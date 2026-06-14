@@ -1,6 +1,6 @@
-# Binaries
-torana-edge
-torana
+# Binaries (anchored to repo root so they don't shadow directories)
+/torana-edge
+/torana
 *.exe
 *.exe~
 *.dll
