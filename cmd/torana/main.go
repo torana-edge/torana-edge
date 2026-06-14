@@ -11,7 +11,7 @@ import (
 	"os/signal"
 	"strings"
 
-	"github.com/projectescape/torana-edge/internal/proxy"
+	"github.com/torana-edge/torana-edge/internal/proxy"
 )
 
 // loadEnv reads a bare-bones key=value .env file (no quoting, no escaping)
