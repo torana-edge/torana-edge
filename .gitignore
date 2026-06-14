@@ -1,0 +1,28 @@
+# Binaries
+torana-edge
+torana
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test binary
+*.test
+
+# Go workspace
+go.work
+go.work.sum
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Environment (keep .env.example but not real .env)
+.env
+
+# OS
+.DS_Store
+Thumbs.db
