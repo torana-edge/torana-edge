@@ -54,11 +54,15 @@ func New(cfg Config) (*Server, error) {
 		return nil, fmt.Errorf("proxy: invalid upstream URL %q: %w", cfg.UpstreamURL, err)
 	}
 
-	// NewSingleHostReverseProxy gives us a Director that rewrites the
-	// outgoing request's Scheme, Host, and Path.  Because target has no
-	// trailing path segment the original request path is preserved as-is,
-	// so POST /v1/messages → POST https://api.anthropic.com/v1/messages.
+	// NewSingleHostReverseProxy rewrites scheme and URL.Host, but does NOT
+	// set req.Host (the HTTP Host header). CloudFront/CDNs reject requests
+	// with a mismatched Host, so we override the Director to fix it.
 	proxy := httputil.NewSingleHostReverseProxy(target)
+	origDirector := proxy.Director
+	proxy.Director = func(req *http.Request) {
+		origDirector(req)
+		req.Host = target.Host
+	}
 
 	// --- future extension points (Phases 2-4) --------------------------
 	// These are no-ops today.  Later phases will replace them with real
