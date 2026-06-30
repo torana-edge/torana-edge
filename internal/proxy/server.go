@@ -88,7 +88,7 @@ func New(cfg Config) (*Server, error) {
 
 			if prov == nil || len(body) == 0 {
 				// Pass-through: no provider match, or empty body.
-				_ = pipeline.RunBeforeRequest(req, nil)
+				_ = pipeline.RunBeforeRequest(req.Context(), req, nil)
 				req.Body = io.NopCloser(bytes.NewReader(body))
 				req.ContentLength = int64(len(body))
 				return
@@ -113,7 +113,7 @@ func New(cfg Config) (*Server, error) {
 
 			if fmt == nil {
 				// No format adapter for this provider's format — just forward raw.
-				_ = pipeline.RunBeforeRequest(req, nil)
+				_ = pipeline.RunBeforeRequest(req.Context(), req, nil)
 				req.Body = io.NopCloser(bytes.NewReader(body))
 				req.ContentLength = int64(len(body))
 				return
@@ -122,13 +122,13 @@ func New(cfg Config) (*Server, error) {
 			chat, err := fmt.Request.Unmarshal(body)
 			if err != nil {
 				log.Printf("format %s unmarshal error: %v — passing through", fmt.Name, err)
-				_ = pipeline.RunBeforeRequest(req, nil)
+				_ = pipeline.RunBeforeRequest(req.Context(), req, nil)
 				req.Body = io.NopCloser(bytes.NewReader(body))
 				req.ContentLength = int64(len(body))
 				return
 			}
 
-			chat = pipeline.RunBeforeRequest(req, chat)
+			chat = pipeline.RunBeforeRequest(req.Context(), req, chat)
 
 			newBody, err := fmt.Request.Marshal(chat)
 			if err != nil {
@@ -159,7 +159,7 @@ func New(cfg Config) (*Server, error) {
 			chat, _ := resp.Request.Context().Value(chatCtxKey{}).(*engine.ChatRequest)
 
 			events := fmt.Stream.ParseStream(resp.Body)
-			events = pipeline.RunAfterResponse(resp, events, resp.Request, chat)
+			events = pipeline.RunAfterResponse(resp.Request.Context(), resp, events, resp.Request, chat)
 
 			pr, pw := io.Pipe()
 			go func() {

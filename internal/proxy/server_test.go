@@ -175,7 +175,7 @@ type testToolInjectionHook struct{}
 
 func (h *testToolInjectionHook) Name() string { return "test-tool-injection" }
 
-func (h *testToolInjectionHook) BeforeRequest(req *http.Request, chat *engine.ChatRequest) (*engine.ChatRequest, error) {
+func (h *testToolInjectionHook) BeforeRequest(ctx context.Context, req *http.Request, chat *engine.ChatRequest) (*engine.ChatRequest, error) {
 	if chat == nil {
 		return nil, nil
 	}

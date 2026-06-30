@@ -8,6 +8,7 @@
 package engine
 
 import (
+	"context"
 	"io"
 	"log"
 	"net/http"
@@ -24,7 +25,7 @@ import (
 // but does NOT abort the request.
 type RequestHook interface {
 	Name() string
-	BeforeRequest(req *http.Request, chat *ChatRequest) (*ChatRequest, error)
+	BeforeRequest(ctx context.Context, req *http.Request, chat *ChatRequest) (*ChatRequest, error)
 }
 
 // ResponseHook is implemented by modules that need to inspect or transform
@@ -39,7 +40,7 @@ type RequestHook interface {
 // original channel and logs a warning.
 type ResponseHook interface {
 	Name() string
-	AfterResponse(resp *http.Response, events <-chan StreamEvent,
+	AfterResponse(ctx context.Context, resp *http.Response, events <-chan StreamEvent,
 		req *http.Request, chat *ChatRequest) (<-chan StreamEvent, error)
 }
 
@@ -69,9 +70,9 @@ func (p *Pipeline) AddResponseHook(h ResponseHook) {
 // Each hook receives the ChatRequest returned by (or passed through by) the
 // previous hook.  On error the current chat is forwarded to the next hook
 // after logging the failure.
-func (p *Pipeline) RunBeforeRequest(req *http.Request, chat *ChatRequest) *ChatRequest {
+func (p *Pipeline) RunBeforeRequest(ctx context.Context, req *http.Request, chat *ChatRequest) *ChatRequest {
 	for _, h := range p.requestHooks {
-		next, err := h.BeforeRequest(req, chat)
+		next, err := h.BeforeRequest(ctx, req, chat)
 		if err != nil {
 			log.Printf("[%s] before-request error: %v", h.Name(), err)
 			continue
@@ -86,10 +87,10 @@ func (p *Pipeline) RunBeforeRequest(req *http.Request, chat *ChatRequest) *ChatR
 // RunAfterResponse runs every registered ResponseHook in order.
 // Each hook receives the event channel returned by the previous hook.
 // On error the original channel is passed through.
-func (p *Pipeline) RunAfterResponse(resp *http.Response, events <-chan StreamEvent,
+func (p *Pipeline) RunAfterResponse(ctx context.Context, resp *http.Response, events <-chan StreamEvent,
 	req *http.Request, chat *ChatRequest) <-chan StreamEvent {
 	for _, h := range p.responseHooks {
-		next, err := h.AfterResponse(resp, events, req, chat)
+		next, err := h.AfterResponse(ctx, resp, events, req, chat)
 		if err != nil {
 			log.Printf("[%s] after-response error: %v", h.Name(), err)
 			continue

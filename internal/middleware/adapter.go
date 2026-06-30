@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"context"
 	"log"
 	"net/http"
 
@@ -21,7 +22,7 @@ func (a *Adapter) Name() string { return "adapter" }
 
 // BeforeRequest logs the incoming request line. The chat request is
 // returned unchanged.
-func (a *Adapter) BeforeRequest(req *http.Request, chat *engine.ChatRequest) (*engine.ChatRequest, error) {
+func (a *Adapter) BeforeRequest(ctx context.Context, req *http.Request, chat *engine.ChatRequest) (*engine.ChatRequest, error) {
 	log.Printf("→ %s %s", req.Method, req.URL.Path)
 	return chat, nil
 }

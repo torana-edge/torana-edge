@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"testing"
@@ -11,26 +12,26 @@ import (
 // testRequestHook is a configurable RequestHook for testing.
 type testRequestHook struct {
 	name string
-	fn   func(req *http.Request, chat *ChatRequest) (*ChatRequest, error)
+	fn   func(ctx context.Context, req *http.Request, chat *ChatRequest) (*ChatRequest, error)
 }
 
 func (h *testRequestHook) Name() string { return h.name }
 
-func (h *testRequestHook) BeforeRequest(req *http.Request, chat *ChatRequest) (*ChatRequest, error) {
-	return h.fn(req, chat)
+func (h *testRequestHook) BeforeRequest(ctx context.Context, req *http.Request, chat *ChatRequest) (*ChatRequest, error) {
+	return h.fn(ctx, req, chat)
 }
 
 // testResponseHook is a configurable ResponseHook for testing.
 type testResponseHook struct {
 	name string
-	fn   func(resp *http.Response, events <-chan StreamEvent, req *http.Request, chat *ChatRequest) (<-chan StreamEvent, error)
+	fn   func(ctx context.Context, resp *http.Response, events <-chan StreamEvent, req *http.Request, chat *ChatRequest) (<-chan StreamEvent, error)
 }
 
 func (h *testResponseHook) Name() string { return h.name }
 
-func (h *testResponseHook) AfterResponse(resp *http.Response, events <-chan StreamEvent,
+func (h *testResponseHook) AfterResponse(ctx context.Context, resp *http.Response, events <-chan StreamEvent,
 	req *http.Request, chat *ChatRequest) (<-chan StreamEvent, error) {
-	return h.fn(resp, events, req, chat)
+	return h.fn(ctx, resp, events, req, chat)
 }
 
 // --- RequestHook tests ---
@@ -40,14 +41,14 @@ func TestRunBeforeRequest_ChainsHooks(t *testing.T) {
 
 	p.AddRequestHook(&testRequestHook{
 		name: "add-system",
-		fn: func(req *http.Request, chat *ChatRequest) (*ChatRequest, error) {
+		fn: func(ctx context.Context, req *http.Request, chat *ChatRequest) (*ChatRequest, error) {
 			chat.Messages = append(chat.Messages, Message{Role: RoleSystem, Content: "system-msg"})
 			return chat, nil
 		},
 	})
 	p.AddRequestHook(&testRequestHook{
 		name: "add-tool",
-		fn: func(req *http.Request, chat *ChatRequest) (*ChatRequest, error) {
+		fn: func(ctx context.Context, req *http.Request, chat *ChatRequest) (*ChatRequest, error) {
 			chat.Tools = append(chat.Tools, ToolDef{Name: "test-tool", Description: "a test tool"})
 			return chat, nil
 		},
@@ -58,7 +59,7 @@ func TestRunBeforeRequest_ChainsHooks(t *testing.T) {
 		Messages: []Message{{Role: RoleUser, Content: "hello"}},
 	}
 
-	result := p.RunBeforeRequest(req, chat)
+	result := p.RunBeforeRequest(context.Background(), req, chat)
 
 	if len(result.Messages) != 2 {
 		t.Fatalf("expected 2 messages, got %d", len(result.Messages))
@@ -79,13 +80,13 @@ func TestRunBeforeRequest_ErrorContinues(t *testing.T) {
 
 	p.AddRequestHook(&testRequestHook{
 		name: "error-hook",
-		fn: func(req *http.Request, chat *ChatRequest) (*ChatRequest, error) {
+		fn: func(ctx context.Context, req *http.Request, chat *ChatRequest) (*ChatRequest, error) {
 			return nil, errors.New("boom")
 		},
 	})
 	p.AddRequestHook(&testRequestHook{
 		name: "success-hook",
-		fn: func(req *http.Request, chat *ChatRequest) (*ChatRequest, error) {
+		fn: func(ctx context.Context, req *http.Request, chat *ChatRequest) (*ChatRequest, error) {
 			chat.Messages = append(chat.Messages, Message{Role: RoleAssistant, Content: "still-ran"})
 			return chat, nil
 		},
@@ -96,7 +97,7 @@ func TestRunBeforeRequest_ErrorContinues(t *testing.T) {
 		Messages: []Message{{Role: RoleUser, Content: "hello"}},
 	}
 
-	result := p.RunBeforeRequest(req, chat)
+	result := p.RunBeforeRequest(context.Background(), req, chat)
 
 	if len(result.Messages) != 2 {
 		t.Fatalf("expected 2 messages (original + success-hook), got %d", len(result.Messages))
@@ -111,13 +112,13 @@ func TestRunBeforeRequest_NilReturnPassthrough(t *testing.T) {
 
 	p.AddRequestHook(&testRequestHook{
 		name: "nil-return",
-		fn: func(req *http.Request, chat *ChatRequest) (*ChatRequest, error) {
+		fn: func(ctx context.Context, req *http.Request, chat *ChatRequest) (*ChatRequest, error) {
 			return nil, nil
 		},
 	})
 	p.AddRequestHook(&testRequestHook{
 		name: "modifier",
-		fn: func(req *http.Request, chat *ChatRequest) (*ChatRequest, error) {
+		fn: func(ctx context.Context, req *http.Request, chat *ChatRequest) (*ChatRequest, error) {
 			chat.Messages = append(chat.Messages, Message{Role: RoleSystem, Content: "modifier-ran"})
 			return chat, nil
 		},
@@ -128,7 +129,7 @@ func TestRunBeforeRequest_NilReturnPassthrough(t *testing.T) {
 		Messages: []Message{{Role: RoleUser, Content: "hello"}},
 	}
 
-	result := p.RunBeforeRequest(req, chat)
+	result := p.RunBeforeRequest(context.Background(), req, chat)
 
 	if len(result.Messages) != 2 {
 		t.Fatalf("expected 2 messages, got %d", len(result.Messages))
@@ -148,7 +149,7 @@ func TestRunAfterResponse_ChainsHooks(t *testing.T) {
 
 	p.AddResponseHook(&testResponseHook{
 		name: "hook1",
-		fn: func(resp *http.Response, in <-chan StreamEvent, req *http.Request, chat *ChatRequest) (<-chan StreamEvent, error) {
+		fn: func(ctx context.Context, resp *http.Response, in <-chan StreamEvent, req *http.Request, chat *ChatRequest) (<-chan StreamEvent, error) {
 			out := make(chan StreamEvent, 4)
 			go func() {
 				defer close(out)
@@ -167,7 +168,7 @@ func TestRunAfterResponse_ChainsHooks(t *testing.T) {
 	})
 	p.AddResponseHook(&testResponseHook{
 		name: "hook2",
-		fn: func(resp *http.Response, in <-chan StreamEvent, req *http.Request, chat *ChatRequest) (<-chan StreamEvent, error) {
+		fn: func(ctx context.Context, resp *http.Response, in <-chan StreamEvent, req *http.Request, chat *ChatRequest) (<-chan StreamEvent, error) {
 			out := make(chan StreamEvent, 4)
 			go func() {
 				defer close(out)
@@ -191,7 +192,7 @@ func TestRunAfterResponse_ChainsHooks(t *testing.T) {
 	req := &http.Request{}
 	chat := &ChatRequest{}
 
-	out := p.RunAfterResponse(resp, in, req, chat)
+	out := p.RunAfterResponse(context.Background(), resp, in, req, chat)
 
 	var events []StreamEvent
 	for ev := range out {
@@ -217,13 +218,13 @@ func TestRunAfterResponse_ErrorContinues(t *testing.T) {
 
 	p.AddResponseHook(&testResponseHook{
 		name: "error-hook",
-		fn: func(resp *http.Response, in <-chan StreamEvent, req *http.Request, chat *ChatRequest) (<-chan StreamEvent, error) {
+		fn: func(ctx context.Context, resp *http.Response, in <-chan StreamEvent, req *http.Request, chat *ChatRequest) (<-chan StreamEvent, error) {
 			return nil, errors.New("boom")
 		},
 	})
 	p.AddResponseHook(&testResponseHook{
 		name: "success-hook",
-		fn: func(resp *http.Response, in <-chan StreamEvent, req *http.Request, chat *ChatRequest) (<-chan StreamEvent, error) {
+		fn: func(ctx context.Context, resp *http.Response, in <-chan StreamEvent, req *http.Request, chat *ChatRequest) (<-chan StreamEvent, error) {
 			out := make(chan StreamEvent, 2)
 			go func() {
 				defer close(out)
@@ -246,7 +247,7 @@ func TestRunAfterResponse_ErrorContinues(t *testing.T) {
 	req := &http.Request{}
 	chat := &ChatRequest{}
 
-	out := p.RunAfterResponse(resp, in, req, chat)
+	out := p.RunAfterResponse(context.Background(), resp, in, req, chat)
 
 	var events []StreamEvent
 	for ev := range out {
