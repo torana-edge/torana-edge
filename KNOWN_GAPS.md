@@ -27,3 +27,7 @@ The `ResponseHook` architecture uses an `io.TeeReader` to passively "scan" the S
 
 ## 6. Missing Token Usage Tracking
 Stream adapters do not extract or emit token usage (Prompt/Completion tokens). This structurally prevents the implementation of billing, rate-limiting, or telemetry plugins in the pipeline.
+
+## 7. gRPC and TLS MITM Interception
+Torana is strictly an HTTP/1.1 REST/JSON proxy. It cannot currently intercept clients that use proxy `CONNECT` tunnels to establish end-to-end encrypted TLS sessions (like internal Google binaries).
+* **Impact:** Dogfooding Torana with clients like Antigravity CLI (`agy`) or strict gRPC-only SDKs is impossible natively. Torana would need a full SSL Man-in-the-Middle (MITM) termination layer (with dynamic certificate generation) and an HTTP/2 gRPC-to-JSON transcoder format adapter to support these clients.
