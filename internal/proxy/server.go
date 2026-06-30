@@ -61,6 +61,7 @@ func New(cfg Config) (*Server, error) {
 	// --- middleware pipeline ----------------------------------------------
 	pipeline := engine.New()
 	pipeline.AddRequestHook(middleware.NewAdapter())
+	pipeline.AddRequestHook(middleware.NewIntentInjector())
 
 	// --- reverse proxy ---------------------------------------------------
 	// Context keys for stashing format and chat between Director and ModifyResponse.
