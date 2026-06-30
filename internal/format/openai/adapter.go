@@ -349,7 +349,6 @@ type marshalTool struct {
 type marshalToolFn struct {
 	Name        string         `json:"name"`
 	Description string         `json:"description,omitempty"`
-	Strict      *bool          `json:"strict,omitempty"`
 	Parameters  map[string]any `json:"parameters,omitempty"`
 }
 
@@ -421,17 +420,11 @@ func marshalChat(chat *engine.ChatRequest) ([]byte, error) {
 
 	// Tools.
 	for _, t := range chat.Tools {
-		var strictPtr *bool
-		if t.Strict {
-			b := true
-			strictPtr = &b
-		}
 		out.Tools = append(out.Tools, marshalTool{
 			Type: "function",
 			Function: marshalToolFn{
 				Name:        t.Name,
 				Description: t.Description,
-				Strict:      strictPtr,
 				Parameters:  t.Parameters,
 			},
 		})

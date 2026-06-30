@@ -32,16 +32,6 @@ func TestIntentInjector(t *testing.T) {
 	}
 
 	tool := modChat.Tools[0]
-
-	if !tool.Strict {
-		t.Error("Strict mode should be true")
-	}
-
-	addProp, ok := tool.Parameters["additionalProperties"].(bool)
-	if !ok || addProp != false {
-		t.Error("additionalProperties should be false")
-	}
-
 	props, ok := tool.Parameters["properties"].(map[string]any)
 	if !ok {
 		t.Fatal("properties not a map")
@@ -60,7 +50,6 @@ func TestIntentInjector(t *testing.T) {
 
 	foundIntent := false
 	foundDelegate := false
-	foundCommand := false
 	for _, r := range reqs {
 		if r == "_torana_extraction_intent" {
 			foundIntent = true
@@ -68,17 +57,11 @@ func TestIntentInjector(t *testing.T) {
 		if r == "_torana_delegate_to_cheap_model" {
 			foundDelegate = true
 		}
-		if r == "command" {
-			foundCommand = true
-		}
 	}
 	if !foundIntent {
 		t.Error("missing _torana_extraction_intent in required")
 	}
 	if !foundDelegate {
 		t.Error("missing _torana_delegate_to_cheap_model in required")
-	}
-	if !foundCommand {
-		t.Error("missing original property 'command' in required")
 	}
 }

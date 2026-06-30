@@ -2,7 +2,6 @@ package middleware
 
 import (
 	"context"
-	"log"
 	"net/http"
 
 	"github.com/torana-edge/torana-edge/internal/engine"
@@ -42,10 +41,6 @@ func (i *IntentInjector) BeforeRequest(ctx context.Context, req *http.Request, c
 			tool.Parameters["properties"] = props
 		}
 
-		// Force strict schema mode so DeepSeek and OpenAI are mathematically required to output intent.
-		tool.Strict = true
-		tool.Parameters["additionalProperties"] = false
-
 		props["_torana_extraction_intent"] = map[string]any{
 			"type":        "string",
 			"description": "CRITICAL: specify what you are looking for in the tool result to help the proxy compact it. If you omit this, you will fail the task.",
@@ -69,15 +64,27 @@ func (i *IntentInjector) BeforeRequest(ctx context.Context, req *http.Request, c
 			reqArr = make([]any, 0)
 		}
 
-		// In strict mode, every single property MUST be required.
-		// Re-build the required array from the keys of props.
-		reqArr = make([]any, 0, len(props))
-		for k := range props {
-			reqArr = append(reqArr, k)
+		foundIntent := false
+		foundDelegate := false
+		for _, reqItem := range reqArr {
+			if s, ok := reqItem.(string); ok {
+				if s == "_torana_extraction_intent" {
+					foundIntent = true
+				}
+				if s == "_torana_delegate_to_cheap_model" {
+					foundDelegate = true
+				}
+			}
+		}
+
+		if !foundIntent {
+			reqArr = append(reqArr, "_torana_extraction_intent")
+		}
+		if !foundDelegate {
+			reqArr = append(reqArr, "_torana_delegate_to_cheap_model")
 		}
 		tool.Parameters["required"] = reqArr
 	}
 
-	log.Printf("[intent-injector] injected into %d tools", len(chat.Tools))
 	return chat, nil
 }
