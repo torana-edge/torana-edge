@@ -111,6 +111,7 @@ func New(cfg Config) (*Server, error) {
 			req.Host = target.Host
 			req.URL.Path = joinURLPath(target.Path, strippedPath)
 			req.URL.RawPath = ""
+			log.Printf("→ upstream %s://%s%s", req.URL.Scheme, req.URL.Host, req.URL.Path)
 
 			if fmt == nil {
 				// No format adapter for this provider's format — just forward raw.
@@ -135,8 +136,18 @@ func New(cfg Config) (*Server, error) {
 			if err != nil {
 				log.Printf("format %s marshal error: %v — passing through", fmt.Name, err)
 				newBody = body
+			} else if strings.Contains(string(newBody), "_torana_extraction_intent") {
+				log.Printf("[intent-verify] ✓ body has _torana_extraction_intent (%d bytes)", len(newBody))
+			} else if len(chat.Tools) > 0 {
+				log.Printf("[intent-verify] ✗ _torana_extraction_intent MISSING (%d tools in chat)", len(chat.Tools))
 			}
 
+			// Dump first parameters block with _torana
+			if pIdx := strings.Index(string(newBody), `"properties":{"`); pIdx > 0 {
+				end := pIdx + 500
+				if end > len(newBody) { end = len(newBody) }
+				log.Printf("[intent-schema] ...%s...", string(newBody[pIdx:end]))
+			}
 			// Stash format and chat for ModifyResponse.
 			ctx := req.Context()
 			ctx = context.WithValue(ctx, formatCtxKey{}, fmt)
