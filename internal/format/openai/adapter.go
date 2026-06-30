@@ -6,6 +6,7 @@ package openai
 import (
 	"encoding/json"
 	"fmt"
+	"net/http"
 
 	"github.com/torana-edge/torana-edge/internal/engine"
 	"github.com/torana-edge/torana-edge/internal/format"
@@ -87,7 +88,7 @@ type responseTool struct {
 // ---------------------------------------------------------------------------
 
 // Unmarshal detects the API variant and parses rawBody into a ChatRequest.
-func (a *Adapter) Unmarshal(rawBody []byte) (*engine.ChatRequest, error) {
+func (a *Adapter) Unmarshal(httpReq *http.Request, rawBody []byte) (*engine.ChatRequest, error) {
 	variant := detectVariant(rawBody)
 	switch variant {
 	case variantResponses:

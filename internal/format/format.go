@@ -6,6 +6,7 @@ package format
 
 import (
 	"io"
+	"net/http"
 
 	"github.com/torana-edge/torana-edge/internal/engine"
 )
@@ -13,7 +14,7 @@ import (
 // RequestAdapter converts between raw JSON and canonical ChatRequest.
 type RequestAdapter interface {
 	// Unmarshal parses rawBody into a ChatRequest.
-	Unmarshal(rawBody []byte) (*engine.ChatRequest, error)
+	Unmarshal(req *http.Request, rawBody []byte) (*engine.ChatRequest, error)
 	// Marshal converts a ChatRequest back to the wire format JSON.
 	Marshal(chat *engine.ChatRequest) ([]byte, error)
 }

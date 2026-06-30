@@ -2,6 +2,7 @@ package vertex
 
 import (
 	"encoding/json"
+	"net/http"
 	"strings"
 	"testing"
 
@@ -25,7 +26,7 @@ func TestRoundTrip(t *testing.T) {
 		"tools": [{"functionDeclarations": [{"name": "get_weather", "description": "Get current weather", "parameters": {"type": "object", "properties": {"location": {"type": "string"}}}}]}]
 	}`
 
-	chat, err := a.Unmarshal([]byte(input))
+	chat, err := a.Unmarshal(&http.Request{}, []byte(input))
 	if err != nil {
 		t.Fatalf("Unmarshal error: %v", err)
 	}
@@ -88,7 +89,7 @@ func TestUnmarshalNoSystem(t *testing.T) {
 	a := &Adapter{}
 	input := `{"contents": [{"role": "user", "parts": [{"text": "Hello"}]}]}`
 
-	chat, err := a.Unmarshal([]byte(input))
+	chat, err := a.Unmarshal(&http.Request{}, []byte(input))
 	if err != nil {
 		t.Fatalf("Unmarshal error: %v", err)
 	}

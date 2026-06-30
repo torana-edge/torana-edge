@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"io"
+	"net/http"
 	"testing"
 
 	"github.com/torana-edge/torana-edge/internal/engine"
@@ -28,7 +29,7 @@ func TestRoundTrip_ChatCompletions(t *testing.T) {
 		"stream": true
 	}`
 
-	chat, err := adapter.Unmarshal([]byte(input))
+	chat, err := adapter.Unmarshal(&http.Request{}, []byte(input))
 	if err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
@@ -97,7 +98,7 @@ func TestUnmarshal_ResponsesAPI(t *testing.T) {
 	// String input
 	input := `{"object":"response","input":"Hello, what is the weather?","tools":[{"type":"function","name":"get_weather","description":"Get weather","parameters":{"type":"object","properties":{"city":{"type":"string"}}}}],"stream":true}`
 
-	chat, err := adapter.Unmarshal([]byte(input))
+	chat, err := adapter.Unmarshal(&http.Request{}, []byte(input))
 	if err != nil {
 		t.Fatalf("unmarshal responses: %v", err)
 	}

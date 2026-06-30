@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"io"
+	"net/http"
 	"strings"
 	"testing"
 
@@ -35,7 +36,8 @@ func TestRoundTrip(t *testing.T) {
 		"stream": true
 	}`
 
-	chat, err := adapter.Unmarshal([]byte(input))
+	rawBody := []byte(input)
+	chat, err := adapter.Unmarshal(&http.Request{}, rawBody)
 	if err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
