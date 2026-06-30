@@ -168,10 +168,10 @@ data: {"type":"message_stop"}
 	// Expected sequence:
 	// 1. TextDelta "Hello"
 	// 2. TextDelta " world"
-	// 3. ToolCallStart{index:0, id:toolu_1, name:get_weather}
-	// 4. ToolCallDelta{index:0, args:{"city":}
-	// 5. ToolCallDelta{index:0, args:SF\"}}
-	// 6. ToolCallEnd{index:0}
+	// 3. ToolCallStart{index:1, id:toolu_1, name:get_weather}
+	// 4. ToolCallDelta{index:1, args:{"city":}
+	// 5. ToolCallDelta{index:1, args:SF\"}}
+	// 6. ToolCallEnd{index:1}
 	// 7. FinishReason "tool_calls"
 	if len(events) != 7 {
 		t.Fatalf("expected 7 events, got %d: %+v", len(events), events)
@@ -190,7 +190,7 @@ data: {"type":"message_stop"}
 		t.Fatalf("event 2: expected ToolCallStart, got %+v", events[2])
 	}
 	tcs := events[2].ToolCallStart
-	if tcs.Index != 0 || tcs.ID != "toolu_1" || tcs.Name != "get_weather" {
+	if tcs.Index != 1 || tcs.ID != "toolu_1" || tcs.Name != "get_weather" {
 		t.Errorf("ToolCallStart: got {idx:%d id:%s name:%s}", tcs.Index, tcs.ID, tcs.Name)
 	}
 
@@ -214,7 +214,7 @@ data: {"type":"message_stop"}
 	if events[5].ToolCallEnd == nil {
 		t.Fatalf("event 5: expected ToolCallEnd, got %+v", events[5])
 	}
-	if events[5].ToolCallEnd.Index != 0 {
+	if events[5].ToolCallEnd.Index != 1 {
 		t.Errorf("ToolCallEnd index: got %d", events[5].ToolCallEnd.Index)
 	}
 

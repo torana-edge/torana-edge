@@ -5,10 +5,14 @@ package engine
 // ChatRequest is the canonical representation of a chat completion request
 // regardless of provider wire format.
 type ChatRequest struct {
-	Model    string     // model name as sent by client (e.g. "deepseek-v4-pro")
-	Messages []Message
-	Tools    []ToolDef
-	Stream   bool
+	Model         string     // model name as sent by client (e.g. "deepseek-v4-pro")
+	Messages      []Message
+	Tools         []ToolDef
+	Stream        bool
+	MaxTokens     *int
+	Temperature   *float64
+	TopP          *float64
+	StopSequences []string
 }
 
 // Role classifies a message's speaker.
@@ -28,6 +32,7 @@ const (
 type Message struct {
 	Role              Role
 	Content           string     // text body; empty for tool-call-only messages
+	ContentParts      []any      // multimodal array content (e.g. vision)
 	Thinking          string     // extended thinking / reasoning text
 	ThinkingSignature string     // Anthropic cryptographic signature (empty for other providers)
 	ToolCalls         []ToolCall // assistant → tool invocations

@@ -86,7 +86,7 @@ func (s *StreamAdapter) ParseStream(body io.Reader) <-chan engine.StreamEvent {
 						blockType = "tool_use"
 						ch <- engine.StreamEvent{
 							ToolCallStart: &engine.ToolCallStart{
-								Index: 0,
+								Index: ev.Index,
 								ID:    ev.ContentBlock.ID,
 								Name:  ev.ContentBlock.Name,
 							},
@@ -111,7 +111,7 @@ func (s *StreamAdapter) ParseStream(body io.Reader) <-chan engine.StreamEvent {
 				case "input_json_delta":
 					ch <- engine.StreamEvent{
 						ToolCallDelta: &engine.ToolCallDelta{
-							Index:          0,
+							Index:          ev.Index,
 							ArgumentsDelta: ev.Delta.PartialJSON,
 						},
 					}
@@ -127,7 +127,7 @@ func (s *StreamAdapter) ParseStream(body io.Reader) <-chan engine.StreamEvent {
 			case ev.Type == "content_block_stop":
 				if blockType == "tool_use" {
 					ch <- engine.StreamEvent{
-						ToolCallEnd: &engine.ToolCallEnd{Index: 0},
+						ToolCallEnd: &engine.ToolCallEnd{Index: ev.Index},
 					}
 				}
 				blockType = ""
@@ -218,7 +218,8 @@ func (s *StreamAdapter) SerializeStream(w io.Writer, events <-chan engine.Stream
 				return err
 			}
 			data := fmt.Sprintf(
-				`data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":%s,"name":%s}}`,
+				`data: {"type":"content_block_start","index":%d,"content_block":{"type":"tool_use","id":%s,"name":%s}}`,
+				ev.ToolCallStart.Index,
 				jsonString(ev.ToolCallStart.ID),
 				jsonString(ev.ToolCallStart.Name),
 			)
@@ -228,7 +229,8 @@ func (s *StreamAdapter) SerializeStream(w io.Writer, events <-chan engine.Stream
 
 		case ev.ToolCallDelta != nil:
 			data := fmt.Sprintf(
-				`data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":%s}}`,
+				`data: {"type":"content_block_delta","index":%d,"delta":{"type":"input_json_delta","partial_json":%s}}`,
+				ev.ToolCallDelta.Index,
 				jsonString(ev.ToolCallDelta.ArgumentsDelta),
 			)
 			if err := emit(data); err != nil {
@@ -236,7 +238,7 @@ func (s *StreamAdapter) SerializeStream(w io.Writer, events <-chan engine.Stream
 			}
 
 		case ev.ToolCallEnd != nil:
-			data := `data: {"type":"content_block_stop","index":0}`
+			data := fmt.Sprintf(`data: {"type":"content_block_stop","index":%d}`, ev.ToolCallEnd.Index)
 			if err := emit(data); err != nil {
 				return err
 			}

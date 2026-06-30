@@ -13,11 +13,14 @@ import (
 // easy unmarshal/marshal.
 type anthropicRequest struct {
 	Model      string              `json:"model"`
-	MaxTokens  int                 `json:"max_tokens"`
-	System     []contentBlock      `json:"system,omitempty"`
-	Messages   []anthropicMessage  `json:"messages"`
-	Tools      []anthropicToolDef  `json:"tools,omitempty"`
-	Stream     bool                `json:"stream,omitempty"`
+	MaxTokens     *int                `json:"max_tokens,omitempty"`
+	Temperature   *float64            `json:"temperature,omitempty"`
+	TopP          *float64            `json:"top_p,omitempty"`
+	StopSequences []string            `json:"stop_sequences,omitempty"`
+	System        []contentBlock      `json:"system,omitempty"`
+	Messages      []anthropicMessage  `json:"messages"`
+	Tools         []anthropicToolDef  `json:"tools,omitempty"`
+	Stream        bool                `json:"stream,omitempty"`
 	StopReason string              `json:"-"`
 }
 
@@ -33,7 +36,7 @@ type contentBlock struct {
 	Name       string         `json:"name,omitempty"`
 	Input      map[string]any `json:"input,omitempty"`
 	ToolUseID  string         `json:"tool_use_id,omitempty"`
-	Content    string         `json:"content,omitempty"` // tool_result content (string)
+	Content    any            `json:"content,omitempty"` // string or array of blocks
 	Thinking   string         `json:"thinking,omitempty"`
 	Signature  string         `json:"signature,omitempty"`
 	Data       string         `json:"data,omitempty"`
@@ -66,24 +69,9 @@ func (cb *contentBlock) UnmarshalJSON(data []byte) error {
 		cb.Content = s
 		return nil
 	}
-	var blocks []contentBlock
+	var blocks []any
 	if json.Unmarshal(raw.Content, &blocks) == nil {
-		// Flatten array of text blocks into a single string
-		var parts []string
-		for _, b := range blocks {
-			if b.Type == "text" {
-				parts = append(parts, b.Text)
-			}
-		}
-		cb.Content = ""
-		if len(parts) > 0 {
-			for i, p := range parts {
-				if i > 0 {
-					cb.Content += "\n"
-				}
-				cb.Content += p
-			}
-		}
+		cb.Content = blocks
 		return nil
 	}
 	return fmt.Errorf("content: expected string or array, got %s", string(raw.Content))
@@ -115,8 +103,12 @@ func (a *Adapter) Unmarshal(rawBody []byte) (*engine.ChatRequest, error) {
 	}
 
 	chat := &engine.ChatRequest{
-		Model:  ar.Model,
-		Stream: ar.Stream,
+		Model:         ar.Model,
+		Stream:        ar.Stream,
+		MaxTokens:     ar.MaxTokens,
+		Temperature:   ar.Temperature,
+		TopP:          ar.TopP,
+		StopSequences: ar.StopSequences,
 	}
 
 	// System: concatenate text blocks into first message.
@@ -139,10 +131,9 @@ func (a *Adapter) Unmarshal(rawBody []byte) (*engine.ChatRequest, error) {
 	for _, am := range ar.Messages {
 		role := mapRole(am.Role)
 		var textParts []string
+		var contentParts []any
 		var toolCalls []engine.ToolCall
-		var toolCallID string
-		var toolName string
-		var toolContent string
+		var toolResults []engine.Message
 		var thinking string
 		var thinkingSignature string
 
@@ -152,6 +143,8 @@ func (a *Adapter) Unmarshal(rawBody []byte) (*engine.ChatRequest, error) {
 				if block.Text != "" {
 					textParts = append(textParts, block.Text)
 				}
+			case "image":
+				contentParts = append(contentParts, block)
 			case "tool_use":
 				toolCalls = append(toolCalls, engine.ToolCall{
 					ID:        block.ID,
@@ -159,14 +152,17 @@ func (a *Adapter) Unmarshal(rawBody []byte) (*engine.ChatRequest, error) {
 					Arguments: block.Input,
 				})
 			case "tool_result":
-				// tool_result → tool message
-				toolCallID = block.ToolUseID
-				toolContent = block.Content
-				// toolName is not available from tool_result blocks in Anthropic.
-				// Set it from root-level if available, otherwise leave empty.
-				if block.Name != "" {
-					toolName = block.Name
+				tr := engine.Message{
+					Role:       engine.RoleTool,
+					ToolCallID: block.ToolUseID,
+					ToolName:   block.Name,
 				}
+				if s, ok := block.Content.(string); ok {
+					tr.Content = s
+				} else if arr, ok := block.Content.([]any); ok {
+					tr.ContentParts = arr
+				}
+				toolResults = append(toolResults, tr)
 			case "thinking":
 				thinking = block.Thinking
 				thinkingSignature = block.Signature
@@ -175,31 +171,18 @@ func (a *Adapter) Unmarshal(rawBody []byte) (*engine.ChatRequest, error) {
 			}
 		}
 
-		switch {
-		case toolCallID != "":
-			chat.Messages = append(chat.Messages, engine.Message{
-				Role:              engine.RoleTool,
-				ToolCallID:        toolCallID,
-				ToolName:          toolName,
-				Content:           toolContent,
-				Thinking:          thinking,
-				ThinkingSignature: thinkingSignature,
-			})
-		case len(toolCalls) > 0:
+		if len(textParts) > 0 || len(contentParts) > 0 || len(toolCalls) > 0 || thinking != "" {
 			chat.Messages = append(chat.Messages, engine.Message{
 				Role:              role,
 				Content:           joinStrings(textParts, ""),
+				ContentParts:      contentParts,
 				ToolCalls:         toolCalls,
 				Thinking:          thinking,
 				ThinkingSignature: thinkingSignature,
 			})
-		default:
-			chat.Messages = append(chat.Messages, engine.Message{
-				Role:              role,
-				Content:           joinStrings(textParts, ""),
-				Thinking:          thinking,
-				ThinkingSignature: thinkingSignature,
-			})
+		}
+		if len(toolResults) > 0 {
+			chat.Messages = append(chat.Messages, toolResults...)
 		}
 	}
 
@@ -222,9 +205,16 @@ func (a *Adapter) Marshal(chat *engine.ChatRequest) ([]byte, error) {
 		model = "claude-sonnet-4-20250514"
 	}
 	ar := anthropicRequest{
-		Model:     model,
-		MaxTokens: 4096,
-		Stream:    chat.Stream,
+		Model:         model,
+		MaxTokens:     chat.MaxTokens,
+		Temperature:   chat.Temperature,
+		TopP:          chat.TopP,
+		StopSequences: chat.StopSequences,
+		Stream:        chat.Stream,
+	}
+	if ar.MaxTokens == nil {
+		defaultMax := 4096
+		ar.MaxTokens = &defaultMax
 	}
 
 	// System message: first Message with RoleSystem → system array.
@@ -252,17 +242,30 @@ func (a *Adapter) Marshal(chat *engine.ChatRequest) ([]byte, error) {
 			if m.Thinking != "" {
 				am.Content = append(am.Content, thinkingBlock(m))
 			}
-			am.Content = append(am.Content, contentBlock{
+			cb := contentBlock{
 				Type:      "tool_result",
 				ToolUseID: m.ToolCallID,
-				Content:   m.Content,
-			})
+				Name:      m.ToolName,
+			}
+			if len(m.ContentParts) > 0 {
+				cb.Content = m.ContentParts
+			} else {
+				cb.Content = m.Content
+			}
+			am.Content = append(am.Content, cb)
 		case len(m.ToolCalls) > 0:
 			// Assistant with tool calls.
 			if m.Thinking != "" {
 				am.Content = append(am.Content, thinkingBlock(m))
 			}
-			if m.Content != "" {
+			if len(m.ContentParts) > 0 {
+				for _, p := range m.ContentParts {
+					b, _ := json.Marshal(p)
+					var cb contentBlock
+					json.Unmarshal(b, &cb)
+					am.Content = append(am.Content, cb)
+				}
+			} else if m.Content != "" {
 				am.Content = append(am.Content, contentBlock{
 					Type: "text",
 					Text: m.Content,
@@ -281,7 +284,14 @@ func (a *Adapter) Marshal(chat *engine.ChatRequest) ([]byte, error) {
 			if m.Thinking != "" {
 				am.Content = append(am.Content, thinkingBlock(m))
 			}
-			if m.Content != "" {
+			if len(m.ContentParts) > 0 {
+				for _, p := range m.ContentParts {
+					b, _ := json.Marshal(p)
+					var cb contentBlock
+					json.Unmarshal(b, &cb)
+					am.Content = append(am.Content, cb)
+				}
+			} else if m.Content != "" {
 				am.Content = append(am.Content, contentBlock{
 					Type: "text",
 					Text: m.Content,

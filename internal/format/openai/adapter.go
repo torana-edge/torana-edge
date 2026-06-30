@@ -27,10 +27,14 @@ type Adapter struct {}
 
 // chatRequest is the Chat Completions JSON shape.
 type chatRequest struct {
-	Model    string         `json:"model"`
-	Messages []chatMessage  `json:"messages"`
-	Tools    []chatToolDef  `json:"tools,omitempty"`
-	Stream   bool           `json:"stream"`
+	Model         string         `json:"model"`
+	Messages      []chatMessage  `json:"messages"`
+	Tools         []chatToolDef  `json:"tools,omitempty"`
+	Stream        bool           `json:"stream"`
+	MaxTokens     *int           `json:"max_tokens,omitempty"`
+	Temperature   *float64       `json:"temperature,omitempty"`
+	TopP          *float64       `json:"top_p,omitempty"`
+	StopSequences interface{}    `json:"stop,omitempty"`
 }
 
 type chatMessage struct {
@@ -151,8 +155,24 @@ func (a *Adapter) unmarshalChat(rawBody []byte) (*engine.ChatRequest, error) {
 	}
 
 	req := &engine.ChatRequest{
-		Model:  cr.Model,
-		Stream: cr.Stream,
+		Model:       cr.Model,
+		Stream:      cr.Stream,
+		MaxTokens:   cr.MaxTokens,
+		Temperature: cr.Temperature,
+		TopP:        cr.TopP,
+	}
+
+	if cr.StopSequences != nil {
+		switch v := cr.StopSequences.(type) {
+		case string:
+			req.StopSequences = []string{v}
+		case []any:
+			for _, item := range v {
+				if s, ok := item.(string); ok {
+					req.StopSequences = append(req.StopSequences, s)
+				}
+			}
+		}
 	}
 
 	// Messages.
@@ -179,14 +199,17 @@ func convertChatMessage(m chatMessage) engine.Message {
 		ToolCallID: m.ToolCallID,
 	}
 
-	// Content may be a string or null.
+	// Content may be a string or array.
 	if len(m.Content) > 0 {
 		var s string
 		if err := json.Unmarshal(m.Content, &s); err == nil {
 			msg.Content = s
+		} else {
+			var parts []any
+			if err := json.Unmarshal(m.Content, &parts); err == nil {
+				msg.ContentParts = parts
+			}
 		}
-		// If content is an array or object, leave it empty — it's not a
-		// standard Chat Completions pattern but handle gracefully.
 	}
 
 	// Reasoning / thinking content (extended reasoning models).
@@ -274,10 +297,14 @@ func (a *Adapter) unmarshalResponses(rawBody []byte) (*engine.ChatRequest, error
 
 // marshalOutput is the Chat Completions JSON shape for marshal.
 type marshalOutput struct {
-	Model    string          `json:"model"`
-	Messages []marshalMsg    `json:"messages"`
-	Tools    []marshalTool   `json:"tools,omitempty"`
-	Stream   bool            `json:"stream"`
+	Model         string          `json:"model"`
+	Messages      []marshalMsg    `json:"messages"`
+	Tools         []marshalTool   `json:"tools,omitempty"`
+	Stream        bool            `json:"stream"`
+	MaxTokens     *int            `json:"max_tokens,omitempty"`
+	Temperature   *float64        `json:"temperature,omitempty"`
+	TopP          *float64        `json:"top_p,omitempty"`
+	StopSequences []string        `json:"stop,omitempty"`
 }
 
 type marshalMsg struct {
@@ -320,10 +347,14 @@ func modelOrDefault(m, d string) string {
 }
 func marshalChat(chat *engine.ChatRequest) ([]byte, error) {
 	out := marshalOutput{
-		Model:    modelOrDefault(chat.Model, "gpt-4o"),
-		Messages: make([]marshalMsg, 0, len(chat.Messages)),
-		Tools:    make([]marshalTool, 0, len(chat.Tools)),
-		Stream:   chat.Stream,
+		Model:         modelOrDefault(chat.Model, "gpt-4o"),
+		Messages:      make([]marshalMsg, 0, len(chat.Messages)),
+		Tools:         make([]marshalTool, 0, len(chat.Tools)),
+		Stream:        chat.Stream,
+		MaxTokens:     chat.MaxTokens,
+		Temperature:   chat.Temperature,
+		TopP:          chat.TopP,
+		StopSequences: chat.StopSequences,
 	}
 
 	for _, m := range chat.Messages {
@@ -333,7 +364,10 @@ func marshalChat(chat *engine.ChatRequest) ([]byte, error) {
 		}
 
 		// Content: null if empty and there are tool calls (assistant).
-		if m.Content != "" {
+		if len(m.ContentParts) > 0 {
+			b, _ := json.Marshal(m.ContentParts)
+			mm.Content = b
+		} else if m.Content != "" {
 			b, _ := json.Marshal(m.Content)
 			mm.Content = b
 		} else if m.Role == engine.RoleAssistant && len(m.ToolCalls) > 0 {

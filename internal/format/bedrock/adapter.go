@@ -85,9 +85,10 @@ type bedrockSystemBlock struct {
 }
 
 type bedrockInferenceConfig struct {
-	MaxTokens   *int     `json:"maxTokens,omitempty"`
-	Temperature *float64 `json:"temperature,omitempty"`
-	TopP        *float64 `json:"topP,omitempty"`
+	MaxTokens     *int     `json:"maxTokens,omitempty"`
+	Temperature   *float64 `json:"temperature,omitempty"`
+	TopP          *float64 `json:"topP,omitempty"`
+	StopSequences []string `json:"stopSequences,omitempty"`
 }
 
 // --- Unmarshal ---
@@ -139,6 +140,13 @@ func (a *Adapter) Unmarshal(rawBody []byte) (*engine.ChatRequest, error) {
 			}
 			chat.Tools = append(chat.Tools, td)
 		}
+	}
+
+	if req.InferenceConfig != nil {
+		chat.MaxTokens = req.InferenceConfig.MaxTokens
+		chat.Temperature = req.InferenceConfig.Temperature
+		chat.TopP = req.InferenceConfig.TopP
+		chat.StopSequences = req.InferenceConfig.StopSequences
 	}
 
 	// Bedrock Converse has no stream field — streaming is a separate API (ConverseStream).
@@ -285,6 +293,15 @@ func (a *Adapter) Marshal(chat *engine.ChatRequest) ([]byte, error) {
 					},
 				},
 			})
+		}
+	}
+
+	if chat.MaxTokens != nil || chat.Temperature != nil || chat.TopP != nil || len(chat.StopSequences) > 0 {
+		req.InferenceConfig = &bedrockInferenceConfig{
+			MaxTokens:     chat.MaxTokens,
+			Temperature:   chat.Temperature,
+			TopP:          chat.TopP,
+			StopSequences: chat.StopSequences,
 		}
 	}
 

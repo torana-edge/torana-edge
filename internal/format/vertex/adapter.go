@@ -30,8 +30,15 @@ type geminiRequest struct {
 	SystemInstruction *geminiSystemInstruction `json:"systemInstruction,omitempty"`
 	Contents          []geminiContent          `json:"contents"`
 	Tools             []geminiTool             `json:"tools,omitempty"`
-	GenerationConfig  json.RawMessage          `json:"generationConfig,omitempty"`
+	GenerationConfig  *geminiGenerationConfig  `json:"generationConfig,omitempty"`
 	SafetySettings    json.RawMessage          `json:"safetySettings,omitempty"`
+}
+
+type geminiGenerationConfig struct {
+	MaxOutputTokens *int     `json:"maxOutputTokens,omitempty"`
+	Temperature     *float64 `json:"temperature,omitempty"`
+	TopP            *float64 `json:"topP,omitempty"`
+	StopSequences   []string `json:"stopSequences,omitempty"`
 }
 
 type geminiSystemInstruction struct {
@@ -81,7 +88,14 @@ func (a *Adapter) Unmarshal(rawBody []byte) (*engine.ChatRequest, error) {
 
 	chat := &engine.ChatRequest{
 		Stream: false,
-		Model:  "gemini", // model is in the URL, not the body JSON
+		Model:  "gemini", // Vertex usually has model in URL path
+	}
+
+	if gReq.GenerationConfig != nil {
+		chat.MaxTokens = gReq.GenerationConfig.MaxOutputTokens
+		chat.Temperature = gReq.GenerationConfig.Temperature
+		chat.TopP = gReq.GenerationConfig.TopP
+		chat.StopSequences = gReq.GenerationConfig.StopSequences
 	}
 
 	// System instruction → first Message with RoleSystem.
@@ -283,6 +297,15 @@ func (a *Adapter) Marshal(chat *engine.ChatRequest) ([]byte, error) {
 			})
 		}
 		gReq.Tools = []geminiTool{{FunctionDeclarations: decls}}
+	}
+
+	if chat.MaxTokens != nil || chat.Temperature != nil || chat.TopP != nil || len(chat.StopSequences) > 0 {
+		gReq.GenerationConfig = &geminiGenerationConfig{
+			MaxOutputTokens: chat.MaxTokens,
+			Temperature:     chat.Temperature,
+			TopP:            chat.TopP,
+			StopSequences:   chat.StopSequences,
+		}
 	}
 
 	return json.Marshal(gReq)
