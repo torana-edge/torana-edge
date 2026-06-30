@@ -152,6 +152,18 @@ func (a *Adapter) Unmarshal(rawBody []byte) (*engine.ChatRequest, error) {
 	// Bedrock Converse has no stream field — streaming is a separate API (ConverseStream).
 	chat.Stream = false
 
+	var raw map[string]any
+	if err := json.Unmarshal(rawBody, &raw); err == nil {
+		delete(raw, "modelId")
+		delete(raw, "system")
+		delete(raw, "messages")
+		delete(raw, "toolConfig")
+		delete(raw, "inferenceConfig")
+		if len(raw) > 0 {
+			chat.ProviderExtensions = raw
+		}
+	}
+
 	return chat, nil
 }
 
@@ -305,7 +317,21 @@ func (a *Adapter) Marshal(chat *engine.ChatRequest) ([]byte, error) {
 		}
 	}
 
-	return json.Marshal(req)
+	b, err := json.Marshal(req)
+	if err != nil {
+		return nil, err
+	}
+
+	if len(chat.ProviderExtensions) > 0 {
+		var outMap map[string]any
+		json.Unmarshal(b, &outMap)
+		for k, v := range chat.ProviderExtensions {
+			outMap[k] = v
+		}
+		return json.Marshal(outMap)
+	}
+
+	return b, nil
 }
 
 func marshalSystemBlocks(text string) json.RawMessage {

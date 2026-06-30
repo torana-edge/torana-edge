@@ -111,6 +111,22 @@ func (a *Adapter) Unmarshal(rawBody []byte) (*engine.ChatRequest, error) {
 		StopSequences: ar.StopSequences,
 	}
 
+	var raw map[string]any
+	if err := json.Unmarshal(rawBody, &raw); err == nil {
+		delete(raw, "model")
+		delete(raw, "max_tokens")
+		delete(raw, "temperature")
+		delete(raw, "top_p")
+		delete(raw, "stop_sequences")
+		delete(raw, "system")
+		delete(raw, "messages")
+		delete(raw, "tools")
+		delete(raw, "stream")
+		if len(raw) > 0 {
+			chat.ProviderExtensions = raw
+		}
+	}
+
 	// System: concatenate text blocks into first message.
 	if len(ar.System) > 0 {
 		var sysText []string
@@ -311,7 +327,21 @@ func (a *Adapter) Marshal(chat *engine.ChatRequest) ([]byte, error) {
 		})
 	}
 
-	return json.Marshal(ar)
+	b, err := json.Marshal(ar)
+	if err != nil {
+		return nil, err
+	}
+
+	if len(chat.ProviderExtensions) > 0 {
+		var outMap map[string]any
+		json.Unmarshal(b, &outMap)
+		for k, v := range chat.ProviderExtensions {
+			outMap[k] = v
+		}
+		return json.Marshal(outMap)
+	}
+
+	return b, nil
 }
 
 // thinkingBlock returns the Anthropic content block for thinking/reasoning content.

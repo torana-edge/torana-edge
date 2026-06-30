@@ -98,6 +98,18 @@ func (a *Adapter) Unmarshal(rawBody []byte) (*engine.ChatRequest, error) {
 		chat.StopSequences = gReq.GenerationConfig.StopSequences
 	}
 
+	var raw map[string]any
+	if err := json.Unmarshal(rawBody, &raw); err == nil {
+		delete(raw, "systemInstruction")
+		delete(raw, "contents")
+		delete(raw, "tools")
+		delete(raw, "generationConfig")
+		delete(raw, "safetySettings")
+		if len(raw) > 0 {
+			chat.ProviderExtensions = raw
+		}
+	}
+
 	// System instruction → first Message with RoleSystem.
 	if gReq.SystemInstruction != nil {
 		var sb string
@@ -308,5 +320,19 @@ func (a *Adapter) Marshal(chat *engine.ChatRequest) ([]byte, error) {
 		}
 	}
 
-	return json.Marshal(gReq)
+	b, err := json.Marshal(gReq)
+	if err != nil {
+		return nil, err
+	}
+
+	if len(chat.ProviderExtensions) > 0 {
+		var outMap map[string]any
+		json.Unmarshal(b, &outMap)
+		for k, v := range chat.ProviderExtensions {
+			outMap[k] = v
+		}
+		return json.Marshal(outMap)
+	}
+
+	return b, nil
 }

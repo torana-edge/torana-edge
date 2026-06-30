@@ -175,6 +175,21 @@ func (a *Adapter) unmarshalChat(rawBody []byte) (*engine.ChatRequest, error) {
 		}
 	}
 
+	var raw map[string]any
+	if err := json.Unmarshal(rawBody, &raw); err == nil {
+		delete(raw, "model")
+		delete(raw, "messages")
+		delete(raw, "tools")
+		delete(raw, "stream")
+		delete(raw, "max_tokens")
+		delete(raw, "temperature")
+		delete(raw, "top_p")
+		delete(raw, "stop")
+		if len(raw) > 0 {
+			req.ProviderExtensions = raw
+		}
+	}
+
 	// Messages.
 	for _, m := range cr.Messages {
 		msg := convertChatMessage(m)
@@ -415,5 +430,19 @@ func marshalChat(chat *engine.ChatRequest) ([]byte, error) {
 		})
 	}
 
-	return json.Marshal(out)
+	b, err := json.Marshal(out)
+	if err != nil {
+		return nil, err
+	}
+
+	if len(chat.ProviderExtensions) > 0 {
+		var outMap map[string]any
+		json.Unmarshal(b, &outMap)
+		for k, v := range chat.ProviderExtensions {
+			outMap[k] = v
+		}
+		return json.Marshal(outMap)
+	}
+
+	return b, nil
 }

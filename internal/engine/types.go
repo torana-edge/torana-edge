@@ -9,10 +9,11 @@ type ChatRequest struct {
 	Messages      []Message
 	Tools         []ToolDef
 	Stream        bool
-	MaxTokens     *int
-	Temperature   *float64
-	TopP          *float64
-	StopSequences []string
+	MaxTokens          *int
+	Temperature        *float64
+	TopP               *float64
+	StopSequences      []string
+	ProviderExtensions map[string]any // unparsed fields passed through transparently
 }
 
 // Role classifies a message's speaker.
