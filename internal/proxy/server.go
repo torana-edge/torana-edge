@@ -1,49 +1,45 @@
 // Package proxy implements the Torana Edge reverse proxy engine.
 //
 // It sits between a developer agent harness (e.g., Claude Code) and a cloud
-// LLM provider (e.g., Anthropic). In its base form it is a transparent
-// pass-through; middleware phases layer on request mutation and response
-// clamping without changing the core forwarding logic.
+// LLM provider. A modular middleware pipeline (internal/engine) intercepts
+// every request/response pair — modules can mutate the body, wrap response
+// streams, or observe traffic without knowing about each other.
 package proxy
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
 	"time"
+
+	"github.com/torana-edge/torana-edge/internal/engine"
+	"github.com/torana-edge/torana-edge/internal/middleware"
 )
 
 // Config holds everything needed to start the proxy server.
-// It mirrors the values read from .env at startup.
 type Config struct {
-	// Port is the TCP port the proxy listens on (e.g. "8080").
-	Port string
-
-	// UpstreamURL is the base URL of the LLM provider
-	// (e.g. "https://api.anthropic.com"). No trailing slash.
+	Port        string
 	UpstreamURL string
-
-	// Provider is a human-readable label: "anthropic" or "openai".
-	// It is used later to branch provider-specific logic.
-	Provider string
+	Provider    string
 }
 
-// Server wraps the HTTP listener and the reverse-proxy plumbing.
+// Server wraps the HTTP listener, the reverse proxy, and the middleware
+// pipeline that runs on every request/response cycle.
 type Server struct {
 	config     Config
 	proxy      *httputil.ReverseProxy
 	httpServer *http.Server
+	pipeline   *engine.Pipeline
 }
 
-// --- Construction -----------------------------------------------------------
-
-// New builds a Server, validates the upstream URL, and wires the HTTP mux so
-// every incoming request is forwarded through Go's standard single-host reverse
-// proxy.
+// New builds a Server, wires the middleware pipeline, and returns a ready-
+// to-start reverse proxy.
 func New(cfg Config) (*Server, error) {
 	if cfg.Port == "" {
 		cfg.Port = "8080"
@@ -54,35 +50,57 @@ func New(cfg Config) (*Server, error) {
 		return nil, fmt.Errorf("proxy: invalid upstream URL %q: %w", cfg.UpstreamURL, err)
 	}
 
-	// NewSingleHostReverseProxy rewrites scheme and URL.Host, but does NOT
-	// set req.Host (the HTTP Host header). CloudFront/CDNs reject requests
-	// with a mismatched Host, so we override the Director to fix it.
+	// --- middleware pipeline ----------------------------------------------
+	pipeline := engine.New()
+
+	// Adapter: host rewriting, request logging (no body mutation).
+	pipeline.AddRequestHook(middleware.NewAdapter(target))
+
+	// Compactor: inject extraction intent (on request) + SSE scanner + sync retry
+	// (on response). Implements both RequestHook and ResponseHook.
+	compactor := middleware.NewCompactor()
+	pipeline.AddRequestHook(compactor)
+	pipeline.AddResponseHook(compactor)
+
+	// --- reverse proxy ---------------------------------------------------
 	proxy := httputil.NewSingleHostReverseProxy(target)
 	origDirector := proxy.Director
+
+	// Context key for stashing request body between Director and ModifyResponse.
+	type bodyCtxKey struct{}
+
 	proxy.Director = func(req *http.Request) {
+		var body []byte
+		if req.Body != nil {
+			body, _ = io.ReadAll(req.Body)
+			req.Body.Close()
+		}
+		body = pipeline.RunBeforeRequest(req, body)
+		req.Body = io.NopCloser(bytes.NewReader(body))
+		req.ContentLength = int64(len(body))
+
+		// Stash body so ModifyResponse can use it for sync retries.
+		ctx := context.WithValue(req.Context(), bodyCtxKey{}, body)
+		*req = *req.WithContext(ctx)
+
 		origDirector(req)
-		req.Host = target.Host
 	}
 
-	// --- future extension points (Phases 2-4) --------------------------
-	// These are no-ops today.  Later phases will replace them with real
-	// logic and the core forwarding loop stays untouched.
-	//   - Director:   inject intent schemas, compact tool results
-	//   - ModifyResponse: clamp SSE streams, strip injection keys
-	//   - Transport:  add API-key header injection, TLS tuning
-	// ------------------------------------------------------------------
+	proxy.ModifyResponse = func(resp *http.Response) error {
+		body, _ := resp.Request.Context().Value(bodyCtxKey{}).([]byte)
+		resp.Body = pipeline.RunAfterResponse(resp, resp.Body, resp.Request, body)
+		return nil
+	}
 
+	// --- HTTP server -----------------------------------------------------
 	mux := http.NewServeMux()
-	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		log.Printf("→ %s %s", r.Method, r.URL.Path)
-		proxy.ServeHTTP(w, r)
-	})
+	mux.HandleFunc("/", proxy.ServeHTTP)
 
 	srv := &http.Server{
 		Addr:         ":" + cfg.Port,
 		Handler:      mux,
 		ReadTimeout:  30 * time.Second,
-		WriteTimeout: 0,  // disabled – SSE streams are long-lived
+		WriteTimeout: 0, // disabled – SSE streams are long-lived
 		IdleTimeout:  120 * time.Second,
 	}
 
@@ -90,13 +108,12 @@ func New(cfg Config) (*Server, error) {
 		config:     cfg,
 		proxy:      proxy,
 		httpServer: srv,
+		pipeline:   pipeline,
 	}, nil
 }
 
 // --- Lifecycle --------------------------------------------------------------
 
-// ListenAndServe starts the HTTP server on the configured address.
-// It blocks until the server stops (either via Shutdown or a fatal error).
 func (s *Server) ListenAndServe() error {
 	log.Printf("Torana Edge → %s  upstream: %s (%s)", s.httpServer.Addr, s.config.UpstreamURL, s.config.Provider)
 	if err := s.httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
@@ -105,8 +122,6 @@ func (s *Server) ListenAndServe() error {
 	return nil
 }
 
-// Serve is the test-friendly variant: it accepts a pre-bound listener so
-// callers can use port :0 and discover the actual address before calling.
 func (s *Server) Serve(ln net.Listener) error {
 	log.Printf("Torana Edge → %s  upstream: %s (%s)", ln.Addr(), s.config.UpstreamURL, s.config.Provider)
 	if err := s.httpServer.Serve(ln); err != nil && err != http.ErrServerClosed {
@@ -115,8 +130,6 @@ func (s *Server) Serve(ln net.Listener) error {
 	return nil
 }
 
-// Shutdown drains in-flight requests and stops the server.
-// It accepts a context to cap how long the graceful drain may take.
 func (s *Server) Shutdown(ctx context.Context) error {
 	return s.httpServer.Shutdown(ctx)
 }
