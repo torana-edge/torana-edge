@@ -7,6 +7,7 @@ package bedrock
 import (
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"strings"
 
 	"github.com/torana-edge/torana-edge/internal/engine"
@@ -93,7 +94,7 @@ type bedrockInferenceConfig struct {
 
 // --- Unmarshal ---
 
-func (a *Adapter) Unmarshal(rawBody []byte) (*engine.ChatRequest, error) {
+func (a *Adapter) Unmarshal(httpReq *http.Request, rawBody []byte) (*engine.ChatRequest, error) {
 	if len(rawBody) == 0 {
 		return nil, fmt.Errorf("bedrock: empty request body")
 	}

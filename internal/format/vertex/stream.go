@@ -1,7 +1,6 @@
 package vertex
 
 import (
-	"bufio"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -41,19 +40,26 @@ func (s *StreamAdapter) ParseStream(body io.Reader) <-chan engine.StreamEvent {
 
 	go func() {
 		defer close(ch)
-		scanner := bufio.NewScanner(body)
-		for scanner.Scan() {
-			line := strings.TrimSpace(scanner.Text())
-			if line == "" {
-				continue
-			}
-
+		decoder := json.NewDecoder(body)
+		for {
 			var chunk geminiStreamChunk
-			if err := json.Unmarshal([]byte(line), &chunk); err != nil {
+			if err := decoder.Decode(&chunk); err != nil {
+				if err == io.EOF {
+					return
+				}
+				// Handle array delimiters if the stream is a JSON array
+				if _, ok := err.(*json.SyntaxError); ok {
+					// Read the token (e.g. '[', ']', ',')
+					if _, tokenErr := decoder.Token(); tokenErr == nil {
+						continue
+					}
+				}
+				// Could also be an SSE stream, handle 'data: ' prefix... for now assume it's just JSON array or JSON lines.
+				// If it fails with a different error, report it.
 				ch <- engine.StreamEvent{
 					Error: &engine.StreamError{
 						Code:    -1,
-						Message: fmt.Sprintf("vertex: parse stream line: %v", err),
+						Message: fmt.Sprintf("vertex: decode stream chunk: %v", err),
 					},
 				}
 				return
@@ -123,14 +129,7 @@ func (s *StreamAdapter) ParseStream(body io.Reader) <-chan engine.StreamEvent {
 			}
 		}
 
-		if err := scanner.Err(); err != nil {
-			ch <- engine.StreamEvent{
-				Error: &engine.StreamError{
-					Code:    -1,
-					Message: fmt.Sprintf("vertex: scanner error: %v", err),
-				},
-			}
-		}
+			// Decoder handles EOF cleanly above
 	}()
 
 	return ch

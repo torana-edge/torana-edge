@@ -7,6 +7,8 @@ package vertex
 import (
 	"encoding/json"
 	"fmt"
+	"net/http"
+	"strings"
 
 	"github.com/torana-edge/torana-edge/internal/engine"
 	"github.com/torana-edge/torana-edge/internal/format"
@@ -80,14 +82,14 @@ type geminiFuncDecl struct {
 // --- Unmarshal ---
 
 // Unmarshal parses a Gemini generateContent JSON body into a ChatRequest.
-func (a *Adapter) Unmarshal(rawBody []byte) (*engine.ChatRequest, error) {
+func (a *Adapter) Unmarshal(httpReq *http.Request, rawBody []byte) (*engine.ChatRequest, error) {
 	var gReq geminiRequest
 	if err := json.Unmarshal(rawBody, &gReq); err != nil {
 		return nil, fmt.Errorf("vertex: unmarshal request: %w", err)
 	}
 
 	chat := &engine.ChatRequest{
-		Stream: false,
+		Stream: httpReq != nil && httpReq.URL != nil && strings.Contains(httpReq.URL.Path, "streamGenerateContent"),
 		Model:  "gemini", // Vertex usually has model in URL path
 	}
 

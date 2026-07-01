@@ -119,7 +119,7 @@ func New(cfg Config) (*Server, error) {
 				return
 			}
 
-			chat, err := fmt.Request.Unmarshal(body)
+			chat, err := fmt.Request.Unmarshal(req, body)
 			if err != nil {
 				log.Printf("format %s unmarshal error: %v — passing through", fmt.Name, err)
 				_ = pipeline.RunBeforeRequest(req.Context(), req, nil)
@@ -147,16 +147,16 @@ func New(cfg Config) (*Server, error) {
 		},
 
 		ModifyResponse: func(resp *http.Response) error {
-			if !strings.Contains(resp.Header.Get("Content-Type"), "text/event-stream") {
-				return nil
-			}
-
 			fmt, _ := resp.Request.Context().Value(formatCtxKey{}).(*format.Format)
-			if fmt == nil {
+			chat, _ := resp.Request.Context().Value(chatCtxKey{}).(*engine.ChatRequest)
+
+			if fmt == nil || chat == nil || !chat.Stream {
 				return nil
 			}
 
-			chat, _ := resp.Request.Context().Value(chatCtxKey{}).(*engine.ChatRequest)
+			if resp.StatusCode != http.StatusOK {
+				return nil
+			}
 
 			events := fmt.Stream.ParseStream(resp.Body)
 			events = pipeline.RunAfterResponse(resp.Request.Context(), resp, events, resp.Request, chat)

@@ -4,6 +4,7 @@ package anthropic
 import (
 	"encoding/json"
 	"fmt"
+	"net/http"
 
 	"github.com/torana-edge/torana-edge/internal/engine"
 	"github.com/torana-edge/torana-edge/internal/format"
@@ -96,7 +97,7 @@ func init() {
 }
 
 // Unmarshal parses an Anthropic Messages request into a canonical ChatRequest.
-func (a *Adapter) Unmarshal(rawBody []byte) (*engine.ChatRequest, error) {
+func (a *Adapter) Unmarshal(httpReq *http.Request, rawBody []byte) (*engine.ChatRequest, error) {
 	var ar anthropicRequest
 	if err := json.Unmarshal(rawBody, &ar); err != nil {
 		return nil, fmt.Errorf("anthropic unmarshal: %w", err)
