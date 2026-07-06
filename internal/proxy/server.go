@@ -252,6 +252,12 @@ func New(cfg Config) (*Server, error) {
 
 // --- Lifecycle --------------------------------------------------------------
 
+// SetProviders hot-reloads the provider configuration without restarting.
+func (s *Server) SetProviders(cfg provider.Config) {
+	s.config.Providers = cfg
+	log.Printf("config hot-reload: %d providers loaded", len(cfg.Providers))
+}
+
 func (s *Server) ListenAndServe() error {
 	log.Printf("Torana Edge → :%s  providers: %d", s.config.Port, len(s.config.Providers.Providers))
 	if err := s.httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
