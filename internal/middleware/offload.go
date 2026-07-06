@@ -118,7 +118,8 @@ func (o *OffloadHook) BeforeRequest(ctx context.Context, req *http.Request, chat
 func (o *OffloadHook) compactDeterministic(content, intent string) string {
 	keywords := extractKeywords(intent)
 	if len(keywords) == 0 {
-		return truncateHeadTail(content, 2000)
+		// No keywords to match — pass through to trigger model delegation.
+		return content
 	}
 
 	lines := strings.Split(content, "\n")
@@ -145,9 +146,9 @@ func (o *OffloadHook) compactDeterministic(content, intent string) string {
 		}
 	}
 
-	// If no lines match, fall back to truncation.
+	// If no lines match keywords, pass through to trigger model delegation.
 	if len(scoredLines) == 0 {
-		return truncateHeadTail(content, 2000)
+		return content
 	}
 
 	// Sort by score descending, keep top matches + context.

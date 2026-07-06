@@ -177,11 +177,25 @@ func (st *SchemaTranslator) AfterResponse(ctx context.Context, resp *http.Respon
 func translateSchema(toolName string, schema map[string]any, path string) []string {
 	var mutations []string
 
-	// Enforce additionalProperties: false at this level.
+	// Detect implicit open maps BEFORE we lock them.
+	props, hasProps := schema["properties"].(map[string]any)
+	_, hasExplicitAP := schema["additionalProperties"]
+	schemaType, _ := schema["type"].(string)
+
+	if schemaType == "object" && !hasProps && !hasExplicitAP {
+		// No properties + no explicit additionalProperties → implicit open map.
+		// Convert to KV array instead of locking it with zero allowed keys.
+		convertToKVArray(schema, "string")
+		mutations = append(mutations, path)
+		log.Printf("[schema-translator] %s: converted implicit open map at %s to KV array",
+			toolName, path)
+		return mutations
+	}
+
+	// Enforce additionalProperties: false for objects that have explicit properties.
 	schema["additionalProperties"] = false
 
-	props, ok := schema["properties"].(map[string]any)
-	if !ok {
+	if !hasProps {
 		return mutations
 	}
 
@@ -193,16 +207,31 @@ func translateSchema(toolName string, schema map[string]any, path string) []stri
 
 		currentPath := joinPath(path, propName)
 
-		// Check if this property is an open-ended map.
+		// Detect implicit open maps BEFORE touching additionalProperties.
+		propType, _ := propSchema["type"].(string)
+		_, propHasProps := propSchema["properties"].(map[string]any)
+		_, propHasAP := propSchema["additionalProperties"]
+
+		// Case 1: Implicit open map — object type, no properties, no additionalProperties.
+		if propType == "object" && !propHasProps && !propHasAP {
+			convertToKVArray(propSchema, "string")
+			mutations = append(mutations, currentPath)
+			log.Printf("[schema-translator] %s: converted implicit open map at %s to KV array",
+				toolName, currentPath)
+			continue
+		}
+
+		// Case 2: Explicit open map — has additionalProperties=true or {type:...}.
 		if hasAdditionalProperties(propSchema) {
 			valueType := extractAdditionalPropertiesType(propSchema)
 			convertToKVArray(propSchema, valueType)
 			mutations = append(mutations, currentPath)
 			log.Printf("[schema-translator] %s: converted %s from map to KV array (value type: %s)",
 				toolName, currentPath, valueType)
+			continue
 		}
 
-		// Enforce additionalProperties: false on this property too.
+		// Case 3: Normal object with properties — enforce additionalProperties: false.
 		propSchema["additionalProperties"] = false
 
 		// Recurse into nested objects.
