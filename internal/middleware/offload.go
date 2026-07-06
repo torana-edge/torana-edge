@@ -56,6 +56,13 @@ func (o *OffloadHook) BeforeRequest(ctx context.Context, req *http.Request, chat
 		return chat, nil
 	}
 
+	// Skip if schema translation didn't run (no mutations registry).
+	// This happens when the format adapter fails to unmarshal the request
+	// and it passes through untouched — there are no intents to find.
+	if chat.ToranaMeta == nil || chat.ToranaMeta[metaKeyMutations] == nil {
+		return chat, nil
+	}
+
 	compacted := 0
 	bytesSaved := 0
 

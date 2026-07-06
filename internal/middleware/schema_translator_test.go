@@ -470,8 +470,9 @@ func TestReverseTranslate_UnknownToolPassthrough(t *testing.T) {
 
 	var parsed map[string]any
 	json.Unmarshal([]byte(result), &parsed)
-	if _, ok := parsed["env"].([]any); !ok {
-		t.Error("env should remain an array when tool not in registry")
+	// Heuristic reversal should convert KV arrays even for unknown tools.
+	if _, ok := parsed["env"].(map[string]any); !ok {
+		t.Error("heuristic reversal should convert KV array to object for unknown tool")
 	}
 }
 
