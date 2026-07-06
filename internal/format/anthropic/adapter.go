@@ -29,6 +29,34 @@ type anthropicMessage struct {
 	Content []contentBlock `json:"content"`
 }
 
+// UnmarshalJSON handles string content (Claude Code style) and array content.
+func (am *anthropicMessage) UnmarshalJSON(data []byte) error {
+	type alias anthropicMessage
+	var raw struct {
+		alias
+		Content json.RawMessage `json:"content"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	*am = anthropicMessage(raw.alias)
+
+	// Try string first.
+	var s string
+	if json.Unmarshal(raw.Content, &s) == nil {
+		am.Content = []contentBlock{{Type: "text", Text: s}}
+		return nil
+	}
+
+	// Try array.
+	var blocks []contentBlock
+	if err := json.Unmarshal(raw.Content, &blocks); err != nil {
+		return fmt.Errorf("content: expected string or array: %w", err)
+	}
+	am.Content = blocks
+	return nil
+}
+
 type contentBlock struct {
 	Type       string         `json:"type"`
 	Text       string         `json:"text,omitempty"`
