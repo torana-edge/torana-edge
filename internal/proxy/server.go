@@ -9,6 +9,7 @@ package proxy
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
@@ -61,6 +62,9 @@ func New(cfg Config) (*Server, error) {
 	// --- middleware pipeline ----------------------------------------------
 	pipeline := engine.New()
 	pipeline.AddRequestHook(middleware.NewAdapter())
+	translator := middleware.NewSchemaTranslator()
+	pipeline.AddRequestHook(translator)
+	pipeline.AddResponseHook(translator)
 
 	// --- reverse proxy ---------------------------------------------------
 	// Context keys for stashing format and chat between Director and ModifyResponse.
@@ -147,28 +151,55 @@ func New(cfg Config) (*Server, error) {
 		},
 
 		ModifyResponse: func(resp *http.Response) error {
-			if !strings.Contains(resp.Header.Get("Content-Type"), "text/event-stream") {
-				return nil
-			}
+			contentType := resp.Header.Get("Content-Type")
 
-			fmt, _ := resp.Request.Context().Value(formatCtxKey{}).(*format.Format)
-			if fmt == nil {
-				return nil
-			}
-
-			chat, _ := resp.Request.Context().Value(chatCtxKey{}).(*engine.ChatRequest)
-
-			events := fmt.Stream.ParseStream(resp.Body)
-			events = pipeline.RunAfterResponse(resp.Request.Context(), resp, events, resp.Request, chat)
-
-			pr, pw := io.Pipe()
-			go func() {
-				defer pw.Close()
-				if err := fmt.Stream.SerializeStream(pw, events); err != nil {
-					log.Printf("format %s serialize error: %v", fmt.Name, err)
+			// SSE streaming: parse → pipeline → serialize.
+			if strings.Contains(contentType, "text/event-stream") {
+				fmt, _ := resp.Request.Context().Value(formatCtxKey{}).(*format.Format)
+				if fmt == nil {
+					return nil
 				}
-			}()
-			resp.Body = pr
+				chat, _ := resp.Request.Context().Value(chatCtxKey{}).(*engine.ChatRequest)
+
+				events := fmt.Stream.ParseStream(resp.Body)
+				events = pipeline.RunAfterResponse(resp.Request.Context(), resp, events, resp.Request, chat)
+
+				pr, pw := io.Pipe()
+				go func() {
+					defer pw.Close()
+					if err := fmt.Stream.SerializeStream(pw, events); err != nil {
+						log.Printf("format %s serialize error: %v", fmt.Name, err)
+					}
+				}()
+				resp.Body = pr
+				return nil
+			}
+
+			// Non-streaming JSON: convert to synthetic StreamEvents,
+			// run through response pipeline, rebuild JSON.
+			if strings.Contains(contentType, "application/json") {
+				chat, _ := resp.Request.Context().Value(chatCtxKey{}).(*engine.ChatRequest)
+				if chat == nil {
+					return nil
+				}
+
+				bodyBytes, err := io.ReadAll(resp.Body)
+				resp.Body.Close()
+				if err != nil {
+					return nil
+				}
+
+				processed, err := runNonStreamingPipeline(resp, pipeline, chat, bodyBytes)
+				if err != nil {
+					log.Printf("non-streaming pipeline error: %v", err)
+					processed = bodyBytes // passthrough on error
+				}
+
+				resp.Body = io.NopCloser(bytes.NewReader(processed))
+				resp.ContentLength = int64(len(processed))
+				return nil
+			}
+
 			return nil
 		},
 	}
@@ -235,4 +266,115 @@ func joinURLPath(base, rel string) string {
 		return bs
 	}
 	return bs + "/" + rs
+}
+
+// runNonStreamingPipeline handles non-streaming (application/json) LLM
+// responses by converting tool calls into synthetic StreamEvents, running
+// them through the response pipeline, and rebuilding the JSON body from
+// the processed events. This ensures all ResponseHooks fire for
+// non-streaming responses just like they do for SSE.
+func runNonStreamingPipeline(resp *http.Response, pipeline *engine.Pipeline, chat *engine.ChatRequest, body []byte) ([]byte, error) {
+	// Parse the OpenAI Chat Completions response shape.
+	var parsed struct {
+		Choices []struct {
+			Message struct {
+				Role      string `json:"role"`
+				Content   string `json:"content,omitempty"`
+				ToolCalls []struct {
+					ID       string `json:"id"`
+					Function struct {
+						Name      string `json:"name"`
+						Arguments string `json:"arguments"`
+					} `json:"function"`
+				} `json:"tool_calls,omitempty"`
+			} `json:"message"`
+		} `json:"choices"`
+	}
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		return body, nil // not our format, pass through
+	}
+
+	// Check if there are tool calls to process.
+	hasToolCalls := false
+	for _, c := range parsed.Choices {
+		if len(c.Message.ToolCalls) > 0 {
+			hasToolCalls = true
+			break
+		}
+	}
+	if !hasToolCalls {
+		return body, nil // nothing to process
+	}
+
+	// Build synthetic StreamEvents: ToolCallStart → ToolCallDelta(full args) → ToolCallEnd
+	// for each tool call. Use a buffered channel and close it before running pipeline.
+	events := make(chan engine.StreamEvent, len(parsed.Choices)*3)
+	for _, c := range parsed.Choices {
+		for i, tc := range c.Message.ToolCalls {
+			events <- engine.StreamEvent{
+				ToolCallStart: &engine.ToolCallStart{
+					Index: i,
+					ID:    tc.ID,
+					Name:  tc.Function.Name,
+				},
+			}
+			if tc.Function.Arguments != "" {
+				args := tc.Function.Arguments
+				events <- engine.StreamEvent{
+					ToolCallDelta: &engine.ToolCallDelta{
+						Index:          i,
+						ArgumentsDelta: args,
+					},
+				}
+			}
+			events <- engine.StreamEvent{
+				ToolCallEnd: &engine.ToolCallEnd{Index: i},
+			}
+		}
+	}
+	close(events)
+
+	// Run through the response pipeline.
+	processed := pipeline.RunAfterResponse(resp.Request.Context(), resp, events, resp.Request, chat)
+
+	// Collect processed events. We only care about ToolCallDeltas
+	// (which contain the sanitized arguments).
+	type tcResult struct {
+		args string
+	}
+	results := make(map[int]*tcResult) // index → result
+
+	for ev := range processed {
+		if ev.ToolCallDelta != nil {
+			if r, ok := results[ev.ToolCallDelta.Index]; ok {
+				r.args += ev.ToolCallDelta.ArgumentsDelta
+			} else {
+				results[ev.ToolCallDelta.Index] = &tcResult{
+					args: ev.ToolCallDelta.ArgumentsDelta,
+				}
+			}
+		}
+	}
+
+	// Rebuild the JSON with sanitized arguments.
+	modified := false
+	for i := range parsed.Choices {
+		for j := range parsed.Choices[i].Message.ToolCalls {
+			tc := &parsed.Choices[i].Message.ToolCalls[j]
+			if r, ok := results[j]; ok && r.args != tc.Function.Arguments {
+				tc.Function.Arguments = r.args
+				modified = true
+			}
+		}
+	}
+
+	if !modified {
+		return body, nil
+	}
+
+	out, err := json.Marshal(parsed)
+	if err != nil {
+		return body, err
+	}
+	return out, nil
 }

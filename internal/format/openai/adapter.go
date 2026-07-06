@@ -57,8 +57,9 @@ type chatToolFunc struct {
 }
 
 type chatToolDef struct {
-	Type     string        `json:"type"`
+	Type     string         `json:"type"`
 	Function chatToolFuncDef `json:"function"`
+	Strict   bool           `json:"strict,omitempty"`
 }
 
 type chatToolFuncDef struct {
@@ -202,6 +203,7 @@ func (a *Adapter) unmarshalChat(rawBody []byte) (*engine.ChatRequest, error) {
 			Name:        t.Function.Name,
 			Description: t.Function.Description,
 			Parameters:  t.Function.Parameters,
+			Strict:      t.Strict,
 		}
 		req.Tools = append(req.Tools, td)
 	}
@@ -342,8 +344,9 @@ type marshalTCFn struct {
 }
 
 type marshalTool struct {
-	Type     string       `json:"type"`
+	Type     string        `json:"type"`
 	Function marshalToolFn `json:"function"`
+	Strict   bool          `json:"strict,omitempty"`
 }
 
 type marshalToolFn struct {
@@ -421,7 +424,8 @@ func marshalChat(chat *engine.ChatRequest) ([]byte, error) {
 	// Tools.
 	for _, t := range chat.Tools {
 		out.Tools = append(out.Tools, marshalTool{
-			Type: "function",
+			Type:   "function",
+			Strict: t.Strict,
 			Function: marshalToolFn{
 				Name:        t.Name,
 				Description: t.Description,

@@ -14,6 +14,11 @@ type ChatRequest struct {
 	TopP               *float64
 	StopSequences      []string
 	ProviderExtensions map[string]any // unparsed fields passed through transparently
+
+	// ToranaMeta carries proxy-internal metadata that format adapters
+	// MUST NOT serialize to the wire. Used for request-scoped state
+	// (e.g. mutation registries) shared between hooks.
+	ToranaMeta map[string]any
 }
 
 // Role classifies a message's speaker.
