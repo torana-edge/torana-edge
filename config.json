@@ -17,5 +17,10 @@
       "url": "https://api.anthropic.com",
       "format": "anthropic"
     }
+  },
+  "offload": {
+    "enabled": true,
+    "model": "deepseek-v4-flash",
+    "provider": "deepseek"
   }
 }

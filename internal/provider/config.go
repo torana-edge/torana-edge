@@ -17,8 +17,20 @@ type Provider struct {
 
 // Config is the top-level Torana configuration.
 type Config struct {
-	Port      int                `json:"port"`
+	Port      int                 `json:"port"`
 	Providers map[string]Provider `json:"providers"`
+	Offload   OffloadConfig        `json:"offload,omitempty"`
+}
+
+// OffloadConfig controls tool-result compaction via a cheaper model.
+type OffloadConfig struct {
+	// Enabled toggles model offloading. Defaults to false.
+	Enabled bool `json:"enabled,omitempty"`
+	// Model is the cheaper model used for compaction (e.g. "deepseek-v4-flash").
+	Model string `json:"model,omitempty"`
+	// Provider is which configured provider to use for offload API calls.
+	// Defaults to "deepseek" if unset.
+	Provider string `json:"provider,omitempty"`
 }
 
 // DefaultConfig returns the built-in configuration for common providers.
@@ -65,12 +77,21 @@ func Load(path string) (Config, error) {
 		return cfg, fmt.Errorf("parsing config %q: %w", path, err)
 	}
 
-	// Merge: user port overrides default, provider map merges.
+	// Merge: user port overrides default, provider map merges, offload merges.
 	if user.Port != 0 {
 		cfg.Port = user.Port
 	}
 	for name, p := range user.Providers {
 		cfg.Providers[name] = p
+	}
+	if user.Offload.Enabled {
+		cfg.Offload.Enabled = true
+	}
+	if user.Offload.Model != "" {
+		cfg.Offload.Model = user.Offload.Model
+	}
+	if user.Offload.Provider != "" {
+		cfg.Offload.Provider = user.Offload.Provider
 	}
 
 	return cfg, nil
