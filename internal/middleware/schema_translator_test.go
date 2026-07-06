@@ -67,8 +67,14 @@ func TestSchemaTranslator_MutatesAdditionalPropertiesToString(t *testing.T) {
 		t.Error("env.items missing 'value' property")
 	}
 
-	if ap, ok := env["additionalProperties"]; !ok || ap != false {
-		t.Error("env.additionalProperties should be false")
+	// items object should have additionalProperties: false.
+	if ap, ok := items["additionalProperties"]; !ok || ap != false {
+		t.Errorf("env.items.additionalProperties should be false, got %v", ap)
+	}
+
+	// env is now an array — additionalProperties is on items, not the array itself.
+	if ap, ok := env["additionalProperties"]; ok {
+		t.Errorf("env is an array, should not have additionalProperties — got %v", ap)
 	}
 
 	registry, ok := result.ToranaMeta[metaKeyMutations].(map[string][]string)
@@ -547,5 +553,58 @@ func TestRoundTrip_MutateThenReverse(t *testing.T) {
 	}
 	if env["NODE_ENV"] != "test" {
 		t.Errorf("env.NODE_ENV = %v", env["NODE_ENV"])
+	}
+}
+
+func TestSchemaTranslator_ImplicitOpenMap(t *testing.T) {
+	// An object with no properties and no additionalProperties declaration
+	// should be treated as an implicit open map and converted to KV array.
+	st := NewSchemaTranslator()
+	chat := &engine.ChatRequest{
+		Tools: []engine.ToolDef{
+			{
+				Name: "bash",
+				Parameters: map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"command": map[string]any{"type": "string"},
+						"headers": map[string]any{
+							"type": "object",
+							// No properties, no additionalProperties — implicit open map.
+						},
+					},
+				},
+			},
+		},
+	}
+
+	req, _ := http.NewRequest("POST", "/", nil)
+	result, _ := st.BeforeRequest(context.Background(), req, chat)
+
+	props := result.Tools[0].Parameters["properties"].(map[string]any)
+	headers := props["headers"].(map[string]any)
+
+	// Should be converted to a KV array, not left as a locked object.
+	if headers["type"] != "array" {
+		t.Fatalf("implicit open map should be converted to array, got type=%v", headers["type"])
+	}
+
+	items := headers["items"].(map[string]any)
+	if items["type"] != "object" {
+		t.Error("items should be object")
+	}
+
+	itemProps := items["properties"].(map[string]any)
+	if _, ok := itemProps["key"]; !ok {
+		t.Error("items missing 'key'")
+	}
+	if _, ok := itemProps["value"]; !ok {
+		t.Error("items missing 'value'")
+	}
+
+	// Verify it's in the mutation registry.
+	registry, _ := result.ToranaMeta[metaKeyMutations].(map[string][]string)
+	if paths, ok := registry["bash"]; !ok || len(paths) == 0 {
+		t.Error("implicit open map should be in mutation registry")
 	}
 }
