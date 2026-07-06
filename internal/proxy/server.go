@@ -169,6 +169,13 @@ func New(cfg Config) (*Server, error) {
 		},
 
 		ModifyResponse: func(resp *http.Response) error {
+			// Skip pipeline for error responses — don't try to
+			// reverse-translate a 4xx/5xx body that isn't a valid
+			// chat completion response.
+			if resp.StatusCode >= 400 {
+				return nil
+			}
+
 			contentType := resp.Header.Get("Content-Type")
 
 			// SSE streaming: parse → pipeline → serialize.
