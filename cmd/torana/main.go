@@ -67,6 +67,12 @@ func main() {
 		srv.Shutdown(shutdownCtx)
 	}()
 
+	// Start config hot-reload watcher.
+	stopWatch := provider.WatchConfig(configPath, 5*time.Second, func(newCfg provider.Config) {
+		srv.SetProviders(newCfg)
+	})
+	defer stopWatch()
+
 	if err := srv.ListenAndServe(); err != nil {
 		log.Fatalf("Server error: %v", err)
 	}
