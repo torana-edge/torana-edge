@@ -163,6 +163,7 @@ func (s *StreamAdapter) ParseStream(body io.Reader) <-chan engine.StreamEvent {
 func (s *StreamAdapter) SerializeStream(w io.Writer, events <-chan engine.StreamEvent) error {
 	var thinkingIndex int
 	var inThinking bool
+	var textBlockIndex int // tracks text content block indices (#25)
 	emit := func(line string) error {
 		if _, err := fmt.Fprintln(w, line); err != nil {
 			return fmt.Errorf("anthropic serialize: %w", err)
@@ -205,8 +206,10 @@ func (s *StreamAdapter) SerializeStream(w io.Writer, events <-chan engine.Stream
 			if err := closeThinking(); err != nil {
 				return err
 			}
+			textBlockIndex++
 			data := fmt.Sprintf(
-				`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":%s}}`,
+				`data: {"type":"content_block_delta","index":%d,"delta":{"type":"text_delta","text":%s}}`,
+				textBlockIndex-1,
 				jsonString(*ev.TextDelta),
 			)
 			if err := emit(data); err != nil {

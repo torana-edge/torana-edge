@@ -88,6 +88,7 @@ func (s *Stream) ParseStream(body io.Reader) <-chan engine.StreamEvent {
 		scanner.Buffer(make([]byte, 0, 64*1024), 2*1024*1024)
 
 		var inThinking bool
+		var inToolUse bool
 		var signatureBuf string
 
 		for scanner.Scan() {
@@ -104,7 +105,7 @@ func (s *Stream) ParseStream(body io.Reader) <-chan engine.StreamEvent {
 				continue
 			}
 
-			evt := parseBedrockEvent(line, &inThinking, &signatureBuf)
+			evt := parseBedrockEvent(line, &inThinking, &inToolUse, &signatureBuf)
 			if evt != nil {
 				ch <- *evt
 			}
@@ -124,7 +125,7 @@ func (s *Stream) ParseStream(body io.Reader) <-chan engine.StreamEvent {
 }
 // parseBedrockEvent parses a single Bedrock JSON event line into a StreamEvent.
 // Returns nil for events that should be silently ignored (e.g. messageStart).
-func parseBedrockEvent(line string, inThinking *bool, signatureBuf *string) *engine.StreamEvent {
+func parseBedrockEvent(line string, inThinking *bool, inToolUse *bool, signatureBuf *string) *engine.StreamEvent {
 	var se bedrockStreamEvent
 	if err := json.Unmarshal([]byte(line), &se); err != nil {
 		return &engine.StreamEvent{
@@ -153,6 +154,7 @@ func parseBedrockEvent(line string, inThinking *bool, signatureBuf *string) *eng
 
 	case se.ContentBlockStart != nil && se.ContentBlockStart.Start.ToolUse != nil:
 		tu := se.ContentBlockStart.Start.ToolUse
+		*inToolUse = true
 		return &engine.StreamEvent{
 			ToolCallStart: &engine.ToolCallStart{
 				Index: 0, // Bedrock has only one tool call per turn
@@ -166,15 +168,18 @@ func parseBedrockEvent(line string, inThinking *bool, signatureBuf *string) *eng
 		delta := se.ContentBlockDelta.Delta
 		switch {
 		case delta.Thinking != nil:
-			return &engine.StreamEvent{ThinkingDelta: delta.Thinking}
+			*inToolUse = true
+		return &engine.StreamEvent{ThinkingDelta: delta.Thinking}
 		case delta.Signature != nil:
 			*signatureBuf += *delta.Signature
 			return nil
 		case delta.Text != nil:
 			text := *delta.Text
-			return &engine.StreamEvent{TextDelta: &text}
+			*inToolUse = true
+		return &engine.StreamEvent{TextDelta: &text}
 		case delta.ToolUse != nil:
-			return &engine.StreamEvent{
+			*inToolUse = true
+		return &engine.StreamEvent{
 				ToolCallDelta: &engine.ToolCallDelta{
 					Index:          0,
 					ArgumentsDelta: delta.ToolUse.Input,
@@ -187,12 +192,18 @@ func parseBedrockEvent(line string, inThinking *bool, signatureBuf *string) *eng
 			*inThinking = false
 			return nil // thinking block stop; no event to emit
 		}
+		if !*inToolUse {
+			return nil // text block stop — no tool call to end
+		}
+		*inToolUse = false
+		*inToolUse = true
 		return &engine.StreamEvent{
 			ToolCallEnd: &engine.ToolCallEnd{Index: 0},
 		}
 
 	case se.MessageStop != nil:
 		reason := mapBedrockStopReason(se.MessageStop.StopReason)
+		*inToolUse = true
 		return &engine.StreamEvent{FinishReason: reason}
 	}
 
