@@ -224,7 +224,19 @@ func New(cfg Config) (*Server, error) {
 
 	// --- HTTP server -----------------------------------------------------
 	mux := http.NewServeMux()
+	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"status":"ok"}`))
+	})
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		// Panic recovery for the request handler goroutine.
+		defer func() {
+			if rec := recover(); rec != nil {
+				log.Printf("panic in request handler: %v", rec)
+				http.Error(w, "internal server error", http.StatusInternalServerError)
+			}
+		}()
 		// If no provider matches and no default, reject.
 		prov, _, _ := provider.Resolve(r.URL.Path, cfg.Providers)
 		if prov == nil && cfg.DefaultProvider == "" {
