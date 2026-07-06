@@ -5,16 +5,23 @@ import (
 	"encoding/json"
 	"net/http"
 	"testing"
+	"time"
 
+	"github.com/torana-edge/torana-edge/internal/cache"
 	"github.com/torana-edge/torana-edge/internal/engine"
 )
+
+// testCache is a shared cache for tests.
+func testCache() cache.IntentCache {
+	return cache.NewLocalCache(5 * time.Minute)
+}
 
 // ---------------------------------------------------------------------------
 // Schema mutation tests
 // ---------------------------------------------------------------------------
 
 func TestSchemaTranslator_MutatesAdditionalPropertiesToString(t *testing.T) {
-	st := NewSchemaTranslator()
+	st := NewSchemaTranslator(testCache())
 	chat := &engine.ChatRequest{
 		Tools: []engine.ToolDef{
 			{
@@ -91,7 +98,7 @@ func TestSchemaTranslator_MutatesAdditionalPropertiesToString(t *testing.T) {
 }
 
 func TestSchemaTranslator_AdditionalPropertiesTrue(t *testing.T) {
-	st := NewSchemaTranslator()
+	st := NewSchemaTranslator(testCache())
 	chat := &engine.ChatRequest{
 		Tools: []engine.ToolDef{
 			{
@@ -124,7 +131,7 @@ func TestSchemaTranslator_AdditionalPropertiesTrue(t *testing.T) {
 }
 
 func TestSchemaTranslator_InjectsIntentAtRoot(t *testing.T) {
-	st := NewSchemaTranslator()
+	st := NewSchemaTranslator(testCache())
 	chat := &engine.ChatRequest{
 		Tools: []engine.ToolDef{
 			{
@@ -173,7 +180,7 @@ func TestSchemaTranslator_InjectsIntentAtRoot(t *testing.T) {
 }
 
 func TestSchemaTranslator_Idempotent(t *testing.T) {
-	st := NewSchemaTranslator()
+	st := NewSchemaTranslator(testCache())
 	chat := &engine.ChatRequest{
 		Tools: []engine.ToolDef{
 			{
@@ -217,7 +224,7 @@ func TestSchemaTranslator_Idempotent(t *testing.T) {
 }
 
 func TestSchemaTranslator_NoToolsPassthrough(t *testing.T) {
-	st := NewSchemaTranslator()
+	st := NewSchemaTranslator(testCache())
 	chat := &engine.ChatRequest{}
 	req, _ := http.NewRequest("POST", "/", nil)
 	result, _ := st.BeforeRequest(context.Background(), req, chat)
@@ -227,7 +234,7 @@ func TestSchemaTranslator_NoToolsPassthrough(t *testing.T) {
 }
 
 func TestSchemaTranslator_NilChatPassthrough(t *testing.T) {
-	st := NewSchemaTranslator()
+	st := NewSchemaTranslator(testCache())
 	req, _ := http.NewRequest("POST", "/", nil)
 	result, _ := st.BeforeRequest(context.Background(), req, nil)
 	if result != nil {
@@ -236,7 +243,7 @@ func TestSchemaTranslator_NilChatPassthrough(t *testing.T) {
 }
 
 func TestSchemaTranslator_NestedObjects(t *testing.T) {
-	st := NewSchemaTranslator()
+	st := NewSchemaTranslator(testCache())
 	chat := &engine.ChatRequest{
 		Tools: []engine.ToolDef{
 			{
@@ -278,7 +285,7 @@ func TestSchemaTranslator_NestedObjects(t *testing.T) {
 }
 
 func TestSchemaTranslator_ArrayOfObjects(t *testing.T) {
-	st := NewSchemaTranslator()
+	st := NewSchemaTranslator(testCache())
 	chat := &engine.ChatRequest{
 		Tools: []engine.ToolDef{
 			{
@@ -325,7 +332,7 @@ func TestSchemaTranslator_ArrayOfObjects(t *testing.T) {
 }
 
 func TestSchemaTranslator_NoAdditionalPropertiesPassthrough(t *testing.T) {
-	st := NewSchemaTranslator()
+	st := NewSchemaTranslator(testCache())
 	chat := &engine.ChatRequest{
 		Tools: []engine.ToolDef{
 			{
@@ -500,7 +507,7 @@ func TestReverseTranslate_InvalidJSON(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestRoundTrip_MutateThenReverse(t *testing.T) {
-	st := NewSchemaTranslator()
+	st := NewSchemaTranslator(testCache())
 
 	chat := &engine.ChatRequest{
 		Tools: []engine.ToolDef{
@@ -559,7 +566,7 @@ func TestRoundTrip_MutateThenReverse(t *testing.T) {
 func TestSchemaTranslator_ImplicitOpenMap(t *testing.T) {
 	// An object with no properties and no additionalProperties declaration
 	// should be treated as an implicit open map and converted to KV array.
-	st := NewSchemaTranslator()
+	st := NewSchemaTranslator(testCache())
 	chat := &engine.ChatRequest{
 		Tools: []engine.ToolDef{
 			{
