@@ -31,3 +31,7 @@ Stream adapters do not extract or emit token usage (Prompt/Completion tokens). T
 ## 7. gRPC and TLS MITM Interception
 Torana is strictly an HTTP/1.1 REST/JSON proxy. It cannot currently intercept clients that use proxy `CONNECT` tunnels to establish end-to-end encrypted TLS sessions (like internal Google binaries).
 * **Impact:** Dogfooding Torana with clients like Antigravity CLI (`agy`) or strict gRPC-only SDKs is impossible natively. Torana would need a full SSL Man-in-the-Middle (MITM) termination layer (with dynamic certificate generation) and an HTTP/2 gRPC-to-JSON transcoder format adapter to support these clients.
+
+## 8. Schema Injection vs Strict Mode (Structured Outputs)
+The "Schema Injection" strategy (V1) for intent extraction attempts to bolt `_torana_extraction_intent` onto the tool schema. However, to mathematically force LLMs (like DeepSeek Beta and OpenAI) to output this intent, we must enable Strict Mode (Structured Outputs).
+* **Impact:** Strict Mode API rules explicitly forbid open-ended dictionaries (i.e. `additionalProperties` must be boolean `false` everywhere). Many agent harnesses (like `oh-my-pi`) define tools with open-ended map parameters (e.g., `bash`'s `env` parameter). Enabling Strict Mode on these schemas causes immediate 400 API validation errors from the provider. V1 intent injection is therefore structurally incompatible with modern agent schemas.
