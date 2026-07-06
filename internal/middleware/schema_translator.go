@@ -12,9 +12,9 @@ import (
 	"github.com/torana-edge/torana-edge/internal/engine"
 )
 
-// SchemaTranslator implements bidirectional schema translation for
-// Strict Mode compatibility. It converts open-ended maps (additionalProperties)
-// into arrays of {key, value} pairs on the way to the LLM, and reverses the
+// SchemaTranslator implements bidirectional schema translation.
+// It converts open-ended maps (additionalProperties) into arrays of
+// {key, value} pairs on the way to the LLM, and reverses the
 // transformation on the way back to the harness.
 //
 // It implements both RequestHook and ResponseHook.
@@ -41,8 +41,8 @@ const metaKeyMutations = "_torana_mutations"
 // metaKeyIntentCache is the ToranaMeta key for the intent cache reference.
 const metaKeyIntentCache = "_torana_intent_cache"
 
-// BeforeRequest mutates tool schemas for Strict Mode compatibility,
-// injects _torana_extraction_intent, and records all mutations
+// BeforeRequest mutates tool schemas: converts additionalProperties maps
+// to KV arrays, injects the "i" intent field, and records all mutations
 // in the request's ToranaMeta for later reversal.
 func (st *SchemaTranslator) BeforeRequest(ctx context.Context, req *http.Request, chat *engine.ChatRequest) (*engine.ChatRequest, error) {
 	if chat == nil || len(chat.Tools) == 0 {
@@ -76,11 +76,8 @@ func (st *SchemaTranslator) BeforeRequest(ctx context.Context, req *http.Request
 			registry[tool.Name] = mutations
 		}
 
-		// Inject _torana_extraction_intent at root.
+		// Inject the "i" intent field.
 		injectIntentParam(tool)
-
-		// Enable strict mode.
-		tool.Strict = true
 	}
 
 	chat.ToranaMeta[metaKeyMutations] = registry
@@ -132,6 +129,7 @@ func (st *SchemaTranslator) AfterResponse(ctx context.Context, resp *http.Respon
 
 			case ev.ToolCallEnd != nil && current != nil:
 				assembled := strings.Join(current.fragments, "")
+
 
 				// Extract intent + reverse mutations.
 				processed, intent := ReverseTranslate(current.name, assembled, registry)
@@ -289,8 +287,15 @@ func convertToKVArray(schema map[string]any, valueType string) {
 	}
 }
 
-// injectIntentParam adds _torana_extraction_intent to the tool's root
-// parameters schema.
+// ToranaIntentField is injected into every tool schema. Named "i" to match
+// the field that omp (oh-my-pi) uses, because models trained on omp interactions
+// already know to populate "i" on every tool call. We update the description
+// to guide the model toward specific, actionable intents.
+const ToranaIntentField = "i"
+
+// injectIntentParam ensures every tool has an "i" (concise intent) field
+// with a description that guides the model toward specific, actionable intents.
+// If the harness already has "i", we update its description. If not, we inject it.
 func injectIntentParam(tool *engine.ToolDef) {
 	if tool.Parameters == nil {
 		tool.Parameters = make(map[string]any)
@@ -305,14 +310,10 @@ func injectIntentParam(tool *engine.ToolDef) {
 		tool.Parameters["properties"] = props
 	}
 
-	// Idempotent — don't double-inject.
-	if _, exists := props["_torana_extraction_intent"]; exists {
-		return
-	}
-
-	props["_torana_extraction_intent"] = map[string]any{
+	// Inject or update the "i" field with our enhanced description.
+	props[ToranaIntentField] = map[string]any{
 		"type":        "string",
-		"description": "CRITICAL: specify exactly what information you need from this tool's output. Be specific — e.g. 'find the NullPointerException stack trace' or 'extract the API key from line 42'.",
+		"description": "describe the specific information you expect to find in this tool's output",
 	}
 
 	// Add to required array.
@@ -331,12 +332,12 @@ func injectIntentParam(tool *engine.ToolDef) {
 
 	// Check if already present.
 	for _, r := range required {
-		if s, ok := r.(string); ok && s == "_torana_extraction_intent" {
+		if s, ok := r.(string); ok && s == ToranaIntentField {
 			return
 		}
 	}
 
-	required = append(required, "_torana_extraction_intent")
+	required = append(required, ToranaIntentField)
 	tool.Parameters["required"] = required
 	tool.Parameters["additionalProperties"] = false
 }
@@ -346,7 +347,7 @@ func injectIntentParam(tool *engine.ToolDef) {
 // ==========================================================================
 
 // ReverseTranslate processes assembled tool call arguments JSON:
-// 1. Extracts and removes _torana_extraction_intent
+// 1. Extracts intent from the "i" (concise intent) field
 // 2. Reverses KV-array mutations back to objects
 // Returns (sanitizedJSON, intentString).
 func ReverseTranslate(toolName string, argsJSON string, registry map[string][]string) (string, string) {
@@ -356,17 +357,15 @@ func ReverseTranslate(toolName string, argsJSON string, registry map[string][]st
 
 	var args map[string]any
 	if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
-		// Can't parse — pass through unchanged.
 		log.Printf("[schema-translator] %s: failed to parse arguments: %v", toolName, err)
 		return argsJSON, ""
 	}
 
-	// 1. Extract intent.
+	// Extract intent from the "i" field.
 	intent := ""
-	if v, ok := args["_torana_extraction_intent"].(string); ok {
+	if v, ok := args[ToranaIntentField].(string); ok && v != "" {
 		intent = v
 	}
-	delete(args, "_torana_extraction_intent")
 
 	// 2. Reverse KV-array mutations.
 	paths, ok := registry[toolName]

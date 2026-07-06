@@ -43,7 +43,6 @@ func TestSchemaTranslator_MutatesAdditionalPropertiesToString(t *testing.T) {
 	tool := result.Tools[0]
 	props := tool.Parameters["properties"].(map[string]any)
 
-	// env should be converted to array of KV objects.
 	env, ok := props["env"].(map[string]any)
 	if !ok {
 		t.Fatal("env is not a map")
@@ -68,12 +67,10 @@ func TestSchemaTranslator_MutatesAdditionalPropertiesToString(t *testing.T) {
 		t.Error("env.items missing 'value' property")
 	}
 
-	// additionalProperties should be false.
 	if ap, ok := env["additionalProperties"]; !ok || ap != false {
 		t.Error("env.additionalProperties should be false")
 	}
 
-	// Mutation registry should record "env".
 	registry, ok := result.ToranaMeta[metaKeyMutations].(map[string][]string)
 	if !ok {
 		t.Fatal("no mutation registry in ToranaMeta")
@@ -82,9 +79,8 @@ func TestSchemaTranslator_MutatesAdditionalPropertiesToString(t *testing.T) {
 		t.Errorf("registry[bash] = %v, want [env]", registry["bash"])
 	}
 
-	// strict should be true.
-	if !tool.Strict {
-		t.Error("tool.Strict should be true")
+	if tool.Strict {
+		t.Error("tool.Strict should be false — we no longer enforce strict mode")
 	}
 }
 
@@ -114,7 +110,6 @@ func TestSchemaTranslator_AdditionalPropertiesTrue(t *testing.T) {
 	props := tool.Parameters["properties"].(map[string]any)
 	headers := props["headers"].(map[string]any)
 
-	// Value type should default to "string".
 	items := headers["items"].(map[string]any)
 	valueProp := items["properties"].(map[string]any)["value"].(map[string]any)
 	if valueProp["type"] != "string" {
@@ -145,29 +140,26 @@ func TestSchemaTranslator_InjectsIntentAtRoot(t *testing.T) {
 	tool := result.Tools[0]
 	props := tool.Parameters["properties"].(map[string]any)
 
-	// Intent property injected.
-	intent, ok := props["_torana_extraction_intent"].(map[string]any)
+	intent, ok := props[ToranaIntentField].(map[string]any)
 	if !ok {
-		t.Fatal("_torana_extraction_intent not injected")
+		t.Fatalf("%s not injected", ToranaIntentField)
 	}
 	if intent["type"] != "string" {
 		t.Errorf("intent type = %v, want string", intent["type"])
 	}
 
-	// Intent in required.
 	required := tool.Parameters["required"].([]any)
 	found := false
 	for _, r := range required {
-		if r == "_torana_extraction_intent" {
+		if r == ToranaIntentField {
 			found = true
 			break
 		}
 	}
 	if !found {
-		t.Error("_torana_extraction_intent not in required array")
+		t.Errorf("%s not in required array", ToranaIntentField)
 	}
 
-	// additionalProperties: false at root.
 	ap := tool.Parameters["additionalProperties"]
 	if ap != false {
 		t.Errorf("root additionalProperties = %v, want false", ap)
@@ -192,21 +184,18 @@ func TestSchemaTranslator_Idempotent(t *testing.T) {
 
 	req, _ := http.NewRequest("POST", "/", nil)
 
-	// First pass.
 	r1, _ := st.BeforeRequest(context.Background(), req, chat)
-	// Second pass on the same request.
 	r2, _ := st.BeforeRequest(context.Background(), req, r1)
 
-	// Should not double-inject.
 	props := r2.Tools[0].Parameters["properties"].(map[string]any)
-	if _, ok := props["_torana_extraction_intent"]; !ok {
-		t.Error("intent param missing after second pass")
+	if _, ok := props[ToranaIntentField]; !ok {
+		t.Errorf("%s missing after second pass", ToranaIntentField)
 	}
 
 	required := r2.Tools[0].Parameters["required"].([]any)
 	intentCount := 0
 	for _, r := range required {
-		if r == "_torana_extraction_intent" {
+		if r == ToranaIntentField {
 			intentCount++
 		}
 	}
@@ -214,7 +203,6 @@ func TestSchemaTranslator_Idempotent(t *testing.T) {
 		t.Errorf("intent appears %d times in required, want 1", intentCount)
 	}
 
-	// Mutation registry should only have one entry per path.
 	registry, _ := r2.ToranaMeta[metaKeyMutations].(map[string][]string)
 	muts := registry["bash"]
 	if len(muts) > 0 {
@@ -274,7 +262,6 @@ func TestSchemaTranslator_NestedObjects(t *testing.T) {
 		t.Errorf("mutations = %v, want [config.env_vars]", muts)
 	}
 
-	// Verify nested structure.
 	props := result.Tools[0].Parameters["properties"].(map[string]any)
 	config := props["config"].(map[string]any)
 	configProps := config["properties"].(map[string]any)
@@ -321,7 +308,6 @@ func TestSchemaTranslator_ArrayOfObjects(t *testing.T) {
 		t.Errorf("mutations = %v, want [steps[].env]", muts)
 	}
 
-	// Verify the array items were mutated.
 	props := result.Tools[0].Parameters["properties"].(map[string]any)
 	steps := props["steps"].(map[string]any)
 	items := steps["items"].(map[string]any)
@@ -352,16 +338,14 @@ func TestSchemaTranslator_NoAdditionalPropertiesPassthrough(t *testing.T) {
 	req, _ := http.NewRequest("POST", "/", nil)
 	result, _ := st.BeforeRequest(context.Background(), req, chat)
 
-	// No mutations recorded.
 	registry, _ := result.ToranaMeta[metaKeyMutations].(map[string][]string)
 	if len(registry) != 0 {
 		t.Errorf("unexpected mutations: %v", registry)
 	}
 
-	// Intent should still be injected.
 	props := result.Tools[0].Parameters["properties"].(map[string]any)
-	if _, ok := props["_torana_extraction_intent"]; !ok {
-		t.Error("intent not injected even without additionalProperties")
+	if _, ok := props[ToranaIntentField]; !ok {
+		t.Errorf("%s not injected even without additionalProperties", ToranaIntentField)
 	}
 }
 
@@ -370,7 +354,7 @@ func TestSchemaTranslator_NoAdditionalPropertiesPassthrough(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestReverseTranslate_ExtractsIntent(t *testing.T) {
-	argsJSON := `{"command": "ls", "_torana_extraction_intent": "find the error log"}`
+	argsJSON := `{"command": "ls", "i": "find the error log"}`
 	registry := map[string][]string{}
 	result, intent := ReverseTranslate("bash", argsJSON, registry)
 
@@ -380,9 +364,6 @@ func TestReverseTranslate_ExtractsIntent(t *testing.T) {
 
 	var parsed map[string]any
 	json.Unmarshal([]byte(result), &parsed)
-	if _, exists := parsed["_torana_extraction_intent"]; exists {
-		t.Error("_torana_extraction_intent not removed from result")
-	}
 	if parsed["command"] != "ls" {
 		t.Errorf("command = %v, want ls", parsed["command"])
 	}
@@ -391,7 +372,7 @@ func TestReverseTranslate_ExtractsIntent(t *testing.T) {
 func TestReverseTranslate_KVArrayToObject(t *testing.T) {
 	argsJSON := `{
 		"command": "./build.sh",
-		"_torana_extraction_intent": "run build",
+		"i": "run build",
 		"env": [
 			{"key": "NODE_ENV", "value": "staging"},
 			{"key": "DEBUG", "value": "true"}
@@ -430,7 +411,7 @@ func TestReverseTranslate_NestedKVArray(t *testing.T) {
 				{"key": "HOST", "value": "localhost"}
 			]
 		},
-		"_torana_extraction_intent": "deploy config"
+		"i": "deploy config"
 	}`
 
 	registry := map[string][]string{"deploy": {"config.env_vars"}}
@@ -454,7 +435,7 @@ func TestReverseTranslate_NestedKVArray(t *testing.T) {
 }
 
 func TestReverseTranslate_NoMutationsPassthrough(t *testing.T) {
-	argsJSON := `{"command": "ls", "_torana_extraction_intent": "list files"}`
+	argsJSON := `{"command": "ls", "i": "list files"}`
 	registry := map[string][]string{}
 	result, intent := ReverseTranslate("bash", argsJSON, registry)
 
@@ -464,18 +445,14 @@ func TestReverseTranslate_NoMutationsPassthrough(t *testing.T) {
 
 	var parsed map[string]any
 	json.Unmarshal([]byte(result), &parsed)
-	if _, exists := parsed["_torana_extraction_intent"]; exists {
-		t.Error("intent not removed")
-	}
 	if parsed["command"] != "ls" {
-		t.Errorf("command = %v", parsed["command"])
+		t.Errorf("command = %v, want ls", parsed["command"])
 	}
 }
 
 func TestReverseTranslate_UnknownToolPassthrough(t *testing.T) {
-	// Tool not in registry — should still extract intent but skip KV reversal.
 	argsJSON := `{
-		"_torana_extraction_intent": "test",
+		"i": "test",
 		"env": [{"key": "X", "value": "Y"}]
 	}`
 	registry := map[string][]string{"other_tool": {"env"}}
@@ -487,7 +464,6 @@ func TestReverseTranslate_UnknownToolPassthrough(t *testing.T) {
 
 	var parsed map[string]any
 	json.Unmarshal([]byte(result), &parsed)
-	// env should still be an array since bash is not in registry.
 	if _, ok := parsed["env"].([]any); !ok {
 		t.Error("env should remain an array when tool not in registry")
 	}
@@ -520,7 +496,6 @@ func TestReverseTranslate_InvalidJSON(t *testing.T) {
 func TestRoundTrip_MutateThenReverse(t *testing.T) {
 	st := NewSchemaTranslator()
 
-	// Simulate a harness request with open-ended env map.
 	chat := &engine.ChatRequest{
 		Tools: []engine.ToolDef{
 			{
@@ -543,10 +518,9 @@ func TestRoundTrip_MutateThenReverse(t *testing.T) {
 	req, _ := http.NewRequest("POST", "/", nil)
 	mutated, _ := st.BeforeRequest(context.Background(), req, chat)
 
-	// Simulate what the LLM returns (with KV array and intent).
 	llmResponse := `{
 		"command": "npm test",
-		"_torana_extraction_intent": "find the failing test",
+		"i": "find the failing test",
 		"env": [
 			{"key": "CI", "value": "true"},
 			{"key": "NODE_ENV", "value": "test"}
@@ -556,20 +530,15 @@ func TestRoundTrip_MutateThenReverse(t *testing.T) {
 	registry, _ := mutated.ToranaMeta[metaKeyMutations].(map[string][]string)
 	result, intent := ReverseTranslate("bash", llmResponse, registry)
 
-	// Verify intent was extracted.
 	if intent != "find the failing test" {
 		t.Errorf("intent = %q", intent)
 	}
 
-	// Verify the harness gets back the original object shape.
 	var parsed map[string]any
 	json.Unmarshal([]byte(result), &parsed)
 
 	if parsed["command"] != "npm test" {
 		t.Errorf("command = %v", parsed["command"])
-	}
-	if _, exists := parsed["_torana_extraction_intent"]; exists {
-		t.Error("intent leaked to harness")
 	}
 
 	env := parsed["env"].(map[string]any)

@@ -66,6 +66,24 @@ func New(cfg Config) (*Server, error) {
 	pipeline.AddRequestHook(translator)
 	pipeline.AddResponseHook(translator)
 
+	// Offload hook — compacts tool results using a cheaper model.
+	// Runs after schema translator so intent cache is populated.
+	offloadCfg := cfg.Providers.Offload
+	if offloadCfg.Enabled {
+		offloadProvider := offloadCfg.Provider
+		if offloadProvider == "" {
+			offloadProvider = "deepseek"
+		}
+		offloadURL := ""
+		if p, ok := cfg.Providers.Providers[offloadProvider]; ok {
+			offloadURL = p.URL
+		}
+		offloadHook := middleware.NewOffloadHook(&translator.IntentCache, offloadCfg, offloadURL)
+		pipeline.AddRequestHook(offloadHook)
+		log.Printf("Torana Edge → offload enabled: model=%s provider=%s url=%s",
+			offloadCfg.Model, offloadProvider, offloadURL)
+	}
+
 	// --- reverse proxy ---------------------------------------------------
 	// Context keys for stashing format and chat between Director and ModifyResponse.
 	type formatCtxKey struct{}
@@ -220,7 +238,7 @@ func New(cfg Config) (*Server, error) {
 		Addr:         ":" + cfg.Port,
 		Handler:      mux,
 		ReadTimeout:  30 * time.Second,
-		WriteTimeout: 0,  // disabled – SSE streams are long-lived
+		WriteTimeout: 0, // disabled – SSE streams are long-lived
 		IdleTimeout:  120 * time.Second,
 	}
 
