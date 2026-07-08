@@ -398,7 +398,9 @@ func ReverseTranslate(toolName string, argsJSON string, registry map[string][]st
 	// 2. Reverse KV-array mutations.
 	paths, ok := registry[toolName]
 	if !ok {
-		// No mutations to reverse — just marshal and return.
+		// Tool not in mutation registry — try heuristic KV reversal
+		// for any property that looks like a [{key,value}] array.
+		args = heuristicKVReversal(args)
 		b, _ := json.Marshal(args)
 		return string(b), intent
 	}
@@ -504,6 +506,29 @@ func reverseKVObject(obj map[string]any) map[string]any {
 		}
 	}
 	return obj
+}
+
+// heuristicKVReversal scans all top-level properties and reverses
+// any that look like KV arrays. Used as a fallback when a tool
+// is not in the mutation registry.
+func heuristicKVReversal(args map[string]any) map[string]any {
+	for k, v := range args {
+		switch val := v.(type) {
+		case map[string]any:
+			args[k] = heuristicKVReversal(val)
+		case []any:
+			if isKVArray(val) {
+				args[k] = reverseKVArray(val)
+			} else {
+				for i, item := range val {
+					if m, ok := item.(map[string]any); ok {
+						val[i] = heuristicKVReversal(m)
+					}
+				}
+			}
+		}
+	}
+	return args
 }
 
 // isKVArray heuristically checks if an array looks like a KV-pair array.
