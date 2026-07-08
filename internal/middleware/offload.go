@@ -26,6 +26,9 @@ import (
 type OffloadHook struct {
 	// IntentCache is the shared cache populated by SchemaTranslator.
 	IntentCache cache.IntentCache
+	// CompactionCache caches compacted summaries by tool_use_id to prevent
+	// redundant offload calls when harnesses resend unchanged tool results.
+	CompactionCache cache.IntentCache
 	// Config controls offload behaviour (model, provider, enabled).
 	Config provider.OffloadConfig
 	// ProviderURL is the base URL of the provider used for offload calls.
@@ -35,11 +38,12 @@ type OffloadHook struct {
 }
 
 // NewOffloadHook creates an OffloadHook.
-func NewOffloadHook(ic cache.IntentCache, cfg provider.OffloadConfig, providerURL string) *OffloadHook {
+func NewOffloadHook(ic cache.IntentCache, cc cache.IntentCache, cfg provider.OffloadConfig, providerURL string) *OffloadHook {
 	return &OffloadHook{
-		IntentCache:    ic,
-		Config:      cfg,
-		ProviderURL: providerURL,
+		IntentCache:     ic,
+		CompactionCache: cc,
+		Config:          cfg,
+		ProviderURL:     providerURL,
 		APIKeyExtractor: func(req *http.Request) string {
 			auth := req.Header.Get("Authorization")
 			return strings.TrimPrefix(auth, "Bearer ")
@@ -83,6 +87,23 @@ func (o *OffloadHook) BeforeRequest(ctx context.Context, req *http.Request, chat
 
 		originalLen := len(msg.Content)
 
+		// Check compaction cache — if we already compacted this result
+		// in a previous turn, reuse it (free, instant, $0 cost).
+		if o.CompactionCache != nil {
+			if cached, ok := o.CompactionCache.Get(msg.ToolCallID); ok && cached != "" {
+				if cached != msg.Content {
+					saved := originalLen - len(cached)
+					pct := float64(saved) / float64(originalLen) * 100
+					log.Printf("[offload] cache hit %s: %d → %d bytes (%.1f%% reduction, reused)",
+						msg.ToolCallID, originalLen, len(cached), pct)
+					msg.Content = cached
+					compacted++
+					bytesSaved += saved
+				}
+				continue
+			}
+		}
+
 		// Try deterministic compaction first (fast, free).
 		compacted_content := o.compactDeterministic(msg.Content, intent)
 
@@ -105,6 +126,11 @@ func (o *OffloadHook) BeforeRequest(ctx context.Context, req *http.Request, chat
 			msg.Content = compacted_content
 			compacted++
 			bytesSaved += saved
+
+			// Store in compaction cache for future turns.
+			if o.CompactionCache != nil {
+				o.CompactionCache.Store(msg.ToolCallID, compacted_content)
+			}
 		}
 	}
 
