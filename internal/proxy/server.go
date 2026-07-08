@@ -44,9 +44,10 @@ type Config struct {
 // pipeline that runs on every request/response cycle.
 type Server struct {
 	config     Config
-	proxy      *httputil.ReverseProxy
-	httpServer *http.Server
-	pipeline   *engine.Pipeline
+	proxy       *httputil.ReverseProxy
+	httpServer  *http.Server
+	pipeline    *engine.Pipeline
+	intentCache cache.IntentCache
 }
 
 // --- Construction -----------------------------------------------------------
@@ -248,10 +249,11 @@ func New(cfg Config) (*Server, error) {
 	}
 
 	return &Server{
-		config:     cfg,
-		proxy:      proxy,
-		httpServer: srv,
-		pipeline:   pipeline,
+		config:      cfg,
+		proxy:       proxy,
+		httpServer:  srv,
+		pipeline:    pipeline,
+		intentCache: intentCache,
 	}, nil
 }
 
@@ -274,7 +276,13 @@ func (s *Server) Serve(ln net.Listener) error {
 }
 
 func (s *Server) Shutdown(ctx context.Context) error {
-	return s.httpServer.Shutdown(ctx)
+	if s.intentCache != nil {
+		s.intentCache.Close()
+	}
+	if s.httpServer != nil {
+		return s.httpServer.Shutdown(ctx)
+	}
+	return nil
 }
 
 // joinURLPath concatenates a base path with a relative path, preserving
