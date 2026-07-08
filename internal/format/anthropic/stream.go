@@ -163,6 +163,8 @@ func (s *StreamAdapter) ParseStream(body io.Reader) <-chan engine.StreamEvent {
 func (s *StreamAdapter) SerializeStream(w io.Writer, events <-chan engine.StreamEvent) error {
 	var thinkingIndex int
 	var inThinking bool
+	var inText bool
+	var blockIndex int
 	emit := func(line string) error {
 		if _, err := fmt.Fprintln(w, line); err != nil {
 			return fmt.Errorf("anthropic serialize: %w", err)
@@ -177,8 +179,8 @@ func (s *StreamAdapter) SerializeStream(w io.Writer, events <-chan engine.Stream
 			return nil
 		}
 		inThinking = false
-		thinkingIndex++
-		return emit(fmt.Sprintf(`data: {"type":"content_block_stop","index":%d}`, thinkingIndex-1))
+		blockIndex++
+		return emit(fmt.Sprintf(`data: {"type":"content_block_stop","index":%d}`, blockIndex-1))
 	}
 
 	for ev := range events {
@@ -205,8 +207,18 @@ func (s *StreamAdapter) SerializeStream(w io.Writer, events <-chan engine.Stream
 			if err := closeThinking(); err != nil {
 				return err
 			}
+			if !inText {
+				inText = true
+				if err := emit(fmt.Sprintf(
+					`data: {"type":"content_block_start","index":%d,"content_block":{"type":"text","text":""}}`,
+					blockIndex,
+				)); err != nil {
+					return err
+				}
+			}
 			data := fmt.Sprintf(
-				`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":%s}}`,
+				`data: {"type":"content_block_delta","index":%d,"delta":{"type":"text_delta","text":%s}}`,
+				blockIndex,
 				jsonString(*ev.TextDelta),
 			)
 			if err := emit(data); err != nil {
@@ -217,9 +229,13 @@ func (s *StreamAdapter) SerializeStream(w io.Writer, events <-chan engine.Stream
 			if err := closeThinking(); err != nil {
 				return err
 			}
+			if inText {
+				inText = false
+				blockIndex++
+			}
 			data := fmt.Sprintf(
 				`data: {"type":"content_block_start","index":%d,"content_block":{"type":"tool_use","id":%s,"name":%s}}`,
-				ev.ToolCallStart.Index,
+				blockIndex,
 				jsonString(ev.ToolCallStart.ID),
 				jsonString(ev.ToolCallStart.Name),
 			)
