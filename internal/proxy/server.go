@@ -24,6 +24,7 @@ import (
 	"github.com/torana-edge/torana-edge/internal/cache"
 	"github.com/torana-edge/torana-edge/internal/engine"
 	"github.com/torana-edge/torana-edge/internal/format"
+	"github.com/torana-edge/torana-edge/internal/metrics"
 	"github.com/torana-edge/torana-edge/internal/middleware"
 	"github.com/torana-edge/torana-edge/internal/provider"
 )
@@ -50,6 +51,7 @@ type Server struct {
 	httpServer  *http.Server
 	pipeline    *engine.Pipeline
 	intentCache cache.IntentCache
+	stats       *metrics.StatsTracker
 }
 
 // --- Construction -----------------------------------------------------------
@@ -96,6 +98,7 @@ func New(cfg Config) (*Server, error) {
 		config:      cfg,
 		pipeline:    pipeline,
 		intentCache: intentCache,
+		stats:       &metrics.StatsTracker{},
 	}
 
 	// --- reverse proxy ---------------------------------------------------
@@ -250,6 +253,11 @@ func New(cfg Config) (*Server, error) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte(`{"status":"ok"}`))
+	})
+	mux.HandleFunc("/stats", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		b, _ := json.Marshal(s.stats)
+		w.Write(b)
 	})
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		currentCfg := s.GetConfig()
