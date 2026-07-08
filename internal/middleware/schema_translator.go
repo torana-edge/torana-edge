@@ -127,7 +127,6 @@ func (st *SchemaTranslator) AfterResponse(ctx context.Context, resp *http.Respon
 
 			case ev.ToolCallEnd != nil && current != nil:
 				assembled := strings.Join(current.fragments, "")
-		log.Printf("[audit] %s ARGS: %s", current.name, assembled[:min(len(assembled), 400)])
 
 
 				// Extract intent + reverse mutations.
@@ -341,7 +340,7 @@ func injectIntentParam(tool *engine.ToolDef) {
 	// Inject or update the "i" field with our enhanced description.
 	props[ToranaIntentField] = map[string]any{
 		"type":        "string",
-		"description": "describe your goal for this tool call",
+		"description": "what you intend to accomplish: the question you are answering or the information you need",
 	}
 
 	// Add to required array.
