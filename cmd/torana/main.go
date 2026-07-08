@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"syscall"
 	"time"
 
 	"github.com/torana-edge/torana-edge/internal/provider"
@@ -55,11 +56,16 @@ func main() {
 		log.Fatalf("Failed to create proxy server: %v", err)
 	}
 
-	// Graceful shutdown on Ctrl+C / SIGTERM.
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	// Graceful shutdown on Ctrl+C / SIGTERM (Docker/K8s).
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("panic in shutdown goroutine: %v", r)
+			}
+		}()
 		<-ctx.Done()
 		log.Println("Shutting down...")
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
