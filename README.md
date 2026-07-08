@@ -1,8 +1,8 @@
 # Torana Edge
 
-Torana Edge is an **extensible, high-performance LLM reverse proxy and routing engine**. It sits transparently between AI coding harnesses (running locally for personal users, or deployed on-premise as an enterprise gateway) and cloud LLM providers. 
+Torana Edge is an **extensible, high-performance LLM reverse proxy and routing engine** built specifically for AI coding assistants. It sits transparently between your local agent (e.g., OpenCode, Claude Code) and cloud LLM providers, acting as a **Smart FinOps Filter**.
 
-By parsing traffic into a unified Internal Representation (IR), Torana allows you to build and attach **plugins** that work universally across OpenAI, Anthropic, Bedrock, and Vertex. The core engine simply routes and runs the middleware pipeline—everything else (FinOps compression, OpenTelemetry, API Key routing, intent caching) is a plugin, allowing you to "build your own Torana."
+By parsing traffic into a unified Internal Representation (IR), Torana intercepts massive tool outputs (like 50,000-line log files or minified JS dumps), safely summarizes them using a dirt-cheap model (e.g., DeepSeek-Flash), and forwards only the relevant chunks to the expensive upstream model (e.g., GPT-4o, Claude 3.5 Sonnet).
 
 ```
 [harness] ←→ [Torana Edge :8080] ←→ [LLM Providers]
@@ -12,9 +12,16 @@ By parsing traffic into a unified Internal Representation (IR), Torana allows yo
              /provider/vertex/...     → GCP Vertex AI
 ```
 
+## Key Features (v0.1.0)
+
+- **Model Delegation (The Compactor):** Stop paying premium GPT-4/Claude prices to read massive walls of log text. Torana automatically intercepts heavy tool outputs and summarizes them via a cheaper model before they leave your network.
+- **Contextual Intent Inference:** The proxy natively traces the user's conversational history to infer *exactly* what the agent is looking for, ensuring the cheap model summarizes precisely what is needed.
+- **Zero-Cost Compaction Caching:** Because LLM APIs are stateless, local agents often re-send the exact same massive tool output on every subsequent turn. Torana caches its summaries by `ToolCallID`, turning these expensive repeated payloads into $0, 0-millisecond cache hits.
+- **Unified IR Plugin Ecosystem:** Write plugins that work universally across OpenAI, Anthropic, Bedrock, and Vertex without dealing with provider-specific wire formats.
+
 ## Quick Start
 
-1. (Optional) Create `config.json` to override defaults:
+1. (Optional) Create `config.json` to override defaults (and configure the offload model):
    ```json
    {
      "port": 8080,
@@ -23,6 +30,11 @@ By parsing traffic into a unified Internal Representation (IR), Torana allows yo
          "url": "https://api.example.com",
          "format": "openai"
        }
+     },
+     "offload": {
+       "enabled": true,
+       "provider": "deepseek",
+       "model": "deepseek-v4-flash"
      }
    }
    ```
@@ -47,7 +59,7 @@ By parsing traffic into a unified Internal Representation (IR), Torana allows yo
 
 1. **Path-based routing** — Requests arrive at `/provider/<name>/<upstream-path>`. Torana strips the provider prefix, looks up the upstream URL and format, and forwards.
 2. **Canonical IR** — Format adapters translate each provider's wire format into a shared set of Go types (`ChatRequest`, `Message`, `ToolDef`, `StreamEvent`). Plugins import `internal/engine` and work on IR, never on raw JSON.
-3. **Pipeline** — Registered `RequestHook` and `ResponseHook` plugins intercept every request/response. On error, the pipeline continues with the current state — a broken plugin doesn't break the proxy.
+3. **Pipeline Plugins** — Registered `RequestHook` and `ResponseHook` plugins intercept every request/response. The core `OffloadHook` and `SchemaTranslator` operate here to perform intent extraction, few-shot injection, and cost-saving compaction.
 4. **Pass-through** — Requests without a `/provider/` prefix (and no `DefaultProvider` configured) return 502. Unknown provider names also return 502. No silent forwarding to the wrong upstream.
 
 ## Supported Formats
@@ -65,23 +77,15 @@ By parsing traffic into a unified Internal Representation (IR), Torana allows yo
 torana-edge/
 ├── cmd/torana/main.go             # Entry point, config loading
 ├── config.json                    # User-facing provider config
-├── config.example.json
 ├── internal/
 │   ├── engine/
 │   │   ├── types.go               # Canonical IR: ChatRequest, StreamEvent, etc.
 │   │   └── pipeline.go            # RequestHook / ResponseHook chain
-│   ├── format/
-│   │   ├── format.go              # RequestAdapter / StreamAdapter interfaces
-│   │   ├── registry.go            # Format registration + Lookup
-│   │   ├── openai/                # OpenAI ↔ IR (Chat Completions + Responses)
-│   │   ├── anthropic/             # Anthropic Messages ↔ IR
-│   │   ├── bedrock/               # Bedrock Converse ↔ IR
-│   │   └── vertex/                # Vertex AI / Gemini ↔ IR
+│   ├── format/                    # Format translation adapters (OpenAI, Anthropic, etc.)
 │   ├── middleware/
-│   │   └── adapter.go             # Request logging hook
-│   ├── provider/
-│   │   ├── config.go              # Config types, DefaultConfig, Load/merge
-│   │   └── resolver.go            # /provider/<name>/ path resolution
+│   │   ├── offload.go             # Compactor, Intent Cache, Model Delegation
+│   │   └── schema_translator.go   # Intent Extraction, Few-Shot Injection
+│   ├── provider/                  # Config parsing, URI resolution
 │   └── proxy/
 │       └── server.go              # Reverse proxy with format dispatch
 └── test/
@@ -94,25 +98,6 @@ torana-edge/
 | `TORANA_CONFIG` | `config.json` | Path to config file |
 | `TORANA_PORT` | `8080` | Listen port (overrides config file) |
 | `TORANA_DEFAULT_PROVIDER` | (none) | Provider name for non-prefixed paths |
-| `OPENAI_BASE_URL` | — | Set in your harness to `http://localhost:8080/provider/<name>/v1` |
-| `ANTHROPIC_BASE_URL` | — | Set in your harness to `http://localhost:8080/provider/<name>` |
-
-## Adding a Provider
-
-Add to `config.json`:
-
-```json
-{
-  "providers": {
-    "my-llm": {
-      "url": "https://my-llm.example.com",
-      "format": "openai"
-    }
-  }
-}
-```
-
-Then use `OPENAI_BASE_URL=http://localhost:8080/provider/my-llm/v1`. No code changes needed.
 
 ## License
 
