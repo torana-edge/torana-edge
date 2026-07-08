@@ -277,6 +277,14 @@ func New(cfg Config) (*Server, error) {
 		IdleTimeout:  120 * time.Second,
 	}
 
+	// Wire failover transport so the proxy retries across fallback providers.
+	proxy.Transport = &failoverRoundTripper{
+		base: http.DefaultTransport,
+		cfg: func() provider.Config {
+			return s.GetConfig().Providers
+		},
+	}
+
 	s.proxy = proxy
 	s.httpServer = srv
 	return s, nil
