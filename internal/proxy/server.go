@@ -18,6 +18,7 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/torana-edge/torana-edge/internal/engine"
@@ -42,6 +43,7 @@ type Config struct {
 // Server wraps the HTTP listener, the reverse proxy, and the middleware
 // pipeline that runs on every request/response cycle.
 type Server struct {
+	configMu   sync.RWMutex
 	config     Config
 	proxy      *httputil.ReverseProxy
 	httpServer *http.Server
@@ -84,6 +86,11 @@ func New(cfg Config) (*Server, error) {
 			offloadCfg.Model, offloadProvider, offloadURL)
 	}
 
+	s := &Server{
+		config:   cfg,
+		pipeline: pipeline,
+	}
+
 	// --- reverse proxy ---------------------------------------------------
 	// Context keys for stashing format and chat between Director and ModifyResponse.
 	type formatCtxKey struct{}
@@ -97,13 +104,14 @@ func New(cfg Config) (*Server, error) {
 				req.Body.Close()
 			}
 
-			prov, provName, strippedPath := provider.Resolve(req.URL.Path, cfg.Providers)
+			currentCfg := s.GetConfig()
+			prov, provName, strippedPath := provider.Resolve(req.URL.Path, currentCfg.Providers)
 
 			// Try default provider fallback for non-prefixed paths.
-			if prov == nil && cfg.DefaultProvider != "" {
-				if dp, ok := cfg.Providers.Providers[cfg.DefaultProvider]; ok {
+			if prov == nil && currentCfg.DefaultProvider != "" {
+				if dp, ok := currentCfg.Providers.Providers[currentCfg.DefaultProvider]; ok {
 					prov = &dp
-					provName = cfg.DefaultProvider
+					provName = currentCfg.DefaultProvider
 					strippedPath = req.URL.Path
 				}
 			}
@@ -225,9 +233,10 @@ func New(cfg Config) (*Server, error) {
 	// --- HTTP server -----------------------------------------------------
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		currentCfg := s.GetConfig()
 		// If no provider matches and no default, reject.
-		prov, _, _ := provider.Resolve(r.URL.Path, cfg.Providers)
-		if prov == nil && cfg.DefaultProvider == "" {
+		prov, _, _ := provider.Resolve(r.URL.Path, currentCfg.Providers)
+		if prov == nil && currentCfg.DefaultProvider == "" {
 			http.Error(w, "no provider configured for this path", http.StatusBadGateway)
 			return
 		}
@@ -242,24 +251,30 @@ func New(cfg Config) (*Server, error) {
 		IdleTimeout:  120 * time.Second,
 	}
 
-	return &Server{
-		config:     cfg,
-		proxy:      proxy,
-		httpServer: srv,
-		pipeline:   pipeline,
-	}, nil
+	s.proxy = proxy
+	s.httpServer = srv
+	return s, nil
 }
 
 // --- Lifecycle --------------------------------------------------------------
 
+func (s *Server) GetConfig() Config {
+	s.configMu.RLock()
+	defer s.configMu.RUnlock()
+	return s.config
+}
+
 // SetProviders hot-reloads the provider configuration without restarting.
 func (s *Server) SetProviders(cfg provider.Config) {
+	s.configMu.Lock()
 	s.config.Providers = cfg
+	s.configMu.Unlock()
 	log.Printf("config hot-reload: %d providers loaded", len(cfg.Providers))
 }
 
 func (s *Server) ListenAndServe() error {
-	log.Printf("Torana Edge → :%s  providers: %d", s.config.Port, len(s.config.Providers.Providers))
+	cfg := s.GetConfig()
+	log.Printf("Torana Edge → :%s  providers: %d", cfg.Port, len(cfg.Providers.Providers))
 	if err := s.httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		return fmt.Errorf("proxy: listen error: %w", err)
 	}
@@ -267,7 +282,8 @@ func (s *Server) ListenAndServe() error {
 }
 
 func (s *Server) Serve(ln net.Listener) error {
-	log.Printf("Torana Edge → %s  providers: %d", ln.Addr(), len(s.config.Providers.Providers))
+	cfg := s.GetConfig()
+	log.Printf("Torana Edge → %s  providers: %d", ln.Addr(), len(cfg.Providers.Providers))
 	if err := s.httpServer.Serve(ln); err != nil && err != http.ErrServerClosed {
 		return fmt.Errorf("proxy: serve error: %w", err)
 	}
