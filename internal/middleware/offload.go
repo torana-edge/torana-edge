@@ -88,7 +88,8 @@ func (o *OffloadHook) BeforeRequest(ctx context.Context, req *http.Request, chat
 
 		// If deterministic didn't help enough, try model delegation.
 		if len(compacted_content) > len(msg.Content)/2 && originalLen > 2000 {
-			modelResult, err := o.compactWithModel(ctx, req, msg.Content, intent)
+			context := extractConversationContext(chat, i, 5)
+			modelResult, err := o.compactWithModel(ctx, req, msg.Content, intent, context)
 			if err != nil {
 				log.Printf("[offload] model compaction failed for %s: %v — using deterministic", msg.ToolCallID, err)
 			} else if modelResult != "" {
@@ -112,6 +113,57 @@ func (o *OffloadHook) BeforeRequest(ctx context.Context, req *http.Request, chat
 	}
 
 	return chat, nil
+}
+
+// extractConversationContext walks backward from msgIndex and collects
+// the last N user/assistant messages with meaningful text content.
+// Tool results are skipped or truncated to avoid context bloat.
+func extractConversationContext(chat *engine.ChatRequest, msgIndex, maxMessages int) string {
+	var parts []string
+	collected := 0
+
+	for i := msgIndex - 1; i >= 0 && collected < maxMessages; i-- {
+		msg := chat.Messages[i]
+		content := ""
+
+		switch msg.Role {
+		case engine.RoleUser:
+			if msg.Content != "" {
+				content = msg.Content
+			}
+		case engine.RoleAssistant:
+			// Use text content if available, otherwise skip tool-call-only messages.
+			if msg.Content != "" {
+				content = msg.Content
+			} else if len(msg.ContentParts) > 0 {
+				// Flatten content parts into brief text.
+				var parts []string
+				for _, p := range msg.ContentParts {
+					parts = append(parts, fmt.Sprintf("%v", p))
+				}
+				content = strings.Join(parts, " ")
+			}
+		case engine.RoleTool:
+			// Skip tool results — they're too large for context.
+			continue
+		default:
+			continue
+		}
+
+		if content != "" {
+			// Truncate long content to 500 chars to avoid context bloat.
+			if len(content) > 500 {
+				content = content[:500] + "..."
+			}
+			parts = append([]string{string(msg.Role) + ": " + content}, parts...)
+			collected++
+		}
+	}
+
+	if len(parts) == 0 {
+		return ""
+	}
+	return "Conversation history leading to this tool call:\n" + strings.Join(parts, "\n")
 }
 
 // ==========================================================================
@@ -241,7 +293,9 @@ func truncateHeadTail(content string, n int) string {
 // ==========================================================================
 
 // compactWithModel sends the tool result to a cheap model for summarization.
-func (o *OffloadHook) compactWithModel(ctx context.Context, req *http.Request, content, intent string) (string, error) {
+// conversationContext provides the last N user/assistant messages so the
+// cheap model can infer the user's real goal even when the intent is terse.
+func (o *OffloadHook) compactWithModel(ctx context.Context, req *http.Request, content, intent, conversationContext string) (string, error) {
 	apiKey := o.APIKeyExtractor(req)
 	if apiKey == "" {
 		return "", fmt.Errorf("no API key found in request")
@@ -252,9 +306,15 @@ func (o *OffloadHook) compactWithModel(ctx context.Context, req *http.Request, c
 		model = "deepseek-v4-flash"
 	}
 
-	// Build a compact prompt for the cheap model.
-	systemPrompt := "You are a tool output summarizer. Given an extraction intent and a large tool result, return ONLY the relevant parts. Be concise. Do not add commentary."
-	userPrompt := fmt.Sprintf("Intent: %s\n\nTool output:\n%s\n\nExtract only the parts relevant to the intent. Return the filtered/summarized output.", intent, truncateForPrompt(content, 16000))
+	// Build a compact prompt for the cheap model, including conversation
+	// context so it can infer the user's goal even from terse intents.
+	systemPrompt := "You are a tool output summarizer. Given a tool output and an extraction intent, return ONLY the relevant parts. If conversation context is provided, use it to understand what the user was actually trying to accomplish. Be concise. Do not add commentary."
+
+	userPrompt := fmt.Sprintf("Intent: %s\n\nTool output:\n%s", intent, truncateForPrompt(content, 14000))
+	if conversationContext != "" {
+		userPrompt = conversationContext + "\n\n" + userPrompt
+	}
+	userPrompt += "\n\nExtract only the parts relevant to the intent and conversation context. Return the filtered/summarized output."
 
 	payload := map[string]any{
 		"model": model,
