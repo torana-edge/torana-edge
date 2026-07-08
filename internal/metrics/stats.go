@@ -7,7 +7,7 @@ import (
 	"sync/atomic"
 )
 
-// StatsTracker records bytes and tokens saved by the offload compactor.
+// StatsTracker records bytes saved by the compactor.
 type StatsTracker struct {
 	TotalRequests   int64 `json:"total_requests"`
 	TotalBytesIn    int64 `json:"total_bytes_in"`
@@ -17,6 +17,10 @@ type StatsTracker struct {
 	OffloadFailures int64 `json:"offload_failures"`
 }
 
+// NewStatsTracker creates a zeroed StatsTracker.
+func NewStatsTracker() *StatsTracker { return &StatsTracker{} }
+
+// RecordCompaction records a single compaction's savings.
 func (s *StatsTracker) RecordCompaction(bytesIn, bytesOut int64) {
 	atomic.AddInt64(&s.TotalRequests, 1)
 	atomic.AddInt64(&s.TotalBytesIn, bytesIn)
@@ -25,10 +29,12 @@ func (s *StatsTracker) RecordCompaction(bytesIn, bytesOut int64) {
 	atomic.AddInt64(&s.Compactions, 1)
 }
 
+// RecordOffloadFailure records a failed offload attempt.
 func (s *StatsTracker) RecordOffloadFailure() {
 	atomic.AddInt64(&s.OffloadFailures, 1)
 }
 
+// Snapshot returns a copy of the current state.
 func (s *StatsTracker) Snapshot() StatsTracker {
 	return StatsTracker{
 		TotalRequests:   atomic.LoadInt64(&s.TotalRequests),
@@ -40,6 +46,7 @@ func (s *StatsTracker) Snapshot() StatsTracker {
 	}
 }
 
+// MarshalJSON implements json.Marshaler.
 func (s *StatsTracker) MarshalJSON() ([]byte, error) {
 	return json.Marshal(s.Snapshot())
 }
