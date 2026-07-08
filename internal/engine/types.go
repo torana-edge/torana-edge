@@ -99,3 +99,9 @@ type StreamError struct {
 	Code    int
 	Message string
 }
+
+// StreamUsage represents token usage data from a streaming response.
+type StreamUsage struct {
+	InputTokens  int
+	OutputTokens int
+}
