@@ -262,3 +262,35 @@ data: [DONE]
 }
 
 func strPtr(s string) *string { return &s }
+
+func TestProviderExtensions_RoundTrip(t *testing.T) {
+	adapter := &Adapter{}
+
+	// Known fields (temperature, max_tokens) are handled by the adapter.
+	// ProviderExtensions preserve UNKNOWN fields like x-custom-* or response_format.
+	input := `{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}],"temperature":0.7,"x-custom-metadata":"test-value","stream":true}`
+
+	chat, err := adapter.Unmarshal([]byte(input))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(chat.ProviderExtensions) == 0 {
+		t.Fatal("expected ProviderExtensions to be populated for unknown field x-custom-metadata")
+	}
+
+	out, err := adapter.Marshal(chat)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var parsed map[string]any
+	if err := json.Unmarshal(out, &parsed); err != nil {
+		t.Fatal(err)
+	}
+	if v, _ := parsed["x-custom-metadata"].(string); v != "test-value" {
+		t.Errorf("x-custom-metadata = %v", v)
+	}
+	if v, _ := parsed["temperature"].(float64); v != 0.7 {
+		t.Errorf("temperature = %v", v)
+	}
+}
