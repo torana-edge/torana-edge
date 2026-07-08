@@ -7,8 +7,8 @@ import (
 	"log"
 	"net/http"
 	"strings"
-	"sync"
 
+	"github.com/torana-edge/torana-edge/internal/cache"
 	"github.com/torana-edge/torana-edge/internal/engine"
 )
 
@@ -19,14 +19,12 @@ import (
 //
 // It implements both RequestHook and ResponseHook.
 type SchemaTranslator struct {
-	// IntentCache stores extracted intents keyed by tool_use_id.
-	// Populated during response processing, read by Phase 4 compaction.
-	IntentCache sync.Map
+	IntentCache cache.IntentCache
 }
 
-// NewSchemaTranslator creates a new SchemaTranslator.
-func NewSchemaTranslator() *SchemaTranslator {
-	return &SchemaTranslator{}
+// NewSchemaTranslator creates a SchemaTranslator with the given intent cache.
+func NewSchemaTranslator(ic cache.IntentCache) *SchemaTranslator {
+	return &SchemaTranslator{IntentCache: ic}
 }
 
 func (st *SchemaTranslator) Name() string { return "schema-translator" }
@@ -129,6 +127,7 @@ func (st *SchemaTranslator) AfterResponse(ctx context.Context, resp *http.Respon
 
 			case ev.ToolCallEnd != nil && current != nil:
 				assembled := strings.Join(current.fragments, "")
+		log.Printf("[audit] %s ARGS: %s", current.name, assembled[:min(len(assembled), 400)])
 
 
 				// Extract intent + reverse mutations.
@@ -304,11 +303,11 @@ func convertToKVArray(schema map[string]any, valueType string) {
 		"properties": map[string]any{
 			"key": map[string]any{
 				"type":        "string",
-				"description": "The key name",
+				"description": "describe your goal for this tool call",
 			},
 			"value": map[string]any{
 				"type":        valueType,
-				"description": "The value for this key",
+				"description": "describe your goal for this tool call",
 			},
 		},
 		"additionalProperties": false,
@@ -342,7 +341,7 @@ func injectIntentParam(tool *engine.ToolDef) {
 	// Inject or update the "i" field with our enhanced description.
 	props[ToranaIntentField] = map[string]any{
 		"type":        "string",
-		"description": "describe the specific information you expect to find in this tool's output",
+		"description": "describe your goal for this tool call",
 	}
 
 	// Add to required array.

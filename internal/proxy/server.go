@@ -20,6 +20,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/torana-edge/torana-edge/internal/cache"
 	"github.com/torana-edge/torana-edge/internal/engine"
 	"github.com/torana-edge/torana-edge/internal/format"
 	"github.com/torana-edge/torana-edge/internal/middleware"
@@ -43,9 +44,10 @@ type Config struct {
 // pipeline that runs on every request/response cycle.
 type Server struct {
 	config     Config
-	proxy      *httputil.ReverseProxy
-	httpServer *http.Server
-	pipeline   *engine.Pipeline
+	proxy       *httputil.ReverseProxy
+	httpServer  *http.Server
+	pipeline    *engine.Pipeline
+	intentCache cache.IntentCache
 }
 
 // --- Construction -----------------------------------------------------------
@@ -62,7 +64,11 @@ func New(cfg Config) (*Server, error) {
 	// --- middleware pipeline ----------------------------------------------
 	pipeline := engine.New()
 	pipeline.AddRequestHook(middleware.NewAdapter())
-	translator := middleware.NewSchemaTranslator()
+
+	// Create shared intent cache (configurable TTL, future Redis-compatible).
+	intentCache := cache.NewLocalCache(30 * time.Minute)
+
+	translator := middleware.NewSchemaTranslator(intentCache)
 	pipeline.AddRequestHook(translator)
 	pipeline.AddResponseHook(translator)
 
@@ -78,7 +84,7 @@ func New(cfg Config) (*Server, error) {
 		if p, ok := cfg.Providers.Providers[offloadProvider]; ok {
 			offloadURL = p.URL
 		}
-		offloadHook := middleware.NewOffloadHook(&translator.IntentCache, offloadCfg, offloadURL)
+		offloadHook := middleware.NewOffloadHook(translator.IntentCache, offloadCfg, offloadURL)
 		pipeline.AddRequestHook(offloadHook)
 		log.Printf("Torana Edge → offload enabled: model=%s provider=%s url=%s",
 			offloadCfg.Model, offloadProvider, offloadURL)
@@ -250,10 +256,11 @@ func New(cfg Config) (*Server, error) {
 	}
 
 	return &Server{
-		config:     cfg,
-		proxy:      proxy,
-		httpServer: srv,
-		pipeline:   pipeline,
+		config:      cfg,
+		proxy:       proxy,
+		httpServer:  srv,
+		pipeline:    pipeline,
+		intentCache: intentCache,
 	}, nil
 }
 
@@ -276,7 +283,13 @@ func (s *Server) Serve(ln net.Listener) error {
 }
 
 func (s *Server) Shutdown(ctx context.Context) error {
-	return s.httpServer.Shutdown(ctx)
+	if s.intentCache != nil {
+		s.intentCache.Close()
+	}
+	if s.httpServer != nil {
+		return s.httpServer.Shutdown(ctx)
+	}
+	return nil
 }
 
 // joinURLPath concatenates a base path with a relative path, preserving
