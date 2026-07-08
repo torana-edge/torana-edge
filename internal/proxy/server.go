@@ -71,13 +71,14 @@ func New(cfg Config) (*Server, error) {
 
 	// Create shared intent cache (configurable TTL, future Redis-compatible).
 	intentCache := cache.NewLocalCache(30 * time.Minute)
+	statsTracker := metrics.NewStatsTracker()
 
 	translator := middleware.NewSchemaTranslator(intentCache)
 	pipeline.AddRequestHook(translator)
 	pipeline.AddResponseHook(translator)
 
 	// Offload hook — compacts tool results using a cheaper model.
-	// Runs after schema translator so intent cache is populated.
+	var offloadHook *middleware.OffloadHook
 	offloadCfg := cfg.Providers.Offload
 	if offloadCfg.Enabled {
 		offloadProvider := offloadCfg.Provider
@@ -88,7 +89,8 @@ func New(cfg Config) (*Server, error) {
 		if p, ok := cfg.Providers.Providers[offloadProvider]; ok {
 			offloadURL = p.URL
 		}
-		offloadHook := middleware.NewOffloadHook(translator.IntentCache, offloadCfg, offloadURL)
+		offloadHook = middleware.NewOffloadHook(translator.IntentCache, offloadCfg, offloadURL)
+		offloadHook.Stats = statsTracker
 		pipeline.AddRequestHook(offloadHook)
 		log.Printf("Torana Edge → offload enabled: model=%s provider=%s url=%s",
 			offloadCfg.Model, offloadProvider, offloadURL)
@@ -98,7 +100,7 @@ func New(cfg Config) (*Server, error) {
 		config:      cfg,
 		pipeline:    pipeline,
 		intentCache: intentCache,
-		stats:       &metrics.StatsTracker{},
+		stats:       statsTracker,
 	}
 
 	// --- reverse proxy ---------------------------------------------------
