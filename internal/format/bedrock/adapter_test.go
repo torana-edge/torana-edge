@@ -199,10 +199,9 @@ func TestStreamParse(t *testing.T) {
 	}
 
 	// Expected: TextDelta("Hello"), TextDelta(" world"),
-	//   ToolCallEnd (from contentBlockStop of text block),
 	//   ToolCallStart, ToolCallDelta, ToolCallEnd, FinishReason("tool_calls")
-	if len(events) != 7 {
-		t.Fatalf("expected 7 events, got %d: %+v", len(events), events)
+	if len(events) != 6 {
+		t.Fatalf("expected 6 events, got %d: %+v", len(events), events)
 	}
 
 	// Text deltas
@@ -213,36 +212,31 @@ func TestStreamParse(t *testing.T) {
 		t.Errorf("event 1: expected TextDelta ' world', got %+v", events[1])
 	}
 
-	// ToolCallEnd from text content block stop (index 0)
-	if events[2].ToolCallEnd == nil {
-		t.Errorf("event 2: expected ToolCallEnd (from text block stop), got %+v", events[2])
-	}
-
 	// ToolCallStart (index 0 for bedrock, since only one tool call per turn)
-	if events[3].ToolCallStart == nil {
-		t.Fatalf("event 3: expected ToolCallStart, got %+v", events[3])
+	if events[2].ToolCallStart == nil {
+		t.Fatalf("event 2: expected ToolCallStart, got %+v", events[2])
 	}
-	tcs := events[3].ToolCallStart
+	tcs := events[2].ToolCallStart
 	if tcs.Index != 0 || tcs.ID != "toolu_1" || tcs.Name != "get_weather" {
 		t.Errorf("ToolCallStart: got {idx:%d id:%s name:%s}", tcs.Index, tcs.ID, tcs.Name)
 	}
 
 	// ToolCallDelta
-	if events[4].ToolCallDelta == nil {
-		t.Fatalf("event 4: expected ToolCallDelta, got %+v", events[4])
+	if events[3].ToolCallDelta == nil {
+		t.Fatalf("event 3: expected ToolCallDelta, got %+v", events[3])
 	}
-	if events[4].ToolCallDelta.ArgumentsDelta != `{"city":"SF"}` {
-		t.Errorf("ToolCallDelta: got %q", events[4].ToolCallDelta.ArgumentsDelta)
+	if events[3].ToolCallDelta.ArgumentsDelta != `{"city":"SF"}` {
+		t.Errorf("ToolCallDelta: got %q", events[3].ToolCallDelta.ArgumentsDelta)
 	}
 
 	// ToolCallEnd from tool block stop
-	if events[5].ToolCallEnd == nil {
-		t.Errorf("event 5: expected ToolCallEnd, got %+v", events[5])
+	if events[4].ToolCallEnd == nil {
+		t.Errorf("event 4: expected ToolCallEnd, got %+v", events[4])
 	}
 
 	// FinishReason — tool_use maps to "tool_calls"
-	if events[6].FinishReason != "tool_calls" {
-		t.Errorf("event 6: expected FinishReason 'tool_calls', got %q", events[6].FinishReason)
+	if events[5].FinishReason != "tool_calls" {
+		t.Errorf("event 5: expected FinishReason 'tool_calls', got %q", events[5].FinishReason)
 	}
 }
 

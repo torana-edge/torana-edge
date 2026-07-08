@@ -88,6 +88,7 @@ func (s *Stream) ParseStream(body io.Reader) <-chan engine.StreamEvent {
 		scanner.Buffer(make([]byte, 0, 64*1024), 2*1024*1024)
 
 		var inThinking bool
+		var inToolUse bool
 		var signatureBuf string
 
 		for scanner.Scan() {
@@ -104,7 +105,7 @@ func (s *Stream) ParseStream(body io.Reader) <-chan engine.StreamEvent {
 				continue
 			}
 
-			evt := parseBedrockEvent(line, &inThinking, &signatureBuf)
+			evt := parseBedrockEvent(line, &inThinking, &inToolUse, &signatureBuf)
 			if evt != nil {
 				ch <- *evt
 			}
@@ -124,7 +125,7 @@ func (s *Stream) ParseStream(body io.Reader) <-chan engine.StreamEvent {
 }
 // parseBedrockEvent parses a single Bedrock JSON event line into a StreamEvent.
 // Returns nil for events that should be silently ignored (e.g. messageStart).
-func parseBedrockEvent(line string, inThinking *bool, signatureBuf *string) *engine.StreamEvent {
+func parseBedrockEvent(line string, inThinking *bool, inToolUse *bool, signatureBuf *string) *engine.StreamEvent {
 	var se bedrockStreamEvent
 	if err := json.Unmarshal([]byte(line), &se); err != nil {
 		return &engine.StreamEvent{
@@ -152,6 +153,7 @@ func parseBedrockEvent(line string, inThinking *bool, signatureBuf *string) *eng
 		// thinking block start is informational; no event emitted.
 
 	case se.ContentBlockStart != nil && se.ContentBlockStart.Start.ToolUse != nil:
+		*inToolUse = true
 		tu := se.ContentBlockStart.Start.ToolUse
 		return &engine.StreamEvent{
 			ToolCallStart: &engine.ToolCallStart{
@@ -187,9 +189,14 @@ func parseBedrockEvent(line string, inThinking *bool, signatureBuf *string) *eng
 			*inThinking = false
 			return nil // thinking block stop; no event to emit
 		}
-		return &engine.StreamEvent{
-			ToolCallEnd: &engine.ToolCallEnd{Index: 0},
+		if *inToolUse {
+			*inToolUse = false
+			return &engine.StreamEvent{
+				ToolCallEnd: &engine.ToolCallEnd{Index: 0},
+			}
 		}
+		// Text block stop — no event to emit.
+		return nil
 
 	case se.MessageStop != nil:
 		reason := mapBedrockStopReason(se.MessageStop.StopReason)
