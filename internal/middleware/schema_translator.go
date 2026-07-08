@@ -514,16 +514,17 @@ func reverseKVObject(obj map[string]any) map[string]any {
 // is not in the mutation registry.
 func heuristicKVReversal(args map[string]any) map[string]any {
 	for k, v := range args {
-		if arr, ok := v.([]any); ok && isKVArray(arr) {
-			args[k] = reverseKVArray(arr)
-		}
-		if nested, ok := v.(map[string]any); ok {
-			args[k] = heuristicKVReversal(nested)
-		}
-		if arr, ok := v.([]any); ok {
-			for i, item := range arr {
-				if m, ok := item.(map[string]any); ok {
-					arr[i] = heuristicKVReversal(m)
+		switch val := v.(type) {
+		case map[string]any:
+			args[k] = heuristicKVReversal(val)
+		case []any:
+			if isKVArray(val) {
+				args[k] = reverseKVArray(val)
+			} else {
+				for i, item := range val {
+					if m, ok := item.(map[string]any); ok {
+						val[i] = heuristicKVReversal(m)
+					}
 				}
 			}
 		}
