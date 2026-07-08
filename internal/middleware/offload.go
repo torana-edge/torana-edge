@@ -81,14 +81,19 @@ func (o *OffloadHook) BeforeRequest(ctx context.Context, req *http.Request, chat
 			continue
 		}
 
+		// If the intent is terse (action-oriented like "Read go.mod"),
+		// enrich it with conversation context so the offload model can
+		// infer the real goal from what the user originally asked.
+		contextIntent := o.enrichIntentWithContext(chat, i, intent)
+
 		originalLen := len(msg.Content)
 
 		// Try deterministic compaction first (fast, free).
-		compacted_content := o.compactDeterministic(msg.Content, intent)
+		compacted_content := o.compactDeterministic(msg.Content, contextIntent)
 
 		// If deterministic didn't help enough, try model delegation.
 		if len(compacted_content) > len(msg.Content)/2 && originalLen > 2000 {
-			modelResult, err := o.compactWithModel(ctx, req, msg.Content, intent)
+			modelResult, err := o.compactWithModel(ctx, req, msg.Content, contextIntent)
 			if err != nil {
 				log.Printf("[offload] model compaction failed for %s: %v — using deterministic", msg.ToolCallID, err)
 			} else if modelResult != "" {
@@ -100,7 +105,7 @@ func (o *OffloadHook) BeforeRequest(ctx context.Context, req *http.Request, chat
 			saved := originalLen - len(compacted_content)
 			pct := float64(saved) / float64(originalLen) * 100
 			log.Printf("[offload] compacted %s: %d → %d bytes (%.1f%% reduction) intent=%q",
-				msg.ToolCallID, originalLen, len(compacted_content), pct, intent)
+				msg.ToolCallID, originalLen, len(compacted_content), pct, contextIntent)
 			msg.Content = compacted_content
 			compacted++
 			bytesSaved += saved
@@ -325,6 +330,70 @@ func truncateForPrompt(content string, maxChars int) string {
 	}
 	half := maxChars / 2
 	return content[:half] + "\n\n... [truncated for offload] ...\n\n" + content[len(content)-half:]
+}
+
+// enrichIntentWithContext appends conversation context to the intent
+// when it's terse (action-oriented), so the offload model can infer
+// the real goal from what the user originally asked.
+func (o *OffloadHook) enrichIntentWithContext(chat *engine.ChatRequest, toolMsgIndex int, intent string) string {
+	// Don't enrich if intent already looks goal-oriented (>20 chars, contains goal words).
+	if len(intent) > 20 && (containsAny(intent, "understand", "explain", "investigate", "check", "verify", "analyze", "question", "determine")) {
+		return intent
+	}
+
+	context := extractConversationContext(chat, toolMsgIndex, 5)
+	if context == "" {
+		return intent
+	}
+
+	return intent + "\n[Conversation context: " + context + "]"
+}
+
+// extractConversationContext collects the last N meaningful messages
+// (user/assistant with text content) before the given tool message index.
+func extractConversationContext(chat *engine.ChatRequest, toolMsgIndex int, maxMessages int) string {
+	var parts []string
+	collected := 0
+
+	for i := toolMsgIndex - 1; i >= 0 && collected < maxMessages; i-- {
+		msg := chat.Messages[i]
+		content := msg.Content
+		if content == "" {
+			continue
+		}
+		// Truncate tool outputs in history to avoid blowing context.
+		if msg.Role == engine.RoleTool {
+			if len(content) > 200 {
+				content = content[:200] + "..."
+			}
+		}
+		switch msg.Role {
+		case engine.RoleUser:
+			parts = append([]string{"User: " + content}, parts...)
+			collected++
+		case engine.RoleAssistant:
+			if content != "" {
+				parts = append([]string{"Assistant: " + content}, parts...)
+				collected++
+			}
+		}
+	}
+
+	if len(parts) == 0 {
+		return ""
+	}
+	return strings.Join(parts, "\n")
+}
+
+// containsAny returns true if s contains any of the given substrings (case-insensitive).
+func containsAny(s string, substrs ...string) bool {
+	lower := strings.ToLower(s)
+	for _, sub := range substrs {
+		if strings.Contains(lower, sub) {
+			return true
+		}
+	}
+	return false
 }
 
 // Compile-time guard.
