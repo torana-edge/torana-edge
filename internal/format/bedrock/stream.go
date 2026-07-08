@@ -168,14 +168,12 @@ func parseBedrockEvent(line string, inThinking *bool, inToolUse *bool, signature
 		delta := se.ContentBlockDelta.Delta
 		switch {
 		case delta.Thinking != nil:
-			*inToolUse = true
 		return &engine.StreamEvent{ThinkingDelta: delta.Thinking}
 		case delta.Signature != nil:
 			*signatureBuf += *delta.Signature
 			return nil
 		case delta.Text != nil:
 			text := *delta.Text
-			*inToolUse = true
 		return &engine.StreamEvent{TextDelta: &text}
 		case delta.ToolUse != nil:
 			*inToolUse = true
@@ -196,14 +194,12 @@ func parseBedrockEvent(line string, inThinking *bool, inToolUse *bool, signature
 			return nil // text block stop — no tool call to end
 		}
 		*inToolUse = false
-		*inToolUse = true
 		return &engine.StreamEvent{
 			ToolCallEnd: &engine.ToolCallEnd{Index: 0},
 		}
 
 	case se.MessageStop != nil:
 		reason := mapBedrockStopReason(se.MessageStop.StopReason)
-		*inToolUse = true
 		return &engine.StreamEvent{FinishReason: reason}
 	}
 
