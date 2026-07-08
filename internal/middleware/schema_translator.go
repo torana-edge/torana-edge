@@ -374,9 +374,10 @@ func injectIntentParam(tool *engine.ToolDef) {
 // System prompt injection
 // ==========================================================================
 
-// injectSystemPrompt appends a targeted addendum to the system message that
-// tells the model what we expect in the "i" field on tool calls. We append
-// rather than replace to avoid disrupting the harness's own prompt.
+// injectSystemPrompt appends a targeted addendum + few-shot examples to
+// train the model to produce goal-oriented intents in the "i" field.
+// The few-shot triplet (user → assistant tool call → tool result) is
+// injected before the last user message to demonstrate the desired pattern.
 func injectSystemPrompt(chat *engine.ChatRequest) {
 	const addendum = "\n\nWhen populating the \"i\" field on any tool call, do not describe the " +
 		"action you are taking (e.g. \"Read go.mod\" or \"List files\"). " +
@@ -390,7 +391,7 @@ func injectSystemPrompt(chat *engine.ChatRequest) {
 	for i := range chat.Messages {
 		if chat.Messages[i].Role == engine.RoleSystem {
 			chat.Messages[i].Content += addendum
-			return
+			goto injectExamples
 		}
 	}
 
@@ -399,6 +400,45 @@ func injectSystemPrompt(chat *engine.ChatRequest) {
 		Role:    engine.RoleSystem,
 		Content: "[SYSTEM]" + addendum,
 	}}, chat.Messages...)
+
+injectExamples:
+	// Inject a few-shot example triplet demonstrating the desired pattern.
+	// Use the first available tool name from the actual request to ensure
+	// the model can associate the example with real tools.
+	toolName := "read"
+	if len(chat.Tools) > 0 && chat.Tools[0].Name != "" {
+		toolName = chat.Tools[0].Name
+	}
+
+	fewShot := []engine.Message{
+		{
+			Role:    engine.RoleUser,
+			Content: "I need to understand how the proxy handles upstream errors.",
+		},
+		{
+			Role: engine.RoleAssistant,
+			ToolCalls: []engine.ToolCall{{
+				ID:   "call_mock_fewshot_1",
+				Name: toolName,
+				Arguments: map[string]any{
+					"path": "server.go",
+					"i":    "Understand error handling in the proxy pipeline, specifically looking for 5xx response codes",
+				},
+			}},
+		},
+		{
+			Role:       engine.RoleTool,
+			ToolCallID: "call_mock_fewshot_1",
+			Content:    "[Simulated tool output — this is a few-shot example for demonstration]",
+		},
+	}
+
+	// Insert the few-shot triplet before the last message.
+	last := len(chat.Messages) - 1
+	if last >= 0 {
+		chat.Messages = append(chat.Messages[:last],
+			append(fewShot, chat.Messages[last:]...)...)
+	}
 }
 
 // ==========================================================================
