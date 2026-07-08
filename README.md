@@ -1,6 +1,8 @@
 # Torana Edge
 
-Provider-agnostic AI reverse proxy with a canonical IR and format adapters. Sits between developer agent harnesses (oh-my-pi, Claude Code) and cloud LLM providers, translating wire formats so plugins work on one canonical representation regardless of provider.
+Torana Edge is an **extensible, high-performance LLM reverse proxy and routing engine**. It sits transparently between AI coding harnesses (running locally for personal users, or deployed on-premise as an enterprise gateway) and cloud LLM providers. 
+
+By parsing traffic into a unified Internal Representation (IR), Torana allows you to build and attach **plugins** that work universally across OpenAI, Anthropic, Bedrock, and Vertex. The core engine simply routes and runs the middleware pipeline—everything else (FinOps compression, OpenTelemetry, API Key routing, intent caching) is a plugin, allowing you to "build your own Torana."
 
 ```
 [harness] ←→ [Torana Edge :8080] ←→ [LLM Providers]
