@@ -11,9 +11,9 @@ import (
 	"net/http"
 	"sort"
 	"strings"
-	"sync"
 	"time"
 
+	"github.com/torana-edge/torana-edge/internal/cache"
 	"github.com/torana-edge/torana-edge/internal/engine"
 	"github.com/torana-edge/torana-edge/internal/provider"
 )
@@ -25,7 +25,7 @@ import (
 // before the request reaches the upstream LLM.
 type OffloadHook struct {
 	// IntentCache is the shared cache populated by SchemaTranslator.
-	IntentCache *sync.Map
+	IntentCache cache.IntentCache
 	// Config controls offload behaviour (model, provider, enabled).
 	Config provider.OffloadConfig
 	// ProviderURL is the base URL of the provider used for offload calls.
@@ -35,9 +35,9 @@ type OffloadHook struct {
 }
 
 // NewOffloadHook creates an OffloadHook.
-func NewOffloadHook(cache *sync.Map, cfg provider.OffloadConfig, providerURL string) *OffloadHook {
+func NewOffloadHook(ic cache.IntentCache, cfg provider.OffloadConfig, providerURL string) *OffloadHook {
 	return &OffloadHook{
-		IntentCache: cache,
+		IntentCache:    ic,
 		Config:      cfg,
 		ProviderURL: providerURL,
 		APIKeyExtractor: func(req *http.Request) string {
@@ -66,11 +66,10 @@ func (o *OffloadHook) BeforeRequest(ctx context.Context, req *http.Request, chat
 		}
 
 		// Look up intent from the cache.
-		intentVal, ok := o.IntentCache.Load(msg.ToolCallID)
+		intent, ok := o.IntentCache.Get(msg.ToolCallID)
 		if !ok {
 			continue
 		}
-		intent, _ := intentVal.(string)
 		if intent == "" || msg.Content == "" {
 			continue
 		}
@@ -326,4 +325,3 @@ var _ engine.RequestHook = (*OffloadHook)(nil)
 
 // Ensure imports used.
 var _ = sort.Ints
-var _ = sync.Map{}
