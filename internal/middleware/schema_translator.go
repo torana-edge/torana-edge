@@ -51,8 +51,9 @@ func (st *SchemaTranslator) BeforeRequest(ctx context.Context, req *http.Request
 		chat.ToranaMeta = make(map[string]any)
 	}
 
-	// Stash the intent cache reference so response handlers can access it.
-	chat.ToranaMeta[metaKeyIntentCache] = &st.IntentCache
+	// Inject a targeted system-prompt addendum that tells the model
+	// what we expect in the "i" field on tool calls.
+	injectSystemPrompt(chat)
 
 	// toolName → list of dotted paths that were converted to KV arrays
 	registry := make(map[string][]string)
@@ -367,6 +368,37 @@ func injectIntentParam(tool *engine.ToolDef) {
 	required = append(required, ToranaIntentField)
 	tool.Parameters["required"] = required
 	tool.Parameters["additionalProperties"] = false
+}
+
+// ==========================================================================
+// System prompt injection
+// ==========================================================================
+
+// injectSystemPrompt appends a targeted addendum to the system message that
+// tells the model what we expect in the "i" field on tool calls. We append
+// rather than replace to avoid disrupting the harness's own prompt.
+func injectSystemPrompt(chat *engine.ChatRequest) {
+	const addendum = "\n\nWhen populating the \"i\" field on any tool call, do not describe the " +
+		"action you are taking (e.g. \"Read go.mod\" or \"List files\"). " +
+		"Instead state the underlying question you are trying to answer or " +
+		"decision you are trying to make (e.g. \"Determine minimum required " +
+		"Go version for this module\" or \"Find which middleware handles " +
+		"authentication\"). Action descriptions in \"i\" will be discarded " +
+		"and are not useful."
+
+	// Find existing system message and append.
+	for i := range chat.Messages {
+		if chat.Messages[i].Role == engine.RoleSystem {
+			chat.Messages[i].Content += addendum
+			return
+		}
+	}
+
+	// No system message exists — inject as first message.
+	chat.Messages = append([]engine.Message{{
+		Role:    engine.RoleSystem,
+		Content: "[SYSTEM]" + addendum,
+	}}, chat.Messages...)
 }
 
 // ==========================================================================
