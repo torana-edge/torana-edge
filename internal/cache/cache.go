@@ -23,6 +23,9 @@ type IntentCache interface {
 
 	// Len returns the number of cached entries (including expired).
 	Len() int
+
+	// Close releases any background resources (e.g., eviction goroutines).
+	Close()
 }
 
 // ── Local memory implementation ────────────────────────────────────
@@ -35,8 +38,9 @@ type LocalCache struct {
 	ttl     time.Duration
 
 	// Eviction control.
-	stopCh chan struct{}
-	doneCh chan struct{}
+	stopCh    chan struct{}
+	doneCh    chan struct{}
+	closeOnce sync.Once
 }
 
 type cacheEntry struct {
@@ -96,12 +100,9 @@ func (l *LocalCache) Len() int {
 
 // Close stops the eviction goroutine. Safe to call multiple times.
 func (l *LocalCache) Close() {
-	select {
-	case <-l.stopCh:
-		// Already closed.
-	default:
+	l.closeOnce.Do(func() {
 		close(l.stopCh)
-	}
+	})
 	<-l.doneCh
 }
 

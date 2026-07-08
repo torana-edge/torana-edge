@@ -128,7 +128,6 @@ func (st *SchemaTranslator) AfterResponse(ctx context.Context, resp *http.Respon
 			case ev.ToolCallEnd != nil && current != nil:
 				assembled := strings.Join(current.fragments, "")
 		log.Printf("[audit] %s ARGS: %s", current.name, assembled[:min(len(assembled), 400)])
-		log.Printf("[audit] %s ARGS: %s", current.name, assembled[:min(len(assembled), 400)])
 
 
 				// Extract intent + reverse mutations.
