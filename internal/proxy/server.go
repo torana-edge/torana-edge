@@ -24,6 +24,7 @@ import (
 	"github.com/torana-edge/torana-edge/internal/cache"
 	"github.com/torana-edge/torana-edge/internal/engine"
 	"github.com/torana-edge/torana-edge/internal/format"
+	"github.com/torana-edge/torana-edge/internal/metrics"
 	"github.com/torana-edge/torana-edge/internal/middleware"
 	"github.com/torana-edge/torana-edge/internal/provider"
 )
@@ -50,6 +51,7 @@ type Server struct {
 	httpServer  *http.Server
 	pipeline    *engine.Pipeline
 	intentCache cache.IntentCache
+	stats       *metrics.StatsTracker
 }
 
 // --- Construction -----------------------------------------------------------
@@ -67,13 +69,14 @@ func New(cfg Config) (*Server, error) {
 	pipeline := engine.New()
 	pipeline.AddRequestHook(middleware.NewAdapter())
 	intentCache := cache.NewLocalCache(30 * time.Minute)
+	statsTracker := metrics.NewStatsTracker()
 	compactionCache := cache.NewLocalCache(10 * time.Minute)
 	translator := middleware.NewSchemaTranslator(intentCache)
 	pipeline.AddRequestHook(translator)
 	pipeline.AddResponseHook(translator)
 
 	// Offload hook — compacts tool results using a cheaper model.
-	// Runs after schema translator so intent cache is populated.
+	var offloadHook *middleware.OffloadHook
 	offloadCfg := cfg.Providers.Offload
 	if offloadCfg.Enabled {
 		offloadProvider := offloadCfg.Provider
@@ -84,7 +87,8 @@ func New(cfg Config) (*Server, error) {
 		if p, ok := cfg.Providers.Providers[offloadProvider]; ok {
 			offloadURL = p.URL
 		}
-		offloadHook := middleware.NewOffloadHook(translator.IntentCache, compactionCache, offloadCfg, offloadURL)
+		offloadHook = middleware.NewOffloadHook(translator.IntentCache, compactionCache, offloadCfg, offloadURL)
+		offloadHook.Stats = statsTracker
 		pipeline.AddRequestHook(offloadHook)
 		log.Printf("Torana Edge → offload enabled: model=%s provider=%s url=%s",
 			offloadCfg.Model, offloadProvider, offloadURL)
@@ -94,6 +98,7 @@ func New(cfg Config) (*Server, error) {
 		config:      cfg,
 		pipeline:    pipeline,
 		intentCache: intentCache,
+		stats:       statsTracker,
 	}
 
 	// --- reverse proxy ---------------------------------------------------
@@ -248,6 +253,11 @@ func New(cfg Config) (*Server, error) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte(`{"status":"ok"}`))
+	})
+	mux.HandleFunc("/stats", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		b, _ := json.Marshal(s.stats)
+		w.Write(b)
 	})
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		currentCfg := s.GetConfig()
