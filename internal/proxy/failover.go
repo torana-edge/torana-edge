@@ -18,7 +18,19 @@ type failoverRoundTripper struct {
 }
 
 func (t *failoverRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
-	// First attempt — no body buffering needed for the normal path.
+	// Find the provider name from the original URL path.
+	provName, fallbacks := extractFallbacks(req.URL, t.cfg())
+
+	// If there are fallbacks, we MUST buffer the body before the first attempt
+	// because RoundTrip consumes the body.
+	var bodyBytes []byte
+	if len(fallbacks) > 0 && req.Body != nil {
+		bodyBytes, _ = io.ReadAll(req.Body)
+		req.Body.Close()
+		req.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+	}
+
+	// First attempt.
 	resp, err := t.base.RoundTrip(req)
 	if err == nil && !shouldRetry(resp) {
 		return resp, nil
@@ -27,20 +39,11 @@ func (t *failoverRoundTripper) RoundTrip(req *http.Request) (*http.Response, err
 		resp.Body.Close()
 	}
 
-	// Find the provider name from the original URL path.
-	provName, fallbacks := extractFallbacks(req.URL, t.cfg())
 	if len(fallbacks) == 0 {
 		if resp != nil {
 			return resp, nil
 		}
 		return nil, err
-	}
-
-	// Only buffer body when we actually need to retry.
-	var bodyBytes []byte
-	if req.Body != nil {
-		bodyBytes, _ = io.ReadAll(req.Body)
-		req.Body.Close()
 	}
 
 	log.Printf("[failover] %s returned %v — trying fallbacks: %v",
