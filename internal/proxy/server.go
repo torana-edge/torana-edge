@@ -75,6 +75,11 @@ func New(cfg Config) (*Server, error) {
 	pipeline.AddRequestHook(translator)
 	pipeline.AddResponseHook(translator)
 
+	// Delegator hook — injects torana_delegate_task tool and intercepts calls.
+	delegator := middleware.NewDelegator()
+	pipeline.AddRequestHook(delegator)
+	pipeline.AddResponseHook(delegator)
+
 	// Offload hook — compacts tool results using a cheaper model.
 	var offloadHook *middleware.OffloadHook
 	offloadCfg := cfg.Providers.Offload
