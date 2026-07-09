@@ -18,9 +18,10 @@ type Provider struct {
 
 // Config is the top-level Torana configuration.
 type Config struct {
-	Port      int                 `json:"port"`
-	Providers map[string]Provider `json:"providers"`
-	Offload   OffloadConfig        `json:"offload,omitempty"`
+	Port               int                 `json:"port"`
+	Providers          map[string]Provider `json:"providers"`
+	Offload            OffloadConfig       `json:"offload,omitempty"`
+	MaxRequestBodySize int64               `json:"max_request_body_size,omitempty"`
 }
 
 // OffloadConfig controls tool-result compaction via a cheaper model.
