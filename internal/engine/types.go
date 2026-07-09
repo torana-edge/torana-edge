@@ -73,6 +73,7 @@ type StreamEvent struct {
 	ToolCallDelta *ToolCallDelta  // arguments JSON fragment (string)
 	ToolCallEnd   *ToolCallEnd    // tool call arguments complete
 	FinishReason  string          // "stop", "tool_calls", "length", "error"
+	Usage         *StreamUsage    // token usage from stream (OpenAI final chunk, Anthropic usage event)
 	Error         *StreamError
 }
 
