@@ -80,3 +80,15 @@ export ANTHROPIC_AUTH_TOKEN=<your-deepseek-key>
 curl http://localhost:8080/health   # {"status":"ok"}
 curl http://localhost:8080/stats    # compaction counters
 ```
+
+### Aider
+```bash
+export OPENAI_API_BASE=http://localhost:8080/provider/deepseek/v1
+export OPENAI_API_KEY=<your-key>
+aider --model deepseek/deepseek-v4-flash
+```
+
+### OpenHands / Continue.dev
+Configure the provider URL to `http://localhost:8080/provider/deepseek/v1`
+and API key in the respective settings UI. Torana is compatible with any
+tool that sends OpenAI-compatible chat completion requests.
