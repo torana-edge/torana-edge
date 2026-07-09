@@ -15,6 +15,7 @@ import (
 
 	"github.com/torana-edge/torana-edge/internal/cache"
 	"github.com/torana-edge/torana-edge/internal/engine"
+	"github.com/torana-edge/torana-edge/internal/metrics"
 	"github.com/torana-edge/torana-edge/internal/provider"
 )
 
@@ -35,6 +36,7 @@ type OffloadHook struct {
 	ProviderURL string
 	// APIKeyExtractor extracts the API key from incoming requests.
 	APIKeyExtractor func(req *http.Request) string
+	Stats           *metrics.StatsTracker
 }
 
 // NewOffloadHook creates an OffloadHook.
@@ -113,7 +115,9 @@ func (o *OffloadHook) BeforeRequest(ctx context.Context, req *http.Request, chat
 			modelResult, err := o.compactWithModel(ctx, req, msg.Content, intent, context)
 			if err != nil {
 				log.Printf("[offload] model compaction failed for %s: %v — using deterministic", msg.ToolCallID, err)
-			} else if modelResult != "" {
+				if o.Stats != nil {
+					o.Stats.RecordOffloadFailure()
+				}} else if modelResult != "" {
 				compacted_content = modelResult
 			}
 		}
@@ -126,6 +130,9 @@ func (o *OffloadHook) BeforeRequest(ctx context.Context, req *http.Request, chat
 			msg.Content = compacted_content
 			compacted++
 			bytesSaved += saved
+			if o.Stats != nil {
+				o.Stats.RecordCompaction(int64(originalLen), int64(len(compacted_content)))
+			}
 
 			// Store in compaction cache for future turns.
 			if o.CompactionCache != nil {
