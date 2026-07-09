@@ -107,7 +107,7 @@ func New(cfg Config) (*Server, error) {
 		Director: func(req *http.Request) {
 			var body []byte
 			if req.Body != nil {
-				body, _ = io.ReadAll(req.Body)
+				body, _ = readBodyPool(req.Body)
 				req.Body.Close()
 			}
 
