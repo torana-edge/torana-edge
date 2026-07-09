@@ -45,9 +45,10 @@ func main() {
 	}
 
 	cfg := proxy.Config{
-		Port:            strconv.Itoa(provCfg.Port),
-		Providers:       provCfg,
-		DefaultProvider: os.Getenv("TORANA_DEFAULT_PROVIDER"),
+		Port:               strconv.Itoa(provCfg.Port),
+		Providers:          provCfg,
+		DefaultProvider:    os.Getenv("TORANA_DEFAULT_PROVIDER"),
+		MaxRequestBodySize: provCfg.MaxRequestBodySize,
 	}
 
 	// --- server ---------------------------------------------------------
