@@ -39,6 +39,10 @@ type Config struct {
 	// DefaultProvider routes requests without a /provider/<name>/ prefix
 	// to this provider. Empty means no default — such requests get 502.
 	DefaultProvider string
+
+	// MaxRequestBodySize caps how many bytes the proxy will buffer in
+	// memory for a single request. Zero means unlimited (legacy).
+	MaxRequestBodySize int64
 }
 
 // Server wraps the HTTP listener, the reverse proxy, and the middleware
@@ -107,8 +111,16 @@ func New(cfg Config) (*Server, error) {
 		Director: func(req *http.Request) {
 			var body []byte
 			if req.Body != nil {
-				body, _ = io.ReadAll(req.Body)
+				maxSize := s.GetConfig().MaxRequestBodySize
+				reader := req.Body
+				if maxSize > 0 {
+					reader = io.NopCloser(io.LimitReader(req.Body, maxSize+1))
+				}
+				body, _ = io.ReadAll(reader)
 				req.Body.Close()
+				if maxSize > 0 && int64(len(body)) > maxSize {
+					body = nil // discard — will be rejected downstream
+				}
 			}
 
 			currentCfg := s.GetConfig()
