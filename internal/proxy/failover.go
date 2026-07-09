@@ -25,7 +25,7 @@ func (t *failoverRoundTripper) RoundTrip(req *http.Request) (*http.Response, err
 	// because RoundTrip consumes the body.
 	var bodyBytes []byte
 	if len(fallbacks) > 0 && req.Body != nil {
-		bodyBytes, _ = io.ReadAll(req.Body)
+		bodyBytes, _ = readBodyPool(req.Body)
 		req.Body.Close()
 		req.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 	}
