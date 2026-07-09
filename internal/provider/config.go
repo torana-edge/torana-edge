@@ -11,8 +11,9 @@ import (
 
 // Provider describes an upstream LLM API endpoint.
 type Provider struct {
-	URL    string `json:"url"`    // upstream base URL, e.g. "https://api.deepseek.com"
-	Format string `json:"format"` // wire format: "openai", "anthropic", "bedrock", "vertex"
+	URL      string   `json:"url"`    // upstream base URL
+	Format   string   `json:"format"` // wire format: "openai", "anthropic", "bedrock", "vertex"
+	Fallback []string `json:"fallback,omitempty"` // provider names to try on 429/5xx
 }
 
 // Config is the top-level Torana configuration.
