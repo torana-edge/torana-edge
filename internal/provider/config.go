@@ -20,7 +20,15 @@ type Provider struct {
 type Config struct {
 	Port      int                 `json:"port"`
 	Providers map[string]Provider `json:"providers"`
-	Offload   OffloadConfig        `json:"offload,omitempty"`
+	Plugins   PluginsConfig       `json:"plugins,omitempty"`
+	Offload   OffloadConfig        `json:"offload,omitempty"` // deprecated — use plugins.config.compactor
+}
+
+// PluginsConfig controls WASM plugin loading and execution.
+type PluginsConfig struct {
+	Dir    string                     `json:"dir"`    // plugins directory, default "./plugins"
+	Order  []string                   `json:"order"`  // execution order by plugin name
+	Config map[string]json.RawMessage `json:"config"` // per-plugin config blobs
 }
 
 // OffloadConfig controls tool-result compaction via a cheaper model.
