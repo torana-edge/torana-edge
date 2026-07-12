@@ -41,7 +41,7 @@ func Init() {
 // alloc allocates size bytes and returns a pointer.
 // The memory is managed dynamically — wazero scales linear memory as needed.
 //
-//go:export alloc
+
 func alloc(size uint32) uint32 {
 	if len(heap) == 0 {
 		Init()
@@ -58,8 +58,12 @@ func alloc(size uint32) uint32 {
 
 // dealloc is a no-op — WASM's linear memory is garbage collected by wazero.
 //
-//go:export dealloc
+
 func dealloc(ptr, size uint32) {}
+
+// Alloc is the public alias for alloc — used by plugin main packages
+// that must define their own //go:export wrappers.
+func Alloc(size uint32) uint32 { return alloc(size) }
 
 // HostCall serializes input, calls alloc, copies to heap, and returns [ptr, len].
 // Utility for plugins that need to return data to the host.
