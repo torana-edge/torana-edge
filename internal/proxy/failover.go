@@ -6,6 +6,7 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"encoding/json"
 
 	"github.com/torana-edge/torana-edge/internal/provider"
 )
@@ -91,10 +92,26 @@ func extractFallbacks(u *url.URL, cfg provider.Config) (string, []string) {
 		return "", nil
 	}
 	p, ok := cfg.Providers[name]
-	if !ok || len(p.Fallback) == 0 {
+	if !ok {
 		return name, nil
 	}
-	return name, p.Fallback
+
+	fallbacks := p.Fallback
+
+	// Also check plugins.config.failover for allowed_fallbacks.
+	if failoverCfg, hasCfg := cfg.Plugins.Config["failover"]; hasCfg {
+		var fc struct {
+			AllowedFallbacks []string `json:"allowed_fallbacks"`
+		}
+		if err := json.Unmarshal(failoverCfg, &fc); err == nil && len(fc.AllowedFallbacks) > 0 {
+			fallbacks = fc.AllowedFallbacks
+		}
+	}
+
+	if len(fallbacks) == 0 {
+		return name, nil
+	}
+	return name, fallbacks
 }
 
 func statusOrErr(resp *http.Response, err error) string {
