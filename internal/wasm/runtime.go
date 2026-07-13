@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"os"
 	"sync"
 
 	"github.com/tetratelabs/wazero"
@@ -97,7 +98,11 @@ func (r *Runtime) Close() error { return r.runtime.Close(r.ctx) }
 
 func (r *Runtime) LoadPlugin(name string, wasmBytes []byte) (*Plugin, error) {
 	mod, err := r.runtime.InstantiateWithConfig(r.ctx, wasmBytes,
-		wazero.NewModuleConfig().WithName(name))
+		wazero.NewModuleConfig().WithName(name).
+			WithSysWalltime().
+			WithSysNanotime().
+			WithStdout(os.Stdout).
+			WithStderr(os.Stderr))
 	if err != nil { return nil, fmt.Errorf("wasm: %s: %w", name, err) }
 
 	// Must call _initialize for reactor libraries before alloc works.
