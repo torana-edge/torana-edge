@@ -2,6 +2,7 @@ package wasm
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"testing"
 )
@@ -11,10 +12,19 @@ func TestDelegator(t *testing.T) {
 	r := NewRuntime(context.Background()); defer r.Close()
 	p, _ := r.LoadPlugin("delegator", b)
 	var out map[string]any
-	if err := p.CallRequest(context.Background(), "on_chat_request", map[string]any{"t":1}, &out); err != nil {
+	wrapped := map[string]any{"chat": `{"t":1}`}
+	if err := p.CallRequest(context.Background(), "on_chat_request", wrapped, &out); err != nil {
 		t.Fatal(err)
 	}
-	if out["handled_by"] != "delegator.wasm" { t.Fatal("bad output") }
+	
+	// Unpack the modified chat wrapper
+	chatStr, ok := out["chat"].(string)
+	if !ok { t.Fatalf("missing chat wrapper in output: %v", out) }
+	
+	var actual map[string]any
+	json.Unmarshal([]byte(chatStr), &actual)
+	
+	if actual["Model"] != "claude-3-5-sonnet-20241022" { t.Fatal("bad output") }
 	t.Log("delegator OK")
 }
 
@@ -23,6 +33,7 @@ func TestSchemaTranslator(t *testing.T) {
 	r := NewRuntime(context.Background()); defer r.Close()
 	p, _ := r.LoadPlugin("schema_translator", b)
 	out := map[string]any{}
-	p.CallRequest(context.Background(), "on_chat_request", map[string]any{"tools": []any{}}, &out)
+	wrapped := map[string]any{"chat": `{"Tools":[]}`}
+	p.CallRequest(context.Background(), "on_chat_request", wrapped, &out)
 	t.Log("schema_translator OK")
 }

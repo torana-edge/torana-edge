@@ -142,6 +142,10 @@ func (r *Runtime) installHostFunctions() {
 		metrics.EmitPluginMetric(ctx, pluginName, name, int(metricType), value)
 	}).Export("emit_metric")
 
+	env.NewFunctionBuilder().WithFunc(func(ctx context.Context, mod api.Module, message, fileName, line, column uint32) {
+		log.Printf("[wasm abort] AssemblyScript abort called at %d:%d", line, column)
+	}).Export("abort")
+
 	env.Instantiate(r.ctx)
 }
 
