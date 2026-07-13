@@ -1,29 +1,33 @@
 package wasm
-import ("context";"encoding/json";"os";"testing")
+import (
+	"context"
+	"os"
+	"testing"
+
+	"github.com/torana-edge/torana-edge/pkg/pb"
+	"google.golang.org/protobuf/proto"
+)
 
 func TestDelegator(t *testing.T) {
 	b, _ := os.ReadFile("../../plugins/delegator/plugin.wasm")
 	r := NewRuntime(context.Background()); defer r.Close()
 	p, _ := r.LoadPlugin("delegator", b)
 	
-	// New plugin wraps chat JSON — test with a wrapper that has chat
-	input := map[string]any{"chat": `{"Model":""}`, "test": 1}
-	var out map[string]any
-	if err := p.CallRequest(context.Background(), "on_chat_request", input, &out); err != nil {
+	req := &pb.ChatRequest{Model: ""}
+	input, _ := proto.Marshal(req)
+
+	var outBytes []byte
+	if err := p.CallRequest(context.Background(), "on_chat_request", input, &outBytes); err != nil {
 		t.Fatal(err)
 	}
-	b2, _ := json.Marshal(out)
-	t.Logf("output: %s", b2)
 	
-	// Plugin should inject default model into the chat JSON
-	chatStr, _ := out["chat"].(string)
-	if chatStr == "" {
-		t.Fatal("no chat in output")
+	var out pb.ChatRequest
+	if err := proto.Unmarshal(outBytes, &out); err != nil {
+		t.Fatal(err)
 	}
-	var chat map[string]any
-	json.Unmarshal([]byte(chatStr), &chat)
-	if chat["Model"] != "claude-3-5-sonnet-20241022" {
-		t.Fatalf("expected model injection, got %v", chat["Model"])
+
+	if out.Model != "claude-3-5-sonnet-20241022" {
+		t.Fatalf("expected model injection, got %v", out.Model)
 	}
 	t.Log("delegator OK")
 }

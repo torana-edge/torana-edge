@@ -8,11 +8,15 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"time"
 	"sync"
+	"time"
 
 	"github.com/fsnotify/fsnotify"
+	"github.com/torana-edge/torana-edge/internal/engine"
+	"github.com/torana-edge/torana-edge/internal/engine/pbconv"
 	"github.com/torana-edge/torana-edge/internal/wasm"
+	"github.com/torana-edge/torana-edge/pkg/pb"
+	"google.golang.org/protobuf/proto"
 )
 
 // ============================================================================
@@ -159,78 +163,102 @@ func (pp *PluginPipeline) DrainAndClose() {
 }
 
 // RunOnChatRequest calls every plugin that implements on_chat_request.
-func (pp *PluginPipeline) RunOnChatRequest(ctx context.Context, chatJSON []byte) ([]byte, error) {
+func (pp *PluginPipeline) RunOnChatRequest(ctx context.Context, chat *engine.ChatRequest) (*engine.ChatRequest, error) {
 	pp.Acquire()
 	defer pp.Release()
 
-	var result struct{ ChatJSON []byte `json:"chat"` }
-	result.ChatJSON = chatJSON
+	pbReq := pbconv.ToPBChatRequest(chat)
+	reqBytes, err := proto.Marshal(pbReq)
+	if err != nil {
+		return chat, err
+	}
+
+	resultBytes := reqBytes
 	for _, lp := range pp.plugins {
 		if !hasHook(lp.manifest, "on_chat_request") {
 			continue
 		}
-		var out struct{ ChatJSON string `json:"chat"` }
-		if err := lp.plugin.CallRequest(ctx, "on_chat_request", map[string]any{
-			"chat": string(result.ChatJSON),
-		}, &out); err != nil {
+		var outBytes []byte
+		if err := lp.plugin.CallRequest(ctx, "on_chat_request", resultBytes, &outBytes); err != nil {
 			log.Printf("[plugin] %s on_chat_request: %v", lp.manifest.Name, err)
 			continue
 		}
-		if len(out.ChatJSON) > 0 {
-			result.ChatJSON = []byte(out.ChatJSON)
+		if len(outBytes) > 0 {
+			resultBytes = outBytes
 		}
 	}
-	return result.ChatJSON, nil
+
+	var resReq pb.ChatRequest
+	if err := proto.Unmarshal(resultBytes, &resReq); err != nil {
+		return chat, err
+	}
+	return pbconv.FromPBChatRequest(&resReq), nil
 }
 
 // RunOnChatResponse calls every plugin that implements on_chat_response.
-func (pp *PluginPipeline) RunOnChatResponse(ctx context.Context, respJSON []byte) ([]byte, error) {
+func (pp *PluginPipeline) RunOnChatResponse(ctx context.Context, chat *engine.ChatRequest) (*engine.ChatRequest, error) {
 	pp.Acquire()
 	defer pp.Release()
 
-	var result struct{ ChatJSON []byte `json:"chat"` }
-	result.ChatJSON = respJSON
+	pbReq := pbconv.ToPBChatRequest(chat)
+	reqBytes, err := proto.Marshal(pbReq)
+	if err != nil {
+		return chat, err
+	}
+
+	resultBytes := reqBytes
 	for _, lp := range pp.plugins {
 		if !hasHook(lp.manifest, "on_chat_response") {
 			continue
 		}
-		var out struct{ ChatJSON string `json:"chat"` }
-		if err := lp.plugin.CallRequest(ctx, "on_chat_response", map[string]any{
-			"chat": string(result.ChatJSON),
-		}, &out); err != nil {
+		var outBytes []byte
+		if err := lp.plugin.CallRequest(ctx, "on_chat_response", resultBytes, &outBytes); err != nil {
 			log.Printf("[plugin] %s on_chat_response: %v", lp.manifest.Name, err)
 			continue
 		}
-		if len(out.ChatJSON) > 0 {
-			result.ChatJSON = []byte(out.ChatJSON)
+		if len(outBytes) > 0 {
+			resultBytes = outBytes
 		}
 	}
-	return result.ChatJSON, nil
+
+	var resReq pb.ChatRequest
+	if err := proto.Unmarshal(resultBytes, &resReq); err != nil {
+		return chat, err
+	}
+	return pbconv.FromPBChatRequest(&resReq), nil
 }
 
 // RunOnStreamChunk calls every plugin that implements on_stream_chunk.
-func (pp *PluginPipeline) RunOnStreamChunk(ctx context.Context, chunkJSON []byte) ([]byte, error) {
+func (pp *PluginPipeline) RunOnStreamChunk(ctx context.Context, chunk *engine.StreamEvent) (*engine.StreamEvent, error) {
 	pp.Acquire()
 	defer pp.Release()
 
-	var result struct{ ChunkJSON []byte `json:"chunk"` }
-	result.ChunkJSON = chunkJSON
+	pbChunk := pbconv.ToPBStreamEvent(chunk)
+	reqBytes, err := proto.Marshal(pbChunk)
+	if err != nil {
+		return chunk, err
+	}
+
+	resultBytes := reqBytes
 	for _, lp := range pp.plugins {
 		if !hasHook(lp.manifest, "on_stream_chunk") {
 			continue
 		}
-		var out struct{ ChunkJSON string `json:"chunk"` }
-		if err := lp.plugin.CallRequest(ctx, "on_stream_chunk", map[string]any{
-			"chunk": string(result.ChunkJSON),
-		}, &out); err != nil {
+		var outBytes []byte
+		if err := lp.plugin.CallRequest(ctx, "on_stream_chunk", resultBytes, &outBytes); err != nil {
 			log.Printf("[plugin] %s on_stream_chunk: %v", lp.manifest.Name, err)
 			continue
 		}
-		if len(out.ChunkJSON) > 0 {
-			result.ChunkJSON = []byte(out.ChunkJSON)
+		if len(outBytes) > 0 {
+			resultBytes = outBytes
 		}
 	}
-	return result.ChunkJSON, nil
+
+	var resChunk pb.StreamEvent
+	if err := proto.Unmarshal(resultBytes, &resChunk); err != nil {
+		return chunk, err
+	}
+	return pbconv.FromPBStreamEvent(&resChunk), nil
 }
 
 // ============================================================================

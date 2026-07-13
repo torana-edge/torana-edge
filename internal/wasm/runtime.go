@@ -2,7 +2,6 @@ package wasm
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"log"
 	"os"
@@ -27,15 +26,13 @@ func (p *Plugin) SetGrants(g []string) {
 	for _, x := range g { p.grants[x] = true }
 }
 
-// CallRequest marshals input, passes it to the WASM hook, and unmarshals result.
-func (p *Plugin) CallRequest(ctx context.Context, hook string, input, output any) error {
+// CallRequest passes byte payload to the WASM hook, and returns the result.
+func (p *Plugin) CallRequest(ctx context.Context, hook string, inBytes []byte, output *[]byte) error {
 	fn := p.mod.ExportedFunction(hook)
 	if fn == nil { return nil }
 	allocFn := p.mod.ExportedFunction("alloc")
 	if allocFn == nil { return fmt.Errorf("wasm: %s missing alloc", p.name) }
 	deallocFn := p.mod.ExportedFunction("dealloc")
-
-	inBytes, _ := json.Marshal(input)
 
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -61,9 +58,12 @@ func (p *Plugin) CallRequest(ctx context.Context, hook string, input, output any
 		if outPtr != 0 && outLen > 0 {
 			b, ok := p.mod.Memory().Read(outPtr, outLen)
 			if ok { 
-				err := json.Unmarshal(b, output)
+				// Copy the bytes so they survive memory grow/free
+				res := make([]byte, len(b))
+				copy(res, b)
+				*output = res
 				if deallocFn != nil { deallocFn.Call(ctx, uint64(outPtr), uint64(outLen)) }
-				return err
+				return nil
 			}
 		}
 	}

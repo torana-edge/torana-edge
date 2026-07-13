@@ -1,0 +1,89 @@
+syntax = "proto3";
+
+package torana.v1;
+option go_package = "github.com/torana-edge/torana-edge/pkg/pb";
+
+// A single turn in a chat conversation.
+message Message {
+  string role = 1;
+  string content = 2;
+  // JSON array of multimodal parts (e.g. vision)
+  bytes content_parts_json = 3; 
+  string thinking = 4;
+  string thinking_signature = 5;
+  repeated ToolCall tool_calls = 6;
+  string tool_call_id = 7;
+  string tool_name = 8;
+}
+
+// An assistant's request to invoke a tool.
+message ToolCall {
+  string id = 1;
+  string name = 2;
+  bytes arguments_json = 3;
+}
+
+// Describes a function available to the model.
+message ToolDef {
+  string name = 1;
+  string description = 2;
+  bytes parameters_json = 3;
+  bool strict = 4;
+}
+
+// Canonical representation of a chat completion request.
+message ChatRequest {
+  string model = 1;
+  repeated Message messages = 2;
+  repeated ToolDef tools = 3;
+  bool stream = 4;
+  
+  optional int32 max_tokens = 5;
+  optional double temperature = 6;
+  optional double top_p = 7;
+  repeated string stop_sequences = 8;
+
+  // Unparsed provider fields (passed transparently as JSON)
+  bytes provider_extensions_json = 9;
+
+  // Proxy-internal metadata shared between hooks. Not serialized to wire.
+  bytes torana_meta_json = 10;
+}
+
+message ToolCallStart {
+  int32 index = 1;
+  string id = 2;
+  string name = 3;
+}
+
+message ToolCallDelta {
+  int32 index = 1;
+  string arguments_delta = 2;
+}
+
+message ToolCallEnd {
+  int32 index = 1;
+}
+
+message StreamError {
+  int32 code = 1;
+  string message = 2;
+}
+
+message StreamUsage {
+  int32 input_tokens = 1;
+  int32 output_tokens = 2;
+}
+
+message StreamEvent {
+  oneof event {
+    string text_delta = 1;
+    string thinking_delta = 2;
+    ToolCallStart tool_call_start = 3;
+    ToolCallDelta tool_call_delta = 4;
+    ToolCallEnd tool_call_end = 5;
+    string finish_reason = 6;
+    StreamUsage usage = 7;
+    StreamError error = 8;
+  }
+}

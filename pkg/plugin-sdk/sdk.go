@@ -5,6 +5,9 @@ package plugin_sdk
 import (
 	"sync"
 	"unsafe"
+
+	"github.com/torana-edge/torana-edge/pkg/pb"
+	"google.golang.org/protobuf/proto"
 )
 
 var (
@@ -14,6 +17,9 @@ var (
 
 //go:wasmexport alloc
 func alloc(size uint32) uint32 {
+	if size == 0 {
+		return 0
+	}
 	buf := make([]byte, size)
 	ptr := uint32(uintptr(unsafe.Pointer(&buf[0])))
 	pinMutex.Lock()
@@ -41,10 +47,10 @@ func WriteResult(data []byte) uint64 {
 	return uint64(p)<<32 | uint64(len(data))
 }
 
-var chatRequestHandler func(req []byte) ([]byte, error)
+var chatRequestHandler func(req *pb.ChatRequest) (*pb.ChatRequest, error)
 
 // OnChatRequest registers the handler for chat requests.
-func OnChatRequest(handler func(req []byte) ([]byte, error)) {
+func OnChatRequest(handler func(req *pb.ChatRequest) (*pb.ChatRequest, error)) {
 	chatRequestHandler = handler
 }
 
@@ -53,18 +59,29 @@ func on_chat_request(ptr, size uint32) uint64 {
 	if chatRequestHandler == nil {
 		return 0
 	}
-	input := ReadBytes(ptr, size)
-	out, err := chatRequestHandler(input)
-	if err != nil || len(out) == 0 {
+	inputBytes := ReadBytes(ptr, size)
+	var req pb.ChatRequest
+	if err := proto.Unmarshal(inputBytes, &req); err != nil {
+		Log("on_chat_request unmarshal err: "+err.Error(), LogLevelInfo)
 		return 0
 	}
-	return WriteResult(out)
+
+	out, err := chatRequestHandler(&req)
+	if err != nil || out == nil {
+		return 0
+	}
+
+	outBytes, err := proto.Marshal(out)
+	if err != nil || len(outBytes) == 0 {
+		return 0
+	}
+	return WriteResult(outBytes)
 }
 
-var chatResponseHandler func(resp []byte) ([]byte, error)
+var chatResponseHandler func(resp *pb.ChatRequest) (*pb.ChatRequest, error)
 
 // OnChatResponse registers the handler for chat responses.
-func OnChatResponse(handler func(resp []byte) ([]byte, error)) {
+func OnChatResponse(handler func(resp *pb.ChatRequest) (*pb.ChatRequest, error)) {
 	chatResponseHandler = handler
 }
 
@@ -73,18 +90,28 @@ func on_chat_response(ptr, size uint32) uint64 {
 	if chatResponseHandler == nil {
 		return 0
 	}
-	input := ReadBytes(ptr, size)
-	out, err := chatResponseHandler(input)
-	if err != nil || len(out) == 0 {
+	inputBytes := ReadBytes(ptr, size)
+	var resp pb.ChatRequest
+	if err := proto.Unmarshal(inputBytes, &resp); err != nil {
 		return 0
 	}
-	return WriteResult(out)
+
+	out, err := chatResponseHandler(&resp)
+	if err != nil || out == nil {
+		return 0
+	}
+
+	outBytes, err := proto.Marshal(out)
+	if err != nil || len(outBytes) == 0 {
+		return 0
+	}
+	return WriteResult(outBytes)
 }
 
-var streamChunkHandler func(chunk []byte) ([]byte, error)
+var streamChunkHandler func(chunk *pb.StreamEvent) (*pb.StreamEvent, error)
 
 // OnStreamChunk registers the handler for stream chunks.
-func OnStreamChunk(handler func(chunk []byte) ([]byte, error)) {
+func OnStreamChunk(handler func(chunk *pb.StreamEvent) (*pb.StreamEvent, error)) {
 	streamChunkHandler = handler
 }
 
@@ -93,12 +120,22 @@ func on_stream_chunk(ptr, size uint32) uint64 {
 	if streamChunkHandler == nil {
 		return 0
 	}
-	input := ReadBytes(ptr, size)
-	out, err := streamChunkHandler(input)
-	if err != nil || len(out) == 0 {
+	inputBytes := ReadBytes(ptr, size)
+	var chunk pb.StreamEvent
+	if err := proto.Unmarshal(inputBytes, &chunk); err != nil {
 		return 0
 	}
-	return WriteResult(out)
+
+	out, err := streamChunkHandler(&chunk)
+	if err != nil || out == nil {
+		return 0
+	}
+
+	outBytes, err := proto.Marshal(out)
+	if err != nil || len(outBytes) == 0 {
+		return 0
+	}
+	return WriteResult(outBytes)
 }
 
 //go:wasmimport env log
