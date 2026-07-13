@@ -58,7 +58,11 @@ func (p *Plugin) CallRequest(ctx context.Context, hook string, input, output any
 		outLen := uint32(v & 0xFFFFFFFF)
 		if outPtr != 0 && outLen > 0 {
 			b, ok := p.mod.Memory().Read(outPtr, outLen)
-			if ok { return json.Unmarshal(b, output) }
+			if ok { 
+				err := json.Unmarshal(b, output)
+				if deallocFn != nil { deallocFn.Call(ctx, uint64(outPtr), uint64(outLen)) }
+				return err
+			}
 		}
 	}
 	return nil
