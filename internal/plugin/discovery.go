@@ -1,6 +1,3 @@
-// Package plugin defines the WASM plugin API for Torana Edge.
-// It provides plugin discovery, manifest parsing, and a pluggable
-// pipeline that replaces the Go-native engine.Pipeline.
 package plugin
 
 import (
@@ -11,7 +8,10 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"time"
+	"sync"
 
+	"github.com/fsnotify/fsnotify"
 	"github.com/torana-edge/torana-edge/internal/wasm"
 )
 
@@ -19,19 +19,16 @@ import (
 // Manifest
 // ============================================================================
 
-// Permission describes a host function a plugin requires.
 type Permission struct {
-	Name        string `json:"name"`        // e.g. "env.http_request"
-	Description string `json:"description"` // human-readable reason
+	Name        string `json:"name"`
+	Description string `json:"description"`
 }
 
-// Hook declares a hook point the plugin implements.
 type Hook struct {
-	Name     string `json:"name"`     // e.g. "on_chat_request", "on_stream_event"
-	Priority int    `json:"priority"` // lower = runs first (default 0)
+	Name     string `json:"name"`
+	Priority int    `json:"priority"`
 }
 
-// PluginManifest describes a plugin's metadata (from plugin.json).
 type PluginManifest struct {
 	Name        string       `json:"name"`
 	Version     string       `json:"version"`
@@ -44,27 +41,22 @@ type PluginManifest struct {
 // Discovery
 // ============================================================================
 
-// PluginBundle groups a parsed manifest with its WASM bytes.
 type PluginBundle struct {
 	Manifest  PluginManifest
 	WASMBytes []byte
 }
 
-// DiscoverPlugins scans a directory for plugin bundles.
-// Each bundle is a directory containing plugin.json and plugin.wasm.
 func DiscoverPlugins(pluginsDir string) ([]PluginBundle, error) {
 	if pluginsDir == "" {
 		pluginsDir = "./plugins"
 	}
-
 	entries, err := os.ReadDir(pluginsDir)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil, nil // empty is fine
+			return nil, nil
 		}
 		return nil, err
 	}
-
 	var bundles []PluginBundle
 	for _, e := range entries {
 		if !e.IsDir() {
@@ -87,30 +79,26 @@ func loadBundle(dir string) (*PluginBundle, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read manifest: %w", err)
 	}
-
 	var manifest PluginManifest
 	if err := json.Unmarshal(mBytes, &manifest); err != nil {
 		return nil, fmt.Errorf("parse manifest: %w", err)
 	}
-
 	wasmPath := filepath.Join(dir, "plugin.wasm")
 	wBytes, err := os.ReadFile(wasmPath)
 	if err != nil {
 		return nil, fmt.Errorf("read wasm: %w", err)
 	}
-
 	return &PluginBundle{Manifest: manifest, WASMBytes: wBytes}, nil
 }
 
 // ============================================================================
-// Pipeline — replaces engine.Pipeline
+// Pipeline
 // ============================================================================
 
-// PluginPipeline executes WASM plugins in configured order.
-// It replaces the Go-native engine.Pipeline.
 type PluginPipeline struct {
 	plugins []*loadedPlugin
 	runtime *wasm.Runtime
+	wg      sync.WaitGroup // active requests using this pipeline
 }
 
 type loadedPlugin struct {
@@ -118,67 +106,65 @@ type loadedPlugin struct {
 	plugin   *wasm.Plugin
 }
 
-// NewPipeline loads and orders plugins from the runtime and config.
 func NewPipeline(runtime *wasm.Runtime, config PluginConfig) (*PluginPipeline, error) {
+	return reloadPipeline(runtime, config)
+}
+
+func reloadPipeline(runtime *wasm.Runtime, config PluginConfig) (*PluginPipeline, error) {
 	bundles, err := DiscoverPlugins(config.Dir)
 	if err != nil {
 		return nil, err
 	}
-
-	// Index bundles by name.
 	byName := make(map[string]PluginBundle)
 	for _, b := range bundles {
 		byName[b.Manifest.Name] = b
 	}
-
-	// Load plugins in configured order.
 	var loaded []*loadedPlugin
 	order := config.Order
 	if len(order) == 0 {
-		// Default order: all discovered plugins by manifest name.
 		for _, b := range bundles {
 			order = append(order, b.Manifest.Name)
 		}
 		sort.Strings(order)
 	}
-
 	for _, name := range order {
 		bundle, ok := byName[name]
 		if !ok {
 			log.Printf("[plugin] %s not found in plugins dir, skipping", name)
 			continue
 		}
-
 		pl, err := runtime.LoadPlugin(name, bundle.WASMBytes)
 		if err != nil {
 			log.Printf("[plugin] %s: %v — skipping", name, err)
 			continue
 		}
-
 		loaded = append(loaded, &loadedPlugin{
 			manifest: bundle.Manifest,
 			plugin:   pl,
 		})
 		log.Printf("[plugin] %s ready — hooks: %v", name, hookNames(bundle.Manifest.Hooks))
 	}
-
 	return &PluginPipeline{plugins: loaded, runtime: runtime}, nil
 }
 
-// Close releases all loaded plugins.
-func (pp *PluginPipeline) Close() error {
-	return pp.runtime.Close()
-}
+func (pp *PluginPipeline) Acquire()  { pp.wg.Add(1) }
+func (pp *PluginPipeline) Release()  { pp.wg.Done() }
 
-// ============================================================================
-// Hook execution
-// ============================================================================
+// DrainAndClose waits for active requests then closes the runtime.
+func (pp *PluginPipeline) DrainAndClose() {
+	pp.wg.Wait()
+	if err := pp.runtime.Close(); err != nil {
+		log.Printf("[plugin] close old runtime: %v", err)
+	}
+}
 
 // RunOnChatRequest calls every plugin that implements on_chat_request.
 func (pp *PluginPipeline) RunOnChatRequest(ctx context.Context, chatJSON []byte) ([]byte, error) {
+	pp.Acquire()
+	defer pp.Release()
+
 	var result struct{ ChatJSON []byte }
 	result.ChatJSON = chatJSON
-
 	for _, lp := range pp.plugins {
 		if !hasHook(lp.manifest, "on_chat_request") {
 			continue
@@ -194,22 +180,19 @@ func (pp *PluginPipeline) RunOnChatRequest(ctx context.Context, chatJSON []byte)
 			result.ChatJSON = out.ChatJSON
 		}
 	}
-
 	return result.ChatJSON, nil
 }
 
 // ============================================================================
-// Plugin config (from config.json)
+// Plugin config
 // ============================================================================
 
-// PluginConfig represents the plugins section of config.json.
 type PluginConfig struct {
-	Dir    string                     `json:"dir"`    // e.g. "./plugins"
-	Order  []string                   `json:"order"`  // execution order
-	Config map[string]json.RawMessage `json:"config"` // per-plugin config
+	Dir    string                     `json:"dir"`
+	Order  []string                   `json:"order"`
+	Config map[string]json.RawMessage `json:"config"`
 }
 
-// hasHook checks if a plugin implements a given hook.
 func hasHook(m PluginManifest, hook string) bool {
 	for _, h := range m.Hooks {
 		if h.Name == hook {
@@ -225,4 +208,80 @@ func hookNames(hooks []Hook) []string {
 		names = append(names, h.Name)
 	}
 	return names
+}
+
+// ============================================================================
+// Hot-Reload (fsnotify)
+// ============================================================================
+
+// WatchPlugins starts a file watcher on the plugins directory. When a
+// .wasm or plugin.json file changes, it calls reloadFn with a new runtime
+// and config. The reloadFn should atomically swap the active pipeline.
+func WatchPlugins(ctx context.Context, dir string, config PluginConfig, reloadFn func(pipeline *PluginPipeline)) error {
+	if dir == "" {
+		dir = "./plugins"
+	}
+
+	w, err := fsnotify.NewWatcher()
+	if err != nil {
+		return fmt.Errorf("fsnotify: %w", err)
+	}
+
+	// Watch the plugins directory and subdirectories.
+	if err := w.Add(dir); err != nil {
+		w.Close()
+		return fmt.Errorf("fsnotify watch %s: %w", dir, err)
+	}
+
+	go func() {
+		defer w.Close()
+
+		// Debounce: batch rapid changes.
+		var debounceTimer *time.Timer
+		const debounce = 500 * time.Millisecond
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+
+			case event, ok := <-w.Events:
+				if !ok {
+					return
+				}
+				// Only reload on .wasm or plugin.json changes.
+				name := filepath.Base(event.Name)
+				if name != "plugin.wasm" && name != "plugin.json" {
+					continue
+				}
+				if event.Op&(fsnotify.Write|fsnotify.Create|fsnotify.Rename) == 0 {
+					continue
+				}
+
+				if debounceTimer != nil {
+					debounceTimer.Stop()
+				}
+				debounceTimer = time.AfterFunc(debounce, func() {
+					log.Printf("[plugin] file change detected: %s — reloading", event.Name)
+					newRT := wasm.NewRuntime(ctx)
+					pp, err := reloadPipeline(newRT, config)
+					if err != nil {
+						log.Printf("[plugin] reload failed: %v", err)
+						newRT.Close()
+						return
+					}
+					log.Printf("[plugin] hot-reload complete: %d plugins", len(pp.plugins))
+					reloadFn(pp)
+				})
+
+			case err, ok := <-w.Errors:
+				if !ok {
+					return
+				}
+				log.Printf("[plugin] fsnotify error: %v", err)
+			}
+		}
+	}()
+
+	return nil
 }
