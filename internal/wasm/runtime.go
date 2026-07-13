@@ -48,7 +48,7 @@ func (p *Plugin) SetGrants(g []string) {
 
 func (p *Plugin) hasGrant(perm string) bool {
 	if p.grants == nil {
-		return true // no grants configured = allow all
+		return false // fail-closed: no grants = no permissions
 	}
 	return p.grants[perm]
 }
@@ -252,19 +252,23 @@ func (r *Runtime) installHostFunctions() {
 		metrics.EmitPluginMetric(ctx, pluginName, name, int(metricType), value)
 	}).Export("emit_metric")
 
-	// host_call — permission-enforced callback registry.
+	// host_call — permission-enforced per-command.
 	env.NewFunctionBuilder().WithFunc(func(ctx context.Context, mod api.Module, cmdPtr, cmdLen, argsPtr, argsLen uint32) uint64 {
-		// Enforce permission: plugin must have "env.host_call" grant.
+		cmd := readStr(mod, cmdPtr, cmdLen)
+		args := readStr(mod, argsPtr, argsLen)
+
+		// Enforce per-command permission: env.host_call.<command>
 		r.mu.RLock()
 		p := r.plugins[mod.Name()]
 		r.mu.RUnlock()
-		if p == nil || !p.hasGrant("env.host_call") {
-			log.Printf("[wasm] permission denied: %s tried host_call", mod.Name())
+		perm := "env.host_call"
+		if cmd != "" {
+			perm = "env.host_call." + cmd
+		}
+		if p == nil || !p.hasGrant(perm) {
+			log.Printf("[wasm] permission denied: %s tried %s", mod.Name(), perm)
 			return writeStr(mod, `{"status":"error","message":"permission denied"}`)
 		}
-
-		cmd := readStr(mod, cmdPtr, cmdLen)
-		args := readStr(mod, argsPtr, argsLen)
 
 		var res string
 		switch cmd {
