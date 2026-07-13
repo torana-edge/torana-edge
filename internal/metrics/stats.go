@@ -21,6 +21,14 @@ type StatsTracker struct {
 func NewStatsTracker() *StatsTracker { return &StatsTracker{} }
 
 // RecordCompaction records a single compaction's savings.
+
+// RecordRequest records a single proxied request.
+func (s *StatsTracker) RecordRequest(bytesIn, bytesOut int64) {
+	atomic.AddInt64(&s.TotalRequests, 1)
+	atomic.AddInt64(&s.TotalBytesIn, bytesIn)
+	atomic.AddInt64(&s.TotalBytesOut, bytesOut)
+}
+
 func (s *StatsTracker) RecordCompaction(bytesIn, bytesOut int64) {
 	atomic.AddInt64(&s.TotalRequests, 1)
 	atomic.AddInt64(&s.TotalBytesIn, bytesIn)
