@@ -163,6 +163,8 @@ func New(cfg Config) (*Server, error) {
 			}
 
 			// --- WASM plugin pipeline (runs before native hooks) ----------
+			s.stats.RecordRequest(int64(len(body)), 0)
+
 			if pp := s.pluginPipeline.Load(); pp != nil {
 				pl := pp.(*plugin.PluginPipeline)
 				chatJSON, _ := json.Marshal(chat)
