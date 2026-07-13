@@ -120,6 +120,11 @@ func (r *Runtime) installHostFunctions() {
 		r.metaMu.RLock(); v := r.meta[key]; r.metaMu.RUnlock()
 		return writeStr(mod, v)
 	}).Export("meta_get")
+	env.NewFunctionBuilder().WithFunc(func(ctx context.Context, mod api.Module, message, fileName, line, column uint32) {
+		msg := readStr(mod, message, 0) // we don't know length easily here, but just logging it
+		log.Printf("[wasm] abort called: %s at %d:%d", msg, line, column)
+	}).Export("abort")
+
 	env.Instantiate(r.ctx)
 }
 
