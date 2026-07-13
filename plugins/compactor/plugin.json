@@ -1,0 +1,13 @@
+{
+  "name": "compactor",
+  "version": "0.3.0",
+  "description": "Compacts tool results using keyword extraction",
+  "hooks": [
+    {"name": "on_chat_request", "priority": 200}
+  ],
+  "permissions": [
+    {"name": "env.cache_get", "description": "Check compaction cache"},
+    {"name": "env.cache_set", "description": "Store compacted results"},
+    {"name": "env.log", "description": "Diagnostic logging"}
+  ]
+}

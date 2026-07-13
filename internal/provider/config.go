@@ -102,6 +102,9 @@ func Load(path string) (Config, error) {
 	if user.Offload.Provider != "" {
 		cfg.Offload.Provider = user.Offload.Provider
 	}
+	if user.Plugins.Dir != "" {
+		cfg.Plugins = user.Plugins
+	}
 
 	return cfg, nil
 }
