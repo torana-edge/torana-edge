@@ -26,7 +26,9 @@ import (
 	"github.com/torana-edge/torana-edge/internal/format"
 	"github.com/torana-edge/torana-edge/internal/metrics"
 	"github.com/torana-edge/torana-edge/internal/middleware"
+	"github.com/torana-edge/torana-edge/internal/plugin"
 	"github.com/torana-edge/torana-edge/internal/provider"
+	"github.com/torana-edge/torana-edge/internal/wasm"
 )
 
 // Config holds everything needed to start the proxy server.
@@ -52,12 +54,16 @@ type Server struct {
 	pipeline    *engine.Pipeline
 	intentCache cache.IntentCache
 	stats       *metrics.StatsTracker
+	// WASM plugin pipeline (loaded when configured)
+	pluginPipeline *plugin.PluginPipeline
+	wasmRuntime    *wasm.Runtime
 }
 
 // --- Construction -----------------------------------------------------------
 
 // New builds a Server and wires the middleware pipeline.
 func New(cfg Config) (*Server, error) {
+	log.Printf("DEBUG New: providers=%d plugins.dir=%q plugins.order=%v", len(cfg.Providers.Providers), cfg.Providers.Plugins.Dir, cfg.Providers.Plugins.Order)
 	if cfg.Port == "" {
 		cfg.Port = "8080"
 	}
@@ -95,10 +101,27 @@ func New(cfg Config) (*Server, error) {
 	}
 
 	s := &Server{
-		config:      cfg,
-		pipeline:    pipeline,
-		intentCache: intentCache,
-		stats:       statsTracker,
+		config:         cfg,
+		pipeline:       pipeline,
+		intentCache:    intentCache,
+		stats:          statsTracker,
+		pluginPipeline: nil, // set below if plugins configured
+	}
+
+	// --- WASM plugin pipeline (optional) ---------------------------------
+	if cfg.Providers.Plugins.Dir != "" {
+		s.wasmRuntime = wasm.NewRuntime(context.Background())
+		pp, err := plugin.NewPipeline(s.wasmRuntime, plugin.PluginConfig{
+			Dir:    cfg.Providers.Plugins.Dir,
+			Order:  cfg.Providers.Plugins.Order,
+			Config: cfg.Providers.Plugins.Config,
+		})
+		if err != nil {
+			log.Printf("plugin pipeline: %v", err)
+		} else {
+			s.pluginPipeline = pp
+			log.Printf("plugin pipeline: %d plugins loaded", len(cfg.Providers.Plugins.Order))
+		}
 	}
 
 	// --- reverse proxy ---------------------------------------------------
@@ -166,6 +189,20 @@ func New(cfg Config) (*Server, error) {
 				req.Body = io.NopCloser(bytes.NewReader(body))
 				req.ContentLength = int64(len(body))
 				return
+			}
+
+			// --- WASM plugin pipeline (runs before native hooks) ----------
+			if s.pluginPipeline != nil {
+				chatJSON, _ := json.Marshal(chat)
+				modifiedJSON, err := s.pluginPipeline.RunOnChatRequest(req.Context(), chatJSON)
+				if err != nil {
+					log.Printf("plugin pipeline error: %v", err)
+				} else if len(modifiedJSON) > 0 {
+					var modified engine.ChatRequest
+					if json.Unmarshal(modifiedJSON, &modified) == nil {
+						chat = &modified
+					}
+				}
 			}
 
 			chat = pipeline.RunBeforeRequest(req.Context(), req, chat)
@@ -333,6 +370,9 @@ func (s *Server) Serve(ln net.Listener) error {
 }
 
 func (s *Server) Shutdown(ctx context.Context) error {
+	if s.wasmRuntime != nil {
+		s.wasmRuntime.Close()
+	}
 	if s.intentCache != nil {
 		s.intentCache.Close()
 	}

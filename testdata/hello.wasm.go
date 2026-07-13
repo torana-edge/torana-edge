@@ -4,7 +4,7 @@ package main
 var heap [65536]byte
 var bump uint32
 
-//export alloc
+//go:wasmexport alloc
 func alloc(size uint32) uint32 {
 	if bump + size > uint32(len(heap)) {
 		return 0
@@ -14,10 +14,10 @@ func alloc(size uint32) uint32 {
 	return ptr
 }
 
-//export dealloc
+//go:wasmexport dealloc
 func dealloc(ptr, size uint32) {}
 
-//export on_chat_request
+//go:wasmexport on_chat_request
 func on_chat_request(ptr, size uint32) uint64 {
 	data := heap[ptr:ptr+size]
 	// Return a simple acknowledgement
