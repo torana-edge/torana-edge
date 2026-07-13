@@ -1,7 +1,6 @@
 package plugin_sdk
 
 import (
-	"encoding/json"
 	"sync"
 	"unsafe"
 )
@@ -40,10 +39,10 @@ func WriteResult(data []byte) uint64 {
 	return uint64(p)<<32 | uint64(len(data))
 }
 
-var chatRequestHandler func(req map[string]any) (map[string]any, error)
+var chatRequestHandler func(req []byte) ([]byte, error)
 
 // OnChatRequest registers the handler for chat requests.
-func OnChatRequest(handler func(req map[string]any) (map[string]any, error)) {
+func OnChatRequest(handler func(req []byte) ([]byte, error)) {
 	chatRequestHandler = handler
 }
 
@@ -53,16 +52,8 @@ func on_chat_request(ptr, size uint32) uint64 {
 		return 0
 	}
 	input := ReadBytes(ptr, size)
-	var req map[string]any
-	if err := json.Unmarshal(input, &req); err != nil {
-		return 0
-	}
-	res, err := chatRequestHandler(req)
-	if err != nil || res == nil {
-		return 0
-	}
-	out, err := json.Marshal(res)
-	if err != nil {
+	out, err := chatRequestHandler(input)
+	if err != nil || len(out) == 0 {
 		return 0
 	}
 	return WriteResult(out)

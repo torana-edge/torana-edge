@@ -8,28 +8,29 @@ import (
 
 func main() {}
 
-//go:wasmexport on_chat_request
-func on_chat_request(ptr, size uint32) uint64 {
-	input := sdk.ReadBytes(ptr, size)
-	var msg struct {
-		Chat     string `json:"chat"`
-		Messages []struct {
-			Role       string `json:"role"`
-			Content    string `json:"content"`
-			ToolCallID string `json:"tool_call_id"`
-		} `json:"messages"`
-	}
-	json.Unmarshal(input, &msg)
-	modified := false
-	for i := range msg.Messages {
-		if msg.Messages[i].Role == "tool" && len(msg.Messages[i].Content) > 2000 {
-			msg.Messages[i].Content = compact(msg.Messages[i].Content)
-			modified = true
+func init() {
+	sdk.OnChatRequest(func(input []byte) ([]byte, error) {
+		var msg struct {
+			Chat     string `json:"chat"`
+			Messages []struct {
+				Role       string `json:"role"`
+				Content    string `json:"content"`
+				ToolCallID string `json:"tool_call_id"`
+			} `json:"messages"`
 		}
-	}
-	if !modified { return 0 }
-	out, _ := json.Marshal(msg)
-	return sdk.WriteResult(out)
+		json.Unmarshal(input, &msg)
+		modified := false
+		for i := range msg.Messages {
+			if msg.Messages[i].Role == "tool" && len(msg.Messages[i].Content) > 2000 {
+				msg.Messages[i].Content = compact(msg.Messages[i].Content)
+				modified = true
+			}
+		}
+		if !modified {
+			return nil, nil
+		}
+		return json.Marshal(msg)
+	})
 }
 func compact(s string) string {
 	lines := strings.Split(s, "\n")
