@@ -123,8 +123,8 @@ func New(cfg Config) (*Server, error) {
 				}
 			}
 
-			if prov == nil || len(body) == 0 {
-				// Pass-through: no provider match, or empty body.
+			if prov == nil {
+				// Pass-through: no provider match.
 				req.Body = io.NopCloser(bytes.NewReader(body))
 				req.ContentLength = int64(len(body))
 				return
@@ -147,8 +147,8 @@ func New(cfg Config) (*Server, error) {
 			req.URL.Path = joinURLPath(target.Path, strippedPath)
 			req.URL.RawPath = ""
 
-			if fmt == nil {
-				// No format adapter for this provider's format — just forward raw.
+			if fmt == nil || len(body) == 0 {
+				// No format adapter, or empty body (e.g. GET /models). Just forward.
 				req.Body = io.NopCloser(bytes.NewReader(body))
 				req.ContentLength = int64(len(body))
 				return
