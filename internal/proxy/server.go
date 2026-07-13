@@ -19,6 +19,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/torana-edge/torana-edge/internal/engine"
@@ -51,8 +52,7 @@ type Server struct {
 	httpServer  *http.Server
 	stats       *metrics.StatsTracker
 	// WASM plugin pipeline (loaded when configured)
-	pluginPipeline *plugin.PluginPipeline
-	wasmRuntime    *wasm.Runtime
+	pluginPipeline atomic.Value // *plugin.PluginPipeline
 }
 
 // --- Construction -----------------------------------------------------------
@@ -73,13 +73,13 @@ func New(cfg Config) (*Server, error) {
 	s := &Server{
 		config:         cfg,
 		stats:          statsTracker,
-		pluginPipeline: nil, // set below if plugins configured
+		
 	}
 
 	// --- WASM plugin pipeline (optional) ---------------------------------
 	if cfg.Providers.Plugins.Dir != "" {
-		s.wasmRuntime = wasm.NewRuntime(context.Background())
-		pp, err := plugin.NewPipeline(s.wasmRuntime, plugin.PluginConfig{
+		rt := wasm.NewRuntime(context.Background())
+		pp, err := plugin.NewPipeline(rt, plugin.PluginConfig{
 			Dir:    cfg.Providers.Plugins.Dir,
 			Order:  cfg.Providers.Plugins.Order,
 			Config: cfg.Providers.Plugins.Config,
@@ -87,8 +87,14 @@ func New(cfg Config) (*Server, error) {
 		if err != nil {
 			log.Printf("plugin pipeline: %v", err)
 		} else {
-			s.pluginPipeline = pp
+			s.pluginPipeline.Store(pp)
 			log.Printf("plugin pipeline: %d plugins loaded", len(cfg.Providers.Plugins.Order))
+			go plugin.WatchPlugins(context.Background(), s.config.Providers.Plugins.Dir, plugin.PluginConfig{Dir: s.config.Providers.Plugins.Dir, Order: s.config.Providers.Plugins.Order, Config: s.config.Providers.Plugins.Config}, func(newPP *plugin.PluginPipeline) {
+				old := s.pluginPipeline.Swap(newPP)
+				if old != nil {
+					go old.(*plugin.PluginPipeline).DrainAndClose()
+				}
+			})
 		}
 	}
 
@@ -157,9 +163,10 @@ func New(cfg Config) (*Server, error) {
 			}
 
 			// --- WASM plugin pipeline (runs before native hooks) ----------
-			if s.pluginPipeline != nil {
+			if pp := s.pluginPipeline.Load(); pp != nil {
+				pl := pp.(*plugin.PluginPipeline)
 				chatJSON, _ := json.Marshal(chat)
-				modifiedJSON, err := s.pluginPipeline.RunOnChatRequest(req.Context(), chatJSON)
+				modifiedJSON, err := pl.RunOnChatRequest(req.Context(), chatJSON)
 				if err != nil {
 					log.Printf("plugin pipeline error: %v", err)
 				} else if len(modifiedJSON) > 0 {
@@ -324,8 +331,8 @@ func (s *Server) Serve(ln net.Listener) error {
 }
 
 func (s *Server) Shutdown(ctx context.Context) error {
-	if s.wasmRuntime != nil {
-		s.wasmRuntime.Close()
+	if pp := s.pluginPipeline.Load(); pp != nil {
+		pp.(*plugin.PluginPipeline).DrainAndClose()
 	}
 	if s.httpServer != nil {
 		return s.httpServer.Shutdown(ctx)
