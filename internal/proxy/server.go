@@ -212,8 +212,35 @@ func New(cfg Config) (*Server, error) {
 					return nil
 				}
 
-				// WASM response hooks not yet implemented for SSE
 				events := fmt.Stream.ParseStream(resp.Body)
+
+				// Hook WASM pipeline into the stream
+				if pp := s.pluginPipeline.Load(); pp != nil {
+					pl := pp.(*plugin.PluginPipeline)
+					out := make(chan engine.StreamEvent)
+					go func() {
+						defer close(out)
+						for event := range events {
+							// Call on_stream_chunk
+							eventJSON, _ := json.Marshal(event)
+							modifiedJSON, err := pl.RunOnStreamChunk(resp.Request.Context(), eventJSON)
+							if err != nil {
+								log.Printf("plugin stream error: %v", err)
+								out <- event
+							} else if len(modifiedJSON) > 0 {
+								var modified engine.StreamEvent
+								if json.Unmarshal(modifiedJSON, &modified) == nil {
+									out <- modified
+								} else {
+									out <- event
+								}
+							} else {
+								out <- event
+							}
+						}
+					}()
+					events = out
+				}
 
 				pr, pw := io.Pipe()
 				go func() {

@@ -183,6 +183,56 @@ func (pp *PluginPipeline) RunOnChatRequest(ctx context.Context, chatJSON []byte)
 	return result.ChatJSON, nil
 }
 
+// RunOnChatResponse calls every plugin that implements on_chat_response.
+func (pp *PluginPipeline) RunOnChatResponse(ctx context.Context, respJSON []byte) ([]byte, error) {
+	pp.Acquire()
+	defer pp.Release()
+
+	var result struct{ ChatJSON []byte `json:"chat"` }
+	result.ChatJSON = respJSON
+	for _, lp := range pp.plugins {
+		if !hasHook(lp.manifest, "on_chat_response") {
+			continue
+		}
+		var out struct{ ChatJSON string `json:"chat"` }
+		if err := lp.plugin.CallRequest(ctx, "on_chat_response", map[string]any{
+			"chat": string(result.ChatJSON),
+		}, &out); err != nil {
+			log.Printf("[plugin] %s on_chat_response: %v", lp.manifest.Name, err)
+			continue
+		}
+		if len(out.ChatJSON) > 0 {
+			result.ChatJSON = []byte(out.ChatJSON)
+		}
+	}
+	return result.ChatJSON, nil
+}
+
+// RunOnStreamChunk calls every plugin that implements on_stream_chunk.
+func (pp *PluginPipeline) RunOnStreamChunk(ctx context.Context, chunkJSON []byte) ([]byte, error) {
+	pp.Acquire()
+	defer pp.Release()
+
+	var result struct{ ChunkJSON []byte `json:"chunk"` }
+	result.ChunkJSON = chunkJSON
+	for _, lp := range pp.plugins {
+		if !hasHook(lp.manifest, "on_stream_chunk") {
+			continue
+		}
+		var out struct{ ChunkJSON string `json:"chunk"` }
+		if err := lp.plugin.CallRequest(ctx, "on_stream_chunk", map[string]any{
+			"chunk": string(result.ChunkJSON),
+		}, &out); err != nil {
+			log.Printf("[plugin] %s on_stream_chunk: %v", lp.manifest.Name, err)
+			continue
+		}
+		if len(out.ChunkJSON) > 0 {
+			result.ChunkJSON = []byte(out.ChunkJSON)
+		}
+	}
+	return result.ChunkJSON, nil
+}
+
 // ============================================================================
 // Plugin config
 // ============================================================================
