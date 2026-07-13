@@ -136,11 +136,35 @@ func (r *Runtime) installHostFunctions() {
 		}
 	}).Export("log")
 
+	env.NewFunctionBuilder().WithFunc(func(ctx context.Context, mod api.Module, message, fileName, lineNumber, columnNumber uint32) {
+		log.Printf("[wasm] abort at line %d col %d", lineNumber, columnNumber)
+	}).Export("abort")
+
 	env.NewFunctionBuilder().WithFunc(func(ctx context.Context, mod api.Module, metricType int32, ptr, length uint32, value float64) {
 		name := readStr(mod, ptr, length)
 		pluginName := mod.Name()
 		metrics.EmitPluginMetric(ctx, pluginName, name, int(metricType), value)
 	}).Export("emit_metric")
+
+	env.NewFunctionBuilder().WithFunc(func(ctx context.Context, mod api.Module, cmdPtr, cmdLen, argsPtr, argsLen uint32) uint64 {
+		cmd := readStr(mod, cmdPtr, cmdLen)
+		args := readStr(mod, argsPtr, argsLen)
+		
+		// Very simple stub registry for host callbacks
+		var res string
+		switch cmd {
+		case "torana_db_query":
+			// In reality, this would execute a DB query and return JSON.
+			res = `{"status":"ok","db_result":"stub"}`
+		case "torana_kms_decrypt":
+			// In reality, this would decrypt the args payload via KMS.
+			res = `{"status":"ok","decrypted":"` + args + `"}`
+		default:
+			res = `{"status":"error","message":"unknown host call"}`
+		}
+		
+		return writeStr(mod, res)
+	}).Export("host_call")
 
 	env.Instantiate(r.ctx)
 }
