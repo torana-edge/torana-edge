@@ -87,6 +87,7 @@ func NewRuntime(ctx context.Context) *Runtime {
 		meta:    make(map[string]string),
 		cache:   make(map[string]string),
 	}
+	wasi_snapshot_preview1.MustInstantiate(r.ctx, r.runtime)
 	r.installHostFunctions()
 	return r
 }
@@ -94,7 +95,6 @@ func NewRuntime(ctx context.Context) *Runtime {
 func (r *Runtime) Close() error { return r.runtime.Close(r.ctx) }
 
 func (r *Runtime) LoadPlugin(name string, wasmBytes []byte) (*Plugin, error) {
-	wasi_snapshot_preview1.MustInstantiate(r.ctx, r.runtime)
 	mod, err := r.runtime.InstantiateWithConfig(r.ctx, wasmBytes,
 		wazero.NewModuleConfig().WithName(name))
 	if err != nil { return nil, fmt.Errorf("wasm: %s: %w", name, err) }
