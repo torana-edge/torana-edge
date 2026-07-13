@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"math"
 	"os"
 	"sync"
 
@@ -13,62 +14,166 @@ import (
 	"github.com/torana-edge/torana-edge/internal/metrics"
 )
 
+// ============================================================================
+// Plugin — WASM module with instance pooling and permission enforcement
+// ============================================================================
+
+// poolSize is the number of concurrent WASM instances per plugin.
+// For single-user local use this is adequate; production should increase.
+const poolSize = 4
+
 type Plugin struct {
-	name   string
-	mod    api.Module
-	grants map[string]bool
-	mu     sync.Mutex
+	name      string
+	wasmBytes []byte
+	grants    map[string]bool
+	runtime   wazero.Runtime
+
+	// Instance pool for concurrent request handling.
+	pool   chan *pluginInstance
+	poolMu sync.Mutex
+}
+
+type pluginInstance struct {
+	mod api.Module
 }
 
 func (p *Plugin) Name() string { return p.name }
+
 func (p *Plugin) SetGrants(g []string) {
 	p.grants = make(map[string]bool)
-	for _, x := range g { p.grants[x] = true }
+	for _, x := range g {
+		p.grants[x] = true
+	}
 }
 
-// CallRequest passes byte payload to the WASM hook, and returns the result.
-func (p *Plugin) CallRequest(ctx context.Context, hook string, inBytes []byte, output *[]byte) error {
-	fn := p.mod.ExportedFunction(hook)
-	if fn == nil { return nil }
-	allocFn := p.mod.ExportedFunction("alloc")
-	if allocFn == nil { return fmt.Errorf("wasm: %s missing alloc", p.name) }
-	deallocFn := p.mod.ExportedFunction("dealloc")
+func (p *Plugin) hasGrant(perm string) bool {
+	if p.grants == nil {
+		return true // no grants configured = allow all
+	}
+	return p.grants[perm]
+}
 
-	p.mu.Lock()
-	defer p.mu.Unlock()
+// acquire returns a plugin instance from the pool.
+func (p *Plugin) acquire(ctx context.Context) (*pluginInstance, error) {
+	select {
+	case inst := <-p.pool:
+		if inst != nil {
+			return inst, nil
+		}
+	default:
+	}
+	// Pool empty — create a new instance.
+	return p.newInstance(ctx)
+}
+
+// release returns an instance to the pool.
+func (p *Plugin) release(inst *pluginInstance) {
+	select {
+	case p.pool <- inst:
+	default:
+		// Pool full — close the extra instance.
+		inst.mod.Close(context.Background())
+	}
+}
+
+func (p *Plugin) newInstance(ctx context.Context) (*pluginInstance, error) {
+	p.poolMu.Lock()
+	defer p.poolMu.Unlock()
+
+	mod, err := p.runtime.InstantiateWithConfig(ctx, p.wasmBytes,
+		wazero.NewModuleConfig().WithName(p.name).
+			WithSysWalltime().WithSysNanotime().
+			WithStdout(os.Stdout).WithStderr(os.Stderr))
+	if err != nil {
+		return nil, err
+	}
+	init := mod.ExportedFunction("_initialize")
+	if init != nil {
+		init.Call(ctx)
+	}
+	return &pluginInstance{mod: mod}, nil
+}
+
+// CallRequest passes byte payload to the WASM hook and returns the result.
+// Uses instance pooling for concurrent request handling.
+func (p *Plugin) CallRequest(ctx context.Context, hook string, inBytes []byte, output *[]byte) error {
+	fn, allocFn, deallocFn, err := p.resolveExports()
+	if err != nil {
+		return err
+	}
+	if fn == nil {
+		return nil
+	}
+
+	// Acquire an instance from the pool.
+	inst, err := p.acquire(ctx)
+	if err != nil {
+		return err
+	}
+	defer p.release(inst)
+
+	mod := inst.mod
 
 	// Allocate in WASM linear memory.
 	r, err := allocFn.Call(ctx, uint64(len(inBytes)))
-	if err != nil { return err }
+	if err != nil {
+		return err
+	}
 	inPtr := uint32(r[0])
-
-	// Write to WASM linear memory.
-	p.mod.Memory().Write(inPtr, inBytes)
+	mod.Memory().Write(inPtr, inBytes)
 
 	// Call hook.
 	ret, err := fn.Call(ctx, uint64(inPtr), uint64(len(inBytes)))
-	if deallocFn != nil { deallocFn.Call(ctx, uint64(inPtr), uint64(len(inBytes))) }
-	if err != nil { return err }
+	if deallocFn != nil {
+		deallocFn.Call(ctx, uint64(inPtr), uint64(len(inBytes)))
+	}
+	if err != nil {
+		return err
+	}
 
-	// Read result from WASM linear memory.
+	// Read result.
 	if len(ret) > 0 && ret[0] != 0 {
 		v := ret[0]
 		outPtr := uint32(v >> 32)
 		outLen := uint32(v & 0xFFFFFFFF)
 		if outPtr != 0 && outLen > 0 {
-			b, ok := p.mod.Memory().Read(outPtr, outLen)
-			if ok { 
-				// Copy the bytes so they survive memory grow/free
+			b, ok := mod.Memory().Read(outPtr, outLen)
+			if ok {
 				res := make([]byte, len(b))
 				copy(res, b)
 				*output = res
-				if deallocFn != nil { deallocFn.Call(ctx, uint64(outPtr), uint64(outLen)) }
+				if deallocFn != nil {
+					deallocFn.Call(ctx, uint64(outPtr), uint64(outLen))
+				}
 				return nil
 			}
 		}
 	}
 	return nil
 }
+
+// resolveExports looks up hook, alloc, and dealloc functions.
+// The hook is resolved per-instance since it's exported from each module.
+func (p *Plugin) resolveExports() (hook, alloc, dealloc api.Function, err error) {
+	// Get a quick instance just to resolve exports.
+	inst, err := p.acquire(context.Background())
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	defer p.release(inst)
+
+	hook = inst.mod.ExportedFunction("on_chat_request")
+	alloc = inst.mod.ExportedFunction("alloc")
+	if alloc == nil {
+		return nil, nil, nil, fmt.Errorf("wasm: %s missing alloc", p.name)
+	}
+	dealloc = inst.mod.ExportedFunction("dealloc")
+	return hook, alloc, dealloc, nil
+}
+
+// ============================================================================
+// Runtime
+// ============================================================================
 
 type Runtime struct {
 	ctx     context.Context
@@ -97,25 +202,24 @@ func NewRuntime(ctx context.Context) *Runtime {
 func (r *Runtime) Close() error { return r.runtime.Close(r.ctx) }
 
 func (r *Runtime) LoadPlugin(name string, wasmBytes []byte) (*Plugin, error) {
-	mod, err := r.runtime.InstantiateWithConfig(r.ctx, wasmBytes,
-		wazero.NewModuleConfig().WithName(name).
-			WithSysWalltime().
-			WithSysNanotime().
-			WithStdout(os.Stdout).
-			WithStderr(os.Stderr))
-	if err != nil { return nil, fmt.Errorf("wasm: %s: %w", name, err) }
-
-	// Must call _initialize for reactor libraries before alloc works.
-	init := mod.ExportedFunction("_initialize")
-	if init != nil {
-		if _, err := init.Call(r.ctx); err != nil {
-			return nil, fmt.Errorf("wasm: %s _initialize: %w", name, err)
-		}
+	p := &Plugin{
+		name:      name,
+		wasmBytes: wasmBytes,
+		runtime:   r.runtime,
+		pool:      make(chan *pluginInstance, poolSize),
 	}
 
-	p := &Plugin{name: name, mod: mod}
-	r.mu.Lock(); r.plugins[name] = p; r.mu.Unlock()
-	log.Printf("[wasm] loaded plugin %s", name)
+	// Pre-warm the pool with one instance.
+	inst, err := p.newInstance(r.ctx)
+	if err != nil {
+		return nil, fmt.Errorf("wasm: %s: %w", name, err)
+	}
+	p.pool <- inst
+
+	r.mu.Lock()
+	r.plugins[name] = p
+	r.mu.Unlock()
+	log.Printf("[wasm] loaded plugin %s (pool=%d)", name, poolSize)
 	return p, nil
 }
 
@@ -123,7 +227,9 @@ func (r *Runtime) installHostFunctions() {
 	env := r.runtime.NewHostModuleBuilder("env")
 	env.NewFunctionBuilder().WithFunc(func(ctx context.Context, mod api.Module, kPtr, kLen uint32) uint64 {
 		key := readStr(mod, kPtr, kLen)
-		r.metaMu.RLock(); v := r.meta[key]; r.metaMu.RUnlock()
+		r.metaMu.RLock()
+		v := r.meta[key]
+		r.metaMu.RUnlock()
 		return writeStr(mod, v)
 	}).Export("meta_get")
 
@@ -146,23 +252,30 @@ func (r *Runtime) installHostFunctions() {
 		metrics.EmitPluginMetric(ctx, pluginName, name, int(metricType), value)
 	}).Export("emit_metric")
 
+	// host_call — permission-enforced callback registry.
 	env.NewFunctionBuilder().WithFunc(func(ctx context.Context, mod api.Module, cmdPtr, cmdLen, argsPtr, argsLen uint32) uint64 {
+		// Enforce permission: plugin must have "env.host_call" grant.
+		r.mu.RLock()
+		p := r.plugins[mod.Name()]
+		r.mu.RUnlock()
+		if p == nil || !p.hasGrant("env.host_call") {
+			log.Printf("[wasm] permission denied: %s tried host_call", mod.Name())
+			return writeStr(mod, `{"status":"error","message":"permission denied"}`)
+		}
+
 		cmd := readStr(mod, cmdPtr, cmdLen)
 		args := readStr(mod, argsPtr, argsLen)
-		
-		// Very simple stub registry for host callbacks
+
 		var res string
 		switch cmd {
 		case "torana_db_query":
-			// In reality, this would execute a DB query and return JSON.
 			res = `{"status":"ok","db_result":"stub"}`
 		case "torana_kms_decrypt":
-			// In reality, this would decrypt the args payload via KMS.
 			res = `{"status":"ok","decrypted":"` + args + `"}`
 		default:
 			res = `{"status":"error","message":"unknown host call"}`
 		}
-		
+
 		return writeStr(mod, res)
 	}).Export("host_call")
 
@@ -171,13 +284,35 @@ func (r *Runtime) installHostFunctions() {
 
 func readStr(mod api.Module, ptr, length uint32) string {
 	b, ok := mod.Memory().Read(ptr, length)
-	if !ok { return "" }
+	if !ok {
+		return ""
+	}
 	return string(b)
 }
+
+// writeStr allocates space in WASM linear memory and writes the string.
+// Uses Memory().Grow() to ensure sufficient pages before writing.
 func writeStr(mod api.Module, s string) uint64 {
 	b := []byte(s)
-	if len(b) == 0 { return 0 }
-	ptr := mod.Memory().Size()
-	mod.Memory().Write(ptr, b)
+	if len(b) == 0 {
+		return 0
+	}
+
+	mem := mod.Memory()
+	currentSize := mem.Size()
+	needed := currentSize + uint32(len(b))
+
+	// Grow if needed (each page is 64KB).
+	if needed > currentSize {
+		pagesNeeded := uint32(math.Ceil(float64(needed-currentSize) / 65536))
+		if _, ok := mem.Grow(pagesNeeded); !ok {
+			log.Printf("[wasm] writeStr: grow(%d) failed — memory full", pagesNeeded)
+			return 0
+		}
+	}
+
+	// Re-read size after potential grow.
+	ptr := mem.Size() - uint32(len(b))
+	mem.Write(ptr, b)
 	return uint64(ptr)<<32 | uint64(len(b))
 }
