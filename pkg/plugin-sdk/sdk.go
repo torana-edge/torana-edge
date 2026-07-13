@@ -1,3 +1,5 @@
+//go:build wasip1
+
 package plugin_sdk
 
 import (
@@ -57,4 +59,98 @@ func on_chat_request(ptr, size uint32) uint64 {
 		return 0
 	}
 	return WriteResult(out)
+}
+
+var chatResponseHandler func(resp []byte) ([]byte, error)
+
+// OnChatResponse registers the handler for chat responses.
+func OnChatResponse(handler func(resp []byte) ([]byte, error)) {
+	chatResponseHandler = handler
+}
+
+//go:wasmexport on_chat_response
+func on_chat_response(ptr, size uint32) uint64 {
+	if chatResponseHandler == nil {
+		return 0
+	}
+	input := ReadBytes(ptr, size)
+	out, err := chatResponseHandler(input)
+	if err != nil || len(out) == 0 {
+		return 0
+	}
+	return WriteResult(out)
+}
+
+var streamChunkHandler func(chunk []byte) ([]byte, error)
+
+// OnStreamChunk registers the handler for stream chunks.
+func OnStreamChunk(handler func(chunk []byte) ([]byte, error)) {
+	streamChunkHandler = handler
+}
+
+//go:wasmexport on_stream_chunk
+func on_stream_chunk(ptr, size uint32) uint64 {
+	if streamChunkHandler == nil {
+		return 0
+	}
+	input := ReadBytes(ptr, size)
+	out, err := streamChunkHandler(input)
+	if err != nil || len(out) == 0 {
+		return 0
+	}
+	return WriteResult(out)
+}
+
+//go:wasmimport env log
+func hostLog(level int32, ptr uint32, length uint32)
+
+const (
+	LogLevelDebug = 0
+	LogLevelInfo  = 1
+)
+
+func Log(msg string, level int32) {
+	b := []byte(msg)
+	if len(b) == 0 {
+		return
+	}
+	ptr := alloc(uint32(len(b)))
+	copy(ReadBytes(ptr, uint32(len(b))), b)
+	hostLog(level, ptr, uint32(len(b)))
+	dealloc(ptr, uint32(len(b)))
+}
+
+//go:wasmimport env host_call
+func hostCall(cmdPtr uint32, cmdLen uint32, argsPtr uint32, argsLen uint32) uint64
+
+// HostCall invokes a registered host function by name.
+func HostCall(cmd string, args string) (string, error) {
+	cb := []byte(cmd)
+	ab := []byte(args)
+	if len(cb) == 0 {
+		return "", nil
+	}
+	
+	cPtr := alloc(uint32(len(cb)))
+	copy(ReadBytes(cPtr, uint32(len(cb))), cb)
+	defer dealloc(cPtr, uint32(len(cb)))
+
+	var aPtr uint32
+	if len(ab) > 0 {
+		aPtr = alloc(uint32(len(ab)))
+		copy(ReadBytes(aPtr, uint32(len(ab))), ab)
+		defer dealloc(aPtr, uint32(len(ab)))
+	}
+
+	ret := hostCall(cPtr, uint32(len(cb)), aPtr, uint32(len(ab)))
+	if ret == 0 {
+		return "", nil
+	}
+	
+	outPtr := uint32(ret >> 32)
+	outLen := uint32(ret & 0xFFFFFFFF)
+	res := string(ReadBytes(outPtr, outLen))
+	dealloc(outPtr, outLen)
+	
+	return res, nil
 }
