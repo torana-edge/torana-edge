@@ -1,18 +1,18 @@
 package main
 
-import sdk "github.com/torana-edge/torana-edge/pkg/plugin-sdk"
+import (
+	"encoding/json"
+	sdk "github.com/torana-edge/torana-edge/pkg/plugin-sdk"
+)
 
-func main() { sdk.Init() }
+func main() {}
 
-//go:export alloc
-func alloc(size uint32) uint32 { return sdk.Alloc(size) }
-
-//go:export dealloc
-func dealloc(ptr, size uint32) {}
-
-//go:export on_chat_request
+//go:wasmexport on_chat_request
 func on_chat_request(ptr, size uint32) uint64 {
-	input := sdk.GetBytes(ptr, size)
-	_ = input
-	return 0 // pass-through: Go host handles tool injection
+	input := sdk.ReadBytes(ptr, size)
+	var msg map[string]any
+	json.Unmarshal(input, &msg)
+	msg["handled_by"] = "delegator.wasm"
+	out, _ := json.Marshal(msg)
+	return sdk.WriteResult(out)
 }

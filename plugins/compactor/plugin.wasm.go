@@ -3,21 +3,14 @@ package main
 import (
 	"encoding/json"
 	"strings"
-
 	sdk "github.com/torana-edge/torana-edge/pkg/plugin-sdk"
 )
 
-func main() { sdk.Init() }
+func main() {}
 
-//go:export alloc
-func alloc(size uint32) uint32 { return sdk.Alloc(size) }
-
-//go:export dealloc
-func dealloc(ptr, size uint32) {}
-
-//go:export on_chat_request
+//go:wasmexport on_chat_request
 func on_chat_request(ptr, size uint32) uint64 {
-	input := sdk.GetBytes(ptr, size)
+	input := sdk.ReadBytes(ptr, size)
 	var msg struct {
 		Chat     string `json:"chat"`
 		Messages []struct {
@@ -26,46 +19,21 @@ func on_chat_request(ptr, size uint32) uint64 {
 			ToolCallID string `json:"tool_call_id"`
 		} `json:"messages"`
 	}
-	if json.Unmarshal(input, &msg) != nil {
-		return 0
-	}
+	json.Unmarshal(input, &msg)
 	modified := false
 	for i := range msg.Messages {
-		m := &msg.Messages[i]
-		if m.Role != "tool" || len(m.Content) < 2000 {
-			continue
-		}
-		compacted := compactDeterministic(m.Content)
-		if compacted != m.Content && len(compacted) < len(m.Content) {
-			m.Content = compacted
+		if msg.Messages[i].Role == "tool" && len(msg.Messages[i].Content) > 2000 {
+			msg.Messages[i].Content = compact(msg.Messages[i].Content)
 			modified = true
 		}
 	}
-	if !modified {
-		return 0
-	}
-	return sdk.WriteResult(msg)
+	if !modified { return 0 }
+	out, _ := json.Marshal(msg)
+	return sdk.WriteResult(out)
 }
-
-func compactDeterministic(content string) string {
-	indicators := []string{"func ", "type ", "import ", "package ", "//", "var ", "const ",
-		"return ", "error", "log.", "config", "server", "plugin", "wasm"}
-	lines := strings.Split(content, "\n")
-	var kept []string
-	for _, line := range lines {
-		lower := strings.ToLower(line)
-		for _, kw := range indicators {
-			if strings.Contains(lower, kw) {
-				kept = append(kept, line)
-				break
-			}
-		}
-	}
-	if len(kept) == 0 {
-		return content
-	}
-	if len(kept) > 150 {
-		kept = kept[:150]
-	}
-	return strings.Join(kept, "\n")
+func compact(s string) string {
+	lines := strings.Split(s, "\n")
+	for _, l := range lines { _ = l }
+	return s[:min(500, len(s))]
 }
+func min(a, b int) int { if a < b { return a }; return b }
