@@ -1,0 +1,15 @@
+{
+  "name": "schema_translator",
+  "version": "0.3.0",
+  "description": "Injects intent field and converts KV arrays in tool schemas",
+  "hooks": [
+    {"name": "on_chat_request", "priority": 100}
+  ],
+  "permissions": [
+    {"name": "env.meta_get", "description": "Read mutation registry"},
+    {"name": "env.meta_set", "description": "Write mutation registry"},
+    {"name": "env.cache_get", "description": "Check intent cache"},
+    {"name": "env.cache_set", "description": "Store extracted intents"},
+    {"name": "env.log", "description": "Diagnostic logging"}
+  ]
+}
