@@ -11,57 +11,46 @@ Torana uses `wazero` for executing WASM plugins. For standard Go (not TinyGo), c
 GOOS=wasip1 GOARCH=wasm go build -buildmode=c-shared -o plugin.wasm plugin.wasm.go
 ```
 
-## 2. JSON Structure and Torana's Payload
+## 2. Protobuf Structure and Torana's Payload
 
-When Torana invokes `on_chat_request`, it passes a stringified version of the `engine.ChatRequest`. 
+Torana uses a strict Protobuf contract for all WASM boundaries to prevent schema corruption.
+When Torana invokes `on_chat_request`, it passes serialized bytes of `pb.ChatRequest`. 
 
-The payload your plugin receives looks like this:
-```json
-{
-  "chat": "{\"Model\": \"claude-3-5-sonnet-20241022\", \"Messages\": [...], \"Tools\": [...]}"
-}
-```
+The Go plugin SDK handles all the underlying memory allocation, pointer packing, and Protobuf marshaling for you.
 
-**CRITICAL:** Do NOT attempt to unmarshal the Torana payload directly into an `engine.ChatRequest` or a struct mirroring it. If you do, you will miss the outer `chat` wrapper.
+**CRITICAL:** Do NOT attempt to read raw JSON or use `map[string]any`. You will lose the benefits of Protobuf unknown field preservation.
 
 ### The Correct Unmarshaling Pattern
 
-Use this two-step pattern to modify specific parts of the request without losing fields:
+Use the generated `pb` types and the `sdk` handlers. The SDK automatically unmarshals the request and marshals the response, fully preserving unknown fields under the hood.
 
 ```go
-sdk.OnChatRequest(func(input []byte) ([]byte, error) {
-	// Step 1: Unwrap the Torana envelope
-	var wrapper struct {
-		Chat string `json:"chat"`
-	}
-	json.Unmarshal(input, &wrapper)
-	if wrapper.Chat == "" { 
-        return nil, nil // Nothing to modify
-    }
+package main
 
-	// Step 2: Decode the actual ChatRequest payload.
-    // Use map[string]any to ensure that fields you don't explicitly handle 
-    // (e.g. streaming, temperature) are preserved during serialization.
-	var fullReq map[string]any
-	json.Unmarshal([]byte(wrapper.Chat), &fullReq)
+import (
+	"github.com/torana-edge/torana-edge/pkg/pb"
+	sdk "github.com/torana-edge/torana-edge/pkg/plugin-sdk"
+)
 
-	// Step 3: Extract and modify the fields you care about
-    modified := false
-	if toolsAny, ok := fullReq["Tools"].([]any); ok {
-        // modify toolsAny...
-        modified = true
-    }
+func main() {
+	sdk.OnChatRequest(func(req *pb.ChatRequest) (*pb.ChatRequest, error) {
+		modified := false
 
-	// Step 4: Short-circuit if no modifications are needed
-	if !modified {
-		return nil, nil
-	}
+		// Extract and modify the fields you care about
+		if len(req.Tools) > 0 {
+			// modify req.Tools...
+			modified = true
+		}
 
-	// Step 5: Repackage and return
-	chatBytes, _ := json.Marshal(fullReq)
-	wrapper.Chat = string(chatBytes)
-	return json.Marshal(wrapper)
-})
+		// Short-circuit if no modifications are needed
+		if !modified {
+			return nil, nil
+		}
+
+		// Return the modified request
+		return req, nil
+	})
+}
 ```
 
 ## 3. Wazero Engine Configuration

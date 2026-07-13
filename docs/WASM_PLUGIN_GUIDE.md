@@ -6,10 +6,10 @@ This document is a critical reference for implementing WebAssembly (WASM) plugin
 WASM plugins in Torana run inside a highly restricted sandbox (using `wazero`). 
 The Go host (Torana) and the guest (the plugin) do NOT share variables, structs, or garbage collection. They only share a single, flat byte array called **Linear Memory**.
 
-To pass a JSON string from the host to the plugin:
+To pass a Protobuf byte array from the host to the plugin:
 1. The host calls the plugin's `alloc(size)` function.
 2. The plugin allocates memory and returns a 32-bit pointer.
-3. The host writes the JSON string into the plugin's memory at that pointer.
+3. The host writes the Protobuf byte array into the plugin's memory at that pointer.
 4. The host calls the plugin's hook (e.g., `on_chat_request(ptr, size)`).
 
 ## 2. The Golden Rule of Memory Allocation
@@ -24,7 +24,7 @@ export function alloc(size: u32): u32 {
   return ptr;
 }
 ```
-*Why it fails:* The `bump` pointer only goes up. Even if the host calls `dealloc`, the memory is never reused. After a few megabytes of JSON requests, the plugin will crash the server.
+*Why it fails:* The `bump` pointer only goes up. Even if the host calls `dealloc`, the memory is never reused. After a few megabytes of Protobuf requests, the plugin will crash the server.
 
 ### ✅ CORRECT:
 Use the standard library allocator for your language.
@@ -89,4 +89,4 @@ When passing strings TO the host, you don't need to pack them into a 64-bit inte
 2. Did I implement both `alloc` and `dealloc`?
 3. Did I pack the return pointer and size into a `u64`?
 4. Did I return `0` for passthrough?
-5. Did I parse and serialize JSON properly within the memory bounds?
+5. Did I parse and serialize Protobuf properly within the memory bounds?
