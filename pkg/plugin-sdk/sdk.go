@@ -62,7 +62,7 @@ func alloc(size uint32) uint32 {
 func dealloc(ptr, size uint32) {}
 
 // Alloc is the public alias for alloc — used by plugin main packages
-// that must define their own //go:export wrappers.
+// that must define their own //go:wasmexport wrappers.
 func Alloc(size uint32) uint32 { return alloc(size) }
 
 // HostCall serializes input, calls alloc, copies to heap, and returns [ptr, len].
