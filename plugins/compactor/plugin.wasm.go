@@ -1,33 +1,19 @@
 package main
 
 import (
-	"encoding/json"
 	"strings"
 	sdk "github.com/torana-edge/torana-edge/pkg/plugin-sdk"
+	"github.com/torana-edge/torana-edge/pkg/pb"
 )
 
 func main() {}
 
 func init() {
-	sdk.OnChatRequest(func(input []byte) ([]byte, error) {
-		var wrapper struct {
-			Chat string `json:"chat"`
-		}
-		json.Unmarshal(input, &wrapper)
-		if wrapper.Chat == "" { return nil, nil }
-
-		var fullReq map[string]any
-		json.Unmarshal([]byte(wrapper.Chat), &fullReq)
-
-		messagesAny, _ := fullReq["Messages"].([]any)
+	sdk.OnChatRequest(func(req *pb.ChatRequest) (*pb.ChatRequest, error) {
 		modified := false
-		for _, mAny := range messagesAny {
-			m, _ := mAny.(map[string]any)
-			if m == nil { continue }
-			role, _ := m["Role"].(string)
-			content, _ := m["Content"].(string)
-			if role == "tool" && len(content) > 2000 {
-				m["Content"] = compact(content)
+		for _, m := range req.Messages {
+			if m.Role == "tool" && len(m.Content) > 2000 {
+				m.Content = compact(m.Content)
 				modified = true
 			}
 		}
@@ -36,9 +22,7 @@ func init() {
 			return nil, nil
 		}
 
-		chatBytes, _ := json.Marshal(fullReq)
-		wrapper.Chat = string(chatBytes)
-		return json.Marshal(wrapper)
+		return req, nil
 	})
 }
 

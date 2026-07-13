@@ -167,15 +167,11 @@ func New(cfg Config) (*Server, error) {
 
 			if pp := s.pluginPipeline.Load(); pp != nil {
 				pl := pp.(*plugin.PluginPipeline)
-				chatJSON, _ := json.Marshal(chat)
-				modifiedJSON, err := pl.RunOnChatRequest(req.Context(), chatJSON)
+				modified, err := pl.RunOnChatRequest(req.Context(), chat)
 				if err != nil {
 					log.Printf("plugin pipeline error: %v", err)
-				} else if len(modifiedJSON) > 0 {
-					var modified engine.ChatRequest
-					if json.Unmarshal(modifiedJSON, &modified) == nil {
-						chat = &modified
-					}
+				} else if modified != nil {
+					chat = modified
 				}
 			}
 
@@ -222,18 +218,12 @@ func New(cfg Config) (*Server, error) {
 						defer close(out)
 						for event := range events {
 							// Call on_stream_chunk
-							eventJSON, _ := json.Marshal(event)
-							modifiedJSON, err := pl.RunOnStreamChunk(resp.Request.Context(), eventJSON)
+							modified, err := pl.RunOnStreamChunk(resp.Request.Context(), &event)
 							if err != nil {
 								log.Printf("plugin stream error: %v", err)
 								out <- event
-							} else if len(modifiedJSON) > 0 {
-								var modified engine.StreamEvent
-								if json.Unmarshal(modifiedJSON, &modified) == nil {
-									out <- modified
-								} else {
-									out <- event
-								}
+							} else if modified != nil {
+								out <- *modified
 							} else {
 								out <- event
 							}

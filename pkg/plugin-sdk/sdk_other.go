@@ -2,14 +2,16 @@
 
 package plugin_sdk
 
+import "github.com/torana-edge/torana-edge/pkg/pb"
+
 func alloc(size uint32) uint32 { return 0 }
 func dealloc(ptr uint32, size uint32) {}
 func ReadBytes(ptr, size uint32) []byte { return nil }
 func WriteResult(data []byte) uint64 { return 0 }
 
-func OnChatRequest(handler func(req []byte) ([]byte, error)) {}
-func OnChatResponse(handler func(resp []byte) ([]byte, error)) {}
-func OnStreamChunk(handler func(chunk []byte) ([]byte, error)) {}
+func OnChatRequest(handler func(req *pb.ChatRequest) (*pb.ChatRequest, error)) {}
+func OnChatResponse(handler func(resp *pb.ChatRequest) (*pb.ChatRequest, error)) {}
+func OnStreamChunk(handler func(chunk *pb.StreamEvent) (*pb.StreamEvent, error)) {}
 
 const (
 	LogLevelDebug = 0
