@@ -1,0 +1,7 @@
+{
+  "name": "ts-logger",
+  "version": "0.3.0",
+  "description": "Polyglot ABI validation plugin written in AssemblyScript",
+  "hooks": [{"name": "on_chat_request", "priority": 200}],
+  "permissions": [{"name": "env.log", "description": "Write structured logs"}]
+}

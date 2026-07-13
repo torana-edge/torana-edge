@@ -1,0 +1,7 @@
+{
+  "name": "rust-redactor",
+  "version": "0.3.0",
+  "description": "Polyglot ABI validation plugin written in Rust",
+  "hooks": [{"name": "on_chat_request", "priority": 100}],
+  "permissions": []
+}
