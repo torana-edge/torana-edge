@@ -163,13 +163,13 @@ func (pp *PluginPipeline) RunOnChatRequest(ctx context.Context, chatJSON []byte)
 	pp.Acquire()
 	defer pp.Release()
 
-	var result struct{ ChatJSON []byte }
+	var result struct{ ChatJSON []byte `json:"chat"` }
 	result.ChatJSON = chatJSON
 	for _, lp := range pp.plugins {
 		if !hasHook(lp.manifest, "on_chat_request") {
 			continue
 		}
-		var out struct{ ChatJSON []byte }
+		var out struct{ ChatJSON string `json:"chat"` }
 		if err := lp.plugin.CallRequest(ctx, "on_chat_request", map[string]any{
 			"chat": string(result.ChatJSON),
 		}, &out); err != nil {
@@ -177,7 +177,7 @@ func (pp *PluginPipeline) RunOnChatRequest(ctx context.Context, chatJSON []byte)
 			continue
 		}
 		if len(out.ChatJSON) > 0 {
-			result.ChatJSON = out.ChatJSON
+			result.ChatJSON = []byte(out.ChatJSON)
 		}
 	}
 	return result.ChatJSON, nil
