@@ -1,0 +1,10 @@
+{
+  "name": "ts-logger",
+  "version": "0.3.0",
+  "scripts": {
+    "build": "asc assembly.ts -o plugin.wasm --target release"
+  },
+  "devDependencies": {
+    "assemblyscript": "^0.27.0"
+  }
+}
