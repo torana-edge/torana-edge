@@ -10,28 +10,38 @@ func main() {}
 
 func init() {
 	sdk.OnChatRequest(func(input []byte) ([]byte, error) {
-		var msg struct {
-			Chat     string `json:"chat"`
-			Messages []struct {
-				Role       string `json:"role"`
-				Content    string `json:"content"`
-				ToolCallID string `json:"tool_call_id"`
-			} `json:"messages"`
+		var wrapper struct {
+			Chat string `json:"chat"`
 		}
-		json.Unmarshal(input, &msg)
+		json.Unmarshal(input, &wrapper)
+		if wrapper.Chat == "" { return nil, nil }
+
+		var fullReq map[string]any
+		json.Unmarshal([]byte(wrapper.Chat), &fullReq)
+
+		messagesAny, _ := fullReq["Messages"].([]any)
 		modified := false
-		for i := range msg.Messages {
-			if msg.Messages[i].Role == "tool" && len(msg.Messages[i].Content) > 2000 {
-				msg.Messages[i].Content = compact(msg.Messages[i].Content)
+		for _, mAny := range messagesAny {
+			m, _ := mAny.(map[string]any)
+			if m == nil { continue }
+			role, _ := m["Role"].(string)
+			content, _ := m["Content"].(string)
+			if role == "tool" && len(content) > 2000 {
+				m["Content"] = compact(content)
 				modified = true
 			}
 		}
+
 		if !modified {
 			return nil, nil
 		}
-		return json.Marshal(msg)
+
+		chatBytes, _ := json.Marshal(fullReq)
+		wrapper.Chat = string(chatBytes)
+		return json.Marshal(wrapper)
 	})
 }
+
 func compact(s string) string {
 	lines := strings.Split(s, "\n")
 	for _, l := range lines { _ = l }

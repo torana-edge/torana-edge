@@ -9,31 +9,40 @@ func main() {}
 
 func init() {
 	sdk.OnChatRequest(func(input []byte) ([]byte, error) {
-		var msg struct {
-			Chat  string `json:"chat"`
-			Tools []struct {
-				Name       string         `json:"name"`
-				Parameters map[string]any `json:"parameters"`
-			} `json:"tools"`
+		var wrapper struct {
+			Chat string `json:"chat"`
 		}
-		json.Unmarshal(input, &msg)
+		json.Unmarshal(input, &wrapper)
+		if wrapper.Chat == "" { return nil, nil }
+
+		var fullReq map[string]any
+		json.Unmarshal([]byte(wrapper.Chat), &fullReq)
+
+		toolsAny, _ := fullReq["Tools"].([]any)
 		modified := false
-		for i := range msg.Tools {
-			t := &msg.Tools[i]
-			if t.Parameters == nil { continue }
-			p, _ := t.Parameters["properties"].(map[string]any)
-			if p == nil { continue }
-			if _, ok := p["i"]; !ok {
-				p["i"] = map[string]any{"type": "string", "description": "what you intend to accomplish"}
-				if r, ok := t.Parameters["required"].([]any); ok {
-					t.Parameters["required"] = append(r, "i")
+		for _, tAny := range toolsAny {
+			t, _ := tAny.(map[string]any)
+			if t == nil { continue }
+			paramsAny, _ := t["Parameters"].(map[string]any)
+			if paramsAny == nil { continue }
+			propsAny, _ := paramsAny["properties"].(map[string]any)
+			if propsAny == nil { continue }
+			if _, ok := propsAny["i"]; !ok {
+				propsAny["i"] = map[string]any{"type": "string", "description": "what you intend to accomplish"}
+				reqAny, ok := paramsAny["required"].([]any)
+				if ok {
+					paramsAny["required"] = append(reqAny, "i")
 				}
 				modified = true
 			}
 		}
+
 		if !modified {
 			return nil, nil
 		}
-		return json.Marshal(msg)
+
+		chatBytes, _ := json.Marshal(fullReq)
+		wrapper.Chat = string(chatBytes)
+		return json.Marshal(wrapper)
 	})
 }
