@@ -21,11 +21,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/torana-edge/torana-edge/internal/cache"
 	"github.com/torana-edge/torana-edge/internal/engine"
 	"github.com/torana-edge/torana-edge/internal/format"
 	"github.com/torana-edge/torana-edge/internal/metrics"
-	"github.com/torana-edge/torana-edge/internal/middleware"
 	"github.com/torana-edge/torana-edge/internal/plugin"
 	"github.com/torana-edge/torana-edge/internal/provider"
 	"github.com/torana-edge/torana-edge/internal/wasm"
@@ -51,8 +49,6 @@ type Server struct {
 	config     Config
 	proxy       *httputil.ReverseProxy
 	httpServer  *http.Server
-	pipeline    *engine.Pipeline
-	intentCache cache.IntentCache
 	stats       *metrics.StatsTracker
 	// WASM plugin pipeline (loaded when configured)
 	pluginPipeline *plugin.PluginPipeline
@@ -71,39 +67,11 @@ func New(cfg Config) (*Server, error) {
 		cfg.Providers.Providers = map[string]provider.Provider{}
 	}
 
-	// --- middleware pipeline ----------------------------------------------
-	pipeline := engine.New()
-	pipeline.AddRequestHook(middleware.NewAdapter())
-	intentCache := cache.NewLocalCache(30 * time.Minute)
+	// --- middleware pipeline (now WASM) -----------------------------------
 	statsTracker := metrics.NewStatsTracker()
-	compactionCache := cache.NewLocalCache(10 * time.Minute)
-	translator := middleware.NewSchemaTranslator(intentCache)
-	pipeline.AddRequestHook(translator)
-	pipeline.AddResponseHook(translator)
-
-	// Offload hook — compacts tool results using a cheaper model.
-	var offloadHook *middleware.OffloadHook
-	offloadCfg := cfg.Providers.Offload
-	if offloadCfg.Enabled {
-		offloadProvider := offloadCfg.Provider
-		if offloadProvider == "" {
-			offloadProvider = "deepseek"
-		}
-		offloadURL := ""
-		if p, ok := cfg.Providers.Providers[offloadProvider]; ok {
-			offloadURL = p.URL
-		}
-		offloadHook = middleware.NewOffloadHook(translator.IntentCache, compactionCache, offloadCfg, offloadURL)
-		offloadHook.Stats = statsTracker
-		pipeline.AddRequestHook(offloadHook)
-		log.Printf("Torana Edge → offload enabled: model=%s provider=%s url=%s",
-			offloadCfg.Model, offloadProvider, offloadURL)
-	}
 
 	s := &Server{
 		config:         cfg,
-		pipeline:       pipeline,
-		intentCache:    intentCache,
 		stats:          statsTracker,
 		pluginPipeline: nil, // set below if plugins configured
 	}
@@ -151,7 +119,6 @@ func New(cfg Config) (*Server, error) {
 
 			if prov == nil || len(body) == 0 {
 				// Pass-through: no provider match, or empty body.
-				_ = pipeline.RunBeforeRequest(req.Context(), req, nil)
 				req.Body = io.NopCloser(bytes.NewReader(body))
 				req.ContentLength = int64(len(body))
 				return
@@ -176,7 +143,6 @@ func New(cfg Config) (*Server, error) {
 
 			if fmt == nil {
 				// No format adapter for this provider's format — just forward raw.
-				_ = pipeline.RunBeforeRequest(req.Context(), req, nil)
 				req.Body = io.NopCloser(bytes.NewReader(body))
 				req.ContentLength = int64(len(body))
 				return
@@ -185,7 +151,6 @@ func New(cfg Config) (*Server, error) {
 			chat, err := fmt.Request.Unmarshal(body)
 			if err != nil {
 				log.Printf("format %s unmarshal error: %v — passing through", fmt.Name, err)
-				_ = pipeline.RunBeforeRequest(req.Context(), req, nil)
 				req.Body = io.NopCloser(bytes.NewReader(body))
 				req.ContentLength = int64(len(body))
 				return
@@ -204,8 +169,6 @@ func New(cfg Config) (*Server, error) {
 					}
 				}
 			}
-
-			chat = pipeline.RunBeforeRequest(req.Context(), req, chat)
 
 			newBody, err := fmt.Request.Marshal(chat)
 			if err != nil {
@@ -239,10 +202,9 @@ func New(cfg Config) (*Server, error) {
 				if fmt == nil {
 					return nil
 				}
-				chat, _ := resp.Request.Context().Value(chatCtxKey{}).(*engine.ChatRequest)
 
+				// WASM response hooks not yet implemented for SSE
 				events := fmt.Stream.ParseStream(resp.Body)
-				events = pipeline.RunAfterResponse(resp.Request.Context(), resp, events, resp.Request, chat)
 
 				pr, pw := io.Pipe()
 				go func() {
@@ -255,13 +217,8 @@ func New(cfg Config) (*Server, error) {
 				return nil
 			}
 
-			// Non-streaming JSON: convert to synthetic StreamEvents,
-			// run through response pipeline, rebuild JSON.
+			// Non-streaming JSON:
 			if strings.Contains(contentType, "application/json") {
-				chat, _ := resp.Request.Context().Value(chatCtxKey{}).(*engine.ChatRequest)
-				if chat == nil {
-					return nil
-				}
 
 				bodyBytes, err := io.ReadAll(resp.Body)
 				resp.Body.Close()
@@ -269,11 +226,8 @@ func New(cfg Config) (*Server, error) {
 					return nil
 				}
 
-				processed, err := runNonStreamingPipeline(resp, pipeline, chat, bodyBytes)
-				if err != nil {
-					log.Printf("non-streaming pipeline error: %v", err)
-					processed = bodyBytes // passthrough on error
-				}
+				// WASM response hooks not yet implemented for JSON
+				processed := bodyBytes
 
 				resp.Body = io.NopCloser(bytes.NewReader(processed))
 				resp.ContentLength = int64(len(processed))
@@ -373,9 +327,6 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	if s.wasmRuntime != nil {
 		s.wasmRuntime.Close()
 	}
-	if s.intentCache != nil {
-		s.intentCache.Close()
-	}
 	if s.httpServer != nil {
 		return s.httpServer.Shutdown(ctx)
 	}
@@ -396,113 +347,4 @@ func joinURLPath(base, rel string) string {
 	return bs + "/" + rs
 }
 
-// runNonStreamingPipeline handles non-streaming (application/json) LLM
-// responses by converting tool calls into synthetic StreamEvents, running
-// them through the response pipeline, and rebuilding the JSON body from
-// the processed events. This ensures all ResponseHooks fire for
-// non-streaming responses just like they do for SSE.
-func runNonStreamingPipeline(resp *http.Response, pipeline *engine.Pipeline, chat *engine.ChatRequest, body []byte) ([]byte, error) {
-	// Parse the OpenAI Chat Completions response shape.
-	var parsed struct {
-		Choices []struct {
-			Message struct {
-				Role      string `json:"role"`
-				Content   string `json:"content,omitempty"`
-				ToolCalls []struct {
-					ID       string `json:"id"`
-					Function struct {
-						Name      string `json:"name"`
-						Arguments string `json:"arguments"`
-					} `json:"function"`
-				} `json:"tool_calls,omitempty"`
-			} `json:"message"`
-		} `json:"choices"`
-	}
-	if err := json.Unmarshal(body, &parsed); err != nil {
-		return body, nil // not our format, pass through
-	}
 
-	// Check if there are tool calls to process.
-	hasToolCalls := false
-	for _, c := range parsed.Choices {
-		if len(c.Message.ToolCalls) > 0 {
-			hasToolCalls = true
-			break
-		}
-	}
-	if !hasToolCalls {
-		return body, nil // nothing to process
-	}
-
-	// Build synthetic StreamEvents: ToolCallStart → ToolCallDelta(full args) → ToolCallEnd
-	// for each tool call. Use a buffered channel and close it before running pipeline.
-	events := make(chan engine.StreamEvent, len(parsed.Choices)*3)
-	for _, c := range parsed.Choices {
-		for i, tc := range c.Message.ToolCalls {
-			events <- engine.StreamEvent{
-				ToolCallStart: &engine.ToolCallStart{
-					Index: i,
-					ID:    tc.ID,
-					Name:  tc.Function.Name,
-				},
-			}
-			if tc.Function.Arguments != "" {
-				args := tc.Function.Arguments
-				events <- engine.StreamEvent{
-					ToolCallDelta: &engine.ToolCallDelta{
-						Index:          i,
-						ArgumentsDelta: args,
-					},
-				}
-			}
-			events <- engine.StreamEvent{
-				ToolCallEnd: &engine.ToolCallEnd{Index: i},
-			}
-		}
-	}
-	close(events)
-
-	// Run through the response pipeline.
-	processed := pipeline.RunAfterResponse(resp.Request.Context(), resp, events, resp.Request, chat)
-
-	// Collect processed events. We only care about ToolCallDeltas
-	// (which contain the sanitized arguments).
-	type tcResult struct {
-		args string
-	}
-	results := make(map[int]*tcResult) // index → result
-
-	for ev := range processed {
-		if ev.ToolCallDelta != nil {
-			if r, ok := results[ev.ToolCallDelta.Index]; ok {
-				r.args += ev.ToolCallDelta.ArgumentsDelta
-			} else {
-				results[ev.ToolCallDelta.Index] = &tcResult{
-					args: ev.ToolCallDelta.ArgumentsDelta,
-				}
-			}
-		}
-	}
-
-	// Rebuild the JSON with sanitized arguments.
-	modified := false
-	for i := range parsed.Choices {
-		for j := range parsed.Choices[i].Message.ToolCalls {
-			tc := &parsed.Choices[i].Message.ToolCalls[j]
-			if r, ok := results[j]; ok && r.args != tc.Function.Arguments {
-				tc.Function.Arguments = r.args
-				modified = true
-			}
-		}
-	}
-
-	if !modified {
-		return body, nil
-	}
-
-	out, err := json.Marshal(parsed)
-	if err != nil {
-		return body, err
-	}
-	return out, nil
-}
