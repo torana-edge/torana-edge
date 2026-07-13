@@ -10,6 +10,7 @@ import (
 	"github.com/tetratelabs/wazero"
 	"github.com/tetratelabs/wazero/api"
 	"github.com/tetratelabs/wazero/imports/wasi_snapshot_preview1"
+	"github.com/torana-edge/torana-edge/internal/metrics"
 )
 
 type Plugin struct {
@@ -120,6 +121,22 @@ func (r *Runtime) installHostFunctions() {
 		r.metaMu.RLock(); v := r.meta[key]; r.metaMu.RUnlock()
 		return writeStr(mod, v)
 	}).Export("meta_get")
+
+	env.NewFunctionBuilder().WithFunc(func(ctx context.Context, mod api.Module, level int32, ptr, length uint32) {
+		msg := readStr(mod, ptr, length)
+		if level == 0 {
+			log.Printf("[plugin debug] %s", msg)
+		} else {
+			log.Printf("[plugin] %s", msg)
+		}
+	}).Export("log")
+
+	env.NewFunctionBuilder().WithFunc(func(ctx context.Context, mod api.Module, metricType int32, ptr, length uint32, value float64) {
+		name := readStr(mod, ptr, length)
+		pluginName := mod.Name()
+		metrics.EmitPluginMetric(ctx, pluginName, name, int(metricType), value)
+	}).Export("emit_metric")
+
 	env.Instantiate(r.ctx)
 }
 
