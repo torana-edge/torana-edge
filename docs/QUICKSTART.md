@@ -35,10 +35,13 @@ Create `config.json`:
       "fallback": ["deepseek"]
     }
   },
-  "offload": {
-    "enabled": true,
-    "model": "deepseek-v4-flash",
-    "provider": "deepseek"
+  "plugins": {
+    "dir": "./plugins",
+    "order": ["schema_translator", "delegator", "compactor"]
+  },
+  "limits": {
+    "concurrency": 10,
+    "rpm": 100
   }
 }
 ```

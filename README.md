@@ -69,9 +69,9 @@ All request/response mutations are handled by **WebAssembly (WASM) plugins** run
 
 | Plugin | Hook | What it does |
 |---|---|---|
-| `schema_translator` | `on_chat_request` | Injects intent extraction fields into tool schemas |
-| `delegator` | `on_chat_request` | Sets default model routing |
-| `compactor` | `on_chat_request` | Truncates oversized tool outputs to save context |
+| `schema_translator` | `before_request` | Injects intent extraction fields into tool schemas |
+| `delegator` | `before_request` | Sets default model routing |
+| `compactor` | `before_request` | Truncates oversized tool outputs to save context |
 
 ## Project Structure
 

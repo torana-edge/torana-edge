@@ -1,0 +1,17 @@
+{
+  "port": 8080,
+  "providers": {
+    "deepseek": {
+      "url": "http://localhost:8081",
+      "format": "openai"
+    }
+  },
+  "plugins": {
+    "dir": "./plugins",
+    "order": ["schema_translator", "delegator", "compactor"]
+  },
+  "limits": {
+    "concurrency": 10,
+    "rpm": 100
+  }
+}

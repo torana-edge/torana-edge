@@ -10,7 +10,7 @@ To pass a Protobuf byte array from the host to the plugin:
 1. The host calls the plugin's `alloc(size)` function.
 2. The plugin allocates memory and returns a 32-bit pointer.
 3. The host writes the Protobuf byte array into the plugin's memory at that pointer.
-4. The host calls the plugin's hook (e.g., `on_chat_request(ptr, size)`).
+4. The host calls the plugin's hook (e.g., `run_before_request(reqID, ptr, size)`).
 
 ## 2. The Golden Rule of Memory Allocation
 **NEVER USE STATIC BUMP ALLOCATORS.**
@@ -62,7 +62,7 @@ Use the standard library allocator for your language.
   ```
 
 ## 3. The 64-bit Return ABI
-Hooks like `on_chat_request(ptr: u32, size: u32)` must return a **64-bit integer (`u64` or `uint64`)**.
+Hooks like `run_before_request(reqID: u64, ptr: u32, size: u32)` must return a **64-bit integer (`u64` or `uint64`)**.
 Because WASM32 only supports 32-bit pointers, we pack the pointer and the length of the response into a single 64-bit integer.
 
 * **Format**: `(pointer << 32) | size`

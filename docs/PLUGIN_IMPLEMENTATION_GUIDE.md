@@ -14,7 +14,7 @@ GOOS=wasip1 GOARCH=wasm go build -buildmode=c-shared -o plugin.wasm plugin.wasm.
 ## 2. Protobuf Structure and Torana's Payload
 
 Torana uses a strict Protobuf contract for all WASM boundaries to prevent schema corruption.
-When Torana invokes `on_chat_request`, it passes serialized bytes of `pb.ChatRequest`. 
+When Torana invokes `run_before_request`, it passes serialized bytes of `pb.ChatRequest`. 
 
 The Go plugin SDK handles all the underlying memory allocation, pointer packing, and Protobuf marshaling for you.
 
@@ -28,12 +28,13 @@ Use the generated `pb` types and the `sdk` handlers. The SDK automatically unmar
 package main
 
 import (
+	"context"
 	"github.com/torana-edge/torana-edge/pkg/pb"
 	sdk "github.com/torana-edge/torana-edge/pkg/plugin-sdk"
 )
 
 func main() {
-	sdk.OnChatRequest(func(req *pb.ChatRequest) (*pb.ChatRequest, error) {
+	sdk.OnBeforeRequest(func(ctx context.Context, req *pb.ChatRequest) (*pb.ChatRequest, error) {
 		modified := false
 
 		// Extract and modify the fields you care about
