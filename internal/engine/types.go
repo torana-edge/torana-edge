@@ -13,6 +13,7 @@ type ChatRequest struct {
 	Temperature        *float64
 	TopP               *float64
 	StopSequences      []string
+	SafetySettings     []any          // Google Vertex/Gemini safety configuration
 	ProviderExtensions map[string]any // unparsed fields passed through transparently
 
 	// ToranaMeta carries proxy-internal metadata that format adapters
@@ -41,6 +42,7 @@ type Message struct {
 	ContentParts      []any      // multimodal array content (e.g. vision)
 	Thinking          string     // extended thinking / reasoning text
 	ThinkingSignature string     // Anthropic cryptographic signature (empty for other providers)
+	RedactedThinking  string     // encrypted/redacted thinking blocks from Anthropic
 	ToolCalls         []ToolCall // assistant → tool invocations
 	ToolCallID        string     // tool messages: which call this result answers
 	ToolName          string     // tool messages: which tool produced this result

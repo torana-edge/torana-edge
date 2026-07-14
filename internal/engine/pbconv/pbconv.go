@@ -33,6 +33,9 @@ func ToPBChatRequest(c *engine.ChatRequest) *pb.ChatRequest {
 	if len(c.ProviderExtensions) > 0 {
 		out.ProviderExtensionsJson, _ = json.Marshal(c.ProviderExtensions)
 	}
+	if len(c.SafetySettings) > 0 {
+		out.SafetySettingsJson, _ = json.Marshal(c.SafetySettings)
+	}
 	if len(c.ToranaMeta) > 0 {
 		out.ToranaMetaJson, _ = json.Marshal(c.ToranaMeta)
 	}
@@ -43,6 +46,7 @@ func ToPBChatRequest(c *engine.ChatRequest) *pb.ChatRequest {
 			Content:           m.Content,
 			Thinking:          m.Thinking,
 			ThinkingSignature: m.ThinkingSignature,
+			RedactedThinking:  m.RedactedThinking,
 			ToolCallId:        m.ToolCallID,
 			ToolName:          m.ToolName,
 		}
@@ -99,6 +103,9 @@ func FromPBChatRequest(c *pb.ChatRequest) *engine.ChatRequest {
 	if len(c.ProviderExtensionsJson) > 0 {
 		json.Unmarshal(c.ProviderExtensionsJson, &out.ProviderExtensions)
 	}
+	if len(c.SafetySettingsJson) > 0 {
+		json.Unmarshal(c.SafetySettingsJson, &out.SafetySettings)
+	}
 	if len(c.ToranaMetaJson) > 0 {
 		json.Unmarshal(c.ToranaMetaJson, &out.ToranaMeta)
 	}
@@ -109,6 +116,7 @@ func FromPBChatRequest(c *pb.ChatRequest) *engine.ChatRequest {
 			Content:           m.Content,
 			Thinking:          m.Thinking,
 			ThinkingSignature: m.ThinkingSignature,
+			RedactedThinking:  m.RedactedThinking,
 			ToolCallID:        m.ToolCallId,
 			ToolName:          m.ToolName,
 		}
