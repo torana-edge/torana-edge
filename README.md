@@ -1,8 +1,8 @@
 # Torana Edge
 
-Torana Edge is an **extensible, high-performance LLM reverse proxy and routing engine** built specifically for AI coding assistants. It sits transparently between your local agent (e.g., OpenCode, Claude Code) and cloud LLM providers, acting as a **Smart FinOps Filter**.
+Torana Edge is an **extensible, high-performance LLM reverse proxy and routing engine** built specifically for AI coding assistants. It sits transparently between your local agent (e.g., OpenCode, Claude Code, Aider) and cloud LLM providers, acting as a **Smart FinOps Filter**.
 
-By parsing traffic into a unified Internal Representation (IR), Torana intercepts massive tool outputs (like 50,000-line log files or minified JS dumps), safely summarizes them using a dirt-cheap model (e.g., DeepSeek-Flash), and forwards only the relevant chunks to the expensive upstream model (e.g., GPT-4o, Claude 3.5 Sonnet).
+All request/response mutations are handled by **WebAssembly (WASM) plugins** running in a sandboxed `wazero` runtime, communicating with the host via **Protobuf** serialization. This architecture enables hot-loadable, language-agnostic plugins with zero-downtime updates.
 
 ```
 [harness] ←→ [Torana Edge :8080] ←→ [LLM Providers]
@@ -12,55 +12,49 @@ By parsing traffic into a unified Internal Representation (IR), Torana intercept
              /provider/vertex/...     → GCP Vertex AI
 ```
 
-## Key Features (v0.1.0)
+## Key Features
 
-- **Model Delegation (The Compactor):** Stop paying premium GPT-4/Claude prices to read massive walls of log text. Torana automatically intercepts heavy tool outputs and summarizes them via a cheaper model before they leave your network.
-- **Contextual Intent Inference:** The proxy natively traces the user's conversational history to infer *exactly* what the agent is looking for, ensuring the cheap model summarizes precisely what is needed.
-- **Zero-Cost Compaction Caching:** Because LLM APIs are stateless, local agents often re-send the exact same massive tool output on every subsequent turn. Torana caches its summaries by `ToolCallID`, turning these expensive repeated payloads into $0, 0-millisecond cache hits.
-- **Unified IR Plugin Ecosystem:** Write plugins that work universally across OpenAI, Anthropic, Bedrock, and Vertex without dealing with provider-specific wire formats.
+- **WASM Plugin Ecosystem:** Write plugins in Go (or any WASI-compatible language), compile to `.wasm`, and drop them into the `plugins/` directory. No proxy restarts needed.
+- **Model Delegation (The Compactor):** Automatically intercepts heavy tool outputs and summarizes them via a cheaper model before they hit the expensive upstream, saving tokens and money.
+- **Prompt Cache Optimization:** Deterministic payload normalization ensures upstream provider prompt caches are never busted across turns.
+- **Provider Failover:** Automatic retry with fallback providers on 429/5xx errors.
+- **Unified IR:** Format adapters translate OpenAI, Anthropic, Bedrock, and Vertex wire formats into a single canonical IR. Plugins work on the IR and never touch raw JSON.
 
 ## Quick Start
 
-1. (Optional) Create `config.json` to override defaults (and configure the offload model):
-   ```json
-   {
-     "port": 8080,
-     "providers": {
-       "my-provider": {
-         "url": "https://api.example.com",
-         "format": "openai"
-       }
-     },
-     "offload": {
-       "enabled": true,
-       "provider": "deepseek",
-       "model": "deepseek-v4-flash"
-     }
-   }
+1. Copy and edit the example config:
+   ```bash
+   cp config.example.json config.json
    ```
-   Built-in defaults cover deepseek, openai, and anthropic — see `config.example.json`.
 
-2. Run the proxy:
+2. Build the WASM plugins:
+   ```bash
+   # Using torana-cli (recommended):
+   go run ./cmd/torana-cli plugin build plugins/schema_translator
+   go run ./cmd/torana-cli plugin build plugins/delegator
+   go run ./cmd/torana-cli plugin build plugins/compactor
+
+   # Or manually:
+   cd plugins/schema_translator && GOOS=wasip1 GOARCH=wasm go build -buildmode=c-shared -o plugin.wasm .
+   ```
+
+3. Run the proxy:
    ```bash
    go run ./cmd/torana
    ```
 
-3. Point your AI harness at Torana:
+4. Point your AI harness at Torana:
    ```bash
    export OPENAI_BASE_URL=http://localhost:8080/provider/deepseek/v1
-   ```
-
-   For Anthropic-format providers:
-   ```bash
-   export ANTHROPIC_BASE_URL=http://localhost:8080/provider/anthropic
    ```
 
 ## How It Works
 
 1. **Path-based routing** — Requests arrive at `/provider/<name>/<upstream-path>`. Torana strips the provider prefix, looks up the upstream URL and format, and forwards.
-2. **Canonical IR** — Format adapters translate each provider's wire format into a shared set of Go types (`ChatRequest`, `Message`, `ToolDef`, `StreamEvent`). Plugins import `internal/engine` and work on IR, never on raw JSON.
-3. **Pipeline Plugins** — Registered `RequestHook` and `ResponseHook` plugins intercept every request/response. The core `OffloadHook` and `SchemaTranslator` operate here to perform intent extraction, few-shot injection, and cost-saving compaction.
-4. **Pass-through** — Requests without a `/provider/` prefix (and no `DefaultProvider` configured) return 502. Unknown provider names also return 502. No silent forwarding to the wrong upstream.
+2. **Canonical IR** — Format adapters (`internal/format/`) translate each provider's wire format into shared Go types (`ChatRequest`, `Message`, `ToolDef`, `StreamEvent`).
+3. **Protobuf Serialization** — The IR is serialized to Protobuf via `internal/engine/pbconv` and handed to the WASM runtime.
+4. **WASM Plugin Pipeline** — Loaded plugins execute sequentially (in `config.json` order). Each plugin receives the Protobuf bytes, mutates them via the SDK (`pkg/plugin-sdk`), and writes back.
+5. **Pass-through** — Requests without a recognized `/provider/` prefix return 502.
 
 ## Supported Formats
 
@@ -71,24 +65,40 @@ By parsing traffic into a unified Internal Representation (IR), Torana intercept
 | `/provider/<name>/` (format: `bedrock`) | AWS Bedrock Converse | JSON lines |
 | `/provider/<name>/` (format: `vertex`) | GCP Vertex AI / Gemini | JSON lines |
 
+## Bundled Plugins
+
+| Plugin | Hook | What it does |
+|---|---|---|
+| `schema_translator` | `on_chat_request` | Injects intent extraction fields into tool schemas |
+| `delegator` | `on_chat_request` | Sets default model routing |
+| `compactor` | `on_chat_request` | Truncates oversized tool outputs to save context |
+
 ## Project Structure
 
 ```
 torana-edge/
-├── cmd/torana/main.go             # Entry point, config loading
-├── config.json                    # User-facing provider config
+├── cmd/
+│   ├── torana/main.go              # Proxy entry point
+│   └── torana-cli/main.go          # CLI for building WASM plugins
 ├── internal/
 │   ├── engine/
-│   │   ├── types.go               # Canonical IR: ChatRequest, StreamEvent, etc.
-│   │   └── pipeline.go            # RequestHook / ResponseHook chain
-│   ├── format/                    # Format translation adapters (OpenAI, Anthropic, etc.)
-│   ├── middleware/
-│   │   ├── offload.go             # Compactor, Intent Cache, Model Delegation
-│   │   └── schema_translator.go   # Intent Extraction, Few-Shot Injection
-│   ├── provider/                  # Config parsing, URI resolution
-│   └── proxy/
-│       └── server.go              # Reverse proxy with format dispatch
-└── test/
+│   │   ├── types.go                # Canonical IR: ChatRequest, StreamEvent, etc.
+│   │   └── pbconv/                 # IR ↔ Protobuf converters
+│   ├── format/                     # Wire format adapters (OpenAI, Anthropic, Bedrock, Vertex)
+│   ├── metrics/                    # Request stats tracking
+│   ├── plugin/                     # WASM plugin discovery and pipeline orchestration
+│   ├── provider/                   # Config parsing, URI resolution
+│   ├── proxy/                      # Reverse proxy with format dispatch
+│   └── wasm/                       # Wazero runtime integration
+├── pkg/
+│   ├── pb/                         # Protobuf schemas and generated code
+│   └── plugin-sdk/                 # SDK imported by WASM plugins
+├── plugins/                        # WASM plugin source code
+│   ├── compactor/
+│   ├── delegator/
+│   └── schema_translator/
+├── config.example.json             # Example configuration
+└── go.mod
 ```
 
 ## Environment Variables
