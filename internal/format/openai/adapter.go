@@ -6,6 +6,7 @@ package openai
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/torana-edge/torana-edge/internal/engine"
 	"github.com/torana-edge/torana-edge/internal/format"
@@ -70,7 +71,8 @@ type chatToolFuncDef struct {
 
 // responseRequest is the Responses API JSON shape.
 type responseRequest struct {
-	Object string          `json:"object"`
+	Object string          `json:"object,omitempty"`
+	Model  string          `json:"model,omitempty"`
 	Input  json.RawMessage `json:"input"`
 	Tools  []responseTool  `json:"tools,omitempty"`
 	Stream bool            `json:"stream"`
@@ -98,8 +100,13 @@ func (a *Adapter) Unmarshal(rawBody []byte) (*engine.ChatRequest, error) {
 	}
 }
 
-// Marshal converts a ChatRequest back to Chat Completions wire format.
+// Marshal converts a ChatRequest back to Chat Completions or Responses wire format.
 func (a *Adapter) Marshal(chat *engine.ChatRequest) ([]byte, error) {
+	if chat.ProviderExtensions != nil {
+		if variant, ok := chat.ProviderExtensions["_openai_variant"].(string); ok && variant == "responses" {
+			return marshalResponses(chat)
+		}
+	}
 	return marshalChat(chat)
 }
 
@@ -143,6 +150,65 @@ func bytesContains(s []byte, sub string) bool {
 		}
 	}
 	return false
+}
+
+func marshalResponses(chat *engine.ChatRequest) ([]byte, error) {
+	var rr responseRequest
+	rr.Stream = chat.Stream
+	if chat.ProviderExtensions != nil {
+		if m, ok := chat.ProviderExtensions["_openai_original_model"].(string); ok {
+			rr.Model = m
+		}
+	}
+	
+	// Convert messages back to input array if possible.
+	if len(chat.Messages) > 0 {
+		var msgs []chatMessage
+		for _, m := range chat.Messages {
+			msgs = append(msgs, chatMessage{
+				Role: string(m.Role),
+				Content: func() json.RawMessage {
+					if len(m.ContentParts) > 0 {
+						b, _ := json.Marshal(m.ContentParts)
+						return b
+					} else if m.Content != "" {
+						b, _ := json.Marshal(m.Content)
+						return b
+					}
+					return json.RawMessage(`""`)
+				}(),
+			})
+		}
+		b, _ := json.Marshal(msgs)
+		rr.Input = b
+	}
+
+	for _, t := range chat.Tools {
+		rr.Tools = append(rr.Tools, responseTool{
+			Type:        "function",
+			Name:        t.Name,
+			Description: t.Description,
+			Parameters:  t.Parameters,
+		})
+	}
+
+	b, err := json.Marshal(rr)
+	if err != nil {
+		return nil, err
+	}
+
+	if len(chat.ProviderExtensions) > 0 {
+		var outMap map[string]any
+		json.Unmarshal(b, &outMap)
+		for k, v := range chat.ProviderExtensions {
+			if !strings.HasPrefix(k, "_openai_") {
+				outMap[k] = v
+			}
+		}
+		return json.Marshal(outMap)
+	}
+
+	return b, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -273,6 +339,14 @@ func (a *Adapter) unmarshalResponses(rawBody []byte) (*engine.ChatRequest, error
 	req := &engine.ChatRequest{
 		Model:  "gpt-4o",
 		Stream: rr.Stream,
+	}
+
+	// Preserve the variant and original model in extensions.
+	req.ProviderExtensions = map[string]any{
+		"_openai_variant": "responses",
+	}
+	if rr.Model != "" {
+		req.ProviderExtensions["_openai_original_model"] = rr.Model
 	}
 
 	// Input: string or array.
