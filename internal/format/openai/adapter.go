@@ -349,6 +349,17 @@ func (a *Adapter) unmarshalResponses(rawBody []byte) (*engine.ChatRequest, error
 		req.ProviderExtensions["_openai_original_model"] = rr.Model
 	}
 
+	var raw map[string]any
+	if err := json.Unmarshal(rawBody, &raw); err == nil {
+		delete(raw, "model")
+		delete(raw, "input")
+		delete(raw, "tools")
+		delete(raw, "stream")
+		for k, v := range raw {
+			req.ProviderExtensions[k] = v
+		}
+	}
+
 	// Input: string or array.
 	if len(rr.Input) > 0 {
 		// Try string first.

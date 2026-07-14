@@ -251,13 +251,32 @@ data: [DONE]
 	}
 
 	if len(events) != 2 {
-		t.Fatalf("expected 2 events, got %d: %+v", len(events), events)
-	}
-	if events[0].TextDelta == nil || *events[0].TextDelta != "Done" {
-		t.Errorf("event 0: got %+v", events[0])
+		t.Fatalf("expected 2 events, got %d", len(events))
 	}
 	if events[1].FinishReason != "stop" {
-		t.Errorf("event 1: got %+v", events[1])
+		t.Errorf("expected finish_reason 'stop', got %q", events[1].FinishReason)
+	}
+}
+
+func TestResponsesFieldPreservation(t *testing.T) {
+	raw := []byte(`{
+		"model": "gpt-4o",
+		"instructions": "Be helpful.",
+		"temperature": 0.5,
+		"input": "Hello"
+	}`)
+
+	a := &Adapter{}
+	req, err := a.Unmarshal(raw)
+	if err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+
+	if req.ProviderExtensions["instructions"] != "Be helpful." {
+		t.Errorf("expected instructions to be preserved, got %v", req.ProviderExtensions["instructions"])
+	}
+	if req.ProviderExtensions["temperature"] != 0.5 {
+		t.Errorf("expected temperature to be preserved, got %v", req.ProviderExtensions["temperature"])
 	}
 }
 

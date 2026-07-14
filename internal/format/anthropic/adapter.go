@@ -299,7 +299,7 @@ func (a *Adapter) Marshal(chat *engine.ChatRequest) ([]byte, error) {
 			am.Content = append(am.Content, cb)
 		case len(m.ToolCalls) > 0:
 			// Assistant with tool calls.
-			if m.Thinking != "" {
+			if m.Thinking != "" || m.RedactedThinking != "" {
 				am.Content = append(am.Content, thinkingBlock(m))
 			}
 			if len(m.ContentParts) > 0 {
@@ -325,7 +325,7 @@ func (a *Adapter) Marshal(chat *engine.ChatRequest) ([]byte, error) {
 			}
 		default:
 			// Simple text message.
-			if m.Thinking != "" {
+			if m.Thinking != "" || m.RedactedThinking != "" {
 				am.Content = append(am.Content, thinkingBlock(m))
 			}
 			if len(m.ContentParts) > 0 {
