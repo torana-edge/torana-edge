@@ -13,5 +13,9 @@
       "url": "https://api.anthropic.com",
       "format": "anthropic"
     }
+  },
+  "plugins": {
+    "dir": "./plugins",
+    "order": ["schema_translator", "delegator", "compactor"]
   }
 }

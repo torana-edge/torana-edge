@@ -20,7 +20,10 @@ go.work.sum
 *.swp
 *.swo
 
-# Environment (keep .env.example but not real .env)
+# WASM plugin binaries (built via torana-cli or GOOS=wasip1)
+*.wasm
+
+# Environment (legacy — config is now JSON-based)
 .env
 
 # OS

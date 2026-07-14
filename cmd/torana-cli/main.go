@@ -36,7 +36,7 @@ func printUsage() {
 
 func buildPlugin(args []string) {
 	dir := "."
-	out := "plugin.wasm"
+	out := ""
 
 	// Very simple flag parsing
 	for i := 0; i < len(args); i++ {
@@ -46,6 +46,10 @@ func buildPlugin(args []string) {
 		} else if dir == "." {
 			dir = args[i]
 		}
+	}
+
+	if out == "" {
+		out = filepath.Join(dir, "plugin.wasm")
 	}
 
 	absDir, err := filepath.Abs(dir)

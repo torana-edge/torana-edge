@@ -195,38 +195,8 @@ func (pp *PluginPipeline) RunOnChatRequest(ctx context.Context, chat *engine.Cha
 	return pbconv.FromPBChatRequest(&resReq), nil
 }
 
-// RunOnChatResponse calls every plugin that implements on_chat_response.
-func (pp *PluginPipeline) RunOnChatResponse(ctx context.Context, chat *engine.ChatRequest) (*engine.ChatRequest, error) {
-	pp.Acquire()
-	defer pp.Release()
 
-	pbReq := pbconv.ToPBChatRequest(chat)
-	reqBytes, err := proto.Marshal(pbReq)
-	if err != nil {
-		return chat, err
-	}
 
-	resultBytes := reqBytes
-	for _, lp := range pp.plugins {
-		if !hasHook(lp.manifest, "on_chat_response") {
-			continue
-		}
-		var outBytes []byte
-		if err := lp.plugin.CallRequest(ctx, "on_chat_response", resultBytes, &outBytes); err != nil {
-			log.Printf("[plugin] %s on_chat_response: %v", lp.manifest.Name, err)
-			continue
-		}
-		if len(outBytes) > 0 {
-			resultBytes = outBytes
-		}
-	}
-
-	var resReq pb.ChatRequest
-	if err := proto.Unmarshal(resultBytes, &resReq); err != nil {
-		return chat, err
-	}
-	return pbconv.FromPBChatRequest(&resReq), nil
-}
 
 // RunOnStreamChunk calls every plugin that implements on_stream_chunk.
 func (pp *PluginPipeline) RunOnStreamChunk(ctx context.Context, chunk *engine.StreamEvent) (*engine.StreamEvent, error) {

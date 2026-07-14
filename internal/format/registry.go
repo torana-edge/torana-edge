@@ -16,18 +16,7 @@ func Register(prefix string, f Format) {
 	byPrefix[prefix] = f
 }
 
-// Resolve returns the Format matching the URL path, plus the path with
-// the format prefix stripped for upstream forwarding. Returns nil if
-// no format matches.
-func Resolve(path string) (*Format, string) {
-	for prefix, f := range byPrefix {
-		if strings.HasPrefix(path, prefix) {
-			stripped := "/" + strings.TrimPrefix(path, prefix)
-			return &f, stripped
-		}
-	}
-	return nil, path
-}
+
 
 // Lookup returns the Format registered under the given name (e.g. "openai").
 // Returns nil if no format matches.
