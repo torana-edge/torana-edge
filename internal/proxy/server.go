@@ -90,6 +90,77 @@ func New(cfg Config) (*Server, error) {
 	// --- WASM plugin pipeline (optional) ---------------------------------
 	if cfg.Providers.Plugins.Dir != "" {
 		rt := wasm.NewRuntime(context.Background())
+		// Wire offload completion handler — makes HTTP POST to first
+		// available provider for cheap-model tool result summarization.
+		rt.OffloadFunc = func(ctx context.Context, payloadJSON string) (string, error) {
+			var p struct {
+				SystemPrompt string `json:"system_prompt"`
+				UserPrompt   string `json:"user_prompt"`
+				APIKey       string `json:"api_key"`
+				Model        string `json:"model"`
+			}
+			if err := json.Unmarshal([]byte(payloadJSON), &p); err != nil {
+				return "", fmt.Errorf("offload: parse payload: %w", err)
+			}
+			model := p.Model
+			if model == "" {
+				model = "deepseek-v4-flash"
+			}
+			// Use first configured provider as offload endpoint.
+			var offloadURL string
+			for _, prov := range cfg.Providers.Providers {
+				offloadURL = prov.URL
+				break
+			}
+			if offloadURL == "" {
+				return "", fmt.Errorf("offload: no provider configured")
+			}
+			reqBody, _ := json.Marshal(map[string]any{
+				"model": model,
+				"messages": []map[string]any{
+					{"role": "system", "content": p.SystemPrompt},
+					{"role": "user", "content": p.UserPrompt},
+				},
+				"stream":      false,
+				"max_tokens":  1024,
+				"temperature": 0,
+			})
+			httpReq, err := http.NewRequestWithContext(ctx, "POST", offloadURL+"/v1/chat/completions", bytes.NewReader(reqBody))
+			if err != nil {
+				return "", err
+			}
+			httpReq.Header.Set("Content-Type", "application/json")
+			if p.APIKey != "" {
+				httpReq.Header.Set("Authorization", "Bearer "+p.APIKey)
+			}
+			client := &http.Client{Timeout: 30 * time.Second}
+			resp, err := client.Do(httpReq)
+			if err != nil {
+				return "", err
+			}
+			defer resp.Body.Close()
+			respBytes, err := io.ReadAll(resp.Body)
+			if err != nil {
+				return "", err
+			}
+			if resp.StatusCode != 200 {
+				return "", fmt.Errorf("offload: upstream returned %d: %s", resp.StatusCode, string(respBytes[:min(len(respBytes), 200)]))
+			}
+			var result struct {
+				Choices []struct {
+					Message struct {
+						Content string `json:"content"`
+					} `json:"message"`
+				} `json:"choices"`
+			}
+			if err := json.Unmarshal(respBytes, &result); err != nil {
+				return "", fmt.Errorf("offload: parse response: %w", err)
+			}
+			if len(result.Choices) == 0 || result.Choices[0].Message.Content == "" {
+				return "", fmt.Errorf("offload: empty response")
+			}
+			return result.Choices[0].Message.Content, nil
+		}
 		pp, err := plugin.NewPipeline(rt, plugin.PluginConfig{
 			Dir:    cfg.Providers.Plugins.Dir,
 			Order:  cfg.Providers.Plugins.Order,
