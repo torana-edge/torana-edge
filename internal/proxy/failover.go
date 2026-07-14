@@ -26,9 +26,17 @@ func (t *failoverRoundTripper) RoundTrip(req *http.Request) (*http.Response, err
 	// because RoundTrip consumes the body.
 	var bodyBytes []byte
 	if len(fallbacks) > 0 && req.Body != nil {
-		bodyBytes, _ = io.ReadAll(io.LimitReader(req.Body, maxBodySize))
+		lr := io.LimitReader(req.Body, maxBodySize+1)
+		bodyBytes, _ = io.ReadAll(lr)
 		req.Body.Close()
-		req.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+		if len(bodyBytes) > maxBodySize {
+			// Cannot retry safely if body is oversized. We will let the first attempt fail or pass,
+			// but we won't have the body for fallbacks.
+			bodyBytes = nil
+			fallbacks = nil
+		} else {
+			req.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+		}
 	}
 
 	// First attempt.
@@ -41,10 +49,8 @@ func (t *failoverRoundTripper) RoundTrip(req *http.Request) (*http.Response, err
 		return resp, err
 	}
 
-	// We are about to retry, close the primary response.
-	if resp != nil {
-		resp.Body.Close()
-	}
+	var lastResp *http.Response = resp
+	var lastErr error = err
 
 	log.Printf("[failover] %s returned %v — trying fallbacks: %v",
 		provName, statusOrErr(resp, err), fallbacks)
@@ -75,12 +81,20 @@ func (t *failoverRoundTripper) RoundTrip(req *http.Request) (*http.Response, err
 		retryReq.URL.RawPath = ""
 
 		retryResp, retryErr := t.base.RoundTrip(retryReq)
+		
+		// Close previous response since we are going to try the next one or we got a new one
+		if lastResp != nil {
+			lastResp.Body.Close()
+		}
+		
+		lastResp = retryResp
+		lastErr = retryErr
+
 		if retryErr != nil {
 			log.Printf("[failover] %s failed: %v", fbName, retryErr)
 			continue
 		}
 		if shouldRetry(retryResp) {
-			retryResp.Body.Close()
 			log.Printf("[failover] %s also returned %d — trying next", fbName, retryResp.StatusCode)
 			continue
 		}
@@ -88,7 +102,7 @@ func (t *failoverRoundTripper) RoundTrip(req *http.Request) (*http.Response, err
 		return retryResp, nil
 	}
 
-	return resp, err
+	return lastResp, lastErr
 }
 
 func shouldRetry(resp *http.Response) bool {

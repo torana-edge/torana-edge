@@ -116,8 +116,20 @@ func New(cfg Config) (*Server, error) {
 		Director: func(req *http.Request) {
 			var body []byte
 			if req.Body != nil {
-				body, _ = io.ReadAll(io.LimitReader(req.Body, maxBodySize))
+				lr := io.LimitReader(req.Body, maxBodySize+1)
+				body, _ = io.ReadAll(lr)
 				req.Body.Close()
+				if len(body) > maxBodySize {
+					// We can't write 413 from here, but we can set body to empty to fail parsing
+					// and perhaps let the upstream reject it, or log it. But we MUST not send truncated JSON.
+					// A better way is to panic with a specific error and recover it, but
+					// since we just pass it through if it's too large... wait, if it's too large,
+					// we can't parse it. We should pass it through UNTRUNCATED!
+					// But we already consumed the body.
+					// Actually, the finding says we should reject with 413.
+					// Since Director can't do that easily, let me panic and recover in the handler.
+					panic(http.ErrNotMultipart) // using a recognizable error to catch
+				}
 			}
 
 			currentCfg := s.GetConfig()
@@ -274,10 +286,14 @@ func New(cfg Config) (*Server, error) {
 			// Non-streaming JSON:
 			if strings.Contains(contentType, "application/json") {
 
-				bodyBytes, err := io.ReadAll(io.LimitReader(resp.Body, maxBodySize))
+				lr := io.LimitReader(resp.Body, maxBodySize+1)
+				bodyBytes, err := io.ReadAll(lr)
 				resp.Body.Close()
 				if err != nil {
-					return nil
+					return err
+				}
+				if len(bodyBytes) > maxBodySize {
+					return fmt.Errorf("response body exceeds max size")
 				}
 
 				// WASM response hooks not yet implemented for JSON
@@ -318,6 +334,19 @@ func New(cfg Config) (*Server, error) {
 		if prov == nil && currentCfg.DefaultProvider == "" {
 			http.Error(w, "no provider configured for this path", http.StatusBadGateway)
 			return
+		}
+		
+		// Enforce request body limit before it reaches Director or failover
+		if r.Body != nil {
+			r.Body = http.MaxBytesReader(w, r.Body, maxBodySize)
+			// Read the whole body now to trigger the 413 if it's too large
+			bodyBytes, err := io.ReadAll(r.Body)
+			if err != nil {
+				http.Error(w, "Request Entity Too Large", http.StatusRequestEntityTooLarge)
+				return
+			}
+			r.Body.Close()
+			r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 		}
 		tr := &trackingReader{ReadCloser: r.Body}
 		tw := &trackingWriter{ResponseWriter: w}

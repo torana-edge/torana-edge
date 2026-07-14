@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"net"
@@ -83,6 +84,48 @@ func TestProxyPassThrough(t *testing.T) {
 	}
 	if !strings.Contains(bodyStr, "method: POST") {
 		t.Error("request method not preserved")
+	}
+}
+
+func TestOversizedBodyRejection(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	cfg := Config{
+		Port:      "0",
+		Providers: testProviderConfig(upstream.URL, "test", "openai"),
+	}
+	srv, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	ln, err := net.Listen("tcp", ":0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer ln.Close()
+
+	go srv.Serve(ln)
+	defer srv.Shutdown(context.Background())
+
+	proxyURL := "http://" + ln.Addr().String()
+	
+	// maxBodySize is 10<<20 (10MB). Let's send 10MB + 1 byte
+	largeBody := make([]byte, maxBodySize+1)
+
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Post(proxyURL+"/provider/test/v1/chat", "application/json",
+		bytes.NewReader(largeBody))
+	if err != nil {
+		t.Fatalf("POST to proxy: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusRequestEntityTooLarge {
+		t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusRequestEntityTooLarge)
 	}
 }
 
