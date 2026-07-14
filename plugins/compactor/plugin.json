@@ -3,7 +3,7 @@
   "version": "0.3.0",
   "description": "Compacts tool results using keyword extraction",
   "hooks": [
-    {"name": "on_chat_request", "priority": 200}
+    {"name": "run_before_request", "priority": 200}
   ],
   "permissions": [
     {"name": "env.cache_get", "description": "Check compaction cache"},
