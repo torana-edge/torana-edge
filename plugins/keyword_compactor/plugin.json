@@ -1,0 +1,12 @@
+{
+  "name": "keyword_compactor",
+  "version": "0.4.0",
+  "description": "Deterministic keyword-based tool result compaction using cached intent",
+  "hooks": [
+    {"name": "run_before_request", "priority": 150}
+  ],
+  "permissions": [
+    {"name": "env.cache_get", "description": "Read cached intent from compactor"},
+    {"name": "env.log", "description": "Diagnostic logging"}
+  ]
+}
