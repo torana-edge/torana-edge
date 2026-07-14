@@ -81,10 +81,9 @@ func init() {
 				}
 			}
 		} else if isJWT {
-			// Mock JWT parse for Enterprise Gateway
-			meta["tenant_id"] = "jwt-tenant"
-			meta["team_id"] = "jwt-team"
-			meta["user_id"] = token // store token as user_id for mock
+			// Enterprise auth is not available in the open-source edition.
+			// Real JWT verification lives in torana-edge/private-nucleus.
+			return nil, nil
 		}
 
 		// Save updated ToranaMeta back
