@@ -178,8 +178,7 @@ func (a *Adapter) Unmarshal(rawBody []byte) (*engine.ChatRequest, error) {
 		var contentParts []any
 		var toolCalls []engine.ToolCall
 		var toolResults []engine.Message
-		var thinking string
-		var thinkingSignature string
+		var thinking, thinkingSignature, redactedThinking string
 
 		for _, block := range am.Content {
 			switch block.Type {
@@ -211,11 +210,11 @@ func (a *Adapter) Unmarshal(rawBody []byte) (*engine.ChatRequest, error) {
 				thinking = block.Thinking
 				thinkingSignature = block.Signature
 			case "redacted_thinking":
-				thinking = "[redacted]"
+				redactedThinking = block.Data
 			}
 		}
 
-		if len(textParts) > 0 || len(contentParts) > 0 || len(toolCalls) > 0 || thinking != "" {
+		if len(textParts) > 0 || len(contentParts) > 0 || len(toolCalls) > 0 || thinking != "" || redactedThinking != "" {
 			chat.Messages = append(chat.Messages, engine.Message{
 				Role:              role,
 				Content:           joinStrings(textParts, ""),
@@ -223,6 +222,7 @@ func (a *Adapter) Unmarshal(rawBody []byte) (*engine.ChatRequest, error) {
 				ToolCalls:         toolCalls,
 				Thinking:          thinking,
 				ThinkingSignature: thinkingSignature,
+				RedactedThinking:  redactedThinking,
 			})
 		}
 		if len(toolResults) > 0 {
@@ -374,10 +374,10 @@ func (a *Adapter) Marshal(chat *engine.ChatRequest) ([]byte, error) {
 
 // thinkingBlock returns the Anthropic content block for thinking/reasoning content.
 func thinkingBlock(m engine.Message) contentBlock {
-	if m.Thinking == "[redacted]" {
+	if m.RedactedThinking != "" {
 		return contentBlock{
 			Type: "redacted_thinking",
-			Data: m.Thinking,
+			Data: m.RedactedThinking,
 		}
 	}
 	return contentBlock{
