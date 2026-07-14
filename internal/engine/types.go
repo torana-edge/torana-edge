@@ -13,6 +13,7 @@ type ChatRequest struct {
 	Temperature        *float64
 	TopP               *float64
 	StopSequences      []string
+	SafetySettings     []any          // Google Vertex/Gemini safety configuration
 	ProviderExtensions map[string]any // unparsed fields passed through transparently
 
 	// ToranaMeta carries proxy-internal metadata that format adapters

@@ -48,6 +48,8 @@ message ChatRequest {
 
   // Proxy-internal metadata shared between hooks. Not serialized to wire.
   bytes torana_meta_json = 10;
+
+  bytes safety_settings_json = 11;
 }
 
 message ToolCallStart {
