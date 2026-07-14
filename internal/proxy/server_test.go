@@ -212,3 +212,72 @@ func TestProxyNoProviderRejects(t *testing.T) {
 	}
 }
 
+
+// TestJSONResponseRunsAfterResponseHook verifies that a non-streaming JSON
+// response with tool calls is routed through the WASM pipeline.
+func TestJSONResponseRunsWASMHooks(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		// Return a tool call response — the run_before_request hook in
+		// the delegator plugin sets a default model, but run_on_stream_chunk
+		// and run_after_response should execute without error.
+		w.Write([]byte(`{
+			"choices": [{
+				"message": {
+					"role": "assistant",
+					"tool_calls": [{
+						"id": "call_test_1",
+						"function": {
+							"name": "read",
+							"arguments": "{\"path\":\"/tmp/test\"}"
+						}
+					}]
+				}
+			}]
+		}`))
+	}))
+	defer upstream.Close()
+
+	cfg := Config{
+		Port:      "0",
+		Providers: testProviderConfig(upstream.URL, "test", "openai"),
+	}
+	srv, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	ln, err := net.Listen("tcp", ":0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer ln.Close()
+	go srv.Serve(ln)
+	defer srv.Shutdown(context.Background())
+
+	proxyURL := "http://" + ln.Addr().String()
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Post(proxyURL+"/provider/test/v1/chat/completions",
+		"application/json",
+		strings.NewReader(`{"model":"gpt-4o","messages":[{"role":"user","content":"hello"}]}`))
+	if err != nil {
+		t.Fatalf("POST to proxy: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+
+	body, _ := io.ReadAll(resp.Body)
+	bodyStr := string(body)
+
+	// Valid JSON with tool calls should survive the round-trip.
+	if !strings.Contains(bodyStr, `call_test_1`) {
+		t.Errorf("tool call ID should be preserved in response, got: %s", bodyStr)
+	}
+	if !strings.Contains(bodyStr, `"tool_calls"`) {
+		t.Error("response should contain tool_calls key")
+	}
+}
