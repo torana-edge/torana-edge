@@ -147,6 +147,11 @@ func reloadPipeline(runtime *wasm.Runtime, config PluginConfig) (*PluginPipeline
 			grants = append(grants, p.Name)
 		}
 		pl.SetGrants(grants)
+		// Validate that every declared hook is actually exported by the WASM module.
+		if err := pl.ValidateHooks(context.Background(), hookNames(bundle.Manifest.Hooks)); err != nil {
+			log.Printf("[plugin] %s: hook validation failed: %v — skipping", name, err)
+			continue
+		}
 		loaded = append(loaded, &loadedPlugin{
 			manifest: bundle.Manifest,
 			plugin:   pl,

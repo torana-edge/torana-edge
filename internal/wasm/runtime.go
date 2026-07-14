@@ -55,6 +55,26 @@ func (p *Plugin) hasGrant(perm string) bool {
 	return p.grants[perm]
 }
 
+// ValidateHooks checks that every named hook from the manifest is actually
+// exported by the WASM module. Returns an error listing all missing hooks.
+func (p *Plugin) ValidateHooks(ctx context.Context, hooks []string) error {
+	inst, err := p.newInstance(ctx)
+	if err != nil {
+		return fmt.Errorf("wasm: %s: create validation instance: %w", p.name, err)
+	}
+	defer inst.mod.Close(ctx)
+	var missing []string
+	for _, h := range hooks {
+		if fn := inst.mod.ExportedFunction(h); fn == nil {
+			missing = append(missing, h)
+		}
+	}
+	if len(missing) > 0 {
+		return fmt.Errorf("wasm: %s: hooks not exported by module: %v", p.name, missing)
+	}
+	return nil
+}
+
 // acquire returns a plugin instance from the pool.
 func (p *Plugin) acquire(ctx context.Context) (*pluginInstance, error) {
 	select {

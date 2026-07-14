@@ -4,7 +4,7 @@
   "description": "Enterprise Gateway auth normalization",
   "hooks": [
     {
-      "name": "on_request",
+      "name": "run_before_request",
       "priority": 100
     }
   ],

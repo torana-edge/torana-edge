@@ -1,0 +1,168 @@
+package plugin
+
+import (
+	"context"
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"testing"
+
+	"github.com/torana-edge/torana-edge/internal/engine"
+	"github.com/torana-edge/torana-edge/internal/wasm"
+)
+
+func TestHasHook_MatchAfterManifestFix(t *testing.T) {
+	m := PluginManifest{
+		Name: "test-plugin",
+		Hooks: []Hook{
+			{Name: "run_before_request", Priority: 100},
+		},
+	}
+	if !hasHook(m, "run_before_request") {
+		t.Error("hasHook should match run_before_request after manifest fix")
+	}
+	if hasHook(m, "on_chat_request") {
+		t.Error("hasHook should NOT match on_chat_request — manifests were updated")
+	}
+}
+
+func TestHasHook_MultipleHooks(t *testing.T) {
+	m := PluginManifest{
+		Name: "multi-hook",
+		Hooks: []Hook{
+			{Name: "run_before_request", Priority: 100},
+			{Name: "run_after_response", Priority: 200},
+			{Name: "run_on_stream_chunk", Priority: 300},
+		},
+	}
+	for _, h := range []string{"run_before_request", "run_after_response", "run_on_stream_chunk"} {
+		if !hasHook(m, h) {
+			t.Errorf("hasHook should match %s", h)
+		}
+	}
+	if hasHook(m, "on_chat_request") {
+		t.Error("hasHook should NOT match on_chat_request")
+	}
+}
+
+func TestHookNames(t *testing.T) {
+	hooks := []Hook{
+		{Name: "run_before_request", Priority: 100},
+		{Name: "run_after_response", Priority: 200},
+	}
+	names := hookNames(hooks)
+	if len(names) != 2 {
+		t.Fatalf("expected 2 hook names, got %d", len(names))
+	}
+	if names[0] != "run_before_request" || names[1] != "run_after_response" {
+		t.Errorf("unexpected hook names: %v", names)
+	}
+}
+
+func TestDiscoverPlugins_EmptyDir(t *testing.T) {
+	dir := t.TempDir()
+	bundles, err := DiscoverPlugins(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bundles) != 0 {
+		t.Errorf("expected 0 bundles in empty dir, got %d", len(bundles))
+	}
+}
+
+func TestDiscoverPlugins_ValidPlugin(t *testing.T) {
+	dir := t.TempDir()
+	pluginDir := filepath.Join(dir, "test-plugin")
+	if err := os.MkdirAll(pluginDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	manifest := PluginManifest{
+		Name:        "test-plugin",
+		Version:     "0.1.0",
+		Description: "test",
+		Hooks: []Hook{
+			{Name: "run_before_request", Priority: 100},
+		},
+	}
+	mBytes, _ := json.Marshal(manifest)
+	if err := os.WriteFile(filepath.Join(pluginDir, "plugin.json"), mBytes, 0644); err != nil {
+		t.Fatal(err)
+	}
+	// Write a minimal valid WASM file (magic bytes + version).
+	// This won't execute, but DiscoverPlugins only reads the file — it doesn't instantiate.
+	wasmBytes := []byte{0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00}
+	if err := os.WriteFile(filepath.Join(pluginDir, "plugin.wasm"), wasmBytes, 0644); err != nil {
+		t.Fatal(err)
+	}
+	bundles, err := DiscoverPlugins(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bundles) != 1 {
+		t.Fatalf("expected 1 bundle, got %d", len(bundles))
+	}
+	if bundles[0].Manifest.Name != "test-plugin" {
+		t.Errorf("unexpected plugin name: %s", bundles[0].Manifest.Name)
+	}
+}
+
+// TestPipelineRunBeforeRequest exercises the full dispatch path (manifest → discovery →
+// pipeline → hook call) using a real compiled WASM plugin, rather than calling
+// CallRequest directly. This catches manifest/dispatch mismatches that the
+// existing direct-call tests miss.
+func TestPipelineRunBeforeRequest_FullDispatch(t *testing.T) {
+	// Use the committed delegator plugin for the integration test.
+	wasmPath := "../../plugins/delegator/plugin.wasm"
+	wBytes, err := os.ReadFile(wasmPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			t.Skip("skipping integration test: delegator plugin.wasm not found")
+		}
+		t.Fatal(err)
+	}
+
+	// Create a temp plugin directory with correct manifest.
+	dir := t.TempDir()
+	pluginDir := filepath.Join(dir, "delegator")
+	if err := os.MkdirAll(pluginDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	manifest := PluginManifest{
+		Name:        "delegator",
+		Version:     "0.3.0",
+		Description: "test",
+		Hooks: []Hook{
+			{Name: "run_before_request", Priority: 100},
+		},
+	}
+	mBytes, _ := json.Marshal(manifest)
+	if err := os.WriteFile(filepath.Join(pluginDir, "plugin.json"), mBytes, 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(pluginDir, "plugin.wasm"), wBytes, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx := context.Background()
+	runtime := wasm.NewRuntime(ctx)
+	defer runtime.Close()
+
+	pipeline, err := NewPipeline(runtime, PluginConfig{
+		Dir:   dir,
+		Order: []string{"delegator"},
+	})
+	if err != nil {
+		t.Fatalf("NewPipeline: %v", err)
+	}
+
+	chat := &engine.ChatRequest{Model: ""}
+	result, err := pipeline.RunBeforeRequest(ctx, 1, chat)
+	if err != nil {
+		t.Fatalf("RunBeforeRequest: %v", err)
+	}
+
+	// The delegator plugin sets default model to claude-3-5-sonnet-20241022
+	if result.Model != "claude-3-5-sonnet-20241022" {
+		t.Errorf("expected model injection via full dispatch path, got %q", result.Model)
+	}
+}
