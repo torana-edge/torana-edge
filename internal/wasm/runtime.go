@@ -297,11 +297,7 @@ func (r *Runtime) installHostFunctions() {
 		case "torana_kms_decrypt":
 			res = `{"status":"ok","decrypted":"` + args + `"}`
 		case "verify_virtual_key":
-			if strings.HasPrefix(args, "sk-torana-") {
-				res = `{"status":"ok","tenant_id":"tenant-42","team_id":"team-red","user_id":"user-007"}`
-			} else {
-				res = `{"status":"error","message":"invalid virtual key format"}`
-			}
+			res = `{"status":"error","message":"unimplemented: enterprise auth is available in torana-edge/private-nucleus"}`
 		default:
 			res = `{"status":"error","message":"unknown host call"}`
 		}
