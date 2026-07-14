@@ -17,9 +17,9 @@ import (
 // Plugin — WASM module with instance pooling and permission enforcement
 // ============================================================================
 
-// poolSize is the number of concurrent WASM instances per plugin.
-// For single-user local use this is adequate; production should increase.
-const poolSize = 4
+// poolSize is the number of concurrent WASM instances per plugin kept warm in the pool.
+// Requests exceeding this size will create instances on-the-fly and close them afterwards.
+const poolSize = 100
 
 type Plugin struct {
 	name      string
@@ -30,6 +30,8 @@ type Plugin struct {
 	// Instance pool for concurrent request handling.
 	pool   chan *pluginInstance
 	poolMu sync.Mutex
+	
+	instanceCount uint64
 }
 
 type pluginInstance struct {
@@ -79,8 +81,14 @@ func (p *Plugin) newInstance(ctx context.Context) (*pluginInstance, error) {
 	p.poolMu.Lock()
 	defer p.poolMu.Unlock()
 
+	
+	
+	// Wazero requires unique names for instances
+	p.instanceCount++
+	instanceName := fmt.Sprintf("%s-%d", p.name, p.instanceCount)
+
 	mod, err := p.runtime.InstantiateWithConfig(ctx, p.wasmBytes,
-		wazero.NewModuleConfig().WithName(p.name).
+		wazero.NewModuleConfig().WithName(instanceName).
 			WithSysWalltime().WithSysNanotime().
 			WithStdout(os.Stdout).WithStderr(os.Stderr))
 	if err != nil {
