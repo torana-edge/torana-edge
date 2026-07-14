@@ -55,6 +55,13 @@ type Server struct {
 	pluginPipeline atomic.Value // *plugin.PluginPipeline
 }
 
+type routeContextKey struct{}
+
+type RouteContext struct {
+	ProviderName string
+	StrippedPath string
+}
+
 // --- Construction -----------------------------------------------------------
 
 // New builds a Server and wires the middleware pipeline.
@@ -129,6 +136,14 @@ func New(cfg Config) (*Server, error) {
 				req.ContentLength = int64(len(body))
 				return
 			}
+			
+			// Inject explicit routing metadata so the transport layer (failover) 
+			// doesn't have to guess from the mutated URL.
+			ctx := context.WithValue(req.Context(), routeContextKey{}, &RouteContext{
+				ProviderName: provName,
+				StrippedPath: strippedPath,
+			})
+			*req = *req.WithContext(ctx)
 
 			// Look up the format adapter.
 			fmt := format.Lookup(prov.Format)
@@ -182,7 +197,7 @@ func New(cfg Config) (*Server, error) {
 			}
 
 			// Stash format and chat for ModifyResponse.
-			ctx := req.Context()
+			ctx = req.Context()
 			ctx = context.WithValue(ctx, formatCtxKey{}, fmt)
 			ctx = context.WithValue(ctx, chatCtxKey{}, chat)
 			*req = *req.WithContext(ctx)
