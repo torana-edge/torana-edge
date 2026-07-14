@@ -1,9 +1,0 @@
-{
-  "name": "delegator",
-  "version": "0.3.0",
-  "description": "Injects torana_delegate_task tool for hierarchical agentic routing",
-  "hooks": [
-    {"name": "run_before_request", "priority": 100}
-  ],
-  "permissions": []
-}
