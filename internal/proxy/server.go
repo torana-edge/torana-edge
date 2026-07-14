@@ -179,6 +179,18 @@ func New(cfg Config) (*Server, error) {
 				return
 			}
 
+			// Inject headers into ToranaMeta for plugins (e.g. auth).
+			if chat.ToranaMeta == nil {
+				chat.ToranaMeta = make(map[string]any)
+			}
+			headers := make(map[string]any)
+			for k, v := range req.Header {
+				if len(v) > 0 {
+					headers[k] = v[0]
+				}
+			}
+			chat.ToranaMeta["_request_headers"] = headers
+
 			// --- WASM plugin pipeline (runs before native hooks) ----------
 
 			if pp := s.pluginPipeline.Load(); pp != nil {

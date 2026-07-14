@@ -276,6 +276,12 @@ func (r *Runtime) installHostFunctions() {
 			res = `{"status":"ok","db_result":"stub"}`
 		case "torana_kms_decrypt":
 			res = `{"status":"ok","decrypted":"` + args + `"}`
+		case "verify_virtual_key":
+			if strings.HasPrefix(args, "sk-torana-") {
+				res = `{"status":"ok","tenant_id":"tenant-42","team_id":"team-red","user_id":"user-007"}`
+			} else {
+				res = `{"status":"error","message":"invalid virtual key format"}`
+			}
 		default:
 			res = `{"status":"error","message":"unknown host call"}`
 		}
