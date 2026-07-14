@@ -4,7 +4,6 @@ package plugin_sdk
 
 import (
 	"context"
-
 	"sync"
 	"unsafe"
 
@@ -51,7 +50,7 @@ func WriteResult(data []byte) uint64 {
 
 var chatRequestHandler func(ctx context.Context, req *pb.ChatRequest) (*pb.ChatRequest, error)
 
-// OnChatRequest registers the handler for chat requests.
+// OnBeforeRequest registers the handler for chat requests.
 func OnBeforeRequest(handler func(ctx context.Context, req *pb.ChatRequest) (*pb.ChatRequest, error)) {
 	chatRequestHandler = handler
 }
@@ -82,7 +81,7 @@ func run_before_request(reqID uint64, ptr, size uint32) uint64 {
 
 var chatResponseHandler func(ctx context.Context, resp *pb.ChatRequest) (*pb.ChatRequest, error)
 
-// OnChatResponse registers the handler for chat responses.
+// OnAfterResponse registers the handler for chat responses.
 func OnAfterResponse(handler func(ctx context.Context, resp *pb.ChatRequest) (*pb.ChatRequest, error)) {
 	chatResponseHandler = handler
 }

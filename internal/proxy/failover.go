@@ -14,13 +14,46 @@ import (
 // failoverRoundTripper wraps the default transport and retries failed
 // requests against configured fallback providers (429 / 5xx).
 type failoverRoundTripper struct {
-	base     http.RoundTripper
-	cfg      func() provider.Config
+	base        http.RoundTripper
+	cfg         func() provider.Config
+	rateLimiter *RateLimiter
+}
+
+// rateLimitBody wraps the response body to release the concurrency token on close.
+type rateLimitBody struct {
+	io.ReadCloser
+	identity    string
+	rateLimiter *RateLimiter
+}
+
+func (r *rateLimitBody) Close() error {
+	r.rateLimiter.Release(r.identity)
+	return r.ReadCloser.Close()
 }
 
 func (t *failoverRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
 	// Find the provider name from the context.
 	provName, fallbacks := extractFallbacks(req, t.cfg())
+
+	rc, _ := req.Context().Value(routeContextKey{}).(*RouteContext)
+	identity := "default"
+	if rc != nil && rc.Identity != "" {
+		identity = rc.Identity
+	}
+
+	if !t.rateLimiter.Acquire(identity) {
+		return &http.Response{
+			StatusCode:    http.StatusTooManyRequests,
+			Status:        "429 Too Many Requests",
+			Proto:         "HTTP/1.1",
+			ProtoMajor:    1,
+			ProtoMinor:    1,
+			Body:          io.NopCloser(bytes.NewReader([]byte(`{"error":"rate limit exceeded"}`))),
+			ContentLength: -1,
+			Request:       req,
+			Header:        make(http.Header),
+		}, nil
+	}
 
 	// If there are fallbacks, we MUST buffer the body before the first attempt
 	// because RoundTrip consumes the body.
@@ -42,6 +75,7 @@ func (t *failoverRoundTripper) RoundTrip(req *http.Request) (*http.Response, err
 	// First attempt.
 	resp, err := t.base.RoundTrip(req)
 	if err == nil && !shouldRetry(resp) {
+		resp.Body = &rateLimitBody{ReadCloser: resp.Body, identity: identity, rateLimiter: t.rateLimiter}
 		return resp, nil
 	}
 
@@ -99,7 +133,15 @@ func (t *failoverRoundTripper) RoundTrip(req *http.Request) (*http.Response, err
 			continue
 		}
 		log.Printf("[failover] %s succeeded", fbName)
+		retryResp.Body = &rateLimitBody{ReadCloser: retryResp.Body, identity: identity, rateLimiter: t.rateLimiter}
 		return retryResp, nil
+	}
+
+	if lastResp != nil && lastResp.Body != nil {
+		lastResp.Body = &rateLimitBody{ReadCloser: lastResp.Body, identity: identity, rateLimiter: t.rateLimiter}
+	} else {
+		// If lastResp is nil (only error returned), we need to release token
+		t.rateLimiter.Release(identity)
 	}
 
 	return lastResp, lastErr
