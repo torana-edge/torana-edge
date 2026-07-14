@@ -21,6 +21,13 @@ type Config struct {
 	Port      int                 `json:"port"`
 	Providers map[string]Provider `json:"providers"`
 	Plugins   PluginsConfig       `json:"plugins,omitempty"`
+	Limits    Limits              `json:"limits,omitempty"`
+}
+
+// Limits defines the rate limit and concurrency caps.
+type Limits struct {
+	Concurrency int `json:"concurrency,omitempty"`
+	RPM         int `json:"rpm,omitempty"`
 }
 
 // PluginsConfig controls WASM plugin loading and execution.
@@ -83,6 +90,9 @@ func Load(path string) (Config, error) {
 	}
 	if user.Plugins.Dir != "" {
 		cfg.Plugins = user.Plugins
+	}
+	if user.Limits.RPM != 0 || user.Limits.Concurrency != 0 {
+		cfg.Limits = user.Limits
 	}
 
 	return cfg, nil

@@ -3,6 +3,7 @@
 package plugin_sdk
 
 import (
+	"context"
 	"sync"
 	"unsafe"
 
@@ -47,15 +48,15 @@ func WriteResult(data []byte) uint64 {
 	return uint64(p)<<32 | uint64(len(data))
 }
 
-var chatRequestHandler func(req *pb.ChatRequest) (*pb.ChatRequest, error)
+var chatRequestHandler func(ctx context.Context, req *pb.ChatRequest) (*pb.ChatRequest, error)
 
-// OnChatRequest registers the handler for chat requests.
-func OnChatRequest(handler func(req *pb.ChatRequest) (*pb.ChatRequest, error)) {
+// OnBeforeRequest registers the handler for chat requests.
+func OnBeforeRequest(handler func(ctx context.Context, req *pb.ChatRequest) (*pb.ChatRequest, error)) {
 	chatRequestHandler = handler
 }
 
-//go:wasmexport on_chat_request
-func on_chat_request(ptr, size uint32) uint64 {
+//go:wasmexport run_before_request
+func run_before_request(reqID uint64, ptr, size uint32) uint64 {
 	if chatRequestHandler == nil {
 		return 0
 	}
@@ -66,7 +67,7 @@ func on_chat_request(ptr, size uint32) uint64 {
 		return 0
 	}
 
-	out, err := chatRequestHandler(&req)
+	out, err := chatRequestHandler(context.WithValue(context.Background(), "reqID", reqID), &req)
 	if err != nil || out == nil {
 		return 0
 	}
@@ -78,15 +79,15 @@ func on_chat_request(ptr, size uint32) uint64 {
 	return WriteResult(outBytes)
 }
 
-var chatResponseHandler func(resp *pb.ChatRequest) (*pb.ChatRequest, error)
+var chatResponseHandler func(ctx context.Context, resp *pb.ChatRequest) (*pb.ChatRequest, error)
 
-// OnChatResponse registers the handler for chat responses.
-func OnChatResponse(handler func(resp *pb.ChatRequest) (*pb.ChatRequest, error)) {
+// OnAfterResponse registers the handler for chat responses.
+func OnAfterResponse(handler func(ctx context.Context, resp *pb.ChatRequest) (*pb.ChatRequest, error)) {
 	chatResponseHandler = handler
 }
 
-//go:wasmexport on_chat_response
-func on_chat_response(ptr, size uint32) uint64 {
+//go:wasmexport run_after_response
+func run_after_response(reqID uint64, ptr, size uint32) uint64 {
 	if chatResponseHandler == nil {
 		return 0
 	}
@@ -96,7 +97,7 @@ func on_chat_response(ptr, size uint32) uint64 {
 		return 0
 	}
 
-	out, err := chatResponseHandler(&resp)
+	out, err := chatResponseHandler(context.WithValue(context.Background(), "reqID", reqID), &resp)
 	if err != nil || out == nil {
 		return 0
 	}
@@ -108,15 +109,15 @@ func on_chat_response(ptr, size uint32) uint64 {
 	return WriteResult(outBytes)
 }
 
-var streamChunkHandler func(chunk *pb.StreamEvent) (*pb.StreamEvent, error)
+var streamChunkHandler func(ctx context.Context, chunk *pb.StreamEvent) (*pb.StreamEvent, error)
 
 // OnStreamChunk registers the handler for stream chunks.
-func OnStreamChunk(handler func(chunk *pb.StreamEvent) (*pb.StreamEvent, error)) {
+func OnStreamChunk(handler func(ctx context.Context, chunk *pb.StreamEvent) (*pb.StreamEvent, error)) {
 	streamChunkHandler = handler
 }
 
-//go:wasmexport on_stream_chunk
-func on_stream_chunk(ptr, size uint32) uint64 {
+//go:wasmexport run_on_stream_chunk
+func run_on_stream_chunk(reqID uint64, ptr, size uint32) uint64 {
 	if streamChunkHandler == nil {
 		return 0
 	}
@@ -126,7 +127,7 @@ func on_stream_chunk(ptr, size uint32) uint64 {
 		return 0
 	}
 
-	out, err := streamChunkHandler(&chunk)
+	out, err := streamChunkHandler(context.WithValue(context.Background(), "reqID", reqID), &chunk)
 	if err != nil || out == nil {
 		return 0
 	}
@@ -167,7 +168,7 @@ func HostCall(cmd string, args string) (string, error) {
 	if len(cb) == 0 {
 		return "", nil
 	}
-	
+
 	cPtr := alloc(uint32(len(cb)))
 	copy(ReadBytes(cPtr, uint32(len(cb))), cb)
 	defer dealloc(cPtr, uint32(len(cb)))
@@ -183,11 +184,11 @@ func HostCall(cmd string, args string) (string, error) {
 	if ret == 0 {
 		return "", nil
 	}
-	
+
 	outPtr := uint32(ret >> 32)
 	outLen := uint32(ret & 0xFFFFFFFF)
 	res := string(ReadBytes(outPtr, outLen))
 	dealloc(outPtr, outLen)
-	
+
 	return res, nil
 }

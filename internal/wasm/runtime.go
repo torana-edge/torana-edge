@@ -102,7 +102,7 @@ func (p *Plugin) newInstance(ctx context.Context) (*pluginInstance, error) {
 
 // CallRequest passes byte payload to the WASM hook and returns the result.
 // Uses instance pooling for concurrent request handling.
-func (p *Plugin) CallRequest(ctx context.Context, hook string, inBytes []byte, output *[]byte) error {
+func (p *Plugin) CallRequest(ctx context.Context, hook string, reqID uint64, inBytes []byte, output *[]byte) error {
 	// Acquire an instance from the pool.
 	inst, err := p.acquire(ctx)
 	if err != nil {
@@ -132,7 +132,7 @@ func (p *Plugin) CallRequest(ctx context.Context, hook string, inBytes []byte, o
 	mod.Memory().Write(inPtr, inBytes)
 
 	// Call hook.
-	ret, err := fn.Call(ctx, uint64(inPtr), uint64(len(inBytes)))
+	ret, err := fn.Call(ctx, reqID, uint64(inPtr), uint64(len(inBytes)))
 	if deallocFn != nil {
 		deallocFn.Call(ctx, uint64(inPtr), uint64(len(inBytes)))
 	}

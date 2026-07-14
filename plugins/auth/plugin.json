@@ -1,0 +1,17 @@
+{
+  "name": "auth",
+  "version": "0.1.0",
+  "description": "Enterprise Gateway auth normalization",
+  "hooks": [
+    {
+      "name": "on_request",
+      "priority": 100
+    }
+  ],
+  "permissions": [
+    {
+      "name": "env.host_call.verify_virtual_key",
+      "description": "verify torana virtual keys"
+    }
+  ]
+}
