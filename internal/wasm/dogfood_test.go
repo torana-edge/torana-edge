@@ -26,7 +26,7 @@ func TestDelegator(t *testing.T) {
 	input, _ := proto.Marshal(req)
 
 	var outBytes []byte
-	if err := p.CallRequest(context.Background(), "on_chat_request", input, &outBytes); err != nil {
+	if err := p.CallRequest(context.Background(), "run_before_request", 1, input, &outBytes); err != nil {
 		t.Fatal(err)
 	}
 	

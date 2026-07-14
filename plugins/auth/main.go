@@ -1,6 +1,8 @@
 package main
 
 import (
+	"context"
+
 	"encoding/json"
 	"strings"
 
@@ -19,7 +21,7 @@ type VerifyResponse struct {
 }
 
 func init() {
-	sdk.OnChatRequest(func(req *pb.ChatRequest) (*pb.ChatRequest, error) {
+	sdk.OnBeforeRequest(func(ctx context.Context, req *pb.ChatRequest) (*pb.ChatRequest, error) {
 		if req.ToranaMetaJson == nil {
 			req.ToranaMetaJson = []byte(`{}`)
 		}
@@ -34,7 +36,7 @@ func init() {
 		if !ok {
 			return nil, nil
 		}
-		
+
 		headers, ok := headersRaw.(map[string]any)
 		if !ok {
 			return nil, nil
