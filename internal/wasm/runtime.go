@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"sync"
+	"strings"
 
 	"github.com/tetratelabs/wazero"
 	"github.com/tetratelabs/wazero/api"
@@ -30,7 +31,7 @@ type Plugin struct {
 	// Instance pool for concurrent request handling.
 	pool   chan *pluginInstance
 	poolMu sync.Mutex
-	
+
 	instanceCount uint64
 }
 
@@ -81,8 +82,6 @@ func (p *Plugin) newInstance(ctx context.Context) (*pluginInstance, error) {
 	p.poolMu.Lock()
 	defer p.poolMu.Unlock()
 
-	
-	
 	// Wazero requires unique names for instances
 	p.instanceCount++
 	instanceName := fmt.Sprintf("%s-%d", p.name, p.instanceCount)
@@ -104,14 +103,6 @@ func (p *Plugin) newInstance(ctx context.Context) (*pluginInstance, error) {
 // CallRequest passes byte payload to the WASM hook and returns the result.
 // Uses instance pooling for concurrent request handling.
 func (p *Plugin) CallRequest(ctx context.Context, hook string, inBytes []byte, output *[]byte) error {
-	fn, allocFn, deallocFn, err := p.resolveExports()
-	if err != nil {
-		return err
-	}
-	if fn == nil {
-		return nil
-	}
-
 	// Acquire an instance from the pool.
 	inst, err := p.acquire(ctx)
 	if err != nil {
@@ -120,6 +111,17 @@ func (p *Plugin) CallRequest(ctx context.Context, hook string, inBytes []byte, o
 	defer p.release(inst)
 
 	mod := inst.mod
+
+	fn := mod.ExportedFunction(hook)
+	if fn == nil {
+		return nil
+	}
+
+	allocFn := mod.ExportedFunction("alloc")
+	if allocFn == nil {
+		return fmt.Errorf("wasm: %s missing alloc", p.name)
+	}
+	deallocFn := mod.ExportedFunction("dealloc")
 
 	// Allocate in WASM linear memory.
 	r, err := allocFn.Call(ctx, uint64(len(inBytes)))
@@ -157,25 +159,6 @@ func (p *Plugin) CallRequest(ctx context.Context, hook string, inBytes []byte, o
 		}
 	}
 	return nil
-}
-
-// resolveExports looks up hook, alloc, and dealloc functions.
-// The hook is resolved per-instance since it's exported from each module.
-func (p *Plugin) resolveExports() (hook, alloc, dealloc api.Function, err error) {
-	// Get a quick instance just to resolve exports.
-	inst, err := p.acquire(context.Background())
-	if err != nil {
-		return nil, nil, nil, err
-	}
-	defer p.release(inst)
-
-	hook = inst.mod.ExportedFunction("on_chat_request")
-	alloc = inst.mod.ExportedFunction("alloc")
-	if alloc == nil {
-		return nil, nil, nil, fmt.Errorf("wasm: %s missing alloc", p.name)
-	}
-	dealloc = inst.mod.ExportedFunction("dealloc")
-	return hook, alloc, dealloc, nil
 }
 
 // ============================================================================
@@ -256,6 +239,10 @@ func (r *Runtime) installHostFunctions() {
 	env.NewFunctionBuilder().WithFunc(func(ctx context.Context, mod api.Module, metricType int32, ptr, length uint32, value float64) {
 		name := readStr(mod, ptr, length)
 		pluginName := mod.Name()
+		idx := strings.LastIndex(pluginName, "-")
+		if idx != -1 {
+			pluginName = pluginName[:idx]
+		}
 		metrics.EmitPluginMetric(ctx, pluginName, name, int(metricType), value)
 	}).Export("emit_metric")
 
@@ -265,8 +252,14 @@ func (r *Runtime) installHostFunctions() {
 		args := readStr(mod, argsPtr, argsLen)
 
 		// Enforce per-command permission: env.host_call.<command>
+		pluginName := mod.Name()
+		idx := strings.LastIndex(pluginName, "-")
+		if idx != -1 {
+			pluginName = pluginName[:idx]
+		}
+
 		r.mu.RLock()
-		p := r.plugins[mod.Name()]
+		p := r.plugins[pluginName]
 		r.mu.RUnlock()
 		perm := "env.host_call"
 		if cmd != "" {
