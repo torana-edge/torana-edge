@@ -142,6 +142,11 @@ func reloadPipeline(runtime *wasm.Runtime, config PluginConfig) (*PluginPipeline
 			log.Printf("[plugin] %s: %v — skipping", name, err)
 			continue
 		}
+		var grants []string
+		for _, p := range bundle.Manifest.Permissions {
+			grants = append(grants, p.Name)
+		}
+		pl.SetGrants(grants)
 		loaded = append(loaded, &loadedPlugin{
 			manifest: bundle.Manifest,
 			plugin:   pl,
