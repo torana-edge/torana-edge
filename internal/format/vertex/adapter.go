@@ -31,7 +31,7 @@ type geminiRequest struct {
 	Contents          []geminiContent          `json:"contents"`
 	Tools             []geminiTool             `json:"tools,omitempty"`
 	GenerationConfig  *geminiGenerationConfig  `json:"generationConfig,omitempty"`
-	SafetySettings    json.RawMessage          `json:"safetySettings,omitempty"`
+	SafetySettings    []any                    `json:"safetySettings,omitempty"`
 }
 
 type geminiGenerationConfig struct {
@@ -96,6 +96,10 @@ func (a *Adapter) Unmarshal(rawBody []byte) (*engine.ChatRequest, error) {
 		chat.Temperature = gReq.GenerationConfig.Temperature
 		chat.TopP = gReq.GenerationConfig.TopP
 		chat.StopSequences = gReq.GenerationConfig.StopSequences
+	}
+
+	if len(gReq.SafetySettings) > 0 {
+		chat.SafetySettings = gReq.SafetySettings
 	}
 
 	var raw map[string]any
@@ -318,6 +322,10 @@ func (a *Adapter) Marshal(chat *engine.ChatRequest) ([]byte, error) {
 			TopP:            chat.TopP,
 			StopSequences:   chat.StopSequences,
 		}
+	}
+	
+	if len(chat.SafetySettings) > 0 {
+		gReq.SafetySettings = chat.SafetySettings
 	}
 
 	b, err := json.Marshal(gReq)
