@@ -178,7 +178,6 @@ func New(cfg Config) (*Server, error) {
 			}
 
 			// --- WASM plugin pipeline (runs before native hooks) ----------
-			s.stats.RecordRequest(int64(len(body)), 0)
 
 			if pp := s.pluginPipeline.Load(); pp != nil {
 				pl := pp.(*plugin.PluginPipeline)
@@ -306,7 +305,13 @@ func New(cfg Config) (*Server, error) {
 			http.Error(w, "no provider configured for this path", http.StatusBadGateway)
 			return
 		}
-		proxy.ServeHTTP(w, r)
+		tr := &trackingReader{ReadCloser: r.Body}
+		tw := &trackingWriter{ResponseWriter: w}
+		r.Body = tr
+
+		proxy.ServeHTTP(tw, r)
+		
+		s.stats.RecordRequest(tr.bytesRead, tw.bytesWritten)
 	})
 
 	srv := &http.Server{
@@ -389,3 +394,31 @@ func joinURLPath(base, rel string) string {
 }
 
 
+
+type trackingWriter struct {
+	http.ResponseWriter
+	bytesWritten int64
+}
+
+func (tw *trackingWriter) Write(b []byte) (int, error) {
+	n, err := tw.ResponseWriter.Write(b)
+	tw.bytesWritten += int64(n)
+	return n, err
+}
+
+func (tw *trackingWriter) Flush() {
+	if f, ok := tw.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+type trackingReader struct {
+	io.ReadCloser
+	bytesRead int64
+}
+
+func (tr *trackingReader) Read(p []byte) (n int, err error) {
+	n, err = tr.ReadCloser.Read(p)
+	tr.bytesRead += int64(n)
+	return n, err
+}
