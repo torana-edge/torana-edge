@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"log"
-	"math"
 	"os"
 	"sync"
 
@@ -230,7 +229,7 @@ func (r *Runtime) installHostFunctions() {
 		r.metaMu.RLock()
 		v := r.meta[key]
 		r.metaMu.RUnlock()
-		return writeStr(mod, v)
+		return writeStr(ctx, mod, v)
 	}).Export("meta_get")
 
 	env.NewFunctionBuilder().WithFunc(func(ctx context.Context, mod api.Module, level int32, ptr, length uint32) {
@@ -267,7 +266,7 @@ func (r *Runtime) installHostFunctions() {
 		}
 		if p == nil || !p.hasGrant(perm) {
 			log.Printf("[wasm] permission denied: %s tried %s", mod.Name(), perm)
-			return writeStr(mod, `{"status":"error","message":"permission denied"}`)
+			return writeStr(ctx, mod, `{"status":"error","message":"permission denied"}`)
 		}
 
 		var res string
@@ -280,7 +279,7 @@ func (r *Runtime) installHostFunctions() {
 			res = `{"status":"error","message":"unknown host call"}`
 		}
 
-		return writeStr(mod, res)
+		return writeStr(ctx, mod, res)
 	}).Export("host_call")
 
 	env.Instantiate(r.ctx)
@@ -294,29 +293,29 @@ func readStr(mod api.Module, ptr, length uint32) string {
 	return string(b)
 }
 
-// writeStr allocates space in WASM linear memory and writes the string.
-// Uses Memory().Grow() to ensure sufficient pages before writing.
-func writeStr(mod api.Module, s string) uint64 {
+// writeStr calls the WASM module's 'alloc' function to allocate space, then writes the string.
+func writeStr(ctx context.Context, mod api.Module, s string) uint64 {
 	b := []byte(s)
 	if len(b) == 0 {
 		return 0
 	}
 
-	mem := mod.Memory()
-	currentSize := mem.Size()
-	needed := currentSize + uint32(len(b))
-
-	// Grow if needed (each page is 64KB).
-	if needed > currentSize {
-		pagesNeeded := uint32(math.Ceil(float64(needed-currentSize) / 65536))
-		if _, ok := mem.Grow(pagesNeeded); !ok {
-			log.Printf("[wasm] writeStr: grow(%d) failed — memory full", pagesNeeded)
-			return 0
-		}
+	allocFn := mod.ExportedFunction("alloc")
+	if allocFn == nil {
+		log.Printf("[wasm] writeStr: missing alloc function in module %s", mod.Name())
+		return 0
 	}
 
-	// Re-read size after potential grow.
-	ptr := mem.Size() - uint32(len(b))
-	mem.Write(ptr, b)
+	res, err := allocFn.Call(ctx, uint64(len(b)))
+	if err != nil {
+		log.Printf("[wasm] writeStr: alloc failed: %v", err)
+		return 0
+	}
+	if len(res) == 0 {
+		return 0
+	}
+
+	ptr := uint32(res[0])
+	mod.Memory().Write(ptr, b)
 	return uint64(ptr)<<32 | uint64(len(b))
 }
