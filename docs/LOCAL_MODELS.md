@@ -37,17 +37,16 @@ while keeping your primary provider (DeepSeek/OpenAI) for reasoning.
 
 ## Local offload (free compaction)
 
-Set offload to use a local model instead of a cloud API:
+Use the `compactor` plugin to automatically route heavy summarization tasks to a local model:
 
 ```json
 {
-  "offload": {
-    "enabled": true,
-    "model": "llama3.1:8b",
-    "provider": "ollama"
+  "plugins": {
+    "dir": "./plugins",
+    "order": ["compactor"]
   }
 }
 ```
 
 This gives you token-free compaction — the summarization runs on your
-local GPU without any API costs.
+local GPU without any API costs, as the compactor plugin can be configured to offload to Ollama.
