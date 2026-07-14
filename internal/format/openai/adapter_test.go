@@ -278,6 +278,22 @@ func TestResponsesFieldPreservation(t *testing.T) {
 	if req.ProviderExtensions["temperature"] != 0.5 {
 		t.Errorf("expected temperature to be preserved, got %v", req.ProviderExtensions["temperature"])
 	}
+
+	out, err := a.Marshal(req)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+
+	var outMap map[string]any
+	if err := json.Unmarshal(out, &outMap); err != nil {
+		t.Fatalf("Marshal output is not valid JSON: %v\n%s", err, out)
+	}
+	if outMap["instructions"] != "Be helpful." {
+		t.Errorf("expected marshaled instructions to be preserved, got %v", outMap["instructions"])
+	}
+	if outMap["temperature"] != 0.5 {
+		t.Errorf("expected marshaled temperature to be preserved, got %v", outMap["temperature"])
+	}
 }
 
 func strPtr(s string) *string { return &s }
