@@ -275,11 +275,16 @@ func WatchPlugins(ctx context.Context, dir string, config PluginConfig, reloadFn
 		return fmt.Errorf("fsnotify: %w", err)
 	}
 
-	// Watch the plugins directory and subdirectories.
-	if err := w.Add(dir); err != nil {
-		w.Close()
-		return fmt.Errorf("fsnotify watch %s: %w", dir, err)
+	// Watch the plugins directory and all subdirectories recursively.
+	addRecursive := func(root string) {
+		filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+			if err == nil && info.IsDir() {
+				w.Add(path)
+			}
+			return nil
+		})
 	}
+	addRecursive(dir)
 
 	go func() {
 		defer w.Close()
@@ -297,6 +302,14 @@ func WatchPlugins(ctx context.Context, dir string, config PluginConfig, reloadFn
 				if !ok {
 					return
 				}
+				// Handle newly created directories for recursive watching.
+				if event.Op&fsnotify.Create == fsnotify.Create {
+					if fi, err := os.Stat(event.Name); err == nil && fi.IsDir() {
+						addRecursive(event.Name)
+						continue
+					}
+				}
+
 				// Only reload on .wasm or plugin.json changes.
 				name := filepath.Base(event.Name)
 				if name != "plugin.wasm" && name != "plugin.json" {
