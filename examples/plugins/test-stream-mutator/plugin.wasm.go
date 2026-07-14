@@ -1,6 +1,8 @@
 package main
 
 import (
+	"context"
+
 	"strings"
 
 	"github.com/torana-edge/torana-edge/pkg/pb"
@@ -10,7 +12,7 @@ import (
 func main() {}
 
 func init() {
-	sdk.OnStreamChunk(func(ev *pb.StreamEvent) (*pb.StreamEvent, error) {
+	sdk.OnStreamChunk(func(ctx context.Context, ev *pb.StreamEvent) (*pb.StreamEvent, error) {
 		if textDelta, ok := ev.Event.(*pb.StreamEvent_TextDelta); ok {
 			if strings.Contains(textDelta.TextDelta, "secret") {
 				textDelta.TextDelta = strings.ReplaceAll(textDelta.TextDelta, "secret", "[REDACTED]")

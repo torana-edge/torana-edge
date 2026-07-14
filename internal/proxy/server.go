@@ -55,6 +55,7 @@ type Server struct {
 	stats      *metrics.StatsTracker
 	// WASM plugin pipeline (loaded when configured)
 	pluginPipeline atomic.Value // *plugin.PluginPipeline
+	nextReqID      uint64
 }
 
 type routeContextKey struct{}
@@ -201,7 +202,12 @@ func New(cfg Config) (*Server, error) {
 
 			if pp := s.pluginPipeline.Load(); pp != nil {
 				pl := pp.(*plugin.PluginPipeline)
-				modified, err := pl.RunOnChatRequest(req.Context(), chat)
+				reqID := atomic.AddUint64(&s.nextReqID, 1)
+				// stash reqID into context so ModifyResponse can retrieve it
+				ctx = context.WithValue(req.Context(), "reqID", reqID)
+				*req = *req.WithContext(ctx)
+
+				modified, err := pl.RunBeforeRequest(req.Context(), reqID, chat)
 				if err != nil {
 					log.Printf("plugin pipeline error: %v", err)
 				} else if modified != nil {
@@ -248,11 +254,13 @@ func New(cfg Config) (*Server, error) {
 				if pp := s.pluginPipeline.Load(); pp != nil {
 					pl := pp.(*plugin.PluginPipeline)
 					out := make(chan engine.StreamEvent)
+					in := events
 					go func() {
 						defer close(out)
-						for event := range events {
-							// Call on_stream_chunk
-							modified, err := pl.RunOnStreamChunk(resp.Request.Context(), &event)
+						reqID, _ := resp.Request.Context().Value("reqID").(uint64)
+						for event := range in {
+							// Call run_on_stream_chunk
+							modified, err := pl.RunOnStreamChunk(resp.Request.Context(), reqID, &event)
 							if err != nil {
 								log.Printf("plugin stream error: %v", err)
 								out <- event
@@ -272,7 +280,23 @@ func New(cfg Config) (*Server, error) {
 					if err := fmt.Stream.SerializeStream(pw, events); err != nil {
 						log.Printf("format %s serialize error: %v", fmt.Name, err)
 					}
+					// RunAfterResponse when stream finishes
+					if pp := s.pluginPipeline.Load(); pp != nil {
+						reqID, _ := resp.Request.Context().Value("reqID").(uint64)
+						chat, _ := resp.Request.Context().Value(chatCtxKey{}).(*engine.ChatRequest)
+						if chat != nil {
+							_, _ = pp.(*plugin.PluginPipeline).RunAfterResponse(resp.Request.Context(), reqID, chat)
+						}
+					}
 				}()
+
+				// Fix client disconnect handling
+				ctx := resp.Request.Context()
+				go func() {
+					<-ctx.Done()
+					resp.Body.Close()
+				}()
+
 				resp.Body = pr
 				return nil
 			}
@@ -290,8 +314,32 @@ func New(cfg Config) (*Server, error) {
 					return fmt.Errorf("response body exceeds max size")
 				}
 
-				// WASM response hooks not yet implemented for JSON
+				// WASM response hooks
 				processed := bodyBytes
+				fmtAdapter, _ := resp.Request.Context().Value(formatCtxKey{}).(*format.Format)
+				if fmtAdapter != nil {
+					chatResponse, err := fmtAdapter.Request.Unmarshal(bodyBytes)
+					if err != nil {
+						log.Printf("format %s unmarshal response error: %v — passing through", fmtAdapter.Name, err)
+					} else {
+						if pp := s.pluginPipeline.Load(); pp != nil {
+							reqID, _ := resp.Request.Context().Value("reqID").(uint64)
+							modified, err := pp.(*plugin.PluginPipeline).RunAfterResponse(resp.Request.Context(), reqID, chatResponse)
+							if err != nil {
+								log.Printf("plugin pipeline response error: %v", err)
+							} else if modified != nil {
+								chatResponse = modified
+							}
+						}
+						
+						newBody, err := fmtAdapter.Request.Marshal(chatResponse)
+						if err != nil {
+							log.Printf("format %s marshal response error: %v — passing through", fmtAdapter.Name, err)
+						} else {
+							processed = newBody
+						}
+					}
+				}
 
 				resp.Body = io.NopCloser(bytes.NewReader(processed))
 				resp.ContentLength = int64(len(processed))

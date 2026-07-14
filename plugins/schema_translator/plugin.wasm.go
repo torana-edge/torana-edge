@@ -1,15 +1,17 @@
 package main
 
 import (
+	"context"
+
 	"encoding/json"
-	sdk "github.com/torana-edge/torana-edge/pkg/plugin-sdk"
 	"github.com/torana-edge/torana-edge/pkg/pb"
+	sdk "github.com/torana-edge/torana-edge/pkg/plugin-sdk"
 )
 
 func main() {}
 
 func init() {
-	sdk.OnChatRequest(func(req *pb.ChatRequest) (*pb.ChatRequest, error) {
+	sdk.OnBeforeRequest(func(ctx context.Context, req *pb.ChatRequest) (*pb.ChatRequest, error) {
 		modified := false
 		for _, t := range req.Tools {
 			if len(t.ParametersJson) == 0 {
@@ -30,7 +32,7 @@ func init() {
 				if reqAny, ok := params["required"].([]any); ok {
 					params["required"] = append(reqAny, "i")
 				}
-				
+
 				newParamsJson, err := json.Marshal(params)
 				if err == nil {
 					t.ParametersJson = newParamsJson

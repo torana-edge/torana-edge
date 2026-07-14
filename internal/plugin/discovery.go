@@ -167,8 +167,8 @@ func (pp *PluginPipeline) DrainAndClose() {
 	}
 }
 
-// RunOnChatRequest calls every plugin that implements on_chat_request.
-func (pp *PluginPipeline) RunOnChatRequest(ctx context.Context, chat *engine.ChatRequest) (*engine.ChatRequest, error) {
+// RunOnChatRequest calls every plugin that implements run_before_request.
+func (pp *PluginPipeline) RunBeforeRequest(ctx context.Context, reqID uint64, chat *engine.ChatRequest) (*engine.ChatRequest, error) {
 	pp.Acquire()
 	defer pp.Release()
 
@@ -180,12 +180,45 @@ func (pp *PluginPipeline) RunOnChatRequest(ctx context.Context, chat *engine.Cha
 
 	resultBytes := reqBytes
 	for _, lp := range pp.plugins {
-		if !hasHook(lp.manifest, "on_chat_request") {
+		if !hasHook(lp.manifest, "run_before_request") {
 			continue
 		}
 		var outBytes []byte
-		if err := lp.plugin.CallRequest(ctx, "on_chat_request", resultBytes, &outBytes); err != nil {
-			log.Printf("[plugin] %s on_chat_request: %v", lp.manifest.Name, err)
+		if err := lp.plugin.CallRequest(ctx, "run_before_request", reqID, resultBytes, &outBytes); err != nil {
+			log.Printf("[plugin] %s run_before_request: %v", lp.manifest.Name, err)
+			continue
+		}
+		if len(outBytes) > 0 {
+			resultBytes = outBytes
+		}
+	}
+
+	var resReq pb.ChatRequest
+	if err := proto.Unmarshal(resultBytes, &resReq); err != nil {
+		return chat, err
+	}
+	return pbconv.FromPBChatRequest(&resReq), nil
+}
+
+// RunAfterResponse calls every plugin that implements run_after_response.
+func (pp *PluginPipeline) RunAfterResponse(ctx context.Context, reqID uint64, chat *engine.ChatRequest) (*engine.ChatRequest, error) {
+	pp.Acquire()
+	defer pp.Release()
+
+	pbReq := pbconv.ToPBChatRequest(chat)
+	reqBytes, err := proto.Marshal(pbReq)
+	if err != nil {
+		return chat, err
+	}
+
+	resultBytes := reqBytes
+	for _, lp := range pp.plugins {
+		if !hasHook(lp.manifest, "run_after_response") {
+			continue
+		}
+		var outBytes []byte
+		if err := lp.plugin.CallRequest(ctx, "run_after_response", reqID, resultBytes, &outBytes); err != nil {
+			log.Printf("[plugin] %s run_after_response: %v", lp.manifest.Name, err)
 			continue
 		}
 		if len(outBytes) > 0 {
@@ -203,8 +236,8 @@ func (pp *PluginPipeline) RunOnChatRequest(ctx context.Context, chat *engine.Cha
 
 
 
-// RunOnStreamChunk calls every plugin that implements on_stream_chunk.
-func (pp *PluginPipeline) RunOnStreamChunk(ctx context.Context, chunk *engine.StreamEvent) (*engine.StreamEvent, error) {
+// RunOnStreamChunk calls every plugin that implements run_on_stream_chunk.
+func (pp *PluginPipeline) RunOnStreamChunk(ctx context.Context, reqID uint64, chunk *engine.StreamEvent) (*engine.StreamEvent, error) {
 	pp.Acquire()
 	defer pp.Release()
 
@@ -216,12 +249,12 @@ func (pp *PluginPipeline) RunOnStreamChunk(ctx context.Context, chunk *engine.St
 
 	resultBytes := reqBytes
 	for _, lp := range pp.plugins {
-		if !hasHook(lp.manifest, "on_stream_chunk") {
+		if !hasHook(lp.manifest, "run_on_stream_chunk") {
 			continue
 		}
 		var outBytes []byte
-		if err := lp.plugin.CallRequest(ctx, "on_stream_chunk", resultBytes, &outBytes); err != nil {
-			log.Printf("[plugin] %s on_stream_chunk: %v", lp.manifest.Name, err)
+		if err := lp.plugin.CallRequest(ctx, "run_on_stream_chunk", reqID, resultBytes, &outBytes); err != nil {
+			log.Printf("[plugin] %s run_on_stream_chunk: %v", lp.manifest.Name, err)
 			continue
 		}
 		if len(outBytes) > 0 {
