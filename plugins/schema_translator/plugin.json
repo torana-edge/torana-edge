@@ -1,15 +1,14 @@
 {
   "name": "schema_translator",
   "version": "0.3.0",
-  "description": "Injects intent field and converts KV arrays in tool schemas",
+  "description": "KV-array schema translation: converts additionalProperties maps to arrays and reverses on response",
   "hooks": [
-    {"name": "run_before_request", "priority": 100}
+    {"name": "run_before_request", "priority": 100},
+    {"name": "run_on_stream_chunk", "priority": 100}
   ],
   "permissions": [
-    {"name": "env.meta_get", "description": "Read mutation registry"},
-    {"name": "env.meta_set", "description": "Write mutation registry"},
-    {"name": "env.cache_get", "description": "Check intent cache"},
-    {"name": "env.cache_set", "description": "Store extracted intents"},
+    {"name": "env.meta_get", "description": "Read mutation registry and fragment buffers"},
+    {"name": "env.meta_set", "description": "Write mutation registry and fragment buffers"},
     {"name": "env.log", "description": "Diagnostic logging"}
   ]
 }
