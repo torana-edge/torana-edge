@@ -223,12 +223,14 @@ func New(cfg Config) (*Server, error) {
 
 			req.Body = io.NopCloser(bytes.NewReader(newBody))
 			req.ContentLength = int64(len(newBody))
+			log.Printf("Proxying request to %s", req.URL.String())
 		},
 
 		ModifyResponse: func(resp *http.Response) error {
 			// Skip pipeline for error responses — don't try to
 			// reverse-translate a 4xx/5xx body that isn't a valid
 			// chat completion response.
+			log.Printf("Upstream returned %d", resp.StatusCode)
 			if resp.StatusCode >= 400 {
 				return nil
 			}
@@ -248,9 +250,10 @@ func New(cfg Config) (*Server, error) {
 				if pp := s.pluginPipeline.Load(); pp != nil {
 					pl := pp.(*plugin.PluginPipeline)
 					out := make(chan engine.StreamEvent)
+					in := events
 					go func() {
 						defer close(out)
-						for event := range events {
+						for event := range in {
 							// Call on_stream_chunk
 							modified, err := pl.RunOnStreamChunk(resp.Request.Context(), &event)
 							if err != nil {
@@ -274,6 +277,7 @@ func New(cfg Config) (*Server, error) {
 					}
 				}()
 				resp.Body = pr
+				resp.Header.Del("Content-Length")
 				return nil
 			}
 
