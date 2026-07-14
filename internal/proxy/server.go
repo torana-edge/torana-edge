@@ -30,6 +30,8 @@ import (
 	"github.com/torana-edge/torana-edge/internal/wasm"
 )
 
+const maxBodySize = 10 * 1024 * 1024 // 10 MB
+
 // Config holds everything needed to start the proxy server.
 type Config struct {
 	// Port is the TCP port the proxy listens on (e.g. "8080").
@@ -114,7 +116,7 @@ func New(cfg Config) (*Server, error) {
 		Director: func(req *http.Request) {
 			var body []byte
 			if req.Body != nil {
-				body, _ = io.ReadAll(req.Body)
+				body, _ = io.ReadAll(io.LimitReader(req.Body, maxBodySize))
 				req.Body.Close()
 			}
 
@@ -260,7 +262,7 @@ func New(cfg Config) (*Server, error) {
 			// Non-streaming JSON:
 			if strings.Contains(contentType, "application/json") {
 
-				bodyBytes, err := io.ReadAll(resp.Body)
+				bodyBytes, err := io.ReadAll(io.LimitReader(resp.Body, maxBodySize))
 				resp.Body.Close()
 				if err != nil {
 					return nil
