@@ -276,6 +276,11 @@ func New(cfg Config) (*Server, error) {
 								out <- event
 							} else if modified != nil {
 								out <- *modified
+								// Always forward the original ToolCallEnd after a plugin's
+								// modification so the client receives the end-of-tool-call signal.
+								if event.ToolCallEnd != nil {
+									out <- event
+								}
 							} else {
 								out <- event
 							}
