@@ -182,6 +182,14 @@ func (s *StreamAdapter) SerializeStream(w io.Writer, events <-chan engine.Stream
 		blockIndex++
 		return emit(fmt.Sprintf(`data: {"type":"content_block_stop","index":%d}`, blockIndex-1))
 	}
+	closeText := func() error {
+		if !inText {
+			return nil
+		}
+		inText = false
+		blockIndex++
+		return emit(fmt.Sprintf(`data: {"type":"content_block_stop","index":%d}`, blockIndex-1))
+	}
 
 	for ev := range events {
 		switch {
@@ -229,9 +237,8 @@ func (s *StreamAdapter) SerializeStream(w io.Writer, events <-chan engine.Stream
 			if err := closeThinking(); err != nil {
 				return err
 			}
-			if inText {
-				inText = false
-				blockIndex++
+			if err := closeText(); err != nil {
+				return err
 			}
 			data := fmt.Sprintf(
 				`data: {"type":"content_block_start","index":%d,"content_block":{"type":"tool_use","id":%s,"name":%s}}`,
@@ -285,6 +292,11 @@ func (s *StreamAdapter) SerializeStream(w io.Writer, events <-chan engine.Stream
 
 	// Close any open thinking block before message_stop.
 	if err := closeThinking(); err != nil {
+		return err
+	}
+	
+	// Close any open text block before message_stop.
+	if err := closeText(); err != nil {
 		return err
 	}
 
