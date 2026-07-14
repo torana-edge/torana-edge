@@ -309,8 +309,17 @@ func New(cfg Config) (*Server, error) {
 					return fmt.Errorf("response body exceeds max size")
 				}
 
-				// WASM response hooks not yet implemented for JSON
-				processed := bodyBytes
+				// Route JSON response through WASM response hooks.
+				if pp := s.pluginPipeline.Load(); pp != nil {
+					pl := pp.(*plugin.PluginPipeline)
+					modified, modErr := runWASMOnJSONResponse(resp, pl, bodyBytes)
+					if modErr != nil {
+						log.Printf("wasm json response hook error: %v", modErr)
+					} else {
+						bodyBytes = modified
+					}
+				}
+ 				processed := bodyBytes
 
 				resp.Body = io.NopCloser(bytes.NewReader(processed))
 				resp.ContentLength = int64(len(processed))
@@ -436,6 +445,107 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	return nil
 }
 
+
+// runWASMOnJSONResponse routes a non-streaming JSON response body through
+// the WASM plugin pipeline. It parses tool calls from the JSON, creates
+// synthetic StreamEvents, runs them through RunOnStreamChunk, collects
+// modifications, and calls RunAfterResponse for post-processing.
+func runWASMOnJSONResponse(resp *http.Response, pl *plugin.PluginPipeline, bodyBytes []byte) ([]byte, error) {
+	// Parse the JSON response body to find tool calls.
+	var parsed struct {
+		Choices []struct {
+			Message struct {
+				Role      string `json:"role"`
+				Content   string `json:"content,omitempty"`
+				ToolCalls []struct {
+					ID       string `json:"id"`
+					Function struct {
+						Name      string `json:"name"`
+						Arguments string `json:"arguments"`
+					} `json:"function"`
+				} `json:"tool_calls,omitempty"`
+			} `json:"message"`
+		} `json:"choices"`
+	}
+	if err := json.Unmarshal(bodyBytes, &parsed); err != nil {
+		return bodyBytes, nil // not our format, pass through
+	}
+
+	// Check if there are tool calls to process.
+	hasToolCalls := false
+	for _, c := range parsed.Choices {
+		if len(c.Message.ToolCalls) > 0 {
+			hasToolCalls = true
+			break
+		}
+	}
+	if !hasToolCalls {
+		return bodyBytes, nil
+	}
+
+	ctx := resp.Request.Context()
+
+	// Build synthetic StreamEvents and run through on_stream_chunk hooks.
+	modified := false
+	for ci := range parsed.Choices {
+		for ti := range parsed.Choices[ci].Message.ToolCalls {
+			tc := &parsed.Choices[ci].Message.ToolCalls[ti]
+
+			// ToolCallStart
+			startEv := engine.StreamEvent{
+				ToolCallStart: &engine.ToolCallStart{
+					Index: ti,
+					ID:    tc.ID,
+					Name:  tc.Function.Name,
+				},
+			}
+			modStart, err := pl.RunOnStreamChunk(ctx, 0, &startEv)
+			if err != nil {
+				return bodyBytes, err
+			}
+			// Track name changes
+			if modStart != nil && modStart.ToolCallStart != nil {
+				tc.Function.Name = modStart.ToolCallStart.Name
+			}
+
+			// ToolCallDelta (full args)
+			if tc.Function.Arguments != "" {
+				deltaEv := engine.StreamEvent{
+					ToolCallDelta: &engine.ToolCallDelta{
+						Index:          ti,
+						ArgumentsDelta: tc.Function.Arguments,
+					},
+				}
+				modDelta, err := pl.RunOnStreamChunk(ctx, 0, &deltaEv)
+				if err != nil {
+					return bodyBytes, err
+				}
+				if modDelta != nil && modDelta.ToolCallDelta != nil && modDelta.ToolCallDelta.ArgumentsDelta != tc.Function.Arguments {
+					tc.Function.Arguments = modDelta.ToolCallDelta.ArgumentsDelta
+					modified = true
+				}
+			}
+
+			// ToolCallEnd
+			endEv := engine.StreamEvent{
+				ToolCallEnd: &engine.ToolCallEnd{Index: ti},
+			}
+			if _, err := pl.RunOnStreamChunk(ctx, 0, &endEv); err != nil {
+				return bodyBytes, err
+			}
+		}
+	}
+
+	if !modified {
+		return bodyBytes, nil
+	}
+
+	out, err := json.Marshal(parsed)
+	if err != nil {
+		return bodyBytes, err
+	}
+	return out, nil
+}
 // joinURLPath concatenates a base path with a relative path, preserving
 // double slashes where appropriate (mirrors httputil.singleJoiningSlash).
 func joinURLPath(base, rel string) string {
