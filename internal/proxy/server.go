@@ -204,7 +204,7 @@ func New(cfg Config) (*Server, error) {
 
 			if pp := s.pluginPipeline.Load(); pp != nil {
 				pl := pp.(*plugin.PluginPipeline)
-				modified, err := pl.RunOnChatRequest(req.Context(), chat)
+				modified, err := pl.RunBeforeRequest(req.Context(), 0, chat)
 				if err != nil {
 					log.Printf("plugin pipeline error: %v", err)
 				} else if modified != nil {
@@ -270,7 +270,7 @@ func New(cfg Config) (*Server, error) {
 						defer close(out)
 						for event := range in {
 							// Call on_stream_chunk
-							modified, err := pl.RunOnStreamChunk(resp.Request.Context(), &event)
+							modified, err := pl.RunOnStreamChunk(resp.Request.Context(), 0, &event)
 							if err != nil {
 								log.Printf("plugin stream error: %v", err)
 								out <- event
