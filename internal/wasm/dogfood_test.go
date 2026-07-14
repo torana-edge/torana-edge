@@ -9,9 +9,18 @@ import (
 )
 
 func TestDelegator(t *testing.T) {
-	b, _ := os.ReadFile("../../plugins/delegator/plugin.wasm")
+	b, err := os.ReadFile("../../plugins/delegator/plugin.wasm")
+	if err != nil {
+		if os.IsNotExist(err) {
+			t.Skip("skipping test: delegator plugin.wasm not found")
+		}
+		t.Fatal(err)
+	}
 	r := NewRuntime(context.Background()); defer r.Close()
-	p, _ := r.LoadPlugin("delegator", b)
+	p, err := r.LoadPlugin("delegator", b)
+	if err != nil {
+		t.Fatal(err)
+	}
 	
 	req := &pb.ChatRequest{Model: ""}
 	input, _ := proto.Marshal(req)
