@@ -55,6 +55,7 @@ type Server struct {
 	stats      *metrics.StatsTracker
 	// WASM plugin pipeline (loaded when configured)
 	pluginPipeline atomic.Value // *plugin.PluginPipeline
+	rateLimiter    *RateLimiter
 }
 
 type routeContextKey struct{}
@@ -62,6 +63,7 @@ type routeContextKey struct{}
 type RouteContext struct {
 	ProviderName string
 	StrippedPath string
+	Identity     string
 }
 
 // --- Construction -----------------------------------------------------------
@@ -80,8 +82,9 @@ func New(cfg Config) (*Server, error) {
 	statsTracker := metrics.NewStatsTracker()
 
 	s := &Server{
-		config: cfg,
-		stats:  statsTracker,
+		config:      cfg,
+		stats:       statsTracker,
+		rateLimiter: NewRateLimiter(cfg.Providers.Limits.RPM, cfg.Providers.Limits.Concurrency),
 	}
 
 	// --- WASM plugin pipeline (optional) ---------------------------------
@@ -208,6 +211,18 @@ func New(cfg Config) (*Server, error) {
 					chat = modified
 				}
 			}
+
+			identity := ""
+			if chat.ToranaMeta != nil {
+				if id, ok := chat.ToranaMeta["identity"].(string); ok {
+					identity = id
+				}
+			}
+			if identity == "" {
+				identity = req.Header.Get("Authorization")
+			}
+			rc := req.Context().Value(routeContextKey{}).(*RouteContext)
+			rc.Identity = identity
 
 			newBody, err := fmt.Request.Marshal(chat)
 			if err != nil {
@@ -369,6 +384,7 @@ func New(cfg Config) (*Server, error) {
 		cfg: func() provider.Config {
 			return s.GetConfig().Providers
 		},
+		rateLimiter: s.rateLimiter,
 	}
 
 	s.proxy = proxy
