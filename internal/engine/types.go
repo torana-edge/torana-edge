@@ -42,6 +42,7 @@ type Message struct {
 	ContentParts      []any      // multimodal array content (e.g. vision)
 	Thinking          string     // extended thinking / reasoning text
 	ThinkingSignature string     // Anthropic cryptographic signature (empty for other providers)
+	RedactedThinking  string     // encrypted/redacted thinking blocks from Anthropic
 	ToolCalls         []ToolCall // assistant → tool invocations
 	ToolCallID        string     // tool messages: which call this result answers
 	ToolName          string     // tool messages: which tool produced this result

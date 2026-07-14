@@ -11,6 +11,7 @@ message Message {
   bytes content_parts_json = 3; 
   string thinking = 4;
   string thinking_signature = 5;
+  string redacted_thinking = 9;
   repeated ToolCall tool_calls = 6;
   string tool_call_id = 7;
   string tool_name = 8;

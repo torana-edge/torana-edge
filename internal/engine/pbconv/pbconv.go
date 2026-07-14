@@ -46,6 +46,7 @@ func ToPBChatRequest(c *engine.ChatRequest) *pb.ChatRequest {
 			Content:           m.Content,
 			Thinking:          m.Thinking,
 			ThinkingSignature: m.ThinkingSignature,
+			RedactedThinking:  m.RedactedThinking,
 			ToolCallId:        m.ToolCallID,
 			ToolName:          m.ToolName,
 		}
@@ -115,6 +116,7 @@ func FromPBChatRequest(c *pb.ChatRequest) *engine.ChatRequest {
 			Content:           m.Content,
 			Thinking:          m.Thinking,
 			ThinkingSignature: m.ThinkingSignature,
+			RedactedThinking:  m.RedactedThinking,
 			ToolCallID:        m.ToolCallId,
 			ToolName:          m.ToolName,
 		}

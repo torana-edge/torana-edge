@@ -30,6 +30,7 @@ type Message struct {
 	ContentPartsJson  []byte      `protobuf:"bytes,3,opt,name=content_parts_json,json=contentPartsJson,proto3" json:"content_parts_json,omitempty"`
 	Thinking          string      `protobuf:"bytes,4,opt,name=thinking,proto3" json:"thinking,omitempty"`
 	ThinkingSignature string      `protobuf:"bytes,5,opt,name=thinking_signature,json=thinkingSignature,proto3" json:"thinking_signature,omitempty"`
+	RedactedThinking  string      `protobuf:"bytes,9,opt,name=redacted_thinking,json=redactedThinking,proto3" json:"redacted_thinking,omitempty"`
 	ToolCalls         []*ToolCall `protobuf:"bytes,6,rep,name=tool_calls,json=toolCalls,proto3" json:"tool_calls,omitempty"`
 	ToolCallId        string      `protobuf:"bytes,7,opt,name=tool_call_id,json=toolCallId,proto3" json:"tool_call_id,omitempty"`
 	ToolName          string      `protobuf:"bytes,8,opt,name=tool_name,json=toolName,proto3" json:"tool_name,omitempty"`
@@ -98,6 +99,13 @@ func (x *Message) GetThinking() string {
 func (x *Message) GetThinkingSignature() string {
 	if x != nil {
 		return x.ThinkingSignature
+	}
+	return ""
+}
+
+func (x *Message) GetRedactedThinking() string {
+	if x != nil {
+		return x.RedactedThinking
 	}
 	return ""
 }
@@ -822,13 +830,14 @@ var File_torana_proto protoreflect.FileDescriptor
 
 const file_torana_proto_rawDesc = "" +
 	"\n" +
-	"\ftorana.proto\x12\ttorana.v1\"\xa3\x02\n" +
+	"\ftorana.proto\x12\ttorana.v1\"\xd0\x02\n" +
 	"\aMessage\x12\x12\n" +
 	"\x04role\x18\x01 \x01(\tR\x04role\x12\x18\n" +
 	"\acontent\x18\x02 \x01(\tR\acontent\x12,\n" +
 	"\x12content_parts_json\x18\x03 \x01(\fR\x10contentPartsJson\x12\x1a\n" +
 	"\bthinking\x18\x04 \x01(\tR\bthinking\x12-\n" +
-	"\x12thinking_signature\x18\x05 \x01(\tR\x11thinkingSignature\x122\n" +
+	"\x12thinking_signature\x18\x05 \x01(\tR\x11thinkingSignature\x12+\n" +
+	"\x11redacted_thinking\x18\t \x01(\tR\x10redactedThinking\x122\n" +
 	"\n" +
 	"tool_calls\x18\x06 \x03(\v2\x13.torana.v1.ToolCallR\ttoolCalls\x12 \n" +
 	"\ftool_call_id\x18\a \x01(\tR\n" +
