@@ -2,6 +2,7 @@ package wasm
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"os"
@@ -194,6 +195,10 @@ type Runtime struct {
 	meta    map[string]string
 	cacheMu sync.RWMutex
 	cache   map[string]string
+
+	// OffloadFunc handles torana_offload_completion host calls.
+	// Set by the server during initialization.
+	OffloadFunc func(ctx context.Context, payloadJSON string) (string, error)
 }
 
 func NewRuntime(ctx context.Context) *Runtime {
@@ -283,7 +288,11 @@ func (r *Runtime) installHostFunctions() {
 		r.mu.RUnlock()
 		perm := "env.host_call"
 		if cmd != "" {
-			perm = "env.host_call." + cmd
+			if strings.HasPrefix(cmd, "env.") {
+				perm = cmd
+			} else {
+				perm = "env.host_call." + cmd
+			}
 		}
 		if p == nil || !p.hasGrant(perm) {
 			log.Printf("[wasm] permission denied: %s tried %s", mod.Name(), perm)
@@ -292,8 +301,67 @@ func (r *Runtime) installHostFunctions() {
 
 		var res string
 		switch cmd {
+		case "env.meta_set":
+			var kv struct {
+				Key   string `json:"key"`
+				Value any    `json:"value"`
+			}
+			if err := json.Unmarshal([]byte(args), &kv); err == nil {
+				r.metaMu.Lock()
+				switch v := kv.Value.(type) {
+				case string:
+					r.meta[kv.Key] = v
+				default:
+					b, _ := json.Marshal(v)
+					r.meta[kv.Key] = string(b)
+				}
+				r.metaMu.Unlock()
+				res = `{"status":"ok"}`
+			} else {
+				res = `{"status":"error","message":"invalid payload"}`
+			}
+		case "env.meta_get":
+			r.metaMu.RLock()
+			v := r.meta[args]
+			r.metaMu.RUnlock()
+			res = v
+		case "env.cache_set":
+			var kv struct {
+				Key   string `json:"key"`
+				Value any    `json:"value"`
+			}
+			if err := json.Unmarshal([]byte(args), &kv); err == nil {
+				r.cacheMu.Lock()
+				switch v := kv.Value.(type) {
+				case string:
+					r.cache[kv.Key] = v
+				default:
+					b, _ := json.Marshal(v)
+					r.cache[kv.Key] = string(b)
+				}
+				r.cacheMu.Unlock()
+				res = `{"status":"ok"}`
+			} else {
+				res = `{"status":"error","message":"invalid payload"}`
+			}
+		case "env.cache_get":
+			r.cacheMu.RLock()
+			v := r.cache[args]
+			r.cacheMu.RUnlock()
+			res = v
 		case "torana_db_query":
 			res = `{"status":"ok","db_result":"stub"}`
+		case "torana_offload_completion":
+			if r.OffloadFunc != nil {
+				result, err := r.OffloadFunc(ctx, args)
+				if err != nil {
+					res = fmt.Sprintf(`{"status":"error","message":%q}`, err.Error())
+				} else {
+					res = fmt.Sprintf(`{"status":"ok","completion":%q}`, result)
+				}
+			} else {
+				res = `{"status":"error","message":"offload not configured"}`
+			}
 		case "torana_kms_decrypt":
 			res = `{"status":"ok","decrypted":"` + args + `"}`
 		case "verify_virtual_key":
