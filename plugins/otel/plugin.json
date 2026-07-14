@@ -1,0 +1,13 @@
+{
+  "name": "otel",
+  "version": "0.4.0",
+  "description": "OpenTelemetry metrics plugin: records request/response counts and latency",
+  "hooks": [
+    {"name": "run_before_request", "priority": 50},
+    {"name": "run_after_response", "priority": 50}
+  ],
+  "permissions": [
+    {"name": "env.emit_metric", "description": "Emit OTel-compatible metrics"},
+    {"name": "env.log", "description": "Diagnostic logging"}
+  ]
+}

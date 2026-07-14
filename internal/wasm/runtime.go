@@ -350,7 +350,9 @@ func (r *Runtime) installHostFunctions() {
 			r.cacheMu.RUnlock()
 			res = v
 		case "torana_db_query":
-			res = `{"status":"ok","db_result":"stub"}`
+			res = `{"status":"error","message":"database not configured — set plugins.config.compactor.dsn"}`
+		case "torana_kms_decrypt":
+			res = `{"status":"error","message":"KMS not configured — set TORANA_KMS_ENDPOINT"}`
 		case "torana_offload_completion":
 			if r.OffloadFunc != nil {
 				result, err := r.OffloadFunc(ctx, args)
@@ -362,8 +364,6 @@ func (r *Runtime) installHostFunctions() {
 			} else {
 				res = `{"status":"error","message":"offload not configured"}`
 			}
-		case "torana_kms_decrypt":
-			res = `{"status":"ok","decrypted":"` + args + `"}`
 		case "verify_virtual_key":
 			res = `{"status":"error","message":"unimplemented: enterprise auth is available in torana-edge/private-nucleus"}`
 		default:
