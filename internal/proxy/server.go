@@ -50,9 +50,9 @@ type Config struct {
 type Server struct {
 	configMu   sync.RWMutex
 	config     Config
-	proxy       *httputil.ReverseProxy
-	httpServer  *http.Server
-	stats       *metrics.StatsTracker
+	proxy      *httputil.ReverseProxy
+	httpServer *http.Server
+	stats      *metrics.StatsTracker
 	// WASM plugin pipeline (loaded when configured)
 	pluginPipeline atomic.Value // *plugin.PluginPipeline
 }
@@ -80,9 +80,8 @@ func New(cfg Config) (*Server, error) {
 	statsTracker := metrics.NewStatsTracker()
 
 	s := &Server{
-		config:         cfg,
-		stats:          statsTracker,
-		
+		config: cfg,
+		stats:  statsTracker,
 	}
 
 	// --- WASM plugin pipeline (optional) ---------------------------------
@@ -120,15 +119,10 @@ func New(cfg Config) (*Server, error) {
 				body, _ = io.ReadAll(lr)
 				req.Body.Close()
 				if len(body) > maxBodySize {
-					// We can't write 413 from here, but we can set body to empty to fail parsing
-					// and perhaps let the upstream reject it, or log it. But we MUST not send truncated JSON.
-					// A better way is to panic with a specific error and recover it, but
-					// since we just pass it through if it's too large... wait, if it's too large,
-					// we can't parse it. We should pass it through UNTRUNCATED!
-					// But we already consumed the body.
-					// Actually, the finding says we should reject with 413.
-					// Since Director can't do that easily, let me panic and recover in the handler.
-					panic(http.ErrNotMultipart) // using a recognizable error to catch
+					log.Printf("request body exceeds max size after preflight limit")
+					req.Body = io.NopCloser(bytes.NewReader(nil))
+					req.ContentLength = 0
+					return
 				}
 			}
 
@@ -150,8 +144,8 @@ func New(cfg Config) (*Server, error) {
 				req.ContentLength = int64(len(body))
 				return
 			}
-			
-			// Inject explicit routing metadata so the transport layer (failover) 
+
+			// Inject explicit routing metadata so the transport layer (failover)
 			// doesn't have to guess from the mutated URL.
 			ctx := context.WithValue(req.Context(), routeContextKey{}, &RouteContext{
 				ProviderName: provName,
@@ -335,7 +329,7 @@ func New(cfg Config) (*Server, error) {
 			http.Error(w, "no provider configured for this path", http.StatusBadGateway)
 			return
 		}
-		
+
 		// Enforce request body limit before it reaches Director or failover
 		if r.Body != nil {
 			r.Body = http.MaxBytesReader(w, r.Body, maxBodySize)
@@ -353,7 +347,7 @@ func New(cfg Config) (*Server, error) {
 		r.Body = tr
 
 		proxy.ServeHTTP(tw, r)
-		
+
 		s.stats.RecordRequest(tr.bytesRead, tw.bytesWritten)
 	})
 
@@ -435,8 +429,6 @@ func joinURLPath(base, rel string) string {
 	}
 	return bs + "/" + rs
 }
-
-
 
 type trackingWriter struct {
 	http.ResponseWriter
