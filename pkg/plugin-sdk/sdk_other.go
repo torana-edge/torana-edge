@@ -4,7 +4,6 @@ package plugin_sdk
 
 import (
 	"context"
-	"context"
 	"github.com/torana-edge/torana-edge/pkg/pb"
 )
 
