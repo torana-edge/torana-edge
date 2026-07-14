@@ -19,8 +19,8 @@ type failoverRoundTripper struct {
 }
 
 func (t *failoverRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
-	// Find the provider name from the original URL path.
-	provName, fallbacks := extractFallbacks(req.URL, t.cfg())
+	// Find the provider name from the context.
+	provName, fallbacks := extractFallbacks(req, t.cfg())
 
 	// If there are fallbacks, we MUST buffer the body before the first attempt
 	// because RoundTrip consumes the body.
@@ -36,15 +36,14 @@ func (t *failoverRoundTripper) RoundTrip(req *http.Request) (*http.Response, err
 	if err == nil && !shouldRetry(resp) {
 		return resp, nil
 	}
-	if resp != nil {
-		resp.Body.Close()
-	}
 
 	if len(fallbacks) == 0 {
-		if resp != nil {
-			return resp, nil
-		}
-		return nil, err
+		return resp, err
+	}
+
+	// We are about to retry, close the primary response.
+	if resp != nil {
+		resp.Body.Close()
 	}
 
 	log.Printf("[failover] %s returned %v — trying fallbacks: %v",
@@ -62,8 +61,18 @@ func (t *failoverRoundTripper) RoundTrip(req *http.Request) (*http.Response, err
 		}
 
 		retryReq := cloneWithBody(req, bodyBytes)
+		
+		// Reconstruct retry URL using the fallback base URL and original stripped path.
+		rc, _ := req.Context().Value(routeContextKey{}).(*RouteContext)
 		retryReq.URL.Scheme = fbURL.Scheme
 		retryReq.URL.Host = fbURL.Host
+		retryReq.Host = fbURL.Host // Finding 3: update Host header
+		if rc != nil {
+			retryReq.URL.Path = joinURLPath(fbURL.Path, rc.StrippedPath)
+		} else {
+			retryReq.URL.Path = fbURL.Path
+		}
+		retryReq.URL.RawPath = ""
 
 		retryResp, retryErr := t.base.RoundTrip(retryReq)
 		if retryErr != nil {
@@ -86,11 +95,12 @@ func shouldRetry(resp *http.Response) bool {
 	return resp.StatusCode == 429 || resp.StatusCode >= 500
 }
 
-func extractFallbacks(u *url.URL, cfg provider.Config) (string, []string) {
-	_, name, _ := provider.Resolve(u.Path, cfg)
-	if name == "" {
+func extractFallbacks(req *http.Request, cfg provider.Config) (string, []string) {
+	rc, ok := req.Context().Value(routeContextKey{}).(*RouteContext)
+	if !ok || rc.ProviderName == "" {
 		return "", nil
 	}
+	name := rc.ProviderName
 	p, ok := cfg.Providers[name]
 	if !ok {
 		return name, nil
