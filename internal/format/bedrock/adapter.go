@@ -58,8 +58,8 @@ type bedrockToolUse struct {
 }
 
 type bedrockToolResult struct {
-	ToolUseID string                `json:"toolUseId"`
-	Content   []bedrockContentBlock `json:"content"`
+	ToolUseID string `json:"toolUseId"`
+	Content   []any  `json:"content"`
 }
 
 type bedrockToolConfig struct {
@@ -235,14 +235,25 @@ func blocksToMessages(role string, blocks []bedrockContentBlock) []engine.Messag
 		case b.ToolResult != nil:
 			// Flush pending text first
 			flushText()
+			
 			resultContent := ""
-			if len(b.ToolResult.Content) > 0 && b.ToolResult.Content[0].Text != nil {
-				resultContent = *b.ToolResult.Content[0].Text
+			var contentParts []any
+			for _, part := range b.ToolResult.Content {
+				// if it's a map with just "text", extract it to resultContent if empty
+				if m, ok := part.(map[string]any); ok && len(m) == 1 {
+					if txt, ok := m["text"].(string); ok && resultContent == "" && len(contentParts) == 0 {
+						resultContent = txt
+						continue
+					}
+				}
+				contentParts = append(contentParts, part)
 			}
+			
 			msgs = append(msgs, engine.Message{
-				Role:       engine.RoleTool,
-				ToolCallID: b.ToolResult.ToolUseID,
-				Content:    resultContent,
+				Role:         engine.RoleTool,
+				ToolCallID:   b.ToolResult.ToolUseID,
+				Content:      resultContent,
+				ContentParts: contentParts,
 			})
 		}
 	}
@@ -349,14 +360,18 @@ func marshalMessage(m engine.Message) bedrockMsg {
 
 	switch m.Role {
 	case engine.RoleTool:
-		// Tool result: only emit toolResult block, not a text block.
-		content := m.Content
+		// Tool result: emit toolResult block with preserved parts
+		var trContent []any
+		if m.Content != "" || len(m.ContentParts) == 0 {
+			trContent = append(trContent, map[string]any{"text": m.Content})
+		}
+		if len(m.ContentParts) > 0 {
+			trContent = append(trContent, m.ContentParts...)
+		}
 		blocks = append(blocks, bedrockContentBlock{
 			ToolResult: &bedrockToolResult{
 				ToolUseID: m.ToolCallID,
-				Content: []bedrockContentBlock{{
-					Text: &content,
-				}},
+				Content:   trContent,
 			},
 		})
 
