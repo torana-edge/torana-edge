@@ -321,6 +321,42 @@ func TestE2E(t *testing.T) {
 		}
 	})
 
+	t.Run("StreamingReleasesRateLimitTokens", func(t *testing.T) {
+		// Regression caught during live dogfooding: the SSE path replaced
+		// resp.Body with the serializer pipe, so the upstream body's Close
+		// (which releases the concurrency token) never ran — after
+		// limits.concurrency streamed requests, every caller got 429.
+		limCfg := cfg
+		limCfg.Providers.Limits = provider.Limits{Concurrency: 2}
+		limSrv, err := New(limCfg)
+		if err != nil {
+			t.Fatalf("New: %v", err)
+		}
+		limLn, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatalf("listen: %v", err)
+		}
+		go limSrv.Serve(limLn)
+		defer limSrv.Shutdown(context.Background())
+		limBase := "http://" + limLn.Addr().String()
+
+		// Well beyond the concurrency cap — every sequential request must
+		// succeed because each stream releases its token on completion.
+		for i := 0; i < 6; i++ {
+			req, _ := http.NewRequest("POST", limBase+"/provider/oai/v1/chat/completions", strings.NewReader(openaiToolsReq("gpt-x", true)))
+			req.Header.Set("Content-Type", "application/json")
+			resp, err := client.Do(req)
+			if err != nil {
+				t.Fatalf("request %d: %v", i, err)
+			}
+			io.Copy(io.Discard, resp.Body)
+			resp.Body.Close()
+			if resp.StatusCode != http.StatusOK {
+				t.Fatalf("request %d: status %d — streaming leaked rate-limit tokens", i, resp.StatusCode)
+			}
+		}
+	})
+
 	t.Run("ConcurrentStreams", func(t *testing.T) {
 		var wg sync.WaitGroup
 		for i := 0; i < 10; i++ {

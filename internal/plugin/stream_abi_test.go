@@ -250,3 +250,69 @@ func TestStreamChaining(t *testing.T) {
 		t.Fatalf("expected env reversed by schema_translator, got %v", args)
 	}
 }
+
+// TestFewShotPlacementNeverSplitsToolPairs: the compactor's few-shot triplet
+// must land after the leading system messages — inserting it before the last
+// message split assistant tool_calls from their tool results, which strict
+// providers (DeepSeek) reject with a 400. Caught live during dogfooding.
+func TestFewShotPlacementNeverSplitsToolPairs(t *testing.T) {
+	requireWASM(t, "../../plugins/compactor/plugin.wasm")
+	pp := newTestPipeline(t, "../../plugins", []string{"compactor"})
+
+	chat := &engine.ChatRequest{
+		Messages: []engine.Message{
+			{Role: engine.RoleSystem, Content: "sys"},
+			{Role: engine.RoleUser, Content: "do the thing"},
+			{Role: engine.RoleAssistant, ToolCalls: []engine.ToolCall{{ID: "call_real_1", Name: "read", Arguments: map[string]any{"path": "x"}}}},
+			{Role: engine.RoleTool, ToolCallID: "call_real_1", Content: "result"},
+		},
+		Tools: []engine.ToolDef{{Name: "read", Parameters: map[string]any{
+			"type": "object", "properties": map[string]any{"path": map[string]any{"type": "string"}},
+		}}},
+	}
+	out, err := pp.RunBeforeRequest(context.Background(), 77, chat)
+	if err != nil {
+		t.Fatalf("RunBeforeRequest: %v", err)
+	}
+
+	// Every assistant message carrying tool_calls must be immediately
+	// followed by tool messages answering each of its call IDs.
+	for i, m := range out.Messages {
+		if m.Role != engine.RoleAssistant || len(m.ToolCalls) == 0 {
+			continue
+		}
+		want := map[string]bool{}
+		for _, tc := range m.ToolCalls {
+			want[tc.ID] = true
+		}
+		for j := i + 1; j < len(out.Messages) && len(want) > 0; j++ {
+			if out.Messages[j].Role != engine.RoleTool {
+				t.Fatalf("assistant tool_calls at %d followed by %q at %d (unanswered: %v)\nsequence: %v",
+					i, out.Messages[j].Role, j, want, roles(out.Messages))
+			}
+			delete(want, out.Messages[j].ToolCallID)
+		}
+		if len(want) > 0 {
+			t.Fatalf("assistant tool_calls at %d never answered: %v", i, want)
+		}
+	}
+
+	// And the few-shot must sit right after the system message.
+	if out.Messages[0].Role != engine.RoleSystem || out.Messages[1].Role != engine.RoleUser ||
+		len(out.Messages) < 4 || len(out.Messages[2].ToolCalls) == 0 ||
+		out.Messages[2].ToolCalls[0].ID != "call_mock_fewshot_1" {
+		t.Fatalf("few-shot not placed after system: %v", roles(out.Messages))
+	}
+}
+
+func roles(msgs []engine.Message) []string {
+	var out []string
+	for _, m := range msgs {
+		r := string(m.Role)
+		if len(m.ToolCalls) > 0 {
+			r += "(tool_calls)"
+		}
+		out = append(out, r)
+	}
+	return out
+}

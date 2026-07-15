@@ -224,11 +224,22 @@ func injectFewShot(req *pb.ChatRequest) bool {
 		}}},
 		{Role: "tool", ToolCallId: "call_mock_fewshot_1", Content: "[few-shot example]"},
 	}
-	last := len(req.Messages) - 1
-	if last < 0 {
+	if len(req.Messages) == 0 {
 		return false
 	}
-	req.Messages = append(req.Messages[:last], append(fewShot, req.Messages[last:]...)...)
+	// Insert directly after the leading system message(s). Inserting
+	// mid-conversation can split an assistant tool_call from its tool
+	// result, which strict providers reject with a 400
+	// ("tool_calls must be followed by tool messages").
+	insert := 0
+	for insert < len(req.Messages) && req.Messages[insert].Role == "system" {
+		insert++
+	}
+	out := make([]*pb.Message, 0, len(req.Messages)+len(fewShot))
+	out = append(out, req.Messages[:insert]...)
+	out = append(out, fewShot...)
+	out = append(out, req.Messages[insert:]...)
+	req.Messages = out
 	return true
 }
 

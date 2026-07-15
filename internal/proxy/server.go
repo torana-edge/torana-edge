@@ -143,6 +143,9 @@ func New(cfg Config) (*Server, error) {
 			rt.OffloadFunc = func(ctx context.Context, payloadJSON string) (string, error) {
 				out, err := s.offloadCompletion(ctx, payloadJSON)
 				if err != nil {
+					// Plugins degrade gracefully on offload errors, so this
+					// log line is the only host-side visibility.
+					log.Printf("[offload] %v", err)
 					s.stats.RecordOffloadFailure()
 				}
 				return out, err
@@ -341,7 +344,14 @@ func New(cfg Config) (*Server, error) {
 					return nil
 				}
 
-				events := fmt.Stream.ParseStream(resp.Body)
+				// resp.Body is replaced with the serializer pipe below, so
+				// nothing downstream ever closes the ORIGINAL upstream body
+				// — which carries the rate-limiter release in its Close.
+				// Close it explicitly when serialization finishes, or every
+				// streamed request leaks a concurrency token.
+				upstreamBody := resp.Body
+
+				events := fmt.Stream.ParseStream(upstreamBody)
 
 				// Hook WASM pipeline into the stream. Plugins may suppress,
 				// replace, or fan out each event (e.g. buffer argument
@@ -372,6 +382,7 @@ func New(cfg Config) (*Server, error) {
 				pr, pw := io.Pipe()
 				go func() {
 					defer pw.Close()
+					defer upstreamBody.Close()
 					if err := fmt.Stream.SerializeStream(pw, events); err != nil {
 						log.Printf("format %s serialize error: %v", fmt.Name, err)
 					}
