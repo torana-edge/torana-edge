@@ -52,9 +52,9 @@ type geminiContent struct {
 
 // geminiPart is a polymorphic content part. Only one of these fields is non-nil.
 type geminiPart struct {
-	Text             string           `json:"text,omitempty"`
-	FunctionCall     *geminiFuncCall  `json:"functionCall,omitempty"`
-	FunctionResponse *geminiFuncResp  `json:"functionResponse,omitempty"`
+	Text             string          `json:"text,omitempty"`
+	FunctionCall     *geminiFuncCall `json:"functionCall,omitempty"`
+	FunctionResponse *geminiFuncResp `json:"functionResponse,omitempty"`
 }
 
 type geminiFuncCall struct {
@@ -323,7 +323,7 @@ func (a *Adapter) Marshal(chat *engine.ChatRequest) ([]byte, error) {
 			StopSequences:   chat.StopSequences,
 		}
 	}
-	
+
 	if len(chat.SafetySettings) > 0 {
 		gReq.SafetySettings = chat.SafetySettings
 	}

@@ -21,11 +21,11 @@ type sseEvent struct {
 }
 
 type contentBlockEv struct {
-	Type      string `json:"type"`
-	ID        string `json:"id,omitempty"`
-	Name      string `json:"name,omitempty"`
-	Text      string `json:"text,omitempty"`
-	Thinking  string `json:"thinking,omitempty"`
+	Type     string `json:"type"`
+	ID       string `json:"id,omitempty"`
+	Name     string `json:"name,omitempty"`
+	Text     string `json:"text,omitempty"`
+	Thinking string `json:"thinking,omitempty"`
 }
 
 type deltaEv struct {
@@ -165,6 +165,11 @@ func (s *StreamAdapter) SerializeStream(w io.Writer, events <-chan engine.Stream
 	var inThinking bool
 	var inText bool
 	var blockIndex int
+	// toolBlock maps the event's tool-call index (upstream numbering) to the
+	// Anthropic content-block index assigned at ToolCallStart, so deltas and
+	// stops land on the same block even when text/thinking blocks precede
+	// tool calls or multiple tool calls occur in one turn.
+	toolBlock := make(map[int]int)
 	emit := func(line string) error {
 		if _, err := fmt.Fprintln(w, line); err != nil {
 			return fmt.Errorf("anthropic serialize: %w", err)
@@ -240,20 +245,26 @@ func (s *StreamAdapter) SerializeStream(w io.Writer, events <-chan engine.Stream
 			if err := closeText(); err != nil {
 				return err
 			}
+			toolBlock[ev.ToolCallStart.Index] = blockIndex
 			data := fmt.Sprintf(
 				`data: {"type":"content_block_start","index":%d,"content_block":{"type":"tool_use","id":%s,"name":%s}}`,
 				blockIndex,
 				jsonString(ev.ToolCallStart.ID),
 				jsonString(ev.ToolCallStart.Name),
 			)
+			blockIndex++
 			if err := emit(data); err != nil {
 				return err
 			}
 
 		case ev.ToolCallDelta != nil:
+			idx, ok := toolBlock[ev.ToolCallDelta.Index]
+			if !ok {
+				idx = ev.ToolCallDelta.Index
+			}
 			data := fmt.Sprintf(
 				`data: {"type":"content_block_delta","index":%d,"delta":{"type":"input_json_delta","partial_json":%s}}`,
-				ev.ToolCallDelta.Index,
+				idx,
 				jsonString(ev.ToolCallDelta.ArgumentsDelta),
 			)
 			if err := emit(data); err != nil {
@@ -261,7 +272,12 @@ func (s *StreamAdapter) SerializeStream(w io.Writer, events <-chan engine.Stream
 			}
 
 		case ev.ToolCallEnd != nil:
-			data := fmt.Sprintf(`data: {"type":"content_block_stop","index":%d}`, ev.ToolCallEnd.Index)
+			idx, ok := toolBlock[ev.ToolCallEnd.Index]
+			if !ok {
+				idx = ev.ToolCallEnd.Index
+			}
+			delete(toolBlock, ev.ToolCallEnd.Index)
+			data := fmt.Sprintf(`data: {"type":"content_block_stop","index":%d}`, idx)
 			if err := emit(data); err != nil {
 				return err
 			}
@@ -294,7 +310,7 @@ func (s *StreamAdapter) SerializeStream(w io.Writer, events <-chan engine.Stream
 	if err := closeThinking(); err != nil {
 		return err
 	}
-	
+
 	// Close any open text block before message_stop.
 	if err := closeText(); err != nil {
 		return err

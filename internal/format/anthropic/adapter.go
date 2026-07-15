@@ -12,16 +12,16 @@ import (
 // anthropicRequest mirrors the Anthropic Messages request JSON shape for
 // easy unmarshal/marshal.
 type anthropicRequest struct {
-	Model      string              `json:"model"`
-	MaxTokens     *int                `json:"max_tokens,omitempty"`
-	Temperature   *float64            `json:"temperature,omitempty"`
-	TopP          *float64            `json:"top_p,omitempty"`
-	StopSequences []string            `json:"stop_sequences,omitempty"`
-	System        []contentBlock      `json:"system,omitempty"`
-	Messages      []anthropicMessage  `json:"messages"`
-	Tools         []anthropicToolDef  `json:"tools,omitempty"`
-	Stream        bool                `json:"stream,omitempty"`
-	StopReason string              `json:"-"`
+	Model         string             `json:"model"`
+	MaxTokens     *int               `json:"max_tokens,omitempty"`
+	Temperature   *float64           `json:"temperature,omitempty"`
+	TopP          *float64           `json:"top_p,omitempty"`
+	StopSequences []string           `json:"stop_sequences,omitempty"`
+	System        []contentBlock     `json:"system,omitempty"`
+	Messages      []anthropicMessage `json:"messages"`
+	Tools         []anthropicToolDef `json:"tools,omitempty"`
+	Stream        bool               `json:"stream,omitempty"`
+	StopReason    string             `json:"-"`
 }
 
 type anthropicMessage struct {
@@ -58,16 +58,16 @@ func (am *anthropicMessage) UnmarshalJSON(data []byte) error {
 }
 
 type contentBlock struct {
-	Type       string         `json:"type"`
-	Text       string         `json:"text,omitempty"`
-	ID         string         `json:"id,omitempty"`
-	Name       string         `json:"name,omitempty"`
-	Input      map[string]any `json:"input,omitempty"`
-	ToolUseID  string         `json:"tool_use_id,omitempty"`
-	Content    any            `json:"content,omitempty"` // string or array of blocks
-	Thinking   string         `json:"thinking,omitempty"`
-	Signature  string         `json:"signature,omitempty"`
-	Data       string         `json:"data,omitempty"`
+	Type      string         `json:"type"`
+	Text      string         `json:"text,omitempty"`
+	ID        string         `json:"id,omitempty"`
+	Name      string         `json:"name,omitempty"`
+	Input     map[string]any `json:"input,omitempty"`
+	ToolUseID string         `json:"tool_use_id,omitempty"`
+	Content   any            `json:"content,omitempty"` // string or array of blocks
+	Thinking  string         `json:"thinking,omitempty"`
+	Signature string         `json:"signature,omitempty"`
+	Data      string         `json:"data,omitempty"`
 	// Also handle tool_result content as array of blocks (Anthropic supports both)
 }
 

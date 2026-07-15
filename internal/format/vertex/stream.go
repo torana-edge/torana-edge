@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"strings"
 
 	"github.com/torana-edge/torana-edge/internal/engine"
@@ -21,9 +22,9 @@ type geminiStreamChunk struct {
 }
 
 type geminiStreamCandidate struct {
-	Content      *geminiStreamContent `json:"content,omitempty"`
-	FinishReason string               `json:"finishReason,omitempty"`
-	SafetyRatings json.RawMessage     `json:"safetyRatings,omitempty"`
+	Content       *geminiStreamContent `json:"content,omitempty"`
+	FinishReason  string               `json:"finishReason,omitempty"`
+	SafetyRatings json.RawMessage      `json:"safetyRatings,omitempty"`
 }
 
 type geminiStreamContent struct {
@@ -179,7 +180,14 @@ func (s *StreamAdapter) SerializeStream(w io.Writer, events <-chan engine.Stream
 	emitFunctionCall := func(name string, argsJSON string) error {
 		var args map[string]any
 		if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
-			args = map[string]any{}
+			// Emitting {} would silently hand the harness a broken tool
+			// call — surface the failure instead.
+			log.Printf("[vertex] function call %q: accumulated args are not valid JSON (%v): %.200s", name, err, argsJSON)
+			errLine := geminiStreamChunk{
+				Candidates: []geminiStreamCandidate{{FinishReason: "OTHER"}},
+			}
+			_ = writeLine(w, errLine)
+			return fmt.Errorf("vertex: function call %q args invalid: %w", name, err)
 		}
 		line := geminiStreamChunk{
 			Candidates: []geminiStreamCandidate{{
