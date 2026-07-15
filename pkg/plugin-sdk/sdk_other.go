@@ -7,7 +7,9 @@ import (
 	"github.com/torana-edge/torana-edge/pkg/pb"
 )
 
+//nolint:unused
 func alloc(size uint32) uint32          { return 0 }
+//nolint:unused
 func dealloc(ptr uint32, size uint32)   {}
 func ReadBytes(ptr, size uint32) []byte { return nil }
 func WriteResult(data []byte) uint64    { return 0 }
