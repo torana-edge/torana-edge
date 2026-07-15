@@ -1,0 +1,16 @@
+{
+  "name": "pii",
+  "version": "0.1.0",
+  "description": "Scans tool results through a local model + regex pre-filter and blocks the request if PII is detected",
+  "hooks": [
+    {"name": "run_before_request", "priority": 175}
+  ],
+  "permissions": [
+    {"name": "env.cache_get", "description": "Skip re-scanning tool results already cleared this session"},
+    {"name": "env.cache_set", "description": "Cache clean verdicts by tool_call_id"},
+    {"name": "env.host_call.torana_offload_completion", "description": "Send tool output to the local PII-detection model"},
+    {"name": "env.block_request", "description": "Reject a request whose tool output contains PII"},
+    {"name": "env.plugin_config", "description": "Read plugins.config.pii (provider, model, tools, on_error)"},
+    {"name": "env.log", "description": "Diagnostic logging"}
+  ]
+}

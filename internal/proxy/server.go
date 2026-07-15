@@ -78,6 +78,18 @@ type RouteContext struct {
 	ProviderName string
 	StrippedPath string
 	Identity     string
+	// Block, when set by the Director after a plugin vetoes the request
+	// (env.block_request), tells the transport to return this synthetic
+	// error response instead of calling upstream.
+	Block *BlockResponse
+}
+
+// BlockResponse is a synthetic, provider-shaped error a plugin requested via
+// env.block_request. The transport returns it verbatim; no upstream call is made.
+type BlockResponse struct {
+	Status      int
+	ContentType string
+	Body        []byte
 }
 
 // reqCounter issues unique request IDs used to scope plugin state.
@@ -305,6 +317,22 @@ func New(cfg Config) (*Server, error) {
 				// ToranaMeta, but response hooks receive it).
 				if chat.ToranaMeta != nil {
 					delete(chat.ToranaMeta, "_request_headers")
+				}
+
+				// Request veto: a plugin holding env.block_request may reject
+				// the request outright. Honor it only when the capability is
+				// declared, render a provider-shaped error, and short-circuit
+				// — the transport returns rc.Block instead of calling upstream.
+				if pl.HasGrant("env.block_request") && chat.ToranaMeta != nil {
+					if raw, ok := chat.ToranaMeta["_block"]; ok {
+						delete(chat.ToranaMeta, "_block")
+						if rc, ok := req.Context().Value(routeContextKey{}).(*RouteContext); ok {
+							rc.Block = renderBlock(prov.Format, raw)
+						}
+						req.Body = io.NopCloser(bytes.NewReader(nil))
+						req.ContentLength = 0
+						return
+					}
 				}
 			}
 

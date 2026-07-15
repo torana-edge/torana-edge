@@ -36,6 +36,26 @@ func (t *failoverRoundTripper) RoundTrip(req *http.Request) (*http.Response, err
 	provName, fallbacks := extractFallbacks(req, t.cfg())
 
 	rc, _ := req.Context().Value(routeContextKey{}).(*RouteContext)
+
+	// Request veto (env.block_request): a plugin rejected this request in the
+	// Director. Return the synthetic error without touching the rate limiter
+	// or upstream. Mirrors the 429 short-circuit below.
+	if rc != nil && rc.Block != nil {
+		h := make(http.Header)
+		h.Set("Content-Type", rc.Block.ContentType)
+		return &http.Response{
+			StatusCode:    rc.Block.Status,
+			Status:        http.StatusText(rc.Block.Status),
+			Proto:         "HTTP/1.1",
+			ProtoMajor:    1,
+			ProtoMinor:    1,
+			Body:          io.NopCloser(bytes.NewReader(rc.Block.Body)),
+			ContentLength: int64(len(rc.Block.Body)),
+			Request:       req,
+			Header:        h,
+		}, nil
+	}
+
 	identity := "default"
 	if rc != nil && rc.Identity != "" {
 		identity = rc.Identity

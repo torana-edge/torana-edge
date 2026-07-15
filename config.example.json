@@ -27,6 +27,14 @@
       "compactor": {
         "_comment": "max_offload_input_chars caps how much of a tool output is sent to the cheap summarizer. Omit or set 0 to send the COMPLETE tool output (default, unbounded). Set a positive value only if you want to bound offload cost/latency for very large outputs — it keeps the head+tail and drops the middle, which can discard relevant content.",
         "max_offload_input_chars": 0
+      },
+      "pii": {
+        "_comment": "PII detection. Scans tool results and BLOCKS the request (returns a provider-shaped error naming the PII type + line, never the value) if PII is found. 'provider' names a provider above used for the model-based scan — it MUST be a local/trusted endpoint because it receives raw tool output including any PII (e.g. 'local-slm'). A deterministic regex pre-filter (email, SSN, AWS key, private key) runs first and works even without a model. 'tools' is a tool-name allowlist (empty or [\"*\"] = all tool results). 'on_error' = \"block\" (fail-closed, default) or \"allow\" (fail-open). To enable, add \"pii\" to the order array above.",
+        "provider": "local-slm",
+        "model": "qwen2.5:3b",
+        "tools": ["*"],
+        "on_error": "block",
+        "max_scan_chars": 0
       }
     }
   },
