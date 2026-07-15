@@ -26,10 +26,14 @@ import (
 const poolSize = 100
 
 type Plugin struct {
-	name      string
-	wasmBytes []byte
-	grants    map[string]bool
-	runtime   wazero.Runtime
+	name    string
+	grants  map[string]bool
+	runtime wazero.Runtime
+
+	// compiled is the module compiled ONCE at load. Pool instances are
+	// created from it via InstantiateModule, which skips the expensive
+	// decode+codegen that InstantiateWithConfig(bytes) redoes on every call.
+	compiled wazero.CompiledModule
 
 	// Instance pool for concurrent request handling.
 	pool   chan *pluginInstance
@@ -109,7 +113,10 @@ func (p *Plugin) newInstance(ctx context.Context) (*pluginInstance, error) {
 	p.instanceCount++
 	instanceName := fmt.Sprintf("%s-%d", p.name, p.instanceCount)
 
-	mod, err := p.runtime.InstantiateWithConfig(ctx, p.wasmBytes,
+	// Instantiate from the already-compiled module. This avoids recompiling
+	// the ~8 MB Go/WASI module on every pool instance (and on every instance
+	// created on-the-fly when the pool is exhausted under load).
+	mod, err := p.runtime.InstantiateModule(ctx, p.compiled,
 		wazero.NewModuleConfig().WithName(instanceName).
 			WithSysWalltime().WithSysNanotime().
 			WithStdout(os.Stdout).WithStderr(os.Stderr))
@@ -223,10 +230,18 @@ type Runtime struct {
 	SavingsFunc func(originalBytes, finalBytes int64)
 }
 
+// wasmCompilationCache is shared by every Runtime in the process. wazero's
+// optimizing compiler turns each ~8 MB Go/WASI plugin into machine code once;
+// later runtimes — notably the fresh runtime built on every plugin
+// hot-reload — reuse that cached artifact for unchanged modules instead of
+// paying the full (and, under -race, very slow) compilation again.
+var wasmCompilationCache = wazero.NewCompilationCache()
+
 func NewRuntime(ctx context.Context) *Runtime {
 	r := &Runtime{
-		ctx:     ctx,
-		runtime: wazero.NewRuntime(ctx),
+		ctx: ctx,
+		runtime: wazero.NewRuntimeWithConfig(ctx,
+			wazero.NewRuntimeConfig().WithCompilationCache(wasmCompilationCache)),
 		plugins: make(map[string]*Plugin),
 		meta:    make(map[uint64]map[string]string),
 		cache:   cache.NewLocalCache(cacheTTL),
@@ -280,11 +295,20 @@ func reqIDFrom(ctx context.Context) uint64 {
 }
 
 func (r *Runtime) LoadPlugin(name string, wasmBytes []byte) (*Plugin, error) {
+	// Compile once here; every pool instance is then instantiated cheaply
+	// from p.compiled. With the shared compilation cache (see NewRuntime),
+	// a runtime built on hot-reload reuses an unchanged module's machine
+	// code instead of recompiling it.
+	compiled, err := r.runtime.CompileModule(r.ctx, wasmBytes)
+	if err != nil {
+		return nil, fmt.Errorf("wasm: %s: compile: %w", name, err)
+	}
+
 	p := &Plugin{
-		name:      name,
-		wasmBytes: wasmBytes,
-		runtime:   r.runtime,
-		pool:      make(chan *pluginInstance, poolSize),
+		name:     name,
+		compiled: compiled,
+		runtime:  r.runtime,
+		pool:     make(chan *pluginInstance, poolSize),
 	}
 
 	// Pre-warm the pool with one instance.
