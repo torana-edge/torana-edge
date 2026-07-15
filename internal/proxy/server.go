@@ -93,6 +93,13 @@ type reqState struct {
 	// fallback credential for offload completions. Host-side only — never
 	// exposed to plugins.
 	CallerAuth string
+	// Pipeline is the plugin pipeline pinned for this request's entire
+	// lifetime (Acquire held until the handler's deferred Release). Every
+	// phase — Director, stream hooks, ModifyResponse, EndRequest — MUST
+	// use this instead of re-loading s.pluginPipeline: a hot-reload swap
+	// mid-request would otherwise drain and close the runtime holding this
+	// request's meta state (fragment buffers, mutation registry).
+	Pipeline *plugin.PluginPipeline
 }
 
 // reqStateFrom returns the request state stashed by the HTTP handler,
@@ -266,8 +273,7 @@ func New(cfg Config) (*Server, error) {
 
 			// --- WASM plugin pipeline --------------------------------------
 
-			if pp := s.pluginPipeline.Load(); pp != nil {
-				pl := pp.(*plugin.PluginPipeline)
+			if pl := reqStateFrom(req.Context()).Pipeline; pl != nil {
 
 				// Credential-bearing headers are exposed to plugins only
 				// when a loaded plugin declares the env.request_headers
@@ -356,9 +362,9 @@ func New(cfg Config) (*Server, error) {
 				// Hook WASM pipeline into the stream. Plugins may suppress,
 				// replace, or fan out each event (e.g. buffer argument
 				// fragments and emit one complete ToolCallDelta before
-				// ToolCallEnd).
-				if pp := s.pluginPipeline.Load(); pp != nil {
-					pl := pp.(*plugin.PluginPipeline)
+				// ToolCallEnd). Uses the request-pinned pipeline — never
+				// re-load s.pluginPipeline mid-request.
+				if pl := reqStateFrom(resp.Request.Context()).Pipeline; pl != nil {
 					reqID := reqStateFrom(resp.Request.Context()).ID
 					out := make(chan engine.StreamEvent)
 					in := events
@@ -389,10 +395,9 @@ func New(cfg Config) (*Server, error) {
 					// Observational run_after_response for streaming
 					// responses (metrics/audit plugins). Mutations are not
 					// applied — the stream has already been written.
-					if pp := s.pluginPipeline.Load(); pp != nil {
-						ctx := resp.Request.Context()
+					ctx := resp.Request.Context()
+					if pl := reqStateFrom(ctx).Pipeline; pl != nil {
 						if chat, _ := ctx.Value(chatCtxKey{}).(*engine.ChatRequest); chat != nil {
-							pl := pp.(*plugin.PluginPipeline)
 							if _, err := pl.RunAfterResponse(ctx, reqStateFrom(ctx).ID, chat); err != nil {
 								log.Printf("plugin run_after_response (stream): %v", err)
 							}
@@ -419,11 +424,11 @@ func New(cfg Config) (*Server, error) {
 
 				// Route the JSON response through the WASM response hooks
 				// (run_on_stream_chunk over synthetic events, then
-				// run_after_response) for every provider format.
-				if pp := s.pluginPipeline.Load(); pp != nil {
-					ctx := resp.Request.Context()
+				// run_after_response) for every provider format. Uses the
+				// request-pinned pipeline.
+				ctx := resp.Request.Context()
+				if pl := reqStateFrom(ctx).Pipeline; pl != nil {
 					if f, _ := ctx.Value(formatCtxKey{}).(*format.Format); f != nil {
-						pl := pp.(*plugin.PluginPipeline)
 						chat, _ := ctx.Value(chatCtxKey{}).(*engine.ChatRequest)
 						modified, modErr := runJSONResponseHooks(ctx, pl, reqStateFrom(ctx).ID, f.Name, chat, bodyBytes)
 						if modErr != nil {
@@ -467,17 +472,26 @@ func New(cfg Config) (*Server, error) {
 
 		// Assign a request ID scoping all plugin meta state, and stash
 		// per-request data for the Director/ModifyResponse/offload path.
+		// The pipeline is pinned (Acquire) for the whole request so a
+		// hot-reload swap cannot drain-and-close the runtime that holds
+		// this request's state mid-flight.
 		rs := &reqState{
 			ID:         reqCounter.Add(1),
 			CallerAuth: strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "),
 		}
+		if pp := s.pluginPipeline.Load(); pp != nil {
+			rs.Pipeline = pp.(*plugin.PluginPipeline)
+			rs.Pipeline.Acquire()
+		}
 		r = r.WithContext(context.WithValue(r.Context(), reqStateKey{}, rs))
-		// Drop request-scoped plugin state when the request completes.
-		// Safe to defer here: ReverseProxy.ServeHTTP only returns after the
-		// response body (including the SSE pipe) is fully copied.
+		// Drop request-scoped plugin state when the request completes,
+		// then release the pinned pipeline. Safe to defer here:
+		// ReverseProxy.ServeHTTP only returns after the response body
+		// (including the SSE pipe) is fully copied.
 		defer func() {
-			if pp := s.pluginPipeline.Load(); pp != nil {
-				pp.(*plugin.PluginPipeline).EndRequest(rs.ID)
+			if rs.Pipeline != nil {
+				rs.Pipeline.EndRequest(rs.ID)
+				rs.Pipeline.Release()
 			}
 		}()
 		// If no provider matches and no default, reject.

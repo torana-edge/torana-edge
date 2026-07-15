@@ -14,7 +14,9 @@ import (
 	"time"
 
 	"github.com/torana-edge/torana-edge/internal/format"
+	"github.com/torana-edge/torana-edge/internal/plugin"
 	"github.com/torana-edge/torana-edge/internal/provider"
+	"github.com/torana-edge/torana-edge/internal/wasm"
 
 	_ "github.com/torana-edge/torana-edge/internal/format/anthropic"
 	_ "github.com/torana-edge/torana-edge/internal/format/openai"
@@ -396,4 +398,121 @@ func TestE2E(t *testing.T) {
 		}
 		wg.Wait()
 	})
+}
+
+// TestHotReloadDuringInflightRequest reproduces the review finding on #140:
+// a pipeline swap while a request is streaming must not drain-and-close the
+// runtime holding that request's state. The request pins its pipeline for
+// its whole lifetime, so the old runtime's meta (fragment buffers, mutation
+// registry) stays alive until the response completes.
+func TestHotReloadDuringInflightRequest(t *testing.T) {
+	requireWASM(t, "../../plugins/schema_translator/plugin.wasm")
+
+	release := make(chan struct{})
+	reached := make(chan struct{})
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.Copy(io.Discard, r.Body)
+		w.Header().Set("Content-Type", "text/event-stream")
+		fl := w.(http.Flusher)
+		fmt.Fprint(w, `data: {"choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call_hr","type":"function","function":{"name":"write","arguments":""}}]}}]}`+"\n\n")
+		fmt.Fprint(w, `data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"env\":[{\"key\":\"A\","}}]}}]}`+"\n\n")
+		fl.Flush()
+		close(reached) // fragment is in flight, buffered in the plugin
+		<-release      // hold the stream open while the test swaps pipelines
+		fmt.Fprint(w, `data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"value\":\"1\"}]}"}}]}}]}`+"\n\n")
+		fmt.Fprint(w, `data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`+"\n\n")
+		fmt.Fprint(w, "data: [DONE]\n\n")
+		fl.Flush()
+	}))
+	defer upstream.Close()
+
+	cfg := Config{
+		Port: "0",
+		Providers: provider.Config{
+			Providers: map[string]provider.Provider{"oai": {URL: upstream.URL, Format: "openai"}},
+			Plugins:   provider.PluginsConfig{Dir: "../../plugins", Order: []string{"schema_translator"}},
+		},
+	}
+	srv, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	go srv.Serve(ln)
+	defer srv.Shutdown(context.Background())
+
+	// Fire the streaming request.
+	type result struct {
+		args []string
+		err  error
+	}
+	resCh := make(chan result, 1)
+	go func() {
+		resp, err := (&http.Client{Timeout: 30 * time.Second}).Post(
+			"http://"+ln.Addr().String()+"/provider/oai/v1/chat/completions",
+			"application/json",
+			strings.NewReader(`{"model":"m","stream":true,"messages":[{"role":"user","content":"x"}],"tools":[{"type":"function","function":{"name":"write","parameters":{"type":"object","properties":{"env":{"type":"object","additionalProperties":{"type":"string"}}}}}}]}`))
+		if err != nil {
+			resCh <- result{err: err}
+			return
+		}
+		defer resp.Body.Close()
+		var deltas []string
+		for ev := range format.Lookup("openai").Stream.ParseStream(resp.Body) {
+			if ev.ToolCallDelta != nil {
+				deltas = append(deltas, ev.ToolCallDelta.ArgumentsDelta)
+			}
+		}
+		resCh <- result{args: deltas}
+	}()
+
+	<-reached // request is mid-stream with a buffered fragment
+
+	// Simulate the watcher: swap in a fresh pipeline and drain the old one.
+	newRT := wasm.NewRuntime(context.Background())
+	newPP, err := plugin.NewPipeline(newRT, plugin.PluginConfig{Dir: "../../plugins", Order: []string{"schema_translator"}})
+	if err != nil {
+		t.Fatalf("NewPipeline: %v", err)
+	}
+	old := srv.pluginPipeline.Swap(newPP).(*plugin.PluginPipeline)
+	drained := make(chan struct{})
+	go func() {
+		old.DrainAndClose()
+		close(drained)
+	}()
+
+	// The drain must NOT complete while the request is still in flight.
+	select {
+	case <-drained:
+		t.Fatal("old pipeline drained while a request was still using it")
+	case <-time.After(300 * time.Millisecond):
+	}
+
+	close(release) // let the stream finish
+
+	res := <-resCh
+	if res.err != nil {
+		t.Fatalf("request: %v", res.err)
+	}
+	if len(res.args) != 1 {
+		t.Fatalf("expected 1 complete args delta, got %v", res.args)
+	}
+	var args map[string]any
+	if err := json.Unmarshal([]byte(res.args[0]), &args); err != nil {
+		t.Fatalf("args invalid: %v (%q)", err, res.args[0])
+	}
+	env, _ := args["env"].(map[string]any)
+	if env == nil || env["A"] != "1" {
+		t.Fatalf("state lost across hot reload — args: %v", args)
+	}
+
+	// And after the request completes, the drain must finish promptly.
+	select {
+	case <-drained:
+	case <-time.After(5 * time.Second):
+		t.Fatal("old pipeline never drained after request completion")
+	}
 }
