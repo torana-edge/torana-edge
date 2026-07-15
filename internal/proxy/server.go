@@ -465,6 +465,13 @@ func New(cfg Config) (*Server, error) {
 		// Panic recovery for the request handler goroutine.
 		defer func() {
 			if rec := recover(); rec != nil {
+				// http.ErrAbortHandler is the sanctioned abort for client
+				// disconnects (ReverseProxy panics with it by design) —
+				// re-panic so net/http handles it quietly instead of
+				// logging it as a crash.
+				if err, ok := rec.(error); ok && err == http.ErrAbortHandler {
+					panic(rec)
+				}
 				log.Printf("panic in request handler: %v", rec)
 				http.Error(w, "internal server error", http.StatusInternalServerError)
 			}
