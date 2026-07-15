@@ -206,6 +206,17 @@ func EmitMetric(name string, metricType int32, value float64) {
 //go:wasmimport env host_call
 func hostCall(cmdPtr uint32, cmdLen uint32, argsPtr uint32, argsLen uint32) uint64
 
+// PluginConfig returns this plugin's config JSON blob (plugins.config.<name>
+// from the Torana config), or "{}" when none is set or the env.plugin_config
+// permission is missing. Callers should tolerate absent/zero fields.
+func PluginConfig() string {
+	res, err := HostCall("env.plugin_config", "")
+	if err != nil || res == "" {
+		return "{}"
+	}
+	return res
+}
+
 // HostCall invokes a registered host function by name.
 func HostCall(cmd string, args string) (string, error) {
 	cb := []byte(cmd)

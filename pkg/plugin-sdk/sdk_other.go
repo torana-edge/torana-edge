@@ -8,7 +8,8 @@ import (
 )
 
 //nolint:unused
-func alloc(size uint32) uint32          { return 0 }
+func alloc(size uint32) uint32 { return 0 }
+
 //nolint:unused
 func dealloc(ptr uint32, size uint32)   {}
 func ReadBytes(ptr, size uint32) []byte { return nil }
@@ -44,3 +45,5 @@ func Log(msg string, level int32)                             {}
 func EmitMetric(name string, metricType int32, value float64) {}
 
 func HostCall(cmd string, args string) (string, error) { return "", nil }
+
+func PluginConfig() string { return "{}" }

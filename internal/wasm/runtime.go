@@ -28,6 +28,7 @@ const poolSize = 100
 type Plugin struct {
 	name    string
 	grants  map[string]bool
+	config  string // per-plugin config JSON (plugins.config.<name>); "" if none
 	runtime wazero.Runtime
 
 	// compiled is the module compiled ONCE at load. Pool instances are
@@ -54,6 +55,10 @@ func (p *Plugin) SetGrants(g []string) {
 		p.grants[x] = true
 	}
 }
+
+// SetConfig stores the plugin's config JSON blob (plugins.config.<name>),
+// returned to the plugin via the env.plugin_config host call.
+func (p *Plugin) SetConfig(cfg string) { p.config = cfg }
 
 func (p *Plugin) hasGrant(perm string) bool {
 	if p.grants == nil {
@@ -438,6 +443,12 @@ func (r *Runtime) installHostFunctions() {
 			}
 		case "env.cache_get":
 			res, _ = r.cache.Get(args)
+		case "env.plugin_config":
+			// Return this plugin's config blob (plugins.config.<name>).
+			res = p.config
+			if res == "" {
+				res = "{}"
+			}
 		case "torana_db_query":
 			res = `{"status":"error","message":"database not configured — set plugins.config.compactor.dsn"}`
 		case "torana_kms_decrypt":

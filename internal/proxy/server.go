@@ -135,8 +135,13 @@ func New(cfg Config) (*Server, error) {
 	if err := cfg.Providers.Offload.Validate(cfg.Providers.Providers); err != nil {
 		return nil, fmt.Errorf("proxy: %w", err)
 	}
-	if env := cfg.Providers.Offload.APIKeyEnv; env != "" && os.Getenv(env) == "" {
-		log.Printf("warning: offload.api_key_env %q is set but the env var is empty — falling back to caller credentials", env)
+	if off := cfg.Providers.Offload; off.Enabled {
+		switch {
+		case off.APIKeyEnv == "":
+			log.Printf("warning: offload enabled without offload.api_key_env — offload will reuse each caller's credential, which only authenticates when the offload provider %q shares the caller's auth. Set offload.api_key_env for cross-provider or local-model offload (e.g. a Claude/OpenAI caller summarizing on DeepSeek or a self-hosted SLM).", off.Provider)
+		case os.Getenv(off.APIKeyEnv) == "":
+			log.Printf("warning: offload.api_key_env %q is set but the env var is empty — falling back to caller credentials", off.APIKeyEnv)
+		}
 	}
 
 	// --- WASM plugin pipeline (optional) ---------------------------------

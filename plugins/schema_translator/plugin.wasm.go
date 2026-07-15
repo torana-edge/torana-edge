@@ -248,26 +248,27 @@ func convertToKVArray(schema map[string]any, valueType string) {
 // Reverse translation
 // ==========================================================================
 
+// reverseTranslate undoes KV-array conversions using ONLY the per-request
+// mutation registry — the exact paths this plugin converted on the request
+// side. It deliberately does not touch KV-array shapes it did not create: an
+// agent may legitimately pass [{"key":..,"value":..}] arrays as real arguments,
+// and no heuristic can tell those apart from our translations. A tool with no
+// recorded mutation (nothing was translated) therefore passes through intact.
 func reverseTranslate(toolName string, argsJSON string, registry map[string][]string) (string, string) {
-	if argsJSON == "" || argsJSON == "{}" {
+	if argsJSON == "" || argsJSON == "{}" || toolName == "" {
+		return argsJSON, ""
+	}
+	paths, ok := registry[toolName]
+	if !ok || len(paths) == 0 {
 		return argsJSON, ""
 	}
 	var args map[string]any
 	if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
 		return argsJSON, ""
 	}
-
-	reversed := false
-	if paths, ok := registry[toolName]; ok && toolName != "" {
-		for _, path := range paths {
-			reverseKVArrayAtPath(args, path)
-		}
-		reversed = true
+	for _, path := range paths {
+		reverseKVArrayAtPath(args, path)
 	}
-	if !reversed {
-		args = heuristicKVReversal(args)
-	}
-
 	b, err := json.Marshal(args)
 	if err != nil {
 		return argsJSON, ""
@@ -347,26 +348,6 @@ func reverseKVObject(obj map[string]any) map[string]any {
 		}
 	}
 	return obj
-}
-
-func heuristicKVReversal(args map[string]any) map[string]any {
-	for k, v := range args {
-		switch val := v.(type) {
-		case map[string]any:
-			args[k] = heuristicKVReversal(val)
-		case []any:
-			if isKVArray(val) {
-				args[k] = reverseKVArray(val)
-			} else {
-				for i, item := range val {
-					if m, ok := item.(map[string]any); ok {
-						val[i] = heuristicKVReversal(m)
-					}
-				}
-			}
-		}
-	}
-	return args
 }
 
 func isKVArray(arr []any) bool {

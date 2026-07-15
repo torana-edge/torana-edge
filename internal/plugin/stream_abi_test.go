@@ -62,6 +62,32 @@ func runAs(t *testing.T, pp *PluginPipeline, reqID uint64, ev engine.StreamEvent
 	return out
 }
 
+// registerEnvMap runs the request side for a tool whose `env` parameter is an
+// open map, so schema_translator records the KV-array mutation for reqID. This
+// mirrors the real request→response flow: the schema is always translated
+// (and the mutation registered) before the response stream is reversed. Tests
+// that reverse `env` MUST set this up rather than relying on shape-guessing.
+func registerEnvMap(t *testing.T, pp *PluginPipeline, reqID uint64, toolName string) {
+	t.Helper()
+	chat := &engine.ChatRequest{
+		Tools: []engine.ToolDef{{
+			Name: toolName,
+			Parameters: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"env": map[string]any{
+						"type":                 "object",
+						"additionalProperties": map[string]any{"type": "string"},
+					},
+				},
+			},
+		}},
+	}
+	if _, err := pp.RunBeforeRequest(context.Background(), reqID, chat); err != nil {
+		t.Fatalf("RunBeforeRequest: %v", err)
+	}
+}
+
 // TestStreamPassthrough: events a plugin doesn't handle flow through 1:1.
 func TestStreamPassthrough(t *testing.T) {
 	requireWASM(t, "../../plugins/schema_translator/plugin.wasm")
@@ -79,6 +105,9 @@ func TestStreamPassthrough(t *testing.T) {
 func TestStreamSuppressAndFanOut(t *testing.T) {
 	requireWASM(t, "../../plugins/schema_translator/plugin.wasm")
 	pp := newTestPipeline(t, "../../plugins", []string{"schema_translator"})
+
+	// Translate the schema first so env's KV-array mutation is registered.
+	registerEnvMap(t, pp, 1, "write")
 
 	out := run(t, pp, toolStart(0, "call_1", "write"))
 	if len(out) != 1 || out[0].ToolCallStart == nil {
@@ -135,6 +164,10 @@ func TestStreamReplace(t *testing.T) {
 func TestStreamRequestIsolation(t *testing.T) {
 	requireWASM(t, "../../plugins/schema_translator/plugin.wasm")
 	pp := newTestPipeline(t, "../../plugins", []string{"schema_translator"})
+
+	// Each request translates its schema first, registering env's mutation.
+	registerEnvMap(t, pp, 1, "write")
+	registerEnvMap(t, pp, 2, "write")
 
 	// Both requests use index 0 and stream interleaved fragments.
 	runAs(t, pp, 1, toolStart(0, "call_r1", "write"))
@@ -215,12 +248,44 @@ func TestRegistryPathReversal(t *testing.T) {
 	}
 }
 
+// TestUnregisteredToolNotReversed proves reversal is registry-only. A tool with
+// no recorded mutation (nothing was translated on the request side) must have
+// its arguments passed through untouched — even when they contain a genuine
+// [{"key","value"}] array the agent uses natively. The removed heuristic
+// fallback would have rewritten that array into a map and corrupted the call.
+func TestUnregisteredToolNotReversed(t *testing.T) {
+	requireWASM(t, "../../plugins/schema_translator/plugin.wasm")
+	pp := newTestPipeline(t, "../../plugins", []string{"schema_translator"})
+
+	// No RunBeforeRequest translation for this request → empty mutation
+	// registry → nothing is registered for tool "emit".
+	const reqID = 7
+	runAs(t, pp, reqID, toolStart(0, "call_native", "emit"))
+	runAs(t, pp, reqID, toolDelta(0, `{"tags":[{"key":"k","value":"v"}]}`))
+
+	out := runAs(t, pp, reqID, toolEnd(0))
+	if len(out) != 2 || out[0].ToolCallDelta == nil {
+		t.Fatalf("expected [delta, end], got %+v", out)
+	}
+	var args map[string]any
+	if err := json.Unmarshal([]byte(out[0].ToolCallDelta.ArgumentsDelta), &args); err != nil {
+		t.Fatalf("invalid args %q: %v", out[0].ToolCallDelta.ArgumentsDelta, err)
+	}
+	if _, isArray := args["tags"].([]any); !isArray {
+		t.Fatalf("native KV array was reversed on an unregistered tool: %v", args)
+	}
+}
+
 // TestStreamChaining: schema_translator fans out at ToolCallEnd; compactor
 // consumes that fan-out, extracts the intent, and strips the "i" field.
 func TestStreamChaining(t *testing.T) {
 	requireWASM(t, "../../plugins/schema_translator/plugin.wasm")
 	requireWASM(t, "../../plugins/compactor/plugin.wasm")
 	pp := newTestPipeline(t, "../../plugins", []string{"schema_translator", "compactor"})
+
+	// Translate the schema first (reqID 1, matching run's default) so env's
+	// KV-array mutation is registered and reversed via the registry.
+	registerEnvMap(t, pp, 1, "write")
 
 	if out := run(t, pp, toolStart(0, "call_2", "write")); len(out) != 1 {
 		t.Fatalf("expected start passthrough, got %+v", out)
