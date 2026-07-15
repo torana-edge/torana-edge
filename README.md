@@ -27,15 +27,14 @@ All request/response mutations are handled by **WebAssembly (WASM) plugins** run
    cp config.example.json config.json
    ```
 
-2. Build the WASM plugins:
+2. Build the WASM plugins. **Plugin binaries are build artifacts — they are never
+   committed to git** (`*.wasm` is gitignored). Always rebuild after pulling or
+   editing plugin sources:
    ```bash
-   # Using torana-cli (recommended):
-   go run ./cmd/torana-cli plugin build plugins/schema_translator
-   go run ./cmd/torana-cli plugin build plugins/delegator
-   go run ./cmd/torana-cli plugin build plugins/compactor
+   make plugins
 
-   # Or manually:
-   cd plugins/schema_translator && GOOS=wasip1 GOARCH=wasm go build -buildmode=c-shared -o plugin.wasm .
+   # Or a single plugin via torana-cli:
+   go run ./cmd/torana-cli plugin build plugins/schema_translator
    ```
 
 3. Run the proxy:
@@ -67,11 +66,13 @@ All request/response mutations are handled by **WebAssembly (WASM) plugins** run
 
 ## Bundled Plugins
 
-| Plugin | Hook | What it does |
+| Plugin | Hooks | What it does |
 |---|---|---|
-| `schema_translator` | `before_request` | Injects intent extraction fields into tool schemas |
-| `delegator` | `before_request` | Sets default model routing |
-| `compactor` | `before_request` | Truncates oversized tool outputs to save context |
+| `schema_translator` | `run_before_request`, `run_on_stream_chunk` | Converts open-map tool schemas to strict KV arrays and reverses them on responses |
+| `keyword_compactor` | `run_before_request` | Deterministic keyword-based tool result compaction using the cached intent |
+| `compactor` | `run_before_request`, `run_on_stream_chunk` | Injects/extracts the `"i"` intent field; offloads huge tool results to a cheap model |
+| `otel` | `run_before_request`, `run_after_response` | Emits request/response OTel metrics |
+| `auth` | `run_before_request` | Normalizes caller identity from allowlisted auth headers |
 
 ## Project Structure
 
@@ -93,9 +94,11 @@ torana-edge/
 ├── pkg/
 │   ├── pb/                         # Protobuf schemas and generated code
 │   └── plugin-sdk/                 # SDK imported by WASM plugins
-├── plugins/                        # WASM plugin source code
+├── plugins/                        # WASM plugin source code (binaries built via `make plugins`)
+│   ├── auth/
 │   ├── compactor/
-│   ├── delegator/
+│   ├── keyword_compactor/
+│   ├── otel/
 │   └── schema_translator/
 ├── config.example.json             # Example configuration
 └── go.mod
