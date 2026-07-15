@@ -6,9 +6,35 @@ import (
 	"os"
 	"testing"
 
+	"github.com/torana-edge/torana-edge/internal/engine"
 	"github.com/torana-edge/torana-edge/internal/plugin"
 	"github.com/torana-edge/torana-edge/internal/wasm"
 )
+
+// registerWriteEnvMap runs the request side for a "write" tool whose `env`
+// parameter is an open map, recording the KV-array mutation for reqID so the
+// response path reverses env via the registry. Reversal is registry-only, so
+// tests must translate the schema first — exactly as production does.
+func registerWriteEnvMap(t *testing.T, pp *plugin.PluginPipeline, reqID uint64) {
+	t.Helper()
+	chat := &engine.ChatRequest{
+		Tools: []engine.ToolDef{{
+			Name: "write",
+			Parameters: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"env": map[string]any{
+						"type":                 "object",
+						"additionalProperties": map[string]any{"type": "string"},
+					},
+				},
+			},
+		}},
+	}
+	if _, err := pp.RunBeforeRequest(context.Background(), reqID, chat); err != nil {
+		t.Fatalf("RunBeforeRequest: %v", err)
+	}
+}
 
 // requireWASM skips locally when the plugin binary is missing but fails in
 // CI (TORANA_E2E=1) so missing binaries can never silently disable coverage.
@@ -112,6 +138,7 @@ func TestJSONResponseHooksAllFormats(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.format, func(t *testing.T) {
 			pp := newPluginPipeline(t, "schema_translator")
+			registerWriteEnvMap(t, pp, 1)
 
 			out, err := runJSONResponseHooks(context.Background(), pp, 1, tc.format, nil, []byte(tc.body))
 			if err != nil {

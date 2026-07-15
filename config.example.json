@@ -12,6 +12,11 @@
     "anthropic": {
       "url": "https://api.anthropic.com",
       "format": "anthropic"
+    },
+    "local-slm": {
+      "_comment": "Local OpenAI-compatible endpoint (Ollama, vLLM, LM Studio). Point offload here to summarize tool output on a self-hosted small model at zero marginal cost. Ollama serves the OpenAI API at http://localhost:11434/v1/chat/completions, so set url to the host root.",
+      "url": "http://localhost:11434",
+      "format": "openai"
     }
   },
   "plugins": {
@@ -20,7 +25,7 @@
     "order": ["schema_translator", "keyword_compactor", "compactor"]
   },
   "offload": {
-    "_comment": "Cheap-model tool result summarization used by the compactor plugin. provider must exist above and use the openai format. api_key_env optionally names an env var with a dedicated key; otherwise the caller's credential is reused.",
+    "_comment": "Cheap-model tool result summarization used by the compactor plugin. 'provider' must exist above and use the openai format (deepseek-v4-flash is only a default, not a hard dependency — any openai-compatible model works, including a local SLM via the 'local-slm' provider). 'api_key_env' names an env var holding a dedicated offload key. IMPORTANT: leave it empty ONLY when the offload provider shares the caller's auth; for cross-provider offload (e.g. a Claude- or OpenAI-key caller summarizing on DeepSeek) or a keyless local model, set a dedicated key here — otherwise the caller's credential is reused and will fail to authenticate against a different provider.",
     "enabled": false,
     "provider": "deepseek",
     "model": "deepseek-v4-flash",
