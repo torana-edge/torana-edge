@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"sync"
 
 	"github.com/torana-edge/torana-edge/pkg/pb"
 	sdk "github.com/torana-edge/torana-edge/pkg/plugin-sdk"
@@ -18,6 +19,29 @@ const (
 	compactionCache = "compacted"
 	minOffloadChars = 2000
 )
+
+// maxOffloadInputChars caps how much of a tool output is sent to the cheap
+// summarizer. 0 (the default) means UNBOUNDED — the complete tool output is
+// sent. A positive value is opt-in via plugins.config.compactor and truncates
+// head+tail to that many chars. Loaded once, lazily, from the plugin config.
+var (
+	cfgOnce              sync.Once
+	maxOffloadInputChars int
+)
+
+func loadConfig() {
+	cfgOnce.Do(func() {
+		var c struct {
+			MaxOffloadInputChars int `json:"max_offload_input_chars"`
+		}
+		if raw := sdk.PluginConfig(); raw != "" {
+			_ = json.Unmarshal([]byte(raw), &c)
+		}
+		if c.MaxOffloadInputChars > 0 {
+			maxOffloadInputChars = c.MaxOffloadInputChars
+		}
+	})
+}
 
 func init() {
 	// ── Request side: schema injection + tool result compaction ──────
@@ -248,6 +272,7 @@ func injectFewShot(req *pb.ChatRequest) bool {
 // ==========================================================================
 
 func compactToolResults(ctx context.Context, req *pb.ChatRequest) bool {
+	loadConfig()
 	modified := false
 	for _, msg := range req.Messages {
 		if msg.Role != "tool" || msg.ToolCallId == "" || len(msg.Content) < minOffloadChars {
@@ -275,7 +300,7 @@ func compactToolResults(ctx context.Context, req *pb.ChatRequest) bool {
 		// Call cheap model for summarization.
 		payload, _ := json.Marshal(map[string]any{
 			"system_prompt": "You are a tool output summarizer. Given a tool output and an extraction intent, return ONLY the relevant parts. Be concise. Do not add commentary.",
-			"user_prompt":   fmt.Sprintf("Intent: %s\n\nConversation context:\n%s\n\nTool output:\n%s\n\nExtract only the parts relevant to the intent.", intent, ctxStr, truncateForPrompt(msg.Content, 14000)),
+			"user_prompt":   fmt.Sprintf("Intent: %s\n\nConversation context:\n%s\n\nTool output:\n%s\n\nExtract only the parts relevant to the intent.", intent, ctxStr, truncateForPrompt(msg.Content, maxOffloadInputChars)),
 		})
 		result, err := sdk.HostCall("torana_offload_completion", string(payload))
 		if err != nil || result == "" {
@@ -340,8 +365,12 @@ func extractConversationContext(msgs []*pb.Message, excludeToolCallID string) st
 	return strings.Join(parts, "\n")
 }
 
+// truncateForPrompt bounds the tool output sent to the summarizer. maxChars <= 0
+// means unbounded: the complete output is sent (the default). A positive cap
+// keeps the head and tail (first + last maxChars/2), where signal tends to
+// cluster, dropping the middle.
 func truncateForPrompt(content string, maxChars int) string {
-	if len(content) <= maxChars {
+	if maxChars <= 0 || len(content) <= maxChars {
 		return content
 	}
 	half := maxChars / 2

@@ -22,7 +22,13 @@
   "plugins": {
     "dir": "./plugins",
     "_comment": "Order matters: schema_translator must run before the compactors so requests are translated first and responses reversed last.",
-    "order": ["schema_translator", "keyword_compactor", "compactor"]
+    "order": ["schema_translator", "keyword_compactor", "compactor"],
+    "config": {
+      "compactor": {
+        "_comment": "max_offload_input_chars caps how much of a tool output is sent to the cheap summarizer. Omit or set 0 to send the COMPLETE tool output (default, unbounded). Set a positive value only if you want to bound offload cost/latency for very large outputs — it keeps the head+tail and drops the middle, which can discard relevant content.",
+        "max_offload_input_chars": 0
+      }
+    }
   },
   "offload": {
     "_comment": "Cheap-model tool result summarization used by the compactor plugin. 'provider' must exist above and use the openai format (deepseek-v4-flash is only a default, not a hard dependency — any openai-compatible model works, including a local SLM via the 'local-slm' provider). 'api_key_env' names an env var holding a dedicated offload key. IMPORTANT: leave it empty ONLY when the offload provider shares the caller's auth; for cross-provider offload (e.g. a Claude- or OpenAI-key caller summarizing on DeepSeek) or a keyless local model, set a dedicated key here — otherwise the caller's credential is reused and will fail to authenticate against a different provider.",
