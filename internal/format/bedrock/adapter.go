@@ -27,23 +27,23 @@ type Adapter struct{}
 // --- Wire types for Bedrock Converse JSON ---
 
 type bedrockRequest struct {
-	ModelID     string                 `json:"modelId"`
-	System      json.RawMessage        `json:"system"`
-	Messages    []bedrockMsg           `json:"messages"`
-	ToolConfig  *bedrockToolConfig     `json:"toolConfig,omitempty"`
+	ModelID         string                  `json:"modelId"`
+	System          json.RawMessage         `json:"system"`
+	Messages        []bedrockMsg            `json:"messages"`
+	ToolConfig      *bedrockToolConfig      `json:"toolConfig,omitempty"`
 	InferenceConfig *bedrockInferenceConfig `json:"inferenceConfig,omitempty"`
 }
 
 type bedrockMsg struct {
-	Role    string             `json:"role"`
-	Content json.RawMessage    `json:"content"` // array of content blocks
+	Role    string          `json:"role"`
+	Content json.RawMessage `json:"content"` // array of content blocks
 }
 
 type bedrockContentBlock struct {
-	Text       *string              `json:"text,omitempty"`
-	Thinking   *bedrockThinking     `json:"thinking,omitempty"`
-	ToolUse    *bedrockToolUse      `json:"toolUse,omitempty"`
-	ToolResult *bedrockToolResult   `json:"toolResult,omitempty"`
+	Text       *string            `json:"text,omitempty"`
+	Thinking   *bedrockThinking   `json:"thinking,omitempty"`
+	ToolUse    *bedrockToolUse    `json:"toolUse,omitempty"`
+	ToolResult *bedrockToolResult `json:"toolResult,omitempty"`
 }
 
 type bedrockThinking struct {
@@ -71,9 +71,9 @@ type bedrockTool struct {
 }
 
 type bedrockToolSpec struct {
-	Name        string         `json:"name"`
-	Description string         `json:"description,omitempty"`
-	InputSchema bedrockSchema  `json:"inputSchema"`
+	Name        string        `json:"name"`
+	Description string        `json:"description,omitempty"`
+	InputSchema bedrockSchema `json:"inputSchema"`
 }
 
 type bedrockSchema struct {
@@ -235,20 +235,22 @@ func blocksToMessages(role string, blocks []bedrockContentBlock) []engine.Messag
 		case b.ToolResult != nil:
 			// Flush pending text first
 			flushText()
-			
-			resultContent := ""
+
+			// Concatenate ALL text-only blocks into Content; anything else
+			// (images, json blocks) is preserved via ContentParts.
+			var resultTexts []string
 			var contentParts []any
 			for _, part := range b.ToolResult.Content {
-				// if it's a map with just "text", extract it to resultContent if empty
 				if m, ok := part.(map[string]any); ok && len(m) == 1 {
-					if txt, ok := m["text"].(string); ok && resultContent == "" && len(contentParts) == 0 {
-						resultContent = txt
+					if txt, ok := m["text"].(string); ok {
+						resultTexts = append(resultTexts, txt)
 						continue
 					}
 				}
 				contentParts = append(contentParts, part)
 			}
-			
+			resultContent := strings.Join(resultTexts, "\n")
+
 			msgs = append(msgs, engine.Message{
 				Role:         engine.RoleTool,
 				ToolCallID:   b.ToolResult.ToolUseID,

@@ -68,6 +68,18 @@ Because WASM32 only supports 32-bit pointers, we pack the pointer and the length
 * **Format**: `(pointer << 32) | size`
 * **Pass-Through**: If you don't want to modify the request, return `0`.
 
+**Stream hook return type**: `run_on_stream_chunk` returns a serialized
+`torana.v1.StreamEventResult` (NOT a bare `StreamEvent`):
+```proto
+message StreamEventResult {
+  bool handled = 1;              // must be true for the result to apply
+  repeated StreamEvent events = 2; // empty = suppress, 1 = replace, n = fan-out
+}
+```
+Returning `0` bytes still means pass-through. `handled=true` with zero
+events suppresses the input event — this is how buffering plugins drop
+argument fragments before re-emitting the assembled result at ToolCallEnd.
+
 ### Packing Example (Rust):
 ```rust
 let out_ptr = alloc(output.len() as u32);

@@ -303,3 +303,80 @@ func TestStreamSerialize(t *testing.T) {
 }
 
 func strPtr(s string) *string { return &s }
+
+// TestParallelToolResultsCoalesce is a regression test for the Anthropic
+// request-serialization bug that broke Claude Code: a single assistant turn
+// with multiple (parallel) tool_use blocks must be answered by tool_result
+// blocks in the ONE immediately-following user message. The canonical IR
+// represents each tool result as its own engine.RoleTool message, so Marshal
+// must coalesce a consecutive run of them into a single Anthropic user
+// message. Emitting one user message per result yields:
+//
+//	messages.N: `tool_use` ids were found without `tool_result` blocks
+//	immediately after ... (HTTP 400 from Anthropic/DeepSeek)
+func TestParallelToolResultsCoalesce(t *testing.T) {
+	adapter := &Adapter{}
+
+	chat := &engine.ChatRequest{
+		Model:     "claude-x",
+		MaxTokens: intPtr(256),
+		Messages: []engine.Message{
+			{Role: engine.RoleUser, Content: "read both files"},
+			{Role: engine.RoleAssistant, ToolCalls: []engine.ToolCall{
+				{ID: "toolu_a", Name: "read", Arguments: map[string]any{"path": "a.go"}},
+				{ID: "toolu_b", Name: "read", Arguments: map[string]any{"path": "b.go"}},
+			}},
+			{Role: engine.RoleTool, ToolCallID: "toolu_a", Content: "package alpha"},
+			{Role: engine.RoleTool, ToolCallID: "toolu_b", Content: "package beta"},
+			{Role: engine.RoleUser, Content: "thanks"},
+		},
+	}
+
+	out, err := adapter.Marshal(chat)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var got struct {
+		Messages []struct {
+			Role    string `json:"role"`
+			Content []struct {
+				Type      string `json:"type"`
+				ToolUseID string `json:"tool_use_id"`
+			} `json:"content"`
+		} `json:"messages"`
+	}
+	if err := json.Unmarshal(out, &got); err != nil {
+		t.Fatalf("output not valid JSON: %v\n%s", err, out)
+	}
+
+	// Expected shape: user(text), assistant(2 tool_use), user(2 tool_result), user(text).
+	if len(got.Messages) != 4 {
+		roles := make([]string, len(got.Messages))
+		for i, m := range got.Messages {
+			roles[i] = m.Role
+		}
+		t.Fatalf("expected 4 messages after coalescing, got %d: %v", len(got.Messages), roles)
+	}
+
+	// The tool_result message (index 2) must carry BOTH results, in order.
+	tr := got.Messages[2]
+	if tr.Role != "user" {
+		t.Fatalf("tool-result message role: got %s, want user", tr.Role)
+	}
+	var ids []string
+	for _, b := range tr.Content {
+		if b.Type == "tool_result" {
+			ids = append(ids, b.ToolUseID)
+		}
+	}
+	if len(ids) != 2 || ids[0] != "toolu_a" || ids[1] != "toolu_b" {
+		t.Fatalf("coalesced tool_result ids: got %v, want [toolu_a toolu_b]", ids)
+	}
+
+	// A following non-tool message must NOT be merged into the tool-result turn.
+	if got.Messages[3].Role != "user" || len(got.Messages[3].Content) == 0 || got.Messages[3].Content[0].Type != "text" {
+		t.Fatalf("message after tool results: got %+v, want user/text", got.Messages[3])
+	}
+}
+
+func intPtr(i int) *int { return &i }

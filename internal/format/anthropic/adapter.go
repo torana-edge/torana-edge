@@ -12,16 +12,16 @@ import (
 // anthropicRequest mirrors the Anthropic Messages request JSON shape for
 // easy unmarshal/marshal.
 type anthropicRequest struct {
-	Model      string              `json:"model"`
-	MaxTokens     *int                `json:"max_tokens,omitempty"`
-	Temperature   *float64            `json:"temperature,omitempty"`
-	TopP          *float64            `json:"top_p,omitempty"`
-	StopSequences []string            `json:"stop_sequences,omitempty"`
-	System        []contentBlock      `json:"system,omitempty"`
-	Messages      []anthropicMessage  `json:"messages"`
-	Tools         []anthropicToolDef  `json:"tools,omitempty"`
-	Stream        bool                `json:"stream,omitempty"`
-	StopReason string              `json:"-"`
+	Model         string             `json:"model"`
+	MaxTokens     *int               `json:"max_tokens,omitempty"`
+	Temperature   *float64           `json:"temperature,omitempty"`
+	TopP          *float64           `json:"top_p,omitempty"`
+	StopSequences []string           `json:"stop_sequences,omitempty"`
+	System        []contentBlock     `json:"system,omitempty"`
+	Messages      []anthropicMessage `json:"messages"`
+	Tools         []anthropicToolDef `json:"tools,omitempty"`
+	Stream        bool               `json:"stream,omitempty"`
+	StopReason    string             `json:"-"`
 }
 
 type anthropicMessage struct {
@@ -58,16 +58,16 @@ func (am *anthropicMessage) UnmarshalJSON(data []byte) error {
 }
 
 type contentBlock struct {
-	Type       string         `json:"type"`
-	Text       string         `json:"text,omitempty"`
-	ID         string         `json:"id,omitempty"`
-	Name       string         `json:"name,omitempty"`
-	Input      map[string]any `json:"input,omitempty"`
-	ToolUseID  string         `json:"tool_use_id,omitempty"`
-	Content    any            `json:"content,omitempty"` // string or array of blocks
-	Thinking   string         `json:"thinking,omitempty"`
-	Signature  string         `json:"signature,omitempty"`
-	Data       string         `json:"data,omitempty"`
+	Type      string         `json:"type"`
+	Text      string         `json:"text,omitempty"`
+	ID        string         `json:"id,omitempty"`
+	Name      string         `json:"name,omitempty"`
+	Input     map[string]any `json:"input,omitempty"`
+	ToolUseID string         `json:"tool_use_id,omitempty"`
+	Content   any            `json:"content,omitempty"` // string or array of blocks
+	Thinking  string         `json:"thinking,omitempty"`
+	Signature string         `json:"signature,omitempty"`
+	Data      string         `json:"data,omitempty"`
 	// Also handle tool_result content as array of blocks (Anthropic supports both)
 }
 
@@ -272,31 +272,54 @@ func (a *Adapter) Marshal(chat *engine.ChatRequest) ([]byte, error) {
 	}
 
 	// Other messages → content blocks.
-	for _, m := range chat.Messages {
+	//
+	// Consecutive tool-result messages are coalesced into a SINGLE user
+	// message. The Anthropic API requires every `tool_use` block in an
+	// assistant turn to be answered by `tool_result` blocks in the one
+	// immediately-following message. Emitting a separate user message per
+	// tool result splits a parallel tool-call batch across several user
+	// messages, so only the first result lands "in the next message" and the
+	// rest are rejected:
+	//   messages.N: `tool_use` ids were found without `tool_result` blocks
+	//   immediately after ...
+	// Coding agents (Claude Code) issue parallel tool calls constantly, so
+	// this path is hit on essentially every multi-tool turn.
+	for i := 0; i < len(chat.Messages); i++ {
+		m := chat.Messages[i]
 		if m.Role == engine.RoleSystem {
 			continue // handled above
 		}
+
+		if m.Role == engine.RoleTool {
+			am := anthropicMessage{Role: unmapRole(engine.RoleTool), Content: []contentBlock{}}
+			for i < len(chat.Messages) && chat.Messages[i].Role == engine.RoleTool {
+				tm := chat.Messages[i]
+				if tm.Thinking != "" {
+					am.Content = append(am.Content, thinkingBlock(tm))
+				}
+				cb := contentBlock{
+					Type:      "tool_result",
+					ToolUseID: tm.ToolCallID,
+					Name:      tm.ToolName,
+				}
+				if len(tm.ContentParts) > 0 {
+					cb.Content = tm.ContentParts
+				} else {
+					cb.Content = tm.Content
+				}
+				am.Content = append(am.Content, cb)
+				i++
+			}
+			i-- // for-loop post-statement re-increments
+			ar.Messages = append(ar.Messages, am)
+			continue
+		}
+
 		am := anthropicMessage{
 			Role: unmapRole(m.Role),
 		}
 
 		switch {
-		case m.Role == engine.RoleTool:
-			am.Content = []contentBlock{}
-			if m.Thinking != "" {
-				am.Content = append(am.Content, thinkingBlock(m))
-			}
-			cb := contentBlock{
-				Type:      "tool_result",
-				ToolUseID: m.ToolCallID,
-				Name:      m.ToolName,
-			}
-			if len(m.ContentParts) > 0 {
-				cb.Content = m.ContentParts
-			} else {
-				cb.Content = m.Content
-			}
-			am.Content = append(am.Content, cb)
 		case len(m.ToolCalls) > 0:
 			// Assistant with tool calls.
 			if m.Thinking != "" || m.RedactedThinking != "" {

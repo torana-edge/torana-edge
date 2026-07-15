@@ -11,8 +11,8 @@ import (
 
 // Provider describes an upstream LLM API endpoint.
 type Provider struct {
-	URL      string   `json:"url"`    // upstream base URL
-	Format   string   `json:"format"` // wire format: "openai", "anthropic", "bedrock", "vertex"
+	URL      string   `json:"url"`                // upstream base URL
+	Format   string   `json:"format"`             // wire format: "openai", "anthropic", "bedrock", "vertex"
 	Fallback []string `json:"fallback,omitempty"` // provider names to try on 429/5xx
 }
 
@@ -22,6 +22,40 @@ type Config struct {
 	Providers map[string]Provider `json:"providers"`
 	Plugins   PluginsConfig       `json:"plugins,omitempty"`
 	Limits    Limits              `json:"limits,omitempty"`
+	Offload   OffloadConfig       `json:"offload,omitempty"`
+}
+
+// OffloadConfig controls cheap-model tool result summarization
+// (the torana_offload_completion host call used by the compactor plugin).
+type OffloadConfig struct {
+	Enabled bool `json:"enabled,omitempty"`
+	// Provider names the configured provider used for offload calls.
+	// Must exist in Providers and use the "openai" format.
+	Provider string `json:"provider,omitempty"`
+	// Model is the cheap model requested for summarization.
+	Model string `json:"model,omitempty"`
+	// APIKeyEnv names an environment variable holding a dedicated offload
+	// API key. When empty, the caller's request credential is reused.
+	APIKeyEnv string `json:"api_key_env,omitempty"`
+}
+
+// Validate checks an enabled offload config against the provider map.
+// A disabled config is always valid.
+func (o OffloadConfig) Validate(providers map[string]Provider) error {
+	if !o.Enabled {
+		return nil
+	}
+	p, ok := providers[o.Provider]
+	if !ok {
+		return fmt.Errorf("offload.provider %q not found in providers", o.Provider)
+	}
+	if p.Format != "openai" {
+		return fmt.Errorf("offload.provider %q must use the openai format, has %q", o.Provider, p.Format)
+	}
+	if o.Model == "" {
+		return fmt.Errorf("offload.model must be set when offload is enabled")
+	}
+	return nil
 }
 
 // Limits defines the rate limit and concurrency caps.
@@ -93,6 +127,9 @@ func Load(path string) (Config, error) {
 	}
 	if user.Limits.RPM != 0 || user.Limits.Concurrency != 0 {
 		cfg.Limits = user.Limits
+	}
+	if user.Offload != (OffloadConfig{}) {
+		cfg.Offload = user.Offload
 	}
 
 	return cfg, nil

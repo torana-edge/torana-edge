@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/torana-edge/torana-edge/internal/provider"
 	_ "github.com/torana-edge/torana-edge/internal/format/openai"
+	"github.com/torana-edge/torana-edge/internal/provider"
 )
 
 // testProviderConfig builds a provider.Config with a single provider
@@ -112,7 +112,7 @@ func TestOversizedBodyRejection(t *testing.T) {
 	defer srv.Shutdown(context.Background())
 
 	proxyURL := "http://" + ln.Addr().String()
-	
+
 	// maxBodySize is 10<<20 (10MB). Let's send 10MB + 1 byte
 	largeBody := make([]byte, maxBodySize+1)
 
@@ -212,16 +212,15 @@ func TestProxyNoProviderRejects(t *testing.T) {
 	}
 }
 
-
 // TestJSONResponseRunsAfterResponseHook verifies that a non-streaming JSON
 // response with tool calls is routed through the WASM pipeline.
 func TestJSONResponseRunsWASMHooks(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		// Return a tool call response — the run_before_request hook in
-		// the delegator plugin sets a default model, but run_on_stream_chunk
-		// and run_after_response should execute without error.
+		// Return a tool call response. This server runs WITHOUT plugins —
+		// it verifies the JSON hook path passes responses through intact
+		// when no pipeline is loaded. TestE2E covers the with-plugins path.
 		w.Write([]byte(`{
 			"choices": [{
 				"message": {

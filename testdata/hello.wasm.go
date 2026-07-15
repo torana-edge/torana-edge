@@ -1,12 +1,15 @@
+// Minimal hand-rolled WASM fixture for raw runtime ABI tests.
+// It implements the host ABI surface (alloc/dealloc/run_before_request)
+// without the plugin SDK. The bump allocator is fine here — the fixture
+// handles a handful of tiny test payloads, never production traffic.
 package main
-
 
 var heap [65536]byte
 var bump uint32
 
 //go:wasmexport alloc
 func alloc(size uint32) uint32 {
-	if bump + size > uint32(len(heap)) {
+	if bump+size > uint32(len(heap)) {
 		return 0
 	}
 	ptr := bump
@@ -17,26 +20,10 @@ func alloc(size uint32) uint32 {
 //go:wasmexport dealloc
 func dealloc(ptr, size uint32) {}
 
-//go:wasmexport on_chat_request
-func on_chat_request(ptr, size uint32) uint64 {
-	data := heap[ptr:ptr+size]
-	// Return a simple acknowledgement
-	resp := []byte(`{"result":"ok","input_len":` + itoa(len(data)) + `}`)
-	respPtr := alloc(uint32(len(resp)))
-	copy(heap[respPtr:], resp)
-	return uint64(respPtr)<<32 | uint64(len(resp))
-}
-
-func itoa(n int) string {
-	if n == 0 { return "0" }
-	var buf [10]byte
-	i := len(buf)
-	for n > 0 {
-		i--
-		buf[i] = byte('0' + n%10)
-		n /= 10
-	}
-	return string(buf[i:])
+//go:wasmexport run_before_request
+func run_before_request(reqID uint64, ptr, size uint32) uint64 {
+	// Return 0: "not handled" — the host keeps the original request.
+	return 0
 }
 
 func main() {}

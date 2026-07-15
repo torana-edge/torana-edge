@@ -37,7 +37,7 @@ Create `config.json`:
   },
   "plugins": {
     "dir": "./plugins",
-    "order": ["schema_translator", "delegator", "compactor"]
+    "order": ["schema_translator", "keyword_compactor", "compactor"]
   },
   "limits": {
     "concurrency": 10,

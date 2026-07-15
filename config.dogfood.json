@@ -2,13 +2,22 @@
   "port": 8080,
   "providers": {
     "deepseek": {
-      "url": "http://localhost:8081",
+      "url": "https://api.deepseek.com",
       "format": "openai"
+    },
+    "deepseek-anthropic": {
+      "url": "https://api.deepseek.com/anthropic",
+      "format": "anthropic"
     }
   },
   "plugins": {
     "dir": "./plugins",
     "order": ["schema_translator", "keyword_compactor", "compactor"]
+  },
+  "offload": {
+    "enabled": true,
+    "provider": "deepseek",
+    "model": "deepseek-v4-flash"
   },
   "limits": {
     "concurrency": 10,

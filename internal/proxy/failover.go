@@ -2,11 +2,11 @@ package proxy
 
 import (
 	"bytes"
+	"encoding/json"
 	"io"
 	"log"
 	"net/http"
 	"net/url"
-	"encoding/json"
 
 	"github.com/torana-edge/torana-edge/internal/provider"
 )
@@ -80,6 +80,14 @@ func (t *failoverRoundTripper) RoundTrip(req *http.Request) (*http.Response, err
 	}
 
 	if len(fallbacks) == 0 {
+		// Still release the concurrency token: on a transport error there
+		// is no body whose Close would release it, and a retryable status
+		// returned unwrapped would leak it the same way.
+		if resp != nil && resp.Body != nil {
+			resp.Body = &rateLimitBody{ReadCloser: resp.Body, identity: identity, rateLimiter: t.rateLimiter}
+		} else {
+			t.rateLimiter.Release(identity)
+		}
 		return resp, err
 	}
 
@@ -101,7 +109,7 @@ func (t *failoverRoundTripper) RoundTrip(req *http.Request) (*http.Response, err
 		}
 
 		retryReq := cloneWithBody(req, bodyBytes)
-		
+
 		// Reconstruct retry URL using the fallback base URL and original stripped path.
 		rc, _ := req.Context().Value(routeContextKey{}).(*RouteContext)
 		retryReq.URL.Scheme = fbURL.Scheme
@@ -115,12 +123,12 @@ func (t *failoverRoundTripper) RoundTrip(req *http.Request) (*http.Response, err
 		retryReq.URL.RawPath = ""
 
 		retryResp, retryErr := t.base.RoundTrip(retryReq)
-		
+
 		// Close previous response since we are going to try the next one or we got a new one
 		if lastResp != nil {
 			lastResp.Body.Close()
 		}
-		
+
 		lastResp = retryResp
 		lastErr = retryErr
 

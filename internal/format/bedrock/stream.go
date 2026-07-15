@@ -23,7 +23,7 @@ type bedrockStreamEvent struct {
 	ContentBlockStop  *bedrockContentBlockStop  `json:"contentBlockStop,omitempty"`
 	MessageStop       *bedrockMessageStop       `json:"messageStop,omitempty"`
 	// Error responses
-	Type  string `json:"__type,omitempty"`
+	Type  string        `json:"__type,omitempty"`
 	Error *bedrockError `json:"error,omitempty"`
 }
 
@@ -32,7 +32,7 @@ type bedrockMessageStart struct {
 }
 
 type bedrockContentBlockStart struct {
-	ContentBlockIndex int                    `json:"contentBlockIndex"`
+	ContentBlockIndex int                           `json:"contentBlockIndex"`
 	Start             bedrockContentBlockStartField `json:"start"`
 }
 
@@ -123,6 +123,7 @@ func (s *Stream) ParseStream(body io.Reader) <-chan engine.StreamEvent {
 	}()
 	return ch
 }
+
 // parseBedrockEvent parses a single Bedrock JSON event line into a StreamEvent.
 // Returns nil for events that should be silently ignored (e.g. messageStart).
 func parseBedrockEvent(line string, inThinking *bool, inToolUse *bool, signatureBuf *string) *engine.StreamEvent {
@@ -168,16 +169,16 @@ func parseBedrockEvent(line string, inThinking *bool, inToolUse *bool, signature
 		delta := se.ContentBlockDelta.Delta
 		switch {
 		case delta.Thinking != nil:
-		return &engine.StreamEvent{ThinkingDelta: delta.Thinking}
+			return &engine.StreamEvent{ThinkingDelta: delta.Thinking}
 		case delta.Signature != nil:
 			*signatureBuf += *delta.Signature
 			return nil
 		case delta.Text != nil:
 			text := *delta.Text
-		return &engine.StreamEvent{TextDelta: &text}
+			return &engine.StreamEvent{TextDelta: &text}
 		case delta.ToolUse != nil:
 			*inToolUse = true
-		return &engine.StreamEvent{
+			return &engine.StreamEvent{
 				ToolCallDelta: &engine.ToolCallDelta{
 					Index:          0,
 					ArgumentsDelta: delta.ToolUse.Input,

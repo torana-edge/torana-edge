@@ -12,10 +12,10 @@ import (
 func main() {}
 
 const (
-	minContentLength = 2000 // below this, content is already small enough
-	contextLines     = 2    // lines of context around keyword matches
-	maxKeepLines     = 200  // cap to prevent bloat
-	maxResultBytes   = 8000 // cap result size
+	minContentLength = 2000     // below this, content is already small enough
+	contextLines     = 2        // lines of context around keyword matches
+	maxKeepLines     = 200      // cap to prevent bloat
+	maxResultBytes   = 8000     // cap result size
 	intentCacheKey   = "intent" // cache key for intent (set by compactor plugin)
 )
 
@@ -45,6 +45,9 @@ func init() {
 				continue
 			}
 
+			// Report savings to /stats via the host.
+			sdk.HostCall("torana_record_savings",
+				`{"original_bytes":`+itoa(len(msg.Content))+`,"final_bytes":`+itoa(len(compacted))+`}`)
 			msg.Content = compacted
 			modified = true
 		}

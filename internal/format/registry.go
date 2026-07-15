@@ -16,8 +16,6 @@ func Register(prefix string, f Format) {
 	byPrefix[prefix] = f
 }
 
-
-
 // Lookup returns the Format registered under the given name (e.g. "openai").
 // Returns nil if no format matches.
 func Lookup(name string) *Format {

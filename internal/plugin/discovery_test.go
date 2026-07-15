@@ -111,58 +111,45 @@ func TestDiscoverPlugins_ValidPlugin(t *testing.T) {
 // CallRequest directly. This catches manifest/dispatch mismatches that the
 // existing direct-call tests miss.
 func TestPipelineRunBeforeRequest_FullDispatch(t *testing.T) {
-	// Use the committed delegator plugin for the integration test.
-	wasmPath := "../../plugins/delegator/plugin.wasm"
-	wBytes, err := os.ReadFile(wasmPath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			t.Skip("skipping integration test: delegator plugin.wasm not found")
-		}
-		t.Fatal(err)
-	}
-
-	// Create a temp plugin directory with correct manifest.
-	dir := t.TempDir()
-	pluginDir := filepath.Join(dir, "delegator")
-	if err := os.MkdirAll(pluginDir, 0755); err != nil {
-		t.Fatal(err)
-	}
-	manifest := PluginManifest{
-		Name:        "delegator",
-		Version:     "0.3.0",
-		Description: "test",
-		Hooks: []Hook{
-			{Name: "run_before_request", Priority: 100},
-		},
-	}
-	mBytes, _ := json.Marshal(manifest)
-	if err := os.WriteFile(filepath.Join(pluginDir, "plugin.json"), mBytes, 0644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(pluginDir, "plugin.wasm"), wBytes, 0644); err != nil {
-		t.Fatal(err)
-	}
+	requireWASM(t, "../../plugins/compactor/plugin.wasm")
 
 	ctx := context.Background()
 	runtime := wasm.NewRuntime(ctx)
 	defer runtime.Close()
 
 	pipeline, err := NewPipeline(runtime, PluginConfig{
-		Dir:   dir,
-		Order: []string{"delegator"},
+		Dir:   "../../plugins",
+		Order: []string{"compactor"},
 	})
 	if err != nil {
 		t.Fatalf("NewPipeline: %v", err)
 	}
+	if pipeline.Len() != 1 {
+		t.Fatalf("compactor not loaded (loaded=%d)", pipeline.Len())
+	}
 
-	chat := &engine.ChatRequest{Model: ""}
+	chat := &engine.ChatRequest{
+		Messages: []engine.Message{{Role: engine.RoleUser, Content: "hi"}},
+		Tools: []engine.ToolDef{{
+			Name: "read",
+			Parameters: map[string]any{
+				"type":       "object",
+				"properties": map[string]any{"path": map[string]any{"type": "string"}},
+			},
+		}},
+	}
 	result, err := pipeline.RunBeforeRequest(ctx, 1, chat)
 	if err != nil {
 		t.Fatalf("RunBeforeRequest: %v", err)
 	}
 
-	// The delegator plugin sets default model to claude-3-5-sonnet-20241022
-	if result.Model != "claude-3-5-sonnet-20241022" {
-		t.Errorf("expected model injection via full dispatch path, got %q", result.Model)
+	// The compactor plugin injects the "i" intent field into tool schemas
+	// via the full dispatch path.
+	if len(result.Tools) != 1 {
+		t.Fatalf("expected 1 tool, got %d", len(result.Tools))
+	}
+	props, _ := result.Tools[0].Parameters["properties"].(map[string]any)
+	if _, ok := props["i"]; !ok {
+		t.Errorf(`expected "i" injected into tool schema via full dispatch path, got %v`, result.Tools[0].Parameters)
 	}
 }

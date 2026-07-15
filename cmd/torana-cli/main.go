@@ -65,7 +65,7 @@ func buildPlugin(args []string) {
 	}
 
 	fmt.Printf("Building Torana WASM plugin in %s...\n", absDir)
-	
+
 	cmd := exec.Command("go", "build", "-buildmode=c-shared", "-o", absOut, ".")
 	cmd.Dir = absDir
 	cmd.Env = append(os.Environ(), "GOOS=wasip1", "GOARCH=wasm")

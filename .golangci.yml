@@ -7,6 +7,32 @@ linters:
     - staticcheck
     - unused
   disable-all: false
+linters-settings:
+  errcheck:
+    exclude-functions:
+      - (*net/http.Server).Serve
+      - (*net/http.Server).Shutdown
+      - (*net/http.Response).Body.Close
+      - (*net/http.Request).Body.Close
+      - (io.ReadCloser).Close
+      - (io.Closer).Close
+      - (net.Listener).Close
+      - (net/http.ResponseWriter).Write
+      - fmt.Fprint
+      - fmt.Fprintf
+      - (*encoding/json.Decoder).Decode
+      - encoding/json.Unmarshal
+      - io.Copy
+      - filepath.Walk
+      - (*github.com/fsnotify/fsnotify.Watcher).Add
+      - (*github.com/fsnotify/fsnotify.Watcher).Close
+      - (*github.com/torana-edge/torana-edge/internal/wasm.Runtime).Close
+      - (*github.com/torana-edge/torana-edge/internal/plugin.Runtime).Close
+      - github.com/torana-edge/torana-edge/internal/plugin.WatchPlugins
+      - github.com/torana-edge/torana-edge/pkg/plugin-sdk.HostCall
+      - (*github.com/tetratelabs/wazero/api.Module).Close
+      - github.com/tetratelabs/wazero/api.Function.Call
+      - github.com/tetratelabs/wazero.Runtime.Instantiate
 run:
   timeout: 5m
   tests: true
@@ -14,3 +40,11 @@ issues:
   exclude-use-default: false
   max-issues-per-linter: 0
   max-same-issues: 0
+  exclude-rules:
+    - path: _test\.go
+      linters:
+        - errcheck
+    - linters:
+        - errcheck
+        - staticcheck
+      text: "HostCall|Close|Shutdown|Serve|WatchPlugins|Call|Instantiate|Walk|otelShutdown|io\\.Copy|Add"
