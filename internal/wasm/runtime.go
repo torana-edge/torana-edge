@@ -6,12 +6,14 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"sync"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/tetratelabs/wazero"
 	"github.com/tetratelabs/wazero/api"
 	"github.com/tetratelabs/wazero/imports/wasi_snapshot_preview1"
+	"github.com/torana-edge/torana-edge/internal/cache"
 	"github.com/torana-edge/torana-edge/internal/metrics"
 )
 
@@ -124,6 +126,10 @@ func (p *Plugin) newInstance(ctx context.Context) (*pluginInstance, error) {
 // CallRequest passes byte payload to the WASM hook and returns the result.
 // Uses instance pooling for concurrent request handling.
 func (p *Plugin) CallRequest(ctx context.Context, hook string, reqID uint64, inBytes []byte, output *[]byte) error {
+	// Carry the request ID into host functions (wazero propagates the
+	// fn.Call context) so meta state is scoped per request.
+	ctx = context.WithValue(ctx, reqIDKey{}, reqID)
+
 	// Acquire an instance from the pool.
 	inst, err := p.acquire(ctx)
 	if err != nil {
@@ -186,19 +192,35 @@ func (p *Plugin) CallRequest(ctx context.Context, hook string, reqID uint64, inB
 // Runtime
 // ============================================================================
 
+// cacheTTL bounds the cross-request cache (intents, compacted results).
+// Entries are keyed by tool_call_id; 15 minutes comfortably covers a
+// harness resending tool results across conversation turns.
+const cacheTTL = 15 * time.Minute
+
+// reqIDKey carries the request ID through wazero's fn.Call context into
+// host functions, scoping plugin meta state to a single request.
+type reqIDKey struct{}
+
 type Runtime struct {
 	ctx     context.Context
 	runtime wazero.Runtime
 	plugins map[string]*Plugin
 	mu      sync.RWMutex
 	metaMu  sync.RWMutex
-	meta    map[string]string
-	cacheMu sync.RWMutex
-	cache   map[string]string
+	// meta holds request-scoped, plugin-private state: reqID → namespaced
+	// key → value. Buckets are dropped via EndRequest when a request ends.
+	meta map[uint64]map[string]string
+	// cache is the cross-request TTL store shared between plugins
+	// (e.g. compactor writes intents, keyword_compactor reads them).
+	cache cache.Store
 
 	// OffloadFunc handles torana_offload_completion host calls.
 	// Set by the server during initialization.
 	OffloadFunc func(ctx context.Context, payloadJSON string) (string, error)
+
+	// SavingsFunc handles torana_record_savings host calls (compaction
+	// byte savings reported by plugins). Set by the server.
+	SavingsFunc func(originalBytes, finalBytes int64)
 }
 
 func NewRuntime(ctx context.Context) *Runtime {
@@ -206,15 +228,56 @@ func NewRuntime(ctx context.Context) *Runtime {
 		ctx:     ctx,
 		runtime: wazero.NewRuntime(ctx),
 		plugins: make(map[string]*Plugin),
-		meta:    make(map[string]string),
-		cache:   make(map[string]string),
+		meta:    make(map[uint64]map[string]string),
+		cache:   cache.NewLocalCache(cacheTTL),
 	}
 	wasi_snapshot_preview1.MustInstantiate(r.ctx, r.runtime)
 	r.installHostFunctions()
 	return r
 }
 
-func (r *Runtime) Close() error { return r.runtime.Close(r.ctx) }
+func (r *Runtime) Close() error {
+	r.cache.Close()
+	return r.runtime.Close(r.ctx)
+}
+
+// EndRequest drops all plugin meta state for a finished request.
+func (r *Runtime) EndRequest(reqID uint64) {
+	r.metaMu.Lock()
+	delete(r.meta, reqID)
+	r.metaMu.Unlock()
+}
+
+// metaGet reads a request-scoped meta value.
+func (r *Runtime) metaGet(reqID uint64, key string) string {
+	r.metaMu.RLock()
+	defer r.metaMu.RUnlock()
+	return r.meta[reqID][key]
+}
+
+// metaSet writes a request-scoped meta value; empty value deletes the key
+// (plugins use this convention for cleanup).
+func (r *Runtime) metaSet(reqID uint64, key, value string) {
+	r.metaMu.Lock()
+	defer r.metaMu.Unlock()
+	if value == "" {
+		delete(r.meta[reqID], key)
+		return
+	}
+	bucket, ok := r.meta[reqID]
+	if !ok {
+		bucket = make(map[string]string)
+		r.meta[reqID] = bucket
+	}
+	bucket[key] = value
+}
+
+// reqIDFrom extracts the request ID host calls were invoked under.
+// Calls outside a request (e.g. hook validation) land in bucket 0.
+func reqIDFrom(ctx context.Context) uint64 {
+	id, _ := ctx.Value(reqIDKey{}).(uint64)
+	return id
+}
 
 func (r *Runtime) LoadPlugin(name string, wasmBytes []byte) (*Plugin, error) {
 	p := &Plugin{
@@ -238,14 +301,26 @@ func (r *Runtime) LoadPlugin(name string, wasmBytes []byte) (*Plugin, error) {
 	return p, nil
 }
 
+// pluginNameOf strips the "-<instance>" suffix wazero module names carry.
+func pluginNameOf(mod api.Module) string {
+	name := mod.Name()
+	if idx := strings.LastIndex(name, "-"); idx != -1 {
+		return name[:idx]
+	}
+	return name
+}
+
+// metaKey namespaces a plugin's meta key. Meta is plugin-private state
+// (fragment buffers, tool-call tracking) — without namespacing, plugins
+// sharing key conventions (tool:0, frag:<id>) clobber each other.
+// The shared cross-plugin channel is the cache (env.cache_*), not meta.
+func metaKey(plugin, key string) string { return plugin + "\x00" + key }
+
 func (r *Runtime) installHostFunctions() {
 	env := r.runtime.NewHostModuleBuilder("env")
 	env.NewFunctionBuilder().WithFunc(func(ctx context.Context, mod api.Module, kPtr, kLen uint32) uint64 {
-		key := readStr(mod, kPtr, kLen)
-		r.metaMu.RLock()
-		v := r.meta[key]
-		r.metaMu.RUnlock()
-		return writeStr(ctx, mod, v)
+		key := metaKey(pluginNameOf(mod), readStr(mod, kPtr, kLen))
+		return writeStr(ctx, mod, r.metaGet(reqIDFrom(ctx), key))
 	}).Export("meta_get")
 
 	env.NewFunctionBuilder().WithFunc(func(ctx context.Context, mod api.Module, level int32, ptr, length uint32) {
@@ -262,12 +337,15 @@ func (r *Runtime) installHostFunctions() {
 	}).Export("abort")
 
 	env.NewFunctionBuilder().WithFunc(func(ctx context.Context, mod api.Module, metricType int32, ptr, length uint32, value float64) {
-		name := readStr(mod, ptr, length)
-		pluginName := mod.Name()
-		idx := strings.LastIndex(pluginName, "-")
-		if idx != -1 {
-			pluginName = pluginName[:idx]
+		pluginName := pluginNameOf(mod)
+		r.mu.RLock()
+		p := r.plugins[pluginName]
+		r.mu.RUnlock()
+		if p == nil || !p.hasGrant("env.emit_metric") {
+			log.Printf("[wasm] permission denied: %s tried env.emit_metric", mod.Name())
+			return
 		}
+		name := readStr(mod, ptr, length)
 		metrics.EmitPluginMetric(ctx, pluginName, name, int(metricType), value)
 	}).Export("emit_metric")
 
@@ -277,11 +355,7 @@ func (r *Runtime) installHostFunctions() {
 		args := readStr(mod, argsPtr, argsLen)
 
 		// Enforce per-command permission: env.host_call.<command>
-		pluginName := mod.Name()
-		idx := strings.LastIndex(pluginName, "-")
-		if idx != -1 {
-			pluginName = pluginName[:idx]
-		}
+		pluginName := pluginNameOf(mod)
 
 		r.mu.RLock()
 		p := r.plugins[pluginName]
@@ -307,52 +381,56 @@ func (r *Runtime) installHostFunctions() {
 				Value any    `json:"value"`
 			}
 			if err := json.Unmarshal([]byte(args), &kv); err == nil {
-				r.metaMu.Lock()
+				key := metaKey(pluginName, kv.Key)
 				switch v := kv.Value.(type) {
 				case string:
-					r.meta[kv.Key] = v
+					r.metaSet(reqIDFrom(ctx), key, v)
 				default:
 					b, _ := json.Marshal(v)
-					r.meta[kv.Key] = string(b)
+					r.metaSet(reqIDFrom(ctx), key, string(b))
 				}
-				r.metaMu.Unlock()
 				res = `{"status":"ok"}`
 			} else {
 				res = `{"status":"error","message":"invalid payload"}`
 			}
 		case "env.meta_get":
-			r.metaMu.RLock()
-			v := r.meta[args]
-			r.metaMu.RUnlock()
-			res = v
+			res = r.metaGet(reqIDFrom(ctx), metaKey(pluginName, args))
 		case "env.cache_set":
 			var kv struct {
 				Key   string `json:"key"`
 				Value any    `json:"value"`
 			}
 			if err := json.Unmarshal([]byte(args), &kv); err == nil {
-				r.cacheMu.Lock()
 				switch v := kv.Value.(type) {
 				case string:
-					r.cache[kv.Key] = v
+					r.cache.Set(kv.Key, v)
 				default:
 					b, _ := json.Marshal(v)
-					r.cache[kv.Key] = string(b)
+					r.cache.Set(kv.Key, string(b))
 				}
-				r.cacheMu.Unlock()
 				res = `{"status":"ok"}`
 			} else {
 				res = `{"status":"error","message":"invalid payload"}`
 			}
 		case "env.cache_get":
-			r.cacheMu.RLock()
-			v := r.cache[args]
-			r.cacheMu.RUnlock()
-			res = v
+			res, _ = r.cache.Get(args)
 		case "torana_db_query":
 			res = `{"status":"error","message":"database not configured — set plugins.config.compactor.dsn"}`
 		case "torana_kms_decrypt":
 			res = `{"status":"error","message":"KMS not configured — set TORANA_KMS_ENDPOINT"}`
+		case "torana_record_savings":
+			var pl struct {
+				OriginalBytes int64 `json:"original_bytes"`
+				FinalBytes    int64 `json:"final_bytes"`
+			}
+			if err := json.Unmarshal([]byte(args), &pl); err != nil || pl.OriginalBytes < 0 || pl.FinalBytes < 0 {
+				res = `{"status":"error","message":"invalid payload"}`
+			} else if r.SavingsFunc != nil {
+				r.SavingsFunc(pl.OriginalBytes, pl.FinalBytes)
+				res = `{"status":"ok"}`
+			} else {
+				res = `{"status":"error","message":"savings tracking not configured"}`
+			}
 		case "torana_offload_completion":
 			if r.OffloadFunc != nil {
 				result, err := r.OffloadFunc(ctx, args)

@@ -92,7 +92,31 @@ func loadBundle(dir string) (*PluginBundle, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read wasm: %w", err)
 	}
+	warnIfStale(dir, wasmPath, manifest.Name)
 	return &PluginBundle{Manifest: manifest, WASMBytes: wBytes}, nil
+}
+
+// warnIfStale logs a warning when plugin.wasm is older than any Go source
+// in the plugin directory. Stale binaries silently running outdated logic
+// caused a production incident — binaries are build artifacts (`make plugins`).
+func warnIfStale(dir, wasmPath, name string) {
+	wasmInfo, err := os.Stat(wasmPath)
+	if err != nil {
+		return
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		if e.IsDir() || filepath.Ext(e.Name()) != ".go" {
+			continue
+		}
+		if info, err := e.Info(); err == nil && info.ModTime().After(wasmInfo.ModTime()) {
+			log.Printf("[plugin] %s: plugin.wasm is older than %s — rebuild with 'make plugins'", name, e.Name())
+			return
+		}
+	}
 }
 
 // ============================================================================
@@ -161,8 +185,26 @@ func reloadPipeline(runtime *wasm.Runtime, config PluginConfig) (*PluginPipeline
 	return &PluginPipeline{plugins: loaded, runtime: runtime}, nil
 }
 
-func (pp *PluginPipeline) Acquire()  { pp.wg.Add(1) }
-func (pp *PluginPipeline) Release()  { pp.wg.Done() }
+func (pp *PluginPipeline) Acquire() { pp.wg.Add(1) }
+func (pp *PluginPipeline) Release() { pp.wg.Done() }
+
+// Len returns the number of successfully loaded plugins.
+func (pp *PluginPipeline) Len() int { return len(pp.plugins) }
+
+// EndRequest drops all request-scoped plugin state for a finished request.
+func (pp *PluginPipeline) EndRequest(reqID uint64) { pp.runtime.EndRequest(reqID) }
+
+// HasGrant reports whether any loaded plugin declares the given permission.
+func (pp *PluginPipeline) HasGrant(perm string) bool {
+	for _, lp := range pp.plugins {
+		for _, p := range lp.manifest.Permissions {
+			if p.Name == perm {
+				return true
+			}
+		}
+	}
+	return false
+}
 
 // DrainAndClose waits for active requests then closes the runtime.
 func (pp *PluginPipeline) DrainAndClose() {
@@ -184,6 +226,7 @@ func (pp *PluginPipeline) RunBeforeRequest(ctx context.Context, reqID uint64, ch
 	}
 
 	resultBytes := reqBytes
+	modified := false
 	for _, lp := range pp.plugins {
 		if !hasHook(lp.manifest, "run_before_request") {
 			continue
@@ -195,9 +238,14 @@ func (pp *PluginPipeline) RunBeforeRequest(ctx context.Context, reqID uint64, ch
 		}
 		if len(outBytes) > 0 {
 			resultBytes = outBytes
+			modified = true
 		}
 	}
 
+	if !modified {
+		// No plugin produced output — skip the pb round-trip entirely.
+		return chat, nil
+	}
 	var resReq pb.ChatRequest
 	if err := proto.Unmarshal(resultBytes, &resReq); err != nil {
 		return chat, err
@@ -217,6 +265,7 @@ func (pp *PluginPipeline) RunAfterResponse(ctx context.Context, reqID uint64, ch
 	}
 
 	resultBytes := reqBytes
+	modified := false
 	for _, lp := range pp.plugins {
 		if !hasHook(lp.manifest, "run_after_response") {
 			continue
@@ -228,9 +277,14 @@ func (pp *PluginPipeline) RunAfterResponse(ctx context.Context, reqID uint64, ch
 		}
 		if len(outBytes) > 0 {
 			resultBytes = outBytes
+			modified = true
 		}
 	}
 
+	if !modified {
+		// No plugin produced output — skip the pb round-trip entirely.
+		return chat, nil
+	}
 	var resReq pb.ChatRequest
 	if err := proto.Unmarshal(resultBytes, &resReq); err != nil {
 		return chat, err
@@ -238,40 +292,62 @@ func (pp *PluginPipeline) RunAfterResponse(ctx context.Context, reqID uint64, ch
 	return pbconv.FromPBChatRequest(&resReq), nil
 }
 
-
-
-
 // RunOnStreamChunk calls every plugin that implements run_on_stream_chunk.
-func (pp *PluginPipeline) RunOnStreamChunk(ctx context.Context, reqID uint64, chunk *engine.StreamEvent) (*engine.StreamEvent, error) {
+//
+// Each plugin sees every event produced by the previous plugin in the chain
+// and returns a StreamEventResult per event: a zero-length return passes the
+// event through unchanged; handled=true splices in its events (empty =
+// suppress, one = replace, many = fan-out). The final event set replaces the
+// input chunk in the stream — possibly empty.
+func (pp *PluginPipeline) RunOnStreamChunk(ctx context.Context, reqID uint64, chunk *engine.StreamEvent) ([]engine.StreamEvent, error) {
 	pp.Acquire()
 	defer pp.Release()
 
-	pbChunk := pbconv.ToPBStreamEvent(chunk)
-	reqBytes, err := proto.Marshal(pbChunk)
-	if err != nil {
-		return chunk, err
-	}
+	current := []*pb.StreamEvent{pbconv.ToPBStreamEvent(chunk)}
 
-	resultBytes := reqBytes
 	for _, lp := range pp.plugins {
 		if !hasHook(lp.manifest, "run_on_stream_chunk") {
 			continue
 		}
-		var outBytes []byte
-		if err := lp.plugin.CallRequest(ctx, "run_on_stream_chunk", reqID, resultBytes, &outBytes); err != nil {
-			log.Printf("[plugin] %s run_on_stream_chunk: %v", lp.manifest.Name, err)
-			continue
+		next := make([]*pb.StreamEvent, 0, len(current))
+		for _, ev := range current {
+			evBytes, err := proto.Marshal(ev)
+			if err != nil {
+				log.Printf("[plugin] %s run_on_stream_chunk marshal: %v", lp.manifest.Name, err)
+				next = append(next, ev)
+				continue
+			}
+			var outBytes []byte
+			if err := lp.plugin.CallRequest(ctx, "run_on_stream_chunk", reqID, evBytes, &outBytes); err != nil {
+				log.Printf("[plugin] %s run_on_stream_chunk: %v", lp.manifest.Name, err)
+				next = append(next, ev)
+				continue
+			}
+			if len(outBytes) == 0 {
+				// Passthrough: plugin did not handle this event.
+				next = append(next, ev)
+				continue
+			}
+			var res pb.StreamEventResult
+			if err := proto.Unmarshal(outBytes, &res); err != nil {
+				log.Printf("[plugin] %s run_on_stream_chunk unmarshal: %v", lp.manifest.Name, err)
+				next = append(next, ev)
+				continue
+			}
+			if !res.Handled {
+				next = append(next, ev)
+				continue
+			}
+			next = append(next, res.Events...)
 		}
-		if len(outBytes) > 0 {
-			resultBytes = outBytes
-		}
+		current = next
 	}
 
-	var resChunk pb.StreamEvent
-	if err := proto.Unmarshal(resultBytes, &resChunk); err != nil {
-		return chunk, err
+	out := make([]engine.StreamEvent, 0, len(current))
+	for _, ev := range current {
+		out = append(out, *pbconv.FromPBStreamEvent(ev))
 	}
-	return pbconv.FromPBStreamEvent(&resChunk), nil
+	return out, nil
 }
 
 // ============================================================================
@@ -306,9 +382,15 @@ func hookNames(hooks []Hook) []string {
 // ============================================================================
 
 // WatchPlugins starts a file watcher on the plugins directory. When a
-// .wasm or plugin.json file changes, it calls reloadFn with a new runtime
-// and config. The reloadFn should atomically swap the active pipeline.
-func WatchPlugins(ctx context.Context, dir string, config PluginConfig, reloadFn func(pipeline *PluginPipeline)) error {
+// .wasm or plugin.json file changes (or is removed), it calls reloadFn with
+// a freshly built pipeline. The reloadFn should atomically swap the active
+// pipeline.
+//
+// configFn is consulted at reload time so config hot-reloads (plugin order,
+// per-plugin config) take effect without restarting the watcher. runtimeFn
+// builds each reload's runtime — the caller wires host callbacks (offload,
+// savings) there; a bare runtime would silently lose them.
+func WatchPlugins(ctx context.Context, dir string, configFn func() PluginConfig, runtimeFn func() *wasm.Runtime, reloadFn func(pipeline *PluginPipeline)) error {
 	if dir == "" {
 		dir = "./plugins"
 	}
@@ -358,7 +440,8 @@ func WatchPlugins(ctx context.Context, dir string, config PluginConfig, reloadFn
 				if name != "plugin.wasm" && name != "plugin.json" {
 					continue
 				}
-				if event.Op&(fsnotify.Write|fsnotify.Create|fsnotify.Rename) == 0 {
+				// Remove/Rename included: deleting a plugin must unload it.
+				if event.Op&(fsnotify.Write|fsnotify.Create|fsnotify.Rename|fsnotify.Remove) == 0 {
 					continue
 				}
 
@@ -367,8 +450,8 @@ func WatchPlugins(ctx context.Context, dir string, config PluginConfig, reloadFn
 				}
 				debounceTimer = time.AfterFunc(debounce, func() {
 					log.Printf("[plugin] file change detected: %s — reloading", event.Name)
-					newRT := wasm.NewRuntime(ctx)
-					pp, err := reloadPipeline(newRT, config)
+					newRT := runtimeFn()
+					pp, err := reloadPipeline(newRT, configFn())
 					if err != nil {
 						log.Printf("[plugin] reload failed: %v", err)
 						newRT.Close()

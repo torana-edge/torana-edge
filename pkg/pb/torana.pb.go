@@ -2,7 +2,7 @@
 // versions:
 // 	protoc-gen-go v1.36.11
 // 	protoc        v7.35.1
-// source: torana.proto
+// source: pkg/pb/torana.proto
 
 package pb
 
@@ -40,7 +40,7 @@ type Message struct {
 
 func (x *Message) Reset() {
 	*x = Message{}
-	mi := &file_torana_proto_msgTypes[0]
+	mi := &file_pkg_pb_torana_proto_msgTypes[0]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -52,7 +52,7 @@ func (x *Message) String() string {
 func (*Message) ProtoMessage() {}
 
 func (x *Message) ProtoReflect() protoreflect.Message {
-	mi := &file_torana_proto_msgTypes[0]
+	mi := &file_pkg_pb_torana_proto_msgTypes[0]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -65,7 +65,7 @@ func (x *Message) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Message.ProtoReflect.Descriptor instead.
 func (*Message) Descriptor() ([]byte, []int) {
-	return file_torana_proto_rawDescGZIP(), []int{0}
+	return file_pkg_pb_torana_proto_rawDescGZIP(), []int{0}
 }
 
 func (x *Message) GetRole() string {
@@ -143,7 +143,7 @@ type ToolCall struct {
 
 func (x *ToolCall) Reset() {
 	*x = ToolCall{}
-	mi := &file_torana_proto_msgTypes[1]
+	mi := &file_pkg_pb_torana_proto_msgTypes[1]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -155,7 +155,7 @@ func (x *ToolCall) String() string {
 func (*ToolCall) ProtoMessage() {}
 
 func (x *ToolCall) ProtoReflect() protoreflect.Message {
-	mi := &file_torana_proto_msgTypes[1]
+	mi := &file_pkg_pb_torana_proto_msgTypes[1]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -168,7 +168,7 @@ func (x *ToolCall) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ToolCall.ProtoReflect.Descriptor instead.
 func (*ToolCall) Descriptor() ([]byte, []int) {
-	return file_torana_proto_rawDescGZIP(), []int{1}
+	return file_pkg_pb_torana_proto_rawDescGZIP(), []int{1}
 }
 
 func (x *ToolCall) GetId() string {
@@ -205,7 +205,7 @@ type ToolDef struct {
 
 func (x *ToolDef) Reset() {
 	*x = ToolDef{}
-	mi := &file_torana_proto_msgTypes[2]
+	mi := &file_pkg_pb_torana_proto_msgTypes[2]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -217,7 +217,7 @@ func (x *ToolDef) String() string {
 func (*ToolDef) ProtoMessage() {}
 
 func (x *ToolDef) ProtoReflect() protoreflect.Message {
-	mi := &file_torana_proto_msgTypes[2]
+	mi := &file_pkg_pb_torana_proto_msgTypes[2]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -230,7 +230,7 @@ func (x *ToolDef) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ToolDef.ProtoReflect.Descriptor instead.
 func (*ToolDef) Descriptor() ([]byte, []int) {
-	return file_torana_proto_rawDescGZIP(), []int{2}
+	return file_pkg_pb_torana_proto_rawDescGZIP(), []int{2}
 }
 
 func (x *ToolDef) GetName() string {
@@ -283,7 +283,7 @@ type ChatRequest struct {
 
 func (x *ChatRequest) Reset() {
 	*x = ChatRequest{}
-	mi := &file_torana_proto_msgTypes[3]
+	mi := &file_pkg_pb_torana_proto_msgTypes[3]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -295,7 +295,7 @@ func (x *ChatRequest) String() string {
 func (*ChatRequest) ProtoMessage() {}
 
 func (x *ChatRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_torana_proto_msgTypes[3]
+	mi := &file_pkg_pb_torana_proto_msgTypes[3]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -308,7 +308,7 @@ func (x *ChatRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ChatRequest.ProtoReflect.Descriptor instead.
 func (*ChatRequest) Descriptor() ([]byte, []int) {
-	return file_torana_proto_rawDescGZIP(), []int{3}
+	return file_pkg_pb_torana_proto_rawDescGZIP(), []int{3}
 }
 
 func (x *ChatRequest) GetModel() string {
@@ -399,7 +399,7 @@ type ToolCallStart struct {
 
 func (x *ToolCallStart) Reset() {
 	*x = ToolCallStart{}
-	mi := &file_torana_proto_msgTypes[4]
+	mi := &file_pkg_pb_torana_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -411,7 +411,7 @@ func (x *ToolCallStart) String() string {
 func (*ToolCallStart) ProtoMessage() {}
 
 func (x *ToolCallStart) ProtoReflect() protoreflect.Message {
-	mi := &file_torana_proto_msgTypes[4]
+	mi := &file_pkg_pb_torana_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -424,7 +424,7 @@ func (x *ToolCallStart) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ToolCallStart.ProtoReflect.Descriptor instead.
 func (*ToolCallStart) Descriptor() ([]byte, []int) {
-	return file_torana_proto_rawDescGZIP(), []int{4}
+	return file_pkg_pb_torana_proto_rawDescGZIP(), []int{4}
 }
 
 func (x *ToolCallStart) GetIndex() int32 {
@@ -458,7 +458,7 @@ type ToolCallDelta struct {
 
 func (x *ToolCallDelta) Reset() {
 	*x = ToolCallDelta{}
-	mi := &file_torana_proto_msgTypes[5]
+	mi := &file_pkg_pb_torana_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -470,7 +470,7 @@ func (x *ToolCallDelta) String() string {
 func (*ToolCallDelta) ProtoMessage() {}
 
 func (x *ToolCallDelta) ProtoReflect() protoreflect.Message {
-	mi := &file_torana_proto_msgTypes[5]
+	mi := &file_pkg_pb_torana_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -483,7 +483,7 @@ func (x *ToolCallDelta) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ToolCallDelta.ProtoReflect.Descriptor instead.
 func (*ToolCallDelta) Descriptor() ([]byte, []int) {
-	return file_torana_proto_rawDescGZIP(), []int{5}
+	return file_pkg_pb_torana_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *ToolCallDelta) GetIndex() int32 {
@@ -509,7 +509,7 @@ type ToolCallEnd struct {
 
 func (x *ToolCallEnd) Reset() {
 	*x = ToolCallEnd{}
-	mi := &file_torana_proto_msgTypes[6]
+	mi := &file_pkg_pb_torana_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -521,7 +521,7 @@ func (x *ToolCallEnd) String() string {
 func (*ToolCallEnd) ProtoMessage() {}
 
 func (x *ToolCallEnd) ProtoReflect() protoreflect.Message {
-	mi := &file_torana_proto_msgTypes[6]
+	mi := &file_pkg_pb_torana_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -534,7 +534,7 @@ func (x *ToolCallEnd) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ToolCallEnd.ProtoReflect.Descriptor instead.
 func (*ToolCallEnd) Descriptor() ([]byte, []int) {
-	return file_torana_proto_rawDescGZIP(), []int{6}
+	return file_pkg_pb_torana_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *ToolCallEnd) GetIndex() int32 {
@@ -554,7 +554,7 @@ type StreamError struct {
 
 func (x *StreamError) Reset() {
 	*x = StreamError{}
-	mi := &file_torana_proto_msgTypes[7]
+	mi := &file_pkg_pb_torana_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -566,7 +566,7 @@ func (x *StreamError) String() string {
 func (*StreamError) ProtoMessage() {}
 
 func (x *StreamError) ProtoReflect() protoreflect.Message {
-	mi := &file_torana_proto_msgTypes[7]
+	mi := &file_pkg_pb_torana_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -579,7 +579,7 @@ func (x *StreamError) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StreamError.ProtoReflect.Descriptor instead.
 func (*StreamError) Descriptor() ([]byte, []int) {
-	return file_torana_proto_rawDescGZIP(), []int{7}
+	return file_pkg_pb_torana_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *StreamError) GetCode() int32 {
@@ -606,7 +606,7 @@ type StreamUsage struct {
 
 func (x *StreamUsage) Reset() {
 	*x = StreamUsage{}
-	mi := &file_torana_proto_msgTypes[8]
+	mi := &file_pkg_pb_torana_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -618,7 +618,7 @@ func (x *StreamUsage) String() string {
 func (*StreamUsage) ProtoMessage() {}
 
 func (x *StreamUsage) ProtoReflect() protoreflect.Message {
-	mi := &file_torana_proto_msgTypes[8]
+	mi := &file_pkg_pb_torana_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -631,7 +631,7 @@ func (x *StreamUsage) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StreamUsage.ProtoReflect.Descriptor instead.
 func (*StreamUsage) Descriptor() ([]byte, []int) {
-	return file_torana_proto_rawDescGZIP(), []int{8}
+	return file_pkg_pb_torana_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *StreamUsage) GetInputTokens() int32 {
@@ -667,7 +667,7 @@ type StreamEvent struct {
 
 func (x *StreamEvent) Reset() {
 	*x = StreamEvent{}
-	mi := &file_torana_proto_msgTypes[9]
+	mi := &file_pkg_pb_torana_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -679,7 +679,7 @@ func (x *StreamEvent) String() string {
 func (*StreamEvent) ProtoMessage() {}
 
 func (x *StreamEvent) ProtoReflect() protoreflect.Message {
-	mi := &file_torana_proto_msgTypes[9]
+	mi := &file_pkg_pb_torana_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -692,7 +692,7 @@ func (x *StreamEvent) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StreamEvent.ProtoReflect.Descriptor instead.
 func (*StreamEvent) Descriptor() ([]byte, []int) {
-	return file_torana_proto_rawDescGZIP(), []int{9}
+	return file_pkg_pb_torana_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *StreamEvent) GetEvent() isStreamEvent_Event {
@@ -826,11 +826,76 @@ func (*StreamEvent_Usage) isStreamEvent_Event() {}
 
 func (*StreamEvent_Error) isStreamEvent_Event() {}
 
-var File_torana_proto protoreflect.FileDescriptor
+// Result of a run_on_stream_chunk hook invocation.
+//
+// A zero-length hook return means "not handled" — the input event passes
+// through unchanged. A non-empty StreamEventResult with handled=true
+// replaces the input event with `events`:
+//
+//	events empty  → suppress the input event
+//	one event     → replace it
+//	multiple      → fan-out (e.g. [ToolCallDelta(full args), ToolCallEnd])
+//
+// The explicit `handled` flag exists because an all-defaults protobuf
+// message marshals to zero bytes — without it, "suppress" would be
+// indistinguishable from "passthrough" on the wire.
+type StreamEventResult struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Handled       bool                   `protobuf:"varint,1,opt,name=handled,proto3" json:"handled,omitempty"`
+	Events        []*StreamEvent         `protobuf:"bytes,2,rep,name=events,proto3" json:"events,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
 
-const file_torana_proto_rawDesc = "" +
+func (x *StreamEventResult) Reset() {
+	*x = StreamEventResult{}
+	mi := &file_pkg_pb_torana_proto_msgTypes[10]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *StreamEventResult) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*StreamEventResult) ProtoMessage() {}
+
+func (x *StreamEventResult) ProtoReflect() protoreflect.Message {
+	mi := &file_pkg_pb_torana_proto_msgTypes[10]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use StreamEventResult.ProtoReflect.Descriptor instead.
+func (*StreamEventResult) Descriptor() ([]byte, []int) {
+	return file_pkg_pb_torana_proto_rawDescGZIP(), []int{10}
+}
+
+func (x *StreamEventResult) GetHandled() bool {
+	if x != nil {
+		return x.Handled
+	}
+	return false
+}
+
+func (x *StreamEventResult) GetEvents() []*StreamEvent {
+	if x != nil {
+		return x.Events
+	}
+	return nil
+}
+
+var File_pkg_pb_torana_proto protoreflect.FileDescriptor
+
+const file_pkg_pb_torana_proto_rawDesc = "" +
 	"\n" +
-	"\ftorana.proto\x12\ttorana.v1\"\xd0\x02\n" +
+	"\x13pkg/pb/torana.proto\x12\ttorana.v1\"\xd0\x02\n" +
 	"\aMessage\x12\x12\n" +
 	"\x04role\x18\x01 \x01(\tR\x04role\x12\x18\n" +
 	"\acontent\x18\x02 \x01(\tR\acontent\x12,\n" +
@@ -894,34 +959,38 @@ const file_torana_proto_rawDesc = "" +
 	"\rfinish_reason\x18\x06 \x01(\tH\x00R\ffinishReason\x12.\n" +
 	"\x05usage\x18\a \x01(\v2\x16.torana.v1.StreamUsageH\x00R\x05usage\x12.\n" +
 	"\x05error\x18\b \x01(\v2\x16.torana.v1.StreamErrorH\x00R\x05errorB\a\n" +
-	"\x05eventB+Z)github.com/torana-edge/torana-edge/pkg/pbb\x06proto3"
+	"\x05event\"]\n" +
+	"\x11StreamEventResult\x12\x18\n" +
+	"\ahandled\x18\x01 \x01(\bR\ahandled\x12.\n" +
+	"\x06events\x18\x02 \x03(\v2\x16.torana.v1.StreamEventR\x06eventsB+Z)github.com/torana-edge/torana-edge/pkg/pbb\x06proto3"
 
 var (
-	file_torana_proto_rawDescOnce sync.Once
-	file_torana_proto_rawDescData []byte
+	file_pkg_pb_torana_proto_rawDescOnce sync.Once
+	file_pkg_pb_torana_proto_rawDescData []byte
 )
 
-func file_torana_proto_rawDescGZIP() []byte {
-	file_torana_proto_rawDescOnce.Do(func() {
-		file_torana_proto_rawDescData = protoimpl.X.CompressGZIP(unsafe.Slice(unsafe.StringData(file_torana_proto_rawDesc), len(file_torana_proto_rawDesc)))
+func file_pkg_pb_torana_proto_rawDescGZIP() []byte {
+	file_pkg_pb_torana_proto_rawDescOnce.Do(func() {
+		file_pkg_pb_torana_proto_rawDescData = protoimpl.X.CompressGZIP(unsafe.Slice(unsafe.StringData(file_pkg_pb_torana_proto_rawDesc), len(file_pkg_pb_torana_proto_rawDesc)))
 	})
-	return file_torana_proto_rawDescData
+	return file_pkg_pb_torana_proto_rawDescData
 }
 
-var file_torana_proto_msgTypes = make([]protoimpl.MessageInfo, 10)
-var file_torana_proto_goTypes = []any{
-	(*Message)(nil),       // 0: torana.v1.Message
-	(*ToolCall)(nil),      // 1: torana.v1.ToolCall
-	(*ToolDef)(nil),       // 2: torana.v1.ToolDef
-	(*ChatRequest)(nil),   // 3: torana.v1.ChatRequest
-	(*ToolCallStart)(nil), // 4: torana.v1.ToolCallStart
-	(*ToolCallDelta)(nil), // 5: torana.v1.ToolCallDelta
-	(*ToolCallEnd)(nil),   // 6: torana.v1.ToolCallEnd
-	(*StreamError)(nil),   // 7: torana.v1.StreamError
-	(*StreamUsage)(nil),   // 8: torana.v1.StreamUsage
-	(*StreamEvent)(nil),   // 9: torana.v1.StreamEvent
+var file_pkg_pb_torana_proto_msgTypes = make([]protoimpl.MessageInfo, 11)
+var file_pkg_pb_torana_proto_goTypes = []any{
+	(*Message)(nil),           // 0: torana.v1.Message
+	(*ToolCall)(nil),          // 1: torana.v1.ToolCall
+	(*ToolDef)(nil),           // 2: torana.v1.ToolDef
+	(*ChatRequest)(nil),       // 3: torana.v1.ChatRequest
+	(*ToolCallStart)(nil),     // 4: torana.v1.ToolCallStart
+	(*ToolCallDelta)(nil),     // 5: torana.v1.ToolCallDelta
+	(*ToolCallEnd)(nil),       // 6: torana.v1.ToolCallEnd
+	(*StreamError)(nil),       // 7: torana.v1.StreamError
+	(*StreamUsage)(nil),       // 8: torana.v1.StreamUsage
+	(*StreamEvent)(nil),       // 9: torana.v1.StreamEvent
+	(*StreamEventResult)(nil), // 10: torana.v1.StreamEventResult
 }
-var file_torana_proto_depIdxs = []int32{
+var file_pkg_pb_torana_proto_depIdxs = []int32{
 	1, // 0: torana.v1.Message.tool_calls:type_name -> torana.v1.ToolCall
 	0, // 1: torana.v1.ChatRequest.messages:type_name -> torana.v1.Message
 	2, // 2: torana.v1.ChatRequest.tools:type_name -> torana.v1.ToolDef
@@ -930,20 +999,21 @@ var file_torana_proto_depIdxs = []int32{
 	6, // 5: torana.v1.StreamEvent.tool_call_end:type_name -> torana.v1.ToolCallEnd
 	8, // 6: torana.v1.StreamEvent.usage:type_name -> torana.v1.StreamUsage
 	7, // 7: torana.v1.StreamEvent.error:type_name -> torana.v1.StreamError
-	8, // [8:8] is the sub-list for method output_type
-	8, // [8:8] is the sub-list for method input_type
-	8, // [8:8] is the sub-list for extension type_name
-	8, // [8:8] is the sub-list for extension extendee
-	0, // [0:8] is the sub-list for field type_name
+	9, // 8: torana.v1.StreamEventResult.events:type_name -> torana.v1.StreamEvent
+	9, // [9:9] is the sub-list for method output_type
+	9, // [9:9] is the sub-list for method input_type
+	9, // [9:9] is the sub-list for extension type_name
+	9, // [9:9] is the sub-list for extension extendee
+	0, // [0:9] is the sub-list for field type_name
 }
 
-func init() { file_torana_proto_init() }
-func file_torana_proto_init() {
-	if File_torana_proto != nil {
+func init() { file_pkg_pb_torana_proto_init() }
+func file_pkg_pb_torana_proto_init() {
+	if File_pkg_pb_torana_proto != nil {
 		return
 	}
-	file_torana_proto_msgTypes[3].OneofWrappers = []any{}
-	file_torana_proto_msgTypes[9].OneofWrappers = []any{
+	file_pkg_pb_torana_proto_msgTypes[3].OneofWrappers = []any{}
+	file_pkg_pb_torana_proto_msgTypes[9].OneofWrappers = []any{
 		(*StreamEvent_TextDelta)(nil),
 		(*StreamEvent_ThinkingDelta)(nil),
 		(*StreamEvent_ToolCallStart)(nil),
@@ -957,17 +1027,17 @@ func file_torana_proto_init() {
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
-			RawDescriptor: unsafe.Slice(unsafe.StringData(file_torana_proto_rawDesc), len(file_torana_proto_rawDesc)),
+			RawDescriptor: unsafe.Slice(unsafe.StringData(file_pkg_pb_torana_proto_rawDesc), len(file_pkg_pb_torana_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   10,
+			NumMessages:   11,
 			NumExtensions: 0,
 			NumServices:   0,
 		},
-		GoTypes:           file_torana_proto_goTypes,
-		DependencyIndexes: file_torana_proto_depIdxs,
-		MessageInfos:      file_torana_proto_msgTypes,
+		GoTypes:           file_pkg_pb_torana_proto_goTypes,
+		DependencyIndexes: file_pkg_pb_torana_proto_depIdxs,
+		MessageInfos:      file_pkg_pb_torana_proto_msgTypes,
 	}.Build()
-	File_torana_proto = out.File
-	file_torana_proto_goTypes = nil
-	file_torana_proto_depIdxs = nil
+	File_pkg_pb_torana_proto = out.File
+	file_pkg_pb_torana_proto_goTypes = nil
+	file_pkg_pb_torana_proto_depIdxs = nil
 }

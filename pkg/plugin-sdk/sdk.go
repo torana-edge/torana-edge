@@ -109,11 +109,34 @@ func run_after_response(reqID uint64, ptr, size uint32) uint64 {
 	return WriteResult(outBytes)
 }
 
-var streamChunkHandler func(ctx context.Context, chunk *pb.StreamEvent) (*pb.StreamEvent, error)
+var streamChunkHandler func(ctx context.Context, chunk *pb.StreamEvent) (*pb.StreamEventResult, error)
 
 // OnStreamChunk registers the handler for stream chunks.
-func OnStreamChunk(handler func(ctx context.Context, chunk *pb.StreamEvent) (*pb.StreamEvent, error)) {
+//
+// The handler returns a *pb.StreamEventResult describing what should replace
+// the input event: use Pass() (or nil) to forward it unchanged, Suppress()
+// to drop it, Replace(ev) to substitute it, or Emit(evs...) to fan out
+// multiple events in its place.
+func OnStreamChunk(handler func(ctx context.Context, chunk *pb.StreamEvent) (*pb.StreamEventResult, error)) {
 	streamChunkHandler = handler
+}
+
+// Pass forwards the input event unchanged (equivalent to returning nil).
+func Pass() *pb.StreamEventResult { return nil }
+
+// Suppress drops the input event from the stream.
+func Suppress() *pb.StreamEventResult {
+	return &pb.StreamEventResult{Handled: true}
+}
+
+// Replace substitutes the input event with ev.
+func Replace(ev *pb.StreamEvent) *pb.StreamEventResult {
+	return &pb.StreamEventResult{Handled: true, Events: []*pb.StreamEvent{ev}}
+}
+
+// Emit replaces the input event with the given events (fan-out).
+func Emit(evs ...*pb.StreamEvent) *pb.StreamEventResult {
+	return &pb.StreamEventResult{Handled: true, Events: evs}
 }
 
 //go:wasmexport run_on_stream_chunk
@@ -128,7 +151,7 @@ func run_on_stream_chunk(reqID uint64, ptr, size uint32) uint64 {
 	}
 
 	out, err := streamChunkHandler(context.WithValue(context.Background(), "reqID", reqID), &chunk)
-	if err != nil || out == nil {
+	if err != nil || out == nil || !out.Handled {
 		return 0
 	}
 
@@ -155,6 +178,28 @@ func Log(msg string, level int32) {
 	ptr := alloc(uint32(len(b)))
 	copy(ReadBytes(ptr, uint32(len(b))), b)
 	hostLog(level, ptr, uint32(len(b)))
+	dealloc(ptr, uint32(len(b)))
+}
+
+//go:wasmimport env emit_metric
+func hostEmitMetric(metricType int32, ptr uint32, length uint32, value float64)
+
+// Metric types accepted by EmitMetric (mirrors the host's OTel mapping).
+const (
+	MetricCounter   = 0
+	MetricHistogram = 1
+)
+
+// EmitMetric records a named metric via the host's OTel exporter.
+// Requires the env.emit_metric permission in the plugin manifest.
+func EmitMetric(name string, metricType int32, value float64) {
+	b := []byte(name)
+	if len(b) == 0 {
+		return
+	}
+	ptr := alloc(uint32(len(b)))
+	copy(ReadBytes(ptr, uint32(len(b))), b)
+	hostEmitMetric(metricType, ptr, uint32(len(b)), value)
 	dealloc(ptr, uint32(len(b)))
 }
 

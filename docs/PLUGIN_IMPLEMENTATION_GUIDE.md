@@ -8,8 +8,12 @@ Torana uses `wazero` for executing WASM plugins. For standard Go (not TinyGo), c
 
 **CRITICAL:** Always compile your standard Go plugins as a C-shared library to enable the reactor model.
 ```bash
-GOOS=wasip1 GOARCH=wasm go build -buildmode=c-shared -o plugin.wasm plugin.wasm.go
+GOOS=wasip1 GOARCH=wasm go build -buildmode=c-shared -o plugin.wasm .
 ```
+
+**Plugin binaries are build artifacts and are NEVER committed to git** (`*.wasm`
+is gitignored). Build all in-repo plugins with `make plugins`. Torana logs a
+warning at load time if `plugin.wasm` is older than the plugin's Go sources.
 
 ## 2. Protobuf Structure and Torana's Payload
 
@@ -54,7 +58,46 @@ func main() {
 }
 ```
 
-## 3. Wazero Engine Configuration
+## 3. Stream Hooks: Suppress, Replace, Fan-Out
+
+`run_on_stream_chunk` handlers return a `*pb.StreamEventResult` describing
+what replaces the input event. Use the SDK helpers:
+
+| Helper | Meaning |
+|---|---|
+| `sdk.Pass()` (or `nil`) | forward the event unchanged |
+| `sdk.Suppress()` | drop the event from the stream |
+| `sdk.Replace(ev)` | substitute the event |
+| `sdk.Emit(ev1, ev2, …)` | fan out multiple events in its place |
+
+The canonical buffering pattern — reassemble fragmented tool-call arguments,
+process them once, and emit a single complete delta:
+
+```go
+sdk.OnStreamChunk(func(ctx context.Context, chunk *pb.StreamEvent) (*pb.StreamEventResult, error) {
+	if td := chunk.GetToolCallDelta(); td != nil {
+		bufferFragment(td) // via env.meta_set — state is request-scoped
+		return sdk.Suppress(), nil
+	}
+	if te := chunk.GetToolCallEnd(); te != nil {
+		full := processArgs(assembleFragments(te.Index))
+		// Fragments were suppressed, so the complete args MUST be emitted
+		// here, followed by the ToolCallEnd itself.
+		return sdk.Emit(deltaEvent(te.Index, full), chunk), nil
+	}
+	return sdk.Pass(), nil
+})
+```
+
+**State scoping rules:**
+- `env.meta_set` / `env.meta_get` — plugin-private AND request-scoped. Other
+  plugins and other requests can never see these keys. Setting an empty
+  value deletes the key.
+- `env.cache_set` / `env.cache_get` — shared across plugins and requests
+  (with a TTL). Use for cross-request handoff, e.g. the compactor caches
+  intents by `tool_call_id` that the keyword_compactor reads next turn.
+
+## 4. Wazero Engine Configuration
 
 When setting up the host engine (in `internal/wasm/runtime.go`), note that any module performing timing operations (like garbage collection in standard Go) expects a system clock via WASI.
 

@@ -2,8 +2,8 @@
 //
 // It sits between a developer agent harness (e.g., oh-my-pi) and cloud
 // LLM providers. Requests arrive at /provider/<name>/<path> and are routed
-// to the matching upstream. A modular middleware pipeline (internal/engine)
-// intercepts every request/response pair.
+// to the matching upstream. A WASM plugin pipeline (internal/plugin +
+// internal/wasm) intercepts every request/response pair.
 package proxy
 
 import (
@@ -17,6 +17,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -32,6 +33,17 @@ import (
 
 const maxBodySize = 10 * 1024 * 1024 // 10 MB
 
+// allowedPluginHeaders is the only set of request headers ever exposed to
+// plugins (via ToranaMeta["_request_headers"]), and only when a loaded
+// plugin holds the env.request_headers permission.
+var allowedPluginHeaders = []string{
+	"Authorization",
+	"X-Api-Key",
+	"X-Torana-User",
+	"X-Torana-Team",
+	"X-Torana-Tenant",
+}
+
 // Config holds everything needed to start the proxy server.
 type Config struct {
 	// Port is the TCP port the proxy listens on (e.g. "8080").
@@ -45,7 +57,7 @@ type Config struct {
 	DefaultProvider string
 }
 
-// Server wraps the HTTP listener, the reverse proxy, and the middleware
+// Server wraps the HTTP listener, the reverse proxy, and the WASM plugin
 // pipeline that runs on every request/response cycle.
 type Server struct {
 	configMu   sync.RWMutex
@@ -56,6 +68,8 @@ type Server struct {
 	// WASM plugin pipeline (loaded when configured)
 	pluginPipeline atomic.Value // *plugin.PluginPipeline
 	rateLimiter    *RateLimiter
+	// watchCancel stops the plugin hot-reload watcher on Shutdown.
+	watchCancel context.CancelFunc
 }
 
 type routeContextKey struct{}
@@ -66,11 +80,34 @@ type RouteContext struct {
 	Identity     string
 }
 
+// reqCounter issues unique request IDs used to scope plugin state.
+var reqCounter atomic.Uint64
+
+type reqStateKey struct{}
+
+// reqState carries per-request data from the HTTP handler into the
+// Director, ModifyResponse, and WASM host calls (via context).
+type reqState struct {
+	ID uint64
+	// CallerAuth is the caller's Authorization header value, used as the
+	// fallback credential for offload completions. Host-side only — never
+	// exposed to plugins.
+	CallerAuth string
+}
+
+// reqStateFrom returns the request state stashed by the HTTP handler,
+// or a zero-value fallback for requests outside the handler (tests).
+func reqStateFrom(ctx context.Context) *reqState {
+	if rs, ok := ctx.Value(reqStateKey{}).(*reqState); ok {
+		return rs
+	}
+	return &reqState{}
+}
+
 // --- Construction -----------------------------------------------------------
 
-// New builds a Server and wires the middleware pipeline.
+// New builds a Server and wires the WASM plugin pipeline.
 func New(cfg Config) (*Server, error) {
-	log.Printf("DEBUG New: providers=%d plugins.dir=%q plugins.order=%v", len(cfg.Providers.Providers), cfg.Providers.Plugins.Dir, cfg.Providers.Plugins.Order)
 	if cfg.Port == "" {
 		cfg.Port = "8080"
 	}
@@ -78,7 +115,7 @@ func New(cfg Config) (*Server, error) {
 		cfg.Providers.Providers = map[string]provider.Provider{}
 	}
 
-	// --- middleware pipeline (now WASM) -----------------------------------
+	// --- stats tracker -----------------------------------------------------
 	statsTracker := metrics.NewStatsTracker()
 
 	s := &Server{
@@ -87,81 +124,34 @@ func New(cfg Config) (*Server, error) {
 		rateLimiter: NewRateLimiter(cfg.Providers.Limits.RPM, cfg.Providers.Limits.Concurrency),
 	}
 
+	// --- offload validation (fail fast on misconfiguration) ---------------
+	if err := cfg.Providers.Offload.Validate(cfg.Providers.Providers); err != nil {
+		return nil, fmt.Errorf("proxy: %w", err)
+	}
+	if env := cfg.Providers.Offload.APIKeyEnv; env != "" && os.Getenv(env) == "" {
+		log.Printf("warning: offload.api_key_env %q is set but the env var is empty — falling back to caller credentials", env)
+	}
+
 	// --- WASM plugin pipeline (optional) ---------------------------------
 	if cfg.Providers.Plugins.Dir != "" {
-		rt := wasm.NewRuntime(context.Background())
-		// Wire offload completion handler — makes HTTP POST to first
-		// available provider for cheap-model tool result summarization.
-		rt.OffloadFunc = func(ctx context.Context, payloadJSON string) (string, error) {
-			var p struct {
-				SystemPrompt string `json:"system_prompt"`
-				UserPrompt   string `json:"user_prompt"`
-				APIKey       string `json:"api_key"`
-				Model        string `json:"model"`
+		// newRuntime wires host callbacks; used at startup AND on every
+		// hot-reload — a bare runtime would silently lose offload/stats.
+		newRuntime := func() *wasm.Runtime {
+			rt := wasm.NewRuntime(context.Background())
+			// Offload completion handler (cheap-model tool result
+			// summarization), recording failures in /stats.
+			rt.OffloadFunc = func(ctx context.Context, payloadJSON string) (string, error) {
+				out, err := s.offloadCompletion(ctx, payloadJSON)
+				if err != nil {
+					s.stats.RecordOffloadFailure()
+				}
+				return out, err
 			}
-			if err := json.Unmarshal([]byte(payloadJSON), &p); err != nil {
-				return "", fmt.Errorf("offload: parse payload: %w", err)
-			}
-			model := p.Model
-			if model == "" {
-				model = "deepseek-v4-flash"
-			}
-			// Use first configured provider as offload endpoint.
-			var offloadURL string
-			for _, prov := range cfg.Providers.Providers {
-				offloadURL = prov.URL
-				break
-			}
-			if offloadURL == "" {
-				return "", fmt.Errorf("offload: no provider configured")
-			}
-			reqBody, _ := json.Marshal(map[string]any{
-				"model": model,
-				"messages": []map[string]any{
-					{"role": "system", "content": p.SystemPrompt},
-					{"role": "user", "content": p.UserPrompt},
-				},
-				"stream":      false,
-				"max_tokens":  1024,
-				"temperature": 0,
-			})
-			httpReq, err := http.NewRequestWithContext(ctx, "POST", offloadURL+"/v1/chat/completions", bytes.NewReader(reqBody))
-			if err != nil {
-				return "", err
-			}
-			httpReq.Header.Set("Content-Type", "application/json")
-			if p.APIKey != "" {
-				httpReq.Header.Set("Authorization", "Bearer "+p.APIKey)
-			}
-			client := &http.Client{Timeout: 30 * time.Second}
-			resp, err := client.Do(httpReq)
-			if err != nil {
-				return "", err
-			}
-			defer resp.Body.Close()
-			respBytes, err := io.ReadAll(resp.Body)
-			if err != nil {
-				return "", err
-			}
-			if resp.StatusCode != 200 {
-				return "", fmt.Errorf("offload: upstream returned %d: %s", resp.StatusCode, string(respBytes[:min(len(respBytes), 200)]))
-			}
-			var result struct {
-				Choices []struct {
-					Message struct {
-						Content string `json:"content"`
-					} `json:"message"`
-				} `json:"choices"`
-			}
-			if err := json.Unmarshal(respBytes, &result); err != nil {
-				return "", fmt.Errorf("offload: parse response: %w", err)
-			}
-			if len(result.Choices) == 0 || result.Choices[0].Message.Content == "" {
-				return "", fmt.Errorf("offload: empty response")
-			}
-			return result.Choices[0].Message.Content, nil
+			// Plugins report compaction savings via torana_record_savings.
+			rt.SavingsFunc = s.stats.RecordCompaction
+			return rt
 		}
-		pp, err := plugin.NewPipeline(rt, plugin.PluginConfig{
+		pp, err := plugin.NewPipeline(newRuntime(), plugin.PluginConfig{
 			Dir:    cfg.Providers.Plugins.Dir,
 			Order:  cfg.Providers.Plugins.Order,
 			Config: cfg.Providers.Plugins.Config,
@@ -170,8 +160,16 @@ func New(cfg Config) (*Server, error) {
 			log.Printf("plugin pipeline: %v", err)
 		} else {
 			s.pluginPipeline.Store(pp)
-			log.Printf("plugin pipeline: %d plugins loaded", len(cfg.Providers.Plugins.Order))
-			go plugin.WatchPlugins(context.Background(), s.config.Providers.Plugins.Dir, plugin.PluginConfig{Dir: s.config.Providers.Plugins.Dir, Order: s.config.Providers.Plugins.Order, Config: s.config.Providers.Plugins.Config}, func(newPP *plugin.PluginPipeline) {
+			log.Printf("plugin pipeline: %d plugins loaded", pp.Len())
+			watchCtx, watchCancel := context.WithCancel(context.Background())
+			s.watchCancel = watchCancel
+			// configFn reads the live config so plugin-config hot-reloads
+			// apply on the next plugin reload.
+			configFn := func() plugin.PluginConfig {
+				p := s.GetConfig().Providers.Plugins
+				return plugin.PluginConfig{Dir: p.Dir, Order: p.Order, Config: p.Config}
+			}
+			go plugin.WatchPlugins(watchCtx, cfg.Providers.Plugins.Dir, configFn, newRuntime, func(newPP *plugin.PluginPipeline) {
 				old := s.pluginPipeline.Swap(newPP)
 				if old != nil {
 					go old.(*plugin.PluginPipeline).DrainAndClose()
@@ -259,27 +257,40 @@ func New(cfg Config) (*Server, error) {
 				return
 			}
 
-			// Inject headers into ToranaMeta for plugins (e.g. auth).
 			if chat.ToranaMeta == nil {
 				chat.ToranaMeta = make(map[string]any)
 			}
-			headers := make(map[string]any)
-			for k, v := range req.Header {
-				if len(v) > 0 {
-					headers[k] = v[0]
-				}
-			}
-			chat.ToranaMeta["_request_headers"] = headers
 
-			// --- WASM plugin pipeline (runs before native hooks) ----------
+			// --- WASM plugin pipeline --------------------------------------
 
 			if pp := s.pluginPipeline.Load(); pp != nil {
 				pl := pp.(*plugin.PluginPipeline)
-				modified, err := pl.RunBeforeRequest(req.Context(), 0, chat)
+
+				// Credential-bearing headers are exposed to plugins only
+				// when a loaded plugin declares the env.request_headers
+				// permission, and only from an allowlist — plugins must
+				// never see arbitrary caller headers by default.
+				if pl.HasGrant("env.request_headers") {
+					headers := make(map[string]any)
+					for _, k := range allowedPluginHeaders {
+						if v := req.Header.Get(k); v != "" {
+							headers[k] = v
+						}
+					}
+					chat.ToranaMeta["_request_headers"] = headers
+				}
+
+				modified, err := pl.RunBeforeRequest(req.Context(), reqStateFrom(req.Context()).ID, chat)
 				if err != nil {
 					log.Printf("plugin pipeline error: %v", err)
 				} else if modified != nil {
 					chat = modified
+				}
+				// Defense in depth: never let credentials linger in meta
+				// past the request hook (format adapters don't serialize
+				// ToranaMeta, but response hooks receive it).
+				if chat.ToranaMeta != nil {
+					delete(chat.ToranaMeta, "_request_headers")
 				}
 			}
 
@@ -332,28 +343,26 @@ func New(cfg Config) (*Server, error) {
 
 				events := fmt.Stream.ParseStream(resp.Body)
 
-				// Hook WASM pipeline into the stream
+				// Hook WASM pipeline into the stream. Plugins may suppress,
+				// replace, or fan out each event (e.g. buffer argument
+				// fragments and emit one complete ToolCallDelta before
+				// ToolCallEnd).
 				if pp := s.pluginPipeline.Load(); pp != nil {
 					pl := pp.(*plugin.PluginPipeline)
+					reqID := reqStateFrom(resp.Request.Context()).ID
 					out := make(chan engine.StreamEvent)
 					in := events
 					go func() {
 						defer close(out)
 						for event := range in {
-							// Call on_stream_chunk
-							modified, err := pl.RunOnStreamChunk(resp.Request.Context(), 0, &event)
+							outEvents, err := pl.RunOnStreamChunk(resp.Request.Context(), reqID, &event)
 							if err != nil {
 								log.Printf("plugin stream error: %v", err)
 								out <- event
-							} else if modified != nil {
-								out <- *modified
-								// Always forward the original ToolCallEnd after a plugin's
-								// modification so the client receives the end-of-tool-call signal.
-								if event.ToolCallEnd != nil {
-									out <- event
-								}
-							} else {
-								out <- event
+								continue
+							}
+							for _, ev := range outEvents {
+								out <- ev
 							}
 						}
 					}()
@@ -365,6 +374,18 @@ func New(cfg Config) (*Server, error) {
 					defer pw.Close()
 					if err := fmt.Stream.SerializeStream(pw, events); err != nil {
 						log.Printf("format %s serialize error: %v", fmt.Name, err)
+					}
+					// Observational run_after_response for streaming
+					// responses (metrics/audit plugins). Mutations are not
+					// applied — the stream has already been written.
+					if pp := s.pluginPipeline.Load(); pp != nil {
+						ctx := resp.Request.Context()
+						if chat, _ := ctx.Value(chatCtxKey{}).(*engine.ChatRequest); chat != nil {
+							pl := pp.(*plugin.PluginPipeline)
+							if _, err := pl.RunAfterResponse(ctx, reqStateFrom(ctx).ID, chat); err != nil {
+								log.Printf("plugin run_after_response (stream): %v", err)
+							}
+						}
 					}
 				}()
 				resp.Body = pr
@@ -385,20 +406,25 @@ func New(cfg Config) (*Server, error) {
 					return fmt.Errorf("response body exceeds max size")
 				}
 
-				// Route JSON response through WASM response hooks.
+				// Route the JSON response through the WASM response hooks
+				// (run_on_stream_chunk over synthetic events, then
+				// run_after_response) for every provider format.
 				if pp := s.pluginPipeline.Load(); pp != nil {
-					pl := pp.(*plugin.PluginPipeline)
-					modified, modErr := runWASMOnJSONResponse(resp, pl, bodyBytes)
-					if modErr != nil {
-						log.Printf("wasm json response hook error: %v", modErr)
-					} else {
-						bodyBytes = modified
+					ctx := resp.Request.Context()
+					if f, _ := ctx.Value(formatCtxKey{}).(*format.Format); f != nil {
+						pl := pp.(*plugin.PluginPipeline)
+						chat, _ := ctx.Value(chatCtxKey{}).(*engine.ChatRequest)
+						modified, modErr := runJSONResponseHooks(ctx, pl, reqStateFrom(ctx).ID, f.Name, chat, bodyBytes)
+						if modErr != nil {
+							log.Printf("wasm json response hook error: %v", modErr)
+						} else {
+							bodyBytes = modified
+						}
 					}
 				}
- 				processed := bodyBytes
 
-				resp.Body = io.NopCloser(bytes.NewReader(processed))
-				resp.ContentLength = int64(len(processed))
+				resp.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+				resp.ContentLength = int64(len(bodyBytes))
 				return nil
 			}
 
@@ -425,6 +451,22 @@ func New(cfg Config) (*Server, error) {
 			if rec := recover(); rec != nil {
 				log.Printf("panic in request handler: %v", rec)
 				http.Error(w, "internal server error", http.StatusInternalServerError)
+			}
+		}()
+
+		// Assign a request ID scoping all plugin meta state, and stash
+		// per-request data for the Director/ModifyResponse/offload path.
+		rs := &reqState{
+			ID:         reqCounter.Add(1),
+			CallerAuth: strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "),
+		}
+		r = r.WithContext(context.WithValue(r.Context(), reqStateKey{}, rs))
+		// Drop request-scoped plugin state when the request completes.
+		// Safe to defer here: ReverseProxy.ServeHTTP only returns after the
+		// response body (including the SSE pipe) is fully copied.
+		defer func() {
+			if pp := s.pluginPipeline.Load(); pp != nil {
+				pp.(*plugin.PluginPipeline).EndRequest(rs.ID)
 			}
 		}()
 		// If no provider matches and no default, reject.
@@ -512,6 +554,10 @@ func (s *Server) Serve(ln net.Listener) error {
 }
 
 func (s *Server) Shutdown(ctx context.Context) error {
+	if s.watchCancel != nil {
+		s.watchCancel()
+	}
+	s.rateLimiter.Close()
 	if pp := s.pluginPipeline.Load(); pp != nil {
 		pp.(*plugin.PluginPipeline).DrainAndClose()
 	}
@@ -521,108 +567,6 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	return nil
 }
 
-
-// runWASMOnJSONResponse routes a non-streaming JSON response body through
-// the WASM plugin pipeline. It parses tool calls from the JSON, creates
-// synthetic StreamEvents, runs them through RunOnStreamChunk, collects
-// modifications, and calls RunAfterResponse for post-processing.
-func runWASMOnJSONResponse(resp *http.Response, pl *plugin.PluginPipeline, bodyBytes []byte) ([]byte, error) {
-	// Parse the JSON response body to find tool calls.
-	var parsed struct {
-		Choices []struct {
-			Message struct {
-				Role      string `json:"role"`
-				Content   string `json:"content,omitempty"`
-				ToolCalls []struct {
-					ID       string `json:"id"`
-					Function struct {
-						Name      string `json:"name"`
-						Arguments string `json:"arguments"`
-					} `json:"function"`
-				} `json:"tool_calls,omitempty"`
-			} `json:"message"`
-		} `json:"choices"`
-	}
-	if err := json.Unmarshal(bodyBytes, &parsed); err != nil {
-		return bodyBytes, nil // not our format, pass through
-	}
-
-	// Check if there are tool calls to process.
-	hasToolCalls := false
-	for _, c := range parsed.Choices {
-		if len(c.Message.ToolCalls) > 0 {
-			hasToolCalls = true
-			break
-		}
-	}
-	if !hasToolCalls {
-		return bodyBytes, nil
-	}
-
-	ctx := resp.Request.Context()
-
-	// Build synthetic StreamEvents and run through on_stream_chunk hooks.
-	modified := false
-	for ci := range parsed.Choices {
-		for ti := range parsed.Choices[ci].Message.ToolCalls {
-			tc := &parsed.Choices[ci].Message.ToolCalls[ti]
-
-			// ToolCallStart
-			startEv := engine.StreamEvent{
-				ToolCallStart: &engine.ToolCallStart{
-					Index: ti,
-					ID:    tc.ID,
-					Name:  tc.Function.Name,
-				},
-			}
-			modStart, err := pl.RunOnStreamChunk(ctx, 0, &startEv)
-			if err != nil {
-				return bodyBytes, err
-			}
-			// Track name changes
-			if modStart != nil && modStart.ToolCallStart != nil {
-				tc.Function.Name = modStart.ToolCallStart.Name
-			}
-
-			// ToolCallDelta (full args)
-			if tc.Function.Arguments != "" {
-				deltaEv := engine.StreamEvent{
-					ToolCallDelta: &engine.ToolCallDelta{
-						Index:          ti,
-						ArgumentsDelta: tc.Function.Arguments,
-					},
-				}
-				modDelta, err := pl.RunOnStreamChunk(ctx, 0, &deltaEv)
-				if err != nil {
-					return bodyBytes, err
-				}
-				if modDelta != nil && modDelta.ToolCallDelta != nil && modDelta.ToolCallDelta.ArgumentsDelta != tc.Function.Arguments {
-					tc.Function.Arguments = modDelta.ToolCallDelta.ArgumentsDelta
-					modified = true
-				}
-			}
-
-			// ToolCallEnd
-			endEv := engine.StreamEvent{
-				ToolCallEnd: &engine.ToolCallEnd{Index: ti},
-			}
-			if _, err := pl.RunOnStreamChunk(ctx, 0, &endEv); err != nil {
-				return bodyBytes, err
-			}
-		}
-	}
-
-	if !modified {
-		return bodyBytes, nil
-	}
-
-	out, err := json.Marshal(parsed)
-	if err != nil {
-		return bodyBytes, err
-	}
-	return out, nil
-}
-// joinURLPath concatenates a base path with a relative path, preserving
 // double slashes where appropriate (mirrors httputil.singleJoiningSlash).
 func joinURLPath(base, rel string) string {
 	bs := strings.TrimSuffix(base, "/")

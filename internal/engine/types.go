@@ -5,10 +5,10 @@ package engine
 // ChatRequest is the canonical representation of a chat completion request
 // regardless of provider wire format.
 type ChatRequest struct {
-	Model         string     // model name as sent by client (e.g. "deepseek-v4-pro")
-	Messages      []Message
-	Tools         []ToolDef
-	Stream        bool
+	Model              string // model name as sent by client (e.g. "deepseek-v4-pro")
+	Messages           []Message
+	Tools              []ToolDef
+	Stream             bool
 	MaxTokens          *int
 	Temperature        *float64
 	TopP               *float64
@@ -69,19 +69,19 @@ type ToolDef struct {
 // Exactly one field is non-nil per event. Consumers switch on the non-nil field.
 type StreamEvent struct {
 	// Exactly one field is non-nil per event.
-	TextDelta     *string         // text content fragment
-	ThinkingDelta *string         // thinking/reasoning text fragment
-	ToolCallStart *ToolCallStart  // new tool call beginning
-	ToolCallDelta *ToolCallDelta  // arguments JSON fragment (string)
-	ToolCallEnd   *ToolCallEnd    // tool call arguments complete
-	FinishReason  string          // "stop", "tool_calls", "length", "error"
-	Usage         *StreamUsage    // token usage from stream (OpenAI final chunk, Anthropic usage event)
+	TextDelta     *string        // text content fragment
+	ThinkingDelta *string        // thinking/reasoning text fragment
+	ToolCallStart *ToolCallStart // new tool call beginning
+	ToolCallDelta *ToolCallDelta // arguments JSON fragment (string)
+	ToolCallEnd   *ToolCallEnd   // tool call arguments complete
+	FinishReason  string         // "stop", "tool_calls", "length", "error"
+	Usage         *StreamUsage   // token usage from stream (OpenAI final chunk, Anthropic usage event)
 	Error         *StreamError
 }
 
 // ToolCallStart signals the beginning of a tool call in the stream.
 type ToolCallStart struct {
-	Index int    // 0-based within this turn (OpenAI uses index for parallel calls)
+	Index int // 0-based within this turn (OpenAI uses index for parallel calls)
 	ID    string
 	Name  string
 }

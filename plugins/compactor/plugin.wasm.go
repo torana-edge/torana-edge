@@ -41,47 +41,69 @@ func init() {
 	})
 
 	// ── Response side: extract intent ───────────────────────────────
-	sdk.OnStreamChunk(func(ctx context.Context, chunk *pb.StreamEvent) (*pb.StreamEvent, error) {
+	//
+	// Argument deltas are buffered and suppressed; at ToolCallEnd the
+	// assembled arguments (intent extracted, "i" stripped when Torana
+	// injected it) are emitted as one complete ToolCallDelta followed
+	// by the ToolCallEnd.
+	sdk.OnStreamChunk(func(ctx context.Context, chunk *pb.StreamEvent) (*pb.StreamEventResult, error) {
 		// Track tool call by index.
 		if ts := chunk.GetToolCallStart(); ts != nil {
 			sdk.HostCall("env.meta_set", fmt.Sprintf(`{"key":"tool:%d","value":%q}`, ts.Index, ts.Id))
 			sdk.HostCall("env.meta_set", fmt.Sprintf(`{"key":"name:%d","value":%q}`, ts.Index, ts.Name))
-			return nil, nil
+			return sdk.Pass(), nil
 		}
 
-		// Buffer tool call argument fragments.
+		// Buffer and suppress tool call argument fragments.
 		if td := chunk.GetToolCallDelta(); td != nil {
 			toolID, _ := sdk.HostCall("env.meta_get", fmt.Sprintf("tool:%d", td.Index))
 			if toolID == "" {
-				return nil, nil
+				return sdk.Pass(), nil
 			}
 			key := "frag:" + toolID
 			prev, _ := sdk.HostCall("env.meta_get", key)
 			sdk.HostCall("env.meta_set", fmt.Sprintf(`{"key":"%s","value":%q}`, key, prev+td.ArgumentsDelta))
-			return nil, nil
+			return sdk.Suppress(), nil
 		}
 
-		// On ToolCallEnd: extract intent, optionally strip "i".
+		// On ToolCallEnd: extract intent, optionally strip "i", emit args.
 		if te := chunk.GetToolCallEnd(); te != nil {
 			toolID, _ := sdk.HostCall("env.meta_get", fmt.Sprintf("tool:%d", te.Index))
 			toolName, _ := sdk.HostCall("env.meta_get", fmt.Sprintf("name:%d", te.Index))
 			if toolID == "" {
-				return nil, nil
+				return sdk.Pass(), nil
 			}
 			key := "frag:" + toolID
 			fullArgs, _ := sdk.HostCall("env.meta_get", key)
-			// Clean up.
+			// Clean up (empty value deletes the key).
 			sdk.HostCall("env.meta_set", fmt.Sprintf(`{"key":"%s","value":""}`, key))
 			sdk.HostCall("env.meta_set", fmt.Sprintf(`{"key":"tool:%d","value":""}`, te.Index))
 			sdk.HostCall("env.meta_set", fmt.Sprintf(`{"key":"name:%d","value":""}`, te.Index))
 
-			if fullArgs == "" || !strings.HasPrefix(fullArgs, "{") {
-				return nil, nil
+			if fullArgs == "" {
+				// No fragments were buffered — nothing to re-emit.
+				return sdk.Pass(), nil
+			}
+
+			emitArgs := func(args string) *pb.StreamEventResult {
+				// The fragments were suppressed, so the complete arguments
+				// MUST be emitted here even when unchanged.
+				return sdk.Emit(
+					&pb.StreamEvent{
+						Event: &pb.StreamEvent_ToolCallDelta{
+							ToolCallDelta: &pb.ToolCallDelta{
+								Index:          te.Index,
+								ArgumentsDelta: args,
+							},
+						},
+					},
+					chunk,
+				)
 			}
 
 			var args map[string]any
-			if err := json.Unmarshal([]byte(fullArgs), &args); err != nil {
-				return nil, nil
+			if !strings.HasPrefix(fullArgs, "{") || json.Unmarshal([]byte(fullArgs), &args) != nil {
+				return emitArgs(fullArgs), nil
 			}
 
 			// Extract and cache intent.
@@ -97,21 +119,14 @@ func init() {
 				}
 			}
 
-			modifiedJSON, _ := json.Marshal(args)
-			if string(modifiedJSON) != fullArgs {
-				return &pb.StreamEvent{
-					Event: &pb.StreamEvent_ToolCallDelta{
-						ToolCallDelta: &pb.ToolCallDelta{
-							Index:          te.Index,
-							ArgumentsDelta: string(modifiedJSON),
-						},
-					},
-				}, nil
+			modifiedJSON, err := json.Marshal(args)
+			if err != nil {
+				return emitArgs(fullArgs), nil
 			}
-			return nil, nil
+			return emitArgs(string(modifiedJSON)), nil
 		}
 
-		return nil, nil
+		return sdk.Pass(), nil
 	})
 }
 
@@ -231,6 +246,7 @@ func compactToolResults(ctx context.Context, req *pb.ChatRequest) bool {
 		// Compaction cache check.
 		cached, _ := sdk.HostCall("env.cache_get", compactionCache+":"+msg.ToolCallId)
 		if cached != "" {
+			recordSavings(len(msg.Content), len(cached))
 			msg.Content = cached
 			modified = true
 			continue
@@ -262,6 +278,7 @@ func compactToolResults(ctx context.Context, req *pb.ChatRequest) bool {
 			continue
 		}
 
+		recordSavings(len(msg.Content), len(offloadResp.Completion))
 		msg.Content = offloadResp.Completion
 		modified = true
 
@@ -269,6 +286,12 @@ func compactToolResults(ctx context.Context, req *pb.ChatRequest) bool {
 		sdk.HostCall("env.cache_set", fmt.Sprintf(`{"key":"%s:%s","value":%q}`, compactionCache, msg.ToolCallId, offloadResp.Completion))
 	}
 	return modified
+}
+
+// recordSavings reports compaction byte savings to /stats via the host.
+func recordSavings(originalBytes, finalBytes int) {
+	sdk.HostCall("torana_record_savings",
+		fmt.Sprintf(`{"original_bytes":%d,"final_bytes":%d}`, originalBytes, finalBytes))
 }
 
 func extractConversationContext(msgs []*pb.Message, excludeToolCallID string) string {
