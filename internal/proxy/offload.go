@@ -59,6 +59,12 @@ func (s *Server) offloadCompletion(ctx context.Context, payloadJSON string) (str
 		apiKey = reqStateFrom(ctx).CallerAuth
 	}
 
+	// max_tokens must cover BOTH reasoning and content: DeepSeek-style
+	// reasoning models spend this budget on reasoning_content first, so a
+	// tight cap (1024) leaves reasoning-heavy summarizations with an empty
+	// content field and finish_reason "length". 4096 gives content room to
+	// land after the reasoning; the offload still degrades gracefully if the
+	// budget is somehow exhausted.
 	reqBody, _ := json.Marshal(map[string]any{
 		"model": model,
 		"messages": []map[string]any{
@@ -66,7 +72,7 @@ func (s *Server) offloadCompletion(ctx context.Context, payloadJSON string) (str
 			{"role": "user", "content": p.UserPrompt},
 		},
 		"stream":      false,
-		"max_tokens":  1024,
+		"max_tokens":  4096,
 		"temperature": 0,
 	})
 	httpReq, err := http.NewRequestWithContext(ctx, "POST", prov.URL+"/v1/chat/completions", bytes.NewReader(reqBody))
@@ -93,7 +99,8 @@ func (s *Server) offloadCompletion(ctx context.Context, payloadJSON string) (str
 	}
 	var result struct {
 		Choices []struct {
-			Message struct {
+			FinishReason string `json:"finish_reason"`
+			Message      struct {
 				Content string `json:"content"`
 			} `json:"message"`
 		} `json:"choices"`
@@ -101,8 +108,14 @@ func (s *Server) offloadCompletion(ctx context.Context, payloadJSON string) (str
 	if err := json.Unmarshal(respBytes, &result); err != nil {
 		return "", fmt.Errorf("offload: parse response: %w", err)
 	}
-	if len(result.Choices) == 0 || result.Choices[0].Message.Content == "" {
-		return "", fmt.Errorf("offload: empty response")
+	if len(result.Choices) == 0 {
+		return "", fmt.Errorf("offload: no choices in response")
+	}
+	if result.Choices[0].Message.Content == "" {
+		// Surface finish_reason so budget exhaustion (reasoning consumed the
+		// whole max_tokens → finish_reason "length") is distinguishable from a
+		// genuinely empty extraction in the logs/stats.
+		return "", fmt.Errorf("offload: empty response (finish_reason=%q)", result.Choices[0].FinishReason)
 	}
 	return result.Choices[0].Message.Content, nil
 }

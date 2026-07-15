@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/torana-edge/torana-edge/internal/provider"
@@ -79,6 +80,59 @@ func TestOffloadDedicatedKeyWins(t *testing.T) {
 	ctx := context.WithValue(context.Background(), reqStateKey{}, &reqState{ID: 1, CallerAuth: "caller-key"})
 	if _, err := s.offloadCompletion(ctx, `{"system_prompt":"sum","user_prompt":"text"}`); err != nil {
 		t.Fatalf("offloadCompletion: %v", err)
+	}
+}
+
+// TestOffloadRequestBudget: the offload request must reserve enough token
+// budget to cover a reasoning model's reasoning_content plus the summary,
+// otherwise reasoning-heavy inputs come back with empty content
+// (finish_reason "length"). Regression guard for the dogfood-observed
+// "offload: empty response" failures against deepseek-v4-flash.
+func TestOffloadRequestBudget(t *testing.T) {
+	var gotMaxTokens float64
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req map[string]any
+		json.NewDecoder(r.Body).Decode(&req)
+		gotMaxTokens, _ = req["max_tokens"].(float64)
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"choices":[{"message":{"content":"summary"}}]}`))
+	}))
+	defer upstream.Close()
+
+	s, err := New(Config{Providers: offloadConfig(upstream.URL)})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	ctx := context.WithValue(context.Background(), reqStateKey{}, &reqState{ID: 1, CallerAuth: "k"})
+	if _, err := s.offloadCompletion(ctx, `{"system_prompt":"sum","user_prompt":"text"}`); err != nil {
+		t.Fatalf("offloadCompletion: %v", err)
+	}
+	if gotMaxTokens < 4096 {
+		t.Fatalf("offload max_tokens = %v, want >= 4096 (reasoning budget headroom)", gotMaxTokens)
+	}
+}
+
+// TestOffloadEmptyContentSurfacesFinishReason: an empty completion must
+// report the finish_reason so budget-exhaustion ("length") is distinguishable
+// from other empties in logs/stats.
+func TestOffloadEmptyContentSurfacesFinishReason(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"choices":[{"finish_reason":"length","message":{"content":""}}]}`))
+	}))
+	defer upstream.Close()
+
+	s, err := New(Config{Providers: offloadConfig(upstream.URL)})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	ctx := context.WithValue(context.Background(), reqStateKey{}, &reqState{ID: 1, CallerAuth: "k"})
+	_, err = s.offloadCompletion(ctx, `{"system_prompt":"sum","user_prompt":"text"}`)
+	if err == nil {
+		t.Fatal("expected error for empty completion")
+	}
+	if !strings.Contains(err.Error(), "length") {
+		t.Fatalf("error %q should surface finish_reason \"length\"", err)
 	}
 }
 
