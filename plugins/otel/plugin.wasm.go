@@ -11,12 +11,13 @@ func main() {}
 
 func init() {
 	sdk.OnBeforeRequest(func(ctx context.Context, req *pb.ChatRequest) (*pb.ChatRequest, error) {
-		sdk.Log("torana_requests_total model="+req.Model, 1)
+		sdk.EmitMetric("torana_requests_total", sdk.MetricCounter, 1)
+		sdk.EmitMetric("torana_request_messages", sdk.MetricHistogram, float64(len(req.Messages)))
 		return nil, nil
 	})
 
 	sdk.OnAfterResponse(func(ctx context.Context, resp *pb.ChatRequest) (*pb.ChatRequest, error) {
-		sdk.Log("torana_responses_total model="+resp.Model, 1)
+		sdk.EmitMetric("torana_responses_total", sdk.MetricCounter, 1)
 		return nil, nil
 	})
 }

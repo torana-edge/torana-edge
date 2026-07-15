@@ -90,3 +90,20 @@ message StreamEvent {
     StreamError error = 8;
   }
 }
+
+// Result of a run_on_stream_chunk hook invocation.
+//
+// A zero-length hook return means "not handled" — the input event passes
+// through unchanged. A non-empty StreamEventResult with handled=true
+// replaces the input event with `events`:
+//   events empty  → suppress the input event
+//   one event     → replace it
+//   multiple      → fan-out (e.g. [ToolCallDelta(full args), ToolCallEnd])
+//
+// The explicit `handled` flag exists because an all-defaults protobuf
+// message marshals to zero bytes — without it, "suppress" would be
+// indistinguishable from "passthrough" on the wire.
+message StreamEventResult {
+  bool handled = 1;
+  repeated StreamEvent events = 2;
+}

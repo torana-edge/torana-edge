@@ -12,6 +12,7 @@
     {"name": "env.meta_get", "description": "Read mutation registry and fragment buffers"},
     {"name": "env.meta_set", "description": "Write mutation registry and fragment buffers"},
     {"name": "env.host_call.torana_offload_completion", "description": "Delegate to cheap model for summarization"},
+    {"name": "env.host_call.torana_record_savings", "description": "Report compaction byte savings to /stats"},
     {"name": "env.log", "description": "Diagnostic logging"}
   ]
 }

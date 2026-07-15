@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"sort"
 	"strings"
 
 	"github.com/torana-edge/torana-edge/internal/engine"
@@ -16,16 +17,16 @@ type StreamAdapter struct{}
 // --- wire types for parse ---------------------------------------------------
 
 type sseChunk struct {
-	ID      string         `json:"id"`
-	Object  string         `json:"object"`
-	Choices []sseChoice    `json:"choices"`
-	Error   *sseError      `json:"error,omitempty"`
+	ID      string      `json:"id"`
+	Object  string      `json:"object"`
+	Choices []sseChoice `json:"choices"`
+	Error   *sseError   `json:"error,omitempty"`
 }
 
 type sseChoice struct {
-	Index        int        `json:"index"`
-	Delta        sseDelta   `json:"delta"`
-	FinishReason *string    `json:"finish_reason"`
+	Index        int      `json:"index"`
+	Delta        sseDelta `json:"delta"`
+	FinishReason *string  `json:"finish_reason"`
 }
 
 type sseDelta struct {
@@ -36,10 +37,10 @@ type sseDelta struct {
 }
 
 type sseToolCall struct {
-	Index    int           `json:"index"`
-	ID       string        `json:"id,omitempty"`
-	Type     string        `json:"type,omitempty"`
-	Function sseToolFunc   `json:"function,omitempty"`
+	Index    int         `json:"index"`
+	ID       string      `json:"id,omitempty"`
+	Type     string      `json:"type,omitempty"`
+	Function sseToolFunc `json:"function,omitempty"`
 }
 
 type sseToolFunc struct {
@@ -174,9 +175,16 @@ func (s *StreamAdapter) parseStream(body io.Reader, ch chan<- engine.StreamEvent
 			if choice.FinishReason != nil && *choice.FinishReason != "" {
 				fr := *choice.FinishReason
 
-				// If tool_calls, emit ToolCallEnd for every started index first.
+				// If tool_calls, emit ToolCallEnd for every started index
+				// first, in ascending order — map iteration order is
+				// nondeterministic.
 				if fr == "tool_calls" {
+					indexes := make([]int, 0, len(toolCallStarted))
 					for idx := range toolCallStarted {
+						indexes = append(indexes, idx)
+					}
+					sort.Ints(indexes)
+					for _, idx := range indexes {
 						ch <- engine.StreamEvent{
 							ToolCallEnd: &engine.ToolCallEnd{
 								Index: idx,
@@ -249,8 +257,8 @@ func serializeEvent(evt engine.StreamEvent) (string, error) {
 
 func textDeltaSSE(text string) string {
 	chunk := map[string]any{
-		"id":      streamID,
-		"object":  "chat.completion.chunk",
+		"id":     streamID,
+		"object": "chat.completion.chunk",
 		"choices": []map[string]any{
 			{
 				"index": 0,
@@ -266,8 +274,8 @@ func textDeltaSSE(text string) string {
 
 func thinkingDeltaSSE(text string) string {
 	chunk := map[string]any{
-		"id":      streamID,
-		"object":  "chat.completion.chunk",
+		"id":     streamID,
+		"object": "chat.completion.chunk",
 		"choices": []map[string]any{
 			{
 				"index": 0,
@@ -283,8 +291,8 @@ func thinkingDeltaSSE(text string) string {
 
 func toolCallStartSSE(tc *engine.ToolCallStart) string {
 	chunk := map[string]any{
-		"id":      streamID,
-		"object":  "chat.completion.chunk",
+		"id":     streamID,
+		"object": "chat.completion.chunk",
 		"choices": []map[string]any{
 			{
 				"index": 0,
@@ -310,8 +318,8 @@ func toolCallStartSSE(tc *engine.ToolCallStart) string {
 
 func toolCallDeltaSSE(tc *engine.ToolCallDelta) string {
 	chunk := map[string]any{
-		"id":      streamID,
-		"object":  "chat.completion.chunk",
+		"id":     streamID,
+		"object": "chat.completion.chunk",
 		"choices": []map[string]any{
 			{
 				"index": 0,
@@ -334,8 +342,8 @@ func toolCallDeltaSSE(tc *engine.ToolCallDelta) string {
 
 func finishReasonSSE(reason string) string {
 	chunk := map[string]any{
-		"id":      streamID,
-		"object":  "chat.completion.chunk",
+		"id":     streamID,
+		"object": "chat.completion.chunk",
 		"choices": []map[string]any{
 			{
 				"index":         0,

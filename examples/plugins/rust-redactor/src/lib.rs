@@ -12,13 +12,16 @@ pub extern "C" fn dealloc(ptr: u32, size: u32) {
     unsafe { dealloc(ptr as *mut u8, layout) }
 }
 
+// run_before_request receives a serialized torana.v1.ChatRequest protobuf.
+// Return 0 to pass the request through unchanged, or pack a pointer/length
+// to a re-serialized ChatRequest as ((ptr as u64) << 32) | len.
+//
+// A real plugin would decode the payload with `prost` (see pkg/pb/torana.proto
+// for the schema). This example validates the polyglot ABI surface only:
+// alloc/dealloc, the 3-argument hook signature, and the u64 return packing.
 #[no_mangle]
-pub extern "C" fn on_chat_request(ptr: u32, size: u32) -> u64 {
-    let input = unsafe { std::slice::from_raw_parts(ptr as *const u8, size as usize) };
-    let mut value: serde_json::Value = serde_json::from_slice(input).unwrap_or_default();
-    value["handled_by"] = serde_json::json!("rust-redactor.wasm");
-    let output = serde_json::to_vec(&value).unwrap_or_default();
-    let out_ptr = alloc(output.len() as u32);
-    unsafe { std::ptr::copy_nonoverlapping(output.as_ptr(), out_ptr as *mut u8, output.len()) }
-    ((out_ptr as u64) << 32) | (output.len() as u64)
+pub extern "C" fn run_before_request(_req_id: u64, ptr: u32, size: u32) -> u64 {
+    let _input = unsafe { std::slice::from_raw_parts(ptr as *const u8, size as usize) };
+    // Pass-through.
+    0
 }

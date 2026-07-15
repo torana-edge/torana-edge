@@ -12,6 +12,10 @@
     {
       "name": "env.host_call.verify_virtual_key",
       "description": "verify torana virtual keys"
+    },
+    {
+      "name": "env.request_headers",
+      "description": "read allowlisted auth headers (Authorization, X-Api-Key, X-Torana-*)"
     }
   ]
 }

@@ -47,6 +47,8 @@ func init() {
 		var isVirtualKey bool
 		var isJWT bool
 
+		// Headers arrive canonicalized (net/http MIME form) via the
+		// env.request_headers grant allowlist.
 		if authHeader, ok := headers["Authorization"].(string); ok && strings.HasPrefix(authHeader, "Bearer ") {
 			token = strings.TrimPrefix(authHeader, "Bearer ")
 			isJWT = true
@@ -55,12 +57,7 @@ func init() {
 			if strings.HasPrefix(apiKey, "sk-torana-") {
 				isVirtualKey = true
 			}
-		} else if apiKey, ok := headers["x-api-key"].(string); ok {
-			token = apiKey
-			if strings.HasPrefix(apiKey, "sk-torana-") {
-				isVirtualKey = true
-			}
-		} else if toranaUser, ok := headers["x-torana-user"].(string); ok {
+		} else if toranaUser, ok := headers["X-Torana-User"].(string); ok {
 			// Extract simple user string
 			meta["tenant_id"] = "default-tenant"
 			meta["user_id"] = toranaUser

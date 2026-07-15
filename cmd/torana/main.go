@@ -62,6 +62,7 @@ func main() {
 	defer stop()
 
 	if otelShutdown, err := metrics.InitOTel(context.Background()); err == nil {
+		//nolint:errcheck
 		defer otelShutdown(context.Background())
 	} else {
 		log.Printf("Failed to init OTel: %v", err)

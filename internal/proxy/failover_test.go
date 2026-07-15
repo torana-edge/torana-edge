@@ -5,8 +5,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"testing"
 	"strings"
+	"testing"
 
 	"github.com/torana-edge/torana-edge/internal/provider"
 )
@@ -21,14 +21,14 @@ func TestFailoverExhaustion(t *testing.T) {
 
 	cfg := provider.Config{
 		Providers: map[string]provider.Provider{
-			"primary": {URL: failingBackend.URL, Fallback: []string{"fallback1"}},
+			"primary":   {URL: failingBackend.URL, Fallback: []string{"fallback1"}},
 			"fallback1": {URL: failingBackend.URL},
 		},
 	}
 
 	frt := &failoverRoundTripper{
 		base: http.DefaultTransport,
-		cfg: func() provider.Config { return cfg },
+		cfg:  func() provider.Config { return cfg },
 	}
 
 	req, _ := http.NewRequest("POST", failingBackend.URL, strings.NewReader(`{}`))
@@ -55,4 +55,65 @@ func TestFailoverExhaustion(t *testing.T) {
 	if string(body) != `{"error":"failed"}` {
 		t.Errorf("expected body, got %q", string(body))
 	}
+}
+
+// TestFailoverReleasesTokenOnTransportError: a transport error with no
+// fallbacks must release the concurrency token. Regression: the token was
+// only released via rateLimitBody.Close, which never wraps a nil response,
+// so N connection errors permanently exhausted the identity's slots.
+func TestFailoverReleasesTokenOnTransportError(t *testing.T) {
+	rl := NewRateLimiter(0, 1) // one concurrent slot
+	defer rl.Close()
+
+	frt := &failoverRoundTripper{
+		base:        http.DefaultTransport,
+		cfg:         func() provider.Config { return provider.Config{} },
+		rateLimiter: rl,
+	}
+
+	// 127.0.0.1:1 refuses connections — every attempt is a transport error.
+	for i := 0; i < 3; i++ {
+		req, _ := http.NewRequest("POST", "http://127.0.0.1:1/v1/chat", strings.NewReader(`{}`))
+		if _, err := frt.RoundTrip(req); err == nil {
+			t.Fatalf("attempt %d: expected transport error", i)
+		}
+	}
+
+	// With the leak, the single slot would now be gone and this returns false.
+	if !rl.Acquire("default") {
+		t.Fatal("concurrency token leaked after transport errors")
+	}
+	rl.Release("default")
+}
+
+// TestFailoverReleasesTokenOnRetryableStatus: a retryable status (500) with
+// no fallbacks must wrap the body so Close releases the token.
+func TestFailoverReleasesTokenOnRetryableStatus(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer backend.Close()
+
+	rl := NewRateLimiter(0, 1)
+	defer rl.Close()
+
+	frt := &failoverRoundTripper{
+		base:        http.DefaultTransport,
+		cfg:         func() provider.Config { return provider.Config{} },
+		rateLimiter: rl,
+	}
+
+	for i := 0; i < 3; i++ {
+		req, _ := http.NewRequest("POST", backend.URL, strings.NewReader(`{}`))
+		resp, err := frt.RoundTrip(req)
+		if err != nil {
+			t.Fatalf("attempt %d: %v", i, err)
+		}
+		resp.Body.Close()
+	}
+
+	if !rl.Acquire("default") {
+		t.Fatal("concurrency token leaked after retryable statuses")
+	}
+	rl.Release("default")
 }

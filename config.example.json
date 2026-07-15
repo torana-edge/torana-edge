@@ -16,6 +16,14 @@
   },
   "plugins": {
     "dir": "./plugins",
+    "_comment": "Order matters: schema_translator must run before the compactors so requests are translated first and responses reversed last.",
     "order": ["schema_translator", "keyword_compactor", "compactor"]
+  },
+  "offload": {
+    "_comment": "Cheap-model tool result summarization used by the compactor plugin. provider must exist above and use the openai format. api_key_env optionally names an env var with a dedicated key; otherwise the caller's credential is reused.",
+    "enabled": false,
+    "provider": "deepseek",
+    "model": "deepseek-v4-flash",
+    "api_key_env": ""
   }
 }

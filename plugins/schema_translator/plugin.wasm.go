@@ -17,6 +17,9 @@ const mutationsKey = "mutations"
 // activeToolKey returns the meta key for tracking the current tool call ID by index.
 func activeToolKey(index int32) string { return fmt.Sprintf("tool:%d", index) }
 
+// activeNameKey returns the meta key for tracking the current tool name by index.
+func activeNameKey(index int32) string { return fmt.Sprintf("name:%d", index) }
+
 // fragmentKey returns the meta key for accumulating tool call argument fragments.
 func fragmentKey(toolCallID string) string { return "frag:" + toolCallID }
 
@@ -66,64 +69,49 @@ func init() {
 	})
 
 	// ── Response side: reverse KV arrays ────────────────────────────
-	sdk.OnStreamChunk(func(ctx context.Context, chunk *pb.StreamEvent) (*pb.StreamEvent, error) {
-		// Track the current tool call by index (ToolCallStart is the only event with ID).
+	//
+	// Argument deltas are buffered and suppressed; at ToolCallEnd the
+	// assembled arguments are reversed and emitted as one complete
+	// ToolCallDelta followed by the ToolCallEnd.
+	sdk.OnStreamChunk(func(ctx context.Context, chunk *pb.StreamEvent) (*pb.StreamEventResult, error) {
+		// Track the current tool call ID and name by index
+		// (ToolCallStart is the only event carrying them).
 		if ts := chunk.GetToolCallStart(); ts != nil {
 			sdk.HostCall("env.meta_set", fmt.Sprintf(`{"key":"%s","value":%q}`, activeToolKey(ts.Index), ts.Id))
-			return nil, nil // pass through
+			sdk.HostCall("env.meta_set", fmt.Sprintf(`{"key":"%s","value":%q}`, activeNameKey(ts.Index), ts.Name))
+			return sdk.Pass(), nil
 		}
 
-		// Accumulate ToolCallDelta fragments.
+		// Buffer and suppress ToolCallDelta fragments.
 		if td := chunk.GetToolCallDelta(); td != nil {
 			toolID, _ := sdk.HostCall("env.meta_get", activeToolKey(td.Index))
 			if toolID == "" {
-				return nil, nil
+				return sdk.Pass(), nil
 			}
 			key := fragmentKey(toolID)
 			prev, _ := sdk.HostCall("env.meta_get", key)
 			accumulated := prev + td.ArgumentsDelta
 			sdk.HostCall("env.meta_set", fmt.Sprintf(`{"key":"%s","value":%q}`, key, accumulated))
-
-			// For non-streaming JSON responses (full args in single delta),
-			// reverse in-place and return immediately.
-			args := td.ArgumentsDelta
-			if strings.HasPrefix(strings.TrimSpace(args), "{") && strings.HasSuffix(strings.TrimSpace(args), "}") {
-				regRaw, _ := sdk.HostCall("env.meta_get", mutationsKey)
-				var registry map[string][]string
-				if regRaw != "" {
-					json.Unmarshal([]byte(regRaw), &registry)
-				}
-				reversed, _ := reverseTranslate("", args, registry)
-				if reversed != args {
-					sdk.HostCall("env.meta_set", fmt.Sprintf(`{"key":"%s","value":%q}`, key, reversed))
-					return &pb.StreamEvent{
-						Event: &pb.StreamEvent_ToolCallDelta{
-							ToolCallDelta: &pb.ToolCallDelta{
-								Index:          td.Index,
-								ArgumentsDelta: reversed,
-							},
-						},
-					}, nil
-				}
-			}
-			// Fragment — suppress, buffer until ToolCallEnd.
-			return nil, nil
+			return sdk.Suppress(), nil
 		}
 
-		// On ToolCallEnd for streaming: emit reversed args from buffered fragments.
+		// On ToolCallEnd: emit the reversed assembled args, then the end.
 		if te := chunk.GetToolCallEnd(); te != nil {
 			toolID, _ := sdk.HostCall("env.meta_get", activeToolKey(te.Index))
+			toolName, _ := sdk.HostCall("env.meta_get", activeNameKey(te.Index))
 			if toolID == "" {
-				return nil, nil
+				return sdk.Pass(), nil
 			}
 			key := fragmentKey(toolID)
 			fullArgs, _ := sdk.HostCall("env.meta_get", key)
-			// Clean up.
+			// Clean up (empty value deletes the key).
 			sdk.HostCall("env.meta_set", fmt.Sprintf(`{"key":"%s","value":""}`, key))
 			sdk.HostCall("env.meta_set", fmt.Sprintf(`{"key":"%s","value":""}`, activeToolKey(te.Index)))
+			sdk.HostCall("env.meta_set", fmt.Sprintf(`{"key":"%s","value":""}`, activeNameKey(te.Index)))
 
-			if fullArgs == "" || !strings.HasPrefix(fullArgs, "{") {
-				return nil, nil
+			if fullArgs == "" {
+				// No fragments were buffered — nothing to re-emit.
+				return sdk.Pass(), nil
 			}
 
 			regRaw, _ := sdk.HostCall("env.meta_get", mutationsKey)
@@ -131,24 +119,26 @@ func init() {
 			if regRaw != "" {
 				json.Unmarshal([]byte(regRaw), &registry)
 			}
-			reversed, _ := reverseTranslate("", fullArgs, registry)
+			// reverseTranslate returns the input unchanged on parse failure,
+			// so the buffered args are always re-emitted intact at worst.
+			reversed, _ := reverseTranslate(toolName, fullArgs, registry)
 
-			if reversed == fullArgs {
-				return nil, nil
-			}
-
-			// Emit reversed delta. Server forwards ToolCallEnd after this.
-			return &pb.StreamEvent{
-				Event: &pb.StreamEvent_ToolCallDelta{
-					ToolCallDelta: &pb.ToolCallDelta{
-						Index:          te.Index,
-						ArgumentsDelta: reversed,
+			// The fragments were suppressed, so the complete arguments MUST
+			// be emitted here regardless of whether reversal changed them.
+			return sdk.Emit(
+				&pb.StreamEvent{
+					Event: &pb.StreamEvent_ToolCallDelta{
+						ToolCallDelta: &pb.ToolCallDelta{
+							Index:          te.Index,
+							ArgumentsDelta: reversed,
+						},
 					},
 				},
-			}, nil
+				chunk,
+			), nil
 		}
 
-		return nil, nil
+		return sdk.Pass(), nil
 	})
 }
 

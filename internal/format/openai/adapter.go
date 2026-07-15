@@ -22,20 +22,20 @@ func init() {
 
 // Adapter implements format.RequestAdapter for OpenAI Chat Completions
 // and Responses API formats.
-type Adapter struct {}
+type Adapter struct{}
 
 // --- wire types for unmarshal ------------------------------------------------
 
 // chatRequest is the Chat Completions JSON shape.
 type chatRequest struct {
-	Model         string         `json:"model"`
-	Messages      []chatMessage  `json:"messages"`
-	Tools         []chatToolDef  `json:"tools,omitempty"`
-	Stream        bool           `json:"stream"`
-	MaxTokens     *int           `json:"max_tokens,omitempty"`
-	Temperature   *float64       `json:"temperature,omitempty"`
-	TopP          *float64       `json:"top_p,omitempty"`
-	StopSequences interface{}    `json:"stop,omitempty"`
+	Model         string        `json:"model"`
+	Messages      []chatMessage `json:"messages"`
+	Tools         []chatToolDef `json:"tools,omitempty"`
+	Stream        bool          `json:"stream"`
+	MaxTokens     *int          `json:"max_tokens,omitempty"`
+	Temperature   *float64      `json:"temperature,omitempty"`
+	TopP          *float64      `json:"top_p,omitempty"`
+	StopSequences interface{}   `json:"stop,omitempty"`
 }
 
 type chatMessage struct {
@@ -47,9 +47,9 @@ type chatMessage struct {
 }
 
 type chatToolCall struct {
-	ID       string         `json:"id"`
-	Type     string         `json:"type"`
-	Function chatToolFunc   `json:"function"`
+	ID       string       `json:"id"`
+	Type     string       `json:"type"`
+	Function chatToolFunc `json:"function"`
 }
 
 type chatToolFunc struct {
@@ -58,9 +58,9 @@ type chatToolFunc struct {
 }
 
 type chatToolDef struct {
-	Type     string         `json:"type"`
+	Type     string          `json:"type"`
 	Function chatToolFuncDef `json:"function"`
-	Strict   bool           `json:"strict,omitempty"`
+	Strict   bool            `json:"strict,omitempty"`
 }
 
 type chatToolFuncDef struct {
@@ -117,7 +117,7 @@ func (a *Adapter) Marshal(chat *engine.ChatRequest) ([]byte, error) {
 type variant int
 
 const (
-	variantChat      variant = iota
+	variantChat variant = iota
 	variantResponses
 )
 
@@ -160,7 +160,7 @@ func marshalResponses(chat *engine.ChatRequest) ([]byte, error) {
 			rr.Model = m
 		}
 	}
-	
+
 	// Convert messages back to input array if possible.
 	if len(chat.Messages) > 0 {
 		var msgs []chatMessage
@@ -399,14 +399,14 @@ func (a *Adapter) unmarshalResponses(rawBody []byte) (*engine.ChatRequest, error
 
 // marshalOutput is the Chat Completions JSON shape for marshal.
 type marshalOutput struct {
-	Model         string          `json:"model"`
-	Messages      []marshalMsg    `json:"messages"`
-	Tools         []marshalTool   `json:"tools,omitempty"`
-	Stream        bool            `json:"stream"`
-	MaxTokens     *int            `json:"max_tokens,omitempty"`
-	Temperature   *float64        `json:"temperature,omitempty"`
-	TopP          *float64        `json:"top_p,omitempty"`
-	StopSequences []string        `json:"stop,omitempty"`
+	Model         string        `json:"model"`
+	Messages      []marshalMsg  `json:"messages"`
+	Tools         []marshalTool `json:"tools,omitempty"`
+	Stream        bool          `json:"stream"`
+	MaxTokens     *int          `json:"max_tokens,omitempty"`
+	Temperature   *float64      `json:"temperature,omitempty"`
+	TopP          *float64      `json:"top_p,omitempty"`
+	StopSequences []string      `json:"stop,omitempty"`
 }
 
 type marshalMsg struct {
@@ -418,9 +418,9 @@ type marshalMsg struct {
 }
 
 type marshalTC struct {
-	ID       string       `json:"id"`
-	Type     string       `json:"type"`
-	Function marshalTCFn  `json:"function"`
+	ID       string      `json:"id"`
+	Type     string      `json:"type"`
+	Function marshalTCFn `json:"function"`
 }
 
 type marshalTCFn struct {
@@ -439,7 +439,6 @@ type marshalToolFn struct {
 	Description string         `json:"description,omitempty"`
 	Parameters  map[string]any `json:"parameters,omitempty"`
 }
-
 
 // modelOrDefault returns m if non-empty, otherwise d.
 func modelOrDefault(m, d string) string {

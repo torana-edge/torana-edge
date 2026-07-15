@@ -13,8 +13,9 @@ export function dealloc(ptr: usize, size: u32): void {
   __free(ptr);
 }
 
-export function on_chat_request(ptr: u32, size: u32): u64 {
-  // Pass-through: 0 means no modification
+// run_before_request receives a serialized torana.v1.ChatRequest protobuf
+// (see pkg/pb/torana.proto). Return 0 to pass the request through unchanged.
+export function run_before_request(reqID: u64, ptr: u32, size: u32): u64 {
   let msg = String.UTF8.encode("Hello from AssemblyScript plugin!");
   env_log(1, changetype<usize>(msg), msg.byteLength);
   return 0;
