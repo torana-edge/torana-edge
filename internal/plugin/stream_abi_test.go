@@ -276,12 +276,12 @@ func TestUnregisteredToolNotReversed(t *testing.T) {
 	}
 }
 
-// TestStreamChaining: schema_translator fans out at ToolCallEnd; compactor
-// consumes that fan-out, extracts the intent, and strips the "i" field.
+// TestStreamChaining: schema_translator fans out at ToolCallEnd; the intent
+// plugin consumes that fan-out, extracts the intent, and strips the "i" field.
 func TestStreamChaining(t *testing.T) {
 	requireWASM(t, "../../plugins/schema_translator/plugin.wasm")
-	requireWASM(t, "../../plugins/compactor/plugin.wasm")
-	pp := newTestPipeline(t, "../../plugins", []string{"schema_translator", "compactor"})
+	requireWASM(t, "../../plugins/intent/plugin.wasm")
+	pp := newTestPipeline(t, "../../plugins", []string{"schema_translator", "intent"})
 
 	// Translate the schema first (reqID 1, matching run's default) so env's
 	// KV-array mutation is registered and reversed via the registry.
@@ -308,7 +308,7 @@ func TestStreamChaining(t *testing.T) {
 		t.Fatalf("emitted args not valid JSON: %v (%q)", err, out[0].ToolCallDelta.ArgumentsDelta)
 	}
 	if _, hasI := args["i"]; hasI {
-		t.Fatalf(`expected "i" stripped by compactor, got %v`, args)
+		t.Fatalf(`expected "i" stripped by the intent plugin, got %v`, args)
 	}
 	env, ok := args["env"].(map[string]any)
 	if !ok || env["A"] != "1" {
@@ -316,13 +316,13 @@ func TestStreamChaining(t *testing.T) {
 	}
 }
 
-// TestFewShotPlacementNeverSplitsToolPairs: the compactor's few-shot triplet
-// must land after the leading system messages — inserting it before the last
-// message split assistant tool_calls from their tool results, which strict
-// providers (DeepSeek) reject with a 400. Caught live during dogfooding.
+// TestFewShotPlacementNeverSplitsToolPairs: the intent plugin's few-shot
+// triplet must land after the leading system messages — inserting it before
+// the last message split assistant tool_calls from their tool results, which
+// strict providers (DeepSeek) reject with a 400. Caught live during dogfooding.
 func TestFewShotPlacementNeverSplitsToolPairs(t *testing.T) {
-	requireWASM(t, "../../plugins/compactor/plugin.wasm")
-	pp := newTestPipeline(t, "../../plugins", []string{"compactor"})
+	requireWASM(t, "../../plugins/intent/plugin.wasm")
+	pp := newTestPipeline(t, "../../plugins", []string{"intent"})
 
 	chat := &engine.ChatRequest{
 		Messages: []engine.Message{

@@ -1,0 +1,16 @@
+{
+  "name": "intent",
+  "version": "0.1.0",
+  "description": "Captures WHY each tool call is made: injects the required 'i' field into tool schemas (plus system-prompt and few-shot reinforcement), extracts it from streamed tool calls into the shared cache, and strips it before the harness sees it. Run before keyword_compactor OR compactor — both consume the intent cache.",
+  "hooks": [
+    {"name": "run_before_request", "priority": 200},
+    {"name": "run_on_stream_chunk", "priority": 200}
+  ],
+  "permissions": [
+    {"name": "env.cache_set", "description": "Store extracted intents by tool_call_id"},
+    {"name": "env.meta_get", "description": "Read fragment buffers and tool-call tracking"},
+    {"name": "env.meta_set", "description": "Write fragment buffers and tool-call tracking"},
+    {"name": "env.emit_metric", "description": "Intent capture-rate metrics (captured/absent per tool)"},
+    {"name": "env.log", "description": "Diagnostic logging"}
+  ]
+}

@@ -21,8 +21,8 @@
   },
   "plugins": {
     "dir": "./plugins",
-    "_comment": "Order matters: schema_translator must run before the compactors so requests are translated first and responses reversed last.",
-    "order": ["schema_translator", "keyword_compactor", "compactor"],
+    "_comment": "Order matters: schema_translator first (translate requests, reverse responses), then 'intent' (captures WHY each tool call is made into the shared cache), then ONE compactor. keyword_compactor (deterministic, local, free) and compactor (cheap-model offload, higher quality) are alternatives, not a pipeline — running both lets whichever is first starve the other. Both require 'intent' before them.",
+    "order": ["schema_translator", "intent", "compactor"],
     "config": {
       "compactor": {
         "_comment": "max_offload_input_chars caps how much of a tool output is sent to the cheap summarizer. Omit or set 0 to send the COMPLETE tool output (default, unbounded). Set a positive value only if you want to bound offload cost/latency for very large outputs — it keeps the head+tail and drops the middle, which can discard relevant content.",
