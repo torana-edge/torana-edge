@@ -24,7 +24,11 @@ import (
 	"sync/atomic"
 	"time"
 
+	"google.golang.org/protobuf/proto"
+
+	"github.com/torana-edge/torana-edge/internal/cache"
 	"github.com/torana-edge/torana-edge/internal/engine"
+	"github.com/torana-edge/torana-edge/internal/engine/pbconv"
 	"github.com/torana-edge/torana-edge/internal/format"
 	"github.com/torana-edge/torana-edge/internal/metrics"
 	"github.com/torana-edge/torana-edge/internal/plugin"
@@ -68,7 +72,11 @@ type Server struct {
 	stats      *metrics.StatsTracker
 	// WASM plugin pipeline (loaded when configured)
 	pluginPipeline atomic.Value // *plugin.PluginPipeline
-	rateLimiter    *RateLimiter
+	// sharedCache is the cross-request plugin state store shared by every
+	// runtime this server builds (survives hot-reloads; redis backend
+	// survives restarts). Closed on Shutdown, after the pipeline drains.
+	sharedCache cache.Store
+	rateLimiter *RateLimiter
 	// watchCancel stops the plugin hot-reload watcher on Shutdown.
 	watchCancel context.CancelFunc
 }
@@ -132,6 +140,17 @@ type reqState struct {
 	// stream_options.include_usage on the caller's behalf; the resulting
 	// usage frame is consumed host-side and never forwarded to the client.
 	UsageInjected bool
+	// Synthetic marks a response served by a plugin (env.respond_request):
+	// the transport returns it verbatim and ModifyResponse must not re-parse
+	// it or run response hooks over it.
+	Synthetic bool
+	// OriginalReq is the pristine pre-pipeline request (pb bytes), snapshotted
+	// only when a loaded plugin holds env.original_request.
+	OriginalReq []byte
+	// OriginalResp is the raw upstream response body (non-streaming JSON path
+	// only), stashed before response hooks run, only when a loaded plugin
+	// holds env.original_response.
+	OriginalResp []byte
 }
 
 // responseMeta builds the _response signal handed to run_after_response so
@@ -198,10 +217,22 @@ func New(cfg Config) (*Server, error) {
 
 	// --- WASM plugin pipeline (optional) ---------------------------------
 	if cfg.Providers.Plugins.Dir != "" {
+		// One shared cross-request cache store for every runtime this server
+		// ever builds: plugin state (compacted results, PII verdicts) must
+		// survive hot-reload swaps, and the redis backend additionally makes
+		// it survive restarts / span instances. Fail fast on a bad backend —
+		// a deployment that asked for distributed state must not silently
+		// fall back to per-process memory.
+		sharedCache, err := cache.New(cfg.Providers.Cache)
+		if err != nil {
+			return nil, fmt.Errorf("proxy: %w", err)
+		}
+		s.sharedCache = sharedCache
+
 		// newRuntime wires host callbacks; used at startup AND on every
 		// hot-reload — a bare runtime would silently lose offload/stats.
 		newRuntime := func() *wasm.Runtime {
-			rt := wasm.NewRuntime(context.Background())
+			rt := wasm.NewRuntimeWithCache(context.Background(), sharedCache)
 			// Offload completion handler (cheap-model tool result
 			// summarization), recording failures in /stats.
 			rt.OffloadFunc = func(ctx context.Context, payloadJSON string) (string, error) {
@@ -219,6 +250,15 @@ func New(cfg Config) (*Server, error) {
 			rt.SavingsFunc = func(pluginName string, originalBytes, finalBytes int64) {
 				s.stats.RecordCompaction(pluginName, originalBytes, finalBytes)
 				metrics.RecordPluginSavings(context.Background(), pluginName, originalBytes-finalBytes)
+			}
+			// Pristine request/response snapshots (env.original_request /
+			// env.original_response), read from the request state the same
+			// way offload does.
+			rt.OriginalRequestFunc = func(ctx context.Context) []byte {
+				return reqStateFrom(ctx).OriginalReq
+			}
+			rt.OriginalResponseFunc = func(ctx context.Context) []byte {
+				return reqStateFrom(ctx).OriginalResp
 			}
 			return rt
 		}
@@ -336,6 +376,16 @@ func New(cfg Config) (*Server, error) {
 
 			if pl := reqStateFrom(req.Context()).Pipeline; pl != nil {
 
+				// Pristine-request snapshot for env.original_request, taken
+				// BEFORE any meta injection or plugin mutation. Plugins are
+				// chained (each sees its predecessor's output); this host call
+				// is the only way to see what the caller actually sent.
+				if pl.HasGrant("env.original_request") {
+					if b, err := proto.Marshal(pbconv.ToPBChatRequest(chat)); err == nil {
+						reqStateFrom(req.Context()).OriginalReq = b
+					}
+				}
+
 				// Credential-bearing headers are exposed to plugins only
 				// when a loaded plugin declares the env.request_headers
 				// permission, and only from an allowlist — plugins must
@@ -378,6 +428,28 @@ func New(cfg Config) (*Server, error) {
 						return
 					}
 				}
+
+				// Respond-directly: a plugin holding env.respond_request may
+				// serve the full response itself (response cache, mock mode).
+				// The host renders a provider-shaped completion — SSE if the
+				// client streams — and the transport returns it without
+				// calling upstream: zero tokens spent. A block verdict wins
+				// over a respond verdict (checked above).
+				if pl.HasGrant("env.respond_request") && chat.ToranaMeta != nil {
+					if raw, ok := chat.ToranaMeta["_respond"]; ok {
+						delete(chat.ToranaMeta, "_respond")
+						if rc, ok := req.Context().Value(routeContextKey{}).(*RouteContext); ok {
+							rc.Block = renderRespond(fmt, chat.Model, raw, chat.Stream)
+						}
+						rs := reqStateFrom(req.Context())
+						rs.Synthetic = true
+						rs.Model = chat.Model
+						rs.Provider = provName
+						req.Body = io.NopCloser(bytes.NewReader(nil))
+						req.ContentLength = 0
+						return
+					}
+				}
 			}
 
 			// Record routing facts for host request metrics (read by the
@@ -398,6 +470,21 @@ func New(cfg Config) (*Server, error) {
 			}
 			rc := req.Context().Value(routeContextKey{}).(*RouteContext)
 			rc.Identity = identity
+
+			// Content-based routing: a plugin holding env.route_request may
+			// redirect this request to another configured provider (same wire
+			// format) and/or override the model. Applied AFTER identity
+			// extraction so rate limiting still keys on the caller, and
+			// before marshal so the model override reaches the wire. Bad
+			// verdicts fail open to the original route.
+			if pl := reqStateFrom(req.Context()).Pipeline; pl != nil && pl.HasGrant("env.route_request") && chat.ToranaMeta != nil {
+				if raw, ok := chat.ToranaMeta["_route"]; ok {
+					delete(chat.ToranaMeta, "_route")
+					applyRoute(req, chat, prov.Format, provName, raw, currentCfg.Providers)
+					// Model may have been overridden; refresh the metrics fact.
+					reqStateFrom(req.Context()).Model = chat.Model
+				}
+			}
 
 			// Token usage on openai streams is opt-in; opt in on the caller's
 			// behalf so the host can meter tokens. The resulting usage frame
@@ -434,6 +521,12 @@ func New(cfg Config) (*Server, error) {
 		ModifyResponse: func(resp *http.Response) error {
 			if rs := reqStateFrom(resp.Request.Context()); rs != nil {
 				rs.UpstreamStatus = resp.StatusCode
+				// Plugin-served response (env.respond_request): already a
+				// complete, provider-shaped body — don't re-parse it or run
+				// response hooks over it.
+				if rs.Synthetic {
+					return nil
+				}
 			}
 			// Skip the mutation pipeline for error responses — don't try to
 			// reverse-translate a 4xx/5xx body that isn't a valid chat
@@ -574,6 +667,11 @@ func New(cfg Config) (*Server, error) {
 				rs := reqStateFrom(ctx)
 				f, _ := ctx.Value(formatCtxKey{}).(*format.Format)
 				if pl := rs.Pipeline; pl != nil && f != nil {
+					// Raw-body snapshot for env.original_response, before any
+					// hook mutates it.
+					if pl.HasGrant("env.original_response") {
+						rs.OriginalResp = bodyBytes
+					}
 					chat, _ := ctx.Value(chatCtxKey{}).(*engine.ChatRequest)
 					// Records provider usage into rs as a side effect.
 					modified, modErr := runJSONResponseHooks(ctx, pl, rs.ID, f.Name, chat, bodyBytes)
@@ -756,6 +854,9 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	s.rateLimiter.Close()
 	if pp := s.pluginPipeline.Load(); pp != nil {
 		pp.(*plugin.PluginPipeline).DrainAndClose()
+	}
+	if s.sharedCache != nil {
+		s.sharedCache.Close()
 	}
 	if s.httpServer != nil {
 		return s.httpServer.Shutdown(ctx)

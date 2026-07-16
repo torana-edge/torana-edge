@@ -1,0 +1,12 @@
+{
+  "name": "test-responder",
+  "version": "0.1.0",
+  "description": "Example plugin: serves a canned completion via env.respond_request when a message contains 'respondme'",
+  "hooks": [
+    {"name": "run_before_request", "priority": 100}
+  ],
+  "permissions": [
+    {"name": "env.respond_request", "description": "Serve the response directly without calling upstream"},
+    {"name": "env.log", "description": "Diagnostic logging"}
+  ]
+}

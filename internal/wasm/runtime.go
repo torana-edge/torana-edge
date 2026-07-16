@@ -225,6 +225,9 @@ type Runtime struct {
 	// cache is the cross-request TTL store shared between plugins
 	// (e.g. compactor writes intents, keyword_compactor reads them).
 	cache cache.Store
+	// ownsCache marks a runtime-private store (NewRuntime) that Close must
+	// release; shared stores (NewRuntimeWithCache) outlive the runtime.
+	ownsCache bool
 
 	// OffloadFunc handles torana_offload_completion host calls.
 	// Set by the server during initialization.
@@ -234,6 +237,16 @@ type Runtime struct {
 	// byte savings reported by plugins), attributed to the calling plugin.
 	// Set by the server.
 	SavingsFunc func(plugin string, originalBytes, finalBytes int64)
+
+	// OriginalRequestFunc returns the pristine pre-pipeline request as pb
+	// bytes for env.original_request (empty when unavailable). Set by the
+	// server; grant-gated at dispatch.
+	OriginalRequestFunc func(ctx context.Context) []byte
+
+	// OriginalResponseFunc returns the raw upstream response body for
+	// env.original_response (empty when unavailable — e.g. streaming
+	// responses, which are never buffered). Set by the server.
+	OriginalResponseFunc func(ctx context.Context) []byte
 }
 
 // wasmCompilationCache is shared by every Runtime in the process. wazero's
@@ -244,13 +257,28 @@ type Runtime struct {
 var wasmCompilationCache = wazero.NewCompilationCache()
 
 func NewRuntime(ctx context.Context) *Runtime {
+	r := newRuntime(ctx, cache.NewLocalCache(cacheTTL), true)
+	return r
+}
+
+// NewRuntimeWithCache builds a Runtime on a caller-owned cache store. The
+// store is shared across runtime instances — plugin cache state survives
+// hot-reload swaps (each reload builds a fresh runtime) and, with a Redis
+// store, restarts and multiple proxy instances. Close does NOT close a
+// shared store; its owner does.
+func NewRuntimeWithCache(ctx context.Context, store cache.Store) *Runtime {
+	return newRuntime(ctx, store, false)
+}
+
+func newRuntime(ctx context.Context, store cache.Store, ownsCache bool) *Runtime {
 	r := &Runtime{
 		ctx: ctx,
 		runtime: wazero.NewRuntimeWithConfig(ctx,
 			wazero.NewRuntimeConfig().WithCompilationCache(wasmCompilationCache)),
-		plugins: make(map[string]*Plugin),
-		meta:    make(map[uint64]map[string]string),
-		cache:   cache.NewLocalCache(cacheTTL),
+		plugins:   make(map[string]*Plugin),
+		meta:      make(map[uint64]map[string]string),
+		cache:     store,
+		ownsCache: ownsCache,
 	}
 	wasi_snapshot_preview1.MustInstantiate(r.ctx, r.runtime)
 	r.installHostFunctions()
@@ -258,7 +286,9 @@ func NewRuntime(ctx context.Context) *Runtime {
 }
 
 func (r *Runtime) Close() error {
-	r.cache.Close()
+	if r.ownsCache {
+		r.cache.Close()
+	}
 	return r.runtime.Close(r.ctx)
 }
 
@@ -455,6 +485,16 @@ func (r *Runtime) installHostFunctions() {
 			res = p.config
 			if res == "" {
 				res = "{}"
+			}
+		case "env.original_request":
+			// Pristine pre-pipeline request, pb-encoded. Empty = unavailable.
+			if r.OriginalRequestFunc != nil {
+				res = string(r.OriginalRequestFunc(ctx))
+			}
+		case "env.original_response":
+			// Raw upstream response body (non-streaming only). Empty = unavailable.
+			if r.OriginalResponseFunc != nil {
+				res = string(r.OriginalResponseFunc(ctx))
 			}
 		case "torana_db_query":
 			res = `{"status":"error","message":"database not configured — set plugins.config.compactor.dsn"}`

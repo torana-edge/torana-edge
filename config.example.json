@@ -14,7 +14,7 @@
       "format": "anthropic"
     },
     "local-slm": {
-      "_comment": "Local OpenAI-compatible endpoint (Ollama, vLLM, LM Studio). Point offload here to summarize tool output on a self-hosted small model at zero marginal cost. Ollama serves the OpenAI API at http://localhost:11434/v1/chat/completions, so set url to the host root.",
+      "_comment": "Local OpenAI-compatible endpoint (Ollama, vLLM, LM Studio). Point offload here to summarize tool output on a self-hosted small model at zero marginal cost. Ollama serves the OpenAI API at http://localhost:11434/v1/chat/completions, so set url to the host root. Providers may also set 'api_key_env' naming an env var with their own API key — required for plugin-initiated rerouting (env.route_request), where the caller's credential is never forwarded; leave it unset for local endpoints that need no auth.",
       "url": "http://localhost:11434",
       "format": "openai"
     }
@@ -44,5 +44,16 @@
     "provider": "deepseek",
     "model": "deepseek-v4-flash",
     "api_key_env": ""
+  },
+  "cache": {
+    "_comment": "Cross-request plugin state (compacted tool results, PII verdicts, intents). 'backend' is \"memory\" (default, per-process, lost on restart) or \"redis\" (survives restarts, shared across proxy instances in a distributed deployment). 'ttl_seconds' defaults to 900. For redis, 'password_env' names an env var holding the password — never put the password in this file; 'prefix' namespaces keys so one Redis can serve several deployments.",
+    "backend": "memory",
+    "ttl_seconds": 900,
+    "redis": {
+      "addr": "127.0.0.1:6379",
+      "password_env": "",
+      "db": 0,
+      "prefix": "torana:"
+    }
   }
 }

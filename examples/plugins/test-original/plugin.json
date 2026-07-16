@@ -1,0 +1,14 @@
+{
+  "name": "test-original",
+  "version": "0.1.0",
+  "description": "Test fixture: mutates the request, then proves env.original_request/env.original_response still expose the pristine data",
+  "hooks": [
+    {"name": "run_before_request", "priority": 100},
+    {"name": "run_after_response", "priority": 100}
+  ],
+  "permissions": [
+    {"name": "env.original_request", "description": "Read the caller's pristine request"},
+    {"name": "env.original_response", "description": "Read the raw upstream response body"},
+    {"name": "env.log", "description": "Diagnostic logging"}
+  ]
+}

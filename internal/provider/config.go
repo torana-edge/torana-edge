@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+
+	"github.com/torana-edge/torana-edge/internal/cache"
 )
 
 // Provider describes an upstream LLM API endpoint.
@@ -14,6 +16,12 @@ type Provider struct {
 	URL      string   `json:"url"`                // upstream base URL
 	Format   string   `json:"format"`             // wire format: "openai", "anthropic", "bedrock", "vertex"
 	Fallback []string `json:"fallback,omitempty"` // provider names to try on 429/5xx
+	// APIKeyEnv names an environment variable holding this provider's own
+	// API key. Used when a plugin reroutes a request here
+	// (env.route_request) — the caller's credential is never forwarded to a
+	// rerouted provider. Empty means the provider needs no auth (e.g. a
+	// local model server).
+	APIKeyEnv string `json:"api_key_env,omitempty"`
 }
 
 // Config is the top-level Torana configuration.
@@ -23,6 +31,9 @@ type Config struct {
 	Plugins   PluginsConfig       `json:"plugins,omitempty"`
 	Limits    Limits              `json:"limits,omitempty"`
 	Offload   OffloadConfig       `json:"offload,omitempty"`
+	// Cache selects the cross-request plugin state backend: in-process
+	// memory (default) or Redis for distributed / restart-safe deployments.
+	Cache cache.Config `json:"cache,omitempty"`
 }
 
 // OffloadConfig controls cheap-model tool result summarization
@@ -130,6 +141,9 @@ func Load(path string) (Config, error) {
 	}
 	if user.Offload != (OffloadConfig{}) {
 		cfg.Offload = user.Offload
+	}
+	if user.Cache != (cache.Config{}) {
+		cfg.Cache = user.Cache
 	}
 
 	return cfg, nil

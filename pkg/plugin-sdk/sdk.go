@@ -189,6 +189,7 @@ func hostEmitMetric(metricType int32, ptr uint32, length uint32, value float64, 
 const (
 	MetricCounter   = 0
 	MetricHistogram = 1
+	MetricGauge     = 2
 )
 
 // EmitMetric records a named metric, with optional labels, via the host's OTel
