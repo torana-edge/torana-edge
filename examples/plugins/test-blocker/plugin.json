@@ -1,0 +1,12 @@
+{
+  "name": "test-blocker",
+  "version": "0.1.0",
+  "description": "Example plugin: vetoes any request containing the word 'blockme' via env.block_request",
+  "hooks": [
+    {"name": "run_before_request", "priority": 100}
+  ],
+  "permissions": [
+    {"name": "env.block_request", "description": "Reject a request with a custom error"},
+    {"name": "env.log", "description": "Diagnostic logging"}
+  ]
+}

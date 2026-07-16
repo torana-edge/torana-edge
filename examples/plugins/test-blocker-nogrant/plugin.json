@@ -1,0 +1,11 @@
+{
+  "name": "test-blocker-nogrant",
+  "version": "0.1.0",
+  "description": "Example plugin: attempts to veto but does NOT declare env.block_request, so the proxy ignores it",
+  "hooks": [
+    {"name": "run_before_request", "priority": 100}
+  ],
+  "permissions": [
+    {"name": "env.log", "description": "Diagnostic logging"}
+  ]
+}
