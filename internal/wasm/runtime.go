@@ -365,7 +365,7 @@ func (r *Runtime) installHostFunctions() {
 		log.Printf("[wasm] abort at line %d col %d", lineNumber, columnNumber)
 	}).Export("abort")
 
-	env.NewFunctionBuilder().WithFunc(func(ctx context.Context, mod api.Module, metricType int32, ptr, length uint32, value float64) {
+	env.NewFunctionBuilder().WithFunc(func(ctx context.Context, mod api.Module, metricType int32, ptr, length uint32, value float64, labelsPtr, labelsLen uint32) {
 		pluginName := pluginNameOf(mod)
 		r.mu.RLock()
 		p := r.plugins[pluginName]
@@ -375,7 +375,13 @@ func (r *Runtime) installHostFunctions() {
 			return
 		}
 		name := readStr(mod, ptr, length)
-		metrics.EmitPluginMetric(ctx, pluginName, name, int(metricType), value)
+		var labels map[string]string
+		if labelsLen > 0 {
+			if raw := readStr(mod, labelsPtr, labelsLen); raw != "" {
+				_ = json.Unmarshal([]byte(raw), &labels)
+			}
+		}
+		metrics.EmitPluginMetric(ctx, pluginName, name, int(metricType), value, labels)
 	}).Export("emit_metric")
 
 	// host_call — permission-enforced per-command.

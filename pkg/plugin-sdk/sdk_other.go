@@ -41,8 +41,9 @@ const (
 	MetricHistogram = 1
 )
 
-func Log(msg string, level int32)                             {}
-func EmitMetric(name string, metricType int32, value float64) {}
+func Log(msg string, level int32) {}
+func EmitMetric(name string, metricType int32, value float64, labels map[string]string) {
+}
 
 func HostCall(cmd string, args string) (string, error) { return "", nil }
 

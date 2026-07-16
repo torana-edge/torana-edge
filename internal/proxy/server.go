@@ -112,6 +112,13 @@ type reqState struct {
 	// mid-request would otherwise drain and close the runtime holding this
 	// request's meta state (fragment buffers, mutation registry).
 	Pipeline *plugin.PluginPipeline
+
+	// Observability fields, populated across phases and read by the handler
+	// after ServeHTTP to emit host request metrics. Model/Provider are set in
+	// the Director; UpstreamStatus in ModifyResponse.
+	Model          string
+	Provider       string
+	UpstreamStatus int
 }
 
 // reqStateFrom returns the request state stashed by the HTTP handler,
@@ -136,6 +143,9 @@ func New(cfg Config) (*Server, error) {
 
 	// --- stats tracker -----------------------------------------------------
 	statsTracker := metrics.NewStatsTracker()
+	// Bridge cumulative savings/throughput counters to OTLP (no-op if OTel
+	// is disabled; InitOTel runs before New in main).
+	metrics.RegisterStatsObservables(statsTracker)
 
 	s := &Server{
 		config:      cfg,
@@ -336,6 +346,13 @@ func New(cfg Config) (*Server, error) {
 				}
 			}
 
+			// Record routing facts for host request metrics (read by the
+			// handler after ServeHTTP).
+			if rs := reqStateFrom(req.Context()); rs != nil {
+				rs.Model = chat.Model
+				rs.Provider = provName
+			}
+
 			identity := ""
 			if chat.ToranaMeta != nil {
 				if id, ok := chat.ToranaMeta["identity"].(string); ok {
@@ -366,6 +383,9 @@ func New(cfg Config) (*Server, error) {
 		},
 
 		ModifyResponse: func(resp *http.Response) error {
+			if rs := reqStateFrom(resp.Request.Context()); rs != nil {
+				rs.UpstreamStatus = resp.StatusCode
+			}
 			// Skip pipeline for error responses — don't try to
 			// reverse-translate a 4xx/5xx body that isn't a valid
 			// chat completion response.
@@ -557,9 +577,14 @@ func New(cfg Config) (*Server, error) {
 		tw := &trackingWriter{ResponseWriter: w}
 		r.Body = tr
 
+		start := time.Now()
 		proxy.ServeHTTP(tw, r)
 
 		s.stats.RecordRequest(tr.bytesRead, tw.bytesWritten)
+		// Host request metrics: latency + outcome, labeled by model/provider.
+		// The host sees every response (including errors and vetoes), so this
+		// is the reliable source of truth for latency and status.
+		metrics.RecordProxyRequest(r.Context(), rs.Model, rs.Provider, tw.status, float64(time.Since(start).Microseconds())/1000)
 	})
 
 	srv := &http.Server{
@@ -648,9 +673,18 @@ func joinURLPath(base, rel string) string {
 type trackingWriter struct {
 	http.ResponseWriter
 	bytesWritten int64
+	status       int
+}
+
+func (tw *trackingWriter) WriteHeader(code int) {
+	tw.status = code
+	tw.ResponseWriter.WriteHeader(code)
 }
 
 func (tw *trackingWriter) Write(b []byte) (int, error) {
+	if tw.status == 0 {
+		tw.status = http.StatusOK // implicit 200 on first write
+	}
 	n, err := tw.ResponseWriter.Write(b)
 	tw.bytesWritten += int64(n)
 	return n, err

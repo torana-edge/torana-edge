@@ -1,7 +1,7 @@
 {
   "name": "otel",
   "version": "0.4.0",
-  "description": "OpenTelemetry metrics plugin: records request/response counts and latency",
+  "description": "OpenTelemetry request-shape metrics (request/response counts, message/tool histograms) labeled by model; latency and error rate are emitted host-side",
   "hooks": [
     {"name": "run_before_request", "priority": 50},
     {"name": "run_after_response", "priority": 50}
