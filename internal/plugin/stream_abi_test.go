@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/torana-edge/torana-edge/internal/engine"
@@ -316,11 +317,14 @@ func TestStreamChaining(t *testing.T) {
 	}
 }
 
-// TestFewShotPlacementNeverSplitsToolPairs: the intent plugin's few-shot
-// triplet must land after the leading system messages — inserting it before
-// the last message split assistant tool_calls from their tool results, which
-// strict providers (DeepSeek) reject with a 400. Caught live during dogfooding.
-func TestFewShotPlacementNeverSplitsToolPairs(t *testing.T) {
+// TestIntentInjectsNoSyntheticMessages: the intent plugin must teach the "i"
+// convention WITHOUT adding messages — a fake conversation is
+// indistinguishable from real history and contaminates model behavior
+// (verbatim intent leaks, topic-anchored refusals; caught live and in the
+// Jul 16 experiments). The example transcript lives in the system prompt.
+// Also pins the historical invariant: assistant tool_calls must stay
+// immediately followed by their tool results (strict providers 400 otherwise).
+func TestIntentInjectsNoSyntheticMessages(t *testing.T) {
 	requireWASM(t, "../../plugins/intent/plugin.wasm")
 	pp := newTestPipeline(t, "../../plugins", []string{"intent"})
 
@@ -362,11 +366,20 @@ func TestFewShotPlacementNeverSplitsToolPairs(t *testing.T) {
 		}
 	}
 
-	// And the few-shot must sit right after the system message.
-	if out.Messages[0].Role != engine.RoleSystem || out.Messages[1].Role != engine.RoleUser ||
-		len(out.Messages) < 4 || len(out.Messages[2].ToolCalls) == 0 ||
-		out.Messages[2].ToolCalls[0].ID != "call_mock_fewshot_1" {
-		t.Fatalf("few-shot not placed after system: %v", roles(out.Messages))
+	// No synthetic messages: exactly the 4 originals, in order.
+	if len(out.Messages) != 4 {
+		t.Fatalf("intent plugin added messages (want 4, got %d): %v", len(out.Messages), roles(out.Messages))
+	}
+	for _, m := range out.Messages {
+		for _, tc := range m.ToolCalls {
+			if strings.Contains(tc.ID, "fewshot") {
+				t.Fatalf("synthetic few-shot message injected: %v", roles(out.Messages))
+			}
+		}
+	}
+	// The convention (with its example transcript) rides the system prompt.
+	if !strings.Contains(out.Messages[0].Content, `"i"`) {
+		t.Fatalf("system prompt missing the intent addendum: %q", out.Messages[0].Content)
 	}
 }
 

@@ -2,10 +2,13 @@
 //
 // Request side, it teaches the convention: every tool schema gains a required
 // "i" property ("what question are you answering?"), reinforced by a system
-// prompt addendum and a few-shot demonstration. Response side, it buffers the
-// streamed tool-call arguments, extracts the "i" value into the shared
-// cross-request cache (keyed by tool_call_id), and strips "i" back off so the
-// agent harness never sees it.
+// prompt addendum that embeds a one-line example transcript. No synthetic
+// messages are injected — a fake conversation is indistinguishable from real
+// history and measurably contaminates behavior (verbatim intent leaks,
+// topic-anchored refusals; see the Jul 16 experiments). Response side, it
+// buffers the streamed tool-call arguments, extracts the "i" value into the
+// shared cross-request cache (keyed by tool_call_id), and strips "i" back off
+// so the agent harness never sees it.
 //
 // It exists as its own plugin so the compactors are independent consumers:
 // run "intent" plus EITHER keyword_compactor (deterministic, local) OR
@@ -37,7 +40,6 @@ func init() {
 		}
 		modified := injectIntentSchema(req)
 		modified = injectSystemPrompt(req) || modified
-		modified = injectFewShot(req) || modified
 		if !modified {
 			return nil, nil
 		}
@@ -116,8 +118,15 @@ func init() {
 			if intent, ok := args[intentField].(string); ok && intent != "" {
 				sdk.HostCall("env.cache_set", fmt.Sprintf(`{"key":"%s:%s","value":%q}`, intentCacheKey, toolID, intent))
 				sdk.EmitMetric("torana_intent_captured_total", sdk.MetricCounter, 1, labels)
+				// Debug visibility for dogfooding: intent QUALITY (goal vs
+				// action description) is only judgeable by reading the values.
+				if len(intent) > 160 {
+					intent = intent[:160] + "…"
+				}
+				sdk.Log(fmt.Sprintf("intent[%s %s]: %s", toolName, toolID, intent), sdk.LogLevelDebug)
 			} else {
 				sdk.EmitMetric("torana_intent_absent_total", sdk.MetricCounter, 1, labels)
+				sdk.Log(fmt.Sprintf("intent[%s %s]: ABSENT", toolName, toolID), sdk.LogLevelDebug)
 			}
 
 			// Strip "i" if not originally in schema.
@@ -168,8 +177,13 @@ func injectIntentSchema(req *pb.ChatRequest) bool {
 		}
 
 		props[intentField] = map[string]any{
-			"type":        "string",
-			"description": "what you intend to accomplish: the question you are answering or the information you need",
+			"type": "string",
+			// The example-carrying description measured markedly better than
+			// an abstract instruction (75% vs 54% goal-tied intents in the
+			// Jul 16 experiments).
+			"description": "the underlying question this call helps answer, NOT the action taken. " +
+				"Good: 'where is the user locale mapped to a currency, to find the EU bug'. " +
+				"Bad: 'reading currency.ts'.",
 		}
 
 		required, _ := params["required"].([]any)
@@ -198,10 +212,15 @@ func injectIntentSchema(req *pb.ChatRequest) bool {
 	return modified
 }
 
+// injectSystemPrompt appends the "i" convention with a one-line example
+// TRANSCRIPT embedded in the system prompt — the winning strategy from the
+// Jul 16 experiments: it matches few-shot messages on intent quality with
+// zero conversation contamination and no per-request message overhead.
 func injectSystemPrompt(req *pb.ChatRequest) bool {
-	const addendum = "\n\nWhen populating the \"i\" field on any tool call, do not describe the " +
-		"action you are taking. Instead state the underlying question you are trying to " +
-		"answer or decision you are trying to make. Action descriptions in \"i\" will be discarded."
+	const addendum = "\n\nEvery tool call has an \"i\" field: the underlying question the call " +
+		"helps answer, never the action taken. Example of a good call:\n" +
+		"  read_file(path=\"src/pricing.ts\", i=\"Which table maps locale to currency, to find why EU shows USD\")\n" +
+		"Example of a BAD value: i=\"reading pricing.ts\" (action description — discarded)."
 	modified := false
 	for _, msg := range req.Messages {
 		if msg.Role == "system" {
@@ -214,40 +233,5 @@ func injectSystemPrompt(req *pb.ChatRequest) bool {
 		Role:    "system",
 		Content: "[SYSTEM]" + addendum,
 	}}, req.Messages...)
-	return true
-}
-
-func injectFewShot(req *pb.ChatRequest) bool {
-	toolName := "read"
-	if len(req.Tools) > 0 && req.Tools[0].Name != "" {
-		toolName = req.Tools[0].Name
-	}
-	exampleArgs, _ := json.Marshal(map[string]any{
-		"path": "server.go",
-		"i":    "Understand error handling in the proxy pipeline, looking for 5xx responses",
-	})
-	fewShot := []*pb.Message{
-		{Role: "user", Content: "I need to understand how the proxy handles upstream errors."},
-		{Role: "assistant", ToolCalls: []*pb.ToolCall{{
-			Id: "call_mock_fewshot_1", Name: toolName, ArgumentsJson: exampleArgs,
-		}}},
-		{Role: "tool", ToolCallId: "call_mock_fewshot_1", Content: "[few-shot example]"},
-	}
-	if len(req.Messages) == 0 {
-		return false
-	}
-	// Insert directly after the leading system message(s). Inserting
-	// mid-conversation can split an assistant tool_call from its tool
-	// result, which strict providers reject with a 400
-	// ("tool_calls must be followed by tool messages").
-	insert := 0
-	for insert < len(req.Messages) && req.Messages[insert].Role == "system" {
-		insert++
-	}
-	out := make([]*pb.Message, 0, len(req.Messages)+len(fewShot))
-	out = append(out, req.Messages[:insert]...)
-	out = append(out, fewShot...)
-	out = append(out, req.Messages[insert:]...)
-	req.Messages = out
 	return true
 }
