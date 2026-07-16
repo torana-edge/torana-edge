@@ -231,8 +231,9 @@ type Runtime struct {
 	OffloadFunc func(ctx context.Context, payloadJSON string) (string, error)
 
 	// SavingsFunc handles torana_record_savings host calls (compaction
-	// byte savings reported by plugins). Set by the server.
-	SavingsFunc func(originalBytes, finalBytes int64)
+	// byte savings reported by plugins), attributed to the calling plugin.
+	// Set by the server.
+	SavingsFunc func(plugin string, originalBytes, finalBytes int64)
 }
 
 // wasmCompilationCache is shared by every Runtime in the process. wazero's
@@ -365,7 +366,7 @@ func (r *Runtime) installHostFunctions() {
 		log.Printf("[wasm] abort at line %d col %d", lineNumber, columnNumber)
 	}).Export("abort")
 
-	env.NewFunctionBuilder().WithFunc(func(ctx context.Context, mod api.Module, metricType int32, ptr, length uint32, value float64) {
+	env.NewFunctionBuilder().WithFunc(func(ctx context.Context, mod api.Module, metricType int32, ptr, length uint32, value float64, labelsPtr, labelsLen uint32) {
 		pluginName := pluginNameOf(mod)
 		r.mu.RLock()
 		p := r.plugins[pluginName]
@@ -375,7 +376,13 @@ func (r *Runtime) installHostFunctions() {
 			return
 		}
 		name := readStr(mod, ptr, length)
-		metrics.EmitPluginMetric(ctx, pluginName, name, int(metricType), value)
+		var labels map[string]string
+		if labelsLen > 0 {
+			if raw := readStr(mod, labelsPtr, labelsLen); raw != "" {
+				_ = json.Unmarshal([]byte(raw), &labels)
+			}
+		}
+		metrics.EmitPluginMetric(ctx, pluginName, name, int(metricType), value, labels)
 	}).Export("emit_metric")
 
 	// host_call — permission-enforced per-command.
@@ -461,7 +468,7 @@ func (r *Runtime) installHostFunctions() {
 			if err := json.Unmarshal([]byte(args), &pl); err != nil || pl.OriginalBytes < 0 || pl.FinalBytes < 0 {
 				res = `{"status":"error","message":"invalid payload"}`
 			} else if r.SavingsFunc != nil {
-				r.SavingsFunc(pl.OriginalBytes, pl.FinalBytes)
+				r.SavingsFunc(pluginName, pl.OriginalBytes, pl.FinalBytes)
 				res = `{"status":"ok"}`
 			} else {
 				res = `{"status":"error","message":"savings tracking not configured"}`

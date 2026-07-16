@@ -4,6 +4,7 @@ package plugin_sdk
 
 import (
 	"context"
+	"encoding/json"
 	"sync"
 	"unsafe"
 
@@ -182,7 +183,7 @@ func Log(msg string, level int32) {
 }
 
 //go:wasmimport env emit_metric
-func hostEmitMetric(metricType int32, ptr uint32, length uint32, value float64)
+func hostEmitMetric(metricType int32, ptr uint32, length uint32, value float64, labelsPtr uint32, labelsLen uint32)
 
 // Metric types accepted by EmitMetric (mirrors the host's OTel mapping).
 const (
@@ -190,17 +191,27 @@ const (
 	MetricHistogram = 1
 )
 
-// EmitMetric records a named metric via the host's OTel exporter.
-// Requires the env.emit_metric permission in the plugin manifest.
-func EmitMetric(name string, metricType int32, value float64) {
+// EmitMetric records a named metric, with optional labels, via the host's OTel
+// exporter. Requires the env.emit_metric permission in the plugin manifest.
+func EmitMetric(name string, metricType int32, value float64, labels map[string]string) {
 	b := []byte(name)
 	if len(b) == 0 {
 		return
 	}
 	ptr := alloc(uint32(len(b)))
 	copy(ReadBytes(ptr, uint32(len(b))), b)
-	hostEmitMetric(metricType, ptr, uint32(len(b)), value)
-	dealloc(ptr, uint32(len(b)))
+	defer dealloc(ptr, uint32(len(b)))
+
+	var lPtr, lLen uint32
+	if len(labels) > 0 {
+		if lb, err := json.Marshal(labels); err == nil {
+			lPtr = alloc(uint32(len(lb)))
+			copy(ReadBytes(lPtr, uint32(len(lb))), lb)
+			lLen = uint32(len(lb))
+			defer dealloc(lPtr, lLen)
+		}
+	}
+	hostEmitMetric(metricType, ptr, uint32(len(b)), value, lPtr, lLen)
 }
 
 //go:wasmimport env host_call

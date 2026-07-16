@@ -1,0 +1,14 @@
+{
+  "name": "test-observer",
+  "version": "0.1.0",
+  "description": "Test fixture: proves plugins receive the _response signal (latency/status/usage) on normal and error responses",
+  "hooks": [
+    {"name": "run_before_request", "priority": 100},
+    {"name": "run_after_response", "priority": 100}
+  ],
+  "permissions": [
+    {"name": "env.cache_get", "description": "Read observed error status"},
+    {"name": "env.cache_set", "description": "Record observed error status"},
+    {"name": "env.log", "description": "Diagnostic logging"}
+  ]
+}

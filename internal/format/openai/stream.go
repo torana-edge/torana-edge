@@ -20,7 +20,14 @@ type sseChunk struct {
 	ID      string      `json:"id"`
 	Object  string      `json:"object"`
 	Choices []sseChoice `json:"choices"`
+	Usage   *sseUsage   `json:"usage,omitempty"`
 	Error   *sseError   `json:"error,omitempty"`
+}
+
+type sseUsage struct {
+	PromptTokens     int `json:"prompt_tokens"`
+	CompletionTokens int `json:"completion_tokens"`
+	TotalTokens      int `json:"total_tokens"`
 }
 
 type sseChoice struct {
@@ -117,6 +124,17 @@ func (s *StreamAdapter) parseStream(body io.Reader, ch chan<- engine.StreamEvent
 			return
 		}
 
+		// Usage arrives on the final chunk (empty choices) when the client —
+		// or the proxy on its behalf — asked for stream_options.include_usage.
+		if chunk.Usage != nil && (chunk.Usage.PromptTokens > 0 || chunk.Usage.CompletionTokens > 0) {
+			ch <- engine.StreamEvent{
+				Usage: &engine.StreamUsage{
+					InputTokens:  chunk.Usage.PromptTokens,
+					OutputTokens: chunk.Usage.CompletionTokens,
+				},
+			}
+		}
+
 		// Process choices.
 		for _, choice := range chunk.Choices {
 			delta := choice.Delta
@@ -209,6 +227,10 @@ const streamID = "chatcmpl-torana"
 
 // SerializeStream writes StreamEvents as OpenAI Chat Completions SSE to writer.
 // Returns when the channel is closed or on write error.
+//
+// [DONE] is emitted when the event channel closes, not with the finish chunk:
+// OpenAI sends the usage chunk AFTER the finish chunk, so terminating at
+// FinishReason would drop it.
 func (s *StreamAdapter) SerializeStream(w io.Writer, events <-chan engine.StreamEvent) error {
 	for evt := range events {
 		line, err := serializeEvent(evt)
@@ -221,6 +243,9 @@ func (s *StreamAdapter) SerializeStream(w io.Writer, events <-chan engine.Stream
 		if _, err := fmt.Fprint(w, line); err != nil {
 			return fmt.Errorf("openai serialize write: %w", err)
 		}
+	}
+	if _, err := fmt.Fprint(w, "data: [DONE]\n\n"); err != nil {
+		return fmt.Errorf("openai serialize write: %w", err)
 	}
 	return nil
 }
@@ -244,6 +269,9 @@ func serializeEvent(evt engine.StreamEvent) (string, error) {
 
 	case evt.FinishReason != "":
 		return finishReasonSSE(evt.FinishReason), nil
+
+	case evt.Usage != nil:
+		return usageSSE(evt.Usage), nil
 
 	case evt.Error != nil:
 		return errorSSE(evt.Error), nil
@@ -353,7 +381,24 @@ func finishReasonSSE(reason string) string {
 		},
 	}
 	b, _ := json.Marshal(chunk)
-	return fmt.Sprintf("data: %s\n\n%s", string(b), "data: [DONE]\n\n")
+	return fmt.Sprintf("data: %s\n\n", string(b))
+}
+
+// usageSSE is the final usage chunk (empty choices), the shape OpenAI sends
+// when stream_options.include_usage is set.
+func usageSSE(u *engine.StreamUsage) string {
+	chunk := map[string]any{
+		"id":      streamID,
+		"object":  "chat.completion.chunk",
+		"choices": []map[string]any{},
+		"usage": map[string]any{
+			"prompt_tokens":     u.InputTokens,
+			"completion_tokens": u.OutputTokens,
+			"total_tokens":      u.InputTokens + u.OutputTokens,
+		},
+	}
+	b, _ := json.Marshal(chunk)
+	return fmt.Sprintf("data: %s\n\n", string(b))
 }
 
 func errorSSE(err *engine.StreamError) string {

@@ -17,7 +17,13 @@ type sseEvent struct {
 	ContentBlock *contentBlockEv `json:"content_block,omitempty"`
 	Delta        *deltaEv        `json:"delta,omitempty"`
 	Message      *messageEv      `json:"message,omitempty"`
+	Usage        *usageEv        `json:"usage,omitempty"` // message_delta carries output tokens here
 	Error        *errorEv        `json:"error,omitempty"`
+}
+
+type usageEv struct {
+	InputTokens  int `json:"input_tokens,omitempty"`
+	OutputTokens int `json:"output_tokens,omitempty"`
 }
 
 type contentBlockEv struct {
@@ -38,7 +44,8 @@ type deltaEv struct {
 }
 
 type messageEv struct {
-	StopReason string `json:"stop_reason"`
+	StopReason string   `json:"stop_reason"`
+	Usage      *usageEv `json:"usage,omitempty"` // message_start carries input tokens here
 }
 
 type errorEv struct {
@@ -56,6 +63,7 @@ func (s *StreamAdapter) ParseStream(body io.Reader) <-chan engine.StreamEvent {
 		defer close(ch)
 		scanner := bufio.NewScanner(body)
 		var blockType string // tracks current content block type: "", "text", "tool_use", "thinking"
+		var inputTokens int  // from message_start, reported with output at message_delta
 		for scanner.Scan() {
 			line := scanner.Text()
 			if !strings.HasPrefix(line, "data: ") {
@@ -79,6 +87,11 @@ func (s *StreamAdapter) ParseStream(body io.Reader) <-chan engine.StreamEvent {
 			}
 
 			switch {
+			case ev.Type == "message_start":
+				if ev.Message != nil && ev.Message.Usage != nil {
+					inputTokens = ev.Message.Usage.InputTokens
+				}
+
 			case ev.Type == "content_block_start":
 				if ev.ContentBlock != nil {
 					switch ev.ContentBlock.Type {
@@ -133,6 +146,17 @@ func (s *StreamAdapter) ParseStream(body io.Reader) <-chan engine.StreamEvent {
 				blockType = ""
 
 			case ev.Type == "message_delta":
+				// Usage precedes FinishReason so serializers can embed it in
+				// their final frame (message_delta carries output tokens;
+				// input tokens were captured at message_start).
+				if ev.Usage != nil && (inputTokens > 0 || ev.Usage.OutputTokens > 0) {
+					ch <- engine.StreamEvent{
+						Usage: &engine.StreamUsage{
+							InputTokens:  inputTokens,
+							OutputTokens: ev.Usage.OutputTokens,
+						},
+					}
+				}
 				if ev.Delta != nil {
 					switch ev.Delta.StopReason {
 					case "end_turn":
@@ -165,6 +189,11 @@ func (s *StreamAdapter) SerializeStream(w io.Writer, events <-chan engine.Stream
 	var inThinking bool
 	var inText bool
 	var blockIndex int
+	// pendingUsage buffers a Usage event so it rides the message_delta frame
+	// (where Anthropic clients read token usage). If usage arrives after the
+	// finish frame was already written, a standalone message_delta carries it.
+	var pendingUsage *engine.StreamUsage
+	finishWritten := false
 	// toolBlock maps the event's tool-call index (upstream numbering) to the
 	// Anthropic content-block index assigned at ToolCallStart, so deltas and
 	// stops land on the same block even when text/thinking blocks precede
@@ -282,14 +311,34 @@ func (s *StreamAdapter) SerializeStream(w io.Writer, events <-chan engine.Stream
 				return err
 			}
 
+		case ev.Usage != nil:
+			if finishWritten {
+				// Finish frame already out — emit usage on its own delta frame.
+				if err := emit(fmt.Sprintf(
+					`data: {"type":"message_delta","delta":{},"usage":%s}`,
+					usageJSON(ev.Usage),
+				)); err != nil {
+					return err
+				}
+			} else {
+				pendingUsage = ev.Usage
+			}
+
 		case ev.FinishReason != "":
 			stopReason := "end_turn"
 			if ev.FinishReason == "tool_calls" {
 				stopReason = "tool_use"
 			}
+			usageField := ""
+			if pendingUsage != nil {
+				usageField = fmt.Sprintf(`,"usage":%s`, usageJSON(pendingUsage))
+				pendingUsage = nil
+			}
+			finishWritten = true
 			data := fmt.Sprintf(
-				`data: {"type":"message_delta","delta":{"stop_reason":%s,"stop_sequence":null}}`,
+				`data: {"type":"message_delta","delta":{"stop_reason":%s,"stop_sequence":null}%s}`,
 				jsonString(stopReason),
+				usageField,
 			)
 			if err := emit(data); err != nil {
 				return err
@@ -316,6 +365,16 @@ func (s *StreamAdapter) SerializeStream(w io.Writer, events <-chan engine.Stream
 		return err
 	}
 
+	// Usage seen but no finish frame followed — don't drop it.
+	if pendingUsage != nil {
+		if err := emit(fmt.Sprintf(
+			`data: {"type":"message_delta","delta":{},"usage":%s}`,
+			usageJSON(pendingUsage),
+		)); err != nil {
+			return err
+		}
+	}
+
 	// Always send message_stop after all events.
 	if _, err := fmt.Fprint(w, `data: {"type":"message_stop"}`+"\n\n"); err != nil {
 		return fmt.Errorf("anthropic serialize: %w", err)
@@ -327,4 +386,9 @@ func (s *StreamAdapter) SerializeStream(w io.Writer, events <-chan engine.Stream
 func jsonString(s string) string {
 	b, _ := json.Marshal(s)
 	return string(b)
+}
+
+// usageJSON renders a StreamUsage in Anthropic's usage shape.
+func usageJSON(u *engine.StreamUsage) string {
+	return fmt.Sprintf(`{"input_tokens":%d,"output_tokens":%d}`, u.InputTokens, u.OutputTokens)
 }

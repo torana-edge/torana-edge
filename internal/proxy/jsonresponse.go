@@ -31,6 +31,7 @@ type responseRefs struct {
 	content    string
 	setContent func(string)
 	toolCalls  []toolCallRef
+	usage      *engine.StreamUsage // provider-reported token usage (read-only)
 }
 
 // extractResponse builds mutable references into a decoded response body for
@@ -52,6 +53,25 @@ func extractResponse(formatName string, body map[string]any) responseRefs {
 func asString(v any) string {
 	s, _ := v.(string)
 	return s
+}
+
+func asInt(v any) int {
+	f, _ := v.(float64) // JSON numbers decode as float64
+	return int(f)
+}
+
+// usageFrom reads token counts from a decoded usage object under the given
+// input/output key names. Returns nil when absent or all-zero.
+func usageFrom(body map[string]any, objKey, inKey, outKey string) *engine.StreamUsage {
+	obj, _ := body[objKey].(map[string]any)
+	if obj == nil {
+		return nil
+	}
+	u := &engine.StreamUsage{InputTokens: asInt(obj[inKey]), OutputTokens: asInt(obj[outKey])}
+	if u.InputTokens == 0 && u.OutputTokens == 0 {
+		return nil
+	}
+	return u
 }
 
 // objArgs marshals an object-valued args field to JSON text and returns a
@@ -76,7 +96,10 @@ func objArgs(parent map[string]any, key string) (string, func(string) error) {
 // --- openai: choices[].message.{content, tool_calls[].function.{name,arguments}} ---
 
 func extractOpenAI(body map[string]any) responseRefs {
-	refs := responseRefs{model: asString(body["model"])}
+	refs := responseRefs{
+		model: asString(body["model"]),
+		usage: usageFrom(body, "usage", "prompt_tokens", "completion_tokens"),
+	}
 	choices, _ := body["choices"].([]any)
 	for ci, c := range choices {
 		choice, _ := c.(map[string]any)
@@ -120,7 +143,10 @@ func extractOpenAI(body map[string]any) responseRefs {
 // --- anthropic: content[] blocks (text | tool_use{id,name,input}) ---
 
 func extractAnthropic(body map[string]any) responseRefs {
-	refs := responseRefs{model: asString(body["model"])}
+	refs := responseRefs{
+		model: asString(body["model"]),
+		usage: usageFrom(body, "usage", "input_tokens", "output_tokens"),
+	}
 	blocks, _ := body["content"].([]any)
 	for _, b := range blocks {
 		block, _ := b.(map[string]any)
@@ -152,7 +178,7 @@ func extractAnthropic(body map[string]any) responseRefs {
 // --- bedrock: output.message.content[].{text | toolUse{toolUseId,name,input}} ---
 
 func extractBedrock(body map[string]any) responseRefs {
-	refs := responseRefs{}
+	refs := responseRefs{usage: usageFrom(body, "usage", "inputTokens", "outputTokens")}
 	output, _ := body["output"].(map[string]any)
 	msg, _ := output["message"].(map[string]any)
 	parts, _ := msg["content"].([]any)
@@ -184,7 +210,10 @@ func extractBedrock(body map[string]any) responseRefs {
 // --- vertex: candidates[].content.parts[].{text | functionCall{name,args}} ---
 
 func extractVertex(body map[string]any) responseRefs {
-	refs := responseRefs{model: asString(body["modelVersion"])}
+	refs := responseRefs{
+		model: asString(body["modelVersion"]),
+		usage: usageFrom(body, "usageMetadata", "promptTokenCount", "candidatesTokenCount"),
+	}
 	candidates, _ := body["candidates"].([]any)
 	for _, c := range candidates {
 		cand, _ := c.(map[string]any)
@@ -235,6 +264,12 @@ func runJSONResponseHooks(ctx context.Context, pl *plugin.PluginPipeline, reqID 
 
 	refs := extractResponse(formatName, body)
 	modified := false
+
+	// Record provider-reported token usage for host metrics and _response.
+	rs := reqStateFrom(ctx)
+	if refs.usage != nil {
+		rs.UsageIn, rs.UsageOut = refs.usage.InputTokens, refs.usage.OutputTokens
+	}
 
 	// --- 1. synthetic stream events per tool call --------------------------
 	for ti := range refs.toolCalls {
@@ -292,6 +327,11 @@ func runJSONResponseHooks(ctx context.Context, pl *plugin.PluginPipeline, reqID 
 	if chat != nil {
 		respChat.ToranaMeta = chat.ToranaMeta
 	}
+	if respChat.ToranaMeta == nil {
+		respChat.ToranaMeta = map[string]any{}
+	}
+	// Expose latency/status/usage to response hooks.
+	respChat.ToranaMeta["_response"] = rs.responseMeta()
 	assistant := engine.Message{Role: engine.RoleAssistant, Content: refs.content}
 	for _, tc := range refs.toolCalls {
 		var args map[string]any
