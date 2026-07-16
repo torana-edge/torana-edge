@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+
+	"github.com/torana-edge/torana-edge/internal/cache"
 )
 
 // Provider describes an upstream LLM API endpoint.
@@ -29,6 +31,9 @@ type Config struct {
 	Plugins   PluginsConfig       `json:"plugins,omitempty"`
 	Limits    Limits              `json:"limits,omitempty"`
 	Offload   OffloadConfig       `json:"offload,omitempty"`
+	// Cache selects the cross-request plugin state backend: in-process
+	// memory (default) or Redis for distributed / restart-safe deployments.
+	Cache cache.Config `json:"cache,omitempty"`
 }
 
 // OffloadConfig controls cheap-model tool result summarization
@@ -136,6 +141,9 @@ func Load(path string) (Config, error) {
 	}
 	if user.Offload != (OffloadConfig{}) {
 		cfg.Offload = user.Offload
+	}
+	if user.Cache != (cache.Config{}) {
+		cfg.Cache = user.Cache
 	}
 
 	return cfg, nil

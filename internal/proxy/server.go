@@ -26,6 +26,7 @@ import (
 
 	"google.golang.org/protobuf/proto"
 
+	"github.com/torana-edge/torana-edge/internal/cache"
 	"github.com/torana-edge/torana-edge/internal/engine"
 	"github.com/torana-edge/torana-edge/internal/engine/pbconv"
 	"github.com/torana-edge/torana-edge/internal/format"
@@ -71,7 +72,11 @@ type Server struct {
 	stats      *metrics.StatsTracker
 	// WASM plugin pipeline (loaded when configured)
 	pluginPipeline atomic.Value // *plugin.PluginPipeline
-	rateLimiter    *RateLimiter
+	// sharedCache is the cross-request plugin state store shared by every
+	// runtime this server builds (survives hot-reloads; redis backend
+	// survives restarts). Closed on Shutdown, after the pipeline drains.
+	sharedCache cache.Store
+	rateLimiter *RateLimiter
 	// watchCancel stops the plugin hot-reload watcher on Shutdown.
 	watchCancel context.CancelFunc
 }
@@ -212,10 +217,22 @@ func New(cfg Config) (*Server, error) {
 
 	// --- WASM plugin pipeline (optional) ---------------------------------
 	if cfg.Providers.Plugins.Dir != "" {
+		// One shared cross-request cache store for every runtime this server
+		// ever builds: plugin state (compacted results, PII verdicts) must
+		// survive hot-reload swaps, and the redis backend additionally makes
+		// it survive restarts / span instances. Fail fast on a bad backend —
+		// a deployment that asked for distributed state must not silently
+		// fall back to per-process memory.
+		sharedCache, err := cache.New(cfg.Providers.Cache)
+		if err != nil {
+			return nil, fmt.Errorf("proxy: %w", err)
+		}
+		s.sharedCache = sharedCache
+
 		// newRuntime wires host callbacks; used at startup AND on every
 		// hot-reload — a bare runtime would silently lose offload/stats.
 		newRuntime := func() *wasm.Runtime {
-			rt := wasm.NewRuntime(context.Background())
+			rt := wasm.NewRuntimeWithCache(context.Background(), sharedCache)
 			// Offload completion handler (cheap-model tool result
 			// summarization), recording failures in /stats.
 			rt.OffloadFunc = func(ctx context.Context, payloadJSON string) (string, error) {
@@ -837,6 +854,9 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	s.rateLimiter.Close()
 	if pp := s.pluginPipeline.Load(); pp != nil {
 		pp.(*plugin.PluginPipeline).DrainAndClose()
+	}
+	if s.sharedCache != nil {
+		s.sharedCache.Close()
 	}
 	if s.httpServer != nil {
 		return s.httpServer.Shutdown(ctx)

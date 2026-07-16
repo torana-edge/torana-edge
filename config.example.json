@@ -44,5 +44,16 @@
     "provider": "deepseek",
     "model": "deepseek-v4-flash",
     "api_key_env": ""
+  },
+  "cache": {
+    "_comment": "Cross-request plugin state (compacted tool results, PII verdicts, intents). 'backend' is \"memory\" (default, per-process, lost on restart) or \"redis\" (survives restarts, shared across proxy instances in a distributed deployment). 'ttl_seconds' defaults to 900. For redis, 'password_env' names an env var holding the password — never put the password in this file; 'prefix' namespaces keys so one Redis can serve several deployments.",
+    "backend": "memory",
+    "ttl_seconds": 900,
+    "redis": {
+      "addr": "127.0.0.1:6379",
+      "password_env": "",
+      "db": 0,
+      "prefix": "torana:"
+    }
   }
 }

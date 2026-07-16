@@ -225,6 +225,9 @@ type Runtime struct {
 	// cache is the cross-request TTL store shared between plugins
 	// (e.g. compactor writes intents, keyword_compactor reads them).
 	cache cache.Store
+	// ownsCache marks a runtime-private store (NewRuntime) that Close must
+	// release; shared stores (NewRuntimeWithCache) outlive the runtime.
+	ownsCache bool
 
 	// OffloadFunc handles torana_offload_completion host calls.
 	// Set by the server during initialization.
@@ -254,13 +257,28 @@ type Runtime struct {
 var wasmCompilationCache = wazero.NewCompilationCache()
 
 func NewRuntime(ctx context.Context) *Runtime {
+	r := newRuntime(ctx, cache.NewLocalCache(cacheTTL), true)
+	return r
+}
+
+// NewRuntimeWithCache builds a Runtime on a caller-owned cache store. The
+// store is shared across runtime instances — plugin cache state survives
+// hot-reload swaps (each reload builds a fresh runtime) and, with a Redis
+// store, restarts and multiple proxy instances. Close does NOT close a
+// shared store; its owner does.
+func NewRuntimeWithCache(ctx context.Context, store cache.Store) *Runtime {
+	return newRuntime(ctx, store, false)
+}
+
+func newRuntime(ctx context.Context, store cache.Store, ownsCache bool) *Runtime {
 	r := &Runtime{
 		ctx: ctx,
 		runtime: wazero.NewRuntimeWithConfig(ctx,
 			wazero.NewRuntimeConfig().WithCompilationCache(wasmCompilationCache)),
-		plugins: make(map[string]*Plugin),
-		meta:    make(map[uint64]map[string]string),
-		cache:   cache.NewLocalCache(cacheTTL),
+		plugins:   make(map[string]*Plugin),
+		meta:      make(map[uint64]map[string]string),
+		cache:     store,
+		ownsCache: ownsCache,
 	}
 	wasi_snapshot_preview1.MustInstantiate(r.ctx, r.runtime)
 	r.installHostFunctions()
@@ -268,7 +286,9 @@ func NewRuntime(ctx context.Context) *Runtime {
 }
 
 func (r *Runtime) Close() error {
-	r.cache.Close()
+	if r.ownsCache {
+		r.cache.Close()
+	}
 	return r.runtime.Close(r.ctx)
 }
 
