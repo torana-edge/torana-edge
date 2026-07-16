@@ -56,14 +56,19 @@ func initInstruments(m metric.Meter) {
 	meter = m
 	reqDuration, _ = m.Float64Histogram("torana_request_duration_ms", metric.WithUnit("ms"))
 	reqTotal, _ = m.Int64Counter("torana_requests_total")
+	tokensTotal, _ = m.Int64Counter("torana_tokens_total")
+	pluginSaved, _ = m.Int64Counter("torana_bytes_saved_total")
 }
 
 var (
 	meter          metric.Meter
 	reqDuration    metric.Float64Histogram
 	reqTotal       metric.Int64Counter
+	tokensTotal    metric.Int64Counter
+	pluginSaved    metric.Int64Counter
 	counterCache   sync.Map
 	histogramCache sync.Map
+	gaugeCache     sync.Map
 )
 
 // RecordProxyRequest records one proxied request's latency and outcome,
@@ -82,6 +87,34 @@ func RecordProxyRequest(ctx context.Context, model, provider string, status int,
 	reqTotal.Add(ctx, 1, attrs)
 }
 
+// RecordTokens records provider-reported token usage for one request, labeled
+// by model, provider, and direction (input/output). No-op unless OTel is
+// configured; zero counts (provider didn't report) are skipped.
+func RecordTokens(ctx context.Context, model, provider string, in, out int) {
+	if meter == nil || (in == 0 && out == 0) {
+		return
+	}
+	base := []attribute.KeyValue{
+		attribute.String("model", model),
+		attribute.String("provider", provider),
+	}
+	if in > 0 {
+		tokensTotal.Add(ctx, int64(in), metric.WithAttributes(append(base, attribute.String("direction", "input"))...))
+	}
+	if out > 0 {
+		tokensTotal.Add(ctx, int64(out), metric.WithAttributes(append(base, attribute.String("direction", "output"))...))
+	}
+}
+
+// RecordPluginSavings records compaction savings attributed to one plugin
+// (torana_bytes_saved_total{plugin}). No-op unless OTel is configured.
+func RecordPluginSavings(ctx context.Context, plugin string, savedBytes int64) {
+	if meter == nil || savedBytes <= 0 {
+		return
+	}
+	pluginSaved.Add(ctx, savedBytes, metric.WithAttributes(attribute.String("plugin", plugin)))
+}
+
 func statusClass(status int) string {
 	switch {
 	case status >= 500:
@@ -98,26 +131,27 @@ func statusClass(status int) string {
 }
 
 // RegisterStatsObservables bridges the running StatsTracker to OTLP as
-// observable counters, so compaction savings and offload failures export
-// without any plugin. No-op unless OTel is configured. Call once after InitOTel.
+// observable counters, so throughput and offload failures export without any
+// plugin. Savings bytes are NOT bridged here — they export as the labeled
+// sync counter torana_bytes_saved_total{plugin} (see RecordPluginSavings);
+// registering the same name as an observable would conflict.
+// No-op unless OTel is configured. Call once after InitOTel.
 func RegisterStatsObservables(st *StatsTracker) {
 	if meter == nil || st == nil {
 		return
 	}
-	bytesSaved, _ := meter.Int64ObservableCounter("torana_bytes_saved_total")
 	compactions, _ := meter.Int64ObservableCounter("torana_compactions_total")
 	offloadFails, _ := meter.Int64ObservableCounter("torana_offload_failures_total")
 	bytesIn, _ := meter.Int64ObservableCounter("torana_bytes_in_total")
 	bytesOut, _ := meter.Int64ObservableCounter("torana_bytes_out_total")
 	_, _ = meter.RegisterCallback(func(_ context.Context, o metric.Observer) error {
 		s := st.Snapshot()
-		o.ObserveInt64(bytesSaved, s.BytesSaved)
 		o.ObserveInt64(compactions, s.Compactions)
 		o.ObserveInt64(offloadFails, s.OffloadFailures)
 		o.ObserveInt64(bytesIn, s.TotalBytesIn)
 		o.ObserveInt64(bytesOut, s.TotalBytesOut)
 		return nil
-	}, bytesSaved, compactions, offloadFails, bytesIn, bytesOut)
+	}, compactions, offloadFails, bytesIn, bytesOut)
 }
 
 // EmitPluginMetric records a custom metric emitted by a WASM plugin, tagged
@@ -151,6 +185,11 @@ func EmitPluginMetric(ctx context.Context, pluginName, metricName string, metric
 		}
 		v.(metric.Float64Histogram).Record(ctx, value, opt)
 	case 2:
-		// Not implementing gauge cache for simplicity
+		v, ok := gaugeCache.Load(metricName)
+		if !ok {
+			g, _ := meter.Float64Gauge(metricName)
+			v, _ = gaugeCache.LoadOrStore(metricName, g)
+		}
+		v.(metric.Float64Gauge).Record(ctx, value, opt)
 	}
 }

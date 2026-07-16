@@ -231,8 +231,9 @@ type Runtime struct {
 	OffloadFunc func(ctx context.Context, payloadJSON string) (string, error)
 
 	// SavingsFunc handles torana_record_savings host calls (compaction
-	// byte savings reported by plugins). Set by the server.
-	SavingsFunc func(originalBytes, finalBytes int64)
+	// byte savings reported by plugins), attributed to the calling plugin.
+	// Set by the server.
+	SavingsFunc func(plugin string, originalBytes, finalBytes int64)
 }
 
 // wasmCompilationCache is shared by every Runtime in the process. wazero's
@@ -467,7 +468,7 @@ func (r *Runtime) installHostFunctions() {
 			if err := json.Unmarshal([]byte(args), &pl); err != nil || pl.OriginalBytes < 0 || pl.FinalBytes < 0 {
 				res = `{"status":"error","message":"invalid payload"}`
 			} else if r.SavingsFunc != nil {
-				r.SavingsFunc(pl.OriginalBytes, pl.FinalBytes)
+				r.SavingsFunc(pluginName, pl.OriginalBytes, pl.FinalBytes)
 				res = `{"status":"ok"}`
 			} else {
 				res = `{"status":"error","message":"savings tracking not configured"}`

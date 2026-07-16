@@ -1,7 +1,7 @@
 {
   "name": "otel",
-  "version": "0.4.0",
-  "description": "OpenTelemetry request-shape metrics (request/response counts, message/tool histograms) labeled by model; latency and error rate are emitted host-side",
+  "version": "0.5.0",
+  "description": "OpenTelemetry per-request metrics: request shape on the way in; latency, status class, and token usage (from the host's _response signal) on the way out",
   "hooks": [
     {"name": "run_before_request", "priority": 50},
     {"name": "run_after_response", "priority": 50}
