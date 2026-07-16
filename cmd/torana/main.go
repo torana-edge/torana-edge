@@ -51,6 +51,15 @@ func main() {
 		DefaultProvider: os.Getenv("TORANA_DEFAULT_PROVIDER"),
 	}
 
+	// Initialize OTel BEFORE the server so New can bridge its StatsTracker to
+	// the meter (RegisterStatsObservables is a no-op if OTel is disabled).
+	if otelShutdown, err := metrics.InitOTel(context.Background()); err == nil {
+		//nolint:errcheck
+		defer otelShutdown(context.Background())
+	} else {
+		log.Printf("Failed to init OTel: %v", err)
+	}
+
 	// --- server ---------------------------------------------------------
 	srv, err := proxy.New(cfg)
 	if err != nil {
@@ -60,13 +69,6 @@ func main() {
 	// Graceful shutdown on Ctrl+C / SIGTERM (Docker/K8s).
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-
-	if otelShutdown, err := metrics.InitOTel(context.Background()); err == nil {
-		//nolint:errcheck
-		defer otelShutdown(context.Background())
-	} else {
-		log.Printf("Failed to init OTel: %v", err)
-	}
 
 	go func() {
 		defer func() {

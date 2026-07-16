@@ -18,7 +18,14 @@ type StreamAdapter struct{}
 
 // geminiStreamChunk is a single JSON line from the Gemini streaming endpoint.
 type geminiStreamChunk struct {
-	Candidates []geminiStreamCandidate `json:"candidates"`
+	Candidates    []geminiStreamCandidate `json:"candidates"`
+	UsageMetadata *geminiUsageMetadata    `json:"usageMetadata,omitempty"`
+}
+
+type geminiUsageMetadata struct {
+	PromptTokenCount     int `json:"promptTokenCount"`
+	CandidatesTokenCount int `json:"candidatesTokenCount"`
+	TotalTokenCount      int `json:"totalTokenCount"`
 }
 
 type geminiStreamCandidate struct {
@@ -43,6 +50,10 @@ func (s *StreamAdapter) ParseStream(body io.Reader) <-chan engine.StreamEvent {
 	go func() {
 		defer close(ch)
 		scanner := bufio.NewScanner(body)
+		// Gemini repeats usageMetadata on chunks with growing counts; the
+		// last-seen value is the total, emitted just before FinishReason so
+		// the serializer can attach it to the final chunk.
+		var lastUsage *geminiUsageMetadata
 		for scanner.Scan() {
 			line := strings.TrimSpace(scanner.Text())
 			if line == "" {
@@ -60,6 +71,10 @@ func (s *StreamAdapter) ParseStream(body io.Reader) <-chan engine.StreamEvent {
 				return
 			}
 
+			if chunk.UsageMetadata != nil {
+				lastUsage = chunk.UsageMetadata
+			}
+
 			if len(chunk.Candidates) == 0 {
 				continue
 			}
@@ -69,6 +84,15 @@ func (s *StreamAdapter) ParseStream(body io.Reader) <-chan engine.StreamEvent {
 			if candidate.FinishReason != "" {
 				reason := mapGeminiFinishReason(candidate.FinishReason)
 				if reason != "" {
+					if lastUsage != nil && (lastUsage.PromptTokenCount > 0 || lastUsage.CandidatesTokenCount > 0) {
+						ch <- engine.StreamEvent{
+							Usage: &engine.StreamUsage{
+								InputTokens:  lastUsage.PromptTokenCount,
+								OutputTokens: lastUsage.CandidatesTokenCount,
+							},
+						}
+						lastUsage = nil
+					}
 					ch <- engine.StreamEvent{FinishReason: reason}
 				}
 				continue
@@ -162,6 +186,8 @@ type serializeState struct {
 // SerializeStream writes StreamEvents as Gemini JSON lines to writer.
 func (s *StreamAdapter) SerializeStream(w io.Writer, events <-chan engine.StreamEvent) error {
 	var toolState *serializeState
+	// pendingUsage rides the finish chunk as usageMetadata (Gemini's shape).
+	var pendingUsage *engine.StreamUsage
 
 	emitText := func(text string) error {
 		line := geminiStreamChunk{
@@ -223,10 +249,20 @@ func (s *StreamAdapter) SerializeStream(w io.Writer, events <-chan engine.Stream
 					FinishReason: reason,
 				}},
 			}
+			if pendingUsage != nil {
+				line.UsageMetadata = &geminiUsageMetadata{
+					PromptTokenCount:     pendingUsage.InputTokens,
+					CandidatesTokenCount: pendingUsage.OutputTokens,
+					TotalTokenCount:      pendingUsage.InputTokens + pendingUsage.OutputTokens,
+				}
+			}
 			return writeLine(w, line)
 		}
 
 		switch {
+		case event.Usage != nil:
+			pendingUsage = event.Usage
+
 		case event.TextDelta != nil:
 			if err := emitText(*event.TextDelta); err != nil {
 				return err

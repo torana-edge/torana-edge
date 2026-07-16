@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc"
 	"go.opentelemetry.io/otel/metric"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
@@ -40,25 +41,133 @@ func InitOTel(ctx context.Context) (func(context.Context) error, error) {
 	)
 
 	otel.SetMeterProvider(provider)
-	meter = provider.Meter("torana.edge.plugins")
+	initInstruments(provider.Meter("torana.edge"))
 
 	log.Printf("[metrics] OpenTelemetry enabled, exporting to %s", endpoint)
 
 	return provider.Shutdown, nil
 }
 
+// initInstruments installs the meter and creates the host-owned request
+// instruments. The host is the only component that sees every response
+// (errors skip the plugin pipeline) and owns request timing, so these live
+// here rather than in a plugin. Split out so tests can install a manual reader.
+func initInstruments(m metric.Meter) {
+	meter = m
+	reqDuration, _ = m.Float64Histogram("torana_request_duration_ms", metric.WithUnit("ms"))
+	reqTotal, _ = m.Int64Counter("torana_requests_total")
+	tokensTotal, _ = m.Int64Counter("torana_tokens_total")
+	pluginSaved, _ = m.Int64Counter("torana_bytes_saved_total")
+}
+
 var (
 	meter          metric.Meter
+	reqDuration    metric.Float64Histogram
+	reqTotal       metric.Int64Counter
+	tokensTotal    metric.Int64Counter
+	pluginSaved    metric.Int64Counter
 	counterCache   sync.Map
 	histogramCache sync.Map
+	gaugeCache     sync.Map
 )
 
-// EmitPluginMetric records a custom metric emitted by a WASM plugin.
-// type: 0=counter, 1=histogram, 2=gauge
-func EmitPluginMetric(ctx context.Context, pluginName, metricName string, metricType int, value float64) {
+// RecordProxyRequest records one proxied request's latency and outcome,
+// labeled by model, provider, and status class (2xx/4xx/5xx). No-op unless OTel
+// is configured.
+func RecordProxyRequest(ctx context.Context, model, provider string, status int, durationMs float64) {
 	if meter == nil {
 		return
 	}
+	attrs := metric.WithAttributes(
+		attribute.String("model", model),
+		attribute.String("provider", provider),
+		attribute.String("status_class", statusClass(status)),
+	)
+	reqDuration.Record(ctx, durationMs, attrs)
+	reqTotal.Add(ctx, 1, attrs)
+}
+
+// RecordTokens records provider-reported token usage for one request, labeled
+// by model, provider, and direction (input/output). No-op unless OTel is
+// configured; zero counts (provider didn't report) are skipped.
+func RecordTokens(ctx context.Context, model, provider string, in, out int) {
+	if meter == nil || (in == 0 && out == 0) {
+		return
+	}
+	base := []attribute.KeyValue{
+		attribute.String("model", model),
+		attribute.String("provider", provider),
+	}
+	if in > 0 {
+		tokensTotal.Add(ctx, int64(in), metric.WithAttributes(append(base, attribute.String("direction", "input"))...))
+	}
+	if out > 0 {
+		tokensTotal.Add(ctx, int64(out), metric.WithAttributes(append(base, attribute.String("direction", "output"))...))
+	}
+}
+
+// RecordPluginSavings records compaction savings attributed to one plugin
+// (torana_bytes_saved_total{plugin}). No-op unless OTel is configured.
+func RecordPluginSavings(ctx context.Context, plugin string, savedBytes int64) {
+	if meter == nil || savedBytes <= 0 {
+		return
+	}
+	pluginSaved.Add(ctx, savedBytes, metric.WithAttributes(attribute.String("plugin", plugin)))
+}
+
+func statusClass(status int) string {
+	switch {
+	case status >= 500:
+		return "5xx"
+	case status >= 400:
+		return "4xx"
+	case status >= 300:
+		return "3xx"
+	case status >= 200:
+		return "2xx"
+	default:
+		return "other"
+	}
+}
+
+// RegisterStatsObservables bridges the running StatsTracker to OTLP as
+// observable counters, so throughput and offload failures export without any
+// plugin. Savings bytes are NOT bridged here — they export as the labeled
+// sync counter torana_bytes_saved_total{plugin} (see RecordPluginSavings);
+// registering the same name as an observable would conflict.
+// No-op unless OTel is configured. Call once after InitOTel.
+func RegisterStatsObservables(st *StatsTracker) {
+	if meter == nil || st == nil {
+		return
+	}
+	compactions, _ := meter.Int64ObservableCounter("torana_compactions_total")
+	offloadFails, _ := meter.Int64ObservableCounter("torana_offload_failures_total")
+	bytesIn, _ := meter.Int64ObservableCounter("torana_bytes_in_total")
+	bytesOut, _ := meter.Int64ObservableCounter("torana_bytes_out_total")
+	_, _ = meter.RegisterCallback(func(_ context.Context, o metric.Observer) error {
+		s := st.Snapshot()
+		o.ObserveInt64(compactions, s.Compactions)
+		o.ObserveInt64(offloadFails, s.OffloadFailures)
+		o.ObserveInt64(bytesIn, s.TotalBytesIn)
+		o.ObserveInt64(bytesOut, s.TotalBytesOut)
+		return nil
+	}, compactions, offloadFails, bytesIn, bytesOut)
+}
+
+// EmitPluginMetric records a custom metric emitted by a WASM plugin, tagged
+// with the plugin name plus any plugin-supplied labels.
+// type: 0=counter, 1=histogram, 2=gauge
+func EmitPluginMetric(ctx context.Context, pluginName, metricName string, metricType int, value float64, labels map[string]string) {
+	if meter == nil {
+		return
+	}
+
+	attrs := make([]attribute.KeyValue, 0, len(labels)+1)
+	attrs = append(attrs, attribute.String("plugin", pluginName))
+	for k, v := range labels {
+		attrs = append(attrs, attribute.String(k, v))
+	}
+	opt := metric.WithAttributes(attrs...)
 
 	switch metricType {
 	case 0:
@@ -67,17 +176,20 @@ func EmitPluginMetric(ctx context.Context, pluginName, metricName string, metric
 			c, _ := meter.Float64Counter(metricName)
 			v, _ = counterCache.LoadOrStore(metricName, c)
 		}
-		c := v.(metric.Float64Counter)
-		c.Add(ctx, value, metric.WithAttributes(semconv.ServiceNameKey.String(pluginName)))
+		v.(metric.Float64Counter).Add(ctx, value, opt)
 	case 1:
 		v, ok := histogramCache.Load(metricName)
 		if !ok {
 			h, _ := meter.Float64Histogram(metricName)
 			v, _ = histogramCache.LoadOrStore(metricName, h)
 		}
-		h := v.(metric.Float64Histogram)
-		h.Record(ctx, value, metric.WithAttributes(semconv.ServiceNameKey.String(pluginName)))
+		v.(metric.Float64Histogram).Record(ctx, value, opt)
 	case 2:
-		// Not implementing gauge cache for simplicity
+		v, ok := gaugeCache.Load(metricName)
+		if !ok {
+			g, _ := meter.Float64Gauge(metricName)
+			v, _ = gaugeCache.LoadOrStore(metricName, g)
+		}
+		v.(metric.Float64Gauge).Record(ctx, value, opt)
 	}
 }

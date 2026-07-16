@@ -18,6 +18,7 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -112,6 +113,42 @@ type reqState struct {
 	// mid-request would otherwise drain and close the runtime holding this
 	// request's meta state (fragment buffers, mutation registry).
 	Pipeline *plugin.PluginPipeline
+
+	// Observability fields, populated across phases and read by the handler
+	// after ServeHTTP to emit host request metrics. Model/Provider are set in
+	// the Director; UpstreamStatus in ModifyResponse.
+	Model          string
+	Provider       string
+	UpstreamStatus int
+	// Start marks when the handler began proxying (drives _response.duration_ms
+	// and the host latency metric).
+	Start time.Time
+	// UsageIn/UsageOut are provider-reported token counts, captured from the
+	// stream usage frame or the JSON usage object. Zero when the provider
+	// didn't report.
+	UsageIn  int
+	UsageOut int
+	// UsageInjected marks that the Director opted an openai stream into
+	// stream_options.include_usage on the caller's behalf; the resulting
+	// usage frame is consumed host-side and never forwarded to the client.
+	UsageInjected bool
+}
+
+// responseMeta builds the _response signal handed to run_after_response so
+// plugins can observe latency, upstream status, and token usage.
+func (rs *reqState) responseMeta() map[string]any {
+	durationMs := 0.0
+	if !rs.Start.IsZero() {
+		durationMs = float64(time.Since(rs.Start).Microseconds()) / 1000
+	}
+	return map[string]any{
+		"duration_ms":     durationMs,
+		"upstream_status": rs.UpstreamStatus,
+		"usage": map[string]any{
+			"input_tokens":  rs.UsageIn,
+			"output_tokens": rs.UsageOut,
+		},
+	}
 }
 
 // reqStateFrom returns the request state stashed by the HTTP handler,
@@ -136,6 +173,9 @@ func New(cfg Config) (*Server, error) {
 
 	// --- stats tracker -----------------------------------------------------
 	statsTracker := metrics.NewStatsTracker()
+	// Bridge cumulative savings/throughput counters to OTLP (no-op if OTel
+	// is disabled; InitOTel runs before New in main).
+	metrics.RegisterStatsObservables(statsTracker)
 
 	s := &Server{
 		config:      cfg,
@@ -174,8 +214,12 @@ func New(cfg Config) (*Server, error) {
 				}
 				return out, err
 			}
-			// Plugins report compaction savings via torana_record_savings.
-			rt.SavingsFunc = s.stats.RecordCompaction
+			// Plugins report compaction savings via torana_record_savings,
+			// attributed per plugin in /stats and OTLP.
+			rt.SavingsFunc = func(pluginName string, originalBytes, finalBytes int64) {
+				s.stats.RecordCompaction(pluginName, originalBytes, finalBytes)
+				metrics.RecordPluginSavings(context.Background(), pluginName, originalBytes-finalBytes)
+			}
 			return rt
 		}
 		pp, err := plugin.NewPipeline(newRuntime(), plugin.PluginConfig{
@@ -336,6 +380,13 @@ func New(cfg Config) (*Server, error) {
 				}
 			}
 
+			// Record routing facts for host request metrics (read by the
+			// handler after ServeHTTP).
+			if rs := reqStateFrom(req.Context()); rs != nil {
+				rs.Model = chat.Model
+				rs.Provider = provName
+			}
+
 			identity := ""
 			if chat.ToranaMeta != nil {
 				if id, ok := chat.ToranaMeta["identity"].(string); ok {
@@ -347,6 +398,21 @@ func New(cfg Config) (*Server, error) {
 			}
 			rc := req.Context().Value(routeContextKey{}).(*RouteContext)
 			rc.Identity = identity
+
+			// Token usage on openai streams is opt-in; opt in on the caller's
+			// behalf so the host can meter tokens. The resulting usage frame
+			// is consumed host-side and suppressed from the client's stream
+			// (see the usage tap in ModifyResponse) — unless the client asked
+			// for it itself, in which case nothing is injected or suppressed.
+			if fmt.Name == "openai" && chat.Stream {
+				if _, ok := chat.ProviderExtensions["stream_options"]; !ok {
+					if chat.ProviderExtensions == nil {
+						chat.ProviderExtensions = map[string]any{}
+					}
+					chat.ProviderExtensions["stream_options"] = map[string]any{"include_usage": true}
+					reqStateFrom(req.Context()).UsageInjected = true
+				}
+			}
 
 			newBody, err := fmt.Request.Marshal(chat)
 			if err != nil {
@@ -366,11 +432,26 @@ func New(cfg Config) (*Server, error) {
 		},
 
 		ModifyResponse: func(resp *http.Response) error {
-			// Skip pipeline for error responses — don't try to
-			// reverse-translate a 4xx/5xx body that isn't a valid
-			// chat completion response.
+			if rs := reqStateFrom(resp.Request.Context()); rs != nil {
+				rs.UpstreamStatus = resp.StatusCode
+			}
+			// Skip the mutation pipeline for error responses — don't try to
+			// reverse-translate a 4xx/5xx body that isn't a valid chat
+			// completion response. Audit/metrics plugins still observe the
+			// outcome through an observe-only hook carrying _response.
 			log.Printf("Upstream returned %d", resp.StatusCode)
 			if resp.StatusCode >= 400 {
+				ctx := resp.Request.Context()
+				rs := reqStateFrom(ctx)
+				if pl := rs.Pipeline; pl != nil {
+					errChat := &engine.ChatRequest{
+						Model:      rs.Model,
+						ToranaMeta: map[string]any{"_response": rs.responseMeta()},
+					}
+					if _, err := pl.RunAfterResponse(ctx, rs.ID, errChat); err != nil {
+						log.Printf("plugin run_after_response (error path): %v", err)
+					}
+				}
 				return nil
 			}
 
@@ -391,6 +472,30 @@ func New(cfg Config) (*Server, error) {
 				upstreamBody := resp.Body
 
 				events := fmt.Stream.ParseStream(upstreamBody)
+
+				// Host usage tap: record provider-reported tokens for metrics
+				// and the _response signal. When the host injected the usage
+				// opt-in (openai), the frame is dropped here so the client's
+				// stream shape is exactly what it asked for; otherwise it
+				// passes through (and on to plugins) untouched.
+				rs := reqStateFrom(resp.Request.Context())
+				{
+					in := events
+					tapped := make(chan engine.StreamEvent)
+					go func() {
+						defer close(tapped)
+						for ev := range in {
+							if ev.Usage != nil {
+								rs.UsageIn, rs.UsageOut = ev.Usage.InputTokens, ev.Usage.OutputTokens
+								if rs.UsageInjected {
+									continue
+								}
+							}
+							tapped <- ev
+						}
+					}()
+					events = tapped
+				}
 
 				// Hook WASM pipeline into the stream. Plugins may suppress,
 				// replace, or fan out each event (e.g. buffer argument
@@ -427,10 +532,16 @@ func New(cfg Config) (*Server, error) {
 					}
 					// Observational run_after_response for streaming
 					// responses (metrics/audit plugins). Mutations are not
-					// applied — the stream has already been written.
+					// applied — the stream has already been written. The
+					// _response signal (latency/status/usage) is complete
+					// here: the whole stream has been serialized.
 					ctx := resp.Request.Context()
 					if pl := reqStateFrom(ctx).Pipeline; pl != nil {
 						if chat, _ := ctx.Value(chatCtxKey{}).(*engine.ChatRequest); chat != nil {
+							if chat.ToranaMeta == nil {
+								chat.ToranaMeta = map[string]any{}
+							}
+							chat.ToranaMeta["_response"] = rs.responseMeta()
 							if _, err := pl.RunAfterResponse(ctx, reqStateFrom(ctx).ID, chat); err != nil {
 								log.Printf("plugin run_after_response (stream): %v", err)
 							}
@@ -460,20 +571,33 @@ func New(cfg Config) (*Server, error) {
 				// run_after_response) for every provider format. Uses the
 				// request-pinned pipeline.
 				ctx := resp.Request.Context()
-				if pl := reqStateFrom(ctx).Pipeline; pl != nil {
-					if f, _ := ctx.Value(formatCtxKey{}).(*format.Format); f != nil {
-						chat, _ := ctx.Value(chatCtxKey{}).(*engine.ChatRequest)
-						modified, modErr := runJSONResponseHooks(ctx, pl, reqStateFrom(ctx).ID, f.Name, chat, bodyBytes)
-						if modErr != nil {
-							log.Printf("wasm json response hook error: %v", modErr)
-						} else {
-							bodyBytes = modified
+				rs := reqStateFrom(ctx)
+				f, _ := ctx.Value(formatCtxKey{}).(*format.Format)
+				if pl := rs.Pipeline; pl != nil && f != nil {
+					chat, _ := ctx.Value(chatCtxKey{}).(*engine.ChatRequest)
+					// Records provider usage into rs as a side effect.
+					modified, modErr := runJSONResponseHooks(ctx, pl, rs.ID, f.Name, chat, bodyBytes)
+					if modErr != nil {
+						log.Printf("wasm json response hook error: %v", modErr)
+					} else {
+						bodyBytes = modified
+					}
+				} else if f != nil {
+					// No pipeline — still meter provider-reported usage.
+					var body map[string]any
+					if json.Unmarshal(bodyBytes, &body) == nil {
+						if u := extractResponse(f.Name, body).usage; u != nil {
+							rs.UsageIn, rs.UsageOut = u.InputTokens, u.OutputTokens
 						}
 					}
 				}
 
 				resp.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 				resp.ContentLength = int64(len(bodyBytes))
+				// ReverseProxy copies resp.Header verbatim — a stale
+				// Content-Length after a body-mutating hook makes the server
+				// write more bytes than declared and abort the connection.
+				resp.Header.Set("Content-Length", strconv.Itoa(len(bodyBytes)))
 				return nil
 			}
 
@@ -518,6 +642,7 @@ func New(cfg Config) (*Server, error) {
 		rs := &reqState{
 			ID:         reqCounter.Add(1),
 			CallerAuth: strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "),
+			Start:      time.Now(),
 		}
 		if pp := s.pluginPipeline.Load(); pp != nil {
 			rs.Pipeline = pp.(*plugin.PluginPipeline)
@@ -560,6 +685,12 @@ func New(cfg Config) (*Server, error) {
 		proxy.ServeHTTP(tw, r)
 
 		s.stats.RecordRequest(tr.bytesRead, tw.bytesWritten)
+		s.stats.RecordTokens(int64(rs.UsageIn), int64(rs.UsageOut))
+		// Host request metrics: latency + outcome, labeled by model/provider.
+		// The host sees every response (including errors and vetoes), so this
+		// is the reliable source of truth for latency and status.
+		metrics.RecordProxyRequest(r.Context(), rs.Model, rs.Provider, tw.status, float64(time.Since(rs.Start).Microseconds())/1000)
+		metrics.RecordTokens(r.Context(), rs.Model, rs.Provider, rs.UsageIn, rs.UsageOut)
 	})
 
 	srv := &http.Server{
@@ -648,9 +779,18 @@ func joinURLPath(base, rel string) string {
 type trackingWriter struct {
 	http.ResponseWriter
 	bytesWritten int64
+	status       int
+}
+
+func (tw *trackingWriter) WriteHeader(code int) {
+	tw.status = code
+	tw.ResponseWriter.WriteHeader(code)
 }
 
 func (tw *trackingWriter) Write(b []byte) (int, error) {
+	if tw.status == 0 {
+		tw.status = http.StatusOK // implicit 200 on first write
+	}
 	n, err := tw.ResponseWriter.Write(b)
 	tw.bytesWritten += int64(n)
 	return n, err

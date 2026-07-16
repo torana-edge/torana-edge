@@ -22,9 +22,22 @@ type bedrockStreamEvent struct {
 	ContentBlockDelta *bedrockContentBlockDelta `json:"contentBlockDelta,omitempty"`
 	ContentBlockStop  *bedrockContentBlockStop  `json:"contentBlockStop,omitempty"`
 	MessageStop       *bedrockMessageStop       `json:"messageStop,omitempty"`
+	Metadata          *bedrockMetadata          `json:"metadata,omitempty"`
 	// Error responses
 	Type  string        `json:"__type,omitempty"`
 	Error *bedrockError `json:"error,omitempty"`
+}
+
+// bedrockMetadata is the ConverseStream trailer carrying token usage.
+// It arrives AFTER messageStop on the wire.
+type bedrockMetadata struct {
+	Usage *bedrockUsage `json:"usage,omitempty"`
+}
+
+type bedrockUsage struct {
+	InputTokens  int `json:"inputTokens"`
+	OutputTokens int `json:"outputTokens"`
+	TotalTokens  int `json:"totalTokens"`
 }
 
 type bedrockMessageStart struct {
@@ -202,6 +215,17 @@ func parseBedrockEvent(line string, inThinking *bool, inToolUse *bool, signature
 	case se.MessageStop != nil:
 		reason := mapBedrockStopReason(se.MessageStop.StopReason)
 		return &engine.StreamEvent{FinishReason: reason}
+
+	case se.Metadata != nil && se.Metadata.Usage != nil:
+		u := se.Metadata.Usage
+		if u.InputTokens > 0 || u.OutputTokens > 0 {
+			return &engine.StreamEvent{
+				Usage: &engine.StreamUsage{
+					InputTokens:  u.InputTokens,
+					OutputTokens: u.OutputTokens,
+				},
+			}
+		}
 	}
 
 	return nil
@@ -367,6 +391,19 @@ func marshalStreamEvent(evt engine.StreamEvent) []string {
 		se := bedrockStreamEvent{
 			MessageStop: &bedrockMessageStop{
 				StopReason: reason,
+			},
+		}
+		b, _ := json.Marshal(se)
+		return []string{string(b) + "\n"}
+
+	case evt.Usage != nil:
+		se := bedrockStreamEvent{
+			Metadata: &bedrockMetadata{
+				Usage: &bedrockUsage{
+					InputTokens:  evt.Usage.InputTokens,
+					OutputTokens: evt.Usage.OutputTokens,
+					TotalTokens:  evt.Usage.InputTokens + evt.Usage.OutputTokens,
+				},
 			},
 		}
 		b, _ := json.Marshal(se)
