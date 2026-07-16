@@ -136,6 +136,67 @@ func TestOffloadEmptyContentSurfacesFinishReason(t *testing.T) {
 	}
 }
 
+// TestOffloadProviderOverride: a plugin payload naming a different provider
+// directs the call there (a local model, say), with its own model, and does
+// NOT forward the caller's credential to that provider.
+func TestOffloadProviderOverride(t *testing.T) {
+	var gotModel, gotAuth string
+	local := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		var req struct {
+			Model string `json:"model"`
+		}
+		json.NewDecoder(r.Body).Decode(&req)
+		gotModel = req.Model
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"choices":[{"message":{"content":"local-summary"}}]}`))
+	}))
+	defer local.Close()
+
+	cfg := provider.Config{
+		Providers: map[string]provider.Provider{
+			"cheap": {URL: "http://unused", Format: "openai"},
+			"local": {URL: local.URL, Format: "openai"},
+		},
+		Offload: provider.OffloadConfig{Enabled: true, Provider: "cheap", Model: "cheap-1"},
+	}
+	s, err := New(Config{Providers: cfg})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	ctx := context.WithValue(context.Background(), reqStateKey{}, &reqState{ID: 1, CallerAuth: "caller-key"})
+	got, err := s.offloadCompletion(ctx, `{"system_prompt":"s","user_prompt":"u","provider":"local","model":"local-1"}`)
+	if err != nil {
+		t.Fatalf("offloadCompletion: %v", err)
+	}
+	if got != "local-summary" {
+		t.Fatalf("got %q, want local-summary (call must hit the overridden provider)", got)
+	}
+	if gotModel != "local-1" {
+		t.Fatalf("model = %q, want local-1", gotModel)
+	}
+	if gotAuth != "" {
+		t.Fatalf("Authorization = %q, want empty — caller credential must NOT be forwarded to an overridden provider", gotAuth)
+	}
+}
+
+// TestOffloadOverrideRequiresModel: overriding the provider without a model errors
+// (off.Model belongs to the default provider).
+func TestOffloadOverrideRequiresModel(t *testing.T) {
+	cfg := provider.Config{
+		Providers: map[string]provider.Provider{
+			"cheap": {URL: "http://x", Format: "openai"},
+			"local": {URL: "http://y", Format: "openai"},
+		},
+		Offload: provider.OffloadConfig{Enabled: true, Provider: "cheap", Model: "cheap-1"},
+	}
+	s, _ := New(Config{Providers: cfg})
+	ctx := context.WithValue(context.Background(), reqStateKey{}, &reqState{ID: 1})
+	if _, err := s.offloadCompletion(ctx, `{"user_prompt":"u","provider":"local"}`); err == nil {
+		t.Fatal("expected error when overriding provider without a model")
+	}
+}
+
 // TestOffloadDisabledErrors: offload without config errors instead of
 // guessing a provider.
 func TestOffloadDisabledErrors(t *testing.T) {

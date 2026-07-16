@@ -28,6 +28,13 @@ func (s *Server) offloadCompletion(ctx context.Context, payloadJSON string) (str
 		SystemPrompt string `json:"system_prompt"`
 		UserPrompt   string `json:"user_prompt"`
 		Model        string `json:"model"`
+		// Provider optionally overrides the configured offload provider so a
+		// plugin can direct its call to a specific endpoint (e.g. a
+		// guaranteed-local model for PII scanning). Must exist in Providers.
+		Provider string `json:"provider"`
+		// APIKeyEnv optionally names the env var holding the key for that
+		// provider (only consulted alongside a provider override).
+		APIKeyEnv string `json:"api_key_env"`
 	}
 	if err := json.Unmarshal([]byte(payloadJSON), &p); err != nil {
 		return "", fmt.Errorf("offload: parse payload: %w", err)
@@ -35,27 +42,45 @@ func (s *Server) offloadCompletion(ctx context.Context, payloadJSON string) (str
 
 	cfg := s.GetConfig().Providers
 	off := cfg.Offload
-	if !off.Enabled {
+	overrideProvider := p.Provider != ""
+	if !off.Enabled && !overrideProvider {
 		return "", fmt.Errorf("offload not configured — set offload.enabled, offload.provider, offload.model")
 	}
-	prov, ok := cfg.Providers[off.Provider]
+
+	// Provider precedence: plugin payload overrides the configured offload provider.
+	provName := off.Provider
+	if overrideProvider {
+		provName = p.Provider
+	}
+	prov, ok := cfg.Providers[provName]
 	if !ok {
-		// Validated at startup; can only happen after a bad hot-reload.
-		return "", fmt.Errorf("offload: provider %q not found", off.Provider)
+		// The default is validated at startup; an override names an arbitrary provider.
+		return "", fmt.Errorf("offload: provider %q not found", provName)
 	}
 
-	// Model precedence: plugin payload overrides config.
+	// Model precedence: plugin payload overrides config. off.Model belongs to
+	// the default provider, so an override must carry its own model.
 	model := p.Model
 	if model == "" {
+		if overrideProvider {
+			return "", fmt.Errorf("offload: model required when provider is overridden")
+		}
 		model = off.Model
 	}
 
-	// Auth precedence: dedicated key env, else the caller's credential.
+	// Auth: a payload key env wins, else the configured offload key. Fall back
+	// to the caller's credential ONLY for the default provider — the caller's
+	// key authenticates the primary provider, not a plugin-chosen endpoint, so
+	// it is never forwarded to an overridden (e.g. local) provider.
 	apiKey := ""
-	if off.APIKeyEnv != "" {
-		apiKey = os.Getenv(off.APIKeyEnv)
+	keyEnv := off.APIKeyEnv
+	if p.APIKeyEnv != "" {
+		keyEnv = p.APIKeyEnv
 	}
-	if apiKey == "" {
+	if keyEnv != "" {
+		apiKey = os.Getenv(keyEnv)
+	}
+	if apiKey == "" && !overrideProvider {
 		apiKey = reqStateFrom(ctx).CallerAuth
 	}
 
