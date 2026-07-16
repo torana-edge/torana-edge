@@ -39,6 +39,7 @@ const (
 const (
 	MetricCounter   = 0
 	MetricHistogram = 1
+	MetricGauge     = 2
 )
 
 func Log(msg string, level int32) {}

@@ -8,6 +8,7 @@ package main
 import (
 	"context"
 	"log"
+	"net"
 	"os"
 	"os/signal"
 	"strconv"
@@ -89,7 +90,19 @@ func main() {
 	})
 	defer stopWatch()
 
-	if err := srv.ListenAndServe(); err != nil {
+	// TORANA_BIND restricts the listen address (e.g. "127.0.0.1" to keep the
+	// proxy localhost-only — it forwards caller credentials, so never expose
+	// it beyond the machine unless that's intentional). Default binds all
+	// interfaces (container deployments).
+	if host := os.Getenv("TORANA_BIND"); host != "" {
+		ln, err := net.Listen("tcp", net.JoinHostPort(host, strconv.Itoa(provCfg.Port)))
+		if err != nil {
+			log.Fatalf("Failed to bind %s:%d: %v", host, provCfg.Port, err)
+		}
+		if err := srv.Serve(ln); err != nil {
+			log.Fatalf("Server error: %v", err)
+		}
+	} else if err := srv.ListenAndServe(); err != nil {
 		log.Fatalf("Server error: %v", err)
 	}
 	log.Println("Torana Edge stopped.")
