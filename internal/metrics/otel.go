@@ -58,6 +58,7 @@ func initInstruments(m metric.Meter) {
 	reqTotal, _ = m.Int64Counter("torana_requests_total")
 	tokensTotal, _ = m.Int64Counter("torana_tokens_total")
 	pluginSaved, _ = m.Int64Counter("torana_bytes_saved_total")
+	routedTotal, _ = m.Int64Counter("torana_routed_requests_total")
 }
 
 var (
@@ -66,6 +67,7 @@ var (
 	reqTotal       metric.Int64Counter
 	tokensTotal    metric.Int64Counter
 	pluginSaved    metric.Int64Counter
+	routedTotal    metric.Int64Counter
 	counterCache   sync.Map
 	histogramCache sync.Map
 	gaugeCache     sync.Map
@@ -104,6 +106,19 @@ func RecordTokens(ctx context.Context, model, provider string, in, out int) {
 	if out > 0 {
 		tokensTotal.Add(ctx, int64(out), metric.WithAttributes(append(base, attribute.String("direction", "output"))...))
 	}
+}
+
+// RecordRoutedRequest counts a plugin-initiated reroute
+// (torana_routed_requests_total{from_provider, to_provider}). No-op unless
+// OTel is configured.
+func RecordRoutedRequest(ctx context.Context, from, to string) {
+	if meter == nil {
+		return
+	}
+	routedTotal.Add(ctx, 1, metric.WithAttributes(
+		attribute.String("from_provider", from),
+		attribute.String("to_provider", to),
+	))
 }
 
 // RecordPluginSavings records compaction savings attributed to one plugin

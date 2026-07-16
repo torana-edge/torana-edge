@@ -14,7 +14,7 @@
       "format": "anthropic"
     },
     "local-slm": {
-      "_comment": "Local OpenAI-compatible endpoint (Ollama, vLLM, LM Studio). Point offload here to summarize tool output on a self-hosted small model at zero marginal cost. Ollama serves the OpenAI API at http://localhost:11434/v1/chat/completions, so set url to the host root.",
+      "_comment": "Local OpenAI-compatible endpoint (Ollama, vLLM, LM Studio). Point offload here to summarize tool output on a self-hosted small model at zero marginal cost. Ollama serves the OpenAI API at http://localhost:11434/v1/chat/completions, so set url to the host root. Providers may also set 'api_key_env' naming an env var with their own API key — required for plugin-initiated rerouting (env.route_request), where the caller's credential is never forwarded; leave it unset for local endpoints that need no auth.",
       "url": "http://localhost:11434",
       "format": "openai"
     }

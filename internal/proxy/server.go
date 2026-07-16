@@ -454,6 +454,21 @@ func New(cfg Config) (*Server, error) {
 			rc := req.Context().Value(routeContextKey{}).(*RouteContext)
 			rc.Identity = identity
 
+			// Content-based routing: a plugin holding env.route_request may
+			// redirect this request to another configured provider (same wire
+			// format) and/or override the model. Applied AFTER identity
+			// extraction so rate limiting still keys on the caller, and
+			// before marshal so the model override reaches the wire. Bad
+			// verdicts fail open to the original route.
+			if pl := reqStateFrom(req.Context()).Pipeline; pl != nil && pl.HasGrant("env.route_request") && chat.ToranaMeta != nil {
+				if raw, ok := chat.ToranaMeta["_route"]; ok {
+					delete(chat.ToranaMeta, "_route")
+					applyRoute(req, chat, prov.Format, provName, raw, currentCfg.Providers)
+					// Model may have been overridden; refresh the metrics fact.
+					reqStateFrom(req.Context()).Model = chat.Model
+				}
+			}
+
 			// Token usage on openai streams is opt-in; opt in on the caller's
 			// behalf so the host can meter tokens. The resulting usage frame
 			// is consumed host-side and suppressed from the client's stream

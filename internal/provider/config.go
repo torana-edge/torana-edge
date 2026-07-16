@@ -14,6 +14,12 @@ type Provider struct {
 	URL      string   `json:"url"`                // upstream base URL
 	Format   string   `json:"format"`             // wire format: "openai", "anthropic", "bedrock", "vertex"
 	Fallback []string `json:"fallback,omitempty"` // provider names to try on 429/5xx
+	// APIKeyEnv names an environment variable holding this provider's own
+	// API key. Used when a plugin reroutes a request here
+	// (env.route_request) — the caller's credential is never forwarded to a
+	// rerouted provider. Empty means the provider needs no auth (e.g. a
+	// local model server).
+	APIKeyEnv string `json:"api_key_env,omitempty"`
 }
 
 // Config is the top-level Torana configuration.
