@@ -234,6 +234,16 @@ type Runtime struct {
 	// byte savings reported by plugins), attributed to the calling plugin.
 	// Set by the server.
 	SavingsFunc func(plugin string, originalBytes, finalBytes int64)
+
+	// OriginalRequestFunc returns the pristine pre-pipeline request as pb
+	// bytes for env.original_request (empty when unavailable). Set by the
+	// server; grant-gated at dispatch.
+	OriginalRequestFunc func(ctx context.Context) []byte
+
+	// OriginalResponseFunc returns the raw upstream response body for
+	// env.original_response (empty when unavailable — e.g. streaming
+	// responses, which are never buffered). Set by the server.
+	OriginalResponseFunc func(ctx context.Context) []byte
 }
 
 // wasmCompilationCache is shared by every Runtime in the process. wazero's
@@ -455,6 +465,16 @@ func (r *Runtime) installHostFunctions() {
 			res = p.config
 			if res == "" {
 				res = "{}"
+			}
+		case "env.original_request":
+			// Pristine pre-pipeline request, pb-encoded. Empty = unavailable.
+			if r.OriginalRequestFunc != nil {
+				res = string(r.OriginalRequestFunc(ctx))
+			}
+		case "env.original_response":
+			// Raw upstream response body (non-streaming only). Empty = unavailable.
+			if r.OriginalResponseFunc != nil {
+				res = string(r.OriginalResponseFunc(ctx))
 			}
 		case "torana_db_query":
 			res = `{"status":"error","message":"database not configured — set plugins.config.compactor.dsn"}`

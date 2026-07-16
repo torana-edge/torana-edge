@@ -1,0 +1,11 @@
+{
+  "name": "test-responder-nogrant",
+  "version": "0.1.0",
+  "description": "Negative fixture: sets _respond without the env.respond_request grant; the proxy must ignore it",
+  "hooks": [
+    {"name": "run_before_request", "priority": 100}
+  ],
+  "permissions": [
+    {"name": "env.log", "description": "Diagnostic logging"}
+  ]
+}
