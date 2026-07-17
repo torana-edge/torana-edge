@@ -109,7 +109,26 @@ func (cb *contentBlock) UnmarshalJSON(data []byte) error {
 func (cb contentBlock) MarshalJSON() ([]byte, error) {
 	type alias contentBlock
 	a := alias(cb)
-	return json.Marshal(a)
+	b, err := json.Marshal(a)
+	if err != nil {
+		return nil, err
+	}
+	// Anthropic requires `input` on every tool_use block, even when the tool
+	// takes no arguments. The struct's `omitempty` drops an empty map, yielding
+	// a block with no input that the API rejects ("missing field `input`").
+	// This surfaces multi-turn: the client replays prior no-arg tool calls in
+	// history (and the intent plugin can strip "i" down to an empty object).
+	// Re-inject it as {} when absent. Only tool_use requires this; text and
+	// tool_result blocks must keep omitting input.
+	if cb.Type == "tool_use" && len(cb.Input) == 0 {
+		var m map[string]json.RawMessage
+		if err := json.Unmarshal(b, &m); err != nil {
+			return nil, err
+		}
+		m["input"] = json.RawMessage("{}")
+		return json.Marshal(m)
+	}
+	return b, nil
 }
 
 // Adapter implements format.RequestAdapter for Anthropic Messages.

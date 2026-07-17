@@ -379,4 +379,67 @@ func TestParallelToolResultsCoalesce(t *testing.T) {
 	}
 }
 
+// TestToolUseAlwaysHasInput: a tool call with no arguments must still
+// serialize `"input":{}` — Anthropic requires the field on every tool_use
+// block. Without it the API rejects the request with "missing field `input`".
+// Regression: found multi-turn during dogfooding (a replayed no-arg tool call,
+// or one the intent plugin stripped down to {}, produced an invalid block).
+func TestToolUseAlwaysHasInput(t *testing.T) {
+	adapter := &Adapter{}
+
+	cases := map[string]map[string]any{
+		"nil args":   nil,
+		"empty args": {},
+	}
+	for name, args := range cases {
+		t.Run(name, func(t *testing.T) {
+			chat := &engine.ChatRequest{
+				Model:     "claude-x",
+				MaxTokens: intPtr(64),
+				Messages: []engine.Message{
+					{Role: engine.RoleUser, Content: "list files"},
+					{Role: engine.RoleAssistant, ToolCalls: []engine.ToolCall{
+						{ID: "toolu_1", Name: "list_files", Arguments: args},
+					}},
+					{Role: engine.RoleTool, ToolCallID: "toolu_1", Content: "ok"},
+				},
+			}
+			out, err := adapter.Marshal(chat)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+
+			var got struct {
+				Messages []struct {
+					Content []struct {
+						Type  string          `json:"type"`
+						Input json.RawMessage `json:"input"`
+					} `json:"content"`
+				} `json:"messages"`
+			}
+			if err := json.Unmarshal(out, &got); err != nil {
+				t.Fatalf("output not valid JSON: %v\n%s", err, out)
+			}
+			var found bool
+			for _, m := range got.Messages {
+				for _, b := range m.Content {
+					if b.Type != "tool_use" {
+						continue
+					}
+					found = true
+					if len(b.Input) == 0 {
+						t.Fatalf("tool_use block missing input field: %s", out)
+					}
+					if string(b.Input) != "{}" {
+						t.Fatalf("empty-args tool_use input: got %s, want {}", b.Input)
+					}
+				}
+			}
+			if !found {
+				t.Fatalf("no tool_use block emitted: %s", out)
+			}
+		})
+	}
+}
+
 func intPtr(i int) *int { return &i }
