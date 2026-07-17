@@ -5,10 +5,14 @@
 // prompt addendum that embeds a one-line example transcript. No synthetic
 // messages are injected — a fake conversation is indistinguishable from real
 // history and measurably contaminates behavior (verbatim intent leaks,
-// topic-anchored refusals; see the Jul 16 experiments). Response side, it
+// topic-anchored refusals; see the Jul 16 experiments). It also keeps the
+// model's own history consistent: prior tool calls get their captured "i"
+// restored (rehydration), and never-captured ones get a heuristic fill —
+// without this the model imitates its "i"-stripped history and emission
+// collapses per tool (see rehydrateHistoryIntents). Response side, it
 // buffers the streamed tool-call arguments, extracts the "i" value into the
-// shared cross-request cache (keyed by tool_call_id), and strips "i" back off
-// so the agent harness never sees it.
+// shared cross-request cache (keyed by tool_call_id AND by tool name+args),
+// and strips "i" back off so the agent harness never sees it.
 //
 // It exists as its own plugin so the compactors are independent consumers:
 // run "intent" plus EITHER keyword_compactor (deterministic, local) OR
@@ -19,7 +23,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
+	"sync"
 
 	"github.com/torana-edge/torana-edge/pkg/pb"
 	sdk "github.com/torana-edge/torana-edge/pkg/plugin-sdk"
@@ -31,6 +37,30 @@ const (
 	intentField    = "i"
 	intentCacheKey = "intent"
 )
+
+// fillMode controls what happens to a history tool call whose intent was never
+// captured (the model organically omitted "i" — nothing to rehydrate):
+// "heuristic" (default) fills it with a template derived from the call's own
+// arguments and the current task; "off" leaves it untouched. Loaded once from
+// plugins.config.intent.
+var (
+	cfgOnce  sync.Once
+	fillMode = "heuristic"
+)
+
+func loadConfig() {
+	cfgOnce.Do(func() {
+		var c struct {
+			Fill string `json:"fill"`
+		}
+		if raw := sdk.PluginConfig(); raw != "" {
+			_ = json.Unmarshal([]byte(raw), &c)
+		}
+		if c.Fill != "" {
+			fillMode = c.Fill
+		}
+	})
+}
 
 func init() {
 	// ── Request side: teach the "i" convention ──────────────────────
@@ -169,11 +199,21 @@ func init() {
 
 // rehydrateHistoryIntents restores the "i" field onto the model's prior
 // assistant tool calls in the conversation history, reading each intent back
-// from the cross-request cache (keyed by tool_call_id — the same key the
-// response side wrote). This counters the model imitating its own "i"-stripped
-// history. Tool calls whose intent has aged out of the cache, or that already
-// carry "i" (a tool that natively declared the field), are left untouched.
+// from the cross-request cache. This counters the model imitating its own
+// "i"-stripped history. Calls whose intent was never captured are FILLED with
+// a derived heuristic (unless fill is "off"): history "i" values act as
+// few-shot examples, so a single "i"-less call becomes a self-reinforcing
+// per-tool precedent (measured: one organic miss collapsed that tool's
+// emission to 0 for the rest of the session), while presence — even a
+// mediocre fill among real intents — sustains near-100% emission without
+// dragging new-call quality down to the fill's level. A constant placeholder
+// is NOT safe: models copy the literal value into new calls. Trailing
+// reminder messages recovered only ~70% in the same experiments and add
+// contamination surface — kept as a fallback idea, not implemented.
 func rehydrateHistoryIntents(req *pb.ChatRequest) bool {
+	loadConfig()
+	task := latestUserSnippet(req.Messages)
+	restored, filled, present := 0, 0, 0
 	modified := false
 	for _, msg := range req.Messages {
 		if msg.Role != "assistant" || len(msg.ToolCalls) == 0 {
@@ -186,7 +226,8 @@ func rehydrateHistoryIntents(req *pb.ChatRequest) bool {
 			} else if json.Unmarshal(tc.ArgumentsJson, &args) != nil {
 				continue
 			}
-			if _, present := args[intentField]; present {
+			if _, ok := args[intentField]; ok {
+				present++
 				continue // already carries "i"
 			}
 			// Look up by the content key (tool name + args). This is the only
@@ -194,8 +235,23 @@ func rehydrateHistoryIntents(req *pb.ChatRequest) bool {
 			// turns — the response-stream ID we cached under never reappears
 			// in later request history.
 			intent, _ := sdk.HostCall("env.cache_get", contentKey(tc.Name, args))
-			if intent == "" {
-				continue // never captured or aged out of the cache
+			if intent != "" {
+				// Bridge the real intent to this request's own tool_call_id so
+				// the compactors' intent:<tool_call_id> lookup (keyed off the
+				// tool RESULT message) works on harnesses that reassign IDs.
+				sdk.HostCall("env.cache_set", fmt.Sprintf(`{"key":"%s:%s","value":%q}`, intentCacheKey, tc.Id, intent))
+				restored++
+			} else {
+				if fillMode == "off" {
+					continue
+				}
+				// Filled values are injected into history only — never cached
+				// and never bridged: the intent cache stays real-captured-only
+				// so compaction quality is driven by real intents.
+				intent = heuristicFill(tc.Name, args, task)
+				sdk.EmitMetric("torana_intent_filled_total", sdk.MetricCounter, 1, map[string]string{"tool": tc.Name})
+				sdk.Log(fmt.Sprintf("intent-fill[%s %s]: %s", tc.Name, tc.Id, intent), sdk.LogLevelDebug)
+				filled++
 			}
 			args[intentField] = intent
 			if b, err := json.Marshal(args); err == nil {
@@ -204,7 +260,65 @@ func rehydrateHistoryIntents(req *pb.ChatRequest) bool {
 			}
 		}
 	}
+	if restored+filled > 0 {
+		sdk.Log(fmt.Sprintf("rehydrate: %d restored, %d filled, %d already present", restored, filled, present), sdk.LogLevelDebug)
+	}
 	return modified
+}
+
+// heuristicFill derives a stand-in intent for a history tool call whose real
+// intent was never captured. Its only job is presence — preventing an
+// "i"-less precedent — but it carries the call's primary argument and the
+// current task so it reads as a plausible (if mediocre) example rather than a
+// literal token the model might copy verbatim.
+func heuristicFill(name string, args map[string]any, task string) string {
+	subject := name
+	keys := make([]string, 0, len(args))
+	for k := range args {
+		if k != intentField {
+			keys = append(keys, k)
+		}
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		if s, ok := args[k].(string); ok && s != "" {
+			subject = truncateRunes(s, 80)
+			break
+		}
+	}
+	out := "what " + subject + " shows"
+	if task != "" {
+		out += ", toward: " + task
+	}
+	return out
+}
+
+// latestUserSnippet returns a short single-line excerpt of the most recent
+// user message, skipping harness-injected reminder blocks.
+func latestUserSnippet(msgs []*pb.Message) string {
+	for i := len(msgs) - 1; i >= 0; i-- {
+		m := msgs[i]
+		if m.Role != "user" || m.Content == "" {
+			continue
+		}
+		if strings.HasPrefix(strings.TrimSpace(m.Content), "<system-reminder>") {
+			continue
+		}
+		return truncateRunes(strings.Join(strings.Fields(m.Content), " "), 80)
+	}
+	return ""
+}
+
+// truncateRunes shortens s to at most n runes, never splitting a rune.
+func truncateRunes(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n]) + "…"
 }
 
 // contentKey derives a cache key from a tool call's name and arguments,

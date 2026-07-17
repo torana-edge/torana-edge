@@ -6,7 +6,9 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/torana-edge/torana-edge/internal/cache"
 	"github.com/torana-edge/torana-edge/internal/engine"
 	"github.com/torana-edge/torana-edge/internal/wasm"
 )
@@ -26,9 +28,19 @@ func requireWASM(t *testing.T, path string) {
 
 func newTestPipeline(t *testing.T, dir string, order []string) *PluginPipeline {
 	t.Helper()
-	rt := wasm.NewRuntime(context.Background())
-	t.Cleanup(func() { rt.Close() })
-	pp, err := NewPipeline(rt, PluginConfig{Dir: dir, Order: order})
+	return newTestPipelineWith(t, dir, order, cache.NewLocalCache(time.Minute), nil)
+}
+
+// newTestPipelineWith exposes the plugin cache store to the test (for
+// asserting what plugins wrote cross-request) and per-plugin config blobs.
+func newTestPipelineWith(t *testing.T, dir string, order []string, store cache.Store, cfg map[string]json.RawMessage) *PluginPipeline {
+	t.Helper()
+	rt := wasm.NewRuntimeWithCache(context.Background(), store)
+	t.Cleanup(func() {
+		rt.Close()
+		store.Close()
+	})
+	pp, err := NewPipeline(rt, PluginConfig{Dir: dir, Order: order, Config: cfg})
 	if err != nil {
 		t.Fatalf("NewPipeline: %v", err)
 	}
@@ -379,11 +391,81 @@ func TestIntentRehydratesHistory(t *testing.T) {
 	}
 }
 
-// TestIntentRehydrateSkipsUncached: a history tool call with no cached intent
-// (never captured, or aged out) is left untouched — no spurious "i".
-func TestIntentRehydrateSkipsUncached(t *testing.T) {
+// TestIntentFillsUncachedHistory: a history tool call with no cached intent
+// (the model organically omitted "i" — nothing to rehydrate) gets a HEURISTIC
+// fill by default. History "i" values act as few-shot examples: one "i"-less
+// call becomes a self-reinforcing per-tool precedent (measured Jul 18: an
+// "i"-less history collapses next-call emission to 0/9; filling the holes
+// restores 8/8). The fill is derived per request — never cached, never
+// bridged — so the intent cache stays real-captured-only.
+func TestIntentFillsUncachedHistory(t *testing.T) {
 	requireWASM(t, "../../plugins/intent/plugin.wasm")
-	pp := newTestPipeline(t, "../../plugins", []string{"intent"})
+	store := cache.NewLocalCache(time.Minute)
+	pp := newTestPipelineWith(t, "../../plugins", []string{"intent"}, store, nil)
+
+	mkChat := func(userMsg string) *engine.ChatRequest {
+		return &engine.ChatRequest{
+			Tools: []engine.ToolDef{{Name: "read", Parameters: map[string]any{
+				"type": "object", "properties": map[string]any{"path": map[string]any{"type": "string"}},
+			}}},
+			Messages: []engine.Message{
+				{Role: engine.RoleUser, Content: userMsg},
+				{Role: engine.RoleAssistant, ToolCalls: []engine.ToolCall{
+					{ID: "call_never_seen", Name: "read", Arguments: map[string]any{"path": "x.go"}},
+				}},
+				{Role: engine.RoleTool, ToolCallID: "call_never_seen", Content: "..."},
+			},
+		}
+	}
+	fillOf := func(out *engine.ChatRequest) string {
+		t.Helper()
+		for _, m := range out.Messages {
+			if m.Role == engine.RoleAssistant && len(m.ToolCalls) == 1 {
+				i, _ := m.ToolCalls[0].Arguments["i"].(string)
+				return i
+			}
+		}
+		t.Fatalf("history tool call missing: %v", out.Messages)
+		return ""
+	}
+
+	out, err := pp.RunBeforeRequest(context.Background(), 3, mkChat("trace the retry logic"))
+	if err != nil {
+		t.Fatalf("RunBeforeRequest: %v", err)
+	}
+	fill := fillOf(out)
+	if fill == "" {
+		t.Fatal("uncached history tool call was not filled")
+	}
+	if !strings.Contains(fill, "x.go") || !strings.Contains(fill, "trace the retry logic") {
+		t.Fatalf("fill should carry the call's primary arg and the task, got %q", fill)
+	}
+
+	// Never cached, never bridged: the intent cache must not contain the fill.
+	if v, ok := store.Get("intent:call_never_seen"); ok {
+		t.Fatalf("fill was bridged into the intent cache: %q", v)
+	}
+	if v, ok := store.Get(`intentc:["read",{"path":"x.go"}]`); ok {
+		t.Fatalf("fill was written under the content key: %q", v)
+	}
+
+	// Derived fresh each request: a new task must produce a new fill (a cached
+	// fill would freeze the first one).
+	out2, err := pp.RunBeforeRequest(context.Background(), 4, mkChat("audit the timeout budget"))
+	if err != nil {
+		t.Fatalf("RunBeforeRequest: %v", err)
+	}
+	if fill2 := fillOf(out2); !strings.Contains(fill2, "audit the timeout budget") {
+		t.Fatalf("fill not re-derived for the new task: %q", fill2)
+	}
+}
+
+// TestIntentFillOff: fill "off" restores the old behavior — an uncached
+// history tool call is left untouched, no spurious "i".
+func TestIntentFillOff(t *testing.T) {
+	requireWASM(t, "../../plugins/intent/plugin.wasm")
+	pp := newTestPipelineWith(t, "../../plugins", []string{"intent"}, cache.NewLocalCache(time.Minute),
+		map[string]json.RawMessage{"intent": json.RawMessage(`{"fill":"off"}`)})
 
 	chat := &engine.ChatRequest{
 		Tools: []engine.ToolDef{{Name: "read", Parameters: map[string]any{
@@ -404,9 +486,110 @@ func TestIntentRehydrateSkipsUncached(t *testing.T) {
 	for _, m := range out.Messages {
 		if m.Role == engine.RoleAssistant && len(m.ToolCalls) == 1 {
 			if _, hasI := m.ToolCalls[0].Arguments["i"]; hasI {
-				t.Fatalf("uncached history tool call should not get a spurious i: %v", m.ToolCalls[0].Arguments)
+				t.Fatalf("fill=off: uncached history tool call should stay untouched: %v", m.ToolCalls[0].Arguments)
 			}
 		}
+	}
+}
+
+// TestIntentBridgesToRequestSideID: harnesses like Claude Code do NOT
+// round-trip tool_call_ids — the ID the response side cached under never
+// reappears in later request history. Rehydration resolves the intent by
+// content key and must BRIDGE it to the request's own tool_call_id, because
+// that request-side ID is what the compactors use to look up intents from
+// the tool RESULT message (and it stays stable across the session's
+// requests; verified in dogfood).
+func TestIntentBridgesToRequestSideID(t *testing.T) {
+	requireWASM(t, "../../plugins/intent/plugin.wasm")
+	store := cache.NewLocalCache(time.Minute)
+	pp := newTestPipelineWith(t, "../../plugins", []string{"intent"}, store, nil)
+
+	// Turn 1 response: model emits the call under the response-stream ID.
+	run(t, pp, toolStart(0, "call_resp_7", "read"))
+	run(t, pp, toolDelta(0, `{"i":"where is the retry budget configured","path":"failover.go"}`))
+	run(t, pp, toolEnd(0))
+
+	// Turn 2 request: the harness replays the same call under ITS OWN ID.
+	chat := &engine.ChatRequest{
+		Tools: []engine.ToolDef{{Name: "read", Parameters: map[string]any{
+			"type": "object", "properties": map[string]any{"path": map[string]any{"type": "string"}},
+		}}},
+		Messages: []engine.Message{
+			{Role: engine.RoleUser, Content: "trace the retry logic"},
+			{Role: engine.RoleAssistant, ToolCalls: []engine.ToolCall{
+				{ID: "call_req_42", Name: "read", Arguments: map[string]any{"path": "failover.go"}},
+			}},
+			{Role: engine.RoleTool, ToolCallID: "call_req_42", Content: "package proxy ..."},
+		},
+	}
+	if _, err := pp.RunBeforeRequest(context.Background(), 2, chat); err != nil {
+		t.Fatalf("RunBeforeRequest: %v", err)
+	}
+	got, ok := store.Get("intent:call_req_42")
+	if !ok || got != "where is the retry budget configured" {
+		t.Fatalf("intent not bridged to request-side ID: got %q (ok=%v)", got, ok)
+	}
+}
+
+// TestIntentBridgeFeedsKeywordCompactor: the end-to-end #5 regression — with
+// reassigned tool_call_ids (the Claude Code path), the keyword compactor's
+// unchanged intent:<tool_call_id> lookup must work because the intent plugin
+// (running first in the chain) bridges the content-key hit to the request's
+// ID before the compactor sees the request.
+func TestIntentBridgeFeedsKeywordCompactor(t *testing.T) {
+	requireWASM(t, "../../plugins/intent/plugin.wasm")
+	requireWASM(t, "../../plugins/keyword_compactor/plugin.wasm")
+	store := cache.NewLocalCache(time.Minute)
+	pp := newTestPipelineWith(t, "../../plugins", []string{"intent", "keyword_compactor"}, store, nil)
+
+	// Turn 1 response: intent captured under the response-stream ID.
+	run(t, pp, toolStart(0, "call_resp_9", "read"))
+	run(t, pp, toolDelta(0, `{"i":"where is the retry budget configured","path":"failover.go"}`))
+	run(t, pp, toolEnd(0))
+
+	// A big tool result: >50 lines, >2000 chars, with a few lines matching the
+	// intent's keywords (retry/budget/configured) buried in filler.
+	var lines []string
+	for n := 0; n < 120; n++ {
+		switch n {
+		case 20, 60, 100:
+			lines = append(lines, "the retry budget is configured right here, attempt cap and backoff")
+		default:
+			lines = append(lines, "filler stanza describing nothing of consequence on this line ....")
+		}
+	}
+	big := strings.Join(lines, "\n")
+
+	chat := &engine.ChatRequest{
+		Tools: []engine.ToolDef{{Name: "read", Parameters: map[string]any{
+			"type": "object", "properties": map[string]any{"path": map[string]any{"type": "string"}},
+		}}},
+		Messages: []engine.Message{
+			{Role: engine.RoleUser, Content: "trace the retry logic"},
+			{Role: engine.RoleAssistant, ToolCalls: []engine.ToolCall{
+				{ID: "call_req_77", Name: "read", Arguments: map[string]any{"path": "failover.go"}},
+			}},
+			{Role: engine.RoleTool, ToolCallID: "call_req_77", Content: big},
+		},
+	}
+	out, err := pp.RunBeforeRequest(context.Background(), 5, chat)
+	if err != nil {
+		t.Fatalf("RunBeforeRequest: %v", err)
+	}
+	var result string
+	for _, m := range out.Messages {
+		if m.Role == engine.RoleTool && m.ToolCallID == "call_req_77" {
+			result = m.Content
+		}
+	}
+	if result == "" {
+		t.Fatalf("tool result missing from output: %v", out.Messages)
+	}
+	if len(result) >= len(big)/2 {
+		t.Fatalf("tool result was not compacted (%d bytes of %d) — bridge to request-side ID broken?", len(result), len(big))
+	}
+	if !strings.Contains(result, "retry budget is configured") {
+		t.Fatalf("compaction dropped the intent-relevant lines: %q", result)
 	}
 }
 
