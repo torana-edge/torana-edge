@@ -317,6 +317,99 @@ func TestStreamChaining(t *testing.T) {
 	}
 }
 
+// TestIntentRehydratesHistory: the response side strips "i" and caches it;
+// on a later request the intent plugin must restore "i" onto that same tool
+// call in history (from the cache) so the model sees consistent usage. This
+// is the fix for multi-turn intent collapse (the model imitating its own
+// "i"-stripped history).
+func TestIntentRehydratesHistory(t *testing.T) {
+	requireWASM(t, "../../plugins/intent/plugin.wasm")
+	pp := newTestPipeline(t, "../../plugins", []string{"intent"})
+
+	// Turn 1 response: model emits a tool call carrying "i"; the plugin caches
+	// the intent under the tool_call_id and strips it from the emitted args.
+	if out := run(t, pp, toolStart(0, "call_hist", "read")); len(out) != 1 {
+		t.Fatalf("expected start passthrough, got %+v", out)
+	}
+	if out := run(t, pp, toolDelta(0, `{"i":"where is the retry budget configured","path":"failover.go"}`)); len(out) != 0 {
+		t.Fatalf("expected fragment suppressed, got %+v", out)
+	}
+	out := run(t, pp, toolEnd(0))
+	if len(out) != 2 || out[0].ToolCallDelta == nil {
+		t.Fatalf("expected [delta, end], got %+v", out)
+	}
+	var stripped map[string]any
+	json.Unmarshal([]byte(out[0].ToolCallDelta.ArgumentsDelta), &stripped)
+	if _, hasI := stripped["i"]; hasI {
+		t.Fatalf(`turn 1: "i" should be stripped from emitted args, got %v`, stripped)
+	}
+
+	// Turn 2 request: the harness replays the (stripped) tool call in history.
+	// The intent plugin must re-hydrate "i" from the cache.
+	chat := &engine.ChatRequest{
+		Tools: []engine.ToolDef{{Name: "read", Parameters: map[string]any{
+			"type": "object", "properties": map[string]any{"path": map[string]any{"type": "string"}},
+		}}},
+		Messages: []engine.Message{
+			{Role: engine.RoleUser, Content: "trace the retry logic"},
+			{Role: engine.RoleAssistant, ToolCalls: []engine.ToolCall{
+				{ID: "call_hist", Name: "read", Arguments: map[string]any{"path": "failover.go"}},
+			}},
+			{Role: engine.RoleTool, ToolCallID: "call_hist", Content: "package proxy ..."},
+		},
+	}
+	out2, err := pp.RunBeforeRequest(context.Background(), 2, chat)
+	if err != nil {
+		t.Fatalf("RunBeforeRequest: %v", err)
+	}
+	var histArgs map[string]any
+	for _, m := range out2.Messages {
+		if m.Role == engine.RoleAssistant && len(m.ToolCalls) == 1 && m.ToolCalls[0].ID == "call_hist" {
+			histArgs = m.ToolCalls[0].Arguments
+		}
+	}
+	if histArgs == nil {
+		t.Fatalf("history tool call missing after rehydration: %v", out2.Messages)
+	}
+	if got, _ := histArgs["i"].(string); got != "where is the retry budget configured" {
+		t.Fatalf(`"i" not re-hydrated onto history tool call: got %q (args %v)`, got, histArgs)
+	}
+	if histArgs["path"] != "failover.go" {
+		t.Fatalf("rehydration clobbered original args: %v", histArgs)
+	}
+}
+
+// TestIntentRehydrateSkipsUncached: a history tool call with no cached intent
+// (never captured, or aged out) is left untouched — no spurious "i".
+func TestIntentRehydrateSkipsUncached(t *testing.T) {
+	requireWASM(t, "../../plugins/intent/plugin.wasm")
+	pp := newTestPipeline(t, "../../plugins", []string{"intent"})
+
+	chat := &engine.ChatRequest{
+		Tools: []engine.ToolDef{{Name: "read", Parameters: map[string]any{
+			"type": "object", "properties": map[string]any{"path": map[string]any{"type": "string"}},
+		}}},
+		Messages: []engine.Message{
+			{Role: engine.RoleUser, Content: "hi"},
+			{Role: engine.RoleAssistant, ToolCalls: []engine.ToolCall{
+				{ID: "call_never_seen", Name: "read", Arguments: map[string]any{"path": "x.go"}},
+			}},
+			{Role: engine.RoleTool, ToolCallID: "call_never_seen", Content: "..."},
+		},
+	}
+	out, err := pp.RunBeforeRequest(context.Background(), 3, chat)
+	if err != nil {
+		t.Fatalf("RunBeforeRequest: %v", err)
+	}
+	for _, m := range out.Messages {
+		if m.Role == engine.RoleAssistant && len(m.ToolCalls) == 1 {
+			if _, hasI := m.ToolCalls[0].Arguments["i"]; hasI {
+				t.Fatalf("uncached history tool call should not get a spurious i: %v", m.ToolCalls[0].Arguments)
+			}
+		}
+	}
+}
+
 // TestIntentInjectsNoSyntheticMessages: the intent plugin must teach the "i"
 // convention WITHOUT adding messages — a fake conversation is
 // indistinguishable from real history and contaminates model behavior

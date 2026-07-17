@@ -40,6 +40,14 @@ func init() {
 		}
 		modified := injectIntentSchema(req)
 		modified = injectSystemPrompt(req) || modified
+		// Re-hydrate "i" onto the model's PRIOR tool calls in history. We
+		// strip "i" before returning to the harness, so the harness replays
+		// the model's own tool calls without it — and the model imitates that
+		// stripped history, dropping "i" on new calls within a few turns
+		// (measured: ~96% single-turn capture collapses to ~18% multi-turn).
+		// Restoring "i" here (from the cache we populated when it was first
+		// emitted) shows the model a consistent history, so it keeps emitting.
+		modified = rehydrateHistoryIntents(req) || modified
 		if !modified {
 			return nil, nil
 		}
@@ -116,7 +124,14 @@ func init() {
 			// often the model actually follows the convention, per tool.
 			labels := map[string]string{"tool": toolName}
 			if intent, ok := args[intentField].(string); ok && intent != "" {
+				// Key by tool_call_id (works when the harness echoes IDs, e.g.
+				// most OpenAI clients) AND by tool name+args content. The
+				// content key survives harnesses that reassign tool_call_ids
+				// across turns (Claude Code does), which is the only key
+				// rehydration can rely on since the response-stream ID never
+				// reappears in later request history.
 				sdk.HostCall("env.cache_set", fmt.Sprintf(`{"key":"%s:%s","value":%q}`, intentCacheKey, toolID, intent))
+				sdk.HostCall("env.cache_set", fmt.Sprintf(`{"key":%q,"value":%q}`, contentKey(toolName, args), intent))
 				sdk.EmitMetric("torana_intent_captured_total", sdk.MetricCounter, 1, labels)
 				// Debug visibility for dogfooding: intent QUALITY (goal vs
 				// action description) is only judgeable by reading the values.
@@ -146,6 +161,71 @@ func init() {
 
 		return sdk.Pass(), nil
 	})
+}
+
+// ==========================================================================
+// History re-hydration
+// ==========================================================================
+
+// rehydrateHistoryIntents restores the "i" field onto the model's prior
+// assistant tool calls in the conversation history, reading each intent back
+// from the cross-request cache (keyed by tool_call_id — the same key the
+// response side wrote). This counters the model imitating its own "i"-stripped
+// history. Tool calls whose intent has aged out of the cache, or that already
+// carry "i" (a tool that natively declared the field), are left untouched.
+func rehydrateHistoryIntents(req *pb.ChatRequest) bool {
+	modified := false
+	for _, msg := range req.Messages {
+		if msg.Role != "assistant" || len(msg.ToolCalls) == 0 {
+			continue
+		}
+		for _, tc := range msg.ToolCalls {
+			var args map[string]any
+			if len(tc.ArgumentsJson) == 0 {
+				args = map[string]any{}
+			} else if json.Unmarshal(tc.ArgumentsJson, &args) != nil {
+				continue
+			}
+			if _, present := args[intentField]; present {
+				continue // already carries "i"
+			}
+			// Look up by the content key (tool name + args). This is the only
+			// key that survives harnesses reassigning tool_call_ids across
+			// turns — the response-stream ID we cached under never reappears
+			// in later request history.
+			intent, _ := sdk.HostCall("env.cache_get", contentKey(tc.Name, args))
+			if intent == "" {
+				continue // never captured or aged out of the cache
+			}
+			args[intentField] = intent
+			if b, err := json.Marshal(args); err == nil {
+				tc.ArgumentsJson = b
+				modified = true
+			}
+		}
+	}
+	return modified
+}
+
+// contentKey derives a cache key from a tool call's name and arguments,
+// excluding "i". Go's json.Marshal sorts map keys, so the encoding is
+// canonical: the response side (which strips "i") and the request side (where
+// "i" is already absent) produce the same key for the same logical call.
+// Collisions (same tool + args, different intent) resolve last-write-wins,
+// which is acceptable for a hint.
+func contentKey(name string, args map[string]any) string {
+	cp := make(map[string]any, len(args))
+	for k, v := range args {
+		if k == intentField {
+			continue
+		}
+		cp[k] = v
+	}
+	// Encode as a JSON array so the key stays JSON-safe (no control-char
+	// separator that would break the cache_set payload) while remaining
+	// canonical — Go sorts the inner map's keys.
+	b, _ := json.Marshal([]any{name, cp})
+	return "intentc:" + string(b)
 }
 
 // ==========================================================================
