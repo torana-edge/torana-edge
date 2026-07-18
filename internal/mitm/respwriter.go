@@ -44,7 +44,7 @@ func (w *connResponseWriter) WriteHeader(status int) {
 		}
 	}
 	b.WriteString("Connection: close\r\n\r\n")
-	w.conn.Write([]byte(b.String()))
+	_, _ = w.conn.Write([]byte(b.String()))
 }
 
 func (w *connResponseWriter) Write(p []byte) (int, error) {
