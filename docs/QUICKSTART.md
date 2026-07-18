@@ -37,7 +37,7 @@ Create `config.json`:
   },
   "plugins": {
     "dir": "./plugins",
-    "order": ["schema_translator", "keyword_compactor", "compactor"]
+    "order": ["schema_translator", "intent", "keyword_compactor"]
   },
   "limits": {
     "concurrency": 10,
@@ -45,6 +45,11 @@ Create `config.json`:
   }
 }
 ```
+
+> **Plugin order:** `intent` captures why each tool call happens; the compactor
+> then uses those intents to shrink tool results. Keep `intent` before the
+> compactor, and run **one** compactor — `keyword_compactor` (deterministic,
+> local, free) **or** `compactor` (cheap-model offload), never both.
 
 ## Route your harness
 
@@ -60,6 +65,14 @@ providers:
 ```bash
 export ANTHROPIC_BASE_URL=http://localhost:8080/provider/deepseek-anthropic
 export ANTHROPIC_AUTH_TOKEN=<your-deepseek-key>
+```
+
+### Antigravity CLI (agy)
+`agy` can't take a base URL, so route it through Torana's MITM ingress — see
+[GEMINI_ANTIGRAVITY.md](GEMINI_ANTIGRAVITY.md):
+```bash
+export HTTPS_PROXY=http://127.0.0.1:8099
+export SSL_CERT_FILE=/abs/path/to/local/mitm/bundle.pem
 ```
 
 ### OpenCode

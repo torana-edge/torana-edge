@@ -13,7 +13,7 @@ import (
 	_ "github.com/torana-edge/torana-edge/internal/format/anthropic"
 	_ "github.com/torana-edge/torana-edge/internal/format/bedrock"
 	_ "github.com/torana-edge/torana-edge/internal/format/openai"
-	_ "github.com/torana-edge/torana-edge/internal/format/vertex"
+	_ "github.com/torana-edge/torana-edge/internal/format/gemini"
 )
 
 // TestSerializeSingleCompleteDelta validates the invariant the stream plugin
@@ -28,7 +28,7 @@ func TestSerializeSingleCompleteDelta(t *testing.T) {
 		"path": "main.go",
 	}
 
-	for _, name := range []string{"openai", "anthropic", "bedrock", "vertex"} {
+	for _, name := range []string{"openai", "anthropic", "bedrock", "gemini"} {
 		t.Run(name, func(t *testing.T) {
 			f := format.Lookup(name)
 			if f == nil {

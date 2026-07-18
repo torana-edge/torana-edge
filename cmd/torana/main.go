@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/torana-edge/torana-edge/internal/metrics"
+	"github.com/torana-edge/torana-edge/internal/mitm"
 	"github.com/torana-edge/torana-edge/internal/provider"
 	"github.com/torana-edge/torana-edge/internal/proxy"
 
@@ -23,7 +24,7 @@ import (
 	_ "github.com/torana-edge/torana-edge/internal/format/anthropic"
 	_ "github.com/torana-edge/torana-edge/internal/format/bedrock"
 	_ "github.com/torana-edge/torana-edge/internal/format/openai"
-	_ "github.com/torana-edge/torana-edge/internal/format/vertex"
+	_ "github.com/torana-edge/torana-edge/internal/format/gemini"
 )
 
 func main() {
@@ -89,6 +90,21 @@ func main() {
 		srv.SetProviders(newCfg)
 	})
 	defer stopWatch()
+
+	// Optional TLS-terminating MITM ingress for harnesses that can't be pointed
+	// at a base URL (e.g. the Antigravity CLI). Runs alongside the main proxy.
+	if provCfg.MITM.Enabled {
+		mitmSrv, err := mitm.New(provCfg.MITM, srv.Handler())
+		if err != nil {
+			log.Fatalf("Failed to start MITM ingress: %v", err)
+		}
+		defer mitmSrv.Close()
+		go func() {
+			if err := mitmSrv.ListenAndServe(); err != nil {
+				log.Printf("MITM ingress stopped: %v", err)
+			}
+		}()
+	}
 
 	// TORANA_BIND restricts the listen address (e.g. "127.0.0.1" to keep the
 	// proxy localhost-only — it forwards caller credentials, so never expose

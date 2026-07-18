@@ -1,4 +1,4 @@
-package vertex
+package gemini
 
 import (
 	"bytes"

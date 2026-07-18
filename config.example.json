@@ -17,6 +17,30 @@
       "_comment": "Local OpenAI-compatible endpoint (Ollama, vLLM, LM Studio). Point offload here to summarize tool output on a self-hosted small model at zero marginal cost. Ollama serves the OpenAI API at http://localhost:11434/v1/chat/completions, so set url to the host root. Providers may also set 'api_key_env' naming an env var with their own API key — required for plugin-initiated rerouting (env.route_request), where the caller's credential is never forwarded; leave it unset for local endpoints that need no auth.",
       "url": "http://localhost:11434",
       "format": "openai"
+    },
+    "gemini": {
+      "_comment": "Public Gemini API (or Vertex AI) over the bare Gemini generateContent wire format — for tools you point at a base URL with an API key (Cline, Aider, Continue, Zed, opencode, …), exactly like the openai providers. No MITM needed: send requests to /provider/gemini/v1beta/models/<model>:streamGenerateContent. Set api_key_env if rerouting here; otherwise the caller's key/credential is forwarded.",
+      "url": "https://generativelanguage.googleapis.com",
+      "format": "gemini"
+    },
+    "antigravity": {
+      "_comment": "Google Code Assist backend for the Antigravity CLI (agy), reached via the MITM ingress below (agy can't be pointed at a base URL). Same content model as 'gemini' but wrapped in the Code Assist envelope, hence format 'gemini-codeassist'. The caller's own Google OAuth bearer is forwarded upstream — Torana injects no auth. Two channels exist: prod (this) and 'daily' (dev); the mitm.hosts map routes each hostname to the matching provider.",
+      "url": "https://cloudcode-pa.googleapis.com",
+      "format": "gemini-codeassist"
+    },
+    "antigravity-daily": {
+      "url": "https://daily-cloudcode-pa.googleapis.com",
+      "format": "gemini-codeassist"
+    }
+  },
+  "mitm": {
+    "_comment": "TLS-terminating CONNECT proxy for harnesses that can't be pointed at a base URL (the Antigravity CLI's stripped Go binary ignores endpoint env vars but honors HTTPS_PROXY and a custom CA via SSL_CERT_FILE). Disabled unless 'enabled' is true. Only chat calls (…:streamGenerateContent / …:generateContent) on the mapped hosts run through the provider pipeline; all other hosts and paths are tunneled/forwarded verbatim so login and telemetry keep working. Point agy at it with HTTPS_PROXY=http://<listen> SSL_CERT_FILE=<ca_dir>/bundle.pem. Keep 'listen' on localhost — it decrypts caller traffic — and NEVER commit ca_dir (the CA private key lives there) or add the CA to the system trust store.",
+    "enabled": false,
+    "listen": "127.0.0.1:8099",
+    "ca_dir": "./local/mitm",
+    "hosts": {
+      "cloudcode-pa.googleapis.com": "antigravity",
+      "daily-cloudcode-pa.googleapis.com": "antigravity-daily"
     }
   },
   "plugins": {

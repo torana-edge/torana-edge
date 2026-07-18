@@ -22,6 +22,10 @@ message ToolCall {
   string id = 1;
   string name = 2;
   bytes arguments_json = 3;
+  // Opaque provider token bound to this call (e.g. Gemini thoughtSignature).
+  // Preserved across round-trips so replayed history keeps the model's
+  // reasoning binding; empty for providers that don't emit one.
+  string signature = 4;
 }
 
 // Describes a function available to the model.
@@ -57,6 +61,8 @@ message ToolCallStart {
   int32 index = 1;
   string id = 2;
   string name = 3;
+  // Opaque provider token on the call (Gemini thoughtSignature); empty otherwise.
+  string signature = 4;
 }
 
 message ToolCallDelta {
@@ -88,6 +94,9 @@ message StreamEvent {
     string finish_reason = 6;
     StreamUsage usage = 7;
     StreamError error = 8;
+    // Opaque provider signature paired with the surrounding block (Gemini
+    // thoughtSignature on a standalone text/thought part).
+    string signature_delta = 9;
   }
 }
 

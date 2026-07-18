@@ -37,13 +37,13 @@ while keeping your primary provider (DeepSeek/OpenAI) for reasoning.
 
 ## Local offload (free compaction)
 
-Use the `compactor` plugin to automatically route heavy summarization tasks to a local model:
+Use the `compactor` plugin to automatically route heavy summarization tasks to a local model. It consumes intents captured by the `intent` plugin, so `intent` must run before it:
 
 ```json
 {
   "plugins": {
     "dir": "./plugins",
-    "order": ["compactor"]
+    "order": ["intent", "compactor"]
   }
 }
 ```

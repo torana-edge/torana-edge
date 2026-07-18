@@ -31,7 +31,7 @@ func TestRenderProviderError(t *testing.T) {
 			e, _ := m["error"].(map[string]any)
 			return e != nil && e["message"] == msg && e["type"] == "pii"
 		},
-		"vertex": func(m map[string]any) bool {
+		"gemini": func(m map[string]any) bool {
 			e, _ := m["error"].(map[string]any)
 			return e != nil && e["message"] == msg && e["code"].(float64) == 422
 		},

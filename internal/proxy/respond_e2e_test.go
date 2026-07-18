@@ -17,7 +17,7 @@ import (
 
 	_ "github.com/torana-edge/torana-edge/internal/format/anthropic"
 	_ "github.com/torana-edge/torana-edge/internal/format/bedrock"
-	_ "github.com/torana-edge/torana-edge/internal/format/vertex"
+	_ "github.com/torana-edge/torana-edge/internal/format/gemini"
 )
 
 // fixtureEnv starts a proxy loading the given example fixture(s) against an
@@ -80,7 +80,7 @@ func respondReq(formatName string, stream bool) string {
 		return s + `}`
 	case "bedrock":
 		return `{"messages":[{"role":"user","content":[{"text":"respondme please"}]}]}`
-	case "vertex":
+	case "gemini":
 		return `{"contents":[{"role":"user","parts":[{"text":"respondme please"}]}]}`
 	default:
 		s := `{"model":"gpt-x","messages":[{"role":"user","content":"respondme please"}]`
@@ -95,7 +95,7 @@ func respondReq(formatName string, stream bool) string {
 // completion in each provider format — a valid envelope the format's own
 // adapter can parse back — and upstream is never called.
 func TestRespondDirectlyAllFormats(t *testing.T) {
-	for _, formatName := range []string{"openai", "anthropic", "bedrock", "vertex"} {
+	for _, formatName := range []string{"openai", "anthropic", "bedrock", "gemini"} {
 		t.Run(formatName, func(t *testing.T) {
 			post, hits := fixtureEnv(t, []string{"test-responder"}, formatName,
 				func(w http.ResponseWriter, r *http.Request) {
@@ -123,7 +123,7 @@ func TestRespondDirectlyAllFormats(t *testing.T) {
 				"openai":    "choices",
 				"anthropic": "content",
 				"bedrock":   "output",
-				"vertex":    "candidates",
+				"gemini":    "candidates",
 			}[formatName]
 			if _, ok := decoded[marker]; !ok {
 				t.Fatalf("%s envelope missing %q: %s", formatName, marker, body)

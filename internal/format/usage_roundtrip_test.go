@@ -63,7 +63,7 @@ func TestStreamUsageRoundTrip(t *testing.T) {
 			},
 		},
 		{
-			format: "vertex",
+			format: "gemini",
 			input: `{"candidates":[{"content":{"role":"model","parts":[{"text":"hi"}]}}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":3,"totalTokenCount":13}}` + "\n" +
 				`{"candidates":[{"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":5,"totalTokenCount":15}}` + "\n",
 			usageBeforeFinish: true, // last-seen counts win, emitted before finish

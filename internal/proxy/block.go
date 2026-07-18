@@ -39,7 +39,8 @@ func renderProviderError(format string, status int, code, message string) []byte
 			"type":  "error",
 			"error": map[string]any{"type": code, "message": message},
 		}
-	case "vertex":
+	case "gemini", "gemini-codeassist":
+		// Google API errors are a bare {error:{…}} even on Code Assist streams.
 		payload = map[string]any{
 			"error": map[string]any{"code": status, "status": code, "message": message},
 		}

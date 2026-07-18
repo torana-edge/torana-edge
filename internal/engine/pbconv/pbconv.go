@@ -59,6 +59,7 @@ func ToPBChatRequest(c *engine.ChatRequest) *pb.ChatRequest {
 				Id:            tc.ID,
 				Name:          tc.Name,
 				ArgumentsJson: argsJson,
+				Signature:     tc.Signature,
 			})
 		}
 		out.Messages = append(out.Messages, msg)
@@ -132,6 +133,7 @@ func FromPBChatRequest(c *pb.ChatRequest) *engine.ChatRequest {
 				ID:        tc.Id,
 				Name:      tc.Name,
 				Arguments: args,
+				Signature: tc.Signature,
 			})
 		}
 		out.Messages = append(out.Messages, msg)
@@ -162,11 +164,14 @@ func ToPBStreamEvent(e *engine.StreamEvent) *pb.StreamEvent {
 	} else if e.ToolCallStart != nil {
 		out.Event = &pb.StreamEvent_ToolCallStart{
 			ToolCallStart: &pb.ToolCallStart{
-				Index: int32(e.ToolCallStart.Index),
-				Id:    e.ToolCallStart.ID,
-				Name:  e.ToolCallStart.Name,
+				Index:     int32(e.ToolCallStart.Index),
+				Id:        e.ToolCallStart.ID,
+				Name:      e.ToolCallStart.Name,
+				Signature: e.ToolCallStart.Signature,
 			},
 		}
+	} else if e.SignatureDelta != nil {
+		out.Event = &pb.StreamEvent_SignatureDelta{SignatureDelta: *e.SignatureDelta}
 	} else if e.ToolCallDelta != nil {
 		out.Event = &pb.StreamEvent_ToolCallDelta{
 			ToolCallDelta: &pb.ToolCallDelta{
@@ -207,10 +212,14 @@ func FromPBStreamEvent(e *pb.StreamEvent) *engine.StreamEvent {
 		out.ThinkingDelta = &v.ThinkingDelta
 	case *pb.StreamEvent_ToolCallStart:
 		out.ToolCallStart = &engine.ToolCallStart{
-			Index: int(v.ToolCallStart.Index),
-			ID:    v.ToolCallStart.Id,
-			Name:  v.ToolCallStart.Name,
+			Index:     int(v.ToolCallStart.Index),
+			ID:        v.ToolCallStart.Id,
+			Name:      v.ToolCallStart.Name,
+			Signature: v.ToolCallStart.Signature,
 		}
+	case *pb.StreamEvent_SignatureDelta:
+		sig := v.SignatureDelta
+		out.SignatureDelta = &sig
 	case *pb.StreamEvent_ToolCallDelta:
 		out.ToolCallDelta = &engine.ToolCallDelta{
 			Index:          int(v.ToolCallDelta.Index),

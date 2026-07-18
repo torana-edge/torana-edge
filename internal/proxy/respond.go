@@ -51,10 +51,11 @@ func renderCompletionStream(f *format.Format, content string) []byte {
 }
 
 // streamContentType matches what harnesses expect from each provider's
-// streaming endpoint (bedrock/vertex stream JSON lines, not SSE).
+// streaming endpoint. Bedrock streams JSON lines; Gemini/Code Assist and the
+// openai family stream SSE (text/event-stream).
 func streamContentType(formatName string) string {
 	switch formatName {
-	case "bedrock", "vertex":
+	case "bedrock":
 		return "application/json"
 	default:
 		return "text/event-stream"
@@ -89,8 +90,8 @@ func renderCompletionJSON(formatName, model, content string) []byte {
 			"stopReason": "end_turn",
 			"usage":      map[string]any{"inputTokens": 0, "outputTokens": 0, "totalTokens": 0},
 		}
-	case "vertex":
-		payload = map[string]any{
+	case "gemini", "gemini-codeassist":
+		gen := map[string]any{
 			"candidates": []map[string]any{{
 				"content": map[string]any{
 					"role":  "model",
@@ -99,6 +100,12 @@ func renderCompletionJSON(formatName, model, content string) []byte {
 				"finishReason": "STOP",
 			}},
 			"usageMetadata": map[string]any{"promptTokenCount": 0, "candidatesTokenCount": 0, "totalTokenCount": 0},
+		}
+		// Code Assist nests the GenerateContentResponse under "response".
+		if formatName == "gemini-codeassist" {
+			payload = map[string]any{"response": gen}
+		} else {
+			payload = gen
 		}
 	default: // openai and openai-compatible
 		payload = map[string]any{
