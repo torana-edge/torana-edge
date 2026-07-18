@@ -137,6 +137,10 @@ type ToolCall struct {
 	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
 	Name          string                 `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`
 	ArgumentsJson []byte                 `protobuf:"bytes,3,opt,name=arguments_json,json=argumentsJson,proto3" json:"arguments_json,omitempty"`
+	// Opaque provider token bound to this call (e.g. Gemini thoughtSignature).
+	// Preserved across round-trips so replayed history keeps the model's
+	// reasoning binding; empty for providers that don't emit one.
+	Signature     string `protobuf:"bytes,4,opt,name=signature,proto3" json:"signature,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -190,6 +194,13 @@ func (x *ToolCall) GetArgumentsJson() []byte {
 		return x.ArgumentsJson
 	}
 	return nil
+}
+
+func (x *ToolCall) GetSignature() string {
+	if x != nil {
+		return x.Signature
+	}
+	return ""
 }
 
 // Describes a function available to the model.
@@ -389,10 +400,12 @@ func (x *ChatRequest) GetSafetySettingsJson() []byte {
 }
 
 type ToolCallStart struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Index         int32                  `protobuf:"varint,1,opt,name=index,proto3" json:"index,omitempty"`
-	Id            string                 `protobuf:"bytes,2,opt,name=id,proto3" json:"id,omitempty"`
-	Name          string                 `protobuf:"bytes,3,opt,name=name,proto3" json:"name,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	Index int32                  `protobuf:"varint,1,opt,name=index,proto3" json:"index,omitempty"`
+	Id    string                 `protobuf:"bytes,2,opt,name=id,proto3" json:"id,omitempty"`
+	Name  string                 `protobuf:"bytes,3,opt,name=name,proto3" json:"name,omitempty"`
+	// Opaque provider token on the call (Gemini thoughtSignature); empty otherwise.
+	Signature     string `protobuf:"bytes,4,opt,name=signature,proto3" json:"signature,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -444,6 +457,13 @@ func (x *ToolCallStart) GetId() string {
 func (x *ToolCallStart) GetName() string {
 	if x != nil {
 		return x.Name
+	}
+	return ""
+}
+
+func (x *ToolCallStart) GetSignature() string {
+	if x != nil {
+		return x.Signature
 	}
 	return ""
 }
@@ -660,6 +680,7 @@ type StreamEvent struct {
 	//	*StreamEvent_FinishReason
 	//	*StreamEvent_Usage
 	//	*StreamEvent_Error
+	//	*StreamEvent_SignatureDelta
 	Event         isStreamEvent_Event `protobuf_oneof:"event"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -774,6 +795,15 @@ func (x *StreamEvent) GetError() *StreamError {
 	return nil
 }
 
+func (x *StreamEvent) GetSignatureDelta() string {
+	if x != nil {
+		if x, ok := x.Event.(*StreamEvent_SignatureDelta); ok {
+			return x.SignatureDelta
+		}
+	}
+	return ""
+}
+
 type isStreamEvent_Event interface {
 	isStreamEvent_Event()
 }
@@ -810,6 +840,12 @@ type StreamEvent_Error struct {
 	Error *StreamError `protobuf:"bytes,8,opt,name=error,proto3,oneof"`
 }
 
+type StreamEvent_SignatureDelta struct {
+	// Opaque provider signature paired with the surrounding block (Gemini
+	// thoughtSignature on a standalone text/thought part).
+	SignatureDelta string `protobuf:"bytes,9,opt,name=signature_delta,json=signatureDelta,proto3,oneof"`
+}
+
 func (*StreamEvent_TextDelta) isStreamEvent_Event() {}
 
 func (*StreamEvent_ThinkingDelta) isStreamEvent_Event() {}
@@ -825,6 +861,8 @@ func (*StreamEvent_FinishReason) isStreamEvent_Event() {}
 func (*StreamEvent_Usage) isStreamEvent_Event() {}
 
 func (*StreamEvent_Error) isStreamEvent_Event() {}
+
+func (*StreamEvent_SignatureDelta) isStreamEvent_Event() {}
 
 // Result of a run_on_stream_chunk hook invocation.
 //
@@ -907,11 +945,12 @@ const file_pkg_pb_torana_proto_rawDesc = "" +
 	"tool_calls\x18\x06 \x03(\v2\x13.torana.v1.ToolCallR\ttoolCalls\x12 \n" +
 	"\ftool_call_id\x18\a \x01(\tR\n" +
 	"toolCallId\x12\x1b\n" +
-	"\ttool_name\x18\b \x01(\tR\btoolName\"U\n" +
+	"\ttool_name\x18\b \x01(\tR\btoolName\"s\n" +
 	"\bToolCall\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x12\n" +
 	"\x04name\x18\x02 \x01(\tR\x04name\x12%\n" +
-	"\x0earguments_json\x18\x03 \x01(\fR\rargumentsJson\"\x80\x01\n" +
+	"\x0earguments_json\x18\x03 \x01(\fR\rargumentsJson\x12\x1c\n" +
+	"\tsignature\x18\x04 \x01(\tR\tsignature\"\x80\x01\n" +
 	"\aToolDef\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12 \n" +
 	"\vdescription\x18\x02 \x01(\tR\vdescription\x12'\n" +
@@ -933,11 +972,12 @@ const file_pkg_pb_torana_proto_rawDesc = "" +
 	"\x14safety_settings_json\x18\v \x01(\fR\x12safetySettingsJsonB\r\n" +
 	"\v_max_tokensB\x0e\n" +
 	"\f_temperatureB\b\n" +
-	"\x06_top_p\"I\n" +
+	"\x06_top_p\"g\n" +
 	"\rToolCallStart\x12\x14\n" +
 	"\x05index\x18\x01 \x01(\x05R\x05index\x12\x0e\n" +
 	"\x02id\x18\x02 \x01(\tR\x02id\x12\x12\n" +
-	"\x04name\x18\x03 \x01(\tR\x04name\"N\n" +
+	"\x04name\x18\x03 \x01(\tR\x04name\x12\x1c\n" +
+	"\tsignature\x18\x04 \x01(\tR\tsignature\"N\n" +
 	"\rToolCallDelta\x12\x14\n" +
 	"\x05index\x18\x01 \x01(\x05R\x05index\x12'\n" +
 	"\x0farguments_delta\x18\x02 \x01(\tR\x0eargumentsDelta\"#\n" +
@@ -948,7 +988,7 @@ const file_pkg_pb_torana_proto_rawDesc = "" +
 	"\amessage\x18\x02 \x01(\tR\amessage\"U\n" +
 	"\vStreamUsage\x12!\n" +
 	"\finput_tokens\x18\x01 \x01(\x05R\vinputTokens\x12#\n" +
-	"\routput_tokens\x18\x02 \x01(\x05R\foutputTokens\"\xad\x03\n" +
+	"\routput_tokens\x18\x02 \x01(\x05R\foutputTokens\"\xd8\x03\n" +
 	"\vStreamEvent\x12\x1f\n" +
 	"\n" +
 	"text_delta\x18\x01 \x01(\tH\x00R\ttextDelta\x12'\n" +
@@ -958,7 +998,8 @@ const file_pkg_pb_torana_proto_rawDesc = "" +
 	"\rtool_call_end\x18\x05 \x01(\v2\x16.torana.v1.ToolCallEndH\x00R\vtoolCallEnd\x12%\n" +
 	"\rfinish_reason\x18\x06 \x01(\tH\x00R\ffinishReason\x12.\n" +
 	"\x05usage\x18\a \x01(\v2\x16.torana.v1.StreamUsageH\x00R\x05usage\x12.\n" +
-	"\x05error\x18\b \x01(\v2\x16.torana.v1.StreamErrorH\x00R\x05errorB\a\n" +
+	"\x05error\x18\b \x01(\v2\x16.torana.v1.StreamErrorH\x00R\x05error\x12)\n" +
+	"\x0fsignature_delta\x18\t \x01(\tH\x00R\x0esignatureDeltaB\a\n" +
 	"\x05event\"]\n" +
 	"\x11StreamEventResult\x12\x18\n" +
 	"\ahandled\x18\x01 \x01(\bR\ahandled\x12.\n" +
@@ -1022,6 +1063,7 @@ func file_pkg_pb_torana_proto_init() {
 		(*StreamEvent_FinishReason)(nil),
 		(*StreamEvent_Usage)(nil),
 		(*StreamEvent_Error)(nil),
+		(*StreamEvent_SignatureDelta)(nil),
 	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{

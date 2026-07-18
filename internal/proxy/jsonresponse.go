@@ -211,6 +211,13 @@ func extractBedrock(body map[string]any) responseRefs {
 // --- vertex: candidates[].content.parts[].{text | functionCall{name,args}} ---
 
 func extractVertex(body map[string]any) responseRefs {
+	// Code Assist (Antigravity CLI) wraps the GenerateContentResponse under
+	// "response"; unwrap so extraction/writeback target the real fields. Maps
+	// are references, so mutating the inner map still reflects in the outer
+	// body the caller re-marshals.
+	if inner, ok := body["response"].(map[string]any); ok {
+		body = inner
+	}
 	refs := responseRefs{
 		model: asString(body["modelVersion"]),
 		usage: usageFrom(body, "usageMetadata", "promptTokenCount", "candidatesTokenCount"),

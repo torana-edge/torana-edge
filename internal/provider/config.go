@@ -34,6 +34,27 @@ type Config struct {
 	// Cache selects the cross-request plugin state backend: in-process
 	// memory (default) or Redis for distributed / restart-safe deployments.
 	Cache cache.Config `json:"cache,omitempty"`
+	// MITM optionally terminates TLS for harnesses that can't be pointed at a
+	// base URL (e.g. the Antigravity CLI), routing intercepted hosts into the
+	// provider pipeline. Disabled unless configured.
+	MITM MITMConfig `json:"mitm,omitempty"`
+}
+
+// MITMConfig configures the TLS-terminating ingress. When enabled, agy (or any
+// client trusting the generated CA and pointed here via HTTPS_PROXY) has its
+// requests to the mapped hosts decrypted and routed through the named provider;
+// all other hosts and non-chat paths are tunneled/forwarded verbatim.
+type MITMConfig struct {
+	Enabled bool `json:"enabled,omitempty"`
+	// Listen is the CONNECT proxy address (e.g. "127.0.0.1:8099"). Keep it on
+	// localhost — it decrypts caller traffic.
+	Listen string `json:"listen,omitempty"`
+	// CADir holds the generated CA cert/key and the SSL_CERT_FILE bundle. The
+	// CA private key never leaves this dir and must not be committed.
+	CADir string `json:"ca_dir,omitempty"`
+	// Hosts maps an upstream hostname to the provider name that handles its
+	// chat calls (e.g. "cloudcode-pa.googleapis.com" -> "antigravity").
+	Hosts map[string]string `json:"hosts,omitempty"`
 }
 
 // OffloadConfig controls cheap-model tool result summarization
@@ -144,6 +165,9 @@ func Load(path string) (Config, error) {
 	}
 	if user.Cache != (cache.Config{}) {
 		cfg.Cache = user.Cache
+	}
+	if user.MITM.Enabled {
+		cfg.MITM = user.MITM
 	}
 
 	return cfg, nil

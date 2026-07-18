@@ -845,6 +845,13 @@ func (s *Server) GetConfig() Config {
 	return s.config
 }
 
+// Handler returns the server's HTTP handler (the provider-routing mux). The
+// MITM ingress delegates decrypted chat requests to it so they run through the
+// full plugin pipeline exactly like a direct /provider/<name>/… call.
+func (s *Server) Handler() http.Handler {
+	return s.httpServer.Handler
+}
+
 // SetProviders hot-reloads the provider configuration without restarting.
 func (s *Server) SetProviders(cfg provider.Config) {
 	s.configMu.Lock()
