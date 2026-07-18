@@ -199,14 +199,33 @@ func (s *StreamAdapter) SerializeStream(w io.Writer, events <-chan engine.Stream
 	// stops land on the same block even when text/thinking blocks precede
 	// tool calls or multiple tool calls occur in one turn.
 	toolBlock := make(map[int]int)
-	emit := func(line string) error {
-		if _, err := fmt.Fprintln(w, line); err != nil {
-			return fmt.Errorf("anthropic serialize: %w", err)
-		}
-		if _, err := fmt.Fprint(w, "\n"); err != nil {
+	// emit writes one SSE frame in Anthropic's wire shape: an `event:` line
+	// naming the type, then the `data:` line. Strict SDK clients (Claude
+	// Code) dispatch on the event line — bare data frames make them treat
+	// the stream as malformed, abort it, and silently retry the request
+	// non-streaming (caught live: every streamed turn was re-sent as JSON).
+	emit := func(eventType, payload string) error {
+		if _, err := fmt.Fprintf(w, "event: %s\ndata: %s\n\n", eventType, payload); err != nil {
 			return fmt.Errorf("anthropic serialize: %w", err)
 		}
 		return nil
+	}
+	// Anthropic streams MUST open with message_start (the SDK's message
+	// accumulator is seeded by it). The upstream envelope was consumed by
+	// ParseStream, so synthesize one; input tokens ride the closing
+	// message_delta's usage instead.
+	started := false
+	ensureStarted := func() error {
+		if started {
+			return nil
+		}
+		started = true
+		if err := emit("message_start",
+			`{"type":"message_start","message":{"id":"msg_torana_stream","type":"message","role":"assistant","model":"","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":0,"output_tokens":0}}}`,
+		); err != nil {
+			return err
+		}
+		return emit("ping", `{"type":"ping"}`)
 	}
 	closeThinking := func() error {
 		if !inThinking {
@@ -214,7 +233,7 @@ func (s *StreamAdapter) SerializeStream(w io.Writer, events <-chan engine.Stream
 		}
 		inThinking = false
 		blockIndex++
-		return emit(fmt.Sprintf(`data: {"type":"content_block_stop","index":%d}`, blockIndex-1))
+		return emit("content_block_stop", fmt.Sprintf(`{"type":"content_block_stop","index":%d}`, blockIndex-1))
 	}
 	closeText := func() error {
 		if !inText {
@@ -222,23 +241,28 @@ func (s *StreamAdapter) SerializeStream(w io.Writer, events <-chan engine.Stream
 		}
 		inText = false
 		blockIndex++
-		return emit(fmt.Sprintf(`data: {"type":"content_block_stop","index":%d}`, blockIndex-1))
+		return emit("content_block_stop", fmt.Sprintf(`{"type":"content_block_stop","index":%d}`, blockIndex-1))
 	}
 
 	for ev := range events {
+		if ev.Error == nil {
+			if err := ensureStarted(); err != nil {
+				return err
+			}
+		}
 		switch {
 		case ev.ThinkingDelta != nil:
 			if !inThinking {
 				inThinking = true
-				if err := emit(fmt.Sprintf(
-					`data: {"type":"content_block_start","index":%d,"content_block":{"type":"thinking","thinking":""}}`,
+				if err := emit("content_block_start", fmt.Sprintf(
+					`{"type":"content_block_start","index":%d,"content_block":{"type":"thinking","thinking":""}}`,
 					thinkingIndex,
 				)); err != nil {
 					return err
 				}
 			}
-			if err := emit(fmt.Sprintf(
-				`data: {"type":"content_block_delta","index":%d,"delta":{"type":"thinking_delta","thinking":%s}}`,
+			if err := emit("content_block_delta", fmt.Sprintf(
+				`{"type":"content_block_delta","index":%d,"delta":{"type":"thinking_delta","thinking":%s}}`,
 				thinkingIndex,
 				jsonString(*ev.ThinkingDelta),
 			)); err != nil {
@@ -251,19 +275,18 @@ func (s *StreamAdapter) SerializeStream(w io.Writer, events <-chan engine.Stream
 			}
 			if !inText {
 				inText = true
-				if err := emit(fmt.Sprintf(
-					`data: {"type":"content_block_start","index":%d,"content_block":{"type":"text","text":""}}`,
+				if err := emit("content_block_start", fmt.Sprintf(
+					`{"type":"content_block_start","index":%d,"content_block":{"type":"text","text":""}}`,
 					blockIndex,
 				)); err != nil {
 					return err
 				}
 			}
-			data := fmt.Sprintf(
-				`data: {"type":"content_block_delta","index":%d,"delta":{"type":"text_delta","text":%s}}`,
+			if err := emit("content_block_delta", fmt.Sprintf(
+				`{"type":"content_block_delta","index":%d,"delta":{"type":"text_delta","text":%s}}`,
 				blockIndex,
 				jsonString(*ev.TextDelta),
-			)
-			if err := emit(data); err != nil {
+			)); err != nil {
 				return err
 			}
 
@@ -276,13 +299,13 @@ func (s *StreamAdapter) SerializeStream(w io.Writer, events <-chan engine.Stream
 			}
 			toolBlock[ev.ToolCallStart.Index] = blockIndex
 			data := fmt.Sprintf(
-				`data: {"type":"content_block_start","index":%d,"content_block":{"type":"tool_use","id":%s,"name":%s}}`,
+				`{"type":"content_block_start","index":%d,"content_block":{"type":"tool_use","id":%s,"name":%s,"input":{}}}`,
 				blockIndex,
 				jsonString(ev.ToolCallStart.ID),
 				jsonString(ev.ToolCallStart.Name),
 			)
 			blockIndex++
-			if err := emit(data); err != nil {
+			if err := emit("content_block_start", data); err != nil {
 				return err
 			}
 
@@ -291,12 +314,11 @@ func (s *StreamAdapter) SerializeStream(w io.Writer, events <-chan engine.Stream
 			if !ok {
 				idx = ev.ToolCallDelta.Index
 			}
-			data := fmt.Sprintf(
-				`data: {"type":"content_block_delta","index":%d,"delta":{"type":"input_json_delta","partial_json":%s}}`,
+			if err := emit("content_block_delta", fmt.Sprintf(
+				`{"type":"content_block_delta","index":%d,"delta":{"type":"input_json_delta","partial_json":%s}}`,
 				idx,
 				jsonString(ev.ToolCallDelta.ArgumentsDelta),
-			)
-			if err := emit(data); err != nil {
+			)); err != nil {
 				return err
 			}
 
@@ -306,16 +328,15 @@ func (s *StreamAdapter) SerializeStream(w io.Writer, events <-chan engine.Stream
 				idx = ev.ToolCallEnd.Index
 			}
 			delete(toolBlock, ev.ToolCallEnd.Index)
-			data := fmt.Sprintf(`data: {"type":"content_block_stop","index":%d}`, idx)
-			if err := emit(data); err != nil {
+			if err := emit("content_block_stop", fmt.Sprintf(`{"type":"content_block_stop","index":%d}`, idx)); err != nil {
 				return err
 			}
 
 		case ev.Usage != nil:
 			if finishWritten {
 				// Finish frame already out — emit usage on its own delta frame.
-				if err := emit(fmt.Sprintf(
-					`data: {"type":"message_delta","delta":{},"usage":%s}`,
+				if err := emit("message_delta", fmt.Sprintf(
+					`{"type":"message_delta","delta":{},"usage":%s}`,
 					usageJSON(ev.Usage),
 				)); err != nil {
 					return err
@@ -335,24 +356,27 @@ func (s *StreamAdapter) SerializeStream(w io.Writer, events <-chan engine.Stream
 				pendingUsage = nil
 			}
 			finishWritten = true
-			data := fmt.Sprintf(
-				`data: {"type":"message_delta","delta":{"stop_reason":%s,"stop_sequence":null}%s}`,
+			if err := emit("message_delta", fmt.Sprintf(
+				`{"type":"message_delta","delta":{"stop_reason":%s,"stop_sequence":null}%s}`,
 				jsonString(stopReason),
 				usageField,
-			)
-			if err := emit(data); err != nil {
+			)); err != nil {
 				return err
 			}
 
 		case ev.Error != nil:
-			data := fmt.Sprintf(
-				`data: {"type":"error","error":{"type":"stream_error","message":%s}}`,
+			if err := emit("error", fmt.Sprintf(
+				`{"type":"error","error":{"type":"stream_error","message":%s}}`,
 				jsonString(ev.Error.Message),
-			)
-			if err := emit(data); err != nil {
+			)); err != nil {
 				return err
 			}
 		}
+	}
+
+	// An empty event stream still yields a valid message envelope.
+	if err := ensureStarted(); err != nil {
+		return err
 	}
 
 	// Close any open thinking block before message_stop.
@@ -367,8 +391,8 @@ func (s *StreamAdapter) SerializeStream(w io.Writer, events <-chan engine.Stream
 
 	// Usage seen but no finish frame followed — don't drop it.
 	if pendingUsage != nil {
-		if err := emit(fmt.Sprintf(
-			`data: {"type":"message_delta","delta":{},"usage":%s}`,
+		if err := emit("message_delta", fmt.Sprintf(
+			`{"type":"message_delta","delta":{},"usage":%s}`,
 			usageJSON(pendingUsage),
 		)); err != nil {
 			return err
@@ -376,10 +400,7 @@ func (s *StreamAdapter) SerializeStream(w io.Writer, events <-chan engine.Stream
 	}
 
 	// Always send message_stop after all events.
-	if _, err := fmt.Fprint(w, `data: {"type":"message_stop"}`+"\n\n"); err != nil {
-		return fmt.Errorf("anthropic serialize: %w", err)
-	}
-	return nil
+	return emit("message_stop", `{"type":"message_stop"}`)
 }
 
 // jsonString returns a JSON-encoded string (with quotes).
