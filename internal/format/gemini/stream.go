@@ -1,4 +1,4 @@
-package vertex
+package gemini
 
 import (
 	"bufio"
@@ -12,11 +12,16 @@ import (
 	"github.com/torana-edge/torana-edge/internal/engine"
 )
 
-// StreamAdapter translates between Gemini/Code Assist SSE streams and
-// StreamEvent channels. Code Assist streams are text/event-stream with
-// `data: {"response": {<GenerateContentResponse>}, ...}` frames; bare Gemini
-// line-delimited JSON (no data: prefix, no wrapper) is also tolerated.
-type StreamAdapter struct{}
+// StreamAdapter translates between Gemini SSE streams and StreamEvent channels.
+//
+// Parsing is flavor-agnostic and tolerant: it accepts `data:`-prefixed SSE or
+// bare line-JSON, and unwraps a {"response":…} envelope when present. Only
+// serialization differs by endpoint, controlled by Wrapped: Code Assist
+// (Wrapped=true) emits `data: {"response":{<chunk>}}`, the public Gemini API /
+// Vertex AI (Wrapped=false) emit bare `data: {<chunk>}`.
+type StreamAdapter struct {
+	Wrapped bool
+}
 
 // --- Stream wire types ---
 
@@ -84,7 +89,7 @@ func (s *StreamAdapter) ParseStream(body io.Reader) <-chan engine.StreamEvent {
 			}
 			if err != nil {
 				if err != io.EOF {
-					ch <- engine.StreamEvent{Error: &engine.StreamError{Code: -1, Message: fmt.Sprintf("vertex: read stream: %v", err)}}
+					ch <- engine.StreamEvent{Error: &engine.StreamError{Code: -1, Message: fmt.Sprintf("gemini: read stream: %v", err)}}
 				}
 				return
 			}
@@ -99,7 +104,7 @@ func (s *StreamAdapter) ParseStream(body io.Reader) <-chan engine.StreamEvent {
 func emitChunk(ch chan<- engine.StreamEvent, payload []byte, lastUsage **geminiUsageMetadata) bool {
 	var frame streamFrame
 	if err := json.Unmarshal(payload, &frame); err != nil {
-		ch <- engine.StreamEvent{Error: &engine.StreamError{Code: -1, Message: fmt.Sprintf("vertex: parse frame: %v", err)}}
+		ch <- engine.StreamEvent{Error: &engine.StreamError{Code: -1, Message: fmt.Sprintf("gemini: parse frame: %v", err)}}
 		return true
 	}
 	chunk := frame.Response
@@ -107,7 +112,7 @@ func emitChunk(ch chan<- engine.StreamEvent, payload []byte, lastUsage **geminiU
 		// Bare Gemini: the payload IS the chunk.
 		chunk = &geminiStreamChunk{}
 		if err := json.Unmarshal(payload, chunk); err != nil {
-			ch <- engine.StreamEvent{Error: &engine.StreamError{Code: -1, Message: fmt.Sprintf("vertex: parse chunk: %v", err)}}
+			ch <- engine.StreamEvent{Error: &engine.StreamError{Code: -1, Message: fmt.Sprintf("gemini: parse chunk: %v", err)}}
 			return true
 		}
 	}
@@ -151,7 +156,7 @@ func emitPart(ch chan<- engine.StreamEvent, part geminiPart) bool {
 		ch <- engine.StreamEvent{ToolCallStart: &engine.ToolCallStart{Index: 0, ID: id, Name: part.FunctionCall.Name, Signature: part.ThoughtSignature}}
 		argsJSON, err := json.Marshal(part.FunctionCall.Args)
 		if err != nil {
-			ch <- engine.StreamEvent{Error: &engine.StreamError{Code: -1, Message: fmt.Sprintf("vertex: marshal function call args: %v", err)}}
+			ch <- engine.StreamEvent{Error: &engine.StreamError{Code: -1, Message: fmt.Sprintf("gemini: marshal function call args: %v", err)}}
 			return true
 		}
 		delta := string(argsJSON)
@@ -204,7 +209,8 @@ type serializeState struct {
 	ArgsJSON  strings.Builder
 }
 
-// SerializeStream writes StreamEvents as Code Assist SSE frames to writer.
+// SerializeStream writes StreamEvents as Gemini SSE frames to writer, wrapping
+// each in {"response":…} for the Code Assist flavor (s.Wrapped).
 func (s *StreamAdapter) SerializeStream(w io.Writer, events <-chan engine.StreamEvent) error {
 	var toolState *serializeState
 	var pendingUsage *engine.StreamUsage
@@ -212,8 +218,8 @@ func (s *StreamAdapter) SerializeStream(w io.Writer, events <-chan engine.Stream
 	for event := range events {
 		switch {
 		case event.Error != nil:
-			_ = writeFrame(w, chunkFinish("OTHER", nil))
-			return fmt.Errorf("vertex: stream error: %s", event.Error.Message)
+			_ = writeFrame(w, chunkFinish("OTHER", nil), s.Wrapped)
+			return fmt.Errorf("gemini: stream error: %s", event.Error.Message)
 
 		case event.FinishReason != "":
 			var usage *geminiUsageMetadata
@@ -224,23 +230,23 @@ func (s *StreamAdapter) SerializeStream(w io.Writer, events <-chan engine.Stream
 					TotalTokenCount:      pendingUsage.InputTokens + pendingUsage.OutputTokens,
 				}
 			}
-			return writeFrame(w, chunkFinish(mapCanonicalToGeminiFinishReason(event.FinishReason), usage))
+			return writeFrame(w, chunkFinish(mapCanonicalToGeminiFinishReason(event.FinishReason), usage), s.Wrapped)
 
 		case event.Usage != nil:
 			pendingUsage = event.Usage
 
 		case event.TextDelta != nil:
-			if err := writeFrame(w, chunkPart(geminiPart{Text: *event.TextDelta})); err != nil {
+			if err := writeFrame(w, chunkPart(geminiPart{Text: *event.TextDelta}), s.Wrapped); err != nil {
 				return err
 			}
 
 		case event.ThinkingDelta != nil:
-			if err := writeFrame(w, chunkPart(geminiPart{Thought: true, Text: *event.ThinkingDelta})); err != nil {
+			if err := writeFrame(w, chunkPart(geminiPart{Thought: true, Text: *event.ThinkingDelta}), s.Wrapped); err != nil {
 				return err
 			}
 
 		case event.SignatureDelta != nil:
-			if err := writeFrame(w, chunkPart(geminiPart{ThoughtSignature: *event.SignatureDelta})); err != nil {
+			if err := writeFrame(w, chunkPart(geminiPart{ThoughtSignature: *event.SignatureDelta}), s.Wrapped); err != nil {
 				return err
 			}
 
@@ -251,7 +257,7 @@ func (s *StreamAdapter) SerializeStream(w io.Writer, events <-chan engine.Stream
 			toolState.ArgsJSON.WriteString(event.ToolCallDelta.ArgumentsDelta)
 
 		case event.ToolCallEnd != nil && toolState != nil:
-			if err := emitFunctionCall(w, toolState); err != nil {
+			if err := emitFunctionCall(w, toolState, s.Wrapped); err != nil {
 				return err
 			}
 			toolState = nil
@@ -260,18 +266,18 @@ func (s *StreamAdapter) SerializeStream(w io.Writer, events <-chan engine.Stream
 	return nil
 }
 
-func emitFunctionCall(w io.Writer, st *serializeState) error {
+func emitFunctionCall(w io.Writer, st *serializeState, wrapped bool) error {
 	var args map[string]any
 	if err := json.Unmarshal([]byte(st.ArgsJSON.String()), &args); err != nil {
-		log.Printf("[vertex] function call %q: accumulated args are not valid JSON (%v): %.200s", st.Name, err, st.ArgsJSON.String())
-		_ = writeFrame(w, chunkFinish("OTHER", nil))
-		return fmt.Errorf("vertex: function call %q args invalid: %w", st.Name, err)
+		log.Printf("[gemini] function call %q: accumulated args are not valid JSON (%v): %.200s", st.Name, err, st.ArgsJSON.String())
+		_ = writeFrame(w, chunkFinish("OTHER", nil), wrapped)
+		return fmt.Errorf("gemini: function call %q args invalid: %w", st.Name, err)
 	}
 	part := geminiPart{
 		ThoughtSignature: st.Signature,
 		FunctionCall:     &geminiFuncCall{Name: st.Name, Args: args, ID: st.ID},
 	}
-	return writeFrame(w, chunkPart(part))
+	return writeFrame(w, chunkPart(part), wrapped)
 }
 
 func chunkPart(part geminiPart) geminiStreamChunk {
@@ -299,9 +305,17 @@ func mapCanonicalToGeminiFinishReason(r string) string {
 	}
 }
 
-// writeFrame emits one Code Assist SSE frame: `data: {"response": <chunk>}\n\n`.
-func writeFrame(w io.Writer, chunk geminiStreamChunk) error {
-	payload, err := json.Marshal(streamFrame{Response: &chunk})
+// writeFrame emits one SSE frame. Wrapped (Code Assist) nests the chunk under
+// "response" — `data: {"response":<chunk>}\n\n`; bare (Gemini API / Vertex AI)
+// emits the chunk directly — `data: {<chunk>}\n\n`.
+func writeFrame(w io.Writer, chunk geminiStreamChunk, wrapped bool) error {
+	var payload []byte
+	var err error
+	if wrapped {
+		payload, err = json.Marshal(streamFrame{Response: &chunk})
+	} else {
+		payload, err = json.Marshal(chunk)
+	}
 	if err != nil {
 		return err
 	}

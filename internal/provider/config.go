@@ -14,7 +14,7 @@ import (
 // Provider describes an upstream LLM API endpoint.
 type Provider struct {
 	URL      string   `json:"url"`                // upstream base URL
-	Format   string   `json:"format"`             // wire format: "openai", "anthropic", "bedrock", "vertex"
+	Format   string   `json:"format"`             // wire format: "openai", "anthropic", "bedrock", "gemini", "gemini-codeassist"
 	Fallback []string `json:"fallback,omitempty"` // provider names to try on 429/5xx
 	// APIKeyEnv names an environment variable holding this provider's own
 	// API key. Used when a plugin reroutes a request here

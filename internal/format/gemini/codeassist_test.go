@@ -1,4 +1,4 @@
-package vertex
+package gemini
 
 import (
 	"encoding/json"
@@ -122,7 +122,7 @@ func TestCodeAssistStreamToolCall(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read fixture: %v", err)
 	}
-	s := &StreamAdapter{}
+	s := &StreamAdapter{Wrapped: true}
 	events := drain(s.ParseStream(strings.NewReader(string(raw))))
 
 	var start *engine.ToolCallStart
@@ -180,7 +180,7 @@ func TestCodeAssistStreamText(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read fixture: %v", err)
 	}
-	s := &StreamAdapter{}
+	s := &StreamAdapter{Wrapped: true}
 	events := drain(s.ParseStream(strings.NewReader(string(raw))))
 
 	var text strings.Builder
@@ -313,6 +313,55 @@ func TestCodeAssistParallelCallsShareOneBlock(t *testing.T) {
 	}
 	if _, present := p1["thoughtSignature"]; present {
 		t.Errorf("second parallel call should have no signature, got %v", p1["thoughtSignature"])
+	}
+}
+
+// TestStreamFramingBareVsWrapped locks the one difference between the two
+// formats: bare Gemini emits `data: {<chunk>}`, Code Assist wraps in "response".
+func TestStreamFramingBareVsWrapped(t *testing.T) {
+	mk := func() <-chan engine.StreamEvent {
+		ch := make(chan engine.StreamEvent, 2)
+		txt := "hi"
+		ch <- engine.StreamEvent{TextDelta: &txt}
+		ch <- engine.StreamEvent{FinishReason: "stop"}
+		close(ch)
+		return ch
+	}
+
+	var bare strings.Builder
+	if err := (&StreamAdapter{Wrapped: false}).SerializeStream(&bare, mk()); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(bare.String(), `"response"`) {
+		t.Errorf("bare gemini frames must NOT wrap in \"response\":\n%s", bare.String())
+	}
+	if !strings.Contains(bare.String(), `"candidates"`) {
+		t.Errorf("bare gemini frames must carry candidates at top level:\n%s", bare.String())
+	}
+
+	var wrapped strings.Builder
+	if err := (&StreamAdapter{Wrapped: true}).SerializeStream(&wrapped, mk()); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(wrapped.String(), `"response"`) {
+		t.Errorf("code assist frames must wrap in \"response\":\n%s", wrapped.String())
+	}
+
+	// Both must re-parse cleanly through the tolerant parser.
+	for _, out := range []string{bare.String(), wrapped.String()} {
+		evs := drain((&StreamAdapter{}).ParseStream(strings.NewReader(out)))
+		var sawText, sawFinish bool
+		for _, e := range evs {
+			if e.TextDelta != nil && *e.TextDelta == "hi" {
+				sawText = true
+			}
+			if e.FinishReason == "stop" {
+				sawFinish = true
+			}
+		}
+		if !sawText || !sawFinish {
+			t.Errorf("re-parse lost text/finish for output:\n%s", out)
+		}
 	}
 }
 

@@ -123,7 +123,7 @@ func TestJSONResponseHooksAllFormats(t *testing.T) {
 			preserved: map[string]any{"stopReason": "tool_use"},
 		},
 		{
-			format: "vertex",
+			format: "gemini",
 			body: `{
 				"modelVersion": "gemini-x",
 				"candidates": [{"finishReason": "STOP", "content": {"role": "model", "parts": [

@@ -1,4 +1,4 @@
-package vertex
+package gemini
 
 import (
 	"encoding/json"
@@ -203,8 +203,9 @@ func TestStreamSerialize(t *testing.T) {
 	}
 }
 
-// parseSSEFrames splits serialized output into its `data: {"response":...}`
-// frames and unwraps each into a geminiStreamChunk.
+// parseSSEFrames splits serialized output into frames, tolerating both the
+// bare (`data: {<chunk>}`) and Code Assist wrapped (`data: {"response":{…}}`)
+// shapes — mirroring ParseStream.
 func parseSSEFrames(t *testing.T, output string) []geminiStreamChunk {
 	t.Helper()
 	var chunks []geminiStreamChunk
@@ -217,14 +218,20 @@ func parseSSEFrames(t *testing.T, output string) []geminiStreamChunk {
 		if !ok {
 			t.Fatalf("frame missing data: prefix: %q", block)
 		}
+		raw := strings.TrimSpace(data)
 		var frame streamFrame
-		if err := json.Unmarshal([]byte(strings.TrimSpace(data)), &frame); err != nil {
+		if err := json.Unmarshal([]byte(raw), &frame); err != nil {
 			t.Fatalf("frame not valid JSON: %v (%q)", err, block)
 		}
-		if frame.Response == nil {
-			t.Fatalf("frame missing response wrapper: %q", block)
+		if frame.Response != nil {
+			chunks = append(chunks, *frame.Response)
+			continue
 		}
-		chunks = append(chunks, *frame.Response)
+		var bare geminiStreamChunk
+		if err := json.Unmarshal([]byte(raw), &bare); err != nil {
+			t.Fatalf("bare frame not valid JSON: %v (%q)", err, block)
+		}
+		chunks = append(chunks, bare)
 	}
 	return chunks
 }

@@ -1,18 +1,26 @@
-// Package vertex implements format adapters for GCP Vertex AI / Gemini and the
-// Google Code Assist API used by the Antigravity CLI (agy).
+// Package gemini implements format adapters for the Google Gemini generateContent
+// wire format — the content model (contents/parts/functionCall/systemInstruction/
+// generationConfig) shared by the public Gemini API, Vertex AI, and the Code
+// Assist API behind the Antigravity CLI (agy).
 //
-// Two request envelopes are supported transparently:
-//   - Bare Gemini generateContent: {systemInstruction, contents, tools, ...}
-//     at the JSON root.
-//   - Code Assist: {"model","project","request":{<GenerateContentRequest>}, ...}
-//     — the Antigravity CLI wraps the GenerateContentRequest under "request"
-//     with sibling routing fields, puts tool calls AND tool results under
-//     role "model", carries a per-call "id", and attaches a "thoughtSignature"
-//     to model parts. Unknown wrapper/request fields (toolConfig, labels,
-//     sessionId, generationConfig.thinkingConfig, requestId, requestType, …)
-//     are preserved verbatim so only the plugin-touched fields (contents,
-//     systemInstruction, tools) are rebuilt from the IR.
-package vertex
+// Two endpoint flavors are registered as sibling formats sharing this code:
+//
+//   - "gemini": the bare shape used by the public Gemini API and Vertex AI —
+//     {systemInstruction, contents, tools, …} at the JSON root; SSE frames are
+//     bare `data: {<GenerateContentResponse>}`.
+//   - "gemini-codeassist": the Antigravity CLI / Code Assist envelope —
+//     {model, project, request:{<GenerateContentRequest>}, …} on the request,
+//     and `data: {"response":{<GenerateContentResponse>}}` SSE frames. Tool
+//     calls AND results live under role "model", each functionCall/Response
+//     carries a real "id", and model parts carry a "thoughtSignature".
+//
+// The request Adapter is shared: it detects the Code Assist envelope on the wire
+// (unambiguous — a top-level "request" object) and preserves the wrapper plus
+// inner extras (toolConfig, labels, sessionId, thinkingConfig, requestId, …)
+// verbatim, rebuilding only contents/systemInstruction/tools from the IR. Only
+// the SSE framing differs between the two, so the StreamAdapter is parameterized
+// by a Wrapped flag.
+package gemini
 
 import (
 	"encoding/json"
@@ -22,15 +30,30 @@ import (
 	"github.com/torana-edge/torana-edge/internal/format"
 )
 
+// Format names registered by this package.
+const (
+	FormatGemini     = "gemini"            // public Gemini API / Vertex AI (bare)
+	FormatCodeAssist = "gemini-codeassist" // Code Assist / Antigravity CLI (wrapped)
+)
+
 func init() {
-	format.Register("/vertex", format.Format{
-		Name:    "vertex",
+	// Bare Gemini (public Gemini API, Vertex AI): unwrapped SSE frames.
+	format.Register("/gemini", format.Format{
+		Name:    FormatGemini,
 		Request: &Adapter{},
-		Stream:  &StreamAdapter{},
+		Stream:  &StreamAdapter{Wrapped: false},
+	})
+	// Code Assist (Antigravity CLI): {"response":…}-wrapped SSE frames.
+	format.Register("/gemini-codeassist", format.Format{
+		Name:    FormatCodeAssist,
+		Request: &Adapter{},
+		Stream:  &StreamAdapter{Wrapped: true},
 	})
 }
 
 // Adapter translates between Gemini/Code Assist JSON and canonical ChatRequest.
+// It is shared by both formats; the Code Assist envelope is detected on the wire
+// and round-tripped via ProviderExtensions, independent of the format name.
 type Adapter struct{}
 
 // ProviderExtensions keys used to round-trip the Code Assist envelope.
@@ -106,7 +129,7 @@ func (a *Adapter) Unmarshal(rawBody []byte) (*engine.ChatRequest, error) {
 	// Detect the Code Assist wrapper: a top-level object with a "request" member.
 	var top map[string]json.RawMessage
 	if err := json.Unmarshal(rawBody, &top); err != nil {
-		return nil, fmt.Errorf("vertex: unmarshal request: %w", err)
+		return nil, fmt.Errorf("gemini: unmarshal request: %w", err)
 	}
 
 	reqBytes := rawBody
@@ -118,7 +141,7 @@ func (a *Adapter) Unmarshal(rawBody []byte) (*engine.ChatRequest, error) {
 
 	var gReq geminiRequest
 	if err := json.Unmarshal(reqBytes, &gReq); err != nil {
-		return nil, fmt.Errorf("vertex: unmarshal inner request: %w", err)
+		return nil, fmt.Errorf("gemini: unmarshal inner request: %w", err)
 	}
 
 	chat := &engine.ChatRequest{Stream: false, Model: "gemini"}

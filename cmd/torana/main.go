@@ -24,7 +24,7 @@ import (
 	_ "github.com/torana-edge/torana-edge/internal/format/anthropic"
 	_ "github.com/torana-edge/torana-edge/internal/format/bedrock"
 	_ "github.com/torana-edge/torana-edge/internal/format/openai"
-	_ "github.com/torana-edge/torana-edge/internal/format/vertex"
+	_ "github.com/torana-edge/torana-edge/internal/format/gemini"
 )
 
 func main() {
