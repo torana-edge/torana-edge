@@ -111,7 +111,7 @@ func TestDiscoverPlugins_ValidPlugin(t *testing.T) {
 // CallRequest directly. This catches manifest/dispatch mismatches that the
 // existing direct-call tests miss.
 func TestPipelineRunBeforeRequest_FullDispatch(t *testing.T) {
-	requireWASM(t, "../../plugins/compactor/plugin.wasm")
+	requireWASM(t, "../../plugins/intent/plugin.wasm")
 
 	ctx := context.Background()
 	runtime := wasm.NewRuntime(ctx)
@@ -119,13 +119,13 @@ func TestPipelineRunBeforeRequest_FullDispatch(t *testing.T) {
 
 	pipeline, err := NewPipeline(runtime, PluginConfig{
 		Dir:   "../../plugins",
-		Order: []string{"compactor"},
+		Order: []string{"intent"},
 	})
 	if err != nil {
 		t.Fatalf("NewPipeline: %v", err)
 	}
 	if pipeline.Len() != 1 {
-		t.Fatalf("compactor not loaded (loaded=%d)", pipeline.Len())
+		t.Fatalf("intent plugin not loaded (loaded=%d)", pipeline.Len())
 	}
 
 	chat := &engine.ChatRequest{
@@ -143,7 +143,7 @@ func TestPipelineRunBeforeRequest_FullDispatch(t *testing.T) {
 		t.Fatalf("RunBeforeRequest: %v", err)
 	}
 
-	// The compactor plugin injects the "i" intent field into tool schemas
+	// The intent plugin injects the "i" intent field into tool schemas
 	// via the full dispatch path.
 	if len(result.Tools) != 1 {
 		t.Fatalf("expected 1 tool, got %d", len(result.Tools))

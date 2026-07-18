@@ -6,7 +6,7 @@ LDFLAGS := -s -w -X main.version=$(VERSION)
 
 # WASM plugins are build artifacts — never committed (*.wasm is gitignored).
 # Every plugin dir builds with the same recipe as `torana-cli plugin build`.
-PLUGIN_DIRS := plugins/schema_translator plugins/keyword_compactor plugins/compactor plugins/otel plugins/auth plugins/pii
+PLUGIN_DIRS := plugins/schema_translator plugins/intent plugins/keyword_compactor plugins/compactor plugins/otel plugins/auth plugins/pii
 TESTDATA_DIRS := examples/plugins/test-stream-mutator examples/plugins/test-blocker examples/plugins/test-blocker-nogrant examples/plugins/test-observer examples/plugins/test-responder examples/plugins/test-responder-nogrant examples/plugins/test-original examples/plugins/test-router
 WASM_BUILD = GOOS=wasip1 GOARCH=wasm go build -buildmode=c-shared
 

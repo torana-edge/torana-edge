@@ -28,7 +28,7 @@ import (
 // regression ship: every assertion here exercises the deployed .wasm files.
 func TestE2E(t *testing.T) {
 	requireWASM(t, "../../plugins/schema_translator/plugin.wasm")
-	requireWASM(t, "../../plugins/keyword_compactor/plugin.wasm")
+	requireWASM(t, "../../plugins/intent/plugin.wasm")
 	requireWASM(t, "../../plugins/compactor/plugin.wasm")
 
 	// --- mock upstream ------------------------------------------------------
@@ -84,8 +84,9 @@ func TestE2E(t *testing.T) {
 			mu.Unlock()
 		}
 		for _, m := range req.Messages {
-			// Ignore the compactor's injected few-shot example (a synthetic
-			// tool-result message present in every translated request).
+			// Ignore the intent plugin's injected few-shot example (a
+			// synthetic tool-result message present in every translated
+			// request).
 			if m.Role == "tool" && m.ToolCallID != "call_mock_fewshot_1" {
 				mu.Lock()
 				lastToolResultBody = body
@@ -145,8 +146,11 @@ func TestE2E(t *testing.T) {
 				"cheap": {URL: offload.URL, Format: "openai"},
 			},
 			Plugins: provider.PluginsConfig{
-				Dir:   "../../plugins",
-				Order: []string{"schema_translator", "keyword_compactor", "compactor"},
+				Dir: "../../plugins",
+				// intent captures "i" into the cache; compactor consumes it.
+				// keyword_compactor is its ALTERNATIVE (either/or) and is
+				// deliberately not in this pipeline.
+				Order: []string{"schema_translator", "intent", "compactor"},
 			},
 			Offload: provider.OffloadConfig{
 				Enabled:  true,

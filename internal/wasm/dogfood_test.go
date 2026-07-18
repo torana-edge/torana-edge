@@ -10,11 +10,11 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
-// TestCompactorRawABI drives the compactor plugin through the raw
+// TestIntentRawABI drives the intent plugin through the raw
 // CallRequest ABI (alloc → write → hook → read result) with a real protobuf
 // payload, asserting the "i" intent field lands in the returned tool schema.
-func TestCompactorRawABI(t *testing.T) {
-	path := "../../plugins/compactor/plugin.wasm"
+func TestIntentRawABI(t *testing.T) {
+	path := "../../plugins/intent/plugin.wasm"
 	requireWASM(t, path)
 	b, err := os.ReadFile(path)
 	if err != nil {
@@ -23,7 +23,7 @@ func TestCompactorRawABI(t *testing.T) {
 
 	r := NewRuntime(context.Background())
 	defer r.Close()
-	p, err := r.LoadPlugin("compactor", b)
+	p, err := r.LoadPlugin("intent", b)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -43,7 +43,7 @@ func TestCompactorRawABI(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(outBytes) == 0 {
-		t.Fatal("compactor did not modify the request (expected intent injection)")
+		t.Fatal("intent plugin did not modify the request (expected intent injection)")
 	}
 
 	var out pb.ChatRequest

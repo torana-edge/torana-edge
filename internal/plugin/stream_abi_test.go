@@ -4,8 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"strings"
 	"testing"
+	"time"
 
+	"github.com/torana-edge/torana-edge/internal/cache"
 	"github.com/torana-edge/torana-edge/internal/engine"
 	"github.com/torana-edge/torana-edge/internal/wasm"
 )
@@ -25,9 +28,19 @@ func requireWASM(t *testing.T, path string) {
 
 func newTestPipeline(t *testing.T, dir string, order []string) *PluginPipeline {
 	t.Helper()
-	rt := wasm.NewRuntime(context.Background())
-	t.Cleanup(func() { rt.Close() })
-	pp, err := NewPipeline(rt, PluginConfig{Dir: dir, Order: order})
+	return newTestPipelineWith(t, dir, order, cache.NewLocalCache(time.Minute), nil)
+}
+
+// newTestPipelineWith exposes the plugin cache store to the test (for
+// asserting what plugins wrote cross-request) and per-plugin config blobs.
+func newTestPipelineWith(t *testing.T, dir string, order []string, store cache.Store, cfg map[string]json.RawMessage) *PluginPipeline {
+	t.Helper()
+	rt := wasm.NewRuntimeWithCache(context.Background(), store)
+	t.Cleanup(func() {
+		rt.Close()
+		store.Close()
+	})
+	pp, err := NewPipeline(rt, PluginConfig{Dir: dir, Order: order, Config: cfg})
 	if err != nil {
 		t.Fatalf("NewPipeline: %v", err)
 	}
@@ -276,12 +289,12 @@ func TestUnregisteredToolNotReversed(t *testing.T) {
 	}
 }
 
-// TestStreamChaining: schema_translator fans out at ToolCallEnd; compactor
-// consumes that fan-out, extracts the intent, and strips the "i" field.
+// TestStreamChaining: schema_translator fans out at ToolCallEnd; the intent
+// plugin consumes that fan-out, extracts the intent, and strips the "i" field.
 func TestStreamChaining(t *testing.T) {
 	requireWASM(t, "../../plugins/schema_translator/plugin.wasm")
-	requireWASM(t, "../../plugins/compactor/plugin.wasm")
-	pp := newTestPipeline(t, "../../plugins", []string{"schema_translator", "compactor"})
+	requireWASM(t, "../../plugins/intent/plugin.wasm")
+	pp := newTestPipeline(t, "../../plugins", []string{"schema_translator", "intent"})
 
 	// Translate the schema first (reqID 1, matching run's default) so env's
 	// KV-array mutation is registered and reversed via the registry.
@@ -308,7 +321,7 @@ func TestStreamChaining(t *testing.T) {
 		t.Fatalf("emitted args not valid JSON: %v (%q)", err, out[0].ToolCallDelta.ArgumentsDelta)
 	}
 	if _, hasI := args["i"]; hasI {
-		t.Fatalf(`expected "i" stripped by compactor, got %v`, args)
+		t.Fatalf(`expected "i" stripped by the intent plugin, got %v`, args)
 	}
 	env, ok := args["env"].(map[string]any)
 	if !ok || env["A"] != "1" {
@@ -316,13 +329,280 @@ func TestStreamChaining(t *testing.T) {
 	}
 }
 
-// TestFewShotPlacementNeverSplitsToolPairs: the compactor's few-shot triplet
-// must land after the leading system messages — inserting it before the last
-// message split assistant tool_calls from their tool results, which strict
-// providers (DeepSeek) reject with a 400. Caught live during dogfooding.
-func TestFewShotPlacementNeverSplitsToolPairs(t *testing.T) {
-	requireWASM(t, "../../plugins/compactor/plugin.wasm")
-	pp := newTestPipeline(t, "../../plugins", []string{"compactor"})
+// TestIntentRehydratesHistory: the response side strips "i" and caches it;
+// on a later request the intent plugin must restore "i" onto that same tool
+// call in history (from the cache) so the model sees consistent usage. This
+// is the fix for multi-turn intent collapse (the model imitating its own
+// "i"-stripped history).
+func TestIntentRehydratesHistory(t *testing.T) {
+	requireWASM(t, "../../plugins/intent/plugin.wasm")
+	pp := newTestPipeline(t, "../../plugins", []string{"intent"})
+
+	// Turn 1 response: model emits a tool call carrying "i"; the plugin caches
+	// the intent under the tool_call_id and strips it from the emitted args.
+	if out := run(t, pp, toolStart(0, "call_hist", "read")); len(out) != 1 {
+		t.Fatalf("expected start passthrough, got %+v", out)
+	}
+	if out := run(t, pp, toolDelta(0, `{"i":"where is the retry budget configured","path":"failover.go"}`)); len(out) != 0 {
+		t.Fatalf("expected fragment suppressed, got %+v", out)
+	}
+	out := run(t, pp, toolEnd(0))
+	if len(out) != 2 || out[0].ToolCallDelta == nil {
+		t.Fatalf("expected [delta, end], got %+v", out)
+	}
+	var stripped map[string]any
+	json.Unmarshal([]byte(out[0].ToolCallDelta.ArgumentsDelta), &stripped)
+	if _, hasI := stripped["i"]; hasI {
+		t.Fatalf(`turn 1: "i" should be stripped from emitted args, got %v`, stripped)
+	}
+
+	// Turn 2 request: the harness replays the (stripped) tool call in history.
+	// The intent plugin must re-hydrate "i" from the cache.
+	chat := &engine.ChatRequest{
+		Tools: []engine.ToolDef{{Name: "read", Parameters: map[string]any{
+			"type": "object", "properties": map[string]any{"path": map[string]any{"type": "string"}},
+		}}},
+		Messages: []engine.Message{
+			{Role: engine.RoleUser, Content: "trace the retry logic"},
+			{Role: engine.RoleAssistant, ToolCalls: []engine.ToolCall{
+				{ID: "call_hist", Name: "read", Arguments: map[string]any{"path": "failover.go"}},
+			}},
+			{Role: engine.RoleTool, ToolCallID: "call_hist", Content: "package proxy ..."},
+		},
+	}
+	out2, err := pp.RunBeforeRequest(context.Background(), 2, chat)
+	if err != nil {
+		t.Fatalf("RunBeforeRequest: %v", err)
+	}
+	var histArgs map[string]any
+	for _, m := range out2.Messages {
+		if m.Role == engine.RoleAssistant && len(m.ToolCalls) == 1 && m.ToolCalls[0].ID == "call_hist" {
+			histArgs = m.ToolCalls[0].Arguments
+		}
+	}
+	if histArgs == nil {
+		t.Fatalf("history tool call missing after rehydration: %v", out2.Messages)
+	}
+	if got, _ := histArgs["i"].(string); got != "where is the retry budget configured" {
+		t.Fatalf(`"i" not re-hydrated onto history tool call: got %q (args %v)`, got, histArgs)
+	}
+	if histArgs["path"] != "failover.go" {
+		t.Fatalf("rehydration clobbered original args: %v", histArgs)
+	}
+}
+
+// TestIntentFillsUncachedHistory: a history tool call with no cached intent
+// (the model organically omitted "i" — nothing to rehydrate) gets a HEURISTIC
+// fill by default. History "i" values act as few-shot examples: one "i"-less
+// call becomes a self-reinforcing per-tool precedent (measured Jul 18: an
+// "i"-less history collapses next-call emission to 0/9; filling the holes
+// restores 8/8). The fill is derived per request — never cached, never
+// bridged — so the intent cache stays real-captured-only.
+func TestIntentFillsUncachedHistory(t *testing.T) {
+	requireWASM(t, "../../plugins/intent/plugin.wasm")
+	store := cache.NewLocalCache(time.Minute)
+	pp := newTestPipelineWith(t, "../../plugins", []string{"intent"}, store, nil)
+
+	mkChat := func(userMsg string) *engine.ChatRequest {
+		return &engine.ChatRequest{
+			Tools: []engine.ToolDef{{Name: "read", Parameters: map[string]any{
+				"type": "object", "properties": map[string]any{"path": map[string]any{"type": "string"}},
+			}}},
+			Messages: []engine.Message{
+				{Role: engine.RoleUser, Content: userMsg},
+				{Role: engine.RoleAssistant, ToolCalls: []engine.ToolCall{
+					{ID: "call_never_seen", Name: "read", Arguments: map[string]any{"path": "x.go"}},
+				}},
+				{Role: engine.RoleTool, ToolCallID: "call_never_seen", Content: "..."},
+			},
+		}
+	}
+	fillOf := func(out *engine.ChatRequest) string {
+		t.Helper()
+		for _, m := range out.Messages {
+			if m.Role == engine.RoleAssistant && len(m.ToolCalls) == 1 {
+				i, _ := m.ToolCalls[0].Arguments["i"].(string)
+				return i
+			}
+		}
+		t.Fatalf("history tool call missing: %v", out.Messages)
+		return ""
+	}
+
+	out, err := pp.RunBeforeRequest(context.Background(), 3, mkChat("trace the retry logic"))
+	if err != nil {
+		t.Fatalf("RunBeforeRequest: %v", err)
+	}
+	fill := fillOf(out)
+	if fill == "" {
+		t.Fatal("uncached history tool call was not filled")
+	}
+	if !strings.Contains(fill, "x.go") || !strings.Contains(fill, "trace the retry logic") {
+		t.Fatalf("fill should carry the call's primary arg and the task, got %q", fill)
+	}
+
+	// Never cached, never bridged: the intent cache must not contain the fill.
+	if v, ok := store.Get("intent:call_never_seen"); ok {
+		t.Fatalf("fill was bridged into the intent cache: %q", v)
+	}
+	if v, ok := store.Get(`intentc:["read",{"path":"x.go"}]`); ok {
+		t.Fatalf("fill was written under the content key: %q", v)
+	}
+
+	// Derived fresh each request: a new task must produce a new fill (a cached
+	// fill would freeze the first one).
+	out2, err := pp.RunBeforeRequest(context.Background(), 4, mkChat("audit the timeout budget"))
+	if err != nil {
+		t.Fatalf("RunBeforeRequest: %v", err)
+	}
+	if fill2 := fillOf(out2); !strings.Contains(fill2, "audit the timeout budget") {
+		t.Fatalf("fill not re-derived for the new task: %q", fill2)
+	}
+}
+
+// TestIntentFillOff: fill "off" restores the old behavior — an uncached
+// history tool call is left untouched, no spurious "i".
+func TestIntentFillOff(t *testing.T) {
+	requireWASM(t, "../../plugins/intent/plugin.wasm")
+	pp := newTestPipelineWith(t, "../../plugins", []string{"intent"}, cache.NewLocalCache(time.Minute),
+		map[string]json.RawMessage{"intent": json.RawMessage(`{"fill":"off"}`)})
+
+	chat := &engine.ChatRequest{
+		Tools: []engine.ToolDef{{Name: "read", Parameters: map[string]any{
+			"type": "object", "properties": map[string]any{"path": map[string]any{"type": "string"}},
+		}}},
+		Messages: []engine.Message{
+			{Role: engine.RoleUser, Content: "hi"},
+			{Role: engine.RoleAssistant, ToolCalls: []engine.ToolCall{
+				{ID: "call_never_seen", Name: "read", Arguments: map[string]any{"path": "x.go"}},
+			}},
+			{Role: engine.RoleTool, ToolCallID: "call_never_seen", Content: "..."},
+		},
+	}
+	out, err := pp.RunBeforeRequest(context.Background(), 3, chat)
+	if err != nil {
+		t.Fatalf("RunBeforeRequest: %v", err)
+	}
+	for _, m := range out.Messages {
+		if m.Role == engine.RoleAssistant && len(m.ToolCalls) == 1 {
+			if _, hasI := m.ToolCalls[0].Arguments["i"]; hasI {
+				t.Fatalf("fill=off: uncached history tool call should stay untouched: %v", m.ToolCalls[0].Arguments)
+			}
+		}
+	}
+}
+
+// TestIntentBridgesToRequestSideID: harnesses like Claude Code do NOT
+// round-trip tool_call_ids — the ID the response side cached under never
+// reappears in later request history. Rehydration resolves the intent by
+// content key and must BRIDGE it to the request's own tool_call_id, because
+// that request-side ID is what the compactors use to look up intents from
+// the tool RESULT message (and it stays stable across the session's
+// requests; verified in dogfood).
+func TestIntentBridgesToRequestSideID(t *testing.T) {
+	requireWASM(t, "../../plugins/intent/plugin.wasm")
+	store := cache.NewLocalCache(time.Minute)
+	pp := newTestPipelineWith(t, "../../plugins", []string{"intent"}, store, nil)
+
+	// Turn 1 response: model emits the call under the response-stream ID.
+	run(t, pp, toolStart(0, "call_resp_7", "read"))
+	run(t, pp, toolDelta(0, `{"i":"where is the retry budget configured","path":"failover.go"}`))
+	run(t, pp, toolEnd(0))
+
+	// Turn 2 request: the harness replays the same call under ITS OWN ID.
+	chat := &engine.ChatRequest{
+		Tools: []engine.ToolDef{{Name: "read", Parameters: map[string]any{
+			"type": "object", "properties": map[string]any{"path": map[string]any{"type": "string"}},
+		}}},
+		Messages: []engine.Message{
+			{Role: engine.RoleUser, Content: "trace the retry logic"},
+			{Role: engine.RoleAssistant, ToolCalls: []engine.ToolCall{
+				{ID: "call_req_42", Name: "read", Arguments: map[string]any{"path": "failover.go"}},
+			}},
+			{Role: engine.RoleTool, ToolCallID: "call_req_42", Content: "package proxy ..."},
+		},
+	}
+	if _, err := pp.RunBeforeRequest(context.Background(), 2, chat); err != nil {
+		t.Fatalf("RunBeforeRequest: %v", err)
+	}
+	got, ok := store.Get("intent:call_req_42")
+	if !ok || got != "where is the retry budget configured" {
+		t.Fatalf("intent not bridged to request-side ID: got %q (ok=%v)", got, ok)
+	}
+}
+
+// TestIntentBridgeFeedsKeywordCompactor: the end-to-end #5 regression — with
+// reassigned tool_call_ids (the Claude Code path), the keyword compactor's
+// unchanged intent:<tool_call_id> lookup must work because the intent plugin
+// (running first in the chain) bridges the content-key hit to the request's
+// ID before the compactor sees the request.
+func TestIntentBridgeFeedsKeywordCompactor(t *testing.T) {
+	requireWASM(t, "../../plugins/intent/plugin.wasm")
+	requireWASM(t, "../../plugins/keyword_compactor/plugin.wasm")
+	store := cache.NewLocalCache(time.Minute)
+	pp := newTestPipelineWith(t, "../../plugins", []string{"intent", "keyword_compactor"}, store, nil)
+
+	// Turn 1 response: intent captured under the response-stream ID.
+	run(t, pp, toolStart(0, "call_resp_9", "read"))
+	run(t, pp, toolDelta(0, `{"i":"where is the retry budget configured","path":"failover.go"}`))
+	run(t, pp, toolEnd(0))
+
+	// A big tool result: >50 lines, >2000 chars, with a few lines matching the
+	// intent's keywords (retry/budget/configured) buried in filler.
+	var lines []string
+	for n := 0; n < 120; n++ {
+		switch n {
+		case 20, 60, 100:
+			lines = append(lines, "the retry budget is configured right here, attempt cap and backoff")
+		default:
+			lines = append(lines, "filler stanza describing nothing of consequence on this line ....")
+		}
+	}
+	big := strings.Join(lines, "\n")
+
+	chat := &engine.ChatRequest{
+		Tools: []engine.ToolDef{{Name: "read", Parameters: map[string]any{
+			"type": "object", "properties": map[string]any{"path": map[string]any{"type": "string"}},
+		}}},
+		Messages: []engine.Message{
+			{Role: engine.RoleUser, Content: "trace the retry logic"},
+			{Role: engine.RoleAssistant, ToolCalls: []engine.ToolCall{
+				{ID: "call_req_77", Name: "read", Arguments: map[string]any{"path": "failover.go"}},
+			}},
+			{Role: engine.RoleTool, ToolCallID: "call_req_77", Content: big},
+		},
+	}
+	out, err := pp.RunBeforeRequest(context.Background(), 5, chat)
+	if err != nil {
+		t.Fatalf("RunBeforeRequest: %v", err)
+	}
+	var result string
+	for _, m := range out.Messages {
+		if m.Role == engine.RoleTool && m.ToolCallID == "call_req_77" {
+			result = m.Content
+		}
+	}
+	if result == "" {
+		t.Fatalf("tool result missing from output: %v", out.Messages)
+	}
+	if len(result) >= len(big)/2 {
+		t.Fatalf("tool result was not compacted (%d bytes of %d) — bridge to request-side ID broken?", len(result), len(big))
+	}
+	if !strings.Contains(result, "retry budget is configured") {
+		t.Fatalf("compaction dropped the intent-relevant lines: %q", result)
+	}
+}
+
+// TestIntentInjectsNoSyntheticMessages: the intent plugin must teach the "i"
+// convention WITHOUT adding messages — a fake conversation is
+// indistinguishable from real history and contaminates model behavior
+// (verbatim intent leaks, topic-anchored refusals; caught live and in the
+// Jul 16 experiments). The example transcript lives in the system prompt.
+// Also pins the historical invariant: assistant tool_calls must stay
+// immediately followed by their tool results (strict providers 400 otherwise).
+func TestIntentInjectsNoSyntheticMessages(t *testing.T) {
+	requireWASM(t, "../../plugins/intent/plugin.wasm")
+	pp := newTestPipeline(t, "../../plugins", []string{"intent"})
 
 	chat := &engine.ChatRequest{
 		Messages: []engine.Message{
@@ -362,11 +642,20 @@ func TestFewShotPlacementNeverSplitsToolPairs(t *testing.T) {
 		}
 	}
 
-	// And the few-shot must sit right after the system message.
-	if out.Messages[0].Role != engine.RoleSystem || out.Messages[1].Role != engine.RoleUser ||
-		len(out.Messages) < 4 || len(out.Messages[2].ToolCalls) == 0 ||
-		out.Messages[2].ToolCalls[0].ID != "call_mock_fewshot_1" {
-		t.Fatalf("few-shot not placed after system: %v", roles(out.Messages))
+	// No synthetic messages: exactly the 4 originals, in order.
+	if len(out.Messages) != 4 {
+		t.Fatalf("intent plugin added messages (want 4, got %d): %v", len(out.Messages), roles(out.Messages))
+	}
+	for _, m := range out.Messages {
+		for _, tc := range m.ToolCalls {
+			if strings.Contains(tc.ID, "fewshot") {
+				t.Fatalf("synthetic few-shot message injected: %v", roles(out.Messages))
+			}
+		}
+	}
+	// The convention (with its example transcript) rides the system prompt.
+	if !strings.Contains(out.Messages[0].Content, `"i"`) {
+		t.Fatalf("system prompt missing the intent addendum: %q", out.Messages[0].Content)
 	}
 }
 
@@ -380,4 +669,85 @@ func roles(msgs []engine.Message) []string {
 		out = append(out, r)
 	}
 	return out
+}
+
+// TestIntentNativeIEnrichesDescriptionOnly: a harness whose tools natively
+// declare "i" (omp adopted the intent field itself) keeps its structural
+// contract — required/optionality and additionalProperties untouched, and
+// the response side CAPTURES the value but never strips it (the harness's
+// tools expect the parameter). Only the description is upgraded to the
+// example-carrying form: advisory prose, not contract, and omp's native
+// "concise intent" produced action-labels that starve the compactors.
+func TestIntentNativeIEnrichesDescriptionOnly(t *testing.T) {
+	requireWASM(t, "../../plugins/intent/plugin.wasm")
+	store := cache.NewLocalCache(time.Minute)
+	pp := newTestPipelineWith(t, "../../plugins", []string{"intent"}, store, nil)
+
+	nativeParams := map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"i":    map[string]any{"type": "string", "description": "omp's own intent semantics"},
+			"path": map[string]any{"type": "string"},
+		},
+		"required": []any{"path"},
+	}
+	chat := &engine.ChatRequest{
+		Tools: []engine.ToolDef{
+			{Name: "read", Parameters: nativeParams},
+			{Name: "plain", Parameters: map[string]any{
+				"type": "object", "properties": map[string]any{"q": map[string]any{"type": "string"}},
+			}},
+		},
+		Messages: []engine.Message{{Role: engine.RoleUser, Content: "go"}},
+	}
+	out, err := pp.RunBeforeRequest(context.Background(), 6, chat)
+	if err != nil {
+		t.Fatalf("RunBeforeRequest: %v", err)
+	}
+	if out == nil {
+		out = chat
+	}
+	var native, plain map[string]any
+	for _, tool := range out.Tools {
+		switch tool.Name {
+		case "read":
+			native = tool.Parameters
+		case "plain":
+			plain = tool.Parameters
+		}
+	}
+	// Native tool: description upgraded, structure preserved.
+	props := native["properties"].(map[string]any)
+	desc, _ := props["i"].(map[string]any)["description"].(string)
+	if !strings.Contains(desc, "NOT the action taken") {
+		t.Fatalf("native i description not enriched: %q", desc)
+	}
+	if req := native["required"].([]any); len(req) != 1 || req[0] != "path" {
+		t.Fatalf("native tool required list mutated: %v", req)
+	}
+	if _, ok := native["additionalProperties"]; ok {
+		t.Fatalf("additionalProperties bolted onto native-i tool")
+	}
+	// The plain tool still gets the injection.
+	pprops := plain["properties"].(map[string]any)
+	if _, ok := pprops["i"]; !ok {
+		t.Fatalf("plain tool did not get i injected: %v", plain)
+	}
+
+	// Response side (same request ID — hadI is request-scoped meta):
+	// capture but DO NOT strip for the native tool.
+	runAs(t, pp, 6, toolStart(0, "call_native", "read"))
+	runAs(t, pp, 6, toolDelta(0, `{"i":"find the retry budget","path":"failover.go"}`))
+	out2 := runAs(t, pp, 6, toolEnd(0))
+	if len(out2) != 2 || out2[0].ToolCallDelta == nil {
+		t.Fatalf("expected [delta, end], got %+v", out2)
+	}
+	var args map[string]any
+	json.Unmarshal([]byte(out2[0].ToolCallDelta.ArgumentsDelta), &args)
+	if args["i"] != "find the retry budget" {
+		t.Fatalf(`native "i" must NOT be stripped, got %v`, args)
+	}
+	if v, ok := store.Get("intent:call_native"); !ok || v != "find the retry budget" {
+		t.Fatalf("native i not captured into cache: %q ok=%v", v, ok)
+	}
 }
