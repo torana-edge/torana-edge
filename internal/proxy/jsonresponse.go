@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 
 	"github.com/torana-edge/torana-edge/internal/engine"
 	"github.com/torana-edge/torana-edge/internal/plugin"
@@ -259,7 +260,11 @@ func extractVertex(body map[string]any) responseRefs {
 func runJSONResponseHooks(ctx context.Context, pl *plugin.PluginPipeline, reqID uint64, formatName string, chat *engine.ChatRequest, bodyBytes []byte) ([]byte, error) {
 	var body map[string]any
 	if err := json.Unmarshal(bodyBytes, &body); err != nil {
-		return bodyBytes, nil // not JSON we understand — pass through
+		// Not JSON we understand — pass through, but never silently: an
+		// unparseable 200 body means every response hook is being skipped
+		// (a compressed body once leaked plugin-injected fields this way).
+		log.Printf("json response: unparseable body (%v) — response hooks skipped", err)
+		return bodyBytes, nil
 	}
 
 	refs := extractResponse(formatName, body)

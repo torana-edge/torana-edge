@@ -8,6 +8,7 @@ package proxy
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -360,6 +361,15 @@ func New(cfg Config) (*Server, error) {
 				return
 			}
 
+			// The response pipeline reads upstream bodies as plaintext. If the
+			// caller's Accept-Encoding (e.g. Claude Code's gzip) were forwarded,
+			// Go's transport would pass the compressed body through untouched —
+			// json.Unmarshal fails and the response silently bypasses every
+			// hook (caught live: plugin-injected fields leaked back to the
+			// harness on every non-streamed response). Force identity for any
+			// request we intend to parse.
+			req.Header.Set("Accept-Encoding", "identity")
+
 			chat, err := fmt.Request.Unmarshal(body)
 			if err != nil {
 				log.Printf("format %s unmarshal error: %v — passing through", fmt.Name, err)
@@ -657,6 +667,20 @@ func New(cfg Config) (*Server, error) {
 				}
 				if len(bodyBytes) > maxBodySize {
 					return fmt.Errorf("response body exceeds max size")
+				}
+
+				// Defense in depth: some upstreams compress even against
+				// Accept-Encoding: identity. A compressed body would fail the
+				// JSON parse below and silently bypass every response hook.
+				if resp.Header.Get("Content-Encoding") == "gzip" {
+					if zr, zerr := gzip.NewReader(bytes.NewReader(bodyBytes)); zerr == nil {
+						plain, rerr := io.ReadAll(io.LimitReader(zr, maxBodySize+1))
+						zr.Close()
+						if rerr == nil && len(plain) <= maxBodySize {
+							bodyBytes = plain
+							resp.Header.Del("Content-Encoding")
+						}
+					}
 				}
 
 				// Route the JSON response through the WASM response hooks

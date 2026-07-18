@@ -109,7 +109,26 @@ func (cb *contentBlock) UnmarshalJSON(data []byte) error {
 func (cb contentBlock) MarshalJSON() ([]byte, error) {
 	type alias contentBlock
 	a := alias(cb)
-	return json.Marshal(a)
+	b, err := json.Marshal(a)
+	if err != nil {
+		return nil, err
+	}
+	// Anthropic requires `input` on every tool_use block, even when the tool
+	// takes no arguments. The struct's `omitempty` drops an empty map, yielding
+	// a block with no input that the API rejects ("missing field `input`").
+	// This surfaces multi-turn: the client replays prior no-arg tool calls in
+	// history (and the intent plugin can strip "i" down to an empty object).
+	// Re-inject it as {} when absent. Only tool_use requires this; text and
+	// tool_result blocks must keep omitting input.
+	if cb.Type == "tool_use" && len(cb.Input) == 0 {
+		var m map[string]json.RawMessage
+		if err := json.Unmarshal(b, &m); err != nil {
+			return nil, err
+		}
+		m["input"] = json.RawMessage("{}")
+		return json.Marshal(m)
+	}
+	return b, nil
 }
 
 // Adapter implements format.RequestAdapter for Anthropic Messages.
@@ -179,14 +198,25 @@ func (a *Adapter) Unmarshal(rawBody []byte) (*engine.ChatRequest, error) {
 		var toolCalls []engine.ToolCall
 		var toolResults []engine.Message
 		var thinking, thinkingSignature, redactedThinking string
+		// resultsFirst records whether the original message opened with
+		// tool_result blocks (Claude Code sends [tool_result..., text] — the
+		// text is its injected context). The IR split must keep that order:
+		// re-marshaling the text BEFORE the results interposes a user message
+		// between the assistant's tool_use and its tool_results, which strict
+		// providers reject ("tool_use ids were found without tool_result
+		// blocks immediately after").
+		resultsFirst := false
+		sawContent := false
 
 		for _, block := range am.Content {
 			switch block.Type {
 			case "text":
+				sawContent = true
 				if block.Text != "" {
 					textParts = append(textParts, block.Text)
 				}
 			case "image":
+				sawContent = true
 				contentParts = append(contentParts, block)
 			case "tool_use":
 				toolCalls = append(toolCalls, engine.ToolCall{
@@ -195,6 +225,9 @@ func (a *Adapter) Unmarshal(rawBody []byte) (*engine.ChatRequest, error) {
 					Arguments: block.Input,
 				})
 			case "tool_result":
+				if !sawContent {
+					resultsFirst = true
+				}
 				tr := engine.Message{
 					Role:       engine.RoleTool,
 					ToolCallID: block.ToolUseID,
@@ -214,18 +247,25 @@ func (a *Adapter) Unmarshal(rawBody []byte) (*engine.ChatRequest, error) {
 			}
 		}
 
-		if len(textParts) > 0 || len(contentParts) > 0 || len(toolCalls) > 0 || thinking != "" || redactedThinking != "" {
-			chat.Messages = append(chat.Messages, engine.Message{
-				Role:              role,
-				Content:           joinStrings(textParts, ""),
-				ContentParts:      contentParts,
-				ToolCalls:         toolCalls,
-				Thinking:          thinking,
-				ThinkingSignature: thinkingSignature,
-				RedactedThinking:  redactedThinking,
-			})
+		contentMsg := engine.Message{
+			Role:              role,
+			Content:           joinStrings(textParts, ""),
+			ContentParts:      contentParts,
+			ToolCalls:         toolCalls,
+			Thinking:          thinking,
+			ThinkingSignature: thinkingSignature,
+			RedactedThinking:  redactedThinking,
 		}
-		if len(toolResults) > 0 {
+		hasContent := len(textParts) > 0 || len(contentParts) > 0 || len(toolCalls) > 0 || thinking != "" || redactedThinking != ""
+		if resultsFirst {
+			chat.Messages = append(chat.Messages, toolResults...)
+			if hasContent {
+				chat.Messages = append(chat.Messages, contentMsg)
+			}
+		} else {
+			if hasContent {
+				chat.Messages = append(chat.Messages, contentMsg)
+			}
 			chat.Messages = append(chat.Messages, toolResults...)
 		}
 	}
