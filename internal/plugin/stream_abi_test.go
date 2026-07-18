@@ -670,3 +670,82 @@ func roles(msgs []engine.Message) []string {
 	}
 	return out
 }
+
+// TestIntentLeavesNativeIToolsAlone: a harness whose tools natively declare
+// "i" (omp adopted the intent field itself) must get complete passthrough:
+// the request side leaves that tool's schema byte-identical (no description
+// overwrite, no forced required, no additionalProperties), and the response
+// side still CAPTURES the value into the cache but never strips it — the
+// harness's tools expect the parameter.
+func TestIntentLeavesNativeIToolsAlone(t *testing.T) {
+	requireWASM(t, "../../plugins/intent/plugin.wasm")
+	store := cache.NewLocalCache(time.Minute)
+	pp := newTestPipelineWith(t, "../../plugins", []string{"intent"}, store, nil)
+
+	nativeParams := map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"i":    map[string]any{"type": "string", "description": "omp's own intent semantics"},
+			"path": map[string]any{"type": "string"},
+		},
+		"required": []any{"path"},
+	}
+	chat := &engine.ChatRequest{
+		Tools: []engine.ToolDef{
+			{Name: "read", Parameters: nativeParams},
+			{Name: "plain", Parameters: map[string]any{
+				"type": "object", "properties": map[string]any{"q": map[string]any{"type": "string"}},
+			}},
+		},
+		Messages: []engine.Message{{Role: engine.RoleUser, Content: "go"}},
+	}
+	out, err := pp.RunBeforeRequest(context.Background(), 6, chat)
+	if err != nil {
+		t.Fatalf("RunBeforeRequest: %v", err)
+	}
+	if out == nil {
+		out = chat
+	}
+	var native, plain map[string]any
+	for _, tool := range out.Tools {
+		switch tool.Name {
+		case "read":
+			native = tool.Parameters
+		case "plain":
+			plain = tool.Parameters
+		}
+	}
+	// Native tool: schema semantics preserved.
+	props := native["properties"].(map[string]any)
+	if desc := props["i"].(map[string]any)["description"]; desc != "omp's own intent semantics" {
+		t.Fatalf("native i description clobbered: %v", desc)
+	}
+	if req := native["required"].([]any); len(req) != 1 || req[0] != "path" {
+		t.Fatalf("native tool required list mutated: %v", req)
+	}
+	if _, ok := native["additionalProperties"]; ok {
+		t.Fatalf("additionalProperties bolted onto native-i tool")
+	}
+	// The plain tool still gets the injection.
+	pprops := plain["properties"].(map[string]any)
+	if _, ok := pprops["i"]; !ok {
+		t.Fatalf("plain tool did not get i injected: %v", plain)
+	}
+
+	// Response side (same request ID — hadI is request-scoped meta):
+	// capture but DO NOT strip for the native tool.
+	runAs(t, pp, 6, toolStart(0, "call_native", "read"))
+	runAs(t, pp, 6, toolDelta(0, `{"i":"find the retry budget","path":"failover.go"}`))
+	out2 := runAs(t, pp, 6, toolEnd(0))
+	if len(out2) != 2 || out2[0].ToolCallDelta == nil {
+		t.Fatalf("expected [delta, end], got %+v", out2)
+	}
+	var args map[string]any
+	json.Unmarshal([]byte(out2[0].ToolCallDelta.ArgumentsDelta), &args)
+	if args["i"] != "find the retry budget" {
+		t.Fatalf(`native "i" must NOT be stripped, got %v`, args)
+	}
+	if v, ok := store.Get("intent:call_native"); !ok || v != "find the retry budget" {
+		t.Fatalf("native i not captured into cache: %q ok=%v", v, ok)
+	}
+}

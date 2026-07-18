@@ -365,9 +365,16 @@ func injectIntentSchema(req *pb.ChatRequest) bool {
 			params["properties"] = props
 		}
 
-		hadI := false
+		// A tool that natively declares "i" (omp's tools do — the harness
+		// adopted the intent field itself) is left COMPLETELY untouched:
+		// overwriting its own description, forcing it required, or bolting on
+		// additionalProperties would clobber the harness's schema semantics.
+		// The response side still captures the value (and never strips it —
+		// that's what hadI records); rehydration skips calls already carrying
+		// "i".
 		if _, exists := props[intentField]; exists {
-			hadI = true
+			sdk.HostCall("env.meta_set", fmt.Sprintf(`{"key":"hadI:%s","value":"true"}`, tool.Name))
+			continue
 		}
 
 		props[intentField] = map[string]any{
@@ -392,10 +399,6 @@ func injectIntentSchema(req *pb.ChatRequest) bool {
 			params["required"] = append(required, intentField)
 		}
 		params["additionalProperties"] = false
-
-		if hadI {
-			sdk.HostCall("env.meta_set", fmt.Sprintf(`{"key":"hadI:%s","value":"true"}`, tool.Name))
-		}
 
 		newJSON, err := json.Marshal(params)
 		if err == nil && string(newJSON) != string(tool.ParametersJson) {
