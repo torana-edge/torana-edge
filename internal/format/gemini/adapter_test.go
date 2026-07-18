@@ -1,4 +1,4 @@
-package vertex
+package gemini
 
 import (
 	"encoding/json"
@@ -172,40 +172,66 @@ func TestStreamSerialize(t *testing.T) {
 		t.Fatalf("SerializeStream error: %v", err)
 	}
 
-	output := buf.String()
-	rawLines := strings.Split(strings.TrimSpace(output), "\n")
-	if len(rawLines) < 3 {
-		t.Fatalf("Expected at least 3 lines, got %d:\n%s", len(rawLines), output)
+	frames := parseSSEFrames(t, buf.String())
+	if len(frames) < 3 {
+		t.Fatalf("Expected at least 3 SSE frames, got %d:\n%s", len(frames), buf.String())
 	}
 
-	// First line should have text
-	var line1 geminiStreamChunk
-	json.Unmarshal([]byte(rawLines[0]), &line1)
-	if len(line1.Candidates) == 0 || line1.Candidates[0].Content == nil {
-		t.Fatalf("Line 1 missing content")
+	// First frame should have text.
+	if len(frames[0].Candidates) == 0 || frames[0].Candidates[0].Content == nil {
+		t.Fatalf("Frame 1 missing content")
 	}
-	if len(line1.Candidates[0].Content.Parts) == 0 || line1.Candidates[0].Content.Parts[0].Text != "Hello" {
-		t.Errorf("Line 1 text mismatch")
+	if len(frames[0].Candidates[0].Content.Parts) == 0 || frames[0].Candidates[0].Content.Parts[0].Text != "Hello" {
+		t.Errorf("Frame 1 text mismatch")
 	}
 
-	// Second line should have functionCall
-	var line2 geminiStreamChunk
-	json.Unmarshal([]byte(rawLines[1]), &line2)
-	if len(line2.Candidates) == 0 || line2.Candidates[0].Content == nil {
-		t.Fatalf("Line 2 missing content")
+	// Second frame should have functionCall.
+	if len(frames[1].Candidates) == 0 || frames[1].Candidates[0].Content == nil {
+		t.Fatalf("Frame 2 missing content")
 	}
-	if len(line2.Candidates[0].Content.Parts) == 0 || line2.Candidates[0].Content.Parts[0].FunctionCall == nil {
-		t.Fatalf("Line 2 missing functionCall")
+	if len(frames[1].Candidates[0].Content.Parts) == 0 || frames[1].Candidates[0].Content.Parts[0].FunctionCall == nil {
+		t.Fatalf("Frame 2 missing functionCall")
 	}
-	fc := line2.Candidates[0].Content.Parts[0].FunctionCall
-	if fc.Name != "get_weather" {
-		t.Errorf("Line 2 functionCall name: %s", fc.Name)
+	if fc := frames[1].Candidates[0].Content.Parts[0].FunctionCall; fc.Name != "get_weather" {
+		t.Errorf("Frame 2 functionCall name: %s", fc.Name)
 	}
 
-	// Last line should have finishReason
-	var lineN geminiStreamChunk
-	json.Unmarshal([]byte(rawLines[len(rawLines)-1]), &lineN)
-	if len(lineN.Candidates) == 0 || lineN.Candidates[0].FinishReason != "STOP" {
-		t.Errorf("Last line: expected finishReason STOP, got %+v", lineN)
+	// Last frame should have finishReason.
+	last := frames[len(frames)-1]
+	if len(last.Candidates) == 0 || last.Candidates[0].FinishReason != "STOP" {
+		t.Errorf("Last frame: expected finishReason STOP, got %+v", last)
 	}
+}
+
+// parseSSEFrames splits serialized output into frames, tolerating both the
+// bare (`data: {<chunk>}`) and Code Assist wrapped (`data: {"response":{…}}`)
+// shapes — mirroring ParseStream.
+func parseSSEFrames(t *testing.T, output string) []geminiStreamChunk {
+	t.Helper()
+	var chunks []geminiStreamChunk
+	for _, block := range strings.Split(output, "\n\n") {
+		block = strings.TrimSpace(block)
+		if block == "" {
+			continue
+		}
+		data, ok := strings.CutPrefix(block, "data:")
+		if !ok {
+			t.Fatalf("frame missing data: prefix: %q", block)
+		}
+		raw := strings.TrimSpace(data)
+		var frame streamFrame
+		if err := json.Unmarshal([]byte(raw), &frame); err != nil {
+			t.Fatalf("frame not valid JSON: %v (%q)", err, block)
+		}
+		if frame.Response != nil {
+			chunks = append(chunks, *frame.Response)
+			continue
+		}
+		var bare geminiStreamChunk
+		if err := json.Unmarshal([]byte(raw), &bare); err != nil {
+			t.Fatalf("bare frame not valid JSON: %v (%q)", err, block)
+		}
+		chunks = append(chunks, bare)
+	}
+	return chunks
 }

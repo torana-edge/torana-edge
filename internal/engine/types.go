@@ -53,6 +53,11 @@ type ToolCall struct {
 	ID        string
 	Name      string
 	Arguments map[string]any // parsed JSON object
+	// Signature is an opaque provider-specific token attached to this call
+	// (e.g. Gemini/Code Assist thoughtSignature). It MUST be preserved across
+	// a round-trip so replayed history keeps the model's reasoning binding;
+	// empty for providers that don't emit one.
+	Signature string
 }
 
 // ToolDef describes a function available to the model.
@@ -77,13 +82,21 @@ type StreamEvent struct {
 	FinishReason  string         // "stop", "tool_calls", "length", "error"
 	Usage         *StreamUsage   // token usage from stream (OpenAI final chunk, Anthropic usage event)
 	Error         *StreamError
+
+	// SignatureDelta carries an opaque provider signature (e.g. Gemini
+	// thoughtSignature on a text/thought part) that must be preserved on
+	// re-serialization. It is metadata paired with the surrounding block, not
+	// an "exactly one field" content event; adapters that don't understand it
+	// ignore it.
+	SignatureDelta *string
 }
 
 // ToolCallStart signals the beginning of a tool call in the stream.
 type ToolCallStart struct {
-	Index int // 0-based within this turn (OpenAI uses index for parallel calls)
-	ID    string
-	Name  string
+	Index     int // 0-based within this turn (OpenAI uses index for parallel calls)
+	ID        string
+	Name      string
+	Signature string // opaque provider token on the call (Gemini thoughtSignature); empty otherwise
 }
 
 // ToolCallDelta carries a fragment of tool call arguments JSON.

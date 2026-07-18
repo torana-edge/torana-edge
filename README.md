@@ -9,8 +9,12 @@ All request/response mutations are handled by **WebAssembly (WASM) plugins** run
              /provider/deepseek/...   → DeepSeek (OpenAI format)
              /provider/anthropic/...  → Anthropic
              /provider/openai/...     → OpenAI
-             /provider/vertex/...     → GCP Vertex AI
+             /provider/gemini/...     → Google Gemini API / Vertex AI
 ```
+
+For harnesses that can't be pointed at a base URL — notably the **Antigravity
+CLI (`agy`)** — Torana also offers an optional TLS-terminating MITM ingress. See
+[docs/GEMINI_ANTIGRAVITY.md](docs/GEMINI_ANTIGRAVITY.md).
 
 ## Key Features
 
@@ -18,7 +22,8 @@ All request/response mutations are handled by **WebAssembly (WASM) plugins** run
 - **Model Delegation (The Compactor):** Automatically intercepts heavy tool outputs and summarizes them via a cheaper model before they hit the expensive upstream, saving tokens and money.
 - **Prompt Cache Optimization:** Deterministic payload normalization ensures upstream provider prompt caches are never busted across turns.
 - **Provider Failover:** Automatic retry with fallback providers on 429/5xx errors.
-- **Unified IR:** Format adapters translate OpenAI, Anthropic, Bedrock, and Vertex wire formats into a single canonical IR. Plugins work on the IR and never touch raw JSON.
+- **Unified IR:** Format adapters translate OpenAI, Anthropic, Bedrock, and Gemini wire formats into a single canonical IR. Plugins work on the IR and never touch raw JSON.
+- **MITM ingress (optional):** For harnesses that ignore base-URL overrides (e.g. the Antigravity CLI), an opt-in TLS-terminating proxy routes their traffic through the pipeline. Disabled unless configured.
 
 ## Quick Start
 
@@ -57,22 +62,34 @@ All request/response mutations are handled by **WebAssembly (WASM) plugins** run
 
 ## Supported Formats
 
-| Prefix | Format | Streaming |
+| Format | Wire API | Streaming |
 |---|---|---|
-| `/provider/<name>/` (format: `openai`) | OpenAI Chat Completions + Responses API | SSE |
-| `/provider/<name>/` (format: `anthropic`) | Anthropic Messages API | SSE |
-| `/provider/<name>/` (format: `bedrock`) | AWS Bedrock Converse | JSON lines |
-| `/provider/<name>/` (format: `vertex`) | GCP Vertex AI / Gemini | JSON lines |
+| `openai` | OpenAI Chat Completions + Responses API | SSE |
+| `anthropic` | Anthropic Messages API | SSE |
+| `bedrock` | AWS Bedrock Converse | JSON lines |
+| `gemini` | Google Gemini API / Vertex AI (`generateContent`) | SSE |
+| `gemini-codeassist` | Google Code Assist (Antigravity CLI) | SSE |
+
+`gemini` and `gemini-codeassist` share one content model; they differ only in the
+request envelope and SSE framing (see [docs/GEMINI_ANTIGRAVITY.md](docs/GEMINI_ANTIGRAVITY.md)).
 
 ## Bundled Plugins
 
 | Plugin | Hooks | What it does |
 |---|---|---|
 | `schema_translator` | `run_before_request`, `run_on_stream_chunk` | Converts open-map tool schemas to strict KV arrays and reverses them on responses |
-| `keyword_compactor` | `run_before_request` | Deterministic keyword-based tool result compaction using the cached intent |
-| `compactor` | `run_before_request`, `run_on_stream_chunk` | Injects/extracts the `"i"` intent field; offloads huge tool results to a cheap model |
+| `intent` | `run_before_request`, `run_on_stream_chunk` | Captures **why** each tool call is made: injects the required `"i"` field into tool schemas (plus a system-prompt example) and extracts it from the stream into the shared cache |
+| `keyword_compactor` | `run_before_request` | Deterministic, local, free tool-result compaction guided by the intent cache |
+| `compactor` | `run_before_request` | Cheap-model tool-result compaction guided by the intent cache |
+| `pii` | `run_before_request` | Scans tool results (local model + regex) and blocks the request if PII is found |
 | `otel` | `run_before_request`, `run_after_response` | Emits request/response OTel metrics |
 | `auth` | `run_before_request` | Normalizes caller identity from allowlisted auth headers |
+
+> **Order matters.** Put `intent` before whichever compactor you run — both
+> compactors are pure consumers of the intent cache. `keyword_compactor` and
+> `compactor` are **alternatives** (deterministic/local vs. cheap-model offload),
+> not a pipeline: run **one**, not both, or whichever comes first starves the other.
+> Recommended order: `["schema_translator", "intent", "keyword_compactor"]`.
 
 ## Project Structure
 
@@ -85,8 +102,9 @@ torana-edge/
 │   ├── engine/
 │   │   ├── types.go                # Canonical IR: ChatRequest, StreamEvent, etc.
 │   │   └── pbconv/                 # IR ↔ Protobuf converters
-│   ├── format/                     # Wire format adapters (OpenAI, Anthropic, Bedrock, Vertex)
+│   ├── format/                     # Wire format adapters (OpenAI, Anthropic, Bedrock, Gemini)
 │   ├── metrics/                    # Request stats tracking
+│   ├── mitm/                       # Optional TLS-terminating ingress (Antigravity CLI)
 │   ├── plugin/                     # WASM plugin discovery and pipeline orchestration
 │   ├── provider/                   # Config parsing, URI resolution
 │   ├── proxy/                      # Reverse proxy with format dispatch
@@ -97,12 +115,22 @@ torana-edge/
 ├── plugins/                        # WASM plugin source code (binaries built via `make plugins`)
 │   ├── auth/
 │   ├── compactor/
+│   ├── intent/
 │   ├── keyword_compactor/
 │   ├── otel/
+│   ├── pii/
 │   └── schema_translator/
 ├── config.example.json             # Example configuration
 └── go.mod
 ```
+
+## Endpoints
+
+| Path | Purpose |
+|---|---|
+| `/provider/<name>/<upstream-path>` | Proxied request to the named provider |
+| `/health` | Liveness check — `{"status":"ok"}` |
+| `/stats` | Cumulative counters (requests, tokens, compactions, bytes saved) |
 
 ## Environment Variables
 

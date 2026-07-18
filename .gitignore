@@ -30,3 +30,10 @@ go.work.sum
 .DS_Store
 Thumbs.db
 config.json
+
+# Local runtime artifacts (dogfood binaries, logs) and MITM CA material.
+# The MITM CA private key MUST never be committed or trusted system-wide.
+/local/
+*.pem
+ca-key.pem
+bundle.pem

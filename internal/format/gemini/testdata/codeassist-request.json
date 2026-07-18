@@ -1,0 +1,21 @@
+{
+  "project": "snappy-emblem-54xv4",
+  "requestId": "agent/abc/1",
+  "model": "gemini-3.5-flash-extra-low",
+  "userAgent": "antigravity/cli",
+  "requestType": "AGENT",
+  "request": {
+    "systemInstruction": {"role": "user", "parts": [{"text": "You are Antigravity."}]},
+    "contents": [
+      {"role": "user", "parts": [{"text": "List the guide directory."}]},
+      {"role": "model", "parts": [{"thoughtSignature": "SIG_CALL_1", "functionCall": {"name": "list_dir", "args": {"DirectoryPath": "/tmp/guide", "toolAction": "Listing guide", "toolSummary": "List guide"}, "id": "3llkhajj"}}]},
+      {"role": "model", "parts": [{"functionResponse": {"id": "3llkhajj", "name": "list_dir", "response": {"output": "SKILL.md\nREADME.md"}}}]},
+      {"role": "model", "parts": [{"thoughtSignature": "SIG_TEXT", "text": "The directory contains two files."}]}
+    ],
+    "tools": [{"functionDeclarations": [{"name": "list_dir", "description": "List a directory", "parameters": {"type": "object", "properties": {"DirectoryPath": {"type": "string"}}, "required": ["DirectoryPath"]}}]}],
+    "toolConfig": {"functionCallingConfig": {"mode": "VALIDATED"}},
+    "labels": {"session": "s1"},
+    "sessionId": "sess-123",
+    "generationConfig": {"maxOutputTokens": 65536, "thinkingConfig": {"includeThoughts": true, "thinkingBudget": 1000}}
+  }
+}

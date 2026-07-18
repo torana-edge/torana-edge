@@ -45,8 +45,8 @@ func extractResponse(formatName string, body map[string]any) responseRefs {
 		return extractAnthropic(body)
 	case "bedrock":
 		return extractBedrock(body)
-	case "vertex":
-		return extractVertex(body)
+	case "gemini", "gemini-codeassist":
+		return extractGemini(body)
 	}
 	return responseRefs{}
 }
@@ -208,9 +208,16 @@ func extractBedrock(body map[string]any) responseRefs {
 	return refs
 }
 
-// --- vertex: candidates[].content.parts[].{text | functionCall{name,args}} ---
+// --- gemini: candidates[].content.parts[].{text | functionCall{name,args}} ---
 
-func extractVertex(body map[string]any) responseRefs {
+func extractGemini(body map[string]any) responseRefs {
+	// Code Assist (Antigravity CLI) wraps the GenerateContentResponse under
+	// "response"; unwrap so extraction/writeback target the real fields. Maps
+	// are references, so mutating the inner map still reflects in the outer
+	// body the caller re-marshals.
+	if inner, ok := body["response"].(map[string]any); ok {
+		body = inner
+	}
 	refs := responseRefs{
 		model: asString(body["modelVersion"]),
 		usage: usageFrom(body, "usageMetadata", "promptTokenCount", "candidatesTokenCount"),
@@ -280,7 +287,7 @@ func runJSONResponseHooks(ctx context.Context, pl *plugin.PluginPipeline, reqID 
 	for ti := range refs.toolCalls {
 		tc := &refs.toolCalls[ti]
 
-		// Formats without tool-call IDs (vertex) get a synthetic one so
+		// Formats without tool-call IDs (bare gemini) get a synthetic one so
 		// plugins can key their buffers; it never reaches the wire.
 		syntheticID := tc.id
 		if syntheticID == "" {
