@@ -443,3 +443,91 @@ func TestToolUseAlwaysHasInput(t *testing.T) {
 }
 
 func intPtr(i int) *int { return &i }
+
+// TestToolResultsStayAdjacentToToolUse: Claude Code sends the tool-results
+// user message as [tool_result..., text] — the text is its injected context.
+// The IR round trip must keep the results IMMEDIATELY after the assistant's
+// tool_use turn; flattening the text first interposed a user message between
+// tool_use and tool_result, which strict providers 400 on ("tool_use ids
+// were found without tool_result blocks immediately after"). Caught live:
+// the error killed every parallel-subagent Claude Code session.
+func TestToolResultsStayAdjacentToToolUse(t *testing.T) {
+	adapter := &Adapter{}
+
+	inbound := []byte(`{
+		"model": "claude-x",
+		"max_tokens": 128,
+		"messages": [
+			{"role": "user", "content": "run both probes"},
+			{"role": "assistant", "content": [
+				{"type": "thinking", "thinking": "probing", "signature": ""},
+				{"type": "tool_use", "id": "tu_1", "name": "probe", "input": {"q": "a"}},
+				{"type": "tool_use", "id": "tu_2", "name": "probe", "input": {"q": "b"}}
+			]},
+			{"role": "user", "content": [
+				{"type": "tool_result", "tool_use_id": "tu_1", "content": "ok1"},
+				{"type": "tool_result", "tool_use_id": "tu_2", "content": "ok2"},
+				{"type": "text", "text": "injected context reminder"}
+			]}
+		]
+	}`)
+
+	chat, err := adapter.Unmarshal(inbound)
+	if err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	out, err := adapter.Marshal(chat)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	var got struct {
+		Messages []struct {
+			Role    string `json:"role"`
+			Content []struct {
+				Type      string `json:"type"`
+				ToolUseID string `json:"tool_use_id"`
+				Text      string `json:"text"`
+			} `json:"content"`
+		} `json:"messages"`
+	}
+	if err := json.Unmarshal(out, &got); err != nil {
+		t.Fatalf("output not valid JSON: %v\n%s", err, out)
+	}
+
+	// Locate the assistant tool_use turn; the NEXT message must open with
+	// tool_result blocks answering both ids, and the trailing text must come
+	// only after all results (same or later message).
+	assistantIdx := -1
+	for i, m := range got.Messages {
+		for _, b := range m.Content {
+			if b.Type == "tool_use" {
+				assistantIdx = i
+			}
+		}
+	}
+	if assistantIdx == -1 || assistantIdx+1 >= len(got.Messages) {
+		t.Fatalf("no assistant tool_use turn found: %s", out)
+	}
+	next := got.Messages[assistantIdx+1]
+	if next.Role != "user" {
+		t.Fatalf("message after tool_use must be the tool-result user turn, got role %s", next.Role)
+	}
+	var ids []string
+	for _, b := range next.Content {
+		if b.Type == "text" && len(ids) == 0 {
+			t.Fatalf("text precedes tool_results in the reply turn — tool_use/tool_result adjacency broken: %s", out)
+		}
+		if b.Type == "tool_result" {
+			ids = append(ids, b.ToolUseID)
+		}
+	}
+	if len(ids) != 2 || ids[0] != "tu_1" || ids[1] != "tu_2" {
+		t.Fatalf("tool results not adjacent to tool_use: got ids %v in message %d\n%s", ids, assistantIdx+1, out)
+	}
+
+	// The injected context text must survive the round trip, after the results.
+	if !strings.Contains(string(out), "injected context reminder") {
+		t.Fatalf("trailing text dropped in round trip: %s", out)
+	}
+}

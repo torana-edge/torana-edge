@@ -198,14 +198,25 @@ func (a *Adapter) Unmarshal(rawBody []byte) (*engine.ChatRequest, error) {
 		var toolCalls []engine.ToolCall
 		var toolResults []engine.Message
 		var thinking, thinkingSignature, redactedThinking string
+		// resultsFirst records whether the original message opened with
+		// tool_result blocks (Claude Code sends [tool_result..., text] — the
+		// text is its injected context). The IR split must keep that order:
+		// re-marshaling the text BEFORE the results interposes a user message
+		// between the assistant's tool_use and its tool_results, which strict
+		// providers reject ("tool_use ids were found without tool_result
+		// blocks immediately after").
+		resultsFirst := false
+		sawContent := false
 
 		for _, block := range am.Content {
 			switch block.Type {
 			case "text":
+				sawContent = true
 				if block.Text != "" {
 					textParts = append(textParts, block.Text)
 				}
 			case "image":
+				sawContent = true
 				contentParts = append(contentParts, block)
 			case "tool_use":
 				toolCalls = append(toolCalls, engine.ToolCall{
@@ -214,6 +225,9 @@ func (a *Adapter) Unmarshal(rawBody []byte) (*engine.ChatRequest, error) {
 					Arguments: block.Input,
 				})
 			case "tool_result":
+				if !sawContent {
+					resultsFirst = true
+				}
 				tr := engine.Message{
 					Role:       engine.RoleTool,
 					ToolCallID: block.ToolUseID,
@@ -233,18 +247,25 @@ func (a *Adapter) Unmarshal(rawBody []byte) (*engine.ChatRequest, error) {
 			}
 		}
 
-		if len(textParts) > 0 || len(contentParts) > 0 || len(toolCalls) > 0 || thinking != "" || redactedThinking != "" {
-			chat.Messages = append(chat.Messages, engine.Message{
-				Role:              role,
-				Content:           joinStrings(textParts, ""),
-				ContentParts:      contentParts,
-				ToolCalls:         toolCalls,
-				Thinking:          thinking,
-				ThinkingSignature: thinkingSignature,
-				RedactedThinking:  redactedThinking,
-			})
+		contentMsg := engine.Message{
+			Role:              role,
+			Content:           joinStrings(textParts, ""),
+			ContentParts:      contentParts,
+			ToolCalls:         toolCalls,
+			Thinking:          thinking,
+			ThinkingSignature: thinkingSignature,
+			RedactedThinking:  redactedThinking,
 		}
-		if len(toolResults) > 0 {
+		hasContent := len(textParts) > 0 || len(contentParts) > 0 || len(toolCalls) > 0 || thinking != "" || redactedThinking != ""
+		if resultsFirst {
+			chat.Messages = append(chat.Messages, toolResults...)
+			if hasContent {
+				chat.Messages = append(chat.Messages, contentMsg)
+			}
+		} else {
+			if hasContent {
+				chat.Messages = append(chat.Messages, contentMsg)
+			}
 			chat.Messages = append(chat.Messages, toolResults...)
 		}
 	}
