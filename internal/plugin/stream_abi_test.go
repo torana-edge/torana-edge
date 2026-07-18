@@ -671,13 +671,14 @@ func roles(msgs []engine.Message) []string {
 	return out
 }
 
-// TestIntentLeavesNativeIToolsAlone: a harness whose tools natively declare
-// "i" (omp adopted the intent field itself) must get complete passthrough:
-// the request side leaves that tool's schema byte-identical (no description
-// overwrite, no forced required, no additionalProperties), and the response
-// side still CAPTURES the value into the cache but never strips it — the
-// harness's tools expect the parameter.
-func TestIntentLeavesNativeIToolsAlone(t *testing.T) {
+// TestIntentNativeIEnrichesDescriptionOnly: a harness whose tools natively
+// declare "i" (omp adopted the intent field itself) keeps its structural
+// contract — required/optionality and additionalProperties untouched, and
+// the response side CAPTURES the value but never strips it (the harness's
+// tools expect the parameter). Only the description is upgraded to the
+// example-carrying form: advisory prose, not contract, and omp's native
+// "concise intent" produced action-labels that starve the compactors.
+func TestIntentNativeIEnrichesDescriptionOnly(t *testing.T) {
 	requireWASM(t, "../../plugins/intent/plugin.wasm")
 	store := cache.NewLocalCache(time.Minute)
 	pp := newTestPipelineWith(t, "../../plugins", []string{"intent"}, store, nil)
@@ -715,10 +716,11 @@ func TestIntentLeavesNativeIToolsAlone(t *testing.T) {
 			plain = tool.Parameters
 		}
 	}
-	// Native tool: schema semantics preserved.
+	// Native tool: description upgraded, structure preserved.
 	props := native["properties"].(map[string]any)
-	if desc := props["i"].(map[string]any)["description"]; desc != "omp's own intent semantics" {
-		t.Fatalf("native i description clobbered: %v", desc)
+	desc, _ := props["i"].(map[string]any)["description"].(string)
+	if !strings.Contains(desc, "NOT the action taken") {
+		t.Fatalf("native i description not enriched: %q", desc)
 	}
 	if req := native["required"].([]any); len(req) != 1 || req[0] != "path" {
 		t.Fatalf("native tool required list mutated: %v", req)

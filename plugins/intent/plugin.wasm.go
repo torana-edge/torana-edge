@@ -36,6 +36,13 @@ func main() {}
 const (
 	intentField    = "i"
 	intentCacheKey = "intent"
+
+	// intentDescription is the example-carrying "i" description. It measured
+	// markedly better than an abstract instruction (75% vs 54% goal-tied
+	// intents in the Jul 16 experiments).
+	intentDescription = "the underlying question this call helps answer, NOT the action taken. " +
+		"Good: 'where is the user locale mapped to a currency, to find the EU bug'. " +
+		"Bad: 'reading currency.ts'."
 )
 
 // fillMode controls what happens to a history tool call whose intent was never
@@ -366,39 +373,38 @@ func injectIntentSchema(req *pb.ChatRequest) bool {
 		}
 
 		// A tool that natively declares "i" (omp's tools do — the harness
-		// adopted the intent field itself) is left COMPLETELY untouched:
-		// overwriting its own description, forcing it required, or bolting on
-		// additionalProperties would clobber the harness's schema semantics.
-		// The response side still captures the value (and never strips it —
-		// that's what hadI records); rehydration skips calls already carrying
-		// "i".
-		if _, exists := props[intentField]; exists {
+		// adopted the intent field itself) keeps its structural contract:
+		// required/optionality and additionalProperties are never touched,
+		// and the response side never strips the value (that's what hadI
+		// records). Only the DESCRIPTION is upgraded to the example-carrying
+		// form — advisory prose, not contract, and measured markedly better
+		// at producing goal-tied intents (omp's native "concise intent"
+		// yielded action-labels like "Map repo structure", which starve the
+		// compactors' keyword extraction).
+		if existing, exists := props[intentField]; exists {
 			sdk.HostCall("env.meta_set", fmt.Sprintf(`{"key":"hadI:%s","value":"true"}`, tool.Name))
-			continue
-		}
-
-		props[intentField] = map[string]any{
-			"type": "string",
-			// The example-carrying description measured markedly better than
-			// an abstract instruction (75% vs 54% goal-tied intents in the
-			// Jul 16 experiments).
-			"description": "the underlying question this call helps answer, NOT the action taken. " +
-				"Good: 'where is the user locale mapped to a currency, to find the EU bug'. " +
-				"Bad: 'reading currency.ts'.",
-		}
-
-		required, _ := params["required"].([]any)
-		found := false
-		for _, r := range required {
-			if s, ok := r.(string); ok && s == intentField {
-				found = true
-				break
+			if m, ok := existing.(map[string]any); ok {
+				m["description"] = intentDescription
 			}
+		} else {
+			props[intentField] = map[string]any{
+				"type":        "string",
+				"description": intentDescription,
+			}
+
+			required, _ := params["required"].([]any)
+			found := false
+			for _, r := range required {
+				if s, ok := r.(string); ok && s == intentField {
+					found = true
+					break
+				}
+			}
+			if !found {
+				params["required"] = append(required, intentField)
+			}
+			params["additionalProperties"] = false
 		}
-		if !found {
-			params["required"] = append(required, intentField)
-		}
-		params["additionalProperties"] = false
 
 		newJSON, err := json.Marshal(params)
 		if err == nil && string(newJSON) != string(tool.ParametersJson) {
