@@ -16,7 +16,7 @@ const (
 	contextLines     = 2        // lines of context around keyword matches
 	maxKeepLines     = 200      // cap to prevent bloat
 	maxResultBytes   = 8000     // cap result size
-	intentCacheKey   = "intent" // cache key for intent (set by compactor plugin)
+	intentCacheKey   = "intent" // cache key for intent (set by the intent plugin)
 )
 
 func init() {
@@ -28,10 +28,15 @@ func init() {
 				continue
 			}
 
-			// Retrieve cached intent for this tool call.
+			// Phase 0 observability: every result big enough to compact.
+			sdk.EmitMetric("torana_compact_eligible_total", sdk.MetricCounter, 1, map[string]string{"tool": msg.ToolName})
+
+			// Retrieve cached intent for this tool call (written by the
+			// intent plugin).
 			cacheKey := intentCacheKey + ":" + msg.ToolCallId
 			intent, _ := sdk.HostCall("env.cache_get", cacheKey)
 			if intent == "" {
+				sdk.EmitMetric("torana_intent_missing_total", sdk.MetricCounter, 1, map[string]string{"tool": msg.ToolName})
 				continue
 			}
 
