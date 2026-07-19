@@ -193,14 +193,13 @@ func (s *Server) routeThroughTorana(conn net.Conn, req *http.Request, hostname, 
 // forwardVerbatim proxies a non-chat request to the real host unchanged.
 func (s *Server) forwardVerbatim(conn net.Conn, req *http.Request, hostname string) bool {
 	target := "https://" + hostname + req.URL.RequestURI()
-	body, _ := io.ReadAll(req.Body)
-	req.Body.Close()
 
-	out, err := http.NewRequest(req.Method, target, strings.NewReader(string(body)))
+	out, err := http.NewRequest(req.Method, target, req.Body)
 	if err != nil {
 		writeSimpleError(conn, 502)
 		return false
 	}
+	out.ContentLength = req.ContentLength
 	for k, vs := range req.Header {
 		if strings.EqualFold(k, "Proxy-Connection") {
 			continue
