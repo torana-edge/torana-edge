@@ -43,6 +43,9 @@ type geminiUsageMetadata struct {
 	PromptTokenCount     int `json:"promptTokenCount"`
 	CandidatesTokenCount int `json:"candidatesTokenCount"`
 	TotalTokenCount      int `json:"totalTokenCount"`
+	// Prompt tokens served from Gemini's (implicit or explicit) context
+	// cache; subset of PromptTokenCount.
+	CachedContentTokenCount int `json:"cachedContentTokenCount,omitempty"`
 }
 
 type geminiStreamCandidate struct {
@@ -137,7 +140,11 @@ func emitChunk(ch chan<- engine.StreamEvent, payload []byte, lastUsage **geminiU
 		reason := mapGeminiFinishReason(candidate.FinishReason)
 		if reason != "" {
 			if lu := *lastUsage; lu != nil && (lu.PromptTokenCount > 0 || lu.CandidatesTokenCount > 0) {
-				ch <- engine.StreamEvent{Usage: &engine.StreamUsage{InputTokens: lu.PromptTokenCount, OutputTokens: lu.CandidatesTokenCount}}
+				ch <- engine.StreamEvent{Usage: &engine.StreamUsage{
+					InputTokens:     lu.PromptTokenCount,
+					OutputTokens:    lu.CandidatesTokenCount,
+					CacheReadTokens: lu.CachedContentTokenCount,
+				}}
 				*lastUsage = nil
 			}
 			ch <- engine.StreamEvent{FinishReason: reason}
@@ -225,9 +232,10 @@ func (s *StreamAdapter) SerializeStream(w io.Writer, events <-chan engine.Stream
 			var usage *geminiUsageMetadata
 			if pendingUsage != nil {
 				usage = &geminiUsageMetadata{
-					PromptTokenCount:     pendingUsage.InputTokens,
-					CandidatesTokenCount: pendingUsage.OutputTokens,
-					TotalTokenCount:      pendingUsage.InputTokens + pendingUsage.OutputTokens,
+					PromptTokenCount:        pendingUsage.InputTokens,
+					CandidatesTokenCount:    pendingUsage.OutputTokens,
+					TotalTokenCount:         pendingUsage.InputTokens + pendingUsage.OutputTokens,
+					CachedContentTokenCount: pendingUsage.CacheReadTokens,
 				}
 			}
 			return writeFrame(w, chunkFinish(mapCanonicalToGeminiFinishReason(event.FinishReason), usage), s.Wrapped)

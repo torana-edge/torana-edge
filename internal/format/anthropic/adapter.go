@@ -68,13 +68,18 @@ type contentBlock struct {
 	Thinking  string         `json:"thinking,omitempty"`
 	Signature string         `json:"signature,omitempty"`
 	Data      string         `json:"data,omitempty"`
+	// Cache breakpoint marker, e.g. {"type":"ephemeral"}. Preserved verbatim
+	// (opaque map) so TTL variants pass through. Dropping it disables the
+	// provider's prompt cache for the whole prefix.
+	CacheControl map[string]any `json:"cache_control,omitempty"`
 	// Also handle tool_result content as array of blocks (Anthropic supports both)
 }
 
 type anthropicToolDef struct {
-	Name        string         `json:"name"`
-	Description string         `json:"description,omitempty"`
-	InputSchema map[string]any `json:"input_schema"`
+	Name         string         `json:"name"`
+	Description  string         `json:"description,omitempty"`
+	InputSchema  map[string]any `json:"input_schema"`
+	CacheControl map[string]any `json:"cache_control,omitempty"`
 }
 
 // UnmarshalJSON handles the polymorphic tool_result content (string or array).
@@ -174,18 +179,26 @@ func (a *Adapter) Unmarshal(rawBody []byte) (*engine.ChatRequest, error) {
 		}
 	}
 
-	// System: concatenate text blocks into first message.
+	// System: concatenate text blocks into first message. A cache breakpoint
+	// on any system block (Claude Code marks the last one) is carried on the
+	// coalesced message; Marshal re-emits it on the last system block, which
+	// preserves the breakpoint position after coalescing.
 	if len(ar.System) > 0 {
 		var sysText []string
+		var sysCache map[string]any
 		for _, b := range ar.System {
 			if b.Type == "text" && b.Text != "" {
 				sysText = append(sysText, b.Text)
 			}
+			if b.CacheControl != nil {
+				sysCache = b.CacheControl
+			}
 		}
 		if len(sysText) > 0 {
 			chat.Messages = append(chat.Messages, engine.Message{
-				Role:    engine.RoleSystem,
-				Content: joinStrings(sysText, "\n"),
+				Role:         engine.RoleSystem,
+				Content:      joinStrings(sysText, "\n"),
+				CacheControl: sysCache,
 			})
 		}
 	}
@@ -207,6 +220,10 @@ func (a *Adapter) Unmarshal(rawBody []byte) (*engine.ChatRequest, error) {
 		// blocks immediately after").
 		resultsFirst := false
 		sawContent := false
+		// contentCache carries a cache breakpoint from a non-tool_result block
+		// onto the coalesced content message (tool_result markers stay on their
+		// own tool message, keeping the breakpoint's position exact).
+		var contentCache map[string]any
 
 		for _, block := range am.Content {
 			switch block.Type {
@@ -229,9 +246,10 @@ func (a *Adapter) Unmarshal(rawBody []byte) (*engine.ChatRequest, error) {
 					resultsFirst = true
 				}
 				tr := engine.Message{
-					Role:       engine.RoleTool,
-					ToolCallID: block.ToolUseID,
-					ToolName:   block.Name,
+					Role:         engine.RoleTool,
+					ToolCallID:   block.ToolUseID,
+					ToolName:     block.Name,
+					CacheControl: block.CacheControl,
 				}
 				if s, ok := block.Content.(string); ok {
 					tr.Content = s
@@ -245,6 +263,11 @@ func (a *Adapter) Unmarshal(rawBody []byte) (*engine.ChatRequest, error) {
 			case "redacted_thinking":
 				redactedThinking = block.Data
 			}
+			// image blocks travel verbatim inside ContentParts (marker
+			// included), tool_result markers ride their own tool message.
+			if block.Type != "tool_result" && block.Type != "image" && block.CacheControl != nil {
+				contentCache = block.CacheControl
+			}
 		}
 
 		contentMsg := engine.Message{
@@ -255,6 +278,7 @@ func (a *Adapter) Unmarshal(rawBody []byte) (*engine.ChatRequest, error) {
 			Thinking:          thinking,
 			ThinkingSignature: thinkingSignature,
 			RedactedThinking:  redactedThinking,
+			CacheControl:      contentCache,
 		}
 		hasContent := len(textParts) > 0 || len(contentParts) > 0 || len(toolCalls) > 0 || thinking != "" || redactedThinking != ""
 		if resultsFirst {
@@ -273,9 +297,10 @@ func (a *Adapter) Unmarshal(rawBody []byte) (*engine.ChatRequest, error) {
 	// Tools.
 	for _, t := range ar.Tools {
 		chat.Tools = append(chat.Tools, engine.ToolDef{
-			Name:        t.Name,
-			Description: t.Description,
-			Parameters:  t.InputSchema,
+			Name:         t.Name,
+			Description:  t.Description,
+			Parameters:   t.InputSchema,
+			CacheControl: t.CacheControl,
 		})
 	}
 
@@ -305,8 +330,9 @@ func (a *Adapter) Marshal(chat *engine.ChatRequest) ([]byte, error) {
 	for _, m := range chat.Messages {
 		if m.Role == engine.RoleSystem {
 			ar.System = append(ar.System, contentBlock{
-				Type: "text",
-				Text: m.Content,
+				Type:         "text",
+				Text:         m.Content,
+				CacheControl: m.CacheControl,
 			})
 		}
 	}
@@ -338,9 +364,10 @@ func (a *Adapter) Marshal(chat *engine.ChatRequest) ([]byte, error) {
 					am.Content = append(am.Content, thinkingBlock(tm))
 				}
 				cb := contentBlock{
-					Type:      "tool_result",
-					ToolUseID: tm.ToolCallID,
-					Name:      tm.ToolName,
+					Type:         "tool_result",
+					ToolUseID:    tm.ToolCallID,
+					Name:         tm.ToolName,
+					CacheControl: tm.CacheControl,
 				}
 				if len(tm.ContentParts) > 0 {
 					cb.Content = tm.ContentParts
@@ -406,15 +433,26 @@ func (a *Adapter) Marshal(chat *engine.ChatRequest) ([]byte, error) {
 			}
 		}
 
+		// Re-attach the message's cache breakpoint to the last emitted block —
+		// breakpoints are positional ("cache everything up to here"), so after
+		// block coalescing the end of the message is the faithful spot.
+		if m.CacheControl != nil && len(am.Content) > 0 {
+			last := &am.Content[len(am.Content)-1]
+			if last.CacheControl == nil {
+				last.CacheControl = m.CacheControl
+			}
+		}
+
 		ar.Messages = append(ar.Messages, am)
 	}
 
 	// Tools.
 	for _, t := range chat.Tools {
 		ar.Tools = append(ar.Tools, anthropicToolDef{
-			Name:        t.Name,
-			Description: t.Description,
-			InputSchema: t.Parameters,
+			Name:         t.Name,
+			Description:  t.Description,
+			InputSchema:  t.Parameters,
+			CacheControl: t.CacheControl,
 		})
 	}
 

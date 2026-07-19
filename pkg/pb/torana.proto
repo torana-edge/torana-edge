@@ -15,6 +15,10 @@ message Message {
   repeated ToolCall tool_calls = 6;
   string tool_call_id = 7;
   string tool_name = 8;
+  // Opaque provider cache breakpoint on this message (JSON object, e.g.
+  // Anthropic {"type":"ephemeral"}). Preserved verbatim across the plugin
+  // boundary so mutating plugins don't strip prompt-cache markers.
+  bytes cache_control_json = 10;
 }
 
 // An assistant's request to invoke a tool.
@@ -34,6 +38,8 @@ message ToolDef {
   string description = 2;
   bytes parameters_json = 3;
   bool strict = 4;
+  // Opaque cache breakpoint after this tool definition (JSON object).
+  bytes cache_control_json = 5;
 }
 
 // Canonical representation of a chat completion request.
@@ -82,6 +88,10 @@ message StreamError {
 message StreamUsage {
   int32 input_tokens = 1;
   int32 output_tokens = 2;
+  // Input tokens served from the provider's prompt cache.
+  int32 cache_read_tokens = 3;
+  // Input tokens written to the cache this turn; 0 if unreported.
+  int32 cache_write_tokens = 4;
 }
 
 message StreamEvent {

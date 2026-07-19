@@ -53,6 +53,9 @@ func ToPBChatRequest(c *engine.ChatRequest) *pb.ChatRequest {
 		if len(m.ContentParts) > 0 {
 			msg.ContentPartsJson, _ = json.Marshal(m.ContentParts)
 		}
+		if len(m.CacheControl) > 0 {
+			msg.CacheControlJson, _ = json.Marshal(m.CacheControl)
+		}
 		for _, tc := range m.ToolCalls {
 			argsJson, _ := json.Marshal(tc.Arguments)
 			msg.ToolCalls = append(msg.ToolCalls, &pb.ToolCall{
@@ -67,12 +70,16 @@ func ToPBChatRequest(c *engine.ChatRequest) *pb.ChatRequest {
 
 	for _, t := range c.Tools {
 		paramsJson, _ := json.Marshal(t.Parameters)
-		out.Tools = append(out.Tools, &pb.ToolDef{
+		td := &pb.ToolDef{
 			Name:           t.Name,
 			Description:    t.Description,
 			ParametersJson: paramsJson,
 			Strict:         t.Strict,
-		})
+		}
+		if len(t.CacheControl) > 0 {
+			td.CacheControlJson, _ = json.Marshal(t.CacheControl)
+		}
+		out.Tools = append(out.Tools, td)
 	}
 
 	return out
@@ -124,6 +131,9 @@ func FromPBChatRequest(c *pb.ChatRequest) *engine.ChatRequest {
 		if len(m.ContentPartsJson) > 0 {
 			json.Unmarshal(m.ContentPartsJson, &msg.ContentParts)
 		}
+		if len(m.CacheControlJson) > 0 {
+			json.Unmarshal(m.CacheControlJson, &msg.CacheControl)
+		}
 		for _, tc := range m.ToolCalls {
 			var args map[string]any
 			if len(tc.ArgumentsJson) > 0 {
@@ -144,12 +154,16 @@ func FromPBChatRequest(c *pb.ChatRequest) *engine.ChatRequest {
 		if len(t.ParametersJson) > 0 {
 			json.Unmarshal(t.ParametersJson, &params)
 		}
-		out.Tools = append(out.Tools, engine.ToolDef{
+		td := engine.ToolDef{
 			Name:        t.Name,
 			Description: t.Description,
 			Parameters:  params,
 			Strict:      t.Strict,
-		})
+		}
+		if len(t.CacheControlJson) > 0 {
+			json.Unmarshal(t.CacheControlJson, &td.CacheControl)
+		}
+		out.Tools = append(out.Tools, td)
 	}
 
 	return out
@@ -188,8 +202,10 @@ func ToPBStreamEvent(e *engine.StreamEvent) *pb.StreamEvent {
 	} else if e.Usage != nil {
 		out.Event = &pb.StreamEvent_Usage{
 			Usage: &pb.StreamUsage{
-				InputTokens:  int32(e.Usage.InputTokens),
-				OutputTokens: int32(e.Usage.OutputTokens),
+				InputTokens:      int32(e.Usage.InputTokens),
+				OutputTokens:     int32(e.Usage.OutputTokens),
+				CacheReadTokens:  int32(e.Usage.CacheReadTokens),
+				CacheWriteTokens: int32(e.Usage.CacheWriteTokens),
 			},
 		}
 	} else if e.Error != nil {
@@ -233,8 +249,10 @@ func FromPBStreamEvent(e *pb.StreamEvent) *engine.StreamEvent {
 		out.FinishReason = v.FinishReason
 	case *pb.StreamEvent_Usage:
 		out.Usage = &engine.StreamUsage{
-			InputTokens:  int(v.Usage.InputTokens),
-			OutputTokens: int(v.Usage.OutputTokens),
+			InputTokens:      int(v.Usage.InputTokens),
+			OutputTokens:     int(v.Usage.OutputTokens),
+			CacheReadTokens:  int(v.Usage.CacheReadTokens),
+			CacheWriteTokens: int(v.Usage.CacheWriteTokens),
 		}
 	case *pb.StreamEvent_Error:
 		out.Error = &engine.StreamError{

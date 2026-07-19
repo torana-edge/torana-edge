@@ -108,6 +108,25 @@ func RecordTokens(ctx context.Context, model, provider string, in, out int) {
 	}
 }
 
+// RecordCacheTokens records provider-reported prompt-cache usage for one
+// request (direction=cache_read/cache_write). No-op unless OTel is configured;
+// zero counts are skipped.
+func RecordCacheTokens(ctx context.Context, model, provider string, read, write int) {
+	if meter == nil || (read == 0 && write == 0) {
+		return
+	}
+	base := []attribute.KeyValue{
+		attribute.String("model", model),
+		attribute.String("provider", provider),
+	}
+	if read > 0 {
+		tokensTotal.Add(ctx, int64(read), metric.WithAttributes(append(base, attribute.String("direction", "cache_read"))...))
+	}
+	if write > 0 {
+		tokensTotal.Add(ctx, int64(write), metric.WithAttributes(append(base, attribute.String("direction", "cache_write"))...))
+	}
+}
+
 // RecordRoutedRequest counts a plugin-initiated reroute
 // (torana_routed_requests_total{from_provider, to_provider}). No-op unless
 // OTel is configured.
