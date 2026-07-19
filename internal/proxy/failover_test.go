@@ -117,3 +117,50 @@ func TestFailoverReleasesTokenOnRetryableStatus(t *testing.T) {
 	}
 	rl.Release("default")
 }
+
+func TestRateLimitBodyReleasesOnlyOnce(t *testing.T) {
+	rl := NewRateLimiter(0, 1)
+	defer rl.Close()
+	if !rl.Acquire("caller") {
+		t.Fatal("failed to acquire initial slot")
+	}
+
+	body := &rateLimitBody{
+		ReadCloser:  io.NopCloser(strings.NewReader("ok")),
+		identity:    "caller",
+		rateLimiter: rl,
+	}
+	if err := body.Close(); err != nil {
+		t.Fatalf("first close: %v", err)
+	}
+	if err := body.Close(); err != nil {
+		t.Fatalf("second close: %v", err)
+	}
+
+	// A duplicate close must not release a slot held by this second request.
+	if !rl.Acquire("caller") {
+		t.Fatal("failed to acquire replacement slot")
+	}
+	if rl.Acquire("caller") {
+		t.Fatal("duplicate body close released the replacement request's slot")
+	}
+	rl.Release("caller")
+}
+
+func TestRateLimiterUpdateAppliesWithoutDroppingActiveRequests(t *testing.T) {
+	rl := NewRateLimiter(0, 1)
+	defer rl.Close()
+	if !rl.Acquire("caller") {
+		t.Fatal("failed to acquire initial slot")
+	}
+
+	rl.Update(0, 2)
+	if !rl.Acquire("caller") {
+		t.Fatal("updated concurrency limit was not applied")
+	}
+	if rl.Acquire("caller") {
+		t.Fatal("update lost in-flight concurrency accounting")
+	}
+	rl.Release("caller")
+	rl.Release("caller")
+}
