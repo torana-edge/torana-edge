@@ -2,6 +2,7 @@ package anthropic
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -28,7 +29,7 @@ func TestSerializeToolBlockIndexes(t *testing.T) {
 	close(events)
 
 	var buf bytes.Buffer
-	if err := (&StreamAdapter{}).SerializeStream(&buf, events); err != nil {
+	if err := (&StreamAdapter{}).SerializeStream(context.Background(), &buf, events); err != nil {
 		t.Fatalf("SerializeStream: %v", err)
 	}
 

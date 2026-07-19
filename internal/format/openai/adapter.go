@@ -85,6 +85,16 @@ type responseTool struct {
 	Parameters  map[string]any `json:"parameters,omitempty"`
 }
 
+type responsesInputItem struct {
+	Type      string          `json:"type"`
+	Role      string          `json:"role,omitempty"`
+	Content   json.RawMessage `json:"content,omitempty"`
+	Name      string          `json:"name,omitempty"`
+	Arguments string          `json:"arguments,omitempty"`
+	CallID    string          `json:"call_id,omitempty"`
+	Output    string          `json:"output,omitempty"`
+}
+
 // ---------------------------------------------------------------------------
 // Unmarshal
 // ---------------------------------------------------------------------------
@@ -155,31 +165,56 @@ func bytesContains(s []byte, sub string) bool {
 func marshalResponses(chat *engine.ChatRequest) ([]byte, error) {
 	var rr responseRequest
 	rr.Stream = chat.Stream
-	if chat.ProviderExtensions != nil {
-		if m, ok := chat.ProviderExtensions["_openai_original_model"].(string); ok {
-			rr.Model = m
-		}
-	}
+	rr.Model = chat.Model
 
-	// Convert messages back to input array if possible.
+	// Convert messages back to input array of Responses API items.
 	if len(chat.Messages) > 0 {
-		var msgs []chatMessage
+		var items []any
 		for _, m := range chat.Messages {
-			msgs = append(msgs, chatMessage{
-				Role: string(m.Role),
-				Content: func() json.RawMessage {
-					if len(m.ContentParts) > 0 {
-						b, _ := json.Marshal(m.ContentParts)
-						return b
-					} else if m.Content != "" {
-						b, _ := json.Marshal(m.Content)
-						return b
+			switch m.Role {
+			case engine.RoleTool:
+				items = append(items, map[string]any{
+					"type":    "function_call_output",
+					"call_id": m.ToolCallID,
+					"output":  m.Content,
+				})
+			case engine.RoleAssistant:
+				if len(m.ToolCalls) > 0 {
+					for _, tc := range m.ToolCalls {
+						argsBytes, _ := json.Marshal(tc.Arguments)
+						items = append(items, map[string]any{
+							"type":      "function_call",
+							"call_id":   tc.ID,
+							"name":      tc.Name,
+							"arguments": string(argsBytes),
+						})
 					}
-					return json.RawMessage(`""`)
-				}(),
-			})
+				} else {
+					items = append(items, map[string]any{
+						"type": "message",
+						"role": string(m.Role),
+						"content": func() any {
+							if len(m.ContentParts) > 0 {
+								return m.ContentParts
+							}
+							return m.Content
+						}(),
+					})
+				}
+			default:
+				items = append(items, map[string]any{
+					"type": "message",
+					"role": string(m.Role),
+					"content": func() any {
+						if len(m.ContentParts) > 0 {
+							return m.ContentParts
+						}
+						return m.Content
+					}(),
+				})
+			}
 		}
-		b, _ := json.Marshal(msgs)
+		b, _ := json.Marshal(items)
 		rr.Input = b
 	}
 
@@ -336,8 +371,13 @@ func (a *Adapter) unmarshalResponses(rawBody []byte) (*engine.ChatRequest, error
 		return nil, fmt.Errorf("openai responses unmarshal: %w", err)
 	}
 
+	model := rr.Model
+	if model == "" {
+		model = "gpt-4o"
+	}
+
 	req := &engine.ChatRequest{
-		Model:  "gpt-4o",
+		Model:  model,
 		Stream: rr.Stream,
 	}
 
@@ -370,11 +410,57 @@ func (a *Adapter) unmarshalResponses(rawBody []byte) (*engine.ChatRequest, error
 				Content: s,
 			})
 		} else {
-			// Try array of messages.
-			var msgs []chatMessage
-			if err := json.Unmarshal(rr.Input, &msgs); err == nil {
-				for _, m := range msgs {
-					req.Messages = append(req.Messages, convertChatMessage(m))
+			// Try array of Responses API items first.
+			var items []responsesInputItem
+			if err := json.Unmarshal(rr.Input, &items); err == nil && len(items) > 0 && items[0].Type != "" {
+				for _, item := range items {
+					switch item.Type {
+					case "message":
+						msg := engine.Message{
+							Role: engine.Role(item.Role),
+						}
+						if len(item.Content) > 0 {
+							var cs string
+							if err := json.Unmarshal(item.Content, &cs); err == nil {
+								msg.Content = cs
+							} else {
+								var parts []any
+								if err := json.Unmarshal(item.Content, &parts); err == nil {
+									msg.ContentParts = parts
+								}
+							}
+						}
+						req.Messages = append(req.Messages, msg)
+
+					case "function_call":
+						msg := engine.Message{
+							Role: engine.RoleAssistant,
+							ToolCalls: []engine.ToolCall{
+								{
+									ID:        item.CallID,
+									Name:      item.Name,
+									Arguments: parseArgs(item.Arguments),
+								},
+							},
+						}
+						req.Messages = append(req.Messages, msg)
+
+					case "function_call_output":
+						msg := engine.Message{
+							Role:       engine.RoleTool,
+							ToolCallID: item.CallID,
+							Content:    item.Output,
+						}
+						req.Messages = append(req.Messages, msg)
+					}
+				}
+			} else {
+				// Try legacy array of messages.
+				var msgs []chatMessage
+				if err := json.Unmarshal(rr.Input, &msgs); err == nil {
+					for _, m := range msgs {
+						req.Messages = append(req.Messages, convertChatMessage(m))
+					}
 				}
 			}
 		}

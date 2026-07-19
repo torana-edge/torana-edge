@@ -5,6 +5,7 @@
 package format
 
 import (
+	"context"
 	"io"
 
 	"github.com/torana-edge/torana-edge/internal/engine"
@@ -25,7 +26,7 @@ type StreamAdapter interface {
 	ParseStream(body io.Reader) <-chan engine.StreamEvent
 	// SerializeStream writes StreamEvents from the channel as SSE to writer.
 	// Returns when the channel is closed or on write error.
-	SerializeStream(w io.Writer, events <-chan engine.StreamEvent) error
+	SerializeStream(ctx context.Context, w io.Writer, events <-chan engine.StreamEvent) error
 }
 
 // Format bundles both adapters under a name.
