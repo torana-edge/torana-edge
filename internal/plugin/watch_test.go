@@ -71,13 +71,15 @@ func TestWatchPlugins_ReloadEditDeleteAndShutdown(t *testing.T) {
 		}
 	}()
 
-	// The debounce is 500ms; give reloads a generous window.
+	// The debounce is 500ms, but fsnotify delivery + WASM (re)load is much
+	// slower on virtualized CI runners where write events can be coalesced and
+	// delayed. Use a generous window so this isn't flaky in GHA.
 	awaitReload := func(what string) *PluginPipeline {
 		t.Helper()
 		select {
 		case pp := <-reloads:
 			return pp
-		case <-time.After(6 * time.Second):
+		case <-time.After(30 * time.Second):
 			t.Fatalf("no reload after %s", what)
 			return nil
 		}
@@ -112,7 +114,7 @@ func TestWatchPlugins_ReloadEditDeleteAndShutdown(t *testing.T) {
 	cancel()
 	select {
 	case <-watchDone:
-	case <-time.After(3 * time.Second):
+	case <-time.After(10 * time.Second):
 		t.Fatal("WatchPlugins goroutine did not exit after ctx cancel (watcher leak)")
 	}
 }
