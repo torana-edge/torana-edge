@@ -184,6 +184,14 @@ func reloadPipeline(runtime *wasm.Runtime, config PluginConfig) (*PluginPipeline
 			plugin:   pl,
 		})
 		log.Printf("[plugin] %s ready — hooks: %v", name, hookNames(bundle.Manifest.Hooks))
+		// run_after_response mutations are applied on the non-streaming JSON
+		// path but are OBSERVATIONAL on streaming responses (the stream is
+		// already written when the hook fires) — see docs/PLUGIN_IMPLEMENTATION_
+		// GUIDE.md §5. Warn once at load so a plugin that expects to rewrite
+		// streamed responses isn't silently a no-op.
+		if hasHook(bundle.Manifest, "run_after_response") {
+			log.Printf("[plugin] %s: run_after_response mutations are observational on streaming responses (metrics/audit OK; response rewrites are dropped mid-stream)", name)
+		}
 	}
 	return &PluginPipeline{plugins: loaded, runtime: runtime}, nil
 }
