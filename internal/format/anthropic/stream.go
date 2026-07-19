@@ -24,6 +24,10 @@ type sseEvent struct {
 type usageEv struct {
 	InputTokens  int `json:"input_tokens,omitempty"`
 	OutputTokens int `json:"output_tokens,omitempty"`
+	// Prompt-cache accounting: read = served from cache, creation = written
+	// to cache this turn. Reported on message_start alongside input_tokens.
+	CacheReadInputTokens     int `json:"cache_read_input_tokens,omitempty"`
+	CacheCreationInputTokens int `json:"cache_creation_input_tokens,omitempty"`
 }
 
 type contentBlockEv struct {
@@ -63,7 +67,8 @@ func (s *StreamAdapter) ParseStream(body io.Reader) <-chan engine.StreamEvent {
 		defer close(ch)
 		scanner := bufio.NewScanner(body)
 		var blockType string // tracks current content block type: "", "text", "tool_use", "thinking"
-		var inputTokens int  // from message_start, reported with output at message_delta
+		// From message_start, reported with output at message_delta.
+		var inputTokens, cacheRead, cacheWrite int
 		for scanner.Scan() {
 			line := scanner.Text()
 			if !strings.HasPrefix(line, "data: ") {
@@ -90,6 +95,8 @@ func (s *StreamAdapter) ParseStream(body io.Reader) <-chan engine.StreamEvent {
 			case ev.Type == "message_start":
 				if ev.Message != nil && ev.Message.Usage != nil {
 					inputTokens = ev.Message.Usage.InputTokens
+					cacheRead = ev.Message.Usage.CacheReadInputTokens
+					cacheWrite = ev.Message.Usage.CacheCreationInputTokens
 				}
 
 			case ev.Type == "content_block_start":
@@ -149,11 +156,22 @@ func (s *StreamAdapter) ParseStream(body io.Reader) <-chan engine.StreamEvent {
 				// Usage precedes FinishReason so serializers can embed it in
 				// their final frame (message_delta carries output tokens;
 				// input tokens were captured at message_start).
-				if ev.Usage != nil && (inputTokens > 0 || ev.Usage.OutputTokens > 0) {
+				if ev.Usage != nil && (inputTokens > 0 || ev.Usage.OutputTokens > 0 || cacheRead > 0 || cacheWrite > 0) {
+					// message_delta may re-report the cache counts; prefer them
+					// when present, else use the message_start capture.
+					cr, cw := ev.Usage.CacheReadInputTokens, ev.Usage.CacheCreationInputTokens
+					if cr == 0 {
+						cr = cacheRead
+					}
+					if cw == 0 {
+						cw = cacheWrite
+					}
 					ch <- engine.StreamEvent{
 						Usage: &engine.StreamUsage{
-							InputTokens:  inputTokens,
-							OutputTokens: ev.Usage.OutputTokens,
+							InputTokens:      inputTokens,
+							OutputTokens:     ev.Usage.OutputTokens,
+							CacheReadTokens:  cr,
+							CacheWriteTokens: cw,
 						},
 					}
 				}
@@ -409,7 +427,15 @@ func jsonString(s string) string {
 	return string(b)
 }
 
-// usageJSON renders a StreamUsage in Anthropic's usage shape.
+// usageJSON renders a StreamUsage in Anthropic's usage shape. Cache counts
+// are included only when non-zero so uncached turns keep the classic shape.
 func usageJSON(u *engine.StreamUsage) string {
-	return fmt.Sprintf(`{"input_tokens":%d,"output_tokens":%d}`, u.InputTokens, u.OutputTokens)
+	s := fmt.Sprintf(`"input_tokens":%d,"output_tokens":%d`, u.InputTokens, u.OutputTokens)
+	if u.CacheReadTokens > 0 {
+		s += fmt.Sprintf(`,"cache_read_input_tokens":%d`, u.CacheReadTokens)
+	}
+	if u.CacheWriteTokens > 0 {
+		s += fmt.Sprintf(`,"cache_creation_input_tokens":%d`, u.CacheWriteTokens)
+	}
+	return "{" + s + "}"
 }

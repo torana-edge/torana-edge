@@ -46,6 +46,13 @@ type Message struct {
 	ToolCalls         []ToolCall // assistant → tool invocations
 	ToolCallID        string     // tool messages: which call this result answers
 	ToolName          string     // tool messages: which tool produced this result
+
+	// CacheControl is an opaque provider cache breakpoint attached to this
+	// message (e.g. Anthropic {"type":"ephemeral"}, Bedrock cachePoint).
+	// Stored verbatim so provider-specific shapes and TTLs pass through
+	// untouched. Breakpoints are positional: adapters re-emit the marker on
+	// the last wire block rendered for this message. Nil when absent.
+	CacheControl map[string]any
 }
 
 // ToolCall represents an assistant's request to invoke a tool.
@@ -66,6 +73,9 @@ type ToolDef struct {
 	Description string
 	Parameters  map[string]any // JSON Schema object: {"type":"object","properties":{...},"required":[...]}
 	Strict      bool
+	// CacheControl marks a cache breakpoint after this tool definition
+	// (Anthropic allows cache_control on tool entries). Opaque; nil when absent.
+	CacheControl map[string]any
 }
 
 // --- Response streaming side ---
@@ -117,7 +127,17 @@ type StreamError struct {
 }
 
 // StreamUsage represents token usage data from a streaming response.
+// InputTokens excludes cached tokens for providers that report them
+// separately (Anthropic); for providers where the cached count is a subset
+// of the prompt total (OpenAI, Gemini, Bedrock) it is the full prompt count.
 type StreamUsage struct {
 	InputTokens  int
 	OutputTokens int
+	// CacheReadTokens is the number of input tokens served from the
+	// provider's prompt cache (billed at a fraction of full price).
+	CacheReadTokens int
+	// CacheWriteTokens is the number of input tokens written to the cache
+	// this turn (Anthropic cache_creation_input_tokens, Bedrock
+	// cacheWriteInputTokens); 0 for providers that don't report it.
+	CacheWriteTokens int
 }

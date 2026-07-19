@@ -25,9 +25,16 @@ type sseChunk struct {
 }
 
 type sseUsage struct {
-	PromptTokens     int `json:"prompt_tokens"`
-	CompletionTokens int `json:"completion_tokens"`
-	TotalTokens      int `json:"total_tokens"`
+	PromptTokens        int                     `json:"prompt_tokens"`
+	CompletionTokens    int                     `json:"completion_tokens"`
+	TotalTokens         int                     `json:"total_tokens"`
+	PromptTokensDetails *ssePromptTokensDetails `json:"prompt_tokens_details,omitempty"`
+}
+
+// ssePromptTokensDetails carries the automatic prompt-cache hit count
+// (cached_tokens is a subset of prompt_tokens, billed at a discount).
+type ssePromptTokensDetails struct {
+	CachedTokens int `json:"cached_tokens"`
 }
 
 type sseChoice struct {
@@ -127,12 +134,14 @@ func (s *StreamAdapter) parseStream(body io.Reader, ch chan<- engine.StreamEvent
 		// Usage arrives on the final chunk (empty choices) when the client —
 		// or the proxy on its behalf — asked for stream_options.include_usage.
 		if chunk.Usage != nil && (chunk.Usage.PromptTokens > 0 || chunk.Usage.CompletionTokens > 0) {
-			ch <- engine.StreamEvent{
-				Usage: &engine.StreamUsage{
-					InputTokens:  chunk.Usage.PromptTokens,
-					OutputTokens: chunk.Usage.CompletionTokens,
-				},
+			u := &engine.StreamUsage{
+				InputTokens:  chunk.Usage.PromptTokens,
+				OutputTokens: chunk.Usage.CompletionTokens,
 			}
+			if d := chunk.Usage.PromptTokensDetails; d != nil {
+				u.CacheReadTokens = d.CachedTokens
+			}
+			ch <- engine.StreamEvent{Usage: u}
 		}
 
 		// Process choices.
@@ -387,15 +396,19 @@ func finishReasonSSE(reason string) string {
 // usageSSE is the final usage chunk (empty choices), the shape OpenAI sends
 // when stream_options.include_usage is set.
 func usageSSE(u *engine.StreamUsage) string {
+	usage := map[string]any{
+		"prompt_tokens":     u.InputTokens,
+		"completion_tokens": u.OutputTokens,
+		"total_tokens":      u.InputTokens + u.OutputTokens,
+	}
+	if u.CacheReadTokens > 0 {
+		usage["prompt_tokens_details"] = map[string]any{"cached_tokens": u.CacheReadTokens}
+	}
 	chunk := map[string]any{
 		"id":      streamID,
 		"object":  "chat.completion.chunk",
 		"choices": []map[string]any{},
-		"usage": map[string]any{
-			"prompt_tokens":     u.InputTokens,
-			"completion_tokens": u.OutputTokens,
-			"total_tokens":      u.InputTokens + u.OutputTokens,
-		},
+		"usage":   usage,
 	}
 	b, _ := json.Marshal(chunk)
 	return fmt.Sprintf("data: %s\n\n", string(b))
