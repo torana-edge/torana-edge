@@ -626,8 +626,25 @@ func New(cfg Config) (*Server, error) {
 					events = out
 				}
 
+				// Pin the pipeline for the background goroutine's entire
+				// lifetime. The goroutine outlives this handler (it keeps
+				// running while ReverseProxy copies pr→client and then calls
+				// RunAfterResponse). RunAfterResponse does its own Acquire, but
+				// there's a window after the handler's deferred Release where
+				// the wg counter can hit 0 — letting a concurrent
+				// DrainAndClose().Wait() unblock and race Add(1) (data race +
+				// use of a closing runtime). An explicit Acquire/Release around
+				// the goroutine keeps the counter above 0 until it's fully done.
+				var streamPl *plugin.PluginPipeline
+				if pl := reqStateFrom(resp.Request.Context()).Pipeline; pl != nil {
+					pl.Acquire()
+					streamPl = pl
+				}
 				pr, pw := io.Pipe()
 				go func() {
+					if streamPl != nil {
+						defer streamPl.Release()
+					}
 					serErr := fmt.Stream.SerializeStream(pw, events)
 					pw.Close()
 					// On client disconnect the request context is cancelled, so
