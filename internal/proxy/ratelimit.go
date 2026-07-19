@@ -107,12 +107,7 @@ func hashIdentity(identity string) string {
 	return hex.EncodeToString(sum[:16])
 }
 
-func (rl *RateLimiter) getLimiter(identity string, rpm int) *Limiter {
-	key := hashIdentity(identity)
-	rl.mu.Lock()
-	defer rl.mu.Unlock()
-	return rl.getLimiterLocked(key, rpm)
-}
+
 
 func (rl *RateLimiter) getLimiterLocked(key string, rpm int) *Limiter {
 	if l, exists := rl.limits[key]; exists {
