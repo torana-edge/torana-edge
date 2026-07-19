@@ -166,6 +166,13 @@ func reloadPipeline(runtime *wasm.Runtime, config PluginConfig) (*PluginPipeline
 			log.Printf("[plugin] %s: %v — skipping", name, err)
 			continue
 		}
+		// SECURITY BOUNDARY SECURITY NOTE:
+		// Grants are read directly from the plugin's own self-declared manifest
+		// (bundle.Manifest.Permissions). This is a policy declaration for runtime auditability
+		// and developer convenience, NOT a secure security boundary against untrusted plugin
+		// artifacts. Since any plugin can request any permission in its manifest, the system
+		// does not enforce third-party validation or sandbox boundaries beyond wazero's basic
+		// WASM environment. Administrative review of plugins before deployment is required.
 		var grants []string
 		for _, p := range bundle.Manifest.Permissions {
 			grants = append(grants, p.Name)
