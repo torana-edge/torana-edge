@@ -369,10 +369,7 @@ func TestRoundTrip_ResponsesAPI(t *testing.T) {
 		t.Errorf("message 1 mismatch: %+v", chat.Messages[1])
 	}
 
-	if chat.Messages[2].Role != engine.RoleTool || chat.Messages[2].ToolCallID != "call_abc" || chat.Messages[2].Content != "Seattle" {
-		// Wait, Seattle or Rainy? Let's check Seattle vs Rainy. Content should be Seattle or output should be Seattle. Output: Seattle is mapped to Content: Seattle.
-		// Wait, our test has output: "Rainy", so chat.Messages[2].Content should be "Rainy"!
-	}
+
 	if chat.Messages[2].Role != engine.RoleTool || chat.Messages[2].ToolCallID != "call_abc" || chat.Messages[2].Content != "Rainy" {
 		t.Errorf("message 2 mismatch: %+v", chat.Messages[2])
 	}
