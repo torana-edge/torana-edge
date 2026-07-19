@@ -2,6 +2,7 @@ package format_test
 
 import (
 	"bytes"
+	"context"
 	"strings"
 	"testing"
 
@@ -120,7 +121,7 @@ func TestStreamUsageRoundTrip(t *testing.T) {
 			}
 			close(ch)
 			var out bytes.Buffer
-			if err := f.Stream.SerializeStream(&out, ch); err != nil {
+			if err := f.Stream.SerializeStream(context.Background(), &out, ch); err != nil {
 				t.Fatalf("serialize: %v", err)
 			}
 			for _, marker := range tc.wireMarkers {
@@ -145,7 +146,7 @@ func TestOpenAISerializeFinishBeforeUsageBeforeDone(t *testing.T) {
 	close(ch)
 
 	var out bytes.Buffer
-	if err := f.Stream.SerializeStream(&out, ch); err != nil {
+	if err := f.Stream.SerializeStream(context.Background(), &out, ch); err != nil {
 		t.Fatalf("serialize: %v", err)
 	}
 	s := out.String()

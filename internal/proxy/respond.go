@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 
 	"github.com/torana-edge/torana-edge/internal/engine"
@@ -46,7 +47,7 @@ func renderCompletionStream(f *format.Format, content string) []byte {
 	ch <- engine.StreamEvent{FinishReason: "stop"}
 	close(ch)
 	var buf bytes.Buffer
-	_ = f.Stream.SerializeStream(&buf, ch)
+	_ = f.Stream.SerializeStream(context.Background(), &buf, ch)
 	return buf.Bytes()
 }
 

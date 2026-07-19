@@ -1,5 +1,11 @@
 package engine
 
+type chatRequestCtxKey struct{}
+
+// ChatRequestKey is the context key used to store/retrieve *ChatRequest.
+var ChatRequestKey = chatRequestCtxKey{}
+
+
 // --- Request side ---
 
 // ChatRequest is the canonical representation of a chat completion request
