@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"sync"
 
 	"github.com/torana-edge/torana-edge/internal/provider"
 )
@@ -24,11 +25,16 @@ type rateLimitBody struct {
 	io.ReadCloser
 	identity    string
 	rateLimiter *RateLimiter
+	once        sync.Once
 }
 
 func (r *rateLimitBody) Close() error {
-	r.rateLimiter.Release(r.identity)
-	return r.ReadCloser.Close()
+	var err error
+	r.once.Do(func() {
+		r.rateLimiter.Release(r.identity)
+		err = r.ReadCloser.Close()
+	})
+	return err
 }
 
 func (t *failoverRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
