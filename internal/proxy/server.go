@@ -651,7 +651,8 @@ func New(cfg Config) (*Server, error) {
 					if streamPl != nil {
 						defer streamPl.Release()
 					}
-					serErr := fmt.Stream.SerializeStream(pw, events)
+					chat, _ := resp.Request.Context().Value(chatCtxKey{}).(*engine.ChatRequest)
+					serErr := fmt.Stream.SerializeStream(pw, chat, events)
 					pw.Close()
 					// On client disconnect the request context is cancelled, so
 					// the transport tears down the upstream connection and the

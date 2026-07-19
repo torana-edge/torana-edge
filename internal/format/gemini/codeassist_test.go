@@ -159,7 +159,7 @@ func TestCodeAssistStreamToolCall(t *testing.T) {
 
 	// Re-serialize and confirm it round-trips through ParseStream with id+sig intact.
 	var buf strings.Builder
-	if err := s.SerializeStream(&buf, replay(events)); err != nil {
+	if err := s.SerializeStream(&buf, nil, replay(events)); err != nil {
 		t.Fatalf("SerializeStream: %v", err)
 	}
 	reparsed := drain(s.ParseStream(strings.NewReader(buf.String())))
@@ -329,7 +329,7 @@ func TestStreamFramingBareVsWrapped(t *testing.T) {
 	}
 
 	var bare strings.Builder
-	if err := (&StreamAdapter{Wrapped: false}).SerializeStream(&bare, mk()); err != nil {
+	if err := (&StreamAdapter{Wrapped: false}).SerializeStream(&bare, nil, mk()); err != nil {
 		t.Fatal(err)
 	}
 	if strings.Contains(bare.String(), `"response"`) {
@@ -340,7 +340,7 @@ func TestStreamFramingBareVsWrapped(t *testing.T) {
 	}
 
 	var wrapped strings.Builder
-	if err := (&StreamAdapter{Wrapped: true}).SerializeStream(&wrapped, mk()); err != nil {
+	if err := (&StreamAdapter{Wrapped: true}).SerializeStream(&wrapped, nil, mk()); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(wrapped.String(), `"response"`) {

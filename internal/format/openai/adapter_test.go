@@ -207,7 +207,7 @@ func TestStreamSerialize_RoundTrip(t *testing.T) {
 	close(evtCh)
 
 	var buf bytes.Buffer
-	if err := sa.SerializeStream(&buf, evtCh); err != nil {
+	if err := sa.SerializeStream(&buf, nil, evtCh); err != nil {
 		t.Fatalf("serialize: %v", err)
 	}
 

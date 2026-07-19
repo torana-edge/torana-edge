@@ -25,7 +25,7 @@ type StreamAdapter interface {
 	ParseStream(body io.Reader) <-chan engine.StreamEvent
 	// SerializeStream writes StreamEvents from the channel as SSE to writer.
 	// Returns when the channel is closed or on write error.
-	SerializeStream(w io.Writer, events <-chan engine.StreamEvent) error
+	SerializeStream(w io.Writer, chat *engine.ChatRequest, events <-chan engine.StreamEvent) error
 }
 
 // Format bundles both adapters under a name.

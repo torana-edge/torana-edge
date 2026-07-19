@@ -85,6 +85,24 @@ type responseTool struct {
 	Parameters  map[string]any `json:"parameters,omitempty"`
 }
 
+type responseInputMsg struct {
+	Role               string          `json:"role"`
+	Content            json.RawMessage `json:"content,omitempty"`
+	FunctionCall       *responseFnCall `json:"function_call,omitempty"`
+	FunctionCallOutput *responseFnOut  `json:"function_call_output,omitempty"`
+}
+
+type responseFnCall struct {
+	CallID    string `json:"call_id"`
+	Name      string `json:"name"`
+	Arguments string `json:"arguments"`
+}
+
+type responseFnOut struct {
+	CallID string `json:"call_id"`
+	Output string `json:"output"`
+}
+
 // ---------------------------------------------------------------------------
 // Unmarshal
 // ---------------------------------------------------------------------------
@@ -155,7 +173,9 @@ func bytesContains(s []byte, sub string) bool {
 func marshalResponses(chat *engine.ChatRequest) ([]byte, error) {
 	var rr responseRequest
 	rr.Stream = chat.Stream
-	if chat.ProviderExtensions != nil {
+	if chat.Model != "" {
+		rr.Model = chat.Model
+	} else if chat.ProviderExtensions != nil {
 		if m, ok := chat.ProviderExtensions["_openai_original_model"].(string); ok {
 			rr.Model = m
 		}
@@ -163,21 +183,42 @@ func marshalResponses(chat *engine.ChatRequest) ([]byte, error) {
 
 	// Convert messages back to input array if possible.
 	if len(chat.Messages) > 0 {
-		var msgs []chatMessage
+		var msgs []responseInputMsg
 		for _, m := range chat.Messages {
-			msgs = append(msgs, chatMessage{
-				Role: string(m.Role),
-				Content: func() json.RawMessage {
-					if len(m.ContentParts) > 0 {
-						b, _ := json.Marshal(m.ContentParts)
-						return b
-					} else if m.Content != "" {
-						b, _ := json.Marshal(m.Content)
-						return b
-					}
-					return json.RawMessage(`""`)
-				}(),
-			})
+			outMsg := responseInputMsg{Role: string(m.Role)}
+			if len(m.ContentParts) > 0 {
+				b, _ := json.Marshal(m.ContentParts)
+				outMsg.Content = b
+			} else if m.Content != "" {
+				if m.Role == engine.RoleTool && m.ToolCallID != "" {
+					// We'll set it below.
+				} else {
+					b, _ := json.Marshal(m.Content)
+					outMsg.Content = b
+				}
+			}
+			if len(m.ToolCalls) > 0 {
+				tc := m.ToolCalls[0]
+				args, _ := json.Marshal(tc.Arguments)
+				outMsg.FunctionCall = &responseFnCall{
+					CallID:    tc.ID,
+					Name:      tc.Name,
+					Arguments: string(args),
+				}
+			}
+			if m.Role == engine.RoleTool && m.ToolCallID != "" {
+				outMsg.FunctionCallOutput = &responseFnOut{
+					CallID: m.ToolCallID,
+					Output: m.Content,
+				}
+			} else if m.Role == engine.RoleTool && m.ToolName != "" {
+				// Fallback if ToolCallID isn't set
+				outMsg.FunctionCallOutput = &responseFnOut{
+					CallID: m.ToolName,
+					Output: m.Content,
+				}
+			}
+			msgs = append(msgs, outMsg)
 		}
 		b, _ := json.Marshal(msgs)
 		rr.Input = b
@@ -371,10 +412,33 @@ func (a *Adapter) unmarshalResponses(rawBody []byte) (*engine.ChatRequest, error
 			})
 		} else {
 			// Try array of messages.
-			var msgs []chatMessage
+			var msgs []responseInputMsg
 			if err := json.Unmarshal(rr.Input, &msgs); err == nil {
 				for _, m := range msgs {
-					req.Messages = append(req.Messages, convertChatMessage(m))
+					msg := engine.Message{Role: engine.Role(m.Role)}
+					if len(m.Content) > 0 {
+						var s string
+						if err := json.Unmarshal(m.Content, &s); err == nil {
+							msg.Content = s
+						} else {
+							var parts []any
+							if err := json.Unmarshal(m.Content, &parts); err == nil {
+								msg.ContentParts = parts
+							}
+						}
+					}
+					if m.FunctionCall != nil {
+						msg.ToolCalls = []engine.ToolCall{{
+							ID:        m.FunctionCall.CallID,
+							Name:      m.FunctionCall.Name,
+							Arguments: parseArgs(m.FunctionCall.Arguments),
+						}}
+					}
+					if m.FunctionCallOutput != nil {
+						msg.ToolCallID = m.FunctionCallOutput.CallID
+						msg.Content = m.FunctionCallOutput.Output
+					}
+					req.Messages = append(req.Messages, msg)
 				}
 			}
 		}
