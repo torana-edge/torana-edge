@@ -27,7 +27,7 @@ func TestSerializeStreamWireShape(t *testing.T) {
 	close(events)
 
 	var buf bytes.Buffer
-	if err := (&StreamAdapter{}).SerializeStream(&buf, events); err != nil {
+	if err := (&StreamAdapter{}).SerializeStream(&buf, nil, events); err != nil {
 		t.Fatalf("SerializeStream: %v", err)
 	}
 	out := buf.String()

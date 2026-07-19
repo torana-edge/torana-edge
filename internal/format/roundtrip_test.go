@@ -43,7 +43,7 @@ func TestSerializeSingleCompleteDelta(t *testing.T) {
 			close(events)
 
 			var buf bytes.Buffer
-			if err := f.Stream.SerializeStream(&buf, events); err != nil {
+			if err := f.Stream.SerializeStream(&buf, nil, events); err != nil {
 				t.Fatalf("SerializeStream: %v", err)
 			}
 

@@ -204,6 +204,9 @@ func New(cfg Config) (*Server, error) {
 		rateLimiter: NewRateLimiter(cfg.Providers.Limits.RPM, cfg.Providers.Limits.Concurrency),
 	}
 
+	// Debug: log selected providers at startup for visibility.
+	log.Printf("proxy: initializing with %d upstream provider(s)", len(cfg.Providers.Providers))
+
 	// --- offload validation (fail fast on misconfiguration) ---------------
 	if err := cfg.Providers.Offload.Validate(cfg.Providers.Providers); err != nil {
 		return nil, fmt.Errorf("proxy: %w", err)
@@ -651,7 +654,8 @@ func New(cfg Config) (*Server, error) {
 					if streamPl != nil {
 						defer streamPl.Release()
 					}
-					serErr := fmt.Stream.SerializeStream(pw, events)
+					chat, _ := resp.Request.Context().Value(chatCtxKey{}).(*engine.ChatRequest)
+					serErr := fmt.Stream.SerializeStream(pw, chat, events)
 					pw.Close()
 					// On client disconnect the request context is cancelled, so
 					// the transport tears down the upstream connection and the
@@ -941,7 +945,8 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	return nil
 }
 
-// double slashes where appropriate (mirrors httputil.singleJoiningSlash).
+// joinURLPath canonicalizes a base/rel path pair, avoiding double slashes
+// where appropriate (mirrors httputil.singleJoiningSlash).
 func joinURLPath(base, rel string) string {
 	bs := strings.TrimSuffix(base, "/")
 	rs := strings.TrimPrefix(rel, "/")
