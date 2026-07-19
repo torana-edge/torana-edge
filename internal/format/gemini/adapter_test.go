@@ -168,7 +168,7 @@ func TestStreamSerialize(t *testing.T) {
 	close(events)
 
 	var buf strings.Builder
-	if err := s.SerializeStream(&buf, events); err != nil {
+	if err := s.SerializeStream(&buf, nil, events); err != nil {
 		t.Fatalf("SerializeStream error: %v", err)
 	}
 

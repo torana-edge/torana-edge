@@ -46,7 +46,7 @@ func renderCompletionStream(f *format.Format, content string) []byte {
 	ch <- engine.StreamEvent{FinishReason: "stop"}
 	close(ch)
 	var buf bytes.Buffer
-	_ = f.Stream.SerializeStream(&buf, ch)
+	_ = f.Stream.SerializeStream(&buf, nil, ch)
 	return buf.Bytes()
 }
 

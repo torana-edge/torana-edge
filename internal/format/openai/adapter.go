@@ -85,6 +85,26 @@ type responseTool struct {
 	Parameters  map[string]any `json:"parameters,omitempty"`
 }
 
+
+// responseInputMsg is a single item in the Responses API input array.
+type responseInputMsg struct {
+	Role               string          `json:"role"`
+	Content            json.RawMessage `json:"content,omitempty"`
+	FunctionCall       *responseFnCall `json:"function_call,omitempty"`
+	FunctionCallOutput *responseFnOut  `json:"function_call_output,omitempty"`
+}
+
+type responseFnCall struct {
+	CallID    string `json:"call_id"`
+	Name      string `json:"name"`
+	Arguments string `json:"arguments"`
+}
+
+type responseFnOut struct {
+	CallID string `json:"call_id"`
+	Output string `json:"output"`
+}
+
 // ---------------------------------------------------------------------------
 // Unmarshal
 // ---------------------------------------------------------------------------
@@ -155,31 +175,75 @@ func bytesContains(s []byte, sub string) bool {
 func marshalResponses(chat *engine.ChatRequest) ([]byte, error) {
 	var rr responseRequest
 	rr.Stream = chat.Stream
-	if chat.ProviderExtensions != nil {
+	if chat.Model != "" {
+		rr.Model = chat.Model
+	} else if chat.ProviderExtensions != nil {
 		if m, ok := chat.ProviderExtensions["_openai_original_model"].(string); ok {
 			rr.Model = m
 		}
 	}
 
-	// Convert messages back to input array if possible.
+	// Convert messages back to input array.
+	// In the Responses API, each function_call is a separate input item
+	// with role "assistant", and content/function_call_output are separate items.
 	if len(chat.Messages) > 0 {
-		var msgs []chatMessage
+		var msgs []responseInputMsg
 		for _, m := range chat.Messages {
-			msgs = append(msgs, chatMessage{
-				Role: string(m.Role),
-				Content: func() json.RawMessage {
-					if len(m.ContentParts) > 0 {
-						b, _ := json.Marshal(m.ContentParts)
-						return b
-					} else if m.Content != "" {
-						b, _ := json.Marshal(m.Content)
-						return b
+			isToolResult := m.Role == engine.RoleTool
+			hasContent := m.Content != "" || len(m.ContentParts) > 0
+
+			if isToolResult {
+				if m.ToolCallID == "" {
+					continue // cannot form a valid tool result without call_id
+				}
+				outMsg := responseInputMsg{Role: string(engine.RoleTool)}
+				outMsg.FunctionCallOutput = &responseFnOut{
+					CallID: m.ToolCallID,
+					Output: m.Content,
+				}
+				msgs = append(msgs, outMsg)
+				continue
+			}
+
+			// Emit content as a separate message if present.
+			if hasContent {
+				outMsg := responseInputMsg{Role: string(m.Role)}
+				if len(m.ContentParts) > 0 {
+					b, err := json.Marshal(m.ContentParts)
+					if err != nil {
+						return nil, fmt.Errorf("openai marshal responses: content parts: %w", err)
 					}
-					return json.RawMessage(`""`)
-				}(),
-			})
+					outMsg.Content = b
+				} else if m.Content != "" {
+					b, err := json.Marshal(m.Content)
+					if err != nil {
+						return nil, fmt.Errorf("openai marshal responses: content: %w", err)
+					}
+					outMsg.Content = b
+				}
+				msgs = append(msgs, outMsg)
+			}
+
+			// Emit each tool call as a separate assistant message.
+			for _, tc := range m.ToolCalls {
+				args, err := json.Marshal(tc.Arguments)
+				if err != nil {
+					return nil, fmt.Errorf("openai marshal responses: tool call args: %w", err)
+				}
+				msgs = append(msgs, responseInputMsg{
+					Role: string(engine.RoleAssistant),
+					FunctionCall: &responseFnCall{
+						CallID:    tc.ID,
+						Name:      tc.Name,
+						Arguments: string(args),
+					},
+				})
+			}
 		}
-		b, _ := json.Marshal(msgs)
+		b, err := json.Marshal(msgs)
+		if err != nil {
+			return nil, fmt.Errorf("openai marshal responses: input messages: %w", err)
+		}
 		rr.Input = b
 	}
 
@@ -194,12 +258,14 @@ func marshalResponses(chat *engine.ChatRequest) ([]byte, error) {
 
 	b, err := json.Marshal(rr)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("openai marshal responses: %w", err)
 	}
 
 	if len(chat.ProviderExtensions) > 0 {
 		var outMap map[string]any
-		json.Unmarshal(b, &outMap)
+		if err := json.Unmarshal(b, &outMap); err != nil {
+			return nil, fmt.Errorf("openai marshal responses: decode for extensions: %w", err)
+		}
 		for k, v := range chat.ProviderExtensions {
 			if !strings.HasPrefix(k, "_openai_") {
 				outMap[k] = v
@@ -467,10 +533,16 @@ func marshalChat(chat *engine.ChatRequest) ([]byte, error) {
 
 		// Content: null if empty and there are tool calls (assistant).
 		if len(m.ContentParts) > 0 {
-			b, _ := json.Marshal(m.ContentParts)
+			b, err := json.Marshal(m.ContentParts)
+			if err != nil {
+				return nil, fmt.Errorf("openai marshal chat: content parts: %w", err)
+			}
 			mm.Content = b
 		} else if m.Content != "" {
-			b, _ := json.Marshal(m.Content)
+			b, err := json.Marshal(m.Content)
+			if err != nil {
+				return nil, fmt.Errorf("openai marshal chat: content: %w", err)
+			}
 			mm.Content = b
 		} else if m.Role == engine.RoleAssistant && len(m.ToolCalls) > 0 {
 			mm.Content = json.RawMessage("null")

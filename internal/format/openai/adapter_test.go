@@ -4,8 +4,8 @@ import (
 	"bytes"
 	"encoding/json"
 	"io"
+	"strings"
 	"testing"
-
 	"github.com/torana-edge/torana-edge/internal/engine"
 )
 
@@ -207,7 +207,7 @@ func TestStreamSerialize_RoundTrip(t *testing.T) {
 	close(evtCh)
 
 	var buf bytes.Buffer
-	if err := sa.SerializeStream(&buf, evtCh); err != nil {
+	if err := sa.SerializeStream(&buf, nil, evtCh); err != nil {
 		t.Fatalf("serialize: %v", err)
 	}
 
@@ -327,5 +327,205 @@ func TestProviderExtensions_RoundTrip(t *testing.T) {
 	}
 	if v, _ := parsed["temperature"].(float64); v != 0.7 {
 		t.Errorf("temperature = %v", v)
+	}
+}
+
+func TestMarshalResponses_MultipleToolCalls(t *testing.T) {
+	chat := &engine.ChatRequest{
+		Model: "gpt-4o",
+		ProviderExtensions: map[string]any{
+			"_openai_variant": "responses",
+		},
+		Messages: []engine.Message{
+			{Role: engine.RoleUser, Content: "What's the weather and time?"},
+			{Role: engine.RoleAssistant, ToolCalls: []engine.ToolCall{
+				{ID: "call_1", Name: "get_weather", Arguments: map[string]any{"city": "NYC"}},
+				{ID: "call_2", Name: "get_time", Arguments: map[string]any{"tz": "EST"}},
+			}},
+			{Role: engine.RoleTool, ToolCallID: "call_1", Content: "Sunny, 72F"},
+			{Role: engine.RoleTool, ToolCallID: "call_2", Content: "3:00 PM"},
+		},
+	}
+
+	adapter := &Adapter{}
+	out, err := adapter.Marshal(chat)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+
+	var raw map[string]any
+	if err := json.Unmarshal(out, &raw); err != nil {
+		t.Fatalf("output not valid JSON: %v\n%s", err, out)
+	}
+
+	input, ok := raw["input"].([]any)
+	if !ok {
+		t.Fatalf("input is not an array: %T", raw["input"])
+	}
+
+	if len(input) != 5 {
+		t.Fatalf("expected 5 input items, got %d: %v", len(input), input)
+	}
+
+	msg1 := input[1].(map[string]any)
+	if msg1["role"] != "assistant" {
+		t.Errorf("item 1 role: got %v, want assistant", msg1["role"])
+	}
+	fc1, ok := msg1["function_call"].(map[string]any)
+	if !ok {
+		t.Fatalf("item 1 missing function_call: %v", msg1)
+	}
+	if fc1["call_id"] != "call_1" || fc1["name"] != "get_weather" {
+		t.Errorf("item 1 function_call: call_id=%v name=%v", fc1["call_id"], fc1["name"])
+	}
+
+	msg2 := input[2].(map[string]any)
+	fc2, ok := msg2["function_call"].(map[string]any)
+	if !ok {
+		t.Fatalf("item 2 missing function_call: %v", msg2)
+	}
+	if fc2["call_id"] != "call_2" || fc2["name"] != "get_time" {
+		t.Errorf("item 2 function_call: call_id=%v name=%v", fc2["call_id"], fc2["name"])
+	}
+
+	msg3 := input[3].(map[string]any)
+	fco1, ok := msg3["function_call_output"].(map[string]any)
+	if !ok {
+		t.Fatalf("item 3 missing function_call_output: %v", msg3)
+	}
+	if fco1["call_id"] != "call_1" || fco1["output"] != "Sunny, 72F" {
+		t.Errorf("item 3 function_call_output: call_id=%v output=%v", fco1["call_id"], fco1["output"])
+	}
+}
+
+func TestMarshalResponses_NoToolNameFallback(t *testing.T) {
+	chat := &engine.ChatRequest{
+		Model: "gpt-4o",
+		ProviderExtensions: map[string]any{
+			"_openai_variant": "responses",
+		},
+		Messages: []engine.Message{
+			{Role: engine.RoleUser, Content: "hi"},
+			{Role: engine.RoleTool, ToolName: "some_tool", Content: "result without id"},
+		},
+	}
+
+	adapter := &Adapter{}
+	out, err := adapter.Marshal(chat)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+
+	var raw map[string]any
+	if err := json.Unmarshal(out, &raw); err != nil {
+		t.Fatalf("output not valid JSON: %v\n%s", err, out)
+	}
+
+	input, _ := raw["input"].([]any)
+	if len(input) != 1 {
+		t.Fatalf("expected 1 input item, got %d", len(input))
+	}
+}
+
+func TestStreamSerialize_ResponsesAPI(t *testing.T) {
+	chat := &engine.ChatRequest{
+		ProviderExtensions: map[string]any{
+			"_openai_variant": "responses",
+		},
+	}
+
+	events := []engine.StreamEvent{
+		{TextDelta: strPtr("Hello")},
+		{TextDelta: strPtr(" world")},
+		{ToolCallStart: &engine.ToolCallStart{Index: 0, ID: "call_1", Name: "get_weather"}},
+		{ToolCallDelta: &engine.ToolCallDelta{Index: 0, ArgumentsDelta: `{"city":"SF"}`}},
+		{ToolCallEnd: &engine.ToolCallEnd{Index: 0}},
+		{FinishReason: "stop"},
+	}
+
+	evtCh := make(chan engine.StreamEvent, len(events))
+	for _, e := range events {
+		evtCh <- e
+	}
+	close(evtCh)
+
+	sa := &StreamAdapter{}
+	var buf bytes.Buffer
+	if err := sa.SerializeStream(&buf, chat, evtCh); err != nil {
+		t.Fatalf("serialize: %v", err)
+	}
+
+	output := buf.String()
+	t.Logf("Responses API serialized:\n%s", output)
+
+	if !strings.Contains(output, `"type":"response.text.delta"`) {
+		t.Error("missing response.text.delta events")
+	}
+	if !strings.Contains(output, `"call_id":"call_1"`) {
+		t.Error("first function_call delta missing call_id")
+	}
+	if !strings.Contains(output, `"name":"get_weather"`) {
+		t.Error("first function_call delta missing name")
+	}
+	if !strings.Contains(output, `"type":"response.function_call.arguments.done"`) {
+		t.Error("missing response.function_call.arguments.done")
+	}
+	if !strings.Contains(output, `"type":"response.done"`) {
+		t.Error("missing response.done")
+	}
+	count := strings.Count(output, `response.function_call.arguments.delta`)
+	if count != 1 {
+		t.Errorf("expected exactly 1 function_call.arguments.delta event, got %d", count)
+	}
+}
+
+func TestStreamParse_ResponsesAPI(t *testing.T) {
+	sse := `data: {"type":"response.text.delta","delta":"Hello"}
+data: {"type":"response.text.delta","delta":" world"}
+data: {"type":"response.function_call.arguments.delta","call_id":"call_1","name":"get_weather","delta":"{\"city\":\"SF\"}"}
+data: {"type":"response.function_call.arguments.done"}
+data: {"type":"response.done"}
+`
+
+	sa := &StreamAdapter{}
+	ch := sa.ParseStream(io.NopCloser(bytes.NewReader([]byte(sse))))
+
+	events := make([]engine.StreamEvent, 0)
+	for evt := range ch {
+		events = append(events, evt)
+	}
+
+	if len(events) < 6 {
+		t.Fatalf("expected at least 6 events, got %d: %+v", len(events), events)
+	}
+
+	if events[0].TextDelta == nil || *events[0].TextDelta != "Hello" {
+		t.Errorf("event 0: expected TextDelta 'Hello', got %+v", events[0])
+	}
+	if events[1].TextDelta == nil || *events[1].TextDelta != " world" {
+		t.Errorf("event 1: expected TextDelta ' world', got %+v", events[1])
+	}
+
+	if events[2].ToolCallStart == nil {
+		t.Fatalf("event 2: expected ToolCallStart, got %+v", events[2])
+	}
+	tcs := events[2].ToolCallStart
+	if tcs.ID != "call_1" || tcs.Name != "get_weather" {
+		t.Errorf("ToolCallStart: got id=%s name=%s", tcs.ID, tcs.Name)
+	}
+
+	if events[3].ToolCallDelta == nil {
+		t.Fatalf("event 3: expected ToolCallDelta, got %+v", events[3])
+	}
+	if events[3].ToolCallDelta.ArgumentsDelta != `{"city":"SF"}` {
+		t.Errorf("ToolCallDelta: got %q", events[3].ToolCallDelta.ArgumentsDelta)
+	}
+
+	if events[4].ToolCallEnd == nil {
+		t.Fatalf("event 4: expected ToolCallEnd, got %+v", events[4])
+	}
+
+	if events[5].FinishReason != "stop" {
+		t.Errorf("event 5: expected FinishReason 'stop', got %q", events[5].FinishReason)
 	}
 }

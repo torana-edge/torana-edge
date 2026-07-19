@@ -184,7 +184,7 @@ func (s *StreamAdapter) ParseStream(body io.Reader) <-chan engine.StreamEvent {
 }
 
 // SerializeStream writes StreamEvents as Anthropic SSE to the writer.
-func (s *StreamAdapter) SerializeStream(w io.Writer, events <-chan engine.StreamEvent) error {
+func (s *StreamAdapter) SerializeStream(w io.Writer, chat *engine.ChatRequest, events <-chan engine.StreamEvent) error {
 	var thinkingIndex int
 	var inThinking bool
 	var inText bool
