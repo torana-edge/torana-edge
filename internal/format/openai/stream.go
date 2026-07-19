@@ -19,6 +19,10 @@ type StreamAdapter struct{}
 type sseChunk struct {
 	ID      string      `json:"id"`
 	Object  string      `json:"object"`
+	Type    string      `json:"type,omitempty"`
+	Delta   string      `json:"delta,omitempty"`
+	Name    string      `json:"name,omitempty"`
+	CallID  string      `json:"call_id,omitempty"`
 	Choices []sseChoice `json:"choices"`
 	Usage   *sseUsage   `json:"usage,omitempty"`
 	Error   *sseError   `json:"error,omitempty"`
@@ -122,6 +126,41 @@ func (s *StreamAdapter) parseStream(body io.Reader, ch chan<- engine.StreamEvent
 				},
 			}
 			return
+		}
+
+		// Handle Responses API events.
+		if chunk.Type != "" {
+			switch chunk.Type {
+			case "response.text.delta":
+				d := chunk.Delta
+				ch <- engine.StreamEvent{TextDelta: &d}
+			case "response.function_call.arguments.delta":
+				if chunk.Name != "" && !toolCallStarted[0] {
+					toolCallStarted[0] = true
+					ch <- engine.StreamEvent{
+						ToolCallStart: &engine.ToolCallStart{
+							Index: 0,
+							ID:    chunk.CallID,
+							Name:  chunk.Name,
+						},
+					}
+				}
+				ch <- engine.StreamEvent{
+					ToolCallDelta: &engine.ToolCallDelta{
+						Index:          0,
+						ArgumentsDelta: chunk.Delta,
+					},
+				}
+			case "response.function_call.arguments.done":
+				ch <- engine.StreamEvent{
+					ToolCallEnd: &engine.ToolCallEnd{Index: 0},
+				}
+			case "response.done":
+				ch <- engine.StreamEvent{
+					FinishReason: "stop",
+				}
+			}
+			continue
 		}
 
 		// Usage arrives on the final chunk (empty choices) when the client —
@@ -231,9 +270,16 @@ const streamID = "chatcmpl-torana"
 // [DONE] is emitted when the event channel closes, not with the finish chunk:
 // OpenAI sends the usage chunk AFTER the finish chunk, so terminating at
 // FinishReason would drop it.
-func (s *StreamAdapter) SerializeStream(w io.Writer, events <-chan engine.StreamEvent) error {
+func (s *StreamAdapter) SerializeStream(w io.Writer, chat *engine.ChatRequest, events <-chan engine.StreamEvent) error {
+	isResponsesAPI := false
+	if chat != nil && chat.ProviderExtensions != nil {
+		if variant, ok := chat.ProviderExtensions["_openai_variant"].(string); ok && variant == "responses" {
+			isResponsesAPI = true
+		}
+	}
+
 	for evt := range events {
-		line, err := serializeEvent(evt)
+		line, err := serializeEvent(evt, isResponsesAPI)
 		if err != nil {
 			return fmt.Errorf("openai serialize: %w", err)
 		}
@@ -250,24 +296,36 @@ func (s *StreamAdapter) SerializeStream(w io.Writer, events <-chan engine.Stream
 	return nil
 }
 
-func serializeEvent(evt engine.StreamEvent) (string, error) {
+func serializeEvent(evt engine.StreamEvent, isResponsesAPI bool) (string, error) {
 	switch {
 	case evt.TextDelta != nil:
+		if isResponsesAPI {
+			return textDeltaResponsesSSE(*evt.TextDelta), nil
+		}
 		return textDeltaSSE(*evt.TextDelta), nil
 
 	case evt.ThinkingDelta != nil:
 		return thinkingDeltaSSE(*evt.ThinkingDelta), nil
 
 	case evt.ToolCallStart != nil:
+		if isResponsesAPI {
+			return toolCallStartResponsesSSE(evt.ToolCallStart), nil
+		}
 		return toolCallStartSSE(evt.ToolCallStart), nil
 
 	case evt.ToolCallDelta != nil:
+		if isResponsesAPI {
+			return toolCallDeltaResponsesSSE(evt.ToolCallDelta), nil
+		}
 		return toolCallDeltaSSE(evt.ToolCallDelta), nil
 
 	// ToolCallEnd does not emit a standalone SSE chunk; we only emit on
 	// FinishReason (which must precede ToolCallEnd in the stream protocol).
 
 	case evt.FinishReason != "":
+		if isResponsesAPI {
+			return finishReasonResponsesSSE(evt.FinishReason), nil
+		}
 		return finishReasonSSE(evt.FinishReason), nil
 
 	case evt.Usage != nil:
@@ -407,6 +465,47 @@ func errorSSE(err *engine.StreamError) string {
 			"message": err.Message,
 			"type":    "stream_error",
 		},
+	}
+	b, _ := json.Marshal(chunk)
+	return fmt.Sprintf("data: %s\n\n", string(b))
+}
+
+// ---------------------------------------------------------------------------
+// Responses API SSE line builders
+// ---------------------------------------------------------------------------
+
+func textDeltaResponsesSSE(text string) string {
+	chunk := map[string]any{
+		"type":  "response.text.delta",
+		"delta": text,
+	}
+	b, _ := json.Marshal(chunk)
+	return fmt.Sprintf("data: %s\n\n", string(b))
+}
+
+func toolCallStartResponsesSSE(tc *engine.ToolCallStart) string {
+	chunk := map[string]any{
+		"type":    "response.function_call.arguments.delta", // wait, what about start? we just emit delta with call_id and name
+		"call_id": tc.ID,
+		"name":    tc.Name,
+		"delta":   "",
+	}
+	b, _ := json.Marshal(chunk)
+	return fmt.Sprintf("data: %s\n\n", string(b))
+}
+
+func toolCallDeltaResponsesSSE(tc *engine.ToolCallDelta) string {
+	chunk := map[string]any{
+		"type":  "response.function_call.arguments.delta",
+		"delta": tc.ArgumentsDelta,
+	}
+	b, _ := json.Marshal(chunk)
+	return fmt.Sprintf("data: %s\n\n", string(b))
+}
+
+func finishReasonResponsesSSE(reason string) string {
+	chunk := map[string]any{
+		"type": "response.done", // Or whatever the equivalent is
 	}
 	b, _ := json.Marshal(chunk)
 	return fmt.Sprintf("data: %s\n\n", string(b))

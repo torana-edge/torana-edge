@@ -251,7 +251,7 @@ func mapBedrockStopReason(reason string) string {
 
 // --- SerializeStream ---
 
-func (s *Stream) SerializeStream(w io.Writer, events <-chan engine.StreamEvent) error {
+func (s *Stream) SerializeStream(w io.Writer, chat *engine.ChatRequest, events <-chan engine.StreamEvent) error {
 	bw := bufio.NewWriter(w)
 	thinkingOpen := false
 
