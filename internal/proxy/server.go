@@ -626,12 +626,42 @@ func New(cfg Config) (*Server, error) {
 					events = out
 				}
 
+				// Pin the pipeline for the background goroutine's entire
+				// lifetime. The goroutine outlives this handler (it keeps
+				// running while ReverseProxy copies pr→client and then calls
+				// RunAfterResponse). RunAfterResponse does its own Acquire, but
+				// there's a window after the handler's deferred Release where
+				// the wg counter can hit 0 — letting a concurrent
+				// DrainAndClose().Wait() unblock and race Add(1) (data race +
+				// use of a closing runtime). An explicit Acquire/Release around
+				// the goroutine keeps the counter above 0 until it's fully done.
+				var streamPl *plugin.PluginPipeline
+				if pl := reqStateFrom(resp.Request.Context()).Pipeline; pl != nil {
+					pl.Acquire()
+					streamPl = pl
+				}
 				pr, pw := io.Pipe()
 				go func() {
-					defer pw.Close()
-					defer upstreamBody.Close()
-					if err := fmt.Stream.SerializeStream(pw, events); err != nil {
-						log.Printf("format %s serialize error: %v", fmt.Name, err)
+					if streamPl != nil {
+						defer streamPl.Release()
+					}
+					serErr := fmt.Stream.SerializeStream(pw, events)
+					pw.Close()
+					// On client disconnect the request context is cancelled, so
+					// the transport tears down the upstream connection and the
+					// provider stops generating (see TestClientDisconnectCancels
+					// Upstream). ReverseProxy also closes pr, ending
+					// SerializeStream early. Belt-and-suspenders: close the
+					// upstream body, then drain any events ParseStream still has
+					// queued so its goroutine can't be left blocked on an
+					// unconsumed send if it wins the race to produce one after
+					// SerializeStream returns. On normal completion both are
+					// no-ops (body at EOF, channel already closed).
+					upstreamBody.Close()
+					for range events { //nolint:revive // intentional drain
+					}
+					if serErr != nil {
+						log.Printf("format %s serialize error: %v", fmt.Name, serErr)
 					}
 					// Observational run_after_response for streaming
 					// responses (metrics/audit plugins). Mutations are not
