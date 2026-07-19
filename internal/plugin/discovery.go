@@ -126,7 +126,13 @@ func warnIfStale(dir, wasmPath, name string) {
 type PluginPipeline struct {
 	plugins []*loadedPlugin
 	runtime *wasm.Runtime
-	wg      sync.WaitGroup // active requests using this pipeline
+
+	mu        sync.Mutex
+	active    int
+	draining  bool
+	drained   chan struct{}
+	closed    chan struct{}
+	drainOnce sync.Once
 }
 
 type loadedPlugin struct {
@@ -193,11 +199,44 @@ func reloadPipeline(runtime *wasm.Runtime, config PluginConfig) (*PluginPipeline
 			log.Printf("[plugin] %s: run_after_response mutations are observational on streaming responses (metrics/audit OK; response rewrites are dropped mid-stream)", name)
 		}
 	}
-	return &PluginPipeline{plugins: loaded, runtime: runtime}, nil
+	return &PluginPipeline{
+		plugins: loaded,
+		runtime: runtime,
+		drained: make(chan struct{}),
+		closed:  make(chan struct{}),
+	}, nil
 }
 
-func (pp *PluginPipeline) Acquire() { pp.wg.Add(1) }
-func (pp *PluginPipeline) Release() { pp.wg.Done() }
+// TryAcquire pins a pipeline for a new HTTP request. Once draining begins it
+// rejects new work, preventing a request that observed the old atomic pointer
+// from acquiring a runtime after that runtime has been closed.
+func (pp *PluginPipeline) TryAcquire() bool {
+	pp.mu.Lock()
+	defer pp.mu.Unlock()
+	if pp.draining {
+		return false
+	}
+	pp.active++
+	return true
+}
+
+// Acquire/Release protect individual hook calls. A request that already owns
+// a pipeline may make nested hook calls while it is draining, so Acquire is
+// deliberately not gated by draining; new request admission uses TryAcquire.
+func (pp *PluginPipeline) Acquire() {
+	pp.mu.Lock()
+	pp.active++
+	pp.mu.Unlock()
+}
+
+func (pp *PluginPipeline) Release() {
+	pp.mu.Lock()
+	pp.active--
+	if pp.active == 0 && pp.draining {
+		close(pp.drained)
+	}
+	pp.mu.Unlock()
+}
 
 // Len returns the number of successfully loaded plugins.
 func (pp *PluginPipeline) Len() int { return len(pp.plugins) }
@@ -217,12 +256,26 @@ func (pp *PluginPipeline) HasGrant(perm string) bool {
 	return false
 }
 
-// DrainAndClose waits for active requests then closes the runtime.
+// DrainAndClose rejects future request admission, waits for active work, then
+// closes the runtime exactly once. It does not use WaitGroup because Add racing
+// with Wait at a zero count can close the runtime before a request is pinned.
 func (pp *PluginPipeline) DrainAndClose() {
-	pp.wg.Wait()
-	if err := pp.runtime.Close(); err != nil {
-		log.Printf("[plugin] close old runtime: %v", err)
-	}
+	pp.drainOnce.Do(func() {
+		pp.mu.Lock()
+		pp.draining = true
+		if pp.active == 0 {
+			close(pp.drained)
+		}
+		pp.mu.Unlock()
+		go func() {
+			<-pp.drained
+			if err := pp.runtime.Close(); err != nil {
+				log.Printf("[plugin] close old runtime: %v", err)
+			}
+			close(pp.closed)
+		}()
+	})
+	<-pp.closed
 }
 
 // RunOnChatRequest calls every plugin that implements run_before_request.
@@ -401,7 +454,7 @@ func hookNames(hooks []Hook) []string {
 // per-plugin config) take effect without restarting the watcher. runtimeFn
 // builds each reload's runtime — the caller wires host callbacks (offload,
 // savings) there; a bare runtime would silently lose them.
-func WatchPlugins(ctx context.Context, dir string, configFn func() PluginConfig, runtimeFn func() *wasm.Runtime, reloadFn func(pipeline *PluginPipeline)) error {
+func WatchPlugins(ctx context.Context, dir string, configFn func() PluginConfig, runtimeFn func() *wasm.Runtime, reloadFn func(pipeline *PluginPipeline), done func()) error {
 	if dir == "" {
 		dir = "./plugins"
 	}
@@ -424,15 +477,43 @@ func WatchPlugins(ctx context.Context, dir string, configFn func() PluginConfig,
 
 	go func() {
 		defer w.Close()
+		if done != nil {
+			defer done()
+		}
 
-		// Debounce: batch rapid changes.
+		// Debounce in this goroutine rather than time.AfterFunc. This serializes
+		// reloads: an older, slow reload can never overwrite a newer one.
 		var debounceTimer *time.Timer
+		var debounceC <-chan time.Time
 		const debounce = 500 * time.Millisecond
 
 		for {
 			select {
 			case <-ctx.Done():
+				if debounceTimer != nil {
+					debounceTimer.Stop()
+				}
 				return
+
+			case <-debounceC:
+				debounceTimer = nil
+				debounceC = nil
+				if ctx.Err() != nil {
+					return
+				}
+				newRT := runtimeFn()
+				pp, err := reloadPipeline(newRT, configFn())
+				if err != nil {
+					log.Printf("[plugin] reload failed: %v", err)
+					newRT.Close()
+					continue
+				}
+				if ctx.Err() != nil {
+					newRT.Close()
+					return
+				}
+				log.Printf("[plugin] hot-reload complete: %d plugins", len(pp.plugins))
+				reloadFn(pp)
 
 			case event, ok := <-w.Events:
 				if !ok {
@@ -456,21 +537,18 @@ func WatchPlugins(ctx context.Context, dir string, configFn func() PluginConfig,
 					continue
 				}
 
-				if debounceTimer != nil {
-					debounceTimer.Stop()
-				}
-				debounceTimer = time.AfterFunc(debounce, func() {
-					log.Printf("[plugin] file change detected: %s — reloading", event.Name)
-					newRT := runtimeFn()
-					pp, err := reloadPipeline(newRT, configFn())
-					if err != nil {
-						log.Printf("[plugin] reload failed: %v", err)
-						newRT.Close()
-						return
+				if debounceTimer == nil {
+					debounceTimer = time.NewTimer(debounce)
+					debounceC = debounceTimer.C
+				} else {
+					if !debounceTimer.Stop() {
+						select {
+						case <-debounceTimer.C:
+						default:
+						}
 					}
-					log.Printf("[plugin] hot-reload complete: %d plugins", len(pp.plugins))
-					reloadFn(pp)
-				})
+					debounceTimer.Reset(debounce)
+				}
 
 			case err, ok := <-w.Errors:
 				if !ok {

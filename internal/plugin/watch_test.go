@@ -116,7 +116,7 @@ func TestWatchPlugins_FiresReloadAndExitsOnCancel(t *testing.T) {
 	watchDone := make(chan struct{})
 	go func() {
 		defer close(watchDone)
-		if err := WatchPlugins(ctx, dir, configFn, runtimeFn, func(pp *PluginPipeline) { reloads <- pp }); err != nil {
+		if err := WatchPlugins(ctx, dir, configFn, runtimeFn, func(pp *PluginPipeline) { reloads <- pp }, nil); err != nil {
 			t.Errorf("WatchPlugins: %v", err)
 		}
 	}()
