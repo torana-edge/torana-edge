@@ -628,10 +628,23 @@ func New(cfg Config) (*Server, error) {
 
 				pr, pw := io.Pipe()
 				go func() {
-					defer pw.Close()
-					defer upstreamBody.Close()
-					if err := fmt.Stream.SerializeStream(pw, events); err != nil {
-						log.Printf("format %s serialize error: %v", fmt.Name, err)
+					serErr := fmt.Stream.SerializeStream(pw, events)
+					pw.Close()
+					// On client disconnect the request context is cancelled, so
+					// the transport tears down the upstream connection and the
+					// provider stops generating (see TestClientDisconnectCancels
+					// Upstream). ReverseProxy also closes pr, ending
+					// SerializeStream early. Belt-and-suspenders: close the
+					// upstream body, then drain any events ParseStream still has
+					// queued so its goroutine can't be left blocked on an
+					// unconsumed send if it wins the race to produce one after
+					// SerializeStream returns. On normal completion both are
+					// no-ops (body at EOF, channel already closed).
+					upstreamBody.Close()
+					for range events { //nolint:revive // intentional drain
+					}
+					if serErr != nil {
+						log.Printf("format %s serialize error: %v", fmt.Name, serErr)
 					}
 					// Observational run_after_response for streaming
 					// responses (metrics/audit plugins). Mutations are not
