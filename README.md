@@ -140,6 +140,19 @@ torana-edge/
 | `TORANA_PORT` | `8080` | Listen port (overrides config file) |
 | `TORANA_DEFAULT_PROVIDER` | (none) | Provider name for non-prefixed paths |
 
+## Development
+
+Before raising pull requests, developers and AI agents must ensure that all code complies with style guides, compiles, and passes all tests:
+
+```bash
+# Run local lint checks (golangci-lint)
+make lint
+
+# Run all unit and integration tests
+make test
+```
+
 ## License
 
 Apache 2.0
+
