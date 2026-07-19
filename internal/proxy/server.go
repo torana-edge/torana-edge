@@ -80,6 +80,7 @@ type Server struct {
 	rateLimiter *RateLimiter
 	// watchCancel stops the plugin hot-reload watcher on Shutdown.
 	watchCancel context.CancelFunc
+	watchDone   <-chan struct{}
 }
 
 type routeContextKey struct{}
@@ -281,12 +282,17 @@ func New(cfg Config) (*Server, error) {
 				p := s.GetConfig().Providers.Plugins
 				return plugin.PluginConfig{Dir: p.Dir, Order: p.Order, Config: p.Config}
 			}
-			go plugin.WatchPlugins(watchCtx, cfg.Providers.Plugins.Dir, configFn, newRuntime, func(newPP *plugin.PluginPipeline) {
+			watchDone := make(chan struct{})
+			s.watchDone = watchDone
+			if err := plugin.WatchPlugins(watchCtx, cfg.Providers.Plugins.Dir, configFn, newRuntime, func(newPP *plugin.PluginPipeline) {
 				old := s.pluginPipeline.Swap(newPP)
 				if old != nil {
 					go old.(*plugin.PluginPipeline).DrainAndClose()
 				}
-			})
+			}, func() { close(watchDone) }); err != nil {
+				log.Printf("plugin watcher: %v", err)
+				close(watchDone)
+			}
 		}
 	}
 
@@ -797,8 +803,10 @@ func New(cfg Config) (*Server, error) {
 			Start:      time.Now(),
 		}
 		if pp := s.pluginPipeline.Load(); pp != nil {
-			rs.Pipeline = pp.(*plugin.PluginPipeline)
-			rs.Pipeline.Acquire()
+			candidate := pp.(*plugin.PluginPipeline)
+			if candidate.TryAcquire() {
+				rs.Pipeline = candidate
+			}
 		}
 		r = r.WithContext(context.WithValue(r.Context(), reqStateKey{}, rs))
 		// Drop request-scoped plugin state when the request completes,
@@ -912,15 +920,22 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	if s.watchCancel != nil {
 		s.watchCancel()
 	}
-	s.rateLimiter.Close()
+	if s.watchDone != nil {
+		<-s.watchDone
+	}
+	// Stop accepting new requests and let HTTP cancellation unblock streams
+	// before waiting for their pinned plugin pipeline.
+	if s.httpServer != nil {
+		if err := s.httpServer.Shutdown(ctx); err != nil {
+			return err
+		}
+	}
 	if pp := s.pluginPipeline.Load(); pp != nil {
 		pp.(*plugin.PluginPipeline).DrainAndClose()
 	}
+	s.rateLimiter.Close()
 	if s.sharedCache != nil {
 		s.sharedCache.Close()
-	}
-	if s.httpServer != nil {
-		return s.httpServer.Shutdown(ctx)
 	}
 	return nil
 }

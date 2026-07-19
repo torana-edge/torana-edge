@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/torana-edge/torana-edge/internal/engine"
 	"github.com/torana-edge/torana-edge/internal/wasm"
@@ -68,6 +69,54 @@ func TestDiscoverPlugins_EmptyDir(t *testing.T) {
 	if len(bundles) != 0 {
 		t.Errorf("expected 0 bundles in empty dir, got %d", len(bundles))
 	}
+}
+
+func TestPipelineDrainRejectsNewRequestsUntilPinnedWorkFinishes(t *testing.T) {
+	rt := wasm.NewRuntime(context.Background())
+	pp, err := NewPipeline(rt, PluginConfig{Dir: t.TempDir()})
+	if err != nil {
+		t.Fatalf("NewPipeline: %v", err)
+	}
+	if !pp.TryAcquire() {
+		t.Fatal("initial request was not admitted")
+	}
+
+	drained := make(chan struct{})
+	go func() {
+		pp.DrainAndClose()
+		close(drained)
+	}()
+
+	deadline := time.After(time.Second)
+	for !isDraining(pp) {
+		select {
+		case <-deadline:
+			t.Fatal("pipeline never entered draining state")
+		default:
+			time.Sleep(time.Millisecond)
+		}
+	}
+	if pp.TryAcquire() {
+		t.Fatal("draining pipeline admitted a new request")
+	}
+	select {
+	case <-drained:
+		t.Fatal("pipeline closed while a request was pinned")
+	default:
+	}
+
+	pp.Release()
+	select {
+	case <-drained:
+	case <-time.After(time.Second):
+		t.Fatal("pipeline did not close after pinned work finished")
+	}
+}
+
+func isDraining(pp *PluginPipeline) bool {
+	pp.mu.Lock()
+	defer pp.mu.Unlock()
+	return pp.draining
 }
 
 func TestDiscoverPlugins_ValidPlugin(t *testing.T) {
