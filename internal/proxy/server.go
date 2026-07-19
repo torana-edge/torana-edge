@@ -895,6 +895,7 @@ func (s *Server) SetProviders(cfg provider.Config) {
 	s.configMu.Lock()
 	s.config.Providers = cfg
 	s.configMu.Unlock()
+	s.rateLimiter.Update(cfg.Limits.RPM, cfg.Limits.Concurrency)
 	log.Printf("config hot-reload: %d providers loaded", len(cfg.Providers))
 }
 

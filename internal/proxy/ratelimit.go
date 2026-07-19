@@ -36,10 +36,35 @@ func NewRateLimiter(rpm, maxConn int) *RateLimiter {
 		maxConn:     maxConn,
 		stopJanitor: make(chan struct{}),
 	}
-	if rpm > 0 || maxConn > 0 {
-		go rl.janitor()
-	}
+	// Start the janitor even while limits are disabled: limits may be enabled
+	// later by a config reload.
+	go rl.janitor()
 	return rl
+}
+
+// Update replaces the live limits without dropping in-flight concurrency
+// accounting. Existing buckets retain their active count; their token balance
+// is clamped to the new bucket capacity.
+func (rl *RateLimiter) Update(rpm, maxConn int) {
+	if rl == nil {
+		return
+	}
+	rl.mu.Lock()
+	rl.rpm = rpm
+	rl.maxConn = maxConn
+	now := time.Now()
+	for _, l := range rl.limits {
+		l.mu.Lock()
+		if rpm == 0 {
+			l.tokens = 0
+		} else if l.tokens > float64(rpm) {
+			l.tokens = float64(rpm)
+		}
+		l.lastRefill = now
+		l.lastSeen = now
+		l.mu.Unlock()
+	}
+	rl.mu.Unlock()
 }
 
 // Close stops the background janitor. Safe to call multiple times.
@@ -82,10 +107,9 @@ func hashIdentity(identity string) string {
 	return hex.EncodeToString(sum[:16])
 }
 
-func (rl *RateLimiter) getLimiter(identity string) *Limiter {
-	key := hashIdentity(identity)
-	rl.mu.Lock()
-	defer rl.mu.Unlock()
+
+
+func (rl *RateLimiter) getLimiterLocked(key string, rpm int) *Limiter {
 	if l, exists := rl.limits[key]; exists {
 		return l
 	}
@@ -102,28 +126,31 @@ func (rl *RateLimiter) Acquire(identity string) bool {
 	if rl == nil {
 		return true
 	}
-	if rl.rpm <= 0 && rl.maxConn <= 0 {
+	rl.mu.Lock()
+	rpm, maxConn := rl.rpm, rl.maxConn
+	if rpm <= 0 && maxConn <= 0 {
+		rl.mu.Unlock()
 		return true // limits disabled
 	}
-
-	l := rl.getLimiter(identity)
+	l := rl.getLimiterLocked(hashIdentity(identity), rpm)
+	rl.mu.Unlock()
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.lastSeen = time.Now()
 
 	// Concurrency check
-	if rl.maxConn > 0 && l.active >= rl.maxConn {
+	if maxConn > 0 && l.active >= maxConn {
 		return false
 	}
 
 	// RPM check
-	if rl.rpm > 0 {
+	if rpm > 0 {
 		now := time.Now()
 		elapsed := now.Sub(l.lastRefill).Seconds()
-		rate := float64(rl.rpm) / 60.0
+		rate := float64(rpm) / 60.0
 		l.tokens += elapsed * rate
-		if l.tokens > float64(rl.rpm) {
-			l.tokens = float64(rl.rpm)
+		if l.tokens > float64(rpm) {
+			l.tokens = float64(rpm)
 		}
 		l.lastRefill = now
 
@@ -141,11 +168,11 @@ func (rl *RateLimiter) Release(identity string) {
 	if rl == nil {
 		return
 	}
-	if rl.rpm <= 0 && rl.maxConn <= 0 {
-		return
-	}
-
-	l := rl.getLimiter(identity)
+	// Always release a bucket, including after a live change disables limits:
+	// an in-flight request may still be represented by its active count.
+	rl.mu.Lock()
+	l := rl.getLimiterLocked(hashIdentity(identity), rl.rpm)
+	rl.mu.Unlock()
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.lastSeen = time.Now()
