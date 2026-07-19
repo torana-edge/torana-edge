@@ -114,3 +114,39 @@ func TestObserverSeesErrorResponses(t *testing.T) {
 		t.Fatalf("error status never reached the plugin (second request untagged): %s", bodies[1])
 	}
 }
+
+// TestObserverStreamingMutationIsObservational pins the #141 semantics: on a
+// STREAMING response, run_after_response mutations are observational — the
+// stream has already been written, so the plugin's content rewrite must NOT
+// appear in what the client receives. (Contrast TestObserverSeesResponseSignal,
+// where the identical plugin's rewrite IS applied on the non-streaming path.)
+func TestObserverStreamingMutationIsObservational(t *testing.T) {
+	post := observerEnv(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fl, _ := w.(http.Flusher)
+		for _, frame := range []string{
+			`{"choices":[{"index":0,"delta":{"role":"assistant","content":"hi"}}]}`,
+			`{"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`,
+			`[DONE]`,
+		} {
+			io.WriteString(w, "data: "+frame+"\n\n")
+			if fl != nil {
+				fl.Flush()
+			}
+		}
+	})
+
+	status, body := post(`{"model":"gpt-x","stream":true,"messages":[{"role":"user","content":"hello"}]}`)
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", status, body)
+	}
+	// The observer rewrites assistant content to "observed status=..." on the
+	// JSON path. On the streaming path that mutation is dropped, so the client
+	// gets the original content and never the observed-status string.
+	if strings.Contains(string(body), "observed status=") {
+		t.Fatalf("#141: run_after_response mutation leaked into the streamed response (should be observational): %s", body)
+	}
+	if !strings.Contains(string(body), `"content":"hi"`) {
+		t.Fatalf("original streamed content missing; body=%s", body)
+	}
+}

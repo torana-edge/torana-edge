@@ -97,7 +97,27 @@ sdk.OnStreamChunk(func(ctx context.Context, chunk *pb.StreamEvent) (*pb.StreamEv
   (with a TTL). Use for cross-request handoff, e.g. the compactor caches
   intents by `tool_call_id` that the keyword_compactor reads next turn.
 
-## 4. Wazero Engine Configuration
+## 4. Response Hooks: `run_after_response` semantics differ by path
+
+`run_after_response` fires on **both** response paths, but with **asymmetric**
+mutation semantics — know which one you're on before relying on it:
+
+| Response path | Mutations (assistant content, tool-call name/args) |
+|---|---|
+| Non-streaming JSON | **Applied** — written back into the response body before the client sees it (`internal/proxy/jsonresponse.go`). |
+| Streaming SSE | **Observational only** — the hook runs *after* the stream has already been serialized to the client, so any mutation is discarded (`internal/proxy/server.go`). |
+
+**Why:** buffering an entire SSE stream to allow post-hoc rewrites would defeat
+streaming latency, so the streaming path invokes the hook purely for observation.
+This is the right channel for **metrics / audit / usage** plugins (e.g. `otel`),
+which only read the `_response` signal (latency, upstream status, token usage).
+
+**If your plugin needs to *rewrite* the final response**, do it on the streaming
+path via `run_on_stream_chunk` (mutate events as they flow — see §3), not
+`run_after_response`. Torana logs a heads-up at load time for any plugin that
+declares `run_after_response`, reminding you the streaming mutations are dropped.
+
+## 5. Wazero Engine Configuration
 
 When setting up the host engine (in `internal/wasm/runtime.go`), note that any module performing timing operations (like garbage collection in standard Go) expects a system clock via WASI.
 
