@@ -12,10 +12,11 @@
   },
   "plugins": {
     "dir": "./plugins",
-    "order": ["schema_translator", "keyword_compactor", "compactor"]
+    "_comment": "Safe coding-agent baseline: intent instrumentation stays enabled, but lossy compactors are disabled until issue #166 protects fresh/exact file reads. For research-only sessions, append ONE compactor after intent: keyword_compactor or compactor, never both.",
+    "order": ["schema_translator", "intent"]
   },
   "offload": {
-    "enabled": true,
+    "enabled": false,
     "provider": "deepseek",
     "model": "deepseek-v4-flash"
   },

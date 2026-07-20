@@ -19,7 +19,7 @@ CLI (`agy`)** — Torana also offers an optional TLS-terminating MITM ingress. S
 ## Key Features
 
 - **WASM Plugin Ecosystem:** Write plugins in Go (or any WASI-compatible language), compile to `.wasm`, and drop them into the `plugins/` directory. No proxy restarts needed.
-- **Model Delegation (The Compactor):** Automatically intercepts heavy tool outputs and summarizes them via a cheaper model before they hit the expensive upstream, saving tokens and money.
+- **Model Delegation (The Compactor):** Can summarize selected historical tool outputs via a cheaper model before they hit the expensive upstream, saving tokens and money. Lossy compaction is currently opt-in and should not be used for coding-agent file reads; see [Compaction safety](#compaction-safety).
 - **Prompt Cache Optimization:** Deterministic payload normalization ensures upstream provider prompt caches are never busted across turns.
 - **Provider Failover:** Automatic retry with fallback providers on 429/5xx errors.
 - **Unified IR:** Format adapters translate OpenAI, Anthropic, Bedrock, and Gemini wire formats into a single canonical IR. Plugins work on the IR and never touch raw JSON.
@@ -44,7 +44,7 @@ CLI (`agy`)** — Torana also offers an optional TLS-terminating MITM ingress. S
 
 3. Run the proxy:
    ```bash
-   go run ./cmd/torana
+   TORANA_BIND=127.0.0.1 go run ./cmd/torana
    ```
 
 4. Point your AI harness at Torana:
@@ -89,7 +89,24 @@ request envelope and SSE framing (see [docs/GEMINI_ANTIGRAVITY.md](docs/GEMINI_A
 > compactors are pure consumers of the intent cache. `keyword_compactor` and
 > `compactor` are **alternatives** (deterministic/local vs. cheap-model offload),
 > not a pipeline: run **one**, not both, or whichever comes first starves the other.
-> Recommended order: `["schema_translator", "intent", "keyword_compactor"]`.
+> Recommended research/log-analysis order:
+> `["schema_translator", "intent", "keyword_compactor"]`. For coding agents
+> that edit files, use the safe baseline below.
+
+### Compaction safety
+
+Both compactors are lossy. They currently consider every tool result over 2,000
+characters, including a fresh result that the model has not seen yet. Summarizing
+or extracting lines from `Read`, `View`, or similar source-reading tools can
+remove the exact text a coding agent needs for search-and-replace edits.
+
+For coding-agent sessions that may edit files, use the safe baseline
+`["schema_translator", "intent"]` until
+[#166](https://github.com/torana-edge/torana-edge/issues/166) lands. Enable one
+compactor only for workloads where lossy tool-output reduction is acceptable,
+such as research or log analysis. The intended fix is tool-aware and
+recency-aware: never compact newly returned results, preserve recent tool uses,
+and allow exact-output tools to opt out.
 
 ## Project Structure
 
@@ -139,6 +156,7 @@ torana-edge/
 | `TORANA_CONFIG` | `config.json` | Path to config file |
 | `TORANA_PORT` | `8080` | Listen port (overrides config file) |
 | `TORANA_DEFAULT_PROVIDER` | (none) | Provider name for non-prefixed paths |
+| `TORANA_BIND` | all interfaces | Bind host; use `127.0.0.1` locally because Torana forwards caller credentials |
 
 ## Development
 
@@ -155,4 +173,3 @@ make test
 ## License
 
 Apache 2.0
-
