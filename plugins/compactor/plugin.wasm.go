@@ -68,8 +68,23 @@ func init() {
 func compactToolResults(ctx context.Context, req *pb.ChatRequest) bool {
 	loadConfig()
 	modified := false
-	for _, msg := range req.Messages {
+
+	// Protect fresh tool results (Issue #166)
+	lastAssistantIdx := -1
+	for i := len(req.Messages) - 1; i >= 0; i-- {
+		if req.Messages[i].Role == "assistant" {
+			lastAssistantIdx = i
+			break
+		}
+	}
+
+	for i, msg := range req.Messages {
 		if msg.Role != "tool" || msg.ToolCallId == "" || len(msg.Content) < minOffloadChars {
+			continue
+		}
+
+		// Protect fresh unconsumed results.
+		if i > lastAssistantIdx {
 			continue
 		}
 
