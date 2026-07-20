@@ -9,6 +9,8 @@ import (
 	"net/http"
 	"os"
 	"time"
+
+	"github.com/torana-edge/torana-edge/internal/economics"
 )
 
 // offloadTimeout bounds a single cheap-model summarization call.
@@ -24,6 +26,13 @@ const offloadTimeout = 30 * time.Second
 // own request credential (carried host-side in reqState; never exposed to
 // plugins).
 func (s *Server) offloadCompletion(ctx context.Context, payloadJSON string) (string, error) {
+	result, err := s.offloadCompletionResult(ctx, payloadJSON)
+	return result.Completion, err
+}
+
+// offloadCompletionResult is the usage-aware form used by the WASM host. The
+// string-returning wrapper above preserves the existing internal API.
+func (s *Server) offloadCompletionResult(ctx context.Context, payloadJSON string) (economics.OffloadResult, error) {
 	var p struct {
 		SystemPrompt string `json:"system_prompt"`
 		UserPrompt   string `json:"user_prompt"`
@@ -37,14 +46,14 @@ func (s *Server) offloadCompletion(ctx context.Context, payloadJSON string) (str
 		APIKeyEnv string `json:"api_key_env"`
 	}
 	if err := json.Unmarshal([]byte(payloadJSON), &p); err != nil {
-		return "", fmt.Errorf("offload: parse payload: %w", err)
+		return economics.OffloadResult{}, fmt.Errorf("offload: parse payload: %w", err)
 	}
 
 	cfg := s.GetConfig().Providers
 	off := cfg.Offload
 	overrideProvider := p.Provider != ""
 	if !off.Enabled && !overrideProvider {
-		return "", fmt.Errorf("offload not configured — set offload.enabled, offload.provider, offload.model")
+		return economics.OffloadResult{}, fmt.Errorf("offload not configured — set offload.enabled, offload.provider, offload.model")
 	}
 
 	// Provider precedence: plugin payload overrides the configured offload provider.
@@ -55,7 +64,7 @@ func (s *Server) offloadCompletion(ctx context.Context, payloadJSON string) (str
 	prov, ok := cfg.Providers[provName]
 	if !ok {
 		// The default is validated at startup; an override names an arbitrary provider.
-		return "", fmt.Errorf("offload: provider %q not found", provName)
+		return economics.OffloadResult{}, fmt.Errorf("offload: provider %q not found", provName)
 	}
 
 	// Model precedence: plugin payload overrides config. off.Model belongs to
@@ -63,7 +72,7 @@ func (s *Server) offloadCompletion(ctx context.Context, payloadJSON string) (str
 	model := p.Model
 	if model == "" {
 		if overrideProvider {
-			return "", fmt.Errorf("offload: model required when provider is overridden")
+			return economics.OffloadResult{}, fmt.Errorf("offload: model required when provider is overridden")
 		}
 		model = off.Model
 	}
@@ -102,7 +111,7 @@ func (s *Server) offloadCompletion(ctx context.Context, payloadJSON string) (str
 	})
 	httpReq, err := http.NewRequestWithContext(ctx, "POST", prov.URL+"/v1/chat/completions", bytes.NewReader(reqBody))
 	if err != nil {
-		return "", err
+		return economics.OffloadResult{}, err
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 	if apiKey != "" {
@@ -112,15 +121,15 @@ func (s *Server) offloadCompletion(ctx context.Context, payloadJSON string) (str
 	client := &http.Client{Timeout: offloadTimeout}
 	resp, err := client.Do(httpReq)
 	if err != nil {
-		return "", err
+		return economics.OffloadResult{}, err
 	}
 	defer resp.Body.Close()
 	respBytes, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return "", err
+		return economics.OffloadResult{}, err
 	}
 	if resp.StatusCode != 200 {
-		return "", fmt.Errorf("offload: upstream returned %d: %s", resp.StatusCode, string(respBytes[:min(len(respBytes), 200)]))
+		return economics.OffloadResult{}, fmt.Errorf("offload: upstream returned %d: %s", resp.StatusCode, string(respBytes[:min(len(respBytes), 200)]))
 	}
 	var result struct {
 		Choices []struct {
@@ -129,18 +138,39 @@ func (s *Server) offloadCompletion(ctx context.Context, payloadJSON string) (str
 				Content string `json:"content"`
 			} `json:"message"`
 		} `json:"choices"`
+		Usage *struct {
+			PromptTokens     int64 `json:"prompt_tokens"`
+			CompletionTokens int64 `json:"completion_tokens"`
+			PromptDetails    struct {
+				CachedTokens     int64 `json:"cached_tokens"`
+				CacheWriteTokens int64 `json:"cache_write_tokens"`
+			} `json:"prompt_tokens_details"`
+		} `json:"usage"`
 	}
 	if err := json.Unmarshal(respBytes, &result); err != nil {
-		return "", fmt.Errorf("offload: parse response: %w", err)
+		return economics.OffloadResult{}, fmt.Errorf("offload: parse response: %w", err)
 	}
 	if len(result.Choices) == 0 {
-		return "", fmt.Errorf("offload: no choices in response")
+		return economics.OffloadResult{}, fmt.Errorf("offload: no choices in response")
 	}
 	if result.Choices[0].Message.Content == "" {
 		// Surface finish_reason so budget exhaustion (reasoning consumed the
 		// whole max_tokens → finish_reason "length") is distinguishable from a
 		// genuinely empty extraction in the logs/stats.
-		return "", fmt.Errorf("offload: empty response (finish_reason=%q)", result.Choices[0].FinishReason)
+		return economics.OffloadResult{}, fmt.Errorf("offload: empty response (finish_reason=%q)", result.Choices[0].FinishReason)
 	}
-	return result.Choices[0].Message.Content, nil
+	usage := economics.Usage{InputIncludesCacheRead: true}
+	if result.Usage != nil {
+		usage.Reported = true
+		usage.InputTokens = result.Usage.PromptTokens
+		usage.OutputTokens = result.Usage.CompletionTokens
+		usage.CacheReadTokens = result.Usage.PromptDetails.CachedTokens
+		usage.CacheWriteTokens = result.Usage.PromptDetails.CacheWriteTokens
+	}
+	return economics.OffloadResult{
+		Completion: result.Choices[0].Message.Content,
+		Provider:   provName,
+		Model:      model,
+		Usage:      usage,
+	}, nil
 }

@@ -7,7 +7,11 @@
     },
     "openai": {
       "url": "https://api.openai.com",
-      "format": "openai"
+      "format": "openai",
+      "responses_compaction": {
+        "_comment": "Optional OpenAI-native compaction for the Responses API only. Torana adds context_management when the caller did not provide it. Omit this block to disable; Chat Completions requests are never changed.",
+        "compact_threshold": 100000
+      }
     },
     "anthropic": {
       "url": "https://api.anthropic.com",
@@ -45,16 +49,22 @@
   },
   "plugins": {
     "dir": "./plugins",
-    "_comment": "Order matters: schema_translator first (translate requests, reverse responses), then 'intent' (captures WHY each tool call is made into the shared cache), then ONE compactor. keyword_compactor (deterministic, local, free) and compactor (cheap-model offload, higher quality) are alternatives, not a pipeline — running both lets whichever is first starve the other. Both require 'intent' before them.",
-    "order": ["schema_translator", "intent", "compactor"],
+    "_comment": "Safe coding-agent baseline: schema_translator plus intent. To compact tool results, append ONE compactor after intent and configure explicit ordered tool_policies; unmatched tools remain exact. See docs/COMPACTION.md.",
+    "order": ["schema_translator", "intent"],
     "config": {
       "intent": {
         "_comment": "fill controls what the intent plugin does with a HISTORY tool call whose intent was never captured (the model organically omitted 'i'): 'heuristic' (default) fills it with a template derived from the call's arguments and the current task — required to keep multi-turn 'i' emission alive, since one 'i'-less call in history becomes a per-tool precedent the model imitates; 'off' leaves history untouched (only sensible for models that reliably honor required schema fields). Filled values are never cached and never drive compaction; watch torana_intent_filled_total to see how often a model needs propping up.",
         "fill": "heuristic"
       },
       "compactor": {
-        "_comment": "max_offload_input_chars caps how much of a tool output is sent to the cheap summarizer. Omit or set 0 to send the COMPLETE tool output (default, unbounded). Set a positive value only if you want to bound offload cost/latency for very large outputs — it keeps the head+tail and drops the middle, which can discard relevant content.",
-        "max_offload_input_chars": 0
+        "_comment": "Dormant until compactor is added to order. Source reads stay exact for three later assistant messages. Deterministic first_pass is only for explicitly recoverable outputs. Model mode also requires expected_applications, target/offload pricing, and positive estimated net savings.",
+        "max_offload_input_chars": 0,
+        "expected_applications": 6,
+        "tool_policies": [
+          {"match": "read*", "mode": "source", "rerun": "Read the file again to recover exact current contents."},
+          {"match": "view*", "mode": "source", "rerun": "View the file again to recover exact current contents."},
+          {"match": "web_search", "mode": "deterministic", "first_pass": true, "rerun": "Repeat the search to recover every result."}
+        ]
       },
       "pii": {
         "_comment": "PII detection. Scans tool results and BLOCKS the request (returns a provider-shaped error naming the PII type + line, never the value) if PII is found. 'provider' names a provider above used for the model-based scan — it MUST be a local/trusted endpoint because it receives raw tool output including any PII (e.g. 'local-slm'). A deterministic regex pre-filter (email, SSN, AWS key, private key) runs first and works even without a model. 'tools' is a tool-name allowlist (empty or [\"*\"] = all tool results). 'on_error' = \"block\" (fail-closed, default) or \"allow\" (fail-open). To enable, add \"pii\" to the order array above.",
@@ -74,9 +84,11 @@
     "api_key_env": ""
   },
   "cache": {
-    "_comment": "Cross-request plugin state (compacted tool results, PII verdicts, intents). 'backend' is \"memory\" (default, per-process, lost on restart) or \"redis\" (survives restarts, shared across proxy instances in a distributed deployment). 'ttl_seconds' defaults to 900. For redis, 'password_env' names an env var holding the password — never put the password in this file; 'prefix' namespaces keys so one Redis can serve several deployments.",
+    "_comment": "Cross-request plugin state. The memory backend is TTL+LRU bounded; max_entries defaults to 10000 and max_bytes to 64 MiB. Redis deployments should configure server-side eviction. 'password_env' names the password environment variable — never put the password here.",
     "backend": "memory",
     "ttl_seconds": 900,
+    "max_entries": 10000,
+    "max_bytes": 67108864,
     "redis": {
       "addr": "127.0.0.1:6379",
       "password_env": "",

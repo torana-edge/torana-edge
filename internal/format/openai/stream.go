@@ -40,8 +40,22 @@ type responsesItem struct {
 }
 
 type responsesObject struct {
-	Status string    `json:"status,omitempty"`
-	Usage  *sseUsage `json:"usage,omitempty"`
+	Status string          `json:"status,omitempty"`
+	Usage  *responsesUsage `json:"usage,omitempty"`
+}
+
+// responsesUsage is deliberately separate from Chat Completions usage: the
+// Responses API calls these fields input/output tokens and nests prompt-cache
+// details under input_tokens_details.
+type responsesUsage struct {
+	InputTokens        int                          `json:"input_tokens"`
+	OutputTokens       int                          `json:"output_tokens"`
+	InputTokensDetails *responsesInputTokensDetails `json:"input_tokens_details,omitempty"`
+}
+
+type responsesInputTokensDetails struct {
+	CachedTokens     int `json:"cached_tokens"`
+	CacheWriteTokens int `json:"cache_write_tokens"`
 }
 
 type sseUsage struct {
@@ -315,11 +329,16 @@ func (s *StreamAdapter) parseResponsesEvent(chunk sseChunk, ch chan<- engine.Str
 				}
 			}
 			if chunk.Response.Usage != nil {
+				u := &engine.StreamUsage{
+					InputTokens:  chunk.Response.Usage.InputTokens,
+					OutputTokens: chunk.Response.Usage.OutputTokens,
+				}
+				if details := chunk.Response.Usage.InputTokensDetails; details != nil {
+					u.CacheReadTokens = details.CachedTokens
+					u.CacheWriteTokens = details.CacheWriteTokens
+				}
 				ch <- engine.StreamEvent{
-					Usage: &engine.StreamUsage{
-						InputTokens:  chunk.Response.Usage.PromptTokens,
-						OutputTokens: chunk.Response.Usage.CompletionTokens,
-					},
+					Usage: u,
 				}
 			}
 		}

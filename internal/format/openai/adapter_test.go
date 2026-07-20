@@ -395,7 +395,7 @@ func TestRoundTrip_ResponsesAPI(t *testing.T) {
 		`data: {"type": "response.function_call_arguments.delta", "item_id": "item_123", "delta": "{\""}` + "\n" +
 		`data: {"type": "response.function_call_arguments.delta", "item_id": "item_123", "delta": "city\":\"Seattle\"}"}` + "\n" +
 		`data: {"type": "response.function_call_arguments.done", "item_id": "item_123"}` + "\n" +
-		`data: {"type": "response.completed", "response": {"status": "completed", "usage": {"prompt_tokens": 10, "completion_tokens": 20}}}` + "\n"
+		`data: {"type": "response.completed", "response": {"status": "completed", "usage": {"input_tokens": 10, "output_tokens": 20}}}` + "\n"
 
 	ch := sa.ParseStream(strings.NewReader(streamInput))
 	var events []engine.StreamEvent

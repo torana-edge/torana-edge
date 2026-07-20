@@ -14,6 +14,8 @@ import (
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/resource"
 	semconv "go.opentelemetry.io/otel/semconv/v1.24.0"
+
+	"github.com/torana-edge/torana-edge/internal/economics"
 )
 
 // InitOTel sets up OpenTelemetry metrics if OTEL_EXPORTER_OTLP_ENDPOINT is set.
@@ -58,19 +60,27 @@ func initInstruments(m metric.Meter) {
 	reqTotal, _ = m.Int64Counter("torana_requests_total")
 	tokensTotal, _ = m.Int64Counter("torana_tokens_total")
 	pluginSaved, _ = m.Int64Counter("torana_bytes_saved_total")
+	compactionApplications, _ = m.Int64Counter("torana_compaction_applications_total")
+	compactionEstimatedTokens, _ = m.Int64Counter("torana_compaction_estimated_tokens_total")
+	compactionEstimatedUSD, _ = m.Float64Counter("torana_compaction_estimated_usd_total")
+	compactionUnavailable, _ = m.Int64Counter("torana_compaction_savings_unavailable_total")
 	routedTotal, _ = m.Int64Counter("torana_routed_requests_total")
 }
 
 var (
-	meter          metric.Meter
-	reqDuration    metric.Float64Histogram
-	reqTotal       metric.Int64Counter
-	tokensTotal    metric.Int64Counter
-	pluginSaved    metric.Int64Counter
-	routedTotal    metric.Int64Counter
-	counterCache   sync.Map
-	histogramCache sync.Map
-	gaugeCache     sync.Map
+	meter                     metric.Meter
+	reqDuration               metric.Float64Histogram
+	reqTotal                  metric.Int64Counter
+	tokensTotal               metric.Int64Counter
+	pluginSaved               metric.Int64Counter
+	compactionApplications    metric.Int64Counter
+	compactionEstimatedTokens metric.Int64Counter
+	compactionEstimatedUSD    metric.Float64Counter
+	compactionUnavailable     metric.Int64Counter
+	routedTotal               metric.Int64Counter
+	counterCache              sync.Map
+	histogramCache            sync.Map
+	gaugeCache                sync.Map
 )
 
 // RecordProxyRequest records one proxied request's latency and outcome,
@@ -147,6 +157,46 @@ func RecordPluginSavings(ctx context.Context, plugin string, savedBytes int64) {
 		return
 	}
 	pluginSaved.Add(ctx, savedBytes, metric.WithAttributes(attribute.String("plugin", plugin)))
+}
+
+// RecordCompactionEconomics exports one applied batch. Dollar values are
+// emitted only when every required operator-supplied price and usage field is
+// available; otherwise a labeled unavailable counter explains why.
+func RecordCompactionEconomics(ctx context.Context, plugin string, report economics.CompactionReport, targetPricing, offloadPricing *economics.ModelPricing) {
+	if meter == nil {
+		return
+	}
+	base := []attribute.KeyValue{attribute.String("plugin", plugin), attribute.String("source", report.Source)}
+	compactionApplications.Add(ctx, 1, metric.WithAttributes(base...))
+	if report.EstimatedTokensRemoved > 0 {
+		attrs := append(append([]attribute.KeyValue{}, base...), attribute.String("kind", "avoided"))
+		compactionEstimatedTokens.Add(ctx, report.EstimatedTokensRemoved, metric.WithAttributes(attrs...))
+	}
+	if report.Source == "transformation" && report.EstimatedRewriteSpanTokens > 0 {
+		attrs := append(append([]attribute.KeyValue{}, base...), attribute.String("kind", "rewrite_span"))
+		compactionEstimatedTokens.Add(ctx, report.EstimatedRewriteSpanTokens, metric.WithAttributes(attrs...))
+	}
+	if report.Source == "legacy" {
+		return
+	}
+	if targetPricing == nil {
+		attrs := append(append([]attribute.KeyValue{}, base...), attribute.String("reason", economics.UnavailablePricing))
+		compactionUnavailable.Add(ctx, 1, metric.WithAttributes(attrs...))
+		return
+	}
+	est := economics.EstimateApplicationSavings(report, *targetPricing, offloadPricing)
+	if est.EstimatedGrossUSD != nil {
+		attrs := append(append([]attribute.KeyValue{}, base...), attribute.String("kind", "gross"))
+		compactionEstimatedUSD.Add(ctx, *est.EstimatedGrossUSD, metric.WithAttributes(attrs...))
+	}
+	if est.EstimatedNetUSD != nil {
+		attrs := append(append([]attribute.KeyValue{}, base...), attribute.String("kind", "net"))
+		compactionEstimatedUSD.Add(ctx, *est.EstimatedNetUSD, metric.WithAttributes(attrs...))
+	}
+	if est.UnavailableReason != "" {
+		attrs := append(append([]attribute.KeyValue{}, base...), attribute.String("reason", est.UnavailableReason))
+		compactionUnavailable.Add(ctx, 1, metric.WithAttributes(attrs...))
+	}
 }
 
 func statusClass(status int) string {

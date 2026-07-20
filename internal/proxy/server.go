@@ -28,6 +28,7 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	"github.com/torana-edge/torana-edge/internal/cache"
+	"github.com/torana-edge/torana-edge/internal/economics"
 	"github.com/torana-edge/torana-edge/internal/engine"
 	"github.com/torana-edge/torana-edge/internal/engine/pbconv"
 	"github.com/torana-edge/torana-edge/internal/format"
@@ -35,6 +36,7 @@ import (
 	"github.com/torana-edge/torana-edge/internal/plugin"
 	"github.com/torana-edge/torana-edge/internal/provider"
 	"github.com/torana-edge/torana-edge/internal/wasm"
+	"github.com/torana-edge/torana-edge/pkg/pb"
 )
 
 const maxBodySize = 10 * 1024 * 1024 // 10 MB
@@ -84,6 +86,27 @@ type Server struct {
 }
 
 type routeContextKey struct{}
+
+func isOpenAIResponsesRequest(chat *engine.ChatRequest) bool {
+	if chat == nil || chat.ProviderExtensions == nil {
+		return false
+	}
+	variant, _ := chat.ProviderExtensions["_openai_variant"].(string)
+	return variant == "responses"
+}
+
+func applyOpenAIResponsesCompaction(chat *engine.ChatRequest, p provider.Provider) {
+	if !isOpenAIResponsesRequest(chat) || p.ResponsesCompaction == nil {
+		return
+	}
+	if _, supplied := chat.ProviderExtensions["context_management"]; supplied {
+		return
+	}
+	chat.ProviderExtensions["context_management"] = []any{map[string]any{
+		"type":              "compaction",
+		"compact_threshold": p.ResponsesCompaction.CompactThreshold,
+	}}
+}
 
 type RouteContext struct {
 	ProviderName string
@@ -158,6 +181,19 @@ type reqState struct {
 	// only), stashed before response hooks run, only when a loaded plugin
 	// holds env.original_response.
 	OriginalResp []byte
+	// CompactionReports are queued by request-side WASM host calls and priced
+	// only after routing has selected the final provider/model.
+	CompactionReports          []attributedCompactionReport
+	InitialProvider            string
+	InitialFormat              string
+	PendingRoute               *routeVerdict
+	CompactionRequestPrepared  bool
+	CompactionReportsCommitted bool
+}
+
+type attributedCompactionReport struct {
+	Plugin string
+	Report economics.CompactionReport
 }
 
 // responseMeta builds the _response signal handed to run_after_response so
@@ -197,6 +233,117 @@ func (rs *reqState) mergeUsage(u *engine.StreamUsage) {
 	}
 }
 
+// recordCompactionReports resolves prices after routing. Missing providers,
+// models, or rates are intentionally passed through as nil so /stats records
+// an explicit unavailable reason rather than a guessed dollar value.
+func (s *Server) recordCompactionReports(rs *reqState) {
+	if rs == nil || !rs.CompactionReportsCommitted || len(rs.CompactionReports) == 0 {
+		return
+	}
+	defer func() {
+		rs.CompactionReports = nil
+		rs.CompactionReportsCommitted = false
+	}()
+	for _, attributed := range rs.CompactionReports {
+		report := attributed.Report
+		targetPricing, offloadPricing := s.compactionPricing(rs, report)
+		s.stats.RecordCompactionReport(attributed.Plugin, report, targetPricing, offloadPricing)
+		metrics.RecordPluginSavings(context.Background(), attributed.Plugin, report.OriginalBytes-report.FinalBytes)
+		metrics.RecordCompactionEconomics(context.Background(), attributed.Plugin, report, targetPricing, offloadPricing)
+	}
+}
+
+func discardCompactionReports(rs *reqState) {
+	if rs == nil {
+		return
+	}
+	rs.CompactionReports = nil
+	rs.CompactionRequestPrepared = false
+	rs.CompactionReportsCommitted = false
+}
+
+func (s *Server) compactionPricing(rs *reqState, report economics.CompactionReport) (*economics.ModelPricing, *economics.ModelPricing) {
+	cfg := s.GetConfig().Providers
+	providerName, model := report.Provider, report.Model
+	if providerName == "" && rs != nil {
+		providerName = rs.Provider
+	}
+	if model == "" && rs != nil {
+		model = rs.Model
+	}
+	var targetPricing *economics.ModelPricing
+	if prov, ok := cfg.Providers[providerName]; ok {
+		if price, ok := prov.PricingFor(model); ok {
+			targetPricing = &price
+		}
+	}
+	var offloadPricing *economics.ModelPricing
+	if report.Offload != nil {
+		if prov, ok := cfg.Providers[report.Offload.Provider]; ok {
+			if price, ok := prov.PricingFor(report.Offload.Model); ok {
+				offloadPricing = &price
+			}
+		}
+	}
+	return targetPricing, offloadPricing
+}
+
+func (s *Server) evaluateCompaction(ctx context.Context, report economics.CompactionReport) economics.CompactionDecision {
+	rs := reqStateFrom(ctx)
+	targetName := report.Provider
+	if targetName == "" {
+		targetName = rs.Provider
+	}
+	if rs.PendingRoute != nil {
+		cfg := s.GetConfig().Providers
+		targetName = rs.PendingRoute.Provider
+		if targetName == "" {
+			targetName = rs.InitialProvider
+		}
+		targetProvider, ok := cfg.Providers[targetName]
+		if !ok || (rs.InitialFormat != "" && targetProvider.Format != rs.InitialFormat) {
+			return economics.CompactionDecision{Reason: economics.UnavailableRouteUnresolved}
+		}
+		report.Provider = targetName
+		if rs.PendingRoute.Model != "" {
+			report.Model = rs.PendingRoute.Model
+		}
+	}
+	target, offload := s.compactionPricing(rs, report)
+	decision := economics.DecideCompaction(report, target, offload)
+	if !decision.Apply {
+		return decision
+	}
+
+	// A request may ultimately run on any configured fallback. Fail closed if
+	// one of those routes is wire-incompatible, unpriced, or would make the
+	// same batch uneconomic; otherwise a primary-priced decision could produce
+	// an optimistic claim after failover.
+	cfg := s.GetConfig().Providers
+	primary, ok := cfg.Providers[targetName]
+	if !ok {
+		return economics.CompactionDecision{Reason: economics.UnavailableRouteUnresolved}
+	}
+	for _, fallbackName := range fallbackNamesForProvider(targetName, cfg) {
+		fallback, ok := cfg.Providers[fallbackName]
+		if !ok || (primary.Format != "" && fallback.Format != "" && fallback.Format != primary.Format) {
+			return economics.CompactionDecision{Reason: economics.UnavailableFallbackUnpriced}
+		}
+		price, ok := fallback.PricingFor(report.Model)
+		if !ok {
+			model := report.Model
+			if model == "" {
+				model = rs.Model
+			}
+			price, ok = fallback.PricingFor(model)
+		}
+		if !ok || !economics.DecideCompaction(report, &price, offload).Apply {
+			return economics.CompactionDecision{Reason: economics.UnavailableFallbackUnpriced}
+		}
+	}
+	return decision
+}
+
 // reqStateFrom returns the request state stashed by the HTTP handler,
 // or a zero-value fallback for requests outside the handler (tests).
 func reqStateFrom(ctx context.Context) *reqState {
@@ -233,6 +380,11 @@ func New(cfg Config) (*Server, error) {
 	if err := cfg.Providers.Offload.Validate(cfg.Providers.Providers); err != nil {
 		return nil, fmt.Errorf("proxy: %w", err)
 	}
+	for name, p := range cfg.Providers.Providers {
+		if err := p.ValidateResponsesCompaction(name); err != nil {
+			return nil, fmt.Errorf("proxy: %w", err)
+		}
+	}
 	if off := cfg.Providers.Offload; off.Enabled {
 		switch {
 		case off.APIKeyEnv == "":
@@ -262,8 +414,8 @@ func New(cfg Config) (*Server, error) {
 			rt := wasm.NewRuntimeWithCache(context.Background(), sharedCache)
 			// Offload completion handler (cheap-model tool result
 			// summarization), recording failures in /stats.
-			rt.OffloadFunc = func(ctx context.Context, payloadJSON string) (string, error) {
-				out, err := s.offloadCompletion(ctx, payloadJSON)
+			rt.OffloadResultFunc = func(ctx context.Context, payloadJSON string) (economics.OffloadResult, error) {
+				out, err := s.offloadCompletionResult(ctx, payloadJSON)
 				if err != nil {
 					// Plugins degrade gracefully on offload errors, so this
 					// log line is the only host-side visibility.
@@ -274,9 +426,31 @@ func New(cfg Config) (*Server, error) {
 			}
 			// Plugins report compaction savings via torana_record_savings,
 			// attributed per plugin in /stats and OTLP.
-			rt.SavingsFunc = func(pluginName string, originalBytes, finalBytes int64) {
-				s.stats.RecordCompaction(pluginName, originalBytes, finalBytes)
-				metrics.RecordPluginSavings(context.Background(), pluginName, originalBytes-finalBytes)
+			rt.CompactionReportFunc = func(ctx context.Context, pluginName string, report economics.CompactionReport) {
+				rs := reqStateFrom(ctx)
+				rs.CompactionReports = append(rs.CompactionReports, attributedCompactionReport{Plugin: pluginName, Report: report})
+			}
+			rt.EvaluateCompactionFunc = s.evaluateCompaction
+			rt.RequestMutationFunc = func(ctx context.Context, requestPB []byte) {
+				var request pb.ChatRequest
+				if proto.Unmarshal(requestPB, &request) != nil {
+					return
+				}
+				var meta map[string]any
+				if json.Unmarshal(request.ToranaMetaJson, &meta) != nil {
+					reqStateFrom(ctx).PendingRoute = nil
+					return
+				}
+				raw, ok := meta["_route"]
+				if !ok {
+					reqStateFrom(ctx).PendingRoute = nil
+					return
+				}
+				b, _ := json.Marshal(raw)
+				var verdict routeVerdict
+				if json.Unmarshal(b, &verdict) == nil {
+					reqStateFrom(ctx).PendingRoute = &verdict
+				}
 			}
 			// Pristine request/response snapshots (env.original_request /
 			// env.original_response), read from the request state the same
@@ -411,6 +585,14 @@ func New(cfg Config) (*Server, error) {
 			if chat.ToranaMeta == nil {
 				chat.ToranaMeta = make(map[string]any)
 			}
+			// Economic-gate host calls run inside request hooks, so make the
+			// initially routed provider/model available before the pipeline.
+			// A later content-routing verdict refreshes these fields as before.
+			rs := reqStateFrom(req.Context())
+			rs.Provider = provName
+			rs.Model = chat.Model
+			rs.InitialProvider = provName
+			rs.InitialFormat = prov.Format
 
 			// --- WASM plugin pipeline --------------------------------------
 
@@ -465,6 +647,7 @@ func New(cfg Config) (*Server, error) {
 						}
 						req.Body = io.NopCloser(bytes.NewReader(nil))
 						req.ContentLength = 0
+						discardCompactionReports(reqStateFrom(req.Context()))
 						return
 					}
 				}
@@ -487,6 +670,7 @@ func New(cfg Config) (*Server, error) {
 						rs.Provider = provName
 						req.Body = io.NopCloser(bytes.NewReader(nil))
 						req.ContentLength = 0
+						discardCompactionReports(rs)
 						return
 					}
 				}
@@ -526,12 +710,21 @@ func New(cfg Config) (*Server, error) {
 				}
 			}
 
+			// OpenAI can compact server-managed Responses history without Torana
+			// rewriting an opaque previous_response_id chain. This is opt-in per
+			// provider, applies only to Responses requests, and never overrides a
+			// caller-supplied context_management policy.
+			if fmt.Name == "openai" && isOpenAIResponsesRequest(chat) {
+				routedProvider := currentCfg.Providers.Providers[rc.ProviderName]
+				applyOpenAIResponsesCompaction(chat, routedProvider)
+			}
+
 			// Token usage on openai streams is opt-in; opt in on the caller's
 			// behalf so the host can meter tokens. The resulting usage frame
 			// is consumed host-side and suppressed from the client's stream
 			// (see the usage tap in ModifyResponse) — unless the client asked
 			// for it itself, in which case nothing is injected or suppressed.
-			if fmt.Name == "openai" && chat.Stream {
+			if fmt.Name == "openai" && chat.Stream && !isOpenAIResponsesRequest(chat) {
 				if _, ok := chat.ProviderExtensions["stream_options"]; !ok {
 					if chat.ProviderExtensions == nil {
 						chat.ProviderExtensions = map[string]any{}
@@ -545,6 +738,11 @@ func New(cfg Config) (*Server, error) {
 			if err != nil {
 				log.Printf("format %s marshal error: %v — passing through", fmt.Name, err)
 				newBody = body
+				// The original request is sent, so queued reports about plugin
+				// mutations must never become savings metrics.
+				discardCompactionReports(reqStateFrom(req.Context()))
+			} else {
+				reqStateFrom(req.Context()).CompactionRequestPrepared = true
 			}
 
 			// Stash format and chat for ModifyResponse.
@@ -872,6 +1070,7 @@ func New(cfg Config) (*Server, error) {
 
 		proxy.ServeHTTP(tw, r)
 
+		s.recordCompactionReports(rs)
 		s.stats.RecordRequest(tr.bytesRead, tw.bytesWritten)
 		s.stats.RecordTokens(int64(rs.UsageIn), int64(rs.UsageOut))
 		s.stats.RecordCacheTokens(int64(rs.UsageCacheRead), int64(rs.UsageCacheWrite))
