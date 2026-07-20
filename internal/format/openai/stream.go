@@ -110,10 +110,8 @@ func (s *StreamAdapter) parseStream(body io.Reader, ch chan<- engine.StreamEvent
 
 	// toolCallStarted tracks which indices have emitted ToolCallStart.
 	toolCallStarted := make(map[int]bool)
-
-	// Responses API tracking
-	itemIDToIndex := make(map[string]int)
-	nextIndex := 0
+	// responsesCallIDs maps call_id to an auto-assigned index.
+	responsesCallIDs := make(map[string]int)
 
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -133,6 +131,67 @@ func (s *StreamAdapter) parseStream(body io.Reader, ch chan<- engine.StreamEvent
 		// Stream termination.
 		if payload == "[DONE]" {
 			return
+		}
+
+		// Responses API SSE format: {"type":"response.text.delta","delta":"..."} etc.
+		if strings.Contains(payload, `"type":"response.`) {
+			var rse map[string]any
+			if err := json.Unmarshal([]byte(payload), &rse); err != nil {
+				continue
+			}
+			typ, _ := rse["type"].(string)
+			switch typ {
+			case "response.text.delta":
+				if d, ok := rse["delta"].(string); ok && d != "" {
+					ch <- engine.StreamEvent{TextDelta: &d}
+				}
+			case "response.function_call.arguments.delta":
+				cid, _ := rse["call_id"].(string)
+				name, _ := rse["name"].(string)
+				d, _ := rse["delta"].(string)
+				
+				if cid == "" {
+					continue
+				}
+				idx, ok := responsesCallIDs[cid]
+				if !ok {
+					idx = len(responsesCallIDs)
+					responsesCallIDs[cid] = idx
+				}
+
+				if name != "" && !toolCallStarted[idx] {
+					toolCallStarted[idx] = true
+					ch <- engine.StreamEvent{
+						ToolCallStart: &engine.ToolCallStart{
+							Index: idx,
+							ID:    cid,
+							Name:  name,
+						},
+					}
+				}
+				if d != "" {
+					ch <- engine.StreamEvent{
+						ToolCallDelta: &engine.ToolCallDelta{
+							Index:          idx,
+							ArgumentsDelta: d,
+						},
+					}
+				}
+			case "response.function_call.arguments.done":
+				cid, _ := rse["call_id"].(string)
+				// If call_id is missing, default to index 0 (single tool call fallback)
+				idx := 0
+				if cid != "" {
+					if savedIdx, ok := responsesCallIDs[cid]; ok {
+						idx = savedIdx
+					}
+				}
+				ch <- engine.StreamEvent{
+					ToolCallEnd: &engine.ToolCallEnd{Index: idx},
+				}
+			case "response.done":
+			}
+			continue
 		}
 
 		var chunk sseChunk
