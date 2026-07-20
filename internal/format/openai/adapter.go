@@ -24,6 +24,11 @@ func init() {
 // and Responses API formats.
 type Adapter struct{}
 
+// responsesInputLayoutExt stores the caller's typed Responses input array so
+// opaque items (reasoning, compaction, and future item types) survive the
+// canonical ChatRequest pipeline. It is internal and never emitted itself.
+const responsesInputLayoutExt = "_openai_input_layout"
+
 // --- wire types for unmarshal ------------------------------------------------
 
 // chatRequest is the Chat Completions JSON shape.
@@ -168,52 +173,13 @@ func marshalResponses(chat *engine.ChatRequest) ([]byte, error) {
 	rr.Model = chat.Model
 
 	// Convert messages back to input array of Responses API items.
-	if len(chat.Messages) > 0 {
-		var items []any
-		for _, m := range chat.Messages {
-			switch m.Role {
-			case engine.RoleTool:
-				items = append(items, map[string]any{
-					"type":    "function_call_output",
-					"call_id": m.ToolCallID,
-					"output":  m.Content,
-				})
-			case engine.RoleAssistant:
-				if len(m.ToolCalls) > 0 {
-					for _, tc := range m.ToolCalls {
-						argsBytes, _ := json.Marshal(tc.Arguments)
-						items = append(items, map[string]any{
-							"type":      "function_call",
-							"call_id":   tc.ID,
-							"name":      tc.Name,
-							"arguments": string(argsBytes),
-						})
-					}
-				} else {
-					items = append(items, map[string]any{
-						"type": "message",
-						"role": string(m.Role),
-						"content": func() any {
-							if len(m.ContentParts) > 0 {
-								return m.ContentParts
-							}
-							return m.Content
-						}(),
-					})
-				}
-			default:
-				items = append(items, map[string]any{
-					"type": "message",
-					"role": string(m.Role),
-					"content": func() any {
-						if len(m.ContentParts) > 0 {
-							return m.ContentParts
-						}
-						return m.Content
-					}(),
-				})
-			}
+	items := responsesItemsFromMessages(chat.Messages)
+	if chat.ProviderExtensions != nil {
+		if layout, ok := chat.ProviderExtensions[responsesInputLayoutExt].([]any); ok {
+			items = mergeResponsesInputLayout(layout, items)
 		}
+	}
+	if len(items) > 0 {
 		b, _ := json.Marshal(items)
 		rr.Input = b
 	}
@@ -244,6 +210,70 @@ func marshalResponses(chat *engine.ChatRequest) ([]byte, error) {
 	}
 
 	return b, nil
+}
+
+func responsesItemsFromMessages(messages []engine.Message) []any {
+	var items []any
+	for _, m := range messages {
+		switch m.Role {
+		case engine.RoleTool:
+			items = append(items, map[string]any{
+				"type":    "function_call_output",
+				"call_id": m.ToolCallID,
+				"output":  m.Content,
+			})
+		case engine.RoleAssistant:
+			if len(m.ToolCalls) > 0 {
+				for _, tc := range m.ToolCalls {
+					argsBytes, _ := json.Marshal(tc.Arguments)
+					items = append(items, map[string]any{
+						"type":      "function_call",
+						"call_id":   tc.ID,
+						"name":      tc.Name,
+						"arguments": string(argsBytes),
+					})
+				}
+				continue
+			}
+			fallthrough
+		default:
+			content := any(m.Content)
+			if len(m.ContentParts) > 0 {
+				content = m.ContentParts
+			}
+			items = append(items, map[string]any{
+				"type":    "message",
+				"role":    string(m.Role),
+				"content": content,
+			})
+		}
+	}
+	return items
+}
+
+func mergeResponsesInputLayout(layout, generated []any) []any {
+	merged := make([]any, 0, len(layout)+len(generated))
+	nextGenerated := 0
+	for _, original := range layout {
+		if isCanonicalResponsesItem(original) {
+			if nextGenerated < len(generated) {
+				merged = append(merged, generated[nextGenerated])
+				nextGenerated++
+			}
+			continue
+		}
+		merged = append(merged, original)
+	}
+	return append(merged, generated[nextGenerated:]...)
+}
+
+func isCanonicalResponsesItem(item any) bool {
+	m, ok := item.(map[string]any)
+	if !ok {
+		return false
+	}
+	typ, _ := m["type"].(string)
+	return typ == "message" || typ == "function_call" || typ == "function_call_output"
 }
 
 // ---------------------------------------------------------------------------
@@ -413,6 +443,10 @@ func (a *Adapter) unmarshalResponses(rawBody []byte) (*engine.ChatRequest, error
 			// Try array of Responses API items first.
 			var items []responsesInputItem
 			if err := json.Unmarshal(rr.Input, &items); err == nil && len(items) > 0 && items[0].Type != "" {
+				var layout []any
+				if err := json.Unmarshal(rr.Input, &layout); err == nil {
+					req.ProviderExtensions[responsesInputLayoutExt] = layout
+				}
 				for _, item := range items {
 					switch item.Type {
 					case "message":

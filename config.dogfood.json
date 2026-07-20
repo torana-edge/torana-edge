@@ -12,10 +12,21 @@
   },
   "plugins": {
     "dir": "./plugins",
-    "order": ["schema_translator", "keyword_compactor", "compactor"]
+    "_comment": "Dogfood the safe deterministic policy. Run one compactor only, after intent; unmatched tools and failures stay exact.",
+    "order": ["schema_translator", "intent", "keyword_compactor"],
+    "config": {
+      "keyword_compactor": {
+        "tool_policies": [
+          {"match": "read*", "mode": "exact"},
+          {"match": "view*", "mode": "exact"},
+          {"match": "web_search", "mode": "deterministic", "first_pass": true, "rerun": "Repeat the search to recover every result."},
+          {"match": "grep*", "mode": "keyword"}
+        ]
+      }
+    }
   },
   "offload": {
-    "enabled": true,
+    "enabled": false,
     "provider": "deepseek",
     "model": "deepseek-v4-flash"
   },

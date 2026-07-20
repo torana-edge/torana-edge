@@ -1,14 +1,16 @@
 {
   "name": "keyword_compactor",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "Deterministic keyword-based tool result compaction using the intent plugin's cache; alternative to compactor — run ONE of the two, after 'intent'",
   "hooks": [
     {"name": "run_before_request", "priority": 150}
   ],
   "permissions": [
-    {"name": "env.cache_get", "description": "Read cached intent from the intent plugin"},
+    {"name": "env.cache_get", "description": "Read cached intents and canonical deterministic replacements"},
+    {"name": "env.cache_set", "description": "Store canonical deterministic replacements"},
     {"name": "env.host_call.torana_record_savings", "description": "Report compaction byte savings to /stats"},
     {"name": "env.emit_metric", "description": "Compaction eligibility and intent-miss metrics"},
+    {"name": "env.plugin_config", "description": "Read ordered plugins.config.keyword_compactor.tool_policies"},
     {"name": "env.log", "description": "Diagnostic logging"}
   ]
 }

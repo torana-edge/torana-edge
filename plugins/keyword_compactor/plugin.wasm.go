@@ -2,8 +2,10 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/torana-edge/torana-edge/pkg/pb"
 	sdk "github.com/torana-edge/torana-edge/pkg/plugin-sdk"
@@ -12,45 +14,103 @@ import (
 func main() {}
 
 const (
-	minContentLength = 2000     // below this, content is already small enough
-	contextLines     = 2        // lines of context around keyword matches
-	maxKeepLines     = 200      // cap to prevent bloat
-	maxResultBytes   = 8000     // cap result size
-	intentCacheKey   = "intent" // cache key for intent (set by the intent plugin)
+	minContentLength       = 2000     // below this, content is already small enough
+	contextLines           = 2        // lines of context around keyword matches
+	maxKeepLines           = 200      // cap to prevent bloat
+	maxResultBytes         = 8000     // cap result size
+	intentCacheKey         = "intent" // cache key for intent (set by the intent plugin)
+	policyCompactionCache  = "policy_compacted"
+	keywordCompactionCache = "keyword_compacted"
 )
+
+var (
+	cfgOnce      sync.Once
+	toolPolicies []sdk.ToolPolicyRule
+)
+
+func loadConfig() {
+	cfgOnce.Do(func() {
+		var c struct {
+			ToolPolicies []sdk.ToolPolicyRule `json:"tool_policies"`
+		}
+		if raw := sdk.PluginConfig(); raw != "" {
+			_ = json.Unmarshal([]byte(raw), &c)
+		}
+		toolPolicies = c.ToolPolicies
+	})
+}
 
 func init() {
 	sdk.OnBeforeRequest(func(ctx context.Context, req *pb.ChatRequest) (*pb.ChatRequest, error) {
+		loadConfig()
 		modified := false
-
-		// Protect fresh tool results (Issue #166)
-		lastAssistantIdx := -1
-		for i := len(req.Messages) - 1; i >= 0; i-- {
-			if req.Messages[i].Role == "assistant" {
-				lastAssistantIdx = i
-				break
-			}
-		}
+		assistantAfter := assistantMessageCountsAfter(req.Messages)
+		toolNames := sdk.ToolNamesByCallID(req.Messages)
+		toolCalls := sdk.ToolCallsByID(req.Messages)
 
 		for i, msg := range req.Messages {
-			if msg.Role != "tool" || msg.ToolCallId == "" || len(msg.Content) < minContentLength {
+			if msg.Role != "tool" || msg.ToolCallId == "" || len(msg.Content) < minContentLength || sdk.IsDeterministicToolReplacement(msg.Content) {
 				continue
 			}
 
-			// Protect fresh unconsumed results.
-			if i > lastAssistantIdx {
+			toolName := msg.ToolName
+			if toolName == "" {
+				toolName = toolNames[msg.ToolCallId]
+			}
+			toolArgs := ""
+			if call := toolCalls[msg.ToolCallId]; call != nil {
+				toolArgs = string(call.ArgumentsJson)
+			}
+			if toolName == "" || sdk.ToolResultMustStayExact(toolName, msg.Content) {
+				continue
+			}
+			rule, matched := sdk.MatchToolPolicy(toolPolicies, toolName)
+			if !matched || rule.Mode == "" || rule.Mode == "exact" {
+				continue
+			}
+
+			switch rule.Mode {
+			case "deterministic":
+				if assistantAfter[i] == 0 && !rule.FirstPass {
+					continue
+				}
+				if applyDeterministicPolicy(msg, toolName, toolArgs, rule, false) {
+					modified = true
+				}
+				continue
+			case "source":
+				// Live OMP dogfood showed that replacing aged source reads makes
+				// autonomous agents reread different ranges of the same file until
+				// they hit their request limit. Source mode is therefore fail-closed
+				// to exact until the economically gated experiment in #178 ships.
+				continue
+			case "keyword":
+				if assistantAfter[i] == 0 {
+					continue
+				}
+			default:
 				continue
 			}
 
 			// Phase 0 observability: every result big enough to compact.
-			sdk.EmitMetric("torana_compact_eligible_total", sdk.MetricCounter, 1, map[string]string{"tool": msg.ToolName})
+			sdk.EmitMetric("torana_compact_eligible_total", sdk.MetricCounter, 1, map[string]string{"tool": toolName})
 
 			// Retrieve cached intent for this tool call (written by the
 			// intent plugin).
 			cacheKey := intentCacheKey + ":" + msg.ToolCallId
 			intent, _ := sdk.HostCall("env.cache_get", cacheKey)
 			if intent == "" {
-				sdk.EmitMetric("torana_intent_missing_total", sdk.MetricCounter, 1, map[string]string{"tool": msg.ToolName})
+				sdk.EmitMetric("torana_intent_missing_total", sdk.MetricCounter, 1, map[string]string{"tool": toolName})
+				continue
+			}
+			keywordKey := sdk.ContentAddressedCacheKey(keywordCompactionCache,
+				"v2", toolName, toolArgs, msg.Content, intent, "keyword")
+			if cached, _ := sdk.HostCall("env.cache_get", keywordKey); cached != "" {
+				if len(cached) < len(msg.Content) {
+					recordSavings(len(msg.Content), len(cached), "cache_reuse")
+					msg.Content = cached
+					modified = true
+				}
 				continue
 			}
 
@@ -65,10 +125,11 @@ func init() {
 			}
 
 			// Report savings to /stats via the host.
-			sdk.HostCall("torana_record_savings",
-				`{"original_bytes":`+itoa(len(msg.Content))+`,"final_bytes":`+itoa(len(compacted))+`}`)
+			recordSavings(len(msg.Content), len(compacted), "transformation")
 			msg.Content = compacted
 			modified = true
+			payload, _ := json.Marshal(map[string]string{"key": keywordKey, "value": compacted})
+			_, _ = sdk.HostCall("env.cache_set", string(payload))
 		}
 
 		if !modified {
@@ -76,6 +137,43 @@ func init() {
 		}
 		return req, nil
 	})
+}
+
+func assistantMessageCountsAfter(messages []*pb.Message) []int {
+	counts := make([]int, len(messages))
+	count := 0
+	for i := len(messages) - 1; i >= 0; i-- {
+		counts[i] = count
+		if messages[i].Role == "assistant" {
+			count++
+		}
+	}
+	return counts
+}
+
+func applyDeterministicPolicy(msg *pb.Message, toolName, toolArgs string, rule sdk.ToolPolicyRule, markerOnly bool) bool {
+	cacheKey := sdk.ContentAddressedCacheKey(policyCompactionCache,
+		"v2", toolName, toolArgs, msg.Content, rule.Mode, rule.Rerun)
+	cached, _ := sdk.HostCall("env.cache_get", cacheKey)
+	if cached != "" {
+		recordSavings(len(msg.Content), len(cached), "cache_reuse")
+		msg.Content = cached
+		return true
+	}
+	replacement := sdk.DeterministicToolReplacement(toolName, toolArgs, msg.Content, rule.Mode, rule.Rerun, markerOnly)
+	if len(replacement) >= len(msg.Content) {
+		return false
+	}
+	recordSavings(len(msg.Content), len(replacement), "transformation")
+	msg.Content = replacement
+	payload, _ := json.Marshal(map[string]string{"key": cacheKey, "value": replacement})
+	_, _ = sdk.HostCall("env.cache_set", string(payload))
+	return true
+}
+
+func recordSavings(originalBytes, finalBytes int, source string) {
+	_, _ = sdk.HostCall("torana_record_savings",
+		`{"original_bytes":`+itoa(originalBytes)+`,"final_bytes":`+itoa(finalBytes)+`,"source":"`+source+`"}`)
 }
 
 // compactDeterministic extracts lines matching intent keywords.

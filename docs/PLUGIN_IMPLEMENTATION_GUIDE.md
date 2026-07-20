@@ -165,7 +165,8 @@ hashes the rendered prompt up to each breakpoint. Concretely:
   different bytes, busting the cache from that point on; it now derives only
   from the call's own name+args).
 - One-time changes are fine: the first compaction of a tool result re-caches
-  once and then stays stable (keyed by `tool_call_id`) — a net win. What's
+  once and then stays stable (keyed by content, tool arguments, intent, and
+  policy version) — a potential net win after rewrite cost. What's
   fatal is *per-turn* variance.
 - Per-request state belongs in `ToranaMetaJson` (never serialized to the
   wire), not in messages or tool schemas.
@@ -174,3 +175,17 @@ The guardrail test `internal/plugin/cache_compliance_test.go` runs every
 in-repo plugin twice over an identical request and asserts byte-identical
 output, and asserts markers survive the round-trip. New plugins are picked up
 by adding their name to the list — do so.
+
+## 7. Tool-output safety
+
+The trailing tool-result batch is evidence the model requested but has not yet
+consumed. Keep it exact unless an explicit rule opts a recoverable tool into
+deterministic `first_pass` reduction. Model-based compaction must always wait
+for at least one exact exposure.
+
+Unknown tools, mutation outputs, and failures default to exact. Historical
+source reads need a recent exact window and a deterministic recovery marker;
+economically gated transformations must be assessed as one batch from the
+earliest changed item. Reuse the policy and cache-key helpers in `plugin-sdk`
+rather than inventing plugin-specific matching or call-ID-only keys. See
+[COMPACTION.md](COMPACTION.md) for the public contract.

@@ -68,6 +68,7 @@ func (t *failoverRoundTripper) RoundTrip(req *http.Request) (*http.Response, err
 	}
 
 	if !t.rateLimiter.Acquire(identity) {
+		discardCompactionReports(reqStateFrom(req.Context()))
 		return &http.Response{
 			StatusCode:    http.StatusTooManyRequests,
 			Status:        "429 Too Many Requests",
@@ -99,6 +100,12 @@ func (t *failoverRoundTripper) RoundTrip(req *http.Request) (*http.Response, err
 	}
 
 	// First attempt.
+	if rs := reqStateFrom(req.Context()); rs.CompactionRequestPrepared {
+		// This is the first point after synthetic vetoes, local rate limits, and
+		// marshal fallback where the mutated request is actually handed to an
+		// upstream transport.
+		rs.CompactionReportsCommitted = true
+	}
 	resp, err := t.base.RoundTrip(req)
 	if err == nil && !shouldRetry(resp) {
 		resp.Body = &rateLimitBody{ReadCloser: resp.Body, identity: identity, rateLimiter: t.rateLimiter}
@@ -124,8 +131,14 @@ func (t *failoverRoundTripper) RoundTrip(req *http.Request) (*http.Response, err
 		provName, statusOrErr(resp, err), fallbacks)
 
 	for _, fbName := range fallbacks {
-		fb, ok := t.cfg().Providers[fbName]
+		liveCfg := t.cfg()
+		fb, ok := liveCfg.Providers[fbName]
 		if !ok {
+			continue
+		}
+		primary := liveCfg.Providers[provName]
+		if primary.Format != "" && fb.Format != "" && primary.Format != fb.Format {
+			log.Printf("[failover] skipping %s: format %q is incompatible with %s format %q", fbName, fb.Format, provName, primary.Format)
 			continue
 		}
 		fbURL, uErr := url.Parse(fb.URL)
@@ -167,6 +180,7 @@ func (t *failoverRoundTripper) RoundTrip(req *http.Request) (*http.Response, err
 			continue
 		}
 		log.Printf("[failover] %s succeeded", fbName)
+		reqStateFrom(req.Context()).Provider = fbName
 		retryResp.Body = &rateLimitBody{ReadCloser: retryResp.Body, identity: identity, rateLimiter: t.rateLimiter}
 		return retryResp, nil
 	}
@@ -191,11 +205,24 @@ func extractFallbacks(req *http.Request, cfg provider.Config) (string, []string)
 		return "", nil
 	}
 	name := rc.ProviderName
-	p, ok := cfg.Providers[name]
+	_, ok = cfg.Providers[name]
 	if !ok {
 		return name, nil
 	}
 
+	fallbacks := fallbackNamesForProvider(name, cfg)
+
+	if len(fallbacks) == 0 {
+		return name, nil
+	}
+	return name, fallbacks
+}
+
+func fallbackNamesForProvider(name string, cfg provider.Config) []string {
+	p, ok := cfg.Providers[name]
+	if !ok {
+		return nil
+	}
 	fallbacks := p.Fallback
 
 	// Also check plugins.config.failover for allowed_fallbacks.
@@ -208,10 +235,7 @@ func extractFallbacks(req *http.Request, cfg provider.Config) (string, []string)
 		}
 	}
 
-	if len(fallbacks) == 0 {
-		return name, nil
-	}
-	return name, fallbacks
+	return fallbacks
 }
 
 func statusOrErr(resp *http.Response, err error) string {

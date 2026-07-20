@@ -28,6 +28,17 @@ func TestExtractResponseCacheUsage(t *testing.T) {
 			read:   1792, write: 0,
 		},
 		{
+			format: "openai",
+			body:   `{"model":"deepseek-v4-pro","choices":[],"usage":{"prompt_tokens":2000,"completion_tokens":10,"prompt_cache_hit_tokens":1536,"prompt_cache_miss_tokens":464}}`,
+			read:   1536, write: 0,
+		},
+		{
+			// Standard OpenAI details win if a compatible provider emits both.
+			format: "openai",
+			body:   `{"model":"compatible","choices":[],"usage":{"prompt_tokens":2000,"completion_tokens":10,"prompt_cache_hit_tokens":1536,"prompt_tokens_details":{"cached_tokens":1024}}}`,
+			read:   1024, write: 0,
+		},
+		{
 			format: "bedrock",
 			body:   `{"output":{"message":{"content":[]}},"usage":{"inputTokens":10,"outputTokens":4,"cacheReadInputTokens":8000,"cacheWriteInputTokens":500}}`,
 			read:   8000, write: 500,

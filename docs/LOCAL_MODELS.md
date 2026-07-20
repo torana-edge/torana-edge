@@ -9,7 +9,7 @@ or any OpenAI-compatible local server.
 {
   "providers": {
     "ollama": {
-      "url": "http://localhost:11434/v1",
+      "url": "http://localhost:11434",
       "format": "openai",
       "fallback": ["deepseek"]
     }
@@ -28,7 +28,7 @@ while keeping your primary provider (DeepSeek/OpenAI) for reasoning.
 {
   "providers": {
     "vllm": {
-      "url": "http://localhost:8000/v1",
+      "url": "http://localhost:8000",
       "format": "openai"
     }
   }
@@ -37,16 +37,48 @@ while keeping your primary provider (DeepSeek/OpenAI) for reasoning.
 
 ## Local offload (free compaction)
 
-Use the `compactor` plugin to automatically route heavy summarization tasks to a local model. It consumes intents captured by the `intent` plugin, so `intent` must run before it:
+Use the `compactor` plugin to route explicitly eligible historical results to
+a local model. Provider URLs are host roots because Torana appends
+`/v1/chat/completions`. The compactor consumes intents captured by `intent`, so
+`intent` must run first:
 
 ```json
 {
+  "providers": {
+    "ollama": {
+      "url": "http://localhost:11434",
+      "format": "openai",
+      "pricing": {
+        "qwen2.5:3b": {
+          "input_usd_per_mtok": 0,
+          "output_usd_per_mtok": 0,
+          "cache_read_usd_per_mtok": 0,
+          "cache_write_usd_per_mtok": 0
+        }
+      }
+    }
+  },
   "plugins": {
     "dir": "./plugins",
-    "order": ["intent", "compactor"]
+    "order": ["intent", "compactor"],
+    "config": {
+      "compactor": {
+        "expected_applications": 6,
+        "tool_policies": [
+          {"match": "web_search", "mode": "model"},
+          {"match": "read*", "mode": "exact"}
+        ]
+      }
+    }
+  },
+  "offload": {
+    "enabled": true,
+    "provider": "ollama",
+    "model": "qwen2.5:3b"
   }
 }
 ```
 
-This gives you token-free compaction — the summarization runs on your
-local GPU without any API costs, as the compactor plugin can be configured to offload to Ollama.
+The offload has zero marginal API cost, but the target provider still needs
+operator-supplied cache-read/write pricing for the positive-net economic gate.
+See [COMPACTION.md](COMPACTION.md) for the complete configuration.

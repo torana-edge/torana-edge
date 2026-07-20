@@ -9,19 +9,35 @@ import (
 	"os"
 
 	"github.com/torana-edge/torana-edge/internal/cache"
+	"github.com/torana-edge/torana-edge/internal/economics"
 )
 
 // Provider describes an upstream LLM API endpoint.
 type Provider struct {
-	URL      string   `json:"url"`                // upstream base URL
-	Format   string   `json:"format"`             // wire format: "openai", "anthropic", "bedrock", "gemini", "gemini-codeassist"
-	Fallback []string `json:"fallback,omitempty"` // provider names to try on 429/5xx
+	URL                 string                     `json:"url"`                            // upstream base URL
+	Format              string                     `json:"format"`                         // wire format: "openai", "anthropic", "bedrock", "gemini", "gemini-codeassist"
+	Fallback            []string                   `json:"fallback,omitempty"`             // provider names to try on 429/5xx
+	ResponsesCompaction *ResponsesCompactionConfig `json:"responses_compaction,omitempty"` // native OpenAI Responses context compaction; nil disables it
 	// APIKeyEnv names an environment variable holding this provider's own
 	// API key. Used when a plugin reroutes a request here
 	// (env.route_request) — the caller's credential is never forwarded to a
 	// rerouted provider. Empty means the provider needs no auth (e.g. a
 	// local model server).
 	APIKeyEnv string `json:"api_key_env,omitempty"`
+	// Pricing is optional, operator-supplied pricing by exact model name.
+	// "*" may be used as a provider default. Torana intentionally ships no
+	// built-in rates because provider prices and cache semantics change.
+	Pricing map[string]economics.ModelPricing `json:"pricing,omitempty"`
+}
+
+// PricingFor returns an explicitly configured exact-model rate, falling back
+// to the provider's "*" entry. It never guesses or downloads pricing.
+func (p Provider) PricingFor(model string) (economics.ModelPricing, bool) {
+	if price, ok := p.Pricing[model]; ok {
+		return price, true
+	}
+	price, ok := p.Pricing["*"]
+	return price, ok
 }
 
 // Config is the top-level Torana configuration.
@@ -69,6 +85,27 @@ type OffloadConfig struct {
 	// APIKeyEnv names an environment variable holding a dedicated offload
 	// API key. When empty, the caller's request credential is reused.
 	APIKeyEnv string `json:"api_key_env,omitempty"`
+}
+
+// ResponsesCompactionConfig enables provider-native compaction for OpenAI
+// Responses API requests. It does not apply to Chat Completions requests.
+type ResponsesCompactionConfig struct {
+	CompactThreshold int `json:"compact_threshold"`
+}
+
+// ValidateResponsesCompaction rejects configured-but-ineffective thresholds.
+// A nil configuration is intentionally valid and means disabled.
+func (p Provider) ValidateResponsesCompaction(name string) error {
+	if p.ResponsesCompaction == nil {
+		return nil
+	}
+	if p.Format != "openai" {
+		return fmt.Errorf("provider %q responses_compaction requires format %q, has %q", name, "openai", p.Format)
+	}
+	if p.ResponsesCompaction.CompactThreshold <= 0 {
+		return fmt.Errorf("provider %q responses_compaction.compact_threshold must be positive", name)
+	}
+	return nil
 }
 
 // Validate checks an enabled offload config against the provider map.
@@ -168,6 +205,11 @@ func Load(path string) (Config, error) {
 	}
 	if user.MITM.Enabled {
 		cfg.MITM = user.MITM
+	}
+	for name, p := range cfg.Providers {
+		if err := p.ValidateResponsesCompaction(name); err != nil {
+			return cfg, err
+		}
 	}
 
 	return cfg, nil

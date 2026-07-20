@@ -61,7 +61,18 @@ forwarded upstream — **Torana injects no auth**.
       "daily-cloudcode-pa.googleapis.com": "antigravity-daily"
     }
   },
-  "plugins": { "dir": "./plugins", "order": ["intent", "keyword_compactor"] }
+  "plugins": {
+    "dir": "./plugins",
+    "order": ["intent", "keyword_compactor"],
+    "config": {
+      "keyword_compactor": {
+        "tool_policies": [
+          {"match": "read*", "mode": "exact"},
+          {"match": "grep*", "mode": "keyword"}
+        ]
+      }
+    }
+  }
 }
 ```
 
@@ -133,6 +144,7 @@ Upstream returned 200
   can trip Google's re-auth (a security response); if `agy` asks you to log in
   again, just re-run its sign-in flow.
 - **Keep `listen` on localhost** — the ingress decrypts caller traffic.
-- **Intent + compaction:** `agy`'s tool calls already carry a goal-tied intent,
-  so the `intent` plugin captures well and the compactors fire on large tool
-  outputs (file reads, greps). Keep `intent` before whichever compactor you run.
+- **Intent + compaction:** `agy`'s tool calls already carry a goal-tied intent.
+  Keep `intent` before one compactor and configure explicit policies; source
+  reads remain exact for three later assistant turns and unmatched tools remain
+  exact. See [COMPACTION.md](COMPACTION.md).

@@ -120,3 +120,34 @@ func TestLocalCache_Override(t *testing.T) {
 		t.Errorf("intent = %q, want 'new' (override)", got)
 	}
 }
+
+func TestLocalCache_EvictsLeastRecentlyUsedByEntryCount(t *testing.T) {
+	l := NewLocalCacheWithLimits(5*time.Minute, 2, 1<<20)
+	defer l.Close()
+	l.Set("a", "1")
+	l.Set("b", "2")
+	if _, ok := l.Get("a"); !ok {
+		t.Fatal("expected a before eviction")
+	}
+	l.Set("c", "3")
+	if _, ok := l.Get("b"); ok {
+		t.Fatal("least recently used entry b was not evicted")
+	}
+	if _, ok := l.Get("a"); !ok {
+		t.Fatal("recently used entry a was evicted")
+	}
+}
+
+func TestLocalCache_BoundsBytesAndRejectsOversizedValues(t *testing.T) {
+	l := NewLocalCacheWithLimits(5*time.Minute, 100, 8)
+	defer l.Close()
+	l.Set("a", "1234") // 5 bytes including key
+	l.Set("b", "5678") // evicts a to remain under 8
+	if _, ok := l.Get("a"); ok {
+		t.Fatal("byte bound did not evict oldest entry")
+	}
+	l.Set("huge", "12345678")
+	if _, ok := l.Get("huge"); ok {
+		t.Fatal("oversized value should not be admitted")
+	}
+}
