@@ -284,8 +284,9 @@ func TestE2E(t *testing.T) {
 			t.Errorf("turn 1 response lost sibling fields: %s", b)
 		}
 
-		// Turn 2: resend with a huge tool result — the compactor must
-		// offload it to the cheap model before it reaches the upstream.
+		// Turn 2: send a huge fresh tool result. The model requested this
+		// evidence and has not consumed it yet, so #166 requires that it reach
+		// the upstream verbatim rather than being compacted on first exposure.
 		bigResult := strings.Repeat("zzzz zzz zz\n", 300) // >2000 chars, no intent keywords
 		turn2 := fmt.Sprintf(`{
 			"model": "gpt-x",
@@ -301,6 +302,33 @@ func TestE2E(t *testing.T) {
 
 		mu.Lock()
 		upstreamSaw := string(lastToolResultBody)
+		mu.Unlock()
+		if !strings.Contains(upstreamSaw, "zzzz zzz zz") {
+			t.Errorf("upstream did not receive the fresh raw tool result")
+		}
+		if strings.Contains(upstreamSaw, "summary of the answer") {
+			t.Errorf("fresh tool result was compacted before first consumption")
+		}
+
+		// Turn 3: replay the now-consumed result with the assistant response
+		// from turn 2 followed by a new user request. The result is historical,
+		// so the compactor may offload it before it reaches the upstream.
+		turn3 := fmt.Sprintf(`{
+			"model": "gpt-x",
+			"messages": [
+				{"role": "user", "content": "find it"},
+				{"role": "assistant", "tool_calls": [{"id": "call_off_1", "type": "function", "function": {"name": "search", "arguments": "{\"query\":\"x\"}"}}]},
+				{"role": "tool", "tool_call_id": "call_off_1", "content": %q},
+				{"role": "assistant", "content": "done"},
+				{"role": "user", "content": "continue"}
+			]
+		}`, bigResult)
+		resp3 := post(t, "/provider/oai/v1/chat/completions", turn3)
+		io.Copy(io.Discard, resp3.Body)
+		resp3.Body.Close()
+
+		mu.Lock()
+		upstreamSaw = string(lastToolResultBody)
 		mu.Unlock()
 		if !strings.Contains(upstreamSaw, "summary of the answer") {
 			t.Errorf("upstream did not receive the offloaded summary; tool result was: %.200s", upstreamSaw)
