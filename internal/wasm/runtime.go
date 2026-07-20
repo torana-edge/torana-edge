@@ -14,6 +14,7 @@ import (
 	"github.com/tetratelabs/wazero/api"
 	"github.com/tetratelabs/wazero/imports/wasi_snapshot_preview1"
 	"github.com/torana-edge/torana-edge/internal/cache"
+	"github.com/torana-edge/torana-edge/internal/economics"
 	"github.com/torana-edge/torana-edge/internal/metrics"
 )
 
@@ -232,11 +233,25 @@ type Runtime struct {
 	// OffloadFunc handles torana_offload_completion host calls.
 	// Set by the server during initialization.
 	OffloadFunc func(ctx context.Context, payloadJSON string) (string, error)
+	// OffloadResultFunc exposes provider/model/usage while preserving the old
+	// OffloadFunc contract for external embedders.
+	OffloadResultFunc func(ctx context.Context, payloadJSON string) (economics.OffloadResult, error)
 
 	// SavingsFunc handles torana_record_savings host calls (compaction
 	// byte savings reported by plugins), attributed to the calling plugin.
 	// Set by the server.
 	SavingsFunc func(plugin string, originalBytes, finalBytes int64)
+	// CompactionReportFunc receives the richer, batch-aware savings ABI. When
+	// set it supersedes SavingsFunc; the old callback remains for embedders and
+	// tests using the original two-field contract.
+	CompactionReportFunc func(ctx context.Context, plugin string, report economics.CompactionReport)
+	// EvaluateCompactionFunc performs the optional operator-priced economic
+	// gate before a plugin mutates history.
+	EvaluateCompactionFunc func(ctx context.Context, report economics.CompactionReport) economics.CompactionDecision
+	// RequestMutationFunc observes a plugin's returned canonical request. It is
+	// used by the host to make an earlier routing verdict visible to later
+	// plugins' economic-gate calls.
+	RequestMutationFunc func(ctx context.Context, requestPB []byte)
 
 	// OriginalRequestFunc returns the pristine pre-pipeline request as pb
 	// bytes for env.original_request (empty when unavailable). Set by the
@@ -247,6 +262,15 @@ type Runtime struct {
 	// env.original_response (empty when unavailable — e.g. streaming
 	// responses, which are never buffered). Set by the server.
 	OriginalResponseFunc func(ctx context.Context) []byte
+}
+
+// ObserveRequestMutation forwards a defensive copy to the host callback.
+func (r *Runtime) ObserveRequestMutation(ctx context.Context, requestPB []byte) {
+	if r.RequestMutationFunc == nil || len(requestPB) == 0 {
+		return
+	}
+	b := append([]byte(nil), requestPB...)
+	r.RequestMutationFunc(ctx, b)
 }
 
 // wasmCompilationCache is shared by every Runtime in the process. wazero's
@@ -513,20 +537,52 @@ func (r *Runtime) installHostFunctions() {
 		case "torana_kms_decrypt":
 			res = `{"status":"error","message":"KMS not configured — set TORANA_KMS_ENDPOINT"}`
 		case "torana_record_savings":
-			var pl struct {
-				OriginalBytes int64 `json:"original_bytes"`
-				FinalBytes    int64 `json:"final_bytes"`
-			}
-			if err := json.Unmarshal([]byte(args), &pl); err != nil || pl.OriginalBytes < 0 || pl.FinalBytes < 0 {
+			var report economics.CompactionReport
+			if err := json.Unmarshal([]byte(args), &report); err != nil {
 				res = `{"status":"error","message":"invalid payload"}`
+				break
+			}
+			report.Normalize()
+			if !report.Valid() {
+				res = `{"status":"error","message":"invalid payload"}`
+			} else if r.CompactionReportFunc != nil {
+				r.CompactionReportFunc(ctx, pluginName, report)
+				res = `{"status":"ok"}`
 			} else if r.SavingsFunc != nil {
-				r.SavingsFunc(pluginName, pl.OriginalBytes, pl.FinalBytes)
+				r.SavingsFunc(pluginName, report.OriginalBytes, report.FinalBytes)
 				res = `{"status":"ok"}`
 			} else {
 				res = `{"status":"error","message":"savings tracking not configured"}`
 			}
+		case "torana_evaluate_compaction":
+			var report economics.CompactionReport
+			if err := json.Unmarshal([]byte(args), &report); err != nil {
+				res = `{"apply":false,"reason":"invalid_payload"}`
+				break
+			}
+			report.Normalize()
+			if !report.Valid() {
+				res = `{"apply":false,"reason":"invalid_payload"}`
+			} else if r.EvaluateCompactionFunc == nil {
+				res = `{"apply":false,"reason":"pricing_unconfigured"}`
+			} else {
+				decision := r.EvaluateCompactionFunc(ctx, report)
+				payload, _ := json.Marshal(decision)
+				res = string(payload)
+			}
 		case "torana_offload_completion":
-			if r.OffloadFunc != nil {
+			if r.OffloadResultFunc != nil {
+				result, err := r.OffloadResultFunc(ctx, args)
+				if err != nil {
+					res = fmt.Sprintf(`{"status":"error","message":%q}`, err.Error())
+				} else {
+					payload, _ := json.Marshal(struct {
+						Status string `json:"status"`
+						economics.OffloadResult
+					}{Status: "ok", OffloadResult: result})
+					res = string(payload)
+				}
+			} else if r.OffloadFunc != nil {
 				result, err := r.OffloadFunc(ctx, args)
 				if err != nil {
 					res = fmt.Sprintf(`{"status":"error","message":%q}`, err.Error())

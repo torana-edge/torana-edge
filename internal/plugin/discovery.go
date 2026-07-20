@@ -161,6 +161,29 @@ func reloadPipeline(runtime *wasm.Runtime, config PluginConfig) (*PluginPipeline
 		}
 		sort.Strings(order)
 	}
+	// Rates are provider/model-specific, so an economic gate must observe any
+	// content-routing verdict first. Reject ambiguous ordering rather than
+	// silently pricing the original route.
+	lastRouter, firstEvaluator := -1, len(order)
+	for i, name := range order {
+		bundle, ok := byName[name]
+		if !ok {
+			continue
+		}
+		for _, permission := range bundle.Manifest.Permissions {
+			switch permission.Name {
+			case "env.route_request":
+				lastRouter = i
+			case "env.host_call.torana_evaluate_compaction":
+				if i < firstEvaluator {
+					firstEvaluator = i
+				}
+			}
+		}
+	}
+	if lastRouter > firstEvaluator {
+		return nil, fmt.Errorf("plugin order: route-capable plugins must run before compaction economic gates")
+	}
 	for _, name := range order {
 		bundle, ok := byName[name]
 		if !ok {
@@ -310,6 +333,7 @@ func (pp *PluginPipeline) RunBeforeRequest(ctx context.Context, reqID uint64, ch
 		if len(outBytes) > 0 {
 			resultBytes = outBytes
 			modified = true
+			pp.runtime.ObserveRequestMutation(ctx, outBytes)
 		}
 	}
 

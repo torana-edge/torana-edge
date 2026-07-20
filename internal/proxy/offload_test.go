@@ -63,6 +63,30 @@ func TestOffloadUsesCallerCredential(t *testing.T) {
 	}
 }
 
+func TestOffloadResultReturnsProviderModelAndUsage(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"choices":[{"message":{"content":"summary"}}],"usage":{"prompt_tokens":1200,"completion_tokens":80,"prompt_tokens_details":{"cached_tokens":900,"cache_write_tokens":100}}}`))
+	}))
+	defer upstream.Close()
+
+	s, err := New(Config{Providers: offloadConfig(upstream.URL)})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	ctx := context.WithValue(context.Background(), reqStateKey{}, &reqState{ID: 1, CallerAuth: "k"})
+	got, err := s.offloadCompletionResult(ctx, `{"system_prompt":"sum","user_prompt":"text"}`)
+	if err != nil {
+		t.Fatalf("offloadCompletionResult: %v", err)
+	}
+	if got.Completion != "summary" || got.Provider != "cheap" || got.Model != "cheap-1" {
+		t.Fatalf("identity/completion not returned: %+v", got)
+	}
+	if !got.Usage.Reported || got.Usage.InputTokens != 1200 || got.Usage.OutputTokens != 80 || got.Usage.CacheReadTokens != 900 || got.Usage.CacheWriteTokens != 100 || !got.Usage.InputIncludesCacheRead {
+		t.Fatalf("usage not returned: %+v", got.Usage)
+	}
+}
+
 // TestOffloadDedicatedKeyWins: offload.api_key_env overrides the caller key.
 func TestOffloadDedicatedKeyWins(t *testing.T) {
 	upstream := offloadServer(t, "Bearer dedicated-key", "cheap-1")

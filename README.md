@@ -19,8 +19,9 @@ CLI (`agy`)** — Torana also offers an optional TLS-terminating MITM ingress. S
 ## Key Features
 
 - **WASM Plugin Ecosystem:** Write plugins in Go (or any WASI-compatible language), compile to `.wasm`, and drop them into the `plugins/` directory. No proxy restarts needed.
-- **Model Delegation (The Compactor):** Automatically intercepts heavy tool outputs and summarizes them via a cheaper model before they hit the expensive upstream, saving tokens and money.
-- **Prompt Cache Optimization:** Deterministic payload normalization ensures upstream provider prompt caches are never busted across turns.
+- **Tool-aware compaction:** Explicit policies keep source and failure evidence exact while allowing recoverable searches/listings to be reduced deterministically—even on first exposure when configured.
+- **Economic model delegation:** Historical results can be summarized through a cheaper model only when route-aware cache/offload economics estimate positive net savings.
+- **Responses-native compaction:** OpenAI Responses requests can opt into provider-side compaction without Torana storing a second conversation.
 - **Provider Failover:** Automatic retry with fallback providers on 429/5xx errors.
 - **Unified IR:** Format adapters translate OpenAI, Anthropic, Bedrock, and Gemini wire formats into a single canonical IR. Plugins work on the IR and never touch raw JSON.
 - **MITM ingress (optional):** For harnesses that ignore base-URL overrides (e.g. the Antigravity CLI), an opt-in TLS-terminating proxy routes their traffic through the pipeline. Disabled unless configured.
@@ -79,8 +80,8 @@ request envelope and SSE framing (see [docs/GEMINI_ANTIGRAVITY.md](docs/GEMINI_A
 |---|---|---|
 | `schema_translator` | `run_before_request`, `run_on_stream_chunk` | Converts open-map tool schemas to strict KV arrays and reverses them on responses |
 | `intent` | `run_before_request`, `run_on_stream_chunk` | Captures **why** each tool call is made: injects the required `"i"` field into tool schemas (plus a system-prompt example) and extracts it from the stream into the shared cache |
-| `keyword_compactor` | `run_before_request` | Deterministic, local, free tool-result compaction guided by the intent cache |
-| `compactor` | `run_before_request` | Cheap-model tool-result compaction guided by the intent cache |
+| `keyword_compactor` | `run_before_request` | Policy-driven source markers, deterministic reductions, and intent-guided extractive compaction |
+| `compactor` | `run_before_request` | The same safety policy plus economically gated cheap-model summaries |
 | `pii` | `run_before_request` | Scans tool results (local model + regex) and blocks the request if PII is found |
 | `otel` | `run_before_request`, `run_after_response` | Emits request/response OTel metrics |
 | `auth` | `run_before_request` | Normalizes caller identity from allowlisted auth headers |
@@ -90,6 +91,8 @@ request envelope and SSE framing (see [docs/GEMINI_ANTIGRAVITY.md](docs/GEMINI_A
 > `compactor` are **alternatives** (deterministic/local vs. cheap-model offload),
 > not a pipeline: run **one**, not both, or whichever comes first starves the other.
 > Recommended order: `["schema_translator", "intent", "keyword_compactor"]`.
+> Unmatched tools remain exact. See [Tool-output and Responses compaction](docs/COMPACTION.md)
+> for policy modes, first-pass behavior, pricing, recovery, and OpenAI Responses.
 
 ## Project Structure
 
@@ -130,7 +133,7 @@ torana-edge/
 |---|---|
 | `/provider/<name>/<upstream-path>` | Proxied request to the named provider |
 | `/health` | Liveness check — `{"status":"ok"}` |
-| `/stats` | Cumulative counters (requests, tokens, compactions, bytes saved) |
+| `/stats` | Requests/tokens plus separate compaction transformations, applications, cache reuse, and estimated gross/net savings |
 
 ## Environment Variables
 
@@ -155,4 +158,3 @@ make test
 ## License
 
 Apache 2.0
-
