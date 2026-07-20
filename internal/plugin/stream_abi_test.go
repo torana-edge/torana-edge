@@ -585,6 +585,131 @@ func TestIntentBridgeFeedsKeywordCompactor(t *testing.T) {
 	}
 }
 
+// TestCompactorsRespectToolResultConsumptionBoundary pins the structural
+// safety rule from #166 through the real WASM request path. Fresh results,
+// including every result in a parallel batch, must reach the model verbatim.
+// Once a later assistant message exists, historical results may be compacted,
+// including old results in a request that also contains a fresh round.
+func TestCompactorsRespectToolResultConsumptionBoundary(t *testing.T) {
+	const compacted = "compacted historical result"
+
+	for _, pluginName := range []string{"keyword_compactor", "compactor"} {
+		pluginName := pluginName
+		t.Run(pluginName, func(t *testing.T) {
+			requireWASM(t, "../../plugins/"+pluginName+"/plugin.wasm")
+
+			for _, tc := range []struct {
+				name          string
+				messages      []engine.Message
+				wantCompacted map[string]bool
+			}{
+				{
+					name: "fresh single result",
+					messages: []engine.Message{
+						toolCallMessage("fresh-1"),
+						toolResultMessage("fresh-1"),
+					},
+					wantCompacted: map[string]bool{"fresh-1": false},
+				},
+				{
+					name: "fresh parallel batch",
+					messages: []engine.Message{
+						parallelToolCallMessage("parallel-1", "parallel-2"),
+						toolResultMessage("parallel-1"),
+						toolResultMessage("parallel-2"),
+					},
+					wantCompacted: map[string]bool{"parallel-1": false, "parallel-2": false},
+				},
+				{
+					name: "historical result",
+					messages: []engine.Message{
+						toolCallMessage("old-1"),
+						toolResultMessage("old-1"),
+						{Role: engine.RoleAssistant, Content: "I consumed the result."},
+						{Role: engine.RoleUser, Content: "Continue."},
+					},
+					wantCompacted: map[string]bool{"old-1": true},
+				},
+				{
+					name: "mixed historical and fresh rounds",
+					messages: []engine.Message{
+						toolCallMessage("old-2"),
+						toolResultMessage("old-2"),
+						parallelToolCallMessage("fresh-2", "fresh-3"),
+						toolResultMessage("fresh-2"),
+						toolResultMessage("fresh-3"),
+					},
+					wantCompacted: map[string]bool{"old-2": true, "fresh-2": false, "fresh-3": false},
+				},
+			} {
+				t.Run(tc.name, func(t *testing.T) {
+					store := cache.NewLocalCache(time.Minute)
+					for id := range tc.wantCompacted {
+						if pluginName == "keyword_compactor" {
+							store.Set("intent:"+id, "needle")
+						} else {
+							store.Set("compacted:"+id, compacted)
+						}
+					}
+					pp := newTestPipelineWith(t, "../../plugins", []string{pluginName}, store, nil)
+					out, err := pp.RunBeforeRequest(context.Background(), 1, &engine.ChatRequest{Messages: tc.messages})
+					if err != nil {
+						t.Fatalf("RunBeforeRequest: %v", err)
+					}
+
+					seen := make(map[string]bool, len(tc.wantCompacted))
+					for _, msg := range out.Messages {
+						want, tracked := tc.wantCompacted[msg.ToolCallID]
+						if msg.Role != engine.RoleTool || !tracked {
+							continue
+						}
+						seen[msg.ToolCallID] = true
+						if want && msg.Content == largeToolResult() {
+							t.Errorf("historical result %q was not compacted", msg.ToolCallID)
+						}
+						if !want && msg.Content != largeToolResult() {
+							t.Errorf("fresh result %q changed: got %q", msg.ToolCallID, msg.Content)
+						}
+					}
+					for id := range tc.wantCompacted {
+						if !seen[id] {
+							t.Errorf("tool result %q missing from output", id)
+						}
+					}
+				})
+			}
+		})
+	}
+}
+
+func toolCallMessage(ids ...string) engine.Message {
+	return parallelToolCallMessage(ids...)
+}
+
+func parallelToolCallMessage(ids ...string) engine.Message {
+	calls := make([]engine.ToolCall, 0, len(ids))
+	for _, id := range ids {
+		calls = append(calls, engine.ToolCall{ID: id, Name: "read"})
+	}
+	return engine.Message{Role: engine.RoleAssistant, ToolCalls: calls}
+}
+
+func toolResultMessage(id string) engine.Message {
+	return engine.Message{Role: engine.RoleTool, ToolCallID: id, ToolName: "read", Content: largeToolResult()}
+}
+
+func largeToolResult() string {
+	var lines []string
+	for i := 0; i < 80; i++ {
+		if i == 40 {
+			lines = append(lines, "needle: exact relevant line")
+			continue
+		}
+		lines = append(lines, "filler output that is intentionally long and repetitive ................")
+	}
+	return strings.Join(lines, "\n")
+}
+
 // TestIntentInjectsNoSyntheticMessages: the intent plugin must teach the "i"
 // convention WITHOUT adding messages — a fake conversation is
 // indistinguishable from real history and contaminates model behavior
