@@ -174,3 +174,33 @@ The guardrail test `internal/plugin/cache_compliance_test.go` runs every
 in-repo plugin twice over an identical request and asserts byte-identical
 output, and asserts markers survive the round-trip. New plugins are picked up
 by adding their name to the list — do so.
+
+## 7. Coding-Agent Tool-Output Safety
+
+A `run_before_request` plugin sees tool results immediately before they are
+sent to the model. The trailing tool-result batch is new evidence: the model
+requested it in the preceding assistant message and has not consumed it yet.
+Never summarize, truncate, or remove that batch.
+
+For historical tool results, use an explicit policy rather than a single byte
+threshold:
+
+- Preserve the newest N tool-use/result pairs.
+- Support case-insensitive per-tool exclusions for exact-output tools such as
+  `Read`, `View`, and file-oriented shell commands.
+- Prefer verbatim extractive reduction for source, diffs, errors, and command
+  output. Abstractive summaries can corrupt edit anchors and exact identifiers.
+- Replace removed history with a deterministic marker that says what was
+  removed and how to retrieve or reproduce it.
+- Cache the original when recovery is possible, and measure task success and
+  billed cost—not just bytes removed.
+
+This is the safety boundary tracked by
+[#166](https://github.com/torana-edge/torana-edge/issues/166). A useful model is
+[Anthropic's context-editing policy](https://platform.claude.com/docs/en/build-with-claude/context-editing):
+trigger only after the overall context is large, keep recent tool uses, allow
+excluded tools, and clear old results in chronological order. The empirical
+study [Token Reduction Is Not Cost Reduction](https://arxiv.org/abs/2607.12161)
+also shows why the success metric must include patch completion and billed cost:
+tool-output compression can remove verbatim edit anchors and lengthen the agent
+trajectory even when the individual request is smaller.

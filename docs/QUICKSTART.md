@@ -1,9 +1,9 @@
 # Torana Edge — Quickstart
 
-Torana Edge sits between your AI coding harness and your LLM provider.
-It intercepts tool calls, extracts intent, and compacts massive tool
-results through a cheaper model — cutting token costs by 90%+ on
-file reads, grep searches, and other repetitive coding tasks.
+Torana Edge sits between your AI coding harness and your LLM provider. It
+normalizes provider formats and runs an ordered WASM plugin pipeline over chat
+requests and responses. Optional compactors can reduce large tool outputs for
+workloads where lossy reduction is acceptable.
 
 ## 1-minute install
 
@@ -11,11 +11,15 @@ file reads, grep searches, and other repetitive coding tasks.
 go install github.com/torana-edge/torana-edge/cmd/torana@latest
 ```
 
-Or clone and build:
+This installs the proxy executable only. It does not install plugin source or
+compiled `.wasm` artifacts. Use it for provider routing without plugins, or
+provide a separately built plugin directory.
+
+To use the bundled plugins, clone the repository and build them:
 ```bash
 git clone https://github.com/torana-edge/torana-edge
 cd torana-edge
-go build -o torana ./cmd/torana/
+make build
 ```
 
 ## Configure
@@ -37,7 +41,7 @@ Create `config.json`:
   },
   "plugins": {
     "dir": "./plugins",
-    "order": ["schema_translator", "intent", "keyword_compactor"]
+    "order": ["schema_translator", "intent"]
   },
   "limits": {
     "concurrency": 10,
@@ -46,10 +50,13 @@ Create `config.json`:
 }
 ```
 
-> **Plugin order:** `intent` captures why each tool call happens; the compactor
-> then uses those intents to shrink tool results. Keep `intent` before the
-> compactor, and run **one** compactor — `keyword_compactor` (deterministic,
-> local, free) **or** `compactor` (cheap-model offload), never both.
+> **Coding-agent safety:** the current compactors are lossy and may alter a
+> fresh file-read result before the model sees it, breaking exact-match edits.
+> The configuration above deliberately enables no compactor while
+> [#166](https://github.com/torana-edge/torana-edge/issues/166) is open. For a
+> research-only workload, append **one** compactor after `intent`:
+> `keyword_compactor` (deterministic/local) or `compactor` (model offload),
+> never both.
 
 ## Route your harness
 

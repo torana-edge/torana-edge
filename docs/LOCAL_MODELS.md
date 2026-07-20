@@ -9,7 +9,7 @@ or any OpenAI-compatible local server.
 {
   "providers": {
     "ollama": {
-      "url": "http://localhost:11434/v1",
+      "url": "http://localhost:11434",
       "format": "openai",
       "fallback": ["deepseek"]
     }
@@ -28,7 +28,7 @@ while keeping your primary provider (DeepSeek/OpenAI) for reasoning.
 {
   "providers": {
     "vllm": {
-      "url": "http://localhost:8000/v1",
+      "url": "http://localhost:8000",
       "format": "openai"
     }
   }
@@ -37,16 +37,31 @@ while keeping your primary provider (DeepSeek/OpenAI) for reasoning.
 
 ## Local offload (free compaction)
 
-Use the `compactor` plugin to automatically route heavy summarization tasks to a local model. It consumes intents captured by the `intent` plugin, so `intent` must run before it:
+Use the `compactor` plugin to route eligible summarization tasks to a local
+model. Provider URLs must be host roots because the offload client appends
+`/v1/chat/completions`. The compactor consumes intents captured by the `intent`
+plugin, so `intent` must run before it:
 
 ```json
 {
   "plugins": {
     "dir": "./plugins",
     "order": ["intent", "compactor"]
+  },
+  "offload": {
+    "enabled": true,
+    "provider": "ollama",
+    "model": "qwen2.5:3b"
   }
 }
 ```
 
 This gives you token-free compaction — the summarization runs on your
-local GPU without any API costs, as the compactor plugin can be configured to offload to Ollama.
+local GPU without API costs.
+
+The current compactor is lossy and considers fresh tool results before the
+model has seen them. Do not enable it for coding-agent sessions that depend on
+exact file contents until
+[#166](https://github.com/torana-edge/torana-edge/issues/166) is resolved. It is
+appropriate today for research, logs, and other outputs where summarization is
+acceptable.

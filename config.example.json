@@ -45,8 +45,8 @@
   },
   "plugins": {
     "dir": "./plugins",
-    "_comment": "Order matters: schema_translator first (translate requests, reverse responses), then 'intent' (captures WHY each tool call is made into the shared cache), then ONE compactor. keyword_compactor (deterministic, local, free) and compactor (cheap-model offload, higher quality) are alternatives, not a pipeline — running both lets whichever is first starve the other. Both require 'intent' before them.",
-    "order": ["schema_translator", "intent", "compactor"],
+    "_comment": "Safe coding-agent baseline: schema_translator plus intent instrumentation, with lossy compaction disabled while issue #166 is open. For research/log-analysis workloads, append ONE compactor after intent: keyword_compactor (deterministic/local) or compactor (model offload), never both.",
+    "order": ["schema_translator", "intent"],
     "config": {
       "intent": {
         "_comment": "fill controls what the intent plugin does with a HISTORY tool call whose intent was never captured (the model organically omitted 'i'): 'heuristic' (default) fills it with a template derived from the call's arguments and the current task — required to keep multi-turn 'i' emission alive, since one 'i'-less call in history becomes a per-tool precedent the model imitates; 'off' leaves history untouched (only sensible for models that reliably honor required schema fields). Filled values are never cached and never drive compaction; watch torana_intent_filled_total to see how often a model needs propping up.",
