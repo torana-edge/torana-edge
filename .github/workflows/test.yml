@@ -12,14 +12,23 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
+        id: go
         with:
           go-version: "1.26"
+      - name: Cache Wazero compilation
+        uses: actions/cache@v4
+        with:
+          path: /tmp/wazero-cache
+          key: ${{ runner.os }}-${{ runner.arch }}-go${{ steps.go.outputs.go-version }}-wazero-${{ hashFiles('go.mod', 'go.sum', 'Makefile', 'plugins/**/*.go', 'examples/plugins/**/*.go', 'testdata/**/*.go', 'pkg/**/*.go') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-go${{ steps.go.outputs.go-version }}-wazero-
+            ${{ runner.os }}-${{ runner.arch }}-wazero-
       - name: Build
         run: go build ./...
       - name: Build WASM plugins
         run: make plugins testdata
       - name: Test
-        run: TORANA_E2E=1 go test ./... -race -timeout 600s
+        run: TORANA_CI_CACHE=/tmp/wazero-cache TORANA_E2E=1 go test ./... -race -timeout 600s
       - name: Vet
         run: go vet ./...
 
