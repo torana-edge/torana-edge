@@ -23,7 +23,7 @@ The supported modes are:
 | Mode | Behavior |
 | --- | --- |
 | `exact` | Never alter the output. This is also the default for unknown tools. |
-| `source` | Keep the source read exact until three later assistant messages have consumed it, then replace it with a deterministic reread marker. |
+| `source` | Reserved, but currently fails closed to `exact`. Live OMP dogfood showed that reread markers can make an agent repeatedly fetch different ranges of the same file. |
 | `deterministic` | Retain bounded head/tail evidence plus size, SHA-256, omitted-byte count, and a rerun instruction. Set `first_pass` to compact the first model exposure. |
 | `keyword` | `keyword_compactor` only: retain intent-matching lines after at least one exact exposure. |
 | `model` | `compactor` only: create an intent-guided offload summary after at least one exact exposure, then apply it only when the economic gate passes. |
@@ -43,8 +43,7 @@ Example deterministic coding-agent policy:
         "tool_policies": [
           {
             "match": "read*",
-            "mode": "source",
-            "rerun": "Read the file again to recover exact current contents."
+            "mode": "exact"
           },
           {
             "match": "web_search",
@@ -64,6 +63,11 @@ Example deterministic coding-agent policy:
 for large, reproducible listings, searches, and repetitive successful logs: the
 model sees the same compact representation on every turn, so no later prompt
 prefix rewrite is required. Do not enable it for source reads or exact records.
+Keep source-reading tools `exact`: merely making their output recoverable does
+not bound the number or cost of recovery calls an agent may make. The `source`
+spelling is accepted for configuration compatibility, but currently behaves as
+`exact` while recovery economics and loop detection are investigated in issue
+#178.
 
 ## Model compaction economics
 
@@ -106,7 +110,7 @@ ships no price table because rates and cache semantics change.
         "expected_applications": 6,
         "tool_policies": [
           {"match": "web_search", "mode": "model"},
-          {"match": "read*", "mode": "source"}
+          {"match": "read*", "mode": "exact"}
         ]
       }
     }
@@ -141,7 +145,10 @@ economically gated compactor so the decision uses the final provider and model.
 estimated removed tokens, cache rewrite tokens, gross savings, net savings, and
 reasons a dollar estimate was unavailable. These numbers support workload-
 specific A/B comparisons; they are not a universal percentage of the total API
-bill.
+bill. It also exposes successful offload input, output, cache-read, and
+cache-write tokens so an A/B test can include the summarizer's actual cost.
+OpenAI-compatible DeepSeek responses are accounted using DeepSeek's
+`prompt_cache_hit_tokens` fields when standard OpenAI cache details are absent.
 
 ## OpenAI Responses compaction
 

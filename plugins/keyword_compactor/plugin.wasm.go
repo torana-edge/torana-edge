@@ -79,12 +79,10 @@ func init() {
 				}
 				continue
 			case "source":
-				if assistantAfter[i] < 3 {
-					continue
-				}
-				if applyDeterministicPolicy(msg, toolName, toolArgs, rule, true) {
-					modified = true
-				}
+				// Live OMP dogfood showed that replacing aged source reads makes
+				// autonomous agents reread different ranges of the same file until
+				// they hit their request limit. Source mode is therefore fail-closed
+				// to exact until the economically gated experiment in #178 ships.
 				continue
 			case "keyword":
 				if assistantAfter[i] == 0 {

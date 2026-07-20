@@ -703,23 +703,13 @@ func TestCompactorToolPolicies(t *testing.T) {
 				}
 			})
 
-			t.Run("source retained for two later assistants", func(t *testing.T) {
-				messages := sourceHistory("source-two", 2)
+			t.Run("source remains exact after aging", func(t *testing.T) {
+				messages := sourceHistory("source-exact", 5)
 				out := runToolPolicyRequest(t, pluginName,
 					`{"tool_policies":[{"match":"read_file","mode":"source","rerun":"Read the file again."}]}`,
 					messages)
-				if got := toolResultContent(t, out, "source-two"); got != largeToolResult() {
-					t.Fatalf("source changed before three later assistant messages: %q", got)
-				}
-			})
-
-			t.Run("source marker after third later assistant", func(t *testing.T) {
-				out := runToolPolicyRequest(t, pluginName,
-					`{"tool_policies":[{"match":"READ_FILE","mode":"source","rerun":"Read the file again."}]}`,
-					sourceHistory("source-three", 3))
-				got := toolResultContent(t, out, "source-three")
-				if !strings.Contains(got, "mode: source") || !strings.Contains(got, "retained_bytes: 0") || strings.Contains(got, "exact relevant line") {
-					t.Fatalf("aged source was not replaced by a reread-only marker: %q", got)
+				if got := toolResultContent(t, out, "source-exact"); got != largeToolResult() {
+					t.Fatalf("source mode must fail closed to exact after loop-prone dogfood: %q", got)
 				}
 			})
 

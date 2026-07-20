@@ -76,6 +76,24 @@ func TestModelBatchReportUsesAdjustedTailOnce(t *testing.T) {
 	}
 }
 
+func TestOptimisticPreflightChargesUncachedRewrite(t *testing.T) {
+	uncached := &pb.Message{Role: "tool", ToolCallId: "new", Content: strings.Repeat("x", 10_000)}
+	cached := &pb.Message{Role: "tool", ToolCallId: "cached", Content: strings.Repeat("y", 10_000)}
+	candidates, hasUncached := optimisticModelCandidates([]modelWork{
+		{message: uncached, index: 0},
+		{message: cached, index: 1, cached: "summary"},
+	})
+	if !hasUncached {
+		t.Fatal("uncached work was not detected")
+	}
+	if candidates[0].source != "transformation" {
+		t.Fatalf("uncached optimistic candidate source=%q, want transformation", candidates[0].source)
+	}
+	if candidates[1].source != "cache_reuse" {
+		t.Fatalf("cached optimistic candidate source=%q, want cache_reuse", candidates[1].source)
+	}
+}
+
 func containsMarker(s string) bool {
 	const marker = "... [truncated] ..."
 	for i := 0; i+len(marker) <= len(s); i++ {
