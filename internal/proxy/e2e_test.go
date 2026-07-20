@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/torana-edge/torana-edge/internal/economics"
 	"github.com/torana-edge/torana-edge/internal/format"
 	"github.com/torana-edge/torana-edge/internal/plugin"
 	"github.com/torana-edge/torana-edge/internal/provider"
@@ -132,18 +133,33 @@ func TestE2E(t *testing.T) {
 			t.Errorf("offload Authorization: got %q want Bearer sk-e2e", got)
 		}
 		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(`{"choices":[{"message":{"content":"summary of the answer"}}]}`))
+		w.Write([]byte(`{
+			"choices":[{"message":{"content":"summary of the answer"}}],
+			"usage":{"prompt_tokens":20,"completion_tokens":5}
+		}`))
 	}))
 	defer offload.Close()
 
 	// --- proxy with real plugins ---------------------------------------------
+	cacheRate := 1.0
+	freeRate := 0.0
 	cfg := Config{
 		Port: "0",
 		Providers: provider.Config{
 			Providers: map[string]provider.Provider{
-				"oai":   {URL: upstream.URL, Format: "openai"},
-				"anth":  {URL: upstream.URL + "/anthropic", Format: "anthropic"},
-				"cheap": {URL: offload.URL, Format: "openai"},
+				"oai": {
+					URL: upstream.URL, Format: "openai",
+					Pricing: map[string]economics.ModelPricing{
+						"gpt-x": {CacheReadUSDPerMTok: &cacheRate, CacheWriteUSDPerMTok: &cacheRate},
+					},
+				},
+				"anth": {URL: upstream.URL + "/anthropic", Format: "anthropic"},
+				"cheap": {
+					URL: offload.URL, Format: "openai",
+					Pricing: map[string]economics.ModelPricing{
+						"cheap-1": {InputUSDPerMTok: &freeRate, OutputUSDPerMTok: &freeRate},
+					},
+				},
 			},
 			Plugins: provider.PluginsConfig{
 				Dir: "../../plugins",
@@ -151,6 +167,12 @@ func TestE2E(t *testing.T) {
 				// keyword_compactor is its ALTERNATIVE (either/or) and is
 				// deliberately not in this pipeline.
 				Order: []string{"schema_translator", "intent", "compactor"},
+				Config: map[string]json.RawMessage{
+					"compactor": json.RawMessage(`{
+						"expected_applications": 6,
+						"tool_policies": [{"match": "search", "mode": "model"}]
+					}`),
+				},
 			},
 			Offload: provider.OffloadConfig{
 				Enabled:  true,
