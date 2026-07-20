@@ -2,6 +2,7 @@ package bedrock
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"strings"
@@ -262,7 +263,7 @@ func TestStreamSerialize(t *testing.T) {
 	close(evtCh)
 
 	var buf bytes.Buffer
-	if err := stream.SerializeStream(&buf, evtCh); err != nil {
+	if err := stream.SerializeStream(context.Background(), &buf, evtCh); err != nil {
 		t.Fatalf("serialize: %v", err)
 	}
 

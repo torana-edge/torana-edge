@@ -2,6 +2,7 @@ package anthropic
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"strings"
@@ -241,7 +242,7 @@ func TestStreamSerialize(t *testing.T) {
 	close(evtCh)
 
 	var buf bytes.Buffer
-	if err := sa.SerializeStream(&buf, evtCh); err != nil {
+	if err := sa.SerializeStream(context.Background(), &buf, evtCh); err != nil {
 		t.Fatalf("serialize: %v", err)
 	}
 

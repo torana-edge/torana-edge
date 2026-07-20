@@ -2,6 +2,7 @@ package format_test
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"reflect"
 	"strings"
@@ -43,7 +44,7 @@ func TestSerializeSingleCompleteDelta(t *testing.T) {
 			close(events)
 
 			var buf bytes.Buffer
-			if err := f.Stream.SerializeStream(&buf, events); err != nil {
+			if err := f.Stream.SerializeStream(context.Background(), &buf, events); err != nil {
 				t.Fatalf("SerializeStream: %v", err)
 			}
 

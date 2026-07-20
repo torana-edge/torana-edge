@@ -3,6 +3,7 @@ package gemini
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -218,7 +219,7 @@ type serializeState struct {
 
 // SerializeStream writes StreamEvents as Gemini SSE frames to writer, wrapping
 // each in {"response":…} for the Code Assist flavor (s.Wrapped).
-func (s *StreamAdapter) SerializeStream(w io.Writer, events <-chan engine.StreamEvent) error {
+func (s *StreamAdapter) SerializeStream(ctx context.Context, w io.Writer, events <-chan engine.StreamEvent) error {
 	var toolState *serializeState
 	var pendingUsage *engine.StreamUsage
 

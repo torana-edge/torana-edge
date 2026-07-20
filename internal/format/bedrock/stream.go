@@ -2,6 +2,7 @@ package bedrock
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -257,7 +258,7 @@ func mapBedrockStopReason(reason string) string {
 
 // --- SerializeStream ---
 
-func (s *Stream) SerializeStream(w io.Writer, events <-chan engine.StreamEvent) error {
+func (s *Stream) SerializeStream(ctx context.Context, w io.Writer, events <-chan engine.StreamEvent) error {
 	bw := bufio.NewWriter(w)
 	thinkingOpen := false
 

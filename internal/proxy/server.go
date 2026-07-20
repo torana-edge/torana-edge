@@ -324,7 +324,6 @@ func New(cfg Config) (*Server, error) {
 	// --- reverse proxy ---------------------------------------------------
 	// Context keys for stashing format and chat between Director and ModifyResponse.
 	type formatCtxKey struct{}
-	type chatCtxKey struct{}
 
 	proxy := &httputil.ReverseProxy{
 		Director: func(req *http.Request) {
@@ -551,7 +550,7 @@ func New(cfg Config) (*Server, error) {
 			// Stash format and chat for ModifyResponse.
 			ctx = req.Context()
 			ctx = context.WithValue(ctx, formatCtxKey{}, fmt)
-			ctx = context.WithValue(ctx, chatCtxKey{}, chat)
+			ctx = context.WithValue(ctx, engine.ChatRequestKey, chat)
 			*req = *req.WithContext(ctx)
 
 			req.Body = io.NopCloser(bytes.NewReader(newBody))
@@ -680,7 +679,7 @@ func New(cfg Config) (*Server, error) {
 					if streamPl != nil {
 						defer streamPl.Release()
 					}
-					serErr := fmt.Stream.SerializeStream(pw, events)
+					serErr := fmt.Stream.SerializeStream(resp.Request.Context(), pw, events)
 					pw.Close()
 					// On client disconnect the request context is cancelled, so
 					// the transport tears down the upstream connection and the
@@ -705,7 +704,7 @@ func New(cfg Config) (*Server, error) {
 					// here: the whole stream has been serialized.
 					ctx := resp.Request.Context()
 					if pl := reqStateFrom(ctx).Pipeline; pl != nil {
-						if chat, _ := ctx.Value(chatCtxKey{}).(*engine.ChatRequest); chat != nil {
+						if chat, _ := ctx.Value(engine.ChatRequestKey).(*engine.ChatRequest); chat != nil {
 							if chat.ToranaMeta == nil {
 								chat.ToranaMeta = map[string]any{}
 							}
@@ -761,7 +760,7 @@ func New(cfg Config) (*Server, error) {
 					if pl.HasGrant("env.original_response") {
 						rs.OriginalResp = bodyBytes
 					}
-					chat, _ := ctx.Value(chatCtxKey{}).(*engine.ChatRequest)
+					chat, _ := ctx.Value(engine.ChatRequestKey).(*engine.ChatRequest)
 					// Records provider usage into rs as a side effect.
 					modified, modErr := runJSONResponseHooks(ctx, pl, rs.ID, f.Name, chat, bodyBytes)
 					if modErr != nil {
