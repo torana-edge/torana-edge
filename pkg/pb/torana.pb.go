@@ -34,8 +34,12 @@ type Message struct {
 	ToolCalls         []*ToolCall `protobuf:"bytes,6,rep,name=tool_calls,json=toolCalls,proto3" json:"tool_calls,omitempty"`
 	ToolCallId        string      `protobuf:"bytes,7,opt,name=tool_call_id,json=toolCallId,proto3" json:"tool_call_id,omitempty"`
 	ToolName          string      `protobuf:"bytes,8,opt,name=tool_name,json=toolName,proto3" json:"tool_name,omitempty"`
-	unknownFields     protoimpl.UnknownFields
-	sizeCache         protoimpl.SizeCache
+	// Opaque provider cache breakpoint on this message (JSON object, e.g.
+	// Anthropic {"type":"ephemeral"}). Preserved verbatim across the plugin
+	// boundary so mutating plugins don't strip prompt-cache markers.
+	CacheControlJson []byte `protobuf:"bytes,10,opt,name=cache_control_json,json=cacheControlJson,proto3" json:"cache_control_json,omitempty"`
+	unknownFields    protoimpl.UnknownFields
+	sizeCache        protoimpl.SizeCache
 }
 
 func (x *Message) Reset() {
@@ -131,6 +135,13 @@ func (x *Message) GetToolName() string {
 	return ""
 }
 
+func (x *Message) GetCacheControlJson() []byte {
+	if x != nil {
+		return x.CacheControlJson
+	}
+	return nil
+}
+
 // An assistant's request to invoke a tool.
 type ToolCall struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
@@ -210,8 +221,10 @@ type ToolDef struct {
 	Description    string                 `protobuf:"bytes,2,opt,name=description,proto3" json:"description,omitempty"`
 	ParametersJson []byte                 `protobuf:"bytes,3,opt,name=parameters_json,json=parametersJson,proto3" json:"parameters_json,omitempty"`
 	Strict         bool                   `protobuf:"varint,4,opt,name=strict,proto3" json:"strict,omitempty"`
-	unknownFields  protoimpl.UnknownFields
-	sizeCache      protoimpl.SizeCache
+	// Opaque cache breakpoint after this tool definition (JSON object).
+	CacheControlJson []byte `protobuf:"bytes,5,opt,name=cache_control_json,json=cacheControlJson,proto3" json:"cache_control_json,omitempty"`
+	unknownFields    protoimpl.UnknownFields
+	sizeCache        protoimpl.SizeCache
 }
 
 func (x *ToolDef) Reset() {
@@ -270,6 +283,13 @@ func (x *ToolDef) GetStrict() bool {
 		return x.Strict
 	}
 	return false
+}
+
+func (x *ToolDef) GetCacheControlJson() []byte {
+	if x != nil {
+		return x.CacheControlJson
+	}
+	return nil
 }
 
 // Canonical representation of a chat completion request.
@@ -617,11 +637,15 @@ func (x *StreamError) GetMessage() string {
 }
 
 type StreamUsage struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	InputTokens   int32                  `protobuf:"varint,1,opt,name=input_tokens,json=inputTokens,proto3" json:"input_tokens,omitempty"`
-	OutputTokens  int32                  `protobuf:"varint,2,opt,name=output_tokens,json=outputTokens,proto3" json:"output_tokens,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state        protoimpl.MessageState `protogen:"open.v1"`
+	InputTokens  int32                  `protobuf:"varint,1,opt,name=input_tokens,json=inputTokens,proto3" json:"input_tokens,omitempty"`
+	OutputTokens int32                  `protobuf:"varint,2,opt,name=output_tokens,json=outputTokens,proto3" json:"output_tokens,omitempty"`
+	// Input tokens served from the provider's prompt cache.
+	CacheReadTokens int32 `protobuf:"varint,3,opt,name=cache_read_tokens,json=cacheReadTokens,proto3" json:"cache_read_tokens,omitempty"`
+	// Input tokens written to the cache this turn; 0 if unreported.
+	CacheWriteTokens int32 `protobuf:"varint,4,opt,name=cache_write_tokens,json=cacheWriteTokens,proto3" json:"cache_write_tokens,omitempty"`
+	unknownFields    protoimpl.UnknownFields
+	sizeCache        protoimpl.SizeCache
 }
 
 func (x *StreamUsage) Reset() {
@@ -664,6 +688,20 @@ func (x *StreamUsage) GetInputTokens() int32 {
 func (x *StreamUsage) GetOutputTokens() int32 {
 	if x != nil {
 		return x.OutputTokens
+	}
+	return 0
+}
+
+func (x *StreamUsage) GetCacheReadTokens() int32 {
+	if x != nil {
+		return x.CacheReadTokens
+	}
+	return 0
+}
+
+func (x *StreamUsage) GetCacheWriteTokens() int32 {
+	if x != nil {
+		return x.CacheWriteTokens
 	}
 	return 0
 }
@@ -933,7 +971,7 @@ var File_pkg_pb_torana_proto protoreflect.FileDescriptor
 
 const file_pkg_pb_torana_proto_rawDesc = "" +
 	"\n" +
-	"\x13pkg/pb/torana.proto\x12\ttorana.v1\"\xd0\x02\n" +
+	"\x13pkg/pb/torana.proto\x12\ttorana.v1\"\xfe\x02\n" +
 	"\aMessage\x12\x12\n" +
 	"\x04role\x18\x01 \x01(\tR\x04role\x12\x18\n" +
 	"\acontent\x18\x02 \x01(\tR\acontent\x12,\n" +
@@ -945,17 +983,20 @@ const file_pkg_pb_torana_proto_rawDesc = "" +
 	"tool_calls\x18\x06 \x03(\v2\x13.torana.v1.ToolCallR\ttoolCalls\x12 \n" +
 	"\ftool_call_id\x18\a \x01(\tR\n" +
 	"toolCallId\x12\x1b\n" +
-	"\ttool_name\x18\b \x01(\tR\btoolName\"s\n" +
+	"\ttool_name\x18\b \x01(\tR\btoolName\x12,\n" +
+	"\x12cache_control_json\x18\n" +
+	" \x01(\fR\x10cacheControlJson\"s\n" +
 	"\bToolCall\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x12\n" +
 	"\x04name\x18\x02 \x01(\tR\x04name\x12%\n" +
 	"\x0earguments_json\x18\x03 \x01(\fR\rargumentsJson\x12\x1c\n" +
-	"\tsignature\x18\x04 \x01(\tR\tsignature\"\x80\x01\n" +
+	"\tsignature\x18\x04 \x01(\tR\tsignature\"\xae\x01\n" +
 	"\aToolDef\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12 \n" +
 	"\vdescription\x18\x02 \x01(\tR\vdescription\x12'\n" +
 	"\x0fparameters_json\x18\x03 \x01(\fR\x0eparametersJson\x12\x16\n" +
-	"\x06strict\x18\x04 \x01(\bR\x06strict\"\xe0\x03\n" +
+	"\x06strict\x18\x04 \x01(\bR\x06strict\x12,\n" +
+	"\x12cache_control_json\x18\x05 \x01(\fR\x10cacheControlJson\"\xe0\x03\n" +
 	"\vChatRequest\x12\x14\n" +
 	"\x05model\x18\x01 \x01(\tR\x05model\x12.\n" +
 	"\bmessages\x18\x02 \x03(\v2\x12.torana.v1.MessageR\bmessages\x12(\n" +
@@ -985,10 +1026,12 @@ const file_pkg_pb_torana_proto_rawDesc = "" +
 	"\x05index\x18\x01 \x01(\x05R\x05index\";\n" +
 	"\vStreamError\x12\x12\n" +
 	"\x04code\x18\x01 \x01(\x05R\x04code\x12\x18\n" +
-	"\amessage\x18\x02 \x01(\tR\amessage\"U\n" +
+	"\amessage\x18\x02 \x01(\tR\amessage\"\xaf\x01\n" +
 	"\vStreamUsage\x12!\n" +
 	"\finput_tokens\x18\x01 \x01(\x05R\vinputTokens\x12#\n" +
-	"\routput_tokens\x18\x02 \x01(\x05R\foutputTokens\"\xd8\x03\n" +
+	"\routput_tokens\x18\x02 \x01(\x05R\foutputTokens\x12*\n" +
+	"\x11cache_read_tokens\x18\x03 \x01(\x05R\x0fcacheReadTokens\x12,\n" +
+	"\x12cache_write_tokens\x18\x04 \x01(\x05R\x10cacheWriteTokens\"\xd8\x03\n" +
 	"\vStreamEvent\x12\x1f\n" +
 	"\n" +
 	"text_delta\x18\x01 \x01(\tH\x00R\ttextDelta\x12'\n" +
