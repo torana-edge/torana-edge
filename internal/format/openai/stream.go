@@ -59,10 +59,12 @@ type responsesInputTokensDetails struct {
 }
 
 type sseUsage struct {
-	PromptTokens        int                     `json:"prompt_tokens"`
-	CompletionTokens    int                     `json:"completion_tokens"`
-	TotalTokens         int                     `json:"total_tokens"`
-	PromptTokensDetails *ssePromptTokensDetails `json:"prompt_tokens_details,omitempty"`
+	PromptTokens          int                     `json:"prompt_tokens"`
+	CompletionTokens      int                     `json:"completion_tokens"`
+	TotalTokens           int                     `json:"total_tokens"`
+	PromptTokensDetails   *ssePromptTokensDetails `json:"prompt_tokens_details,omitempty"`
+	PromptCacheHitTokens  int                     `json:"prompt_cache_hit_tokens,omitempty"`
+	PromptCacheMissTokens int                     `json:"prompt_cache_miss_tokens,omitempty"`
 }
 
 // ssePromptTokensDetails carries the automatic prompt-cache hit count
@@ -181,6 +183,8 @@ func (s *StreamAdapter) parseStream(body io.Reader, ch chan<- engine.StreamEvent
 			}
 			if d := chunk.Usage.PromptTokensDetails; d != nil {
 				u.CacheReadTokens = d.CachedTokens
+			} else {
+				u.CacheReadTokens = chunk.Usage.PromptCacheHitTokens
 			}
 			ch <- engine.StreamEvent{Usage: u}
 		}

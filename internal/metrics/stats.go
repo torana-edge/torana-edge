@@ -38,6 +38,10 @@ type Stats struct {
 	Compactions                int64                    `json:"compactions"`
 	BytesSaved                 int64                    `json:"bytes_saved"`
 	OffloadFailures            int64                    `json:"offload_failures"`
+	OffloadInputTokens         int64                    `json:"offload_input_tokens"`
+	OffloadOutputTokens        int64                    `json:"offload_output_tokens"`
+	OffloadCacheReadTokens     int64                    `json:"offload_cache_read_tokens"`
+	OffloadCacheWriteTokens    int64                    `json:"offload_cache_write_tokens"`
 	CompactionApplications     int64                    `json:"compaction_applications"`
 	CompactionTransformations  int64                    `json:"compaction_transformations"`
 	CompactionCacheReuses      int64                    `json:"compaction_cache_reuses"`
@@ -62,6 +66,10 @@ type StatsTracker struct {
 	compactions                int64
 	bytesSaved                 int64
 	offloadFailures            int64
+	offloadInputTokens         int64
+	offloadOutputTokens        int64
+	offloadCacheReadTokens     int64
+	offloadCacheWriteTokens    int64
 	compactionApplications     int64
 	compactionTransformations  int64
 	compactionCacheReuses      int64
@@ -200,6 +208,19 @@ func (s *StatsTracker) RecordOffloadFailure() {
 	atomic.AddInt64(&s.offloadFailures, 1)
 }
 
+// RecordOffloadUsage records provider-reported usage for a successful
+// compaction offload. InputTokens includes cache reads for OpenAI-compatible
+// providers, matching Usage.InputIncludesCacheRead.
+func (s *StatsTracker) RecordOffloadUsage(usage economics.Usage) {
+	if !usage.Reported {
+		return
+	}
+	atomic.AddInt64(&s.offloadInputTokens, usage.InputTokens)
+	atomic.AddInt64(&s.offloadOutputTokens, usage.OutputTokens)
+	atomic.AddInt64(&s.offloadCacheReadTokens, usage.CacheReadTokens)
+	atomic.AddInt64(&s.offloadCacheWriteTokens, usage.CacheWriteTokens)
+}
+
 // Snapshot returns a copy of the current state.
 func (s *StatsTracker) Snapshot() Stats {
 	snap := Stats{
@@ -213,6 +234,10 @@ func (s *StatsTracker) Snapshot() Stats {
 		Compactions:                atomic.LoadInt64(&s.compactions),
 		BytesSaved:                 atomic.LoadInt64(&s.bytesSaved),
 		OffloadFailures:            atomic.LoadInt64(&s.offloadFailures),
+		OffloadInputTokens:         atomic.LoadInt64(&s.offloadInputTokens),
+		OffloadOutputTokens:        atomic.LoadInt64(&s.offloadOutputTokens),
+		OffloadCacheReadTokens:     atomic.LoadInt64(&s.offloadCacheReadTokens),
+		OffloadCacheWriteTokens:    atomic.LoadInt64(&s.offloadCacheWriteTokens),
 		CompactionApplications:     atomic.LoadInt64(&s.compactionApplications),
 		CompactionTransformations:  atomic.LoadInt64(&s.compactionTransformations),
 		CompactionCacheReuses:      atomic.LoadInt64(&s.compactionCacheReuses),

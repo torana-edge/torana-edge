@@ -87,6 +87,31 @@ func TestOffloadResultReturnsProviderModelAndUsage(t *testing.T) {
 	}
 }
 
+func TestOffloadResultReturnsDeepSeekCacheUsageAndRecordsStats(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"choices":[{"message":{"content":"summary"}}],"usage":{"prompt_tokens":1200,"completion_tokens":80,"prompt_cache_hit_tokens":900,"prompt_cache_miss_tokens":300}}`))
+	}))
+	defer upstream.Close()
+
+	s, err := New(Config{Providers: offloadConfig(upstream.URL)})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	ctx := context.WithValue(context.Background(), reqStateKey{}, &reqState{ID: 1, CallerAuth: "k"})
+	got, err := s.offloadCompletionResult(ctx, `{"system_prompt":"sum","user_prompt":"text"}`)
+	if err != nil {
+		t.Fatalf("offloadCompletionResult: %v", err)
+	}
+	if got.Usage.CacheReadTokens != 900 {
+		t.Fatalf("DeepSeek cache usage not returned: %+v", got.Usage)
+	}
+	stats := s.stats.Snapshot()
+	if stats.OffloadInputTokens != 1200 || stats.OffloadOutputTokens != 80 || stats.OffloadCacheReadTokens != 900 {
+		t.Fatalf("offload usage not recorded: %+v", stats)
+	}
+}
+
 // TestOffloadDedicatedKeyWins: offload.api_key_env overrides the caller key.
 func TestOffloadDedicatedKeyWins(t *testing.T) {
 	upstream := offloadServer(t, "Bearer dedicated-key", "cheap-1")

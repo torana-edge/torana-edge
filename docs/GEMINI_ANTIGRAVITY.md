@@ -67,7 +67,7 @@ forwarded upstream — **Torana injects no auth**.
     "config": {
       "keyword_compactor": {
         "tool_policies": [
-          {"match": "read*", "mode": "source"},
+          {"match": "read*", "mode": "exact"},
           {"match": "grep*", "mode": "keyword"}
         ]
       }

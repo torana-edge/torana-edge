@@ -66,7 +66,7 @@ a local model. Provider URLs are host roots because Torana appends
         "expected_applications": 6,
         "tool_policies": [
           {"match": "web_search", "mode": "model"},
-          {"match": "read*", "mode": "source"}
+          {"match": "read*", "mode": "exact"}
         ]
       }
     }

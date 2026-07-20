@@ -17,8 +17,8 @@
     "config": {
       "keyword_compactor": {
         "tool_policies": [
-          {"match": "read*", "mode": "source", "rerun": "Read the file again to recover exact current contents."},
-          {"match": "view*", "mode": "source", "rerun": "View the file again to recover exact current contents."},
+          {"match": "read*", "mode": "exact"},
+          {"match": "view*", "mode": "exact"},
           {"match": "web_search", "mode": "deterministic", "first_pass": true, "rerun": "Repeat the search to recover every result."},
           {"match": "grep*", "mode": "keyword"}
         ]

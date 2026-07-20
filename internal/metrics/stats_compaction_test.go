@@ -59,3 +59,13 @@ func TestRecordCompactionReportExplainsUnavailableDollars(t *testing.T) {
 		t.Fatalf("unavailable dollar totals must be omitted: %+v", snapshot)
 	}
 }
+
+func TestRecordOffloadUsage(t *testing.T) {
+	s := NewStatsTracker()
+	s.RecordOffloadUsage(economics.Usage{Reported: true, InputTokens: 1200, OutputTokens: 80, CacheReadTokens: 900, CacheWriteTokens: 100})
+	s.RecordOffloadUsage(economics.Usage{})
+	got := s.Snapshot()
+	if got.OffloadInputTokens != 1200 || got.OffloadOutputTokens != 80 || got.OffloadCacheReadTokens != 900 || got.OffloadCacheWriteTokens != 100 {
+		t.Fatalf("offload totals wrong: %+v", got)
+	}
+}

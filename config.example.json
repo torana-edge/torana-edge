@@ -57,12 +57,12 @@
         "fill": "heuristic"
       },
       "compactor": {
-        "_comment": "Dormant until compactor is added to order. Source reads stay exact for three later assistant messages. Deterministic first_pass is only for explicitly recoverable outputs. Model mode also requires expected_applications, target/offload pricing, and positive estimated net savings.",
+        "_comment": "Dormant until compactor is added to order. Source-reading tools stay exact; source mode is reserved and currently fails closed to exact after live agent reread loops. Deterministic first_pass is only for explicitly recoverable outputs. Model mode also requires expected_applications, target/offload pricing, and positive estimated net savings.",
         "max_offload_input_chars": 0,
         "expected_applications": 6,
         "tool_policies": [
-          {"match": "read*", "mode": "source", "rerun": "Read the file again to recover exact current contents."},
-          {"match": "view*", "mode": "source", "rerun": "View the file again to recover exact current contents."},
+          {"match": "read*", "mode": "exact"},
+          {"match": "view*", "mode": "exact"},
           {"match": "web_search", "mode": "deterministic", "first_pass": true, "rerun": "Repeat the search to recover every result."}
         ]
       },

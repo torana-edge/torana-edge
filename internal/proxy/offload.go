@@ -139,9 +139,11 @@ func (s *Server) offloadCompletionResult(ctx context.Context, payloadJSON string
 			} `json:"message"`
 		} `json:"choices"`
 		Usage *struct {
-			PromptTokens     int64 `json:"prompt_tokens"`
-			CompletionTokens int64 `json:"completion_tokens"`
-			PromptDetails    struct {
+			PromptTokens          int64 `json:"prompt_tokens"`
+			CompletionTokens      int64 `json:"completion_tokens"`
+			PromptCacheHitTokens  int64 `json:"prompt_cache_hit_tokens"`
+			PromptCacheMissTokens int64 `json:"prompt_cache_miss_tokens"`
+			PromptDetails         struct {
 				CachedTokens     int64 `json:"cached_tokens"`
 				CacheWriteTokens int64 `json:"cache_write_tokens"`
 			} `json:"prompt_tokens_details"`
@@ -165,8 +167,12 @@ func (s *Server) offloadCompletionResult(ctx context.Context, payloadJSON string
 		usage.InputTokens = result.Usage.PromptTokens
 		usage.OutputTokens = result.Usage.CompletionTokens
 		usage.CacheReadTokens = result.Usage.PromptDetails.CachedTokens
+		if usage.CacheReadTokens == 0 {
+			usage.CacheReadTokens = result.Usage.PromptCacheHitTokens
+		}
 		usage.CacheWriteTokens = result.Usage.PromptDetails.CacheWriteTokens
 	}
+	s.stats.RecordOffloadUsage(usage)
 	return economics.OffloadResult{
 		Completion: result.Choices[0].Message.Content,
 		Provider:   provName,

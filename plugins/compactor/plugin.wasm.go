@@ -116,12 +116,9 @@ func compactToolResults(ctx context.Context, req *pb.ChatRequest) bool {
 			}
 			continue
 		case "source":
-			if assistantAfter[i] < 3 {
-				continue
-			}
-			if applyDeterministicPolicy(msg, toolName, toolArgs, rule, true) {
-				modified = true
-			}
+			// Fail closed to exact. Live OMP dogfood showed that aged source
+			// markers can trigger unbounded different-range rereads. Re-enable
+			// only behind the economic/recovery experiment tracked by #178.
 			continue
 		case "model":
 			// A model summary is never allowed before one exact consumption.
@@ -194,18 +191,7 @@ func prepareAndApplyModelBatch(req *pb.ChatRequest, works []modelWork) bool {
 	// Do not incur offload cost unless even a zero-cost, best-case replacement
 	// would be economical. Cached candidates use their known final size; an
 	// uncached candidate optimistically assumes zero bytes.
-	var optimistic []modelCandidate
-	hasUncached := false
-	for _, work := range works {
-		replacement := work.cached
-		if replacement == "" {
-			hasUncached = true
-		}
-		optimistic = append(optimistic, modelCandidate{
-			message: work.message, index: work.index, originalBytes: len(work.message.Content), replacement: replacement,
-			source: "cache_reuse", cacheKey: work.cacheKey,
-		})
-	}
+	optimistic, hasUncached := optimisticModelCandidates(works)
 	if hasUncached {
 		preflight, ok := modelBatchReport(req, optimistic, false)
 		if !ok || !evaluateModelReport(preflight) {
@@ -264,6 +250,28 @@ func prepareAndApplyModelBatch(req *pb.ChatRequest, works []modelWork) bool {
 	payload, _ := json.Marshal(report)
 	_, _ = sdk.HostCall("torana_record_savings", string(payload))
 	return true
+}
+
+func optimisticModelCandidates(works []modelWork) ([]modelCandidate, bool) {
+	candidates := make([]modelCandidate, 0, len(works))
+	hasUncached := false
+	for _, work := range works {
+		replacement := work.cached
+		source := "cache_reuse"
+		if replacement == "" {
+			hasUncached = true
+			// This candidate would create a new compact prefix. Even the
+			// zero-byte optimistic preflight must charge that cache rewrite;
+			// labeling it cache_reuse lets uneconomic summaries reach offload
+			// before the exact post-offload gate rejects them.
+			source = "transformation"
+		}
+		candidates = append(candidates, modelCandidate{
+			message: work.message, index: work.index, originalBytes: len(work.message.Content), replacement: replacement,
+			source: source, cacheKey: work.cacheKey,
+		})
+	}
+	return candidates, hasUncached
 }
 
 func modelBatchReport(req *pb.ChatRequest, candidates []modelCandidate, includeOffload bool) (map[string]any, bool) {
