@@ -254,7 +254,19 @@ type Runtime struct {
 // later runtimes — notably the fresh runtime built on every plugin
 // hot-reload — reuse that cached artifact for unchanged modules instead of
 // paying the full (and, under -race, very slow) compilation again.
-var wasmCompilationCache = wazero.NewCompilationCache()
+var wasmCompilationCache wazero.CompilationCache
+
+func init() {
+	if dir := os.Getenv("TORANA_CI_CACHE"); dir != "" {
+		if c, err := wazero.NewCompilationCacheWithDir(dir); err == nil {
+			wasmCompilationCache = c
+			return
+		} else {
+			log.Printf("[wasm] compilation cache unavailable at %q; using memory only: %v", dir, err)
+		}
+	}
+	wasmCompilationCache = wazero.NewCompilationCache()
+}
 
 func NewRuntime(ctx context.Context) *Runtime {
 	r := newRuntime(ctx, cache.NewLocalCache(cacheTTL), true)
