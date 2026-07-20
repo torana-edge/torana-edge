@@ -560,6 +560,8 @@ func TestIntentBridgeFeedsKeywordCompactor(t *testing.T) {
 				{ID: "call_req_77", Name: "read", Arguments: map[string]any{"path": "failover.go"}},
 			}},
 			{Role: engine.RoleTool, ToolCallID: "call_req_77", Content: big},
+			{Role: engine.RoleAssistant, Content: "I have read the file."},
+			{Role: engine.RoleUser, Content: "Great, now fix it."},
 		},
 	}
 	out, err := pp.RunBeforeRequest(context.Background(), 5, chat)
