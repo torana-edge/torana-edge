@@ -2,8 +2,10 @@ package openai
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
+	"strings"
 	"testing"
 
 	"github.com/torana-edge/torana-edge/internal/engine"
@@ -207,7 +209,7 @@ func TestStreamSerialize_RoundTrip(t *testing.T) {
 	close(evtCh)
 
 	var buf bytes.Buffer
-	if err := sa.SerializeStream(&buf, evtCh); err != nil {
+	if err := sa.SerializeStream(context.Background(), &buf, evtCh); err != nil {
 		t.Fatalf("serialize: %v", err)
 	}
 
@@ -327,5 +329,123 @@ func TestProviderExtensions_RoundTrip(t *testing.T) {
 	}
 	if v, _ := parsed["temperature"].(float64); v != 0.7 {
 		t.Errorf("temperature = %v", v)
+	}
+}
+
+func TestRoundTrip_ResponsesAPI(t *testing.T) {
+	adapter := &Adapter{}
+
+	input := `{
+		"model": "gpt-4o-realtime",
+		"input": [
+			{ "type": "message", "role": "user", "content": "Hello!" },
+			{ "type": "function_call", "call_id": "call_abc", "name": "get_weather", "arguments": "{\"city\":\"Seattle\"}" },
+			{ "type": "function_call_output", "call_id": "call_abc", "output": "Rainy" }
+		],
+		"tools": [
+			{ "type": "function", "name": "get_weather", "description": "Get weather", "parameters": { "type": "object" } }
+		],
+		"stream": true
+	}`
+
+	chat, err := adapter.Unmarshal([]byte(input))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if chat.Model != "gpt-4o-realtime" {
+		t.Errorf("expected model gpt-4o-realtime, got %q", chat.Model)
+	}
+
+	if len(chat.Messages) != 3 {
+		t.Fatalf("expected 3 messages, got %d", len(chat.Messages))
+	}
+
+	if chat.Messages[0].Role != engine.RoleUser || chat.Messages[0].Content != "Hello!" {
+		t.Errorf("message 0 mismatch: %+v", chat.Messages[0])
+	}
+
+	if chat.Messages[1].Role != engine.RoleAssistant || len(chat.Messages[1].ToolCalls) != 1 || chat.Messages[1].ToolCalls[0].ID != "call_abc" || chat.Messages[1].ToolCalls[0].Name != "get_weather" {
+		t.Errorf("message 1 mismatch: %+v", chat.Messages[1])
+	}
+
+
+	if chat.Messages[2].Role != engine.RoleTool || chat.Messages[2].ToolCallID != "call_abc" || chat.Messages[2].Content != "Rainy" {
+		t.Errorf("message 2 mismatch: %+v", chat.Messages[2])
+	}
+
+	out, err := adapter.Marshal(chat)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var parsed map[string]any
+	if err := json.Unmarshal(out, &parsed); err != nil {
+		t.Fatal(err)
+	}
+
+	if parsed["model"] != "gpt-4o-realtime" {
+		t.Errorf("marshaled model mismatch: %v", parsed["model"])
+	}
+
+	// Test streaming parser
+	sa := &StreamAdapter{}
+	streamInput := `data: {"type": "response.output_text.delta", "delta": "Hello"}` + "\n" +
+		`data: {"type": "response.output_item.added", "item": {"id": "item_123", "type": "function_call", "name": "get_weather", "call_id": "call_123"}}` + "\n" +
+		`data: {"type": "response.function_call_arguments.delta", "item_id": "item_123", "delta": "{\""}` + "\n" +
+		`data: {"type": "response.function_call_arguments.delta", "item_id": "item_123", "delta": "city\":\"Seattle\"}"}` + "\n" +
+		`data: {"type": "response.function_call_arguments.done", "item_id": "item_123"}` + "\n" +
+		`data: {"type": "response.completed", "response": {"status": "completed", "usage": {"prompt_tokens": 10, "completion_tokens": 20}}}` + "\n"
+
+	ch := sa.ParseStream(strings.NewReader(streamInput))
+	var events []engine.StreamEvent
+	for ev := range ch {
+		events = append(events, ev)
+	}
+
+	if len(events) != 7 {
+		t.Fatalf("expected 7 events, got %d: %+v", len(events), events)
+	}
+
+	if events[0].TextDelta == nil || *events[0].TextDelta != "Hello" {
+		t.Errorf("expected TextDelta 'Hello', got %+v", events[0])
+	}
+	if events[1].ToolCallStart == nil || events[1].ToolCallStart.ID != "call_123" || events[1].ToolCallStart.Name != "get_weather" {
+		t.Errorf("expected ToolCallStart, got %+v", events[1])
+	}
+	if events[2].ToolCallDelta == nil || events[2].ToolCallDelta.ArgumentsDelta != "{\"" {
+		t.Errorf("expected ToolCallDelta, got %+v", events[2])
+	}
+	if events[3].ToolCallDelta == nil || events[3].ToolCallDelta.ArgumentsDelta != "city\":\"Seattle\"}" {
+		t.Errorf("expected ToolCallDelta, got %+v", events[3])
+	}
+	if events[4].ToolCallEnd == nil || events[4].ToolCallEnd.Index != 0 {
+		t.Errorf("expected ToolCallEnd, got %+v", events[4])
+	}
+	if events[5].FinishReason != "stop" {
+		t.Errorf("expected FinishReason 'stop', got %+v", events[5])
+	}
+	if events[6].Usage == nil || events[6].Usage.InputTokens != 10 || events[6].Usage.OutputTokens != 20 {
+		t.Errorf("expected Usage, got %+v", events[6])
+	}
+
+	// Test streaming serializer
+	evtCh := make(chan engine.StreamEvent, len(events))
+	for _, ev := range events {
+		evtCh <- ev
+	}
+	close(evtCh)
+
+	ctx := context.WithValue(context.Background(), engine.ChatRequestKey, chat)
+	chat.ProviderExtensions["_openai_variant"] = "responses"
+
+	var buf bytes.Buffer
+	if err := sa.SerializeStream(ctx, &buf, evtCh); err != nil {
+		t.Fatal(err)
+	}
+
+	serialized := buf.String()
+	if !strings.Contains(serialized, "event: response.output_text.delta") || !strings.Contains(serialized, "event: response.function_call_arguments.delta") {
+		t.Errorf("serialized output mismatch:\n%s", serialized)
 	}
 }

@@ -2,6 +2,7 @@ package gemini
 
 import (
 	"bytes"
+	"context"
 	"strings"
 	"testing"
 
@@ -18,7 +19,7 @@ func TestSerializeBadArgsSurfacesError(t *testing.T) {
 	close(events)
 
 	var buf bytes.Buffer
-	err := (&StreamAdapter{}).SerializeStream(&buf, events)
+	err := (&StreamAdapter{}).SerializeStream(context.Background(), &buf, events)
 	if err == nil {
 		t.Fatalf("expected error for invalid args, got nil; wire: %s", buf.String())
 	}

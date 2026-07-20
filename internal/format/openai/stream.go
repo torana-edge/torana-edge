@@ -2,6 +2,7 @@ package openai
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -17,11 +18,30 @@ type StreamAdapter struct{}
 // --- wire types for parse ---------------------------------------------------
 
 type sseChunk struct {
-	ID      string      `json:"id"`
-	Object  string      `json:"object"`
-	Choices []sseChoice `json:"choices"`
+	ID      string      `json:"id,omitempty"`
+	Object  string      `json:"object,omitempty"`
+	Choices []sseChoice `json:"choices,omitempty"`
 	Usage   *sseUsage   `json:"usage,omitempty"`
 	Error   *sseError   `json:"error,omitempty"`
+
+	// Responses API fields
+	Type     string           `json:"type,omitempty"`
+	ItemID   string           `json:"item_id,omitempty"`
+	Delta    *string          `json:"delta,omitempty"`
+	Item     *responsesItem   `json:"item,omitempty"`
+	Response *responsesObject `json:"response,omitempty"`
+}
+
+type responsesItem struct {
+	ID     string `json:"id,omitempty"`
+	Type   string `json:"type,omitempty"`
+	Name   string `json:"name,omitempty"`
+	CallID string `json:"call_id,omitempty"`
+}
+
+type responsesObject struct {
+	Status string    `json:"status,omitempty"`
+	Usage  *sseUsage `json:"usage,omitempty"`
 }
 
 type sseUsage struct {
@@ -91,6 +111,10 @@ func (s *StreamAdapter) parseStream(body io.Reader, ch chan<- engine.StreamEvent
 	// toolCallStarted tracks which indices have emitted ToolCallStart.
 	toolCallStarted := make(map[int]bool)
 
+	// Responses API tracking
+	itemIDToIndex := make(map[string]int)
+	nextIndex := 0
+
 	for scanner.Scan() {
 		line := scanner.Text()
 
@@ -142,6 +166,11 @@ func (s *StreamAdapter) parseStream(body io.Reader, ch chan<- engine.StreamEvent
 				u.CacheReadTokens = d.CachedTokens
 			}
 			ch <- engine.StreamEvent{Usage: u}
+		}
+
+		if chunk.Type != "" {
+			s.parseResponsesEvent(chunk, ch, itemIDToIndex, &nextIndex)
+			continue
 		}
 
 		// Process choices.
@@ -228,19 +257,98 @@ func (s *StreamAdapter) parseStream(body io.Reader, ch chan<- engine.StreamEvent
 	}
 }
 
+func (s *StreamAdapter) parseResponsesEvent(chunk sseChunk, ch chan<- engine.StreamEvent, itemIDToIndex map[string]int, nextIndex *int) {
+	switch chunk.Type {
+	case "response.output_text.delta":
+		if chunk.Delta != nil && *chunk.Delta != "" {
+			ch <- engine.StreamEvent{
+				TextDelta: chunk.Delta,
+			}
+		}
+
+	case "response.output_item.added":
+		if chunk.Item != nil && chunk.Item.Type == "function_call" {
+			idx := *nextIndex
+			itemIDToIndex[chunk.Item.ID] = idx
+			*nextIndex = idx + 1
+
+			ch <- engine.StreamEvent{
+				ToolCallStart: &engine.ToolCallStart{
+					Index: idx,
+					ID:    chunk.Item.CallID,
+					Name:  chunk.Item.Name,
+				},
+			}
+		}
+
+	case "response.function_call_arguments.delta":
+		if chunk.Delta != nil && *chunk.Delta != "" && chunk.ItemID != "" {
+			if idx, ok := itemIDToIndex[chunk.ItemID]; ok {
+				ch <- engine.StreamEvent{
+					ToolCallDelta: &engine.ToolCallDelta{
+						Index:          idx,
+						ArgumentsDelta: *chunk.Delta,
+					},
+				}
+			}
+		}
+
+	case "response.function_call_arguments.done":
+		if chunk.ItemID != "" {
+			if idx, ok := itemIDToIndex[chunk.ItemID]; ok {
+				ch <- engine.StreamEvent{
+					ToolCallEnd: &engine.ToolCallEnd{
+						Index: idx,
+					},
+				}
+			}
+		}
+
+	case "response.completed":
+		if chunk.Response != nil {
+			if chunk.Response.Status == "completed" {
+				ch <- engine.StreamEvent{
+					FinishReason: "stop",
+				}
+			}
+			if chunk.Response.Usage != nil {
+				ch <- engine.StreamEvent{
+					Usage: &engine.StreamUsage{
+						InputTokens:  chunk.Response.Usage.PromptTokens,
+						OutputTokens: chunk.Response.Usage.CompletionTokens,
+					},
+				}
+			}
+		}
+
+	case "response.failed":
+		if chunk.Error != nil {
+			ch <- engine.StreamEvent{
+				Error: &engine.StreamError{
+					Message: chunk.Error.Message,
+				},
+			}
+		}
+	}
+}
+
 // ---------------------------------------------------------------------------
 // SerializeStream
 // ---------------------------------------------------------------------------
 
 const streamID = "chatcmpl-torana"
 
-// SerializeStream writes StreamEvents as OpenAI Chat Completions SSE to writer.
-// Returns when the channel is closed or on write error.
-//
-// [DONE] is emitted when the event channel closes, not with the finish chunk:
-// OpenAI sends the usage chunk AFTER the finish chunk, so terminating at
-// FinishReason would drop it.
-func (s *StreamAdapter) SerializeStream(w io.Writer, events <-chan engine.StreamEvent) error {
+// SerializeStream writes StreamEvents from the channel as SSE to writer.
+func (s *StreamAdapter) SerializeStream(ctx context.Context, w io.Writer, events <-chan engine.StreamEvent) error {
+	if chat, ok := ctx.Value(engine.ChatRequestKey).(*engine.ChatRequest); ok {
+		if variant, ok := chat.ProviderExtensions["_openai_variant"].(string); ok && variant == "responses" {
+			return s.serializeResponsesStream(w, events)
+		}
+	}
+	return s.serializeChatStream(w, events)
+}
+
+func (s *StreamAdapter) serializeChatStream(w io.Writer, events <-chan engine.StreamEvent) error {
 	for evt := range events {
 		line, err := serializeEvent(evt)
 		if err != nil {
@@ -255,6 +363,154 @@ func (s *StreamAdapter) SerializeStream(w io.Writer, events <-chan engine.Stream
 	}
 	if _, err := fmt.Fprint(w, "data: [DONE]\n\n"); err != nil {
 		return fmt.Errorf("openai serialize write: %w", err)
+	}
+	return nil
+}
+
+func (s *StreamAdapter) serializeResponsesStream(w io.Writer, events <-chan engine.StreamEvent) error {
+	toolCallStarted := make(map[int]string) // index -> ID
+	toolCallArgs := make(map[int]*strings.Builder) // index -> accumulated arguments
+
+	for evt := range events {
+		switch {
+		case evt.Error != nil:
+			payload := map[string]any{
+				"type": "response.failed",
+				"error": map[string]any{
+					"message": evt.Error.Message,
+				},
+			}
+			b, _ := json.Marshal(payload)
+			if _, err := fmt.Fprintf(w, "event: response.failed\ndata: %s\n\n", string(b)); err != nil {
+				return err
+			}
+			return fmt.Errorf("openai responses stream error: %s", evt.Error.Message)
+
+		case evt.TextDelta != nil:
+			payload := map[string]any{
+				"type":  "response.output_text.delta",
+				"delta": *evt.TextDelta,
+			}
+			b, _ := json.Marshal(payload)
+			if _, err := fmt.Fprintf(w, "event: response.output_text.delta\ndata: %s\n\n", string(b)); err != nil {
+				return err
+			}
+
+		case evt.ThinkingDelta != nil:
+			payload := map[string]any{
+				"type":  "response.output_text.delta",
+				"delta": *evt.ThinkingDelta,
+			}
+			b, _ := json.Marshal(payload)
+			if _, err := fmt.Fprintf(w, "event: response.output_text.delta\ndata: %s\n\n", string(b)); err != nil {
+				return err
+			}
+
+		case evt.ToolCallStart != nil:
+			tc := evt.ToolCallStart
+			toolCallStarted[tc.Index] = tc.ID
+			toolCallArgs[tc.Index] = &strings.Builder{}
+			
+			payload := map[string]any{
+				"type": "response.output_item.added",
+				"item": map[string]any{
+					"id":      "item_" + tc.ID,
+					"type":    "function_call",
+					"name":    tc.Name,
+					"call_id": tc.ID,
+				},
+			}
+			b, _ := json.Marshal(payload)
+			if _, err := fmt.Fprintf(w, "event: response.output_item.added\ndata: %s\n\n", string(b)); err != nil {
+				return err
+			}
+
+		case evt.ToolCallDelta != nil:
+			tcd := evt.ToolCallDelta
+			id, ok := toolCallStarted[tcd.Index]
+			if !ok {
+				continue
+			}
+			if builder, ok := toolCallArgs[tcd.Index]; ok {
+				builder.WriteString(tcd.ArgumentsDelta)
+			}
+			
+			payload := map[string]any{
+				"type":    "response.function_call_arguments.delta",
+				"item_id": "item_" + id,
+				"delta":   tcd.ArgumentsDelta,
+			}
+			b, _ := json.Marshal(payload)
+			if _, err := fmt.Fprintf(w, "event: response.function_call_arguments.delta\ndata: %s\n\n", string(b)); err != nil {
+				return err
+			}
+
+		case evt.ToolCallEnd != nil:
+			tce := evt.ToolCallEnd
+			id, ok := toolCallStarted[tce.Index]
+			if !ok {
+				continue
+			}
+			args := ""
+			if builder, ok := toolCallArgs[tce.Index]; ok {
+				args = builder.String()
+			}
+			
+			payloadDone := map[string]any{
+				"type":    "response.function_call_arguments.done",
+				"item_id": "item_" + id,
+			}
+			bDone, _ := json.Marshal(payloadDone)
+			if _, err := fmt.Fprintf(w, "event: response.function_call_arguments.done\ndata: %s\n\n", string(bDone)); err != nil {
+				return err
+			}
+
+			payloadItem := map[string]any{
+				"type": "response.output_item.done",
+				"item": map[string]any{
+					"id":        "item_" + id,
+					"type":      "function_call",
+					"call_id":   id,
+					"arguments": args,
+				},
+			}
+			bItem, _ := json.Marshal(payloadItem)
+			if _, err := fmt.Fprintf(w, "event: response.output_item.done\ndata: %s\n\n", string(bItem)); err != nil {
+				return err
+			}
+
+		case evt.FinishReason != "":
+			payload := map[string]any{
+				"type": "response.completed",
+				"response": map[string]any{
+					"status": "completed",
+				},
+			}
+			b, _ := json.Marshal(payload)
+			if _, err := fmt.Fprintf(w, "event: response.completed\ndata: %s\n\n", string(b)); err != nil {
+				return err
+			}
+
+		case evt.Usage != nil:
+			payload := map[string]any{
+				"type": "response.completed",
+				"response": map[string]any{
+					"status": "completed",
+					"usage": map[string]any{
+						"prompt_tokens":     evt.Usage.InputTokens,
+						"completion_tokens": evt.Usage.OutputTokens,
+						"total_tokens":      evt.Usage.InputTokens + evt.Usage.OutputTokens,
+					},
+				},
+			}
+			b, _ := json.Marshal(payload)
+			if _, err := fmt.Fprintf(w, "event: response.completed\ndata: %s\n\n", string(b)); err != nil {
+				return err
+			}
+		}
+	}
+	if _, err := fmt.Fprint(w, "data: [DONE]\n\n"); err != nil {
+		return err
 	}
 	return nil
 }

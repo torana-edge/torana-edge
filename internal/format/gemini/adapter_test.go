@@ -1,6 +1,7 @@
 package gemini
 
 import (
+	"context"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -168,7 +169,7 @@ func TestStreamSerialize(t *testing.T) {
 	close(events)
 
 	var buf strings.Builder
-	if err := s.SerializeStream(&buf, events); err != nil {
+	if err := s.SerializeStream(context.Background(), &buf, events); err != nil {
 		t.Fatalf("SerializeStream error: %v", err)
 	}
 
