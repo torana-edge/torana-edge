@@ -130,3 +130,47 @@ wazero.NewModuleConfig().WithName(name).
     WithStderr(os.Stderr)
 ```
 Failure to include `WithSysNanotime()` will result in `nil pointer dereference` panics inside `wasi_snapshot_preview1.clock_time_get` when Go attempts a GC pass.
+
+## 6. Prompt-Cache Compliance
+
+Provider prompt caching bills cached input tokens at ~10% of full price — it is
+the single biggest cost lever an agent session has, and a plugin can silently
+destroy it. Two rules keep a plugin compliant:
+
+**1. Never strip cache breakpoints.** `Message.cache_control_json` and
+`ToolDef.cache_control_json` carry the client's cache markers (Anthropic
+`cache_control`, Bedrock `cachePoint`) through the plugin boundary. They
+survive automatically — a plugin that returns a request keeps them without
+doing anything. But a plugin that *restructures* messages (splits, merges,
+reorders, drops) must carry the marker to the equivalent position in its
+output. The SDK helpers do this:
+
+```go
+cc := sdk.CacheControl(msg)          // read a message's breakpoint (nil if none)
+sdk.SetCacheBreakpoint(msg, cc)      // attach / clear one
+sdk.MoveCacheBreakpoint(from, to)    // transfer when merging messages
+```
+
+**2. Be deterministic over the cacheable prefix.** Everything before the last
+breakpoint — tools, system prompt, conversation history — must serialize to
+the *same bytes* on every request that replays the same history. OpenAI
+caching is an exact-prefix match (one changed token busts it); Anthropic
+hashes the rendered prompt up to each breakpoint. Concretely:
+
+- No wall-clock time, randomness, request IDs, or counters in anything you
+  inject before a breakpoint.
+- Any value derived for a *historical* message must be a pure function of
+  that message (the intent plugin's heuristic fill once mixed in a snippet of
+  the latest user message — every turn re-serialized the same history to
+  different bytes, busting the cache from that point on; it now derives only
+  from the call's own name+args).
+- One-time changes are fine: the first compaction of a tool result re-caches
+  once and then stays stable (keyed by `tool_call_id`) — a net win. What's
+  fatal is *per-turn* variance.
+- Per-request state belongs in `ToranaMetaJson` (never serialized to the
+  wire), not in messages or tool schemas.
+
+The guardrail test `internal/plugin/cache_compliance_test.go` runs every
+in-repo plugin twice over an identical request and asserts byte-identical
+output, and asserts markers survive the round-trip. New plugins are picked up
+by adding their name to the list — do so.

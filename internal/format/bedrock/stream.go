@@ -38,6 +38,10 @@ type bedrockUsage struct {
 	InputTokens  int `json:"inputTokens"`
 	OutputTokens int `json:"outputTokens"`
 	TotalTokens  int `json:"totalTokens"`
+	// Converse prompt-cache accounting (only present when cachePoints are in
+	// play): read = served from cache, write = written this turn.
+	CacheReadInputTokens  int `json:"cacheReadInputTokens,omitempty"`
+	CacheWriteInputTokens int `json:"cacheWriteInputTokens,omitempty"`
 }
 
 type bedrockMessageStart struct {
@@ -221,8 +225,10 @@ func parseBedrockEvent(line string, inThinking *bool, inToolUse *bool, signature
 		if u.InputTokens > 0 || u.OutputTokens > 0 {
 			return &engine.StreamEvent{
 				Usage: &engine.StreamUsage{
-					InputTokens:  u.InputTokens,
-					OutputTokens: u.OutputTokens,
+					InputTokens:      u.InputTokens,
+					OutputTokens:     u.OutputTokens,
+					CacheReadTokens:  u.CacheReadInputTokens,
+					CacheWriteTokens: u.CacheWriteInputTokens,
 				},
 			}
 		}
@@ -400,9 +406,11 @@ func marshalStreamEvent(evt engine.StreamEvent) []string {
 		se := bedrockStreamEvent{
 			Metadata: &bedrockMetadata{
 				Usage: &bedrockUsage{
-					InputTokens:  evt.Usage.InputTokens,
-					OutputTokens: evt.Usage.OutputTokens,
-					TotalTokens:  evt.Usage.InputTokens + evt.Usage.OutputTokens,
+					InputTokens:           evt.Usage.InputTokens,
+					OutputTokens:          evt.Usage.OutputTokens,
+					TotalTokens:           evt.Usage.InputTokens + evt.Usage.OutputTokens,
+					CacheReadInputTokens:  evt.Usage.CacheReadTokens,
+					CacheWriteInputTokens: evt.Usage.CacheWriteTokens,
 				},
 			},
 		}

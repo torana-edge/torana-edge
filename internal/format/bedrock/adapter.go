@@ -44,6 +44,9 @@ type bedrockContentBlock struct {
 	Thinking   *bedrockThinking   `json:"thinking,omitempty"`
 	ToolUse    *bedrockToolUse    `json:"toolUse,omitempty"`
 	ToolResult *bedrockToolResult `json:"toolResult,omitempty"`
+	// Cache breakpoint block, e.g. {"cachePoint":{"type":"default"}}.
+	// Positional: caches the prefix up to this block. Preserved opaquely.
+	CachePoint map[string]any `json:"cachePoint,omitempty"`
 }
 
 type bedrockThinking struct {
@@ -67,7 +70,10 @@ type bedrockToolConfig struct {
 }
 
 type bedrockTool struct {
-	ToolSpec bedrockToolSpec `json:"toolSpec"`
+	ToolSpec *bedrockToolSpec `json:"toolSpec,omitempty"`
+	// A tools[] entry may instead be a cache breakpoint after the preceding
+	// tool definitions: {"cachePoint":{"type":"default"}}.
+	CachePoint map[string]any `json:"cachePoint,omitempty"`
 }
 
 type bedrockToolSpec struct {
@@ -81,7 +87,8 @@ type bedrockSchema struct {
 }
 
 type bedrockSystemBlock struct {
-	Text string `json:"text"`
+	Text       string         `json:"text,omitempty"`
+	CachePoint map[string]any `json:"cachePoint,omitempty"`
 }
 
 type bedrockInferenceConfig struct {
@@ -107,14 +114,15 @@ func (a *Adapter) Unmarshal(rawBody []byte) (*engine.ChatRequest, error) {
 
 	// Parse system blocks
 	if len(req.System) > 0 {
-		sysBlocks, err := parseSystemBlocks(req.System)
+		sysText, sysCache, err := parseSystemBlocks(req.System)
 		if err != nil {
 			return nil, fmt.Errorf("bedrock: unmarshal system: %w", err)
 		}
-		if len(sysBlocks) > 0 {
+		if len(sysText) > 0 {
 			chat.Messages = append(chat.Messages, engine.Message{
-				Role:    engine.RoleSystem,
-				Content: sysBlocks,
+				Role:         engine.RoleSystem,
+				Content:      sysText,
+				CacheControl: sysCache,
 			})
 		}
 	}
@@ -126,13 +134,31 @@ func (a *Adapter) Unmarshal(rawBody []byte) (*engine.ChatRequest, error) {
 			return nil, fmt.Errorf("bedrock: unmarshal message content: %w", err)
 		}
 
-		msgs := blocksToMessages(bm.Role, blocks)
+		msgs, leadingCache := blocksToMessages(bm.Role, blocks)
+		// A cachePoint before any content in this wire message caches the
+		// prefix ending at the previous message.
+		if leadingCache != nil && len(chat.Messages) > 0 {
+			prev := &chat.Messages[len(chat.Messages)-1]
+			if prev.CacheControl == nil {
+				prev.CacheControl = leadingCache
+			}
+		}
 		chat.Messages = append(chat.Messages, msgs...)
 	}
 
-	// Parse tools
+	// Parse tools: a {"cachePoint":...} entry marks a breakpoint after the
+	// preceding tool definitions.
 	if req.ToolConfig != nil {
 		for _, t := range req.ToolConfig.Tools {
+			if t.CachePoint != nil && t.ToolSpec == nil {
+				if n := len(chat.Tools); n > 0 {
+					chat.Tools[n-1].CacheControl = t.CachePoint
+				}
+				continue
+			}
+			if t.ToolSpec == nil {
+				continue
+			}
 			td := engine.ToolDef{
 				Name:        t.ToolSpec.Name,
 				Description: t.ToolSpec.Description,
@@ -167,17 +193,23 @@ func (a *Adapter) Unmarshal(rawBody []byte) (*engine.ChatRequest, error) {
 	return chat, nil
 }
 
-// parseSystemBlocks parses the system array into a concatenated string.
-func parseSystemBlocks(raw json.RawMessage) (string, error) {
+// parseSystemBlocks parses the system array into a concatenated string plus
+// any cache breakpoint marker found among the blocks.
+func parseSystemBlocks(raw json.RawMessage) (string, map[string]any, error) {
 	var blocks []bedrockSystemBlock
 	if err := json.Unmarshal(raw, &blocks); err != nil {
-		return "", err
+		return "", nil, err
 	}
 	var parts []string
+	var cache map[string]any
 	for _, b := range blocks {
+		if b.CachePoint != nil {
+			cache = b.CachePoint
+			continue
+		}
 		parts = append(parts, b.Text)
 	}
-	return strings.Join(parts, "\n"), nil
+	return strings.Join(parts, "\n"), cache, nil
 }
 
 // parseContentBlocks unmarshals the content JSON as an array of bedrockContentBlock.
@@ -191,9 +223,11 @@ func parseContentBlocks(raw json.RawMessage) ([]bedrockContentBlock, error) {
 
 // blocksToMessages converts content blocks into one or more engine.Message values.
 // Text blocks are concatenated into a single message. Tool use and tool result blocks
-// each produce their own message.
-func blocksToMessages(role string, blocks []bedrockContentBlock) []engine.Message {
-	var msgs []engine.Message
+// each produce their own message. A cachePoint block attaches to the message
+// produced by the blocks before it (positional breakpoint); a cachePoint that
+// precedes all content is returned as leadingCache for the caller to attach
+// to the previous message.
+func blocksToMessages(role string, blocks []bedrockContentBlock) (msgs []engine.Message, leadingCache map[string]any) {
 	var textParts []string
 	var thinkingText string
 	var thinkingSig string
@@ -216,6 +250,15 @@ func blocksToMessages(role string, blocks []bedrockContentBlock) []engine.Messag
 
 	for _, b := range blocks {
 		switch {
+		case b.CachePoint != nil:
+			flushText()
+			if n := len(msgs); n > 0 {
+				if msgs[n-1].CacheControl == nil {
+					msgs[n-1].CacheControl = b.CachePoint
+				}
+			} else if leadingCache == nil {
+				leadingCache = b.CachePoint
+			}
 		case b.Text != nil:
 			textParts = append(textParts, *b.Text)
 		case b.Thinking != nil:
@@ -263,7 +306,7 @@ func blocksToMessages(role string, blocks []bedrockContentBlock) []engine.Messag
 	// Flush any remaining text
 	flushText()
 
-	return msgs
+	return msgs, leadingCache
 }
 
 // mapRole converts Bedrock role strings to engine.Role.
@@ -291,7 +334,7 @@ func (a *Adapter) Marshal(chat *engine.ChatRequest) ([]byte, error) {
 	// System message
 	for _, m := range chat.Messages {
 		if m.Role == engine.RoleSystem && m.Content != "" {
-			req.System = marshalSystemBlocks(m.Content)
+			req.System = marshalSystemBlocks(m.Content, m.CacheControl)
 			break // only first system message
 		}
 	}
@@ -310,7 +353,7 @@ func (a *Adapter) Marshal(chat *engine.ChatRequest) ([]byte, error) {
 		req.ToolConfig = &bedrockToolConfig{}
 		for _, td := range chat.Tools {
 			req.ToolConfig.Tools = append(req.ToolConfig.Tools, bedrockTool{
-				ToolSpec: bedrockToolSpec{
+				ToolSpec: &bedrockToolSpec{
 					Name:        td.Name,
 					Description: td.Description,
 					InputSchema: bedrockSchema{
@@ -318,6 +361,11 @@ func (a *Adapter) Marshal(chat *engine.ChatRequest) ([]byte, error) {
 					},
 				},
 			})
+			if td.CacheControl != nil {
+				req.ToolConfig.Tools = append(req.ToolConfig.Tools, bedrockTool{
+					CachePoint: td.CacheControl,
+				})
+			}
 		}
 	}
 
@@ -347,8 +395,11 @@ func (a *Adapter) Marshal(chat *engine.ChatRequest) ([]byte, error) {
 	return b, nil
 }
 
-func marshalSystemBlocks(text string) json.RawMessage {
+func marshalSystemBlocks(text string, cache map[string]any) json.RawMessage {
 	blocks := []bedrockSystemBlock{{Text: text}}
+	if cache != nil {
+		blocks = append(blocks, bedrockSystemBlock{CachePoint: cache})
+	}
 	b, _ := json.Marshal(blocks)
 	return b
 }
@@ -407,6 +458,11 @@ func marshalMessage(m engine.Message) bedrockMsg {
 			text := m.Content
 			blocks = append(blocks, bedrockContentBlock{Text: &text})
 		}
+	}
+
+	// Re-emit the message's cache breakpoint after its content.
+	if m.CacheControl != nil {
+		blocks = append(blocks, bedrockContentBlock{CachePoint: m.CacheControl})
 	}
 
 	raw, _ := json.Marshal(blocks)

@@ -219,7 +219,6 @@ func init() {
 // contamination surface — kept as a fallback idea, not implemented.
 func rehydrateHistoryIntents(req *pb.ChatRequest) bool {
 	loadConfig()
-	task := latestUserSnippet(req.Messages)
 	restored, filled, present := 0, 0, 0
 	modified := false
 	for _, msg := range req.Messages {
@@ -255,7 +254,7 @@ func rehydrateHistoryIntents(req *pb.ChatRequest) bool {
 				// Filled values are injected into history only — never cached
 				// and never bridged: the intent cache stays real-captured-only
 				// so compaction quality is driven by real intents.
-				intent = heuristicFill(tc.Name, args, task)
+				intent = heuristicFill(tc.Name, args)
 				sdk.EmitMetric("torana_intent_filled_total", sdk.MetricCounter, 1, map[string]string{"tool": tc.Name})
 				sdk.Log(fmt.Sprintf("intent-fill[%s %s]: %s", tc.Name, tc.Id, intent), sdk.LogLevelDebug)
 				filled++
@@ -275,10 +274,17 @@ func rehydrateHistoryIntents(req *pb.ChatRequest) bool {
 
 // heuristicFill derives a stand-in intent for a history tool call whose real
 // intent was never captured. Its only job is presence — preventing an
-// "i"-less precedent — but it carries the call's primary argument and the
-// current task so it reads as a plausible (if mediocre) example rather than a
-// literal token the model might copy verbatim.
-func heuristicFill(name string, args map[string]any, task string) string {
+// "i"-less precedent — but it carries the call's primary argument so it reads
+// as a plausible (if mediocre) example rather than a literal token the model
+// might copy verbatim.
+//
+// PROMPT-CACHE COMPLIANCE: the fill MUST be a pure function of (tool name,
+// args). It previously also mixed in a snippet of the latest user message,
+// which changes every turn — so the same historical call re-serialized to
+// different bytes each request, busting the provider prompt cache (OpenAI
+// exact-prefix, Anthropic breakpoint hash) from that message onward. Do not
+// reintroduce any per-request input here.
+func heuristicFill(name string, args map[string]any) string {
 	subject := name
 	keys := make([]string, 0, len(args))
 	for k := range args {
@@ -293,27 +299,7 @@ func heuristicFill(name string, args map[string]any, task string) string {
 			break
 		}
 	}
-	out := "what " + subject + " shows"
-	if task != "" {
-		out += ", toward: " + task
-	}
-	return out
-}
-
-// latestUserSnippet returns a short single-line excerpt of the most recent
-// user message, skipping harness-injected reminder blocks.
-func latestUserSnippet(msgs []*pb.Message) string {
-	for i := len(msgs) - 1; i >= 0; i-- {
-		m := msgs[i]
-		if m.Role != "user" || m.Content == "" {
-			continue
-		}
-		if strings.HasPrefix(strings.TrimSpace(m.Content), "<system-reminder>") {
-			continue
-		}
-		return truncateRunes(strings.Join(strings.Fields(m.Content), " "), 80)
-	}
-	return ""
+	return "what " + subject + " shows"
 }
 
 // truncateRunes shortens s to at most n runes, never splitting a rune.

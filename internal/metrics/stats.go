@@ -17,28 +17,34 @@ type PluginSavings struct {
 
 // Stats is an immutable snapshot of a StatsTracker.
 type Stats struct {
-	TotalRequests   int64                    `json:"total_requests"`
-	TotalBytesIn    int64                    `json:"total_bytes_in"`
-	TotalBytesOut   int64                    `json:"total_bytes_out"`
-	TotalTokensIn   int64                    `json:"total_tokens_in"`
-	TotalTokensOut  int64                    `json:"total_tokens_out"`
-	Compactions     int64                    `json:"compactions"`
-	BytesSaved      int64                    `json:"bytes_saved"`
-	OffloadFailures int64                    `json:"offload_failures"`
-	PerPlugin       map[string]PluginSavings `json:"per_plugin,omitempty"`
+	TotalRequests  int64 `json:"total_requests"`
+	TotalBytesIn   int64 `json:"total_bytes_in"`
+	TotalBytesOut  int64 `json:"total_bytes_out"`
+	TotalTokensIn  int64 `json:"total_tokens_in"`
+	TotalTokensOut int64 `json:"total_tokens_out"`
+	// Prompt-cache accounting: read = input tokens served from the provider's
+	// cache (billed at ~10% of full price), write = tokens written to cache.
+	TotalCacheReadTokens  int64                    `json:"total_cache_read_tokens"`
+	TotalCacheWriteTokens int64                    `json:"total_cache_write_tokens"`
+	Compactions           int64                    `json:"compactions"`
+	BytesSaved            int64                    `json:"bytes_saved"`
+	OffloadFailures       int64                    `json:"offload_failures"`
+	PerPlugin             map[string]PluginSavings `json:"per_plugin,omitempty"`
 }
 
 // StatsTracker records proxy request statistics and compaction savings —
 // the numbers behind Torana's cost-saving value proposition.
 type StatsTracker struct {
-	totalRequests   int64
-	totalBytesIn    int64
-	totalBytesOut   int64
-	totalTokensIn   int64
-	totalTokensOut  int64
-	compactions     int64
-	bytesSaved      int64
-	offloadFailures int64
+	totalRequests         int64
+	totalBytesIn          int64
+	totalBytesOut         int64
+	totalTokensIn         int64
+	totalTokensOut        int64
+	totalCacheReadTokens  int64
+	totalCacheWriteTokens int64
+	compactions           int64
+	bytesSaved            int64
+	offloadFailures       int64
 
 	mu        sync.Mutex
 	perPlugin map[string]*PluginSavings
@@ -64,6 +70,17 @@ func (s *StatsTracker) RecordTokens(in, out int64) {
 	}
 	if out > 0 {
 		atomic.AddInt64(&s.totalTokensOut, out)
+	}
+}
+
+// RecordCacheTokens accumulates provider-reported prompt-cache usage
+// (read = cache hits, write = cache creation). Zero counts are a no-op.
+func (s *StatsTracker) RecordCacheTokens(read, write int64) {
+	if read > 0 {
+		atomic.AddInt64(&s.totalCacheReadTokens, read)
+	}
+	if write > 0 {
+		atomic.AddInt64(&s.totalCacheWriteTokens, write)
 	}
 }
 
@@ -99,14 +116,16 @@ func (s *StatsTracker) RecordOffloadFailure() {
 // Snapshot returns a copy of the current state.
 func (s *StatsTracker) Snapshot() Stats {
 	snap := Stats{
-		TotalRequests:   atomic.LoadInt64(&s.totalRequests),
-		TotalBytesIn:    atomic.LoadInt64(&s.totalBytesIn),
-		TotalBytesOut:   atomic.LoadInt64(&s.totalBytesOut),
-		TotalTokensIn:   atomic.LoadInt64(&s.totalTokensIn),
-		TotalTokensOut:  atomic.LoadInt64(&s.totalTokensOut),
-		Compactions:     atomic.LoadInt64(&s.compactions),
-		BytesSaved:      atomic.LoadInt64(&s.bytesSaved),
-		OffloadFailures: atomic.LoadInt64(&s.offloadFailures),
+		TotalRequests:         atomic.LoadInt64(&s.totalRequests),
+		TotalBytesIn:          atomic.LoadInt64(&s.totalBytesIn),
+		TotalBytesOut:         atomic.LoadInt64(&s.totalBytesOut),
+		TotalTokensIn:         atomic.LoadInt64(&s.totalTokensIn),
+		TotalTokensOut:        atomic.LoadInt64(&s.totalTokensOut),
+		TotalCacheReadTokens:  atomic.LoadInt64(&s.totalCacheReadTokens),
+		TotalCacheWriteTokens: atomic.LoadInt64(&s.totalCacheWriteTokens),
+		Compactions:           atomic.LoadInt64(&s.compactions),
+		BytesSaved:            atomic.LoadInt64(&s.bytesSaved),
+		OffloadFailures:       atomic.LoadInt64(&s.offloadFailures),
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()

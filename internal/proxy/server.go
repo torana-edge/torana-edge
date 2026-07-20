@@ -138,6 +138,11 @@ type reqState struct {
 	// didn't report.
 	UsageIn  int
 	UsageOut int
+	// UsageCacheRead/UsageCacheWrite are the provider-reported prompt-cache
+	// token counts (read = served from cache, write = written to cache).
+	// Zero when the provider didn't report or nothing was cached.
+	UsageCacheRead  int
+	UsageCacheWrite int
 	// UsageInjected marks that the Director opted an openai stream into
 	// stream_options.include_usage on the caller's behalf; the resulting
 	// usage frame is consumed host-side and never forwarded to the client.
@@ -166,9 +171,29 @@ func (rs *reqState) responseMeta() map[string]any {
 		"duration_ms":     durationMs,
 		"upstream_status": rs.UpstreamStatus,
 		"usage": map[string]any{
-			"input_tokens":  rs.UsageIn,
-			"output_tokens": rs.UsageOut,
+			"input_tokens":       rs.UsageIn,
+			"output_tokens":      rs.UsageOut,
+			"cache_read_tokens":  rs.UsageCacheRead,
+			"cache_write_tokens": rs.UsageCacheWrite,
 		},
+	}
+}
+
+// mergeUsage folds a usage frame into the request state without zeroing
+// counts a previous frame already reported (Anthropic splits input and output
+// usage across message_start and message_delta).
+func (rs *reqState) mergeUsage(u *engine.StreamUsage) {
+	if u.InputTokens > 0 {
+		rs.UsageIn = u.InputTokens
+	}
+	if u.OutputTokens > 0 {
+		rs.UsageOut = u.OutputTokens
+	}
+	if u.CacheReadTokens > 0 {
+		rs.UsageCacheRead = u.CacheReadTokens
+	}
+	if u.CacheWriteTokens > 0 {
+		rs.UsageCacheWrite = u.CacheWriteTokens
 	}
 }
 
@@ -595,7 +620,11 @@ func New(cfg Config) (*Server, error) {
 						defer close(tapped)
 						for ev := range in {
 							if ev.Usage != nil {
-								rs.UsageIn, rs.UsageOut = ev.Usage.InputTokens, ev.Usage.OutputTokens
+								// Merge rather than overwrite: Anthropic reports
+								// input (+cache) tokens on message_start and
+								// output tokens on message_delta as separate
+								// usage frames.
+								rs.mergeUsage(ev.Usage)
 								if rs.UsageInjected {
 									continue
 								}
@@ -745,7 +774,7 @@ func New(cfg Config) (*Server, error) {
 					var body map[string]any
 					if json.Unmarshal(bodyBytes, &body) == nil {
 						if u := extractResponse(f.Name, body).usage; u != nil {
-							rs.UsageIn, rs.UsageOut = u.InputTokens, u.OutputTokens
+							rs.mergeUsage(u)
 						}
 					}
 				}
@@ -846,11 +875,13 @@ func New(cfg Config) (*Server, error) {
 
 		s.stats.RecordRequest(tr.bytesRead, tw.bytesWritten)
 		s.stats.RecordTokens(int64(rs.UsageIn), int64(rs.UsageOut))
+		s.stats.RecordCacheTokens(int64(rs.UsageCacheRead), int64(rs.UsageCacheWrite))
 		// Host request metrics: latency + outcome, labeled by model/provider.
 		// The host sees every response (including errors and vetoes), so this
 		// is the reliable source of truth for latency and status.
 		metrics.RecordProxyRequest(r.Context(), rs.Model, rs.Provider, tw.status, float64(time.Since(rs.Start).Microseconds())/1000)
 		metrics.RecordTokens(r.Context(), rs.Model, rs.Provider, rs.UsageIn, rs.UsageOut)
+		metrics.RecordCacheTokens(r.Context(), rs.Model, rs.Provider, rs.UsageCacheRead, rs.UsageCacheWrite)
 	})
 
 	srv := &http.Server{

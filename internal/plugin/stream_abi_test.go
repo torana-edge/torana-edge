@@ -437,8 +437,8 @@ func TestIntentFillsUncachedHistory(t *testing.T) {
 	if fill == "" {
 		t.Fatal("uncached history tool call was not filled")
 	}
-	if !strings.Contains(fill, "x.go") || !strings.Contains(fill, "trace the retry logic") {
-		t.Fatalf("fill should carry the call's primary arg and the task, got %q", fill)
+	if fill != "what x.go shows" {
+		t.Fatalf("fill should be a pure function of tool name and args, got %q", fill)
 	}
 
 	// Never cached, never bridged: the intent cache must not contain the fill.
@@ -447,16 +447,6 @@ func TestIntentFillsUncachedHistory(t *testing.T) {
 	}
 	if v, ok := store.Get(`intentc:["read",{"path":"x.go"}]`); ok {
 		t.Fatalf("fill was written under the content key: %q", v)
-	}
-
-	// Derived fresh each request: a new task must produce a new fill (a cached
-	// fill would freeze the first one).
-	out2, err := pp.RunBeforeRequest(context.Background(), 4, mkChat("audit the timeout budget"))
-	if err != nil {
-		t.Fatalf("RunBeforeRequest: %v", err)
-	}
-	if fill2 := fillOf(out2); !strings.Contains(fill2, "audit the timeout budget") {
-		t.Fatalf("fill not re-derived for the new task: %q", fill2)
 	}
 }
 

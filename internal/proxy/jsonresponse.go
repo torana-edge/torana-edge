@@ -62,14 +62,22 @@ func asInt(v any) int {
 }
 
 // usageFrom reads token counts from a decoded usage object under the given
-// input/output key names. Returns nil when absent or all-zero.
-func usageFrom(body map[string]any, objKey, inKey, outKey string) *engine.StreamUsage {
+// input/output key names. cacheReadKey/cacheWriteKey name the provider's
+// cached-token counts within the same object (empty = not reported by this
+// provider in flat form). Returns nil when absent or all-zero.
+func usageFrom(body map[string]any, objKey, inKey, outKey, cacheReadKey, cacheWriteKey string) *engine.StreamUsage {
 	obj, _ := body[objKey].(map[string]any)
 	if obj == nil {
 		return nil
 	}
 	u := &engine.StreamUsage{InputTokens: asInt(obj[inKey]), OutputTokens: asInt(obj[outKey])}
-	if u.InputTokens == 0 && u.OutputTokens == 0 {
+	if cacheReadKey != "" {
+		u.CacheReadTokens = asInt(obj[cacheReadKey])
+	}
+	if cacheWriteKey != "" {
+		u.CacheWriteTokens = asInt(obj[cacheWriteKey])
+	}
+	if u.InputTokens == 0 && u.OutputTokens == 0 && u.CacheReadTokens == 0 && u.CacheWriteTokens == 0 {
 		return nil
 	}
 	return u
@@ -99,7 +107,15 @@ func objArgs(parent map[string]any, key string) (string, func(string) error) {
 func extractOpenAI(body map[string]any) responseRefs {
 	refs := responseRefs{
 		model: asString(body["model"]),
-		usage: usageFrom(body, "usage", "prompt_tokens", "completion_tokens"),
+		usage: usageFrom(body, "usage", "prompt_tokens", "completion_tokens", "", ""),
+	}
+	// OpenAI nests the cached count: usage.prompt_tokens_details.cached_tokens.
+	if refs.usage != nil {
+		if usage, ok := body["usage"].(map[string]any); ok {
+			if details, ok := usage["prompt_tokens_details"].(map[string]any); ok {
+				refs.usage.CacheReadTokens = asInt(details["cached_tokens"])
+			}
+		}
 	}
 	choices, _ := body["choices"].([]any)
 	for ci, c := range choices {
@@ -146,7 +162,7 @@ func extractOpenAI(body map[string]any) responseRefs {
 func extractAnthropic(body map[string]any) responseRefs {
 	refs := responseRefs{
 		model: asString(body["model"]),
-		usage: usageFrom(body, "usage", "input_tokens", "output_tokens"),
+		usage: usageFrom(body, "usage", "input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"),
 	}
 	blocks, _ := body["content"].([]any)
 	for _, b := range blocks {
@@ -179,7 +195,7 @@ func extractAnthropic(body map[string]any) responseRefs {
 // --- bedrock: output.message.content[].{text | toolUse{toolUseId,name,input}} ---
 
 func extractBedrock(body map[string]any) responseRefs {
-	refs := responseRefs{usage: usageFrom(body, "usage", "inputTokens", "outputTokens")}
+	refs := responseRefs{usage: usageFrom(body, "usage", "inputTokens", "outputTokens", "cacheReadInputTokens", "cacheWriteInputTokens")}
 	output, _ := body["output"].(map[string]any)
 	msg, _ := output["message"].(map[string]any)
 	parts, _ := msg["content"].([]any)
@@ -220,7 +236,7 @@ func extractGemini(body map[string]any) responseRefs {
 	}
 	refs := responseRefs{
 		model: asString(body["modelVersion"]),
-		usage: usageFrom(body, "usageMetadata", "promptTokenCount", "candidatesTokenCount"),
+		usage: usageFrom(body, "usageMetadata", "promptTokenCount", "candidatesTokenCount", "cachedContentTokenCount", ""),
 	}
 	candidates, _ := body["candidates"].([]any)
 	for _, c := range candidates {
@@ -280,7 +296,7 @@ func runJSONResponseHooks(ctx context.Context, pl *plugin.PluginPipeline, reqID 
 	// Record provider-reported token usage for host metrics and _response.
 	rs := reqStateFrom(ctx)
 	if refs.usage != nil {
-		rs.UsageIn, rs.UsageOut = refs.usage.InputTokens, refs.usage.OutputTokens
+		rs.mergeUsage(refs.usage)
 	}
 
 	// --- 1. synthetic stream events per tool call --------------------------
