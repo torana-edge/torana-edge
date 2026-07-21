@@ -11,6 +11,7 @@ import (
 	"compress/gzip"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -35,6 +36,7 @@ import (
 	"github.com/torana-edge/torana-edge/internal/plugin"
 	"github.com/torana-edge/torana-edge/internal/provider"
 	"github.com/torana-edge/torana-edge/internal/wasm"
+	"github.com/torana-edge/torana-edge/pkg/pb"
 )
 
 const maxBodySize = 10 * 1024 * 1024 // 10 MB
@@ -895,6 +897,101 @@ func New(cfg Config) (*Server, error) {
 				fmt.Fprintf(w, "data: %s\n\n", b)
 				flusher.Flush()
 			}
+		}
+	})
+
+	// /_torana/plugin/<name>/* — per-plugin HTTP namespace.
+	//
+	// Plugins that declare the run_on_http_request hook and the env.serve_http
+	// permission can serve their own HTTP UI/API under this prefix. The route
+	// is NON-chat: it does NOT go through the Director or ReverseProxy.
+	mux.HandleFunc("/_torana/plugin/", func(w http.ResponseWriter, r *http.Request) {
+		// Parse plugin name: first path segment after /_torana/plugin/.
+		rest := strings.TrimPrefix(r.URL.Path, "/_torana/plugin/")
+		var pluginName, pluginRelPath string
+		if idx := strings.IndexByte(rest, '/'); idx >= 0 {
+			pluginName = rest[:idx]
+			pluginRelPath = rest[idx:] // retains the leading '/'
+		} else {
+			pluginName = rest
+			pluginRelPath = "/"
+		}
+		if pluginName == "" {
+			http.Error(w, "plugin name required", http.StatusNotFound)
+			return
+		}
+
+		// Load the pinned pipeline. No pipeline → service unavailable.
+		raw := s.pluginPipeline.Load()
+		if raw == nil {
+			http.Error(w, "plugin pipeline not available", http.StatusServiceUnavailable)
+			return
+		}
+		pp := raw.(*plugin.PluginPipeline)
+		if !pp.TryAcquire() {
+			http.Error(w, "plugin pipeline draining", http.StatusServiceUnavailable)
+			return
+		}
+		defer pp.Release()
+
+		// Build the pb.HttpRequest from the incoming net/http request.
+		var bodyBytes []byte
+		if r.Body != nil {
+			lr := io.LimitReader(r.Body, maxBodySize+1)
+			var readErr error
+			bodyBytes, readErr = io.ReadAll(lr)
+			r.Body.Close()
+			if readErr != nil {
+				http.Error(w, "read body", http.StatusInternalServerError)
+				return
+			}
+			if int64(len(bodyBytes)) > maxBodySize {
+				http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
+				return
+			}
+		}
+		headersJSON, _ := json.Marshal(map[string][]string(r.Header))
+		httpReq := &pb.HttpRequest{
+			Method:      r.Method,
+			Path:        pluginRelPath,
+			HeadersJson: headersJSON,
+			Body:        bodyBytes,
+		}
+
+		reqID := reqCounter.Add(1)
+		resp, err := pp.RunOnHTTPRequest(r.Context(), reqID, pluginName, httpReq)
+		if err != nil {
+			if errors.Is(err, plugin.ErrServeHTTPForbidden) {
+				http.Error(w, "plugin lacks env.serve_http permission", http.StatusForbidden)
+				return
+			}
+			log.Printf("[proxy] /_torana/plugin/%s: %v", pluginName, err)
+			http.Error(w, "plugin dispatch error", http.StatusServiceUnavailable)
+			return
+		}
+		if resp == nil {
+			http.Error(w, "plugin not found or did not handle request", http.StatusNotFound)
+			return
+		}
+
+		// Write the plugin's response.
+		if len(resp.HeadersJson) > 0 {
+			var hdrs map[string][]string
+			if err := json.Unmarshal(resp.HeadersJson, &hdrs); err == nil {
+				for k, vals := range hdrs {
+					for _, v := range vals {
+						w.Header().Add(k, v)
+					}
+				}
+			}
+		}
+		status := int(resp.Status)
+		if status == 0 {
+			status = http.StatusOK
+		}
+		w.WriteHeader(status)
+		if len(resp.Body) > 0 {
+			w.Write(resp.Body)
 		}
 	})
 

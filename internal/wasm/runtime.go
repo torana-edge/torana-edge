@@ -67,6 +67,12 @@ func (p *Plugin) hasGrant(perm string) bool {
 	return p.grants[perm]
 }
 
+// HasGrant reports whether this plugin holds the named permission grant.
+// It is the exported complement of hasGrant, used by callers outside the
+// wasm package (e.g. plugin.PluginPipeline.RunOnHTTPRequest).
+func (p *Plugin) HasGrant(perm string) bool { return p.hasGrant(perm) }
+
+
 // ValidateHooks checks that every named hook from the manifest is actually
 // exported by the WASM module. Returns an error listing all missing hooks.
 func (p *Plugin) ValidateHooks(ctx context.Context, hooks []string) error {
