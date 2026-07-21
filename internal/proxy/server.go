@@ -10,6 +10,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -804,23 +805,24 @@ func New(cfg Config) (*Server, error) {
 	// proxy handler.
 
 	// GET /_torana/api/config — JSON of current effective provider.Config.
-	mux.HandleFunc("/_torana/api/config", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/_torana/api/config", s.controlPlaneGuard(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		b, err := json.Marshal(s.GetConfig().Providers)
+		cfg := s.GetConfig().Providers
+		cfg.ControlPlane.Token = ""
+		b, err := json.Marshal(cfg)
 		if err != nil {
 			http.Error(w, "error marshalling config", http.StatusInternalServerError)
 			return
 		}
 		w.Write(b)
-	})
+	}))
 
 	// PUT /_torana/api/plugins (or POST) — live plugin enable/disable/reorder/edit + persist.
-	mux.HandleFunc("/_torana/api/plugins", func(w http.ResponseWriter, r *http.Request) {
-		// TODO(controlplane-security): localhost-only guard added in the security workstream
+	mux.HandleFunc("/_torana/api/plugins", s.controlPlaneGuard(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPut && r.Method != http.MethodPost {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
@@ -875,11 +877,11 @@ func New(cfg Config) (*Server, error) {
 		w.Header().Set("Content-Type", "application/json")
 		b, _ := json.Marshal(newPlugins)
 		w.Write(b)
-	})
+	}))
 
 	// GET /_torana/api/feed — one-shot JSON snapshot of recent events,
 	// newest-first (up to the ring-buffer capacity, default 200).
-	mux.HandleFunc("/_torana/api/feed", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/_torana/api/feed", s.controlPlaneGuard(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
@@ -893,13 +895,13 @@ func New(cfg Config) (*Server, error) {
 		}
 		b, _ := json.Marshal(snap)
 		w.Write(b)
-	})
+	}))
 
 	// GET /_torana/api/stream — SSE stream of live RequestEvents.
 	// On connect the current snapshot is replayed (oldest-to-newest) so the
 	// client gets a consistent view, then new events are pushed as they arrive.
 	// The stream honors request-context cancellation (client disconnect).
-	mux.HandleFunc("/_torana/api/stream", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/_torana/api/stream", s.controlPlaneGuard(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
@@ -951,14 +953,14 @@ func New(cfg Config) (*Server, error) {
 				flusher.Flush()
 			}
 		}
-	})
+	}))
 
 	// /_torana/plugin/<name>/* — per-plugin HTTP namespace.
 	//
 	// Plugins that declare the run_on_http_request hook and the env.serve_http
 	// permission can serve their own HTTP UI/API under this prefix. The route
 	// is NON-chat: it does NOT go through the Director or ReverseProxy.
-	mux.HandleFunc("/_torana/plugin/", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/_torana/plugin/", s.controlPlaneGuard(func(w http.ResponseWriter, r *http.Request) {
 		// Parse plugin name: first path segment after /_torana/plugin/.
 		rest := strings.TrimPrefix(r.URL.Path, "/_torana/plugin/")
 		var pluginName, pluginRelPath string
@@ -1046,15 +1048,16 @@ func New(cfg Config) (*Server, error) {
 		if len(resp.Body) > 0 {
 			w.Write(resp.Body)
 		}
-	})
+	}))
 
 	// GET /_torana/ — embedded SPA dashboard.
-	mux.Handle("/_torana/", http.StripPrefix("/_torana/", controlplane.Handler()))
+	spaHandler := http.StripPrefix("/_torana/", controlplane.Handler())
+	mux.Handle("/_torana/", s.controlPlaneGuard(spaHandler.ServeHTTP))
 
 	// GET /_torana — redirect to /_torana/
-	mux.HandleFunc("/_torana", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/_torana", s.controlPlaneGuard(func(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/_torana/", http.StatusMovedPermanently)
-	})
+	}))
 
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		currentCfg := s.GetConfig()
@@ -1178,6 +1181,52 @@ func New(cfg Config) (*Server, error) {
 }
 
 // --- Lifecycle --------------------------------------------------------------
+
+func (s *Server) controlPlaneGuard(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		cpCfg := s.GetConfig().Providers.ControlPlane
+
+		isLoopback := false
+		if r.RemoteAddr != "" {
+			host, _, err := net.SplitHostPort(r.RemoteAddr)
+			if err != nil {
+				host = r.RemoteAddr
+			}
+			if ip := net.ParseIP(host); ip != nil {
+				isLoopback = ip.IsLoopback()
+			}
+		}
+
+		if isLoopback {
+			next(w, r)
+			return
+		}
+
+		if !cpCfg.AllowRemote {
+			http.Error(w, "control plane is localhost-only", http.StatusForbidden)
+			return
+		}
+
+		if cpCfg.Token == "" {
+			http.Error(w, "control plane remote access requires a token", http.StatusForbidden)
+			return
+		}
+
+		reqToken := r.Header.Get("X-Torana-Token")
+		if reqToken == "" {
+			if auth := r.Header.Get("Authorization"); len(auth) > 7 && strings.EqualFold(auth[:7], "bearer ") {
+				reqToken = auth[7:]
+			}
+		}
+
+		if subtle.ConstantTimeCompare([]byte(reqToken), []byte(cpCfg.Token)) != 1 {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+
+		next(w, r)
+	}
+}
 
 func (s *Server) GetConfig() Config {
 	s.configMu.RLock()
