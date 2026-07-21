@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 
 	"github.com/torana-edge/torana-edge/internal/cache"
 )
@@ -26,6 +27,7 @@ type Provider struct {
 
 // Config is the top-level Torana configuration.
 type Config struct {
+	Managed   bool                `json:"managed,omitempty"`
 	Port      int                 `json:"port"`
 	Providers map[string]Provider `json:"providers"`
 	Plugins   PluginsConfig       `json:"plugins,omitempty"`
@@ -131,6 +133,7 @@ func DefaultConfig() Config {
 
 // Load reads a JSON config file and merges it over the defaults.
 // If the file doesn't exist, the defaults are returned as-is.
+// If user.Managed is true, default-merge is skipped and user config is returned verbatim.
 func Load(path string) (Config, error) {
 	cfg := DefaultConfig()
 
@@ -145,6 +148,16 @@ func Load(path string) (Config, error) {
 	var user Config
 	if err := json.Unmarshal(raw, &user); err != nil {
 		return cfg, fmt.Errorf("parsing config %q: %w", path, err)
+	}
+
+	if user.Managed {
+		if user.Port == 0 {
+			user.Port = 8080
+		}
+		if user.Providers == nil {
+			user.Providers = make(map[string]Provider)
+		}
+		return user, nil
 	}
 
 	// Merge: user values override defaults.
@@ -171,4 +184,49 @@ func Load(path string) (Config, error) {
 	}
 
 	return cfg, nil
+}
+
+// Save writes cfg to path atomically with Managed set to true.
+func Save(path string, cfg Config) error {
+	cfg.Managed = true
+	data, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshalling config: %w", err)
+	}
+	data = append(data, '\n')
+
+	dir := filepath.Dir(path)
+	if dir == "" {
+		dir = "."
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("creating config dir: %w", err)
+	}
+
+	tmpFile, err := os.CreateTemp(dir, ".config.json.tmp-*")
+	if err != nil {
+		return fmt.Errorf("creating temp config file: %w", err)
+	}
+	tmpName := tmpFile.Name()
+
+	if _, err := tmpFile.Write(data); err != nil {
+		tmpFile.Close()
+		_ = os.Remove(tmpName)
+		return fmt.Errorf("writing temp config file: %w", err)
+	}
+	if err := tmpFile.Sync(); err != nil {
+		tmpFile.Close()
+		_ = os.Remove(tmpName)
+		return fmt.Errorf("syncing temp config file: %w", err)
+	}
+	if err := tmpFile.Close(); err != nil {
+		_ = os.Remove(tmpName)
+		return fmt.Errorf("closing temp config file: %w", err)
+	}
+
+	if err := os.Rename(tmpName, path); err != nil {
+		_ = os.Remove(tmpName)
+		return fmt.Errorf("renaming temp config file: %w", err)
+	}
+	return nil
 }
