@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64" fill="none" role="img" aria-label="Torana">
+  <g fill="none" stroke="#ffffff" stroke-linecap="round" stroke-linejoin="round">
+    <g stroke-width="2.3">
+      <path d="M27.8 10.5Q32 5 36.2 10.5"/>
+      <path d="M25 11Q32 7.6 39 11"/>
+      <path d="M9 11H55"/>
+      <path d="M11 15.5Q32 19 53 15.5"/>
+      <path d="M9 20.5Q32 24 55 20.5"/>
+    </g>
+    <g stroke-width="3">
+      <path d="M24 24V60"/>
+      <path d="M40 24V60"/>
+    </g>
+  </g>
+</svg>

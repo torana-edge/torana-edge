@@ -806,23 +806,143 @@ func New(cfg Config) (*Server, error) {
 
 	// GET /_torana/api/config — JSON of current effective provider.Config.
 	mux.HandleFunc("/_torana/api/config", s.controlPlaneGuard(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
+		switch r.Method {
+		case http.MethodGet:
+			w.Header().Set("Content-Type", "application/json")
+			cfg := s.GetConfig().Providers
+			cfg.ControlPlane.Token = "" // never surface the token value
+			b, err := json.Marshal(cfg)
+			if err != nil {
+				http.Error(w, "error marshalling config", http.StatusInternalServerError)
+				return
+			}
+			w.Write(b)
+
+		case http.MethodPut, http.MethodPost:
+			// Settings write-back: providers / offload / limits / control_plane.
+			// The plugin pipeline (order + per-plugin config) is owned by
+			// /_torana/api/plugins and is preserved verbatim here.
+			lr := io.LimitReader(r.Body, maxBodySize+1)
+			data, err := io.ReadAll(lr)
+			if err != nil {
+				http.Error(w, "failed to read body", http.StatusBadRequest)
+				return
+			}
+			var incoming provider.Config
+			if err := json.Unmarshal(data, &incoming); err != nil {
+				http.Error(w, "invalid json body", http.StatusBadRequest)
+				return
+			}
+			cur := s.GetConfig().Providers
+			// Never let the settings surface mutate the pipeline or the
+			// startup-only backends (cache/mitm require a restart to change).
+			incoming.Plugins = cur.Plugins
+			incoming.Cache = cur.Cache
+			incoming.MITM = cur.MITM
+			// Preserve the redacted control-plane token when the client
+			// echoes back an empty one.
+			if incoming.ControlPlane.Token == "" {
+				incoming.ControlPlane.Token = cur.ControlPlane.Token
+			}
+			incoming.Managed = true
+			if err := incoming.Offload.Validate(incoming.Providers); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			s.SetProviders(incoming)
+			if err := s.PersistConfig(); err != nil {
+				log.Printf("failed to persist config: %v", err)
+				http.Error(w, "failed to persist config to disk", http.StatusInternalServerError)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			out := incoming
+			out.ControlPlane.Token = ""
+			b, _ := json.Marshal(out)
+			w.Write(b)
+
+		default:
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-			return
 		}
-		w.Header().Set("Content-Type", "application/json")
-		cfg := s.GetConfig().Providers
-		cfg.ControlPlane.Token = ""
-		b, err := json.Marshal(cfg)
-		if err != nil {
-			http.Error(w, "error marshalling config", http.StatusInternalServerError)
-			return
-		}
-		w.Write(b)
 	}))
 
 	// PUT /_torana/api/plugins (or POST) — live plugin enable/disable/reorder/edit + persist.
 	mux.HandleFunc("/_torana/api/plugins", s.controlPlaneGuard(func(w http.ResponseWriter, r *http.Request) {
+		// GET — enumerate every plugin discovered on disk, marking which are
+		// enabled (present in plugins.order) and which serve their own HTTP UI.
+		if r.Method == http.MethodGet {
+			cur := s.GetConfig().Providers.Plugins
+			orderIdx := make(map[string]int, len(cur.Order))
+			for i, n := range cur.Order {
+				orderIdx[n] = i
+			}
+			type pluginInfo struct {
+				Name        string          `json:"name"`
+				Version     string          `json:"version"`
+				Description string          `json:"description"`
+				Hooks       []string        `json:"hooks"`
+				Permissions []string        `json:"permissions"`
+				Enabled     bool            `json:"enabled"`
+				Order       int             `json:"order"`
+				ServesHTTP  bool            `json:"serves_http"`
+				Config      json.RawMessage `json:"config,omitempty"`
+			}
+			bundles, _ := plugin.DiscoverPlugins(cur.Dir)
+			infos := make([]pluginInfo, 0, len(bundles))
+			seen := make(map[string]bool, len(bundles))
+			for _, b := range bundles {
+				m := b.Manifest
+				hooks := make([]string, 0, len(m.Hooks))
+				servesHTTPHook := false
+				for _, h := range m.Hooks {
+					hooks = append(hooks, h.Name)
+					if h.Name == "run_on_http_request" {
+						servesHTTPHook = true
+					}
+				}
+				perms := make([]string, 0, len(m.Permissions))
+				hasServeGrant := false
+				for _, p := range m.Permissions {
+					perms = append(perms, p.Name)
+					if p.Name == "env.serve_http" {
+						hasServeGrant = true
+					}
+				}
+				idx, enabled := orderIdx[m.Name]
+				infos = append(infos, pluginInfo{
+					Name:        m.Name,
+					Version:     m.Version,
+					Description: m.Description,
+					Hooks:       hooks,
+					Permissions: perms,
+					Enabled:     enabled,
+					Order:       idx,
+					ServesHTTP:  servesHTTPHook && hasServeGrant,
+					Config:      cur.Config[m.Name],
+				})
+				seen[m.Name] = true
+			}
+			// Surface enabled-but-not-on-disk plugins so the operator can still
+			// see and remove a stale pipeline entry from the UI.
+			for _, n := range cur.Order {
+				if !seen[n] {
+					infos = append(infos, pluginInfo{
+						Name:    n,
+						Enabled: true,
+						Order:   orderIdx[n],
+						Config:  cur.Config[n],
+					})
+				}
+			}
+			w.Header().Set("Content-Type", "application/json")
+			b, _ := json.Marshal(struct {
+				Dir     string       `json:"dir"`
+				Plugins []pluginInfo `json:"plugins"`
+			}{Dir: cur.Dir, Plugins: infos})
+			w.Write(b)
+			return
+		}
+
 		if r.Method != http.MethodPut && r.Method != http.MethodPost {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return

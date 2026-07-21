@@ -4,31 +4,31 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Torana Control Plane</title>
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCA2NCA2NCI+PGRlZnM+PGxpbmVhckdyYWRpZW50IGlkPSJnIiBncmFkaWVudFVuaXRzPSJ1c2VyU3BhY2VPblVzZSIgeDE9IjgiIHkxPSI2IiB4Mj0iNTYiIHkyPSI2MCI+PHN0b3Agb2Zmc2V0PSIwIiBzdG9wLWNvbG9yPSIjMjJkM2VlIi8+PHN0b3Agb2Zmc2V0PSIuNSIgc3RvcC1jb2xvcj0iIzI1ODVkMSIvPjxzdG9wIG9mZnNldD0iMSIgc3RvcC1jb2xvcj0iIzYzNjZmMSIvPjwvbGluZWFyR3JhZGllbnQ+PC9kZWZzPjxnIGZpbGw9Im5vbmUiIHN0cm9rZT0idXJsKCNnKSIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIiBzdHJva2UtbGluZWpvaW49InJvdW5kIj48cGF0aCBzdHJva2Utd2lkdGg9IjIuMyIgZD0iTTI3LjggMTAuNVEzMiA1IDM2LjIgMTAuNSIvPjxwYXRoIHN0cm9rZS13aWR0aD0iMi4zIiBkPSJNMjUgMTFRMzIgNy42IDM5IDExIi8+PHBhdGggc3Ryb2tlLXdpZHRoPSIyLjMiIGQ9Ik05IDExSDU1Ii8+PHBhdGggc3Ryb2tlLXdpZHRoPSIyLjMiIGQ9Ik0xMSAxNS41UTMyIDE5IDUzIDE1LjUiLz48cGF0aCBzdHJva2Utd2lkdGg9IjIuMyIgZD0iTTkgMjAuNVEzMiAyNCA1NSAyMC41Ii8+PHBhdGggc3Ryb2tlLXdpZHRoPSIzIiBkPSJNMjQgMjRWNjAiLz48cGF0aCBzdHJva2Utd2lkdGg9IjMiIGQ9Ik00MCAyNFY2MCIvPjwvZz48L3N2Zz4K">
   <style>
     :root {
-      --bg-dark: #0f172a;
-      --bg-card: #1e293b;
-      --bg-card-hover: #334155;
-      --text-main: #f8fafc;
+      --bg-dark: #0b1120;
+      --bg-card: #131c31;
+      --bg-card-hover: #1e293b;
+      --bg-inset: #0b1120;
+      --text-main: #f1f5f9;
       --text-muted: #94a3b8;
+      --text-faint: #64748b;
       --accent-blue: #38bdf8;
       --accent-indigo: #818cf8;
       --accent-green: #34d399;
       --accent-yellow: #fbbf24;
       --accent-red: #f87171;
-      --border-color: #334155;
-      --radius: 8px;
+      --border-color: #263449;
+      --radius: 10px;
     }
 
-    * {
-      box-sizing: border-box;
-      margin: 0;
-      padding: 0;
-    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
 
     body {
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
       background-color: var(--bg-dark);
+      background-image: radial-gradient(1200px 500px at 20% -10%, rgba(56,189,248,0.08), transparent 60%);
       color: var(--text-main);
       line-height: 1.5;
       min-height: 100vh;
@@ -37,421 +37,295 @@
     }
 
     header {
-      background-color: var(--bg-card);
+      background-color: rgba(19, 28, 49, 0.85);
+      backdrop-filter: blur(8px);
       border-bottom: 1px solid var(--border-color);
-      padding: 1rem 1.5rem;
+      padding: 0.85rem 1.5rem;
       display: flex;
       align-items: center;
       justify-content: space-between;
       flex-wrap: wrap;
       gap: 1rem;
+      position: sticky;
+      top: 0;
+      z-index: 20;
     }
 
-    .brand {
-      display: flex;
-      align-items: center;
-      gap: 0.75rem;
+    .brand { display: flex; align-items: center; gap: 0.7rem; }
+    .logo-svg {
+      width: 30px; height: 34px;
+      filter: drop-shadow(0 0 7px rgba(56, 189, 248, 0.45));
+      flex-shrink: 0;
     }
+    .brand h1 { font-size: 1.15rem; font-weight: 700; letter-spacing: -0.02em; }
+    .brand .sub { font-size: 0.7rem; color: var(--text-faint); letter-spacing: 0.02em; }
 
-    .logo {
-      width: 28px;
-      height: 28px;
-      background: linear-gradient(135deg, var(--accent-blue), var(--accent-indigo));
-      border-radius: 6px;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      font-weight: bold;
-      color: #fff;
-      font-size: 16px;
-    }
-
-    h1 {
-      font-size: 1.25rem;
-      font-weight: 700;
-      letter-spacing: -0.025em;
-    }
-
-    nav {
-      display: flex;
-      gap: 0.5rem;
-    }
-
+    nav { display: flex; gap: 0.25rem; }
     .nav-btn {
-      background: transparent;
-      border: 1px solid transparent;
-      color: var(--text-muted);
-      padding: 0.5rem 1rem;
-      border-radius: var(--radius);
-      cursor: pointer;
-      font-weight: 500;
-      font-size: 0.875rem;
-      transition: all 0.2s ease;
+      background: transparent; border: 1px solid transparent;
+      color: var(--text-muted); padding: 0.45rem 0.9rem;
+      border-radius: var(--radius); cursor: pointer;
+      font-weight: 500; font-size: 0.875rem; transition: all 0.15s ease;
     }
-
-    .nav-btn:hover {
-      color: var(--text-main);
-      background-color: rgba(255, 255, 255, 0.05);
-    }
-
+    .nav-btn:hover { color: var(--text-main); background-color: rgba(255,255,255,0.04); }
     .nav-btn.active {
       color: var(--accent-blue);
-      background-color: rgba(56, 189, 248, 0.1);
-      border-color: rgba(56, 189, 248, 0.3);
+      background-color: rgba(56,189,248,0.1);
+      border-color: rgba(56,189,248,0.3);
     }
 
     .status-badge {
-      display: flex;
-      align-items: center;
-      gap: 0.5rem;
-      font-size: 0.75rem;
-      padding: 0.25rem 0.625rem;
-      border-radius: 9999px;
-      background-color: rgba(52, 211, 153, 0.1);
-      color: var(--accent-green);
-      border: 1px solid rgba(52, 211, 153, 0.3);
+      display: flex; align-items: center; gap: 0.45rem;
+      font-size: 0.72rem; padding: 0.25rem 0.65rem; border-radius: 9999px;
+      background-color: rgba(52,211,153,0.1); color: var(--accent-green);
+      border: 1px solid rgba(52,211,153,0.3);
     }
-
     .status-badge.disconnected {
-      background-color: rgba(248, 113, 113, 0.1);
-      color: var(--accent-red);
-      border-color: rgba(248, 113, 113, 0.3);
+      background-color: rgba(248,113,113,0.1); color: var(--accent-red);
+      border-color: rgba(248,113,113,0.3);
     }
+    .status-dot { width: 6px; height: 6px; border-radius: 50%; background-color: currentColor; }
 
-    .status-dot {
-      width: 6px;
-      height: 6px;
-      border-radius: 50%;
-      background-color: currentColor;
-    }
-
-    main {
-      flex: 1;
-      padding: 1.5rem;
-      max-width: 1400px;
-      width: 100%;
-      margin: 0 auto;
-    }
-
-    .view {
-      display: none;
-    }
-
-    .view.active {
-      display: block;
-    }
+    main { flex: 1; padding: 1.5rem; max-width: 1200px; width: 100%; margin: 0 auto; }
+    .view { display: none; }
+    .view.active { display: block; }
 
     .section-header {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      margin-bottom: 1.25rem;
+      display: flex; justify-content: space-between; align-items: center;
+      margin-bottom: 1.1rem; gap: 1rem; flex-wrap: wrap;
+    }
+    .section-title { font-size: 1.15rem; font-weight: 650; }
+    .section-desc { font-size: 0.82rem; color: var(--text-muted); margin-top: 0.15rem; }
+    .subhead {
+      font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.07em;
+      color: var(--text-faint); font-weight: 600; margin: 1.75rem 0 0.75rem;
+    }
+    .subhead:first-child { margin-top: 0; }
+
+    /* Buttons */
+    .btn {
+      background-color: var(--bg-card-hover); color: var(--text-main);
+      border: 1px solid var(--border-color); padding: 0.4rem 0.75rem;
+      border-radius: 6px; font-size: 0.8rem; cursor: pointer;
+      font-weight: 500; transition: all 0.15s; white-space: nowrap;
+    }
+    .btn:hover:not(:disabled) { background-color: #334155; }
+    .btn:disabled { opacity: 0.4; cursor: not-allowed; }
+    .btn-sm { padding: 0.3rem 0.6rem; font-size: 0.75rem; }
+    .btn-danger { background-color: rgba(248,113,113,0.12); color: var(--accent-red); border-color: rgba(248,113,113,0.25); }
+    .btn-danger:hover:not(:disabled) { background-color: rgba(248,113,113,0.25); }
+    .btn-green { background-color: rgba(52,211,153,0.12); color: var(--accent-green); border-color: rgba(52,211,153,0.28); }
+    .btn-green:hover:not(:disabled) { background-color: rgba(52,211,153,0.25); }
+    .btn-primary {
+      background-color: var(--accent-blue); color: #071018;
+      border-color: var(--accent-blue); font-weight: 650; padding: 0.5rem 1.1rem; font-size: 0.85rem;
+    }
+    .btn-primary:hover:not(:disabled) { background-color: #7dd3fc; }
+    .btn-ghost { background: transparent; border-color: transparent; color: var(--text-muted); }
+    .btn-ghost:hover:not(:disabled) { background: rgba(255,255,255,0.05); color: var(--text-main); }
+
+    /* Cards */
+    .card {
+      background-color: var(--bg-card); border: 1px solid var(--border-color);
+      border-radius: var(--radius); padding: 1.1rem 1.25rem;
     }
 
-    .section-title {
-      font-size: 1.125rem;
-      font-weight: 600;
+    /* Pipeline */
+    .pipeline-list { display: flex; flex-direction: column; gap: 0.6rem; }
+    .plugin-card {
+      background-color: var(--bg-card); border: 1px solid var(--border-color);
+      border-radius: var(--radius); padding: 0.85rem 1rem;
+      display: flex; align-items: center; gap: 0.9rem; transition: border-color 0.15s, box-shadow 0.15s;
     }
+    .plugin-card.dragging { opacity: 0.45; }
+    .plugin-card.drop-target { border-color: var(--accent-blue); box-shadow: 0 0 0 1px var(--accent-blue) inset; }
+    .drag-handle {
+      color: var(--text-faint); cursor: grab; font-size: 1.1rem; line-height: 1;
+      user-select: none; padding: 0.2rem; letter-spacing: -2px;
+    }
+    .drag-handle:active { cursor: grabbing; }
+    .order-num {
+      width: 24px; height: 24px; flex-shrink: 0; border-radius: 6px;
+      background: rgba(56,189,248,0.12); color: var(--accent-blue);
+      display: flex; align-items: center; justify-content: center;
+      font-size: 0.78rem; font-weight: 700;
+    }
+    .plugin-main { flex: 1; min-width: 0; cursor: pointer; }
+    .plugin-name-row { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; }
+    .plugin-name { font-weight: 600; font-size: 0.95rem; }
+    .plugin-desc {
+      font-size: 0.78rem; color: var(--text-muted); margin-top: 0.15rem;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 46ch;
+    }
+    .plugin-card-actions { display: flex; gap: 0.4rem; align-items: center; flex-shrink: 0; }
 
-    /* Plugin Links Bar */
-    .plugin-links-bar {
-      margin-bottom: 1.25rem;
-      background: var(--bg-card);
-      border: 1px solid var(--border-color);
-      border-radius: var(--radius);
-      padding: 0.75rem 1rem;
-      display: flex;
-      align-items: center;
-      gap: 0.75rem;
-      font-size: 0.875rem;
-      flex-wrap: wrap;
+    .chip {
+      font-size: 0.68rem; padding: 0.12rem 0.45rem; border-radius: 5px;
+      background: rgba(148,163,184,0.12); color: var(--text-muted); font-weight: 500;
+      border: 1px solid transparent; white-space: nowrap;
     }
+    .chip.serve { color: var(--accent-green); background: rgba(52,211,153,0.12); border-color: rgba(52,211,153,0.2); }
+    .chip.cfg { color: var(--accent-indigo); background: rgba(129,140,248,0.12); }
+    .chip.hook { color: var(--accent-blue); background: rgba(56,189,248,0.1); }
+    .chip.perm { color: var(--accent-yellow); background: rgba(251,191,36,0.1); }
 
-    .plugin-links-bar span {
-      color: var(--text-muted);
+    .available-row {
+      display: flex; align-items: center; gap: 0.9rem;
+      background-color: var(--bg-card); border: 1px dashed var(--border-color);
+      border-radius: var(--radius); padding: 0.7rem 1rem;
     }
+    .available-row .plugin-main { cursor: default; }
 
-    .plugin-link {
-      color: var(--accent-blue);
-      text-decoration: none;
-      background: rgba(56, 189, 248, 0.1);
-      padding: 0.2rem 0.6rem;
-      border-radius: 4px;
-      border: 1px solid rgba(56, 189, 248, 0.2);
-      transition: background 0.2s;
+    /* Sticky dirty bar */
+    .dirty-bar {
+      position: sticky; bottom: 1rem; margin-top: 1.25rem;
+      display: none; align-items: center; justify-content: space-between; gap: 1rem;
+      background: rgba(19,28,49,0.95); backdrop-filter: blur(6px);
+      border: 1px solid var(--accent-blue); border-radius: var(--radius);
+      padding: 0.7rem 1rem; box-shadow: 0 8px 24px rgba(0,0,0,0.4);
     }
+    .dirty-bar.show { display: flex; }
+    .dirty-bar .msg { font-size: 0.85rem; color: var(--accent-blue); }
+    .dirty-bar .actions { display: flex; gap: 0.5rem; }
 
-    .plugin-link:hover {
-      background: rgba(56, 189, 248, 0.2);
+    /* Metrics */
+    .metrics-grid {
+      display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+      gap: 0.9rem; margin-bottom: 1.5rem;
     }
+    .metric-card {
+      background-color: var(--bg-card); border: 1px solid var(--border-color);
+      border-radius: var(--radius); padding: 1.1rem 1.2rem;
+    }
+    .metric-label { font-size: 0.7rem; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 0.4rem; }
+    .metric-value { font-size: 1.45rem; font-weight: 700; }
+    .metric-sub { font-size: 0.72rem; color: var(--text-faint); margin-top: 0.25rem; }
+
+    .status-pills { display: flex; gap: 0.5rem; margin-top: 0.5rem; }
+    .status-pill { font-size: 0.7rem; padding: 0.1rem 0.45rem; border-radius: 5px; font-weight: 600; }
 
     /* Tables */
     .table-container {
-      background-color: var(--bg-card);
-      border: 1px solid var(--border-color);
-      border-radius: var(--radius);
-      overflow-x: auto;
+      background-color: var(--bg-card); border: 1px solid var(--border-color);
+      border-radius: var(--radius); overflow-x: auto;
     }
-
-    table {
-      width: 100%;
-      border-collapse: collapse;
-      text-align: left;
-      font-size: 0.875rem;
-    }
-
+    table { width: 100%; border-collapse: collapse; text-align: left; font-size: 0.85rem; }
     th {
-      background-color: rgba(0, 0, 0, 0.2);
-      color: var(--text-muted);
-      font-weight: 600;
-      padding: 0.75rem 1rem;
-      border-bottom: 1px solid var(--border-color);
-      white-space: nowrap;
+      background-color: rgba(0,0,0,0.2); color: var(--text-muted); font-weight: 600;
+      padding: 0.7rem 1rem; border-bottom: 1px solid var(--border-color); white-space: nowrap;
     }
+    td { padding: 0.65rem 1rem; border-bottom: 1px solid var(--border-color); white-space: nowrap; }
+    tr:last-child td { border-bottom: none; }
+    tr:hover td { background-color: rgba(255,255,255,0.02); }
 
-    td {
-      padding: 0.75rem 1rem;
-      border-bottom: 1px solid var(--border-color);
-      color: var(--text-main);
-      white-space: nowrap;
-    }
-
-    tr:last-child td {
-      border-bottom: none;
-    }
-
-    tr:hover td {
-      background-color: rgba(255, 255, 255, 0.02);
-    }
-
-    /* Badges */
     .badge {
-      display: inline-block;
-      padding: 0.15rem 0.5rem;
-      border-radius: 4px;
-      font-size: 0.75rem;
-      font-weight: 600;
-      text-transform: uppercase;
+      display: inline-block; padding: 0.13rem 0.5rem; border-radius: 4px;
+      font-size: 0.72rem; font-weight: 600;
     }
-
-    .badge-2xx { background: rgba(52, 211, 153, 0.15); color: var(--accent-green); }
-    .badge-3xx { background: rgba(56, 189, 248, 0.15); color: var(--accent-blue); }
-    .badge-4xx { background: rgba(251, 191, 36, 0.15); color: var(--accent-yellow); }
-    .badge-5xx { background: rgba(248, 113, 113, 0.15); color: var(--accent-red); }
-
-    .badge-verdict {
-      background: rgba(129, 140, 248, 0.15);
-      color: var(--accent-indigo);
-    }
-    .badge-verdict.block { background: rgba(248, 113, 113, 0.2); color: var(--accent-red); }
-    .badge-verdict.respond { background: rgba(56, 189, 248, 0.2); color: var(--accent-blue); }
-    .badge-verdict.route { background: rgba(251, 191, 36, 0.2); color: var(--accent-yellow); }
-
-    /* Stats Grid */
-    .metrics-grid {
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-      gap: 1rem;
-      margin-bottom: 1.5rem;
-    }
-
-    .metric-card {
-      background-color: var(--bg-card);
-      border: 1px solid var(--border-color);
-      border-radius: var(--radius);
-      padding: 1.25rem;
-    }
-
-    .metric-label {
-      font-size: 0.75rem;
-      color: var(--text-muted);
-      text-transform: uppercase;
-      letter-spacing: 0.05em;
-      margin-bottom: 0.5rem;
-    }
-
-    .metric-value {
-      font-size: 1.5rem;
-      font-weight: 700;
-      color: var(--text-main);
-    }
-
-    .metric-sub {
-      font-size: 0.75rem;
-      color: var(--text-muted);
-      margin-top: 0.25rem;
-    }
-
-    /* Pipeline Manager */
-    .pipeline-list {
-      display: flex;
-      flex-direction: column;
-      gap: 1rem;
-      margin-bottom: 1.5rem;
-    }
-
-    .plugin-card {
-      background-color: var(--bg-card);
-      border: 1px solid var(--border-color);
-      border-radius: var(--radius);
-      padding: 1rem 1.25rem;
-    }
-
-    .plugin-header {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      margin-bottom: 0.75rem;
-    }
-
-    .plugin-name {
-      font-weight: 600;
-      font-size: 1rem;
-      color: var(--accent-blue);
-      display: flex;
-      align-items: center;
-      gap: 0.5rem;
-    }
-
-    .plugin-actions {
-      display: flex;
-      gap: 0.35rem;
-    }
-
-    .btn {
-      background-color: var(--bg-card-hover);
-      color: var(--text-main);
-      border: 1px solid var(--border-color);
-      padding: 0.35rem 0.65rem;
-      border-radius: 4px;
-      font-size: 0.75rem;
-      cursor: pointer;
-      font-weight: 500;
-      transition: background 0.15s;
-    }
-
-    .btn:hover:not(:disabled) {
-      background-color: #475569;
-    }
-
-    .btn:disabled {
-      opacity: 0.4;
-      cursor: not-allowed;
-    }
-
-    .btn-danger {
-      background-color: rgba(248, 113, 113, 0.15);
-      color: var(--accent-red);
-      border-color: rgba(248, 113, 113, 0.3);
-    }
-
-    .btn-danger:hover:not(:disabled) {
-      background-color: rgba(248, 113, 113, 0.3);
-    }
-
-    .btn-primary {
-      background-color: var(--accent-blue);
-      color: #0f172a;
-      border-color: var(--accent-blue);
-      font-weight: 600;
-      padding: 0.5rem 1.25rem;
-      font-size: 0.875rem;
-    }
-
-    .btn-primary:hover:not(:disabled) {
-      background-color: #7dd3fc;
-    }
-
-    .plugin-config-area {
-      width: 100%;
-      height: 90px;
-      background-color: #0f172a;
-      color: #e2e8f0;
-      border: 1px solid var(--border-color);
-      border-radius: 4px;
-      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-      font-size: 0.8rem;
-      padding: 0.5rem;
-      resize: vertical;
-    }
-
-    .plugin-config-area:focus {
-      outline: none;
-      border-color: var(--accent-blue);
-    }
-
-    .pipeline-controls {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      flex-wrap: wrap;
-      gap: 1rem;
-      margin-top: 1rem;
-    }
-
-    .add-plugin-form {
-      display: flex;
-      gap: 0.5rem;
-    }
-
-    .input-text {
-      background-color: var(--bg-card);
-      border: 1px solid var(--border-color);
-      color: var(--text-main);
-      padding: 0.4rem 0.75rem;
-      border-radius: 4px;
-      font-size: 0.875rem;
-    }
-
-    .input-text:focus {
-      outline: none;
-      border-color: var(--accent-blue);
-    }
+    .badge-2xx { background: rgba(52,211,153,0.15); color: var(--accent-green); }
+    .badge-3xx { background: rgba(56,189,248,0.15); color: var(--accent-blue); }
+    .badge-4xx { background: rgba(251,191,36,0.15); color: var(--accent-yellow); }
+    .badge-5xx { background: rgba(248,113,113,0.15); color: var(--accent-red); }
+    .badge-verdict { background: rgba(129,140,248,0.15); color: var(--accent-indigo); }
+    .badge-verdict.block { background: rgba(248,113,113,0.2); color: var(--accent-red); }
+    .badge-verdict.respond { background: rgba(56,189,248,0.2); color: var(--accent-blue); }
+    .badge-verdict.route { background: rgba(251,191,36,0.2); color: var(--accent-yellow); }
 
     /* Alerts */
-    .alert {
-      padding: 0.75rem 1rem;
-      border-radius: var(--radius);
-      margin-bottom: 1rem;
-      font-size: 0.875rem;
-      display: none;
-    }
+    .alert { padding: 0.7rem 1rem; border-radius: var(--radius); margin-bottom: 1rem; font-size: 0.85rem; display: none; }
+    .alert.show { display: block; }
+    .alert-error { background-color: rgba(248,113,113,0.15); color: var(--accent-red); border: 1px solid rgba(248,113,113,0.3); }
+    .alert-success { background-color: rgba(52,211,153,0.15); color: var(--accent-green); border: 1px solid rgba(52,211,153,0.3); }
 
-    .alert.show {
-      display: block;
-    }
+    .empty-state { text-align: center; padding: 2.25rem 1rem; color: var(--text-faint); font-size: 0.85rem; }
 
-    .alert-error {
-      background-color: rgba(248, 113, 113, 0.15);
-      color: var(--accent-red);
-      border: 1px solid rgba(248, 113, 113, 0.3);
+    /* Info note */
+    .info-note {
+      background: rgba(56,189,248,0.06); border: 1px solid rgba(56,189,248,0.18);
+      border-radius: var(--radius); padding: 0.75rem 1rem; font-size: 0.82rem;
+      color: var(--text-muted); margin-bottom: 1.25rem;
     }
+    .info-note a { color: var(--accent-blue); text-decoration: none; }
+    .info-note a:hover { text-decoration: underline; }
 
-    .alert-success {
-      background-color: rgba(52, 211, 153, 0.15);
-      color: var(--accent-green);
-      border: 1px solid rgba(52, 211, 153, 0.3);
+    /* Plugin detail */
+    .back-link {
+      display: inline-flex; align-items: center; gap: 0.35rem; color: var(--text-muted);
+      font-size: 0.82rem; cursor: pointer; margin-bottom: 1rem; background: none; border: none;
     }
+    .back-link:hover { color: var(--text-main); }
+    .detail-head { display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap; margin-bottom: 0.35rem; }
+    .detail-title { font-size: 1.35rem; font-weight: 700; }
+    .detail-meta-grid { display: flex; flex-wrap: wrap; gap: 0.4rem; margin: 0.75rem 0 1.25rem; }
+    .detail-frame {
+      width: 100%; height: 460px; border: 1px solid var(--border-color);
+      border-radius: var(--radius); background: #fff;
+    }
+    .code-editor {
+      width: 100%; min-height: 220px; background-color: var(--bg-inset); color: #e2e8f0;
+      border: 1px solid var(--border-color); border-radius: var(--radius);
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      font-size: 0.82rem; padding: 0.85rem; resize: vertical; line-height: 1.5;
+    }
+    .code-editor:focus { outline: none; border-color: var(--accent-blue); }
 
-    .empty-state {
-      text-align: center;
-      padding: 2.5rem 1rem;
-      color: var(--text-muted);
-      font-size: 0.875rem;
+    /* Settings forms */
+    .form-section { margin-bottom: 1.75rem; }
+    .form-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 0.9rem; }
+    .field { display: flex; flex-direction: column; gap: 0.3rem; }
+    .field label { font-size: 0.75rem; color: var(--text-muted); font-weight: 500; }
+    .field .hint { font-size: 0.7rem; color: var(--text-faint); }
+    .input, select.input {
+      background-color: var(--bg-inset); border: 1px solid var(--border-color); color: var(--text-main);
+      padding: 0.45rem 0.65rem; border-radius: 6px; font-size: 0.85rem; width: 100%;
+      font-family: inherit;
     }
+    .input:focus { outline: none; border-color: var(--accent-blue); }
+    .checkbox-row { display: flex; align-items: center; gap: 0.5rem; font-size: 0.85rem; color: var(--text-main); }
+    .checkbox-row input { width: 16px; height: 16px; accent-color: var(--accent-blue); }
+
+    .providers-table { width: 100%; border-collapse: separate; border-spacing: 0 0.4rem; }
+    .providers-table td { padding: 0.15rem 0.3rem; border: none; white-space: normal; }
+    .providers-table input, .providers-table select { font-size: 0.8rem; padding: 0.35rem 0.5rem; }
+    .providers-table th { background: none; border: none; padding: 0.2rem 0.3rem; font-size: 0.68rem; }
   </style>
 </head>
 <body>
   <header>
     <div class="brand">
-      <div class="logo">T</div>
-      <h1>Torana Control Plane</h1>
+      <svg class="logo-svg" viewBox="0 0 64 64" fill="none" aria-hidden="true">
+        <defs>
+          <linearGradient id="toranaGrad" gradientUnits="userSpaceOnUse" x1="8" y1="6" x2="56" y2="60">
+            <stop offset="0" stop-color="#22d3ee"/>
+            <stop offset="0.5" stop-color="#2585d1"/>
+            <stop offset="1" stop-color="#6366f1"/>
+          </linearGradient>
+        </defs>
+        <g fill="none" stroke="url(#toranaGrad)" stroke-linecap="round" stroke-linejoin="round">
+          <g stroke-width="2.3">
+            <path d="M27.8 10.5 Q32 5 36.2 10.5"/>
+            <path d="M25 11 Q32 7.6 39 11"/>
+            <path d="M9 11 H55"/>
+            <path d="M11 15.5 Q32 19 53 15.5"/>
+            <path d="M9 20.5 Q32 24 55 20.5"/>
+          </g>
+          <g stroke-width="3">
+            <path d="M24 24 V60"/>
+            <path d="M40 24 V60"/>
+          </g>
+        </g>
+      </svg>
+      <div>
+        <h1>Torana</h1>
+        <div class="sub">Control Plane</div>
+      </div>
     </div>
 
     <nav>
-      <button class="nav-btn active" onclick="switchView('feed')">Live Feed</button>
-      <button class="nav-btn" onclick="switchView('stats')">Stats & FinOps</button>
-      <button class="nav-btn" onclick="switchView('pipeline')">Pipeline Manager</button>
+      <button class="nav-btn" data-view="pipeline" onclick="go('pipeline')">Pipeline</button>
+      <button class="nav-btn" data-view="traffic" onclick="go('traffic')">Traffic</button>
+      <button class="nav-btn" data-view="feed" onclick="go('feed')">Live Feed</button>
+      <button class="nav-btn" data-view="settings" onclick="go('settings')">Settings</button>
     </nav>
 
     <div id="connectionStatus" class="status-badge">
@@ -461,519 +335,640 @@
   </header>
 
   <main>
-    <!-- Plugin Links Bar -->
-    <div id="pluginLinksBar" class="plugin-links-bar">
-      <span>Per-Plugin UIs:</span>
-      <div id="pluginLinksContainer" style="display:inline-flex; gap:0.5rem; flex-wrap:wrap;">
-        <span style="color:var(--text-muted); font-style:italic;">None active</span>
-      </div>
-    </div>
-
-    <!-- Alert Banner -->
     <div id="alertBox" class="alert"></div>
 
-    <!-- View 1: Live Feed -->
-    <section id="view-feed" class="view active">
+    <!-- View: Pipeline Manager (default) -->
+    <section id="view-pipeline" class="view">
       <div class="section-header">
-        <h2 class="section-title">Live Request Stream</h2>
-        <span id="eventCount" style="font-size:0.75rem; color:var(--text-muted)">0 events</span>
+        <div>
+          <h2 class="section-title">Plugin Pipeline</h2>
+          <div class="section-desc">Drag to reorder. Requests flow through enabled plugins top&nbsp;to&nbsp;bottom.</div>
+        </div>
+        <button class="btn btn-ghost" onclick="loadPlugins()">↻ Reload</button>
       </div>
 
-      <div class="table-container">
-        <table>
-          <thead>
-            <tr>
-              <th>Timestamp</th>
-              <th>Provider</th>
-              <th>Model</th>
-              <th>Status</th>
-              <th>Latency</th>
-              <th>Tokens (In / Out)</th>
-              <th>Cache (Read / Write)</th>
-              <th>Verdict</th>
-            </tr>
-          </thead>
-          <tbody id="feedTableBody">
-            <tr>
-              <td colspan="8" class="empty-state">Waiting for request events...</td>
-            </tr>
-          </tbody>
-        </table>
+      <div class="subhead">Enabled &mdash; execution order</div>
+      <div id="pipelineContainer" class="pipeline-list"></div>
+
+      <div class="subhead">Available to enable</div>
+      <div id="availableContainer" class="pipeline-list"></div>
+
+      <div id="dirtyBar" class="dirty-bar">
+        <span class="msg">You have unsaved pipeline changes.</span>
+        <div class="actions">
+          <button class="btn" onclick="loadPlugins()">Discard</button>
+          <button class="btn btn-primary" onclick="savePipeline()">Save &amp; apply</button>
+        </div>
       </div>
     </section>
 
-    <!-- View 2: Stats & FinOps -->
-    <section id="view-stats" class="view">
+    <!-- View: Plugin detail -->
+    <section id="view-plugin" class="view">
+      <button class="back-link" onclick="go('pipeline')">&larr; Back to pipeline</button>
+      <div id="pluginDetail"></div>
+    </section>
+
+    <!-- View: Traffic -->
+    <section id="view-traffic" class="view">
       <div class="section-header">
-        <h2 class="section-title">Proxy Statistics & FinOps</h2>
-        <button class="btn" onclick="fetchStats()">Refresh</button>
+        <div>
+          <h2 class="section-title">Traffic</h2>
+          <div class="section-desc">Live proxy throughput. Cost &amp; FinOps analytics are provided by plugins.</div>
+        </div>
+        <button class="btn btn-ghost" onclick="fetchStats()">↻ Refresh</button>
       </div>
 
       <div class="metrics-grid">
         <div class="metric-card">
           <div class="metric-label">Total Requests</div>
           <div class="metric-value" id="statRequests">0</div>
-          <div class="metric-sub" id="statWireBytes">In: 0 B | Out: 0 B</div>
+          <div class="status-pills" id="statStatusPills"></div>
         </div>
-
         <div class="metric-card">
           <div class="metric-label">Token Traffic</div>
           <div class="metric-value" id="statTokens">0 / 0</div>
-          <div class="metric-sub">Input / Output Tokens</div>
+          <div class="metric-sub">Input / Output</div>
         </div>
-
         <div class="metric-card">
-          <div class="metric-label">Cache Hit Ratio</div>
+          <div class="metric-label">Prompt Cache</div>
           <div class="metric-value" id="statCacheHitRatio">N/A</div>
           <div class="metric-sub" id="statCacheTokens">Read: 0 | Write: 0</div>
         </div>
-
         <div class="metric-card">
-          <div class="metric-label">Compaction Savings</div>
-          <div class="metric-value" id="statCompactions">0</div>
-          <div class="metric-sub" id="statBytesSaved">0 B saved</div>
+          <div class="metric-label">Wire Bytes</div>
+          <div class="metric-value" id="statWireBytes">0 B</div>
+          <div class="metric-sub" id="statWireSub">In: 0 B | Out: 0 B</div>
         </div>
       </div>
 
-      <div class="section-header" style="margin-top:1.5rem">
-        <h2 class="section-title">Per-Plugin Compaction Stats</h2>
-      </div>
+      <div id="finopsNote" class="info-note" style="display:none"></div>
 
+      <div class="subhead">Plugin activity</div>
       <div class="table-container">
         <table>
           <thead>
-            <tr>
-              <th>Plugin Name</th>
-              <th>Compactions</th>
-              <th>Bytes Saved</th>
-            </tr>
+            <tr><th>Plugin</th><th>Compactions</th><th>Bytes saved</th></tr>
           </thead>
           <tbody id="pluginStatsTableBody">
-            <tr>
-              <td colspan="3" class="empty-state">No per-plugin statistics available.</td>
-            </tr>
+            <tr><td colspan="3" class="empty-state">No plugin activity recorded yet.</td></tr>
           </tbody>
         </table>
       </div>
     </section>
 
-    <!-- View 3: Pipeline Manager -->
-    <section id="view-pipeline" class="view">
+    <!-- View: Live Feed -->
+    <section id="view-feed" class="view">
       <div class="section-header">
-        <h2 class="section-title">WASM Plugin Pipeline</h2>
-        <button class="btn" onclick="fetchConfig()">Reload Config</button>
+        <h2 class="section-title">Live Request Stream</h2>
+        <span id="eventCount" style="font-size:0.75rem; color:var(--text-muted)">0 events</span>
       </div>
-
-      <div id="pipelineContainer" class="pipeline-list">
-        <!-- Rendered dynamically -->
+      <div class="table-container">
+        <table>
+          <thead>
+            <tr>
+              <th>Time</th><th>Provider</th><th>Model</th><th>Status</th>
+              <th>Latency</th><th>Tokens (In/Out)</th><th>Cache (R/W)</th><th>Verdict</th>
+            </tr>
+          </thead>
+          <tbody id="feedTableBody">
+            <tr><td colspan="8" class="empty-state">Waiting for request events&hellip;</td></tr>
+          </tbody>
+        </table>
       </div>
+    </section>
 
-      <div class="pipeline-controls">
-        <div class="add-plugin-form">
-          <input type="text" id="newPluginName" class="input-text" placeholder="Plugin name (e.g. otel)">
-          <button class="btn" onclick="addPluginToPipeline()">+ Add Plugin</button>
+    <!-- View: Settings -->
+    <section id="view-settings" class="view">
+      <div class="section-header">
+        <div>
+          <h2 class="section-title">Settings</h2>
+          <div class="section-desc">Server configuration &mdash; persisted to config.json.</div>
         </div>
-
-        <button class="btn btn-primary" onclick="savePipeline()">Save Pipeline Changes</button>
+        <button class="btn btn-ghost" onclick="loadSettings()">↻ Reload</button>
       </div>
+
+      <div class="card form-section">
+        <div class="subhead" style="margin-top:0">Providers</div>
+        <div class="table-container" style="border:none; background:none;">
+          <table class="providers-table">
+            <thead>
+              <tr><th>Name</th><th>Upstream URL</th><th>Format</th><th>API key env</th><th>Fallback</th><th></th></tr>
+            </thead>
+            <tbody id="providersBody"></tbody>
+          </table>
+        </div>
+        <button class="btn btn-sm" style="margin-top:0.5rem" onclick="addProviderRow()">+ Add provider</button>
+      </div>
+
+      <div class="card form-section">
+        <div class="subhead" style="margin-top:0">Offload (cheap-model summarization)</div>
+        <div class="checkbox-row" style="margin-bottom:0.9rem">
+          <input type="checkbox" id="offEnabled"><label for="offEnabled">Enabled</label>
+        </div>
+        <div class="form-grid">
+          <div class="field">
+            <label>Provider</label>
+            <select class="input" id="offProvider"></select>
+            <span class="hint">Must be an <code>openai</code>-format provider.</span>
+          </div>
+          <div class="field"><label>Model</label><input class="input" id="offModel" placeholder="deepseek-v4-flash"></div>
+          <div class="field"><label>API key env <span class="hint">(optional)</span></label><input class="input" id="offKey" placeholder="OFFLOAD_API_KEY"></div>
+        </div>
+      </div>
+
+      <div class="card form-section">
+        <div class="subhead" style="margin-top:0">Limits &amp; access</div>
+        <div class="form-grid">
+          <div class="field"><label>Concurrency</label><input class="input" id="limConc" type="number" min="0"></div>
+          <div class="field"><label>Requests / min</label><input class="input" id="limRpm" type="number" min="0"></div>
+          <div class="field">
+            <label>Listen port</label><input class="input" id="cfgPort" type="number" min="1">
+            <span class="hint">Changing the port requires a restart.</span>
+          </div>
+        </div>
+        <div class="form-grid" style="margin-top:0.9rem">
+          <div class="field">
+            <div class="checkbox-row"><input type="checkbox" id="cpAllowRemote"><label for="cpAllowRemote">Allow remote control-plane access</label></div>
+            <span class="hint">Off = loopback only (recommended).</span>
+          </div>
+          <div class="field">
+            <label>Control-plane token</label><input class="input" id="cpToken" type="password" placeholder="unchanged">
+            <span class="hint">Only used when remote access is allowed. Leave blank to keep current.</span>
+          </div>
+        </div>
+      </div>
+
+      <button class="btn btn-primary" onclick="saveSettings()">Save settings</button>
     </section>
   </main>
 
   <script>
-    // State management
-    let activeView = 'feed';
+    // ---- State ----
+    let allPlugins = [];        // from GET /_torana/api/plugins
+    let pluginByName = {};       // name -> info
+    let pipelineOrder = [];      // enabled plugin names, in order
+    let configMap = {};          // name -> config object
+    let pipelineDirty = false;
+    let settingsCfg = null;      // full provider.Config from GET /_torana/api/config
     let feedEvents = [];
     let seenEventKeys = new Set();
-    let currentConfig = { order: [], config: {} };
-    let statsInterval = null;
     let eventSource = null;
+    let statsInterval = null;
+    let dragSrc = null;
 
-    // Initialize SPA
     document.addEventListener('DOMContentLoaded', () => {
       initSSE();
-      fetchConfig();
+      loadPlugins();
       fetchStats();
-      // Periodically refresh stats every 5s
-      statsInterval = setInterval(fetchStats, 5000);
+      statsInterval = setInterval(() => { if (activeView() === 'traffic') fetchStats(); }, 5000);
+      window.addEventListener('hashchange', route);
+      route();
     });
 
-    // View Switching
-    function switchView(viewName) {
-      activeView = viewName;
-      document.querySelectorAll('.nav-btn').forEach(btn => btn.classList.remove('active'));
-      document.querySelectorAll('.view').forEach(view => view.classList.remove('active'));
+    // ---- Routing (hash-based) ----
+    function activeView() {
+      const h = (location.hash || '#pipeline').slice(1);
+      return h.split('/')[0] || 'pipeline';
+    }
+    function go(view, arg) {
+      location.hash = arg ? `#${view}/${encodeURIComponent(arg)}` : `#${view}`;
+    }
+    function route() {
+      const h = (location.hash || '#pipeline').slice(1);
+      const [view, arg] = h.split('/');
+      const v = view || 'pipeline';
+      document.querySelectorAll('.view').forEach(s => s.classList.remove('active'));
+      document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active'));
 
-      const targetBtn = Array.from(document.querySelectorAll('.nav-btn')).find(
-        b => b.getAttribute('onclick') && b.getAttribute('onclick').includes(viewName)
-      );
-      if (targetBtn) targetBtn.classList.add('active');
-
-      const targetView = document.getElementById(`view-${viewName}`);
-      if (targetView) targetView.classList.add('active');
-
-      if (viewName === 'stats') {
-        fetchStats();
-      } else if (viewName === 'pipeline') {
-        fetchConfig();
+      if (v === 'plugin' && arg) {
+        document.getElementById('view-plugin').classList.add('active');
+        document.querySelector('.nav-btn[data-view="pipeline"]').classList.add('active');
+        renderPluginDetail(decodeURIComponent(arg));
+        return;
       }
+      const known = ['pipeline','traffic','feed','settings'];
+      const target = known.includes(v) ? v : 'pipeline';
+      document.getElementById(`view-${target}`).classList.add('active');
+      const navBtn = document.querySelector(`.nav-btn[data-view="${target}"]`);
+      if (navBtn) navBtn.classList.add('active');
+      if (target === 'traffic') fetchStats();
+      if (target === 'settings') loadSettings();
+      if (target === 'pipeline') renderPipeline();
     }
 
-    // Status & Alerts
-    function setConnectionStatus(connected, message = '') {
+    // ---- Status & alerts ----
+    function setConnectionStatus(connected, message) {
       const el = document.getElementById('connectionStatus');
       const text = document.getElementById('statusText');
-      if (connected) {
-        el.className = 'status-badge';
-        text.textContent = 'Connected';
-      } else {
-        el.className = 'status-badge disconnected';
-        text.textContent = message || 'Disconnected';
-      }
+      if (connected) { el.className = 'status-badge'; text.textContent = 'Connected'; }
+      else { el.className = 'status-badge disconnected'; text.textContent = message || 'Disconnected'; }
     }
-
     function showAlert(msg, isError = true) {
-      const alertBox = document.getElementById('alertBox');
-      alertBox.className = `alert show ${isError ? 'alert-error' : 'alert-success'}`;
-      alertBox.textContent = msg;
-      setTimeout(() => {
-        alertBox.className = 'alert';
-      }, 6000);
+      const box = document.getElementById('alertBox');
+      box.className = `alert show ${isError ? 'alert-error' : 'alert-success'}`;
+      box.textContent = msg;
+      setTimeout(() => { box.className = 'alert'; }, 6000);
     }
 
-    // View 1: SSE Live Feed
-    function initSSE() {
-      if (eventSource) {
-        eventSource.close();
-      }
-      try {
-        eventSource = new EventSource('/_torana/api/stream');
-        eventSource.onopen = () => {
-          setConnectionStatus(true);
-        };
-        eventSource.onmessage = (e) => {
-          try {
-            const ev = JSON.parse(e.data);
-            addFeedEvent(ev);
-          } catch (err) {
-            console.error('Failed to parse SSE event:', err);
+    // ---- Plugins / pipeline ----
+    function loadPlugins() {
+      fetch('/_torana/api/plugins')
+        .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
+        .then(data => {
+          allPlugins = (data.plugins || []);
+          pluginByName = {};
+          configMap = {};
+          for (const p of allPlugins) {
+            pluginByName[p.name] = p;
+            configMap[p.name] = p.config && Object.keys(p.config).length ? p.config : (p.config || {});
           }
-        };
-        eventSource.onerror = (err) => {
-          setConnectionStatus(false, 'Disconnected');
-        };
-      } catch (err) {
-        setConnectionStatus(false, 'Connection Error');
-      }
-    }
-
-    function addFeedEvent(ev) {
-      // Deduplicate event by signature if needed
-      const key = `${ev.timestamp}_${ev.provider}_${ev.model}_${ev.status}_${ev.latency_ms}`;
-      if (seenEventKeys.has(key)) return;
-      seenEventKeys.add(key);
-
-      // Keep key set from growing indefinitely
-      if (seenEventKeys.size > 500) {
-        const firstKey = seenEventKeys.values().next().value;
-        seenEventKeys.delete(firstKey);
-      }
-
-      feedEvents.unshift(ev);
-      if (feedEvents.length > 200) {
-        feedEvents.pop();
-      }
-      renderFeedTable();
-    }
-
-    function renderFeedTable() {
-      const tbody = document.getElementById('feedTableBody');
-      const countEl = document.getElementById('eventCount');
-      countEl.textContent = `${feedEvents.length} event${feedEvents.length === 1 ? '' : 's'}`;
-
-      if (feedEvents.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="8" class="empty-state">Waiting for request events...</td></tr>';
-        return;
-      }
-
-      let html = '';
-      for (const ev of feedEvents) {
-        const statusClass = ev.status >= 500 ? 'badge-5xx' : ev.status >= 400 ? 'badge-4xx' : ev.status >= 300 ? 'badge-3xx' : 'badge-2xx';
-        const formattedTime = ev.timestamp ? ev.timestamp.replace('T', ' ').replace('Z', '') : '-';
-        const latency = typeof ev.latency_ms === 'number' ? `${ev.latency_ms.toFixed(1)} ms` : '-';
-        const tokens = `${(ev.tokens_in || 0).toLocaleString()} / ${(ev.tokens_out || 0).toLocaleString()}`;
-        const cacheTokens = `${(ev.cache_read_tokens || 0).toLocaleString()} / ${(ev.cache_write_tokens || 0).toLocaleString()}`;
-        
-        let verdictClass = 'badge-verdict';
-        if (ev.verdict) {
-          verdictClass += ` ${ev.verdict}`;
-        }
-        const verdictBadge = ev.verdict ? `<span class="badge ${verdictClass}">${escapeHtml(ev.verdict)}</span>` : '<span style="color:var(--text-muted)">-</span>';
-
-        html += `<tr>
-          <td style="font-family:monospace; font-size:0.8rem">${escapeHtml(formattedTime)}</td>
-          <td><strong>${escapeHtml(ev.provider || '-')}</strong></td>
-          <td>${escapeHtml(ev.model || '-')}</td>
-          <td><span class="badge ${statusClass}">${ev.status || 0}</span></td>
-          <td>${latency}</td>
-          <td>${tokens}</td>
-          <td>${cacheTokens}</td>
-          <td>${verdictBadge}</td>
-        </tr>`;
-      }
-      tbody.innerHTML = html;
-    }
-
-    // View 2: Stats & FinOps
-    function fetchStats() {
-      fetch('/stats')
-        .then(res => {
-          if (!res.ok) throw new Error(`HTTP ${res.status}`);
-          return res.json();
-        })
-        .then(data => {
-          renderStats(data);
-        })
-        .catch(err => {
-          console.error('Error fetching stats:', err);
-        });
-    }
-
-    function renderStats(data) {
-      document.getElementById('statRequests').textContent = (data.total_requests || 0).toLocaleString();
-      document.getElementById('statWireBytes').textContent = `In: ${formatBytes(data.total_bytes_in || 0)} | Out: ${formatBytes(data.total_bytes_out || 0)}`;
-
-      document.getElementById('statTokens').textContent = `${(data.total_tokens_in || 0).toLocaleString()} / ${(data.total_tokens_out || 0).toLocaleString()}`;
-
-      const readCache = data.total_cache_read_tokens || 0;
-      const writeCache = data.total_cache_write_tokens || 0;
-      document.getElementById('statCacheTokens').textContent = `Read: ${readCache.toLocaleString()} | Write: ${writeCache.toLocaleString()}`;
-
-      if (readCache + writeCache > 0) {
-        const ratio = (readCache / (readCache + writeCache)) * 100;
-        document.getElementById('statCacheHitRatio').textContent = `${ratio.toFixed(1)}%`;
-      } else if (readCache + (data.total_tokens_in || 0) > 0 && readCache > 0) {
-        const ratio = (readCache / (readCache + (data.total_tokens_in || 0))) * 100;
-        document.getElementById('statCacheHitRatio').textContent = `${ratio.toFixed(1)}%`;
-      } else {
-        document.getElementById('statCacheHitRatio').textContent = 'N/A';
-      }
-
-      document.getElementById('statCompactions').textContent = (data.compactions || 0).toLocaleString();
-      document.getElementById('statBytesSaved').textContent = `${formatBytes(data.bytes_saved || 0)} saved`;
-
-      // Render per-plugin table
-      const tbody = document.getElementById('pluginStatsTableBody');
-      const perPlugin = data.per_plugin || {};
-      const pluginNames = Object.keys(perPlugin);
-
-      if (pluginNames.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="3" class="empty-state">No per-plugin statistics recorded yet.</td></tr>';
-        return;
-      }
-
-      let html = '';
-      for (const name of pluginNames) {
-        const p = perPlugin[name];
-        html += `<tr>
-          <td><strong style="color:var(--accent-blue)">${escapeHtml(name)}</strong></td>
-          <td>${(p.compactions || 0).toLocaleString()}</td>
-          <td>${formatBytes(p.bytes_saved || 0)}</td>
-        </tr>`;
-      }
-      tbody.innerHTML = html;
-    }
-
-    // View 3: Pipeline Manager
-    function fetchConfig() {
-      fetch('/_torana/api/config')
-        .then(res => {
-          if (!res.ok) throw new Error(`HTTP ${res.status}`);
-          return res.json();
-        })
-        .then(data => {
-          const pluginsConfig = data.plugins || {};
-          currentConfig = {
-            order: Array.isArray(pluginsConfig.order) ? [...pluginsConfig.order] : [],
-            config: pluginsConfig.config || {}
-          };
+          pipelineOrder = allPlugins.filter(p => p.enabled)
+            .sort((a, b) => a.order - b.order).map(p => p.name);
+          pipelineDirty = false;
+          setDirty(false);
           renderPipeline();
-          renderPluginLinks();
+          // If we're on a detail page, refresh it too.
+          if (activeView() === 'plugin') route();
         })
-        .catch(err => {
-          console.error('Error fetching config:', err);
-          showAlert(`Failed to fetch pipeline config: ${err.message}`);
-        });
+        .catch(err => showAlert(`Failed to load plugins: ${err.message}`));
     }
 
-    function renderPluginLinks() {
-      const container = document.getElementById('pluginLinksContainer');
-      const allPlugins = new Set([...currentConfig.order, ...Object.keys(currentConfig.config)]);
-      if (allPlugins.size === 0) {
-        container.innerHTML = '<span style="color:var(--text-muted); font-style:italic;">None configured</span>';
-        return;
-      }
-      let html = '';
-      for (const p of allPlugins) {
-        html += `<a href="/_torana/plugin/${encodeURIComponent(p)}/" class="plugin-link" target="_blank">${escapeHtml(p)}</a>`;
-      }
-      container.innerHTML = html;
+    function setDirty(v) {
+      pipelineDirty = v;
+      document.getElementById('dirtyBar').classList.toggle('show', v);
     }
 
     function renderPipeline() {
-      const container = document.getElementById('pipelineContainer');
-      const order = currentConfig.order;
-
-      if (order.length === 0) {
-        container.innerHTML = '<div class="empty-state">No plugins enabled in pipeline order. Add one below.</div>';
-        return;
-      }
-
-      let html = '';
-      for (let i = 0; i < order.length; i++) {
-        const pluginName = order[i];
-        const rawConfig = currentConfig.config[pluginName];
-        let jsonStr = '{}';
-        if (rawConfig !== undefined) {
-          try {
-            jsonStr = typeof rawConfig === 'string' ? rawConfig : JSON.stringify(rawConfig, null, 2);
-          } catch (e) {
-            jsonStr = '{}';
-          }
-        }
-
-        const isFirst = i === 0;
-        const isLast = i === order.length - 1;
-
-        html += `<div class="plugin-card" data-plugin="${escapeHtml(pluginName)}">
-          <div class="plugin-header">
-            <div class="plugin-name">
-              <span style="color:var(--text-muted); font-size:0.8rem">#${i + 1}</span>
-              ${escapeHtml(pluginName)}
+      const cont = document.getElementById('pipelineContainer');
+      if (pipelineOrder.length === 0) {
+        cont.innerHTML = '<div class="empty-state">No plugins enabled. Enable one below.</div>';
+      } else {
+        cont.innerHTML = pipelineOrder.map((name, i) => {
+          const p = pluginByName[name] || { name, hooks: [], permissions: [] };
+          const chips = [];
+          if (p.serves_http) chips.push('<span class="chip serve">serves UI</span>');
+          if (configMap[name] && Object.keys(configMap[name]).length) chips.push('<span class="chip cfg">configured</span>');
+          if (p.hooks && p.hooks.length) chips.push(`<span class="chip hook">${p.hooks.length} hook${p.hooks.length === 1 ? '' : 's'}</span>`);
+          if (!pluginByName[name]) chips.push('<span class="chip perm">missing on disk</span>');
+          return `<div class="plugin-card" draggable="true" data-name="${escAttr(name)}" data-index="${i}">
+            <span class="drag-handle" title="Drag to reorder">⠿</span>
+            <span class="order-num">${i + 1}</span>
+            <div class="plugin-main" onclick="go('plugin','${escAttr(name)}')">
+              <div class="plugin-name-row">
+                <span class="plugin-name">${escHtml(name)}</span>
+                ${chips.join('')}
+              </div>
+              ${p.description ? `<div class="plugin-desc">${escHtml(p.description)}</div>` : ''}
             </div>
-            <div class="plugin-actions">
-              <button class="btn" onclick="movePlugin(${i}, -1)" ${isFirst ? 'disabled' : ''}>▲ Up</button>
-              <button class="btn" onclick="movePlugin(${i}, 1)" ${isLast ? 'disabled' : ''}>▼ Down</button>
-              <button class="btn btn-danger" onclick="removePlugin(${i})">Remove</button>
+            <div class="plugin-card-actions">
+              <button class="btn btn-sm" onclick="event.stopPropagation(); go('plugin','${escAttr(name)}')">Configure</button>
+              <button class="btn btn-sm btn-danger" onclick="event.stopPropagation(); disablePlugin('${escAttr(name)}')">Disable</button>
             </div>
-          </div>
-          <textarea class="plugin-config-area" id="config-${escapeHtml(pluginName)}" placeholder="Plugin JSON Config">${escapeHtml(jsonStr)}</textarea>
-        </div>`;
+          </div>`;
+        }).join('');
+        attachDnD();
       }
-      container.innerHTML = html;
-    }
 
-    function movePlugin(index, direction) {
-      readCurrentTextareas();
-      const newIndex = index + direction;
-      if (newIndex < 0 || newIndex >= currentConfig.order.length) return;
-      const temp = currentConfig.order[index];
-      currentConfig.order[index] = currentConfig.order[newIndex];
-      currentConfig.order[newIndex] = temp;
-      renderPipeline();
-    }
-
-    function removePlugin(index) {
-      readCurrentTextareas();
-      currentConfig.order.splice(index, 1);
-      renderPipeline();
-      renderPluginLinks();
-    }
-
-    function addPluginToPipeline() {
-      const input = document.getElementById('newPluginName');
-      const name = input.value.trim();
-      if (!name) return;
-      readCurrentTextareas();
-      if (!currentConfig.order.includes(name)) {
-        currentConfig.order.push(name);
-      }
-      if (!currentConfig.config[name]) {
-        currentConfig.config[name] = {};
-      }
-      input.value = '';
-      renderPipeline();
-      renderPluginLinks();
-    }
-
-    function readCurrentTextareas() {
-      for (const pName of currentConfig.order) {
-        const area = document.getElementById(`config-${pName}`);
-        if (area) {
-          try {
-            currentConfig.config[pName] = JSON.parse(area.value.trim() || '{}');
-          } catch (e) {
-            // Keep raw string temporarily if invalid so user edits aren't lost
-          }
-        }
+      const avail = allPlugins.filter(p => !pipelineOrder.includes(p.name));
+      const ac = document.getElementById('availableContainer');
+      if (avail.length === 0) {
+        ac.innerHTML = '<div class="empty-state">All discovered plugins are enabled.</div>';
+      } else {
+        ac.innerHTML = avail.map(p => {
+          const chips = [];
+          if (p.serves_http) chips.push('<span class="chip serve">serves UI</span>');
+          if (p.hooks && p.hooks.length) chips.push(`<span class="chip hook">${p.hooks.length} hook${p.hooks.length === 1 ? '' : 's'}</span>`);
+          return `<div class="available-row">
+            <div class="plugin-main">
+              <div class="plugin-name-row"><span class="plugin-name">${escHtml(p.name)}</span>${chips.join('')}</div>
+              ${p.description ? `<div class="plugin-desc">${escHtml(p.description)}</div>` : ''}
+            </div>
+            <button class="btn btn-sm btn-green" onclick="enablePlugin('${escAttr(p.name)}')">Enable</button>
+          </div>`;
+        }).join('');
       }
     }
 
-    function savePipeline() {
-      // Validate all JSON textareas first
-      const updatedConfigMap = {};
-      for (const pName of currentConfig.order) {
-        const area = document.getElementById(`config-${pName}`);
-        const val = area ? area.value.trim() : '{}';
-        if (val) {
-          try {
-            updatedConfigMap[pName] = JSON.parse(val);
-          } catch (err) {
-            showAlert(`Invalid JSON config for plugin "${pName}": ${err.message}`, true);
-            if (area) area.focus();
-            return;
-          }
-        } else {
-          updatedConfigMap[pName] = {};
-        }
-      }
-
-      // Preserve configs of plugins not in order as well if present
-      const finalConfigMap = { ...currentConfig.config, ...updatedConfigMap };
-
-      const payload = {
-        order: currentConfig.order,
-        config: finalConfigMap
-      };
-
-      fetch('/_torana/api/plugins', {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
-      })
-      .then(async res => {
-        const text = await res.text();
-        if (!res.ok) {
-          throw new Error(text || `HTTP ${res.status}`);
-        }
-        return text ? JSON.parse(text) : {};
-      })
-      .then(data => {
-        showAlert('Pipeline configuration updated and saved successfully!', false);
-        fetchConfig();
-      })
-      .catch(err => {
-        console.error('Error saving pipeline:', err);
-        showAlert(`Failed to update pipeline: ${err.message}`, true);
+    function attachDnD() {
+      document.querySelectorAll('#pipelineContainer .plugin-card').forEach(card => {
+        card.addEventListener('dragstart', e => {
+          dragSrc = parseInt(card.dataset.index, 10);
+          card.classList.add('dragging');
+          e.dataTransfer.effectAllowed = 'move';
+        });
+        card.addEventListener('dragend', () => {
+          card.classList.remove('dragging');
+          document.querySelectorAll('.plugin-card').forEach(c => c.classList.remove('drop-target'));
+        });
+        card.addEventListener('dragover', e => { e.preventDefault(); card.classList.add('drop-target'); });
+        card.addEventListener('dragleave', () => card.classList.remove('drop-target'));
+        card.addEventListener('drop', e => {
+          e.preventDefault();
+          const target = parseInt(card.dataset.index, 10);
+          if (dragSrc === null || dragSrc === target) return;
+          const moved = pipelineOrder.splice(dragSrc, 1)[0];
+          pipelineOrder.splice(target, 0, moved);
+          dragSrc = null;
+          setDirty(true);
+          renderPipeline();
+        });
       });
     }
 
-    // Utilities
-    function formatBytes(bytes) {
-      if (bytes === 0) return '0 B';
-      const k = 1024;
-      const sizes = ['B', 'KB', 'MB', 'GB'];
-      const i = Math.floor(Math.log(bytes) / Math.log(k));
-      return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+    function enablePlugin(name) {
+      if (!pipelineOrder.includes(name)) pipelineOrder.push(name);
+      if (!configMap[name]) configMap[name] = {};
+      setDirty(true);
+      renderPipeline();
+    }
+    function disablePlugin(name) {
+      pipelineOrder = pipelineOrder.filter(n => n !== name);
+      setDirty(true);
+      renderPipeline();
     }
 
-    function escapeHtml(str) {
-      if (typeof str !== 'string') return str;
-      return str.replace(/&/g, '&amp;')
-                .replace(/</g, '&lt;')
-                .replace(/>/g, '&gt;')
-                .replace(/"/g, '&quot;')
-                .replace(/'/g, '&#039;');
+    function savePipeline() {
+      const cfgOut = {};
+      for (const name of pipelineOrder) cfgOut[name] = configMap[name] || {};
+      fetch('/_torana/api/plugins', {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ order: pipelineOrder, config: cfgOut })
+      })
+      .then(async r => { const t = await r.text(); if (!r.ok) throw new Error(t || `HTTP ${r.status}`); return t; })
+      .then(() => { showAlert('Pipeline saved and applied.', false); loadPlugins(); })
+      .catch(err => showAlert(`Failed to save pipeline: ${err.message}`));
     }
+
+    // ---- Plugin detail ----
+    function renderPluginDetail(name) {
+      const cont = document.getElementById('pluginDetail');
+      const p = pluginByName[name];
+      if (!p) {
+        cont.innerHTML = `<div class="empty-state">Plugin "${escHtml(name)}" not found. It may not be on disk.</div>`;
+        return;
+      }
+      const enabled = pipelineOrder.includes(name);
+      const hookChips = (p.hooks || []).map(h => `<span class="chip hook">${escHtml(h)}</span>`).join('');
+      const permChips = (p.permissions || []).map(pm => `<span class="chip perm">${escHtml(pm)}</span>`).join('');
+      const cfgStr = JSON.stringify(configMap[name] || {}, null, 2);
+
+      let servedBlock = '';
+      if (p.serves_http) {
+        const url = `/_torana/plugin/${encodeURIComponent(name)}/`;
+        servedBlock = `<div class="subhead">Plugin UI</div>
+          <div class="info-note">This plugin serves its own interface. <a href="${url}" target="_blank" rel="noopener">Open in new tab ↗</a></div>
+          <iframe class="detail-frame" src="${url}" title="${escAttr(name)} UI"></iframe>`;
+      }
+
+      cont.innerHTML = `
+        <div class="detail-head">
+          <span class="detail-title">${escHtml(name)}</span>
+          ${p.version ? `<span class="chip">v${escHtml(p.version)}</span>` : ''}
+          <span class="chip ${enabled ? 'serve' : ''}">${enabled ? 'enabled' : 'disabled'}</span>
+        </div>
+        ${p.description ? `<div class="section-desc">${escHtml(p.description)}</div>` : ''}
+        <div class="detail-meta-grid">${hookChips}${permChips || '<span class="chip">no permissions</span>'}</div>
+
+        <div style="display:flex; gap:0.5rem; margin-bottom:1.25rem;">
+          ${enabled
+            ? `<button class="btn btn-sm btn-danger" onclick="disablePlugin('${escAttr(name)}'); go('pipeline')">Disable &amp; return</button>`
+            : `<button class="btn btn-sm btn-green" onclick="enablePlugin('${escAttr(name)}'); go('pipeline')">Enable &amp; return</button>`}
+        </div>
+
+        ${servedBlock}
+
+        <div class="subhead">Configuration (JSON)</div>
+        <div class="section-desc" style="margin-bottom:0.6rem">Raw config passed to the plugin. Saved &amp; applied immediately.</div>
+        <textarea class="code-editor" id="detailConfig">${escHtml(cfgStr)}</textarea>
+        <div style="margin-top:0.75rem; display:flex; gap:0.5rem;">
+          <button class="btn btn-primary" onclick="savePluginConfig('${escAttr(name)}')">Save config</button>
+        </div>
+      `;
+    }
+
+    function savePluginConfig(name) {
+      const area = document.getElementById('detailConfig');
+      let parsed;
+      try { parsed = JSON.parse(area.value.trim() || '{}'); }
+      catch (e) { showAlert(`Invalid JSON: ${e.message}`); area.focus(); return; }
+      configMap[name] = parsed;
+      // Ensure enabled so the config takes effect; keep current order.
+      const order = pipelineOrder.includes(name) ? pipelineOrder.slice() : pipelineOrder.concat(name);
+      const cfgOut = {};
+      for (const n of order) cfgOut[n] = configMap[n] || {};
+      fetch('/_torana/api/plugins', {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ order, config: cfgOut })
+      })
+      .then(async r => { const t = await r.text(); if (!r.ok) throw new Error(t || `HTTP ${r.status}`); return t; })
+      .then(() => { showAlert('Plugin config saved and applied.', false); loadPlugins(); })
+      .catch(err => showAlert(`Failed to save config: ${err.message}`));
+    }
+
+    // ---- Traffic / stats ----
+    function fetchStats() {
+      fetch('/stats').then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
+        .then(renderStats).catch(err => console.error('stats:', err));
+    }
+    function renderStats(data) {
+      document.getElementById('statRequests').textContent = (data.total_requests || 0).toLocaleString();
+      // status distribution from the live feed (client-side)
+      let s2 = 0, s4 = 0, s5 = 0;
+      for (const ev of feedEvents) {
+        if (ev.status >= 500) s5++; else if (ev.status >= 400) s4++; else if (ev.status < 300) s2++;
+      }
+      document.getElementById('statStatusPills').innerHTML =
+        `<span class="status-pill badge-2xx">${s2} ok</span>` +
+        `<span class="status-pill badge-4xx">${s4} 4xx</span>` +
+        `<span class="status-pill badge-5xx">${s5} 5xx</span>`;
+
+      document.getElementById('statTokens').textContent =
+        `${(data.total_tokens_in || 0).toLocaleString()} / ${(data.total_tokens_out || 0).toLocaleString()}`;
+
+      const rc = data.total_cache_read_tokens || 0, wc = data.total_cache_write_tokens || 0;
+      document.getElementById('statCacheTokens').textContent = `Read: ${rc.toLocaleString()} | Write: ${wc.toLocaleString()}`;
+      const denom = rc + (data.total_tokens_in || 0);
+      document.getElementById('statCacheHitRatio').textContent = denom > 0 ? `${((rc / denom) * 100).toFixed(1)}%` : 'N/A';
+
+      const bi = data.total_bytes_in || 0, bo = data.total_bytes_out || 0;
+      document.getElementById('statWireBytes').textContent = formatBytes(bi + bo);
+      document.getElementById('statWireSub').textContent = `In: ${formatBytes(bi)} | Out: ${formatBytes(bo)}`;
+
+      // FinOps-is-a-plugin note: link any serving plugin.
+      const serving = allPlugins.filter(p => p.serves_http && pipelineOrder.includes(p.name));
+      const note = document.getElementById('finopsNote');
+      if (serving.length) {
+        note.style.display = 'block';
+        note.innerHTML = 'Detailed cost dashboards are served by plugins: ' +
+          serving.map(p => `<a href="/_torana/plugin/${encodeURIComponent(p.name)}/" target="_blank" rel="noopener">${escHtml(p.name)} ↗</a>`).join(' · ');
+      } else {
+        note.style.display = 'none';
+      }
+
+      const tbody = document.getElementById('pluginStatsTableBody');
+      const per = data.per_plugin || {};
+      const names = Object.keys(per);
+      tbody.innerHTML = names.length === 0
+        ? '<tr><td colspan="3" class="empty-state">No plugin activity recorded yet.</td></tr>'
+        : names.map(n => `<tr>
+            <td><strong style="color:var(--accent-blue)">${escHtml(n)}</strong></td>
+            <td>${(per[n].compactions || 0).toLocaleString()}</td>
+            <td>${formatBytes(per[n].bytes_saved || 0)}</td>
+          </tr>`).join('');
+    }
+
+    // ---- Live feed (SSE) ----
+    function initSSE() {
+      if (eventSource) eventSource.close();
+      try {
+        eventSource = new EventSource('/_torana/api/stream');
+        eventSource.onopen = () => setConnectionStatus(true);
+        eventSource.onmessage = e => { try { addFeedEvent(JSON.parse(e.data)); } catch (_) {} };
+        eventSource.onerror = () => setConnectionStatus(false, 'Reconnecting…');
+      } catch (_) { setConnectionStatus(false, 'Connection error'); }
+    }
+    function addFeedEvent(ev) {
+      const key = `${ev.timestamp}_${ev.provider}_${ev.model}_${ev.status}_${ev.latency_ms}`;
+      if (seenEventKeys.has(key)) return;
+      seenEventKeys.add(key);
+      if (seenEventKeys.size > 500) seenEventKeys.delete(seenEventKeys.values().next().value);
+      feedEvents.unshift(ev);
+      if (feedEvents.length > 200) feedEvents.pop();
+      renderFeedTable();
+    }
+    function renderFeedTable() {
+      const tbody = document.getElementById('feedTableBody');
+      document.getElementById('eventCount').textContent = `${feedEvents.length} event${feedEvents.length === 1 ? '' : 's'}`;
+      if (feedEvents.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="8" class="empty-state">Waiting for request events…</td></tr>';
+        return;
+      }
+      tbody.innerHTML = feedEvents.map(ev => {
+        const sc = ev.status >= 500 ? 'badge-5xx' : ev.status >= 400 ? 'badge-4xx' : ev.status >= 300 ? 'badge-3xx' : 'badge-2xx';
+        const t = ev.timestamp ? ev.timestamp.replace('T', ' ').replace('Z', '').slice(0, 23) : '-';
+        const lat = typeof ev.latency_ms === 'number' ? `${ev.latency_ms.toFixed(1)} ms` : '-';
+        let vc = 'badge-verdict'; if (ev.verdict) vc += ` ${ev.verdict}`;
+        const vb = ev.verdict ? `<span class="badge ${vc}">${escHtml(ev.verdict)}</span>` : '<span style="color:var(--text-faint)">-</span>';
+        return `<tr>
+          <td style="font-family:monospace; font-size:0.78rem">${escHtml(t)}</td>
+          <td><strong>${escHtml(ev.provider || '-')}</strong></td>
+          <td>${escHtml(ev.model || '-')}</td>
+          <td><span class="badge ${sc}">${ev.status || 0}</span></td>
+          <td>${lat}</td>
+          <td>${(ev.tokens_in || 0).toLocaleString()} / ${(ev.tokens_out || 0).toLocaleString()}</td>
+          <td>${(ev.cache_read_tokens || 0).toLocaleString()} / ${(ev.cache_write_tokens || 0).toLocaleString()}</td>
+          <td>${vb}</td>
+        </tr>`;
+      }).join('');
+    }
+
+    // ---- Settings ----
+    const PROVIDER_FORMATS = ['openai', 'anthropic', 'bedrock', 'gemini', 'gemini-codeassist'];
+    function loadSettings() {
+      fetch('/_torana/api/config').then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
+        .then(cfg => { settingsCfg = cfg; renderSettings(cfg); })
+        .catch(err => showAlert(`Failed to load settings: ${err.message}`));
+    }
+    function renderSettings(cfg) {
+      const providers = cfg.providers || {};
+      const body = document.getElementById('providersBody');
+      body.innerHTML = '';
+      Object.keys(providers).forEach(name => addProviderRow(name, providers[name]));
+      if (Object.keys(providers).length === 0) addProviderRow();
+
+      refreshOffloadProviderOptions();
+      const off = cfg.offload || {};
+      document.getElementById('offEnabled').checked = !!off.enabled;
+      document.getElementById('offProvider').value = off.provider || '';
+      document.getElementById('offModel').value = off.model || '';
+      document.getElementById('offKey').value = off.api_key_env || '';
+
+      const lim = cfg.limits || {};
+      document.getElementById('limConc').value = lim.concurrency || 0;
+      document.getElementById('limRpm').value = lim.rpm || 0;
+      document.getElementById('cfgPort').value = cfg.port || 8080;
+
+      const cp = cfg.control_plane || {};
+      document.getElementById('cpAllowRemote').checked = !!cp.allow_remote;
+      document.getElementById('cpToken').value = '';
+    }
+    function addProviderRow(name, prov) {
+      prov = prov || {};
+      const body = document.getElementById('providersBody');
+      const tr = document.createElement('tr');
+      const opts = PROVIDER_FORMATS.map(f => `<option value="${f}" ${prov.format === f ? 'selected' : ''}>${f}</option>`).join('');
+      tr.innerHTML = `
+        <td><input class="input p-name" value="${escAttr(name || '')}" placeholder="name" oninput="refreshOffloadProviderOptions()"></td>
+        <td><input class="input p-url" value="${escAttr(prov.url || '')}" placeholder="https://…"></td>
+        <td><select class="input p-format">${opts}</select></td>
+        <td><input class="input p-key" value="${escAttr(prov.api_key_env || '')}" placeholder="ENV_VAR"></td>
+        <td><input class="input p-fallback" value="${escAttr((prov.fallback || []).join(', '))}" placeholder="name, name"></td>
+        <td><button class="btn btn-sm btn-danger" onclick="this.closest('tr').remove(); refreshOffloadProviderOptions()">✕</button></td>`;
+      body.appendChild(tr);
+    }
+    function refreshOffloadProviderOptions() {
+      const sel = document.getElementById('offProvider');
+      const cur = sel.value;
+      const names = Array.from(document.querySelectorAll('#providersBody .p-name'))
+        .map(i => i.value.trim()).filter(Boolean);
+      sel.innerHTML = '<option value=""></option>' + names.map(n => `<option value="${escAttr(n)}">${escHtml(n)}</option>`).join('');
+      if (names.includes(cur)) sel.value = cur;
+    }
+    function saveSettings() {
+      const cfg = settingsCfg ? JSON.parse(JSON.stringify(settingsCfg)) : {};
+      const providers = {};
+      document.querySelectorAll('#providersBody tr').forEach(tr => {
+        const name = tr.querySelector('.p-name').value.trim();
+        if (!name) return;
+        const prov = {
+          url: tr.querySelector('.p-url').value.trim(),
+          format: tr.querySelector('.p-format').value
+        };
+        const key = tr.querySelector('.p-key').value.trim();
+        if (key) prov.api_key_env = key;
+        const fb = tr.querySelector('.p-fallback').value.trim();
+        if (fb) prov.fallback = fb.split(',').map(s => s.trim()).filter(Boolean);
+        providers[name] = prov;
+      });
+      cfg.providers = providers;
+      cfg.offload = {
+        enabled: document.getElementById('offEnabled').checked,
+        provider: document.getElementById('offProvider').value.trim(),
+        model: document.getElementById('offModel').value.trim()
+      };
+      const offKey = document.getElementById('offKey').value.trim();
+      if (offKey) cfg.offload.api_key_env = offKey;
+      cfg.limits = {
+        concurrency: parseInt(document.getElementById('limConc').value, 10) || 0,
+        rpm: parseInt(document.getElementById('limRpm').value, 10) || 0
+      };
+      const port = parseInt(document.getElementById('cfgPort').value, 10);
+      if (!isNaN(port)) cfg.port = port;
+      cfg.control_plane = cfg.control_plane || {};
+      cfg.control_plane.allow_remote = document.getElementById('cpAllowRemote').checked;
+      const tok = document.getElementById('cpToken').value.trim();
+      if (tok) cfg.control_plane.token = tok; else delete cfg.control_plane.token;
+
+      fetch('/_torana/api/config', {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(cfg)
+      })
+      .then(async r => { const t = await r.text(); if (!r.ok) throw new Error(t || `HTTP ${r.status}`); return t ? JSON.parse(t) : {}; })
+      .then(saved => { settingsCfg = saved; showAlert('Settings saved and applied.', false); })
+      .catch(err => showAlert(`Failed to save settings: ${err.message}`));
+    }
+
+    // ---- Utils ----
+    function formatBytes(b) {
+      if (!b) return '0 B';
+      const k = 1024, sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
+      const i = Math.floor(Math.log(b) / Math.log(k));
+      return parseFloat((b / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+    }
+    function escHtml(s) {
+      if (typeof s !== 'string') return s;
+      return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#039;');
+    }
+    function escAttr(s) { return escHtml(String(s == null ? '' : s)); }
   </script>
 </body>
 </html>
