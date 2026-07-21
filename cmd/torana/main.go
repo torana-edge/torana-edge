@@ -51,6 +51,7 @@ func main() {
 		Port:            strconv.Itoa(provCfg.Port),
 		Providers:       provCfg,
 		DefaultProvider: os.Getenv("TORANA_DEFAULT_PROVIDER"),
+		ConfigPath:      configPath,
 	}
 
 	// Initialize OTel BEFORE the server so New can bridge its StatsTracker to

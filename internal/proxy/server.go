@@ -63,12 +63,17 @@ type Config struct {
 	// DefaultProvider routes requests without a /provider/<name>/ prefix
 	// to this provider. Empty means no default — such requests get 502.
 	DefaultProvider string
+
+	// ConfigPath is the path to the config file on disk for persistence.
+	ConfigPath string
 }
 
 // Server wraps the HTTP listener, the reverse proxy, and the WASM plugin
 // pipeline that runs on every request/response cycle.
 type Server struct {
 	configMu   sync.RWMutex
+	rebuildMu  sync.Mutex
+	configPath string
 	config     Config
 	proxy      *httputil.ReverseProxy
 	httpServer *http.Server
@@ -233,8 +238,13 @@ func New(cfg Config) (*Server, error) {
 	// is disabled; InitOTel runs before New in main).
 	metrics.RegisterStatsObservables(statsTracker)
 
+	configPath := cfg.ConfigPath
+	if configPath == "" {
+		configPath = "config.json"
+	}
 	s := &Server{
 		config:      cfg,
+		configPath:  configPath,
 		stats:       statsTracker,
 		feed:        metrics.NewRequestFeed(0), // default 200-event ring buffer
 		rateLimiter: NewRateLimiter(cfg.Providers.Limits.RPM, cfg.Providers.Limits.Concurrency),
@@ -267,49 +277,14 @@ func New(cfg Config) (*Server, error) {
 		}
 		s.sharedCache = sharedCache
 
-		// newRuntime wires host callbacks; used at startup AND on every
-		// hot-reload — a bare runtime would silently lose offload/stats.
-		newRuntime := func() *wasm.Runtime {
-			rt := wasm.NewRuntimeWithCache(context.Background(), sharedCache)
-			// Offload completion handler (cheap-model tool result
-			// summarization), recording failures in /stats.
-			rt.OffloadFunc = func(ctx context.Context, payloadJSON string) (string, error) {
-				out, err := s.offloadCompletion(ctx, payloadJSON)
-				if err != nil {
-					// Plugins degrade gracefully on offload errors, so this
-					// log line is the only host-side visibility.
-					log.Printf("[offload] %v", err)
-					s.stats.RecordOffloadFailure()
-				}
-				return out, err
-			}
-			// Plugins report compaction savings via torana_record_savings,
-			// attributed per plugin in /stats and OTLP.
-			rt.SavingsFunc = func(pluginName string, originalBytes, finalBytes int64) {
-				s.stats.RecordCompaction(pluginName, originalBytes, finalBytes)
-				metrics.RecordPluginSavings(context.Background(), pluginName, originalBytes-finalBytes)
-			}
-			// Pristine request/response snapshots (env.original_request /
-			// env.original_response), read from the request state the same
-			// way offload does.
-			rt.OriginalRequestFunc = func(ctx context.Context) []byte {
-				return reqStateFrom(ctx).OriginalReq
-			}
-			rt.OriginalResponseFunc = func(ctx context.Context) []byte {
-				return reqStateFrom(ctx).OriginalResp
-			}
-			return rt
-		}
-		pp, err := plugin.NewPipeline(newRuntime(), plugin.PluginConfig{
-			Dir:    cfg.Providers.Plugins.Dir,
-			Order:  cfg.Providers.Plugins.Order,
-			Config: cfg.Providers.Plugins.Config,
-		})
-		if err != nil {
+		if err := s.RebuildPipeline(cfg.Providers.Plugins); err != nil {
 			log.Printf("plugin pipeline: %v", err)
 		} else {
-			s.pluginPipeline.Store(pp)
-			log.Printf("plugin pipeline: %d plugins loaded", pp.Len())
+			raw := s.pluginPipeline.Load()
+			if raw != nil {
+				pp := raw.(*plugin.PluginPipeline)
+				log.Printf("plugin pipeline: %d plugins loaded", pp.Len())
+			}
 			watchCtx, watchCancel := context.WithCancel(context.Background())
 			s.watchCancel = watchCancel
 			// configFn reads the live config so plugin-config hot-reloads
@@ -320,7 +295,10 @@ func New(cfg Config) (*Server, error) {
 			}
 			watchDone := make(chan struct{})
 			s.watchDone = watchDone
-			if err := plugin.WatchPlugins(watchCtx, cfg.Providers.Plugins.Dir, configFn, newRuntime, func(newPP *plugin.PluginPipeline) {
+			if err := plugin.WatchPlugins(watchCtx, cfg.Providers.Plugins.Dir, configFn, s.newRuntime, func(newPP *plugin.PluginPipeline) {
+				// WatchPlugins has already built newPP from the live config
+				// (configFn) using s.newRuntime — swap it in and drain the old
+				// one. Rebuilding here would compile the whole pipeline twice.
 				old := s.pluginPipeline.Swap(newPP)
 				if old != nil {
 					go old.(*plugin.PluginPipeline).DrainAndClose()
@@ -824,6 +802,80 @@ func New(cfg Config) (*Server, error) {
 	// Go's ServeMux routes them directly and they never reach the provider
 	// proxy handler.
 
+	// GET /_torana/api/config — JSON of current effective provider.Config.
+	mux.HandleFunc("/_torana/api/config", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		b, err := json.Marshal(s.GetConfig().Providers)
+		if err != nil {
+			http.Error(w, "error marshalling config", http.StatusInternalServerError)
+			return
+		}
+		w.Write(b)
+	})
+
+	// PUT /_torana/api/plugins (or POST) — live plugin enable/disable/reorder/edit + persist.
+	mux.HandleFunc("/_torana/api/plugins", func(w http.ResponseWriter, r *http.Request) {
+		// TODO(controlplane-security): localhost-only guard added in the security workstream
+		if r.Method != http.MethodPut && r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		var req struct {
+			Order  *[]string                  `json:"order,omitempty"`
+			Config map[string]json.RawMessage `json:"config,omitempty"`
+		}
+		if r.Body != nil {
+			lr := io.LimitReader(r.Body, maxBodySize+1)
+			data, err := io.ReadAll(lr)
+			if err != nil {
+				http.Error(w, "failed to read body", http.StatusBadRequest)
+				return
+			}
+			if len(data) > 0 {
+				if err := json.Unmarshal(data, &req); err != nil {
+					http.Error(w, "invalid json body", http.StatusBadRequest)
+					return
+				}
+			}
+		}
+
+		oldPlugins := s.GetConfig().Providers.Plugins
+		newPlugins := oldPlugins
+		if req.Order != nil {
+			newPlugins.Order = *req.Order
+		}
+		if req.Config != nil {
+			newPlugins.Config = req.Config
+		}
+
+		s.configMu.Lock()
+		s.config.Providers.Plugins = newPlugins
+		s.configMu.Unlock()
+
+		if err := s.RebuildPipeline(newPlugins); err != nil {
+			s.configMu.Lock()
+			s.config.Providers.Plugins = oldPlugins
+			s.configMu.Unlock()
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		if err := s.PersistConfig(); err != nil {
+			log.Printf("failed to persist config: %v", err)
+			http.Error(w, "failed to persist config to disk", http.StatusInternalServerError)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		b, _ := json.Marshal(newPlugins)
+		w.Write(b)
+	})
+
 	// GET /_torana/api/feed — one-shot JSON snapshot of recent events,
 	// newest-first (up to the ring-buffer capacity, default 200).
 	mux.HandleFunc("/_torana/api/feed", func(w http.ResponseWriter, r *http.Request) {
@@ -1138,6 +1190,77 @@ func (s *Server) SetProviders(cfg provider.Config) {
 	s.configMu.Unlock()
 	s.rateLimiter.Update(cfg.Limits.RPM, cfg.Limits.Concurrency)
 	log.Printf("config hot-reload: %d providers loaded", len(cfg.Providers))
+}
+
+// newRuntime wires host callbacks for a WASM runtime.
+func (s *Server) newRuntime() *wasm.Runtime {
+	rt := wasm.NewRuntimeWithCache(context.Background(), s.sharedCache)
+	// Offload completion handler (cheap-model tool result
+	// summarization), recording failures in /stats.
+	rt.OffloadFunc = func(ctx context.Context, payloadJSON string) (string, error) {
+		out, err := s.offloadCompletion(ctx, payloadJSON)
+		if err != nil {
+			// Plugins degrade gracefully on offload errors, so this
+			// log line is the only host-side visibility.
+			log.Printf("[offload] %v", err)
+			s.stats.RecordOffloadFailure()
+		}
+		return out, err
+	}
+	// Plugins report compaction savings via torana_record_savings,
+	// attributed per plugin in /stats and OTLP.
+	rt.SavingsFunc = func(pluginName string, originalBytes, finalBytes int64) {
+		s.stats.RecordCompaction(pluginName, originalBytes, finalBytes)
+		metrics.RecordPluginSavings(context.Background(), pluginName, originalBytes-finalBytes)
+	}
+	// Pristine request/response snapshots (env.original_request /
+	// env.original_response), read from the request state the same
+	// way offload does.
+	rt.OriginalRequestFunc = func(ctx context.Context) []byte {
+		return reqStateFrom(ctx).OriginalReq
+	}
+	rt.OriginalResponseFunc = func(ctx context.Context) []byte {
+		return reqStateFrom(ctx).OriginalResp
+	}
+	return rt
+}
+
+// RebuildPipeline builds a fresh runtime + plugin pipeline using pcfg,
+// then atomically swaps the active pipeline and drains the old one.
+// If reloading fails (e.g. ordering constraint violation), returns the error
+// without swapping the active pipeline.
+func (s *Server) RebuildPipeline(pcfg provider.PluginsConfig) error {
+	s.rebuildMu.Lock()
+	defer s.rebuildMu.Unlock()
+
+	rt := s.newRuntime()
+	pp, err := plugin.NewPipeline(rt, plugin.PluginConfig{
+		Dir:    pcfg.Dir,
+		Order:  pcfg.Order,
+		Config: pcfg.Config,
+	})
+	if err != nil {
+		rt.Close()
+		return err
+	}
+
+	old := s.pluginPipeline.Swap(pp)
+	if old != nil {
+		go old.(*plugin.PluginPipeline).DrainAndClose()
+	}
+	return nil
+}
+
+// PersistConfig saves the current in-memory provider configuration to disk.
+// The 5s modtime poller (provider.WatchConfig) will observe Save()'s write
+// and call SetProviders again (benign; it does not rebuild the pipeline).
+// Atomic rename prevents a half-written read.
+func (s *Server) PersistConfig() error {
+	path := s.configPath
+	if path == "" {
+		path = "config.json"
+	}
+	return provider.Save(path, s.GetConfig().Providers)
 }
 
 func (s *Server) ListenAndServe() error {

@@ -161,6 +161,31 @@ func reloadPipeline(runtime *wasm.Runtime, config PluginConfig) (*PluginPipeline
 		}
 		sort.Strings(order)
 	}
+	// Enforce ordering constraint: route-capable plugins (env.route_request)
+	// must precede compaction economic-gate plugins (env.host_call.torana_evaluate_compaction).
+	var seenCompactionGate bool
+	for _, name := range order {
+		bundle, ok := byName[name]
+		if !ok {
+			continue
+		}
+		var hasRoute, hasCompactionGate bool
+		for _, p := range bundle.Manifest.Permissions {
+			if p.Name == "env.route_request" {
+				hasRoute = true
+			}
+			if p.Name == "env.host_call.torana_evaluate_compaction" {
+				hasCompactionGate = true
+			}
+		}
+		if hasRoute && seenCompactionGate {
+			return nil, fmt.Errorf("ordering constraint violation: route-capable plugin %q (grant env.route_request) must precede compaction economic-gate plugins (grant env.host_call.torana_evaluate_compaction)", name)
+		}
+		if hasCompactionGate {
+			seenCompactionGate = true
+		}
+	}
+
 	for _, name := range order {
 		bundle, ok := byName[name]
 		if !ok {
