@@ -71,6 +71,9 @@ type Server struct {
 	proxy      *httputil.ReverseProxy
 	httpServer *http.Server
 	stats      *metrics.StatsTracker
+	// feed is the bounded in-memory ring buffer of recent per-request events,
+	// exposed via /_torana/api/feed (snapshot) and /_torana/api/stream (SSE).
+	feed *metrics.RequestFeed
 	// WASM plugin pipeline (loaded when configured)
 	pluginPipeline atomic.Value // *plugin.PluginPipeline
 	// sharedCache is the cross-request plugin state store shared by every
@@ -151,6 +154,11 @@ type reqState struct {
 	// the transport returns it verbatim and ModifyResponse must not re-parse
 	// it or run response hooks over it.
 	Synthetic bool
+	// Verdict is the control-plane outcome applied by the plugin pipeline:
+	// "block" (env.block_request), "respond" (env.respond_request),
+	// "route" (env.route_request). Empty when no pipeline is loaded or no
+	// veto/redirect was applied.
+	Verdict string
 	// OriginalReq is the pristine pre-pipeline request (pb bytes), snapshotted
 	// only when a loaded plugin holds env.original_request.
 	OriginalReq []byte
@@ -226,6 +234,7 @@ func New(cfg Config) (*Server, error) {
 	s := &Server{
 		config:      cfg,
 		stats:       statsTracker,
+		feed:        metrics.NewRequestFeed(0), // default 200-event ring buffer
 		rateLimiter: NewRateLimiter(cfg.Providers.Limits.RPM, cfg.Providers.Limits.Concurrency),
 	}
 
@@ -463,6 +472,7 @@ func New(cfg Config) (*Server, error) {
 						if rc, ok := req.Context().Value(routeContextKey{}).(*RouteContext); ok {
 							rc.Block = renderBlock(prov.Format, raw)
 						}
+						reqStateFrom(req.Context()).Verdict = "block"
 						req.Body = io.NopCloser(bytes.NewReader(nil))
 						req.ContentLength = 0
 						return
@@ -485,6 +495,7 @@ func New(cfg Config) (*Server, error) {
 						rs.Synthetic = true
 						rs.Model = chat.Model
 						rs.Provider = provName
+						rs.Verdict = "respond"
 						req.Body = io.NopCloser(bytes.NewReader(nil))
 						req.ContentLength = 0
 						return
@@ -522,7 +533,9 @@ func New(cfg Config) (*Server, error) {
 					delete(chat.ToranaMeta, "_route")
 					applyRoute(req, chat, prov.Format, provName, raw, currentCfg.Providers)
 					// Model may have been overridden; refresh the metrics fact.
-					reqStateFrom(req.Context()).Model = chat.Model
+					rstate := reqStateFrom(req.Context())
+					rstate.Model = chat.Model
+					rstate.Verdict = "route"
 				}
 			}
 
@@ -803,6 +816,88 @@ func New(cfg Config) (*Server, error) {
 		b, _ := json.Marshal(s.stats)
 		w.Write(b)
 	})
+
+	// --- /_torana control-plane namespace --------------------------------
+	// These routes MUST be registered before the "/" catch-all so that
+	// Go's ServeMux routes them directly and they never reach the provider
+	// proxy handler.
+
+	// GET /_torana/api/feed — one-shot JSON snapshot of recent events,
+	// newest-first (up to the ring-buffer capacity, default 200).
+	mux.HandleFunc("/_torana/api/feed", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		snap := s.feed.Snapshot()
+		if snap == nil {
+			// Return an empty JSON array instead of null for API ergonomics.
+			w.Write([]byte("[]"))
+			return
+		}
+		b, _ := json.Marshal(snap)
+		w.Write(b)
+	})
+
+	// GET /_torana/api/stream — SSE stream of live RequestEvents.
+	// On connect the current snapshot is replayed (oldest-to-newest) so the
+	// client gets a consistent view, then new events are pushed as they arrive.
+	// The stream honors request-context cancellation (client disconnect).
+	mux.HandleFunc("/_torana/api/stream", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			http.Error(w, "streaming not supported", http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("Connection", "keep-alive")
+
+		// Subscribe before replaying the snapshot to avoid a race where an
+		// event arrives between the Snapshot() call and Subscribe().
+		ch, unsub := s.feed.Subscribe()
+		defer unsub()
+
+		// Replay existing events oldest-first so the client sees a coherent
+		// history in chronological order before live events begin.
+		if snap := s.feed.Snapshot(); len(snap) > 0 {
+			for i := len(snap) - 1; i >= 0; i-- {
+				b, err := json.Marshal(snap[i])
+				if err != nil {
+					continue
+				}
+				fmt.Fprintf(w, "data: %s\n\n", b)
+			}
+			flusher.Flush()
+		}
+
+		ctx := r.Context()
+		for {
+			select {
+			case <-ctx.Done():
+				// Client disconnected.
+				return
+			case ev, ok := <-ch:
+				if !ok {
+					// Channel closed by unsub (shouldn't happen before ctx cancel,
+					// but handle it gracefully).
+					return
+				}
+				b, err := json.Marshal(ev)
+				if err != nil {
+					continue
+				}
+				fmt.Fprintf(w, "data: %s\n\n", b)
+				flusher.Flush()
+			}
+		}
+	})
+
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		currentCfg := s.GetConfig()
 		// Panic recovery for the request handler goroutine.
@@ -878,9 +973,28 @@ func New(cfg Config) (*Server, error) {
 		// Host request metrics: latency + outcome, labeled by model/provider.
 		// The host sees every response (including errors and vetoes), so this
 		// is the reliable source of truth for latency and status.
-		metrics.RecordProxyRequest(r.Context(), rs.Model, rs.Provider, tw.status, float64(time.Since(rs.Start).Microseconds())/1000)
+		latencyMS := float64(time.Since(rs.Start).Microseconds()) / 1000
+		metrics.RecordProxyRequest(r.Context(), rs.Model, rs.Provider, tw.status, latencyMS)
 		metrics.RecordTokens(r.Context(), rs.Model, rs.Provider, rs.UsageIn, rs.UsageOut)
 		metrics.RecordCacheTokens(r.Context(), rs.Model, rs.Provider, rs.UsageCacheRead, rs.UsageCacheWrite)
+		// Record a per-request event in the live feed (control-plane dashboard).
+		// Add is O(1) and non-blocking — it never stalls the request goroutine.
+		// TODO(controlplane): populate Plugins once the pipeline exposes which
+		// plugins ran for this request ID.
+		s.feed.Add(metrics.RequestEvent{
+			Timestamp:        rs.Start.UTC().Format(time.RFC3339Nano),
+			Provider:         rs.Provider,
+			Model:            rs.Model,
+			Status:           tw.status,
+			LatencyMS:        latencyMS,
+			TokensIn:         int64(rs.UsageIn),
+			TokensOut:        int64(rs.UsageOut),
+			CacheReadTokens:  int64(rs.UsageCacheRead),
+			CacheWriteTokens: int64(rs.UsageCacheWrite),
+			BytesIn:          tr.bytesRead,
+			BytesOut:         tw.bytesWritten,
+			Verdict:          rs.Verdict,
+		})
 	})
 
 	srv := &http.Server{
