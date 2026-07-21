@@ -16,7 +16,7 @@ pub extern "C" fn dealloc(ptr: u32, size: u32) {
 // Return 0 to pass the request through unchanged, or pack a pointer/length
 // to a re-serialized ChatRequest as ((ptr as u64) << 32) | len.
 //
-// A real plugin would decode the payload with `prost` (see pkg/pb/torana.proto
+// A real plugin would decode the payload with `prost` (see sdk/pb/torana.proto
 // for the schema). This example validates the polyglot ABI surface only:
 // alloc/dealloc, the 3-argument hook signature, and the u64 return packing.
 #[no_mangle]

@@ -4,7 +4,7 @@ package plugin_sdk
 
 import (
 	"context"
-	"github.com/torana-edge/torana-edge/pkg/pb"
+	"github.com/torana-edge/torana-edge/sdk/pb"
 )
 
 //nolint:unused

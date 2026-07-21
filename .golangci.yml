@@ -29,7 +29,7 @@ linters-settings:
       - (*github.com/torana-edge/torana-edge/internal/wasm.Runtime).Close
       - (*github.com/torana-edge/torana-edge/internal/plugin.Runtime).Close
       - github.com/torana-edge/torana-edge/internal/plugin.WatchPlugins
-      - github.com/torana-edge/torana-edge/pkg/plugin-sdk.HostCall
+      - github.com/torana-edge/torana-edge/sdk/plugin-sdk.HostCall
       - (*github.com/tetratelabs/wazero/api.Module).Close
       - github.com/tetratelabs/wazero/api.Function.Call
       - github.com/tetratelabs/wazero.Runtime.Instantiate

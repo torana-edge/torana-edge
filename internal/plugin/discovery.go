@@ -15,7 +15,7 @@ import (
 	"github.com/torana-edge/torana-edge/internal/engine"
 	"github.com/torana-edge/torana-edge/internal/engine/pbconv"
 	"github.com/torana-edge/torana-edge/internal/wasm"
-	"github.com/torana-edge/torana-edge/pkg/pb"
+	"github.com/torana-edge/torana-edge/sdk/pb"
 	"google.golang.org/protobuf/proto"
 )
 

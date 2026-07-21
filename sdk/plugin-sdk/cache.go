@@ -3,7 +3,7 @@ package plugin_sdk
 import (
 	"encoding/json"
 
-	"github.com/torana-edge/torana-edge/pkg/pb"
+	"github.com/torana-edge/torana-edge/sdk/pb"
 )
 
 // Prompt-cache compliance

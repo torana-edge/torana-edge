@@ -1,7 +1,7 @@
 syntax = "proto3";
 
 package torana.v1;
-option go_package = "github.com/torana-edge/torana-edge/pkg/pb";
+option go_package = "github.com/torana-edge/torana-edge/sdk/pb";
 
 // A single turn in a chat conversation.
 message Message {
