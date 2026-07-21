@@ -40,6 +40,8 @@ type Config struct {
 	// base URL (e.g. the Antigravity CLI), routing intercepted hosts into the
 	// provider pipeline. Disabled unless configured.
 	MITM MITMConfig `json:"mitm,omitempty"`
+	// ControlPlane configures access control for the /_torana/* endpoints.
+	ControlPlane ControlPlaneConfig `json:"control_plane,omitempty"`
 }
 
 // MITMConfig configures the TLS-terminating ingress. When enabled, agy (or any
@@ -96,6 +98,14 @@ func (o OffloadConfig) Validate(providers map[string]Provider) error {
 type Limits struct {
 	Concurrency int `json:"concurrency,omitempty"`
 	RPM         int `json:"rpm,omitempty"`
+}
+
+// ControlPlaneConfig configures access control for the /_torana/* endpoints.
+// Default (zero value) is loopback-only with no token. AllowRemote permits
+// non-loopback callers; when Token is set, requests that provide it are allowed.
+type ControlPlaneConfig struct {
+	AllowRemote bool   `json:"allow_remote,omitempty"`
+	Token       string `json:"token,omitempty"`
 }
 
 // PluginsConfig controls WASM plugin loading and execution.
@@ -181,6 +191,9 @@ func Load(path string) (Config, error) {
 	}
 	if user.MITM.Enabled {
 		cfg.MITM = user.MITM
+	}
+	if user.ControlPlane != (ControlPlaneConfig{}) {
+		cfg.ControlPlane = user.ControlPlane
 	}
 
 	return cfg, nil
