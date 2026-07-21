@@ -126,3 +126,26 @@ message StreamEventResult {
   bool handled = 1;
   repeated StreamEvent events = 2;
 }
+
+// Incoming HTTP request forwarded to a plugin's run_on_http_request hook.
+// Built directly from net/http — does not cross the engine IR.
+message HttpRequest {
+  string method = 1;
+  string path = 2;
+  // JSON-encoded map of request headers (map[string][]string).
+  bytes headers_json = 3;
+  bytes body = 4;
+}
+
+// Response produced by a plugin's run_on_http_request hook.
+//
+// The explicit `handled` bool is required: an all-defaults proto message
+// marshals to zero bytes, which the host reads as "not handled". A plugin
+// MUST set handled=true when it serves a response.
+message HttpResponse {
+  int32 status = 1;
+  // JSON-encoded map of response headers (map[string][]string).
+  bytes headers_json = 2;
+  bytes body = 3;
+  bool handled = 4;
+}

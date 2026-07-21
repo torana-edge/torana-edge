@@ -421,6 +421,80 @@ func (pp *PluginPipeline) RunOnStreamChunk(ctx context.Context, reqID uint64, ch
 	return out, nil
 }
 
+// ErrServeHTTPForbidden is returned by RunOnHTTPRequest when the named plugin
+// exists and declares the run_on_http_request hook but does NOT hold the
+// env.serve_http permission. The proxy route handler maps this to 403.
+var ErrServeHTTPForbidden = fmt.Errorf("plugin does not hold env.serve_http permission")
+
+// RunOnHTTPRequest dispatches an HTTP request to a single named plugin's
+// run_on_http_request hook. It is used by the /_torana/plugin/<name>/* proxy
+// route so plugins can serve their own HTTP UI/API namespace.
+//
+// Return values:
+//
+//	(nil, nil)                   — plugin not found, or does not declare
+//	                               run_on_http_request; caller should 404.
+//	(nil, ErrServeHTTPForbidden) — plugin exists and has the hook but lacks
+//	                               the env.serve_http grant; caller → 403.
+//	(*HttpResponse, nil)         — plugin returned a response; caller writes it.
+//	(nil, other error)           — internal dispatch error; caller → 503.
+//
+// httpReq is built directly from net/http — it does not cross the engine IR.
+func (pp *PluginPipeline) RunOnHTTPRequest(ctx context.Context, reqID uint64, pluginName string, httpReq *pb.HttpRequest) (*pb.HttpResponse, error) {
+	pp.Acquire()
+	defer pp.Release()
+
+	// Find the named plugin.
+	var target *loadedPlugin
+	for _, lp := range pp.plugins {
+		if lp.manifest.Name == pluginName {
+			target = lp
+			break
+		}
+	}
+	if target == nil {
+		return nil, nil // not found
+	}
+
+	// Plugin must declare the hook.
+	if !hasHook(target.manifest, "run_on_http_request") {
+		return nil, nil // not serving HTTP
+	}
+
+	// Enforce env.serve_http capability.
+	if !target.plugin.HasGrant("env.serve_http") {
+		return nil, ErrServeHTTPForbidden
+	}
+
+	inBytes, err := proto.Marshal(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("plugin %s: marshal http request: %w", pluginName, err)
+	}
+
+	var outBytes []byte
+	if err := target.plugin.CallRequest(ctx, "run_on_http_request", reqID, inBytes, &outBytes); err != nil {
+		return nil, fmt.Errorf("plugin %s: run_on_http_request: %w", pluginName, err)
+	}
+
+	// Zero-length return → plugin did not handle the request.
+	if len(outBytes) == 0 {
+		return nil, nil
+	}
+
+	var resp pb.HttpResponse
+	if err := proto.Unmarshal(outBytes, &resp); err != nil {
+		return nil, fmt.Errorf("plugin %s: unmarshal http response: %w", pluginName, err)
+	}
+
+	// Explicit handled flag required — see proto comment.
+	if !resp.Handled {
+		return nil, nil
+	}
+
+	return &resp, nil
+}
+
+
 // ============================================================================
 // Plugin config
 // ============================================================================
