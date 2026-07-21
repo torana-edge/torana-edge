@@ -1,7 +1,7 @@
 package plugin_sdk
 
 import (
-	"github.com/torana-edge/torana-edge/pkg/pb"
+	"github.com/torana-edge/torana-edge/sdk/pb"
 	"google.golang.org/protobuf/proto"
 )
 

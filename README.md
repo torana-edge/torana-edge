@@ -57,7 +57,7 @@ CLI (`agy`)** — Torana also offers an optional TLS-terminating MITM ingress. S
 1. **Path-based routing** — Requests arrive at `/provider/<name>/<upstream-path>`. Torana strips the provider prefix, looks up the upstream URL and format, and forwards.
 2. **Canonical IR** — Format adapters (`internal/format/`) translate each provider's wire format into shared Go types (`ChatRequest`, `Message`, `ToolDef`, `StreamEvent`).
 3. **Protobuf Serialization** — The IR is serialized to Protobuf via `internal/engine/pbconv` and handed to the WASM runtime.
-4. **WASM Plugin Pipeline** — Loaded plugins execute sequentially (in `config.json` order). Each plugin receives the Protobuf bytes, mutates them via the SDK (`pkg/plugin-sdk`), and writes back.
+4. **WASM Plugin Pipeline** — Loaded plugins execute sequentially (in `config.json` order). Each plugin receives the Protobuf bytes, mutates them via the SDK (`sdk/plugin-sdk`), and writes back.
 5. **Pass-through** — Requests without a recognized `/provider/` prefix return 502.
 
 ## Supported Formats

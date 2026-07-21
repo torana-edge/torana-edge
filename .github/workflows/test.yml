@@ -19,7 +19,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: /tmp/wazero-cache
-          key: ${{ runner.os }}-${{ runner.arch }}-go${{ steps.go.outputs.go-version }}-wazero-${{ hashFiles('go.mod', 'go.sum', 'Makefile', 'plugins/**/*.go', 'examples/plugins/**/*.go', 'testdata/**/*.go', 'pkg/**/*.go') }}
+          key: ${{ runner.os }}-${{ runner.arch }}-go${{ steps.go.outputs.go-version }}-wazero-${{ hashFiles('go.mod', 'go.sum', 'Makefile', 'plugins/**/*.go', 'examples/plugins/**/*.go', 'testdata/**/*.go', 'sdk/**/*.go') }}
           restore-keys: |
             ${{ runner.os }}-${{ runner.arch }}-go${{ steps.go.outputs.go-version }}-wazero-
             ${{ runner.os }}-${{ runner.arch }}-wazero-
