@@ -29,6 +29,7 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	"github.com/torana-edge/torana-edge/internal/cache"
+	"github.com/torana-edge/torana-edge/internal/controlplane"
 	"github.com/torana-edge/torana-edge/internal/engine"
 	"github.com/torana-edge/torana-edge/internal/engine/pbconv"
 	"github.com/torana-edge/torana-edge/internal/format"
@@ -1045,6 +1046,14 @@ func New(cfg Config) (*Server, error) {
 		if len(resp.Body) > 0 {
 			w.Write(resp.Body)
 		}
+	})
+
+	// GET /_torana/ — embedded SPA dashboard.
+	mux.Handle("/_torana/", http.StripPrefix("/_torana/", controlplane.Handler()))
+
+	// GET /_torana — redirect to /_torana/
+	mux.HandleFunc("/_torana", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/_torana/", http.StatusMovedPermanently)
 	})
 
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
