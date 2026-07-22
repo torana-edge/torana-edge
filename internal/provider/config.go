@@ -23,6 +23,7 @@ type Provider struct {
 	// rerouted provider. Empty means the provider needs no auth (e.g. a
 	// local model server).
 	APIKeyEnv string `json:"api_key_env,omitempty"`
+	APIKeyEnc string `json:"api_key_enc,omitempty"`
 }
 
 // Config is the top-level Torana configuration.
@@ -73,6 +74,7 @@ type OffloadConfig struct {
 	// APIKeyEnv names an environment variable holding a dedicated offload
 	// API key. When empty, the caller's request credential is reused.
 	APIKeyEnv string `json:"api_key_env,omitempty"`
+	APIKeyEnc string `json:"api_key_enc,omitempty"`
 }
 
 // Validate checks an enabled offload config against the provider map.
