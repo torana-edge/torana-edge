@@ -37,3 +37,6 @@ config.json
 *.pem
 ca-key.pem
 bundle.pem
+
+# Local encrypted-secret store key (internal/secret). Never commit.
+secret.key

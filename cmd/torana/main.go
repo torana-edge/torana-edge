@@ -8,7 +8,6 @@ package main
 import (
 	"context"
 	"log"
-	"net"
 	"os"
 	"os/signal"
 	"strconv"
@@ -78,19 +77,6 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	go func() {
-		defer func() {
-			if r := recover(); r != nil {
-				log.Printf("panic in shutdown goroutine: %v", r)
-			}
-		}()
-		<-ctx.Done()
-		log.Println("Shutting down...")
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		srv.Shutdown(shutdownCtx)
-	}()
-
 	// Start config hot-reload watcher.
 	stopWatch := provider.WatchConfig(storePath, 5*time.Second, func(newCfg provider.Config) {
 		srv.SetProviders(newCfg)
@@ -112,20 +98,13 @@ func main() {
 		}()
 	}
 
-	// TORANA_BIND restricts the listen address (e.g. "127.0.0.1" to keep the
-	// proxy localhost-only — it forwards caller credentials, so never expose
-	// it beyond the machine unless that's intentional). Default binds all
-	// interfaces (container deployments).
-	if host := os.Getenv("TORANA_BIND"); host != "" {
-		ln, err := net.Listen("tcp", net.JoinHostPort(host, strconv.Itoa(provCfg.Port)))
-		if err != nil {
-			log.Fatalf("Failed to bind %s:%d: %v", host, provCfg.Port, err)
-		}
-		if err := srv.Serve(ln); err != nil {
-			log.Fatalf("Server error: %v", err)
-		}
-	} else if err := srv.ListenAndServe(); err != nil {
-		log.Fatalf("Server error: %v", err)
+	if err := srv.Start(os.Getenv("TORANA_BIND")); err != nil {
+		log.Fatalf("Failed to start server: %v", err)
 	}
+	<-ctx.Done()
+	log.Println("Shutting down...")
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	srv.Shutdown(shutdownCtx)
 	log.Println("Torana Edge stopped.")
 }
