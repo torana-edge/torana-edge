@@ -93,6 +93,9 @@ type Server struct {
 	// runtime this server builds (survives hot-reloads; redis backend
 	// survives restarts). Closed on Shutdown, after the pipeline drains.
 	sharedCache cache.Store
+	// cacheMu guards sharedCache: ReconfigureCache may swap it at runtime while
+	// the plugin-watcher goroutine reads it via newRuntime (off rebuildMu).
+	cacheMu     sync.RWMutex
 	rateLimiter *RateLimiter
 	// watchCancel stops the plugin hot-reload watcher on Shutdown.
 	watchCancel context.CancelFunc
@@ -287,7 +290,7 @@ func New(cfg Config) (*Server, error) {
 		if err != nil {
 			return nil, fmt.Errorf("proxy: %w", err)
 		}
-		s.sharedCache = sharedCache
+		s.setCache(sharedCache)
 
 		if err := s.RebuildPipeline(cfg.Providers.Plugins); err != nil {
 			log.Printf("plugin pipeline: %v", err)
@@ -307,7 +310,12 @@ func New(cfg Config) (*Server, error) {
 			}
 			watchDone := make(chan struct{})
 			s.watchDone = watchDone
-			if err := plugin.WatchPlugins(watchCtx, cfg.Providers.Plugins.Dir, configFn, s.newRuntime, func(newPP *plugin.PluginPipeline) {
+			runtimeFn := func() *wasm.Runtime {
+				s.rebuildMu.Lock()
+				defer s.rebuildMu.Unlock()
+				return s.newRuntime()
+			}
+			if err := plugin.WatchPlugins(watchCtx, cfg.Providers.Plugins.Dir, configFn, runtimeFn, func(newPP *plugin.PluginPipeline) {
 				// WatchPlugins has already built newPP from the live config
 				// (configFn) using s.newRuntime — swap it in and drain the old
 				// one. Rebuilding here would compile the whole pipeline twice.
@@ -843,10 +851,9 @@ func New(cfg Config) (*Server, error) {
 				return
 			}
 			cur := s.GetConfig().Providers
-			// Never let the settings surface mutate the pipeline or the
-			// startup-only backends (cache/mitm require a restart to change).
+			// Never let the settings surface mutate the pipeline or MITM
+			// (MITM live-reconfig is a later task).
 			incoming.Plugins = cur.Plugins
-			incoming.Cache = cur.Cache
 			incoming.MITM = cur.MITM
 			// Preserve the redacted control-plane token when the client
 			// echoes back an empty one.
@@ -860,6 +867,13 @@ func New(cfg Config) (*Server, error) {
 				return
 			}
 			incoming.Offload.APIKeyEnc = offEnc
+
+			cacheEnc, err := s.normalizeSecretField(incoming.Cache.Redis.PasswordEnc, cur.Cache.Redis.PasswordEnc)
+			if err != nil {
+				http.Error(w, "failed to encrypt secret", http.StatusInternalServerError)
+				return
+			}
+			incoming.Cache.Redis.PasswordEnc = cacheEnc
 
 			if incoming.Providers != nil {
 				for name, incP := range incoming.Providers {
@@ -878,6 +892,17 @@ func New(cfg Config) (*Server, error) {
 			if err := incoming.Offload.Validate(incoming.Providers); err != nil {
 				http.Error(w, err.Error(), http.StatusBadRequest)
 				return
+			}
+
+			c1 := incoming.Cache
+			c1.Redis.Password = ""
+			c2 := cur.Cache
+			c2.Redis.Password = ""
+			if c1 != c2 {
+				if err := s.ReconfigureCache(incoming.Cache); err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
 			}
 			s.SetProviders(incoming)
 			if err := s.PersistConfig(); err != nil {
@@ -1556,9 +1581,23 @@ func redactConfigSecrets(cfg provider.Config) provider.Config {
 	return cfg
 }
 
+// currentCache returns the active cache store under the guard mutex.
+func (s *Server) currentCache() cache.Store {
+	s.cacheMu.RLock()
+	defer s.cacheMu.RUnlock()
+	return s.sharedCache
+}
+
+// setCache atomically swaps the active cache store.
+func (s *Server) setCache(c cache.Store) {
+	s.cacheMu.Lock()
+	s.sharedCache = c
+	s.cacheMu.Unlock()
+}
+
 // newRuntime wires host callbacks for a WASM runtime.
 func (s *Server) newRuntime() *wasm.Runtime {
-	rt := wasm.NewRuntimeWithCache(context.Background(), s.sharedCache)
+	rt := wasm.NewRuntimeWithCache(context.Background(), s.currentCache())
 	// Offload completion handler (cheap-model tool result
 	// summarization), recording failures in /stats.
 	rt.OffloadFunc = func(ctx context.Context, payloadJSON string) (string, error) {
@@ -1589,14 +1628,9 @@ func (s *Server) newRuntime() *wasm.Runtime {
 	return rt
 }
 
-// RebuildPipeline builds a fresh runtime + plugin pipeline using pcfg,
-// then atomically swaps the active pipeline and drains the old one.
-// If reloading fails (e.g. ordering constraint violation), returns the error
-// without swapping the active pipeline.
-func (s *Server) RebuildPipeline(pcfg provider.PluginsConfig) error {
-	s.rebuildMu.Lock()
-	defer s.rebuildMu.Unlock()
-
+// rebuildPipelineLocked swaps in a fresh pipeline (using the current
+// s.sharedCache) and returns the displaced pipeline, undrained. Caller holds rebuildMu.
+func (s *Server) rebuildPipelineLocked(pcfg provider.PluginsConfig) (*plugin.PluginPipeline, error) {
 	rt := s.newRuntime()
 	pp, err := plugin.NewPipeline(rt, plugin.PluginConfig{
 		Dir:    pcfg.Dir,
@@ -1605,13 +1639,70 @@ func (s *Server) RebuildPipeline(pcfg provider.PluginsConfig) error {
 	})
 	if err != nil {
 		rt.Close()
-		return err
+		return nil, err
 	}
 
 	old := s.pluginPipeline.Swap(pp)
 	if old != nil {
-		go old.(*plugin.PluginPipeline).DrainAndClose()
+		return old.(*plugin.PluginPipeline), nil
 	}
+	return nil, nil
+}
+
+// RebuildPipeline builds a fresh runtime + plugin pipeline using pcfg,
+// then atomically swaps the active pipeline and drains the old one.
+// If reloading fails (e.g. ordering constraint violation), returns the error
+// without swapping the active pipeline.
+func (s *Server) RebuildPipeline(pcfg provider.PluginsConfig) error {
+	s.rebuildMu.Lock()
+	defer s.rebuildMu.Unlock()
+
+	old, err := s.rebuildPipelineLocked(pcfg)
+	if err != nil {
+		return err
+	}
+	if old != nil {
+		go old.DrainAndClose()
+	}
+	return nil
+}
+
+// ReconfigureCache rebuilds the shared cache store from newCache and atomically
+// swaps the plugin pipeline to use the new store. The displaced pipeline and
+// old store are drained and closed asynchronously after in-flight requests finish.
+func (s *Server) ReconfigureCache(newCache cache.Config) error {
+	s.rebuildMu.Lock()
+	defer s.rebuildMu.Unlock()
+
+	newCache.Redis.Password = s.resolveSecret(newCache.Redis.PasswordEnv, newCache.Redis.PasswordEnc)
+	newStore, err := cache.New(newCache)
+	if err != nil {
+		return err
+	}
+
+	oldStore := s.currentCache()
+	s.setCache(newStore)
+
+	old, err := s.rebuildPipelineLocked(s.GetConfig().Providers.Plugins)
+	if err != nil {
+		s.setCache(oldStore)
+		newStore.Close()
+		return err
+	}
+
+	go func() {
+		if old != nil {
+			old.DrainAndClose()
+		}
+		if oldStore != nil {
+			oldStore.Close()
+		}
+	}()
+
+	s.configMu.Lock()
+	s.config.Providers.Cache = newCache
+	s.configMu.Unlock()
+
 	return nil
 }
 
@@ -1663,9 +1754,14 @@ func (s *Server) Shutdown(ctx context.Context) error {
 		pp.(*plugin.PluginPipeline).DrainAndClose()
 	}
 	s.rateLimiter.Close()
+	s.rebuildMu.Lock()
+	s.cacheMu.Lock()
 	if s.sharedCache != nil {
 		s.sharedCache.Close()
+		s.sharedCache = nil
 	}
+	s.cacheMu.Unlock()
+	s.rebuildMu.Unlock()
 	return nil
 }
 
