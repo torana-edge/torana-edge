@@ -284,6 +284,10 @@
     .checkbox-row { display: flex; align-items: center; gap: 0.5rem; font-size: 0.85rem; color: var(--text-main); }
     .checkbox-row input { width: 16px; height: 16px; accent-color: var(--accent-blue); }
 
+    .secret-field { display: flex; gap: 0.25rem; align-items: center; }
+    .secret-field .input { flex: 1; min-width: 0; }
+    .btn-secret-clear { padding: 0.35rem 0.45rem; font-size: 0.72rem; flex-shrink: 0; }
+
     .providers-table { width: 100%; border-collapse: separate; border-spacing: 0 0.4rem; }
     .providers-table td { padding: 0.15rem 0.3rem; border: none; white-space: normal; }
     .providers-table input, .providers-table select { font-size: 0.8rem; padding: 0.35rem 0.5rem; }
@@ -452,7 +456,7 @@
         <div class="table-container" style="border:none; background:none;">
           <table class="providers-table">
             <thead>
-              <tr><th>Name</th><th>Upstream URL</th><th>Format</th><th>API key env</th><th>Fallback</th><th></th></tr>
+              <tr><th>Name</th><th>Upstream URL</th><th>Format</th><th>API key</th><th>API key env</th><th>Fallback</th><th></th></tr>
             </thead>
             <tbody id="providersBody"></tbody>
           </table>
@@ -472,6 +476,13 @@
             <span class="hint">Must be an <code>openai</code>-format provider.</span>
           </div>
           <div class="field"><label>Model</label><input class="input" id="offModel" placeholder="deepseek-v4-flash"></div>
+          <div class="field">
+            <label>API key <span class="hint">(encrypted)</span></label>
+            <div class="secret-field">
+              <input type="password" class="input" id="offKeyEnc" data-set="" data-clear="" oninput="onSecretInput(this)">
+              <button type="button" class="btn btn-sm btn-secret-clear" onclick="toggleSecretClear(this)" title="Clear secret">Clear</button>
+            </div>
+          </div>
           <div class="field"><label>API key env <span class="hint">(optional)</span></label><input class="input" id="offKey" placeholder="OFFLOAD_API_KEY"></div>
         </div>
       </div>
@@ -951,6 +962,69 @@
 
     // ---- Settings ----
     const PROVIDER_FORMATS = ['openai', 'anthropic', 'bedrock', 'gemini', 'gemini-codeassist'];
+    function setupSecretInput(el, secretVal) {
+      if (!el) return;
+      const isSet = secretVal === '__set__';
+      el.setAttribute('data-set', isSet ? '1' : '');
+      el.setAttribute('data-clear', '');
+      el.value = '';
+      updateSecretInputUI(el);
+    }
+    function updateSecretInputUI(input) {
+      if (!input) return;
+      const container = input.parentElement;
+      const btn = container ? container.querySelector('.btn-secret-clear') : null;
+      const isClear = input.getAttribute('data-clear') === '1';
+      const isSet = input.getAttribute('data-set') === '1';
+
+      if (isClear) {
+        input.placeholder = 'will be removed';
+        if (btn) {
+          btn.textContent = 'Undo';
+          btn.classList.add('btn-danger');
+        }
+      } else if (isSet) {
+        input.placeholder = '•••••••• set — type to replace';
+        if (btn) {
+          btn.textContent = 'Clear';
+          btn.classList.remove('btn-danger');
+        }
+      } else {
+        input.placeholder = 'sk-… (stored encrypted)';
+        if (btn) {
+          btn.textContent = 'Clear';
+          btn.classList.remove('btn-danger');
+        }
+      }
+    }
+    function onSecretInput(el) {
+      if (el.value !== '' && el.getAttribute('data-clear') === '1') {
+        el.setAttribute('data-clear', '');
+      }
+      updateSecretInputUI(el);
+    }
+    function toggleSecretClear(btn) {
+      const container = btn.parentElement;
+      if (!container) return;
+      const input = container.querySelector('.input');
+      if (!input) return;
+      const curClear = input.getAttribute('data-clear') === '1';
+      if (!curClear) {
+        input.setAttribute('data-clear', '1');
+        input.value = '';
+      } else {
+        input.setAttribute('data-clear', '');
+      }
+      updateSecretInputUI(input);
+    }
+    function getSecretFieldValue(inputEl) {
+      if (!inputEl) return undefined;
+      const val = inputEl.value.trim();
+      if (val !== '') return val;
+      if (inputEl.getAttribute('data-clear') === '1') return '';
+      if (inputEl.getAttribute('data-set') === '1') return '__set__';
+      return undefined;
+    }
     function loadSettings() {
       fetch('/_torana/api/config').then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
         .then(cfg => { settingsCfg = cfg; renderSettings(cfg); })
@@ -969,6 +1043,7 @@
       document.getElementById('offProvider').value = off.provider || '';
       document.getElementById('offModel').value = off.model || '';
       document.getElementById('offKey').value = off.api_key_env || '';
+      setupSecretInput(document.getElementById('offKeyEnc'), off.api_key_enc);
 
       const lim = cfg.limits || {};
       document.getElementById('limConc').value = lim.concurrency || 0;
@@ -988,10 +1063,17 @@
         <td><input class="input p-name" value="${escAttr(name || '')}" placeholder="name" oninput="refreshOffloadProviderOptions()"></td>
         <td><input class="input p-url" value="${escAttr(prov.url || '')}" placeholder="https://…"></td>
         <td><select class="input p-format">${opts}</select></td>
+        <td>
+          <div class="secret-field">
+            <input type="password" class="input p-keyenc" data-set="" data-clear="" oninput="onSecretInput(this)">
+            <button type="button" class="btn btn-sm btn-secret-clear" onclick="toggleSecretClear(this)" title="Clear secret">Clear</button>
+          </div>
+        </td>
         <td><input class="input p-key" value="${escAttr(prov.api_key_env || '')}" placeholder="ENV_VAR"></td>
         <td><input class="input p-fallback" value="${escAttr((prov.fallback || []).join(', '))}" placeholder="name, name"></td>
         <td><button class="btn btn-sm btn-danger" onclick="this.closest('tr').remove(); refreshOffloadProviderOptions()">✕</button></td>`;
       body.appendChild(tr);
+      setupSecretInput(tr.querySelector('.p-keyenc'), prov.api_key_enc);
     }
     function refreshOffloadProviderOptions() {
       const sel = document.getElementById('offProvider');
@@ -1011,6 +1093,8 @@
           url: tr.querySelector('.p-url').value.trim(),
           format: tr.querySelector('.p-format').value
         };
+        const secretVal = getSecretFieldValue(tr.querySelector('.p-keyenc'));
+        if (secretVal !== undefined) prov.api_key_enc = secretVal;
         const key = tr.querySelector('.p-key').value.trim();
         if (key) prov.api_key_env = key;
         const fb = tr.querySelector('.p-fallback').value.trim();
@@ -1023,6 +1107,8 @@
         provider: document.getElementById('offProvider').value.trim(),
         model: document.getElementById('offModel').value.trim()
       };
+      const offSecretVal = getSecretFieldValue(document.getElementById('offKeyEnc'));
+      if (offSecretVal !== undefined) cfg.offload.api_key_enc = offSecretVal;
       const offKey = document.getElementById('offKey').value.trim();
       if (offKey) cfg.offload.api_key_env = offKey;
       cfg.limits = {
