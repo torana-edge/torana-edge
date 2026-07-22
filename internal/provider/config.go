@@ -243,3 +243,46 @@ func Save(path string, cfg Config) error {
 	}
 	return nil
 }
+
+// ManagedStorePath returns the path to Torana's managed configuration file.
+// It resolves to $TORANA_DATA_DIR/config.json if TORANA_DATA_DIR is set,
+// otherwise os.UserConfigDir()/torana/config.json.
+func ManagedStorePath() (string, error) {
+	dataDir := os.Getenv("TORANA_DATA_DIR")
+	if dataDir == "" {
+		dir, err := os.UserConfigDir()
+		if err != nil {
+			return "", fmt.Errorf("getting user config dir: %w", err)
+		}
+		dataDir = filepath.Join(dir, "torana")
+	}
+	return filepath.Join(dataDir, "config.json"), nil
+}
+
+// ResolveConfig resolves the active configuration for Torana.
+// If storePath exists, it loads and returns the managed store (ignoring seedPath).
+// If storePath does not exist, it loads seedPath (merging with defaults if needed),
+// saves the result to storePath to materialize the store (setting Managed: true),
+// and returns the config. The seed file is never modified.
+func ResolveConfig(seedPath, storePath string) (Config, error) {
+	if _, err := os.Stat(storePath); err == nil {
+		return Load(storePath)
+	} else if !os.IsNotExist(err) {
+		return Config{}, fmt.Errorf("checking managed store %q: %w", storePath, err)
+	}
+
+	cfg, err := Load(seedPath)
+	if err != nil {
+		return cfg, fmt.Errorf("loading seed config %q: %w", seedPath, err)
+	}
+
+	if err := Save(storePath, cfg); err != nil {
+		return cfg, fmt.Errorf("materializing managed store %q: %w", storePath, err)
+	}
+
+	// Save persists Managed:true; reflect that in the returned config so the
+	// in-memory view the caller holds agrees with what is now on disk.
+	cfg.Managed = true
+	return cfg, nil
+}
+
