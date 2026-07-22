@@ -877,15 +877,16 @@ func New(cfg Config) (*Server, error) {
 				orderIdx[n] = i
 			}
 			type pluginInfo struct {
-				Name        string          `json:"name"`
-				Version     string          `json:"version"`
-				Description string          `json:"description"`
-				Hooks       []string        `json:"hooks"`
-				Permissions []string        `json:"permissions"`
-				Enabled     bool            `json:"enabled"`
-				Order       int             `json:"order"`
-				ServesHTTP  bool            `json:"serves_http"`
-				Config      json.RawMessage `json:"config,omitempty"`
+				Name        string               `json:"name"`
+				Version     string               `json:"version"`
+				Description string               `json:"description"`
+				Hooks       []string             `json:"hooks"`
+				Permissions []string             `json:"permissions"`
+				Enabled     bool                 `json:"enabled"`
+				Order       int                  `json:"order"`
+				ServesHTTP  bool                 `json:"serves_http"`
+				Schema      *plugin.ConfigSchema `json:"schema,omitempty"`
+				Config      json.RawMessage      `json:"config,omitempty"`
 			}
 			bundles, _ := plugin.DiscoverPlugins(cur.Dir)
 			infos := make([]pluginInfo, 0, len(bundles))
@@ -918,6 +919,7 @@ func New(cfg Config) (*Server, error) {
 					Enabled:     enabled,
 					Order:       idx,
 					ServesHTTP:  servesHTTPHook && hasServeGrant,
+					Schema:      b.Schema,
 					Config:      cur.Config[m.Name],
 				})
 				seen[m.Name] = true
@@ -975,6 +977,103 @@ func New(cfg Config) (*Server, error) {
 		if req.Config != nil {
 			newPlugins.Config = req.Config
 		}
+
+		s.configMu.Lock()
+		s.config.Providers.Plugins = newPlugins
+		s.configMu.Unlock()
+
+		if err := s.RebuildPipeline(newPlugins); err != nil {
+			s.configMu.Lock()
+			s.config.Providers.Plugins = oldPlugins
+			s.configMu.Unlock()
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		if err := s.PersistConfig(); err != nil {
+			log.Printf("failed to persist config: %v", err)
+			http.Error(w, "failed to persist config to disk", http.StatusInternalServerError)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		b, _ := json.Marshal(newPlugins)
+		w.Write(b)
+	}))
+
+	// POST /_torana/api/plugins/<name>/config — update single plugin config + rebuild + persist.
+	mux.HandleFunc("/_torana/api/plugins/", s.controlPlaneGuard(func(w http.ResponseWriter, r *http.Request) {
+		rest := strings.TrimPrefix(r.URL.Path, "/_torana/api/plugins/")
+		if !strings.HasSuffix(rest, "/config") {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		name := strings.TrimSuffix(rest, "/config")
+		if name == "" || strings.Contains(name, "/") {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		cur := s.GetConfig().Providers.Plugins
+		bundles, _ := plugin.DiscoverPlugins(cur.Dir)
+		known := false
+		for _, b := range bundles {
+			if b.Manifest.Name == name {
+				known = true
+				break
+			}
+		}
+		if !known {
+			for _, o := range cur.Order {
+				if o == name {
+					known = true
+					break
+				}
+			}
+		}
+		if !known {
+			if _, ok := cur.Config[name]; ok {
+				known = true
+			}
+		}
+		if !known {
+			http.Error(w, "plugin not found", http.StatusNotFound)
+			return
+		}
+
+		if r.Body == nil {
+			http.Error(w, "invalid json body", http.StatusBadRequest)
+			return
+		}
+		lr := io.LimitReader(r.Body, maxBodySize+1)
+		data, err := io.ReadAll(lr)
+		if err != nil || len(data) == 0 {
+			http.Error(w, "invalid json body", http.StatusBadRequest)
+			return
+		}
+		if !json.Valid(data) {
+			http.Error(w, "invalid json body", http.StatusBadRequest)
+			return
+		}
+
+		raw := json.RawMessage(data)
+		oldPlugins := s.GetConfig().Providers.Plugins
+		newPlugins := oldPlugins
+		if newPlugins.Config == nil {
+			newPlugins.Config = make(map[string]json.RawMessage)
+		} else {
+			cfgCopy := make(map[string]json.RawMessage, len(oldPlugins.Config))
+			for k, v := range oldPlugins.Config {
+				cfgCopy[k] = v
+			}
+			newPlugins.Config = cfgCopy
+		}
+		newPlugins.Config[name] = raw
 
 		s.configMu.Lock()
 		s.config.Providers.Plugins = newPlugins

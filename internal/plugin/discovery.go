@@ -41,6 +41,19 @@ type PluginManifest struct {
 	Permissions []Permission `json:"permissions"`
 }
 
+type ConfigField struct {
+	Key     string   `json:"key"`
+	Type    string   `json:"type"`              // "string" | "number" | "boolean" | "enum"
+	Label   string   `json:"label"`
+	Default any      `json:"default,omitempty"`
+	Options []string `json:"options,omitempty"` // enum only
+	Help    string   `json:"help,omitempty"`
+}
+
+type ConfigSchema struct {
+	Fields []ConfigField `json:"fields"`
+}
+
 // ============================================================================
 // Discovery
 // ============================================================================
@@ -48,6 +61,7 @@ type PluginManifest struct {
 type PluginBundle struct {
 	Manifest  PluginManifest
 	WASMBytes []byte
+	Schema    *ConfigSchema
 }
 
 func DiscoverPlugins(pluginsDir string) ([]PluginBundle, error) {
@@ -92,8 +106,19 @@ func loadBundle(dir string) (*PluginBundle, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read wasm: %w", err)
 	}
+	schemaPath := filepath.Join(dir, "schema.json")
+	var schema *ConfigSchema
+	if sBytes, err := os.ReadFile(schemaPath); err == nil {
+		var s ConfigSchema
+		if err := json.Unmarshal(sBytes, &s); err != nil {
+			return nil, fmt.Errorf("parse schema: %w", err)
+		}
+		schema = &s
+	} else if !os.IsNotExist(err) {
+		return nil, fmt.Errorf("read schema: %w", err)
+	}
 	warnIfStale(dir, wasmPath, manifest.Name)
-	return &PluginBundle{Manifest: manifest, WASMBytes: wBytes}, nil
+	return &PluginBundle{Manifest: manifest, WASMBytes: wBytes, Schema: schema}, nil
 }
 
 // warnIfStale logs a warning when plugin.wasm is older than any Go source
@@ -633,9 +658,9 @@ func WatchPlugins(ctx context.Context, dir string, configFn func() PluginConfig,
 					}
 				}
 
-				// Only reload on .wasm or plugin.json changes.
+				// Only reload on .wasm, plugin.json, or schema.json changes.
 				name := filepath.Base(event.Name)
-				if name != "plugin.wasm" && name != "plugin.json" {
+				if name != "plugin.wasm" && name != "plugin.json" && name != "schema.json" {
 					continue
 				}
 				// Remove/Rename included: deleting a plugin must unload it.
