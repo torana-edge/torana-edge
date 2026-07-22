@@ -29,12 +29,17 @@ import (
 
 func main() {
 	// --- configuration --------------------------------------------------
-	configPath := "config.json"
+	seedPath := "config.json"
 	if v := os.Getenv("TORANA_CONFIG"); v != "" {
-		configPath = v
+		seedPath = v
 	}
 
-	provCfg, err := provider.Load(configPath)
+	storePath, err := provider.ManagedStorePath()
+	if err != nil {
+		log.Fatalf("Failed to resolve managed store path: %v", err)
+	}
+
+	provCfg, err := provider.ResolveConfig(seedPath, storePath)
 	if err != nil {
 		log.Printf("Warning: %v — using defaults", err)
 		provCfg = provider.DefaultConfig()
@@ -51,7 +56,7 @@ func main() {
 		Port:            strconv.Itoa(provCfg.Port),
 		Providers:       provCfg,
 		DefaultProvider: os.Getenv("TORANA_DEFAULT_PROVIDER"),
-		ConfigPath:      configPath,
+		ConfigPath:      storePath,
 	}
 
 	// Initialize OTel BEFORE the server so New can bridge its StatsTracker to
@@ -87,7 +92,7 @@ func main() {
 	}()
 
 	// Start config hot-reload watcher.
-	stopWatch := provider.WatchConfig(configPath, 5*time.Second, func(newCfg provider.Config) {
+	stopWatch := provider.WatchConfig(storePath, 5*time.Second, func(newCfg provider.Config) {
 		srv.SetProviders(newCfg)
 	})
 	defer stopWatch()
