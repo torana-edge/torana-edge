@@ -494,7 +494,7 @@
           <div class="field"><label>Requests / min</label><input class="input" id="limRpm" type="number" min="0"></div>
           <div class="field">
             <label>Listen port</label><input class="input" id="cfgPort" type="number" min="1">
-            <span class="hint">Changing the port requires a restart.</span>
+            <span class="hint">Applied live &mdash; no restart</span>
           </div>
         </div>
         <div class="form-grid" style="margin-top:0.9rem">
@@ -506,6 +506,79 @@
             <label>Control-plane token</label><input class="input" id="cpToken" type="password" placeholder="unchanged">
             <span class="hint">Only used when remote access is allowed. Leave blank to keep current.</span>
           </div>
+        </div>
+      </div>
+
+      <div class="card form-section">
+        <div class="subhead" style="margin-top:0">Cache</div>
+        <div class="form-grid">
+          <div class="field">
+            <label>Backend</label>
+            <select class="input" id="cacheBackend">
+              <option value="memory">Memory</option>
+              <option value="redis">Redis</option>
+            </select>
+          </div>
+          <div class="field">
+            <label>TTL seconds</label>
+            <input class="input" id="cacheTtl" type="number" min="0" placeholder="900">
+          </div>
+        </div>
+        <div class="subhead">Redis configuration</div>
+        <div class="form-grid">
+          <div class="field">
+            <label>Address</label>
+            <input class="input" id="cacheRedisAddr" placeholder="127.0.0.1:6379">
+          </div>
+          <div class="field">
+            <label>Password <span class="hint">(encrypted)</span></label>
+            <div class="secret-field">
+              <input type="password" class="input" id="cacheRedisPasswordEnc" data-set="" data-clear="" oninput="onSecretInput(this)">
+              <button type="button" class="btn btn-sm btn-secret-clear" onclick="toggleSecretClear(this)" title="Clear secret">Clear</button>
+            </div>
+          </div>
+          <div class="field">
+            <label>Password env <span class="hint">(optional)</span></label>
+            <input class="input" id="cacheRedisPasswordEnv" placeholder="REDIS_PASSWORD">
+          </div>
+          <div class="field">
+            <label>DB</label>
+            <input class="input" id="cacheRedisDb" type="number" min="0" placeholder="0">
+          </div>
+          <div class="field">
+            <label>Prefix</label>
+            <input class="input" id="cacheRedisPrefix" placeholder="torana:">
+          </div>
+        </div>
+      </div>
+
+      <div class="card form-section">
+        <div class="subhead" style="margin-top:0">MITM Ingress</div>
+        <div class="checkbox-row" style="margin-bottom:0.9rem">
+          <input type="checkbox" id="mitmEnabled"><label for="mitmEnabled">Enabled</label>
+        </div>
+        <div class="form-grid">
+          <div class="field">
+            <label>Listen</label>
+            <input class="input" id="mitmListen" placeholder="127.0.0.1:8099">
+          </div>
+          <div class="field">
+            <label>CA dir</label>
+            <input class="input" id="mitmCaDir" placeholder="~/.torana/mitm-ca">
+          </div>
+        </div>
+        <span class="hint" style="display:block; margin-top:0.4rem; margin-bottom:0.9rem;">Enabling MITM requires Listen + CA dir.</span>
+        <div class="field">
+          <label style="margin-bottom:0.25rem;">Hosts mapping <span class="hint">(hostname &rarr; provider name)</span></label>
+          <div class="table-container" style="border:none; background:none;">
+            <table class="providers-table" style="max-width:600px;">
+              <thead>
+                <tr><th>Hostname</th><th>Provider</th><th></th></tr>
+              </thead>
+              <tbody id="mitmHostsBody"></tbody>
+            </table>
+          </div>
+          <button type="button" class="btn btn-sm" style="margin-top:0.4rem; align-self:flex-start;" onclick="addMitmHostRow()">＋ Add host</button>
         </div>
       </div>
 
@@ -1053,6 +1126,36 @@
       const cp = cfg.control_plane || {};
       document.getElementById('cpAllowRemote').checked = !!cp.allow_remote;
       document.getElementById('cpToken').value = '';
+
+      const cache = cfg.cache || {};
+      const redis = cache.redis || {};
+      document.getElementById('cacheBackend').value = cache.backend === 'redis' ? 'redis' : 'memory';
+      document.getElementById('cacheTtl').value = cache.ttl_seconds !== undefined && cache.ttl_seconds !== null ? cache.ttl_seconds : '';
+      document.getElementById('cacheRedisAddr').value = redis.addr || '';
+      setupSecretInput(document.getElementById('cacheRedisPasswordEnc'), redis.password_enc);
+      document.getElementById('cacheRedisPasswordEnv').value = redis.password_env || '';
+      document.getElementById('cacheRedisDb').value = redis.db !== undefined && redis.db !== null ? redis.db : '';
+      document.getElementById('cacheRedisPrefix').value = redis.prefix || '';
+
+      const mitm = cfg.mitm || {};
+      document.getElementById('mitmEnabled').checked = !!mitm.enabled;
+      document.getElementById('mitmListen').value = mitm.listen || '';
+      document.getElementById('mitmCaDir').value = mitm.ca_dir || '';
+      const mitmHostsBody = document.getElementById('mitmHostsBody');
+      mitmHostsBody.innerHTML = '';
+      const hosts = mitm.hosts || {};
+      Object.keys(hosts).forEach(h => addMitmHostRow(h, hosts[h]));
+    }
+    function addMitmHostRow(host, provider) {
+      host = host || '';
+      provider = provider || '';
+      const body = document.getElementById('mitmHostsBody');
+      const tr = document.createElement('tr');
+      tr.innerHTML = `
+        <td><input class="input m-host" value="${escAttr(host)}" placeholder="cloudcode-pa.googleapis.com"></td>
+        <td><input class="input m-provider" value="${escAttr(provider)}" placeholder="antigravity"></td>
+        <td><button type="button" class="btn btn-sm btn-danger" onclick="this.closest('tr').remove()">✕</button></td>`;
+      body.appendChild(tr);
     }
     function addProviderRow(name, prov) {
       prov = prov || {};
@@ -1121,6 +1224,61 @@
       cfg.control_plane.allow_remote = document.getElementById('cpAllowRemote').checked;
       const tok = document.getElementById('cpToken').value.trim();
       if (tok) cfg.control_plane.token = tok; else delete cfg.control_plane.token;
+
+      const cacheBackend = document.getElementById('cacheBackend').value;
+      const cacheTtlVal = document.getElementById('cacheTtl').value.trim();
+      const cacheRedisAddr = document.getElementById('cacheRedisAddr').value.trim();
+      const cacheRedisPasswordEnv = document.getElementById('cacheRedisPasswordEnv').value.trim();
+      const cacheRedisDbVal = document.getElementById('cacheRedisDb').value.trim();
+      const cacheRedisPrefix = document.getElementById('cacheRedisPrefix').value.trim();
+      const cacheRedisSecretVal = getSecretFieldValue(document.getElementById('cacheRedisPasswordEnc'));
+
+      const cacheObj = {};
+      // "memory" is the default (empty backend) — omit it so it never spuriously
+      // differs from a default config and triggers a needless cache rebuild.
+      if (cacheBackend && cacheBackend !== 'memory') cacheObj.backend = cacheBackend;
+      if (cacheTtlVal !== '') {
+        const ttlNum = parseInt(cacheTtlVal, 10);
+        if (!isNaN(ttlNum)) cacheObj.ttl_seconds = ttlNum;
+      }
+      const redisObj = {};
+      if (cacheRedisAddr) redisObj.addr = cacheRedisAddr;
+      if (cacheRedisSecretVal !== undefined) redisObj.password_enc = cacheRedisSecretVal;
+      if (cacheRedisPasswordEnv) redisObj.password_env = cacheRedisPasswordEnv;
+      if (cacheRedisDbVal !== '') {
+        const dbNum = parseInt(cacheRedisDbVal, 10);
+        if (!isNaN(dbNum)) redisObj.db = dbNum;
+      }
+      if (cacheRedisPrefix) redisObj.prefix = cacheRedisPrefix;
+
+      if (Object.keys(redisObj).length > 0) {
+        cacheObj.redis = redisObj;
+      }
+
+      if (Object.keys(cacheObj).length > 0) {
+        cfg.cache = cacheObj;
+      } else {
+        delete cfg.cache;
+      }
+
+      const mitmEnabled = document.getElementById('mitmEnabled').checked;
+      const mitmListen = document.getElementById('mitmListen').value.trim();
+      const mitmCaDir = document.getElementById('mitmCaDir').value.trim();
+      const mitmHosts = {};
+      document.querySelectorAll('#mitmHostsBody tr').forEach(tr => {
+        const h = tr.querySelector('.m-host').value.trim();
+        const p = tr.querySelector('.m-provider').value.trim();
+        if (h && p) mitmHosts[h] = p;
+      });
+
+      const mitmObj = {
+        enabled: mitmEnabled
+      };
+      if (mitmListen) mitmObj.listen = mitmListen;
+      if (mitmCaDir) mitmObj.ca_dir = mitmCaDir;
+      if (Object.keys(mitmHosts).length > 0) mitmObj.hosts = mitmHosts;
+
+      cfg.mitm = mitmObj;
 
       fetch('/_torana/api/config', {
         method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(cfg)
