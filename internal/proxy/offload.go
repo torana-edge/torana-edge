@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"os"
 	"time"
 )
 
@@ -72,14 +71,11 @@ func (s *Server) offloadCompletion(ctx context.Context, payloadJSON string) (str
 	// to the caller's credential ONLY for the default provider — the caller's
 	// key authenticates the primary provider, not a plugin-chosen endpoint, so
 	// it is never forwarded to an overridden (e.g. local) provider.
-	apiKey := ""
 	keyEnv := off.APIKeyEnv
 	if p.APIKeyEnv != "" {
 		keyEnv = p.APIKeyEnv
 	}
-	if keyEnv != "" {
-		apiKey = os.Getenv(keyEnv)
-	}
+	apiKey := s.resolveSecret(keyEnv, off.APIKeyEnc)
 	if apiKey == "" && !overrideProvider {
 		apiKey = reqStateFrom(ctx).CallerAuth
 	}

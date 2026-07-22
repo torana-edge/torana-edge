@@ -21,6 +21,7 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -37,11 +38,13 @@ import (
 	"github.com/torana-edge/torana-edge/internal/metrics"
 	"github.com/torana-edge/torana-edge/internal/plugin"
 	"github.com/torana-edge/torana-edge/internal/provider"
+	"github.com/torana-edge/torana-edge/internal/secret"
 	"github.com/torana-edge/torana-edge/internal/wasm"
 	"github.com/torana-edge/torana-edge/sdk/pb"
 )
 
 const maxBodySize = 10 * 1024 * 1024 // 10 MB
+const secretSetSentinel = "__set__"
 
 // allowedPluginHeaders is the only set of request headers ever exposed to
 // plugins (via ToranaMeta["_request_headers"]), and only when a loaded
@@ -77,6 +80,7 @@ type Server struct {
 	rebuildMu  sync.Mutex
 	configPath string
 	config     Config
+	secrets    *secret.Store
 	proxy      *httputil.ReverseProxy
 	httpServer *http.Server
 	stats      *metrics.StatsTracker
@@ -244,9 +248,14 @@ func New(cfg Config) (*Server, error) {
 	if configPath == "" {
 		configPath = "config.json"
 	}
+	secStore, err := secret.Open(filepath.Dir(configPath))
+	if err != nil {
+		return nil, fmt.Errorf("proxy: secret store: %w", err)
+	}
 	s := &Server{
 		config:      cfg,
 		configPath:  configPath,
+		secrets:     secStore,
 		stats:       statsTracker,
 		feed:        metrics.NewRequestFeed(0), // default 200-event ring buffer
 		rateLimiter: NewRateLimiter(cfg.Providers.Limits.RPM, cfg.Providers.Limits.Concurrency),
@@ -273,6 +282,7 @@ func New(cfg Config) (*Server, error) {
 		// it survive restarts / span instances. Fail fast on a bad backend —
 		// a deployment that asked for distributed state must not silently
 		// fall back to per-process memory.
+		cfg.Providers.Cache.Redis.Password = s.resolveSecret(cfg.Providers.Cache.Redis.PasswordEnv, cfg.Providers.Cache.Redis.PasswordEnc)
 		sharedCache, err := cache.New(cfg.Providers.Cache)
 		if err != nil {
 			return nil, fmt.Errorf("proxy: %w", err)
@@ -513,7 +523,7 @@ func New(cfg Config) (*Server, error) {
 			if pl := reqStateFrom(req.Context()).Pipeline; pl != nil && pl.HasGrant("env.route_request") && chat.ToranaMeta != nil {
 				if raw, ok := chat.ToranaMeta["_route"]; ok {
 					delete(chat.ToranaMeta, "_route")
-					applyRoute(req, chat, prov.Format, provName, raw, currentCfg.Providers)
+					s.applyRoute(req, chat, prov.Format, provName, raw, currentCfg.Providers)
 					// Model may have been overridden; refresh the metrics fact.
 					rstate := reqStateFrom(req.Context())
 					rstate.Model = chat.Model
@@ -809,8 +819,7 @@ func New(cfg Config) (*Server, error) {
 		switch r.Method {
 		case http.MethodGet:
 			w.Header().Set("Content-Type", "application/json")
-			cfg := s.GetConfig().Providers
-			cfg.ControlPlane.Token = "" // never surface the token value
+			cfg := redactConfigSecrets(s.GetConfig().Providers)
 			b, err := json.Marshal(cfg)
 			if err != nil {
 				http.Error(w, "error marshalling config", http.StatusInternalServerError)
@@ -844,6 +853,27 @@ func New(cfg Config) (*Server, error) {
 			if incoming.ControlPlane.Token == "" {
 				incoming.ControlPlane.Token = cur.ControlPlane.Token
 			}
+			// Normalize encrypted secrets (*_enc fields)
+			offEnc, err := s.normalizeSecretField(incoming.Offload.APIKeyEnc, cur.Offload.APIKeyEnc)
+			if err != nil {
+				http.Error(w, "failed to encrypt secret", http.StatusInternalServerError)
+				return
+			}
+			incoming.Offload.APIKeyEnc = offEnc
+
+			if incoming.Providers != nil {
+				for name, incP := range incoming.Providers {
+					curP := cur.Providers[name]
+					pEnc, err := s.normalizeSecretField(incP.APIKeyEnc, curP.APIKeyEnc)
+					if err != nil {
+						http.Error(w, fmt.Sprintf("failed to encrypt secret for provider %s", name), http.StatusInternalServerError)
+						return
+					}
+					incP.APIKeyEnc = pEnc
+					incoming.Providers[name] = incP
+				}
+			}
+
 			incoming.Managed = true
 			if err := incoming.Offload.Validate(incoming.Providers); err != nil {
 				http.Error(w, err.Error(), http.StatusBadRequest)
@@ -856,8 +886,7 @@ func New(cfg Config) (*Server, error) {
 				return
 			}
 			w.Header().Set("Content-Type", "application/json")
-			out := incoming
-			out.ControlPlane.Token = ""
+			out := redactConfigSecrets(incoming)
 			b, _ := json.Marshal(out)
 			w.Write(b)
 
@@ -1467,6 +1496,64 @@ func (s *Server) SetProviders(cfg provider.Config) {
 	s.configMu.Unlock()
 	s.rateLimiter.Update(cfg.Limits.RPM, cfg.Limits.Concurrency)
 	log.Printf("config hot-reload: %d providers loaded", len(cfg.Providers))
+}
+
+func (s *Server) resolveSecret(envName, encVal string) string {
+	if envName != "" {
+		if val := os.Getenv(envName); val != "" {
+			return val
+		}
+	}
+	if encVal != "" {
+		if s.secrets == nil {
+			log.Printf("failed to decrypt secret: store is not initialized")
+			return ""
+		}
+		val, err := s.secrets.Decrypt(encVal)
+		if err != nil {
+			log.Printf("failed to decrypt secret: %v", err)
+			return ""
+		}
+		return val
+	}
+	return ""
+}
+
+func (s *Server) normalizeSecretField(incomingEnc, storedEnc string) (string, error) {
+	switch {
+	case incomingEnc == secretSetSentinel:
+		return storedEnc, nil
+	case incomingEnc == "":
+		return "", nil
+	case secret.IsEncrypted(incomingEnc):
+		return incomingEnc, nil
+	default:
+		if s.secrets == nil {
+			return "", fmt.Errorf("secret store is not initialized")
+		}
+		return s.secrets.Encrypt(incomingEnc)
+	}
+}
+
+func redactConfigSecrets(cfg provider.Config) provider.Config {
+	cfg.ControlPlane.Token = ""
+	if cfg.Providers != nil {
+		provs := make(map[string]provider.Provider, len(cfg.Providers))
+		for name, p := range cfg.Providers {
+			if p.APIKeyEnc != "" {
+				p.APIKeyEnc = secretSetSentinel
+			}
+			provs[name] = p
+		}
+		cfg.Providers = provs
+	}
+	if cfg.Offload.APIKeyEnc != "" {
+		cfg.Offload.APIKeyEnc = secretSetSentinel
+	}
+	if cfg.Cache.Redis.PasswordEnc != "" {
+		cfg.Cache.Redis.PasswordEnc = secretSetSentinel
+	}
+	return cfg
 }
 
 // newRuntime wires host callbacks for a WASM runtime.
