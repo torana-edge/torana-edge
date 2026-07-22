@@ -4,12 +4,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -356,5 +358,70 @@ func TestControlPlaneSecretRedaction(t *testing.T) {
 	body := rec.Body.String()
 	if strings.Contains(body, "super-secret-token-abcdef12345") {
 		t.Errorf("GET /_torana/api/config leaked token in response body: %s", body)
+	}
+}
+
+func TestControlPlanePortRebind(t *testing.T) {
+	ln1, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Listen 1: %v", err)
+	}
+	port1 := ln1.Addr().(*net.TCPAddr).Port
+	ln1.Close()
+
+	ln2, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Listen 2: %v", err)
+	}
+	port2 := ln2.Addr().(*net.TCPAddr).Port
+	ln2.Close()
+
+	provCfg := provider.DefaultConfig()
+	provCfg.Port = port1
+
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.json")
+
+	cfg := Config{
+		Port:       strconv.Itoa(port1),
+		Providers:  provCfg,
+		ConfigPath: configPath,
+	}
+	srv, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	if err := srv.Start("127.0.0.1"); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer srv.Shutdown(context.Background())
+
+	client := &http.Client{Timeout: 2 * time.Second}
+
+	provCfg.Port = port2
+	b, _ := json.Marshal(provCfg)
+	req, err := http.NewRequest(http.MethodPut, fmt.Sprintf("http://127.0.0.1:%d/_torana/api/config", port1), bytes.NewReader(b))
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("PUT config: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("PUT status = %d, want 200", resp.StatusCode)
+	}
+
+	resp2, err := client.Get(fmt.Sprintf("http://127.0.0.1:%d/health", port2))
+	if err != nil {
+		t.Fatalf("GET port2: %v", err)
+	}
+	resp2.Body.Close()
+	if resp2.StatusCode != http.StatusOK {
+		t.Errorf("port2 status = %d, want 200", resp2.StatusCode)
 	}
 }

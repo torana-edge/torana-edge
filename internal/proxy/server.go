@@ -78,6 +78,9 @@ type Config struct {
 type Server struct {
 	configMu   sync.RWMutex
 	rebuildMu  sync.Mutex
+	listenerMu sync.Mutex
+	listener   net.Listener
+	bindHost   string
 	configPath string
 	config     Config
 	secrets    *secret.Store
@@ -904,6 +907,12 @@ func New(cfg Config) (*Server, error) {
 					return
 				}
 			}
+			if incoming.Port != cur.Port && incoming.Port > 0 {
+				if err := s.SetPort(incoming.Port); err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+			}
 			s.SetProviders(incoming)
 			if err := s.PersistConfig(); err != nil {
 				log.Printf("failed to persist config: %v", err)
@@ -1718,6 +1727,86 @@ func (s *Server) PersistConfig() error {
 	return provider.Save(path, s.GetConfig().Providers)
 }
 
+func (s *Server) setListener(ln net.Listener) {
+	s.listenerMu.Lock()
+	defer s.listenerMu.Unlock()
+	s.listener = ln
+}
+
+func (s *Server) swapListener(ln net.Listener) net.Listener {
+	s.listenerMu.Lock()
+	defer s.listenerMu.Unlock()
+	old := s.listener
+	s.listener = ln
+	return old
+}
+
+func (s *Server) currentPort() int {
+	s.configMu.RLock()
+	defer s.configMu.RUnlock()
+	if s.config.Providers.Port > 0 {
+		return s.config.Providers.Port
+	}
+	if p, err := strconv.Atoi(s.config.Port); err == nil {
+		return p
+	}
+	return 8080
+}
+
+// Start binds the initial listener on bindHost:<current port> and serves it in
+// the background. Non-blocking; returns the bind error only.
+func (s *Server) Start(bindHost string) error {
+	s.listenerMu.Lock()
+	s.bindHost = bindHost
+	s.listenerMu.Unlock()
+	ln, err := net.Listen("tcp", net.JoinHostPort(bindHost, strconv.Itoa(s.currentPort())))
+	if err != nil {
+		return err
+	}
+	s.setListener(ln)
+	s.serveOnListener(ln)
+	return nil
+}
+
+// serveOnListener runs httpServer.Serve(ln) in a goroutine. A listener closed
+// for a port swap surfaces as a non-ErrServerClosed error here — that is
+// expected and must NOT be fatal.
+func (s *Server) serveOnListener(ln net.Listener) {
+	go func() {
+		if err := s.httpServer.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Printf("listener %s stopped: %v", ln.Addr(), err)
+		}
+	}()
+}
+
+// SetPort rebinds to newPort with no restart: bind the new listener, start
+// serving it, then close the old listener (drains in-flight). On bind failure
+// the old listener keeps serving and an error is returned.
+func (s *Server) SetPort(newPort int) error {
+	s.listenerMu.Lock()
+	bindHost := s.bindHost
+	s.listenerMu.Unlock()
+
+	ln, err := net.Listen("tcp", net.JoinHostPort(bindHost, strconv.Itoa(newPort)))
+	if err != nil {
+		return err
+	}
+	s.serveOnListener(ln)
+	old := s.swapListener(ln)
+	if old != nil {
+		old.Close()
+	}
+	// reflect the new port in config + the http.Server Addr
+	s.configMu.Lock()
+	s.config.Providers.Port = newPort
+	s.config.Port = strconv.Itoa(newPort)
+	if s.httpServer != nil {
+		s.httpServer.Addr = ":" + strconv.Itoa(newPort)
+	}
+	s.configMu.Unlock()
+	return nil
+}
+
 func (s *Server) ListenAndServe() error {
 	cfg := s.GetConfig()
 	log.Printf("Torana Edge → :%s  providers: %d", cfg.Port, len(cfg.Providers.Providers))
@@ -1728,6 +1817,7 @@ func (s *Server) ListenAndServe() error {
 }
 
 func (s *Server) Serve(ln net.Listener) error {
+	s.setListener(ln)
 	cfg := s.GetConfig()
 	log.Printf("Torana Edge → %s  providers: %d", ln.Addr(), len(cfg.Providers.Providers))
 	if err := s.httpServer.Serve(ln); err != nil && err != http.ErrServerClosed {
