@@ -15,7 +15,6 @@ import (
 	"time"
 
 	"github.com/torana-edge/torana-edge/internal/metrics"
-	"github.com/torana-edge/torana-edge/internal/mitm"
 	"github.com/torana-edge/torana-edge/internal/provider"
 	"github.com/torana-edge/torana-edge/internal/proxy"
 
@@ -82,21 +81,6 @@ func main() {
 		srv.SetProviders(newCfg)
 	})
 	defer stopWatch()
-
-	// Optional TLS-terminating MITM ingress for harnesses that can't be pointed
-	// at a base URL (e.g. the Antigravity CLI). Runs alongside the main proxy.
-	if provCfg.MITM.Enabled {
-		mitmSrv, err := mitm.New(provCfg.MITM, srv.Handler())
-		if err != nil {
-			log.Fatalf("Failed to start MITM ingress: %v", err)
-		}
-		defer mitmSrv.Close()
-		go func() {
-			if err := mitmSrv.ListenAndServe(); err != nil {
-				log.Printf("MITM ingress stopped: %v", err)
-			}
-		}()
-	}
 
 	if err := srv.Start(os.Getenv("TORANA_BIND")); err != nil {
 		log.Fatalf("Failed to start server: %v", err)

@@ -22,6 +22,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -36,6 +37,7 @@ import (
 	"github.com/torana-edge/torana-edge/internal/engine/pbconv"
 	"github.com/torana-edge/torana-edge/internal/format"
 	"github.com/torana-edge/torana-edge/internal/metrics"
+	"github.com/torana-edge/torana-edge/internal/mitm"
 	"github.com/torana-edge/torana-edge/internal/plugin"
 	"github.com/torana-edge/torana-edge/internal/provider"
 	"github.com/torana-edge/torana-edge/internal/secret"
@@ -79,7 +81,9 @@ type Server struct {
 	configMu   sync.RWMutex
 	rebuildMu  sync.Mutex
 	listenerMu sync.Mutex
+	mitmMu     sync.Mutex
 	listener   net.Listener
+	mitmSrv    *mitm.Server
 	bindHost   string
 	configPath string
 	config     Config
@@ -854,10 +858,8 @@ func New(cfg Config) (*Server, error) {
 				return
 			}
 			cur := s.GetConfig().Providers
-			// Never let the settings surface mutate the pipeline or MITM
-			// (MITM live-reconfig is a later task).
+			// Never let the settings surface mutate the pipeline.
 			incoming.Plugins = cur.Plugins
-			incoming.MITM = cur.MITM
 			// Preserve the redacted control-plane token when the client
 			// echoes back an empty one.
 			if incoming.ControlPlane.Token == "" {
@@ -903,6 +905,12 @@ func New(cfg Config) (*Server, error) {
 			c2.Redis.Password = ""
 			if c1 != c2 {
 				if err := s.ReconfigureCache(incoming.Cache); err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+			}
+			if !reflect.DeepEqual(incoming.MITM, cur.MITM) {
+				if err := s.applyMITM(incoming.MITM); err != nil {
 					http.Error(w, err.Error(), http.StatusBadRequest)
 					return
 				}
@@ -1753,6 +1761,31 @@ func (s *Server) currentPort() int {
 	return 8080
 }
 
+// applyMITM (re)configures the MITM ingress to match cfg with no restart:
+// it tears down any running ingress, then starts a fresh one if enabled.
+func (s *Server) applyMITM(cfg provider.MITMConfig) error {
+	s.mitmMu.Lock()
+	defer s.mitmMu.Unlock()
+	if s.mitmSrv != nil {
+		s.mitmSrv.Close() // stops the old CONNECT listener; frees the addr
+		s.mitmSrv = nil
+	}
+	if !cfg.Enabled {
+		return nil
+	}
+	m, err := mitm.New(cfg, s.Handler())
+	if err != nil {
+		return err
+	}
+	go func() {
+		if err := m.ListenAndServe(); err != nil {
+			log.Printf("mitm ingress stopped: %v", err)
+		}
+	}()
+	s.mitmSrv = m
+	return nil
+}
+
 // Start binds the initial listener on bindHost:<current port> and serves it in
 // the background. Non-blocking; returns the bind error only.
 func (s *Server) Start(bindHost string) error {
@@ -1765,6 +1798,9 @@ func (s *Server) Start(bindHost string) error {
 	}
 	s.setListener(ln)
 	s.serveOnListener(ln)
+	if err := s.applyMITM(s.config.Providers.MITM); err != nil {
+		return fmt.Errorf("mitm: %w", err)
+	}
 	return nil
 }
 
@@ -1833,6 +1869,12 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	if s.watchDone != nil {
 		<-s.watchDone
 	}
+	s.mitmMu.Lock()
+	if s.mitmSrv != nil {
+		s.mitmSrv.Close()
+		s.mitmSrv = nil
+	}
+	s.mitmMu.Unlock()
 	// Stop accepting new requests and let HTTP cancellation unblock streams
 	// before waiting for their pinned plugin pipeline.
 	if s.httpServer != nil {
