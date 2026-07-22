@@ -1205,14 +1205,14 @@ func New(cfg Config) (*Server, error) {
 		w.Header().Set("Cache-Control", "no-cache")
 		w.Header().Set("Connection", "keep-alive")
 
-		// Subscribe before replaying the snapshot to avoid a race where an
-		// event arrives between the Snapshot() call and Subscribe().
-		ch, unsub := s.feed.Subscribe()
+		// Subscribe and capture the snapshot atomically under one lock, so an
+		// event arriving between snapshot and subscribe is never delivered twice.
+		snap, ch, unsub := s.feed.SubscribeWithSnapshot()
 		defer unsub()
 
 		// Replay existing events oldest-first so the client sees a coherent
 		// history in chronological order before live events begin.
-		if snap := s.feed.Snapshot(); len(snap) > 0 {
+		if len(snap) > 0 {
 			for i := len(snap) - 1; i >= 0; i-- {
 				b, err := json.Marshal(snap[i])
 				if err != nil {
@@ -1818,7 +1818,7 @@ func (s *Server) Start(bindHost string) error {
 // expected and must NOT be fatal.
 func (s *Server) serveOnListener(ln net.Listener) {
 	go func() {
-		if err := s.httpServer.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		if err := s.httpServer.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) && !errors.Is(err, net.ErrClosed) {
 			log.Printf("listener %s stopped: %v", ln.Addr(), err)
 		}
 	}()

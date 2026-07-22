@@ -45,6 +45,9 @@ func Open(dataDir string) (*Store, error) {
 		return nil, fmt.Errorf("failed to read secret key file: %w", err)
 	} else if len(key) != 32 {
 		return nil, fmt.Errorf("invalid key length in secret key file: expected 32 bytes, got %d", len(key))
+	} else {
+		// Enforce 0600 permissions on pre-existing key file.
+		_ = os.Chmod(keyPath, 0600)
 	}
 
 	keyCopy := make([]byte, len(key))
@@ -106,7 +109,7 @@ func (s *Store) Decrypt(token string) (string, error) {
 	}
 
 	nonceSize := gcm.NonceSize()
-	if len(data) < nonceSize {
+	if len(data) < nonceSize+gcm.Overhead() {
 		return "", fmt.Errorf("invalid token length: payload too short")
 	}
 
