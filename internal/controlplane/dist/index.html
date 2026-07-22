@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Torana Control Plane</title>
-  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCA2NCA2NCI+PGRlZnM+PGxpbmVhckdyYWRpZW50IGlkPSJnIiBncmFkaWVudFVuaXRzPSJ1c2VyU3BhY2VPblVzZSIgeDE9IjgiIHkxPSI2IiB4Mj0iNTYiIHkyPSI2MCI+PHN0b3Agb2Zmc2V0PSIwIiBzdG9wLWNvbG9yPSIjMjJkM2VlIi8+PHN0b3Agb2Zmc2V0PSIuNSIgc3RvcC1jb2xvcj0iIzI1ODVkMSIvPjxzdG9wIG9mZnNldD0iMSIgc3RvcC1jb2xvcj0iIzYzNjZmMSIvPjwvbGluZWFyR3JhZGllbnQ+PC9kZWZzPjxnIGZpbGw9Im5vbmUiIHN0cm9rZT0idXJsKCNnKSIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIiBzdHJva2UtbGluZWpvaW49InJvdW5kIj48cGF0aCBzdHJva2Utd2lkdGg9IjIuMyIgZD0iTTI3LjggMTAuNVEzMiA1IDM2LjIgMTAuNSIvPjxwYXRoIHN0cm9rZS13aWR0aD0iMi4zIiBkPSJNMjUgMTFRMzIgNy42IDM5IDExIi8+PHBhdGggc3Ryb2tlLXdpZHRoPSIyLjMiIGQ9Ik05IDExSDU1Ii8+PHBhdGggc3Ryb2tlLXdpZHRoPSIyLjMiIGQ9Ik0xMSAxNS41UTMyIDE5IDUzIDE1LjUiLz48cGF0aCBzdHJva2Utd2lkdGg9IjIuMyIgZD0iTTkgMjAuNVEzMiAyNCA1NSAyMC41Ii8+PHBhdGggc3Ryb2tlLXdpZHRoPSIzIiBkPSJNMjQgMjRWNjAiLz48cGF0aCBzdHJva2Utd2lkdGg9IjMiIGQ9Ik00MCAyNFY2MCIvPjwvZz48L3N2Zz4K">
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCA2NCA2NCI+PGRlZnM+PGxpbmVhckdyYWRpZW50IGlkPSJnIiBncmFkaWVudFVuaXRzPSJ1c2VyU3BhY2VPblVzZSIgeDE9IjgiIHkxPSI2IiB4Mj0iNTYiIHkyPSI2MCI+PHN0b3Agb2Zmc2V0PSIwIiBzdG9wLWNvbG9yPSIjMjJkM2VlIi8+PHN0b3Agb2Zmc2V0PSIuNSIgc3RvcC1jb2xvcj0iIzNiODJmNiIvPjxzdG9wIG9mZnNldD0iMSIgc3RvcC1jb2xvcj0iIzhiNWNmNiIvPjwvbGluZWFyR3JhZGllbnQ+PC9kZWZzPjxnIGZpbGw9Im5vbmUiIHN0cm9rZT0idXJsKCNnKSIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIiBzdHJva2UtbGluZWpvaW49InJvdW5kIj48cGF0aCBzdHJva2Utd2lkdGg9IjIuMyIgZD0iTTI3LjggMTAuNVEzMiA1IDM2LjIgMTAuNSIvPjxwYXRoIHN0cm9rZS13aWR0aD0iMi4zIiBkPSJNMjUgMTFRMzIgNy42IDM5IDExIi8+PHBhdGggc3Ryb2tlLXdpZHRoPSIyLjMiIGQ9Ik05IDExSDU1Ii8+PHBhdGggc3Ryb2tlLXdpZHRoPSIyLjMiIGQ9Ik0xMSAxNS41UTMyIDE5IDUzIDE1LjUiLz48cGF0aCBzdHJva2Utd2lkdGg9IjIuMyIgZD0iTTkgMjAuNVEzMiAyNCA1NSAyMC41Ii8+PHBhdGggc3Ryb2tlLXdpZHRoPSIzIiBkPSJNMjQgMjRWNjAiLz48cGF0aCBzdHJva2Utd2lkdGg9IjMiIGQ9Ik00MCAyNFY2MCIvPjwvZz48L3N2Zz4K">
   <style>
     :root {
       --bg-dark: #0b1120;
@@ -53,8 +53,8 @@
 
     .brand { display: flex; align-items: center; gap: 0.7rem; }
     .logo-svg {
-      width: 30px; height: 34px;
-      filter: drop-shadow(0 0 7px rgba(56, 189, 248, 0.45));
+      width: 34px; height: 38px;
+      filter: drop-shadow(0 0 5px rgba(34,211,238,0.6)) drop-shadow(0 0 11px rgba(139,92,246,0.5));
       flex-shrink: 0;
     }
     .brand h1 { font-size: 1.15rem; font-weight: 700; letter-spacing: -0.02em; }
@@ -297,8 +297,8 @@
         <defs>
           <linearGradient id="toranaGrad" gradientUnits="userSpaceOnUse" x1="8" y1="6" x2="56" y2="60">
             <stop offset="0" stop-color="#22d3ee"/>
-            <stop offset="0.5" stop-color="#2585d1"/>
-            <stop offset="1" stop-color="#6366f1"/>
+            <stop offset="0.5" stop-color="#3b82f6"/>
+            <stop offset="1" stop-color="#8b5cf6"/>
           </linearGradient>
         </defs>
         <g fill="none" stroke="url(#toranaGrad)" stroke-linecap="round" stroke-linejoin="round">
@@ -720,6 +720,69 @@
           <iframe class="detail-frame" src="${url}" title="${escAttr(name)} UI"></iframe>`;
       }
 
+      const hasSchemaFields = Boolean(p.schema && p.schema.fields && p.schema.fields.length > 0);
+      let schemaBlock = '';
+
+      if (hasSchemaFields) {
+        const curCfg = configMap[name] || {};
+        const fieldHtml = p.schema.fields.map(field => {
+          const key = field.key;
+          const label = field.label || key;
+          const help = field.help || '';
+          const type = field.type || 'string';
+          const curVal = (curCfg[key] !== undefined) ? curCfg[key] : field.default;
+
+          if (type === 'boolean') {
+            const checked = Boolean(curVal);
+            return `<div class="field" style="grid-column: span 2;">
+              <label class="checkbox-row">
+                <input type="checkbox" data-schema-key="${escAttr(key)}" data-schema-type="boolean" ${checked ? 'checked' : ''}>
+                <span>${escHtml(label)}</span>
+              </label>
+              ${help ? `<div class="hint">${escHtml(help)}</div>` : ''}
+            </div>`;
+          } else if (type === 'number') {
+            const val = (curVal !== undefined && curVal !== null) ? curVal : '';
+            return `<div class="field">
+              <label>${escHtml(label)}</label>
+              <input type="number" class="input" data-schema-key="${escAttr(key)}" data-schema-type="number" value="${escAttr(val)}">
+              ${help ? `<div class="hint">${escHtml(help)}</div>` : ''}
+            </div>`;
+          } else if (type === 'enum') {
+            const val = (curVal !== undefined && curVal !== null) ? String(curVal) : '';
+            const opts = field.options || [];
+            const optHtml = opts.map(opt => `<option value="${escAttr(opt)}" ${String(opt) === String(val) ? 'selected' : ''}>${escHtml(opt)}</option>`).join('');
+            return `<div class="field">
+              <label>${escHtml(label)}</label>
+              <select class="input" data-schema-key="${escAttr(key)}" data-schema-type="enum">
+                ${optHtml}
+              </select>
+              ${help ? `<div class="hint">${escHtml(help)}</div>` : ''}
+            </div>`;
+          } else {
+            // string
+            const val = (curVal !== undefined && curVal !== null) ? String(curVal) : '';
+            return `<div class="field">
+              <label>${escHtml(label)}</label>
+              <input type="text" class="input" data-schema-key="${escAttr(key)}" data-schema-type="string" value="${escAttr(val)}">
+              ${help ? `<div class="hint">${escHtml(help)}</div>` : ''}
+            </div>`;
+          }
+        }).join('');
+
+        schemaBlock = `
+          <div class="subhead">Configuration</div>
+          <div id="schemaFormContainer" class="form-grid" style="margin-bottom:1rem;">
+            ${fieldHtml}
+          </div>
+          <div style="margin-bottom:1.25rem;">
+            <button class="btn btn-primary" onclick="saveSchemaConfig('${escAttr(name)}')">Save config</button>
+          </div>
+        `;
+      }
+
+      const rawOpen = !hasSchemaFields && !p.serves_http;
+
       cont.innerHTML = `
         <div class="detail-head">
           <span class="detail-title">${escHtml(name)}</span>
@@ -736,14 +799,42 @@
         </div>
 
         ${servedBlock}
+        ${schemaBlock}
 
-        <div class="subhead">Configuration (JSON)</div>
-        <div class="section-desc" style="margin-bottom:0.6rem">Raw config passed to the plugin. Saved &amp; applied immediately.</div>
-        <textarea class="code-editor" id="detailConfig">${escHtml(cfgStr)}</textarea>
-        <div style="margin-top:0.75rem; display:flex; gap:0.5rem;">
-          <button class="btn btn-primary" onclick="savePluginConfig('${escAttr(name)}')">Save config</button>
-        </div>
+        <details ${rawOpen ? 'open' : ''} style="margin-top:1.25rem;">
+          <summary style="cursor:pointer; font-weight:600; font-size:0.85rem; color:var(--text-muted); margin-bottom:0.75rem;">Advanced (raw JSON)</summary>
+          <div class="section-desc" style="margin-bottom:0.6rem">Raw config passed to the plugin. Saved &amp; applied immediately.</div>
+          <textarea class="code-editor" id="detailConfig">${escHtml(cfgStr)}</textarea>
+          <div style="margin-top:0.75rem; display:flex; gap:0.5rem;">
+            <button class="btn ${hasSchemaFields ? 'btn' : 'btn-primary'}" onclick="savePluginConfig('${escAttr(name)}')">Save raw JSON</button>
+          </div>
+        </details>
       `;
+    }
+
+    function saveSchemaConfig(name) {
+      const cfg = { ...(configMap[name] || {}) };
+      const fields = document.querySelectorAll('#schemaFormContainer [data-schema-key]');
+      fields.forEach(el => {
+        const k = el.dataset.schemaKey;
+        const t = el.dataset.schemaType;
+        if (t === 'boolean') {
+          cfg[k] = el.checked;
+        } else if (t === 'number') {
+          const val = el.value.trim();
+          cfg[k] = val === '' ? 0 : Number(val);
+        } else {
+          cfg[k] = el.value;
+        }
+      });
+      fetch(`/_torana/api/plugins/${encodeURIComponent(name)}/config`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(cfg)
+      })
+      .then(async r => { const t = await r.text(); if (!r.ok) throw new Error(t || `HTTP ${r.status}`); return t; })
+      .then(() => { showAlert('Plugin config saved and applied.', false); loadPlugins(); })
+      .catch(err => showAlert(`Failed to save config: ${err.message}`));
     }
 
     function savePluginConfig(name) {
@@ -751,14 +842,10 @@
       let parsed;
       try { parsed = JSON.parse(area.value.trim() || '{}'); }
       catch (e) { showAlert(`Invalid JSON: ${e.message}`); area.focus(); return; }
-      configMap[name] = parsed;
-      // Ensure enabled so the config takes effect; keep current order.
-      const order = pipelineOrder.includes(name) ? pipelineOrder.slice() : pipelineOrder.concat(name);
-      const cfgOut = {};
-      for (const n of order) cfgOut[n] = configMap[n] || {};
-      fetch('/_torana/api/plugins', {
-        method: 'PUT', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ order, config: cfgOut })
+      fetch(`/_torana/api/plugins/${encodeURIComponent(name)}/config`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(parsed)
       })
       .then(async r => { const t = await r.text(); if (!r.ok) throw new Error(t || `HTTP ${r.status}`); return t; })
       .then(() => { showAlert('Plugin config saved and applied.', false); loadPlugins(); })

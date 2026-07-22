@@ -1,0 +1,43 @@
+{
+  "fields": [
+    {
+      "key": "provider",
+      "type": "string",
+      "label": "Provider",
+      "default": "",
+      "help": "Local model provider (required to enable local model scan)."
+    },
+    {
+      "key": "model",
+      "type": "string",
+      "label": "Model",
+      "default": "",
+      "help": "Model name for PII scan."
+    },
+    {
+      "key": "api_key_env",
+      "type": "string",
+      "label": "API Key Env",
+      "default": "",
+      "help": "Environment variable name containing provider API key."
+    },
+    {
+      "key": "on_error",
+      "type": "enum",
+      "label": "On Error",
+      "default": "block",
+      "options": [
+        "block",
+        "allow"
+      ],
+      "help": "Behavior when PII scanner fails: 'block' (fail-closed) or 'allow' (fail-open)."
+    },
+    {
+      "key": "max_scan_chars",
+      "type": "number",
+      "label": "Max Scan Chars",
+      "default": 0,
+      "help": "Character cap for model-scan input (0 for unbounded)."
+    }
+  ]
+}

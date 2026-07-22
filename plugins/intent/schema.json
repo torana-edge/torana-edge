@@ -1,0 +1,15 @@
+{
+  "fields": [
+    {
+      "key": "fill",
+      "type": "enum",
+      "label": "Fill Mode",
+      "default": "heuristic",
+      "options": [
+        "heuristic",
+        "off"
+      ],
+      "help": "Strategy for uncaptured history intents: 'heuristic' (fill template) or 'off' (leave untouched)."
+    }
+  ]
+}
