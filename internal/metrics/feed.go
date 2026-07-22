@@ -140,11 +140,28 @@ func (f *RequestFeed) Snapshot() []RequestEvent {
 // the caller MUST invoke when it is done (e.g. on client disconnect). Calling
 // the unsubscribe function more than once is safe.
 func (f *RequestFeed) Subscribe() (<-chan RequestEvent, func()) {
+	_, ch, unsub := f.SubscribeWithSnapshot()
+	return ch, unsub
+}
+
+// SubscribeWithSnapshot registers a new SSE subscriber and atomically captures
+// a snapshot of recent events (newest-first) under the same lock, preventing
+// event duplication between snapshot replay and live event stream.
+func (f *RequestFeed) SubscribeWithSnapshot() ([]RequestEvent, <-chan RequestEvent, func()) {
 	ch := make(chan RequestEvent, subscriberBufSize)
 	f.mu.Lock()
 	id := f.nextSubID
 	f.nextSubID++
 	f.subscribers[id] = &subscriber{ch: ch}
+
+	var snap []RequestEvent
+	if f.count > 0 {
+		snap = make([]RequestEvent, f.count)
+		for i := 0; i < f.count; i++ {
+			idx := (f.head - 1 - i + f.cap) % f.cap
+			snap[i] = f.buf[idx]
+		}
+	}
 	f.mu.Unlock()
 
 	once := sync.Once{}
@@ -158,5 +175,5 @@ func (f *RequestFeed) Subscribe() (<-chan RequestEvent, func()) {
 			close(ch)
 		})
 	}
-	return ch, unsub
+	return snap, ch, unsub
 }
