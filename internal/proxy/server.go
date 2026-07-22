@@ -1766,16 +1766,25 @@ func (s *Server) currentPort() int {
 func (s *Server) applyMITM(cfg provider.MITMConfig) error {
 	s.mitmMu.Lock()
 	defer s.mitmMu.Unlock()
-	if s.mitmSrv != nil {
-		s.mitmSrv.Close() // stops the old CONNECT listener; frees the addr
-		s.mitmSrv = nil
-	}
 	if !cfg.Enabled {
+		if s.mitmSrv != nil {
+			s.mitmSrv.Close() // stops the old CONNECT listener; frees the addr
+			s.mitmSrv = nil
+		}
 		return nil
 	}
+	// Build (and validate) the new ingress BEFORE tearing down the old one. A
+	// bad config (e.g. missing ca_dir) must not take down a running ingress —
+	// otherwise a rejected settings PUT leaves the operator with no MITM at all.
 	m, err := mitm.New(cfg, s.Handler())
 	if err != nil {
 		return err
+	}
+	// Only now that the new server is validated, stop the old one and free its
+	// CONNECT addr so the new bind (which may reuse the same addr) can succeed.
+	if s.mitmSrv != nil {
+		s.mitmSrv.Close()
+		s.mitmSrv = nil
 	}
 	go func() {
 		if err := m.ListenAndServe(); err != nil {
