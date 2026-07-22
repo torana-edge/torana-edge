@@ -1,0 +1,1292 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Torana Control Plane</title>
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjExMjMgMzYzIDU3MCA1NzciPgogIDxkZWZzPgogICAgPGxpbmVhckdyYWRpZW50IGlkPSJnIiB4MT0iMCIgeTE9IjAiIHgyPSIwIiB5Mj0iMSI+CiAgICAgIDxzdG9wIG9mZnNldD0iMCUiIHN0b3AtY29sb3I9IiMxNEYxRDkiIC8+CiAgICAgIDxzdG9wIG9mZnNldD0iMTAwJSIgc3RvcC1jb2xvcj0iIzBFOEJFMSIgLz4KICAgIDwvbGluZWFyR3JhZGllbnQ+CiAgPC9kZWZzPgogIDxwYXRoIGQ9Ik0gMTIwOCA0MDEgTCAxMTk1IDQyMCBMIDExOTggNDM2IEwgMTIxMSA0NTEgTCAxMjM3IDQ1MyBMIDEyNDAgNDcxIEwgMTE3OCA0NzQgTCAxMTYwIDQ5NCBMIDExNjEgNTEzIEwgMTE4NiA1MzYgTCAxMjM4IDUzOCBMIDEyNDAgNTU3IEwgMTE0MyA1NTkgTCAxMTI4IDU3MSBMIDExMjMgNjAwIEwgMTE0MiA2MjMgTCAxMjQwIDYyNSBMIDEyMzkgOTM3IEwgMTMxNCA5MzcgTCAxMzE1IDYzNSBMIDEyOTMgNjM1IEwgMTI5MyA5MTUgTCAxMjYyIDkxNyBMIDEyNjAgNjI3IEwgMTMwNCA2MjUgTCAxMzYwIDYwNyBMIDE0MjMgNjAzIEwgMTUxNiA2MjUgTCAxNTU2IDYyNiBMIDE1NTEgOTE3IEwgMTUyMiA5MTUgTCAxNTIyIDYzOCBMIDE1MDIgNjM1IEwgMTUwMSA5MzYgTCAxNTc1IDkzOCBMIDE1NzUgNjI0IEwgMTY2NyA2MjMgTCAxNjg0IDYxMyBMIDE2OTIgNTk2IEwgMTY4OCA1NzQgTCAxNjcxIDU1OSBMIDE1NzUgNTU3IEwgMTU3NiA1MzYgTCAxNjMyIDUzNSBMIDE2NTQgNTEyIEwgMTY1MiA0OTAgTCAxNjM5IDQ3NiBMIDE1NzUgNDcxIEwgMTU3NyA0NTMgTCAxNjAyIDQ1MSBMIDE2MTYgNDM4IEwgMTYxNCA0MDggTCAxNTk0IDM5NiBMIDE1MDAgNDAwIEwgMTQ3MyAzODggTCAxNDM4IDM4NiBMIDE0MTcgMzYzIEwgMTM5OCAzNjMgTCAxMzgwIDM4NSBMIDEzNDIgMzg4IEwgMTMxNSA0MDAgTCAxMjY3IDM5NCBaIE0gMTE0MiA1ODYgTCAxMTUxIDU3NyBMIDEyNTkgNTc2IEwgMTI1OSA1MTcgTCAxMjQzIDUxNSBMIDExOTIgNTE4IEwgMTE4MyA1MTQgTCAxMTgwIDUwNyBMIDExODIgNDk3IEwgMTE4OCA0OTEgTCAxMjA5IDQ5MyBMIDEyNTkgNDkwIEwgMTI1OSA0MzUgTCAxMjE5IDQzMyBMIDEyMTUgNDI4IEwgMTIxNSA0MjEgTCAxMjIxIDQxNSBMIDEyOTQgNDE2IEwgMTI5NSA0OTMgTCAxMzU1IDQ3OSBMIDE0MDIgNDc1IEwgMTQ2MCA0NzkgTCAxNTIwIDQ5MyBMIDE1MjEgNDE2IEwgMTU5MCA0MTQgTCAxNjAwIDQyMSBMIDE2MDEgNDI1IEwgMTU5NiA0MzMgTCAxNTU0IDQzNCBMIDE1NTYgNDkwIEwgMTYyNCA0OTAgTCAxNjM0IDQ5NiBMIDE2MzYgNTA4IEwgMTYyNSA1MTggTCAxNTU2IDUxOCBMIDE1NTYgNTc2IEwgMTY2MSA1NzYgTCAxNjcyIDU4MyBMIDE2NzQgNTkzIEwgMTY2MiA2MDUgTCAxNTEzIDYwNSBMIDE0NzUgNTkxIEwgMTQ1NCA1ODcgTCAxMzcxIDU4NSBMIDEzMzkgNTkxIEwgMTMwMSA2MDUgTCAxMTU1IDYwNSBMIDExNDQgNTk5IFogTSAxMjk0IDUxOSBMIDEyOTMgNTYxIEwgMTI5MiA1NjIgTCAxMjkzIDU2MyBMIDEyOTMgNTY5IEwgMTI5NCA1NzAgTCAxMjkzIDU3MSBMIDEyOTQgNTc3IEwgMTMwMCA1NzcgTCAxMzA0IDU3NSBMIDEzMDUgNTc2IEwgMTMwNyA1NzYgTCAxMzA5IDU3NCBMIDEzMTIgNTc0IEwgMTMxNCA1NzIgTCAxMzE1IDU3MyBMIDEzMTYgNTcyIEwgMTMxOSA1NzIgTCAxMzIxIDU3MCBMIDEzMjMgNTcxIEwgMTMyOSA1NjggTCAxMzMzIDU2OCBMIDEzMzYgNTY2IEwgMTMzOSA1NjYgTCAxMzQwIDU2NSBMIDEzNDEgNTY2IEwgMTM0MyA1NjUgTCAxMzQ0IDU2NiBMIDEzNDUgNTY0IEwgMTM0OCA1NjQgTCAxMzQ5IDU2MyBMIDEzNTMgNTYzIEwgMTM1NCA1NjIgTCAxMzU4IDU2MiBMIDEzNTkgNTYxIEwgMTM2NSA1NjEgTCAxMzY2IDU2MCBMIDEzNzIgNTYwIEwgMTM3MyA1NTkgTCAxMzgzIDU1OSBMIDEzODQgNTU4IEwgMTQzMiA1NTggTCAxNDMzIDU1OSBMIDE0NTAgNTYwIEwgMTQ1MSA1NjEgTCAxNDU2IDU2MSBMIDE0NTcgNTYyIEwgMTQ2MiA1NjIgTCAxNDYzIDU2MyBMIDE0NzIgNTY0IEwgMTQ3NCA1NjYgTCAxNDc1IDU2NSBMIDE0NzcgNTY1IEwgMTQ3OCA1NjYgTCAxNDgxIDU2NiBMIDE0ODQgNTY4IEwgMTQ4OSA1NjggTCAxNDkwIDU3MCBMIDE0OTEgNTY5IEwgMTQ5MyA1NjkgTCAxNDk0IDU3MSBMIDE0OTYgNTcwIEwgMTQ5OCA1NzIgTCAxNTAwIDU3MSBMIDE1MDEgNTcyIEwgMTUwNCA1NzIgTCAxNTA2IDU3NCBMIDE1MDcgNTczIEwgMTUxOCA1NzcgTCAxNTIwIDU3NyBMIDE1MjEgNTc2IEwgMTUyMSA1NjYgTCAxNTIyIDU2NSBMIDE1MjEgNTY0IEwgMTUyMiA1NjMgTCAxNTIyIDU1NyBMIDE1MjEgNTU2IEwgMTUyMSA1MjcgTCAxNTIwIDUyNiBMIDE1MjEgNTI1IEwgMTUyMCA1MjMgTCAxNTIxIDUyMSBMIDE1MTkgNTE4IEwgMTUxNiA1MTggTCAxNTE1IDUxNyBMIDE1MDkgNTE2IEwgMTUwNSA1MTQgTCAxNTAyIDUxNCBMIDE0OTggNTEyIEwgMTQ5NSA1MTIgTCAxNDkwIDUxMCBMIDE0ODYgNTEwIEwgMTQ4NSA1MDkgTCAxNDgyIDUwOSBMIDE0NzcgNTA3IEwgMTQ2OCA1MDYgTCAxNDY3IDUwNSBMIDE0NTYgNTA0IEwgMTQ1NSA1MDMgTCAxNDM2IDUwMiBMIDE0MzUgNTAxIEwgMTQwMiA1MDAgTCAxNDAxIDUwMSBMIDEzODEgNTAxIEwgMTM4MCA1MDIgTCAxMzY4IDUwMiBMIDEzNjcgNTAzIEwgMTM2MSA1MDMgTCAxMzYwIDUwMiBMIDEzNTkgNTA0IEwgMTM1OCA1MDMgTCAxMzU0IDUwMyBMIDEzNTIgNTA1IEwgMTM0NiA1MDUgTCAxMzQ1IDUwNiBMIDEzNDMgNTA1IEwgMTM0MSA1MDcgTCAxMzM3IDUwNyBMIDEzMzYgNTA4IEwgMTMxNyA1MTIgTCAxMzEzIDUxNCBMIDEzMDYgNTE1IEwgMTMwNSA1MTYgWiBNIDEzMTMgNTMzIEwgMTMxNCA1MzIgTCAxMzE3IDUzMiBMIDEzMTggNTMxIEwgMTMyMCA1MzEgTCAxMzIxIDUzMCBMIDEzMjQgNTMwIEwgMTMyNSA1MjkgTCAxMzI4IDUyOSBMIDEzMjkgNTI4IEwgMTMzMiA1MjggTCAxMzMzIDUyNyBMIDEzMzYgNTI3IEwgMTMzNyA1MjYgTCAxMzQxIDUyNiBMIDEzNDIgNTI1IEwgMTM0NiA1MjUgTCAxMzQ3IDUyNCBMIDEzNTIgNTI0IEwgMTM1MyA1MjMgTCAxMzU5IDUyMyBMIDEzNjAgNTIyIEwgMTM2NyA1MjIgTCAxMzY4IDUyMSBMIDEzNzcgNTIxIEwgMTM3OCA1MjIgTCAxMzc4IDUyMSBMIDEzNzkgNTIwIEwgMTM4NyA1MjAgTCAxMzg4IDUxOSBMIDEzODkgNTE5IEwgMTM5MCA1MjAgTCAxMzkxIDUxOSBMIDE0MjggNTE5IEwgMTQyOSA1MjAgTCAxNDM4IDUyMCBMIDE0MzkgNTIxIEwgMTQ0OSA1MjEgTCAxNDUwIDUyMiBMIDE0NTYgNTIyIEwgMTQ1NyA1MjMgTCAxNDYzIDUyMyBMIDE0NjQgNTI0IEwgMTQ2OCA1MjQgTCAxNDY5IDUyNSBMIDE0NzQgNTI1IEwgMTQ3NSA1MjYgTCAxNDc4IDUyNiBMIDE0NzkgNTI3IEwgMTQ4MyA1MjcgTCAxNDg0IDUyOCBMIDE0ODYgNTI4IEwgMTQ4NyA1MjkgTCAxNDkxIDUyOSBMIDE0OTIgNTMwIEwgMTQ5NCA1MzAgTCAxNDk1IDUzMSBMIDE0OTggNTMxIEwgMTQ5OSA1MzIgTCAxNTAxIDUzMiBMIDE1MDIgNTMzIEwgMTUwMiA1NTAgTCAxNTAwIDU1MiBMIDE0OTggNTUyIEwgMTQ5NyA1NTEgTCAxNDk1IDU1MSBMIDE0OTQgNTUwIEwgMTQ5MSA1NTAgTCAxNDkwIDU0OSBMIDE0ODYgNTQ5IEwgMTQ4NSA1NDggTCAxNDgyIDU0OCBMIDE0ODEgNTQ3IEwgMTQ3NyA1NDcgTCAxNDc2IDU0NiBMIDE0NzIgNTQ2IEwgMTQ3MSA1NDUgTCAxNDY3IDU0NSBMIDE0NjYgNTQ0IEwgMTQ2MSA1NDQgTCAxNDYwIDU0MyBMIDE0NTUgNTQzIEwgMTQ1NCA1NDIgTCAxNDQ4IDU0MiBMIDE0NDcgNTQxIEwgMTQzOSA1NDEgTCAxNDM4IDU0MCBMIDE0MjkgNTQwIEwgMTQyOCA1MzkgTCAxMzg4IDUzOSBMIDEzODcgNTQwIEwgMTM3NSA1NDAgTCAxMzc0IDU0MSBMIDEzNjcgNTQxIEwgMTM2NiA1NDIgTCAxMzYwIDU0MiBMIDEzNTkgNTQzIEwgMTM1NCA1NDMgTCAxMzUzIDU0NCBMIDEzNDggNTQ0IEwgMTM0NyA1NDUgTCAxMzQzIDU0NSBMIDEzNDIgNTQ2IEwgMTMzOCA1NDYgTCAxMzM3IDU0NyBMIDEzMzQgNTQ3IEwgMTMzMyA1NDggTCAxMzI5IDU0OCBMIDEzMjggNTQ5IEwgMTMyNSA1NDkgTCAxMzI0IDU1MCBMIDEzMjMgNTQ5IEwgMTMyMiA1NDkgTCAxMzIxIDU1MCBMIDEzMTkgNTUwIEwgMTMxNiA1NTIgTCAxMzEzIDU0OCBaIE0gMTMxMyA0MzUgTCAxMzE0IDQzNCBMIDEzMTQgNDMxIEwgMTMxNiA0MjcgTCAxMzIwIDQyMiBMIDEzMjAgNDIxIEwgMTMyMSA0MjAgTCAxMzIzIDQyMSBMIDEzMjQgNDIwIEwgMTMyMiA0MTkgTCAxMzI1IDQxNiBMIDEzMjcgNDE2IEwgMTMyNyA0MTUgTCAxMzMxIDQxMiBMIDEzMzkgNDA4IEwgMTM0NSA0MDcgTCAxMzQ2IDQwNiBMIDEzNTEgNDA2IEwgMTM1MiA0MDUgTCAxMzcxIDQwNSBMIDEzNzIgNDA0IEwgMTM4MCA0MDQgTCAxMzgxIDQwMyBMIDEzODQgNDAzIEwgMTM4NSA0MDIgTCAxMzkwIDQwMSBMIDEzOTcgMzk3IEwgMTQwNSAzODkgTCAxNDA1IDM4OCBMIDE0MDcgMzg2IEwgMTQwOCAzODYgTCAxNDEwIDM4OCBMIDE0MTAgMzg5IEwgMTQxOCAzOTcgTCAxNDMwIDQwMyBMIDE0MzMgNDAzIEwgMTQzNCA0MDQgTCAxNDQxIDQwNCBMIDE0NDIgNDA1IEwgMTQ2MyA0MDUgTCAxNDY0IDQwNiBMIDE0NjkgNDA2IEwgMTQ3MCA0MDcgTCAxNDc2IDQwOCBMIDE0ODEgNDExIEwgMTQ4MyA0MTEgTCAxNDg1IDQxMyBMIDE0ODkgNDE1IEwgMTQ5NiA0MjIgTCAxNDk2IDQyMyBMIDE0OTggNDI1IEwgMTUwMSA0MzEgTCAxNTAxIDQzNCBMIDE1MDIgNDM1IEwgMTUwMiA0NjggTCAxNTAxIDQ2OSBMIDE0OTggNDY5IEwgMTQ5NyA0NjggTCAxNDk0IDQ2OCBMIDE0OTMgNDY3IEwgMTQ5MCA0NjcgTCAxNDg5IDQ2NiBMIDE0ODUgNDY2IEwgMTQ4NCA0NjUgTCAxNDgwIDQ2NSBMIDE0NzkgNDY0IEwgMTQ3NSA0NjQgTCAxNDc0IDQ2MyBMIDE0NzAgNDYzIEwgMTQ2OSA0NjIgTCAxNDYzIDQ2MiBMIDE0NjIgNDYxIEwgMTQ1NiA0NjEgTCAxNDU1IDQ2MCBMIDE0NDggNDYwIEwgMTQ0NyA0NTkgTCAxNDM5IDQ1OSBMIDE0MzggNDU4IEwgMTQyMiA0NTggTCAxNDIxIDQ1NyBMIDEzOTIgNDU3IEwgMTM5MSA0NTggTCAxMzkwIDQ1NyBMIDEzODkgNDU4IEwgMTM3NSA0NTggTCAxMzc0IDQ1OSBMIDEzNjcgNDU5IEwgMTM2NiA0NjAgTCAxMzUyIDQ2MSBMIDEzNTEgNDYyIEwgMTM0MCA0NjMgTCAxMzM5IDQ2NCBMIDEzMzUgNDY0IEwgMTMzNCA0NjUgTCAxMzMxIDQ2NSBMIDEzMzAgNDY2IEwgMTMyNiA0NjYgTCAxMzI1IDQ2NyBMIDEzMjIgNDY3IEwgMTMyMSA0NjggTCAxMzE3IDQ2OCBMIDEzMTYgNDY5IEwgMTMxNCA0NjkgTCAxMzEzIDQ2OCBaICIgZmlsbD0idXJsKCNnKSIgZmlsbC1ydWxlPSJldmVub2RkIiAvPgo8L3N2Zz4=">
+  <style>
+    :root {
+      --bg-dark: #0b1120;
+      --bg-card: #131c31;
+      --bg-card-hover: #1e293b;
+      --bg-inset: #0b1120;
+      --text-main: #f1f5f9;
+      --text-muted: #94a3b8;
+      --text-faint: #64748b;
+      --accent-blue: #38bdf8;
+      --accent-indigo: #818cf8;
+      --accent-green: #34d399;
+      --accent-yellow: #fbbf24;
+      --accent-red: #f87171;
+      --border-color: #263449;
+      --radius: 10px;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      background-color: var(--bg-dark);
+      background-image: radial-gradient(1200px 500px at 20% -10%, rgba(56,189,248,0.08), transparent 60%);
+      color: var(--text-main);
+      line-height: 1.5;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+
+    header {
+      background-color: rgba(19, 28, 49, 0.85);
+      backdrop-filter: blur(8px);
+      border-bottom: 1px solid var(--border-color);
+      padding: 0.85rem 1.5rem;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 1rem;
+      position: sticky;
+      top: 0;
+      z-index: 20;
+    }
+
+    .brand { display: flex; align-items: center; gap: 0.7rem; }
+    .logo-svg {
+      width: 34px; height: 38px;
+      filter: drop-shadow(0 0 5px rgba(34,211,238,0.6)) drop-shadow(0 0 11px rgba(139,92,246,0.5));
+      flex-shrink: 0;
+    }
+    .brand h1 { font-size: 1.15rem; font-weight: 700; letter-spacing: -0.02em; }
+    .brand .sub { font-size: 0.7rem; color: var(--text-faint); letter-spacing: 0.02em; }
+
+    nav { display: flex; gap: 0.25rem; }
+    .nav-btn {
+      background: transparent; border: 1px solid transparent;
+      color: var(--text-muted); padding: 0.45rem 0.9rem;
+      border-radius: var(--radius); cursor: pointer;
+      font-weight: 500; font-size: 0.875rem; transition: all 0.15s ease;
+    }
+    .nav-btn:hover { color: var(--text-main); background-color: rgba(255,255,255,0.04); }
+    .nav-btn.active {
+      color: var(--accent-blue);
+      background-color: rgba(56,189,248,0.1);
+      border-color: rgba(56,189,248,0.3);
+    }
+
+    .status-badge {
+      display: flex; align-items: center; gap: 0.45rem;
+      font-size: 0.72rem; padding: 0.25rem 0.65rem; border-radius: 9999px;
+      background-color: rgba(52,211,153,0.1); color: var(--accent-green);
+      border: 1px solid rgba(52,211,153,0.3);
+    }
+    .status-badge.disconnected {
+      background-color: rgba(248,113,113,0.1); color: var(--accent-red);
+      border-color: rgba(248,113,113,0.3);
+    }
+    .status-dot { width: 6px; height: 6px; border-radius: 50%; background-color: currentColor; }
+
+    main { flex: 1; padding: 1.5rem; max-width: 1200px; width: 100%; margin: 0 auto; }
+    .view { display: none; }
+    .view.active { display: block; }
+
+    .section-header {
+      display: flex; justify-content: space-between; align-items: center;
+      margin-bottom: 1.1rem; gap: 1rem; flex-wrap: wrap;
+    }
+    .section-title { font-size: 1.15rem; font-weight: 650; }
+    .section-desc { font-size: 0.82rem; color: var(--text-muted); margin-top: 0.15rem; }
+    .subhead {
+      font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.07em;
+      color: var(--text-faint); font-weight: 600; margin: 1.75rem 0 0.75rem;
+    }
+    .subhead:first-child { margin-top: 0; }
+
+    /* Buttons */
+    .btn {
+      background-color: var(--bg-card-hover); color: var(--text-main);
+      border: 1px solid var(--border-color); padding: 0.4rem 0.75rem;
+      border-radius: 6px; font-size: 0.8rem; cursor: pointer;
+      font-weight: 500; transition: all 0.15s; white-space: nowrap;
+    }
+    .btn:hover:not(:disabled) { background-color: #334155; }
+    .btn:disabled { opacity: 0.4; cursor: not-allowed; }
+    .btn-sm { padding: 0.3rem 0.6rem; font-size: 0.75rem; }
+    .btn-danger { background-color: rgba(248,113,113,0.12); color: var(--accent-red); border-color: rgba(248,113,113,0.25); }
+    .btn-danger:hover:not(:disabled) { background-color: rgba(248,113,113,0.25); }
+    .btn-green { background-color: rgba(52,211,153,0.12); color: var(--accent-green); border-color: rgba(52,211,153,0.28); }
+    .btn-green:hover:not(:disabled) { background-color: rgba(52,211,153,0.25); }
+    .btn-primary {
+      background-color: var(--accent-blue); color: #071018;
+      border-color: var(--accent-blue); font-weight: 650; padding: 0.5rem 1.1rem; font-size: 0.85rem;
+    }
+    .btn-primary:hover:not(:disabled) { background-color: #7dd3fc; }
+    .btn-ghost { background: transparent; border-color: transparent; color: var(--text-muted); }
+    .btn-ghost:hover:not(:disabled) { background: rgba(255,255,255,0.05); color: var(--text-main); }
+
+    /* Cards */
+    .card {
+      background-color: var(--bg-card); border: 1px solid var(--border-color);
+      border-radius: var(--radius); padding: 1.1rem 1.25rem;
+    }
+
+    /* Pipeline */
+    .pipeline-list { display: flex; flex-direction: column; gap: 0.6rem; }
+    .plugin-card {
+      background-color: var(--bg-card); border: 1px solid var(--border-color);
+      border-radius: var(--radius); padding: 0.85rem 1rem;
+      display: flex; align-items: center; gap: 0.9rem; transition: border-color 0.15s, box-shadow 0.15s;
+    }
+    .plugin-card.dragging { opacity: 0.45; }
+    .plugin-card.drop-target { border-color: var(--accent-blue); box-shadow: 0 0 0 1px var(--accent-blue) inset; }
+    .drag-handle {
+      color: var(--text-faint); cursor: grab; font-size: 1.1rem; line-height: 1;
+      user-select: none; padding: 0.2rem; letter-spacing: -2px;
+    }
+    .drag-handle:active { cursor: grabbing; }
+    .order-num {
+      width: 24px; height: 24px; flex-shrink: 0; border-radius: 6px;
+      background: rgba(56,189,248,0.12); color: var(--accent-blue);
+      display: flex; align-items: center; justify-content: center;
+      font-size: 0.78rem; font-weight: 700;
+    }
+    .plugin-main { flex: 1; min-width: 0; cursor: pointer; }
+    .plugin-name-row { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; }
+    .plugin-name { font-weight: 600; font-size: 0.95rem; }
+    .plugin-desc {
+      font-size: 0.78rem; color: var(--text-muted); margin-top: 0.15rem;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 46ch;
+    }
+    .plugin-card-actions { display: flex; gap: 0.4rem; align-items: center; flex-shrink: 0; }
+
+    .chip {
+      font-size: 0.68rem; padding: 0.12rem 0.45rem; border-radius: 5px;
+      background: rgba(148,163,184,0.12); color: var(--text-muted); font-weight: 500;
+      border: 1px solid transparent; white-space: nowrap;
+    }
+    .chip.serve { color: var(--accent-green); background: rgba(52,211,153,0.12); border-color: rgba(52,211,153,0.2); }
+    .chip.cfg { color: var(--accent-indigo); background: rgba(129,140,248,0.12); }
+    .chip.hook { color: var(--accent-blue); background: rgba(56,189,248,0.1); }
+    .chip.perm { color: var(--accent-yellow); background: rgba(251,191,36,0.1); }
+
+    .available-row {
+      display: flex; align-items: center; gap: 0.9rem;
+      background-color: var(--bg-card); border: 1px dashed var(--border-color);
+      border-radius: var(--radius); padding: 0.7rem 1rem;
+    }
+    .available-row .plugin-main { cursor: default; }
+
+    /* Sticky dirty bar */
+    .dirty-bar {
+      position: sticky; bottom: 1rem; margin-top: 1.25rem;
+      display: none; align-items: center; justify-content: space-between; gap: 1rem;
+      background: rgba(19,28,49,0.95); backdrop-filter: blur(6px);
+      border: 1px solid var(--accent-blue); border-radius: var(--radius);
+      padding: 0.7rem 1rem; box-shadow: 0 8px 24px rgba(0,0,0,0.4);
+    }
+    .dirty-bar.show { display: flex; }
+    .dirty-bar .msg { font-size: 0.85rem; color: var(--accent-blue); }
+    .dirty-bar .actions { display: flex; gap: 0.5rem; }
+
+    /* Metrics */
+    .metrics-grid {
+      display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+      gap: 0.9rem; margin-bottom: 1.5rem;
+    }
+    .metric-card {
+      background-color: var(--bg-card); border: 1px solid var(--border-color);
+      border-radius: var(--radius); padding: 1.1rem 1.2rem;
+    }
+    .metric-label { font-size: 0.7rem; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 0.4rem; }
+    .metric-value { font-size: 1.45rem; font-weight: 700; }
+    .metric-sub { font-size: 0.72rem; color: var(--text-faint); margin-top: 0.25rem; }
+
+    .status-pills { display: flex; gap: 0.5rem; margin-top: 0.5rem; }
+    .status-pill { font-size: 0.7rem; padding: 0.1rem 0.45rem; border-radius: 5px; font-weight: 600; }
+
+    /* Tables */
+    .table-container {
+      background-color: var(--bg-card); border: 1px solid var(--border-color);
+      border-radius: var(--radius); overflow-x: auto;
+    }
+    table { width: 100%; border-collapse: collapse; text-align: left; font-size: 0.85rem; }
+    th {
+      background-color: rgba(0,0,0,0.2); color: var(--text-muted); font-weight: 600;
+      padding: 0.7rem 1rem; border-bottom: 1px solid var(--border-color); white-space: nowrap;
+    }
+    td { padding: 0.65rem 1rem; border-bottom: 1px solid var(--border-color); white-space: nowrap; }
+    tr:last-child td { border-bottom: none; }
+    tr:hover td { background-color: rgba(255,255,255,0.02); }
+
+    .badge {
+      display: inline-block; padding: 0.13rem 0.5rem; border-radius: 4px;
+      font-size: 0.72rem; font-weight: 600;
+    }
+    .badge-2xx { background: rgba(52,211,153,0.15); color: var(--accent-green); }
+    .badge-3xx { background: rgba(56,189,248,0.15); color: var(--accent-blue); }
+    .badge-4xx { background: rgba(251,191,36,0.15); color: var(--accent-yellow); }
+    .badge-5xx { background: rgba(248,113,113,0.15); color: var(--accent-red); }
+    .badge-verdict { background: rgba(129,140,248,0.15); color: var(--accent-indigo); }
+    .badge-verdict.block { background: rgba(248,113,113,0.2); color: var(--accent-red); }
+    .badge-verdict.respond { background: rgba(56,189,248,0.2); color: var(--accent-blue); }
+    .badge-verdict.route { background: rgba(251,191,36,0.2); color: var(--accent-yellow); }
+
+    /* Alerts */
+    .alert { padding: 0.7rem 1rem; border-radius: var(--radius); margin-bottom: 1rem; font-size: 0.85rem; display: none; }
+    .alert.show { display: block; }
+    .alert-error { background-color: rgba(248,113,113,0.15); color: var(--accent-red); border: 1px solid rgba(248,113,113,0.3); }
+    .alert-success { background-color: rgba(52,211,153,0.15); color: var(--accent-green); border: 1px solid rgba(52,211,153,0.3); }
+
+    .empty-state { text-align: center; padding: 2.25rem 1rem; color: var(--text-faint); font-size: 0.85rem; }
+
+    /* Info note */
+    .info-note {
+      background: rgba(56,189,248,0.06); border: 1px solid rgba(56,189,248,0.18);
+      border-radius: var(--radius); padding: 0.75rem 1rem; font-size: 0.82rem;
+      color: var(--text-muted); margin-bottom: 1.25rem;
+    }
+    .info-note a { color: var(--accent-blue); text-decoration: none; }
+    .info-note a:hover { text-decoration: underline; }
+
+    /* Plugin detail */
+    .back-link {
+      display: inline-flex; align-items: center; gap: 0.35rem; color: var(--text-muted);
+      font-size: 0.82rem; cursor: pointer; margin-bottom: 1rem; background: none; border: none;
+    }
+    .back-link:hover { color: var(--text-main); }
+    .detail-head { display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap; margin-bottom: 0.35rem; }
+    .detail-title { font-size: 1.35rem; font-weight: 700; }
+    .detail-meta-grid { display: flex; flex-wrap: wrap; gap: 0.4rem; margin: 0.75rem 0 1.25rem; }
+    .detail-frame {
+      width: 100%; height: 460px; border: 1px solid var(--border-color);
+      border-radius: var(--radius); background: #fff;
+    }
+    .code-editor {
+      width: 100%; min-height: 220px; background-color: var(--bg-inset); color: #e2e8f0;
+      border: 1px solid var(--border-color); border-radius: var(--radius);
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      font-size: 0.82rem; padding: 0.85rem; resize: vertical; line-height: 1.5;
+    }
+    .code-editor:focus { outline: none; border-color: var(--accent-blue); }
+
+    /* Settings forms */
+    .form-section { margin-bottom: 1.75rem; }
+    .form-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 0.9rem; }
+    .field { display: flex; flex-direction: column; gap: 0.3rem; }
+    .field label { font-size: 0.75rem; color: var(--text-muted); font-weight: 500; }
+    .field .hint { font-size: 0.7rem; color: var(--text-faint); }
+    .input, select.input {
+      background-color: var(--bg-inset); border: 1px solid var(--border-color); color: var(--text-main);
+      padding: 0.45rem 0.65rem; border-radius: 6px; font-size: 0.85rem; width: 100%;
+      font-family: inherit;
+    }
+    .input:focus { outline: none; border-color: var(--accent-blue); }
+    .checkbox-row { display: flex; align-items: center; gap: 0.5rem; font-size: 0.85rem; color: var(--text-main); }
+    .checkbox-row input { width: 16px; height: 16px; accent-color: var(--accent-blue); }
+
+    .secret-field { display: flex; gap: 0.25rem; align-items: center; }
+    .secret-field .input { flex: 1; min-width: 0; }
+    .btn-secret-clear { padding: 0.35rem 0.45rem; font-size: 0.72rem; flex-shrink: 0; }
+
+    .providers-table { width: 100%; border-collapse: separate; border-spacing: 0 0.4rem; }
+    .providers-table td { padding: 0.15rem 0.3rem; border: none; white-space: normal; }
+    .providers-table input, .providers-table select { font-size: 0.8rem; padding: 0.35rem 0.5rem; }
+    .providers-table th { background: none; border: none; padding: 0.2rem 0.3rem; font-size: 0.68rem; }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="brand">
+      <svg class="logo-svg" viewBox="1123 363 570 577" aria-hidden="true" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="tLogoGrad" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#14F1D9" />
+      <stop offset="100%" stop-color="#0E8BE1" />
+    </linearGradient>
+  </defs>
+  <path d="M 1208 401 L 1195 420 L 1198 436 L 1211 451 L 1237 453 L 1240 471 L 1178 474 L 1160 494 L 1161 513 L 1186 536 L 1238 538 L 1240 557 L 1143 559 L 1128 571 L 1123 600 L 1142 623 L 1240 625 L 1239 937 L 1314 937 L 1315 635 L 1293 635 L 1293 915 L 1262 917 L 1260 627 L 1304 625 L 1360 607 L 1423 603 L 1516 625 L 1556 626 L 1551 917 L 1522 915 L 1522 638 L 1502 635 L 1501 936 L 1575 938 L 1575 624 L 1667 623 L 1684 613 L 1692 596 L 1688 574 L 1671 559 L 1575 557 L 1576 536 L 1632 535 L 1654 512 L 1652 490 L 1639 476 L 1575 471 L 1577 453 L 1602 451 L 1616 438 L 1614 408 L 1594 396 L 1500 400 L 1473 388 L 1438 386 L 1417 363 L 1398 363 L 1380 385 L 1342 388 L 1315 400 L 1267 394 Z M 1142 586 L 1151 577 L 1259 576 L 1259 517 L 1243 515 L 1192 518 L 1183 514 L 1180 507 L 1182 497 L 1188 491 L 1209 493 L 1259 490 L 1259 435 L 1219 433 L 1215 428 L 1215 421 L 1221 415 L 1294 416 L 1295 493 L 1355 479 L 1402 475 L 1460 479 L 1520 493 L 1521 416 L 1590 414 L 1600 421 L 1601 425 L 1596 433 L 1554 434 L 1556 490 L 1624 490 L 1634 496 L 1636 508 L 1625 518 L 1556 518 L 1556 576 L 1661 576 L 1672 583 L 1674 593 L 1662 605 L 1513 605 L 1475 591 L 1454 587 L 1371 585 L 1339 591 L 1301 605 L 1155 605 L 1144 599 Z M 1294 519 L 1293 561 L 1292 562 L 1293 563 L 1293 569 L 1294 570 L 1293 571 L 1294 577 L 1300 577 L 1304 575 L 1305 576 L 1307 576 L 1309 574 L 1312 574 L 1314 572 L 1315 573 L 1316 572 L 1319 572 L 1321 570 L 1323 571 L 1329 568 L 1333 568 L 1336 566 L 1339 566 L 1340 565 L 1341 566 L 1343 565 L 1344 566 L 1345 564 L 1348 564 L 1349 563 L 1353 563 L 1354 562 L 1358 562 L 1359 561 L 1365 561 L 1366 560 L 1372 560 L 1373 559 L 1383 559 L 1384 558 L 1432 558 L 1433 559 L 1450 560 L 1451 561 L 1456 561 L 1457 562 L 1462 562 L 1463 563 L 1472 564 L 1474 566 L 1475 565 L 1477 565 L 1478 566 L 1481 566 L 1484 568 L 1489 568 L 1490 570 L 1491 569 L 1493 569 L 1494 571 L 1496 570 L 1498 572 L 1500 571 L 1501 572 L 1504 572 L 1506 574 L 1507 573 L 1518 577 L 1520 577 L 1521 576 L 1521 566 L 1522 565 L 1521 564 L 1522 563 L 1522 557 L 1521 556 L 1521 527 L 1520 526 L 1521 525 L 1520 523 L 1521 521 L 1519 518 L 1516 518 L 1515 517 L 1509 516 L 1505 514 L 1502 514 L 1498 512 L 1495 512 L 1490 510 L 1486 510 L 1485 509 L 1482 509 L 1477 507 L 1468 506 L 1467 505 L 1456 504 L 1455 503 L 1436 502 L 1435 501 L 1402 500 L 1401 501 L 1381 501 L 1380 502 L 1368 502 L 1367 503 L 1361 503 L 1360 502 L 1359 504 L 1358 503 L 1354 503 L 1352 505 L 1346 505 L 1345 506 L 1343 505 L 1341 507 L 1337 507 L 1336 508 L 1317 512 L 1313 514 L 1306 515 L 1305 516 Z M 1313 533 L 1314 532 L 1317 532 L 1318 531 L 1320 531 L 1321 530 L 1324 530 L 1325 529 L 1328 529 L 1329 528 L 1332 528 L 1333 527 L 1336 527 L 1337 526 L 1341 526 L 1342 525 L 1346 525 L 1347 524 L 1352 524 L 1353 523 L 1359 523 L 1360 522 L 1367 522 L 1368 521 L 1377 521 L 1378 522 L 1378 521 L 1379 520 L 1387 520 L 1388 519 L 1389 519 L 1390 520 L 1391 519 L 1428 519 L 1429 520 L 1438 520 L 1439 521 L 1449 521 L 1450 522 L 1456 522 L 1457 523 L 1463 523 L 1464 524 L 1468 524 L 1469 525 L 1474 525 L 1475 526 L 1478 526 L 1479 527 L 1483 527 L 1484 528 L 1486 528 L 1487 529 L 1491 529 L 1492 530 L 1494 530 L 1495 531 L 1498 531 L 1499 532 L 1501 532 L 1502 533 L 1502 550 L 1500 552 L 1498 552 L 1497 551 L 1495 551 L 1494 550 L 1491 550 L 1490 549 L 1486 549 L 1485 548 L 1482 548 L 1481 547 L 1477 547 L 1476 546 L 1472 546 L 1471 545 L 1467 545 L 1466 544 L 1461 544 L 1460 543 L 1455 543 L 1454 542 L 1448 542 L 1447 541 L 1439 541 L 1438 540 L 1429 540 L 1428 539 L 1388 539 L 1387 540 L 1375 540 L 1374 541 L 1367 541 L 1366 542 L 1360 542 L 1359 543 L 1354 543 L 1353 544 L 1348 544 L 1347 545 L 1343 545 L 1342 546 L 1338 546 L 1337 547 L 1334 547 L 1333 548 L 1329 548 L 1328 549 L 1325 549 L 1324 550 L 1323 549 L 1322 549 L 1321 550 L 1319 550 L 1316 552 L 1313 548 Z M 1313 435 L 1314 434 L 1314 431 L 1316 427 L 1320 422 L 1320 421 L 1321 420 L 1323 421 L 1324 420 L 1322 419 L 1325 416 L 1327 416 L 1327 415 L 1331 412 L 1339 408 L 1345 407 L 1346 406 L 1351 406 L 1352 405 L 1371 405 L 1372 404 L 1380 404 L 1381 403 L 1384 403 L 1385 402 L 1390 401 L 1397 397 L 1405 389 L 1405 388 L 1407 386 L 1408 386 L 1410 388 L 1410 389 L 1418 397 L 1430 403 L 1433 403 L 1434 404 L 1441 404 L 1442 405 L 1463 405 L 1464 406 L 1469 406 L 1470 407 L 1476 408 L 1481 411 L 1483 411 L 1485 413 L 1489 415 L 1496 422 L 1496 423 L 1498 425 L 1501 431 L 1501 434 L 1502 435 L 1502 468 L 1501 469 L 1498 469 L 1497 468 L 1494 468 L 1493 467 L 1490 467 L 1489 466 L 1485 466 L 1484 465 L 1480 465 L 1479 464 L 1475 464 L 1474 463 L 1470 463 L 1469 462 L 1463 462 L 1462 461 L 1456 461 L 1455 460 L 1448 460 L 1447 459 L 1439 459 L 1438 458 L 1422 458 L 1421 457 L 1392 457 L 1391 458 L 1390 457 L 1389 458 L 1375 458 L 1374 459 L 1367 459 L 1366 460 L 1352 461 L 1351 462 L 1340 463 L 1339 464 L 1335 464 L 1334 465 L 1331 465 L 1330 466 L 1326 466 L 1325 467 L 1322 467 L 1321 468 L 1317 468 L 1316 469 L 1314 469 L 1313 468 Z " fill="url(#tLogoGrad)" fill-rule="evenodd" />
+</svg>
+      <div>
+        <h1>Torana</h1>
+        <div class="sub">Control Plane</div>
+      </div>
+    </div>
+
+    <nav>
+      <button class="nav-btn" data-view="pipeline" onclick="go('pipeline')">Pipeline</button>
+      <button class="nav-btn" data-view="traffic" onclick="go('traffic')">Traffic</button>
+      <button class="nav-btn" data-view="feed" onclick="go('feed')">Live Feed</button>
+      <button class="nav-btn" data-view="settings" onclick="go('settings')">Settings</button>
+    </nav>
+
+    <div id="connectionStatus" class="status-badge">
+      <span class="status-dot"></span>
+      <span id="statusText">Connected</span>
+    </div>
+  </header>
+
+  <main>
+    <div id="alertBox" class="alert"></div>
+
+    <!-- View: Pipeline Manager (default) -->
+    <section id="view-pipeline" class="view">
+      <div class="section-header">
+        <div>
+          <h2 class="section-title">Plugin Pipeline</h2>
+          <div class="section-desc">Drag to reorder. Requests flow through enabled plugins top&nbsp;to&nbsp;bottom.</div>
+        </div>
+        <button class="btn btn-ghost" onclick="loadPlugins()">↻ Reload</button>
+      </div>
+
+      <div class="subhead">Enabled &mdash; execution order</div>
+      <div id="pipelineContainer" class="pipeline-list"></div>
+
+      <div class="subhead">Available to enable</div>
+      <div id="availableContainer" class="pipeline-list"></div>
+
+      <div id="dirtyBar" class="dirty-bar">
+        <span class="msg">You have unsaved pipeline changes.</span>
+        <div class="actions">
+          <button class="btn" onclick="loadPlugins()">Discard</button>
+          <button class="btn btn-primary" onclick="savePipeline()">Save &amp; apply</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- View: Plugin detail -->
+    <section id="view-plugin" class="view">
+      <button class="back-link" onclick="go('pipeline')">&larr; Back to pipeline</button>
+      <div id="pluginDetail"></div>
+    </section>
+
+    <!-- View: Traffic -->
+    <section id="view-traffic" class="view">
+      <div class="section-header">
+        <div>
+          <h2 class="section-title">Traffic</h2>
+          <div class="section-desc">Live proxy throughput. Cost &amp; FinOps analytics are provided by plugins.</div>
+        </div>
+        <button class="btn btn-ghost" onclick="fetchStats()">↻ Refresh</button>
+      </div>
+
+      <div class="metrics-grid">
+        <div class="metric-card">
+          <div class="metric-label">Total Requests</div>
+          <div class="metric-value" id="statRequests">0</div>
+          <div class="status-pills" id="statStatusPills"></div>
+        </div>
+        <div class="metric-card">
+          <div class="metric-label">Token Traffic</div>
+          <div class="metric-value" id="statTokens">0 / 0</div>
+          <div class="metric-sub">Input / Output</div>
+        </div>
+        <div class="metric-card">
+          <div class="metric-label">Prompt Cache</div>
+          <div class="metric-value" id="statCacheHitRatio">N/A</div>
+          <div class="metric-sub" id="statCacheTokens">Read: 0 | Write: 0</div>
+        </div>
+        <div class="metric-card">
+          <div class="metric-label">Wire Bytes</div>
+          <div class="metric-value" id="statWireBytes">0 B</div>
+          <div class="metric-sub" id="statWireSub">In: 0 B | Out: 0 B</div>
+        </div>
+      </div>
+
+      <div id="finopsNote" class="info-note" style="display:none"></div>
+
+      <div class="subhead">Plugin activity</div>
+      <div class="table-container">
+        <table>
+          <thead>
+            <tr><th>Plugin</th><th>Compactions</th><th>Bytes saved</th></tr>
+          </thead>
+          <tbody id="pluginStatsTableBody">
+            <tr><td colspan="3" class="empty-state">No plugin activity recorded yet.</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- View: Live Feed -->
+    <section id="view-feed" class="view">
+      <div class="section-header">
+        <h2 class="section-title">Live Request Stream</h2>
+        <span id="eventCount" style="font-size:0.75rem; color:var(--text-muted)">0 events</span>
+      </div>
+      <div class="table-container">
+        <table>
+          <thead>
+            <tr>
+              <th>Time</th><th>Provider</th><th>Model</th><th>Status</th>
+              <th>Latency</th><th>Tokens (In/Out)</th><th>Cache (R/W)</th><th>Verdict</th>
+            </tr>
+          </thead>
+          <tbody id="feedTableBody">
+            <tr><td colspan="8" class="empty-state">Waiting for request events&hellip;</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- View: Settings -->
+    <section id="view-settings" class="view">
+      <div class="section-header">
+        <div>
+          <h2 class="section-title">Settings</h2>
+          <div class="section-desc">Server configuration &mdash; persisted to config.json.</div>
+        </div>
+        <button class="btn btn-ghost" onclick="loadSettings()">↻ Reload</button>
+      </div>
+
+      <div class="card form-section">
+        <div class="subhead" style="margin-top:0">Providers</div>
+        <div class="table-container" style="border:none; background:none;">
+          <table class="providers-table">
+            <thead>
+              <tr><th>Name</th><th>Upstream URL</th><th>Format</th><th>API key</th><th>API key env</th><th>Fallback</th><th></th></tr>
+            </thead>
+            <tbody id="providersBody"></tbody>
+          </table>
+        </div>
+        <button class="btn btn-sm" style="margin-top:0.5rem" onclick="addProviderRow()">+ Add provider</button>
+      </div>
+
+      <div class="card form-section">
+        <div class="subhead" style="margin-top:0">Offload (cheap-model summarization)</div>
+        <div class="checkbox-row" style="margin-bottom:0.9rem">
+          <input type="checkbox" id="offEnabled"><label for="offEnabled">Enabled</label>
+        </div>
+        <div class="form-grid">
+          <div class="field">
+            <label>Provider</label>
+            <select class="input" id="offProvider"></select>
+            <span class="hint">Must be an <code>openai</code>-format provider.</span>
+          </div>
+          <div class="field"><label>Model</label><input class="input" id="offModel" placeholder="deepseek-v4-flash"></div>
+          <div class="field">
+            <label>API key <span class="hint">(encrypted)</span></label>
+            <div class="secret-field">
+              <input type="password" class="input" id="offKeyEnc" data-set="" data-clear="" oninput="onSecretInput(this)">
+              <button type="button" class="btn btn-sm btn-secret-clear" onclick="toggleSecretClear(this)" title="Clear secret">Clear</button>
+            </div>
+          </div>
+          <div class="field"><label>API key env <span class="hint">(optional)</span></label><input class="input" id="offKey" placeholder="OFFLOAD_API_KEY"></div>
+        </div>
+      </div>
+
+      <div class="card form-section">
+        <div class="subhead" style="margin-top:0">Limits &amp; access</div>
+        <div class="form-grid">
+          <div class="field"><label>Concurrency</label><input class="input" id="limConc" type="number" min="0"></div>
+          <div class="field"><label>Requests / min</label><input class="input" id="limRpm" type="number" min="0"></div>
+          <div class="field">
+            <label>Listen port</label><input class="input" id="cfgPort" type="number" min="1">
+            <span class="hint">Applied live &mdash; no restart</span>
+          </div>
+        </div>
+        <div class="form-grid" style="margin-top:0.9rem">
+          <div class="field">
+            <div class="checkbox-row"><input type="checkbox" id="cpAllowRemote"><label for="cpAllowRemote">Allow remote control-plane access</label></div>
+            <span class="hint">Off = loopback only (recommended).</span>
+          </div>
+          <div class="field">
+            <label>Control-plane token</label><input class="input" id="cpToken" type="password" placeholder="unchanged">
+            <span class="hint">Only used when remote access is allowed. Leave blank to keep current.</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="card form-section">
+        <div class="subhead" style="margin-top:0">Cache</div>
+        <div class="form-grid">
+          <div class="field">
+            <label>Backend</label>
+            <select class="input" id="cacheBackend">
+              <option value="memory">Memory</option>
+              <option value="redis">Redis</option>
+            </select>
+          </div>
+          <div class="field">
+            <label>TTL seconds</label>
+            <input class="input" id="cacheTtl" type="number" min="0" placeholder="900">
+          </div>
+        </div>
+        <div class="subhead">Redis configuration</div>
+        <div class="form-grid">
+          <div class="field">
+            <label>Address</label>
+            <input class="input" id="cacheRedisAddr" placeholder="127.0.0.1:6379">
+          </div>
+          <div class="field">
+            <label>Password <span class="hint">(encrypted)</span></label>
+            <div class="secret-field">
+              <input type="password" class="input" id="cacheRedisPasswordEnc" data-set="" data-clear="" oninput="onSecretInput(this)">
+              <button type="button" class="btn btn-sm btn-secret-clear" onclick="toggleSecretClear(this)" title="Clear secret">Clear</button>
+            </div>
+          </div>
+          <div class="field">
+            <label>Password env <span class="hint">(optional)</span></label>
+            <input class="input" id="cacheRedisPasswordEnv" placeholder="REDIS_PASSWORD">
+          </div>
+          <div class="field">
+            <label>DB</label>
+            <input class="input" id="cacheRedisDb" type="number" min="0" placeholder="0">
+          </div>
+          <div class="field">
+            <label>Prefix</label>
+            <input class="input" id="cacheRedisPrefix" placeholder="torana:">
+          </div>
+        </div>
+      </div>
+
+      <div class="card form-section">
+        <div class="subhead" style="margin-top:0">MITM Ingress</div>
+        <div class="checkbox-row" style="margin-bottom:0.9rem">
+          <input type="checkbox" id="mitmEnabled"><label for="mitmEnabled">Enabled</label>
+        </div>
+        <div class="form-grid">
+          <div class="field">
+            <label>Listen</label>
+            <input class="input" id="mitmListen" placeholder="127.0.0.1:8099">
+          </div>
+          <div class="field">
+            <label>CA dir</label>
+            <input class="input" id="mitmCaDir" placeholder="~/.torana/mitm-ca">
+          </div>
+        </div>
+        <span class="hint" style="display:block; margin-top:0.4rem; margin-bottom:0.9rem;">Enabling MITM requires Listen + CA dir.</span>
+        <div class="field">
+          <label style="margin-bottom:0.25rem;">Hosts mapping <span class="hint">(hostname &rarr; provider name)</span></label>
+          <div class="table-container" style="border:none; background:none;">
+            <table class="providers-table" style="max-width:600px;">
+              <thead>
+                <tr><th>Hostname</th><th>Provider</th><th></th></tr>
+              </thead>
+              <tbody id="mitmHostsBody"></tbody>
+            </table>
+          </div>
+          <button type="button" class="btn btn-sm" style="margin-top:0.4rem; align-self:flex-start;" onclick="addMitmHostRow()">＋ Add host</button>
+        </div>
+      </div>
+
+      <button class="btn btn-primary" onclick="saveSettings()">Save settings</button>
+    </section>
+  </main>
+
+  <script>
+    // ---- State ----
+    let allPlugins = [];        // from GET /_torana/api/plugins
+    let pluginByName = {};       // name -> info
+    let pipelineOrder = [];      // enabled plugin names, in order
+    let configMap = {};          // name -> config object
+    let pipelineDirty = false;
+    let settingsCfg = null;      // full provider.Config from GET /_torana/api/config
+    let feedEvents = [];
+    let seenEventKeys = new Set();
+    let eventSource = null;
+    let statsInterval = null;
+    let dragSrc = null;
+
+    document.addEventListener('DOMContentLoaded', () => {
+      initSSE();
+      loadPlugins();
+      fetchStats();
+      statsInterval = setInterval(() => { if (activeView() === 'traffic') fetchStats(); }, 5000);
+      window.addEventListener('hashchange', route);
+      route();
+    });
+
+    // ---- Routing (hash-based) ----
+    function activeView() {
+      const h = (location.hash || '#pipeline').slice(1);
+      return h.split('/')[0] || 'pipeline';
+    }
+    function go(view, arg) {
+      location.hash = arg ? `#${view}/${encodeURIComponent(arg)}` : `#${view}`;
+    }
+    function route() {
+      const h = (location.hash || '#pipeline').slice(1);
+      const [view, arg] = h.split('/');
+      const v = view || 'pipeline';
+      document.querySelectorAll('.view').forEach(s => s.classList.remove('active'));
+      document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active'));
+
+      if (v === 'plugin' && arg) {
+        document.getElementById('view-plugin').classList.add('active');
+        document.querySelector('.nav-btn[data-view="pipeline"]').classList.add('active');
+        renderPluginDetail(decodeURIComponent(arg));
+        return;
+      }
+      const known = ['pipeline','traffic','feed','settings'];
+      const target = known.includes(v) ? v : 'pipeline';
+      document.getElementById(`view-${target}`).classList.add('active');
+      const navBtn = document.querySelector(`.nav-btn[data-view="${target}"]`);
+      if (navBtn) navBtn.classList.add('active');
+      if (target === 'traffic') fetchStats();
+      if (target === 'settings') loadSettings();
+      if (target === 'pipeline') renderPipeline();
+    }
+
+    // ---- Status & alerts ----
+    function setConnectionStatus(connected, message) {
+      const el = document.getElementById('connectionStatus');
+      const text = document.getElementById('statusText');
+      if (connected) { el.className = 'status-badge'; text.textContent = 'Connected'; }
+      else { el.className = 'status-badge disconnected'; text.textContent = message || 'Disconnected'; }
+    }
+    function showAlert(msg, isError = true) {
+      const box = document.getElementById('alertBox');
+      box.className = `alert show ${isError ? 'alert-error' : 'alert-success'}`;
+      box.textContent = msg;
+      setTimeout(() => { box.className = 'alert'; }, 6000);
+    }
+
+    // ---- Plugins / pipeline ----
+    function loadPlugins() {
+      fetch('/_torana/api/plugins')
+        .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
+        .then(data => {
+          allPlugins = (data.plugins || []);
+          pluginByName = {};
+          configMap = {};
+          for (const p of allPlugins) {
+            pluginByName[p.name] = p;
+            configMap[p.name] = p.config && Object.keys(p.config).length ? p.config : (p.config || {});
+          }
+          pipelineOrder = allPlugins.filter(p => p.enabled)
+            .sort((a, b) => a.order - b.order).map(p => p.name);
+          pipelineDirty = false;
+          setDirty(false);
+          renderPipeline();
+          // If we're on a detail page, refresh it too.
+          if (activeView() === 'plugin') route();
+        })
+        .catch(err => showAlert(`Failed to load plugins: ${err.message}`));
+    }
+
+    function setDirty(v) {
+      pipelineDirty = v;
+      document.getElementById('dirtyBar').classList.toggle('show', v);
+    }
+
+    function renderPipeline() {
+      const cont = document.getElementById('pipelineContainer');
+      if (pipelineOrder.length === 0) {
+        cont.innerHTML = '<div class="empty-state">No plugins enabled. Enable one below.</div>';
+      } else {
+        cont.innerHTML = pipelineOrder.map((name, i) => {
+          const p = pluginByName[name] || { name, hooks: [], permissions: [] };
+          const chips = [];
+          if (p.serves_http) chips.push('<span class="chip serve">serves UI</span>');
+          if (configMap[name] && Object.keys(configMap[name]).length) chips.push('<span class="chip cfg">configured</span>');
+          if (p.hooks && p.hooks.length) chips.push(`<span class="chip hook">${p.hooks.length} hook${p.hooks.length === 1 ? '' : 's'}</span>`);
+          if (!pluginByName[name]) chips.push('<span class="chip perm">missing on disk</span>');
+          return `<div class="plugin-card" draggable="true" data-name="${escAttr(name)}" data-index="${i}">
+            <span class="drag-handle" title="Drag to reorder">⠿</span>
+            <span class="order-num">${i + 1}</span>
+            <div class="plugin-main" onclick="go('plugin','${escAttr(name)}')">
+              <div class="plugin-name-row">
+                <span class="plugin-name">${escHtml(name)}</span>
+                ${chips.join('')}
+              </div>
+              ${p.description ? `<div class="plugin-desc">${escHtml(p.description)}</div>` : ''}
+            </div>
+            <div class="plugin-card-actions">
+              <button class="btn btn-sm" onclick="event.stopPropagation(); go('plugin','${escAttr(name)}')">Configure</button>
+              <button class="btn btn-sm btn-danger" onclick="event.stopPropagation(); disablePlugin('${escAttr(name)}')">Disable</button>
+            </div>
+          </div>`;
+        }).join('');
+        attachDnD();
+      }
+
+      const avail = allPlugins.filter(p => !pipelineOrder.includes(p.name));
+      const ac = document.getElementById('availableContainer');
+      if (avail.length === 0) {
+        ac.innerHTML = '<div class="empty-state">All discovered plugins are enabled.</div>';
+      } else {
+        ac.innerHTML = avail.map(p => {
+          const chips = [];
+          if (p.serves_http) chips.push('<span class="chip serve">serves UI</span>');
+          if (p.hooks && p.hooks.length) chips.push(`<span class="chip hook">${p.hooks.length} hook${p.hooks.length === 1 ? '' : 's'}</span>`);
+          return `<div class="available-row">
+            <div class="plugin-main">
+              <div class="plugin-name-row"><span class="plugin-name">${escHtml(p.name)}</span>${chips.join('')}</div>
+              ${p.description ? `<div class="plugin-desc">${escHtml(p.description)}</div>` : ''}
+            </div>
+            <button class="btn btn-sm btn-green" onclick="enablePlugin('${escAttr(p.name)}')">Enable</button>
+          </div>`;
+        }).join('');
+      }
+    }
+
+    function attachDnD() {
+      document.querySelectorAll('#pipelineContainer .plugin-card').forEach(card => {
+        card.addEventListener('dragstart', e => {
+          dragSrc = parseInt(card.dataset.index, 10);
+          card.classList.add('dragging');
+          e.dataTransfer.effectAllowed = 'move';
+        });
+        card.addEventListener('dragend', () => {
+          card.classList.remove('dragging');
+          document.querySelectorAll('.plugin-card').forEach(c => c.classList.remove('drop-target'));
+        });
+        card.addEventListener('dragover', e => { e.preventDefault(); card.classList.add('drop-target'); });
+        card.addEventListener('dragleave', () => card.classList.remove('drop-target'));
+        card.addEventListener('drop', e => {
+          e.preventDefault();
+          const target = parseInt(card.dataset.index, 10);
+          if (dragSrc === null || dragSrc === target) return;
+          const moved = pipelineOrder.splice(dragSrc, 1)[0];
+          pipelineOrder.splice(target, 0, moved);
+          dragSrc = null;
+          setDirty(true);
+          renderPipeline();
+        });
+      });
+    }
+
+    function enablePlugin(name) {
+      if (!pipelineOrder.includes(name)) pipelineOrder.push(name);
+      if (!configMap[name]) configMap[name] = {};
+      setDirty(true);
+      renderPipeline();
+    }
+    function disablePlugin(name) {
+      pipelineOrder = pipelineOrder.filter(n => n !== name);
+      setDirty(true);
+      renderPipeline();
+    }
+
+    function savePipeline() {
+      const cfgOut = {};
+      for (const name of pipelineOrder) cfgOut[name] = configMap[name] || {};
+      fetch('/_torana/api/plugins', {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ order: pipelineOrder, config: cfgOut })
+      })
+      .then(async r => { const t = await r.text(); if (!r.ok) throw new Error(t || `HTTP ${r.status}`); return t; })
+      .then(() => { showAlert('Pipeline saved and applied.', false); loadPlugins(); })
+      .catch(err => showAlert(`Failed to save pipeline: ${err.message}`));
+    }
+
+    // ---- Plugin detail ----
+    function renderPluginDetail(name) {
+      const cont = document.getElementById('pluginDetail');
+      const p = pluginByName[name];
+      if (!p) {
+        cont.innerHTML = `<div class="empty-state">Plugin "${escHtml(name)}" not found. It may not be on disk.</div>`;
+        return;
+      }
+      const enabled = pipelineOrder.includes(name);
+      const hookChips = (p.hooks || []).map(h => `<span class="chip hook">${escHtml(h)}</span>`).join('');
+      const permChips = (p.permissions || []).map(pm => `<span class="chip perm">${escHtml(pm)}</span>`).join('');
+      const cfgStr = JSON.stringify(configMap[name] || {}, null, 2);
+
+      let servedBlock = '';
+      if (p.serves_http) {
+        const url = `/_torana/plugin/${encodeURIComponent(name)}/`;
+        servedBlock = `<div class="subhead">Plugin UI</div>
+          <div class="info-note">This plugin serves its own interface. <a href="${url}" target="_blank" rel="noopener">Open in new tab ↗</a></div>
+          <iframe class="detail-frame" src="${url}" title="${escAttr(name)} UI"></iframe>`;
+      }
+
+      const hasSchemaFields = Boolean(p.schema && p.schema.fields && p.schema.fields.length > 0);
+      let schemaBlock = '';
+
+      if (hasSchemaFields) {
+        const curCfg = configMap[name] || {};
+        const fieldHtml = p.schema.fields.map(field => {
+          const key = field.key;
+          const label = field.label || key;
+          const help = field.help || '';
+          const type = field.type || 'string';
+          const curVal = (curCfg[key] !== undefined) ? curCfg[key] : field.default;
+
+          if (type === 'boolean') {
+            const checked = Boolean(curVal);
+            return `<div class="field" style="grid-column: span 2;">
+              <label class="checkbox-row">
+                <input type="checkbox" data-schema-key="${escAttr(key)}" data-schema-type="boolean" ${checked ? 'checked' : ''}>
+                <span>${escHtml(label)}</span>
+              </label>
+              ${help ? `<div class="hint">${escHtml(help)}</div>` : ''}
+            </div>`;
+          } else if (type === 'number') {
+            const val = (curVal !== undefined && curVal !== null) ? curVal : '';
+            return `<div class="field">
+              <label>${escHtml(label)}</label>
+              <input type="number" class="input" data-schema-key="${escAttr(key)}" data-schema-type="number" value="${escAttr(val)}">
+              ${help ? `<div class="hint">${escHtml(help)}</div>` : ''}
+            </div>`;
+          } else if (type === 'enum') {
+            const val = (curVal !== undefined && curVal !== null) ? String(curVal) : '';
+            const opts = field.options || [];
+            const optHtml = opts.map(opt => `<option value="${escAttr(opt)}" ${String(opt) === String(val) ? 'selected' : ''}>${escHtml(opt)}</option>`).join('');
+            return `<div class="field">
+              <label>${escHtml(label)}</label>
+              <select class="input" data-schema-key="${escAttr(key)}" data-schema-type="enum">
+                ${optHtml}
+              </select>
+              ${help ? `<div class="hint">${escHtml(help)}</div>` : ''}
+            </div>`;
+          } else {
+            // string
+            const val = (curVal !== undefined && curVal !== null) ? String(curVal) : '';
+            return `<div class="field">
+              <label>${escHtml(label)}</label>
+              <input type="text" class="input" data-schema-key="${escAttr(key)}" data-schema-type="string" value="${escAttr(val)}">
+              ${help ? `<div class="hint">${escHtml(help)}</div>` : ''}
+            </div>`;
+          }
+        }).join('');
+
+        schemaBlock = `
+          <div class="subhead">Configuration</div>
+          <div id="schemaFormContainer" class="form-grid" style="margin-bottom:1rem;">
+            ${fieldHtml}
+          </div>
+          <div style="margin-bottom:1.25rem;">
+            <button class="btn btn-primary" onclick="saveSchemaConfig('${escAttr(name)}')">Save config</button>
+          </div>
+        `;
+      }
+
+      const rawOpen = !hasSchemaFields && !p.serves_http;
+
+      cont.innerHTML = `
+        <div class="detail-head">
+          <span class="detail-title">${escHtml(name)}</span>
+          ${p.version ? `<span class="chip">v${escHtml(p.version)}</span>` : ''}
+          <span class="chip ${enabled ? 'serve' : ''}">${enabled ? 'enabled' : 'disabled'}</span>
+        </div>
+        ${p.description ? `<div class="section-desc">${escHtml(p.description)}</div>` : ''}
+        <div class="detail-meta-grid">${hookChips}${permChips || '<span class="chip">no permissions</span>'}</div>
+
+        <div style="display:flex; gap:0.5rem; margin-bottom:1.25rem;">
+          ${enabled
+            ? `<button class="btn btn-sm btn-danger" onclick="disablePlugin('${escAttr(name)}'); go('pipeline')">Disable &amp; return</button>`
+            : `<button class="btn btn-sm btn-green" onclick="enablePlugin('${escAttr(name)}'); go('pipeline')">Enable &amp; return</button>`}
+        </div>
+
+        ${servedBlock}
+        ${schemaBlock}
+
+        <details ${rawOpen ? 'open' : ''} style="margin-top:1.25rem;">
+          <summary style="cursor:pointer; font-weight:600; font-size:0.85rem; color:var(--text-muted); margin-bottom:0.75rem;">Advanced (raw JSON)</summary>
+          <div class="section-desc" style="margin-bottom:0.6rem">Raw config passed to the plugin. Saved &amp; applied immediately.</div>
+          <textarea class="code-editor" id="detailConfig">${escHtml(cfgStr)}</textarea>
+          <div style="margin-top:0.75rem; display:flex; gap:0.5rem;">
+            <button class="btn ${hasSchemaFields ? 'btn' : 'btn-primary'}" onclick="savePluginConfig('${escAttr(name)}')">Save raw JSON</button>
+          </div>
+        </details>
+      `;
+    }
+
+    function saveSchemaConfig(name) {
+      const cfg = { ...(configMap[name] || {}) };
+      const fields = document.querySelectorAll('#schemaFormContainer [data-schema-key]');
+      fields.forEach(el => {
+        const k = el.dataset.schemaKey;
+        const t = el.dataset.schemaType;
+        if (t === 'boolean') {
+          cfg[k] = el.checked;
+        } else if (t === 'number') {
+          const val = el.value.trim();
+          cfg[k] = val === '' ? 0 : Number(val);
+        } else {
+          cfg[k] = el.value;
+        }
+      });
+      fetch(`/_torana/api/plugins/${encodeURIComponent(name)}/config`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(cfg)
+      })
+      .then(async r => { const t = await r.text(); if (!r.ok) throw new Error(t || `HTTP ${r.status}`); return t; })
+      .then(() => { showAlert('Plugin config saved and applied.', false); loadPlugins(); })
+      .catch(err => showAlert(`Failed to save config: ${err.message}`));
+    }
+
+    function savePluginConfig(name) {
+      const area = document.getElementById('detailConfig');
+      let parsed;
+      try { parsed = JSON.parse(area.value.trim() || '{}'); }
+      catch (e) { showAlert(`Invalid JSON: ${e.message}`); area.focus(); return; }
+      fetch(`/_torana/api/plugins/${encodeURIComponent(name)}/config`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(parsed)
+      })
+      .then(async r => { const t = await r.text(); if (!r.ok) throw new Error(t || `HTTP ${r.status}`); return t; })
+      .then(() => { showAlert('Plugin config saved and applied.', false); loadPlugins(); })
+      .catch(err => showAlert(`Failed to save config: ${err.message}`));
+    }
+
+    // ---- Traffic / stats ----
+    function fetchStats() {
+      fetch('/stats').then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
+        .then(renderStats).catch(err => console.error('stats:', err));
+    }
+    function renderStats(data) {
+      document.getElementById('statRequests').textContent = (data.total_requests || 0).toLocaleString();
+      // status distribution from the live feed (client-side)
+      let s2 = 0, s4 = 0, s5 = 0;
+      for (const ev of feedEvents) {
+        if (ev.status >= 500) s5++; else if (ev.status >= 400) s4++; else if (ev.status < 300) s2++;
+      }
+      document.getElementById('statStatusPills').innerHTML =
+        `<span class="status-pill badge-2xx">${s2} ok</span>` +
+        `<span class="status-pill badge-4xx">${s4} 4xx</span>` +
+        `<span class="status-pill badge-5xx">${s5} 5xx</span>`;
+
+      document.getElementById('statTokens').textContent =
+        `${(data.total_tokens_in || 0).toLocaleString()} / ${(data.total_tokens_out || 0).toLocaleString()}`;
+
+      const rc = data.total_cache_read_tokens || 0, wc = data.total_cache_write_tokens || 0;
+      document.getElementById('statCacheTokens').textContent = `Read: ${rc.toLocaleString()} | Write: ${wc.toLocaleString()}`;
+      const denom = rc + (data.total_tokens_in || 0);
+      document.getElementById('statCacheHitRatio').textContent = denom > 0 ? `${((rc / denom) * 100).toFixed(1)}%` : 'N/A';
+
+      const bi = data.total_bytes_in || 0, bo = data.total_bytes_out || 0;
+      document.getElementById('statWireBytes').textContent = formatBytes(bi + bo);
+      document.getElementById('statWireSub').textContent = `In: ${formatBytes(bi)} | Out: ${formatBytes(bo)}`;
+
+      // FinOps-is-a-plugin note: link any serving plugin.
+      const serving = allPlugins.filter(p => p.serves_http && pipelineOrder.includes(p.name));
+      const note = document.getElementById('finopsNote');
+      if (serving.length) {
+        note.style.display = 'block';
+        note.innerHTML = 'Detailed cost dashboards are served by plugins: ' +
+          serving.map(p => `<a href="/_torana/plugin/${encodeURIComponent(p.name)}/" target="_blank" rel="noopener">${escHtml(p.name)} ↗</a>`).join(' · ');
+      } else {
+        note.style.display = 'none';
+      }
+
+      const tbody = document.getElementById('pluginStatsTableBody');
+      const per = data.per_plugin || {};
+      const names = Object.keys(per);
+      tbody.innerHTML = names.length === 0
+        ? '<tr><td colspan="3" class="empty-state">No plugin activity recorded yet.</td></tr>'
+        : names.map(n => `<tr>
+            <td><strong style="color:var(--accent-blue)">${escHtml(n)}</strong></td>
+            <td>${(per[n].compactions || 0).toLocaleString()}</td>
+            <td>${formatBytes(per[n].bytes_saved || 0)}</td>
+          </tr>`).join('');
+    }
+
+    // ---- Live feed (SSE) ----
+    function initSSE() {
+      if (eventSource) eventSource.close();
+      try {
+        eventSource = new EventSource('/_torana/api/stream');
+        eventSource.onopen = () => setConnectionStatus(true);
+        eventSource.onmessage = e => { try { addFeedEvent(JSON.parse(e.data)); } catch (_) {} };
+        eventSource.onerror = () => setConnectionStatus(false, 'Reconnecting…');
+      } catch (_) { setConnectionStatus(false, 'Connection error'); }
+    }
+    function addFeedEvent(ev) {
+      const key = `${ev.timestamp}_${ev.provider}_${ev.model}_${ev.status}_${ev.latency_ms}`;
+      if (seenEventKeys.has(key)) return;
+      seenEventKeys.add(key);
+      if (seenEventKeys.size > 500) seenEventKeys.delete(seenEventKeys.values().next().value);
+      feedEvents.unshift(ev);
+      if (feedEvents.length > 200) feedEvents.pop();
+      renderFeedTable();
+    }
+    function renderFeedTable() {
+      const tbody = document.getElementById('feedTableBody');
+      document.getElementById('eventCount').textContent = `${feedEvents.length} event${feedEvents.length === 1 ? '' : 's'}`;
+      if (feedEvents.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="8" class="empty-state">Waiting for request events…</td></tr>';
+        return;
+      }
+      tbody.innerHTML = feedEvents.map(ev => {
+        const sc = ev.status >= 500 ? 'badge-5xx' : ev.status >= 400 ? 'badge-4xx' : ev.status >= 300 ? 'badge-3xx' : 'badge-2xx';
+        const t = ev.timestamp ? ev.timestamp.replace('T', ' ').replace('Z', '').slice(0, 23) : '-';
+        const lat = typeof ev.latency_ms === 'number' ? `${ev.latency_ms.toFixed(1)} ms` : '-';
+        let vc = 'badge-verdict'; if (ev.verdict) vc += ` ${ev.verdict}`;
+        const vb = ev.verdict ? `<span class="badge ${vc}">${escHtml(ev.verdict)}</span>` : '<span style="color:var(--text-faint)">-</span>';
+        return `<tr>
+          <td style="font-family:monospace; font-size:0.78rem">${escHtml(t)}</td>
+          <td><strong>${escHtml(ev.provider || '-')}</strong></td>
+          <td>${escHtml(ev.model || '-')}</td>
+          <td><span class="badge ${sc}">${ev.status || 0}</span></td>
+          <td>${lat}</td>
+          <td>${(ev.tokens_in || 0).toLocaleString()} / ${(ev.tokens_out || 0).toLocaleString()}</td>
+          <td>${(ev.cache_read_tokens || 0).toLocaleString()} / ${(ev.cache_write_tokens || 0).toLocaleString()}</td>
+          <td>${vb}</td>
+        </tr>`;
+      }).join('');
+    }
+
+    // ---- Settings ----
+    const PROVIDER_FORMATS = ['openai', 'anthropic', 'bedrock', 'gemini', 'gemini-codeassist'];
+    function setupSecretInput(el, secretVal) {
+      if (!el) return;
+      const isSet = secretVal === '__set__';
+      el.setAttribute('data-set', isSet ? '1' : '');
+      el.setAttribute('data-clear', '');
+      el.value = '';
+      updateSecretInputUI(el);
+    }
+    function updateSecretInputUI(input) {
+      if (!input) return;
+      const container = input.parentElement;
+      const btn = container ? container.querySelector('.btn-secret-clear') : null;
+      const isClear = input.getAttribute('data-clear') === '1';
+      const isSet = input.getAttribute('data-set') === '1';
+
+      if (isClear) {
+        input.placeholder = 'will be removed';
+        if (btn) {
+          btn.textContent = 'Undo';
+          btn.classList.add('btn-danger');
+        }
+      } else if (isSet) {
+        input.placeholder = '•••••••• set — type to replace';
+        if (btn) {
+          btn.textContent = 'Clear';
+          btn.classList.remove('btn-danger');
+        }
+      } else {
+        input.placeholder = 'sk-… (stored encrypted)';
+        if (btn) {
+          btn.textContent = 'Clear';
+          btn.classList.remove('btn-danger');
+        }
+      }
+    }
+    function onSecretInput(el) {
+      if (el.value !== '' && el.getAttribute('data-clear') === '1') {
+        el.setAttribute('data-clear', '');
+      }
+      updateSecretInputUI(el);
+    }
+    function toggleSecretClear(btn) {
+      const container = btn.parentElement;
+      if (!container) return;
+      const input = container.querySelector('.input');
+      if (!input) return;
+      const curClear = input.getAttribute('data-clear') === '1';
+      if (!curClear) {
+        input.setAttribute('data-clear', '1');
+        input.value = '';
+      } else {
+        input.setAttribute('data-clear', '');
+      }
+      updateSecretInputUI(input);
+    }
+    function getSecretFieldValue(inputEl) {
+      if (!inputEl) return undefined;
+      const val = inputEl.value.trim();
+      if (val !== '') return val;
+      if (inputEl.getAttribute('data-clear') === '1') return '';
+      if (inputEl.getAttribute('data-set') === '1') return '__set__';
+      return undefined;
+    }
+    function loadSettings() {
+      fetch('/_torana/api/config').then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
+        .then(cfg => { settingsCfg = cfg; renderSettings(cfg); })
+        .catch(err => showAlert(`Failed to load settings: ${err.message}`));
+    }
+    function renderSettings(cfg) {
+      const providers = cfg.providers || {};
+      const body = document.getElementById('providersBody');
+      body.innerHTML = '';
+      Object.keys(providers).forEach(name => addProviderRow(name, providers[name]));
+      if (Object.keys(providers).length === 0) addProviderRow();
+
+      refreshOffloadProviderOptions();
+      const off = cfg.offload || {};
+      document.getElementById('offEnabled').checked = !!off.enabled;
+      document.getElementById('offProvider').value = off.provider || '';
+      document.getElementById('offModel').value = off.model || '';
+      document.getElementById('offKey').value = off.api_key_env || '';
+      setupSecretInput(document.getElementById('offKeyEnc'), off.api_key_enc);
+
+      const lim = cfg.limits || {};
+      document.getElementById('limConc').value = lim.concurrency || 0;
+      document.getElementById('limRpm').value = lim.rpm || 0;
+      document.getElementById('cfgPort').value = cfg.port || 8080;
+
+      const cp = cfg.control_plane || {};
+      document.getElementById('cpAllowRemote').checked = !!cp.allow_remote;
+      document.getElementById('cpToken').value = '';
+
+      const cache = cfg.cache || {};
+      const redis = cache.redis || {};
+      document.getElementById('cacheBackend').value = cache.backend === 'redis' ? 'redis' : 'memory';
+      document.getElementById('cacheTtl').value = cache.ttl_seconds !== undefined && cache.ttl_seconds !== null ? cache.ttl_seconds : '';
+      document.getElementById('cacheRedisAddr').value = redis.addr || '';
+      setupSecretInput(document.getElementById('cacheRedisPasswordEnc'), redis.password_enc);
+      document.getElementById('cacheRedisPasswordEnv').value = redis.password_env || '';
+      document.getElementById('cacheRedisDb').value = redis.db !== undefined && redis.db !== null ? redis.db : '';
+      document.getElementById('cacheRedisPrefix').value = redis.prefix || '';
+
+      const mitm = cfg.mitm || {};
+      document.getElementById('mitmEnabled').checked = !!mitm.enabled;
+      document.getElementById('mitmListen').value = mitm.listen || '';
+      document.getElementById('mitmCaDir').value = mitm.ca_dir || '';
+      const mitmHostsBody = document.getElementById('mitmHostsBody');
+      mitmHostsBody.innerHTML = '';
+      const hosts = mitm.hosts || {};
+      Object.keys(hosts).forEach(h => addMitmHostRow(h, hosts[h]));
+    }
+    function addMitmHostRow(host, provider) {
+      host = host || '';
+      provider = provider || '';
+      const body = document.getElementById('mitmHostsBody');
+      const tr = document.createElement('tr');
+      tr.innerHTML = `
+        <td><input class="input m-host" value="${escAttr(host)}" placeholder="cloudcode-pa.googleapis.com"></td>
+        <td><input class="input m-provider" value="${escAttr(provider)}" placeholder="antigravity"></td>
+        <td><button type="button" class="btn btn-sm btn-danger" onclick="this.closest('tr').remove()">✕</button></td>`;
+      body.appendChild(tr);
+    }
+    function addProviderRow(name, prov) {
+      prov = prov || {};
+      const body = document.getElementById('providersBody');
+      const tr = document.createElement('tr');
+      const opts = PROVIDER_FORMATS.map(f => `<option value="${f}" ${prov.format === f ? 'selected' : ''}>${f}</option>`).join('');
+      tr.innerHTML = `
+        <td><input class="input p-name" value="${escAttr(name || '')}" placeholder="name" oninput="refreshOffloadProviderOptions()"></td>
+        <td><input class="input p-url" value="${escAttr(prov.url || '')}" placeholder="https://…"></td>
+        <td><select class="input p-format">${opts}</select></td>
+        <td>
+          <div class="secret-field">
+            <input type="password" class="input p-keyenc" data-set="" data-clear="" oninput="onSecretInput(this)">
+            <button type="button" class="btn btn-sm btn-secret-clear" onclick="toggleSecretClear(this)" title="Clear secret">Clear</button>
+          </div>
+        </td>
+        <td><input class="input p-key" value="${escAttr(prov.api_key_env || '')}" placeholder="ENV_VAR"></td>
+        <td><input class="input p-fallback" value="${escAttr((prov.fallback || []).join(', '))}" placeholder="name, name"></td>
+        <td><button class="btn btn-sm btn-danger" onclick="this.closest('tr').remove(); refreshOffloadProviderOptions()">✕</button></td>`;
+      body.appendChild(tr);
+      setupSecretInput(tr.querySelector('.p-keyenc'), prov.api_key_enc);
+    }
+    function refreshOffloadProviderOptions() {
+      const sel = document.getElementById('offProvider');
+      const cur = sel.value;
+      const names = Array.from(document.querySelectorAll('#providersBody .p-name'))
+        .map(i => i.value.trim()).filter(Boolean);
+      sel.innerHTML = '<option value=""></option>' + names.map(n => `<option value="${escAttr(n)}">${escHtml(n)}</option>`).join('');
+      if (names.includes(cur)) sel.value = cur;
+    }
+    function saveSettings() {
+      const cfg = settingsCfg ? JSON.parse(JSON.stringify(settingsCfg)) : {};
+      const providers = {};
+      document.querySelectorAll('#providersBody tr').forEach(tr => {
+        const name = tr.querySelector('.p-name').value.trim();
+        if (!name) return;
+        const prov = {
+          url: tr.querySelector('.p-url').value.trim(),
+          format: tr.querySelector('.p-format').value
+        };
+        const secretVal = getSecretFieldValue(tr.querySelector('.p-keyenc'));
+        if (secretVal !== undefined) prov.api_key_enc = secretVal;
+        const key = tr.querySelector('.p-key').value.trim();
+        if (key) prov.api_key_env = key;
+        const fb = tr.querySelector('.p-fallback').value.trim();
+        if (fb) prov.fallback = fb.split(',').map(s => s.trim()).filter(Boolean);
+        providers[name] = prov;
+      });
+      cfg.providers = providers;
+      cfg.offload = {
+        enabled: document.getElementById('offEnabled').checked,
+        provider: document.getElementById('offProvider').value.trim(),
+        model: document.getElementById('offModel').value.trim()
+      };
+      const offSecretVal = getSecretFieldValue(document.getElementById('offKeyEnc'));
+      if (offSecretVal !== undefined) cfg.offload.api_key_enc = offSecretVal;
+      const offKey = document.getElementById('offKey').value.trim();
+      if (offKey) cfg.offload.api_key_env = offKey;
+      cfg.limits = {
+        concurrency: parseInt(document.getElementById('limConc').value, 10) || 0,
+        rpm: parseInt(document.getElementById('limRpm').value, 10) || 0
+      };
+      const port = parseInt(document.getElementById('cfgPort').value, 10);
+      if (!isNaN(port)) cfg.port = port;
+      cfg.control_plane = cfg.control_plane || {};
+      cfg.control_plane.allow_remote = document.getElementById('cpAllowRemote').checked;
+      const tok = document.getElementById('cpToken').value.trim();
+      if (tok) cfg.control_plane.token = tok; else delete cfg.control_plane.token;
+
+      const cacheBackend = document.getElementById('cacheBackend').value;
+      const cacheTtlVal = document.getElementById('cacheTtl').value.trim();
+      const cacheRedisAddr = document.getElementById('cacheRedisAddr').value.trim();
+      const cacheRedisPasswordEnv = document.getElementById('cacheRedisPasswordEnv').value.trim();
+      const cacheRedisDbVal = document.getElementById('cacheRedisDb').value.trim();
+      const cacheRedisPrefix = document.getElementById('cacheRedisPrefix').value.trim();
+      const cacheRedisSecretVal = getSecretFieldValue(document.getElementById('cacheRedisPasswordEnc'));
+
+      const cacheObj = {};
+      // "memory" is the default (empty backend) — omit it so it never spuriously
+      // differs from a default config and triggers a needless cache rebuild.
+      if (cacheBackend && cacheBackend !== 'memory') cacheObj.backend = cacheBackend;
+      if (cacheTtlVal !== '') {
+        const ttlNum = parseInt(cacheTtlVal, 10);
+        if (!isNaN(ttlNum)) cacheObj.ttl_seconds = ttlNum;
+      }
+      const redisObj = {};
+      if (cacheRedisAddr) redisObj.addr = cacheRedisAddr;
+      if (cacheRedisSecretVal !== undefined) redisObj.password_enc = cacheRedisSecretVal;
+      if (cacheRedisPasswordEnv) redisObj.password_env = cacheRedisPasswordEnv;
+      if (cacheRedisDbVal !== '') {
+        const dbNum = parseInt(cacheRedisDbVal, 10);
+        if (!isNaN(dbNum)) redisObj.db = dbNum;
+      }
+      if (cacheRedisPrefix) redisObj.prefix = cacheRedisPrefix;
+
+      if (Object.keys(redisObj).length > 0) {
+        cacheObj.redis = redisObj;
+      }
+
+      if (Object.keys(cacheObj).length > 0) {
+        cfg.cache = cacheObj;
+      } else {
+        delete cfg.cache;
+      }
+
+      const mitmEnabled = document.getElementById('mitmEnabled').checked;
+      const mitmListen = document.getElementById('mitmListen').value.trim();
+      const mitmCaDir = document.getElementById('mitmCaDir').value.trim();
+      const mitmHosts = {};
+      document.querySelectorAll('#mitmHostsBody tr').forEach(tr => {
+        const h = tr.querySelector('.m-host').value.trim();
+        const p = tr.querySelector('.m-provider').value.trim();
+        if (h && p) mitmHosts[h] = p;
+      });
+
+      const mitmObj = {
+        enabled: mitmEnabled
+      };
+      if (mitmListen) mitmObj.listen = mitmListen;
+      if (mitmCaDir) mitmObj.ca_dir = mitmCaDir;
+      if (Object.keys(mitmHosts).length > 0) mitmObj.hosts = mitmHosts;
+
+      cfg.mitm = mitmObj;
+
+      fetch('/_torana/api/config', {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(cfg)
+      })
+      .then(async r => { const t = await r.text(); if (!r.ok) throw new Error(t || `HTTP ${r.status}`); return t ? JSON.parse(t) : {}; })
+      .then(saved => { settingsCfg = saved; showAlert('Settings saved and applied.', false); })
+      .catch(err => showAlert(`Failed to save settings: ${err.message}`));
+    }
+
+    // ---- Utils ----
+    function formatBytes(b) {
+      if (!b) return '0 B';
+      const k = 1024, sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
+      const i = Math.floor(Math.log(b) / Math.log(k));
+      return parseFloat((b / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+    }
+    function escHtml(s) {
+      if (typeof s !== 'string') return s;
+      return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#039;');
+    }
+    function escAttr(s) { return escHtml(String(s == null ? '' : s)); }
+  </script>
+</body>
+</html>

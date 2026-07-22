@@ -8,7 +8,7 @@ import (
 	"sync"
 	"unsafe"
 
-	"github.com/torana-edge/torana-edge/pkg/pb"
+	"github.com/torana-edge/torana-edge/sdk/pb"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -162,6 +162,41 @@ func run_on_stream_chunk(reqID uint64, ptr, size uint32) uint64 {
 	}
 	return WriteResult(outBytes)
 }
+
+var httpRequestHandler func(ctx context.Context, req *pb.HttpRequest) (*pb.HttpResponse, error)
+
+// OnHTTPRequest registers the handler for the run_on_http_request hook.
+// The plugin serves HTTP under /_torana/plugin/<name>/* when it also declares
+// the env.serve_http permission in its manifest. The returned *pb.HttpResponse
+// MUST have Handled=true for the host to deliver the response to the caller.
+func OnHTTPRequest(handler func(ctx context.Context, req *pb.HttpRequest) (*pb.HttpResponse, error)) {
+	httpRequestHandler = handler
+}
+
+//go:wasmexport run_on_http_request
+func run_on_http_request(reqID uint64, ptr, size uint32) uint64 {
+	if httpRequestHandler == nil {
+		return 0
+	}
+	inputBytes := ReadBytes(ptr, size)
+	var req pb.HttpRequest
+	if err := proto.Unmarshal(inputBytes, &req); err != nil {
+		Log("run_on_http_request unmarshal err: "+err.Error(), LogLevelInfo)
+		return 0
+	}
+
+	out, err := httpRequestHandler(context.WithValue(context.Background(), "reqID", reqID), &req)
+	if err != nil || out == nil || !out.Handled {
+		return 0
+	}
+
+	outBytes, err := proto.Marshal(out)
+	if err != nil || len(outBytes) == 0 {
+		return 0
+	}
+	return WriteResult(outBytes)
+}
+
 
 //go:wasmimport env log
 func hostLog(level int32, ptr uint32, length uint32)

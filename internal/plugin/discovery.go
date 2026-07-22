@@ -15,7 +15,7 @@ import (
 	"github.com/torana-edge/torana-edge/internal/engine"
 	"github.com/torana-edge/torana-edge/internal/engine/pbconv"
 	"github.com/torana-edge/torana-edge/internal/wasm"
-	"github.com/torana-edge/torana-edge/pkg/pb"
+	"github.com/torana-edge/torana-edge/sdk/pb"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -41,6 +41,19 @@ type PluginManifest struct {
 	Permissions []Permission `json:"permissions"`
 }
 
+type ConfigField struct {
+	Key     string   `json:"key"`
+	Type    string   `json:"type"`              // "string" | "number" | "boolean" | "enum"
+	Label   string   `json:"label"`
+	Default any      `json:"default,omitempty"`
+	Options []string `json:"options,omitempty"` // enum only
+	Help    string   `json:"help,omitempty"`
+}
+
+type ConfigSchema struct {
+	Fields []ConfigField `json:"fields"`
+}
+
 // ============================================================================
 // Discovery
 // ============================================================================
@@ -48,6 +61,7 @@ type PluginManifest struct {
 type PluginBundle struct {
 	Manifest  PluginManifest
 	WASMBytes []byte
+	Schema    *ConfigSchema
 }
 
 func DiscoverPlugins(pluginsDir string) ([]PluginBundle, error) {
@@ -92,8 +106,19 @@ func loadBundle(dir string) (*PluginBundle, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read wasm: %w", err)
 	}
+	schemaPath := filepath.Join(dir, "schema.json")
+	var schema *ConfigSchema
+	if sBytes, err := os.ReadFile(schemaPath); err == nil {
+		var s ConfigSchema
+		if err := json.Unmarshal(sBytes, &s); err != nil {
+			return nil, fmt.Errorf("parse schema: %w", err)
+		}
+		schema = &s
+	} else if !os.IsNotExist(err) {
+		return nil, fmt.Errorf("read schema: %w", err)
+	}
 	warnIfStale(dir, wasmPath, manifest.Name)
-	return &PluginBundle{Manifest: manifest, WASMBytes: wBytes}, nil
+	return &PluginBundle{Manifest: manifest, WASMBytes: wBytes, Schema: schema}, nil
 }
 
 // warnIfStale logs a warning when plugin.wasm is older than any Go source
@@ -161,6 +186,31 @@ func reloadPipeline(runtime *wasm.Runtime, config PluginConfig) (*PluginPipeline
 		}
 		sort.Strings(order)
 	}
+	// Enforce ordering constraint: route-capable plugins (env.route_request)
+	// must precede compaction economic-gate plugins (env.host_call.torana_evaluate_compaction).
+	var seenCompactionGate bool
+	for _, name := range order {
+		bundle, ok := byName[name]
+		if !ok {
+			continue
+		}
+		var hasRoute, hasCompactionGate bool
+		for _, p := range bundle.Manifest.Permissions {
+			if p.Name == "env.route_request" {
+				hasRoute = true
+			}
+			if p.Name == "env.host_call.torana_evaluate_compaction" {
+				hasCompactionGate = true
+			}
+		}
+		if hasRoute && seenCompactionGate {
+			return nil, fmt.Errorf("ordering constraint violation: route-capable plugin %q (grant env.route_request) must precede compaction economic-gate plugins (grant env.host_call.torana_evaluate_compaction)", name)
+		}
+		if hasCompactionGate {
+			seenCompactionGate = true
+		}
+	}
+
 	for _, name := range order {
 		bundle, ok := byName[name]
 		if !ok {
@@ -421,6 +471,80 @@ func (pp *PluginPipeline) RunOnStreamChunk(ctx context.Context, reqID uint64, ch
 	return out, nil
 }
 
+// ErrServeHTTPForbidden is returned by RunOnHTTPRequest when the named plugin
+// exists and declares the run_on_http_request hook but does NOT hold the
+// env.serve_http permission. The proxy route handler maps this to 403.
+var ErrServeHTTPForbidden = fmt.Errorf("plugin does not hold env.serve_http permission")
+
+// RunOnHTTPRequest dispatches an HTTP request to a single named plugin's
+// run_on_http_request hook. It is used by the /_torana/plugin/<name>/* proxy
+// route so plugins can serve their own HTTP UI/API namespace.
+//
+// Return values:
+//
+//	(nil, nil)                   — plugin not found, or does not declare
+//	                               run_on_http_request; caller should 404.
+//	(nil, ErrServeHTTPForbidden) — plugin exists and has the hook but lacks
+//	                               the env.serve_http grant; caller → 403.
+//	(*HttpResponse, nil)         — plugin returned a response; caller writes it.
+//	(nil, other error)           — internal dispatch error; caller → 503.
+//
+// httpReq is built directly from net/http — it does not cross the engine IR.
+func (pp *PluginPipeline) RunOnHTTPRequest(ctx context.Context, reqID uint64, pluginName string, httpReq *pb.HttpRequest) (*pb.HttpResponse, error) {
+	pp.Acquire()
+	defer pp.Release()
+
+	// Find the named plugin.
+	var target *loadedPlugin
+	for _, lp := range pp.plugins {
+		if lp.manifest.Name == pluginName {
+			target = lp
+			break
+		}
+	}
+	if target == nil {
+		return nil, nil // not found
+	}
+
+	// Plugin must declare the hook.
+	if !hasHook(target.manifest, "run_on_http_request") {
+		return nil, nil // not serving HTTP
+	}
+
+	// Enforce env.serve_http capability.
+	if !target.plugin.HasGrant("env.serve_http") {
+		return nil, ErrServeHTTPForbidden
+	}
+
+	inBytes, err := proto.Marshal(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("plugin %s: marshal http request: %w", pluginName, err)
+	}
+
+	var outBytes []byte
+	if err := target.plugin.CallRequest(ctx, "run_on_http_request", reqID, inBytes, &outBytes); err != nil {
+		return nil, fmt.Errorf("plugin %s: run_on_http_request: %w", pluginName, err)
+	}
+
+	// Zero-length return → plugin did not handle the request.
+	if len(outBytes) == 0 {
+		return nil, nil
+	}
+
+	var resp pb.HttpResponse
+	if err := proto.Unmarshal(outBytes, &resp); err != nil {
+		return nil, fmt.Errorf("plugin %s: unmarshal http response: %w", pluginName, err)
+	}
+
+	// Explicit handled flag required — see proto comment.
+	if !resp.Handled {
+		return nil, nil
+	}
+
+	return &resp, nil
+}
+
+
 // ============================================================================
 // Plugin config
 // ============================================================================
@@ -534,9 +658,9 @@ func WatchPlugins(ctx context.Context, dir string, configFn func() PluginConfig,
 					}
 				}
 
-				// Only reload on .wasm or plugin.json changes.
+				// Only reload on .wasm, plugin.json, or schema.json changes.
 				name := filepath.Base(event.Name)
-				if name != "plugin.wasm" && name != "plugin.json" {
+				if name != "plugin.wasm" && name != "plugin.json" && name != "schema.json" {
 					continue
 				}
 				// Remove/Rename included: deleting a plugin must unload it.

@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 
 	"github.com/torana-edge/torana-edge/internal/cache"
 )
@@ -22,10 +23,12 @@ type Provider struct {
 	// rerouted provider. Empty means the provider needs no auth (e.g. a
 	// local model server).
 	APIKeyEnv string `json:"api_key_env,omitempty"`
+	APIKeyEnc string `json:"api_key_enc,omitempty"`
 }
 
 // Config is the top-level Torana configuration.
 type Config struct {
+	Managed   bool                `json:"managed,omitempty"`
 	Port      int                 `json:"port"`
 	Providers map[string]Provider `json:"providers"`
 	Plugins   PluginsConfig       `json:"plugins,omitempty"`
@@ -38,6 +41,8 @@ type Config struct {
 	// base URL (e.g. the Antigravity CLI), routing intercepted hosts into the
 	// provider pipeline. Disabled unless configured.
 	MITM MITMConfig `json:"mitm,omitempty"`
+	// ControlPlane configures access control for the /_torana/* endpoints.
+	ControlPlane ControlPlaneConfig `json:"control_plane,omitempty"`
 }
 
 // MITMConfig configures the TLS-terminating ingress. When enabled, agy (or any
@@ -69,6 +74,7 @@ type OffloadConfig struct {
 	// APIKeyEnv names an environment variable holding a dedicated offload
 	// API key. When empty, the caller's request credential is reused.
 	APIKeyEnv string `json:"api_key_env,omitempty"`
+	APIKeyEnc string `json:"api_key_enc,omitempty"`
 }
 
 // Validate checks an enabled offload config against the provider map.
@@ -94,6 +100,14 @@ func (o OffloadConfig) Validate(providers map[string]Provider) error {
 type Limits struct {
 	Concurrency int `json:"concurrency,omitempty"`
 	RPM         int `json:"rpm,omitempty"`
+}
+
+// ControlPlaneConfig configures access control for the /_torana/* endpoints.
+// Default (zero value) is loopback-only with no token. AllowRemote permits
+// non-loopback callers; when Token is set, requests that provide it are allowed.
+type ControlPlaneConfig struct {
+	AllowRemote bool   `json:"allow_remote,omitempty"`
+	Token       string `json:"token,omitempty"`
 }
 
 // PluginsConfig controls WASM plugin loading and execution.
@@ -131,6 +145,7 @@ func DefaultConfig() Config {
 
 // Load reads a JSON config file and merges it over the defaults.
 // If the file doesn't exist, the defaults are returned as-is.
+// If user.Managed is true, default-merge is skipped and user config is returned verbatim.
 func Load(path string) (Config, error) {
 	cfg := DefaultConfig()
 
@@ -145,6 +160,16 @@ func Load(path string) (Config, error) {
 	var user Config
 	if err := json.Unmarshal(raw, &user); err != nil {
 		return cfg, fmt.Errorf("parsing config %q: %w", path, err)
+	}
+
+	if user.Managed {
+		if user.Port == 0 {
+			user.Port = 8080
+		}
+		if user.Providers == nil {
+			user.Providers = make(map[string]Provider)
+		}
+		return user, nil
 	}
 
 	// Merge: user values override defaults.
@@ -169,6 +194,97 @@ func Load(path string) (Config, error) {
 	if user.MITM.Enabled {
 		cfg.MITM = user.MITM
 	}
+	if user.ControlPlane != (ControlPlaneConfig{}) {
+		cfg.ControlPlane = user.ControlPlane
+	}
 
 	return cfg, nil
 }
+
+// Save writes cfg to path atomically with Managed set to true.
+func Save(path string, cfg Config) error {
+	cfg.Managed = true
+	data, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshalling config: %w", err)
+	}
+	data = append(data, '\n')
+
+	dir := filepath.Dir(path)
+	if dir == "" {
+		dir = "."
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("creating config dir: %w", err)
+	}
+
+	tmpFile, err := os.CreateTemp(dir, ".config.json.tmp-*")
+	if err != nil {
+		return fmt.Errorf("creating temp config file: %w", err)
+	}
+	tmpName := tmpFile.Name()
+
+	if _, err := tmpFile.Write(data); err != nil {
+		tmpFile.Close()
+		_ = os.Remove(tmpName)
+		return fmt.Errorf("writing temp config file: %w", err)
+	}
+	if err := tmpFile.Sync(); err != nil {
+		tmpFile.Close()
+		_ = os.Remove(tmpName)
+		return fmt.Errorf("syncing temp config file: %w", err)
+	}
+	if err := tmpFile.Close(); err != nil {
+		_ = os.Remove(tmpName)
+		return fmt.Errorf("closing temp config file: %w", err)
+	}
+
+	if err := os.Rename(tmpName, path); err != nil {
+		_ = os.Remove(tmpName)
+		return fmt.Errorf("renaming temp config file: %w", err)
+	}
+	return nil
+}
+
+// ManagedStorePath returns the path to Torana's managed configuration file.
+// It resolves to $TORANA_DATA_DIR/config.json if TORANA_DATA_DIR is set,
+// otherwise os.UserConfigDir()/torana/config.json.
+func ManagedStorePath() (string, error) {
+	dataDir := os.Getenv("TORANA_DATA_DIR")
+	if dataDir == "" {
+		dir, err := os.UserConfigDir()
+		if err != nil {
+			return "", fmt.Errorf("getting user config dir: %w", err)
+		}
+		dataDir = filepath.Join(dir, "torana")
+	}
+	return filepath.Join(dataDir, "config.json"), nil
+}
+
+// ResolveConfig resolves the active configuration for Torana.
+// If storePath exists, it loads and returns the managed store (ignoring seedPath).
+// If storePath does not exist, it loads seedPath (merging with defaults if needed),
+// saves the result to storePath to materialize the store (setting Managed: true),
+// and returns the config. The seed file is never modified.
+func ResolveConfig(seedPath, storePath string) (Config, error) {
+	if _, err := os.Stat(storePath); err == nil {
+		return Load(storePath)
+	} else if !os.IsNotExist(err) {
+		return Config{}, fmt.Errorf("checking managed store %q: %w", storePath, err)
+	}
+
+	cfg, err := Load(seedPath)
+	if err != nil {
+		return cfg, fmt.Errorf("loading seed config %q: %w", seedPath, err)
+	}
+
+	if err := Save(storePath, cfg); err != nil {
+		return cfg, fmt.Errorf("materializing managed store %q: %w", storePath, err)
+	}
+
+	// Save persists Managed:true; reflect that in the returned config so the
+	// in-memory view the caller holds agrees with what is now on disk.
+	cfg.Managed = true
+	return cfg, nil
+}
+

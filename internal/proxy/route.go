@@ -5,7 +5,6 @@ import (
 	"log"
 	"net/http"
 	"net/url"
-	"os"
 
 	"github.com/torana-edge/torana-edge/internal/engine"
 	"github.com/torana-edge/torana-edge/internal/metrics"
@@ -27,7 +26,7 @@ type routeVerdict struct {
 // Credential rule (mirrors the offload provider override): the caller's
 // credential is NEVER forwarded to a rerouted provider. Auth comes from the
 // target's api_key_env; empty means no auth (local endpoints).
-func applyRoute(req *http.Request, chat *engine.ChatRequest, origFormat, origName string, raw any, cfg provider.Config) {
+func (s *Server) applyRoute(req *http.Request, chat *engine.ChatRequest, origFormat, origName string, raw any, cfg provider.Config) {
 	b, _ := json.Marshal(raw)
 	var v routeVerdict
 	_ = json.Unmarshal(b, &v)
@@ -72,15 +71,13 @@ func applyRoute(req *http.Request, chat *engine.ChatRequest, origFormat, origNam
 	// Never forward the caller's credential to a rerouted provider.
 	req.Header.Del("Authorization")
 	req.Header.Del("X-Api-Key")
-	if target.APIKeyEnv != "" {
-		if k := os.Getenv(target.APIKeyEnv); k != "" {
-			// Cover both auth conventions; providers ignore the one they
-			// don't use.
-			req.Header.Set("Authorization", "Bearer "+k)
-			req.Header.Set("X-Api-Key", k)
-		} else {
-			log.Printf("[route] provider %q api_key_env %q is empty — sending unauthenticated", v.Provider, target.APIKeyEnv)
-		}
+	if k := s.resolveSecret(target.APIKeyEnv, target.APIKeyEnc); k != "" {
+		// Cover both auth conventions; providers ignore the one they
+		// don't use.
+		req.Header.Set("Authorization", "Bearer "+k)
+		req.Header.Set("X-Api-Key", k)
+	} else if target.APIKeyEnv != "" || target.APIKeyEnc != "" {
+		log.Printf("[route] provider %q key is empty — sending unauthenticated", v.Provider)
 	}
 
 	metrics.RecordRoutedRequest(req.Context(), origName, v.Provider)

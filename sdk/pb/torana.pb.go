@@ -2,7 +2,7 @@
 // versions:
 // 	protoc-gen-go v1.36.11
 // 	protoc        v7.35.1
-// source: pkg/pb/torana.proto
+// source: sdk/pb/torana.proto
 
 package pb
 
@@ -44,7 +44,7 @@ type Message struct {
 
 func (x *Message) Reset() {
 	*x = Message{}
-	mi := &file_pkg_pb_torana_proto_msgTypes[0]
+	mi := &file_sdk_pb_torana_proto_msgTypes[0]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -56,7 +56,7 @@ func (x *Message) String() string {
 func (*Message) ProtoMessage() {}
 
 func (x *Message) ProtoReflect() protoreflect.Message {
-	mi := &file_pkg_pb_torana_proto_msgTypes[0]
+	mi := &file_sdk_pb_torana_proto_msgTypes[0]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -69,7 +69,7 @@ func (x *Message) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Message.ProtoReflect.Descriptor instead.
 func (*Message) Descriptor() ([]byte, []int) {
-	return file_pkg_pb_torana_proto_rawDescGZIP(), []int{0}
+	return file_sdk_pb_torana_proto_rawDescGZIP(), []int{0}
 }
 
 func (x *Message) GetRole() string {
@@ -158,7 +158,7 @@ type ToolCall struct {
 
 func (x *ToolCall) Reset() {
 	*x = ToolCall{}
-	mi := &file_pkg_pb_torana_proto_msgTypes[1]
+	mi := &file_sdk_pb_torana_proto_msgTypes[1]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -170,7 +170,7 @@ func (x *ToolCall) String() string {
 func (*ToolCall) ProtoMessage() {}
 
 func (x *ToolCall) ProtoReflect() protoreflect.Message {
-	mi := &file_pkg_pb_torana_proto_msgTypes[1]
+	mi := &file_sdk_pb_torana_proto_msgTypes[1]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -183,7 +183,7 @@ func (x *ToolCall) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ToolCall.ProtoReflect.Descriptor instead.
 func (*ToolCall) Descriptor() ([]byte, []int) {
-	return file_pkg_pb_torana_proto_rawDescGZIP(), []int{1}
+	return file_sdk_pb_torana_proto_rawDescGZIP(), []int{1}
 }
 
 func (x *ToolCall) GetId() string {
@@ -229,7 +229,7 @@ type ToolDef struct {
 
 func (x *ToolDef) Reset() {
 	*x = ToolDef{}
-	mi := &file_pkg_pb_torana_proto_msgTypes[2]
+	mi := &file_sdk_pb_torana_proto_msgTypes[2]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -241,7 +241,7 @@ func (x *ToolDef) String() string {
 func (*ToolDef) ProtoMessage() {}
 
 func (x *ToolDef) ProtoReflect() protoreflect.Message {
-	mi := &file_pkg_pb_torana_proto_msgTypes[2]
+	mi := &file_sdk_pb_torana_proto_msgTypes[2]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -254,7 +254,7 @@ func (x *ToolDef) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ToolDef.ProtoReflect.Descriptor instead.
 func (*ToolDef) Descriptor() ([]byte, []int) {
-	return file_pkg_pb_torana_proto_rawDescGZIP(), []int{2}
+	return file_sdk_pb_torana_proto_rawDescGZIP(), []int{2}
 }
 
 func (x *ToolDef) GetName() string {
@@ -314,7 +314,7 @@ type ChatRequest struct {
 
 func (x *ChatRequest) Reset() {
 	*x = ChatRequest{}
-	mi := &file_pkg_pb_torana_proto_msgTypes[3]
+	mi := &file_sdk_pb_torana_proto_msgTypes[3]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -326,7 +326,7 @@ func (x *ChatRequest) String() string {
 func (*ChatRequest) ProtoMessage() {}
 
 func (x *ChatRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_pkg_pb_torana_proto_msgTypes[3]
+	mi := &file_sdk_pb_torana_proto_msgTypes[3]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -339,7 +339,7 @@ func (x *ChatRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ChatRequest.ProtoReflect.Descriptor instead.
 func (*ChatRequest) Descriptor() ([]byte, []int) {
-	return file_pkg_pb_torana_proto_rawDescGZIP(), []int{3}
+	return file_sdk_pb_torana_proto_rawDescGZIP(), []int{3}
 }
 
 func (x *ChatRequest) GetModel() string {
@@ -432,7 +432,7 @@ type ToolCallStart struct {
 
 func (x *ToolCallStart) Reset() {
 	*x = ToolCallStart{}
-	mi := &file_pkg_pb_torana_proto_msgTypes[4]
+	mi := &file_sdk_pb_torana_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -444,7 +444,7 @@ func (x *ToolCallStart) String() string {
 func (*ToolCallStart) ProtoMessage() {}
 
 func (x *ToolCallStart) ProtoReflect() protoreflect.Message {
-	mi := &file_pkg_pb_torana_proto_msgTypes[4]
+	mi := &file_sdk_pb_torana_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -457,7 +457,7 @@ func (x *ToolCallStart) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ToolCallStart.ProtoReflect.Descriptor instead.
 func (*ToolCallStart) Descriptor() ([]byte, []int) {
-	return file_pkg_pb_torana_proto_rawDescGZIP(), []int{4}
+	return file_sdk_pb_torana_proto_rawDescGZIP(), []int{4}
 }
 
 func (x *ToolCallStart) GetIndex() int32 {
@@ -498,7 +498,7 @@ type ToolCallDelta struct {
 
 func (x *ToolCallDelta) Reset() {
 	*x = ToolCallDelta{}
-	mi := &file_pkg_pb_torana_proto_msgTypes[5]
+	mi := &file_sdk_pb_torana_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -510,7 +510,7 @@ func (x *ToolCallDelta) String() string {
 func (*ToolCallDelta) ProtoMessage() {}
 
 func (x *ToolCallDelta) ProtoReflect() protoreflect.Message {
-	mi := &file_pkg_pb_torana_proto_msgTypes[5]
+	mi := &file_sdk_pb_torana_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -523,7 +523,7 @@ func (x *ToolCallDelta) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ToolCallDelta.ProtoReflect.Descriptor instead.
 func (*ToolCallDelta) Descriptor() ([]byte, []int) {
-	return file_pkg_pb_torana_proto_rawDescGZIP(), []int{5}
+	return file_sdk_pb_torana_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *ToolCallDelta) GetIndex() int32 {
@@ -549,7 +549,7 @@ type ToolCallEnd struct {
 
 func (x *ToolCallEnd) Reset() {
 	*x = ToolCallEnd{}
-	mi := &file_pkg_pb_torana_proto_msgTypes[6]
+	mi := &file_sdk_pb_torana_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -561,7 +561,7 @@ func (x *ToolCallEnd) String() string {
 func (*ToolCallEnd) ProtoMessage() {}
 
 func (x *ToolCallEnd) ProtoReflect() protoreflect.Message {
-	mi := &file_pkg_pb_torana_proto_msgTypes[6]
+	mi := &file_sdk_pb_torana_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -574,7 +574,7 @@ func (x *ToolCallEnd) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ToolCallEnd.ProtoReflect.Descriptor instead.
 func (*ToolCallEnd) Descriptor() ([]byte, []int) {
-	return file_pkg_pb_torana_proto_rawDescGZIP(), []int{6}
+	return file_sdk_pb_torana_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *ToolCallEnd) GetIndex() int32 {
@@ -594,7 +594,7 @@ type StreamError struct {
 
 func (x *StreamError) Reset() {
 	*x = StreamError{}
-	mi := &file_pkg_pb_torana_proto_msgTypes[7]
+	mi := &file_sdk_pb_torana_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -606,7 +606,7 @@ func (x *StreamError) String() string {
 func (*StreamError) ProtoMessage() {}
 
 func (x *StreamError) ProtoReflect() protoreflect.Message {
-	mi := &file_pkg_pb_torana_proto_msgTypes[7]
+	mi := &file_sdk_pb_torana_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -619,7 +619,7 @@ func (x *StreamError) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StreamError.ProtoReflect.Descriptor instead.
 func (*StreamError) Descriptor() ([]byte, []int) {
-	return file_pkg_pb_torana_proto_rawDescGZIP(), []int{7}
+	return file_sdk_pb_torana_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *StreamError) GetCode() int32 {
@@ -650,7 +650,7 @@ type StreamUsage struct {
 
 func (x *StreamUsage) Reset() {
 	*x = StreamUsage{}
-	mi := &file_pkg_pb_torana_proto_msgTypes[8]
+	mi := &file_sdk_pb_torana_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -662,7 +662,7 @@ func (x *StreamUsage) String() string {
 func (*StreamUsage) ProtoMessage() {}
 
 func (x *StreamUsage) ProtoReflect() protoreflect.Message {
-	mi := &file_pkg_pb_torana_proto_msgTypes[8]
+	mi := &file_sdk_pb_torana_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -675,7 +675,7 @@ func (x *StreamUsage) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StreamUsage.ProtoReflect.Descriptor instead.
 func (*StreamUsage) Descriptor() ([]byte, []int) {
-	return file_pkg_pb_torana_proto_rawDescGZIP(), []int{8}
+	return file_sdk_pb_torana_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *StreamUsage) GetInputTokens() int32 {
@@ -726,7 +726,7 @@ type StreamEvent struct {
 
 func (x *StreamEvent) Reset() {
 	*x = StreamEvent{}
-	mi := &file_pkg_pb_torana_proto_msgTypes[9]
+	mi := &file_sdk_pb_torana_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -738,7 +738,7 @@ func (x *StreamEvent) String() string {
 func (*StreamEvent) ProtoMessage() {}
 
 func (x *StreamEvent) ProtoReflect() protoreflect.Message {
-	mi := &file_pkg_pb_torana_proto_msgTypes[9]
+	mi := &file_sdk_pb_torana_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -751,7 +751,7 @@ func (x *StreamEvent) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StreamEvent.ProtoReflect.Descriptor instead.
 func (*StreamEvent) Descriptor() ([]byte, []int) {
-	return file_pkg_pb_torana_proto_rawDescGZIP(), []int{9}
+	return file_sdk_pb_torana_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *StreamEvent) GetEvent() isStreamEvent_Event {
@@ -925,7 +925,7 @@ type StreamEventResult struct {
 
 func (x *StreamEventResult) Reset() {
 	*x = StreamEventResult{}
-	mi := &file_pkg_pb_torana_proto_msgTypes[10]
+	mi := &file_sdk_pb_torana_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -937,7 +937,7 @@ func (x *StreamEventResult) String() string {
 func (*StreamEventResult) ProtoMessage() {}
 
 func (x *StreamEventResult) ProtoReflect() protoreflect.Message {
-	mi := &file_pkg_pb_torana_proto_msgTypes[10]
+	mi := &file_sdk_pb_torana_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -950,7 +950,7 @@ func (x *StreamEventResult) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StreamEventResult.ProtoReflect.Descriptor instead.
 func (*StreamEventResult) Descriptor() ([]byte, []int) {
-	return file_pkg_pb_torana_proto_rawDescGZIP(), []int{10}
+	return file_sdk_pb_torana_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *StreamEventResult) GetHandled() bool {
@@ -967,11 +967,156 @@ func (x *StreamEventResult) GetEvents() []*StreamEvent {
 	return nil
 }
 
-var File_pkg_pb_torana_proto protoreflect.FileDescriptor
+// Incoming HTTP request forwarded to a plugin's run_on_http_request hook.
+// Built directly from net/http — does not cross the engine IR.
+type HttpRequest struct {
+	state  protoimpl.MessageState `protogen:"open.v1"`
+	Method string                 `protobuf:"bytes,1,opt,name=method,proto3" json:"method,omitempty"`
+	Path   string                 `protobuf:"bytes,2,opt,name=path,proto3" json:"path,omitempty"`
+	// JSON-encoded map of request headers (map[string][]string).
+	HeadersJson   []byte `protobuf:"bytes,3,opt,name=headers_json,json=headersJson,proto3" json:"headers_json,omitempty"`
+	Body          []byte `protobuf:"bytes,4,opt,name=body,proto3" json:"body,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
 
-const file_pkg_pb_torana_proto_rawDesc = "" +
+func (x *HttpRequest) Reset() {
+	*x = HttpRequest{}
+	mi := &file_sdk_pb_torana_proto_msgTypes[11]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *HttpRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*HttpRequest) ProtoMessage() {}
+
+func (x *HttpRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_sdk_pb_torana_proto_msgTypes[11]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use HttpRequest.ProtoReflect.Descriptor instead.
+func (*HttpRequest) Descriptor() ([]byte, []int) {
+	return file_sdk_pb_torana_proto_rawDescGZIP(), []int{11}
+}
+
+func (x *HttpRequest) GetMethod() string {
+	if x != nil {
+		return x.Method
+	}
+	return ""
+}
+
+func (x *HttpRequest) GetPath() string {
+	if x != nil {
+		return x.Path
+	}
+	return ""
+}
+
+func (x *HttpRequest) GetHeadersJson() []byte {
+	if x != nil {
+		return x.HeadersJson
+	}
+	return nil
+}
+
+func (x *HttpRequest) GetBody() []byte {
+	if x != nil {
+		return x.Body
+	}
+	return nil
+}
+
+// Response produced by a plugin's run_on_http_request hook.
+//
+// The explicit `handled` bool is required: an all-defaults proto message
+// marshals to zero bytes, which the host reads as "not handled". A plugin
+// MUST set handled=true when it serves a response.
+type HttpResponse struct {
+	state  protoimpl.MessageState `protogen:"open.v1"`
+	Status int32                  `protobuf:"varint,1,opt,name=status,proto3" json:"status,omitempty"`
+	// JSON-encoded map of response headers (map[string][]string).
+	HeadersJson   []byte `protobuf:"bytes,2,opt,name=headers_json,json=headersJson,proto3" json:"headers_json,omitempty"`
+	Body          []byte `protobuf:"bytes,3,opt,name=body,proto3" json:"body,omitempty"`
+	Handled       bool   `protobuf:"varint,4,opt,name=handled,proto3" json:"handled,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *HttpResponse) Reset() {
+	*x = HttpResponse{}
+	mi := &file_sdk_pb_torana_proto_msgTypes[12]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *HttpResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*HttpResponse) ProtoMessage() {}
+
+func (x *HttpResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_sdk_pb_torana_proto_msgTypes[12]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use HttpResponse.ProtoReflect.Descriptor instead.
+func (*HttpResponse) Descriptor() ([]byte, []int) {
+	return file_sdk_pb_torana_proto_rawDescGZIP(), []int{12}
+}
+
+func (x *HttpResponse) GetStatus() int32 {
+	if x != nil {
+		return x.Status
+	}
+	return 0
+}
+
+func (x *HttpResponse) GetHeadersJson() []byte {
+	if x != nil {
+		return x.HeadersJson
+	}
+	return nil
+}
+
+func (x *HttpResponse) GetBody() []byte {
+	if x != nil {
+		return x.Body
+	}
+	return nil
+}
+
+func (x *HttpResponse) GetHandled() bool {
+	if x != nil {
+		return x.Handled
+	}
+	return false
+}
+
+var File_sdk_pb_torana_proto protoreflect.FileDescriptor
+
+const file_sdk_pb_torana_proto_rawDesc = "" +
 	"\n" +
-	"\x13pkg/pb/torana.proto\x12\ttorana.v1\"\xfe\x02\n" +
+	"\x13sdk/pb/torana.proto\x12\ttorana.v1\"\xfe\x02\n" +
 	"\aMessage\x12\x12\n" +
 	"\x04role\x18\x01 \x01(\tR\x04role\x12\x18\n" +
 	"\acontent\x18\x02 \x01(\tR\acontent\x12,\n" +
@@ -1046,22 +1191,32 @@ const file_pkg_pb_torana_proto_rawDesc = "" +
 	"\x05event\"]\n" +
 	"\x11StreamEventResult\x12\x18\n" +
 	"\ahandled\x18\x01 \x01(\bR\ahandled\x12.\n" +
-	"\x06events\x18\x02 \x03(\v2\x16.torana.v1.StreamEventR\x06eventsB+Z)github.com/torana-edge/torana-edge/pkg/pbb\x06proto3"
+	"\x06events\x18\x02 \x03(\v2\x16.torana.v1.StreamEventR\x06events\"p\n" +
+	"\vHttpRequest\x12\x16\n" +
+	"\x06method\x18\x01 \x01(\tR\x06method\x12\x12\n" +
+	"\x04path\x18\x02 \x01(\tR\x04path\x12!\n" +
+	"\fheaders_json\x18\x03 \x01(\fR\vheadersJson\x12\x12\n" +
+	"\x04body\x18\x04 \x01(\fR\x04body\"w\n" +
+	"\fHttpResponse\x12\x16\n" +
+	"\x06status\x18\x01 \x01(\x05R\x06status\x12!\n" +
+	"\fheaders_json\x18\x02 \x01(\fR\vheadersJson\x12\x12\n" +
+	"\x04body\x18\x03 \x01(\fR\x04body\x12\x18\n" +
+	"\ahandled\x18\x04 \x01(\bR\ahandledB+Z)github.com/torana-edge/torana-edge/sdk/pbb\x06proto3"
 
 var (
-	file_pkg_pb_torana_proto_rawDescOnce sync.Once
-	file_pkg_pb_torana_proto_rawDescData []byte
+	file_sdk_pb_torana_proto_rawDescOnce sync.Once
+	file_sdk_pb_torana_proto_rawDescData []byte
 )
 
-func file_pkg_pb_torana_proto_rawDescGZIP() []byte {
-	file_pkg_pb_torana_proto_rawDescOnce.Do(func() {
-		file_pkg_pb_torana_proto_rawDescData = protoimpl.X.CompressGZIP(unsafe.Slice(unsafe.StringData(file_pkg_pb_torana_proto_rawDesc), len(file_pkg_pb_torana_proto_rawDesc)))
+func file_sdk_pb_torana_proto_rawDescGZIP() []byte {
+	file_sdk_pb_torana_proto_rawDescOnce.Do(func() {
+		file_sdk_pb_torana_proto_rawDescData = protoimpl.X.CompressGZIP(unsafe.Slice(unsafe.StringData(file_sdk_pb_torana_proto_rawDesc), len(file_sdk_pb_torana_proto_rawDesc)))
 	})
-	return file_pkg_pb_torana_proto_rawDescData
+	return file_sdk_pb_torana_proto_rawDescData
 }
 
-var file_pkg_pb_torana_proto_msgTypes = make([]protoimpl.MessageInfo, 11)
-var file_pkg_pb_torana_proto_goTypes = []any{
+var file_sdk_pb_torana_proto_msgTypes = make([]protoimpl.MessageInfo, 13)
+var file_sdk_pb_torana_proto_goTypes = []any{
 	(*Message)(nil),           // 0: torana.v1.Message
 	(*ToolCall)(nil),          // 1: torana.v1.ToolCall
 	(*ToolDef)(nil),           // 2: torana.v1.ToolDef
@@ -1073,8 +1228,10 @@ var file_pkg_pb_torana_proto_goTypes = []any{
 	(*StreamUsage)(nil),       // 8: torana.v1.StreamUsage
 	(*StreamEvent)(nil),       // 9: torana.v1.StreamEvent
 	(*StreamEventResult)(nil), // 10: torana.v1.StreamEventResult
+	(*HttpRequest)(nil),       // 11: torana.v1.HttpRequest
+	(*HttpResponse)(nil),      // 12: torana.v1.HttpResponse
 }
-var file_pkg_pb_torana_proto_depIdxs = []int32{
+var file_sdk_pb_torana_proto_depIdxs = []int32{
 	1, // 0: torana.v1.Message.tool_calls:type_name -> torana.v1.ToolCall
 	0, // 1: torana.v1.ChatRequest.messages:type_name -> torana.v1.Message
 	2, // 2: torana.v1.ChatRequest.tools:type_name -> torana.v1.ToolDef
@@ -1091,13 +1248,13 @@ var file_pkg_pb_torana_proto_depIdxs = []int32{
 	0, // [0:9] is the sub-list for field type_name
 }
 
-func init() { file_pkg_pb_torana_proto_init() }
-func file_pkg_pb_torana_proto_init() {
-	if File_pkg_pb_torana_proto != nil {
+func init() { file_sdk_pb_torana_proto_init() }
+func file_sdk_pb_torana_proto_init() {
+	if File_sdk_pb_torana_proto != nil {
 		return
 	}
-	file_pkg_pb_torana_proto_msgTypes[3].OneofWrappers = []any{}
-	file_pkg_pb_torana_proto_msgTypes[9].OneofWrappers = []any{
+	file_sdk_pb_torana_proto_msgTypes[3].OneofWrappers = []any{}
+	file_sdk_pb_torana_proto_msgTypes[9].OneofWrappers = []any{
 		(*StreamEvent_TextDelta)(nil),
 		(*StreamEvent_ThinkingDelta)(nil),
 		(*StreamEvent_ToolCallStart)(nil),
@@ -1112,17 +1269,17 @@ func file_pkg_pb_torana_proto_init() {
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
-			RawDescriptor: unsafe.Slice(unsafe.StringData(file_pkg_pb_torana_proto_rawDesc), len(file_pkg_pb_torana_proto_rawDesc)),
+			RawDescriptor: unsafe.Slice(unsafe.StringData(file_sdk_pb_torana_proto_rawDesc), len(file_sdk_pb_torana_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   11,
+			NumMessages:   13,
 			NumExtensions: 0,
 			NumServices:   0,
 		},
-		GoTypes:           file_pkg_pb_torana_proto_goTypes,
-		DependencyIndexes: file_pkg_pb_torana_proto_depIdxs,
-		MessageInfos:      file_pkg_pb_torana_proto_msgTypes,
+		GoTypes:           file_sdk_pb_torana_proto_goTypes,
+		DependencyIndexes: file_sdk_pb_torana_proto_depIdxs,
+		MessageInfos:      file_sdk_pb_torana_proto_msgTypes,
 	}.Build()
-	File_pkg_pb_torana_proto = out.File
-	file_pkg_pb_torana_proto_goTypes = nil
-	file_pkg_pb_torana_proto_depIdxs = nil
+	File_sdk_pb_torana_proto = out.File
+	file_sdk_pb_torana_proto_goTypes = nil
+	file_sdk_pb_torana_proto_depIdxs = nil
 }

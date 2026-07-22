@@ -26,6 +26,8 @@ type RedisConfig struct {
 	// PasswordEnv names an environment variable holding the Redis password
 	// (never put the password itself in the config file).
 	PasswordEnv string `json:"password_env,omitempty"`
+	PasswordEnc string `json:"password_enc,omitempty"`
+	Password    string `json:"-"`
 	DB          int    `json:"db,omitempty"`
 	// Prefix namespaces this deployment's keys. Default "torana:".
 	Prefix string `json:"prefix,omitempty"`
@@ -48,8 +50,8 @@ func New(cfg Config) (Store, error) {
 		if addr == "" {
 			addr = "127.0.0.1:6379"
 		}
-		password := ""
-		if cfg.Redis.PasswordEnv != "" {
+		password := cfg.Redis.Password
+		if password == "" && cfg.Redis.PasswordEnv != "" {
 			password = os.Getenv(cfg.Redis.PasswordEnv)
 		}
 		prefix := cfg.Redis.Prefix

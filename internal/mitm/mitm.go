@@ -19,6 +19,7 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/torana-edge/torana-edge/internal/provider"
@@ -30,7 +31,13 @@ type Server struct {
 	ca       *CA
 	torana   http.Handler // provider-routing mux (chat calls delegate here)
 	passthru *http.Transport
+
+	// mu guards listener/closed. ListenAndServe (in its own goroutine) writes
+	// listener while Close, driven by live reconfiguration, may read it
+	// concurrently — the two must not race.
+	mu       sync.Mutex
 	listener net.Listener
+	closed   bool
 }
 
 // New builds a MITM server. toranaHandler is the proxy's provider mux, obtained
@@ -66,7 +73,16 @@ func (s *Server) ListenAndServe() error {
 	if err != nil {
 		return fmt.Errorf("mitm: listen %s: %w", s.cfg.Listen, err)
 	}
+	s.mu.Lock()
+	if s.closed {
+		// Close() won the race to the bind. Serving now would leak a listener
+		// nobody can stop, so drop it and exit cleanly instead.
+		s.mu.Unlock()
+		ln.Close()
+		return nil
+	}
 	s.listener = ln
+	s.mu.Unlock()
 	log.Printf("mitm: CONNECT proxy on %s; intercepting %d host(s)", s.cfg.Listen, len(s.cfg.Hosts))
 	srv := &http.Server{
 		Handler:      http.HandlerFunc(s.handleConnect),
@@ -76,10 +92,16 @@ func (s *Server) ListenAndServe() error {
 	return srv.Serve(ln)
 }
 
-// Close stops the proxy.
+// Close stops the proxy. It is safe to call before ListenAndServe has bound:
+// the pending bind observes the closed flag and tears its own listener down.
 func (s *Server) Close() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.closed = true
 	if s.listener != nil {
-		return s.listener.Close()
+		err := s.listener.Close()
+		s.listener = nil
+		return err
 	}
 	return nil
 }

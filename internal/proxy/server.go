@@ -10,7 +10,9 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"crypto/subtle"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -19,6 +21,8 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"os"
+	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -28,16 +32,21 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	"github.com/torana-edge/torana-edge/internal/cache"
+	"github.com/torana-edge/torana-edge/internal/controlplane"
 	"github.com/torana-edge/torana-edge/internal/engine"
 	"github.com/torana-edge/torana-edge/internal/engine/pbconv"
 	"github.com/torana-edge/torana-edge/internal/format"
 	"github.com/torana-edge/torana-edge/internal/metrics"
+	"github.com/torana-edge/torana-edge/internal/mitm"
 	"github.com/torana-edge/torana-edge/internal/plugin"
 	"github.com/torana-edge/torana-edge/internal/provider"
+	"github.com/torana-edge/torana-edge/internal/secret"
 	"github.com/torana-edge/torana-edge/internal/wasm"
+	"github.com/torana-edge/torana-edge/sdk/pb"
 )
 
 const maxBodySize = 10 * 1024 * 1024 // 10 MB
+const secretSetSentinel = "__set__"
 
 // allowedPluginHeaders is the only set of request headers ever exposed to
 // plugins (via ToranaMeta["_request_headers"]), and only when a loaded
@@ -61,22 +70,39 @@ type Config struct {
 	// DefaultProvider routes requests without a /provider/<name>/ prefix
 	// to this provider. Empty means no default — such requests get 502.
 	DefaultProvider string
+
+	// ConfigPath is the path to the config file on disk for persistence.
+	ConfigPath string
 }
 
 // Server wraps the HTTP listener, the reverse proxy, and the WASM plugin
 // pipeline that runs on every request/response cycle.
 type Server struct {
 	configMu   sync.RWMutex
+	rebuildMu  sync.Mutex
+	listenerMu sync.Mutex
+	mitmMu     sync.Mutex
+	listener   net.Listener
+	mitmSrv    *mitm.Server
+	bindHost   string
+	configPath string
 	config     Config
+	secrets    *secret.Store
 	proxy      *httputil.ReverseProxy
 	httpServer *http.Server
 	stats      *metrics.StatsTracker
+	// feed is the bounded in-memory ring buffer of recent per-request events,
+	// exposed via /_torana/api/feed (snapshot) and /_torana/api/stream (SSE).
+	feed *metrics.RequestFeed
 	// WASM plugin pipeline (loaded when configured)
 	pluginPipeline atomic.Value // *plugin.PluginPipeline
 	// sharedCache is the cross-request plugin state store shared by every
 	// runtime this server builds (survives hot-reloads; redis backend
 	// survives restarts). Closed on Shutdown, after the pipeline drains.
 	sharedCache cache.Store
+	// cacheMu guards sharedCache: ReconfigureCache may swap it at runtime while
+	// the plugin-watcher goroutine reads it via newRuntime (off rebuildMu).
+	cacheMu     sync.RWMutex
 	rateLimiter *RateLimiter
 	// watchCancel stops the plugin hot-reload watcher on Shutdown.
 	watchCancel context.CancelFunc
@@ -151,6 +177,11 @@ type reqState struct {
 	// the transport returns it verbatim and ModifyResponse must not re-parse
 	// it or run response hooks over it.
 	Synthetic bool
+	// Verdict is the control-plane outcome applied by the plugin pipeline:
+	// "block" (env.block_request), "respond" (env.respond_request),
+	// "route" (env.route_request). Empty when no pipeline is loaded or no
+	// veto/redirect was applied.
+	Verdict string
 	// OriginalReq is the pristine pre-pipeline request (pb bytes), snapshotted
 	// only when a loaded plugin holds env.original_request.
 	OriginalReq []byte
@@ -223,9 +254,20 @@ func New(cfg Config) (*Server, error) {
 	// is disabled; InitOTel runs before New in main).
 	metrics.RegisterStatsObservables(statsTracker)
 
+	configPath := cfg.ConfigPath
+	if configPath == "" {
+		configPath = "config.json"
+	}
+	secStore, err := secret.Open(filepath.Dir(configPath))
+	if err != nil {
+		return nil, fmt.Errorf("proxy: secret store: %w", err)
+	}
 	s := &Server{
 		config:      cfg,
+		configPath:  configPath,
+		secrets:     secStore,
 		stats:       statsTracker,
+		feed:        metrics.NewRequestFeed(0), // default 200-event ring buffer
 		rateLimiter: NewRateLimiter(cfg.Providers.Limits.RPM, cfg.Providers.Limits.Concurrency),
 	}
 
@@ -250,55 +292,21 @@ func New(cfg Config) (*Server, error) {
 		// it survive restarts / span instances. Fail fast on a bad backend —
 		// a deployment that asked for distributed state must not silently
 		// fall back to per-process memory.
+		cfg.Providers.Cache.Redis.Password = s.resolveSecret(cfg.Providers.Cache.Redis.PasswordEnv, cfg.Providers.Cache.Redis.PasswordEnc)
 		sharedCache, err := cache.New(cfg.Providers.Cache)
 		if err != nil {
 			return nil, fmt.Errorf("proxy: %w", err)
 		}
-		s.sharedCache = sharedCache
+		s.setCache(sharedCache)
 
-		// newRuntime wires host callbacks; used at startup AND on every
-		// hot-reload — a bare runtime would silently lose offload/stats.
-		newRuntime := func() *wasm.Runtime {
-			rt := wasm.NewRuntimeWithCache(context.Background(), sharedCache)
-			// Offload completion handler (cheap-model tool result
-			// summarization), recording failures in /stats.
-			rt.OffloadFunc = func(ctx context.Context, payloadJSON string) (string, error) {
-				out, err := s.offloadCompletion(ctx, payloadJSON)
-				if err != nil {
-					// Plugins degrade gracefully on offload errors, so this
-					// log line is the only host-side visibility.
-					log.Printf("[offload] %v", err)
-					s.stats.RecordOffloadFailure()
-				}
-				return out, err
-			}
-			// Plugins report compaction savings via torana_record_savings,
-			// attributed per plugin in /stats and OTLP.
-			rt.SavingsFunc = func(pluginName string, originalBytes, finalBytes int64) {
-				s.stats.RecordCompaction(pluginName, originalBytes, finalBytes)
-				metrics.RecordPluginSavings(context.Background(), pluginName, originalBytes-finalBytes)
-			}
-			// Pristine request/response snapshots (env.original_request /
-			// env.original_response), read from the request state the same
-			// way offload does.
-			rt.OriginalRequestFunc = func(ctx context.Context) []byte {
-				return reqStateFrom(ctx).OriginalReq
-			}
-			rt.OriginalResponseFunc = func(ctx context.Context) []byte {
-				return reqStateFrom(ctx).OriginalResp
-			}
-			return rt
-		}
-		pp, err := plugin.NewPipeline(newRuntime(), plugin.PluginConfig{
-			Dir:    cfg.Providers.Plugins.Dir,
-			Order:  cfg.Providers.Plugins.Order,
-			Config: cfg.Providers.Plugins.Config,
-		})
-		if err != nil {
+		if err := s.RebuildPipeline(cfg.Providers.Plugins); err != nil {
 			log.Printf("plugin pipeline: %v", err)
 		} else {
-			s.pluginPipeline.Store(pp)
-			log.Printf("plugin pipeline: %d plugins loaded", pp.Len())
+			raw := s.pluginPipeline.Load()
+			if raw != nil {
+				pp := raw.(*plugin.PluginPipeline)
+				log.Printf("plugin pipeline: %d plugins loaded", pp.Len())
+			}
 			watchCtx, watchCancel := context.WithCancel(context.Background())
 			s.watchCancel = watchCancel
 			// configFn reads the live config so plugin-config hot-reloads
@@ -309,7 +317,15 @@ func New(cfg Config) (*Server, error) {
 			}
 			watchDone := make(chan struct{})
 			s.watchDone = watchDone
-			if err := plugin.WatchPlugins(watchCtx, cfg.Providers.Plugins.Dir, configFn, newRuntime, func(newPP *plugin.PluginPipeline) {
+			runtimeFn := func() *wasm.Runtime {
+				s.rebuildMu.Lock()
+				defer s.rebuildMu.Unlock()
+				return s.newRuntime()
+			}
+			if err := plugin.WatchPlugins(watchCtx, cfg.Providers.Plugins.Dir, configFn, runtimeFn, func(newPP *plugin.PluginPipeline) {
+				// WatchPlugins has already built newPP from the live config
+				// (configFn) using s.newRuntime — swap it in and drain the old
+				// one. Rebuilding here would compile the whole pipeline twice.
 				old := s.pluginPipeline.Swap(newPP)
 				if old != nil {
 					go old.(*plugin.PluginPipeline).DrainAndClose()
@@ -463,6 +479,7 @@ func New(cfg Config) (*Server, error) {
 						if rc, ok := req.Context().Value(routeContextKey{}).(*RouteContext); ok {
 							rc.Block = renderBlock(prov.Format, raw)
 						}
+						reqStateFrom(req.Context()).Verdict = "block"
 						req.Body = io.NopCloser(bytes.NewReader(nil))
 						req.ContentLength = 0
 						return
@@ -485,6 +502,7 @@ func New(cfg Config) (*Server, error) {
 						rs.Synthetic = true
 						rs.Model = chat.Model
 						rs.Provider = provName
+						rs.Verdict = "respond"
 						req.Body = io.NopCloser(bytes.NewReader(nil))
 						req.ContentLength = 0
 						return
@@ -520,9 +538,11 @@ func New(cfg Config) (*Server, error) {
 			if pl := reqStateFrom(req.Context()).Pipeline; pl != nil && pl.HasGrant("env.route_request") && chat.ToranaMeta != nil {
 				if raw, ok := chat.ToranaMeta["_route"]; ok {
 					delete(chat.ToranaMeta, "_route")
-					applyRoute(req, chat, prov.Format, provName, raw, currentCfg.Providers)
+					s.applyRoute(req, chat, prov.Format, provName, raw, currentCfg.Providers)
 					// Model may have been overridden; refresh the metrics fact.
-					reqStateFrom(req.Context()).Model = chat.Model
+					rstate := reqStateFrom(req.Context())
+					rstate.Model = chat.Model
+					rstate.Verdict = "route"
 				}
 			}
 
@@ -803,6 +823,532 @@ func New(cfg Config) (*Server, error) {
 		b, _ := json.Marshal(s.stats)
 		w.Write(b)
 	})
+
+	// --- /_torana control-plane namespace --------------------------------
+	// These routes MUST be registered before the "/" catch-all so that
+	// Go's ServeMux routes them directly and they never reach the provider
+	// proxy handler.
+
+	// GET /_torana/api/config — JSON of current effective provider.Config.
+	mux.HandleFunc("/_torana/api/config", s.controlPlaneGuard(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			w.Header().Set("Content-Type", "application/json")
+			cfg := redactConfigSecrets(s.GetConfig().Providers)
+			b, err := json.Marshal(cfg)
+			if err != nil {
+				http.Error(w, "error marshalling config", http.StatusInternalServerError)
+				return
+			}
+			w.Write(b)
+
+		case http.MethodPut, http.MethodPost:
+			// Settings write-back: providers / offload / limits / control_plane.
+			// The plugin pipeline (order + per-plugin config) is owned by
+			// /_torana/api/plugins and is preserved verbatim here.
+			lr := io.LimitReader(r.Body, maxBodySize+1)
+			data, err := io.ReadAll(lr)
+			if err != nil {
+				http.Error(w, "failed to read body", http.StatusBadRequest)
+				return
+			}
+			var incoming provider.Config
+			if err := json.Unmarshal(data, &incoming); err != nil {
+				http.Error(w, "invalid json body", http.StatusBadRequest)
+				return
+			}
+			cur := s.GetConfig().Providers
+			// Never let the settings surface mutate the pipeline.
+			incoming.Plugins = cur.Plugins
+			// Preserve the redacted control-plane token when the client
+			// echoes back an empty one.
+			if incoming.ControlPlane.Token == "" {
+				incoming.ControlPlane.Token = cur.ControlPlane.Token
+			}
+			// Normalize encrypted secrets (*_enc fields)
+			offEnc, err := s.normalizeSecretField(incoming.Offload.APIKeyEnc, cur.Offload.APIKeyEnc)
+			if err != nil {
+				http.Error(w, "failed to encrypt secret", http.StatusInternalServerError)
+				return
+			}
+			incoming.Offload.APIKeyEnc = offEnc
+
+			cacheEnc, err := s.normalizeSecretField(incoming.Cache.Redis.PasswordEnc, cur.Cache.Redis.PasswordEnc)
+			if err != nil {
+				http.Error(w, "failed to encrypt secret", http.StatusInternalServerError)
+				return
+			}
+			incoming.Cache.Redis.PasswordEnc = cacheEnc
+
+			if incoming.Providers != nil {
+				for name, incP := range incoming.Providers {
+					curP := cur.Providers[name]
+					pEnc, err := s.normalizeSecretField(incP.APIKeyEnc, curP.APIKeyEnc)
+					if err != nil {
+						http.Error(w, fmt.Sprintf("failed to encrypt secret for provider %s", name), http.StatusInternalServerError)
+						return
+					}
+					incP.APIKeyEnc = pEnc
+					incoming.Providers[name] = incP
+				}
+			}
+
+			incoming.Managed = true
+			if err := incoming.Offload.Validate(incoming.Providers); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+
+			c1 := incoming.Cache
+			c1.Redis.Password = ""
+			c2 := cur.Cache
+			c2.Redis.Password = ""
+			if c1 != c2 {
+				if err := s.ReconfigureCache(incoming.Cache); err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+			}
+			if !reflect.DeepEqual(incoming.MITM, cur.MITM) {
+				if err := s.applyMITM(incoming.MITM); err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+			}
+			if incoming.Port != cur.Port && incoming.Port > 0 {
+				if err := s.SetPort(incoming.Port); err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+			}
+			s.SetProviders(incoming)
+			if err := s.PersistConfig(); err != nil {
+				log.Printf("failed to persist config: %v", err)
+				http.Error(w, "failed to persist config to disk", http.StatusInternalServerError)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			out := redactConfigSecrets(incoming)
+			b, _ := json.Marshal(out)
+			w.Write(b)
+
+		default:
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		}
+	}))
+
+	// PUT /_torana/api/plugins (or POST) — live plugin enable/disable/reorder/edit + persist.
+	mux.HandleFunc("/_torana/api/plugins", s.controlPlaneGuard(func(w http.ResponseWriter, r *http.Request) {
+		// GET — enumerate every plugin discovered on disk, marking which are
+		// enabled (present in plugins.order) and which serve their own HTTP UI.
+		if r.Method == http.MethodGet {
+			cur := s.GetConfig().Providers.Plugins
+			orderIdx := make(map[string]int, len(cur.Order))
+			for i, n := range cur.Order {
+				orderIdx[n] = i
+			}
+			type pluginInfo struct {
+				Name        string               `json:"name"`
+				Version     string               `json:"version"`
+				Description string               `json:"description"`
+				Hooks       []string             `json:"hooks"`
+				Permissions []string             `json:"permissions"`
+				Enabled     bool                 `json:"enabled"`
+				Order       int                  `json:"order"`
+				ServesHTTP  bool                 `json:"serves_http"`
+				Schema      *plugin.ConfigSchema `json:"schema,omitempty"`
+				Config      json.RawMessage      `json:"config,omitempty"`
+			}
+			bundles, _ := plugin.DiscoverPlugins(cur.Dir)
+			infos := make([]pluginInfo, 0, len(bundles))
+			seen := make(map[string]bool, len(bundles))
+			for _, b := range bundles {
+				m := b.Manifest
+				hooks := make([]string, 0, len(m.Hooks))
+				servesHTTPHook := false
+				for _, h := range m.Hooks {
+					hooks = append(hooks, h.Name)
+					if h.Name == "run_on_http_request" {
+						servesHTTPHook = true
+					}
+				}
+				perms := make([]string, 0, len(m.Permissions))
+				hasServeGrant := false
+				for _, p := range m.Permissions {
+					perms = append(perms, p.Name)
+					if p.Name == "env.serve_http" {
+						hasServeGrant = true
+					}
+				}
+				idx, enabled := orderIdx[m.Name]
+				infos = append(infos, pluginInfo{
+					Name:        m.Name,
+					Version:     m.Version,
+					Description: m.Description,
+					Hooks:       hooks,
+					Permissions: perms,
+					Enabled:     enabled,
+					Order:       idx,
+					ServesHTTP:  servesHTTPHook && hasServeGrant,
+					Schema:      b.Schema,
+					Config:      cur.Config[m.Name],
+				})
+				seen[m.Name] = true
+			}
+			// Surface enabled-but-not-on-disk plugins so the operator can still
+			// see and remove a stale pipeline entry from the UI.
+			for _, n := range cur.Order {
+				if !seen[n] {
+					infos = append(infos, pluginInfo{
+						Name:    n,
+						Enabled: true,
+						Order:   orderIdx[n],
+						Config:  cur.Config[n],
+					})
+				}
+			}
+			w.Header().Set("Content-Type", "application/json")
+			b, _ := json.Marshal(struct {
+				Dir     string       `json:"dir"`
+				Plugins []pluginInfo `json:"plugins"`
+			}{Dir: cur.Dir, Plugins: infos})
+			w.Write(b)
+			return
+		}
+
+		if r.Method != http.MethodPut && r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		var req struct {
+			Order  *[]string                  `json:"order,omitempty"`
+			Config map[string]json.RawMessage `json:"config,omitempty"`
+		}
+		if r.Body != nil {
+			lr := io.LimitReader(r.Body, maxBodySize+1)
+			data, err := io.ReadAll(lr)
+			if err != nil {
+				http.Error(w, "failed to read body", http.StatusBadRequest)
+				return
+			}
+			if len(data) > 0 {
+				if err := json.Unmarshal(data, &req); err != nil {
+					http.Error(w, "invalid json body", http.StatusBadRequest)
+					return
+				}
+			}
+		}
+
+		oldPlugins := s.GetConfig().Providers.Plugins
+		newPlugins := oldPlugins
+		if req.Order != nil {
+			newPlugins.Order = *req.Order
+		}
+		if req.Config != nil {
+			newPlugins.Config = req.Config
+		}
+
+		s.configMu.Lock()
+		s.config.Providers.Plugins = newPlugins
+		s.configMu.Unlock()
+
+		if err := s.RebuildPipeline(newPlugins); err != nil {
+			s.configMu.Lock()
+			s.config.Providers.Plugins = oldPlugins
+			s.configMu.Unlock()
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		if err := s.PersistConfig(); err != nil {
+			log.Printf("failed to persist config: %v", err)
+			http.Error(w, "failed to persist config to disk", http.StatusInternalServerError)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		b, _ := json.Marshal(newPlugins)
+		w.Write(b)
+	}))
+
+	// POST /_torana/api/plugins/<name>/config — update single plugin config + rebuild + persist.
+	mux.HandleFunc("/_torana/api/plugins/", s.controlPlaneGuard(func(w http.ResponseWriter, r *http.Request) {
+		rest := strings.TrimPrefix(r.URL.Path, "/_torana/api/plugins/")
+		if !strings.HasSuffix(rest, "/config") {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		name := strings.TrimSuffix(rest, "/config")
+		if name == "" || strings.Contains(name, "/") {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		cur := s.GetConfig().Providers.Plugins
+		bundles, _ := plugin.DiscoverPlugins(cur.Dir)
+		known := false
+		for _, b := range bundles {
+			if b.Manifest.Name == name {
+				known = true
+				break
+			}
+		}
+		if !known {
+			for _, o := range cur.Order {
+				if o == name {
+					known = true
+					break
+				}
+			}
+		}
+		if !known {
+			if _, ok := cur.Config[name]; ok {
+				known = true
+			}
+		}
+		if !known {
+			http.Error(w, "plugin not found", http.StatusNotFound)
+			return
+		}
+
+		if r.Body == nil {
+			http.Error(w, "invalid json body", http.StatusBadRequest)
+			return
+		}
+		lr := io.LimitReader(r.Body, maxBodySize+1)
+		data, err := io.ReadAll(lr)
+		if err != nil || len(data) == 0 {
+			http.Error(w, "invalid json body", http.StatusBadRequest)
+			return
+		}
+		if !json.Valid(data) {
+			http.Error(w, "invalid json body", http.StatusBadRequest)
+			return
+		}
+
+		raw := json.RawMessage(data)
+		oldPlugins := s.GetConfig().Providers.Plugins
+		newPlugins := oldPlugins
+		if newPlugins.Config == nil {
+			newPlugins.Config = make(map[string]json.RawMessage)
+		} else {
+			cfgCopy := make(map[string]json.RawMessage, len(oldPlugins.Config))
+			for k, v := range oldPlugins.Config {
+				cfgCopy[k] = v
+			}
+			newPlugins.Config = cfgCopy
+		}
+		newPlugins.Config[name] = raw
+
+		s.configMu.Lock()
+		s.config.Providers.Plugins = newPlugins
+		s.configMu.Unlock()
+
+		if err := s.RebuildPipeline(newPlugins); err != nil {
+			s.configMu.Lock()
+			s.config.Providers.Plugins = oldPlugins
+			s.configMu.Unlock()
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		if err := s.PersistConfig(); err != nil {
+			log.Printf("failed to persist config: %v", err)
+			http.Error(w, "failed to persist config to disk", http.StatusInternalServerError)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		b, _ := json.Marshal(newPlugins)
+		w.Write(b)
+	}))
+
+	// GET /_torana/api/feed — one-shot JSON snapshot of recent events,
+	// newest-first (up to the ring-buffer capacity, default 200).
+	mux.HandleFunc("/_torana/api/feed", s.controlPlaneGuard(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		snap := s.feed.Snapshot()
+		if snap == nil {
+			// Return an empty JSON array instead of null for API ergonomics.
+			w.Write([]byte("[]"))
+			return
+		}
+		b, _ := json.Marshal(snap)
+		w.Write(b)
+	}))
+
+	// GET /_torana/api/stream — SSE stream of live RequestEvents.
+	// On connect the current snapshot is replayed (oldest-to-newest) so the
+	// client gets a consistent view, then new events are pushed as they arrive.
+	// The stream honors request-context cancellation (client disconnect).
+	mux.HandleFunc("/_torana/api/stream", s.controlPlaneGuard(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			http.Error(w, "streaming not supported", http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("Connection", "keep-alive")
+
+		// Subscribe and capture the snapshot atomically under one lock, so an
+		// event arriving between snapshot and subscribe is never delivered twice.
+		snap, ch, unsub := s.feed.SubscribeWithSnapshot()
+		defer unsub()
+
+		// Replay existing events oldest-first so the client sees a coherent
+		// history in chronological order before live events begin.
+		if len(snap) > 0 {
+			for i := len(snap) - 1; i >= 0; i-- {
+				b, err := json.Marshal(snap[i])
+				if err != nil {
+					continue
+				}
+				fmt.Fprintf(w, "data: %s\n\n", b)
+			}
+			flusher.Flush()
+		}
+
+		ctx := r.Context()
+		for {
+			select {
+			case <-ctx.Done():
+				// Client disconnected.
+				return
+			case ev, ok := <-ch:
+				if !ok {
+					// Channel closed by unsub (shouldn't happen before ctx cancel,
+					// but handle it gracefully).
+					return
+				}
+				b, err := json.Marshal(ev)
+				if err != nil {
+					continue
+				}
+				fmt.Fprintf(w, "data: %s\n\n", b)
+				flusher.Flush()
+			}
+		}
+	}))
+
+	// /_torana/plugin/<name>/* — per-plugin HTTP namespace.
+	//
+	// Plugins that declare the run_on_http_request hook and the env.serve_http
+	// permission can serve their own HTTP UI/API under this prefix. The route
+	// is NON-chat: it does NOT go through the Director or ReverseProxy.
+	mux.HandleFunc("/_torana/plugin/", s.controlPlaneGuard(func(w http.ResponseWriter, r *http.Request) {
+		// Parse plugin name: first path segment after /_torana/plugin/.
+		rest := strings.TrimPrefix(r.URL.Path, "/_torana/plugin/")
+		var pluginName, pluginRelPath string
+		if idx := strings.IndexByte(rest, '/'); idx >= 0 {
+			pluginName = rest[:idx]
+			pluginRelPath = rest[idx:] // retains the leading '/'
+		} else {
+			pluginName = rest
+			pluginRelPath = "/"
+		}
+		if pluginName == "" {
+			http.Error(w, "plugin name required", http.StatusNotFound)
+			return
+		}
+
+		// Load the pinned pipeline. No pipeline → service unavailable.
+		raw := s.pluginPipeline.Load()
+		if raw == nil {
+			http.Error(w, "plugin pipeline not available", http.StatusServiceUnavailable)
+			return
+		}
+		pp := raw.(*plugin.PluginPipeline)
+		if !pp.TryAcquire() {
+			http.Error(w, "plugin pipeline draining", http.StatusServiceUnavailable)
+			return
+		}
+		defer pp.Release()
+
+		// Build the pb.HttpRequest from the incoming net/http request.
+		var bodyBytes []byte
+		if r.Body != nil {
+			lr := io.LimitReader(r.Body, maxBodySize+1)
+			var readErr error
+			bodyBytes, readErr = io.ReadAll(lr)
+			r.Body.Close()
+			if readErr != nil {
+				http.Error(w, "read body", http.StatusInternalServerError)
+				return
+			}
+			if int64(len(bodyBytes)) > maxBodySize {
+				http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
+				return
+			}
+		}
+		headersJSON, _ := json.Marshal(map[string][]string(r.Header))
+		httpReq := &pb.HttpRequest{
+			Method:      r.Method,
+			Path:        pluginRelPath,
+			HeadersJson: headersJSON,
+			Body:        bodyBytes,
+		}
+
+		reqID := reqCounter.Add(1)
+		resp, err := pp.RunOnHTTPRequest(r.Context(), reqID, pluginName, httpReq)
+		if err != nil {
+			if errors.Is(err, plugin.ErrServeHTTPForbidden) {
+				http.Error(w, "plugin lacks env.serve_http permission", http.StatusForbidden)
+				return
+			}
+			log.Printf("[proxy] /_torana/plugin/%s: %v", pluginName, err)
+			http.Error(w, "plugin dispatch error", http.StatusServiceUnavailable)
+			return
+		}
+		if resp == nil {
+			http.Error(w, "plugin not found or did not handle request", http.StatusNotFound)
+			return
+		}
+
+		// Write the plugin's response.
+		if len(resp.HeadersJson) > 0 {
+			var hdrs map[string][]string
+			if err := json.Unmarshal(resp.HeadersJson, &hdrs); err == nil {
+				for k, vals := range hdrs {
+					for _, v := range vals {
+						w.Header().Add(k, v)
+					}
+				}
+			}
+		}
+		status := int(resp.Status)
+		if status == 0 {
+			status = http.StatusOK
+		}
+		w.WriteHeader(status)
+		if len(resp.Body) > 0 {
+			w.Write(resp.Body)
+		}
+	}))
+
+	// GET /_torana/ — embedded SPA dashboard.
+	spaHandler := http.StripPrefix("/_torana/", controlplane.Handler())
+	mux.Handle("/_torana/", s.controlPlaneGuard(spaHandler.ServeHTTP))
+
+	// GET /_torana — redirect to /_torana/
+	mux.HandleFunc("/_torana", s.controlPlaneGuard(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/_torana/", http.StatusMovedPermanently)
+	}))
+
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		currentCfg := s.GetConfig()
 		// Panic recovery for the request handler goroutine.
@@ -878,9 +1424,28 @@ func New(cfg Config) (*Server, error) {
 		// Host request metrics: latency + outcome, labeled by model/provider.
 		// The host sees every response (including errors and vetoes), so this
 		// is the reliable source of truth for latency and status.
-		metrics.RecordProxyRequest(r.Context(), rs.Model, rs.Provider, tw.status, float64(time.Since(rs.Start).Microseconds())/1000)
+		latencyMS := float64(time.Since(rs.Start).Microseconds()) / 1000
+		metrics.RecordProxyRequest(r.Context(), rs.Model, rs.Provider, tw.status, latencyMS)
 		metrics.RecordTokens(r.Context(), rs.Model, rs.Provider, rs.UsageIn, rs.UsageOut)
 		metrics.RecordCacheTokens(r.Context(), rs.Model, rs.Provider, rs.UsageCacheRead, rs.UsageCacheWrite)
+		// Record a per-request event in the live feed (control-plane dashboard).
+		// Add is O(1) and non-blocking — it never stalls the request goroutine.
+		// TODO(controlplane): populate Plugins once the pipeline exposes which
+		// plugins ran for this request ID.
+		s.feed.Add(metrics.RequestEvent{
+			Timestamp:        rs.Start.UTC().Format(time.RFC3339Nano),
+			Provider:         rs.Provider,
+			Model:            rs.Model,
+			Status:           tw.status,
+			LatencyMS:        latencyMS,
+			TokensIn:         int64(rs.UsageIn),
+			TokensOut:        int64(rs.UsageOut),
+			CacheReadTokens:  int64(rs.UsageCacheRead),
+			CacheWriteTokens: int64(rs.UsageCacheWrite),
+			BytesIn:          tr.bytesRead,
+			BytesOut:         tw.bytesWritten,
+			Verdict:          rs.Verdict,
+		})
 	})
 
 	srv := &http.Server{
@@ -907,6 +1472,52 @@ func New(cfg Config) (*Server, error) {
 
 // --- Lifecycle --------------------------------------------------------------
 
+func (s *Server) controlPlaneGuard(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		cpCfg := s.GetConfig().Providers.ControlPlane
+
+		isLoopback := false
+		if r.RemoteAddr != "" {
+			host, _, err := net.SplitHostPort(r.RemoteAddr)
+			if err != nil {
+				host = r.RemoteAddr
+			}
+			if ip := net.ParseIP(host); ip != nil {
+				isLoopback = ip.IsLoopback()
+			}
+		}
+
+		if isLoopback {
+			next(w, r)
+			return
+		}
+
+		if !cpCfg.AllowRemote {
+			http.Error(w, "control plane is localhost-only", http.StatusForbidden)
+			return
+		}
+
+		if cpCfg.Token == "" {
+			http.Error(w, "control plane remote access requires a token", http.StatusForbidden)
+			return
+		}
+
+		reqToken := r.Header.Get("X-Torana-Token")
+		if reqToken == "" {
+			if auth := r.Header.Get("Authorization"); len(auth) > 7 && strings.EqualFold(auth[:7], "bearer ") {
+				reqToken = auth[7:]
+			}
+		}
+
+		if subtle.ConstantTimeCompare([]byte(reqToken), []byte(cpCfg.Token)) != 1 {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+
+		next(w, r)
+	}
+}
+
 func (s *Server) GetConfig() Config {
 	s.configMu.RLock()
 	defer s.configMu.RUnlock()
@@ -929,6 +1540,318 @@ func (s *Server) SetProviders(cfg provider.Config) {
 	log.Printf("config hot-reload: %d providers loaded", len(cfg.Providers))
 }
 
+func (s *Server) resolveSecret(envName, encVal string) string {
+	if envName != "" {
+		if val := os.Getenv(envName); val != "" {
+			return val
+		}
+	}
+	if encVal != "" {
+		if s.secrets == nil {
+			log.Printf("failed to decrypt secret: store is not initialized")
+			return ""
+		}
+		val, err := s.secrets.Decrypt(encVal)
+		if err != nil {
+			log.Printf("failed to decrypt secret: %v", err)
+			return ""
+		}
+		return val
+	}
+	return ""
+}
+
+func (s *Server) normalizeSecretField(incomingEnc, storedEnc string) (string, error) {
+	switch {
+	case incomingEnc == secretSetSentinel:
+		return storedEnc, nil
+	case incomingEnc == "":
+		return "", nil
+	case secret.IsEncrypted(incomingEnc):
+		return incomingEnc, nil
+	default:
+		if s.secrets == nil {
+			return "", fmt.Errorf("secret store is not initialized")
+		}
+		return s.secrets.Encrypt(incomingEnc)
+	}
+}
+
+func redactConfigSecrets(cfg provider.Config) provider.Config {
+	cfg.ControlPlane.Token = ""
+	if cfg.Providers != nil {
+		provs := make(map[string]provider.Provider, len(cfg.Providers))
+		for name, p := range cfg.Providers {
+			if p.APIKeyEnc != "" {
+				p.APIKeyEnc = secretSetSentinel
+			}
+			provs[name] = p
+		}
+		cfg.Providers = provs
+	}
+	if cfg.Offload.APIKeyEnc != "" {
+		cfg.Offload.APIKeyEnc = secretSetSentinel
+	}
+	if cfg.Cache.Redis.PasswordEnc != "" {
+		cfg.Cache.Redis.PasswordEnc = secretSetSentinel
+	}
+	return cfg
+}
+
+// currentCache returns the active cache store under the guard mutex.
+func (s *Server) currentCache() cache.Store {
+	s.cacheMu.RLock()
+	defer s.cacheMu.RUnlock()
+	return s.sharedCache
+}
+
+// setCache atomically swaps the active cache store.
+func (s *Server) setCache(c cache.Store) {
+	s.cacheMu.Lock()
+	s.sharedCache = c
+	s.cacheMu.Unlock()
+}
+
+// newRuntime wires host callbacks for a WASM runtime.
+func (s *Server) newRuntime() *wasm.Runtime {
+	rt := wasm.NewRuntimeWithCache(context.Background(), s.currentCache())
+	// Offload completion handler (cheap-model tool result
+	// summarization), recording failures in /stats.
+	rt.OffloadFunc = func(ctx context.Context, payloadJSON string) (string, error) {
+		out, err := s.offloadCompletion(ctx, payloadJSON)
+		if err != nil {
+			// Plugins degrade gracefully on offload errors, so this
+			// log line is the only host-side visibility.
+			log.Printf("[offload] %v", err)
+			s.stats.RecordOffloadFailure()
+		}
+		return out, err
+	}
+	// Plugins report compaction savings via torana_record_savings,
+	// attributed per plugin in /stats and OTLP.
+	rt.SavingsFunc = func(pluginName string, originalBytes, finalBytes int64) {
+		s.stats.RecordCompaction(pluginName, originalBytes, finalBytes)
+		metrics.RecordPluginSavings(context.Background(), pluginName, originalBytes-finalBytes)
+	}
+	// Pristine request/response snapshots (env.original_request /
+	// env.original_response), read from the request state the same
+	// way offload does.
+	rt.OriginalRequestFunc = func(ctx context.Context) []byte {
+		return reqStateFrom(ctx).OriginalReq
+	}
+	rt.OriginalResponseFunc = func(ctx context.Context) []byte {
+		return reqStateFrom(ctx).OriginalResp
+	}
+	return rt
+}
+
+// rebuildPipelineLocked swaps in a fresh pipeline (using the current
+// s.sharedCache) and returns the displaced pipeline, undrained. Caller holds rebuildMu.
+func (s *Server) rebuildPipelineLocked(pcfg provider.PluginsConfig) (*plugin.PluginPipeline, error) {
+	rt := s.newRuntime()
+	pp, err := plugin.NewPipeline(rt, plugin.PluginConfig{
+		Dir:    pcfg.Dir,
+		Order:  pcfg.Order,
+		Config: pcfg.Config,
+	})
+	if err != nil {
+		rt.Close()
+		return nil, err
+	}
+
+	old := s.pluginPipeline.Swap(pp)
+	if old != nil {
+		return old.(*plugin.PluginPipeline), nil
+	}
+	return nil, nil
+}
+
+// RebuildPipeline builds a fresh runtime + plugin pipeline using pcfg,
+// then atomically swaps the active pipeline and drains the old one.
+// If reloading fails (e.g. ordering constraint violation), returns the error
+// without swapping the active pipeline.
+func (s *Server) RebuildPipeline(pcfg provider.PluginsConfig) error {
+	s.rebuildMu.Lock()
+	defer s.rebuildMu.Unlock()
+
+	old, err := s.rebuildPipelineLocked(pcfg)
+	if err != nil {
+		return err
+	}
+	if old != nil {
+		go old.DrainAndClose()
+	}
+	return nil
+}
+
+// ReconfigureCache rebuilds the shared cache store from newCache and atomically
+// swaps the plugin pipeline to use the new store. The displaced pipeline and
+// old store are drained and closed asynchronously after in-flight requests finish.
+func (s *Server) ReconfigureCache(newCache cache.Config) error {
+	s.rebuildMu.Lock()
+	defer s.rebuildMu.Unlock()
+
+	newCache.Redis.Password = s.resolveSecret(newCache.Redis.PasswordEnv, newCache.Redis.PasswordEnc)
+	newStore, err := cache.New(newCache)
+	if err != nil {
+		return err
+	}
+
+	oldStore := s.currentCache()
+	s.setCache(newStore)
+
+	old, err := s.rebuildPipelineLocked(s.GetConfig().Providers.Plugins)
+	if err != nil {
+		s.setCache(oldStore)
+		newStore.Close()
+		return err
+	}
+
+	go func() {
+		if old != nil {
+			old.DrainAndClose()
+		}
+		if oldStore != nil {
+			oldStore.Close()
+		}
+	}()
+
+	s.configMu.Lock()
+	s.config.Providers.Cache = newCache
+	s.configMu.Unlock()
+
+	return nil
+}
+
+// PersistConfig saves the current in-memory provider configuration to disk.
+// The 5s modtime poller (provider.WatchConfig) will observe Save()'s write
+// and call SetProviders again (benign; it does not rebuild the pipeline).
+// Atomic rename prevents a half-written read.
+func (s *Server) PersistConfig() error {
+	path := s.configPath
+	if path == "" {
+		path = "config.json"
+	}
+	return provider.Save(path, s.GetConfig().Providers)
+}
+
+func (s *Server) setListener(ln net.Listener) {
+	s.listenerMu.Lock()
+	defer s.listenerMu.Unlock()
+	s.listener = ln
+}
+
+func (s *Server) swapListener(ln net.Listener) net.Listener {
+	s.listenerMu.Lock()
+	defer s.listenerMu.Unlock()
+	old := s.listener
+	s.listener = ln
+	return old
+}
+
+func (s *Server) currentPort() int {
+	s.configMu.RLock()
+	defer s.configMu.RUnlock()
+	if s.config.Providers.Port > 0 {
+		return s.config.Providers.Port
+	}
+	if p, err := strconv.Atoi(s.config.Port); err == nil {
+		return p
+	}
+	return 8080
+}
+
+// applyMITM (re)configures the MITM ingress to match cfg with no restart:
+// it tears down any running ingress, then starts a fresh one if enabled.
+func (s *Server) applyMITM(cfg provider.MITMConfig) error {
+	s.mitmMu.Lock()
+	defer s.mitmMu.Unlock()
+	if !cfg.Enabled {
+		if s.mitmSrv != nil {
+			s.mitmSrv.Close() // stops the old CONNECT listener; frees the addr
+			s.mitmSrv = nil
+		}
+		return nil
+	}
+	// Build (and validate) the new ingress BEFORE tearing down the old one. A
+	// bad config (e.g. missing ca_dir) must not take down a running ingress —
+	// otherwise a rejected settings PUT leaves the operator with no MITM at all.
+	m, err := mitm.New(cfg, s.Handler())
+	if err != nil {
+		return err
+	}
+	// Only now that the new server is validated, stop the old one and free its
+	// CONNECT addr so the new bind (which may reuse the same addr) can succeed.
+	if s.mitmSrv != nil {
+		s.mitmSrv.Close()
+		s.mitmSrv = nil
+	}
+	go func() {
+		if err := m.ListenAndServe(); err != nil {
+			log.Printf("mitm ingress stopped: %v", err)
+		}
+	}()
+	s.mitmSrv = m
+	return nil
+}
+
+// Start binds the initial listener on bindHost:<current port> and serves it in
+// the background. Non-blocking; returns the bind error only.
+func (s *Server) Start(bindHost string) error {
+	s.listenerMu.Lock()
+	s.bindHost = bindHost
+	s.listenerMu.Unlock()
+	ln, err := net.Listen("tcp", net.JoinHostPort(bindHost, strconv.Itoa(s.currentPort())))
+	if err != nil {
+		return err
+	}
+	s.setListener(ln)
+	s.serveOnListener(ln)
+	if err := s.applyMITM(s.config.Providers.MITM); err != nil {
+		return fmt.Errorf("mitm: %w", err)
+	}
+	return nil
+}
+
+// serveOnListener runs httpServer.Serve(ln) in a goroutine. A listener closed
+// for a port swap surfaces as a non-ErrServerClosed error here — that is
+// expected and must NOT be fatal.
+func (s *Server) serveOnListener(ln net.Listener) {
+	go func() {
+		if err := s.httpServer.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) && !errors.Is(err, net.ErrClosed) {
+			log.Printf("listener %s stopped: %v", ln.Addr(), err)
+		}
+	}()
+}
+
+// SetPort rebinds to newPort with no restart: bind the new listener, start
+// serving it, then close the old listener (drains in-flight). On bind failure
+// the old listener keeps serving and an error is returned.
+func (s *Server) SetPort(newPort int) error {
+	s.listenerMu.Lock()
+	bindHost := s.bindHost
+	s.listenerMu.Unlock()
+
+	ln, err := net.Listen("tcp", net.JoinHostPort(bindHost, strconv.Itoa(newPort)))
+	if err != nil {
+		return err
+	}
+	s.serveOnListener(ln)
+	old := s.swapListener(ln)
+	if old != nil {
+		old.Close()
+	}
+	// reflect the new port in config + the http.Server Addr
+	s.configMu.Lock()
+	s.config.Providers.Port = newPort
+	s.config.Port = strconv.Itoa(newPort)
+	if s.httpServer != nil {
+		s.httpServer.Addr = ":" + strconv.Itoa(newPort)
+	}
+	s.configMu.Unlock()
+	return nil
+}
+
 func (s *Server) ListenAndServe() error {
 	cfg := s.GetConfig()
 	log.Printf("Torana Edge → :%s  providers: %d", cfg.Port, len(cfg.Providers.Providers))
@@ -939,6 +1862,7 @@ func (s *Server) ListenAndServe() error {
 }
 
 func (s *Server) Serve(ln net.Listener) error {
+	s.setListener(ln)
 	cfg := s.GetConfig()
 	log.Printf("Torana Edge → %s  providers: %d", ln.Addr(), len(cfg.Providers.Providers))
 	if err := s.httpServer.Serve(ln); err != nil && err != http.ErrServerClosed {
@@ -954,6 +1878,12 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	if s.watchDone != nil {
 		<-s.watchDone
 	}
+	s.mitmMu.Lock()
+	if s.mitmSrv != nil {
+		s.mitmSrv.Close()
+		s.mitmSrv = nil
+	}
+	s.mitmMu.Unlock()
 	// Stop accepting new requests and let HTTP cancellation unblock streams
 	// before waiting for their pinned plugin pipeline.
 	if s.httpServer != nil {
@@ -965,9 +1895,14 @@ func (s *Server) Shutdown(ctx context.Context) error {
 		pp.(*plugin.PluginPipeline).DrainAndClose()
 	}
 	s.rateLimiter.Close()
+	s.rebuildMu.Lock()
+	s.cacheMu.Lock()
 	if s.sharedCache != nil {
 		s.sharedCache.Close()
+		s.sharedCache = nil
 	}
+	s.cacheMu.Unlock()
+	s.rebuildMu.Unlock()
 	return nil
 }
 

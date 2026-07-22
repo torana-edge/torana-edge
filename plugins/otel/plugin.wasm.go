@@ -5,8 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/torana-edge/torana-edge/pkg/pb"
-	sdk "github.com/torana-edge/torana-edge/pkg/plugin-sdk"
+	"github.com/torana-edge/torana-edge/sdk/pb"
+	sdk "github.com/torana-edge/torana-edge/sdk/plugin-sdk"
 )
 
 func main() {}
@@ -59,7 +59,28 @@ func init() {
 		}
 		return nil, nil
 	})
+
+	// Serve a tiny status page at /_torana/plugin/otel/.
+	// This demonstrates the run_on_http_request ABI: the page is intentionally
+	// minimal — a proof of the per-plugin HTTP namespace, not a real dashboard.
+	sdk.OnHTTPRequest(func(ctx context.Context, req *pb.HttpRequest) (*pb.HttpResponse, error) {
+		body := []byte(`<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Torana otel plugin</title></head>
+<body><h1>Torana otel plugin</h1></body>
+</html>`)
+		hdrsJSON, _ := json.Marshal(map[string][]string{
+			"Content-Type": {"text/html; charset=utf-8"},
+		})
+		return &pb.HttpResponse{
+			Status:      200,
+			HeadersJson: hdrsJSON,
+			Body:        body,
+			Handled:     true,
+		}, nil
+	})
 }
+
 
 func statusClass(status int) string {
 	switch {

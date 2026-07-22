@@ -4,7 +4,7 @@ package plugin_sdk
 
 import (
 	"context"
-	"github.com/torana-edge/torana-edge/pkg/pb"
+	"github.com/torana-edge/torana-edge/sdk/pb"
 )
 
 //nolint:unused
@@ -20,6 +20,8 @@ func OnBeforeRequest(handler func(ctx context.Context, req *pb.ChatRequest) (*pb
 func OnAfterResponse(handler func(ctx context.Context, resp *pb.ChatRequest) (*pb.ChatRequest, error)) {
 }
 func OnStreamChunk(handler func(ctx context.Context, chunk *pb.StreamEvent) (*pb.StreamEventResult, error)) {
+}
+func OnHTTPRequest(handler func(ctx context.Context, req *pb.HttpRequest) (*pb.HttpResponse, error)) {
 }
 
 func Pass() *pb.StreamEventResult     { return nil }
