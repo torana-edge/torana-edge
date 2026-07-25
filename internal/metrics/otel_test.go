@@ -6,6 +6,8 @@ import (
 
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
+
+	"github.com/torana-edge/torana-edge/internal/economics"
 )
 
 // collect installs a manual-reader meter and returns a collect function.
@@ -14,13 +16,38 @@ func collect(t *testing.T) func() metricdata.ResourceMetrics {
 	reader := sdkmetric.NewManualReader()
 	provider := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
 	initInstruments(provider.Meter("test"))
-	t.Cleanup(func() { meter = nil; reqDuration = nil; reqTotal = nil; tokensTotal = nil; pluginSaved = nil })
+	t.Cleanup(func() {
+		meter = nil
+		reqDuration, reqTotal, tokensTotal, pluginSaved = nil, nil, nil, nil
+		compactionApplications, compactionEstimatedTokens = nil, nil
+		compactionEstimatedUSD, compactionUnavailable = nil, nil
+	})
 	return func() metricdata.ResourceMetrics {
 		var rm metricdata.ResourceMetrics
 		if err := reader.Collect(context.Background(), &rm); err != nil {
 			t.Fatalf("collect: %v", err)
 		}
 		return rm
+	}
+}
+
+func TestRecordCompactionEconomics(t *testing.T) {
+	do := collect(t)
+	read, write := 0.5, 1.0
+	pricing := economics.ModelPricing{CacheReadUSDPerMTok: &read, CacheWriteUSDPerMTok: &write}
+	RecordCompactionEconomics(context.Background(), "compactor", economics.CompactionReport{
+		OriginalBytes: 40_000, FinalBytes: 4_000, EstimatedTokensRemoved: 9_000,
+		EstimatedRewriteSpanTokens: 2_000, Source: "transformation",
+	}, &pricing, nil)
+	names := metricNames(do())
+	for _, want := range []string{
+		"torana_compaction_applications_total",
+		"torana_compaction_estimated_tokens_total",
+		"torana_compaction_estimated_usd_total",
+	} {
+		if !names[want] {
+			t.Fatalf("missing economics metric %q: %v", want, names)
+		}
 	}
 }
 

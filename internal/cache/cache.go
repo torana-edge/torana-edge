@@ -1,14 +1,14 @@
 // Package cache provides a TTL-evicting key-value store used by the WASM
 // runtime for cross-request plugin state (extracted intents, compacted tool
-// results — keyed by tool_call_id). The local memory implementation uses
-// sync.RWMutex with background TTL eviction; a Redis-backed implementation
-// can be added later behind the same Store interface.
+// results). The local implementation combines TTL expiry with entry/byte-bounded
+// LRU eviction; Redis uses the same Store interface and server-side eviction.
 //
 // Resurrected from the pre-WASM-migration intent cache (a2ca3e3) that fixed
 // "intent cache grows forever" (torana-edge#6).
 package cache
 
 import (
+	"container/list"
 	"sync"
 	"time"
 )
@@ -36,9 +36,13 @@ type Store interface {
 // LocalCache is an in-memory Store with TTL-based eviction.
 // A background goroutine periodically cleans expired entries.
 type LocalCache struct {
-	mu      sync.RWMutex
-	entries map[string]cacheEntry
-	ttl     time.Duration
+	mu         sync.Mutex
+	entries    map[string]*cacheEntry
+	lru        *list.List
+	ttl        time.Duration
+	maxEntries int
+	maxBytes   int
+	bytes      int
 
 	// Eviction control.
 	stopCh    chan struct{}
@@ -47,19 +51,31 @@ type LocalCache struct {
 }
 
 type cacheEntry struct {
+	key       string
 	value     string
 	expiresAt time.Time
+	size      int
+	element   *list.Element
 }
 
 // NewLocalCache creates a LocalCache with the given TTL. A background
 // goroutine evicts expired entries every ttl/2 (at least every second).
 // Call Close() to stop the eviction goroutine.
 func NewLocalCache(ttl time.Duration) *LocalCache {
+	return NewLocalCacheWithLimits(ttl, DefaultMaxEntries, DefaultMaxBytes)
+}
+
+// NewLocalCacheWithLimits creates a TTL cache with LRU admission bounds.
+// Values larger than maxBytes are not admitted.
+func NewLocalCacheWithLimits(ttl time.Duration, maxEntries, maxBytes int) *LocalCache {
 	l := &LocalCache{
-		entries: make(map[string]cacheEntry),
-		ttl:     ttl,
-		stopCh:  make(chan struct{}),
-		doneCh:  make(chan struct{}),
+		entries:    make(map[string]*cacheEntry),
+		lru:        list.New(),
+		ttl:        ttl,
+		maxEntries: maxEntries,
+		maxBytes:   maxBytes,
+		stopCh:     make(chan struct{}),
+		doneCh:     make(chan struct{}),
 	}
 	go l.evictLoop()
 	return l
@@ -67,37 +83,53 @@ func NewLocalCache(ttl time.Duration) *LocalCache {
 
 func (l *LocalCache) Set(key, value string) {
 	l.mu.Lock()
-	l.entries[key] = cacheEntry{
+	defer l.mu.Unlock()
+	if old := l.entries[key]; old != nil {
+		l.removeLocked(old)
+	}
+	size := len(key) + len(value)
+	if l.maxBytes > 0 && size > l.maxBytes {
+		return
+	}
+	e := &cacheEntry{
+		key:       key,
 		value:     value,
 		expiresAt: time.Now().Add(l.ttl),
+		size:      size,
 	}
-	l.mu.Unlock()
+	e.element = l.lru.PushFront(e)
+	l.entries[key] = e
+	l.bytes += size
+	l.evictBoundsLocked()
 }
 
 func (l *LocalCache) Get(key string) (string, bool) {
-	l.mu.RLock()
+	l.mu.Lock()
+	defer l.mu.Unlock()
 	e, ok := l.entries[key]
-	l.mu.RUnlock()
 	if !ok {
 		return "", false
 	}
 	if time.Now().After(e.expiresAt) {
-		l.Delete(key)
+		l.removeLocked(e)
 		return "", false
 	}
+	l.lru.MoveToFront(e.element)
 	return e.value, true
 }
 
 func (l *LocalCache) Delete(key string) {
 	l.mu.Lock()
-	delete(l.entries, key)
+	if e := l.entries[key]; e != nil {
+		l.removeLocked(e)
+	}
 	l.mu.Unlock()
 }
 
 func (l *LocalCache) Len() int {
-	l.mu.RLock()
+	l.mu.Lock()
 	n := len(l.entries)
-	l.mu.RUnlock()
+	l.mu.Unlock()
 	return n
 }
 
@@ -131,10 +163,27 @@ func (l *LocalCache) evictLoop() {
 func (l *LocalCache) evict() {
 	now := time.Now()
 	l.mu.Lock()
-	for id, e := range l.entries {
+	for _, e := range l.entries {
 		if now.After(e.expiresAt) {
-			delete(l.entries, id)
+			l.removeLocked(e)
 		}
 	}
 	l.mu.Unlock()
+}
+
+func (l *LocalCache) evictBoundsLocked() {
+	for (l.maxEntries > 0 && len(l.entries) > l.maxEntries) ||
+		(l.maxBytes > 0 && l.bytes > l.maxBytes) {
+		back := l.lru.Back()
+		if back == nil {
+			return
+		}
+		l.removeLocked(back.Value.(*cacheEntry))
+	}
+}
+
+func (l *LocalCache) removeLocked(e *cacheEntry) {
+	delete(l.entries, e.key)
+	l.lru.Remove(e.element)
+	l.bytes -= e.size
 }

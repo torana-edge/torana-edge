@@ -530,7 +530,8 @@ func TestIntentBridgeFeedsKeywordCompactor(t *testing.T) {
 	requireWASM(t, "../../plugins/intent/plugin.wasm")
 	requireWASM(t, "../../plugins/keyword_compactor/plugin.wasm")
 	store := cache.NewLocalCache(time.Minute)
-	pp := newTestPipelineWith(t, "../../plugins", []string{"intent", "keyword_compactor"}, store, nil)
+	pp := newTestPipelineWith(t, "../../plugins", []string{"intent", "keyword_compactor"}, store,
+		map[string]json.RawMessage{"keyword_compactor": json.RawMessage(`{"tool_policies":[{"match":"read","mode":"keyword"}]}`)})
 
 	// Turn 1 response: intent captured under the response-stream ID.
 	run(t, pp, toolStart(0, "call_resp_9", "read"))
@@ -591,12 +592,13 @@ func TestIntentBridgeFeedsKeywordCompactor(t *testing.T) {
 // Once a later assistant message exists, historical results may be compacted,
 // including old results in a request that also contains a fresh round.
 func TestCompactorsRespectToolResultConsumptionBoundary(t *testing.T) {
-	const compacted = "compacted historical result"
-
 	for _, pluginName := range []string{"keyword_compactor", "compactor"} {
 		pluginName := pluginName
 		t.Run(pluginName, func(t *testing.T) {
 			requireWASM(t, "../../plugins/"+pluginName+"/plugin.wasm")
+			config := map[string]json.RawMessage{
+				pluginName: json.RawMessage(`{"tool_policies":[{"match":"read","mode":"deterministic"}]}`),
+			}
 
 			for _, tc := range []struct {
 				name          string
@@ -644,14 +646,7 @@ func TestCompactorsRespectToolResultConsumptionBoundary(t *testing.T) {
 			} {
 				t.Run(tc.name, func(t *testing.T) {
 					store := cache.NewLocalCache(time.Minute)
-					for id := range tc.wantCompacted {
-						if pluginName == "keyword_compactor" {
-							store.Set("intent:"+id, "needle")
-						} else {
-							store.Set("compacted:"+id, compacted)
-						}
-					}
-					pp := newTestPipelineWith(t, "../../plugins", []string{pluginName}, store, nil)
+					pp := newTestPipelineWith(t, "../../plugins", []string{pluginName}, store, config)
 					out, err := pp.RunBeforeRequest(context.Background(), 1, &engine.ChatRequest{Messages: tc.messages})
 					if err != nil {
 						t.Fatalf("RunBeforeRequest: %v", err)
@@ -680,6 +675,137 @@ func TestCompactorsRespectToolResultConsumptionBoundary(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestCompactorToolPolicies(t *testing.T) {
+	for _, pluginName := range []string{"keyword_compactor", "compactor"} {
+		pluginName := pluginName
+		t.Run(pluginName, func(t *testing.T) {
+			requireWASM(t, "../../plugins/"+pluginName+"/plugin.wasm")
+
+			t.Run("explicit first pass deterministic", func(t *testing.T) {
+				out := runToolPolicyRequest(t, pluginName,
+					`{"tool_policies":[{"match":"WEB_*","mode":"deterministic","first_pass":true,"rerun":"Repeat the original query."}]}`,
+					[]engine.Message{toolCallNamedMessage("fresh", "web_search"), toolResultNamedMessage("fresh", "Web_Search")})
+				got := toolResultContent(t, out, "fresh")
+				if !strings.HasPrefix(got, "[torana-tool-output v1]\n") || !strings.Contains(got, "rerun: Repeat the original query.") {
+					t.Fatalf("first-pass deterministic policy did not produce a recoverable marker: %q", got)
+				}
+			})
+
+			t.Run("resolves missing result tool name", func(t *testing.T) {
+				out := runToolPolicyRequest(t, pluginName,
+					`{"tool_policies":[{"match":"web_search","mode":"deterministic","first_pass":true}]}`,
+					[]engine.Message{toolCallNamedMessage("unnamed", "web_search"), toolResultNamedMessage("unnamed", "")})
+				got := toolResultContent(t, out, "unnamed")
+				if !strings.Contains(got, "tool: web_search") {
+					t.Fatalf("policy did not recover tool name from prior call: %q", got)
+				}
+			})
+
+			t.Run("source remains exact after aging", func(t *testing.T) {
+				messages := sourceHistory("source-exact", 5)
+				out := runToolPolicyRequest(t, pluginName,
+					`{"tool_policies":[{"match":"read_file","mode":"source","rerun":"Read the file again."}]}`,
+					messages)
+				if got := toolResultContent(t, out, "source-exact"); got != largeToolResult() {
+					t.Fatalf("source mode must fail closed to exact after loop-prone dogfood: %q", got)
+				}
+			})
+
+			t.Run("unknown and safety sensitive stay exact", func(t *testing.T) {
+				for _, toolName := range []string{"unknown_tool", "apply_patch", "git_diff"} {
+					config := `{"tool_policies":[{"match":"*","mode":"deterministic","first_pass":true}]}`
+					if toolName == "unknown_tool" {
+						config = `{"tool_policies":[{"match":"web_search","mode":"deterministic","first_pass":true}]}`
+					}
+					messages := []engine.Message{
+						toolCallNamedMessage("safe", toolName),
+						toolResultNamedMessage("safe", toolName),
+						{Role: engine.RoleAssistant, Content: "consumed"},
+					}
+					out := runToolPolicyRequest(t, pluginName, config, messages)
+					if got := toolResultContent(t, out, "safe"); got != largeToolResult() {
+						t.Fatalf("tool %q should remain exact, got %q", toolName, got)
+					}
+				}
+			})
+
+			t.Run("replacement stable across raw replays", func(t *testing.T) {
+				store := cache.NewLocalCache(time.Minute)
+				cfg := map[string]json.RawMessage{pluginName: json.RawMessage(
+					`{"tool_policies":[{"match":"web_search","mode":"deterministic","first_pass":true}]}`)}
+				pp := newTestPipelineWith(t, "../../plugins", []string{pluginName}, store, cfg)
+				request := func() *engine.ChatRequest {
+					return &engine.ChatRequest{Messages: []engine.Message{
+						toolCallNamedMessage("replay", "web_search"), toolResultNamedMessage("replay", "web_search"),
+					}}
+				}
+				first, err := pp.RunBeforeRequest(context.Background(), 1, request())
+				if err != nil {
+					t.Fatalf("first replay: %v", err)
+				}
+				second, err := pp.RunBeforeRequest(context.Background(), 2, request())
+				if err != nil {
+					t.Fatalf("second replay: %v", err)
+				}
+				if a, b := toolResultContent(t, first, "replay"), toolResultContent(t, second, "replay"); a != b {
+					t.Fatalf("canonical replacement changed across replays\nfirst: %q\nsecond: %q", a, b)
+				}
+			})
+		})
+	}
+
+	t.Run("model compactor ignores first_pass override", func(t *testing.T) {
+		requireWASM(t, "../../plugins/compactor/plugin.wasm")
+		out := runToolPolicyRequest(t, "compactor",
+			`{"tool_policies":[{"match":"web_search","mode":"model","first_pass":true}],"expected_applications":5}`,
+			[]engine.Message{toolCallNamedMessage("model-fresh", "web_search"), toolResultNamedMessage("model-fresh", "web_search")})
+		if got := toolResultContent(t, out, "model-fresh"); got != largeToolResult() {
+			t.Fatalf("model compactor summarized before one exact use: %q", got)
+		}
+	})
+}
+
+func runToolPolicyRequest(t *testing.T, pluginName, rawConfig string, messages []engine.Message) *engine.ChatRequest {
+	t.Helper()
+	store := cache.NewLocalCache(time.Minute)
+	pp := newTestPipelineWith(t, "../../plugins", []string{pluginName}, store,
+		map[string]json.RawMessage{pluginName: json.RawMessage(rawConfig)})
+	out, err := pp.RunBeforeRequest(context.Background(), 1, &engine.ChatRequest{Messages: messages})
+	if err != nil {
+		t.Fatalf("RunBeforeRequest: %v", err)
+	}
+	return out
+}
+
+func sourceHistory(id string, laterAssistants int) []engine.Message {
+	messages := []engine.Message{toolCallNamedMessage(id, "read_file"), toolResultNamedMessage(id, "read_file")}
+	for i := 0; i < laterAssistants; i++ {
+		messages = append(messages,
+			engine.Message{Role: engine.RoleAssistant, Content: "consumed"},
+			engine.Message{Role: engine.RoleUser, Content: "continue"})
+	}
+	return messages
+}
+
+func toolCallNamedMessage(id, name string) engine.Message {
+	return engine.Message{Role: engine.RoleAssistant, ToolCalls: []engine.ToolCall{{ID: id, Name: name}}}
+}
+
+func toolResultNamedMessage(id, name string) engine.Message {
+	return engine.Message{Role: engine.RoleTool, ToolCallID: id, ToolName: name, Content: largeToolResult()}
+}
+
+func toolResultContent(t *testing.T, req *engine.ChatRequest, id string) string {
+	t.Helper()
+	for _, message := range req.Messages {
+		if message.Role == engine.RoleTool && message.ToolCallID == id {
+			return message.Content
+		}
+	}
+	t.Fatalf("tool result %q missing", id)
+	return ""
 }
 
 func toolCallMessage(ids ...string) engine.Message {

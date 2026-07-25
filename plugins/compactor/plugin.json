@@ -1,6 +1,6 @@
 {
   "name": "compactor",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "Cheap-model tool result compaction guided by the intent plugin's cache; alternative to keyword_compactor — run ONE of the two, after 'intent'",
   "hooks": [
     {"name": "run_before_request", "priority": 200}
@@ -9,9 +9,10 @@
     {"name": "env.cache_get", "description": "Check intent and compaction cache"},
     {"name": "env.cache_set", "description": "Store compacted results"},
     {"name": "env.host_call.torana_offload_completion", "description": "Delegate to cheap model for summarization"},
+    {"name": "env.host_call.torana_evaluate_compaction", "description": "Apply model-generated replacements only when the batch has positive estimated net savings"},
     {"name": "env.host_call.torana_record_savings", "description": "Report compaction byte savings to /stats"},
     {"name": "env.emit_metric", "description": "Compaction eligibility and intent-miss metrics"},
-    {"name": "env.plugin_config", "description": "Read plugins.config.compactor (e.g. max_offload_input_chars)"},
+    {"name": "env.plugin_config", "description": "Read plugins.config.compactor (tool_policies, expected_applications, and max_offload_input_chars)"},
     {"name": "env.log", "description": "Diagnostic logging"}
   ]
 }
