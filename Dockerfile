@@ -1,6 +1,7 @@
 # Multi-arch Dockerfile for Torana Edge
 # Build: docker buildx build --platform linux/amd64,linux/arm64 -t torana-edge .
 FROM golang:1.26.4-alpine AS builder
+RUN apk add --no-cache make
 WORKDIR /app
 COPY go.mod go.sum ./
 RUN go mod download
