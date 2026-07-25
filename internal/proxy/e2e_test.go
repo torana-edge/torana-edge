@@ -162,7 +162,8 @@ func TestE2E(t *testing.T) {
 				},
 			},
 			Plugins: provider.PluginsConfig{
-				Dir: "../../plugins",
+				Dir:             "../../plugins",
+				AllowUnapproved: true,
 				// intent captures "i" into the cache; compactor consumes it.
 				// keyword_compactor is its ALTERNATIVE (either/or) and is
 				// deliberately not in this pipeline.
@@ -484,7 +485,7 @@ func TestHotReloadDuringInflightRequest(t *testing.T) {
 		Port: "0",
 		Providers: provider.Config{
 			Providers: map[string]provider.Provider{"oai": {URL: upstream.URL, Format: "openai"}},
-			Plugins:   provider.PluginsConfig{Dir: "../../plugins", Order: []string{"schema_translator"}},
+			Plugins:   provider.PluginsConfig{Dir: "../../plugins", Order: []string{"schema_translator"}, AllowUnapproved: true},
 		},
 	}
 	srv, err := New(cfg)
@@ -527,7 +528,7 @@ func TestHotReloadDuringInflightRequest(t *testing.T) {
 
 	// Simulate the watcher: swap in a fresh pipeline and drain the old one.
 	newRT := wasm.NewRuntime(context.Background())
-	newPP, err := plugin.NewPipeline(newRT, plugin.PluginConfig{Dir: "../../plugins", Order: []string{"schema_translator"}})
+	newPP, err := plugin.NewPipeline(newRT, plugin.PluginConfig{Dir: "../../plugins", Order: []string{"schema_translator"}, AllowUnapproved: true})
 	if err != nil {
 		t.Fatalf("NewPipeline: %v", err)
 	}

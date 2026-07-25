@@ -83,8 +83,9 @@ func TestPluginPrefixDeterminism(t *testing.T) {
 			defer runtime.Close()
 
 			pipeline, err := NewPipeline(runtime, PluginConfig{
-				Dir:   "../../plugins",
-				Order: []string{name},
+				Dir:             "../../plugins",
+				Order:           []string{name},
+				AllowUnapproved: true,
 			})
 			if err != nil {
 				t.Fatalf("NewPipeline: %v", err)
@@ -123,8 +124,9 @@ func TestCacheControlSurvivesPluginRoundTrip(t *testing.T) {
 	defer runtime.Close()
 
 	pipeline, err := NewPipeline(runtime, PluginConfig{
-		Dir:   "../../plugins",
-		Order: []string{"intent"},
+		Dir:             "../../plugins",
+		Order:           []string{"intent"},
+		AllowUnapproved: true,
 	})
 	if err != nil {
 		t.Fatalf("NewPipeline: %v", err)

@@ -72,7 +72,7 @@ func blockE2E(t *testing.T, order []string) (status int, body []byte, upstreamHi
 		Port: "0",
 		Providers: provider.Config{
 			Providers: map[string]provider.Provider{"oai": {URL: upstream.URL, Format: "openai"}},
-			Plugins:   provider.PluginsConfig{Dir: "../../examples/plugins", Order: order},
+			Plugins:   provider.PluginsConfig{Dir: "../../examples/plugins", Order: order, AllowUnapproved: true},
 		},
 	})
 	if err != nil {

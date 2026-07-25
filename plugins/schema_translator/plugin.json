@@ -1,4 +1,10 @@
 {
+  "schema_version": 1,
+  "id": "torana/schema_translator",
+  "abi_version": "v1",
+  "minimum_torana_version": "0.1.0",
+  "failure_mode": "pass",
+  "repository": "https://github.com/torana-edge/torana-plugins",
   "name": "schema_translator",
   "version": "0.3.0",
   "description": "KV-array schema translation: converts additionalProperties maps to arrays and reverses on response",

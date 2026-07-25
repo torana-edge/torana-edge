@@ -28,7 +28,7 @@ func TestReloadPipeline_ReflectsDiskState(t *testing.T) {
 	if err := os.MkdirAll(pDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	cfg := PluginConfig{Dir: dir, Order: []string{"schema_translator", "auth"}}
+	cfg := PluginConfig{Dir: dir, Order: []string{"schema_translator", "auth"}, AllowUnapproved: true}
 
 	// reload runs reloadPipeline with a FRESH runtime each time — the runtime
 	// factory fix — so host callbacks survive reloads rather than being lost.
@@ -96,7 +96,7 @@ func TestWatchPlugins_FiresReloadAndExitsOnCancel(t *testing.T) {
 	var configCalls, runtimeCalls int
 	configFn := func() PluginConfig {
 		configCalls++
-		return PluginConfig{Dir: dir, Order: []string{"schema_translator", "auth"}}
+		return PluginConfig{Dir: dir, Order: []string{"schema_translator", "auth"}, AllowUnapproved: true}
 	}
 	var runtimes []*wasm.Runtime
 	runtimeFn := func() *wasm.Runtime {

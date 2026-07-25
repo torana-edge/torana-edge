@@ -32,9 +32,9 @@ func Run(args []string, stdout, stderr io.Writer) error {
 
 // Usage prints the authoring command summary.
 func Usage(w io.Writer) {
-	fmt.Fprintln(w, "Usage:")
-	fmt.Fprintln(w, "  torana plugin init <name>")
-	fmt.Fprintln(w, "  torana plugin build [plugin-directory] [-o plugin.wasm]")
+	_, _ = fmt.Fprintln(w, "Usage:")
+	_, _ = fmt.Fprintln(w, "  torana plugin init <name>")
+	_, _ = fmt.Fprintln(w, "  torana plugin build [plugin-directory] [-o plugin.wasm]")
 }
 
 func initPlugin(args []string, stdout io.Writer) error {

@@ -65,6 +65,36 @@ func TestRuntimeOptionsAreNormalized(t *testing.T) {
 	}
 }
 
+func TestPoolSizeBoundsConcurrentInstances(t *testing.T) {
+	r := NewRuntimeWithOptions(context.Background(), RuntimeOptions{
+		PoolSize:    1,
+		CallTimeout: time.Second,
+	})
+	defer r.Close()
+
+	p, err := r.LoadPlugin("bounded", timeoutPluginWasm)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	first, err := p.acquire(context.Background())
+	if err != nil {
+		t.Fatalf("first acquire: %v", err)
+	}
+
+	waitCtx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	if _, err := p.acquire(waitCtx); err == nil {
+		t.Fatal("second acquire exceeded PoolSize while first instance was active")
+	}
+	p.release(first)
+
+	second, err := p.acquire(context.Background())
+	if err != nil {
+		t.Fatalf("acquire after release: %v", err)
+	}
+	p.release(second)
+}
+
 // TestMetaRequestScoping: meta state is isolated per request ID.
 func TestMetaRequestScoping(t *testing.T) {
 	r := NewRuntime(context.Background())

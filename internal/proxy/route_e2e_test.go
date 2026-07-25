@@ -55,7 +55,7 @@ func routerEnv(t *testing.T) (func(msg string) (int, []byte), *sync.Map) {
 				"cheap":    {URL: cheapUp.URL, Format: "openai", APIKeyEnv: "TEST_CHEAP_KEY"},
 				"wrongfmt": {URL: cheapUp.URL, Format: "anthropic"},
 			},
-			Plugins: provider.PluginsConfig{Dir: "../../examples/plugins", Order: []string{"test-router"}},
+			Plugins: provider.PluginsConfig{Dir: "../../examples/plugins", Order: []string{"test-router"}, AllowUnapproved: true},
 		},
 	})
 	if err != nil {

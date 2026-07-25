@@ -1,4 +1,10 @@
 {
+  "schema_version": 1,
+  "id": "torana/compactor",
+  "abi_version": "v1",
+  "minimum_torana_version": "0.1.0",
+  "failure_mode": "pass",
+  "repository": "https://github.com/torana-edge/torana-plugins",
   "name": "compactor",
   "version": "0.5.0",
   "description": "Cheap-model tool result compaction guided by the intent plugin's cache; alternative to keyword_compactor — run ONE of the two, after 'intent'",

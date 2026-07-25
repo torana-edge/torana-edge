@@ -28,6 +28,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"golang.org/x/net/http/httpguts"
 	"google.golang.org/protobuf/proto"
 
 	"github.com/torana-edge/torana-edge/internal/cache"
@@ -47,6 +48,59 @@ import (
 
 const maxBodySize = 10 * 1024 * 1024 // 10 MB
 const secretSetSentinel = "__set__"
+const maxPluginResponseHeaders = 64
+const maxPluginResponseHeaderBytes = 16 * 1024
+
+var forbiddenPluginResponseHeaders = map[string]struct{}{
+	"Connection":              {},
+	"Content-Security-Policy": {},
+	"Cookie":                  {},
+	"Keep-Alive":              {},
+	"Permissions-Policy":      {},
+	"Proxy-Authenticate":      {},
+	"Proxy-Authorization":     {},
+	"Set-Cookie":              {},
+	"Te":                      {},
+	"Trailer":                 {},
+	"Transfer-Encoding":       {},
+	"Upgrade":                 {},
+	"X-Content-Type-Options":  {},
+	"X-Frame-Options":         {},
+}
+
+func applyPluginResponseHeaders(dst http.Header, encoded []byte) error {
+	if len(encoded) == 0 {
+		return nil
+	}
+	var headers map[string][]string
+	if err := json.Unmarshal(encoded, &headers); err != nil {
+		return err
+	}
+	if len(headers) > maxPluginResponseHeaders {
+		return fmt.Errorf("too many response headers")
+	}
+	total := 0
+	for name, values := range headers {
+		canonical := http.CanonicalHeaderKey(name)
+		if canonical == "" || !httpguts.ValidHeaderFieldName(canonical) {
+			return fmt.Errorf("invalid header name")
+		}
+		if _, forbidden := forbiddenPluginResponseHeaders[canonical]; forbidden {
+			continue
+		}
+		for _, value := range values {
+			total += len(canonical) + len(value)
+			if total > maxPluginResponseHeaderBytes {
+				return fmt.Errorf("response headers too large")
+			}
+			if !httpguts.ValidHeaderFieldValue(value) {
+				return fmt.Errorf("invalid value for header %q", canonical)
+			}
+			dst.Add(canonical, value)
+		}
+	}
+	return nil
+}
 
 // allowedPluginHeaders is the only set of request headers ever exposed to
 // plugins (via ToranaMeta["_request_headers"]), and only when a loaded
@@ -463,7 +517,14 @@ func New(cfg Config) (*Server, error) {
 			// apply on the next plugin reload.
 			configFn := func() plugin.PluginConfig {
 				p := s.GetConfig().Providers.Plugins
-				return plugin.PluginConfig{Dir: p.Dir, Order: p.Order, Config: p.Config}
+				return plugin.PluginConfig{
+					Dir:             p.Dir,
+					Order:           p.Order,
+					Config:          p.Config,
+					Approvals:       pluginApprovals(p.Approvals),
+					AllowUnapproved: p.AllowUnapproved,
+					Strict:          true,
+				}
 			}
 			watchDone := make(chan struct{})
 			s.watchDone = watchDone
@@ -1075,7 +1136,7 @@ func New(cfg Config) (*Server, error) {
 			}
 
 			incoming.Managed = true
-			if err := incoming.Offload.Validate(incoming.Providers); err != nil {
+			if err := incoming.Validate(); err != nil {
 				http.Error(w, err.Error(), http.StatusBadRequest)
 				return
 			}
@@ -1106,16 +1167,20 @@ func New(cfg Config) (*Server, error) {
 				orderIdx[n] = i
 			}
 			type pluginInfo struct {
-				Name        string               `json:"name"`
-				Version     string               `json:"version"`
-				Description string               `json:"description"`
-				Hooks       []string             `json:"hooks"`
-				Permissions []string             `json:"permissions"`
-				Enabled     bool                 `json:"enabled"`
-				Order       int                  `json:"order"`
-				ServesHTTP  bool                 `json:"serves_http"`
-				Schema      *plugin.ConfigSchema `json:"schema,omitempty"`
-				Config      json.RawMessage      `json:"config,omitempty"`
+				ID          string                   `json:"id"`
+				Name        string                   `json:"name"`
+				Version     string                   `json:"version"`
+				Digest      string                   `json:"digest"`
+				FailureMode string                   `json:"failure_mode"`
+				Description string                   `json:"description"`
+				Hooks       []string                 `json:"hooks"`
+				Permissions []string                 `json:"permissions"`
+				Enabled     bool                     `json:"enabled"`
+				Order       int                      `json:"order"`
+				ServesHTTP  bool                     `json:"serves_http"`
+				Schema      *plugin.ConfigSchema     `json:"schema,omitempty"`
+				Config      json.RawMessage          `json:"config,omitempty"`
+				Approval    *provider.PluginApproval `json:"approval,omitempty"`
 			}
 			bundles, _ := plugin.DiscoverPlugins(cur.Dir)
 			infos := make([]pluginInfo, 0, len(bundles))
@@ -1139,9 +1204,22 @@ func New(cfg Config) (*Server, error) {
 					}
 				}
 				idx, enabled := orderIdx[m.Name]
+				approval, approved := cur.Approvals[m.ID]
+				if !approved {
+					approval, approved = cur.Approvals[m.Name]
+				}
+				var approvalPtr *provider.PluginApproval
+				if approved {
+					copy := approval
+					copy.Permissions = append([]string(nil), approval.Permissions...)
+					approvalPtr = &copy
+				}
 				infos = append(infos, pluginInfo{
+					ID:          m.ID,
 					Name:        m.Name,
 					Version:     m.Version,
+					Digest:      b.Digest,
+					FailureMode: m.FailureMode,
 					Description: m.Description,
 					Hooks:       hooks,
 					Permissions: perms,
@@ -1150,6 +1228,7 @@ func New(cfg Config) (*Server, error) {
 					ServesHTTP:  servesHTTPHook && hasServeGrant,
 					Schema:      b.Schema,
 					Config:      cur.Config[m.Name],
+					Approval:    approvalPtr,
 				})
 				seen[m.Name] = true
 			}
@@ -1180,8 +1259,9 @@ func New(cfg Config) (*Server, error) {
 		}
 
 		var req struct {
-			Order  *[]string                  `json:"order,omitempty"`
-			Config map[string]json.RawMessage `json:"config,omitempty"`
+			Order     *[]string                           `json:"order,omitempty"`
+			Config    map[string]json.RawMessage          `json:"config,omitempty"`
+			Approvals *map[string]provider.PluginApproval `json:"approvals,omitempty"`
 		}
 		if r.Body != nil {
 			lr := io.LimitReader(r.Body, maxBodySize+1)
@@ -1210,6 +1290,13 @@ func New(cfg Config) (*Server, error) {
 			newPlugins.Config = clonePluginConfig(oldPlugins.Config)
 			for name, raw := range req.Config {
 				newPlugins.Config[name] = raw
+			}
+		}
+		if req.Approvals != nil {
+			newPlugins.Approvals = make(map[string]provider.PluginApproval, len(*req.Approvals))
+			for id, approval := range *req.Approvals {
+				approval.Permissions = append([]string(nil), approval.Permissions...)
+				newPlugins.Approvals[id] = approval
 			}
 		}
 
@@ -1410,7 +1497,7 @@ func New(cfg Config) (*Server, error) {
 	// Plugins that declare the run_on_http_request hook and the env.serve_http
 	// permission can serve their own HTTP UI/API under this prefix. The route
 	// is NON-chat: it does NOT go through the Director or ReverseProxy.
-	mux.HandleFunc("/_torana/plugin/", s.controlPlaneGuard(func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/_torana/plugin/", s.controlPlanePluginGuard(func(w http.ResponseWriter, r *http.Request) {
 		// Parse plugin name: first path segment after /_torana/plugin/.
 		rest := strings.TrimPrefix(r.URL.Path, "/_torana/plugin/")
 		var pluginName, pluginRelPath string
@@ -1479,20 +1566,17 @@ func New(cfg Config) (*Server, error) {
 			return
 		}
 
-		// Write the plugin's response.
-		if len(resp.HeadersJson) > 0 {
-			var hdrs map[string][]string
-			if err := json.Unmarshal(resp.HeadersJson, &hdrs); err == nil {
-				for k, vals := range hdrs {
-					for _, v := range vals {
-						w.Header().Add(k, v)
-					}
-				}
-			}
+		if err := applyPluginResponseHeaders(w.Header(), resp.HeadersJson); err != nil {
+			http.Error(w, "plugin returned invalid response headers", http.StatusBadGateway)
+			return
 		}
 		status := int(resp.Status)
 		if status == 0 {
 			status = http.StatusOK
+		}
+		if status < 100 || status > 599 {
+			http.Error(w, "plugin returned invalid response status", http.StatusBadGateway)
+			return
 		}
 		w.WriteHeader(status)
 		if len(resp.Body) > 0 {
@@ -1658,6 +1742,14 @@ func New(cfg Config) (*Server, error) {
 // --- Lifecycle --------------------------------------------------------------
 
 func (s *Server) controlPlaneGuard(next http.HandlerFunc) http.HandlerFunc {
+	return s.controlPlaneGuardWithHeaders(next, false)
+}
+
+func (s *Server) controlPlanePluginGuard(next http.HandlerFunc) http.HandlerFunc {
+	return s.controlPlaneGuardWithHeaders(next, true)
+}
+
+func (s *Server) controlPlaneGuardWithHeaders(next http.HandlerFunc, allowSameOriginFrame bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if !isLoopbackRemote(r.RemoteAddr) {
 			http.Error(w, "control plane is localhost-only", http.StatusForbidden)
@@ -1671,7 +1763,7 @@ func (s *Server) controlPlaneGuard(next http.HandlerFunc) http.HandlerFunc {
 			http.Error(w, "invalid control-plane origin", http.StatusForbidden)
 			return
 		}
-		setControlPlaneSecurityHeaders(w)
+		setControlPlaneSecurityHeaders(w, allowSameOriginFrame)
 		next(w, r)
 	}
 }
@@ -1732,17 +1824,22 @@ func isSameOriginControlPlaneRequest(r *http.Request) bool {
 	return strings.EqualFold(u.Host, r.Host)
 }
 
-func setControlPlaneSecurityHeaders(w http.ResponseWriter) {
+func setControlPlaneSecurityHeaders(w http.ResponseWriter, allowSameOriginFrame bool) {
 	h := w.Header()
 	h.Set("Cache-Control", "no-store")
 	h.Set("Pragma", "no-cache")
 	h.Set("X-Content-Type-Options", "nosniff")
 	h.Set("Referrer-Policy", "no-referrer")
+	frameAncestors := "'none'"
 	h.Set("X-Frame-Options", "DENY")
+	if allowSameOriginFrame {
+		frameAncestors = "'self'"
+		h.Set("X-Frame-Options", "SAMEORIGIN")
+	}
 	// The embedded dashboard currently has an inline script and stylesheet, so
 	// unsafe-inline is constrained to same-origin content rather than opening
 	// the page to third-party script or frame sources.
-	h.Set("Content-Security-Policy", "default-src 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; form-action 'self'; connect-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'")
+	h.Set("Content-Security-Policy", "default-src 'self'; base-uri 'none'; object-src 'none'; frame-ancestors "+frameAncestors+"; form-action 'self'; connect-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'")
 }
 
 func (s *Server) GetConfig() Config {
@@ -1778,6 +1875,21 @@ func clonePluginConfig(src map[string]json.RawMessage) map[string]json.RawMessag
 	return dst
 }
 
+func pluginApprovals(src map[string]provider.PluginApproval) map[string]plugin.Approval {
+	if src == nil {
+		return nil
+	}
+	dst := make(map[string]plugin.Approval, len(src))
+	for key, approval := range src {
+		dst[key] = plugin.Approval{
+			Digest:      approval.Digest,
+			Permissions: append([]string(nil), approval.Permissions...),
+			FailureMode: approval.FailureMode,
+		}
+	}
+	return dst
+}
+
 func (s *Server) persistProviders(cfg provider.Config) error {
 	path := s.configPath
 	if path == "" {
@@ -1787,49 +1899,67 @@ func (s *Server) persistProviders(cfg provider.Config) error {
 }
 
 // applyProviderConfigTransaction keeps persisted state and in-memory state in
-// lockstep. Validation and the atomic file write happen before any live
-// changes. If a live reconfiguration fails, the persisted file is restored to
-// the last known-good configuration and the visible provider config stays put.
+// lockstep. Candidate resources are brought up before persistence, and every
+// live change is rolled back if a later step or the atomic save fails. Config
+// file polling is intentionally not used: all live mutation comes through this
+// coordinated path.
 func (s *Server) applyProviderConfigTransaction(current, incoming provider.Config) error {
-	if err := s.persistProviders(incoming); err != nil {
-		return fmt.Errorf("failed to persist config to disk: %w", err)
-	}
-
-	rollback := func(cause error) error {
-		if err := s.persistProviders(current); err != nil {
-			log.Printf("failed to restore persisted config after error: %v", err)
-		}
-		return cause
+	if incoming.Port <= 0 || incoming.Port > 65535 {
+		return fmt.Errorf("port must be between 1 and 65535")
 	}
 
 	c1, c2 := incoming.Cache, current.Cache
 	c1.Redis.Password, c2.Redis.Password = "", ""
 	cacheChanged := c1 != c2
+	mitmChanged := !reflect.DeepEqual(incoming.MITM, current.MITM)
+	portChanged := incoming.Port != current.Port
+
+	rollbackLive := func() {
+		if portChanged {
+			if err := s.SetPort(current.Port); err != nil {
+				log.Printf("failed to roll back listener port: %v", err)
+			}
+		}
+		if mitmChanged {
+			if err := s.applyMITM(current.MITM); err != nil {
+				log.Printf("failed to roll back MITM config: %v", err)
+			}
+		}
+		if cacheChanged {
+			if err := s.ReconfigureCache(current.Cache); err != nil {
+				log.Printf("failed to roll back cache config: %v", err)
+			}
+		}
+		s.SetProviders(current)
+	}
+
 	if cacheChanged {
 		if err := s.ReconfigureCache(incoming.Cache); err != nil {
-			return rollback(err)
+			return err
 		}
 	}
-	if !reflect.DeepEqual(incoming.MITM, current.MITM) {
+	if mitmChanged {
 		if err := s.applyMITM(incoming.MITM); err != nil {
 			if cacheChanged {
 				_ = s.ReconfigureCache(current.Cache)
 			}
-			s.SetProviders(current)
-			return rollback(err)
+			return err
 		}
 	}
-	if incoming.Port != current.Port && incoming.Port > 0 {
+	if portChanged {
 		if err := s.SetPort(incoming.Port); err != nil {
-			if !reflect.DeepEqual(incoming.MITM, current.MITM) {
+			if mitmChanged {
 				_ = s.applyMITM(current.MITM)
 			}
 			if cacheChanged {
 				_ = s.ReconfigureCache(current.Cache)
 			}
-			s.SetProviders(current)
-			return rollback(err)
+			return err
 		}
+	}
+	if err := s.persistProviders(incoming); err != nil {
+		rollbackLive()
+		return fmt.Errorf("failed to persist config to disk: %w", err)
 	}
 	s.SetProviders(incoming)
 	return nil
@@ -1992,9 +2122,12 @@ func (s *Server) newRuntime() *wasm.Runtime {
 func (s *Server) rebuildPipelineLocked(pcfg provider.PluginsConfig) (*plugin.PluginPipeline, error) {
 	rt := s.newRuntime()
 	pp, err := plugin.NewPipeline(rt, plugin.PluginConfig{
-		Dir:    pcfg.Dir,
-		Order:  pcfg.Order,
-		Config: pcfg.Config,
+		Dir:             pcfg.Dir,
+		Order:           pcfg.Order,
+		Config:          pcfg.Config,
+		Approvals:       pluginApprovals(pcfg.Approvals),
+		AllowUnapproved: pcfg.AllowUnapproved,
+		Strict:          true,
 	})
 	if err != nil {
 		rt.Close()
@@ -2140,6 +2273,9 @@ func (s *Server) applyMITM(cfg provider.MITMConfig) error {
 // Start binds the initial listener on bindHost:<current port> and serves it in
 // the background. Non-blocking; returns the bind error only.
 func (s *Server) Start(bindHost string) error {
+	if bindHost == "" {
+		bindHost = "127.0.0.1"
+	}
 	s.listenerMu.Lock()
 	s.bindHost = bindHost
 	s.listenerMu.Unlock()

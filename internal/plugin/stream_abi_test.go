@@ -40,7 +40,7 @@ func newTestPipelineWith(t *testing.T, dir string, order []string, store cache.S
 		rt.Close()
 		store.Close()
 	})
-	pp, err := NewPipeline(rt, PluginConfig{Dir: dir, Order: order, Config: cfg})
+	pp, err := NewPipeline(rt, PluginConfig{Dir: dir, Order: order, Config: cfg, AllowUnapproved: true})
 	if err != nil {
 		t.Fatalf("NewPipeline: %v", err)
 	}
