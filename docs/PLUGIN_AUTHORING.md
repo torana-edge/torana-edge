@@ -98,9 +98,15 @@ Every plugin directory must contain a `plugin.json` file describing its metadata
 
 ```json
 {
+  "schema_version": 1,
+  "id": "my-custom-plugin",
   "name": "my-custom-plugin",
   "version": "0.1.0",
   "description": "Redacts sensitive terms from user prompts",
+  "abi": "v1",
+  "min_torana_version": "0.1.0",
+  "failure_mode": "block",
+  "repository": "https://github.com/your-org/my-custom-plugin",
   "hooks": [
     { "name": "run_before_request", "priority": 100 }
   ],
@@ -113,14 +119,34 @@ Every plugin directory must contain a `plugin.json` file describing its metadata
 ### Manifest Schema Reference
 
 - **`name`**: Unique string identifier for the plugin.
+- **`schema_version`**: Manifest schema version. Use `1`.
+- **`id`**: Stable machine-readable plugin identifier.
 - **`version`**: Semantic version string (e.g. `"0.1.0"`).
 - **`description`**: Human-readable description.
+- **`abi`**: Torana plugin ABI version. Use `"v1"`.
+- **`min_torana_version`**: Oldest compatible Torana release.
+- **`failure_mode`**: Recommended operator policy, `"pass"` or `"block"`.
+- **`repository`**: HTTPS source repository for provenance and support.
 - **`hooks`**: Array of hook definitions:
   - **`name`**: Hook event type (`run_before_request`, `run_on_stream_chunk`, `run_on_http_request`).
   - **`priority`**: Execution order priority (`integer`). Lower numbers execute earlier.
 - **`permissions`**: Declared host capabilities required by the plugin:
   - **`name`**: Capability permission string.
   - **`description`**: Rationale for requesting the capability.
+
+Manifest permissions are requests, not grants. In production, Torana only
+exposes capabilities present in an operator-owned approval, and that approval
+is bound to the digest of the exact `plugin.json`, `plugin.wasm`, and
+`schema.json` bundle. A changed bundle must be reviewed and approved again.
+The Control Plane shows the digest and requested capabilities before enabling a
+plugin.
+
+Wazero's linear-memory isolation, execution timeout, and memory limit sandbox
+untrusted guest code. Capability approvals separately limit which Torana host
+operations the guest may invoke; they do not make an approved plugin trustworthy
+or review its request/response transformation logic. Only install artifacts you
+intend to run, grant the minimum requested subset, and prefer `failure_mode:
+"block"` when silent pass-through would be unsafe.
 
 ### Available Capability Strings
 
@@ -154,5 +180,9 @@ torana plugin build . -o plugin.wasm
 
 ## 6. Deployment and Activation
 
-1. Place the compiled `plugin.wasm` and `plugin.json` into a subfolder under Torana's configured `plugins.dir`.
-2. Update Torana's `config.json` or enable the plugin via the Torana Control Plane.
+1. Place `plugin.wasm`, `plugin.json`, and `schema.json` into a subfolder under
+   Torana's configured `plugins.dir`.
+2. Open the Torana Control Plane, inspect the bundle digest and requested
+   capabilities, choose a failure policy, and approve the plugin.
+3. Enable and order the approved plugin. Torana persists the operator approval
+   separately from the plugin-owned manifest.

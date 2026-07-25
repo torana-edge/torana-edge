@@ -38,7 +38,7 @@ Create `config.json`:
   },
   "plugins": {
     "dir": "./plugins",
-    "order": ["schema_translator", "intent"]
+    "order": []
   },
   "limits": {
     "concurrency": 10,
@@ -47,9 +47,23 @@ Create `config.json`:
 }
 ```
 
-> The baseline leaves all tool output exact. To enable compaction, append one
-> compactor after `intent` and configure explicit tool policies. Unknown tools,
-> mutations, and failures remain exact. See [COMPACTION.md](COMPACTION.md).
+On the first run, Torana imports this seed into its managed store at
+`~/.config/torana/config.json` (or `$TORANA_DATA_DIR/config.json`). After that,
+the managed store is authoritative so Control Plane edits survive restarts.
+Changing the original seed does not overwrite managed state; Torana logs a
+warning when both files exist and differ. Edit the managed configuration through
+`http://127.0.0.1:8080/_torana/`, or remove the managed store if you deliberately
+want the next start to re-import the seed. `TORANA_CONFIG` selects a different
+seed path; it does not bypass an existing managed store.
+
+The empty order is intentional: discovered plugins are not implicitly trusted
+or enabled. Open the Control Plane, inspect and approve the exact bundle digest
+and requested capability subset, then enable plugins in the desired order.
+
+> The baseline leaves all tool output exact. To enable compaction, approve and
+> enable `intent`, then place one approved compactor after it and configure
+> explicit tool policies. Unknown tools, mutations, and failures remain exact.
+> See [COMPACTION.md](COMPACTION.md).
 
 ## Route your harness
 

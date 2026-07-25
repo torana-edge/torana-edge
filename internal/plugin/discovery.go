@@ -750,7 +750,9 @@ type PluginConfig struct {
 	Approvals map[string]Approval        `json:"approvals,omitempty"`
 
 	// AllowUnapproved is for in-repository conformance tests and plugin
-	// development only. Production configuration never exposes this switch.
+	// development only. It converts manifest requests into grants and is not a
+	// security boundary. Production configuration never exposes this switch:
+	// production grants come only from a digest-bound operator approval.
 	AllowUnapproved bool `json:"-"`
 	// Strict rejects an explicitly enabled plugin that cannot be loaded instead
 	// of silently persisting a partially-active pipeline.

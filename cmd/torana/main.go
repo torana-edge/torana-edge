@@ -1,8 +1,8 @@
 // Torana Edge – stateful AI FinOps reverse proxy.
 //
-// Entry point.  Loads provider configuration from config.json (falls back
-// to built-in defaults), wires the proxy server, and blocks until the
-// process receives a termination signal.
+// Entry point. Imports a seed config into Torana's managed store on first run,
+// then loads the managed configuration, wires the proxy server, and blocks
+// until the process receives a termination signal.
 package main
 
 import (
@@ -54,6 +54,11 @@ func main() {
 	if err != nil {
 		log.Printf("Warning: %v — using defaults", err)
 		provCfg = provider.DefaultConfig()
+	}
+	if differs, diffErr := provider.ManagedStoreShadowsSeed(seedPath, storePath); diffErr != nil {
+		log.Printf("Warning: could not compare seed config %q with managed store %q: %v", seedPath, storePath, diffErr)
+	} else if differs {
+		log.Printf("Warning: managed config %q differs from and takes precedence over seed %q; edit the managed store through /_torana/ or remove it to re-import the seed", storePath, seedPath)
 	}
 
 	// Allow port override via env.
