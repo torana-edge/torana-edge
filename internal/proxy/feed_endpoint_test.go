@@ -26,7 +26,7 @@ func TestFeedSnapshotEndpoint(t *testing.T) {
 		w.Write([]byte(`{"choices":[]}`))
 	})
 	ups := &http.Server{Handler: upstream}
-	upsLn, _ := net.Listen("tcp", ":0")
+	upsLn, _ := net.Listen("tcp", "127.0.0.1:0")
 	go ups.Serve(upsLn)
 	defer ups.Shutdown(context.Background())
 
@@ -38,7 +38,7 @@ func TestFeedSnapshotEndpoint(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	ln, _ := net.Listen("tcp", ":0")
+	ln, _ := net.Listen("tcp", "127.0.0.1:0")
 	go srv.Serve(ln)
 	defer srv.Shutdown(context.Background())
 
@@ -94,7 +94,13 @@ func TestFeedSnapshotEndpoint(t *testing.T) {
 
 	// Verify the feed route does NOT fall through to the provider catch-all:
 	// calling a non-GET method must return 405, not a provider error.
-	resp3, err := client.Post(base+"/_torana/api/feed", "application/json", strings.NewReader("{}"))
+	postReq, err := http.NewRequest(http.MethodPost, base+"/_torana/api/feed", strings.NewReader("{}"))
+	if err != nil {
+		t.Fatalf("new POST /feed request: %v", err)
+	}
+	postReq.Header.Set("Content-Type", "application/json")
+	postReq.Header.Set("X-Torana-Local-Request", "1")
+	resp3, err := client.Do(postReq)
 	if err != nil {
 		t.Fatalf("POST /feed: %v", err)
 	}
@@ -117,7 +123,7 @@ func TestFeedSSEStreamSnapshotReplay(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	ln, _ := net.Listen("tcp", ":0")
+	ln, _ := net.Listen("tcp", "127.0.0.1:0")
 	go srv.Serve(ln)
 	defer srv.Shutdown(context.Background())
 

@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
+	"math"
 	"os"
 	"strings"
 	"sync"
@@ -22,9 +24,57 @@ import (
 // Plugin — WASM module with instance pooling and permission enforcement
 // ============================================================================
 
-// poolSize is the number of concurrent WASM instances per plugin kept warm in the pool.
-// Requests exceeding this size will create instances on-the-fly and close them afterwards.
-const poolSize = 100
+const (
+	// defaultPoolSize is deliberately small. A Go/WASI plugin can consume several
+	// MiB per instance, so the previous 100-slot pool made a single plugin able to
+	// reserve far more memory than a personal proxy should spend.
+	defaultPoolSize = 4
+	// defaultCallTimeout bounds every untrusted guest call, including _initialize.
+	defaultCallTimeout = 5 * time.Second
+	// defaultMemoryLimitPages caps a plugin at 64 MiB of Wasm linear memory.
+	// A page is 64 KiB. This is high enough for the current Go/WASI plugins while
+	// preventing an absent module maximum from becoming wazero's 4 GiB default.
+	defaultMemoryLimitPages uint32 = 1024
+)
+
+// RuntimeOptions bounds resources used by every plugin loaded in a Runtime.
+// Zero values select conservative defaults, so existing callers retain working
+// behavior without inheriting unbounded resource use.
+type RuntimeOptions struct {
+	// PoolSize is the maximum number of idle instances retained per plugin.
+	PoolSize int
+	// CallTimeout is the maximum duration of one guest function invocation.
+	CallTimeout time.Duration
+	// MemoryLimitPages is the maximum Wasm linear memory per instance (64 KiB/page).
+	MemoryLimitPages uint32
+}
+
+func defaultRuntimeOptions() RuntimeOptions {
+	return RuntimeOptions{
+		PoolSize:         defaultPoolSize,
+		CallTimeout:      defaultCallTimeout,
+		MemoryLimitPages: defaultMemoryLimitPages,
+	}
+}
+
+func normalizeRuntimeOptions(options RuntimeOptions) RuntimeOptions {
+	defaults := defaultRuntimeOptions()
+	if options.PoolSize <= 0 {
+		options.PoolSize = defaults.PoolSize
+	}
+	if options.CallTimeout <= 0 {
+		options.CallTimeout = defaults.CallTimeout
+	}
+	if options.MemoryLimitPages == 0 {
+		options.MemoryLimitPages = defaults.MemoryLimitPages
+	}
+	// Wazero panics for a value above the WebAssembly maximum. Clamp here so a
+	// configuration mistake cannot crash the proxy at startup.
+	if options.MemoryLimitPages > 65536 {
+		options.MemoryLimitPages = 65536
+	}
+	return options
+}
 
 type Plugin struct {
 	name    string
@@ -38,41 +88,76 @@ type Plugin struct {
 	compiled wazero.CompiledModule
 
 	// Instance pool for concurrent request handling.
-	pool   chan *pluginInstance
-	poolMu sync.Mutex
+	pool    chan *pluginInstance
+	poolMu  sync.Mutex
+	stateMu sync.RWMutex
+
+	poolSize    int
+	callTimeout time.Duration
 
 	instanceCount uint64
 }
 
 type pluginInstance struct {
-	mod api.Module
+	mod        api.Module
+	logEnabled bool
 }
 
 func (p *Plugin) Name() string { return p.name }
 
 func (p *Plugin) SetGrants(g []string) {
+	p.stateMu.Lock()
 	p.grants = make(map[string]bool)
 	for _, x := range g {
 		p.grants[x] = true
 	}
+	p.stateMu.Unlock()
+
+	// Stdout/stderr are selected when a module is instantiated. Recycle idle
+	// instances after grants change so an env.log grant is applied consistently.
+	p.discardIdleInstances()
 }
 
 // SetConfig stores the plugin's config JSON blob (plugins.config.<name>),
 // returned to the plugin via the env.plugin_config host call.
-func (p *Plugin) SetConfig(cfg string) { p.config = cfg }
+func (p *Plugin) SetConfig(cfg string) {
+	p.stateMu.Lock()
+	p.config = cfg
+	p.stateMu.Unlock()
+}
+
+func (p *Plugin) pluginConfig() string {
+	p.stateMu.RLock()
+	defer p.stateMu.RUnlock()
+	return p.config
+}
 
 func (p *Plugin) hasGrant(perm string) bool {
+	p.stateMu.RLock()
+	defer p.stateMu.RUnlock()
 	if p.grants == nil {
 		return false // fail-closed: no grants = no permissions
 	}
 	return p.grants[perm]
 }
 
+func (p *Plugin) discardIdleInstances() {
+	for {
+		select {
+		case inst := <-p.pool:
+			if inst != nil {
+				_ = inst.mod.Close(context.Background())
+			}
+		default:
+			return
+		}
+	}
+}
+
 // HasGrant reports whether this plugin holds the named permission grant.
 // It is the exported complement of hasGrant, used by callers outside the
 // wasm package (e.g. plugin.PluginPipeline.RunOnHTTPRequest).
 func (p *Plugin) HasGrant(perm string) bool { return p.hasGrant(perm) }
-
 
 // ValidateHooks checks that every named hook from the manifest is actually
 // exported by the WASM module. Returns an error listing all missing hooks.
@@ -109,12 +194,29 @@ func (p *Plugin) acquire(ctx context.Context) (*pluginInstance, error) {
 
 // release returns an instance to the pool.
 func (p *Plugin) release(inst *pluginInstance) {
+	if inst == nil || inst.mod == nil || inst.mod.IsClosed() {
+		return
+	}
+	if inst.logEnabled != p.hasGrant("env.log") {
+		p.discard(inst)
+		return
+	}
 	select {
 	case p.pool <- inst:
 	default:
 		// Pool full — close the extra instance.
 		inst.mod.Close(context.Background())
 	}
+}
+
+func (p *Plugin) discard(inst *pluginInstance) {
+	if inst != nil && inst.mod != nil {
+		_ = inst.mod.Close(context.Background())
+	}
+}
+
+func (p *Plugin) callContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(ctx, p.callTimeout)
 }
 
 func (p *Plugin) newInstance(ctx context.Context) (*pluginInstance, error) {
@@ -128,38 +230,66 @@ func (p *Plugin) newInstance(ctx context.Context) (*pluginInstance, error) {
 	// Instantiate from the already-compiled module. This avoids recompiling
 	// the ~8 MB Go/WASI module on every pool instance (and on every instance
 	// created on-the-fly when the pool is exhausted under load).
-	mod, err := p.runtime.InstantiateModule(ctx, p.compiled,
-		wazero.NewModuleConfig().WithName(instanceName).
-			WithSysWalltime().WithSysNanotime().
-			WithStdout(os.Stdout).WithStderr(os.Stderr))
+	instanceCtx, cancel := p.callContext(ctx)
+	defer cancel()
+	config := wazero.NewModuleConfig().WithName(instanceName).
+		WithSysWalltime().WithSysNanotime()
+	// wazero defaults stdout/stderr to io.Discard. Only grant direct guest
+	// output to plugins explicitly granted env.log; host env.log is gated too.
+	logEnabled := p.hasGrant("env.log")
+	if logEnabled {
+		config = config.WithStdout(os.Stdout).WithStderr(os.Stderr)
+	} else {
+		config = config.WithStdout(io.Discard).WithStderr(io.Discard)
+	}
+	mod, err := p.runtime.InstantiateModule(instanceCtx, p.compiled, config)
 	if err != nil {
 		return nil, err
 	}
 	init := mod.ExportedFunction("_initialize")
 	if init != nil {
-		init.Call(ctx)
+		if _, err := init.Call(instanceCtx); err != nil {
+			_ = mod.Close(context.Background())
+			return nil, fmt.Errorf("wasm: %s initialize: %w", p.name, err)
+		}
 	}
-	return &pluginInstance{mod: mod}, nil
+	return &pluginInstance{mod: mod, logEnabled: logEnabled}, nil
 }
 
 // CallRequest passes byte payload to the WASM hook and returns the result.
 // Uses instance pooling for concurrent request handling.
 func (p *Plugin) CallRequest(ctx context.Context, hook string, reqID uint64, inBytes []byte, output *[]byte) error {
+	if output == nil {
+		return fmt.Errorf("wasm: %s nil output", p.name)
+	}
+	if uint64(len(inBytes)) > math.MaxUint32 {
+		return fmt.Errorf("wasm: %s input exceeds 32-bit Wasm memory", p.name)
+	}
 	// Carry the request ID into host functions (wazero propagates the
 	// fn.Call context) so meta state is scoped per request.
 	ctx = context.WithValue(ctx, reqIDKey{}, reqID)
+	callCtx, cancel := p.callContext(ctx)
+	defer cancel()
 
 	// Acquire an instance from the pool.
-	inst, err := p.acquire(ctx)
+	inst, err := p.acquire(callCtx)
 	if err != nil {
 		return err
 	}
-	defer p.release(inst)
+	healthy := false
+	defer func() {
+		if healthy {
+			p.release(inst)
+		} else {
+			p.discard(inst)
+		}
+	}()
 
 	mod := inst.mod
 
 	fn := mod.ExportedFunction(hook)
 	if fn == nil {
+		healthy = true
 		return nil
 	}
 
@@ -170,41 +300,75 @@ func (p *Plugin) CallRequest(ctx context.Context, hook string, reqID uint64, inB
 	deallocFn := mod.ExportedFunction("dealloc")
 
 	// Allocate in WASM linear memory.
-	r, err := allocFn.Call(ctx, uint64(len(inBytes)))
+	r, err := allocFn.Call(callCtx, uint64(len(inBytes)))
 	if err != nil {
 		return err
 	}
+	if len(r) != 1 || r[0] > math.MaxUint32 {
+		return fmt.Errorf("wasm: %s alloc returned invalid pointer", p.name)
+	}
 	inPtr := uint32(r[0])
-	mod.Memory().Write(inPtr, inBytes)
+	if !writeMemory(mod.Memory(), inPtr, inBytes) {
+		return fmt.Errorf("wasm: %s alloc returned out-of-bounds input pointer", p.name)
+	}
 
 	// Call hook.
-	ret, err := fn.Call(ctx, reqID, uint64(inPtr), uint64(len(inBytes)))
+	ret, err := fn.Call(callCtx, reqID, uint64(inPtr), uint64(len(inBytes)))
 	if deallocFn != nil {
-		deallocFn.Call(ctx, uint64(inPtr), uint64(len(inBytes)))
+		if _, deallocErr := deallocFn.Call(callCtx, uint64(inPtr), uint64(len(inBytes))); deallocErr != nil && err == nil {
+			err = fmt.Errorf("wasm: %s dealloc input: %w", p.name, deallocErr)
+		}
 	}
 	if err != nil {
 		return err
 	}
 
 	// Read result.
-	if len(ret) > 0 && ret[0] != 0 {
+	if len(ret) != 1 {
+		return fmt.Errorf("wasm: %s hook %q returned invalid ABI result", p.name, hook)
+	}
+	if ret[0] != 0 {
 		v := ret[0]
 		outPtr := uint32(v >> 32)
 		outLen := uint32(v & 0xFFFFFFFF)
-		if outPtr != 0 && outLen > 0 {
-			b, ok := mod.Memory().Read(outPtr, outLen)
-			if ok {
-				res := make([]byte, len(b))
-				copy(res, b)
-				*output = res
-				if deallocFn != nil {
-					deallocFn.Call(ctx, uint64(outPtr), uint64(outLen))
-				}
-				return nil
+		if outLen == 0 {
+			return fmt.Errorf("wasm: %s hook %q returned a non-zero pointer with zero length", p.name, hook)
+		}
+		b, ok := readMemory(mod.Memory(), outPtr, outLen)
+		if !ok {
+			return fmt.Errorf("wasm: %s hook %q returned out-of-bounds result", p.name, hook)
+		}
+		res := append([]byte(nil), b...)
+		if deallocFn != nil {
+			if _, err := deallocFn.Call(callCtx, uint64(outPtr), uint64(outLen)); err != nil {
+				return fmt.Errorf("wasm: %s dealloc result: %w", p.name, err)
 			}
 		}
+		*output = res
 	}
+	healthy = true
 	return nil
+}
+
+func memoryRangeOK(memory api.Memory, ptr, length uint32) bool {
+	if memory == nil {
+		return false
+	}
+	return uint64(ptr)+uint64(length) <= uint64(memory.Size())
+}
+
+func writeMemory(memory api.Memory, ptr uint32, b []byte) bool {
+	if uint64(len(b)) > math.MaxUint32 || !memoryRangeOK(memory, ptr, uint32(len(b))) {
+		return false
+	}
+	return memory.Write(ptr, b)
+}
+
+func readMemory(memory api.Memory, ptr, length uint32) ([]byte, bool) {
+	if !memoryRangeOK(memory, ptr, length) {
+		return nil, false
+	}
+	return memory.Read(ptr, length)
 }
 
 // ============================================================================
@@ -224,6 +388,7 @@ type Runtime struct {
 	ctx     context.Context
 	runtime wazero.Runtime
 	plugins map[string]*Plugin
+	options RuntimeOptions
 	mu      sync.RWMutex
 	metaMu  sync.RWMutex
 	// meta holds request-scoped, plugin-private state: reqID → namespaced
@@ -299,8 +464,13 @@ func init() {
 }
 
 func NewRuntime(ctx context.Context) *Runtime {
-	r := newRuntime(ctx, cache.NewLocalCache(cacheTTL), true)
+	r := newRuntime(ctx, cache.NewLocalCache(cacheTTL), true, defaultRuntimeOptions())
 	return r
+}
+
+// NewRuntimeWithOptions creates a runtime with explicit resource limits.
+func NewRuntimeWithOptions(ctx context.Context, options RuntimeOptions) *Runtime {
+	return newRuntime(ctx, cache.NewLocalCache(cacheTTL), true, normalizeRuntimeOptions(options))
 }
 
 // NewRuntimeWithCache builds a Runtime on a caller-owned cache store. The
@@ -309,18 +479,29 @@ func NewRuntime(ctx context.Context) *Runtime {
 // store, restarts and multiple proxy instances. Close does NOT close a
 // shared store; its owner does.
 func NewRuntimeWithCache(ctx context.Context, store cache.Store) *Runtime {
-	return newRuntime(ctx, store, false)
+	return newRuntime(ctx, store, false, defaultRuntimeOptions())
 }
 
-func newRuntime(ctx context.Context, store cache.Store, ownsCache bool) *Runtime {
+// NewRuntimeWithCacheAndOptions is the cache-sharing equivalent of
+// NewRuntimeWithOptions.
+func NewRuntimeWithCacheAndOptions(ctx context.Context, store cache.Store, options RuntimeOptions) *Runtime {
+	return newRuntime(ctx, store, false, normalizeRuntimeOptions(options))
+}
+
+func newRuntime(ctx context.Context, store cache.Store, ownsCache bool, options RuntimeOptions) *Runtime {
+	options = normalizeRuntimeOptions(options)
 	r := &Runtime{
 		ctx: ctx,
 		runtime: wazero.NewRuntimeWithConfig(ctx,
-			wazero.NewRuntimeConfig().WithCompilationCache(wasmCompilationCache)),
+			wazero.NewRuntimeConfig().
+				WithCompilationCache(wasmCompilationCache).
+				WithMemoryLimitPages(options.MemoryLimitPages).
+				WithCloseOnContextDone(true)),
 		plugins:   make(map[string]*Plugin),
 		meta:      make(map[uint64]map[string]string),
 		cache:     store,
 		ownsCache: ownsCache,
+		options:   options,
 	}
 	wasi_snapshot_preview1.MustInstantiate(r.ctx, r.runtime)
 	r.installHostFunctions()
@@ -383,10 +564,12 @@ func (r *Runtime) LoadPlugin(name string, wasmBytes []byte) (*Plugin, error) {
 	}
 
 	p := &Plugin{
-		name:     name,
-		compiled: compiled,
-		runtime:  r.runtime,
-		pool:     make(chan *pluginInstance, poolSize),
+		name:        name,
+		compiled:    compiled,
+		runtime:     r.runtime,
+		pool:        make(chan *pluginInstance, r.options.PoolSize),
+		poolSize:    r.options.PoolSize,
+		callTimeout: r.options.CallTimeout,
 	}
 
 	// Pre-warm the pool with one instance.
@@ -399,7 +582,7 @@ func (r *Runtime) LoadPlugin(name string, wasmBytes []byte) (*Plugin, error) {
 	r.mu.Lock()
 	r.plugins[name] = p
 	r.mu.Unlock()
-	log.Printf("[wasm] loaded plugin %s (pool=%d)", name, poolSize)
+	log.Printf("[wasm] loaded plugin %s (pool=%d timeout=%s memory_limit=%dMiB)", name, p.poolSize, p.callTimeout, int(r.options.MemoryLimitPages)/16)
 	return p, nil
 }
 
@@ -426,11 +609,19 @@ func (r *Runtime) installHostFunctions() {
 	}).Export("meta_get")
 
 	env.NewFunctionBuilder().WithFunc(func(ctx context.Context, mod api.Module, level int32, ptr, length uint32) {
+		pluginName := pluginNameOf(mod)
+		r.mu.RLock()
+		p := r.plugins[pluginName]
+		r.mu.RUnlock()
+		if p == nil || !p.hasGrant("env.log") {
+			log.Printf("[wasm] permission denied: %s tried env.log", mod.Name())
+			return
+		}
 		msg := readStr(mod, ptr, length)
 		if level == 0 {
-			log.Printf("[plugin debug] %s", msg)
+			log.Printf("[plugin %s debug] %s", pluginName, msg)
 		} else {
-			log.Printf("[plugin] %s", msg)
+			log.Printf("[plugin %s] %s", pluginName, msg)
 		}
 	}).Export("log")
 
@@ -524,7 +715,7 @@ func (r *Runtime) installHostFunctions() {
 			res, _ = r.cache.Get(args)
 		case "env.plugin_config":
 			// Return this plugin's config blob (plugins.config.<name>).
-			res = p.config
+			res = p.pluginConfig()
 			if res == "" {
 				res = "{}"
 			}
@@ -611,7 +802,7 @@ func (r *Runtime) installHostFunctions() {
 }
 
 func readStr(mod api.Module, ptr, length uint32) string {
-	b, ok := mod.Memory().Read(ptr, length)
+	b, ok := readMemory(mod.Memory(), ptr, length)
 	if !ok {
 		return ""
 	}
@@ -640,7 +831,14 @@ func writeStr(ctx context.Context, mod api.Module, s string) uint64 {
 		return 0
 	}
 
+	if res[0] > math.MaxUint32 {
+		log.Printf("[wasm] writeStr: alloc returned invalid pointer in module %s", mod.Name())
+		return 0
+	}
 	ptr := uint32(res[0])
-	mod.Memory().Write(ptr, b)
+	if !writeMemory(mod.Memory(), ptr, b) {
+		log.Printf("[wasm] writeStr: alloc returned out-of-bounds pointer in module %s", mod.Name())
+		return 0
+	}
 	return uint64(ptr)<<32 | uint64(len(b))
 }

@@ -69,12 +69,15 @@ func TestControlPlaneConfigAPI(t *testing.T) {
 	}
 
 	// PUT /_torana/api/plugins
-	updateBody := `{"order":["schema_translator","intent"]}`
+	updateBody := `{"order":["schema_translator","intent"],"config":{"schema_translator":{"strict":true}}}`
+	provCfg.Plugins.Config = map[string]json.RawMessage{"disabled_plugin": json.RawMessage(`{"retain":true}`)}
+	srv.SetProviders(provCfg)
 	req, err := http.NewRequest(http.MethodPut, url+"/_torana/api/plugins", strings.NewReader(updateBody))
 	if err != nil {
 		t.Fatalf("NewRequest: %v", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Origin", url)
 
 	resp2, err := client.Do(req)
 	if err != nil {
@@ -95,6 +98,9 @@ func TestControlPlaneConfigAPI(t *testing.T) {
 	if len(gotPlugins.Order) != 2 || gotPlugins.Order[0] != "schema_translator" || gotPlugins.Order[1] != "intent" {
 		t.Errorf("gotPlugins.Order = %v, want [schema_translator intent]", gotPlugins.Order)
 	}
+	if string(gotPlugins.Config["disabled_plugin"]) != `{"retain":true}` {
+		t.Errorf("disabled plugin config was dropped: %s", gotPlugins.Config["disabled_plugin"])
+	}
 
 	// Verify persistence on disk
 	savedCfg, err := provider.Load(configPath)
@@ -107,6 +113,12 @@ func TestControlPlaneConfigAPI(t *testing.T) {
 	if len(savedCfg.Plugins.Order) != 2 || savedCfg.Plugins.Order[0] != "schema_translator" {
 		t.Errorf("persisted Plugins.Order = %v, want [schema_translator intent]", savedCfg.Plugins.Order)
 	}
+}
+
+func localControlPlaneRequest(method, target string, body io.Reader) *http.Request {
+	req := httptest.NewRequest(method, target, body)
+	req.Host = "127.0.0.1"
+	return req
 }
 
 func TestControlPlanePluginsOrderingConstraintError(t *testing.T) {
@@ -159,6 +171,7 @@ func TestControlPlanePluginsOrderingConstraintError(t *testing.T) {
 	invalidBody := `{"order":["gate","router"]}`
 	req, _ := http.NewRequest(http.MethodPost, url+"/_torana/api/plugins", bytes.NewBufferString(invalidBody))
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Origin", url)
 
 	resp, err := client.Do(req)
 	if err != nil {
@@ -198,7 +211,7 @@ func TestControlPlaneGuard(t *testing.T) {
 	handler := srv.Handler()
 
 	t.Run("loopback allowed by default", func(t *testing.T) {
-		req := httptest.NewRequest(http.MethodGet, "/_torana/api/config", nil)
+		req := localControlPlaneRequest(http.MethodGet, "/_torana/api/config", nil)
 		req.RemoteAddr = "127.0.0.1:12345"
 		rec := httptest.NewRecorder()
 		handler.ServeHTTP(rec, req)
@@ -207,8 +220,50 @@ func TestControlPlaneGuard(t *testing.T) {
 		}
 	})
 
+	t.Run("v1 returns hardened headers", func(t *testing.T) {
+		req := localControlPlaneRequest(http.MethodGet, "/_torana/api/v1/config", nil)
+		req.RemoteAddr = "127.0.0.1:12345"
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200", rec.Code)
+		}
+		for key, want := range map[string]string{
+			"Cache-Control":          "no-store",
+			"X-Content-Type-Options": "nosniff",
+			"Referrer-Policy":        "no-referrer",
+		} {
+			if got := rec.Header().Get(key); got != want {
+				t.Errorf("%s = %q, want %q", key, got, want)
+			}
+		}
+		if !strings.Contains(rec.Header().Get("Content-Security-Policy"), "frame-ancestors 'none'") {
+			t.Error("v1 response missing restrictive CSP")
+		}
+	})
+
+	t.Run("rejects DNS-rebinding host and cross-origin mutation", func(t *testing.T) {
+		req := localControlPlaneRequest(http.MethodGet, "/_torana/api/v1/config", nil)
+		req.RemoteAddr = "127.0.0.1:12345"
+		req.Host = "attacker.invalid"
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusForbidden {
+			t.Errorf("foreign Host status = %d, want 403", rec.Code)
+		}
+
+		req = localControlPlaneRequest(http.MethodPost, "/_torana/api/v1/plugins", strings.NewReader(`{}`))
+		req.RemoteAddr = "127.0.0.1:12345"
+		req.Header.Set("Origin", "https://attacker.invalid")
+		rec = httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusForbidden {
+			t.Errorf("cross-origin mutation status = %d, want 403", rec.Code)
+		}
+	})
+
 	t.Run("non-loopback rejected when AllowRemote is false", func(t *testing.T) {
-		req := httptest.NewRequest(http.MethodGet, "/_torana/api/config", nil)
+		req := localControlPlaneRequest(http.MethodGet, "/_torana/api/config", nil)
 		req.RemoteAddr = "203.0.113.9:12345"
 		rec := httptest.NewRecorder()
 		handler.ServeHTTP(rec, req)
@@ -220,7 +275,7 @@ func TestControlPlaneGuard(t *testing.T) {
 		}
 	})
 
-	t.Run("non-loopback with AllowRemote=true but no token configured", func(t *testing.T) {
+	t.Run("non-loopback remains rejected when deprecated remote settings are configured", func(t *testing.T) {
 		remoteCfg := provCfg
 		remoteCfg.ControlPlane = provider.ControlPlaneConfig{
 			AllowRemote: true,
@@ -228,7 +283,7 @@ func TestControlPlaneGuard(t *testing.T) {
 		}
 		srvRemote, _ := New(Config{Port: "8080", Providers: remoteCfg})
 
-		req := httptest.NewRequest(http.MethodGet, "/_torana/api/config", nil)
+		req := localControlPlaneRequest(http.MethodGet, "/_torana/api/config", nil)
 		req.RemoteAddr = "203.0.113.9:12345"
 		rec := httptest.NewRecorder()
 		srvRemote.Handler().ServeHTTP(rec, req)
@@ -238,7 +293,7 @@ func TestControlPlaneGuard(t *testing.T) {
 		}
 	})
 
-	t.Run("non-loopback with AllowRemote=true and Token configured", func(t *testing.T) {
+	t.Run("remote token does not enable the embedded control plane", func(t *testing.T) {
 		tokCfg := provCfg
 		tokCfg.ControlPlane = provider.ControlPlaneConfig{
 			AllowRemote: true,
@@ -247,47 +302,47 @@ func TestControlPlaneGuard(t *testing.T) {
 		srvTok, _ := New(Config{Port: "8080", Providers: tokCfg})
 		tokHandler := srvTok.Handler()
 
-		// Without token -> 401
-		reqNoTok := httptest.NewRequest(http.MethodGet, "/_torana/api/config", nil)
+		// All remote callers are rejected: v1 is intentionally localhost-only.
+		reqNoTok := localControlPlaneRequest(http.MethodGet, "/_torana/api/config", nil)
 		reqNoTok.RemoteAddr = "203.0.113.9:12345"
 		recNoTok := httptest.NewRecorder()
 		tokHandler.ServeHTTP(recNoTok, reqNoTok)
-		if recNoTok.Code != http.StatusUnauthorized {
-			t.Errorf("no token status = %d, want 401", recNoTok.Code)
+		if recNoTok.Code != http.StatusForbidden {
+			t.Errorf("no token status = %d, want 403", recNoTok.Code)
 		}
 
-		// With wrong token -> 401
-		reqWrongTok := httptest.NewRequest(http.MethodGet, "/_torana/api/config", nil)
+		// A token is not an alternate remote auth mechanism.
+		reqWrongTok := localControlPlaneRequest(http.MethodGet, "/_torana/api/config", nil)
 		reqWrongTok.RemoteAddr = "203.0.113.9:12345"
 		reqWrongTok.Header.Set("X-Torana-Token", "wrong-token")
 		recWrongTok := httptest.NewRecorder()
 		tokHandler.ServeHTTP(recWrongTok, reqWrongTok)
-		if recWrongTok.Code != http.StatusUnauthorized {
-			t.Errorf("wrong token status = %d, want 401", recWrongTok.Code)
+		if recWrongTok.Code != http.StatusForbidden {
+			t.Errorf("wrong token status = %d, want 403", recWrongTok.Code)
 		}
 
-		// With correct X-Torana-Token -> 200
-		reqHeader := httptest.NewRequest(http.MethodGet, "/_torana/api/config", nil)
+		// A correct legacy token also remains rejected remotely.
+		reqHeader := localControlPlaneRequest(http.MethodGet, "/_torana/api/config", nil)
 		reqHeader.RemoteAddr = "203.0.113.9:12345"
 		reqHeader.Header.Set("X-Torana-Token", "secret-token-123")
 		recHeader := httptest.NewRecorder()
 		tokHandler.ServeHTTP(recHeader, reqHeader)
-		if recHeader.Code != http.StatusOK {
-			t.Errorf("X-Torana-Token status = %d, want 200", recHeader.Code)
+		if recHeader.Code != http.StatusForbidden {
+			t.Errorf("X-Torana-Token status = %d, want 403", recHeader.Code)
 		}
 
-		// With correct Authorization: Bearer -> 200
-		reqAuth := httptest.NewRequest(http.MethodGet, "/_torana/api/config", nil)
+		// Nor does Authorization: Bearer.
+		reqAuth := localControlPlaneRequest(http.MethodGet, "/_torana/api/config", nil)
 		reqAuth.RemoteAddr = "203.0.113.9:12345"
 		reqAuth.Header.Set("Authorization", "Bearer secret-token-123")
 		recAuth := httptest.NewRecorder()
 		tokHandler.ServeHTTP(recAuth, reqAuth)
-		if recAuth.Code != http.StatusOK {
-			t.Errorf("Authorization Bearer status = %d, want 200", recAuth.Code)
+		if recAuth.Code != http.StatusForbidden {
+			t.Errorf("Authorization Bearer status = %d, want 403", recAuth.Code)
 		}
 
 		// Loopback caller with token configured -> 200 even without providing token
-		reqLoopback := httptest.NewRequest(http.MethodGet, "/_torana/api/config", nil)
+		reqLoopback := localControlPlaneRequest(http.MethodGet, "/_torana/api/config", nil)
 		reqLoopback.RemoteAddr = "127.0.0.1:12345"
 		recLoopback := httptest.NewRecorder()
 		tokHandler.ServeHTTP(recLoopback, reqLoopback)
@@ -307,7 +362,7 @@ func TestControlPlaneGuard(t *testing.T) {
 			"/_torana/plugin/test",
 		}
 		for _, ep := range endpoints {
-			req := httptest.NewRequest(http.MethodGet, ep, nil)
+			req := localControlPlaneRequest(http.MethodGet, ep, nil)
 			req.RemoteAddr = "203.0.113.9:12345"
 			rec := httptest.NewRecorder()
 			handler.ServeHTTP(rec, req)
@@ -317,15 +372,22 @@ func TestControlPlaneGuard(t *testing.T) {
 		}
 	})
 
-	t.Run("health and stats endpoints are unguarded", func(t *testing.T) {
-		for _, ep := range []string{"/health", "/stats"} {
-			req := httptest.NewRequest(http.MethodGet, ep, nil)
+	t.Run("health is public but stats are control-plane data", func(t *testing.T) {
+		for _, ep := range []string{"/health"} {
+			req := localControlPlaneRequest(http.MethodGet, ep, nil)
 			req.RemoteAddr = "203.0.113.9:12345"
 			rec := httptest.NewRecorder()
 			handler.ServeHTTP(rec, req)
 			if rec.Code != http.StatusOK {
 				t.Errorf("endpoint %s status = %d, want 200", ep, rec.Code)
 			}
+		}
+		req := localControlPlaneRequest(http.MethodGet, "/stats", nil)
+		req.RemoteAddr = "203.0.113.9:12345"
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusForbidden {
+			t.Errorf("remote stats status = %d, want 403", rec.Code)
 		}
 	})
 }
@@ -346,7 +408,7 @@ func TestControlPlaneSecretRedaction(t *testing.T) {
 		t.Fatalf("New: %v", err)
 	}
 
-	req := httptest.NewRequest(http.MethodGet, "/_torana/api/config", nil)
+	req := localControlPlaneRequest(http.MethodGet, "/_torana/api/config", nil)
 	req.RemoteAddr = "127.0.0.1:12345"
 	rec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, req)
@@ -406,6 +468,7 @@ func TestControlPlanePortRebind(t *testing.T) {
 		t.Fatalf("NewRequest: %v", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Origin", fmt.Sprintf("http://127.0.0.1:%d", port1))
 
 	resp, err := client.Do(req)
 	if err != nil {

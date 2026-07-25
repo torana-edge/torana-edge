@@ -10,7 +10,6 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
-	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -993,11 +992,18 @@ func New(cfg Config) (*Server, error) {
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte(`{"status":"ok"}`))
 	})
-	mux.HandleFunc("/stats", func(w http.ResponseWriter, r *http.Request) {
+	statsHandler := s.controlPlaneGuard(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		b, _ := json.Marshal(s.stats)
 		w.Write(b)
 	})
+	// Usage data can reveal provider, model, and traffic information. Keep the
+	// legacy endpoint for local scripts, but protect it like the dashboard.
+	mux.HandleFunc("/stats", statsHandler)
 
 	// --- /_torana control-plane namespace --------------------------------
 	// These routes MUST be registered before the "/" catch-all so that
@@ -1074,32 +1080,9 @@ func New(cfg Config) (*Server, error) {
 				return
 			}
 
-			c1 := incoming.Cache
-			c1.Redis.Password = ""
-			c2 := cur.Cache
-			c2.Redis.Password = ""
-			if c1 != c2 {
-				if err := s.ReconfigureCache(incoming.Cache); err != nil {
-					http.Error(w, err.Error(), http.StatusBadRequest)
-					return
-				}
-			}
-			if !reflect.DeepEqual(incoming.MITM, cur.MITM) {
-				if err := s.applyMITM(incoming.MITM); err != nil {
-					http.Error(w, err.Error(), http.StatusBadRequest)
-					return
-				}
-			}
-			if incoming.Port != cur.Port && incoming.Port > 0 {
-				if err := s.SetPort(incoming.Port); err != nil {
-					http.Error(w, err.Error(), http.StatusBadRequest)
-					return
-				}
-			}
-			s.SetProviders(incoming)
-			if err := s.PersistConfig(); err != nil {
-				log.Printf("failed to persist config: %v", err)
-				http.Error(w, "failed to persist config to disk", http.StatusInternalServerError)
+			if err := s.applyProviderConfigTransaction(cur, incoming); err != nil {
+				log.Printf("failed to apply config transaction: %v", err)
+				http.Error(w, err.Error(), http.StatusBadRequest)
 				return
 			}
 			w.Header().Set("Content-Type", "application/json")
@@ -1221,26 +1204,30 @@ func New(cfg Config) (*Server, error) {
 			newPlugins.Order = *req.Order
 		}
 		if req.Config != nil {
-			newPlugins.Config = req.Config
+			// PATCH-like semantics deliberately retain configurations for disabled
+			// plugins. The old dashboard only submits enabled plugins, and replacing
+			// this map silently discarded a disabled plugin's settings.
+			newPlugins.Config = clonePluginConfig(oldPlugins.Config)
+			for name, raw := range req.Config {
+				newPlugins.Config[name] = raw
+			}
 		}
 
-		s.configMu.Lock()
-		s.config.Providers.Plugins = newPlugins
-		s.configMu.Unlock()
-
-		if err := s.RebuildPipeline(newPlugins); err != nil {
-			s.configMu.Lock()
-			s.config.Providers.Plugins = oldPlugins
-			s.configMu.Unlock()
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-
-		if err := s.PersistConfig(); err != nil {
+		candidate := s.GetConfig().Providers
+		candidate.Plugins = newPlugins
+		if err := s.persistProviders(candidate); err != nil {
 			log.Printf("failed to persist config: %v", err)
 			http.Error(w, "failed to persist config to disk", http.StatusInternalServerError)
 			return
 		}
+		if err := s.RebuildPipeline(newPlugins); err != nil {
+			if rollbackErr := s.persistProviders(s.GetConfig().Providers); rollbackErr != nil {
+				log.Printf("failed to restore config after rejected plugin update: %v", rollbackErr)
+			}
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		s.SetProviders(candidate)
 
 		w.Header().Set("Content-Type", "application/json")
 		b, _ := json.Marshal(newPlugins)
@@ -1321,23 +1308,21 @@ func New(cfg Config) (*Server, error) {
 		}
 		newPlugins.Config[name] = raw
 
-		s.configMu.Lock()
-		s.config.Providers.Plugins = newPlugins
-		s.configMu.Unlock()
-
-		if err := s.RebuildPipeline(newPlugins); err != nil {
-			s.configMu.Lock()
-			s.config.Providers.Plugins = oldPlugins
-			s.configMu.Unlock()
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-
-		if err := s.PersistConfig(); err != nil {
+		candidate := s.GetConfig().Providers
+		candidate.Plugins = newPlugins
+		if err := s.persistProviders(candidate); err != nil {
 			log.Printf("failed to persist config: %v", err)
 			http.Error(w, "failed to persist config to disk", http.StatusInternalServerError)
 			return
 		}
+		if err := s.RebuildPipeline(newPlugins); err != nil {
+			if rollbackErr := s.persistProviders(s.GetConfig().Providers); rollbackErr != nil {
+				log.Printf("failed to restore config after rejected plugin update: %v", rollbackErr)
+			}
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		s.SetProviders(candidate)
 
 		w.Header().Set("Content-Type", "application/json")
 		b, _ := json.Marshal(newPlugins)
@@ -1377,7 +1362,7 @@ func New(cfg Config) (*Server, error) {
 			return
 		}
 		w.Header().Set("Content-Type", "text/event-stream")
-		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("Connection", "keep-alive")
 
 		// Subscribe and capture the snapshot atomically under one lock, so an
@@ -1524,6 +1509,30 @@ func New(cfg Config) (*Server, error) {
 		http.Redirect(w, r, "/_torana/", http.StatusMovedPermanently)
 	}))
 
+	// v1 is the canonical public control-plane API. The unversioned API remains
+	// available for existing local scripts and the pre-v1 dashboard, but all v1
+	// requests are translated before dispatch so both paths share exactly the
+	// same auth, validation, and response behavior.
+	mux.HandleFunc("/_torana/api/v1", s.controlPlaneGuard(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/_torana/api/v1/", http.StatusMovedPermanently)
+	}))
+	mux.HandleFunc("/_torana/api/v1/", s.controlPlaneGuard(func(w http.ResponseWriter, r *http.Request) {
+		legacyPath := strings.TrimPrefix(r.URL.Path, "/_torana/api/v1")
+		if legacyPath == "/stats" {
+			statsHandler(w, r)
+			return
+		}
+		if legacyPath == "/" {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		clone := r.Clone(r.Context())
+		urlCopy := *r.URL
+		clone.URL = &urlCopy
+		clone.URL.Path = "/_torana/api" + legacyPath
+		mux.ServeHTTP(w, clone)
+	}))
+
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		currentCfg := s.GetConfig()
 		// Panic recovery for the request handler goroutine.
@@ -1650,48 +1659,90 @@ func New(cfg Config) (*Server, error) {
 
 func (s *Server) controlPlaneGuard(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		cpCfg := s.GetConfig().Providers.ControlPlane
-
-		isLoopback := false
-		if r.RemoteAddr != "" {
-			host, _, err := net.SplitHostPort(r.RemoteAddr)
-			if err != nil {
-				host = r.RemoteAddr
-			}
-			if ip := net.ParseIP(host); ip != nil {
-				isLoopback = ip.IsLoopback()
-			}
-		}
-
-		if isLoopback {
-			next(w, r)
-			return
-		}
-
-		if !cpCfg.AllowRemote {
+		if !isLoopbackRemote(r.RemoteAddr) {
 			http.Error(w, "control plane is localhost-only", http.StatusForbidden)
 			return
 		}
-
-		if cpCfg.Token == "" {
-			http.Error(w, "control plane remote access requires a token", http.StatusForbidden)
+		if !isControlPlaneHost(r.Host) {
+			http.Error(w, "invalid control-plane host", http.StatusForbidden)
 			return
 		}
-
-		reqToken := r.Header.Get("X-Torana-Token")
-		if reqToken == "" {
-			if auth := r.Header.Get("Authorization"); len(auth) > 7 && strings.EqualFold(auth[:7], "bearer ") {
-				reqToken = auth[7:]
-			}
-		}
-
-		if subtle.ConstantTimeCompare([]byte(reqToken), []byte(cpCfg.Token)) != 1 {
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
+		if isControlPlaneMutation(r.Method) && !isSameOriginControlPlaneRequest(r) {
+			http.Error(w, "invalid control-plane origin", http.StatusForbidden)
 			return
 		}
-
+		setControlPlaneSecurityHeaders(w)
 		next(w, r)
 	}
+}
+
+func isLoopbackRemote(remoteAddr string) bool {
+	host, _, err := net.SplitHostPort(remoteAddr)
+	if err != nil {
+		host = remoteAddr
+	}
+	ip := net.ParseIP(strings.Trim(host, "[]"))
+	return ip != nil && ip.IsLoopback()
+}
+
+// isControlPlaneHost defends a localhost-bound browser session from DNS
+// rebinding. Only literal loopback hosts and localhost are accepted; external
+// names that happen to resolve to 127.0.0.1 are intentionally rejected.
+func isControlPlaneHost(hostport string) bool {
+	if hostport == "" {
+		return false
+	}
+	host, _, err := net.SplitHostPort(hostport)
+	if err != nil {
+		host = hostport
+	}
+	host = strings.Trim(strings.ToLower(host), "[]")
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+func isControlPlaneMutation(method string) bool {
+	switch method {
+	case http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete:
+		return true
+	default:
+		return false
+	}
+}
+
+// Browsers attach Origin to fetch/XHR mutations. Requiring it to match the
+// loopback Host prevents a malicious website from issuing state-changing
+// requests to a developer's local proxy. Non-browser tools can use the
+// explicit X-Torana-Local-Request header instead of forging browser metadata.
+func isSameOriginControlPlaneRequest(r *http.Request) bool {
+	origin := r.Header.Get("Origin")
+	if origin == "" {
+		return r.Header.Get("X-Torana-Local-Request") == "1"
+	}
+	u, err := url.Parse(origin)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return false
+	}
+	if !isControlPlaneHost(u.Host) {
+		return false
+	}
+	return strings.EqualFold(u.Host, r.Host)
+}
+
+func setControlPlaneSecurityHeaders(w http.ResponseWriter) {
+	h := w.Header()
+	h.Set("Cache-Control", "no-store")
+	h.Set("Pragma", "no-cache")
+	h.Set("X-Content-Type-Options", "nosniff")
+	h.Set("Referrer-Policy", "no-referrer")
+	h.Set("X-Frame-Options", "DENY")
+	// The embedded dashboard currently has an inline script and stylesheet, so
+	// unsafe-inline is constrained to same-origin content rather than opening
+	// the page to third-party script or frame sources.
+	h.Set("Content-Security-Policy", "default-src 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; form-action 'self'; connect-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'")
 }
 
 func (s *Server) GetConfig() Config {
@@ -1714,6 +1765,74 @@ func (s *Server) SetProviders(cfg provider.Config) {
 	s.configMu.Unlock()
 	s.rateLimiter.Update(cfg.Limits.RPM, cfg.Limits.Concurrency)
 	log.Printf("config hot-reload: %d providers loaded", len(cfg.Providers))
+}
+
+func clonePluginConfig(src map[string]json.RawMessage) map[string]json.RawMessage {
+	if src == nil {
+		return make(map[string]json.RawMessage)
+	}
+	dst := make(map[string]json.RawMessage, len(src))
+	for key, raw := range src {
+		dst[key] = append(json.RawMessage(nil), raw...)
+	}
+	return dst
+}
+
+func (s *Server) persistProviders(cfg provider.Config) error {
+	path := s.configPath
+	if path == "" {
+		path = "config.json"
+	}
+	return provider.Save(path, cfg)
+}
+
+// applyProviderConfigTransaction keeps persisted state and in-memory state in
+// lockstep. Validation and the atomic file write happen before any live
+// changes. If a live reconfiguration fails, the persisted file is restored to
+// the last known-good configuration and the visible provider config stays put.
+func (s *Server) applyProviderConfigTransaction(current, incoming provider.Config) error {
+	if err := s.persistProviders(incoming); err != nil {
+		return fmt.Errorf("failed to persist config to disk: %w", err)
+	}
+
+	rollback := func(cause error) error {
+		if err := s.persistProviders(current); err != nil {
+			log.Printf("failed to restore persisted config after error: %v", err)
+		}
+		return cause
+	}
+
+	c1, c2 := incoming.Cache, current.Cache
+	c1.Redis.Password, c2.Redis.Password = "", ""
+	cacheChanged := c1 != c2
+	if cacheChanged {
+		if err := s.ReconfigureCache(incoming.Cache); err != nil {
+			return rollback(err)
+		}
+	}
+	if !reflect.DeepEqual(incoming.MITM, current.MITM) {
+		if err := s.applyMITM(incoming.MITM); err != nil {
+			if cacheChanged {
+				_ = s.ReconfigureCache(current.Cache)
+			}
+			s.SetProviders(current)
+			return rollback(err)
+		}
+	}
+	if incoming.Port != current.Port && incoming.Port > 0 {
+		if err := s.SetPort(incoming.Port); err != nil {
+			if !reflect.DeepEqual(incoming.MITM, current.MITM) {
+				_ = s.applyMITM(current.MITM)
+			}
+			if cacheChanged {
+				_ = s.ReconfigureCache(current.Cache)
+			}
+			s.SetProviders(current)
+			return rollback(err)
+		}
+	}
+	s.SetProviders(incoming)
+	return nil
 }
 
 func (s *Server) resolveSecret(envName, encVal string) string {
@@ -1790,7 +1909,20 @@ func (s *Server) setCache(c cache.Store) {
 
 // newRuntime wires host callbacks for a WASM runtime.
 func (s *Server) newRuntime() *wasm.Runtime {
-	rt := wasm.NewRuntimeWithCache(context.Background(), s.currentCache())
+	runtimeCfg := s.GetConfig().Providers.Plugins.Runtime
+	memoryPages := uint32(0)
+	if runtimeCfg.MemoryLimitMiB > 0 {
+		if runtimeCfg.MemoryLimitMiB > 4096 {
+			memoryPages = 65536
+		} else {
+			memoryPages = runtimeCfg.MemoryLimitMiB * 16
+		}
+	}
+	rt := wasm.NewRuntimeWithCacheAndOptions(context.Background(), s.currentCache(), wasm.RuntimeOptions{
+		PoolSize:         runtimeCfg.PoolSize,
+		CallTimeout:      time.Duration(runtimeCfg.CallTimeoutMS) * time.Millisecond,
+		MemoryLimitPages: memoryPages,
+	})
 	// Offload completion handler (cheap-model tool result
 	// summarization), recording failures in /stats.
 	rt.OffloadResultFunc = func(ctx context.Context, payloadJSON string) (economics.OffloadResult, error) {

@@ -7,16 +7,16 @@ This guide provides an end-to-end Standard Operating Procedure (SOP) for authori
 ## Prerequisites
 
 - **Go**: Version 1.23 or higher.
-- **torana-cli**: (Optional) Installed or run via `go run ./cmd/torana-cli`.
+- **Torana CLI**: Installed as the same `torana` binary that runs the proxy.
 
 ---
 
-## 1. Quickstart with `torana-cli`
+## 1. Quickstart with `torana plugin`
 
-You can scaffold a new external plugin directory using `torana-cli`:
+You can scaffold a new external plugin directory using Torana:
 
 ```bash
-torana-cli plugin init my-custom-plugin
+torana plugin init my-custom-plugin
 cd my-custom-plugin
 ```
 
@@ -36,13 +36,14 @@ cd my-custom-plugin
 go mod init github.com/your-org/my-custom-plugin
 ```
 
-2. Fetch the lightweight Torana Edge SDK:
+2. Fetch the standalone Torana plugin SDK:
 
 ```bash
-go get github.com/torana-edge/torana-edge/sdk@latest
+go get github.com/torana-edge/torana-plugin-sdk@latest
 ```
 
-> **Note**: The `sdk` module contains only the plugin SDK and compiled Protobuf definitions, keeping external plugin dependencies minimal.
+> **Note**: The SDK repository contains the ABI, helpers, templates, and
+> conformance tests without pulling the proxy into your plugin module.
 
 ---
 
@@ -57,8 +58,8 @@ import (
 	"context"
 	"strings"
 
-	"github.com/torana-edge/torana-edge/sdk/pb"
-	sdk "github.com/torana-edge/torana-edge/sdk/plugin-sdk"
+	sdk "github.com/torana-edge/torana-plugin-sdk"
+	"github.com/torana-edge/torana-plugin-sdk/pb"
 )
 
 func main() {}
@@ -143,10 +144,10 @@ Build the WebAssembly binary targeting WASI (`wasip1`):
 GOOS=wasip1 GOARCH=wasm go build -buildmode=c-shared -o plugin.wasm .
 ```
 
-Or using `torana-cli`:
+Or using Torana:
 
 ```bash
-torana-cli plugin build . -o plugin.wasm
+torana plugin build . -o plugin.wasm
 ```
 
 ---
