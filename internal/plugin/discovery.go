@@ -7,8 +7,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -64,6 +66,26 @@ type ConfigSchema struct {
 	Fields []ConfigField `json:"fields"`
 }
 
+// AgentOperation describes one stable JSON operation a plugin contributes to
+// Torana's agent-facing control plane. The descriptor is language-neutral and
+// is loaded from agent.json beside the plugin bundle.
+type AgentOperation struct {
+	ID           string          `json:"id"`
+	Method       string          `json:"method"`
+	Path         string          `json:"path"`
+	Description  string          `json:"description"`
+	Risk         string          `json:"risk"` // read | write | destructive
+	Idempotent   bool            `json:"idempotent"`
+	InputSchema  json.RawMessage `json:"input_schema,omitempty"`
+	OutputSchema json.RawMessage `json:"output_schema"`
+}
+
+type AgentDescriptor struct {
+	SchemaVersion int              `json:"schema_version"`
+	Description   string           `json:"description,omitempty"`
+	Operations    []AgentOperation `json:"operations"`
+}
+
 // ============================================================================
 // Discovery
 // ============================================================================
@@ -73,6 +95,7 @@ type PluginBundle struct {
 	WASMBytes []byte
 	Digest    string
 	Schema    *ConfigSchema
+	Agent     *AgentDescriptor
 }
 
 const currentToranaVersion = "0.1.0"
@@ -105,6 +128,101 @@ var supportedPermissions = map[string]struct{}{
 	"env.respond_request":                      {},
 	"env.route_request":                        {},
 	"env.serve_http":                           {},
+}
+
+var agentOperationIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
+var agentOperationPathPattern = regexp.MustCompile(`^/(?:[A-Za-z0-9._~-]+/?)*$`)
+
+func validateAgentDescriptor(descriptor AgentDescriptor, manifest PluginManifest) error {
+	if !agentOperationIDPattern.MatchString(manifest.Name) {
+		return fmt.Errorf("agent descriptor: plugin name %q is not a safe path segment", manifest.Name)
+	}
+	if descriptor.SchemaVersion != 1 {
+		return fmt.Errorf("agent descriptor: unsupported schema_version %d", descriptor.SchemaVersion)
+	}
+	if len(descriptor.Operations) == 0 || len(descriptor.Operations) > 64 {
+		return fmt.Errorf("agent descriptor: operations must contain 1 to 64 entries")
+	}
+	if !hasHook(manifest, "run_on_http_request") {
+		return fmt.Errorf("agent descriptor: run_on_http_request hook is required")
+	}
+	hasServeHTTP := false
+	for _, permission := range manifest.Permissions {
+		if permission.Name == "env.serve_http" {
+			hasServeHTTP = true
+			break
+		}
+	}
+	if !hasServeHTTP {
+		return fmt.Errorf("agent descriptor: env.serve_http permission is required")
+	}
+
+	seenIDs := make(map[string]struct{}, len(descriptor.Operations))
+	seenRoutes := make(map[string]struct{}, len(descriptor.Operations))
+	for index := range descriptor.Operations {
+		operation := &descriptor.Operations[index]
+		operation.Method = strings.ToUpper(strings.TrimSpace(operation.Method))
+		if !agentOperationIDPattern.MatchString(operation.ID) {
+			return fmt.Errorf("agent descriptor: invalid operation id %q", operation.ID)
+		}
+		if _, duplicate := seenIDs[operation.ID]; duplicate {
+			return fmt.Errorf("agent descriptor: duplicate operation id %q", operation.ID)
+		}
+		seenIDs[operation.ID] = struct{}{}
+		switch operation.Method {
+		case http.MethodGet, http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete:
+		default:
+			return fmt.Errorf("agent descriptor: operation %q has unsupported method %q", operation.ID, operation.Method)
+		}
+		if operation.Path == "" || !strings.HasPrefix(operation.Path, "/") ||
+			!agentOperationPathPattern.MatchString(operation.Path) ||
+			strings.HasSuffix(operation.Path, "/.") || strings.Contains(operation.Path, "/./") ||
+			strings.HasPrefix(operation.Path, "//") || strings.Contains(operation.Path, "..") ||
+			strings.ContainsAny(operation.Path, "?#") {
+			return fmt.Errorf("agent descriptor: operation %q has invalid path %q", operation.ID, operation.Path)
+		}
+		routeKey := operation.Method + " " + operation.Path
+		if _, duplicate := seenRoutes[routeKey]; duplicate {
+			return fmt.Errorf("agent descriptor: duplicate route %s", routeKey)
+		}
+		seenRoutes[routeKey] = struct{}{}
+		if strings.TrimSpace(operation.Description) == "" {
+			return fmt.Errorf("agent descriptor: operation %q requires a description", operation.ID)
+		}
+		switch operation.Risk {
+		case "read":
+			if operation.Method != http.MethodGet {
+				return fmt.Errorf("agent descriptor: operation %q marks a mutating method as read risk", operation.ID)
+			}
+		case "write":
+			if operation.Method == http.MethodGet || operation.Method == http.MethodDelete {
+				return fmt.Errorf("agent descriptor: operation %q has inconsistent write risk", operation.ID)
+			}
+		case "destructive":
+			if operation.Method == http.MethodGet {
+				return fmt.Errorf("agent descriptor: operation %q marks GET as destructive", operation.ID)
+			}
+		default:
+			return fmt.Errorf("agent descriptor: operation %q has invalid risk %q", operation.ID, operation.Risk)
+		}
+		if err := validateJSONSchemaObject(operation.InputSchema, true); err != nil {
+			return fmt.Errorf("agent descriptor: operation %q input_schema: %w", operation.ID, err)
+		}
+		if err := validateJSONSchemaObject(operation.OutputSchema, false); err != nil {
+			return fmt.Errorf("agent descriptor: operation %q output_schema: %w", operation.ID, err)
+		}
+	}
+	return nil
+}
+
+func validateJSONSchemaObject(raw json.RawMessage, optional bool) error {
+	if len(raw) == 0 {
+		if optional {
+			return nil
+		}
+		return fmt.Errorf("is required")
+	}
+	return ValidateAgentSchema(raw)
 }
 
 func validateManifest(manifest PluginManifest) error {
@@ -207,6 +325,8 @@ func DiscoverPlugins(pluginsDir string) ([]PluginBundle, error) {
 		return nil, err
 	}
 	var bundles []PluginBundle
+	seenNames := make(map[string]string)
+	seenIDs := make(map[string]string)
 	for _, e := range entries {
 		if !e.IsDir() {
 			continue
@@ -217,6 +337,16 @@ func DiscoverPlugins(pluginsDir string) ([]PluginBundle, error) {
 			log.Printf("[plugin] skipping %s: %v", e.Name(), err)
 			continue
 		}
+		if firstDir, duplicate := seenNames[bundle.Manifest.Name]; duplicate {
+			return nil, fmt.Errorf("duplicate plugin name %q in %s and %s", bundle.Manifest.Name, firstDir, e.Name())
+		}
+		if bundle.Manifest.ID != "" {
+			if firstDir, duplicate := seenIDs[bundle.Manifest.ID]; duplicate {
+				return nil, fmt.Errorf("duplicate plugin id %q in %s and %s", bundle.Manifest.ID, firstDir, e.Name())
+			}
+			seenIDs[bundle.Manifest.ID] = e.Name()
+		}
+		seenNames[bundle.Manifest.Name] = e.Name()
 		bundles = append(bundles, *bundle)
 	}
 	return bundles, nil
@@ -250,18 +380,46 @@ func loadBundle(dir string) (*PluginBundle, error) {
 	} else if !os.IsNotExist(err) {
 		return nil, fmt.Errorf("read schema: %w", err)
 	}
+	agentPath := filepath.Join(dir, "agent.json")
+	var agent *AgentDescriptor
+	var agentBytes []byte
+	if aBytes, err := os.ReadFile(agentPath); err == nil {
+		agentBytes = aBytes
+		var descriptor AgentDescriptor
+		if err := json.Unmarshal(aBytes, &descriptor); err != nil {
+			return nil, fmt.Errorf("parse agent descriptor: %w", err)
+		}
+		if err := validateAgentDescriptor(descriptor, manifest); err != nil {
+			return nil, err
+		}
+		agent = &descriptor
+	} else if !os.IsNotExist(err) {
+		return nil, fmt.Errorf("read agent descriptor: %w", err)
+	}
 	warnIfStale(dir, wasmPath, manifest.Name)
-	digest := bundleDigest(mBytes, wBytes, schemaBytes)
-	return &PluginBundle{Manifest: manifest, WASMBytes: wBytes, Digest: digest, Schema: schema}, nil
+	digest := bundleDigest(mBytes, wBytes, schemaBytes, agentBytes)
+	return &PluginBundle{
+		Manifest:  manifest,
+		WASMBytes: wBytes,
+		Digest:    digest,
+		Schema:    schema,
+		Agent:     agent,
+	}, nil
 }
 
 // bundleDigest covers every executable or policy-bearing file consumed by the
 // runtime. Length-prefixing keeps the digest unambiguous. A change to code,
-// requested permissions, failure behavior, hooks, or configuration schema
-// therefore invalidates the operator's prior approval.
-func bundleDigest(manifestBytes, wasmBytes, schemaBytes []byte) string {
+// requested permissions, failure behavior, hooks, configuration schema, or
+// advertised agent contract therefore invalidates the operator's approval.
+func bundleDigest(manifestBytes, wasmBytes, schemaBytes, agentBytes []byte) string {
 	h := sha256.New()
-	for _, part := range [][]byte{manifestBytes, wasmBytes, schemaBytes} {
+	parts := [][]byte{manifestBytes, wasmBytes, schemaBytes}
+	// Preserve existing approvals for bundles that do not ship agent.json.
+	// Adding the optional file appends a fourth length-delimited digest part.
+	if len(agentBytes) > 0 {
+		parts = append(parts, agentBytes)
+	}
+	for _, part := range parts {
 		var size [8]byte
 		binary.BigEndian.PutUint64(size[:], uint64(len(part)))
 		_, _ = h.Write(size[:])
@@ -311,8 +469,26 @@ type PluginPipeline struct {
 
 type loadedPlugin struct {
 	manifest    PluginManifest
+	digest      string
+	agent       *AgentDescriptor
 	plugin      *wasm.Plugin
 	failureMode string
+}
+
+// LoadedAgentPlugin is the immutable, approved agent contract attached to the
+// exact plugin bundle currently loaded in a pipeline.
+type LoadedAgentPlugin struct {
+	Manifest   PluginManifest
+	Digest     string
+	Descriptor AgentDescriptor
+}
+
+// LoadedPluginStatus describes the exact bundle currently serving traffic.
+type LoadedPluginStatus struct {
+	Name       string
+	Digest     string
+	ServesHTTP bool
+	Agent      *AgentDescriptor
 }
 
 func NewPipeline(runtime *wasm.Runtime, config PluginConfig) (*PluginPipeline, error) {
@@ -330,6 +506,13 @@ func reloadPipeline(runtime *wasm.Runtime, config PluginConfig) (*PluginPipeline
 	}
 	var loaded []*loadedPlugin
 	order := config.Order
+	seenOrder := make(map[string]struct{}, len(order))
+	for _, name := range order {
+		if _, duplicate := seenOrder[name]; duplicate {
+			return nil, fmt.Errorf("plugin order contains duplicate %q", name)
+		}
+		seenOrder[name] = struct{}{}
+	}
 	// Enforce ordering constraint: route-capable plugins (env.route_request)
 	// must precede compaction economic-gate plugins (env.host_call.torana_evaluate_compaction).
 	var seenCompactionGate bool
@@ -421,8 +604,19 @@ func reloadPipeline(runtime *wasm.Runtime, config PluginConfig) (*PluginPipeline
 			log.Printf("[plugin] %s: hook validation failed: %v — skipping", name, err)
 			continue
 		}
+		var loadedAgent *AgentDescriptor
+		if bundle.Agent != nil {
+			for _, grant := range grants {
+				if grant == "env.serve_http" {
+					loadedAgent = cloneAgentDescriptor(bundle.Agent)
+					break
+				}
+			}
+		}
 		loaded = append(loaded, &loadedPlugin{
 			manifest:    bundle.Manifest,
+			digest:      bundle.Digest,
+			agent:       loadedAgent,
 			plugin:      pl,
 			failureMode: failureMode,
 		})
@@ -477,6 +671,82 @@ func (pp *PluginPipeline) Release() {
 
 // Len returns the number of successfully loaded plugins.
 func (pp *PluginPipeline) Len() int { return len(pp.plugins) }
+
+// AgentPlugins returns the agent contracts for the exact approved bundles in
+// this pipeline. Reading contracts from the live pipeline prevents a changed,
+// unapproved agent.json on disk from being advertised or routed to old code.
+func (pp *PluginPipeline) AgentPlugins() []LoadedAgentPlugin {
+	plugins := make([]LoadedAgentPlugin, 0, len(pp.plugins))
+	for _, lp := range pp.plugins {
+		if lp.agent == nil {
+			continue
+		}
+		plugins = append(plugins, LoadedAgentPlugin{
+			Manifest:   lp.manifest,
+			Digest:     lp.digest,
+			Descriptor: *cloneAgentDescriptor(lp.agent),
+		})
+	}
+	return plugins
+}
+
+// LoadedPlugins returns immutable status for the exact bundles in this
+// pipeline, allowing operator surfaces to distinguish configured disk state
+// from the code that remains live after a rejected hot reload.
+func (pp *PluginPipeline) LoadedPlugins() []LoadedPluginStatus {
+	plugins := make([]LoadedPluginStatus, 0, len(pp.plugins))
+	for _, lp := range pp.plugins {
+		plugins = append(plugins, LoadedPluginStatus{
+			Name:       lp.manifest.Name,
+			Digest:     lp.digest,
+			ServesHTTP: hasHook(lp.manifest, "run_on_http_request") && lp.plugin.HasGrant("env.serve_http"),
+			Agent:      cloneAgentDescriptor(lp.agent),
+		})
+	}
+	return plugins
+}
+
+// FindAgentOperation resolves an operation only from the exact approved
+// contract currently loaded alongside the plugin code.
+func (pp *PluginPipeline) FindAgentOperation(pluginName, method, path string) (*AgentOperation, []string, bool) {
+	for _, lp := range pp.plugins {
+		if lp.manifest.Name != pluginName || lp.agent == nil {
+			continue
+		}
+		var allowed []string
+		for index := range lp.agent.Operations {
+			operation := &lp.agent.Operations[index]
+			if operation.Path != path {
+				continue
+			}
+			allowed = append(allowed, operation.Method)
+			if operation.Method == method {
+				operationCopy := cloneAgentOperation(*operation)
+				return &operationCopy, allowed, true
+			}
+		}
+		return nil, allowed, true
+	}
+	return nil, nil, false
+}
+
+func cloneAgentDescriptor(descriptor *AgentDescriptor) *AgentDescriptor {
+	if descriptor == nil {
+		return nil
+	}
+	descriptorCopy := *descriptor
+	descriptorCopy.Operations = make([]AgentOperation, len(descriptor.Operations))
+	for index, operation := range descriptor.Operations {
+		descriptorCopy.Operations[index] = cloneAgentOperation(operation)
+	}
+	return &descriptorCopy
+}
+
+func cloneAgentOperation(operation AgentOperation) AgentOperation {
+	operation.InputSchema = append(json.RawMessage(nil), operation.InputSchema...)
+	operation.OutputSchema = append(json.RawMessage(nil), operation.OutputSchema...)
+	return operation
+}
 
 // EndRequest drops all request-scoped plugin state for a finished request.
 func (pp *PluginPipeline) EndRequest(reqID uint64) { pp.runtime.EndRequest(reqID) }
@@ -923,9 +1193,10 @@ func WatchPlugins(ctx context.Context, dir string, configFn func() PluginConfig,
 					}
 				}
 
-				// Only reload on .wasm, plugin.json, or schema.json changes.
+				// Only reload on executable or consumed bundle metadata changes.
 				name := filepath.Base(event.Name)
-				if name != "plugin.wasm" && name != "plugin.json" && name != "schema.json" {
+				if name != "plugin.wasm" && name != "plugin.json" &&
+					name != "schema.json" && name != "agent.json" {
 					continue
 				}
 				// Remove/Rename included: deleting a plugin must unload it.
