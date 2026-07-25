@@ -15,17 +15,30 @@ import (
 	"time"
 
 	"github.com/torana-edge/torana-edge/internal/metrics"
+	"github.com/torana-edge/torana-edge/internal/plugincmd"
 	"github.com/torana-edge/torana-edge/internal/provider"
 	"github.com/torana-edge/torana-edge/internal/proxy"
 
 	// Register format adapters so their init() calls wire the registry.
 	_ "github.com/torana-edge/torana-edge/internal/format/anthropic"
 	_ "github.com/torana-edge/torana-edge/internal/format/bedrock"
-	_ "github.com/torana-edge/torana-edge/internal/format/openai"
 	_ "github.com/torana-edge/torana-edge/internal/format/gemini"
+	_ "github.com/torana-edge/torana-edge/internal/format/openai"
 )
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "plugin" {
+		if err := plugincmd.Run(os.Args[1:], os.Stdout, os.Stderr); err != nil {
+			log.Printf("plugin command: %v", err)
+			os.Exit(2)
+		}
+		return
+	}
+	if len(os.Args) > 1 && os.Args[1] != "serve" {
+		log.Printf("unknown command %q (run without arguments or use: torana serve | torana plugin ...)", os.Args[1])
+		os.Exit(2)
+	}
+
 	// --- configuration --------------------------------------------------
 	seedPath := "config.json"
 	if v := os.Getenv("TORANA_CONFIG"); v != "" {

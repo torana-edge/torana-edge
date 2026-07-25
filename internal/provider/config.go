@@ -139,9 +139,10 @@ type Limits struct {
 	RPM         int `json:"rpm,omitempty"`
 }
 
-// ControlPlaneConfig configures access control for the /_torana/* endpoints.
-// Default (zero value) is loopback-only with no token. AllowRemote permits
-// non-loopback callers; when Token is set, requests that provide it are allowed.
+// ControlPlaneConfig reserves settings for a future authenticated remote control
+// plane. The embedded control plane is localhost-only in v1; AllowRemote and
+// Token are retained only so older config files continue to parse and are not
+// silently lost. They do not enable remote access.
 type ControlPlaneConfig struct {
 	AllowRemote bool   `json:"allow_remote,omitempty"`
 	Token       string `json:"token,omitempty"`
@@ -149,9 +150,18 @@ type ControlPlaneConfig struct {
 
 // PluginsConfig controls WASM plugin loading and execution.
 type PluginsConfig struct {
-	Dir    string                     `json:"dir"`    // plugins directory, default "./plugins"
-	Order  []string                   `json:"order"`  // execution order by plugin name
-	Config map[string]json.RawMessage `json:"config"` // per-plugin config blobs
+	Dir     string                     `json:"dir"`    // plugins directory, default "./plugins"
+	Order   []string                   `json:"order"`  // execution order by plugin name
+	Config  map[string]json.RawMessage `json:"config"` // per-plugin config blobs
+	Runtime PluginRuntimeConfig        `json:"runtime,omitempty"`
+}
+
+// PluginRuntimeConfig bounds untrusted WASM execution. Zero values select the
+// runtime's conservative defaults (4 idle instances, 5 seconds, 64 MiB).
+type PluginRuntimeConfig struct {
+	PoolSize       int    `json:"pool_size,omitempty"`
+	CallTimeoutMS  int    `json:"call_timeout_ms,omitempty"`
+	MemoryLimitMiB uint32 `json:"memory_limit_mib,omitempty"`
 }
 
 // DefaultConfig returns the built-in configuration for common providers.

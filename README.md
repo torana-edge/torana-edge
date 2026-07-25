@@ -39,8 +39,8 @@ CLI (`agy`)** — Torana also offers an optional TLS-terminating MITM ingress. S
    ```bash
    make plugins
 
-   # Or a single plugin via torana-cli:
-   go run ./cmd/torana-cli plugin build plugins/schema_translator
+   # Or a single plugin via the unified Torana CLI:
+   go run ./cmd/torana plugin build plugins/schema_translator
    ```
 
 3. Run the proxy:

@@ -486,12 +486,8 @@
         </div>
         <div class="form-grid" style="margin-top:0.9rem">
           <div class="field">
-            <div class="checkbox-row"><input type="checkbox" id="cpAllowRemote"><label for="cpAllowRemote">Allow remote control-plane access</label></div>
-            <span class="hint">Off = loopback only (recommended).</span>
-          </div>
-          <div class="field">
-            <label>Control-plane token</label><input class="input" id="cpToken" type="password" placeholder="unchanged">
-            <span class="hint">Only used when remote access is allowed. Leave blank to keep current.</span>
+            <label>Control-plane access</label>
+            <span class="hint">Localhost only. Remote and multi-user administration are not supported in this release.</span>
           </div>
         </div>
       </div>
@@ -643,7 +639,7 @@
 
     // ---- Plugins / pipeline ----
     function loadPlugins() {
-      fetch('/_torana/api/plugins')
+      fetch('/_torana/api/v1/plugins')
         .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
         .then(data => {
           allPlugins = (data.plugins || []);
@@ -684,7 +680,7 @@
           return `<div class="plugin-card" draggable="true" data-name="${escAttr(name)}" data-index="${i}">
             <span class="drag-handle" title="Drag to reorder">⠿</span>
             <span class="order-num">${i + 1}</span>
-            <div class="plugin-main" onclick="go('plugin','${escAttr(name)}')">
+            <div class="plugin-main" onclick="go('plugin',${escJS(name)})">
               <div class="plugin-name-row">
                 <span class="plugin-name">${escHtml(name)}</span>
                 ${chips.join('')}
@@ -692,8 +688,8 @@
               ${p.description ? `<div class="plugin-desc">${escHtml(p.description)}</div>` : ''}
             </div>
             <div class="plugin-card-actions">
-              <button class="btn btn-sm" onclick="event.stopPropagation(); go('plugin','${escAttr(name)}')">Configure</button>
-              <button class="btn btn-sm btn-danger" onclick="event.stopPropagation(); disablePlugin('${escAttr(name)}')">Disable</button>
+              <button class="btn btn-sm" onclick="event.stopPropagation(); go('plugin',${escJS(name)})">Configure</button>
+              <button class="btn btn-sm btn-danger" onclick="event.stopPropagation(); disablePlugin(${escJS(name)})">Disable</button>
             </div>
           </div>`;
         }).join('');
@@ -714,7 +710,7 @@
               <div class="plugin-name-row"><span class="plugin-name">${escHtml(p.name)}</span>${chips.join('')}</div>
               ${p.description ? `<div class="plugin-desc">${escHtml(p.description)}</div>` : ''}
             </div>
-            <button class="btn btn-sm btn-green" onclick="enablePlugin('${escAttr(p.name)}')">Enable</button>
+            <button class="btn btn-sm btn-green" onclick="enablePlugin(${escJS(p.name)})">Enable</button>
           </div>`;
         }).join('');
       }
@@ -761,7 +757,7 @@
     function savePipeline() {
       const cfgOut = {};
       for (const name of pipelineOrder) cfgOut[name] = configMap[name] || {};
-      fetch('/_torana/api/plugins', {
+      fetch('/_torana/api/v1/plugins', {
         method: 'PUT', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ order: pipelineOrder, config: cfgOut })
       })
@@ -787,8 +783,8 @@
       if (p.serves_http) {
         const url = `/_torana/plugin/${encodeURIComponent(name)}/`;
         servedBlock = `<div class="subhead">Plugin UI</div>
-          <div class="info-note">This plugin serves its own interface. <a href="${url}" target="_blank" rel="noopener">Open in new tab ↗</a></div>
-          <iframe class="detail-frame" src="${url}" title="${escAttr(name)} UI"></iframe>`;
+          <div class="info-note">This plugin interface runs in an isolated frame and cannot access control-plane data directly.</div>
+          <iframe class="detail-frame" sandbox="allow-scripts allow-forms" src="${url}" title="${escAttr(name)} UI"></iframe>`;
       }
 
       const hasSchemaFields = Boolean(p.schema && p.schema.fields && p.schema.fields.length > 0);
@@ -847,7 +843,7 @@
             ${fieldHtml}
           </div>
           <div style="margin-bottom:1.25rem;">
-            <button class="btn btn-primary" onclick="saveSchemaConfig('${escAttr(name)}')">Save config</button>
+            <button class="btn btn-primary" onclick="saveSchemaConfig(${escJS(name)})">Save config</button>
           </div>
         `;
       }
@@ -865,8 +861,8 @@
 
         <div style="display:flex; gap:0.5rem; margin-bottom:1.25rem;">
           ${enabled
-            ? `<button class="btn btn-sm btn-danger" onclick="disablePlugin('${escAttr(name)}'); go('pipeline')">Disable &amp; return</button>`
-            : `<button class="btn btn-sm btn-green" onclick="enablePlugin('${escAttr(name)}'); go('pipeline')">Enable &amp; return</button>`}
+            ? `<button class="btn btn-sm btn-danger" onclick="disablePlugin(${escJS(name)}); go('pipeline')">Disable &amp; return</button>`
+            : `<button class="btn btn-sm btn-green" onclick="enablePlugin(${escJS(name)}); go('pipeline')">Enable &amp; return</button>`}
         </div>
 
         ${servedBlock}
@@ -877,7 +873,7 @@
           <div class="section-desc" style="margin-bottom:0.6rem">Raw config passed to the plugin. Saved &amp; applied immediately.</div>
           <textarea class="code-editor" id="detailConfig">${escHtml(cfgStr)}</textarea>
           <div style="margin-top:0.75rem; display:flex; gap:0.5rem;">
-            <button class="btn ${hasSchemaFields ? 'btn' : 'btn-primary'}" onclick="savePluginConfig('${escAttr(name)}')">Save raw JSON</button>
+            <button class="btn ${hasSchemaFields ? 'btn' : 'btn-primary'}" onclick="savePluginConfig(${escJS(name)})">Save raw JSON</button>
           </div>
         </details>
       `;
@@ -898,7 +894,7 @@
           cfg[k] = el.value;
         }
       });
-      fetch(`/_torana/api/plugins/${encodeURIComponent(name)}/config`, {
+      fetch(`/_torana/api/v1/plugins/${encodeURIComponent(name)}/config`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(cfg)
@@ -913,7 +909,7 @@
       let parsed;
       try { parsed = JSON.parse(area.value.trim() || '{}'); }
       catch (e) { showAlert(`Invalid JSON: ${e.message}`); area.focus(); return; }
-      fetch(`/_torana/api/plugins/${encodeURIComponent(name)}/config`, {
+      fetch(`/_torana/api/v1/plugins/${encodeURIComponent(name)}/config`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(parsed)
@@ -925,7 +921,7 @@
 
     // ---- Traffic / stats ----
     function fetchStats() {
-      fetch('/stats').then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
+      fetch('/_torana/api/v1/stats').then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
         .then(renderStats).catch(err => console.error('stats:', err));
     }
     function renderStats(data) {
@@ -979,7 +975,7 @@
     function initSSE() {
       if (eventSource) eventSource.close();
       try {
-        eventSource = new EventSource('/_torana/api/stream');
+        eventSource = new EventSource('/_torana/api/v1/stream');
         eventSource.onopen = () => setConnectionStatus(true);
         eventSource.onmessage = e => { try { addFeedEvent(JSON.parse(e.data)); } catch (_) {} };
         eventSource.onerror = () => setConnectionStatus(false, 'Reconnecting…');
@@ -1086,7 +1082,7 @@
       return undefined;
     }
     function loadSettings() {
-      fetch('/_torana/api/config').then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
+      fetch('/_torana/api/v1/config').then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
         .then(cfg => { settingsCfg = cfg; renderSettings(cfg); })
         .catch(err => showAlert(`Failed to load settings: ${err.message}`));
     }
@@ -1109,10 +1105,6 @@
       document.getElementById('limConc').value = lim.concurrency || 0;
       document.getElementById('limRpm').value = lim.rpm || 0;
       document.getElementById('cfgPort').value = cfg.port || 8080;
-
-      const cp = cfg.control_plane || {};
-      document.getElementById('cpAllowRemote').checked = !!cp.allow_remote;
-      document.getElementById('cpToken').value = '';
 
       const cache = cfg.cache || {};
       const redis = cache.redis || {};
@@ -1207,11 +1199,6 @@
       };
       const port = parseInt(document.getElementById('cfgPort').value, 10);
       if (!isNaN(port)) cfg.port = port;
-      cfg.control_plane = cfg.control_plane || {};
-      cfg.control_plane.allow_remote = document.getElementById('cpAllowRemote').checked;
-      const tok = document.getElementById('cpToken').value.trim();
-      if (tok) cfg.control_plane.token = tok; else delete cfg.control_plane.token;
-
       const cacheBackend = document.getElementById('cacheBackend').value;
       const cacheTtlVal = document.getElementById('cacheTtl').value.trim();
       const cacheRedisAddr = document.getElementById('cacheRedisAddr').value.trim();
@@ -1267,7 +1254,7 @@
 
       cfg.mitm = mitmObj;
 
-      fetch('/_torana/api/config', {
+      fetch('/_torana/api/v1/config', {
         method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(cfg)
       })
       .then(async r => { const t = await r.text(); if (!r.ok) throw new Error(t || `HTTP ${r.status}`); return t ? JSON.parse(t) : {}; })
@@ -1287,6 +1274,9 @@
       return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#039;');
     }
     function escAttr(s) { return escHtml(String(s == null ? '' : s)); }
+    // JSON produces a JavaScript string literal; HTML-escaping it afterwards
+    // keeps plugin-provided names from escaping inline event-handler strings.
+    function escJS(s) { return escHtml(JSON.stringify(String(s == null ? '' : s))); }
   </script>
 </body>
 </html>

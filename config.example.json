@@ -49,6 +49,11 @@
   },
   "plugins": {
     "dir": "./plugins",
+    "runtime": {
+      "pool_size": 4,
+      "call_timeout_ms": 5000,
+      "memory_limit_mib": 64
+    },
     "_comment": "Safe coding-agent baseline: schema_translator plus intent. To compact tool results, append ONE compactor after intent and configure explicit ordered tool_policies; unmatched tools remain exact. See docs/COMPACTION.md.",
     "order": ["schema_translator", "intent"],
     "config": {
