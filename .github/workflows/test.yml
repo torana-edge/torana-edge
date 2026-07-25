@@ -41,3 +41,16 @@ jobs:
           go-version: "1.26"
       - name: golangci-lint
         run: go run github.com/golangci/golangci-lint/cmd/golangci-lint@latest run --timeout 5m
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build image
+        run: docker build -t torana-edge:ci .
+      - name: Verify bundled plugin artifact
+        run: |
+          container_id=$(docker create torana-edge:ci)
+          trap 'docker rm -f "$container_id" >/dev/null' EXIT
+          docker cp "$container_id:/plugins/pii/plugin.wasm" /tmp/pii.wasm
+          test -s /tmp/pii.wasm

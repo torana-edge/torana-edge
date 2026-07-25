@@ -257,3 +257,61 @@ func TestResolveConfig(t *testing.T) {
 		}
 	})
 }
+
+func TestManagedStoreShadowsSeed(t *testing.T) {
+	t.Run("materialized seed is equivalent", func(t *testing.T) {
+		dir := t.TempDir()
+		seedPath := filepath.Join(dir, "seed.json")
+		storePath := filepath.Join(dir, "managed", "config.json")
+		if err := os.WriteFile(seedPath, []byte(`{"port": 9090}`), 0644); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := ResolveConfig(seedPath, storePath); err != nil {
+			t.Fatal(err)
+		}
+		differs, err := ManagedStoreShadowsSeed(seedPath, storePath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if differs {
+			t.Fatal("freshly materialized store should equal its seed")
+		}
+	})
+
+	t.Run("changed seed is shadowed", func(t *testing.T) {
+		dir := t.TempDir()
+		seedPath := filepath.Join(dir, "seed.json")
+		storePath := filepath.Join(dir, "managed", "config.json")
+		if err := os.WriteFile(seedPath, []byte(`{"port": 9090}`), 0644); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := ResolveConfig(seedPath, storePath); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(seedPath, []byte(`{"port": 7070}`), 0644); err != nil {
+			t.Fatal(err)
+		}
+		differs, err := ManagedStoreShadowsSeed(seedPath, storePath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !differs {
+			t.Fatal("changed seed should differ from managed store")
+		}
+	})
+
+	t.Run("missing seed is not a conflict", func(t *testing.T) {
+		dir := t.TempDir()
+		storePath := filepath.Join(dir, "config.json")
+		if err := Save(storePath, DefaultConfig()); err != nil {
+			t.Fatal(err)
+		}
+		differs, err := ManagedStoreShadowsSeed(filepath.Join(dir, "missing.json"), storePath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if differs {
+			t.Fatal("missing seed should not be reported as shadowed")
+		}
+	})
+}

@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 
 	"github.com/torana-edge/torana-edge/internal/cache"
@@ -390,6 +391,37 @@ func ManagedStorePath() (string, error) {
 		dataDir = filepath.Join(dir, "torana")
 	}
 	return filepath.Join(dataDir, "config.json"), nil
+}
+
+// ManagedStoreShadowsSeed reports whether an existing managed store differs
+// semantically from an existing seed file. Managed is ignored because Save
+// sets it while materializing the seed. Missing inputs do not constitute a
+// shadowing conflict.
+func ManagedStoreShadowsSeed(seedPath, storePath string) (bool, error) {
+	if _, err := os.Stat(storePath); err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("checking managed store %q: %w", storePath, err)
+	}
+	if _, err := os.Stat(seedPath); err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("checking seed config %q: %w", seedPath, err)
+	}
+
+	seed, err := Load(seedPath)
+	if err != nil {
+		return false, fmt.Errorf("loading seed config %q: %w", seedPath, err)
+	}
+	store, err := Load(storePath)
+	if err != nil {
+		return false, fmt.Errorf("loading managed store %q: %w", storePath, err)
+	}
+	seed.Managed = false
+	store.Managed = false
+	return !reflect.DeepEqual(seed, store), nil
 }
 
 // ResolveConfig resolves the active configuration for Torana.
