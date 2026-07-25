@@ -1,9 +1,9 @@
 # Torana Edge — Quickstart
 
-Torana Edge sits between your AI coding harness and your LLM provider.
-It intercepts tool calls, extracts intent, and compacts massive tool
-results through a cheaper model — cutting token costs by 90%+ on
-file reads, grep searches, and other repetitive coding tasks.
+Torana Edge sits between your AI coding harness and your LLM provider. It
+normalizes provider formats and runs an ordered WASM plugin pipeline. Optional
+tool-aware and provider-native compaction can reduce repeated context while
+preserving exact evidence according to explicit policies.
 
 ## 1-minute install
 
@@ -11,11 +11,12 @@ file reads, grep searches, and other repetitive coding tasks.
 go install github.com/torana-edge/torana-edge/cmd/torana@latest
 ```
 
-Or clone and build:
+The command above installs the proxy, not the WASM artifacts. To use bundled
+plugins, clone the repository and build them:
 ```bash
 git clone https://github.com/torana-edge/torana-edge
 cd torana-edge
-go build -o torana ./cmd/torana/
+make build
 ```
 
 ## Configure
@@ -30,14 +31,14 @@ Create `config.json`:
       "format": "openai"
     },
     "openai": {
-      "url": "https://api.openai.com/v1",
+      "url": "https://api.openai.com",
       "format": "openai",
       "fallback": ["deepseek"]
     }
   },
   "plugins": {
     "dir": "./plugins",
-    "order": ["schema_translator", "intent", "keyword_compactor"]
+    "order": ["schema_translator", "intent"]
   },
   "limits": {
     "concurrency": 10,
@@ -46,10 +47,9 @@ Create `config.json`:
 }
 ```
 
-> **Plugin order:** `intent` captures why each tool call happens; the compactor
-> then uses those intents to shrink tool results. Keep `intent` before the
-> compactor, and run **one** compactor — `keyword_compactor` (deterministic,
-> local, free) **or** `compactor` (cheap-model offload), never both.
+> The baseline leaves all tool output exact. To enable compaction, append one
+> compactor after `intent` and configure explicit tool policies. Unknown tools,
+> mutations, and failures remain exact. See [COMPACTION.md](COMPACTION.md).
 
 ## Route your harness
 

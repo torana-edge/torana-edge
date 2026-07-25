@@ -43,7 +43,7 @@ type PluginManifest struct {
 
 type ConfigField struct {
 	Key     string   `json:"key"`
-	Type    string   `json:"type"`              // "string" | "number" | "boolean" | "enum"
+	Type    string   `json:"type"` // "string" | "number" | "boolean" | "enum"
 	Label   string   `json:"label"`
 	Default any      `json:"default,omitempty"`
 	Options []string `json:"options,omitempty"` // enum only
@@ -210,7 +210,6 @@ func reloadPipeline(runtime *wasm.Runtime, config PluginConfig) (*PluginPipeline
 			seenCompactionGate = true
 		}
 	}
-
 	for _, name := range order {
 		bundle, ok := byName[name]
 		if !ok {
@@ -360,6 +359,7 @@ func (pp *PluginPipeline) RunBeforeRequest(ctx context.Context, reqID uint64, ch
 		if len(outBytes) > 0 {
 			resultBytes = outBytes
 			modified = true
+			pp.runtime.ObserveRequestMutation(ctx, outBytes)
 		}
 	}
 
@@ -543,7 +543,6 @@ func (pp *PluginPipeline) RunOnHTTPRequest(ctx context.Context, reqID uint64, pl
 
 	return &resp, nil
 }
-
 
 // ============================================================================
 // Plugin config

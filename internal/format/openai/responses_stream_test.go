@@ -114,3 +114,22 @@ func TestParseResponsesStreamIgnoresUnknownToolItemIDs(t *testing.T) {
 		t.Fatalf("unknown item IDs must not be assigned to another call: %+v", events)
 	}
 }
+
+func TestParseResponsesStreamOfficialUsageAndCacheDetails(t *testing.T) {
+	input := `data: {"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":12000,"output_tokens":345,"total_tokens":12345,"input_tokens_details":{"cached_tokens":9000,"cache_write_tokens":1500}}}}` + "\n"
+
+	events := collectStreamEvents(input)
+	if len(events) != 2 {
+		t.Fatalf("expected finish and usage events, got %d: %+v", len(events), events)
+	}
+	if events[0].FinishReason != "stop" {
+		t.Fatalf("event 0: expected stop, got %+v", events[0])
+	}
+	usage := events[1].Usage
+	if usage == nil {
+		t.Fatalf("event 1: expected usage, got %+v", events[1])
+	}
+	if usage.InputTokens != 12000 || usage.OutputTokens != 345 || usage.CacheReadTokens != 9000 || usage.CacheWriteTokens != 1500 {
+		t.Fatalf("unexpected Responses usage: %+v", usage)
+	}
+}
