@@ -108,6 +108,42 @@ func TestManagedStorePath(t *testing.T) {
 	}
 }
 
+func TestConfigValidateRejectsInvalidProviderGraph(t *testing.T) {
+	valid := Config{
+		Port: 8080,
+		Providers: map[string]Provider{
+			"primary": {
+				URL:      "https://api.example.test",
+				Format:   "openai",
+				Fallback: []string{"fallback"},
+			},
+			"fallback": {
+				URL:    "http://127.0.0.1:11434",
+				Format: "openai",
+			},
+		},
+	}
+	if err := valid.Validate(); err != nil {
+		t.Fatalf("valid config: %v", err)
+	}
+
+	invalid := valid
+	invalid.Providers = map[string]Provider{
+		"primary": {URL: "file:///tmp/socket", Format: "openai"},
+	}
+	if err := invalid.Validate(); err == nil {
+		t.Fatal("non-http provider URL was accepted")
+	}
+
+	invalid = valid
+	invalid.Providers = map[string]Provider{
+		"primary": {URL: "https://api.example.test", Format: "openai", Fallback: []string{"missing"}},
+	}
+	if err := invalid.Validate(); err == nil {
+		t.Fatal("missing fallback provider was accepted")
+	}
+}
+
 func TestResolveConfig(t *testing.T) {
 	t.Run("no store, seed present -> store created with seed values, seed unchanged", func(t *testing.T) {
 		dir := t.TempDir()
@@ -221,4 +257,3 @@ func TestResolveConfig(t *testing.T) {
 		}
 	})
 }
-

@@ -575,6 +575,8 @@
     let pluginByName = {};       // name -> info
     let pipelineOrder = [];      // enabled plugin names, in order
     let configMap = {};          // name -> config object
+    let approvalMap = {};        // manifest id -> digest-bound operator approval
+    let failureModeMap = {};     // name -> operator-selected pass/block behavior
     let pipelineDirty = false;
     let settingsCfg = null;      // full provider.Config from GET /_torana/api/config
     let feedEvents = [];
@@ -645,9 +647,13 @@
           allPlugins = (data.plugins || []);
           pluginByName = {};
           configMap = {};
+          approvalMap = {};
+          failureModeMap = {};
           for (const p of allPlugins) {
             pluginByName[p.name] = p;
             configMap[p.name] = p.config && Object.keys(p.config).length ? p.config : (p.config || {});
+            if (p.approval) approvalMap[p.id || p.name] = p.approval;
+            failureModeMap[p.name] = (p.approval && p.approval.failure_mode) || p.failure_mode || 'pass';
           }
           pipelineOrder = allPlugins.filter(p => p.enabled)
             .sort((a, b) => a.order - b.order).map(p => p.name);
@@ -743,6 +749,30 @@
     }
 
     function enablePlugin(name) {
+      const p = pluginByName[name];
+      if (!p || !p.digest) {
+        showAlert(`Cannot enable ${name}: bundle digest is unavailable.`);
+        return;
+      }
+      const approvalKey = p.id || p.name;
+      const requested = p.permissions || [];
+      const failureMode = failureModeMap[name] || p.failure_mode || 'pass';
+      const prior = approvalMap[approvalKey];
+      const priorMatches = prior && prior.digest === p.digest &&
+        JSON.stringify(prior.permissions || []) === JSON.stringify(requested) &&
+        (prior.failure_mode || failureMode) === failureMode;
+      if (!priorMatches) {
+        const summary = requested.length ? requested.join('\n  • ') : 'none';
+        const accepted = window.confirm(
+          `Approve ${approvalKey}?\n\nBundle: ${p.digest}\nRequested capabilities:\n  • ${summary}\nFailure policy: ${failureMode}\n\nAny bundle or manifest change will require approval again.`
+        );
+        if (!accepted) return;
+        approvalMap[approvalKey] = {
+          digest: p.digest,
+          permissions: [...requested],
+          failure_mode: failureMode
+        };
+      }
       if (!pipelineOrder.includes(name)) pipelineOrder.push(name);
       if (!configMap[name]) configMap[name] = {};
       setDirty(true);
@@ -754,12 +784,23 @@
       renderPipeline();
     }
 
+    function setPluginFailureMode(name, mode) {
+      if (mode !== 'pass' && mode !== 'block') return;
+      failureModeMap[name] = mode;
+      const p = pluginByName[name];
+      if (p) {
+        const key = p.id || p.name;
+        if (approvalMap[key]) approvalMap[key].failure_mode = mode;
+      }
+      setDirty(true);
+    }
+
     function savePipeline() {
       const cfgOut = {};
       for (const name of pipelineOrder) cfgOut[name] = configMap[name] || {};
       fetch('/_torana/api/v1/plugins', {
         method: 'PUT', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ order: pipelineOrder, config: cfgOut })
+        body: JSON.stringify({ order: pipelineOrder, config: cfgOut, approvals: approvalMap })
       })
       .then(async r => { const t = await r.text(); if (!r.ok) throw new Error(t || `HTTP ${r.status}`); return t; })
       .then(() => { showAlert('Pipeline saved and applied.', false); loadPlugins(); })
@@ -858,6 +899,14 @@
         </div>
         ${p.description ? `<div class="section-desc">${escHtml(p.description)}</div>` : ''}
         <div class="detail-meta-grid">${hookChips}${permChips || '<span class="chip">no permissions</span>'}</div>
+        ${p.digest ? `<div class="section-desc"><strong>Bundle digest:</strong> <code>${escHtml(p.digest)}</code><br><strong>Recommended failure policy:</strong> ${escHtml(p.failure_mode || 'pass')}</div>` : ''}
+        <label class="field" style="max-width:20rem;margin:1rem 0;">
+          <span>On plugin runtime failure</span>
+          <select onchange="setPluginFailureMode(${escJS(name)}, this.value)">
+            <option value="pass" ${failureModeMap[name] === 'pass' ? 'selected' : ''}>Pass through</option>
+            <option value="block" ${failureModeMap[name] === 'block' ? 'selected' : ''}>Block request</option>
+          </select>
+        </label>
 
         <div style="display:flex; gap:0.5rem; margin-bottom:1.25rem;">
           ${enabled

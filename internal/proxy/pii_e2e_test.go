@@ -39,9 +39,10 @@ func piiEnv(t *testing.T, piiCfg string, extra map[string]provider.Provider) (fu
 		Providers: provider.Config{
 			Providers: providers,
 			Plugins: provider.PluginsConfig{
-				Dir:    "../../plugins",
-				Order:  []string{"pii"},
-				Config: map[string]json.RawMessage{"pii": json.RawMessage(piiCfg)},
+				Dir:             "../../plugins",
+				Order:           []string{"pii"},
+				Config:          map[string]json.RawMessage{"pii": json.RawMessage(piiCfg)},
+				AllowUnapproved: true,
 			},
 		},
 	})

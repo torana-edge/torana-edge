@@ -55,8 +55,9 @@ func TestOrderingConstraintViolation(t *testing.T) {
 
 	// Invalid order: gate_plugin before router_plugin -> must fail with ordering constraint violation
 	invalidCfg := PluginConfig{
-		Dir:   dir,
-		Order: []string{"gate_plugin", "router_plugin"},
+		Dir:             dir,
+		Order:           []string{"gate_plugin", "router_plugin"},
+		AllowUnapproved: true,
 	}
 
 	_, err := reloadPipeline(rt, invalidCfg)
@@ -69,8 +70,9 @@ func TestOrderingConstraintViolation(t *testing.T) {
 
 	// Valid order: router_plugin before gate_plugin -> should pass ordering validation
 	validCfg := PluginConfig{
-		Dir:   dir,
-		Order: []string{"router_plugin", "gate_plugin"},
+		Dir:             dir,
+		Order:           []string{"router_plugin", "gate_plugin"},
+		AllowUnapproved: true,
 	}
 
 	// reloadPipeline will try to compile the dummy wasm modules.

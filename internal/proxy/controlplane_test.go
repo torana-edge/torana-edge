@@ -69,7 +69,7 @@ func TestControlPlaneConfigAPI(t *testing.T) {
 	}
 
 	// PUT /_torana/api/plugins
-	updateBody := `{"order":["schema_translator","intent"],"config":{"schema_translator":{"strict":true}}}`
+	updateBody := `{"order":[],"config":{"schema_translator":{"strict":true}}}`
 	provCfg.Plugins.Config = map[string]json.RawMessage{"disabled_plugin": json.RawMessage(`{"retain":true}`)}
 	srv.SetProviders(provCfg)
 	req, err := http.NewRequest(http.MethodPut, url+"/_torana/api/plugins", strings.NewReader(updateBody))
@@ -95,8 +95,8 @@ func TestControlPlaneConfigAPI(t *testing.T) {
 		t.Fatalf("decode PUT plugins response: %v", err)
 	}
 
-	if len(gotPlugins.Order) != 2 || gotPlugins.Order[0] != "schema_translator" || gotPlugins.Order[1] != "intent" {
-		t.Errorf("gotPlugins.Order = %v, want [schema_translator intent]", gotPlugins.Order)
+	if len(gotPlugins.Order) != 0 {
+		t.Errorf("gotPlugins.Order = %v, want no enabled plugins", gotPlugins.Order)
 	}
 	if string(gotPlugins.Config["disabled_plugin"]) != `{"retain":true}` {
 		t.Errorf("disabled plugin config was dropped: %s", gotPlugins.Config["disabled_plugin"])
@@ -110,8 +110,8 @@ func TestControlPlaneConfigAPI(t *testing.T) {
 	if !savedCfg.Managed {
 		t.Errorf("persisted config should be managed")
 	}
-	if len(savedCfg.Plugins.Order) != 2 || savedCfg.Plugins.Order[0] != "schema_translator" {
-		t.Errorf("persisted Plugins.Order = %v, want [schema_translator intent]", savedCfg.Plugins.Order)
+	if len(savedCfg.Plugins.Order) != 0 {
+		t.Errorf("persisted Plugins.Order = %v, want no enabled plugins", savedCfg.Plugins.Order)
 	}
 }
 
@@ -140,8 +140,9 @@ func TestControlPlanePluginsOrderingConstraintError(t *testing.T) {
 	configPath := filepath.Join(t.TempDir(), "config.json")
 	provCfg := provider.DefaultConfig()
 	provCfg.Plugins = provider.PluginsConfig{
-		Dir:   pluginsDir,
-		Order: []string{"router", "gate"},
+		Dir:             pluginsDir,
+		Order:           []string{"router", "gate"},
+		AllowUnapproved: true,
 	}
 
 	cfg := Config{

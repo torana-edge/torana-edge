@@ -89,13 +89,11 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	// Start config hot-reload watcher.
-	stopWatch := provider.WatchConfig(storePath, 5*time.Second, func(newCfg provider.Config) {
-		srv.SetProviders(newCfg)
-	})
-	defer stopWatch()
-
-	if err := srv.Start(os.Getenv("TORANA_BIND")); err != nil {
+	bindHost := os.Getenv("TORANA_BIND")
+	if bindHost == "" {
+		bindHost = "127.0.0.1"
+	}
+	if err := srv.Start(bindHost); err != nil {
 		log.Fatalf("Failed to start server: %v", err)
 	}
 	<-ctx.Done()

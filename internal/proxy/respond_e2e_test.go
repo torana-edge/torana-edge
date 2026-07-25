@@ -39,7 +39,7 @@ func fixtureEnv(t *testing.T, order []string, formatName string, upstream http.H
 	srv, err := New(Config{
 		Providers: provider.Config{
 			Providers: map[string]provider.Provider{"p": {URL: up.URL, Format: formatName}},
-			Plugins:   provider.PluginsConfig{Dir: "../../examples/plugins", Order: order},
+			Plugins:   provider.PluginsConfig{Dir: "../../examples/plugins", Order: order, AllowUnapproved: true},
 		},
 	})
 	if err != nil {

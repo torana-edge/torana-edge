@@ -1,4 +1,10 @@
 {
+  "schema_version": 1,
+  "id": "torana/intent",
+  "abi_version": "v1",
+  "minimum_torana_version": "0.1.0",
+  "failure_mode": "pass",
+  "repository": "https://github.com/torana-edge/torana-plugins",
   "name": "intent",
   "version": "0.1.0",
   "description": "Captures WHY each tool call is made: injects the required 'i' field into tool schemas (plus a system-prompt example), extracts it from streamed tool calls into the shared cache, and strips it before the harness sees it. On later requests it rehydrates cached intents onto history tool calls (bridging them to the request's tool_call_ids for the compactors) and heuristically fills never-captured ones so no tool establishes an 'i'-less precedent. Run before keyword_compactor OR compactor — both consume the intent cache.",

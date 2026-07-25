@@ -6,8 +6,10 @@ package provider
 import (
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/torana-edge/torana-edge/internal/cache"
 	"github.com/torana-edge/torana-edge/internal/economics"
@@ -30,6 +32,72 @@ type Provider struct {
 	// "*" may be used as a provider default. Torana intentionally ships no
 	// built-in rates because provider prices and cache semantics change.
 	Pricing map[string]economics.ModelPricing `json:"pricing,omitempty"`
+}
+
+var supportedFormats = map[string]struct{}{
+	"anthropic":         {},
+	"bedrock":           {},
+	"gemini":            {},
+	"gemini-codeassist": {},
+	"openai":            {},
+}
+
+// Validate rejects configuration that cannot be routed deterministically.
+func (c Config) Validate() error {
+	if c.Port <= 0 || c.Port > 65535 {
+		return fmt.Errorf("port must be between 1 and 65535")
+	}
+	if c.Limits.Concurrency < 0 || c.Limits.RPM < 0 {
+		return fmt.Errorf("limits must not be negative")
+	}
+	for name, configured := range c.Providers {
+		if strings.TrimSpace(name) == "" {
+			return fmt.Errorf("provider name must not be empty")
+		}
+		u, err := url.Parse(configured.URL)
+		if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
+			return fmt.Errorf("provider %q has invalid http(s) url %q", name, configured.URL)
+		}
+		if _, ok := supportedFormats[configured.Format]; !ok {
+			return fmt.Errorf("provider %q has unsupported format %q", name, configured.Format)
+		}
+		for _, fallback := range configured.Fallback {
+			if fallback == name {
+				return fmt.Errorf("provider %q cannot fall back to itself", name)
+			}
+			if _, ok := c.Providers[fallback]; !ok {
+				return fmt.Errorf("provider %q fallback %q is not configured", name, fallback)
+			}
+		}
+		if err := configured.ValidateResponsesCompaction(name); err != nil {
+			return err
+		}
+	}
+	if err := c.Offload.Validate(c.Providers); err != nil {
+		return err
+	}
+	switch c.Cache.Backend {
+	case "", "memory", "redis":
+	default:
+		return fmt.Errorf("cache backend %q is unsupported", c.Cache.Backend)
+	}
+	if c.Cache.TTLSeconds < 0 || c.Cache.MaxEntries < 0 || c.Cache.MaxBytes < 0 || c.Cache.Redis.DB < 0 {
+		return fmt.Errorf("cache limits and redis db must not be negative")
+	}
+	if c.MITM.Enabled {
+		if c.MITM.Listen == "" || c.MITM.CADir == "" {
+			return fmt.Errorf("mitm.listen and mitm.ca_dir are required when MITM is enabled")
+		}
+		for host, providerName := range c.MITM.Hosts {
+			if strings.TrimSpace(host) == "" {
+				return fmt.Errorf("mitm host must not be empty")
+			}
+			if _, ok := c.Providers[providerName]; !ok {
+				return fmt.Errorf("mitm host %q references unknown provider %q", host, providerName)
+			}
+		}
+	}
+	return nil
 }
 
 // PricingFor returns an explicitly configured exact-model rate, falling back
@@ -154,6 +222,11 @@ type PluginsConfig struct {
 	Order   []string                   `json:"order"`  // execution order by plugin name
 	Config  map[string]json.RawMessage `json:"config"` // per-plugin config blobs
 	Runtime PluginRuntimeConfig        `json:"runtime,omitempty"`
+	// Approvals are operator-owned and bound to the installed WASM digest.
+	// A plugin manifest may request capabilities but can never grant itself.
+	Approvals map[string]PluginApproval `json:"approvals,omitempty"`
+	// AllowUnapproved is only used by in-repository conformance tests.
+	AllowUnapproved bool `json:"-"`
 }
 
 // PluginRuntimeConfig bounds untrusted WASM execution. Zero values select the
@@ -162,6 +235,12 @@ type PluginRuntimeConfig struct {
 	PoolSize       int    `json:"pool_size,omitempty"`
 	CallTimeoutMS  int    `json:"call_timeout_ms,omitempty"`
 	MemoryLimitMiB uint32 `json:"memory_limit_mib,omitempty"`
+}
+
+type PluginApproval struct {
+	Digest      string   `json:"digest"`
+	Permissions []string `json:"permissions"`
+	FailureMode string   `json:"failure_mode,omitempty"`
 }
 
 // DefaultConfig returns the built-in configuration for common providers.

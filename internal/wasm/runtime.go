@@ -87,8 +87,11 @@ type Plugin struct {
 	// decode+codegen that InstantiateWithConfig(bytes) redoes on every call.
 	compiled wazero.CompiledModule
 
-	// Instance pool for concurrent request handling.
+	// Instance pool for concurrent request handling. slots is a semaphore over
+	// both pooled and newly-created instances, making PoolSize a hard bound on
+	// simultaneous guest calls rather than only an idle retention target.
 	pool    chan *pluginInstance
+	slots   chan struct{}
 	poolMu  sync.Mutex
 	stateMu sync.RWMutex
 
@@ -182,6 +185,11 @@ func (p *Plugin) ValidateHooks(ctx context.Context, hooks []string) error {
 // acquire returns a plugin instance from the pool.
 func (p *Plugin) acquire(ctx context.Context) (*pluginInstance, error) {
 	select {
+	case p.slots <- struct{}{}:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	select {
 	case inst := <-p.pool:
 		if inst != nil {
 			return inst, nil
@@ -189,16 +197,22 @@ func (p *Plugin) acquire(ctx context.Context) (*pluginInstance, error) {
 	default:
 	}
 	// Pool empty — create a new instance.
-	return p.newInstance(ctx)
+	inst, err := p.newInstance(ctx)
+	if err != nil {
+		<-p.slots
+		return nil, err
+	}
+	return inst, nil
 }
 
 // release returns an instance to the pool.
 func (p *Plugin) release(inst *pluginInstance) {
+	defer func() { <-p.slots }()
 	if inst == nil || inst.mod == nil || inst.mod.IsClosed() {
 		return
 	}
 	if inst.logEnabled != p.hasGrant("env.log") {
-		p.discard(inst)
+		_ = inst.mod.Close(context.Background())
 		return
 	}
 	select {
@@ -210,6 +224,7 @@ func (p *Plugin) release(inst *pluginInstance) {
 }
 
 func (p *Plugin) discard(inst *pluginInstance) {
+	defer func() { <-p.slots }()
 	if inst != nil && inst.mod != nil {
 		_ = inst.mod.Close(context.Background())
 	}
@@ -568,6 +583,7 @@ func (r *Runtime) LoadPlugin(name string, wasmBytes []byte) (*Plugin, error) {
 		compiled:    compiled,
 		runtime:     r.runtime,
 		pool:        make(chan *pluginInstance, r.options.PoolSize),
+		slots:       make(chan struct{}, r.options.PoolSize),
 		poolSize:    r.options.PoolSize,
 		callTimeout: r.options.CallTimeout,
 	}
