@@ -1,0 +1,10 @@
+[
+  {
+    "date": "2026-07-26",
+    "scope": "app",
+    "macrostructure": "Workbench",
+    "theme": "Torana operator ink",
+    "enrichment": "none",
+    "brief": "Redesign the embedded local control plane while preserving its routes and behavior."
+  }
+]

@@ -64,6 +64,17 @@ func init() {
 	// This demonstrates the run_on_http_request ABI: the page is intentionally
 	// minimal — a proof of the per-plugin HTTP namespace, not a real dashboard.
 	sdk.OnHTTPRequest(func(ctx context.Context, req *pb.HttpRequest) (*pb.HttpResponse, error) {
+		if req.Path == "/agent/status" {
+			hdrsJSON, _ := json.Marshal(map[string][]string{
+				"Content-Type": {"application/json"},
+			})
+			return &pb.HttpResponse{
+				Status:      200,
+				HeadersJson: hdrsJSON,
+				Body:        []byte(`{"plugin":"otel","status":"ready","capabilities":["request_metrics","response_metrics","token_metrics"]}`),
+				Handled:     true,
+			}, nil
+		}
 		body := []byte(`<!DOCTYPE html>
 <html lang="en">
 <head><meta charset="utf-8"><title>Torana otel plugin</title></head>
@@ -80,7 +91,6 @@ func init() {
 		}, nil
 	})
 }
-
 
 func statusClass(status int) string {
 	switch {

@@ -1,0 +1,10 @@
+{
+  "date": "2026-07-26",
+  "scope": "app",
+  "framework": "embedded vanilla HTML, CSS, and JavaScript",
+  "font_stack": "self-contained system fonts",
+  "palette": "existing Torana dark blue surfaces and canonical teal-blue logo",
+  "motion": "motion-cut",
+  "spacing": "migrated to a named 4-point scale",
+  "source": "internal/controlplane/dist/index.html"
+}

@@ -1,0 +1,70 @@
+/* Hallmark · genre: modern-minimal · tone: precise/quiet · anchor: teal 190 · fingerprint: compact workbench rail + trust-first detail · design-system: design.md · designed-as-app
+ * Hallmark · pre-emit critique: P5 H5 E4 S5 R5 V4
+ * contrast: pass (40–41) · mobile: pass (34, 49, 50–57) · tokens: pass (48)
+ */
+:root {
+  color-scheme: dark;
+
+  --color-paper: oklch(17% 0.025 250);
+  --color-paper-2: oklch(21% 0.03 250);
+  --color-paper-3: oklch(25% 0.032 250);
+  --color-paper-raised: oklch(29% 0.035 248);
+  --color-ink: oklch(95% 0.012 230);
+  --color-ink-2: oklch(79% 0.025 240);
+  --color-muted: oklch(70% 0.03 242);
+  --color-faint: oklch(68% 0.03 242);
+  --color-rule: oklch(37% 0.035 245);
+  --color-rule-strong: oklch(49% 0.045 242);
+  --color-accent: oklch(82% 0.145 190);
+  --color-accent-soft: oklch(31% 0.06 205);
+  --color-accent-ink: oklch(18% 0.03 250);
+  --color-focus: oklch(14% 0.03 250);
+  --color-focus-outer: oklch(94% 0.025 95);
+  --color-success: oklch(78% 0.15 155);
+  --color-success-soft: oklch(28% 0.06 155);
+  --color-warning: oklch(84% 0.15 85);
+  --color-warning-soft: oklch(28% 0.055 85);
+  --color-danger: oklch(72% 0.18 25);
+  --color-danger-soft: oklch(28% 0.065 25);
+  --color-brand-start: oklch(86% 0.16 180);
+  --color-brand-end: oklch(66% 0.17 240);
+  --color-overlay: oklch(10% 0.02 250 / 72%);
+  --color-transparent: oklch(0% 0 0 / 0%);
+
+  --font-display: "Bahnschrift SemiCondensed", "DIN Condensed", "Aptos Display", sans-serif;
+  --font-body: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: ui-monospace, "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+
+  --space-3xs: 0.25rem;
+  --space-2xs: 0.5rem;
+  --space-xs: 0.75rem;
+  --space-sm: 1rem;
+  --space-md: 1.5rem;
+  --space-lg: 2rem;
+  --space-xl: 3rem;
+  --space-2xl: 4rem;
+  --space-3xl: 6rem;
+
+  --text-2xs: 0.6875rem;
+  --text-xs: 0.75rem;
+  --text-sm: 0.875rem;
+  --text-md: 1rem;
+  --text-lg: 1.25rem;
+  --text-xl: 1.5rem;
+  --text-display: clamp(1.5rem, 1.1rem + 1.2vw, 2.25rem);
+
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-in: cubic-bezier(0.7, 0, 0.84, 0);
+  --ease-in-out: cubic-bezier(0.65, 0, 0.35, 1);
+  --dur-short: 120ms;
+  --dur-medium: 220ms;
+
+  --radius-sm: 0.25rem;
+  --radius-input: 0.375rem;
+  --radius-card: 0.5rem;
+  --radius-pill: 999px;
+  --rule-thin: 1px;
+  --control-height: 2.75rem;
+  --banner-height: 4.5rem;
+  --content-max: 78rem;
+}

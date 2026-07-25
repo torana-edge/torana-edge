@@ -88,7 +88,7 @@ func init() {
 
 - `sdk.OnBeforeRequest(fn func(ctx context.Context, req *pb.ChatRequest) (*pb.ChatRequest, error))`
 - `sdk.OnStreamChunk(fn func(ctx context.Context, chunk *pb.StreamEvent) (*pb.StreamEventResult, error))`
-- `sdk.OnHttpRequest(fn func(ctx context.Context, req *pb.HttpRequest) (*pb.HttpResponse, error))`
+- `sdk.OnHTTPRequest(fn func(ctx context.Context, req *pb.HttpRequest) (*pb.HttpResponse, error))`
 
 ---
 
@@ -103,8 +103,8 @@ Every plugin directory must contain a `plugin.json` file describing its metadata
   "name": "my-custom-plugin",
   "version": "0.1.0",
   "description": "Redacts sensitive terms from user prompts",
-  "abi": "v1",
-  "min_torana_version": "0.1.0",
+  "abi_version": "v1",
+  "minimum_torana_version": "0.1.0",
   "failure_mode": "block",
   "repository": "https://github.com/your-org/my-custom-plugin",
   "hooks": [
@@ -123,8 +123,8 @@ Every plugin directory must contain a `plugin.json` file describing its metadata
 - **`id`**: Stable machine-readable plugin identifier.
 - **`version`**: Semantic version string (e.g. `"0.1.0"`).
 - **`description`**: Human-readable description.
-- **`abi`**: Torana plugin ABI version. Use `"v1"`.
-- **`min_torana_version`**: Oldest compatible Torana release.
+- **`abi_version`**: Torana plugin ABI version. Use `"v1"`.
+- **`minimum_torana_version`**: Oldest compatible Torana release.
 - **`failure_mode`**: Recommended operator policy, `"pass"` or `"block"`.
 - **`repository`**: HTTPS source repository for provenance and support.
 - **`hooks`**: Array of hook definitions:
@@ -136,8 +136,9 @@ Every plugin directory must contain a `plugin.json` file describing its metadata
 
 Manifest permissions are requests, not grants. In production, Torana only
 exposes capabilities present in an operator-owned approval, and that approval
-is bound to the digest of the exact `plugin.json`, `plugin.wasm`, and
-`schema.json` bundle. A changed bundle must be reviewed and approved again.
+is bound to the digest of the exact `plugin.json`, `plugin.wasm`,
+`schema.json`, and optional `agent.json` bundle. A changed bundle must be
+reviewed and approved again.
 The Control Plane shows the digest and requested capabilities before enabling a
 plugin.
 
@@ -180,9 +181,20 @@ torana plugin build . -o plugin.wasm
 
 ## 6. Deployment and Activation
 
-1. Place `plugin.wasm`, `plugin.json`, and `schema.json` into a subfolder under
-   Torana's configured `plugins.dir`.
+1. Place `plugin.wasm`, `plugin.json`, `schema.json`, and optional `agent.json`
+   into a subfolder under Torana's configured `plugins.dir`.
 2. Open the Torana Control Plane, inspect the bundle digest and requested
    capabilities, choose a failure policy, and approve the plugin.
 3. Enable and order the approved plugin. Torana persists the operator approval
    separately from the plugin-owned manifest.
+
+## 7. Optional agent-facing operations
+
+Plugins that already vend a page through `run_on_http_request` can also expose
+machine-readable operations. Add a language-neutral `agent.json` descriptor and
+handle the advertised path beneath `/agent` in the same HTTP hook. Torana
+aggregates enabled operations in `GET /_torana/api/v1/`, enforces JSON
+responses, and includes the descriptor in the digest-bound approval.
+
+See [AGENT_CONTROL_PLANE.md](AGENT_CONTROL_PLANE.md) for the descriptor schema,
+dispatch contract, validation rules, and a complete curl example.

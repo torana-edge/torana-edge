@@ -169,16 +169,133 @@ func TestValidateApprovalAllowsOperatorFailureModeOverride(t *testing.T) {
 }
 
 func TestBundleDigestCoversCodeAndPolicyFiles(t *testing.T) {
-	base := bundleDigest([]byte(`{"failure_mode":"pass"}`), []byte("wasm"), []byte(`{"type":"object"}`))
+	withoutAgent := bundleDigest(
+		[]byte(`{"failure_mode":"pass"}`),
+		[]byte("wasm"),
+		[]byte(`{"type":"object"}`),
+		nil,
+	)
+	base := bundleDigest(
+		[]byte(`{"failure_mode":"pass"}`),
+		[]byte("wasm"),
+		[]byte(`{"type":"object"}`),
+		[]byte(`{"schema_version":1}`),
+	)
 	cases := []string{
-		bundleDigest([]byte(`{"failure_mode":"block"}`), []byte("wasm"), []byte(`{"type":"object"}`)),
-		bundleDigest([]byte(`{"failure_mode":"pass"}`), []byte("wasm2"), []byte(`{"type":"object"}`)),
-		bundleDigest([]byte(`{"failure_mode":"pass"}`), []byte("wasm"), []byte(`{"type":"string"}`)),
+		bundleDigest([]byte(`{"failure_mode":"block"}`), []byte("wasm"), []byte(`{"type":"object"}`), []byte(`{"schema_version":1}`)),
+		bundleDigest([]byte(`{"failure_mode":"pass"}`), []byte("wasm2"), []byte(`{"type":"object"}`), []byte(`{"schema_version":1}`)),
+		bundleDigest([]byte(`{"failure_mode":"pass"}`), []byte("wasm"), []byte(`{"type":"string"}`), []byte(`{"schema_version":1}`)),
+		bundleDigest([]byte(`{"failure_mode":"pass"}`), []byte("wasm"), []byte(`{"type":"object"}`), []byte(`{"schema_version":2}`)),
 	}
 	for _, changed := range cases {
 		if changed == base {
 			t.Fatal("bundle digest did not change when a consumed file changed")
 		}
+	}
+	if withoutAgent == base {
+		t.Fatal("adding agent.json did not change the bundle digest")
+	}
+}
+
+func TestBundleDigestGoldenVector(t *testing.T) {
+	const withoutAgent = "sha256:8743ff3f6066c1859164f246e463e5dcff44f1a4e26cdc2193d62f51fd128ecb"
+	const withAgent = "sha256:4a00f9b037bbc9138735d6cbc7fdb54348cd1f54fe99302e73d06d6d3b36e708"
+	if got := bundleDigest([]byte("manifest"), []byte("wasm"), []byte("schema"), nil); got != withoutAgent {
+		t.Fatalf("legacy digest = %s, want %s", got, withoutAgent)
+	}
+	if got := bundleDigest([]byte("manifest"), []byte("wasm"), []byte("schema"), []byte("agent")); got != withAgent {
+		t.Fatalf("agent digest = %s, want %s", got, withAgent)
+	}
+}
+
+func TestValidateAgentDescriptor(t *testing.T) {
+	manifest := PluginManifest{
+		Name:        "example",
+		Hooks:       []Hook{{Name: "run_on_http_request"}},
+		Permissions: []Permission{{Name: "env.serve_http"}},
+	}
+	valid := AgentDescriptor{
+		SchemaVersion: 1,
+		Operations: []AgentOperation{{
+			ID:           "status",
+			Method:       "GET",
+			Path:         "/status",
+			Description:  "Read plugin status.",
+			Risk:         "read",
+			Idempotent:   true,
+			OutputSchema: json.RawMessage(`{"type":"object"}`),
+		}},
+	}
+	if err := validateAgentDescriptor(valid, manifest); err != nil {
+		t.Fatalf("valid descriptor: %v", err)
+	}
+
+	invalid := valid
+	invalid.Operations = append([]AgentOperation(nil), valid.Operations...)
+	invalid.Operations[0].Path = "/../config"
+	if err := validateAgentDescriptor(invalid, manifest); err == nil {
+		t.Fatal("path traversal was accepted")
+	}
+	invalid.Operations[0].Path = "/st%61tus"
+	if err := validateAgentDescriptor(invalid, manifest); err == nil {
+		t.Fatal("non-canonical escaped path was accepted")
+	}
+	invalid.Operations[0].Path = "/foo/./bar"
+	if err := validateAgentDescriptor(invalid, manifest); err == nil {
+		t.Fatal("dot path segment was accepted")
+	}
+
+	invalid = valid
+	invalid.Operations = append([]AgentOperation(nil), valid.Operations...)
+	invalid.Operations[0].Method = "POST"
+	if err := validateAgentDescriptor(invalid, manifest); err == nil {
+		t.Fatal("read-risk POST was accepted")
+	}
+
+	manifest.Hooks = nil
+	if err := validateAgentDescriptor(valid, manifest); err == nil {
+		t.Fatal("descriptor without HTTP hook was accepted")
+	}
+}
+
+func TestPipelineAgentOperationsComeFromLoadedContract(t *testing.T) {
+	pipeline := &PluginPipeline{plugins: []*loadedPlugin{{
+		manifest: PluginManifest{ID: "torana/example", Name: "example"},
+		digest:   "sha256:approved",
+		agent: &AgentDescriptor{
+			SchemaVersion: 1,
+			Operations: []AgentOperation{{
+				ID:           "status",
+				Method:       "GET",
+				Path:         "/status",
+				Description:  "Read status.",
+				Risk:         "read",
+				Idempotent:   true,
+				OutputSchema: json.RawMessage(`{"type":"object"}`),
+			}},
+		},
+	}}}
+
+	loaded := pipeline.AgentPlugins()
+	if len(loaded) != 1 || loaded[0].Digest != "sha256:approved" {
+		t.Fatalf("loaded agent plugins = %#v", loaded)
+	}
+	loaded[0].Descriptor.Operations[0].Path = "/changed"
+
+	operation, allowed, found := pipeline.FindAgentOperation("example", "GET", "/status")
+	if !found || operation == nil || operation.ID != "status" {
+		t.Fatalf("approved operation not found: operation=%#v allowed=%v found=%v", operation, allowed, found)
+	}
+	if len(allowed) != 1 || allowed[0] != "GET" {
+		t.Fatalf("allowed methods = %v, want [GET]", allowed)
+	}
+	if operation.Path != "/status" {
+		t.Fatalf("loaded contract was mutated through snapshot: %q", operation.Path)
+	}
+
+	operation, allowed, found = pipeline.FindAgentOperation("example", "POST", "/status")
+	if !found || operation != nil || len(allowed) != 1 || allowed[0] != "GET" {
+		t.Fatalf("method mismatch = operation=%#v allowed=%v found=%v", operation, allowed, found)
 	}
 }
 
@@ -285,6 +402,27 @@ func TestDiscoverPlugins_ValidPlugin(t *testing.T) {
 	}
 	if bundles[0].Manifest.Name != "test-plugin" {
 		t.Errorf("unexpected plugin name: %s", bundles[0].Manifest.Name)
+	}
+}
+
+func TestDiscoverPluginsRejectsDuplicateIdentity(t *testing.T) {
+	root := t.TempDir()
+	for _, directory := range []string{"first", "second"} {
+		pluginDir := filepath.Join(root, directory)
+		if err := os.Mkdir(pluginDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		manifest := PluginManifest{ID: "community/example", Name: "example"}
+		manifestBytes, _ := json.Marshal(manifest)
+		if err := os.WriteFile(filepath.Join(pluginDir, "plugin.json"), manifestBytes, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(pluginDir, "plugin.wasm"), []byte{0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00}, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := DiscoverPlugins(root); err == nil {
+		t.Fatal("duplicate plugin name and ID were accepted")
 	}
 }
 

@@ -60,6 +60,17 @@ The empty order is intentional: discovered plugins are not implicitly trusted
 or enabled. Open the Control Plane, inspect and approve the exact bundle digest
 and requested capability subset, then enable plugins in the desired order.
 
+Software agents and shell scripts can discover the same guarded control-plane
+capabilities as JSON:
+
+```bash
+curl --fail-with-body --silent \
+  http://127.0.0.1:8080/_torana/api/v1/ | jq
+```
+
+See [AGENT_CONTROL_PLANE.md](AGENT_CONTROL_PLANE.md) for stable operation IDs,
+JSON error envelopes, mutation guidance, and plugin-contributed operations.
+
 > The baseline leaves all tool output exact. To enable compaction, approve and
 > enable `intent`, then place one approved compactor after it and configure
 > explicit tool policies. Unknown tools, mutations, and failures remain exact.
