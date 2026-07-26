@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"math"
+	"sort"
 )
 
 // cachePricingRequest is what a plugin asks about.
@@ -46,6 +47,26 @@ type cachePricingResponse struct {
 	// loop races against. Zero when the provider declares no tiers.
 	ShortestTTLSeconds  int `json:"shortest_ttl_seconds,omitempty"`
 	WarmIntervalSeconds int `json:"warm_interval_seconds,omitempty"`
+
+	// Tiers are the cache lifetimes this provider sells, ascending by TTL,
+	// each with the opaque breakpoint marker that selects it.
+	//
+	// Without these a plugin choosing between lifetimes has to hard-code one
+	// provider's menu, which is what cache_tier_selector did — writing
+	// Anthropic's marker into every provider's requests and silently ignoring
+	// whatever the operator had configured.
+	Tiers []cachePricingTier `json:"tiers,omitempty"`
+}
+
+// cachePricingTier is one purchasable cache lifetime, as the operator declared it.
+type cachePricingTier struct {
+	TTLSeconds int `json:"ttl_seconds"`
+	// WriteMultiplier is the cost of writing this tier relative to the model's
+	// base input rate, so a plugin can compare tiers without knowing the model.
+	WriteMultiplier float64 `json:"write_multiplier,omitempty"`
+	// Marker is placed verbatim into the request's cache breakpoint. Torana
+	// never interprets it.
+	Marker map[string]any `json:"marker,omitempty"`
 }
 
 // Reasons a plugin may see. Named so the plugin can branch on them rather than
@@ -83,6 +104,16 @@ func (s *Server) cachePricing(_ context.Context, payloadJSON string) string {
 		if shortest, ok := prov.Cache.ShortestTier(); ok {
 			out.ShortestTTLSeconds = shortest.TTLSeconds
 		}
+		for _, t := range prov.Cache.Tiers {
+			out.Tiers = append(out.Tiers, cachePricingTier{
+				TTLSeconds:      t.TTLSeconds,
+				WriteMultiplier: t.WriteMultiplier,
+				Marker:          t.Marker,
+			})
+		}
+		sort.Slice(out.Tiers, func(i, j int) bool {
+			return out.Tiers[i].TTLSeconds < out.Tiers[j].TTLSeconds
+		})
 		out.WarmIntervalSeconds = int(prov.Cache.WarmInterval().Seconds())
 	}
 

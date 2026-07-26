@@ -151,37 +151,30 @@ func chooseTier(cfg config, pricing sdk.CachePricing, act activity, now int64) (
 		return nil, 0
 	}
 
+	// The provider's own tier menu, as the operator declared it. A provider
+	// selling only one lifetime has nothing to choose between.
+	long, ok := pricing.LongestTier()
+	if !ok || long.Marker == nil {
+		return nil, 0
+	}
+
 	switch cfg.Mode {
 	case "short":
 		return nil, 0 // the harness default already selects the short tier
 	case "long":
-		return longTierMarker(pricing), longTierTTL(pricing)
+		return long.Marker, long.TTLSeconds
 	}
 
 	// auto: buy the longer tier once this conversation has demonstrated it
 	// pauses for long enough to lose a short-tier entry.
 	threshold := int64(cfg.MinGapSecondsForLongTier) * 1000
 	if threshold <= 0 {
-		threshold = int64(float64(longTierTTL(pricing)) * 0.3 * 1000)
+		threshold = int64(float64(long.TTLSeconds) * 0.3 * 1000)
 	}
 	if threshold <= 0 || act.LongestGapMillis < threshold {
 		return nil, 0
 	}
-	return longTierMarker(pricing), longTierTTL(pricing)
-}
-
-// The host reports the shortest tier explicitly; the long tier is whatever it
-// declared beyond that. The plugin learns both through pricing rather than
-// hard-coding any provider's menu.
-func longTierTTL(p sdk.CachePricing) int {
-	if p.ShortestTTLSeconds >= 3600 {
-		return p.ShortestTTLSeconds
-	}
-	return 3600
-}
-
-func longTierMarker(p sdk.CachePricing) map[string]any {
-	return map[string]any{"type": "ephemeral", "ttl": "1h"}
+	return long.Marker, long.TTLSeconds
 }
 
 // recordActivity updates and returns this conversation's gap history.

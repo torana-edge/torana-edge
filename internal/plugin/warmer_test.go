@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -33,6 +34,10 @@ type warmerHarness struct {
 	sent     []sentRequest
 	pricing  string
 	cacheHit bool // whether a refresh reports a cache read (alive) or write (lapsed)
+	// httpStatus, when non-zero and not 200, simulates a provider that was
+	// reached and refused the request — the 401 an unconfigured provider
+	// credential produces.
+	httpStatus int
 }
 
 func (h *warmerHarness) sentCount() int {
@@ -100,6 +105,11 @@ func newWarmerPipeline(t *testing.T, h *warmerHarness, conversations string, sta
 			return `{"status":"error","message":"` + why + `"}`
 		}
 
+		if h.httpStatus != 0 && h.httpStatus != 200 {
+			// The host reports transport success separately from what the
+			// provider said, so a refused request still arrives as status "ok".
+			return `{"status":"ok","http_status":` + strconv.Itoa(h.httpStatus) + `}`
+		}
 		if h.cacheHit {
 			return `{"status":"ok","http_status":200,"usage":{"input":100,"output":1,"cache_read":95,"cache_write":0}}`
 		}
@@ -359,6 +369,43 @@ func TestWarmerWithoutClockGrantStoresNothing(t *testing.T) {
 		if strings.Contains(o.Note, "deadline") {
 			t.Errorf("reported %q, which blames the deadline for a missing env.now grant", o.Note)
 		}
+	}
+}
+
+// TestWarmerStopsOnProviderRefusal is the regression test for a bug found in
+// audit: the host reports transport success separately from what the provider
+// said, so a 401 arrived as status "ok" and the SDK did not error. The warmer
+// counted every refused refresh as a completed one — burning its budget,
+// letting the cache lapse anyway, and reporting warm actions to the operator.
+//
+// The likeliest cause of that 401 is the subtle part: on the normal request
+// path Torana forwards the caller's credential, but a plugin-originated request
+// has no caller, so a provider configured the ordinary way has no key at all.
+func TestWarmerStopsOnProviderRefusal(t *testing.T) {
+	h := &warmerHarness{pricing: okPricing(), cacheHit: true, httpStatus: 401}
+	pp := newWarmerPipeline(t, h, "conv-a3f9", nil)
+
+	if _, err := pp.RunBeforeRequest(context.Background(), 1, warmerRequestBreakpointOnUser("conv-a3f9")); err != nil {
+		t.Fatal(err)
+	}
+	first := tick(t, pp, 1, 5*time.Minute)
+
+	// One attempt is fine — it could not have known. Reporting it as an action
+	// is not.
+	for _, o := range first {
+		if o.Actions > 0 {
+			t.Errorf("a refused refresh was reported as %d completed actions", o.Actions)
+		}
+	}
+
+	// And it must stop rather than pay the same 401 every tick forever.
+	before := h.sentCount()
+	for i := 2; i <= 5; i++ {
+		tick(t, pp, uint64(i), time.Duration(i*5)*time.Minute)
+	}
+	if h.sentCount() != before {
+		t.Errorf("kept retrying a refusing provider: %d sends after the first failure",
+			h.sentCount()-before)
 	}
 }
 
