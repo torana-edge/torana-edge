@@ -33,6 +33,7 @@ import (
 
 	"github.com/torana-edge/torana-edge/internal/cache"
 	"github.com/torana-edge/torana-edge/internal/controlplane"
+	"github.com/torana-edge/torana-edge/internal/conversation"
 	"github.com/torana-edge/torana-edge/internal/economics"
 	"github.com/torana-edge/torana-edge/internal/engine"
 	"github.com/torana-edge/torana-edge/internal/engine/pbconv"
@@ -149,6 +150,10 @@ type Server struct {
 	// the plugin-watcher goroutine reads it via newRuntime (off rebuildMu).
 	cacheMu     sync.RWMutex
 	rateLimiter *RateLimiter
+	// conversations tracks recently seen conversations (metadata only, never
+	// prompt content) so the control plane and plugins can name one. Bounded
+	// and self-expiring; closed on Shutdown.
+	conversations *conversation.Registry
 	// watchCancel stops the plugin hot-reload watcher on Shutdown.
 	watchCancel context.CancelFunc
 	watchDone   <-chan struct{}
@@ -239,6 +244,19 @@ type reqState struct {
 	// stream_options.include_usage on the caller's behalf; the resulting
 	// usage frame is consumed host-side and never forwarded to the client.
 	UsageInjected bool
+	// ConversationID is the durable label for the conversation this request
+	// belongs to, derived from the canonical IR before any plugin runs.
+	// Empty when the request could not be identified.
+	ConversationID string
+	// CachePrefixKey fingerprints the provider-side cache entry this request
+	// will hit, computed after routing and plugin mutation so it describes what
+	// actually goes on the wire. Unlike ConversationID it moves whenever the
+	// prefix or model changes.
+	CachePrefixKey string
+	// Path is the provider-stripped request path, kept because the proxy never
+	// synthesizes a chat path and anything replaying this conversation needs
+	// the one the caller used.
+	Path string
 	// Synthetic marks a response served by a plugin (env.respond_request):
 	// the transport returns it verbatim and ModifyResponse must not re-parse
 	// it or run response hooks over it.
@@ -453,12 +471,13 @@ func New(cfg Config) (*Server, error) {
 		return nil, fmt.Errorf("proxy: secret store: %w", err)
 	}
 	s := &Server{
-		config:      cfg,
-		configPath:  configPath,
-		secrets:     secStore,
-		stats:       statsTracker,
-		feed:        metrics.NewRequestFeed(0), // default 200-event ring buffer
-		rateLimiter: NewRateLimiter(cfg.Providers.Limits.RPM, cfg.Providers.Limits.Concurrency),
+		config:        cfg,
+		configPath:    configPath,
+		secrets:       secStore,
+		stats:         statsTracker,
+		feed:          metrics.NewRequestFeed(0), // default 200-event ring buffer
+		rateLimiter:   NewRateLimiter(cfg.Providers.Limits.RPM, cfg.Providers.Limits.Concurrency),
+		conversations: conversation.New(conversation.Options{}),
 	}
 
 	// --- offload validation (fail fast on misconfiguration) ---------------
@@ -647,6 +666,13 @@ func New(cfg Config) (*Server, error) {
 			rs.InitialProvider = provName
 			rs.InitialFormat = prov.Format
 
+			// Label the conversation from the canonical IR, before any plugin
+			// can rewrite the messages it is derived from. Deriving it after
+			// RunBeforeRequest would let a compactor rename the conversation it
+			// just compacted, which is precisely the case the label exists to
+			// survive. The cache-prefix key is deliberately computed later.
+			rs.ConversationID = engine.ConversationID(chat)
+
 			// --- WASM plugin pipeline --------------------------------------
 
 			if pl := reqStateFrom(req.Context()).Pipeline; pl != nil {
@@ -790,6 +816,13 @@ func New(cfg Config) (*Server, error) {
 					reqStateFrom(req.Context()).UsageInjected = true
 				}
 			}
+
+			// Fingerprint the cache prefix as it will actually go on the wire:
+			// after content routing may have changed the model, and after every
+			// plugin has had its say. Computing it earlier would key the entry
+			// on a request that was never sent.
+			rs.CachePrefixKey = engine.CachePrefixKey(chat)
+			rs.Path = rc.StrippedPath
 
 			newBody, err := fmt.Request.Marshal(chat)
 			if err != nil {
@@ -1474,6 +1507,27 @@ func New(cfg Config) (*Server, error) {
 		writePluginsWithWarnings(w, newPlugins, skipped)
 	}))
 
+	// GET /_torana/api/conversations — conversations seen recently, most
+	// recently active first. Metadata only: identifiers, timestamps, and token
+	// counts, never message content. The /v1/ prefix reaches this through the
+	// same shim as every other route.
+	mux.HandleFunc("/_torana/api/conversations", s.controlPlaneGuard(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		list := s.conversations.List()
+		if list == nil {
+			// An empty array rather than null, matching /feed.
+			list = []conversation.Record{}
+		}
+		b, _ := json.Marshal(struct {
+			Conversations []conversation.Record `json:"conversations"`
+		}{Conversations: list})
+		w.Write(b)
+	}))
+
 	// GET /_torana/api/feed — one-shot JSON snapshot of recent events,
 	// newest-first (up to the ring-buffer capacity, default 200).
 	mux.HandleFunc("/_torana/api/feed", s.controlPlaneGuard(func(w http.ResponseWriter, r *http.Request) {
@@ -1776,6 +1830,19 @@ func New(cfg Config) (*Server, error) {
 		s.stats.RecordRequest(tr.bytesRead, tw.bytesWritten)
 		s.stats.RecordTokens(int64(rs.UsageIn), int64(rs.UsageOut))
 		s.stats.RecordCacheTokens(int64(rs.UsageCacheRead), int64(rs.UsageCacheWrite))
+		// Record the conversation here rather than in the Rewrite hook: the
+		// provider's cache token counts only exist once the response has been
+		// read, and they are the ground truth for whether a prefix was warm.
+		s.conversations.Observe(conversation.Observation{
+			ID:             rs.ConversationID,
+			CachePrefixKey: rs.CachePrefixKey,
+			Provider:       rs.Provider,
+			Model:          rs.Model,
+			Format:         rs.InitialFormat,
+			Path:           rs.Path,
+			CacheRead:      rs.UsageCacheRead,
+			CacheWrite:     rs.UsageCacheWrite,
+		})
 		// Host request metrics: latency + outcome, labeled by model/provider.
 		// The host sees every response (including errors and vetoes), so this
 		// is the reliable source of truth for latency and status.
@@ -2563,6 +2630,7 @@ func (s *Server) Shutdown(ctx context.Context) error {
 		pp.(*plugin.PluginPipeline).DrainAndClose()
 	}
 	s.rateLimiter.Close()
+	s.conversations.Close()
 	s.rebuildMu.Lock()
 	s.cacheMu.Lock()
 	if s.sharedCache != nil {
