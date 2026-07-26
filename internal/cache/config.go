@@ -10,12 +10,22 @@ import (
 // results, PII verdicts) in every backend.
 const DefaultTTL = 15 * time.Minute
 
+const (
+	DefaultMaxEntries = 10_000
+	DefaultMaxBytes   = 64 << 20 // 64 MiB
+)
+
 // Config selects and configures the cross-request cache backend.
 type Config struct {
 	// Backend is "memory" (default) or "redis".
 	Backend string `json:"backend,omitempty"`
 	// TTLSeconds overrides the default 15-minute entry TTL.
 	TTLSeconds int `json:"ttl_seconds,omitempty"`
+	// MaxEntries and MaxBytes bound the in-process LRU cache. Zero selects the
+	// defaults. Redis deployments should configure their server-side eviction
+	// policy separately.
+	MaxEntries int `json:"max_entries,omitempty"`
+	MaxBytes   int `json:"max_bytes,omitempty"`
 	// Redis configures the redis backend.
 	Redis RedisConfig `json:"redis,omitempty"`
 }
@@ -26,6 +36,8 @@ type RedisConfig struct {
 	// PasswordEnv names an environment variable holding the Redis password
 	// (never put the password itself in the config file).
 	PasswordEnv string `json:"password_env,omitempty"`
+	PasswordEnc string `json:"password_enc,omitempty"`
+	Password    string `json:"-"`
 	DB          int    `json:"db,omitempty"`
 	// Prefix namespaces this deployment's keys. Default "torana:".
 	Prefix string `json:"prefix,omitempty"`
@@ -42,14 +54,22 @@ func New(cfg Config) (Store, error) {
 	}
 	switch cfg.Backend {
 	case "", "memory":
-		return NewLocalCache(ttl), nil
+		maxEntries := cfg.MaxEntries
+		if maxEntries <= 0 {
+			maxEntries = DefaultMaxEntries
+		}
+		maxBytes := cfg.MaxBytes
+		if maxBytes <= 0 {
+			maxBytes = DefaultMaxBytes
+		}
+		return NewLocalCacheWithLimits(ttl, maxEntries, maxBytes), nil
 	case "redis":
 		addr := cfg.Redis.Addr
 		if addr == "" {
 			addr = "127.0.0.1:6379"
 		}
-		password := ""
-		if cfg.Redis.PasswordEnv != "" {
+		password := cfg.Redis.Password
+		if password == "" && cfg.Redis.PasswordEnv != "" {
 			password = os.Getenv(cfg.Redis.PasswordEnv)
 		}
 		prefix := cfg.Redis.Prefix

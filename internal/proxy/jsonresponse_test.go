@@ -52,7 +52,7 @@ func newPluginPipeline(t *testing.T, order ...string) *plugin.PluginPipeline {
 	t.Helper()
 	rt := wasm.NewRuntime(context.Background())
 	t.Cleanup(func() { rt.Close() })
-	pp, err := plugin.NewPipeline(rt, plugin.PluginConfig{Dir: "../../plugins", Order: order})
+	pp, err := plugin.NewPipeline(rt, plugin.PluginConfig{Dir: "../../plugins", Order: order, AllowUnapproved: true})
 	if err != nil {
 		t.Fatalf("NewPipeline: %v", err)
 	}

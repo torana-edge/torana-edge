@@ -114,6 +114,8 @@ func extractOpenAI(body map[string]any) responseRefs {
 		if usage, ok := body["usage"].(map[string]any); ok {
 			if details, ok := usage["prompt_tokens_details"].(map[string]any); ok {
 				refs.usage.CacheReadTokens = asInt(details["cached_tokens"])
+			} else {
+				refs.usage.CacheReadTokens = asInt(usage["prompt_cache_hit_tokens"])
 			}
 		}
 	}

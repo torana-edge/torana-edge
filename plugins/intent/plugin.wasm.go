@@ -27,8 +27,8 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/torana-edge/torana-edge/pkg/pb"
-	sdk "github.com/torana-edge/torana-edge/pkg/plugin-sdk"
+	"github.com/torana-edge/torana-edge/sdk/pb"
+	sdk "github.com/torana-edge/torana-edge/sdk/plugin-sdk"
 )
 
 func main() {}

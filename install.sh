@@ -6,7 +6,7 @@ set -euo pipefail
 VERSION="${INSTALL_VERSION:-latest}"
 REPO="torana-edge/torana-edge"
 BINARY="torana"
-INSTALL_DIR="${INSTALL_DIR:-/usr/local/bin}"
+INSTALL_DIR="${INSTALL_DIR:-${HOME}/.local/bin}"
 
 need_cmd() {
     if ! command -v "$1" >/dev/null 2>&1; then
@@ -25,16 +25,54 @@ case "$(uname -m)" in
 esac
 
 if [ "$VERSION" = "latest" ]; then
-    URL="https://github.com/${REPO}/releases/latest/download/${BINARY}-${OS}-${ARCH}.tar.gz"
+    RELEASE_PATH="latest/download"
+    RELEASE_TAG="$(curl -fsSLI -o /dev/null -w '%{url_effective}' "https://github.com/${REPO}/releases/latest" | awk -F/ '{print $NF}')"
 else
-    URL="https://github.com/${REPO}/releases/download/${VERSION}/${BINARY}-${OS}-${ARCH}.tar.gz"
+    RELEASE_PATH="download/${VERSION}"
+    RELEASE_TAG="$VERSION"
 fi
+ARCHIVE_VERSION="${RELEASE_TAG#v}"
+ARCHIVE="${BINARY}_${ARCHIVE_VERSION}_${OS}_${ARCH}.tar.gz"
+URL="https://github.com/${REPO}/releases/${RELEASE_PATH}/${ARCHIVE}"
+CHECKSUM_URL="https://github.com/${REPO}/releases/${RELEASE_PATH}/checksums.txt"
 
 echo "Installing Torana Edge $VERSION for $OS/$ARCH..."
-curl -fsSL "$URL" -o "/tmp/${BINARY}.tar.gz"
-tar xzf "/tmp/${BINARY}.tar.gz" -C /tmp
-sudo mv "/tmp/${BINARY}" "$INSTALL_DIR/${BINARY}"
-rm -f "/tmp/${BINARY}.tar.gz"
+TMP_DIR="$(mktemp -d)"
+trap 'rm -rf "$TMP_DIR"' EXIT
+curl -fsSL "$URL" -o "$TMP_DIR/$ARCHIVE"
+curl -fsSL "$CHECKSUM_URL" -o "$TMP_DIR/checksums.txt"
+EXPECTED="$(awk -v archive="$ARCHIVE" '$2 == archive || $2 == "*" archive {print $1; exit}' "$TMP_DIR/checksums.txt")"
+if [ -z "$EXPECTED" ]; then
+    echo "Error: release checksum for $ARCHIVE was not published." >&2
+    exit 1
+fi
+if command -v sha256sum >/dev/null 2>&1; then
+    ACTUAL="$(sha256sum "$TMP_DIR/$ARCHIVE" | awk '{print $1}')"
+elif command -v shasum >/dev/null 2>&1; then
+    ACTUAL="$(shasum -a 256 "$TMP_DIR/$ARCHIVE" | awk '{print $1}')"
+else
+    echo "Error: sha256sum or shasum is required." >&2
+    exit 1
+fi
+if [ "$ACTUAL" != "$EXPECTED" ]; then
+    echo "Error: checksum verification failed for $ARCHIVE." >&2
+    exit 1
+fi
+if tar -tzf "$TMP_DIR/$ARCHIVE" | awk '
+    /^\// { bad=1 }
+    /(^|\/)\.\.(\/|$)/ { bad=1 }
+    END { exit bad ? 0 : 1 }
+'; then
+    echo "Error: archive contains an unsafe path." >&2
+    exit 1
+fi
+tar xzf "$TMP_DIR/$ARCHIVE" -C "$TMP_DIR"
+mkdir -p "$INSTALL_DIR"
+install -m 0755 "$TMP_DIR/${BINARY}" "$INSTALL_DIR/${BINARY}"
 
 echo "Torana Edge installed to $INSTALL_DIR/${BINARY}"
+case ":${PATH}:" in
+    *":${INSTALL_DIR}:"*) ;;
+    *) echo "Add $INSTALL_DIR to PATH before running Torana." ;;
+esac
 echo "Run: torana"

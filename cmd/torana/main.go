@@ -1,14 +1,13 @@
 // Torana Edge – stateful AI FinOps reverse proxy.
 //
-// Entry point.  Loads provider configuration from config.json (falls back
-// to built-in defaults), wires the proxy server, and blocks until the
-// process receives a termination signal.
+// Entry point. Imports a seed config into Torana's managed store on first run,
+// then loads the managed configuration, wires the proxy server, and blocks
+// until the process receives a termination signal.
 package main
 
 import (
 	"context"
 	"log"
-	"net"
 	"os"
 	"os/signal"
 	"strconv"
@@ -16,28 +15,50 @@ import (
 	"time"
 
 	"github.com/torana-edge/torana-edge/internal/metrics"
-	"github.com/torana-edge/torana-edge/internal/mitm"
+	"github.com/torana-edge/torana-edge/internal/plugincmd"
 	"github.com/torana-edge/torana-edge/internal/provider"
 	"github.com/torana-edge/torana-edge/internal/proxy"
 
 	// Register format adapters so their init() calls wire the registry.
 	_ "github.com/torana-edge/torana-edge/internal/format/anthropic"
 	_ "github.com/torana-edge/torana-edge/internal/format/bedrock"
-	_ "github.com/torana-edge/torana-edge/internal/format/openai"
 	_ "github.com/torana-edge/torana-edge/internal/format/gemini"
+	_ "github.com/torana-edge/torana-edge/internal/format/openai"
 )
 
 func main() {
-	// --- configuration --------------------------------------------------
-	configPath := "config.json"
-	if v := os.Getenv("TORANA_CONFIG"); v != "" {
-		configPath = v
+	if len(os.Args) > 1 && os.Args[1] == "plugin" {
+		if err := plugincmd.Run(os.Args[1:], os.Stdout, os.Stderr); err != nil {
+			log.Printf("plugin command: %v", err)
+			os.Exit(2)
+		}
+		return
+	}
+	if len(os.Args) > 1 && os.Args[1] != "serve" {
+		log.Printf("unknown command %q (run without arguments or use: torana serve | torana plugin ...)", os.Args[1])
+		os.Exit(2)
 	}
 
-	provCfg, err := provider.Load(configPath)
+	// --- configuration --------------------------------------------------
+	seedPath := "config.json"
+	if v := os.Getenv("TORANA_CONFIG"); v != "" {
+		seedPath = v
+	}
+
+	storePath, err := provider.ManagedStorePath()
+	if err != nil {
+		log.Fatalf("Failed to resolve managed store path: %v", err)
+	}
+
+	provCfg, err := provider.ResolveConfig(seedPath, storePath)
 	if err != nil {
 		log.Printf("Warning: %v — using defaults", err)
 		provCfg = provider.DefaultConfig()
+	}
+	if differs, diffErr := provider.ManagedStoreShadowsSeed(seedPath, storePath); diffErr != nil {
+		log.Printf("Warning: could not compare seed config %q with managed store %q: %v", seedPath, storePath, diffErr)
+	} else if differs {
+		log.Printf("Warning: managed config %q differs from and takes precedence over seed %q; edit the managed store through /_torana/ or remove it to re-import the seed", storePath, seedPath)
 	}
 
 	// Allow port override via env.
@@ -51,6 +72,7 @@ func main() {
 		Port:            strconv.Itoa(provCfg.Port),
 		Providers:       provCfg,
 		DefaultProvider: os.Getenv("TORANA_DEFAULT_PROVIDER"),
+		ConfigPath:      storePath,
 	}
 
 	// Initialize OTel BEFORE the server so New can bridge its StatsTracker to
@@ -72,54 +94,17 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	go func() {
-		defer func() {
-			if r := recover(); r != nil {
-				log.Printf("panic in shutdown goroutine: %v", r)
-			}
-		}()
-		<-ctx.Done()
-		log.Println("Shutting down...")
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		srv.Shutdown(shutdownCtx)
-	}()
-
-	// Start config hot-reload watcher.
-	stopWatch := provider.WatchConfig(configPath, 5*time.Second, func(newCfg provider.Config) {
-		srv.SetProviders(newCfg)
-	})
-	defer stopWatch()
-
-	// Optional TLS-terminating MITM ingress for harnesses that can't be pointed
-	// at a base URL (e.g. the Antigravity CLI). Runs alongside the main proxy.
-	if provCfg.MITM.Enabled {
-		mitmSrv, err := mitm.New(provCfg.MITM, srv.Handler())
-		if err != nil {
-			log.Fatalf("Failed to start MITM ingress: %v", err)
-		}
-		defer mitmSrv.Close()
-		go func() {
-			if err := mitmSrv.ListenAndServe(); err != nil {
-				log.Printf("MITM ingress stopped: %v", err)
-			}
-		}()
+	bindHost := os.Getenv("TORANA_BIND")
+	if bindHost == "" {
+		bindHost = "127.0.0.1"
 	}
-
-	// TORANA_BIND restricts the listen address (e.g. "127.0.0.1" to keep the
-	// proxy localhost-only — it forwards caller credentials, so never expose
-	// it beyond the machine unless that's intentional). Default binds all
-	// interfaces (container deployments).
-	if host := os.Getenv("TORANA_BIND"); host != "" {
-		ln, err := net.Listen("tcp", net.JoinHostPort(host, strconv.Itoa(provCfg.Port)))
-		if err != nil {
-			log.Fatalf("Failed to bind %s:%d: %v", host, provCfg.Port, err)
-		}
-		if err := srv.Serve(ln); err != nil {
-			log.Fatalf("Server error: %v", err)
-		}
-	} else if err := srv.ListenAndServe(); err != nil {
-		log.Fatalf("Server error: %v", err)
+	if err := srv.Start(bindHost); err != nil {
+		log.Fatalf("Failed to start server: %v", err)
 	}
+	<-ctx.Done()
+	log.Println("Shutting down...")
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	srv.Shutdown(shutdownCtx)
 	log.Println("Torana Edge stopped.")
 }

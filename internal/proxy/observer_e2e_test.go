@@ -26,7 +26,7 @@ func observerEnv(t *testing.T, upstream http.HandlerFunc) func(body string) (int
 	srv, err := New(Config{
 		Providers: provider.Config{
 			Providers: map[string]provider.Provider{"oai": {URL: up.URL, Format: "openai"}},
-			Plugins:   provider.PluginsConfig{Dir: "../../examples/plugins", Order: []string{"test-observer"}},
+			Plugins:   provider.PluginsConfig{Dir: "../../examples/plugins", Order: []string{"test-observer"}, AllowUnapproved: true},
 		},
 	})
 	if err != nil {

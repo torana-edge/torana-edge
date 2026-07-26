@@ -65,3 +65,17 @@ func TestStreamUsageCachedTokens(t *testing.T) {
 		t.Errorf("uncached usage should omit prompt_tokens_details: %s", out)
 	}
 }
+
+func TestStreamUsageDeepSeekCacheTokens(t *testing.T) {
+	input := `data: {"choices":[],"usage":{"prompt_tokens":2000,"completion_tokens":10,"prompt_cache_hit_tokens":1536,"prompt_cache_miss_tokens":464}}` + "\n\n" +
+		`data: [DONE]` + "\n\n"
+	var usage *engine.StreamUsage
+	for event := range (&StreamAdapter{}).ParseStream(strings.NewReader(input)) {
+		if event.Usage != nil {
+			usage = event.Usage
+		}
+	}
+	if usage == nil || usage.InputTokens != 2000 || usage.OutputTokens != 10 || usage.CacheReadTokens != 1536 {
+		t.Fatalf("DeepSeek usage not parsed: %+v", usage)
+	}
+}

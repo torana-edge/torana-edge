@@ -19,7 +19,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: /tmp/wazero-cache
-          key: ${{ runner.os }}-${{ runner.arch }}-go${{ steps.go.outputs.go-version }}-wazero-${{ hashFiles('go.mod', 'go.sum', 'Makefile', 'plugins/**/*.go', 'examples/plugins/**/*.go', 'testdata/**/*.go', 'pkg/**/*.go') }}
+          key: ${{ runner.os }}-${{ runner.arch }}-go${{ steps.go.outputs.go-version }}-wazero-${{ hashFiles('go.mod', 'go.sum', 'Makefile', 'plugins/**/*.go', 'examples/plugins/**/*.go', 'testdata/**/*.go', 'sdk/**/*.go') }}
           restore-keys: |
             ${{ runner.os }}-${{ runner.arch }}-go${{ steps.go.outputs.go-version }}-wazero-
             ${{ runner.os }}-${{ runner.arch }}-wazero-
@@ -41,3 +41,16 @@ jobs:
           go-version: "1.26"
       - name: golangci-lint
         run: go run github.com/golangci/golangci-lint/cmd/golangci-lint@latest run --timeout 5m
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build image
+        run: docker build -t torana-edge:ci .
+      - name: Verify bundled plugin artifact
+        run: |
+          container_id=$(docker create torana-edge:ci)
+          trap 'docker rm -f "$container_id" >/dev/null' EXIT
+          docker cp "$container_id:/plugins/pii/plugin.wasm" /tmp/pii.wasm
+          test -s /tmp/pii.wasm
