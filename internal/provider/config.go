@@ -56,6 +56,12 @@ func (c Config) Validate() error {
 	if c.Limits.Concurrency < 0 || c.Limits.RPM < 0 {
 		return fmt.Errorf("limits must not be negative")
 	}
+	if t := c.Plugins.Runtime.TickIntervalSeconds; t != 0 && t < MinTickIntervalSeconds {
+		return fmt.Errorf(
+			"plugins.runtime.tick_interval_seconds must be 0 (disabled) or at least %d; "+
+				"%d would wake every background plugin that often, and each may spend money",
+			MinTickIntervalSeconds, t)
+	}
 	for name, configured := range c.Providers {
 		if strings.TrimSpace(name) == "" {
 			return fmt.Errorf("provider name must not be empty")
@@ -361,6 +367,24 @@ type PluginRuntimeConfig struct {
 	PoolSize       int    `json:"pool_size,omitempty"`
 	CallTimeoutMS  int    `json:"call_timeout_ms,omitempty"`
 	MemoryLimitMiB uint32 `json:"memory_limit_mib,omitempty"`
+	// TickIntervalSeconds is how often run_on_tick fires. Zero disables ticks
+	// entirely, which is the default: background execution is opt-in, and a
+	// proxy nobody configured for it should never run plugin code outside a
+	// request. Ignored when no loaded plugin holds env.background_tick.
+	TickIntervalSeconds int `json:"tick_interval_seconds,omitempty"`
+}
+
+// MinTickIntervalSeconds floors the tick cadence. A tick wakes every
+// background plugin, and each may spend money; a one-second interval is far
+// more likely to be a typo than an intention.
+const MinTickIntervalSeconds = 10
+
+// TickInterval returns the configured cadence, or zero when ticks are off.
+func (p PluginRuntimeConfig) TickInterval() time.Duration {
+	if p.TickIntervalSeconds <= 0 {
+		return 0
+	}
+	return time.Duration(p.TickIntervalSeconds) * time.Second
 }
 
 type PluginApproval struct {

@@ -157,6 +157,8 @@ type Server struct {
 	// watchCancel stops the plugin hot-reload watcher on Shutdown.
 	watchCancel context.CancelFunc
 	watchDone   <-chan struct{}
+	// ticker drives run_on_tick. Nil when ticks are not configured.
+	ticker *tickScheduler
 }
 
 type routeContextKey struct{}
@@ -1892,6 +1894,10 @@ func New(cfg Config) (*Server, error) {
 
 	s.proxy = proxy
 	s.httpServer = srv
+	// Background plugin ticks. Returns nil unless an operator configured an
+	// interval; the loop additionally does nothing until some loaded plugin
+	// both declares run_on_tick and holds env.background_tick.
+	s.ticker = s.startTicker(cfg.Providers.Plugins.Runtime.TickInterval())
 	return s, nil
 }
 
@@ -2618,6 +2624,11 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	if s.watchDone != nil {
 		<-s.watchDone
 	}
+	// Stop background ticks before the pipeline drains below: a tick in flight
+	// holds the pipeline and may be mid-way through an outbound request, and
+	// letting it outlive the runtime it is calling into is how a shutdown turns
+	// into a crash.
+	s.ticker.Close()
 	s.mitmMu.Lock()
 	if s.mitmSrv != nil {
 		s.mitmSrv.Close()

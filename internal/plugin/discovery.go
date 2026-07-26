@@ -106,9 +106,11 @@ var supportedHooks = map[string]struct{}{
 	"run_before_request":  {},
 	"run_on_http_request": {},
 	"run_on_stream_chunk": {},
+	"run_on_tick":         {},
 }
 
 var supportedPermissions = map[string]struct{}{
+	"env.background_tick":                      {},
 	"env.block_request":                        {},
 	"env.cache_get":                            {},
 	"env.cache_set":                            {},
@@ -1073,6 +1075,91 @@ func (pp *PluginPipeline) RunOnHTTPRequest(ctx context.Context, reqID uint64, pl
 	}
 
 	return &resp, nil
+}
+
+// TickOutcome is one plugin's report from a single tick.
+type TickOutcome struct {
+	Plugin  string
+	Actions int
+	Note    string
+}
+
+// RunOnTick calls every plugin that declares run_on_tick and holds the
+// env.background_tick grant, returning what each reported.
+//
+// Two things differ from the request-driven hooks, both deliberate:
+//
+// The grant is checked per plugin here rather than being enforced by the
+// caller, because there is no caller — a tick originates inside the host, so
+// there is no request whose permissions could stand in for the plugin's own.
+//
+// failure_mode is deliberately not honoured. It selects whether a failing plugin
+// blocks or passes the request, and on a tick there is no request to block; a
+// plugin that traps has failed to do its own background work and cannot
+// implicate anyone else's. Errors are logged and iteration continues, so one
+// broken plugin cannot silently stop every other plugin's timer.
+func (pp *PluginPipeline) RunOnTick(ctx context.Context, reqID uint64, tick *pb.TickRequest) []TickOutcome {
+	pp.Acquire()
+	defer pp.Release()
+
+	inBytes, err := proto.Marshal(tick)
+	if err != nil {
+		log.Printf("[plugin] tick: marshal: %v", err)
+		return nil
+	}
+
+	var outcomes []TickOutcome
+	for _, lp := range pp.plugins {
+		if !hasHook(lp.manifest, "run_on_tick") {
+			continue
+		}
+		if !lp.plugin.HasGrant("env.background_tick") {
+			// Not an error worth logging every tick: an unapproved capability
+			// is ordinary operator state, and the plugin is already listed as
+			// requesting it in the control plane.
+			continue
+		}
+		var outBytes []byte
+		if err := lp.plugin.CallRequest(ctx, "run_on_tick", reqID, inBytes, &outBytes); err != nil {
+			log.Printf("[plugin] %s run_on_tick: %v", lp.manifest.Name, err)
+			continue
+		}
+		if len(outBytes) == 0 {
+			continue // nothing to do this tick
+		}
+		var res pb.TickResult
+		if err := proto.Unmarshal(outBytes, &res); err != nil {
+			log.Printf("[plugin] %s run_on_tick: unmarshal: %v", lp.manifest.Name, err)
+			continue
+		}
+		// Explicit handled flag required — see proto comment.
+		if !res.Handled {
+			continue
+		}
+		outcomes = append(outcomes, TickOutcome{
+			Plugin:  lp.manifest.Name,
+			Actions: int(res.Actions),
+			Note:    res.Note,
+		})
+	}
+	return outcomes
+}
+
+// TicksEnabled reports whether any loaded plugin both declares run_on_tick and
+// holds the grant, so the host can skip scheduling entirely when nothing wants
+// it.
+func (pp *PluginPipeline) TicksEnabled() bool {
+	if pp == nil {
+		return false
+	}
+	pp.Acquire()
+	defer pp.Release()
+	for _, lp := range pp.plugins {
+		if hasHook(lp.manifest, "run_on_tick") && lp.plugin.HasGrant("env.background_tick") {
+			return true
+		}
+	}
+	return false
 }
 
 // ============================================================================

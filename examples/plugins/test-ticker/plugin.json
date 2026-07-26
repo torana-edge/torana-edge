@@ -1,0 +1,15 @@
+{
+  "name": "test-ticker",
+  "version": "0.1.0",
+  "description": "Test fixture: proves run_on_tick fires with no request in flight and that TickRequest carries the host's clock",
+  "hooks": [
+    {"name": "run_on_tick", "priority": 100},
+    {"name": "run_before_request", "priority": 100}
+  ],
+  "permissions": [
+    {"name": "env.background_tick", "description": "Run periodically with no request in flight"},
+    {"name": "env.cache_get", "description": "Read the recorded tick"},
+    {"name": "env.cache_set", "description": "Record that a tick fired"},
+    {"name": "env.log", "description": "Diagnostic logging"}
+  ]
+}
