@@ -6,7 +6,7 @@ import (
 	"testing"
 
 	"github.com/torana-edge/torana-edge/internal/wasm"
-	"github.com/torana-edge/torana-edge/sdk/pb"
+	"github.com/torana-edge/torana-plugin-sdk/pb"
 )
 
 // TestRunOnHTTPRequest_UnknownPlugin verifies that RunOnHTTPRequest returns

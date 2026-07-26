@@ -43,7 +43,7 @@ import (
 	"github.com/torana-edge/torana-edge/internal/provider"
 	"github.com/torana-edge/torana-edge/internal/secret"
 	"github.com/torana-edge/torana-edge/internal/wasm"
-	"github.com/torana-edge/torana-edge/sdk/pb"
+	"github.com/torana-edge/torana-plugin-sdk/pb"
 )
 
 const maxBodySize = 10 * 1024 * 1024 // 10 MB

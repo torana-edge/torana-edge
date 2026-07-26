@@ -5,8 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/torana-edge/torana-edge/sdk/pb"
-	sdk "github.com/torana-edge/torana-edge/sdk/plugin-sdk"
+	sdk "github.com/torana-edge/torana-plugin-sdk"
+	"github.com/torana-edge/torana-plugin-sdk/pb"
 )
 
 func main() {}

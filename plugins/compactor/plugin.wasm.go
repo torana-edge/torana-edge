@@ -18,8 +18,8 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/torana-edge/torana-edge/sdk/pb"
-	sdk "github.com/torana-edge/torana-edge/sdk/plugin-sdk"
+	sdk "github.com/torana-edge/torana-plugin-sdk"
+	"github.com/torana-edge/torana-plugin-sdk/pb"
 	"google.golang.org/protobuf/proto"
 )
 

@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/torana-edge/torana-edge/sdk/pb"
+	"github.com/torana-edge/torana-plugin-sdk/pb"
 )
 
 // TestTruncateForPromptUnboundedByDefault: with no configured limit (maxChars
