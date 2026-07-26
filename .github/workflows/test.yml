@@ -40,7 +40,11 @@ jobs:
         with:
           go-version: "1.26"
       - name: golangci-lint
-        run: go run github.com/golangci/golangci-lint/cmd/golangci-lint@latest run --timeout 5m
+        # Pinned: @latest on the v1 module path silently resolved to the last
+        # v1 release, so a v2 release would have broken CI with no code change —
+        # and contributors installing golangci-lint today get v2 and could not
+        # run the repo's lint at all.
+        run: go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2 run --timeout 5m
 
   docker:
     runs-on: ubuntu-latest
