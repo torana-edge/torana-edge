@@ -40,3 +40,6 @@ bundle.pem
 
 # Local encrypted-secret store key (internal/secret). Never commit.
 secret.key
+
+# Vendored JS deps — restore with `npm install` (see examples/plugins/*/package.json)
+node_modules/
