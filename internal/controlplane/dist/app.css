@@ -1096,3 +1096,26 @@ select:disabled,
     animation-iteration-count: 1;
   }
 }
+
+/* Live-source pickers: rows offered by a schema field that names a host
+   resource (see FIELD_SOURCES). */
+.source-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2xs);
+  padding-block: var(--space-3xs);
+  flex-wrap: wrap;
+}
+
+.source-hint {
+  color: var(--color-faint);
+}
+
+/* A stale row is shown but not offered, matching the disabled-control
+   treatment. Selecting a conversation whose cache expired long ago is the
+   choice that loses money, so the UI should not invite it. */
+.source-row-stale {
+  opacity: 0.55;
+  color: var(--color-faint);
+  cursor: not-allowed;
+}

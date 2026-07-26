@@ -166,6 +166,26 @@
       </div>
 
       <div class="card form-section">
+        <div class="subhead space-block-start-none">Model pricing</div>
+        <div class="section-desc space-block-end-sm">
+          Rates in USD per million tokens, per exact model name (<code>*</code> as a provider-wide
+          default). Torana ships no built-in prices because they change and vary by account.
+          Anything that spends money &mdash; the compactor's economic gate, the cache plugins &mdash;
+          declines to act rather than guess when a rate is missing, so leaving this empty is safe
+          but disables those features.
+        </div>
+        <div class="table-container surface-flat">
+          <table class="providers-table">
+            <thead>
+              <tr><th>Provider</th><th>Model</th><th>Input</th><th>Output</th><th>Cache read</th><th>Cache write</th><th></th></tr>
+            </thead>
+            <tbody id="pricingBody"></tbody>
+          </table>
+        </div>
+        <button class="btn btn-sm space-block-start-xs" type="button" onclick="addPricingRow()">+ Add pricing</button>
+      </div>
+
+      <div class="card form-section">
         <div class="subhead space-block-start-none">Offload (cheap-model summarization)</div>
         <div class="checkbox-row space-block-end-sm">
           <input type="checkbox" id="offEnabled"><label for="offEnabled">Enabled</label>
@@ -332,6 +352,9 @@
         pipelineNav.classList.add('active');
         pipelineNav.setAttribute('aria-current', 'page');
         renderPluginDetail(decodeURIComponent(arg));
+        // Pickers are filled after render because they need live host state,
+        // which the synchronous schema form has no way to wait for.
+        hydrateFieldSources();
         focusViewTitle(document.getElementById('view-plugin'));
         return;
       }
@@ -674,12 +697,20 @@
               ${help ? `<div class="hint">${escHtml(help)}</div>` : ''}
             </div>`;
           } else {
-            // string
+            // string. A field may name a live host resource in `source`, in
+            // which case a picker is offered alongside the text input. The
+            // mechanism is generic on purpose — the same field type serves a
+            // plugin that needs to pick a conversation, a provider, or a model,
+            // rather than the control plane knowing about any one plugin.
             const val = (curVal !== undefined && curVal !== null) ? String(curVal) : '';
+            const picker = field.source
+              ? `<div class="hint" id="${inputId}-source" data-source="${escAttr(field.source)}" data-target="${escAttr(inputId)}">Loading ${escHtml(field.source)}…</div>`
+              : '';
             return `<div class="field">
               <label for="${inputId}">${escHtml(label)}</label>
               <input id="${inputId}" type="text" class="input" data-schema-key="${escAttr(key)}" data-schema-type="string" value="${escAttr(val)}">
               ${help ? `<div class="hint">${escHtml(help)}</div>` : ''}
+              ${picker}
             </div>`;
           }
         }).join('');
@@ -736,6 +767,96 @@
           </div>
         </details>
       `;
+    }
+
+    // Sources are live host resources a schema field can offer as a picker.
+    // Adding one here is the whole extension point: no plugin is named, and any
+    // plugin whose schema says source:"conversations" gets the picker.
+    const FIELD_SOURCES = {
+      conversations: {
+        url: '/_torana/api/conversations',
+        // rows: [{value, label, hint, stale}] — stale rows are shown greyed and
+        // are not offered for selection.
+        rows: data => (data.conversations || []).map(c => {
+          const idleMs = Date.now() - new Date(c.last_active).getTime();
+          // A cache nobody has touched for an hour is long gone. Offering it
+          // would invite exactly the choice that loses money: paying to
+          // rebuild and hold a prefix the user may never return to.
+          const stale = idleMs > 3600e3;
+          return {
+            value: c.id,
+            label: `${c.id}  ·  ${c.model || 'unknown model'}`,
+            hint: `${relativeAge(idleMs)} · ${c.turns} turn${c.turns === 1 ? '' : 's'} · ${cacheSummary(c)}`,
+            stale
+          };
+        })
+      }
+    };
+
+    function relativeAge(ms) {
+      if (ms < 60e3) return 'just now';
+      if (ms < 3600e3) return `${Math.floor(ms / 60e3)}m ago`;
+      if (ms < 86400e3) return `${Math.floor(ms / 3600e3)}h ago`;
+      return `${Math.floor(ms / 86400e3)}d ago`;
+    }
+
+    // The provider's own token counts are the only honest signal for whether a
+    // cache was warm: reads mean it was alive, writes mean it had to be rebuilt.
+    function cacheSummary(c) {
+      if (c.last_cache_read > 0) return `${compactCount(c.last_cache_read)} cached`;
+      if (c.last_cache_write > 0) return `${compactCount(c.last_cache_write)} written`;
+      return 'no cache activity';
+    }
+
+    function compactCount(n) {
+      return n >= 1000 ? `${(n / 1000).toFixed(n >= 10000 ? 0 : 1)}k` : String(n);
+    }
+
+    // hydrateFieldSources fills in any picker placeholders the schema form left.
+    function hydrateFieldSources() {
+      document.querySelectorAll('#schemaFormContainer [data-source]').forEach(el => {
+        const source = FIELD_SOURCES[el.dataset.source];
+        const target = document.getElementById(el.dataset.target);
+        if (!source || !target) {
+          el.textContent = `Unknown source "${el.dataset.source}"`;
+          return;
+        }
+        fetch(source.url)
+          .then(r => r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`)))
+          .then(data => {
+            const rows = source.rows(data);
+            if (rows.length === 0) {
+              el.textContent = 'Nothing available yet — send some traffic through the proxy first.';
+              return;
+            }
+            el.innerHTML = rows.map(row => {
+              if (row.stale) {
+                return `<div class="source-row source-row-stale" title="Idle too long — its cache has almost certainly expired">
+                  <span>${escHtml(row.label)}</span> <span class="source-hint">${escHtml(row.hint)}</span>
+                </div>`;
+              }
+              return `<div class="source-row">
+                <button type="button" class="btn btn-sm" data-pick="${escAttr(row.value)}" data-into="${escAttr(el.dataset.target)}">Add</button>
+                <span>${escHtml(row.label)}</span> <span class="source-hint">${escHtml(row.hint)}</span>
+              </div>`;
+            }).join('');
+            el.querySelectorAll('[data-pick]').forEach(btn => {
+              btn.addEventListener('click', () => appendPickedValue(btn.dataset.into, btn.dataset.pick));
+            });
+          })
+          .catch(err => { el.textContent = `Could not load ${el.dataset.source}: ${err.message}`; });
+      });
+    }
+
+    // Values accumulate as a comma-separated list, matching how a scalar schema
+    // field has to express a set.
+    function appendPickedValue(targetId, value) {
+      const input = document.getElementById(targetId);
+      if (!input) return;
+      const existing = input.value.split(',').map(s => s.trim()).filter(Boolean);
+      if (existing.includes(value)) return;
+      existing.push(value);
+      input.value = existing.join(', ');
     }
 
     function saveSchemaConfig(name, button) {
@@ -962,6 +1083,16 @@
       Object.keys(providers).forEach(name => addProviderRow(name, providers[name]));
       if (Object.keys(providers).length === 0) addProviderRow();
 
+      // Pricing is flattened to one row per provider/model pair. It nests two
+      // levels deep in config, which is unreadable as a table, and an operator
+      // thinks in terms of "what does this model cost" rather than in maps.
+      const pricingBody = document.getElementById('pricingBody');
+      pricingBody.innerHTML = '';
+      Object.keys(providers).forEach(provName => {
+        const rates = providers[provName].pricing || {};
+        Object.keys(rates).forEach(model => addPricingRow(provName, model, rates[model]));
+      });
+
       refreshOffloadProviderOptions();
       const off = cfg.offload || {};
       document.getElementById('offEnabled').checked = !!off.enabled;
@@ -1031,6 +1162,51 @@
       body.appendChild(tr);
       setupSecretInput(tr.querySelector('.p-keyenc'), prov.api_key_enc);
     }
+    // Rates are stored as USD per million tokens. An empty cell means "not
+    // configured", which is a different thing from zero: zero is an explicitly
+    // free rate, and features that spend money treat the two differently.
+    function addPricingRow(provName, model, rates) {
+      rates = rates || {};
+      const body = document.getElementById('pricingBody');
+      const tr = document.createElement('tr');
+      const rate = k => (rates[k] === undefined || rates[k] === null) ? '' : rates[k];
+      tr.innerHTML = `
+        <td><input class="input pr-provider" aria-label="Pricing provider" value="${escAttr(provName || '')}" placeholder="provider"></td>
+        <td><input class="input pr-model" aria-label="Pricing model" value="${escAttr(model || '')}" placeholder="model or *"></td>
+        <td><input class="input pr-in" type="number" step="any" aria-label="Input rate" value="${escAttr(rate('input_usd_per_mtok'))}" placeholder="3.0"></td>
+        <td><input class="input pr-out" type="number" step="any" aria-label="Output rate" value="${escAttr(rate('output_usd_per_mtok'))}" placeholder="15.0"></td>
+        <td><input class="input pr-cread" type="number" step="any" aria-label="Cache read rate" value="${escAttr(rate('cache_read_usd_per_mtok'))}" placeholder="0.3"></td>
+        <td><input class="input pr-cwrite" type="number" step="any" aria-label="Cache write rate" value="${escAttr(rate('cache_write_usd_per_mtok'))}" placeholder="3.75"></td>
+        <td><button type="button" class="btn btn-sm btn-danger" aria-label="Remove pricing" onclick="this.closest('tr').remove()">Remove</button></td>`;
+      body.appendChild(tr);
+    }
+
+    // collectPricing folds the flat rows back into the nested shape config
+    // uses, keyed by provider then exact model name.
+    function collectPricing() {
+      const byProvider = {};
+      document.querySelectorAll('#pricingBody tr').forEach(tr => {
+        const provName = tr.querySelector('.pr-provider').value.trim();
+        const model = tr.querySelector('.pr-model').value.trim();
+        if (!provName || !model) return;
+        const entry = {};
+        const put = (sel, key) => {
+          const raw = tr.querySelector(sel).value.trim();
+          // Omit rather than zero: an absent rate means unknown, and a feature
+          // that cannot price its action must decline rather than treat it as
+          // free.
+          if (raw !== '' && !isNaN(Number(raw))) entry[key] = Number(raw);
+        };
+        put('.pr-in', 'input_usd_per_mtok');
+        put('.pr-out', 'output_usd_per_mtok');
+        put('.pr-cread', 'cache_read_usd_per_mtok');
+        put('.pr-cwrite', 'cache_write_usd_per_mtok');
+        if (Object.keys(entry).length === 0) return;
+        (byProvider[provName] = byProvider[provName] || {})[model] = entry;
+      });
+      return byProvider;
+    }
+
     function refreshOffloadProviderOptions() {
       const sel = document.getElementById('offProvider');
       const cur = sel.value;
@@ -1065,6 +1241,18 @@
         const fb = tr.querySelector('.p-fallback').value.trim();
         if (fb) prov.fallback = fb.split(',').map(s => s.trim()).filter(Boolean);
         providers[name] = prov;
+      });
+      // Pricing is edited in its own table, so it is applied here rather than
+      // carried forward as an unmanaged field.
+      //
+      // An emptied table sends `pricing: null` rather than omitting the key.
+      // The server preserves per-provider fields the caller does not mention —
+      // that is what stops a form losing config it cannot render — so omitting
+      // it would silently restore the rates the operator just deleted. Sending
+      // null says "I manage this field and it is now empty".
+      const pricing = collectPricing();
+      Object.keys(providers).forEach(name => {
+        providers[name].pricing = pricing[name] || null;
       });
       cfg.providers = providers;
       cfg.offload = {

@@ -5,7 +5,8 @@
       "type": "string",
       "label": "Conversation IDs",
       "default": "",
-      "help": "Comma-separated conversation IDs to keep warm — run `torana conversations` to list them. Empty means observe only. Warming everything loses money: refreshing only pays for a bounded window, so choose the conversations you are actually coming back to."
+      "help": "Comma-separated conversation IDs to keep warm \u2014 run `torana conversations` to list them. Empty means observe only. Warming everything loses money: refreshing only pays for a bounded window, so choose the conversations you are actually coming back to.",
+      "source": "conversations"
     },
     {
       "key": "warm_for_minutes",

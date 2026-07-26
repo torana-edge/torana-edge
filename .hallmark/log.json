@@ -6,5 +6,13 @@
     "theme": "Torana operator ink",
     "enrichment": "none",
     "brief": "Redesign the embedded local control plane while preserving its routes and behavior."
+  },
+  {
+    "date": "2026-07-26",
+    "scope": "app",
+    "macrostructure": "Workbench",
+    "theme": "Torana operator ink",
+    "enrichment": "none",
+    "brief": "Extend Settings with a model-pricing table and add live-source pickers to plugin config forms. Reuses the existing Workbench surfaces, table treatment and 4-point spacing scale; stale picker rows adopt the established disabled-control treatment rather than a new one."
   }
 ]

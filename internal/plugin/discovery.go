@@ -61,6 +61,14 @@ type ConfigField struct {
 	Default any      `json:"default,omitempty"`
 	Options []string `json:"options,omitempty"` // enum only
 	Help    string   `json:"help,omitempty"`
+	// Source names a live host resource whose current values the control plane
+	// offers as a picker beside the input, e.g. "conversations". It is advisory
+	// UI metadata: the value is still an ordinary string, an unknown source
+	// simply renders no picker, and nothing here constrains what may be saved.
+	//
+	// Generic on purpose. The control plane resolves the name against its own
+	// table of sources, so no plugin is ever named in the rendering logic.
+	Source string `json:"source,omitempty"`
 }
 
 type ConfigSchema struct {
