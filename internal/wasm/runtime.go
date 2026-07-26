@@ -453,6 +453,19 @@ type Runtime struct {
 	// increment named counters that appear in the /stats response.
 	// Set by the server.
 	PluginCounterFunc func(plugin string, counter string, delta int64)
+
+	// StateGetFunc and StateSetFunc back env.state_get / env.state_set:
+	// durable, plugin-namespaced storage that survives a restart. Unlike the
+	// cache these are private per plugin, and unlike meta they outlive the
+	// request. Nil when no data directory is configured.
+	StateGetFunc  func(plugin, key string) (string, bool)
+	StateSetFunc  func(plugin, key, value string) error
+	StateKeysFunc func(plugin string) []string
+
+	// CachePricingFunc answers torana_cache_pricing: given a provider and
+	// model, what the prompt cache costs and how long it lives. Data, not a
+	// decision — the host holds the prices, the plugin holds the policy.
+	CachePricingFunc func(ctx context.Context, payloadJSON string) string
 }
 
 // ObserveRequestMutation forwards a defensive copy to the host callback.
@@ -734,6 +747,54 @@ func (r *Runtime) installHostFunctions() {
 			}
 		case "env.cache_get":
 			res, _ = r.cache.Get(args)
+		case "env.state_set":
+			// Durable, plugin-private, survives a restart. The plugin name
+			// comes from the module, never the payload, so one plugin cannot
+			// write into another's namespace.
+			var kv struct {
+				Key   string `json:"key"`
+				Value any    `json:"value"`
+			}
+			if err := json.Unmarshal([]byte(args), &kv); err != nil {
+				res = `{"status":"error","message":"invalid payload"}`
+			} else if r.StateSetFunc == nil {
+				res = `{"status":"error","message":"durable plugin state is not configured"}`
+			} else {
+				value := ""
+				switch v := kv.Value.(type) {
+				case nil:
+					// Explicit null deletes, same as an empty string.
+				case string:
+					value = v
+				default:
+					b, _ := json.Marshal(v)
+					value = string(b)
+				}
+				if err := r.StateSetFunc(pluginName, kv.Key, value); err != nil {
+					res = fmt.Sprintf(`{"status":"error","message":%q}`, err.Error())
+				} else {
+					res = `{"status":"ok"}`
+				}
+			}
+		case "env.state_get":
+			if r.StateGetFunc == nil {
+				res = ""
+			} else {
+				res, _ = r.StateGetFunc(pluginName, args)
+			}
+		case "env.state_keys":
+			if r.StateKeysFunc == nil {
+				res = "[]"
+			} else {
+				b, _ := json.Marshal(r.StateKeysFunc(pluginName))
+				res = string(b)
+			}
+		case "torana_cache_pricing":
+			if r.CachePricingFunc == nil {
+				res = `{"status":"unavailable","reason":"pricing_unconfigured"}`
+			} else {
+				res = r.CachePricingFunc(ctx, args)
+			}
 		case "env.plugin_config":
 			// Return this plugin's config blob (plugins.config.<name>).
 			res = p.pluginConfig()

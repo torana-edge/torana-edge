@@ -41,6 +41,7 @@ import (
 	"github.com/torana-edge/torana-edge/internal/metrics"
 	"github.com/torana-edge/torana-edge/internal/mitm"
 	"github.com/torana-edge/torana-edge/internal/plugin"
+	"github.com/torana-edge/torana-edge/internal/pluginstate"
 	"github.com/torana-edge/torana-edge/internal/provider"
 	"github.com/torana-edge/torana-edge/internal/secret"
 	"github.com/torana-edge/torana-edge/internal/wasm"
@@ -159,6 +160,9 @@ type Server struct {
 	watchDone   <-chan struct{}
 	// ticker drives run_on_tick. Nil when ticks are not configured.
 	ticker *tickScheduler
+	// pluginState is durable per-plugin storage (env.state_*), kept beside the
+	// managed config. Nil when there is no config path to anchor it to.
+	pluginState *pluginstate.Store
 }
 
 type routeContextKey struct{}
@@ -472,6 +476,16 @@ func New(cfg Config) (*Server, error) {
 	if err != nil {
 		return nil, fmt.Errorf("proxy: secret store: %w", err)
 	}
+	// Durable plugin state lives beside the managed config. A failure to load
+	// it is reported but not fatal: the store still works in memory, and
+	// refusing to start the proxy because one plugin's scratch file was
+	// truncated would be a poor trade.
+	stateStore, err := pluginstate.New(pluginstate.Options{
+		Path: filepath.Join(filepath.Dir(configPath), "plugin-state.json"),
+	})
+	if err != nil {
+		log.Printf("warning: %v", err)
+	}
 	s := &Server{
 		config:        cfg,
 		configPath:    configPath,
@@ -480,6 +494,7 @@ func New(cfg Config) (*Server, error) {
 		feed:          metrics.NewRequestFeed(0), // default 200-event ring buffer
 		rateLimiter:   NewRateLimiter(cfg.Providers.Limits.RPM, cfg.Providers.Limits.Concurrency),
 		conversations: conversation.New(conversation.Options{}),
+		pluginState:   stateStore,
 	}
 
 	// --- offload validation (fail fast on misconfiguration) ---------------
@@ -2324,6 +2339,15 @@ func (s *Server) newRuntime() *wasm.Runtime {
 	rt.PluginCounterFunc = func(pluginName string, counter string, delta int64) {
 		s.stats.RecordPluginCounter(pluginName, counter, delta)
 	}
+	// Durable plugin state (env.state_*). The plugin name is supplied by the
+	// host from the calling module, never by the guest payload, so one plugin
+	// cannot address another's namespace.
+	if s.pluginState != nil {
+		rt.StateGetFunc = s.pluginState.Get
+		rt.StateSetFunc = s.pluginState.Set
+		rt.StateKeysFunc = s.pluginState.Keys
+	}
+	rt.CachePricingFunc = s.cachePricing
 	// Pristine request/response snapshots (env.original_request /
 	// env.original_response), read from the request state the same
 	// way offload does.

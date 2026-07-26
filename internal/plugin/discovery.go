@@ -125,6 +125,7 @@ var supportedPermissions = map[string]struct{}{
 	"env.log":                                  {},
 	"env.meta_get":                             {},
 	"env.meta_set":                             {},
+	"env.host_call.torana_cache_pricing":       {},
 	"env.original_request":                     {},
 	"env.original_response":                    {},
 	"env.plugin_config":                        {},
@@ -132,6 +133,9 @@ var supportedPermissions = map[string]struct{}{
 	"env.respond_request":                      {},
 	"env.route_request":                        {},
 	"env.serve_http":                           {},
+	"env.state_get":                            {},
+	"env.state_keys":                           {},
+	"env.state_set":                            {},
 }
 
 var agentOperationIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
