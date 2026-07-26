@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 
@@ -163,4 +164,133 @@ func TestRateLimiterUpdateAppliesWithoutDroppingActiveRequests(t *testing.T) {
 	}
 	rl.Release("caller")
 	rl.Release("caller")
+}
+
+// Failover sends a request to a provider the caller never addressed. The
+// credential rules that follow from that are the subject of these tests, and
+// the last one is the reason they exist: until the fix, failover could not
+// succeed at all, because the fallback rejected the caller's key.
+
+// failoverEnv stands up a primary that always fails and a fallback that records
+// what credential it was handed.
+type failoverEnv struct {
+	frt        *failoverRoundTripper
+	seenAuth   string
+	seenAPIKey string
+	reached    bool
+}
+
+func newFailoverEnv(t *testing.T, fallbackKeyEnv string, fallbackAuthRequired string) *failoverEnv {
+	t.Helper()
+	env := &failoverEnv{}
+
+	primary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusTooManyRequests)
+	}))
+	t.Cleanup(primary.Close)
+
+	fallback := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		env.reached = true
+		env.seenAuth = r.Header.Get("Authorization")
+		env.seenAPIKey = r.Header.Get("X-Api-Key")
+		// A real provider rejects a credential it did not issue.
+		if fallbackAuthRequired != "" && env.seenAuth != "Bearer "+fallbackAuthRequired {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	t.Cleanup(fallback.Close)
+
+	cfg := provider.Config{
+		Providers: map[string]provider.Provider{
+			"primary": {URL: primary.URL, Fallback: []string{"backup"}},
+			"backup":  {URL: fallback.URL, APIKeyEnv: fallbackKeyEnv},
+		},
+	}
+	env.frt = &failoverRoundTripper{
+		base:          http.DefaultTransport,
+		cfg:           func() provider.Config { return cfg },
+		resolveSecret: func(envName, _ string) string { return os.Getenv(envName) },
+	}
+	return env
+}
+
+func (e *failoverEnv) roundTrip(t *testing.T, callerKey string) *http.Response {
+	t.Helper()
+	req, err := http.NewRequest("POST", "http://primary/v1/chat/completions", strings.NewReader(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer "+callerKey)
+	req.Header.Set("X-Api-Key", callerKey)
+	req = req.WithContext(context.WithValue(req.Context(), routeContextKey{},
+		&RouteContext{ProviderName: "primary", StrippedPath: "/v1/chat/completions"}))
+
+	resp, err := e.frt.RoundTrip(req)
+	if err != nil {
+		t.Fatalf("RoundTrip: %v", err)
+	}
+	t.Cleanup(func() { resp.Body.Close() })
+	return resp
+}
+
+// TestFailoverDoesNotLeakCallerCredential is the security half. The caller
+// issued that key to one vendor; a 429 from that vendor is not consent to send
+// it to another.
+func TestFailoverDoesNotLeakCallerCredential(t *testing.T) {
+	t.Setenv("FAILOVER_BACKUP_KEY", "sk-backup")
+	env := newFailoverEnv(t, "FAILOVER_BACKUP_KEY", "")
+
+	env.roundTrip(t, "sk-caller-primary-only")
+
+	if !env.reached {
+		t.Fatal("fallback was never reached")
+	}
+	if strings.Contains(env.seenAuth, "sk-caller-primary-only") ||
+		strings.Contains(env.seenAPIKey, "sk-caller-primary-only") {
+		t.Errorf("the caller's credential was forwarded to a different vendor: auth=%q x-api-key=%q",
+			env.seenAuth, env.seenAPIKey)
+	}
+	if env.seenAuth != "Bearer sk-backup" {
+		t.Errorf("Authorization = %q, want the fallback's own key", env.seenAuth)
+	}
+}
+
+// TestFailoverStripsCredentialWhenFallbackHasNone — an unauthenticated target
+// (a local model server) must receive no credential at all, not the caller's.
+func TestFailoverStripsCredentialWhenFallbackHasNone(t *testing.T) {
+	env := newFailoverEnv(t, "", "")
+
+	env.roundTrip(t, "sk-caller")
+
+	if !env.reached {
+		t.Fatal("fallback was never reached")
+	}
+	if env.seenAuth != "" || env.seenAPIKey != "" {
+		t.Errorf("credential forwarded to a provider configured with none: auth=%q x-api-key=%q",
+			env.seenAuth, env.seenAPIKey)
+	}
+}
+
+// TestFailoverActuallySucceeds is the regression test that matters most, and it
+// is the one that shows failover was never functional.
+//
+// The fallback here behaves like a real provider: it rejects a credential it
+// did not issue. Before the fix the caller's key was forwarded verbatim, the
+// fallback returned 401, and 401 is not retryable — so that 401 became the
+// caller's response. A configured fallback made the outcome strictly worse than
+// having none.
+func TestFailoverActuallySucceeds(t *testing.T) {
+	t.Setenv("FAILOVER_BACKUP_KEY", "sk-backup")
+	env := newFailoverEnv(t, "FAILOVER_BACKUP_KEY", "sk-backup")
+
+	resp := env.roundTrip(t, "sk-caller-primary-only")
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("failover returned %d (%s), want 200 — the fallback rejected the credential it was handed",
+			resp.StatusCode, strings.TrimSpace(string(body)))
+	}
 }

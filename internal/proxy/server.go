@@ -1921,7 +1921,8 @@ func New(cfg Config) (*Server, error) {
 		cfg: func() provider.Config {
 			return s.GetConfig().Providers
 		},
-		rateLimiter: s.rateLimiter,
+		resolveSecret: s.resolveSecret,
+		rateLimiter:   s.rateLimiter,
 	}
 
 	s.proxy = proxy

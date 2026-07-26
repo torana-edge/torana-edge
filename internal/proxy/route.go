@@ -69,16 +69,7 @@ func (s *Server) applyRoute(req *http.Request, chat *engine.ChatRequest, origFor
 	reqStateFrom(req.Context()).Provider = v.Provider
 
 	// Never forward the caller's credential to a rerouted provider.
-	req.Header.Del("Authorization")
-	req.Header.Del("X-Api-Key")
-	if k := s.resolveSecret(target.APIKeyEnv, target.APIKeyEnc); k != "" {
-		// Cover both auth conventions; providers ignore the one they
-		// don't use.
-		req.Header.Set("Authorization", "Bearer "+k)
-		req.Header.Set("X-Api-Key", k)
-	} else if target.APIKeyEnv != "" || target.APIKeyEnc != "" {
-		log.Printf("[route] provider %q key is empty — sending unauthenticated", v.Provider)
-	}
+	applyProviderCredential(req, target, v.Provider, "route", s.resolveSecret)
 
 	metrics.RecordRoutedRequest(req.Context(), origName, v.Provider)
 	log.Printf("[route] %s → %s (model %q)", origName, v.Provider, chat.Model)

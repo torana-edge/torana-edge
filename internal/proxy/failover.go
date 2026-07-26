@@ -15,9 +15,13 @@ import (
 // failoverRoundTripper wraps the default transport and retries failed
 // requests against configured fallback providers (429 / 5xx).
 type failoverRoundTripper struct {
-	base        http.RoundTripper
-	cfg         func() provider.Config
-	rateLimiter *RateLimiter
+	base http.RoundTripper
+	cfg  func() provider.Config
+	// resolveSecret authenticates to a fallback with that provider's own
+	// credential. Without it, failover forwarded the caller's key to a
+	// different vendor — see applyProviderCredential.
+	resolveSecret func(env, enc string) string
+	rateLimiter   *RateLimiter
 }
 
 // rateLimitBody wraps the response body to release the concurrency token on close.
@@ -148,6 +152,14 @@ func (t *failoverRoundTripper) RoundTrip(req *http.Request) (*http.Response, err
 		}
 
 		retryReq := cloneWithBody(req, bodyBytes)
+
+		// A fallback is a different vendor. The caller's credential must not
+		// travel there, and would not authenticate if it did — which is why
+		// failover returned the fallback's 401 to the caller rather than a
+		// working response.
+		if t.resolveSecret != nil {
+			applyProviderCredential(retryReq, fb, fbName, "failover", t.resolveSecret)
+		}
 
 		// Reconstruct retry URL using the fallback base URL and original stripped path.
 		rc, _ := req.Context().Value(routeContextKey{}).(*RouteContext)
