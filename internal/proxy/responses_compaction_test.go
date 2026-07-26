@@ -3,7 +3,9 @@ package proxy
 import (
 	"encoding/json"
 	"io"
+	"net/http"
 	"net/http/httptest"
+	"net/http/httputil"
 	"reflect"
 	"strings"
 	"testing"
@@ -11,6 +13,17 @@ import (
 	"github.com/torana-edge/torana-edge/internal/engine"
 	"github.com/torana-edge/torana-edge/internal/provider"
 )
+
+// runRewrite drives the proxy's Rewrite hook the way httputil.ReverseProxy does:
+// clone the inbound request, hand the clone over as ProxyRequest.Out, and return
+// the mutated clone. Tests assert on what would go upstream, not on the inbound
+// request, which Rewrite is contractually forbidden from modifying.
+func runRewrite(t *testing.T, srv *Server, req *http.Request) *http.Request {
+	t.Helper()
+	pr := &httputil.ProxyRequest{In: req, Out: req.Clone(req.Context())}
+	srv.proxy.Rewrite(pr)
+	return pr.Out
+}
 
 func responsesCompactionProvider(threshold int) provider.Provider {
 	return provider.Provider{
@@ -33,8 +46,8 @@ func TestResponsesCompactionDirectorInjectionAndOpaqueHistory(t *testing.T) {
 
 	body := `{"model":"gpt-5.4","stream":true,"previous_response_id":"resp_123","input":[{"type":"reasoning","encrypted_content":"reasoning-opaque"},{"type":"message","role":"user","content":"next"},{"type":"compaction","encrypted_content":"compaction-opaque"}]}`
 	req := httptest.NewRequest("POST", "http://torana/provider/openai/v1/responses", strings.NewReader(body))
-	srv.proxy.Director(req)
-	forwarded, err := io.ReadAll(req.Body)
+	out := runRewrite(t, srv, req)
+	forwarded, err := io.ReadAll(out.Body)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -69,8 +82,8 @@ func TestResponsesCompactionDirectorNeverInjectsChatCompletions(t *testing.T) {
 	}
 
 	req := httptest.NewRequest("POST", "http://torana/provider/openai/v1/chat/completions", strings.NewReader(`{"model":"gpt-5.4","stream":true,"messages":[{"role":"user","content":"hi"}]}`))
-	srv.proxy.Director(req)
-	forwarded, err := io.ReadAll(req.Body)
+	out := runRewrite(t, srv, req)
+	forwarded, err := io.ReadAll(out.Body)
 	if err != nil {
 		t.Fatal(err)
 	}

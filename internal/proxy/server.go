@@ -544,7 +544,16 @@ func New(cfg Config) (*Server, error) {
 	type formatCtxKey struct{}
 
 	proxy := &httputil.ReverseProxy{
-		Director: func(req *http.Request) {
+		// Rewrite, not Director: Director is deprecated as of Go 1.26. The body
+		// below is unchanged — req is pr.Out, the clone ReverseProxy builds for
+		// the upstream, which is exactly what Director received. Two behavioural
+		// differences come from net/http/httputil itself, both wanted here:
+		// inbound X-Forwarded-* and Forwarded headers are stripped rather than
+		// appended to (this proxy talks to LLM providers; a caller's IP chain has
+		// no business being forwarded to them, and we deliberately do not call
+		// pr.SetXForwarded), and unparsable query parameters are dropped.
+		Rewrite: func(pr *httputil.ProxyRequest) {
+			req := pr.Out
 			var body []byte
 			if req.Body != nil {
 				lr := io.LimitReader(req.Body, maxBodySize+1)
