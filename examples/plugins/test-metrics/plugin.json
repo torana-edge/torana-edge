@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "name": "test-metrics",
+  "version": "0.1.0",
+  "description": "Test fixture: emits one metric of each type with labels, and mutates nothing",
+  "hooks": [
+    {"name": "run_before_request", "priority": 100}
+  ],
+  "permissions": [
+    {"name": "env.emit_metric", "description": "Emit counter, histogram and gauge metrics"},
+    {"name": "env.log", "description": "Diagnostic logging"}
+  ]
+}

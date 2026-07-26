@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "name": "test-mutator",
+  "version": "0.1.0",
+  "description": "Test fixture: deterministically rewrites user messages and tool definitions",
+  "hooks": [
+    {"name": "run_before_request", "priority": 100}
+  ],
+  "permissions": [
+    {"name": "env.log", "description": "Diagnostic logging"}
+  ]
+}

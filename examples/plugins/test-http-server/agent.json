@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "description": "Test fixture agent operations.",
+  "operations": [
+    {
+      "id": "status",
+      "method": "GET",
+      "path": "/status",
+      "description": "Read the fixture's identity and the method the host forwarded.",
+      "risk": "read",
+      "idempotent": true,
+      "output_schema": {
+        "type": "object",
+        "required": ["plugin", "status", "method"],
+        "properties": {
+          "plugin": {"const": "test-http-server"},
+          "status": {"const": "ready"},
+          "method": {"type": "string"}
+        },
+        "additionalProperties": false
+      }
+    }
+  ]
+}
