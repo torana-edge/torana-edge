@@ -488,6 +488,9 @@ func New(cfg Config) (*Server, error) {
 		if err := p.ValidateResponsesCompaction(name); err != nil {
 			return nil, fmt.Errorf("proxy: %w", err)
 		}
+		if err := p.ValidateCache(name); err != nil {
+			return nil, fmt.Errorf("proxy: %w", err)
+		}
 	}
 	if off := cfg.Providers.Offload; off.Enabled {
 		switch {
@@ -2182,7 +2185,7 @@ func providerFieldsSent(body []byte) map[string]map[string]struct{} {
 // unmanagedProviderFields are per-provider settings that no control-plane form
 // currently renders. A client that rebuilds a provider object from a form would
 // drop them, so they are carried forward unless explicitly written.
-var unmanagedProviderFields = []string{"pricing", "responses_compaction"}
+var unmanagedProviderFields = []string{"pricing", "responses_compaction", "cache"}
 
 // preserveUnmanagedProviderFields copies unmanaged fields from the stored config
 // into the incoming one wherever the caller left them out. It mutates incoming.
@@ -2201,6 +2204,8 @@ func preserveUnmanagedProviderFields(stored, incoming map[string]provider.Provid
 				incP.Pricing = curP.Pricing
 			case "responses_compaction":
 				incP.ResponsesCompaction = curP.ResponsesCompaction
+			case "cache":
+				incP.Cache = curP.Cache
 			}
 		}
 		incoming[name] = incP

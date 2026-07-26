@@ -195,6 +195,56 @@ func TestNewProviderNeedsNoStoredFields(t *testing.T) {
 	}
 }
 
+// TestSettingsSaveKeepsCacheSemantics — cache config is the second setting the
+// form does not render, and losing it would silently disable the cache plugins
+// exactly the way losing pricing disabled the compactor's gate.
+func TestSettingsSaveKeepsCacheSemantics(t *testing.T) {
+	srv := pricedServer(t)
+
+	// Declare cache semantics the way an operator would, then save Settings.
+	rec := putConfig(t, srv, map[string]any{
+		"port": 8080,
+		"providers": map[string]any{
+			"primary": map[string]any{
+				"url":    "https://api.example.com",
+				"format": "openai",
+				"cache": map[string]any{
+					"refresh_on_read": true,
+					"tiers": []any{
+						map[string]any{"ttl_seconds": 300, "write_multiplier": 1.25,
+							"marker": map[string]any{"type": "ephemeral"}},
+					},
+				},
+			},
+		},
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PUT status = %d, want 200: %s", rec.Code, rec.Body)
+	}
+
+	// Now a plain settings save, which sends no cache key at all.
+	rec = putConfig(t, srv, map[string]any{
+		"port": 8080,
+		"providers": map[string]any{
+			"primary": map[string]any{"url": "https://api.example.com", "format": "openai"},
+		},
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("second PUT status = %d, want 200: %s", rec.Code, rec.Body)
+	}
+
+	p := srv.GetConfig().Providers.Providers["primary"]
+	if p.Cache == nil {
+		t.Fatal("cache semantics were erased by a settings save")
+	}
+	if !p.Cache.RefreshOnRead || len(p.Cache.Tiers) != 1 {
+		t.Errorf("cache config survived but was mangled: %+v", p.Cache)
+	}
+	if got := p.Cache.Tiers[0].Marker["type"]; got != "ephemeral" {
+		t.Errorf("tier marker = %v, want the opaque provider value", got)
+	}
+}
+
 // TestProviderFieldsSent covers the presence detection directly, including the
 // case that matters most: a zero value that was genuinely sent.
 func TestProviderFieldsSent(t *testing.T) {
