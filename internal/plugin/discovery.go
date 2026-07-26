@@ -459,12 +459,40 @@ type PluginPipeline struct {
 	plugins []*loadedPlugin
 	runtime *wasm.Runtime
 
+	// skipped records plugins named in config.Order that were not loaded
+	// because the operator has not approved their current bundle digest.
+	// A missing approval is operator state, not a malformed configuration:
+	// the plugin is skipped (its code never runs) and the condition is
+	// reported, rather than failing the whole reload. Every other Strict
+	// failure — invalid manifest, duplicate order, ordering violation,
+	// failed load — remains a hard error.
+	skipped []SkippedPlugin
+
 	mu        sync.Mutex
 	active    int
 	draining  bool
 	drained   chan struct{}
 	closed    chan struct{}
 	drainOnce sync.Once
+}
+
+// SkippedPlugin describes an enabled plugin that was not loaded because it
+// lacks an operator approval bound to its current bundle digest.
+type SkippedPlugin struct {
+	Name   string `json:"name"`
+	Digest string `json:"digest"`
+	Reason string `json:"reason"`
+}
+
+// Skipped returns the plugins that were enabled in configuration but not
+// loaded for want of a digest-bound approval. Callers surface this so an
+// operator can see what needs approving instead of silently running a
+// shorter pipeline than they configured.
+func (p *PluginPipeline) Skipped() []SkippedPlugin {
+	if p == nil {
+		return nil
+	}
+	return p.skipped
 }
 
 type loadedPlugin struct {
@@ -505,6 +533,7 @@ func reloadPipeline(runtime *wasm.Runtime, config PluginConfig) (*PluginPipeline
 		byName[b.Manifest.Name] = b
 	}
 	var loaded []*loadedPlugin
+	var skipped []SkippedPlugin
 	order := config.Order
 	seenOrder := make(map[string]struct{}, len(order))
 	for _, name := range order {
@@ -531,9 +560,7 @@ func reloadPipeline(runtime *wasm.Runtime, config PluginConfig) (*PluginPipeline
 		}
 		approval, approved := config.approvalFor(bundle)
 		if !approved {
-			if config.Strict {
-				return nil, fmt.Errorf("enabled plugin %q has no approval for digest %s", name, bundle.Digest)
-			}
+			// Not a configuration error — see PluginPipeline.skipped.
 			continue
 		}
 		grants, _, err := validateApproval(bundle, approval)
@@ -570,10 +597,14 @@ func reloadPipeline(runtime *wasm.Runtime, config PluginConfig) (*PluginPipeline
 		}
 		approval, approved := config.approvalFor(bundle)
 		if !approved {
-			if config.Strict {
-				return nil, fmt.Errorf("enabled plugin %q has no approval for digest %s", name, bundle.Digest)
-			}
-			log.Printf("[plugin] %s: no approval for digest %s — skipping", name, bundle.Digest)
+			skipped = append(skipped, SkippedPlugin{
+				Name:   name,
+				Digest: bundle.Digest,
+				Reason: "no operator approval for this bundle digest",
+			})
+			log.Printf("[plugin] %s: not loaded — no operator approval for digest %s. "+
+				"Open %s in the control plane at /_torana/, review its requested "+
+				"capabilities, and approve this digest to enable it.", name, bundle.Digest, name)
 			continue
 		}
 		grants, failureMode, err := validateApproval(bundle, approval)
@@ -633,6 +664,7 @@ func reloadPipeline(runtime *wasm.Runtime, config PluginConfig) (*PluginPipeline
 	return &PluginPipeline{
 		plugins: loaded,
 		runtime: runtime,
+		skipped: skipped,
 		drained: make(chan struct{}),
 		closed:  make(chan struct{}),
 	}, nil

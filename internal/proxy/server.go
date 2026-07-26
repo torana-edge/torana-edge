@@ -1333,7 +1333,8 @@ func New(cfg Config) (*Server, error) {
 			http.Error(w, "failed to persist config to disk", http.StatusInternalServerError)
 			return
 		}
-		if err := s.RebuildPipeline(newPlugins); err != nil {
+		skipped, err := s.rebuildPipelineReportingSkips(newPlugins)
+		if err != nil {
 			if rollbackErr := s.persistProviders(s.GetConfig().Providers); rollbackErr != nil {
 				log.Printf("failed to restore config after rejected plugin update: %v", rollbackErr)
 			}
@@ -1343,8 +1344,7 @@ func New(cfg Config) (*Server, error) {
 		s.SetProviders(candidate)
 
 		w.Header().Set("Content-Type", "application/json")
-		b, _ := json.Marshal(newPlugins)
-		w.Write(b)
+		writePluginsWithWarnings(w, newPlugins, skipped)
 	}))
 
 	// POST /_torana/api/plugins/<name>/config — update single plugin config + rebuild + persist.
@@ -1428,7 +1428,8 @@ func New(cfg Config) (*Server, error) {
 			http.Error(w, "failed to persist config to disk", http.StatusInternalServerError)
 			return
 		}
-		if err := s.RebuildPipeline(newPlugins); err != nil {
+		skipped, err := s.rebuildPipelineReportingSkips(newPlugins)
+		if err != nil {
 			if rollbackErr := s.persistProviders(s.GetConfig().Providers); rollbackErr != nil {
 				log.Printf("failed to restore config after rejected plugin update: %v", rollbackErr)
 			}
@@ -1438,8 +1439,7 @@ func New(cfg Config) (*Server, error) {
 		s.SetProviders(candidate)
 
 		w.Header().Set("Content-Type", "application/json")
-		b, _ := json.Marshal(newPlugins)
-		w.Write(b)
+		writePluginsWithWarnings(w, newPlugins, skipped)
 	}))
 
 	// GET /_torana/api/feed — one-shot JSON snapshot of recent events,
@@ -2200,17 +2200,66 @@ func (s *Server) rebuildPipelineLocked(pcfg provider.PluginsConfig) (*plugin.Plu
 // If reloading fails (e.g. ordering constraint violation), returns the error
 // without swapping the active pipeline.
 func (s *Server) RebuildPipeline(pcfg provider.PluginsConfig) error {
+	_, err := s.rebuildPipelineReportingSkips(pcfg)
+	return err
+}
+
+// writePluginsWithWarnings emits the saved plugin configuration plus, when
+// any enabled plugin was not loaded for want of an operator approval, a
+// warnings block naming each one and how to resolve it. The save itself
+// succeeds: unapproved plugins are skipped, never executed, so refusing the
+// whole write would strand the operator — unrelated settings could not be
+// changed while any stale entry sat in plugins.order.
+func writePluginsWithWarnings(w http.ResponseWriter, plugins provider.PluginsConfig, skipped []plugin.SkippedPlugin) {
+	if len(skipped) == 0 {
+		b, _ := json.Marshal(plugins)
+		w.Write(b)
+		return
+	}
+	type warning struct {
+		Name   string `json:"name"`
+		Digest string `json:"digest"`
+		Reason string `json:"reason"`
+		Remedy string `json:"remedy"`
+	}
+	payload := struct {
+		provider.PluginsConfig
+		Warnings []warning `json:"warnings"`
+	}{PluginsConfig: plugins}
+	for _, sk := range skipped {
+		payload.Warnings = append(payload.Warnings, warning{
+			Name:   sk.Name,
+			Digest: sk.Digest,
+			Reason: sk.Reason,
+			Remedy: "Open " + sk.Name + " in the control plane, review its requested capabilities, and approve this digest. Until then the plugin is enabled in configuration but not running.",
+		})
+	}
+	b, _ := json.Marshal(payload)
+	w.Write(b)
+}
+
+// rebuildPipelineReportingSkips is RebuildPipeline plus the list of enabled
+// plugins that were not loaded for want of a digest-bound operator approval.
+// A missing approval does not fail the rebuild: the plugin's code never runs,
+// and the condition is reported to the caller so the control plane can tell
+// the operator what to approve. Callers that only care about success can use
+// RebuildPipeline.
+func (s *Server) rebuildPipelineReportingSkips(pcfg provider.PluginsConfig) ([]plugin.SkippedPlugin, error) {
 	s.rebuildMu.Lock()
 	defer s.rebuildMu.Unlock()
 
 	old, err := s.rebuildPipelineLocked(pcfg)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if old != nil {
 		go old.DrainAndClose()
 	}
-	return nil
+	var skipped []plugin.SkippedPlugin
+	if pp, ok := s.pluginPipeline.Load().(*plugin.PluginPipeline); ok {
+		skipped = pp.Skipped()
+	}
+	return skipped, nil
 }
 
 // ReconfigureCache rebuilds the shared cache store from newCache and atomically
