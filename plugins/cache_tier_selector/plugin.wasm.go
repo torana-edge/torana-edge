@@ -119,7 +119,12 @@ func init() {
 			return applyMarker(req, idx, prior.Marker), nil
 		}
 
-		now, _ := sdk.Now()
+		// Without a clock there is no gap history to reason from, so the
+		// conversation keeps whatever tier the harness asked for.
+		now, err := sdk.Now()
+		if err != nil {
+			return nil, nil
+		}
 		act := recordActivity(meta.ConversationID, now)
 
 		marker, ttl := chooseTier(cfg, pricing, act, now)

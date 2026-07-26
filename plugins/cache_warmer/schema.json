@@ -1,26 +1,28 @@
 {
-  "fields": [
-    {
-      "key": "conversations",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "conversations": {
       "type": "string",
-      "label": "Conversation IDs",
+      "title": "Conversation IDs",
       "default": "",
-      "help": "Comma-separated conversation IDs to keep warm \u2014 run `torana conversations` to list them. Empty means observe only. Warming everything loses money: refreshing only pays for a bounded window, so choose the conversations you are actually coming back to.",
-      "source": "conversations"
+      "x-torana-source": "conversations",
+      "description": "Comma-separated conversation IDs to keep warm — run `torana conversations` to list them. Empty means observe only. Warming everything loses money: refreshing only pays for a bounded window, so choose the conversations you are actually coming back to."
     },
-    {
-      "key": "warm_for_minutes",
-      "type": "number",
-      "label": "Warm For (minutes)",
+    "warm_for_minutes": {
+      "type": "integer",
+      "minimum": 0,
+      "title": "Warm For (minutes)",
       "default": 45,
-      "help": "How long after the last real turn to keep refreshing. 0 relies on the break-even refresh count alone. Beyond roughly 45 minutes on a 5-minute cache tier, refreshing costs more than accepting the miss."
+      "description": "How long after the last real turn to keep refreshing. 0 relies on the break-even refresh count alone. Beyond roughly 45 minutes on a 5-minute cache tier, refreshing costs more than accepting the miss."
     },
-    {
-      "key": "interval_seconds_override",
-      "type": "number",
-      "label": "Refresh Interval Override (seconds)",
+    "interval_seconds_override": {
+      "type": "integer",
+      "minimum": 0,
+      "title": "Refresh Interval Override (seconds)",
       "default": 0,
-      "help": "0 uses the provider's configured cadence (80% of its shortest cache lifetime). An interval at or beyond that lifetime is rejected, since the refresh would always arrive after the entry had expired."
+      "description": "0 uses the provider's configured cadence (80% of its shortest cache lifetime). An interval at or beyond that lifetime is rejected, since the refresh would always arrive after the entry had expired."
     }
-  ]
+  }
 }

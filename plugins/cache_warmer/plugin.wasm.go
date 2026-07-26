@@ -134,7 +134,13 @@ func init() {
 			return nil, nil
 		}
 
-		now, _ := sdk.Now()
+		// A plugin without the clock cannot reason about elapsed time at all,
+		// and every downstream number would be measured from the epoch. Storing
+		// nothing is better than storing a deadline 45 minutes after 1970.
+		now, err := sdk.Now()
+		if err != nil {
+			return nil, nil
+		}
 		entry := warmEntry{
 			ConversationID: meta.ConversationID,
 			Provider:       meta.Provider,

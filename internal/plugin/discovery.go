@@ -394,6 +394,15 @@ func loadBundle(dir string) (*PluginBundle, error) {
 		if err := json.Unmarshal(sBytes, &s); err != nil {
 			return nil, fmt.Errorf("parse schema: %w", err)
 		}
+		// A JSON Schema document unmarshals into ConfigSchema without error and
+		// yields no fields, which used to mean the control plane silently
+		// rendered no form. Derive the fields instead — see
+		// jsonschema_config.go.
+		if len(s.Fields) == 0 {
+			if derived := deriveConfigSchema(sBytes); derived != nil {
+				s = *derived
+			}
+		}
 		schema = &s
 	} else if !os.IsNotExist(err) {
 		return nil, fmt.Errorf("read schema: %w", err)

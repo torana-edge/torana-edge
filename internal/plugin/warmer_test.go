@@ -293,6 +293,75 @@ func TestWarmerSkipsPrefixEndingMidToolCall(t *testing.T) {
 	}
 }
 
+// TestWarmerWithoutClockGrantStoresNothing pins the behaviour when env.now is
+// not granted.
+//
+// This regressed once already. When Now() returned a bare 0 on denial, the
+// warmer stored a deadline 45 minutes after the epoch, so the very next tick
+// found it long past and stopped every conversation reporting "deadline
+// reached" — a plausible-sounding message for a completely different cause. The
+// operator would see a plugin that looked like it was working.
+//
+// Fail closed is right; failing closed with a misleading reason is not.
+func TestWarmerWithoutClockGrantStoresNothing(t *testing.T) {
+	requireWASM(t, "../../plugins/cache_warmer/plugin.wasm")
+
+	rt := wasm.NewRuntime(context.Background())
+	defer rt.Close()
+	state, err := pluginstate.New(pluginstate.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rt.StateGetFunc, rt.StateSetFunc, rt.StateKeysFunc = state.Get, state.Set, state.Keys
+	rt.CachePricingFunc = func(_ context.Context, _ string) string { return okPricing() }
+	sent := 0
+	rt.SendRequestFunc = func(_ context.Context, _, _ string) string {
+		sent++
+		return `{"status":"ok","http_status":200,"usage":{"cache_read":95}}`
+	}
+
+	digest, err := BundleDigestForDir("../../plugins/cache_warmer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pp, err := NewPipeline(rt, PluginConfig{
+		Dir: "../../plugins", Order: []string{"cache_warmer"},
+		Approvals: map[string]Approval{"torana/cache_warmer": {
+			Digest: digest,
+			// Everything the plugin asks for except env.now.
+			Permissions: []string{
+				"env.background_tick", "env.host_call.torana_send_request",
+				"env.host_call.torana_cache_pricing", "env.state_get",
+				"env.state_set", "env.state_keys", "env.plugin_config", "env.log",
+			},
+		}},
+		Config: map[string]json.RawMessage{
+			"cache_warmer": json.RawMessage(`{"conversations":"conv-a3f9","warm_for_minutes":45}`),
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := pp.RunBeforeRequest(context.Background(), 1, warmerRequestBreakpointOnUser("conv-a3f9")); err != nil {
+		t.Fatal(err)
+	}
+	outcomes := tick(t, pp, 1, 5*time.Minute)
+
+	if sent != 0 {
+		t.Errorf("sent %d refreshes with no clock to schedule them by", sent)
+	}
+	if len(state.Keys("cache_warmer")) != 0 {
+		v, _ := state.Get("cache_warmer", state.Keys("cache_warmer")[0])
+		t.Errorf("stored an entry built from a zero clock: %s", v)
+	}
+	for _, o := range outcomes {
+		if strings.Contains(o.Note, "deadline") {
+			t.Errorf("reported %q, which blames the deadline for a missing env.now grant", o.Note)
+		}
+	}
+}
+
 // TestWarmerIgnoresUnlistedConversations — warming everything is how this
 // feature loses money, so opt-in must actually gate.
 func TestWarmerIgnoresUnlistedConversations(t *testing.T) {
