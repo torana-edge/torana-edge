@@ -59,18 +59,18 @@ CLI (`agy`)** — Torana also offers an optional TLS-terminating MITM ingress. S
 | Guide | What it covers |
 | --- | --- |
 | [Quickstart](docs/QUICKSTART.md) | Install, add a provider, point a harness at Torana |
-| [Writing plugins](docs/PLUGIN_AUTHORING.md) | Build a plugin against the [torana-plugin-sdk](https://github.com/torana-edge/torana-plugin-sdk) module |
-| [Plugin implementation notes](docs/PLUGIN_IMPLEMENTATION_GUIDE.md) | The wasip1 reactor model and why `-buildmode=c-shared` is mandatory |
+| [Running plugins](docs/PLUGINS.md) | Install, inspect, approve, order, and what the sandbox does |
 | [Agent control plane](docs/AGENT_CONTROL_PLANE.md) | The versioned JSON API and `agent.json` operation contracts |
 | [Local models](docs/LOCAL_MODELS.md) | Point a coding harness at Ollama or vLLM through Torana |
 | [Antigravity CLI](docs/GEMINI_ANTIGRAVITY.md) | The optional TLS-terminating MITM ingress |
 | [Context compaction](docs/COMPACTION.md) | Policies, the economic gate, and why it is off by default |
 | [Dogfood results](docs/DOGFOOD_166_RESULTS.md) | 75 paired sessions measuring whether compaction actually saves money |
 
+**Writing a plugin?** That lives with the SDK:
+[torana-plugin-sdk](https://github.com/torana-edge/torana-plugin-sdk) — the
+`torana.v1` ABI, Go and Rust SDKs, and the authoring guides.
+
 **Official plugins** live in [torana-plugins](https://github.com/torana-edge/torana-plugins).
-The **plugin SDK and the `torana.v1` ABI** live in
-[torana-plugin-sdk](https://github.com/torana-edge/torana-plugin-sdk) — this repository
-consumes it as a normal Go module and no longer vendors a copy.
 
 ## How It Works
 

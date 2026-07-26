@@ -11,7 +11,7 @@ import (
 
 // Prompt-cache compliance harness.
 //
-// Contract (docs/PLUGIN_IMPLEMENTATION_GUIDE.md "Prompt-Cache Compliance"):
+// Contract (torana-plugin-sdk docs/PLUGIN_SEMANTICS.md "Prompt-Cache Compliance"):
 // a plugin's transformation of the cacheable prefix (tools, system, history)
 // must be a deterministic function of its input, and cache_control markers
 // must survive the plugin round-trip. A plugin that injects per-request
