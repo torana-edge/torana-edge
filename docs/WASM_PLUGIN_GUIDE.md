@@ -1,5 +1,11 @@
 # Torana WASM Plugin Development Guide (For AI Agents & Humans)
 
+> **Scope note.** This guide explains the raw ABI — memory ownership, exports, and
+> the host boundary — for people implementing an SDK in a new language. If you just
+> want to *write a plugin*, start at [PLUGIN_AUTHORING.md](PLUGIN_AUTHORING.md) and use
+> the published SDK instead. On the Go toolchain,
+> [PLUGIN_IMPLEMENTATION_GUIDE.md](PLUGIN_IMPLEMENTATION_GUIDE.md) is authoritative.
+
 This document is a critical reference for implementing WebAssembly (WASM) plugins in Torana Edge. **AI Coding Agents MUST read this document before generating or modifying Torana WASM plugins.**
 
 ## 1. The Core Architecture (Linear Memory)
@@ -28,12 +34,18 @@ export function alloc(size: u32): u32 {
 
 ### ✅ CORRECT:
 Use the standard library allocator for your language.
-* **Go (TinyGo)**:
+* **Go (standard Go, not TinyGo)**:
   ```go
   var memory map[uint64][]byte // For tracking allocations
   // Use standard make([]byte) and return unsafe.Pointer
   ```
-  *(See `sdk/plugin-sdk` for the robust Go implementation)*
+  Torana's plugins are built with **standard Go**, compiled
+  `GOOS=wasip1 GOARCH=wasm -buildmode=c-shared` for the reactor model — see
+  [PLUGIN_IMPLEMENTATION_GUIDE.md](PLUGIN_IMPLEMENTATION_GUIDE.md), which is
+  authoritative on the toolchain. Don't hand-roll this: the
+  [torana-plugin-sdk](https://github.com/torana-edge/torana-plugin-sdk) module
+  implements the allocator correctly, and getting it wrong returns null bytes
+  rather than an error.
 * **Rust**:
   ```rust
   use std::alloc::{alloc, dealloc, Layout};

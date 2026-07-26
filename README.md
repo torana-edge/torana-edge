@@ -1,4 +1,4 @@
-# Torana Edge
+# <img src="./assets/logo/torana-color.svg" width="40" align="absmiddle" /> Torana Edge
 
 Torana Edge is an **extensible, high-performance LLM reverse proxy and routing engine** built specifically for AI coding assistants. It sits transparently between your local agent (e.g., OpenCode, Claude Code, Aider) and cloud LLM providers, acting as a **Smart FinOps Filter**.
 
@@ -53,12 +53,30 @@ CLI (`agy`)** — Torana also offers an optional TLS-terminating MITM ingress. S
    export OPENAI_BASE_URL=http://localhost:8080/provider/deepseek/v1
    ```
 
+## Documentation
+
+| Guide | What it covers |
+| --- | --- |
+| [Quickstart](docs/QUICKSTART.md) | Install, add a provider, point a harness at Torana |
+| [Writing plugins](docs/PLUGIN_AUTHORING.md) | Build a plugin against the [torana-plugin-sdk](https://github.com/torana-edge/torana-plugin-sdk) module |
+| [Plugin implementation notes](docs/PLUGIN_IMPLEMENTATION_GUIDE.md) | The wasip1 reactor model and why `-buildmode=c-shared` is mandatory |
+| [Agent control plane](docs/AGENT_CONTROL_PLANE.md) | The versioned JSON API and `agent.json` operation contracts |
+| [Local models](docs/LOCAL_MODELS.md) | Point a coding harness at Ollama or vLLM through Torana |
+| [Antigravity CLI](docs/GEMINI_ANTIGRAVITY.md) | The optional TLS-terminating MITM ingress |
+| [Context compaction](docs/COMPACTION.md) | Policies, the economic gate, and why it is off by default |
+| [Dogfood results](docs/DOGFOOD_166_RESULTS.md) | 75 paired sessions measuring whether compaction actually saves money |
+
+**Official plugins** live in [torana-plugins](https://github.com/torana-edge/torana-plugins).
+The **plugin SDK and the `torana.v1` ABI** live in
+[torana-plugin-sdk](https://github.com/torana-edge/torana-plugin-sdk) — this repository
+consumes it as a normal Go module and no longer vendors a copy.
+
 ## How It Works
 
 1. **Path-based routing** — Requests arrive at `/provider/<name>/<upstream-path>`. Torana strips the provider prefix, looks up the upstream URL and format, and forwards.
 2. **Canonical IR** — Format adapters (`internal/format/`) translate each provider's wire format into shared Go types (`ChatRequest`, `Message`, `ToolDef`, `StreamEvent`).
 3. **Protobuf Serialization** — The IR is serialized to Protobuf via `internal/engine/pbconv` and handed to the WASM runtime.
-4. **WASM Plugin Pipeline** — Loaded plugins execute sequentially (in `config.json` order). Each plugin receives the Protobuf bytes, mutates them via the SDK (`sdk/plugin-sdk`), and writes back.
+4. **WASM Plugin Pipeline** — Loaded plugins execute sequentially (in `config.json` order). Each plugin receives the Protobuf bytes, mutates them via the SDK ([torana-plugin-sdk](https://github.com/torana-edge/torana-plugin-sdk)), and writes back.
 5. **Pass-through** — Requests without a recognized `/provider/` prefix return 502.
 
 ## Supported Formats
@@ -112,10 +130,7 @@ torana-edge/
 │   ├── provider/                   # Config parsing, URI resolution
 │   ├── proxy/                      # Reverse proxy with format dispatch
 │   └── wasm/                       # Wazero runtime integration
-├── pkg/
-│   ├── pb/                         # Protobuf schemas and generated code
-│   └── plugin-sdk/                 # SDK imported by WASM plugins
-├── plugins/                        # WASM plugin source code (binaries built via `make plugins`)
+├── plugins/                        # Bundled plugin source (binaries built via `make plugins`)
 │   ├── auth/
 │   ├── compactor/
 │   ├── intent/
