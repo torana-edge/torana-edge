@@ -21,6 +21,12 @@ func Run(args []string, stdout, stderr io.Writer) error {
 		return initPlugin(args[2:], stdout)
 	case "build":
 		return buildPlugin(args[2:], stdout, stderr)
+	case "install":
+		return installPlugin(args[2:], stdout, stderr)
+	case "list", "ls":
+		return listPlugins(args[2:], stdout)
+	case "remove", "rm":
+		return removePlugin(args[2:], stdout)
 	case "help", "-h", "--help":
 		Usage(stdout)
 		return nil
@@ -35,6 +41,18 @@ func Usage(w io.Writer) {
 	_, _ = fmt.Fprintln(w, "Usage:")
 	_, _ = fmt.Fprintln(w, "  torana plugin init <name>")
 	_, _ = fmt.Fprintln(w, "  torana plugin build [plugin-directory] [-o plugin.wasm]")
+	_, _ = fmt.Fprintln(w, "  torana plugin install <source>... [--official] [--dir plugins]")
+	_, _ = fmt.Fprintln(w, "  torana plugin list [--dir plugins]")
+	_, _ = fmt.Fprintln(w, "  torana plugin remove <name>... [--dir plugins]")
+	_, _ = fmt.Fprintln(w, "")
+	_, _ = fmt.Fprintln(w, "A source is a local path or a repository path:")
+	_, _ = fmt.Fprintln(w, "  torana plugin install ./my-plugin")
+	_, _ = fmt.Fprintln(w, "  torana plugin install github.com/you/your-plugins/plugins/foo")
+	_, _ = fmt.Fprintln(w, "  torana plugin install github.com/you/your-plugins/plugins/foo@v1.2.0")
+	_, _ = fmt.Fprintln(w, "  torana plugin install --official")
+	_, _ = fmt.Fprintln(w, "")
+	_, _ = fmt.Fprintln(w, "Plugins are compiled locally from source, never downloaded prebuilt,")
+	_, _ = fmt.Fprintln(w, "and are not loaded until you approve their digest in the control plane.")
 }
 
 func initPlugin(args []string, stdout io.Writer) error {

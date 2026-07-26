@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -411,6 +412,38 @@ func loadBundle(dir string) (*PluginBundle, error) {
 // runtime. Length-prefixing keeps the digest unambiguous. A change to code,
 // requested permissions, failure behavior, hooks, configuration schema, or
 // advertised agent contract therefore invalidates the operator's approval.
+// BundleDigestForDir computes the approval digest for an on-disk bundle. It is
+// the single source of truth shared with `torana plugin install`, which must
+// print exactly the digest an operator will later approve. Reimplementing this
+// anywhere else reintroduces a drift bug that is silent by construction — the
+// two values simply never match and nothing errors.
+func BundleDigestForDir(dir string) (string, error) {
+	read := func(name string) ([]byte, error) {
+		data, err := os.ReadFile(filepath.Join(dir, name))
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, nil
+		}
+		return data, err
+	}
+	manifestBytes, err := read("plugin.json")
+	if err != nil {
+		return "", err
+	}
+	wasmBytes, err := read("plugin.wasm")
+	if err != nil {
+		return "", err
+	}
+	schemaBytes, err := read("schema.json")
+	if err != nil {
+		return "", err
+	}
+	agentBytes, err := read("agent.json")
+	if err != nil {
+		return "", err
+	}
+	return bundleDigest(manifestBytes, wasmBytes, schemaBytes, agentBytes), nil
+}
+
 func bundleDigest(manifestBytes, wasmBytes, schemaBytes, agentBytes []byte) string {
 	h := sha256.New()
 	parts := [][]byte{manifestBytes, wasmBytes, schemaBytes}
