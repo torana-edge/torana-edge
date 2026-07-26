@@ -134,7 +134,7 @@ func init() {
 			return nil, nil
 		}
 
-		now := sdk.Now()
+		now, _ := sdk.Now()
 		entry := warmEntry{
 			ConversationID: meta.ConversationID,
 			Provider:       meta.Provider,

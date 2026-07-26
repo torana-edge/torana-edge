@@ -119,7 +119,7 @@ func init() {
 			return applyMarker(req, idx, prior.Marker), nil
 		}
 
-		now := sdk.Now()
+		now, _ := sdk.Now()
 		act := recordActivity(meta.ConversationID, now)
 
 		marker, ttl := chooseTier(cfg, pricing, act, now)
