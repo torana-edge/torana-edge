@@ -1,6 +1,6 @@
 # <img src="./assets/logo/torana-color.svg" width="40" align="absmiddle" /> Torana Edge
 
-Torana Edge is an **extensible, high-performance LLM reverse proxy and routing engine** built specifically for AI coding assistants. It sits transparently between your local agent (e.g., OpenCode, Claude Code, Aider) and cloud LLM providers, acting as a **Smart FinOps Filter**.
+Torana Edge is a **local-first, programmable reverse proxy for AI coding agents**. It sits between your harness (Claude Code, Codex, OpenCode, Aider) and your provider, and gives you a place to observe, redact, route, veto, or rewrite traffic — without replacing the agent or the model.
 
 All request/response mutations are handled by **WebAssembly (WASM) plugins** running in a sandboxed `wazero` runtime, communicating with the host via **Protobuf** serialization. This architecture enables hot-loadable, language-agnostic plugins with zero-downtime updates.
 
@@ -18,7 +18,8 @@ CLI (`agy`)** — Torana also offers an optional TLS-terminating MITM ingress. S
 
 ## Key Features
 
-- **WASM Plugin Ecosystem:** Write plugins in Go (or any WASI-compatible language), compile to `.wasm`, and drop them into the `plugins/` directory. No proxy restarts needed.
+- **WASM Plugin Ecosystem:** Write plugins in Go, Rust, or any WASI-compatible language against the [torana-plugin-sdk](https://github.com/torana-edge/torana-plugin-sdk) and compile to `.wasm`. Hot-loaded, no proxy restart.
+- **Operator-approved plugins:** A plugin declares the capabilities it wants; it does not receive them. You inspect and approve each bundle, and the approval is bound to that bundle's SHA-256 digest — rebuild or change permissions and it needs approving again. Sandboxed in `wazero`: a plugin gets the IR and nothing else, no filesystem, no sockets you did not grant.
 - **Tool-aware compaction:** Explicit policies keep source and failure evidence exact while allowing recoverable searches/listings to be reduced deterministically—even on first exposure when configured.
 - **Economic model delegation:** Historical results can be summarized through a cheaper model only when route-aware cache/offload economics estimate positive net savings.
 - **Responses-native compaction:** OpenAI Responses requests can opt into provider-side compaction without Torana storing a second conversation.
