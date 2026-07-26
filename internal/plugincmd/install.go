@@ -114,7 +114,7 @@ func fetch(src source, stdout, stderr io.Writer) (string, func(), error) {
 	if src.ref != "" {
 		fmt.Fprintf(stdout, " @ %s", src.ref)
 	}
-	fmt.Fprintln(stdout)
+	_, _ = fmt.Fprintln(stdout)
 
 	cmd := exec.Command("git", args...)
 	cmd.Stderr = stderr
@@ -273,9 +273,9 @@ func installPlugin(args []string, stdout, stderr io.Writer) error {
 	}
 
 	fmt.Fprintf(stdout, "\n%d plugin(s) installed. They are NOT running yet.\n", len(installed))
-	fmt.Fprintln(stdout, "Torana never loads a plugin you have not approved. Open the control plane")
-	fmt.Fprintln(stdout, "at http://127.0.0.1:8080/_torana/, review what each one requests, and approve")
-	fmt.Fprintln(stdout, "its digest. Approval is bound to that digest — rebuild it and you approve again.")
+	_, _ = fmt.Fprintln(stdout, "Torana never loads a plugin you have not approved. Open the control plane")
+	_, _ = fmt.Fprintln(stdout, "at http://127.0.0.1:8080/_torana/, review what each one requests, and approve")
+	_, _ = fmt.Fprintln(stdout, "its digest. Approval is bound to that digest — rebuild it and you approve again.")
 	return nil
 }
 
@@ -287,7 +287,7 @@ func listPlugins(args []string, stdout io.Writer) error {
 	entries, err := os.ReadDir(dest)
 	if errors.Is(err, os.ErrNotExist) {
 		fmt.Fprintf(stdout, "No plugins directory at %s.\n", dest)
-		fmt.Fprintln(stdout, "Install the official set with: torana plugin install --official")
+		_, _ = fmt.Fprintln(stdout, "Install the official set with: torana plugin install --official")
 		return nil
 	}
 	if err != nil {
@@ -323,7 +323,7 @@ func listPlugins(args []string, stdout io.Writer) error {
 	}
 	if len(rows) == 0 {
 		fmt.Fprintf(stdout, "No plugins installed in %s.\n", dest)
-		fmt.Fprintln(stdout, "Install the official set with: torana plugin install --official")
+		_, _ = fmt.Fprintln(stdout, "Install the official set with: torana plugin install --official")
 		return nil
 	}
 	sort.Slice(rows, func(i, j int) bool { return rows[i].name < rows[j].name })
@@ -365,7 +365,7 @@ func removePlugin(args []string, stdout io.Writer) error {
 		}
 		fmt.Fprintf(stdout, "Removed %s\n", name)
 	}
-	fmt.Fprintln(stdout, "\nRemove it from plugins.order in the control plane too, or the next")
-	fmt.Fprintln(stdout, "reload will report it as enabled but missing.")
+	_, _ = fmt.Fprintln(stdout, "\nRemove it from plugins.order in the control plane too, or the next")
+	_, _ = fmt.Fprintln(stdout, "reload will report it as enabled but missing.")
 	return nil
 }
