@@ -21,6 +21,7 @@ import (
 	"github.com/torana-edge/torana-edge/internal/engine"
 	"github.com/torana-edge/torana-edge/internal/engine/pbconv"
 	"github.com/torana-edge/torana-edge/internal/wasm"
+	sdk "github.com/torana-edge/torana-plugin-sdk"
 	"github.com/torana-edge/torana-plugin-sdk/pb"
 	"google.golang.org/protobuf/proto"
 )
@@ -109,43 +110,23 @@ type PluginBundle struct {
 
 const currentToranaVersion = "0.1.0"
 
-var supportedHooks = map[string]struct{}{
-	"run_after_response":  {},
-	"run_before_request":  {},
-	"run_on_http_request": {},
-	"run_on_stream_chunk": {},
-	"run_on_tick":         {},
-}
+// supportedHooks and supportedPermissions are derived from the SDK's published
+// v1 vocabulary rather than restated here. Which capability strings exist is an
+// ABI concern, and a second copy is how the official plugin repository's
+// validator ended up rejecting capabilities this host accepts.
+//
+// A host may expose fewer than the ABI defines; it must not invent names
+// outside it.
+var supportedHooks = setOf(sdk.Hooks)
 
-var supportedPermissions = map[string]struct{}{
-	"env.background_tick":                      {},
-	"env.block_request":                        {},
-	"env.cache_get":                            {},
-	"env.cache_set":                            {},
-	"env.emit_metric":                          {},
-	"env.host_call.torana_cache_pricing":       {},
-	"env.host_call.torana_db_query":            {},
-	"env.host_call.torana_evaluate_compaction": {},
-	"env.host_call.torana_kms_decrypt":         {},
-	"env.host_call.torana_offload_completion":  {},
-	"env.host_call.torana_plugin_counter":      {},
-	"env.host_call.torana_record_savings":      {},
-	"env.host_call.torana_send_request":        {},
-	"env.host_call.verify_virtual_key":         {},
-	"env.log":                                  {},
-	"env.meta_get":                             {},
-	"env.meta_set":                             {},
-	"env.now":                                  {},
-	"env.original_request":                     {},
-	"env.original_response":                    {},
-	"env.plugin_config":                        {},
-	"env.request_headers":                      {},
-	"env.respond_request":                      {},
-	"env.route_request":                        {},
-	"env.serve_http":                           {},
-	"env.state_get":                            {},
-	"env.state_keys":                           {},
-	"env.state_set":                            {},
+var supportedPermissions = setOf(sdk.Permissions)
+
+func setOf(names []string) map[string]struct{} {
+	out := make(map[string]struct{}, len(names))
+	for _, n := range names {
+		out[n] = struct{}{}
+	}
+	return out
 }
 
 var agentOperationIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)

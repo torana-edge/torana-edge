@@ -1,15 +1,13 @@
 {
-  "fields": [
-    {
-      "key": "fill",
-      "type": "enum",
-      "label": "Fill Mode",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "fill": {
+      "type": "string",
+      "enum": ["heuristic", "off"],
       "default": "heuristic",
-      "options": [
-        "heuristic",
-        "off"
-      ],
-      "help": "Strategy for uncaptured history intents: 'heuristic' (fill template) or 'off' (leave untouched)."
+      "description": "How to handle history tool calls whose intent was never captured."
     }
-  ]
+  }
 }

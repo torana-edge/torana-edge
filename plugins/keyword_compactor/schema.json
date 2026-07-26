@@ -1,3 +1,21 @@
 {
-  "fields": []
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "tool_policies": {"type": "array", "items": {"$ref": "#/$defs/policy"}, "default": [], "description": "Ordered first-match rules for deterministic or keyword compaction."}
+  },
+  "$defs": {
+    "policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["match", "mode"],
+      "properties": {
+        "match": {"type": "string", "description": "Case-insensitive shell-style tool-name pattern."},
+        "mode": {"type": "string", "enum": ["exact", "deterministic", "source", "keyword"]},
+        "first_pass": {"type": "boolean", "default": false},
+        "rerun": {"type": "string"}
+      }
+    }
+  }
 }
