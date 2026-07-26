@@ -7,7 +7,7 @@ require (
 	github.com/fsnotify/fsnotify v1.10.1
 	github.com/redis/go-redis/v9 v9.21.0
 	github.com/tetratelabs/wazero v1.12.0
-	github.com/torana-edge/torana-plugin-sdk v0.1.0
+	github.com/torana-edge/torana-plugin-sdk v0.1.1
 	go.opentelemetry.io/otel v1.44.0
 	go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc v1.44.0
 	go.opentelemetry.io/otel/metric v1.44.0
