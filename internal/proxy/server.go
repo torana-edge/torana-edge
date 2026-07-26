@@ -2168,6 +2168,9 @@ func (s *Server) newRuntime() *wasm.Runtime {
 		s.stats.RecordCompaction(pluginName, originalBytes, finalBytes)
 		metrics.RecordPluginSavings(context.Background(), pluginName, originalBytes-finalBytes)
 	}
+	rt.PluginCounterFunc = func(pluginName string, counter string, delta int64) {
+		s.stats.RecordPluginCounter(pluginName, counter, delta)
+	}
 	// Pristine request/response snapshots (env.original_request /
 	// env.original_response), read from the request state the same
 	// way offload does.

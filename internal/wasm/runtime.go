@@ -448,6 +448,11 @@ type Runtime struct {
 	// env.original_response (empty when unavailable — e.g. streaming
 	// responses, which are never buffered). Set by the server.
 	OriginalResponseFunc func(ctx context.Context) []byte
+
+	// PluginCounterFunc handles torana_plugin_counter host calls — plugins
+	// increment named counters that appear in the /stats response.
+	// Set by the server.
+	PluginCounterFunc func(plugin string, counter string, delta int64)
 }
 
 // ObserveRequestMutation forwards a defensive copy to the host callback.
@@ -766,6 +771,19 @@ func (r *Runtime) installHostFunctions() {
 				res = `{"status":"ok"}`
 			} else {
 				res = `{"status":"error","message":"savings tracking not configured"}`
+			}
+		case "torana_plugin_counter":
+			var counter struct {
+				Counter string `json:"counter"`
+				Delta   int64  `json:"delta"`
+			}
+			if err := json.Unmarshal([]byte(args), &counter); err != nil || counter.Counter == "" {
+				res = `{"status":"error","message":"invalid payload"}`
+			} else if r.PluginCounterFunc != nil {
+				r.PluginCounterFunc(pluginName, counter.Counter, counter.Delta)
+				res = `{"status":"ok"}`
+			} else {
+				res = `{"status":"error","message":"plugin counter tracking not configured"}`
 			}
 		case "torana_evaluate_compaction":
 			var report economics.CompactionReport
