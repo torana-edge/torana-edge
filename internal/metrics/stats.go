@@ -49,8 +49,9 @@ type Stats struct {
 	EstimatedRewriteSpanTokens int64                    `json:"estimated_cache_rewrite_tokens"`
 	EstimatedGrossUSD          *float64                 `json:"estimated_gross_usd,omitempty"`
 	EstimatedNetUSD            *float64                 `json:"estimated_net_usd,omitempty"`
-	SavingsUnavailable         map[string]int64         `json:"savings_unavailable,omitempty"`
-	PerPlugin                  map[string]PluginSavings `json:"per_plugin,omitempty"`
+	SavingsUnavailable         map[string]int64            `json:"savings_unavailable,omitempty"`
+	PerPlugin                  map[string]PluginSavings    `json:"per_plugin,omitempty"`
+	PluginCounters             map[string]map[string]int64 `json:"plugin_counters,omitempty"`
 }
 
 // StatsTracker records proxy request statistics and compaction savings —
@@ -78,6 +79,7 @@ type StatsTracker struct {
 
 	mu                  sync.Mutex
 	perPlugin           map[string]*PluginSavings
+	pluginCounters      map[string]map[string]int64
 	estimatedGrossUSD   float64
 	estimatedNetUSD     float64
 	estimatedGrossCount int64
@@ -89,6 +91,7 @@ type StatsTracker struct {
 func NewStatsTracker() *StatsTracker {
 	return &StatsTracker{
 		perPlugin:          map[string]*PluginSavings{},
+		pluginCounters:     map[string]map[string]int64{},
 		savingsUnavailable: map[string]int64{},
 	}
 }
@@ -221,6 +224,22 @@ func (s *StatsTracker) RecordOffloadUsage(usage economics.Usage) {
 	atomic.AddInt64(&s.offloadCacheWriteTokens, usage.CacheWriteTokens)
 }
 
+// RecordPluginCounter adds delta to a named counter scoped to the calling
+// plugin. A zero delta is a no-op.
+func (s *StatsTracker) RecordPluginCounter(plugin, counter string, delta int64) {
+	if delta == 0 || plugin == "" || counter == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	m := s.pluginCounters[plugin]
+	if m == nil {
+		m = map[string]int64{}
+		s.pluginCounters[plugin] = m
+	}
+	m[counter] += delta
+}
+
 // Snapshot returns a copy of the current state.
 func (s *StatsTracker) Snapshot() Stats {
 	snap := Stats{
@@ -264,6 +283,16 @@ func (s *StatsTracker) Snapshot() Stats {
 		snap.PerPlugin = make(map[string]PluginSavings, len(s.perPlugin))
 		for name, ps := range s.perPlugin {
 			snap.PerPlugin[name] = *ps
+		}
+	}
+	if len(s.pluginCounters) > 0 {
+		snap.PluginCounters = make(map[string]map[string]int64, len(s.pluginCounters))
+		for plugin, counters := range s.pluginCounters {
+			cp := make(map[string]int64, len(counters))
+			for k, v := range counters {
+				cp[k] = v
+			}
+			snap.PluginCounters[plugin] = cp
 		}
 	}
 	return snap
