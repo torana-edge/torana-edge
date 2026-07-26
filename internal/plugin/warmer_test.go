@@ -91,6 +91,15 @@ func newWarmerPipeline(t *testing.T, h *warmerHarness, conversations string, sta
 		h.sent = append(h.sent, sentRequest{Provider: req.Provider, Path: req.Path, Request: &chat})
 		h.mu.Unlock()
 
+		// Reject what a real provider would reject. A harness that says "ok" to
+		// anything cannot catch a malformed request, which is how an earlier
+		// version of this plugin shipped a refresh that appended a second
+		// consecutive user turn -- valid to this fake, rejected by Bedrock and
+		// fragile on Anthropic.
+		if why := providerWouldReject(&chat); why != "" {
+			return `{"status":"error","message":"` + why + `"}`
+		}
+
 		if h.cacheHit {
 			return `{"status":"ok","http_status":200,"usage":{"input":100,"output":1,"cache_read":95,"cache_write":0}}`
 		}
@@ -115,6 +124,29 @@ func newWarmerPipeline(t *testing.T, h *warmerHarness, conversations string, sta
 	return pp
 }
 
+// providerWouldReject applies the message-shape rules a provider enforces,
+// returning why a request is invalid or "" when it is fine.
+func providerWouldReject(req *pb.ChatRequest) string {
+	if len(req.Messages) == 0 {
+		return "messages must not be empty"
+	}
+	prev := ""
+	for _, m := range req.Messages {
+		// system may repeat; user and assistant may not. Anthropic documents
+		// consecutive same-role turns as merged, but Bedrock rejects them and
+		// real 400s are common enough that emitting them is not worth it.
+		if (m.Role == "user" || m.Role == "assistant") && m.Role == prev {
+			return "roles must alternate between user and assistant, but found multiple " + m.Role + " roles in a row"
+		}
+		prev = m.Role
+	}
+	last := req.Messages[len(req.Messages)-1]
+	if last.Role == "assistant" && len(last.ToolCalls) > 0 {
+		return "final assistant turn has tool calls with no tool result"
+	}
+	return ""
+}
+
 func warmerRequest(conversationID string) *engine.ChatRequest {
 	return &engine.ChatRequest{
 		Model: "claude-sonnet-4-5",
@@ -127,6 +159,26 @@ func warmerRequest(conversationID string) *engine.ChatRequest {
 			"_provider":        "anth",
 			"_conversation_id": conversationID,
 			"_path":            "/v1/messages",
+		},
+	}
+}
+
+// warmerRequestBreakpointOnUser is the shape a real coding harness sends: the
+// cache breakpoint sits on the last user turn, so the cached prefix ENDS with a
+// user message. Any refresh that appends another user turn produces two in a
+// row, which Bedrock rejects outright and Anthropic only tolerates by merging.
+func warmerRequestBreakpointOnUser(conversationID string) *engine.ChatRequest {
+	return &engine.ChatRequest{
+		Model: "claude-sonnet-4-5",
+		Messages: []engine.Message{
+			{Role: engine.RoleSystem, Content: "You are a coding agent."},
+			{Role: engine.RoleUser, Content: "refactor the loader"},
+			{Role: engine.RoleAssistant, Content: "which file?"},
+			{Role: engine.RoleUser, Content: "discovery.go",
+				CacheControl: map[string]any{"type": "ephemeral"}},
+		},
+		ToranaMeta: map[string]any{
+			"_provider": "anth", "_conversation_id": conversationID, "_path": "/v1/messages",
 		},
 	}
 }
@@ -170,6 +222,74 @@ func TestWarmerRefreshesOptedInConversation(t *testing.T) {
 	}
 	if got.Request.Messages[0].Content != "You are a coding agent." {
 		t.Error("refresh did not carry the cached prefix, so it would not touch the entry")
+	}
+}
+
+// TestWarmerRefreshIsAValidRequest is the regression test for a bug a reviewer
+// caught: the refresh appended a trailing user turn on the theory that a
+// request needs something after the cache breakpoint. It does not — a
+// breakpoint on the final message is the ordinary shape — and appending one
+// after a prefix that already ended with a user turn produced two in a row.
+//
+// The fixture matters as much as the assertion. With the breakpoint on the
+// system message the appended turn still alternated, so the original test
+// passed while the plugin was broken for every realistic conversation.
+func TestWarmerRefreshIsAValidRequest(t *testing.T) {
+	h := &warmerHarness{pricing: okPricing(), cacheHit: true}
+	pp := newWarmerPipeline(t, h, "conv-a3f9", nil)
+
+	if _, err := pp.RunBeforeRequest(context.Background(), 1, warmerRequestBreakpointOnUser("conv-a3f9")); err != nil {
+		t.Fatal(err)
+	}
+	tick(t, pp, 1, 5*time.Minute)
+
+	if h.sentCount() != 1 {
+		t.Fatalf("sent %d refreshes, want 1", h.sentCount())
+	}
+	got, _ := h.lastSent()
+	if why := providerWouldReject(got.Request); why != "" {
+		t.Errorf("the refresh would be rejected by the provider: %s", why)
+	}
+	// And it must be the cached bytes, not something adjacent to them.
+	if n := len(got.Request.Messages); n != 4 {
+		t.Errorf("refresh carried %d messages, want the 4 of the cached prefix — "+
+			"anything else is not the entry we are trying to touch", n)
+	}
+	if last := got.Request.Messages[len(got.Request.Messages)-1]; last.Content != "discovery.go" {
+		t.Errorf("refresh ends on %q, want the prefix's own last message", last.Content)
+	}
+}
+
+// TestWarmerSkipsPrefixEndingMidToolCall — a prefix ending on an unanswered
+// tool call is not a request that can be sent at all, so warming should say so
+// once rather than failing on every tick.
+func TestWarmerSkipsPrefixEndingMidToolCall(t *testing.T) {
+	h := &warmerHarness{pricing: okPricing(), cacheHit: true}
+	pp := newWarmerPipeline(t, h, "conv-a3f9", nil)
+
+	in := &engine.ChatRequest{
+		Model: "claude-sonnet-4-5",
+		Messages: []engine.Message{
+			{Role: engine.RoleSystem, Content: "You are a coding agent."},
+			{Role: engine.RoleUser, Content: "read the file"},
+			{Role: engine.RoleAssistant,
+				ToolCalls:    []engine.ToolCall{{ID: "call_1", Name: "read"}},
+				CacheControl: map[string]any{"type": "ephemeral"}},
+		},
+		ToranaMeta: map[string]any{
+			"_provider": "anth", "_conversation_id": "conv-a3f9", "_path": "/v1/messages",
+		},
+	}
+	if _, err := pp.RunBeforeRequest(context.Background(), 1, in); err != nil {
+		t.Fatal(err)
+	}
+	outcomes := tick(t, pp, 1, 5*time.Minute)
+
+	if h.sentCount() != 0 {
+		t.Errorf("sent %d refreshes for a prefix that cannot be sent standalone", h.sentCount())
+	}
+	if len(outcomes) == 0 || !strings.Contains(outcomes[0].Note, "tool call") {
+		t.Errorf("the refusal was not explained: %+v", outcomes)
 	}
 }
 

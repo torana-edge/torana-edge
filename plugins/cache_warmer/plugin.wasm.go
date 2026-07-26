@@ -255,10 +255,28 @@ func refreshOne(entry *warmEntry, cfg config, now int64) (bool, string) {
 		entry.Stopped = "stored prefix is unreadable"
 		return false, ""
 	}
-	// A minimal trailing turn, after the last breakpoint so it is not part of
-	// the cached prefix, and one output token. The point is to touch the entry,
-	// not to get an answer.
-	req.Messages = append(req.Messages, &pb.Message{Role: "user", Content: "."})
+	// A prefix ending on an unanswered tool call is not a request that can be
+	// sent on its own — the provider expects a tool result next, and rejects
+	// the turn without one. Nothing can warm such a prefix, so say so once
+	// rather than failing every tick.
+	if endsWithUnansweredToolCall(req) {
+		entry.Stopped = "prefix ends on an unanswered tool call"
+		return false, fmt.Sprintf("%s: stopped, cached prefix ends mid tool call",
+			short(entry.ConversationID))
+	}
+	// Send the stored prefix verbatim, appending nothing.
+	//
+	// An earlier version appended a minimal trailing user turn, on the theory
+	// that a request needs something after the cache breakpoint. It does not —
+	// a breakpoint on the final message is the ordinary shape of a cached
+	// request, which is exactly what a harness sends. Appending was worse in
+	// three ways: it risked two consecutive user turns, which Anthropic
+	// documents as merged but which Bedrock rejects outright; it paid for
+	// tokens that bought nothing; and it made the request differ from the bytes
+	// actually cached, which is the opposite of the goal.
+	//
+	// One output token, because the point is to touch the entry rather than to
+	// get an answer.
 	one := int32(1)
 	req.MaxTokens = &one
 
@@ -281,6 +299,16 @@ func refreshOne(entry *warmEntry, cfg config, now int64) (bool, string) {
 		return true, fmt.Sprintf("%s: stopped, cache had already expired", short(entry.ConversationID))
 	}
 	return true, ""
+}
+
+// endsWithUnansweredToolCall reports whether the last message is an assistant
+// turn holding tool calls that nothing answers.
+func endsWithUnansweredToolCall(req *pb.ChatRequest) bool {
+	if len(req.Messages) == 0 {
+		return false
+	}
+	last := req.Messages[len(req.Messages)-1]
+	return last.Role == "assistant" && len(last.ToolCalls) > 0
 }
 
 // prefixThroughBreakpoint returns a copy of the request truncated at its last
