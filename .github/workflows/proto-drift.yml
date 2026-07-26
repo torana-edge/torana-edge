@@ -1,0 +1,46 @@
+name: proto-drift
+
+# The torana.v1 ABI currently exists in two places: sdk/pb/torana.proto here,
+# and proto/torana/v1/torana.proto in torana-edge/torana-plugin-sdk. Plugins
+# compile against the SDK's descriptors while this host decodes with its own,
+# so the two must stay field-for-field identical or fields silently vanish on
+# round-trip — the failure protobuf was adopted to eliminate (issue #68, where
+# a stringified-JSON envelope destroyed Temperature and Stream).
+#
+# Delete this workflow once core migrates to the tagged external SDK module
+# and sdk/ is removed.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    paths:
+      - 'sdk/pb/torana.proto'
+      - '.github/workflows/proto-drift.yml'
+  schedule:
+    - cron: '0 6 * * 1'
+
+jobs:
+  compare:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fetch the SDK's copy of the ABI
+        run: |
+          curl -sfL \
+            https://raw.githubusercontent.com/torana-edge/torana-plugin-sdk/main/proto/torana/v1/torana.proto \
+            -o /tmp/sdk.proto
+      - name: Compare (go_package and blank lines ignored)
+        run: |
+          norm() {
+            grep -vE '^[[:space:]]*option go_package' "$1" \
+              | sed 's/[[:space:]]*$//' | grep -vE '^[[:space:]]*$'
+          }
+          if diff <(norm sdk/pb/torana.proto) <(norm /tmp/sdk.proto); then
+            echo "OK: torana.v1 is identical in both repos."
+          else
+            echo "::error::torana.v1 has drifted between torana-edge and torana-plugin-sdk."
+            echo "Plugins and host would disagree about the wire format, and mismatched"
+            echo "fields are dropped silently. Reconcile both copies before merging."
+            exit 1
+          fi
