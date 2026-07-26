@@ -3,10 +3,12 @@ package proxy
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -278,5 +280,62 @@ func TestJSONResponseRunsWASMHooks(t *testing.T) {
 	}
 	if !strings.Contains(bodyStr, `"tool_calls"`) {
 		t.Error("response should contain tool_calls key")
+	}
+}
+
+func TestServerStartAndSetPort(t *testing.T) {
+	ln1, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Listen 1: %v", err)
+	}
+	port1 := ln1.Addr().(*net.TCPAddr).Port
+	ln1.Close()
+
+	ln2, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Listen 2: %v", err)
+	}
+	port2 := ln2.Addr().(*net.TCPAddr).Port
+	ln2.Close()
+
+	provCfg := provider.DefaultConfig()
+	provCfg.Port = port1
+
+	cfg := Config{
+		Port:      strconv.Itoa(port1),
+		Providers: provCfg,
+	}
+	srv, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	if err := srv.Start("127.0.0.1"); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer srv.Shutdown(context.Background())
+
+	client := &http.Client{Timeout: 2 * time.Second}
+
+	resp, err := client.Get(fmt.Sprintf("http://127.0.0.1:%d/health", port1))
+	if err != nil {
+		t.Fatalf("GET port1: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("port1 status = %d, want 200", resp.StatusCode)
+	}
+
+	if err := srv.SetPort(port2); err != nil {
+		t.Fatalf("SetPort: %v", err)
+	}
+
+	resp2, err := client.Get(fmt.Sprintf("http://127.0.0.1:%d/health", port2))
+	if err != nil {
+		t.Fatalf("GET port2: %v", err)
+	}
+	resp2.Body.Close()
+	if resp2.StatusCode != http.StatusOK {
+		t.Errorf("port2 status = %d, want 200", resp2.StatusCode)
 	}
 }

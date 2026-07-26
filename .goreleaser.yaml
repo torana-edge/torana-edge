@@ -11,6 +11,7 @@ builds:
     goos:
       - linux
       - darwin
+      - windows
     goarch:
       - amd64
       - arm64
@@ -18,11 +19,17 @@ builds:
       - CGO_ENABLED=0
 
 archives:
-  - format: tar.gz
-    name_template: "{{.ProjectName}}_{{.Version}}_{{.Os}}_{{.Arch}}"
+  - formats: [tar.gz]
+    name_template: "torana_{{.Version}}_{{.Os}}_{{.Arch}}"
+    format_overrides:
+      - goos: windows
+        formats: [zip]
 
 checksum:
   name_template: "checksums.txt"
+
+sboms:
+  - artifacts: archive
 
 changelog:
   sort: asc

@@ -1,9 +1,9 @@
 # Torana Edge — Quickstart
 
-Torana Edge sits between your AI coding harness and your LLM provider.
-It intercepts tool calls, extracts intent, and compacts massive tool
-results through a cheaper model — cutting token costs by 90%+ on
-file reads, grep searches, and other repetitive coding tasks.
+Torana Edge sits between your AI coding harness and your LLM provider. It
+normalizes provider formats and runs an ordered WASM plugin pipeline. Optional
+tool-aware and provider-native compaction can reduce repeated context while
+preserving exact evidence according to explicit policies.
 
 ## 1-minute install
 
@@ -11,11 +11,12 @@ file reads, grep searches, and other repetitive coding tasks.
 go install github.com/torana-edge/torana-edge/cmd/torana@latest
 ```
 
-Or clone and build:
+The command above installs the proxy, not the WASM artifacts. To use bundled
+plugins, clone the repository and build them:
 ```bash
 git clone https://github.com/torana-edge/torana-edge
 cd torana-edge
-go build -o torana ./cmd/torana/
+make build
 ```
 
 ## Configure
@@ -30,14 +31,14 @@ Create `config.json`:
       "format": "openai"
     },
     "openai": {
-      "url": "https://api.openai.com/v1",
+      "url": "https://api.openai.com",
       "format": "openai",
       "fallback": ["deepseek"]
     }
   },
   "plugins": {
     "dir": "./plugins",
-    "order": ["schema_translator", "intent", "keyword_compactor"]
+    "order": []
   },
   "limits": {
     "concurrency": 10,
@@ -46,10 +47,23 @@ Create `config.json`:
 }
 ```
 
-> **Plugin order:** `intent` captures why each tool call happens; the compactor
-> then uses those intents to shrink tool results. Keep `intent` before the
-> compactor, and run **one** compactor — `keyword_compactor` (deterministic,
-> local, free) **or** `compactor` (cheap-model offload), never both.
+On the first run, Torana imports this seed into its managed store at
+`~/.config/torana/config.json` (or `$TORANA_DATA_DIR/config.json`). After that,
+the managed store is authoritative so Control Plane edits survive restarts.
+Changing the original seed does not overwrite managed state; Torana logs a
+warning when both files exist and differ. Edit the managed configuration through
+`http://127.0.0.1:8080/_torana/`, or remove the managed store if you deliberately
+want the next start to re-import the seed. `TORANA_CONFIG` selects a different
+seed path; it does not bypass an existing managed store.
+
+The empty order is intentional: discovered plugins are not implicitly trusted
+or enabled. Open the Control Plane, inspect and approve the exact bundle digest
+and requested capability subset, then enable plugins in the desired order.
+
+> The baseline leaves all tool output exact. To enable compaction, approve and
+> enable `intent`, then place one approved compactor after it and configure
+> explicit tool policies. Unknown tools, mutations, and failures remain exact.
+> See [COMPACTION.md](COMPACTION.md).
 
 ## Route your harness
 

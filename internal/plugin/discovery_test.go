@@ -113,6 +113,139 @@ func TestPipelineDrainRejectsNewRequestsUntilPinnedWorkFinishes(t *testing.T) {
 	}
 }
 
+func TestValidateApprovalBindsDigestAndRequestedPermissions(t *testing.T) {
+	bundle := PluginBundle{
+		Digest: "sha256:installed",
+		Manifest: PluginManifest{
+			FailureMode: "block",
+			Permissions: []Permission{{Name: "env.log"}},
+		},
+	}
+
+	if _, _, err := validateApproval(bundle, Approval{
+		Digest: "sha256:other",
+	}); err == nil {
+		t.Fatal("digest mismatch was accepted")
+	}
+	if _, _, err := validateApproval(bundle, Approval{
+		Digest:      bundle.Digest,
+		Permissions: []string{"env.route_request"},
+	}); err == nil {
+		t.Fatal("unrequested permission was accepted")
+	}
+
+	grants, failureMode, err := validateApproval(bundle, Approval{
+		Digest:      bundle.Digest,
+		Permissions: []string{"env.log"},
+	})
+	if err != nil {
+		t.Fatalf("valid approval: %v", err)
+	}
+	if len(grants) != 1 || grants[0] != "env.log" {
+		t.Fatalf("grants = %v", grants)
+	}
+	if failureMode != "block" {
+		t.Fatalf("failure mode = %q, want manifest recommendation block", failureMode)
+	}
+}
+
+func TestValidateApprovalAllowsOperatorFailureModeOverride(t *testing.T) {
+	bundle := PluginBundle{
+		Digest: "sha256:installed",
+		Manifest: PluginManifest{
+			FailureMode: "block",
+		},
+	}
+	_, failureMode, err := validateApproval(bundle, Approval{
+		Digest:      bundle.Digest,
+		FailureMode: "pass",
+	})
+	if err != nil {
+		t.Fatalf("override: %v", err)
+	}
+	if failureMode != "pass" {
+		t.Fatalf("failure mode = %q, want operator override pass", failureMode)
+	}
+}
+
+func TestBundleDigestCoversCodeAndPolicyFiles(t *testing.T) {
+	base := bundleDigest([]byte(`{"failure_mode":"pass"}`), []byte("wasm"), []byte(`{"type":"object"}`))
+	cases := []string{
+		bundleDigest([]byte(`{"failure_mode":"block"}`), []byte("wasm"), []byte(`{"type":"object"}`)),
+		bundleDigest([]byte(`{"failure_mode":"pass"}`), []byte("wasm2"), []byte(`{"type":"object"}`)),
+		bundleDigest([]byte(`{"failure_mode":"pass"}`), []byte("wasm"), []byte(`{"type":"string"}`)),
+	}
+	for _, changed := range cases {
+		if changed == base {
+			t.Fatal("bundle digest did not change when a consumed file changed")
+		}
+	}
+}
+
+func TestValidateManifestContract(t *testing.T) {
+	valid := PluginManifest{
+		SchemaVersion:        1,
+		ID:                   "local/example",
+		Name:                 "example",
+		Version:              "0.1.0",
+		ABIVersion:           "v1",
+		MinimumToranaVersion: "0.1.0",
+		FailureMode:          "pass",
+		Hooks:                []Hook{{Name: "run_before_request"}},
+		Permissions:          []Permission{{Name: "env.log"}},
+	}
+	if err := validateManifest(valid); err != nil {
+		t.Fatalf("valid manifest: %v", err)
+	}
+	invalid := valid
+	invalid.ABIVersion = "v2"
+	if err := validateManifest(invalid); err == nil {
+		t.Fatal("unsupported ABI was accepted")
+	}
+	invalid = valid
+	invalid.Permissions = []Permission{{Name: "env.not_real"}}
+	if err := validateManifest(invalid); err == nil {
+		t.Fatal("unknown permission was accepted")
+	}
+	invalid = valid
+	invalid.MinimumToranaVersion = "99.0.0"
+	if err := validateManifest(invalid); err == nil {
+		t.Fatal("incompatible minimum host version was accepted")
+	}
+}
+
+func TestExternalBundlesConformToCurrentHost(t *testing.T) {
+	root := os.Getenv("TORANA_PLUGIN_BUNDLES_DIR")
+	if root == "" {
+		t.Skip("TORANA_PLUGIN_BUNDLES_DIR is unset")
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		t.Fatalf("read bundles: %v", err)
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		t.Run(entry.Name(), func(t *testing.T) {
+			runtime := wasm.NewRuntime(context.Background())
+			defer runtime.Close()
+			pipeline, err := NewPipeline(runtime, PluginConfig{
+				Dir:             root,
+				Order:           []string{entry.Name()},
+				AllowUnapproved: true,
+				Strict:          true,
+			})
+			if err != nil {
+				t.Fatalf("host conformance: %v", err)
+			}
+			if pipeline.Len() != 1 {
+				t.Fatalf("loaded plugins = %d, want 1", pipeline.Len())
+			}
+		})
+	}
+}
+
 func isDraining(pp *PluginPipeline) bool {
 	pp.mu.Lock()
 	defer pp.mu.Unlock()
@@ -167,8 +300,9 @@ func TestPipelineRunBeforeRequest_FullDispatch(t *testing.T) {
 	defer runtime.Close()
 
 	pipeline, err := NewPipeline(runtime, PluginConfig{
-		Dir:   "../../plugins",
-		Order: []string{"intent"},
+		Dir:             "../../plugins",
+		Order:           []string{"intent"},
+		AllowUnapproved: true,
 	})
 	if err != nil {
 		t.Fatalf("NewPipeline: %v", err)

@@ -1,0 +1,11 @@
+{
+  "fields": [
+    {
+      "key": "max_offload_input_chars",
+      "type": "number",
+      "label": "Max Offload Input Chars",
+      "default": 0,
+      "help": "Max characters of tool output sent to cheap summarizer (0 for unbounded)."
+    }
+  ]
+}

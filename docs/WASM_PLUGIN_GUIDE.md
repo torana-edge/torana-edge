@@ -33,7 +33,7 @@ Use the standard library allocator for your language.
   var memory map[uint64][]byte // For tracking allocations
   // Use standard make([]byte) and return unsafe.Pointer
   ```
-  *(See `pkg/plugin-sdk` for the robust Go implementation)*
+  *(See `sdk/plugin-sdk` for the robust Go implementation)*
 * **Rust**:
   ```rust
   use std::alloc::{alloc, dealloc, Layout};

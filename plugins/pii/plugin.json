@@ -1,4 +1,10 @@
 {
+  "schema_version": 1,
+  "id": "torana/pii",
+  "abi_version": "v1",
+  "minimum_torana_version": "0.1.0",
+  "failure_mode": "block",
+  "repository": "https://github.com/torana-edge/torana-plugins",
   "name": "pii",
   "version": "0.1.0",
   "description": "Scans tool results through a local model + regex pre-filter and blocks the request if PII is detected",

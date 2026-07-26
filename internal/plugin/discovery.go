@@ -2,12 +2,15 @@ package plugin
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"log"
 	"os"
 	"path/filepath"
-	"sort"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -15,7 +18,7 @@ import (
 	"github.com/torana-edge/torana-edge/internal/engine"
 	"github.com/torana-edge/torana-edge/internal/engine/pbconv"
 	"github.com/torana-edge/torana-edge/internal/wasm"
-	"github.com/torana-edge/torana-edge/pkg/pb"
+	"github.com/torana-edge/torana-edge/sdk/pb"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -34,11 +37,31 @@ type Hook struct {
 }
 
 type PluginManifest struct {
-	Name        string       `json:"name"`
-	Version     string       `json:"version"`
-	Description string       `json:"description"`
-	Hooks       []Hook       `json:"hooks"`
-	Permissions []Permission `json:"permissions"`
+	SchemaVersion        int          `json:"schema_version,omitempty"`
+	ID                   string       `json:"id,omitempty"`
+	Name                 string       `json:"name"`
+	Version              string       `json:"version"`
+	ABIVersion           string       `json:"abi_version,omitempty"`
+	MinimumToranaVersion string       `json:"minimum_torana_version,omitempty"`
+	MaximumToranaVersion string       `json:"maximum_torana_version,omitempty"`
+	FailureMode          string       `json:"failure_mode,omitempty"`
+	Repository           string       `json:"repository,omitempty"`
+	Description          string       `json:"description"`
+	Hooks                []Hook       `json:"hooks"`
+	Permissions          []Permission `json:"permissions"`
+}
+
+type ConfigField struct {
+	Key     string   `json:"key"`
+	Type    string   `json:"type"` // "string" | "number" | "boolean" | "enum"
+	Label   string   `json:"label"`
+	Default any      `json:"default,omitempty"`
+	Options []string `json:"options,omitempty"` // enum only
+	Help    string   `json:"help,omitempty"`
+}
+
+type ConfigSchema struct {
+	Fields []ConfigField `json:"fields"`
 }
 
 // ============================================================================
@@ -48,6 +71,128 @@ type PluginManifest struct {
 type PluginBundle struct {
 	Manifest  PluginManifest
 	WASMBytes []byte
+	Digest    string
+	Schema    *ConfigSchema
+}
+
+const currentToranaVersion = "0.1.0"
+
+var supportedHooks = map[string]struct{}{
+	"run_after_response":  {},
+	"run_before_request":  {},
+	"run_on_http_request": {},
+	"run_on_stream_chunk": {},
+}
+
+var supportedPermissions = map[string]struct{}{
+	"env.block_request":                        {},
+	"env.cache_get":                            {},
+	"env.cache_set":                            {},
+	"env.emit_metric":                          {},
+	"env.host_call.torana_db_query":            {},
+	"env.host_call.torana_evaluate_compaction": {},
+	"env.host_call.torana_kms_decrypt":         {},
+	"env.host_call.torana_offload_completion":  {},
+	"env.host_call.torana_record_savings":      {},
+	"env.host_call.verify_virtual_key":         {},
+	"env.log":                                  {},
+	"env.meta_get":                             {},
+	"env.meta_set":                             {},
+	"env.original_request":                     {},
+	"env.original_response":                    {},
+	"env.plugin_config":                        {},
+	"env.request_headers":                      {},
+	"env.respond_request":                      {},
+	"env.route_request":                        {},
+	"env.serve_http":                           {},
+}
+
+func validateManifest(manifest PluginManifest) error {
+	if manifest.SchemaVersion != 1 {
+		return fmt.Errorf("unsupported schema_version %d", manifest.SchemaVersion)
+	}
+	if manifest.ID == "" || manifest.Name == "" {
+		return fmt.Errorf("id and name are required")
+	}
+	if manifest.ABIVersion != "v1" {
+		return fmt.Errorf("unsupported abi_version %q", manifest.ABIVersion)
+	}
+	if _, err := parseSemver(manifest.Version); err != nil {
+		return fmt.Errorf("invalid version: %w", err)
+	}
+	minimum, err := parseSemver(manifest.MinimumToranaVersion)
+	if err != nil {
+		return fmt.Errorf("invalid minimum_torana_version: %w", err)
+	}
+	current, _ := parseSemver(currentToranaVersion)
+	if compareSemver(minimum, current) > 0 {
+		return fmt.Errorf("requires Torana >= %s", manifest.MinimumToranaVersion)
+	}
+	if manifest.MaximumToranaVersion != "" {
+		maximum, err := parseSemver(manifest.MaximumToranaVersion)
+		if err != nil {
+			return fmt.Errorf("invalid maximum_torana_version: %w", err)
+		}
+		if compareSemver(maximum, current) < 0 {
+			return fmt.Errorf("requires Torana <= %s", manifest.MaximumToranaVersion)
+		}
+	}
+	if manifest.FailureMode != "pass" && manifest.FailureMode != "block" {
+		return fmt.Errorf("failure_mode must be pass or block")
+	}
+	if strings.HasPrefix(manifest.ID, "torana/") && manifest.Repository == "" {
+		return fmt.Errorf("official plugin repository is required")
+	}
+	seenHooks := make(map[string]struct{}, len(manifest.Hooks))
+	for _, hook := range manifest.Hooks {
+		if _, ok := supportedHooks[hook.Name]; !ok {
+			return fmt.Errorf("unsupported hook %q", hook.Name)
+		}
+		if _, duplicate := seenHooks[hook.Name]; duplicate {
+			return fmt.Errorf("duplicate hook %q", hook.Name)
+		}
+		seenHooks[hook.Name] = struct{}{}
+	}
+	seenPermissions := make(map[string]struct{}, len(manifest.Permissions))
+	for _, permission := range manifest.Permissions {
+		if _, ok := supportedPermissions[permission.Name]; !ok {
+			return fmt.Errorf("unsupported permission %q", permission.Name)
+		}
+		if _, duplicate := seenPermissions[permission.Name]; duplicate {
+			return fmt.Errorf("duplicate permission %q", permission.Name)
+		}
+		seenPermissions[permission.Name] = struct{}{}
+	}
+	return nil
+}
+
+func parseSemver(raw string) ([3]int, error) {
+	var parsed [3]int
+	core := strings.SplitN(strings.TrimPrefix(raw, "v"), "-", 2)[0]
+	parts := strings.Split(core, ".")
+	if len(parts) != 3 {
+		return parsed, fmt.Errorf("%q is not major.minor.patch", raw)
+	}
+	for index, part := range parts {
+		value, err := strconv.Atoi(part)
+		if err != nil || value < 0 {
+			return parsed, fmt.Errorf("%q is not major.minor.patch", raw)
+		}
+		parsed[index] = value
+	}
+	return parsed, nil
+}
+
+func compareSemver(left, right [3]int) int {
+	for index := range left {
+		if left[index] < right[index] {
+			return -1
+		}
+		if left[index] > right[index] {
+			return 1
+		}
+	}
+	return 0
 }
 
 func DiscoverPlugins(pluginsDir string) ([]PluginBundle, error) {
@@ -92,8 +237,37 @@ func loadBundle(dir string) (*PluginBundle, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read wasm: %w", err)
 	}
+	schemaPath := filepath.Join(dir, "schema.json")
+	var schema *ConfigSchema
+	var schemaBytes []byte
+	if sBytes, err := os.ReadFile(schemaPath); err == nil {
+		schemaBytes = sBytes
+		var s ConfigSchema
+		if err := json.Unmarshal(sBytes, &s); err != nil {
+			return nil, fmt.Errorf("parse schema: %w", err)
+		}
+		schema = &s
+	} else if !os.IsNotExist(err) {
+		return nil, fmt.Errorf("read schema: %w", err)
+	}
 	warnIfStale(dir, wasmPath, manifest.Name)
-	return &PluginBundle{Manifest: manifest, WASMBytes: wBytes}, nil
+	digest := bundleDigest(mBytes, wBytes, schemaBytes)
+	return &PluginBundle{Manifest: manifest, WASMBytes: wBytes, Digest: digest, Schema: schema}, nil
+}
+
+// bundleDigest covers every executable or policy-bearing file consumed by the
+// runtime. Length-prefixing keeps the digest unambiguous. A change to code,
+// requested permissions, failure behavior, hooks, or configuration schema
+// therefore invalidates the operator's prior approval.
+func bundleDigest(manifestBytes, wasmBytes, schemaBytes []byte) string {
+	h := sha256.New()
+	for _, part := range [][]byte{manifestBytes, wasmBytes, schemaBytes} {
+		var size [8]byte
+		binary.BigEndian.PutUint64(size[:], uint64(len(part)))
+		_, _ = h.Write(size[:])
+		_, _ = h.Write(part)
+	}
+	return fmt.Sprintf("sha256:%x", h.Sum(nil))
 }
 
 // warnIfStale logs a warning when plugin.wasm is older than any Go source
@@ -136,8 +310,9 @@ type PluginPipeline struct {
 }
 
 type loadedPlugin struct {
-	manifest PluginManifest
-	plugin   *wasm.Plugin
+	manifest    PluginManifest
+	plugin      *wasm.Plugin
+	failureMode string
 }
 
 func NewPipeline(runtime *wasm.Runtime, config PluginConfig) (*PluginPipeline, error) {
@@ -155,33 +330,84 @@ func reloadPipeline(runtime *wasm.Runtime, config PluginConfig) (*PluginPipeline
 	}
 	var loaded []*loadedPlugin
 	order := config.Order
-	if len(order) == 0 {
-		for _, b := range bundles {
-			order = append(order, b.Manifest.Name)
+	// Enforce ordering constraint: route-capable plugins (env.route_request)
+	// must precede compaction economic-gate plugins (env.host_call.torana_evaluate_compaction).
+	var seenCompactionGate bool
+	for _, name := range order {
+		bundle, ok := byName[name]
+		if !ok {
+			if config.Strict {
+				return nil, fmt.Errorf("enabled plugin %q is missing or malformed", name)
+			}
+			continue
 		}
-		sort.Strings(order)
+		if !config.AllowUnapproved {
+			if err := validateManifest(bundle.Manifest); err != nil {
+				return nil, fmt.Errorf("enabled plugin %q has invalid manifest: %w", name, err)
+			}
+		}
+		approval, approved := config.approvalFor(bundle)
+		if !approved {
+			if config.Strict {
+				return nil, fmt.Errorf("enabled plugin %q has no approval for digest %s", name, bundle.Digest)
+			}
+			continue
+		}
+		grants, _, err := validateApproval(bundle, approval)
+		if err != nil {
+			if config.Strict {
+				return nil, fmt.Errorf("enabled plugin %q has invalid approval: %w", name, err)
+			}
+			continue
+		}
+		var hasRoute, hasCompactionGate bool
+		for _, grant := range grants {
+			if grant == "env.route_request" {
+				hasRoute = true
+			}
+			if grant == "env.host_call.torana_evaluate_compaction" {
+				hasCompactionGate = true
+			}
+		}
+		if hasRoute && seenCompactionGate {
+			return nil, fmt.Errorf("ordering constraint violation: route-capable plugin %q (grant env.route_request) must precede compaction economic-gate plugins (grant env.host_call.torana_evaluate_compaction)", name)
+		}
+		if hasCompactionGate {
+			seenCompactionGate = true
+		}
 	}
 	for _, name := range order {
 		bundle, ok := byName[name]
 		if !ok {
+			if config.Strict {
+				return nil, fmt.Errorf("enabled plugin %q is missing or malformed", name)
+			}
 			log.Printf("[plugin] %s not found in plugins dir, skipping", name)
+			continue
+		}
+		approval, approved := config.approvalFor(bundle)
+		if !approved {
+			if config.Strict {
+				return nil, fmt.Errorf("enabled plugin %q has no approval for digest %s", name, bundle.Digest)
+			}
+			log.Printf("[plugin] %s: no approval for digest %s — skipping", name, bundle.Digest)
+			continue
+		}
+		grants, failureMode, err := validateApproval(bundle, approval)
+		if err != nil {
+			if config.Strict {
+				return nil, fmt.Errorf("enabled plugin %q has invalid approval: %w", name, err)
+			}
+			log.Printf("[plugin] %s: invalid approval: %v — skipping", name, err)
 			continue
 		}
 		pl, err := runtime.LoadPlugin(name, bundle.WASMBytes)
 		if err != nil {
+			if config.Strict {
+				return nil, fmt.Errorf("enabled plugin %q failed to load: %w", name, err)
+			}
 			log.Printf("[plugin] %s: %v — skipping", name, err)
 			continue
-		}
-		// SECURITY BOUNDARY SECURITY NOTE:
-		// Grants are read directly from the plugin's own self-declared manifest
-		// (bundle.Manifest.Permissions). This is a policy declaration for runtime auditability
-		// and developer convenience, NOT a secure security boundary against untrusted plugin
-		// artifacts. Since any plugin can request any permission in its manifest, the system
-		// does not enforce third-party validation or sandbox boundaries beyond wazero's basic
-		// WASM environment. Administrative review of plugins before deployment is required.
-		var grants []string
-		for _, p := range bundle.Manifest.Permissions {
-			grants = append(grants, p.Name)
 		}
 		pl.SetGrants(grants)
 		if raw, ok := config.Config[name]; ok && len(raw) > 0 {
@@ -189,12 +415,16 @@ func reloadPipeline(runtime *wasm.Runtime, config PluginConfig) (*PluginPipeline
 		}
 		// Validate that every declared hook is actually exported by the WASM module.
 		if err := pl.ValidateHooks(context.Background(), hookNames(bundle.Manifest.Hooks)); err != nil {
+			if config.Strict {
+				return nil, fmt.Errorf("enabled plugin %q failed hook validation: %w", name, err)
+			}
 			log.Printf("[plugin] %s: hook validation failed: %v — skipping", name, err)
 			continue
 		}
 		loaded = append(loaded, &loadedPlugin{
-			manifest: bundle.Manifest,
-			plugin:   pl,
+			manifest:    bundle.Manifest,
+			plugin:      pl,
+			failureMode: failureMode,
 		})
 		log.Printf("[plugin] %s ready — hooks: %v", name, hookNames(bundle.Manifest.Hooks))
 		// run_after_response mutations are applied on the non-streaming JSON
@@ -251,13 +481,12 @@ func (pp *PluginPipeline) Len() int { return len(pp.plugins) }
 // EndRequest drops all request-scoped plugin state for a finished request.
 func (pp *PluginPipeline) EndRequest(reqID uint64) { pp.runtime.EndRequest(reqID) }
 
-// HasGrant reports whether any loaded plugin declares the given permission.
+// HasGrant reports whether any loaded plugin has actually been granted the
+// named permission by the operator. Manifest requests alone confer no access.
 func (pp *PluginPipeline) HasGrant(perm string) bool {
 	for _, lp := range pp.plugins {
-		for _, p := range lp.manifest.Permissions {
-			if p.Name == perm {
-				return true
-			}
+		if lp.plugin.HasGrant(perm) {
+			return true
 		}
 	}
 	return false
@@ -305,11 +534,15 @@ func (pp *PluginPipeline) RunBeforeRequest(ctx context.Context, reqID uint64, ch
 		var outBytes []byte
 		if err := lp.plugin.CallRequest(ctx, "run_before_request", reqID, resultBytes, &outBytes); err != nil {
 			log.Printf("[plugin] %s run_before_request: %v", lp.manifest.Name, err)
+			if lp.failureMode == "block" {
+				return chat, fmt.Errorf("plugin %s blocked request after failure: %w", lp.manifest.Name, err)
+			}
 			continue
 		}
 		if len(outBytes) > 0 {
 			resultBytes = outBytes
 			modified = true
+			pp.runtime.ObserveRequestMutation(ctx, outBytes)
 		}
 	}
 
@@ -344,6 +577,9 @@ func (pp *PluginPipeline) RunAfterResponse(ctx context.Context, reqID uint64, ch
 		var outBytes []byte
 		if err := lp.plugin.CallRequest(ctx, "run_after_response", reqID, resultBytes, &outBytes); err != nil {
 			log.Printf("[plugin] %s run_after_response: %v", lp.manifest.Name, err)
+			if lp.failureMode == "block" {
+				return chat, fmt.Errorf("plugin %s blocked response after failure: %w", lp.manifest.Name, err)
+			}
 			continue
 		}
 		if len(outBytes) > 0 {
@@ -385,12 +621,18 @@ func (pp *PluginPipeline) RunOnStreamChunk(ctx context.Context, reqID uint64, ch
 			evBytes, err := proto.Marshal(ev)
 			if err != nil {
 				log.Printf("[plugin] %s run_on_stream_chunk marshal: %v", lp.manifest.Name, err)
+				if lp.failureMode == "block" {
+					return nil, fmt.Errorf("plugin %s blocked stream after marshal failure: %w", lp.manifest.Name, err)
+				}
 				next = append(next, ev)
 				continue
 			}
 			var outBytes []byte
 			if err := lp.plugin.CallRequest(ctx, "run_on_stream_chunk", reqID, evBytes, &outBytes); err != nil {
 				log.Printf("[plugin] %s run_on_stream_chunk: %v", lp.manifest.Name, err)
+				if lp.failureMode == "block" {
+					return nil, fmt.Errorf("plugin %s blocked stream after failure: %w", lp.manifest.Name, err)
+				}
 				next = append(next, ev)
 				continue
 			}
@@ -402,6 +644,9 @@ func (pp *PluginPipeline) RunOnStreamChunk(ctx context.Context, reqID uint64, ch
 			var res pb.StreamEventResult
 			if err := proto.Unmarshal(outBytes, &res); err != nil {
 				log.Printf("[plugin] %s run_on_stream_chunk unmarshal: %v", lp.manifest.Name, err)
+				if lp.failureMode == "block" {
+					return nil, fmt.Errorf("plugin %s blocked stream after invalid output: %w", lp.manifest.Name, err)
+				}
 				next = append(next, ev)
 				continue
 			}
@@ -421,14 +666,158 @@ func (pp *PluginPipeline) RunOnStreamChunk(ctx context.Context, reqID uint64, ch
 	return out, nil
 }
 
+// ErrServeHTTPForbidden is returned by RunOnHTTPRequest when the named plugin
+// exists and declares the run_on_http_request hook but does NOT hold the
+// env.serve_http permission. The proxy route handler maps this to 403.
+var ErrServeHTTPForbidden = fmt.Errorf("plugin does not hold env.serve_http permission")
+
+// RunOnHTTPRequest dispatches an HTTP request to a single named plugin's
+// run_on_http_request hook. It is used by the /_torana/plugin/<name>/* proxy
+// route so plugins can serve their own HTTP UI/API namespace.
+//
+// Return values:
+//
+//	(nil, nil)                   — plugin not found, or does not declare
+//	                               run_on_http_request; caller should 404.
+//	(nil, ErrServeHTTPForbidden) — plugin exists and has the hook but lacks
+//	                               the env.serve_http grant; caller → 403.
+//	(*HttpResponse, nil)         — plugin returned a response; caller writes it.
+//	(nil, other error)           — internal dispatch error; caller → 503.
+//
+// httpReq is built directly from net/http — it does not cross the engine IR.
+func (pp *PluginPipeline) RunOnHTTPRequest(ctx context.Context, reqID uint64, pluginName string, httpReq *pb.HttpRequest) (*pb.HttpResponse, error) {
+	pp.Acquire()
+	defer pp.Release()
+
+	// Find the named plugin.
+	var target *loadedPlugin
+	for _, lp := range pp.plugins {
+		if lp.manifest.Name == pluginName {
+			target = lp
+			break
+		}
+	}
+	if target == nil {
+		return nil, nil // not found
+	}
+
+	// Plugin must declare the hook.
+	if !hasHook(target.manifest, "run_on_http_request") {
+		return nil, nil // not serving HTTP
+	}
+
+	// Enforce env.serve_http capability.
+	if !target.plugin.HasGrant("env.serve_http") {
+		return nil, ErrServeHTTPForbidden
+	}
+
+	inBytes, err := proto.Marshal(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("plugin %s: marshal http request: %w", pluginName, err)
+	}
+
+	var outBytes []byte
+	if err := target.plugin.CallRequest(ctx, "run_on_http_request", reqID, inBytes, &outBytes); err != nil {
+		return nil, fmt.Errorf("plugin %s: run_on_http_request: %w", pluginName, err)
+	}
+
+	// Zero-length return → plugin did not handle the request.
+	if len(outBytes) == 0 {
+		return nil, nil
+	}
+
+	var resp pb.HttpResponse
+	if err := proto.Unmarshal(outBytes, &resp); err != nil {
+		return nil, fmt.Errorf("plugin %s: unmarshal http response: %w", pluginName, err)
+	}
+
+	// Explicit handled flag required — see proto comment.
+	if !resp.Handled {
+		return nil, nil
+	}
+
+	return &resp, nil
+}
+
 // ============================================================================
 // Plugin config
 // ============================================================================
 
 type PluginConfig struct {
-	Dir    string                     `json:"dir"`
-	Order  []string                   `json:"order"`
-	Config map[string]json.RawMessage `json:"config"`
+	Dir       string                     `json:"dir"`
+	Order     []string                   `json:"order"`
+	Config    map[string]json.RawMessage `json:"config"`
+	Approvals map[string]Approval        `json:"approvals,omitempty"`
+
+	// AllowUnapproved is for in-repository conformance tests and plugin
+	// development only. It converts manifest requests into grants and is not a
+	// security boundary. Production configuration never exposes this switch:
+	// production grants come only from a digest-bound operator approval.
+	AllowUnapproved bool `json:"-"`
+	// Strict rejects an explicitly enabled plugin that cannot be loaded instead
+	// of silently persisting a partially-active pipeline.
+	Strict bool `json:"-"`
+}
+
+// Approval is operator-owned state, intentionally separate from plugin.json.
+// It binds granted capabilities and the effective failure mode to one exact
+// WASM digest. Updating the artifact therefore requires explicit reapproval.
+type Approval struct {
+	Digest      string   `json:"digest"`
+	Permissions []string `json:"permissions"`
+	FailureMode string   `json:"failure_mode,omitempty"`
+}
+
+func (c PluginConfig) approvalFor(bundle PluginBundle) (Approval, bool) {
+	if c.AllowUnapproved {
+		permissions := make([]string, 0, len(bundle.Manifest.Permissions))
+		for _, permission := range bundle.Manifest.Permissions {
+			permissions = append(permissions, permission.Name)
+		}
+		return Approval{
+			Digest:      bundle.Digest,
+			Permissions: permissions,
+			FailureMode: bundle.Manifest.FailureMode,
+		}, true
+	}
+	keys := []string{bundle.Manifest.ID, bundle.Manifest.Name}
+	for _, key := range keys {
+		if key == "" {
+			continue
+		}
+		if approval, ok := c.Approvals[key]; ok {
+			return approval, true
+		}
+	}
+	return Approval{}, false
+}
+
+func validateApproval(bundle PluginBundle, approval Approval) ([]string, string, error) {
+	if approval.Digest == "" || approval.Digest != bundle.Digest {
+		return nil, "", fmt.Errorf("digest mismatch: approved %q, installed %q", approval.Digest, bundle.Digest)
+	}
+	requested := make(map[string]struct{}, len(bundle.Manifest.Permissions))
+	for _, permission := range bundle.Manifest.Permissions {
+		requested[permission.Name] = struct{}{}
+	}
+	grants := make([]string, 0, len(approval.Permissions))
+	for _, permission := range approval.Permissions {
+		if _, ok := requested[permission]; !ok {
+			return nil, "", fmt.Errorf("permission %q was not requested by manifest", permission)
+		}
+		grants = append(grants, permission)
+	}
+	failureMode := approval.FailureMode
+	if failureMode == "" {
+		failureMode = bundle.Manifest.FailureMode
+	}
+	if failureMode == "" {
+		failureMode = "pass"
+	}
+	if failureMode != "pass" && failureMode != "block" {
+		return nil, "", fmt.Errorf("failure_mode must be pass or block, got %q", failureMode)
+	}
+	return grants, failureMode, nil
 }
 
 func hasHook(m PluginManifest, hook string) bool {
@@ -534,9 +923,9 @@ func WatchPlugins(ctx context.Context, dir string, configFn func() PluginConfig,
 					}
 				}
 
-				// Only reload on .wasm or plugin.json changes.
+				// Only reload on .wasm, plugin.json, or schema.json changes.
 				name := filepath.Base(event.Name)
-				if name != "plugin.wasm" && name != "plugin.json" {
+				if name != "plugin.wasm" && name != "plugin.json" && name != "schema.json" {
 					continue
 				}
 				// Remove/Rename included: deleting a plugin must unload it.

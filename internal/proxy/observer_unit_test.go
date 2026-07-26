@@ -17,7 +17,7 @@ func TestObserverJSONHooksDirect(t *testing.T) {
 
 	rt := wasm.NewRuntime(context.Background())
 	t.Cleanup(func() { rt.Close() })
-	pp, err := plugin.NewPipeline(rt, plugin.PluginConfig{Dir: "../../examples/plugins", Order: []string{"test-observer"}})
+	pp, err := plugin.NewPipeline(rt, plugin.PluginConfig{Dir: "../../examples/plugins", Order: []string{"test-observer"}, AllowUnapproved: true})
 	if err != nil {
 		t.Fatalf("NewPipeline: %v", err)
 	}

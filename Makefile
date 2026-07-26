@@ -27,10 +27,10 @@ testdata:
 	@echo "building testdata/hello.wasm"
 	@cd testdata && $(WASM_BUILD) -o hello.wasm .
 
-# Regenerate pkg/pb/torana.pb.go. Requires protoc and:
+# Regenerate sdk/pb/torana.pb.go. Requires protoc and:
 #   go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.11
 proto:
-	protoc --go_out=paths=source_relative:. pkg/pb/torana.proto
+	protoc --go_out=paths=source_relative:. sdk/pb/torana.proto
 
 install:
 	go install -ldflags "$(LDFLAGS)" ./cmd/torana/

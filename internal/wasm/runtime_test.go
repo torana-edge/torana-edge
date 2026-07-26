@@ -5,7 +5,95 @@ import (
 	"fmt"
 	"sync"
 	"testing"
+	"time"
 )
+
+// timeoutPluginWasm exports the Torana alloc ABI plus a hook that loops
+// forever. It is intentionally tiny so cancellation coverage never depends on
+// a compiler being installed in CI.
+var timeoutPluginWasm = []byte{
+	0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00,
+	0x01, 0x0d, 0x02, 0x60, 0x01, 0x7f, 0x01, 0x7f,
+	0x60, 0x03, 0x7e, 0x7e, 0x7e, 0x01, 0x7e,
+	0x03, 0x03, 0x02, 0x00, 0x01,
+	0x05, 0x03, 0x01, 0x00, 0x01,
+	0x07, 0x19, 0x03,
+	0x06, 0x6d, 0x65, 0x6d, 0x6f, 0x72, 0x79, 0x02, 0x00,
+	0x05, 0x61, 0x6c, 0x6c, 0x6f, 0x63, 0x00, 0x00,
+	0x04, 0x6c, 0x6f, 0x6f, 0x70, 0x00, 0x01,
+	0x0a, 0x0f, 0x02,
+	0x04, 0x00, 0x41, 0x00, 0x0b,
+	0x08, 0x00, 0x03, 0x40, 0x0c, 0x00, 0x0b, 0x00, 0x0b,
+}
+
+func TestCallRequestTimeoutDiscardsInstance(t *testing.T) {
+	r := NewRuntimeWithOptions(context.Background(), RuntimeOptions{
+		PoolSize:    1,
+		CallTimeout: 15 * time.Millisecond,
+	})
+	defer r.Close()
+
+	p, err := r.LoadPlugin("timeout", timeoutPluginWasm)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	started := time.Now()
+	var output []byte
+	err = p.CallRequest(context.Background(), "loop", 1, []byte("x"), &output)
+	if err == nil {
+		t.Fatal("expected timed-out guest call to fail")
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("guest call ignored deadline for %s", elapsed)
+	}
+	if got := len(p.pool); got != 0 {
+		t.Fatalf("timed-out instance was returned to pool (%d retained)", got)
+	}
+}
+
+func TestRuntimeOptionsAreNormalized(t *testing.T) {
+	got := normalizeRuntimeOptions(RuntimeOptions{
+		PoolSize:         -1,
+		CallTimeout:      -1,
+		MemoryLimitPages: 70000,
+	})
+	if got.PoolSize != defaultPoolSize || got.CallTimeout != defaultCallTimeout {
+		t.Fatalf("defaults = %+v", got)
+	}
+	if got.MemoryLimitPages != 65536 {
+		t.Fatalf("memory pages = %d, want WebAssembly maximum", got.MemoryLimitPages)
+	}
+}
+
+func TestPoolSizeBoundsConcurrentInstances(t *testing.T) {
+	r := NewRuntimeWithOptions(context.Background(), RuntimeOptions{
+		PoolSize:    1,
+		CallTimeout: time.Second,
+	})
+	defer r.Close()
+
+	p, err := r.LoadPlugin("bounded", timeoutPluginWasm)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	first, err := p.acquire(context.Background())
+	if err != nil {
+		t.Fatalf("first acquire: %v", err)
+	}
+
+	waitCtx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	if _, err := p.acquire(waitCtx); err == nil {
+		t.Fatal("second acquire exceeded PoolSize while first instance was active")
+	}
+	p.release(first)
+
+	second, err := p.acquire(context.Background())
+	if err != nil {
+		t.Fatalf("acquire after release: %v", err)
+	}
+	p.release(second)
+}
 
 // TestMetaRequestScoping: meta state is isolated per request ID.
 func TestMetaRequestScoping(t *testing.T) {

@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 
 	"github.com/torana-edge/torana-edge/internal/engine"
-	"github.com/torana-edge/torana-edge/pkg/pb"
+	"github.com/torana-edge/torana-edge/sdk/pb"
 )
 
 func ToPBChatRequest(c *engine.ChatRequest) *pb.ChatRequest {
