@@ -33,6 +33,7 @@ import (
 
 	"github.com/torana-edge/torana-edge/internal/cache"
 	"github.com/torana-edge/torana-edge/internal/controlplane"
+	"github.com/torana-edge/torana-edge/internal/conversation"
 	"github.com/torana-edge/torana-edge/internal/economics"
 	"github.com/torana-edge/torana-edge/internal/engine"
 	"github.com/torana-edge/torana-edge/internal/engine/pbconv"
@@ -40,6 +41,7 @@ import (
 	"github.com/torana-edge/torana-edge/internal/metrics"
 	"github.com/torana-edge/torana-edge/internal/mitm"
 	"github.com/torana-edge/torana-edge/internal/plugin"
+	"github.com/torana-edge/torana-edge/internal/pluginstate"
 	"github.com/torana-edge/torana-edge/internal/provider"
 	"github.com/torana-edge/torana-edge/internal/secret"
 	"github.com/torana-edge/torana-edge/internal/wasm"
@@ -149,9 +151,21 @@ type Server struct {
 	// the plugin-watcher goroutine reads it via newRuntime (off rebuildMu).
 	cacheMu     sync.RWMutex
 	rateLimiter *RateLimiter
+	// conversations tracks recently seen conversations (metadata only, never
+	// prompt content) so the control plane and plugins can name one. Bounded
+	// and self-expiring; closed on Shutdown.
+	conversations *conversation.Registry
 	// watchCancel stops the plugin hot-reload watcher on Shutdown.
 	watchCancel context.CancelFunc
 	watchDone   <-chan struct{}
+	// ticker drives run_on_tick. Nil when ticks are not configured.
+	ticker *tickScheduler
+	// pluginState is durable per-plugin storage (env.state_*), kept beside the
+	// managed config. Nil when there is no config path to anchor it to.
+	pluginState *pluginstate.Store
+	// egress meters plugin-originated provider requests against per-plugin
+	// budgets, so a plugin cannot spend without a ceiling an operator set.
+	egress *egressMeter
 }
 
 type routeContextKey struct{}
@@ -239,6 +253,19 @@ type reqState struct {
 	// stream_options.include_usage on the caller's behalf; the resulting
 	// usage frame is consumed host-side and never forwarded to the client.
 	UsageInjected bool
+	// ConversationID is the durable label for the conversation this request
+	// belongs to, derived from the canonical IR before any plugin runs.
+	// Empty when the request could not be identified.
+	ConversationID string
+	// CachePrefixKey fingerprints the provider-side cache entry this request
+	// will hit, computed after routing and plugin mutation so it describes what
+	// actually goes on the wire. Unlike ConversationID it moves whenever the
+	// prefix or model changes.
+	CachePrefixKey string
+	// Path is the provider-stripped request path, kept because the proxy never
+	// synthesizes a chat path and anything replaying this conversation needs
+	// the one the caller used.
+	Path string
 	// Synthetic marks a response served by a plugin (env.respond_request):
 	// the transport returns it verbatim and ModifyResponse must not re-parse
 	// it or run response hooks over it.
@@ -452,13 +479,26 @@ func New(cfg Config) (*Server, error) {
 	if err != nil {
 		return nil, fmt.Errorf("proxy: secret store: %w", err)
 	}
+	// Durable plugin state lives beside the managed config. A failure to load
+	// it is reported but not fatal: the store still works in memory, and
+	// refusing to start the proxy because one plugin's scratch file was
+	// truncated would be a poor trade.
+	stateStore, err := pluginstate.New(pluginstate.Options{
+		Path: filepath.Join(filepath.Dir(configPath), "plugin-state.json"),
+	})
+	if err != nil {
+		log.Printf("warning: %v", err)
+	}
 	s := &Server{
-		config:      cfg,
-		configPath:  configPath,
-		secrets:     secStore,
-		stats:       statsTracker,
-		feed:        metrics.NewRequestFeed(0), // default 200-event ring buffer
-		rateLimiter: NewRateLimiter(cfg.Providers.Limits.RPM, cfg.Providers.Limits.Concurrency),
+		config:        cfg,
+		configPath:    configPath,
+		secrets:       secStore,
+		stats:         statsTracker,
+		feed:          metrics.NewRequestFeed(0), // default 200-event ring buffer
+		rateLimiter:   NewRateLimiter(cfg.Providers.Limits.RPM, cfg.Providers.Limits.Concurrency),
+		conversations: conversation.New(conversation.Options{}),
+		pluginState:   stateStore,
+		egress:        newEgressMeter(),
 	}
 
 	// --- offload validation (fail fast on misconfiguration) ---------------
@@ -467,6 +507,9 @@ func New(cfg Config) (*Server, error) {
 	}
 	for name, p := range cfg.Providers.Providers {
 		if err := p.ValidateResponsesCompaction(name); err != nil {
+			return nil, fmt.Errorf("proxy: %w", err)
+		}
+		if err := p.ValidateCache(name); err != nil {
 			return nil, fmt.Errorf("proxy: %w", err)
 		}
 	}
@@ -647,6 +690,26 @@ func New(cfg Config) (*Server, error) {
 			rs.InitialProvider = provName
 			rs.InitialFormat = prov.Format
 
+			// Label the conversation from the canonical IR, before any plugin
+			// can rewrite the messages it is derived from. Deriving it after
+			// RunBeforeRequest would let a compactor rename the conversation it
+			// just compacted, which is precisely the case the label exists to
+			// survive. The cache-prefix key is deliberately computed later.
+			rs.ConversationID = engine.ConversationID(chat)
+
+			// Publish the routing decision so plugins can ask the host about
+			// this provider — pricing and cache semantics are keyed by provider
+			// name, and a plugin that cannot name its own provider cannot look
+			// up the economics of what it is about to do. ToranaMeta never
+			// reaches the wire and is excluded from the determinism check, so
+			// this is safe to vary per request.
+			chat.ToranaMeta["_provider"] = provName
+			chat.ToranaMeta["_conversation_id"] = rs.ConversationID
+			// The path too: Torana forwards whatever the caller sent rather
+			// than synthesizing one, so a plugin replaying this conversation
+			// has no other way to know where it goes.
+			chat.ToranaMeta["_path"] = strippedPath
+
 			// --- WASM plugin pipeline --------------------------------------
 
 			if pl := reqStateFrom(req.Context()).Pipeline; pl != nil {
@@ -790,6 +853,13 @@ func New(cfg Config) (*Server, error) {
 					reqStateFrom(req.Context()).UsageInjected = true
 				}
 			}
+
+			// Fingerprint the cache prefix as it will actually go on the wire:
+			// after content routing may have changed the model, and after every
+			// plugin has had its say. Computing it earlier would key the entry
+			// on a request that was never sent.
+			rs.CachePrefixKey = engine.CachePrefixKey(chat)
+			rs.Path = rc.StrippedPath
 
 			newBody, err := fmt.Request.Marshal(chat)
 			if err != nil {
@@ -1122,6 +1192,15 @@ func New(cfg Config) (*Server, error) {
 			}
 			incoming.Cache.Redis.PasswordEnc = cacheEnc
 
+			// Carry forward per-provider fields the caller did not mention.
+			// The settings form renders only six fields per provider and sends
+			// a rebuilt object, so without this an ordinary Save silently drops
+			// pricing and cache semantics — which the compactor's economic gate
+			// and the cache plugins depend on. Absent means preserve; an
+			// explicit null or empty value still clears, so the fields stay
+			// editable by any client that actually manages them.
+			preserveUnmanagedProviderFields(cur.Providers, incoming.Providers, providerFieldsSent(data))
+
 			if incoming.Providers != nil {
 				for name, incP := range incoming.Providers {
 					curP := cur.Providers[name]
@@ -1416,6 +1495,20 @@ func New(cfg Config) (*Server, error) {
 			return
 		}
 
+		// Check the blob against the schema the bundle declares. Until this
+		// existed, a wrong-typed value reached the guest and misbehaved
+		// silently.
+		for _, b := range bundles {
+			if b.Manifest.Name != name {
+				continue
+			}
+			if verr := plugin.ValidateConfigAgainstSchema(b.Schema, json.RawMessage(data)); verr != nil {
+				http.Error(w, verr.Error(), http.StatusBadRequest)
+				return
+			}
+			break
+		}
+
 		raw := json.RawMessage(data)
 		oldPlugins := s.GetConfig().Providers.Plugins
 		newPlugins := oldPlugins
@@ -1449,6 +1542,27 @@ func New(cfg Config) (*Server, error) {
 
 		w.Header().Set("Content-Type", "application/json")
 		writePluginsWithWarnings(w, newPlugins, skipped)
+	}))
+
+	// GET /_torana/api/conversations — conversations seen recently, most
+	// recently active first. Metadata only: identifiers, timestamps, and token
+	// counts, never message content. The /v1/ prefix reaches this through the
+	// same shim as every other route.
+	mux.HandleFunc("/_torana/api/conversations", s.controlPlaneGuard(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		list := s.conversations.List()
+		if list == nil {
+			// An empty array rather than null, matching /feed.
+			list = []conversation.Record{}
+		}
+		b, _ := json.Marshal(struct {
+			Conversations []conversation.Record `json:"conversations"`
+		}{Conversations: list})
+		w.Write(b)
 	}))
 
 	// GET /_torana/api/feed — one-shot JSON snapshot of recent events,
@@ -1753,6 +1867,19 @@ func New(cfg Config) (*Server, error) {
 		s.stats.RecordRequest(tr.bytesRead, tw.bytesWritten)
 		s.stats.RecordTokens(int64(rs.UsageIn), int64(rs.UsageOut))
 		s.stats.RecordCacheTokens(int64(rs.UsageCacheRead), int64(rs.UsageCacheWrite))
+		// Record the conversation here rather than in the Rewrite hook: the
+		// provider's cache token counts only exist once the response has been
+		// read, and they are the ground truth for whether a prefix was warm.
+		s.conversations.Observe(conversation.Observation{
+			ID:             rs.ConversationID,
+			CachePrefixKey: rs.CachePrefixKey,
+			Provider:       rs.Provider,
+			Model:          rs.Model,
+			Format:         rs.InitialFormat,
+			Path:           rs.Path,
+			CacheRead:      rs.UsageCacheRead,
+			CacheWrite:     rs.UsageCacheWrite,
+		})
 		// Host request metrics: latency + outcome, labeled by model/provider.
 		// The host sees every response (including errors and vetoes), so this
 		// is the reliable source of truth for latency and status.
@@ -1799,6 +1926,10 @@ func New(cfg Config) (*Server, error) {
 
 	s.proxy = proxy
 	s.httpServer = srv
+	// Background plugin ticks. Returns nil unless an operator configured an
+	// interval; the loop additionally does nothing until some loaded plugin
+	// both declares run_on_tick and holds env.background_tick.
+	s.ticker = s.startTicker(cfg.Providers.Plugins.Runtime.TickInterval())
 	return s, nil
 }
 
@@ -2065,6 +2196,60 @@ func (s *Server) normalizeSecretField(incomingEnc, storedEnc string) (string, er
 	}
 }
 
+// providerFieldsSent reports which keys the caller actually wrote for each
+// provider, keyed by provider name. Presence is the whole point: encoding/json
+// cannot distinguish "field omitted" from "field set to its zero value", and
+// that distinction is what separates "the settings form doesn't manage pricing"
+// from "the caller means to delete pricing". A malformed or unparseable body
+// yields nil, which preserves nothing — the request will fail validation anyway.
+func providerFieldsSent(body []byte) map[string]map[string]struct{} {
+	var envelope struct {
+		Providers map[string]map[string]json.RawMessage `json:"providers"`
+	}
+	if err := json.Unmarshal(body, &envelope); err != nil {
+		return nil
+	}
+	sent := make(map[string]map[string]struct{}, len(envelope.Providers))
+	for name, fields := range envelope.Providers {
+		keys := make(map[string]struct{}, len(fields))
+		for key := range fields {
+			keys[key] = struct{}{}
+		}
+		sent[name] = keys
+	}
+	return sent
+}
+
+// unmanagedProviderFields are per-provider settings that no control-plane form
+// currently renders. A client that rebuilds a provider object from a form would
+// drop them, so they are carried forward unless explicitly written.
+var unmanagedProviderFields = []string{"pricing", "responses_compaction", "cache"}
+
+// preserveUnmanagedProviderFields copies unmanaged fields from the stored config
+// into the incoming one wherever the caller left them out. It mutates incoming.
+func preserveUnmanagedProviderFields(stored, incoming map[string]provider.Provider, sent map[string]map[string]struct{}) {
+	for name, incP := range incoming {
+		curP, existed := stored[name]
+		if !existed {
+			continue
+		}
+		for _, field := range unmanagedProviderFields {
+			if _, written := sent[name][field]; written {
+				continue
+			}
+			switch field {
+			case "pricing":
+				incP.Pricing = curP.Pricing
+			case "responses_compaction":
+				incP.ResponsesCompaction = curP.ResponsesCompaction
+			case "cache":
+				incP.Cache = curP.Cache
+			}
+		}
+		incoming[name] = incP
+	}
+}
+
 func redactConfigSecrets(cfg provider.Config) provider.Config {
 	cfg.ControlPlane.Token = ""
 	if cfg.Providers != nil {
@@ -2171,6 +2356,16 @@ func (s *Server) newRuntime() *wasm.Runtime {
 	rt.PluginCounterFunc = func(pluginName string, counter string, delta int64) {
 		s.stats.RecordPluginCounter(pluginName, counter, delta)
 	}
+	// Durable plugin state (env.state_*). The plugin name is supplied by the
+	// host from the calling module, never by the guest payload, so one plugin
+	// cannot address another's namespace.
+	if s.pluginState != nil {
+		rt.StateGetFunc = s.pluginState.Get
+		rt.StateSetFunc = s.pluginState.Set
+		rt.StateKeysFunc = s.pluginState.Keys
+	}
+	rt.CachePricingFunc = s.cachePricing
+	rt.SendRequestFunc = s.sendPluginRequest
 	// Pristine request/response snapshots (env.original_request /
 	// env.original_response), read from the request state the same
 	// way offload does.
@@ -2471,6 +2666,11 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	if s.watchDone != nil {
 		<-s.watchDone
 	}
+	// Stop background ticks before the pipeline drains below: a tick in flight
+	// holds the pipeline and may be mid-way through an outbound request, and
+	// letting it outlive the runtime it is calling into is how a shutdown turns
+	// into a crash.
+	s.ticker.Close()
 	s.mitmMu.Lock()
 	if s.mitmSrv != nil {
 		s.mitmSrv.Close()
@@ -2488,6 +2688,7 @@ func (s *Server) Shutdown(ctx context.Context) error {
 		pp.(*plugin.PluginPipeline).DrainAndClose()
 	}
 	s.rateLimiter.Close()
+	s.conversations.Close()
 	s.rebuildMu.Lock()
 	s.cacheMu.Lock()
 	if s.sharedCache != nil {

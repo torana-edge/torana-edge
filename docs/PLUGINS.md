@@ -60,6 +60,64 @@ Read the requests before granting them, particularly `env.host_call.*`, which
 reaches host functionality, and `env.serve_http`, which lets a plugin vend a
 page inside the control plane.
 
+### Capabilities worth pausing over
+
+Most capabilities only let a plugin see or shape a request you were already
+making. Three are different in kind, and are worth a second look before you
+approve them.
+
+| Capability | What it actually allows |
+| --- | --- |
+| `env.background_tick` | Runs plugin code on a timer with **no request in flight**. Everything else a plugin does appears in a trace of your own traffic; this does not. |
+| `env.host_call.torana_send_request` | Lets the plugin **send its own provider requests**, which costs you money. It cannot choose a destination — only providers you configured — and never sees your credentials, but it can spend within the budget you set. |
+| `env.state_set` / `env.state_get` | Durable storage that **survives restarts**, written to disk beside your config. A plugin may keep prompt fragments there. |
+
+None of the three does anything on its own. Ticks are off unless you set an
+interval, egress is refused unless you set a budget, and both are refused
+outright without the grant. But an approved plugin holding all three can work,
+and spend, while you are not looking. Grant them to plugins whose source you have
+read.
+
+### Turning on background ticks
+
+Ticks are off by default. A plugin that declares `run_on_tick` still does
+nothing until you choose a cadence:
+
+```json
+{ "plugins": { "runtime": { "tick_interval_seconds": 60 } } }
+```
+
+The floor is 10 seconds. Every declaring plugin is woken on the same tick, so
+this is a global cadence, not a per-plugin one; a plugin that wants to act less
+often counts ticks itself.
+
+### Budgeting plugin egress
+
+A plugin that can send provider requests still cannot send any until you say how
+much it may spend:
+
+```json
+{
+  "plugins": {
+    "runtime": {
+      "egress": {
+        "cache_warmer": { "max_calls_per_minute": 4, "max_tokens_per_hour": 200000 }
+      }
+    }
+  }
+}
+```
+
+Budgets are per plugin and roll over a window, so a throttled plugin recovers
+rather than being locked out. `max_calls_per_minute` is the hard ceiling.
+`max_tokens_per_hour` is a backstop for calls that are individually cheap but
+collectively large; it is checked against tokens already spent, since a call's
+cost is not knowable before making it, so it can overshoot by one call.
+
+Every plugin-originated request appears in the live feed marked
+`plugin-egress` and attributed to the plugin, and `/stats` counts calls and
+refusals per plugin. If a plugin is spending, you can see it.
+
 ## Ordering
 
 Order matters and Torana enforces the constraints it can:

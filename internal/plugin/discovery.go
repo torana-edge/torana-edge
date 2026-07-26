@@ -21,6 +21,7 @@ import (
 	"github.com/torana-edge/torana-edge/internal/engine"
 	"github.com/torana-edge/torana-edge/internal/engine/pbconv"
 	"github.com/torana-edge/torana-edge/internal/wasm"
+	sdk "github.com/torana-edge/torana-plugin-sdk"
 	"github.com/torana-edge/torana-plugin-sdk/pb"
 	"google.golang.org/protobuf/proto"
 )
@@ -61,6 +62,14 @@ type ConfigField struct {
 	Default any      `json:"default,omitempty"`
 	Options []string `json:"options,omitempty"` // enum only
 	Help    string   `json:"help,omitempty"`
+	// Source names a live host resource whose current values the control plane
+	// offers as a picker beside the input, e.g. "conversations". It is advisory
+	// UI metadata: the value is still an ordinary string, an unknown source
+	// simply renders no picker, and nothing here constrains what may be saved.
+	//
+	// Generic on purpose. The control plane resolves the name against its own
+	// table of sources, so no plugin is ever named in the rendering logic.
+	Source string `json:"source,omitempty"`
 }
 
 type ConfigSchema struct {
@@ -101,35 +110,23 @@ type PluginBundle struct {
 
 const currentToranaVersion = "0.1.0"
 
-var supportedHooks = map[string]struct{}{
-	"run_after_response":  {},
-	"run_before_request":  {},
-	"run_on_http_request": {},
-	"run_on_stream_chunk": {},
-}
+// supportedHooks and supportedPermissions are derived from the SDK's published
+// v1 vocabulary rather than restated here. Which capability strings exist is an
+// ABI concern, and a second copy is how the official plugin repository's
+// validator ended up rejecting capabilities this host accepts.
+//
+// A host may expose fewer than the ABI defines; it must not invent names
+// outside it.
+var supportedHooks = setOf(sdk.Hooks)
 
-var supportedPermissions = map[string]struct{}{
-	"env.block_request":                        {},
-	"env.cache_get":                            {},
-	"env.cache_set":                            {},
-	"env.emit_metric":                          {},
-	"env.host_call.torana_db_query":            {},
-	"env.host_call.torana_evaluate_compaction": {},
-	"env.host_call.torana_kms_decrypt":         {},
-	"env.host_call.torana_offload_completion":  {},
-	"env.host_call.torana_plugin_counter":      {},
-	"env.host_call.torana_record_savings":      {},
-	"env.host_call.verify_virtual_key":         {},
-	"env.log":                                  {},
-	"env.meta_get":                             {},
-	"env.meta_set":                             {},
-	"env.original_request":                     {},
-	"env.original_response":                    {},
-	"env.plugin_config":                        {},
-	"env.request_headers":                      {},
-	"env.respond_request":                      {},
-	"env.route_request":                        {},
-	"env.serve_http":                           {},
+var supportedPermissions = setOf(sdk.Permissions)
+
+func setOf(names []string) map[string]struct{} {
+	out := make(map[string]struct{}, len(names))
+	for _, n := range names {
+		out[n] = struct{}{}
+	}
+	return out
 }
 
 var agentOperationIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
@@ -377,6 +374,15 @@ func loadBundle(dir string) (*PluginBundle, error) {
 		var s ConfigSchema
 		if err := json.Unmarshal(sBytes, &s); err != nil {
 			return nil, fmt.Errorf("parse schema: %w", err)
+		}
+		// A JSON Schema document unmarshals into ConfigSchema without error and
+		// yields no fields, which used to mean the control plane silently
+		// rendered no form. Derive the fields instead — see
+		// jsonschema_config.go.
+		if len(s.Fields) == 0 {
+			if derived := deriveConfigSchema(sBytes); derived != nil {
+				s = *derived
+			}
 		}
 		schema = &s
 	} else if !os.IsNotExist(err) {
@@ -1073,6 +1079,91 @@ func (pp *PluginPipeline) RunOnHTTPRequest(ctx context.Context, reqID uint64, pl
 	}
 
 	return &resp, nil
+}
+
+// TickOutcome is one plugin's report from a single tick.
+type TickOutcome struct {
+	Plugin  string
+	Actions int
+	Note    string
+}
+
+// RunOnTick calls every plugin that declares run_on_tick and holds the
+// env.background_tick grant, returning what each reported.
+//
+// Two things differ from the request-driven hooks, both deliberate:
+//
+// The grant is checked per plugin here rather than being enforced by the
+// caller, because there is no caller — a tick originates inside the host, so
+// there is no request whose permissions could stand in for the plugin's own.
+//
+// failure_mode is deliberately not honoured. It selects whether a failing plugin
+// blocks or passes the request, and on a tick there is no request to block; a
+// plugin that traps has failed to do its own background work and cannot
+// implicate anyone else's. Errors are logged and iteration continues, so one
+// broken plugin cannot silently stop every other plugin's timer.
+func (pp *PluginPipeline) RunOnTick(ctx context.Context, reqID uint64, tick *pb.TickRequest) []TickOutcome {
+	pp.Acquire()
+	defer pp.Release()
+
+	inBytes, err := proto.Marshal(tick)
+	if err != nil {
+		log.Printf("[plugin] tick: marshal: %v", err)
+		return nil
+	}
+
+	var outcomes []TickOutcome
+	for _, lp := range pp.plugins {
+		if !hasHook(lp.manifest, "run_on_tick") {
+			continue
+		}
+		if !lp.plugin.HasGrant("env.background_tick") {
+			// Not an error worth logging every tick: an unapproved capability
+			// is ordinary operator state, and the plugin is already listed as
+			// requesting it in the control plane.
+			continue
+		}
+		var outBytes []byte
+		if err := lp.plugin.CallRequest(ctx, "run_on_tick", reqID, inBytes, &outBytes); err != nil {
+			log.Printf("[plugin] %s run_on_tick: %v", lp.manifest.Name, err)
+			continue
+		}
+		if len(outBytes) == 0 {
+			continue // nothing to do this tick
+		}
+		var res pb.TickResult
+		if err := proto.Unmarshal(outBytes, &res); err != nil {
+			log.Printf("[plugin] %s run_on_tick: unmarshal: %v", lp.manifest.Name, err)
+			continue
+		}
+		// Explicit handled flag required — see proto comment.
+		if !res.Handled {
+			continue
+		}
+		outcomes = append(outcomes, TickOutcome{
+			Plugin:  lp.manifest.Name,
+			Actions: int(res.Actions),
+			Note:    res.Note,
+		})
+	}
+	return outcomes
+}
+
+// TicksEnabled reports whether any loaded plugin both declares run_on_tick and
+// holds the grant, so the host can skip scheduling entirely when nothing wants
+// it.
+func (pp *PluginPipeline) TicksEnabled() bool {
+	if pp == nil {
+		return false
+	}
+	pp.Acquire()
+	defer pp.Release()
+	for _, lp := range pp.plugins {
+		if hasHook(lp.manifest, "run_on_tick") && lp.plugin.HasGrant("env.background_tick") {
+			return true
+		}
+	}
+	return false
 }
 
 // ============================================================================

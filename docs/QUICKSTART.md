@@ -122,6 +122,23 @@ curl http://localhost:8080/health   # {"status":"ok"}
 curl http://localhost:8080/stats    # compaction counters
 ```
 
+Once traffic has flowed, `torana conversations` lists what the proxy has seen:
+
+```
+ID            LAST ACTIVE  TURNS  MODEL              CACHE
+a3f9c2e1      2m ago       12     claude-sonnet-4-5  118k cached
+7b1e04aa      41m ago      3      gemini-2.5-pro     62k written
+```
+
+The CACHE column is the provider's own accounting, and it is the quickest way to
+tell whether prompt caching is working for you: **cached** means the prefix was
+served from cache, **written** means it had to be rebuilt. A conversation that
+resumes after a pause and shows "written" paid full price for history it had
+already sent. See [Prompt caching](PROMPT_CACHING.md).
+
+Torana records identifiers, timestamps and token counts here — never message
+content.
+
 ### Aider
 ```bash
 export OPENAI_API_BASE=http://localhost:8080/provider/deepseek/v1

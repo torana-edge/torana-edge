@@ -34,6 +34,18 @@ func TestHandler(t *testing.T) {
 		t.Errorf("body missing expected title string")
 	}
 
+	// The settings form renders six fields per provider but saves a whole
+	// provider object, so it must start from the stored one or it deletes
+	// everything it does not render (pricing, cache semantics). The server
+	// enforces this too — see TestSettingsSaveKeepsPricing, which is the real
+	// guarantee — but losing it here means every save makes a pointless
+	// round-trip through the preservation path, so pin the anchor.
+	for _, marker := range []string{"dataset.originalName", "tr.dataset.originalName"} {
+		if !strings.Contains(string(body), marker) {
+			t.Errorf("settings form lost its stored-provider anchor: missing %q", marker)
+		}
+	}
+
 	for _, asset := range []struct {
 		path   string
 		marker string

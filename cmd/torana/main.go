@@ -14,6 +14,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/torana-edge/torana-edge/internal/conversationcmd"
 	"github.com/torana-edge/torana-edge/internal/metrics"
 	"github.com/torana-edge/torana-edge/internal/plugincmd"
 	"github.com/torana-edge/torana-edge/internal/provider"
@@ -34,8 +35,15 @@ func main() {
 		}
 		return
 	}
+	if len(os.Args) > 1 && os.Args[1] == "conversations" {
+		if err := conversationcmd.Run(os.Args[1:], os.Stdout, os.Stderr); err != nil {
+			log.Printf("conversations command: %v", err)
+			os.Exit(2)
+		}
+		return
+	}
 	if len(os.Args) > 1 && os.Args[1] != "serve" {
-		log.Printf("unknown command %q (run without arguments or use: torana serve | torana plugin ...)", os.Args[1])
+		log.Printf("unknown command %q (run without arguments or use: torana serve | torana plugin ... | torana conversations)", os.Args[1])
 		os.Exit(2)
 	}
 

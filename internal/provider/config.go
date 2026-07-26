@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"time"
 
 	"github.com/torana-edge/torana-edge/internal/cache"
 	"github.com/torana-edge/torana-edge/internal/economics"
@@ -33,6 +34,10 @@ type Provider struct {
 	// "*" may be used as a provider default. Torana intentionally ships no
 	// built-in rates because provider prices and cache semantics change.
 	Pricing map[string]economics.ModelPricing `json:"pricing,omitempty"`
+	// Cache declares how this provider's prompt cache behaves — lifetimes and
+	// whether reads refresh them. Neither is discoverable from the wire, and
+	// nil means unknown. See CacheConfig.
+	Cache *CacheConfig `json:"cache,omitempty"`
 }
 
 var supportedFormats = map[string]struct{}{
@@ -50,6 +55,12 @@ func (c Config) Validate() error {
 	}
 	if c.Limits.Concurrency < 0 || c.Limits.RPM < 0 {
 		return fmt.Errorf("limits must not be negative")
+	}
+	if t := c.Plugins.Runtime.TickIntervalSeconds; t != 0 && t < MinTickIntervalSeconds {
+		return fmt.Errorf(
+			"plugins.runtime.tick_interval_seconds must be 0 (disabled) or at least %d; "+
+				"%d would wake every background plugin that often, and each may spend money",
+			MinTickIntervalSeconds, t)
 	}
 	for name, configured := range c.Providers {
 		if strings.TrimSpace(name) == "" {
@@ -71,6 +82,9 @@ func (c Config) Validate() error {
 			}
 		}
 		if err := configured.ValidateResponsesCompaction(name); err != nil {
+			return err
+		}
+		if err := configured.ValidateCache(name); err != nil {
 			return err
 		}
 	}
@@ -168,6 +182,123 @@ type ResponsesCompactionConfig struct {
 	CompactThreshold int `json:"compact_threshold"`
 }
 
+// CacheConfig describes how a provider's prompt cache behaves. Torana knows the
+// prices from Pricing but cannot know the cache's lifetime or whether reading
+// refreshes it, and neither is discoverable from the wire — so an operator
+// declares it once per provider.
+//
+// This is deliberately not keyed to a provider name. A provider that vends chat
+// completions while pricing and caching like Anthropic gets the same treatment
+// as Anthropic, which is the whole reason the setting is configuration rather
+// than a built-in table.
+//
+// A nil configuration is intentionally valid and means "cache behaviour
+// unknown", under which anything that would spend money on the cache must
+// decline to act rather than guess.
+type CacheConfig struct {
+	// RefreshOnRead reports whether reading a cache entry restarts its clock.
+	// When false there is nothing a periodic request can do to keep an entry
+	// alive — the case for providers doing automatic prefix caching, where the
+	// lifetime is not under the caller's control.
+	RefreshOnRead bool `json:"refresh_on_read"`
+
+	// Tiers are the cache lifetimes this provider sells, ascending by TTL.
+	// Anthropic offers two (5 minutes and 1 hour) at different write prices;
+	// most providers offer one or none.
+	Tiers []CacheTier `json:"tiers,omitempty"`
+
+	// WarmIntervalSeconds is how often a refresh request should be sent to hold
+	// the shortest tier open. Zero selects 80% of that tier's TTL, which leaves
+	// room for latency and clock skew without wasting requests.
+	WarmIntervalSeconds int `json:"warm_interval_seconds,omitempty"`
+}
+
+// CacheTier is one purchasable cache lifetime.
+type CacheTier struct {
+	TTLSeconds int `json:"ttl_seconds"`
+
+	// WriteMultiplier is the cost of writing this tier relative to the model's
+	// base input rate (Anthropic: 1.25 for 5 minutes, 2.0 for 1 hour). It is a
+	// multiplier rather than an absolute rate because it holds across models
+	// while the base rate does not.
+	WriteMultiplier float64 `json:"write_multiplier"`
+
+	// Marker is the provider-specific breakpoint value that selects this tier,
+	// stored opaquely exactly as the IR carries cache breakpoints — e.g.
+	// {"type":"ephemeral"} or {"type":"ephemeral","ttl":"1h"}. Torana never
+	// interprets it; it only places it.
+	Marker map[string]any `json:"marker,omitempty"`
+}
+
+// ShortestTier returns the tier with the smallest TTL, which is the one a
+// refresh loop races against.
+func (c *CacheConfig) ShortestTier() (CacheTier, bool) {
+	if c == nil || len(c.Tiers) == 0 {
+		return CacheTier{}, false
+	}
+	best := c.Tiers[0]
+	for _, t := range c.Tiers[1:] {
+		if t.TTLSeconds < best.TTLSeconds {
+			best = t
+		}
+	}
+	return best, true
+}
+
+// WarmInterval returns how often to refresh, defaulting to 80% of the shortest
+// tier's TTL. Zero means warming is not possible for this provider.
+func (c *CacheConfig) WarmInterval() time.Duration {
+	if c == nil || !c.RefreshOnRead {
+		return 0
+	}
+	shortest, ok := c.ShortestTier()
+	if !ok {
+		return 0
+	}
+	if c.WarmIntervalSeconds > 0 {
+		return time.Duration(c.WarmIntervalSeconds) * time.Second
+	}
+	return time.Duration(shortest.TTLSeconds) * time.Second * 4 / 5
+}
+
+// ValidateCache rejects cache declarations that cannot mean anything.
+// A nil configuration is intentionally valid and means disabled.
+func (p Provider) ValidateCache(name string) error {
+	if p.Cache == nil {
+		return nil
+	}
+	c := p.Cache
+	if len(c.Tiers) == 0 {
+		return fmt.Errorf("provider %q cache requires at least one tier", name)
+	}
+	seen := make(map[int]struct{}, len(c.Tiers))
+	for i, t := range c.Tiers {
+		if t.TTLSeconds <= 0 {
+			return fmt.Errorf("provider %q cache.tiers[%d].ttl_seconds must be positive", name, i)
+		}
+		if _, dup := seen[t.TTLSeconds]; dup {
+			return fmt.Errorf("provider %q cache.tiers has two tiers with ttl_seconds %d", name, t.TTLSeconds)
+		}
+		seen[t.TTLSeconds] = struct{}{}
+		if t.WriteMultiplier < 0 {
+			return fmt.Errorf("provider %q cache.tiers[%d].write_multiplier cannot be negative", name, i)
+		}
+	}
+	// An interval at or beyond the TTL never refreshes anything, but still pays
+	// for every request it sends — a silent money drain, so it is rejected here
+	// rather than discovered on a bill.
+	if c.WarmIntervalSeconds > 0 {
+		shortest, _ := c.ShortestTier()
+		if c.WarmIntervalSeconds >= shortest.TTLSeconds {
+			return fmt.Errorf(
+				"provider %q cache.warm_interval_seconds (%d) must be less than the shortest tier's ttl_seconds (%d), "+
+					"or refreshes always arrive after the entry has expired",
+				name, c.WarmIntervalSeconds, shortest.TTLSeconds)
+		}
+	}
+	return nil
+}
+
 // ValidateResponsesCompaction rejects configured-but-ineffective thresholds.
 // A nil configuration is intentionally valid and means disabled.
 func (p Provider) ValidateResponsesCompaction(name string) error {
@@ -236,6 +367,44 @@ type PluginRuntimeConfig struct {
 	PoolSize       int    `json:"pool_size,omitempty"`
 	CallTimeoutMS  int    `json:"call_timeout_ms,omitempty"`
 	MemoryLimitMiB uint32 `json:"memory_limit_mib,omitempty"`
+	// TickIntervalSeconds is how often run_on_tick fires. Zero disables ticks
+	// entirely, which is the default: background execution is opt-in, and a
+	// proxy nobody configured for it should never run plugin code outside a
+	// request. Ignored when no loaded plugin holds env.background_tick.
+	TickIntervalSeconds int `json:"tick_interval_seconds,omitempty"`
+	// Egress bounds what each plugin may spend on its own provider requests,
+	// keyed by plugin name. A plugin with no entry cannot send at all: a
+	// capability that spends money should stay unusable until an operator has
+	// said how much.
+	Egress map[string]EgressBudget `json:"egress,omitempty"`
+}
+
+// EgressBudget bounds one plugin's self-originated provider requests.
+type EgressBudget struct {
+	// MaxCallsPerMinute is a hard ceiling on request rate. Zero disables egress
+	// for this plugin.
+	MaxCallsPerMinute int `json:"max_calls_per_minute,omitempty"`
+	// MaxTokensPerHour bounds provider-reported tokens. Zero means unlimited
+	// within the call-rate ceiling.
+	MaxTokensPerHour int64 `json:"max_tokens_per_hour,omitempty"`
+}
+
+// EgressBudgetFor returns a plugin's budget, or the zero budget (no egress).
+func (p PluginRuntimeConfig) EgressBudgetFor(plugin string) EgressBudget {
+	return p.Egress[plugin]
+}
+
+// MinTickIntervalSeconds floors the tick cadence. A tick wakes every
+// background plugin, and each may spend money; a one-second interval is far
+// more likely to be a typo than an intention.
+const MinTickIntervalSeconds = 10
+
+// TickInterval returns the configured cadence, or zero when ticks are off.
+func (p PluginRuntimeConfig) TickInterval() time.Duration {
+	if p.TickIntervalSeconds <= 0 {
+		return 0
+	}
+	return time.Duration(p.TickIntervalSeconds) * time.Second
 }
 
 type PluginApproval struct {
@@ -326,6 +495,9 @@ func Load(path string) (Config, error) {
 	}
 	for name, p := range cfg.Providers {
 		if err := p.ValidateResponsesCompaction(name); err != nil {
+			return cfg, err
+		}
+		if err := p.ValidateCache(name); err != nil {
 			return cfg, err
 		}
 	}

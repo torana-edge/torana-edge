@@ -142,6 +142,8 @@ var pluginListSchema = json.RawMessage(`{"type":"object","required":["dir","plug
 var statsSchema = json.RawMessage(`{"type":"object","required":["total_requests","total_bytes_in","total_bytes_out","total_tokens_in","total_tokens_out"],"properties":{"total_requests":{"type":"integer"},"total_bytes_in":{"type":"integer"},"total_bytes_out":{"type":"integer"},"total_tokens_in":{"type":"integer"},"total_tokens_out":{"type":"integer"},"total_cache_read_tokens":{"type":"integer"},"total_cache_write_tokens":{"type":"integer"},"compactions":{"type":"integer"},"bytes_saved":{"type":"integer"}},"additionalProperties":true}`)
 var feedSchema = json.RawMessage(`{"type":"array","items":{"type":"object","required":["timestamp","provider","model","status","latency_ms","tokens_in","tokens_out","bytes_in","bytes_out"],"properties":{"timestamp":{"type":"string"},"provider":{"type":"string"},"model":{"type":"string"},"status":{"type":"integer"},"latency_ms":{"type":"number"},"tokens_in":{"type":"integer"},"tokens_out":{"type":"integer"},"bytes_in":{"type":"integer"},"bytes_out":{"type":"integer"}},"additionalProperties":true}}`)
 
+var conversationsSchema = json.RawMessage(`{"type":"object","required":["conversations"],"properties":{"conversations":{"type":"array","items":{"type":"object","required":["id","cache_prefix_key","provider","model","last_active","turns"],"properties":{"id":{"type":"string"},"cache_prefix_key":{"type":"string"},"provider":{"type":"string"},"model":{"type":"string"},"format":{"type":"string"},"path":{"type":"string"},"first_seen":{"type":"string"},"last_active":{"type":"string"},"turns":{"type":"integer"},"last_cache_read":{"type":"integer"},"last_cache_write":{"type":"integer"}},"additionalProperties":true}}},"additionalProperties":true}`)
+
 func writeAgentJSON(w http.ResponseWriter, status int, value any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
@@ -236,6 +238,12 @@ func builtInAgentOperations() []agentAPIOperation {
 			Path: "/_torana/api/v1/feed", Description: "Read the bounded recent request-event snapshot, newest first.",
 			Risk: "read", Idempotent: true, ContentType: "application/json",
 			OutputSchema: feedSchema,
+		},
+		{
+			ID: "torana.conversations.list", Method: http.MethodGet,
+			Path: "/_torana/api/v1/conversations", Description: "List conversations seen recently, most recently active first. Metadata only — no message content.",
+			Risk: "read", Idempotent: true, ContentType: "application/json",
+			OutputSchema: conversationsSchema,
 		},
 	}
 }
