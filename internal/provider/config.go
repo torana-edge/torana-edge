@@ -372,6 +372,26 @@ type PluginRuntimeConfig struct {
 	// proxy nobody configured for it should never run plugin code outside a
 	// request. Ignored when no loaded plugin holds env.background_tick.
 	TickIntervalSeconds int `json:"tick_interval_seconds,omitempty"`
+	// Egress bounds what each plugin may spend on its own provider requests,
+	// keyed by plugin name. A plugin with no entry cannot send at all: a
+	// capability that spends money should stay unusable until an operator has
+	// said how much.
+	Egress map[string]EgressBudget `json:"egress,omitempty"`
+}
+
+// EgressBudget bounds one plugin's self-originated provider requests.
+type EgressBudget struct {
+	// MaxCallsPerMinute is a hard ceiling on request rate. Zero disables egress
+	// for this plugin.
+	MaxCallsPerMinute int `json:"max_calls_per_minute,omitempty"`
+	// MaxTokensPerHour bounds provider-reported tokens. Zero means unlimited
+	// within the call-rate ceiling.
+	MaxTokensPerHour int64 `json:"max_tokens_per_hour,omitempty"`
+}
+
+// EgressBudgetFor returns a plugin's budget, or the zero budget (no egress).
+func (p PluginRuntimeConfig) EgressBudgetFor(plugin string) EgressBudget {
+	return p.Egress[plugin]
 }
 
 // MinTickIntervalSeconds floors the tick cadence. A tick wakes every

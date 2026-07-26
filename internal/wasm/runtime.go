@@ -467,6 +467,12 @@ type Runtime struct {
 	// model, what the prompt cache costs and how long it lives. Data, not a
 	// decision — the host holds the prices, the plugin holds the policy.
 	CachePricingFunc func(ctx context.Context, payloadJSON string) string
+
+	// SendRequestFunc backs torana_send_request: a plugin-originated provider
+	// request. The plugin name is passed so the host can meter it against that
+	// plugin's budget and attribute it in the feed — spend a plugin initiates
+	// must still be traceable to the plugin that initiated it.
+	SendRequestFunc func(ctx context.Context, plugin, payloadJSON string) string
 }
 
 // ObserveRequestMutation forwards a defensive copy to the host callback.
@@ -800,6 +806,12 @@ func (r *Runtime) installHostFunctions() {
 			// busts the provider's prompt cache on every turn. See
 			// PLUGIN_SEMANTICS §6.
 			res = strconv.FormatInt(time.Now().UnixMilli(), 10)
+		case "torana_send_request":
+			if r.SendRequestFunc == nil {
+				res = `{"status":"error","message":"plugin egress is not configured"}`
+			} else {
+				res = r.SendRequestFunc(ctx, pluginName, args)
+			}
 		case "torana_cache_pricing":
 			if r.CachePricingFunc == nil {
 				res = `{"status":"unavailable","reason":"pricing_unconfigured"}`

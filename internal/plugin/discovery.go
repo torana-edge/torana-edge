@@ -122,6 +122,7 @@ var supportedPermissions = map[string]struct{}{
 	"env.host_call.torana_offload_completion":  {},
 	"env.host_call.torana_plugin_counter":      {},
 	"env.host_call.torana_record_savings":      {},
+	"env.host_call.torana_send_request":        {},
 	"env.host_call.verify_virtual_key":         {},
 	"env.log":                                  {},
 	"env.meta_get":                             {},

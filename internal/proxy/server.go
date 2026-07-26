@@ -163,6 +163,9 @@ type Server struct {
 	// pluginState is durable per-plugin storage (env.state_*), kept beside the
 	// managed config. Nil when there is no config path to anchor it to.
 	pluginState *pluginstate.Store
+	// egress meters plugin-originated provider requests against per-plugin
+	// budgets, so a plugin cannot spend without a ceiling an operator set.
+	egress *egressMeter
 }
 
 type routeContextKey struct{}
@@ -495,6 +498,7 @@ func New(cfg Config) (*Server, error) {
 		rateLimiter:   NewRateLimiter(cfg.Providers.Limits.RPM, cfg.Providers.Limits.Concurrency),
 		conversations: conversation.New(conversation.Options{}),
 		pluginState:   stateStore,
+		egress:        newEgressMeter(),
 	}
 
 	// --- offload validation (fail fast on misconfiguration) ---------------
@@ -2357,6 +2361,7 @@ func (s *Server) newRuntime() *wasm.Runtime {
 		rt.StateKeysFunc = s.pluginState.Keys
 	}
 	rt.CachePricingFunc = s.cachePricing
+	rt.SendRequestFunc = s.sendPluginRequest
 	// Pristine request/response snapshots (env.original_request /
 	// env.original_response), read from the request state the same
 	// way offload does.
