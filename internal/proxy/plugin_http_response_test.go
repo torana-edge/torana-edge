@@ -6,13 +6,11 @@ import (
 	"testing"
 )
 
-func TestApplyPluginResponseHeadersFiltersSecurityAndCookieHeaders(t *testing.T) {
+func TestApplyPluginResponseHeadersAllowsOnlyPresentationMetadata(t *testing.T) {
 	headers := make(http.Header)
 	err := applyPluginResponseHeaders(headers, []byte(`{
 		"Content-Type":["text/html; charset=utf-8"],
-		"Set-Cookie":["session=secret"],
-		"Content-Security-Policy":["default-src *"],
-		"X-Frame-Options":["ALLOWALL"]
+		"Content-Language":["en"]
 	}`))
 	if err != nil {
 		t.Fatalf("apply headers: %v", err)
@@ -20,9 +18,13 @@ func TestApplyPluginResponseHeadersFiltersSecurityAndCookieHeaders(t *testing.T)
 	if got := headers.Get("Content-Type"); got != "text/html; charset=utf-8" {
 		t.Fatalf("content type = %q", got)
 	}
-	for _, forbidden := range []string{"Set-Cookie", "Content-Security-Policy", "X-Frame-Options"} {
-		if got := headers.Get(forbidden); got != "" {
-			t.Fatalf("%s escaped filter: %q", forbidden, got)
+	for _, forbidden := range []string{
+		"Set-Cookie", "Content-Security-Policy", "X-Frame-Options",
+		"Access-Control-Allow-Origin", "Content-Length", "Content-Encoding",
+	} {
+		encoded := []byte(`{"` + forbidden + `":["unsafe"]}`)
+		if err := applyPluginResponseHeaders(make(http.Header), encoded); err == nil {
+			t.Fatalf("%s was accepted", forbidden)
 		}
 	}
 }

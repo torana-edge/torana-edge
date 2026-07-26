@@ -51,26 +51,17 @@ const secretSetSentinel = "__set__"
 const maxPluginResponseHeaders = 64
 const maxPluginResponseHeaderBytes = 16 * 1024
 
-var forbiddenPluginResponseHeaders = map[string]struct{}{
-	"Connection":              {},
-	"Content-Security-Policy": {},
-	"Cookie":                  {},
-	"Keep-Alive":              {},
-	"Permissions-Policy":      {},
-	"Proxy-Authenticate":      {},
-	"Proxy-Authorization":     {},
-	"Set-Cookie":              {},
-	"Te":                      {},
-	"Trailer":                 {},
-	"Transfer-Encoding":       {},
-	"Upgrade":                 {},
-	"X-Content-Type-Options":  {},
-	"X-Frame-Options":         {},
+var allowedPluginResponseHeaders = map[string]struct{}{
+	"Content-Language": {},
+	"Content-Type":     {},
 }
 
 func applyPluginResponseHeaders(dst http.Header, encoded []byte) error {
 	if len(encoded) == 0 {
 		return nil
+	}
+	if len(encoded) > maxPluginResponseHeaderBytes {
+		return fmt.Errorf("encoded response headers too large")
 	}
 	var headers map[string][]string
 	if err := json.Unmarshal(encoded, &headers); err != nil {
@@ -85,8 +76,8 @@ func applyPluginResponseHeaders(dst http.Header, encoded []byte) error {
 		if canonical == "" || !httpguts.ValidHeaderFieldName(canonical) {
 			return fmt.Errorf("invalid header name")
 		}
-		if _, forbidden := forbiddenPluginResponseHeaders[canonical]; forbidden {
-			continue
+		if _, allowed := allowedPluginResponseHeaders[canonical]; !allowed {
+			return fmt.Errorf("response header %q is not allowed", canonical)
 		}
 		for _, value := range values {
 			total += len(canonical) + len(value)
@@ -1167,41 +1158,52 @@ func New(cfg Config) (*Server, error) {
 				orderIdx[n] = i
 			}
 			type pluginInfo struct {
-				ID          string                   `json:"id"`
-				Name        string                   `json:"name"`
-				Version     string                   `json:"version"`
-				Digest      string                   `json:"digest"`
-				FailureMode string                   `json:"failure_mode"`
-				Description string                   `json:"description"`
-				Hooks       []string                 `json:"hooks"`
-				Permissions []string                 `json:"permissions"`
-				Enabled     bool                     `json:"enabled"`
-				Order       int                      `json:"order"`
-				ServesHTTP  bool                     `json:"serves_http"`
-				Schema      *plugin.ConfigSchema     `json:"schema,omitempty"`
-				Config      json.RawMessage          `json:"config,omitempty"`
-				Approval    *provider.PluginApproval `json:"approval,omitempty"`
+				ID           string                   `json:"id"`
+				Name         string                   `json:"name"`
+				Version      string                   `json:"version"`
+				Digest       string                   `json:"digest"`
+				FailureMode  string                   `json:"failure_mode"`
+				Description  string                   `json:"description"`
+				Hooks        []string                 `json:"hooks"`
+				Permissions  []string                 `json:"permissions"`
+				Enabled      bool                     `json:"enabled"`
+				Order        int                      `json:"order"`
+				State        string                   `json:"state"`
+				Loaded       bool                     `json:"loaded"`
+				LoadedDigest string                   `json:"loaded_digest,omitempty"`
+				ServesHTTP   bool                     `json:"serves_http"`
+				Schema       *plugin.ConfigSchema     `json:"schema,omitempty"`
+				Agent        *plugin.AgentDescriptor  `json:"agent,omitempty"`
+				LoadedAgent  *plugin.AgentDescriptor  `json:"loaded_agent,omitempty"`
+				Config       json.RawMessage          `json:"config,omitempty"`
+				Approval     *provider.PluginApproval `json:"approval,omitempty"`
 			}
-			bundles, _ := plugin.DiscoverPlugins(cur.Dir)
+			loadedByName := make(map[string]plugin.LoadedPluginStatus)
+			if rawPipeline := s.pluginPipeline.Load(); rawPipeline != nil {
+				pipeline := rawPipeline.(*plugin.PluginPipeline)
+				if pipeline.TryAcquire() {
+					for _, status := range pipeline.LoadedPlugins() {
+						loadedByName[status.Name] = status
+					}
+					pipeline.Release()
+				}
+			}
+			bundles, discoveryErr := plugin.DiscoverPlugins(cur.Dir)
+			if discoveryErr != nil {
+				http.Error(w, "plugin discovery failed", http.StatusInternalServerError)
+				return
+			}
 			infos := make([]pluginInfo, 0, len(bundles))
 			seen := make(map[string]bool, len(bundles))
 			for _, b := range bundles {
 				m := b.Manifest
 				hooks := make([]string, 0, len(m.Hooks))
-				servesHTTPHook := false
 				for _, h := range m.Hooks {
 					hooks = append(hooks, h.Name)
-					if h.Name == "run_on_http_request" {
-						servesHTTPHook = true
-					}
 				}
 				perms := make([]string, 0, len(m.Permissions))
-				hasServeGrant := false
 				for _, p := range m.Permissions {
 					perms = append(perms, p.Name)
-					if p.Name == "env.serve_http" {
-						hasServeGrant = true
-					}
 				}
 				idx, enabled := orderIdx[m.Name]
 				approval, approved := cur.Approvals[m.ID]
@@ -1214,21 +1216,37 @@ func New(cfg Config) (*Server, error) {
 					copy.Permissions = append([]string(nil), approval.Permissions...)
 					approvalPtr = &copy
 				}
+				loadedStatus, loaded := loadedByName[m.Name]
+				state := "disabled"
+				if enabled {
+					state = "unavailable"
+					if loaded {
+						state = "current"
+						if loadedStatus.Digest != b.Digest {
+							state = "stale"
+						}
+					}
+				}
 				infos = append(infos, pluginInfo{
-					ID:          m.ID,
-					Name:        m.Name,
-					Version:     m.Version,
-					Digest:      b.Digest,
-					FailureMode: m.FailureMode,
-					Description: m.Description,
-					Hooks:       hooks,
-					Permissions: perms,
-					Enabled:     enabled,
-					Order:       idx,
-					ServesHTTP:  servesHTTPHook && hasServeGrant,
-					Schema:      b.Schema,
-					Config:      cur.Config[m.Name],
-					Approval:    approvalPtr,
+					ID:           m.ID,
+					Name:         m.Name,
+					Version:      m.Version,
+					Digest:       b.Digest,
+					FailureMode:  m.FailureMode,
+					Description:  m.Description,
+					Hooks:        hooks,
+					Permissions:  perms,
+					Enabled:      enabled,
+					Order:        idx,
+					State:        state,
+					Loaded:       loaded,
+					LoadedDigest: loadedStatus.Digest,
+					ServesHTTP:   loaded && loadedStatus.ServesHTTP,
+					Schema:       b.Schema,
+					Agent:        b.Agent,
+					LoadedAgent:  loadedStatus.Agent,
+					Config:       cur.Config[m.Name],
+					Approval:     approvalPtr,
 				})
 				seen[m.Name] = true
 			}
@@ -1236,11 +1254,19 @@ func New(cfg Config) (*Server, error) {
 			// see and remove a stale pipeline entry from the UI.
 			for _, n := range cur.Order {
 				if !seen[n] {
+					loadedStatus, loaded := loadedByName[n]
 					infos = append(infos, pluginInfo{
-						Name:    n,
-						Enabled: true,
-						Order:   orderIdx[n],
-						Config:  cur.Config[n],
+						Name:         n,
+						Enabled:      true,
+						Order:        orderIdx[n],
+						State:        "missing",
+						Loaded:       loaded,
+						LoadedDigest: loadedStatus.Digest,
+						ServesHTTP:   loaded && loadedStatus.ServesHTTP,
+						Hooks:        []string{},
+						Permissions:  []string{},
+						LoadedAgent:  loadedStatus.Agent,
+						Config:       cur.Config[n],
 					})
 				}
 			}
@@ -1550,8 +1576,7 @@ func New(cfg Config) (*Server, error) {
 			Body:        bodyBytes,
 		}
 
-		reqID := reqCounter.Add(1)
-		resp, err := pp.RunOnHTTPRequest(r.Context(), reqID, pluginName, httpReq)
+		resp, err := dispatchPluginHTTPRequest(r.Context(), pp, pluginName, httpReq)
 		if err != nil {
 			if errors.Is(err, plugin.ErrServeHTTPForbidden) {
 				http.Error(w, "plugin lacks env.serve_http permission", http.StatusForbidden)
@@ -1563,6 +1588,10 @@ func New(cfg Config) (*Server, error) {
 		}
 		if resp == nil {
 			http.Error(w, "plugin not found or did not handle request", http.StatusNotFound)
+			return
+		}
+		if len(resp.Body) > maxBodySize {
+			http.Error(w, "plugin response body too large", http.StatusBadGateway)
 			return
 		}
 
@@ -1600,21 +1629,46 @@ func New(cfg Config) (*Server, error) {
 	mux.HandleFunc("/_torana/api/v1", s.controlPlaneGuard(func(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/_torana/api/v1/", http.StatusMovedPermanently)
 	}))
+	// Enabled plugins may contribute digest-bound, JSON-only agent operations
+	// through agent.json. Dispatch still uses the existing isolated
+	// run_on_http_request hook and env.serve_http approval.
+	mux.HandleFunc("/_torana/api/v1/agent/plugins/", s.controlPlaneGuard(s.handlePluginAgentOperation))
 	mux.HandleFunc("/_torana/api/v1/", s.controlPlaneGuard(func(w http.ResponseWriter, r *http.Request) {
 		legacyPath := strings.TrimPrefix(r.URL.Path, "/_torana/api/v1")
-		if legacyPath == "/stats" {
-			statsHandler(w, r)
+		if legacyPath == "/" || legacyPath == "/agent" {
+			if r.Method != http.MethodGet {
+				w.Header().Set("Allow", http.MethodGet)
+				writeAgentError(w, http.StatusMethodNotAllowed, "method_not_allowed", "discovery only supports GET")
+				return
+			}
+			writeAgentJSON(w, http.StatusOK, s.agentAPIDiscovery())
 			return
 		}
-		if legacyPath == "/" {
-			http.Error(w, "not found", http.StatusNotFound)
+		if legacyPath == "/stats" {
+			captured := newBufferedAgentResponse()
+			statsHandler(captured, r)
+			flushAgentResponse(w, captured)
 			return
 		}
 		clone := r.Clone(r.Context())
 		urlCopy := *r.URL
 		clone.URL = &urlCopy
 		clone.URL.Path = "/_torana/api" + legacyPath
-		mux.ServeHTTP(w, clone)
+		// Preserve streaming semantics for SSE. All bounded v1 responses pass
+		// through a small adapter that turns legacy text errors into the stable
+		// JSON error envelope advertised to agents.
+		if legacyPath == "/stream" {
+			if r.Method != http.MethodGet {
+				w.Header().Set("Allow", http.MethodGet)
+				writeAgentError(w, http.StatusMethodNotAllowed, "method_not_allowed", "stream only supports GET")
+				return
+			}
+			mux.ServeHTTP(w, clone)
+			return
+		}
+		captured := newBufferedAgentResponse()
+		mux.ServeHTTP(captured, clone)
+		flushAgentResponse(w, captured)
 	}))
 
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {

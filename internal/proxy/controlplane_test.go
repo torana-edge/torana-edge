@@ -360,6 +360,8 @@ func TestControlPlaneGuard(t *testing.T) {
 			"/_torana/api/stream",
 			"/_torana/api/config",
 			"/_torana/api/plugins",
+			"/_torana/api/v1/",
+			"/_torana/api/v1/agent/plugins/test/status",
 			"/_torana/plugin/test",
 		}
 		for _, ep := range endpoints {
