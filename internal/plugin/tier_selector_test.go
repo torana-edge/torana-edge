@@ -45,6 +45,12 @@ func tierSelectorPipeline(t *testing.T, refreshOnRead bool, readRate, writeRate 
 			"refresh_on_read":          refreshOnRead,
 			"shortest_ttl_seconds":     300,
 			"warm_interval_seconds":    240,
+			"tiers": []any{
+				map[string]any{"ttl_seconds": 300, "write_multiplier": 1.25,
+					"marker": map[string]any{"type": "ephemeral"}},
+				map[string]any{"ttl_seconds": 3600, "write_multiplier": 2.0,
+					"marker": map[string]any{"type": "ephemeral", "ttl": "1h"}},
+			},
 		})
 		return string(b)
 	}
@@ -85,7 +91,7 @@ func tierSelectorPipelineWithMode(t *testing.T, mode string) *PluginPipeline {
 	rt.StateSetFunc = state.Set
 	rt.CachePricingFunc = func(_ context.Context, _ string) string {
 		return `{"status":"ok","refresh_on_read":true,"shortest_ttl_seconds":300,` +
-			`"write_read_ratio":12.5,"break_even_refreshes":11}`
+			`"write_read_ratio":12.5,"break_even_refreshes":11,` + anthropicTiers + `}`
 	}
 
 	pp, err := NewPipeline(rt, PluginConfig{
@@ -101,6 +107,14 @@ func tierSelectorPipelineWithMode(t *testing.T, mode string) *PluginPipeline {
 	}
 	return pp
 }
+
+// anthropicTiers is the two-lifetime menu the plugin chooses between. It has to
+// be present for the plugin to do anything: since it stopped hard-coding one
+// provider's markers it reads them from here, and a provider selling a single
+// lifetime correctly has no decision to make.
+const anthropicTiers = `"tiers":[` +
+	`{"ttl_seconds":300,"write_multiplier":1.25,"marker":{"type":"ephemeral"}},` +
+	`{"ttl_seconds":3600,"write_multiplier":2.0,"marker":{"type":"ephemeral","ttl":"1h"}}]`
 
 // tierRequest is a conversation with a breakpoint after the system prompt.
 func tierRequest(provider string) *engine.ChatRequest {
@@ -260,7 +274,7 @@ func TestOffModeDoesNothing(t *testing.T) {
 	rt.StateGetFunc = state.Get
 	rt.StateSetFunc = state.Set
 	rt.CachePricingFunc = func(_ context.Context, _ string) string {
-		return `{"status":"ok","refresh_on_read":true,"shortest_ttl_seconds":300,"write_read_ratio":12.5}`
+		return `{"status":"ok","refresh_on_read":true,"shortest_ttl_seconds":300,"write_read_ratio":12.5,` + anthropicTiers + `}`
 	}
 
 	pp, err := NewPipeline(rt, PluginConfig{
@@ -300,7 +314,7 @@ func TestDecisionSurvivesRestart(t *testing.T) {
 		rt.StateGetFunc = state.Get
 		rt.StateSetFunc = state.Set
 		rt.CachePricingFunc = func(_ context.Context, _ string) string {
-			return `{"status":"ok","refresh_on_read":true,"shortest_ttl_seconds":300,"write_read_ratio":12.5,"break_even_refreshes":11}`
+			return `{"status":"ok","refresh_on_read":true,"shortest_ttl_seconds":300,"write_read_ratio":12.5,"break_even_refreshes":11,` + anthropicTiers + `}`
 		}
 		pp, err := NewPipeline(rt, PluginConfig{
 			Dir:             "../../plugins",
