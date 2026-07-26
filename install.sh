@@ -75,4 +75,20 @@ case ":${PATH}:" in
     *":${INSTALL_DIR}:"*) ;;
     *) echo "Add $INSTALL_DIR to PATH before running Torana." ;;
 esac
-echo "Run: torana"
+
+cat <<'NEXT'
+
+Torana is a proxy — on its own it forwards traffic and nothing else. The
+interesting behaviour lives in plugins, which are NOT installed with the
+gateway. Pick the ones you want:
+
+  torana plugin install --official          # the six maintained plugins
+  torana plugin install github.com/you/your-plugins/plugins/foo
+
+Plugins are compiled from source on your machine, never downloaded prebuilt,
+and none of them run until you review and approve their capabilities in the
+control plane. A Go toolchain is required to build them.
+
+  torana serve                              # then open http://127.0.0.1:8080/_torana/
+
+NEXT

@@ -32,6 +32,19 @@ try {
     New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
     Copy-Item (Join-Path $Temporary "torana.exe") (Join-Path $InstallDir "torana.exe") -Force
     Write-Host "Torana installed to $(Join-Path $InstallDir 'torana.exe')"
+    Write-Host ""
+    Write-Host "Torana is a proxy - on its own it forwards traffic and nothing else."
+    Write-Host "The interesting behaviour lives in plugins, which are NOT installed"
+    Write-Host "with the gateway. Pick the ones you want:"
+    Write-Host ""
+    Write-Host "  torana plugin install --official"
+    Write-Host "  torana plugin install github.com/you/your-plugins/plugins/foo"
+    Write-Host ""
+    Write-Host "Plugins are compiled from source on your machine, never downloaded"
+    Write-Host "prebuilt, and none run until you approve their capabilities in the"
+    Write-Host "control plane. A Go toolchain is required to build them."
+    Write-Host ""
+    Write-Host "  torana serve    # then open http://127.0.0.1:8080/_torana/"
 } finally {
     Remove-Item -Recurse -Force $Temporary -ErrorAction SilentlyContinue
 }
