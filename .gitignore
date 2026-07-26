@@ -43,3 +43,7 @@ secret.key
 
 # Vendored JS deps — restore with `npm install` (see examples/plugins/*/package.json)
 node_modules/
+
+# Scratch files — never commit these
+fix_lint.sh
+*.diff
