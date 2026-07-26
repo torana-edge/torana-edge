@@ -1009,6 +1009,11 @@
       prov = prov || {};
       const body = document.getElementById('providersBody');
       const tr = document.createElement('tr');
+      // Anchor the row to the config key it came from. saveSettings rebuilds
+      // each provider from the visible inputs only, so without this it would
+      // drop every field this form does not render (pricing, cache,
+      // responses_compaction). New rows have no anchor and no fields to keep.
+      if (name) tr.dataset.originalName = name;
       const opts = PROVIDER_FORMATS.map(f => `<option value="${f}" ${prov.format === f ? 'selected' : ''}>${f}</option>`).join('');
       tr.innerHTML = `
         <td><input class="input p-name" aria-label="Provider name" value="${escAttr(name || '')}" placeholder="name" oninput="refreshOffloadProviderOptions()"></td>
@@ -1041,10 +1046,18 @@
       document.querySelectorAll('#providersBody tr').forEach(tr => {
         const name = tr.querySelector('.p-name').value.trim();
         if (!name) return;
-        const prov = {
-          url: tr.querySelector('.p-url').value.trim(),
-          format: tr.querySelector('.p-format').value
-        };
+        // Start from the stored provider so fields this form does not render
+        // survive a save, then override only what the form owns. Renaming a
+        // provider carries its unmanaged fields across with it.
+        const original = (settingsCfg && settingsCfg.providers && tr.dataset.originalName)
+          ? settingsCfg.providers[tr.dataset.originalName] : null;
+        const prov = original ? JSON.parse(JSON.stringify(original)) : {};
+        prov.url = tr.querySelector('.p-url').value.trim();
+        prov.format = tr.querySelector('.p-format').value;
+        // A cleared field must clear, so drop the stored value up front and
+        // let the checks below re-add it only when the input is non-empty.
+        delete prov.api_key_env;
+        delete prov.fallback;
         const secretVal = getSecretFieldValue(tr.querySelector('.p-keyenc'));
         if (secretVal !== undefined) prov.api_key_enc = secretVal;
         const key = tr.querySelector('.p-key').value.trim();

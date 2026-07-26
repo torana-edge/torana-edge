@@ -1122,6 +1122,15 @@ func New(cfg Config) (*Server, error) {
 			}
 			incoming.Cache.Redis.PasswordEnc = cacheEnc
 
+			// Carry forward per-provider fields the caller did not mention.
+			// The settings form renders only six fields per provider and sends
+			// a rebuilt object, so without this an ordinary Save silently drops
+			// pricing and cache semantics — which the compactor's economic gate
+			// and the cache plugins depend on. Absent means preserve; an
+			// explicit null or empty value still clears, so the fields stay
+			// editable by any client that actually manages them.
+			preserveUnmanagedProviderFields(cur.Providers, incoming.Providers, providerFieldsSent(data))
+
 			if incoming.Providers != nil {
 				for name, incP := range incoming.Providers {
 					curP := cur.Providers[name]
@@ -1414,6 +1423,20 @@ func New(cfg Config) (*Server, error) {
 		if !json.Valid(data) {
 			http.Error(w, "invalid json body", http.StatusBadRequest)
 			return
+		}
+
+		// Check the blob against the schema the bundle declares. Until this
+		// existed, a wrong-typed value reached the guest and misbehaved
+		// silently.
+		for _, b := range bundles {
+			if b.Manifest.Name != name {
+				continue
+			}
+			if verr := plugin.ValidateConfigAgainstSchema(b.Schema, json.RawMessage(data)); verr != nil {
+				http.Error(w, verr.Error(), http.StatusBadRequest)
+				return
+			}
+			break
 		}
 
 		raw := json.RawMessage(data)
@@ -2062,6 +2085,58 @@ func (s *Server) normalizeSecretField(incomingEnc, storedEnc string) (string, er
 			return "", fmt.Errorf("secret store is not initialized")
 		}
 		return s.secrets.Encrypt(incomingEnc)
+	}
+}
+
+// providerFieldsSent reports which keys the caller actually wrote for each
+// provider, keyed by provider name. Presence is the whole point: encoding/json
+// cannot distinguish "field omitted" from "field set to its zero value", and
+// that distinction is what separates "the settings form doesn't manage pricing"
+// from "the caller means to delete pricing". A malformed or unparseable body
+// yields nil, which preserves nothing — the request will fail validation anyway.
+func providerFieldsSent(body []byte) map[string]map[string]struct{} {
+	var envelope struct {
+		Providers map[string]map[string]json.RawMessage `json:"providers"`
+	}
+	if err := json.Unmarshal(body, &envelope); err != nil {
+		return nil
+	}
+	sent := make(map[string]map[string]struct{}, len(envelope.Providers))
+	for name, fields := range envelope.Providers {
+		keys := make(map[string]struct{}, len(fields))
+		for key := range fields {
+			keys[key] = struct{}{}
+		}
+		sent[name] = keys
+	}
+	return sent
+}
+
+// unmanagedProviderFields are per-provider settings that no control-plane form
+// currently renders. A client that rebuilds a provider object from a form would
+// drop them, so they are carried forward unless explicitly written.
+var unmanagedProviderFields = []string{"pricing", "responses_compaction"}
+
+// preserveUnmanagedProviderFields copies unmanaged fields from the stored config
+// into the incoming one wherever the caller left them out. It mutates incoming.
+func preserveUnmanagedProviderFields(stored, incoming map[string]provider.Provider, sent map[string]map[string]struct{}) {
+	for name, incP := range incoming {
+		curP, existed := stored[name]
+		if !existed {
+			continue
+		}
+		for _, field := range unmanagedProviderFields {
+			if _, written := sent[name][field]; written {
+				continue
+			}
+			switch field {
+			case "pricing":
+				incP.Pricing = curP.Pricing
+			case "responses_compaction":
+				incP.ResponsesCompaction = curP.ResponsesCompaction
+			}
+		}
+		incoming[name] = incP
 	}
 }
 
