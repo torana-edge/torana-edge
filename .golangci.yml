@@ -50,14 +50,6 @@ linters:
       - linters:
           - errcheck
         path: _test\.go
-      # Go 1.26 deprecated httputil.ReverseProxy.Director. The proxy still sets
-      # it (internal/proxy/server.go), and these tests drive the same field.
-      # Migrating to Rewrite is a real change — Rewrite does not preserve the
-      # inbound Host the way Director did — so it is tracked as follow-up work
-      # rather than smuggled into a lint-config migration.
-      - linters:
-          - staticcheck
-        text: 'SA1019.*Director'
       - linters:
           - errcheck
           - staticcheck
