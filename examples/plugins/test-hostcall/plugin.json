@@ -1,18 +1,46 @@
 {
   "schema_version": 1,
+  "id": "torana-test/test-hostcall",
   "name": "test-hostcall",
   "version": "0.1.0",
+  "abi_version": "v1",
+  "minimum_torana_version": "0.1.0",
+  "failure_mode": "pass",
   "description": "Test fixture: exercises the clock, cache pricing, durable state and plugin counters, recording what the host answered",
   "hooks": [
-    {"name": "run_before_request", "priority": 100}
+    {
+      "name": "run_before_request",
+      "priority": 100
+    }
   ],
   "permissions": [
-    {"name": "env.now", "description": "Read the host clock"},
-    {"name": "env.host_call.torana_cache_pricing", "description": "Query cache pricing"},
-    {"name": "env.host_call.torana_plugin_counter", "description": "Increment a named counter"},
-    {"name": "env.state_get", "description": "Read durable state"},
-    {"name": "env.state_set", "description": "Write durable state"},
-    {"name": "env.state_keys", "description": "Enumerate durable state"},
-    {"name": "env.log", "description": "Diagnostic logging"}
+    {
+      "name": "env.now",
+      "description": "Read the host clock"
+    },
+    {
+      "name": "env.host_call.torana_cache_pricing",
+      "description": "Query cache pricing"
+    },
+    {
+      "name": "env.host_call.torana_plugin_counter",
+      "description": "Increment a named counter"
+    },
+    {
+      "name": "env.state_get",
+      "description": "Read durable state"
+    },
+    {
+      "name": "env.state_set",
+      "description": "Write durable state"
+    },
+    {
+      "name": "env.state_keys",
+      "description": "Enumerate durable state"
+    },
+    {
+      "name": "env.log",
+      "description": "Diagnostic logging"
+    }
   ]
 }

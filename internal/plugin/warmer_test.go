@@ -63,7 +63,8 @@ func okPricing() string {
 
 func newWarmerPipeline(t *testing.T, h *warmerHarness, conversations string, state *pluginstate.Store) *PluginPipeline {
 	t.Helper()
-	requireWASM(t, "../../plugins/cache_warmer/plugin.wasm")
+	dir := officialBundlesDir(t)
+	requireBundle(t, dir, "cache_warmer")
 
 	rt := wasm.NewRuntime(context.Background())
 	t.Cleanup(func() { rt.Close() })
@@ -120,7 +121,7 @@ func newWarmerPipeline(t *testing.T, h *warmerHarness, conversations string, sta
 	cfgJSON, _ := json.Marshal(cfg)
 
 	pp, err := NewPipeline(rt, PluginConfig{
-		Dir:             "../../plugins",
+		Dir:             dir,
 		Order:           []string{"cache_warmer"},
 		AllowUnapproved: true,
 		Config:          map[string]json.RawMessage{"cache_warmer": cfgJSON},
@@ -314,7 +315,8 @@ func TestWarmerSkipsPrefixEndingMidToolCall(t *testing.T) {
 //
 // Fail closed is right; failing closed with a misleading reason is not.
 func TestWarmerWithoutClockGrantStoresNothing(t *testing.T) {
-	requireWASM(t, "../../plugins/cache_warmer/plugin.wasm")
+	dir := officialBundlesDir(t)
+	requireBundle(t, dir, "cache_warmer")
 
 	rt := wasm.NewRuntime(context.Background())
 	defer rt.Close()
@@ -330,12 +332,12 @@ func TestWarmerWithoutClockGrantStoresNothing(t *testing.T) {
 		return `{"status":"ok","http_status":200,"usage":{"cache_read":95}}`
 	}
 
-	digest, err := BundleDigestForDir("../../plugins/cache_warmer")
+	digest, err := BundleDigestForDir(dir + "/cache_warmer")
 	if err != nil {
 		t.Fatal(err)
 	}
 	pp, err := NewPipeline(rt, PluginConfig{
-		Dir: "../../plugins", Order: []string{"cache_warmer"},
+		Dir: dir, Order: []string{"cache_warmer"},
 		Approvals: map[string]Approval{"torana/cache_warmer": {
 			Digest: digest,
 			// Everything the plugin asks for except env.now.

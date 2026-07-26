@@ -103,8 +103,8 @@ func registerEnvMap(t *testing.T, pp *PluginPipeline, reqID uint64, toolName str
 
 // TestStreamPassthrough: events a plugin doesn't handle flow through 1:1.
 func TestStreamPassthrough(t *testing.T) {
-	requireWASM(t, "../../plugins/schema_translator/plugin.wasm")
-	pp := newTestPipeline(t, "../../plugins", []string{"schema_translator"})
+	requireWASM(t, fixturesDir+"/test-stream-mutator/plugin.wasm")
+	pp := newTestPipeline(t, fixturesDir, []string{"test-stream-mutator"})
 
 	text := "hello"
 	out := run(t, pp, engine.StreamEvent{TextDelta: &text})
@@ -116,8 +116,9 @@ func TestStreamPassthrough(t *testing.T) {
 // TestStreamSuppressAndFanOut: argument fragments are suppressed, and
 // ToolCallEnd fans out into [complete reversed delta, end].
 func TestStreamSuppressAndFanOut(t *testing.T) {
-	requireWASM(t, "../../plugins/schema_translator/plugin.wasm")
-	pp := newTestPipeline(t, "../../plugins", []string{"schema_translator"})
+	bundles := officialBundlesDir(t)
+	requireBundle(t, bundles, "schema_translator")
+	pp := newTestPipeline(t, bundles, []string{"schema_translator"})
 
 	// Translate the schema first so env's KV-array mutation is registered.
 	registerEnvMap(t, pp, 1, "write")
@@ -175,8 +176,9 @@ func TestStreamReplace(t *testing.T) {
 // at the same tool index must not contaminate each other — the exact
 // corruption the pre-fix global meta store guaranteed under concurrency.
 func TestStreamRequestIsolation(t *testing.T) {
-	requireWASM(t, "../../plugins/schema_translator/plugin.wasm")
-	pp := newTestPipeline(t, "../../plugins", []string{"schema_translator"})
+	bundles := officialBundlesDir(t)
+	requireBundle(t, bundles, "schema_translator")
+	pp := newTestPipeline(t, bundles, []string{"schema_translator"})
 
 	// Each request translates its schema first, registering env's mutation.
 	registerEnvMap(t, pp, 1, "write")
@@ -211,8 +213,9 @@ func TestStreamRequestIsolation(t *testing.T) {
 // Only the registered path (env) is reversed; an unregistered KV-lookalike
 // array (pairs) must survive intact. The heuristic would reverse both.
 func TestRegistryPathReversal(t *testing.T) {
-	requireWASM(t, "../../plugins/schema_translator/plugin.wasm")
-	pp := newTestPipeline(t, "../../plugins", []string{"schema_translator"})
+	bundles := officialBundlesDir(t)
+	requireBundle(t, bundles, "schema_translator")
+	pp := newTestPipeline(t, bundles, []string{"schema_translator"})
 
 	const reqID = 42
 	ctx := context.Background()
@@ -267,8 +270,9 @@ func TestRegistryPathReversal(t *testing.T) {
 // [{"key","value"}] array the agent uses natively. The removed heuristic
 // fallback would have rewritten that array into a map and corrupted the call.
 func TestUnregisteredToolNotReversed(t *testing.T) {
-	requireWASM(t, "../../plugins/schema_translator/plugin.wasm")
-	pp := newTestPipeline(t, "../../plugins", []string{"schema_translator"})
+	bundles := officialBundlesDir(t)
+	requireBundle(t, bundles, "schema_translator")
+	pp := newTestPipeline(t, bundles, []string{"schema_translator"})
 
 	// No RunBeforeRequest translation for this request → empty mutation
 	// registry → nothing is registered for tool "emit".
@@ -292,9 +296,10 @@ func TestUnregisteredToolNotReversed(t *testing.T) {
 // TestStreamChaining: schema_translator fans out at ToolCallEnd; the intent
 // plugin consumes that fan-out, extracts the intent, and strips the "i" field.
 func TestStreamChaining(t *testing.T) {
-	requireWASM(t, "../../plugins/schema_translator/plugin.wasm")
-	requireWASM(t, "../../plugins/intent/plugin.wasm")
-	pp := newTestPipeline(t, "../../plugins", []string{"schema_translator", "intent"})
+	bundles := officialBundlesDir(t)
+	requireBundle(t, bundles, "schema_translator")
+	requireBundle(t, bundles, "intent")
+	pp := newTestPipeline(t, bundles, []string{"schema_translator", "intent"})
 
 	// Translate the schema first (reqID 1, matching run's default) so env's
 	// KV-array mutation is registered and reversed via the registry.
@@ -335,8 +340,9 @@ func TestStreamChaining(t *testing.T) {
 // is the fix for multi-turn intent collapse (the model imitating its own
 // "i"-stripped history).
 func TestIntentRehydratesHistory(t *testing.T) {
-	requireWASM(t, "../../plugins/intent/plugin.wasm")
-	pp := newTestPipeline(t, "../../plugins", []string{"intent"})
+	bundles := officialBundlesDir(t)
+	requireBundle(t, bundles, "intent")
+	pp := newTestPipeline(t, bundles, []string{"intent"})
 
 	// Turn 1 response: model emits a tool call carrying "i"; the plugin caches
 	// the intent under the tool_call_id and strips it from the emitted args.
@@ -399,9 +405,10 @@ func TestIntentRehydratesHistory(t *testing.T) {
 // restores 8/8). The fill is derived per request — never cached, never
 // bridged — so the intent cache stays real-captured-only.
 func TestIntentFillsUncachedHistory(t *testing.T) {
-	requireWASM(t, "../../plugins/intent/plugin.wasm")
+	bundles := officialBundlesDir(t)
+	requireBundle(t, bundles, "intent")
 	store := cache.NewLocalCache(time.Minute)
-	pp := newTestPipelineWith(t, "../../plugins", []string{"intent"}, store, nil)
+	pp := newTestPipelineWith(t, bundles, []string{"intent"}, store, nil)
 
 	mkChat := func(userMsg string) *engine.ChatRequest {
 		return &engine.ChatRequest{
@@ -453,8 +460,9 @@ func TestIntentFillsUncachedHistory(t *testing.T) {
 // TestIntentFillOff: fill "off" restores the old behavior — an uncached
 // history tool call is left untouched, no spurious "i".
 func TestIntentFillOff(t *testing.T) {
-	requireWASM(t, "../../plugins/intent/plugin.wasm")
-	pp := newTestPipelineWith(t, "../../plugins", []string{"intent"}, cache.NewLocalCache(time.Minute),
+	bundles := officialBundlesDir(t)
+	requireBundle(t, bundles, "intent")
+	pp := newTestPipelineWith(t, bundles, []string{"intent"}, cache.NewLocalCache(time.Minute),
 		map[string]json.RawMessage{"intent": json.RawMessage(`{"fill":"off"}`)})
 
 	chat := &engine.ChatRequest{
@@ -490,9 +498,10 @@ func TestIntentFillOff(t *testing.T) {
 // the tool RESULT message (and it stays stable across the session's
 // requests; verified in dogfood).
 func TestIntentBridgesToRequestSideID(t *testing.T) {
-	requireWASM(t, "../../plugins/intent/plugin.wasm")
+	bundles := officialBundlesDir(t)
+	requireBundle(t, bundles, "intent")
 	store := cache.NewLocalCache(time.Minute)
-	pp := newTestPipelineWith(t, "../../plugins", []string{"intent"}, store, nil)
+	pp := newTestPipelineWith(t, bundles, []string{"intent"}, store, nil)
 
 	// Turn 1 response: model emits the call under the response-stream ID.
 	run(t, pp, toolStart(0, "call_resp_7", "read"))
@@ -527,10 +536,11 @@ func TestIntentBridgesToRequestSideID(t *testing.T) {
 // (running first in the chain) bridges the content-key hit to the request's
 // ID before the compactor sees the request.
 func TestIntentBridgeFeedsKeywordCompactor(t *testing.T) {
-	requireWASM(t, "../../plugins/intent/plugin.wasm")
-	requireWASM(t, "../../plugins/keyword_compactor/plugin.wasm")
+	bundles := officialBundlesDir(t)
+	requireBundle(t, bundles, "intent")
+	requireBundle(t, bundles, "keyword_compactor")
 	store := cache.NewLocalCache(time.Minute)
-	pp := newTestPipelineWith(t, "../../plugins", []string{"intent", "keyword_compactor"}, store,
+	pp := newTestPipelineWith(t, bundles, []string{"intent", "keyword_compactor"}, store,
 		map[string]json.RawMessage{"keyword_compactor": json.RawMessage(`{"tool_policies":[{"match":"read","mode":"keyword"}]}`)})
 
 	// Turn 1 response: intent captured under the response-stream ID.
@@ -595,7 +605,8 @@ func TestCompactorsRespectToolResultConsumptionBoundary(t *testing.T) {
 	for _, pluginName := range []string{"keyword_compactor", "compactor"} {
 		pluginName := pluginName
 		t.Run(pluginName, func(t *testing.T) {
-			requireWASM(t, "../../plugins/"+pluginName+"/plugin.wasm")
+			bundles := officialBundlesDir(t)
+			requireBundle(t, bundles, pluginName)
 			config := map[string]json.RawMessage{
 				pluginName: json.RawMessage(`{"tool_policies":[{"match":"read","mode":"deterministic"}]}`),
 			}
@@ -646,7 +657,7 @@ func TestCompactorsRespectToolResultConsumptionBoundary(t *testing.T) {
 			} {
 				t.Run(tc.name, func(t *testing.T) {
 					store := cache.NewLocalCache(time.Minute)
-					pp := newTestPipelineWith(t, "../../plugins", []string{pluginName}, store, config)
+					pp := newTestPipelineWith(t, bundles, []string{pluginName}, store, config)
 					out, err := pp.RunBeforeRequest(context.Background(), 1, &engine.ChatRequest{Messages: tc.messages})
 					if err != nil {
 						t.Fatalf("RunBeforeRequest: %v", err)
@@ -681,7 +692,8 @@ func TestCompactorToolPolicies(t *testing.T) {
 	for _, pluginName := range []string{"keyword_compactor", "compactor"} {
 		pluginName := pluginName
 		t.Run(pluginName, func(t *testing.T) {
-			requireWASM(t, "../../plugins/"+pluginName+"/plugin.wasm")
+			bundles := officialBundlesDir(t)
+			requireBundle(t, bundles, pluginName)
 
 			t.Run("explicit first pass deterministic", func(t *testing.T) {
 				out := runToolPolicyRequest(t, pluginName,
@@ -735,7 +747,7 @@ func TestCompactorToolPolicies(t *testing.T) {
 				store := cache.NewLocalCache(time.Minute)
 				cfg := map[string]json.RawMessage{pluginName: json.RawMessage(
 					`{"tool_policies":[{"match":"web_search","mode":"deterministic","first_pass":true}]}`)}
-				pp := newTestPipelineWith(t, "../../plugins", []string{pluginName}, store, cfg)
+				pp := newTestPipelineWith(t, bundles, []string{pluginName}, store, cfg)
 				request := func() *engine.ChatRequest {
 					return &engine.ChatRequest{Messages: []engine.Message{
 						toolCallNamedMessage("replay", "web_search"), toolResultNamedMessage("replay", "web_search"),
@@ -757,7 +769,8 @@ func TestCompactorToolPolicies(t *testing.T) {
 	}
 
 	t.Run("model compactor ignores first_pass override", func(t *testing.T) {
-		requireWASM(t, "../../plugins/compactor/plugin.wasm")
+		bundles := officialBundlesDir(t)
+		requireBundle(t, bundles, "compactor")
 		out := runToolPolicyRequest(t, "compactor",
 			`{"tool_policies":[{"match":"web_search","mode":"model","first_pass":true}],"expected_applications":5}`,
 			[]engine.Message{toolCallNamedMessage("model-fresh", "web_search"), toolResultNamedMessage("model-fresh", "web_search")})
@@ -770,7 +783,7 @@ func TestCompactorToolPolicies(t *testing.T) {
 func runToolPolicyRequest(t *testing.T, pluginName, rawConfig string, messages []engine.Message) *engine.ChatRequest {
 	t.Helper()
 	store := cache.NewLocalCache(time.Minute)
-	pp := newTestPipelineWith(t, "../../plugins", []string{pluginName}, store,
+	pp := newTestPipelineWith(t, officialBundlesDir(t), []string{pluginName}, store,
 		map[string]json.RawMessage{pluginName: json.RawMessage(rawConfig)})
 	out, err := pp.RunBeforeRequest(context.Background(), 1, &engine.ChatRequest{Messages: messages})
 	if err != nil {
@@ -844,8 +857,9 @@ func largeToolResult() string {
 // Also pins the historical invariant: assistant tool_calls must stay
 // immediately followed by their tool results (strict providers 400 otherwise).
 func TestIntentInjectsNoSyntheticMessages(t *testing.T) {
-	requireWASM(t, "../../plugins/intent/plugin.wasm")
-	pp := newTestPipeline(t, "../../plugins", []string{"intent"})
+	bundles := officialBundlesDir(t)
+	requireBundle(t, bundles, "intent")
+	pp := newTestPipeline(t, bundles, []string{"intent"})
 
 	chat := &engine.ChatRequest{
 		Messages: []engine.Message{
@@ -922,9 +936,10 @@ func roles(msgs []engine.Message) []string {
 // example-carrying form: advisory prose, not contract, and omp's native
 // "concise intent" produced action-labels that starve the compactors.
 func TestIntentNativeIEnrichesDescriptionOnly(t *testing.T) {
-	requireWASM(t, "../../plugins/intent/plugin.wasm")
+	bundles := officialBundlesDir(t)
+	requireBundle(t, bundles, "intent")
 	store := cache.NewLocalCache(time.Minute)
-	pp := newTestPipelineWith(t, "../../plugins", []string{"intent"}, store, nil)
+	pp := newTestPipelineWith(t, bundles, []string{"intent"}, store, nil)
 
 	nativeParams := map[string]any{
 		"type": "object",

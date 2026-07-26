@@ -48,11 +48,11 @@ func requireWASM(t *testing.T, path string) {
 	}
 }
 
-func newPluginPipeline(t *testing.T, order ...string) *plugin.PluginPipeline {
+func newPluginPipeline(t *testing.T, pluginDir string, order ...string) *plugin.PluginPipeline {
 	t.Helper()
 	rt := wasm.NewRuntime(context.Background())
 	t.Cleanup(func() { rt.Close() })
-	pp, err := plugin.NewPipeline(rt, plugin.PluginConfig{Dir: "../../plugins", Order: order, AllowUnapproved: true})
+	pp, err := plugin.NewPipeline(rt, plugin.PluginConfig{Dir: pluginDir, Order: order, AllowUnapproved: true})
 	if err != nil {
 		t.Fatalf("NewPipeline: %v", err)
 	}
@@ -67,7 +67,10 @@ func newPluginPipeline(t *testing.T, order ...string) *plugin.PluginPipeline {
 // provider format, while sibling fields (id, usage, finish/stop reasons,
 // unknown extras) survive untouched.
 func TestJSONResponseHooksAllFormats(t *testing.T) {
-	requireWASM(t, "../../plugins/schema_translator/plugin.wasm")
+	// Asserts schema_translator reverses its KV-array mutation on the
+	// response side. That is the plugin's behaviour, not the host's.
+	bundles := officialBundlesDir(t)
+	requireBundle(t, bundles, "schema_translator")
 
 	kvArgsStr := `{"env":[{"key":"A","value":"1"}]}` // openai: JSON string
 	kvArgsObj := `{"env":[{"key":"A","value":"1"}]}` // object formats: raw object
@@ -137,7 +140,7 @@ func TestJSONResponseHooksAllFormats(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.format, func(t *testing.T) {
-			pp := newPluginPipeline(t, "schema_translator")
+			pp := newPluginPipeline(t, bundles, "schema_translator")
 			registerWriteEnvMap(t, pp, 1)
 
 			out, err := runJSONResponseHooks(context.Background(), pp, 1, tc.format, nil, []byte(tc.body))

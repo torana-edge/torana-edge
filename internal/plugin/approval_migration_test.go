@@ -20,7 +20,7 @@ import (
 // plugin's code must not be loaded. What changes is that the rest of the
 // configuration still applies, and the skip is reported rather than fatal.
 func TestUnapprovedPluginSkippedNotFatal(t *testing.T) {
-	requireWASM(t, "../../plugins/schema_translator/plugin.wasm")
+	requireWASM(t, fixturesDir+"/test-mutator/plugin.wasm")
 
 	ctx := context.Background()
 	runtime := wasm.NewRuntime(ctx)
@@ -29,8 +29,8 @@ func TestUnapprovedPluginSkippedNotFatal(t *testing.T) {
 	// Strict, enabled, and deliberately unapproved — the exact shape of a
 	// store carried over from a build that predates digest-bound approvals.
 	pipeline, err := NewPipeline(runtime, PluginConfig{
-		Dir:       "../../plugins",
-		Order:     []string{"schema_translator"},
+		Dir:       fixturesDir,
+		Order:     []string{"test-mutator"},
 		Approvals: nil,
 		Strict:    true,
 	})
@@ -47,8 +47,8 @@ func TestUnapprovedPluginSkippedNotFatal(t *testing.T) {
 	if len(skipped) != 1 {
 		t.Fatalf("expected exactly 1 reported skip, got %d: %+v", len(skipped), skipped)
 	}
-	if skipped[0].Name != "schema_translator" {
-		t.Errorf("skip names %q, want schema_translator", skipped[0].Name)
+	if skipped[0].Name != "test-mutator" {
+		t.Errorf("skip names %q, want test-mutator", skipped[0].Name)
 	}
 	if skipped[0].Digest == "" {
 		t.Error("skip must carry the digest the operator needs to approve")
@@ -61,15 +61,15 @@ func TestUnapprovedPluginSkippedNotFatal(t *testing.T) {
 // TestApprovedPluginStillLoads guards the other direction: the skip path must
 // not swallow plugins that are correctly approved.
 func TestApprovedPluginStillLoads(t *testing.T) {
-	requireWASM(t, "../../plugins/schema_translator/plugin.wasm")
+	requireWASM(t, fixturesDir+"/test-mutator/plugin.wasm")
 
 	ctx := context.Background()
 	runtime := wasm.NewRuntime(ctx)
 	defer runtime.Close()
 
 	pipeline, err := NewPipeline(runtime, PluginConfig{
-		Dir:             "../../plugins",
-		Order:           []string{"schema_translator"},
+		Dir:             fixturesDir,
+		Order:           []string{"test-mutator"},
 		AllowUnapproved: true,
 		Strict:          true,
 	})

@@ -150,14 +150,14 @@ func TestValidateAgentResponseHeaders(t *testing.T) {
 }
 
 func TestPluginAgentOperationDispatch(t *testing.T) {
-	if _, err := os.Stat("../../plugins/otel/plugin.wasm"); err != nil {
-		t.Skip("otel plugin is not built; run make plugins")
+	if _, err := os.Stat(fixturesDir + "/test-http-server/plugin.wasm"); err != nil {
+		t.Skip("test-http-server fixture is not built; run make testdata")
 	}
 	config := provider.DefaultConfig()
 	config.Port = 8080
 	config.Plugins = provider.PluginsConfig{
-		Dir:             "../../plugins",
-		Order:           []string{"otel"},
+		Dir:             fixturesDir,
+		Order:           []string{"test-http-server"},
 		AllowUnapproved: true,
 	}
 	server, err := New(Config{Port: "8080", Providers: config})
@@ -174,12 +174,12 @@ func TestPluginAgentOperationDispatch(t *testing.T) {
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("discovery status = %d: %s", recorder.Code, recorder.Body.String())
 	}
-	if !strings.Contains(recorder.Body.String(), `"id":"plugin:otel:status"`) ||
+	if !strings.Contains(recorder.Body.String(), `"id":"plugin:test-http-server:status"`) ||
 		!strings.Contains(recorder.Body.String(), `"plugin_digest":"sha256:`) {
-		t.Fatalf("discovery missing otel operation: %s", recorder.Body.String())
+		t.Fatalf("discovery missing the fixture operation: %s", recorder.Body.String())
 	}
 
-	request = localControlPlaneRequest(http.MethodGet, "/_torana/api/v1/agent/plugins/otel/status", nil)
+	request = localControlPlaneRequest(http.MethodGet, "/_torana/api/v1/agent/plugins/test-http-server/status", nil)
 	request.RemoteAddr = "127.0.0.1:12345"
 	recorder = httptest.NewRecorder()
 	handler.ServeHTTP(recorder, request)
@@ -193,11 +193,11 @@ func TestPluginAgentOperationDispatch(t *testing.T) {
 	if err := json.Unmarshal(recorder.Body.Bytes(), &status); err != nil {
 		t.Fatalf("decode plugin status: %v", err)
 	}
-	if status["plugin"] != "otel" || status["status"] != "ready" {
+	if status["plugin"] != "test-http-server" || status["status"] != "ready" {
 		t.Fatalf("unexpected plugin status: %v", status)
 	}
 
-	request = localControlPlaneRequest(http.MethodPost, "/_torana/api/v1/agent/plugins/otel/status", strings.NewReader(`{}`))
+	request = localControlPlaneRequest(http.MethodPost, "/_torana/api/v1/agent/plugins/test-http-server/status", strings.NewReader(`{}`))
 	request.RemoteAddr = "127.0.0.1:12345"
 	request.Header.Set("X-Torana-Local-Request", "1")
 	recorder = httptest.NewRecorder()
@@ -211,12 +211,12 @@ func TestPluginAgentOperationDispatch(t *testing.T) {
 }
 
 func TestPluginListDistinguishesLoadedBundleFromChangedDiskBundle(t *testing.T) {
-	sourceDir := "../../plugins/otel"
+	sourceDir := fixturesDir + "/test-http-server"
 	if _, err := os.Stat(filepath.Join(sourceDir, "plugin.wasm")); err != nil {
-		t.Skip("otel plugin is not built; run make plugins")
+		t.Skip("test-http-server fixture is not built; run make testdata")
 	}
 	pluginsDir := t.TempDir()
-	pluginDir := filepath.Join(pluginsDir, "otel")
+	pluginDir := filepath.Join(pluginsDir, "test-http-server")
 	if err := os.Mkdir(pluginDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -234,7 +234,7 @@ func TestPluginListDistinguishesLoadedBundleFromChangedDiskBundle(t *testing.T) 
 	config.Port = 8080
 	config.Plugins = provider.PluginsConfig{
 		Dir:             pluginsDir,
-		Order:           []string{"otel"},
+		Order:           []string{"test-http-server"},
 		AllowUnapproved: true,
 	}
 	server, err := New(Config{Port: "8080", Providers: config})
@@ -248,7 +248,10 @@ func TestPluginListDistinguishesLoadedBundleFromChangedDiskBundle(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	changed := strings.Replace(string(agentBody), "Machine-readable OpenTelemetry", "Changed OpenTelemetry", 1)
+	changed := strings.Replace(string(agentBody), "Test fixture agent operations.", "Changed on disk.", 1)
+	if changed == string(agentBody) {
+		t.Fatal("agent.json was not modified — the test would assert nothing")
+	}
 	if err := os.WriteFile(agentPath, []byte(changed), 0o644); err != nil {
 		t.Fatal(err)
 	}

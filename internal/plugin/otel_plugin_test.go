@@ -12,8 +12,8 @@ import (
 // signature and the host export disagree, the module traps at instantiation or
 // on the call. With no OTel meter configured the host call is a safe no-op.
 func TestOtelPluginEmitMetricABI(t *testing.T) {
-	requireWASM(t, "../../plugins/otel/plugin.wasm")
-	pp := newTestPipeline(t, "../../plugins", []string{"otel"})
+	requireWASM(t, fixturesDir+"/test-metrics/plugin.wasm")
+	pp := newTestPipeline(t, fixturesDir, []string{"test-metrics"})
 
 	chat := &engine.ChatRequest{
 		Model: "gpt-x",

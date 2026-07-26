@@ -35,7 +35,7 @@ func TestLoadRealPlugins(t *testing.T) {
 
 	for name, hooks := range cases {
 		t.Run(name, func(t *testing.T) {
-			path := "../../plugins/" + name + "/plugin.wasm"
+			path := officialBundlesDir(t) + "/" + name + "/plugin.wasm"
 			requireWASM(t, path)
 			b, err := os.ReadFile(path)
 			if err != nil {

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -431,22 +432,22 @@ func TestDiscoverPluginsRejectsDuplicateIdentity(t *testing.T) {
 // CallRequest directly. This catches manifest/dispatch mismatches that the
 // existing direct-call tests miss.
 func TestPipelineRunBeforeRequest_FullDispatch(t *testing.T) {
-	requireWASM(t, "../../plugins/intent/plugin.wasm")
+	requireWASM(t, fixturesDir+"/test-mutator/plugin.wasm")
 
 	ctx := context.Background()
 	runtime := wasm.NewRuntime(ctx)
 	defer runtime.Close()
 
 	pipeline, err := NewPipeline(runtime, PluginConfig{
-		Dir:             "../../plugins",
-		Order:           []string{"intent"},
+		Dir:             fixturesDir,
+		Order:           []string{"test-mutator"},
 		AllowUnapproved: true,
 	})
 	if err != nil {
 		t.Fatalf("NewPipeline: %v", err)
 	}
 	if pipeline.Len() != 1 {
-		t.Fatalf("intent plugin not loaded (loaded=%d)", pipeline.Len())
+		t.Fatalf("fixture not loaded (loaded=%d)", pipeline.Len())
 	}
 
 	chat := &engine.ChatRequest{
@@ -464,13 +465,16 @@ func TestPipelineRunBeforeRequest_FullDispatch(t *testing.T) {
 		t.Fatalf("RunBeforeRequest: %v", err)
 	}
 
-	// The intent plugin injects the "i" intent field into tool schemas
-	// via the full dispatch path.
+	// The fixture mutates both a message and a tool definition, so a single
+	// dispatch proves the host carried the whole request across the boundary
+	// and merged the plugin's version back — not merely that a hook ran.
 	if len(result.Tools) != 1 {
 		t.Fatalf("expected 1 tool, got %d", len(result.Tools))
 	}
-	props, _ := result.Tools[0].Parameters["properties"].(map[string]any)
-	if _, ok := props["i"]; !ok {
-		t.Errorf(`expected "i" injected into tool schema via full dispatch path, got %v`, result.Tools[0].Parameters)
+	if got := result.Tools[0].Description; got != "described by test-mutator" {
+		t.Errorf("tool definition did not survive the dispatch path: description = %q", got)
+	}
+	if len(result.Messages) != 1 || !strings.HasSuffix(result.Messages[0].Content, "[seen by test-mutator]") {
+		t.Errorf("message did not survive the dispatch path: %+v", result.Messages)
 	}
 }

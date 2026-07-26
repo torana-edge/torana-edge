@@ -28,9 +28,10 @@ import (
 // HTTP client. This is the coverage class whose absence let the stale-stub
 // regression ship: every assertion here exercises the deployed .wasm files.
 func TestE2E(t *testing.T) {
-	requireWASM(t, "../../plugins/schema_translator/plugin.wasm")
-	requireWASM(t, "../../plugins/intent/plugin.wasm")
-	requireWASM(t, "../../plugins/compactor/plugin.wasm")
+	bundles := officialBundlesDir(t)
+	for _, name := range []string{"schema_translator", "intent", "compactor"} {
+		requireBundle(t, bundles, name)
+	}
 
 	// --- mock upstream ------------------------------------------------------
 	var mu sync.Mutex
@@ -162,7 +163,7 @@ func TestE2E(t *testing.T) {
 				},
 			},
 			Plugins: provider.PluginsConfig{
-				Dir:             "../../plugins",
+				Dir:             bundles,
 				AllowUnapproved: true,
 				// intent captures "i" into the cache; compactor consumes it.
 				// keyword_compactor is its ALTERNATIVE (either/or) and is
@@ -461,7 +462,8 @@ func TestE2E(t *testing.T) {
 // its whole lifetime, so the old runtime's meta (fragment buffers, mutation
 // registry) stays alive until the response completes.
 func TestHotReloadDuringInflightRequest(t *testing.T) {
-	requireWASM(t, "../../plugins/schema_translator/plugin.wasm")
+	reloadBundles := officialBundlesDir(t)
+	requireBundle(t, reloadBundles, "schema_translator")
 
 	release := make(chan struct{})
 	reached := make(chan struct{})
@@ -485,7 +487,7 @@ func TestHotReloadDuringInflightRequest(t *testing.T) {
 		Port: "0",
 		Providers: provider.Config{
 			Providers: map[string]provider.Provider{"oai": {URL: upstream.URL, Format: "openai"}},
-			Plugins:   provider.PluginsConfig{Dir: "../../plugins", Order: []string{"schema_translator"}, AllowUnapproved: true},
+			Plugins:   provider.PluginsConfig{Dir: reloadBundles, Order: []string{"schema_translator"}, AllowUnapproved: true},
 		},
 	}
 	srv, err := New(cfg)
@@ -528,7 +530,7 @@ func TestHotReloadDuringInflightRequest(t *testing.T) {
 
 	// Simulate the watcher: swap in a fresh pipeline and drain the old one.
 	newRT := wasm.NewRuntime(context.Background())
-	newPP, err := plugin.NewPipeline(newRT, plugin.PluginConfig{Dir: "../../plugins", Order: []string{"schema_translator"}, AllowUnapproved: true})
+	newPP, err := plugin.NewPipeline(newRT, plugin.PluginConfig{Dir: reloadBundles, Order: []string{"schema_translator"}, AllowUnapproved: true})
 	if err != nil {
 		t.Fatalf("NewPipeline: %v", err)
 	}
