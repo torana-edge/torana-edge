@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "id": "torana/cache_warmer",
+  "name": "cache_warmer",
+  "version": "0.1.0",
+  "abi_version": "v1",
+  "minimum_torana_version": "0.1.0",
+  "failure_mode": "pass",
+  "repository": "https://github.com/torana-edge/torana-plugins",
+  "description": "Keeps a chosen conversation's prompt cache alive across an idle gap. Opt-in per conversation and bounded by a deadline and a break-even refresh budget, because refreshing forever costs more than the cache miss it avoids.",
+  "hooks": [
+    {"name": "run_before_request", "priority": 200},
+    {"name": "run_on_tick", "priority": 200}
+  ],
+  "permissions": [
+    {"name": "env.background_tick", "description": "Refresh caches while no request is in flight — the only time a cache can lapse"},
+    {"name": "env.host_call.torana_send_request", "description": "Send the refresh request that touches the cached prefix"},
+    {"name": "env.host_call.torana_cache_pricing", "description": "Read cache prices and lifetimes to know when refreshing stops paying"},
+    {"name": "env.state_get", "description": "Read stored prefixes and refresh budgets"},
+    {"name": "env.state_set", "description": "Store the cached prefix of an opted-in conversation"},
+    {"name": "env.state_keys", "description": "Enumerate the conversations being kept warm"},
+    {"name": "env.now", "description": "Measure how long since the last refresh"},
+    {"name": "env.plugin_config", "description": "Read plugins.config.cache_warmer (which conversations, deadline, interval)"},
+    {"name": "env.log", "description": "Diagnostic logging"}
+  ]
+}

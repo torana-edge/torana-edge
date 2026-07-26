@@ -705,6 +705,10 @@ func New(cfg Config) (*Server, error) {
 			// this is safe to vary per request.
 			chat.ToranaMeta["_provider"] = provName
 			chat.ToranaMeta["_conversation_id"] = rs.ConversationID
+			// The path too: Torana forwards whatever the caller sent rather
+			// than synthesizing one, so a plugin replaying this conversation
+			// has no other way to know where it goes.
+			chat.ToranaMeta["_path"] = strippedPath
 
 			// --- WASM plugin pipeline --------------------------------------
 
