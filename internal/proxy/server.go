@@ -693,6 +693,15 @@ func New(cfg Config) (*Server, error) {
 			// survive. The cache-prefix key is deliberately computed later.
 			rs.ConversationID = engine.ConversationID(chat)
 
+			// Publish the routing decision so plugins can ask the host about
+			// this provider — pricing and cache semantics are keyed by provider
+			// name, and a plugin that cannot name its own provider cannot look
+			// up the economics of what it is about to do. ToranaMeta never
+			// reaches the wire and is excluded from the determinism check, so
+			// this is safe to vary per request.
+			chat.ToranaMeta["_provider"] = provName
+			chat.ToranaMeta["_conversation_id"] = rs.ConversationID
+
 			// --- WASM plugin pipeline --------------------------------------
 
 			if pl := reqStateFrom(req.Context()).Pipeline; pl != nil {

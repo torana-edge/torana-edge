@@ -1,0 +1,19 @@
+{
+  "fields": [
+    {
+      "key": "mode",
+      "type": "enum",
+      "label": "Mode",
+      "default": "auto",
+      "options": ["auto", "short", "long", "off"],
+      "help": "auto: buy the longer cache tier once this conversation has shown it pauses long enough to lose the short one. short: always leave the harness default. long: always buy the longer tier. off: never touch breakpoints."
+    },
+    {
+      "key": "min_gap_seconds_for_long_tier",
+      "type": "number",
+      "label": "Min Gap For Long Tier (seconds)",
+      "default": 0,
+      "help": "How long an observed pause must be before the longer tier is bought. 0 uses 30% of that tier's lifetime, so one unusual pause does not commit a short conversation."
+    }
+  ]
+}

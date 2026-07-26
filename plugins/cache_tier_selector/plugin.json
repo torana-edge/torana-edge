@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "id": "torana/cache_tier_selector",
+  "name": "cache_tier_selector",
+  "version": "0.1.0",
+  "abi_version": "v1",
+  "minimum_torana_version": "0.1.0",
+  "failure_mode": "pass",
+  "repository": "https://github.com/torana-edge/torana-plugins",
+  "description": "Buys the cheapest prompt-cache lifetime for a conversation based on how long it actually goes idle. Decides once per cache prefix and never changes its mind, because changing a breakpoint marker invalidates the entry it is protecting.",
+  "hooks": [
+    {"name": "run_before_request", "priority": 190}
+  ],
+  "permissions": [
+    {"name": "env.host_call.torana_cache_pricing", "description": "Read this provider's cache prices and lifetimes to choose a tier"},
+    {"name": "env.state_get", "description": "Read the tier already chosen for this cache prefix"},
+    {"name": "env.state_set", "description": "Remember the chosen tier so it stays identical across turns"},
+    {"name": "env.now", "description": "Measure how long a conversation has been idle"},
+    {"name": "env.plugin_config", "description": "Read plugins.config.cache_tier_selector (mode, gap threshold)"},
+    {"name": "env.host_call.torana_plugin_counter", "description": "Report how many tier decisions were made"},
+    {"name": "env.log", "description": "Diagnostic logging"}
+  ]
+}

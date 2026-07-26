@@ -74,7 +74,7 @@ func stableBytes(t *testing.T, chat *engine.ChatRequest) []byte {
 // twice over the identical request and asserts byte-identical output — the
 // guardrail that keeps plugins from busting turn-over-turn prompt caching.
 func TestPluginPrefixDeterminism(t *testing.T) {
-	for _, name := range []string{"schema_translator", "intent", "keyword_compactor", "compactor", "pii", "otel"} {
+	for _, name := range []string{"schema_translator", "intent", "keyword_compactor", "compactor", "pii", "otel", "cache_tier_selector"} {
 		t.Run(name, func(t *testing.T) {
 			requireWASM(t, "../../plugins/"+name+"/plugin.wasm")
 

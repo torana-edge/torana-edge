@@ -8,6 +8,7 @@ import (
 	"log"
 	"math"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -789,6 +790,16 @@ func (r *Runtime) installHostFunctions() {
 				b, _ := json.Marshal(r.StateKeysFunc(pluginName))
 				res = string(b)
 			}
+		case "env.now":
+			// WASI preview1 gives the guest no clock, deliberately. Plugins
+			// that reason about elapsed time — cache lifetimes, deadlines,
+			// rate windows — otherwise have no way to ask.
+			//
+			// This is a capability, not a convenience: a plugin that writes the
+			// result into a request makes its output non-deterministic, which
+			// busts the provider's prompt cache on every turn. See
+			// PLUGIN_SEMANTICS §6.
+			res = strconv.FormatInt(time.Now().UnixMilli(), 10)
 		case "torana_cache_pricing":
 			if r.CachePricingFunc == nil {
 				res = `{"status":"unavailable","reason":"pricing_unconfigured"}`
