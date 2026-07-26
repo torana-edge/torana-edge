@@ -63,6 +63,7 @@ CLI (`agy`)** — Torana also offers an optional TLS-terminating MITM ingress. S
 | [Agent control plane](docs/AGENT_CONTROL_PLANE.md) | The versioned JSON API and `agent.json` operation contracts |
 | [Local models](docs/LOCAL_MODELS.md) | Point a coding harness at Ollama or vLLM through Torana |
 | [Antigravity CLI](docs/GEMINI_ANTIGRAVITY.md) | The optional TLS-terminating MITM ingress |
+| [Prompt caching](docs/PROMPT_CACHING.md) | Declaring cache prices and lifetimes, and the arithmetic that bounds cache warming |
 | [Context compaction](docs/COMPACTION.md) | Policies, the economic gate, and why it is off by default |
 | [Dogfood results](docs/DOGFOOD_166_RESULTS.md) | 75 paired sessions measuring whether compaction actually saves money |
 

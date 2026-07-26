@@ -107,6 +107,59 @@ on a bill.
 
 Duplicate TTLs, non-positive TTLs, and negative multipliers are also rejected.
 
+## The two cache plugins
+
+Both are optional, both are off unless you configure them, and both decline to
+act when they cannot price what they are about to do. They are distributed from
+[torana-plugins](https://github.com/torana-edge/torana-plugins), not bundled.
+
+### cache_tier_selector
+
+Chooses which lifetime to buy for a conversation. It watches how long a
+conversation actually goes idle and, once it has seen a pause long enough to
+lose the short tier, switches that conversation to the longer one.
+
+```json
+{ "plugins": { "config": { "cache_tier_selector": { "mode": "auto" } } } }
+```
+
+`auto` decides per conversation; `long` and `short` force it; `off` disables it.
+
+It needs no budget and sends no requests — it only changes a marker on requests
+you were already making. The decision is made once per cached prefix and never
+revisited, because changing the marker changes the prefix and would invalidate
+the entry it is protecting.
+
+### cache_warmer
+
+Refreshes a chosen conversation's cache so an idle gap does not cost you a
+rebuild. Requires `plugins.runtime.tick_interval_seconds` and an egress budget
+(see [Running plugins](PLUGINS.md)).
+
+```json
+{
+  "plugins": {
+    "runtime": {
+      "tick_interval_seconds": 60,
+      "egress": { "cache_warmer": { "max_calls_per_minute": 4 } }
+    },
+    "config": {
+      "cache_warmer": { "conversations": "a3f9c2e1", "warm_for_minutes": 45 }
+    }
+  }
+}
+```
+
+Pick conversation IDs from `torana conversations`, or from the picker on the
+plugin's page in the control plane, which shows each conversation's model, age
+and cache state and greys out ones whose cache is long gone.
+
+**It is opt-in per conversation on purpose.** Warming everything would lose
+money on every conversation you never return to — see the arithmetic above. It
+stops on whichever comes first: the deadline, the break-even refresh count, or a
+refresh that reports a cache *write*, which means the entry had already lapsed
+and holding it open is no longer preserving anything.
+
 ## Seeing what actually happened
 
 Providers report cache token counts per request, and those are the ground truth:
