@@ -33,22 +33,22 @@ type Stats struct {
 	TotalTokensOut int64 `json:"total_tokens_out"`
 	// Prompt-cache accounting: read = input tokens served from the provider's
 	// cache, write = tokens written to cache. Rates are provider/model-specific.
-	TotalCacheReadTokens       int64                    `json:"total_cache_read_tokens"`
-	TotalCacheWriteTokens      int64                    `json:"total_cache_write_tokens"`
-	Compactions                int64                    `json:"compactions"`
-	BytesSaved                 int64                    `json:"bytes_saved"`
-	OffloadFailures            int64                    `json:"offload_failures"`
-	OffloadInputTokens         int64                    `json:"offload_input_tokens"`
-	OffloadOutputTokens        int64                    `json:"offload_output_tokens"`
-	OffloadCacheReadTokens     int64                    `json:"offload_cache_read_tokens"`
-	OffloadCacheWriteTokens    int64                    `json:"offload_cache_write_tokens"`
-	CompactionApplications     int64                    `json:"compaction_applications"`
-	CompactionTransformations  int64                    `json:"compaction_transformations"`
-	CompactionCacheReuses      int64                    `json:"compaction_cache_reuses"`
-	EstimatedTokensAvoided     int64                    `json:"estimated_input_tokens_avoided"`
-	EstimatedRewriteSpanTokens int64                    `json:"estimated_cache_rewrite_tokens"`
-	EstimatedGrossUSD          *float64                 `json:"estimated_gross_usd,omitempty"`
-	EstimatedNetUSD            *float64                 `json:"estimated_net_usd,omitempty"`
+	TotalCacheReadTokens       int64                       `json:"total_cache_read_tokens"`
+	TotalCacheWriteTokens      int64                       `json:"total_cache_write_tokens"`
+	Compactions                int64                       `json:"compactions"`
+	BytesSaved                 int64                       `json:"bytes_saved"`
+	OffloadFailures            int64                       `json:"offload_failures"`
+	OffloadInputTokens         int64                       `json:"offload_input_tokens"`
+	OffloadOutputTokens        int64                       `json:"offload_output_tokens"`
+	OffloadCacheReadTokens     int64                       `json:"offload_cache_read_tokens"`
+	OffloadCacheWriteTokens    int64                       `json:"offload_cache_write_tokens"`
+	CompactionApplications     int64                       `json:"compaction_applications"`
+	CompactionTransformations  int64                       `json:"compaction_transformations"`
+	CompactionCacheReuses      int64                       `json:"compaction_cache_reuses"`
+	EstimatedTokensAvoided     int64                       `json:"estimated_input_tokens_avoided"`
+	EstimatedRewriteSpanTokens int64                       `json:"estimated_cache_rewrite_tokens"`
+	EstimatedGrossUSD          *float64                    `json:"estimated_gross_usd,omitempty"`
+	EstimatedNetUSD            *float64                    `json:"estimated_net_usd,omitempty"`
 	SavingsUnavailable         map[string]int64            `json:"savings_unavailable,omitempty"`
 	PerPlugin                  map[string]PluginSavings    `json:"per_plugin,omitempty"`
 	PluginCounters             map[string]map[string]int64 `json:"plugin_counters,omitempty"`
