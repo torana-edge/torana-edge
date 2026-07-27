@@ -1,23 +1,30 @@
-.PHONY: build install clean test release plugins testdata proto lint
+.PHONY: build install clean test release official-plugins testdata lint
 
 BINARY := torana
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
 LDFLAGS := -s -w -X main.version=$(VERSION)
 
-# WASM plugins are build artifacts — never committed (*.wasm is gitignored).
-# Every plugin dir builds with the same recipe as `torana-cli plugin build`.
-PLUGIN_DIRS := plugins/cache_tier_selector plugins/cache_warmer plugins/schema_translator plugins/intent plugins/keyword_compactor plugins/compactor plugins/otel plugins/auth plugins/pii
+# WASM fixtures are build artifacts — never committed (*.wasm is gitignored).
+#
+# The official plugins are NOT built here. They live in torana-plugins, which is
+# the only tree that has them; this repo tests the host against the fixtures
+# below. `make official-plugins` builds them from a sibling checkout when you
+# want the plugin-behaviour suite to run locally.
 TESTDATA_DIRS := examples/plugins/test-stream-mutator examples/plugins/test-blocker examples/plugins/test-blocker-nogrant examples/plugins/test-observer examples/plugins/test-responder examples/plugins/test-responder-nogrant examples/plugins/test-original examples/plugins/test-router examples/plugins/test-ticker examples/plugins/test-http-server examples/plugins/test-metrics examples/plugins/test-mutator examples/plugins/test-hostcall
 WASM_BUILD = GOOS=wasip1 GOARCH=wasm go build -buildmode=c-shared
 
-build: plugins
+build:
 	go build -ldflags "$(LDFLAGS)" -o $(BINARY) ./cmd/torana/
 
-plugins:
-	@for dir in $(PLUGIN_DIRS); do \
-		echo "building $$dir/plugin.wasm"; \
-		(cd $$dir && $(WASM_BUILD) -o plugin.wasm .) || exit 1; \
+# Build the official plugins from a sibling torana-plugins checkout, and print
+# the directory to hand to the plugin-behaviour suite:
+#   TORANA_PLUGIN_BUNDLES_DIR=$(shell pwd)/../torana-plugins/dist go test ./...
+official-plugins:
+	@test -d ../torana-plugins || { echo "clone torana-plugins alongside this repo first" >&2; exit 1; }
+	@for dir in ../torana-plugins/plugins/*/; do \
+		../torana-plugins/scripts/build.sh "$$(basename $$dir)" >/dev/null || exit 1; \
 	done
+	@echo "bundles in ../torana-plugins/dist"
 
 testdata:
 	@for dir in $(TESTDATA_DIRS); do \
@@ -27,15 +34,10 @@ testdata:
 	@echo "building testdata/hello.wasm"
 	@cd testdata && $(WASM_BUILD) -o hello.wasm .
 
-# Regenerate sdk/pb/torana.pb.go. Requires protoc and:
-#   go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.11
-proto:
-	protoc --go_out=paths=source_relative:. sdk/pb/torana.proto
-
 install:
 	go install -ldflags "$(LDFLAGS)" ./cmd/torana/
 
-test: plugins testdata
+test: testdata
 	go test ./... -race -timeout 600s
 
 lint:
@@ -43,7 +45,7 @@ lint:
 
 clean:
 	rm -f $(BINARY)
-	rm -f $(foreach d,$(PLUGIN_DIRS) $(TESTDATA_DIRS),$(d)/plugin.wasm) testdata/hello.wasm
+	rm -f $(foreach d,$(TESTDATA_DIRS),$(d)/plugin.wasm) testdata/hello.wasm
 
 release:
 	GOOS=linux   GOARCH=amd64 go build -ldflags "$(LDFLAGS)" -o dist/torana-linux-amd64   ./cmd/torana/

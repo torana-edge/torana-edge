@@ -41,7 +41,7 @@ CLI (`agy`)** — Torana also offers an optional TLS-terminating MITM ingress. S
    make plugins
 
    # Or a single plugin via the unified Torana CLI:
-   go run ./cmd/torana plugin build plugins/schema_translator
+   go run ./cmd/torana plugin install github.com/torana-edge/torana-plugins/plugins/schema_translator
    ```
 
 3. Run the proxy:
@@ -94,7 +94,20 @@ CLI (`agy`)** — Torana also offers an optional TLS-terminating MITM ingress. S
 `gemini` and `gemini-codeassist` share one content model; they differ only in the
 request envelope and SSE framing (see [docs/GEMINI_ANTIGRAVITY.md](docs/GEMINI_ANTIGRAVITY.md)).
 
-## Bundled Plugins
+## Official Plugins
+
+None are bundled. They live in
+[torana-plugins](https://github.com/torana-edge/torana-plugins) and are installed
+deliberately, one at a time:
+
+```bash
+torana plugin install github.com/torana-edge/torana-plugins/plugins/pii
+```
+
+`install` fetches the source, builds it locally, and prints the SHA-256 digest of
+what it built — so nobody runs a binary they could not have read. Installing
+still enables nothing: you approve the digest and its requested capabilities in
+the control plane first. See [docs/PLUGINS.md](docs/PLUGINS.md).
 
 | Plugin | Hooks | What it does |
 |---|---|---|
@@ -105,6 +118,8 @@ request envelope and SSE framing (see [docs/GEMINI_ANTIGRAVITY.md](docs/GEMINI_A
 | `pii` | `run_before_request` | Scans tool results (local model + regex) and blocks the request if PII is found |
 | `otel` | `run_before_request`, `run_after_response` | Emits request/response OTel metrics |
 | `auth` | `run_before_request` | Normalizes caller identity from allowlisted auth headers |
+| `cache_tier_selector` | `run_before_request` | Buys the cheapest prompt-cache lifetime for a conversation, and never changes its mind for a given prefix |
+| `cache_warmer` | `run_before_request`, `run_on_tick` | Refreshes a chosen conversation's cached prefix before it lapses, bounded by a deadline and a break-even budget |
 
 > **Order matters.** Put `intent` before whichever compactor you run — both
 > compactors are pure consumers of the intent cache. `keyword_compactor` and
@@ -132,7 +147,6 @@ torana-edge/
 │   ├── provider/                   # Config parsing, URI resolution
 │   ├── proxy/                      # Reverse proxy with format dispatch
 │   └── wasm/                       # Wazero runtime integration
-├── plugins/                        # Bundled plugin source (binaries built via `make plugins`)
 │   ├── auth/
 │   ├── compactor/
 │   ├── intent/
