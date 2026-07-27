@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"strings"
 
 	"github.com/torana-edge/torana-edge/internal/engine"
 	openaifmt "github.com/torana-edge/torana-edge/internal/format/openai"
@@ -176,6 +177,12 @@ func extractOpenAI(body map[string]any) responseRefs {
 // arrives as a "message" whose content is a list of output_text parts, and each
 // tool call is its own "function_call" item.
 func extractResponsesOutput(refs *responseRefs, output []any) {
+	// Every output_text part, not just the first. A Responses reply routinely
+	// carries several, and binding only the first left the rest read-only —
+	// so a redaction plugin would report success having rewritten one
+	// paragraph of a multi-part answer.
+	var textParts []map[string]any
+
 	for _, item := range output {
 		it, _ := item.(map[string]any)
 		if it == nil {
@@ -189,22 +196,29 @@ func extractResponsesOutput(refs *responseRefs, output []any) {
 				if part == nil || asString(part["type"]) != "output_text" {
 					continue
 				}
-				// Only the first text part is exposed for mutation, matching
-				// the Chat path's first-choice-only behaviour.
-				if refs.setContent == nil {
-					partRef := part
-					refs.content = asString(part["text"])
-					refs.setContent = func(s string) { partRef["text"] = s }
-				}
+				textParts = append(textParts, part)
 			}
-		case "function_call":
+		case "function_call": //nolint:dupl // distinct wire shape from the Chat path
 			itRef := it
-			// Responses carries arguments as a JSON string; objArgs covers the
-			// object form used elsewhere, so prefer the string when present.
-			args, setArgs := objArgs(itRef, "arguments")
+			// The Responses wire format carries arguments as a JSON STRING.
+			// objArgs writes back a decoded object, which is the Chat shape —
+			// so using it here produced a body the client cannot parse. It is
+			// only reached when "arguments" is absent or not a string, and even
+			// then the setter must write a string.
+			args := "{}"
 			if raw, ok := itRef["arguments"].(string); ok {
 				args = raw
-				setArgs = func(s string) error { itRef["arguments"] = s; return nil }
+			} else if v, present := itRef["arguments"]; present && v != nil {
+				if b, err := json.Marshal(v); err == nil {
+					args = string(b)
+				}
+			}
+			setArgs := func(s string) error {
+				if !json.Valid([]byte(s)) {
+					return fmt.Errorf("tool call arguments are not valid JSON")
+				}
+				itRef["arguments"] = s
+				return nil
 			}
 			refs.toolCalls = append(refs.toolCalls, toolCallRef{
 				id:       asString(itRef["call_id"]),
@@ -213,6 +227,25 @@ func extractResponsesOutput(refs *responseRefs, output []any) {
 				setName:  func(s string) { itRef["name"] = s },
 				setArgs:  setArgs,
 			})
+		}
+	}
+	if len(textParts) == 0 {
+		return
+	}
+	// content is the joined text so a plugin sees the whole reply; setContent
+	// writes the replacement into the first part and blanks the rest, which is
+	// the only faithful way to express "this text is now that text" across a
+	// list of parts.
+	joined := make([]string, 0, len(textParts))
+	for _, part := range textParts {
+		joined = append(joined, asString(part["text"]))
+	}
+	refs.content = strings.Join(joined, "")
+	parts := textParts
+	refs.setContent = func(replacement string) {
+		parts[0]["text"] = replacement
+		for _, part := range parts[1:] {
+			part["text"] = ""
 		}
 	}
 }

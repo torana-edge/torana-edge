@@ -115,3 +115,79 @@ func TestExtractOpenAIChatStillWorks(t *testing.T) {
 		t.Errorf("chat tool calls misread: %+v", refs.toolCalls)
 	}
 }
+
+// TestResponsesArgumentsStayAJSONString — the Responses wire format carries
+// tool-call arguments as a JSON string. The first version reached objArgs when
+// "arguments" was absent, whose setter writes back a decoded OBJECT: the Chat
+// shape. A plugin rewriting such a call produced a body the client cannot
+// parse.
+func TestResponsesArgumentsStayAJSONString(t *testing.T) {
+	for name, item := range map[string]string{
+		"arguments absent":    `{"type":"function_call","call_id":"c1","name":"ping"}`,
+		"arguments as string": `{"type":"function_call","call_id":"c1","name":"ping","arguments":"{\"a\":1}"}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			body := decode(t, `{"object":"response","model":"m","output":[`+item+`]}`)
+			refs := extractOpenAI(body)
+
+			if len(refs.toolCalls) != 1 {
+				t.Fatalf("got %d tool calls", len(refs.toolCalls))
+			}
+			if err := refs.toolCalls[0].setArgs(`{"b":2}`); err != nil {
+				t.Fatalf("setArgs: %v", err)
+			}
+
+			out, err := json.Marshal(body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			// A string on the wire, so the re-serialized form contains the
+			// escaped JSON rather than a nested object.
+			if !strings.Contains(string(out), `"arguments":"{\"b\":2}"`) {
+				t.Errorf("arguments were not written back as a JSON string: %s", out)
+			}
+		})
+	}
+}
+
+// Invalid JSON must be refused rather than written to the wire, where it would
+// reach the client as a malformed tool call.
+func TestResponsesArgumentsRejectInvalidJSON(t *testing.T) {
+	body := decode(t, `{"object":"response","model":"m","output":[{"type":"function_call","call_id":"c1","name":"ping","arguments":"{}"}]}`)
+	refs := extractOpenAI(body)
+	if err := refs.toolCalls[0].setArgs("not json"); err == nil {
+		t.Error("invalid JSON was accepted into the tool call arguments")
+	}
+}
+
+// TestResponsesRedactionReachesEveryTextPart — a Responses reply routinely
+// carries several output_text parts. Binding only the first left the rest
+// read-only, so a redaction plugin would report success having rewritten one
+// paragraph of a multi-part answer, and the PII would still ship.
+func TestResponsesRedactionReachesEveryTextPart(t *testing.T) {
+	body := decode(t, `{
+      "object": "response", "model": "m",
+      "output": [{"type":"message","content":[
+        {"type":"output_text","text":"my email is "},
+        {"type":"output_text","text":"alice@example.com"},
+        {"type":"output_text","text":" — do not share"}
+      ]}]
+    }`)
+	refs := extractOpenAI(body)
+
+	if refs.content != "my email is alice@example.com — do not share" {
+		t.Errorf("a plugin should see the whole reply, got %q", refs.content)
+	}
+	refs.setContent("[redacted]")
+
+	out, err := json.Marshal(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(out), "alice@example.com") {
+		t.Errorf("redaction left PII in a later text part: %s", out)
+	}
+	if !strings.Contains(string(out), "[redacted]") {
+		t.Errorf("replacement text did not reach the body: %s", out)
+	}
+}

@@ -2,6 +2,7 @@ package openai
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/torana-edge/torana-edge/internal/engine"
@@ -71,37 +72,65 @@ func TestReadUsageAbsentOrEmpty(t *testing.T) {
 	}
 }
 
-// TestStreamingAndNonStreamingAgreeOnUsage is the anti-divergence test. Both
-// paths take the same JSON through the same reader, so the assertion is that
-// there is exactly one implementation — if someone reintroduces a typed struct
-// for one path, this stops being true the moment the two disagree.
+// TestStreamingAndNonStreamingAgreeOnUsage is the anti-divergence test, and it
+// has to drive both real code paths to be one.
+//
+// The first version called ReadUsage twice on two maps decoded from the same
+// string. That is an assertion about ReadUsage, not about the paths — review
+// replaced the Responses branch of the streaming parser with a chat-only
+// decoder and the test still passed. It now runs SSE through ParseStream and a
+// response body through extractResponseUsage, so reintroducing a private
+// decoder for either path fails here.
 func TestStreamingAndNonStreamingAgreeOnUsage(t *testing.T) {
-	for _, body := range []string{
-		`{"prompt_tokens":100,"completion_tokens":20,"prompt_tokens_details":{"cached_tokens":80}}`,
-		`{"input_tokens":100,"output_tokens":20,"input_tokens_details":{"cached_tokens":80,"cache_write_tokens":15}}`,
+	for name, tc := range map[string]struct {
+		sse  string
+		body string
+	}{
+		"chat completions": {
+			sse: "data: {\"object\":\"chat.completion.chunk\",\"choices\":[]," +
+				"\"usage\":{\"prompt_tokens\":100,\"completion_tokens\":20," +
+				"\"prompt_tokens_details\":{\"cached_tokens\":80}}}\n\ndata: [DONE]\n\n",
+			body: `{"object":"chat.completion","usage":{"prompt_tokens":100,"completion_tokens":20,` +
+				`"prompt_tokens_details":{"cached_tokens":80}}}`,
+		},
+		"responses": {
+			sse: "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\"," +
+				"\"usage\":{\"input_tokens\":100,\"output_tokens\":20," +
+				"\"input_tokens_details\":{\"cached_tokens\":80,\"cache_write_tokens\":15}}}}\n\n",
+			body: `{"object":"response","usage":{"input_tokens":100,"output_tokens":20,` +
+				`"input_tokens_details":{"cached_tokens":80,"cache_write_tokens":15}}}`,
+		},
 	} {
-		// The streaming path decodes usage as part of an SSE chunk...
-		var chunk struct {
-			Usage map[string]any `json:"usage"`
-		}
-		if err := json.Unmarshal([]byte(`{"usage":`+body+`}`), &chunk); err != nil {
-			t.Fatal(err)
-		}
-		streaming := ReadUsage(chunk.Usage)
+		t.Run(name, func(t *testing.T) {
+			// The streaming path, through the real parser.
+			var streaming *engine.StreamUsage
+			for evt := range (&StreamAdapter{}).ParseStream(strings.NewReader(tc.sse)) {
+				if evt.Usage != nil {
+					streaming = evt.Usage
+				}
+			}
+			if streaming == nil {
+				t.Fatal("the streaming parser reported no usage")
+			}
 
-		// ...the non-streaming path pulls it out of a decoded response body.
-		var resp map[string]any
-		if err := json.Unmarshal([]byte(`{"usage":`+body+`}`), &resp); err != nil {
-			t.Fatal(err)
-		}
-		usage, _ := resp["usage"].(map[string]any)
-		nonStreaming := ReadUsage(usage)
+			// The non-streaming path, through the reader extractOpenAI uses.
+			var decoded map[string]any
+			if err := json.Unmarshal([]byte(tc.body), &decoded); err != nil {
+				t.Fatal(err)
+			}
+			usage, _ := decoded["usage"].(map[string]any)
+			nonStreaming := ReadUsage(usage)
+			if nonStreaming == nil {
+				t.Fatal("the non-streaming reader reported no usage")
+			}
 
-		if streaming == nil || nonStreaming == nil {
-			t.Fatalf("%s: one path read nothing (streaming=%v non-streaming=%v)", body, streaming, nonStreaming)
-		}
-		if *streaming != *nonStreaming {
-			t.Errorf("%s: paths disagree — streaming %+v, non-streaming %+v", body, *streaming, *nonStreaming)
-		}
+			if *streaming != *nonStreaming {
+				t.Errorf("the two paths disagree for the same numbers:\n  streaming     %+v\n  non-streaming %+v",
+					*streaming, *nonStreaming)
+			}
+			if streaming.InputTokens != 100 || streaming.OutputTokens != 20 || streaming.CacheReadTokens != 80 {
+				t.Errorf("both paths agree on the WRONG values: %+v", *streaming)
+			}
+		})
 	}
 }
