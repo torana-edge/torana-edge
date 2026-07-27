@@ -66,6 +66,44 @@ func TestManagedConfigIsValidated(t *testing.T) {
 	}
 }
 
+// TestPassThroughProviderLoads is the regression test for over-strict
+// validation. A provider with no format is a supported mode — the proxy
+// forwards the body untouched while routing, failover, rate limiting and
+// metrics all still apply — and this PR made it fatal at startup, refusing to
+// start on configurations that work today.
+func TestPassThroughProviderLoads(t *testing.T) {
+	for name, body := range map[string]string{
+		"unmanaged": `{"providers":{"passthru":{"url":"https://upstream.example"}}}`,
+		"managed":   `{"managed":true,"port":8080,"providers":{"passthru":{"url":"https://upstream.example"}}}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			cfg, err := Load(writeConfig(t, body))
+			if err != nil {
+				t.Fatalf("a format-less provider is transparent pass-through, not a broken "+
+					"config; refusing it is a startup outage for a working setup: %v", err)
+			}
+			if _, ok := cfg.Providers["passthru"]; !ok {
+				t.Error("provider was dropped")
+			}
+		})
+	}
+}
+
+// A format that is set but not recognised is still an error — the operator
+// meant something specific and Torana cannot honour it. The message must say
+// what is available and how to ask for pass-through.
+func TestUnknownFormatIsStillRejected(t *testing.T) {
+	_, err := Load(writeConfig(t, `{"managed":true,"port":8080,"providers":{"p":{"url":"https://x.example","format":"nope"}}}`))
+	if err == nil {
+		t.Fatal("an unrecognised format must be rejected")
+	}
+	for _, want := range []string{"openai", "pass-through"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not mention %q, so it does not tell the operator what to write", err, want)
+		}
+	}
+}
+
 // TestValidManagedConfigStillLoads guards the other direction: tightening
 // validation must not reject configs that are fine.
 func TestValidManagedConfigStillLoads(t *testing.T) {

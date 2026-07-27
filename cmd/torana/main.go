@@ -71,8 +71,11 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to load configuration: %v\n\n"+
 			"Torana will not start with a partial configuration, because the plugins you "+
-			"configured — PII blocking, compaction, cost accounting — would be silently "+
-			"off.\nFix the file, or move it aside to start from defaults.", err)
+			"configured — PII blocking, compaction, cost accounting — would be silently off.\n\n"+
+			"Configuration is now validated on every load path, not only on control-plane "+
+			"writes, so a rule that was previously enforced in one place may be reporting a "+
+			"pre-existing problem for the first time.\n\n"+
+			"Fix the reported field, or move %s aside to start from defaults.", err, storePath)
 	}
 	if differs, diffErr := provider.ManagedStoreShadowsSeed(seedPath, storePath); diffErr != nil {
 		log.Printf("Warning: could not compare seed config %q with managed store %q: %v", seedPath, storePath, diffErr)

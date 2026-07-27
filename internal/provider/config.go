@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"strings"
 	"time"
 
@@ -49,6 +50,17 @@ var supportedFormats = map[string]struct{}{
 }
 
 // Validate rejects configuration that cannot be routed deterministically.
+// supportedFormatNames lists the wire formats in a stable order, for error
+// messages that tell the operator what to write instead.
+func supportedFormatNames() string {
+	names := make([]string, 0, len(supportedFormats))
+	for name := range supportedFormats {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return strings.Join(names, ", ")
+}
+
 func (c Config) Validate() error {
 	if c.Port <= 0 || c.Port > 65535 {
 		return fmt.Errorf("port must be between 1 and 65535")
@@ -70,8 +82,19 @@ func (c Config) Validate() error {
 		if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
 			return fmt.Errorf("provider %q has invalid http(s) url %q", name, configured.URL)
 		}
-		if _, ok := supportedFormats[configured.Format]; !ok {
-			return fmt.Errorf("provider %q has unsupported format %q", name, configured.Format)
+		// An empty format is a supported mode, not a missing value: it selects
+		// transparent pass-through, which the proxy implements deliberately
+		// ("No format adapter... Just forward", server.go). Routing, failover,
+		// rate limiting and metrics all still apply — only body translation is
+		// skipped. Rejecting it here would refuse to start on a configuration
+		// that works today and is the right one for an upstream Torana does not
+		// need to understand.
+		if configured.Format != "" {
+			if _, ok := supportedFormats[configured.Format]; !ok {
+				return fmt.Errorf("provider %q has unsupported format %q (supported: %s; "+
+					"omit the field entirely for transparent pass-through)",
+					name, configured.Format, supportedFormatNames())
+			}
 		}
 		for _, fallback := range configured.Fallback {
 			if fallback == name {
