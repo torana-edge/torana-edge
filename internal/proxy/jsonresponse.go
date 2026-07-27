@@ -7,6 +7,7 @@ import (
 	"log"
 
 	"github.com/torana-edge/torana-edge/internal/engine"
+	openaifmt "github.com/torana-edge/torana-edge/internal/format/openai"
 	"github.com/torana-edge/torana-edge/internal/plugin"
 )
 
@@ -104,21 +105,30 @@ func objArgs(parent map[string]any, key string) (string, func(string) error) {
 
 // --- openai: choices[].message.{content, tool_calls[].function.{name,arguments}} ---
 
+// extractOpenAI handles both OpenAI response shapes. Chat Completions carries
+// the reply in choices[].message; the Responses API carries it in a flat
+// output[] of typed items and names its token fields differently.
+//
+// Reading only the Chat shape meant a non-streaming Responses call was
+// accounted at zero tokens and its content was invisible to response hooks —
+// both silently, since an absent field is indistinguishable from a provider
+// that reported nothing. The streaming path has understood the Responses shape
+// all along, so the two paths disagreed depending only on whether the client
+// asked for a stream.
 func extractOpenAI(body map[string]any) responseRefs {
+	usage, _ := body["usage"].(map[string]any)
 	refs := responseRefs{
 		model: asString(body["model"]),
-		usage: usageFrom(body, "usage", "prompt_tokens", "completion_tokens", "", ""),
+		// Field names live in the openai format package, shared with the
+		// streaming reader, so the two cannot drift apart again.
+		usage: openaifmt.ReadUsage(usage),
 	}
-	// OpenAI nests the cached count: usage.prompt_tokens_details.cached_tokens.
-	if refs.usage != nil {
-		if usage, ok := body["usage"].(map[string]any); ok {
-			if details, ok := usage["prompt_tokens_details"].(map[string]any); ok {
-				refs.usage.CacheReadTokens = asInt(details["cached_tokens"])
-			} else {
-				refs.usage.CacheReadTokens = asInt(usage["prompt_cache_hit_tokens"])
-			}
-		}
+
+	if output, ok := body["output"].([]any); ok {
+		extractResponsesOutput(&refs, output)
+		return refs
 	}
+
 	choices, _ := body["choices"].([]any)
 	for ci, c := range choices {
 		choice, _ := c.(map[string]any)
@@ -160,6 +170,52 @@ func extractOpenAI(body map[string]any) responseRefs {
 }
 
 // --- anthropic: content[] blocks (text | tool_use{id,name,input}) ---
+
+// extractResponsesOutput builds references into a Responses API output[] array.
+// Items are typed and flat rather than nested under a choice: assistant text
+// arrives as a "message" whose content is a list of output_text parts, and each
+// tool call is its own "function_call" item.
+func extractResponsesOutput(refs *responseRefs, output []any) {
+	for _, item := range output {
+		it, _ := item.(map[string]any)
+		if it == nil {
+			continue
+		}
+		switch asString(it["type"]) {
+		case "message":
+			parts, _ := it["content"].([]any)
+			for _, p := range parts {
+				part, _ := p.(map[string]any)
+				if part == nil || asString(part["type"]) != "output_text" {
+					continue
+				}
+				// Only the first text part is exposed for mutation, matching
+				// the Chat path's first-choice-only behaviour.
+				if refs.setContent == nil {
+					partRef := part
+					refs.content = asString(part["text"])
+					refs.setContent = func(s string) { partRef["text"] = s }
+				}
+			}
+		case "function_call":
+			itRef := it
+			// Responses carries arguments as a JSON string; objArgs covers the
+			// object form used elsewhere, so prefer the string when present.
+			args, setArgs := objArgs(itRef, "arguments")
+			if raw, ok := itRef["arguments"].(string); ok {
+				args = raw
+				setArgs = func(s string) error { itRef["arguments"] = s; return nil }
+			}
+			refs.toolCalls = append(refs.toolCalls, toolCallRef{
+				id:       asString(itRef["call_id"]),
+				name:     asString(itRef["name"]),
+				argsJSON: args,
+				setName:  func(s string) { itRef["name"] = s },
+				setArgs:  setArgs,
+			})
+		}
+	}
+}
 
 func extractAnthropic(body map[string]any) responseRefs {
 	refs := responseRefs{
