@@ -63,6 +63,17 @@ func main() {
 		log.Printf("Warning: %v — using defaults", err)
 		provCfg = provider.DefaultConfig()
 	}
+	// A fallback with no credential of its own answers 401, which is not
+	// retryable — so failover turns a recoverable 429 into a hard failure for
+	// the caller. Say so now, not on the first 429.
+	if unauth := provCfg.UnauthenticatedFallbacks(); len(unauth) > 0 {
+		log.Printf("Warning: fallback provider(s) %v declare no API key and have not set "+
+			"forward_caller_credential. Failover to them will send an unauthenticated request. "+
+			"Set an api_key_env, or set forward_caller_credential:true if they are meant to "+
+			"receive the caller's own credential (a second endpoint of the same vendor, or a "+
+			"local model server).", unauth)
+	}
+
 	if differs, diffErr := provider.ManagedStoreShadowsSeed(seedPath, storePath); diffErr != nil {
 		log.Printf("Warning: could not compare seed config %q with managed store %q: %v", seedPath, storePath, diffErr)
 	} else if differs {

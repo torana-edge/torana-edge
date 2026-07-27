@@ -28,7 +28,8 @@ Create `config.json`:
   "providers": {
     "deepseek": {
       "url": "https://api.deepseek.com/beta",
-      "format": "openai"
+      "format": "openai",
+      "api_key_env": "DEEPSEEK_API_KEY"
     },
     "openai": {
       "url": "https://api.openai.com",
@@ -75,6 +76,21 @@ JSON error envelopes, mutation guidance, and plugin-contributed operations.
 > enable `intent`, then place one approved compactor after it and configure
 > explicit tool policies. Unknown tools, mutations, and failures remain exact.
 > See [COMPACTION.md](COMPACTION.md).
+
+
+### Credentials on a fallback
+
+A fallback provider needs a credential of its own. When Torana retries against
+one it **removes the caller's** — that key was issued to a different vendor, so
+forwarding it would leak it, and it would not authenticate there anyway.
+
+Give the fallback an `api_key_env`, as above. If the fallback is genuinely the
+same vendor (a second endpoint or region) or a local server that ignores
+credentials, set `"forward_caller_credential": true` on it instead.
+
+A fallback with neither is reported at startup, because the failure it produces
+otherwise is a 401 from a provider you never called directly.
+
 
 ## Route your harness
 

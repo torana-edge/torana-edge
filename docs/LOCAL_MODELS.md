@@ -12,12 +12,22 @@ or any OpenAI-compatible local server.
       "url": "http://localhost:11434",
       "format": "openai",
       "fallback": ["deepseek"]
+    },
+    "deepseek": {
+      "url": "https://api.deepseek.com/beta",
+      "format": "openai",
+      "api_key_env": "DEEPSEEK_API_KEY"
     }
   }
 }
 ```
 
 Route your harness to `http://localhost:8080/provider/ollama`.
+
+The fallback declares its own `api_key_env`: on failover Torana removes the
+caller's credential rather than forwarding it to a different vendor. If your
+fallback is the same vendor or another local server, set
+`"forward_caller_credential": true` on it instead.
 
 Typical use: use Ollama for offload compaction (mirrors the cheap model pattern)
 while keeping your primary provider (DeepSeek/OpenAI) for reasoning.

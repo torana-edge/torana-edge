@@ -157,9 +157,12 @@ func (t *failoverRoundTripper) RoundTrip(req *http.Request) (*http.Response, err
 		// travel there, and would not authenticate if it did — which is why
 		// failover returned the fallback's 401 to the caller rather than a
 		// working response.
-		if t.resolveSecret != nil {
-			applyProviderCredential(retryReq, fb, fbName, "failover", t.resolveSecret)
-		}
+		// Unconditional. This was gated on a non-nil resolver, which meant a
+		// nil one skipped the whole call — including the strip — and forwarded
+		// the caller's credential, the exact bug being fixed. The resolver is
+		// always set in production, so the gate bought nothing and risked
+		// everything; applyProviderCredential handles nil itself.
+		applyProviderCredential(retryReq, fb, fbName, "failover", t.resolveSecret)
 
 		// Reconstruct retry URL using the fallback base URL and original stripped path.
 		rc, _ := req.Context().Value(routeContextKey{}).(*RouteContext)

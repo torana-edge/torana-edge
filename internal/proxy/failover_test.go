@@ -294,3 +294,66 @@ func TestFailoverActuallySucceeds(t *testing.T) {
 			resp.StatusCode, strings.TrimSpace(string(body)))
 	}
 }
+
+// TestFailoverStripsCredentialEvenWithoutAResolver is the fail-open guard. The
+// strip used to live inside `if t.resolveSecret != nil`, so a nil resolver
+// skipped it and the caller's key travelled to the fallback — the exact bug the
+// PR set out to fix, reachable through the branch meant to fix it.
+func TestFailoverStripsCredentialEvenWithoutAResolver(t *testing.T) {
+	req, _ := http.NewRequest(http.MethodPost, "https://primary.example/v1/chat", nil)
+	req.Header.Set("Authorization", "Bearer caller-secret")
+	req.Header.Set("X-Api-Key", "caller-secret")
+
+	applyProviderCredential(req, provider.Provider{URL: "https://fallback.example"}, "fb", "failover", nil)
+
+	if got := req.Header.Get("Authorization"); got != "" {
+		t.Errorf("caller Authorization survived a nil resolver: %q", got)
+	}
+	if got := req.Header.Get("X-Api-Key"); got != "" {
+		t.Errorf("caller X-Api-Key survived a nil resolver: %q", got)
+	}
+}
+
+// TestForwardCallerCredentialIsOptIn covers the setup the strip would otherwise
+// break: a fallback that is a second endpoint of the same vendor, or a local
+// model server, where the caller's credential is the correct one to send.
+// Both documented failover examples are that shape.
+func TestForwardCallerCredentialIsOptIn(t *testing.T) {
+	newReq := func() *http.Request {
+		r, _ := http.NewRequest(http.MethodPost, "https://primary.example/v1/chat", nil)
+		r.Header.Set("Authorization", "Bearer caller-secret")
+		r.Header.Set("X-Api-Key", "caller-secret")
+		return r
+	}
+
+	t.Run("off by default", func(t *testing.T) {
+		req := newReq()
+		applyProviderCredential(req, provider.Provider{}, "fb", "failover", func(string, string) string { return "" })
+		if req.Header.Get("Authorization") != "" {
+			t.Error("caller credential forwarded without opting in")
+		}
+	})
+
+	t.Run("forwarded when declared", func(t *testing.T) {
+		req := newReq()
+		applyProviderCredential(req, provider.Provider{ForwardCallerCredential: true}, "fb", "failover",
+			func(string, string) string { return "" })
+		if got := req.Header.Get("Authorization"); got != "Bearer caller-secret" {
+			t.Errorf("Authorization = %q, want the caller's", got)
+		}
+		if got := req.Header.Get("X-Api-Key"); got != "caller-secret" {
+			t.Errorf("X-Api-Key = %q, want the caller's", got)
+		}
+	})
+
+	t.Run("the fallback's own key still wins", func(t *testing.T) {
+		// Opting in must not override a credential the fallback declares:
+		// that would send the wrong key to a provider that has its own.
+		req := newReq()
+		applyProviderCredential(req, provider.Provider{ForwardCallerCredential: true, APIKeyEnv: "FB_KEY"},
+			"fb", "failover", func(string, string) string { return "fallback-secret" })
+		if got := req.Header.Get("Authorization"); got != "Bearer fallback-secret" {
+			t.Errorf("Authorization = %q, want the fallback's own key", got)
+		}
+	})
+}
