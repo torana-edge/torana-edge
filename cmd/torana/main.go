@@ -58,10 +58,21 @@ func main() {
 		log.Fatalf("Failed to resolve managed store path: %v", err)
 	}
 
+	// Fail closed. Downgrading to defaults here left PII blocking, compaction
+	// and cost accounting silently off behind a single warning line — in a
+	// process that usually runs in the background, where nobody reads it. A
+	// proxy that silently stops enforcing the policy it was configured with is
+	// worse than one that does not start.
+	//
+	// This does not affect a fresh install: a missing config is not an error,
+	// it resolves to defaults and materializes the managed store. Reaching
+	// here means the config exists and is broken, unreadable, or unwritable.
 	provCfg, err := provider.ResolveConfig(seedPath, storePath)
 	if err != nil {
-		log.Printf("Warning: %v — using defaults", err)
-		provCfg = provider.DefaultConfig()
+		log.Fatalf("Failed to load configuration: %v\n\n"+
+			"Torana will not start with a partial configuration, because the plugins you "+
+			"configured — PII blocking, compaction, cost accounting — would be silently "+
+			"off.\nFix the file, or move it aside to start from defaults.", err)
 	}
 	if differs, diffErr := provider.ManagedStoreShadowsSeed(seedPath, storePath); diffErr != nil {
 		log.Printf("Warning: could not compare seed config %q with managed store %q: %v", seedPath, storePath, diffErr)

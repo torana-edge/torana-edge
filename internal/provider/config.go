@@ -465,7 +465,11 @@ func Load(path string) (Config, error) {
 		if user.Providers == nil {
 			user.Providers = make(map[string]Provider)
 		}
-		return user, nil
+		// Managed configs used to return here, before any validation. That
+		// made the managed store — the config every running Torana actually
+		// uses after first start — the LEAST checked path, while the seed it
+		// was imported from was the most. Validate it like anything else.
+		return user, validate(user)
 	}
 
 	// Merge: user values override defaults.
@@ -493,16 +497,28 @@ func Load(path string) (Config, error) {
 	if user.ControlPlane != (ControlPlaneConfig{}) {
 		cfg.ControlPlane = user.ControlPlane
 	}
+	return cfg, validate(cfg)
+}
+
+// validate runs every check a loaded config must pass, on every load path.
+//
+// These were split before: the structural checks in Config.Validate ran only
+// on the control-plane PUT, and the per-provider checks only when merging an
+// unmanaged seed. So which rules applied depended on how the config arrived,
+// and the path that actually runs in production was covered by neither.
+func validate(cfg Config) error {
+	if err := cfg.Validate(); err != nil {
+		return err
+	}
 	for name, p := range cfg.Providers {
 		if err := p.ValidateResponsesCompaction(name); err != nil {
-			return cfg, err
+			return err
 		}
 		if err := p.ValidateCache(name); err != nil {
-			return cfg, err
+			return err
 		}
 	}
-
-	return cfg, nil
+	return nil
 }
 
 // Save writes cfg to path atomically with Managed set to true.
