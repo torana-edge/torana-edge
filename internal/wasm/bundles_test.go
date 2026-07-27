@@ -21,5 +21,9 @@ func officialBundlesDir(t *testing.T) string {
 	if _, err := os.Stat(dir); err != nil {
 		t.Fatalf("TORANA_PLUGIN_BUNDLES_DIR=%q is not readable: %v", dir, err)
 	}
+	// Marker consumed by torana-plugins CI to prove this suite actually ran.
+	// A gate that silently skipped everywhere would look identical to a green
+	// run, and that is the failure mode this split introduces.
+	t.Logf("official-plugin behaviour: bundles from %s", dir)
 	return dir
 }
