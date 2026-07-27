@@ -572,8 +572,16 @@
 
     function savePipeline(button) {
       setButtonBusy(button, true, 'Applying…');
+      // Only send configuration we actually have. The `|| {}` this replaces
+      // synthesised an empty object for any plugin whose config had not
+      // loaded, and the server treats this map as a patch — so an enabled
+      // plugin whose bundle was missing from disk had its stored settings
+      // silently overwritten with nothing, just by clicking Save & apply.
+      // Omitting a name preserves it.
       const cfgOut = {};
-      for (const name of pipelineOrder) cfgOut[name] = configMap[name] || {};
+      for (const name of pipelineOrder) {
+        if (configMap[name] !== undefined) cfgOut[name] = configMap[name];
+      }
       fetch('/_torana/api/v1/plugins', {
         method: 'PUT', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ order: pipelineOrder, config: cfgOut, approvals: approvalMap })

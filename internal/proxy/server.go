@@ -599,15 +599,17 @@ func New(cfg Config) (*Server, error) {
 			req := pr.Out
 			var body []byte
 			if req.Body != nil {
+				// ServeHTTP has already enforced maxBodySize with a
+				// MaxBytesReader and returned 413, so nothing oversized reaches
+				// here. There used to be a second check that replaced an
+				// oversized body with an EMPTY one and forwarded it — dead code
+				// that an external auditor reasonably read as a live bug
+				// ("body silently truncated, upstream 400s"). The limit belongs
+				// at the edge, where it can still return a status code; here it
+				// could only corrupt the request.
 				lr := io.LimitReader(req.Body, maxBodySize+1)
 				body, _ = io.ReadAll(lr)
 				req.Body.Close()
-				if len(body) > maxBodySize {
-					log.Printf("request body exceeds max size after preflight limit")
-					req.Body = io.NopCloser(bytes.NewReader(nil))
-					req.ContentLength = 0
-					return
-				}
 			}
 
 			currentCfg := s.GetConfig()
@@ -1398,6 +1400,30 @@ func New(cfg Config) (*Server, error) {
 			newPlugins.Order = *req.Order
 		}
 		if req.Config != nil {
+			// Validate against each bundle's declared schema, exactly as the
+			// per-plugin POST does. Only that endpoint checked, while the
+			// dashboard's "Save & apply" button uses THIS one — so the path
+			// operators actually click was the unvalidated one, and a
+			// wrong-typed value reached the guest to misbehave silently.
+			bundles, _ := plugin.DiscoverPlugins(oldPlugins.Dir)
+			schemaByName := make(map[string]*plugin.ConfigSchema, len(bundles))
+			for _, b := range bundles {
+				schemaByName[b.Manifest.Name] = b.Schema
+			}
+			for name, raw := range req.Config {
+				schema, ok := schemaByName[name]
+				if !ok {
+					// No bundle on disk to check against. Configuration for
+					// absent plugins is deliberately retained, so this is not
+					// an error — it matches the per-plugin endpoint.
+					continue
+				}
+				if verr := plugin.ValidateConfigAgainstSchema(schema, raw); verr != nil {
+					http.Error(w, fmt.Sprintf("plugin %q: %v", name, verr), http.StatusBadRequest)
+					return
+				}
+			}
+
 			// PATCH-like semantics deliberately retain configurations for disabled
 			// plugins. The old dashboard only submits enabled plugins, and replacing
 			// this map silently discarded a disabled plugin's settings.
