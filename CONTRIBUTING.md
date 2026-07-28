@@ -121,9 +121,16 @@ both repos:
 
 **In torana-edge:**
 
-6. Add the hook name to `supportedHooks` and any permission to
-   `supportedPermissions`, both in `internal/plugin/discovery.go`. These are
-   strict allowlists — an unlisted name is rejected at load.
+6. **Nothing.** `supportedHooks` and `supportedPermissions` in
+   `internal/plugin/discovery.go` are `setOf(sdk.Hooks)` and
+   `setOf(sdk.Permissions)` — derived from the SDK's published vocabulary, not
+   restated here. Adding the name in the SDK (step 1) is what makes the host
+   accept it, and the SDK bump is what delivers it.
+
+   They are still strict allowlists: an unlisted name is rejected at load. The
+   list just has one source now. Maintaining a second copy is precisely how the
+   official plugin repository's validator ended up rejecting capabilities this
+   host accepts.
 7. Note that `CallRequest` treats a **missing export as silent success**. That is
    why `ValidateHooks` exists: a manifest declaring a hook the binary doesn't
    export fails at load rather than doing nothing forever.

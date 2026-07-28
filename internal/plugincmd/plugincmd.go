@@ -55,6 +55,27 @@ func Usage(w io.Writer) {
 	_, _ = fmt.Fprintln(w, "and are not loaded until you approve their digest in the control plane.")
 }
 
+// ScaffoldSDKVersion is the SDK release `torana plugin new` writes into a new
+// plugin's go.mod, and scaffoldGoVersion the Go directive it writes.
+//
+// They are constants because the test used to assert the scaffolded string
+// literally — so the scaffold and the assertion were two copies of the same
+// value, and the test locked in whatever the scaffold said rather than
+// checking it. It named SDK v0.1.0 long after v0.1.3 shipped, and the test
+// passed the whole time.
+//
+// Bumping the SDK is now one edit here. Keep ScaffoldSDKVersion to a version
+// that is actually published: a scaffold naming an unreleased tag produces a
+// project that cannot build.
+const (
+	ScaffoldSDKVersion = "v0.1.3"
+	// scaffoldGoVersion tracks the SDK's own go directive. A scaffolded module
+	// declaring an OLDER Go version than its dependency requires fails to build
+	// with "module requires go >= x", which is the same class of unbuildable
+	// first project this constant pair exists to prevent.
+	scaffoldGoVersion = "1.25.0"
+)
+
 func initPlugin(args []string, stdout io.Writer) error {
 	if len(args) < 1 || args[0] == "" {
 		return errors.New("plugin name is required")
@@ -76,10 +97,10 @@ func initPlugin(args []string, stdout io.Writer) error {
 	files := map[string]string{
 		"go.mod": fmt.Sprintf(`module %s
 
-go 1.26
+go %s
 
-require github.com/torana-edge/torana-plugin-sdk v0.1.0
-`, pluginName),
+require github.com/torana-edge/torana-plugin-sdk %s
+`, pluginName, scaffoldGoVersion, ScaffoldSDKVersion),
 		"plugin.wasm.go": `package main
 
 import (
