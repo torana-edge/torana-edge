@@ -1433,7 +1433,7 @@ func New(cfg Config) (*Server, error) {
 				// value that predates a schema change blocks enabling,
 				// disabling or reordering anything until it is fixed by hand —
 				// while the per-plugin endpoint would block only that plugin.
-				if bytes.Equal(oldPlugins.Config[name], raw) {
+				if sameJSONConfig(oldPlugins.Config[name], raw) {
 					continue
 				}
 				if verr := plugin.ValidateConfigAgainstSchema(schema, raw); verr != nil {
@@ -2262,6 +2262,25 @@ func providerFieldsSent(body []byte) map[string]map[string]struct{} {
 		sent[name] = keys
 	}
 	return sent
+}
+
+// sameJSONConfig reports whether two stored config blobs are the same JSON.
+//
+// Not bytes.Equal: provider.Save writes with json.MarshalIndent, which
+// RE-INDENTS nested json.RawMessage. So a value written to disk comes back
+// pretty-printed while the dashboard PUTs it compact, the byte comparison never
+// matches after a restart, and every plugin's config is re-validated on every
+// bulk write — which is precisely the lockout this comparison exists to avoid.
+func sameJSONConfig(stored, incoming json.RawMessage) bool {
+	if len(stored) == 0 || len(incoming) == 0 {
+		return len(stored) == len(incoming)
+	}
+	var a, b bytes.Buffer
+	if json.Compact(&a, stored) != nil || json.Compact(&b, incoming) != nil {
+		// Unparseable on either side: treat as changed and let validation speak.
+		return false
+	}
+	return a.String() == b.String()
 }
 
 // unmanagedProviderFields are per-provider settings that no control-plane form

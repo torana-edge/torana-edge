@@ -25,8 +25,9 @@ import (
 // pluginConfigEnv stands up a real server over a temp plugin directory holding
 // one bundle whose schema declares a boolean field.
 type pluginConfigEnv struct {
-	srv *Server
-	url string
+	srv        *Server
+	url        string
+	configPath string
 }
 
 func newPluginConfigEnv(t *testing.T) *pluginConfigEnv {
@@ -52,10 +53,11 @@ func newPluginConfigEnv(t *testing.T) *pluginConfigEnv {
 	provCfg := provider.DefaultConfig()
 	provCfg.Plugins = provider.PluginsConfig{Dir: pluginsDir, AllowUnapproved: true}
 
+	configPath := filepath.Join(t.TempDir(), "config.json")
 	srv, err := New(Config{
 		Port:       "8080",
 		Providers:  provCfg,
-		ConfigPath: filepath.Join(t.TempDir(), "config.json"),
+		ConfigPath: configPath,
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -70,7 +72,7 @@ func newPluginConfigEnv(t *testing.T) *pluginConfigEnv {
 		ln.Close()
 	})
 
-	return &pluginConfigEnv{srv: srv, url: "http://" + ln.Addr().String()}
+	return &pluginConfigEnv{srv: srv, url: "http://" + ln.Addr().String(), configPath: configPath}
 }
 
 func (e *pluginConfigEnv) put(t *testing.T, body string) (int, string) {
@@ -179,13 +181,30 @@ func TestSavePipelineDoesNotBlankConfigs(t *testing.T) {
 func TestUnchangedBadConfigDoesNotBlockPipelineEdits(t *testing.T) {
 	env := newPluginConfigEnv(t)
 
-	// Simulate a value stored before the schema declared "enabled" a boolean.
+	// Written through Save/Load, not injected in memory. provider.Save uses
+	// json.MarshalIndent, which re-indents nested json.RawMessage — so what
+	// comes back off disk is pretty-printed while the dashboard PUTs it
+	// compact. Setting the value directly skipped that entirely, which is why
+	// the first version of this test passed against a byte comparison that
+	// could never match after a restart.
 	provs := env.srv.GetConfig().Providers
 	provs.Plugins.Config = map[string]json.RawMessage{"settings": json.RawMessage(`{"enabled":"legacy"}`)}
-	env.srv.SetProviders(provs)
+	if err := provider.Save(env.configPath, provs); err != nil {
+		t.Fatal(err)
+	}
+	reloaded, err := provider.Load(env.configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(reloaded.Plugins.Config["settings"]) == `{"enabled":"legacy"}` {
+		t.Fatal("the fixture no longer exercises re-indentation; this test would be vacuous")
+	}
+	env.srv.SetProviders(reloaded)
 
-	// A reorder that resubmits the same (bad) config must still go through.
-	status, body := env.put(t, `{"order":["settings"],"config":{"settings":{"enabled":"legacy"}}}`)
+	// Resubmitting the same value, compact as the dashboard sends it, must go
+	// through. The dashboard does this on every save, including saves that only
+	// reorder or toggle a different plugin.
+	status, body := env.put(t, `{"config":{"settings":{"enabled":"legacy"}}}`)
 	if status != http.StatusOK {
 		t.Fatalf("an unchanged legacy value blocked an unrelated pipeline edit: status %d, body %s", status, body)
 	}
