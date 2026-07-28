@@ -20,7 +20,8 @@ import (
 // Returns a post helper and the upstream hit counter.
 func piiEnv(t *testing.T, piiCfg string, extra map[string]provider.Provider) (func(body string) (int, []byte), *int32) {
 	t.Helper()
-	requireWASM(t, "../../plugins/pii/plugin.wasm")
+	bundles := officialBundlesDir(t)
+	requireBundle(t, bundles, "pii")
 
 	var hits int32
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -39,7 +40,7 @@ func piiEnv(t *testing.T, piiCfg string, extra map[string]provider.Provider) (fu
 		Providers: provider.Config{
 			Providers: providers,
 			Plugins: provider.PluginsConfig{
-				Dir:             "../../plugins",
+				Dir:             bundles,
 				Order:           []string{"pii"},
 				Config:          map[string]json.RawMessage{"pii": json.RawMessage(piiCfg)},
 				AllowUnapproved: true,

@@ -23,7 +23,8 @@ import (
 // plugin needs, since without them it correctly declines to act at all.
 func tierSelectorPipeline(t *testing.T, refreshOnRead bool, readRate, writeRate float64) (*PluginPipeline, *pluginstate.Store) {
 	t.Helper()
-	requireWASM(t, "../../plugins/cache_tier_selector/plugin.wasm")
+	dir := officialBundlesDir(t)
+	requireBundle(t, dir, "cache_tier_selector")
 
 	rt := wasm.NewRuntime(context.Background())
 	t.Cleanup(func() { rt.Close() })
@@ -56,7 +57,7 @@ func tierSelectorPipeline(t *testing.T, refreshOnRead bool, readRate, writeRate 
 	}
 
 	pp, err := NewPipeline(rt, PluginConfig{
-		Dir:             "../../plugins",
+		Dir:             dir,
 		Order:           []string{"cache_tier_selector"},
 		AllowUnapproved: true,
 		Config: map[string]json.RawMessage{
@@ -78,7 +79,8 @@ func tierSelectorPipeline(t *testing.T, refreshOnRead bool, readRate, writeRate 
 // tests that need the plugin to actually act rather than correctly decline.
 func tierSelectorPipelineWithMode(t *testing.T, mode string) *PluginPipeline {
 	t.Helper()
-	requireWASM(t, "../../plugins/cache_tier_selector/plugin.wasm")
+	dir := officialBundlesDir(t)
+	requireBundle(t, dir, "cache_tier_selector")
 
 	rt := wasm.NewRuntime(context.Background())
 	t.Cleanup(func() { rt.Close() })
@@ -95,7 +97,7 @@ func tierSelectorPipelineWithMode(t *testing.T, mode string) *PluginPipeline {
 	}
 
 	pp, err := NewPipeline(rt, PluginConfig{
-		Dir:             "../../plugins",
+		Dir:             dir,
 		Order:           []string{"cache_tier_selector"},
 		AllowUnapproved: true,
 		Config: map[string]json.RawMessage{
@@ -210,7 +212,8 @@ func TestAutoModeLeavesBusyConversationsAlone(t *testing.T) {
 // TestUnknownPricingLeavesRequestAlone — a plugin that cannot price its action
 // must not take it. Guessing a tier spends the operator's money on a hunch.
 func TestUnknownPricingLeavesRequestAlone(t *testing.T) {
-	requireWASM(t, "../../plugins/cache_tier_selector/plugin.wasm")
+	dir := officialBundlesDir(t)
+	requireBundle(t, dir, "cache_tier_selector")
 
 	rt := wasm.NewRuntime(context.Background())
 	defer rt.Close()
@@ -222,7 +225,7 @@ func TestUnknownPricingLeavesRequestAlone(t *testing.T) {
 	}
 
 	pp, err := NewPipeline(rt, PluginConfig{
-		Dir:             "../../plugins",
+		Dir:             dir,
 		Order:           []string{"cache_tier_selector"},
 		AllowUnapproved: true,
 	})
@@ -266,7 +269,8 @@ func TestNoBreakpointIsNotTouched(t *testing.T) {
 // TestOffModeDoesNothing — the escape hatch has to actually work, since it is
 // what an operator reaches for when they suspect this plugin of misbehaving.
 func TestOffModeDoesNothing(t *testing.T) {
-	requireWASM(t, "../../plugins/cache_tier_selector/plugin.wasm")
+	dir := officialBundlesDir(t)
+	requireBundle(t, dir, "cache_tier_selector")
 
 	rt := wasm.NewRuntime(context.Background())
 	defer rt.Close()
@@ -278,7 +282,7 @@ func TestOffModeDoesNothing(t *testing.T) {
 	}
 
 	pp, err := NewPipeline(rt, PluginConfig{
-		Dir:             "../../plugins",
+		Dir:             dir,
 		Order:           []string{"cache_tier_selector"},
 		AllowUnapproved: true,
 		Config: map[string]json.RawMessage{
@@ -303,11 +307,14 @@ func TestOffModeDoesNothing(t *testing.T) {
 // TestDecisionSurvivesRestart — the decision lives in durable state precisely
 // so a redeploy does not re-decide and invalidate every live cache entry.
 func TestDecisionSurvivesRestart(t *testing.T) {
-	dir := t.TempDir()
+	bundles := officialBundlesDir(t)
+	requireBundle(t, bundles, "cache_tier_selector")
+
+	stateDir := t.TempDir()
 	build := func() *PluginPipeline {
 		rt := wasm.NewRuntime(context.Background())
 		t.Cleanup(func() { rt.Close() })
-		state, err := pluginstate.New(pluginstate.Options{Path: dir + "/state.json"})
+		state, err := pluginstate.New(pluginstate.Options{Path: stateDir + "/state.json"})
 		if err != nil {
 			t.Fatalf("pluginstate.New: %v", err)
 		}
@@ -317,7 +324,7 @@ func TestDecisionSurvivesRestart(t *testing.T) {
 			return `{"status":"ok","refresh_on_read":true,"shortest_ttl_seconds":300,"write_read_ratio":12.5,"break_even_refreshes":11,` + anthropicTiers + `}`
 		}
 		pp, err := NewPipeline(rt, PluginConfig{
-			Dir:             "../../plugins",
+			Dir:             bundles,
 			Order:           []string{"cache_tier_selector"},
 			AllowUnapproved: true,
 			Config: map[string]json.RawMessage{
@@ -329,8 +336,6 @@ func TestDecisionSurvivesRestart(t *testing.T) {
 		}
 		return pp
 	}
-
-	requireWASM(t, "../../plugins/cache_tier_selector/plugin.wasm")
 
 	first, err := build().RunBeforeRequest(context.Background(), 1, tierRequest("anth"))
 	if err != nil {

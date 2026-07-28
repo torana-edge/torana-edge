@@ -18,17 +18,17 @@ import (
 //   - a reload reflects the CURRENT on-disk config (the "live config" fix), and
 //   - removing a plugin unloads it (the fsnotify.Remove → unload fix).
 func TestReloadPipeline_ReflectsDiskState(t *testing.T) {
-	schemaWASM := readWASM(t, "../../plugins/schema_translator/plugin.wasm")
-	schemaJSON := readFile(t, "../../plugins/schema_translator/plugin.json")
-	authWASM := readWASM(t, "../../plugins/auth/plugin.wasm")
-	authJSON := readFile(t, "../../plugins/auth/plugin.json")
+	schemaWASM := readWASM(t, fixturesDir+"/test-mutator/plugin.wasm")
+	schemaJSON := readFile(t, fixturesDir+"/test-mutator/plugin.json")
+	authWASM := readWASM(t, fixturesDir+"/test-metrics/plugin.wasm")
+	authJSON := readFile(t, fixturesDir+"/test-metrics/plugin.json")
 
 	dir := t.TempDir()
 	pDir := filepath.Join(dir, "p")
 	if err := os.MkdirAll(pDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	cfg := PluginConfig{Dir: dir, Order: []string{"schema_translator", "auth"}, AllowUnapproved: true}
+	cfg := PluginConfig{Dir: dir, Order: []string{"test-mutator", "test-metrics"}, AllowUnapproved: true}
 
 	// reload runs reloadPipeline with a FRESH runtime each time — the runtime
 	// factory fix — so host callbacks survive reloads rather than being lost.
@@ -43,22 +43,22 @@ func TestReloadPipeline_ReflectsDiskState(t *testing.T) {
 		return pp
 	}
 
-	// Initial: schema_translator on disk → loaded.
+	// Initial: test-mutator on disk → loaded.
 	writeFile(t, filepath.Join(pDir, "plugin.json"), schemaJSON)
 	writeFile(t, filepath.Join(pDir, "plugin.wasm"), schemaWASM)
-	if pp := reload(); !hasLoaded(pp, "schema_translator") {
-		t.Fatalf("initial: schema_translator not loaded, got %v", loadedNames(pp))
+	if pp := reload(); !hasLoaded(pp, "test-mutator") {
+		t.Fatalf("initial: test-mutator not loaded, got %v", loadedNames(pp))
 	}
 
 	// Edit: replace with auth → next reload reflects the new on-disk config.
 	writeFile(t, filepath.Join(pDir, "plugin.json"), authJSON)
 	writeFile(t, filepath.Join(pDir, "plugin.wasm"), authWASM)
 	pp := reload()
-	if !hasLoaded(pp, "auth") {
+	if !hasLoaded(pp, "test-metrics") {
 		t.Errorf("after edit: expected 'auth', got %v", loadedNames(pp))
 	}
-	if hasLoaded(pp, "schema_translator") {
-		t.Errorf("after edit: schema_translator should be gone, got %v", loadedNames(pp))
+	if hasLoaded(pp, "test-mutator") {
+		t.Errorf("after edit: test-mutator should be gone, got %v", loadedNames(pp))
 	}
 
 	// Delete: remove the plugin files → next reload unloads it (0 plugins).
@@ -80,10 +80,10 @@ func TestReloadPipeline_ReflectsDiskState(t *testing.T) {
 // deterministically in TestReloadPipeline_ReflectsDiskState above; this test's
 // job is just the wiring.
 func TestWatchPlugins_FiresReloadAndExitsOnCancel(t *testing.T) {
-	authWASM := readWASM(t, "../../plugins/auth/plugin.wasm")
-	authJSON := readFile(t, "../../plugins/auth/plugin.json")
-	schemaWASM := readWASM(t, "../../plugins/schema_translator/plugin.wasm")
-	schemaJSON := readFile(t, "../../plugins/schema_translator/plugin.json")
+	authWASM := readWASM(t, fixturesDir+"/test-metrics/plugin.wasm")
+	authJSON := readFile(t, fixturesDir+"/test-metrics/plugin.json")
+	schemaWASM := readWASM(t, fixturesDir+"/test-mutator/plugin.wasm")
+	schemaJSON := readFile(t, fixturesDir+"/test-mutator/plugin.json")
 
 	dir := t.TempDir()
 	pDir := filepath.Join(dir, "p")
@@ -96,7 +96,7 @@ func TestWatchPlugins_FiresReloadAndExitsOnCancel(t *testing.T) {
 	var configCalls, runtimeCalls int
 	configFn := func() PluginConfig {
 		configCalls++
-		return PluginConfig{Dir: dir, Order: []string{"schema_translator", "auth"}, AllowUnapproved: true}
+		return PluginConfig{Dir: dir, Order: []string{"test-mutator", "test-metrics"}, AllowUnapproved: true}
 	}
 	var runtimes []*wasm.Runtime
 	runtimeFn := func() *wasm.Runtime {
@@ -144,7 +144,7 @@ wait:
 			t.Fatal("WatchPlugins never fired a reload after an edit (fsnotify wiring broken)")
 		}
 	}
-	if !hasLoaded(got, "auth") {
+	if !hasLoaded(got, "test-metrics") {
 		t.Errorf("reload didn't reflect the edit: got %v", loadedNames(got))
 	}
 	if configCalls < 1 || runtimeCalls < 1 {

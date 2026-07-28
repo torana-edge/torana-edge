@@ -150,9 +150,9 @@ func TestRunOnTick_DeliversHostClock(t *testing.T) {
 // export as silent success, so only the manifest check prevents a pointless
 // call every tick.
 func TestRunOnTick_PluginWithoutHookIgnored(t *testing.T) {
-	requireWASM(t, "../../plugins/otel/plugin.wasm")
+	requireWASM(t, fixturesDir+"/test-metrics/plugin.wasm")
 
-	pp := newTestPipeline(t, "../../plugins", []string{"otel"})
+	pp := newTestPipeline(t, fixturesDir, []string{"test-metrics"})
 	if got := pp.RunOnTick(context.Background(), 1, tickRequest(1)); len(got) != 0 {
 		t.Errorf("a plugin that does not declare run_on_tick was ticked: %+v", got)
 	}

@@ -28,9 +28,10 @@ import (
 // HTTP client. This is the coverage class whose absence let the stale-stub
 // regression ship: every assertion here exercises the deployed .wasm files.
 func TestE2E(t *testing.T) {
-	requireWASM(t, "../../plugins/schema_translator/plugin.wasm")
-	requireWASM(t, "../../plugins/intent/plugin.wasm")
-	requireWASM(t, "../../plugins/compactor/plugin.wasm")
+	bundles := officialBundlesDir(t)
+	for _, name := range []string{"schema_translator", "intent", "compactor"} {
+		requireBundle(t, bundles, name)
+	}
 
 	// --- mock upstream ------------------------------------------------------
 	var mu sync.Mutex
@@ -162,7 +163,7 @@ func TestE2E(t *testing.T) {
 				},
 			},
 			Plugins: provider.PluginsConfig{
-				Dir:             "../../plugins",
+				Dir:             bundles,
 				AllowUnapproved: true,
 				// intent captures "i" into the cache; compactor consumes it.
 				// keyword_compactor is its ALTERNATIVE (either/or) and is
@@ -461,7 +462,18 @@ func TestE2E(t *testing.T) {
 // its whole lifetime, so the old runtime's meta (fragment buffers, mutation
 // registry) stays alive until the response completes.
 func TestHotReloadDuringInflightRequest(t *testing.T) {
-	requireWASM(t, "../../plugins/schema_translator/plugin.wasm")
+	// Host mechanics, not plugin behaviour: what is under test is that a
+	// pipeline swap mid-stream does not drain the runtime holding an in-flight
+	// request's state. Gating it on a real plugin took the assertion out of
+	// this repository's suite entirely.
+	//
+	// test-fragment-buffer accumulates tool-call argument fragments in
+	// request-scoped host state and emits them verbatim once complete. If the
+	// swap drops that state the arguments never arrive, which is observable
+	// from outside without knowing what any real plugin would have done to
+	// them.
+	requireWASM(t, fixturesDir+"/test-fragment-buffer/plugin.wasm")
+	reloadBundles := fixturesDir
 
 	release := make(chan struct{})
 	reached := make(chan struct{})
@@ -485,7 +497,7 @@ func TestHotReloadDuringInflightRequest(t *testing.T) {
 		Port: "0",
 		Providers: provider.Config{
 			Providers: map[string]provider.Provider{"oai": {URL: upstream.URL, Format: "openai"}},
-			Plugins:   provider.PluginsConfig{Dir: "../../plugins", Order: []string{"schema_translator"}, AllowUnapproved: true},
+			Plugins:   provider.PluginsConfig{Dir: reloadBundles, Order: []string{"test-fragment-buffer"}, AllowUnapproved: true},
 		},
 	}
 	srv, err := New(cfg)
@@ -528,7 +540,7 @@ func TestHotReloadDuringInflightRequest(t *testing.T) {
 
 	// Simulate the watcher: swap in a fresh pipeline and drain the old one.
 	newRT := wasm.NewRuntime(context.Background())
-	newPP, err := plugin.NewPipeline(newRT, plugin.PluginConfig{Dir: "../../plugins", Order: []string{"schema_translator"}, AllowUnapproved: true})
+	newPP, err := plugin.NewPipeline(newRT, plugin.PluginConfig{Dir: reloadBundles, Order: []string{"test-fragment-buffer"}, AllowUnapproved: true})
 	if err != nil {
 		t.Fatalf("NewPipeline: %v", err)
 	}
@@ -559,9 +571,17 @@ func TestHotReloadDuringInflightRequest(t *testing.T) {
 	if err := json.Unmarshal([]byte(res.args[0]), &args); err != nil {
 		t.Fatalf("args invalid: %v (%q)", err, res.args[0])
 	}
-	env, _ := args["env"].(map[string]any)
-	if env == nil || env["A"] != "1" {
+	// The fragments spanned the pipeline swap. Their reassembled form arriving
+	// intact is the whole assertion: had the swap drained the runtime holding
+	// this request's buffer, the accumulated prefix would be gone and these
+	// arguments would never have completed.
+	env, _ := args["env"].([]any)
+	if len(env) != 1 {
 		t.Fatalf("state lost across hot reload — args: %v", args)
+	}
+	pair, _ := env[0].(map[string]any)
+	if pair["key"] != "A" || pair["value"] != "1" {
+		t.Fatalf("fragments reassembled incorrectly across the reload: %v", args)
 	}
 
 	// And after the request completes, the drain must finish promptly.

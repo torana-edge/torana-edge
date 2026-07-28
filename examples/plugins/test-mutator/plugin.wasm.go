@@ -44,3 +44,34 @@ func init() {
 		return req, nil
 	})
 }
+
+// Response-side mutation, for testing the host's response locators.
+//
+// runJSONResponseHooks has to find a tool call inside four different provider
+// body shapes, hand its arguments to a plugin, and write the result back
+// without disturbing anything else. That is host mechanics — the plugin is only
+// the thing that changes a value — so a fixture with a fixed, known
+// substitution tests it far more precisely than a real plugin whose output
+// depends on its own logic.
+func init() {
+	sdk.OnAfterResponse(func(ctx context.Context, resp *pb.ChatRequest) (*pb.ChatRequest, error) {
+		var changed bool
+		for i := range resp.Messages {
+			for j := range resp.Messages[i].ToolCalls {
+				tc := resp.Messages[i].ToolCalls[j]
+				if tc == nil {
+					continue
+				}
+				// A fixed replacement: the test asserts these exact bytes came
+				// back, which proves the host both read and wrote the right
+				// place in the body.
+				tc.ArgumentsJson = []byte(`{"mutated_by":"test-mutator"}`)
+				changed = true
+			}
+		}
+		if !changed {
+			return nil, nil
+		}
+		return resp, nil
+	})
+}

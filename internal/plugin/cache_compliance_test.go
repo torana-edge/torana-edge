@@ -74,16 +74,17 @@ func stableBytes(t *testing.T, chat *engine.ChatRequest) []byte {
 // twice over the identical request and asserts byte-identical output — the
 // guardrail that keeps plugins from busting turn-over-turn prompt caching.
 func TestPluginPrefixDeterminism(t *testing.T) {
+	bundles := officialBundlesDir(t)
 	for _, name := range []string{"schema_translator", "intent", "keyword_compactor", "compactor", "pii", "otel", "cache_tier_selector", "cache_warmer"} {
 		t.Run(name, func(t *testing.T) {
-			requireWASM(t, "../../plugins/"+name+"/plugin.wasm")
+			requireBundle(t, bundles, name)
 
 			ctx := context.Background()
 			runtime := wasm.NewRuntime(ctx)
 			defer runtime.Close()
 
 			pipeline, err := NewPipeline(runtime, PluginConfig{
-				Dir:             "../../plugins",
+				Dir:             bundles,
 				Order:           []string{name},
 				AllowUnapproved: true,
 			})
@@ -117,15 +118,15 @@ func TestPluginPrefixDeterminism(t *testing.T) {
 // pb round-trip through a mutating plugin (threaded via pbconv — a plugin
 // returning a request must not strip them).
 func TestCacheControlSurvivesPluginRoundTrip(t *testing.T) {
-	requireWASM(t, "../../plugins/intent/plugin.wasm")
+	requireWASM(t, fixturesDir+"/test-mutator/plugin.wasm")
 
 	ctx := context.Background()
 	runtime := wasm.NewRuntime(ctx)
 	defer runtime.Close()
 
 	pipeline, err := NewPipeline(runtime, PluginConfig{
-		Dir:             "../../plugins",
-		Order:           []string{"intent"},
+		Dir:             fixturesDir,
+		Order:           []string{"test-mutator"},
 		AllowUnapproved: true,
 	})
 	if err != nil {

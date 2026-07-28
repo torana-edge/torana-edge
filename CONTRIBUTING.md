@@ -8,15 +8,41 @@ don't cost you one.
 
 ```bash
 go build ./...
-make plugins      # builds the bundled plugins to .wasm
 make testdata     # builds the WASM test fixtures the plugin tests need
 make test         # plugins + testdata + go test ./... -race
 ```
 
-`.wasm` files are build artifacts and are gitignored. Many tests skip themselves
-when the binaries are missing, so **a clean `go test ./...` on a fresh clone is
-not proof that anything passed.** Run `make test`, or set `TORANA_E2E=1` to turn
-those skips into hard failures.
+`.wasm` files are build artifacts and are gitignored, so `make test` builds the
+fixtures first. `TORANA_E2E=1` turns a missing fixture from a skip into a hard
+failure.
+
+### The official plugins are not in this repository
+
+They live in [torana-plugins](https://github.com/torana-edge/torana-plugins),
+and this repo has no copy. It used to, and the copy silently drifted — the
+`pii` plugin here shipped an unsound cache key for long enough to matter.
+
+So the tests split by what they assert:
+
+- **Host mechanics** — hook dispatch, grant refusal, verdict handling, the raw
+  ABI — run against the purpose-built fixtures in `examples/plugins/`. These are
+  the tests you are almost certainly writing, and they need nothing external.
+- **Plugin behaviour** — does `pii` block, does the warmer stop at break-even —
+  is gated on `TORANA_PLUGIN_BUNDLES_DIR` and runs from torana-plugins CI, which
+  builds the bundles from the repo that owns them.
+
+To run the second set locally:
+
+```bash
+git clone https://github.com/torana-edge/torana-plugins ../torana-plugins
+make official-plugins
+TORANA_PLUGIN_BUNDLES_DIR=$(pwd)/../torana-plugins/dist go test ./...
+```
+
+**If you are adding a test, ask which kind it is.** A test that needs a real
+plugin to state its assertion is testing that plugin, and belongs behind the
+gate. Reaching for a real plugin because it happens to be convenient is how the
+copy got here in the first place.
 
 ### Working across the four repositories
 

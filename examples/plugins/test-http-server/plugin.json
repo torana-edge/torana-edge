@@ -1,13 +1,26 @@
 {
   "schema_version": 1,
+  "id": "torana-test/test-http-server",
   "name": "test-http-server",
   "version": "0.1.0",
+  "abi_version": "v1",
+  "minimum_torana_version": "0.1.0",
+  "failure_mode": "pass",
   "description": "Test fixture: serves an HTML page and a schema-validated agent operation over run_on_http_request",
   "hooks": [
-    {"name": "run_on_http_request", "priority": 100}
+    {
+      "name": "run_on_http_request",
+      "priority": 100
+    }
   ],
   "permissions": [
-    {"name": "env.serve_http", "description": "Serve pages and JSON under /_torana/plugin/test-http-server/"},
-    {"name": "env.log", "description": "Diagnostic logging"}
+    {
+      "name": "env.serve_http",
+      "description": "Serve pages and JSON under /_torana/plugin/test-http-server/"
+    },
+    {
+      "name": "env.log",
+      "description": "Diagnostic logging"
+    }
   ]
 }

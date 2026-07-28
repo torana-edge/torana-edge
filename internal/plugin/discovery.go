@@ -470,7 +470,8 @@ func bundleDigest(manifestBytes, wasmBytes, schemaBytes, agentBytes []byte) stri
 
 // warnIfStale logs a warning when plugin.wasm is older than any Go source
 // in the plugin directory. Stale binaries silently running outdated logic
-// caused a production incident — binaries are build artifacts (`make plugins`).
+// caused a production incident — binaries are build artifacts, installed with
+// `torana plugin install` (fixtures: `make testdata`).
 func warnIfStale(dir, wasmPath, name string) {
 	wasmInfo, err := os.Stat(wasmPath)
 	if err != nil {
@@ -485,7 +486,11 @@ func warnIfStale(dir, wasmPath, name string) {
 			continue
 		}
 		if info, err := e.Info(); err == nil && info.ModTime().After(wasmInfo.ModTime()) {
-			log.Printf("[plugin] %s: plugin.wasm is older than %s — rebuild with 'make plugins'", name, e.Name())
+			// Operator-facing, so it has to name a command that exists.
+			// Plugins are no longer built from a tree in this repository, and
+			// the previous message pointed at a Makefile target deleted along
+			// with that tree.
+			log.Printf("[plugin] %s: plugin.wasm is older than %s — reinstall with 'torana plugin install %s'", name, e.Name(), name)
 			return
 		}
 	}

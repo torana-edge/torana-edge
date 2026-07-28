@@ -25,4 +25,14 @@ func init() {
 		// request, and a test asserting the prefix is untouched needs that.
 		return nil, nil
 	})
+
+	// The response half of the same ABI. Without this hook declared, a test
+	// calling RunAfterResponse dispatches to nothing and passes for the wrong
+	// reason — which is what happened when this fixture replaced otel, whose
+	// manifest declared both.
+	sdk.OnAfterResponse(func(ctx context.Context, resp *pb.ChatRequest) (*pb.ChatRequest, error) {
+		sdk.EmitMetric("test_response_counter", sdk.MetricCounter, 1,
+			map[string]string{"model": resp.Model, "fixture": "test-metrics", "phase": "response"})
+		return nil, nil
+	})
 }

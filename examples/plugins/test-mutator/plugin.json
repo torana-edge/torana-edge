@@ -1,12 +1,26 @@
 {
   "schema_version": 1,
+  "id": "torana-test/test-mutator",
   "name": "test-mutator",
   "version": "0.1.0",
+  "abi_version": "v1",
+  "minimum_torana_version": "0.1.0",
+  "failure_mode": "pass",
   "description": "Test fixture: deterministically rewrites user messages and tool definitions",
   "hooks": [
-    {"name": "run_before_request", "priority": 100}
+    {
+      "name": "run_before_request",
+      "priority": 100
+    },
+    {
+      "name": "run_after_response",
+      "priority": 100
+    }
   ],
   "permissions": [
-    {"name": "env.log", "description": "Diagnostic logging"}
+    {
+      "name": "env.log",
+      "description": "Diagnostic logging"
+    }
   ]
 }
