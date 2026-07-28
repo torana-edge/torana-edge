@@ -49,7 +49,6 @@ var supportedFormats = map[string]struct{}{
 	"openai":            {},
 }
 
-// Validate rejects configuration that cannot be routed deterministically.
 // supportedFormatNames lists the wire formats in a stable order, for error
 // messages that tell the operator what to write instead.
 func supportedFormatNames() string {
@@ -61,6 +60,7 @@ func supportedFormatNames() string {
 	return strings.Join(names, ", ")
 }
 
+// Validate rejects configuration that cannot be routed deterministically.
 func (c Config) Validate() error {
 	if c.Port <= 0 || c.Port > 65535 {
 		return fmt.Errorf("port must be between 1 and 65535")
