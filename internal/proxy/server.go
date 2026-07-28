@@ -1405,7 +1405,16 @@ func New(cfg Config) (*Server, error) {
 			// dashboard's "Save & apply" button uses THIS one — so the path
 			// operators actually click was the unvalidated one, and a
 			// wrong-typed value reached the guest to misbehave silently.
-			bundles, _ := plugin.DiscoverPlugins(oldPlugins.Dir)
+			// A discovery failure must not silently disable validation. The
+			// GET handler on this same directory returns 500 for it; skipping
+			// the check here would let anything through on a transient error,
+			// which is the opposite of what this endpoint is for.
+			bundles, derr := plugin.DiscoverPlugins(oldPlugins.Dir)
+			if derr != nil {
+				log.Printf("plugin discovery failed while validating config: %v", derr)
+				http.Error(w, "plugin discovery failed", http.StatusInternalServerError)
+				return
+			}
 			schemaByName := make(map[string]*plugin.ConfigSchema, len(bundles))
 			for _, b := range bundles {
 				schemaByName[b.Manifest.Name] = b.Schema
@@ -1416,6 +1425,15 @@ func New(cfg Config) (*Server, error) {
 					// No bundle on disk to check against. Configuration for
 					// absent plugins is deliberately retained, so this is not
 					// an error — it matches the per-plugin endpoint.
+					continue
+				}
+				// Only entries the caller actually CHANGED. The dashboard's
+				// Save & apply resubmits every enabled plugin's current config
+				// on every reorder, so validating all of them means one stored
+				// value that predates a schema change blocks enabling,
+				// disabling or reordering anything until it is fixed by hand —
+				// while the per-plugin endpoint would block only that plugin.
+				if bytes.Equal(oldPlugins.Config[name], raw) {
 					continue
 				}
 				if verr := plugin.ValidateConfigAgainstSchema(schema, raw); verr != nil {

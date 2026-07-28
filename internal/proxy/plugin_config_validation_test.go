@@ -3,6 +3,7 @@ package proxy
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"io"
 	"net"
 	"net/http"
@@ -167,5 +168,31 @@ func TestSavePipelineDoesNotBlankConfigs(t *testing.T) {
 	}
 	if !strings.Contains(body, "configMap[name] !== undefined") {
 		t.Error("savePipeline no longer guards on a present config; the blanking bug can recur")
+	}
+}
+
+// TestUnchangedBadConfigDoesNotBlockPipelineEdits — the dashboard's Save &
+// apply resubmits every enabled plugin's current config on every reorder. If
+// validation ran over all of them, a single stored value predating a schema
+// change would block enabling, disabling or reordering ANYTHING until it was
+// fixed by hand, while the per-plugin endpoint would block only that plugin.
+func TestUnchangedBadConfigDoesNotBlockPipelineEdits(t *testing.T) {
+	env := newPluginConfigEnv(t)
+
+	// Simulate a value stored before the schema declared "enabled" a boolean.
+	provs := env.srv.GetConfig().Providers
+	provs.Plugins.Config = map[string]json.RawMessage{"settings": json.RawMessage(`{"enabled":"legacy"}`)}
+	env.srv.SetProviders(provs)
+
+	// A reorder that resubmits the same (bad) config must still go through.
+	status, body := env.put(t, `{"order":["settings"],"config":{"settings":{"enabled":"legacy"}}}`)
+	if status != http.StatusOK {
+		t.Fatalf("an unchanged legacy value blocked an unrelated pipeline edit: status %d, body %s", status, body)
+	}
+
+	// Changing it to something still invalid must be rejected.
+	status, _ = env.put(t, `{"config":{"settings":{"enabled":"also-bad"}}}`)
+	if status != http.StatusBadRequest {
+		t.Errorf("a NEW invalid value was accepted: status %d", status)
 	}
 }
