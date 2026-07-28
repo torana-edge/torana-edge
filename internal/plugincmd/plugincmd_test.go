@@ -47,17 +47,9 @@ func TestScaffoldBuildsFromCleanSourceWithoutMutatingModuleFiles(t *testing.T) {
 	if err := Run([]string{"plugin", "init", dir}, &stdout, &stderr); err != nil {
 		t.Fatalf("init: %v", err)
 	}
-	sdkDir, err := filepath.Abs("../../../torana-plugin-sdk")
-	if err != nil {
-		t.Fatal(err)
-	}
 	goModPath := filepath.Join(dir, "go.mod")
 	goMod, err := os.ReadFile(goModPath)
 	if err != nil {
-		t.Fatal(err)
-	}
-	goMod = append(goMod, []byte("\nreplace "+sdkModulePath+" => "+sdkDir+"\n")...)
-	if err := os.WriteFile(goModPath, goMod, 0o644); err != nil {
 		t.Fatal(err)
 	}
 
