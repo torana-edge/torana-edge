@@ -157,7 +157,7 @@ func setNonZero(v reflect.Value) bool {
 		v.SetInt(1)
 	case reflect.Float32, reflect.Float64:
 		v.SetFloat(1)
-	case reflect.Ptr:
+	case reflect.Pointer:
 		v.Set(reflect.New(v.Type().Elem()))
 	case reflect.Map:
 		m := reflect.MakeMap(v.Type())
