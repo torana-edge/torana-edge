@@ -12,9 +12,9 @@ func requireWASM(t *testing.T, path string) {
 	t.Helper()
 	if _, err := os.Stat(path); err != nil {
 		if os.Getenv("TORANA_E2E") != "" {
-			t.Fatalf("%s missing — run 'make plugins testdata' (err: %v)", path, err)
+			t.Fatalf("%s missing — run 'make testdata' (err: %v)", path, err)
 		}
-		t.Skipf("%s not built — run 'make plugins testdata'", path)
+		t.Skipf("%s not built — run 'make testdata'", path)
 	}
 }
 
