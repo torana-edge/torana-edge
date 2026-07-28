@@ -599,15 +599,17 @@ func New(cfg Config) (*Server, error) {
 			req := pr.Out
 			var body []byte
 			if req.Body != nil {
+				// ServeHTTP has already enforced maxBodySize with a
+				// MaxBytesReader and returned 413, so nothing oversized reaches
+				// here. There used to be a second check that replaced an
+				// oversized body with an EMPTY one and forwarded it — dead code
+				// that an external auditor reasonably read as a live bug
+				// ("body silently truncated, upstream 400s"). The limit belongs
+				// at the edge, where it can still return a status code; here it
+				// could only corrupt the request.
 				lr := io.LimitReader(req.Body, maxBodySize+1)
 				body, _ = io.ReadAll(lr)
 				req.Body.Close()
-				if len(body) > maxBodySize {
-					log.Printf("request body exceeds max size after preflight limit")
-					req.Body = io.NopCloser(bytes.NewReader(nil))
-					req.ContentLength = 0
-					return
-				}
 			}
 
 			currentCfg := s.GetConfig()
@@ -1398,6 +1400,48 @@ func New(cfg Config) (*Server, error) {
 			newPlugins.Order = *req.Order
 		}
 		if req.Config != nil {
+			// Validate against each bundle's declared schema, exactly as the
+			// per-plugin POST does. Only that endpoint checked, while the
+			// dashboard's "Save & apply" button uses THIS one — so the path
+			// operators actually click was the unvalidated one, and a
+			// wrong-typed value reached the guest to misbehave silently.
+			// A discovery failure must not silently disable validation. The
+			// GET handler on this same directory returns 500 for it; skipping
+			// the check here would let anything through on a transient error,
+			// which is the opposite of what this endpoint is for.
+			bundles, derr := plugin.DiscoverPlugins(oldPlugins.Dir)
+			if derr != nil {
+				log.Printf("plugin discovery failed while validating config: %v", derr)
+				http.Error(w, "plugin discovery failed", http.StatusInternalServerError)
+				return
+			}
+			schemaByName := make(map[string]*plugin.ConfigSchema, len(bundles))
+			for _, b := range bundles {
+				schemaByName[b.Manifest.Name] = b.Schema
+			}
+			for name, raw := range req.Config {
+				schema, ok := schemaByName[name]
+				if !ok {
+					// No bundle on disk to check against. Configuration for
+					// absent plugins is deliberately retained, so this is not
+					// an error — it matches the per-plugin endpoint.
+					continue
+				}
+				// Only entries the caller actually CHANGED. The dashboard's
+				// Save & apply resubmits every enabled plugin's current config
+				// on every reorder, so validating all of them means one stored
+				// value that predates a schema change blocks enabling,
+				// disabling or reordering anything until it is fixed by hand —
+				// while the per-plugin endpoint would block only that plugin.
+				if sameJSONConfig(oldPlugins.Config[name], raw) {
+					continue
+				}
+				if verr := plugin.ValidateConfigAgainstSchema(schema, raw); verr != nil {
+					http.Error(w, fmt.Sprintf("plugin %q: %v", name, verr), http.StatusBadRequest)
+					return
+				}
+			}
+
 			// PATCH-like semantics deliberately retain configurations for disabled
 			// plugins. The old dashboard only submits enabled plugins, and replacing
 			// this map silently discarded a disabled plugin's settings.
@@ -2219,6 +2263,25 @@ func providerFieldsSent(body []byte) map[string]map[string]struct{} {
 		sent[name] = keys
 	}
 	return sent
+}
+
+// sameJSONConfig reports whether two stored config blobs are the same JSON.
+//
+// Not bytes.Equal: provider.Save writes with json.MarshalIndent, which
+// RE-INDENTS nested json.RawMessage. So a value written to disk comes back
+// pretty-printed while the dashboard PUTs it compact, the byte comparison never
+// matches after a restart, and every plugin's config is re-validated on every
+// bulk write — which is precisely the lockout this comparison exists to avoid.
+func sameJSONConfig(stored, incoming json.RawMessage) bool {
+	if len(stored) == 0 || len(incoming) == 0 {
+		return len(stored) == len(incoming)
+	}
+	var a, b bytes.Buffer
+	if json.Compact(&a, stored) != nil || json.Compact(&b, incoming) != nil {
+		// Unparseable on either side: treat as changed and let validation speak.
+		return false
+	}
+	return a.String() == b.String()
 }
 
 // unmanagedProviderFields are per-provider settings that no control-plane form

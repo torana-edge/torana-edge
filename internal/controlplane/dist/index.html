@@ -572,8 +572,17 @@
 
     function savePipeline(button) {
       setButtonBusy(button, true, 'Applying…');
+      // Only send configuration we actually have. loadPlugins populates
+      // configMap for every plugin the GET returns — including ones missing
+      // from disk, whose stored config the server sends back — so today this
+      // is defensive rather than a fix: the `|| {}` it replaces was not
+      // reachable. It matters because the server treats this map as a PATCH,
+      // so any future path that leaves an entry unset would silently blank
+      // that plugin's stored settings. Omitting a name preserves it.
       const cfgOut = {};
-      for (const name of pipelineOrder) cfgOut[name] = configMap[name] || {};
+      for (const name of pipelineOrder) {
+        if (configMap[name] !== undefined) cfgOut[name] = configMap[name];
+      }
       fetch('/_torana/api/v1/plugins', {
         method: 'PUT', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ order: pipelineOrder, config: cfgOut, approvals: approvalMap })
