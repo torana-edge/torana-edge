@@ -11,8 +11,8 @@ RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o torana ./cmd/torana/
 FROM gcr.io/distroless/static-debian12
 COPY --from=builder /app/torana /torana
 # No plugins are baked in. They live in torana-plugins and are installed by the
-# operator with `torana plugin install`, which fetches the source, builds it
-# locally and prints the digest — so nobody runs a binary they could not have
-# read. Mount or install into /plugins and point plugins.dir at it.
+# operator on a machine with Go and git. Mount the resulting bundle directory
+# read-only at /plugins and point plugins.dir at it; the minimal runtime image
+# intentionally contains neither a compiler nor git.
 EXPOSE 8080
 ENTRYPOINT ["/torana"]

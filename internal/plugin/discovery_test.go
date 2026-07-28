@@ -302,15 +302,14 @@ func TestPipelineAgentOperationsComeFromLoadedContract(t *testing.T) {
 
 func TestValidateManifestContract(t *testing.T) {
 	valid := PluginManifest{
-		SchemaVersion:        1,
-		ID:                   "local/example",
-		Name:                 "example",
-		Version:              "0.1.0",
-		ABIVersion:           "v1",
-		MinimumToranaVersion: "0.1.0",
-		FailureMode:          "pass",
-		Hooks:                []Hook{{Name: "run_before_request"}},
-		Permissions:          []Permission{{Name: "env.log"}},
+		SchemaVersion: 1,
+		ID:            "local/example",
+		Name:          "example",
+		Version:       "0.1.0",
+		ABIVersion:    "v1",
+		FailureMode:   "pass",
+		Hooks:         []Hook{{Name: "run_before_request"}},
+		Permissions:   []Permission{{Name: "env.log"}},
 	}
 	if err := validateManifest(valid); err != nil {
 		t.Fatalf("valid manifest: %v", err)
@@ -327,8 +326,75 @@ func TestValidateManifestContract(t *testing.T) {
 	}
 	invalid = valid
 	invalid.MinimumToranaVersion = "99.0.0"
+	if err := validateManifest(invalid); err != nil {
+		t.Fatalf("legacy host version must be ignored for an unversioned host: %v", err)
+	}
+	invalid = valid
+	invalid.RequiresUpstream = []string{valid.ID}
 	if err := validateManifest(invalid); err == nil {
-		t.Fatal("incompatible minimum host version was accepted")
+		t.Fatal("self dependency was accepted")
+	}
+}
+
+func TestRequiresUpstreamRejectsMissingOrLaterDependencyBeforeLoadingCode(t *testing.T) {
+	root := t.TempDir()
+	writeBundle := func(dirName, id, name string, requires []string) {
+		t.Helper()
+		dir := filepath.Join(root, dirName)
+		if err := os.Mkdir(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		manifest := PluginManifest{
+			SchemaVersion:    1,
+			ID:               id,
+			Name:             name,
+			Version:          "0.1.0",
+			ABIVersion:       "v1",
+			FailureMode:      "pass",
+			Repository:       "https://github.com/torana-edge/torana-plugins",
+			RequiresUpstream: requires,
+		}
+		raw, _ := json.Marshal(manifest)
+		if err := os.WriteFile(filepath.Join(dir, "plugin.json"), raw, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		// Deliberately not valid WASM: ordering must fail before code loading.
+		if err := os.WriteFile(filepath.Join(dir, "plugin.wasm"), []byte("not wasm"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeBundle("intent", "torana/intent", "intent", nil)
+	writeBundle("compactor", "torana/compactor", "compactor", []string{"torana/intent"})
+
+	bundles, err := DiscoverPlugins(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	approvals := make(map[string]Approval)
+	for _, bundle := range bundles {
+		approvals[bundle.Manifest.Name] = Approval{Digest: bundle.Digest}
+	}
+	rt := wasm.NewRuntime(context.Background())
+	defer rt.Close()
+	_, err = NewPipeline(rt, PluginConfig{
+		Dir:       root,
+		Order:     []string{"compactor", "intent"},
+		Approvals: approvals,
+		Strict:    true,
+	})
+	if err == nil || !strings.Contains(err.Error(), "requires approved plugin id") {
+		t.Fatalf("dependency misordering error = %v", err)
+	}
+
+	_, err = NewPipeline(rt, PluginConfig{
+		Dir:       root,
+		Order:     []string{"intent", "compactor"},
+		Approvals: approvals,
+		Strict:    false,
+	})
+	if err == nil || !strings.Contains(err.Error(), "requires plugin id") ||
+		!strings.Contains(err.Error(), "load successfully") {
+		t.Fatalf("unavailable dependency error = %v", err)
 	}
 }
 

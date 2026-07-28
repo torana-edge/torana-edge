@@ -126,7 +126,7 @@ func init() {
   "abi_version": "v1",
   "description": "A local Torana plugin",
   "hooks": [
-    {"name": "run_before_request", "priority": 100}
+    {"name": "run_before_request"}
   ],
   "permissions": [],
   "failure_mode": "pass"
@@ -177,8 +177,23 @@ func buildPlugin(args []string, stdout, stderr io.Writer) error {
 		return fmt.Errorf("resolve output: %w", err)
 	}
 	fmt.Fprintf(stdout, "Building WASI plugin in %s\n", absDir)
-	cmd := exec.Command("go", "build", "-buildmode=c-shared", "-o", absOut, ".")
-	cmd.Dir = absDir
+	stage, err := os.MkdirTemp("", "torana-plugin-build-*")
+	if err != nil {
+		return fmt.Errorf("create build staging directory: %w", err)
+	}
+	defer func() { _ = os.RemoveAll(stage) }()
+	if err := copyTree(absDir, stage); err != nil {
+		return fmt.Errorf("stage plugin source: %w", err)
+	}
+	tidy := exec.Command("go", "mod", "tidy")
+	tidy.Dir = stage
+	tidy.Stdout = stdout
+	tidy.Stderr = stderr
+	if err := tidy.Run(); err != nil {
+		return fmt.Errorf("resolve plugin dependencies: %w", err)
+	}
+	cmd := exec.Command("go", "build", "-buildmode=c-shared", "-buildvcs=false", "-o", absOut, ".")
+	cmd.Dir = stage
 	cmd.Env = append(os.Environ(), "GOOS=wasip1", "GOARCH=wasm")
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr

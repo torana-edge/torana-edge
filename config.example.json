@@ -58,11 +58,9 @@
     "order": ["schema_translator", "intent"],
     "config": {
       "intent": {
-        "_comment": "fill controls what the intent plugin does with a HISTORY tool call whose intent was never captured (the model organically omitted 'i'): 'heuristic' (default) fills it with a template derived from the call's arguments and the current task — required to keep multi-turn 'i' emission alive, since one 'i'-less call in history becomes a per-tool precedent the model imitates; 'off' leaves history untouched (only sensible for models that reliably honor required schema fields). Filled values are never cached and never drive compaction; watch torana_intent_filled_total to see how often a model needs propping up.",
         "fill": "heuristic"
       },
       "compactor": {
-        "_comment": "Dormant until compactor is added to order. Source-reading tools stay exact; source mode is reserved and currently fails closed to exact after live agent reread loops. Deterministic first_pass is only for explicitly recoverable outputs. Model mode also requires expected_applications, target/offload pricing, and positive estimated net savings.",
         "max_offload_input_chars": 0,
         "expected_applications": 6,
         "tool_policies": [
@@ -72,7 +70,6 @@
         ]
       },
       "pii": {
-        "_comment": "PII detection. Scans tool results and BLOCKS the request (returns a provider-shaped error naming the PII type + line, never the value) if PII is found. 'provider' names a provider above used for the model-based scan — it MUST be a local/trusted endpoint because it receives raw tool output including any PII (e.g. 'local-slm'). A deterministic regex pre-filter (email, SSN, AWS key, private key) runs first and works even without a model. 'tools' is a tool-name allowlist (empty or [\"*\"] = all tool results). 'on_error' = \"block\" (fail-closed, default) or \"allow\" (fail-open). To enable, add \"pii\" to the order array above.",
         "provider": "local-slm",
         "model": "qwen2.5:3b",
         "tools": ["*"],

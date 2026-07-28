@@ -5,6 +5,21 @@ import (
 	"sort"
 )
 
+func isJSONSchema(raw []byte) bool {
+	var doc map[string]json.RawMessage
+	if json.Unmarshal(raw, &doc) != nil {
+		return false
+	}
+	_, hasFields := doc["fields"]
+	if hasFields {
+		return false
+	}
+	_, hasSchema := doc["$schema"]
+	_, hasType := doc["type"]
+	_, hasProperties := doc["properties"]
+	return hasSchema || hasType || hasProperties
+}
+
 // Two shapes of schema.json exist in the wild, and the host must read both.
 //
 // Torana's own shape is a UI manifest: {"fields":[{key,type,label,...}]}. The

@@ -41,6 +41,46 @@ func TestInitCreatesStandaloneSDKPlugin(t *testing.T) {
 	}
 }
 
+func TestScaffoldBuildsFromCleanSourceWithoutMutatingModuleFiles(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "clean-plugin")
+	var stdout, stderr bytes.Buffer
+	if err := Run([]string{"plugin", "init", dir}, &stdout, &stderr); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	sdkDir, err := filepath.Abs("../../../torana-plugin-sdk")
+	if err != nil {
+		t.Fatal(err)
+	}
+	goModPath := filepath.Join(dir, "go.mod")
+	goMod, err := os.ReadFile(goModPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	goMod = append(goMod, []byte("\nreplace "+sdkModulePath+" => "+sdkDir+"\n")...)
+	if err := os.WriteFile(goModPath, goMod, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if err := Run([]string{"plugin", "build", dir}, &stdout, &stderr); err != nil {
+		t.Fatalf("build scaffold: %v\nstderr: %s", err, stderr.String())
+	}
+	if info, err := os.Stat(filepath.Join(dir, "plugin.wasm")); err != nil || info.Size() == 0 {
+		t.Fatalf("plugin.wasm was not built: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "go.sum")); !os.IsNotExist(err) {
+		t.Fatalf("clean-room build unexpectedly modified source go.sum: %v", err)
+	}
+	after, err := os.ReadFile(goModPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != string(goMod) {
+		t.Fatal("clean-room build modified source go.mod")
+	}
+}
+
 func TestRunRejectsUnknownPluginCommand(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	err := Run([]string{"plugin", "publish"}, &stdout, &stderr)

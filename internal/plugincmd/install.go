@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/torana-edge/torana-edge/internal/plugin"
+	"github.com/torana-edge/torana-edge/internal/provider"
 )
 
 // bundleFiles are the files that make up an installed plugin bundle. plugin.wasm
@@ -24,6 +25,11 @@ var bundleFiles = []string{"plugin.wasm", "plugin.json", "schema.json", "agent.j
 // from it goes through exactly the same path as any other repository: fetch,
 // build locally, digest what was built, hand it to the operator for approval.
 const officialPluginsRepo = "github.com/torana-edge/torana-plugins"
+
+const (
+	maxSourceFiles = 10_000
+	maxSourceBytes = 100 << 20
+)
 
 // officialCatalog lists every plugin in the official repository and says, for
 // each, whether `--official` installs it.
@@ -80,7 +86,7 @@ func pluginsDir() string {
 	if v := os.Getenv("TORANA_PLUGINS_DIR"); v != "" {
 		return v
 	}
-	return "./plugins"
+	return provider.DefaultPluginsDir
 }
 
 // source describes where a plugin is being installed from.
@@ -112,24 +118,55 @@ func parseSource(arg string) (source, error) {
 	}
 
 	spec, ref := arg, ""
-	if at := strings.LastIndex(arg, "@"); at > 0 {
-		spec, ref = arg[:at], arg[at+1:]
-	}
 	spec = strings.TrimSuffix(spec, "/")
+
+	// Canonical remote syntax makes the repository/subdirectory boundary
+	// explicit, including for GitLab groups of arbitrary depth:
+	//   https://host/group/repo.git//plugins/foo@ref
+	if marker := strings.Index(spec, ".git//"); marker >= 0 {
+		repoEnd := marker + len(".git")
+		repoURL := spec[:repoEnd]
+		subAndRef := spec[repoEnd+2:]
+		if at := strings.LastIndex(subAndRef, "@"); at >= 0 {
+			ref = subAndRef[at+1:]
+			subAndRef = subAndRef[:at]
+		}
+		subPath := filepath.FromSlash(subAndRef)
+		cleanSub := filepath.Clean(subPath)
+		if repoURL == "" || subAndRef == "" || cleanSub == "." ||
+			cleanSub != subPath || filepath.IsAbs(cleanSub) ||
+			cleanSub == ".." || strings.HasPrefix(cleanSub, ".."+string(filepath.Separator)) {
+			return source{}, fmt.Errorf("%q is not a valid repository plugin source", arg)
+		}
+		return source{
+			repoURL: repoURL,
+			subPath: filepath.ToSlash(cleanSub),
+			ref:     ref,
+			name:    filepath.Base(cleanSub),
+		}, nil
+	}
+
+	if at := strings.LastIndex(spec, "@"); at > 0 {
+		spec, ref = spec[:at], spec[at+1:]
+	}
 	parts := strings.Split(spec, "/")
 	if len(parts) < 3 {
 		return source{}, fmt.Errorf("%q is not a plugin source — expected a local path or host/owner/repo/path/to/plugin", arg)
 	}
 	repo := strings.Join(parts[:3], "/")
 	sub := strings.Join(parts[3:], "/")
-	if sub == "" {
+	subPath := filepath.FromSlash(sub)
+	cleanSub := filepath.Clean(subPath)
+	if sub == "" || cleanSub == "." || cleanSub != subPath ||
+		filepath.IsAbs(cleanSub) || cleanSub == ".." ||
+		strings.HasPrefix(cleanSub, ".."+string(filepath.Separator)) {
 		return source{}, fmt.Errorf("%q names a repository but not a plugin directory inside it", arg)
 	}
 	return source{
 		repoURL: "https://" + repo + ".git",
-		subPath: sub,
+		subPath: filepath.ToSlash(cleanSub),
 		ref:     ref,
-		name:    filepath.Base(sub),
+		name:    filepath.Base(cleanSub),
 	}, nil
 }
 
@@ -149,11 +186,7 @@ func fetch(src source, stdout, stderr io.Writer) (string, func(), error) {
 	}
 	cleanup := func() { _ = os.RemoveAll(tmp) }
 
-	args := []string{"clone", "--depth", "1", "--quiet"}
-	if src.ref != "" {
-		args = append(args, "--branch", src.ref)
-	}
-	args = append(args, src.repoURL, tmp)
+	args := []string{"clone", "--depth", "1", "--quiet", src.repoURL, tmp}
 	fmt.Fprintf(stdout, "Fetching %s", src.repoURL)
 	if src.ref != "" {
 		fmt.Fprintf(stdout, " @ %s", src.ref)
@@ -166,6 +199,20 @@ func fetch(src source, stdout, stderr io.Writer) (string, func(), error) {
 		cleanup()
 		return "", nil, fmt.Errorf("clone %s: %w", src.repoURL, err)
 	}
+	if src.ref != "" {
+		fetchCmd := exec.Command("git", "-C", tmp, "fetch", "--depth", "1", "origin", src.ref)
+		fetchCmd.Stderr = stderr
+		if err := fetchCmd.Run(); err != nil {
+			cleanup()
+			return "", nil, fmt.Errorf("fetch %s @ %s: %w", src.repoURL, src.ref, err)
+		}
+		checkoutCmd := exec.Command("git", "-C", tmp, "checkout", "--quiet", "--detach", "FETCH_HEAD")
+		checkoutCmd.Stderr = stderr
+		if err := checkoutCmd.Run(); err != nil {
+			cleanup()
+			return "", nil, fmt.Errorf("checkout %s @ %s: %w", src.repoURL, src.ref, err)
+		}
+	}
 
 	dir := filepath.Join(tmp, filepath.FromSlash(src.subPath))
 	if _, err := os.Stat(dir); err != nil {
@@ -175,27 +222,50 @@ func fetch(src source, stdout, stderr io.Writer) (string, func(), error) {
 	return dir, cleanup, nil
 }
 
-// copyTree copies a plugin source directory one level deep. Plugin bundles are
-// flat by construction, and refusing to recurse keeps a hostile repository from
-// staging something enormous or escaping via a symlinked subdirectory.
+// copyTree recursively copies a bounded plugin source tree. Nested Go packages
+// and embedded assets are ordinary plugin inputs; symlinks and special files
+// are rejected so a hostile repository cannot escape the source root.
 func copyTree(src, dst string) error {
-	entries, err := os.ReadDir(src)
-	if err != nil {
-		return err
-	}
-	for _, e := range entries {
-		if e.IsDir() || !e.Type().IsRegular() {
-			continue
+	files, bytesCopied := 0, int64(0)
+	return filepath.WalkDir(src, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
 		}
-		data, err := os.ReadFile(filepath.Join(src, e.Name()))
+		rel, err := filepath.Rel(src, path)
 		if err != nil {
 			return err
 		}
-		if err := os.WriteFile(filepath.Join(dst, e.Name()), data, 0o644); err != nil {
+		if rel == "." {
+			return nil
+		}
+		if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			return fmt.Errorf("source path escapes root: %s", path)
+		}
+		info, err := entry.Info()
+		if err != nil {
 			return err
 		}
-	}
-	return nil
+		if info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("source contains unsupported symlink %s", rel)
+		}
+		target := filepath.Join(dst, rel)
+		if entry.IsDir() {
+			return os.MkdirAll(target, 0o755)
+		}
+		if !info.Mode().IsRegular() {
+			return fmt.Errorf("source contains unsupported special file %s", rel)
+		}
+		files++
+		bytesCopied += info.Size()
+		if files > maxSourceFiles || bytesCopied > maxSourceBytes {
+			return fmt.Errorf("plugin source exceeds staging limit (%d files, %d bytes)", maxSourceFiles, maxSourceBytes)
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		return os.WriteFile(target, data, info.Mode().Perm()&0o777)
+	})
 }
 
 func installPlugin(args []string, stdout, stderr io.Writer) error {
@@ -231,15 +301,49 @@ func installPlugin(args []string, stdout, stderr io.Writer) error {
 		return fmt.Errorf("create plugins dir: %w", err)
 	}
 
+	type cachedRepository struct {
+		root    string
+		cleanup func()
+	}
+	repositories := make(map[string]cachedRepository)
+	defer func() {
+		for _, cached := range repositories {
+			cached.cleanup()
+		}
+	}()
+
 	var installed []string
 	for _, arg := range sources {
 		src, err := parseSource(arg)
 		if err != nil {
 			return err
 		}
-		srcDir, cleanup, err := fetch(src, stdout, stderr)
-		if err != nil {
-			return err
+		var srcDir string
+		cleanup := func() {}
+		if src.local != "" {
+			srcDir, cleanup, err = fetch(src, stdout, stderr)
+			if err != nil {
+				return err
+			}
+		} else {
+			cacheKey := src.repoURL + "\x00" + src.ref
+			if cached, ok := repositories[cacheKey]; ok {
+				srcDir = filepath.Join(cached.root, filepath.FromSlash(src.subPath))
+			} else {
+				var fetchedCleanup func()
+				srcDir, fetchedCleanup, err = fetch(src, stdout, stderr)
+				if err != nil {
+					return err
+				}
+				root := srcDir
+				for range strings.Split(filepath.ToSlash(src.subPath), "/") {
+					root = filepath.Dir(root)
+				}
+				repositories[cacheKey] = cachedRepository{root: root, cleanup: fetchedCleanup}
+			}
+			if _, err := os.Stat(srcDir); err != nil {
+				return fmt.Errorf("%s does not contain %s: %w", src.repoURL, src.subPath, err)
+			}
 		}
 
 		if _, err := os.Stat(filepath.Join(srcDir, "plugin.json")); err != nil {
@@ -287,10 +391,12 @@ func installPlugin(args []string, stdout, stderr io.Writer) error {
 		defer stageCleanup()
 
 		target := filepath.Join(dest, src.name)
-		if err := os.MkdirAll(target, 0o755); err != nil {
+		installStage, err := os.MkdirTemp(dest, "."+src.name+".install-*")
+		if err != nil {
 			cleanup()
-			return fmt.Errorf("create %s: %w", target, err)
+			return fmt.Errorf("stage install for %s: %w", src.name, err)
 		}
+		installStageCleanup := func() { _ = os.RemoveAll(installStage) }
 		for _, name := range bundleFiles {
 			data, err := os.ReadFile(filepath.Join(srcDir, name))
 			if errors.Is(err, os.ErrNotExist) {
@@ -298,18 +404,31 @@ func installPlugin(args []string, stdout, stderr io.Writer) error {
 			}
 			if err != nil {
 				cleanup()
+				installStageCleanup()
 				return err
 			}
-			if err := os.WriteFile(filepath.Join(target, name), data, 0o644); err != nil {
+			if err := os.WriteFile(filepath.Join(installStage, name), data, 0o644); err != nil {
 				cleanup()
+				installStageCleanup()
 				return err
 			}
 		}
 
-		digest, err := plugin.BundleDigestForDir(target)
+		if _, err := plugin.ValidateBundleDir(installStage); err != nil {
+			cleanup()
+			installStageCleanup()
+			return fmt.Errorf("validate %s: %w", src.name, err)
+		}
+		digest, err := plugin.BundleDigestForDir(installStage)
 		if err != nil {
 			cleanup()
+			installStageCleanup()
 			return fmt.Errorf("digest %s: %w", src.name, err)
+		}
+		if err := activateBundle(installStage, target); err != nil {
+			cleanup()
+			installStageCleanup()
+			return err
 		}
 		cleanup()
 		fmt.Fprintf(stdout, "Installed %s -> %s\n  digest %s\n", src.name, target, digest)
@@ -320,6 +439,37 @@ func installPlugin(args []string, stdout, stderr io.Writer) error {
 	_, _ = fmt.Fprintln(stdout, "Torana never loads a plugin you have not approved. Open the control plane")
 	_, _ = fmt.Fprintln(stdout, "at http://127.0.0.1:8080/_torana/, review what each one requests, and approve")
 	_, _ = fmt.Fprintln(stdout, "its digest. Approval is bound to that digest — rebuild it and you approve again.")
+	return nil
+}
+
+func activateBundle(installStage, target string) error {
+	dest := filepath.Dir(target)
+	name := filepath.Base(target)
+	backup, err := os.MkdirTemp(dest, "."+name+".previous-*")
+	if err != nil {
+		return fmt.Errorf("prepare rollback for %s: %w", target, err)
+	}
+	if err := os.Remove(backup); err != nil {
+		return fmt.Errorf("prepare rollback for %s: %w", target, err)
+	}
+	hadTarget := false
+	if _, err := os.Stat(target); err == nil {
+		hadTarget = true
+		if err := os.Rename(target, backup); err != nil {
+			return fmt.Errorf("replace %s: %w", target, err)
+		}
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	if err := os.Rename(installStage, target); err != nil {
+		if hadTarget {
+			_ = os.Rename(backup, target)
+		}
+		return fmt.Errorf("activate %s: %w", target, err)
+	}
+	if hadTarget {
+		_ = os.RemoveAll(backup)
+	}
 	return nil
 }
 

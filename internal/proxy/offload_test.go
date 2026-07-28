@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -226,6 +227,97 @@ func TestOffloadProviderOverride(t *testing.T) {
 	}
 	if gotAuth != "" {
 		t.Fatalf("Authorization = %q, want empty — caller credential must NOT be forwarded to an overridden provider", gotAuth)
+	}
+}
+
+// An override must not inherit the default provider's encrypted key. This is
+// the credential-boundary regression: before the fix, resolving an empty
+// override env still passed off.APIKeyEnc to resolveSecret.
+func TestOffloadProviderOverrideCannotReceiveDefaultEncryptedKey(t *testing.T) {
+	var gotAuth string
+	local := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"choices":[{"message":{"content":"ok"}}]}`))
+	}))
+	defer local.Close()
+
+	cfg := provider.Config{
+		Providers: map[string]provider.Provider{
+			"cheap": {URL: "http://unused", Format: "openai"},
+			"local": {URL: local.URL, Format: "openai"},
+		},
+		Offload: provider.OffloadConfig{
+			Enabled:  true,
+			Provider: "cheap",
+			Model:    "cheap-1",
+		},
+	}
+	s, err := New(Config{Providers: cfg, ConfigPath: filepath.Join(t.TempDir(), "config.json")})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	encrypted, err := s.secrets.Encrypt("default-secret")
+	if err != nil {
+		t.Fatalf("Encrypt: %v", err)
+	}
+	s.config.Providers.Offload.APIKeyEnc = encrypted
+	if _, err := s.offloadCompletion(context.Background(), `{"provider":"local","model":"local-1","user_prompt":"u"}`); err != nil {
+		t.Fatalf("offloadCompletion: %v", err)
+	}
+	if gotAuth != "" {
+		t.Fatalf("Authorization = %q, want empty", gotAuth)
+	}
+}
+
+func TestOffloadProviderOverrideUsesOnlyOverrideProviderCredential(t *testing.T) {
+	t.Setenv("TORANA_LOCAL_KEY", "local-secret")
+	var gotAuth string
+	local := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"choices":[{"message":{"content":"ok"}}]}`))
+	}))
+	defer local.Close()
+
+	cfg := provider.Config{
+		Providers: map[string]provider.Provider{
+			"cheap": {URL: "http://unused", Format: "openai"},
+			"local": {URL: local.URL, Format: "openai", APIKeyEnv: "TORANA_LOCAL_KEY"},
+		},
+		Offload: provider.OffloadConfig{Enabled: true, Provider: "cheap", Model: "cheap-1"},
+	}
+	s, err := New(Config{Providers: cfg})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if _, err := s.offloadCompletion(context.Background(), `{"provider":"local","model":"local-1","user_prompt":"u"}`); err != nil {
+		t.Fatalf("offloadCompletion: %v", err)
+	}
+	if gotAuth != "Bearer local-secret" {
+		t.Fatalf("Authorization = %q, want provider-scoped credential", gotAuth)
+	}
+}
+
+func TestOffloadProviderOverrideCannotSelectArbitraryEnvironmentSecret(t *testing.T) {
+	t.Setenv("UNRELATED_PROCESS_SECRET", "must-not-leak")
+	cfg := provider.Config{
+		Providers: map[string]provider.Provider{
+			"cheap": {URL: "http://unused", Format: "openai"},
+			"local": {URL: "http://127.0.0.1:1", Format: "openai"},
+		},
+		Offload: provider.OffloadConfig{Enabled: true, Provider: "cheap", Model: "cheap-1"},
+	}
+	s, err := New(Config{Providers: cfg})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	_, err = s.offloadCompletion(context.Background(), `{
+		"provider":"local","model":"local-1","user_prompt":"u",
+		"api_key_env":"UNRELATED_PROCESS_SECRET"
+	}`)
+	if err == nil || !strings.Contains(err.Error(), "host-owned") {
+		t.Fatalf("arbitrary environment selector error = %v", err)
 	}
 }
 

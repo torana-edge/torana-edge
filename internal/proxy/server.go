@@ -143,6 +143,9 @@ type Server struct {
 	feed *metrics.RequestFeed
 	// WASM plugin pipeline (loaded when configured)
 	pluginPipeline atomic.Value // *plugin.PluginPipeline
+	// True when a hot reload failed and the last known-good pipeline remains
+	// active.
+	pluginReloadDegraded atomic.Bool
 	// sharedCache is the cross-request plugin state store shared by every
 	// runtime this server builds (survives hot-reloads; redis backend
 	// survives restarts). Closed on Shutdown, after the pipeline drains.
@@ -464,6 +467,12 @@ func New(cfg Config) (*Server, error) {
 	if cfg.Providers.Providers == nil {
 		cfg.Providers.Providers = map[string]provider.Provider{}
 	}
+	if cfg.Providers.Plugins.Dir == "" &&
+		(len(cfg.Providers.Plugins.Order) > 0 ||
+			len(cfg.Providers.Plugins.Config) > 0 ||
+			len(cfg.Providers.Plugins.Approvals) > 0) {
+		cfg.Providers.Plugins.Dir = provider.DefaultPluginsDir
+	}
 
 	// --- stats tracker -----------------------------------------------------
 	statsTracker := metrics.NewStatsTracker()
@@ -500,16 +509,32 @@ func New(cfg Config) (*Server, error) {
 		pluginState:   stateStore,
 		egress:        newEgressMeter(),
 	}
+	cleanupConstruction := func() {
+		if raw := s.pluginPipeline.Load(); raw != nil {
+			raw.(*plugin.PluginPipeline).DrainAndClose()
+		}
+		s.cacheMu.Lock()
+		if s.sharedCache != nil {
+			s.sharedCache.Close()
+			s.sharedCache = nil
+		}
+		s.cacheMu.Unlock()
+		s.rateLimiter.Close()
+		s.conversations.Close()
+	}
 
 	// --- offload validation (fail fast on misconfiguration) ---------------
 	if err := cfg.Providers.Offload.Validate(cfg.Providers.Providers); err != nil {
+		cleanupConstruction()
 		return nil, fmt.Errorf("proxy: %w", err)
 	}
 	for name, p := range cfg.Providers.Providers {
 		if err := p.ValidateResponsesCompaction(name); err != nil {
+			cleanupConstruction()
 			return nil, fmt.Errorf("proxy: %w", err)
 		}
 		if err := p.ValidateCache(name); err != nil {
+			cleanupConstruction()
 			return nil, fmt.Errorf("proxy: %w", err)
 		}
 	}
@@ -533,12 +558,14 @@ func New(cfg Config) (*Server, error) {
 		cfg.Providers.Cache.Redis.Password = s.resolveSecret(cfg.Providers.Cache.Redis.PasswordEnv, cfg.Providers.Cache.Redis.PasswordEnc)
 		sharedCache, err := cache.New(cfg.Providers.Cache)
 		if err != nil {
+			cleanupConstruction()
 			return nil, fmt.Errorf("proxy: %w", err)
 		}
 		s.setCache(sharedCache)
 
 		if err := s.RebuildPipeline(cfg.Providers.Plugins); err != nil {
-			log.Printf("plugin pipeline: %v", err)
+			cleanupConstruction()
+			return nil, fmt.Errorf("proxy: plugin pipeline: %w", err)
 		} else {
 			raw := s.pluginPipeline.Load()
 			if raw != nil {
@@ -575,9 +602,15 @@ func New(cfg Config) (*Server, error) {
 				if old != nil {
 					go old.(*plugin.PluginPipeline).DrainAndClose()
 				}
+				s.pluginReloadDegraded.Store(false)
+			}, func(err error) {
+				s.pluginReloadDegraded.Store(true)
+				log.Printf("plugin reload degraded: %v", err)
 			}, func() { close(watchDone) }); err != nil {
-				log.Printf("plugin watcher: %v", err)
 				close(watchDone)
+				watchCancel()
+				cleanupConstruction()
+				return nil, fmt.Errorf("proxy: plugin watcher: %w", err)
 			}
 		}
 	}
@@ -1122,6 +1155,11 @@ func New(cfg Config) (*Server, error) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
+		if s.pluginReloadDegraded.Load() {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			w.Write([]byte(`{"status":"degraded","component":"plugin_pipeline","serving":"last_known_good"}`))
+			return
+		}
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte(`{"status":"ok"}`))
 	})
@@ -2474,6 +2512,7 @@ func (s *Server) rebuildPipelineLocked(pcfg provider.PluginsConfig) (*plugin.Plu
 // without swapping the active pipeline.
 func (s *Server) RebuildPipeline(pcfg provider.PluginsConfig) error {
 	_, err := s.rebuildPipelineReportingSkips(pcfg)
+	s.pluginReloadDegraded.Store(err != nil)
 	return err
 }
 

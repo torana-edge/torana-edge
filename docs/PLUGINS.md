@@ -14,16 +14,21 @@ the SDK: [torana-plugin-sdk](https://github.com/torana-edge/torana-plugin-sdk).
 torana plugin install --official                              # the maintained set
 torana plugin install github.com/you/your-plugins/plugins/foo # anyone's repo
 torana plugin install github.com/you/your-plugins/plugins/foo@v1.2.0
+torana plugin install https://gitlab.example.com/group/subgroup/repo.git//plugins/foo@v1.2.0
 torana plugin install ./foo                                   # local directory
 torana plugin list
 torana plugin remove foo
 ```
 
-Any git host works. There is no central index to register with and nothing to
-publish — `--official` is a convenience alias for a public repository, not a
-privileged channel, and it takes the identical code path.
+GitHub's `host/owner/repo/subdirectory@ref` shorthand remains supported. For
+arbitrary HTTPS hosts and nested GitLab groups, use the unambiguous
+`.git//subdirectory@ref` form shown above. A ref may be a branch, tag, or commit
+SHA. There is no central index; `--official` is a convenience alias, not a
+privileged channel.
 
-Plugins are **compiled locally from source**, never downloaded prebuilt. You can
+Plugins are **compiled locally from source**, never downloaded prebuilt. Nested
+Go packages and embedded assets are supported; symlinks and special files are
+rejected during bounded staging. You can
 read what you are about to run, and the digest is computed from what your own
 machine built. This is why a Go toolchain is required.
 
@@ -127,8 +132,19 @@ Order matters and Torana enforces the constraints it can:
 - Route-capable plugins must precede compaction economic-gate plugins.
 
 A misordering that Torana cannot detect fails quietly — the pipeline runs and
-produces less than you configured. `torana plugin list` shows what is installed;
-the control plane shows what is actually live.
+produces less than you configured. Manifests can declare `requires_upstream`
+plugin IDs; Torana refuses startup when an approved dependent appears without
+its approved dependency earlier in `plugins.order`. `torana plugin list` shows
+what is installed; the control plane shows what is actually live.
+
+`plugins.order` is authoritative. Older manifests may contain hook `priority`,
+but current hosts ignore it and report a deprecation warning.
+
+## Containers
+
+The runtime image intentionally contains neither git nor a Go compiler. Build
+and approve plugins on the host, then mount the resulting bundle directory
+read-only at `/plugins` and configure `"plugins": {"dir":"/plugins", ...}`.
 
 ## Failure policy
 

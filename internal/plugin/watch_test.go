@@ -116,7 +116,7 @@ func TestWatchPlugins_FiresReloadAndExitsOnCancel(t *testing.T) {
 	watchDone := make(chan struct{})
 	go func() {
 		defer close(watchDone)
-		if err := WatchPlugins(ctx, dir, configFn, runtimeFn, func(pp *PluginPipeline) { reloads <- pp }, nil); err != nil {
+		if err := WatchPlugins(ctx, dir, configFn, runtimeFn, func(pp *PluginPipeline) { reloads <- pp }, nil, nil); err != nil {
 			t.Errorf("WatchPlugins: %v", err)
 		}
 	}()
@@ -157,6 +157,23 @@ wait:
 	case <-watchDone:
 	case <-time.After(10 * time.Second):
 		t.Fatal("WatchPlugins goroutine did not exit after ctx cancel (watcher leak)")
+	}
+}
+
+func TestWatchPluginsRejectsMissingDirectory(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	err := WatchPlugins(
+		ctx,
+		filepath.Join(t.TempDir(), "missing"),
+		func() PluginConfig { return PluginConfig{} },
+		func() *wasm.Runtime { return wasm.NewRuntime(context.Background()) },
+		func(*PluginPipeline) {},
+		nil,
+		nil,
+	)
+	if err == nil {
+		t.Fatal("missing plugin directory was reported as successfully watched")
 	}
 }
 

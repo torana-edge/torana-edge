@@ -59,6 +59,11 @@ func TestParseSource(t *testing.T) {
 		{in: "github.com/o/r/plugins/pii", repo: "https://github.com/o/r.git", sub: "plugins/pii", name: "pii"},
 		{in: "github.com/o/r/plugins/pii@v1.2.0", repo: "https://github.com/o/r.git", sub: "plugins/pii", ref: "v1.2.0", name: "pii"},
 		{in: "gitlab.example.com/team/repo/p", repo: "https://gitlab.example.com/team/repo.git", sub: "p", name: "p"},
+		{in: "https://gitlab.example.com/group/subgroup/repo.git//plugins/pii@deadbeef", repo: "https://gitlab.example.com/group/subgroup/repo.git", sub: "plugins/pii", ref: "deadbeef", name: "pii"},
+		{in: "https://gitlab.example.com/group/repo.git//../escape", wantErr: true},
+		{in: "https://gitlab.example.com/group/repo.git//.", wantErr: true},
+		{in: "https://gitlab.example.com/group/repo.git//plugins/pii/..", wantErr: true},
+		{in: "github.com/o/r/plugins/pii/..", wantErr: true},
 		{in: "github.com/o/r", wantErr: true},
 		{in: "", wantErr: true},
 	}
@@ -78,6 +83,58 @@ func TestParseSource(t *testing.T) {
 			t.Errorf("parseSource(%q) = %+v, want repo=%s sub=%s ref=%s name=%s",
 				c.in, got, c.repo, c.sub, c.ref, c.name)
 		}
+	}
+}
+
+func TestCopyTreeSupportsNestedSourcesAndRejectsSymlinks(t *testing.T) {
+	src := t.TempDir()
+	dst := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(src, "internal", "rules"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(src, "internal", "rules", "rules.go"), []byte("package rules"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := copyTree(src, dst); err != nil {
+		t.Fatalf("copyTree nested source: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dst, "internal", "rules", "rules.go")); err != nil {
+		t.Fatalf("nested source was not copied: %v", err)
+	}
+
+	linkRoot := t.TempDir()
+	if err := os.Symlink("/etc/passwd", filepath.Join(linkRoot, "escape")); err != nil {
+		t.Fatal(err)
+	}
+	if err := copyTree(linkRoot, t.TempDir()); err == nil {
+		t.Fatal("symlinked source was accepted")
+	}
+}
+
+func TestActivateBundleRemovesStaleOptionalFiles(t *testing.T) {
+	dest := t.TempDir()
+	target := filepath.Join(dest, "demo")
+	if err := os.Mkdir(target, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(target, "agent.json"), []byte("stale"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	stage, err := os.MkdirTemp(dest, ".demo.install-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stage, "plugin.json"), []byte("new"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := activateBundle(stage, target); err != nil {
+		t.Fatalf("activateBundle: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(target, "agent.json")); !os.IsNotExist(err) {
+		t.Fatalf("stale agent.json survived replacement: %v", err)
+	}
+	if got, err := os.ReadFile(filepath.Join(target, "plugin.json")); err != nil || string(got) != "new" {
+		t.Fatalf("new bundle not activated: %q, %v", got, err)
 	}
 }
 

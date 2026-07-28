@@ -5,19 +5,25 @@ normalizes provider formats and runs an ordered WASM plugin pipeline. Optional
 tool-aware and provider-native compaction can reduce repeated context while
 preserving exact evidence according to explicit policies.
 
-## 1-minute install
+## Install from source
 
 ```bash
-go install github.com/torana-edge/torana-edge/cmd/torana@latest
+go install github.com/torana-edge/torana-edge/cmd/torana@main
 ```
 
-The command above installs the proxy, not the WASM artifacts. To use bundled
-plugins, clone the repository and build them:
+Torana Edge is intentionally unversioned. For a reproducible deployment, replace
+`main` with a reviewed commit SHA. The command installs the proxy only; no WASM
+plugins are bundled.
+
+Install maintained plugins from their separate repository:
+
 ```bash
-git clone https://github.com/torana-edge/torana-edge
-cd torana-edge
-make build
+torana plugin install --official
 ```
+
+This clones the official repository once and builds each selected plugin
+locally. A Go toolchain and git are required. Installing does not approve or
+enable a plugin.
 
 ## Configure
 
@@ -137,6 +143,9 @@ export SSL_CERT_FILE=/abs/path/to/local/mitm/bundle.pem
 curl http://localhost:8080/health   # {"status":"ok"}
 curl http://localhost:8080/stats    # compaction counters
 ```
+
+A failed plugin hot reload keeps the last known-good pipeline serving and makes
+`/health` return 503 with `status: degraded` until a valid bundle reloads.
 
 Once traffic has flowed, `torana conversations` lists what the proxy has seen:
 

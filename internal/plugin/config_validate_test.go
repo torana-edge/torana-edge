@@ -151,3 +151,48 @@ func TestErrorMessageIsStable(t *testing.T) {
 		}
 	}
 }
+
+func jsonSchema(raw string) *ConfigSchema {
+	return &ConfigSchema{Raw: json.RawMessage(raw)}
+}
+
+func TestJSONSchemaValidatesWholeConfig(t *testing.T) {
+	schema := jsonSchema(`{
+		"$schema":"https://json-schema.org/draft/2020-12/schema",
+		"type":"object",
+		"additionalProperties":false,
+		"required":["policies"],
+		"properties":{
+			"count":{"type":"integer","minimum":1},
+			"policies":{"type":"array","items":{"$ref":"#/$defs/policy"}}
+		},
+		"$defs":{"policy":{"type":"object","additionalProperties":false,
+			"required":["mode"],"properties":{"mode":{"enum":["exact","model"]}}}}
+	}`)
+	if err := ValidateConfigAgainstSchema(schema, json.RawMessage(`{"count":1,"policies":[{"mode":"exact"}]}`)); err != nil {
+		t.Fatalf("valid nested config rejected: %v", err)
+	}
+	for _, cfg := range []string{
+		`{"count":0,"policies":[]}`,
+		`{"count":1}`,
+		`{"count":1,"policies":[{"mode":"unknown"}]}`,
+		`{"count":1,"policies":[{"mode":"exact","typo":true}]}`,
+		`{"count":1,"policies":[],"typo":true}`,
+		`[1,2,3]`,
+	} {
+		if err := ValidateConfigAgainstSchema(schema, json.RawMessage(cfg)); err == nil {
+			t.Errorf("invalid config accepted: %s", cfg)
+		}
+	}
+}
+
+func TestJSONSchemaAllowsOnlyLegacyTopLevelComment(t *testing.T) {
+	schema := jsonSchema(`{"type":"object","additionalProperties":false,
+		"properties":{"enabled":{"type":"boolean"}}}`)
+	if err := ValidateConfigAgainstSchema(schema, json.RawMessage(`{"_comment":"legacy docs","enabled":true}`)); err != nil {
+		t.Fatalf("legacy _comment rejected: %v", err)
+	}
+	if err := ValidateConfigAgainstSchema(schema, json.RawMessage(`{"comment":"typo","enabled":true}`)); err == nil {
+		t.Fatal("ordinary undeclared property was accepted")
+	}
+}
