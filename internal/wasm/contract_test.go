@@ -75,6 +75,13 @@ func TestSDKAgreesOnTheDenialEnvelope(t *testing.T) {
 	if _, err := os.Stat(root); err != nil {
 		t.Skip("torana-plugin-sdk not checked out beside this repo")
 	}
+	// os.Stat follows symlinks but filepath.WalkDir does not: it lstats the
+	// root, sees a link rather than a directory, and never descends. A
+	// side-by-side checkout linked into place would then find zero matches and
+	// FAIL rather than skip, which reads as a broken contract.
+	if resolved, err := filepath.EvalSymlinks(root); err == nil {
+		root = resolved
+	}
 
 	var matches []string
 	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
