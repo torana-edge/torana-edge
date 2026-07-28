@@ -53,8 +53,9 @@ func TestCatalogEntriesAreWellFormed(t *testing.T) {
 // truth for which plugins exist.
 //
 // torana-edge deliberately keeps no copy of the plugins, so this cannot be a
-// hard requirement here; it runs for anyone with both repos, and in
-// torana-plugins CI where both are present.
+// hard requirement here. It runs for anyone with both repos checked out, and in
+// torana-plugins CI, whose behaviour-suite step includes this package for
+// exactly that reason — it is the only place both repositories exist.
 func TestCatalogMatchesThePluginRepository(t *testing.T) {
 	const pluginsRoot = "../../../torana-plugins/plugins"
 	entries, err := os.ReadDir(pluginsRoot)
