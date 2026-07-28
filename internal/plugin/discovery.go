@@ -486,10 +486,10 @@ func warnIfStale(dir, wasmPath, name string) {
 			continue
 		}
 		if info, err := e.Info(); err == nil && info.ModTime().After(wasmInfo.ModTime()) {
-			// Operator-facing: name a command that exists. Plugins are no
-			// longer built from a tree in this repository, so the old
-			// The old message named a Makefile target that was deleted along
-			// with the tree it built.
+			// Operator-facing, so it has to name a command that exists.
+			// Plugins are no longer built from a tree in this repository, and
+			// the previous message pointed at a Makefile target deleted along
+			// with that tree.
 			log.Printf("[plugin] %s: plugin.wasm is older than %s — reinstall with 'torana plugin install %s'", name, e.Name(), name)
 			return
 		}
