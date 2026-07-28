@@ -25,8 +25,52 @@ var bundleFiles = []string{"plugin.wasm", "plugin.json", "schema.json", "agent.j
 // build locally, digest what was built, hand it to the operator for approval.
 const officialPluginsRepo = "github.com/torana-edge/torana-plugins"
 
-var officialPlugins = []string{
-	"compactor", "intent", "keyword_compactor", "otel", "pii", "schema_translator",
+// officialCatalog lists every plugin in the official repository and says, for
+// each, whether `--official` installs it.
+//
+// It was a bare list of names, and two plugins were simply missing from it:
+// cache_tier_selector and cache_warmer shipped, and `--official` quietly did
+// not install them. Nothing was wrong in the list — the entries just were not
+// there, which is the failure mode a list of names cannot show you.
+//
+// Naming every plugin and requiring a reason to exclude one makes an omission
+// visible. A new plugin has to be added here to be installable, and leaving it
+// out is a decision someone wrote down rather than an oversight.
+type officialPlugin struct {
+	name string
+	// install is false for plugins that exist but must not be installed by
+	// default; excludedBecause must then say why.
+	install         bool
+	excludedBecause string
+}
+
+var officialCatalog = []officialPlugin{
+	{name: "cache_tier_selector", install: true},
+	{name: "cache_warmer", install: true},
+	{name: "compactor", install: true},
+	{name: "intent", install: true},
+	{name: "keyword_compactor", install: true},
+	{name: "otel", install: true},
+	{name: "pii", install: true},
+	{name: "schema_translator", install: true},
+	{
+		name:    "auth",
+		install: false,
+		excludedBecause: "its own plugin.json says it is not published to the public registry and " +
+			"is a reference for the capability surface only — installing it by default would put " +
+			"something explicitly not built as an access control into an access-control position",
+	},
+}
+
+// officialPlugins returns the names `--official` installs.
+func officialPlugins() []string {
+	names := make([]string, 0, len(officialCatalog))
+	for _, p := range officialCatalog {
+		if p.install {
+			names = append(names, p.name)
+		}
+	}
+	return names
 }
 
 // pluginsDir resolves where bundles are installed. Mirrors the server's
@@ -176,7 +220,7 @@ func installPlugin(args []string, stdout, stderr io.Writer) error {
 		}
 	}
 	if official {
-		for _, name := range officialPlugins {
+		for _, name := range officialPlugins() {
 			sources = append(sources, officialPluginsRepo+"/plugins/"+name)
 		}
 	}
