@@ -55,8 +55,11 @@ const (
 
 // Store is a durable, plugin-namespaced key/value store.
 type Store struct {
-	mu   sync.RWMutex
-	data map[string]map[string]string // plugin → key → value
+	mu sync.RWMutex
+	// flushMu serializes durable snapshots. Without it, two Set calls could
+	// write snapshots concurrently and an older snapshot could rename last.
+	flushMu sync.Mutex
+	data    map[string]map[string]string // plugin → key → value
 
 	path             string
 	maxValueBytes    int
@@ -66,7 +69,8 @@ type Store struct {
 
 	// dirty marks unflushed changes. Writes persist synchronously, so this
 	// only guards against redundant rewrites of an unchanged store.
-	dirty bool
+	dirty      bool
+	generation uint64
 }
 
 // Options configures a Store. Zero values select the defaults above.
@@ -143,6 +147,7 @@ func (s *Store) Set(plugin, key, value string) error {
 				delete(s.data, plugin)
 			}
 			s.dirty = true
+			s.generation++
 		}
 		s.mu.Unlock()
 		return s.flush()
@@ -169,6 +174,7 @@ func (s *Store) Set(plugin, key, value string) error {
 	bucket[key] = value
 	s.totalBytes += delta
 	s.dirty = true
+	s.generation++
 	s.mu.Unlock()
 
 	return s.flush()
@@ -253,6 +259,9 @@ func (s *Store) flush() error {
 	if s.path == "" {
 		return nil
 	}
+	s.flushMu.Lock()
+	defer s.flushMu.Unlock()
+
 	s.mu.Lock()
 	if !s.dirty {
 		s.mu.Unlock()
@@ -263,7 +272,7 @@ func (s *Store) flush() error {
 		s.mu.Unlock()
 		return fmt.Errorf("plugin state: encode: %w", err)
 	}
-	s.dirty = false
+	generation := s.generation
 	s.mu.Unlock()
 
 	dir := filepath.Dir(s.path)
@@ -301,6 +310,27 @@ func (s *Store) flush() error {
 		return fmt.Errorf("plugin state: replace %s: %w", s.path, err)
 	}
 	tmpName = ""
+	// Make the rename durable as well as the file contents. Some filesystems
+	// can otherwise lose the directory entry after a crash.
+	dirHandle, err := os.Open(dir)
+	if err != nil {
+		return fmt.Errorf("plugin state: open directory %s: %w", dir, err)
+	}
+	if err := dirHandle.Sync(); err != nil {
+		dirHandle.Close()
+		return fmt.Errorf("plugin state: sync directory %s: %w", dir, err)
+	}
+	if err := dirHandle.Close(); err != nil {
+		return fmt.Errorf("plugin state: close directory %s: %w", dir, err)
+	}
+
+	s.mu.Lock()
+	// A write may have landed after this snapshot was encoded. Only clear
+	// dirty when the persisted generation is still the newest generation.
+	if s.generation == generation {
+		s.dirty = false
+	}
+	s.mu.Unlock()
 	return nil
 }
 

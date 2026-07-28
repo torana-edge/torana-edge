@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "description": "Example plugin: redacts the word 'secret' from streamed text deltas",
   "hooks": [
-    {"name": "run_on_stream_chunk", "priority": 100}
+    {"name": "run_on_stream_chunk"}
   ],
   "permissions": [
     {"name": "env.log", "description": "Diagnostic logging"}

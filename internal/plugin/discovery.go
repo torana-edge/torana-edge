@@ -12,7 +12,6 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -23,6 +22,7 @@ import (
 	"github.com/torana-edge/torana-edge/internal/wasm"
 	sdk "github.com/torana-edge/torana-plugin-sdk"
 	"github.com/torana-edge/torana-plugin-sdk/pb"
+	"golang.org/x/mod/semver"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -36,8 +36,7 @@ type Permission struct {
 }
 
 type Hook struct {
-	Name     string `json:"name"`
-	Priority int    `json:"priority"`
+	Name string `json:"name"`
 }
 
 type PluginManifest struct {
@@ -53,6 +52,9 @@ type PluginManifest struct {
 	Description          string       `json:"description"`
 	Hooks                []Hook       `json:"hooks"`
 	Permissions          []Permission `json:"permissions"`
+	// RequiresUpstream lists stable plugin IDs that must be approved and
+	// loaded earlier in the operator's configured order.
+	RequiresUpstream []string `json:"requires_upstream,omitempty"`
 }
 
 type ConfigField struct {
@@ -74,6 +76,11 @@ type ConfigField struct {
 
 type ConfigSchema struct {
 	Fields []ConfigField `json:"fields"`
+	// Raw is the complete JSON Schema document used for validation. Fields is
+	// only the scalar projection rendered by the control plane.
+	Raw json.RawMessage `json:"-"`
+	// compiledSchema is prepared once while loading the bundle.
+	compiledSchema any
 }
 
 // AgentOperation describes one stable JSON operation a plugin contributes to
@@ -107,8 +114,6 @@ type PluginBundle struct {
 	Schema    *ConfigSchema
 	Agent     *AgentDescriptor
 }
-
-const currentToranaVersion = "0.1.0"
 
 // supportedHooks and supportedPermissions are derived from the SDK's published
 // v1 vocabulary rather than restated here. Which capability strings exist is an
@@ -237,22 +242,19 @@ func validateManifest(manifest PluginManifest) error {
 	if _, err := parseSemver(manifest.Version); err != nil {
 		return fmt.Errorf("invalid version: %w", err)
 	}
-	minimum, err := parseSemver(manifest.MinimumToranaVersion)
-	if err != nil {
-		return fmt.Errorf("invalid minimum_torana_version: %w", err)
-	}
-	current, _ := parseSemver(currentToranaVersion)
-	if compareSemver(minimum, current) > 0 {
-		return fmt.Errorf("requires Torana >= %s", manifest.MinimumToranaVersion)
+	if manifest.MinimumToranaVersion != "" {
+		if _, err := parseSemver(manifest.MinimumToranaVersion); err != nil {
+			return fmt.Errorf("invalid minimum_torana_version: %w", err)
+		}
 	}
 	if manifest.MaximumToranaVersion != "" {
-		maximum, err := parseSemver(manifest.MaximumToranaVersion)
-		if err != nil {
+		if _, err := parseSemver(manifest.MaximumToranaVersion); err != nil {
 			return fmt.Errorf("invalid maximum_torana_version: %w", err)
 		}
-		if compareSemver(maximum, current) < 0 {
-			return fmt.Errorf("requires Torana <= %s", manifest.MaximumToranaVersion)
-		}
+	}
+	if manifest.MinimumToranaVersion != "" && manifest.MaximumToranaVersion != "" &&
+		compareSemver(manifest.MinimumToranaVersion, manifest.MaximumToranaVersion) > 0 {
+		return fmt.Errorf("minimum_torana_version must not exceed maximum_torana_version")
 	}
 	if manifest.FailureMode != "pass" && manifest.FailureMode != "block" {
 		return fmt.Errorf("failure_mode must be pass or block")
@@ -280,36 +282,63 @@ func validateManifest(manifest PluginManifest) error {
 		}
 		seenPermissions[permission.Name] = struct{}{}
 	}
+	seenRequirements := make(map[string]struct{}, len(manifest.RequiresUpstream))
+	for _, requiredID := range manifest.RequiresUpstream {
+		if strings.TrimSpace(requiredID) == "" {
+			return fmt.Errorf("requires_upstream entries must be non-empty plugin ids")
+		}
+		if requiredID == manifest.ID {
+			return fmt.Errorf("requires_upstream cannot reference the plugin itself")
+		}
+		if _, duplicate := seenRequirements[requiredID]; duplicate {
+			return fmt.Errorf("duplicate requires_upstream plugin id %q", requiredID)
+		}
+		seenRequirements[requiredID] = struct{}{}
+	}
 	return nil
 }
 
-func parseSemver(raw string) ([3]int, error) {
-	var parsed [3]int
-	core := strings.SplitN(strings.TrimPrefix(raw, "v"), "-", 2)[0]
-	parts := strings.Split(core, ".")
-	if len(parts) != 3 {
-		return parsed, fmt.Errorf("%q is not major.minor.patch", raw)
+func canonicalSemver(raw string) string {
+	if strings.HasPrefix(raw, "v") {
+		return raw
 	}
-	for index, part := range parts {
-		value, err := strconv.Atoi(part)
-		if err != nil || value < 0 {
-			return parsed, fmt.Errorf("%q is not major.minor.patch", raw)
-		}
-		parsed[index] = value
-	}
-	return parsed, nil
+	return "v" + raw
 }
 
-func compareSemver(left, right [3]int) int {
-	for index := range left {
-		if left[index] < right[index] {
-			return -1
-		}
-		if left[index] > right[index] {
-			return 1
-		}
+func parseSemver(raw string) (string, error) {
+	version := canonicalSemver(raw)
+	if !semver.IsValid(version) {
+		return "", fmt.Errorf("%q is not a valid semantic version", raw)
 	}
-	return 0
+	return version, nil
+}
+
+func compareSemver(left, right string) int {
+	return semver.Compare(canonicalSemver(left), canonicalSemver(right))
+}
+
+// validateHostCompatibility applies optional product-version bounds only when
+// the host was built with a semantic version. Development builds identify
+// themselves with "dev" or a commit SHA, so compatibility remains governed by
+// abi_version, hooks, and permissions until Edge has releases.
+func validateHostCompatibility(manifest PluginManifest, hostVersion string) error {
+	rawHostVersion := hostVersion
+	hostVersion, err := parseSemver(rawHostVersion)
+	if err != nil {
+		if manifest.MinimumToranaVersion != "" || manifest.MaximumToranaVersion != "" {
+			log.Printf("[plugin] %s: host version %q is not semantic; skipping minimum_torana_version/maximum_torana_version checks", manifest.Name, rawHostVersion)
+		}
+		return nil
+	}
+	if manifest.MinimumToranaVersion != "" &&
+		semver.Compare(hostVersion, canonicalSemver(manifest.MinimumToranaVersion)) < 0 {
+		return fmt.Errorf("requires Torana Edge >= %s (running %s)", manifest.MinimumToranaVersion, hostVersion)
+	}
+	if manifest.MaximumToranaVersion != "" &&
+		semver.Compare(hostVersion, canonicalSemver(manifest.MaximumToranaVersion)) > 0 {
+		return fmt.Errorf("requires Torana Edge <= %s (running %s)", manifest.MaximumToranaVersion, hostVersion)
+	}
+	return nil
 }
 
 func DiscoverPlugins(pluginsDir string) ([]PluginBundle, error) {
@@ -384,6 +413,12 @@ func loadBundle(dir string) (*PluginBundle, error) {
 				s = *derived
 			}
 		}
+		if isJSONSchema(sBytes) {
+			s.Raw = append(json.RawMessage(nil), sBytes...)
+			if err := prepareConfigSchema(&s); err != nil {
+				return nil, fmt.Errorf("compile schema: %w", err)
+			}
+		}
 		schema = &s
 	} else if !os.IsNotExist(err) {
 		return nil, fmt.Errorf("read schema: %w", err)
@@ -413,6 +448,19 @@ func loadBundle(dir string) (*PluginBundle, error) {
 		Schema:    schema,
 		Agent:     agent,
 	}, nil
+}
+
+// ValidateBundleDir loads and validates one complete bundle exactly as the
+// runtime will before an installer activates it.
+func ValidateBundleDir(dir string) (*PluginBundle, error) {
+	bundle, err := loadBundle(dir)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateManifest(bundle.Manifest); err != nil {
+		return nil, err
+	}
+	return bundle, nil
 }
 
 // bundleDigest covers every executable or policy-bearing file consumed by the
@@ -590,6 +638,8 @@ func reloadPipeline(runtime *wasm.Runtime, config PluginConfig) (*PluginPipeline
 	// Enforce ordering constraint: route-capable plugins (env.route_request)
 	// must precede compaction economic-gate plugins (env.host_call.torana_evaluate_compaction).
 	var seenCompactionGate bool
+	approvedUpstream := make(map[string]struct{})
+	loadedUpstream := make(map[string]struct{})
 	for _, name := range order {
 		bundle, ok := byName[name]
 		if !ok {
@@ -601,6 +651,9 @@ func reloadPipeline(runtime *wasm.Runtime, config PluginConfig) (*PluginPipeline
 		if !config.AllowUnapproved {
 			if err := validateManifest(bundle.Manifest); err != nil {
 				return nil, fmt.Errorf("enabled plugin %q has invalid manifest: %w", name, err)
+			}
+			if err := validateHostCompatibility(bundle.Manifest, config.HostVersion); err != nil {
+				return nil, fmt.Errorf("enabled plugin %q is incompatible: %w", name, err)
 			}
 		}
 		approval, approved := config.approvalFor(bundle)
@@ -614,6 +667,13 @@ func reloadPipeline(runtime *wasm.Runtime, config PluginConfig) (*PluginPipeline
 				return nil, fmt.Errorf("enabled plugin %q has invalid approval: %w", name, err)
 			}
 			continue
+		}
+		if !config.AllowUnapproved {
+			for _, requiredID := range bundle.Manifest.RequiresUpstream {
+				if _, ok := approvedUpstream[requiredID]; !ok {
+					return nil, fmt.Errorf("ordering constraint violation: plugin %q requires approved plugin id %q earlier in plugins.order", name, requiredID)
+				}
+			}
 		}
 		var hasRoute, hasCompactionGate bool
 		for _, grant := range grants {
@@ -629,6 +689,9 @@ func reloadPipeline(runtime *wasm.Runtime, config PluginConfig) (*PluginPipeline
 		}
 		if hasCompactionGate {
 			seenCompactionGate = true
+		}
+		if !config.AllowUnapproved {
+			approvedUpstream[bundle.Manifest.ID] = struct{}{}
 		}
 	}
 	for _, name := range order {
@@ -651,6 +714,13 @@ func reloadPipeline(runtime *wasm.Runtime, config PluginConfig) (*PluginPipeline
 				"Open %s in the control plane at /_torana/, review its requested "+
 				"capabilities, and approve this digest to enable it.", name, bundle.Digest, name)
 			continue
+		}
+		if !config.AllowUnapproved {
+			for _, requiredID := range bundle.Manifest.RequiresUpstream {
+				if _, ok := loadedUpstream[requiredID]; !ok {
+					return nil, fmt.Errorf("dependency unavailable: plugin %q requires plugin id %q to load successfully earlier in plugins.order", name, requiredID)
+				}
+			}
 		}
 		grants, failureMode, err := validateApproval(bundle, approval)
 		if err != nil {
@@ -696,6 +766,9 @@ func reloadPipeline(runtime *wasm.Runtime, config PluginConfig) (*PluginPipeline
 			plugin:      pl,
 			failureMode: failureMode,
 		})
+		if !config.AllowUnapproved {
+			loadedUpstream[bundle.Manifest.ID] = struct{}{}
+		}
 		log.Printf("[plugin] %s ready — hooks: %v", name, hookNames(bundle.Manifest.Hooks))
 		// run_after_response mutations are applied on the non-streaming JSON
 		// path but are OBSERVATIONAL on streaming responses (the stream is
@@ -1180,6 +1253,9 @@ type PluginConfig struct {
 	Order     []string                   `json:"order"`
 	Config    map[string]json.RawMessage `json:"config"`
 	Approvals map[string]Approval        `json:"approvals,omitempty"`
+	// HostVersion is build metadata supplied by the executable. It is never
+	// persisted in operator configuration.
+	HostVersion string `json:"-"`
 
 	// AllowUnapproved is for in-repository conformance tests and plugin
 	// development only. It converts manifest requests into grants and is not a
@@ -1282,7 +1358,7 @@ func hookNames(hooks []Hook) []string {
 // per-plugin config) take effect without restarting the watcher. runtimeFn
 // builds each reload's runtime — the caller wires host callbacks (offload,
 // savings) there; a bare runtime would silently lose them.
-func WatchPlugins(ctx context.Context, dir string, configFn func() PluginConfig, runtimeFn func() *wasm.Runtime, reloadFn func(pipeline *PluginPipeline), done func()) error {
+func WatchPlugins(ctx context.Context, dir string, configFn func() PluginConfig, runtimeFn func() *wasm.Runtime, reloadFn func(pipeline *PluginPipeline), errorFn func(error), done func()) error {
 	if dir == "" {
 		dir = "./plugins"
 	}
@@ -1292,16 +1368,26 @@ func WatchPlugins(ctx context.Context, dir string, configFn func() PluginConfig,
 		return fmt.Errorf("fsnotify: %w", err)
 	}
 
-	// Watch the plugins directory and all subdirectories recursively.
-	addRecursive := func(root string) {
-		filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
-			if err == nil && info.IsDir() {
-				w.Add(path)
+	// Watch the plugins directory and all subdirectories recursively. Initial
+	// registration errors are fatal: returning success with no active watches
+	// would make later installs or updates silently invisible.
+	addRecursive := func(root string) error {
+		return filepath.Walk(root, func(path string, info os.FileInfo, walkErr error) error {
+			if walkErr != nil {
+				return walkErr
+			}
+			if info.IsDir() {
+				if err := w.Add(path); err != nil {
+					return err
+				}
 			}
 			return nil
 		})
 	}
-	addRecursive(dir)
+	if err := addRecursive(dir); err != nil {
+		_ = w.Close()
+		return fmt.Errorf("watch plugins directory %s: %w", dir, err)
+	}
 
 	go func() {
 		defer w.Close()
@@ -1333,6 +1419,9 @@ func WatchPlugins(ctx context.Context, dir string, configFn func() PluginConfig,
 				pp, err := reloadPipeline(newRT, configFn())
 				if err != nil {
 					log.Printf("[plugin] reload failed: %v", err)
+					if errorFn != nil {
+						errorFn(err)
+					}
 					newRT.Close()
 					continue
 				}
@@ -1350,7 +1439,12 @@ func WatchPlugins(ctx context.Context, dir string, configFn func() PluginConfig,
 				// Handle newly created directories for recursive watching.
 				if event.Op&fsnotify.Create == fsnotify.Create {
 					if fi, err := os.Stat(event.Name); err == nil && fi.IsDir() {
-						addRecursive(event.Name)
+						if err := addRecursive(event.Name); err != nil {
+							log.Printf("[plugin] watch new directory failed: %v", err)
+							if errorFn != nil {
+								errorFn(err)
+							}
+						}
 						continue
 					}
 				}
@@ -1384,6 +1478,9 @@ func WatchPlugins(ctx context.Context, dir string, configFn func() PluginConfig,
 					return
 				}
 				log.Printf("[plugin] fsnotify error: %v", err)
+				if errorFn != nil {
+					errorFn(err)
+				}
 			}
 		}
 	}()

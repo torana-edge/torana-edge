@@ -3,8 +3,8 @@
   "version": "0.1.0",
   "description": "Test fixture: proves run_on_tick fires with no request in flight and that TickRequest carries the host's clock",
   "hooks": [
-    {"name": "run_on_tick", "priority": 100},
-    {"name": "run_before_request", "priority": 100}
+    {"name": "run_on_tick"},
+    {"name": "run_before_request"}
   ],
   "permissions": [
     {"name": "env.background_tick", "description": "Run periodically with no request in flight"},

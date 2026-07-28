@@ -40,8 +40,9 @@ func (s *Server) offloadCompletionResult(ctx context.Context, payloadJSON string
 		// plugin can direct its call to a specific endpoint (e.g. a
 		// guaranteed-local model for PII scanning). Must exist in Providers.
 		Provider string `json:"provider"`
-		// APIKeyEnv optionally names the env var holding the key for that
-		// provider (only consulted alongside a provider override).
+		// APIKeyEnv is accepted only for compatibility with older plugins and
+		// must match the provider's host-owned configuration. A guest may not
+		// select arbitrary process environment variables.
 		APIKeyEnv string `json:"api_key_env"`
 	}
 	if err := json.Unmarshal([]byte(payloadJSON), &p); err != nil {
@@ -76,17 +77,22 @@ func (s *Server) offloadCompletionResult(ctx context.Context, payloadJSON string
 		model = off.Model
 	}
 
-	// Auth: a payload key env wins, else the configured offload key. Fall back
-	// to the caller's credential ONLY for the default provider — the caller's
-	// key authenticates the primary provider, not a plugin-chosen endpoint, so
-	// it is never forwarded to an overridden (e.g. local) provider.
-	keyEnv := off.APIKeyEnv
-	if p.APIKeyEnv != "" {
-		keyEnv = p.APIKeyEnv
-	}
-	apiKey := s.resolveSecret(keyEnv, off.APIKeyEnc)
-	if apiKey == "" && !overrideProvider {
-		apiKey = reqStateFrom(ctx).CallerAuth
+	// Credentials belong to a provider, not to the offload operation. The
+	// default offload secret may only be used for the configured default
+	// provider. An override gets only its explicitly named environment
+	// variable (or the provider's own configured environment variable); it
+	// must never inherit off.APIKeyEnc or the caller's credential.
+	var apiKey string
+	if overrideProvider {
+		if p.APIKeyEnv != "" && p.APIKeyEnv != prov.APIKeyEnv {
+			return economics.OffloadResult{}, fmt.Errorf("offload: api_key_env is host-owned; configure it on provider %q", provName)
+		}
+		apiKey = s.resolveSecret(prov.APIKeyEnv, prov.APIKeyEnc)
+	} else {
+		apiKey = s.resolveSecret(off.APIKeyEnv, off.APIKeyEnc)
+		if apiKey == "" {
+			apiKey = reqStateFrom(ctx).CallerAuth
+		}
 	}
 
 	// max_tokens must cover BOTH reasoning and content: DeepSeek-style

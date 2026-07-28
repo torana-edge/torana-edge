@@ -416,7 +416,7 @@ type ControlPlaneConfig struct {
 
 // PluginsConfig controls WASM plugin loading and execution.
 type PluginsConfig struct {
-	Dir     string                     `json:"dir"`    // plugins directory, default "./plugins"
+	Dir     string                     `json:"dir"`    // plugins directory; empty uses DefaultPluginsDir when plugins are configured
 	Order   []string                   `json:"order"`  // execution order by plugin name
 	Config  map[string]json.RawMessage `json:"config"` // per-plugin config blobs
 	Runtime PluginRuntimeConfig        `json:"runtime,omitempty"`
@@ -426,6 +426,11 @@ type PluginsConfig struct {
 	// AllowUnapproved is only used by in-repository conformance tests.
 	AllowUnapproved bool `json:"-"`
 }
+
+// DefaultPluginsDir is shared by the server and plugin lifecycle CLI. Keeping
+// one constant prevents an install from succeeding into a directory the host
+// never inspects.
+const DefaultPluginsDir = "./plugins"
 
 // PluginRuntimeConfig bounds untrusted WASM execution. Zero values select the
 // runtime's conservative defaults (4 idle instances, 5 seconds, 64 MiB).

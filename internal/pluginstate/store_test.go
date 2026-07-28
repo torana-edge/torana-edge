@@ -251,4 +251,37 @@ func TestConcurrentAccess(t *testing.T) {
 	if total != 40 {
 		t.Errorf("stored %d keys, want 40 — a write was lost", total)
 	}
+	reloaded := newStore(t, Options{Path: s.path})
+	reloadedTotal := 0
+	for i := 0; i < 4; i++ {
+		reloadedTotal += reloaded.Len(fmt.Sprintf("plugin-%d", i))
+	}
+	if reloadedTotal != 40 {
+		t.Errorf("persisted %d keys after concurrent writes, want 40", reloadedTotal)
+	}
+}
+
+func TestFailedFlushRemainsDirtyAndCanBeRetried(t *testing.T) {
+	root := t.TempDir()
+	blockedPath := filepath.Join(root, "existing-directory")
+	if err := os.Mkdir(blockedPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	s := newStore(t, Options{Path: ""})
+	s.path = blockedPath
+	if err := s.Set("plugin", "key", "newest"); err == nil {
+		t.Fatal("flush over an existing directory unexpectedly succeeded")
+	}
+	if !s.dirty {
+		t.Fatal("failed flush cleared dirty state")
+	}
+
+	s.path = filepath.Join(root, "state.json")
+	if err := s.flush(); err != nil {
+		t.Fatalf("retry flush: %v", err)
+	}
+	reloaded := newStore(t, Options{Path: s.path})
+	if got, ok := reloaded.Get("plugin", "key"); !ok || got != "newest" {
+		t.Fatalf("retried snapshot = %q (ok=%v), want newest", got, ok)
+	}
 }

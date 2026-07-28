@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -25,6 +26,41 @@ func testProviderConfig(upstreamURL, name, format string) provider.Config {
 		Providers: map[string]provider.Provider{
 			name: {URL: upstreamURL, Format: format},
 		},
+	}
+}
+
+func TestConfiguredPluginFailureAbortsStartupUsingDefaultDirectory(t *testing.T) {
+	cfg := provider.DefaultConfig()
+	cfg.Plugins.Order = []string{"missing-security-plugin"}
+	_, err := New(Config{
+		Providers:  cfg,
+		ConfigPath: filepath.Join(t.TempDir(), "config.json"),
+	})
+	if err == nil {
+		t.Fatal("startup accepted a configured plugin that cannot load")
+	}
+	if !strings.Contains(err.Error(), "missing or malformed") {
+		t.Fatalf("startup error = %v", err)
+	}
+}
+
+func TestHealthReportsFailedPluginReload(t *testing.T) {
+	srv, err := New(Config{
+		Providers:  provider.DefaultConfig(),
+		ConfigPath: filepath.Join(t.TempDir(), "config.json"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv.pluginReloadDegraded.Store(true)
+	req := httptest.NewRequest(http.MethodGet, "/health", nil)
+	rec := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("health status = %d, want 503", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "last_known_good") {
+		t.Fatalf("health body = %s", rec.Body.String())
 	}
 }
 
