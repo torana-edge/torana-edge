@@ -1921,7 +1921,8 @@ func New(cfg Config) (*Server, error) {
 		cfg: func() provider.Config {
 			return s.GetConfig().Providers
 		},
-		rateLimiter: s.rateLimiter,
+		resolveSecret: s.resolveSecret,
+		rateLimiter:   s.rateLimiter,
 	}
 
 	s.proxy = proxy
@@ -2223,7 +2224,7 @@ func providerFieldsSent(body []byte) map[string]map[string]struct{} {
 // unmanagedProviderFields are per-provider settings that no control-plane form
 // currently renders. A client that rebuilds a provider object from a form would
 // drop them, so they are carried forward unless explicitly written.
-var unmanagedProviderFields = []string{"pricing", "responses_compaction", "cache"}
+var unmanagedProviderFields = []string{"pricing", "responses_compaction", "cache", "forward_caller_credential"}
 
 // preserveUnmanagedProviderFields copies unmanaged fields from the stored config
 // into the incoming one wherever the caller left them out. It mutates incoming.
@@ -2244,6 +2245,8 @@ func preserveUnmanagedProviderFields(stored, incoming map[string]provider.Provid
 				incP.ResponsesCompaction = curP.ResponsesCompaction
 			case "cache":
 				incP.Cache = curP.Cache
+			case "forward_caller_credential":
+				incP.ForwardCallerCredential = curP.ForwardCallerCredential
 			}
 		}
 		incoming[name] = incP
