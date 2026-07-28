@@ -3,6 +3,7 @@ package proxy
 import (
 	"os"
 	"reflect"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -146,26 +147,42 @@ func TestUnmanagedProviderFieldsAreAllHandled(t *testing.T) {
 func TestFormRenderedFieldsExistInTheDashboard(t *testing.T) {
 	spa := readDashboard(t)
 	for _, field := range formRenderedProviderFields {
-		// The SPA builds provider objects with quoted keys, e.g. p.url or
-		// {"url": ...}; either spelling contains the quoted key or a dotted
-		// access. Requiring one of those rules out incidental substrings.
-		quoted := `"` + field + `"`
-		dotted := "." + field
-		if !strings.Contains(spa, quoted) && !strings.Contains(spa, dotted) {
-			t.Errorf("field %q never appears in the dashboard as a key (%s) or an access (%s); "+
-				"claiming the form renders it is then fiction, and saving would drop it",
-				field, quoted, dotted)
+		if !dashboardReferences(spa, field) {
+			t.Errorf("field %q never appears in the dashboard as a property access or a "+
+				"quoted key; claiming the form renders it is then fiction, and saving "+
+				"would drop it", field)
 		}
 	}
 }
 
+// dashboardReferences reports whether the SPA reads or writes this field.
+//
+// The SPA uses property access (p.url, off.api_key_env) rather than quoted
+// keys, so both spellings are accepted — but only as WHOLE identifiers. A plain
+// substring search matched "format" inside formatBytes and "url" inside any
+// href, which is how the first version of this check could not fail; a bare
+// `strings.Contains(spa, "."+field)` had the same hole one layer down.
+func dashboardReferences(spa, field string) bool {
+	pattern := regexp.MustCompile(`(\.|["'` + "`" + `])` + regexp.QuoteMeta(field) + `\b`)
+	return pattern.MatchString(spa)
+}
+
 // TestFormRenderedListRejectsAFieldTheDashboardDoesNotHave proves the check
-// above can fail, by running it against a name the SPA cannot contain.
+// above can fail, and that it does not match a longer identifier that merely
+// starts with the field name — the exact hole the substring version had.
 func TestFormRenderedListRejectsAFieldTheDashboardDoesNotHave(t *testing.T) {
 	spa := readDashboard(t)
-	const invented = "definitely_not_a_provider_field_xyzzy"
-	if strings.Contains(spa, `"`+invented+`"`) || strings.Contains(spa, "."+invented) {
-		t.Fatal("test fixture is not invented after all")
+
+	if dashboardReferences(spa, "definitely_not_a_provider_field_xyzzy") {
+		t.Error("matched a field the dashboard cannot contain")
+	}
+	// "format" is a real field; "formatBytes" is a helper. A check that cannot
+	// tell them apart would pass for a field the form does not render.
+	if dashboardReferences("const x = formatBytes(n);", "format") {
+		t.Error("`.formatBytes(` was accepted as a reference to the `format` field")
+	}
+	if !dashboardReferences("p.format = 'openai';", "format") {
+		t.Error("a genuine property access was not recognised")
 	}
 }
 
