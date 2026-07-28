@@ -64,6 +64,17 @@ var supportedFormats = map[string]struct{}{
 	"openai":            {},
 }
 
+// supportedFormatNames lists the wire formats in a stable order, for error
+// messages that tell the operator what to write instead.
+func supportedFormatNames() string {
+	names := make([]string, 0, len(supportedFormats))
+	for name := range supportedFormats {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return strings.Join(names, ", ")
+}
+
 // Validate rejects configuration that cannot be routed deterministically.
 func (c Config) Validate() error {
 	if c.Port <= 0 || c.Port > 65535 {
@@ -86,8 +97,19 @@ func (c Config) Validate() error {
 		if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
 			return fmt.Errorf("provider %q has invalid http(s) url %q", name, configured.URL)
 		}
-		if _, ok := supportedFormats[configured.Format]; !ok {
-			return fmt.Errorf("provider %q has unsupported format %q", name, configured.Format)
+		// An empty format is a supported mode, not a missing value: it selects
+		// transparent pass-through, which the proxy implements deliberately
+		// ("No format adapter... Just forward", server.go). Routing, failover,
+		// rate limiting and metrics all still apply — only body translation is
+		// skipped. Rejecting it here would refuse to start on a configuration
+		// that works today and is the right one for an upstream Torana does not
+		// need to understand.
+		if configured.Format != "" {
+			if _, ok := supportedFormats[configured.Format]; !ok {
+				return fmt.Errorf("provider %q has unsupported format %q (supported: %s; "+
+					"omit the field entirely for transparent pass-through)",
+					name, configured.Format, supportedFormatNames())
+			}
 		}
 		for _, fallback := range configured.Fallback {
 			if fallback == name {
@@ -509,7 +531,11 @@ func Load(path string) (Config, error) {
 		if user.Providers == nil {
 			user.Providers = make(map[string]Provider)
 		}
-		return user, nil
+		// Managed configs used to return here, before any validation. That
+		// made the managed store — the config every running Torana actually
+		// uses after first start — the LEAST checked path, while the seed it
+		// was imported from was the most. Validate it like anything else.
+		return user, validate(user)
 	}
 
 	// Merge: user values override defaults.
@@ -537,16 +563,28 @@ func Load(path string) (Config, error) {
 	if user.ControlPlane != (ControlPlaneConfig{}) {
 		cfg.ControlPlane = user.ControlPlane
 	}
+	return cfg, validate(cfg)
+}
+
+// validate runs every check a loaded config must pass, on every load path.
+//
+// These were split before: the structural checks in Config.Validate ran only
+// on the control-plane PUT, and the per-provider checks only when merging an
+// unmanaged seed. So which rules applied depended on how the config arrived,
+// and the path that actually runs in production was covered by neither.
+func validate(cfg Config) error {
+	if err := cfg.Validate(); err != nil {
+		return err
+	}
 	for name, p := range cfg.Providers {
 		if err := p.ValidateResponsesCompaction(name); err != nil {
-			return cfg, err
+			return err
 		}
 		if err := p.ValidateCache(name); err != nil {
-			return cfg, err
+			return err
 		}
 	}
-
-	return cfg, nil
+	return nil
 }
 
 // Save writes cfg to path atomically with Managed set to true.

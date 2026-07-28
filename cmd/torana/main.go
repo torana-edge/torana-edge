@@ -58,10 +58,24 @@ func main() {
 		log.Fatalf("Failed to resolve managed store path: %v", err)
 	}
 
+	// Fail closed. Downgrading to defaults here left PII blocking, compaction
+	// and cost accounting silently off behind a single warning line — in a
+	// process that usually runs in the background, where nobody reads it. A
+	// proxy that silently stops enforcing the policy it was configured with is
+	// worse than one that does not start.
+	//
+	// This does not affect a fresh install: a missing config is not an error,
+	// it resolves to defaults and materializes the managed store. Reaching
+	// here means the config exists and is broken, unreadable, or unwritable.
 	provCfg, err := provider.ResolveConfig(seedPath, storePath)
 	if err != nil {
-		log.Printf("Warning: %v — using defaults", err)
-		provCfg = provider.DefaultConfig()
+		log.Fatalf("Failed to load configuration: %v\n\n"+
+			"Torana will not start with a partial configuration, because the plugins you "+
+			"configured — PII blocking, compaction, cost accounting — would be silently off.\n\n"+
+			"Configuration is now validated on every load path, not only on control-plane "+
+			"writes, so a rule that was previously enforced in one place may be reporting a "+
+			"pre-existing problem for the first time.\n\n"+
+			"Fix the reported field, or move %s aside to start from defaults.", err, storePath)
 	}
 	// A fallback with no credential of its own answers 401, which is not
 	// retryable — so failover turns a recoverable 429 into a hard failure for
