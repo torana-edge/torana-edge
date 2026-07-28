@@ -7,7 +7,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/torana-edge/torana-edge/internal/economics"
 	"github.com/torana-edge/torana-edge/internal/provider"
 )
 
@@ -91,51 +90,85 @@ func TestEveryProviderFieldIsRenderedOrPreserved(t *testing.T) {
 // now derives the expectation from the list itself, by round-tripping a stored
 // config through preservation and asserting every unmanaged field survived.
 func TestUnmanagedProviderFieldsAreAllHandled(t *testing.T) {
-	// Every field named in unmanagedProviderFields must be set to something
-	// non-zero here, or preservation cannot be observed for it.
-	stored := map[string]provider.Provider{"p": {
-		URL:                 "https://stored.example",
-		Pricing:             map[string]economics.ModelPricing{"gpt-4": {}},
-		ResponsesCompaction: &provider.ResponsesCompactionConfig{},
-		Cache:               &provider.CacheConfig{},
-	}}
-	incoming := map[string]provider.Provider{"p": {URL: "https://incoming.example"}}
-
-	preserveUnmanagedProviderFields(stored, incoming, map[string]map[string]struct{}{})
-
-	// Driven by the list, not by a hardcoded set of names. The first version
-	// checked the three fields it happened to know about, which is exactly the
-	// failure it was written to catch: adding a fourth with no switch case
-	// still passed.
-	typ := reflect.TypeOf(provider.Provider{})
-	storedV := reflect.ValueOf(stored["p"])
-	gotV := reflect.ValueOf(incoming["p"])
+	// The fixture is built by reflection from unmanagedProviderFields itself,
+	// so adding a field to that list needs no edit here.
+	//
+	// A hand-written fixture couples this test to every PR that adds an
+	// unmanaged field: the two would merge without a textual conflict and land
+	// a red main, because neither PR's CI sees the other's change. That is a
+	// mechanical failure, not a real finding, and it would train people to
+	// treat this test as noise.
+	stored := provider.Provider{URL: "https://stored.example"}
+	sv := reflect.ValueOf(&stored).Elem()
+	typ := sv.Type()
 
 	for _, name := range unmanagedProviderFields {
-		idx := -1
-		for i := 0; i < typ.NumField(); i++ {
-			if jsonFieldName(typ.Field(i)) == name {
-				idx = i
-				break
-			}
-		}
+		idx := fieldIndexByJSONName(typ, name)
 		if idx < 0 {
 			t.Errorf("unmanagedProviderFields names %q, which is not a field on provider.Provider", name)
 			continue
 		}
-		want := storedV.Field(idx).Interface()
-		if reflect.ValueOf(want).IsZero() {
-			t.Errorf("the fixture leaves %q at its zero value, so preservation cannot be "+
-				"observed for it. Set it in `stored` above — a listed field with no switch "+
-				"case in preserveUnmanagedProviderFields is a silent no-op, and this test "+
-				"exists to catch that.", name)
+		if !setNonZero(sv.Field(idx)) {
+			t.Errorf("cannot build a non-zero %s for %q, so preservation cannot be observed; "+
+				"extend setNonZero", sv.Field(idx).Type(), name)
+		}
+	}
+
+	incoming := map[string]provider.Provider{"p": {URL: "https://incoming.example"}}
+	preserveUnmanagedProviderFields(map[string]provider.Provider{"p": stored}, incoming,
+		map[string]map[string]struct{}{})
+
+	gotV := reflect.ValueOf(incoming["p"])
+	for _, name := range unmanagedProviderFields {
+		idx := fieldIndexByJSONName(typ, name)
+		if idx < 0 {
 			continue
+		}
+		want := sv.Field(idx).Interface()
+		if reflect.ValueOf(want).IsZero() {
+			continue // already reported above
 		}
 		if !reflect.DeepEqual(want, gotV.Field(idx).Interface()) {
 			t.Errorf("%q is listed as unmanaged but was not carried forward; "+
 				"preserveUnmanagedProviderFields has no case for it", name)
 		}
 	}
+}
+
+func fieldIndexByJSONName(typ reflect.Type, name string) int {
+	for i := 0; i < typ.NumField(); i++ {
+		if jsonFieldName(typ.Field(i)) == name {
+			return i
+		}
+	}
+	return -1
+}
+
+// setNonZero gives v a value distinguishable from its zero, so preservation is
+// observable. It reports false for a kind it cannot construct, which is a
+// prompt to extend it rather than a silent pass.
+func setNonZero(v reflect.Value) bool {
+	switch v.Kind() {
+	case reflect.Bool:
+		v.SetBool(true)
+	case reflect.String:
+		v.SetString("non-zero")
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		v.SetInt(1)
+	case reflect.Float32, reflect.Float64:
+		v.SetFloat(1)
+	case reflect.Ptr:
+		v.Set(reflect.New(v.Type().Elem()))
+	case reflect.Map:
+		m := reflect.MakeMap(v.Type())
+		m.SetMapIndex(reflect.New(v.Type().Key()).Elem(), reflect.New(v.Type().Elem()).Elem())
+		v.Set(m)
+	case reflect.Slice:
+		v.Set(reflect.Append(v, reflect.New(v.Type().Elem()).Elem()))
+	default:
+		return false
+	}
+	return !v.IsZero()
 }
 
 // TestFormRenderedFieldsExistInTheDashboard keeps the list above honest.
