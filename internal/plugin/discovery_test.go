@@ -17,7 +17,7 @@ func TestHasHook_MatchAfterManifestFix(t *testing.T) {
 	m := PluginManifest{
 		Name: "test-plugin",
 		Hooks: []Hook{
-			{Name: "run_before_request", Priority: 100},
+			{Name: "run_before_request"},
 		},
 	}
 	if !hasHook(m, "run_before_request") {
@@ -32,9 +32,9 @@ func TestHasHook_MultipleHooks(t *testing.T) {
 	m := PluginManifest{
 		Name: "multi-hook",
 		Hooks: []Hook{
-			{Name: "run_before_request", Priority: 100},
-			{Name: "run_after_response", Priority: 200},
-			{Name: "run_on_stream_chunk", Priority: 300},
+			{Name: "run_before_request"},
+			{Name: "run_after_response"},
+			{Name: "run_on_stream_chunk"},
 		},
 	}
 	for _, h := range []string{"run_before_request", "run_after_response", "run_on_stream_chunk"} {
@@ -49,8 +49,8 @@ func TestHasHook_MultipleHooks(t *testing.T) {
 
 func TestHookNames(t *testing.T) {
 	hooks := []Hook{
-		{Name: "run_before_request", Priority: 100},
-		{Name: "run_after_response", Priority: 200},
+		{Name: "run_before_request"},
+		{Name: "run_after_response"},
 	}
 	names := hookNames(hooks)
 	if len(names) != 2 {
@@ -327,7 +327,31 @@ func TestValidateManifestContract(t *testing.T) {
 	invalid = valid
 	invalid.MinimumToranaVersion = "99.0.0"
 	if err := validateManifest(invalid); err != nil {
-		t.Fatalf("legacy host version must be ignored for an unversioned host: %v", err)
+		t.Fatalf("valid optional host version bound: %v", err)
+	}
+	if err := validateHostCompatibility(invalid, "dev"); err != nil {
+		t.Fatalf("unversioned host must skip the optional bound: %v", err)
+	}
+	if err := validateHostCompatibility(invalid, "98.0.0"); err == nil {
+		t.Fatal("known host below the minimum version was accepted")
+	}
+	if err := validateHostCompatibility(invalid, "99.0.0"); err != nil {
+		t.Fatalf("known host at the minimum version was rejected: %v", err)
+	}
+	invalid.MaximumToranaVersion = "100.0.0"
+	if err := validateHostCompatibility(invalid, "101.0.0"); err == nil {
+		t.Fatal("known host above the maximum version was accepted")
+	}
+	invalid = valid
+	invalid.MinimumToranaVersion = "not-semver"
+	if err := validateManifest(invalid); err == nil {
+		t.Fatal("malformed minimum_torana_version was accepted")
+	}
+	invalid = valid
+	invalid.MinimumToranaVersion = "2.0.0"
+	invalid.MaximumToranaVersion = "1.0.0"
+	if err := validateManifest(invalid); err == nil {
+		t.Fatal("inverted host version range was accepted")
 	}
 	invalid = valid
 	invalid.RequiresUpstream = []string{valid.ID}
@@ -447,7 +471,7 @@ func TestDiscoverPlugins_ValidPlugin(t *testing.T) {
 		Version:     "0.1.0",
 		Description: "test",
 		Hooks: []Hook{
-			{Name: "run_before_request", Priority: 100},
+			{Name: "run_before_request"},
 		},
 	}
 	mBytes, _ := json.Marshal(manifest)

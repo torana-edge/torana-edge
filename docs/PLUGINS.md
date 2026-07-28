@@ -137,8 +137,13 @@ plugin IDs; Torana refuses startup when an approved dependent appears without
 its approved dependency earlier in `plugins.order`. `torana plugin list` shows
 what is installed; the control plane shows what is actually live.
 
-`plugins.order` is authoritative. Older manifests may contain hook `priority`,
-but current hosts ignore it and report a deprecation warning.
+`plugins.order` is authoritative; hooks do not have a manifest-level priority.
+
+Plugins may declare optional `minimum_torana_version` and
+`maximum_torana_version` bounds. A tagged host with a semantic version enforces
+them. Development and commit-SHA builds have no reliable product version, so
+they log and skip this product-version gate while still enforcing
+`abi_version`, hooks, permissions, exports, and approvals.
 
 ## Containers
 

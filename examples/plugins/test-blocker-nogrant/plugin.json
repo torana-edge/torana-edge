@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "description": "Example plugin: attempts to veto but does NOT declare env.block_request, so the proxy ignores it",
   "hooks": [
-    {"name": "run_before_request", "priority": 100}
+    {"name": "run_before_request"}
   ],
   "permissions": [
     {"name": "env.log", "description": "Diagnostic logging"}

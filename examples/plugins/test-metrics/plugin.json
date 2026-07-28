@@ -9,12 +9,10 @@
   "description": "Test fixture: emits one metric of each type with labels, and mutates nothing",
   "hooks": [
     {
-      "name": "run_before_request",
-      "priority": 100
+      "name": "run_before_request"
     },
     {
-      "name": "run_after_response",
-      "priority": 100
+      "name": "run_after_response"
     }
   ],
   "permissions": [

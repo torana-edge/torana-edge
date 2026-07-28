@@ -9,8 +9,7 @@
   "description": "Test fixture: serves an HTML page and a schema-validated agent operation over run_on_http_request",
   "hooks": [
     {
-      "name": "run_on_http_request",
-      "priority": 100
+      "name": "run_on_http_request"
     }
   ],
   "permissions": [

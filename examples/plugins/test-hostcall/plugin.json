@@ -9,8 +9,7 @@
   "description": "Test fixture: exercises the clock, cache pricing, durable state and plugin counters, recording what the host answered",
   "hooks": [
     {
-      "name": "run_before_request",
-      "priority": 100
+      "name": "run_before_request"
     }
   ],
   "permissions": [

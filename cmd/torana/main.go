@@ -27,6 +27,11 @@ import (
 	_ "github.com/torana-edge/torana-edge/internal/format/openai"
 )
 
+// version is injected for tagged builds by the Makefile. Untagged builds use
+// "dev" or a commit SHA and intentionally skip product-version compatibility
+// gates while continuing to enforce the plugin ABI and capability contract.
+var version = "dev"
+
 func main() {
 	if len(os.Args) > 1 && os.Args[1] == "plugin" {
 		if err := plugincmd.Run(os.Args[1:], os.Stdout, os.Stderr); err != nil {
@@ -103,6 +108,7 @@ func main() {
 
 	cfg := proxy.Config{
 		Port:            strconv.Itoa(provCfg.Port),
+		HostVersion:     version,
 		Providers:       provCfg,
 		DefaultProvider: os.Getenv("TORANA_DEFAULT_PROVIDER"),
 		ConfigPath:      storePath,

@@ -12,7 +12,6 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -23,6 +22,7 @@ import (
 	"github.com/torana-edge/torana-edge/internal/wasm"
 	sdk "github.com/torana-edge/torana-plugin-sdk"
 	"github.com/torana-edge/torana-plugin-sdk/pb"
+	"golang.org/x/mod/semver"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -36,8 +36,7 @@ type Permission struct {
 }
 
 type Hook struct {
-	Name     string `json:"name"`
-	Priority int    `json:"priority,omitempty"` // legacy; plugins.order is authoritative
+	Name string `json:"name"`
 }
 
 type PluginManifest struct {
@@ -243,8 +242,19 @@ func validateManifest(manifest PluginManifest) error {
 	if _, err := parseSemver(manifest.Version); err != nil {
 		return fmt.Errorf("invalid version: %w", err)
 	}
-	if manifest.MinimumToranaVersion != "" || manifest.MaximumToranaVersion != "" {
-		log.Printf("[plugin] %s: minimum_torana_version/maximum_torana_version are deprecated and ignored; compatibility is enforced by abi_version, hooks, and permissions", manifest.Name)
+	if manifest.MinimumToranaVersion != "" {
+		if _, err := parseSemver(manifest.MinimumToranaVersion); err != nil {
+			return fmt.Errorf("invalid minimum_torana_version: %w", err)
+		}
+	}
+	if manifest.MaximumToranaVersion != "" {
+		if _, err := parseSemver(manifest.MaximumToranaVersion); err != nil {
+			return fmt.Errorf("invalid maximum_torana_version: %w", err)
+		}
+	}
+	if manifest.MinimumToranaVersion != "" && manifest.MaximumToranaVersion != "" &&
+		compareSemver(manifest.MinimumToranaVersion, manifest.MaximumToranaVersion) > 0 {
+		return fmt.Errorf("minimum_torana_version must not exceed maximum_torana_version")
 	}
 	if manifest.FailureMode != "pass" && manifest.FailureMode != "block" {
 		return fmt.Errorf("failure_mode must be pass or block")
@@ -261,9 +271,6 @@ func validateManifest(manifest PluginManifest) error {
 			return fmt.Errorf("duplicate hook %q", hook.Name)
 		}
 		seenHooks[hook.Name] = struct{}{}
-		if hook.Priority != 0 {
-			log.Printf("[plugin] %s: hook priority is deprecated and ignored; plugins.order is authoritative", manifest.Name)
-		}
 	}
 	seenPermissions := make(map[string]struct{}, len(manifest.Permissions))
 	for _, permission := range manifest.Permissions {
@@ -291,21 +298,47 @@ func validateManifest(manifest PluginManifest) error {
 	return nil
 }
 
-func parseSemver(raw string) ([3]int, error) {
-	var parsed [3]int
-	core := strings.SplitN(strings.TrimPrefix(raw, "v"), "-", 2)[0]
-	parts := strings.Split(core, ".")
-	if len(parts) != 3 {
-		return parsed, fmt.Errorf("%q is not major.minor.patch", raw)
+func canonicalSemver(raw string) string {
+	if strings.HasPrefix(raw, "v") {
+		return raw
 	}
-	for index, part := range parts {
-		value, err := strconv.Atoi(part)
-		if err != nil || value < 0 {
-			return parsed, fmt.Errorf("%q is not major.minor.patch", raw)
+	return "v" + raw
+}
+
+func parseSemver(raw string) (string, error) {
+	version := canonicalSemver(raw)
+	if !semver.IsValid(version) {
+		return "", fmt.Errorf("%q is not a valid semantic version", raw)
+	}
+	return version, nil
+}
+
+func compareSemver(left, right string) int {
+	return semver.Compare(canonicalSemver(left), canonicalSemver(right))
+}
+
+// validateHostCompatibility applies optional product-version bounds only when
+// the host was built with a semantic version. Development builds identify
+// themselves with "dev" or a commit SHA, so compatibility remains governed by
+// abi_version, hooks, and permissions until Edge has releases.
+func validateHostCompatibility(manifest PluginManifest, hostVersion string) error {
+	rawHostVersion := hostVersion
+	hostVersion, err := parseSemver(rawHostVersion)
+	if err != nil {
+		if manifest.MinimumToranaVersion != "" || manifest.MaximumToranaVersion != "" {
+			log.Printf("[plugin] %s: host version %q is not semantic; skipping minimum_torana_version/maximum_torana_version checks", manifest.Name, rawHostVersion)
 		}
-		parsed[index] = value
+		return nil
 	}
-	return parsed, nil
+	if manifest.MinimumToranaVersion != "" &&
+		semver.Compare(hostVersion, canonicalSemver(manifest.MinimumToranaVersion)) < 0 {
+		return fmt.Errorf("requires Torana Edge >= %s (running %s)", manifest.MinimumToranaVersion, hostVersion)
+	}
+	if manifest.MaximumToranaVersion != "" &&
+		semver.Compare(hostVersion, canonicalSemver(manifest.MaximumToranaVersion)) > 0 {
+		return fmt.Errorf("requires Torana Edge <= %s (running %s)", manifest.MaximumToranaVersion, hostVersion)
+	}
+	return nil
 }
 
 func DiscoverPlugins(pluginsDir string) ([]PluginBundle, error) {
@@ -618,6 +651,9 @@ func reloadPipeline(runtime *wasm.Runtime, config PluginConfig) (*PluginPipeline
 		if !config.AllowUnapproved {
 			if err := validateManifest(bundle.Manifest); err != nil {
 				return nil, fmt.Errorf("enabled plugin %q has invalid manifest: %w", name, err)
+			}
+			if err := validateHostCompatibility(bundle.Manifest, config.HostVersion); err != nil {
+				return nil, fmt.Errorf("enabled plugin %q is incompatible: %w", name, err)
 			}
 		}
 		approval, approved := config.approvalFor(bundle)
@@ -1217,6 +1253,9 @@ type PluginConfig struct {
 	Order     []string                   `json:"order"`
 	Config    map[string]json.RawMessage `json:"config"`
 	Approvals map[string]Approval        `json:"approvals,omitempty"`
+	// HostVersion is build metadata supplied by the executable. It is never
+	// persisted in operator configuration.
+	HostVersion string `json:"-"`
 
 	// AllowUnapproved is for in-repository conformance tests and plugin
 	// development only. It converts manifest requests into grants and is not a

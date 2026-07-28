@@ -1,7 +1,7 @@
 .PHONY: build install clean test release official-plugins testdata lint
 
 BINARY := torana
-VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
+VERSION ?= $(shell git describe --tags --exact-match 2>/dev/null || git rev-parse --short HEAD 2>/dev/null || echo "dev")
 LDFLAGS := -s -w -X main.version=$(VERSION)
 
 # WASM fixtures are build artifacts — never committed (*.wasm is gitignored).
@@ -11,10 +11,10 @@ LDFLAGS := -s -w -X main.version=$(VERSION)
 # below. `make official-plugins` builds them from a sibling checkout when you
 # want the plugin-behaviour suite to run locally.
 TESTDATA_DIRS := examples/plugins/test-stream-mutator examples/plugins/test-blocker examples/plugins/test-blocker-nogrant examples/plugins/test-observer examples/plugins/test-responder examples/plugins/test-responder-nogrant examples/plugins/test-original examples/plugins/test-router examples/plugins/test-ticker examples/plugins/test-http-server examples/plugins/test-metrics examples/plugins/test-mutator examples/plugins/test-hostcall examples/plugins/test-fragment-buffer
-WASM_BUILD = GOOS=wasip1 GOARCH=wasm go build -buildmode=c-shared
+WASM_BUILD = GOOS=wasip1 GOARCH=wasm go build -buildvcs=false -buildmode=c-shared
 
 build:
-	go build -ldflags "$(LDFLAGS)" -o $(BINARY) ./cmd/torana/
+	go build -buildvcs=false -ldflags "$(LDFLAGS)" -o $(BINARY) ./cmd/torana/
 
 # Build the official plugins from a sibling torana-plugins checkout, and print
 # the directory to hand to the plugin-behaviour suite:
@@ -35,7 +35,7 @@ testdata:
 	@cd testdata && $(WASM_BUILD) -o hello.wasm .
 
 install:
-	go install -ldflags "$(LDFLAGS)" ./cmd/torana/
+	go install -buildvcs=false -ldflags "$(LDFLAGS)" ./cmd/torana/
 
 test: testdata
 	go test ./... -race -timeout 600s
@@ -48,7 +48,7 @@ clean:
 	rm -f $(foreach d,$(TESTDATA_DIRS),$(d)/plugin.wasm) testdata/hello.wasm
 
 release:
-	GOOS=linux   GOARCH=amd64 go build -ldflags "$(LDFLAGS)" -o dist/torana-linux-amd64   ./cmd/torana/
-	GOOS=linux   GOARCH=arm64 go build -ldflags "$(LDFLAGS)" -o dist/torana-linux-arm64   ./cmd/torana/
-	GOOS=darwin  GOARCH=amd64 go build -ldflags "$(LDFLAGS)" -o dist/torana-darwin-amd64  ./cmd/torana/
-	GOOS=darwin  GOARCH=arm64 go build -ldflags "$(LDFLAGS)" -o dist/torana-darwin-arm64  ./cmd/torana/
+	GOOS=linux   GOARCH=amd64 go build -buildvcs=false -ldflags "$(LDFLAGS)" -o dist/torana-linux-amd64   ./cmd/torana/
+	GOOS=linux   GOARCH=arm64 go build -buildvcs=false -ldflags "$(LDFLAGS)" -o dist/torana-linux-arm64   ./cmd/torana/
+	GOOS=darwin  GOARCH=amd64 go build -buildvcs=false -ldflags "$(LDFLAGS)" -o dist/torana-darwin-amd64  ./cmd/torana/
+	GOOS=darwin  GOARCH=arm64 go build -buildvcs=false -ldflags "$(LDFLAGS)" -o dist/torana-darwin-arm64  ./cmd/torana/

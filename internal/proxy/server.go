@@ -110,6 +110,9 @@ var allowedPluginHeaders = []string{
 type Config struct {
 	// Port is the TCP port the proxy listens on (e.g. "8080").
 	Port string
+	// HostVersion is the executable build version used for optional plugin
+	// compatibility checks. Development builds may leave it non-semantic.
+	HostVersion string
 
 	// Providers is the provider configuration (URLs, formats).
 	Providers provider.Config
@@ -585,6 +588,7 @@ func New(cfg Config) (*Server, error) {
 					Approvals:       pluginApprovals(p.Approvals),
 					AllowUnapproved: p.AllowUnapproved,
 					Strict:          true,
+					HostVersion:     s.config.HostVersion,
 				}
 			}
 			watchDone := make(chan struct{})
@@ -2493,6 +2497,7 @@ func (s *Server) rebuildPipelineLocked(pcfg provider.PluginsConfig) (*plugin.Plu
 		Approvals:       pluginApprovals(pcfg.Approvals),
 		AllowUnapproved: pcfg.AllowUnapproved,
 		Strict:          true,
+		HostVersion:     s.config.HostVersion,
 	})
 	if err != nil {
 		rt.Close()
