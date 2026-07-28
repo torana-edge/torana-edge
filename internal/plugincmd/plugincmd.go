@@ -69,7 +69,11 @@ func Usage(w io.Writer) {
 // project that cannot build.
 const (
 	ScaffoldSDKVersion = "v0.1.3"
-	scaffoldGoVersion  = "1.25.0"
+	// scaffoldGoVersion tracks the SDK's own go directive. A scaffolded module
+	// declaring an OLDER Go version than its dependency requires fails to build
+	// with "module requires go >= x", which is the same class of unbuildable
+	// first project this constant pair exists to prevent.
+	scaffoldGoVersion = "1.25.0"
 )
 
 func initPlugin(args []string, stdout io.Writer) error {

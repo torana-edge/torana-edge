@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -61,22 +62,76 @@ func TestRunRejectsUnknownPluginCommand(t *testing.T) {
 // the host implements is the exact drift that produced "v0.1.0" surviving three
 // SDK releases.
 func TestScaffoldSDKVersionMatchesTheHost(t *testing.T) {
-	goMod, err := os.ReadFile("../../go.mod")
-	if err != nil {
-		t.Fatal(err)
-	}
-	const dep = "github.com/torana-edge/torana-plugin-sdk "
-	i := strings.Index(string(goMod), dep)
-	if i < 0 {
-		t.Fatal("torana-edge does not depend on the plugin SDK")
-	}
-	rest := string(goMod)[i+len(dep):]
-	hostVersion := strings.Fields(rest)[0]
-
+	hostVersion := requireVersionFromGoMod(t, "../../go.mod", sdkModulePath)
 	if ScaffoldSDKVersion != hostVersion {
 		t.Errorf("torana plugin new scaffolds SDK %s, but torana-edge is built against %s.\n"+
 			"A plugin scaffolded against a different SDK than the host implements can fail in "+
 			"ways the author cannot debug. Update ScaffoldSDKVersion when bumping the SDK.",
 			ScaffoldSDKVersion, hostVersion)
 	}
+}
+
+// TestScaffoldGoVersionSatisfiesTheSDK anchors the other constant. A scaffolded
+// module declaring an older Go version than the SDK requires does not build,
+// and nothing previously asserted it at all.
+func TestScaffoldGoVersionSatisfiesTheSDK(t *testing.T) {
+	const sdkGoMod = "../../../torana-plugin-sdk/go.mod"
+	raw, err := os.ReadFile(sdkGoMod)
+	if err != nil {
+		t.Skip("torana-plugin-sdk not checked out beside this repo")
+	}
+	m := regexp.MustCompile(`(?m)^go\s+(\S+)`).FindStringSubmatch(string(raw))
+	if m == nil {
+		t.Fatal("no go directive in the SDK go.mod")
+	}
+	if scaffoldGoVersion != m[1] {
+		t.Errorf("the scaffold writes `go %s` but the SDK requires `go %s`. A scaffolded "+
+			"module below its dependency's requirement does not build.", scaffoldGoVersion, m[1])
+	}
+}
+
+// TestRequireVersionIgnoresReplaceDirectives — the first version of this
+// helper took the first occurrence of the module path and the next field, so a
+// replace directive above the require block yielded "=>" as the host version.
+func TestRequireVersionIgnoresReplaceDirectives(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "go.mod")
+	content := "module example.com/x\n\ngo 1.25.0\n\n" +
+		"replace " + sdkModulePath + " => ../torana-plugin-sdk\n\n" +
+		"require (\n\t" + sdkModulePath + " v0.1.3\n)\n"
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := requireVersionFromGoMod(t, path, sdkModulePath); got != "v0.1.3" {
+		t.Errorf("got %q, want v0.1.3 — a replace directive must not be read as the version", got)
+	}
+}
+
+const sdkModulePath = "github.com/torana-edge/torana-plugin-sdk"
+
+// requireVersionFromGoMod reads a module's REQUIRED version.
+//
+// The first version of this took the first strings.Index of the module path and
+// the next field, which a `replace github.com/... => ../local` line above the
+// require block turns into "=>". Anchoring on a version token avoids that, and
+// replace/exclude lines are skipped explicitly.
+func requireVersionFromGoMod(t *testing.T, path, module string) string {
+	t.Helper()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, line := range strings.Split(string(raw), "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "replace ") || strings.HasPrefix(trimmed, "exclude ") ||
+			strings.HasPrefix(trimmed, "//") {
+			continue
+		}
+		fields := strings.Fields(strings.TrimPrefix(trimmed, "require "))
+		if len(fields) >= 2 && fields[0] == module && strings.HasPrefix(fields[1], "v") {
+			return fields[1]
+		}
+	}
+	t.Fatalf("%s does not require %s", path, module)
+	return ""
 }
