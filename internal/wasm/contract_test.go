@@ -37,57 +37,75 @@ func TestPermissionDeniedEnvelopeIsStable(t *testing.T) {
 	}
 }
 
-// TestDeniedCapabilitiesAllReturnTheSameEnvelope: the host has several denial
-// sites, and one of them drifting is far likelier than all of them changing
-// together. A site that returns a differently-shaped error is invisible to
-// guests that match on this one.
+// TestDeniedCapabilitiesAllReturnTheSameEnvelope is now structural rather than
+// textual: runtime.go has ONE named constant and every denial site returns it,
+// so "one site drifted from the others" cannot happen.
+//
+// The version this replaces scanned for lines containing both `"status":"error"`
+// and "permission denied" and then checked those lines matched the envelope —
+// so it could only fail on whitespace inside an already-correct one-liner, and
+// a differently-worded denial was filtered out before the assertion ran.
 func TestDeniedCapabilitiesAllReturnTheSameEnvelope(t *testing.T) {
+	if permissionDeniedJSON != permissionDeniedEnvelope {
+		t.Fatalf("the host constant changed to %s; this is a wire contract that "+
+			"already-published plugin binaries match verbatim", permissionDeniedJSON)
+	}
+
 	src, err := os.ReadFile("runtime.go")
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, line := range strings.Split(string(src), "\n") {
-		if !strings.Contains(line, `"status":"error"`) {
-			continue
-		}
-		if !strings.Contains(line, "permission denied") {
-			continue
-		}
-		if !strings.Contains(line, permissionDeniedEnvelope) {
-			t.Errorf("a permission-denied response does not use the standard envelope:\n  %s\n"+
-				"want exactly %s", strings.TrimSpace(line), permissionDeniedEnvelope)
-		}
+	// Exactly one occurrence of the literal — the constant's own declaration.
+	// A second means someone reintroduced an inline copy, which is how the two
+	// halves drift apart.
+	if n := strings.Count(string(src), permissionDeniedEnvelope); n != 1 {
+		t.Errorf("the denial envelope literal appears %d times in runtime.go, want 1 "+
+			"(the permissionDeniedJSON declaration). An inline copy can drift from the "+
+			"constant, and guests match it verbatim.", n)
 	}
 }
 
 // TestSDKAgreesOnTheDenialEnvelope closes the loop when the SDK is checked out
-// beside this repo: the contract only holds if both sides spell it the same
-// way, and asserting only the host half proves nothing about the guest.
+// beside this repo. Asserting only the host half proves nothing about the guest.
+//
+// It looks for the EXACT envelope, not the phrase "permission denied" — the
+// previous version was satisfied by a comment mentioning it.
 func TestSDKAgreesOnTheDenialEnvelope(t *testing.T) {
 	root := "../../../torana-plugin-sdk"
 	if _, err := os.Stat(root); err != nil {
 		t.Skip("torana-plugin-sdk not checked out beside this repo")
 	}
 
-	var found bool
+	var matches []string
 	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
-		if err != nil || d.IsDir() || !strings.HasSuffix(path, ".go") {
-			return nil //nolint:nilerr // unreadable files are not a contract failure
+		if err != nil || d.IsDir() {
+			return nil //nolint:nilerr // unreadable entries are not a contract failure
+		}
+		ext := filepath.Ext(path)
+		if ext != ".go" && ext != ".rs" {
+			return nil
+		}
+		if strings.Contains(path, "/target/") {
+			return nil
 		}
 		b, readErr := os.ReadFile(path)
 		if readErr != nil {
 			return nil
 		}
-		if strings.Contains(string(b), "permission denied") {
-			found = true
+		if strings.Contains(string(b), permissionDeniedEnvelope) {
+			matches = append(matches, path)
 		}
 		return nil
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !found {
-		t.Error("the SDK no longer mentions \"permission denied\" anywhere; the host still " +
-			"returns it, so guests would stop detecting refused capabilities")
+	if len(matches) == 0 {
+		t.Errorf("no SDK source contains the exact envelope %s.\n"+
+			"The host returns it on every denied capability; an SDK that does not match it "+
+			"byte for byte treats a refusal as an ordinary result and continues as though "+
+			"the call had succeeded — which is what #210 produced in PluginConfig.",
+			permissionDeniedEnvelope)
 	}
+	t.Logf("SDK sources matching the envelope: %v", matches)
 }

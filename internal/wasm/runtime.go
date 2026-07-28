@@ -21,6 +21,19 @@ import (
 	"github.com/torana-edge/torana-edge/internal/metrics"
 )
 
+// permissionDeniedJSON is what a guest receives when it calls a host function
+// it was not granted.
+//
+// It is a WIRE CONSTANT, not an implementation detail: every SDK matches it
+// verbatim to tell a refusal from an ordinary empty result, and
+// already-published plugin binaries cannot be recompiled from this repository.
+// Changing the bytes breaks them silently — the plugin carries on as though the
+// call had succeeded.
+//
+// Named rather than repeated so a second denial site cannot drift from the
+// first.
+const permissionDeniedJSON = `{"status":"error","message":"permission denied"}`
+
 // ============================================================================
 // Plugin — WASM module with instance pooling and permission enforcement
 // ============================================================================
@@ -710,7 +723,7 @@ func (r *Runtime) installHostFunctions() {
 		}
 		if p == nil || !p.hasGrant(perm) {
 			log.Printf("[wasm] permission denied: %s tried %s", mod.Name(), perm)
-			return writeStr(ctx, mod, `{"status":"error","message":"permission denied"}`)
+			return writeStr(ctx, mod, permissionDeniedJSON)
 		}
 
 		var res string
