@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"strings"
 
 	"github.com/torana-edge/torana-edge/internal/engine"
+	openaifmt "github.com/torana-edge/torana-edge/internal/format/openai"
 	"github.com/torana-edge/torana-edge/internal/plugin"
 )
 
@@ -104,21 +106,30 @@ func objArgs(parent map[string]any, key string) (string, func(string) error) {
 
 // --- openai: choices[].message.{content, tool_calls[].function.{name,arguments}} ---
 
+// extractOpenAI handles both OpenAI response shapes. Chat Completions carries
+// the reply in choices[].message; the Responses API carries it in a flat
+// output[] of typed items and names its token fields differently.
+//
+// Reading only the Chat shape meant a non-streaming Responses call was
+// accounted at zero tokens and its content was invisible to response hooks —
+// both silently, since an absent field is indistinguishable from a provider
+// that reported nothing. The streaming path has understood the Responses shape
+// all along, so the two paths disagreed depending only on whether the client
+// asked for a stream.
 func extractOpenAI(body map[string]any) responseRefs {
+	usage, _ := body["usage"].(map[string]any)
 	refs := responseRefs{
 		model: asString(body["model"]),
-		usage: usageFrom(body, "usage", "prompt_tokens", "completion_tokens", "", ""),
+		// Field names live in the openai format package, shared with the
+		// streaming reader, so the two cannot drift apart again.
+		usage: openaifmt.ReadUsage(usage),
 	}
-	// OpenAI nests the cached count: usage.prompt_tokens_details.cached_tokens.
-	if refs.usage != nil {
-		if usage, ok := body["usage"].(map[string]any); ok {
-			if details, ok := usage["prompt_tokens_details"].(map[string]any); ok {
-				refs.usage.CacheReadTokens = asInt(details["cached_tokens"])
-			} else {
-				refs.usage.CacheReadTokens = asInt(usage["prompt_cache_hit_tokens"])
-			}
-		}
+
+	if output, ok := body["output"].([]any); ok {
+		extractResponsesOutput(&refs, output)
+		return refs
 	}
+
 	choices, _ := body["choices"].([]any)
 	for ci, c := range choices {
 		choice, _ := c.(map[string]any)
@@ -160,6 +171,84 @@ func extractOpenAI(body map[string]any) responseRefs {
 }
 
 // --- anthropic: content[] blocks (text | tool_use{id,name,input}) ---
+
+// extractResponsesOutput builds references into a Responses API output[] array.
+// Items are typed and flat rather than nested under a choice: assistant text
+// arrives as a "message" whose content is a list of output_text parts, and each
+// tool call is its own "function_call" item.
+func extractResponsesOutput(refs *responseRefs, output []any) {
+	// Every output_text part, not just the first. A Responses reply routinely
+	// carries several, and binding only the first left the rest read-only —
+	// so a redaction plugin would report success having rewritten one
+	// paragraph of a multi-part answer.
+	var textParts []map[string]any
+
+	for _, item := range output {
+		it, _ := item.(map[string]any)
+		if it == nil {
+			continue
+		}
+		switch asString(it["type"]) {
+		case "message":
+			parts, _ := it["content"].([]any)
+			for _, p := range parts {
+				part, _ := p.(map[string]any)
+				if part == nil || asString(part["type"]) != "output_text" {
+					continue
+				}
+				textParts = append(textParts, part)
+			}
+		case "function_call": //nolint:dupl // distinct wire shape from the Chat path
+			itRef := it
+			// The Responses wire format carries arguments as a JSON STRING.
+			// objArgs writes back a decoded object, which is the Chat shape —
+			// so using it here produced a body the client cannot parse. It is
+			// only reached when "arguments" is absent or not a string, and even
+			// then the setter must write a string.
+			args := "{}"
+			if raw, ok := itRef["arguments"].(string); ok {
+				args = raw
+			} else if v, present := itRef["arguments"]; present && v != nil {
+				if b, err := json.Marshal(v); err == nil {
+					args = string(b)
+				}
+			}
+			setArgs := func(s string) error {
+				if !json.Valid([]byte(s)) {
+					return fmt.Errorf("tool call arguments are not valid JSON")
+				}
+				itRef["arguments"] = s
+				return nil
+			}
+			refs.toolCalls = append(refs.toolCalls, toolCallRef{
+				id:       asString(itRef["call_id"]),
+				name:     asString(itRef["name"]),
+				argsJSON: args,
+				setName:  func(s string) { itRef["name"] = s },
+				setArgs:  setArgs,
+			})
+		}
+	}
+	if len(textParts) == 0 {
+		return
+	}
+	// content is the joined text so a plugin sees the whole reply; setContent
+	// writes the replacement into the first part and blanks the rest, which is
+	// the only faithful way to express "this text is now that text" across a
+	// list of parts.
+	joined := make([]string, 0, len(textParts))
+	for _, part := range textParts {
+		joined = append(joined, asString(part["text"]))
+	}
+	refs.content = strings.Join(joined, "")
+	parts := textParts
+	refs.setContent = func(replacement string) {
+		parts[0]["text"] = replacement
+		for _, part := range parts[1:] {
+			part["text"] = ""
+		}
+	}
+}
 
 func extractAnthropic(body map[string]any) responseRefs {
 	refs := responseRefs{

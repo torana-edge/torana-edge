@@ -18,11 +18,11 @@ type StreamAdapter struct{}
 // --- wire types for parse ---------------------------------------------------
 
 type sseChunk struct {
-	ID      string      `json:"id,omitempty"`
-	Object  string      `json:"object,omitempty"`
-	Choices []sseChoice `json:"choices,omitempty"`
-	Usage   *sseUsage   `json:"usage,omitempty"`
-	Error   *sseError   `json:"error,omitempty"`
+	ID      string         `json:"id,omitempty"`
+	Object  string         `json:"object,omitempty"`
+	Choices []sseChoice    `json:"choices,omitempty"`
+	Usage   map[string]any `json:"usage,omitempty"`
+	Error   *sseError      `json:"error,omitempty"`
 
 	// Responses API fields
 	Type     string           `json:"type,omitempty"`
@@ -40,38 +40,14 @@ type responsesItem struct {
 }
 
 type responsesObject struct {
-	Status string          `json:"status,omitempty"`
-	Usage  *responsesUsage `json:"usage,omitempty"`
+	Status string         `json:"status,omitempty"`
+	Usage  map[string]any `json:"usage,omitempty"`
 }
 
-// responsesUsage is deliberately separate from Chat Completions usage: the
-// Responses API calls these fields input/output tokens and nests prompt-cache
-// details under input_tokens_details.
-type responsesUsage struct {
-	InputTokens        int                          `json:"input_tokens"`
-	OutputTokens       int                          `json:"output_tokens"`
-	InputTokensDetails *responsesInputTokensDetails `json:"input_tokens_details,omitempty"`
-}
-
-type responsesInputTokensDetails struct {
-	CachedTokens     int `json:"cached_tokens"`
-	CacheWriteTokens int `json:"cache_write_tokens"`
-}
-
-type sseUsage struct {
-	PromptTokens          int                     `json:"prompt_tokens"`
-	CompletionTokens      int                     `json:"completion_tokens"`
-	TotalTokens           int                     `json:"total_tokens"`
-	PromptTokensDetails   *ssePromptTokensDetails `json:"prompt_tokens_details,omitempty"`
-	PromptCacheHitTokens  int                     `json:"prompt_cache_hit_tokens,omitempty"`
-	PromptCacheMissTokens int                     `json:"prompt_cache_miss_tokens,omitempty"`
-}
-
-// ssePromptTokensDetails carries the automatic prompt-cache hit count
-// (cached_tokens is a subset of prompt_tokens, billed at a discount).
-type ssePromptTokensDetails struct {
-	CachedTokens int `json:"cached_tokens"`
-}
+// Both usage fields above are raw maps on purpose: OpenAI's two variants name
+// their token fields differently, and ReadUsage in usage.go owns that mapping
+// for the streaming and non-streaming paths alike. Typed structs here meant the
+// field names existed in two places, and one of them fell behind.
 
 type sseChoice struct {
 	Index        int      `json:"index"`
@@ -176,16 +152,7 @@ func (s *StreamAdapter) parseStream(body io.Reader, ch chan<- engine.StreamEvent
 
 		// Usage arrives on the final chunk (empty choices) when the client —
 		// or the proxy on its behalf — asked for stream_options.include_usage.
-		if chunk.Usage != nil && (chunk.Usage.PromptTokens > 0 || chunk.Usage.CompletionTokens > 0) {
-			u := &engine.StreamUsage{
-				InputTokens:  chunk.Usage.PromptTokens,
-				OutputTokens: chunk.Usage.CompletionTokens,
-			}
-			if d := chunk.Usage.PromptTokensDetails; d != nil {
-				u.CacheReadTokens = d.CachedTokens
-			} else {
-				u.CacheReadTokens = chunk.Usage.PromptCacheHitTokens
-			}
+		if u := ReadUsage(chunk.Usage); u != nil {
 			ch <- engine.StreamEvent{Usage: u}
 		}
 
@@ -332,18 +299,8 @@ func (s *StreamAdapter) parseResponsesEvent(chunk sseChunk, ch chan<- engine.Str
 					FinishReason: "stop",
 				}
 			}
-			if chunk.Response.Usage != nil {
-				u := &engine.StreamUsage{
-					InputTokens:  chunk.Response.Usage.InputTokens,
-					OutputTokens: chunk.Response.Usage.OutputTokens,
-				}
-				if details := chunk.Response.Usage.InputTokensDetails; details != nil {
-					u.CacheReadTokens = details.CachedTokens
-					u.CacheWriteTokens = details.CacheWriteTokens
-				}
-				ch <- engine.StreamEvent{
-					Usage: u,
-				}
+			if u := ReadUsage(chunk.Response.Usage); u != nil {
+				ch <- engine.StreamEvent{Usage: u}
 			}
 		}
 

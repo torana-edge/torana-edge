@@ -136,35 +136,34 @@ const (
 	variantResponses
 )
 
-// detectVariant probes the JSON body to determine which API variant it is.
-// It returns variantResponses if the body contains "object":"response" or a
-// top-level "input" field without "messages". Otherwise it returns
-// variantChat.
+// detectVariant decides which OpenAI API variant a body belongs to.
+//
+// It decodes rather than scanning for substrings. The scan it replaces was
+// unanchored, so it could not tell a top-level key from the same text inside a
+// message: a Responses request whose prompt merely contained the characters
+// "messages" — a coding agent pasting a request body, say, which is exactly
+// Torana's traffic — was routed to the Chat parser and mis-parsed. The keys
+// that decide this are top-level, so the check must be too.
+//
+// Only the three deciding keys are bound; everything else stays raw.
 func detectVariant(raw []byte) variant {
-	// Fast heuristic: look for "object":"response" literal.
-	if containsKey(raw, `"object":"response"`) || containsKey(raw, `"object": "response"`) {
+	var probe struct {
+		Object   string          `json:"object"`
+		Input    json.RawMessage `json:"input"`
+		Messages json.RawMessage `json:"messages"`
+	}
+	if err := json.Unmarshal(raw, &probe); err != nil {
+		// Not a decodable JSON object. Chat is the historical default, and the
+		// parser reports its own error more usefully than a guess here would.
+		return variantChat
+	}
+	if probe.Object == "response" {
 		return variantResponses
 	}
-	// Check for top-level "input" without "messages".
-	if containsKey(raw, `"input"`) && !containsKey(raw, `"messages"`) {
+	if len(probe.Input) > 0 && len(probe.Messages) == 0 {
 		return variantResponses
 	}
 	return variantChat
-}
-
-// containsKey does a fast substring check. It is deliberately loose (does not
-// parse JSON) because the bodies are small and the patterns are distinctive.
-func containsKey(raw []byte, key string) bool {
-	return len(raw) > 0 && bytesContains(raw, key)
-}
-
-func bytesContains(s []byte, sub string) bool {
-	for i := 0; i <= len(s)-len(sub); i++ {
-		if string(s[i:i+len(sub)]) == sub {
-			return true
-		}
-	}
-	return false
 }
 
 func marshalResponses(chat *engine.ChatRequest) ([]byte, error) {
