@@ -63,14 +63,22 @@ func newPluginPipeline(t *testing.T, pluginDir string, order ...string) *plugin.
 }
 
 // TestJSONResponseHooksAllFormats: tool-call arguments are routed through
-// the plugin pipeline (KV arrays reversed by schema_translator) for every
+// the plugin pipeline for every
 // provider format, while sibling fields (id, usage, finish/stop reasons,
 // unknown extras) survive untouched.
 func TestJSONResponseHooksAllFormats(t *testing.T) {
-	// Asserts schema_translator reverses its KV-array mutation on the
-	// response side. That is the plugin's behaviour, not the host's.
-	bundles := officialBundlesDir(t)
-	requireBundle(t, bundles, "schema_translator")
+	// This is host mechanics, not plugin behaviour, and gating it on a real
+	// plugin took the ONLY cross-format test of runJSONResponseHooks out of
+	// this repository's suite — including for the code path the Responses
+	// accounting work rewrites.
+	//
+	// What it asserts is that the host can locate a tool call inside four
+	// different provider body shapes, hand its arguments to a plugin, write the
+	// result back, and leave every sibling field untouched. The plugin only has
+	// to change a value; a fixture with a fixed substitution pins that far more
+	// precisely than a real one whose output depends on its own logic.
+	requireWASM(t, fixturesDir+"/test-mutator/plugin.wasm")
+	bundles := fixturesDir
 
 	kvArgsStr := `{"env":[{"key":"A","value":"1"}]}` // openai: JSON string
 	kvArgsObj := `{"env":[{"key":"A","value":"1"}]}` // object formats: raw object
@@ -140,8 +148,7 @@ func TestJSONResponseHooksAllFormats(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.format, func(t *testing.T) {
-			pp := newPluginPipeline(t, bundles, "schema_translator")
-			registerWriteEnvMap(t, pp, 1)
+			pp := newPluginPipeline(t, bundles, "test-mutator")
 
 			out, err := runJSONResponseHooks(context.Background(), pp, 1, tc.format, nil, []byte(tc.body))
 			if err != nil {
@@ -153,7 +160,10 @@ func TestJSONResponseHooksAllFormats(t *testing.T) {
 				t.Fatalf("output not valid JSON: %v", err)
 			}
 
-			// Args reversed by the plugin.
+			// The host located the tool call, gave its arguments to the
+			// plugin, and wrote the replacement back into this format's own
+			// body shape. The fixture substitutes fixed bytes, so anything
+			// else here is the host reading or writing the wrong place.
 			refs := extractResponse(tc.format, body)
 			if len(refs.toolCalls) != 1 {
 				t.Fatalf("expected 1 tool call, got %d", len(refs.toolCalls))
@@ -162,9 +172,8 @@ func TestJSONResponseHooksAllFormats(t *testing.T) {
 			if err := json.Unmarshal([]byte(refs.toolCalls[0].argsJSON), &args); err != nil {
 				t.Fatalf("args not valid JSON: %v (%q)", err, refs.toolCalls[0].argsJSON)
 			}
-			env, ok := args["env"].(map[string]any)
-			if !ok || env["A"] != "1" {
-				t.Fatalf("expected env reversed to object, got %v", args)
+			if args["mutated_by"] != "test-mutator" {
+				t.Fatalf("the plugin's replacement did not reach this format's body: %v", args)
 			}
 
 			// Sibling fields preserved.

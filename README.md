@@ -34,15 +34,19 @@ CLI (`agy`)** — Torana also offers an optional TLS-terminating MITM ingress. S
    cp config.example.json config.json
    ```
 
-2. Build the WASM plugins. **Plugin binaries are build artifacts — they are never
-   committed to git** (`*.wasm` is gitignored). Always rebuild after pulling or
-   editing plugin sources:
+2. Install the plugins you want. They live in
+   [torana-plugins](https://github.com/torana-edge/torana-plugins), not in this
+   repository, and `torana plugin install` fetches the source, builds it
+   locally and prints the digest — so nothing runs that you could not have read:
    ```bash
-   make plugins
+   # The official set:
+   go run ./cmd/torana plugin install --official
 
-   # Or a single plugin via the unified Torana CLI:
+   # Or one at a time, from any repository:
    go run ./cmd/torana plugin install github.com/torana-edge/torana-plugins/plugins/schema_translator
    ```
+   **Plugin binaries are build artifacts and are never committed** (`*.wasm` is
+   gitignored), so rebuild after pulling or editing plugin sources.
 
 3. Run the proxy:
    ```bash
@@ -147,13 +151,6 @@ torana-edge/
 │   ├── provider/                   # Config parsing, URI resolution
 │   ├── proxy/                      # Reverse proxy with format dispatch
 │   └── wasm/                       # Wazero runtime integration
-│   ├── auth/
-│   ├── compactor/
-│   ├── intent/
-│   ├── keyword_compactor/
-│   ├── otel/
-│   ├── pii/
-│   └── schema_translator/
 ├── config.example.json             # Example configuration
 └── go.mod
 ```

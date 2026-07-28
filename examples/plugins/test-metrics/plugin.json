@@ -11,6 +11,10 @@
     {
       "name": "run_before_request",
       "priority": 100
+    },
+    {
+      "name": "run_after_response",
+      "priority": 100
     }
   ],
   "permissions": [
