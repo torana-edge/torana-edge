@@ -65,34 +65,6 @@ var supportedFormats = map[string]struct{}{
 }
 
 // Validate rejects configuration that cannot be routed deterministically.
-// UnauthenticatedFallbacks returns provider names that are used as a failover
-// target, declare no credential of their own, and have not opted into
-// forwarding the caller's.
-//
-// Such a fallback receives an unauthenticated request and will almost certainly
-// answer 401 — which is not retryable, so it becomes the caller's response and
-// failover silently makes things worse than no failover at all. The operator
-// should hear about that at startup rather than the first time a primary
-// returns 429.
-func (c Config) UnauthenticatedFallbacks() []string {
-	var names []string
-	seen := make(map[string]bool)
-	for _, p := range c.Providers {
-		for _, fbName := range p.Fallback {
-			fb, ok := c.Providers[fbName]
-			if !ok || seen[fbName] {
-				continue
-			}
-			if fb.APIKeyEnv == "" && fb.APIKeyEnc == "" && !fb.ForwardCallerCredential {
-				seen[fbName] = true
-				names = append(names, fbName)
-			}
-		}
-	}
-	sort.Strings(names)
-	return names
-}
-
 func (c Config) Validate() error {
 	if c.Port <= 0 || c.Port > 65535 {
 		return fmt.Errorf("port must be between 1 and 65535")
@@ -157,6 +129,34 @@ func (c Config) Validate() error {
 		}
 	}
 	return nil
+}
+
+// UnauthenticatedFallbacks returns provider names that are used as a failover
+// target, declare no credential of their own, and have not opted into
+// forwarding the caller's.
+//
+// Such a fallback receives an unauthenticated request and will almost certainly
+// answer 401 — which is not retryable, so it becomes the caller's response and
+// failover silently makes things worse than no failover at all. The operator
+// should hear about that at startup rather than the first time a primary
+// returns 429.
+func (c Config) UnauthenticatedFallbacks() []string {
+	var names []string
+	seen := make(map[string]bool)
+	for _, p := range c.Providers {
+		for _, fbName := range p.Fallback {
+			fb, ok := c.Providers[fbName]
+			if !ok || seen[fbName] {
+				continue
+			}
+			if fb.APIKeyEnv == "" && fb.APIKeyEnc == "" && !fb.ForwardCallerCredential {
+				seen[fbName] = true
+				names = append(names, fbName)
+			}
+		}
+	}
+	sort.Strings(names)
+	return names
 }
 
 // PricingFor returns an explicitly configured exact-model rate, falling back
