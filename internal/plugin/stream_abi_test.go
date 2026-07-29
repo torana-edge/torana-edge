@@ -16,7 +16,11 @@ import (
 // requireWASM skips the test locally when the plugin binary hasn't been
 // built, but fails hard in CI (TORANA_E2E=1) so missing binaries can never
 // silently disable coverage again.
-func requireWASM(t *testing.T, path string) {
+// These take testing.TB rather than *testing.T so the benchmarks in
+// bench_test.go can build a pipeline through exactly the same path the tests
+// do — a benchmark measuring a differently-constructed pipeline would not be
+// measuring what ships.
+func requireWASM(t testing.TB, path string) {
 	t.Helper()
 	if _, err := os.Stat(path); err != nil {
 		if os.Getenv("TORANA_E2E") != "" {
@@ -26,14 +30,14 @@ func requireWASM(t *testing.T, path string) {
 	}
 }
 
-func newTestPipeline(t *testing.T, dir string, order []string) *PluginPipeline {
+func newTestPipeline(t testing.TB, dir string, order []string) *PluginPipeline {
 	t.Helper()
 	return newTestPipelineWith(t, dir, order, cache.NewLocalCache(time.Minute), nil)
 }
 
 // newTestPipelineWith exposes the plugin cache store to the test (for
 // asserting what plugins wrote cross-request) and per-plugin config blobs.
-func newTestPipelineWith(t *testing.T, dir string, order []string, store cache.Store, cfg map[string]json.RawMessage) *PluginPipeline {
+func newTestPipelineWith(t testing.TB, dir string, order []string, store cache.Store, cfg map[string]json.RawMessage) *PluginPipeline {
 	t.Helper()
 	rt := wasm.NewRuntimeWithCache(context.Background(), store)
 	t.Cleanup(func() {
