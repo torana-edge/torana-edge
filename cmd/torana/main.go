@@ -37,10 +37,9 @@ var version = "dev"
 // usage documents the commands and every environment variable Torana reads.
 //
 // Both `torana --help` and `torana version` used to exit as unknown commands,
-// which is the first thing anyone types. The environment table matters as much:
-// TORANA_BIND in particular has caught people out, because a container started
-// with `docker run -p 8080:8080` looks dead without it — Torana binds loopback
-// by default, deliberately, since the control plane is on the same listener.
+// which is the first thing anyone types. The environment table matters as much,
+// because until now the only way to learn that TORANA_BIND or TORANA_DATA_DIR
+// existed was to read main().
 func usage(w io.Writer) {
 	fmt.Fprint(w, `torana — a local-first LLM reverse proxy for AI coding agents
 
@@ -57,9 +56,10 @@ Environment:
                            (default: os.UserConfigDir()/torana)
   TORANA_PORT              listen port, overriding the config
   TORANA_BIND              bind address (default: 127.0.0.1)
-                           Set 0.0.0.0 in a container, or the published port
-                           will appear dead. Loopback is the default because
-                           the control plane shares this listener.
+                           Loopback by default because the control plane shares
+                           this listener and can approve plugins. The control
+                           plane also requires a loopback SOURCE address, so
+                           binding wider exposes the proxy, not the dashboard.
   TORANA_DEFAULT_PROVIDER  provider for requests that match no /provider/ prefix
   TORANA_PLUGINS_DIR       plugin directory for the plugin subcommands
 
