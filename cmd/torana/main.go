@@ -7,6 +7,8 @@ package main
 
 import (
 	"context"
+	"fmt"
+	"io"
 	"log"
 	"os"
 	"os/signal"
@@ -32,6 +34,40 @@ import (
 // gates while continuing to enforce the plugin ABI and capability contract.
 var version = "dev"
 
+// usage documents the commands and every environment variable Torana reads.
+//
+// Both `torana --help` and `torana version` used to exit as unknown commands,
+// which is the first thing anyone types. The environment table matters as much:
+// TORANA_BIND in particular has caught people out, because a container started
+// with `docker run -p 8080:8080` looks dead without it — Torana binds loopback
+// by default, deliberately, since the control plane is on the same listener.
+func usage(w io.Writer) {
+	fmt.Fprint(w, `torana — a local-first LLM reverse proxy for AI coding agents
+
+Usage:
+  torana [serve]                 run the proxy (default)
+  torana plugin <command>        author, build and install plugins
+  torana conversations <command> inspect recorded conversations
+  torana version                 print the version
+  torana help                    print this message
+
+Environment:
+  TORANA_CONFIG            seed config path (default: config.json)
+  TORANA_DATA_DIR          managed store location
+                           (default: os.UserConfigDir()/torana)
+  TORANA_PORT              listen port, overriding the config
+  TORANA_BIND              bind address (default: 127.0.0.1)
+                           Set 0.0.0.0 in a container, or the published port
+                           will appear dead. Loopback is the default because
+                           the control plane shares this listener.
+  TORANA_DEFAULT_PROVIDER  provider for requests that match no /provider/ prefix
+  TORANA_PLUGINS_DIR       plugin directory for the plugin subcommands
+
+The control plane is at http://127.0.0.1:<port>/_torana/ and is reachable from
+loopback only. Plugins never load until you approve their digest there.
+`)
+}
+
 func main() {
 	if len(os.Args) > 1 && os.Args[1] == "plugin" {
 		if err := plugincmd.Run(os.Args[1:], os.Stdout, os.Stderr); err != nil {
@@ -47,9 +83,20 @@ func main() {
 		}
 		return
 	}
-	if len(os.Args) > 1 && os.Args[1] != "serve" {
-		log.Printf("unknown command %q (run without arguments or use: torana serve | torana plugin ... | torana conversations)", os.Args[1])
-		os.Exit(2)
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "version", "--version", "-v":
+			fmt.Println(version)
+			return
+		case "help", "--help", "-h":
+			usage(os.Stdout)
+			return
+		case "serve":
+		default:
+			fmt.Fprintf(os.Stderr, "unknown command %q\n\n", os.Args[1])
+			usage(os.Stderr)
+			os.Exit(2)
+		}
 	}
 
 	// --- configuration --------------------------------------------------

@@ -167,9 +167,22 @@ torana-edge/
 
 | Variable | Default | Description |
 |---|---|---|
-| `TORANA_CONFIG` | `config.json` | Path to config file |
+| `TORANA_CONFIG` | `config.json` | Path to the seed config file |
+| `TORANA_DATA_DIR` | `os.UserConfigDir()/torana` | Where the managed store lives |
 | `TORANA_PORT` | `8080` | Listen port (overrides config file) |
+| `TORANA_BIND` | `127.0.0.1` | Bind address — **set `0.0.0.0` in a container** |
 | `TORANA_DEFAULT_PROVIDER` | (none) | Provider name for non-prefixed paths |
+| `TORANA_PLUGINS_DIR` | `./plugins` | Plugin directory for the `torana plugin` commands |
+
+`torana help` prints the same table, so it cannot drift out of the binary.
+
+**On `TORANA_BIND`:** Torana binds loopback by default because the control
+plane shares the same listener, and that plane can rewrite config and approve
+plugins. In a container that means `docker run -p 8080:8080` publishes a port
+that answers nothing. The shipped `Dockerfile` sets `TORANA_BIND=0.0.0.0` for
+you, taking the container boundary as the isolation instead; if you run the
+binary directly and want it reachable off-host, set it yourself and put
+something in front of it.
 
 ## Development
 
