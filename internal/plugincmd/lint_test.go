@@ -636,8 +636,12 @@ func init() { hooks.Register() }
 `)
 	// The linter resolves local imports against the module path, so the
 	// subpackage is only reachable if go.mod says who "example.com/sub" is.
+	//
+	// The trailing comment is deliberate and load-bearing: valid go.mod syntax
+	// that a hand-rolled parser reads as part of the path, which then matches
+	// no import and silently hides every subpackage.
 	if err := os.WriteFile(filepath.Join(dir, "go.mod"),
-		[]byte("module example.com/sub\n\ngo 1.25.0\n"), 0o600); err != nil {
+		[]byte("module example.com/sub // the plugin\n\ngo 1.25.0\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	sub := filepath.Join(dir, "internal", "hooks")

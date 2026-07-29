@@ -13,6 +13,8 @@ import (
 	"strconv"
 	"strings"
 
+	"golang.org/x/mod/modfile"
+
 	"github.com/torana-edge/torana-edge/internal/plugin"
 	sdk "github.com/torana-edge/torana-plugin-sdk"
 )
@@ -434,23 +436,24 @@ func localImportDir(root, modulePath, importPath string) (string, bool) {
 	return filepath.Join(root, filepath.FromSlash(rel)), true
 }
 
-// modulePathOf reads the module line from the plugin's go.mod. A plugin without
+// modulePathOf reads the module path from the plugin's go.mod. A plugin without
 // one has no local packages to reach, so its root is the whole graph.
+//
+// Parsed with modfile rather than by hand. A hand-rolled "strip the module
+// prefix and trim" reads `module example.com/plug // the plugin` as a path
+// including the comment, which then matches no import — and the linter silently
+// stops seeing every subpackage. That is the worst possible failure for this
+// command: it reports success on a plugin it never really examined.
 func modulePathOf(dir string) (string, error) {
-	raw, err := os.ReadFile(filepath.Join(dir, "go.mod"))
+	path := filepath.Join(dir, "go.mod")
+	raw, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return "", nil
 		}
 		return "", fmt.Errorf("read go.mod: %w", err)
 	}
-	for _, line := range strings.Split(string(raw), "\n") {
-		line = strings.TrimSpace(line)
-		if rest, ok := strings.CutPrefix(line, "module"); ok {
-			return strings.TrimSpace(rest), nil
-		}
-	}
-	return "", nil
+	return modfile.ModulePath(raw), nil
 }
 
 func scanFile(fset *token.FileSet, file *ast.File, u *usage) {
