@@ -12,54 +12,73 @@ built to answer is recorded below.
 
 ## Should the host verify what each plugin changed?
 
-**Yes. It costs 2–4% of pipeline time, which is ~0.03% of end-to-end request
-latency.**
+**Yes. It costs 2–10% of pipeline time, worst case 1.6 ms absolute, which is
+well under 0.1% of end-to-end request latency.**
 
 Today `RunBeforeRequest` converts once, marshals once, then chains raw bytes
 from plugin to plugin without looking inside (`discovery.go:942-967`). Enforcing
-write grants means unmarshalling each plugin's output so the host can
-fingerprint its sections and compare them against the previously accepted
-request — so the added cost is one `proto.Unmarshal` per plugin.
+write grants means, per plugin, unmarshalling that plugin's output and
+fingerprinting each grantable section so it can be compared against the
+previously accepted request.
+
+`BenchmarkWriteGrantVerification` measures **both halves** — the decode and the
+fingerprinting — against a prototype verifier. That matters: the decode alone is
+under half the cost.
+
+| | msgs=1 | msgs=20 | msgs=100 |
+|---|---:|---:|---:|
+| `proto.Unmarshal` only | 2.9 µs | 26 µs | 134 µs |
+| **decode + fingerprint** | **10.5 µs** | **56 µs** | **311 µs** |
 
 Measured on an AMD Ryzen 7 4800H, Go 1.26, `-benchtime=100x` (pipeline) and
 `2000x` (serialization):
 
 | plugins | msgs | pipeline | verification | overhead |
 |--------:|-----:|---------:|-------------:|---------:|
-| 1 | 1 | 0.33 ms | 0.006 ms | 1.7% |
-| 1 | 100 | 4.30 ms | 0.132 ms | 3.1% |
-| 3 | 20 | 2.99 ms | 0.100 ms | 3.4% |
-| 3 | 100 | 8.96 ms | 0.396 ms | 4.4% |
-| 5 | 20 | 4.93 ms | 0.167 ms | 3.4% |
-| 5 | 100 | 16.67 ms | 0.660 ms | 4.0% |
+| 1 | 1 | 0.44 ms | 0.010 ms | 2.4% |
+| 1 | 100 | 4.33 ms | 0.311 ms | 7.2% |
+| 3 | 20 | 2.84 ms | 0.169 ms | 5.9% |
+| 3 | 100 | 8.98 ms | 0.934 ms | 10.4% |
+| 5 | 20 | 5.02 ms | 0.281 ms | 5.6% |
+| 5 | 100 | 16.55 ms | 1.557 ms | 9.4% |
 
-Worst case is 0.66 ms of verification on a request whose upstream LLM call takes
-2–30 seconds. Fully-granted plugins skip the check entirely via the fast path,
-so most pipelines pay less than this.
+Worst case is 1.6 ms on a request whose upstream call takes 2–30 seconds.
+Fully-granted plugins skip the check via the fast path, so most pipelines pay
+less.
+
+The fingerprint prototype uses FNV-1a, the cheapest credible choice, so these
+are a lower bound on the hashing. A stronger hash would move the second row of
+the first table, not the conclusion.
 
 ## The WASM boundary dominates everything else
 
-The more useful finding, and the one that should shape future optimisation work:
+`BenchmarkBoundaryCrossing` uses fixtures that do nothing but return
+pass-through, so the delta between 1, 2 and 3 plugins is crossing cost with no
+guest work mixed in. The mixed pipeline cannot give this — its fixtures scan
+messages, emit metrics and make cache calls, so its plugin-count delta measures
+crossings *and* guest work together.
 
-| | 1 msg | 100 msgs |
-|---|---|---|
-| Marginal cost per extra plugin | ~230 µs | ~3.1 ms |
-| Host-side serialization for that plugin | ~8 µs | ~200 µs |
+| | 1 plugin | 2 plugins | 3 plugins | marginal |
+|---|---:|---:|---:|---:|
+| msgs=100 | 2.40 ms | 4.65 ms | 7.27 ms | **~2.4 ms per plugin** |
+| msgs=1 | 179 µs | 243 µs | 486 µs | did not stabilise |
 
-Each plugin crossing costs roughly 230 µs even for a single-message request that
-does almost nothing — that is instantiation, memory copy and guest-side decode,
-not encoding. Host-side serialization is 3–6% of the marginal cost of adding a
-plugin.
+The 100-message series is clean and linear. The single-message series did not
+converge across runs (deltas ranged from 60 µs to 240 µs), so **no per-crossing
+figure is claimed for small payloads** — it is somewhere in that range, and the
+benchmark as written cannot narrow it.
 
-Two consequences:
+What does hold: at 100 messages a crossing costs ~2.4 ms, while the entire
+host-side conversion for that request — `pbconv` plus `proto.Marshal`, run once
+— is ~137 µs. Two consequences:
 
 1. **Optimising host-side encoding is not worth doing.** `pbconv` is the most
-   expensive host-side step (it runs `json.Marshal` per message, per tool call
-   and per tool — `pbconv.go:33-84`), and at 100 messages it is 69 µs against a
-   16.7 ms pipeline.
-2. **Plugin count is the thing that costs.** Five plugins are ~4× one plugin.
-   Anything that reduces crossings — merging hooks, skipping plugins that
-   declare no interest in a request — is worth far more than encoding work.
+   expensive host-side step (`json.Marshal` per message, per tool call and per
+   tool — `pbconv.go:33-84`), and at 100 messages it is 69 µs against a 16.5 ms
+   five-plugin pipeline: 0.4%.
+2. **Plugin count is what costs.** Anything that reduces crossings — skipping
+   plugins with no interest in a request, short-circuiting on a block verdict —
+   is worth far more than encoding work.
 
 ## Streaming is where the cost actually lives
 
@@ -105,6 +124,9 @@ plugins, a 1000-token streamed reply, two stream plugins:
 | **total CPU added by the plugin pipeline** | **~91 ms** |
 | against an upstream call of | 10–20 s |
 | **share of end-to-end** | **~0.5–0.9%** |
+
+Write-grant verification would add ~0.2 ms to that (three plugins, 20 messages),
+which does not move the figure.
 
 This is the plugin pipeline only. It excludes format adapter parsing, the HTTP
 proxy itself, and response-side hooks, none of which are benchmarked yet.

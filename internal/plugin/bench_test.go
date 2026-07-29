@@ -2,7 +2,10 @@ package plugin
 
 import (
 	"context"
+	"encoding/binary"
 	"fmt"
+	"hash/fnv"
+	"math"
 	"strings"
 	"testing"
 
@@ -19,10 +22,12 @@ import (
 //
 // Today RunBeforeRequest converts once, marshals once, and then chains raw
 // bytes from plugin to plugin without ever looking inside (discovery.go:942-967).
-// Verification means unmarshalling each plugin's output to fingerprint it, so
-// the added cost is N unmarshals per request. BenchmarkVerificationUnmarshal
-// measures that directly; BenchmarkRunBeforeRequest measures what it would be
-// added to. The ratio between them is the decision.
+// Verification means unmarshalling each plugin's output AND fingerprinting its
+// sections, so BenchmarkWriteGrantVerification measures both halves against a
+// prototype verifier — the decode alone is under half the real cost.
+// BenchmarkRunBeforeRequest measures what it would be added to, and
+// BenchmarkBoundaryCrossing isolates one WASM crossing using fixtures that do
+// no guest work at all.
 //
 // Run:
 //
@@ -157,11 +162,8 @@ func BenchmarkProtoMarshal(b *testing.B) {
 	}
 }
 
-// BenchmarkVerificationUnmarshal is the cost the write-grant design adds:
-// one proto.Unmarshal of a plugin's output, per plugin, so the host can
-// fingerprint its sections and compare them against the previously accepted
-// request. Multiply this by the plugin count and compare against
-// BenchmarkRunBeforeRequest for the same size.
+// BenchmarkVerificationUnmarshal is the decode half of the write-grant check,
+// measured alone so the two halves can be told apart.
 func BenchmarkVerificationUnmarshal(b *testing.B) {
 	for _, n := range benchSizes {
 		raw, err := proto.Marshal(pbconv.ToPBChatRequest(benchConversation(n)))
@@ -181,6 +183,157 @@ func BenchmarkVerificationUnmarshal(b *testing.B) {
 	}
 }
 
+// sectionPrints is a prototype of the write-grant verifier's fingerprints —
+// one per grantable section, so a section whose print moved requires the
+// matching grant.
+//
+// This is a benchmark prototype, not the shipping implementation: it exists so
+// the cost figure covers the work the verifier actually does, rather than only
+// the proto.Unmarshal in front of it. FNV-1a is the cheapest credible choice
+// and therefore the fairest lower bound on the hashing itself.
+type sectionPrints struct {
+	messagesUser      uint64
+	messagesAssistant uint64
+	messagesSystem    uint64
+	messagesTool      uint64
+	tools             uint64
+	model             uint64
+	params            uint64
+}
+
+func fingerprintSections(req *pb.ChatRequest) sectionPrints {
+	var p sectionPrints
+	h := fnv.New64a()
+
+	roleHash := map[string]*uint64{
+		"user":      &p.messagesUser,
+		"assistant": &p.messagesAssistant,
+		"system":    &p.messagesSystem,
+		"tool":      &p.messagesTool,
+	}
+	// One accumulator per role, folded in message order so a reordering is
+	// detected as well as an edit.
+	acc := map[string]uint64{}
+	for _, m := range req.Messages {
+		h.Reset()
+		_, _ = h.Write([]byte(m.Role))
+		_, _ = h.Write([]byte(m.Content))
+		_, _ = h.Write(m.ContentPartsJson)
+		_, _ = h.Write([]byte(m.Thinking))
+		_, _ = h.Write([]byte(m.ToolCallId))
+		_, _ = h.Write([]byte(m.ToolName))
+		_, _ = h.Write(m.CacheControlJson)
+		for _, tc := range m.ToolCalls {
+			_, _ = h.Write([]byte(tc.Id))
+			_, _ = h.Write([]byte(tc.Name))
+			_, _ = h.Write(tc.ArgumentsJson)
+			_, _ = h.Write([]byte(tc.Signature))
+		}
+		acc[m.Role] = acc[m.Role]*31 + h.Sum64()
+	}
+	for role, dst := range roleHash {
+		*dst = acc[role]
+	}
+
+	h.Reset()
+	for _, t := range req.Tools {
+		_, _ = h.Write([]byte(t.Name))
+		_, _ = h.Write([]byte(t.Description))
+		_, _ = h.Write(t.ParametersJson)
+		_, _ = h.Write(t.CacheControlJson)
+	}
+	p.tools = h.Sum64()
+
+	h.Reset()
+	_, _ = h.Write([]byte(req.Model))
+	p.model = h.Sum64()
+
+	h.Reset()
+	var scratch [8]byte
+	if req.MaxTokens != nil {
+		binary.LittleEndian.PutUint64(scratch[:], uint64(*req.MaxTokens))
+		_, _ = h.Write(scratch[:])
+	}
+	if req.Temperature != nil {
+		binary.LittleEndian.PutUint64(scratch[:], math.Float64bits(*req.Temperature))
+		_, _ = h.Write(scratch[:])
+	}
+	if req.TopP != nil {
+		binary.LittleEndian.PutUint64(scratch[:], math.Float64bits(*req.TopP))
+		_, _ = h.Write(scratch[:])
+	}
+	for _, s := range req.StopSequences {
+		_, _ = h.Write([]byte(s))
+	}
+	if req.Stream {
+		_, _ = h.Write([]byte{1})
+	}
+	p.params = h.Sum64()
+
+	return p
+}
+
+// BenchmarkWriteGrantVerification is the whole per-plugin check: decode the
+// plugin's output, fingerprint every grantable section, and compare against the
+// previously accepted prints. This is the number to multiply by the plugin
+// count — BenchmarkVerificationUnmarshal alone understates it.
+func BenchmarkWriteGrantVerification(b *testing.B) {
+	for _, n := range benchSizes {
+		req := pbconv.ToPBChatRequest(benchConversation(n))
+		raw, err := proto.Marshal(req)
+		if err != nil {
+			b.Fatal(err)
+		}
+		accepted := fingerprintSections(req)
+
+		b.Run(fmt.Sprintf("msgs=%d", n), func(b *testing.B) {
+			b.SetBytes(int64(len(raw)))
+			b.ReportAllocs()
+			for i := 0; i < b.N; i++ {
+				var out pb.ChatRequest
+				if err := proto.Unmarshal(raw, &out); err != nil {
+					b.Fatal(err)
+				}
+				got := fingerprintSections(&out)
+				if got != accepted {
+					b.Fatal("fingerprints must match for an unmodified request")
+				}
+			}
+		})
+	}
+}
+
+// BenchmarkBoundaryCrossing isolates the cost of one WASM crossing by using
+// fixtures that do nothing but return pass-through. The delta between 1, 2 and
+// 3 plugins is crossing cost with no guest work mixed in — which the mixed
+// pipeline in BenchmarkRunBeforeRequest cannot give, because its fixtures scan
+// messages, emit metrics and make host calls.
+func BenchmarkBoundaryCrossing(b *testing.B) {
+	inert := []string{"test-inert-a", "test-inert-b", "test-inert-c"}
+	for _, count := range []int{1, 2, 3} {
+		order := inert[:count]
+		for _, name := range order {
+			requireWASM(b, fixturesDir+"/"+name+"/plugin.wasm")
+		}
+		pp := newTestPipeline(b, fixturesDir, order)
+		for _, n := range []int{1, 100} {
+			chat := benchConversation(n)
+			b.Run(fmt.Sprintf("plugins=%d/msgs=%d", count, n), func(b *testing.B) {
+				b.ReportAllocs()
+				ctx := context.Background()
+				for i := 0; i < b.N; i++ {
+					// These fixtures never mutate, so one request can be
+					// reused: nothing to copy, nothing to exclude from the
+					// timed region.
+					if _, err := pp.RunBeforeRequest(ctx, uint64(i+1), chat); err != nil {
+						b.Fatal(err)
+					}
+				}
+			})
+		}
+	}
+}
+
 // BenchmarkRunBeforeRequest is the end-to-end baseline: the whole hook
 // dispatch including the WASM boundary crossings, for 1, 3 and 5 plugins.
 // Verification cost is only meaningful as a fraction of this.
@@ -197,11 +350,18 @@ func BenchmarkRunBeforeRequest(b *testing.B) {
 				b.ReportAllocs()
 				ctx := context.Background()
 				for i := 0; i < b.N; i++ {
-					// A fresh copy each iteration: test-mutator appends a
-					// marker and skips messages that already carry it, so a
-					// shared request would measure the no-op path after the
-					// first iteration.
-					if _, err := pp.RunBeforeRequest(ctx, uint64(i+1), benchConversationFrom(chat)); err != nil {
+					// test-mutator appends a marker and skips messages that
+					// already carry it, so each iteration needs a fresh copy or
+					// it would measure the no-op path after the first. The copy
+					// is test scaffolding, not pipeline work, so it is excluded
+					// from the timed region — leaving it in inflates the
+					// baseline and makes everything compared against it look
+					// cheaper than it is.
+					b.StopTimer()
+					fresh := benchConversationFrom(chat)
+					b.StartTimer()
+
+					if _, err := pp.RunBeforeRequest(ctx, uint64(i+1), fresh); err != nil {
 						b.Fatal(err)
 					}
 				}
