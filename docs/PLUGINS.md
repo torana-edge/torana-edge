@@ -145,12 +145,6 @@ them. Development and commit-SHA builds have no reliable product version, so
 they log and skip this product-version gate while still enforcing
 `abi_version`, hooks, permissions, exports, and approvals.
 
-## Containers
-
-The runtime image intentionally contains neither git nor a Go compiler. Build
-and approve plugins on the host, then mount the resulting bundle directory
-read-only at `/plugins` and configure `"plugins": {"dir":"/plugins", ...}`.
-
 ## Failure policy
 
 Each plugin declares `pass` or `block`, and you confirm it at approval time.

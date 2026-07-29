@@ -113,7 +113,7 @@ Both are optional, both are off unless you configure them, and both decline to
 act when they cannot price what they are about to do. Like every official
 plugin they are distributed from
 [torana-plugins](https://github.com/torana-edge/torana-plugins) and installed
-with `torana plugin install`; nothing ships in the proxy or its image.
+with `torana plugin install`; nothing is bundled into the proxy.
 
 ### cache_tier_selector
 
