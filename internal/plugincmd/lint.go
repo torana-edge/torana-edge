@@ -322,6 +322,11 @@ func scanSource(dir string) (*usage, error) {
 	buildCtx := build.Default
 	buildCtx.GOOS = "wasip1"
 	buildCtx.GOARCH = "wasm"
+	// build.Default takes CgoEnabled from the host environment, where it is
+	// usually true. wasip1/wasm builds with CGO_ENABLED=0, so a //go:build cgo
+	// file is not in the compiled plugin — inheriting the host's setting would
+	// scan it anyway and credit the plugin with handlers it does not have.
+	buildCtx.CgoEnabled = false
 
 	fset := token.NewFileSet()
 	for _, e := range entries {

@@ -257,6 +257,43 @@ func init() {
 	assertContains(t, msgs, `declares hook "run_on_tick" but no sdk.OnTick call`)
 }
 
+// wasip1/wasm builds with CGO_ENABLED=0, so a cgo-constrained file is not in
+// the compiled plugin. build.Default inherits the host's CgoEnabled, which is
+// usually true, and would otherwise credit the plugin with a handler it does
+// not have.
+func TestLintHonoursCgoConstraint(t *testing.T) {
+	dir := writePlugin(t,
+		manifestWith(`{"name":"run_on_tick"}`, `{"name":"env.log","description":"logging"}`),
+		`package main
+
+func main() {}
+`)
+	excluded := `//go:build cgo
+
+package main
+
+import (
+	"context"
+
+	sdk "github.com/torana-edge/torana-plugin-sdk"
+	"github.com/torana-edge/torana-plugin-sdk/pb"
+)
+
+func init() {
+	sdk.OnTick(func(ctx context.Context, req *pb.TickRequest) (*pb.TickResult, error) {
+		sdk.Log("tick", sdk.LogLevelInfo)
+		return nil, nil
+	})
+}
+`
+	if err := os.WriteFile(filepath.Join(dir, "cgo_only.go"), []byte(excluded), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	msgs := lintMessages(t, dir)
+	assertContains(t, msgs, `declares hook "run_on_tick" but no sdk.OnTick call`)
+}
+
 // The complement: a file constrained TO the plugin's real target must be
 // scanned.
 func TestLintScansWasipConstrainedFiles(t *testing.T) {
