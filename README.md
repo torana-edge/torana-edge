@@ -167,9 +167,34 @@ torana-edge/
 
 | Variable | Default | Description |
 |---|---|---|
-| `TORANA_CONFIG` | `config.json` | Path to config file |
+| `TORANA_CONFIG` | `config.json` | Path to the seed config file |
+| `TORANA_DATA_DIR` | `os.UserConfigDir()/torana` | Directory holding the managed store (`$TORANA_DATA_DIR/config.json`) |
 | `TORANA_PORT` | `8080` | Listen port (overrides config file) |
+| `TORANA_BIND` | `127.0.0.1` | Bind address — see the note below before changing it |
 | `TORANA_DEFAULT_PROVIDER` | (none) | Provider name for non-prefixed paths |
+| `TORANA_PLUGINS_DIR` | `./plugins` | Plugin directory for the `torana plugin` commands |
+
+`torana help` prints the same table, so it cannot drift out of the binary.
+
+**On `TORANA_BIND`.** Torana binds loopback by default. The control plane
+shares this listener, and it can rewrite configuration and approve plugins —
+approving a plugin means allowing code to run.
+
+Setting `TORANA_BIND` to a reachable address exposes **the data plane only**.
+The control plane has a second, independent check: it requires the request's
+*source* address to be loopback, so remote requests to `/_torana/*` are refused
+with `403` regardless of what you bind to.
+
+**That check is defeated by putting a reverse proxy in front.** nginx, Caddy or
+anything else forwarding to `127.0.0.1` makes every request arrive from a
+loopback source, and the control plane will then accept all of them — with no
+authentication of any kind, from anyone who can reach your proxy. If you put
+Torana behind one, the proxy **must block or authenticate `/_torana/*`
+itself**. Torana cannot do it for you.
+
+Until the control plane gets its own listener and real authentication, the safe
+configurations are: leave the bind on loopback, or expose only the data plane
+and deny `/_torana/` at whatever sits in front.
 
 ## Development
 
