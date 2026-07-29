@@ -168,9 +168,9 @@ torana-edge/
 | Variable | Default | Description |
 |---|---|---|
 | `TORANA_CONFIG` | `config.json` | Path to the seed config file |
-| `TORANA_DATA_DIR` | `os.UserConfigDir()/torana` | Where the managed store lives |
+| `TORANA_DATA_DIR` | `os.UserConfigDir()/torana` | Directory holding the managed store (`$TORANA_DATA_DIR/config.json`) |
 | `TORANA_PORT` | `8080` | Listen port (overrides config file) |
-| `TORANA_BIND` | `127.0.0.1` | Bind address — **set `0.0.0.0` in a container** |
+| `TORANA_BIND` | `127.0.0.1` | Bind address — see the note below before changing it |
 | `TORANA_DEFAULT_PROVIDER` | (none) | Provider name for non-prefixed paths |
 | `TORANA_PLUGINS_DIR` | `./plugins` | Plugin directory for the `torana plugin` commands |
 

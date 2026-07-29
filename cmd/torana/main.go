@@ -52,7 +52,8 @@ Usage:
 
 Environment:
   TORANA_CONFIG            seed config path (default: config.json)
-  TORANA_DATA_DIR          managed store location
+  TORANA_DATA_DIR          directory holding the managed store, which lives at
+                           $TORANA_DATA_DIR/config.json
                            (default: os.UserConfigDir()/torana)
   TORANA_PORT              listen port, overriding the config
   TORANA_BIND              bind address (default: 127.0.0.1)
