@@ -1363,6 +1363,16 @@ func WatchPlugins(ctx context.Context, dir string, configFn func() PluginConfig,
 		dir = "./plugins"
 	}
 
+	// Create the directory if it is absent. A fresh install has no ./plugins —
+	// nothing creates it but `torana plugin install`, and a git clone does not
+	// carry it — so Torana refused to start at all until the operator had
+	// installed a plugin they may not want. Creating it is what the operator
+	// would have to do by hand, and it makes the watch below meaningful
+	// immediately: a plugin installed later is seen without a restart.
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("create plugins directory %s: %w", dir, err)
+	}
+
 	w, err := fsnotify.NewWatcher()
 	if err != nil {
 		return fmt.Errorf("fsnotify: %w", err)

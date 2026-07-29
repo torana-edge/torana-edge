@@ -445,3 +445,25 @@ func TestShippedExampleSurvivesTheMerge(t *testing.T) {
 		t.Errorf("Plugins lost in merge:\n got %+v\nwant %+v", cfg.Plugins, want.Plugins)
 	}
 }
+
+// The README's first step is `cp config.example.json config.json`, so the
+// example has to describe a Torana that can actually start. It shipped
+// order: ["schema_translator", "intent"] while the repo ships no bundles, and
+// the pipeline builds with Strict: true — naming an absent plugin is a hard
+// failure, deliberately, so a missing plugin is never silently ignored. The two
+// together meant the documented first run died on startup.
+func TestShippedExampleNamesNoPluginsItCannotLoad(t *testing.T) {
+	raw, err := os.ReadFile("../../config.example.json")
+	if err != nil {
+		t.Skipf("config.example.json not readable: %v", err)
+	}
+	var cfg Config
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		t.Fatalf("config.example.json does not parse: %v", err)
+	}
+
+	if len(cfg.Plugins.Order) != 0 {
+		t.Errorf("plugins.order = %v — the example must not enable plugins whose "+
+			"bundles it does not ship, or copying it and starting fails", cfg.Plugins.Order)
+	}
+}

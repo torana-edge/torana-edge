@@ -54,8 +54,8 @@
       "call_timeout_ms": 5000,
       "memory_limit_mib": 64
     },
-    "_comment": "Safe coding-agent baseline: schema_translator plus intent. To compact tool results, append ONE compactor after intent and configure explicit ordered tool_policies; unmatched tools remain exact. See docs/COMPACTION.md.",
-    "order": ["schema_translator", "intent"],
+    "_comment": "order is empty because this file has to start a Torana that has no plugins installed yet — naming a plugin whose bundle is absent is a hard startup failure, by design, so a missing plugin is never silently ignored. Install with 'torana plugin install --official', approve each digest in the control plane, then add names here. A safe coding-agent baseline is [\"schema_translator\", \"intent\"]; to compact tool results append ONE compactor after intent with explicit ordered tool_policies (unmatched tools stay exact). See docs/COMPACTION.md. The config below is inert until a plugin is both installed and listed in order.",
+    "order": [],
     "config": {
       "intent": {
         "fill": "heuristic"
