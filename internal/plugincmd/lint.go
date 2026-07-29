@@ -7,7 +7,6 @@ import (
 	"go/parser"
 	"go/token"
 	"io"
-	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -306,81 +305,152 @@ func scanSource(dir string) (*usage, error) {
 		registeredInMain: map[string]token.Position{},
 	}
 
-	// Walk the whole plugin directory, not just its top level. A plugin may
-	// split itself into subpackages, and scanning only the root got both
-	// directions wrong: a handler registered from a subpackage was reported as
-	// "declared but never registered" — blocking a perfectly good build — while
-	// a capability used from a subpackage was invisible, which is the failure
-	// this command exists to prevent.
+	// Follow the plugin's own import graph, starting at its root package.
 	//
-	// The plugin directory is the right boundary because it is what
-	// `torana plugin install` stages and builds (install.go): a plugin cannot
-	// import local code from outside it, or the staged build would not compile.
+	// Two earlier versions of this were wrong in opposite directions. Scanning
+	// only the root directory missed a capability used from a subpackage — the
+	// silent failure this command exists to prevent — and reported a handler
+	// registered from one as never registered, blocking a valid build. Scanning
+	// the whole directory tree then went too far: a `tools/` or `internal/gen`
+	// package that nothing imports is not compiled into the plugin, so
+	// reporting its capabilities rejects a plugin that is perfectly correct.
 	//
-	// Third-party dependencies are deliberately NOT scanned. A module that
-	// calls sdk.HostCall on the plugin's behalf is invisible here, and the host
-	// will refuse it at runtime like any other ungranted call. Auditing
+	// Reachability is the property that matters, because it is what the
+	// compiler uses. Local imports are resolved against the module path in
+	// go.mod, which is also the boundary `torana plugin install` stages: a
+	// plugin cannot import local code from outside its own directory, or the
+	// staged build would not compile.
+	//
+	// Third-party dependencies are deliberately NOT followed. A module calling
+	// sdk.HostCall on the plugin's behalf is invisible here, and the host
+	// refuses it at runtime like any other ungranted call. Auditing
 	// dependencies is a different job from checking a manifest against its own
 	// source.
-	var goFiles []string
-	err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			return walkErr
-		}
-		if d.IsDir() {
-			switch d.Name() {
-			case "vendor", "testdata", "node_modules":
-				return filepath.SkipDir
-			}
-			// Directories Go itself ignores.
-			if path != dir && (strings.HasPrefix(d.Name(), ".") || strings.HasPrefix(d.Name(), "_")) {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		if strings.HasSuffix(d.Name(), ".go") && !strings.HasSuffix(d.Name(), "_test.go") {
-			goFiles = append(goFiles, path)
-		}
-		return nil
-	})
+	fset := token.NewFileSet()
+	files, err := reachableGoFiles(fset, dir)
 	if err != nil {
-		return nil, fmt.Errorf("read plugin directory: %w", err)
+		return nil, err
 	}
 
-	// Select files the way the compiler will for the target a plugin is
-	// actually built for. A plugin is compiled with GOOS=wasip1 GOARCH=wasm
-	// (plugincmd.go:200, install.go:381), so a //go:build linux file — or a
-	// _linux.go — is not in the binary the host loads. Scanning it anyway
-	// reports capabilities and handlers that do not exist at runtime, and
-	// misses the ones that are genuinely absent.
-	//
-	// MatchFile honours both the //go:build line and the filename suffix
-	// convention, which is exactly the compiler's own rule.
-	buildCtx := build.Default
-	buildCtx.GOOS = "wasip1"
-	buildCtx.GOARCH = "wasm"
-	// build.Default takes CgoEnabled from the host environment, where it is
-	// usually true. wasip1/wasm builds with CGO_ENABLED=0, so a //go:build cgo
-	// file is not in the compiled plugin — inheriting the host's setting would
-	// scan it anyway and credit the plugin with handlers it does not have.
-	buildCtx.CgoEnabled = false
-
-	fset := token.NewFileSet()
-	for _, path := range goFiles {
-		included, err := buildCtx.MatchFile(filepath.Dir(path), filepath.Base(path))
-		if err != nil || !included {
-			continue
-		}
-		file, err := parser.ParseFile(fset, path, nil, 0)
-		if err != nil {
-			// A source file that does not parse is the compiler's problem to
-			// report, not the linter's; skip it rather than duplicating a
-			// worse version of the same error.
-			continue
-		}
+	for _, file := range files {
 		scanFile(fset, file, u)
 	}
 	return u, nil
+}
+
+// wasiBuildContext selects files the way the compiler will for the target a
+// plugin is actually built for: GOOS=wasip1 GOARCH=wasm with cgo off. A
+// //go:build linux file, a _darwin.go, or a cgo-only file is not in the binary
+// the host loads, so scanning it would credit the plugin with handlers and
+// capabilities that do not exist at runtime.
+func wasiBuildContext() build.Context {
+	ctx := build.Default
+	ctx.GOOS = "wasip1"
+	ctx.GOARCH = "wasm"
+	ctx.CgoEnabled = false
+	return ctx
+}
+
+// reachableGoFiles parses the plugin's root package and every local package it
+// transitively imports, and returns the parsed files in visit order.
+func reachableGoFiles(fset *token.FileSet, root string) ([]*ast.File, error) {
+	modulePath, err := modulePathOf(root)
+	if err != nil {
+		return nil, err
+	}
+
+	buildCtx := wasiBuildContext()
+	var out []*ast.File
+	visited := map[string]bool{}
+
+	var visit func(dir string) error
+	visit = func(dir string) error {
+		abs, err := filepath.Abs(dir)
+		if err != nil {
+			return err
+		}
+		if visited[abs] {
+			return nil
+		}
+		visited[abs] = true
+
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			// An import that resolves to no directory is the compiler's problem
+			// to report, not the linter's.
+			return nil //nolint:nilerr
+		}
+		for _, e := range entries {
+			name := e.Name()
+			if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+				continue
+			}
+			included, err := buildCtx.MatchFile(dir, name)
+			if err != nil || !included {
+				continue
+			}
+			file, err := parser.ParseFile(fset, filepath.Join(dir, name), nil, 0)
+			if err != nil {
+				// A file that does not parse is the compiler's problem too;
+				// skip it rather than duplicating a worse version of the error.
+				continue
+			}
+			out = append(out, file)
+
+			for _, imp := range file.Imports {
+				path, err := strconv.Unquote(imp.Path.Value)
+				if err != nil {
+					continue
+				}
+				sub, ok := localImportDir(root, modulePath, path)
+				if !ok {
+					continue // stdlib or a third-party module
+				}
+				if err := visit(sub); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	}
+
+	if err := visit(root); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// localImportDir maps an import path to a directory inside the plugin, or
+// reports that it is not local to this module.
+func localImportDir(root, modulePath, importPath string) (string, bool) {
+	if modulePath == "" || importPath == modulePath {
+		return root, importPath == modulePath
+	}
+	prefix := modulePath + "/"
+	if !strings.HasPrefix(importPath, prefix) {
+		return "", false
+	}
+	rel := strings.TrimPrefix(importPath, prefix)
+	return filepath.Join(root, filepath.FromSlash(rel)), true
+}
+
+// modulePathOf reads the module line from the plugin's go.mod. A plugin without
+// one has no local packages to reach, so its root is the whole graph.
+func modulePathOf(dir string) (string, error) {
+	raw, err := os.ReadFile(filepath.Join(dir, "go.mod"))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", nil
+		}
+		return "", fmt.Errorf("read go.mod: %w", err)
+	}
+	for _, line := range strings.Split(string(raw), "\n") {
+		line = strings.TrimSpace(line)
+		if rest, ok := strings.CutPrefix(line, "module"); ok {
+			return strings.TrimSpace(rest), nil
+		}
+	}
+	return "", nil
 }
 
 func scanFile(fset *token.FileSet, file *ast.File, u *usage) {

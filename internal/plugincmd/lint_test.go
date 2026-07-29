@@ -634,6 +634,12 @@ func main() {}
 
 func init() { hooks.Register() }
 `)
+	// The linter resolves local imports against the module path, so the
+	// subpackage is only reachable if go.mod says who "example.com/sub" is.
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"),
+		[]byte("module example.com/sub\n\ngo 1.25.0\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	sub := filepath.Join(dir, "internal", "hooks")
 	if err := os.MkdirAll(sub, 0o755); err != nil {
 		t.Fatal(err)
@@ -681,6 +687,69 @@ func TestLintSeesRegistrationInSubpackage(t *testing.T) {
 			`{"name":"env.log","description":"logging"},{"name":"env.state_set","description":"state"}`))
 
 	assertClean(t, lintMessages(t, dir))
+}
+
+// A local package nothing imports is not compiled into the plugin, so its
+// capabilities must not be reported. Walking the whole directory tree flagged a
+// `tools/` helper and rejected a plugin that was perfectly correct.
+func TestLintIgnoresUnreachablePackages(t *testing.T) {
+	dir := writePlugin(t, validManifest, `package main
+
+import (
+	"context"
+
+	sdk "github.com/torana-edge/torana-plugin-sdk"
+	"github.com/torana-edge/torana-plugin-sdk/pb"
+)
+
+func main() {}
+
+func init() {
+	sdk.OnBeforeRequest(func(ctx context.Context, req *pb.ChatRequest) (*pb.ChatRequest, error) {
+		sdk.Log("hi", sdk.LogLevelInfo)
+		return nil, nil
+	})
+}
+`)
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"),
+		[]byte("module example.com/plug\n\ngo 1.25.0\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// A code generator or scratch helper: present on disk, imported by nothing.
+	gen := filepath.Join(dir, "tools", "unused")
+	if err := os.MkdirAll(gen, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	body := `package unused
+
+import sdk "github.com/torana-edge/torana-plugin-sdk"
+
+func Scratch() { _ = sdk.StateSet("k", "v") }
+`
+	if err := os.WriteFile(filepath.Join(gen, "gen.go"), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	assertClean(t, lintMessages(t, dir))
+
+	// Import it, and the same code must now be reported: reachability is the
+	// property that decides, not presence on disk.
+	main := filepath.Join(dir, "main.go")
+	raw, err := os.ReadFile(main)
+	if err != nil {
+		t.Fatal(err)
+	}
+	withImport := strings.Replace(string(raw),
+		`"github.com/torana-edge/torana-plugin-sdk/pb"`,
+		"\"github.com/torana-edge/torana-plugin-sdk/pb\"\n\n\t\"example.com/plug/tools/unused\"", 1)
+	withImport = strings.Replace(withImport,
+		`sdk.Log("hi", sdk.LogLevelInfo)`,
+		"sdk.Log(\"hi\", sdk.LogLevelInfo)\n\t\tunused.Scratch()", 1)
+	if err := os.WriteFile(main, []byte(withImport), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	assertContains(t, lintMessages(t, dir), `uses "env.state_set" but plugin.json does not request it`)
 }
 
 // Directories the Go toolchain itself ignores must be ignored here too, or the
