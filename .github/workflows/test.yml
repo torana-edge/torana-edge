@@ -48,18 +48,44 @@ jobs:
         # run the repo's lint at all.
         run: go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2 run --timeout 5m
 
-  docker:
+  static-binary:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Build image
-        run: docker build -t torana-edge:ci .
-      - name: Start image and verify health
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      # This replaced a job that built a Docker image and curled /health.
+      # Docker is not a shipped artifact for the initial release, but that job
+      # was quietly providing something worth keeping: proof that the binary is
+      # fully static and starts with no libc, no shell and no writable system
+      # paths. Adding a cgo dependency would break it, and nothing else here
+      # would notice.
+      #
+      # A scratch container gives the same guarantee without shipping a
+      # Dockerfile as a product surface.
+      - name: Build a static binary
+        run: CGO_ENABLED=0 go build -trimpath -o torana ./cmd/torana/
+      - name: Assert it is statically linked
         run: |
+          if file torana | grep -q "dynamically linked"; then
+            echo "torana is dynamically linked — a cgo dependency crept in," >&2
+            echo "and it will not run in a minimal image or on a host without" >&2
+            echo "a matching libc." >&2
+            file torana
+            exit 1
+          fi
+          file torana
+      - name: Start it in an empty container and verify health
+        run: |
+          # scratch has nothing at all: no libc, no shell, no /etc, no CA certs.
+          # If the binary needs any of it, this fails.
+          printf 'FROM scratch\nCOPY torana /torana\nENTRYPOINT ["/torana"]\n' > Dockerfile.cistatic
+          docker build -f Dockerfile.cistatic -t torana-static:ci .
           container_id=$(docker run -d -p 18080:8080 \
             -e TORANA_DATA_DIR=/tmp/torana \
             -e TORANA_BIND=0.0.0.0 \
-            torana-edge:ci)
+            torana-static:ci)
           trap 'docker logs "$container_id"; docker rm -f "$container_id" >/dev/null' EXIT
           for attempt in $(seq 1 30); do
             curl --fail --silent http://127.0.0.1:18080/health && exit 0
