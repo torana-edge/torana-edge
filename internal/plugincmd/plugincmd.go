@@ -192,7 +192,7 @@ func buildPlugin(args []string, stdout, stderr io.Writer) error {
 	if err := tidy.Run(); err != nil {
 		return fmt.Errorf("resolve plugin dependencies: %w", err)
 	}
-	cmd := exec.Command("go", "build", "-buildmode=c-shared", "-buildvcs=false", "-o", absOut, ".")
+	cmd := exec.Command("go", "build", "-trimpath", "-buildmode=c-shared", "-buildvcs=false", "-o", absOut, ".")
 	cmd.Dir = stage
 	cmd.Env = append(os.Environ(), "GOOS=wasip1", "GOARCH=wasm")
 	cmd.Stdout = stdout
