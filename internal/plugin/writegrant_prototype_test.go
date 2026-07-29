@@ -1,6 +1,7 @@
 package plugin
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/binary"
 	"hash"
@@ -8,6 +9,7 @@ import (
 	"testing"
 
 	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/reflect/protoreflect"
 
 	"github.com/torana-edge/torana-plugin-sdk/pb"
 )
@@ -39,10 +41,16 @@ type changedSections struct {
 	tools    bool
 	model    bool
 	params   bool
+	// hostOwned marks a change to a field no grant covers, because the host
+	// owns it. torana_meta_json is the only one: the host writes _provider and
+	// friends into it, and under v2 verdicts are host calls rather than keys in
+	// it, so a plugin has no legitimate reason to alter it at all. There is no
+	// grant that permits this — it is a violation outright.
+	hostOwned bool
 }
 
 func (c changedSections) any() bool {
-	return len(c.messages) > 0 || c.tools || c.model || c.params
+	return len(c.messages) > 0 || c.tools || c.model || c.params || c.hostOwned
 }
 
 // compareSections diffs a plugin's output against the previously accepted
@@ -91,6 +99,7 @@ func compareSections(accepted, out *pb.ChatRequest) changedSections {
 
 	c.model = accepted.Model != out.Model
 	c.params = !sameParams(accepted, out)
+	c.hostOwned = !bytes.Equal(accepted.ToranaMetaJson, out.ToranaMetaJson)
 	return c
 }
 
@@ -99,7 +108,9 @@ func sameParams(a, b *pb.ChatRequest) bool {
 		!sameInt32Ptr(a.MaxTokens, b.MaxTokens) ||
 		!sameFloatPtr(a.Temperature, b.Temperature) ||
 		!sameFloatPtr(a.TopP, b.TopP) ||
-		len(a.StopSequences) != len(b.StopSequences) {
+		len(a.StopSequences) != len(b.StopSequences) ||
+		!bytes.Equal(a.ProviderExtensionsJson, b.ProviderExtensionsJson) ||
+		!bytes.Equal(a.SafetySettingsJson, b.SafetySettingsJson) {
 		return false
 	}
 	for i := range a.StopSequences {
@@ -117,11 +128,15 @@ func sameInt32Ptr(a, b *int32) bool {
 	return *a == *b
 }
 
+// sameFloatPtr compares bit patterns, not values. `==` reports -0.0 and +0.0 as
+// equal, so a plugin could flip the sign bit undetected, and reports NaN as
+// unequal to itself, so a NaN parameter would be flagged as changed on every
+// request it survives.
 func sameFloatPtr(a, b *float64) bool {
 	if a == nil || b == nil {
 		return a == b
 	}
-	return *a == *b
+	return math.Float64bits(*a) == math.Float64bits(*b)
 }
 
 // safePrints is the fingerprint alternative: 32 bytes per grantable section.
@@ -147,6 +162,11 @@ func (p safePrints) equal(q safePrints) bool {
 // writeFramed length-prefixes every field, so field boundaries cannot be moved
 // without changing the digest. Concatenating raw bytes lets ("ab","") and
 // ("a","b") hash identically.
+//
+// Length framing alone is not enough for OPTIONAL fields: writing only the ones
+// that are present makes {MaxTokens: 0, Temperature: nil} and
+// {MaxTokens: nil, Temperature: 0} produce identical input. Use writeField for
+// those — it carries the field's identity and its presence.
 func writeFramed(h hash.Hash, parts ...[]byte) {
 	var lenBuf [8]byte
 	for _, p := range parts {
@@ -154,6 +174,17 @@ func writeFramed(h hash.Hash, parts ...[]byte) {
 		_, _ = h.Write(lenBuf[:])
 		_, _ = h.Write(p)
 	}
+}
+
+// writeField frames a value together with which field it is and whether it was
+// set at all, so neither identity nor presence can be forged by rearrangement.
+func writeField(h hash.Hash, field byte, present bool, value []byte) {
+	presence := byte(0)
+	if present {
+		presence = 1
+	}
+	_, _ = h.Write([]byte{field, presence})
+	writeFramed(h, value)
 }
 
 func fingerprintSectionsSafe(req *pb.ChatRequest) safePrints {
@@ -192,7 +223,12 @@ func fingerprintSectionsSafe(req *pb.ChatRequest) safePrints {
 
 	h := sha256.New()
 	for _, t := range req.Tools {
-		writeFramed(h, []byte(t.Name), []byte(t.Description), t.ParametersJson, t.CacheControlJson)
+		strict := byte(0)
+		if t.Strict {
+			strict = 1
+		}
+		writeFramed(h, []byte(t.Name), []byte(t.Description), t.ParametersJson,
+			t.CacheControlJson, []byte{strict})
 	}
 	copy(p.tools[:], h.Sum(nil))
 
@@ -203,23 +239,38 @@ func fingerprintSectionsSafe(req *pb.ChatRequest) safePrints {
 	h = sha256.New()
 	var scratch [8]byte
 	if req.MaxTokens != nil {
-		binary.LittleEndian.PutUint64(scratch[:], uint64(*req.MaxTokens))
-		writeFramed(h, scratch[:])
+		binary.LittleEndian.PutUint64(scratch[:], uint64(uint32(*req.MaxTokens)))
+		writeField(h, 1, true, scratch[:])
+	} else {
+		writeField(h, 1, false, nil)
 	}
 	if req.Temperature != nil {
+		// Bit pattern, not value: -0.0 and +0.0 compare equal as floats, so a
+		// sign flip would be invisible.
 		binary.LittleEndian.PutUint64(scratch[:], math.Float64bits(*req.Temperature))
-		writeFramed(h, scratch[:])
+		writeField(h, 2, true, scratch[:])
+	} else {
+		writeField(h, 2, false, nil)
 	}
 	if req.TopP != nil {
 		binary.LittleEndian.PutUint64(scratch[:], math.Float64bits(*req.TopP))
-		writeFramed(h, scratch[:])
+		writeField(h, 3, true, scratch[:])
+	} else {
+		writeField(h, 3, false, nil)
 	}
+	stream := byte(0)
+	if req.Stream {
+		stream = 1
+	}
+	writeField(h, 4, true, []byte{stream})
+	writeField(h, 5, true, req.ProviderExtensionsJson)
+	writeField(h, 6, true, req.SafetySettingsJson)
+	_, _ = h.Write([]byte{7})
 	for _, s := range req.StopSequences {
 		writeFramed(h, []byte(s))
 	}
-	if req.Stream {
-		writeFramed(h, []byte{1})
-	}
+	binary.LittleEndian.PutUint64(scratch[:], uint64(len(req.StopSequences)))
+	writeFramed(h, scratch[:])
 	copy(p.params[:], h.Sum(nil))
 
 	return p
@@ -358,5 +409,205 @@ func TestUnmodifiedRequestIsUnchanged(t *testing.T) {
 	}
 	if !fingerprintSectionsSafe(baseRequest()).equal(fingerprintSectionsSafe(baseRequest())) {
 		t.Fatal("unmodified request produced different fingerprints")
+	}
+}
+
+// --- field inventory --------------------------------------------------------
+
+// hostOwnedField marks a field no write grant covers.
+const hostOwnedField = "<host-owned>"
+
+// Every field of every message the verifier inspects, mapped to the grant
+// section that governs it.
+//
+// This exists because "the mutation suite covers every change" was asserted and
+// wrong: the first version silently ignored provider_extensions_json,
+// safety_settings_json, torana_meta_json and ToolDef.strict. A hand-written
+// mutation list cannot prove coverage — it only demonstrates the cases someone
+// thought of. Reflection over the descriptor can, and will fail the moment v2
+// adds a field to the contract without deciding which grant governs it.
+var chatRequestFieldSections = map[string]string{
+	"model":                    "ir.model.write",
+	"messages":                 "ir.messages.write.<role>",
+	"tools":                    "ir.tools.write",
+	"stream":                   "ir.params.write",
+	"max_tokens":               "ir.params.write",
+	"temperature":              "ir.params.write",
+	"top_p":                    "ir.params.write",
+	"stop_sequences":           "ir.params.write",
+	"provider_extensions_json": "ir.params.write",
+	"safety_settings_json":     "ir.params.write",
+	"torana_meta_json":         hostOwnedField,
+}
+
+var messageFieldSections = map[string]string{
+	"role":               "ir.messages.write.<role>",
+	"content":            "ir.messages.write.<role>",
+	"content_parts_json": "ir.messages.write.<role>",
+	"thinking":           "ir.messages.write.<role>",
+	"thinking_signature": "ir.messages.write.<role>",
+	"redacted_thinking":  "ir.messages.write.<role>",
+	"tool_calls":         "ir.messages.write.<role>",
+	"tool_call_id":       "ir.messages.write.<role>",
+	"tool_name":          "ir.messages.write.<role>",
+	"cache_control_json": "ir.messages.write.<role>",
+}
+
+var toolCallFieldSections = map[string]string{
+	"id":             "ir.messages.write.<role>",
+	"name":           "ir.messages.write.<role>",
+	"arguments_json": "ir.messages.write.<role>",
+	"signature":      "ir.messages.write.<role>",
+}
+
+var toolDefFieldSections = map[string]string{
+	"name":               "ir.tools.write",
+	"description":        "ir.tools.write",
+	"parameters_json":    "ir.tools.write",
+	"strict":             "ir.tools.write",
+	"cache_control_json": "ir.tools.write",
+}
+
+// Every protobuf field must be assigned to a grant section or explicitly
+// host-owned. An unassigned field is a field a plugin could change with no
+// grant and no detection.
+func TestEveryProtoFieldHasAGrantSection(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		msg      proto.Message
+		sections map[string]string
+	}{
+		{"ChatRequest", &pb.ChatRequest{}, chatRequestFieldSections},
+		{"Message", &pb.Message{}, messageFieldSections},
+		{"ToolCall", &pb.ToolCall{}, toolCallFieldSections},
+		{"ToolDef", &pb.ToolDef{}, toolDefFieldSections},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fields := tc.msg.ProtoReflect().Descriptor().Fields()
+			seen := map[string]bool{}
+			for i := 0; i < fields.Len(); i++ {
+				name := string(fields.Get(i).Name())
+				seen[name] = true
+				if _, ok := tc.sections[name]; !ok {
+					t.Errorf("%s.%s belongs to no grant section — a plugin could change it "+
+						"with no grant and no detection. Assign it, or mark it %s",
+						tc.name, name, hostOwnedField)
+				}
+			}
+			for name := range tc.sections {
+				if !seen[name] {
+					t.Errorf("%s.%s is mapped to a section but no longer exists in the proto",
+						tc.name, name)
+				}
+			}
+		})
+	}
+}
+
+// Each governed field must actually be detected as changed. This is what turns
+// the inventory above from documentation into enforcement: it walks the
+// descriptor, mutates every non-host-owned field through protoreflect, and
+// requires both methods to notice.
+func TestEveryGovernedFieldIsDetected(t *testing.T) {
+	mutate := func(m proto.Message, fd protoreflect.FieldDescriptor) {
+		r := m.ProtoReflect()
+		switch {
+		case fd.IsList():
+			l := r.Mutable(fd).List()
+			l.Append(newListElem(l, fd))
+		case fd.Kind() == protoreflect.StringKind:
+			r.Set(fd, protoreflect.ValueOfString(r.Get(fd).String()+"x"))
+		case fd.Kind() == protoreflect.BytesKind:
+			r.Set(fd, protoreflect.ValueOfBytes(append(append([]byte{}, r.Get(fd).Bytes()...), 'x')))
+		case fd.Kind() == protoreflect.BoolKind:
+			r.Set(fd, protoreflect.ValueOfBool(!r.Get(fd).Bool()))
+		case fd.Kind() == protoreflect.Int32Kind:
+			r.Set(fd, protoreflect.ValueOfInt32(int32(r.Get(fd).Int())+1))
+		case fd.Kind() == protoreflect.DoubleKind:
+			r.Set(fd, protoreflect.ValueOfFloat64(r.Get(fd).Float()+1))
+		default:
+			t.Fatalf("no mutation strategy for %s of kind %s", fd.Name(), fd.Kind())
+		}
+	}
+
+	fields := (&pb.ChatRequest{}).ProtoReflect().Descriptor().Fields()
+	for i := 0; i < fields.Len(); i++ {
+		fd := fields.Get(i)
+		name := string(fd.Name())
+		if chatRequestFieldSections[name] == hostOwnedField {
+			// Host-owned fields are still detected — as a violation, not as a
+			// grantable change — and covered by their own test below.
+			continue
+		}
+		t.Run(name, func(t *testing.T) {
+			accepted := baseRequest()
+			out := baseRequest()
+			mutate(out, fd)
+
+			if !compareSections(accepted, out).any() {
+				t.Error("exact comparison did not detect a change to this field")
+			}
+			if fingerprintSectionsSafe(accepted).equal(fingerprintSectionsSafe(out)) {
+				t.Error("fingerprint did not detect a change to this field")
+			}
+		})
+	}
+}
+
+func newListElem(l protoreflect.List, fd protoreflect.FieldDescriptor) protoreflect.Value {
+	if fd.Kind() == protoreflect.MessageKind {
+		return l.NewElement()
+	}
+	return protoreflect.ValueOfString("x")
+}
+
+// A plugin changing a host-owned field is a violation regardless of grants.
+func TestHostOwnedFieldChangeIsAViolation(t *testing.T) {
+	accepted := baseRequest()
+	out := baseRequest()
+	out.ToranaMetaJson = []byte(`{"_provider":"evil"}`)
+
+	c := compareSections(accepted, out)
+	if !c.hostOwned {
+		t.Fatal("a change to torana_meta_json must be reported as host-owned")
+	}
+	if !c.any() {
+		t.Fatal("a host-owned change must count as a change")
+	}
+}
+
+// The presence collision reported on #231: writing only the fields that are set
+// makes these two indistinguishable unless identity and presence are framed.
+func TestOptionalPresenceIsNotForgeable(t *testing.T) {
+	zero32 := int32(0)
+	zero64 := 0.0
+
+	a := baseRequest()
+	a.MaxTokens, a.Temperature = &zero32, nil
+	b := baseRequest()
+	b.MaxTokens, b.Temperature = nil, &zero64
+
+	if fingerprintSectionsSafe(a).equal(fingerprintSectionsSafe(b)) {
+		t.Fatal("presence of one optional field is forgeable as another's value")
+	}
+	if !compareSections(a, b).any() {
+		t.Fatal("exact comparison missed a presence difference")
+	}
+}
+
+// -0.0 and +0.0 are equal under ==, so a sign flip would pass unnoticed.
+func TestNegativeZeroIsDetected(t *testing.T) {
+	pos, neg := 0.0, math.Copysign(0, -1)
+
+	a := baseRequest()
+	a.Temperature = &pos
+	b := baseRequest()
+	b.Temperature = &neg
+
+	if !compareSections(a, b).any() {
+		t.Fatal("exact comparison treated -0.0 and +0.0 as identical")
+	}
+	if fingerprintSectionsSafe(a).equal(fingerprintSectionsSafe(b)) {
+		t.Fatal("fingerprint treated -0.0 and +0.0 as identical")
 	}
 }

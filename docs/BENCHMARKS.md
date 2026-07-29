@@ -22,10 +22,13 @@ which grantable sections it changed.
 
 **This is enforcement, and the plugin author is the threat model.** A method that
 merely usually notices a change is not a candidate. Two safe methods are
-measured, in `writegrant_prototype_test.go`, each with a mutation suite proving
-it detects every change a plugin could make — cross-role reorder, same-role
-edit, field-boundary shift, insertion, deletion, tool-call rewrite, schema
-rewrite, model swap, parameter change:
+measured, in `writegrant_prototype_test.go`. Coverage is not asserted by a
+hand-written mutation list — that only demonstrates the cases someone thought
+of. `TestEveryProtoFieldHasAGrantSection` walks the protobuf descriptor and
+fails if any field belongs to no grant section, and
+`TestEveryGovernedFieldIsDetected` mutates every governed field through
+reflection and requires both methods to notice. Adding a field to the contract
+in v2 without deciding which grant governs it will fail the suite.
 
 - **exact** — structural comparison against the previously accepted request.
   Cannot collide, because it never summarises.
@@ -59,11 +62,16 @@ Worst case is 1.5 ms on a request whose upstream call takes 2–30 seconds.
 Fully-granted plugins skip the check via the fast path, so most pipelines pay
 less.
 
-> An earlier revision of this document priced a cheaper prototype that folded a
-> per-role accumulator over unframed field concatenation. It was **not**
-> enforcement-safe: it missed a cross-role reorder entirely, and collided when a
-> field boundary moved. Both are now regression tests. The lesson is that a
-> verification benchmark has to price a method that actually verifies.
+> An earlier revision priced a cheaper prototype that folded a per-role
+> accumulator over unframed field concatenation. It was **not** enforcement-safe:
+> it missed a cross-role reorder entirely, and collided when a field boundary
+> moved. A later revision was still incomplete — it ignored
+> `provider_extensions_json`, `safety_settings_json`, `torana_meta_json` and
+> `ToolDef.strict`, compared floats with `==` (so `-0.0` and `+0.0` were
+> identical), and framed optional fields without their identity, letting
+> `{max_tokens: 0, temperature: nil}` and `{max_tokens: nil, temperature: 0}`
+> collide. All are now regression tests, and the reflection inventory exists so
+> the next omission fails a test rather than shipping.
 
 ## The WASM boundary dominates everything else
 
@@ -105,16 +113,21 @@ provider behaviour these benchmarks do not measure — providers coalesce deltas
 and content-block and message boundaries add events of their own — so no
 token-to-event ratio is assumed anywhere. Convert with your own traffic in hand.
 
-| plugins | event | time | allocations |
-|--------:|---|---:|---:|
-| 1 | text delta | 60 µs | 37 KB |
-| 1 | tool-call delta | 76 µs | 59 KB |
-| 2 | text delta | 113 µs | 73 KB |
-| 2 | tool-call delta | 296 µs | 131 KB |
+Each measurement plays a **complete request** — whatever a plugin opens it gets
+to close — and ends it with `EndRequest`. Stream plugins keep request-scoped
+state, so a benchmark that reuses one request ID forever measures unbounded
+buffer growth, and one that invents a fresh ID per event without ending it leaks
+a buffer per event. Neither is a per-event cost.
 
-Two plugins is **not** double one: 1.9× for text deltas and **3.9×** for
-tool-call deltas, because the second fixture buffers fragments and does real
-work per event.
+| plugins | sequence | per event | allocations |
+|--------:|---|---:|---:|
+| 1 | text delta | 58 µs | 37 KB |
+| 1 | tool call (start, 2 deltas, end) | 67 µs | 212 KB |
+| 2 | text delta | 128 µs | 73 KB |
+| 2 | tool call | 213 µs | 473 KB |
+
+Two plugins is **not** double one: 2.2× for text deltas and 3.2× for tool calls,
+because the second fixture buffers fragments and does real work per event.
 
 Sustained, one plugin, text deltas only — `BenchmarkStreamedResponse`:
 
@@ -123,13 +136,16 @@ Sustained, one plugin, text deltas only — `BenchmarkStreamedResponse`:
 | 100 | 4.4 ms | 3.7 MB |
 | 1000 | 45.9 ms | **36.7 MB** |
 
-That works out to 46 µs/event sustained against 60 µs measured per single
-dispatch. The gap is warm-up: the first crossings pay instantiation, and a short
-benchmark amortises that over too few operations. An earlier revision of this
-document reported **77 µs** for exactly that reason. The benchmark now warms the
-pool before timing, and the sustained figure is the one to trust.
+That works out to 45 µs/event sustained against 58 µs per single dispatch. The
+first runs are measurably slower than the steady state, so the benchmarks warm
+before timing — but **the cause of that gap is not established here.** It is not
+instantiation: the pipeline creates and pools an instance while loading the
+plugin, before any timing starts. An earlier revision of this document asserted
+otherwise, and asserted **77 µs** on the strength of an unwarmed run.
 
-**Latency is fine; allocation is not.** 60 µs added to time-to-next-token is
+Where the two disagree, the sustained figure is the one to use.
+
+**Latency is fine; allocation is not.** 58 µs added to time-to-next-token is
 imperceptible. But 37 KB allocated to process a six-byte text delta is a ~6000×
 amplification, and ~34,000 allocations per thousand events is real GC pressure —
 which shows up under concurrency, and every benchmark here is serial.

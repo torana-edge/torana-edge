@@ -294,62 +294,79 @@ func BenchmarkRunBeforeRequest(b *testing.B) {
 	}
 }
 
-// BenchmarkRunOnStreamChunk is the cost that actually decides whether Torana
-// feels fast, and it is not the request path.
+// BenchmarkRunOnStreamChunk measures the per-event cost of the streaming hook,
+// which is where the pipeline's time actually goes: run_on_stream_chunk fires
+// once per SSE event, while the request hook is paid once per request.
 //
-// run_on_stream_chunk fires once per SSE event. A 1000-token streamed response
-// is on the order of 1000 events, so a per-event cost multiplies by three
-// orders of magnitude before the user sees the end of the reply — where the
-// request hook is paid exactly once. Measure per-event, then multiply.
+// Each iteration runs a COMPLETE request under one request ID and ends it.
+// Stream plugins keep request-scoped state — test-fragment-buffer buffers
+// tool-call fragments until ToolCallEnd — so a benchmark that reuses one ID
+// forever measures unbounded buffer growth, and one that invents a fresh ID per
+// event without calling EndRequest leaks a buffer per event. Neither is a
+// per-event cost.
 func BenchmarkRunOnStreamChunk(b *testing.B) {
-	requireWASM(b, "../../examples/plugins/test-stream-mutator/plugin.wasm")
+	streamPlugins := []string{"test-stream-mutator", "test-fragment-buffer"}
 
 	text := "the quick brown fox jumps over the lazy dog"
-	events := map[string]engine.StreamEvent{
-		"text_delta": {TextDelta: &text},
-		// A tool-call fragment: the event stream plugins actually buffer, and
-		// the one whose handling is duplicated across intent and
-		// schema_translator.
-		"tool_delta": {ToolCallDelta: &engine.ToolCallDelta{Index: 0, ArgumentsDelta: `{"path":"internal/`}},
+	// sequences are complete, well-formed event streams: whatever a plugin
+	// opens, it gets to close.
+	sequences := map[string]func() []engine.StreamEvent{
+		"text_delta": func() []engine.StreamEvent {
+			t := text
+			return []engine.StreamEvent{{TextDelta: &t}}
+		},
+		// A tool call assembled from fragments, then closed — the pattern
+		// intent and schema_translator both implement.
+		"tool_call": func() []engine.StreamEvent {
+			return []engine.StreamEvent{
+				{ToolCallStart: &engine.ToolCallStart{Index: 0, ID: "call_1", Name: "read_file"}},
+				{ToolCallDelta: &engine.ToolCallDelta{Index: 0, ArgumentsDelta: `{"path":"internal/`}},
+				{ToolCallDelta: &engine.ToolCallDelta{Index: 0, ArgumentsDelta: `parser/parse.go"}`}},
+				{ToolCallEnd: &engine.ToolCallEnd{Index: 0}},
+			}
+		},
 	}
 
-	// Both stream fixtures, so the two-plugin figure is measured rather than
-	// doubled from the one-plugin one.
-	streamPlugins := []string{"test-stream-mutator", "test-fragment-buffer"}
 	for _, count := range []int{1, 2} {
 		order := streamPlugins[:count]
 		for _, name := range order {
 			requireWASM(b, fixturesDir+"/"+name+"/plugin.wasm")
 		}
 		pp := newTestPipeline(b, fixturesDir, order)
-		for name, ev := range events {
+
+		for name, build := range sequences {
+			seq := build()
 			b.Run(fmt.Sprintf("plugins=%d/%s", count, name), func(b *testing.B) {
-				b.ReportAllocs()
 				ctx := context.Background()
-				// Warm the pool before timing: the first crossings pay
-				// instantiation, and amortising that over a short run reports a
-				// per-event cost several times the steady state.
-				// A fresh request ID per event. Reusing one makes
-				// test-fragment-buffer accumulate every delta into a single
-				// request's buffer, and the measurement then reports that
-				// unbounded growth rather than the per-event cost — 9 ms/event
-				// by the two-thousandth iteration.
-				for w := 0; w < 50; w++ {
-					e := ev
-					if _, err := pp.RunOnStreamChunk(ctx, uint64(w+1), &e); err != nil {
-						b.Fatal(err)
-					}
+				// Warm before timing. The first runs are measurably slower than
+				// the steady state; the cause is not established here, so the
+				// benchmark removes the effect rather than explaining it.
+				for w := 0; w < 20; w++ {
+					runSequence(b, pp, ctx, uint64(w+1), seq)
 				}
 				b.ResetTimer()
+				b.ReportAllocs()
+
 				for i := 0; i < b.N; i++ {
-					e := ev
-					if _, err := pp.RunOnStreamChunk(ctx, uint64(i+1), &e); err != nil {
-						b.Fatal(err)
-					}
+					runSequence(b, pp, ctx, uint64(i+1), seq)
 				}
+				// Report per EVENT, so the two sequences are comparable.
+				b.ReportMetric(float64(b.Elapsed().Nanoseconds())/float64(b.N*len(seq)), "ns/event")
 			})
 		}
 	}
+}
+
+// runSequence plays one complete request and releases its request-scoped state.
+func runSequence(b *testing.B, pp *PluginPipeline, ctx context.Context, reqID uint64, seq []engine.StreamEvent) {
+	b.Helper()
+	for _, ev := range seq {
+		e := ev
+		if _, err := pp.RunOnStreamChunk(ctx, reqID, &e); err != nil {
+			b.Fatal(err)
+		}
+	}
+	pp.EndRequest(reqID)
 }
 
 // BenchmarkStreamedResponse walks a whole response's worth of events, so the
@@ -371,12 +388,16 @@ func BenchmarkStreamedResponse(b *testing.B) {
 			ctx := context.Background()
 			text := "token "
 			for i := 0; i < b.N; i++ {
+				reqID := uint64(i + 1)
 				for t := 0; t < events; t++ {
 					ev := engine.StreamEvent{TextDelta: &text}
-					if _, err := pp.RunOnStreamChunk(ctx, uint64(i+1), &ev); err != nil {
+					if _, err := pp.RunOnStreamChunk(ctx, reqID, &ev); err != nil {
 						b.Fatal(err)
 					}
 				}
+				// One response, then release its request-scoped state — the
+				// host does this at the end of every request.
+				pp.EndRequest(reqID)
 			}
 		})
 	}
