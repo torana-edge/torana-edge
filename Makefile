@@ -11,7 +11,7 @@ LDFLAGS := -s -w -X main.version=$(VERSION)
 # below. `make official-plugins` builds them from a sibling checkout when you
 # want the plugin-behaviour suite to run locally.
 TESTDATA_DIRS := examples/plugins/test-stream-mutator examples/plugins/test-blocker examples/plugins/test-blocker-nogrant examples/plugins/test-observer examples/plugins/test-responder examples/plugins/test-responder-nogrant examples/plugins/test-original examples/plugins/test-router examples/plugins/test-ticker examples/plugins/test-http-server examples/plugins/test-metrics examples/plugins/test-mutator examples/plugins/test-hostcall examples/plugins/test-fragment-buffer examples/plugins/test-inert-a examples/plugins/test-inert-b examples/plugins/test-inert-c
-WASM_BUILD = GOOS=wasip1 GOARCH=wasm go build -buildvcs=false -buildmode=c-shared
+WASM_BUILD = GOOS=wasip1 GOARCH=wasm go build -trimpath -buildvcs=false -buildmode=c-shared
 
 build:
 	go build -buildvcs=false -ldflags "$(LDFLAGS)" -o $(BINARY) ./cmd/torana/

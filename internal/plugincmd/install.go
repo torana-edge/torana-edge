@@ -377,7 +377,7 @@ func installPlugin(args []string, stdout, stderr io.Writer) error {
 			return fmt.Errorf("resolve dependencies for %s: %w", src.name, err)
 		}
 		wasm := filepath.Join(stage, "plugin.wasm")
-		build := exec.Command("go", "build", "-buildmode=c-shared", "-buildvcs=false", "-o", wasm, ".")
+		build := exec.Command("go", "build", "-trimpath", "-buildmode=c-shared", "-buildvcs=false", "-o", wasm, ".")
 		build.Dir = stage
 		build.Env = append(os.Environ(), "GOOS=wasip1", "GOARCH=wasm")
 		build.Stderr = stderr
