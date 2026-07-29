@@ -23,9 +23,27 @@ COPY --from=builder /app/torana /torana
 # read-only at /plugins and point plugins.dir at it; the minimal runtime image
 # intentionally contains neither a compiler nor git.
 EXPOSE 8080
-# Torana binds 127.0.0.1 by default, because the control plane shares this
-# listener and must not be reachable off-host. In a container that means a
-# published port answers nothing, so bind all interfaces here and let the
-# container boundary be the isolation. Override at run time if you disagree.
-ENV TORANA_BIND=0.0.0.0
+# TORANA_BIND is deliberately NOT set here.
+#
+# Setting it to 0.0.0.0 makes the published port serve proxy traffic, but the
+# control plane still refuses every request: its guard requires a loopback
+# SOURCE address, and traffic crossing a Docker bridge arrives from the gateway
+# (172.17.0.1 or similar). Measured:
+#
+#   /health              from a bridge address -> 200
+#   /_torana/api/config  from a bridge address -> 403 control plane is localhost-only
+#
+# So the container would proxy fine and be impossible to administer — no plugin
+# approvals, no configuration. That is worse than a port that plainly does not
+# answer, because the failure looks like a permissions bug rather than a
+# deployment one.
+#
+# Until the control plane moves to its own listener with real authentication,
+# run with `--network host` if you need it, which makes the source address
+# loopback again:
+#
+#   docker run --network host torana-edge
+#
+# With a published port instead (`-p 8080:8080`), set TORANA_BIND=0.0.0.0
+# yourself and accept that only the data plane works.
 ENTRYPOINT ["/torana"]

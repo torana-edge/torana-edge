@@ -176,13 +176,31 @@ torana-edge/
 
 `torana help` prints the same table, so it cannot drift out of the binary.
 
-**On `TORANA_BIND`:** Torana binds loopback by default because the control
-plane shares the same listener, and that plane can rewrite config and approve
-plugins. In a container that means `docker run -p 8080:8080` publishes a port
-that answers nothing. The shipped `Dockerfile` sets `TORANA_BIND=0.0.0.0` for
-you, taking the container boundary as the isolation instead; if you run the
-binary directly and want it reachable off-host, set it yourself and put
-something in front of it.
+**On `TORANA_BIND`, and running in Docker.** Torana binds loopback by default
+because the control plane shares the same listener, and that plane can rewrite
+config and approve plugins.
+
+Setting `TORANA_BIND=0.0.0.0` is **not** enough to make a container usable. The
+control-plane guard requires a loopback *source* address, and traffic crossing a
+Docker bridge arrives from the gateway, so:
+
+| request from | `/health` | `/_torana/api/config` |
+|---|---|---|
+| a bridge address | `200` | `403 control plane is localhost-only` |
+| loopback | `200` | `200` |
+
+The container proxies fine and cannot be administered — no plugin approvals, no
+configuration changes.
+
+Until the control plane moves to its own listener with real authentication, use
+host networking, which makes the source address loopback again:
+
+```bash
+docker run --network host torana-edge
+```
+
+With a published port instead, set `TORANA_BIND=0.0.0.0` yourself and accept
+that only the data plane works.
 
 ## Development
 
