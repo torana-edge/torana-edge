@@ -160,12 +160,30 @@ wait:
 	}
 }
 
-func TestWatchPluginsRejectsMissingDirectory(t *testing.T) {
+// A directory that genuinely cannot be watched must still be fatal. Reporting
+// success with no active watch would make every later install invisible until a
+// restart, which is the failure this guards.
+//
+// This used to assert that a MISSING directory was an error too. That over-
+// applied the rule: a fresh install has no ./plugins, nothing creates it but
+// `torana plugin install`, and a git clone does not carry one — so Torana
+// refused to start until the operator had installed a plugin they may not have
+// wanted. WatchPlugins now creates the directory, which is what the operator
+// would have done by hand, and the watch is registered on it as before. See
+// TestWatchPluginsCreatesMissingDirectory.
+func TestWatchPluginsRejectsUnwatchableDirectory(t *testing.T) {
+	// A regular file where the directory should be: MkdirAll cannot create it
+	// and the watch cannot be registered.
+	notADir := filepath.Join(t.TempDir(), "plugins")
+	if err := os.WriteFile(notADir, []byte("not a directory"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	err := WatchPlugins(
 		ctx,
-		filepath.Join(t.TempDir(), "missing"),
+		notADir,
 		func() PluginConfig { return PluginConfig{} },
 		func() *wasm.Runtime { return wasm.NewRuntime(context.Background()) },
 		func(*PluginPipeline) {},
@@ -173,7 +191,7 @@ func TestWatchPluginsRejectsMissingDirectory(t *testing.T) {
 		nil,
 	)
 	if err == nil {
-		t.Fatal("missing plugin directory was reported as successfully watched")
+		t.Fatal("an unwatchable plugin directory was reported as successfully watched")
 	}
 }
 

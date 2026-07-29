@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -443,5 +444,63 @@ func TestShippedExampleSurvivesTheMerge(t *testing.T) {
 	}
 	if !reflect.DeepEqual(cfg.Plugins, want.Plugins) {
 		t.Errorf("Plugins lost in merge:\n got %+v\nwant %+v", cfg.Plugins, want.Plugins)
+	}
+}
+
+// The README's first step is `cp config.example.json config.json`, so the
+// example has to describe a Torana that can actually start. It shipped
+// order: ["schema_translator", "intent"] while the repo ships no bundles, and
+// the pipeline builds with Strict: true — naming an absent plugin is a hard
+// failure, deliberately, so a missing plugin is never silently ignored. The two
+// together meant the documented first run died on startup.
+func TestShippedExampleNamesNoPluginsItCannotLoad(t *testing.T) {
+	raw, err := os.ReadFile("../../config.example.json")
+	if err != nil {
+		t.Skipf("config.example.json not readable: %v", err)
+	}
+	var cfg Config
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		t.Fatalf("config.example.json does not parse: %v", err)
+	}
+
+	if len(cfg.Plugins.Order) != 0 {
+		t.Errorf("plugins.order = %v — the example must not enable plugins whose "+
+			"bundles it does not ship, or copying it and starting fails", cfg.Plugins.Order)
+	}
+}
+
+// The example is a SEED: it is read once, copied into the managed store, and
+// never consulted again. A comment telling the reader to come back and edit it
+// after approving plugins describes something that has no effect, and the
+// symptom — an edit that changes nothing — is confusing enough that it has to
+// be said in the file itself.
+func TestShippedExampleExplainsItIsReadOnlyOnce(t *testing.T) {
+	raw, err := os.ReadFile("../../config.example.json")
+	if err != nil {
+		t.Skipf("config.example.json not readable: %v", err)
+	}
+	var doc struct {
+		Plugins struct {
+			Comment string `json:"_comment"`
+		} `json:"plugins"`
+	}
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatalf("config.example.json does not parse: %v", err)
+	}
+
+	comment := strings.ToLower(doc.Plugins.Comment)
+	// The managed store is a FILE inside the data directory. Naming
+	// $TORANA_DATA_DIR alone sends the reader to a directory and leaves them to
+	// guess, which is the kind of near-miss that wastes an afternoon.
+	if strings.Contains(comment, "$torana_data_dir") &&
+		!strings.Contains(comment, "$torana_data_dir/config.json") {
+		t.Error("the comment names $TORANA_DATA_DIR without /config.json — the managed " +
+			"store is a file inside that directory, not the directory itself")
+	}
+	for _, want := range []string{"first start", "managed store", "control plane"} {
+		if !strings.Contains(comment, want) {
+			t.Errorf("the plugins comment does not mention %q — a reader would not learn "+
+				"that editing this file after the first start does nothing", want)
+		}
 	}
 }
