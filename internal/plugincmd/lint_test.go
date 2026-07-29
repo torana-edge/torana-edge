@@ -129,6 +129,168 @@ func init() {
 	assertClean(t, lintMessages(t, dir))
 }
 
+// A package-level var initializer runs before main and is a valid place to
+// register a handler. Tracking "which function am I in" with a variable that
+// was set on entering func main() and never cleared meant everything declared
+// after main inherited it, so this was reported as dead code and the build was
+// blocked.
+func TestLintAcceptsRegistrationInPackageInitializer(t *testing.T) {
+	// The registration sits in a var initializer that appears AFTER func main.
+	// Walking the whole file with a running scope variable left "main" set from
+	// the preceding declaration, so this was flagged as dead code.
+	dir := writePlugin(t, validManifest, `package main
+
+import (
+	"context"
+
+	sdk "github.com/torana-edge/torana-plugin-sdk"
+	"github.com/torana-edge/torana-plugin-sdk/pb"
+)
+
+func main() {}
+
+var _ = func() bool {
+	sdk.OnBeforeRequest(func(ctx context.Context, req *pb.ChatRequest) (*pb.ChatRequest, error) {
+		sdk.Log("hi", sdk.LogLevelInfo)
+		return nil, nil
+	})
+	return true
+}()
+`)
+	assertClean(t, lintMessages(t, dir))
+}
+
+// A registration genuinely inside main must still be caught even when other
+// declarations follow it — the scope fix must not overshoot into missing the
+// real bug.
+func TestLintStillCatchesMainWhenDeclarationsFollow(t *testing.T) {
+	dir := writePlugin(t, validManifest, `package main
+
+import (
+	"context"
+
+	sdk "github.com/torana-edge/torana-plugin-sdk"
+	"github.com/torana-edge/torana-plugin-sdk/pb"
+)
+
+func main() {
+	sdk.OnBeforeRequest(func(ctx context.Context, req *pb.ChatRequest) (*pb.ChatRequest, error) {
+		sdk.Log("hi", sdk.LogLevelInfo)
+		return nil, nil
+	})
+}
+
+var unrelated = 1
+
+func helper() int { return unrelated }
+`)
+	msgs := lintMessages(t, dir)
+	assertContains(t, msgs, "registered inside func main()")
+}
+
+// A plugin is compiled with GOOS=wasip1 GOARCH=wasm, so a file excluded by a
+// build constraint is not in the binary the host loads. Scanning it anyway
+// reports handlers and capabilities that do not exist at runtime.
+func TestLintHonoursBuildConstraints(t *testing.T) {
+	dir := writePlugin(t,
+		manifestWith(`{"name":"run_on_tick"}`, `{"name":"env.log","description":"logging"}`),
+		`package main
+
+func main() {}
+`)
+	// The only OnTick registration lives in a file that never reaches a WASI
+	// build, so the declared hook has no handler in the shipped plugin.
+	excluded := `//go:build linux
+
+package main
+
+import (
+	"context"
+
+	sdk "github.com/torana-edge/torana-plugin-sdk"
+	"github.com/torana-edge/torana-plugin-sdk/pb"
+)
+
+func init() {
+	sdk.OnTick(func(ctx context.Context, req *pb.TickRequest) (*pb.TickResult, error) {
+		sdk.Log("tick", sdk.LogLevelInfo)
+		return nil, nil
+	})
+}
+`
+	if err := os.WriteFile(filepath.Join(dir, "linux_only.go"), []byte(excluded), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	msgs := lintMessages(t, dir)
+	assertContains(t, msgs, `declares hook "run_on_tick" but no sdk.OnTick call`)
+}
+
+// The filename suffix convention is the same rule, and MatchFile honours both.
+func TestLintHonoursFilenameConstraints(t *testing.T) {
+	dir := writePlugin(t,
+		manifestWith(`{"name":"run_on_tick"}`, ``),
+		`package main
+
+func main() {}
+`)
+	excluded := `package main
+
+import (
+	"context"
+
+	sdk "github.com/torana-edge/torana-plugin-sdk"
+	"github.com/torana-edge/torana-plugin-sdk/pb"
+)
+
+func init() {
+	sdk.OnTick(func(ctx context.Context, req *pb.TickRequest) (*pb.TickResult, error) {
+		return nil, nil
+	})
+}
+`
+	if err := os.WriteFile(filepath.Join(dir, "hooks_darwin.go"), []byte(excluded), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	msgs := lintMessages(t, dir)
+	assertContains(t, msgs, `declares hook "run_on_tick" but no sdk.OnTick call`)
+}
+
+// The complement: a file constrained TO the plugin's real target must be
+// scanned.
+func TestLintScansWasipConstrainedFiles(t *testing.T) {
+	dir := writePlugin(t,
+		manifestWith(`{"name":"run_on_tick"}`, `{"name":"env.log","description":"logging"}`),
+		`package main
+
+func main() {}
+`)
+	included := `//go:build wasip1
+
+package main
+
+import (
+	"context"
+
+	sdk "github.com/torana-edge/torana-plugin-sdk"
+	"github.com/torana-edge/torana-plugin-sdk/pb"
+)
+
+func init() {
+	sdk.OnTick(func(ctx context.Context, req *pb.TickRequest) (*pb.TickResult, error) {
+		sdk.Log("tick", sdk.LogLevelInfo)
+		return nil, nil
+	})
+}
+`
+	if err := os.WriteFile(filepath.Join(dir, "wasm_only.go"), []byte(included), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	assertClean(t, lintMessages(t, dir))
+}
+
 func TestLintCatchesDeclaredHookWithNoHandler(t *testing.T) {
 	dir := writePlugin(t,
 		manifestWith(`{"name":"run_before_request"},{"name":"run_on_tick"}`,

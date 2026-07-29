@@ -3,6 +3,7 @@ package plugincmd
 import (
 	"fmt"
 	"go/ast"
+	"go/build"
 	"go/parser"
 	"go/token"
 	"io"
@@ -309,10 +310,27 @@ func scanSource(dir string) (*usage, error) {
 		return nil, fmt.Errorf("read plugin directory: %w", err)
 	}
 
+	// Select files the way the compiler will for the target a plugin is
+	// actually built for. A plugin is compiled with GOOS=wasip1 GOARCH=wasm
+	// (plugincmd.go:200, install.go:381), so a //go:build linux file — or a
+	// _linux.go — is not in the binary the host loads. Scanning it anyway
+	// reports capabilities and handlers that do not exist at runtime, and
+	// misses the ones that are genuinely absent.
+	//
+	// MatchFile honours both the //go:build line and the filename suffix
+	// convention, which is exactly the compiler's own rule.
+	buildCtx := build.Default
+	buildCtx.GOOS = "wasip1"
+	buildCtx.GOARCH = "wasm"
+
 	fset := token.NewFileSet()
 	for _, e := range entries {
 		name := e.Name()
 		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		included, err := buildCtx.MatchFile(dir, name)
+		if err != nil || !included {
 			continue
 		}
 		file, err := parser.ParseFile(fset, filepath.Join(dir, name), nil, 0)
@@ -333,19 +351,37 @@ func scanFile(fset *token.FileSet, file *ast.File, u *usage) {
 		return
 	}
 
-	// enclosing tracks which top-level function body we are inside, so a
-	// registration in main() can be told apart from one in init().
-	var enclosing string
-	ast.Inspect(file, func(n ast.Node) bool {
-		if fn, ok := n.(*ast.FuncDecl); ok {
-			if fn.Recv == nil {
-				enclosing = fn.Name.Name
-			} else {
-				enclosing = ""
+	// Walk each declaration separately rather than inspecting the whole file
+	// with a running "which function am I in" variable. That variable is set on
+	// entering a FuncDecl and never cleared on leaving it, so everything after
+	// `func main()` — including a package-level var initializer, which is a
+	// perfectly good place to register a handler — inherited "main" and was
+	// wrongly reported as dead code. Walking per-declaration makes the scope
+	// exact by construction.
+	for _, decl := range file.Decls {
+		switch d := decl.(type) {
+		case *ast.FuncDecl:
+			if d.Body == nil {
+				continue // external or assembly declaration
 			}
-			return true
+			enclosing := ""
+			if d.Recv == nil {
+				enclosing = d.Name.Name
+			}
+			scanNode(fset, d.Body, alias, enclosing, u)
+		default:
+			// Package-level var/const initializers run before main and are a
+			// valid registration site.
+			scanNode(fset, decl, alias, "", u)
 		}
+	}
+}
 
+func scanNode(fset *token.FileSet, node ast.Node, alias, enclosing string, u *usage) {
+	ast.Inspect(node, func(n ast.Node) bool {
+		// A function literal is its own scope for this purpose: a handler
+		// registered inside one still runs wherever the literal is invoked.
+		// Its enclosing declaration is what matters, so it is inherited.
 		call, ok := n.(*ast.CallExpr)
 		if !ok {
 			return true
