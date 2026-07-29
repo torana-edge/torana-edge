@@ -1,7 +1,20 @@
 {
+  "schema_version": 1,
+  "id": "torana-test/ts-logger",
   "name": "ts-logger",
   "version": "0.3.0",
+  "abi_version": "v1",
+  "failure_mode": "pass",
   "description": "Polyglot ABI validation plugin written in AssemblyScript",
-  "hooks": [{"name": "run_before_request"}],
-  "permissions": [{"name": "env.log", "description": "Write structured logs"}]
+  "hooks": [
+    {
+      "name": "run_before_request"
+    }
+  ],
+  "permissions": [
+    {
+      "name": "env.log",
+      "description": "Write structured logs"
+    }
+  ]
 }

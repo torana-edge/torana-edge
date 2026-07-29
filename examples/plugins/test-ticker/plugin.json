@@ -1,15 +1,35 @@
 {
+  "schema_version": 1,
+  "id": "torana-test/test-ticker",
   "name": "test-ticker",
   "version": "0.1.0",
+  "abi_version": "v1",
+  "failure_mode": "pass",
   "description": "Test fixture: proves run_on_tick fires with no request in flight and that TickRequest carries the host's clock",
   "hooks": [
-    {"name": "run_on_tick"},
-    {"name": "run_before_request"}
+    {
+      "name": "run_on_tick"
+    },
+    {
+      "name": "run_before_request"
+    }
   ],
   "permissions": [
-    {"name": "env.background_tick", "description": "Run periodically with no request in flight"},
-    {"name": "env.cache_get", "description": "Read the recorded tick"},
-    {"name": "env.cache_set", "description": "Record that a tick fired"},
-    {"name": "env.log", "description": "Diagnostic logging"}
+    {
+      "name": "env.background_tick",
+      "description": "Run periodically with no request in flight"
+    },
+    {
+      "name": "env.cache_get",
+      "description": "Read the recorded tick"
+    },
+    {
+      "name": "env.cache_set",
+      "description": "Record that a tick fired"
+    },
+    {
+      "name": "env.log",
+      "description": "Diagnostic logging"
+    }
   ]
 }
