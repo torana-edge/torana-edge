@@ -134,8 +134,8 @@ the control plane first. See [docs/PLUGINS.md](docs/PLUGINS.md).
 `--official`. Its own manifest says it is not published to the public registry:
 it demonstrates the identity capability surface and performs no verification, so
 installing it by default would put something explicitly not built as an access
-control into an access-control position. You can still install it by path if you
-want to read it.
+control into an access-control position. Its source remains available for study
+in [torana-plugins](https://github.com/torana-edge/torana-plugins).
 
 > **Order matters.** Put `intent` before whichever compactor you run — both
 > compactors are pure consumers of the intent cache. `keyword_compactor` and
