@@ -543,29 +543,53 @@ func Load(path string) (Config, error) {
 		return user, validate(user)
 	}
 
-	// Merge: user values override defaults.
-	if user.Port != 0 {
+	// Merge: user values override defaults, for every section the user actually
+	// wrote.
+	//
+	// Presence comes from the raw JSON, not from inspecting the decoded value.
+	// Guessing "did they provide this?" from a sentinel field cannot tell an
+	// omitted section from one deliberately set to its zero value, and it lost
+	// real configuration both ways: `plugins` was applied only when `dir` was
+	// non-empty, so a seed setting `order`, `runtime` or — worse — `approvals`
+	// without `dir` had all of it silently dropped; and `mitm` was applied only
+	// when `enabled` was true, so the shipped example's own MITM stanza
+	// (enabled: false, with listen, ca_dir and hosts) vanished the first time
+	// Torana materialized its managed store.
+	//
+	// That loss is permanent and undetectable: the seed is never re-read once
+	// the store exists, and ManagedStoreShadowsSeed compares two post-merge
+	// values, so both sides are missing the same thing and it reports no drift.
+	var present map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &present); err != nil {
+		return cfg, fmt.Errorf("parsing config %q: %w", path, err)
+	}
+	has := func(key string) bool { _, ok := present[key]; return ok }
+
+	// Port keeps its old zero-means-default behaviour, matching the managed
+	// path above. Zero is not a port anyone means, and this change is about
+	// sections that were dropped wholesale, not about tightening scalars.
+	if has("port") && user.Port != 0 {
 		cfg.Port = user.Port
 	}
 	for name, p := range user.Providers {
 		cfg.Providers[name] = p
 	}
-	if user.Plugins.Dir != "" {
+	if has("plugins") {
 		cfg.Plugins = user.Plugins
 	}
-	if user.Limits.RPM != 0 || user.Limits.Concurrency != 0 {
+	if has("limits") {
 		cfg.Limits = user.Limits
 	}
-	if user.Offload != (OffloadConfig{}) {
+	if has("offload") {
 		cfg.Offload = user.Offload
 	}
-	if user.Cache != (cache.Config{}) {
+	if has("cache") {
 		cfg.Cache = user.Cache
 	}
-	if user.MITM.Enabled {
+	if has("mitm") {
 		cfg.MITM = user.MITM
 	}
-	if user.ControlPlane != (ControlPlaneConfig{}) {
+	if has("control_plane") {
 		cfg.ControlPlane = user.ControlPlane
 	}
 	return cfg, validate(cfg)

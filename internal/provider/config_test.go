@@ -315,3 +315,133 @@ func TestManagedStoreShadowsSeed(t *testing.T) {
 		}
 	})
 }
+
+// writeSeed writes an unmanaged config and loads it.
+func writeSeed(t *testing.T, body string) Config {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	return cfg
+}
+
+// A plugins stanza without `dir` used to be dropped in its entirety, because
+// the merge inferred "did the user provide this section?" from whether one
+// sentinel field was non-empty. `approvals` going missing is the
+// security-relevant case: the operator's grants simply disappear.
+func TestSeedKeepsPluginsWithoutDir(t *testing.T) {
+	cfg := writeSeed(t, `{
+		"plugins": {
+			"order": ["intent", "compactor"],
+			"allow_unapproved": false,
+			"approvals": {
+				"torana/pii": {"digest": "abc123", "permissions": ["env.block_request"]}
+			}
+		}
+	}`)
+
+	if !reflect.DeepEqual(cfg.Plugins.Order, []string{"intent", "compactor"}) {
+		t.Errorf("Plugins.Order = %v, want [intent compactor]", cfg.Plugins.Order)
+	}
+	approval, ok := cfg.Plugins.Approvals["torana/pii"]
+	if !ok {
+		t.Fatal("operator approvals were dropped — the plugin would not load")
+	}
+	if approval.Digest != "abc123" {
+		t.Errorf("approval digest = %q, want abc123", approval.Digest)
+	}
+}
+
+// The shipped example's own MITM stanza has enabled:false. Applying the section
+// only when enabled was true meant copying config.example.json and starting
+// once permanently lost listen, ca_dir and hosts — and nothing reported it,
+// because the seed is never re-read and the drift check compares two
+// post-merge values.
+func TestSeedKeepsDisabledMITM(t *testing.T) {
+	cfg := writeSeed(t, `{
+		"mitm": {
+			"enabled": false,
+			"listen": "127.0.0.1:8099",
+			"ca_dir": "./local/mitm",
+			"hosts": {"cloudcode-pa.googleapis.com": "antigravity"}
+		}
+	}`)
+
+	if cfg.MITM.Enabled {
+		t.Error("MITM.Enabled should stay false")
+	}
+	if cfg.MITM.Listen != "127.0.0.1:8099" {
+		t.Errorf("MITM.Listen = %q — the stanza was dropped", cfg.MITM.Listen)
+	}
+	if cfg.MITM.CADir != "./local/mitm" {
+		t.Errorf("MITM.CADir = %q — the stanza was dropped", cfg.MITM.CADir)
+	}
+	if cfg.MITM.Hosts["cloudcode-pa.googleapis.com"] != "antigravity" {
+		t.Errorf("MITM.Hosts = %v — the stanza was dropped", cfg.MITM.Hosts)
+	}
+}
+
+// A section the user did not write must keep its default, or every omitted
+// section would be zeroed.
+func TestSeedOmittedSectionsKeepDefaults(t *testing.T) {
+	base := DefaultConfig()
+	cfg := writeSeed(t, `{"port": 7070}`)
+
+	if cfg.Port != 7070 {
+		t.Errorf("Port = %d, want 7070", cfg.Port)
+	}
+	if len(cfg.Providers) != len(base.Providers) {
+		t.Errorf("providers = %d, want the %d defaults", len(cfg.Providers), len(base.Providers))
+	}
+	if !reflect.DeepEqual(cfg.MITM, base.MITM) {
+		t.Errorf("MITM = %+v, want the default %+v", cfg.MITM, base.MITM)
+	}
+	if !reflect.DeepEqual(cfg.Plugins, base.Plugins) {
+		t.Errorf("Plugins = %+v, want the default %+v", cfg.Plugins, base.Plugins)
+	}
+}
+
+// Explicitly zeroing a section must be honoured, which is the whole point of
+// deciding presence from the JSON rather than from the decoded value.
+func TestSeedHonoursExplicitlyEmptySection(t *testing.T) {
+	cfg := writeSeed(t, `{"plugins": {"order": []}}`)
+	if len(cfg.Plugins.Order) != 0 {
+		t.Errorf("Plugins.Order = %v, want empty", cfg.Plugins.Order)
+	}
+}
+
+// Zero port keeps the default, matching the managed path. This change is about
+// sections dropped wholesale, not about tightening scalars.
+func TestSeedZeroPortFallsBackToDefault(t *testing.T) {
+	cfg := writeSeed(t, `{"port": 0}`)
+	if cfg.Port != DefaultConfig().Port {
+		t.Errorf("Port = %d, want the default %d", cfg.Port, DefaultConfig().Port)
+	}
+}
+
+// The shipped example must survive a round trip through the merge, since
+// "copy it and run" is the documented first step.
+func TestShippedExampleSurvivesTheMerge(t *testing.T) {
+	raw, err := os.ReadFile("../../config.example.json")
+	if err != nil {
+		t.Skipf("config.example.json not readable: %v", err)
+	}
+	var want Config
+	if err := json.Unmarshal(raw, &want); err != nil {
+		t.Fatalf("config.example.json does not parse: %v", err)
+	}
+
+	cfg := writeSeed(t, string(raw))
+
+	if !reflect.DeepEqual(cfg.MITM, want.MITM) {
+		t.Errorf("MITM lost in merge:\n got %+v\nwant %+v", cfg.MITM, want.MITM)
+	}
+	if !reflect.DeepEqual(cfg.Plugins, want.Plugins) {
+		t.Errorf("Plugins lost in merge:\n got %+v\nwant %+v", cfg.Plugins, want.Plugins)
+	}
+}
