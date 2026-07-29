@@ -33,6 +33,11 @@ CLI (`agy`)** — Torana also offers an optional TLS-terminating MITM ingress. S
    ```bash
    cp config.example.json config.json
    ```
+   This seed is read **only on the first start**. Torana then copies it into a
+   managed store (`~/.config/torana/config.json`, or `$TORANA_DATA_DIR`) and
+   reads that from then on, so later edits to `config.json` have no effect —
+   change things in the control plane instead. See
+   [Quickstart](docs/QUICKSTART.md#configuration).
 
 2. Install the plugins you want. They live in
    [torana-plugins](https://github.com/torana-edge/torana-plugins), not in this

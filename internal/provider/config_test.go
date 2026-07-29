@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -465,5 +466,33 @@ func TestShippedExampleNamesNoPluginsItCannotLoad(t *testing.T) {
 	if len(cfg.Plugins.Order) != 0 {
 		t.Errorf("plugins.order = %v — the example must not enable plugins whose "+
 			"bundles it does not ship, or copying it and starting fails", cfg.Plugins.Order)
+	}
+}
+
+// The example is a SEED: it is read once, copied into the managed store, and
+// never consulted again. A comment telling the reader to come back and edit it
+// after approving plugins describes something that has no effect, and the
+// symptom — an edit that changes nothing — is confusing enough that it has to
+// be said in the file itself.
+func TestShippedExampleExplainsItIsReadOnlyOnce(t *testing.T) {
+	raw, err := os.ReadFile("../../config.example.json")
+	if err != nil {
+		t.Skipf("config.example.json not readable: %v", err)
+	}
+	var doc struct {
+		Plugins struct {
+			Comment string `json:"_comment"`
+		} `json:"plugins"`
+	}
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatalf("config.example.json does not parse: %v", err)
+	}
+
+	comment := strings.ToLower(doc.Plugins.Comment)
+	for _, want := range []string{"first start", "managed store", "control plane"} {
+		if !strings.Contains(comment, want) {
+			t.Errorf("the plugins comment does not mention %q — a reader would not learn "+
+				"that editing this file after the first start does nothing", want)
+		}
 	}
 }
