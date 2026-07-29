@@ -504,53 +504,75 @@ func TestEveryProtoFieldHasAGrantSection(t *testing.T) {
 	}
 }
 
-// Each governed field must actually be detected as changed. This is what turns
-// the inventory above from documentation into enforcement: it walks the
-// descriptor, mutates every non-host-owned field through protoreflect, and
-// requires both methods to notice.
+// Each governed field must actually be detected as changed — including nested
+// ones. This is what turns the inventory above from documentation into
+// enforcement.
+//
+// Walking only ChatRequest's own fields was not enough: Message, ToolCall and
+// ToolDef were inventoried but never mutated, so a nested field could be
+// assigned a grant section and still be missing from the fingerprint without
+// failing anything. The nested cases are exactly where the earlier prototypes
+// went wrong.
 func TestEveryGovernedFieldIsDetected(t *testing.T) {
-	mutate := func(m proto.Message, fd protoreflect.FieldDescriptor) {
-		r := m.ProtoReflect()
-		switch {
-		case fd.IsList():
-			l := r.Mutable(fd).List()
-			l.Append(newListElem(l, fd))
-		case fd.Kind() == protoreflect.StringKind:
-			r.Set(fd, protoreflect.ValueOfString(r.Get(fd).String()+"x"))
-		case fd.Kind() == protoreflect.BytesKind:
-			r.Set(fd, protoreflect.ValueOfBytes(append(append([]byte{}, r.Get(fd).Bytes()...), 'x')))
-		case fd.Kind() == protoreflect.BoolKind:
-			r.Set(fd, protoreflect.ValueOfBool(!r.Get(fd).Bool()))
-		case fd.Kind() == protoreflect.Int32Kind:
-			r.Set(fd, protoreflect.ValueOfInt32(int32(r.Get(fd).Int())+1))
-		case fd.Kind() == protoreflect.DoubleKind:
-			r.Set(fd, protoreflect.ValueOfFloat64(r.Get(fd).Float()+1))
-		default:
-			t.Fatalf("no mutation strategy for %s of kind %s", fd.Name(), fd.Kind())
-		}
+	type target struct {
+		name string
+		// pick returns the nested message to mutate within a fresh request.
+		pick     func(*pb.ChatRequest) proto.Message
+		sections map[string]string
+	}
+	targets := []target{
+		{"ChatRequest", func(r *pb.ChatRequest) proto.Message { return r }, chatRequestFieldSections},
+		{"Message", func(r *pb.ChatRequest) proto.Message { return r.Messages[3] }, messageFieldSections},
+		{"ToolCall", func(r *pb.ChatRequest) proto.Message { return r.Messages[2].ToolCalls[0] }, toolCallFieldSections},
+		{"ToolDef", func(r *pb.ChatRequest) proto.Message { return r.Tools[0] }, toolDefFieldSections},
 	}
 
-	fields := (&pb.ChatRequest{}).ProtoReflect().Descriptor().Fields()
-	for i := 0; i < fields.Len(); i++ {
-		fd := fields.Get(i)
-		name := string(fd.Name())
-		if chatRequestFieldSections[name] == hostOwnedField {
-			// Host-owned fields are still detected — as a violation, not as a
-			// grantable change — and covered by their own test below.
-			continue
-		}
-		t.Run(name, func(t *testing.T) {
-			accepted := baseRequest()
-			out := baseRequest()
-			mutate(out, fd)
+	for _, tg := range targets {
+		fields := tg.pick(baseRequest()).ProtoReflect().Descriptor().Fields()
+		for i := 0; i < fields.Len(); i++ {
+			fd := fields.Get(i)
+			name := string(fd.Name())
+			if tg.sections[name] == hostOwnedField {
+				// Host-owned fields are detected as a violation rather than a
+				// grantable change; covered by their own test below.
+				continue
+			}
+			t.Run(tg.name+"/"+name, func(t *testing.T) {
+				accepted := baseRequest()
+				out := baseRequest()
+				mutateField(t, tg.pick(out), fd)
 
-			if !compareSections(accepted, out).any() {
-				t.Error("exact comparison did not detect a change to this field")
-			}
-			if fingerprintSectionsSafe(accepted).equal(fingerprintSectionsSafe(out)) {
-				t.Error("fingerprint did not detect a change to this field")
-			}
-		})
+				if !compareSections(accepted, out).any() {
+					t.Error("exact comparison did not detect a change to this field")
+				}
+				if fingerprintSectionsSafe(accepted).equal(fingerprintSectionsSafe(out)) {
+					t.Error("fingerprint did not detect a change to this field")
+				}
+			})
+		}
+	}
+}
+
+// mutateField changes fd on m in a way the verifier must notice.
+func mutateField(t *testing.T, m proto.Message, fd protoreflect.FieldDescriptor) {
+	t.Helper()
+	r := m.ProtoReflect()
+	switch {
+	case fd.IsList():
+		l := r.Mutable(fd).List()
+		l.Append(newListElem(l, fd))
+	case fd.Kind() == protoreflect.StringKind:
+		r.Set(fd, protoreflect.ValueOfString(r.Get(fd).String()+"x"))
+	case fd.Kind() == protoreflect.BytesKind:
+		r.Set(fd, protoreflect.ValueOfBytes(append(append([]byte{}, r.Get(fd).Bytes()...), 'x')))
+	case fd.Kind() == protoreflect.BoolKind:
+		r.Set(fd, protoreflect.ValueOfBool(!r.Get(fd).Bool()))
+	case fd.Kind() == protoreflect.Int32Kind:
+		r.Set(fd, protoreflect.ValueOfInt32(int32(r.Get(fd).Int())+1))
+	case fd.Kind() == protoreflect.DoubleKind:
+		r.Set(fd, protoreflect.ValueOfFloat64(r.Get(fd).Float()+1))
+	default:
+		t.Fatalf("no mutation strategy for %s of kind %s", fd.Name(), fd.Kind())
 	}
 }
 

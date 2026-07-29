@@ -12,8 +12,9 @@ built to answer is recorded below.
 
 ## Should the host verify what each plugin changed?
 
-**Yes, using exact structural comparison. It costs 2–9% of pipeline time, worst
-case 1.5 ms absolute, which is well under 0.1% of end-to-end request latency.**
+**Yes, using exact structural comparison. It costs 2.6–10% of pipeline time,
+worst case 1.5 ms absolute, which is well under 0.1% of end-to-end request
+latency.**
 
 Today `RunBeforeRequest` converts once, marshals once, then chains raw bytes
 from plugin to plugin without looking inside (`discovery.go:942-967`). Enforcing
@@ -27,8 +28,10 @@ hand-written mutation list — that only demonstrates the cases someone thought
 of. `TestEveryProtoFieldHasAGrantSection` walks the protobuf descriptor and
 fails if any field belongs to no grant section, and
 `TestEveryGovernedFieldIsDetected` mutates every governed field through
-reflection and requires both methods to notice. Adding a field to the contract
-in v2 without deciding which grant governs it will fail the suite.
+reflection — on `ChatRequest` **and** on the nested `Message`, `ToolCall` and
+`ToolDef` — requiring both methods to notice. Adding a field to the contract in
+v2 without deciding which grant governs it, or assigning one a section but
+forgetting it in the fingerprint, will fail the suite.
 
 - **exact** — structural comparison against the previously accepted request.
   Cannot collide, because it never summarises.
@@ -153,8 +156,8 @@ which shows up under concurrency, and every benchmark here is serial.
 Two design consequences:
 
 1. **Do not extend write-grant verification to the stream path** without
-   measuring it there. On the request path it costs 2–9%; on the stream path the
-   same work is multiplied by the event count.
+   measuring it there. On the request path it costs 2.6–10%; on the stream path
+   the same work is multiplied by the event count.
 2. **The per-event allocation is the optimisation worth doing**, if any is. It is
    `pbconv` → `proto.Marshal` → guest memory copy → result copy, per event, per
    plugin.
