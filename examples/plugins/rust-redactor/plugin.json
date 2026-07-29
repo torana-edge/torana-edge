@@ -1,7 +1,15 @@
 {
+  "schema_version": 1,
+  "id": "torana-test/rust-redactor",
   "name": "rust-redactor",
   "version": "0.3.0",
+  "abi_version": "v1",
+  "failure_mode": "pass",
   "description": "Polyglot ABI validation plugin written in Rust",
-  "hooks": [{"name": "run_before_request"}],
+  "hooks": [
+    {
+      "name": "run_before_request"
+    }
+  ],
   "permissions": []
 }

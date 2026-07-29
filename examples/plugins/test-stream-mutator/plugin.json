@@ -1,11 +1,20 @@
 {
+  "schema_version": 1,
+  "id": "torana-test/test-stream-mutator",
   "name": "test-stream-mutator",
   "version": "0.1.0",
+  "abi_version": "v1",
+  "failure_mode": "pass",
   "description": "Example plugin: redacts the word 'secret' from streamed text deltas",
   "hooks": [
-    {"name": "run_on_stream_chunk"}
+    {
+      "name": "run_on_stream_chunk"
+    }
   ],
   "permissions": [
-    {"name": "env.log", "description": "Diagnostic logging"}
+    {
+      "name": "env.log",
+      "description": "Diagnostic logging"
+    }
   ]
 }

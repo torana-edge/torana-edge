@@ -1,14 +1,31 @@
 {
+  "schema_version": 1,
+  "id": "torana-test/test-original",
   "name": "test-original",
   "version": "0.1.0",
+  "abi_version": "v1",
+  "failure_mode": "pass",
   "description": "Test fixture: mutates the request, then proves env.original_request/env.original_response still expose the pristine data",
   "hooks": [
-    {"name": "run_before_request"},
-    {"name": "run_after_response"}
+    {
+      "name": "run_before_request"
+    },
+    {
+      "name": "run_after_response"
+    }
   ],
   "permissions": [
-    {"name": "env.original_request", "description": "Read the caller's pristine request"},
-    {"name": "env.original_response", "description": "Read the raw upstream response body"},
-    {"name": "env.log", "description": "Diagnostic logging"}
+    {
+      "name": "env.original_request",
+      "description": "Read the caller's pristine request"
+    },
+    {
+      "name": "env.original_response",
+      "description": "Read the raw upstream response body"
+    },
+    {
+      "name": "env.log",
+      "description": "Diagnostic logging"
+    }
   ]
 }

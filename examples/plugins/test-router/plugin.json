@@ -1,12 +1,24 @@
 {
+  "schema_version": 1,
+  "id": "torana-test/test-router",
   "name": "test-router",
   "version": "0.1.0",
+  "abi_version": "v1",
+  "failure_mode": "pass",
   "description": "Example plugin: content-based routing via env.route_request (cheap-provider reroute, model-only override, fail-open)",
   "hooks": [
-    {"name": "run_before_request"}
+    {
+      "name": "run_before_request"
+    }
   ],
   "permissions": [
-    {"name": "env.route_request", "description": "Redirect a request to another configured provider / override the model"},
-    {"name": "env.log", "description": "Diagnostic logging"}
+    {
+      "name": "env.route_request",
+      "description": "Redirect a request to another configured provider / override the model"
+    },
+    {
+      "name": "env.log",
+      "description": "Diagnostic logging"
+    }
   ]
 }

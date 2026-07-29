@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "id": "torana/test-fragment-buffer",
+  "id": "torana-test/test-fragment-buffer",
   "name": "test-fragment-buffer",
   "version": "0.1.0",
   "abi_version": "v1",
@@ -8,11 +8,22 @@
   "failure_mode": "pass",
   "description": "Test fixture: buffers streamed tool-call argument fragments in request-scoped host state and emits them once complete",
   "hooks": [
-    {"name": "run_on_stream_chunk"}
+    {
+      "name": "run_on_stream_chunk"
+    }
   ],
   "permissions": [
-    {"name": "env.meta_get", "description": "read request-scoped fragment buffer"},
-    {"name": "env.meta_set", "description": "write request-scoped fragment buffer"},
-    {"name": "env.log", "description": "Diagnostic logging"}
+    {
+      "name": "env.meta_get",
+      "description": "read request-scoped fragment buffer"
+    },
+    {
+      "name": "env.meta_set",
+      "description": "write request-scoped fragment buffer"
+    },
+    {
+      "name": "env.log",
+      "description": "Diagnostic logging"
+    }
   ]
 }
