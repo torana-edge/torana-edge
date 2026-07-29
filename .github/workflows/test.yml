@@ -55,15 +55,20 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-      # This replaced a job that built a Docker image and curled /health.
-      # Docker is not a shipped artifact for the initial release, but that job
-      # was quietly providing something worth keeping: proof that the binary is
-      # fully static and starts with no libc, no shell and no writable system
-      # paths. Adding a cgo dependency would break it, and nothing else here
-      # would notice.
+      # This replaced a job that built the shipped Docker image and curled
+      # /health. Docker is not an artifact for the initial release, but that job
+      # was quietly proving something worth keeping: that the binary is fully
+      # static and runs with no libc and no shell. Adding a cgo dependency would
+      # break it and nothing else here would notice.
       #
-      # A scratch container gives the same guarantee without shipping a
-      # Dockerfile as a product surface.
+      # What this DOES prove: the binary is statically linked, and it starts and
+      # serves /health in an environment containing nothing but the binary.
+      #
+      # What it does NOT prove, deliberately: that outbound HTTPS works. scratch
+      # has no CA bundle, and /health makes no upstream call, so TLS to a
+      # provider is untested here. The old distroless image did carry CA certs,
+      # so that much coverage is genuinely lost — worth restoring alongside a
+      # real image, rather than pretended at with a stricter-looking base.
       - name: Build a static binary
         run: CGO_ENABLED=0 go build -trimpath -o torana ./cmd/torana/
       - name: Assert it is statically linked
