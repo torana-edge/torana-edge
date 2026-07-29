@@ -176,17 +176,25 @@ torana-edge/
 
 `torana help` prints the same table, so it cannot drift out of the binary.
 
-**On `TORANA_BIND`.** Torana binds loopback by default, and that default is
-deliberate: the control plane shares this listener, and it can rewrite
-configuration and approve plugins — approving a plugin means allowing code to
-run. Binding it to a reachable address exposes that with no authentication in
-front of it.
+**On `TORANA_BIND`.** Torana binds loopback by default. The control plane
+shares this listener, and it can rewrite configuration and approve plugins —
+approving a plugin means allowing code to run.
 
-If you need the proxy reachable from another machine, set `TORANA_BIND` and put
-something in front that you trust. Note the control plane will still refuse
-those requests: it requires a loopback *source* address, not just a loopback
-bind. Reaching it remotely needs its own listener and real authentication,
-which does not exist yet.
+Setting `TORANA_BIND` to a reachable address exposes **the data plane only**.
+The control plane has a second, independent check: it requires the request's
+*source* address to be loopback, so remote requests to `/_torana/*` are refused
+with `403` regardless of what you bind to.
+
+**That check is defeated by putting a reverse proxy in front.** nginx, Caddy or
+anything else forwarding to `127.0.0.1` makes every request arrive from a
+loopback source, and the control plane will then accept all of them — with no
+authentication of any kind, from anyone who can reach your proxy. If you put
+Torana behind one, the proxy **must block or authenticate `/_torana/*`
+itself**. Torana cannot do it for you.
+
+Until the control plane gets its own listener and real authentication, the safe
+configurations are: leave the bind on loopback, or expose only the data plane
+and deny `/_torana/` at whatever sits in front.
 
 ## Development
 

@@ -57,10 +57,13 @@ Environment:
                            (default: os.UserConfigDir()/torana)
   TORANA_PORT              listen port, overriding the config
   TORANA_BIND              bind address (default: 127.0.0.1)
-                           Loopback by default because the control plane shares
-                           this listener and can approve plugins. The control
-                           plane also requires a loopback SOURCE address, so
-                           binding wider exposes the proxy, not the dashboard.
+                           Binding wider exposes the DATA PLANE only: the
+                           control plane separately requires a loopback source
+                           address and refuses remote requests. But a reverse
+                           proxy forwarding to 127.0.0.1 makes every request
+                           look local, which opens the control plane to anyone
+                           who can reach it — so that proxy must block or
+                           authenticate /_torana/* itself.
   TORANA_DEFAULT_PROVIDER  provider for requests that match no /provider/ prefix
   TORANA_PLUGINS_DIR       plugin directory for the plugin subcommands
 
