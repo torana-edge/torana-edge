@@ -463,6 +463,22 @@ func ValidateBundleDir(dir string) (*PluginBundle, error) {
 	return bundle, nil
 }
 
+// ValidateManifestDir checks plugin.json alone, without requiring a compiled
+// plugin.wasm. `torana plugin lint` uses it so an author can find a manifest
+// mistake before paying for a WASM build — ValidateBundleDir needs the binary,
+// which means the first manifest check would otherwise happen at install.
+func ValidateManifestDir(dir string) (PluginManifest, error) {
+	raw, err := os.ReadFile(filepath.Join(dir, "plugin.json"))
+	if err != nil {
+		return PluginManifest{}, fmt.Errorf("read manifest: %w", err)
+	}
+	var manifest PluginManifest
+	if err := json.Unmarshal(raw, &manifest); err != nil {
+		return PluginManifest{}, fmt.Errorf("parse manifest: %w", err)
+	}
+	return manifest, validateManifest(manifest)
+}
+
 // bundleDigest covers every executable or policy-bearing file consumed by the
 // runtime. Length-prefixing keeps the digest unambiguous. A change to code,
 // requested permissions, failure behavior, hooks, configuration schema, or
