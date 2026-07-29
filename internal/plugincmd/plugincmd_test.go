@@ -139,7 +139,8 @@ func TestRequireVersionIgnoresReplaceDirectives(t *testing.T) {
 	}
 }
 
-const sdkModulePath = "github.com/torana-edge/torana-plugin-sdk"
+// sdkModulePath now lives in lint.go, which needs it to resolve the SDK import
+// alias. One definition, so the test cannot drift from what the linter matches.
 
 // requireVersionFromGoMod reads a module's REQUIRED version.
 //

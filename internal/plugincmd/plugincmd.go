@@ -21,6 +21,8 @@ func Run(args []string, stdout, stderr io.Writer) error {
 		return initPlugin(args[2:], stdout)
 	case "build":
 		return buildPlugin(args[2:], stdout, stderr)
+	case "lint":
+		return lintPlugin(args[2:], stdout, stderr)
 	case "install":
 		return installPlugin(args[2:], stdout, stderr)
 	case "list", "ls":
@@ -41,6 +43,7 @@ func Usage(w io.Writer) {
 	_, _ = fmt.Fprintln(w, "Usage:")
 	_, _ = fmt.Fprintln(w, "  torana plugin init <name>")
 	_, _ = fmt.Fprintln(w, "  torana plugin build [plugin-directory] [-o plugin.wasm]")
+	_, _ = fmt.Fprintln(w, "  torana plugin lint [plugin-directory]")
 	_, _ = fmt.Fprintln(w, "  torana plugin install <source>... [--official] [--dir plugins]")
 	_, _ = fmt.Fprintln(w, "  torana plugin list [--dir plugins]")
 	_, _ = fmt.Fprintln(w, "  torana plugin remove <name>... [--dir plugins]")
@@ -176,6 +179,26 @@ func buildPlugin(args []string, stdout, stderr io.Writer) error {
 	if err != nil {
 		return fmt.Errorf("resolve output: %w", err)
 	}
+	// Lint before compiling. `build` used to validate nothing at all, so the
+	// first check on a manifest happened at install — or, for a hook declared
+	// with no handler, never. Reporting a WASM build as successful when the
+	// bundle cannot load, or loads and does nothing, is the wrong answer to
+	// give an author.
+	if findings, err := lintDir(absDir); err == nil {
+		var failed bool
+		for _, f := range findings {
+			if f.sev == sevError {
+				failed = true
+				_, _ = fmt.Fprintf(stderr, "error: %s\n", f.msg)
+			} else {
+				_, _ = fmt.Fprintf(stderr, "warning: %s\n", f.msg)
+			}
+		}
+		if failed {
+			return errors.New("plugin has lint errors — fix them, or run 'torana plugin lint' for detail")
+		}
+	}
+
 	fmt.Fprintf(stdout, "Building WASI plugin in %s\n", absDir)
 	stage, err := os.MkdirTemp("", "torana-plugin-build-*")
 	if err != nil {
