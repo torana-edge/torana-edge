@@ -7,6 +7,7 @@ import (
 	"go/parser"
 	"go/token"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -305,7 +306,43 @@ func scanSource(dir string) (*usage, error) {
 		registeredInMain: map[string]token.Position{},
 	}
 
-	entries, err := os.ReadDir(dir)
+	// Walk the whole plugin directory, not just its top level. A plugin may
+	// split itself into subpackages, and scanning only the root got both
+	// directions wrong: a handler registered from a subpackage was reported as
+	// "declared but never registered" — blocking a perfectly good build — while
+	// a capability used from a subpackage was invisible, which is the failure
+	// this command exists to prevent.
+	//
+	// The plugin directory is the right boundary because it is what
+	// `torana plugin install` stages and builds (install.go): a plugin cannot
+	// import local code from outside it, or the staged build would not compile.
+	//
+	// Third-party dependencies are deliberately NOT scanned. A module that
+	// calls sdk.HostCall on the plugin's behalf is invisible here, and the host
+	// will refuse it at runtime like any other ungranted call. Auditing
+	// dependencies is a different job from checking a manifest against its own
+	// source.
+	var goFiles []string
+	err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if d.IsDir() {
+			switch d.Name() {
+			case "vendor", "testdata", "node_modules":
+				return filepath.SkipDir
+			}
+			// Directories Go itself ignores.
+			if path != dir && (strings.HasPrefix(d.Name(), ".") || strings.HasPrefix(d.Name(), "_")) {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if strings.HasSuffix(d.Name(), ".go") && !strings.HasSuffix(d.Name(), "_test.go") {
+			goFiles = append(goFiles, path)
+		}
+		return nil
+	})
 	if err != nil {
 		return nil, fmt.Errorf("read plugin directory: %w", err)
 	}
@@ -329,16 +366,12 @@ func scanSource(dir string) (*usage, error) {
 	buildCtx.CgoEnabled = false
 
 	fset := token.NewFileSet()
-	for _, e := range entries {
-		name := e.Name()
-		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
-			continue
-		}
-		included, err := buildCtx.MatchFile(dir, name)
+	for _, path := range goFiles {
+		included, err := buildCtx.MatchFile(filepath.Dir(path), filepath.Base(path))
 		if err != nil || !included {
 			continue
 		}
-		file, err := parser.ParseFile(fset, filepath.Join(dir, name), nil, 0)
+		file, err := parser.ParseFile(fset, path, nil, 0)
 		if err != nil {
 			// A source file that does not parse is the compiler's problem to
 			// report, not the linter's; skip it rather than duplicating a

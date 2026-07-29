@@ -621,3 +621,104 @@ func init() {
 	msgs := lintMessages(t, dir)
 	assertContains(t, msgs, `uses "env.log" but plugin.json does not request it`)
 }
+
+// writePluginWithSubpackage lays down a plugin whose registration and capability
+// use both live in a subpackage, reached through a local import.
+func writePluginWithSubpackage(t *testing.T, manifest string) string {
+	t.Helper()
+	dir := writePlugin(t, manifest, `package main
+
+import "example.com/sub/internal/hooks"
+
+func main() {}
+
+func init() { hooks.Register() }
+`)
+	sub := filepath.Join(dir, "internal", "hooks")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	body := `package hooks
+
+import (
+	"context"
+
+	sdk "github.com/torana-edge/torana-plugin-sdk"
+	"github.com/torana-edge/torana-plugin-sdk/pb"
+)
+
+func Register() {
+	sdk.OnBeforeRequest(func(ctx context.Context, req *pb.ChatRequest) (*pb.ChatRequest, error) {
+		sdk.Log("hello", sdk.LogLevelInfo)
+		_ = sdk.StateSet("k", "v")
+		return nil, nil
+	})
+}
+`
+	if err := os.WriteFile(filepath.Join(sub, "hooks.go"), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+// Scanning only the plugin's top-level directory got both directions wrong: a
+// capability used from a subpackage was invisible, which is the failure this
+// command exists to prevent.
+func TestLintScansSubpackagesForCapabilities(t *testing.T) {
+	dir := writePluginWithSubpackage(t,
+		manifestWith(`{"name":"run_before_request"}`, ``))
+
+	msgs := lintMessages(t, dir)
+	assertContains(t, msgs, `uses "env.log" but plugin.json does not request it`)
+	assertContains(t, msgs, `uses "env.state_set" but plugin.json does not request it`)
+}
+
+// The same blind spot produced a false POSITIVE too: a handler registered from a
+// subpackage was reported as never registered, which blocked a valid build.
+func TestLintSeesRegistrationInSubpackage(t *testing.T) {
+	dir := writePluginWithSubpackage(t,
+		manifestWith(`{"name":"run_before_request"}`,
+			`{"name":"env.log","description":"logging"},{"name":"env.state_set","description":"state"}`))
+
+	assertClean(t, lintMessages(t, dir))
+}
+
+// Directories the Go toolchain itself ignores must be ignored here too, or the
+// linter reports capabilities from code that is never compiled into the plugin.
+func TestLintSkipsVendorAndTestdata(t *testing.T) {
+	dir := writePlugin(t, validManifest, `package main
+
+import (
+	"context"
+
+	sdk "github.com/torana-edge/torana-plugin-sdk"
+	"github.com/torana-edge/torana-plugin-sdk/pb"
+)
+
+func main() {}
+
+func init() {
+	sdk.OnBeforeRequest(func(ctx context.Context, req *pb.ChatRequest) (*pb.ChatRequest, error) {
+		sdk.Log("hi", sdk.LogLevelInfo)
+		return nil, nil
+	})
+}
+`)
+	stray := `package stray
+
+import sdk "github.com/torana-edge/torana-plugin-sdk"
+
+func Unused() { _ = sdk.StateSet("k", "v") }
+`
+	for _, sub := range []string{"vendor", "testdata", "_ignored"} {
+		p := filepath.Join(dir, sub, "stray")
+		if err := os.MkdirAll(p, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(p, "stray.go"), []byte(stray), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	assertClean(t, lintMessages(t, dir))
+}
