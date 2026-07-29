@@ -210,6 +210,65 @@ func BenchmarkRunBeforeRequest(b *testing.B) {
 	}
 }
 
+// BenchmarkRunOnStreamChunk is the cost that actually decides whether Torana
+// feels fast, and it is not the request path.
+//
+// run_on_stream_chunk fires once per SSE event. A 1000-token streamed response
+// is on the order of 1000 events, so a per-event cost multiplies by three
+// orders of magnitude before the user sees the end of the reply — where the
+// request hook is paid exactly once. Measure per-event, then multiply.
+func BenchmarkRunOnStreamChunk(b *testing.B) {
+	requireWASM(b, "../../examples/plugins/test-stream-mutator/plugin.wasm")
+
+	text := "the quick brown fox jumps over the lazy dog"
+	events := map[string]engine.StreamEvent{
+		"text_delta": {TextDelta: &text},
+		// A tool-call fragment: the event stream plugins actually buffer, and
+		// the one whose handling is duplicated across intent and
+		// schema_translator.
+		"tool_delta": {ToolCallDelta: &engine.ToolCallDelta{Index: 0, ArgumentsDelta: `{"path":"internal/`}},
+	}
+
+	for _, count := range []int{1} {
+		pp := newTestPipeline(b, "../../examples/plugins", []string{"test-stream-mutator"})
+		for name, ev := range events {
+			b.Run(fmt.Sprintf("plugins=%d/%s", count, name), func(b *testing.B) {
+				b.ReportAllocs()
+				ctx := context.Background()
+				for i := 0; i < b.N; i++ {
+					e := ev
+					if _, err := pp.RunOnStreamChunk(ctx, 1, &e); err != nil {
+						b.Fatal(err)
+					}
+				}
+			})
+		}
+	}
+}
+
+// BenchmarkStreamedResponse is the per-event cost multiplied out over a
+// realistic response length, so the number is in units a user would feel.
+func BenchmarkStreamedResponse(b *testing.B) {
+	requireWASM(b, "../../examples/plugins/test-stream-mutator/plugin.wasm")
+	pp := newTestPipeline(b, "../../examples/plugins", []string{"test-stream-mutator"})
+
+	for _, tokens := range []int{100, 1000} {
+		b.Run(fmt.Sprintf("tokens=%d", tokens), func(b *testing.B) {
+			b.ReportAllocs()
+			ctx := context.Background()
+			text := "token "
+			for i := 0; i < b.N; i++ {
+				for t := 0; t < tokens; t++ {
+					ev := engine.StreamEvent{TextDelta: &text}
+					if _, err := pp.RunOnStreamChunk(ctx, uint64(i+1), &ev); err != nil {
+						b.Fatal(err)
+					}
+				}
+			}
+		})
+	}
+}
+
 // benchConversationFrom deep-copies the parts a plugin can mutate. Cheaper
 // than rebuilding the conversation, and excluded from the measurement above
 // only in the sense that it is the same work every iteration.

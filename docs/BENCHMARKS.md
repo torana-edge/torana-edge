@@ -61,12 +61,60 @@ Two consequences:
    Anything that reduces crossings — merging hooks, skipping plugins that
    declare no interest in a request — is worth far more than encoding work.
 
-## What the numbers do not cover
+## Streaming is where the cost actually lives
 
-- Streaming. `RunOnStreamChunk` is called per SSE event, so its per-call cost
-  matters far more than the request path's; it is not benchmarked yet.
-- Host calls made from inside a hook (`torana_offload_completion` reaches a
-  local model and takes hundreds of milliseconds). Real plugin work dwarfs
+`run_on_stream_chunk` fires **once per SSE event**, so a per-event cost
+multiplies by three orders of magnitude across a response. The request hook is
+paid once; this one is paid a thousand times.
+
+With a single stream plugin loaded:
+
+| | per event | per 100-token response | per 1000-token response |
+|---|---:|---:|---:|
+| time | 77 µs | 4.2 ms | 44 ms |
+| allocations | 37 KB | 3.7 MB | **37 MB** |
+
+Two of the nine official plugins declare `run_on_stream_chunk` (`intent`,
+`schema_translator`), so a realistic pipeline roughly doubles both columns.
+
+**Latency is fine; allocation is not.** 77 µs added to time-to-next-token is
+imperceptible — the whole 44 ms is spread across a stream that takes ten to
+twenty seconds to arrive. But 37 KB allocated to process a six-byte text delta
+is a ~6000× amplification, and 33,000 allocations per streamed response is real
+GC pressure that shows up under concurrency, not in this serial benchmark.
+
+Two design consequences:
+
+1. **Do not extend write-grant verification to the stream path** without
+   measuring it there first. On the request path an extra unmarshal per plugin
+   costs 2–4%; on the stream path the same work is multiplied by the event
+   count.
+2. **The per-event allocation is the optimisation worth doing**, if any is. It
+   is `pbconv` → `proto.Marshal` → guest memory copy → result copy, per event,
+   per plugin.
+
+## Total added latency, in units a user feels
+
+For one realistic coding-agent turn — a 20-message conversation, three request
+plugins, a 1000-token streamed reply, two stream plugins:
+
+| | |
+|---|---|
+| request hooks | ~3 ms, once |
+| stream hooks | ~88 ms, spread across the stream |
+| **total CPU added by the plugin pipeline** | **~91 ms** |
+| against an upstream call of | 10–20 s |
+| **share of end-to-end** | **~0.5–0.9%** |
+
+This is the plugin pipeline only. It excludes format adapter parsing, the HTTP
+proxy itself, and response-side hooks, none of which are benchmarked yet.
+
+## What the numbers still do not cover
+
+- Format adapters, the HTTP proxy layer, and `run_after_response`.
+- Host calls made from inside a hook. `torana_offload_completion` reaches a
+  local model and takes hundreds of milliseconds — real plugin work dwarfs
   everything measured here.
-- Concurrency. The pool is 4 (`wasm.Runtime`), so a sixth concurrent request
-  waits. `BenchmarkRunBeforeRequest` is serial and says nothing about that.
+- Concurrency. The pool is 4 (`wasm.Runtime`), so a fifth concurrent request
+  waits on a slot. Every benchmark here is serial and says nothing about that,
+  which matters most for the allocation figures above.
