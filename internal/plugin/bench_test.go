@@ -2,10 +2,7 @@ package plugin
 
 import (
 	"context"
-	"encoding/binary"
 	"fmt"
-	"hash/fnv"
-	"math"
 	"strings"
 	"testing"
 
@@ -183,100 +180,14 @@ func BenchmarkVerificationUnmarshal(b *testing.B) {
 	}
 }
 
-// sectionPrints is a prototype of the write-grant verifier's fingerprints —
-// one per grantable section, so a section whose print moved requires the
-// matching grant.
+// BenchmarkWriteGrantVerification is the whole per-plugin check under both
+// enforcement-safe methods: decode the plugin's output, then either compare it
+// exactly against the previously accepted request, or fingerprint its sections
+// and compare digests. Multiply the result by the plugin count.
 //
-// This is a benchmark prototype, not the shipping implementation: it exists so
-// the cost figure covers the work the verifier actually does, rather than only
-// the proto.Unmarshal in front of it. FNV-1a is the cheapest credible choice
-// and therefore the fairest lower bound on the hashing itself.
-type sectionPrints struct {
-	messagesUser      uint64
-	messagesAssistant uint64
-	messagesSystem    uint64
-	messagesTool      uint64
-	tools             uint64
-	model             uint64
-	params            uint64
-}
-
-func fingerprintSections(req *pb.ChatRequest) sectionPrints {
-	var p sectionPrints
-	h := fnv.New64a()
-
-	roleHash := map[string]*uint64{
-		"user":      &p.messagesUser,
-		"assistant": &p.messagesAssistant,
-		"system":    &p.messagesSystem,
-		"tool":      &p.messagesTool,
-	}
-	// One accumulator per role, folded in message order so a reordering is
-	// detected as well as an edit.
-	acc := map[string]uint64{}
-	for _, m := range req.Messages {
-		h.Reset()
-		_, _ = h.Write([]byte(m.Role))
-		_, _ = h.Write([]byte(m.Content))
-		_, _ = h.Write(m.ContentPartsJson)
-		_, _ = h.Write([]byte(m.Thinking))
-		_, _ = h.Write([]byte(m.ToolCallId))
-		_, _ = h.Write([]byte(m.ToolName))
-		_, _ = h.Write(m.CacheControlJson)
-		for _, tc := range m.ToolCalls {
-			_, _ = h.Write([]byte(tc.Id))
-			_, _ = h.Write([]byte(tc.Name))
-			_, _ = h.Write(tc.ArgumentsJson)
-			_, _ = h.Write([]byte(tc.Signature))
-		}
-		acc[m.Role] = acc[m.Role]*31 + h.Sum64()
-	}
-	for role, dst := range roleHash {
-		*dst = acc[role]
-	}
-
-	h.Reset()
-	for _, t := range req.Tools {
-		_, _ = h.Write([]byte(t.Name))
-		_, _ = h.Write([]byte(t.Description))
-		_, _ = h.Write(t.ParametersJson)
-		_, _ = h.Write(t.CacheControlJson)
-	}
-	p.tools = h.Sum64()
-
-	h.Reset()
-	_, _ = h.Write([]byte(req.Model))
-	p.model = h.Sum64()
-
-	h.Reset()
-	var scratch [8]byte
-	if req.MaxTokens != nil {
-		binary.LittleEndian.PutUint64(scratch[:], uint64(*req.MaxTokens))
-		_, _ = h.Write(scratch[:])
-	}
-	if req.Temperature != nil {
-		binary.LittleEndian.PutUint64(scratch[:], math.Float64bits(*req.Temperature))
-		_, _ = h.Write(scratch[:])
-	}
-	if req.TopP != nil {
-		binary.LittleEndian.PutUint64(scratch[:], math.Float64bits(*req.TopP))
-		_, _ = h.Write(scratch[:])
-	}
-	for _, s := range req.StopSequences {
-		_, _ = h.Write([]byte(s))
-	}
-	if req.Stream {
-		_, _ = h.Write([]byte{1})
-	}
-	p.params = h.Sum64()
-
-	return p
-}
-
-// BenchmarkWriteGrantVerification is the whole per-plugin check: decode the
-// plugin's output, fingerprint every grantable section, and compare against the
-// previously accepted prints. This is the number to multiply by the plugin
-// count — BenchmarkVerificationUnmarshal alone understates it.
+// See writegrant_prototype_test.go for both methods and the mutation suite
+// proving each detects every change a plugin could make. An earlier prototype
+// here was faster and unsafe: it missed a cross-role reorder outright.
 func BenchmarkWriteGrantVerification(b *testing.B) {
 	for _, n := range benchSizes {
 		req := pbconv.ToPBChatRequest(benchConversation(n))
@@ -284,9 +195,8 @@ func BenchmarkWriteGrantVerification(b *testing.B) {
 		if err != nil {
 			b.Fatal(err)
 		}
-		accepted := fingerprintSections(req)
 
-		b.Run(fmt.Sprintf("msgs=%d", n), func(b *testing.B) {
+		b.Run(fmt.Sprintf("exact/msgs=%d", n), func(b *testing.B) {
 			b.SetBytes(int64(len(raw)))
 			b.ReportAllocs()
 			for i := 0; i < b.N; i++ {
@@ -294,9 +204,23 @@ func BenchmarkWriteGrantVerification(b *testing.B) {
 				if err := proto.Unmarshal(raw, &out); err != nil {
 					b.Fatal(err)
 				}
-				got := fingerprintSections(&out)
-				if got != accepted {
-					b.Fatal("fingerprints must match for an unmodified request")
+				if compareSections(req, &out).any() {
+					b.Fatal("unmodified request must compare equal")
+				}
+			}
+		})
+
+		accepted := fingerprintSectionsSafe(req)
+		b.Run(fmt.Sprintf("fingerprint/msgs=%d", n), func(b *testing.B) {
+			b.SetBytes(int64(len(raw)))
+			b.ReportAllocs()
+			for i := 0; i < b.N; i++ {
+				var out pb.ChatRequest
+				if err := proto.Unmarshal(raw, &out); err != nil {
+					b.Fatal(err)
+				}
+				if !accepted.equal(fingerprintSectionsSafe(&out)) {
+					b.Fatal("unmodified request must fingerprint equal")
 				}
 			}
 		})
@@ -389,15 +313,37 @@ func BenchmarkRunOnStreamChunk(b *testing.B) {
 		"tool_delta": {ToolCallDelta: &engine.ToolCallDelta{Index: 0, ArgumentsDelta: `{"path":"internal/`}},
 	}
 
-	for _, count := range []int{1} {
-		pp := newTestPipeline(b, "../../examples/plugins", []string{"test-stream-mutator"})
+	// Both stream fixtures, so the two-plugin figure is measured rather than
+	// doubled from the one-plugin one.
+	streamPlugins := []string{"test-stream-mutator", "test-fragment-buffer"}
+	for _, count := range []int{1, 2} {
+		order := streamPlugins[:count]
+		for _, name := range order {
+			requireWASM(b, fixturesDir+"/"+name+"/plugin.wasm")
+		}
+		pp := newTestPipeline(b, fixturesDir, order)
 		for name, ev := range events {
 			b.Run(fmt.Sprintf("plugins=%d/%s", count, name), func(b *testing.B) {
 				b.ReportAllocs()
 				ctx := context.Background()
+				// Warm the pool before timing: the first crossings pay
+				// instantiation, and amortising that over a short run reports a
+				// per-event cost several times the steady state.
+				// A fresh request ID per event. Reusing one makes
+				// test-fragment-buffer accumulate every delta into a single
+				// request's buffer, and the measurement then reports that
+				// unbounded growth rather than the per-event cost — 9 ms/event
+				// by the two-thousandth iteration.
+				for w := 0; w < 50; w++ {
+					e := ev
+					if _, err := pp.RunOnStreamChunk(ctx, uint64(w+1), &e); err != nil {
+						b.Fatal(err)
+					}
+				}
+				b.ResetTimer()
 				for i := 0; i < b.N; i++ {
 					e := ev
-					if _, err := pp.RunOnStreamChunk(ctx, 1, &e); err != nil {
+					if _, err := pp.RunOnStreamChunk(ctx, uint64(i+1), &e); err != nil {
 						b.Fatal(err)
 					}
 				}
@@ -406,19 +352,26 @@ func BenchmarkRunOnStreamChunk(b *testing.B) {
 	}
 }
 
-// BenchmarkStreamedResponse is the per-event cost multiplied out over a
-// realistic response length, so the number is in units a user would feel.
+// BenchmarkStreamedResponse walks a whole response's worth of events, so the
+// per-event figure can be checked against a sustained run rather than trusted
+// on its own.
+//
+// The parameter is EVENTS, not tokens. How many SSE events a provider emits per
+// token is a provider behaviour this benchmark does not measure and must not
+// assume: providers coalesce deltas, and content-block and message boundaries
+// add events of their own. Converting events to tokens is the reader's job,
+// with their own provider's traffic in hand.
 func BenchmarkStreamedResponse(b *testing.B) {
-	requireWASM(b, "../../examples/plugins/test-stream-mutator/plugin.wasm")
-	pp := newTestPipeline(b, "../../examples/plugins", []string{"test-stream-mutator"})
+	requireWASM(b, fixturesDir+"/test-stream-mutator/plugin.wasm")
+	pp := newTestPipeline(b, fixturesDir, []string{"test-stream-mutator"})
 
-	for _, tokens := range []int{100, 1000} {
-		b.Run(fmt.Sprintf("tokens=%d", tokens), func(b *testing.B) {
+	for _, events := range []int{100, 1000} {
+		b.Run(fmt.Sprintf("events=%d", events), func(b *testing.B) {
 			b.ReportAllocs()
 			ctx := context.Background()
 			text := "token "
 			for i := 0; i < b.N; i++ {
-				for t := 0; t < tokens; t++ {
+				for t := 0; t < events; t++ {
 					ev := engine.StreamEvent{TextDelta: &text}
 					if _, err := pp.RunOnStreamChunk(ctx, uint64(i+1), &ev); err != nil {
 						b.Fatal(err)
