@@ -489,6 +489,14 @@ func TestShippedExampleExplainsItIsReadOnlyOnce(t *testing.T) {
 	}
 
 	comment := strings.ToLower(doc.Plugins.Comment)
+	// The managed store is a FILE inside the data directory. Naming
+	// $TORANA_DATA_DIR alone sends the reader to a directory and leaves them to
+	// guess, which is the kind of near-miss that wastes an afternoon.
+	if strings.Contains(comment, "$torana_data_dir") &&
+		!strings.Contains(comment, "$torana_data_dir/config.json") {
+		t.Error("the comment names $TORANA_DATA_DIR without /config.json — the managed " +
+			"store is a file inside that directory, not the directory itself")
+	}
 	for _, want := range []string{"first start", "managed store", "control plane"} {
 		if !strings.Contains(comment, want) {
 			t.Errorf("the plugins comment does not mention %q — a reader would not learn "+
