@@ -127,9 +127,15 @@ the control plane first. See [docs/PLUGINS.md](docs/PLUGINS.md).
 | `compactor` | `run_before_request` | The same safety policy plus economically gated cheap-model summaries |
 | `pii` | `run_before_request` | Scans tool results (local model + regex) and blocks the request if PII is found |
 | `otel` | `run_before_request`, `run_after_response` | Emits request/response OTel metrics |
-| `auth` | `run_before_request` | Normalizes caller identity from allowlisted auth headers |
 | `cache_tier_selector` | `run_before_request` | Buys the cheapest prompt-cache lifetime for a conversation, and never changes its mind for a given prefix |
 | `cache_warmer` | `run_before_request`, `run_on_tick` | Refreshes a chosen conversation's cached prefix before it lapses, bounded by a deadline and a break-even budget |
+
+`auth` is deliberately **not** in that list and is not installed by
+`--official`. Its own manifest says it is not published to the public registry:
+it demonstrates the identity capability surface and performs no verification, so
+installing it by default would put something explicitly not built as an access
+control into an access-control position. Its source remains available for study
+in [torana-plugins](https://github.com/torana-edge/torana-plugins).
 
 > **Order matters.** Put `intent` before whichever compactor you run — both
 > compactors are pure consumers of the intent cache. `keyword_compactor` and
@@ -145,7 +151,8 @@ the control plane first. See [docs/PLUGINS.md](docs/PLUGINS.md).
 torana-edge/
 ├── cmd/
 │   ├── torana/main.go              # Proxy entry point
-│   └── torana-cli/main.go          # CLI for building WASM plugins
+│   └── torana-cli/main.go          # thin compatibility wrapper; the real
+│                                   # commands are `torana plugin ...`
 ├── internal/
 │   ├── engine/
 │   │   ├── types.go                # Canonical IR: ChatRequest, StreamEvent, etc.
