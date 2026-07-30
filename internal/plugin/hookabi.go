@@ -3,6 +3,7 @@ package plugin
 import (
 	"fmt"
 
+	sdk "github.com/torana-edge/torana-plugin-sdk"
 	pbv2 "github.com/torana-edge/torana-plugin-sdk/pb/v2"
 	"google.golang.org/protobuf/proto"
 )
@@ -29,16 +30,14 @@ const hostABIMinor uint32 = 0
 
 // encodeHookInput builds the envelope for one dispatch.
 //
-// mutable says whether a returned replacement will actually be applied. It is
-// false only for run_after_response on the streamed and upstream-error paths,
-// where the bytes have already gone to the caller or there is no body to
-// rewrite. v1 offered no such signal, so a plugin learned its mutations were
-// being discarded only by their having no effect.
-func encodeHookInput(reqID uint64, mutable bool, payload isHookPayload) ([]byte, error) {
+// Mutability is NOT on the envelope. v2 moved it into AfterResponse, because
+// only that hook can be immutable — a global flag invited every other hook to
+// consult a field that is always true for it. Callers express it through
+// responsePayload{mutable: …}.
+func encodeHookInput(reqID uint64, payload isHookPayload) ([]byte, error) {
 	in := &pbv2.HookInput{
 		AbiMinor:  hostABIMinor,
 		RequestId: reqID,
-		Mutable:   mutable,
 	}
 	payload.applyTo(in)
 	if err := in.Validate(); err != nil {
@@ -67,10 +66,11 @@ func (p requestPayload) applyTo(in *pbv2.HookInput) {
 }
 
 func (p responsePayload) applyTo(in *pbv2.HookInput) {
-	// Mutability is a property of this dispatch, so it rides with the response
-	// rather than on the envelope: only after-response can be immutable, and a
-	// global flag invited every other hook to consult a field that is always
-	// true for it.
+	// mutable says whether a returned replacement will actually be applied.
+	// False on the streamed and upstream-error paths, where the bytes have
+	// already gone to the caller or there is no body to rewrite. v1 offered no
+	// such signal, so a plugin learned its edits were discarded only by their
+	// having no effect.
 	in.Payload = &pbv2.HookInput_AfterResponse{
 		AfterResponse: &pbv2.AfterResponse{Response: p.resp, Mutable: p.mutable},
 	}
@@ -116,4 +116,22 @@ func decodeHookResult(raw []byte, hook pbv2.Hook) (*pbv2.HookResult, error) {
 		return nil, nil
 	}
 	return res, nil
+}
+
+// manifestHooks converts declared manifest hook names into the v2 enum.
+//
+// An unknown name is refused rather than skipped. Skipping would enable the
+// plugin with fewer hooks than its manifest claims, and the manifest is what
+// the operator approved — a typo would silently narrow what was authorised
+// instead of failing where someone can see it.
+func manifestHooks(hooks []Hook) ([]pbv2.Hook, error) {
+	out := make([]pbv2.Hook, 0, len(hooks))
+	for _, h := range hooks {
+		hk, ok := sdk.ManifestHookName(h.Name)
+		if !ok {
+			return nil, fmt.Errorf("manifest declares unknown hook %q", h.Name)
+		}
+		out = append(out, hk)
+	}
+	return out, nil
 }
