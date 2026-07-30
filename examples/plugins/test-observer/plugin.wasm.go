@@ -6,7 +6,7 @@ import (
 	"fmt"
 
 	sdk "github.com/torana-edge/torana-plugin-sdk"
-	"github.com/torana-edge/torana-plugin-sdk/pb"
+	pb "github.com/torana-edge/torana-plugin-sdk/pb/v2"
 )
 
 func main() {}
@@ -19,15 +19,15 @@ func main() {}
 //     observed status; the next request's model name is tagged with it, which
 //     an echoing test upstream then reveals.
 func init() {
-	sdk.OnBeforeRequest(func(ctx context.Context, req *pb.ChatRequest) (*pb.ChatRequest, error) {
+	sdk.OnBeforeRequest(func(ctx context.Context, req *pb.ChatRequest) (sdk.RequestResult, error) {
 		if v, err := sdk.HostCall("env.cache_get", "observed_error_status"); err == nil && v != "" {
 			req.Model = req.Model + "+err" + v
-			return req, nil
+			return sdk.ReplaceRequest(req), nil
 		}
-		return nil, nil
+		return sdk.PassRequest(), nil
 	})
 
-	sdk.OnAfterResponse(func(ctx context.Context, resp *pb.ChatRequest) (*pb.ChatRequest, error) {
+	sdk.OnAfterResponse(func(ctx context.Context, resp *pb.ChatResponse, mutable bool) (sdk.ResponseResult, error) {
 		var meta struct {
 			Response *struct {
 				DurationMs     float64 `json:"duration_ms"`
@@ -42,7 +42,7 @@ func init() {
 			_ = json.Unmarshal(resp.ToranaMetaJson, &meta)
 		}
 		if meta.Response == nil {
-			return nil, nil
+			return sdk.PassRequest(), nil
 		}
 		r := meta.Response
 
@@ -53,11 +53,11 @@ func init() {
 				"value": fmt.Sprintf("%d", r.UpstreamStatus),
 			})
 			_, _ = sdk.HostCall("env.cache_set", string(args))
-			return nil, nil
+			return sdk.PassRequest(), nil
 		}
 
 		resp.Messages[0].Content = fmt.Sprintf("observed status=%d in=%d out=%d",
 			r.UpstreamStatus, r.Usage.In, r.Usage.Out)
-		return resp, nil
+		return sdk.ReplaceResponse(resp), nil
 	})
 }

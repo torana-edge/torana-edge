@@ -6,7 +6,7 @@ import (
 	"strings"
 
 	sdk "github.com/torana-edge/torana-plugin-sdk"
-	"github.com/torana-edge/torana-plugin-sdk/pb"
+	pb "github.com/torana-edge/torana-plugin-sdk/pb/v2"
 )
 
 func main() {}
@@ -17,14 +17,14 @@ func main() {}
 // upstream body via OriginalResponse — by writing markers into the assistant
 // content.
 func init() {
-	sdk.OnBeforeRequest(func(ctx context.Context, req *pb.ChatRequest) (*pb.ChatRequest, error) {
+	sdk.OnBeforeRequest(func(ctx context.Context, req *pb.ChatRequest) (sdk.RequestResult, error) {
 		req.Model = req.Model + "-mutated"
-		return req, nil
+		return sdk.ReplaceRequest(req), nil
 	})
 
-	sdk.OnAfterResponse(func(ctx context.Context, resp *pb.ChatRequest) (*pb.ChatRequest, error) {
+	sdk.OnAfterResponse(func(ctx context.Context, resp *pb.ChatResponse, mutable bool) (sdk.ResponseResult, error) {
 		if len(resp.Messages) == 0 {
-			return nil, nil
+			return sdk.PassRequest(), nil
 		}
 		origModel := "unavailable"
 		if orig, ok := sdk.OriginalRequest(); ok {
@@ -35,6 +35,6 @@ func init() {
 			rawMarker = "raw=pristine"
 		}
 		resp.Messages[0].Content = fmt.Sprintf("orig-model=%s %s", origModel, rawMarker)
-		return resp, nil
+		return sdk.ReplaceResponse(resp), nil
 	})
 }

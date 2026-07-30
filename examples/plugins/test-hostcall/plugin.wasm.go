@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 
 	sdk "github.com/torana-edge/torana-plugin-sdk"
-	"github.com/torana-edge/torana-plugin-sdk/pb"
+	pb "github.com/torana-edge/torana-plugin-sdk/pb/v2"
 )
 
 func main() {}
@@ -35,7 +35,7 @@ type observation struct {
 const observationKey = "last_observation"
 
 func init() {
-	sdk.OnBeforeRequest(func(ctx context.Context, req *pb.ChatRequest) (*pb.ChatRequest, error) {
+	sdk.OnBeforeRequest(func(ctx context.Context, req *pb.ChatRequest) (sdk.RequestResult, error) {
 		var obs observation
 
 		now, err := sdk.Now()
@@ -69,6 +69,6 @@ func init() {
 		}
 
 		_ = sdk.StateSetJSON(observationKey, obs)
-		return nil, nil
+		return sdk.PassRequest(), nil
 	})
 }

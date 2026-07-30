@@ -5,7 +5,7 @@ import (
 	"strings"
 
 	sdk "github.com/torana-edge/torana-plugin-sdk"
-	"github.com/torana-edge/torana-plugin-sdk/pb"
+	pb "github.com/torana-edge/torana-plugin-sdk/pb/v2"
 )
 
 func main() {}
@@ -22,7 +22,7 @@ func main() {}
 const marker = " [seen by test-mutator]"
 
 func init() {
-	sdk.OnBeforeRequest(func(ctx context.Context, req *pb.ChatRequest) (*pb.ChatRequest, error) {
+	sdk.OnBeforeRequest(func(ctx context.Context, req *pb.ChatRequest) (sdk.RequestResult, error) {
 		changed := false
 		for _, m := range req.Messages {
 			if m.Role == "user" && m.Content != "" && !strings.HasSuffix(m.Content, marker) {
@@ -39,9 +39,9 @@ func init() {
 			}
 		}
 		if !changed {
-			return nil, nil
+			return sdk.PassRequest(), nil
 		}
-		return req, nil
+		return sdk.ReplaceRequest(req), nil
 	})
 }
 
@@ -54,7 +54,7 @@ func init() {
 // substitution tests it far more precisely than a real plugin whose output
 // depends on its own logic.
 func init() {
-	sdk.OnAfterResponse(func(ctx context.Context, resp *pb.ChatRequest) (*pb.ChatRequest, error) {
+	sdk.OnAfterResponse(func(ctx context.Context, resp *pb.ChatResponse, mutable bool) (sdk.ResponseResult, error) {
 		var changed bool
 		for i := range resp.Messages {
 			for j := range resp.Messages[i].ToolCalls {
@@ -70,8 +70,8 @@ func init() {
 			}
 		}
 		if !changed {
-			return nil, nil
+			return sdk.PassRequest(), nil
 		}
-		return resp, nil
+		return sdk.ReplaceResponse(resp), nil
 	})
 }

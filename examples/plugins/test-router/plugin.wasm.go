@@ -5,7 +5,7 @@ import (
 	"strings"
 
 	sdk "github.com/torana-edge/torana-plugin-sdk"
-	"github.com/torana-edge/torana-plugin-sdk/pb"
+	pb "github.com/torana-edge/torana-plugin-sdk/pb/v2"
 )
 
 func main() {}
@@ -17,23 +17,23 @@ func main() {}
 //   - "routewrongfmt" → route to a provider with a different wire format
 //     (must fail open — cross-format transcoding is unsupported)
 func init() {
-	sdk.OnBeforeRequest(func(ctx context.Context, req *pb.ChatRequest) (*pb.ChatRequest, error) {
+	sdk.OnBeforeRequest(func(ctx context.Context, req *pb.ChatRequest) (sdk.RequestResult, error) {
 		for _, m := range req.Messages {
 			switch {
 			case strings.Contains(m.Content, "routecheap"):
-				sdk.RouteRequest(req, "cheap", "small-model")
-				return req, nil
+				sdk.RouteRequest("cheap", "small-model")
+				return sdk.ReplaceRequest(req), nil
 			case strings.Contains(m.Content, "routemodel"):
-				sdk.RouteRequest(req, "", "tiny-model")
-				return req, nil
+				sdk.RouteRequest("", "tiny-model")
+				return sdk.ReplaceRequest(req), nil
 			case strings.Contains(m.Content, "routebroken"):
-				sdk.RouteRequest(req, "no-such-provider", "small-model")
-				return req, nil
+				sdk.RouteRequest("no-such-provider", "small-model")
+				return sdk.ReplaceRequest(req), nil
 			case strings.Contains(m.Content, "routewrongfmt"):
-				sdk.RouteRequest(req, "wrongfmt", "small-model")
-				return req, nil
+				sdk.RouteRequest("wrongfmt", "small-model")
+				return sdk.ReplaceRequest(req), nil
 			}
 		}
-		return nil, nil
+		return sdk.PassRequest(), nil
 	})
 }

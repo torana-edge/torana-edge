@@ -5,7 +5,7 @@ import (
 	"strings"
 
 	sdk "github.com/torana-edge/torana-plugin-sdk"
-	"github.com/torana-edge/torana-plugin-sdk/pb"
+	pb "github.com/torana-edge/torana-plugin-sdk/pb/v2"
 )
 
 func main() {}
@@ -14,13 +14,13 @@ func main() {}
 // word "respondme", the plugin serves a canned completion directly — the
 // upstream provider is never called.
 func init() {
-	sdk.OnBeforeRequest(func(ctx context.Context, req *pb.ChatRequest) (*pb.ChatRequest, error) {
+	sdk.OnBeforeRequest(func(ctx context.Context, req *pb.ChatRequest) (sdk.RequestResult, error) {
 		for _, m := range req.Messages {
 			if strings.Contains(m.Content, "respondme") {
-				sdk.RespondRequest(req, "canned response from test-responder")
-				return req, nil
+				sdk.RespondRequest("canned response from test-responder")
+				return sdk.ReplaceRequest(req), nil
 			}
 		}
-		return nil, nil
+		return sdk.PassRequest(), nil
 	})
 }

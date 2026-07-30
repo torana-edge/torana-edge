@@ -6,7 +6,7 @@ import (
 	"fmt"
 
 	sdk "github.com/torana-edge/torana-plugin-sdk"
-	"github.com/torana-edge/torana-plugin-sdk/pb"
+	pb "github.com/torana-edge/torana-plugin-sdk/pb/v2"
 )
 
 func main() {}
@@ -31,7 +31,7 @@ func init() {
 		// Tick 1 reports nothing to do, so the "nil means did nothing" path is
 		// exercised by a real guest rather than only in unit tests.
 		if tick.TickId == 1 {
-			return nil, nil
+			return sdk.PassRequest(), nil
 		}
 		return &pb.TickResult{
 			Handled: true,
@@ -40,12 +40,12 @@ func init() {
 		}, nil
 	})
 
-	sdk.OnBeforeRequest(func(ctx context.Context, req *pb.ChatRequest) (*pb.ChatRequest, error) {
+	sdk.OnBeforeRequest(func(ctx context.Context, req *pb.ChatRequest) (sdk.RequestResult, error) {
 		v, err := sdk.HostCall("env.cache_get", "last_tick")
 		if err != nil || v == "" {
-			return nil, nil
+			return sdk.PassRequest(), nil
 		}
 		req.Model = req.Model + "+" + v
-		return req, nil
+		return sdk.ReplaceRequest(req), nil
 	})
 }

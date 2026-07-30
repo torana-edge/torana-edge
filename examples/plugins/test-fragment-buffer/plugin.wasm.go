@@ -6,7 +6,7 @@ import (
 	"fmt"
 
 	sdk "github.com/torana-edge/torana-plugin-sdk"
-	"github.com/torana-edge/torana-plugin-sdk/pb"
+	pb "github.com/torana-edge/torana-plugin-sdk/pb/v2"
 )
 
 func main() {}
@@ -33,10 +33,10 @@ func bufferKey(index int32) string {
 }
 
 func init() {
-	sdk.OnStreamChunk(func(ctx context.Context, ev *pb.StreamEvent) (*pb.StreamEventResult, error) {
+	sdk.OnStreamChunk(func(ctx context.Context, ev *pb.StreamEvent) (sdk.StreamResult, error) {
 		delta, ok := ev.Event.(*pb.StreamEvent_ToolCallDelta)
 		if !ok || delta.ToolCallDelta == nil {
-			return sdk.Pass(), nil
+			return sdk.PassEvent(), nil
 		}
 
 		td := delta.ToolCallDelta
