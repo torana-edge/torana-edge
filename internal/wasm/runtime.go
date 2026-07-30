@@ -19,6 +19,7 @@ import (
 	"github.com/torana-edge/torana-edge/internal/cache"
 	"github.com/torana-edge/torana-edge/internal/economics"
 	"github.com/torana-edge/torana-edge/internal/metrics"
+	pbv2 "github.com/torana-edge/torana-plugin-sdk/pb/v2"
 )
 
 // permissionDeniedJSON is what a guest receives when it calls a host function
@@ -91,8 +92,12 @@ func normalizeRuntimeOptions(options RuntimeOptions) RuntimeOptions {
 }
 
 type Plugin struct {
-	name    string
-	grants  map[string]bool
+	name   string
+	grants map[string]bool
+	// hooks is the guest's supported_hooks bitmap, read once at validation.
+	// Dispatch consults it instead of probing for a per-hook export, which no
+	// longer exists. Guarded by stateMu with the other mutable fields.
+	hooks   pbv2.HookBitmap
 	config  string // per-plugin config JSON (plugins.config.<name>); "" if none
 	runtime wazero.Runtime
 
@@ -176,24 +181,62 @@ func (p *Plugin) discardIdleInstances() {
 // wasm package (e.g. plugin.PluginPipeline.RunOnHTTPRequest).
 func (p *Plugin) HasGrant(perm string) bool { return p.hasGrant(perm) }
 
-// ValidateHooks checks that every named hook from the manifest is actually
-// exported by the WASM module. Returns an error listing all missing hooks.
-func (p *Plugin) ValidateHooks(ctx context.Context, hooks []string) error {
+// ValidateHooks checks the guest's declared hook set against its manifest.
+//
+// v2 guests export one run_hook, so there is no per-hook export to probe.
+// Instead they publish a supported_hooks bitmap, which is compared against what
+// the manifest declares.
+//
+// This is stricter than the v1 check it replaces. v1 could only ask "does this
+// export exist", so a guest exporting MORE than it declared passed silently —
+// the manifest is what an operator approves, so undeclared behaviour was
+// invisible to the thing meant to authorise it. Exact equality closes that.
+func (p *Plugin) ValidateHooks(ctx context.Context, declared []pbv2.Hook) error {
 	inst, err := p.newInstance(ctx)
 	if err != nil {
 		return fmt.Errorf("wasm: %s: create validation instance: %w", p.name, err)
 	}
 	defer inst.mod.Close(ctx)
-	var missing []string
-	for _, h := range hooks {
-		if fn := inst.mod.ExportedFunction(h); fn == nil {
-			missing = append(missing, h)
-		}
+
+	bitmap, err := supportedHooks(ctx, inst.mod)
+	if err != nil {
+		return fmt.Errorf("wasm: %s: %w", p.name, err)
 	}
-	if len(missing) > 0 {
-		return fmt.Errorf("wasm: %s: hooks not exported by module: %v", p.name, missing)
+	if err := pbv2.ValidateManifestHooks(bitmap, declared); err != nil {
+		return fmt.Errorf("wasm: %s: %w", p.name, err)
 	}
+	p.stateMu.Lock()
+	p.hooks = bitmap
+	p.stateMu.Unlock()
 	return nil
+}
+
+// supports reports whether the guest implements h, from the validated bitmap.
+func (p *Plugin) supports(h pbv2.Hook) bool {
+	p.stateMu.RLock()
+	defer p.stateMu.RUnlock()
+	return p.hooks.Has(h)
+}
+
+// supportedHooks reads the guest's declared hook set.
+//
+// A missing export is a v1 guest, or one built against an SDK predating the
+// single-export ABI. Saying so beats "hook not found" at the first dispatch,
+// which is where the same guest used to surface.
+func supportedHooks(ctx context.Context, mod api.Module) (pbv2.HookBitmap, error) {
+	fn := mod.ExportedFunction("supported_hooks")
+	if fn == nil {
+		return 0, fmt.Errorf("module exports no supported_hooks: it is a v1 guest, " +
+			"and v2 hosts dispatch through a single run_hook export")
+	}
+	res, err := fn.Call(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("supported_hooks: %w", err)
+	}
+	if len(res) != 1 {
+		return 0, fmt.Errorf("supported_hooks returned %d values, want 1", len(res))
+	}
+	return pbv2.HookBitmap(res[0]), nil
 }
 
 // acquire returns a plugin instance from the pool.
@@ -285,9 +328,14 @@ func (p *Plugin) newInstance(ctx context.Context) (*pluginInstance, error) {
 	return &pluginInstance{mod: mod, logEnabled: logEnabled}, nil
 }
 
-// CallRequest passes byte payload to the WASM hook and returns the result.
+// CallRequest dispatches one hook into the guest and returns its result bytes.
 // Uses instance pooling for concurrent request handling.
-func (p *Plugin) CallRequest(ctx context.Context, hook string, reqID uint64, inBytes []byte, output *[]byte) error {
+//
+// hook selects which handler the guest runs. v2 guests expose a single run_hook
+// export and route internally on the HookInput payload, so the hook identity
+// travels in the payload the caller already built; this argument exists to skip
+// guests that do not implement it, and to name the hook in errors.
+func (p *Plugin) CallRequest(ctx context.Context, hook pbv2.Hook, reqID uint64, inBytes []byte, output *[]byte) error {
 	if output == nil {
 		return fmt.Errorf("wasm: %s nil output", p.name)
 	}
@@ -316,10 +364,17 @@ func (p *Plugin) CallRequest(ctx context.Context, hook string, reqID uint64, inB
 
 	mod := inst.mod
 
-	fn := mod.ExportedFunction(hook)
-	if fn == nil {
+	// A guest that does not implement this hook is not an error: the pipeline
+	// offers every hook to every plugin. v1 detected it by a missing export;
+	// v2 asks the validated bitmap, so an unimplemented hook costs nothing
+	// rather than allocating and copying a payload the guest would discard.
+	if !p.supports(hook) {
 		healthy = true
 		return nil
+	}
+	fn := mod.ExportedFunction("run_hook")
+	if fn == nil {
+		return fmt.Errorf("wasm: %s exports no run_hook", p.name)
 	}
 
 	allocFn := mod.ExportedFunction("alloc")
