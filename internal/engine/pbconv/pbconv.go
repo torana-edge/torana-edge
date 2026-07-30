@@ -176,12 +176,17 @@ func ToPBStreamEvent(e *engine.StreamEvent) *pb.StreamEvent {
 	} else if e.ThinkingDelta != nil {
 		out.Event = &pb.StreamEvent_ThinkingDelta{ThinkingDelta: *e.ThinkingDelta}
 	} else if e.ToolCallStart != nil {
-		out.Event = &pb.StreamEvent_ToolCallStart{
-			ToolCallStart: &pb.ToolCallStart{
-				Index:     int32(e.ToolCallStart.Index),
-				Id:        e.ToolCallStart.ID,
-				Name:      e.ToolCallStart.Name,
-				Signature: e.ToolCallStart.Signature,
+		// v2 has no ToolCallStart: a tool call opens a content block like any
+		// other content, so one sequence covers text, thinking and tools, and
+		// the block index is what binds deltas and signatures to it.
+		out.Event = &pb.StreamEvent_ContentBlockStart{
+			ContentBlockStart: &pb.ContentBlockStart{
+				Index: int32(e.ToolCallStart.Index),
+				Block: &pb.ContentBlockStart_ToolCall{ToolCall: &pb.ToolCallRef{
+					Id:        e.ToolCallStart.ID,
+					Name:      e.ToolCallStart.Name,
+					Signature: e.ToolCallStart.Signature,
+				}},
 			},
 		}
 	} else if e.SignatureDelta != nil {
@@ -194,14 +199,18 @@ func ToPBStreamEvent(e *engine.StreamEvent) *pb.StreamEvent {
 			},
 		}
 	} else if e.ToolCallEnd != nil {
-		out.Event = &pb.StreamEvent_ToolCallEnd{
-			ToolCallEnd: &pb.ToolCallEnd{Index: int32(e.ToolCallEnd.Index)},
+		out.Event = &pb.StreamEvent_ContentBlockStop{
+			ContentBlockStop: &pb.ContentBlockStop{Index: int32(e.ToolCallEnd.Index)},
 		}
 	} else if e.FinishReason != "" {
-		out.Event = &pb.StreamEvent_FinishReason{FinishReason: e.FinishReason}
+		// v2 carries the finish reason on MessageStop rather than as a
+		// standalone event, so the end of a message is one thing to observe.
+		out.Event = &pb.StreamEvent_MessageStop{
+			MessageStop: &pb.MessageStop{FinishReason: e.FinishReason},
+		}
 	} else if e.Usage != nil {
 		out.Event = &pb.StreamEvent_Usage{
-			Usage: &pb.StreamUsage{
+			Usage: &pb.Usage{
 				InputTokens:      int32(e.Usage.InputTokens),
 				OutputTokens:     int32(e.Usage.OutputTokens),
 				CacheReadTokens:  int32(e.Usage.CacheReadTokens),
@@ -226,12 +235,18 @@ func FromPBStreamEvent(e *pb.StreamEvent) *engine.StreamEvent {
 		out.TextDelta = &v.TextDelta
 	case *pb.StreamEvent_ThinkingDelta:
 		out.ThinkingDelta = &v.ThinkingDelta
-	case *pb.StreamEvent_ToolCallStart:
-		out.ToolCallStart = &engine.ToolCallStart{
-			Index:     int(v.ToolCallStart.Index),
-			ID:        v.ToolCallStart.Id,
-			Name:      v.ToolCallStart.Name,
-			Signature: v.ToolCallStart.Signature,
+	case *pb.StreamEvent_ContentBlockStart:
+		// Only tool-call blocks map back: the engine IR has no separate
+		// open-event for text or thinking, which arrive as bare deltas. A
+		// text/thinking/provider block start therefore has no v1-shaped
+		// counterpart and is dropped rather than invented.
+		if tc, ok := v.ContentBlockStart.Block.(*pb.ContentBlockStart_ToolCall); ok && tc.ToolCall != nil {
+			out.ToolCallStart = &engine.ToolCallStart{
+				Index:     int(v.ContentBlockStart.Index),
+				ID:        tc.ToolCall.Id,
+				Name:      tc.ToolCall.Name,
+				Signature: tc.ToolCall.Signature,
+			}
 		}
 	case *pb.StreamEvent_SignatureDelta:
 		sig := v.SignatureDelta
@@ -241,12 +256,12 @@ func FromPBStreamEvent(e *pb.StreamEvent) *engine.StreamEvent {
 			Index:          int(v.ToolCallDelta.Index),
 			ArgumentsDelta: v.ToolCallDelta.ArgumentsDelta,
 		}
-	case *pb.StreamEvent_ToolCallEnd:
+	case *pb.StreamEvent_ContentBlockStop:
 		out.ToolCallEnd = &engine.ToolCallEnd{
-			Index: int(v.ToolCallEnd.Index),
+			Index: int(v.ContentBlockStop.Index),
 		}
-	case *pb.StreamEvent_FinishReason:
-		out.FinishReason = v.FinishReason
+	case *pb.StreamEvent_MessageStop:
+		out.FinishReason = v.MessageStop.FinishReason
 	case *pb.StreamEvent_Usage:
 		out.Usage = &engine.StreamUsage{
 			InputTokens:      int(v.Usage.InputTokens),
