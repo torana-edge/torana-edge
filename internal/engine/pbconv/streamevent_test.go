@@ -124,3 +124,75 @@ func TestToolBlockStartWithoutRefIsSafe(t *testing.T) {
 		t.Fatalf("built a tool call from a nil ref: %+v", got.ToolCallStart)
 	}
 }
+
+// The response conversion must not lose the assistant's reply. v1 had no
+// response type at all, so this mapping is new surface rather than a port, and
+// a field silently dropped here reproduces the v1 failure it exists to fix.
+func TestChatResponseRoundTrips(t *testing.T) {
+	in := &engine.ChatResponse{
+		Model:        "claude-opus-5",
+		ID:           "msg_1",
+		FinishReason: "tool_use",
+		Message: &engine.Message{
+			Role:              engine.Role("assistant"),
+			Content:           "here you go",
+			Thinking:          "considering",
+			ThinkingSignature: "tsig",
+			ToolCalls: []engine.ToolCall{{
+				ID: "call_1", Name: "read_file",
+				Arguments: map[string]any{"path": "/a"},
+				Signature: "sig",
+			}},
+		},
+		Usage:              &engine.StreamUsage{InputTokens: 10, OutputTokens: 20, CacheReadTokens: 3, CacheWriteTokens: 4},
+		UpstreamStatus:     200,
+		DurationMS:         1234,
+		ProviderExtensions: map[string]any{"x": "y"},
+	}
+	got := FromPBChatResponse(ToPBChatResponse(in))
+	if got == nil {
+		t.Fatal("round trip produced nil")
+	}
+	if got.Model != in.Model || got.ID != in.ID || got.FinishReason != in.FinishReason {
+		t.Errorf("scalars lost: %+v", got)
+	}
+	if got.UpstreamStatus != 200 || got.DurationMS != 1234 {
+		t.Errorf("upstream status/duration lost: %d %d", got.UpstreamStatus, got.DurationMS)
+	}
+	if got.Message == nil {
+		t.Fatal("the assistant reply was dropped — this is the v1 bug")
+	}
+	if got.Message.Content != "here you go" || got.Message.ThinkingSignature != "tsig" {
+		t.Errorf("message fields lost: %+v", got.Message)
+	}
+	if len(got.Message.ToolCalls) != 1 {
+		t.Fatalf("tool calls lost: %+v", got.Message.ToolCalls)
+	}
+	tc := got.Message.ToolCalls[0]
+	if tc.ID != "call_1" || tc.Name != "read_file" || tc.Signature != "sig" {
+		t.Errorf("tool call fields lost: %+v", tc)
+	}
+	if tc.Arguments["path"] != "/a" {
+		t.Errorf("tool call arguments lost: %+v", tc.Arguments)
+	}
+	if got.Usage == nil || got.Usage.InputTokens != 10 || got.Usage.CacheWriteTokens != 4 {
+		t.Errorf("usage lost: %+v", got.Usage)
+	}
+	if got.ProviderExtensions["x"] != "y" {
+		t.Errorf("provider extensions lost: %+v", got.ProviderExtensions)
+	}
+}
+
+// An error response has no message. Plugins must not assume one is present,
+// and the conversion must not fabricate an empty assistant turn.
+func TestErrorResponseCarriesNoMessage(t *testing.T) {
+	got := FromPBChatResponse(ToPBChatResponse(&engine.ChatResponse{
+		Model: "m", UpstreamStatus: 503,
+	}))
+	if got.Message != nil {
+		t.Fatalf("invented a message for an error response: %+v", got.Message)
+	}
+	if got.UpstreamStatus != 503 {
+		t.Fatalf("upstream status lost: %d", got.UpstreamStatus)
+	}
+}

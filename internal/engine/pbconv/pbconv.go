@@ -41,31 +41,7 @@ func ToPBChatRequest(c *engine.ChatRequest) *pb.ChatRequest {
 	}
 
 	for _, m := range c.Messages {
-		msg := &pb.Message{
-			Role:              string(m.Role),
-			Content:           m.Content,
-			Thinking:          m.Thinking,
-			ThinkingSignature: m.ThinkingSignature,
-			RedactedThinking:  m.RedactedThinking,
-			ToolCallId:        m.ToolCallID,
-			ToolName:          m.ToolName,
-		}
-		if len(m.ContentParts) > 0 {
-			msg.ContentPartsJson, _ = json.Marshal(m.ContentParts)
-		}
-		if len(m.CacheControl) > 0 {
-			msg.CacheControlJson, _ = json.Marshal(m.CacheControl)
-		}
-		for _, tc := range m.ToolCalls {
-			argsJson, _ := json.Marshal(tc.Arguments)
-			msg.ToolCalls = append(msg.ToolCalls, &pb.ToolCall{
-				Id:            tc.ID,
-				Name:          tc.Name,
-				ArgumentsJson: argsJson,
-				Signature:     tc.Signature,
-			})
-		}
-		out.Messages = append(out.Messages, msg)
+		out.Messages = append(out.Messages, toPBMessage(m))
 	}
 
 	for _, t := range c.Tools {
@@ -119,34 +95,7 @@ func FromPBChatRequest(c *pb.ChatRequest) *engine.ChatRequest {
 	}
 
 	for _, m := range c.Messages {
-		msg := engine.Message{
-			Role:              engine.Role(m.Role),
-			Content:           m.Content,
-			Thinking:          m.Thinking,
-			ThinkingSignature: m.ThinkingSignature,
-			RedactedThinking:  m.RedactedThinking,
-			ToolCallID:        m.ToolCallId,
-			ToolName:          m.ToolName,
-		}
-		if len(m.ContentPartsJson) > 0 {
-			json.Unmarshal(m.ContentPartsJson, &msg.ContentParts)
-		}
-		if len(m.CacheControlJson) > 0 {
-			json.Unmarshal(m.CacheControlJson, &msg.CacheControl)
-		}
-		for _, tc := range m.ToolCalls {
-			var args map[string]any
-			if len(tc.ArgumentsJson) > 0 {
-				json.Unmarshal(tc.ArgumentsJson, &args)
-			}
-			msg.ToolCalls = append(msg.ToolCalls, engine.ToolCall{
-				ID:        tc.Id,
-				Name:      tc.Name,
-				Arguments: args,
-				Signature: tc.Signature,
-			})
-		}
-		out.Messages = append(out.Messages, msg)
+		out.Messages = append(out.Messages, fromPBMessage(m))
 	}
 
 	for _, t := range c.Tools {
@@ -274,6 +223,129 @@ func FromPBStreamEvent(e *pb.StreamEvent) *engine.StreamEvent {
 			Code:    int(v.Error.Code),
 			Message: v.Error.Message,
 		}
+	}
+	return out
+}
+
+// Message conversion is shared by the request and response sides. A response
+// carries exactly one message, and duplicating this mapping for it is how the
+// two would drift — a field added to Message would reach requests only.
+
+func toPBMessage(m engine.Message) *pb.Message {
+	msg := &pb.Message{
+		Role:              string(m.Role),
+		Content:           m.Content,
+		Thinking:          m.Thinking,
+		ThinkingSignature: m.ThinkingSignature,
+		RedactedThinking:  m.RedactedThinking,
+		ToolCallId:        m.ToolCallID,
+		ToolName:          m.ToolName,
+	}
+	if len(m.ContentParts) > 0 {
+		msg.ContentPartsJson, _ = json.Marshal(m.ContentParts)
+	}
+	if len(m.CacheControl) > 0 {
+		msg.CacheControlJson, _ = json.Marshal(m.CacheControl)
+	}
+	for _, tc := range m.ToolCalls {
+		argsJson, _ := json.Marshal(tc.Arguments)
+		msg.ToolCalls = append(msg.ToolCalls, &pb.ToolCall{
+			Id:            tc.ID,
+			Name:          tc.Name,
+			ArgumentsJson: argsJson,
+			Signature:     tc.Signature,
+		})
+	}
+	return msg
+}
+
+func fromPBMessage(m *pb.Message) engine.Message {
+	if m == nil {
+		return engine.Message{}
+	}
+	msg := engine.Message{
+		Role:              engine.Role(m.Role),
+		Content:           m.Content,
+		Thinking:          m.Thinking,
+		ThinkingSignature: m.ThinkingSignature,
+		RedactedThinking:  m.RedactedThinking,
+		ToolCallID:        m.ToolCallId,
+		ToolName:          m.ToolName,
+	}
+	if len(m.ContentPartsJson) > 0 {
+		json.Unmarshal(m.ContentPartsJson, &msg.ContentParts)
+	}
+	if len(m.CacheControlJson) > 0 {
+		json.Unmarshal(m.CacheControlJson, &msg.CacheControl)
+	}
+	for _, tc := range m.ToolCalls {
+		var args map[string]any
+		if len(tc.ArgumentsJson) > 0 {
+			json.Unmarshal(tc.ArgumentsJson, &args)
+		}
+		msg.ToolCalls = append(msg.ToolCalls, engine.ToolCall{
+			ID:        tc.Id,
+			Name:      tc.Name,
+			Arguments: args,
+			Signature: tc.Signature,
+		})
+	}
+	return msg
+}
+
+func ToPBChatResponse(r *engine.ChatResponse) *pb.ChatResponse {
+	if r == nil {
+		return nil
+	}
+	out := &pb.ChatResponse{
+		Model:          r.Model,
+		Id:             r.ID,
+		FinishReason:   r.FinishReason,
+		UpstreamStatus: int32(r.UpstreamStatus),
+		DurationMs:     r.DurationMS,
+	}
+	if r.Message != nil {
+		out.Message = toPBMessage(*r.Message)
+	}
+	if r.Usage != nil {
+		out.Usage = &pb.Usage{
+			InputTokens:      int32(r.Usage.InputTokens),
+			OutputTokens:     int32(r.Usage.OutputTokens),
+			CacheReadTokens:  int32(r.Usage.CacheReadTokens),
+			CacheWriteTokens: int32(r.Usage.CacheWriteTokens),
+		}
+	}
+	if len(r.ProviderExtensions) > 0 {
+		out.ProviderExtensionsJson, _ = json.Marshal(r.ProviderExtensions)
+	}
+	return out
+}
+
+func FromPBChatResponse(r *pb.ChatResponse) *engine.ChatResponse {
+	if r == nil {
+		return nil
+	}
+	out := &engine.ChatResponse{
+		Model:          r.Model,
+		ID:             r.Id,
+		FinishReason:   r.FinishReason,
+		UpstreamStatus: int(r.UpstreamStatus),
+		DurationMS:     r.DurationMs,
+	}
+	if r.Message != nil {
+		msg := fromPBMessage(r.Message)
+		out.Message = &msg
+	}
+	if r.Usage != nil {
+		out.Usage = &engine.StreamUsage{
+			InputTokens:      int(r.Usage.InputTokens),
+			OutputTokens:     int(r.Usage.OutputTokens),
+			CacheReadTokens:  int(r.Usage.CacheReadTokens),
+			CacheWriteTokens: int(r.Usage.CacheWriteTokens),
+		}
+	}
+	if len(r.ProviderExtensionsJson) > 0 {
+		json.Unmarshal(r.ProviderExtensionsJson, &out.ProviderExtensions)
 	}
 	return out
 }

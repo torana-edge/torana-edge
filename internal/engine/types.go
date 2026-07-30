@@ -147,3 +147,38 @@ type StreamUsage struct {
 	// cacheWriteInputTokens); 0 for providers that don't report it.
 	CacheWriteTokens int
 }
+
+// --- Response side ---
+
+// ChatResponse is the canonical representation of a completed chat response,
+// regardless of provider wire format.
+//
+// It exists because v1 had no response type, so run_after_response was handed a
+// ChatRequest and three different call paths filled it three incompatible ways:
+// a synthesized assistant message on the non-streaming path, model + metadata
+// with no messages on the upstream-error path, and — on the streaming path —
+// the outbound REQUEST, whose Messages are the conversation history rather than
+// the reply. A plugin reading the assistant's answer got the last user message
+// instead, depending on a path it could not observe.
+//
+// Mirrors torana.v2.ChatResponse field for field so the conversion cannot lose
+// or invent anything.
+type ChatResponse struct {
+	Model string
+	ID    string
+	// Message is the assistant's reply: exactly one message, because a
+	// response IS one message. The v1 shape allowed a list and thereby allowed
+	// the ambiguity above.
+	Message *Message
+	// FinishReason is the provider's stop reason ("stop", "tool_use", ...).
+	FinishReason string
+	Usage        *StreamUsage
+	// UpstreamStatus is the provider's HTTP status. Non-2xx means Message is
+	// usually absent, which is why plugins must not assume it is set.
+	UpstreamStatus int
+	// DurationMS is how long the upstream call took.
+	DurationMS int64
+	// ProviderExtensions carries unparsed provider fields passed through
+	// transparently, as on the request side.
+	ProviderExtensions map[string]any
+}
