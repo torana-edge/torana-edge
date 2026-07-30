@@ -45,7 +45,7 @@ import (
 	"github.com/torana-edge/torana-edge/internal/provider"
 	"github.com/torana-edge/torana-edge/internal/secret"
 	"github.com/torana-edge/torana-edge/internal/wasm"
-	"github.com/torana-edge/torana-plugin-sdk/pb"
+	pb "github.com/torana-edge/torana-plugin-sdk/pb/v2"
 )
 
 const maxBodySize = 10 * 1024 * 1024 // 10 MB
@@ -318,6 +318,42 @@ func (rs *reqState) responseMeta() map[string]any {
 			"output_tokens":      rs.UsageOut,
 			"cache_read_tokens":  rs.UsageCacheRead,
 			"cache_write_tokens": rs.UsageCacheWrite,
+		},
+	}
+}
+
+// chatResponse builds the canonical response handed to run_after_response.
+//
+// One builder for all three paths on purpose. v1 had each path fill a
+// ChatRequest its own way -- a synthesized assistant message, model plus
+// metadata with no messages, and on the streaming path the outbound REQUEST --
+// so what a plugin received depended on a path it could not observe. Sharing
+// the construction is what stops that returning.
+//
+// msg is the assistant's reply, or nil when there is none (upstream error, or
+// a streamed body already sent).
+//
+// id is the PROVIDER's message id, empty when the path does not surface one.
+// reqState.ID is a host-internal counter and deliberately not used here:
+// putting it in a provider-shaped field would hand plugins a value that looks
+// like an upstream identifier and is not.
+func (rs *reqState) chatResponse(model, id string, msg *engine.Message, finishReason string) *engine.ChatResponse {
+	var durationMS int64
+	if !rs.Start.IsZero() {
+		durationMS = time.Since(rs.Start).Milliseconds()
+	}
+	return &engine.ChatResponse{
+		Model:          model,
+		ID:             id,
+		Message:        msg,
+		FinishReason:   finishReason,
+		UpstreamStatus: rs.UpstreamStatus,
+		DurationMS:     durationMS,
+		Usage: &engine.StreamUsage{
+			InputTokens:      rs.UsageIn,
+			OutputTokens:     rs.UsageOut,
+			CacheReadTokens:  rs.UsageCacheRead,
+			CacheWriteTokens: rs.UsageCacheWrite,
 		},
 	}
 }
@@ -941,11 +977,12 @@ func New(cfg Config) (*Server, error) {
 				ctx := resp.Request.Context()
 				rs := reqStateFrom(ctx)
 				if pl := rs.Pipeline; pl != nil {
-					errChat := &engine.ChatRequest{
-						Model:      rs.Model,
-						ToranaMeta: map[string]any{"_response": rs.responseMeta()},
-					}
-					if _, err := pl.RunAfterResponse(ctx, rs.ID, errChat); err != nil {
+					// No assistant message: upstream failed, so there is no
+					// reply. UpstreamStatus carries the failure, and plugins
+					// must not assume Message is set. Immutable — there is no
+					// body to rewrite.
+					errResp := rs.chatResponse(rs.Model, "", nil, "")
+					if _, err := pl.RunAfterResponse(ctx, rs.ID, errResp, false); err != nil {
 						log.Printf("plugin run_after_response (error path): %v", err)
 					}
 				}
@@ -1068,14 +1105,19 @@ func New(cfg Config) (*Server, error) {
 					// here: the whole stream has been serialized.
 					ctx := resp.Request.Context()
 					if pl := reqStateFrom(ctx).Pipeline; pl != nil {
-						if chat, _ := ctx.Value(engine.ChatRequestKey).(*engine.ChatRequest); chat != nil {
-							if chat.ToranaMeta == nil {
-								chat.ToranaMeta = map[string]any{}
-							}
-							chat.ToranaMeta["_response"] = rs.responseMeta()
-							if _, err := pl.RunAfterResponse(ctx, reqStateFrom(ctx).ID, chat); err != nil {
-								log.Printf("plugin run_after_response (stream): %v", err)
-							}
+						// v1 passed the outbound REQUEST here, so a plugin
+						// reading the assistant's reply got the last USER
+						// message instead — a real bug, not just confusing
+						// naming, and invisible because the shape typechecked.
+						//
+						// The streamed body is already on the wire, so there
+						// is no assembled reply to hand over and nothing can
+						// be rewritten: Message is nil and mutable is false.
+						// A plugin that needs the streamed content observes it
+						// through run_on_stream_chunk, which sees every event.
+						streamResp := rs.chatResponse(rs.Model, "", nil, "")
+						if _, err := pl.RunAfterResponse(ctx, reqStateFrom(ctx).ID, streamResp, false); err != nil {
+							log.Printf("plugin run_after_response (stream): %v", err)
 						}
 					}
 				}()

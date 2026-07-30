@@ -459,9 +459,12 @@ func runJSONResponseHooks(ctx context.Context, pl *plugin.PluginPipeline, reqID 
 	}
 	respChat.Messages = []engine.Message{assistant}
 
-	after, err := pl.RunAfterResponse(ctx, reqID, respChat)
-	if err == nil && after != nil && len(after.Messages) == 1 {
-		msg := after.Messages[0]
+	// The non-streaming path is the one where a replacement CAN be applied:
+	// the body has not been written yet.
+	resp := rs.chatResponse(respChat.Model, "", &assistant, "")
+	after, err := pl.RunAfterResponse(ctx, reqID, resp, true)
+	if err == nil && after != nil && after.Message != nil {
+		msg := *after.Message
 		if msg.Content != refs.content && refs.setContent != nil {
 			refs.setContent(msg.Content)
 			modified = true
