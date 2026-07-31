@@ -35,6 +35,12 @@ type responseRefs struct {
 	setContent func(string)
 	toolCalls  []toolCallRef
 	usage      *engine.StreamUsage // provider-reported token usage (read-only)
+	// id and finishReason are OBSERVED host-owned facts. They were hard-coded
+	// empty in the hook input, so a plugin received typed fields the provider
+	// had actually supplied and saw nothing — the same hostile silence v2
+	// exists to remove, just on the read side instead of the write side.
+	id           string
+	finishReason string
 }
 
 // extractResponse builds mutable references into a decoded response body for
@@ -120,6 +126,7 @@ func extractOpenAI(body map[string]any) responseRefs {
 	usage, _ := body["usage"].(map[string]any)
 	refs := responseRefs{
 		model: asString(body["model"]),
+		id:    asString(body["id"]),
 		// Field names live in the openai format package, shared with the
 		// streaming reader, so the two cannot drift apart again.
 		usage: openaifmt.ReadUsage(usage),
@@ -143,6 +150,7 @@ func extractOpenAI(body map[string]any) responseRefs {
 		if ci == 0 {
 			refs.content = asString(msg["content"])
 			refs.setContent = func(s string) { msg["content"] = s }
+			refs.finishReason = asString(choice["finish_reason"])
 		}
 		toolCalls, _ := msg["tool_calls"].([]any)
 		for _, t := range toolCalls {
@@ -252,8 +260,10 @@ func extractResponsesOutput(refs *responseRefs, output []any) {
 
 func extractAnthropic(body map[string]any) responseRefs {
 	refs := responseRefs{
-		model: asString(body["model"]),
-		usage: usageFrom(body, "usage", "input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"),
+		model:        asString(body["model"]),
+		id:           asString(body["id"]),
+		finishReason: asString(body["stop_reason"]),
+		usage:        usageFrom(body, "usage", "input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"),
 	}
 	blocks, _ := body["content"].([]any)
 	for _, b := range blocks {
@@ -286,7 +296,10 @@ func extractAnthropic(body map[string]any) responseRefs {
 // --- bedrock: output.message.content[].{text | toolUse{toolUseId,name,input}} ---
 
 func extractBedrock(body map[string]any) responseRefs {
-	refs := responseRefs{usage: usageFrom(body, "usage", "inputTokens", "outputTokens", "cacheReadInputTokens", "cacheWriteInputTokens")}
+	refs := responseRefs{
+		finishReason: asString(body["stopReason"]),
+		usage:        usageFrom(body, "usage", "inputTokens", "outputTokens", "cacheReadInputTokens", "cacheWriteInputTokens"),
+	}
 	output, _ := body["output"].(map[string]any)
 	msg, _ := output["message"].(map[string]any)
 	parts, _ := msg["content"].([]any)
@@ -330,8 +343,11 @@ func extractGemini(body map[string]any) responseRefs {
 		usage: usageFrom(body, "usageMetadata", "promptTokenCount", "candidatesTokenCount", "cachedContentTokenCount", ""),
 	}
 	candidates, _ := body["candidates"].([]any)
-	for _, c := range candidates {
+	for ci, c := range candidates {
 		cand, _ := c.(map[string]any)
+		if ci == 0 {
+			refs.finishReason = asString(cand["finishReason"])
+		}
 		content, _ := cand["content"].(map[string]any)
 		parts, _ := content["parts"].([]any)
 		for _, p := range parts {
@@ -461,7 +477,7 @@ func runJSONResponseHooks(ctx context.Context, pl *plugin.PluginPipeline, reqID 
 
 	// The non-streaming path is the one where a replacement CAN be applied:
 	// the body has not been written yet.
-	resp := rs.chatResponse(respChat.Model, "", &assistant, "")
+	resp := rs.chatResponse(respChat.Model, refs.id, &assistant, refs.finishReason)
 	after, err := pl.RunAfterResponse(ctx, reqID, resp, true)
 	if err == nil && after != nil && after.Message != nil {
 		msg := *after.Message
