@@ -300,6 +300,25 @@ type reqState struct {
 	// could be deleted out from under the hook, and reqState was read and
 	// written by two goroutines at once.
 	//
+	// COST, stated plainly: waiting here IS on the client's critical path.
+	// Closing the pipe does not give the client EOF — Go's HTTP server writes
+	// the chunked terminator (or HTTP/2 END_STREAM) when the HANDLER returns,
+	// so a client reading to EOF waits for this hook and every preceding
+	// drain. An earlier comment claimed the opposite; it was wrong, and wrong
+	// in the same way as the deferred-cleanup comment it replaced.
+	//
+	// So an observational streaming hook can add up to the per-plugin call
+	// timeout (5s), times the number of plugins declaring it, to transport
+	// completion. Clients that stop on the protocol sentinel ([DONE], or the
+	// provider's stop event) do not notice, because those bytes are already
+	// written; clients that wait for HTTP completion do.
+	//
+	// This is a DELIBERATE first cut: correctness of request-state lifetime
+	// over latency, while there are no users. Making observational
+	// post-processing genuinely off the response path needs a non-cancelled
+	// bounded context and moves cleanup and final metrics ownership to the
+	// finalizer — recorded as a follow-up in HANDOFF_TO_AGENT.md.
+	//
 	// Set in ModifyResponse, which runs inside ServeHTTP on the handler's own
 	// goroutine, so the handler's later read is ordered after the write.
 	streamDone chan struct{}
@@ -1226,9 +1245,12 @@ func New(cfg Config) (*Server, error) {
 						// A plugin that needs the streamed content observes it
 						// through run_on_stream_chunk, which sees every event.
 						streamResp := rs.chatResponse(rs.Model, "", nil, "")
-						// Observational only. The streamed body has already
-						// gone to the caller in full, so there is nothing left
-						// to withhold and failure_mode has nothing to act on.
+						// Observational only. Every stream event has been
+						// written, so there is nothing left to withhold and
+						// failure_mode has nothing to act on. "Observational"
+						// describes AUTHORITY, not timing: this still runs
+						// before the handler returns, so it is on the client's
+						// critical path (see reqState.streamDone).
 						// Content filtering on a stream belongs to
 						// run_on_stream_chunk, which CAN terminate — see the
 						// stream hook above. Recorded so the failure is
@@ -2103,6 +2125,16 @@ func New(cfg Config) (*Server, error) {
 		// before its observational hook, so EOF releases ServeHTTP while the
 		// hook still needs this state.
 		defer func() {
+			// Wait here too, not only after ServeHTTP.
+			//
+			// ReverseProxy panics with http.ErrAbortHandler when a client
+			// disconnects mid-stream, and this handler re-panics it. During
+			// that unwind the normal-path wait is skipped entirely, so
+			// EndRequest could delete request-scoped metadata while the stream
+			// goroutine was still draining or running its observational hook.
+			// Putting the wait in the deferred cleanup gives normal return,
+			// ErrAbortHandler and any other panic the same invariant.
+			rs.awaitStreamDone()
 			if rs.Pipeline != nil {
 				rs.Pipeline.EndRequest(rs.ID)
 				rs.Pipeline.Release()
@@ -2134,12 +2166,11 @@ func New(cfg Config) (*Server, error) {
 		proxy.ServeHTTP(tw, r)
 
 		// Wait for the streaming goroutine's observational hook before reading
-		// rs for the feed or dropping request state below. The client already
-		// has its EOF — the pipe closed before the hook ran — so this delays
-		// bookkeeping, not the response.
-		if rs.streamDone != nil {
-			<-rs.streamDone
-		}
+		// rs for stats and the feed. The deferred cleanup waits too; this one
+		// orders the reads below, which happen before it.
+		//
+		// This is on the client's critical path — see reqState.streamDone.
+		rs.awaitStreamDone()
 
 		s.recordCompactionReports(rs)
 		s.stats.RecordRequest(tr.bytesRead, tw.bytesWritten)
@@ -3055,4 +3086,18 @@ func (tr *trackingReader) Read(p []byte) (n int, err error) {
 	n, err = tr.ReadCloser.Read(p)
 	tr.bytesRead += int64(n)
 	return n, err
+}
+
+// awaitStreamDone blocks until the streaming goroutine has finished, including
+// its observational hook. It is idempotent and safe on a non-streaming request.
+//
+// Called from BOTH the normal path and the deferred cleanup, because a client
+// disconnect mid-stream unwinds through http.ErrAbortHandler and skips the
+// normal path entirely — which would drop request-scoped state while the hook
+// was still using it.
+func (rs *reqState) awaitStreamDone() {
+	if rs == nil || rs.streamDone == nil {
+		return
+	}
+	<-rs.streamDone
 }

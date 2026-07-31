@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/torana-edge/torana-edge/internal/plugin"
@@ -112,7 +113,7 @@ func TestJSONResponseHooksAllFormats(t *testing.T) {
 			body: `{
 				"modelVersion": "gemini-x",
 				"candidates": [{"finishReason": "STOP", "content": {"role": "model", "parts": [
-					{"functionCall": {"name": "write", "args": ` + kvArgsObj + `}}
+					{"thoughtSignature": "SIG_AFTER_RESPONSE", "functionCall": {"name": "write", "args": ` + kvArgsObj + `}}
 				]}}],
 				"usageMetadata": {"promptTokenCount": 10, "candidatesTokenCount": 5}
 			}`,
@@ -166,4 +167,38 @@ func TestJSONResponseHooksAllFormats(t *testing.T) {
 func jsonStr(s string) string {
 	b, _ := json.Marshal(s)
 	return string(b)
+}
+
+// The AFTER-RESPONSE mutation path must clear a provider signature too.
+//
+// The stream-path test covers a different call site of invalidateSignature.
+// test-mutator rewrites tool arguments from run_after_response, so a signed
+// Gemini body driven through it proves the second site — otherwise one branch
+// was relying on the other's coverage.
+func TestAfterResponseMutationClearsGeminiSignature(t *testing.T) {
+	// fixturesDir, not officialBundlesDir: test-mutator is a repo fixture, and
+	// gating this on TORANA_PLUGIN_BUNDLES_DIR would silently skip the
+	// assertion in the default local run — which is exactly how a branch ends
+	// up believing it is covered.
+	requireWASM(t, fixturesDir+"/test-mutator/plugin.wasm")
+	pp := newPluginPipeline(t, fixturesDir, "test-mutator")
+
+	const body = `{
+		"modelVersion": "gemini-x",
+		"candidates": [{"finishReason": "STOP", "content": {"role": "model", "parts": [
+			{"thoughtSignature": "SIG_AFTER_RESPONSE", "functionCall": {"id": "c1", "name": "write", "args": {"k": "v"}}}
+		]}}]
+	}`
+
+	out, err := runJSONResponseHooks(context.Background(), pp, 1, "gemini", nil, []byte(body))
+	if err != nil {
+		t.Fatalf("runJSONResponseHooks: %v", err)
+	}
+	if !strings.Contains(string(out), "mutated_by") {
+		t.Fatalf("test-mutator did not rewrite the arguments, so this proves nothing "+
+			"about signature clearing: %s", out)
+	}
+	if strings.Contains(string(out), "SIG_AFTER_RESPONSE") {
+		t.Fatalf("the provider signature survived an after-response mutation: %s", out)
+	}
 }

@@ -849,3 +849,166 @@ func TestStreamingObservationalHookCompletesBeforeFeedRecording(t *testing.T) {
 		t.Error("an observational failure was reported as a block; nothing was withheld")
 	}
 }
+
+// The observational streaming hook IS on the client's critical path, and this
+// pins that as a recorded decision.
+//
+// Closing the pipe does not give the client EOF: Go's HTTP server writes the
+// chunked terminator when the HANDLER returns, and the handler waits for this
+// hook. An earlier comment in server.go claimed the opposite — this test exists
+// so the real behaviour cannot drift back into a comfortable assumption.
+//
+// "Observational" describes the hook's AUTHORITY (it cannot change the
+// response), not its timing.
+func TestObservationalStreamingHookIsOnTheClientCriticalPath(t *testing.T) {
+	requireWASM(t, fixturesDir+"/test-slow-after-stream/plugin.wasm")
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fl, _ := w.(http.Flusher)
+		fmt.Fprint(w, `data: {"choices":[{"index":0,"delta":{"content":"hello"}}]}`+"\n\n")
+		if fl != nil {
+			fl.Flush()
+		}
+		fmt.Fprint(w, "data: [DONE]\n\n")
+		if fl != nil {
+			fl.Flush()
+		}
+	}))
+	defer upstream.Close()
+
+	newServer := func(t *testing.T, order []string) string {
+		t.Helper()
+		cfg := Config{Port: "0", Providers: provider.Config{
+			Providers: map[string]provider.Provider{"oai": {URL: upstream.URL, Format: "openai"}},
+			Plugins: provider.PluginsConfig{
+				Dir: fixturesDir, Order: order, AllowUnapproved: true,
+			},
+		}}
+		srv, err := New(cfg)
+		if err != nil {
+			t.Fatalf("New: %v", err)
+		}
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatalf("listen: %v", err)
+		}
+		go srv.Serve(ln)
+		t.Cleanup(func() { srv.Shutdown(context.Background()) })
+		return ln.Addr().String()
+	}
+
+	timeToEOF := func(t *testing.T, addr string) time.Duration {
+		t.Helper()
+		start := time.Now()
+		resp, err := http.Post("http://"+addr+"/provider/oai/v1/chat/completions",
+			"application/json", strings.NewReader(`{"model":"gpt-x","stream":true,"messages":[{"role":"user","content":"hi"}]}`))
+		if err != nil {
+			t.Fatalf("post: %v", err)
+		}
+		body, _ := io.ReadAll(resp.Body) // reads to EOF, i.e. handler return
+		resp.Body.Close()
+		if !strings.Contains(string(body), "hello") {
+			t.Fatalf("stream body missing: %s", body)
+		}
+		return time.Since(start)
+	}
+
+	// Warm both: first request pays WASM instantiation.
+	fast := newServer(t, []string{"test-inert-a"})
+	slow := newServer(t, []string{"test-slow-after-stream"})
+	timeToEOF(t, fast)
+	timeToEOF(t, slow)
+
+	fastEOF := timeToEOF(t, fast)
+	slowEOF := timeToEOF(t, slow)
+
+	// The slow hook must be visible in time-to-EOF. If observational
+	// post-processing is ever moved off the response path, this test should
+	// FAIL and be replaced with its opposite — that is the point of pinning it.
+	if slowEOF <= fastEOF {
+		t.Fatalf("time to EOF did not grow with a slow observational hook "+
+			"(fast=%s slow=%s). If post-processing was made asynchronous, invert "+
+			"this test and update reqState.streamDone's contract.", fastEOF, slowEOF)
+	}
+	t.Logf("time to EOF: fast=%s slow=%s — the observational hook is synchronous "+
+		"with HTTP completion by design", fastEOF, slowEOF)
+}
+
+// A client disconnecting mid-stream must not drop request state before the
+// observational hook finishes.
+//
+// ReverseProxy panics with http.ErrAbortHandler when copying a streaming
+// response to a gone client, and this handler re-panics it. That unwind skips
+// the normal-path wait entirely, so EndRequest could delete request-scoped
+// metadata while the stream goroutine was still running RunAfterResponse. The
+// wait therefore lives in the deferred cleanup, where every exit shares it.
+func TestClientDisconnectStillWaitsForTheObservationalHook(t *testing.T) {
+	requireWASM(t, fixturesDir+"/test-trapper-after-stream/plugin.wasm")
+
+	release := make(chan struct{})
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fl, _ := w.(http.Flusher)
+		fmt.Fprint(w, `data: {"choices":[{"index":0,"delta":{"content":"first"}}]}`+"\n\n")
+		if fl != nil {
+			fl.Flush()
+		}
+		// Hold the stream open so the client can disconnect mid-flight.
+		<-release
+		fmt.Fprint(w, "data: [DONE]\n\n")
+		if fl != nil {
+			fl.Flush()
+		}
+	}))
+	defer upstream.Close()
+
+	cfg := Config{Port: "0", Providers: provider.Config{
+		Providers: map[string]provider.Provider{"oai": {URL: upstream.URL, Format: "openai"}},
+		Plugins: provider.PluginsConfig{
+			Dir: fixturesDir, Order: []string{"test-trapper-after-stream"}, AllowUnapproved: true,
+		},
+	}}
+	srv, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	go srv.Serve(ln)
+	defer srv.Shutdown(context.Background())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	req, _ := http.NewRequestWithContext(ctx, http.MethodPost,
+		"http://"+ln.Addr().String()+"/provider/oai/v1/chat/completions",
+		strings.NewReader(`{"model":"gpt-x","stream":true,"messages":[{"role":"user","content":"hi"}]}`))
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	// Read the first event, then abandon the response mid-stream.
+	buf := make([]byte, 16)
+	_, _ = resp.Body.Read(buf)
+	cancel()
+	resp.Body.Close()
+	close(release)
+
+	// The assertion is that the server survives the unwind with its state
+	// lifetime intact. Under -race this also catches concurrent reqState
+	// access; without the deferred wait, EndRequest runs while the hook is
+	// still executing.
+	//
+	// Give the goroutine time to finish, then prove the server is still
+	// serving — a panic escaping the recovery would have killed it.
+	time.Sleep(500 * time.Millisecond)
+	probe, err := http.Post("http://"+ln.Addr().String()+"/provider/oai/v1/chat/completions",
+		"application/json", strings.NewReader(`{"model":"gpt-x","messages":[{"role":"user","content":"hi"}]}`))
+	if err != nil {
+		t.Fatalf("server did not survive the disconnect unwind: %v", err)
+	}
+	probe.Body.Close()
+}
