@@ -663,3 +663,111 @@ func TestFailureModeBlockRefusesAtTheTransport(t *testing.T) {
 		t.Fatalf("the upstream completion reached the caller despite the block: %s", got)
 	}
 }
+
+// failure_mode: block on the NON-STREAMING response path.
+//
+// The body has not been written yet — ModifyResponse still owns it — so this
+// is refusable, and forwarding the provider's body after a plugin refused it
+// is the same fail-open as sending the request upstream after a refusal.
+// A different transport path from the request hook, and it was independently
+// wrong.
+func TestFailureModeBlockRefusesTheNonStreamingResponse(t *testing.T) {
+	requireWASM(t, fixturesDir+"/test-trapper-response/plugin.wasm")
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"id":"chatcmpl-1","model":"gpt-x","choices":[{"message":{"role":"assistant","content":"leaked"},"finish_reason":"stop"}]}`)
+	}))
+	defer upstream.Close()
+
+	cfg := Config{Port: "0", Providers: provider.Config{
+		Providers: map[string]provider.Provider{"oai": {URL: upstream.URL, Format: "openai"}},
+		Plugins: provider.PluginsConfig{
+			Dir: fixturesDir, Order: []string{"test-trapper-response"}, AllowUnapproved: true,
+		},
+	}}
+	srv, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	go srv.Serve(ln)
+	defer srv.Shutdown(context.Background())
+
+	resp, err := http.Post("http://"+ln.Addr().String()+"/provider/oai/v1/chat/completions",
+		"application/json", strings.NewReader(`{"model":"gpt-x","messages":[{"role":"user","content":"hi"}]}`))
+	if err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	defer resp.Body.Close()
+	got, _ := io.ReadAll(resp.Body)
+
+	if strings.Contains(string(got), "no provider configured") {
+		t.Fatalf("the request never reached the pipeline (%s)", got)
+	}
+	if strings.Contains(string(got), "leaked") {
+		t.Fatalf("the provider body reached the caller after a block-mode response "+
+			"hook trapped: %s", got)
+	}
+	if resp.StatusCode == http.StatusOK {
+		t.Fatalf("caller got 200 after a block-mode response hook trapped: %s", got)
+	}
+}
+
+// failure_mode: block on a stream whose headers and body have already begun.
+//
+// Nothing can be refused any more, so the honest action is to TERMINATE.
+// Replaying the refused event was the fail-open — it delivers exactly the
+// content the block policy exists to withhold.
+func TestFailureModeBlockTerminatesTheStream(t *testing.T) {
+	requireWASM(t, fixturesDir+"/test-trapper-stream/plugin.wasm")
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fl, _ := w.(http.Flusher)
+		fmt.Fprint(w, `data: {"choices":[{"index":0,"delta":{"content":"leaked"}}]}`+"\n\n")
+		if fl != nil {
+			fl.Flush()
+		}
+		fmt.Fprint(w, "data: [DONE]\n\n")
+		if fl != nil {
+			fl.Flush()
+		}
+	}))
+	defer upstream.Close()
+
+	cfg := Config{Port: "0", Providers: provider.Config{
+		Providers: map[string]provider.Provider{"oai": {URL: upstream.URL, Format: "openai"}},
+		Plugins: provider.PluginsConfig{
+			Dir: fixturesDir, Order: []string{"test-trapper-stream"}, AllowUnapproved: true,
+		},
+	}}
+	srv, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	go srv.Serve(ln)
+	defer srv.Shutdown(context.Background())
+
+	resp, err := http.Post("http://"+ln.Addr().String()+"/provider/oai/v1/chat/completions",
+		"application/json", strings.NewReader(`{"model":"gpt-x","stream":true,"messages":[{"role":"user","content":"hi"}]}`))
+	if err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	defer resp.Body.Close()
+	got, _ := io.ReadAll(resp.Body)
+
+	if strings.Contains(string(got), "no provider configured") {
+		t.Fatalf("the request never reached the pipeline (%s)", got)
+	}
+	if strings.Contains(string(got), "leaked") {
+		t.Fatalf("the refused event was replayed to the caller: %s", got)
+	}
+}

@@ -48,6 +48,13 @@ type RequestEvent struct {
 	// (env.block_request), "respond" (env.respond_request), "route"
 	// (env.route_request). Empty when no pipeline is loaded.
 	Verdict string `json:"verdict,omitempty"`
+	// PluginFailure marks a plugin that failed on an OBSERVATIONAL hook, where
+	// failure_mode cannot be applied because the response had already gone to
+	// the caller. Distinct from Verdict "block": nothing was withheld, and
+	// saying otherwise would claim an enforcement that did not happen. Surfaced
+	// so an operator can see a plugin is failing on a path the host cannot
+	// protect.
+	PluginFailure bool `json:"plugin_failure,omitempty"`
 }
 
 // subscriber holds one SSE client's channel and its unique ID used for

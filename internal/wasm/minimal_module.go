@@ -70,24 +70,48 @@ func MinimalV2Module(loopForever bool) []byte {
 // wazero forbids inspecting host modules — and would be the weaker claim
 // anyway: what matters is whether a guest can link against it.
 func ModuleImportingEnvFunc(name string) []byte {
+	// Real signatures, so a restored side door produces an UNKNOWN-IMPORT
+	// error rather than a signature mismatch. Declaring everything as
+	// (i32,i32)->i64 meant a restored env.abort — four i32s, no result —
+	// failed to link on the signature, and a test treating any error as
+	// "absent" could not detect the regression it exists to catch.
+	params, results := 2, 1
+	switch name {
+	case "abort":
+		params, results = 4, 0
+	case "host_call":
+		params, results = 4, 1
+	}
+	return moduleImporting(name, params, results)
+}
+
+func moduleImporting(name string, params, results int) []byte {
 	sec := func(id byte, body []byte) []byte {
 		return append([]byte{id, byte(len(body))}, body...)
 	}
 	str := func(s string) []byte { return append([]byte{byte(len(s))}, s...) }
 
-	// Types: 0 (i32)->i32 alloc, 1 (i32,i32)->i64 run_hook + the import,
-	// 2 ()->i64 supported_hooks.
-	types := sec(0x01, []byte{
-		0x03,
+	// Types: 0 (i32)->i32 alloc, 1 (i32,i32)->i64 run_hook,
+	// 2 ()->i64 supported_hooks, 3 the import's real signature.
+	importType := []byte{0x60, byte(params)}
+	for i := 0; i < params; i++ {
+		importType = append(importType, 0x7f) // i32
+	}
+	importType = append(importType, byte(results))
+	for i := 0; i < results; i++ {
+		importType = append(importType, 0x7e) // i64
+	}
+	typeBody := []byte{0x04,
 		0x60, 0x01, 0x7f, 0x01, 0x7f,
 		0x60, 0x02, 0x7f, 0x7f, 0x01, 0x7e,
 		0x60, 0x00, 0x01, 0x7e,
-	})
+	}
+	types := sec(0x01, append(typeBody, importType...))
 
 	imp := []byte{0x01}
 	imp = append(imp, str("env")...)
 	imp = append(imp, str(name)...)
-	imp = append(imp, 0x00, 0x01) // func, type 1
+	imp = append(imp, 0x00, 0x03) // func, the import's own type
 	imports := sec(0x02, imp)
 
 	// Local funcs come after the imported one, so indexes shift by 1.

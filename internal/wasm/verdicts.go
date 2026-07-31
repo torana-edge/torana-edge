@@ -193,23 +193,25 @@ func (r *Runtime) metaAppend(reqID uint64, key string, fragment []byte) (string,
 		if len(fragment) == 0 {
 			return "", false, nil
 		}
-		bucket = make(map[string]string)
+		bucket = make(map[string][]byte)
 		r.meta[reqID] = bucket
 	}
 	existing, present := bucket[key]
 	if len(fragment) == 0 {
-		return existing, present, nil
+		return string(existing), present, nil
 	}
-	if err := r.checkMetaBudget(bucket, key, len(existing), len(fragment)); err != nil {
-		return existing, present, err
+	if err := r.checkMetaBudget(bucket, key, len(existing)+len(fragment), len(fragment)); err != nil {
+		return string(existing), present, err
 	}
-	// A strings.Builder-per-key would be faster still, but the buffer has to
-	// survive across host calls and be readable as a value, so growth is
-	// amortised by the byte slice underneath rather than by a builder.
-	buf := make([]byte, 0, len(existing)+len(fragment))
-	buf = append(append(buf, existing...), fragment...)
-	bucket[key] = string(buf)
-	return bucket[key], true, nil
+	// append keeps the slice's spare capacity in the map, so successive
+	// fragments amortise. Building a new exact-size slice per call, or
+	// concatenating strings, copied the whole buffer every time — O(total x
+	// fragments) on exactly the hot path this exists to serve.
+	bucket[key] = append(existing, fragment...)
+	// Converting to string here would copy the whole buffer on every fragment
+	// too. The ack path does not need the contents, and the read path
+	// (empty fragment) converts once.
+	return "", true, nil
 }
 
 // Host-side budgets for request-scoped metadata.
@@ -225,12 +227,19 @@ const (
 	maxMetaRequestBytes = 16 << 20 // 16 MiB across one request
 )
 
-// checkMetaBudget reports whether adding delta bytes to key would exceed either
-// budget. Caller holds metaMu.
-func (r *Runtime) checkMetaBudget(bucket map[string]string, key string, existing, delta int) error {
-	if existing+delta > maxMetaValueBytes {
+// checkMetaBudget reports whether a write would exceed either budget.
+//
+// finalLen is the value's size AFTER the write; delta is the change to the
+// request total. They are separate because a replacement is not growth: an
+// earlier version passed delta for both, so replacing a 3.5 MiB value with a
+// 7 MiB one checked only the 3.5 MiB increase and accepted a value well over
+// the per-key limit.
+//
+// Caller holds metaMu.
+func (r *Runtime) checkMetaBudget(bucket map[string][]byte, key string, finalLen, delta int) error {
+	if finalLen > maxMetaValueBytes {
 		return fmt.Errorf("metadata key would reach %d bytes, over the %d byte per-key limit",
-			existing+delta, maxMetaValueBytes)
+			finalLen, maxMetaValueBytes)
 	}
 	total := delta
 	for k, v := range bucket {
@@ -249,14 +258,15 @@ func (r *Runtime) metaSetBounded(reqID uint64, key, value string) error {
 	defer r.metaMu.Unlock()
 	bucket, ok := r.meta[reqID]
 	if !ok {
-		bucket = make(map[string]string)
+		bucket = make(map[string][]byte)
 		r.meta[reqID] = bucket
 	}
-	// Replacing a key frees what it held, so only the delta counts.
-	if err := r.checkMetaBudget(bucket, key, 0, len(value)-len(bucket[key])); err != nil {
+	// finalLen is the whole value; only the DELTA counts against the request
+	// total, because replacing a key frees what it held.
+	if err := r.checkMetaBudget(bucket, key, len(value), len(value)-len(bucket[key])); err != nil {
 		return err
 	}
-	bucket[key] = value
+	bucket[key] = []byte(value)
 	return nil
 }
 
@@ -265,4 +275,17 @@ func (r *Runtime) metaSetBounded(reqID uint64, key, value string) error {
 // without compiling a guest.
 func (r *Runtime) RecordRouteVerdictForTest(reqID uint64, plugin, provider, model string) {
 	r.verdictsBucket(reqID).setRoute(plugin, provider, model)
+}
+
+// RecordBlockVerdictForTest and RecordRespondVerdictForTest record verdicts the
+// way the dispatcher does, so tests in other internal packages can set up trap
+// semantics without compiling a guest for every permutation.
+func (r *Runtime) RecordBlockVerdictForTest(reqID uint64, plugin string, status int32, code, message string) {
+	r.verdictsBucket(reqID).setBlock(plugin, &pbv2.BlockRequestArgs{
+		Status: status, Code: code, Message: message,
+	})
+}
+
+func (r *Runtime) RecordRespondVerdictForTest(reqID uint64, plugin, content string) {
+	r.verdictsBucket(reqID).setRespond(plugin, content)
 }

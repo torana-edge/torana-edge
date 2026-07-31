@@ -2152,6 +2152,7 @@ func New(cfg Config) (*Server, error) {
 			BytesIn:          tr.bytesRead,
 			BytesOut:         tw.bytesWritten,
 			Verdict:          rs.Verdict,
+			PluginFailure:    rs.PluginFailure,
 		})
 	})
 

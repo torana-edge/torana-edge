@@ -479,7 +479,14 @@ func runJSONResponseHooks(ctx context.Context, pl *plugin.PluginPipeline, reqID 
 	// the body has not been written yet.
 	resp := rs.chatResponse(respChat.Model, refs.id, &assistant, refs.finishReason)
 	after, err := pl.RunAfterResponse(ctx, reqID, resp, true)
-	if err == nil && after != nil && after.Message != nil {
+	if err != nil {
+		// Propagate. Swallowing it here with `err == nil &&` meant a
+		// block-mode plugin that trapped on the response never reached
+		// ModifyResponse's refusal path, so the provider's body was forwarded
+		// anyway — the same fail-open, one layer further in.
+		return bodyBytes, err
+	}
+	if after != nil && after.Message != nil {
 		msg := *after.Message
 		if msg.Content != refs.content && refs.setContent != nil {
 			refs.setContent(msg.Content)

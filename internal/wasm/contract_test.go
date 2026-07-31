@@ -81,23 +81,87 @@ func TestUncheckedHostExportsAreRemoved(t *testing.T) {
 	defer r.Close()
 
 	for _, name := range []string{"meta_get", "abort"} {
-		if _, err := r.LoadPlugin("importer-"+name, ModuleImportingEnvFunc(name)); err == nil {
+		_, err := r.LoadPlugin("importer-"+name, ModuleImportingEnvFunc(name))
+		if err == nil {
 			t.Errorf("a guest importing env.%s instantiated. That function has no grant "+
 				"check, so a handwritten guest could use it while declaring an unrelated "+
 				"capability — bypassing the per-command boundary entirely.", name)
+			continue
+		}
+		// The REASON matters. The fixture now declares each import's real
+		// signature, so a restored side door would link — or fail on something
+		// other than being absent. Accepting any error meant a restored
+		// env.abort (four i32s, no result) failed on a signature mismatch and
+		// the test still passed.
+		if strings.Contains(err.Error(), "signature mismatch") {
+			t.Errorf("env.%s failed to link on a SIGNATURE MISMATCH, which means the "+
+				"function still exists: %v", name, err)
 		}
 	}
 
 	// Positive control: without it, this test would pass on a host that exports
-	// nothing at all.
-	//
-	// env.host_call takes four i32s, and the fixture declares two, so linking
-	// fails either way — but the REASON differs and that is the signal. A
-	// signature mismatch means the name resolved, so the function is there; an
-	// unknown-import error means it is not.
-	_, err := r.LoadPlugin("importer-host_call", ModuleImportingEnvFunc("host_call"))
-	if err == nil || !strings.Contains(err.Error(), "signature mismatch") {
-		t.Fatalf("env.host_call did not resolve by name (%v); the permission-checked "+
-			"path must still exist, or the removals above prove nothing", err)
+	// nothing at all. The fixture declares host_call's real signature, so a
+	// guest importing it must LINK.
+	if _, err := r.LoadPlugin("importer-host_call", ModuleImportingEnvFunc("host_call")); err != nil {
+		t.Fatalf("a guest importing env.host_call failed to link: %v — the "+
+			"permission-checked path must still exist, or the removals above "+
+			"prove nothing", err)
+	}
+}
+
+// Originals: absence and a captured empty value must be different answers.
+//
+// The callbacks are installed unconditionally, so "returned nil" cannot mean
+// unavailable — on the streaming and upstream-error paths nothing is ever
+// snapshotted. An all-default ChatRequest marshals to ZERO BYTES and an
+// upstream body can legitimately be empty, so length is not presence.
+func TestOriginalsDistinguishAbsenceFromCapturedEmpty(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		cmd  string
+		set  func(r *Runtime, captured bool, payload []byte)
+	}{
+		{"request", "env.original_request", func(r *Runtime, captured bool, payload []byte) {
+			r.OriginalRequestFunc = func(context.Context) ([]byte, bool) { return payload, captured }
+		}},
+		{"response", "env.original_response", func(r *Runtime, captured bool, payload []byte) {
+			r.OriginalResponseFunc = func(context.Context) ([]byte, bool) { return payload, captured }
+		}},
+	} {
+		t.Run(tc.name+"/absent is NOT_FOUND", func(t *testing.T) {
+			r, p := newGrantedPlugin(t, tc.cmd)
+			tc.set(r, false, nil)
+			res := hostCallDirect(t, r, p, tc.cmd, nil)
+			e, isErr := res.Result.(*pbv2.HostCallResult_Error)
+			if !isErr {
+				t.Fatal("an uncaptured original reported success")
+			}
+			if e.Error.Code != pbv2.ErrorCode_ERROR_CODE_NOT_FOUND {
+				t.Fatalf("got %v, want NOT_FOUND", e.Error.Code)
+			}
+		})
+
+		t.Run(tc.name+"/captured empty is a successful empty value", func(t *testing.T) {
+			r, p := newGrantedPlugin(t, tc.cmd)
+			tc.set(r, true, nil)
+			res := hostCallDirect(t, r, p, tc.cmd, nil)
+			v, isVal := res.Result.(*pbv2.HostCallResult_Value)
+			if !isVal {
+				t.Fatalf("a captured empty original was reported as an error: %+v", res.Result)
+			}
+			if len(v.Value) != 0 {
+				t.Fatalf("value = %q, want empty", v.Value)
+			}
+		})
+
+		t.Run(tc.name+"/captured non-empty round trips", func(t *testing.T) {
+			r, p := newGrantedPlugin(t, tc.cmd)
+			tc.set(r, true, []byte("pristine"))
+			res := hostCallDirect(t, r, p, tc.cmd, nil)
+			v, isVal := res.Result.(*pbv2.HostCallResult_Value)
+			if !isVal || string(v.Value) != "pristine" {
+				t.Fatalf("got %+v, want the captured bytes", res.Result)
+			}
+		})
 	}
 }

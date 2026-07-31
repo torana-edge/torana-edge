@@ -461,7 +461,10 @@ type Runtime struct {
 	metaMu  sync.RWMutex
 	// meta holds request-scoped, plugin-private state: reqID → namespaced
 	// key → value. Buckets are dropped via EndRequest when a request ends.
-	meta      map[uint64]map[string]string
+	// Values are []byte, not string, so meta_append can grow them in place. A
+	// string forces a full copy per fragment, which made assembling one tool
+	// call O(total x fragments) on the hot stream path.
+	meta      map[uint64]map[string][]byte
 	verdictMu sync.RWMutex
 	// verdicts holds request-scoped plugin verdicts: reqID → what plugins
 	// asked the host to do about this request. v1 carried these back inside
@@ -609,7 +612,7 @@ func newRuntime(ctx context.Context, store cache.Store, ownsCache bool, options 
 				WithMemoryLimitPages(options.MemoryLimitPages).
 				WithCloseOnContextDone(true)),
 		plugins:   make(map[string]*Plugin),
-		meta:      make(map[uint64]map[string]string),
+		meta:      make(map[uint64]map[string][]byte),
 		cache:     store,
 		ownsCache: ownsCache,
 		options:   options,
@@ -654,7 +657,7 @@ func (r *Runtime) metaGetPresence(reqID uint64, key string) (string, bool) {
 	r.metaMu.RLock()
 	defer r.metaMu.RUnlock()
 	v, ok := r.meta[reqID][key]
-	return v, ok
+	return string(v), ok
 }
 
 // metaSet writes a request-scoped meta value.
@@ -667,10 +670,10 @@ func (r *Runtime) metaSet(reqID uint64, key, value string) {
 	defer r.metaMu.Unlock()
 	bucket, ok := r.meta[reqID]
 	if !ok {
-		bucket = make(map[string]string)
+		bucket = make(map[string][]byte)
 		r.meta[reqID] = bucket
 	}
-	bucket[key] = value
+	bucket[key] = []byte(value)
 }
 
 // reqIDFrom extracts the request ID host calls were invoked under.
