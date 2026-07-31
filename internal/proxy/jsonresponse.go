@@ -38,6 +38,26 @@ type toolCallRef struct {
 	clearSignature func()
 }
 
+// invalidateSignature drops the provider token from BOTH the canonical state
+// and the body.
+//
+// Canonical too, not just the body: a later hook reads tc.signature, and
+// leaving it set would let run_after_response observe — and a future path
+// propagate — a token that is already invalid.
+//
+// Called from every permitted mutation path. Clearing only in the
+// after-response block meant a stream hook could rewrite a signed Gemini
+// function call while the original thoughtSignature was still forwarded.
+func (tc *toolCallRef) invalidateSignature() {
+	if tc.signature == "" {
+		return
+	}
+	tc.signature = ""
+	if tc.clearSignature != nil {
+		tc.clearSignature()
+	}
+}
+
 // responseRefs is the format-independent mutable view of a JSON response.
 type responseRefs struct {
 	model      string
@@ -435,9 +455,11 @@ func runJSONResponseHooks(ctx context.Context, pl *plugin.PluginPipeline, reqID 
 		applyEvents := func(evs []engine.StreamEvent) error {
 			for i := range evs {
 				ev := &evs[i]
+				signedContentChanged := false
 				if ev.ToolCallStart != nil && ev.ToolCallStart.Name != "" && ev.ToolCallStart.Name != tc.name {
 					tc.name = ev.ToolCallStart.Name
 					tc.setName(tc.name)
+					signedContentChanged = true
 					modified = true
 				}
 				if ev.ToolCallDelta != nil && ev.ToolCallDelta.ArgumentsDelta != "" && ev.ToolCallDelta.ArgumentsDelta != tc.argsJSON {
@@ -445,6 +467,16 @@ func runJSONResponseHooks(ctx context.Context, pl *plugin.PluginPipeline, reqID 
 						return err
 					}
 					tc.argsJSON = ev.ToolCallDelta.ArgumentsDelta
+					signedContentChanged = true
+					modified = true
+				}
+				// The stream hook is a permitted mutation path too, so it must
+				// invalidate the token exactly as after-response does. It also
+				// updates tc.name/tc.argsJSON in place, so the later
+				// comparison would see the ALREADY-CHANGED values and clear
+				// nothing.
+				if signedContentChanged {
+					tc.invalidateSignature()
 					modified = true
 				}
 			}
@@ -536,8 +568,8 @@ func runJSONResponseHooks(ctx context.Context, pl *plugin.PluginPipeline, reqID 
 				// A plugin can never ADD or REPLACE a signature — it cannot
 				// mint one — so the only permitted transition is clearing an
 				// existing token whose covered content changed.
-				if signedContentChanged && tc.signature != "" && tc.clearSignature != nil {
-					tc.clearSignature()
+				if signedContentChanged {
+					tc.invalidateSignature()
 					modified = true
 				}
 			}

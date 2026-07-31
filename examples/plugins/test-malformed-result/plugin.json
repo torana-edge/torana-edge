@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "id": "torana-test/test-malformed-result",
+  "name": "test-malformed-result",
+  "version": "0.1.0",
+  "abi_version": "v2",
+  "failure_mode": "pass",
+  "description": "Handwritten guest: records verdicts via host calls then returns a malformed frame",
+  "hooks": [{"name": "run_before_request"}],
+  "permissions": [
+    {"name": "env.block_request", "description": "Refuse the request"},
+    {"name": "env.respond_request", "description": "Serve a canned response"}
+  ]
+}

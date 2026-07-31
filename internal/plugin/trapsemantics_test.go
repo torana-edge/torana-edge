@@ -61,33 +61,50 @@ func TestBlockSurvivesATrapAndStopsDownstreamPlugins(t *testing.T) {
 	}
 }
 
-// The same guarantees on the malformed-result path. A handwritten guest can
-// issue host calls and THEN return an invalid frame, so that path needs the
-// same treatment as a trap rather than only the trap being handled.
+// The same guarantees on the malformed-result path, driven through a real
+// guest rather than the host's own helpers.
+//
+// A handwritten guest can issue host calls and THEN return an invalid frame —
+// the SDK's typed results make that unrepresentable, so only a guest like this
+// reaches the decode-error branch. The previous version of this test called
+// RecordBlockVerdictForTest / discardTrapped / blocked directly, so forgetting
+// either the discard or the break in that branch would have left it green:
+// the exact regression it was asked to catch.
 func TestBlockSurvivesAMalformedResultAndStopsDownstream(t *testing.T) {
+	requireWASM(t, fixturesDir+"/test-malformed-result/plugin.wasm")
 	requireWASM(t, fixturesDir+"/test-records-invocation/plugin.wasm")
 
-	pp := newTestPipeline(t, fixturesDir, []string{"test-records-invocation"})
+	pp := newTestPipeline(t, fixturesDir,
+		[]string{"test-malformed-result", "test-records-invocation"})
 
-	// Record the verdicts directly, then drive the discard path the pipeline
-	// uses for a refused result. Compiling a guest that returns deliberately
-	// malformed bytes would pin the same behaviour through more machinery
-	// without testing anything extra.
 	const reqID = 43
-	pp.runtime.RecordBlockVerdictForTest(reqID, "handwritten", 422, "malformed", "refused")
-	pp.runtime.RecordRespondVerdictForTest(reqID, "handwritten", "discard me")
-
-	pp.discardTrapped(reqID, "handwritten")
+	chat := &engine.ChatRequest{
+		Model:    "gpt-x",
+		Messages: []engine.Message{{Role: engine.RoleUser, Content: "hello"}},
+	}
+	out, err := pp.RunBeforeRequest(context.Background(), reqID, chat)
+	if err != nil {
+		t.Fatalf("failure_mode is pass, so a malformed result must not error: %v", err)
+	}
 
 	v := pp.Verdicts(reqID)
-	if v.Block() == nil {
-		t.Fatal("the block did not survive a refused result")
+	if v == nil || v.Block() == nil {
+		t.Fatal("the block did not survive a malformed result; a security verdict " +
+			"must fail closed even when the guest then returns garbage")
+	}
+	if got := v.Block().Code; got != "malformed_guest" {
+		t.Errorf("block code = %q, want the one the guest recorded", got)
 	}
 	if v.Respond() != nil {
-		t.Error("a respond verdict survived a refused result")
+		t.Error("a respond verdict from a guest that returned a malformed frame was kept")
 	}
-	if !pp.blocked(reqID) {
-		t.Fatal("blocked() did not see the surviving block, so the pipeline would " +
-			"not short-circuit")
+
+	model := chat.Model
+	if out != nil {
+		model = out.Model
+	}
+	if strings.Contains(model, "downstream-ran") {
+		t.Fatal("a downstream plugin ran after a blocked request whose guest then " +
+			"returned a malformed frame")
 	}
 }

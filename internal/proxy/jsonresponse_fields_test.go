@@ -1,9 +1,14 @@
 package proxy
 
 import (
+	"context"
 	"encoding/json"
 	"strings"
 	"testing"
+
+	"github.com/torana-edge/torana-edge/internal/engine"
+	"github.com/torana-edge/torana-edge/internal/plugin"
+	"github.com/torana-edge/torana-edge/internal/wasm"
 )
 
 // Observed host-owned response facts must reach the plugin.
@@ -58,69 +63,66 @@ func TestObservedResponseFactsAreExtractedPerFormat(t *testing.T) {
 	}
 }
 
-// A provider signature must not survive a change to the content it covers.
+// A provider signature must not survive a change to the content it covers —
+// asserted THROUGH runJSONResponseHooks, with a real mutating plugin.
 //
-// The mutation path did not carry signatures at all: toolCallRef had no
-// signature field, so a plugin could rewrite a Gemini function call's arguments
-// and the original thoughtSignature stayed in the outgoing JSON — a
-// valid-looking provider token over content the provider never signed. B2 would
-// have seen an empty accepted signature and been unable to detect or clear it.
-func TestGeminiSignatureIsClearedWhenArgumentsChange(t *testing.T) {
+// The previous version of this test called setArgs and clearSignature itself,
+// so it would have passed even if the host never cleared anything. It tested
+// the helpers, not the behaviour.
+func TestPipelineClearsSignatureWhenAStreamHookRewritesArguments(t *testing.T) {
+	requireWASM(t, fixturesDir+"/test-tool-rewriter/plugin.wasm")
+	pp := newProxyTestPipeline(t, []string{"test-tool-rewriter"})
+
 	const body = `{"candidates":[{"finishReason":"STOP","content":{"parts":[
 		{"thoughtSignature":"SIG_CALL_1","functionCall":{"id":"call_1","name":"search","args":{"q":"original"}}}
 	]}}]}`
 
-	var decoded map[string]any
-	if err := json.Unmarshal([]byte(body), &decoded); err != nil {
-		t.Fatal(err)
-	}
-	refs := extractResponse("gemini", decoded)
-	if len(refs.toolCalls) != 1 {
-		t.Fatalf("expected 1 tool call, got %d", len(refs.toolCalls))
-	}
-	tc := refs.toolCalls[0]
-	if tc.signature != "SIG_CALL_1" {
-		t.Fatalf("signature was not extracted: %q — it must reach the pipeline, or a "+
-			"stale token cannot be detected", tc.signature)
-	}
-	if tc.clearSignature == nil {
-		t.Fatal("no way to clear the signature from the body")
-	}
-
-	// Simulate the accepted mutation: arguments change, so the token goes.
-	if err := tc.setArgs(`{"q":"rewritten"}`); err != nil {
-		t.Fatal(err)
-	}
-	tc.clearSignature()
-
-	out, err := json.Marshal(decoded)
+	out, err := runJSONResponseHooks(context.Background(), pp, 1, "gemini",
+		&engine.ChatRequest{Model: "gemini-x"}, []byte(body))
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("hooks: %v", err)
+	}
+	if !strings.Contains(string(out), "rewritten-by-plugin") {
+		t.Fatalf("the plugin did not rewrite the arguments, so this test proves "+
+			"nothing about signature clearing: %s", out)
 	}
 	if strings.Contains(string(out), "SIG_CALL_1") {
-		t.Fatalf("the provider signature survived an argument change: %s", out)
-	}
-	if !strings.Contains(string(out), "rewritten") {
-		t.Fatalf("the argument change was not applied: %s", out)
+		t.Fatalf("the provider signature survived a STREAM-hook rewrite: %s", out)
 	}
 }
 
 // An untouched signed call keeps its token. Clearing unconditionally would
 // discard provenance the provider legitimately supplied.
-func TestGeminiSignatureSurvivesAnUntouchedCall(t *testing.T) {
+func TestPipelinePreservesSignatureWhenNothingChanges(t *testing.T) {
+	requireWASM(t, fixturesDir+"/test-inert-a/plugin.wasm")
+	pp := newProxyTestPipeline(t, []string{"test-inert-a"})
+
 	const body = `{"candidates":[{"content":{"parts":[
 		{"thoughtSignature":"SIG_KEEP","functionCall":{"id":"c","name":"search","args":{"q":"x"}}}
 	]}}]}`
-	var decoded map[string]any
-	if err := json.Unmarshal([]byte(body), &decoded); err != nil {
-		t.Fatal(err)
+
+	out, err := runJSONResponseHooks(context.Background(), pp, 2, "gemini",
+		&engine.ChatRequest{Model: "gemini-x"}, []byte(body))
+	if err != nil {
+		t.Fatalf("hooks: %v", err)
 	}
-	refs := extractResponse("gemini", decoded)
-	if refs.toolCalls[0].signature != "SIG_KEEP" {
-		t.Fatal("signature not extracted")
-	}
-	out, _ := json.Marshal(decoded)
 	if !strings.Contains(string(out), "SIG_KEEP") {
 		t.Fatalf("an untouched signature was dropped: %s", out)
 	}
+}
+
+// newProxyTestPipeline builds a pipeline over the fixture bundles, so response
+// tests can drive runJSONResponseHooks with real guests rather than calling its
+// helpers directly.
+func newProxyTestPipeline(t *testing.T, order []string) *plugin.PluginPipeline {
+	t.Helper()
+	rt := wasm.NewRuntime(context.Background())
+	t.Cleanup(func() { _ = rt.Close() })
+	pp, err := plugin.NewPipeline(rt, plugin.PluginConfig{
+		Dir: fixturesDir, Order: order, AllowUnapproved: true,
+	})
+	if err != nil {
+		t.Fatalf("NewPipeline: %v", err)
+	}
+	return pp
 }

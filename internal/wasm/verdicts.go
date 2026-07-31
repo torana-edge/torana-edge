@@ -276,16 +276,3 @@ func (r *Runtime) metaSetBounded(reqID uint64, key, value string) error {
 func (r *Runtime) RecordRouteVerdictForTest(reqID uint64, plugin, provider, model string) {
 	r.verdictsBucket(reqID).setRoute(plugin, provider, model)
 }
-
-// RecordBlockVerdictForTest and RecordRespondVerdictForTest record verdicts the
-// way the dispatcher does, so tests in other internal packages can set up trap
-// semantics without compiling a guest for every permutation.
-func (r *Runtime) RecordBlockVerdictForTest(reqID uint64, plugin string, status int32, code, message string) {
-	r.verdictsBucket(reqID).setBlock(plugin, &pbv2.BlockRequestArgs{
-		Status: status, Code: code, Message: message,
-	})
-}
-
-func (r *Runtime) RecordRespondVerdictForTest(reqID uint64, plugin, content string) {
-	r.verdictsBucket(reqID).setRespond(plugin, content)
-}
