@@ -942,7 +942,7 @@ func TestObservationalStreamingHookIsOnTheClientCriticalPath(t *testing.T) {
 // ordering (EndRequest after streamDone) is pinned by
 // TestRequestCleanupWaitsForStreamingGoroutineOnExceptionalExit — this test
 // only covers the network path still serving after that unwind.
-func TestClientDisconnectStillWaitsForTheObservationalHook(t *testing.T) {
+func TestClientDisconnectDoesNotTakeDownServer(t *testing.T) {
 	requireWASM(t, fixturesDir+"/test-trapper-after-stream/plugin.wasm")
 
 	release := make(chan struct{})

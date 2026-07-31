@@ -3,7 +3,7 @@ package proxy
 import (
 	"sync/atomic"
 	"testing"
-	"time"
+	"testing/synctest"
 )
 
 // Request-scoped state must outlive every bit of work on the streaming
@@ -15,78 +15,29 @@ import (
 // request context is cancelled, so that call may fail). It claims EndRequest
 // cannot run until streamDone closes.
 func TestRequestCleanupWaitsForStreamingGoroutineOnExceptionalExit(t *testing.T) {
-	streamDone := make(chan struct{})
-	var dropCount atomic.Int32
-	statePresent := atomic.Bool{}
-	statePresent.Store(true)
+	synctest.Test(t, func(t *testing.T) {
+		streamDone := make(chan struct{})
+		var dropCount atomic.Int32
+		var finished atomic.Bool
 
-	drop := func() {
-		if !statePresent.Load() {
-			t.Error("drop ran after request-scoped state was already cleared")
+		go func() {
+			finalizeRequestState(streamDone, func() { dropCount.Add(1) })
+			finished.Store(true)
+		}()
+
+		// Durably blocked on streamDone — not a wall-clock guess.
+		synctest.Wait()
+		if finished.Load() || dropCount.Load() != 0 {
+			t.Fatal("cleanup ran while the streaming goroutine was still marked in-flight")
 		}
-		dropCount.Add(1)
-	}
 
-	finished := make(chan struct{})
-	go func() {
-		defer close(finished)
-		finalizeRequestState(streamDone, drop)
-	}()
-
-	select {
-	case <-finished:
-		t.Fatal("finalize returned before streamDone closed — cleanup is not waiting")
-	case <-time.After(30 * time.Millisecond):
-	}
-	if dropCount.Load() != 0 {
-		t.Fatal("cleanup ran while the streaming goroutine was still marked in-flight")
-	}
-
-	// Simulate the stream goroutine finishing (and any attempted after-response).
-	close(streamDone)
-
-	select {
-	case <-finished:
-	case <-time.After(time.Second):
-		t.Fatal("finalize did not run cleanup after streamDone closed")
-	}
-	if dropCount.Load() != 1 {
-		t.Fatalf("cleanup ran %d times, want 1", dropCount.Load())
-	}
-}
-
-// Removing the wait must fail the ordering test — the migration rule that
-// caught the vacuous disconnect regression.
-func TestRequestCleanupWithoutWaitFailsClosed(t *testing.T) {
-	streamDone := make(chan struct{})
-	var dropped atomic.Bool
-
-	// Broken finalizer: drop without waiting. This is what the deferred
-	// cleanup did before awaitStreamDone was added there.
-	broken := func(done <-chan struct{}, drop func()) {
-		_ = done
-		drop()
-	}
-
-	finished := make(chan struct{})
-	go func() {
-		defer close(finished)
-		broken(streamDone, func() { dropped.Store(true) })
-	}()
-
-	select {
-	case <-finished:
-		// Expected: returns immediately while streamDone is still open.
-	case <-time.After(time.Second):
-		t.Fatal("broken finalizer should not wait")
-	}
-	if !dropped.Load() {
-		t.Fatal("expected immediate drop")
-	}
-	// streamDone still open — proving cleanup did not wait for it.
-	select {
-	case <-streamDone:
-		t.Fatal("streamDone was closed unexpectedly")
-	default:
-	}
+		close(streamDone)
+		synctest.Wait()
+		if !finished.Load() {
+			t.Fatal("finalize did not return after streamDone closed")
+		}
+		if dropCount.Load() != 1 {
+			t.Fatalf("cleanup ran %d times, want 1", dropCount.Load())
+		}
+	})
 }
