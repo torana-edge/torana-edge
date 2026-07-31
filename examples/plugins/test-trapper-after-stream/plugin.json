@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "id": "torana-test/test-trapper-after-stream",
+  "name": "test-trapper-after-stream",
+  "version": "0.1.0",
+  "abi_version": "v2",
+  "failure_mode": "block",
+  "description": "Traps in run_after_response; traps on the observational stream after-response; proves plugin_failure reaches the feed",
+  "hooks": [{"name": "run_after_response"}],
+  "permissions": []
+}

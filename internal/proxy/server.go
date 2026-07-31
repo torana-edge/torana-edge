@@ -290,6 +290,19 @@ type reqState struct {
 	// the caller. Recorded so the failure is visible to an operator rather than
 	// the host claiming a block it did not perform.
 	PluginFailure bool
+	// streamDone closes when the streaming goroutine has finished, INCLUDING
+	// the observational after-response hook.
+	//
+	// That goroutine closes the pipe before running the hook, so EOF lets
+	// ReverseProxy.ServeHTTP return while the hook is still executing. Without
+	// waiting, the handler recorded the feed and ran EndRequest concurrently:
+	// plugin_failure was nondeterministically missing, request-scoped metadata
+	// could be deleted out from under the hook, and reqState was read and
+	// written by two goroutines at once.
+	//
+	// Set in ModifyResponse, which runs inside ServeHTTP on the handler's own
+	// goroutine, so the handler's later read is ordered after the write.
+	streamDone chan struct{}
 	// OriginalReq is the pristine pre-pipeline request (pb bytes), snapshotted
 	// only when a loaded plugin holds env.original_request.
 	OriginalReq []byte
@@ -1167,7 +1180,13 @@ func New(cfg Config) (*Server, error) {
 					streamPl = pl
 				}
 				pr, pw := io.Pipe()
+				done := make(chan struct{})
+				rs.streamDone = done
 				go func() {
+					// Closed on EVERY exit, including a panic unwinding through
+					// here: a handler blocked forever on this channel would be
+					// worse than the race it exists to remove.
+					defer close(done)
 					if streamPl != nil {
 						defer streamPl.Release()
 					}
@@ -2076,10 +2095,13 @@ func New(cfg Config) (*Server, error) {
 			}
 		}
 		r = r.WithContext(context.WithValue(r.Context(), reqStateKey{}, rs))
-		// Drop request-scoped plugin state when the request completes,
-		// then release the pinned pipeline. Safe to defer here:
-		// ReverseProxy.ServeHTTP only returns after the response body
-		// (including the SSE pipe) is fully copied.
+		// Drop request-scoped plugin state when the request completes, then
+		// release the pinned pipeline.
+		//
+		// This runs after the streamDone wait below. ServeHTTP returning is NOT
+		// sufficient on the streaming path: the goroutine closes the pipe
+		// before its observational hook, so EOF releases ServeHTTP while the
+		// hook still needs this state.
 		defer func() {
 			if rs.Pipeline != nil {
 				rs.Pipeline.EndRequest(rs.ID)
@@ -2110,6 +2132,14 @@ func New(cfg Config) (*Server, error) {
 		r.Body = tr
 
 		proxy.ServeHTTP(tw, r)
+
+		// Wait for the streaming goroutine's observational hook before reading
+		// rs for the feed or dropping request state below. The client already
+		// has its EOF — the pipe closed before the hook ran — so this delays
+		// bookkeeping, not the response.
+		if rs.streamDone != nil {
+			<-rs.streamDone
+		}
 
 		s.recordCompactionReports(rs)
 		s.stats.RecordRequest(tr.bytesRead, tw.bytesWritten)

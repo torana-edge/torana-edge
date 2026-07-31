@@ -771,3 +771,81 @@ func TestFailureModeBlockTerminatesTheStream(t *testing.T) {
 		t.Fatalf("the refused event was replayed to the caller: %s", got)
 	}
 }
+
+// The streaming observational hook must finish before the handler records the
+// feed and drops request state.
+//
+// The streaming goroutine closes the pipe BEFORE running run_after_response, so
+// EOF lets ReverseProxy.ServeHTTP return while the hook is still executing. The
+// handler then recorded the feed and ran EndRequest concurrently: plugin_failure
+// was nondeterministically absent, request-scoped state could be deleted out
+// from under the hook, and reqState was read and written by two goroutines.
+//
+// Asserted on the emitted feed event rather than a log line, because the field
+// is the operator-visible artifact. Run this package under -race to catch the
+// third symptom.
+func TestStreamingObservationalHookCompletesBeforeFeedRecording(t *testing.T) {
+	requireWASM(t, fixturesDir+"/test-trapper-after-stream/plugin.wasm")
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fl, _ := w.(http.Flusher)
+		fmt.Fprint(w, `data: {"choices":[{"index":0,"delta":{"content":"hello"}}]}`+"\n\n")
+		if fl != nil {
+			fl.Flush()
+		}
+		fmt.Fprint(w, "data: [DONE]\n\n")
+		if fl != nil {
+			fl.Flush()
+		}
+	}))
+	defer upstream.Close()
+
+	cfg := Config{Port: "0", Providers: provider.Config{
+		Providers: map[string]provider.Provider{"oai": {URL: upstream.URL, Format: "openai"}},
+		Plugins: provider.PluginsConfig{
+			Dir: fixturesDir, Order: []string{"test-trapper-after-stream"}, AllowUnapproved: true,
+		},
+	}}
+	srv, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	go srv.Serve(ln)
+	defer srv.Shutdown(context.Background())
+
+	resp, err := http.Post("http://"+ln.Addr().String()+"/provider/oai/v1/chat/completions",
+		"application/json", strings.NewReader(`{"model":"gpt-x","stream":true,"messages":[{"role":"user","content":"hi"}]}`))
+	if err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+
+	if strings.Contains(string(body), "no provider configured") {
+		t.Fatalf("the request never reached the pipeline (%s)", body)
+	}
+	// The stream itself must still succeed: the hook is observational.
+	if !strings.Contains(string(body), "hello") {
+		t.Fatalf("the streamed body did not reach the caller: %s", body)
+	}
+
+	// No sleep and no retry. If the handler no longer waits for the hook, the
+	// event is recorded before PluginFailure is set and this fails every time.
+	events := srv.feed.Snapshot()
+	if len(events) == 0 {
+		t.Fatal("no feed event was recorded")
+	}
+	last := events[len(events)-1]
+	if !last.PluginFailure {
+		t.Fatalf("plugin_failure is absent from the feed event (%+v) — the handler "+
+			"recorded it before the observational hook finished", last)
+	}
+	if last.Verdict == "block" {
+		t.Error("an observational failure was reported as a block; nothing was withheld")
+	}
+}
