@@ -2513,6 +2513,7 @@ func (s *Server) newRuntime() *wasm.Runtime {
 		rt.StateGetFunc = s.pluginState.Get
 		rt.StateSetFunc = s.pluginState.Set
 		rt.StateKeysFunc = s.pluginState.Keys
+		rt.StateDeleteFunc = s.pluginState.Delete
 	}
 	rt.CachePricingFunc = s.cachePricing
 	rt.SendRequestFunc = s.sendPluginRequest

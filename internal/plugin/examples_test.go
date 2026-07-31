@@ -26,6 +26,18 @@ func TestExampleManifestsValidate(t *testing.T) {
 		t.Fatalf("read %s: %v", fixturesDir, err)
 	}
 
+	// Two fixtures are deliberately NOT installable: they are ABI v1 smoke
+	// fixtures for the Rust and AssemblyScript trampolines, excluded from
+	// TESTDATA_DIRS and never built. This host is v2-only, so their manifests
+	// are correctly rejected. They are named here rather than skipped by a
+	// pattern, so adding a third one is a deliberate act someone has to
+	// justify — during the migration a bulk edit relabelled both as v2 and
+	// nothing noticed.
+	notInstallable := map[string]string{
+		"rust-redactor": "ABI v1 smoke fixture; port when the Rust SDK moves to v2",
+		"ts-logger":     "ABI v1 smoke fixture (AssemblyScript)",
+	}
+
 	checked := 0
 	for _, e := range entries {
 		if !e.IsDir() {
@@ -33,6 +45,17 @@ func TestExampleManifestsValidate(t *testing.T) {
 		}
 		dir := filepath.Join(fixturesDir, e.Name())
 		if _, err := os.Stat(filepath.Join(dir, "plugin.json")); err != nil {
+			continue
+		}
+		if reason, excluded := notInstallable[e.Name()]; excluded {
+			// Assert it really is what we claim, so the exclusion cannot
+			// silently cover a v2 fixture that has broken.
+			t.Run(e.Name()+"_excluded", func(t *testing.T) {
+				if _, err := ValidateManifestDir(dir); err == nil {
+					t.Errorf("%s is excluded as %q but now validates — "+
+						"remove it from notInstallable", e.Name(), reason)
+				}
+			})
 			continue
 		}
 		checked++

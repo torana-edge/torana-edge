@@ -20,6 +20,7 @@ import (
 	"github.com/torana-edge/torana-edge/internal/economics"
 	"github.com/torana-edge/torana-edge/internal/metrics"
 	pbv2 "github.com/torana-edge/torana-plugin-sdk/pb/v2"
+	"google.golang.org/protobuf/proto"
 )
 
 // permissionDeniedJSON is what a guest receives when it calls a host function
@@ -526,6 +527,10 @@ type Runtime struct {
 	StateGetFunc  func(plugin, key string) (string, bool)
 	StateSetFunc  func(plugin, key, value string) error
 	StateKeysFunc func(plugin string) []string
+	// StateDeleteFunc backs env.state_delete. v1 deleted by setting an empty
+	// value, which made storing an empty string impossible; v2 makes deletion
+	// explicit and shares the env.state_set grant.
+	StateDeleteFunc func(plugin, key string) error
 
 	// CachePricingFunc answers torana_cache_pricing: given a provider and
 	// model, what the prompt cache costs and how long it lives. Data, not a
@@ -628,20 +633,30 @@ func (r *Runtime) EndRequest(reqID uint64) {
 
 // metaGet reads a request-scoped meta value.
 func (r *Runtime) metaGet(reqID uint64, key string) string {
-	r.metaMu.RLock()
-	defer r.metaMu.RUnlock()
-	return r.meta[reqID][key]
+	v, _ := r.metaGetPresence(reqID, key)
+	return v
 }
 
-// metaSet writes a request-scoped meta value; empty value deletes the key
-// (plugins use this convention for cleanup).
+// metaGetPresence distinguishes an absent key from one holding an empty value.
+//
+// v2 reports absence as NOT_FOUND and a stored empty string as a successful
+// empty value. Reading through the map's zero value collapsed the two, which
+// made a buffered or cached empty string unusable.
+func (r *Runtime) metaGetPresence(reqID uint64, key string) (string, bool) {
+	r.metaMu.RLock()
+	defer r.metaMu.RUnlock()
+	v, ok := r.meta[reqID][key]
+	return v, ok
+}
+
+// metaSet writes a request-scoped meta value.
+//
+// An empty value STORES an empty value. v1 deleted the key here, so a plugin
+// could not distinguish "nothing stored" from "I stored nothing" and could not
+// store an empty string at all. Deletion is not part of the meta surface.
 func (r *Runtime) metaSet(reqID uint64, key, value string) {
 	r.metaMu.Lock()
 	defer r.metaMu.Unlock()
-	if value == "" {
-		delete(r.meta[reqID], key)
-		return
-	}
 	bucket, ok := r.meta[reqID]
 	if !ok {
 		bucket = make(map[string]string)
@@ -788,94 +803,158 @@ func (r *Runtime) installHostFunctions() {
 				perm = "env.host_call." + cmd
 			}
 		}
+		// Two commands are NOT operator-facing capabilities, so deriving their
+		// permission from the command string looks for a grant that cannot
+		// exist and refuses every call. Both mutate a namespace the plugin can
+		// already write, so they share that namespace's grant rather than
+		// adding approval ceremony for no new security line.
+		switch cmd {
+		case pbv2.MetaAppendCommand:
+			perm = pbv2.MetaAppendPermission
+		case pbv2.StateDeleteCommand:
+			perm = pbv2.StateDeletePermission
+		}
 		if p == nil || !p.hasGrant(perm) {
 			log.Printf("[wasm] permission denied: %s tried %s", mod.Name(), perm)
 			return writeStr(ctx, mod, permissionDeniedJSON)
 		}
 
-		var res string
+		// v2: every reply is a framed HostCallResult. Cases set value/herr; the
+		// single exit below frames whichever was set. Extension commands put
+		// their JSON body in the value arm — the BODY is opaque, the envelope
+		// is not.
+		var value []byte
+		var herr *pbv2.HostError
+		var res string // extension/domain JSON, moved into value at the exit
 		switch cmd {
 		case "env.meta_set":
-			var kv struct {
-				Key   string `json:"key"`
-				Value any    `json:"value"`
+			// A decode failure used to be swallowed by `if err == nil`, so the
+			// write silently did not happen. It is now a classified refusal.
+			var a pbv2.MetaSetArgs
+			if err := proto.Unmarshal([]byte(args), &a); err != nil {
+				herr = hostErr(pbv2.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "invalid MetaSetArgs: %v", err)
+				break
 			}
-			if err := json.Unmarshal([]byte(args), &kv); err == nil {
-				key := metaKey(pluginName, kv.Key)
-				switch v := kv.Value.(type) {
-				case string:
-					r.metaSet(reqIDFrom(ctx), key, v)
-				default:
-					b, _ := json.Marshal(v)
-					r.metaSet(reqIDFrom(ctx), key, string(b))
-				}
-				res = `{"status":"ok"}`
-			} else {
-				res = `{"status":"error","message":"invalid payload"}`
+			if err := a.Validate(); err != nil {
+				herr = hostErr(pbv2.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "%v", err)
+				break
 			}
+			// An empty value STORES an empty value; it is not a delete.
+			r.metaSet(reqIDFrom(ctx), metaKey(pluginName, a.Key), a.Value)
 		case "env.meta_get":
-			res = r.metaGet(reqIDFrom(ctx), metaKey(pluginName, args))
+			var a pbv2.MetaGetArgs
+			if err := proto.Unmarshal([]byte(args), &a); err != nil {
+				herr = hostErr(pbv2.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "invalid MetaGetArgs: %v", err)
+				break
+			}
+			if err := a.Validate(); err != nil {
+				herr = hostErr(pbv2.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "%v", err)
+				break
+			}
+			v, present := r.metaGetPresence(reqIDFrom(ctx), metaKey(pluginName, a.Key))
+			if !present {
+				herr = hostErr(pbv2.ErrorCode_ERROR_CODE_NOT_FOUND, "metadata key not found")
+				break
+			}
+			value = []byte(v)
 		case "env.cache_set":
-			var kv struct {
-				Key   string `json:"key"`
-				Value any    `json:"value"`
+			var a pbv2.CacheSetArgs
+			if err := proto.Unmarshal([]byte(args), &a); err != nil {
+				herr = hostErr(pbv2.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "invalid CacheSetArgs: %v", err)
+				break
 			}
-			if err := json.Unmarshal([]byte(args), &kv); err == nil {
-				switch v := kv.Value.(type) {
-				case string:
-					r.cache.Set(kv.Key, v)
-				default:
-					b, _ := json.Marshal(v)
-					r.cache.Set(kv.Key, string(b))
-				}
-				res = `{"status":"ok"}`
-			} else {
-				res = `{"status":"error","message":"invalid payload"}`
+			if err := a.Validate(); err != nil {
+				herr = hostErr(pbv2.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "%v", err)
+				break
 			}
+			r.cache.Set(a.Key, a.Value)
 		case "env.cache_get":
-			res, _ = r.cache.Get(args)
+			var a pbv2.CacheGetArgs
+			if err := proto.Unmarshal([]byte(args), &a); err != nil {
+				herr = hostErr(pbv2.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "invalid CacheGetArgs: %v", err)
+				break
+			}
+			if err := a.Validate(); err != nil {
+				herr = hostErr(pbv2.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "%v", err)
+				break
+			}
+			// The presence bool was previously discarded, so a miss and a
+			// stored empty string were the same answer.
+			v, present := r.cache.Get(a.Key)
+			if !present {
+				herr = hostErr(pbv2.ErrorCode_ERROR_CODE_NOT_FOUND, "cache key not found")
+				break
+			}
+			value = []byte(v)
 		case "env.state_set":
 			// Durable, plugin-private, survives a restart. The plugin name
 			// comes from the module, never the payload, so one plugin cannot
 			// write into another's namespace.
-			var kv struct {
-				Key   string `json:"key"`
-				Value any    `json:"value"`
+			var a pbv2.StateSetArgs
+			if err := proto.Unmarshal([]byte(args), &a); err != nil {
+				herr = hostErr(pbv2.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "invalid StateSetArgs: %v", err)
+				break
 			}
-			if err := json.Unmarshal([]byte(args), &kv); err != nil {
-				res = `{"status":"error","message":"invalid payload"}`
-			} else if r.StateSetFunc == nil {
-				res = `{"status":"error","message":"durable plugin state is not configured"}`
-			} else {
-				value := ""
-				switch v := kv.Value.(type) {
-				case nil:
-					// Explicit null deletes, same as an empty string.
-				case string:
-					value = v
-				default:
-					b, _ := json.Marshal(v)
-					value = string(b)
-				}
-				if err := r.StateSetFunc(pluginName, kv.Key, value); err != nil {
-					res = fmt.Sprintf(`{"status":"error","message":%q}`, err.Error())
-				} else {
-					res = `{"status":"ok"}`
-				}
+			if err := a.Validate(); err != nil {
+				herr = hostErr(pbv2.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "%v", err)
+				break
+			}
+			if r.StateSetFunc == nil {
+				herr = hostErr(pbv2.ErrorCode_ERROR_CODE_NOT_CONFIGURED, "durable plugin state is not configured")
+				break
+			}
+			// An empty value STORES an empty value. v1 deleted here, which is
+			// why deletion is now its own command.
+			if err := r.StateSetFunc(pluginName, a.Key, a.Value); err != nil {
+				herr = hostErr(pbv2.ErrorCode_ERROR_CODE_INTERNAL, "%v", err)
+			}
+		case pbv2.StateDeleteCommand:
+			var a pbv2.StateDeleteArgs
+			if err := proto.Unmarshal([]byte(args), &a); err != nil {
+				herr = hostErr(pbv2.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "invalid StateDeleteArgs: %v", err)
+				break
+			}
+			if err := a.Validate(); err != nil {
+				herr = hostErr(pbv2.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "%v", err)
+				break
+			}
+			if r.StateDeleteFunc == nil {
+				herr = hostErr(pbv2.ErrorCode_ERROR_CODE_NOT_CONFIGURED, "durable plugin state is not configured")
+				break
+			}
+			// Deleting an absent key succeeds: the caller wants it gone.
+			if err := r.StateDeleteFunc(pluginName, a.Key); err != nil {
+				herr = hostErr(pbv2.ErrorCode_ERROR_CODE_INTERNAL, "%v", err)
 			}
 		case "env.state_get":
-			if r.StateGetFunc == nil {
-				res = ""
-			} else {
-				res, _ = r.StateGetFunc(pluginName, args)
+			var a pbv2.StateGetArgs
+			if err := proto.Unmarshal([]byte(args), &a); err != nil {
+				herr = hostErr(pbv2.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "invalid StateGetArgs: %v", err)
+				break
 			}
+			if err := a.Validate(); err != nil {
+				herr = hostErr(pbv2.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "%v", err)
+				break
+			}
+			if r.StateGetFunc == nil {
+				herr = hostErr(pbv2.ErrorCode_ERROR_CODE_NOT_CONFIGURED, "durable plugin state is not configured")
+				break
+			}
+			v, present := r.StateGetFunc(pluginName, a.Key)
+			if !present {
+				herr = hostErr(pbv2.ErrorCode_ERROR_CODE_NOT_FOUND, "state key not found")
+				break
+			}
+			value = []byte(v)
 		case "env.state_keys":
 			if r.StateKeysFunc == nil {
-				res = "[]"
-			} else {
-				b, _ := json.Marshal(r.StateKeysFunc(pluginName))
-				res = string(b)
+				// An empty list said "no keys", which is not the same as "no
+				// store" — a plugin would conclude its writes had vanished.
+				herr = hostErr(pbv2.ErrorCode_ERROR_CODE_NOT_CONFIGURED, "durable plugin state is not configured")
+				break
 			}
+			b, _ := json.Marshal(r.StateKeysFunc(pluginName))
+			value = b
 		case "env.now":
 			// WASI preview1 gives the guest no clock, deliberately. Plugins
 			// that reason about elapsed time — cache lifetimes, deadlines,
@@ -885,7 +964,7 @@ func (r *Runtime) installHostFunctions() {
 			// result into a request makes its output non-deterministic, which
 			// busts the provider's prompt cache on every turn. See
 			// PLUGIN_SEMANTICS §6.
-			res = strconv.FormatInt(time.Now().UnixMilli(), 10)
+			value = []byte(strconv.FormatInt(time.Now().UnixMilli(), 10))
 		case "torana_send_request":
 			if r.SendRequestFunc == nil {
 				res = `{"status":"error","message":"plugin egress is not configured"}`
@@ -900,20 +979,28 @@ func (r *Runtime) installHostFunctions() {
 			}
 		case "env.plugin_config":
 			// Return this plugin's config blob (plugins.config.<name>).
-			res = p.pluginConfig()
-			if res == "" {
-				res = "{}"
+			cfg := p.pluginConfig()
+			if cfg == "" {
+				cfg = "{}"
 			}
+			value = []byte(cfg)
 		case "env.original_request":
-			// Pristine pre-pipeline request, pb-encoded. Empty = unavailable.
-			if r.OriginalRequestFunc != nil {
-				res = string(r.OriginalRequestFunc(ctx))
+			// Pristine pre-pipeline request, pb-encoded. Absence is NOT_FOUND,
+			// not an empty value: an all-default ChatRequest legitimately
+			// marshals to zero bytes.
+			if r.OriginalRequestFunc == nil {
+				herr = hostErr(pbv2.ErrorCode_ERROR_CODE_NOT_FOUND, "no original request captured")
+				break
 			}
+			value = r.OriginalRequestFunc(ctx)
 		case "env.original_response":
-			// Raw upstream response body (non-streaming only). Empty = unavailable.
-			if r.OriginalResponseFunc != nil {
-				res = string(r.OriginalResponseFunc(ctx))
+			// Raw upstream response body (non-streaming only). An upstream body
+			// can legitimately be empty, so absence is again the error arm.
+			if r.OriginalResponseFunc == nil {
+				herr = hostErr(pbv2.ErrorCode_ERROR_CODE_NOT_FOUND, "no original response captured")
+				break
 			}
+			value = r.OriginalResponseFunc(ctx)
 		case "torana_db_query":
 			res = `{"status":"error","message":"database not configured — set plugins.config.compactor.dsn"}`
 		case "torana_kms_decrypt":
@@ -990,10 +1077,13 @@ func (r *Runtime) installHostFunctions() {
 		case "verify_virtual_key":
 			res = `{"status":"error","message":"unimplemented: enterprise auth is available in torana-edge/private-nucleus"}`
 		default:
-			res = `{"status":"error","message":"unknown host call"}`
+			herr = hostErr(pbv2.ErrorCode_ERROR_CODE_NOT_FOUND, "unknown host call %q", cmd)
 		}
 
-		return writeStr(ctx, mod, res)
+		if herr == nil && value == nil && res != "" {
+			value = []byte(res)
+		}
+		return writeBytes(ctx, mod, frameHostCall(value, herr))
 	}).Export("host_call")
 
 	env.Instantiate(r.ctx)
@@ -1008,6 +1098,41 @@ func readStr(mod api.Module, ptr, length uint32) string {
 }
 
 // writeStr calls the WASM module's 'alloc' function to allocate space, then writes the string.
+// frameHostCall builds the HostCallResult a v2 guest decodes.
+//
+// Exactly one arm is set. A nil value with no error is a successful EMPTY
+// value, which is distinct from an error and from absence — that distinction
+// is the whole reason the envelope exists, so it must survive here.
+func frameHostCall(value []byte, herr *pbv2.HostError) []byte {
+	result := &pbv2.HostCallResult{}
+	if herr != nil {
+		result.Result = &pbv2.HostCallResult_Error{Error: herr}
+	} else {
+		result.Result = &pbv2.HostCallResult_Value{Value: value}
+	}
+	raw, err := proto.Marshal(result)
+	if err != nil {
+		// Marshalling a two-field message cannot realistically fail, but a
+		// zero-length reply is a protocol error to the guest rather than a
+		// silent success, so say something rather than nothing.
+		log.Printf("[wasm] frame host-call result: %v", err)
+		return nil
+	}
+	return raw
+}
+
+// hostErr builds a classified refusal.
+func hostErr(code pbv2.ErrorCode, format string, args ...any) *pbv2.HostError {
+	return &pbv2.HostError{Code: code, Message: fmt.Sprintf(format, args...)}
+}
+
+func writeBytes(ctx context.Context, mod api.Module, b []byte) uint64 {
+	if len(b) == 0 {
+		return 0
+	}
+	return writeStr(ctx, mod, string(b))
+}
+
 func writeStr(ctx context.Context, mod api.Module, s string) uint64 {
 	b := []byte(s)
 	if len(b) == 0 {

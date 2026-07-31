@@ -153,20 +153,30 @@ func TestMetaRequestScoping(t *testing.T) {
 
 // TestMetaEmptyValueDeletes: setting an empty value removes the key
 // (the cleanup convention plugins rely on).
-func TestMetaEmptyValueDeletes(t *testing.T) {
+// An empty meta value is a VALUE, not a delete.
+//
+// This test asserted the opposite, which was correct for v1. Under that rule a
+// plugin could not store an empty string and could not tell "nothing stored"
+// from "I stored nothing" — the ambiguity v2 removes, and the reason absence is
+// now reported as NOT_FOUND.
+func TestMetaEmptyValueIsStoredNotDeleted(t *testing.T) {
 	r := NewRuntime(context.Background())
 	defer r.Close()
 
 	r.metaSet(1, "frag:x", "data")
 	r.metaSet(1, "frag:x", "")
-	if got := r.metaGet(1, "frag:x"); got != "" {
-		t.Fatalf("got %q want deleted", got)
+
+	got, present := r.metaGetPresence(1, "frag:x")
+	if !present {
+		t.Fatal("an empty value deleted the key; empty is a value, not a delete")
 	}
-	r.metaMu.RLock()
-	_, exists := r.meta[1]["frag:x"]
-	r.metaMu.RUnlock()
-	if exists {
-		t.Fatal("key still present after empty-value delete")
+	if got != "" {
+		t.Fatalf("got %q, want an empty value", got)
+	}
+
+	// A key never written is absent, which is a different answer.
+	if _, present := r.metaGetPresence(1, "frag:never"); present {
+		t.Fatal("an unwritten key reported present")
 	}
 }
 

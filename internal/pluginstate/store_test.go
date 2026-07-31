@@ -72,7 +72,10 @@ func TestSurvivesRestart(t *testing.T) {
 
 // TestEmptyValueDeletes — a plugin releases state by writing "", so it needs no
 // separate delete host call.
-func TestEmptyValueDeletes(t *testing.T) {
+// An empty value is stored; Delete removes. This test asserted the opposite,
+// which was the v1 rule — and under it a plugin could neither store an empty
+// string nor distinguish absence from emptiness.
+func TestEmptyValueIsStoredAndDeleteRemoves(t *testing.T) {
 	s := newStore(t, Options{})
 	if err := s.Set("warmer", "k", "v"); err != nil {
 		t.Fatal(err)
@@ -80,11 +83,30 @@ func TestEmptyValueDeletes(t *testing.T) {
 	if err := s.Set("warmer", "k", ""); err != nil {
 		t.Fatal(err)
 	}
+	got, ok := s.Get("warmer", "k")
+	if !ok {
+		t.Fatal("writing an empty value deleted the key")
+	}
+	if got != "" {
+		t.Fatalf("got %q, want an empty value", got)
+	}
+
+	if err := s.Delete("warmer", "k"); err != nil {
+		t.Fatal(err)
+	}
 	if _, ok := s.Get("warmer", "k"); ok {
-		t.Error("writing an empty value did not delete the key")
+		t.Error("Delete did not remove the key")
 	}
 	if s.TotalBytes() != 0 {
 		t.Errorf("TotalBytes = %d after delete, want 0", s.TotalBytes())
+	}
+}
+
+// Deleting a key that was never written succeeds: the caller wants it gone.
+func TestDeleteIsIdempotent(t *testing.T) {
+	s := newStore(t, Options{})
+	if err := s.Delete("warmer", "never-existed"); err != nil {
+		t.Fatalf("deleting an absent key failed: %v", err)
 	}
 }
 
