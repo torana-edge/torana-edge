@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "id": "torana-test/test-invented-content",
+  "name": "test-invented-content",
+  "version": "0.1.0",
+  "abi_version": "v2",
+  "failure_mode": "pass",
+  "description": "Test fixture: invents assistant content from run_after_response whenever a message is present",
+  "hooks": [
+    {
+      "name": "run_after_response"
+    }
+  ],
+  "permissions": []
+}

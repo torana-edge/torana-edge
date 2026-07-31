@@ -92,50 +92,86 @@ func TestResponseApplyRewritesCallsPositionally(t *testing.T) {
 	}
 }
 
-// CRITERIA 8c + 7a — ID and Signature are host-owned: the guest's values are
-// never read back, so a replacement that forges them changes nothing on the
-// wire. test-forge-response-fields sets exactly those two fields, so the
-// accepted replacement must leave the provider's values in place and apply
-// nothing else. The gemini half doubles as 7a: an untouched signed call keeps
-// its token, because clearing unconditionally would discard legitimate
-// provider provenance.
-func TestResponseApplyIgnoresForgedGuestFields(t *testing.T) {
+// CRITERIA 8c + 7a + finding 2 — ID and Signature are host-owned: a
+// replacement that forges them is REJECTED wholesale (never half-applied, and
+// never chained to a downstream plugin). test-forge-response-fields sets
+// exactly those two fields, so under allow mode the pipeline refuses the
+// replacement and the original bytes come back verbatim; under a block
+// override the refusal surfaces as an error. The gemini half doubles as 7a:
+// an untouched signed call keeps its token.
+func TestResponseApplyRejectsForgedGuestFields(t *testing.T) {
 	requireWASM(t, fixturesDir+"/test-forge-response-fields/plugin.wasm")
 	pp := newProxyTestPipeline(t, []string{"test-forge-response-fields"})
 
-	t.Run("openai call id", func(t *testing.T) {
-		body := `{"id":"chatcmpl-11","choices":[{"index":0,"message":{
-			"role":"assistant",
-			"tool_calls":[{"id":"call_orig","type":"function","function":{"name":"search","arguments":` + jsonStr(`{"q":"x"}`) + `}}]
-		}}]}`
-
-		out, err := runJSONResponseHooks(context.Background(), pp, 1, "openai", nil, []byte(body))
+	forgeBlockPipeline := func(t *testing.T) *plugin.PluginPipeline {
+		t.Helper()
+		rt := wasm.NewRuntime(context.Background())
+		t.Cleanup(func() { _ = rt.Close() })
+		digest, err := plugin.BundleDigestForDir(fixturesDir + "/test-forge-response-fields")
 		if err != nil {
-			t.Fatalf("host must accept a relative-policy-valid replacement: %v", err)
+			t.Fatal(err)
 		}
-		// Nothing changed on the wire, so the original bytes come back
-		// verbatim — the strongest form of "forged-id was never written".
-		if string(out) != body {
-			t.Fatalf("output changed, forged id leaked or body re-marshaled:\n%s", out)
-		}
-	})
-
-	t.Run("gemini thoughtSignature", func(t *testing.T) {
-		body := `{"candidates":[{"content":{"parts":[
-			{"thoughtSignature":"tsig_orig","functionCall":{"id":"c1","name":"search","args":{"q":"x"}}}
-		]}}]}`
-
-		out, err := runJSONResponseHooks(context.Background(), pp, 1, "gemini", nil, []byte(body))
+		pp, err := plugin.NewPipeline(rt, plugin.PluginConfig{
+			Dir:   fixturesDir,
+			Order: []string{"test-forge-response-fields"},
+			Approvals: map[string]plugin.Approval{
+				"torana-test/test-forge-response-fields": {Digest: digest, FailureMode: "block"},
+			},
+		})
 		if err != nil {
-			t.Fatalf("host must accept a relative-policy-valid replacement: %v", err)
+			t.Fatalf("NewPipeline: %v", err)
 		}
-		if string(out) != body {
-			t.Fatalf("output changed, forged signature leaked or body re-marshaled:\n%s", out)
-		}
-		if !strings.Contains(string(out), "tsig_orig") {
-			t.Fatalf("the untouched provider signature was dropped: %s", out)
-		}
-	})
+		return pp
+	}
+
+	for _, tc := range []struct {
+		name   string
+		format string
+		body   string
+	}{
+		{
+			name:   "openai call id",
+			format: "openai",
+			body: `{"id":"chatcmpl-11","choices":[{"index":0,"message":{
+				"role":"assistant",
+				"tool_calls":[{"id":"call_orig","type":"function","function":{"name":"search","arguments":` + jsonStr(`{"q":"x"}`) + `}}]
+			}}]}`,
+		},
+		{
+			name:   "gemini thoughtSignature",
+			format: "gemini",
+			body: `{"candidates":[{"content":{"parts":[
+				{"thoughtSignature":"tsig_orig","functionCall":{"id":"c1","name":"search","args":{"q":"x"}}}
+			]}}]}`,
+		},
+	} {
+		t.Run(tc.name+"/allow", func(t *testing.T) {
+			out, err := runJSONResponseHooks(context.Background(), pp, 1, tc.format, nil, []byte(tc.body))
+			if err != nil {
+				t.Fatalf("allow mode must not error: %v", err)
+			}
+			// The forged replacement was refused, so nothing changed on the
+			// wire: the original bytes come back verbatim — the strongest form
+			// of "forged id/signature was never written".
+			if string(out) != tc.body {
+				t.Fatalf("output changed, forged fields leaked or body re-marshaled:\n%s", out)
+			}
+		})
+
+		t.Run(tc.name+"/block", func(t *testing.T) {
+			bpp := forgeBlockPipeline(t)
+			out, err := runJSONResponseHooks(context.Background(), bpp, 1, tc.format, nil, []byte(tc.body))
+			if err == nil {
+				t.Fatal("block mode must return an error for a forged host-owned field")
+			}
+			if !strings.Contains(err.Error(), "test-forge-response-fields") {
+				t.Errorf("error %q does not name the offending plugin", err)
+			}
+			if string(out) != tc.body {
+				t.Fatalf("rejection was not atomic — output differs from the input body:\n%s", out)
+			}
+		})
+	}
 }
 
 // Defensive apply boundary: a replacement that violates the host's relative

@@ -25,8 +25,28 @@ type toolCallRef struct {
 	id       string
 	name     string
 	argsJSON string
-	setName  func(string)
-	setArgs  func(string) error
+	// rawArgs is the provider's VERBATIM bytes of the args slot in the
+	// original body, straight out of the wire with no decode/re-encode: for
+	// object slots (anthropic input, bedrock toolUse.input, gemini
+	// functionCall.args) the raw object bytes; for string slots (openai
+	// function.arguments, Responses output item arguments) the full quoted
+	// JSON string including quotes. nil when the slot is absent in the raw
+	// body.
+	rawArgs []byte
+	// path locates the args slot in the FINAL marshaled output (gemini
+	// codeassist paths start with "response" for the wrapper key).
+	path []any
+	// objSlot marks an object-valued args slot. On change the guest's new
+	// bytes are spliced in; for string slots the re-marshaled map already
+	// holds the new string, so no splice is needed.
+	objSlot bool
+	// argsChanged is set whenever setArgs ran (stream delta or after-response
+	// replacement) and drives the splice decision: unchanged slots are
+	// restored to rawArgs verbatim, changed object slots carry the guest's
+	// bytes.
+	argsChanged bool
+	setName     func(string)
+	setArgs     func(string) error
 	// signature is the provider's opaque token over this call (Gemini and
 	// Code Assist thoughtSignature). clearSignature removes it from the body.
 	//
@@ -61,6 +81,11 @@ func (tc *toolCallRef) invalidateSignature() {
 
 // responseRefs is the format-independent mutable view of a JSON response.
 type responseRefs struct {
+	// hasMessage reports whether the provider response actually contains an
+	// assistant turn (message/candidate/content blocks or tool calls). When
+	// false, the pipeline hands run_after_response a ChatResponse with
+	// Message=nil — never a fabricated empty assistant message.
+	hasMessage bool
 	model      string
 	content    string
 	setContent func(string)
@@ -76,16 +101,26 @@ type responseRefs struct {
 
 // extractResponse builds mutable references into a decoded response body for
 // the given wire format. Unknown formats return no references (pass-through).
-func extractResponse(formatName string, body map[string]any) responseRefs {
+//
+// raw is the ORIGINAL body bytes before any mutation; it lets the extractors
+// capture provider-verbatim args spans instead of the lossy decoded map. It is
+// variadic so call sites that only meter usage (no raw bytes on hand) keep
+// working: with no raw, extractors fall back to map-derived args exactly as
+// before.
+func extractResponse(formatName string, body map[string]any, raw ...[]byte) responseRefs {
+	var rb []byte
+	if len(raw) > 0 {
+		rb = raw[0]
+	}
 	switch formatName {
 	case "openai":
-		return extractOpenAI(body)
+		return extractOpenAI(body, rb)
 	case "anthropic":
-		return extractAnthropic(body)
+		return extractAnthropic(body, rb)
 	case "bedrock":
-		return extractBedrock(body)
+		return extractBedrock(body, rb)
 	case "gemini", "gemini-codeassist":
-		return extractGemini(body)
+		return extractGemini(body, rb)
 	}
 	return responseRefs{}
 }
@@ -122,16 +157,11 @@ func usageFrom(body map[string]any, objKey, inKey, outKey, cacheReadKey, cacheWr
 	return u
 }
 
-// objArgs marshals an object-valued args field to JSON text and returns a
-// setter that unmarshals mutated text back into the parent map at key.
-func objArgs(parent map[string]any, key string) (string, func(string) error) {
-	argsJSON := "{}"
-	if v, ok := parent[key]; ok && v != nil {
-		if b, err := json.Marshal(v); err == nil {
-			argsJSON = string(b)
-		}
-	}
-	return argsJSON, func(s string) error {
+// objArgsSetter returns a setter for an object-valued args field: it unmarshals
+// mutated JSON text back into the parent map at key as a decoded object, so the
+// writeback stays in this format's own wire shape (object slots).
+func objArgsSetter(parent map[string]any, key string) func(string) error {
+	return func(s string) error {
 		var obj any
 		if err := json.Unmarshal([]byte(s), &obj); err != nil {
 			return fmt.Errorf("args not valid JSON: %w", err)
@@ -153,7 +183,7 @@ func objArgs(parent map[string]any, key string) (string, func(string) error) {
 // that reported nothing. The streaming path has understood the Responses shape
 // all along, so the two paths disagreed depending only on whether the client
 // asked for a stream.
-func extractOpenAI(body map[string]any) responseRefs {
+func extractOpenAI(body map[string]any, raw []byte) responseRefs {
 	usage, _ := body["usage"].(map[string]any)
 	refs := responseRefs{
 		model: asString(body["model"]),
@@ -164,7 +194,9 @@ func extractOpenAI(body map[string]any) responseRefs {
 	}
 
 	if output, ok := body["output"].([]any); ok {
-		extractResponsesOutput(&refs, output)
+		// Items are components of ONE response — keep aggregating all of them.
+		refs.hasMessage = len(output) > 0
+		extractResponsesOutput(&refs, output, raw)
 		return refs
 	}
 
@@ -179,31 +211,56 @@ func extractOpenAI(body map[string]any) responseRefs {
 			continue
 		}
 		if ci == 0 {
-			refs.content = asString(msg["content"])
-			refs.setContent = func(s string) { msg["content"] = s }
+			refs.hasMessage = true // choices[0].message is a non-nil map
+			// Content slot ONLY when the content key is present AND a string.
+			// Absent or JSON null means the provider sent no writable text
+			// slot, and a plugin must not fabricate content presence.
+			if v, present := msg["content"]; present && v != nil {
+				if s, isStr := v.(string); isStr {
+					refs.content = s
+					refs.setContent = func(s string) { msg["content"] = s }
+				}
+			}
 			refs.finishReason = asString(choice["finish_reason"])
-		}
-		toolCalls, _ := msg["tool_calls"].([]any)
-		for _, t := range toolCalls {
-			tc, _ := t.(map[string]any)
-			if tc == nil {
-				continue
+			// Tool calls come from choice 0 only: a second choice is an
+			// alternative, not another turn — mutating it would rewrite a
+			// response the provider did not select.
+			toolCalls, _ := msg["tool_calls"].([]any)
+			for ti, t := range toolCalls {
+				tc, _ := t.(map[string]any)
+				if tc == nil {
+					continue
+				}
+				fn, _ := tc["function"].(map[string]any)
+				if fn == nil {
+					continue
+				}
+				fnRef := fn
+				path := []any{"choices", 0, "message", "tool_calls", ti, "function", "arguments"}
+				rawArgs, _ := rawJSONSpan(raw, path...)
+				// String slot: the canonical argsJSON is the DECODED inner
+				// JSON text (the SDK requires arguments_json to be an object,
+				// not a quoted string).
+				argsJSON := asString(fn["arguments"])
+				if rawArgs != nil {
+					var inner string
+					if err := json.Unmarshal(rawArgs, &inner); err == nil {
+						argsJSON = inner
+					}
+				}
+				refs.toolCalls = append(refs.toolCalls, toolCallRef{
+					id:       asString(tc["id"]),
+					name:     asString(fn["name"]),
+					argsJSON: argsJSON,
+					rawArgs:  rawArgs,
+					path:     path,
+					setName:  func(s string) { fnRef["name"] = s },
+					setArgs: func(s string) error {
+						fnRef["arguments"] = s
+						return nil
+					},
+				})
 			}
-			fn, _ := tc["function"].(map[string]any)
-			if fn == nil {
-				continue
-			}
-			fnRef := fn
-			refs.toolCalls = append(refs.toolCalls, toolCallRef{
-				id:       asString(tc["id"]),
-				name:     asString(fn["name"]),
-				argsJSON: asString(fn["arguments"]), // JSON *string* on the wire
-				setName:  func(s string) { fnRef["name"] = s },
-				setArgs: func(s string) error {
-					fnRef["arguments"] = s
-					return nil
-				},
-			})
 		}
 	}
 	return refs
@@ -215,14 +272,14 @@ func extractOpenAI(body map[string]any) responseRefs {
 // Items are typed and flat rather than nested under a choice: assistant text
 // arrives as a "message" whose content is a list of output_text parts, and each
 // tool call is its own "function_call" item.
-func extractResponsesOutput(refs *responseRefs, output []any) {
+func extractResponsesOutput(refs *responseRefs, output []any, raw []byte) {
 	// Every output_text part, not just the first. A Responses reply routinely
 	// carries several, and binding only the first left the rest read-only —
 	// so a redaction plugin would report success having rewritten one
 	// paragraph of a multi-part answer.
 	var textParts []map[string]any
 
-	for _, item := range output {
+	for oi, item := range output {
 		it, _ := item.(map[string]any)
 		if it == nil {
 			continue
@@ -239,16 +296,23 @@ func extractResponsesOutput(refs *responseRefs, output []any) {
 			}
 		case "function_call": //nolint:dupl // distinct wire shape from the Chat path
 			itRef := it
-			// The Responses wire format carries arguments as a JSON STRING.
-			// objArgs writes back a decoded object, which is the Chat shape —
-			// so using it here produced a body the client cannot parse. It is
-			// only reached when "arguments" is absent or not a string, and even
-			// then the setter must write a string.
+			path := []any{"output", oi, "arguments"}
+			rawArgs, _ := rawJSONSpan(raw, path...)
+			// The Responses wire format carries arguments as a JSON STRING;
+			// the canonical argsJSON is the DECODED inner JSON text (the SDK
+			// requires arguments_json to be an object). The setter writes a
+			// string back, so the re-marshaled body stays in this format's own
+			// wire shape.
 			args := "{}"
-			if raw, ok := itRef["arguments"].(string); ok {
-				args = raw
+			if rawArgs != nil {
+				var inner string
+				if err := json.Unmarshal(rawArgs, &inner); err == nil {
+					args = inner
+				}
 			} else if v, present := itRef["arguments"]; present && v != nil {
-				if b, err := json.Marshal(v); err == nil {
+				if s, isStr := v.(string); isStr {
+					args = s
+				} else if b, err := json.Marshal(v); err == nil {
 					args = string(b)
 				}
 			}
@@ -263,6 +327,8 @@ func extractResponsesOutput(refs *responseRefs, output []any) {
 				id:       asString(itRef["call_id"]),
 				name:     asString(itRef["name"]),
 				argsJSON: args,
+				rawArgs:  rawArgs,
+				path:     path,
 				setName:  func(s string) { itRef["name"] = s },
 				setArgs:  setArgs,
 			})
@@ -289,7 +355,7 @@ func extractResponsesOutput(refs *responseRefs, output []any) {
 	}
 }
 
-func extractAnthropic(body map[string]any) responseRefs {
+func extractAnthropic(body map[string]any, raw []byte) responseRefs {
 	refs := responseRefs{
 		model:        asString(body["model"]),
 		id:           asString(body["id"]),
@@ -297,27 +363,43 @@ func extractAnthropic(body map[string]any) responseRefs {
 		usage:        usageFrom(body, "usage", "input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"),
 	}
 	blocks, _ := body["content"].([]any)
-	for _, b := range blocks {
+	refs.hasMessage = len(blocks) > 0
+	for bi, b := range blocks {
 		block, _ := b.(map[string]any)
 		if block == nil {
 			continue
 		}
 		switch asString(block["type"]) {
 		case "text":
+			// Content slot = first text block with a present string text key.
 			if refs.setContent == nil {
-				blockRef := block
-				refs.content = asString(block["text"])
-				refs.setContent = func(s string) { blockRef["text"] = s }
+				if s, isStr := block["text"].(string); isStr {
+					blockRef := block
+					refs.content = s
+					refs.setContent = func(s string) { blockRef["text"] = s }
+				}
 			}
 		case "tool_use":
 			blockRef := block
-			argsJSON, setArgs := objArgs(blockRef, "input")
+			path := []any{"content", bi, "input"}
+			rawArgs, _ := rawJSONSpan(raw, path...)
+			argsJSON := "{}"
+			if rawArgs != nil {
+				argsJSON = string(rawArgs) // object slot: verbatim provider bytes
+			} else if v, ok := blockRef["input"]; ok && v != nil {
+				if b, err := json.Marshal(v); err == nil {
+					argsJSON = string(b)
+				}
+			}
 			refs.toolCalls = append(refs.toolCalls, toolCallRef{
 				id:       asString(block["id"]),
 				name:     asString(block["name"]),
 				argsJSON: argsJSON,
+				rawArgs:  rawArgs,
+				path:     path,
+				objSlot:  true,
 				setName:  func(s string) { blockRef["name"] = s },
-				setArgs:  setArgs,
+				setArgs:  objArgsSetter(blockRef, "input"),
 			})
 		}
 	}
@@ -326,33 +408,47 @@ func extractAnthropic(body map[string]any) responseRefs {
 
 // --- bedrock: output.message.content[].{text | toolUse{toolUseId,name,input}} ---
 
-func extractBedrock(body map[string]any) responseRefs {
+func extractBedrock(body map[string]any, raw []byte) responseRefs {
 	refs := responseRefs{
 		finishReason: asString(body["stopReason"]),
 		usage:        usageFrom(body, "usage", "inputTokens", "outputTokens", "cacheReadInputTokens", "cacheWriteInputTokens"),
 	}
 	output, _ := body["output"].(map[string]any)
 	msg, _ := output["message"].(map[string]any)
+	refs.hasMessage = msg != nil
 	parts, _ := msg["content"].([]any)
-	for _, p := range parts {
+	for pi, p := range parts {
 		part, _ := p.(map[string]any)
 		if part == nil {
 			continue
 		}
-		if _, ok := part["text"]; ok && refs.setContent == nil {
+		// Content slot = first part with a present string text key.
+		if s, isStr := part["text"].(string); isStr && refs.setContent == nil {
 			partRef := part
-			refs.content = asString(part["text"])
+			refs.content = s
 			refs.setContent = func(s string) { partRef["text"] = s }
 		}
 		if tu, ok := part["toolUse"].(map[string]any); ok {
 			tuRef := tu
-			argsJSON, setArgs := objArgs(tuRef, "input")
+			path := []any{"output", "message", "content", pi, "toolUse", "input"}
+			rawArgs, _ := rawJSONSpan(raw, path...)
+			argsJSON := "{}"
+			if rawArgs != nil {
+				argsJSON = string(rawArgs) // object slot: verbatim provider bytes
+			} else if v, ok := tuRef["input"]; ok && v != nil {
+				if b, err := json.Marshal(v); err == nil {
+					argsJSON = string(b)
+				}
+			}
 			refs.toolCalls = append(refs.toolCalls, toolCallRef{
 				id:       asString(tu["toolUseId"]),
 				name:     asString(tu["name"]),
 				argsJSON: argsJSON,
+				rawArgs:  rawArgs,
+				path:     path,
+				objSlot:  true,
 				setName:  func(s string) { tuRef["name"] = s },
-				setArgs:  setArgs,
+				setArgs:  objArgsSetter(tuRef, "input"),
 			})
 		}
 	}
@@ -361,46 +457,83 @@ func extractBedrock(body map[string]any) responseRefs {
 
 // --- gemini: candidates[].content.parts[].{text | functionCall{name,args}} ---
 
-func extractGemini(body map[string]any) responseRefs {
+func extractGemini(body map[string]any, raw []byte) responseRefs {
 	// Code Assist (Antigravity CLI) wraps the GenerateContentResponse under
 	// "response"; unwrap so extraction/writeback target the real fields. Maps
 	// are references, so mutating the inner map still reflects in the outer
-	// body the caller re-marshals.
+	// body the caller re-marshals. The args paths gain the "response" prefix
+	// so the splice still finds the slot in the wrapped output.
+	prefix := []any{}
 	if inner, ok := body["response"].(map[string]any); ok {
 		body = inner
+		prefix = []any{"response"}
 	}
 	refs := responseRefs{
 		model: asString(body["modelVersion"]),
 		usage: usageFrom(body, "usageMetadata", "promptTokenCount", "candidatesTokenCount", "cachedContentTokenCount", ""),
 	}
 	candidates, _ := body["candidates"].([]any)
+	// hasMessage: a real candidate with a non-nil content map. An empty
+	// candidates list (or one whose first entry has no content) means the
+	// provider returned no assistant turn.
+	if len(candidates) > 0 {
+		if c0, ok := candidates[0].(map[string]any); ok {
+			if content, ok := c0["content"].(map[string]any); ok {
+				refs.hasMessage = content != nil
+			}
+		}
+	}
 	for ci, c := range candidates {
 		cand, _ := c.(map[string]any)
+		if cand == nil {
+			continue
+		}
 		if ci == 0 {
 			refs.finishReason = asString(cand["finishReason"])
 		}
 		content, _ := cand["content"].(map[string]any)
 		parts, _ := content["parts"].([]any)
-		for _, p := range parts {
+		for pi, p := range parts {
 			part, _ := p.(map[string]any)
 			if part == nil {
 				continue
 			}
-			if _, ok := part["text"]; ok && refs.setContent == nil {
+			// Content slot = first part with a present string text key.
+			if s, isStr := part["text"].(string); isStr && refs.setContent == nil {
 				partRef := part
-				refs.content = asString(part["text"])
+				refs.content = s
 				refs.setContent = func(s string) { partRef["text"] = s }
+			}
+			// Tool calls and signatures come from candidate 0 ONLY: a second
+			// candidate is an alternative response, not another turn, so its
+			// calls must never be replayed, mutated, or spliced.
+			if ci != 0 {
+				continue
 			}
 			if fc, ok := part["functionCall"].(map[string]any); ok {
 				fcRef := fc
 				sigPart := part
-				argsJSON, setArgs := objArgs(fcRef, "args")
+				path := make([]any, 0, len(prefix)+7)
+				path = append(path, prefix...)
+				path = append(path, "candidates", 0, "content", "parts", pi, "functionCall", "args")
+				rawArgs, _ := rawJSONSpan(raw, path...)
+				argsJSON := "{}"
+				if rawArgs != nil {
+					argsJSON = string(rawArgs) // object slot: verbatim provider bytes
+				} else if v, ok := fcRef["args"]; ok && v != nil {
+					if b, err := json.Marshal(v); err == nil {
+						argsJSON = string(b)
+					}
+				}
 				refs.toolCalls = append(refs.toolCalls, toolCallRef{
 					id:       asString(fc["id"]),
 					name:     asString(fc["name"]),
 					argsJSON: argsJSON,
+					rawArgs:  rawArgs,
+					path:     path,
+					objSlot:  true,
 					setName:  func(s string) { fcRef["name"] = s },
-					setArgs:  setArgs,
+					setArgs:  objArgsSetter(fcRef, "args"),
 					// thoughtSignature sits on the PART, beside functionCall.
 					signature:      asString(sigPart["thoughtSignature"]),
 					clearSignature: func() { delete(sigPart, "thoughtSignature") },
@@ -433,7 +566,9 @@ func runJSONResponseHooks(ctx context.Context, pl *plugin.PluginPipeline, reqID 
 		return bodyBytes, nil
 	}
 
-	refs := extractResponse(formatName, body)
+	// raw body bytes go to the extractors so they can capture provider-verbatim
+	// args spans; re-marshaling the decoded map would lose them.
+	refs := extractResponse(formatName, body, bodyBytes)
 	modified := false
 
 	// Record provider-reported token usage for host metrics and _response.
@@ -468,6 +603,7 @@ func runJSONResponseHooks(ctx context.Context, pl *plugin.PluginPipeline, reqID 
 						return err
 					}
 					tc.argsJSON = ev.ToolCallDelta.ArgumentsDelta
+					tc.argsChanged = true
 					signedContentChanged = true
 					modified = true
 				}
@@ -518,23 +654,29 @@ func runJSONResponseHooks(ctx context.Context, pl *plugin.PluginPipeline, reqID 
 	// Expose latency/status/usage to response hooks.
 	respChat.ToranaMeta["_response"] = rs.responseMeta()
 
-	// The canonical response preserves what the wire can prove: content
-	// presence only when the body actually has a writable text slot, and raw
-	// arguments bytes with no map[string]any round-trip between responseRefs
-	// and the wire.
-	assistant := &engine.ResponseMessage{}
-	if refs.setContent != nil {
-		content := refs.content
-		assistant.Content = &content
-	}
-	for i := range refs.toolCalls {
-		tc := &refs.toolCalls[i]
-		assistant.ToolCalls = append(assistant.ToolCalls, engine.ResponseToolCall{
-			ID:            tc.id,
-			Name:          tc.name,
-			ArgumentsJSON: []byte(tc.argsJSON),
-			Signature:     tc.signature,
-		})
+	// The canonical response preserves what the wire can prove: an assistant
+	// message only when the provider response actually contains one (a
+	// message/candidate/content block or tool calls), content presence only
+	// when the body has a writable text slot, and raw arguments bytes with no
+	// map[string]any round-trip between responseRefs and the wire. With no
+	// message the hook receives ChatResponse{Message: nil} — never a
+	// fabricated empty assistant turn.
+	var assistant *engine.ResponseMessage
+	if refs.hasMessage {
+		assistant = &engine.ResponseMessage{}
+		if refs.setContent != nil {
+			content := refs.content
+			assistant.Content = &content
+		}
+		for i := range refs.toolCalls {
+			tc := &refs.toolCalls[i]
+			assistant.ToolCalls = append(assistant.ToolCalls, engine.ResponseToolCall{
+				ID:            tc.id,
+				Name:          tc.name,
+				ArgumentsJSON: []byte(tc.argsJSON),
+				Signature:     tc.signature,
+			})
+		}
 	}
 
 	// The non-streaming path is the one where a replacement CAN be applied:
@@ -586,6 +728,7 @@ func runJSONResponseHooks(ctx context.Context, pl *plugin.PluginPipeline, reqID 
 					return bodyBytes, fmt.Errorf("response replacement tool call %d: %w", i, err)
 				}
 				tc.argsJSON = string(mut.ArgumentsJSON)
+				tc.argsChanged = true
 				signedContentChanged = true
 				modified = true
 			}
@@ -600,11 +743,51 @@ func runJSONResponseHooks(ctx context.Context, pl *plugin.PluginPipeline, reqID 
 	}
 
 	if !modified {
+		// Nothing changed: the provider's bytes are already exactly what
+		// should ship. No marshal, no splice — byte-for-byte identity.
 		return bodyBytes, nil
 	}
 	out, err := json.Marshal(body)
 	if err != nil {
 		return bodyBytes, err
 	}
+	// Restore provider-verbatim argument bytes. Re-marshaling the decoded map
+	// sorts object keys and rounds large integers through float64, so every
+	// args slot the pipeline did NOT rewrite must be spliced back byte for
+	// byte; rewritten OBJECT slots get the plugin's exact bytes spliced in
+	// instead. Rewritten string slots need nothing — the map already holds
+	// the new string and re-marshaling it is correct. Splices run in
+	// descending start-offset order so earlier offsets stay valid.
+	for i := len(refs.toolCalls) - 1; i >= 0; i-- {
+		tc := &refs.toolCalls[i]
+		start, end, ok := rawJSONSpanAt(out, tc.path...)
+		if !ok {
+			return bodyBytes, fmt.Errorf("response replacement: args slot not found at path %v", tc.path)
+		}
+		var repl []byte
+		switch {
+		case !tc.argsChanged:
+			if tc.rawArgs == nil {
+				continue // no args slot in the original body; nothing to restore
+			}
+			repl = tc.rawArgs
+		case tc.objSlot:
+			repl = []byte(tc.argsJSON)
+		default:
+			continue // changed string slot: the map already holds the new string
+		}
+		out = spliceBytes(out, start, end, repl)
+	}
 	return out, nil
+}
+
+// spliceBytes returns a new slice with doc[start:end] replaced by repl.
+// Allocates a fresh slice so the source (which may alias the original body)
+// is never written through.
+func spliceBytes(doc []byte, start, end int, repl []byte) []byte {
+	out := make([]byte, 0, len(doc)-(end-start)+len(repl))
+	out = append(out, doc[:start]...)
+	out = append(out, repl...)
+	out = append(out, doc[end:]...)
+	return out
 }
