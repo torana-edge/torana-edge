@@ -448,9 +448,25 @@ func (s *Server) evaluateCompaction(ctx context.Context, report economics.Compac
 	if targetName == "" {
 		targetName = rs.Provider
 	}
-	if rs.PendingRoute != nil {
+	// Read the route verdict directly rather than a copy cached when a plugin
+	// happened to return a replacement.
+	//
+	// Routing is a host-call SIDE EFFECT in v2, so a route-only plugin
+	// correctly returns PassRequest. The cached copy was only refreshed by
+	// RequestMutationFunc, which fires on ReplaceRequest — so such a plugin
+	// priced compaction against the ORIGINAL provider and model while the
+	// request went somewhere else. The old router fixture hid this by
+	// returning ReplaceRequest after routing, which is the v1
+	// "return the same request" footgun v2 exists to remove.
+	pendingRoute := rs.PendingRoute
+	if rs.Pipeline != nil {
+		if v := rs.Pipeline.Verdicts(rs.ID).Route(); v != nil {
+			pendingRoute = v
+		}
+	}
+	if pendingRoute != nil {
 		cfg := s.GetConfig().Providers
-		targetName = rs.PendingRoute.Provider
+		targetName = pendingRoute.Provider
 		if targetName == "" {
 			targetName = rs.InitialProvider
 		}
@@ -459,8 +475,8 @@ func (s *Server) evaluateCompaction(ctx context.Context, report economics.Compac
 			return economics.CompactionDecision{Reason: economics.UnavailableRouteUnresolved}
 		}
 		report.Provider = targetName
-		if rs.PendingRoute.Model != "" {
-			report.Model = rs.PendingRoute.Model
+		if pendingRoute.Model != "" {
+			report.Model = pendingRoute.Model
 		}
 	}
 	target, offload := s.compactionPricing(rs, report)

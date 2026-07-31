@@ -9,6 +9,7 @@ import (
 
 	"github.com/torana-edge/torana-edge/internal/economics"
 	"github.com/torana-edge/torana-edge/internal/metrics"
+	"github.com/torana-edge/torana-edge/internal/plugin"
 	"github.com/torana-edge/torana-edge/internal/provider"
 	"github.com/torana-edge/torana-edge/internal/wasm"
 )
@@ -133,5 +134,52 @@ func TestEvaluateCompactionRequiresEveryFallbackToBeEconomic(t *testing.T) {
 	s.config.Providers.Providers["fallback"] = fallback
 	if got := s.evaluateCompaction(ctx, report); !got.Apply {
 		t.Fatalf("fully priced compatible fallbacks should apply: %+v", got)
+	}
+}
+
+// A route-only plugin returns PassRequest, so pricing must read the recorded
+// verdict rather than a copy cached when someone returned a replacement.
+//
+// This is the multi-plugin shape in miniature: plugin A calls RouteRequest and
+// passes; plugin B then evaluates compaction. Before the fix, PendingRoute was
+// only refreshed by RequestMutationFunc — which fires on ReplaceRequest — so B
+// priced the ORIGINAL provider and model while the request went elsewhere. The
+// router fixture hid it by returning ReplaceRequest after routing, which is the
+// v1 "return the same request" footgun v2 removes.
+func TestEvaluateCompactionReadsRouteRecordedWithoutAReplacement(t *testing.T) {
+	s := &Server{config: Config{Providers: provider.Config{Providers: map[string]provider.Provider{
+		"initial": {Format: "openai"},
+		"routed": {Format: "openai", Pricing: map[string]economics.ModelPricing{
+			"cheap": {CacheReadUSDPerMTok: usd(0.5), CacheWriteUSDPerMTok: usd(1)},
+		}},
+	}}}}
+
+	rt := wasm.NewRuntime(context.Background())
+	t.Cleanup(func() { _ = rt.Close() })
+	pp, err := plugin.NewPipeline(rt, plugin.PluginConfig{AllowUnapproved: true})
+	if err != nil {
+		t.Fatalf("pipeline: %v", err)
+	}
+
+	const reqID = 77
+	// Plugin A's side effect, with NO replacement returned — the case the old
+	// code could not see.
+	rt.RecordRouteVerdictForTest(reqID, "plugin-a", "routed", "cheap")
+
+	rs := &reqState{
+		ID: reqID, Pipeline: pp,
+		Provider: "initial", Model: "expensive",
+		InitialProvider: "initial", InitialFormat: "openai",
+		// PendingRoute deliberately nil: nothing returned a replacement.
+	}
+	ctx := context.WithValue(context.Background(), reqStateKey{}, rs)
+	report := economics.CompactionReport{
+		OriginalBytes: 100_000, FinalBytes: 5_000, EstimatedTokensRemoved: 95_000,
+		EstimatedRewriteSpanTokens: 15_000, ExpectedApplications: 8, CandidateCount: 1, Source: "transformation",
+	}
+
+	got := s.evaluateCompaction(ctx, report)
+	if !got.Apply {
+		t.Fatalf("compaction was priced against the unrouted provider: %+v", got)
 	}
 }

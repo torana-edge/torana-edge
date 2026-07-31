@@ -21,17 +21,22 @@ func init() {
 		for _, m := range req.Messages {
 			switch {
 			case strings.Contains(m.Content, "routecheap"):
+				// Route is a host-call SIDE EFFECT, so a route-only plugin
+				// returns Pass. Returning ReplaceRequest here was the v1
+				// "return the same request" footgun, and it hid a real bug:
+				// compaction priced the original provider when a plugin
+				// routed without replacing.
 				sdk.RouteRequest("cheap", "small-model")
-				return sdk.ReplaceRequest(req), nil
+				return sdk.PassRequest(), nil
 			case strings.Contains(m.Content, "routemodel"):
 				sdk.RouteRequest("", "tiny-model")
-				return sdk.ReplaceRequest(req), nil
+				return sdk.PassRequest(), nil
 			case strings.Contains(m.Content, "routebroken"):
 				sdk.RouteRequest("no-such-provider", "small-model")
-				return sdk.ReplaceRequest(req), nil
+				return sdk.PassRequest(), nil
 			case strings.Contains(m.Content, "routewrongfmt"):
 				sdk.RouteRequest("wrongfmt", "small-model")
-				return sdk.ReplaceRequest(req), nil
+				return sdk.PassRequest(), nil
 			}
 		}
 		return sdk.PassRequest(), nil

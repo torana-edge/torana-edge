@@ -259,3 +259,10 @@ func (r *Runtime) metaSetBounded(reqID uint64, key, value string) error {
 	bucket[key] = value
 	return nil
 }
+
+// RecordRouteVerdictForTest records a route verdict the way the dispatcher
+// does, so tests in other internal packages can set up a route-only plugin
+// without compiling a guest.
+func (r *Runtime) RecordRouteVerdictForTest(reqID uint64, plugin, provider, model string) {
+	r.verdictsBucket(reqID).setRoute(plugin, provider, model)
+}
