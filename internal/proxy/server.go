@@ -288,10 +288,17 @@ type reqState struct {
 	// OriginalReq is the pristine pre-pipeline request (pb bytes), snapshotted
 	// only when a loaded plugin holds env.original_request.
 	OriginalReq []byte
+	// OriginalReqSet marks that the snapshot was actually taken. Presence is
+	// not length: an all-default ChatRequest marshals to zero bytes, so a
+	// captured empty request and an uncaptured one are the same slice.
+	OriginalReqSet bool
 	// OriginalResp is the raw upstream response body (non-streaming JSON path
 	// only), stashed before response hooks run, only when a loaded plugin
 	// holds env.original_response.
 	OriginalResp []byte
+	// OriginalRespSet marks capture. An upstream body can legitimately be
+	// empty, so again this is separate from length.
+	OriginalRespSet bool
 	// CompactionReports are queued by request-side WASM host calls and priced
 	// only after routing has selected the final provider/model.
 	CompactionReports          []attributedCompactionReport
@@ -799,7 +806,9 @@ func New(cfg Config) (*Server, error) {
 				// is the only way to see what the caller actually sent.
 				if pl.HasGrant("env.original_request") {
 					if b, err := proto.Marshal(pbconv.ToPBChatRequest(chat)); err == nil {
-						reqStateFrom(req.Context()).OriginalReq = b
+						rsOrig := reqStateFrom(req.Context())
+						rsOrig.OriginalReq = b
+						rsOrig.OriginalReqSet = true
 					}
 				}
 
@@ -1180,6 +1189,7 @@ func New(cfg Config) (*Server, error) {
 					// hook mutates it.
 					if pl.HasGrant("env.original_response") {
 						rs.OriginalResp = bodyBytes
+						rs.OriginalRespSet = true
 					}
 					chat, _ := ctx.Value(engine.ChatRequestKey).(*engine.ChatRequest)
 					// Records provider usage into rs as a side effect.
@@ -2526,11 +2536,23 @@ func (s *Server) newRuntime() *wasm.Runtime {
 	// Pristine request/response snapshots (env.original_request /
 	// env.original_response), read from the request state the same
 	// way offload does.
-	rt.OriginalRequestFunc = func(ctx context.Context) []byte {
-		return reqStateFrom(ctx).OriginalReq
+	// (bytes, captured). The callbacks are installed unconditionally, so
+	// "returned nil" cannot mean "unavailable" — on the streaming and
+	// upstream-error paths nothing is ever snapshotted, and framing that as a
+	// successful empty value is the NOT_FOUND-vs-empty ambiguity v2 removes.
+	rt.OriginalRequestFunc = func(ctx context.Context) ([]byte, bool) {
+		rs := reqStateFrom(ctx)
+		if rs == nil {
+			return nil, false
+		}
+		return rs.OriginalReq, rs.OriginalReqSet
 	}
-	rt.OriginalResponseFunc = func(ctx context.Context) []byte {
-		return reqStateFrom(ctx).OriginalResp
+	rt.OriginalResponseFunc = func(ctx context.Context) ([]byte, bool) {
+		rs := reqStateFrom(ctx)
+		if rs == nil {
+			return nil, false
+		}
+		return rs.OriginalResp, rs.OriginalRespSet
 	}
 	return rt
 }

@@ -61,3 +61,57 @@ func MinimalV2Module(loopForever bool) []byte {
 	out = append(out, sec(0x07, exports)...)
 	return append(out, code...)
 }
+
+// ModuleImportingEnvFunc builds a guest that imports env.<name> as a
+// (i32,i32)->i64 function, plus the v2 exports.
+//
+// Used to prove a handwritten guest cannot reach a host function that no
+// longer exists. Asserting on the host module's export list is not possible —
+// wazero forbids inspecting host modules — and would be the weaker claim
+// anyway: what matters is whether a guest can link against it.
+func ModuleImportingEnvFunc(name string) []byte {
+	sec := func(id byte, body []byte) []byte {
+		return append([]byte{id, byte(len(body))}, body...)
+	}
+	str := func(s string) []byte { return append([]byte{byte(len(s))}, s...) }
+
+	// Types: 0 (i32)->i32 alloc, 1 (i32,i32)->i64 run_hook + the import,
+	// 2 ()->i64 supported_hooks.
+	types := sec(0x01, []byte{
+		0x03,
+		0x60, 0x01, 0x7f, 0x01, 0x7f,
+		0x60, 0x02, 0x7f, 0x7f, 0x01, 0x7e,
+		0x60, 0x00, 0x01, 0x7e,
+	})
+
+	imp := []byte{0x01}
+	imp = append(imp, str("env")...)
+	imp = append(imp, str(name)...)
+	imp = append(imp, 0x00, 0x01) // func, type 1
+	imports := sec(0x02, imp)
+
+	// Local funcs come after the imported one, so indexes shift by 1.
+	funcs := sec(0x03, []byte{0x03, 0x00, 0x01, 0x02})
+	mem := sec(0x05, []byte{0x01, 0x00, 0x01})
+
+	exports := []byte{0x04}
+	exports = append(exports, append(str("memory"), 0x02, 0x00)...)
+	exports = append(exports, append(str("alloc"), 0x00, 0x01)...)
+	exports = append(exports, append(str("run_hook"), 0x00, 0x02)...)
+	exports = append(exports, append(str("supported_hooks"), 0x00, 0x03)...)
+
+	code := sec(0x0a, []byte{
+		0x03,
+		0x04, 0x00, 0x41, 0x00, 0x0b,
+		0x04, 0x00, 0x42, 0x00, 0x0b,
+		0x04, 0x00, 0x42, byte(pb.Hook_HOOK_BEFORE_REQUEST.Bit()), 0x0b,
+	})
+
+	out := []byte{0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00}
+	out = append(out, types...)
+	out = append(out, imports...)
+	out = append(out, funcs...)
+	out = append(out, mem...)
+	out = append(out, sec(0x07, exports)...)
+	return append(out, code...)
+}

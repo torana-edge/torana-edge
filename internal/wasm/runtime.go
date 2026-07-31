@@ -23,19 +23,6 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
-// permissionDeniedJSON is what a guest receives when it calls a host function
-// it was not granted.
-//
-// It is a WIRE CONSTANT, not an implementation detail: every SDK matches it
-// verbatim to tell a refusal from an ordinary empty result, and
-// already-published plugin binaries cannot be recompiled from this repository.
-// Changing the bytes breaks them silently — the plugin carries on as though the
-// call had succeeded.
-//
-// Named rather than repeated so a second denial site cannot drift from the
-// first.
-const permissionDeniedJSON = `{"status":"error","message":"permission denied"}`
-
 // ============================================================================
 // Plugin — WASM module with instance pooling and permission enforcement
 // ============================================================================
@@ -517,12 +504,18 @@ type Runtime struct {
 	// OriginalRequestFunc returns the pristine pre-pipeline request as pb
 	// bytes for env.original_request (empty when unavailable). Set by the
 	// server; grant-gated at dispatch.
-	OriginalRequestFunc func(ctx context.Context) []byte
+	// Returns (bytes, captured). Presence is NOT length: an all-default
+	// ChatRequest marshals to zero bytes, and the server installs the callback
+	// unconditionally, so "returned nil" means not captured on this path
+	// (streaming, upstream error, pre-capture) rather than an empty request.
+	OriginalRequestFunc func(ctx context.Context) ([]byte, bool)
 
 	// OriginalResponseFunc returns the raw upstream response body for
 	// env.original_response (empty when unavailable — e.g. streaming
 	// responses, which are never buffered). Set by the server.
-	OriginalResponseFunc func(ctx context.Context) []byte
+	// Returns (bytes, captured). An upstream body can legitimately be empty, so
+	// again presence is separate from length.
+	OriginalResponseFunc func(ctx context.Context) ([]byte, bool)
 
 	// PluginCounterFunc handles torana_plugin_counter host calls — plugins
 	// increment named counters that appear in the /stats response.
@@ -754,10 +747,17 @@ func metaKey(plugin, key string) string { return plugin + "\x00" + key }
 
 func (r *Runtime) installHostFunctions() {
 	env := r.runtime.NewHostModuleBuilder("env")
-	env.NewFunctionBuilder().WithFunc(func(ctx context.Context, mod api.Module, kPtr, kLen uint32) uint64 {
-		key := metaKey(pluginNameOf(mod), readStr(mod, kPtr, kLen))
-		return writeStr(ctx, mod, r.metaGet(reqIDFrom(ctx), key))
-	}).Export("meta_get")
+
+	// There is deliberately NO raw env.meta_get export, and no env.abort.
+	//
+	// Both were unchecked side doors: meta_get read request metadata with no
+	// grant check at all, so a handwritten guest could declare only
+	// env.meta_set and still read — defeating the per-command boundary the
+	// dispatcher enforces. abort logged without env.log, so a guest could spam
+	// host logs it was never granted.
+	//
+	// Neither is imported by either v2 SDK. Everything now goes through
+	// host_call, where the grant is checked per plugin.
 
 	env.NewFunctionBuilder().WithFunc(func(ctx context.Context, mod api.Module, level int32, ptr, length uint32) {
 		pluginName := pluginNameOf(mod)
@@ -775,10 +775,6 @@ func (r *Runtime) installHostFunctions() {
 			log.Printf("[plugin %s] %s", pluginName, msg)
 		}
 	}).Export("log")
-
-	env.NewFunctionBuilder().WithFunc(func(ctx context.Context, mod api.Module, message, fileName, lineNumber, columnNumber uint32) {
-		log.Printf("[wasm] abort at line %d col %d", lineNumber, columnNumber)
-	}).Export("abort")
 
 	env.NewFunctionBuilder().WithFunc(func(ctx context.Context, mod api.Module, metricType int32, ptr, length uint32, value float64, labelsPtr, labelsLen uint32) {
 		pluginName := pluginNameOf(mod)
@@ -915,8 +911,14 @@ func (r *Runtime) dispatchHostCall(ctx context.Context, pluginName, cmd, args st
 			// and a lost update: two fragments interleaving between the read
 			// and the write silently drop one, and the corrupted tool call
 			// surfaces much later as invalid JSON reaching the agent.
-			existing, present := r.metaAppend(reqIDFrom(ctx),
+			existing, present, err := r.metaAppend(reqIDFrom(ctx),
 				metaKey(pluginName, "append:"+strconv.FormatInt(int64(a.BlockIndex), 10)), a.Fragment)
+			if err != nil {
+				// Refused, not truncated: a truncated tool call is worse than
+				// a refused one, because the agent will try to execute it.
+				herr = hostErr(pbv2.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "%v", err)
+				break
+			}
 			// Non-empty fragment acks with an empty value; an empty fragment
 			// reads the buffer back. Returning the cumulative buffer after
 			// every delta would be O(total x fragments) on the stream path.
@@ -934,7 +936,9 @@ func (r *Runtime) dispatchHostCall(ctx context.Context, pluginName, cmd, args st
 				break
 			}
 			// An empty value STORES an empty value; it is not a delete.
-			r.metaSet(reqIDFrom(ctx), metaKey(pluginName, a.Key), a.Value)
+			if err := r.metaSetBounded(reqIDFrom(ctx), metaKey(pluginName, a.Key), a.Value); err != nil {
+				herr = hostErr(pbv2.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "%v", err)
+			}
 		case "env.meta_get":
 			var a pbv2.MetaGetArgs
 			if err := proto.Unmarshal([]byte(args), &a); err != nil {
@@ -1086,7 +1090,12 @@ func (r *Runtime) dispatchHostCall(ctx context.Context, pluginName, cmd, args st
 				herr = hostErr(pbv2.ErrorCode_ERROR_CODE_NOT_FOUND, "no original request captured")
 				break
 			}
-			value = r.OriginalRequestFunc(ctx)
+			raw, captured := r.OriginalRequestFunc(ctx)
+			if !captured {
+				herr = hostErr(pbv2.ErrorCode_ERROR_CODE_NOT_FOUND, "no original request captured")
+				break
+			}
+			value = raw
 		case "env.original_response":
 			// Raw upstream response body (non-streaming only). An upstream body
 			// can legitimately be empty, so absence is again the error arm.
@@ -1094,7 +1103,12 @@ func (r *Runtime) dispatchHostCall(ctx context.Context, pluginName, cmd, args st
 				herr = hostErr(pbv2.ErrorCode_ERROR_CODE_NOT_FOUND, "no original response captured")
 				break
 			}
-			value = r.OriginalResponseFunc(ctx)
+			raw, captured := r.OriginalResponseFunc(ctx)
+			if !captured {
+				herr = hostErr(pbv2.ErrorCode_ERROR_CODE_NOT_FOUND, "no original response captured")
+				break
+			}
+			value = raw
 		case "torana_db_query":
 			res = `{"status":"error","message":"database not configured — set plugins.config.compactor.dsn"}`
 		case "torana_kms_decrypt":

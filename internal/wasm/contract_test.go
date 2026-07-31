@@ -1,118 +1,103 @@
 package wasm
 
 import (
+	"context"
 	"os"
-	"path/filepath"
 	"strings"
 	"testing"
+
+	pbv2 "github.com/torana-edge/torana-plugin-sdk/pb/v2"
+	"google.golang.org/protobuf/proto"
 )
 
-// The host tells a guest that a capability was refused by returning this exact
-// JSON. Nothing checks it: the host writes a string literal, and every SDK
-// parses one. If either side edits its literal the other simply stops
-// recognising the refusal — and a plugin that cannot tell "denied" from a
-// normal empty result carries on as though the call had succeeded.
+// This file used to pin the v1 denial envelope
+// (`{"status":"error","message":"permission denied"}`) as a wire constant that
+// published plugin binaries matched verbatim.
 //
-// That is the failure mode #210 already produced once, in the SDK's
-// PluginConfig(), which returned the denial envelope to the plugin as if it
-// were configuration.
-const permissionDeniedEnvelope = `{"status":"error","message":"permission denied"}`
+// That contract is gone. The host refuses any manifest that is not ABI v2, and
+// every v2 denial is a framed HostCallResult error arm, so a guest classifies a
+// refusal by CODE rather than by matching a string. The tests now pin the
+// replacement — including that the old envelope does not come back, since
+// reintroducing it would surface inside a v2 guest as a protocol error rather
+// than as the refusal it is.
 
-// TestPermissionDeniedEnvelopeIsStable pins the wire literal itself. Changing
-// it is a breaking ABI change for every already-published plugin binary, which
-// cannot be recompiled by this repository.
-func TestPermissionDeniedEnvelopeIsStable(t *testing.T) {
+const legacyDenialEnvelope = `{"status":"error","message":"permission denied"}`
+
+// A denial is a framed PERMISSION_DENIED, not a string.
+func TestDenialIsFramedNotAStringEnvelope(t *testing.T) {
+	r := NewRuntime(context.Background())
+	defer r.Close()
+	p, err := r.LoadPlugin("denial-fixture", MinimalV2Module(false))
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	p.SetGrants(nil) // no capabilities at all
+
+	raw := r.dispatchHostCallForTest(context.Background(), p.name, "env.meta_get", "")
+	if string(raw) == legacyDenialEnvelope {
+		t.Fatal("the host returned the v1 denial string; a v2 guest decodes replies as " +
+			"HostCallResult, so this surfaces as a protocol error rather than a refusal")
+	}
+	var res pbv2.HostCallResult
+	if err := proto.Unmarshal(raw, &res); err != nil {
+		t.Fatalf("denial does not decode as HostCallResult: %v", err)
+	}
+	if err := res.Validate(); err != nil {
+		t.Fatalf("denial is not a valid HostCallResult: %v", err)
+	}
+	e, ok := res.Result.(*pbv2.HostCallResult_Error)
+	if !ok {
+		t.Fatal("a denied call succeeded")
+	}
+	if e.Error.Code != pbv2.ErrorCode_ERROR_CODE_PERMISSION_DENIED {
+		t.Fatalf("got %v, want PERMISSION_DENIED", e.Error.Code)
+	}
+}
+
+// The legacy envelope must not reappear anywhere in the runtime.
+func TestLegacyDenialEnvelopeIsGone(t *testing.T) {
 	src, err := os.ReadFile("runtime.go")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(src), permissionDeniedEnvelope) {
-		t.Errorf("the host no longer returns %s on a denied capability.\n"+
-			"Guests match this envelope verbatim to detect refusal; a plugin that stops "+
-			"recognising it treats a denied host call as an ordinary empty result and "+
-			"continues as though it had succeeded.\n"+
-			"Already-published plugin binaries cannot be recompiled from here, so this "+
-			"literal is a wire contract, not an implementation detail.",
-			permissionDeniedEnvelope)
+	if strings.Contains(string(src), legacyDenialEnvelope) {
+		t.Error("the v1 denial envelope is back in runtime.go. Every v2 denial must be " +
+			"a framed HostCallResult error arm; a string envelope is indistinguishable " +
+			"from a corrupt reply to a guest that decodes protobuf.")
 	}
 }
 
-// TestDeniedCapabilitiesAllReturnTheSameEnvelope is now structural rather than
-// textual: runtime.go has ONE named constant and every denial site returns it,
-// so "one site drifted from the others" cannot happen.
+// The unchecked host exports are gone.
 //
-// The version this replaces scanned for lines containing both `"status":"error"`
-// and "permission denied" and then checked those lines matched the envelope —
-// so it could only fail on whitespace inside an already-correct one-liner, and
-// a differently-worded denial was filtered out before the assertion ran.
-func TestDeniedCapabilitiesAllReturnTheSameEnvelope(t *testing.T) {
-	if permissionDeniedJSON != permissionDeniedEnvelope {
-		t.Fatalf("the host constant changed to %s; this is a wire contract that "+
-			"already-published plugin binaries match verbatim", permissionDeniedJSON)
-	}
-
-	src, err := os.ReadFile("runtime.go")
-	if err != nil {
-		t.Fatal(err)
-	}
-	// Exactly one occurrence of the literal — the constant's own declaration.
-	// A second means someone reintroduced an inline copy, which is how the two
-	// halves drift apart.
-	if n := strings.Count(string(src), permissionDeniedEnvelope); n != 1 {
-		t.Errorf("the denial envelope literal appears %d times in runtime.go, want 1 "+
-			"(the permissionDeniedJSON declaration). An inline copy can drift from the "+
-			"constant, and guests match it verbatim.", n)
-	}
-}
-
-// TestSDKAgreesOnTheDenialEnvelope closes the loop when the SDK is checked out
-// beside this repo. Asserting only the host half proves nothing about the guest.
+// env.meta_get read request metadata with NO grant check, so a handwritten
+// guest could declare only env.meta_set and still read. env.abort logged
+// without env.log. Both bypassed the per-command dispatcher boundary entirely,
+// and neither is imported by either v2 SDK.
 //
-// It looks for the EXACT envelope, not the phrase "permission denied" — the
-// previous version was satisfied by a comment mentioning it.
-func TestSDKAgreesOnTheDenialEnvelope(t *testing.T) {
-	root := "../../../torana-plugin-sdk"
-	if _, err := os.Stat(root); err != nil {
-		t.Skip("torana-plugin-sdk not checked out beside this repo")
-	}
-	// os.Stat follows symlinks but filepath.WalkDir does not: it lstats the
-	// root, sees a link rather than a directory, and never descends. A
-	// side-by-side checkout linked into place would then find zero matches and
-	// FAIL rather than skip, which reads as a broken contract.
-	if resolved, err := filepath.EvalSymlinks(root); err == nil {
-		root = resolved
+// Asserted against the instantiated host module rather than the source, because
+// what matters is what a guest can actually import.
+func TestUncheckedHostExportsAreRemoved(t *testing.T) {
+	r := NewRuntime(context.Background())
+	defer r.Close()
+
+	for _, name := range []string{"meta_get", "abort"} {
+		if _, err := r.LoadPlugin("importer-"+name, ModuleImportingEnvFunc(name)); err == nil {
+			t.Errorf("a guest importing env.%s instantiated. That function has no grant "+
+				"check, so a handwritten guest could use it while declaring an unrelated "+
+				"capability — bypassing the per-command boundary entirely.", name)
+		}
 	}
 
-	var matches []string
-	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
-		if err != nil || d.IsDir() {
-			return nil //nolint:nilerr // unreadable entries are not a contract failure
-		}
-		ext := filepath.Ext(path)
-		if ext != ".go" && ext != ".rs" {
-			return nil
-		}
-		if strings.Contains(path, "/target/") {
-			return nil
-		}
-		b, readErr := os.ReadFile(path)
-		if readErr != nil {
-			return nil
-		}
-		if strings.Contains(string(b), permissionDeniedEnvelope) {
-			matches = append(matches, path)
-		}
-		return nil
-	})
-	if err != nil {
-		t.Fatal(err)
+	// Positive control: without it, this test would pass on a host that exports
+	// nothing at all.
+	//
+	// env.host_call takes four i32s, and the fixture declares two, so linking
+	// fails either way — but the REASON differs and that is the signal. A
+	// signature mismatch means the name resolved, so the function is there; an
+	// unknown-import error means it is not.
+	_, err := r.LoadPlugin("importer-host_call", ModuleImportingEnvFunc("host_call"))
+	if err == nil || !strings.Contains(err.Error(), "signature mismatch") {
+		t.Fatalf("env.host_call did not resolve by name (%v); the permission-checked "+
+			"path must still exist, or the removals above prove nothing", err)
 	}
-	if len(matches) == 0 {
-		t.Errorf("no SDK source contains the exact envelope %s.\n"+
-			"The host returns it on every denied capability; an SDK that does not match it "+
-			"byte for byte treats a refusal as an ordinary result and continues as though "+
-			"the call had succeeded — which is what #210 produced in PluginConfig.",
-			permissionDeniedEnvelope)
-	}
-	t.Logf("SDK sources matching the envelope: %v", matches)
 }

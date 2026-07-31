@@ -1,6 +1,7 @@
 package wasm
 
 import (
+	"fmt"
 	"sync"
 
 	pbv2 "github.com/torana-edge/torana-plugin-sdk/pb/v2"
@@ -184,21 +185,77 @@ func (r *Runtime) verdictsBucket(reqID uint64) *RequestVerdicts {
 // An empty fragment is the read path: it returns the buffer without creating
 // the key, so a fail-open reader cannot resurrect a buffer that was never
 // written.
-func (r *Runtime) metaAppend(reqID uint64, key string, fragment []byte) (string, bool) {
+func (r *Runtime) metaAppend(reqID uint64, key string, fragment []byte) (string, bool, error) {
 	r.metaMu.Lock()
 	defer r.metaMu.Unlock()
 	bucket, ok := r.meta[reqID]
 	if !ok {
 		if len(fragment) == 0 {
-			return "", false
+			return "", false, nil
 		}
 		bucket = make(map[string]string)
 		r.meta[reqID] = bucket
 	}
 	existing, present := bucket[key]
 	if len(fragment) == 0 {
-		return existing, present
+		return existing, present, nil
 	}
-	bucket[key] = existing + string(fragment)
-	return bucket[key], true
+	if err := r.checkMetaBudget(bucket, key, len(existing), len(fragment)); err != nil {
+		return existing, present, err
+	}
+	// A strings.Builder-per-key would be faster still, but the buffer has to
+	// survive across host calls and be readable as a value, so growth is
+	// amortised by the byte slice underneath rather than by a builder.
+	buf := make([]byte, 0, len(existing)+len(fragment))
+	buf = append(append(buf, existing...), fragment...)
+	bucket[key] = string(buf)
+	return bucket[key], true, nil
+}
+
+// Host-side budgets for request-scoped metadata.
+//
+// This storage lives in the HOST, so it is not covered by the guest's 64 MiB
+// WASM memory cap: an approved but buggy or adversarial plugin could otherwise
+// grow host memory until the request ended. The limits are per key and per
+// request, and exceeding either is a classified refusal rather than a silent
+// truncation — a truncated tool call is worse than a refused one, because the
+// agent will try to execute it.
+const (
+	maxMetaValueBytes   = 4 << 20  // 4 MiB per key
+	maxMetaRequestBytes = 16 << 20 // 16 MiB across one request
+)
+
+// checkMetaBudget reports whether adding delta bytes to key would exceed either
+// budget. Caller holds metaMu.
+func (r *Runtime) checkMetaBudget(bucket map[string]string, key string, existing, delta int) error {
+	if existing+delta > maxMetaValueBytes {
+		return fmt.Errorf("metadata key would reach %d bytes, over the %d byte per-key limit",
+			existing+delta, maxMetaValueBytes)
+	}
+	total := delta
+	for k, v := range bucket {
+		total += len(k) + len(v)
+	}
+	if total > maxMetaRequestBytes {
+		return fmt.Errorf("request metadata would reach %d bytes, over the %d byte limit",
+			total, maxMetaRequestBytes)
+	}
+	return nil
+}
+
+// metaSetBounded writes a value subject to the same budgets.
+func (r *Runtime) metaSetBounded(reqID uint64, key, value string) error {
+	r.metaMu.Lock()
+	defer r.metaMu.Unlock()
+	bucket, ok := r.meta[reqID]
+	if !ok {
+		bucket = make(map[string]string)
+		r.meta[reqID] = bucket
+	}
+	// Replacing a key frees what it held, so only the delta counts.
+	if err := r.checkMetaBudget(bucket, key, 0, len(value)-len(bucket[key])); err != nil {
+		return err
+	}
+	bucket[key] = value
+	return nil
 }

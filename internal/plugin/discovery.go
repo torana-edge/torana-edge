@@ -996,12 +996,15 @@ func (pp *PluginPipeline) RunBeforeRequest(ctx context.Context, reqID uint64, ch
 		var outBytes []byte
 		if err := lp.plugin.CallRequest(ctx, pbv2.Hook_HOOK_BEFORE_REQUEST, reqID, inBytes, &outBytes); err != nil {
 			log.Printf("[plugin] %s run_before_request: %v", lp.manifest.Name, err)
-			// Trap semantics: a block this plugin already recorded survives —
-			// a security verdict fails closed, and code that decided to refuse
-			// and then crashed still refused. Its respond/route/identity are
-			// discarded: a half-built synthetic response, or a reroute chosen
-			// by code that crashed immediately after, is not trustworthy.
-			pp.runtime.DiscardTrappedVerdicts(reqID, lp.manifest.Name)
+			pp.discardTrapped(reqID, lp.manifest.Name)
+			// The block check must happen on EVERY exit from this iteration,
+			// not only the successful one. A plugin that blocks and then traps
+			// leaves the block standing, and continuing here would hand the
+			// request to every downstream plugin anyway — exactly the
+			// PII-keeps-flowing problem short-circuiting exists to stop.
+			if pp.blocked(reqID) {
+				break
+			}
 			if lp.failureMode == "block" {
 				return chat, fmt.Errorf("plugin %s blocked request after failure: %w", lp.manifest.Name, err)
 			}
@@ -1010,33 +1013,38 @@ func (pp *PluginPipeline) RunBeforeRequest(ctx context.Context, reqID uint64, ch
 		res, err := decodeHookResult(outBytes, pbv2.Hook_HOOK_BEFORE_REQUEST)
 		if err != nil {
 			// A malformed or misdispatched action is the plugin's fault and is
-			// refused whole rather than partly applied.
+			// refused whole rather than partly applied. A handwritten guest can
+			// issue host calls and THEN return an invalid frame, so this path
+			// gets the same treatment as a trap: its non-block verdicts are
+			// discarded and a recorded block still short-circuits.
 			log.Printf("[plugin] %s run_before_request: invalid result: %v", lp.manifest.Name, err)
+			pp.discardTrapped(reqID, lp.manifest.Name)
+			if pp.blocked(reqID) {
+				break
+			}
 			if lp.failureMode == "block" {
 				return chat, fmt.Errorf("plugin %s returned an invalid result: %w", lp.manifest.Name, err)
 			}
 			continue
 		}
-		if res == nil {
-			continue // pass-through
-		}
-		if replacement := res.GetReplaceRequest(); replacement != nil {
-			current = replacement
-			modified = true
-			// ObserveRequestMutation wants the request bytes, not the
-			// envelope, so it is re-marshalled from the accepted action.
-			if raw, err := proto.Marshal(replacement); err == nil {
-				pp.runtime.ObserveRequestMutation(ctx, raw)
+		if res != nil {
+			if replacement := res.GetReplaceRequest(); replacement != nil {
+				current = replacement
+				modified = true
+				// ObserveRequestMutation wants the request bytes, not the
+				// envelope, so it is re-marshalled from the accepted action.
+				if raw, err := proto.Marshal(replacement); err == nil {
+					pp.runtime.ObserveRequestMutation(ctx, raw)
+				}
 			}
 		}
 
 		// Block short-circuits. v1 could not know a block had happened until
 		// every plugin had run, so a rejected request was still handed to the
-		// compactor and the warmer — PII-laden payloads kept flowing after the
-		// scanner had refused them. A replacement from the blocking plugin is
+		// compactor and the warmer. A replacement from the blocking plugin is
 		// kept but never sent upstream: block wins, and forcing an author to
 		// discard edits before blocking would be a new footgun.
-		if v := pp.runtime.VerdictsFor(reqID); v != nil && v.Block() != nil {
+		if pp.blocked(reqID) {
 			break
 		}
 	}
@@ -1596,4 +1604,26 @@ func WatchPlugins(ctx context.Context, dir string, configFn func() PluginConfig,
 	}()
 
 	return nil
+}
+
+// blocked reports whether any plugin has refused this request.
+//
+// Consulted on every exit from a hook iteration — trap, invalid result and
+// success alike. Checking only the success path let a plugin block, then trap,
+// and still have every downstream plugin see the request.
+func (pp *PluginPipeline) blocked(reqID uint64) bool {
+	v := pp.runtime.VerdictsFor(reqID)
+	return v != nil && v.Block() != nil
+}
+
+// discardTrapped applies trap semantics for a plugin whose call failed or whose
+// result was refused.
+//
+// A block SURVIVES: a security verdict fails closed, and code that decided to
+// refuse a request and then crashed still refused it. Respond, route and
+// identity are DISCARDED — a half-built synthetic response, or a reroute chosen
+// by code that crashed or returned garbage immediately afterwards, is not
+// trustworthy enough to act on.
+func (pp *PluginPipeline) discardTrapped(reqID uint64, plugin string) {
+	pp.runtime.DiscardTrappedVerdicts(reqID, plugin)
 }
