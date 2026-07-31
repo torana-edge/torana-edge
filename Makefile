@@ -10,7 +10,7 @@ LDFLAGS := -s -w -X main.version=$(VERSION)
 # the only tree that has them; this repo tests the host against the fixtures
 # below. `make official-plugins` builds them from a sibling checkout when you
 # want the plugin-behaviour suite to run locally.
-TESTDATA_DIRS := examples/plugins/test-stream-mutator examples/plugins/test-blocker examples/plugins/test-blocker-nogrant examples/plugins/test-observer examples/plugins/test-responder examples/plugins/test-responder-nogrant examples/plugins/test-original examples/plugins/test-router examples/plugins/test-ticker examples/plugins/test-http-server examples/plugins/test-metrics examples/plugins/test-mutator examples/plugins/test-hostcall examples/plugins/test-fragment-buffer examples/plugins/test-inert-a examples/plugins/test-inert-b examples/plugins/test-inert-c
+TESTDATA_DIRS := examples/plugins/test-stream-mutator examples/plugins/test-blocker examples/plugins/test-blocker-nogrant examples/plugins/test-observer examples/plugins/test-responder examples/plugins/test-responder-nogrant examples/plugins/test-original examples/plugins/test-router examples/plugins/test-ticker examples/plugins/test-http-server examples/plugins/test-metrics examples/plugins/test-mutator examples/plugins/test-hostcall examples/plugins/test-fragment-buffer examples/plugins/test-inert-a examples/plugins/test-inert-b examples/plugins/test-inert-c examples/plugins/test-trapper
 WASM_BUILD = GOOS=wasip1 GOARCH=wasm go build -trimpath -buildvcs=false -buildmode=c-shared
 
 build:

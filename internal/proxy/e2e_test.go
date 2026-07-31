@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -589,5 +590,76 @@ func TestHotReloadDuringInflightRequest(t *testing.T) {
 	case <-drained:
 	case <-time.After(5 * time.Second):
 		t.Fatal("old pipeline never drained after request completion")
+	}
+}
+
+// failure_mode: block must be enforced where the response is actually
+// produced, not only inside the pipeline.
+//
+// The pipeline returned an error for a trapping block-mode plugin and both
+// call sites logged it and carried on: the request went upstream, the caller
+// got a normal completion, and only a unit-level pipeline test would have said
+// "blocked". A security plugin whose manifest says block was fail-open on the
+// real HTTP path.
+//
+// End-to-end on purpose. The bug lived in the gap between the pipeline and the
+// transport, which is exactly the seam a pipeline-level test cannot see.
+func TestFailureModeBlockRefusesAtTheTransport(t *testing.T) {
+	requireWASM(t, fixturesDir+"/test-trapper/plugin.wasm")
+
+	var upstreamCalls int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&upstreamCalls, 1)
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"choices":[{"message":{"role":"assistant","content":"leaked"}}]}`)
+	}))
+	defer upstream.Close()
+
+	cfg := Config{
+		Port: "0",
+		Providers: provider.Config{
+			Providers: map[string]provider.Provider{"oai": {URL: upstream.URL, Format: "openai"}},
+			Plugins: provider.PluginsConfig{
+				Dir: fixturesDir, Order: []string{"test-trapper"}, AllowUnapproved: true,
+			},
+		},
+	}
+	srv, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	go srv.Serve(ln)
+	defer srv.Shutdown(context.Background())
+
+	body := `{"model":"gpt-x","messages":[{"role":"user","content":"hello"}]}`
+	// The /provider/<name>/ prefix is what routes to a configured provider. An
+	// earlier version of this test posted to a bare /v1/chat/completions, got
+	// "no provider configured for this path", and passed for that reason
+	// instead of the block — it was green with the fix reverted.
+	url := "http://" + ln.Addr().String() + "/provider/oai/v1/chat/completions"
+	resp, err := http.Post(url, "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	defer resp.Body.Close()
+	got, _ := io.ReadAll(resp.Body)
+
+	if strings.Contains(string(got), "no provider configured") {
+		t.Fatalf("the request never reached the pipeline (%s); this test would pass "+
+			"for the wrong reason", got)
+	}
+	if n := atomic.LoadInt32(&upstreamCalls); n != 0 {
+		t.Errorf("upstream was called %d times; a block-mode plugin trapped, so the "+
+			"request must never have been sent", n)
+	}
+	if resp.StatusCode == http.StatusOK {
+		t.Fatalf("caller got 200 after a block-mode plugin trapped; body=%s", got)
+	}
+	if strings.Contains(string(got), "leaked") {
+		t.Fatalf("the upstream completion reached the caller despite the block: %s", got)
 	}
 }

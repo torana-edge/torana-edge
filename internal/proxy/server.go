@@ -285,6 +285,11 @@ type reqState struct {
 	// as anonymous ToranaMeta keys, so an operator seeing a blocked request
 	// could not tell which plugin blocked it — the first question anyone asks.
 	VerdictPlugin string
+	// PluginFailure marks a plugin failure on an OBSERVATIONAL path, where
+	// failure_mode cannot be applied because the response has already gone to
+	// the caller. Recorded so the failure is visible to an operator rather than
+	// the host claiming a block it did not perform.
+	PluginFailure bool
 	// OriginalReq is the pristine pre-pipeline request (pb bytes), snapshotted
 	// only when a loaded plugin holds env.original_request.
 	OriginalReq []byte
@@ -844,7 +849,33 @@ func New(cfg Config) (*Server, error) {
 
 				modified, err := pl.RunBeforeRequest(req.Context(), reqStateFrom(req.Context()).ID, chat)
 				if err != nil {
-					log.Printf("plugin pipeline error: %v", err)
+					// failure_mode: block, applied at the TRANSPORT boundary.
+					//
+					// The pipeline already decided to refuse — only a plugin
+					// configured to block produces an error here. Logging and
+					// continuing sent the request upstream anyway, so a
+					// security plugin whose manifest says "block" was fail-open
+					// on the real HTTP path while unit-level pipeline tests
+					// reported it blocked.
+					//
+					// The body has not been committed yet, so this can be a
+					// proper refusal. The message is generic: which plugin
+					// failed and why is operator information, not something to
+					// hand the caller.
+					log.Printf("plugin pipeline error (failure_mode=block): %v", err)
+					if rc, ok := req.Context().Value(routeContextKey{}).(*RouteContext); ok {
+						rc.Block = renderBlock(prov.Format, &wasm.BlockVerdict{
+							Status:  502,
+							Code:    "plugin_failure",
+							Message: "a plugin required for this request failed",
+						})
+					}
+					rsFail := reqStateFrom(req.Context())
+					rsFail.Verdict = "block"
+					req.Body = io.NopCloser(bytes.NewReader(nil))
+					req.ContentLength = 0
+					discardCompactionReports(rsFail)
+					return
 				} else if modified != nil {
 					chat = modified
 				}
@@ -1022,8 +1053,18 @@ func New(cfg Config) (*Server, error) {
 					// must not assume Message is set. Immutable — there is no
 					// body to rewrite.
 					errResp := rs.chatResponse(rs.Model, "", nil, "")
+					// Observational only, and honestly so. This runs on the
+					// upstream-ERROR path: the caller is already getting a
+					// failure, there is no body to withhold, and refusing
+					// again would replace one error with a less informative
+					// one. failure_mode cannot apply here — recorded as a
+					// blocked-but-unenforceable outcome so an operator can see
+					// the plugin failed rather than the host claiming a block
+					// it never performed.
 					if _, err := pl.RunAfterResponse(ctx, rs.ID, errResp, false); err != nil {
-						log.Printf("plugin run_after_response (error path): %v", err)
+						log.Printf("plugin run_after_response (error path, observational — "+
+							"failure_mode cannot apply, upstream already failed): %v", err)
+						rs.PluginFailure = true
 					}
 				}
 				return nil
@@ -1089,9 +1130,19 @@ func New(cfg Config) (*Server, error) {
 						for event := range in {
 							outEvents, err := pl.RunOnStreamChunk(resp.Request.Context(), reqID, &event)
 							if err != nil {
-								log.Printf("plugin stream error: %v", err)
-								out <- event
-								continue
+								// failure_mode: block on a stream whose
+								// headers and body have already gone to the
+								// caller. There is nothing to refuse any more,
+								// so the honest action is to TERMINATE.
+								//
+								// Replaying the event was the fail-open: the
+								// plugin refused it, and forwarding it anyway
+								// delivers exactly the content the block
+								// policy exists to withhold. A truncated
+								// stream is visible to the caller; a silently
+								// unfiltered one is not.
+								log.Printf("plugin stream error (failure_mode=block), terminating stream: %v", err)
+								return
 							}
 							for _, ev := range outEvents {
 								out <- ev
@@ -1156,8 +1207,19 @@ func New(cfg Config) (*Server, error) {
 						// A plugin that needs the streamed content observes it
 						// through run_on_stream_chunk, which sees every event.
 						streamResp := rs.chatResponse(rs.Model, "", nil, "")
+						// Observational only. The streamed body has already
+						// gone to the caller in full, so there is nothing left
+						// to withhold and failure_mode has nothing to act on.
+						// Content filtering on a stream belongs to
+						// run_on_stream_chunk, which CAN terminate — see the
+						// stream hook above. Recorded so the failure is
+						// visible rather than claimed as a block.
 						if _, err := pl.RunAfterResponse(ctx, reqStateFrom(ctx).ID, streamResp, false); err != nil {
-							log.Printf("plugin run_after_response (stream): %v", err)
+							log.Printf("plugin run_after_response (stream, observational — "+
+								"failure_mode cannot apply, body already sent): %v", err)
+							if rsObs := reqStateFrom(ctx); rsObs != nil {
+								rsObs.PluginFailure = true
+							}
 						}
 					}
 				}()
@@ -1211,10 +1273,27 @@ func New(cfg Config) (*Server, error) {
 					// Records provider usage into rs as a side effect.
 					modified, modErr := runJSONResponseHooks(ctx, pl, rs.ID, f.Name, chat, bodyBytes)
 					if modErr != nil {
-						log.Printf("wasm json response hook error: %v", modErr)
-					} else {
-						bodyBytes = modified
+						// failure_mode: block on the non-streaming response.
+						// The body has NOT been written yet — ModifyResponse
+						// still owns it — so this is refusable, and forwarding
+						// the provider's body after a plugin refused it is the
+						// same fail-open as the request path.
+						log.Printf("wasm json response hook error (failure_mode=block): %v", modErr)
+						rs.Verdict = "block"
+						blocked := renderBlock(f.Name, &wasm.BlockVerdict{
+							Status:  502,
+							Code:    "plugin_failure",
+							Message: "a plugin required for this response failed",
+						})
+						resp.StatusCode = blocked.Status
+						resp.Status = ""
+						resp.Header.Set("Content-Type", blocked.ContentType)
+						resp.Header.Del("Content-Length")
+						resp.Body = io.NopCloser(bytes.NewReader(blocked.Body))
+						resp.ContentLength = int64(len(blocked.Body))
+						return nil
 					}
+					bodyBytes = modified
 				} else if f != nil {
 					// No pipeline — still meter provider-reported usage.
 					var body map[string]any
