@@ -18,6 +18,7 @@ import (
 
 	_ "github.com/torana-edge/torana-edge/internal/format/openai"
 	"github.com/torana-edge/torana-edge/internal/provider"
+	"github.com/torana-edge/torana-edge/internal/wasm"
 )
 
 func TestControlPlaneConfigAPI(t *testing.T) {
@@ -128,9 +129,16 @@ func TestControlPlanePluginsOrderingConstraintError(t *testing.T) {
 	os.MkdirAll(pGateDir, 0755)
 	os.MkdirAll(pRouterDir, 0755)
 
-	gateManifest := `{"name":"gate","version":"0.1.0","permissions":[{"name":"env.host_call.torana_evaluate_compaction"}]}`
-	routerManifest := `{"name":"router","version":"0.1.0","permissions":[{"name":"env.route_request"}]}`
-	wasmBytes := []byte{0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00}
+	// hooks must match what MinimalV2Module claims in supported_hooks: the host
+	// now requires exact equality, so a manifest declaring nothing is a module
+	// that can never be dispatched.
+	gateManifest := `{"name":"gate","version":"0.1.0","abi_version":"v2","hooks":[{"name":"run_before_request"}],"permissions":[{"name":"env.host_call.torana_evaluate_compaction"}]}`
+	routerManifest := `{"name":"router","version":"0.1.0","abi_version":"v2","hooks":[{"name":"run_before_request"}],"permissions":[{"name":"env.route_request"}]}`
+	// A bare module header is no longer loadable: the v2 host reads
+	// supported_hooks at load, so an empty module is correctly rejected as a
+	// v1 guest. This test is about ordering constraints, not module validity,
+	// so it needs a real minimal v2 guest.
+	wasmBytes := wasm.MinimalV2Module(false)
 
 	os.WriteFile(filepath.Join(pGateDir, "plugin.json"), []byte(gateManifest), 0644)
 	os.WriteFile(filepath.Join(pGateDir, "plugin.wasm"), wasmBytes, 0644)

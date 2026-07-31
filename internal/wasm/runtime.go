@@ -474,7 +474,7 @@ type Runtime struct {
 	metaMu  sync.RWMutex
 	// meta holds request-scoped, plugin-private state: reqID → namespaced
 	// key → value. Buckets are dropped via EndRequest when a request ends.
-	meta map[uint64]map[string]string
+	meta      map[uint64]map[string]string
 	verdictMu sync.RWMutex
 	// verdicts holds request-scoped plugin verdicts: reqID → what plugins
 	// asked the host to do about this request. v1 carried these back inside
@@ -803,10 +803,20 @@ func (r *Runtime) installHostFunctions() {
 	env.NewFunctionBuilder().WithFunc(func(ctx context.Context, mod api.Module, cmdPtr, cmdLen, argsPtr, argsLen uint32) uint64 {
 		cmd := readStr(mod, cmdPtr, cmdLen)
 		args := readStr(mod, argsPtr, argsLen)
+		return writeBytes(ctx, mod, r.dispatchHostCall(ctx, pluginNameOf(mod), cmd, args))
+	}).Export("host_call")
 
-		// Enforce per-command permission: env.host_call.<command>
-		pluginName := pluginNameOf(mod)
+	env.Instantiate(r.ctx)
+}
 
+// dispatchHostCall executes one host call and returns the framed reply.
+//
+// Extracted from the export closure so it is testable at all. The permission
+// boundary lives here — the SDK's guest-side checks are ergonomics, and a
+// handwritten guest never runs them — so it needs tests that call it directly
+// rather than only through a compiled fixture.
+func (r *Runtime) dispatchHostCall(ctx context.Context, pluginName, cmd, args string) []byte {
+	{
 		r.mu.RLock()
 		p := r.plugins[pluginName]
 		r.mu.RUnlock()
@@ -830,8 +840,13 @@ func (r *Runtime) installHostFunctions() {
 			perm = pbv2.StateDeletePermission
 		}
 		if p == nil || !p.hasGrant(perm) {
-			log.Printf("[wasm] permission denied: %s tried %s", mod.Name(), perm)
-			return writeStr(ctx, mod, permissionDeniedJSON)
+			log.Printf("[wasm] permission denied: %s tried %s", pluginName, perm)
+			// A framed refusal, not the v1 string. Guests decode
+			// HostCallResult now, so the old envelope would surface as a
+			// protocol error and a plugin could not tell a missing grant from
+			// a broken boundary.
+			return frameHostCall(nil,
+				hostErr(pbv2.ErrorCode_ERROR_CODE_PERMISSION_DENIED, "permission denied: %s", perm))
 		}
 
 		// v2: every reply is a framed HostCallResult. Cases set value/herr; the
@@ -886,6 +901,26 @@ func (r *Runtime) installHostFunctions() {
 				break
 			}
 			r.verdictsBucket(reqIDFrom(ctx)).setIdentity(pluginName, a.Identity)
+		case pbv2.MetaAppendCommand:
+			var a pbv2.MetaAppendArgs
+			if err := proto.Unmarshal([]byte(args), &a); err != nil {
+				herr = hostErr(pbv2.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "invalid MetaAppendArgs: %v", err)
+				break
+			}
+			if err := a.Validate(); err != nil {
+				herr = hostErr(pbv2.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "%v", err)
+				break
+			}
+			// One atomic call. A meta_get + meta_set pair was two round trips
+			// and a lost update: two fragments interleaving between the read
+			// and the write silently drop one, and the corrupted tool call
+			// surfaces much later as invalid JSON reaching the agent.
+			existing, present := r.metaAppend(reqIDFrom(ctx),
+				metaKey(pluginName, "append:"+strconv.FormatInt(int64(a.BlockIndex), 10)), a.Fragment)
+			// Non-empty fragment acks with an empty value; an empty fragment
+			// reads the buffer back. Returning the cumulative buffer after
+			// every delta would be O(total x fragments) on the stream path.
+			value = pbv2.MetaAppendSuccessValue(a.Fragment, []byte(existing), present)
 		case "env.meta_set":
 			// A decode failure used to be swallowed by `if err == nil`, so the
 			// write silently did not happen. It is now a classified refusal.
@@ -1142,10 +1177,13 @@ func (r *Runtime) installHostFunctions() {
 		if herr == nil && value == nil && res != "" {
 			value = []byte(res)
 		}
-		return writeBytes(ctx, mod, frameHostCall(value, herr))
-	}).Export("host_call")
+		return frameHostCall(value, herr)
+	}
+}
 
-	env.Instantiate(r.ctx)
+// dispatchHostCallForTest exposes the dispatcher to tests in this package.
+func (r *Runtime) dispatchHostCallForTest(ctx context.Context, pluginName, cmd, args string) []byte {
+	return r.dispatchHostCall(ctx, pluginName, cmd, args)
 }
 
 func readStr(mod api.Module, ptr, length uint32) string {

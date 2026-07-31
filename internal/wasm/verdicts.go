@@ -172,3 +172,33 @@ func (r *Runtime) verdictsBucket(reqID uint64) *RequestVerdicts {
 	}
 	return v
 }
+
+// metaAppend atomically appends fragment to a request-scoped buffer and
+// returns the buffer's state.
+//
+// Atomic because the alternative — the guest doing meta_get then meta_set — is
+// two round trips with a lost update between them. Under concurrency that
+// silently drops a fragment, and the corrupted tool call surfaces much later
+// as invalid JSON reaching the agent.
+//
+// An empty fragment is the read path: it returns the buffer without creating
+// the key, so a fail-open reader cannot resurrect a buffer that was never
+// written.
+func (r *Runtime) metaAppend(reqID uint64, key string, fragment []byte) (string, bool) {
+	r.metaMu.Lock()
+	defer r.metaMu.Unlock()
+	bucket, ok := r.meta[reqID]
+	if !ok {
+		if len(fragment) == 0 {
+			return "", false
+		}
+		bucket = make(map[string]string)
+		r.meta[reqID] = bucket
+	}
+	existing, present := bucket[key]
+	if len(fragment) == 0 {
+		return existing, present
+	}
+	bucket[key] = existing + string(fragment)
+	return bucket[key], true
+}
