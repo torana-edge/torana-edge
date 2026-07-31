@@ -33,6 +33,6 @@ func init() {
 	sdk.OnAfterResponse(func(ctx context.Context, resp *pb.ChatResponse, mutable bool) (sdk.ResponseResult, error) {
 		sdk.EmitMetric("test_response_counter", sdk.MetricCounter, 1,
 			map[string]string{"model": resp.Model, "fixture": "test-metrics", "phase": "response"})
-		return sdk.PassRequest(), nil
+		return sdk.PassResponse(), nil
 	})
 }

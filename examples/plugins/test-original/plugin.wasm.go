@@ -23,8 +23,8 @@ func init() {
 	})
 
 	sdk.OnAfterResponse(func(ctx context.Context, resp *pb.ChatResponse, mutable bool) (sdk.ResponseResult, error) {
-		if len(resp.Messages) == 0 {
-			return sdk.PassRequest(), nil
+		if resp.Message == nil {
+			return sdk.PassResponse(), nil
 		}
 		origModel := "unavailable"
 		if orig, ok := sdk.OriginalRequest(); ok {
@@ -34,7 +34,7 @@ func init() {
 		if raw, ok := sdk.OriginalResponse(); ok && strings.Contains(string(raw), "pristine-upstream-marker") {
 			rawMarker = "raw=pristine"
 		}
-		resp.Messages[0].Content = fmt.Sprintf("orig-model=%s %s", origModel, rawMarker)
+		resp.Message.Content = fmt.Sprintf("orig-model=%s %s", origModel, rawMarker)
 		return sdk.ReplaceResponse(resp), nil
 	})
 }

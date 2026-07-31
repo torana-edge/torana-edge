@@ -55,22 +55,24 @@ func init() {
 // depends on its own logic.
 func init() {
 	sdk.OnAfterResponse(func(ctx context.Context, resp *pb.ChatResponse, mutable bool) (sdk.ResponseResult, error) {
+		// A response carries exactly one message in v2, so there is no outer
+		// loop and no question of which message the tool call belonged to.
+		if resp.Message == nil {
+			return sdk.PassResponse(), nil
+		}
 		var changed bool
-		for i := range resp.Messages {
-			for j := range resp.Messages[i].ToolCalls {
-				tc := resp.Messages[i].ToolCalls[j]
-				if tc == nil {
-					continue
-				}
-				// A fixed replacement: the test asserts these exact bytes came
-				// back, which proves the host both read and wrote the right
-				// place in the body.
-				tc.ArgumentsJson = []byte(`{"mutated_by":"test-mutator"}`)
-				changed = true
+		for _, tc := range resp.Message.ToolCalls {
+			if tc == nil {
+				continue
 			}
+			// A fixed replacement: the test asserts these exact bytes came
+			// back, which proves the host both read and wrote the right place
+			// in the body.
+			tc.ArgumentsJson = []byte(`{"mutated_by":"test-mutator"}`)
+			changed = true
 		}
 		if !changed {
-			return sdk.PassRequest(), nil
+			return sdk.PassResponse(), nil
 		}
 		return sdk.ReplaceResponse(resp), nil
 	})

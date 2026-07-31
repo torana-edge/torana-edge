@@ -23,7 +23,11 @@ func main() {}
 // host forwarded the request faithfully rather than merely that something
 // answered.
 func init() {
-	sdk.OnHTTPRequest(func(ctx context.Context, req *pb.HttpRequest) (*pb.HttpResponse, error) {
+	// v2 dropped HttpResponse.Handled: serving is an action, so returning a
+	// ServeHTTP result IS handling it and PassHTTP() is declining. v1 needed
+	// the flag because an all-defaults response marshals to zero bytes and was
+	// indistinguishable from not answering.
+	sdk.OnHTTPRequest(func(ctx context.Context, req *pb.HttpRequest) (sdk.HTTPResult, error) {
 		if req.Path == "/agent/status" {
 			body, err := json.Marshal(map[string]any{
 				"plugin": "test-http-server",
@@ -31,20 +35,18 @@ func init() {
 				"method": req.Method,
 			})
 			if err != nil {
-				return nil, err
+				return sdk.PassHTTP(), err
 			}
-			return &pb.HttpResponse{
+			return sdk.ServeHTTP(&pb.HttpResponse{
 				Status:      200,
 				HeadersJson: []byte(`{"Content-Type":["application/json"]}`),
 				Body:        body,
-				Handled:     true,
-			}, nil
+			}), nil
 		}
-		return &pb.HttpResponse{
+		return sdk.ServeHTTP(&pb.HttpResponse{
 			Status:      200,
 			HeadersJson: []byte(`{"Content-Type":["text/html; charset=utf-8"]}`),
 			Body:        []byte("<h1>test-http-server</h1><p>" + req.Method + " " + req.Path + "</p>"),
-			Handled:     true,
-		}, nil
+		}), nil
 	})
 }
