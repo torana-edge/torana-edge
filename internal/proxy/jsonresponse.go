@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -516,18 +517,29 @@ func runJSONResponseHooks(ctx context.Context, pl *plugin.PluginPipeline, reqID 
 	}
 	// Expose latency/status/usage to response hooks.
 	respChat.ToranaMeta["_response"] = rs.responseMeta()
-	assistant := engine.Message{Role: engine.RoleAssistant, Content: refs.content}
-	for _, tc := range refs.toolCalls {
-		var args map[string]any
-		json.Unmarshal([]byte(tc.argsJSON), &args)
-		assistant.ToolCalls = append(assistant.ToolCalls,
-			engine.ToolCall{ID: tc.id, Name: tc.name, Arguments: args, Signature: tc.signature})
+
+	// The canonical response preserves what the wire can prove: content
+	// presence only when the body actually has a writable text slot, and raw
+	// arguments bytes with no map[string]any round-trip between responseRefs
+	// and the wire.
+	assistant := &engine.ResponseMessage{}
+	if refs.setContent != nil {
+		content := refs.content
+		assistant.Content = &content
 	}
-	respChat.Messages = []engine.Message{assistant}
+	for i := range refs.toolCalls {
+		tc := &refs.toolCalls[i]
+		assistant.ToolCalls = append(assistant.ToolCalls, engine.ResponseToolCall{
+			ID:            tc.id,
+			Name:          tc.name,
+			ArgumentsJSON: []byte(tc.argsJSON),
+			Signature:     tc.signature,
+		})
+	}
 
 	// The non-streaming path is the one where a replacement CAN be applied:
 	// the body has not been written yet.
-	resp := rs.chatResponse(respChat.Model, refs.id, &assistant, refs.finishReason)
+	resp := rs.chatResponse(respChat.Model, refs.id, assistant, refs.finishReason)
 	after, err := pl.RunAfterResponse(ctx, reqID, resp, true)
 	if err != nil {
 		// Propagate. Swallowing it here with `err == nil &&` meant a
@@ -537,41 +549,52 @@ func runJSONResponseHooks(ctx context.Context, pl *plugin.PluginPipeline, reqID 
 		return bodyBytes, err
 	}
 	if after != nil && after.Message != nil {
-		msg := *after.Message
-		if msg.Content != refs.content && refs.setContent != nil {
-			refs.setContent(msg.Content)
+		msg := after.Message
+		// Defensive re-verification, last line of defense: the pipeline
+		// rejects relative-policy violations per plugin before any
+		// replacement is accepted, so these cannot fire on the accepted path —
+		// but the apply boundary must fail loudly rather than half-apply, or
+		// silently skip as v1 did.
+		if (msg.Content != nil) != (refs.setContent != nil) {
+			return bodyBytes, fmt.Errorf("response replacement changed content presence")
+		}
+		if len(msg.ToolCalls) != len(refs.toolCalls) {
+			return bodyBytes, fmt.Errorf("response replacement changed tool-call cardinality: %d != %d",
+				len(msg.ToolCalls), len(refs.toolCalls))
+		}
+		if msg.Content != nil && *msg.Content != refs.content && refs.setContent != nil {
+			refs.setContent(*msg.Content)
 			modified = true
 		}
-		// Apply tool-call mutations back by position.
-		if len(msg.ToolCalls) == len(refs.toolCalls) {
-			for i := range msg.ToolCalls {
-				tc := &refs.toolCalls[i]
-				mut := msg.ToolCalls[i]
-				// signedContentChanged drives clearing the provider token
-				// below. A signature covers this call's name and arguments, so
-				// leaving it in place after either changes ships a valid-looking
-				// provider signature over content the provider never signed.
-				signedContentChanged := false
-				if mut.Name != "" && mut.Name != tc.name {
-					tc.setName(mut.Name)
-					signedContentChanged = true
-					modified = true
+		// Apply tool-call mutations back by position. ID and Signature are
+		// host-owned: the guest's values are never read.
+		for i := range msg.ToolCalls {
+			tc := &refs.toolCalls[i]
+			mut := msg.ToolCalls[i]
+			// signedContentChanged drives clearing the provider token
+			// below. A signature covers this call's name and arguments, so
+			// leaving it in place after either changes ships a valid-looking
+			// provider signature over content the provider never signed.
+			signedContentChanged := false
+			if mut.Name != "" && mut.Name != tc.name {
+				tc.setName(mut.Name)
+				signedContentChanged = true
+				modified = true
+			}
+			if !bytes.Equal(mut.ArgumentsJSON, []byte(tc.argsJSON)) {
+				if err := tc.setArgs(string(mut.ArgumentsJSON)); err != nil {
+					return bodyBytes, fmt.Errorf("response replacement tool call %d: %w", i, err)
 				}
-				if mut.Arguments != nil {
-					if b, err := json.Marshal(mut.Arguments); err == nil && string(b) != tc.argsJSON {
-						if tc.setArgs(string(b)) == nil {
-							signedContentChanged = true
-							modified = true
-						}
-					}
-				}
-				// A plugin can never ADD or REPLACE a signature — it cannot
-				// mint one — so the only permitted transition is clearing an
-				// existing token whose covered content changed.
-				if signedContentChanged {
-					tc.invalidateSignature()
-					modified = true
-				}
+				tc.argsJSON = string(mut.ArgumentsJSON)
+				signedContentChanged = true
+				modified = true
+			}
+			// A plugin can never ADD or REPLACE a signature — it cannot
+			// mint one — so the only permitted transition is clearing an
+			// existing token whose covered content changed.
+			if signedContentChanged {
+				tc.invalidateSignature()
+				modified = true
 			}
 		}
 	}

@@ -227,9 +227,9 @@ func FromPBStreamEvent(e *pb.StreamEvent) *engine.StreamEvent {
 	return out
 }
 
-// Message conversion is shared by the request and response sides. A response
-// carries exactly one message, and duplicating this mapping for it is how the
-// two would drift — a field added to Message would reach requests only.
+// Message conversion belongs to the request side only. The response side has
+// its own narrow shape (ResponseMessage), so duplicating the request mapping
+// for it would claim fields the host cannot deliver on a response.
 
 func toPBMessage(m engine.Message) *pb.Message {
 	msg := &pb.Message{
@@ -305,7 +305,7 @@ func ToPBChatResponse(r *engine.ChatResponse) *pb.ChatResponse {
 		DurationMs:     r.DurationMS,
 	}
 	if r.Message != nil {
-		out.Message = toPBMessage(*r.Message)
+		out.Message = toPBResponseMessage(r.Message)
 	}
 	if r.Usage != nil {
 		out.Usage = &pb.Usage{
@@ -333,8 +333,7 @@ func FromPBChatResponse(r *pb.ChatResponse) *engine.ChatResponse {
 		DurationMS:     r.DurationMs,
 	}
 	if r.Message != nil {
-		msg := fromPBMessage(r.Message)
-		out.Message = &msg
+		out.Message = fromPBResponseMessage(r.Message)
 	}
 	if r.Usage != nil {
 		out.Usage = &engine.StreamUsage{
@@ -347,5 +346,56 @@ func FromPBChatResponse(r *pb.ChatResponse) *engine.ChatResponse {
 	if len(r.ProviderExtensionsJson) > 0 {
 		json.Unmarshal(r.ProviderExtensionsJson, &out.ProviderExtensions)
 	}
+	return out
+}
+
+// toPBResponseMessage maps the canonical response message onto the wire.
+// ArgumentsJSON is copied, never decoded: the pb message outlives the engine
+// value the caller may keep mutating (the apply path rewrites argsJSON in
+// place), and aliasing would let that mutation change the accepted baseline.
+// Content is a *string, which Go strings make safe to alias — nothing can
+// mutate through it.
+func toPBResponseMessage(m *engine.ResponseMessage) *pb.ResponseMessage {
+	out := &pb.ResponseMessage{Content: m.Content}
+	for _, tc := range m.ToolCalls {
+		out.ToolCalls = append(out.ToolCalls, &pb.ToolCall{
+			Id:            tc.ID,
+			Name:          tc.Name,
+			ArgumentsJson: cloneBytes(tc.ArgumentsJSON),
+			Signature:     tc.Signature,
+		})
+	}
+	return out
+}
+
+// fromPBResponseMessage maps the wire response message back to the canonical
+// shape. Bytes are copied in both directions: the pb message is decoded from
+// bytes a guest produced, and the returned engine value outlives the pb
+// message's ownership.
+func fromPBResponseMessage(m *pb.ResponseMessage) *engine.ResponseMessage {
+	out := &engine.ResponseMessage{Content: m.Content}
+	for _, tc := range m.ToolCalls {
+		if tc == nil {
+			// Defensive: the SDK refuses nil tool calls in validated results,
+			// but this conversion also runs on host-built inputs. A nil entry
+			// would panic downstream; skip it rather than crash the process.
+			continue
+		}
+		out.ToolCalls = append(out.ToolCalls, engine.ResponseToolCall{
+			ID:            tc.Id,
+			Name:          tc.Name,
+			ArgumentsJSON: cloneBytes(tc.ArgumentsJson),
+			Signature:     tc.Signature,
+		})
+	}
+	return out
+}
+
+func cloneBytes(b []byte) []byte {
+	if b == nil {
+		return nil
+	}
+	out := make([]byte, len(b))
+	copy(out, b)
 	return out
 }

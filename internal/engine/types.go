@@ -149,6 +149,47 @@ type StreamUsage struct {
 
 // --- Response side ---
 
+// ResponseMessage is the assistant's reply in a completed response, in the
+// narrow shape the host can actually apply: presence-preserving content and
+// in-place tool-call mutations only. It deliberately is not Message — request
+// semantics (role, thinking, content parts, cache control) have no writable
+// response counterpart, and reusing Message would claim a writable surface
+// the host does not deliver.
+//
+// The relative constraints (content presence identical to the accepted
+// response, fixed tool-call cardinality and positional order) are enforced by
+// the host pipeline per plugin before any replacement is accepted, and
+// re-verified at the apply boundary.
+type ResponseMessage struct {
+	// Content is the assistant's text with proto presence preserved: nil
+	// means the provider body has no writable text slot, a non-nil pointer
+	// (possibly to "") means a present text part. Present-empty is not
+	// absent, and a plugin cannot change presence — only the value.
+	Content *string
+	// ToolCalls carries the response's tool invocations in provider order.
+	// Fixed cardinality: a plugin may mutate element N in place but cannot
+	// add, remove, or reorder calls. ID and Signature are host-owned.
+	ToolCalls []ResponseToolCall
+}
+
+// ResponseToolCall is one tool invocation in a completed response.
+//
+// ArgumentsJSON is the provider's verbatim arguments bytes. It must never be
+// decoded and re-encoded on the canonical path: key order is part of the
+// cacheable prompt prefix, and an integer above JavaScript's exact range
+// cannot survive a float64 round-trip.
+type ResponseToolCall struct {
+	ID   string
+	Name string
+	// ArgumentsJSON is the provider's raw arguments object, byte for byte.
+	ArgumentsJSON []byte
+	// Signature is an opaque provider-specific token attached to this call
+	// (e.g. Gemini/Code Assist thoughtSignature). Preserved across a
+	// round-trip; the only permitted transition is the host clearing an
+	// existing token whose covered content changed. A plugin cannot mint one.
+	Signature string
+}
+
 // ChatResponse is the canonical representation of a completed chat response,
 // regardless of provider wire format.
 //
@@ -168,7 +209,11 @@ type ChatResponse struct {
 	// Message is the assistant's reply: exactly one message, because a
 	// response IS one message. The v1 shape allowed a list and thereby allowed
 	// the ambiguity above.
-	Message *Message
+	//
+	// ResponseMessage, not Message: the response side has its own narrow shape
+	// (presence-preserving content, raw arguments bytes) and reusing the
+	// request Message would let the two drift.
+	Message *ResponseMessage
 	// FinishReason is the provider's stop reason ("stop", "tool_use", ...).
 	FinishReason string
 	Usage        *StreamUsage

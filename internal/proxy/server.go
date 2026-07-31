@@ -385,7 +385,7 @@ func (rs *reqState) responseMeta() map[string]any {
 // reqState.ID is a host-internal counter and deliberately not used here:
 // putting it in a provider-shaped field would hand plugins a value that looks
 // like an upstream identifier and is not.
-func (rs *reqState) chatResponse(model, id string, msg *engine.Message, finishReason string) *engine.ChatResponse {
+func (rs *reqState) chatResponse(model, id string, msg *engine.ResponseMessage, finishReason string) *engine.ChatResponse {
 	var durationMS int64
 	if !rs.Start.IsZero() {
 		durationMS = time.Since(rs.Start).Milliseconds()

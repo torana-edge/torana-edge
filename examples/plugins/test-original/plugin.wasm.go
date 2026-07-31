@@ -34,7 +34,8 @@ func init() {
 		if raw, ok := sdk.OriginalResponse(); ok && strings.Contains(string(raw), "pristine-upstream-marker") {
 			rawMarker = "raw=pristine"
 		}
-		resp.Message.Content = fmt.Sprintf("orig-model=%s %s", origModel, rawMarker)
+		content := fmt.Sprintf("orig-model=%s %s", origModel, rawMarker)
+		resp.Message.Content = &content
 		return sdk.ReplaceResponse(resp), nil
 	})
 }

@@ -67,8 +67,9 @@ func init() {
 		if resp.Usage != nil {
 			in, out = resp.Usage.InputTokens, resp.Usage.OutputTokens
 		}
-		resp.Message.Content = fmt.Sprintf("observed status=%d in=%d out=%d",
+		content := fmt.Sprintf("observed status=%d in=%d out=%d",
 			resp.UpstreamStatus, in, out)
+		resp.Message.Content = &content
 		return sdk.ReplaceResponse(resp), nil
 	})
 }

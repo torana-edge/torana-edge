@@ -1108,6 +1108,23 @@ func (pp *PluginPipeline) RunAfterResponse(ctx context.Context, reqID uint64, re
 					lp.manifest.Name)
 				continue
 			}
+			// The SDK validated the replacement's absolute well-formedness in
+			// isolation, but a replacement is a MUTATION of the accepted
+			// response: content presence and tool-call cardinality are
+			// relative constraints only the host can enforce. Reject the
+			// whole replacement before it can become the next plugin's input
+			// or reach the response body.
+			if err := validateResponseReplacement(current, replacement); err != nil {
+				log.Printf("[plugin] %s run_after_response: rejected invalid replacement: %v",
+					lp.manifest.Name, err)
+				if lp.failureMode == "block" {
+					return resp, fmt.Errorf("plugin %s returned an invalid response replacement: %w",
+						lp.manifest.Name, err)
+				}
+				// allow: skip this plugin's replacement; the previous current
+				// stays so the invalid output never chains downstream.
+				continue
+			}
 			current = replacement
 			modified = true
 		}

@@ -36,9 +36,10 @@ func TestMetricFixtureEmitMetricABI(t *testing.T) {
 	// v2 hands run_after_response a real ChatResponse. Passing the request
 	// here was the v1 defect: a plugin reading the assistant's reply got the
 	// conversation history instead.
+	content := "hi"
 	resp := &engine.ChatResponse{
 		Model:          chat.Model,
-		Message:        &engine.Message{Role: engine.RoleAssistant, Content: "hi"},
+		Message:        &engine.ResponseMessage{Content: &content},
 		UpstreamStatus: 200,
 	}
 	if _, err := pp.RunAfterResponse(context.Background(), 1, resp, true); err != nil {

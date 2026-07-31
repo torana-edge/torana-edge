@@ -1,6 +1,7 @@
 package pbconv
 
 import (
+	"bytes"
 	"testing"
 
 	"github.com/torana-edge/torana-edge/internal/engine"
@@ -129,19 +130,17 @@ func TestToolBlockStartWithoutRefIsSafe(t *testing.T) {
 // response type at all, so this mapping is new surface rather than a port, and
 // a field silently dropped here reproduces the v1 failure it exists to fix.
 func TestChatResponseRoundTrips(t *testing.T) {
+	content := "here you go"
 	in := &engine.ChatResponse{
 		Model:        "claude-opus-5",
 		ID:           "msg_1",
 		FinishReason: "tool_use",
-		Message: &engine.Message{
-			Role:              engine.Role("assistant"),
-			Content:           "here you go",
-			Thinking:          "considering",
-			ThinkingSignature: "tsig",
-			ToolCalls: []engine.ToolCall{{
+		Message: &engine.ResponseMessage{
+			Content: &content,
+			ToolCalls: []engine.ResponseToolCall{{
 				ID: "call_1", Name: "read_file",
-				Arguments: map[string]any{"path": "/a"},
-				Signature: "sig",
+				ArgumentsJSON: []byte(`{"path":"/a"}`),
+				Signature:     "sig",
 			}},
 		},
 		Usage:              &engine.StreamUsage{InputTokens: 10, OutputTokens: 20, CacheReadTokens: 3, CacheWriteTokens: 4},
@@ -162,8 +161,8 @@ func TestChatResponseRoundTrips(t *testing.T) {
 	if got.Message == nil {
 		t.Fatal("the assistant reply was dropped — this is the v1 bug")
 	}
-	if got.Message.Content != "here you go" || got.Message.ThinkingSignature != "tsig" {
-		t.Errorf("message fields lost: %+v", got.Message)
+	if got.Message.Content == nil || *got.Message.Content != "here you go" {
+		t.Errorf("message content lost: %+v", got.Message.Content)
 	}
 	if len(got.Message.ToolCalls) != 1 {
 		t.Fatalf("tool calls lost: %+v", got.Message.ToolCalls)
@@ -172,14 +171,60 @@ func TestChatResponseRoundTrips(t *testing.T) {
 	if tc.ID != "call_1" || tc.Name != "read_file" || tc.Signature != "sig" {
 		t.Errorf("tool call fields lost: %+v", tc)
 	}
-	if tc.Arguments["path"] != "/a" {
-		t.Errorf("tool call arguments lost: %+v", tc.Arguments)
+	if string(tc.ArgumentsJSON) != `{"path":"/a"}` {
+		t.Errorf("tool call arguments lost: %q", tc.ArgumentsJSON)
 	}
 	if got.Usage == nil || got.Usage.InputTokens != 10 || got.Usage.CacheWriteTokens != 4 {
 		t.Errorf("usage lost: %+v", got.Usage)
 	}
 	if got.ProviderExtensions["x"] != "y" {
 		t.Errorf("provider extensions lost: %+v", got.ProviderExtensions)
+	}
+}
+
+// The canonical conversion must never re-encode arguments: key order is part
+// of the cacheable prompt prefix, and 9007199254740993 exceeds JavaScript's
+// exact-integer range, so any float64 round-trip corrupts it. The bytes a
+// plugin accepted must be the bytes the host compares and writes back.
+func TestPBChatResponsePreservesRawArgumentsBytes(t *testing.T) {
+	raw := []byte(`{"zzz":1,"aaa":9007199254740993}`)
+	in := &engine.ChatResponse{
+		Message: &engine.ResponseMessage{
+			ToolCalls: []engine.ResponseToolCall{{
+				ID: "call_9", Name: "t", ArgumentsJSON: raw, Signature: "sig-9",
+			}},
+		},
+	}
+	got := FromPBChatResponse(ToPBChatResponse(in))
+	if got == nil || got.Message == nil || len(got.Message.ToolCalls) != 1 {
+		t.Fatalf("round trip lost the tool call: %+v", got)
+	}
+	tc := got.Message.ToolCalls[0]
+	if !bytes.Equal(tc.ArgumentsJSON, raw) {
+		t.Errorf("arguments re-encoded: got %q want %q", tc.ArgumentsJSON, raw)
+	}
+	if tc.ID != "call_9" || tc.Signature != "sig-9" {
+		t.Errorf("id/signature lost: %+v", tc)
+	}
+}
+
+// Absence and present-empty are different facts: absent means the provider
+// body has no writable text slot, present-empty means an empty text part. A
+// plugin cannot change presence, so the conversion must preserve it exactly.
+func TestPBChatResponseContentPresence(t *testing.T) {
+	got := FromPBChatResponse(ToPBChatResponse(&engine.ChatResponse{
+		Message: &engine.ResponseMessage{},
+	}))
+	if got.Message == nil || got.Message.Content != nil {
+		t.Fatalf("absent content became present: %+v", got.Message)
+	}
+
+	empty := ""
+	got = FromPBChatResponse(ToPBChatResponse(&engine.ChatResponse{
+		Message: &engine.ResponseMessage{Content: &empty},
+	}))
+	if got.Message == nil || got.Message.Content == nil || *got.Message.Content != "" {
+		t.Fatalf("present-empty content lost: %+v", got.Message)
 	}
 }
 
