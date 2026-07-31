@@ -26,6 +26,16 @@ type toolCallRef struct {
 	argsJSON string
 	setName  func(string)
 	setArgs  func(string) error
+	// signature is the provider's opaque token over this call (Gemini and
+	// Code Assist thoughtSignature). clearSignature removes it from the body.
+	//
+	// Without these the token was invisible to the pipeline: a plugin could
+	// change a function call's name or arguments and the ORIGINAL signature
+	// stayed in the outgoing JSON, describing content the provider never
+	// signed. B2 would see an empty accepted signature and could neither
+	// detect nor clear it.
+	signature      string
+	clearSignature func()
 }
 
 // responseRefs is the format-independent mutable view of a JSON response.
@@ -362,12 +372,17 @@ func extractGemini(body map[string]any) responseRefs {
 			}
 			if fc, ok := part["functionCall"].(map[string]any); ok {
 				fcRef := fc
+				sigPart := part
 				argsJSON, setArgs := objArgs(fcRef, "args")
 				refs.toolCalls = append(refs.toolCalls, toolCallRef{
+					id:       asString(fc["id"]),
 					name:     asString(fc["name"]),
 					argsJSON: argsJSON,
 					setName:  func(s string) { fcRef["name"] = s },
 					setArgs:  setArgs,
+					// thoughtSignature sits on the PART, beside functionCall.
+					signature:      asString(sigPart["thoughtSignature"]),
+					clearSignature: func() { delete(sigPart, "thoughtSignature") },
 				})
 			}
 		}
@@ -437,7 +452,9 @@ func runJSONResponseHooks(ctx context.Context, pl *plugin.PluginPipeline, reqID 
 		}
 
 		events := []engine.StreamEvent{
-			{ToolCallStart: &engine.ToolCallStart{Index: ti, ID: syntheticID, Name: tc.name}},
+			{ToolCallStart: &engine.ToolCallStart{
+				Index: ti, ID: syntheticID, Name: tc.name, Signature: tc.signature,
+			}},
 		}
 		if tc.argsJSON != "" {
 			events = append(events, engine.StreamEvent{
@@ -471,7 +488,8 @@ func runJSONResponseHooks(ctx context.Context, pl *plugin.PluginPipeline, reqID 
 	for _, tc := range refs.toolCalls {
 		var args map[string]any
 		json.Unmarshal([]byte(tc.argsJSON), &args)
-		assistant.ToolCalls = append(assistant.ToolCalls, engine.ToolCall{ID: tc.id, Name: tc.name, Arguments: args})
+		assistant.ToolCalls = append(assistant.ToolCalls,
+			engine.ToolCall{ID: tc.id, Name: tc.name, Arguments: args, Signature: tc.signature})
 	}
 	respChat.Messages = []engine.Message{assistant}
 
@@ -497,16 +515,30 @@ func runJSONResponseHooks(ctx context.Context, pl *plugin.PluginPipeline, reqID 
 			for i := range msg.ToolCalls {
 				tc := &refs.toolCalls[i]
 				mut := msg.ToolCalls[i]
+				// signedContentChanged drives clearing the provider token
+				// below. A signature covers this call's name and arguments, so
+				// leaving it in place after either changes ships a valid-looking
+				// provider signature over content the provider never signed.
+				signedContentChanged := false
 				if mut.Name != "" && mut.Name != tc.name {
 					tc.setName(mut.Name)
+					signedContentChanged = true
 					modified = true
 				}
 				if mut.Arguments != nil {
 					if b, err := json.Marshal(mut.Arguments); err == nil && string(b) != tc.argsJSON {
 						if tc.setArgs(string(b)) == nil {
+							signedContentChanged = true
 							modified = true
 						}
 					}
+				}
+				// A plugin can never ADD or REPLACE a signature — it cannot
+				// mint one — so the only permitted transition is clearing an
+				// existing token whose covered content changed.
+				if signedContentChanged && tc.signature != "" && tc.clearSignature != nil {
+					tc.clearSignature()
+					modified = true
 				}
 			}
 		}
