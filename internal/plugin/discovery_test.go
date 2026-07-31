@@ -306,7 +306,7 @@ func TestValidateManifestContract(t *testing.T) {
 		ID:            "local/example",
 		Name:          "example",
 		Version:       "0.1.0",
-		ABIVersion:    "v1",
+		ABIVersion:    "v2",
 		FailureMode:   "pass",
 		Hooks:         []Hook{{Name: "run_before_request"}},
 		Permissions:   []Permission{{Name: "env.log"}},
@@ -314,11 +314,17 @@ func TestValidateManifestContract(t *testing.T) {
 	if err := validateManifest(valid); err != nil {
 		t.Fatalf("valid manifest: %v", err)
 	}
-	invalid := valid
-	invalid.ABIVersion = "v2"
-	if err := validateManifest(invalid); err == nil {
-		t.Fatal("unsupported ABI was accepted")
+	// v1 is now the unsupported one: this host dispatches v2 exclusively, so a
+	// v1 guest's per-hook exports are never called. Accepting its manifest
+	// would load a plugin that can never run.
+	for _, unsupported := range []string{"v1", "v3", ""} {
+		invalid := valid
+		invalid.ABIVersion = unsupported
+		if err := validateManifest(invalid); err == nil {
+			t.Fatalf("unsupported ABI %q was accepted", unsupported)
+		}
 	}
+	invalid := valid
 	invalid = valid
 	invalid.Permissions = []Permission{{Name: "env.not_real"}}
 	if err := validateManifest(invalid); err == nil {
@@ -373,7 +379,7 @@ func TestRequiresUpstreamRejectsMissingOrLaterDependencyBeforeLoadingCode(t *tes
 			ID:               id,
 			Name:             name,
 			Version:          "0.1.0",
-			ABIVersion:       "v1",
+			ABIVersion:       "v2",
 			FailureMode:      "pass",
 			Repository:       "https://github.com/torana-edge/torana-plugins",
 			RequiresUpstream: requires,
