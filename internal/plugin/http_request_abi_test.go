@@ -6,7 +6,7 @@ import (
 	"testing"
 
 	"github.com/torana-edge/torana-edge/internal/wasm"
-	"github.com/torana-edge/torana-plugin-sdk/pb"
+	pb "github.com/torana-edge/torana-plugin-sdk/pb/v2"
 )
 
 // TestRunOnHTTPRequest_UnknownPlugin verifies that RunOnHTTPRequest returns
@@ -107,9 +107,8 @@ func TestRunOnHTTPRequest_ServingPlugin(t *testing.T) {
 	if resp == nil {
 		t.Fatal("expected non-nil response from otel serve_http handler, got nil")
 	}
-	if !resp.Handled {
-		t.Error("expected Handled=true")
-	}
+	// v2 dropped HttpResponse.Handled: a non-nil response IS the plugin
+	// serving the request, and declining is a nil response.
 	if resp.Status != 200 {
 		t.Errorf("expected status 200, got %d", resp.Status)
 	}

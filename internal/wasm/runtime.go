@@ -184,30 +184,21 @@ func (p *Plugin) HasGrant(perm string) bool { return p.hasGrant(perm) }
 // ValidateHooks checks the guest's declared hook set against its manifest.
 //
 // v2 guests export one run_hook, so there is no per-hook export to probe.
-// Instead they publish a supported_hooks bitmap, which is compared against what
-// the manifest declares.
+// Instead they publish a supported_hooks bitmap, read once at LoadPlugin, and
+// this compares it against what the manifest declares. The ctx argument is
+// retained for callers and future host-side checks.
 //
 // This is stricter than the v1 check it replaces. v1 could only ask "does this
 // export exist", so a guest exporting MORE than it declared passed silently —
 // the manifest is what an operator approves, so undeclared behaviour was
 // invisible to the thing meant to authorise it. Exact equality closes that.
 func (p *Plugin) ValidateHooks(ctx context.Context, declared []pbv2.Hook) error {
-	inst, err := p.newInstance(ctx)
-	if err != nil {
-		return fmt.Errorf("wasm: %s: create validation instance: %w", p.name, err)
-	}
-	defer inst.mod.Close(ctx)
-
-	bitmap, err := supportedHooks(ctx, inst.mod)
-	if err != nil {
-		return fmt.Errorf("wasm: %s: %w", p.name, err)
-	}
+	p.stateMu.RLock()
+	bitmap := p.hooks
+	p.stateMu.RUnlock()
 	if err := pbv2.ValidateManifestHooks(bitmap, declared); err != nil {
 		return fmt.Errorf("wasm: %s: %w", p.name, err)
 	}
-	p.stateMu.Lock()
-	p.hooks = bitmap
-	p.stateMu.Unlock()
 	return nil
 }
 
@@ -397,7 +388,12 @@ func (p *Plugin) CallRequest(ctx context.Context, hook pbv2.Hook, reqID uint64, 
 	}
 
 	// Call hook.
-	ret, err := fn.Call(callCtx, reqID, uint64(inPtr), uint64(len(inBytes)))
+	//
+	// Two arguments, not three. v1 passed the request id separately; v2 moved
+	// it into HookInput, so the caller has already encoded it and passing it
+	// again is an arity mismatch that fails every guest call. reqID is still
+	// carried on the context above, which is what scopes host-side meta state.
+	ret, err := fn.Call(callCtx, uint64(inPtr), uint64(len(inBytes)))
 	if deallocFn != nil {
 		if _, deallocErr := deallocFn.Call(callCtx, uint64(inPtr), uint64(len(inBytes))); deallocErr != nil && err == nil {
 			err = fmt.Errorf("wasm: %s dealloc input: %w", p.name, deallocErr)
@@ -686,6 +682,22 @@ func (r *Runtime) LoadPlugin(name string, wasmBytes []byte) (*Plugin, error) {
 	if err != nil {
 		return nil, fmt.Errorf("wasm: %s: %w", name, err)
 	}
+
+	// Read the guest's hook set HERE, not in ValidateHooks.
+	//
+	// Dispatch consults this bitmap to skip hooks a guest does not implement.
+	// If it were only populated by ValidateHooks, a plugin loaded without that
+	// call would have a zero bitmap and every dispatch would silently no-op —
+	// a plugin that appears loaded and does nothing, with no error anywhere.
+	// Reading it at load means there is no unvalidated state to get wrong;
+	// ValidateHooks then only compares it against the manifest.
+	bitmap, err := supportedHooks(r.ctx, inst.mod)
+	if err != nil {
+		_ = inst.mod.Close(r.ctx)
+		return nil, fmt.Errorf("wasm: %s: %w", name, err)
+	}
+	p.hooks = bitmap
+
 	p.pool <- inst
 
 	r.mu.Lock()

@@ -236,8 +236,15 @@ func validateManifest(manifest PluginManifest) error {
 	if manifest.ID == "" || manifest.Name == "" {
 		return fmt.Errorf("id and name are required")
 	}
-	if manifest.ABIVersion != "v1" {
-		return fmt.Errorf("unsupported abi_version %q", manifest.ABIVersion)
+	// This host dispatches v2 exclusively: one run_hook export, HookInput in,
+	// HookResult out. A v1 guest exports per-hook functions this host never
+	// calls, so accepting its manifest would load a plugin that can never run
+	// — the failure would surface as "my plugin does nothing" rather than as a
+	// version mismatch anyone can act on.
+	if manifest.ABIVersion != "v2" {
+		return fmt.Errorf("unsupported abi_version %q: this host speaks ABI v2 "+
+			"(single run_hook export); rebuild the plugin against a v2 SDK",
+			manifest.ABIVersion)
 	}
 	if _, err := parseSemver(manifest.Version); err != nil {
 		return fmt.Errorf("invalid version: %w", err)

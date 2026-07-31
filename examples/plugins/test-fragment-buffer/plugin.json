@@ -3,7 +3,7 @@
   "id": "torana-test/test-fragment-buffer",
   "name": "test-fragment-buffer",
   "version": "0.1.0",
-  "abi_version": "v1",
+  "abi_version": "v2",
   "minimum_torana_version": "0.1.0",
   "failure_mode": "pass",
   "description": "Test fixture: buffers streamed tool-call argument fragments in request-scoped host state and emits them once complete",
