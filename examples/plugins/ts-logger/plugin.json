@@ -3,9 +3,9 @@
   "id": "torana-test/ts-logger",
   "name": "ts-logger",
   "version": "0.3.0",
-  "abi_version": "v2",
+  "abi_version": "v1",
   "failure_mode": "pass",
-  "description": "Polyglot ABI validation plugin written in AssemblyScript",
+  "description": "ABI v1 smoke fixture (AssemblyScript). NOT loadable by this host, which is v2-only: it still exports the three-argument v1 hook. Excluded from TESTDATA_DIRS and never built.",
   "hooks": [
     {
       "name": "run_before_request"
