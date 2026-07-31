@@ -2134,11 +2134,7 @@ func New(cfg Config) (*Server, error) {
 			// goroutine was still draining or running its observational hook.
 			// Putting the wait in the deferred cleanup gives normal return,
 			// ErrAbortHandler and any other panic the same invariant.
-			rs.awaitStreamDone()
-			if rs.Pipeline != nil {
-				rs.Pipeline.EndRequest(rs.ID)
-				rs.Pipeline.Release()
-			}
+			rs.finalizeRequest()
 		}()
 		// If no provider matches and no default, reject.
 		prov, _, _ := provider.Resolve(r.URL.Path, currentCfg.Providers)
@@ -3100,4 +3096,34 @@ func (rs *reqState) awaitStreamDone() {
 		return
 	}
 	<-rs.streamDone
+}
+
+// finalizeRequest is the exceptional-and-normal cleanup order for one request:
+// wait for the streaming goroutine (if any), then drop request-scoped state.
+//
+// The deferred handler cleanup calls this so http.ErrAbortHandler unwind shares
+// the same order as a normal return. Factored so a unit test can prove the
+// wait gates cleanup without standing up a guest or network disconnect.
+func (rs *reqState) finalizeRequest() {
+	if rs == nil {
+		return
+	}
+	finalizeRequestState(rs.streamDone, func() {
+		if rs.Pipeline != nil {
+			rs.Pipeline.EndRequest(rs.ID)
+			rs.Pipeline.Release()
+		}
+	})
+}
+
+// finalizeRequestState waits for stream completion then runs drop.
+// streamDone may be nil (non-streaming). Exported to tests in this package via
+// the same symbol — do not call from handlers directly; use finalizeRequest.
+func finalizeRequestState(streamDone <-chan struct{}, drop func()) {
+	if streamDone != nil {
+		<-streamDone
+	}
+	if drop != nil {
+		drop()
+	}
 }

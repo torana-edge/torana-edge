@@ -935,14 +935,13 @@ func TestObservationalStreamingHookIsOnTheClientCriticalPath(t *testing.T) {
 		"with HTTP completion by design", fastEOF, slowEOF)
 }
 
-// A client disconnecting mid-stream must not drop request state before the
-// observational hook finishes.
+// A client disconnect mid-stream must not take down the server.
 //
-// ReverseProxy panics with http.ErrAbortHandler when copying a streaming
-// response to a gone client, and this handler re-panics it. That unwind skips
-// the normal-path wait entirely, so EndRequest could delete request-scoped
-// metadata while the stream goroutine was still running RunAfterResponse. The
-// wait therefore lives in the deferred cleanup, where every exit shares it.
+// ReverseProxy panics with http.ErrAbortHandler when copying to a gone client;
+// this handler re-panics it so net/http handles the abort quietly. Lifetime
+// ordering (EndRequest after streamDone) is pinned by
+// TestRequestCleanupWaitsForStreamingGoroutineOnExceptionalExit — this test
+// only covers the network path still serving after that unwind.
 func TestClientDisconnectStillWaitsForTheObservationalHook(t *testing.T) {
 	requireWASM(t, fixturesDir+"/test-trapper-after-stream/plugin.wasm")
 
@@ -954,7 +953,6 @@ func TestClientDisconnectStillWaitsForTheObservationalHook(t *testing.T) {
 		if fl != nil {
 			fl.Flush()
 		}
-		// Hold the stream open so the client can disconnect mid-flight.
 		<-release
 		fmt.Fprint(w, "data: [DONE]\n\n")
 		if fl != nil {
@@ -990,25 +988,23 @@ func TestClientDisconnectStillWaitsForTheObservationalHook(t *testing.T) {
 	if err != nil {
 		t.Fatalf("post: %v", err)
 	}
-	// Read the first event, then abandon the response mid-stream.
 	buf := make([]byte, 16)
 	_, _ = resp.Body.Read(buf)
 	cancel()
 	resp.Body.Close()
 	close(release)
 
-	// The assertion is that the server survives the unwind with its state
-	// lifetime intact. Under -race this also catches concurrent reqState
-	// access; without the deferred wait, EndRequest runs while the hook is
-	// still executing.
-	//
-	// Give the goroutine time to finish, then prove the server is still
-	// serving — a panic escaping the recovery would have killed it.
-	time.Sleep(500 * time.Millisecond)
-	probe, err := http.Post("http://"+ln.Addr().String()+"/provider/oai/v1/chat/completions",
-		"application/json", strings.NewReader(`{"model":"gpt-x","messages":[{"role":"user","content":"hi"}]}`))
-	if err != nil {
-		t.Fatalf("server did not survive the disconnect unwind: %v", err)
+	deadline := time.Now().Add(5 * time.Second)
+	var lastErr error
+	for time.Now().Before(deadline) {
+		probe, err := http.Post("http://"+ln.Addr().String()+"/provider/oai/v1/chat/completions",
+			"application/json", strings.NewReader(`{"model":"gpt-x","messages":[{"role":"user","content":"hi"}]}`))
+		if err == nil {
+			probe.Body.Close()
+			return
+		}
+		lastErr = err
+		time.Sleep(20 * time.Millisecond)
 	}
-	probe.Body.Close()
+	t.Fatalf("server did not survive the disconnect unwind: %v", lastErr)
 }
