@@ -281,6 +281,10 @@ type reqState struct {
 	// "route" (env.route_request). Empty when no pipeline is loaded or no
 	// veto/redirect was applied.
 	Verdict string
+	// VerdictPlugin names the plugin that issued Verdict. v1 carried verdicts
+	// as anonymous ToranaMeta keys, so an operator seeing a blocked request
+	// could not tell which plugin blocked it — the first question anyone asks.
+	VerdictPlugin string
 	// OriginalReq is the pristine pre-pipeline request (pb bytes), snapshotted
 	// only when a loaded plugin holds env.original_request.
 	OriginalReq []byte
@@ -293,7 +297,7 @@ type reqState struct {
 	CompactionReports          []attributedCompactionReport
 	InitialProvider            string
 	InitialFormat              string
-	PendingRoute               *routeVerdict
+	PendingRoute               *wasm.RouteVerdict
 	CompactionRequestPrepared  bool
 	CompactionReportsCommitted bool
 }
@@ -826,46 +830,50 @@ func New(cfg Config) (*Server, error) {
 					delete(chat.ToranaMeta, "_request_headers")
 				}
 
-				// Request veto: a plugin holding env.block_request may reject
-				// the request outright. Honor it only when the capability is
-				// declared, render a provider-shaped error, and short-circuit
-				// — the transport returns rc.Block instead of calling upstream.
-				if pl.HasGrant("env.block_request") && chat.ToranaMeta != nil {
-					if raw, ok := chat.ToranaMeta["_block"]; ok {
-						delete(chat.ToranaMeta, "_block")
-						if rc, ok := req.Context().Value(routeContextKey{}).(*RouteContext); ok {
-							rc.Block = renderBlock(prov.Format, raw)
-						}
-						reqStateFrom(req.Context()).Verdict = "block"
-						req.Body = io.NopCloser(bytes.NewReader(nil))
-						req.ContentLength = 0
-						discardCompactionReports(reqStateFrom(req.Context()))
-						return
+				// Verdicts are recorded by attributed, permission-checked host
+				// calls now. The grant was verified per plugin at the call
+				// site, so there is deliberately NO pipeline-wide HasGrant
+				// check here: v1 asked "does ANY loaded plugin hold
+				// env.block_request?", which meant one approved blocker let
+				// every other plugin's verdict through. That was the hole in
+				// the capability model.
+				verdicts := pl.Verdicts(reqStateFrom(req.Context()).ID)
+
+				// Request veto: render a provider-shaped error and
+				// short-circuit — the transport returns rc.Block instead of
+				// calling upstream.
+				if block := verdicts.Block(); block != nil {
+					if rc, ok := req.Context().Value(routeContextKey{}).(*RouteContext); ok {
+						rc.Block = renderBlock(prov.Format, block)
 					}
+					rs := reqStateFrom(req.Context())
+					rs.Verdict = "block"
+					rs.VerdictPlugin = block.Plugin
+					req.Body = io.NopCloser(bytes.NewReader(nil))
+					req.ContentLength = 0
+					discardCompactionReports(rs)
+					return
 				}
 
-				// Respond-directly: a plugin holding env.respond_request may
-				// serve the full response itself (response cache, mock mode).
-				// The host renders a provider-shaped completion — SSE if the
-				// client streams — and the transport returns it without
-				// calling upstream: zero tokens spent. A block verdict wins
-				// over a respond verdict (checked above).
-				if pl.HasGrant("env.respond_request") && chat.ToranaMeta != nil {
-					if raw, ok := chat.ToranaMeta["_respond"]; ok {
-						delete(chat.ToranaMeta, "_respond")
-						if rc, ok := req.Context().Value(routeContextKey{}).(*RouteContext); ok {
-							rc.Block = renderRespond(fmt, chat.Model, raw, chat.Stream)
-						}
-						rs := reqStateFrom(req.Context())
-						rs.Synthetic = true
-						rs.Model = chat.Model
-						rs.Provider = provName
-						rs.Verdict = "respond"
-						req.Body = io.NopCloser(bytes.NewReader(nil))
-						req.ContentLength = 0
-						discardCompactionReports(rs)
-						return
+				// Respond-directly: a plugin may serve the full response itself
+				// (response cache, mock mode). The host renders a
+				// provider-shaped completion — SSE if the client streams — and
+				// the transport returns it without calling upstream: zero
+				// tokens spent. Block wins over respond, checked above.
+				if respond := verdicts.Respond(); respond != nil {
+					if rc, ok := req.Context().Value(routeContextKey{}).(*RouteContext); ok {
+						rc.Block = renderRespond(fmt, chat.Model, respond, chat.Stream)
 					}
+					rs := reqStateFrom(req.Context())
+					rs.Synthetic = true
+					rs.Model = chat.Model
+					rs.Provider = provName
+					rs.Verdict = "respond"
+					rs.VerdictPlugin = respond.Plugin
+					req.Body = io.NopCloser(bytes.NewReader(nil))
+					req.ContentLength = 0
+					discardCompactionReports(rs)
+					return
 				}
 			}
 
@@ -876,10 +884,14 @@ func New(cfg Config) (*Server, error) {
 				rs.Provider = provName
 			}
 
+			// Identity override is an attributed, granted verdict now. v1 read
+			// it from an unprefixed ToranaMeta["identity"] key with NO
+			// permission check at all — it did not appear in sdk.Permissions
+			// or ABI.md, so any plugin could rewrite the rate-limit key.
 			identity := ""
-			if chat.ToranaMeta != nil {
-				if id, ok := chat.ToranaMeta["identity"].(string); ok {
-					identity = id
+			if pl := reqStateFrom(req.Context()).Pipeline; pl != nil {
+				if v := pl.Verdicts(reqStateFrom(req.Context()).ID).Identity(); v != nil {
+					identity = v.Identity
 				}
 			}
 			if identity == "" {
@@ -894,14 +906,17 @@ func New(cfg Config) (*Server, error) {
 			// extraction so rate limiting still keys on the caller, and
 			// before marshal so the model override reaches the wire. Bad
 			// verdicts fail open to the original route.
-			if pl := reqStateFrom(req.Context()).Pipeline; pl != nil && pl.HasGrant("env.route_request") && chat.ToranaMeta != nil {
-				if raw, ok := chat.ToranaMeta["_route"]; ok {
-					delete(chat.ToranaMeta, "_route")
-					s.applyRoute(req, chat, prov.Format, provName, raw, currentCfg.Providers)
+			// No pipeline-wide HasGrant: the grant was checked per plugin at
+			// the host call, and asking whether ANY plugin holds it is the
+			// capability hole this migration closes.
+			if pl := reqStateFrom(req.Context()).Pipeline; pl != nil {
+				if route := pl.Verdicts(reqStateFrom(req.Context()).ID).Route(); route != nil {
+					s.applyRoute(req, chat, prov.Format, provName, route, currentCfg.Providers)
 					// Model may have been overridden; refresh the metrics fact.
 					rstate := reqStateFrom(req.Context())
 					rstate.Model = chat.Model
 					rstate.Verdict = "route"
+					rstate.VerdictPlugin = route.Plugin
 				}
 			}
 
@@ -2476,26 +2491,17 @@ func (s *Server) newRuntime() *wasm.Runtime {
 		rs.CompactionReports = append(rs.CompactionReports, attributedCompactionReport{Plugin: pluginName, Report: report})
 	}
 	rt.EvaluateCompactionFunc = s.evaluateCompaction
+	// Compaction savings are priced against the FINAL provider/model, so the
+	// pending route has to be known before pricing runs. It used to be sniffed
+	// out of the mutated request's ToranaMeta["_route"]; the verdict is
+	// recorded at the host call now, so read it directly rather than
+	// re-deriving it from a request the plugin happened to return.
 	rt.RequestMutationFunc = func(ctx context.Context, requestPB []byte) {
-		var request pb.ChatRequest
-		if proto.Unmarshal(requestPB, &request) != nil {
+		rs := reqStateFrom(ctx)
+		if rs == nil {
 			return
 		}
-		var meta map[string]any
-		if json.Unmarshal(request.ToranaMetaJson, &meta) != nil {
-			reqStateFrom(ctx).PendingRoute = nil
-			return
-		}
-		raw, ok := meta["_route"]
-		if !ok {
-			reqStateFrom(ctx).PendingRoute = nil
-			return
-		}
-		b, _ := json.Marshal(raw)
-		var verdict routeVerdict
-		if json.Unmarshal(b, &verdict) == nil {
-			reqStateFrom(ctx).PendingRoute = &verdict
-		}
+		rs.PendingRoute = rt.VerdictsFor(rs.ID).Route()
 	}
 	// Plugins report compaction savings via torana_record_savings,
 	// attributed per plugin in /stats and OTLP.

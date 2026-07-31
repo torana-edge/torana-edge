@@ -475,6 +475,15 @@ type Runtime struct {
 	// meta holds request-scoped, plugin-private state: reqID → namespaced
 	// key → value. Buckets are dropped via EndRequest when a request ends.
 	meta map[uint64]map[string]string
+	verdictMu sync.RWMutex
+	// verdicts holds request-scoped plugin verdicts: reqID → what plugins
+	// asked the host to do about this request. v1 carried these back inside
+	// the returned request's ToranaMeta, which meant the host could not know a
+	// block had happened until every plugin had run — so a rejected,
+	// PII-laden request was still handed to the compactor and warmer. As host
+	// calls they arrive immediately and carry attribution.
+	verdicts map[uint64]*RequestVerdicts
+
 	// cache is the cross-request TTL store shared between plugins
 	// (e.g. compactor writes intents, keyword_compactor reads them).
 	cache cache.Store
@@ -629,6 +638,12 @@ func (r *Runtime) EndRequest(reqID uint64) {
 	r.metaMu.Lock()
 	delete(r.meta, reqID)
 	r.metaMu.Unlock()
+
+	// Verdicts are request-scoped too. Leaking a block into a later request
+	// that happened to reuse the id would refuse traffic nobody objected to.
+	r.verdictMu.Lock()
+	delete(r.verdicts, reqID)
+	r.verdictMu.Unlock()
 }
 
 // metaGet reads a request-scoped meta value.
@@ -827,6 +842,50 @@ func (r *Runtime) installHostFunctions() {
 		var herr *pbv2.HostError
 		var res string // extension/domain JSON, moved into value at the exit
 		switch cmd {
+		case "env.block_request":
+			var a pbv2.BlockRequestArgs
+			if err := proto.Unmarshal([]byte(args), &a); err != nil {
+				herr = hostErr(pbv2.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "invalid BlockRequestArgs: %v", err)
+				break
+			}
+			if err := a.Validate(); err != nil {
+				herr = hostErr(pbv2.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "%v", err)
+				break
+			}
+			r.verdictsBucket(reqIDFrom(ctx)).setBlock(pluginName, &a)
+		case "env.respond_request":
+			var a pbv2.RespondRequestArgs
+			if err := proto.Unmarshal([]byte(args), &a); err != nil {
+				herr = hostErr(pbv2.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "invalid RespondRequestArgs: %v", err)
+				break
+			}
+			if err := a.Validate(); err != nil {
+				herr = hostErr(pbv2.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "%v", err)
+				break
+			}
+			r.verdictsBucket(reqIDFrom(ctx)).setRespond(pluginName, a.Content)
+		case "env.route_request":
+			var a pbv2.RouteRequestArgs
+			if err := proto.Unmarshal([]byte(args), &a); err != nil {
+				herr = hostErr(pbv2.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "invalid RouteRequestArgs: %v", err)
+				break
+			}
+			if err := a.Validate(); err != nil {
+				herr = hostErr(pbv2.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "%v", err)
+				break
+			}
+			r.verdictsBucket(reqIDFrom(ctx)).setRoute(pluginName, a.Provider, a.Model)
+		case "env.set_identity":
+			var a pbv2.SetIdentityArgs
+			if err := proto.Unmarshal([]byte(args), &a); err != nil {
+				herr = hostErr(pbv2.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "invalid SetIdentityArgs: %v", err)
+				break
+			}
+			if err := a.Validate(); err != nil {
+				herr = hostErr(pbv2.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "%v", err)
+				break
+			}
+			r.verdictsBucket(reqIDFrom(ctx)).setIdentity(pluginName, a.Identity)
 		case "env.meta_set":
 			// A decode failure used to be swallowed by `if err == nil`, so the
 			// write silently did not happen. It is now a classified refusal.

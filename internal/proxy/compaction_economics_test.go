@@ -10,6 +10,7 @@ import (
 	"github.com/torana-edge/torana-edge/internal/economics"
 	"github.com/torana-edge/torana-edge/internal/metrics"
 	"github.com/torana-edge/torana-edge/internal/provider"
+	"github.com/torana-edge/torana-edge/internal/wasm"
 )
 
 type economicsRoundTripFunc func(*http.Request) (*http.Response, error)
@@ -97,7 +98,7 @@ func TestEvaluateCompactionUsesEarlierRoutingVerdict(t *testing.T) {
 	}}}}
 	rs := &reqState{
 		Provider: "initial", Model: "expensive", InitialProvider: "initial", InitialFormat: "openai",
-		PendingRoute: &routeVerdict{Provider: "routed", Model: "cheap"},
+		PendingRoute: &wasm.RouteVerdict{Provider: "routed", Model: "cheap"},
 	}
 	ctx := context.WithValue(context.Background(), reqStateKey{}, rs)
 	report := economics.CompactionReport{

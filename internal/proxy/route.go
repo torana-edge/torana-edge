@@ -1,7 +1,6 @@
 package proxy
 
 import (
-	"encoding/json"
 	"log"
 	"net/http"
 	"net/url"
@@ -9,14 +8,8 @@ import (
 	"github.com/torana-edge/torana-edge/internal/engine"
 	"github.com/torana-edge/torana-edge/internal/metrics"
 	"github.com/torana-edge/torana-edge/internal/provider"
+	"github.com/torana-edge/torana-edge/internal/wasm"
 )
-
-// routeVerdict is the plugin-supplied routing override carried in
-// ToranaMeta["_route"] (set via sdk.RouteRequest).
-type routeVerdict struct {
-	Provider string `json:"provider"`
-	Model    string `json:"model"`
-}
 
 // applyRoute validates and applies a plugin routing verdict: rewrite the
 // upstream URL to the target provider, swap credentials, and override the
@@ -26,11 +19,7 @@ type routeVerdict struct {
 // Credential rule (mirrors the offload provider override): the caller's
 // credential is NEVER forwarded to a rerouted provider. Auth comes from the
 // target's api_key_env; empty means no auth (local endpoints).
-func (s *Server) applyRoute(req *http.Request, chat *engine.ChatRequest, origFormat, origName string, raw any, cfg provider.Config) {
-	b, _ := json.Marshal(raw)
-	var v routeVerdict
-	_ = json.Unmarshal(b, &v)
-
+func (s *Server) applyRoute(req *http.Request, chat *engine.ChatRequest, origFormat, origName string, v *wasm.RouteVerdict, cfg provider.Config) {
 	if v.Model != "" {
 		chat.Model = v.Model
 	}
@@ -40,7 +29,7 @@ func (s *Server) applyRoute(req *http.Request, chat *engine.ChatRequest, origFor
 
 	target, ok := cfg.Providers[v.Provider]
 	if !ok {
-		log.Printf("[route] plugin routed to unknown provider %q — keeping %q", v.Provider, origName)
+		log.Printf("[route] %s routed to unknown provider %q — keeping %q", v.Plugin, v.Provider, origName)
 		return
 	}
 	if target.Format != origFormat {

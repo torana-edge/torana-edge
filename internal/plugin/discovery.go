@@ -932,6 +932,19 @@ func cloneAgentOperation(operation AgentOperation) AgentOperation {
 // EndRequest drops all request-scoped plugin state for a finished request.
 func (pp *PluginPipeline) EndRequest(reqID uint64) { pp.runtime.EndRequest(reqID) }
 
+// Verdicts returns what plugins asked the host to do about this request.
+//
+// The grant was already checked per-plugin at the host call, so callers must
+// NOT re-check it pipeline-wide. v1 asked "does any loaded plugin hold
+// env.block_request?" — which meant one approved blocker let every other
+// plugin's verdict through. Attribution now travels with the verdict.
+func (pp *PluginPipeline) Verdicts(reqID uint64) *wasm.RequestVerdicts {
+	if pp == nil {
+		return nil
+	}
+	return pp.runtime.VerdictsFor(reqID)
+}
+
 // HasGrant reports whether any loaded plugin has actually been granted the
 // named permission by the operator. Manifest requests alone confer no access.
 func (pp *PluginPipeline) HasGrant(perm string) bool {
@@ -983,6 +996,12 @@ func (pp *PluginPipeline) RunBeforeRequest(ctx context.Context, reqID uint64, ch
 		var outBytes []byte
 		if err := lp.plugin.CallRequest(ctx, pbv2.Hook_HOOK_BEFORE_REQUEST, reqID, inBytes, &outBytes); err != nil {
 			log.Printf("[plugin] %s run_before_request: %v", lp.manifest.Name, err)
+			// Trap semantics: a block this plugin already recorded survives —
+			// a security verdict fails closed, and code that decided to refuse
+			// and then crashed still refused. Its respond/route/identity are
+			// discarded: a half-built synthetic response, or a reroute chosen
+			// by code that crashed immediately after, is not trustworthy.
+			pp.runtime.DiscardTrappedVerdicts(reqID, lp.manifest.Name)
 			if lp.failureMode == "block" {
 				return chat, fmt.Errorf("plugin %s blocked request after failure: %w", lp.manifest.Name, err)
 			}
@@ -1009,6 +1028,16 @@ func (pp *PluginPipeline) RunBeforeRequest(ctx context.Context, reqID uint64, ch
 			if raw, err := proto.Marshal(replacement); err == nil {
 				pp.runtime.ObserveRequestMutation(ctx, raw)
 			}
+		}
+
+		// Block short-circuits. v1 could not know a block had happened until
+		// every plugin had run, so a rejected request was still handed to the
+		// compactor and the warmer — PII-laden payloads kept flowing after the
+		// scanner had refused them. A replacement from the blocking plugin is
+		// kept but never sent upstream: block wins, and forcing an author to
+		// discard edits before blocking would be a new footgun.
+		if v := pp.runtime.VerdictsFor(reqID); v != nil && v.Block() != nil {
+			break
 		}
 	}
 
