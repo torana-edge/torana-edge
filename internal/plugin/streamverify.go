@@ -326,6 +326,14 @@ func (t typedContent) equals(o typedContent) bool {
 
 func (t typedContent) isEmpty() bool { return t.text == "" && t.thinking == "" }
 
+// sameKind reports whether two records carry the same arm presence, ignoring
+// bytes. An empty TEXT scope and an empty THINKING scope are distinct records
+// (round-4 F1), so a different-kind span at a binding's ordinal means the
+// signed block itself was suppressed, not rewritten (round-5).
+func (t typedContent) sameKind(o typedContent) bool {
+	return t.textSeen == o.textSeen && t.thinkingSeen == o.thinkingSeen
+}
+
 // --- tool-call blocks (SignatureScopeToolCallBlockByIndex) -----------------
 
 // toolCallScope is one tool-call block's signed scope. It mirrors the SDK's
@@ -530,29 +538,54 @@ func scanStreamSignatures(events []*pbv2.StreamEvent) streamSignatureView {
 	var sawText bool
 	openTools := make(map[int32]*toolScopeBuilder)
 
-	closeSpan := func() {
-		if !spanOpen {
-			return
-		}
+	// resetSpanState UNCONDITIONALLY clears the span accumulators, both
+	// presence flags, and spanOpen. The presence flags are also armed by the
+	// explicit block's KIND (round-4 F1), so a closed empty block that kept
+	// them would leak them into the next block (round-5): a consumed span —
+	// or an explicit block that never opened one — must leave no state
+	// behind.
+	resetSpanState := func() {
+		spanText.Reset()
+		spanThink.Reset()
+		spanTextSeen, spanThinkSeen = false, false
+		spanOpen = false
+	}
+
+	// materializeSpan snapshots the current typed span into the closed
+	// accumulation and the span list, then ALWAYS consumes it via
+	// resetSpanState. Every materialization path — closeSpan with deltas and
+	// both direct empty-span appends — goes through this helper, so a
+	// materialized span can never leave its builders or presence behind.
+	materializeSpan := func() typedContent {
 		tc := typedContent{text: spanText.String(), thinking: spanThink.String(), textSeen: spanTextSeen, thinkingSeen: spanThinkSeen}
 		closedText.WriteString(tc.text)
 		closedThink.WriteString(tc.thinking)
 		closedTextSeen = closedTextSeen || tc.textSeen
 		closedThinkSeen = closedThinkSeen || tc.thinkingSeen
 		v.spans = append(v.spans, tc)
-		spanText.Reset()
-		spanThink.Reset()
-		spanTextSeen, spanThinkSeen = false, false
-		spanOpen = false
+		resetSpanState()
 		if blockOpen && blockText {
 			blockSawSpan = true
 		}
+		return tc
+	}
+
+	// closeSpan closes an in-flight span: with deltas it materializes the
+	// span; with none there is nothing to record, but the reset is STILL
+	// unconditional (round-5) — a block's kind-presence must not survive
+	// into the next block.
+	closeSpan := func() {
+		if spanOpen {
+			materializeSpan()
+			return
+		}
+		resetSpanState()
 	}
 
 	for _, ev := range events {
 		switch e := ev.Event.(type) {
 		case *pbv2.StreamEvent_ContentBlockStart:
-			closeSpan()
+			closeSpan() // any start closes an implicit run AND clears residual span state (round-5)
 			cbs := e.ContentBlockStart
 			switch cbs.Block.(type) {
 			case *pbv2.ContentBlockStart_Text:
@@ -587,8 +620,10 @@ func scanStreamSignatures(events []*pbv2.StreamEvent) streamSignatureView {
 				// suppressed block, which is what absence from the span list
 				// would otherwise claim. The span carries the BLOCK KIND's
 				// presence (round-4 F1), so an empty text block's span can
-				// never be mistaken for an empty thinking block's.
-				v.spans = append(v.spans, typedContent{textSeen: spanTextSeen, thinkingSeen: spanThinkSeen})
+				// never be mistaken for an empty thinking block's. The helper
+				// CONSUMES the block kind's presence, so it cannot leak into
+				// the next block (round-5).
+				materializeSpan()
 			}
 			closeSpan()
 			blockOpen, blockText, blockSawSpan = false, false, false
@@ -625,19 +660,22 @@ func scanStreamSignatures(events []*pbv2.StreamEvent) streamSignatureView {
 				// "rewritten" verdict when its token dropped. The materialized
 				// span and the binding carry the BLOCK KIND's presence
 				// (round-4 F1), so an empty text scope and an empty thinking
-				// scope are distinct records.
+				// scope are distinct records. The materialization goes through
+				// the consuming helper (round-5), so the block kind's presence
+				// is reset before the next block can arm its own.
 				span := len(v.spans)
+				content := typedContent{text: spanText.String(), thinking: spanThink.String(), textSeen: spanTextSeen, thinkingSeen: spanThinkSeen}
 				if !spanOpen && blockOpen && blockText {
-					v.spans = append(v.spans, typedContent{textSeen: spanTextSeen, thinkingSeen: spanThinkSeen})
-					blockSawSpan = true
+					materializeSpan()
+				} else {
+					closeSpan()
 				}
 				v.bindings = append(v.bindings, sigBinding{
 					kind:      sigBindingCurrent,
 					signature: e.SignatureDelta,
-					content:   typedContent{text: spanText.String(), thinking: spanThink.String(), textSeen: spanTextSeen, thinkingSeen: spanThinkSeen},
+					content:   content,
 					span:      span,
 				})
-				closeSpan()
 			case blockOpen || len(openTools) > 0:
 				// Open tool/provider block: signature_delta is not the
 				// tool-call path, so this binds nothing.
@@ -1122,6 +1160,18 @@ func verifyUnpairedBinding(kind sigBindingKind, ab sigBinding, rv streamSignatur
 		return nil
 	}
 	if ab.content.isEmpty() {
+		if ab.span >= 0 && ab.span < len(rv.spans) && !rv.spans[ab.span].sameKind(ab.content) {
+			// Round-5: the span at the ordinal is of a DIFFERENT kind — an
+			// empty signed TEXT scope and an empty signed THINKING scope are
+			// distinct records, so a text block can never be "rewritten" into
+			// a thinking block (or vice versa). The signed block itself was
+			// suppressed and another block's span took the ordinal;
+			// suppression is topology, gated on ir.stream.write.
+			if !canWrite(streamWriteGrant) {
+				return fmt.Errorf("suppressed a signed text/thinking block without %s", streamWriteGrant)
+			}
+			return nil
+		}
 		// round-3 F1: a signature over ZERO deltas is either intact
 		// (consumed by an exact match in phase 1) or its empty span was
 		// dropped — there is no content to rewrite, so "cleared" cannot

@@ -1572,6 +1572,116 @@ func TestStreamVerifyExactMatchesReserveReturnedSpans(t *testing.T) {
 	})
 }
 
+// TestStreamVerifyEmptySpanPresenceDoesNotLeak pins round-5: span lifecycle
+// consumption/reset is UNCONDITIONAL for every materialization path, so an
+// empty span's kind-presence can never leak into the next block. The
+// finding: closeSpan reset spanTextSeen/spanThinkSeen only when spanOpen was
+// true, but BOTH direct empty-span materializations — the zero-delta block
+// at ContentBlockStop and the zero-delta current signature at the signature
+// event — appended a typedContent WITHOUT opening or consuming the span, so
+// the presence flag stayed set. An empty thinking scope after an empty text
+// scope was then recorded as {textSeen:true, thinkingSeen:true}, and the
+// retained T2 of
+//
+//	accepted: StartText(0), Sig(T1), Stop(0), StartThinking(1), Sig(T2), Stop(1)
+//	returned:                            StartThinking(1), Sig(T2), Stop(1)
+//
+// failed even with every grant: accepted T2 inherited textSeen while
+// returned T2 did not, so the exact match never fired and the occurrence was
+// condemned stale. T2 must match exactly and T1's suppression must be
+// topology-authorized.
+func TestStreamVerifyEmptySpanPresenceDoesNotLeak(t *testing.T) {
+	emptyTextBlock := func(index int32, sig string) []*pbv2.StreamEvent {
+		out := []*pbv2.StreamEvent{{Event: &pbv2.StreamEvent_ContentBlockStart{
+			ContentBlockStart: &pbv2.ContentBlockStart{
+				Index: index, Block: &pbv2.ContentBlockStart_Text{Text: &pbv2.TextBlock{}},
+			},
+		}}}
+		if sig != "" {
+			out = append(out, signatureDelta(sig))
+		}
+		return append(out, &pbv2.StreamEvent{Event: &pbv2.StreamEvent_ContentBlockStop{
+			ContentBlockStop: &pbv2.ContentBlockStop{Index: index},
+		}})
+	}
+	emptyThinkingBlock := func(index int32, sig string) []*pbv2.StreamEvent {
+		out := []*pbv2.StreamEvent{{Event: &pbv2.StreamEvent_ContentBlockStart{
+			ContentBlockStart: &pbv2.ContentBlockStart{
+				Index: index, Block: &pbv2.ContentBlockStart_Thinking{Thinking: &pbv2.ThinkingBlock{}},
+			},
+		}}}
+		if sig != "" {
+			out = append(out, signatureDelta(sig))
+		}
+		return append(out, &pbv2.StreamEvent{Event: &pbv2.StreamEvent_ContentBlockStop{
+			ContentBlockStop: &pbv2.ContentBlockStop{Index: index},
+		}})
+	}
+
+	t.Run("walk: each empty block records only its own kind", func(t *testing.T) {
+		// StartText(0)+Stop(0) then StartThinking(1)+Stop(1): the second
+		// empty span must NOT inherit the first block's text presence — the
+		// zero-delta materialization at the Stop consumes it.
+		events := append(emptyTextBlock(0, ""), emptyThinkingBlock(1, "")...)
+		v := scanStreamSignatures(events)
+		if len(v.spans) != 2 ||
+			v.spans[0] != (typedContent{textSeen: true}) ||
+			v.spans[1] != (typedContent{thinkingSeen: true}) {
+			t.Fatalf("walk spans = %+v, want [{textSeen} {thinkingSeen}]", v.spans)
+		}
+	})
+
+	// One empty signed block suppressed (its whole block gone), the other
+	// retained intact — in BOTH kind orders. The retained occurrence must
+	// match exactly (its accepted scope must be exactly its own kind, not
+	// the suppressed block's) and the suppressed block's disappearance is
+	// topology, gated on ir.stream.write.
+	for _, tc := range []struct {
+		name   string
+		first  func(index int32, sig string) []*pbv2.StreamEvent
+		second func(index int32, sig string) []*pbv2.StreamEvent
+	}{
+		{"empty text suppressed, empty thinking retained", emptyTextBlock, emptyThinkingBlock},
+		{"empty thinking suppressed, empty text retained", emptyThinkingBlock, emptyTextBlock},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			accepted := append(tc.first(0, streamSigA), tc.second(1, streamSigB)...)
+			returned := tc.second(0, streamSigB)
+			if err := verifyStream(accepted, returned, withStreamWrite); err != nil {
+				t.Fatalf("suppress-first retention with grant rejected: %v", err)
+			}
+			err := verifyStream(accepted, returned, noGrants)
+			if err == nil || !strings.Contains(err.Error(), streamWriteGrant) {
+				t.Fatalf("suppress-first retention without grant: err = %v, want topology rejection", err)
+			}
+		})
+	}
+
+	t.Run("unsigned zero-delta first block, signed second scope exactly its own kind", func(t *testing.T) {
+		// The zero-delta block at ContentBlockStop must consume its presence:
+		// the second signed block's scope is exactly its own kind, so it
+		// matches exactly — passes with every grant (and without).
+		accepted := append(emptyTextBlock(0, ""), emptyThinkingBlock(1, streamSigB)...)
+		returned := emptyThinkingBlock(0, streamSigB)
+		if err := verifyStream(accepted, returned, withEveryGrant); err != nil {
+			t.Fatalf("signed second scope inherited the first block's presence: %v", err)
+		}
+		if err := verifyStream(accepted, returned, noGrants); err != nil {
+			t.Fatalf("signed second scope with no grants: %v", err)
+		}
+	})
+
+	t.Run("two consecutive unchanged empty signed blocks pass without grants", func(t *testing.T) {
+		// The second block's span must not inherit the first's kind, or its
+		// unchanged accepted scope would stop matching the returned one.
+		accepted := append(emptyTextBlock(0, streamSigA), emptyThinkingBlock(1, streamSigB)...)
+		returned := append(emptyTextBlock(0, streamSigA), emptyThinkingBlock(1, streamSigB)...)
+		if err := verifyStream(accepted, returned, noGrants); err != nil {
+			t.Fatalf("unchanged empty signed blocks rejected: %v", err)
+		}
+	})
+}
+
 // TestValidateAcceptedStreamABITopology pins round-2 F4: validateAcceptedStream
 // implements the FULL ABI topology, not a kind-only approximation. Every
 // stop/delta must match its open block BY INDEX, indexes are never reused,
