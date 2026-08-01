@@ -138,6 +138,41 @@ func ToPBStreamEvent(e *engine.StreamEvent) *pb.StreamEvent {
 				}},
 			},
 		}
+	} else if e.BlockStart != nil {
+		// Explicit non-tool content blocks map to their matching v2 arm so the
+		// wire carries the full block topology: every content block opens with
+		// a start event naming its kind.
+		switch e.BlockStart.Kind {
+		case engine.BlockKindText:
+			out.Event = &pb.StreamEvent_ContentBlockStart{
+				ContentBlockStart: &pb.ContentBlockStart{
+					Index: int32(e.BlockStart.Index),
+					Block: &pb.ContentBlockStart_Text{Text: &pb.TextBlock{}},
+				},
+			}
+		case engine.BlockKindThinking:
+			out.Event = &pb.StreamEvent_ContentBlockStart{
+				ContentBlockStart: &pb.ContentBlockStart{
+					Index: int32(e.BlockStart.Index),
+					Block: &pb.ContentBlockStart_Thinking{Thinking: &pb.ThinkingBlock{}},
+				},
+			}
+		case engine.BlockKindProvider:
+			// The engine IR carries provider blocks without the provider's own
+			// kind string (the IR has no slot for it), while the v2 wire
+			// requires one. "provider" is the stable canonical default: it
+			// round-trips through FromPBStreamEvent back to BlockKindProvider.
+			out.Event = &pb.StreamEvent_ContentBlockStart{
+				ContentBlockStart: &pb.ContentBlockStart{
+					Index: int32(e.BlockStart.Index),
+					Block: &pb.ContentBlockStart_Provider{Provider: &pb.ProviderBlock{Kind: "provider"}},
+				},
+			}
+		default:
+			// Unknown kind — drop rather than invent. Only well-formed engine
+			// events reach the wire, so this is defensive.
+			return out
+		}
 	} else if e.SignatureDelta != nil {
 		out.Event = &pb.StreamEvent_SignatureDelta{SignatureDelta: *e.SignatureDelta}
 	} else if e.ToolCallDelta != nil {
@@ -146,6 +181,10 @@ func ToPBStreamEvent(e *engine.StreamEvent) *pb.StreamEvent {
 				Index:          int32(e.ToolCallDelta.Index),
 				ArgumentsDelta: e.ToolCallDelta.ArgumentsDelta,
 			},
+		}
+	} else if e.BlockStop != nil {
+		out.Event = &pb.StreamEvent_ContentBlockStop{
+			ContentBlockStop: &pb.ContentBlockStop{Index: int32(e.BlockStop.Index)},
 		}
 	} else if e.ToolCallEnd != nil {
 		out.Event = &pb.StreamEvent_ContentBlockStop{
@@ -177,7 +216,43 @@ func ToPBStreamEvent(e *engine.StreamEvent) *pb.StreamEvent {
 	return out
 }
 
+// BlockKindTracker records which content blocks are tool-call blocks while a
+// streamed message is converted pb → engine, so a ContentBlockStop — which
+// carries only an index — converts back to the engine event that matches the
+// block it closes: ToolCallEnd for tool blocks, BlockStop for
+// text/thinking/provider blocks.
+//
+// The v2 wire binds a stop by index alone; the block kind lives on the start
+// event. A stateless per-event conversion would map every stop to ToolCallEnd
+// and turn a plugin-passed text block into a tool block (or, with the other
+// default, every tool block into a text block) — the exact loss this tracker
+// exists to prevent. Only the tool-vs-content bit matters for stop resolution:
+// the kind of a non-tool block is carried by its own BlockStart event.
+//
+// A tracker is per streamed message (or per request, when the stream crosses
+// host calls). It is NOT safe for concurrent use.
+type BlockKindTracker struct {
+	// tool holds the indexes of blocks currently open as tool-call blocks.
+	// A stop whose index is recorded here closes a tool block; every other
+	// stop closes non-tool content.
+	tool map[int]struct{}
+}
+
+// FromPBStreamEvent converts one event, resolving ContentBlockStop by the
+// kinds recorded by this tracker's earlier conversions.
+func (t *BlockKindTracker) FromPBStreamEvent(e *pb.StreamEvent) *engine.StreamEvent {
+	return fromPBStreamEvent(e, t)
+}
+
 func FromPBStreamEvent(e *pb.StreamEvent) *engine.StreamEvent {
+	// Stateless per-event conversion: a ContentBlockStop has no recorded
+	// block kind, so it maps to ToolCallEnd — the pre-block-IR behavior,
+	// preserved for per-event callers and legacy paths. Streams that must
+	// preserve text/thinking block boundaries use BlockKindTracker instead.
+	return fromPBStreamEvent(e, nil)
+}
+
+func fromPBStreamEvent(e *pb.StreamEvent, tracker *BlockKindTracker) *engine.StreamEvent {
 	out := &engine.StreamEvent{}
 	switch v := e.Event.(type) {
 	case *pb.StreamEvent_TextDelta:
@@ -185,16 +260,43 @@ func FromPBStreamEvent(e *pb.StreamEvent) *engine.StreamEvent {
 	case *pb.StreamEvent_ThinkingDelta:
 		out.ThinkingDelta = &v.ThinkingDelta
 	case *pb.StreamEvent_ContentBlockStart:
-		// Only tool-call blocks map back: the engine IR has no separate
-		// open-event for text or thinking, which arrive as bare deltas. A
-		// text/thinking/provider block start therefore has no v1-shaped
-		// counterpart and is dropped rather than invented.
-		if tc, ok := v.ContentBlockStart.Block.(*pb.ContentBlockStart_ToolCall); ok && tc.ToolCall != nil {
-			out.ToolCallStart = &engine.ToolCallStart{
-				Index:     int(v.ContentBlockStart.Index),
-				ID:        tc.ToolCall.Id,
-				Name:      tc.ToolCall.Name,
-				Signature: tc.ToolCall.Signature,
+		if v.ContentBlockStart == nil {
+			return out
+		}
+		cbs := v.ContentBlockStart
+		switch b := cbs.Block.(type) {
+		case *pb.ContentBlockStart_ToolCall:
+			if b.ToolCall != nil {
+				out.ToolCallStart = &engine.ToolCallStart{
+					Index:     int(cbs.Index),
+					ID:        b.ToolCall.Id,
+					Name:      b.ToolCall.Name,
+					Signature: b.ToolCall.Signature,
+				}
+				if tracker != nil {
+					tracker.record(cbs.Index, true)
+				}
+			}
+		case *pb.ContentBlockStart_Text:
+			if b.Text != nil {
+				out.BlockStart = &engine.BlockStart{Index: int(cbs.Index), Kind: engine.BlockKindText}
+				if tracker != nil {
+					tracker.record(cbs.Index, false)
+				}
+			}
+		case *pb.ContentBlockStart_Thinking:
+			if b.Thinking != nil {
+				out.BlockStart = &engine.BlockStart{Index: int(cbs.Index), Kind: engine.BlockKindThinking}
+				if tracker != nil {
+					tracker.record(cbs.Index, false)
+				}
+			}
+		case *pb.ContentBlockStart_Provider:
+			if b.Provider != nil {
+				out.BlockStart = &engine.BlockStart{Index: int(cbs.Index), Kind: engine.BlockKindProvider}
+				if tracker != nil {
+					tracker.record(cbs.Index, false)
+				}
 			}
 		}
 	case *pb.StreamEvent_SignatureDelta:
@@ -206,8 +308,23 @@ func FromPBStreamEvent(e *pb.StreamEvent) *engine.StreamEvent {
 			ArgumentsDelta: v.ToolCallDelta.ArgumentsDelta,
 		}
 	case *pb.StreamEvent_ContentBlockStop:
-		out.ToolCallEnd = &engine.ToolCallEnd{
-			Index: int(v.ContentBlockStop.Index),
+		if v.ContentBlockStop == nil {
+			return out
+		}
+		idx := int(v.ContentBlockStop.Index)
+		if tracker != nil {
+			if tracker.isTool(idx) {
+				out.ToolCallEnd = &engine.ToolCallEnd{Index: idx}
+			} else {
+				// Recorded non-tool block, or a stop with no recorded open
+				// block (defensive): a stop that does not close a tool block
+				// closes non-tool content.
+				out.BlockStop = &engine.BlockStop{Index: idx}
+			}
+			tracker.forget(idx)
+		} else {
+			// Stateless path (existing behavior): stops map to ToolCallEnd.
+			out.ToolCallEnd = &engine.ToolCallEnd{Index: idx}
 		}
 	case *pb.StreamEvent_MessageStop:
 		out.FinishReason = v.MessageStop.FinishReason
@@ -225,6 +342,26 @@ func FromPBStreamEvent(e *pb.StreamEvent) *engine.StreamEvent {
 		}
 	}
 	return out
+}
+
+func (t *BlockKindTracker) record(index int32, tool bool) {
+	if t.tool == nil {
+		t.tool = make(map[int]struct{})
+	}
+	if tool {
+		t.tool[int(index)] = struct{}{}
+	} else {
+		delete(t.tool, int(index))
+	}
+}
+
+func (t *BlockKindTracker) isTool(index int) bool {
+	_, ok := t.tool[index]
+	return ok
+}
+
+func (t *BlockKindTracker) forget(index int) {
+	delete(t.tool, index)
 }
 
 // Message conversion belongs to the request side only. The response side has

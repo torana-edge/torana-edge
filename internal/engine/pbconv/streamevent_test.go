@@ -103,28 +103,83 @@ func TestToolCallSequenceRoundTrips(t *testing.T) {
 	}
 }
 
-// The inbound direction is lossy on purpose, and it must stay deliberate.
-//
-// The engine IR has no open-event for text or thinking — those arrive as bare
-// deltas — so a text/thinking/provider ContentBlockStart has no counterpart.
-// Dropping it is right; INVENTING one would fabricate content the provider
-// never sent. This pins the drop so it is a decision rather than an oversight,
-// and flags that the IR needs extending if the host ever has to round-trip a
-// plugin's own text block.
-func TestNonToolBlockStartsAreDropped(t *testing.T) {
-	got := FromPBStreamEvent(&pb.StreamEvent{
-		Event: &pb.StreamEvent_ContentBlockStart{
+// Non-tool ContentBlockStart arms now have an engine counterpart: the IR
+// carries explicit text/thinking/provider block events (BlockStart), so the
+// inbound direction maps them instead of dropping them. This pins that the
+// arm's kind and index survive, and that the mapping never fabricates delta
+// content or a tool call.
+func TestNonToolBlockStartsMapToBlockStart(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		pb   *pb.StreamEvent
+		kind engine.BlockKind
+	}{
+		{"text", &pb.StreamEvent{Event: &pb.StreamEvent_ContentBlockStart{
 			ContentBlockStart: &pb.ContentBlockStart{
 				Index: 0,
 				Block: &pb.ContentBlockStart_Text{Text: &pb.TextBlock{}},
 			},
-		},
-	})
-	if got.ToolCallStart != nil {
-		t.Fatal("a text block start became a tool call")
+		}}, engine.BlockKindText},
+		{"thinking", &pb.StreamEvent{Event: &pb.StreamEvent_ContentBlockStart{
+			ContentBlockStart: &pb.ContentBlockStart{
+				Index: 1,
+				Block: &pb.ContentBlockStart_Thinking{Thinking: &pb.ThinkingBlock{}},
+			},
+		}}, engine.BlockKindThinking},
+		{"provider", &pb.StreamEvent{Event: &pb.StreamEvent_ContentBlockStart{
+			ContentBlockStart: &pb.ContentBlockStart{
+				Index: 2,
+				Block: &pb.ContentBlockStart_Provider{Provider: &pb.ProviderBlock{Kind: "redacted"}},
+			},
+		}}, engine.BlockKindProvider},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := FromPBStreamEvent(tc.pb)
+			if got.ToolCallStart != nil {
+				t.Fatal("a non-tool block start became a tool call")
+			}
+			if got.BlockStart == nil {
+				t.Fatal("non-tool block start was dropped — the IR must keep the block topology")
+			}
+			if got.BlockStart.Kind != tc.kind {
+				t.Errorf("kind = %v, want %v", got.BlockStart.Kind, tc.kind)
+			}
+			if got.TextDelta != nil || got.ThinkingDelta != nil {
+				t.Fatal("a block start invented delta content")
+			}
+		})
 	}
-	if got.TextDelta != nil || got.ThinkingDelta != nil {
-		t.Fatal("a text block start invented delta content")
+}
+
+// A ContentBlockStart arm whose payload is nil must not produce a BlockStart:
+// the arm names a kind it does not carry, so the host drops it rather than
+// invent a block. (The SDK's Validate refuses such starts; this guards the
+// decode path regardless.)
+func TestNonToolBlockStartWithoutPayloadIsSafe(t *testing.T) {
+	for _, tc := range []*pb.StreamEvent{
+		{Event: &pb.StreamEvent_ContentBlockStart{
+			ContentBlockStart: &pb.ContentBlockStart{
+				Index: 0,
+				Block: &pb.ContentBlockStart_Text{Text: nil},
+			},
+		}},
+		{Event: &pb.StreamEvent_ContentBlockStart{
+			ContentBlockStart: &pb.ContentBlockStart{
+				Index: 0,
+				Block: &pb.ContentBlockStart_Thinking{Thinking: nil},
+			},
+		}},
+		{Event: &pb.StreamEvent_ContentBlockStart{
+			ContentBlockStart: &pb.ContentBlockStart{
+				Index: 0,
+				Block: &pb.ContentBlockStart_Provider{Provider: nil},
+			},
+		}},
+	} {
+		got := FromPBStreamEvent(tc)
+		if got.BlockStart != nil || got.ToolCallStart != nil {
+			t.Fatalf("nil-payload block start produced an event: %+v", got)
+		}
 	}
 }
 
@@ -142,6 +197,225 @@ func TestToolBlockStartWithoutRefIsSafe(t *testing.T) {
 	})
 	if got.ToolCallStart != nil {
 		t.Fatalf("built a tool call from a nil ref: %+v", got.ToolCallStart)
+	}
+}
+
+// convertWithKinds walks a pb stream through BlockKindTracker so a stop
+// resolves by the kind of the block it closes — the stream-aware conversion
+// the host uses for plugin-passed streams.
+func convertWithKinds(t *testing.T, events []*pb.StreamEvent) []engine.StreamEvent {
+	t.Helper()
+	tracker := &BlockKindTracker{}
+	out := make([]engine.StreamEvent, 0, len(events))
+	for _, ev := range events {
+		out = append(out, *tracker.FromPBStreamEvent(ev))
+	}
+	return out
+}
+
+// The v2 topology must survive engine → pb → engine exactly: a text/thinking
+// block's start AND stop keep their kind and index, and a tool block's stop
+// stays ToolCallEnd (never BlockStop). This is the lossless round trip the
+// host needs for plugin-passed streams.
+func TestBlockTopologyRoundTripsEngineToPBToEngine(t *testing.T) {
+	text := "A"
+	sig := "S"
+	stream := []engine.StreamEvent{
+		{BlockStart: &engine.BlockStart{Index: 0, Kind: engine.BlockKindText}},
+		{TextDelta: &text},
+		{SignatureDelta: &sig},
+		{BlockStop: &engine.BlockStop{Index: 0}},
+		{ToolCallStart: &engine.ToolCallStart{Index: 1, ID: "c1", Name: "read_file"}},
+		{ToolCallDelta: &engine.ToolCallDelta{Index: 1, ArgumentsDelta: `{}`}},
+		{ToolCallEnd: &engine.ToolCallEnd{Index: 1}},
+		{BlockStart: &engine.BlockStart{Index: 2, Kind: engine.BlockKindThinking}},
+		{ThinkingDelta: &text},
+		{BlockStop: &engine.BlockStop{Index: 2}},
+	}
+
+	var pbEvents []*pb.StreamEvent
+	for i := range stream {
+		pbEvents = append(pbEvents, ToPBStreamEvent(&stream[i]))
+	}
+	got := convertWithKinds(t, pbEvents)
+
+	if len(got) != len(stream) {
+		t.Fatalf("event count changed through the round trip: got %d, want %d", len(got), len(stream))
+	}
+	for i := range stream {
+		switch {
+		case stream[i].BlockStart != nil:
+			if got[i].BlockStart == nil || *got[i].BlockStart != *stream[i].BlockStart {
+				t.Errorf("event %d BlockStart round trip: got %+v, want %+v", i, got[i].BlockStart, stream[i].BlockStart)
+			}
+		case stream[i].BlockStop != nil:
+			if got[i].BlockStop == nil || *got[i].BlockStop != *stream[i].BlockStop {
+				t.Errorf("event %d BlockStop round trip: got %+v, want %+v (a non-tool stop must not become ToolCallEnd)", i, got[i].BlockStop, stream[i].BlockStop)
+			}
+		case stream[i].ToolCallStart != nil:
+			if got[i].ToolCallStart == nil || *got[i].ToolCallStart != *stream[i].ToolCallStart {
+				t.Errorf("event %d ToolCallStart round trip: got %+v, want %+v", i, got[i].ToolCallStart, stream[i].ToolCallStart)
+			}
+		case stream[i].ToolCallDelta != nil:
+			if got[i].ToolCallDelta == nil || *got[i].ToolCallDelta != *stream[i].ToolCallDelta {
+				t.Errorf("event %d ToolCallDelta round trip: got %+v, want %+v", i, got[i].ToolCallDelta, stream[i].ToolCallDelta)
+			}
+		case stream[i].ToolCallEnd != nil:
+			if got[i].ToolCallEnd == nil || *got[i].ToolCallEnd != *stream[i].ToolCallEnd {
+				t.Errorf("event %d ToolCallEnd round trip: got %+v, want %+v (a tool stop must not become BlockStop)", i, got[i].ToolCallEnd, stream[i].ToolCallEnd)
+			}
+		case stream[i].TextDelta != nil:
+			if got[i].TextDelta == nil || *got[i].TextDelta != *stream[i].TextDelta {
+				t.Errorf("event %d TextDelta round trip: got %+v, want %+v", i, got[i].TextDelta, stream[i].TextDelta)
+			}
+		case stream[i].ThinkingDelta != nil:
+			if got[i].ThinkingDelta == nil || *got[i].ThinkingDelta != *stream[i].ThinkingDelta {
+				t.Errorf("event %d ThinkingDelta round trip: got %+v, want %+v", i, got[i].ThinkingDelta, stream[i].ThinkingDelta)
+			}
+		case stream[i].SignatureDelta != nil:
+			if got[i].SignatureDelta == nil || *got[i].SignatureDelta != *stream[i].SignatureDelta {
+				t.Errorf("event %d SignatureDelta round trip: got %+v, want %+v", i, got[i].SignatureDelta, stream[i].SignatureDelta)
+			}
+		}
+	}
+}
+
+// The inbound direction must preserve the wire's block arms: a pb stream with
+// ContentBlockStart{text|thinking|provider} and matching ContentBlockStops
+// converts to engine events whose BlockStarts carry the right kinds and whose
+// stops resolve to BlockStop, and converting back reproduces the same arms
+// and indexes.
+func TestBlockTopologyRoundTripsPBToEngineToPB(t *testing.T) {
+	pbStream := []*pb.StreamEvent{
+		{Event: &pb.StreamEvent_ContentBlockStart{ContentBlockStart: &pb.ContentBlockStart{
+			Index: 0, Block: &pb.ContentBlockStart_Text{Text: &pb.TextBlock{}},
+		}}},
+		{Event: &pb.StreamEvent_TextDelta{TextDelta: "A"}},
+		{Event: &pb.StreamEvent_ContentBlockStop{ContentBlockStop: &pb.ContentBlockStop{Index: 0}}},
+		{Event: &pb.StreamEvent_ContentBlockStart{ContentBlockStart: &pb.ContentBlockStart{
+			Index: 1, Block: &pb.ContentBlockStart_Thinking{Thinking: &pb.ThinkingBlock{}},
+		}}},
+		{Event: &pb.StreamEvent_ThinkingDelta{ThinkingDelta: "T"}},
+		{Event: &pb.StreamEvent_ContentBlockStop{ContentBlockStop: &pb.ContentBlockStop{Index: 1}}},
+		{Event: &pb.StreamEvent_ContentBlockStart{ContentBlockStart: &pb.ContentBlockStart{
+			Index: 2, Block: &pb.ContentBlockStart_Provider{Provider: &pb.ProviderBlock{Kind: "redacted"}},
+		}}},
+		{Event: &pb.StreamEvent_ContentBlockStop{ContentBlockStop: &pb.ContentBlockStop{Index: 2}}},
+	}
+
+	eng := convertWithKinds(t, pbStream)
+	wantKinds := []engine.BlockKind{engine.BlockKindText, engine.BlockKindThinking, engine.BlockKindProvider}
+	var starts []*engine.BlockStart
+	var stops []*engine.BlockStop
+	for _, ev := range eng {
+		if ev.BlockStart != nil {
+			starts = append(starts, ev.BlockStart)
+		}
+		if ev.BlockStop != nil {
+			stops = append(stops, ev.BlockStop)
+		}
+		if ev.ToolCallStart != nil || ev.ToolCallEnd != nil {
+			t.Fatalf("non-tool block converted to a tool event: %+v", ev)
+		}
+	}
+	if len(starts) != 3 || len(stops) != 3 {
+		t.Fatalf("got %d starts / %d stops, want 3/3", len(starts), len(stops))
+	}
+	for i, want := range wantKinds {
+		if starts[i].Kind != want || starts[i].Index != i {
+			t.Errorf("start %d = kind %v index %d, want kind %v index %d", i, starts[i].Kind, starts[i].Index, want, i)
+		}
+		if stops[i].Index != i {
+			t.Errorf("stop %d index = %d, want %d", i, stops[i].Index, i)
+		}
+	}
+
+	// Convert back: arms and indexes must come out identical.
+	var back []*pb.StreamEvent
+	for i := range eng {
+		back = append(back, ToPBStreamEvent(&eng[i]))
+	}
+	for i, orig := range pbStream {
+		switch ob := orig.Event.(type) {
+		case *pb.StreamEvent_ContentBlockStart:
+			backCBS, ok := back[i].Event.(*pb.StreamEvent_ContentBlockStart)
+			if !ok {
+				t.Fatalf("event %d: start did not survive: %T", i, back[i].Event)
+			}
+			if backCBS.ContentBlockStart.Index != ob.ContentBlockStart.Index {
+				t.Errorf("event %d: start index = %d, want %d", i, backCBS.ContentBlockStart.Index, ob.ContentBlockStart.Index)
+			}
+			// The arm (text/thinking/provider) must survive; the provider
+			// kind string is not representable in the engine IR, so it is
+			// normalized to the canonical default on the way back out.
+			switch ob.ContentBlockStart.Block.(type) {
+			case *pb.ContentBlockStart_Text:
+				if _, ok := backCBS.ContentBlockStart.Block.(*pb.ContentBlockStart_Text); !ok {
+					t.Errorf("event %d: text arm became %T", i, backCBS.ContentBlockStart.Block)
+				}
+			case *pb.ContentBlockStart_Thinking:
+				if _, ok := backCBS.ContentBlockStart.Block.(*pb.ContentBlockStart_Thinking); !ok {
+					t.Errorf("event %d: thinking arm became %T", i, backCBS.ContentBlockStart.Block)
+				}
+			case *pb.ContentBlockStart_Provider:
+				p, ok := backCBS.ContentBlockStart.Block.(*pb.ContentBlockStart_Provider)
+				if !ok {
+					t.Errorf("event %d: provider arm became %T", i, backCBS.ContentBlockStart.Block)
+				} else if p.Provider.Kind != "provider" {
+					t.Errorf("event %d: provider kind = %q, want canonical %q", i, p.Provider.Kind, "provider")
+				}
+			}
+		case *pb.StreamEvent_ContentBlockStop:
+			backCBE, ok := back[i].Event.(*pb.StreamEvent_ContentBlockStop)
+			if !ok {
+				t.Fatalf("event %d: stop did not survive: %T", i, back[i].Event)
+			}
+			if backCBE.ContentBlockStop.Index != ob.ContentBlockStop.Index {
+				t.Errorf("event %d: stop index = %d, want %d", i, backCBE.ContentBlockStop.Index, ob.ContentBlockStop.Index)
+			}
+		case *pb.StreamEvent_TextDelta:
+			td, ok := back[i].Event.(*pb.StreamEvent_TextDelta)
+			if !ok || td.TextDelta != ob.TextDelta {
+				t.Errorf("event %d: text delta lost: %v", i, back[i].Event)
+			}
+		case *pb.StreamEvent_ThinkingDelta:
+			td, ok := back[i].Event.(*pb.StreamEvent_ThinkingDelta)
+			if !ok || td.ThinkingDelta != ob.ThinkingDelta {
+				t.Errorf("event %d: thinking delta lost: %v", i, back[i].Event)
+			}
+		}
+	}
+}
+
+// A stop whose index was never recorded as an open block resolves to BlockStop
+// (defensive): the stop closes non-tool content rather than inventing a tool
+// block. Tool stops only resolve to ToolCallEnd when a tool start recorded the
+// index.
+func TestStopWithNoRecordedOpenBlockIsBlockStop(t *testing.T) {
+	tracker := &BlockKindTracker{}
+	got := tracker.FromPBStreamEvent(&pb.StreamEvent{
+		Event: &pb.StreamEvent_ContentBlockStop{ContentBlockStop: &pb.ContentBlockStop{Index: 4}},
+	})
+	if got.BlockStop == nil || got.BlockStop.Index != 4 {
+		t.Fatalf("unrecorded stop = %+v, want BlockStop(4)", got)
+	}
+	if got.ToolCallEnd != nil {
+		t.Fatalf("unrecorded stop invented a ToolCallEnd: %+v", got.ToolCallEnd)
+	}
+}
+
+// The stateless per-event conversion keeps the pre-block-IR behavior: a lone
+// ContentBlockStop maps to ToolCallEnd. Streams that must preserve non-tool
+// block boundaries use BlockKindTracker.
+func TestStatelessStopMapsToToolCallEnd(t *testing.T) {
+	got := FromPBStreamEvent(&pb.StreamEvent{
+		Event: &pb.StreamEvent_ContentBlockStop{ContentBlockStop: &pb.ContentBlockStop{Index: 0}},
+	})
+	if got.ToolCallEnd == nil || got.ToolCallEnd.Index != 0 {
+		t.Fatalf("stateless stop = %+v, want ToolCallEnd(0)", got)
+	}
+	if got.BlockStop != nil {
+		t.Fatalf("stateless stop invented a BlockStop: %+v", got.BlockStop)
 	}
 }
 
