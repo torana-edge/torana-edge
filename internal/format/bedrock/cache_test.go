@@ -80,9 +80,9 @@ func TestCachePointRoundTrip(t *testing.T) {
 // TestStreamMetadataCacheTokens: ConverseStream metadata cache counts flow
 // into the canonical usage event and back out on serialization.
 func TestStreamMetadataCacheTokens(t *testing.T) {
-	var inThinking, inToolUse bool
 	var sigBuf string
-	ev := parseBedrockEvent(`{"metadata":{"usage":{"inputTokens":10,"outputTokens":4,"totalTokens":14,"cacheReadInputTokens":8000,"cacheWriteInputTokens":500}}}`, &inThinking, &inToolUse, &sigBuf)
+	// Index-aware open-block state (fresh maps — no blocks open in this line).
+	ev := parseBedrockEvent(`{"metadata":{"usage":{"inputTokens":10,"outputTokens":4,"totalTokens":14,"cacheReadInputTokens":8000,"cacheWriteInputTokens":500}}}`, make(map[int]struct{}), make(map[int]struct{}), &sigBuf)
 	if ev == nil || ev.Usage == nil {
 		t.Fatal("no usage event from metadata")
 	}

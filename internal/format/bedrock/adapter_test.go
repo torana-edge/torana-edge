@@ -213,12 +213,13 @@ func TestStreamParse(t *testing.T) {
 		t.Errorf("event 1: expected TextDelta ' world', got %+v", events[1])
 	}
 
-	// ToolCallStart (index 0 for bedrock, since only one tool call per turn)
+	// ToolCallStart carries the wire contentBlockIndex (1 here — the text
+	// block consumed 0); the pre-fix parser hard-coded 0 for every tool event.
 	if events[2].ToolCallStart == nil {
 		t.Fatalf("event 2: expected ToolCallStart, got %+v", events[2])
 	}
 	tcs := events[2].ToolCallStart
-	if tcs.Index != 0 || tcs.ID != "toolu_1" || tcs.Name != "get_weather" {
+	if tcs.Index != 1 || tcs.ID != "toolu_1" || tcs.Name != "get_weather" {
 		t.Errorf("ToolCallStart: got {idx:%d id:%s name:%s}", tcs.Index, tcs.ID, tcs.Name)
 	}
 
@@ -230,9 +231,9 @@ func TestStreamParse(t *testing.T) {
 		t.Errorf("ToolCallDelta: got %q", events[3].ToolCallDelta.ArgumentsDelta)
 	}
 
-	// ToolCallEnd from tool block stop
-	if events[4].ToolCallEnd == nil {
-		t.Errorf("event 4: expected ToolCallEnd, got %+v", events[4])
+	// ToolCallEnd from tool block stop (index 1, matching the start)
+	if events[4].ToolCallEnd == nil || events[4].ToolCallEnd.Index != 1 {
+		t.Errorf("event 4: expected ToolCallEnd(1), got %+v", events[4])
 	}
 
 	// Message stop

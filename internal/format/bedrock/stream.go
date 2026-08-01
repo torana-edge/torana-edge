@@ -105,8 +105,14 @@ func (s *Stream) ParseStream(body io.Reader) <-chan engine.StreamEvent {
 		// Bedrock events can be larger than the default 64KB buffer for tool-heavy responses.
 		scanner.Buffer(make([]byte, 0, 64*1024), 2*1024*1024)
 
-		var inThinking bool
-		var inToolUse bool
+		// Index-aware open-block state, keyed by the wire contentBlockIndex:
+		// ConverseStream indexes are unique per block within one message, and
+		// parallel tool calls each own their index — a single in-tool bool
+		// collapsed concurrent calls onto one scope. Thinking blocks are
+		// tracked the same way so their stops resolve by index even with tool
+		// blocks open.
+		openThinking := make(map[int]struct{})
+		openTools := make(map[int]struct{})
 		var signatureBuf string
 
 		for scanner.Scan() {
@@ -123,7 +129,7 @@ func (s *Stream) ParseStream(body io.Reader) <-chan engine.StreamEvent {
 				continue
 			}
 
-			evt := parseBedrockEvent(line, &inThinking, &inToolUse, &signatureBuf)
+			evt := parseBedrockEvent(line, openThinking, openTools, &signatureBuf)
 			if evt != nil {
 				ch <- *evt
 			}
@@ -144,7 +150,15 @@ func (s *Stream) ParseStream(body io.Reader) <-chan engine.StreamEvent {
 
 // parseBedrockEvent parses a single Bedrock JSON event line into a StreamEvent.
 // Returns nil for events that should be silently ignored (e.g. messageStart).
-func parseBedrockEvent(line string, inThinking *bool, inToolUse *bool, signatureBuf *string) *engine.StreamEvent {
+// openThinking/openTools track the blocks opened by contentBlockStart frames,
+// keyed by wire contentBlockIndex, so tool events resolve to the index that
+// opened them: a toolUse DELTA naming an index with no open tool block is an
+// explicit error event (never silently reattached to another call). Stops
+// resolve against the open sets first — a stop closing a tracked thinking or
+// tool block is handled by its kind; a stop naming neither is a text block
+// stop (or a stray stop), which has no engine event and is ignored, matching
+// the wire's informational text blocks.
+func parseBedrockEvent(line string, openThinking, openTools map[int]struct{}, signatureBuf *string) *engine.StreamEvent {
 	var se bedrockStreamEvent
 	if err := json.Unmarshal([]byte(line), &se); err != nil {
 		return &engine.StreamEvent{
@@ -168,15 +182,18 @@ func parseBedrockEvent(line string, inThinking *bool, inToolUse *bool, signature
 		// messageStart is informational; ignore.
 
 	case se.ContentBlockStart != nil && se.ContentBlockStart.Start.Thinking != nil:
-		*inThinking = true
-		// thinking block start is informational; no event emitted.
+		// Thinking block start is informational; record its index so the
+		// matching stop resolves as a thinking stop even while tool blocks
+		// are open.
+		openThinking[se.ContentBlockStart.ContentBlockIndex] = struct{}{}
 
 	case se.ContentBlockStart != nil && se.ContentBlockStart.Start.ToolUse != nil:
 		tu := se.ContentBlockStart.Start.ToolUse
-		*inToolUse = true
+		idx := se.ContentBlockStart.ContentBlockIndex
+		openTools[idx] = struct{}{}
 		return &engine.StreamEvent{
 			ToolCallStart: &engine.ToolCallStart{
-				Index: 0, // Bedrock has only one tool call per turn
+				Index: idx,
 				ID:    tu.ToolUseID,
 				Name:  tu.Name,
 			},
@@ -195,27 +212,36 @@ func parseBedrockEvent(line string, inThinking *bool, inToolUse *bool, signature
 			text := *delta.Text
 			return &engine.StreamEvent{TextDelta: &text}
 		case delta.ToolUse != nil:
-			*inToolUse = true
+			idx := se.ContentBlockDelta.ContentBlockIndex
+			if _, open := openTools[idx]; !open {
+				return &engine.StreamEvent{
+					Error: &engine.StreamError{
+						Code:    0,
+						Message: fmt.Sprintf("bedrock: tool call delta for unknown index %d", idx),
+					},
+				}
+			}
 			return &engine.StreamEvent{
 				ToolCallDelta: &engine.ToolCallDelta{
-					Index:          0,
+					Index:          idx,
 					ArgumentsDelta: delta.ToolUse.Input,
 				},
 			}
 		}
 
 	case se.ContentBlockStop != nil:
-		if *inThinking {
-			*inThinking = false
+		idx := se.ContentBlockStop.ContentBlockIndex
+		if _, thinking := openThinking[idx]; thinking {
+			delete(openThinking, idx)
 			return nil // thinking block stop; no event to emit
 		}
-		if !*inToolUse {
-			return nil // text block stop — no tool call to end
+		if _, tool := openTools[idx]; tool {
+			delete(openTools, idx)
+			return &engine.StreamEvent{
+				ToolCallEnd: &engine.ToolCallEnd{Index: idx},
+			}
 		}
-		*inToolUse = false
-		return &engine.StreamEvent{
-			ToolCallEnd: &engine.ToolCallEnd{Index: 0},
-		}
+		return nil // text block stop (or stray stop) — no tool call to end
 
 	case se.MessageStop != nil:
 		reason := mapBedrockStopReason(se.MessageStop.StopReason)
@@ -312,6 +338,12 @@ func (s *Stream) SerializeStream(ctx context.Context, w io.Writer, events <-chan
 	bw := bufio.NewWriter(w)
 	blocks := &blockTopology{prefix: "bedrock"}
 	thinkingOpen := false
+	// openTools tracks the tool-call blocks opened by ToolCallStart events,
+	// keyed by the engine block index, so deltas and stops lower to the wire
+	// index that opened them. Parallel tool calls each own their index; a
+	// delta/stop for an index that never started (or a duplicate start) is
+	// malformed IR and errors instead of collapsing scopes.
+	openTools := make(map[int]struct{})
 
 	closeThinking := func() error {
 		if !thinkingOpen {
@@ -415,6 +447,27 @@ func (s *Stream) SerializeStream(ctx context.Context, w io.Writer, events <-chan
 			continue
 		}
 
+		// Tool-call events are index-bound: validate against the open-tool set
+		// BEFORE lowering, so a delta/stop for a never-started index or a
+		// duplicate start errors explicitly. marshalStreamEvent renders the
+		// engine index into the wire ContentBlockIndex.
+		switch {
+		case evt.ToolCallStart != nil:
+			if _, dup := openTools[evt.ToolCallStart.Index]; dup {
+				return fmt.Errorf("bedrock: duplicate tool call start at index %d", evt.ToolCallStart.Index)
+			}
+			openTools[evt.ToolCallStart.Index] = struct{}{}
+		case evt.ToolCallDelta != nil:
+			if _, open := openTools[evt.ToolCallDelta.Index]; !open {
+				return fmt.Errorf("bedrock: tool call delta for unknown index %d", evt.ToolCallDelta.Index)
+			}
+		case evt.ToolCallEnd != nil:
+			if _, open := openTools[evt.ToolCallEnd.Index]; !open {
+				return fmt.Errorf("bedrock: tool call end for unknown index %d", evt.ToolCallEnd.Index)
+			}
+			delete(openTools, evt.ToolCallEnd.Index)
+		}
+
 		// Close thinking block before non-thinking events
 		if err := closeThinking(); err != nil {
 			return fmt.Errorf("bedrock serialize: %w", err)
@@ -464,7 +517,7 @@ func marshalStreamEvent(evt engine.StreamEvent) []string {
 	case evt.ToolCallStart != nil:
 		se := bedrockStreamEvent{
 			ContentBlockStart: &bedrockContentBlockStart{
-				ContentBlockIndex: 0,
+				ContentBlockIndex: evt.ToolCallStart.Index,
 				Start: bedrockContentBlockStartField{
 					ToolUse: &bedrockToolUseStart{
 						ToolUseID: evt.ToolCallStart.ID,
@@ -479,7 +532,7 @@ func marshalStreamEvent(evt engine.StreamEvent) []string {
 	case evt.ToolCallDelta != nil:
 		se := bedrockStreamEvent{
 			ContentBlockDelta: &bedrockContentBlockDelta{
-				ContentBlockIndex: 0,
+				ContentBlockIndex: evt.ToolCallDelta.Index,
 				Delta: bedrockContentBlockDeltaField{
 					ToolUse: &bedrockToolUseDelta{
 						Input: evt.ToolCallDelta.ArgumentsDelta,
@@ -493,7 +546,7 @@ func marshalStreamEvent(evt engine.StreamEvent) []string {
 	case evt.ToolCallEnd != nil:
 		se := bedrockStreamEvent{
 			ContentBlockStop: &bedrockContentBlockStop{
-				ContentBlockIndex: 0,
+				ContentBlockIndex: evt.ToolCallEnd.Index,
 			},
 		}
 		b, _ := json.Marshal(se)

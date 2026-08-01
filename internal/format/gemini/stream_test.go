@@ -3,6 +3,7 @@ package gemini
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"slices"
 	"strings"
 	"testing"
@@ -429,6 +430,109 @@ func TestStreamBareDeltasStillSerializePerDelta(t *testing.T) {
 	}
 	if parts[1]["text"] != "b" || parts[1]["thought"] != true {
 		t.Errorf("part 1 = %v, want {thought:true text:b}", parts[1])
+	}
+}
+
+// serializeEventsErr is serializeEvents minus the Fatalf: it returns the
+// serializer error (nil when the stream serializes cleanly).
+func serializeEventsErr(t *testing.T, events ...engine.StreamEvent) error {
+	t.Helper()
+	ch := make(chan engine.StreamEvent, len(events)+1)
+	for _, ev := range events {
+		ch <- ev
+	}
+	close(ch)
+	return (&StreamAdapter{}).SerializeStream(context.Background(), io.Discard, ch)
+}
+
+// TestSerializeInterleavedConcurrentToolCalls pins the index-aware tool-call
+// state: parallel tool blocks with interleaved deltas and NON-ASCENDING stops
+// must serialize to TWO functionCall parts, each carrying its OWN
+// id/name/arguments. The pre-fix single serializeState overwrote the first
+// start with the second, appended both deltas to one part, and silently
+// dropped the first end.
+func TestSerializeInterleavedConcurrentToolCalls(t *testing.T) {
+	parts := rawStreamParts(t, serializeEvents(t,
+		engine.StreamEvent{ToolCallStart: &engine.ToolCallStart{Index: 0, ID: "c1", Name: "list_dir"}},
+		engine.StreamEvent{ToolCallStart: &engine.ToolCallStart{Index: 1, ID: "c2", Name: "read_file"}},
+		engine.StreamEvent{ToolCallDelta: &engine.ToolCallDelta{Index: 0, ArgumentsDelta: `{"p":"/x"}`}},
+		engine.StreamEvent{ToolCallDelta: &engine.ToolCallDelta{Index: 1, ArgumentsDelta: `{"f":"y"}`}},
+		engine.StreamEvent{ToolCallEnd: &engine.ToolCallEnd{Index: 1}},
+		engine.StreamEvent{ToolCallEnd: &engine.ToolCallEnd{Index: 0}},
+	))
+	if len(parts) != 2 {
+		t.Fatalf("serialized %d parts, want 2 (one per tool call): %v", len(parts), parts)
+	}
+	// Ends emit in arrival order: End(1) renders call 2 first, End(0) call 1.
+	for i, want := range []struct {
+		id, name string
+		args     map[string]any
+	}{
+		{id: "c2", name: "read_file", args: map[string]any{"f": "y"}},
+		{id: "c1", name: "list_dir", args: map[string]any{"p": "/x"}},
+	} {
+		fc, ok := parts[i]["functionCall"].(map[string]any)
+		if !ok {
+			t.Fatalf("part %d has no functionCall arm: %v", i, parts[i])
+		}
+		if fc["id"] != want.id || fc["name"] != want.name {
+			t.Errorf("part %d = %v, want id %q name %q — each call must keep its own identity", i, fc, want.id, want.name)
+		}
+		args, ok := fc["args"].(map[string]any)
+		if !ok || len(args) != len(want.args) {
+			t.Errorf("part %d args = %v, want %v — interleaved deltas must land on their own call", i, fc["args"], want.args)
+			continue
+		}
+		for k, v := range want.args {
+			if args[k] != v {
+				t.Errorf("part %d args[%q] = %v, want %v", i, k, args[k], v)
+			}
+		}
+	}
+}
+
+// TestSerializeToolCallStateErrors: index-bound tool-call state rejects
+// malformed IR explicitly — a duplicate start, or a delta/end for an index
+// that never started — instead of silently collapsing scopes (the pre-fix
+// single-state serializer ignored all three).
+func TestSerializeToolCallStateErrors(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		events []engine.StreamEvent
+		want   string
+	}{
+		{
+			name: "duplicate start",
+			events: []engine.StreamEvent{
+				{ToolCallStart: &engine.ToolCallStart{Index: 0, ID: "a", Name: "a"}},
+				{ToolCallStart: &engine.ToolCallStart{Index: 0, ID: "b", Name: "b"}},
+			},
+			want: "gemini: duplicate tool call start at index 0",
+		},
+		{
+			name: "delta for unknown index",
+			events: []engine.StreamEvent{
+				{ToolCallDelta: &engine.ToolCallDelta{Index: 3, ArgumentsDelta: `{}`}},
+			},
+			want: "gemini: tool call delta for unknown index 3",
+		},
+		{
+			name: "end for unknown index",
+			events: []engine.StreamEvent{
+				{ToolCallEnd: &engine.ToolCallEnd{Index: 2}},
+			},
+			want: "gemini: tool call end for unknown index 2",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := serializeEventsErr(t, tc.events...)
+			if err == nil {
+				t.Fatal("malformed tool-call stream did not error")
+			}
+			if err.Error() != tc.want {
+				t.Errorf("error = %q, want %q", err.Error(), tc.want)
+			}
+		})
 	}
 }
 

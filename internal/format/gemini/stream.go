@@ -252,6 +252,12 @@ func mapGeminiFinishReason(r string) string {
 
 // --- SerializeStream ---
 
+// serializeState buffers ONE tool call's wire part while its argument deltas
+// arrive. State is keyed by the block index: the ABI permits concurrent tool
+// blocks (parallel calls), and each index owns its own id/name/signature/args
+// accumulator — a second start at a busy index or a delta/stop for an index
+// that never started is malformed IR and errors rather than corrupting a
+// sibling call's scope.
 type serializeState struct {
 	ID        string
 	Name      string
@@ -272,7 +278,9 @@ type serializePart struct {
 // SerializeStream writes StreamEvents as Gemini SSE frames to writer, wrapping
 // each in {"response":…} for the Code Assist flavor (s.Wrapped).
 func (s *StreamAdapter) SerializeStream(ctx context.Context, w io.Writer, events <-chan engine.StreamEvent) error {
-	var toolState *serializeState
+	// toolStates holds the buffered tool call for each block index opened by
+	// ToolCallStart; concurrent tool blocks each own their index's state.
+	toolStates := make(map[int]*serializeState)
 	var openPart *serializePart
 	var pendingUsage *engine.StreamUsage
 
@@ -372,16 +380,31 @@ func (s *StreamAdapter) SerializeStream(ctx context.Context, w io.Writer, events
 			// part for an empty token.
 
 		case event.ToolCallStart != nil:
-			toolState = &serializeState{ID: event.ToolCallStart.ID, Name: event.ToolCallStart.Name, Signature: event.ToolCallStart.Signature}
+			if _, dup := toolStates[event.ToolCallStart.Index]; dup {
+				return fmt.Errorf("gemini: duplicate tool call start at index %d", event.ToolCallStart.Index)
+			}
+			toolStates[event.ToolCallStart.Index] = &serializeState{
+				ID:        event.ToolCallStart.ID,
+				Name:      event.ToolCallStart.Name,
+				Signature: event.ToolCallStart.Signature,
+			}
 
-		case event.ToolCallDelta != nil && toolState != nil:
-			toolState.ArgsJSON.WriteString(event.ToolCallDelta.ArgumentsDelta)
+		case event.ToolCallDelta != nil:
+			st, ok := toolStates[event.ToolCallDelta.Index]
+			if !ok {
+				return fmt.Errorf("gemini: tool call delta for unknown index %d", event.ToolCallDelta.Index)
+			}
+			st.ArgsJSON.WriteString(event.ToolCallDelta.ArgumentsDelta)
 
-		case event.ToolCallEnd != nil && toolState != nil:
-			if err := emitFunctionCall(w, toolState, s.Wrapped); err != nil {
+		case event.ToolCallEnd != nil:
+			st, ok := toolStates[event.ToolCallEnd.Index]
+			if !ok {
+				return fmt.Errorf("gemini: tool call end for unknown index %d", event.ToolCallEnd.Index)
+			}
+			if err := emitFunctionCall(w, st, s.Wrapped); err != nil {
 				return err
 			}
-			toolState = nil
+			delete(toolStates, event.ToolCallEnd.Index)
 		}
 	}
 	return nil
