@@ -546,7 +546,14 @@ type Runtime struct {
 	// request. The plugin name is passed so the host can meter it against that
 	// plugin's budget and attribute it in the feed — spend a plugin initiates
 	// must still be traceable to the plugin that initiated it.
-	SendRequestFunc func(ctx context.Context, plugin, payloadJSON string) string
+	//
+	// It returns the domain envelope and a classified refusal. The value arm
+	// carries provider outcomes only — never a refusal, which would leave the
+	// SDK keying its sentinel off a status string. Refusals travel framed in
+	// the HostError arm: INVALID_ARGUMENT for malformed payloads, NOT_CONFIGURED
+	// for unknown providers, missing budgets or missing format adapters, and
+	// UNAVAILABLE for transport failure.
+	SendRequestFunc func(ctx context.Context, plugin, payloadJSON string) (string, *pbv2.HostError)
 }
 
 // ObserveRequestMutation forwards a defensive copy to the host callback.
@@ -854,7 +861,9 @@ func (r *Runtime) dispatchHostCall(ctx context.Context, pluginName, cmd, args st
 		// is not.
 		var value []byte
 		var herr *pbv2.HostError
-		var res string // extension/domain JSON, moved into value at the exit
+		// res carries DOMAIN RESULTS only — refusals are framed classified
+		// hostErr, never a status string smuggled through the value arm.
+		var res string // domain JSON, moved into value at the exit
 		switch cmd {
 		case "env.block_request":
 			var a pbv2.BlockRequestArgs
@@ -1068,13 +1077,13 @@ func (r *Runtime) dispatchHostCall(ctx context.Context, pluginName, cmd, args st
 			value = []byte(strconv.FormatInt(time.Now().UnixMilli(), 10))
 		case "torana_send_request":
 			if r.SendRequestFunc == nil {
-				res = `{"status":"error","message":"plugin egress is not configured"}`
+				herr = hostErr(pbv2.ErrorCode_ERROR_CODE_NOT_CONFIGURED, "plugin egress is not configured")
 			} else {
-				res = r.SendRequestFunc(ctx, pluginName, args)
+				res, herr = r.SendRequestFunc(ctx, pluginName, args)
 			}
 		case "torana_cache_pricing":
 			if r.CachePricingFunc == nil {
-				res = `{"status":"unavailable","reason":"pricing_unconfigured"}`
+				herr = hostErr(pbv2.ErrorCode_ERROR_CODE_NOT_CONFIGURED, "cache pricing is not configured")
 			} else {
 				res = r.CachePricingFunc(ctx, args)
 			}
@@ -1113,18 +1122,18 @@ func (r *Runtime) dispatchHostCall(ctx context.Context, pluginName, cmd, args st
 			}
 			value = raw
 		case "torana_db_query":
-			res = `{"status":"error","message":"database not configured — set plugins.config.compactor.dsn"}`
+			herr = hostErr(pbv2.ErrorCode_ERROR_CODE_NOT_CONFIGURED, "database not configured — set plugins.config.compactor.dsn")
 		case "torana_kms_decrypt":
-			res = `{"status":"error","message":"KMS not configured — set TORANA_KMS_ENDPOINT"}`
+			herr = hostErr(pbv2.ErrorCode_ERROR_CODE_NOT_CONFIGURED, "KMS not configured — set TORANA_KMS_ENDPOINT")
 		case "torana_record_savings":
 			var report economics.CompactionReport
 			if err := json.Unmarshal([]byte(args), &report); err != nil {
-				res = `{"status":"error","message":"invalid payload"}`
+				herr = hostErr(pbv2.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "invalid payload")
 				break
 			}
 			report.Normalize()
 			if !report.Valid() {
-				res = `{"status":"error","message":"invalid payload"}`
+				herr = hostErr(pbv2.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "invalid payload")
 			} else if r.CompactionReportFunc != nil {
 				r.CompactionReportFunc(ctx, pluginName, report)
 				res = `{"status":"ok"}`
@@ -1132,7 +1141,7 @@ func (r *Runtime) dispatchHostCall(ctx context.Context, pluginName, cmd, args st
 				r.SavingsFunc(pluginName, report.OriginalBytes, report.FinalBytes)
 				res = `{"status":"ok"}`
 			} else {
-				res = `{"status":"error","message":"savings tracking not configured"}`
+				herr = hostErr(pbv2.ErrorCode_ERROR_CODE_NOT_CONFIGURED, "savings tracking not configured")
 			}
 		case "torana_plugin_counter":
 			var counter struct {
@@ -1140,24 +1149,24 @@ func (r *Runtime) dispatchHostCall(ctx context.Context, pluginName, cmd, args st
 				Delta   int64  `json:"delta"`
 			}
 			if err := json.Unmarshal([]byte(args), &counter); err != nil || counter.Counter == "" {
-				res = `{"status":"error","message":"invalid payload"}`
+				herr = hostErr(pbv2.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "invalid payload")
 			} else if r.PluginCounterFunc != nil {
 				r.PluginCounterFunc(pluginName, counter.Counter, counter.Delta)
 				res = `{"status":"ok"}`
 			} else {
-				res = `{"status":"error","message":"plugin counter tracking not configured"}`
+				herr = hostErr(pbv2.ErrorCode_ERROR_CODE_NOT_CONFIGURED, "plugin counter tracking not configured")
 			}
 		case "torana_evaluate_compaction":
 			var report economics.CompactionReport
 			if err := json.Unmarshal([]byte(args), &report); err != nil {
-				res = `{"apply":false,"reason":"invalid_payload"}`
+				herr = hostErr(pbv2.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "invalid payload")
 				break
 			}
 			report.Normalize()
 			if !report.Valid() {
-				res = `{"apply":false,"reason":"invalid_payload"}`
+				herr = hostErr(pbv2.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "invalid payload")
 			} else if r.EvaluateCompactionFunc == nil {
-				res = `{"apply":false,"reason":"pricing_unconfigured"}`
+				herr = hostErr(pbv2.ErrorCode_ERROR_CODE_NOT_CONFIGURED, "compaction pricing is not configured")
 			} else {
 				decision := r.EvaluateCompactionFunc(ctx, report)
 				payload, _ := json.Marshal(decision)
@@ -1167,7 +1176,7 @@ func (r *Runtime) dispatchHostCall(ctx context.Context, pluginName, cmd, args st
 			if r.OffloadResultFunc != nil {
 				result, err := r.OffloadResultFunc(ctx, args)
 				if err != nil {
-					res = fmt.Sprintf(`{"status":"error","message":%q}`, err.Error())
+					herr = hostErr(pbv2.ErrorCode_ERROR_CODE_UNAVAILABLE, "%v", err)
 				} else {
 					payload, _ := json.Marshal(struct {
 						Status string `json:"status"`
@@ -1178,15 +1187,15 @@ func (r *Runtime) dispatchHostCall(ctx context.Context, pluginName, cmd, args st
 			} else if r.OffloadFunc != nil {
 				result, err := r.OffloadFunc(ctx, args)
 				if err != nil {
-					res = fmt.Sprintf(`{"status":"error","message":%q}`, err.Error())
+					herr = hostErr(pbv2.ErrorCode_ERROR_CODE_UNAVAILABLE, "%v", err)
 				} else {
 					res = fmt.Sprintf(`{"status":"ok","completion":%q}`, result)
 				}
 			} else {
-				res = `{"status":"error","message":"offload not configured"}`
+				herr = hostErr(pbv2.ErrorCode_ERROR_CODE_NOT_CONFIGURED, "offload not configured")
 			}
 		case "verify_virtual_key":
-			res = `{"status":"error","message":"unimplemented: enterprise auth is available in torana-edge/private-nucleus"}`
+			herr = hostErr(pbv2.ErrorCode_ERROR_CODE_UNAVAILABLE, "unimplemented: enterprise auth is available in torana-edge/private-nucleus")
 		default:
 			herr = hostErr(pbv2.ErrorCode_ERROR_CODE_NOT_FOUND, "unknown host call %q", cmd)
 		}

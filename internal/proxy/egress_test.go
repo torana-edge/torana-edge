@@ -18,6 +18,7 @@ import (
 	"github.com/torana-edge/torana-edge/internal/engine"
 	"github.com/torana-edge/torana-edge/internal/engine/pbconv"
 	"github.com/torana-edge/torana-edge/internal/provider"
+	pb "github.com/torana-edge/torana-plugin-sdk/pb/v2"
 )
 
 // egressPayload builds what a plugin would pass to torana_send_request.
@@ -82,13 +83,20 @@ func egressServer(t *testing.T, budget provider.EgressBudget) (*Server, *int) {
 	return srv, &calls
 }
 
-func send(t *testing.T, srv *Server, plugin, payload string) egressResponse {
+// send invokes the host call the way the dispatcher does and decodes whichever
+// arm the refusal or outcome landed on. A refusal is a framed classified
+// HostError; a success is the domain envelope.
+func send(t *testing.T, srv *Server, plugin, payload string) (egressResponse, *pb.HostError) {
 	t.Helper()
+	body, herr := srv.sendPluginRequest(context.Background(), plugin, payload)
+	if herr != nil {
+		return egressResponse{}, herr
+	}
 	var out egressResponse
-	if err := json.Unmarshal([]byte(srv.sendPluginRequest(context.Background(), plugin, payload)), &out); err != nil {
+	if err := json.Unmarshal([]byte(body), &out); err != nil {
 		t.Fatalf("decode egress response: %v", err)
 	}
-	return out
+	return out, nil
 }
 
 // TestEgressSendsAndMeters is the happy path: the request reaches the provider,
@@ -96,7 +104,10 @@ func send(t *testing.T, srv *Server, plugin, payload string) egressResponse {
 func TestEgressSendsAndMeters(t *testing.T) {
 	srv, calls := egressServer(t, provider.EgressBudget{MaxCallsPerMinute: 10})
 
-	got := send(t, srv, "warmer", egressPayload(t, "oai", "/v1/chat/completions"))
+	got, herr := send(t, srv, "warmer", egressPayload(t, "oai", "/v1/chat/completions"))
+	if herr != nil {
+		t.Fatalf("a reached provider was framed as a refusal: %v", herr)
+	}
 	if got.Status != "ok" {
 		t.Fatalf("status = %q: %s", got.Status, got.Message)
 	}
@@ -114,18 +125,28 @@ func TestEgressSendsAndMeters(t *testing.T) {
 // TestEgressRefusedWithoutBudget is the containment default. A capability that
 // spends money must be unusable until an operator has said how much, or a
 // plugin approved for some other reason inherits an open wallet.
+//
+// The refusal is framed NOT_CONFIGURED (never a status string in the envelope)
+// so the SDK's ErrEgressUnavailable sentinel path is real, and the refusal is
+// still metered.
 func TestEgressRefusedWithoutBudget(t *testing.T) {
 	srv, calls := egressServer(t, provider.EgressBudget{})
 
-	got := send(t, srv, "warmer", egressPayload(t, "oai", "/v1/chat/completions"))
-	if got.Status != "error" {
-		t.Fatalf("status = %q, want error — an unbudgeted plugin must not send", got.Status)
+	_, herr := send(t, srv, "warmer", egressPayload(t, "oai", "/v1/chat/completions"))
+	if herr == nil {
+		t.Fatal("an unbudgeted plugin must not send")
 	}
-	if !strings.Contains(got.Message, "budget not configured") {
-		t.Errorf("message does not explain how to fix it: %s", got.Message)
+	if herr.Code != pb.ErrorCode_ERROR_CODE_NOT_CONFIGURED {
+		t.Fatalf("code = %v, want NOT_CONFIGURED — the budget refusal is a configuration gap", herr.Code)
+	}
+	if !strings.Contains(herr.Message, "budget not configured") {
+		t.Errorf("message does not explain how to fix it: %s", herr.Message)
 	}
 	if *calls != 0 {
 		t.Errorf("upstream was reached %d times despite no budget", *calls)
+	}
+	if got := srv.stats.Snapshot().PluginCounters["warmer"]["egress_refused"]; got != 1 {
+		t.Errorf("egress_refused counter = %d, want 1 — refusals must still be observability events", got)
 	}
 }
 
@@ -135,13 +156,13 @@ func TestEgressEnforcesCallRate(t *testing.T) {
 	payload := egressPayload(t, "oai", "/v1/chat/completions")
 
 	for i := 0; i < 3; i++ {
-		if got := send(t, srv, "warmer", payload); got.Status != "ok" {
-			t.Fatalf("call %d refused early: %s", i+1, got.Message)
+		if got, herr := send(t, srv, "warmer", payload); herr != nil || got.Status != "ok" {
+			t.Fatalf("call %d refused early: %v %s", i+1, herr, got.Message)
 		}
 	}
-	got := send(t, srv, "warmer", payload)
-	if got.Status != "error" || !strings.Contains(got.Message, "calls/minute") {
-		t.Fatalf("the 4th call was not refused: status=%q msg=%q", got.Status, got.Message)
+	_, herr := send(t, srv, "warmer", payload)
+	if herr == nil || herr.Code != pb.ErrorCode_ERROR_CODE_NOT_CONFIGURED || !strings.Contains(herr.Message, "calls/minute") {
+		t.Fatalf("the 4th call was not refused as NOT_CONFIGURED: %v", herr)
 	}
 	if *calls != 3 {
 		t.Errorf("upstream saw %d calls, want exactly the budgeted 3", *calls)
@@ -154,17 +175,17 @@ func TestEgressBudgetsArePerPlugin(t *testing.T) {
 	srv, _ := egressServer(t, provider.EgressBudget{MaxCallsPerMinute: 1})
 	payload := egressPayload(t, "oai", "/v1/chat/completions")
 
-	if got := send(t, srv, "warmer", payload); got.Status != "ok" {
-		t.Fatalf("first call refused: %s", got.Message)
+	if got, herr := send(t, srv, "warmer", payload); herr != nil || got.Status != "ok" {
+		t.Fatalf("first call refused: %v %s", herr, got.Message)
 	}
-	if got := send(t, srv, "warmer", payload); got.Status != "error" {
+	if _, herr := send(t, srv, "warmer", payload); herr == nil {
 		t.Fatal("warmer's budget did not bind")
 	}
 	// A different plugin has no budget at all, so it is refused for its own
 	// reason rather than inheriting warmer's exhausted counter.
-	got := send(t, srv, "other", payload)
-	if !strings.Contains(got.Message, "budget not configured") {
-		t.Errorf("other plugin got warmer's error instead of its own: %s", got.Message)
+	_, herr := send(t, srv, "other", payload)
+	if herr == nil || herr.Code != pb.ErrorCode_ERROR_CODE_NOT_CONFIGURED || !strings.Contains(herr.Message, "budget not configured") {
+		t.Errorf("other plugin got warmer's error instead of its own: %v", herr)
 	}
 }
 
@@ -174,12 +195,15 @@ func TestEgressBudgetsArePerPlugin(t *testing.T) {
 func TestEgressRejectsUnknownProvider(t *testing.T) {
 	srv, calls := egressServer(t, provider.EgressBudget{MaxCallsPerMinute: 10})
 
-	got := send(t, srv, "warmer", egressPayload(t, "http://169.254.169.254/latest/meta-data", "/"))
-	if got.Status != "error" {
+	_, herr := send(t, srv, "warmer", egressPayload(t, "http://169.254.169.254/latest/meta-data", "/"))
+	if herr == nil {
 		t.Fatal("a plugin reached a provider that is not configured")
 	}
-	if !strings.Contains(got.Message, "unknown provider") {
-		t.Errorf("unexpected message: %s", got.Message)
+	if herr.Code != pb.ErrorCode_ERROR_CODE_NOT_CONFIGURED {
+		t.Errorf("code = %v, want NOT_CONFIGURED — naming an unconfigured provider is a configuration gap", herr.Code)
+	}
+	if !strings.Contains(herr.Message, "unknown provider") {
+		t.Errorf("unexpected message: %s", herr.Message)
 	}
 	if *calls != 0 {
 		t.Error("upstream was reached for an unknown provider")
@@ -192,9 +216,9 @@ func TestEgressRejectsUnknownProvider(t *testing.T) {
 func TestEgressRequiresPath(t *testing.T) {
 	srv, _ := egressServer(t, provider.EgressBudget{MaxCallsPerMinute: 10})
 
-	got := send(t, srv, "warmer", egressPayload(t, "oai", ""))
-	if got.Status != "error" || !strings.Contains(got.Message, "path is required") {
-		t.Errorf("a pathless request was not refused: status=%q msg=%q", got.Status, got.Message)
+	_, herr := send(t, srv, "warmer", egressPayload(t, "oai", ""))
+	if herr == nil || herr.Code != pb.ErrorCode_ERROR_CODE_INVALID_ARGUMENT || !strings.Contains(herr.Message, "path is required") {
+		t.Errorf("a pathless request was not refused as INVALID_ARGUMENT: %v", herr)
 	}
 }
 
@@ -202,7 +226,9 @@ func TestEgressRequiresPath(t *testing.T) {
 // be visible, or an operator cannot account for their own spend.
 func TestEgressAppearsInFeed(t *testing.T) {
 	srv, _ := egressServer(t, provider.EgressBudget{MaxCallsPerMinute: 10})
-	send(t, srv, "warmer", egressPayload(t, "oai", "/v1/chat/completions"))
+	if _, herr := send(t, srv, "warmer", egressPayload(t, "oai", "/v1/chat/completions")); herr != nil {
+		t.Fatalf("send refused: %v", herr)
+	}
 
 	events := srv.feed.Snapshot()
 	if len(events) == 0 {
@@ -231,12 +257,15 @@ func TestEgressRejectsMalformedPayloads(t *testing.T) {
 		{"not a ChatRequest", `{"provider":"oai","request_pb":"ZGVmaW5pdGVseSBub3QgcHJvdG9idWY=","path":"/v1"}`, "ChatRequest"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got := send(t, srv, "warmer", tc.payload)
-			if got.Status != "error" {
-				t.Fatalf("malformed payload accepted: %+v", got)
+			_, herr := send(t, srv, "warmer", tc.payload)
+			if herr == nil {
+				t.Fatalf("malformed payload accepted: %+v", herr)
 			}
-			if !strings.Contains(got.Message, tc.want) {
-				t.Errorf("message %q does not contain %q", got.Message, tc.want)
+			if herr.Code != pb.ErrorCode_ERROR_CODE_INVALID_ARGUMENT {
+				t.Errorf("code = %v, want INVALID_ARGUMENT — a malformed payload is a caller bug, not a config gap", herr.Code)
+			}
+			if !strings.Contains(herr.Message, tc.want) {
+				t.Errorf("message %q does not contain %q", herr.Message, tc.want)
 			}
 		})
 	}
@@ -254,12 +283,12 @@ func TestEgressTokenBudget(t *testing.T) {
 	srv, calls := egressServer(t, provider.EgressBudget{MaxCallsPerMinute: 100, MaxTokensPerHour: 50})
 	payload := egressPayload(t, "oai", "/v1/chat/completions")
 
-	if got := send(t, srv, "warmer", payload); got.Status != "ok" {
-		t.Fatalf("first call refused: %s", got.Message)
+	if got, herr := send(t, srv, "warmer", payload); herr != nil || got.Status != "ok" {
+		t.Fatalf("first call refused: %v %s", herr, got.Message)
 	}
-	got := send(t, srv, "warmer", payload)
-	if got.Status != "error" || !strings.Contains(got.Message, "tokens/hour") {
-		t.Fatalf("token budget did not bind: status=%q msg=%q", got.Status, got.Message)
+	_, herr := send(t, srv, "warmer", payload)
+	if herr == nil || herr.Code != pb.ErrorCode_ERROR_CODE_NOT_CONFIGURED || !strings.Contains(herr.Message, "tokens/hour") {
+		t.Fatalf("token budget did not bind: %v", herr)
 	}
 	if *calls != 1 {
 		t.Errorf("upstream saw %d calls, want 1 before the token budget bound", *calls)

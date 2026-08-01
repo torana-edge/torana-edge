@@ -162,19 +162,27 @@ type egressResponse struct {
 	} `json:"usage,omitempty"`
 }
 
-func egressError(format string, args ...any) string {
-	b, _ := json.Marshal(egressResponse{Status: "error", Message: fmt.Sprintf(format, args...)})
-	return string(b)
+// hostRefusal builds a framed egress refusal. Egress refusals travel in the
+// error arm of the host-call result; the value arm carries provider outcomes
+// only, so the SDK can key its sentinel off the framed code instead of a
+// status string.
+func hostRefusal(code pb.ErrorCode, format string, args ...any) *pb.HostError {
+	return &pb.HostError{Code: code, Message: fmt.Sprintf(format, args...)}
 }
 
 // sendPluginRequest answers the torana_send_request host call.
-func (s *Server) sendPluginRequest(ctx context.Context, pluginName, payloadJSON string) string {
+//
+// Refusals are framed classified HostErrors: INVALID_ARGUMENT for malformed
+// payloads, NOT_CONFIGURED for unknown providers, missing budgets or missing
+// format adapters, UNAVAILABLE for transport failures. The value arm carries
+// provider outcomes only.
+func (s *Server) sendPluginRequest(ctx context.Context, pluginName, payloadJSON string) (string, *pb.HostError) {
 	var req egressRequest
 	if err := json.Unmarshal([]byte(payloadJSON), &req); err != nil {
-		return egressError("invalid payload: %v", err)
+		return "", hostRefusal(pb.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "invalid payload: %v", err)
 	}
 	if req.Provider == "" {
-		return egressError("provider is required")
+		return "", hostRefusal(pb.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "provider is required")
 	}
 
 	cfg := s.GetConfig().Providers
@@ -182,26 +190,26 @@ func (s *Server) sendPluginRequest(ctx context.Context, pluginName, payloadJSON 
 	if !ok {
 		// Naming an unconfigured provider is the whole containment boundary:
 		// a plugin can only reach endpoints the operator already trusts.
-		return egressError("unknown provider %q", req.Provider)
+		return "", hostRefusal(pb.ErrorCode_ERROR_CODE_NOT_CONFIGURED, "unknown provider %q", req.Provider)
 	}
 
 	budget := cfg.Plugins.Runtime.EgressBudgetFor(pluginName)
 	if err := s.egress.authorize(pluginName, budget); err != nil {
 		s.stats.RecordPluginCounter(pluginName, "egress_refused", 1)
-		return egressError("%v", err)
+		return "", hostRefusal(pb.ErrorCode_ERROR_CODE_NOT_CONFIGURED, "%v", err)
 	}
 
 	raw, err := base64.StdEncoding.DecodeString(req.RequestPB)
 	if err != nil {
-		return egressError("request_pb is not valid base64: %v", err)
+		return "", hostRefusal(pb.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "request_pb is not valid base64: %v", err)
 	}
 	var pbReq pb.ChatRequest
 	if err := proto.Unmarshal(raw, &pbReq); err != nil {
-		return egressError("request_pb is not a ChatRequest: %v", err)
+		return "", hostRefusal(pb.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "request_pb is not a ChatRequest: %v", err)
 	}
 	chat := pbconv.FromPBChatRequest(&pbReq)
 	if chat == nil {
-		return egressError("request_pb decoded to nothing")
+		return "", hostRefusal(pb.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "request_pb decoded to nothing")
 	}
 	// Proxy-internal metadata must not travel upstream, and a plugin has no
 	// business setting it on an outbound request anyway.
@@ -209,16 +217,16 @@ func (s *Server) sendPluginRequest(ctx context.Context, pluginName, payloadJSON 
 
 	f := format.Lookup(prov.Format)
 	if f == nil || f.Request == nil {
-		return egressError("provider %q has no usable format adapter (%q)", req.Provider, prov.Format)
+		return "", hostRefusal(pb.ErrorCode_ERROR_CODE_NOT_CONFIGURED, "provider %q has no usable format adapter (%q)", req.Provider, prov.Format)
 	}
 	body, err := f.Request.Marshal(chat)
 	if err != nil {
-		return egressError("encode request for %s: %v", prov.Format, err)
+		return "", hostRefusal(pb.ErrorCode_ERROR_CODE_UNAVAILABLE, "encode request for %s: %v", prov.Format, err)
 	}
 
 	path := req.Path
 	if path == "" {
-		return egressError("path is required — Torana does not synthesize provider paths")
+		return "", hostRefusal(pb.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "path is required — Torana does not synthesize provider paths")
 	}
 
 	timeout := defaultEgressTimeout
@@ -234,7 +242,7 @@ func (s *Server) sendPluginRequest(ctx context.Context, pluginName, payloadJSON 
 	url := prov.URL + path
 	httpReq, err := http.NewRequestWithContext(callCtx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
-		return egressError("build request: %v", err)
+		return "", hostRefusal(pb.ErrorCode_ERROR_CODE_UNAVAILABLE, "build request: %v", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("Accept-Encoding", "identity")
@@ -252,14 +260,14 @@ func (s *Server) sendPluginRequest(ctx context.Context, pluginName, payloadJSON 
 	resp, err := (&http.Client{Timeout: timeout}).Do(httpReq)
 	if err != nil {
 		s.stats.RecordPluginCounter(pluginName, "egress_failed", 1)
-		return egressError("request to %s failed: %v", req.Provider, err)
+		return "", hostRefusal(pb.ErrorCode_ERROR_CODE_UNAVAILABLE, "request to %s failed: %v", req.Provider, err)
 	}
 	defer resp.Body.Close()
 
 	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxEgressResponseBytes))
 	if err != nil {
 		s.stats.RecordPluginCounter(pluginName, "egress_failed", 1)
-		return egressError("read response: %v", err)
+		return "", hostRefusal(pb.ErrorCode_ERROR_CODE_UNAVAILABLE, "read response: %v", err)
 	}
 
 	out := egressResponse{Status: "ok", HTTPStatus: resp.StatusCode, Body: base64.StdEncoding.EncodeToString(respBody)}
@@ -284,7 +292,11 @@ func (s *Server) sendPluginRequest(ctx context.Context, pluginName, payloadJSON 
 
 	s.stats.RecordPluginCounter(pluginName, "egress_calls", 1)
 	s.recordEgressEvent(pluginName, req.Provider, chat.Model, resp.StatusCode, start, usage)
-	return marshalEgress(out)
+	env, err := marshalEgress(out)
+	if err != nil {
+		return "", hostRefusal(pb.ErrorCode_ERROR_CODE_UNAVAILABLE, "encode response: %v", err)
+	}
+	return env, nil
 }
 
 // recordEgressEvent puts plugin-originated traffic in the same feed as user
@@ -309,10 +321,10 @@ func (s *Server) recordEgressEvent(pluginName, providerName, model string, statu
 	s.feed.Add(ev)
 }
 
-func marshalEgress(r egressResponse) string {
+func marshalEgress(r egressResponse) (string, error) {
 	b, err := json.Marshal(r)
 	if err != nil {
-		return egressError("encode response: %v", err)
+		return "", err
 	}
-	return string(b)
+	return string(b), nil
 }

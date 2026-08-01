@@ -2787,6 +2787,9 @@ func (s *Server) newRuntime() *wasm.Runtime {
 		rt.StateDeleteFunc = s.pluginState.Delete
 	}
 	rt.CachePricingFunc = s.cachePricing
+	// Plugin-originated egress: refusals return framed in the HostError arm
+	// (INVALID_ARGUMENT / NOT_CONFIGURED / UNAVAILABLE); the value arm carries
+	// provider outcomes only.
 	rt.SendRequestFunc = s.sendPluginRequest
 	// Pristine request/response snapshots (env.original_request /
 	// env.original_response), read from the request state the same
