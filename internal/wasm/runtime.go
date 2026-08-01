@@ -481,23 +481,18 @@ type Runtime struct {
 	// release; shared stores (NewRuntimeWithCache) outlive the runtime.
 	ownsCache bool
 
-	// OffloadFunc handles torana_offload_completion host calls.
-	// Set by the server during initialization. Legacy embedder-facing form:
-	// the callback frames its own success value (e.g. {"completion":...})
-	// or classified refusal via the ExtensionResult constructors.
-	OffloadFunc func(ctx context.Context, payloadJSON string) ExtensionResult
-	// OffloadResultFunc exposes provider/model/usage while preserving the old
-	// OffloadFunc contract for external embedders. Both callbacks return the
-	// classified outcome; the dispatcher frames whichever is set.
+	// OffloadResultFunc handles torana_offload_completion host calls. Set by
+	// the server during initialization. The callback returns a classified
+	// ExtensionResult: the value arm is the marshaled OffloadResult, refusals
+	// are framed classified HostErrors. This is the ONE offload callback — the
+	// legacy OffloadFunc form was removed (internal/wasm is host-internal, so
+	// there are no external embedders to preserve it for).
 	OffloadResultFunc func(ctx context.Context, payloadJSON string) ExtensionResult
 
-	// SavingsFunc handles torana_record_savings host calls (compaction
-	// byte savings reported by plugins), attributed to the calling plugin.
-	// Set by the server.
-	SavingsFunc func(plugin string, originalBytes, finalBytes int64)
-	// CompactionReportFunc receives the richer, batch-aware savings ABI. When
-	// set it supersedes SavingsFunc; the old callback remains for embedders and
-	// tests using the original two-field contract.
+	// CompactionReportFunc handles torana_record_savings host calls
+	// (compaction byte savings reported by plugins), attributed to the
+	// calling plugin. Set by the server. This is the ONE savings callback —
+	// the legacy two-field SavingsFunc form was removed.
 	CompactionReportFunc func(ctx context.Context, plugin string, report economics.CompactionReport)
 	// EvaluateCompactionFunc performs the optional operator-priced economic
 	// gate before a plugin mutates history.
@@ -1155,8 +1150,6 @@ func (r *Runtime) dispatchHostCall(ctx context.Context, pluginName, cmd, args st
 				r.CompactionReportFunc(ctx, pluginName, report)
 				// Success is an EMPTY value arm: the savings were recorded, and
 				// there is no domain body to acknowledge with.
-			} else if r.SavingsFunc != nil {
-				r.SavingsFunc(pluginName, report.OriginalBytes, report.FinalBytes)
 			} else {
 				herr = hostErr(pbv2.ErrorCode_ERROR_CODE_NOT_CONFIGURED, "savings tracking not configured")
 			}
@@ -1191,17 +1184,11 @@ func (r *Runtime) dispatchHostCall(ctx context.Context, pluginName, cmd, args st
 				res = string(payload)
 			}
 		case "torana_offload_completion":
-			cb := r.OffloadResultFunc
-			if cb == nil {
-				// Legacy embedder-facing form; its success value is its own
-				// framed body (e.g. {"completion":...}).
-				cb = r.OffloadFunc
-			}
-			if cb == nil {
+			if r.OffloadResultFunc == nil {
 				herr = hostErr(pbv2.ErrorCode_ERROR_CODE_NOT_CONFIGURED, "offload not configured")
 				break
 			}
-			value, herr = r.applyExtensionResult("torana_offload_completion", cb(ctx, args))
+			value, herr = r.applyExtensionResult("torana_offload_completion", r.OffloadResultFunc(ctx, args))
 		case "verify_virtual_key":
 			if r.VerifyVirtualKeyFunc == nil {
 				herr = hostErr(pbv2.ErrorCode_ERROR_CODE_NOT_CONFIGURED, "virtual key verification is not configured")

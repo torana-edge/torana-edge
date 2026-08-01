@@ -138,12 +138,12 @@ func (s *Server) cachePricing(_ context.Context, payloadJSON string) wasm.Extens
 	if !priced {
 		out.Status = "unavailable"
 		out.Reason = pricingReasonNoPricing
-		return wasm.ExtensionValue([]byte(marshalPricing(out)))
+		return pricingValue(out)
 	}
 	if pricing.CacheReadUSDPerMTok == nil || pricing.CacheWriteUSDPerMTok == nil {
 		out.Status = "unavailable"
 		out.Reason = pricingReasonNoCacheRates
-		return wasm.ExtensionValue([]byte(marshalPricing(out)))
+		return pricingValue(out)
 	}
 
 	read, write := *pricing.CacheReadUSDPerMTok, *pricing.CacheWriteUSDPerMTok
@@ -166,13 +166,27 @@ func (s *Server) cachePricing(_ context.Context, payloadJSON string) wasm.Extens
 		out.Status = "unavailable"
 		out.Reason = pricingReasonNoCacheConfig
 	}
-	return wasm.ExtensionValue([]byte(marshalPricing(out)))
+	return pricingValue(out)
 }
 
-func marshalPricing(r cachePricingResponse) string {
+// pricingValue frames a legitimate query result. Marshalling failure is NOT a
+// legitimate result: cachePricingResponse is host-built from operator config
+// (strings, floats, ints, an opaque tier marker map), so a body JSON cannot
+// represent — e.g. an operator-supplied marker containing NaN — is a host
+// invariant/serialization failure, framed INTERNAL, never a status string
+// smuggled through the value arm.
+func pricingValue(out cachePricingResponse) wasm.ExtensionResult {
+	env, err := marshalPricing(out)
+	if err != nil {
+		return wasm.ExtensionRefusal(pbv2.ErrorCode_ERROR_CODE_INTERNAL, "encode pricing response: %v", err)
+	}
+	return wasm.ExtensionValue([]byte(env))
+}
+
+func marshalPricing(r cachePricingResponse) (string, error) {
 	b, err := json.Marshal(r)
 	if err != nil {
-		return `{"status":"unavailable","reason":"encode_failed"}`
+		return "", err
 	}
-	return string(b)
+	return string(b), nil
 }

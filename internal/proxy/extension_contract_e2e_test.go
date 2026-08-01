@@ -53,11 +53,18 @@ func TestExtensionContractE2E(t *testing.T) {
 		},
 		{
 			// Malformed pricing input must be framed INVALID_ARGUMENT — never a
-			// status string smuggled through the value arm.
+			// status string smuggled through the value arm, and never a Go
+			// error misread as a zero-valued observation.
 			"pricing-malformed",
 			func(t *testing.T, obs contractObservation) {
-				if obs.RawCode != int32(pb.ErrorCode_ERROR_CODE_INVALID_ARGUMENT) {
-					t.Errorf("pricing malformed: raw code = %d, want INVALID_ARGUMENT", obs.RawCode)
+				if obs.RawArm != "refusal" || obs.RawCode != int32(pb.ErrorCode_ERROR_CODE_INVALID_ARGUMENT) {
+					t.Errorf("pricing malformed: arm=%q code=%d, want refusal/INVALID_ARGUMENT", obs.RawArm, obs.RawCode)
+				}
+				if obs.RawSucceeded {
+					t.Errorf("pricing malformed: recorded as succeeded")
+				}
+				if obs.RawGoError != "" {
+					t.Errorf("pricing malformed: goerror %q — a Go error must never masquerade as this refusal", obs.RawGoError)
 				}
 			},
 		},
@@ -83,11 +90,14 @@ func TestExtensionContractE2E(t *testing.T) {
 			},
 		},
 		{
-			// A guest-selected api_key_env is a caller bug.
+			// The obsolete guest api_key_env field is a caller bug.
 			"offload-bad-override",
 			func(t *testing.T, obs contractObservation) {
-				if obs.RawCode != int32(pb.ErrorCode_ERROR_CODE_INVALID_ARGUMENT) {
-					t.Errorf("offload bad override: raw code = %d, want INVALID_ARGUMENT", obs.RawCode)
+				if obs.RawArm != "refusal" || obs.RawCode != int32(pb.ErrorCode_ERROR_CODE_INVALID_ARGUMENT) {
+					t.Errorf("offload bad override: arm=%q code=%d, want refusal/INVALID_ARGUMENT", obs.RawArm, obs.RawCode)
+				}
+				if obs.RawSucceeded || obs.RawGoError != "" {
+					t.Errorf("offload bad override: succeeded=%v goerror=%q, want a clean refusal", obs.RawSucceeded, obs.RawGoError)
 				}
 			},
 		},
@@ -95,18 +105,38 @@ func TestExtensionContractE2E(t *testing.T) {
 			// A valid call to a dead endpoint is a transient outage.
 			"offload-transport-dead",
 			func(t *testing.T, obs contractObservation) {
-				if obs.RawCode != int32(pb.ErrorCode_ERROR_CODE_UNAVAILABLE) {
-					t.Errorf("offload dead endpoint: raw code = %d, want UNAVAILABLE", obs.RawCode)
+				if obs.RawArm != "refusal" || obs.RawCode != int32(pb.ErrorCode_ERROR_CODE_UNAVAILABLE) {
+					t.Errorf("offload dead endpoint: arm=%q code=%d, want refusal/UNAVAILABLE", obs.RawArm, obs.RawCode)
+				}
+				if obs.RawSucceeded || obs.RawGoError != "" {
+					t.Errorf("offload dead endpoint: succeeded=%v goerror=%q, want a clean refusal", obs.RawSucceeded, obs.RawGoError)
 				}
 			},
 		},
 		{
-			// record_savings is an acknowledgement: empty value arm, no refusal
-			// (no {"status":"ok"} ceremony).
+			// record_savings is an acknowledgement: succeeded, value arm PRESENT
+			// and zero-length, no refusal (no {"status":"ok"} ceremony). The
+			// explicit discriminator means a transport/protocol failure (a
+			// goerror) can never be read as this ack.
 			"record-savings",
 			func(t *testing.T, obs contractObservation) {
-				if obs.RawCode != 0 || obs.RawValue != "" {
-					t.Errorf("record_savings: code=%d value=%q, want empty success", obs.RawCode, obs.RawValue)
+				if !obs.RawSucceeded {
+					t.Errorf("record_savings: not recorded as succeeded (arm=%q goerror=%q)", obs.RawArm, obs.RawGoError)
+				}
+				if obs.RawArm != "value" {
+					t.Errorf("record_savings: arm=%q, want value — the ack arrives as a value arm, not absence", obs.RawArm)
+				}
+				if obs.RawGoError != "" {
+					t.Errorf("record_savings: goerror %q — a Go error must never masquerade as the ack", obs.RawGoError)
+				}
+				if !obs.RawValuePresent {
+					t.Errorf("record_savings: value arm not recorded as present")
+				}
+				if obs.RawValue != "" {
+					t.Errorf("record_savings: value=%q, want zero length", obs.RawValue)
+				}
+				if obs.RawCode != 0 {
+					t.Errorf("record_savings: refusal code=%d, want none", obs.RawCode)
 				}
 			},
 		},
@@ -126,8 +156,11 @@ func TestExtensionContractE2E(t *testing.T) {
 	t.Run("offload-disabled", func(t *testing.T) {
 		env2 := newContractServer(t, nil)
 		obs := env2.post(t, "offload-disabled")
-		if obs.RawCode != int32(pb.ErrorCode_ERROR_CODE_NOT_CONFIGURED) {
-			t.Errorf("offload disabled: raw code = %d, want NOT_CONFIGURED", obs.RawCode)
+		if obs.RawArm != "refusal" || obs.RawCode != int32(pb.ErrorCode_ERROR_CODE_NOT_CONFIGURED) {
+			t.Errorf("offload disabled: arm=%q code=%d, want refusal/NOT_CONFIGURED", obs.RawArm, obs.RawCode)
+		}
+		if obs.RawSucceeded || obs.RawGoError != "" {
+			t.Errorf("offload disabled: succeeded=%v goerror=%q, want a clean refusal", obs.RawSucceeded, obs.RawGoError)
 		}
 	})
 }
@@ -141,8 +174,16 @@ type contractObservation struct {
 	SendErrContainsNotConfigured bool   `json:"send_err_contains_not_configured,omitempty"`
 	SendErrText                  string `json:"send_err_text,omitempty"`
 
-	RawCode  int32  `json:"raw_code,omitempty"`
-	RawValue string `json:"raw_value,omitempty"`
+	// Raw HostCallExtension discriminator: RawArm is "value"/"refusal"/
+	// "goerror", RawSucceeded only for the value arm, RawGoError the Go
+	// error text, RawValuePresent the value arm's presence bit, RawCode the
+	// framed code, RawValue the value bytes.
+	RawSucceeded    bool   `json:"raw_succeeded,omitempty"`
+	RawArm          string `json:"raw_arm,omitempty"`
+	RawGoError      string `json:"raw_go_error,omitempty"`
+	RawValuePresent bool   `json:"raw_value_present,omitempty"`
+	RawCode         int32  `json:"raw_code,omitempty"`
+	RawValue        string `json:"raw_value,omitempty"`
 
 	PricingStatus string `json:"pricing_status,omitempty"`
 	PricingReason string `json:"pricing_reason,omitempty"`

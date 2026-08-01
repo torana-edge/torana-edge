@@ -3,7 +3,9 @@ package proxy
 import (
 	"context"
 	"encoding/json"
+	"math"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/torana-edge/torana-edge/internal/economics"
@@ -48,12 +50,12 @@ func askPricing(t *testing.T, srv *Server, payload string) (cachePricingResponse
 	if err := res.Validate(); err != nil {
 		t.Fatalf("callback returned an invalid result: %v", err)
 	}
-	if res.Refusal != nil {
-		return cachePricingResponse{}, res.Refusal
+	if res.Refusal() != nil {
+		return cachePricingResponse{}, res.Refusal()
 	}
 	var out cachePricingResponse
-	if err := json.Unmarshal(res.Value, &out); err != nil {
-		t.Fatalf("decode pricing response: %v (body %q)", err, string(res.Value))
+	if err := json.Unmarshal(res.Value(), &out); err != nil {
+		t.Fatalf("decode pricing response: %v (body %q)", err, string(res.Value()))
 	}
 	return out, nil
 }
@@ -228,6 +230,47 @@ func TestFreeCacheReportsNoAffordability(t *testing.T) {
 	if got.BreakEvenRefreshes != 0 || got.WriteReadRatio != 0 {
 		t.Errorf("free cache reported ratio=%v refreshes=%d, want zeroes",
 			got.WriteReadRatio, got.BreakEvenRefreshes)
+	}
+}
+
+// TestCachePricingFramesMarshalFailureAsInternal — a cache-tier marker that
+// JSON cannot represent (here: NaN) is operator configuration, not guest
+// input, and config validation does not reject it — so the host must frame
+// the serialization failure as INTERNAL rather than smuggle an invented
+// {"status":"unavailable"} through the value arm as if it were a legitimate
+// pricing answer.
+func TestCachePricingFramesMarshalFailureAsInternal(t *testing.T) {
+	nanMarker := fullyConfigured()
+	nanMarker.Cache.Tiers[0].Marker = map[string]any{"type": math.NaN()}
+
+	// Config validation must NOT reject the marker (it is opaque); the host
+	// learns of the failure only when the pricing body is serialized.
+	srv, err := New(Config{
+		Port: "0",
+		Providers: func() provider.Config {
+			c := provider.DefaultConfig()
+			c.Providers = map[string]provider.Provider{"anth": nanMarker}
+			return c
+		}(),
+		ConfigPath: filepath.Join(t.TempDir(), "config.json"),
+	})
+	if err != nil {
+		t.Fatalf("config validation rejected the opaque marker: %v — the proof needs it to pass", err)
+	}
+	t.Cleanup(func() { srv.conversations.Close() })
+
+	res := srv.cachePricing(context.Background(), `{"provider":"anth","model":"claude-sonnet-4-5"}`)
+	if err := res.Validate(); err != nil {
+		t.Fatalf("callback returned an invalid result: %v", err)
+	}
+	if res.Refusal() == nil {
+		t.Fatalf("a serialization failure was framed as a value: %q", string(res.Value()))
+	}
+	if res.Refusal().Code != pbv2.ErrorCode_ERROR_CODE_INTERNAL {
+		t.Errorf("code = %v, want INTERNAL — an unrepresentable pricing body is a host invariant, not a query result", res.Refusal().Code)
+	}
+	if !strings.Contains(res.Refusal().Message, "encode pricing response") {
+		t.Errorf("message = %q, want it to name the encode failure", res.Refusal().Message)
 	}
 }
 

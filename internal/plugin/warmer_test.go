@@ -89,7 +89,10 @@ func newWarmerPipeline(t *testing.T, h *warmerHarness, conversations string, sta
 			Path      string `json:"path"`
 		}
 		if err := json.Unmarshal([]byte(payload), &req); err != nil {
-			return wasm.ExtensionValue([]byte(`{"message":"bad payload"}`))
+			// A payload the host cannot even parse is a caller bug, framed as a
+			// classified refusal — production never emits a {"message":...}
+			// value arm for a failure.
+			return wasm.ExtensionRefusal(pb.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "bad payload: %v", err)
 		}
 		raw, _ := base64.StdEncoding.DecodeString(req.RequestPB)
 		var chat pb.ChatRequest
@@ -103,9 +106,11 @@ func newWarmerPipeline(t *testing.T, h *warmerHarness, conversations string, sta
 		// anything cannot catch a malformed request, which is how an earlier
 		// version of this plugin shipped a refresh that appended a second
 		// consecutive user turn -- valid to this fake, rejected by Bedrock and
-		// fragile on Anthropic.
+		// fragile on Anthropic. The request was SENT, so the provider's refusal
+		// is a REACHED-provider outcome: a value arm carrying the actual HTTP
+		// status, exactly what the host reports for a provider 4xx.
 		if why := providerWouldReject(&chat); why != "" {
-			return wasm.ExtensionValue([]byte(`{"message":"` + why + `"}`))
+			return wasm.ExtensionValue([]byte(`{"http_status":400}`))
 		}
 
 		if h.httpStatus != 0 && h.httpStatus != 200 {

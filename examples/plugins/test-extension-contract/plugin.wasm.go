@@ -38,10 +38,19 @@ type observation struct {
 	SendErrText                  string `json:"send_err_text,omitempty"`
 
 	// Raw HostCallExtension outcomes (pricing-malformed, offload-*,
-	// record-savings): the framed code when refused, 0 when accepted; the
-	// value bytes when a value arm came back.
-	RawCode  int32  `json:"raw_code,omitempty"`
-	RawValue string `json:"raw_value,omitempty"`
+	// record-savings). RawArm is the explicit discriminator — "value",
+	// "refusal", or "goerror" — so a call that failed before producing an
+	// arm can never be mistaken for a zero-valued observation. RawSucceeded
+	// is true only for the value arm; RawGoError carries a Go error's text;
+	// RawCode is the framed code when refused; RawValue the value bytes.
+	// RawValuePresent is the arm's own presence bit: the ABI's empty success
+	// decodes as a non-nil zero-length slice, distinct from "no value arm".
+	RawSucceeded    bool   `json:"raw_succeeded,omitempty"`
+	RawArm          string `json:"raw_arm,omitempty"`
+	RawGoError      string `json:"raw_go_error,omitempty"`
+	RawValuePresent bool   `json:"raw_value_present,omitempty"`
+	RawCode         int32  `json:"raw_code,omitempty"`
+	RawValue        string `json:"raw_value,omitempty"`
 
 	// GetCachePricing helper outcomes (pricing-unknown-provider,
 	// pricing-unpriced-model): the domain value the SDK decoded.
@@ -52,6 +61,27 @@ type observation struct {
 // validReport is a CompactionReport the host's Normalize()/Valid() accept.
 const validReport = `{"original_bytes":1000,"final_bytes":400,"estimated_tokens_removed":100,` +
 	`"estimated_rewrite_span_tokens":5000,"expected_applications":1}`
+
+// recordRaw captures the three-way outcome of a raw HostCallExtension call:
+// a Go error (the call failed before the host produced an arm), a framed
+// refusal, or a value arm. Recording WHICH arm arrived — plus the arm's
+// presence bit — is what makes a later assertion unable to read "the call
+// failed" as a zero-valued success.
+func recordRaw(obs *observation, v []byte, herr *pb.HostError, err error) {
+	switch {
+	case err != nil:
+		obs.RawArm = "goerror"
+		obs.RawGoError = err.Error()
+	case herr != nil:
+		obs.RawArm = "refusal"
+		obs.RawCode = int32(herr.Code)
+	default:
+		obs.RawArm = "value"
+		obs.RawSucceeded = true
+		obs.RawValuePresent = v != nil
+		obs.RawValue = string(v)
+	}
+}
 
 func init() {
 	sdk.OnBeforeRequest(func(ctx context.Context, req *pb.ChatRequest) (sdk.RequestResult, error) {
@@ -75,10 +105,8 @@ func init() {
 		case "pricing-malformed":
 			// Raw HostCallExtension with malformed JSON: the host must frame
 			// INVALID_ARGUMENT, never a status string in the value arm.
-			_, herr, err := sdk.HostCallExtension("torana_cache_pricing", []byte("not json"))
-			if err == nil && herr != nil {
-				obs.RawCode = int32(herr.Code)
-			}
+			v, herr, err := sdk.HostCallExtension("torana_cache_pricing", []byte("not json"))
+			recordRaw(&obs, v, herr, err)
 
 		case "pricing-unknown-provider":
 			// The GetCachePricing helper maps a framed NOT_CONFIGURED refusal
@@ -104,43 +132,31 @@ func init() {
 			// UNAVAILABLE — a plugin must not retry a permanently absent
 			// feature as if it were a transient outage.
 			v, herr, err := sdk.HostCallExtension("torana_offload_completion", []byte(`{"user_prompt":"u"}`))
-			if err == nil && herr != nil {
-				obs.RawCode = int32(herr.Code)
-			} else if err == nil {
-				obs.RawValue = string(v)
-			}
+			recordRaw(&obs, v, herr, err)
 
 		case "offload-bad-override":
-			// A guest-selected api_key_env that does not match the provider's
-			// host-owned configuration is a caller bug: INVALID_ARGUMENT.
+			// The obsolete guest api_key_env field is rejected outright: a
+			// caller bug, INVALID_ARGUMENT — credentials are configured on the
+			// provider, never selected by the guest.
 			payload := `{"provider":"local","model":"local-1","user_prompt":"u",` +
 				`"api_key_env":"GUEST_PICKED_SECRET"}`
 			v, herr, err := sdk.HostCallExtension("torana_offload_completion", []byte(payload))
-			if err == nil && herr != nil {
-				obs.RawCode = int32(herr.Code)
-			} else if err == nil {
-				obs.RawValue = string(v)
-			}
+			recordRaw(&obs, v, herr, err)
 
 		case "offload-transport-dead":
 			// A valid request to a dead endpoint: UNAVAILABLE.
 			payload := `{"provider":"dead","model":"m","user_prompt":"u"}`
 			v, herr, err := sdk.HostCallExtension("torana_offload_completion", []byte(payload))
-			if err == nil && herr != nil {
-				obs.RawCode = int32(herr.Code)
-			} else if err == nil {
-				obs.RawValue = string(v)
-			}
+			recordRaw(&obs, v, herr, err)
 
 		case "record-savings":
 			// An acknowledgement: accepted with an EMPTY value arm and no
-			// refusal (ruling 3 — no {"status":"ok"} ceremony).
+			// refusal (ruling 3 — no {"status":"ok"} ceremony). The
+			// discriminator records the value arm as PRESENT and zero-length,
+			// so a transport/protocol failure (which would record a goerror)
+			// can never be read as this ack.
 			v, herr, err := sdk.HostCallExtension("torana_record_savings", []byte(validReport))
-			if err == nil && herr != nil {
-				obs.RawCode = int32(herr.Code)
-			} else if err == nil {
-				obs.RawValue = string(v)
-			}
+			recordRaw(&obs, v, herr, err)
 		}
 
 		obsJSON, _ := json.Marshal(obs)

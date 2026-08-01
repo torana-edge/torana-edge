@@ -94,12 +94,12 @@ func send(t *testing.T, srv *Server, plugin, payload string) (egressResponse, *p
 	if err := res.Validate(); err != nil {
 		t.Fatalf("callback returned an invalid result: %v", err)
 	}
-	if res.Refusal != nil {
-		return egressResponse{}, res.Refusal
+	if res.Refusal() != nil {
+		return egressResponse{}, res.Refusal()
 	}
 	var out egressResponse
-	if err := json.Unmarshal(res.Value, &out); err != nil {
-		t.Fatalf("decode egress response: %v (body %q)", err, string(res.Value))
+	if err := json.Unmarshal(res.Value(), &out); err != nil {
+		t.Fatalf("decode egress response: %v (body %q)", err, string(res.Value()))
 	}
 	return out, nil
 }
@@ -134,14 +134,14 @@ func TestEgressSuccessEnvelopeCarriesNoStatus(t *testing.T) {
 	if err := res.Validate(); err != nil {
 		t.Fatalf("callback returned an invalid result: %v", err)
 	}
-	if res.Refusal != nil {
-		t.Fatalf("a reached provider was framed as a refusal: %v", res.Refusal)
+	if res.Refusal() != nil {
+		t.Fatalf("a reached provider was framed as a refusal: %v", res.Refusal())
 	}
-	if strings.Contains(string(res.Value), `"status"`) {
-		t.Errorf("success envelope still carries a status field: %s", res.Value)
+	if strings.Contains(string(res.Value()), `"status"`) {
+		t.Errorf("success envelope still carries a status field: %s", res.Value())
 	}
 	var out egressResponse
-	if err := json.Unmarshal(res.Value, &out); err != nil {
+	if err := json.Unmarshal(res.Value(), &out); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
 	if out.HTTPStatus != 200 || out.Usage == nil || out.Usage.CacheRead != 95 {
@@ -438,5 +438,61 @@ func TestEgressSentinelsAreTyped(t *testing.T) {
 	m2.recordTokens("warmer", 5)
 	if err := m2.authorize("warmer", token); !errors.Is(err, ErrEgressTokenExhausted) {
 		t.Errorf("token exhaustion: err = %v, want ErrEgressTokenExhausted", err)
+	}
+}
+
+// TestClassifyEgressRefusal pins the exhaustive budget-error mapping: no
+// budget is NOT_CONFIGURED, both exhaustion states are UNAVAILABLE, and ANY
+// OTHER error — including one this build has never seen — is INTERNAL, never
+// silently collapsed into UNAVAILABLE.
+func TestClassifyEgressRefusal(t *testing.T) {
+	// A test-only sentinel stands in for a future budget error the switch has
+	// no explicit case for.
+	var unknownBudgetError = errors.New("some future budget error this build does not know")
+
+	for _, tc := range []struct {
+		name string
+		err  error
+		want pb.ErrorCode
+	}{
+		{"not configured", fmt.Errorf("wrapped: %w", ErrEgressBudgetNotConfigured), pb.ErrorCode_ERROR_CODE_NOT_CONFIGURED},
+		{"rate exhausted", fmt.Errorf("wrapped: %w", ErrEgressRateExhausted), pb.ErrorCode_ERROR_CODE_UNAVAILABLE},
+		{"token exhausted", fmt.Errorf("wrapped: %w", ErrEgressTokenExhausted), pb.ErrorCode_ERROR_CODE_UNAVAILABLE},
+		{"unknown error", unknownBudgetError, pb.ErrorCode_ERROR_CODE_INTERNAL},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := classifyEgressRefusal(tc.err); got != tc.want {
+				t.Errorf("classifyEgressRefusal(%v) = %v, want %v", tc.err, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestEgressInvalidRequestDoesNotConsumeBudget — the budget is the boundary
+// for PROVIDER SPEND, not a caller-bug counter. With a one-call budget, an
+// INVALID request (never reaching a provider) must consume nothing, so the
+// next VALID request still has its slot.
+func TestEgressInvalidRequestDoesNotConsumeBudget(t *testing.T) {
+	srv, calls := egressServer(t, provider.EgressBudget{MaxCallsPerMinute: 1})
+
+	// First an invalid request: bad base64 is refused before any transport.
+	_, herr := send(t, srv, "warmer", `{"provider":"oai","request_pb":"!!!","path":"/v1/chat/completions"}`)
+	if herr == nil || herr.Code != pb.ErrorCode_ERROR_CODE_INVALID_ARGUMENT {
+		t.Fatalf("invalid request was not refused as INVALID_ARGUMENT: %v", herr)
+	}
+	if *calls != 0 {
+		t.Fatalf("invalid request reached upstream %d times", *calls)
+	}
+
+	// Then a valid request: the one-call budget slot must still be free.
+	got, herr := send(t, srv, "warmer", egressPayload(t, "oai", "/v1/chat/completions"))
+	if herr != nil {
+		t.Fatalf("the valid request was refused after an invalid one: %v — the invalid attempt consumed the budget", herr)
+	}
+	if got.HTTPStatus != 200 {
+		t.Errorf("http_status = %d, want 200", got.HTTPStatus)
+	}
+	if *calls != 1 {
+		t.Errorf("upstream saw %d calls, want exactly the 1 valid one", *calls)
 	}
 }

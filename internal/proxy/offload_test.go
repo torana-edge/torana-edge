@@ -54,12 +54,12 @@ func offloadCall(t *testing.T, s *Server, ctx context.Context, payload string) (
 	if err := res.Validate(); err != nil {
 		t.Fatalf("callback returned an invalid result: %v", err)
 	}
-	if res.Refusal != nil {
-		return economics.OffloadResult{}, res.Refusal
+	if res.Refusal() != nil {
+		return economics.OffloadResult{}, res.Refusal()
 	}
 	var out economics.OffloadResult
-	if err := json.Unmarshal(res.Value, &out); err != nil {
-		t.Fatalf("decode offload result: %v (body %q)", err, string(res.Value))
+	if err := json.Unmarshal(res.Value(), &out); err != nil {
+		t.Fatalf("decode offload result: %v (body %q)", err, string(res.Value()))
 	}
 	return out, nil
 }
@@ -392,14 +392,18 @@ func TestOffloadClassification(t *testing.T) {
 		}
 	})
 	t.Run("guest-selected api_key_env", func(t *testing.T) {
+		// The guest field is obsolete: it must be rejected even when it names
+		// the provider's own configured variable — a guest may never select
+		// process environment variables.
 		t.Setenv("UNRELATED_PROCESS_SECRET", "must-not-leak")
+		t.Setenv("TORANA_LOCAL_KEY", "local-secret")
 		s, _ := New(Config{Providers: enabled})
 		_, herr := offloadCall(t, s, context.Background(), `{
 			"provider":"local","model":"local-1","user_prompt":"u",
-			"api_key_env":"UNRELATED_PROCESS_SECRET"
+			"api_key_env":"TORANA_LOCAL_KEY"
 		}`)
-		if herr == nil || herr.Code != pbv2.ErrorCode_ERROR_CODE_INVALID_ARGUMENT || !strings.Contains(herr.Message, "host-owned") {
-			t.Fatalf("guest api_key_env: got %v, want INVALID_ARGUMENT naming host ownership", herr)
+		if herr == nil || herr.Code != pbv2.ErrorCode_ERROR_CODE_INVALID_ARGUMENT || !strings.Contains(herr.Message, "obsolete") {
+			t.Fatalf("guest api_key_env: got %v, want INVALID_ARGUMENT naming the field obsolete", herr)
 		}
 	})
 	t.Run("transport failure", func(t *testing.T) {

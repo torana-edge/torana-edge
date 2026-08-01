@@ -64,8 +64,10 @@ type extensionMatrixRow struct {
 	args  string
 	want  extensionMatrixWant
 	// invalidResult selects which malformed ExtensionResult an "invalid" row's
-	// callback returns: "both" sets value AND refusal, "unspecified" uses an
-	// UNSPECIFIED refusal code.
+	// callback returns: "both" sets value AND refusal, "value-empty" sets a
+	// present EMPTY value alongside a refusal, "unspecified" uses an
+	// UNSPECIFIED refusal code, "unknown-code" uses a numeric code this build
+	// does not recognise.
 	invalidResult string
 }
 
@@ -77,14 +79,32 @@ type extensionMatrixRow struct {
 func wireExtension(t *testing.T, r *Runtime, row extensionMatrixRow) {
 	t.Helper()
 	if row.state == "invalid" {
+		// The malformed results are constructed DIRECTLY with private fields:
+		// the constructors cannot produce them, which is the point — these are
+		// host-bug shapes only an in-package test can build.
 		switch row.invalidResult {
 		case "both":
 			r.SendRequestFunc = func(_ context.Context, _, _ string) ExtensionResult {
-				return ExtensionResult{Value: []byte("value"), Refusal: hostErr(pbv2.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "refusal")}
+				return ExtensionResult{value: []byte("value"), refusal: hostErr(pbv2.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "refusal")}
+			}
+		case "value-empty":
+			// A PRESENT empty value alongside a refusal: len(r.value) > 0 used
+			// to miss this — the value is empty, but it is still a value, and
+			// the guest still cannot tell which arm to trust.
+			r.SendRequestFunc = func(_ context.Context, _, _ string) ExtensionResult {
+				return ExtensionResult{value: []byte{}, refusal: hostErr(pbv2.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "refusal")}
 			}
 		case "unspecified":
 			r.SendRequestFunc = func(_ context.Context, _, _ string) ExtensionResult {
-				return ExtensionResult{Refusal: hostErr(pbv2.ErrorCode_ERROR_CODE_UNSPECIFIED, "no code")}
+				return ExtensionResult{refusal: hostErr(pbv2.ErrorCode_ERROR_CODE_UNSPECIFIED, "no code")}
+			}
+		case "unknown-code":
+			// A numeric code this build does not recognise (e.g. 99 from a
+			// newer ABI): the guest cannot branch on it, so the dispatcher must
+			// frame INTERNAL rather than let it leak to the SDK as a protocol
+			// error.
+			r.SendRequestFunc = func(_ context.Context, _, _ string) ExtensionResult {
+				return ExtensionResult{refusal: hostErr(pbv2.ErrorCode(99), "unknown code")}
 			}
 		default:
 			t.Fatalf("%s: unknown invalid-result variant %q", row.name, row.invalidResult)
@@ -113,7 +133,9 @@ func wireExtension(t *testing.T, r *Runtime, row extensionMatrixRow) {
 			return ExtensionValue([]byte(row.want.body))
 		}
 	case "torana_record_savings":
-		r.SavingsFunc = func(string, int64, int64) {}
+		// The canonical callback: the batch-aware report ABI. The legacy
+		// two-field SavingsFunc no longer exists.
+		r.CompactionReportFunc = func(_ context.Context, _ string, _ economics.CompactionReport) {}
 	case "torana_plugin_counter":
 		r.PluginCounterFunc = func(string, string, int64) {}
 	case "torana_evaluate_compaction":
@@ -131,7 +153,9 @@ func wireExtension(t *testing.T, r *Runtime, row extensionMatrixRow) {
 		}
 	case "torana_offload_completion":
 		if row.state == "refused" {
-			r.OffloadFunc = func(_ context.Context, _ string) ExtensionResult {
+			// The canonical OffloadResultFunc is the only callback: the legacy
+			// OffloadFunc fallback no longer exists.
+			r.OffloadResultFunc = func(_ context.Context, _ string) ExtensionResult {
 				// A classified refusal must pass through UNCHANGED: the old
 				// dispatcher collapsed every callback error into UNAVAILABLE,
 				// which hid caller bugs (INVALID_ARGUMENT) and config gaps
@@ -140,7 +164,7 @@ func wireExtension(t *testing.T, r *Runtime, row extensionMatrixRow) {
 			}
 			return
 		}
-		r.OffloadFunc = func(_ context.Context, _ string) ExtensionResult {
+		r.OffloadResultFunc = func(_ context.Context, _ string) ExtensionResult {
 			return ExtensionValue([]byte(`{"completion":"done"}`))
 		}
 	case "verify_virtual_key":
@@ -257,13 +281,23 @@ func TestExtensionCommandFramingMatrix(t *testing.T) {
 			want: extensionMatrixWant{arm: "value", body: `{"valid":true}`}},
 
 		// A callback that returns a MALFORMED ExtensionResult must not leak to
-		// the guest: both arms set, or an UNSPECIFIED refusal code, is a
-		// host-side bug framed as INTERNAL with a loud log.
+		// the guest: both arms set (including a present empty value), an
+		// UNSPECIFIED refusal code, or an unknown numeric code is a host-side
+		// bug framed as INTERNAL with a loud log. Each shape is constructed
+		// directly with private fields — the constructors cannot produce it.
 		{name: "send_request/invalid-both", cmd: "torana_send_request", state: "invalid", invalidResult: "both",
 			args: `{}`,
 			want: extensionMatrixWant{arm: "error", code: pbv2.ErrorCode_ERROR_CODE_INTERNAL,
 				message: "extension callback returned an invalid result"}},
+		{name: "send_request/invalid-value-empty", cmd: "torana_send_request", state: "invalid", invalidResult: "value-empty",
+			args: `{}`,
+			want: extensionMatrixWant{arm: "error", code: pbv2.ErrorCode_ERROR_CODE_INTERNAL,
+				message: "extension callback returned an invalid result"}},
 		{name: "send_request/invalid-unspecified", cmd: "torana_send_request", state: "invalid", invalidResult: "unspecified",
+			args: `{}`,
+			want: extensionMatrixWant{arm: "error", code: pbv2.ErrorCode_ERROR_CODE_INTERNAL,
+				message: "extension callback returned an invalid result"}},
+		{name: "send_request/invalid-unknown-code", cmd: "torana_send_request", state: "invalid", invalidResult: "unknown-code",
 			args: `{}`,
 			want: extensionMatrixWant{arm: "error", code: pbv2.ErrorCode_ERROR_CODE_INTERNAL,
 				message: "extension callback returned an invalid result"}},
@@ -314,6 +348,11 @@ func TestExtensionCommandFramingMatrix(t *testing.T) {
 // of the one outcome abstraction every refusing callback returns. These are
 // the rules the dispatcher enforces via applyExtensionResult; a callback that
 // violates them is a host bug, not a guest input.
+//
+// The valid list is built ONLY from the constructors and the zero value: a
+// constructor-shaped result must always validate. The invalid list is built
+// DIRECTLY with the private fields, because the constructors cannot produce
+// a malformed result — that is the sum-type discipline F1 restores.
 func TestExtensionResultValidation(t *testing.T) {
 	valid := []ExtensionResult{
 		ExtensionValue([]byte(`{"status":"ok"}`)),
@@ -331,9 +370,15 @@ func TestExtensionResultValidation(t *testing.T) {
 
 	invalid := []ExtensionResult{
 		// Both arms set: the guest could not tell which one to trust.
-		{Value: []byte("value"), Refusal: hostErr(pbv2.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "refusal")},
+		{value: []byte("value"), refusal: hostErr(pbv2.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "refusal")},
+		// A PRESENT EMPTY value alongside a refusal: len(r.value) > 0 used to
+		// miss this exact shape, letting the malformed envelope reach the SDK.
+		{value: []byte{}, refusal: hostErr(pbv2.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "refusal")},
 		// A refusal with no classification.
-		{Refusal: hostErr(pbv2.ErrorCode_ERROR_CODE_UNSPECIFIED, "no code")},
+		{refusal: hostErr(pbv2.ErrorCode_ERROR_CODE_UNSPECIFIED, "no code")},
+		// A numeric code this build does not recognise: the guest cannot
+		// branch on it, so it must not validate.
+		{refusal: hostErr(pbv2.ErrorCode(99), "unknown code")},
 	}
 	for i, r := range invalid {
 		if err := r.Validate(); err == nil {

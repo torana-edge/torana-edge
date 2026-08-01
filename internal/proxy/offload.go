@@ -31,8 +31,9 @@ const offloadTimeout = 30 * time.Second
 // domains, and a plugin branches on them differently:
 //
 //   - INVALID_ARGUMENT: malformed payload, an override missing its model, or
-//     a guest-selected api_key_env that does not match the provider's
-//     host-owned configuration. Retrying the same call cannot help.
+//     the obsolete guest api_key_env field (credentials are configured on the
+//     provider, never selected by the guest). Retrying the same call cannot
+//     help.
 //   - NOT_CONFIGURED: offload disabled, an override naming a provider that
 //     does not exist, or a configured provider URL that cannot even be built
 //     into a request. The operator must change configuration.
@@ -50,13 +51,17 @@ func (s *Server) offloadCompletionResult(ctx context.Context, payloadJSON string
 		// plugin can direct its call to a specific endpoint (e.g. a
 		// guaranteed-local model for PII scanning). Must exist in Providers.
 		Provider string `json:"provider"`
-		// APIKeyEnv is accepted only for compatibility with older plugins and
-		// must match the provider's host-owned configuration. A guest may not
-		// select arbitrary process environment variables.
+		// APIKeyEnv is obsolete: credentials are configured on the provider (or
+		// the offload block), never selected by the guest. Parsed only so a
+		// non-empty value can be rejected loudly instead of silently honored.
 		APIKeyEnv string `json:"api_key_env"`
 	}
 	if err := json.Unmarshal([]byte(payloadJSON), &p); err != nil {
 		return wasm.ExtensionRefusal(pbv2.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "offload: parse payload: %v", err)
+	}
+	if p.APIKeyEnv != "" {
+		return wasm.ExtensionRefusal(pbv2.ErrorCode_ERROR_CODE_INVALID_ARGUMENT,
+			"offload: api_key_env is obsolete; configure credentials on the provider")
 	}
 
 	cfg := s.GetConfig().Providers
@@ -93,13 +98,11 @@ func (s *Server) offloadCompletionResult(ctx context.Context, payloadJSON string
 	// default offload secret may only be used for the configured default
 	// provider. An override gets only its explicitly named environment
 	// variable (or the provider's own configured environment variable); it
-	// must never inherit off.APIKeyEnc or the caller's credential.
+	// must never inherit off.APIKeyEnc or the caller's credential. The guest
+	// can no longer name ANY api_key_env (rejected above), so there is no
+	// guest-selected variable left to match against.
 	var apiKey string
 	if overrideProvider {
-		if p.APIKeyEnv != "" && p.APIKeyEnv != prov.APIKeyEnv {
-			return wasm.ExtensionRefusal(pbv2.ErrorCode_ERROR_CODE_INVALID_ARGUMENT,
-				"offload: api_key_env is host-owned; configure it on provider %q", provName)
-		}
 		apiKey = s.resolveSecret(prov.APIKeyEnv, prov.APIKeyEnc)
 	} else {
 		apiKey = s.resolveSecret(off.APIKeyEnv, off.APIKeyEnc)

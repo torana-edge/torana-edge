@@ -143,6 +143,23 @@ func (m *egressMeter) authorize(plugin string, budget provider.EgressBudget) err
 	return nil
 }
 
+// classifyEgressRefusal maps an authorize failure to the ErrorCode a plugin
+// can branch on, exhaustively: no budget is NOT_CONFIGURED (the capability
+// exists but the operator has not sized it); an EXISTING exhausted budget
+// (rate or token) is UNAVAILABLE (configured but unusable right now — the
+// window rolls); ANY OTHER error is a host bug and must be INTERNAL, never
+// silently collapsed into UNAVAILABLE.
+func classifyEgressRefusal(err error) pb.ErrorCode {
+	switch {
+	case errors.Is(err, ErrEgressBudgetNotConfigured):
+		return pb.ErrorCode_ERROR_CODE_NOT_CONFIGURED
+	case errors.Is(err, ErrEgressRateExhausted), errors.Is(err, ErrEgressTokenExhausted):
+		return pb.ErrorCode_ERROR_CODE_UNAVAILABLE
+	default:
+		return pb.ErrorCode_ERROR_CODE_INTERNAL
+	}
+}
+
 // recordTokens charges tokens actually spent, after the fact.
 func (m *egressMeter) recordTokens(plugin string, tokens int64) {
 	if tokens <= 0 {
@@ -176,8 +193,11 @@ type egressRequest struct {
 	TimeoutMS int    `json:"timeout_ms,omitempty"`
 }
 
+// egressResponse is the provider-outcome envelope: what the provider said
+// (HTTP status, body, metering). There is deliberately NO message/status
+// field — the error arm is the status channel, and a reached-but-refused
+// provider is reported by its HTTPStatus.
 type egressResponse struct {
-	Message    string `json:"message,omitempty"`
 	HTTPStatus int    `json:"http_status,omitempty"`
 	Body       string `json:"body,omitempty"` // base64, provider-format
 	Usage      *struct {
@@ -211,21 +231,6 @@ func (s *Server) sendPluginRequest(ctx context.Context, pluginName, payloadJSON 
 		// Naming an unconfigured provider is the whole containment boundary:
 		// a plugin can only reach endpoints the operator already trusts.
 		return wasm.ExtensionRefusal(pb.ErrorCode_ERROR_CODE_NOT_CONFIGURED, "unknown provider %q", req.Provider)
-	}
-
-	budget := cfg.Plugins.Runtime.EgressBudgetFor(pluginName)
-	if err := s.egress.authorize(pluginName, budget); err != nil {
-		s.stats.RecordPluginCounter(pluginName, "egress_refused", 1)
-		switch {
-		case errors.Is(err, ErrEgressBudgetNotConfigured):
-			// The capability exists but the operator has not sized it for this
-			// plugin — a configuration gap the operator must close.
-			return wasm.ExtensionRefusal(pb.ErrorCode_ERROR_CODE_NOT_CONFIGURED, "%v", err)
-		default:
-			// An EXISTING budget whose rolling limit is exhausted (rate or
-			// token) is configured but unusable right now; the window rolls.
-			return wasm.ExtensionRefusal(pb.ErrorCode_ERROR_CODE_UNAVAILABLE, "%v", err)
-		}
 	}
 
 	raw, err := base64.StdEncoding.DecodeString(req.RequestPB)
@@ -288,6 +293,18 @@ func (s *Server) sendPluginRequest(ctx context.Context, pluginName, payloadJSON 
 	if key := s.resolveSecret(prov.APIKeyEnv, prov.APIKeyEnc); key != "" {
 		httpReq.Header.Set("Authorization", "Bearer "+key)
 		httpReq.Header.Set("X-Api-Key", key)
+	}
+
+	// Budget authorization happens AFTER all guest-input and request-build
+	// validation and immediately BEFORE the network call: the budget is the
+	// containment boundary for PROVIDER SPEND, not a caller-bug counter. A
+	// malformed request that never reaches a provider consumes nothing; a
+	// TRANSPORT ATTEMPT does — the slot was authorized, and a refused request
+	// still needs the window to roll.
+	budget := cfg.Plugins.Runtime.EgressBudgetFor(pluginName)
+	if err := s.egress.authorize(pluginName, budget); err != nil {
+		s.stats.RecordPluginCounter(pluginName, "egress_refused", 1)
+		return wasm.ExtensionRefusal(classifyEgressRefusal(err), "%v", err)
 	}
 
 	start := time.Now()

@@ -2737,10 +2737,10 @@ func (s *Server) newRuntime() *wasm.Runtime {
 	// (no constant status field), refusals are framed classified HostErrors.
 	rt.OffloadResultFunc = func(ctx context.Context, payloadJSON string) wasm.ExtensionResult {
 		out := s.offloadCompletionResult(ctx, payloadJSON)
-		if out.Refusal != nil {
+		if out.Refusal() != nil {
 			// Plugins degrade gracefully on offload errors, so this
 			// log line is the only host-side visibility.
-			log.Printf("[offload] %s", out.Refusal.Message)
+			log.Printf("[offload] %s", out.Refusal().Message)
 			s.stats.RecordOffloadFailure()
 		}
 		return out
@@ -2762,12 +2762,11 @@ func (s *Server) newRuntime() *wasm.Runtime {
 		}
 		rs.PendingRoute = rt.VerdictsFor(rs.ID).Route()
 	}
-	// Plugins report compaction savings via torana_record_savings,
-	// attributed per plugin in /stats and OTLP.
-	rt.SavingsFunc = func(pluginName string, originalBytes, finalBytes int64) {
-		s.stats.RecordCompaction(pluginName, originalBytes, finalBytes)
-		metrics.RecordPluginSavings(context.Background(), pluginName, originalBytes-finalBytes)
-	}
+	// Plugins report compaction savings via torana_record_savings. The
+	// canonical CompactionReportFunc queues the report request-scoped;
+	// recordCompactionReports prices and records it (including the legacy
+	// compactions counter and the OTLP savings gauge) only once the route is
+	// committed.
 	rt.PluginCounterFunc = func(pluginName string, counter string, delta int64) {
 		s.stats.RecordPluginCounter(pluginName, counter, delta)
 	}
