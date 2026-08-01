@@ -182,16 +182,16 @@ func emitPart(ch chan<- engine.StreamEvent, part geminiPart, blockIndex *int) bo
 		ch <- engine.StreamEvent{ToolCallDelta: &engine.ToolCallDelta{Index: idx, ArgumentsDelta: delta}}
 		ch <- engine.StreamEvent{ToolCallEnd: &engine.ToolCallEnd{Index: idx}}
 	case part.Thought:
-		if part.Text != "" {
-			t := part.Text
+		if partText(part) != "" {
+			t := partText(part)
 			ch <- engine.StreamEvent{ThinkingDelta: &t}
 		}
 		if part.ThoughtSignature != "" {
 			sig := part.ThoughtSignature
 			ch <- engine.StreamEvent{SignatureDelta: &sig}
 		}
-	case part.Text != "":
-		t := part.Text
+	case partText(part) != "":
+		t := partText(part)
 		ch <- engine.StreamEvent{TextDelta: &t}
 		if part.ThoughtSignature != "" {
 			sig := part.ThoughtSignature
@@ -256,17 +256,20 @@ func (s *StreamAdapter) SerializeStream(ctx context.Context, w io.Writer, events
 			pendingUsage = event.Usage
 
 		case event.TextDelta != nil:
-			if err := writeFrame(w, chunkPart(geminiPart{Text: *event.TextDelta}), s.Wrapped); err != nil {
+			if err := writeFrame(w, chunkPart(geminiPart{Text: new(*event.TextDelta)}), s.Wrapped); err != nil {
 				return err
 			}
 
 		case event.ThinkingDelta != nil:
-			if err := writeFrame(w, chunkPart(geminiPart{Thought: true, Text: *event.ThinkingDelta}), s.Wrapped); err != nil {
+			if err := writeFrame(w, chunkPart(geminiPart{Thought: true, Text: new(*event.ThinkingDelta)}), s.Wrapped); err != nil {
 				return err
 			}
 
 		case event.SignatureDelta != nil:
-			if err := writeFrame(w, chunkPart(geminiPart{ThoughtSignature: *event.SignatureDelta}), s.Wrapped); err != nil {
+			// The standalone signature part keeps the provider's EXPLICIT empty
+			// text member ({"text":"","thoughtSignature":…}): a bare
+			// {"thoughtSignature":…} would not round-trip the text arm.
+			if err := writeFrame(w, chunkPart(geminiPart{Text: new(""), ThoughtSignature: *event.SignatureDelta}), s.Wrapped); err != nil {
 				return err
 			}
 

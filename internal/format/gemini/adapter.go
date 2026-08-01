@@ -91,13 +91,25 @@ type geminiContent struct {
 }
 
 // geminiPart is a polymorphic content part. Code Assist may combine a
-// thoughtSignature with a functionCall or text on the same part.
+// thoughtSignature with a functionCall or text on the same part. Text is a
+// pointer so an explicit empty text member (the trailing signature-only part's
+// {"text":"","thoughtSignature":…}) is distinguishable from an absent one and
+// survives marshal verbatim.
 type geminiPart struct {
-	Text             string          `json:"text,omitempty"`
+	Text             *string         `json:"text,omitempty"`
 	Thought          bool            `json:"thought,omitempty"`
 	ThoughtSignature string          `json:"thoughtSignature,omitempty"`
 	FunctionCall     *geminiFuncCall `json:"functionCall,omitempty"`
 	FunctionResponse *geminiFuncResp `json:"functionResponse,omitempty"`
+}
+
+// partText returns the part's text, treating an absent text member (nil
+// pointer) as the empty string.
+func partText(p geminiPart) string {
+	if p.Text == nil {
+		return ""
+	}
+	return *p.Text
 }
 
 type geminiFuncCall struct {
@@ -178,11 +190,11 @@ func (a *Adapter) Unmarshal(rawBody []byte) (*engine.ChatRequest, error) {
 	if gReq.SystemInstruction != nil {
 		var sb string
 		for _, p := range gReq.SystemInstruction.Parts {
-			if p.Text != "" {
+			if partText(p) != "" {
 				if sb != "" {
 					sb += "\n"
 				}
-				sb += p.Text
+				sb += partText(p)
 			}
 		}
 		if sb != "" {
@@ -206,11 +218,11 @@ func (a *Adapter) Unmarshal(rawBody []byte) (*engine.ChatRequest, error) {
 			// Unknown role: treat text as user text.
 			msg := engine.Message{Role: engine.RoleUser}
 			for _, p := range content.Parts {
-				if p.Text != "" {
+				if partText(p) != "" {
 					if msg.Content != "" {
 						msg.Content += "\n"
 					}
-					msg.Content += p.Text
+					msg.Content += partText(p)
 				}
 			}
 			if msg.Content != "" {
@@ -265,11 +277,11 @@ func appendUserOrTool(chat *engine.ChatRequest, content geminiContent, callIDs m
 	msg := engine.Message{Role: engine.RoleUser}
 	for _, p := range content.Parts {
 		switch {
-		case p.Text != "":
+		case partText(p) != "":
 			if msg.Content != "" {
 				msg.Content += "\n"
 			}
-			msg.Content += p.Text
+			msg.Content += partText(p)
 		case p.FunctionResponse != nil:
 			appendToolResult(chat, p.FunctionResponse, callIDs)
 		}
@@ -280,30 +292,58 @@ func appendUserOrTool(chat *engine.ChatRequest, content geminiContent, callIDs m
 }
 
 // appendModel handles a role:"model" content, which under Code Assist may hold
-// a functionCall, a functionResponse (tool result), or text — each preserving
-// its id and thoughtSignature. A part with empty text and only a
+// a functionCall, a functionResponse (tool result), thinking, or text — each
+// preserving its id and thoughtSignature. A part with empty text and only a
 // thoughtSignature is the trailing standalone signature (Code Assist's final
 // {"thoughtSignature":<sig>,"text":""} part, SignatureScopeTrailingStandalone):
 // it binds the preceding closed text/thinking content of this turn, never a
 // tool-call block. It is only valid AFTER text/thinking in the same content;
 // a signature-only part with no preceding text/thinking is malformed and
 // rejected (a leading standalone, or one stranded on a tool-call-only turn).
+//
+// Ordered signed-part topology is preserved or rejected: a current-block
+// signature must never move over unsigned content (the Content/Thinking merge
+// would replay a provider signature over parts it did not sign), so multiple
+// text-bearing or thinking-bearing parts with any signature in the content are
+// rejected, and the trailing standalone signature must be final and singular.
 func appendModel(chat *engine.ChatRequest, content geminiContent, prevCallIdx map[string]int, callIDs map[string]string) error {
 	msg := engine.Message{Role: engine.RoleAssistant}
 
-	// hasText: does this content carry any text/thinking at all (text and
-	// thinking blocks both populate Text)? Distinguishes a leading standalone
-	// signature from a signature stranded on a tool-call-only turn.
+	// Pre-pass counts for the topology reject rules. Signatures on tool-call
+	// parts are call-bound (each call keeps its own) and never move, so they
+	// are excluded from "any signature".
+	textParts, thinkingParts, standaloneParts := 0, 0, 0
+	sigOnText, sigOnThinking := false, false
 	hasText := false
 	for _, p := range content.Parts {
-		if p.Text != "" {
+		switch {
+		case p.FunctionCall != nil || p.FunctionResponse != nil:
+		case p.Thought && partText(p) != "":
+			thinkingParts++
+			if p.ThoughtSignature != "" {
+				sigOnThinking = true
+			}
 			hasText = true
-			break
+		case partText(p) != "":
+			textParts++
+			if p.ThoughtSignature != "" {
+				sigOnText = true
+			}
+			hasText = true
+		case p.ThoughtSignature != "":
+			standaloneParts++
 		}
 	}
 
+	// A second signature-only part is always malformed, wherever it sits:
+	// the trailing slot is singular (covers text,sigA,sigB and sig-only,sig-only).
+	if standaloneParts > 1 {
+		return fmt.Errorf("gemini: duplicate standalone signature")
+	}
+
+	sigInContent := sigOnThinking || sigOnText || standaloneParts > 0
 	seenText := false
-	for _, p := range content.Parts {
+	for i, p := range content.Parts {
 		switch {
 		case p.FunctionResponse != nil:
 			appendToolResult(chat, p.FunctionResponse, callIDs)
@@ -321,11 +361,23 @@ func appendModel(chat *engine.ChatRequest, content geminiContent, prevCallIdx ma
 				Arguments: p.FunctionCall.Args,
 				Signature: p.ThoughtSignature,
 			})
-		case p.Text != "":
+		case p.Thought && partText(p) != "":
+			// Thinking part: its text goes to Thinking (never Content), and a
+			// signature on it is the current-block signature. Joined with "\n"
+			// like Content.
+			if msg.Thinking != "" {
+				msg.Thinking += "\n"
+			}
+			msg.Thinking += partText(p)
+			if p.ThoughtSignature != "" {
+				msg.ThinkingSignature = p.ThoughtSignature
+			}
+			seenText = true
+		case partText(p) != "":
 			if msg.Content != "" {
 				msg.Content += "\n"
 			}
-			msg.Content += p.Text
+			msg.Content += partText(p)
 			if p.ThoughtSignature != "" {
 				// A part carrying BOTH text and a signature is a current (still
 				// open) block, not the trailing standalone case.
@@ -342,10 +394,24 @@ func appendModel(chat *engine.ChatRequest, content geminiContent, prevCallIdx ma
 				}
 				return fmt.Errorf("gemini: trailing signature without preceding text/thinking content")
 			}
+			if i != len(content.Parts)-1 {
+				return fmt.Errorf("gemini: standalone signature is not the final part")
+			}
 			msg.TrailingSignature = p.ThoughtSignature
 		}
 	}
-	if msg.Content != "" || len(msg.ToolCalls) > 0 {
+
+	// A single signature plus merged multiple text parts would replay the
+	// signature over content the provider did not sign (findings 1): reject.
+	if textParts >= 2 && (sigOnText || standaloneParts > 0) {
+		return fmt.Errorf("gemini: multiple text parts with a signature are not representable")
+	}
+	// Same class of error for merged thinking parts.
+	if thinkingParts >= 2 && sigInContent {
+		return fmt.Errorf("gemini: multiple thinking parts with a signature are not representable")
+	}
+
+	if msg.Content != "" || msg.Thinking != "" || len(msg.ToolCalls) > 0 {
 		chat.Messages = append(chat.Messages, msg)
 	}
 	return nil
@@ -461,7 +527,7 @@ func buildSystemInstruction(msgs []engine.Message) *geminiSystemInstruction {
 			if si == nil {
 				si = &geminiSystemInstruction{Role: "user"}
 			}
-			si.Parts = append(si.Parts, geminiPart{Text: msg.Content})
+			si.Parts = append(si.Parts, geminiPart{Text: new(msg.Content)})
 		}
 	}
 	return si
@@ -480,20 +546,36 @@ func buildContents(msgs []engine.Message, codeAssist bool) []geminiContent {
 		switch msg.Role {
 		case engine.RoleUser:
 			if msg.Content != "" {
-				out = append(out, geminiContent{Role: "user", Parts: []geminiPart{{Text: msg.Content}}})
+				out = append(out, geminiContent{Role: "user", Parts: []geminiPart{{Text: new(msg.Content)}}})
 			}
 		case engine.RoleAssistant:
-			if msg.Content != "" || msg.TrailingSignature != "" {
-				p := geminiPart{Text: msg.Content}
-				if msg.ThinkingSignature != "" {
+			if msg.Content != "" || msg.Thinking != "" || msg.TrailingSignature != "" {
+				var parts []geminiPart
+				if msg.Thinking != "" {
+					// Thinking precedes text per Gemini's contract: the thinking
+					// part is FIRST, carrying the current-block signature.
+					tp := geminiPart{Thought: true, Text: new(msg.Thinking)}
+					if msg.ThinkingSignature != "" {
+						tp.ThoughtSignature = msg.ThinkingSignature
+					}
+					parts = append(parts, tp)
+				}
+				p := geminiPart{}
+				if msg.Content != "" {
+					p.Text = new(msg.Content)
+				}
+				if msg.Thinking == "" && msg.ThinkingSignature != "" {
+					// Legacy current-block shape: the signature rides on the text
+					// part itself (no separate thinking part to carry it).
 					p.ThoughtSignature = msg.ThinkingSignature
 				}
-				parts := []geminiPart{p}
+				parts = append(parts, p)
 				if msg.TrailingSignature != "" {
 					// Code Assist's trailing signature-only part: its OWN final
-					// part in the same content as the text — never merged into
-					// the text part (topology-preserving round-trip).
-					parts = append(parts, geminiPart{ThoughtSignature: msg.TrailingSignature})
+					// part in the same content as the text, with the EXPLICIT
+					// empty text arm the provider emits — never merged into the
+					// text part (topology-preserving round-trip).
+					parts = append(parts, geminiPart{Text: new(""), ThoughtSignature: msg.TrailingSignature})
 				}
 				out = append(out, geminiContent{Role: "model", Parts: parts})
 			}
