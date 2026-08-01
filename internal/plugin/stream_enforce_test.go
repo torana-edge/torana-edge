@@ -777,6 +777,136 @@ func TestEnforceTransformedBoundariesUseDownstreamScope(t *testing.T) {
 	pp.EndRequest(reqID)
 }
 
+// TestEnforceScopeWatermarksConvergeAcrossCalls pins the two timing variants
+// a topology writer may legally produce: suppress an accepted stop then emit
+// it later, or emit it early then suppress the later accepted stop. The
+// terminal after either shape must use the converged logical scope, never the
+// sum of each call's local max.
+func TestEnforceScopeWatermarksConvergeAcrossCalls(t *testing.T) {
+	usage := func(tokens int32) *pbv2.StreamEvent {
+		return &pbv2.StreamEvent{Event: &pbv2.StreamEvent_Usage{Usage: &pbv2.Usage{InputTokens: tokens}}}
+	}
+	for _, tc := range []struct {
+		name  string
+		calls [][2]int // accepted closes, returned closes for successive calls
+		want  int
+	}{
+		{
+			name:  "accepted stop suppressed then returned later",
+			calls: [][2]int{{1, 0}, {0, 1}},
+			want:  1,
+		},
+		{
+			name:  "returned stop early then accepted later",
+			calls: [][2]int{{0, 1}, {1, 0}},
+			want:  1,
+		},
+		{
+			name:  "two returned scopes then one accepted close",
+			calls: [][2]int{{0, 2}, {1, 0}},
+			want:  2,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			vs, pvs := enforceState(t, "test-stream-mutator")
+			for _, call := range tc.calls {
+				if got := pvs.recordScopeCloses(call[0], call[1]); got != max(pvs.acceptedCloseCount, pvs.returnedCloseCount) {
+					t.Fatalf("watermark scope = %d, want max(%d, %d)", got, pvs.acceptedCloseCount, pvs.returnedCloseCount)
+				}
+			}
+			if pvs.scopeNum != tc.want {
+				t.Fatalf("converged scope = %d, want %d", pvs.scopeNum, tc.want)
+			}
+
+			// A real policy violation after the timing shape must preserve the
+			// converged ordinal in its operator-visible terminal.
+			pvs.accepted = []*pbv2.StreamEvent{usage(1)}
+			pvs.returned = []*pbv2.StreamEvent{usage(2)}
+			err := vs.checkScope(pvs, pvs.scopeNum)
+			var term *StreamTerminalError
+			if !errors.As(err, &term) || term.Kind != streamTerminalPlugin || term.Scope != tc.want {
+				t.Fatalf("violation terminal = %T: %v, want scope %d", err, err, tc.want)
+			}
+		})
+	}
+}
+
+// TestEnforceScopeWatermarksConvergeAcrossCallsProduction drives the two
+// legal boundary moves through real WASM hooks. The per-plugin watermark must
+// converge at scope 1 after the delayed/early counterpart arrives on the next
+// host event; the old per-call max reported scope 2.
+func TestEnforceScopeWatermarksConvergeAcrossCallsProduction(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		plugin string
+	}{
+		{"accepted stop delayed to usage", "test-stream-delay-stop"},
+		{"returned stop emitted early", "test-stream-early-stop"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			requireWASM(t, fixturesDir+"/"+tc.plugin+"/plugin.wasm")
+			pp := newTestPipeline(t, fixturesDir, []string{tc.plugin})
+			const reqID = 7027
+			seq := []engine.StreamEvent{
+				{BlockStart: &engine.BlockStart{Index: 0, Kind: engine.BlockKindText}},
+				{TextDelta: strPtr("text")},
+				{BlockStop: &engine.BlockStop{Index: 0}},
+				{Usage: &engine.StreamUsage{InputTokens: 1, OutputTokens: 1}},
+			}
+			for _, event := range seq {
+				e := event
+				if _, err := pp.RunOnStreamChunkVerified(context.Background(), reqID, &e); err != nil {
+					t.Fatalf("RunOnStreamChunkVerified(%+v): %v", event, err)
+				}
+			}
+			pp.mu.Lock()
+			got := pp.streamVerify[reqID].plugins[0].scopeNum
+			pp.mu.Unlock()
+			if got != 1 {
+				t.Fatalf("moved boundary converged at scope %d, want 1", got)
+			}
+			if err := pp.EndStreamVerified(reqID); err != nil {
+				t.Fatalf("EndStreamVerified: %v", err)
+			}
+			pp.EndRequest(reqID)
+		})
+	}
+}
+
+// TestEndStreamVerifiedUsesSeparateTrailingScope pins the defined terminal
+// ordinal for a boundary-less transaction after completed scopes. It is one
+// final scope for diagnostics, but does not advance either close watermark.
+func TestEndStreamVerifiedUsesSeparateTrailingScope(t *testing.T) {
+	pp := enforcePipeline(t, "test-stream-mutator")
+	vs := newStreamVerifierState(pp)
+	const reqID = 7026
+	pp.mu.Lock()
+	pp.streamVerify[reqID] = vs
+	pp.mu.Unlock()
+	pvs := vs.plugins[0]
+	pvs.recordScopeCloses(1, 1)
+	accepted := &pbv2.StreamEvent{Event: &pbv2.StreamEvent_Usage{Usage: &pbv2.Usage{InputTokens: 1}}}
+	returned := &pbv2.StreamEvent{Event: &pbv2.StreamEvent_Usage{Usage: &pbv2.Usage{InputTokens: 2}}}
+	if err := vs.host.walk(accepted); err != nil {
+		t.Fatalf("host setup: %v", err)
+	}
+	if err := pvs.walker.walk(returned); err != nil {
+		t.Fatalf("returned setup: %v", err)
+	}
+	pvs.accepted = []*pbv2.StreamEvent{accepted}
+	pvs.returned = []*pbv2.StreamEvent{returned}
+
+	err := pp.EndStreamVerified(reqID)
+	var term *StreamTerminalError
+	if !errors.As(err, &term) || term.Kind != streamTerminalPlugin || term.Scope != 2 {
+		t.Fatalf("trailing terminal = %T: %v, want scope 2", err, err)
+	}
+	if pvs.acceptedCloseCount != 1 || pvs.returnedCloseCount != 1 {
+		t.Fatalf("end-of-stream mutated close watermarks: accepted=%d returned=%d", pvs.acceptedCloseCount, pvs.returnedCloseCount)
+	}
+	pp.EndRequest(reqID)
+}
+
 // TestEnforceReturnedCompleteScopeBeforeRelease proves a LAST plugin cannot
 // invent and close a complete scope from a bare non-close input, then rely on
 // EndStreamVerified running after the unauthorized events have reached the

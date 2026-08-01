@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "id": "torana-test/test-stream-early-stop",
+  "name": "test-stream-early-stop",
+  "version": "0.1.0",
+  "abi_version": "v2",
+  "failure_mode": "pass",
+  "description": "Regression fixture: emit a stop early and suppress the later accepted stop",
+  "hooks": [
+    {
+      "name": "run_on_stream_chunk"
+    }
+  ],
+  "permissions": [
+    {
+      "name": "ir.stream.write",
+      "description": "Move a content boundary across hook calls"
+    }
+  ]
+}

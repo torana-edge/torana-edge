@@ -312,6 +312,12 @@ type pluginStreamState struct {
 	// move boundaries before this plugin observes them, and a plugin may CREATE
 	// a complete returned scope before its accepted input closes.
 	scopeNum int
+	// acceptedCloseCount and returnedCloseCount are cumulative watermarks. A
+	// topology writer may suppress a stop now and re-emit it on a later hook
+	// call (or do the reverse), so per-call max would count one logical boundary
+	// twice. scopeNum is always max of these two watermarks.
+	acceptedCloseCount int
+	returnedCloseCount int
 }
 
 // streamVerifierState is the per-request enforcement state: the host-side
@@ -422,16 +428,31 @@ func isScopeCloseEvent(ev *pbv2.StreamEvent) bool {
 	return false
 }
 
-// closeScope runs the LATE scope check for one plugin and advances that
-// plugin's accepted-stream ordinal. The SDK field-policy transaction plus
+// closeScope is the focused-state-test convenience for one coincident
+// accepted/returned close. Production records the actual close counts with
+// recordScopeCloses below. The SDK field-policy transaction plus
 // verifyStreamPrefix run over the whole-stream prefix ending at this scope. A violation is late
 // (earlier output of the block has already been forwarded) and terminates
 // under BOTH failure modes. An *acceptedStreamError from the verifier's own
 // accepted-side validation is a HOST defect — the plugin's failure_mode never
 // applies.
 func (vs *streamVerifierState) closeScope(pvs *pluginStreamState) error {
-	pvs.scopeNum++
-	return vs.checkScope(pvs, pvs.scopeNum)
+	return vs.checkScope(pvs, pvs.recordScopeCloses(1, 1))
+}
+
+// recordScopeCloses advances cumulative close watermarks and returns their
+// converged ordinal. It is deliberately cumulative: accepted Stop → suppress,
+// then a later returned Stop is one scope, not two; similarly for early output
+// followed by a later accepted Stop. A stage still calls checkScope whenever
+// either argument is non-zero.
+func (pvs *pluginStreamState) recordScopeCloses(accepted, returned int) int {
+	pvs.acceptedCloseCount += accepted
+	pvs.returnedCloseCount += returned
+	pvs.scopeNum = pvs.acceptedCloseCount
+	if pvs.returnedCloseCount > pvs.scopeNum {
+		pvs.scopeNum = pvs.returnedCloseCount
+	}
+	return pvs.scopeNum
 }
 
 // checkScope verifies a completed transaction at an already-assigned ordinal.
@@ -568,7 +589,11 @@ func (pp *PluginPipeline) EndStreamVerified(reqID uint64) error {
 		if pvs == nil || pvs.scopeStart >= len(pvs.accepted) {
 			continue
 		}
-		if err := vs.closeScope(pvs); err != nil {
+		// A terminal trailing transaction has no completed close watermark to
+		// pair. Give it a separate final ordinal without mutating either
+		// watermark (EndStreamVerified is called once and no later scope can
+		// converge with it).
+		if err := vs.checkScope(pvs, pvs.scopeNum+1); err != nil {
 			return err
 		}
 	}
@@ -746,17 +771,12 @@ func (pp *PluginPipeline) runOnStreamChunk(ctx context.Context, reqID uint64, ch
 					returnedMessageStop = true
 				}
 			}
-			scopeCloses := acceptedCloses
-			if returnedCloses > scopeCloses {
-				scopeCloses = returnedCloses
-			}
-			if scopeCloses != 0 {
+			if acceptedCloses != 0 || returnedCloses != 0 {
 				// All accepted events in this HookResult are one atomic policy
-				// transaction. Count the larger side so a coincident close is not
-				// double-counted while a multi-scope fan-out reports its last real
-				// boundary.
-				pvs.scopeNum += scopeCloses
-				scope := pvs.scopeNum
+				// transaction. Cumulative paired watermarks make delayed/early
+				// matching stops converge while a multi-scope fan-out reports its
+				// last real boundary.
+				scope := pvs.recordScopeCloses(acceptedCloses, returnedCloses)
 				if acceptedMessageStop || returnedMessageStop {
 					if err := pvs.walker.end(); err != nil {
 						return nil, vs.terminate(streamTerminalPlugin, pvs.lp.manifest.Name, -1, scope, err)
