@@ -46,3 +46,21 @@ func TestToolCallSignatureRoundTrip(t *testing.T) {
 		t.Errorf("request-side tool call signature lost: %q", got.Messages[0].ToolCalls[0].Signature)
 	}
 }
+
+// TestTrailingSignatureRoundTrip guards Message.trailing_signature (pb field 11,
+// request-domain SignatureScopeTrailingStandalone) through the protobuf
+// boundary: the WASM pipeline round-trips every request message through it, so
+// a Gemini/Code Assist trailing signature-only part must survive or replayed
+// history loses the binding on the next turn.
+func TestTrailingSignatureRoundTrip(t *testing.T) {
+	chat := &engine.ChatRequest{Messages: []engine.Message{
+		{Role: engine.RoleAssistant, Content: "answer", TrailingSignature: "TRAIL_SIG"},
+	}}
+	got := FromPBChatRequest(ToPBChatRequest(chat))
+	if len(got.Messages) != 1 {
+		t.Fatal("message lost")
+	}
+	if got.Messages[0].TrailingSignature != "TRAIL_SIG" {
+		t.Errorf("request-side trailing signature lost: %q", got.Messages[0].TrailingSignature)
+	}
+}
