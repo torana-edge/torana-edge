@@ -356,6 +356,19 @@ func (s *StreamAdapter) serializeResponsesStream(w io.Writer, events <-chan engi
 
 	for evt := range events {
 		switch {
+		case evt.BlockStart != nil:
+			// The Responses protocol has no content-block start/stop concept:
+			// a block boundary cannot be rendered faithfully (an empty block
+			// would vanish entirely), so error instead of silently casting or
+			// dropping it. Never cast.
+			if evt.BlockStart.Kind == engine.BlockKindProvider {
+				return fmt.Errorf("openai: provider block kind %q is not supported by this serializer", evt.BlockStart.ProviderKind)
+			}
+			return fmt.Errorf("openai: %v content blocks are not supported by this serializer", evt.BlockStart.Kind)
+
+		case evt.BlockStop != nil:
+			return fmt.Errorf("openai: content block stops are not supported by this serializer")
+
 		case evt.Error != nil:
 			payload := map[string]any{
 				"type": "response.failed",
@@ -500,6 +513,19 @@ func (s *StreamAdapter) serializeResponsesStream(w io.Writer, events <-chan engi
 
 func serializeEvent(evt engine.StreamEvent) (string, error) {
 	switch {
+	case evt.BlockStart != nil:
+		// The chat protocol has no content-block start/stop concept: a
+		// block boundary cannot be rendered faithfully (an empty block would
+		// vanish entirely), so error instead of silently casting or dropping
+		// it. Never cast.
+		if evt.BlockStart.Kind == engine.BlockKindProvider {
+			return "", fmt.Errorf("openai: provider block kind %q is not supported by this serializer", evt.BlockStart.ProviderKind)
+		}
+		return "", fmt.Errorf("openai: %v content blocks are not supported by this serializer", evt.BlockStart.Kind)
+
+	case evt.BlockStop != nil:
+		return "", fmt.Errorf("openai: content block stops are not supported by this serializer")
+
 	case evt.TextDelta != nil:
 		return textDeltaSSE(*evt.TextDelta), nil
 

@@ -327,3 +327,77 @@ func TestStreamParse_EndTurnFinish(t *testing.T) {
 		t.Errorf("event 1: expected FinishReason 'stop', got %q", events[1].FinishReason)
 	}
 }
+
+// TestSerializeThinkingBlock: a plugin-emitted thinking block renders
+// faithfully as contentBlockStart(thinking) → contentBlockDelta(thinking) →
+// contentBlockStop on the ConverseStream wire.
+func TestSerializeThinkingBlock(t *testing.T) {
+	stream := &Stream{}
+
+	thinking := "step by step"
+	events := []engine.StreamEvent{
+		{BlockStart: &engine.BlockStart{Index: 0, Kind: engine.BlockKindThinking}},
+		{ThinkingDelta: &thinking},
+		{BlockStop: &engine.BlockStop{Index: 0}},
+	}
+
+	evCh := make(chan engine.StreamEvent, len(events))
+	for _, e := range events {
+		evCh <- e
+	}
+	close(evCh)
+
+	var buf bytes.Buffer
+	if err := stream.SerializeStream(context.Background(), &buf, evCh); err != nil {
+		t.Fatalf("serialize: %v", err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, `"contentBlockStart"`) || !strings.Contains(out, `"thinking":{}`) {
+		t.Errorf("missing thinking contentBlockStart: %s", out)
+	}
+	if !strings.Contains(out, `"thinking":"step by step"`) {
+		t.Errorf("missing thinking delta: %s", out)
+	}
+	if !strings.Contains(out, `"contentBlockStop"`) {
+		t.Errorf("missing contentBlockStop: %s", out)
+	}
+}
+
+// TestSerializeUnrenderableBlocksError: text and provider blocks have no
+// faithful ConverseStream representation (the wire has no text block start/
+// stop frames and no provider frames at all), so the serializer must error
+// explicitly rather than silently drop them.
+func TestSerializeUnrenderableBlocksError(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		ev   engine.StreamEvent
+		want string
+	}{
+		{
+			name: "text block",
+			ev:   engine.StreamEvent{BlockStart: &engine.BlockStart{Index: 0, Kind: engine.BlockKindText}},
+			want: "bedrock: text content blocks are not supported by this serializer",
+		},
+		{
+			name: "provider block",
+			ev: engine.StreamEvent{BlockStart: &engine.BlockStart{
+				Index: 0, Kind: engine.BlockKindProvider, ProviderKind: "redacted",
+			}},
+			want: `bedrock: provider block kind "redacted" is not supported by this serializer`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			evCh := make(chan engine.StreamEvent, 1)
+			evCh <- tc.ev
+			close(evCh)
+			var buf bytes.Buffer
+			err := (&Stream{}).SerializeStream(context.Background(), &buf, evCh)
+			if err == nil {
+				t.Fatal("unrenderable block did not error")
+			}
+			if err.Error() != tc.want {
+				t.Errorf("error = %q, want %q", err.Error(), tc.want)
+			}
+		})
+	}
+}

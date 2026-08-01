@@ -448,3 +448,73 @@ func TestRoundTrip_ResponsesAPI(t *testing.T) {
 		t.Errorf("serialized output mismatch:\n%s", serialized)
 	}
 }
+
+// TestSerializeBlockEventsErrorChat: the chat.completion.chunk protocol has no
+// content-block start/stop concept, so a plugin-emitted BlockStart/BlockStop
+// cannot be rendered faithfully (an empty block would vanish entirely). The
+// serializer must error explicitly — the pre-fix behavior silently dropped the
+// events.
+func TestSerializeBlockEventsErrorChat(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		ev   engine.StreamEvent
+		want string
+	}{
+		{
+			name: "text block start",
+			ev:   engine.StreamEvent{BlockStart: &engine.BlockStart{Index: 0, Kind: engine.BlockKindText}},
+			want: "openai: text content blocks are not supported by this serializer",
+		},
+		{
+			name: "provider block start",
+			ev: engine.StreamEvent{BlockStart: &engine.BlockStart{
+				Index: 0, Kind: engine.BlockKindProvider, ProviderKind: "redacted",
+			}},
+			want: `openai: provider block kind "redacted" is not supported by this serializer`,
+		},
+		{
+			name: "block stop",
+			ev:   engine.StreamEvent{BlockStop: &engine.BlockStop{Index: 0}},
+			want: "openai: content block stops are not supported by this serializer",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			evCh := make(chan engine.StreamEvent, 1)
+			evCh <- tc.ev
+			close(evCh)
+			var buf bytes.Buffer
+			err := (&StreamAdapter{}).SerializeStream(context.Background(), &buf, evCh)
+			if err == nil {
+				t.Fatal("unrenderable block event did not error")
+			}
+			// The chat serializer wraps its per-event errors with
+			// "openai serialize: "; the message itself must carry the
+			// explicit support-or-error decision.
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("error = %q, want it to contain %q", err.Error(), tc.want)
+			}
+		})
+	}
+}
+
+// TestSerializeBlockEventsErrorResponses: same support-or-error rule on the
+// Responses serializer: block boundaries have no representation in the
+// Responses protocol, so they error rather than vanish.
+func TestSerializeBlockEventsErrorResponses(t *testing.T) {
+	evCh := make(chan engine.StreamEvent, 1)
+	evCh <- engine.StreamEvent{BlockStart: &engine.BlockStart{Index: 0, Kind: engine.BlockKindText}}
+	close(evCh)
+
+	ctx := context.WithValue(context.Background(), engine.ChatRequestKey, &engine.ChatRequest{
+		ProviderExtensions: map[string]any{"_openai_variant": "responses"},
+	})
+	var buf bytes.Buffer
+	err := (&StreamAdapter{}).SerializeStream(ctx, &buf, evCh)
+	if err == nil {
+		t.Fatal("text block start did not error on the responses serializer")
+	}
+	want := "openai: text content blocks are not supported by this serializer"
+	if err.Error() != want {
+		t.Errorf("error = %q, want %q", err.Error(), want)
+	}
+}

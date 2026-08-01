@@ -181,39 +181,55 @@ func emitPart(ch chan<- engine.StreamEvent, part geminiPart, blockIndex *int) bo
 		delta := string(argsJSON)
 		ch <- engine.StreamEvent{ToolCallDelta: &engine.ToolCallDelta{Index: idx, ArgumentsDelta: delta}}
 		ch <- engine.StreamEvent{ToolCallEnd: &engine.ToolCallEnd{Index: idx}}
-	case part.Thought && partText(part) != "":
-		// One thought part is one thinking block: open it, carry the
-		// signature INSIDE the open block (the provider's same-part
-		// signature binds the current block), close it.
+	case part.Thought:
+		// One thought part is one thinking block — ARM PRESENCE decides:
+		// thought:true opens a thinking block even when the text member is
+		// empty or absent (v2 permits zero-delta blocks, and an empty block
+		// still consumes an index). The signature rides INSIDE the open
+		// block (the provider's same-part signature binds the current
+		// block).
 		idx := *blockIndex
 		*blockIndex = idx + 1
 		ch <- engine.StreamEvent{BlockStart: &engine.BlockStart{Index: idx, Kind: engine.BlockKindThinking}}
-		t := partText(part)
-		ch <- engine.StreamEvent{ThinkingDelta: &t}
+		if t := partText(part); t != "" {
+			ch <- engine.StreamEvent{ThinkingDelta: &t}
+		}
 		if part.ThoughtSignature != "" {
 			sig := part.ThoughtSignature
 			ch <- engine.StreamEvent{SignatureDelta: &sig}
 		}
 		ch <- engine.StreamEvent{BlockStop: &engine.BlockStop{Index: idx}}
-	case partText(part) != "":
-		// One text part is one text block. Every block (tool, text,
-		// thinking) consumes a sequential index from the shared per-stream
-		// counter: the v2 invariant requires unique indexes within one
-		// streamed message.
+	case part.Text != nil && *part.Text == "" && part.ThoughtSignature != "":
+		// Trailing standalone signature — kept NARROW to the settled Code
+		// Assist shape: the NON-thinking explicit-empty-text signature part
+		// (final {"text":"","thoughtSignature":…}). NO block events, so
+		// the signature stays unbound to any open block. A thought:true
+		// part with a signature is handled above as a thinking block with
+		// the signature INSIDE it.
+		sig := part.ThoughtSignature
+		ch <- engine.StreamEvent{SignatureDelta: &sig}
+	case part.Text != nil:
+		// One text part is one text block — ARM PRESENCE decides: an
+		// explicit text member opens a text block even when empty (a
+		// zero-delta block consumes an index; dropping it would shift every
+		// later block's index). Every block (tool, text, thinking) consumes
+		// a sequential index from the shared per-stream counter: the v2
+		// invariant requires unique indexes within one streamed message.
 		idx := *blockIndex
 		*blockIndex = idx + 1
 		ch <- engine.StreamEvent{BlockStart: &engine.BlockStart{Index: idx, Kind: engine.BlockKindText}}
-		t := partText(part)
-		ch <- engine.StreamEvent{TextDelta: &t}
+		if t := *part.Text; t != "" {
+			ch <- engine.StreamEvent{TextDelta: &t}
+		}
 		if part.ThoughtSignature != "" {
 			sig := part.ThoughtSignature
 			ch <- engine.StreamEvent{SignatureDelta: &sig}
 		}
 		ch <- engine.StreamEvent{BlockStop: &engine.BlockStop{Index: idx}}
 	case part.ThoughtSignature != "":
-		// Standalone signature part (Code Assist emits one on the final
-		// chunk): trailing — it follows the previous block's stop. NO block
-		// events, so the signature stays unbound to any open block.
+		// Bare signature part with no text member at all (absent, not
+		// explicit-empty): not the contract trailing shape, but tolerated on
+		// the stream path — standalone SignatureDelta, unbound.
 		sig := part.ThoughtSignature
 		ch <- engine.StreamEvent{SignatureDelta: &sig}
 	}
@@ -282,6 +298,14 @@ func (s *StreamAdapter) SerializeStream(ctx context.Context, w io.Writer, events
 			pendingUsage = event.Usage
 
 		case event.BlockStart != nil:
+			// Provider blocks cannot be rendered on the Gemini wire: the part
+			// model has text/thought/functionCall arms but no provider slot,
+			// and casting a provider block to a text part would silently
+			// change the topology the host verified. Error instead — never
+			// cast.
+			if event.BlockStart.Kind == engine.BlockKindProvider {
+				return fmt.Errorf("gemini: provider block kind %q is not supported by this serializer", event.BlockStart.ProviderKind)
+			}
 			// Open a text or thinking part. Well-formed streams have no part
 			// open here (the ABI allows one block at a time); a leftover part
 			// would mean the previous block never stopped, which the

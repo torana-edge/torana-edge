@@ -591,14 +591,15 @@ type PluginPipeline struct {
 	closed    chan struct{}
 	drainOnce sync.Once
 
-	// streamKinds tracks, per request, which content-block indexes are
-	// tool-call blocks across RunOnStreamChunk calls, so a plugin-passed
+	// streamKinds tracks, per request, which content block is ACTUALLY open at
+	// each index across RunOnStreamChunk calls, so a plugin-passed
 	// ContentBlockStop converts back to the engine event matching the block
-	// it closes (ToolCallEnd for tool blocks, BlockStop for text/thinking).
-	// The v2 wire's stop carries only an index; without this, every
-	// plugin-passed text/thinking stop would come back as ToolCallEnd and
-	// the lossless block topology would not survive plugins. Entries live
-	// for the request and are dropped by EndRequest.
+	// it closes (ToolCallEnd for tool blocks, BlockStop for text/thinking/,
+	// provider) and unknown/mismatched/duplicate/reused topology errors
+	// instead of being guessed. The v2 wire's stop carries only an index;
+	// without this, every plugin-passed text/thinking stop would come back
+	// as ToolCallEnd and the lossless block topology would not survive
+	// plugins. Entries live for the request and are dropped by EndRequest.
 	streamKinds map[uint64]*pbconv.BlockKindTracker
 }
 
@@ -1272,13 +1273,24 @@ func (pp *PluginPipeline) RunOnStreamChunk(ctx context.Context, reqID uint64, ch
 
 	out := make([]engine.StreamEvent, 0, len(current))
 	for _, ev := range current {
-		// Kind-aware conversion: the tracker remembers which block indexes
-		// are tool-call blocks (recorded from the converted starts, which are
-		// what the rest of the host consumes), so a ContentBlockStop becomes
-		// ToolCallEnd or BlockStop to match the block it actually closes. A
-		// pass-through stream therefore survives plugins with its block
-		// topology intact.
-		out = append(out, *tracker.FromPBStreamEvent(ev))
+		// Kind-aware conversion: the tracker remembers which content block is
+		// ACTUALLY open at each index (recorded from the converted starts,
+		// which are what the rest of the host consumes), so a
+		// ContentBlockStop becomes ToolCallEnd or BlockStop to match the
+		// block it closes. A pass-through stream therefore survives plugins
+		// with its block topology intact.
+		converted, err := tracker.FromPBStreamEvent(ev)
+		if err != nil {
+			// The v2 ABI declares unknown/mismatched/duplicate/reused
+			// topology invalid: a plugin emitted a stop with no open block at
+			// its index, or a start at an index that is already open. The
+			// conversion must never guess a kind, so this is a hard error —
+			// on the streaming path the caller terminates the stream rather
+			// than deliver a silently reclassified event.
+			log.Printf("[plugin] stream topology error: %v", err)
+			return nil, fmt.Errorf("plugin stream topology: %w", err)
+		}
+		out = append(out, *converted)
 	}
 	return out, nil
 }

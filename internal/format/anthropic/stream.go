@@ -204,7 +204,6 @@ func (s *StreamAdapter) ParseStream(body io.Reader) <-chan engine.StreamEvent {
 
 // SerializeStream writes StreamEvents as Anthropic SSE to the writer.
 func (s *StreamAdapter) SerializeStream(ctx context.Context, w io.Writer, events <-chan engine.StreamEvent) error {
-	var thinkingIndex int
 	var inThinking bool
 	var inText bool
 	var blockIndex int
@@ -270,19 +269,66 @@ func (s *StreamAdapter) SerializeStream(ctx context.Context, w io.Writer, events
 			}
 		}
 		switch {
+		case ev.BlockStart != nil:
+			// Explicit block events (plugin-emitted or relayed): the wire
+			// renders text/thinking blocks faithfully as per-kind
+			// content_block_start frames — never cast. Provider blocks have no
+			// Anthropic representation, so they error rather than vanish.
+			switch ev.BlockStart.Kind {
+			case engine.BlockKindProvider:
+				return fmt.Errorf("anthropic: provider block kind %q is not supported by this serializer", ev.BlockStart.ProviderKind)
+			case engine.BlockKindThinking:
+				if err := closeText(); err != nil {
+					return err
+				}
+				if !inThinking {
+					inThinking = true
+					if err := emit("content_block_start", fmt.Sprintf(
+						`{"type":"content_block_start","index":%d,"content_block":{"type":"thinking","thinking":""}}`,
+						blockIndex,
+					)); err != nil {
+						return err
+					}
+				}
+			case engine.BlockKindText:
+				if err := closeThinking(); err != nil {
+					return err
+				}
+				if !inText {
+					inText = true
+					if err := emit("content_block_start", fmt.Sprintf(
+						`{"type":"content_block_start","index":%d,"content_block":{"type":"text","text":""}}`,
+						blockIndex,
+					)); err != nil {
+						return err
+					}
+				}
+			}
+
+		case ev.BlockStop != nil:
+			// Close whichever block the stop names. A stop with nothing open
+			// has nothing to render — emit nothing, as the gemini serializer
+			// does for a stray stop.
+			if err := closeThinking(); err != nil {
+				return err
+			}
+			if err := closeText(); err != nil {
+				return err
+			}
+
 		case ev.ThinkingDelta != nil:
 			if !inThinking {
 				inThinking = true
 				if err := emit("content_block_start", fmt.Sprintf(
 					`{"type":"content_block_start","index":%d,"content_block":{"type":"thinking","thinking":""}}`,
-					thinkingIndex,
+					blockIndex,
 				)); err != nil {
 					return err
 				}
 			}
 			if err := emit("content_block_delta", fmt.Sprintf(
 				`{"type":"content_block_delta","index":%d,"delta":{"type":"thinking_delta","thinking":%s}}`,
-				thinkingIndex,
+				blockIndex,
 				jsonString(*ev.ThinkingDelta),
 			)); err != nil {
 				return err

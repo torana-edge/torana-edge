@@ -136,6 +136,19 @@ const (
 	BlockKindProvider
 )
 
+func (k BlockKind) String() string {
+	switch k {
+	case BlockKindText:
+		return "text"
+	case BlockKindThinking:
+		return "thinking"
+	case BlockKindProvider:
+		return "provider"
+	default:
+		return "unknown"
+	}
+}
+
 // BlockStart opens an explicit text/thinking/provider content block at Index.
 // Tool-call blocks keep ToolCallStart, which already carries the block payload
 // (id/name/signature). The v2 ABI requires every content block to open with a
@@ -143,6 +156,11 @@ const (
 type BlockStart struct {
 	Index int
 	Kind  BlockKind
+	// ProviderKind is the provider's verbatim kind string for a provider
+	// block (the v2 ABI passes ProviderBlock.kind through verbatim; the host
+	// must not change it after verification). Meaningful only when Kind ==
+	// BlockKindProvider; empty for text/thinking blocks.
+	ProviderKind string
 }
 
 // BlockStop closes the text/thinking/provider block opened at Index.

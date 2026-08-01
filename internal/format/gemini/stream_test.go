@@ -289,9 +289,106 @@ func TestStreamEmptyStandaloneSignatureEmitsNoPart(t *testing.T) {
 	}
 }
 
-// TestStreamPluginEmittedBlocksSerializeAsParts: plugin-emitted text/thinking
-// blocks (the shape pbconv produces for a plugin-authored stream) serialize as
-// one part per block.
+// TestStreamEmptySignedThinkingRoundTrip pins the reviewer's reproduction: an
+// empty thinking block carrying a signature (BlockStart(thinking) →
+// SignatureDelta → BlockStop) must serialize to {"thought":true,"text":"",
+// "thoughtSignature":"S"} and PARSE BACK to the SAME events — it must not
+// collapse to a bare SignatureDelta (the pre-fix value-based detection dropped
+// the empty-text thought part and left the signature unbound).
+func TestStreamEmptySignedThinkingRoundTrip(t *testing.T) {
+	sig := "S"
+	want := []engine.StreamEvent{
+		{BlockStart: &engine.BlockStart{Index: 0, Kind: engine.BlockKindThinking}},
+		{SignatureDelta: &sig},
+		{BlockStop: &engine.BlockStop{Index: 0}},
+	}
+
+	parts := rawStreamParts(t, serializeEvents(t, want...))
+	if len(parts) != 1 {
+		t.Fatalf("serialized %d parts, want exactly 1: %v", len(parts), parts)
+	}
+	if parts[0]["text"] != "" || parts[0]["thought"] != true || parts[0]["thoughtSignature"] != "S" {
+		t.Errorf("part = %v, want {thought:true text:\"\" thoughtSignature:S}", parts[0])
+	}
+
+	// Serialize → parse must reproduce the SAME events: an empty signed
+	// thinking block, NOT a bare SignatureDelta.
+	wire := serializeEvents(t, want...)
+	events := parseStreamSSE(t, wire)
+	assertEventSequence(t, events, want)
+}
+
+// TestStreamEmptyUnsignedBlocksRoundTrip: empty unsigned text and thinking
+// blocks (zero-delta blocks) each open AND close a block, consuming an index,
+// and survive serialize → parse unchanged — an empty part is a block, not
+// nothing.
+func TestStreamEmptyUnsignedBlocksRoundTrip(t *testing.T) {
+	want := []engine.StreamEvent{
+		{BlockStart: &engine.BlockStart{Index: 0, Kind: engine.BlockKindText}},
+		{BlockStop: &engine.BlockStop{Index: 0}},
+		{BlockStart: &engine.BlockStart{Index: 1, Kind: engine.BlockKindThinking}},
+		{BlockStop: &engine.BlockStop{Index: 1}},
+	}
+
+	parts := rawStreamParts(t, serializeEvents(t, want...))
+	if len(parts) != 2 {
+		t.Fatalf("serialized %d parts, want 2: %v", len(parts), parts)
+	}
+	if parts[0]["text"] != "" {
+		t.Errorf("part 0 = %v, want explicit empty text arm", parts[0])
+	}
+	if parts[1]["text"] != "" || parts[1]["thought"] != true {
+		t.Errorf("part 1 = %v, want {thought:true text:\"\"}", parts[1])
+	}
+
+	events := parseStreamSSE(t, serializeEvents(t, want...))
+	assertEventSequence(t, events, want)
+}
+
+// TestStreamEmptyBlockConsumesIndexBeforeToolCall: an empty {"text":""} part
+// still opens and closes a text block, so the tool call that follows must take
+// the NEXT index. The pre-fix value-based detection dropped the empty part
+// (consuming no index) and shifted the tool call to index 0.
+func TestStreamEmptyBlockConsumesIndexBeforeToolCall(t *testing.T) {
+	wire := `data: {"response":{"candidates":[{"content":{"role":"model","parts":[` +
+		`{"text":""},` +
+		`{"functionCall":{"name":"list_dir","args":{"p":"/x"},"id":"c1"}}` +
+		`]}}]}}`
+	events := parseStreamSSE(t, wire)
+
+	want := []engine.StreamEvent{
+		{BlockStart: &engine.BlockStart{Index: 0, Kind: engine.BlockKindText}},
+		{BlockStop: &engine.BlockStop{Index: 0}},
+		{ToolCallStart: &engine.ToolCallStart{Index: 1, ID: "c1", Name: "list_dir"}},
+		{ToolCallDelta: &engine.ToolCallDelta{Index: 1, ArgumentsDelta: `{"p":"/x"}`}},
+		{ToolCallEnd: &engine.ToolCallEnd{Index: 1}},
+	}
+	assertEventSequence(t, events, want)
+}
+
+// TestStreamProviderBlockSerializeErrors: a provider BlockStart cannot be
+// rendered on the Gemini wire (there is no provider part arm), so the
+// serializer must error explicitly — never cast it to a text part.
+func TestStreamProviderBlockSerializeErrors(t *testing.T) {
+	ch := make(chan engine.StreamEvent, 1)
+	ch <- engine.StreamEvent{BlockStart: &engine.BlockStart{
+		Index: 0, Kind: engine.BlockKindProvider, ProviderKind: "redacted",
+	}}
+	close(ch)
+	var buf strings.Builder
+	err := (&StreamAdapter{}).SerializeStream(context.Background(), &buf, ch)
+	if err == nil {
+		t.Fatal("provider block did not error — it must never be cast to a text part")
+	}
+	want := `gemini: provider block kind "redacted" is not supported by this serializer`
+	if err.Error() != want {
+		t.Errorf("error = %q, want %q", err.Error(), want)
+	}
+	if buf.Len() != 0 {
+		t.Errorf("serializer wrote %q before erroring — nothing may be emitted for an unrenderable block", buf.String())
+	}
+}
+
 func TestStreamPluginEmittedBlocksSerializeAsParts(t *testing.T) {
 	parts := rawStreamParts(t, serializeEvents(t,
 		engine.StreamEvent{BlockStart: &engine.BlockStart{Index: 0, Kind: engine.BlockKindText}},

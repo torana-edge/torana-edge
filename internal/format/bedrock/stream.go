@@ -276,6 +276,50 @@ func (s *Stream) SerializeStream(ctx context.Context, w io.Writer, events <-chan
 	}
 
 	for evt := range events {
+		if evt.BlockStart != nil {
+			// Explicit block events (plugin-emitted or relayed): the wire
+			// renders thinking blocks faithfully as contentBlockStart frames —
+			// never cast. Text blocks have no start/stop frames on the
+			// ConverseStream wire (the parser treats a text start as
+			// informational and the wire has no text stop), and provider
+			// blocks have no representation at all, so both error rather than
+			// vanish.
+			switch evt.BlockStart.Kind {
+			case engine.BlockKindProvider:
+				return fmt.Errorf("bedrock: provider block kind %q is not supported by this serializer", evt.BlockStart.ProviderKind)
+			case engine.BlockKindText:
+				return fmt.Errorf("bedrock: text content blocks are not supported by this serializer")
+			case engine.BlockKindThinking:
+				if !thinkingOpen {
+					thinkingOpen = true
+					startEvt := bedrockStreamEvent{
+						ContentBlockStart: &bedrockContentBlockStart{
+							ContentBlockIndex: 0,
+							Start: bedrockContentBlockStartField{
+								Thinking: &bedrockThinkingStart{},
+							},
+						},
+					}
+					b, _ := json.Marshal(startEvt)
+					if _, err := bw.WriteString(string(b) + "\n"); err != nil {
+						return fmt.Errorf("bedrock serialize: %w", err)
+					}
+				}
+			}
+			continue
+		}
+
+		if evt.BlockStop != nil {
+			// Close the block the stop names. Only a thinking block is
+			// representable as an open block on this wire; a stop with
+			// nothing open has nothing to render — emit nothing, as the
+			// gemini serializer does for a stray stop.
+			if err := closeThinking(); err != nil {
+				return fmt.Errorf("bedrock serialize: %w", err)
+			}
+			continue
+		}
+
 		if evt.ThinkingDelta != nil {
 			if !thinkingOpen {
 				thinkingOpen = true
