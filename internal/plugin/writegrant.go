@@ -500,6 +500,11 @@ func verifyRequestSignatures(accepted, out *pb.ChatRequest) error {
 	for _, check := range requestSignatureFields {
 		byToken := map[string][]*signedOccurrence{}
 		byContent := map[[32]byte][]*signedOccurrence{}
+		// Counts of accepted UNSIGNED messages per covered-content digest:
+		// an unsigned output message with an unchanged unsigned counterpart
+		// is spoken for and must not be diagnosed as a dropped token (the
+		// signed twin it was deleted alongside is the grantable deletion).
+		unsignedByContent := map[[32]byte]int{}
 		everSeen := map[string]bool{}
 		for _, am := range accepted.Messages {
 			if am == nil {
@@ -507,6 +512,7 @@ func verifyRequestSignatures(accepted, out *pb.ChatRequest) error {
 			}
 			token := messageStringField(am, check.sig)
 			if token == "" {
+				unsignedByContent[coveredContentDigest(am, check.refs)]++
 				continue
 			}
 			occ := &signedOccurrence{digest: coveredContentDigest(am, check.refs)}
@@ -572,16 +578,24 @@ func verifyRequestSignatures(accepted, out *pb.ChatRequest) error {
 			}
 		}
 
-		// Phase 2: remaining unsigned outputs must not match any remaining
-		// signed accepted occurrence — that would be provenance dropped from
-		// content the provider signed. Occurrences consumed in phase 1 do not
-		// count, so a signed copy plus a cleared copy of the same content
+		// Phase 2: unsigned outputs are consumed against accepted UNSIGNED
+		// occurrences first — an output copy of content that already had an
+		// unsigned twin is spoken for, and deleting the signed occurrence
+		// alongside it is a grantable deletion. Only SURPLUS unsigned outputs
+		// may match remaining signed occurrences: that is provenance dropped
+		// from content the provider signed. Occurrences consumed in phase 1 do
+		// not count, so a signed copy plus a cleared copy of the same content
 		// passes: the signed occurrence is already spoken for.
 		for _, om := range out.Messages {
 			if om == nil || messageStringField(om, check.sig) != "" {
 				continue
 			}
-			for _, occ := range byContent[coveredContentDigest(om, check.refs)] {
+			digest := coveredContentDigest(om, check.refs)
+			if unsignedByContent[digest] > 0 {
+				unsignedByContent[digest]--
+				continue // unchanged unsigned counterpart exists
+			}
+			for _, occ := range byContent[digest] {
 				if !occ.used {
 					return fmt.Errorf("plugin %s signature %s", check.binding.SignatureField,
 						outboundpolicy.SignatureDropped)

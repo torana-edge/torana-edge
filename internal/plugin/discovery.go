@@ -1483,17 +1483,20 @@ func validateApproval(bundle PluginBundle, approval Approval) ([]string, string,
 	}
 	// All-or-nothing: every permission the manifest declares must be in the
 	// approval, or the plugin cannot be enabled. Approving a SUBSET of the
-	// declared set would grant the plugin powers its operator never reviewed
-	// — the empty subset of a grant-declaring manifest is exactly that — so
-	// the approval's permission set must equal the declared set (empty ==
-	// empty is fine for grantless fixtures).
+	// declared set would enable a plugin WITHOUT capabilities it declared
+	// necessary — the empty subset of a grant-declaring manifest is exactly
+	// that — producing degraded or silently ineffective behaviour instead of
+	// failing loudly. The approval's permission set must therefore equal the
+	// declared set (empty == empty is fine for grantless fixtures).
 	approved := make(map[string]struct{}, len(approval.Permissions))
 	for _, permission := range approval.Permissions {
 		approved[permission] = struct{}{}
 	}
-	for name := range requested {
-		if _, ok := approved[name]; !ok {
-			return nil, "", fmt.Errorf("permission %q requested by manifest was not approved", name)
+	// Iterate in manifest order so the first missing permission reported to
+	// an operator is stable across runs.
+	for _, permission := range bundle.Manifest.Permissions {
+		if _, ok := approved[permission.Name]; !ok {
+			return nil, "", fmt.Errorf("permission %q requested by manifest was not approved", permission.Name)
 		}
 	}
 	failureMode := approval.FailureMode

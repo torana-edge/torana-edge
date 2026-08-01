@@ -1080,3 +1080,64 @@ func BenchmarkVerifyRequestMutationFastPath(b *testing.B) {
 		})
 	}
 }
+
+// --- Round-4: phase-2 unsigned-occurrence consumption ----------------------
+
+// accepted signed A + accepted unsigned A -> output unsigned A: the unsigned
+// output is spoken for by its unchanged unsigned twin; deleting the signed
+// occurrence is a grantable deletion. NOT a dropped token.
+func TestVerifyRequestSignaturesDeletingSignedTwinKeepsUnsigned(t *testing.T) {
+	accepted := &pb.ChatRequest{Messages: []*pb.Message{
+		{Role: "assistant", Content: "A", ContentSignature: "token"},
+		{Role: "assistant", Content: "A"},
+	}}
+	out := &pb.ChatRequest{Messages: []*pb.Message{
+		{Role: "assistant", Content: "A"},
+	}}
+	canWrite := grant("ir.messages.write.assistant")
+	if err := verifyRequestMutation(accepted, out, canWrite); err != nil {
+		t.Fatalf("deleting the signed twin must verify (unsigned twin unchanged), got: %v", err)
+	}
+}
+
+// accepted signed A -> output unsigned A: no accepted unsigned occurrence
+// exists, so the unsigned output represents the token dropped from content
+// the provider signed. Rejected.
+func TestVerifyRequestSignaturesDroppedStillRejectedWithoutUnsignedTwin(t *testing.T) {
+	accepted := &pb.ChatRequest{Messages: []*pb.Message{
+		{Role: "assistant", Content: "A", ContentSignature: "token"},
+	}}
+	out := &pb.ChatRequest{Messages: []*pb.Message{
+		{Role: "assistant", Content: "A"},
+	}}
+	canWrite := grant("ir.messages.write.assistant")
+	err := verifyRequestMutation(accepted, out, canWrite)
+	if err == nil {
+		t.Fatal("an unsigned output without an accepted unsigned twin must be a dropped token")
+	}
+	if !strings.Contains(err.Error(), "dropped") {
+		t.Errorf("error %q does not name the dropped class", err)
+	}
+}
+
+// accepted signed A + accepted unsigned A -> output unsigned A twice: one copy
+// is spoken for by the accepted unsigned twin; the SURPLUS copy represents the
+// signed token being dropped. Rejected.
+func TestVerifyRequestSignaturesSurplusUnsignedCopyIsDropped(t *testing.T) {
+	accepted := &pb.ChatRequest{Messages: []*pb.Message{
+		{Role: "assistant", Content: "A", ContentSignature: "token"},
+		{Role: "assistant", Content: "A"},
+	}}
+	out := &pb.ChatRequest{Messages: []*pb.Message{
+		{Role: "assistant", Content: "A"},
+		{Role: "assistant", Content: "A"},
+	}}
+	canWrite := grant("ir.messages.write.assistant")
+	err := verifyRequestMutation(accepted, out, canWrite)
+	if err == nil {
+		t.Fatal("the surplus unsigned copy must be a dropped token")
+	}
+	if !strings.Contains(err.Error(), "dropped") {
+		t.Errorf("error %q does not name the dropped class", err)
+	}
+}
