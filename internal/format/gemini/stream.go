@@ -70,11 +70,11 @@ func (s *StreamAdapter) ParseStream(body io.Reader) <-chan engine.StreamEvent {
 		defer close(ch)
 		reader := bufio.NewReader(body)
 		var lastUsage *geminiUsageMetadata
-		// Per-stream tool-call block counter. The ABI invariant
-		// (SignatureScopeToolCallBlockByIndex) requires block indexes unique
-		// within one streamed message: parallel Gemini parts must each receive
-		// a distinct sequential index, shared by that block's Start/Delta/End.
-		// Shared across chunks because parts arrive split over SSE frames.
+		// Per-stream content-block counter. The ABI invariant requires block
+		// indexes unique within one streamed message: every part that opens a
+		// block — tool, text, or thinking — must receive a distinct sequential
+		// index, shared by that block's Start/Delta/End. Shared across chunks
+		// because parts arrive split over SSE frames.
 		var blockIndex int
 		for {
 			line, err := reader.ReadBytes('\n')
@@ -181,24 +181,39 @@ func emitPart(ch chan<- engine.StreamEvent, part geminiPart, blockIndex *int) bo
 		delta := string(argsJSON)
 		ch <- engine.StreamEvent{ToolCallDelta: &engine.ToolCallDelta{Index: idx, ArgumentsDelta: delta}}
 		ch <- engine.StreamEvent{ToolCallEnd: &engine.ToolCallEnd{Index: idx}}
-	case part.Thought:
-		if partText(part) != "" {
-			t := partText(part)
-			ch <- engine.StreamEvent{ThinkingDelta: &t}
-		}
+	case part.Thought && partText(part) != "":
+		// One thought part is one thinking block: open it, carry the
+		// signature INSIDE the open block (the provider's same-part
+		// signature binds the current block), close it.
+		idx := *blockIndex
+		*blockIndex = idx + 1
+		ch <- engine.StreamEvent{BlockStart: &engine.BlockStart{Index: idx, Kind: engine.BlockKindThinking}}
+		t := partText(part)
+		ch <- engine.StreamEvent{ThinkingDelta: &t}
 		if part.ThoughtSignature != "" {
 			sig := part.ThoughtSignature
 			ch <- engine.StreamEvent{SignatureDelta: &sig}
 		}
+		ch <- engine.StreamEvent{BlockStop: &engine.BlockStop{Index: idx}}
 	case partText(part) != "":
+		// One text part is one text block. Every block (tool, text,
+		// thinking) consumes a sequential index from the shared per-stream
+		// counter: the v2 invariant requires unique indexes within one
+		// streamed message.
+		idx := *blockIndex
+		*blockIndex = idx + 1
+		ch <- engine.StreamEvent{BlockStart: &engine.BlockStart{Index: idx, Kind: engine.BlockKindText}}
 		t := partText(part)
 		ch <- engine.StreamEvent{TextDelta: &t}
 		if part.ThoughtSignature != "" {
 			sig := part.ThoughtSignature
 			ch <- engine.StreamEvent{SignatureDelta: &sig}
 		}
+		ch <- engine.StreamEvent{BlockStop: &engine.BlockStop{Index: idx}}
 	case part.ThoughtSignature != "":
-		// Standalone signature part (Code Assist emits one on the final chunk).
+		// Standalone signature part (Code Assist emits one on the final
+		// chunk): trailing — it follows the previous block's stop. NO block
+		// events, so the signature stays unbound to any open block.
 		sig := part.ThoughtSignature
 		ch <- engine.StreamEvent{SignatureDelta: &sig}
 	}
@@ -228,10 +243,21 @@ type serializeState struct {
 	ArgsJSON  strings.Builder
 }
 
+// serializePart is one buffered, not-yet-flushed text or thinking part: the
+// serializer accumulates its deltas and mid-block signature into a single
+// wire part, flushed by the matching BlockStop. One part is open at a time,
+// mirroring the ABI's single-open-block invariant.
+type serializePart struct {
+	isThinking bool
+	text       strings.Builder
+	sig        string // mid-block signature; empty means the part carries none
+}
+
 // SerializeStream writes StreamEvents as Gemini SSE frames to writer, wrapping
 // each in {"response":…} for the Code Assist flavor (s.Wrapped).
 func (s *StreamAdapter) SerializeStream(ctx context.Context, w io.Writer, events <-chan engine.StreamEvent) error {
 	var toolState *serializeState
+	var openPart *serializePart
 	var pendingUsage *engine.StreamUsage
 
 	for event := range events {
@@ -255,23 +281,71 @@ func (s *StreamAdapter) SerializeStream(ctx context.Context, w io.Writer, events
 		case event.Usage != nil:
 			pendingUsage = event.Usage
 
+		case event.BlockStart != nil:
+			// Open a text or thinking part. Well-formed streams have no part
+			// open here (the ABI allows one block at a time); a leftover part
+			// would mean the previous block never stopped, which the
+			// stream-verifier rework polices — flush defensively rather than
+			// lose the buffered content.
+			if openPart != nil {
+				if err := flushPart(w, openPart, s.Wrapped); err != nil {
+					return err
+				}
+			}
+			openPart = &serializePart{isThinking: event.BlockStart.Kind == engine.BlockKindThinking}
+
+		case event.BlockStop != nil:
+			if openPart != nil {
+				if err := flushPart(w, openPart, s.Wrapped); err != nil {
+					return err
+				}
+				openPart = nil
+			}
+			// No open part: a stray stop (e.g. a tool block's stop arriving as
+			// BlockStop from a hand-built stream) has nothing to flush.
+
 		case event.TextDelta != nil:
-			if err := writeFrame(w, chunkPart(geminiPart{Text: new(*event.TextDelta)}), s.Wrapped); err != nil {
-				return err
+			if openPart != nil {
+				// Delta inside the open part: accumulate — the provider part
+				// model splits one part's text over many deltas.
+				openPart.text.WriteString(*event.TextDelta)
+			} else {
+				// Bare delta with no open block (legacy paths/tests that emit
+				// deltas without block events): emit a per-delta part, as
+				// before blocks existed. Compat, kept for those callers.
+				if err := writeFrame(w, chunkPart(geminiPart{Text: new(*event.TextDelta)}), s.Wrapped); err != nil {
+					return err
+				}
 			}
 
 		case event.ThinkingDelta != nil:
-			if err := writeFrame(w, chunkPart(geminiPart{Thought: true, Text: new(*event.ThinkingDelta)}), s.Wrapped); err != nil {
-				return err
+			if openPart != nil {
+				openPart.text.WriteString(*event.ThinkingDelta)
+			} else {
+				if err := writeFrame(w, chunkPart(geminiPart{Thought: true, Text: new(*event.ThinkingDelta)}), s.Wrapped); err != nil {
+					return err
+				}
 			}
 
 		case event.SignatureDelta != nil:
-			// The standalone signature part keeps the provider's EXPLICIT empty
-			// text member ({"text":"","thoughtSignature":…}): a bare
-			// {"thoughtSignature":…} would not round-trip the text arm.
-			if err := writeFrame(w, chunkPart(geminiPart{Text: new(""), ThoughtSignature: *event.SignatureDelta}), s.Wrapped); err != nil {
-				return err
+			if openPart != nil {
+				// Mid-block signature: attach to the open part — the
+				// provider's same-part thoughtSignature binds the current
+				// block. An empty signature is a CLEAR marker: it overwrites
+				// any earlier signature and the flushed part carries none
+				// (flushPart only emits non-empty signatures).
+				openPart.sig = *event.SignatureDelta
+			} else if *event.SignatureDelta != "" {
+				// The standalone signature part keeps the provider's EXPLICIT
+				// empty text member ({"text":"","thoughtSignature":…}): a bare
+				// {"thoughtSignature":…} would not round-trip the text arm.
+				if err := writeFrame(w, chunkPart(geminiPart{Text: new(""), ThoughtSignature: *event.SignatureDelta}), s.Wrapped); err != nil {
+					return err
+				}
 			}
+			// An empty signature with no open part is a clear marker with
+			// nothing to clear: emit nothing rather than a signature-only
+			// part for an empty token.
 
 		case event.ToolCallStart != nil:
 			toolState = &serializeState{ID: event.ToolCallStart.ID, Name: event.ToolCallStart.Name, Signature: event.ToolCallStart.Signature}
@@ -287,6 +361,20 @@ func (s *StreamAdapter) SerializeStream(ctx context.Context, w io.Writer, events
 		}
 	}
 	return nil
+}
+
+// flushPart emits the buffered open part as ONE wire part, carrying the
+// provider part's explicit text member (even when empty) and its mid-block
+// signature when one is set.
+func flushPart(w io.Writer, p *serializePart, wrapped bool) error {
+	part := geminiPart{
+		Text:    new(p.text.String()),
+		Thought: p.isThinking,
+	}
+	if p.sig != "" {
+		part.ThoughtSignature = p.sig
+	}
+	return writeFrame(w, chunkPart(part), wrapped)
 }
 
 func emitFunctionCall(w io.Writer, st *serializeState, wrapped bool) error {
