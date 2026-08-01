@@ -262,7 +262,17 @@ func (s *StreamAdapter) SerializeStream(ctx context.Context, w io.Writer, events
 		return emit("content_block_stop", fmt.Sprintf(`{"type":"content_block_stop","index":%d}`, blockIndex-1))
 	}
 
-	for ev := range events {
+	for {
+		var ev engine.StreamEvent
+		var ok bool
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case ev, ok = <-events:
+		}
+		if !ok {
+			break
+		}
 		if ev.Error == nil {
 			if err := ensureStarted(); err != nil {
 				return err
@@ -437,6 +447,12 @@ func (s *StreamAdapter) SerializeStream(ctx context.Context, w io.Writer, events
 				return err
 			}
 		}
+	}
+	// A closed event channel can win a select at the same time cancellation is
+	// ready. Check again before synthesizing the successful message envelope
+	// and message_stop frame.
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 
 	// An empty event stream still yields a valid message envelope.

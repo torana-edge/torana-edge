@@ -411,7 +411,17 @@ func (s *Stream) SerializeStream(ctx context.Context, w io.Writer, events <-chan
 		return err
 	}
 
-	for evt := range events {
+	for {
+		var evt engine.StreamEvent
+		var ok bool
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case evt, ok = <-events:
+		}
+		if !ok {
+			break
+		}
 		if evt.BlockStart != nil {
 			// Explicit block events (plugin-emitted or relayed). Provider
 			// blocks have no ConverseStream representation at all, so they
@@ -561,6 +571,11 @@ func (s *Stream) SerializeStream(ctx context.Context, w io.Writer, events <-chan
 				return fmt.Errorf("bedrock serialize: %w", err)
 			}
 		}
+	}
+	// A closed channel is only a clean end when the serializer context remains
+	// live. Avoid flushing/closing a partial Bedrock stream after cancellation.
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 
 	// Close any open thinking block at end of stream

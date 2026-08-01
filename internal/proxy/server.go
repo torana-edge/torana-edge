@@ -1117,6 +1117,13 @@ func New(cfg Config) (*Server, error) {
 				// Close it explicitly when serialization finishes, or every
 				// streamed request leaks a concurrency token.
 				upstreamBody := resp.Body
+				// A terminal stream failure must cancel serialization BEFORE an
+				// adapter sees the closed event channel and writes its protocol
+				// completion marker ([DONE], response.completed, Gemini finish,
+				// ...). This context is deliberately separate from the request:
+				// the request remains useful for logging/finalization while the
+				// client response is being aborted.
+				streamCtx, cancelStream := context.WithCancel(resp.Request.Context())
 
 				events := fmt.Stream.ParseStream(upstreamBody)
 
@@ -1142,7 +1149,17 @@ func New(cfg Config) (*Server, error) {
 									continue
 								}
 							}
-							tapped <- ev
+							select {
+							case tapped <- ev:
+							case <-streamCtx.Done():
+								// The parser may already be blocked trying to send its
+								// next event to this tap. Drain its real input until the
+								// abort closes upstreamBody and ParseStream exits; merely
+								// closing tapped would strand that goroutine.
+								for range in {
+								}
+								return
+							}
 						}
 					}()
 					events = tapped
@@ -1153,15 +1170,53 @@ func New(cfg Config) (*Server, error) {
 				// fragments and emit one complete ToolCallDelta before
 				// ToolCallEnd). Uses the request-pinned pipeline — never
 				// re-load s.pluginPipeline mid-request.
+				//
+				// The verified entry point runs the stream-signature
+				// enforcement (B2 2b): pre-commit returned-side discipline,
+				// scope-close verification, and accepted-side (host)
+				// validation. A TYPED terminal error — a plugin violation or
+				// a host accepted-stream defect — aborts the response so the
+				// client sees a truncated body instead of a clean completion.
+				term := &streamTerminal{cancel: cancelStream}
 				if pl := reqStateFrom(resp.Request.Context()).Pipeline; pl != nil {
 					reqID := reqStateFrom(resp.Request.Context()).ID
 					out := make(chan engine.StreamEvent)
 					in := events
 					go func() {
 						defer close(out)
+						abort := func(err error) {
+							term.trigger(err)
+							// ParseStream and the usage tap use channel sends. Closing
+							// the upstream body releases a blocked parser; draining the
+							// ACTUAL input (not the renamed final output) releases a
+							// tap/parser event already in flight.
+							_ = upstreamBody.Close()
+							go func() {
+								for range in {
+								}
+							}()
+						}
 						for event := range in {
-							outEvents, err := pl.RunOnStreamChunk(resp.Request.Context(), reqID, &event)
+							outEvents, err := pl.RunOnStreamChunkVerified(resp.Request.Context(), reqID, &event)
 							if err != nil {
+								var termErr *plugin.StreamTerminalError
+								if errors.As(err, &termErr) {
+									// Typed terminal: a signed-stream violation
+									// (late, so failure_mode does not apply) or
+									// an accepted-stream host defect. The
+									// response must not appear to complete
+									// normally: stop dispatch now and abort
+									// after the partial body.
+									log.Printf("plugin stream terminal (%s %s, block %d, scope %d): %v",
+										termErr.Kind, termErr.Plugin, termErr.Index, termErr.Scope, termErr)
+									if termErr.Kind == "plugin" {
+										if rsObs := reqStateFrom(resp.Request.Context()); rsObs != nil {
+											rsObs.PluginFailure = true
+										}
+									}
+									abort(err)
+									return
+								}
 								// failure_mode: block on a stream whose
 								// headers and body have already gone to the
 								// caller. There is nothing to refuse any more,
@@ -1174,11 +1229,41 @@ func New(cfg Config) (*Server, error) {
 								// stream is visible to the caller; a silently
 								// unfiltered one is not.
 								log.Printf("plugin stream error (failure_mode=block), terminating stream: %v", err)
+								if rsObs := reqStateFrom(resp.Request.Context()); rsObs != nil {
+									rsObs.PluginFailure = true
+								}
+								abort(err)
 								return
 							}
 							for _, ev := range outEvents {
-								out <- ev
+								select {
+								case out <- ev:
+								case <-streamCtx.Done():
+									return
+								}
 							}
+						}
+						// End of the upstream stream: close the final scope
+						// (end-of-stream scope close, including the host-side
+						// missing-stop check). Still late — the response is
+						// already partially written — so a violation
+						// terminates under both failure modes.
+						if err := pl.EndStreamVerified(reqID); err != nil {
+							var termErr *plugin.StreamTerminalError
+							if errors.As(err, &termErr) {
+								log.Printf("plugin stream terminal (%s %s, block %d, scope %d): %v",
+									termErr.Kind, termErr.Plugin, termErr.Index, termErr.Scope, termErr)
+								if termErr.Kind == "plugin" {
+									if rsObs := reqStateFrom(resp.Request.Context()); rsObs != nil {
+										rsObs.PluginFailure = true
+									}
+								}
+								abort(err)
+								return
+							}
+							log.Printf("plugin stream end error, terminating stream: %v", err)
+							abort(err)
+							return
 						}
 					}()
 					events = out
@@ -1206,11 +1291,28 @@ func New(cfg Config) (*Server, error) {
 					// here: a handler blocked forever on this channel would be
 					// worse than the race it exists to remove.
 					defer close(done)
+					defer cancelStream()
 					if streamPl != nil {
 						defer streamPl.Release()
 					}
-					serErr := fmt.Stream.SerializeStream(resp.Request.Context(), pw, events)
-					pw.Close()
+					serErr := fmt.Stream.SerializeStream(streamCtx, pw, events)
+					if serErr != nil && term.Err() == nil {
+						// A serializer failure is abnormal too. Trigger immediately
+						// so the input pipeline exits and the pipe is never closed as
+						// a clean successful response.
+						term.trigger(serErr)
+					}
+					if terr := term.Err(); terr != nil {
+						// The stream was terminated by enforcement: close the
+						// pipe with the terminal error instead of a clean EOF,
+						// so the client copy loop sees a non-EOF read error and
+						// aborts the response (abortingReader panics with
+						// http.ErrAbortHandler). The client observes a truncated
+						// body with no finish marker — never a clean completion.
+						pw.CloseWithError(terr)
+					} else {
+						pw.Close()
+					}
 					// On client disconnect the request context is cancelled, so
 					// the transport tears down the upstream connection and the
 					// provider stops generating (see TestClientDisconnectCancels
@@ -1264,7 +1366,7 @@ func New(cfg Config) (*Server, error) {
 						}
 					}
 				}()
-				resp.Body = pr
+				resp.Body = &abortingReader{r: pr}
 				resp.Header.Del("Content-Length")
 				return nil
 			}
@@ -3127,3 +3229,71 @@ func finalizeRequestState(streamDone <-chan struct{}, drop func()) {
 		drop()
 	}
 }
+
+// streamTerminal is the shared abort signal between the pipeline goroutine
+// (which detects a typed *plugin.StreamTerminalError) and the serializer
+// goroutine (which closes the pipe with that error so the client copy loop
+// aborts). The first trigger wins; the serializer reads Err() only after
+// SerializeStream has drained the closed output channel, so the trigger
+// happens-before the read via the channel close.
+//
+// The terminal error is NEVER written to the wire as a StreamError: Torana
+// defines its own terminal semantics (a typed internal error the proxy maps
+// to an abnormal abort), so the client sees a truncated/incomplete response,
+// not a provider-originated error frame.
+//
+// Concurrency: trigger runs on the pipeline goroutine; Err() runs on the
+// serializer goroutine. The mutex makes the race formally safe even though
+// the pipe drain already orders them.
+type streamTerminal struct {
+	mu     sync.Mutex
+	err    error
+	cancel context.CancelFunc
+}
+
+func (t *streamTerminal) trigger(err error) {
+	t.mu.Lock()
+	first := false
+	if t.err == nil {
+		t.err = err
+		first = true
+	}
+	cancel := t.cancel
+	t.mu.Unlock()
+	if first && cancel != nil {
+		cancel()
+	}
+}
+
+func (t *streamTerminal) Err() error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.err
+}
+
+// abortingReader wraps the serializer pipe so that a typed terminal error
+// aborts the HTTP response instead of completing it cleanly. The serializer
+// goroutine closes the pipe with the terminal error; this reader converts
+// that non-EOF read error into panic(http.ErrAbortHandler), which propagates
+// through ReverseProxy's copy loop into net/http — the connection is closed
+// WITHOUT the chunked terminator, so the client observes an incomplete body
+// (unexpected EOF) rather than a cleanly ended stream.
+//
+// The only non-EOF error this reader can ever see is the terminal error:
+// io.Pipe returns errors only from CloseWithError (EOF from Close), and the
+// serializer only calls CloseWithError after enforcement terminated.
+// ReverseProxy closes this reader after the copy loop ends; Close delegates
+// to the pipe so the existing disconnect path is unchanged.
+type abortingReader struct {
+	r io.ReadCloser
+}
+
+func (a *abortingReader) Read(p []byte) (int, error) {
+	n, err := a.r.Read(p)
+	if err != nil && err != io.EOF {
+		panic(http.ErrAbortHandler)
+	}
+	return n, err
+}
+
+func (a *abortingReader) Close() error { return a.r.Close() }

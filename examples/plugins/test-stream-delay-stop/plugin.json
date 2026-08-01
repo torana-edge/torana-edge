@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "id": "torana-test/test-stream-delay-stop",
+  "name": "test-stream-delay-stop",
+  "version": "0.1.0",
+  "abi_version": "v2",
+  "failure_mode": "pass",
+  "description": "Regression fixture: suppress one accepted stop and emit it on the next hook call",
+  "hooks": [
+    {
+      "name": "run_on_stream_chunk"
+    }
+  ],
+  "permissions": [
+    {
+      "name": "ir.stream.write",
+      "description": "Move a content boundary across hook calls"
+    }
+  ]
+}

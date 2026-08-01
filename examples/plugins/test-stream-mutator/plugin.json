@@ -13,6 +13,10 @@
   ],
   "permissions": [
     {
+      "name": "ir.messages.write.assistant",
+      "description": "Rewrite streamed assistant text deltas"
+    },
+    {
       "name": "env.log",
       "description": "Diagnostic logging"
     }

@@ -404,6 +404,99 @@ func BenchmarkStreamedResponse(b *testing.B) {
 	}
 }
 
+// runVerifiedSequence plays one complete request through the enforcement
+// entry point (per-event verified calls + end-of-stream scope close) and
+// releases its request-scoped state.
+func runVerifiedSequence(b *testing.B, pp *PluginPipeline, ctx context.Context, reqID uint64, seq []engine.StreamEvent) {
+	b.Helper()
+	for _, ev := range seq {
+		e := ev
+		if _, err := pp.RunOnStreamChunkVerified(ctx, reqID, &e); err != nil {
+			b.Fatal(err)
+		}
+	}
+	if err := pp.EndStreamVerified(reqID); err != nil {
+		b.Fatal(err)
+	}
+	pp.EndRequest(reqID)
+}
+
+// BenchmarkStreamEnforcement measures the exact production path of the
+// stream policy/signature enforcement (B2 part 2b): the per-event state
+// bookkeeping, recursive SDK field-policy transaction, scope verifier, and
+// WASM boundary cadence. The cases deliberately cover the semantic shapes the
+// registry promises to support: pass-through, one-for-one rewrite, fragment
+// assembly, suppression, and fan-out — not just a verifier-only happy path.
+//
+// Each iteration is one COMPLETE request under one request ID (the walkers
+// and buffers are request-scoped, so reusing an ID would measure unbounded
+// growth). ReportMetric scales by event count so the sizes are comparable.
+func BenchmarkStreamEnforcement(b *testing.B) {
+	cases := []struct {
+		name   string
+		plugin string
+		seq    []engine.StreamEvent
+	}{
+		{
+			name:   "pass-through",
+			plugin: "test-stream-mutator",
+			seq: []engine.StreamEvent{
+				{TextDelta: strPtr("ordinary text")}, {FinishReason: "stop"},
+			},
+		},
+		{
+			name:   "rewrite",
+			plugin: "test-stream-mutator",
+			seq: []engine.StreamEvent{
+				{TextDelta: strPtr("the secret plan")}, {FinishReason: "stop"},
+			},
+		},
+		{
+			name:   "assembly",
+			plugin: "test-fragment-buffer",
+			seq: append([]engine.StreamEvent{
+				{ToolCallStart: &engine.ToolCallStart{Index: 0, ID: "call_1", Name: "read"}},
+				{ToolCallDelta: &engine.ToolCallDelta{Index: 0, ArgumentsDelta: `{"path":"`}},
+				{ToolCallDelta: &engine.ToolCallDelta{Index: 0, ArgumentsDelta: `x"}`}},
+				{ToolCallEnd: &engine.ToolCallEnd{Index: 0}},
+			}, engine.StreamEvent{FinishReason: "tool_calls"}),
+		},
+		{
+			name:   "suppress",
+			plugin: "test-fragment-buffer",
+			seq: append([]engine.StreamEvent{
+				{ToolCallStart: &engine.ToolCallStart{Index: 0, ID: "call_1", Name: "read"}},
+				{ToolCallDelta: &engine.ToolCallDelta{Index: 0, ArgumentsDelta: `{`}},
+				{ToolCallEnd: &engine.ToolCallEnd{Index: 0}},
+			}, engine.StreamEvent{FinishReason: "tool_calls"}),
+		},
+		{
+			name:   "fan-out",
+			plugin: "test-stream-fanout",
+			seq: []engine.StreamEvent{
+				{TextDelta: strPtr("ab")}, {FinishReason: "stop"},
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		requireWASM(b, fixturesDir+"/"+tc.plugin+"/plugin.wasm")
+		pp := newTestPipeline(b, fixturesDir, []string{tc.plugin})
+		b.Run(tc.name, func(b *testing.B) {
+			b.ReportAllocs()
+			ctx := context.Background()
+			for w := 0; w < 20; w++ {
+				runVerifiedSequence(b, pp, ctx, uint64(w+1), tc.seq)
+			}
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				runVerifiedSequence(b, pp, ctx, uint64(i+1), tc.seq)
+			}
+			b.ReportMetric(float64(b.Elapsed().Nanoseconds())/float64(b.N*len(tc.seq)), "ns/event")
+		})
+	}
+}
+
 // benchConversationFrom deep-copies the parts a plugin can mutate. Cheaper
 // than rebuilding the conversation, and excluded from the measurement above
 // only in the sense that it is the same work every iteration.

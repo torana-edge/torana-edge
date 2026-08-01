@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "id": "torana-test/test-stream-mutator-nogrant",
+  "name": "test-stream-mutator-nogrant",
+  "version": "0.1.0",
+  "abi_version": "v2",
+  "failure_mode": "pass",
+  "description": "Negative fixture: rewrites streamed assistant text without a write grant",
+  "hooks": [
+    {
+      "name": "run_on_stream_chunk"
+    }
+  ],
+  "permissions": [
+    {
+      "name": "env.log",
+      "description": "Diagnostic logging only; intentionally no stream write grant"
+    }
+  ]
+}

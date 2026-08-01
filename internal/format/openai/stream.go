@@ -325,10 +325,10 @@ const streamID = "chatcmpl-torana"
 func (s *StreamAdapter) SerializeStream(ctx context.Context, w io.Writer, events <-chan engine.StreamEvent) error {
 	if chat, ok := ctx.Value(engine.ChatRequestKey).(*engine.ChatRequest); ok {
 		if variant, ok := chat.ProviderExtensions["_openai_variant"].(string); ok && variant == "responses" {
-			return s.serializeResponsesStream(w, events)
+			return s.serializeResponsesStream(ctx, w, events)
 		}
 	}
-	return s.serializeChatStream(w, events)
+	return s.serializeChatStream(ctx, w, events)
 }
 
 // blockTopology tracks the one content block open in the stream being
@@ -382,9 +382,19 @@ func (b *blockTopology) stop(index int) (engine.BlockKind, error) {
 	return kind, nil
 }
 
-func (s *StreamAdapter) serializeChatStream(w io.Writer, events <-chan engine.StreamEvent) error {
+func (s *StreamAdapter) serializeChatStream(ctx context.Context, w io.Writer, events <-chan engine.StreamEvent) error {
 	blocks := &blockTopology{prefix: "openai"}
-	for evt := range events {
+	for {
+		var evt engine.StreamEvent
+		var ok bool
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case evt, ok = <-events:
+		}
+		if !ok {
+			break
+		}
 		line, err := serializeEvent(evt, blocks)
 		if err != nil {
 			return fmt.Errorf("openai serialize: %w", err)
@@ -396,18 +406,34 @@ func (s *StreamAdapter) serializeChatStream(w io.Writer, events <-chan engine.St
 			return fmt.Errorf("openai serialize write: %w", err)
 		}
 	}
+	// ctx.Done and a closed events channel may both be ready. If the channel
+	// branch won the select above, never turn that aborted stream into a clean
+	// OpenAI completion marker.
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if _, err := fmt.Fprint(w, "data: [DONE]\n\n"); err != nil {
 		return fmt.Errorf("openai serialize write: %w", err)
 	}
 	return nil
 }
 
-func (s *StreamAdapter) serializeResponsesStream(w io.Writer, events <-chan engine.StreamEvent) error {
+func (s *StreamAdapter) serializeResponsesStream(ctx context.Context, w io.Writer, events <-chan engine.StreamEvent) error {
 	toolCallStarted := make(map[int]string)        // index -> ID
 	toolCallArgs := make(map[int]*strings.Builder) // index -> accumulated arguments
 	blocks := &blockTopology{prefix: "openai"}
 
-	for evt := range events {
+	for {
+		var evt engine.StreamEvent
+		var ok bool
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case evt, ok = <-events:
+		}
+		if !ok {
+			break
+		}
 		switch {
 		case evt.BlockStart != nil:
 			// Provider blocks have no representation on the Responses wire:
@@ -563,6 +589,11 @@ func (s *StreamAdapter) serializeResponsesStream(w io.Writer, events <-chan engi
 				return err
 			}
 		}
+	}
+	// See serializeChatStream: closure is not proof of normal completion when
+	// cancellation raced the channel receive.
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 	if _, err := fmt.Fprint(w, "data: [DONE]\n\n"); err != nil {
 		return err

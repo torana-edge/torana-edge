@@ -601,6 +601,14 @@ type PluginPipeline struct {
 	// as ToolCallEnd and the lossless block topology would not survive
 	// plugins. Entries live for the request and are dropped by EndRequest.
 	streamKinds map[uint64]*pbconv.BlockKindTracker
+
+	// streamVerify holds the per-request stream-signature enforcement state
+	// (accepted/returned buffers, per-plugin discipline walkers, terminal
+	// flag) for requests processed through RunOnStreamChunkVerified. Entries
+	// live for the request and are dropped by EndRequest, in the same place
+	// as streamKinds, so the enforcement state cannot outlive the request
+	// metadata it describes.
+	streamVerify map[uint64]*streamVerifierState
 }
 
 // SkippedPlugin describes an enabled plugin that was not loaded because it
@@ -822,12 +830,13 @@ func reloadPipeline(runtime *wasm.Runtime, config PluginConfig) (*PluginPipeline
 		}
 	}
 	return &PluginPipeline{
-		plugins:     loaded,
-		runtime:     runtime,
-		skipped:     skipped,
-		drained:     make(chan struct{}),
-		closed:      make(chan struct{}),
-		streamKinds: make(map[uint64]*pbconv.BlockKindTracker),
+		plugins:      loaded,
+		runtime:      runtime,
+		skipped:      skipped,
+		drained:      make(chan struct{}),
+		closed:       make(chan struct{}),
+		streamKinds:  make(map[uint64]*pbconv.BlockKindTracker),
+		streamVerify: make(map[uint64]*streamVerifierState),
 	}, nil
 }
 
@@ -946,6 +955,7 @@ func (pp *PluginPipeline) EndRequest(reqID uint64) {
 	pp.runtime.EndRequest(reqID)
 	pp.mu.Lock()
 	delete(pp.streamKinds, reqID)
+	delete(pp.streamVerify, reqID)
 	pp.mu.Unlock()
 }
 

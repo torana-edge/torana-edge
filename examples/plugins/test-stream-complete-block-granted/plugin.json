@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "id": "torana-test/test-stream-complete-block-granted",
+  "name": "test-stream-complete-block-granted",
+  "version": "0.1.0",
+  "abi_version": "v2",
+  "failure_mode": "pass",
+  "description": "Positive fixture: invent a complete text scope with the required grants",
+  "hooks": [
+    {
+      "name": "run_on_stream_chunk"
+    }
+  ],
+  "permissions": [
+    {
+      "name": "ir.messages.write.assistant",
+      "description": "Replace the source text with invented assistant text"
+    },
+    {
+      "name": "ir.stream.write",
+      "description": "Replace one source event with a complete text boundary"
+    }
+  ]
+}

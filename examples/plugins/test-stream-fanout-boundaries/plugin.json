@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "id": "torana-test/test-stream-fanout-boundaries",
+  "name": "test-stream-fanout-boundaries",
+  "version": "0.1.0",
+  "abi_version": "v2",
+  "failure_mode": "pass",
+  "description": "Regression fixture: fan one text event into two complete text boundaries",
+  "hooks": [
+    {
+      "name": "run_on_stream_chunk"
+    }
+  ],
+  "permissions": [
+    {
+      "name": "ir.messages.write.assistant",
+      "description": "Remove the source text while producing replacement text boundaries"
+    },
+    {
+      "name": "ir.stream.write",
+      "description": "Fan one source event out into multiple content boundaries"
+    }
+  ]
+}

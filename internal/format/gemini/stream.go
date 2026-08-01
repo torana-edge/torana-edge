@@ -284,7 +284,17 @@ func (s *StreamAdapter) SerializeStream(ctx context.Context, w io.Writer, events
 	var openPart *serializePart
 	var pendingUsage *engine.StreamUsage
 
-	for event := range events {
+	for {
+		var event engine.StreamEvent
+		var ok bool
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case event, ok = <-events:
+		}
+		if !ok {
+			break
+		}
 		switch {
 		case event.Error != nil:
 			_ = writeFrame(w, chunkFinish("OTHER", nil), s.Wrapped)
@@ -406,6 +416,11 @@ func (s *StreamAdapter) SerializeStream(ctx context.Context, w io.Writer, events
 			}
 			delete(toolStates, event.ToolCallEnd.Index)
 		}
+	}
+	// Gemini has no unconditional EOF marker, but it must still report an
+	// aborted closed-channel race as cancellation rather than clean success.
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 	return nil
 }
