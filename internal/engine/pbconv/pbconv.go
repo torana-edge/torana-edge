@@ -218,37 +218,49 @@ func ToPBStreamEvent(e *engine.StreamEvent) *pb.StreamEvent {
 	return out
 }
 
-// BlockKindTracker records which content block is ACTUALLY open while a
+// BlockKindTracker records which content blocks are ACTUALLY open while a
 // streamed message is converted pb → engine, so a ContentBlockStop — which
 // carries only an index — converts back to the engine event that matches the
 // block it closes: ToolCallEnd for tool blocks, BlockStop for
 // text/thinking/provider blocks.
 //
 // The v2 wire binds a stop by index alone; the block kind lives on the start
-// event. The v2 contract is stricter than per-index uniqueness: at most ONE
-// content block may be open at a time, and indexes are unique across the
-// ENTIRE streamed message — never reused after a block closes. This tracker
-// enforces both, so it never guesses: a second start while a block is open is
-// an error regardless of index, a start whose index was already used in this
-// message is an error even after its block closed, and a stop that does not
-// name the single open block is an error.
+// event. The v2 contract: non-tool blocks (text/thinking/provider) are
+// exclusive — at most ONE may be open, and nothing else (not even a tool
+// block) may be open alongside it; TOOL blocks may be open concurrently at
+// distinct indexes (parallel tool calls ride the native protocols), but never
+// while a non-tool block is open; and indexes are unique across the ENTIRE
+// streamed message — never reused after a block closes. This tracker enforces
+// all of it, so it never guesses: a start that violates the exclusivity rules
+// is an error, a start whose index was already used in this message is an
+// error even after its block closed, and a stop that does not name an open
+// block of the kind it closes is an error.
 //
 // One response stream is ONE streamed message. A tracker is request-scoped
 // (streams cross host calls) and never sees MessageStart, so it cannot infer
 // a reset — indexes stay unique for the whole request. It is NOT safe for
 // concurrent use.
 type BlockKindTracker struct {
-	// openKind/openIndex/hasOpen are the one content block currently open in
-	// this message. Stops resolve by this actual kind; nothing is guessed.
-	// The kind is retained ONLY to lower a matching stop to ToolCallEnd
-	// (tool) vs BlockStop (text/thinking/provider).
-	openKind  blockKind
-	openIndex int
-	hasOpen   bool
+	// openNonTool is the one text/thinking/provider block currently open in
+	// this message, if any. Non-tool blocks are exclusive: a start while one
+	// is open is an error regardless of the new block's kind (including a
+	// tool block), and no tool block may be open alongside it.
+	openNonTool *openBlock
+	// openTools records every tool block currently open, keyed by its block
+	// index. Multiple tool blocks may be open at once (parallel tool calls),
+	// each at a unique index; membership is what makes a stop a ToolCallEnd.
+	openTools map[int]struct{}
 	// seen records every index that has opened a block in this message.
 	// Indexes are unique per message: a start whose index was already used —
 	// even after its block closed — is invalid topology.
 	seen map[int]struct{}
+}
+
+// openBlock is a non-tool content block open at an index, with the kind
+// needed to lower a matching stop to BlockStop.
+type openBlock struct {
+	kind  blockKind
+	index int
 }
 
 // blockKind is the kind of a content block recorded as open at an index.
@@ -256,7 +268,6 @@ type blockKind int
 
 const (
 	blockKindNone blockKind = iota
-	blockKindTool
 	blockKindText
 	blockKindThinking
 	blockKindProvider
@@ -264,8 +275,6 @@ const (
 
 func (k blockKind) String() string {
 	switch k {
-	case blockKindTool:
-		return "tool"
 	case blockKindText:
 		return "text"
 	case blockKindThinking:
@@ -277,11 +286,27 @@ func (k blockKind) String() string {
 	}
 }
 
+// startNonTool validates and records a text/thinking/provider block start: it
+// is exclusive — it may not collide with the open non-tool block, nor open
+// while any tool block is open — and its index joins the seen set.
+func (t *BlockKindTracker) startNonTool(idx int, kind blockKind) error {
+	if t.openNonTool != nil {
+		return fmt.Errorf("pbconv: content block start at index %d while a %s block at index %d is still open", idx, t.openNonTool.kind, t.openNonTool.index)
+	}
+	if len(t.openTools) > 0 {
+		return fmt.Errorf("pbconv: content block start at index %d while %d tool block(s) are still open", idx, len(t.openTools))
+	}
+	t.openNonTool = &openBlock{kind: kind, index: idx}
+	t.seen[idx] = struct{}{}
+	return nil
+}
+
 // FromPBStreamEvent converts one event, resolving ContentBlockStop by the kind
 // of the block this tracker recorded as open. It returns an error for topology
-// the v2 ABI declares invalid: a second start while a block is open (regardless
-// of index), a start whose index was already used in this message (even after
-// its block closed), or a stop that does not name the single open block. The
+// the v2 ABI declares invalid: a non-tool start while a non-tool block or any
+// tool block is open, a tool start while a non-tool block is open, a start
+// whose index was already used in this message (even after its block closed),
+// or a stop that does not name an open block of the kind it closes. The
 // conversion boundary never fabricates a kind.
 func (t *BlockKindTracker) FromPBStreamEvent(e *pb.StreamEvent) (*engine.StreamEvent, error) {
 	out := &engine.StreamEvent{}
@@ -296,12 +321,6 @@ func (t *BlockKindTracker) FromPBStreamEvent(e *pb.StreamEvent) (*engine.StreamE
 		}
 		cbs := v.ContentBlockStart
 		idx := int(cbs.Index)
-		// At most ONE content block open at a time — a second start is
-		// invalid even at a different index (it would interleave two blocks'
-		// events, which the index-bound wire cannot represent).
-		if t.hasOpen {
-			return nil, fmt.Errorf("pbconv: content block start at index %d while a %s block at index %d is still open", idx, t.openKind, t.openIndex)
-		}
 		if t.seen == nil {
 			t.seen = make(map[int]struct{})
 		}
@@ -310,37 +329,54 @@ func (t *BlockKindTracker) FromPBStreamEvent(e *pb.StreamEvent) (*engine.StreamE
 		}
 		switch b := cbs.Block.(type) {
 		case *pb.ContentBlockStart_ToolCall:
-			if b.ToolCall != nil {
-				out.ToolCallStart = &engine.ToolCallStart{
-					Index:     idx,
-					ID:        b.ToolCall.Id,
-					Name:      b.ToolCall.Name,
-					Signature: b.ToolCall.Signature,
-				}
-				t.openKind, t.openIndex, t.hasOpen = blockKindTool, idx, true
-				t.seen[idx] = struct{}{}
+			if b.ToolCall == nil {
+				return out, nil
 			}
+			// A tool block may open alongside other tool blocks (parallel
+			// calls ride the native protocols), but never while a non-tool
+			// block is open: the index-bound wire cannot interleave a
+			// non-tool block with anything else.
+			if t.openNonTool != nil {
+				return nil, fmt.Errorf("pbconv: content block start at index %d while a %s block at index %d is still open", idx, t.openNonTool.kind, t.openNonTool.index)
+			}
+			if t.openTools == nil {
+				t.openTools = make(map[int]struct{})
+			}
+			out.ToolCallStart = &engine.ToolCallStart{
+				Index:     idx,
+				ID:        b.ToolCall.Id,
+				Name:      b.ToolCall.Name,
+				Signature: b.ToolCall.Signature,
+			}
+			t.openTools[idx] = struct{}{}
+			t.seen[idx] = struct{}{}
 		case *pb.ContentBlockStart_Text:
-			if b.Text != nil {
-				out.BlockStart = &engine.BlockStart{Index: idx, Kind: engine.BlockKindText}
-				t.openKind, t.openIndex, t.hasOpen = blockKindText, idx, true
-				t.seen[idx] = struct{}{}
+			if b.Text == nil {
+				return out, nil
 			}
+			if err := t.startNonTool(idx, blockKindText); err != nil {
+				return nil, err
+			}
+			out.BlockStart = &engine.BlockStart{Index: idx, Kind: engine.BlockKindText}
 		case *pb.ContentBlockStart_Thinking:
-			if b.Thinking != nil {
-				out.BlockStart = &engine.BlockStart{Index: idx, Kind: engine.BlockKindThinking}
-				t.openKind, t.openIndex, t.hasOpen = blockKindThinking, idx, true
-				t.seen[idx] = struct{}{}
+			if b.Thinking == nil {
+				return out, nil
 			}
+			if err := t.startNonTool(idx, blockKindThinking); err != nil {
+				return nil, err
+			}
+			out.BlockStart = &engine.BlockStart{Index: idx, Kind: engine.BlockKindThinking}
 		case *pb.ContentBlockStart_Provider:
-			if b.Provider != nil {
-				out.BlockStart = &engine.BlockStart{
-					Index:        idx,
-					Kind:         engine.BlockKindProvider,
-					ProviderKind: b.Provider.Kind,
-				}
-				t.openKind, t.openIndex, t.hasOpen = blockKindProvider, idx, true
-				t.seen[idx] = struct{}{}
+			if b.Provider == nil {
+				return out, nil
+			}
+			if err := t.startNonTool(idx, blockKindProvider); err != nil {
+				return nil, err
+			}
+			out.BlockStart = &engine.BlockStart{
+				Index:        idx,
+				Kind:         engine.BlockKindProvider,
+				ProviderKind: b.Provider.Kind,
 			}
 		}
 	case *pb.StreamEvent_SignatureDelta:
@@ -356,18 +392,25 @@ func (t *BlockKindTracker) FromPBStreamEvent(e *pb.StreamEvent) (*engine.StreamE
 			return out, nil
 		}
 		idx := int(v.ContentBlockStop.Index)
-		if !t.hasOpen {
-			return nil, fmt.Errorf("pbconv: content block stop at index %d has no open block (unknown, mismatched, or already-closed topology)", idx)
-		}
-		if idx != t.openIndex {
-			return nil, fmt.Errorf("pbconv: content block stop at index %d does not match the open %s block at index %d", idx, t.openKind, t.openIndex)
-		}
-		if t.openKind == blockKindTool {
-			out.ToolCallEnd = &engine.ToolCallEnd{Index: idx}
-		} else {
+		// A stop binds by index to the block it closes, kind-matched: a tool
+		// index closes a tool block (ToolCallEnd), the open non-tool index
+		// closes a non-tool block (BlockStop). Anything else — a stop that
+		// names a non-tool index while a different block is open, or an index
+		// with no open block at all — is unknown topology, never a guess.
+		if t.openNonTool != nil {
+			if idx != t.openNonTool.index {
+				return nil, fmt.Errorf("pbconv: content block stop at index %d does not match the open %s block at index %d", idx, t.openNonTool.kind, t.openNonTool.index)
+			}
 			out.BlockStop = &engine.BlockStop{Index: idx}
+			t.openNonTool = nil
+			return out, nil
 		}
-		t.hasOpen = false
+		if _, ok := t.openTools[idx]; ok {
+			out.ToolCallEnd = &engine.ToolCallEnd{Index: idx}
+			delete(t.openTools, idx)
+			return out, nil
+		}
+		return nil, fmt.Errorf("pbconv: content block stop at index %d has no open block (unknown, mismatched, or already-closed topology)", idx)
 	case *pb.StreamEvent_MessageStop:
 		out.FinishReason = v.MessageStop.FinishReason
 	case *pb.StreamEvent_Usage:

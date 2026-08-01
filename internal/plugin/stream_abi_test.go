@@ -11,6 +11,7 @@ import (
 	"github.com/torana-edge/torana-edge/internal/cache"
 	"github.com/torana-edge/torana-edge/internal/engine"
 	"github.com/torana-edge/torana-edge/internal/format/gemini"
+	"github.com/torana-edge/torana-edge/internal/format/openai"
 	"github.com/torana-edge/torana-edge/internal/wasm"
 )
 
@@ -1058,6 +1059,148 @@ func TestStreamBlockTopologySurvivesPlugins(t *testing.T) {
 	}
 	if out[0].BlockStop != nil {
 		t.Fatalf("tool stop misread as BlockStop: %+v", out[0].BlockStop)
+	}
+}
+
+// flatEvent is the reduced shape asserted after a pipeline pass: which kind
+// of event, at which block index, with which payload fields.
+type flatEvent struct {
+	kind  string // start | delta | end | finish
+	index int
+	id    string
+	name  string
+	delta string
+}
+
+func flatStream(events []engine.StreamEvent) []flatEvent {
+	out := make([]flatEvent, 0, len(events))
+	for _, ev := range events {
+		switch {
+		case ev.ToolCallStart != nil:
+			out = append(out, flatEvent{kind: "start", index: ev.ToolCallStart.Index, id: ev.ToolCallStart.ID, name: ev.ToolCallStart.Name})
+		case ev.ToolCallDelta != nil:
+			out = append(out, flatEvent{kind: "delta", index: ev.ToolCallDelta.Index, delta: ev.ToolCallDelta.ArgumentsDelta})
+		case ev.ToolCallEnd != nil:
+			out = append(out, flatEvent{kind: "end", index: ev.ToolCallEnd.Index})
+		case ev.FinishReason != "":
+			out = append(out, flatEvent{kind: "finish", delta: ev.FinishReason})
+		case ev.Error != nil:
+			out = append(out, flatEvent{kind: "error", delta: ev.Error.Message})
+		}
+	}
+	return out
+}
+
+// pipeStream pushes every parsed engine event of one response stream through
+// the plugin pipeline under one request ID (one tracker = one streamed
+// message) and returns what came back.
+func pipeStream(t *testing.T, pp *PluginPipeline, reqID uint64, events []engine.StreamEvent) []engine.StreamEvent {
+	t.Helper()
+	var got []engine.StreamEvent
+	for _, ev := range events {
+		out, err := pp.RunOnStreamChunk(context.Background(), reqID, &ev)
+		if err != nil {
+			t.Fatalf("RunOnStreamChunk: %v", err)
+		}
+		got = append(got, out...)
+	}
+	return got
+}
+
+// TestOpenAIParallelChatSurvivesPlugins: a real OpenAI Chat SSE stream with
+// two parallel tool calls — interleaved starts and argument deltas, then both
+// stops — parsed into engine events and pushed through the real plugin
+// pipeline must come back with every start/delta/stop intact at its own
+// index, and must NOT error. The round-4 tracker allows multiple tool blocks
+// open at once (the Chat adapter emits ToolCallEnd for both calls only at
+// finish_reason="tool_calls", so both are open simultaneously), which the
+// round-3 single-open rule would have rejected at the plugin boundary.
+func TestOpenAIParallelChatSurvivesPlugins(t *testing.T) {
+	requireWASM(t, fixturesDir+"/test-inert-a/plugin.wasm")
+	pp := newTestPipeline(t, fixturesDir, []string{"test-inert-a"})
+
+	sse := strings.Join([]string{
+		`data: {"choices":[{"index":0,"delta":{"role":"assistant","content":null,"tool_calls":[{"index":0,"id":"call_weather","type":"function","function":{"name":"get_weather","arguments":""}}]}}]}`,
+		`data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":1,"id":"call_time","type":"function","function":{"name":"get_time","arguments":""}}]}}]}`,
+		`data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"city\":"}}]}}]}`,
+		`data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":1,"function":{"arguments":"{\"tz\":"}}]}}]}`,
+		`data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"Pune\"}"}}]}}]}`,
+		`data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":1,"function":{"arguments":"\"UTC\"}"}}]}}]}`,
+		`data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`,
+		`data: [DONE]`,
+	}, "\n")
+
+	events := drainChunks((&openai.StreamAdapter{}).ParseStream(strings.NewReader(sse)))
+	if len(events) != 9 {
+		t.Fatalf("parsed %d events, want 9: %+v", len(events), flatStream(events))
+	}
+
+	got := flatStream(pipeStream(t, pp, 300, events))
+	want := []flatEvent{
+		{kind: "start", index: 0, id: "call_weather", name: "get_weather"},
+		{kind: "start", index: 1, id: "call_time", name: "get_time"},
+		{kind: "delta", index: 0, delta: `{"city":`},
+		{kind: "delta", index: 1, delta: `{"tz":`},
+		{kind: "delta", index: 0, delta: `"Pune"}`},
+		{kind: "delta", index: 1, delta: `"UTC"}`},
+		{kind: "end", index: 0},
+		{kind: "end", index: 1},
+		{kind: "finish", delta: "tool_calls"},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("pipeline returned %d events, want %d: %+v", len(got), len(want), got)
+	}
+	for i, w := range want {
+		if got[i] != w {
+			t.Errorf("event %d = %+v, want %+v", i, got[i], w)
+		}
+	}
+}
+
+// TestOpenAIResponsesParallelSurvivesPlugins: the Responses API's interleaved
+// parallel calls — two function_call items added back to back, argument
+// deltas alternating by item, and each call completed at its own time — must
+// survive parse → pb → plugin → engine without error. The second call's stop
+// arrives while the first is still open (non-ascending stop order), which is
+// exactly the concurrency the round-4 tracker permits.
+func TestOpenAIResponsesParallelSurvivesPlugins(t *testing.T) {
+	requireWASM(t, fixturesDir+"/test-inert-a/plugin.wasm")
+	pp := newTestPipeline(t, fixturesDir, []string{"test-inert-a"})
+
+	sse := strings.Join([]string{
+		`data: {"type":"response.output_item.added","item":{"id":"item_weather","type":"function_call","name":"weather","call_id":"call_weather"}}`,
+		`data: {"type":"response.output_item.added","item":{"id":"item_time","type":"function_call","name":"time","call_id":"call_time"}}`,
+		`data: {"type":"response.function_call_arguments.delta","item_id":"item_time","delta":"{\"tz\":"}`,
+		`data: {"type":"response.function_call_arguments.delta","item_id":"item_weather","delta":"{\"city\":"}`,
+		`data: {"type":"response.function_call_arguments.delta","item_id":"item_time","delta":"\"UTC\"}"}`,
+		`data: {"type":"response.function_call_arguments.done","item_id":"item_time"}`,
+		`data: {"type":"response.function_call_arguments.delta","item_id":"item_weather","delta":"\"Pune\"}"}`,
+		`data: {"type":"response.function_call_arguments.done","item_id":"item_weather"}`,
+	}, "\n")
+
+	events := drainChunks((&openai.StreamAdapter{}).ParseStream(strings.NewReader(sse)))
+	if len(events) != 8 {
+		t.Fatalf("parsed %d events, want 8: %+v", len(events), flatStream(events))
+	}
+
+	got := flatStream(pipeStream(t, pp, 301, events))
+	want := []flatEvent{
+		{kind: "start", index: 0, id: "call_weather", name: "weather"},
+		{kind: "start", index: 1, id: "call_time", name: "time"},
+		{kind: "delta", index: 1, delta: `{"tz":`},
+		{kind: "delta", index: 0, delta: `{"city":`},
+		{kind: "delta", index: 1, delta: `"UTC"}`},
+		{kind: "end", index: 1},
+		{kind: "delta", index: 0, delta: `"Pune"}`},
+		{kind: "end", index: 0},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("pipeline returned %d events, want %d: %+v", len(got), len(want), got)
+	}
+	for i, w := range want {
+		if got[i] != w {
+			t.Errorf("event %d = %+v, want %+v", i, got[i], w)
+		}
 	}
 }
 

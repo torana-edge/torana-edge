@@ -537,6 +537,120 @@ func TestMismatchedStopRejected(t *testing.T) {
 	}
 }
 
+func toolBlockStart(idx int, id, name string) *pb.StreamEvent {
+	return &pb.StreamEvent{Event: &pb.StreamEvent_ContentBlockStart{ContentBlockStart: &pb.ContentBlockStart{
+		Index: int32(idx), Block: &pb.ContentBlockStart_ToolCall{ToolCall: &pb.ToolCallRef{Id: id, Name: name}},
+	}}}
+}
+
+func toolBlockStop(idx int) *pb.StreamEvent {
+	return &pb.StreamEvent{Event: &pb.StreamEvent_ContentBlockStop{ContentBlockStop: &pb.ContentBlockStop{Index: int32(idx)}}}
+}
+
+// The round-4 contract: MULTIPLE tool blocks may be open concurrently at
+// unique indexes — parallel tool calls ride the native protocols. A second
+// tool start while a tool block is open is legal (this was rejected by the
+// round-3 single-open rule), and each stop resolves its own block by index,
+// kind-matched, regardless of the order stops arrive in.
+func TestConcurrentToolBlocksAccepted(t *testing.T) {
+	tracker := &BlockKindTracker{}
+	stream := []*pb.StreamEvent{
+		toolBlockStart(0, "call_a", "get_weather"),
+		toolBlockStart(1, "call_b", "get_time"),
+		toolBlockStart(2, "call_c", "get_news"),
+		// Stops in non-ascending order: each binds its own index.
+		toolBlockStop(2),
+		toolBlockStop(0),
+		toolBlockStop(1),
+	}
+	for i, ev := range stream {
+		got, err := tracker.FromPBStreamEvent(ev)
+		if err != nil {
+			t.Fatalf("event %d: parallel tool start/stop must be accepted, got error: %v", i, err)
+		}
+		switch arm := ev.Event.(type) {
+		case *pb.StreamEvent_ContentBlockStart:
+			if got.ToolCallStart == nil || got.ToolCallStart.Index != int(arm.ContentBlockStart.Index) {
+				t.Fatalf("event %d: tool start lost its index: %+v", i, got)
+			}
+		case *pb.StreamEvent_ContentBlockStop:
+			if got.ToolCallEnd == nil || got.ToolCallEnd.Index != int(arm.ContentBlockStop.Index) {
+				t.Fatalf("event %d: tool stop did not lower to ToolCallEnd at its own index: %+v", i, got)
+			}
+		}
+	}
+	// Everything is closed: a fresh start is legal again.
+	if _, err := tracker.FromPBStreamEvent(toolBlockStart(3, "call_d", "again")); err != nil {
+		t.Fatalf("start after all parallel blocks closed: %v", err)
+	}
+}
+
+// A stop naming an index with no open block is unknown topology even while
+// OTHER tool blocks are open: the stop binds by index, so an index that is
+// not open cannot be closed. The tracker must error, never guess.
+func TestUnknownStopRejectedWhileToolsOpen(t *testing.T) {
+	tracker := &BlockKindTracker{}
+	if _, err := tracker.FromPBStreamEvent(toolBlockStart(0, "call_a", "a")); err != nil {
+		t.Fatalf("start 0: %v", err)
+	}
+	if _, err := tracker.FromPBStreamEvent(toolBlockStart(1, "call_b", "b")); err != nil {
+		t.Fatalf("start 1: %v", err)
+	}
+	_, err := tracker.FromPBStreamEvent(toolBlockStop(4))
+	if err == nil {
+		t.Fatal("stop for an index with no open tool block did not error")
+	}
+	want := "pbconv: content block stop at index 4 has no open block (unknown, mismatched, or already-closed topology)"
+	if err.Error() != want {
+		t.Errorf("error = %q, want %q", err.Error(), want)
+	}
+}
+
+// A non-tool block is exclusive: it may not open while ANY tool block is
+// open, no matter how many. The error names the count of open tool blocks.
+func TestNonToolStartWhileToolOpenRejected(t *testing.T) {
+	tracker := &BlockKindTracker{}
+	if _, err := tracker.FromPBStreamEvent(toolBlockStart(0, "call_a", "a")); err != nil {
+		t.Fatalf("tool start: %v", err)
+	}
+	if _, err := tracker.FromPBStreamEvent(toolBlockStart(1, "call_b", "b")); err != nil {
+		t.Fatalf("tool start 1: %v", err)
+	}
+	for name, start := range map[string]*pb.StreamEvent{
+		"text":     {Event: &pb.StreamEvent_ContentBlockStart{ContentBlockStart: &pb.ContentBlockStart{Index: 2, Block: &pb.ContentBlockStart_Text{Text: &pb.TextBlock{}}}}},
+		"thinking": {Event: &pb.StreamEvent_ContentBlockStart{ContentBlockStart: &pb.ContentBlockStart{Index: 2, Block: &pb.ContentBlockStart_Thinking{Thinking: &pb.ThinkingBlock{}}}}},
+	} {
+		_, err := tracker.FromPBStreamEvent(start)
+		if err == nil {
+			t.Fatalf("%s start while tool blocks are open did not error", name)
+		}
+		want := "pbconv: content block start at index 2 while 2 tool block(s) are still open"
+		if err.Error() != want {
+			t.Errorf("%s: error = %q, want %q", name, err.Error(), want)
+		}
+	}
+}
+
+// A tool block may not open while a non-tool block is open: the index-bound
+// wire cannot interleave a non-tool block with anything else. The tool start
+// gets the same single-open error a non-tool start would.
+func TestToolStartWhileNonToolOpenRejected(t *testing.T) {
+	tracker := &BlockKindTracker{}
+	if _, err := tracker.FromPBStreamEvent(&pb.StreamEvent{Event: &pb.StreamEvent_ContentBlockStart{ContentBlockStart: &pb.ContentBlockStart{
+		Index: 5, Block: &pb.ContentBlockStart_Text{Text: &pb.TextBlock{}},
+	}}}); err != nil {
+		t.Fatalf("text start: %v", err)
+	}
+	_, err := tracker.FromPBStreamEvent(toolBlockStart(6, "call_a", "a"))
+	if err == nil {
+		t.Fatal("tool start while a text block is open did not error")
+	}
+	want := "pbconv: content block start at index 6 while a text block at index 5 is still open"
+	if err.Error() != want {
+		t.Errorf("error = %q, want %q", err.Error(), want)
+	}
+}
+
 // ProviderBlock.kind is topology the host must not change: pin that
 // {kind:"redacted"} PB → engine → PB is field-equivalent (index, arm, kind
 // string all identical). The pre-fix test blessed "redacted"→"provider"; that
