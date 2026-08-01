@@ -1205,6 +1205,219 @@ func TestStreamVerifyExplicitEmptySignedBlock(t *testing.T) {
 	})
 }
 
+// TestStreamVerifyEmptySignedSpanThenContent pins round-3 F1: a
+// signature_delta emitted in an explicit text/thinking block with NO deltas
+// yet covers an EMPTY span, and that span is materialized AT THE SIGNATURE
+// EVENT — the empty signed scope owns its ordinal, and later deltas become
+// the next span. The finding: accepted StartText(0)+Sig(T)+Text("later")+Stop;
+// returned StartText(0)+Text("later")+Stop — the walk recorded no span for
+// the signature (spanOpen was false, closeSpan appended nothing), so the
+// accepted empty binding also recorded ordinal 0 and the later text became
+// spans[0]; when T vanished, verifyUnpairedBinding compared the empty signed
+// scope to "later", called it rewritten, and allowed the drop. The block and
+// the empty signed scope both survived; only the token vanished. With the
+// empty span materialized, the empty binding's ordinal points at an empty
+// span that does not survive — dropped, not cleared, and not suppression
+// (the block still exists), so no grant can save it. Pinned for TEXT and
+// THINKING, each with a later signed span and a later UNSIGNED span variant,
+// under withEveryGrant (all dropped, rejected).
+func TestStreamVerifyEmptySignedSpanThenContent(t *testing.T) {
+	textStart := func() *pbv2.StreamEvent {
+		return &pbv2.StreamEvent{Event: &pbv2.StreamEvent_ContentBlockStart{
+			ContentBlockStart: &pbv2.ContentBlockStart{
+				Index: 0, Block: &pbv2.ContentBlockStart_Text{Text: &pbv2.TextBlock{}},
+			},
+		}}
+	}
+	thinkingStart := func() *pbv2.StreamEvent {
+		return &pbv2.StreamEvent{Event: &pbv2.StreamEvent_ContentBlockStart{
+			ContentBlockStart: &pbv2.ContentBlockStart{
+				Index: 0, Block: &pbv2.ContentBlockStart_Thinking{Thinking: &pbv2.ThinkingBlock{}},
+			},
+		}}
+	}
+
+	// build renders the accepted stream (empty signature first, then a
+	// "later" span, optionally signed) and the plugin's returned stream with
+	// the EMPTY signature dropped but the later content kept.
+	build := func(start func() *pbv2.StreamEvent, delta func(string) *pbv2.StreamEvent, laterSigned bool) (accepted, returned []*pbv2.StreamEvent) {
+		accepted = []*pbv2.StreamEvent{start()}
+		accepted = append(accepted, signatureDelta(streamSigA))
+		accepted = append(accepted, delta("later"))
+		if laterSigned {
+			accepted = append(accepted, signatureDelta(streamSigB))
+		}
+		accepted = append(accepted, &pbv2.StreamEvent{Event: &pbv2.StreamEvent_ContentBlockStop{
+			ContentBlockStop: &pbv2.ContentBlockStop{Index: 0},
+		}})
+
+		returned = []*pbv2.StreamEvent{start()}
+		returned = append(returned, delta("later"))
+		if laterSigned {
+			returned = append(returned, signatureDelta(streamSigB))
+		}
+		returned = append(returned, &pbv2.StreamEvent{Event: &pbv2.StreamEvent_ContentBlockStop{
+			ContentBlockStop: &pbv2.ContentBlockStop{Index: 0},
+		}})
+		return accepted, returned
+	}
+
+	t.Run("the walk gives the empty signed span its own ordinal", func(t *testing.T) {
+		accepted, _ := build(textStart, textDelta, false)
+		v := scanStreamSignatures(accepted)
+		if len(v.spans) != 2 || !v.spans[0].isEmpty() || v.spans[1].text != "later" {
+			t.Fatalf("walk spans = %+v, want [empty, later]", v.spans)
+		}
+		if len(v.bindings) != 1 || v.bindings[0].span != 0 || !v.bindings[0].content.isEmpty() {
+			t.Fatalf("walk bindings = %+v, want empty binding at span 0", v.bindings)
+		}
+	})
+
+	for _, tc := range []struct {
+		name        string
+		start       func() *pbv2.StreamEvent
+		delta       func(string) *pbv2.StreamEvent
+		laterSigned bool
+	}{
+		{"text, later unsigned span", textStart, textDelta, false},
+		{"text, later signed span", textStart, textDelta, true},
+		{"thinking, later unsigned span", thinkingStart, thinkingDelta, false},
+		{"thinking, later signed span", thinkingStart, thinkingDelta, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			accepted, returned := build(tc.start, tc.delta, tc.laterSigned)
+			// The empty signed span's token vanished while the block (and its
+			// later content) survived: dropped — never "cleared" by the later
+			// content at ordinal 0, and never topology (grants must not save
+			// it).
+			err := verifyStream(accepted, returned, withEveryGrant)
+			if err == nil {
+				t.Fatal("empty signed span losing its token passed with every grant")
+			}
+			if !strings.Contains(err.Error(), "dropped") {
+				t.Fatalf("empty signed span: err = %v, want dropped", err)
+			}
+		})
+	}
+}
+
+// TestStreamVerifyToolGlobalExactFirst pins round-3 F2: tool Phase 1 is a
+// TRUE GLOBAL exact-full-fact pass over ALL returned scopes with a consumed
+// set, and only AFTER every exact occurrence is consumed do the same-index
+// and cross-index fallback correlations run. The finding: accepted A/Ta@0 and
+// B/Tb@1; returned B modified with its token cleared at index 0 and A intact
+// at index 1. The per-returned-loop exact scan let the modified B consume A
+// through same-index correlation first, and the intact A then compared
+// against B and was condemned "forged" — the verdict flipped when the
+// returned order was reversed. At the signature layer both orders are valid:
+// A moved coherently (all facts intact) and B changed with its token cleared.
+// Both output orders must now pass.
+func TestStreamVerifyToolGlobalExactFirst(t *testing.T) {
+	accepted := append(
+		toolBlock(0, "call_1", "read_file", streamSigA, `{"path":"/a"}`),
+		toolBlock(1, "call_2", "write_file", streamSigB, `{"path":"/b"}`)...)
+	modifiedFirst := append(
+		toolBlock(0, "call_2", "write_file", "", `{"path":"/b-changed"}`),
+		toolBlock(1, "call_1", "read_file", streamSigA, `{"path":"/a"}`)...)
+	exactFirst := append(
+		toolBlock(1, "call_1", "read_file", streamSigA, `{"path":"/a"}`),
+		toolBlock(0, "call_2", "write_file", "", `{"path":"/b-changed"}`)...)
+
+	for _, tc := range []struct {
+		name     string
+		returned []*pbv2.StreamEvent
+	}{
+		{"modified block first", modifiedFirst},
+		{"exact match first", exactFirst},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// A is consumed by the global exact pass; B' (changed content,
+			// cleared token) is an invented UNSIGNED block at this layer and
+			// needs ir.stream.write.
+			if err := verifyStream(accepted, tc.returned, withStreamWrite); err != nil {
+				t.Fatalf("order-dependent forged verdict: %v", err)
+			}
+			if err := verifyStream(accepted, tc.returned, noGrants); err == nil ||
+				!strings.Contains(err.Error(), streamWriteGrant) {
+				t.Fatalf("modified unsigned block without grant: err = %v, want grant-gated rejection", err)
+			}
+		})
+	}
+}
+
+// TestStreamVerifyUnsignedTwinSuppression pins round-3 F3: the
+// unchanged-content precheck is occurrence-aware multiset consumption. The
+// finding: accepted signed block A/T + unsigned block A; returned unsigned
+// block A (grant ir.stream.write) — the signed occurrence was suppressed
+// (allowed with the topology grant) while the identical unsigned occurrence
+// survived, but the old "survives ANYWHERE" check treated the surviving
+// unsigned A as proof T was stripped and rejected the drop. Consumption is
+// now one-to-one: exact intact signed bindings consume first (phase 1);
+// surviving unchanged returned spans are matched against accepted UNSIGNED
+// twins before they can prove a signed occurrence dropped; a SURPLUS
+// unchanged returned occurrence corresponding to an unconsumed signed
+// binding is dropped; and an unmatched signed accepted occurrence (content
+// survived only as a twin) is suppression, gated on ir.stream.write.
+func TestStreamVerifyUnsignedTwinSuppression(t *testing.T) {
+	// signed+unsigned twin deletion in BOTH orders: the signed span is
+	// suppressed and the identical unsigned twin survives as the single
+	// returned block. Passes with ir.stream.write, rejected without — the
+	// surviving twin must not be read as a stripped signed token.
+	for name, accepted := range map[string][]*pbv2.StreamEvent{
+		"signed twin first":   append(signedTextBlock(0, "A-content", streamSigA), textBlock(1, "A-content")...),
+		"unsigned twin first": append(textBlock(0, "A-content"), signedTextBlock(1, "A-content", streamSigA)...),
+	} {
+		t.Run(name, func(t *testing.T) {
+			returned := textBlock(0, "A-content")
+			if err := verifyStream(accepted, returned, withStreamWrite); err != nil {
+				t.Fatalf("twin deletion with grant rejected: %v", err)
+			}
+			if err := verifyStream(accepted, returned, noGrants); err == nil ||
+				!strings.Contains(err.Error(), streamWriteGrant) {
+				t.Fatalf("twin deletion without grant: err = %v, want topology rejection", err)
+			}
+		})
+	}
+
+	t.Run("without a twin, the same returned content is a dropped token", func(t *testing.T) {
+		// Same returned shape, but the accepted stream has NO unsigned twin:
+		// the single returned occurrence is the signed content surviving
+		// without its token — dropped, even with every grant.
+		accepted := signedTextBlock(0, "A-content", streamSigA)
+		returned := textBlock(0, "A-content")
+		err := verifyStream(accepted, returned, withEveryGrant)
+		if err == nil || !strings.Contains(err.Error(), "dropped") {
+			t.Fatalf("stripped signed content without twin: err = %v, want dropped", err)
+		}
+	})
+
+	t.Run("two signed copies, one unsigned returned copy is surplus", func(t *testing.T) {
+		// One returned occurrence cannot cover two signed accepted copies:
+		// the signed content survives as a surplus occurrence → dropped.
+		accepted := append(signedTextBlock(0, "A-content", streamSigA),
+			signedTextBlock(1, "A-content", streamSigB)...)
+		returned := textBlock(0, "A-content")
+		err := verifyStream(accepted, returned, withEveryGrant)
+		if err == nil || !strings.Contains(err.Error(), "dropped") {
+			t.Fatalf("two signed copies, one unsigned returned copy: err = %v, want dropped", err)
+		}
+	})
+
+	t.Run("twin plus surplus returned occurrences is dropped", func(t *testing.T) {
+		// accepted: signed A, unsigned A, signed A; returned: TWO unsigned
+		// A's. One returned occurrence is the surviving twin; the second is
+		// a surplus occurrence proving a signed binding dropped.
+		accepted := append(append(signedTextBlock(0, "A-content", streamSigA),
+			textBlock(1, "A-content")...),
+			signedTextBlock(2, "A-content", streamSigB)...)
+		returned := append(textBlock(0, "A-content"), textBlock(1, "A-content")...)
+		err := verifyStream(accepted, returned, withEveryGrant)
+		if err == nil || !strings.Contains(err.Error(), "dropped") {
+			t.Fatalf("twin plus surplus: err = %v, want dropped", err)
+		}
+	})
+}
+
 // TestValidateAcceptedStreamABITopology pins round-2 F4: validateAcceptedStream
 // implements the FULL ABI topology, not a kind-only approximation. Every
 // stop/delta must match its open block BY INDEX, indexes are never reused,

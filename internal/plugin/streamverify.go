@@ -81,7 +81,10 @@ import (
 // deltas is a span with EMPTY typed content: the block exists even without
 // content, so an empty signed block whose token disappears is a dropped
 // signature — never a suppressed block, which is what absence from the span
-// list would otherwise claim.
+// list would otherwise claim. (Round-3 F1) The empty span is materialized AT
+// THE SIGNATURE EVENT when a current-block signature is emitted in an
+// explicit text/thinking block with no deltas yet, so later deltas become
+// the next ordinal instead of rewriting over the empty signed scope.
 //
 // The event walk is a single O(n) pass per stream: tool scopes are built in
 // the main walk, one builder per OPEN tool block (concurrent blocks keep
@@ -448,7 +451,10 @@ type streamSignatureView struct {
 	// (the signature ends the span it covers), and at end of stream. An
 	// explicit text/thinking block closed with zero deltas contributes an
 	// EMPTY span (round-2 F3): the block is present even without content,
-	// so a missing span still means the block itself was suppressed.
+	// so a missing span still means the block itself was suppressed. A
+	// signature in an explicit text/thinking block with no deltas yet
+	// contributes its empty span AT THE SIGNATURE EVENT (round-3 F1), so
+	// later deltas become the next ordinal.
 	spans []typedContent
 	// closed is the concatenated typed content of every span closed so far —
 	// the TrailingStandalone scope for a signature emitted at this point.
@@ -488,7 +494,9 @@ type streamSignatureView struct {
 //	  the plugin-output side, not this PR's.)
 //	SignatureDelta: if a text/thinking span is open (explicit or implicit)
 //	  → CurrentContentBlock binding over the span's typed deltas so far, then
-//	  the span closes (the signature ends the provider part it came with). If
+//	  the span closes (the signature ends the provider part it came with). A
+//	  signature in an explicit text/thinking block with NO deltas yet
+//	  materializes its EMPTY span at the signature event (round-3 F1). If
 //	  a non-text block or any tool block is open → unbound (malformed).
 //	  Otherwise → trailing binding over the accumulated closed content, or
 //	  unbound when no text/thinking content ever preceded it.
@@ -581,12 +589,23 @@ func scanStreamSignatures(events []*pbv2.StreamEvent) streamSignatureView {
 			switch {
 			case spanOpen || (blockOpen && blockText):
 				// Open text/thinking span: current-block binding over the
-				// span's typed deltas up to this signature.
+				// span's typed deltas up to this signature. A signature in an
+				// explicit text/thinking block with NO deltas yet covers an
+				// EMPTY span (round-3 F1): materialize that span AT THE
+				// SIGNATURE EVENT, mark the block as having closed a span, and
+				// leave later deltas to become the next ordinal — otherwise
+				// the empty signed scope would vanish into a later span's
+				// "rewritten" verdict when its token dropped.
+				span := len(v.spans)
+				if !spanOpen && blockOpen && blockText {
+					v.spans = append(v.spans, typedContent{})
+					blockSawSpan = true
+				}
 				v.bindings = append(v.bindings, sigBinding{
 					kind:      sigBindingCurrent,
 					signature: e.SignatureDelta,
 					content:   typedContent{text: spanText.String(), thinking: spanThink.String()},
-					span:      len(v.spans),
+					span:      span,
 				})
 				closeSpan()
 			case blockOpen || len(openTools) > 0:
@@ -664,9 +683,13 @@ func verifyStream(accepted, returned []*pbv2.StreamEvent, canWrite func(string) 
 //
 // Phase 1 — a returned scope that reproduces an accepted scope's complete
 // facts (signature, id, name, arguments) at ANY index is intact and consumes
-// it. Pass-through AND a coherent block reindex (all facts moving together
-// across indexes) both land here: a reindex is NOT forged — the index
-// movement is a topology change whose charge belongs to 2b's full walk.
+// it. This is a TRUE GLOBAL pass over ALL returned scopes with a consumed
+// set (round-3 F2): every exact full-fact occurrence is consumed before any
+// correlation runs, so a modified block's same-index correlation can never
+// steal an accepted occurrence that a later exact match owns. Pass-through
+// AND a coherent block reindex (all facts moving together across indexes)
+// both land here: a reindex is NOT forged — the index movement is a
+// topology change whose charge belongs to 2b's full walk.
 //
 // Phase 2 — a returned scope that is not an exact repeat is correlated with
 // the accepted scope at the SAME index (if one is unconsumed) via
@@ -696,22 +719,33 @@ func verifyStream(accepted, returned []*pbv2.StreamEvent, canWrite func(string) 
 // field-policy walk's business, and passes here by design.
 func verifyToolScopes(accepted, returned []toolCallScope, canWrite func(string) bool) error {
 	consumed := make([]bool, len(accepted))
+	retConsumed := make([]bool, len(returned))
 
-	for _, r := range returned {
-		// Phase 1: exact facts, any index.
-		matched := -1
+	// Phase 1 — a TRUE GLOBAL exact-first pass (round-3 F2): every returned
+	// scope that reproduces an accepted scope's complete facts (signature,
+	// id, name, arguments) at ANY index consumes it, and NO correlation runs
+	// until every exact full-fact occurrence is consumed. Scanning exact
+	// matches inside the per-returned loop let a MODIFIED block's same-index
+	// correlation consume an accepted occurrence first, forcing a later
+	// exact match into a forged verdict — output-order-dependent. The
+	// consumed set makes the fallback phases see the exact matches as taken,
+	// exactly as verifySignatureDeltaBindings already does.
+	for j := range returned {
 		for i := range accepted {
 			if !consumed[i] &&
-				accepted[i].signature == r.signature &&
-				accepted[i].id == r.id &&
-				accepted[i].name == r.name &&
-				accepted[i].arguments == r.arguments {
-				matched = i
+				accepted[i].signature == returned[j].signature &&
+				accepted[i].id == returned[j].id &&
+				accepted[i].name == returned[j].name &&
+				accepted[i].arguments == returned[j].arguments {
+				consumed[i] = true
+				retConsumed[j] = true
 				break
 			}
 		}
-		if matched >= 0 {
-			consumed[matched] = true
+	}
+
+	for j, r := range returned {
+		if retConsumed[j] {
 			continue
 		}
 
@@ -734,7 +768,7 @@ func verifyToolScopes(accepted, returned []toolCallScope, canWrite func(string) 
 		}
 
 		// Phase 2b: cross-index correlation by identical covered facts.
-		matched = -1
+		matched := -1
 		for i := range accepted {
 			if !consumed[i] &&
 				accepted[i].id == r.id &&
@@ -800,15 +834,20 @@ func verifyToolScopes(accepted, returned []toolCallScope, canWrite func(string) 
 // positionally (round-2 F2): an unchanged accepted signed occurrence surviving
 // anywhere without its token is rejected as dropped BEFORE any clear marker
 // is assigned, so a marker attached to a DIFFERENT (rewritten) span cannot
-// hide a dropped token. After that gate, a marker whose typed content exactly
-// matches an accepted occurrence is that occurrence's token stripped over
-// unchanged content (dropped, rejected); a marker otherwise clears the
-// accepted signed occurrence at ITS OWN span ordinal (that span's content was
-// rewritten). What remains is decided from the returned span structure by
-// verifyUnpairedBinding: the same content surviving is a dropped token
-// (rejected), different content is clearing (allowed), and a missing span at
-// the binding's position means the signed block itself was suppressed
-// (topology-gated).
+// hide a dropped token. The unchanged-content precheck is OCCURRENCE-AWARE
+// (round-3 F3): returned spans are consumed one-to-one, matching accepted
+// UNSIGNED twins before they can prove a signed occurrence dropped, so a
+// surplus occurrence condemns (dropped) while a twin-only survival is a
+// suppressed signed span (topology-gated). After that gate, a marker whose
+// typed content exactly matches an accepted occurrence is that occurrence's
+// token stripped over unchanged content (dropped, rejected); a marker
+// otherwise clears the accepted signed occurrence at ITS OWN span ordinal
+// (that span's content was rewritten). What remains is decided from the
+// returned span structure by verifyUnpairedBinding: a missing span at the
+// binding's position means the signed block itself was suppressed
+// (topology-gated), an EMPTY signed scope with no surviving empty span is a
+// dropped span (round-3 F1), and different content at the position is
+// clearing (allowed).
 //
 // An UNBOUND signature_delta in the plugin's OUTPUT is a violation (a
 // floating token the plugin could mint); in ACCEPTED input it is a host
@@ -894,36 +933,56 @@ func verifySignatureDeltaBindings(av, rv streamSignatureView, canWrite func(stri
 			}
 			return -1
 		}
-		// (a) Dropped, decided BEFORE any clear marker is assigned (round-2
-		// F2): an accepted signed occurrence whose typed content survives
-		// UNCHANGED in the returned stream — and whose token no returned
-		// occurrence covers (an exact token+content match would have
-		// consumed it in phase 1) — had its token stripped from content the
-		// provider actually signed. A marker attached to a different,
-		// rewritten span must never be consumed as if it cleared this
-		// occurrence.
-		for i := range acc {
-			if consumed[i] || acc[i].signature == "" {
-				continue
+		// (a) Occurrence-aware multiset precheck (round-3 F3): the old check
+		// asked whether the accepted signed content appears ANYWHERE in the
+		// returned spans, ignoring multiplicity and unsigned twins — a
+		// surviving identical UNSIGNED twin was misread as proof the signed
+		// token was stripped, so an allowed signed suppression looked like a
+		// dropped token. Consumption is now one-to-one, the same cardinality
+		// discipline the request verifier applies to section fingerprints:
+		//
+		//   (b) surviving unchanged returned spans are matched against
+		//       accepted UNSIGNED twins FIRST (an accepted span that no
+		//       accepted signed binding covers), so a twin can never prove a
+		//       signed occurrence dropped;
+		//   (c) any SURPLUS unchanged returned occurrence after that is the
+		//       signed content surviving without its token → dropped;
+		//   (d) an accepted signed occurrence whose content survived only as
+		//       a consumed twin was SUPPRESSED while the twin lived on →
+		//       topology-gated on ir.stream.write.
+		var remaining map[typedContent]int
+		var twinSurvived map[typedContent]bool
+		if kind == sigBindingCurrent {
+			remaining = make(map[typedContent]int, len(rv.spans))
+			for _, s := range rv.spans {
+				remaining[s]++
 			}
-			var survives bool
-			if kind == sigBindingTrailing {
-				survives = rv.closed.equals(acc[i].content)
-			} else {
-				for _, s := range rv.spans {
-					if s.equals(acc[i].content) {
-						survives = true
-						break
-					}
+			signedOrdinals := make(map[int]bool, len(acc))
+			for _, b := range acc {
+				if b.signature != "" && b.span >= 0 {
+					signedOrdinals[b.span] = true
 				}
 			}
-			if survives {
-				return fmt.Errorf("%s signature_delta dropped", kind)
+			twinSurvived = make(map[typedContent]bool)
+			for o, s := range av.spans {
+				if signedOrdinals[o] || remaining[s] == 0 {
+					continue
+				}
+				remaining[s]--
+				twinSurvived[s] = true
 			}
 		}
+
 		for i := range acc {
 			if consumed[i] || acc[i].signature == "" {
 				continue
+			}
+			if kind == sigBindingTrailing {
+				if rv.closed.equals(acc[i].content) {
+					return fmt.Errorf("%s signature_delta dropped", kind)
+				}
+			} else if remaining[acc[i].content] > 0 {
+				return fmt.Errorf("%s signature_delta dropped", kind)
 			}
 			// Exact empty-marker match: the plugin emitted an explicit empty
 			// signature_delta beside the SAME typed content — the token was
@@ -951,6 +1010,16 @@ func verifySignatureDeltaBindings(av, rv streamSignatureView, canWrite func(stri
 				consumed[i] = true
 				continue
 			}
+			if kind == sigBindingCurrent && twinSurvived[acc[i].content] {
+				// (d) The signed content survived only as an unsigned twin:
+				// the signed span itself was suppressed (topology), and the
+				// twin is what remains.
+				if !canWrite(streamWriteGrant) {
+					return fmt.Errorf("suppressed a signed text/thinking block without %s", streamWriteGrant)
+				}
+				consumed[i] = true
+				continue
+			}
 			if err := verifyUnpairedBinding(kind, acc[i], rv, canWrite); err != nil {
 				return err
 			}
@@ -970,15 +1039,16 @@ func verifySignatureDeltaBindings(av, rv streamSignatureView, canWrite func(stri
 
 // verifyUnpairedBinding decides what happened to an accepted signature whose
 // token no longer appears in the returned stream, from the returned span
-// structure alone:
+// structure alone (the unchanged-content survival cases were already decided
+// by the occurrence-aware precheck in verifySignatureDeltaBindings):
 //
-//   - the same typed content survives → dropped (token stripped from content
-//     the provider actually signed) → rejected;
-//   - different content occupies the position → cleared (the prescribed
-//     response to a legitimate rewrite) → allowed;
 //   - nothing occupies the position (current-block) or the turn has no text
 //     left at all (trailing) → the signed block itself was suppressed →
-//     topology-gated on ir.stream.write.
+//     topology-gated on ir.stream.write;
+//   - the signed scope is EMPTY (round-3 F1) → its empty span was dropped:
+//     there is no content to rewrite, so "cleared" cannot apply;
+//   - different content occupies the position → cleared (the prescribed
+//     response to a legitimate rewrite) → allowed.
 func verifyUnpairedBinding(kind sigBindingKind, ab sigBinding, rv streamSignatureView, canWrite func(string) bool) error {
 	if kind == sigBindingTrailing {
 		if rv.closed.equals(ab.content) {
@@ -992,21 +1062,26 @@ func verifyUnpairedBinding(kind sigBindingKind, ab sigBinding, rv streamSignatur
 		}
 		return nil // rewritten: the prescribed clearing
 	}
-	// CurrentContentBlock: the returned span at the binding's ordinal, or
-	// the same typed content anywhere (re-framed spans are transport).
-	if ab.span >= 0 && ab.span < len(rv.spans) && rv.spans[ab.span].equals(ab.content) {
-		return fmt.Errorf("current-block signature_delta dropped")
-	}
-	for _, s := range rv.spans {
-		if s.equals(ab.content) {
-			return fmt.Errorf("current-block signature_delta dropped")
-		}
-	}
+	// CurrentContentBlock: the signed content surviving as a surplus
+	// occurrence was already condemned by the occurrence-aware precheck
+	// ((c)/(d) in verifySignatureDeltaBindings), so here only the span
+	// STRUCTURE decides: nothing at the binding's ordinal is a suppressed
+	// block, an EMPTY signed scope cannot be rewritten (round-3 F1) and is a
+	// dropped span, and anything else is a cleared token over rewritten
+	// content.
 	if ab.span >= 0 && ab.span >= len(rv.spans) {
 		if !canWrite(streamWriteGrant) {
 			return fmt.Errorf("suppressed a signed text/thinking block without %s", streamWriteGrant)
 		}
 		return nil
+	}
+	if ab.content.isEmpty() {
+		// round-3 F1: a signature over ZERO deltas is either intact
+		// (consumed by an exact match in phase 1) or its empty span was
+		// dropped — there is no content to rewrite, so "cleared" cannot
+		// apply, and the block still exists (a span sits at the ordinal), so
+		// this is not suppression either.
+		return fmt.Errorf("current-block signature_delta dropped")
 	}
 	return nil // a different span sits at the position: cleared
 }
