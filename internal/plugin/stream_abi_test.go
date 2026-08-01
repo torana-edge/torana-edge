@@ -10,6 +10,7 @@ import (
 
 	"github.com/torana-edge/torana-edge/internal/cache"
 	"github.com/torana-edge/torana-edge/internal/engine"
+	"github.com/torana-edge/torana-edge/internal/format/gemini"
 	"github.com/torana-edge/torana-edge/internal/wasm"
 )
 
@@ -1012,4 +1013,168 @@ func TestIntentNativeIEnrichesDescriptionOnly(t *testing.T) {
 	if v, ok := store.Get("intent:call_native"); !ok || v != "find the retry budget" {
 		t.Fatalf("native i not captured into cache: %q ok=%v", v, ok)
 	}
+}
+
+// TestStreamBlockTopologySurvivesPlugins: a text block passed through a plugin
+// (which only touches TextDelta) must come back with its block topology
+// intact — BlockStart stays BlockStart and BlockStop stays BlockStop. The v2
+// wire's stop carries only an index; the host's per-request BlockKindTracker
+// is what keeps a plugin-passed text block's stop from being misread as a tool
+// call's end (which would leave the serializer with an open part it never
+// flushes — the exact loss this preserves).
+func TestStreamBlockTopologySurvivesPlugins(t *testing.T) {
+	requireWASM(t, fixturesDir+"/test-stream-mutator/plugin.wasm")
+	pp := newTestPipeline(t, fixturesDir, []string{"test-stream-mutator"})
+
+	text := "hello"
+	out := run(t, pp, engine.StreamEvent{BlockStart: &engine.BlockStart{Index: 0, Kind: engine.BlockKindText}})
+	if len(out) != 1 || out[0].BlockStart == nil || out[0].BlockStart.Kind != engine.BlockKindText || out[0].BlockStart.Index != 0 {
+		t.Fatalf("BlockStart did not survive plugins: %+v", out)
+	}
+
+	out = run(t, pp, engine.StreamEvent{TextDelta: &text})
+	if len(out) != 1 || out[0].TextDelta == nil || *out[0].TextDelta != "hello" {
+		t.Fatalf("TextDelta did not survive plugins: %+v", out)
+	}
+
+	out = run(t, pp, engine.StreamEvent{BlockStop: &engine.BlockStop{Index: 0}})
+	if len(out) != 1 || out[0].BlockStop == nil || out[0].BlockStop.Index != 0 {
+		t.Fatalf("BlockStop became %+v — the open-block kind must survive plugins", out)
+	}
+	if out[0].ToolCallEnd != nil {
+		t.Fatalf("text block stop misread as ToolCallEnd: %+v", out[0].ToolCallEnd)
+	}
+
+	// A tool block still resolves its stop to ToolCallEnd.
+	out = run(t, pp, toolStart(0, "call_1", "read_file"))
+	if len(out) != 1 || out[0].ToolCallStart == nil {
+		t.Fatalf("ToolCallStart did not survive plugins: %+v", out)
+	}
+	out = run(t, pp, toolEnd(0))
+	if len(out) != 1 || out[0].ToolCallEnd == nil || out[0].ToolCallEnd.Index != 0 {
+		t.Fatalf("tool stop did not survive plugins as ToolCallEnd: %+v", out)
+	}
+	if out[0].BlockStop != nil {
+		t.Fatalf("tool stop misread as BlockStop: %+v", out[0].BlockStop)
+	}
+}
+
+// TestStreamLosslessThroughPipeline is the end-to-end claim of the lossless IR
+// work: a Code Assist wire stream parsed into engine events, run through a
+// plugin, and re-serialized must reproduce the SAME part structure — the
+// current-block signature stays beside its text in ONE part, and a trailing
+// standalone signature stays its own empty-text part. Before block events
+// existed, the pipeline's stateless stop conversion turned a text block's stop
+// into ToolCallEnd, which the serializer could not flush.
+func TestStreamLosslessThroughPipeline(t *testing.T) {
+	requireWASM(t, fixturesDir+"/test-stream-mutator/plugin.wasm")
+	pp := newTestPipeline(t, fixturesDir, []string{"test-stream-mutator"})
+
+	for _, tc := range []struct {
+		name string
+		wire string
+		want []string // expected serialized raw part JSON, in order
+	}{
+		{
+			name: "current text signature stays one part",
+			wire: `data: {"response":{"candidates":[{"content":{"role":"model","parts":[` +
+				`{"text":"A","thoughtSignature":"S"}` +
+				`]}}]}}`,
+			want: []string{`{"text":"A","thoughtSignature":"S"}`},
+		},
+		{
+			name: "trailing standalone stays its own part",
+			wire: `data: {"response":{"candidates":[{"content":{"role":"model","parts":[` +
+				`{"text":"A"},{"text":"","thoughtSignature":"S"}` +
+				`]}}]}}`,
+			want: []string{`{"text":"A"}`, `{"text":"","thoughtSignature":"S"}`},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sa := &gemini.StreamAdapter{Wrapped: true}
+			events := drainChunks(sa.ParseStream(strings.NewReader(tc.wire)))
+
+			var piped []engine.StreamEvent
+			for _, ev := range events {
+				out, err := pp.RunOnStreamChunk(context.Background(), 42, &ev)
+				if err != nil {
+					t.Fatalf("RunOnStreamChunk: %v", err)
+				}
+				piped = append(piped, out...)
+			}
+
+			var buf strings.Builder
+			if err := sa.SerializeStream(context.Background(), &buf, replayEngine(piped)); err != nil {
+				t.Fatalf("SerializeStream: %v", err)
+			}
+
+			parts := rawPartsOf(t, buf.String())
+			if len(parts) != len(tc.want) {
+				t.Fatalf("serialized %d parts, want %d: %v", len(parts), len(tc.want), parts)
+			}
+			for i, want := range tc.want {
+				got := string(parts[i])
+				if got != want {
+					t.Errorf("part %d = %s, want %s", i, got, want)
+				}
+			}
+		})
+	}
+}
+
+// drainChunks collects a ParseStream channel into a slice.
+func drainChunks(ch <-chan engine.StreamEvent) []engine.StreamEvent {
+	var out []engine.StreamEvent
+	for ev := range ch {
+		out = append(out, ev)
+	}
+	return out
+}
+
+// replayEngine feeds events back one at a time.
+func replayEngine(events []engine.StreamEvent) <-chan engine.StreamEvent {
+	ch := make(chan engine.StreamEvent, len(events))
+	for _, ev := range events {
+		ch <- ev
+	}
+	close(ch)
+	return ch
+}
+
+// rawPartsOf re-parses serialized SSE and returns the parts of the first
+// candidate's content as compact raw JSON (key presence included).
+func rawPartsOf(t *testing.T, output string) []json.RawMessage {
+	t.Helper()
+	var parts []json.RawMessage
+	for _, block := range strings.Split(output, "\n\n") {
+		block = strings.TrimSpace(block)
+		if block == "" {
+			continue
+		}
+		data, ok := strings.CutPrefix(block, "data:")
+		if !ok {
+			t.Fatalf("frame missing data: prefix: %q", block)
+		}
+		var frame map[string]any
+		if err := json.Unmarshal([]byte(strings.TrimSpace(data)), &frame); err != nil {
+			t.Fatalf("frame not valid JSON: %v (%q)", err, block)
+		}
+		if resp, ok := frame["response"].(map[string]any); ok {
+			frame = resp
+		}
+		cands, _ := frame["candidates"].([]any)
+		if len(cands) == 0 {
+			continue
+		}
+		content, _ := cands[0].(map[string]any)["content"].(map[string]any)
+		if content == nil {
+			continue
+		}
+		ps, _ := content["parts"].([]any)
+		for _, p := range ps {
+			raw, _ := json.Marshal(p)
+			parts = append(parts, raw)
+		}
+	}
+	return parts
 }
