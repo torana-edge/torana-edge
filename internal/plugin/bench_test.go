@@ -404,6 +404,117 @@ func BenchmarkStreamedResponse(b *testing.B) {
 	}
 }
 
+// signedStream builds a realistic SIGNED stream of exactly n engine events:
+// an explicit text block with a mid-block signature (the provider-part
+// shape), a signed tool call, and a message stop — the shape the enforcement
+// was built for. Every size is a VALID stream (the enforcement must not fire
+// on it): small n degrade gracefully to bare deltas and trimmed block
+// scaffolding.
+func signedStream(n int) []engine.StreamEvent {
+	if n < 4 {
+		out := make([]engine.StreamEvent, 0, n)
+		for i := 0; i < n; i++ {
+			t := "token "
+			out = append(out, engine.StreamEvent{TextDelta: &t})
+		}
+		return out
+	}
+	var seq []engine.StreamEvent
+	switch n {
+	case 4:
+		seq = []engine.StreamEvent{
+			{BlockStart: &engine.BlockStart{Index: 0, Kind: engine.BlockKindText}},
+			{TextDelta: strPtr("token ")},
+			{SignatureDelta: strPtr(streamSigA)},
+			{BlockStop: &engine.BlockStop{Index: 0}},
+		}
+	case 5:
+		seq = []engine.StreamEvent{
+			{BlockStart: &engine.BlockStart{Index: 0, Kind: engine.BlockKindText}},
+			{TextDelta: strPtr("token ")},
+			{SignatureDelta: strPtr(streamSigA)},
+			{BlockStop: &engine.BlockStop{Index: 0}},
+			{FinishReason: "stop"},
+		}
+	case 6:
+		seq = []engine.StreamEvent{
+			{BlockStart: &engine.BlockStart{Index: 0, Kind: engine.BlockKindText}},
+			{TextDelta: strPtr("token ")},
+			{SignatureDelta: strPtr(streamSigA)},
+			{BlockStop: &engine.BlockStop{Index: 0}},
+			{ToolCallStart: &engine.ToolCallStart{Index: 1, ID: "call_1", Name: "search", Signature: streamSigB}},
+			{ToolCallEnd: &engine.ToolCallEnd{Index: 1}},
+		}
+	default:
+		// n >= 7: signed text block with (n-7) deltas, signed tool block, stop.
+		textDeltas := n - 7
+		if textDeltas < 0 {
+			textDeltas = 0
+		}
+		seq = []engine.StreamEvent{
+			{BlockStart: &engine.BlockStart{Index: 0, Kind: engine.BlockKindText}},
+		}
+		for i := 0; i < textDeltas; i++ {
+			seq = append(seq, engine.StreamEvent{TextDelta: strPtr("token ")})
+		}
+		seq = append(seq,
+			engine.StreamEvent{SignatureDelta: strPtr(streamSigA)},
+			engine.StreamEvent{BlockStop: &engine.BlockStop{Index: 0}},
+		)
+		seq = append(seq, engineSignedToolBlock(1, "call_1", "search", streamSigB, `{"q":"x"}`)...)
+		seq = append(seq, engine.StreamEvent{FinishReason: "tool_calls"})
+	}
+	return seq
+}
+
+// runVerifiedSequence plays one complete request through the enforcement
+// entry point (per-event verified calls + end-of-stream scope close) and
+// releases its request-scoped state.
+func runVerifiedSequence(b *testing.B, pp *PluginPipeline, ctx context.Context, reqID uint64, seq []engine.StreamEvent) {
+	b.Helper()
+	for _, ev := range seq {
+		e := ev
+		if _, err := pp.RunOnStreamChunkVerified(ctx, reqID, &e); err != nil {
+			b.Fatal(err)
+		}
+	}
+	if err := pp.EndStreamVerified(reqID); err != nil {
+		b.Fatal(err)
+	}
+	pp.EndRequest(reqID)
+}
+
+// BenchmarkStreamEnforcement measures the exact production path of the
+// stream-signature enforcement (B2 part 2b): the per-event state bookkeeping
+// (discipline walkers, accepted/returned buffers), the per-scope verifyStream
+// at block close, and the WASM boundary call cadence — over a realistic
+// signed stream through RunOnStreamChunkVerified. The verifier alone ran
+// ~23µs/100 events in 2a; this reports what the enforcement adds on top.
+//
+// Each iteration is one COMPLETE request under one request ID (the walkers
+// and buffers are request-scoped, so reusing an ID would measure unbounded
+// growth). ReportMetric scales by event count so the sizes are comparable.
+func BenchmarkStreamEnforcement(b *testing.B) {
+	requireWASM(b, fixturesDir+"/test-stream-mutator/plugin.wasm")
+	pp := newTestPipeline(b, fixturesDir, []string{"test-stream-mutator"})
+
+	for _, n := range benchSizes {
+		seq := signedStream(n)
+		b.Run(fmt.Sprintf("events=%d", n), func(b *testing.B) {
+			b.ReportAllocs()
+			ctx := context.Background()
+			for w := 0; w < 20; w++ {
+				runVerifiedSequence(b, pp, ctx, uint64(w+1), seq)
+			}
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				runVerifiedSequence(b, pp, ctx, uint64(i+1), seq)
+			}
+			b.ReportMetric(float64(b.Elapsed().Nanoseconds())/float64(b.N*len(seq)), "ns/event")
+		})
+	}
+}
+
 // benchConversationFrom deep-copies the parts a plugin can mutate. Cheaper
 // than rebuilding the conversation, and excluded from the measurement above
 // only in the sense that it is the same work every iteration.
