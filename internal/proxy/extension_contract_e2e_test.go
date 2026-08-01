@@ -37,17 +37,14 @@ func TestExtensionContractE2E(t *testing.T) {
 		check    func(t *testing.T, obs contractObservation)
 	}{
 		{
-			// The F5 proof: an unbudgeted send surfaces as the SDK's
-			// ErrEgressUnavailable sentinel with the stable not_configured
-			// reason — the exact contract the SDK's own tests pin, now proven
-			// through the production composition.
+			// The F5 proof: an unbudgeted send surfaces as a classified
+			// *HostCallRefusalError with code NOT_CONFIGURED — the exact
+			// contract the SDK's own tests pin, now proven through the
+			// production composition.
 			"unbudgeted-send",
 			func(t *testing.T, obs contractObservation) {
-				if !obs.SendIsErrEgressUnavailable {
-					t.Errorf("errors.Is(err, sdk.ErrEgressUnavailable) = false — the guest saw %q", obs.SendErrText)
-				}
-				if !obs.SendErrContainsNotConfigured {
-					t.Errorf("the refusal did not carry the not_configured reason: %q", obs.SendErrText)
+				if obs.SendRefusalCode != int32(pb.ErrorCode_ERROR_CODE_NOT_CONFIGURED) {
+					t.Errorf("refusal code = %d, want NOT_CONFIGURED — the guest saw %q", obs.SendRefusalCode, obs.SendErrText)
 				}
 			},
 		},
@@ -170,9 +167,8 @@ func TestExtensionContractE2E(t *testing.T) {
 type contractObservation struct {
 	Scenario string `json:"scenario"`
 
-	SendIsErrEgressUnavailable   bool   `json:"send_is_err_egress_unavailable,omitempty"`
-	SendErrContainsNotConfigured bool   `json:"send_err_contains_not_configured,omitempty"`
-	SendErrText                  string `json:"send_err_text,omitempty"`
+	SendRefusalCode int32  `json:"send_refusal_code,omitempty"`
+	SendErrText     string `json:"send_err_text,omitempty"`
 
 	// Raw HostCallExtension discriminator: RawArm is "value"/"refusal"/
 	// "goerror", RawSucceeded only for the value arm, RawGoError the Go

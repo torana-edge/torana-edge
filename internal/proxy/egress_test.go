@@ -22,6 +22,7 @@ import (
 	"github.com/torana-edge/torana-edge/internal/engine/pbconv"
 	"github.com/torana-edge/torana-edge/internal/provider"
 	pb "github.com/torana-edge/torana-plugin-sdk/pb/v2"
+	"github.com/torana-edge/torana-plugin-sdk/sdktest"
 )
 
 // egressPayload builds what a plugin would pass to torana_send_request.
@@ -657,7 +658,7 @@ func TestEgressResponseLimits(t *testing.T) {
 			}))
 			defer upstream.Close()
 
-			srv := newEgressTestServer(t, upstream.URL)
+			srv := newEgressTestServer(t, upstream.URL, provider.EgressBudget{MaxCallsPerMinute: 10})
 			got, herr := send(t, srv, "warmer", egressPayload(t, "oai", "/v1/chat/completions"))
 			if tc.wantRefuse {
 				if herr == nil || herr.Code != pb.ErrorCode_ERROR_CODE_INVALID_ARGUMENT {
@@ -687,14 +688,14 @@ func TestEgressResponseLimits(t *testing.T) {
 
 // newEgressTestServer builds a server with one configured provider backed by
 // the given upstream and a generous budget for the "warmer" plugin.
-func newEgressTestServer(t *testing.T, upstreamURL string) *Server {
+func newEgressTestServer(t *testing.T, upstreamURL string, budget provider.EgressBudget) *Server {
 	t.Helper()
 	t.Setenv("EGRESS_TEST_KEY", "sk-provider")
 	cfg := provider.DefaultConfig()
 	cfg.Providers = map[string]provider.Provider{
 		"oai": {URL: upstreamURL, Format: "openai", APIKeyEnv: "EGRESS_TEST_KEY"},
 	}
-	cfg.Plugins.Runtime.Egress = map[string]provider.EgressBudget{"warmer": {MaxCallsPerMinute: 10}}
+	cfg.Plugins.Runtime.Egress = map[string]provider.EgressBudget{"warmer": budget}
 	srv, err := New(Config{Port: "0", Providers: cfg, ConfigPath: filepath.Join(t.TempDir(), "config.json")})
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -729,7 +730,9 @@ func TestEgressRedirectsStayOnOrigin(t *testing.T) {
 		}))
 		defer upstream.Close()
 
-		srv := newEgressTestServer(t, upstream.URL)
+		// A ONE-call budget: the cross-origin attempt must consume exactly one
+		// slot, which a second call then proves by being refused as exhausted.
+		srv := newEgressTestServer(t, upstream.URL, provider.EgressBudget{MaxCallsPerMinute: 1})
 		got, herr := send(t, srv, "warmer", egressPayload(t, "oai", "/v1/chat/completions"))
 		if herr != nil {
 			t.Fatalf("a cross-origin redirect became a refusal: %v", herr)
@@ -746,6 +749,10 @@ func TestEgressRedirectsStayOnOrigin(t *testing.T) {
 		if auth != "" || key != "" {
 			t.Fatalf("credential reached the attacker: auth=%q x-api-key=%q", auth, key)
 		}
+		_, herr = send(t, srv, "warmer", egressPayload(t, "oai", "/v1/chat/completions"))
+		if herr == nil || herr.Code != pb.ErrorCode_ERROR_CODE_UNAVAILABLE {
+			t.Fatalf("second call was not refused as budget-exhausted, proving the first consumed exactly one slot: %v", herr)
+		}
 	})
 
 	t.Run("same-origin redirect is followed", func(t *testing.T) {
@@ -759,7 +766,7 @@ func TestEgressRedirectsStayOnOrigin(t *testing.T) {
 		}))
 		defer upstream.Close()
 
-		srv := newEgressTestServer(t, upstream.URL)
+		srv := newEgressTestServer(t, upstream.URL, provider.EgressBudget{MaxCallsPerMinute: 10})
 		got, herr := send(t, srv, "warmer", egressPayload(t, "oai", "/start"))
 		if herr != nil {
 			t.Fatalf("a same-origin redirect was refused: %v", herr)
@@ -768,40 +775,44 @@ func TestEgressRedirectsStayOnOrigin(t *testing.T) {
 			t.Fatalf("http_status = %d, want 200 after the same-origin hop", got.HTTPStatus)
 		}
 	})
+
+	t.Run("same-origin redirect loop is bounded", func(t *testing.T) {
+		var mu sync.Mutex
+		hits := 0
+		upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			mu.Lock()
+			hits++
+			mu.Unlock()
+			http.Redirect(w, r, "/loop", http.StatusTemporaryRedirect)
+		}))
+		defer upstream.Close()
+
+		srv := newEgressTestServer(t, upstream.URL, provider.EgressBudget{MaxCallsPerMinute: 10})
+		_, herr := send(t, srv, "warmer", egressPayload(t, "oai", "/start"))
+		if herr == nil {
+			t.Fatal("a redirect loop completed")
+		}
+		if herr.Code != pb.ErrorCode_ERROR_CODE_NOT_CONFIGURED {
+			t.Fatalf("a redirect loop was classified %v, want NOT_CONFIGURED (deterministic, non-retryable)", herr.Code)
+		}
+		mu.Lock()
+		n := hits
+		mu.Unlock()
+		// 1 initial request + up to 10 redirects — never a timeout-length burst.
+		if n > 11 {
+			t.Fatalf("redirect loop issued %d requests, want <= 11 (10-hop bound)", n)
+		}
+		if n < 2 {
+			t.Fatalf("redirect loop issued %d requests, want > 1 (the loop was actually followed)", n)
+		}
+	})
 }
 
 // TestEgressHostPathContract pins the host's authoritative path predicate
-// against the SHARED adversarial matrix (sdktest.EgressPathCases in
-// torana-plugin-sdk). The SDK mirror runs the same rows; the re-pin replaces
-// this local copy with the sdktest import so the two cannot diverge again.
+// against the SHARED adversarial matrix, sdktest.EgressPathCases: the SDK
+// mirror runs the same rows, so the two predicates cannot quietly diverge.
 func TestEgressHostPathContract(t *testing.T) {
-	// Reference: sdktest.EgressPathCases — keep in sync; identical rows.
-	pathCases := []struct {
-		Path  string
-		Valid bool
-	}{
-		{"/v1/chat/completions", true},
-		{"/v1/chat/completions?stream=true", true},
-		{"/v1/chat/completions?x=1&y=2", true},
-		{"/model/amazon.titan-text-express-v1:invoke", true},
-		{"/v1/messages:generateContent", true},
-		{"/a/b/c", true},
-		{"/%2F%2Fattacker.example/x", false},
-		{"/@attacker.example/v1", true},
-		{"", false},
-		{"v1/chat/completions", false},
-		{"@attacker.example/v1", false},
-		{"//attacker.example/v1", false},
-		{"https://attacker.example/v1", false},
-		{"http://attacker.example/v1", false},
-		{"//127.0.0.1:8080/v1", false},
-		{"/v1/chat/completions#frag", false},
-		{"/v1/chat/completions\x00x", false},
-		{"/v1/chat/completions\r\nHost: attacker.example", false},
-		{"/v1/chat/completions\nX: y", false},
-	}
-
-	for _, tc := range pathCases {
+	for _, tc := range sdktest.EgressPathCases {
 		name := strings.Map(func(r rune) rune {
 			if r < 0x20 || r == 0x7f {
 				return '_'

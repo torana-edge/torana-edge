@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/torana-edge/torana-edge/internal/economics"
@@ -518,4 +519,84 @@ func TestOffloadResponseLimits(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestOffloadRedirectsStayOnOrigin — the offload client uses the same
+// redirect policy as egress: a cross-origin redirect must not be followed
+// (no credential crosses, the attacker receives nothing), and a same-origin
+// loop terminates at the ten-hop bound with a non-retryable refusal.
+func TestOffloadRedirectsStayOnOrigin(t *testing.T) {
+	t.Run("cross-origin redirect is not followed", func(t *testing.T) {
+		var attackerMu sync.Mutex
+		attackerHits := 0
+		var attackerAuth string
+		attacker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			attackerMu.Lock()
+			attackerHits++
+			attackerAuth = r.Header.Get("Authorization")
+			attackerMu.Unlock()
+			w.WriteHeader(http.StatusOK)
+		}))
+		defer attacker.Close()
+
+		upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			http.Redirect(w, r, attacker.URL+"/steal", http.StatusFound)
+		}))
+		defer upstream.Close()
+
+		s, err := New(Config{Providers: offloadConfig(upstream.URL)})
+		if err != nil {
+			t.Fatalf("New: %v", err)
+		}
+		ctx := context.WithValue(context.Background(), reqStateKey{}, &reqState{ID: 1})
+
+		_, herr := offloadCall(t, s, ctx, `{"system_prompt":"s","user_prompt":"u"}`)
+		if herr == nil {
+			t.Fatal("a cross-origin redirect completed")
+		}
+		attackerMu.Lock()
+		hits, auth := attackerHits, attackerAuth
+		attackerMu.Unlock()
+		if hits != 0 {
+			t.Fatalf("attacker server saw %d requests", hits)
+		}
+		if auth != "" {
+			t.Fatalf("credential reached the attacker: auth=%q", auth)
+		}
+	})
+
+	t.Run("same-origin redirect loop is bounded", func(t *testing.T) {
+		var mu sync.Mutex
+		hits := 0
+		upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			mu.Lock()
+			hits++
+			mu.Unlock()
+			http.Redirect(w, r, "/loop", http.StatusTemporaryRedirect)
+		}))
+		defer upstream.Close()
+
+		s, err := New(Config{Providers: offloadConfig(upstream.URL)})
+		if err != nil {
+			t.Fatalf("New: %v", err)
+		}
+		ctx := context.WithValue(context.Background(), reqStateKey{}, &reqState{ID: 1})
+
+		_, herr := offloadCall(t, s, ctx, `{"system_prompt":"s","user_prompt":"u"}`)
+		if herr == nil {
+			t.Fatal("a redirect loop completed")
+		}
+		if herr.Code != pbv2.ErrorCode_ERROR_CODE_NOT_CONFIGURED {
+			t.Fatalf("a redirect loop was classified %v, want NOT_CONFIGURED (deterministic, non-retryable)", herr.Code)
+		}
+		mu.Lock()
+		n := hits
+		mu.Unlock()
+		if n > 11 {
+			t.Fatalf("redirect loop issued %d requests, want <= 11 (10-hop bound)", n)
+		}
+		if n < 2 {
+			t.Fatalf("redirect loop issued %d requests, want > 1 (the loop was actually followed)", n)
+		}
+	})
 }

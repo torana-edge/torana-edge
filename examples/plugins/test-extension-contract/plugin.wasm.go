@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"strings"
 
 	sdk "github.com/torana-edge/torana-plugin-sdk"
 	pb "github.com/torana-edge/torana-plugin-sdk/pb/v2"
@@ -30,12 +29,11 @@ type observation struct {
 	Scenario string `json:"scenario"`
 
 	// unbudgeted-send — the sdk.SendRequest helper path. The host has NO
-	// egress budget for this plugin, so the refusal must surface as the
-	// SDK's ErrEgressUnavailable sentinel with the stable not_configured
-	// reason (the F5 composition proof).
-	SendIsErrEgressUnavailable   bool   `json:"send_is_err_egress_unavailable,omitempty"`
-	SendErrContainsNotConfigured bool   `json:"send_err_contains_not_configured,omitempty"`
-	SendErrText                  string `json:"send_err_text,omitempty"`
+	// egress budget for this plugin, so the refusal must surface as a
+	// classified *HostCallRefusalError with code NOT_CONFIGURED (the F5
+	// composition proof).
+	SendRefusalCode int32  `json:"send_refusal_code,omitempty"`
+	SendErrText     string `json:"send_err_text,omitempty"`
 
 	// Raw HostCallExtension outcomes (pricing-malformed, offload-*,
 	// record-savings). RawArm is the explicit discriminator — "value",
@@ -90,14 +88,15 @@ func init() {
 		case "unbudgeted-send":
 			// The SDK helper path: SendRequest → HostCallExtension →
 			// dispatcher → real sendPluginRequest → authorize (no budget) →
-			// framed NOT_CONFIGURED → SDK wraps ErrEgressUnavailable with the
-			// not_configured reason.
+			// framed NOT_CONFIGURED → classified *HostCallRefusalError.
 			_, err := sdk.SendRequest(
 				&pb.ChatRequest{Model: "gpt-x", Messages: []*pb.Message{{Role: "user", Content: "hi"}}},
 				sdk.SendRequestOptions{Provider: "oai", Path: "/v1/chat/completions"},
 			)
-			obs.SendIsErrEgressUnavailable = errors.Is(err, sdk.ErrEgressUnavailable)
-			obs.SendErrContainsNotConfigured = err != nil && strings.Contains(err.Error(), "not_configured")
+			var refusal *sdk.HostCallRefusalError
+			if errors.As(err, &refusal) {
+				obs.SendRefusalCode = int32(refusal.Code)
+			}
 			if err != nil {
 				obs.SendErrText = err.Error()
 			}

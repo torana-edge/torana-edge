@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/url"
@@ -157,17 +158,13 @@ func (s *Server) offloadCompletionResult(ctx context.Context, payloadJSON string
 		return wasm.ExtensionRefusal(pbv2.ErrorCode_ERROR_CODE_NOT_CONFIGURED,
 			"offload: provider %q has an invalid URL %q", provName, prov.URL)
 	}
-	client := &http.Client{
-		Timeout: offloadTimeout,
-		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			if req.URL.Scheme != base.Scheme || req.URL.Host != base.Host || req.URL.Hostname() != base.Hostname() {
-				return http.ErrUseLastResponse
-			}
-			return nil
-		},
-	}
+	client := &http.Client{Timeout: offloadTimeout, CheckRedirect: redirectPolicy(base)}
 	resp, err := client.Do(httpReq)
 	if err != nil {
+		if errors.Is(err, errTooManyRedirects) {
+			// Deterministic: the operator must fix the configured endpoint.
+			return wasm.ExtensionRefusal(pbv2.ErrorCode_ERROR_CODE_NOT_CONFIGURED, "offload: provider %q redirected in a loop: %v", provName, err)
+		}
 		return wasm.ExtensionRefusal(pbv2.ErrorCode_ERROR_CODE_UNAVAILABLE, "offload: %v", err)
 	}
 	defer resp.Body.Close()
