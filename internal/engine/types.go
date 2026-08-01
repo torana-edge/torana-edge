@@ -66,6 +66,15 @@ type Message struct {
 	// tool-call blocks. The host must clear it when the covered content
 	// changes, or reject the mutation. Empty when the provider sent none.
 	TrailingSignature string
+
+	// ContentSignature is a provider signature carried ON an ordinary text
+	// part (Gemini/Code Assist thoughtSignature beside non-thought text),
+	// covering that part's content. SignatureScopeSameMessage: binds this
+	// message's Content field. Distinct from ThinkingSignature (thinking
+	// blocks) and TrailingSignature (standalone final part). The host must
+	// clear it when the covered content changes, or reject the mutation.
+	// Empty when the provider sent no content-bound signature.
+	ContentSignature string
 }
 
 // ToolCall represents an assistant's request to invoke a tool.

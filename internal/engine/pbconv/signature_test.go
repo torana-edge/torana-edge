@@ -47,6 +47,24 @@ func TestToolCallSignatureRoundTrip(t *testing.T) {
 	}
 }
 
+// TestContentSignatureRoundTrip guards Message.content_signature (pb field 12,
+// request-domain SignatureScopeSameMessage) through the protobuf boundary: the
+// WASM pipeline round-trips every request message through it, so a Gemini/Code
+// Assist thoughtSignature beside non-thought text must survive or replayed
+// history loses the content binding on the next turn.
+func TestContentSignatureRoundTrip(t *testing.T) {
+	chat := &engine.ChatRequest{Messages: []engine.Message{
+		{Role: engine.RoleAssistant, Content: "answer", ContentSignature: "CONTENT_SIG"},
+	}}
+	got := FromPBChatRequest(ToPBChatRequest(chat))
+	if len(got.Messages) != 1 {
+		t.Fatal("message lost")
+	}
+	if got.Messages[0].ContentSignature != "CONTENT_SIG" {
+		t.Errorf("request-side content signature lost: %q", got.Messages[0].ContentSignature)
+	}
+}
+
 // TestTrailingSignatureRoundTrip guards Message.trailing_signature (pb field 11,
 // request-domain SignatureScopeTrailingStandalone) through the protobuf
 // boundary: the WASM pipeline round-trips every request message through it, so

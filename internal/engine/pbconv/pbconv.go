@@ -241,6 +241,7 @@ func toPBMessage(m engine.Message) *pb.Message {
 		ToolCallId:        m.ToolCallID,
 		ToolName:          m.ToolName,
 		TrailingSignature: m.TrailingSignature,
+		ContentSignature:  m.ContentSignature,
 	}
 	if len(m.ContentParts) > 0 {
 		msg.ContentPartsJson, _ = json.Marshal(m.ContentParts)
@@ -273,6 +274,7 @@ func fromPBMessage(m *pb.Message) engine.Message {
 		ToolCallID:        m.ToolCallId,
 		ToolName:          m.ToolName,
 		TrailingSignature: m.TrailingSignature,
+		ContentSignature:  m.ContentSignature,
 	}
 	if len(m.ContentPartsJson) > 0 {
 		json.Unmarshal(m.ContentPartsJson, &msg.ContentParts)
