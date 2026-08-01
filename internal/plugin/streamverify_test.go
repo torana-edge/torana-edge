@@ -1418,6 +1418,160 @@ func TestStreamVerifyUnsignedTwinSuppression(t *testing.T) {
 	})
 }
 
+// TestStreamVerifyEmptyKindScopesDiffer pins round-4 F1: typedContent
+// carries arm PRESENCE independently of bytes, so an empty TEXT scope and an
+// empty THINKING scope are different records and can never match each other
+// exactly. The finding: the explicit EMPTY kinds both produced the identical
+// zero record {text:"", thinking:""}, so Phase 1 consumed accepted
+// StartText(0)+Sig(T)+Stop vs returned StartThinking(0)+Sig(T)+Stop as an
+// EXACT match and the token moved from an empty text scope to an empty
+// thinking scope with every grant. Presence is now marked by the explicit
+// block's kind and by every delta of the kind — INCLUDING empty deltas — so
+// the empty kinds differ and the swap is classified stale, exactly like the
+// non-empty text-A -> thinking-A case. Pinned for BOTH directions, for
+// explicit ZERO-DELTA signed blocks and for explicit EMPTY-DELTA signed
+// blocks (TextDelta("")/ThinkingDelta("")), under withEveryGrant — all
+// stale, rejected — and unchanged empty blocks of each kind must still pass
+// intact.
+func TestStreamVerifyEmptyKindScopesDiffer(t *testing.T) {
+	// emptyBlock renders an explicit text/thinking block whose content is a
+	// single (possibly EMPTY) delta of the matching kind, with an optional
+	// signature_delta inside — the four F1 shapes.
+	emptyText := func(sig string, emptyDelta bool) []*pbv2.StreamEvent {
+		out := []*pbv2.StreamEvent{{Event: &pbv2.StreamEvent_ContentBlockStart{
+			ContentBlockStart: &pbv2.ContentBlockStart{
+				Index: 0, Block: &pbv2.ContentBlockStart_Text{Text: &pbv2.TextBlock{}},
+			},
+		}}}
+		if emptyDelta {
+			out = append(out, textDelta(""))
+		}
+		if sig != "" {
+			out = append(out, signatureDelta(sig))
+		}
+		return append(out, &pbv2.StreamEvent{Event: &pbv2.StreamEvent_ContentBlockStop{
+			ContentBlockStop: &pbv2.ContentBlockStop{Index: 0},
+		}})
+	}
+	emptyThinking := func(sig string, emptyDelta bool) []*pbv2.StreamEvent {
+		out := []*pbv2.StreamEvent{{Event: &pbv2.StreamEvent_ContentBlockStart{
+			ContentBlockStart: &pbv2.ContentBlockStart{
+				Index: 0, Block: &pbv2.ContentBlockStart_Thinking{Thinking: &pbv2.ThinkingBlock{}},
+			},
+		}}}
+		if emptyDelta {
+			out = append(out, thinkingDelta(""))
+		}
+		if sig != "" {
+			out = append(out, signatureDelta(sig))
+		}
+		return append(out, &pbv2.StreamEvent{Event: &pbv2.StreamEvent_ContentBlockStop{
+			ContentBlockStop: &pbv2.ContentBlockStop{Index: 0},
+		}})
+	}
+
+	// The token crossed the kind boundary between two EMPTY scopes; the
+	// kinds differ, so this is stale — the same verdict as text-A ->
+	// thinking-A — and no grant may save it.
+	for _, tc := range []struct {
+		name     string
+		accepted []*pbv2.StreamEvent
+		returned []*pbv2.StreamEvent
+	}{
+		{"zero-delta: empty text scope -> empty thinking scope", emptyText(streamSigA, false), emptyThinking(streamSigA, false)},
+		{"zero-delta: empty thinking scope -> empty text scope", emptyThinking(streamSigA, false), emptyText(streamSigA, false)},
+		{"empty-delta: empty text scope -> empty thinking scope", emptyText(streamSigA, true), emptyThinking(streamSigA, true)},
+		{"empty-delta: empty thinking scope -> empty text scope", emptyThinking(streamSigA, true), emptyText(streamSigA, true)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := verifyStream(tc.accepted, tc.returned, withEveryGrant)
+			if err == nil {
+				t.Fatal("empty kind swap passed with every grant")
+			}
+			if !strings.Contains(err.Error(), "stale") {
+				t.Fatalf("empty kind swap: err = %v, want stale", err)
+			}
+		})
+	}
+
+	// An unchanged empty block of each kind — zero-delta and empty-delta
+	// forms — must still pass intact: the presence fields match, so Phase 1
+	// consumes the exact (token, typed-content) match as before.
+	for _, tc := range []struct {
+		name   string
+		stream func(sig string, emptyDelta bool) []*pbv2.StreamEvent
+	}{
+		{"empty text block intact", emptyText},
+		{"empty thinking block intact", emptyThinking},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, emptyDelta := range []bool{false, true} {
+				events := tc.stream(streamSigA, emptyDelta)
+				if err := verifyStream(events, events, noGrants); err != nil {
+					t.Fatalf("unchanged empty block (emptyDelta=%v) rejected: %v", emptyDelta, err)
+				}
+			}
+		})
+	}
+}
+
+// TestStreamVerifyExactMatchesReserveReturnedSpans pins round-4 F2: Phase 1
+// consumes exact (token, typed-content) matches in consumed/retConsumed, but
+// the Phase-3 remaining multiset was rebuilt from ALL returned spans and
+// never subtracted the returned spans owned by those exact matches. The
+// finding: accepted signed text "same"/T1 + signed text "same"/T2; returned
+// signed text "same"/T1 with the grant ir.stream.write — suppressing T2's
+// block is valid topology, but T1's returned "same" span stayed in the
+// multiset and T2 claimed it, so verification returned dropped. The returned
+// span ordinal of every exact-consumed current binding is now reserved from
+// the multiset BEFORE unsigned twins (or anything else) may claim it; only a
+// SURPLUS returned occurrence can then prove a dropped token. Pinned: the
+// two-identical-signed case is nil with ir.stream.write and a suppression
+// error without the grant, plus the empty-span equivalent.
+func TestStreamVerifyExactMatchesReserveReturnedSpans(t *testing.T) {
+	accepted := append(signedTextBlock(0, "same", streamSigA),
+		signedTextBlock(1, "same", streamSigB)...)
+	returned := signedTextBlock(0, "same", streamSigA)
+
+	t.Run("identical signed occurrences: suppression is topology, not dropped", func(t *testing.T) {
+		// T1's returned span is reserved by its exact match; T2 has no
+		// returned counterpart, so its block was suppressed — valid with the
+		// grant, a grant-gated violation without.
+		if err := verifyStream(accepted, returned, withStreamWrite); err != nil {
+			t.Fatalf("identical-signed suppression with grant rejected: %v", err)
+		}
+		if err := verifyStream(accepted, returned, noGrants); err == nil ||
+			!strings.Contains(err.Error(), streamWriteGrant) {
+			t.Fatalf("identical-signed suppression without grant: err = %v, want topology rejection", err)
+		}
+	})
+
+	// The empty-span equivalent: the same two-identical-signed shape over
+	// explicit EMPTY text blocks (zero deltas). T1's returned empty span is
+	// reserved by the exact match; T2's block suppression is topology.
+	emptySignedAt := func(index int32, sig string) []*pbv2.StreamEvent {
+		return []*pbv2.StreamEvent{
+			{Event: &pbv2.StreamEvent_ContentBlockStart{ContentBlockStart: &pbv2.ContentBlockStart{
+				Index: index, Block: &pbv2.ContentBlockStart_Text{Text: &pbv2.TextBlock{}},
+			}}},
+			signatureDelta(sig),
+			{Event: &pbv2.StreamEvent_ContentBlockStop{ContentBlockStop: &pbv2.ContentBlockStop{Index: index}}},
+		}
+	}
+	emptyAccepted := append(emptySignedAt(0, streamSigA), emptySignedAt(1, streamSigB)...)
+	emptyReturned := emptySignedAt(0, streamSigA)
+
+	t.Run("identical empty signed occurrences: suppression is topology, not dropped", func(t *testing.T) {
+		if err := verifyStream(emptyAccepted, emptyReturned, withStreamWrite); err != nil {
+			t.Fatalf("empty identical-signed suppression with grant rejected: %v", err)
+		}
+		if err := verifyStream(emptyAccepted, emptyReturned, noGrants); err == nil ||
+			!strings.Contains(err.Error(), streamWriteGrant) {
+			t.Fatalf("empty identical-signed suppression without grant: err = %v, want topology rejection", err)
+		}
+	})
+}
+
 // TestValidateAcceptedStreamABITopology pins round-2 F4: validateAcceptedStream
 // implements the FULL ABI topology, not a kind-only approximation. Every
 // stop/delta must match its open block BY INDEX, indexes are never reused,

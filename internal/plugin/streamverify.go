@@ -302,13 +302,26 @@ func validateAcceptedStream(events []*pbv2.StreamEvent) error {
 // separate text and thinking accumulators, so identical bytes in different
 // kinds differ (round-1 finding: a scope is a typed record — a signature over
 // text "A" must not match a signature over thinking "A").
+//
+// (Round-4 F1) textSeen/thinkingSeen carry arm PRESENCE independently of
+// bytes: an explicit block of the kind, or a delta of the kind — including an
+// EMPTY delta — marks the arm even when it holds no bytes. Without presence,
+// an empty TEXT scope and an empty THINKING scope collapsed into the same
+// zero record {text:"", thinking:""}, so a token carried from an empty text
+// span to an empty thinking span was consumed as an EXACT (token,
+// typed-content) match and passed with every grant. Exact matching now
+// requires the same presence, so the empty kinds can never match each other:
+// the kind swap is classified stale, exactly like the non-empty case.
 type typedContent struct {
-	text     string
-	thinking string
+	text         string
+	thinking     string
+	textSeen     bool // a text delta (even empty) or an explicit text block marked the arm
+	thinkingSeen bool // a thinking delta (even empty) or an explicit thinking block marked the arm
 }
 
 func (t typedContent) equals(o typedContent) bool {
-	return t.text == o.text && t.thinking == o.thinking
+	return t.text == o.text && t.thinking == o.thinking &&
+		t.textSeen == o.textSeen && t.thinkingSeen == o.thinkingSeen
 }
 
 func (t typedContent) isEmpty() bool { return t.text == "" && t.thinking == "" }
@@ -511,7 +524,9 @@ func scanStreamSignatures(events []*pbv2.StreamEvent) streamSignatureView {
 	var blockSawSpan bool // the open explicit text/thinking block already closed a span (round-2 F3)
 	var spanOpen bool
 	var spanText, spanThink strings.Builder
+	var spanTextSeen, spanThinkSeen bool // arm presence of the OPEN span (round-4 F1)
 	var closedText, closedThink strings.Builder
+	var closedTextSeen, closedThinkSeen bool // OR'd arm presence over every span closed so far
 	var sawText bool
 	openTools := make(map[int32]*toolScopeBuilder)
 
@@ -519,12 +534,15 @@ func scanStreamSignatures(events []*pbv2.StreamEvent) streamSignatureView {
 		if !spanOpen {
 			return
 		}
-		tc := typedContent{text: spanText.String(), thinking: spanThink.String()}
+		tc := typedContent{text: spanText.String(), thinking: spanThink.String(), textSeen: spanTextSeen, thinkingSeen: spanThinkSeen}
 		closedText.WriteString(tc.text)
 		closedThink.WriteString(tc.thinking)
+		closedTextSeen = closedTextSeen || tc.textSeen
+		closedThinkSeen = closedThinkSeen || tc.thinkingSeen
 		v.spans = append(v.spans, tc)
 		spanText.Reset()
 		spanThink.Reset()
+		spanTextSeen, spanThinkSeen = false, false
 		spanOpen = false
 		if blockOpen && blockText {
 			blockSawSpan = true
@@ -537,9 +555,14 @@ func scanStreamSignatures(events []*pbv2.StreamEvent) streamSignatureView {
 			closeSpan()
 			cbs := e.ContentBlockStart
 			switch cbs.Block.(type) {
-			case *pbv2.ContentBlockStart_Text, *pbv2.ContentBlockStart_Thinking:
+			case *pbv2.ContentBlockStart_Text:
 				blockOpen, blockText = true, true
 				blockSawSpan = false
+				spanTextSeen = true // the explicit block's kind marks the empty scope (round-4 F1)
+			case *pbv2.ContentBlockStart_Thinking:
+				blockOpen, blockText = true, true
+				blockSawSpan = false
+				spanThinkSeen = true
 			case *pbv2.ContentBlockStart_ToolCall:
 				if _, ok := openTools[cbs.Index]; !ok {
 					b := &toolScopeBuilder{index: cbs.Index}
@@ -562,8 +585,10 @@ func scanStreamSignatures(events []*pbv2.StreamEvent) streamSignatureView {
 				// block exists even without content, so an empty signed block
 				// whose token disappears is a dropped signature — not a
 				// suppressed block, which is what absence from the span list
-				// would otherwise claim.
-				v.spans = append(v.spans, typedContent{})
+				// would otherwise claim. The span carries the BLOCK KIND's
+				// presence (round-4 F1), so an empty text block's span can
+				// never be mistaken for an empty thinking block's.
+				v.spans = append(v.spans, typedContent{textSeen: spanTextSeen, thinkingSeen: spanThinkSeen})
 			}
 			closeSpan()
 			blockOpen, blockText, blockSawSpan = false, false, false
@@ -576,6 +601,7 @@ func scanStreamSignatures(events []*pbv2.StreamEvent) streamSignatureView {
 				continue // ABI-violating text; charged by the strict walk
 			}
 			sawText = true
+			spanTextSeen = true // even an EMPTY delta marks the arm (round-4 F1)
 			spanText.WriteString(e.TextDelta)
 			spanOpen = true
 		case *pbv2.StreamEvent_ThinkingDelta:
@@ -583,6 +609,7 @@ func scanStreamSignatures(events []*pbv2.StreamEvent) streamSignatureView {
 				continue // ABI-violating thinking; charged by the strict walk
 			}
 			sawText = true
+			spanThinkSeen = true // even an EMPTY delta marks the arm (round-4 F1)
 			spanThink.WriteString(e.ThinkingDelta)
 			spanOpen = true
 		case *pbv2.StreamEvent_SignatureDelta:
@@ -595,16 +622,19 @@ func scanStreamSignatures(events []*pbv2.StreamEvent) streamSignatureView {
 				// SIGNATURE EVENT, mark the block as having closed a span, and
 				// leave later deltas to become the next ordinal — otherwise
 				// the empty signed scope would vanish into a later span's
-				// "rewritten" verdict when its token dropped.
+				// "rewritten" verdict when its token dropped. The materialized
+				// span and the binding carry the BLOCK KIND's presence
+				// (round-4 F1), so an empty text scope and an empty thinking
+				// scope are distinct records.
 				span := len(v.spans)
 				if !spanOpen && blockOpen && blockText {
-					v.spans = append(v.spans, typedContent{})
+					v.spans = append(v.spans, typedContent{textSeen: spanTextSeen, thinkingSeen: spanThinkSeen})
 					blockSawSpan = true
 				}
 				v.bindings = append(v.bindings, sigBinding{
 					kind:      sigBindingCurrent,
 					signature: e.SignatureDelta,
-					content:   typedContent{text: spanText.String(), thinking: spanThink.String()},
+					content:   typedContent{text: spanText.String(), thinking: spanThink.String(), textSeen: spanTextSeen, thinkingSeen: spanThinkSeen},
 					span:      span,
 				})
 				closeSpan()
@@ -626,14 +656,14 @@ func scanStreamSignatures(events []*pbv2.StreamEvent) streamSignatureView {
 				v.bindings = append(v.bindings, sigBinding{
 					kind:      kind,
 					signature: e.SignatureDelta,
-					content:   typedContent{text: closedText.String(), thinking: closedThink.String()},
+					content:   typedContent{text: closedText.String(), thinking: closedThink.String(), textSeen: closedTextSeen, thinkingSeen: closedThinkSeen},
 					span:      -1,
 				})
 			}
 		}
 	}
 	closeSpan() // an implicit span still in flight at end of stream
-	v.closed = typedContent{text: closedText.String(), thinking: closedThink.String()}
+	v.closed = typedContent{text: closedText.String(), thinking: closedThink.String(), textSeen: closedTextSeen, thinkingSeen: closedThinkSeen}
 	v.sawContent = sawText
 	return v
 }
@@ -838,16 +868,19 @@ func verifyToolScopes(accepted, returned []toolCallScope, canWrite func(string) 
 // (round-3 F3): returned spans are consumed one-to-one, matching accepted
 // UNSIGNED twins before they can prove a signed occurrence dropped, so a
 // surplus occurrence condemns (dropped) while a twin-only survival is a
-// suppressed signed span (topology-gated). After that gate, a marker whose
-// typed content exactly matches an accepted occurrence is that occurrence's
-// token stripped over unchanged content (dropped, rejected); a marker
-// otherwise clears the accepted signed occurrence at ITS OWN span ordinal
-// (that span's content was rewritten). What remains is decided from the
-// returned span structure by verifyUnpairedBinding: a missing span at the
-// binding's position means the signed block itself was suppressed
-// (topology-gated), an EMPTY signed scope with no surviving empty span is a
-// dropped span (round-3 F1), and different content at the position is
-// clearing (allowed).
+// suppressed signed span (topology-gated). The returned spans owned by the
+// EXACT matches Phase 1 consumed are reserved from that multiset first
+// (round-4 F2): a surviving exact signed occurrence is its match's own span,
+// never surplus evidence against a second identical signed occurrence. After
+// that gate, a marker whose typed content exactly matches an accepted
+// occurrence is that occurrence's token stripped over unchanged content
+// (dropped, rejected); a marker otherwise clears the accepted signed
+// occurrence at ITS OWN span ordinal (that span's content was rewritten).
+// What remains is decided from the returned span structure by
+// verifyUnpairedBinding: a missing span at the binding's position means the
+// signed block itself was suppressed (topology-gated), an EMPTY signed scope
+// with no surviving empty span is a dropped span (round-3 F1), and different
+// content at the position is clearing (allowed).
 //
 // An UNBOUND signature_delta in the plugin's OUTPUT is a violation (a
 // floating token the plugin could mint); in ACCEPTED input it is a host
@@ -956,6 +989,19 @@ func verifySignatureDeltaBindings(av, rv streamSignatureView, canWrite func(stri
 			remaining = make(map[typedContent]int, len(rv.spans))
 			for _, s := range rv.spans {
 				remaining[s]++
+			}
+			// (round-4 F2) Reserve the returned span ordinals owned by the
+			// exact matches Phase 1 consumed: the multiset was rebuilt from
+			// ALL returned spans, so a surviving exact signed occurrence was
+			// left available to prove a SECOND identical signed occurrence
+			// dropped. Subtract every exact-consumed returned binding's own
+			// span BEFORE unsigned twins (or anything else) may claim it;
+			// only a SURPLUS returned occurrence can then condemn a signed
+			// binding, and an exact match's own span is never surplus.
+			for j := range ret {
+				if retConsumed[j] && ret[j].span >= 0 && ret[j].span < len(rv.spans) {
+					remaining[rv.spans[ret[j].span]]--
+				}
 			}
 			signedOrdinals := make(map[int]bool, len(acc))
 			for _, b := range acc {
