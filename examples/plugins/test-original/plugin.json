@@ -26,6 +26,10 @@
     {
       "name": "env.log",
       "description": "Diagnostic logging"
+    },
+    {
+      "name": "ir.model.write",
+      "description": "Tag the request model so the mutation is visible upstream"
     }
   ]
 }

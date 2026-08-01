@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "id": "torana-test/test-verdict-then-invalid",
+  "name": "test-verdict-then-invalid",
+  "version": "0.1.0",
+  "abi_version": "v2",
+  "minimum_torana_version": "0.1.0",
+  "failure_mode": "pass",
+  "description": "Test fixture: records a respond (and optionally a block) verdict and then returns a grantless request replacement, so the refused output must discard the non-block verdicts like a trap while the block fails closed",
+  "hooks": [
+    {
+      "name": "run_before_request"
+    }
+  ],
+  "permissions": [
+    {
+      "name": "env.respond_request",
+      "description": "Record a respond verdict before the invalid replacement"
+    },
+    {
+      "name": "env.block_request",
+      "description": "Record a block verdict before the invalid replacement"
+    }
+  ]
+}

@@ -1027,8 +1027,43 @@ func (pp *PluginPipeline) RunBeforeRequest(ctx context.Context, reqID uint64, ch
 			}
 			continue
 		}
+		var replacement *pbv2.ChatRequest
 		if res != nil {
-			if replacement := res.GetReplaceRequest(); replacement != nil {
+			replacement = res.GetReplaceRequest()
+			if replacement != nil {
+				// Write-grant verification: the plugin may change only the
+				// sections its operator granted it, and may never touch
+				// host-owned facts or provenance. A fully-granted plugin
+				// skips only the section comparison — grants authorise
+				// SECTIONS, never host facts or provider-signature bindings,
+				// so the all-grants fast path still runs the unconditional
+				// invariants (torana_meta_json, signature provenance).
+				var verr error
+				if holdsAllRequestGrants(lp.plugin) {
+					verr = verifyFastPath(current, replacement)
+				} else {
+					verr = verifyRequestMutation(current, replacement, lp.plugin.HasGrant)
+				}
+				if verr != nil {
+					log.Printf("[plugin] %s run_before_request: rejected invalid replacement: %v",
+						lp.manifest.Name, verr)
+					// A refused replacement gets the same treatment as a trap:
+					// non-block verdicts recorded before it are discarded — a
+					// respond or route chosen by code that then produced an
+					// invalid replacement is not trustworthy — while a
+					// recorded block still fails closed and short-circuits in
+					// the check below.
+					pp.discardTrapped(reqID, lp.manifest.Name)
+					if lp.failureMode == "block" {
+						return chat, fmt.Errorf("plugin %s returned an invalid request replacement: %w",
+							lp.manifest.Name, verr)
+					}
+					// allow: skip this plugin's replacement; the previous current
+					// stays so the invalid output never chains downstream.
+					replacement = nil
+				}
+			}
+			if replacement != nil {
 				current = replacement
 				modified = true
 				// ObserveRequestMutation wants the request bytes, not the
@@ -1445,6 +1480,24 @@ func validateApproval(bundle PluginBundle, approval Approval) ([]string, string,
 			return nil, "", fmt.Errorf("permission %q was not requested by manifest", permission)
 		}
 		grants = append(grants, permission)
+	}
+	// All-or-nothing: every permission the manifest declares must be in the
+	// approval, or the plugin cannot be enabled. Approving a SUBSET of the
+	// declared set would enable a plugin WITHOUT capabilities it declared
+	// necessary — the empty subset of a grant-declaring manifest is exactly
+	// that — producing degraded or silently ineffective behaviour instead of
+	// failing loudly. The approval's permission set must therefore equal the
+	// declared set (empty == empty is fine for grantless fixtures).
+	approved := make(map[string]struct{}, len(approval.Permissions))
+	for _, permission := range approval.Permissions {
+		approved[permission] = struct{}{}
+	}
+	// Iterate in manifest order so the first missing permission reported to
+	// an operator is stable across runs.
+	for _, permission := range bundle.Manifest.Permissions {
+		if _, ok := approved[permission.Name]; !ok {
+			return nil, "", fmt.Errorf("permission %q requested by manifest was not approved", permission.Name)
+		}
 	}
 	failureMode := approval.FailureMode
 	if failureMode == "" {

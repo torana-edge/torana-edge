@@ -150,6 +150,45 @@ func TestValidateApprovalBindsDigestAndRequestedPermissions(t *testing.T) {
 	}
 }
 
+// All-or-nothing: approving a STRICT SUBSET of a multi-permission manifest is
+// rejected — the empty subset of a grant-declaring manifest is exactly that,
+// and a plugin enabled without capabilities it declared necessary degrades
+// silently. The direct missing-permission regression keeps the equality loop
+// honest (deleting it leaves this suite red).
+func TestValidateApprovalRejectsStrictSubset(t *testing.T) {
+	bundle := PluginBundle{
+		Digest: "sha256:installed",
+		Manifest: PluginManifest{
+			Permissions: []Permission{{Name: "env.log"}, {Name: "ir.model.write"}},
+		},
+	}
+
+	for _, subset := range [][]string{
+		{"env.log"},
+		{"ir.model.write"},
+		nil, // the empty subset
+	} {
+		if _, _, err := validateApproval(bundle, Approval{
+			Digest:      bundle.Digest,
+			Permissions: subset,
+		}); err == nil {
+			t.Errorf("strict subset %v was accepted", subset)
+		}
+	}
+
+	// The full declared set is the only valid approval.
+	grants, _, err := validateApproval(bundle, Approval{
+		Digest:      bundle.Digest,
+		Permissions: []string{"env.log", "ir.model.write"},
+	})
+	if err != nil {
+		t.Fatalf("full approval: %v", err)
+	}
+	if len(grants) != 2 {
+		t.Fatalf("grants = %v", grants)
+	}
+}
+
 func TestValidateApprovalAllowsOperatorFailureModeOverride(t *testing.T) {
 	bundle := PluginBundle{
 		Digest: "sha256:installed",

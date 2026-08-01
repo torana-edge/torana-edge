@@ -4,8 +4,8 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/binary"
-	"hash"
 	"math"
+	"strings"
 	"testing"
 
 	"google.golang.org/protobuf/proto"
@@ -14,8 +14,7 @@ import (
 	pb "github.com/torana-edge/torana-plugin-sdk/pb/v2"
 )
 
-// Prototypes of the write-grant verifier, so the benchmarks price the work the
-// real thing has to do rather than a cheaper approximation of it.
+// Mutation suite for the production write-grant verifier (writegrant.go).
 //
 // This is enforcement, and the plugin author is the threat model: the verifier
 // decides whether a plugin exceeded its grants. A method that merely usually
@@ -24,16 +23,17 @@ import (
 // reorder entirely and collided across field boundaries — both reproduced in
 // the tests below, both disqualifying.
 //
-// Two safe candidates are measured:
-//
-//   - compareSections: exact structural comparison, no hashing. Cannot collide
-//     because it never summarises.
-//   - fingerprintSectionsSafe: SHA-256 over length-framed fields with the
-//     message index folded in. Collision-resistant and reorder-sensitive.
-//
-// Exact comparison needs the accepted request kept decoded; fingerprints need
-// only 32 bytes per section carried forward. That is the real trade, and the
-// numbers decide it.
+// Production change detection is fingerprintRequestSections (writegrant.go):
+// SHA-256 over length-framed fields with the message index folded in,
+// collision-resistant and reorder-sensitive. Each message is first hashed as
+// its own typed record (fingerprintMessage) — field tags + presence + an
+// explicit tool-call count and per-call records — so a tool call can never be
+// confused with a message or its neighbour's fields (the round-1 structural
+// ambiguity is reproduced below). The tests here exercise that production
+// fingerprint. compareSections — exact structural comparison, no hashing,
+// which cannot collide because it never summarises — is kept below as the
+// mutation suite's oracle: a mutation must be caught by BOTH the exact
+// comparison and the fingerprint, so a regression in either fails the suite.
 
 // changedSections names the grantable sections a plugin's output differs in.
 type changedSections struct {
@@ -137,144 +137,6 @@ func sameFloatPtr(a, b *float64) bool {
 		return a == b
 	}
 	return math.Float64bits(*a) == math.Float64bits(*b)
-}
-
-// safePrints is the fingerprint alternative: 32 bytes per grantable section.
-type safePrints struct {
-	messages map[string][32]byte
-	tools    [32]byte
-	model    [32]byte
-	params   [32]byte
-}
-
-func (p safePrints) equal(q safePrints) bool {
-	if len(p.messages) != len(q.messages) {
-		return false
-	}
-	for role, sum := range p.messages {
-		if q.messages[role] != sum {
-			return false
-		}
-	}
-	return p.tools == q.tools && p.model == q.model && p.params == q.params
-}
-
-// writeFramed length-prefixes every field, so field boundaries cannot be moved
-// without changing the digest. Concatenating raw bytes lets ("ab","") and
-// ("a","b") hash identically.
-//
-// Length framing alone is not enough for OPTIONAL fields: writing only the ones
-// that are present makes {MaxTokens: 0, Temperature: nil} and
-// {MaxTokens: nil, Temperature: 0} produce identical input. Use writeField for
-// those — it carries the field's identity and its presence.
-func writeFramed(h hash.Hash, parts ...[]byte) {
-	var lenBuf [8]byte
-	for _, p := range parts {
-		binary.LittleEndian.PutUint64(lenBuf[:], uint64(len(p)))
-		_, _ = h.Write(lenBuf[:])
-		_, _ = h.Write(p)
-	}
-}
-
-// writeField frames a value together with which field it is and whether it was
-// set at all, so neither identity nor presence can be forged by rearrangement.
-func writeField(h hash.Hash, field byte, present bool, value []byte) {
-	presence := byte(0)
-	if present {
-		presence = 1
-	}
-	_, _ = h.Write([]byte{field, presence})
-	writeFramed(h, value)
-}
-
-func fingerprintSectionsSafe(req *pb.ChatRequest) safePrints {
-	p := safePrints{messages: map[string][32]byte{}}
-
-	// One hasher per role, fed each message's ABSOLUTE index in the full
-	// message list. Folding only a role's own subsequence leaves a cross-role
-	// reorder invisible, because neither role's subsequence changes.
-	hashers := map[string]hash.Hash{}
-	for i, m := range req.Messages {
-		h, ok := hashers[m.Role]
-		if !ok {
-			h = sha256.New()
-			hashers[m.Role] = h
-		}
-		var idx [8]byte
-		binary.LittleEndian.PutUint64(idx[:], uint64(i))
-		writeFramed(h, idx[:], []byte(m.Role), []byte(m.Content), m.ContentPartsJson,
-			[]byte(m.Thinking), []byte(m.ThinkingSignature), []byte(m.ContentSignature),
-			[]byte(m.TrailingSignature), []byte(m.RedactedThinking),
-			[]byte(m.ToolCallId), []byte(m.ToolName), m.CacheControlJson)
-		for _, tc := range m.ToolCalls {
-			writeFramed(h, []byte(tc.Id), []byte(tc.Name), tc.ArgumentsJson, []byte(tc.Signature))
-		}
-	}
-	// The message count is folded into every role, so appending or removing a
-	// message of one role is visible to all of them — otherwise a deletion that
-	// shifts later indices could be attributed to the wrong role alone.
-	var count [8]byte
-	binary.LittleEndian.PutUint64(count[:], uint64(len(req.Messages)))
-	for role, h := range hashers {
-		writeFramed(h, count[:])
-		var sum [32]byte
-		copy(sum[:], h.Sum(nil))
-		p.messages[role] = sum
-	}
-
-	h := sha256.New()
-	for _, t := range req.Tools {
-		strict := byte(0)
-		if t.Strict {
-			strict = 1
-		}
-		writeFramed(h, []byte(t.Name), []byte(t.Description), t.ParametersJson,
-			t.CacheControlJson, []byte{strict})
-	}
-	copy(p.tools[:], h.Sum(nil))
-
-	h = sha256.New()
-	writeFramed(h, []byte(req.Model))
-	copy(p.model[:], h.Sum(nil))
-
-	h = sha256.New()
-	var scratch [8]byte
-	if req.MaxTokens != nil {
-		binary.LittleEndian.PutUint64(scratch[:], uint64(uint32(*req.MaxTokens)))
-		writeField(h, 1, true, scratch[:])
-	} else {
-		writeField(h, 1, false, nil)
-	}
-	if req.Temperature != nil {
-		// Bit pattern, not value: -0.0 and +0.0 compare equal as floats, so a
-		// sign flip would be invisible.
-		binary.LittleEndian.PutUint64(scratch[:], math.Float64bits(*req.Temperature))
-		writeField(h, 2, true, scratch[:])
-	} else {
-		writeField(h, 2, false, nil)
-	}
-	if req.TopP != nil {
-		binary.LittleEndian.PutUint64(scratch[:], math.Float64bits(*req.TopP))
-		writeField(h, 3, true, scratch[:])
-	} else {
-		writeField(h, 3, false, nil)
-	}
-	stream := byte(0)
-	if req.Stream {
-		stream = 1
-	}
-	writeField(h, 4, true, []byte{stream})
-	writeField(h, 5, true, req.ProviderExtensionsJson)
-	writeField(h, 6, true, req.SafetySettingsJson)
-	_, _ = h.Write([]byte{7})
-	for _, s := range req.StopSequences {
-		writeFramed(h, []byte(s))
-	}
-	binary.LittleEndian.PutUint64(scratch[:], uint64(len(req.StopSequences)))
-	writeFramed(h, scratch[:])
-	copy(p.params[:], h.Sum(nil))
-
-	return p
 }
 
 // --- correctness ------------------------------------------------------------
@@ -391,11 +253,11 @@ func TestCompareSectionsDetectsEveryMutation(t *testing.T) {
 func TestSafeFingerprintDetectsEveryMutation(t *testing.T) {
 	for _, m := range mutations() {
 		t.Run(m.name, func(t *testing.T) {
-			accepted := fingerprintSectionsSafe(baseRequest())
+			accepted := fingerprintRequestSections(baseRequest())
 			out := baseRequest()
 			m.apply(out)
 
-			if accepted.equal(fingerprintSectionsSafe(out)) {
+			if accepted.equal(fingerprintRequestSections(out)) {
 				t.Fatal("mutation invisible to the fingerprint — not safe for enforcement")
 			}
 		})
@@ -408,68 +270,16 @@ func TestUnmodifiedRequestIsUnchanged(t *testing.T) {
 	if c := compareSections(baseRequest(), baseRequest()); c.any() {
 		t.Fatalf("unmodified request reported as changed: %+v", c)
 	}
-	if !fingerprintSectionsSafe(baseRequest()).equal(fingerprintSectionsSafe(baseRequest())) {
+	if !fingerprintRequestSections(baseRequest()).equal(fingerprintRequestSections(baseRequest())) {
 		t.Fatal("unmodified request produced different fingerprints")
 	}
 }
 
 // --- field inventory --------------------------------------------------------
-
-// hostOwnedField marks a field no write grant covers.
-const hostOwnedField = "<host-owned>"
-
-// Every field of every message the verifier inspects, mapped to the grant
-// section that governs it.
 //
-// This exists because "the mutation suite covers every change" was asserted and
-// wrong: the first version silently ignored provider_extensions_json,
-// safety_settings_json, torana_meta_json and ToolDef.strict. A hand-written
-// mutation list cannot prove coverage — it only demonstrates the cases someone
-// thought of. Reflection over the descriptor can, and will fail the moment v2
-// adds a field to the contract without deciding which grant governs it.
-var chatRequestFieldSections = map[string]string{
-	"model":                    "ir.model.write",
-	"messages":                 "ir.messages.write.<role>",
-	"tools":                    "ir.tools.write",
-	"stream":                   "ir.params.write",
-	"max_tokens":               "ir.params.write",
-	"temperature":              "ir.params.write",
-	"top_p":                    "ir.params.write",
-	"stop_sequences":           "ir.params.write",
-	"provider_extensions_json": "ir.params.write",
-	"safety_settings_json":     "ir.params.write",
-	"torana_meta_json":         hostOwnedField,
-}
-
-var messageFieldSections = map[string]string{
-	"role":               "ir.messages.write.<role>",
-	"content":            "ir.messages.write.<role>",
-	"content_parts_json": "ir.messages.write.<role>",
-	"thinking":           "ir.messages.write.<role>",
-	"thinking_signature": "ir.messages.write.<role>",
-	"content_signature":  "ir.messages.write.<role>",
-	"trailing_signature": "ir.messages.write.<role>",
-	"redacted_thinking":  "ir.messages.write.<role>",
-	"tool_calls":         "ir.messages.write.<role>",
-	"tool_call_id":       "ir.messages.write.<role>",
-	"tool_name":          "ir.messages.write.<role>",
-	"cache_control_json": "ir.messages.write.<role>",
-}
-
-var toolCallFieldSections = map[string]string{
-	"id":             "ir.messages.write.<role>",
-	"name":           "ir.messages.write.<role>",
-	"arguments_json": "ir.messages.write.<role>",
-	"signature":      "ir.messages.write.<role>",
-}
-
-var toolDefFieldSections = map[string]string{
-	"name":               "ir.tools.write",
-	"description":        "ir.tools.write",
-	"parameters_json":    "ir.tools.write",
-	"strict":             "ir.tools.write",
-	"cache_control_json": "ir.tools.write",
-}
+// The inventory tables themselves (chatRequestFieldSections and friends) live
+// in writegrant.go next to the verifier; the tests below are what make them
+// enforceable.
 
 // Every protobuf field must be assigned to a grant section or explicitly
 // host-owned. An unassigned field is a field a plugin could change with no
@@ -548,7 +358,7 @@ func TestEveryGovernedFieldIsDetected(t *testing.T) {
 				if !compareSections(accepted, out).any() {
 					t.Error("exact comparison did not detect a change to this field")
 				}
-				if fingerprintSectionsSafe(accepted).equal(fingerprintSectionsSafe(out)) {
+				if fingerprintRequestSections(accepted).equal(fingerprintRequestSections(out)) {
 					t.Error("fingerprint did not detect a change to this field")
 				}
 			})
@@ -612,7 +422,7 @@ func TestOptionalPresenceIsNotForgeable(t *testing.T) {
 	b := baseRequest()
 	b.MaxTokens, b.Temperature = nil, &zero64
 
-	if fingerprintSectionsSafe(a).equal(fingerprintSectionsSafe(b)) {
+	if fingerprintRequestSections(a).equal(fingerprintRequestSections(b)) {
 		t.Fatal("presence of one optional field is forgeable as another's value")
 	}
 	if !compareSections(a, b).any() {
@@ -632,7 +442,154 @@ func TestNegativeZeroIsDetected(t *testing.T) {
 	if !compareSections(a, b).any() {
 		t.Fatal("exact comparison treated -0.0 and +0.0 as identical")
 	}
-	if fingerprintSectionsSafe(a).equal(fingerprintSectionsSafe(b)) {
+	if fingerprintRequestSections(a).equal(fingerprintRequestSections(b)) {
 		t.Fatal("fingerprint treated -0.0 and +0.0 as identical")
+	}
+}
+
+// --- F1: per-message typed records (round-1 structural ambiguity) -----------
+
+// oldSchemeRoleDigest replicates the round-1 per-role framing — message
+// fields and tool-call fields concatenated into ONE role stream — so the
+// tests below can demonstrate the structural ambiguity it had: a tool call's
+// four fields were byte-indistinguishable from the leading fields of the next
+// same-role message, so moving the call between two messages left the
+// preimage identical.
+func oldSchemeRoleDigest(req *pb.ChatRequest, role string) [32]byte {
+	h := sha256.New()
+	for i, m := range req.Messages {
+		if m.Role != role {
+			continue
+		}
+		var idx [8]byte
+		binary.LittleEndian.PutUint64(idx[:], uint64(i))
+		writeFramed(h, idx[:], []byte(m.Role), []byte(m.Content), m.ContentPartsJson,
+			[]byte(m.Thinking), []byte(m.ThinkingSignature), []byte(m.ContentSignature),
+			[]byte(m.TrailingSignature), []byte(m.RedactedThinking),
+			[]byte(m.ToolCallId), []byte(m.ToolName), m.CacheControlJson)
+		for _, tc := range m.ToolCalls {
+			writeFramed(h, []byte(tc.Id), []byte(tc.Name), tc.ArgumentsJson, []byte(tc.Signature))
+		}
+	}
+	var count [8]byte
+	binary.LittleEndian.PutUint64(count[:], uint64(len(req.Messages)))
+	writeFramed(h, count[:])
+	var sum [32]byte
+	copy(sum[:], h.Sum(nil))
+	return sum
+}
+
+// boundaryShiftMessages builds the reviewer's reproduction: a same-role pair
+// where the second message is PERIODIC with the moved call's fields, so under
+// the round-1 framing the call's four fields are byte-identical to the next
+// message's leading fields. accepted has the call on message 0; out moves it
+// into message 1's tool-call list.
+//
+// The period is: idx1 (the 8-byte little-endian index of message 1) followed
+// by the call's fields (id=idx1, name="user", arguments="S", signature="T"),
+// cycling through the message's eleven fields. Moving the call then merely
+// rotates the boundary between the concatenated frames, leaving the round-1
+// preimage identical.
+func boundaryShiftMessages() (accepted, out *pb.ChatRequest) {
+	idx1 := string([]byte{1, 0, 0, 0, 0, 0, 0, 0})
+	call := &pb.ToolCall{Id: idx1, Name: "user", ArgumentsJson: []byte("S"), Signature: "T"}
+	periodic := &pb.Message{
+		Role:              "user",
+		Content:           "S",
+		ContentPartsJson:  []byte("T"),
+		Thinking:          idx1,
+		ThinkingSignature: "user",
+		ContentSignature:  "S",
+		TrailingSignature: "T",
+		RedactedThinking:  idx1,
+		ToolCallId:        "user",
+		ToolName:          "S",
+		CacheControlJson:  []byte("T"),
+	}
+
+	accepted = &pb.ChatRequest{Messages: []*pb.Message{
+		{Role: "user", Content: "M0", ToolCalls: []*pb.ToolCall{call}},
+		periodic,
+	}}
+	out = &pb.ChatRequest{Messages: []*pb.Message{
+		{Role: "user", Content: "M0"}, // call removed
+	}}
+	moved := proto.Clone(periodic).(*pb.Message)
+	moved.ToolCalls = []*pb.ToolCall{call}
+	out.Messages = append(out.Messages, moved)
+	return accepted, out
+}
+
+// The exact round-1 reviewer reproduction: two same-role messages with a
+// periodic field pattern, where moving a tool call from message 0's tool-call
+// list into message 1's yields an IDENTICAL round-1 preimage — so the round-1
+// fingerprint returned equal digests and verifyRequestMutation returned nil
+// with no grants. The per-message typed-record framing must make the shift
+// visible, and verification must reject it.
+func TestMessageFingerprintUnambiguousAcrossBoundaryShift(t *testing.T) {
+	accepted, out := boundaryShiftMessages()
+
+	// 1. The exact oracle sees the change.
+	if !compareSections(accepted, out).any() {
+		t.Fatal("exact comparison missed the boundary shift")
+	}
+	// 2. The round-1 framing collided — this is the reproduced bug. If this
+	// assertion ever starts failing, the construction no longer reproduces
+	// the reviewer's finding and the regression is silently weaker.
+	if oldSchemeRoleDigest(accepted, "user") != oldSchemeRoleDigest(out, "user") {
+		t.Fatal("test construction broken: the round-1 preimages must be identical " +
+			"for this to reproduce the reviewer's reproduction")
+	}
+	// 3. The production fingerprint must NOT collide.
+	if fingerprintRequestSections(accepted).equal(fingerprintRequestSections(out)) {
+		t.Fatal("message fingerprint still ambiguous across a tool-call boundary shift")
+	}
+	// 4. verifyRequestMutation must reject with NO grants.
+	err := verifyRequestMutation(accepted, out, grant())
+	if err == nil {
+		t.Fatal("the boundary shift must be rejected without any grant")
+	}
+	if !strings.Contains(err.Error(), "messages.user") {
+		t.Errorf("error = %q, want the messages.user section named", err)
+	}
+}
+
+// The same boundary shift across THREE messages: the call moves from message
+// 0 to message 2, crossing a periodic middle. The role hasher receives
+// (absolute index, message digest) per message, so the shift is visible even
+// though the moved frames could otherwise be re-aligned against the periodic
+// pattern — each message's digest changes where its tool-call list changed,
+// and the index pins every digest to its position.
+func TestMessageFingerprintBoundaryShiftAcrossThreeMessages(t *testing.T) {
+	idx1 := string([]byte{1, 0, 0, 0, 0, 0, 0, 0})
+	call := &pb.ToolCall{Id: idx1, Name: "user", ArgumentsJson: []byte("S"), Signature: "T"}
+	periodic := &pb.Message{
+		Role: "user", Content: "S", ContentPartsJson: []byte("T"),
+		Thinking: idx1, ThinkingSignature: "user", ContentSignature: "S",
+		TrailingSignature: "T", RedactedThinking: idx1,
+		ToolCallId: "user", ToolName: "S", CacheControlJson: []byte("T"),
+	}
+
+	accepted := &pb.ChatRequest{Messages: []*pb.Message{
+		{Role: "user", Content: "M0", ToolCalls: []*pb.ToolCall{call}},
+		periodic,
+		proto.Clone(periodic).(*pb.Message),
+	}}
+	out := &pb.ChatRequest{Messages: []*pb.Message{
+		{Role: "user", Content: "M0"},
+		proto.Clone(periodic).(*pb.Message),
+	}}
+	last := proto.Clone(periodic).(*pb.Message)
+	last.ToolCalls = []*pb.ToolCall{call}
+	out.Messages = append(out.Messages, last)
+
+	if !compareSections(accepted, out).any() {
+		t.Fatal("exact comparison missed the three-message boundary shift")
+	}
+	if fingerprintRequestSections(accepted).equal(fingerprintRequestSections(out)) {
+		t.Fatal("fingerprint missed a tool-call boundary shift across three messages")
+	}
+	if err := verifyRequestMutation(accepted, out, grant()); err == nil {
+		t.Fatal("the three-message boundary shift must be rejected without any grant")
 	}
 }

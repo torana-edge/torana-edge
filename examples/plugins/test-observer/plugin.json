@@ -26,6 +26,10 @@
     {
       "name": "env.log",
       "description": "Diagnostic logging"
+    },
+    {
+      "name": "ir.model.write",
+      "description": "Tag the next request's model with the observed error status"
     }
   ]
 }

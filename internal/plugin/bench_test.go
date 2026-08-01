@@ -185,7 +185,8 @@ func BenchmarkVerificationUnmarshal(b *testing.B) {
 // exactly against the previously accepted request, or fingerprint its sections
 // and compare digests. Multiply the result by the plugin count.
 //
-// See writegrant_prototype_test.go for both methods and the mutation suite
+// See writegrant.go for the fingerprint and writegrant_prototype_test.go for
+// the exact-comparison oracle and the mutation suite proving both methods
 // proving each detects every change a plugin could make. An earlier prototype
 // here was faster and unsafe: it missed a cross-role reorder outright.
 func BenchmarkWriteGrantVerification(b *testing.B) {
@@ -210,7 +211,7 @@ func BenchmarkWriteGrantVerification(b *testing.B) {
 			}
 		})
 
-		accepted := fingerprintSectionsSafe(req)
+		accepted := fingerprintRequestSections(req)
 		b.Run(fmt.Sprintf("fingerprint/msgs=%d", n), func(b *testing.B) {
 			b.SetBytes(int64(len(raw)))
 			b.ReportAllocs()
@@ -219,7 +220,7 @@ func BenchmarkWriteGrantVerification(b *testing.B) {
 				if err := proto.Unmarshal(raw, &out); err != nil {
 					b.Fatal(err)
 				}
-				if !accepted.equal(fingerprintSectionsSafe(&out)) {
+				if !accepted.equal(fingerprintRequestSections(&out)) {
 					b.Fatal("unmodified request must fingerprint equal")
 				}
 			}
