@@ -118,6 +118,12 @@ func fixtureNames() []string {
 			}
 		}
 	}
+	if len(names) == 0 {
+		// Fail closed: an empty or malformed inventory would make every
+		// mapping vacuously empty and silently starve the strict runs.
+		fmt.Fprintln(os.Stderr, "no fixture inventory found in Makefile TESTDATA_DIRS")
+		os.Exit(1)
+	}
 	sort.Strings(names)
 	return names
 }

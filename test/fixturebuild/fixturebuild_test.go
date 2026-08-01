@@ -801,7 +801,80 @@ func TestMapperMultiPackage(t *testing.T) {
 	}
 }
 
-// TestMain pins the hermetic property: no test in this package may leave the
+// TestEmptyFixtureUnion — a legitimate empty fixture union must produce ZERO
+// target lines and exit 0, never the bogus examples/plugins//plugin.wasm.
+// Driven through the REAL script with a fake go that lists only a
+// no-fixture package.
+func TestEmptyFixtureUnion(t *testing.T) {
+	repo := repoRoot(t)
+	realGo, err := exec.LookPath("go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fakeDir := t.TempDir()
+	fakeGo := "#!/bin/sh\n" +
+		"if [ \"$1\" = list ]; then\n" +
+		"  echo 'github.com/torana-edge/torana-edge/internal/secret'\n" +
+		"  exit 0\n" +
+		"fi\n" +
+		"exec " + realGo + " \"$@\"\n"
+	if err := os.WriteFile(filepath.Join(fakeDir, "go"), []byte(fakeGo), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command("sh", filepath.Join(repo, "scripts", "ci-shards.sh"), "fixtures", "remainder")
+	cmd.Dir = repo
+	cmd.Env = append(os.Environ(), "PATH="+fakeDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("fixtures remainder (no-fixture inventory): %v\n%s", err, out)
+	}
+	if len(out) != 0 {
+		t.Fatalf("expected zero target lines, got:\n%s", out)
+	}
+}
+
+// TestEmptyInventoryFailsClosed — an empty or malformed Makefile inventory
+// must fail the mapper, not produce a vacuously empty mapping.
+func TestEmptyInventoryFailsClosed(t *testing.T) {
+	repo := repoRoot(t)
+	sandbox := t.TempDir()
+	if err := os.WriteFile(filepath.Join(sandbox, "Makefile"), []byte("# no TESTDATA_DIRS\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("go", "run", filepath.Join(repo, "scripts", "fixtures-for-pkg.go"),
+		filepath.Join(repo, "internal", "secret"))
+	cmd.Dir = sandbox
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("mapper succeeded with an empty inventory:\n%s", out)
+	}
+	if !strings.Contains(string(out), "no fixture inventory") {
+		t.Fatalf("unexpected failure output: %s", out)
+	}
+}
+
+// TestEmptyMultiPackageUnion — a mixed multi-package query whose packages
+// reference no fixtures must produce no output and exit 0 (no slash-only
+// target at the wrapper level either).
+func TestEmptyMultiPackageUnion(t *testing.T) {
+	repo := repoRoot(t)
+	cmd := exec.Command("sh", filepath.Join(repo, "scripts", "fixtures-for-pkg.sh"),
+		"internal/secret", "internal/metrics")
+	cmd.Dir = repo
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("multi-package empty union: %v\n%s", err, out)
+	}
+	if len(out) != 0 {
+		t.Fatalf("expected no output, got:\n%s", out)
+	}
+	if strings.Contains(string(out), "examples/plugins//") {
+		t.Fatal("bogus slash-only target emitted")
+	}
+}
+
+// TestMain pins the hermetic property// TestMain pins the hermetic property: no test in this package may leave the
 // tracked checkout modified (fixtures, stamps, and the local cache are
 // gitignored and therefore invisible to git status).
 func TestMain(m *testing.M) {

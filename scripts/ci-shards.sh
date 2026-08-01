@@ -66,6 +66,10 @@ fixtures)
 		echo "fixture mapping failed for shard $shard" >&2
 		exit 1
 	}
+	# An empty union is a LEGITIMATE result (no fixture-bearing tests in
+	# the shard): exit with NO output - an empty line would otherwise
+	# become the bogus target examples/plugins//plugin.wasm.
+	[ -n "$mapped" ] || exit 0
 	printf '%s\n' "$mapped" | sort -u | sed 's#^#examples/plugins/#' | sed 's#$#/plugin.wasm#'
 	;;
 check | check-synthetic)
