@@ -182,7 +182,7 @@ func TestStreamSerialize(t *testing.T) {
 	if len(frames[0].Candidates) == 0 || frames[0].Candidates[0].Content == nil {
 		t.Fatalf("Frame 1 missing content")
 	}
-	if len(frames[0].Candidates[0].Content.Parts) == 0 || frames[0].Candidates[0].Content.Parts[0].Text != "Hello" {
+	if len(frames[0].Candidates[0].Content.Parts) == 0 || partText(frames[0].Candidates[0].Content.Parts[0]) != "Hello" {
 		t.Errorf("Frame 1 text mismatch")
 	}
 
