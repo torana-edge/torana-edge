@@ -5,6 +5,9 @@ import (
 	"encoding/json"
 	"math"
 	"sort"
+
+	"github.com/torana-edge/torana-edge/internal/wasm"
+	pbv2 "github.com/torana-edge/torana-plugin-sdk/pb/v2"
 )
 
 // cachePricingRequest is what a plugin asks about.
@@ -69,32 +72,46 @@ type cachePricingTier struct {
 	Marker map[string]any `json:"marker,omitempty"`
 }
 
-// Reasons a plugin may see. Named so the plugin can branch on them rather than
-// matching prose.
+// Reasons a plugin may see for a domain "unavailable" value. Named so the
+// plugin can branch on them rather than matching prose. Caller bugs (malformed
+// payload) and operator gaps (unknown provider) are FRAMED refusals instead —
+// see cachePricing.
 const (
-	pricingReasonUnknownProvider = "unknown_provider"
-	pricingReasonNoPricing       = "no_pricing_configured"
-	pricingReasonNoCacheRates    = "no_cache_rates_configured"
-	pricingReasonNoCacheConfig   = "no_cache_semantics_configured"
-	pricingReasonBadPayload      = "invalid_payload"
+	pricingReasonNoPricing     = "no_pricing_configured"
+	pricingReasonNoCacheRates  = "no_cache_rates_configured"
+	pricingReasonNoCacheConfig = "no_cache_semantics_configured"
 )
 
 // cachePricing answers the torana_cache_pricing host call.
 //
-// Every failure is an explicit "unavailable" with a machine-readable reason
-// rather than a guess. That is the same discipline the compaction gate follows:
-// a plugin that cannot price its action must decline to spend money, and it can
-// only do that if the host refuses to invent numbers.
-func (s *Server) cachePricing(_ context.Context, payloadJSON string) string {
+// The classification split matters here: a caller bug and an operator gap are
+// different domains, and a plugin must be able to tell them apart. Malformed
+// JSON and a missing required provider/model are INVALID_ARGUMENT — retrying
+// the same call cannot help. Naming a provider that is not configured is
+// NOT_CONFIGURED — the operator must add it. Everything else is a legitimate
+// QUERY RESULT and stays a domain value: an unpriced model, a provider with
+// no cache rates, or one with no cache semantics is "unavailable" as DATA
+// (the plugin must decline to spend), not a transport failure of the host
+// call. Priced is "ok". A plugin that cannot price its action must decline to
+// spend money, and it can only do that if the host refuses to invent numbers.
+func (s *Server) cachePricing(_ context.Context, payloadJSON string) wasm.ExtensionResult {
 	var req cachePricingRequest
 	if err := json.Unmarshal([]byte(payloadJSON), &req); err != nil {
-		return marshalPricing(cachePricingResponse{Status: "unavailable", Reason: pricingReasonBadPayload})
+		return wasm.ExtensionRefusal(pbv2.ErrorCode_ERROR_CODE_INVALID_ARGUMENT,
+			"invalid payload: %v", err)
+	}
+	if req.Provider == "" {
+		return wasm.ExtensionRefusal(pbv2.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "provider is required")
+	}
+	if req.Model == "" {
+		return wasm.ExtensionRefusal(pbv2.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "model is required")
 	}
 
 	cfg := s.GetConfig().Providers
 	prov, ok := cfg.Providers[req.Provider]
 	if !ok {
-		return marshalPricing(cachePricingResponse{Status: "unavailable", Reason: pricingReasonUnknownProvider})
+		return wasm.ExtensionRefusal(pbv2.ErrorCode_ERROR_CODE_NOT_CONFIGURED,
+			"unknown provider %q", req.Provider)
 	}
 
 	out := cachePricingResponse{Status: "ok"}
@@ -121,12 +138,12 @@ func (s *Server) cachePricing(_ context.Context, payloadJSON string) string {
 	if !priced {
 		out.Status = "unavailable"
 		out.Reason = pricingReasonNoPricing
-		return marshalPricing(out)
+		return wasm.ExtensionValue([]byte(marshalPricing(out)))
 	}
 	if pricing.CacheReadUSDPerMTok == nil || pricing.CacheWriteUSDPerMTok == nil {
 		out.Status = "unavailable"
 		out.Reason = pricingReasonNoCacheRates
-		return marshalPricing(out)
+		return wasm.ExtensionValue([]byte(marshalPricing(out)))
 	}
 
 	read, write := *pricing.CacheReadUSDPerMTok, *pricing.CacheWriteUSDPerMTok
@@ -149,7 +166,7 @@ func (s *Server) cachePricing(_ context.Context, payloadJSON string) string {
 		out.Status = "unavailable"
 		out.Reason = pricingReasonNoCacheConfig
 	}
-	return marshalPricing(out)
+	return wasm.ExtensionValue([]byte(marshalPricing(out)))
 }
 
 func marshalPricing(r cachePricingResponse) string {

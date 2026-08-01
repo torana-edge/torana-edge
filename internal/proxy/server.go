@@ -2732,24 +2732,18 @@ func (s *Server) newRuntime() *wasm.Runtime {
 		MemoryLimitPages: memoryPages,
 	})
 	// Offload completion handler (cheap-model tool result
-	// summarization), recording failures in /stats.
-	rt.OffloadResultFunc = func(ctx context.Context, payloadJSON string) (economics.OffloadResult, error) {
-		out, err := s.offloadCompletionResult(ctx, payloadJSON)
-		if err != nil {
-			log.Printf("[offload] %v", err)
-			s.stats.RecordOffloadFailure()
-		}
-		return out, err
-	}
-	rt.OffloadFunc = func(ctx context.Context, payloadJSON string) (string, error) {
-		out, err := s.offloadCompletion(ctx, payloadJSON)
-		if err != nil {
+	// summarization), recording failures in /stats. The callback returns a
+	// classified ExtensionResult: the value arm is the marshaled OffloadResult
+	// (no constant status field), refusals are framed classified HostErrors.
+	rt.OffloadResultFunc = func(ctx context.Context, payloadJSON string) wasm.ExtensionResult {
+		out := s.offloadCompletionResult(ctx, payloadJSON)
+		if out.Refusal != nil {
 			// Plugins degrade gracefully on offload errors, so this
 			// log line is the only host-side visibility.
-			log.Printf("[offload] %v", err)
+			log.Printf("[offload] %s", out.Refusal.Message)
 			s.stats.RecordOffloadFailure()
 		}
-		return out, err
+		return out
 	}
 	rt.CompactionReportFunc = func(ctx context.Context, pluginName string, report economics.CompactionReport) {
 		rs := reqStateFrom(ctx)
@@ -2791,6 +2785,10 @@ func (s *Server) newRuntime() *wasm.Runtime {
 	// (INVALID_ARGUMENT / NOT_CONFIGURED / UNAVAILABLE); the value arm carries
 	// provider outcomes only.
 	rt.SendRequestFunc = s.sendPluginRequest
+	// Virtual-key verification is an enterprise capability: the OSS proxy does
+	// not wire it, so an absent callback frames NOT_CONFIGURED at dispatch
+	// (never UNAVAILABLE — a declared permission that can never succeed in
+	// this host is a configuration gap, not a transient outage).
 	// Pristine request/response snapshots (env.original_request /
 	// env.original_response), read from the request state the same
 	// way offload does.

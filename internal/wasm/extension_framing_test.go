@@ -3,7 +3,6 @@ package wasm
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"strings"
 	"testing"
 
@@ -15,9 +14,10 @@ import (
 // status strings smuggled through the value arm. This is the invariant matrix
 // for the nine torana_* extension commands: every command × every state it can
 // be in — wired (func installed, domain result), nil-func (NOT_CONFIGURED),
-// refused (host-side refusal), unimplemented (verify_virtual_key), malformed
-// args (INVALID_ARGUMENT), and ungranted (PERMISSION_DENIED, which the
-// permission boundary asserts before the switch).
+// refused (host-callback refusal, passed through classified), invalid (the
+// callback returned a malformed ExtensionResult → INTERNAL), malformed args
+// (INVALID_ARGUMENT), and ungranted (PERMISSION_DENIED, which the permission
+// boundary asserts before the switch).
 //
 // A refusal row asserts the ERROR arm explicitly, so reverting any case back
 // to a `{"status":...}` string body fails that row with "expected a framed
@@ -60,27 +60,58 @@ func (w extensionMatrixWant) check(t *testing.T, name string, res *pbv2.HostCall
 type extensionMatrixRow struct {
 	name  string
 	cmd   string
-	state string // wired | nil-func | refused | unimplemented | malformed | ungranted
+	state string // wired | nil-func | refused | invalid | malformed | ungranted
 	args  string
 	want  extensionMatrixWant
+	// invalidResult selects which malformed ExtensionResult an "invalid" row's
+	// callback returns: "both" sets value AND refusal, "unspecified" uses an
+	// UNSPECIFIED refusal code.
+	invalidResult string
 }
 
-// wireExtension installs the host callback a "wired" (or func-backed refusal)
-// row needs. The callback reproduces the classification a real server would
-// make, so the row proves the dispatcher passes the framed error arm through
-// untouched.
+// wireExtension installs the host callback a "wired" (or func-backed refusal
+// or invalid-result) row needs. The callback reproduces the classification a
+// real server would make, so the row proves the dispatcher passes the framed
+// error arm through untouched — and that a malformed callback result is
+// caught before it can leak to the guest.
 func wireExtension(t *testing.T, r *Runtime, row extensionMatrixRow) {
 	t.Helper()
+	if row.state == "invalid" {
+		switch row.invalidResult {
+		case "both":
+			r.SendRequestFunc = func(_ context.Context, _, _ string) ExtensionResult {
+				return ExtensionResult{Value: []byte("value"), Refusal: hostErr(pbv2.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "refusal")}
+			}
+		case "unspecified":
+			r.SendRequestFunc = func(_ context.Context, _, _ string) ExtensionResult {
+				return ExtensionResult{Refusal: hostErr(pbv2.ErrorCode_ERROR_CODE_UNSPECIFIED, "no code")}
+			}
+		default:
+			t.Fatalf("%s: unknown invalid-result variant %q", row.name, row.invalidResult)
+		}
+		return
+	}
 	switch row.cmd {
 	case "torana_send_request":
-		r.SendRequestFunc = func(_ context.Context, _, payload string) (string, *pbv2.HostError) {
-			if !json.Valid([]byte(payload)) {
-				return "", hostErr(pbv2.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "invalid payload")
+		r.SendRequestFunc = func(_ context.Context, _, payload string) ExtensionResult {
+			if row.state == "refused" {
+				return ExtensionRefusal(pbv2.ErrorCode_ERROR_CODE_UNAVAILABLE, "request to oai failed: boom")
 			}
-			return row.want.body, nil
+			if !json.Valid([]byte(payload)) {
+				return ExtensionRefusal(pbv2.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "invalid payload")
+			}
+			return ExtensionValue([]byte(row.want.body))
 		}
 	case "torana_cache_pricing":
-		r.CachePricingFunc = func(_ context.Context, _ string) string { return row.want.body }
+		if row.state == "refused" {
+			r.CachePricingFunc = func(_ context.Context, _ string) ExtensionResult {
+				return ExtensionRefusal(pbv2.ErrorCode_ERROR_CODE_NOT_CONFIGURED, "unknown provider")
+			}
+			return
+		}
+		r.CachePricingFunc = func(_ context.Context, _ string) ExtensionResult {
+			return ExtensionValue([]byte(row.want.body))
+		}
 	case "torana_record_savings":
 		r.SavingsFunc = func(string, int64, int64) {}
 	case "torana_plugin_counter":
@@ -99,7 +130,23 @@ func wireExtension(t *testing.T, r *Runtime, row extensionMatrixRow) {
 			return decision
 		}
 	case "torana_offload_completion":
-		r.OffloadFunc = func(_ context.Context, _ string) (string, error) { return "done", nil }
+		if row.state == "refused" {
+			r.OffloadFunc = func(_ context.Context, _ string) ExtensionResult {
+				// A classified refusal must pass through UNCHANGED: the old
+				// dispatcher collapsed every callback error into UNAVAILABLE,
+				// which hid caller bugs (INVALID_ARGUMENT) and config gaps
+				// (NOT_CONFIGURED) behind a transient-outage story.
+				return ExtensionRefusal(pbv2.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "upstream refused")
+			}
+			return
+		}
+		r.OffloadFunc = func(_ context.Context, _ string) ExtensionResult {
+			return ExtensionValue([]byte(`{"completion":"done"}`))
+		}
+	case "verify_virtual_key":
+		r.VerifyVirtualKeyFunc = func(_ context.Context, _ string) ExtensionResult {
+			return ExtensionValue([]byte(row.want.body))
+		}
 	default:
 		t.Fatalf("%s: no host callback to wire for %s", row.name, row.cmd)
 	}
@@ -115,15 +162,19 @@ func TestExtensionCommandFramingMatrix(t *testing.T) {
 		// are classified by the host callback and pass through framed.
 		{name: "send_request/wired", cmd: "torana_send_request", state: "wired",
 			args: `{"provider":"oai","request_pb":"e30=","path":"/v1"}`,
-			want: extensionMatrixWant{arm: "value", body: `{"status":"ok","http_status":200}`}},
+			want: extensionMatrixWant{arm: "value", body: `{"http_status":200}`}},
 		{name: "send_request/nil-func", cmd: "torana_send_request", state: "nil-func",
 			args: `{"provider":"oai","request_pb":"e30=","path":"/v1"}`,
 			want: extensionMatrixWant{arm: "error", code: pbv2.ErrorCode_ERROR_CODE_NOT_CONFIGURED, message: "plugin egress is not configured"}},
 		{name: "send_request/malformed", cmd: "torana_send_request", state: "malformed",
 			args: `nonsense`,
 			want: extensionMatrixWant{arm: "error", code: pbv2.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, message: "invalid payload"}},
+		{name: "send_request/refused", cmd: "torana_send_request", state: "refused",
+			args: `{"provider":"oai","request_pb":"e30=","path":"/v1"}`,
+			want: extensionMatrixWant{arm: "error", code: pbv2.ErrorCode_ERROR_CODE_UNAVAILABLE, message: "request to oai failed"}},
 
-		// torana_cache_pricing: data in the value arm; no callback is
+		// torana_cache_pricing: data in the value arm — a callback refusal
+		// (unknown provider) passes through classified; no callback is
 		// NOT_CONFIGURED.
 		{name: "cache_pricing/wired", cmd: "torana_cache_pricing", state: "wired",
 			args: `{"provider":"oai","model":"gpt-x"}`,
@@ -131,6 +182,9 @@ func TestExtensionCommandFramingMatrix(t *testing.T) {
 		{name: "cache_pricing/nil-func", cmd: "torana_cache_pricing", state: "nil-func",
 			args: `{"provider":"oai","model":"gpt-x"}`,
 			want: extensionMatrixWant{arm: "error", code: pbv2.ErrorCode_ERROR_CODE_NOT_CONFIGURED, message: "cache pricing is not configured"}},
+		{name: "cache_pricing/refused", cmd: "torana_cache_pricing", state: "refused",
+			args: `{"provider":"nope","model":"m"}`,
+			want: extensionMatrixWant{arm: "error", code: pbv2.ErrorCode_ERROR_CODE_NOT_CONFIGURED, message: "unknown provider"}},
 
 		// torana_db_query / torana_kms_decrypt: no callback exists; the
 		// command IS its refusal.
@@ -141,10 +195,11 @@ func TestExtensionCommandFramingMatrix(t *testing.T) {
 			args: `{"ciphertext":"AA=="}`,
 			want: extensionMatrixWant{arm: "error", code: pbv2.ErrorCode_ERROR_CODE_NOT_CONFIGURED, message: "KMS not configured"}},
 
-		// torana_record_savings: {"status":"ok"} is a domain body, kept.
+		// torana_record_savings: success is an EMPTY value arm — the savings
+		// were recorded and there is no domain body to acknowledge with.
 		{name: "record_savings/wired", cmd: "torana_record_savings", state: "wired",
 			args: validReport,
-			want: extensionMatrixWant{arm: "value", body: `{"status":"ok"}`}},
+			want: extensionMatrixWant{arm: "value", body: ""}},
 		{name: "record_savings/nil-func", cmd: "torana_record_savings", state: "nil-func",
 			args: validReport,
 			want: extensionMatrixWant{arm: "error", code: pbv2.ErrorCode_ERROR_CODE_NOT_CONFIGURED, message: "savings tracking not configured"}},
@@ -152,10 +207,10 @@ func TestExtensionCommandFramingMatrix(t *testing.T) {
 			args: `not json`,
 			want: extensionMatrixWant{arm: "error", code: pbv2.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, message: "invalid payload"}},
 
-		// torana_plugin_counter: same split — ok body kept, refusals framed.
+		// torana_plugin_counter: same split — empty success, refusals framed.
 		{name: "plugin_counter/wired", cmd: "torana_plugin_counter", state: "wired",
 			args: `{"counter":"c","delta":1}`,
-			want: extensionMatrixWant{arm: "value", body: `{"status":"ok"}`}},
+			want: extensionMatrixWant{arm: "value", body: ""}},
 		{name: "plugin_counter/nil-func", cmd: "torana_plugin_counter", state: "nil-func",
 			args: `{"counter":"c","delta":1}`,
 			want: extensionMatrixWant{arm: "error", code: pbv2.ErrorCode_ERROR_CODE_NOT_CONFIGURED, message: "plugin counter tracking not configured"}},
@@ -176,25 +231,42 @@ func TestExtensionCommandFramingMatrix(t *testing.T) {
 			args: `not json`,
 			want: extensionMatrixWant{arm: "error", code: pbv2.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, message: "invalid payload"}},
 
-		// torana_offload_completion: success envelope kept; a callback error
-		// is UNAVAILABLE with the message preserved; nothing installed is
-		// NOT_CONFIGURED.
+		// torana_offload_completion: the callback frames its own success value
+		// (no constant status field) and its own classified refusal — the
+		// dispatcher passes both through untouched instead of collapsing
+		// errors into UNAVAILABLE. Nothing installed is NOT_CONFIGURED.
 		{name: "offload_completion/wired", cmd: "torana_offload_completion", state: "wired",
 			args: `{}`,
-			want: extensionMatrixWant{arm: "value", body: `{"status":"ok","completion":"done"}`}},
+			want: extensionMatrixWant{arm: "value", body: `{"completion":"done"}`}},
 		{name: "offload_completion/refused", cmd: "torana_offload_completion", state: "refused",
 			args: `{}`,
-			want: extensionMatrixWant{arm: "error", code: pbv2.ErrorCode_ERROR_CODE_UNAVAILABLE, message: "upstream refused"}},
+			want: extensionMatrixWant{arm: "error", code: pbv2.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, message: "upstream refused"}},
 		{name: "offload_completion/nil-func", cmd: "torana_offload_completion", state: "nil-func",
 			args: `{}`,
 			want: extensionMatrixWant{arm: "error", code: pbv2.ErrorCode_ERROR_CODE_NOT_CONFIGURED, message: "offload not configured"}},
 
-		// verify_virtual_key: no NOT_IMPLEMENTED code exists, so the honest
-		// refusal is UNAVAILABLE with the message preserved.
-		{name: "verify_virtual_key/unimplemented", cmd: "verify_virtual_key", state: "unimplemented",
+		// verify_virtual_key: absent callback is NOT_CONFIGURED — a declared
+		// permission that can never succeed in this host is a configuration
+		// gap, never UNAVAILABLE (which promises a retryable outage).
+		{name: "verify_virtual_key/nil-func", cmd: "verify_virtual_key", state: "nil-func",
 			args: `{}`,
-			want: extensionMatrixWant{arm: "error", code: pbv2.ErrorCode_ERROR_CODE_UNAVAILABLE,
-				message: "unimplemented: enterprise auth is available in torana-edge/private-nucleus"}},
+			want: extensionMatrixWant{arm: "error", code: pbv2.ErrorCode_ERROR_CODE_NOT_CONFIGURED,
+				message: "virtual key verification is not configured"}},
+		{name: "verify_virtual_key/wired", cmd: "verify_virtual_key", state: "wired",
+			args: `{"key":"vk_abc"}`,
+			want: extensionMatrixWant{arm: "value", body: `{"valid":true}`}},
+
+		// A callback that returns a MALFORMED ExtensionResult must not leak to
+		// the guest: both arms set, or an UNSPECIFIED refusal code, is a
+		// host-side bug framed as INTERNAL with a loud log.
+		{name: "send_request/invalid-both", cmd: "torana_send_request", state: "invalid", invalidResult: "both",
+			args: `{}`,
+			want: extensionMatrixWant{arm: "error", code: pbv2.ErrorCode_ERROR_CODE_INTERNAL,
+				message: "extension callback returned an invalid result"}},
+		{name: "send_request/invalid-unspecified", cmd: "torana_send_request", state: "invalid", invalidResult: "unspecified",
+			args: `{}`,
+			want: extensionMatrixWant{arm: "error", code: pbv2.ErrorCode_ERROR_CODE_INTERNAL,
+				message: "extension callback returned an invalid result"}},
 	}
 
 	// Ungranted is orthogonal to the command: the permission boundary refuses
@@ -226,16 +298,46 @@ func TestExtensionCommandFramingMatrix(t *testing.T) {
 			r, p := newGrantedPlugin(t, grants...)
 
 			switch row.state {
-			case "wired", "malformed":
+			case "wired", "malformed", "refused", "invalid":
 				wireExtension(t, r, row)
-			case "refused":
-				r.OffloadFunc = func(_ context.Context, _ string) (string, error) { return "", errors.New("upstream refused") }
-			case "nil-func", "unimplemented", "ungranted":
+			case "nil-func", "ungranted":
 				// The deliberately-unwired states need no host callback.
 			}
 
 			res := hostCallDirect(t, r, p, row.cmd, []byte(row.args))
 			row.want.check(t, row.name, res)
 		})
+	}
+}
+
+// TestExtensionResultValidation pins the exclusivity and classification rules
+// of the one outcome abstraction every refusing callback returns. These are
+// the rules the dispatcher enforces via applyExtensionResult; a callback that
+// violates them is a host bug, not a guest input.
+func TestExtensionResultValidation(t *testing.T) {
+	valid := []ExtensionResult{
+		ExtensionValue([]byte(`{"status":"ok"}`)),
+		ExtensionValue(nil), // empty success
+		ExtensionValue([]byte{}),
+		ExtensionRefusal(pbv2.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "bad"),
+		ExtensionRefusal(pbv2.ErrorCode_ERROR_CODE_UNAVAILABLE, "down"),
+		ExtensionResult{}, // zero value: both arms empty — a valid empty success
+	}
+	for i, r := range valid {
+		if err := r.Validate(); err != nil {
+			t.Errorf("valid result %d (%+v) rejected: %v", i, r, err)
+		}
+	}
+
+	invalid := []ExtensionResult{
+		// Both arms set: the guest could not tell which one to trust.
+		{Value: []byte("value"), Refusal: hostErr(pbv2.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "refusal")},
+		// A refusal with no classification.
+		{Refusal: hostErr(pbv2.ErrorCode_ERROR_CODE_UNSPECIFIED, "no code")},
+	}
+	for i, r := range invalid {
+		if err := r.Validate(); err == nil {
+			t.Errorf("invalid result %d (%+v) accepted", i, r)
+		}
 	}
 }

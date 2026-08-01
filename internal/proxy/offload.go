@@ -4,34 +4,44 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"fmt"
 	"io"
 	"net/http"
 	"time"
 
 	"github.com/torana-edge/torana-edge/internal/economics"
+	"github.com/torana-edge/torana-edge/internal/wasm"
+	pbv2 "github.com/torana-edge/torana-plugin-sdk/pb/v2"
 )
 
 // offloadTimeout bounds a single cheap-model summarization call.
 const offloadTimeout = 30 * time.Second
 
-// offloadCompletion handles the torana_offload_completion host call: it POSTs
-// the plugin-supplied prompts to the configured offload provider and returns
-// the completion text.
+// offloadCompletionResult answers the torana_offload_completion host call: it
+// POSTs the plugin-supplied prompts to the configured offload provider and
+// returns the classified outcome. The value arm carries the marshaled
+// OffloadResult on success; refusals are framed classified HostErrors.
 //
 // The provider, model, and credentials come from the live config
 // (s.GetConfig().Providers.Offload) — never from map-iteration order.
 // Auth precedence: dedicated key from offload.api_key_env, else the caller's
 // own request credential (carried host-side in reqState; never exposed to
 // plugins).
-func (s *Server) offloadCompletion(ctx context.Context, payloadJSON string) (string, error) {
-	result, err := s.offloadCompletionResult(ctx, payloadJSON)
-	return result.Completion, err
-}
-
-// offloadCompletionResult is the usage-aware form used by the WASM host. The
-// string-returning wrapper above preserves the existing internal API.
-func (s *Server) offloadCompletionResult(ctx context.Context, payloadJSON string) (economics.OffloadResult, error) {
+//
+// Classification — the caller and the configuration are different failure
+// domains, and a plugin branches on them differently:
+//
+//   - INVALID_ARGUMENT: malformed payload, an override missing its model, or
+//     a guest-selected api_key_env that does not match the provider's
+//     host-owned configuration. Retrying the same call cannot help.
+//   - NOT_CONFIGURED: offload disabled, an override naming a provider that
+//     does not exist, or a configured provider URL that cannot even be built
+//     into a request. The operator must change configuration.
+//   - UNAVAILABLE: transport/read failures, an upstream non-200, an
+//     unparseable response, no choices, or an empty completion. The call was
+//     valid but could not currently be completed.
+//   - INTERNAL: a host-side invariant failed (the success envelope cannot be
+//     marshaled). Not the guest's fault, not the operator's.
+func (s *Server) offloadCompletionResult(ctx context.Context, payloadJSON string) wasm.ExtensionResult {
 	var p struct {
 		SystemPrompt string `json:"system_prompt"`
 		UserPrompt   string `json:"user_prompt"`
@@ -46,14 +56,15 @@ func (s *Server) offloadCompletionResult(ctx context.Context, payloadJSON string
 		APIKeyEnv string `json:"api_key_env"`
 	}
 	if err := json.Unmarshal([]byte(payloadJSON), &p); err != nil {
-		return economics.OffloadResult{}, fmt.Errorf("offload: parse payload: %w", err)
+		return wasm.ExtensionRefusal(pbv2.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "offload: parse payload: %v", err)
 	}
 
 	cfg := s.GetConfig().Providers
 	off := cfg.Offload
 	overrideProvider := p.Provider != ""
 	if !off.Enabled && !overrideProvider {
-		return economics.OffloadResult{}, fmt.Errorf("offload not configured — set offload.enabled, offload.provider, offload.model")
+		return wasm.ExtensionRefusal(pbv2.ErrorCode_ERROR_CODE_NOT_CONFIGURED,
+			"offload not configured — set offload.enabled, offload.provider, offload.model")
 	}
 
 	// Provider precedence: plugin payload overrides the configured offload provider.
@@ -64,7 +75,7 @@ func (s *Server) offloadCompletionResult(ctx context.Context, payloadJSON string
 	prov, ok := cfg.Providers[provName]
 	if !ok {
 		// The default is validated at startup; an override names an arbitrary provider.
-		return economics.OffloadResult{}, fmt.Errorf("offload: provider %q not found", provName)
+		return wasm.ExtensionRefusal(pbv2.ErrorCode_ERROR_CODE_NOT_CONFIGURED, "offload: provider %q not found", provName)
 	}
 
 	// Model precedence: plugin payload overrides config. off.Model belongs to
@@ -72,7 +83,8 @@ func (s *Server) offloadCompletionResult(ctx context.Context, payloadJSON string
 	model := p.Model
 	if model == "" {
 		if overrideProvider {
-			return economics.OffloadResult{}, fmt.Errorf("offload: model required when provider is overridden")
+			return wasm.ExtensionRefusal(pbv2.ErrorCode_ERROR_CODE_INVALID_ARGUMENT,
+				"offload: model required when provider is overridden")
 		}
 		model = off.Model
 	}
@@ -85,7 +97,8 @@ func (s *Server) offloadCompletionResult(ctx context.Context, payloadJSON string
 	var apiKey string
 	if overrideProvider {
 		if p.APIKeyEnv != "" && p.APIKeyEnv != prov.APIKeyEnv {
-			return economics.OffloadResult{}, fmt.Errorf("offload: api_key_env is host-owned; configure it on provider %q", provName)
+			return wasm.ExtensionRefusal(pbv2.ErrorCode_ERROR_CODE_INVALID_ARGUMENT,
+				"offload: api_key_env is host-owned; configure it on provider %q", provName)
 		}
 		apiKey = s.resolveSecret(prov.APIKeyEnv, prov.APIKeyEnc)
 	} else {
@@ -111,9 +124,12 @@ func (s *Server) offloadCompletionResult(ctx context.Context, payloadJSON string
 		"max_tokens":  4096,
 		"temperature": 0,
 	})
+	// The URL is operator configuration, never guest input, so a request that
+	// cannot even be built is a configuration gap, not a caller bug.
 	httpReq, err := http.NewRequestWithContext(ctx, "POST", prov.URL+"/v1/chat/completions", bytes.NewReader(reqBody))
 	if err != nil {
-		return economics.OffloadResult{}, err
+		return wasm.ExtensionRefusal(pbv2.ErrorCode_ERROR_CODE_NOT_CONFIGURED,
+			"offload: cannot build request to %q: %v", prov.URL, err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 	if apiKey != "" {
@@ -123,15 +139,16 @@ func (s *Server) offloadCompletionResult(ctx context.Context, payloadJSON string
 	client := &http.Client{Timeout: offloadTimeout}
 	resp, err := client.Do(httpReq)
 	if err != nil {
-		return economics.OffloadResult{}, err
+		return wasm.ExtensionRefusal(pbv2.ErrorCode_ERROR_CODE_UNAVAILABLE, "offload: %v", err)
 	}
 	defer resp.Body.Close()
 	respBytes, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return economics.OffloadResult{}, err
+		return wasm.ExtensionRefusal(pbv2.ErrorCode_ERROR_CODE_UNAVAILABLE, "offload: read response: %v", err)
 	}
 	if resp.StatusCode != 200 {
-		return economics.OffloadResult{}, fmt.Errorf("offload: upstream returned %d: %s", resp.StatusCode, string(respBytes[:min(len(respBytes), 200)]))
+		return wasm.ExtensionRefusal(pbv2.ErrorCode_ERROR_CODE_UNAVAILABLE,
+			"offload: upstream returned %d: %s", resp.StatusCode, string(respBytes[:min(len(respBytes), 200)]))
 	}
 	var result struct {
 		Choices []struct {
@@ -152,16 +169,17 @@ func (s *Server) offloadCompletionResult(ctx context.Context, payloadJSON string
 		} `json:"usage"`
 	}
 	if err := json.Unmarshal(respBytes, &result); err != nil {
-		return economics.OffloadResult{}, fmt.Errorf("offload: parse response: %w", err)
+		return wasm.ExtensionRefusal(pbv2.ErrorCode_ERROR_CODE_UNAVAILABLE, "offload: parse response: %v", err)
 	}
 	if len(result.Choices) == 0 {
-		return economics.OffloadResult{}, fmt.Errorf("offload: no choices in response")
+		return wasm.ExtensionRefusal(pbv2.ErrorCode_ERROR_CODE_UNAVAILABLE, "offload: no choices in response")
 	}
 	if result.Choices[0].Message.Content == "" {
 		// Surface finish_reason so budget exhaustion (reasoning consumed the
 		// whole max_tokens → finish_reason "length") is distinguishable from a
 		// genuinely empty extraction in the logs/stats.
-		return economics.OffloadResult{}, fmt.Errorf("offload: empty response (finish_reason=%q)", result.Choices[0].FinishReason)
+		return wasm.ExtensionRefusal(pbv2.ErrorCode_ERROR_CODE_UNAVAILABLE,
+			"offload: empty response (finish_reason=%q)", result.Choices[0].FinishReason)
 	}
 	usage := economics.Usage{InputIncludesCacheRead: true}
 	if result.Usage != nil {
@@ -175,10 +193,16 @@ func (s *Server) offloadCompletionResult(ctx context.Context, payloadJSON string
 		usage.CacheWriteTokens = result.Usage.PromptDetails.CacheWriteTokens
 	}
 	s.stats.RecordOffloadUsage(usage)
-	return economics.OffloadResult{
+	payload, err := json.Marshal(economics.OffloadResult{
 		Completion: result.Choices[0].Message.Content,
 		Provider:   provName,
 		Model:      model,
 		Usage:      usage,
-	}, nil
+	})
+	if err != nil {
+		// OffloadResult is host-built from strings and a numeric Usage struct;
+		// reaching here is a host invariant, not a guest input.
+		return wasm.ExtensionRefusal(pbv2.ErrorCode_ERROR_CODE_INTERNAL, "offload: encode result: %v", err)
+	}
+	return wasm.ExtensionValue(payload)
 }

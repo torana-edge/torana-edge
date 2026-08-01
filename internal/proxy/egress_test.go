@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -88,13 +90,16 @@ func egressServer(t *testing.T, budget provider.EgressBudget) (*Server, *int) {
 // HostError; a success is the domain envelope.
 func send(t *testing.T, srv *Server, plugin, payload string) (egressResponse, *pb.HostError) {
 	t.Helper()
-	body, herr := srv.sendPluginRequest(context.Background(), plugin, payload)
-	if herr != nil {
-		return egressResponse{}, herr
+	res := srv.sendPluginRequest(context.Background(), plugin, payload)
+	if err := res.Validate(); err != nil {
+		t.Fatalf("callback returned an invalid result: %v", err)
+	}
+	if res.Refusal != nil {
+		return egressResponse{}, res.Refusal
 	}
 	var out egressResponse
-	if err := json.Unmarshal([]byte(body), &out); err != nil {
-		t.Fatalf("decode egress response: %v", err)
+	if err := json.Unmarshal(res.Value, &out); err != nil {
+		t.Fatalf("decode egress response: %v (body %q)", err, string(res.Value))
 	}
 	return out, nil
 }
@@ -108,9 +113,6 @@ func TestEgressSendsAndMeters(t *testing.T) {
 	if herr != nil {
 		t.Fatalf("a reached provider was framed as a refusal: %v", herr)
 	}
-	if got.Status != "ok" {
-		t.Fatalf("status = %q: %s", got.Status, got.Message)
-	}
 	if got.HTTPStatus != 200 {
 		t.Errorf("http_status = %d, want 200", got.HTTPStatus)
 	}
@@ -119,6 +121,31 @@ func TestEgressSendsAndMeters(t *testing.T) {
 	}
 	if got.Usage == nil || got.Usage.CacheRead != 95 {
 		t.Errorf("usage = %+v, want cache_read 95 — the signal that says whether a refresh worked", got.Usage)
+	}
+}
+
+// TestEgressSuccessEnvelopeCarriesNoStatus — the constant success status field
+// is gone (ruling 3): the error arm is the status channel, so a success
+// envelope carries only the actual result fields. The SDK decodes an absent
+// status as "" safely.
+func TestEgressSuccessEnvelopeCarriesNoStatus(t *testing.T) {
+	srv, _ := egressServer(t, provider.EgressBudget{MaxCallsPerMinute: 10})
+	res := srv.sendPluginRequest(context.Background(), "warmer", egressPayload(t, "oai", "/v1/chat/completions"))
+	if err := res.Validate(); err != nil {
+		t.Fatalf("callback returned an invalid result: %v", err)
+	}
+	if res.Refusal != nil {
+		t.Fatalf("a reached provider was framed as a refusal: %v", res.Refusal)
+	}
+	if strings.Contains(string(res.Value), `"status"`) {
+		t.Errorf("success envelope still carries a status field: %s", res.Value)
+	}
+	var out egressResponse
+	if err := json.Unmarshal(res.Value, &out); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if out.HTTPStatus != 200 || out.Usage == nil || out.Usage.CacheRead != 95 {
+		t.Errorf("result fields lost: %+v", out)
 	}
 }
 
@@ -151,18 +178,20 @@ func TestEgressRefusedWithoutBudget(t *testing.T) {
 }
 
 // TestEgressEnforcesCallRate — the budget must actually bind, not merely exist.
+// An EXISTING rate budget whose rolling limit is exhausted is UNAVAILABLE:
+// configured but unusable right now (the window rolls).
 func TestEgressEnforcesCallRate(t *testing.T) {
 	srv, calls := egressServer(t, provider.EgressBudget{MaxCallsPerMinute: 3})
 	payload := egressPayload(t, "oai", "/v1/chat/completions")
 
 	for i := 0; i < 3; i++ {
-		if got, herr := send(t, srv, "warmer", payload); herr != nil || got.Status != "ok" {
-			t.Fatalf("call %d refused early: %v %s", i+1, herr, got.Message)
+		if got, herr := send(t, srv, "warmer", payload); herr != nil || got.HTTPStatus != 200 {
+			t.Fatalf("call %d refused early: %v", i+1, herr)
 		}
 	}
 	_, herr := send(t, srv, "warmer", payload)
-	if herr == nil || herr.Code != pb.ErrorCode_ERROR_CODE_NOT_CONFIGURED || !strings.Contains(herr.Message, "calls/minute") {
-		t.Fatalf("the 4th call was not refused as NOT_CONFIGURED: %v", herr)
+	if herr == nil || herr.Code != pb.ErrorCode_ERROR_CODE_UNAVAILABLE || !strings.Contains(herr.Message, "calls/minute") {
+		t.Fatalf("the 4th call was not refused as UNAVAILABLE: %v", herr)
 	}
 	if *calls != 3 {
 		t.Errorf("upstream saw %d calls, want exactly the budgeted 3", *calls)
@@ -175,8 +204,8 @@ func TestEgressBudgetsArePerPlugin(t *testing.T) {
 	srv, _ := egressServer(t, provider.EgressBudget{MaxCallsPerMinute: 1})
 	payload := egressPayload(t, "oai", "/v1/chat/completions")
 
-	if got, herr := send(t, srv, "warmer", payload); herr != nil || got.Status != "ok" {
-		t.Fatalf("first call refused: %v %s", herr, got.Message)
+	if got, herr := send(t, srv, "warmer", payload); herr != nil || got.HTTPStatus != 200 {
+		t.Fatalf("first call refused: %v", herr)
 	}
 	if _, herr := send(t, srv, "warmer", payload); herr == nil {
 		t.Fatal("warmer's budget did not bind")
@@ -272,7 +301,8 @@ func TestEgressRejectsMalformedPayloads(t *testing.T) {
 }
 
 // TestEgressTokenBudget — the token ceiling is what stops a plugin whose calls
-// are individually cheap but collectively enormous.
+// are individually cheap but collectively enormous. An EXISTING token budget
+// whose rolling limit is exhausted is UNAVAILABLE, not NOT_CONFIGURED.
 //
 // It is checked before each call against tokens already spent, because a call's
 // cost is not knowable until the provider reports it. So the budget can
@@ -283,12 +313,12 @@ func TestEgressTokenBudget(t *testing.T) {
 	srv, calls := egressServer(t, provider.EgressBudget{MaxCallsPerMinute: 100, MaxTokensPerHour: 50})
 	payload := egressPayload(t, "oai", "/v1/chat/completions")
 
-	if got, herr := send(t, srv, "warmer", payload); herr != nil || got.Status != "ok" {
-		t.Fatalf("first call refused: %v %s", herr, got.Message)
+	if got, herr := send(t, srv, "warmer", payload); herr != nil || got.HTTPStatus != 200 {
+		t.Fatalf("first call refused: %v", herr)
 	}
 	_, herr := send(t, srv, "warmer", payload)
-	if herr == nil || herr.Code != pb.ErrorCode_ERROR_CODE_NOT_CONFIGURED || !strings.Contains(herr.Message, "tokens/hour") {
-		t.Fatalf("token budget did not bind: %v", herr)
+	if herr == nil || herr.Code != pb.ErrorCode_ERROR_CODE_UNAVAILABLE || !strings.Contains(herr.Message, "tokens/hour") {
+		t.Fatalf("token budget did not bind as UNAVAILABLE: %v", herr)
 	}
 	if *calls != 1 {
 		t.Errorf("upstream saw %d calls, want 1 before the token budget bound", *calls)
@@ -315,5 +345,98 @@ func TestEgressMeterWindowsRoll(t *testing.T) {
 	now = now.Add(61 * time.Second)
 	if err := m.authorize("warmer", budget); err != nil {
 		t.Errorf("the window did not roll: %v", err)
+	}
+}
+
+// TestEgressRejectsUnrenderableRequest — a guest-supplied ChatRequest that the
+// provider's format adapter cannot render is a CALLER bug, not a transient
+// host outage: retrying the same request cannot help. A protobuf fixed64
+// double field carries NaN bit-exactly, survives pbconv, and makes the
+// adapter's json.Marshal fail — the guest-controlled vector this pins.
+func TestEgressRejectsUnrenderableRequest(t *testing.T) {
+	srv, calls := egressServer(t, provider.EgressBudget{MaxCallsPerMinute: 10})
+
+	chat := &engine.ChatRequest{
+		Model:       "gpt-x",
+		Temperature: proto.Float64(math.NaN()),
+		Messages:    []engine.Message{{Role: engine.RoleUser, Content: "warm"}},
+	}
+	raw, err := proto.Marshal(pbconv.ToPBChatRequest(chat))
+	if err != nil {
+		t.Fatalf("marshal ChatRequest: %v", err)
+	}
+	payload, err := json.Marshal(map[string]any{
+		"provider":   "oai",
+		"request_pb": base64.StdEncoding.EncodeToString(raw),
+		"path":       "/v1/chat/completions",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, herr := send(t, srv, "warmer", string(payload))
+	if herr == nil {
+		t.Fatal("an unrenderable request was sent upstream")
+	}
+	if herr.Code != pb.ErrorCode_ERROR_CODE_INVALID_ARGUMENT {
+		t.Errorf("code = %v, want INVALID_ARGUMENT — the guest supplied an unrenderable request", herr.Code)
+	}
+	if !strings.Contains(herr.Message, "encode request") {
+		t.Errorf("unexpected message: %s", herr.Message)
+	}
+	if *calls != 0 {
+		t.Error("upstream was reached for an unrenderable request")
+	}
+}
+
+// TestEgressRejectsInvalidPath — the path is guest-supplied (Torana forwards
+// the caller's path rather than synthesizing one), so a URL that cannot be
+// built is a caller bug, not a host outage.
+func TestEgressRejectsInvalidPath(t *testing.T) {
+	srv, calls := egressServer(t, provider.EgressBudget{MaxCallsPerMinute: 10})
+
+	payload := egressPayload(t, "oai", "/v1/chat/completions\x00x")
+	_, herr := send(t, srv, "warmer", payload)
+	if herr == nil {
+		t.Fatal("an invalid path was accepted")
+	}
+	if herr.Code != pb.ErrorCode_ERROR_CODE_INVALID_ARGUMENT {
+		t.Errorf("code = %v, want INVALID_ARGUMENT — the guest supplied an invalid path", herr.Code)
+	}
+	if !strings.Contains(herr.Message, "build request") {
+		t.Errorf("unexpected message: %s", herr.Message)
+	}
+	if *calls != 0 {
+		t.Error("upstream was reached for an invalid path")
+	}
+}
+
+// TestEgressSentinelsAreTyped — authorize classifies by typed sentinel, not by
+// message text, so sendPluginRequest can map exhaustion to UNAVAILABLE without
+// parsing prose. The unconfigured and exhausted states must be distinct.
+func TestEgressSentinelsAreTyped(t *testing.T) {
+	m := newEgressMeter()
+	now := time.Now()
+	m.now = func() time.Time { return now }
+
+	if err := m.authorize("warmer", provider.EgressBudget{}); !errors.Is(err, ErrEgressBudgetNotConfigured) {
+		t.Errorf("no budget: err = %v, want ErrEgressBudgetNotConfigured", err)
+	}
+
+	rate := provider.EgressBudget{MaxCallsPerMinute: 1}
+	if err := m.authorize("warmer", rate); err != nil {
+		t.Fatalf("first call refused: %v", err)
+	}
+	if err := m.authorize("warmer", rate); !errors.Is(err, ErrEgressRateExhausted) {
+		t.Errorf("rate exhaustion: err = %v, want ErrEgressRateExhausted", err)
+	}
+
+	token := provider.EgressBudget{MaxCallsPerMinute: 100, MaxTokensPerHour: 1}
+	m2 := newEgressMeter()
+	now2 := time.Now()
+	m2.now = func() time.Time { return now2 }
+	m2.recordTokens("warmer", 5)
+	if err := m2.authorize("warmer", token); !errors.Is(err, ErrEgressTokenExhausted) {
+		t.Errorf("token exhaustion: err = %v, want ErrEgressTokenExhausted", err)
 	}
 }
