@@ -448,13 +448,14 @@ func serializeEventsErr(t *testing.T, events ...engine.StreamEvent) error {
 // TestSerializeInterleavedConcurrentToolCalls pins the index-aware tool-call
 // state: parallel tool blocks with interleaved deltas and NON-ASCENDING stops
 // must serialize to TWO functionCall parts, each carrying its OWN
-// id/name/arguments. The pre-fix single serializeState overwrote the first
-// start with the second, appended both deltas to one part, and silently
-// dropped the first end.
+// id/name/arguments AND its OWN thoughtSignature. The pre-fix single
+// serializeState overwrote the first start with the second, appended both
+// deltas to one part, silently dropped the first end, and swapped signatures
+// between calls.
 func TestSerializeInterleavedConcurrentToolCalls(t *testing.T) {
 	parts := rawStreamParts(t, serializeEvents(t,
-		engine.StreamEvent{ToolCallStart: &engine.ToolCallStart{Index: 0, ID: "c1", Name: "list_dir"}},
-		engine.StreamEvent{ToolCallStart: &engine.ToolCallStart{Index: 1, ID: "c2", Name: "read_file"}},
+		engine.StreamEvent{ToolCallStart: &engine.ToolCallStart{Index: 0, ID: "c1", Name: "list_dir", Signature: "SIG_A"}},
+		engine.StreamEvent{ToolCallStart: &engine.ToolCallStart{Index: 1, ID: "c2", Name: "read_file", Signature: "SIG_B"}},
 		engine.StreamEvent{ToolCallDelta: &engine.ToolCallDelta{Index: 0, ArgumentsDelta: `{"p":"/x"}`}},
 		engine.StreamEvent{ToolCallDelta: &engine.ToolCallDelta{Index: 1, ArgumentsDelta: `{"f":"y"}`}},
 		engine.StreamEvent{ToolCallEnd: &engine.ToolCallEnd{Index: 1}},
@@ -465,11 +466,11 @@ func TestSerializeInterleavedConcurrentToolCalls(t *testing.T) {
 	}
 	// Ends emit in arrival order: End(1) renders call 2 first, End(0) call 1.
 	for i, want := range []struct {
-		id, name string
-		args     map[string]any
+		id, name, sig string
+		args          map[string]any
 	}{
-		{id: "c2", name: "read_file", args: map[string]any{"f": "y"}},
-		{id: "c1", name: "list_dir", args: map[string]any{"p": "/x"}},
+		{id: "c2", name: "read_file", sig: "SIG_B", args: map[string]any{"f": "y"}},
+		{id: "c1", name: "list_dir", sig: "SIG_A", args: map[string]any{"p": "/x"}},
 	} {
 		fc, ok := parts[i]["functionCall"].(map[string]any)
 		if !ok {
@@ -477,6 +478,12 @@ func TestSerializeInterleavedConcurrentToolCalls(t *testing.T) {
 		}
 		if fc["id"] != want.id || fc["name"] != want.name {
 			t.Errorf("part %d = %v, want id %q name %q — each call must keep its own identity", i, fc, want.id, want.name)
+		}
+		// Each call keeps its OWN thoughtSignature on the emitted part: the
+		// raw-map assertion pins signature ownership per call — a swapped or
+		// shared token between concurrent starts is a corruption.
+		if parts[i]["thoughtSignature"] != want.sig {
+			t.Errorf("part %d thoughtSignature = %v, want %q — each call must keep its own token", i, parts[i]["thoughtSignature"], want.sig)
 		}
 		args, ok := fc["args"].(map[string]any)
 		if !ok || len(args) != len(want.args) {

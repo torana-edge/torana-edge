@@ -139,6 +139,135 @@ func TestStreamParseToolDeltaForUnknownIndexErrors(t *testing.T) {
 	}
 }
 
+// TestSignedThinkingBlockNonZeroIndexSplitSignatureRoundTrip pins the
+// lossless signed-thinking path end to end — parse → engine → serialize →
+// parse — with a NON-ZERO wire index (7) and a SPLIT provider signature
+// delivered as two signature deltas. The parser must emit the block
+// topology (BlockStart/BlockStop at the ORIGINAL index 7), stream the
+// thinking delta, and combine the fragments into ONE completed
+// SignatureDelta emitted INSIDE the block (the stream verifier binds the
+// signature to the explicit thinking block). The serializer must write the
+// open thinking index on EVERY thinking frame — start, delta, the
+// signature-bearing delta, and stop — never the pre-fix hard-coded 0.
+func TestSignedThinkingBlockNonZeroIndexSplitSignatureRoundTrip(t *testing.T) {
+	wire := `{"contentBlockStart":{"contentBlockIndex":7,"start":{"thinking":{}}}}
+{"contentBlockDelta":{"contentBlockIndex":7,"delta":{"thinking":"reason"}}}
+{"contentBlockDelta":{"contentBlockIndex":7,"delta":{"signature":"provider-"}}}
+{"contentBlockDelta":{"contentBlockIndex":7,"delta":{"signature":"token"}}}
+{"contentBlockStop":{"contentBlockIndex":7}}
+`
+
+	// Parse: block boundaries at the ORIGINAL wire index, per-delta thinking,
+	// and ONE combined signature event inside the block, right before the stop.
+	parsed := drainStream(t, (&Stream{}).ParseStream(io.NopCloser(strings.NewReader(wire))))
+	want := []engine.StreamEvent{
+		{BlockStart: &engine.BlockStart{Index: 7, Kind: engine.BlockKindThinking}},
+		{ThinkingDelta: new("reason")},
+		{SignatureDelta: new("provider-token")},
+		{BlockStop: &engine.BlockStop{Index: 7}},
+	}
+	if len(parsed) != len(want) {
+		t.Fatalf("parsed %d events, want %d: %+v", len(parsed), len(want), parsed)
+	}
+	for i := range want {
+		if !reflect.DeepEqual(parsed[i], want[i]) {
+			t.Errorf("parsed event %d = %+v, want %+v", i, parsed[i], want[i])
+		}
+	}
+
+	// Serialize the parsed events: every thinking frame carries index 7, and
+	// the signature emits as ONE signature-bearing delta frame inside the
+	// block (start … delta … signature … stop — the signature never closes
+	// the block).
+	evCh := make(chan engine.StreamEvent, len(parsed))
+	for _, ev := range parsed {
+		evCh <- ev
+	}
+	close(evCh)
+	var buf bytes.Buffer
+	if err := (&Stream{}).SerializeStream(context.Background(), &buf, evCh); err != nil {
+		t.Fatalf("serialize: %v", err)
+	}
+
+	var idxs []int
+	var sigFrames []string
+	for _, line := range strings.Split(buf.String(), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		var se bedrockStreamEvent
+		if err := json.Unmarshal([]byte(line), &se); err != nil {
+			t.Fatalf("bad wire line: %v (%q)", err, line)
+		}
+		switch {
+		case se.ContentBlockStart != nil && se.ContentBlockStart.Start.Thinking != nil:
+			idxs = append(idxs, se.ContentBlockStart.ContentBlockIndex)
+		case se.ContentBlockDelta != nil && se.ContentBlockDelta.Delta.Thinking != nil:
+			idxs = append(idxs, se.ContentBlockDelta.ContentBlockIndex)
+		case se.ContentBlockDelta != nil && se.ContentBlockDelta.Delta.Signature != nil:
+			idxs = append(idxs, se.ContentBlockDelta.ContentBlockIndex)
+			sigFrames = append(sigFrames, *se.ContentBlockDelta.Delta.Signature)
+		case se.ContentBlockStop != nil:
+			idxs = append(idxs, se.ContentBlockStop.ContentBlockIndex)
+		}
+	}
+	// start, thinking delta, signature delta, stop — all at index 7.
+	wantIdx := []int{7, 7, 7, 7}
+	if !reflect.DeepEqual(idxs, wantIdx) {
+		t.Fatalf("wire contentBlockIndexes = %v, want %v — the open thinking index must be written on every frame", idxs, wantIdx)
+	}
+	if len(sigFrames) != 1 || sigFrames[0] != "provider-token" {
+		t.Fatalf("signature frames = %v, want exactly one completed [provider-token]", sigFrames)
+	}
+
+	// Round-trip: the serialized wire re-parses to the SAME events.
+	reparsed := drainStream(t, (&Stream{}).ParseStream(io.NopCloser(bytes.NewReader(buf.Bytes()))))
+	if len(reparsed) != len(want) {
+		t.Fatalf("round-trip: %d events, want %d: %+v", len(reparsed), len(want), reparsed)
+	}
+	for i := range want {
+		if !reflect.DeepEqual(reparsed[i], want[i]) {
+			t.Errorf("round-trip event %d = %+v, want %+v", i, reparsed[i], want[i])
+		}
+	}
+}
+
+// TestStreamParseSignatureDeltaForUnknownIndexErrors: a signature delta
+// naming an index with no open thinking block is an EXPLICIT error event —
+// the ConverseStream signature delta is only defined inside a thinking
+// block, and silently buffering the fragment would strand the token forever
+// (the pre-fix parser buffered into a never-read signatureBuf).
+func TestStreamParseSignatureDeltaForUnknownIndexErrors(t *testing.T) {
+	events := drainStream(t, (&Stream{}).ParseStream(io.NopCloser(strings.NewReader(
+		`{"contentBlockDelta":{"contentBlockIndex":2,"delta":{"signature":"tok"}}}`+"\n"))))
+	if len(events) != 1 || events[0].Error == nil {
+		t.Fatalf("expected exactly one error event, got %+v", events)
+	}
+	if events[0].Error.Message != "bedrock: signature delta for unknown index 2" {
+		t.Errorf("error message = %q, want %q", events[0].Error.Message, "bedrock: signature delta for unknown index 2")
+	}
+}
+
+// TestStreamSerializeSignatureWithoutOpenThinkingErrors: a SignatureDelta
+// with no open thinking block has no legal ConverseStream slot (the wire's
+// signature delta only exists for thinking blocks), so the serializer must
+// error explicitly — never silently drop the token as it did before the
+// SignatureDelta arm existed.
+func TestStreamSerializeSignatureWithoutOpenThinkingErrors(t *testing.T) {
+	evCh := make(chan engine.StreamEvent, 1)
+	evCh <- engine.StreamEvent{SignatureDelta: new("orphan")}
+	close(evCh)
+	var buf bytes.Buffer
+	err := (&Stream{}).SerializeStream(context.Background(), &buf, evCh)
+	if err == nil {
+		t.Fatal("unbound signature delta did not error")
+	}
+	if err.Error() != "bedrock: signature delta with no open thinking block" {
+		t.Errorf("error = %q, want %q", err.Error(), "bedrock: signature delta with no open thinking block")
+	}
+}
+
 // TestStreamSerializeToolCallStateErrors: index-bound tool state rejects
 // malformed IR explicitly — a duplicate start, or a delta/end for an index
 // that never started — never silently collapsing parallel scopes.

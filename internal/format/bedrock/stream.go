@@ -113,7 +113,12 @@ func (s *Stream) ParseStream(body io.Reader) <-chan engine.StreamEvent {
 		// blocks open.
 		openThinking := make(map[int]struct{})
 		openTools := make(map[int]struct{})
-		var signatureBuf string
+		// Per-block signature accumulation, keyed by the wire
+		// contentBlockIndex: the ConverseStream signature delta may split the
+		// provider token across several frames, and the engine ABI carries
+		// only the COMPLETED token (a SignatureDelta), so fragments buffer
+		// here and are emitted as ONE event at the block's stop.
+		signatures := make(map[int]string)
 
 		for scanner.Scan() {
 			line := strings.TrimSpace(scanner.Text())
@@ -129,9 +134,8 @@ func (s *Stream) ParseStream(body io.Reader) <-chan engine.StreamEvent {
 				continue
 			}
 
-			evt := parseBedrockEvent(line, openThinking, openTools, &signatureBuf)
-			if evt != nil {
-				ch <- *evt
+			for _, evt := range parseBedrockEvent(line, openThinking, openTools, signatures) {
+				ch <- evt
 			}
 		}
 
@@ -148,7 +152,7 @@ func (s *Stream) ParseStream(body io.Reader) <-chan engine.StreamEvent {
 	return ch
 }
 
-// parseBedrockEvent parses a single Bedrock JSON event line into a StreamEvent.
+// parseBedrockEvent parses a single Bedrock JSON event line into StreamEvents.
 // Returns nil for events that should be silently ignored (e.g. messageStart).
 // openThinking/openTools track the blocks opened by contentBlockStart frames,
 // keyed by wire contentBlockIndex, so tool events resolve to the index that
@@ -158,106 +162,147 @@ func (s *Stream) ParseStream(body io.Reader) <-chan engine.StreamEvent {
 // tool block is handled by its kind; a stop naming neither is a text block
 // stop (or a stray stop), which has no engine event and is ignored, matching
 // the wire's informational text blocks.
-func parseBedrockEvent(line string, openThinking, openTools map[int]struct{}, signatureBuf *string) *engine.StreamEvent {
+//
+// Signed thinking emission: a thinking start emits BlockStart at the ORIGINAL
+// wire index; thinking deltas stream out as ThinkingDelta events; signature
+// fragments accumulate per index in signatures (the wire may split the token
+// across deltas, and the ABI carries only the COMPLETED token). At the block's
+// stop the parser emits the accumulated SignatureDelta — immediately BEFORE
+// the BlockStop so it lands INSIDE the open block, where the stream verifier
+// binds it — then the BlockStop at the same index. A signature delta naming
+// an index with no open thinking block is an explicit error event.
+func parseBedrockEvent(line string, openThinking, openTools map[int]struct{}, signatures map[int]string) []engine.StreamEvent {
 	var se bedrockStreamEvent
 	if err := json.Unmarshal([]byte(line), &se); err != nil {
-		return &engine.StreamEvent{
+		return []engine.StreamEvent{{
 			Error: &engine.StreamError{
 				Code:    0,
 				Message: fmt.Sprintf("bedrock stream parse error: %v", err),
 			},
-		}
+		}}
 	}
 
 	switch {
 	case se.Error != nil:
-		return &engine.StreamEvent{
+		return []engine.StreamEvent{{
 			Error: &engine.StreamError{
 				Code:    se.Error.Code,
 				Message: se.Error.Message,
 			},
-		}
+		}}
 
 	case se.MessageStart != nil:
 		// messageStart is informational; ignore.
 
 	case se.ContentBlockStart != nil && se.ContentBlockStart.Start.Thinking != nil:
-		// Thinking block start is informational; record its index so the
-		// matching stop resolves as a thinking stop even while tool blocks
-		// are open.
-		openThinking[se.ContentBlockStart.ContentBlockIndex] = struct{}{}
+		// Thinking block start opens an explicit thinking block at the
+		// ORIGINAL wire index — the pre-fix parser recorded only state and
+		// emitted no BlockStart, dropping the topology the stream verifier
+		// needs to bind the provider signature to this block.
+		idx := se.ContentBlockStart.ContentBlockIndex
+		openThinking[idx] = struct{}{}
+		return []engine.StreamEvent{{
+			BlockStart: &engine.BlockStart{Index: idx, Kind: engine.BlockKindThinking},
+		}}
 
 	case se.ContentBlockStart != nil && se.ContentBlockStart.Start.ToolUse != nil:
 		tu := se.ContentBlockStart.Start.ToolUse
 		idx := se.ContentBlockStart.ContentBlockIndex
 		openTools[idx] = struct{}{}
-		return &engine.StreamEvent{
+		return []engine.StreamEvent{{
 			ToolCallStart: &engine.ToolCallStart{
 				Index: idx,
 				ID:    tu.ToolUseID,
 				Name:  tu.Name,
 			},
-		}
+		}}
 	// text block start is informational (no content yet); ignore.
 
 	case se.ContentBlockDelta != nil:
 		delta := se.ContentBlockDelta.Delta
 		switch {
 		case delta.Thinking != nil:
-			return &engine.StreamEvent{ThinkingDelta: delta.Thinking}
+			return []engine.StreamEvent{{ThinkingDelta: delta.Thinking}}
 		case delta.Signature != nil:
-			*signatureBuf += *delta.Signature
+			// The signature delta is only defined for an open thinking block
+			// (the token belongs to that block). Fragments accumulate per
+			// block; the COMPLETED token is emitted as a SignatureDelta at the
+			// block's stop — a per-fragment event would carry an incomplete
+			// token the ABI cannot represent.
+			idx := se.ContentBlockDelta.ContentBlockIndex
+			if _, thinking := openThinking[idx]; !thinking {
+				return []engine.StreamEvent{{
+					Error: &engine.StreamError{
+						Code:    0,
+						Message: fmt.Sprintf("bedrock: signature delta for unknown index %d", idx),
+					},
+				}}
+			}
+			signatures[idx] += *delta.Signature
 			return nil
 		case delta.Text != nil:
 			text := *delta.Text
-			return &engine.StreamEvent{TextDelta: &text}
+			return []engine.StreamEvent{{TextDelta: &text}}
 		case delta.ToolUse != nil:
 			idx := se.ContentBlockDelta.ContentBlockIndex
 			if _, open := openTools[idx]; !open {
-				return &engine.StreamEvent{
+				return []engine.StreamEvent{{
 					Error: &engine.StreamError{
 						Code:    0,
 						Message: fmt.Sprintf("bedrock: tool call delta for unknown index %d", idx),
 					},
-				}
+				}}
 			}
-			return &engine.StreamEvent{
+			return []engine.StreamEvent{{
 				ToolCallDelta: &engine.ToolCallDelta{
 					Index:          idx,
 					ArgumentsDelta: delta.ToolUse.Input,
 				},
-			}
+			}}
 		}
 
 	case se.ContentBlockStop != nil:
 		idx := se.ContentBlockStop.ContentBlockIndex
 		if _, thinking := openThinking[idx]; thinking {
 			delete(openThinking, idx)
-			return nil // thinking block stop; no event to emit
+			// The block is complete. Emit the ACCUMULATED signature (one
+			// SignatureDelta per completed token, matching the ABI) BEFORE the
+			// stop so it lands inside the open block — the stream verifier
+			// binds the signature to the explicit thinking block it belongs
+			// to. An empty token is a clear marker: nothing to emit.
+			sig := signatures[idx]
+			delete(signatures, idx)
+			if sig != "" {
+				return []engine.StreamEvent{
+					{SignatureDelta: &sig},
+					{BlockStop: &engine.BlockStop{Index: idx}},
+				}
+			}
+			return []engine.StreamEvent{{BlockStop: &engine.BlockStop{Index: idx}}}
 		}
 		if _, tool := openTools[idx]; tool {
 			delete(openTools, idx)
-			return &engine.StreamEvent{
-				ToolCallEnd: &engine.ToolCallEnd{Index: idx},
+			return []engine.StreamEvent{
+				{ToolCallEnd: &engine.ToolCallEnd{Index: idx}},
 			}
 		}
 		return nil // text block stop (or stray stop) — no tool call to end
 
 	case se.MessageStop != nil:
 		reason := mapBedrockStopReason(se.MessageStop.StopReason)
-		return &engine.StreamEvent{FinishReason: reason}
+		return []engine.StreamEvent{{FinishReason: reason}}
 
 	case se.Metadata != nil && se.Metadata.Usage != nil:
 		u := se.Metadata.Usage
 		if u.InputTokens > 0 || u.OutputTokens > 0 {
-			return &engine.StreamEvent{
+			return []engine.StreamEvent{{
 				Usage: &engine.StreamUsage{
 					InputTokens:      u.InputTokens,
 					OutputTokens:     u.OutputTokens,
 					CacheReadTokens:  u.CacheReadInputTokens,
 					CacheWriteTokens: u.CacheWriteInputTokens,
 				},
-			}
+			}}
 		}
 	}
 
@@ -337,7 +382,14 @@ func (b *blockTopology) stop(index int) (engine.BlockKind, error) {
 func (s *Stream) SerializeStream(ctx context.Context, w io.Writer, events <-chan engine.StreamEvent) error {
 	bw := bufio.NewWriter(w)
 	blocks := &blockTopology{prefix: "bedrock"}
-	thinkingOpen := false
+	// openThinkingIndex is the wire contentBlockIndex of the thinking block
+	// currently rendered on the wire; -1 when none is open. EVERY thinking
+	// frame — start, delta, stop, and the signature-bearing delta — writes
+	// THIS index, so a thinking block opened at a non-zero index keeps its
+	// index on every frame (the pre-fix serializer hard-coded 0). It mirrors
+	// blockTopology but is tracked separately because a bare ThinkingDelta
+	// (legacy path, no explicit block event) may open the wire block too.
+	openThinkingIndex := -1
 	// openTools tracks the tool-call blocks opened by ToolCallStart events,
 	// keyed by the engine block index, so deltas and stops lower to the wire
 	// index that opened them. Parallel tool calls each own their index; a
@@ -346,12 +398,13 @@ func (s *Stream) SerializeStream(ctx context.Context, w io.Writer, events <-chan
 	openTools := make(map[int]struct{})
 
 	closeThinking := func() error {
-		if !thinkingOpen {
+		if openThinkingIndex < 0 {
 			return nil
 		}
-		thinkingOpen = false
+		idx := openThinkingIndex
+		openThinkingIndex = -1
 		se := bedrockStreamEvent{
-			ContentBlockStop: &bedrockContentBlockStop{ContentBlockIndex: 0},
+			ContentBlockStop: &bedrockContentBlockStop{ContentBlockIndex: idx},
 		}
 		b, _ := json.Marshal(se)
 		_, err := bw.WriteString(string(b) + "\n")
@@ -379,11 +432,11 @@ func (s *Stream) SerializeStream(ctx context.Context, w io.Writer, events <-chan
 				if err := blocks.start(evt.BlockStart.Index, engine.BlockKindThinking); err != nil {
 					return err
 				}
-				if !thinkingOpen {
-					thinkingOpen = true
+				if openThinkingIndex < 0 {
+					openThinkingIndex = evt.BlockStart.Index
 					startEvt := bedrockStreamEvent{
 						ContentBlockStart: &bedrockContentBlockStart{
-							ContentBlockIndex: 0,
+							ContentBlockIndex: evt.BlockStart.Index,
 							Start: bedrockContentBlockStartField{
 								Thinking: &bedrockThinkingStart{},
 							},
@@ -415,8 +468,11 @@ func (s *Stream) SerializeStream(ctx context.Context, w io.Writer, events <-chan
 		}
 
 		if evt.ThinkingDelta != nil {
-			if !thinkingOpen {
-				thinkingOpen = true
+			if openThinkingIndex < 0 {
+				// Legacy bare-delta path: no explicit block event opened the
+				// block, so open it on the wire at index 0 (the wire's first
+				// content block) as before block events existed.
+				openThinkingIndex = 0
 				// Emit content block start for thinking
 				startEvt := bedrockStreamEvent{
 					ContentBlockStart: &bedrockContentBlockStart{
@@ -431,12 +487,38 @@ func (s *Stream) SerializeStream(ctx context.Context, w io.Writer, events <-chan
 					return fmt.Errorf("bedrock serialize: %w", err)
 				}
 			}
-			// Emit thinking delta
+			// Emit thinking delta on the open thinking block's index
 			se := bedrockStreamEvent{
 				ContentBlockDelta: &bedrockContentBlockDelta{
-					ContentBlockIndex: 0,
+					ContentBlockIndex: openThinkingIndex,
 					Delta: bedrockContentBlockDeltaField{
 						Thinking: evt.ThinkingDelta,
+					},
+				},
+			}
+			b, _ := json.Marshal(se)
+			if _, err := bw.WriteString(string(b) + "\n"); err != nil {
+				return fmt.Errorf("bedrock serialize: %w", err)
+			}
+			continue
+		}
+
+		if evt.SignatureDelta != nil {
+			// The signature rides INSIDE the open thinking block: the
+			// ConverseStream signature delta frame is only defined for
+			// thinking blocks and carries the block's index, so a signature
+			// with no open thinking block has no legal wire slot — an
+			// explicit error, never silently dropped or reattached to
+			// another block (the pre-fix serializer discarded signatures
+			// entirely). The block stays open; its BlockStop closes it.
+			if openThinkingIndex < 0 {
+				return fmt.Errorf("bedrock: signature delta with no open thinking block")
+			}
+			se := bedrockStreamEvent{
+				ContentBlockDelta: &bedrockContentBlockDelta{
+					ContentBlockIndex: openThinkingIndex,
+					Delta: bedrockContentBlockDeltaField{
+						Signature: evt.SignatureDelta,
 					},
 				},
 			}

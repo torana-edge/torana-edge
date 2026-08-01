@@ -80,17 +80,16 @@ func TestCachePointRoundTrip(t *testing.T) {
 // TestStreamMetadataCacheTokens: ConverseStream metadata cache counts flow
 // into the canonical usage event and back out on serialization.
 func TestStreamMetadataCacheTokens(t *testing.T) {
-	var sigBuf string
 	// Index-aware open-block state (fresh maps — no blocks open in this line).
-	ev := parseBedrockEvent(`{"metadata":{"usage":{"inputTokens":10,"outputTokens":4,"totalTokens":14,"cacheReadInputTokens":8000,"cacheWriteInputTokens":500}}}`, make(map[int]struct{}), make(map[int]struct{}), &sigBuf)
-	if ev == nil || ev.Usage == nil {
-		t.Fatal("no usage event from metadata")
+	evs := parseBedrockEvent(`{"metadata":{"usage":{"inputTokens":10,"outputTokens":4,"totalTokens":14,"cacheReadInputTokens":8000,"cacheWriteInputTokens":500}}}`, make(map[int]struct{}), make(map[int]struct{}), make(map[int]string))
+	if len(evs) != 1 || evs[0].Usage == nil {
+		t.Fatalf("no usage event from metadata, got %+v", evs)
 	}
-	if ev.Usage.CacheReadTokens != 8000 || ev.Usage.CacheWriteTokens != 500 {
-		t.Errorf("cache read/write = %d/%d, want 8000/500", ev.Usage.CacheReadTokens, ev.Usage.CacheWriteTokens)
+	if evs[0].Usage.CacheReadTokens != 8000 || evs[0].Usage.CacheWriteTokens != 500 {
+		t.Errorf("cache read/write = %d/%d, want 8000/500", evs[0].Usage.CacheReadTokens, evs[0].Usage.CacheWriteTokens)
 	}
 
-	frames := marshalStreamEvent(engine.StreamEvent{Usage: ev.Usage})
+	frames := marshalStreamEvent(engine.StreamEvent{Usage: evs[0].Usage})
 	if len(frames) == 0 {
 		t.Fatal("no serialized frame")
 	}
