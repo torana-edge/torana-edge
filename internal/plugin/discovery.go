@@ -1125,6 +1125,12 @@ func (pp *PluginPipeline) RunAfterResponse(ctx context.Context, reqID uint64, re
 				// stays so the invalid output never chains downstream.
 				continue
 			}
+			// The replacement is accepted as a whole. A tool call that left
+			// its provider token untouched over changed content is valid
+			// (the apply block clears the wire token), but the pipeline must
+			// not hand the next plugin a signature over content the provider
+			// never signed — normalize before chaining.
+			clearStaleSignatures(current, replacement)
 			current = replacement
 			modified = true
 		}

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"sort"
 	"strings"
 
 	"github.com/torana-edge/torana-edge/internal/engine"
@@ -21,29 +22,18 @@ import (
 
 // toolCallRef is a mutable view of one tool call inside a decoded response
 // body. setName/setArgs write back into the underlying map tree.
+//
+// toolCallRef covers the SELECTED response only (choice 0 / candidate 0); the
+// wire positions of every args slot — selected or not — live in
+// responseRefs.rawSlots, which the restore pass reads exclusively.
 type toolCallRef struct {
 	id       string
 	name     string
 	argsJSON string
-	// rawArgs is the provider's VERBATIM bytes of the args slot in the
-	// original body, straight out of the wire with no decode/re-encode: for
-	// object slots (anthropic input, bedrock toolUse.input, gemini
-	// functionCall.args) the raw object bytes; for string slots (openai
-	// function.arguments, Responses output item arguments) the full quoted
-	// JSON string including quotes. nil when the slot is absent in the raw
-	// body.
-	rawArgs []byte
-	// path locates the args slot in the FINAL marshaled output (gemini
-	// codeassist paths start with "response" for the wrapper key).
-	path []any
-	// objSlot marks an object-valued args slot. On change the guest's new
-	// bytes are spliced in; for string slots the re-marshaled map already
-	// holds the new string, so no splice is needed.
-	objSlot bool
 	// argsChanged is set whenever setArgs ran (stream delta or after-response
-	// replacement) and drives the splice decision: unchanged slots are
-	// restored to rawArgs verbatim, changed object slots carry the guest's
-	// bytes.
+	// replacement). For the call's raw slot it drives the restore decision:
+	// unchanged slots are spliced back to the provider's verbatim bytes,
+	// changed object slots carry the guest's argsJSON bytes instead.
 	argsChanged bool
 	setName     func(string)
 	setArgs     func(string) error
@@ -57,6 +47,33 @@ type toolCallRef struct {
 	// detect nor clear it.
 	signature      string
 	clearSignature func()
+}
+
+// rawArgSlot records ONE provider-body tool-argument slot for the byte-restore
+// pass. Unlike toolCallRef (the mutable view of SELECTED calls only), rawSlots
+// covers every tool-argument slot on the wire, including unselected
+// choices/candidates: those bytes would otherwise be re-encoded by the
+// marshaled-map round-trip (sorted object keys, big integers rounded through
+// float64) even though the pipeline never touched them.
+type rawArgSlot struct {
+	// path locates the args slot in the FINAL marshaled output (gemini
+	// codeassist paths start with "response" for the wrapper key).
+	path []any
+	// rawArgs is the provider's VERBATIM bytes of the slot in the original
+	// body, straight out of the wire with no decode/re-encode: for object
+	// slots (anthropic input, bedrock toolUse.input, gemini
+	// functionCall.args) the raw object bytes; for string slots (openai
+	// function.arguments, Responses output item arguments) the full quoted
+	// JSON string including quotes. nil when the slot is absent in the raw
+	// body.
+	rawArgs []byte
+	// objSlot marks an object-valued args slot. On change the guest's new
+	// bytes are spliced in; for string slots the re-marshaled map already
+	// holds the new string, so no splice is needed.
+	objSlot bool
+	// call is the index into refs.toolCalls when this slot belongs to a
+	// selected (mutable) call, or -1 for an unselected alternative.
+	call int
 }
 
 // invalidateSignature drops the provider token from BOTH the canonical state
@@ -90,7 +107,12 @@ type responseRefs struct {
 	content    string
 	setContent func(string)
 	toolCalls  []toolCallRef
-	usage      *engine.StreamUsage // provider-reported token usage (read-only)
+	// rawSlots lists every tool-argument slot in the body, selected or not,
+	// so the restore pass can splice provider-verbatim bytes back for
+	// everything the pipeline did not rewrite. Selected slots carry their
+	// toolCallRef index in call; unselected alternatives carry -1.
+	rawSlots []rawArgSlot
+	usage    *engine.StreamUsage // provider-reported token usage (read-only)
 	// id and finishReason are OBSERVED host-owned facts. They were hard-coded
 	// empty in the hook input, so a plugin received typed fields the provider
 	// had actually supplied and saw nothing — the same hostile silence v2
@@ -222,22 +244,27 @@ func extractOpenAI(body map[string]any, raw []byte) responseRefs {
 				}
 			}
 			refs.finishReason = asString(choice["finish_reason"])
-			// Tool calls come from choice 0 only: a second choice is an
-			// alternative, not another turn — mutating it would rewrite a
-			// response the provider did not select.
-			toolCalls, _ := msg["tool_calls"].([]any)
-			for ti, t := range toolCalls {
-				tc, _ := t.(map[string]any)
-				if tc == nil {
-					continue
-				}
-				fn, _ := tc["function"].(map[string]any)
-				if fn == nil {
-					continue
-				}
+		}
+		// Tool-call slots are recorded for EVERY choice — an unselected
+		// alternative must still be restored byte-for-byte after a mutation —
+		// but only choice 0's calls are mutable: a second choice is an
+		// alternative, not another turn, so mutating it would rewrite a
+		// response the provider did not select.
+		toolCalls, _ := msg["tool_calls"].([]any)
+		for ti, t := range toolCalls {
+			tc, _ := t.(map[string]any)
+			if tc == nil {
+				continue
+			}
+			fn, _ := tc["function"].(map[string]any)
+			if fn == nil {
+				continue
+			}
+			path := []any{"choices", ci, "message", "tool_calls", ti, "function", "arguments"}
+			rawArgs, _ := rawJSONSpan(raw, path...)
+			call := -1
+			if ci == 0 {
 				fnRef := fn
-				path := []any{"choices", 0, "message", "tool_calls", ti, "function", "arguments"}
-				rawArgs, _ := rawJSONSpan(raw, path...)
 				// String slot: the canonical argsJSON is the DECODED inner
 				// JSON text (the SDK requires arguments_json to be an object,
 				// not a quoted string).
@@ -252,15 +279,20 @@ func extractOpenAI(body map[string]any, raw []byte) responseRefs {
 					id:       asString(tc["id"]),
 					name:     asString(fn["name"]),
 					argsJSON: argsJSON,
-					rawArgs:  rawArgs,
-					path:     path,
 					setName:  func(s string) { fnRef["name"] = s },
 					setArgs: func(s string) error {
 						fnRef["arguments"] = s
 						return nil
 					},
 				})
+				call = len(refs.toolCalls) - 1
 			}
+			refs.rawSlots = append(refs.rawSlots, rawArgSlot{
+				path:    path,
+				rawArgs: rawArgs,
+				objSlot: false,
+				call:    call,
+			})
 		}
 	}
 	return refs
@@ -327,10 +359,14 @@ func extractResponsesOutput(refs *responseRefs, output []any, raw []byte) {
 				id:       asString(itRef["call_id"]),
 				name:     asString(itRef["name"]),
 				argsJSON: args,
-				rawArgs:  rawArgs,
-				path:     path,
 				setName:  func(s string) { itRef["name"] = s },
 				setArgs:  setArgs,
+			})
+			refs.rawSlots = append(refs.rawSlots, rawArgSlot{
+				path:    path,
+				rawArgs: rawArgs,
+				objSlot: false,
+				call:    len(refs.toolCalls) - 1,
 			})
 		}
 	}
@@ -395,11 +431,14 @@ func extractAnthropic(body map[string]any, raw []byte) responseRefs {
 				id:       asString(block["id"]),
 				name:     asString(block["name"]),
 				argsJSON: argsJSON,
-				rawArgs:  rawArgs,
-				path:     path,
-				objSlot:  true,
 				setName:  func(s string) { blockRef["name"] = s },
 				setArgs:  objArgsSetter(blockRef, "input"),
+			})
+			refs.rawSlots = append(refs.rawSlots, rawArgSlot{
+				path:    path,
+				rawArgs: rawArgs,
+				objSlot: true,
+				call:    len(refs.toolCalls) - 1,
 			})
 		}
 	}
@@ -444,11 +483,14 @@ func extractBedrock(body map[string]any, raw []byte) responseRefs {
 				id:       asString(tu["toolUseId"]),
 				name:     asString(tu["name"]),
 				argsJSON: argsJSON,
-				rawArgs:  rawArgs,
-				path:     path,
-				objSlot:  true,
 				setName:  func(s string) { tuRef["name"] = s },
 				setArgs:  objArgsSetter(tuRef, "input"),
+			})
+			refs.rawSlots = append(refs.rawSlots, rawArgSlot{
+				path:    path,
+				rawArgs: rawArgs,
+				objSlot: true,
+				call:    len(refs.toolCalls) - 1,
 			})
 		}
 	}
@@ -504,39 +546,45 @@ func extractGemini(body map[string]any, raw []byte) responseRefs {
 				refs.content = s
 				refs.setContent = func(s string) { partRef["text"] = s }
 			}
-			// Tool calls and signatures come from candidate 0 ONLY: a second
-			// candidate is an alternative response, not another turn, so its
-			// calls must never be replayed, mutated, or spliced.
-			if ci != 0 {
-				continue
-			}
 			if fc, ok := part["functionCall"].(map[string]any); ok {
-				fcRef := fc
-				sigPart := part
 				path := make([]any, 0, len(prefix)+7)
 				path = append(path, prefix...)
-				path = append(path, "candidates", 0, "content", "parts", pi, "functionCall", "args")
+				path = append(path, "candidates", ci, "content", "parts", pi, "functionCall", "args")
 				rawArgs, _ := rawJSONSpan(raw, path...)
-				argsJSON := "{}"
-				if rawArgs != nil {
-					argsJSON = string(rawArgs) // object slot: verbatim provider bytes
-				} else if v, ok := fcRef["args"]; ok && v != nil {
-					if b, err := json.Marshal(v); err == nil {
-						argsJSON = string(b)
+				// Args slots are recorded for EVERY candidate — an unselected
+				// alternative must still be restored byte-for-byte after a
+				// mutation — but tool calls and signatures come from candidate
+				// 0 ONLY: a second candidate is an alternative response, not
+				// another turn, so its calls must never be replayed or mutated.
+				call := -1
+				if ci == 0 {
+					fcRef := fc
+					sigPart := part
+					argsJSON := "{}"
+					if rawArgs != nil {
+						argsJSON = string(rawArgs) // object slot: verbatim provider bytes
+					} else if v, ok := fcRef["args"]; ok && v != nil {
+						if b, err := json.Marshal(v); err == nil {
+							argsJSON = string(b)
+						}
 					}
+					refs.toolCalls = append(refs.toolCalls, toolCallRef{
+						id:       asString(fc["id"]),
+						name:     asString(fc["name"]),
+						argsJSON: argsJSON,
+						setName:  func(s string) { fcRef["name"] = s },
+						setArgs:  objArgsSetter(fcRef, "args"),
+						// thoughtSignature sits on the PART, beside functionCall.
+						signature:      asString(sigPart["thoughtSignature"]),
+						clearSignature: func() { delete(sigPart, "thoughtSignature") },
+					})
+					call = len(refs.toolCalls) - 1
 				}
-				refs.toolCalls = append(refs.toolCalls, toolCallRef{
-					id:       asString(fc["id"]),
-					name:     asString(fc["name"]),
-					argsJSON: argsJSON,
-					rawArgs:  rawArgs,
-					path:     path,
-					objSlot:  true,
-					setName:  func(s string) { fcRef["name"] = s },
-					setArgs:  objArgsSetter(fcRef, "args"),
-					// thoughtSignature sits on the PART, beside functionCall.
-					signature:      asString(sigPart["thoughtSignature"]),
-					clearSignature: func() { delete(sigPart, "thoughtSignature") },
+				refs.rawSlots = append(refs.rawSlots, rawArgSlot{
+					path:    path,
+					rawArgs: rawArgs,
+					objSlot: true,
+					call:    call,
 				})
 			}
 		}
@@ -756,27 +804,47 @@ func runJSONResponseHooks(ctx context.Context, pl *plugin.PluginPipeline, reqID 
 	// args slot the pipeline did NOT rewrite must be spliced back byte for
 	// byte; rewritten OBJECT slots get the plugin's exact bytes spliced in
 	// instead. Rewritten string slots need nothing — the map already holds
-	// the new string and re-marshaling it is correct. Splices run in
-	// descending start-offset order so earlier offsets stay valid.
-	for i := len(refs.toolCalls) - 1; i >= 0; i-- {
-		tc := &refs.toolCalls[i]
-		start, end, ok := rawJSONSpanAt(out, tc.path...)
-		if !ok {
-			return bodyBytes, fmt.Errorf("response replacement: args slot not found at path %v", tc.path)
+	// the new string and re-marshaling it is correct.
+	//
+	// rawSlots covers EVERY slot on the wire, including unselected
+	// choices/candidates, so the restore cannot lose an alternative's bytes to
+	// the re-encode. A slot with no raw span (no args key in the original
+	// body) that was never changed is skipped BEFORE any lookup: a
+	// content-only mutation must not fail because a call never had an args
+	// slot. If a plugin genuinely changed such a call's arguments, the setter
+	// created the slot in the decoded map and the lookup below is required.
+	//
+	// All spans are computed against the marshaled output FIRST, then spliced
+	// in descending start-offset order, so earlier offsets stay valid no
+	// matter where each slot lives.
+	type spliceOp struct {
+		start, end int
+		repl       []byte
+	}
+	ops := make([]spliceOp, 0, len(refs.rawSlots))
+	for _, slot := range refs.rawSlots {
+		changed := slot.call >= 0 && refs.toolCalls[slot.call].argsChanged
+		if !changed && slot.rawArgs == nil {
+			continue // no args slot in the original body; nothing to restore
 		}
-		var repl []byte
-		switch {
-		case !tc.argsChanged:
-			if tc.rawArgs == nil {
-				continue // no args slot in the original body; nothing to restore
-			}
-			repl = tc.rawArgs
-		case tc.objSlot:
-			repl = []byte(tc.argsJSON)
-		default:
+		start, end, ok := rawJSONSpanAt(out, slot.path...)
+		if !ok {
+			return bodyBytes, fmt.Errorf("response replacement: args slot not found at path %v", slot.path)
+		}
+		if changed && !slot.objSlot {
 			continue // changed string slot: the map already holds the new string
 		}
-		out = spliceBytes(out, start, end, repl)
+		var repl []byte
+		if changed {
+			repl = []byte(refs.toolCalls[slot.call].argsJSON)
+		} else {
+			repl = slot.rawArgs
+		}
+		ops = append(ops, spliceOp{start: start, end: end, repl: repl})
+	}
+	sort.Slice(ops, func(i, j int) bool { return ops[i].start > ops[j].start })
+	for _, op := range ops {
+		out = spliceBytes(out, op.start, op.end, op.repl)
 	}
 	return out, nil
 }

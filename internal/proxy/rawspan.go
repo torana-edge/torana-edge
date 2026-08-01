@@ -38,6 +38,12 @@ func rawJSONSpanAt(doc []byte, path ...any) (int, int, bool) {
 
 // spanAt assumes doc[i] is the start of a JSON value and walks path down to
 // that value, returning the value's [start, end) byte range.
+//
+// Object keys match the LAST occurrence, never the first: encoding/json keeps
+// the last duplicate key, so the raw view must agree with the decoded view
+// the pipeline mutates. The whole object is scanned past a match so a later
+// duplicate (and any siblings after it) still wins. Array steps are exact
+// indexes and unchanged.
 func spanAt(doc []byte, i int, path []any) (int, int, bool) {
 	if len(path) == 0 {
 		return i, skipValue(doc, i), true
@@ -45,15 +51,18 @@ func spanAt(doc []byte, i int, path []any) (int, int, bool) {
 	n := len(doc)
 	switch el := path[0].(type) {
 	case string:
-		// doc[i] must be an object; scan its keys for el.
+		// doc[i] must be an object; scan its keys for el, remembering the
+		// LATEST match and keeping going to the end of the object.
 		if i >= n || doc[i] != '{' {
 			return 0, 0, false
 		}
 		j := i + 1
+		lastStart := 0
+		found := false
 		for {
 			skipWS(doc, &j)
 			if j >= n || doc[j] == '}' { // empty object or key exhausted
-				return 0, 0, false
+				break
 			}
 			if doc[j] != '"' {
 				return 0, 0, false
@@ -76,19 +85,28 @@ func spanAt(doc []byte, i int, path []any) (int, int, bool) {
 			if j >= n {
 				return 0, 0, false
 			}
+			valEnd := skipValue(doc, j)
 			if key == el {
-				return spanAt(doc, j, path[1:])
+				lastStart = j
+				found = true
 			}
-			j = skipValue(doc, j)
+			j = valEnd
 			skipWS(doc, &j)
 			if j >= n {
 				return 0, 0, false
+			}
+			if doc[j] == '}' {
+				break // end of object — a match recorded earlier still wins
 			}
 			if doc[j] != ',' {
 				return 0, 0, false
 			}
 			j++
 		}
+		if !found {
+			return 0, 0, false
+		}
+		return spanAt(doc, lastStart, path[1:])
 	case int:
 		// doc[i] must be an array; walk to element el.
 		if i >= n || doc[i] != '[' {

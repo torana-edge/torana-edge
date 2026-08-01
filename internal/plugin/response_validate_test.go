@@ -380,6 +380,89 @@ func TestValidateResponseReplacementMixedValidMutation(t *testing.T) {
 	}
 }
 
+// Round 10 finding 1: on a mutable NO-MESSAGE response (e.g. a no-candidate
+// Gemini body) the message-relative checks have nothing to compare, but the
+// host-owned ChatResponse facts are still facts — a plugin must not forge
+// them just because there is no assistant turn to anchor the comparison.
+func TestValidateResponseReplacementNoMessageHostOwned(t *testing.T) {
+	base := &pbv2.ChatResponse{
+		Model:                  "gpt-x",
+		Id:                     "resp_1",
+		FinishReason:           "stop",
+		Usage:                  &pbv2.Usage{InputTokens: 1, OutputTokens: 2},
+		UpstreamStatus:         200,
+		DurationMs:             99,
+		ProviderExtensionsJson: []byte(`{"x":1}`),
+	}
+	forge := func(mut func(r *pbv2.ChatResponse)) {
+		replacement := proto.Clone(base).(*pbv2.ChatResponse)
+		mut(replacement)
+		err := validateResponseReplacement(base, replacement)
+		if err == nil {
+			t.Errorf("no-message replacement forging host-owned fields must be rejected")
+		}
+	}
+	forge(func(r *pbv2.ChatResponse) { r.Model = "gpt-y" })
+	forge(func(r *pbv2.ChatResponse) { r.Id = "resp_forged" })
+	forge(func(r *pbv2.ChatResponse) { r.FinishReason = "tool_use" })
+	forge(func(r *pbv2.ChatResponse) { r.Usage.OutputTokens = 999 })
+	forge(func(r *pbv2.ChatResponse) { r.UpstreamStatus = 500 })
+	forge(func(r *pbv2.ChatResponse) { r.DurationMs = 1 })
+	forge(func(r *pbv2.ChatResponse) { r.ProviderExtensionsJson = []byte(`{}`) })
+	// A plugin may not invent a Usage block where the provider reported none.
+	noUsage := proto.Clone(base).(*pbv2.ChatResponse)
+	noUsage.Usage = nil
+	if err := validateResponseReplacement(noUsage, base); err == nil {
+		t.Errorf("inventing usage on a no-message response must be rejected")
+	}
+	// Identical re-emission stays valid.
+	if err := validateResponseReplacement(base, proto.Clone(base).(*pbv2.ChatResponse)); err != nil {
+		t.Errorf("identical no-message replacement must pass: %v", err)
+	}
+}
+
+// Round 10 Stale normalization: an accepted replacement that left the token
+// unchanged over changed covered content must be cleared before it becomes
+// the next plugin's input — the pipeline never carries provenance over
+// content the provider never signed, even though the wire token is cleared at
+// apply time. Normalization is whole-replacement: nothing is cleared when
+// validation rejects, and nothing is cleared when there is nothing stale.
+func TestClearStaleSignatures(t *testing.T) {
+	base := hostOwnedBase() // call 0: id call_a, name t, args {}, signature tok_abc
+
+	// Stale: token left untouched while name/args changed -> cleared.
+	current := proto.Clone(base).(*pbv2.ChatResponse)
+	replacement := proto.Clone(current).(*pbv2.ChatResponse)
+	replacement.Message.ToolCalls[0].Name = "get_forecast"
+	replacement.Message.ToolCalls[0].ArgumentsJson = []byte(`{"zip":94110}`)
+	clearStaleSignatures(current, replacement)
+	if got := replacement.Message.ToolCalls[0].Signature; got != "" {
+		t.Errorf("stale token must be cleared, got %q", got)
+	}
+
+	// Already cleared after a covered mutation: untouched by normalization.
+	current = proto.Clone(base).(*pbv2.ChatResponse)
+	replacement = proto.Clone(current).(*pbv2.ChatResponse)
+	replacement.Message.ToolCalls[0].ArgumentsJson = []byte(`{"a":1}`)
+	replacement.Message.ToolCalls[0].Signature = ""
+	clearStaleSignatures(current, replacement)
+	if replacement.Message.ToolCalls[0].Signature != "" {
+		t.Errorf("already-cleared token must stay empty")
+	}
+
+	// No covered change: the token stays (intact pass-through).
+	current = proto.Clone(base).(*pbv2.ChatResponse)
+	replacement = proto.Clone(current).(*pbv2.ChatResponse)
+	clearStaleSignatures(current, replacement)
+	if got := replacement.Message.ToolCalls[0].Signature; got != "tok_abc" {
+		t.Errorf("intact token must survive normalization, got %q", got)
+	}
+
+	// No-message responses: no tool calls to normalize, no panic.
+	empty := &pbv2.ChatResponse{Model: "m"}
+	clearStaleSignatures(empty, proto.Clone(empty).(*pbv2.ChatResponse))
+}
+
 // ---------------------------------------------------------------------------
 // Pipeline tests: real fixtures through RunAfterResponse.
 // ---------------------------------------------------------------------------
@@ -434,6 +517,46 @@ func TestRunAfterResponseInvalidReplacementAllowNoPoison(t *testing.T) {
 // CRITERION 5b: the same invalid replacement under failure_mode block is an
 // attributed error naming the plugin, and the original response is returned
 // alongside it.
+// Round 10 Stale normalization through the real pipeline: test-mutator
+// rewrites arguments while leaving the provider token untouched. The
+// replacement is valid (the host clears the wire token at apply time), but
+// the returned current must already carry an EMPTY signature — the next
+// plugin in the chain sees no provenance over content the provider never
+// signed.
+func TestRunAfterResponseStaleSignatureNormalized(t *testing.T) {
+	requireWASM(t, fixturesDir+"/test-mutator/plugin.wasm")
+
+	pp := newTestPipeline(t, fixturesDir, []string{"test-mutator"})
+
+	content := "hi"
+	resp := &engine.ChatResponse{
+		Model:          "m",
+		UpstreamStatus: 200,
+		Message: &engine.ResponseMessage{
+			Content: &content,
+			ToolCalls: []engine.ResponseToolCall{{
+				ID: "call_a", Name: "t",
+				ArgumentsJSON: []byte(`{"path":"/a"}`),
+				Signature:     "tok_abc",
+			}},
+		},
+	}
+	out, err := pp.RunAfterResponse(context.Background(), 1, resp, true)
+	if err != nil {
+		t.Fatalf("mutator with untouched token must be accepted: %v", err)
+	}
+	if out == nil || out.Message == nil || len(out.Message.ToolCalls) != 1 {
+		t.Fatalf("result lost the tool call: %+v", out)
+	}
+	tc := out.Message.ToolCalls[0]
+	if string(tc.ArgumentsJSON) != `{"mutated_by":"test-mutator"}` {
+		t.Errorf("mutation not applied: %q", tc.ArgumentsJSON)
+	}
+	if tc.Signature != "" {
+		t.Errorf("stale signature leaked to the pipeline result: %q", tc.Signature)
+	}
+}
+
 func TestRunAfterResponseInvalidReplacementBlockAttributed(t *testing.T) {
 	requireWASM(t, fixturesDir+"/test-invalid-replacement/plugin.wasm")
 

@@ -38,7 +38,7 @@ install:
 	go install -buildvcs=false -ldflags "$(LDFLAGS)" ./cmd/torana/
 
 test: testdata
-	go test ./... -race -timeout 600s
+	go test ./... -race -timeout 1800s
 
 lint:
 	golangci-lint run

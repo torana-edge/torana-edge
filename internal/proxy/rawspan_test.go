@@ -110,6 +110,33 @@ func TestRawJSONSpanStringSlotsKeepQuotes(t *testing.T) {
 	}
 }
 
+func TestRawJSONSpanDuplicateKeysTakeLast(t *testing.T) {
+	// encoding/json keeps the LAST duplicate key, so the raw view must agree
+	// with the decoded view — at the object level and at nested levels, with
+	// sibling keys scanned past the match.
+	doc := []byte(`{"a":1,"a":2,"b":{"k":"first","k":"last"},"c":{"nested":{"x":1,"x":2}}}`)
+	cases := []struct {
+		name string
+		path []any
+		want string
+	}{
+		{"object level", []any{"a"}, `2`},
+		{"nested object level", []any{"b", "k"}, `"last"`},
+		{"two levels down", []any{"c", "nested", "x"}, `2`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := rawJSONSpan(doc, tc.path...)
+			if !ok {
+				t.Fatalf("path %v not found", tc.path)
+			}
+			if string(got) != tc.want {
+				t.Errorf("path %v = %q, want the LAST duplicate's bytes %q", tc.path, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestRawJSONSpanOffsetSplice(t *testing.T) {
 	// rawJSONSpanAt gives spliceable offsets into the document.
 	doc := []byte(`{"keep":{"a":1},"args":{"zzz":1,"aaa":2},"tail":true}`)

@@ -28,20 +28,6 @@ func validateResponseReplacement(current, replacement *pbv2.ChatResponse) error 
 	if replacement.Message != nil && current.Message == nil {
 		return fmt.Errorf("invented an assistant message")
 	}
-	if current.Message == nil { // both messages absent: nothing relative left to check
-		return nil
-	}
-	// Content presence is host-owned: the provider body either has a writable
-	// text slot or it does not, and no plugin changes that. Only the value may
-	// change (present-empty and present-nonempty are the same presence).
-	if (replacement.Message.Content != nil) != (current.Message.Content != nil) {
-		return fmt.Errorf("changed content presence")
-	}
-	// Tool calls have fixed cardinality with positional correspondence: output
-	// element N mutates accepted element N, so the counts must agree.
-	if len(replacement.Message.ToolCalls) != len(current.Message.ToolCalls) {
-		return fmt.Errorf("changed tool-call cardinality")
-	}
 	// The ChatResponse facts below are host-owned: observed provider/host
 	// measurements (model, id, finish reason, usage, upstream status, duration)
 	// and opaque provider output (extensions). Re-emitting them identically is
@@ -49,6 +35,10 @@ func validateResponseReplacement(current, replacement *pbv2.ChatResponse) error 
 	// not authorise forging what the provider reported. Compared field-wise:
 	// reflect.DeepEqual on proto messages is a false oracle because of the
 	// unexported runtime state they carry.
+	//
+	// These run even when BOTH messages are absent: a mutable no-message
+	// response (e.g. a no-candidate Gemini body) must not let a plugin forge
+	// the response facts just because there is no assistant turn to compare.
 	if replacement.Model != current.Model {
 		return fmt.Errorf("changed host-owned field model")
 	}
@@ -69,6 +59,20 @@ func validateResponseReplacement(current, replacement *pbv2.ChatResponse) error 
 	}
 	if !bytes.Equal(replacement.ProviderExtensionsJson, current.ProviderExtensionsJson) {
 		return fmt.Errorf("changed host-owned field provider_extensions_json")
+	}
+	if current.Message == nil { // both messages absent: message-relative checks below have nothing to compare
+		return nil
+	}
+	// Content presence is host-owned: the provider body either has a writable
+	// text slot or it does not, and no plugin changes that. Only the value may
+	// change (present-empty and present-nonempty are the same presence).
+	if (replacement.Message.Content != nil) != (current.Message.Content != nil) {
+		return fmt.Errorf("changed content presence")
+	}
+	// Tool calls have fixed cardinality with positional correspondence: output
+	// element N mutates accepted element N, so the counts must agree.
+	if len(replacement.Message.ToolCalls) != len(current.Message.ToolCalls) {
+		return fmt.Errorf("changed tool-call cardinality")
 	}
 	// Positional tool calls: id is the provider's identity for the call and is
 	// host-owned; name and arguments are assistant-writable in place. The bound
@@ -92,6 +96,39 @@ func validateResponseReplacement(current, replacement *pbv2.ChatResponse) error 
 		}
 	}
 	return nil
+}
+
+// clearStaleSignatures normalizes an ACCEPTED replacement before it becomes
+// the next plugin's input: any tool call whose provider token was left
+// UNCHANGED while its covered content (name or arguments) changed is a stale
+// signature — the pipeline must not carry provenance over content the provider
+// never signed, even though the apply block will clear the wire token later.
+//
+// Must be called only after validateResponseReplacement returned nil, so a
+// later violation can never partially normalize an output that is being
+// rejected: rejection is whole-replacement, normalization is whole-replacement.
+// A guest that already cleared the token after a covered mutation is untouched
+// (nothing to normalize); forged/added/dropped tokens never reach here.
+func clearStaleSignatures(current, replacement *pbv2.ChatResponse) {
+	if current.Message == nil || replacement.Message == nil {
+		return
+	}
+	for i := range replacement.Message.ToolCalls {
+		if i >= len(current.Message.ToolCalls) {
+			return // unreachable post-validation; defensive
+		}
+		cur, rep := current.Message.ToolCalls[i], replacement.Message.ToolCalls[i]
+		if cur == nil || rep == nil || rep.Signature == "" {
+			continue
+		}
+		if rep.Signature != cur.Signature {
+			continue // forged/added — rejected upstream, never reaches here
+		}
+		nameOrArgsChanged := rep.Name != cur.Name || !bytes.Equal(rep.ArgumentsJson, cur.ArgumentsJson)
+		if nameOrArgsChanged {
+			rep.Signature = ""
+		}
+	}
 }
 
 // usageEqual compares the provider token tallies field-wise. Both-nil and
