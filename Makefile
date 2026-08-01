@@ -1,4 +1,4 @@
-.PHONY: build install clean test test-race release official-plugins testdata lint
+.PHONY: build install clean test test-race test-pkg test-race-pkg testdata-pkg release official-plugins testdata lint force-fixtures
 
 BINARY := torana
 VERSION ?= $(shell git describe --tags --exact-match 2>/dev/null || git rev-parse --short HEAD 2>/dev/null || echo "dev")
@@ -40,23 +40,24 @@ STAMP_DIR := .cache/fixtures
 FIXTURES := $(addsuffix /plugin.wasm,$(TESTDATA_DIRS))
 
 # Per-fixture rule. $1 is the fixture directory.
+#
+# The force-fixtures prerequisite makes every recipe run on EVERY invocation:
+# Make's timestamps are deliberately NOT part of the go-build decision. A
+# toolchain change, a content change with a restored old mtime, or a deleted
+# stamp changes no prerequisite, so only the fingerprint script — which always
+# runs and no-ops when nothing changed — can decide. This keeps an unchanged
+# tree at zero go builds while closing the scheduling hole.
+.PHONY: force-fixtures
 define fixture_rule
-$(1)/plugin.wasm: $(1) $(wildcard $(1)/*.go) go.mod go.sum Makefile
+$(1)/plugin.wasm: force-fixtures $(1) $(wildcard $(1)/*.go) go.mod go.sum Makefile
 	@scripts/testdata.sh $(1) $(STAMP_DIR)/$(notdir $(1)).stamp $$@ -- $(WASM_BUILD) -o plugin.wasm .
 endef
 $(foreach d,$(TESTDATA_DIRS),$(eval $(call fixture_rule,$(d))))
 
-# hello.wasm: same engine. Its source directory shares its name with the
-# aggregate target, so a force prerequisite (always re-runs the fingerprint
-# script, which no-ops when unchanged) replaces the directory prerequisite.
-.PHONY: force-hello
-testdata/hello.wasm: force-hello $(wildcard testdata/*.go) go.mod go.sum Makefile
-	@scripts/testdata.sh testdata $(STAMP_DIR)/hello.stamp $@ -- $(WASM_BUILD) -o hello.wasm .
-
-# Aggregate: conservative parallel cold builds (4 workers); warm no-op is a
-# near-instant up-to-date pass.
+# Aggregate: conservative parallel cold builds (4 workers); warm no-op runs
+# only the cheap fingerprint checks (no go builds).
 testdata:
-	$(MAKE) -j4 $(FIXTURES) testdata/hello.wasm
+	$(MAKE) -j4 $(FIXTURES)
 
 install:
 	go install -buildvcs=false -ldflags "$(LDFLAGS)" ./cmd/torana/
@@ -70,17 +71,18 @@ install:
 CACHE_DIR := $(CURDIR)/.cache/wazero
 TORANA_CI_CACHE ?= $(CACHE_DIR)
 export TORANA_CI_CACHE
-$(shell mkdir -p $(CACHE_DIR))
 
 # test: the everyday iteration gate — fixtures plus the strict ordinary full
 # suite. TORANA_E2E=1 makes a missing required fixture an actionable FAILURE
 # instead of a silent skip; GOWORK=off matches the verified gate. No
 # testing.Short or build-tag omissions: this is the complete ./... suite.
 test: testdata
+	@mkdir -p $(CACHE_DIR)
 	GOWORK=off TORANA_E2E=1 go test ./... -timeout 600s
 
 # test-race is the slow pre-merge gate: the same complete suite under -race.
 test-race: testdata
+	@mkdir -p $(CACHE_DIR)
 	GOWORK=off TORANA_E2E=1 go test ./... -race -timeout 1800s
 
 # Package-scoped targets for correction rounds: build only the package's
@@ -95,20 +97,28 @@ PKG_FIXTURES = $(addprefix examples/plugins/,$(shell scripts/fixtures-for-pkg.sh
 
 test-pkg:
 	$(call check_pkg,test-pkg)
+	@mkdir -p $(CACHE_DIR)
 	@$(MAKE) $(addsuffix /plugin.wasm,$(PKG_FIXTURES))
 	GOWORK=off TORANA_E2E=1 go test $(PKG) -timeout 600s
 
 test-race-pkg:
 	$(call check_pkg,test-race-pkg)
+	@mkdir -p $(CACHE_DIR)
 	@$(MAKE) $(addsuffix /plugin.wasm,$(PKG_FIXTURES))
 	GOWORK=off TORANA_E2E=1 go test $(PKG) -race -timeout 1800s
+
+# Build only a package's required fixture set (used by CI shards and the
+# clean-sandbox proof). PKG accepts the same ./internal/... form.
+testdata-pkg:
+	$(call check_pkg,testdata-pkg)
+	@$(MAKE) $(addsuffix /plugin.wasm,$(PKG_FIXTURES))
 
 lint:
 	golangci-lint run
 
 clean:
 	rm -f $(BINARY)
-	rm -f $(foreach d,$(TESTDATA_DIRS),$(d)/plugin.wasm) testdata/hello.wasm
+	rm -f $(foreach d,$(TESTDATA_DIRS),$(d)/plugin.wasm)
 	rm -rf .cache
 
 release:

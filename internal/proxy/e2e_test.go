@@ -986,11 +986,22 @@ func TestStreamingObservationalHookCompletesBeforeFeedRecording(t *testing.T) {
 func TestObservationalStreamingHookIsOnTheClientCriticalPath(t *testing.T) {
 	requireWASM(t, fixturesDir+"/test-slow-after-stream/plugin.wasm")
 
-	entered := make(chan struct{})
-	release := make(chan struct{})
+	enteredCh := make(chan struct{})
+	releaseCh := make(chan struct{})
+	// entered/release are idempotent (sync.Once) and release happens on EVERY
+	// exit path, so a premature failure can never leave the latch handler
+	// blocked and hang httptest.Server.Close in the deferred cleanup.
+	var enteredOnce, releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseCh) }) }
+	defer release()
+
 	latch := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		close(entered)
-		<-release
+		enteredOnce.Do(func() { close(enteredCh) })
+		select {
+		case <-releaseCh:
+		case <-r.Context().Done():
+			return // cancellation-aware: never block server shutdown forever
+		}
 		w.Header().Set("Content-Type", "application/json")
 		fmt.Fprint(w, `{"id":"c1","choices":[{"message":{"role":"assistant","content":"released"}}]}`)
 	}))
@@ -1054,15 +1065,17 @@ func TestObservationalStreamingHookIsOnTheClientCriticalPath(t *testing.T) {
 
 	eof := make(chan struct{})
 	var body []byte
+	var readErr error
 	go func() {
-		body, _ = io.ReadAll(resp.Body) // reads to EOF, i.e. handler return
+		body, readErr = io.ReadAll(resp.Body) // reads to EOF, i.e. handler return
 		resp.Body.Close()
 		close(eof)
 	}()
 
 	select {
-	case <-entered:
+	case <-enteredCh:
 	case <-ctx.Done():
+		release()
 		t.Fatal("the after-response hook never entered the egress latch")
 	}
 
@@ -1070,21 +1083,27 @@ func TestObservationalStreamingHookIsOnTheClientCriticalPath(t *testing.T) {
 	// the critical path by design. A non-blocking check, not a timing claim.
 	select {
 	case <-eof:
+		release()
 		t.Fatal("client EOF completed while the observational hook was still gated — " +
 			"if post-processing was made asynchronous, invert this test and update " +
 			"reqState.streamDone's contract")
 	default:
 	}
 
-	close(release)
+	release()
 
 	select {
 	case <-eof:
 	case <-ctx.Done():
 		t.Fatal("client EOF did not complete after the latch released")
 	}
-	if !strings.Contains(string(body), "hello") {
-		t.Fatalf("stream body missing: %s", body)
+	if readErr != nil {
+		t.Fatalf("reading the stream body: %v", readErr)
+	}
+	// Pin the COMPLETE stream, not a fragment: the content plus the protocol
+	// terminator must both arrive intact.
+	if !strings.Contains(string(body), "hello") || !strings.HasSuffix(string(body), "data: [DONE]\n\n") {
+		t.Fatalf("stream body incomplete or unterminated: %q", body)
 	}
 	t.Log("the observational hook holds EOF until released — synchronous with HTTP completion by design")
 }

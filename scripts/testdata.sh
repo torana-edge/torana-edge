@@ -33,6 +33,23 @@ shift 3
 root=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
 cd "$root"
 
+# Portable SHA-256: sha256sum is not present by default on macOS. The tool is
+# chosen once; TESTDATA_HASH_TOOL forces a choice for testing the fallback.
+if [ -n "${TESTDATA_HASH_TOOL:-}" ]; then
+	case "$TESTDATA_HASH_TOOL" in
+	sha256sum) hash_cmd() { sha256sum "$@"; } ;;
+	shasum) hash_cmd() { shasum -a 256 "$@"; } ;;
+	*) echo "testdata.sh: unknown TESTDATA_HASH_TOOL $TESTDATA_HASH_TOOL" >&2; exit 2 ;;
+	esac
+elif command -v sha256sum >/dev/null 2>&1; then
+	hash_cmd() { sha256sum "$@"; }
+elif command -v shasum >/dev/null 2>&1; then
+	hash_cmd() { shasum -a 256 "$@"; }
+else
+	echo "testdata.sh: no sha256 tool (need sha256sum or shasum -a 256)" >&2
+	exit 2
+fi
+
 # Relative source list (excluding the output itself and any stamps).
 sources=$(cd "$dir" && find . -type f ! -name "$(basename "$out")" | sort)
 
@@ -40,12 +57,12 @@ fp=$({
 	printf 'dir=%s\n' "$dir"
 	for f in $sources; do
 		printf 'f %s ' "$f"
-		sha256sum "$dir/$f" | cut -d' ' -f1
+		hash_cmd "$dir/$f" | cut -d' ' -f1
 	done
 	printf 'gomod '
-	sha256sum go.mod 2>/dev/null | cut -d' ' -f1 || true
+	hash_cmd go.mod 2>/dev/null | cut -d' ' -f1 || true
 	printf 'gosum '
-	sha256sum go.sum 2>/dev/null | cut -d' ' -f1 || true
+	hash_cmd go.sum 2>/dev/null | cut -d' ' -f1 || true
 	printf 'cmd %s\n' "$*"
 	printf 'go '
 	go version
