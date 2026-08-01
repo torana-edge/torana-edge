@@ -373,14 +373,16 @@ func fixtureNames(t *testing.T) []string {
 	return names
 }
 
-// runMapper runs the real AST mapper against a package path.
-func runMapper(t *testing.T, repo, pkg string) map[string]bool {
+// runMapper runs the PRODUCTION wrapper (GOWORK=off inside) against one or
+// more package paths — the same entry point make and CI consume.
+func runMapper(t *testing.T, repo string, pkgs ...string) map[string]bool {
 	t.Helper()
-	cmd := exec.Command("go", "run", "./scripts/fixtures-for-pkg.go", pkg)
+	cmd := exec.Command("sh", filepath.Join(repo, "scripts", "fixtures-for-pkg.sh"))
+	cmd.Args = append(cmd.Args, pkgs...)
 	cmd.Dir = repo
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		t.Fatalf("fixtures-for-pkg.go %s: %v\n%s", pkg, err, out)
+		t.Fatalf("fixtures-for-pkg %v: %v\n%s", pkgs, err, out)
 	}
 	got := map[string]bool{}
 	for _, f := range strings.Fields(string(out)) {
@@ -560,6 +562,30 @@ github.com/torana-edge/torana-edge/test/e2e
 			t.Fatal("check succeeded despite a failing go list")
 		}
 	})
+	t.Run("a PARTIALLY failing go list fails every mode", func(t *testing.T) {
+		// A fake go that emits one valid package and then exits non-zero: a
+		// partial listing must not surface as a successful partial shard or
+		// a verified partition.
+		fakeDir := t.TempDir()
+		fakeGo := "#!/bin/sh\nprintf 'github.com/torana-edge/torana-edge/internal/wasm\\n'\nexit 1\n"
+		if err := os.WriteFile(filepath.Join(fakeDir, "go"), []byte(fakeGo), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		for _, mode := range []string{"wasm", "remainder", "check"} {
+			cmd := exec.Command("sh", script, mode)
+			cmd.Dir = sandbox
+			cmd.Env = append(os.Environ(), "PATH="+fakeDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+			out, err := cmd.CombinedOutput()
+			if err == nil {
+				t.Fatalf("%s succeeded with a partially failing go list:\n%s", mode, out)
+			}
+			// No PARTIAL AUTHORITATIVE OUTPUT: the error message may appear,
+			// but never a package line pretending to be a shard.
+			if strings.Contains(string(out), "github.com/") {
+				t.Fatalf("%s emitted partial package output despite the failure:\n%s", mode, out)
+			}
+		}
+	})
 	t.Run("an overlapped partition fails (revert-proof)", func(t *testing.T) {
 		corrupt := strings.Replace(string(orig),
 			"PLUGIN_MOD='^github.com/torana-edge/torana-edge/internal/plugin(/|$)'",
@@ -674,6 +700,17 @@ func TestHostileGoWorkIgnored(t *testing.T) {
 		t.Fatalf("mapper output incomplete under a hostile GOWORK:\n%s", out)
 	}
 
+	// The CI helper's fixture query (the same entry point CI consumes) must
+	// also ignore the hostile workspace.
+	scmd := exec.Command("sh", filepath.Join(repo, "scripts", "ci-shards.sh"), "fixtures", "proxy")
+	scmd.Dir = repo
+	scmd.Env = append(os.Environ(), "GOWORK="+hostile)
+	if outB, err := scmd.CombinedOutput(); err != nil {
+		t.Fatalf("ci-shards.sh fixtures under a hostile GOWORK: %v\n%s", err, outB)
+	} else if !strings.Contains(string(outB), "examples/plugins/test-observer/plugin.wasm") {
+		t.Fatalf("ci-shards.sh fixtures output incomplete:\n%s", outB)
+	}
+
 	// WASM_BUILD carries GOWORK=off so guest builds are equally insulated.
 	mk, err := os.ReadFile(filepath.Join(repo, "Makefile"))
 	if err != nil {
@@ -688,36 +725,79 @@ func TestHostileGoWorkIgnored(t *testing.T) {
 	}
 }
 
-// TestCacheDirOverride — an environment TORANA_CI_CACHE must be honored: the
-// recipe mkdir targets the EFFECTIVE cache path (${TORANA_CI_CACHE:-default}),
-// never the repo default.
+// TestCacheDirOverride — the EFFECTIVE cache path semantics, tested through
+// the repository's own cache-dir target: absolute overrides pass through
+// unchanged, relative overrides are anchored at the repo root (every Go test
+// process would otherwise resolve them from a different directory), and the
+// default is the ignored repo-local dir. The target must not create any
+// cache directory.
 func TestCacheDirOverride(t *testing.T) {
 	repo := repoRoot(t)
-	cmd := exec.Command("make", "-n", "test")
-	cmd.Dir = repo
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("dry-run make failed: %v\n%s", err, out)
-	}
-	if !strings.Contains(string(out), `${TORANA_CI_CACHE:-`) {
-		t.Fatalf("the recipe does not mkdir the effective TORANA_CI_CACHE path:\n%s", out)
+	effective := func(t *testing.T, args ...string) string {
+		t.Helper()
+		cmd := exec.Command("make", append([]string{"-s", "cache-dir"}, args...)...)
+		cmd.Dir = repo
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("make cache-dir %v: %v\n%s", args, err, out)
+		}
+		return strings.TrimSpace(string(out))
 	}
 
-	// Behavior: with an override set, only the override is created.
-	sandbox := t.TempDir()
-	override := filepath.Join(sandbox, "override-cache")
-	shell := `mkdir -p "${TORANA_CI_CACHE:-default-cache}"`
-	scmd := exec.Command("sh", "-c", shell)
-	scmd.Dir = sandbox
-	scmd.Env = append(os.Environ(), "TORANA_CI_CACHE="+override)
-	if outB, err := scmd.CombinedOutput(); err != nil {
-		t.Fatalf("recipe shell line: %v\n%s", err, outB)
+	t.Run("absolute override passes through unchanged", func(t *testing.T) {
+		abs := filepath.Join(t.TempDir(), "wazero-cache")
+		if got := effective(t, "TORANA_CI_CACHE="+abs); got != abs {
+			t.Fatalf("effective = %q, want the absolute override %q", got, abs)
+		}
+	})
+	t.Run("relative override is anchored at the repo root", func(t *testing.T) {
+		got := effective(t, "TORANA_CI_CACHE=relative/cache")
+		want := filepath.Join(repo, "relative", "cache")
+		if got != want {
+			t.Fatalf("effective = %q, want the anchored %q", got, want)
+		}
+	})
+	t.Run("default is the ignored repo-local dir", func(t *testing.T) {
+		want := filepath.Join(repo, ".cache", "wazero")
+		if got := effective(t); got != want {
+			t.Fatalf("effective = %q, want %q", got, want)
+		}
+	})
+}
+
+// TestMapperMultiPackage — the mapper accepts several package paths in one
+// invocation (the remainder-shard query shape): the union is printed, and a
+// failure in ANY package after earlier successes produces a non-zero exit
+// with NO partial output.
+func TestMapperMultiPackage(t *testing.T) {
+	repo := repoRoot(t)
+	wrapper := filepath.Join(repo, "scripts", "fixtures-for-pkg.sh")
+	run := func(t *testing.T, pkgs ...string) (string, error) {
+		t.Helper()
+		cmd := exec.Command("sh", wrapper)
+		cmd.Args = append(cmd.Args, pkgs...)
+		cmd.Dir = repo
+		out, err := cmd.CombinedOutput()
+		return string(out), err
 	}
-	if _, err := os.Stat(override); err != nil {
-		t.Fatalf("override cache dir was not created: %v", err)
+
+	// Union over packages that individually reference nothing: still fine.
+	out, err := run(t, "internal/secret", "internal/metrics")
+	if err != nil {
+		t.Fatalf("multi-package mapper failed: %v\n%s", err, out)
 	}
-	if _, err := os.Stat(filepath.Join(sandbox, "default-cache")); err == nil {
-		t.Fatal("the default cache dir was created despite the override")
+	if len(strings.Fields(out)) != 0 {
+		t.Fatalf("expected an empty union, got:\n%s", out)
+	}
+
+	// One failing package AFTER an earlier successful walk: non-zero, and no
+	// partial authoritative output from the successful one.
+	out, err = run(t, "internal/metrics", "/nonexistent/pkg")
+	if err == nil {
+		t.Fatalf("mapper succeeded with a nonexistent package:\n%s", out)
+	}
+	if strings.Contains(out, "examples/plugins/") || strings.Contains(out, "test-") {
+		t.Fatalf("mapper emitted partial output despite the failure:\n%s", out)
 	}
 }
 
@@ -731,12 +811,20 @@ func TestMain(m *testing.M) {
 	}
 	var before string
 	if repo != "" {
-		out, _ := exec.Command("git", "-C", repo, "status", "--porcelain").Output()
+		out, err := exec.Command("git", "-C", repo, "status", "--porcelain").Output()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "fixturebuild: git status failed before tests: %v\n", err)
+			os.Exit(1)
+		}
 		before = string(out)
 	}
 	code := m.Run()
 	if repo != "" {
-		out, _ := exec.Command("git", "-C", repo, "status", "--porcelain").Output()
+		out, err := exec.Command("git", "-C", repo, "status", "--porcelain").Output()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "fixturebuild: git status failed after tests: %v\n", err)
+			os.Exit(1)
+		}
 		if string(out) != before {
 			fmt.Fprintf(os.Stderr, "fixturebuild tests modified the tracked checkout:\n%s", out)
 			code = 1

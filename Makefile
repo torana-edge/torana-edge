@@ -67,10 +67,26 @@ install:
 # Persistent local wazero compilation cache: the same mechanism CI uses
 # (TORANA_CI_CACHE), defaulting to an ignored repo-local directory so every
 # local run — and every correction round — reuses compiled fixtures across
-# processes. An environment-provided TORANA_CI_CACHE overrides the default.
+# processes. An environment-provided TORANA_CI_CACHE overrides the default;
+# RELATIVE overrides are anchored at the repository root, because every Go
+# test process resolves a relative value from its own package directory and
+# would otherwise fragment the cache (or fail to share it at all). Absolute
+# overrides pass through unchanged.
 CACHE_DIR := $(CURDIR)/.cache/wazero
-TORANA_CI_CACHE ?= $(CACHE_DIR)
+ifdef TORANA_CI_CACHE
+ifeq ($(filter /%,$(TORANA_CI_CACHE)),)
+# A command-line/relative override cannot be reassigned without `override`.
+override TORANA_CI_CACHE := $(CURDIR)/$(TORANA_CI_CACHE)
+endif
+else
+TORANA_CI_CACHE := $(CACHE_DIR)
+endif
 export TORANA_CI_CACHE
+
+# cache-dir: print the EFFECTIVE wazero cache path (for tests and scripts).
+.PHONY: cache-dir
+cache-dir:
+	@echo "$(TORANA_CI_CACHE)"
 
 # test: the everyday iteration gate — fixtures plus the strict ordinary full
 # suite. TORANA_E2E=1 makes a missing required fixture an actionable FAILURE

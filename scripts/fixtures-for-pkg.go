@@ -12,7 +12,12 @@
 // internal/wasm is special-cased: its all-fixture ABI inventory legitimately
 // requires every v2 fixture.
 //
-// Usage: go run ./scripts/fixtures-for-pkg.go <internal/<pkg>>
+// Usage: go run ./scripts/fixtures-for-pkg.go <internal/<pkg>> [<pkg>...]
+//
+// Multiple package paths are accepted and their unions printed, so the
+// remainder-shard query is ONE mapper invocation instead of dozens of `go
+// run` processes. Results are accumulated and printed only after every
+// package walked successfully: a failure never produces partial output.
 package main
 
 import (
@@ -28,57 +33,60 @@ import (
 )
 
 func main() {
-	if len(os.Args) != 2 {
-		fmt.Fprintln(os.Stderr, "usage: fixtures-for-pkg <internal/<pkg>>")
+	if len(os.Args) < 2 {
+		fmt.Fprintln(os.Stderr, "usage: fixtures-for-pkg <internal/<pkg>> [<pkg>...]")
 		os.Exit(2)
 	}
-	pkg := strings.TrimPrefix(os.Args[1], "./")
 
 	names := fixtureNames()
-	if pkg == "internal/wasm" {
-		for _, n := range names {
-			fmt.Println(n)
-		}
-		return
-	}
-
 	referenced := map[string]bool{}
-	err := filepath.WalkDir(pkg, func(path string, d os.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if d.IsDir() || !strings.HasSuffix(path, ".go") {
-			return nil
-		}
-		fset := token.NewFileSet()
-		f, err := parser.ParseFile(fset, path, nil, 0)
-		if err != nil {
-			return err
-		}
-		ast.Inspect(f, func(n ast.Node) bool {
-			bl, ok := n.(*ast.BasicLit)
-			if !ok || bl.Kind != token.STRING {
-				return true
+	for _, arg := range os.Args[1:] {
+		pkg := strings.TrimPrefix(arg, "./")
+		if pkg == "internal/wasm" {
+			// The all-fixture ABI inventory legitimately requires every v2
+			// fixture; a union with other packages is still the full set.
+			for _, n := range names {
+				referenced[n] = true
 			}
-			lit, err := strconv.Unquote(bl.Value)
+			continue
+		}
+		err := filepath.WalkDir(pkg, func(path string, d os.DirEntry, err error) error {
 			if err != nil {
-				return true
+				return err
 			}
-			for _, name := range names {
-				// Path-segment-ish containment: the name as a whole literal,
-				// as a path segment ("/test-observer"), or as a prefix of a
-				// path ("test-observer/plugin.wasm").
-				if lit == name || strings.Contains(lit, "/"+name) || strings.Contains(lit, name+"/") {
-					referenced[name] = true
+			if d.IsDir() || !strings.HasSuffix(path, ".go") {
+				return nil
+			}
+			fset := token.NewFileSet()
+			f, err := parser.ParseFile(fset, path, nil, 0)
+			if err != nil {
+				return err
+			}
+			ast.Inspect(f, func(n ast.Node) bool {
+				bl, ok := n.(*ast.BasicLit)
+				if !ok || bl.Kind != token.STRING {
+					return true
 				}
-			}
-			return true
+				lit, err := strconv.Unquote(bl.Value)
+				if err != nil {
+					return true
+				}
+				for _, name := range names {
+					// Path-segment-ish containment: the name as a whole
+					// literal, as a path segment ("/test-observer"), or as a
+					// prefix of a path ("test-observer/plugin.wasm").
+					if lit == name || strings.Contains(lit, "/"+name) || strings.Contains(lit, name+"/") {
+						referenced[name] = true
+					}
+				}
+				return true
+			})
+			return nil
 		})
-		return nil
-	})
-	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
 	}
 
 	var out []string

@@ -23,31 +23,50 @@ self=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)/ci-shards.sh
 
 case "${1:-}" in
 wasm | plugin | proxy | remainder)
+	# Capture and validate the inventory ONCE before filtering: a partial
+	# `go list` failure must not surface as a successful partial shard.
+	listed=$(cd "$root" && GOWORK=off go list ./...) || {
+		echo "go list failed; cannot compute the $1 shard" >&2
+		exit 1
+	}
+	[ -n "$listed" ] || {
+		echo "empty package inventory" >&2
+		exit 1
+	}
 	mod=$SHARD_MOD
 	[ "$1" = wasm ] && mod=$WASM_MOD
 	[ "$1" = plugin ] && mod=$PLUGIN_MOD
 	[ "$1" = proxy ] && mod=$PROXY_MOD
 	if [ "$1" = remainder ]; then
-		(cd "$root" && GOWORK=off go list ./...) | grep -vE "$mod"
+		printf '%s\n' "$listed" | grep -vE "$mod"
 	else
-		(cd "$root" && GOWORK=off go list ./...) | grep -E "$mod"
+		printf '%s\n' "$listed" | grep -E "$mod"
 	fi
 	;;
 fixtures)
 	[ $# -eq 2 ] || { echo "usage: ci-shards.sh fixtures <shard>" >&2; exit 2; }
 	shard=$2
 	if [ "$shard" = remainder ]; then
-		# Union of the remainder packages' fixture sets (usually empty).
 		packages=$("$self" remainder)
 	else
 		packages=$("$self" "$shard")
 	fi
+	# ONE mapper invocation for the whole shard (fail-closed: the mapper
+	# accumulates and prints only after every package walked successfully,
+	# so a single failure cannot be masked by sort/sed success).
+	rels=
 	for p in $packages; do
 		rel=${p#"$REPO_PREFIX"}
 		rel=${rel#/}
 		[ -n "$rel" ] || continue # the module root itself
-		(cd "$root" && GOWORK=off go run ./scripts/fixtures-for-pkg.go "$rel")
-	done | sort -u | sed 's#^#examples/plugins/#' | sed 's#$#/plugin.wasm#'
+		rels="$rels $rel"
+	done
+	# shellcheck disable=SC2086
+	mapped=$(cd "$root" && GOWORK=off go run ./scripts/fixtures-for-pkg.go $rels) || {
+		echo "fixture mapping failed for shard $shard" >&2
+		exit 1
+	}
+	printf '%s\n' "$mapped" | sort -u | sed 's#^#examples/plugins/#' | sed 's#$#/plugin.wasm#'
 	;;
 check | check-synthetic)
 	if [ "$1" = check ]; then

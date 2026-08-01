@@ -88,8 +88,10 @@ jobs:
         run: make -j4 testdata-pkg PKG=${{ matrix.pkg }}
       - name: This package's strict suite must find every fixture it requests
         run: |
+          # -count=1: this job is an EXECUTION proof — a cached pass would
+          # prove nothing about the fixtures built just above.
           GOWORK=off TORANA_CI_CACHE=/tmp/wazero-cache TORANA_E2E=1 \
-            go test ${{ matrix.pkg }}/... -timeout 1800s
+            go test ${{ matrix.pkg }}/... -count=1 -timeout 1800s
 
   # Vet and vulnerability scanning run once, outside the test matrix.
   analysis:
