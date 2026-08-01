@@ -779,6 +779,63 @@ func TestFailureModeBlockTerminatesTheStream(t *testing.T) {
 	}
 }
 
+// A terminal plugin error must close the actual upstream response, not merely
+// the downstream serializer channel. Keeping this handler open after the
+// trapped event reproduces the parser→tap back-pressure shape: without the
+// cancellation/drain path, the upstream request remains live after the client
+// has already seen its truncated response.
+func TestFailureModeBlockCancelsAndDrainsUpstream(t *testing.T) {
+	requireWASM(t, fixturesDir+"/test-trapper-stream/plugin.wasm")
+
+	upstreamCanceled := make(chan struct{})
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fl := w.(http.Flusher)
+		fmt.Fprint(w, `data: {"choices":[{"index":0,"delta":{"content":"leaked"}}]}`+"\n\n")
+		fl.Flush()
+		// This second event can be waiting behind the tap when the first one
+		// triggers the terminal. The handler must still observe a canceled
+		// request rather than remaining blocked indefinitely.
+		fmt.Fprint(w, `data: {"choices":[{"index":0,"delta":{"content":"later"}}]}`+"\n\n")
+		fl.Flush()
+		<-r.Context().Done()
+		close(upstreamCanceled)
+	}))
+	defer upstream.Close()
+
+	cfg := Config{Port: "0", Providers: provider.Config{
+		Providers: map[string]provider.Provider{"oai": {URL: upstream.URL, Format: "openai"}},
+		Plugins:   provider.PluginsConfig{Dir: fixturesDir, Order: []string{"test-trapper-stream"}, AllowUnapproved: true},
+	}}
+	srv, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	go srv.Serve(ln)
+	defer srv.Shutdown(context.Background())
+
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Post("http://"+ln.Addr().String()+"/provider/oai/v1/chat/completions",
+		"application/json", strings.NewReader(`{"model":"gpt-x","stream":true,"messages":[{"role":"user","content":"hi"}]}`))
+	if err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	_, readErr := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if readErr == nil || !errors.Is(readErr, io.ErrUnexpectedEOF) {
+		t.Fatalf("block-mode trap completed cleanly: %v", readErr)
+	}
+	select {
+	case <-upstreamCanceled:
+	case <-time.After(2 * time.Second):
+		t.Fatal("terminal stream did not close the upstream parse/tap chain")
+	}
+}
+
 // The OpenAI Responses serializer has a distinct completion frame from Chat
 // Completions. A block-mode trap must cancel it before response.completed (or
 // [DONE]) is written; closing the pipe after the serializer returns is too
