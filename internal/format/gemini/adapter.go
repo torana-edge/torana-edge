@@ -199,7 +199,9 @@ func (a *Adapter) Unmarshal(rawBody []byte) (*engine.ChatRequest, error) {
 		case "user":
 			appendUserOrTool(chat, content, callIDs)
 		case "model":
-			appendModel(chat, content, prevCallIdx, callIDs)
+			if err := appendModel(chat, content, prevCallIdx, callIDs); err != nil {
+				return nil, err
+			}
 		default:
 			// Unknown role: treat text as user text.
 			msg := engine.Message{Role: engine.RoleUser}
@@ -279,16 +281,28 @@ func appendUserOrTool(chat *engine.ChatRequest, content geminiContent, callIDs m
 
 // appendModel handles a role:"model" content, which under Code Assist may hold
 // a functionCall, a functionResponse (tool result), or text — each preserving
-// its id and thoughtSignature.
-func appendModel(chat *engine.ChatRequest, content geminiContent, prevCallIdx map[string]int, callIDs map[string]string) {
+// its id and thoughtSignature. A part with empty text and only a
+// thoughtSignature is the trailing standalone signature (Code Assist's final
+// {"thoughtSignature":<sig>,"text":""} part, SignatureScopeTrailingStandalone):
+// it binds the preceding closed text/thinking content of this turn, never a
+// tool-call block. It is only valid AFTER text/thinking in the same content;
+// a signature-only part with no preceding text/thinking is malformed and
+// rejected (a leading standalone, or one stranded on a tool-call-only turn).
+func appendModel(chat *engine.ChatRequest, content geminiContent, prevCallIdx map[string]int, callIDs map[string]string) error {
 	msg := engine.Message{Role: engine.RoleAssistant}
-	// A trailing standalone signature part (Code Assist's final
-	// {"thoughtSignature":<sig>,"text":""} part after earlier text) binds the
-	// preceding closed text/thinking content of this turn and never a
-	// tool-call block (SignatureScopeTrailingStandalone). Hold it until a
-	// text-bearing message of this turn exists; if none does, drop it rather
-	// than misbind it to a tool-call-only message.
-	var pendingSig string
+
+	// hasText: does this content carry any text/thinking at all (text and
+	// thinking blocks both populate Text)? Distinguishes a leading standalone
+	// signature from a signature stranded on a tool-call-only turn.
+	hasText := false
+	for _, p := range content.Parts {
+		if p.Text != "" {
+			hasText = true
+			break
+		}
+	}
+
+	seenText := false
 	for _, p := range content.Parts {
 		switch {
 		case p.FunctionResponse != nil:
@@ -313,30 +327,28 @@ func appendModel(chat *engine.ChatRequest, content geminiContent, prevCallIdx ma
 			}
 			msg.Content += p.Text
 			if p.ThoughtSignature != "" {
+				// A part carrying BOTH text and a signature is a current (still
+				// open) block, not the trailing standalone case.
 				msg.ThinkingSignature = p.ThoughtSignature
 			}
-			if pendingSig != "" {
-				// The signature-only part preceded this text: bind it to the
-				// turn's text-bearing message per the scope contract.
-				msg.ThinkingSignature = pendingSig
-				pendingSig = ""
-			}
+			seenText = true
 		case p.ThoughtSignature != "":
-			// Signature-only part (text: ""): bind it to the preceding closed
-			// text content of this turn. If this message has no text yet (a
-			// tool-call-only turn), the signature does not bind tool-call
-			// blocks — hold it for a following text-bearing message of this
-			// turn, else drop it.
-			if msg.Content != "" {
-				msg.ThinkingSignature = p.ThoughtSignature
-			} else {
-				pendingSig = p.ThoughtSignature
+			// Signature-only part (text: ""). Valid only after text/thinking
+			// in this same content: it binds that preceding closed content via
+			// TrailingSignature, never tool-call blocks.
+			if !seenText {
+				if !hasText {
+					return fmt.Errorf("gemini: standalone signature on a tool-call-only turn")
+				}
+				return fmt.Errorf("gemini: trailing signature without preceding text/thinking content")
 			}
+			msg.TrailingSignature = p.ThoughtSignature
 		}
 	}
 	if msg.Content != "" || len(msg.ToolCalls) > 0 {
 		chat.Messages = append(chat.Messages, msg)
 	}
+	return nil
 }
 
 func appendToolResult(chat *engine.ChatRequest, fr *geminiFuncResp, callIDs map[string]string) {
@@ -471,12 +483,19 @@ func buildContents(msgs []engine.Message, codeAssist bool) []geminiContent {
 				out = append(out, geminiContent{Role: "user", Parts: []geminiPart{{Text: msg.Content}}})
 			}
 		case engine.RoleAssistant:
-			if msg.Content != "" {
+			if msg.Content != "" || msg.TrailingSignature != "" {
 				p := geminiPart{Text: msg.Content}
 				if msg.ThinkingSignature != "" {
 					p.ThoughtSignature = msg.ThinkingSignature
 				}
-				out = append(out, geminiContent{Role: "model", Parts: []geminiPart{p}})
+				parts := []geminiPart{p}
+				if msg.TrailingSignature != "" {
+					// Code Assist's trailing signature-only part: its OWN final
+					// part in the same content as the text — never merged into
+					// the text part (topology-preserving round-trip).
+					parts = append(parts, geminiPart{ThoughtSignature: msg.TrailingSignature})
+				}
+				out = append(out, geminiContent{Role: "model", Parts: parts})
 			}
 			// Keep a turn's parallel tool calls in ONE content block, matching
 			// how the model produced them: Gemini attaches a thoughtSignature to

@@ -366,16 +366,38 @@ func TestStreamFramingBareVsWrapped(t *testing.T) {
 	}
 }
 
-// TestCodeAssistTrailingSignatureBindsPrecedingText: a model turn whose text
-// is followed by Code Assist's trailing signature-only part
-// ({"thoughtSignature":<sig>,"text":""}) must carry the signature on the
-// assistant message — the non-stream path must not drop it the way the old
-// `case p.Text != ""` did. Per SignatureScopeTrailingStandalone it binds the
-// preceding closed text content of this turn.
-func TestCodeAssistTrailingSignatureBindsPrecedingText(t *testing.T) {
+// assertTrailingParts re-parses marshal output and compares the first model
+// content's parts structurally — part-by-part equality, not substring checks.
+func assertTrailingParts(t *testing.T, out []byte, want []geminiPart) {
+	t.Helper()
+	var gReq geminiRequest
+	if err := json.Unmarshal(out, &gReq); err != nil {
+		t.Fatalf("re-parse marshal output: %v", err)
+	}
+	if len(gReq.Contents) != 1 {
+		t.Fatalf("contents = %d, want 1 (all parts in the same content)", len(gReq.Contents))
+	}
+	if len(gReq.Contents[0].Parts) != len(want) {
+		t.Fatalf("parts = %d, want %d", len(gReq.Contents[0].Parts), len(want))
+	}
+	for i := range want {
+		if gReq.Contents[0].Parts[i] != want[i] {
+			t.Errorf("parts[%d] = %+v, want %+v", i, gReq.Contents[0].Parts[i], want[i])
+		}
+	}
+}
+
+// TestCodeAssistTrailingSignatureRoundTrip: a model turn whose text is
+// followed by Code Assist's trailing signature-only part
+// ({"thoughtSignature":<sig>,"text":""}) must land in the message's explicit
+// TrailingSignature slot (SignatureScopeTrailingStandalone — it binds the
+// preceding closed text content, never the current-block ThinkingSignature),
+// and re-marshal must reproduce the exact two-part topology in one content:
+// the signature stays its own final empty-text part, never merged into text.
+func TestCodeAssistTrailingSignatureRoundTrip(t *testing.T) {
 	body := `{"contents":[{"role":"model","parts":[
-		{"text":"The directory contains two files."},
-		{"thoughtSignature":"SIG_TRAILING","text":""}
+		{"text":"answer"},
+		{"text":"","thoughtSignature":"SIG"}
 	]}]}`
 	chat, err := (&Adapter{}).Unmarshal([]byte(body))
 	if err != nil {
@@ -388,35 +410,37 @@ func TestCodeAssistTrailingSignatureBindsPrecedingText(t *testing.T) {
 	if msg.Role != engine.RoleAssistant {
 		t.Errorf("role = %q, want assistant", msg.Role)
 	}
-	if msg.Content != "The directory contains two files." {
+	if msg.Content != "answer" {
 		t.Errorf("content = %q, want the preceding text", msg.Content)
 	}
-	if msg.ThinkingSignature != "SIG_TRAILING" {
-		t.Errorf("ThinkingSignature = %q, want SIG_TRAILING — trailing signature-only part was dropped", msg.ThinkingSignature)
+	if msg.TrailingSignature != "SIG" {
+		t.Errorf("TrailingSignature = %q, want SIG", msg.TrailingSignature)
+	}
+	if msg.ThinkingSignature != "" {
+		t.Errorf("ThinkingSignature = %q, want empty — trailing signature must not merge into the current block", msg.ThinkingSignature)
 	}
 
-	// The signature must survive re-marshal on the turn's text part.
 	out, err := (&Adapter{}).Marshal(chat)
 	if err != nil {
 		t.Fatalf("Marshal: %v", err)
 	}
-	if !strings.Contains(string(out), `"thoughtSignature":"SIG_TRAILING"`) {
-		t.Errorf("marshal lost the trailing signature: %s", out)
-	}
+	assertTrailingParts(t, out, []geminiPart{{Text: "answer"}, {ThoughtSignature: "SIG"}})
 }
 
-// TestCodeAssistTrailingSignatureNotBoundToToolCallOnlyTurn: a turn made only
-// of tool calls followed by a trailing signature-only part must NOT get the
-// signature attached to the tool-call message. Per SignatureScopeTrailingStandalone
-// the standalone signature binds only the preceding closed text/thinking
-// content of the turn and "does not bind tool-call blocks"; with no text-bearing
-// message in this turn it is dropped rather than misbound — the same clear
-// semantics the stream path's host normalization applies. Asserting the drop
-// keeps it a decision, not the accidental loss of the old code.
-func TestCodeAssistTrailingSignatureNotBoundToToolCallOnlyTurn(t *testing.T) {
+// TestCodeAssistTrailingSignatureRoundTripWithThinking: a current-block
+// signature (text+signature on one part — the thinking part) and a trailing
+// standalone part coexist: the former lands in ThinkingSignature, the latter
+// in TrailingSignature, and never collide. Text parts concatenate into
+// Content (this adapter does not separate thinking text), so the marshal
+// output is the text part carrying the current-block signature plus the
+// trailing signature as its own final empty-text part — the topology that
+// must survive the round trip. The re-parse of that output reproduces the
+// exact same message (stable round trip).
+func TestCodeAssistTrailingSignatureRoundTripWithThinking(t *testing.T) {
 	body := `{"contents":[{"role":"model","parts":[
-		{"functionCall":{"name":"list_dir","args":{"p":"/x"},"id":"c1"}},
-		{"thoughtSignature":"SIG_ORPHAN","text":""}
+		{"text":"think","thoughtSignature":"SIG_A"},
+		{"text":"answer"},
+		{"text":"","thoughtSignature":"SIG_B"}
 	]}]}`
 	chat, err := (&Adapter{}).Unmarshal([]byte(body))
 	if err != nil {
@@ -426,35 +450,72 @@ func TestCodeAssistTrailingSignatureNotBoundToToolCallOnlyTurn(t *testing.T) {
 		t.Fatalf("messages = %d, want 1", len(chat.Messages))
 	}
 	msg := chat.Messages[0]
-	if len(msg.ToolCalls) != 1 || msg.ToolCalls[0].Name != "list_dir" {
-		t.Fatalf("tool calls = %+v, want [list_dir]", msg.ToolCalls)
+	if msg.Content != "think\nanswer" {
+		t.Errorf("content = %q, want the concatenated text parts", msg.Content)
 	}
-	if msg.ThinkingSignature != "" {
-		t.Errorf("ThinkingSignature = %q, want empty — a standalone signature does not bind tool-call blocks", msg.ThinkingSignature)
+	if msg.ThinkingSignature != "SIG_A" {
+		t.Errorf("ThinkingSignature = %q, want SIG_A (current block)", msg.ThinkingSignature)
+	}
+	if msg.TrailingSignature != "SIG_B" {
+		t.Errorf("TrailingSignature = %q, want SIG_B (trailing standalone)", msg.TrailingSignature)
+	}
+
+	out, err := (&Adapter{}).Marshal(chat)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	assertTrailingParts(t, out, []geminiPart{
+		{Text: "think\nanswer", ThoughtSignature: "SIG_A"},
+		{ThoughtSignature: "SIG_B"},
+	})
+
+	again, err := (&Adapter{}).Unmarshal(out)
+	if err != nil {
+		t.Fatalf("re-Unmarshal: %v", err)
+	}
+	if len(again.Messages) != 1 {
+		t.Fatalf("re-unmarshal messages = %d, want 1", len(again.Messages))
+	}
+	re := again.Messages[0]
+	if re.Content != msg.Content || re.ThinkingSignature != msg.ThinkingSignature || re.TrailingSignature != msg.TrailingSignature {
+		t.Errorf("round trip not stable: got {%q, %q, %q}, want {%q, %q, %q}",
+			re.Content, re.ThinkingSignature, re.TrailingSignature, msg.Content, msg.ThinkingSignature, msg.TrailingSignature)
 	}
 }
 
-// TestCodeAssistTrailingSignatureBindsFollowingText: when the signature-only
-// part precedes the turn's text (no text content yet), it binds the next
-// text-bearing message of this turn instead of being dropped.
-func TestCodeAssistTrailingSignatureBindsFollowingText(t *testing.T) {
+// TestCodeAssistTrailingSignatureRejectedLeadingStandalone: a signature-only
+// part with NO preceding text/thinking in the same content is malformed — it
+// would bind nothing (the scope covers only preceding closed content) — so
+// Unmarshal rejects it instead of guessing at a binding.
+func TestCodeAssistTrailingSignatureRejectedLeadingStandalone(t *testing.T) {
 	body := `{"contents":[{"role":"model","parts":[
 		{"thoughtSignature":"SIG_LEAD","text":""},
 		{"text":"the actual reply"}
 	]}]}`
-	chat, err := (&Adapter{}).Unmarshal([]byte(body))
-	if err != nil {
-		t.Fatalf("Unmarshal: %v", err)
+	_, err := (&Adapter{}).Unmarshal([]byte(body))
+	if err == nil {
+		t.Fatal("Unmarshal succeeded, want parse error")
 	}
-	if len(chat.Messages) != 1 {
-		t.Fatalf("messages = %d, want 1", len(chat.Messages))
+	if !strings.Contains(err.Error(), "gemini: trailing signature without preceding text/thinking content") {
+		t.Errorf("error = %q, want the leading-standalone condition named", err.Error())
 	}
-	msg := chat.Messages[0]
-	if msg.Content != "the actual reply" {
-		t.Errorf("content = %q, want the following text", msg.Content)
+}
+
+// TestCodeAssistTrailingSignatureRejectedOnToolCallOnlyTurn: a signature-only
+// part in a content with NO text/thinking at all (a tool-call-only turn) is
+// malformed — SignatureScopeTrailingStandalone does not bind tool-call blocks
+// — so Unmarshal rejects it rather than dropping or misbinding it.
+func TestCodeAssistTrailingSignatureRejectedOnToolCallOnlyTurn(t *testing.T) {
+	body := `{"contents":[{"role":"model","parts":[
+		{"functionCall":{"name":"list_dir","args":{"p":"/x"},"id":"c1"}},
+		{"thoughtSignature":"SIG_ORPHAN","text":""}
+	]}]}`
+	_, err := (&Adapter{}).Unmarshal([]byte(body))
+	if err == nil {
+		t.Fatal("Unmarshal succeeded, want parse error")
 	}
-	if msg.ThinkingSignature != "SIG_LEAD" {
-		t.Errorf("ThinkingSignature = %q, want SIG_LEAD — signature should bind the next text-bearing message", msg.ThinkingSignature)
+	if !strings.Contains(err.Error(), "gemini: standalone signature on a tool-call-only turn") {
+		t.Errorf("error = %q, want the tool-call-only-turn condition named", err.Error())
 	}
 }
 
