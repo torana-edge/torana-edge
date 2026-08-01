@@ -34,6 +34,7 @@ func TestCodeAssistRoundTrip(t *testing.T) {
 	// Messages: system, user, assistant(tool call), tool(result), assistant(text).
 	var toolCall *engine.ToolCall
 	var toolResult *engine.Message
+	var textMsg *engine.Message
 	for i := range chat.Messages {
 		m := &chat.Messages[i]
 		if len(m.ToolCalls) > 0 {
@@ -41,6 +42,9 @@ func TestCodeAssistRoundTrip(t *testing.T) {
 		}
 		if m.Role == engine.RoleTool {
 			toolResult = m
+		}
+		if m.Role == engine.RoleAssistant && m.Content != "" {
+			textMsg = m
 		}
 	}
 	if toolCall == nil {
@@ -54,6 +58,21 @@ func TestCodeAssistRoundTrip(t *testing.T) {
 	}
 	if toolResult == nil || toolResult.ToolCallID != "3llkhajj" {
 		t.Errorf("tool result id not matched to call: %+v", toolResult)
+	}
+	// contents[3] is a text part carrying a thoughtSignature beside non-thought
+	// text — the SameMessage content-bound shape. Round 4 routes it to
+	// ContentSignature, never the thinking slot.
+	if textMsg == nil {
+		t.Fatal("no assistant text message parsed")
+	}
+	if textMsg.Content != "The directory contains two files." {
+		t.Errorf("assistant text content = %q, want the fixture's text", textMsg.Content)
+	}
+	if textMsg.ContentSignature != "SIG_TEXT" {
+		t.Errorf("ContentSignature = %q, want SIG_TEXT (signature beside non-thought text)", textMsg.ContentSignature)
+	}
+	if textMsg.ThinkingSignature != "" {
+		t.Errorf("ThinkingSignature = %q, want empty — text-part signature must not use the thinking slot", textMsg.ThinkingSignature)
 	}
 
 	out, err := a.Marshal(chat)
@@ -89,7 +108,7 @@ func TestCodeAssistRoundTrip(t *testing.T) {
 
 	// Rebuilt contents keep role:model for both call and result, plus id/signature.
 	contents, _ := req["contents"].([]any)
-	var sawModelCall, sawModelResult bool
+	var sawModelCall, sawModelResult, sawTextSig bool
 	for _, c := range contents {
 		cm := c.(map[string]any)
 		parts, _ := cm["parts"].([]any)
@@ -107,12 +126,18 @@ func TestCodeAssistRoundTrip(t *testing.T) {
 				sawModelResult = true
 			}
 		}
+		if tv, ok := p["text"].(string); ok && tv == "The directory contains two files." && p["thoughtSignature"] == "SIG_TEXT" {
+			sawTextSig = true
+		}
 	}
 	if !sawModelCall {
 		t.Error("marshaled functionCall missing role:model / id / thoughtSignature")
 	}
 	if !sawModelResult {
 		t.Error("marshaled functionResponse missing role:model / id")
+	}
+	if !sawTextSig {
+		t.Error("marshaled text part missing thoughtSignature SIG_TEXT beside its text")
 	}
 }
 
@@ -701,15 +726,44 @@ func TestCodeAssistUnsignedTextPartsMerge(t *testing.T) {
 	rawAbsent(t, parts[0], "thoughtSignature")
 }
 
-// TestCodeAssistTrailingSignatureValidWithToolCall: a trailing standalone
-// signature after text followed by a tool call (text, functionCall, trailingSig)
-// is VALID — the signature binds the preceding text; tool calls carry their own
-// signatures and never affect the trailing slot's finality.
-func TestCodeAssistTrailingSignatureValidWithToolCall(t *testing.T) {
+// TestCodeAssistRejectedMixedTextThinkingWithToolCall: a role:"model" content
+// mixing text/thinking parts with functionCall/functionResponse parts is
+// rejected outright — buildContents splits tool calls into their OWN model
+// contents for Code Assist, so the ordered mixed shape (text, functionCall,
+// trailingSig) cannot round-trip. Unconditional per reviewer ruling; no
+// fixture relies on the mixed shape.
+func TestCodeAssistRejectedMixedTextThinkingWithToolCall(t *testing.T) {
+	for name, body := range map[string]string{
+		"text + trailing + call": `{"contents":[{"role":"model","parts":[
+			{"text":"answer"},
+			{"functionCall":{"name":"list_dir","args":{"p":"/x"},"id":"c1"}},
+			{"text":"","thoughtSignature":"SIG"}
+		]}]}`,
+		"thinking + call": `{"contents":[{"role":"model","parts":[
+			{"thought":true,"text":"reason"},
+			{"functionCall":{"name":"list_dir","args":{"p":"/x"},"id":"c1"}}
+		]}]}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := (&Adapter{}).Unmarshal([]byte(body))
+			if err == nil {
+				t.Fatal("Unmarshal succeeded, want parse error")
+			}
+			if !strings.Contains(err.Error(), "gemini: mixed text/thinking and tool-call parts in one content are not representable") {
+				t.Errorf("error = %q, want the mixed-contents condition named", err.Error())
+			}
+		})
+	}
+}
+
+// TestCodeAssistContentSignatureRoundTrip: a non-thought text part carrying a
+// thoughtSignature maps to the ContentSignature slot (SameMessage scope over
+// the merged Content — NOT ThinkingSignature, whose SDK binding covers only
+// thinking/redacted_thinking blocks) and re-marshals to the exact same single
+// part with the signature beside the text.
+func TestCodeAssistContentSignatureRoundTrip(t *testing.T) {
 	body := `{"contents":[{"role":"model","parts":[
-		{"text":"answer"},
-		{"functionCall":{"name":"list_dir","args":{"p":"/x"},"id":"c1"}},
-		{"text":"","thoughtSignature":"SIG"}
+		{"text":"answer","thoughtSignature":"SIG"}
 	]}]}`
 	chat, err := (&Adapter{}).Unmarshal([]byte(body))
 	if err != nil {
@@ -719,11 +773,205 @@ func TestCodeAssistTrailingSignatureValidWithToolCall(t *testing.T) {
 		t.Fatalf("messages = %d, want 1", len(chat.Messages))
 	}
 	msg := chat.Messages[0]
-	if msg.Content != "answer" || msg.TrailingSignature != "SIG" {
-		t.Errorf("got {%q, %q}, want {answer, SIG} — trailing sig binds the text", msg.Content, msg.TrailingSignature)
+	if msg.Content != "answer" {
+		t.Errorf("Content = %q, want the text part's text", msg.Content)
 	}
-	if len(msg.ToolCalls) != 1 || msg.ToolCalls[0].Name != "list_dir" {
-		t.Errorf("tool call lost: %+v", msg.ToolCalls)
+	if msg.ContentSignature != "SIG" {
+		t.Errorf("ContentSignature = %q, want SIG (SameMessage scope over content)", msg.ContentSignature)
+	}
+	if msg.ThinkingSignature != "" {
+		t.Errorf("ThinkingSignature = %q, want empty — text-part signature must not use the thinking slot", msg.ThinkingSignature)
+	}
+	if msg.TrailingSignature != "" {
+		t.Errorf("TrailingSignature = %q, want empty — not a standalone part", msg.TrailingSignature)
+	}
+
+	out, err := (&Adapter{}).Marshal(chat)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	parts := rawModelParts(t, out)
+	if len(parts) != 1 {
+		t.Fatalf("parts = %d, want 1", len(parts))
+	}
+	rawText(t, parts[0], "answer")
+	if parts[0]["thoughtSignature"] != "SIG" {
+		t.Errorf("thoughtSignature = %v, want SIG on the text part", parts[0]["thoughtSignature"])
+	}
+	rawAbsent(t, parts[0], "thought")
+}
+
+// TestCodeAssistContentSignatureCombinedShape: the full signed topology — a
+// thought part with its current-block signature, a text part with its
+// content-bound signature, and the trailing standalone — maps to three DISTINCT
+// message slots (ThinkingSignature, ContentSignature, TrailingSignature) and
+// re-marshals to the same three parts in the pinned order thinking, text,
+// trailing. The re-parse of that output reproduces the exact same message.
+func TestCodeAssistContentSignatureCombinedShape(t *testing.T) {
+	body := `{"contents":[{"role":"model","parts":[
+		{"thought":true,"text":"think","thoughtSignature":"A"},
+		{"text":"answer","thoughtSignature":"B"},
+		{"text":"","thoughtSignature":"C"}
+	]}]}`
+	chat, err := (&Adapter{}).Unmarshal([]byte(body))
+	if err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if len(chat.Messages) != 1 {
+		t.Fatalf("messages = %d, want 1", len(chat.Messages))
+	}
+	msg := chat.Messages[0]
+	if msg.Thinking != "think" || msg.ThinkingSignature != "A" {
+		t.Errorf("Thinking/ThinkingSignature = {%q, %q}, want {think, A}", msg.Thinking, msg.ThinkingSignature)
+	}
+	if msg.Content != "answer" || msg.ContentSignature != "B" {
+		t.Errorf("Content/ContentSignature = {%q, %q}, want {answer, B}", msg.Content, msg.ContentSignature)
+	}
+	if msg.TrailingSignature != "C" {
+		t.Errorf("TrailingSignature = %q, want C", msg.TrailingSignature)
+	}
+
+	out, err := (&Adapter{}).Marshal(chat)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	parts := rawModelParts(t, out)
+	if len(parts) != 3 {
+		t.Fatalf("parts = %d, want 3 (thinking, text, trailing)", len(parts))
+	}
+	// Part 0: thinking, first, with its current-block signature.
+	if parts[0]["thought"] != true {
+		t.Errorf("parts[0] thought = %v, want true", parts[0]["thought"])
+	}
+	rawText(t, parts[0], "think")
+	if parts[0]["thoughtSignature"] != "A" {
+		t.Errorf("parts[0] thoughtSignature = %v, want A", parts[0]["thoughtSignature"])
+	}
+	// Part 1: the text part with its content-bound signature.
+	rawText(t, parts[1], "answer")
+	if parts[1]["thoughtSignature"] != "B" {
+		t.Errorf("parts[1] thoughtSignature = %v, want B", parts[1]["thoughtSignature"])
+	}
+	rawAbsent(t, parts[1], "thought")
+	// Part 2: the trailing standalone with its explicit empty text arm.
+	rawText(t, parts[2], "")
+	if parts[2]["thoughtSignature"] != "C" {
+		t.Errorf("parts[2] thoughtSignature = %v, want C", parts[2]["thoughtSignature"])
+	}
+
+	again, err := (&Adapter{}).Unmarshal(out)
+	if err != nil {
+		t.Fatalf("re-Unmarshal: %v", err)
+	}
+	if len(again.Messages) != 1 {
+		t.Fatalf("re-unmarshal messages = %d, want 1", len(again.Messages))
+	}
+	re := again.Messages[0]
+	if re.Content != msg.Content || re.ContentSignature != msg.ContentSignature || re.Thinking != msg.Thinking || re.ThinkingSignature != msg.ThinkingSignature || re.TrailingSignature != msg.TrailingSignature {
+		t.Errorf("round trip not stable: got {%q,%q,%q,%q,%q}, want {%q,%q,%q,%q,%q}",
+			re.Content, re.ContentSignature, re.Thinking, re.ThinkingSignature, re.TrailingSignature,
+			msg.Content, msg.ContentSignature, msg.Thinking, msg.ThinkingSignature, msg.TrailingSignature)
+	}
+}
+
+// TestCodeAssistRejectedBareSignaturePart: a part with a thoughtSignature but
+// NO "text" key at all is not the supported trailing shape — the
+// TrailingStandalone contract requires the EXPLICIT empty-text arm — so
+// Unmarshal rejects it instead of guessing at a binding.
+func TestCodeAssistRejectedBareSignaturePart(t *testing.T) {
+	for name, body := range map[string]string{
+		"lone bare": `{"contents":[{"role":"model","parts":[
+			{"thoughtSignature":"S"}
+		]}]}`,
+		"bare after text": `{"contents":[{"role":"model","parts":[
+			{"text":"answer"},
+			{"thoughtSignature":"S"}
+		]}]}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := (&Adapter{}).Unmarshal([]byte(body))
+			if err == nil {
+				t.Fatal("Unmarshal succeeded, want parse error")
+			}
+			if !strings.Contains(err.Error(), "gemini: standalone signature part must carry explicit empty text") {
+				t.Errorf("error = %q, want the explicit-empty-text condition named", err.Error())
+			}
+		})
+	}
+}
+
+// TestCodeAssistThinkingOnlyNoInventedTextPart: a thinking-only turn must
+// marshal to EXACTLY ONE part (the thought part) — round 3 invented an empty
+// {} text part for Content-less turns, which Code Assist rejects.
+func TestCodeAssistThinkingOnlyNoInventedTextPart(t *testing.T) {
+	body := `{"contents":[{"role":"model","parts":[
+		{"thought":true,"text":"r","thoughtSignature":"S"}
+	]}]}`
+	chat, err := (&Adapter{}).Unmarshal([]byte(body))
+	if err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if len(chat.Messages) != 1 {
+		t.Fatalf("messages = %d, want 1", len(chat.Messages))
+	}
+	msg := chat.Messages[0]
+	if msg.Thinking != "r" || msg.ThinkingSignature != "S" || msg.Content != "" || msg.ContentSignature != "" {
+		t.Errorf("got {%q,%q,%q,%q}, want {r,S,<empty>,<empty>}", msg.Thinking, msg.ThinkingSignature, msg.Content, msg.ContentSignature)
+	}
+
+	out, err := (&Adapter{}).Marshal(chat)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	parts := rawModelParts(t, out)
+	if len(parts) != 1 {
+		t.Fatalf("parts = %d, want EXACTLY 1 (no invented empty text part)", len(parts))
+	}
+	if parts[0]["thought"] != true {
+		t.Errorf("parts[0] thought = %v, want true", parts[0]["thought"])
+	}
+	rawText(t, parts[0], "r")
+	if parts[0]["thoughtSignature"] != "S" {
+		t.Errorf("parts[0] thoughtSignature = %v, want S", parts[0]["thoughtSignature"])
+	}
+}
+
+// TestCodeAssistThinkingTrailingNoContent: a thinking part plus a trailing
+// standalone with NO text content in between must marshal to exactly two parts
+// (thinking, trailing) — the text part is not invented and the trailing
+// signature stays its own explicit empty-text part.
+func TestCodeAssistThinkingTrailingNoContent(t *testing.T) {
+	body := `{"contents":[{"role":"model","parts":[
+		{"thought":true,"text":"r"},
+		{"text":"","thoughtSignature":"S"}
+	]}]}`
+	chat, err := (&Adapter{}).Unmarshal([]byte(body))
+	if err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if len(chat.Messages) != 1 {
+		t.Fatalf("messages = %d, want 1", len(chat.Messages))
+	}
+	msg := chat.Messages[0]
+	if msg.Thinking != "r" || msg.ThinkingSignature != "" || msg.Content != "" || msg.TrailingSignature != "S" {
+		t.Errorf("got {%q,%q,%q,%q}, want {r,<empty>,<empty>,S}", msg.Thinking, msg.ThinkingSignature, msg.Content, msg.TrailingSignature)
+	}
+
+	out, err := (&Adapter{}).Marshal(chat)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	parts := rawModelParts(t, out)
+	if len(parts) != 2 {
+		t.Fatalf("parts = %d, want 2 (thinking, trailing)", len(parts))
+	}
+	if parts[0]["thought"] != true {
+		t.Errorf("parts[0] thought = %v, want true", parts[0]["thought"])
+	}
+	rawText(t, parts[0], "r")
+	rawText(t, parts[1], "")
+	if parts[1]["thoughtSignature"] != "S" {
+		t.Errorf("parts[1] thoughtSignature = %v, want S", parts[1]["thoughtSignature"])
 	}
 }
 

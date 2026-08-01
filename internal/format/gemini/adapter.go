@@ -293,38 +293,50 @@ func appendUserOrTool(chat *engine.ChatRequest, content geminiContent, callIDs m
 
 // appendModel handles a role:"model" content, which under Code Assist may hold
 // a functionCall, a functionResponse (tool result), thinking, or text — each
-// preserving its id and thoughtSignature. A part with empty text and only a
-// thoughtSignature is the trailing standalone signature (Code Assist's final
-// {"thoughtSignature":<sig>,"text":""} part, SignatureScopeTrailingStandalone):
-// it binds the preceding closed text/thinking content of this turn, never a
-// tool-call block. It is only valid AFTER text/thinking in the same content;
-// a signature-only part with no preceding text/thinking is malformed and
-// rejected (a leading standalone, or one stranded on a tool-call-only turn).
+// preserving its id and thoughtSignature. A signature beside non-thought text
+// is the content-bound signature (SignatureScopeSameMessage: binds the merged
+// Content) and lands in ContentSignature; a signature on a thought:true part
+// is the current-block signature and lands in ThinkingSignature. A part with
+// EXPLICIT empty text and only a thoughtSignature is the trailing standalone
+// signature (Code Assist's final {"thoughtSignature":<sig>,"text":""} part,
+// SignatureScopeTrailingStandalone): it binds the preceding closed text/
+// thinking content of this turn, never a tool-call block. It is only valid
+// AFTER text/thinking in the same content; a signature-only part with no
+// preceding text/thinking is malformed and rejected (a leading standalone, or
+// one stranded on a tool-call-only turn), and a BARE signature part (no "text"
+// key at all) is not the trailing shape — the contract requires the explicit
+// empty-text arm — so it too is rejected.
 //
 // Ordered signed-part topology is preserved or rejected: a current-block
 // signature must never move over unsigned content (the Content/Thinking merge
 // would replay a provider signature over parts it did not sign), so multiple
 // text-bearing or thinking-bearing parts with any signature in the content are
 // rejected, and the trailing standalone signature must be final and singular.
+// A content mixing text/thinking with tool-call parts is rejected outright:
+// buildContents intentionally splits tool calls into their own model contents
+// for Code Assist, so the ordered mixed shape cannot round-trip.
 func appendModel(chat *engine.ChatRequest, content geminiContent, prevCallIdx map[string]int, callIDs map[string]string) error {
 	msg := engine.Message{Role: engine.RoleAssistant}
 
 	// Pre-pass counts for the topology reject rules. Signatures on tool-call
 	// parts are call-bound (each call keeps its own) and never move, so they
-	// are excluded from "any signature".
+	// are excluded from "any signature". A valid trailing part carries the
+	// EXPLICIT "text":"" arm, so it is not counted as text-bearing; a bare
+	// signature part (no "text" key) is counted standalone and rejected below.
 	textParts, thinkingParts, standaloneParts := 0, 0, 0
 	sigOnText, sigOnThinking := false, false
-	hasText := false
+	hasText, hasTool := false, false
 	for _, p := range content.Parts {
 		switch {
 		case p.FunctionCall != nil || p.FunctionResponse != nil:
-		case p.Thought && partText(p) != "":
+			hasTool = true
+		case p.Thought && p.Text != nil && *p.Text != "":
 			thinkingParts++
 			if p.ThoughtSignature != "" {
 				sigOnThinking = true
 			}
 			hasText = true
-		case partText(p) != "":
+		case p.Text != nil && *p.Text != "":
 			textParts++
 			if p.ThoughtSignature != "" {
 				sigOnText = true
@@ -333,6 +345,13 @@ func appendModel(chat *engine.ChatRequest, content geminiContent, prevCallIdx ma
 		case p.ThoughtSignature != "":
 			standaloneParts++
 		}
+	}
+
+	// A content mixing text/thinking with tool-call parts cannot round-trip:
+	// buildContents splits tool calls into their own model contents for Code
+	// Assist, so the ordered mixed shape would be lost. Rejected unconditionally.
+	if hasText && hasTool {
+		return fmt.Errorf("gemini: mixed text/thinking and tool-call parts in one content are not representable")
 	}
 
 	// A second signature-only part is always malformed, wherever it sits:
@@ -361,33 +380,37 @@ func appendModel(chat *engine.ChatRequest, content geminiContent, prevCallIdx ma
 				Arguments: p.FunctionCall.Args,
 				Signature: p.ThoughtSignature,
 			})
-		case p.Thought && partText(p) != "":
+		case p.Thought && p.Text != nil && *p.Text != "":
 			// Thinking part: its text goes to Thinking (never Content), and a
-			// signature on it is the current-block signature. Joined with "\n"
-			// like Content.
+			// signature on it is the current-block ThinkingSignature — the ONLY
+			// source of that slot. Joined with "\n" like Content.
 			if msg.Thinking != "" {
 				msg.Thinking += "\n"
 			}
-			msg.Thinking += partText(p)
+			msg.Thinking += *p.Text
 			if p.ThoughtSignature != "" {
 				msg.ThinkingSignature = p.ThoughtSignature
 			}
 			seenText = true
-		case partText(p) != "":
+		case p.Text != nil && *p.Text != "":
 			if msg.Content != "" {
 				msg.Content += "\n"
 			}
-			msg.Content += partText(p)
+			msg.Content += *p.Text
 			if p.ThoughtSignature != "" {
-				// A part carrying BOTH text and a signature is a current (still
-				// open) block, not the trailing standalone case.
-				msg.ThinkingSignature = p.ThoughtSignature
+				// A part carrying BOTH text and a signature is the content-bound
+				// (SameMessage) signature covering this Content — NOT the
+				// thinking-block slot, which comes only from thought:true parts.
+				msg.ContentSignature = p.ThoughtSignature
 			}
 			seenText = true
 		case p.ThoughtSignature != "":
-			// Signature-only part (text: ""). Valid only after text/thinking
-			// in this same content: it binds that preceding closed content via
-			// TrailingSignature, never tool-call blocks.
+			// Signature-only part. The valid trailing shape is an EXPLICIT
+			// empty-text part ({"text":"","thoughtSignature":…}); a bare part
+			// with no "text" key at all is not that contract and is rejected.
+			if p.Text == nil {
+				return fmt.Errorf("gemini: standalone signature part must carry explicit empty text")
+			}
 			if !seenText {
 				if !hasText {
 					return fmt.Errorf("gemini: standalone signature on a tool-call-only turn")
@@ -549,7 +572,7 @@ func buildContents(msgs []engine.Message, codeAssist bool) []geminiContent {
 				out = append(out, geminiContent{Role: "user", Parts: []geminiPart{{Text: new(msg.Content)}}})
 			}
 		case engine.RoleAssistant:
-			if msg.Content != "" || msg.Thinking != "" || msg.TrailingSignature != "" {
+			if msg.Content != "" || msg.ContentSignature != "" || msg.Thinking != "" || msg.TrailingSignature != "" {
 				var parts []geminiPart
 				if msg.Thinking != "" {
 					// Thinking precedes text per Gemini's contract: the thinking
@@ -560,16 +583,17 @@ func buildContents(msgs []engine.Message, codeAssist bool) []geminiContent {
 					}
 					parts = append(parts, tp)
 				}
-				p := geminiPart{}
-				if msg.Content != "" {
-					p.Text = new(msg.Content)
+				// The text part is emitted only when it carries content OR a
+				// content-bound signature — never invented for thinking-only
+				// turns. Its signature is the ContentSignature (SameMessage
+				// scope over this text), never the thinking-block signature.
+				if msg.Content != "" || msg.ContentSignature != "" {
+					p := geminiPart{Text: new(msg.Content)}
+					if msg.ContentSignature != "" {
+						p.ThoughtSignature = msg.ContentSignature
+					}
+					parts = append(parts, p)
 				}
-				if msg.Thinking == "" && msg.ThinkingSignature != "" {
-					// Legacy current-block shape: the signature rides on the text
-					// part itself (no separate thinking part to carry it).
-					p.ThoughtSignature = msg.ThinkingSignature
-				}
-				parts = append(parts, p)
 				if msg.TrailingSignature != "" {
 					// Code Assist's trailing signature-only part: its OWN final
 					// part in the same content as the text, with the EXPLICIT
