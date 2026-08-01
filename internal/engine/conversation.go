@@ -144,6 +144,20 @@ func CachePrefixKey(c *ChatRequest) string {
 		writeHashField(h, canonicalJSON(m.ContentParts))
 		writeHashField(h, m.Thinking)
 		writeHashField(h, m.ThinkingSignature)
+		// The replayed provider prefix carries the content-bound and trailing
+		// standalone signatures exactly like the thinking signature: two
+		// requests differing only in one of these tokens must not share a
+		// cache key (warming would target a different Gemini prefix than the
+		// one actually sent). Tagged and conditional so unsigned requests keep
+		// their existing keys.
+		if m.ContentSignature != "" {
+			writeHashField(h, "content-signature")
+			writeHashField(h, m.ContentSignature)
+		}
+		if m.TrailingSignature != "" {
+			writeHashField(h, "trailing-signature")
+			writeHashField(h, m.TrailingSignature)
+		}
 		writeHashField(h, m.RedactedThinking)
 		writeHashField(h, m.ToolCallID)
 		writeHashField(h, m.ToolName)

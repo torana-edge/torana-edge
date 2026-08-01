@@ -274,6 +274,46 @@ func TestCachePrefixKeyPreservesSignatures(t *testing.T) {
 	if CachePrefixKey(mk("sig-a")) == CachePrefixKey(mk("sig-b")) {
 		t.Error("a changed tool-call signature kept the cache key")
 	}
+
+	// ContentSignature: a signature bound to a text part is part of the
+	// replayed prefix; two requests differing only in it must split the key.
+	mkContent := func(sig string) *ChatRequest {
+		return &ChatRequest{Model: "m", Messages: msgs(
+			sys("p"),
+			Message{
+				Role:             RoleAssistant,
+				Content:          "answer",
+				ContentSignature: sig,
+				CacheControl:     ephemeral(),
+			},
+		)}
+	}
+	if CachePrefixKey(mkContent("sig-a")) == CachePrefixKey(mkContent("sig-b")) {
+		t.Error("a changed content signature kept the cache key")
+	}
+
+	// TrailingSignature: same invariant for the standalone final token.
+	mkTrailing := func(sig string) *ChatRequest {
+		return &ChatRequest{Model: "m", Messages: msgs(
+			sys("p"),
+			Message{
+				Role:              RoleAssistant,
+				Content:           "answer",
+				TrailingSignature: sig,
+				CacheControl:      ephemeral(),
+			},
+		)}
+	}
+	if CachePrefixKey(mkTrailing("sig-a")) == CachePrefixKey(mkTrailing("sig-b")) {
+		t.Error("a changed trailing signature kept the cache key")
+	}
+
+	// The slots are distinct even when the token bytes are identical: the
+	// same token in the content slot and the trailing slot replays different
+	// provider prefixes.
+	if CachePrefixKey(mkContent("same")) == CachePrefixKey(mkTrailing("same")) {
+		t.Error("content and trailing signatures with the same token shared a cache key")
+	}
 }
 
 // TestCachePrefixKeyEmpty — nothing cacheable yields "".
