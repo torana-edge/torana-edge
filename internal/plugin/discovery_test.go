@@ -325,7 +325,6 @@ func TestValidateManifestContract(t *testing.T) {
 		}
 	}
 	invalid := valid
-	invalid = valid
 	invalid.Permissions = []Permission{{Name: "env.not_real"}}
 	if err := validateManifest(invalid); err == nil {
 		t.Fatal("unknown permission was accepted")
