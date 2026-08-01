@@ -660,8 +660,8 @@ func TestEgressResponseLimits(t *testing.T) {
 			srv := newEgressTestServer(t, upstream.URL)
 			got, herr := send(t, srv, "warmer", egressPayload(t, "oai", "/v1/chat/completions"))
 			if tc.wantRefuse {
-				if herr == nil || herr.Code != pb.ErrorCode_ERROR_CODE_UNAVAILABLE {
-					t.Fatalf("oversized body was not refused as UNAVAILABLE: %v", herr)
+				if herr == nil || herr.Code != pb.ErrorCode_ERROR_CODE_INVALID_ARGUMENT {
+					t.Fatalf("oversized body was not refused as INVALID_ARGUMENT: %v", herr)
 				}
 			} else {
 				if herr != nil {
@@ -701,4 +701,128 @@ func newEgressTestServer(t *testing.T, upstreamURL string) *Server {
 	}
 	t.Cleanup(func() { srv.conversations.Close() })
 	return srv
+}
+
+// TestEgressRedirectsStayOnOrigin — the origin proof applies to the initial
+// request only; http.Client follows redirects by default and Go strips
+// Authorization but NOT X-Api-Key on a cross-host redirect. A cross-origin
+// redirect must not be followed: the 3xx becomes the reached provider
+// outcome, the attacker receives nothing, no credential crosses, and exactly
+// one budget slot is consumed. Same-origin redirects remain legal.
+func TestEgressRedirectsStayOnOrigin(t *testing.T) {
+	t.Run("cross-origin redirect is not followed", func(t *testing.T) {
+		var attackerMu sync.Mutex
+		attackerHits := 0
+		var attackerAuth, attackerKey string
+		attacker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			attackerMu.Lock()
+			attackerHits++
+			attackerAuth = r.Header.Get("Authorization")
+			attackerKey = r.Header.Get("X-Api-Key")
+			attackerMu.Unlock()
+			w.WriteHeader(http.StatusOK)
+		}))
+		defer attacker.Close()
+
+		upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			http.Redirect(w, r, attacker.URL+"/steal", http.StatusFound)
+		}))
+		defer upstream.Close()
+
+		srv := newEgressTestServer(t, upstream.URL)
+		got, herr := send(t, srv, "warmer", egressPayload(t, "oai", "/v1/chat/completions"))
+		if herr != nil {
+			t.Fatalf("a cross-origin redirect became a refusal: %v", herr)
+		}
+		if got.HTTPStatus != http.StatusFound {
+			t.Fatalf("http_status = %d, want the original 302 as the outcome", got.HTTPStatus)
+		}
+		attackerMu.Lock()
+		hits, auth, key := attackerHits, attackerAuth, attackerKey
+		attackerMu.Unlock()
+		if hits != 0 {
+			t.Fatalf("attacker server saw %d requests", hits)
+		}
+		if auth != "" || key != "" {
+			t.Fatalf("credential reached the attacker: auth=%q x-api-key=%q", auth, key)
+		}
+	})
+
+	t.Run("same-origin redirect is followed", func(t *testing.T) {
+		upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/hop" {
+				w.Header().Set("Content-Type", "application/json")
+				w.Write([]byte(`{"id":"c1","choices":[{"message":{"role":"assistant","content":"ok"}}]}`))
+				return
+			}
+			http.Redirect(w, r, "/hop", http.StatusTemporaryRedirect)
+		}))
+		defer upstream.Close()
+
+		srv := newEgressTestServer(t, upstream.URL)
+		got, herr := send(t, srv, "warmer", egressPayload(t, "oai", "/start"))
+		if herr != nil {
+			t.Fatalf("a same-origin redirect was refused: %v", herr)
+		}
+		if got.HTTPStatus != http.StatusOK {
+			t.Fatalf("http_status = %d, want 200 after the same-origin hop", got.HTTPStatus)
+		}
+	})
+}
+
+// TestEgressHostPathContract pins the host's authoritative path predicate
+// against the SHARED adversarial matrix (sdktest.EgressPathCases in
+// torana-plugin-sdk). The SDK mirror runs the same rows; the re-pin replaces
+// this local copy with the sdktest import so the two cannot diverge again.
+func TestEgressHostPathContract(t *testing.T) {
+	// Reference: sdktest.EgressPathCases — keep in sync; identical rows.
+	pathCases := []struct {
+		Path  string
+		Valid bool
+	}{
+		{"/v1/chat/completions", true},
+		{"/v1/chat/completions?stream=true", true},
+		{"/v1/chat/completions?x=1&y=2", true},
+		{"/model/amazon.titan-text-express-v1:invoke", true},
+		{"/v1/messages:generateContent", true},
+		{"/a/b/c", true},
+		{"/%2F%2Fattacker.example/x", false},
+		{"/@attacker.example/v1", true},
+		{"", false},
+		{"v1/chat/completions", false},
+		{"@attacker.example/v1", false},
+		{"//attacker.example/v1", false},
+		{"https://attacker.example/v1", false},
+		{"http://attacker.example/v1", false},
+		{"//127.0.0.1:8080/v1", false},
+		{"/v1/chat/completions#frag", false},
+		{"/v1/chat/completions\x00x", false},
+		{"/v1/chat/completions\r\nHost: attacker.example", false},
+		{"/v1/chat/completions\nX: y", false},
+	}
+
+	for _, tc := range pathCases {
+		name := strings.Map(func(r rune) rune {
+			if r < 0x20 || r == 0x7f {
+				return '_'
+			}
+			return r
+		}, tc.Path)
+		if name == "" {
+			name = "(empty)"
+		}
+		t.Run(name, func(t *testing.T) {
+			srv, calls := egressServer(t, provider.EgressBudget{MaxCallsPerMinute: 10})
+			_, herr := send(t, srv, "warmer", egressPayload(t, "oai", tc.Path))
+			if tc.Valid && herr != nil {
+				t.Fatalf("a valid path %q was refused: %v", tc.Path, herr)
+			}
+			if !tc.Valid && (herr == nil || herr.Code != pb.ErrorCode_ERROR_CODE_INVALID_ARGUMENT) {
+				t.Fatalf("an invalid path %q was not refused as INVALID_ARGUMENT: %v", tc.Path, herr)
+			}
+			if !tc.Valid && *calls != 0 {
+				t.Fatalf("an invalid path consumed a budget slot (upstream calls = %d)", *calls)
+			}
+		})
+	}
 }

@@ -505,8 +505,8 @@ func TestOffloadResponseLimits(t *testing.T) {
 
 			got, herr := offloadCall(t, s, ctx, `{"system_prompt":"s","user_prompt":"u"}`)
 			if tc.wantRefuse {
-				if herr == nil || herr.Code != pbv2.ErrorCode_ERROR_CODE_UNAVAILABLE {
-					t.Fatalf("oversized body was not refused as UNAVAILABLE: %v", herr)
+				if herr == nil || herr.Code != pbv2.ErrorCode_ERROR_CODE_INVALID_ARGUMENT {
+					t.Fatalf("oversized body was not refused as INVALID_ARGUMENT: %v", herr)
 				}
 			} else {
 				if herr != nil {

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"net/url"
 	"time"
 
 	"github.com/torana-edge/torana-edge/internal/economics"
@@ -45,6 +46,9 @@ const maxOffloadResponseBytes = 1 << 20
 //   - UNAVAILABLE: transport/read failures, an upstream non-200, an
 //     unparseable response, no choices, or an empty completion. The call was
 //     valid but could not currently be completed.
+//   - INVALID_ARGUMENT also covers an oversized response: it is deterministic
+//     (the same request hits the same limit and spends money again), so the
+//     plugin must change the request rather than retry it unchanged.
 //   - INTERNAL: a host-side invariant failed (the success envelope cannot be
 //     marshaled). Not the guest's fault, not the operator's.
 func (s *Server) offloadCompletionResult(ctx context.Context, payloadJSON string) wasm.ExtensionResult {
@@ -144,7 +148,24 @@ func (s *Server) offloadCompletionResult(ctx context.Context, payloadJSON string
 		httpReq.Header.Set("Authorization", "Bearer "+apiKey)
 	}
 
-	client := &http.Client{Timeout: offloadTimeout}
+	// The URL is operator configuration, so an origin parse failure is a
+	// configuration gap; a cross-origin redirect would leak the credential
+	// (Go strips Authorization but not X-Api-Key), so redirects are confined
+	// to the configured origin and a 3xx elsewhere becomes the outcome.
+	base, err := url.Parse(prov.URL)
+	if err != nil || base.Scheme == "" || base.Host == "" {
+		return wasm.ExtensionRefusal(pbv2.ErrorCode_ERROR_CODE_NOT_CONFIGURED,
+			"offload: provider %q has an invalid URL %q", provName, prov.URL)
+	}
+	client := &http.Client{
+		Timeout: offloadTimeout,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if req.URL.Scheme != base.Scheme || req.URL.Host != base.Host || req.URL.Hostname() != base.Hostname() {
+				return http.ErrUseLastResponse
+			}
+			return nil
+		},
+	}
 	resp, err := client.Do(httpReq)
 	if err != nil {
 		return wasm.ExtensionRefusal(pbv2.ErrorCode_ERROR_CODE_UNAVAILABLE, "offload: %v", err)
@@ -157,7 +178,8 @@ func (s *Server) offloadCompletionResult(ctx context.Context, payloadJSON string
 		return wasm.ExtensionRefusal(pbv2.ErrorCode_ERROR_CODE_UNAVAILABLE, "offload: read response: %v", err)
 	}
 	if len(respBytes) > maxOffloadResponseBytes {
-		return wasm.ExtensionRefusal(pbv2.ErrorCode_ERROR_CODE_UNAVAILABLE, "offload: response exceeds %d bytes", maxOffloadResponseBytes)
+		// Deterministic, not transient: the plugin must change the request.
+		return wasm.ExtensionRefusal(pbv2.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "offload: response exceeds %d bytes — reduce the prompt or raise the limit", maxOffloadResponseBytes)
 	}
 	if resp.StatusCode != 200 {
 		return wasm.ExtensionRefusal(pbv2.ErrorCode_ERROR_CODE_UNAVAILABLE,

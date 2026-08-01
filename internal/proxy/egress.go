@@ -295,7 +295,10 @@ func (s *Server) sendPluginRequest(ctx context.Context, pluginName, payloadJSON 
 	// (ParseRequestURI folds it into the path); reject it outright so the
 	// authority can never be ambiguous, along with absolute forms, opaque
 	// forms, and userinfo.
-	if u.Scheme != "" || u.Host != "" || u.User != nil || u.Opaque != "" || strings.HasPrefix(u.Path, "//") {
+	// ParseRequestURI folds a raw '#' into the path rather than parsing it as
+	// a fragment, so reject fragments on the raw input; a real '#' in a path
+	// must be %23-encoded.
+	if strings.Contains(path, "#") || u.Scheme != "" || u.Host != "" || u.User != nil || u.Opaque != "" || strings.HasPrefix(u.Path, "//") {
 		return wasm.ExtensionRefusal(pb.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "path must stay on the configured provider origin, got %q", path)
 	}
 	target := base.ResolveReference(u)
@@ -350,8 +353,24 @@ func (s *Server) sendPluginRequest(ctx context.Context, pluginName, payloadJSON 
 		return wasm.ExtensionRefusal(classifyEgressRefusal(err), "%v", err)
 	}
 
+	// The origin proof applies to the INITIAL request only; an http.Client
+	// follows redirects by default, and Go strips Authorization but NOT
+	// X-Api-Key on a cross-host redirect. Confine redirects to the configured
+	// origin: any scheme/host change becomes the reached provider outcome
+	// (http.ErrUseLastResponse preserves the 3xx and the fact that a transport
+	// attempt and budget slot occurred). Go still enforces its 10-redirect cap
+	// before this policy runs.
+	client := &http.Client{
+		Timeout: timeout,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if req.URL.Scheme != base.Scheme || req.URL.Host != base.Host || req.URL.Hostname() != base.Hostname() {
+				return http.ErrUseLastResponse
+			}
+			return nil
+		},
+	}
 	start := time.Now()
-	resp, err := (&http.Client{Timeout: timeout}).Do(httpReq)
+	resp, err := client.Do(httpReq)
 	if err != nil {
 		s.stats.RecordPluginCounter(pluginName, "egress_failed", 1)
 		return wasm.ExtensionRefusal(pb.ErrorCode_ERROR_CODE_UNAVAILABLE, "request to %s failed: %v", req.Provider, err)
@@ -367,8 +386,12 @@ func (s *Server) sendPluginRequest(ctx context.Context, pluginName, payloadJSON 
 		return wasm.ExtensionRefusal(pb.ErrorCode_ERROR_CODE_UNAVAILABLE, "read response: %v", err)
 	}
 	if len(respBody) > maxEgressResponseBytes {
+		// Deterministic, not transient: repeating the same request hits the
+		// same limit and spends money again, so it is a caller-shape problem,
+		// not a retryable outage (no dedicated resource-exhausted code exists
+		// yet; INVALID_ARGUMENT is the closest class until one lands).
 		s.stats.RecordPluginCounter(pluginName, "egress_failed", 1)
-		return wasm.ExtensionRefusal(pb.ErrorCode_ERROR_CODE_UNAVAILABLE, "egress response exceeds %d bytes", maxEgressResponseBytes)
+		return wasm.ExtensionRefusal(pb.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "egress response exceeds %d bytes — reduce the request (e.g. max_tokens) or raise the limit", maxEgressResponseBytes)
 	}
 
 	out := egressResponse{HTTPStatus: resp.StatusCode, Body: base64.StdEncoding.EncodeToString(respBody)}
