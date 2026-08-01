@@ -11,7 +11,7 @@ LDFLAGS := -s -w -X main.version=$(VERSION)
 # below. `make official-plugins` builds them from a sibling checkout when you
 # want the plugin-behaviour suite to run locally.
 TESTDATA_DIRS := examples/plugins/test-extension-contract examples/plugins/test-stream-mutator examples/plugins/test-stream-mutator-nogrant examples/plugins/test-stream-fanout examples/plugins/test-stream-fanout-boundaries examples/plugins/test-stream-reindex-nogrant examples/plugins/test-stream-complete-block-nogrant examples/plugins/test-stream-complete-block-granted examples/plugins/test-stream-complete-signed-tool examples/plugins/test-stream-delay-stop examples/plugins/test-stream-early-stop examples/plugins/test-blocker examples/plugins/test-blocker-nogrant examples/plugins/test-observer examples/plugins/test-responder examples/plugins/test-responder-nogrant examples/plugins/test-original examples/plugins/test-router examples/plugins/test-ticker examples/plugins/test-http-server examples/plugins/test-metrics examples/plugins/test-mutator examples/plugins/test-hostcall examples/plugins/test-fragment-buffer examples/plugins/test-inert-a examples/plugins/test-inert-b examples/plugins/test-inert-c examples/plugins/test-trapper examples/plugins/test-block-then-trap examples/plugins/test-invalid-replacement examples/plugins/test-forge-response-fields examples/plugins/test-invented-content examples/plugins/test-forge-host-meta examples/plugins/test-stale-bind examples/plugins/test-verdict-then-invalid examples/plugins/test-records-invocation examples/plugins/test-trapper-response examples/plugins/test-trapper-stream examples/plugins/test-tool-rewriter examples/plugins/test-malformed-result examples/plugins/test-trapper-after-stream examples/plugins/test-slow-after-stream
-WASM_BUILD = GOOS=wasip1 GOARCH=wasm go build -trimpath -buildvcs=false -buildmode=c-shared
+WASM_BUILD = GOWORK=off GOOS=wasip1 GOARCH=wasm go build -trimpath -buildvcs=false -buildmode=c-shared
 
 build:
 	go build -buildvcs=false -ldflags "$(LDFLAGS)" -o $(BINARY) ./cmd/torana/
@@ -77,12 +77,12 @@ export TORANA_CI_CACHE
 # instead of a silent skip; GOWORK=off matches the verified gate. No
 # testing.Short or build-tag omissions: this is the complete ./... suite.
 test: testdata
-	@mkdir -p $(CACHE_DIR)
+	@mkdir -p "$${TORANA_CI_CACHE:-$(CACHE_DIR)}"
 	GOWORK=off TORANA_E2E=1 go test ./... -timeout 600s
 
 # test-race is the slow pre-merge gate: the same complete suite under -race.
 test-race: testdata
-	@mkdir -p $(CACHE_DIR)
+	@mkdir -p "$${TORANA_CI_CACHE:-$(CACHE_DIR)}"
 	GOWORK=off TORANA_E2E=1 go test ./... -race -timeout 1800s
 
 # Package-scoped targets for correction rounds: build only the package's
@@ -97,13 +97,13 @@ PKG_FIXTURES = $(addprefix examples/plugins/,$(shell scripts/fixtures-for-pkg.sh
 
 test-pkg:
 	$(call check_pkg,test-pkg)
-	@mkdir -p $(CACHE_DIR)
+	@mkdir -p "$${TORANA_CI_CACHE:-$(CACHE_DIR)}"
 	@$(MAKE) $(addsuffix /plugin.wasm,$(PKG_FIXTURES))
 	GOWORK=off TORANA_E2E=1 go test $(PKG) -timeout 600s
 
 test-race-pkg:
 	$(call check_pkg,test-race-pkg)
-	@mkdir -p $(CACHE_DIR)
+	@mkdir -p "$${TORANA_CI_CACHE:-$(CACHE_DIR)}"
 	@$(MAKE) $(addsuffix /plugin.wasm,$(PKG_FIXTURES))
 	GOWORK=off TORANA_E2E=1 go test $(PKG) -race -timeout 1800s
 

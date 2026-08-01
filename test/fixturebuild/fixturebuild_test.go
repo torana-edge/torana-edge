@@ -1,6 +1,7 @@
 package fixturebuild
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -260,26 +261,6 @@ func TestShasumFallback(t *testing.T) {
 	}
 }
 
-// TestMakeForceDesignRunsTheFingerprintEveryTime — at the MAKE level, the
-// per-fixture recipe always executes (force-fixtures prerequisite); the
-// fingerprint script is the sole go-build decision. An up-to-date output must
-// produce zero builds on every invocation.
-func TestMakeForceDesignRunsTheFingerprintEveryTime(t *testing.T) {
-	repo := repoRoot(t)
-	target := "examples/plugins/test-observer/plugin.wasm"
-	for i := 0; i < 2; i++ {
-		cmd := exec.Command("make", target)
-		cmd.Dir = repo
-		out, err := cmd.CombinedOutput()
-		if err != nil {
-			t.Fatalf("make %s: %v\n%s", target, err, out)
-		}
-		if strings.Contains(string(out), "building ") {
-			t.Fatalf("run %d: an up-to-date fixture was rebuilt:\n%s", i+1, out)
-		}
-	}
-}
-
 var (
 	fullPathRef = regexp.MustCompile(`examples/plugins/[a-z0-9-]+`)
 	dirRef      = regexp.MustCompile(`fixturesDir\+"/[a-z0-9-]+`)
@@ -512,16 +493,34 @@ func TestWasmShardIsTheFullInventory(t *testing.T) {
 	}
 }
 
-// TestCIShardsCheck — the single-source shard partition rejects duplicates
-// and corruptions. The helper is the SAME script the workflow consumes, so a
-// drift between the matrix and the proof is impossible by construction.
+// TestCIShardsCheck — the single-source shard partition rejects duplicates,
+// overlaps, omissions, empty inventories, and failed listings. The script is
+// COPIED into a temp sandbox before any corruption, so a broken test can never
+// damage the tracked checkout.
 func TestCIShardsCheck(t *testing.T) {
 	repo := repoRoot(t)
-	script := filepath.Join(repo, "scripts", "ci-shards.sh")
+	sandbox := t.TempDir()
+	scriptsDir := filepath.Join(sandbox, "scripts")
+	if err := os.MkdirAll(scriptsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	orig, err := os.ReadFile(filepath.Join(repo, "scripts", "ci-shards.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := filepath.Join(scriptsDir, "ci-shards.sh")
+	writeScript := func(t *testing.T, content []byte) {
+		t.Helper()
+		if err := os.WriteFile(script, content, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeScript(t, orig)
+
 	run := func(t *testing.T, input string) error {
 		t.Helper()
 		cmd := exec.Command("sh", script, "check-synthetic")
-		cmd.Dir = repo
+		cmd.Dir = sandbox
 		cmd.Stdin = strings.NewReader(input)
 		return cmd.Run()
 	}
@@ -547,53 +546,201 @@ github.com/torana-edge/torana-edge/test/e2e
 			t.Fatal("check accepted a duplicated package")
 		}
 	})
-	t.Run("an overlapped partition fails (revert-proof)", func(t *testing.T) {
-		// Corrupt the helper: make the plugin pattern also match the wasm
-		// package, then restore.
-		orig, err := os.ReadFile(script)
-		if err != nil {
-			t.Fatal(err)
+	t.Run("empty inventory fails", func(t *testing.T) {
+		if err := run(t, ""); err == nil {
+			t.Fatal("check accepted an empty inventory")
 		}
+	})
+	t.Run("a failing go list fails the check", func(t *testing.T) {
+		// The sandbox copy has no Go module: check mode's go list fails, and
+		// that failure must propagate instead of verifying an empty list.
+		cmd := exec.Command("sh", script, "check")
+		cmd.Dir = sandbox
+		if err := cmd.Run(); err == nil {
+			t.Fatal("check succeeded despite a failing go list")
+		}
+	})
+	t.Run("an overlapped partition fails (revert-proof)", func(t *testing.T) {
 		corrupt := strings.Replace(string(orig),
 			"PLUGIN_MOD='^github.com/torana-edge/torana-edge/internal/plugin(/|$)'",
 			"PLUGIN_MOD='^github.com/torana-edge/torana-edge/internal/(plugin|wasm)(/|$)'", 1)
-		if err := os.WriteFile(script, []byte(corrupt), 0o755); err != nil {
-			t.Fatal(err)
-		}
-		err = run(t, realish)
-		os.WriteFile(script, orig, 0o755)
-		if err == nil {
+		writeScript(t, []byte(corrupt))
+		if err := run(t, realish); err == nil {
 			t.Fatal("check accepted an overlapping partition")
 		}
+		writeScript(t, orig)
 	})
 	t.Run("an omitted package fails (revert-proof)", func(t *testing.T) {
-		// Corrupt the remainder exclusion by dropping the anchor: internal/
-		// plugincmd then matches the exclusion but no shard pattern, so it is
-		// omitted from the union.
-		orig, err := os.ReadFile(script)
-		if err != nil {
-			t.Fatal(err)
-		}
 		corrupt := strings.Replace(string(orig),
 			"SHARD_MOD='^github.com/torana-edge/torana-edge/internal/(wasm|plugin|proxy)(/|$)'",
 			"SHARD_MOD='^github.com/torana-edge/torana-edge/internal/(wasm|plugin|proxy)'", 1)
-		if err := os.WriteFile(script, []byte(corrupt), 0o755); err != nil {
-			t.Fatal(err)
-		}
-		err = run(t, realish)
-		os.WriteFile(script, orig, 0o755)
-		if err == nil {
+		writeScript(t, []byte(corrupt))
+		if err := run(t, realish); err == nil {
 			t.Fatal("check accepted a partition that omits a package")
 		}
+		writeScript(t, orig)
 	})
 }
 
-func diff(a, b map[string]bool) []string {
-	var out []string
-	for k := range a {
-		if !b[k] {
-			out = append(out, k)
+// TestMakeForceDesignRunsTheFingerprintEveryTime — at the MAKE level, the
+// force pattern (REAL fingerprint script, fake builder) always executes the
+// recipe; the fingerprint is the sole go-build decision. An up-to-date output
+// must produce zero builds on every invocation, and a content change with a
+// restored old mtime must produce exactly one. The sandbox Makefile keeps the
+// proof hermetic: no repository fixture, stamp, or output is touched.
+func TestMakeForceDesignRunsTheFingerprintEveryTime(t *testing.T) {
+	repo := repoRoot(t)
+	sandbox := t.TempDir()
+	srcDir := filepath.Join(sandbox, "src")
+	outDir := filepath.Join(sandbox, "out")
+	if err := os.MkdirAll(srcDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(outDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(srcDir, "plugin.wasm.go"), "package main\n")
+	writeFile(t, filepath.Join(srcDir, "plugin.json"), "{}")
+
+	builder := filepath.Join(sandbox, "fake-builder.sh")
+	builderSrc := "#!/bin/sh\necho \"build $(pwd)\" >> \"$BUILD_LOG\"\nprintf wasm > plugin.wasm\n"
+	if err := os.WriteFile(builder, []byte(builderSrc), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	mk := filepath.Join(sandbox, "Makefile")
+	// The target IS the builder's output (the fake builder writes plugin.wasm
+	// into its working directory, exactly like the real go build does).
+	mkSrc := ".PHONY: force-fixtures\n" +
+		"src/plugin.wasm: force-fixtures src/plugin.wasm.go\n" +
+		"\t@sh " + filepath.Join(repo, "scripts", "testdata.sh") +
+		" src .stamp $@ -- " + builder + "\n"
+	if err := os.WriteFile(mk, []byte(mkSrc), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	runMake := func(t *testing.T) string {
+		t.Helper()
+		cmd := exec.Command("make", "-f", mk, "src/plugin.wasm")
+		cmd.Dir = sandbox
+		cmd.Env = append(os.Environ(), "BUILD_LOG="+filepath.Join(sandbox, "build.log"))
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("make: %v\n%s", err, out)
+		}
+		return string(out)
+	}
+
+	// First run builds the sandbox output; the two runs after it must not.
+	if out := runMake(t); !strings.Contains(out, "building ") {
+		t.Fatalf("the first run did not build the sandbox output:\n%s", out)
+	}
+	for i := 2; i <= 3; i++ {
+		if out := runMake(t); strings.Contains(out, "building ") {
+			t.Fatalf("run %d: an up-to-date fixture was rebuilt:\n%s", i, out)
 		}
 	}
-	return out
+	src := filepath.Join(srcDir, "plugin.wasm.go")
+	info, err := os.Stat(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, src, "package main\n\n// changed\n")
+	if err := os.Chtimes(src, info.ModTime(), info.ModTime()); err != nil {
+		t.Fatal(err)
+	}
+	if out := runMake(t); !strings.Contains(out, "building ") {
+		t.Fatalf("a content change with a restored mtime did not rebuild:\n%s", out)
+	}
+}
+
+// TestHostileGoWorkIgnored — a parent or environment go.work must not change
+// which module the fixture builds or the mapper use: GOWORK=off is part of
+// WASM_BUILD, the mapper wrapper, and the CI helper invocations.
+func TestHostileGoWorkIgnored(t *testing.T) {
+	repo := repoRoot(t)
+	hostile := filepath.Join(t.TempDir(), "go.work")
+	writeFile(t, hostile, "go 1.99\nuse ../../nonexistent/module\n")
+
+	// The mapper wrapper must ignore the hostile workspace.
+	cmd := exec.Command("sh", filepath.Join(repo, "scripts", "fixtures-for-pkg.sh"), "internal/proxy")
+	cmd.Dir = repo
+	cmd.Env = append(os.Environ(), "GOWORK="+hostile)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("mapper failed under a hostile GOWORK: %v\n%s", err, out)
+	}
+	if !strings.Contains(string(out), "test-observer") {
+		t.Fatalf("mapper output incomplete under a hostile GOWORK:\n%s", out)
+	}
+
+	// WASM_BUILD carries GOWORK=off so guest builds are equally insulated.
+	mk, err := os.ReadFile(filepath.Join(repo, "Makefile"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, line := range strings.Split(string(mk), "\n") {
+		if strings.HasPrefix(line, "WASM_BUILD = ") {
+			if !strings.Contains(line, "GOWORK=off") {
+				t.Fatalf("WASM_BUILD lacks GOWORK=off: %s", line)
+			}
+		}
+	}
+}
+
+// TestCacheDirOverride — an environment TORANA_CI_CACHE must be honored: the
+// recipe mkdir targets the EFFECTIVE cache path (${TORANA_CI_CACHE:-default}),
+// never the repo default.
+func TestCacheDirOverride(t *testing.T) {
+	repo := repoRoot(t)
+	cmd := exec.Command("make", "-n", "test")
+	cmd.Dir = repo
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("dry-run make failed: %v\n%s", err, out)
+	}
+	if !strings.Contains(string(out), `${TORANA_CI_CACHE:-`) {
+		t.Fatalf("the recipe does not mkdir the effective TORANA_CI_CACHE path:\n%s", out)
+	}
+
+	// Behavior: with an override set, only the override is created.
+	sandbox := t.TempDir()
+	override := filepath.Join(sandbox, "override-cache")
+	shell := `mkdir -p "${TORANA_CI_CACHE:-default-cache}"`
+	scmd := exec.Command("sh", "-c", shell)
+	scmd.Dir = sandbox
+	scmd.Env = append(os.Environ(), "TORANA_CI_CACHE="+override)
+	if outB, err := scmd.CombinedOutput(); err != nil {
+		t.Fatalf("recipe shell line: %v\n%s", err, outB)
+	}
+	if _, err := os.Stat(override); err != nil {
+		t.Fatalf("override cache dir was not created: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(sandbox, "default-cache")); err == nil {
+		t.Fatal("the default cache dir was created despite the override")
+	}
+}
+
+// TestMain pins the hermetic property: no test in this package may leave the
+// tracked checkout modified (fixtures, stamps, and the local cache are
+// gitignored and therefore invisible to git status).
+func TestMain(m *testing.M) {
+	repo := ""
+	if out, err := exec.Command("git", "rev-parse", "--show-toplevel").Output(); err == nil {
+		repo = strings.TrimSpace(string(out))
+	}
+	var before string
+	if repo != "" {
+		out, _ := exec.Command("git", "-C", repo, "status", "--porcelain").Output()
+		before = string(out)
+	}
+	code := m.Run()
+	if repo != "" {
+		out, _ := exec.Command("git", "-C", repo, "status", "--porcelain").Output()
+		if string(out) != before {
+			fmt.Fprintf(os.Stderr, "fixturebuild tests modified the tracked checkout:\n%s", out)
+			code = 1
+		}
+	}
+	os.Exit(code)
 }

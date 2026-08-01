@@ -46,14 +46,24 @@ fixtures)
 		rel=${p#"$REPO_PREFIX"}
 		rel=${rel#/}
 		[ -n "$rel" ] || continue # the module root itself
-		(cd "$root" && go run ./scripts/fixtures-for-pkg.go "$rel")
+		(cd "$root" && GOWORK=off go run ./scripts/fixtures-for-pkg.go "$rel")
 	done | sort -u | sed 's#^#examples/plugins/#' | sed 's#$#/plugin.wasm#'
 	;;
 check | check-synthetic)
 	if [ "$1" = check ]; then
-		input=$(cd "$root" && GOWORK=off go list ./... | sort)
+		# Capture go list BEFORE any pipeline so its failure status propagates:
+		# a failed listing must not look like an empty inventory.
+		listed=$(cd "$root" && GOWORK=off go list ./...) || {
+			echo "go list failed; cannot verify the shard partition" >&2
+			exit 1
+		}
+		input=$(printf '%s\n' "$listed" | sort)
 	else
 		input=$(cat | sort)
+	fi
+	if [ -z "$input" ]; then
+		echo "empty package inventory; refusing to verify" >&2
+		exit 1
 	fi
 	# 1. The input itself must have no duplicate lines.
 	dupes=$(printf '%s\n' "$input" | uniq -d)
@@ -71,11 +81,15 @@ check | check-synthetic)
 	# 4. The sorted union must equal the inventory exactly (omissions), and
 	#    the total cardinality must match (dedup must not hide a duplicate).
 	union=$(printf '%s\n' "$all_lists" | sort -u)
-	[ "$union" = "$input" ] || {
+	if [ "$union" != "$input" ]; then
+		tmp=$(mktemp -d) || exit 1
+		trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+		printf '%s\n' "$input" > "$tmp/inventory"
+		printf '%s\n' "$union" > "$tmp/union"
 		echo "shard union does not equal the package inventory:" >&2
-		comm -3 <(printf '%s\n' "$input") <(printf '%s\n' "$union") >&2
+		comm -3 "$tmp/inventory" "$tmp/union" >&2
 		exit 1
-	}
+	fi
 	total=$(printf '%s\n' "$all_lists" | grep -c . || true)
 	expected=$(printf '%s\n' "$input" | grep -c . || true)
 	[ "$total" = "$expected" ] || {

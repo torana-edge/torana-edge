@@ -42,7 +42,9 @@ jobs:
         run: |
           fixtures=$(scripts/ci-shards.sh fixtures ${{ matrix.shard }})
           if [ -n "$fixtures" ]; then
-            make $fixtures
+            # -j4 for cold multi-fixture builds (measured: 43 fixtures in
+            # ~1.2s wall with -j4 vs 16s serial).
+            make -j4 $fixtures
           else
             echo "this shard needs no fixtures"
           fi
@@ -64,27 +66,30 @@ jobs:
       - name: Verify the shard partition
         run: scripts/ci-shards.sh check
 
-  # Independent proof of the per-package fixture mapping: from a CLEAN
-  # checkout (no make testdata), build exactly what the mapping says each
-  # heavy package needs and run its strict suite. Any fixture a test requests
-  # that the mapping forgot fails here — including dynamically constructed
-  # names no static scan can see.
+  # Independent proof of the per-package fixture mapping: ONE FRESH CHECKOUT
+  # PER heavy package. Each matrix entry builds exactly what ITS package's
+  # mapping says and immediately runs that package's strict suite. Any fixture
+  # a test requests that the mapping forgot fails here — including
+  # dynamically constructed names no static scan can see. (A single job that
+  # built wasm's all-42 mapping first would make the other two proofs
+  # vacuous.)
   pkg-fixture-proof:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        pkg: [./internal/wasm, ./internal/plugin, ./internal/proxy]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
           go-version: "1.26"
-      - name: Build only the mapped fixtures for the heavy packages
-        run: |
-          for pkg in ./internal/wasm ./internal/plugin ./internal/proxy; do
-            make testdata-pkg PKG=$pkg
-          done
-      - name: Strict package suites must find every fixture they request
+      - name: Build exactly this package's mapped fixtures
+        run: make -j4 testdata-pkg PKG=${{ matrix.pkg }}
+      - name: This package's strict suite must find every fixture it requests
         run: |
           GOWORK=off TORANA_CI_CACHE=/tmp/wazero-cache TORANA_E2E=1 \
-            go test ./internal/wasm/... ./internal/plugin/... ./internal/proxy/... -timeout 1800s
+            go test ${{ matrix.pkg }}/... -timeout 1800s
 
   # Vet and vulnerability scanning run once, outside the test matrix.
   analysis:
@@ -94,6 +99,8 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: "1.26"
+      - name: POSIX shell syntax (Ubuntu /bin/sh is dash, not bash)
+        run: dash -n scripts/ci-shards.sh scripts/testdata.sh scripts/fixtures-for-pkg.sh
       - name: Vet
         run: GOWORK=off go vet ./...
       - name: Vulnerability scan

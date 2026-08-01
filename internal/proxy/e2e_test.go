@@ -993,8 +993,6 @@ func TestObservationalStreamingHookIsOnTheClientCriticalPath(t *testing.T) {
 	// blocked and hang httptest.Server.Close in the deferred cleanup.
 	var enteredOnce, releaseOnce sync.Once
 	release := func() { releaseOnce.Do(func() { close(releaseCh) }) }
-	defer release()
-
 	latch := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		enteredOnce.Do(func() { close(enteredCh) })
 		select {
@@ -1005,7 +1003,9 @@ func TestObservationalStreamingHookIsOnTheClientCriticalPath(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		fmt.Fprint(w, `{"id":"c1","choices":[{"message":{"role":"assistant","content":"released"}}]}`)
 	}))
-	defer latch.Close()
+	// One combined cleanup: release BEFORE shutdown, on every exit path.
+	// sync.Once makes the explicit failure-branch releases idempotent.
+	defer func() { release(); latch.Close() }()
 
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
@@ -1100,10 +1100,13 @@ func TestObservationalStreamingHookIsOnTheClientCriticalPath(t *testing.T) {
 	if readErr != nil {
 		t.Fatalf("reading the stream body: %v", readErr)
 	}
-	// Pin the COMPLETE stream, not a fragment: the content plus the protocol
-	// terminator must both arrive intact.
-	if !strings.Contains(string(body), "hello") || !strings.HasSuffix(string(body), "data: [DONE]\n\n") {
-		t.Fatalf("stream body incomplete or unterminated: %q", body)
+	// Pin the EXACT body: the proxy's canonical chunk plus the protocol
+	// terminator, with nothing inserted, dropped, or re-ordered between them.
+	// (The upstream's raw frame is re-serialized by the proxy serializer.)
+	want := "data: {\"choices\":[{\"delta\":{\"content\":\"hello\"},\"index\":0}],\"id\":\"chatcmpl-torana\",\"object\":\"chat.completion.chunk\"}\n\n" +
+		"data: [DONE]\n\n"
+	if string(body) != want {
+		t.Fatalf("stream body differs from the exact expected SSE:\n got: %q\nwant: %q", body, want)
 	}
 	t.Log("the observational hook holds EOF until released — synchronous with HTTP completion by design")
 }

@@ -4,4 +4,4 @@
 #
 # usage: fixtures-for-pkg.sh <internal/<pkg>>
 set -eu
-exec go run ./scripts/fixtures-for-pkg.go "$@"
+exec env GOWORK=off go run ./scripts/fixtures-for-pkg.go "$@"
