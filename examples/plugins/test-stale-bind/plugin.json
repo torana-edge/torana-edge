@@ -1,0 +1,53 @@
+{
+  "schema_version": 1,
+  "id": "torana-test/test-stale-bind",
+  "name": "test-stale-bind",
+  "version": "0.1.0",
+  "abi_version": "v2",
+  "minimum_torana_version": "0.1.0",
+  "failure_mode": "pass",
+  "description": "Test fixture: holds every request write grant (so the host takes the all-grants fast path) and still keeps a provider content_signature over changed covered content, which no grant authorises",
+  "hooks": [
+    {
+      "name": "run_before_request"
+    }
+  ],
+  "permissions": [
+    {
+      "name": "ir.messages.write.user",
+      "description": "Rewrite user message content"
+    },
+    {
+      "name": "ir.messages.write.assistant",
+      "description": "Rewrite assistant messages"
+    },
+    {
+      "name": "ir.messages.write.system",
+      "description": "Rewrite system messages"
+    },
+    {
+      "name": "ir.messages.write.tool",
+      "description": "Rewrite tool messages"
+    },
+    {
+      "name": "ir.messages.write.developer",
+      "description": "Rewrite developer messages"
+    },
+    {
+      "name": "ir.messages.write.other",
+      "description": "Rewrite unmodelled-role messages"
+    },
+    {
+      "name": "ir.tools.write",
+      "description": "Rewrite tool definitions"
+    },
+    {
+      "name": "ir.model.write",
+      "description": "Rewrite the model"
+    },
+    {
+      "name": "ir.params.write",
+      "description": "Rewrite sampling parameters"
+    }
+  ]
+}

@@ -2,7 +2,10 @@ package plugin
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/binary"
 	"math"
+	"strings"
 	"testing"
 
 	"google.golang.org/protobuf/proto"
@@ -22,10 +25,14 @@ import (
 //
 // Production change detection is fingerprintRequestSections (writegrant.go):
 // SHA-256 over length-framed fields with the message index folded in,
-// collision-resistant and reorder-sensitive. The tests here exercise that
-// production fingerprint. compareSections — exact structural comparison, no
-// hashing, which cannot collide because it never summarises — is kept below as
-// the mutation suite's oracle: a mutation must be caught by BOTH the exact
+// collision-resistant and reorder-sensitive. Each message is first hashed as
+// its own typed record (fingerprintMessage) — field tags + presence + an
+// explicit tool-call count and per-call records — so a tool call can never be
+// confused with a message or its neighbour's fields (the round-1 structural
+// ambiguity is reproduced below). The tests here exercise that production
+// fingerprint. compareSections — exact structural comparison, no hashing,
+// which cannot collide because it never summarises — is kept below as the
+// mutation suite's oracle: a mutation must be caught by BOTH the exact
 // comparison and the fingerprint, so a regression in either fails the suite.
 
 // changedSections names the grantable sections a plugin's output differs in.
@@ -437,5 +444,152 @@ func TestNegativeZeroIsDetected(t *testing.T) {
 	}
 	if fingerprintRequestSections(a).equal(fingerprintRequestSections(b)) {
 		t.Fatal("fingerprint treated -0.0 and +0.0 as identical")
+	}
+}
+
+// --- F1: per-message typed records (round-1 structural ambiguity) -----------
+
+// oldSchemeRoleDigest replicates the round-1 per-role framing — message
+// fields and tool-call fields concatenated into ONE role stream — so the
+// tests below can demonstrate the structural ambiguity it had: a tool call's
+// four fields were byte-indistinguishable from the leading fields of the next
+// same-role message, so moving the call between two messages left the
+// preimage identical.
+func oldSchemeRoleDigest(req *pb.ChatRequest, role string) [32]byte {
+	h := sha256.New()
+	for i, m := range req.Messages {
+		if m.Role != role {
+			continue
+		}
+		var idx [8]byte
+		binary.LittleEndian.PutUint64(idx[:], uint64(i))
+		writeFramed(h, idx[:], []byte(m.Role), []byte(m.Content), m.ContentPartsJson,
+			[]byte(m.Thinking), []byte(m.ThinkingSignature), []byte(m.ContentSignature),
+			[]byte(m.TrailingSignature), []byte(m.RedactedThinking),
+			[]byte(m.ToolCallId), []byte(m.ToolName), m.CacheControlJson)
+		for _, tc := range m.ToolCalls {
+			writeFramed(h, []byte(tc.Id), []byte(tc.Name), tc.ArgumentsJson, []byte(tc.Signature))
+		}
+	}
+	var count [8]byte
+	binary.LittleEndian.PutUint64(count[:], uint64(len(req.Messages)))
+	writeFramed(h, count[:])
+	var sum [32]byte
+	copy(sum[:], h.Sum(nil))
+	return sum
+}
+
+// boundaryShiftMessages builds the reviewer's reproduction: a same-role pair
+// where the second message is PERIODIC with the moved call's fields, so under
+// the round-1 framing the call's four fields are byte-identical to the next
+// message's leading fields. accepted has the call on message 0; out moves it
+// into message 1's tool-call list.
+//
+// The period is: idx1 (the 8-byte little-endian index of message 1) followed
+// by the call's fields (id=idx1, name="user", arguments="S", signature="T"),
+// cycling through the message's eleven fields. Moving the call then merely
+// rotates the boundary between the concatenated frames, leaving the round-1
+// preimage identical.
+func boundaryShiftMessages() (accepted, out *pb.ChatRequest) {
+	idx1 := string([]byte{1, 0, 0, 0, 0, 0, 0, 0})
+	call := &pb.ToolCall{Id: idx1, Name: "user", ArgumentsJson: []byte("S"), Signature: "T"}
+	periodic := &pb.Message{
+		Role:              "user",
+		Content:           "S",
+		ContentPartsJson:  []byte("T"),
+		Thinking:          idx1,
+		ThinkingSignature: "user",
+		ContentSignature:  "S",
+		TrailingSignature: "T",
+		RedactedThinking:  idx1,
+		ToolCallId:        "user",
+		ToolName:          "S",
+		CacheControlJson:  []byte("T"),
+	}
+
+	accepted = &pb.ChatRequest{Messages: []*pb.Message{
+		{Role: "user", Content: "M0", ToolCalls: []*pb.ToolCall{call}},
+		periodic,
+	}}
+	out = &pb.ChatRequest{Messages: []*pb.Message{
+		{Role: "user", Content: "M0"}, // call removed
+	}}
+	moved := proto.Clone(periodic).(*pb.Message)
+	moved.ToolCalls = []*pb.ToolCall{call}
+	out.Messages = append(out.Messages, moved)
+	return accepted, out
+}
+
+// The exact round-1 reviewer reproduction: two same-role messages with a
+// periodic field pattern, where moving a tool call from message 0's tool-call
+// list into message 1's yields an IDENTICAL round-1 preimage — so the round-1
+// fingerprint returned equal digests and verifyRequestMutation returned nil
+// with no grants. The per-message typed-record framing must make the shift
+// visible, and verification must reject it.
+func TestMessageFingerprintUnambiguousAcrossBoundaryShift(t *testing.T) {
+	accepted, out := boundaryShiftMessages()
+
+	// 1. The exact oracle sees the change.
+	if !compareSections(accepted, out).any() {
+		t.Fatal("exact comparison missed the boundary shift")
+	}
+	// 2. The round-1 framing collided — this is the reproduced bug. If this
+	// assertion ever starts failing, the construction no longer reproduces
+	// the reviewer's finding and the regression is silently weaker.
+	if oldSchemeRoleDigest(accepted, "user") != oldSchemeRoleDigest(out, "user") {
+		t.Fatal("test construction broken: the round-1 preimages must be identical " +
+			"for this to reproduce the reviewer's reproduction")
+	}
+	// 3. The production fingerprint must NOT collide.
+	if fingerprintRequestSections(accepted).equal(fingerprintRequestSections(out)) {
+		t.Fatal("message fingerprint still ambiguous across a tool-call boundary shift")
+	}
+	// 4. verifyRequestMutation must reject with NO grants.
+	err := verifyRequestMutation(accepted, out, grant())
+	if err == nil {
+		t.Fatal("the boundary shift must be rejected without any grant")
+	}
+	if !strings.Contains(err.Error(), "messages.user") {
+		t.Errorf("error = %q, want the messages.user section named", err)
+	}
+}
+
+// The same boundary shift across THREE messages: the call moves from message
+// 0 to message 2, crossing a periodic middle. The role hasher receives
+// (absolute index, message digest) per message, so the shift is visible even
+// though the moved frames could otherwise be re-aligned against the periodic
+// pattern — each message's digest changes where its tool-call list changed,
+// and the index pins every digest to its position.
+func TestMessageFingerprintBoundaryShiftAcrossThreeMessages(t *testing.T) {
+	idx1 := string([]byte{1, 0, 0, 0, 0, 0, 0, 0})
+	call := &pb.ToolCall{Id: idx1, Name: "user", ArgumentsJson: []byte("S"), Signature: "T"}
+	periodic := &pb.Message{
+		Role: "user", Content: "S", ContentPartsJson: []byte("T"),
+		Thinking: idx1, ThinkingSignature: "user", ContentSignature: "S",
+		TrailingSignature: "T", RedactedThinking: idx1,
+		ToolCallId: "user", ToolName: "S", CacheControlJson: []byte("T"),
+	}
+
+	accepted := &pb.ChatRequest{Messages: []*pb.Message{
+		{Role: "user", Content: "M0", ToolCalls: []*pb.ToolCall{call}},
+		periodic,
+		proto.Clone(periodic).(*pb.Message),
+	}}
+	out := &pb.ChatRequest{Messages: []*pb.Message{
+		{Role: "user", Content: "M0"},
+		proto.Clone(periodic).(*pb.Message),
+	}}
+	last := proto.Clone(periodic).(*pb.Message)
+	last.ToolCalls = []*pb.ToolCall{call}
+	out.Messages = append(out.Messages, last)
+
+	if !compareSections(accepted, out).any() {
+		t.Fatal("exact comparison missed the three-message boundary shift")
+	}
+	if fingerprintRequestSections(accepted).equal(fingerprintRequestSections(out)) {
+		t.Fatal("fingerprint missed a tool-call boundary shift across three messages")
+	}
+	if err := verifyRequestMutation(accepted, out, grant()); err == nil {
+		t.Fatal("the three-message boundary shift must be rejected without any grant")
 	}
 }

@@ -86,6 +86,7 @@ func TestVerifyRequestMutationUnchangedNeedsNoGrant(t *testing.T) {
 func TestVerifyRequestMutationUngrantedRejected(t *testing.T) {
 	cases := []struct {
 		name   string
+		base   func() *pb.ChatRequest
 		mutate func(*pb.ChatRequest)
 		want   string
 	}{
@@ -100,16 +101,27 @@ func TestVerifyRequestMutationUngrantedRejected(t *testing.T) {
 				v := 1.0
 				r.Temperature = &v
 			}},
+		// The only changed role is the unmodelled one, so the sorted union
+		// names it and proves an unmodelled role maps to the catch-all
+		// "other" grant. (Appending the message would mark every role, since
+		// the message count is folded into each role's digest; mutating an
+		// existing weird message isolates the role instead.)
 		{name: "unmodelled-role", want: "plugin changed messages.weird without ir.messages.write.other",
-			mutate: func(r *pb.ChatRequest) {
-				r.Messages[1].Role = "weird"
-				r.Messages[1].Content = "A'"
-			}},
+			base: func() *pb.ChatRequest {
+				r := baseRequest()
+				r.Messages = append(r.Messages, &pb.Message{Role: "weird", Content: "W"})
+				return r
+			},
+			mutate: func(r *pb.ChatRequest) { r.Messages[4].Content = "W'" }},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			accepted := baseRequest()
-			out := baseRequest()
+			base := baseRequest
+			if tc.base != nil {
+				base = tc.base
+			}
+			accepted := base()
+			out := base()
 			tc.mutate(out)
 
 			err := verifyRequestMutation(accepted, out, grant())
@@ -287,6 +299,179 @@ func TestVerifyRequestMutationSignatureMatrix(t *testing.T) {
 	}
 }
 
+// --- F2: unconditional invariants (the all-grants fast-path checks) ----------
+
+// verifyUnconditionalInvariants has no canWrite: grants authorise SECTIONS,
+// never host facts or provenance, so these checks stand alone and the
+// all-grants fast path still runs them.
+func TestVerifyUnconditionalInvariantsHostOwnedMetaRejected(t *testing.T) {
+	accepted := baseRequest()
+	out := baseRequest()
+	out.ToranaMetaJson = []byte(`{"_provider":"evil"}`)
+	if err := verifyUnconditionalInvariants(accepted, out); err == nil {
+		t.Fatal("a torana_meta_json change must fail the unconditional invariants")
+	}
+}
+
+func TestVerifyUnconditionalInvariantsSignatureStaleRejected(t *testing.T) {
+	accepted := contentSignedRequest()
+	out := contentSignedRequest()
+	out.Messages[1].Content = "signed content'" // token kept over changed content
+	err := verifyUnconditionalInvariants(accepted, out)
+	if err == nil {
+		t.Fatal("a stale signature must fail the unconditional invariants")
+	}
+	if err.Error() != "plugin content_signature signature stale" {
+		t.Errorf("error = %q, want the stale binding named", err)
+	}
+}
+
+func TestVerifyUnconditionalInvariantsUnchangedPasses(t *testing.T) {
+	req := contentSignedRequest()
+	if err := verifyUnconditionalInvariants(req, req); err != nil {
+		t.Fatalf("an unchanged request must pass the unconditional invariants, got: %v", err)
+	}
+}
+
+// --- F3: identity-based signature alignment ---------------------------------
+
+// The reviewer's exact reproduction: a granted deletion BEFORE a signed
+// message shifts its index. Round-1 positional pairing compared the unchanged
+// token against an unrelated message and classified it as forged; identity
+// alignment pairs by (role, token value) and sees the token intact.
+func TestVerifyRequestSignaturesDeletionBeforeSignedMessage(t *testing.T) {
+	accepted := &pb.ChatRequest{Messages: []*pb.Message{
+		{Role: "user", Content: "discard me"},
+		{Role: "assistant", Content: "signed", ContentSignature: "token"},
+	}}
+	out := &pb.ChatRequest{Messages: []*pb.Message{
+		{Role: "assistant", Content: "signed", ContentSignature: "token"},
+	}}
+	canWrite := grant("ir.messages.write.user", "ir.messages.write.assistant")
+	if err := verifyRequestMutation(accepted, out, canWrite); err != nil {
+		t.Fatalf("a granted deletion before a signed message must verify, got: %v", err)
+	}
+}
+
+func TestVerifyRequestSignaturesInsertionBeforeSignedMessage(t *testing.T) {
+	accepted := &pb.ChatRequest{Messages: []*pb.Message{
+		{Role: "assistant", Content: "signed", ContentSignature: "token"},
+	}}
+	out := &pb.ChatRequest{Messages: []*pb.Message{
+		{Role: "user", Content: "inserted"},
+		{Role: "assistant", Content: "signed", ContentSignature: "token"},
+	}}
+	canWrite := grant("ir.messages.write.user", "ir.messages.write.assistant")
+	if err := verifyRequestMutation(accepted, out, canWrite); err != nil {
+		t.Fatalf("a granted insertion before a signed message must verify, got: %v", err)
+	}
+}
+
+// Two signed messages of the same role swapped in full — tokens travel with
+// their content, so both pair by token and stay intact.
+func TestVerifyRequestSignaturesReorderSameRole(t *testing.T) {
+	accepted := &pb.ChatRequest{Messages: []*pb.Message{
+		{Role: "assistant", Content: "signed1", ContentSignature: "t1"},
+		{Role: "assistant", Content: "signed2", ContentSignature: "t2"},
+	}}
+	out := &pb.ChatRequest{Messages: []*pb.Message{
+		{Role: "assistant", Content: "signed2", ContentSignature: "t2"},
+		{Role: "assistant", Content: "signed1", ContentSignature: "t1"},
+	}}
+	if err := verifyRequestMutation(accepted, out, grant("ir.messages.write.assistant")); err != nil {
+		t.Fatalf("swapping two signed messages with their tokens must verify, got: %v", err)
+	}
+}
+
+// The same swap WITHOUT the tokens travelling with their content must fail:
+// alignment pairs by token and compares covered content, so a token moved
+// onto different content is stale even under a reorder.
+func TestVerifyRequestSignaturesReorderDetachesToken(t *testing.T) {
+	accepted := &pb.ChatRequest{Messages: []*pb.Message{
+		{Role: "assistant", Content: "signed1", ContentSignature: "t1"},
+		{Role: "assistant", Content: "signed2", ContentSignature: "t2"},
+	}}
+	out := &pb.ChatRequest{Messages: []*pb.Message{
+		{Role: "assistant", Content: "signed2", ContentSignature: "t1"},
+		{Role: "assistant", Content: "signed1", ContentSignature: "t2"},
+	}}
+	err := verifyRequestMutation(accepted, out, grant("ir.messages.write.assistant"))
+	if err == nil {
+		t.Fatal("a token moved onto different covered content must be rejected")
+	}
+	if err.Error() != "plugin content_signature signature stale" {
+		t.Errorf("error = %q, want the stale binding named", err)
+	}
+}
+
+// Two accepted messages sharing one token over DIFFERENT content cannot be
+// paired reliably — reject as ambiguous rather than guess.
+func TestVerifyRequestSignaturesDuplicateTokenConflictingContent(t *testing.T) {
+	accepted := &pb.ChatRequest{Messages: []*pb.Message{
+		{Role: "user", Content: "A", ContentSignature: "t"},
+		{Role: "user", Content: "B", ContentSignature: "t"},
+	}}
+	out := &pb.ChatRequest{Messages: []*pb.Message{
+		{Role: "user", Content: "A", ContentSignature: "t"},
+	}}
+	err := verifyRequestMutation(accepted, out, grant("ir.messages.write.user"))
+	if err == nil {
+		t.Fatal("a duplicate token with conflicting content must be rejected as ambiguous")
+	}
+	if !strings.Contains(err.Error(), "duplicate token with conflicting content") {
+		t.Errorf("error = %q, want the ambiguity named", err)
+	}
+}
+
+// Candidates sharing both token AND content are the same signed fact — fine.
+func TestVerifyRequestSignaturesDuplicateTokenIdenticalContent(t *testing.T) {
+	accepted := &pb.ChatRequest{Messages: []*pb.Message{
+		{Role: "user", Content: "A", ContentSignature: "t"},
+		{Role: "user", Content: "A", ContentSignature: "t"},
+	}}
+	out := &pb.ChatRequest{Messages: []*pb.Message{
+		{Role: "user", Content: "A", ContentSignature: "t"},
+	}}
+	if err := verifyRequestMutation(accepted, out, grant("ir.messages.write.user")); err != nil {
+		t.Fatalf("duplicate tokens over identical content must verify, got: %v", err)
+	}
+}
+
+// An accepted token with no output counterpart is allowed: deleting the
+// signed message is a grantable deletion.
+func TestVerifyRequestSignaturesAcceptedTokenWithoutCounterpartAllowed(t *testing.T) {
+	accepted := &pb.ChatRequest{Messages: []*pb.Message{
+		{Role: "user", Content: "signed", ContentSignature: "token"},
+	}}
+	out := &pb.ChatRequest{Messages: []*pb.Message{
+		{Role: "assistant", Content: "fresh"},
+	}}
+	canWrite := grant("ir.messages.write.user", "ir.messages.write.assistant")
+	if err := verifyRequestMutation(accepted, out, canWrite); err != nil {
+		t.Fatalf("deleting a signed message must verify, got: %v", err)
+	}
+}
+
+// --- F6: the changed-role union is checked in sorted order ------------------
+
+// Two roles change and neither is granted; the lexicographically first role
+// must be named, deterministically, no matter which map iteration order the
+// fingerprint comparison visits first.
+func TestVerifyGrantedSectionsReportsSortedRoleFirst(t *testing.T) {
+	accepted := baseRequest()
+	out := baseRequest()
+	out.Messages[1].Content = "A'"                                 // user
+	out.Messages[2].ToolCalls[0].ArgumentsJson = []byte(`{"p":2}`) // assistant
+
+	err := verifyRequestMutation(accepted, out, grant())
+	if err == nil {
+		t.Fatal("an ungranted change must be rejected")
+	}
+	if err.Error() != "plugin changed messages.assistant without ir.messages.write.assistant" {
+		t.Errorf("error = %q, want the lexicographically first changed role named", err)
+	}
+}
+
 // The request-domain binding inventory is part of the enforcement contract: a
 // token the SDK starts covering that this host does not know about would be a
 // signature a plugin could forge unnoticed. outboundpolicy.Validate pins the
@@ -355,11 +540,18 @@ func TestHoldsAllRequestGrants(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Pipeline tests. test-mutator's manifest declares the full request write
-// grant set, so an explicit approval can grant any SUBSET of it — including
-// the empty set, which is how a grantless mutating plugin is exercised without
-// a second wasm fixture. BundleDigestForDir is computed from disk, so the
-// manifest change and the approval stay consistent.
+// Pipeline tests. All-or-nothing approval is settled: a plugin is granted
+// either everything its manifest declares or nothing. test-mutator's manifest
+// declares the full request write set, so a pipeline approval here is either
+// the empty set (a grantless mutating plugin — rejection fixtures) or the
+// full set (the all-grants fast path). Intermediate grant sets are exercised
+// at the UNIT level with canWrite closures above, never by faking a partial
+// approval. Fixtures whose manifests declare exactly the grants they need
+// (test-forge-host-meta, test-stale-bind: the full write set; test-mutator:
+// the full write set) hit the fast path; test-verdict-then-invalid declares
+// only its verdict permissions and is therefore grantless for writes.
+// BundleDigestForDir is computed from disk, so the manifest change and the
+// approval stay consistent.
 // ---------------------------------------------------------------------------
 
 func newApprovedPipeline(t *testing.T, name string, permissions []string, failureMode string) *PluginPipeline {
@@ -437,40 +629,12 @@ func TestRunBeforeRequestGrantlessMutationRejectedBlock(t *testing.T) {
 	}
 }
 
-// A plugin granted exactly the sections it changes has its replacement applied.
-func TestRunBeforeRequestGrantedMutationAccepted(t *testing.T) {
-	requireWASM(t, fixturesDir+"/test-mutator/plugin.wasm")
-	pp := newApprovedPipeline(t, "test-mutator",
-		[]string{"ir.messages.write.user", "ir.tools.write"}, "pass")
-
-	chat := &engine.ChatRequest{
-		Model:    "gpt-x",
-		Messages: []engine.Message{{Role: engine.RoleUser, Content: "hello"}},
-		Tools: []engine.ToolDef{{
-			Name:       "read",
-			Parameters: map[string]any{"type": "object"},
-		}},
-	}
-	out, err := pp.RunBeforeRequest(context.Background(), 3, chat)
-	if err != nil {
-		t.Fatalf("a granted mutation must be accepted: %v", err)
-	}
-	if len(out.Messages) != 1 || !strings.HasSuffix(out.Messages[0].Content, "[seen by test-mutator]") {
-		t.Errorf("granted message mutation was not applied: %+v", out.Messages)
-	}
-	if len(out.Tools) != 1 || out.Tools[0].Description != "described by test-mutator" {
-		t.Errorf("granted tool mutation was not applied: %+v", out.Tools)
-	}
-}
-
-// A plugin holding every request grant takes the fast path: verification is
-// skipped entirely and the replacement is applied. The predicate is unit-tested
-// above; this proves the fully-granted fixture drives the skip branch end to
-// end. (Proving the skip is OBSERVABLE — a mutation that would fail
-// verification but is accepted — would need a fixture that produces a
-// verification violation while holding all grants, and the request-mutating
-// fixtures cannot: adding one means a new wasm build, which the Makefile
-// contract forbids.)
+// A plugin holding every request grant takes the fast path: the section
+// comparison is skipped and the replacement is applied — but the unconditional
+// invariants still run, so the replacement must not touch host-owned fields or
+// signatures (proven end to end by TestRunBeforeRequestAllGrants* below). The
+// predicate is unit-tested above; this proves the fully-granted fixture drives
+// the skip branch end to end with a clean replacement.
 func TestRunBeforeRequestFullyGrantedFastPath(t *testing.T) {
 	requireWASM(t, fixturesDir+"/test-mutator/plugin.wasm")
 	// AllowUnapproved converts manifest requests into grants: test-mutator
@@ -494,6 +658,150 @@ func TestRunBeforeRequestFullyGrantedFastPath(t *testing.T) {
 	}
 	if len(out.Tools) != 1 || out.Tools[0].Description != "described by test-mutator" {
 		t.Errorf("fast-path tool mutation was not applied: %+v", out.Tools)
+	}
+}
+
+// --- F2 end to end: the all-grants fast path still checks host facts --------
+
+// test-forge-host-meta declares the full request write set, so it hits the
+// fast path — and its replacement forges host-owned torana_meta_json, which no
+// grant authorises. The replacement must be refused even though the plugin
+// can write every section.
+func TestRunBeforeRequestAllGrantsHostOwnedMetaRejectedAllow(t *testing.T) {
+	requireWASM(t, fixturesDir+"/test-forge-host-meta/plugin.wasm")
+	pp := newTestPipeline(t, fixturesDir, []string{"test-forge-host-meta"})
+
+	chat := &engine.ChatRequest{
+		Model:    "gpt-x",
+		Messages: []engine.Message{{Role: engine.RoleUser, Content: "hello"}},
+	}
+	out, err := pp.RunBeforeRequest(context.Background(), 1, chat)
+	if err != nil {
+		t.Fatalf("allow mode must not error on a refused replacement: %v", err)
+	}
+	if out == nil || len(out.Messages) != 1 || out.Messages[0].Content != "hello" {
+		t.Fatalf("the forged-metadata replacement leaked into the request: %+v", out.Messages)
+	}
+	if len(out.ToranaMeta) != 0 {
+		t.Errorf("host-owned metadata was changed on the fast path: %v", out.ToranaMeta)
+	}
+}
+
+// The same refusal under a block override is an attributed error naming the
+// plugin, with the original request returned alongside it.
+func TestRunBeforeRequestAllGrantsHostOwnedMetaRejectedBlock(t *testing.T) {
+	requireWASM(t, fixturesDir+"/test-forge-host-meta/plugin.wasm")
+	pp := newApprovedPipeline(t, "test-forge-host-meta", allRequestGrants, "block")
+
+	chat := &engine.ChatRequest{
+		Model:    "gpt-x",
+		Messages: []engine.Message{{Role: engine.RoleUser, Content: "hello"}},
+	}
+	out, err := pp.RunBeforeRequest(context.Background(), 2, chat)
+	if err == nil {
+		t.Fatal("block mode must return an error for a host-owned violation on the fast path")
+	}
+	if !strings.Contains(err.Error(), "test-forge-host-meta") {
+		t.Errorf("error %q does not name the offending plugin", err)
+	}
+	if !strings.Contains(err.Error(), "invalid request replacement") {
+		t.Errorf("error %q does not describe the invalid replacement", err)
+	}
+	if !strings.Contains(err.Error(), "host-owned torana_meta_json") {
+		t.Errorf("error %q does not name the host-owned violation", err)
+	}
+	if out != chat {
+		t.Error("blocked call should return the original request unchanged")
+	}
+}
+
+// test-stale-bind declares the full request write set (fast path) and changes
+// the content a content_signature covers while KEEPING the token. On the
+// request path there is no apply block to invalidate the wire token later, so
+// the stale binding is a violation even for an all-grants plugin.
+func TestRunBeforeRequestAllGrantsStaleBindRejectedAllow(t *testing.T) {
+	requireWASM(t, fixturesDir+"/test-stale-bind/plugin.wasm")
+	pp := newTestPipeline(t, fixturesDir, []string{"test-stale-bind"})
+
+	chat := &engine.ChatRequest{
+		Model: "gpt-x",
+		Messages: []engine.Message{
+			{Role: engine.RoleUser, Content: "signed content", ContentSignature: "cs-token"},
+		},
+	}
+	out, err := pp.RunBeforeRequest(context.Background(), 3, chat)
+	if err != nil {
+		t.Fatalf("allow mode must not error on a refused replacement: %v", err)
+	}
+	if out == nil || len(out.Messages) != 1 || out.Messages[0].Content != "signed content" {
+		t.Fatalf("the stale-bound replacement leaked into the request: %+v", out.Messages)
+	}
+	if out.Messages[0].ContentSignature != "cs-token" {
+		t.Errorf("content_signature changed: %q", out.Messages[0].ContentSignature)
+	}
+}
+
+// --- F4: a refused replacement discards trapped verdicts --------------------
+
+// A respond verdict recorded before a grantless replacement must be discarded
+// when verification refuses the replacement: the refusal is a trap-equivalent
+// exit, and a half-built synthetic response from code that then produced an
+// invalid replacement is not trustworthy. (failure_mode is pass, so the only
+// reason the respond is gone is the discard.)
+func TestRunBeforeRequestRejectedReplacementDiscardsRespond(t *testing.T) {
+	requireWASM(t, fixturesDir+"/test-verdict-then-invalid/plugin.wasm")
+	pp := newTestPipeline(t, fixturesDir, []string{"test-verdict-then-invalid"})
+
+	const reqID = 5
+	chat := &engine.ChatRequest{
+		Model:    "gpt-x",
+		Messages: []engine.Message{{Role: engine.RoleUser, Content: "respondme hello"}},
+	}
+	out, err := pp.RunBeforeRequest(context.Background(), reqID, chat)
+	if err != nil {
+		t.Fatalf("failure_mode is pass, so a refused replacement must not error: %v", err)
+	}
+	v := pp.Verdicts(reqID)
+	if v == nil || v.Respond() != nil {
+		t.Fatal("a respond verdict recorded before an invalid replacement survived — " +
+			"the refusal must discard it like a trap")
+	}
+	if v.Block() != nil {
+		t.Fatal("no block was recorded in this case")
+	}
+	if out == nil || len(out.Messages) != 1 || out.Messages[0].Content != "respondme hello" {
+		t.Fatalf("the grantless replacement was applied: %+v", out.Messages)
+	}
+}
+
+// A block recorded before the invalid replacement must FAIL CLOSED: the
+// discard drops respond/route/identity but never a block, and the block still
+// short-circuits the pipeline.
+func TestRunBeforeRequestRejectedReplacementKeepsBlock(t *testing.T) {
+	requireWASM(t, fixturesDir+"/test-verdict-then-invalid/plugin.wasm")
+	pp := newTestPipeline(t, fixturesDir, []string{"test-verdict-then-invalid"})
+
+	const reqID = 6
+	chat := &engine.ChatRequest{
+		Model:    "gpt-x",
+		Messages: []engine.Message{{Role: engine.RoleUser, Content: "blockme hello"}},
+	}
+	out, err := pp.RunBeforeRequest(context.Background(), reqID, chat)
+	if err != nil {
+		t.Fatalf("failure_mode is pass, so a refused replacement must not error: %v", err)
+	}
+	v := pp.Verdicts(reqID)
+	if v == nil || v.Block() == nil {
+		t.Fatal("a block recorded before an invalid replacement must fail closed")
+	}
+	if got := v.Block().Code; got != "blocked_then_invalid" {
+		t.Errorf("block code = %q, want the one the guest recorded", got)
+	}
+	if v.Respond() != nil {
+		t.Error("a respond verdict from the same refused call was kept")
+	}
+	if out == nil || len(out.Messages) != 1 || out.Messages[0].Content != "blockme hello" {
+		t.Fatalf("the grantless replacement was applied: %+v", out.Messages)
 	}
 }
 

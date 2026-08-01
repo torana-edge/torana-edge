@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"hash"
 	"math"
+	"sort"
 
 	sdk "github.com/torana-edge/torana-plugin-sdk"
 	"github.com/torana-edge/torana-plugin-sdk/outboundpolicy"
@@ -36,21 +37,32 @@ import (
 //
 // Change detection is the section fingerprint (requestSections): SHA-256 over
 // length-framed fields with the message index folded in, per role and per
-// section. It is collision-resistant and reorder-sensitive, and carries only
-// 32 bytes per section forward. The exact-comparison alternative (compareSections)
-// remains in writegrant_prototype_test.go as the mutation suite's oracle.
+// section. Each MESSAGE is hashed first as its own typed record
+// (fingerprintMessage): every message field framed with tag + presence +
+// length, then an explicit tool-call count, then one nested record per tool
+// call. The role hasher then receives (absolute index, message digest), so a
+// tool call's four fields can never be confused with a neighbouring message's
+// fields — the round-1 framing was structurally ambiguous and let a call move
+// between two same-role messages with an identical preimage (reproduced in
+// TestMessageFingerprintUnambiguousAcrossBoundaryShift). It is
+// collision-resistant and reorder-sensitive, and carries only 32 bytes per
+// section forward. The exact-comparison alternative (compareSections) remains
+// in writegrant_prototype_test.go as the mutation suite's oracle.
 //
 // Check order, first error wins (documented because both may legitimately
 // fire — a signature field is also in the message fingerprint, so a signature
 // mutation flags the message section AND the binding check):
 //
-//  1. host-owned fields (torana_meta_json) — always a violation;
-//  2. changed sections without their grant;
-//  3. request-domain signature bindings (stale/forged/added/dropped).
+//  1. unconditional invariants — host-owned fields (torana_meta_json) and the
+//     request-domain signature bindings (stale/forged/added/dropped); these
+//     are checked by verifyUnconditionalInvariants and can never be
+//     authorised by a grant;
+//  2. changed sections without their grant (verifyGrantedSections).
 //
-// A fully-granted plugin skips verification entirely via holdsAllRequestGrants:
-// every request section is grantable to it, so fingerprinting and comparing
-// would be pure cost.
+// A fully-granted plugin skips only the section comparison via
+// holdsAllRequestGrants: grants authorise SECTIONS, never host facts or
+// provenance, so the all-grants fast path still runs
+// verifyUnconditionalInvariants.
 
 // requestSections is the fingerprint of one request: 32 bytes per grantable
 // section, plus a per-role message map.
@@ -101,11 +113,70 @@ func writeField(h hash.Hash, field byte, present bool, value []byte) {
 	writeFramed(h, value)
 }
 
+// fingerprintMessage digests ONE message as a typed record under a fresh
+// sha256, so a message's fields cannot be confused with any other message's,
+// nor with a tool call's, and a tool call cannot be confused with a message.
+//
+// The record is: one writeField frame per message field (tag byte + presence
+// + length-framed value — presence is folded in so "field absent" and "field
+// empty" are never the same input), then an explicit tool-call COUNT frame,
+// then one nested record per tool call: a "call" marker frame plus the call's
+// four fields, each writeField-framed. The count frame draws the boundary
+// between the message's own fields and its call records, and the marker plus
+// fixed four-field record keeps every call's fields from being confused with
+// the message's or another call's. Frame-for-frame the record is a prefix
+// code, so two different messages cannot contribute the same digest input.
+//
+// This is what makes the round-1 boundary shift impossible: there, message
+// fields and tool-call fields were concatenated into one role stream, so a
+// call's four fields were byte-indistinguishable from the leading fields of
+// the next same-role message and the call could move between them with an
+// identical preimage.
+func fingerprintMessage(m *pb.Message) [32]byte {
+	h := sha256.New()
+	writeField(h, 1, m.Role != "", []byte(m.Role))
+	writeField(h, 2, m.Content != "", []byte(m.Content))
+	writeField(h, 3, len(m.ContentPartsJson) > 0, m.ContentPartsJson)
+	writeField(h, 4, m.Thinking != "", []byte(m.Thinking))
+	writeField(h, 5, m.ThinkingSignature != "", []byte(m.ThinkingSignature))
+	writeField(h, 6, m.ContentSignature != "", []byte(m.ContentSignature))
+	writeField(h, 7, m.TrailingSignature != "", []byte(m.TrailingSignature))
+	writeField(h, 8, m.RedactedThinking != "", []byte(m.RedactedThinking))
+	writeField(h, 9, m.ToolCallId != "", []byte(m.ToolCallId))
+	writeField(h, 10, m.ToolName != "", []byte(m.ToolName))
+	writeField(h, 11, len(m.CacheControlJson) > 0, m.CacheControlJson)
+
+	var count [8]byte
+	binary.LittleEndian.PutUint64(count[:], uint64(len(m.ToolCalls)))
+	writeFramed(h, count[:])
+	for _, tc := range m.ToolCalls {
+		// A call record is a marker frame plus exactly four tagged fields.
+		// The marker keeps a record from ever parsing as message fields, and
+		// the fixed shape keeps one call from running into the next.
+		writeFramed(h, []byte{callMarker})
+		writeField(h, 1, tc.Id != "", []byte(tc.Id))
+		writeField(h, 2, tc.Name != "", []byte(tc.Name))
+		writeField(h, 3, len(tc.ArgumentsJson) > 0, tc.ArgumentsJson)
+		writeField(h, 4, tc.Signature != "", []byte(tc.Signature))
+	}
+	var sum [32]byte
+	copy(sum[:], h.Sum(nil))
+	return sum
+}
+
+// callMarker distinguishes a tool-call record inside a message's digest from
+// the message's own field frames.
+const callMarker = 0x63 // 'c'
+
 // fingerprintRequestSections digests the grantable sections of a request.
 //
-// One hasher per role, fed each message's ABSOLUTE index in the full message
-// list. Folding only a role's own subsequence leaves a cross-role reorder
-// invisible, because neither role's subsequence changes.
+// One hasher per role, fed each message as (ABSOLUTE index in the full
+// message list, per-message digest). The index pins the message to its
+// position — a boundary shift or reorder moves a digest to a different
+// index — and the digest is the typed record above, so no two messages can
+// ever contribute the same bytes. Folding only a role's own subsequence
+// leaves a cross-role reorder invisible, because neither role's subsequence
+// changes.
 func fingerprintRequestSections(req *pb.ChatRequest) requestSections {
 	p := requestSections{messages: map[string][32]byte{}}
 
@@ -116,15 +187,10 @@ func fingerprintRequestSections(req *pb.ChatRequest) requestSections {
 			h = sha256.New()
 			hashers[m.Role] = h
 		}
+		d := fingerprintMessage(m)
 		var idx [8]byte
 		binary.LittleEndian.PutUint64(idx[:], uint64(i))
-		writeFramed(h, idx[:], []byte(m.Role), []byte(m.Content), m.ContentPartsJson,
-			[]byte(m.Thinking), []byte(m.ThinkingSignature), []byte(m.ContentSignature),
-			[]byte(m.TrailingSignature), []byte(m.RedactedThinking),
-			[]byte(m.ToolCallId), []byte(m.ToolName), m.CacheControlJson)
-		for _, tc := range m.ToolCalls {
-			writeFramed(h, []byte(tc.Id), []byte(tc.Name), tc.ArgumentsJson, []byte(tc.Signature))
-		}
+		writeFramed(h, idx[:], d[:])
 	}
 	// The message count is folded into every role, so appending or removing a
 	// message of one role is visible to all of them — otherwise a deletion that
@@ -193,44 +259,63 @@ func fingerprintRequestSections(req *pb.ChatRequest) requestSections {
 	return p
 }
 
-// verifyRequestMutation reports whether a plugin's replace_request output is a
-// valid mutation of the accepted request: every changed section must be
-// covered by a grant the plugin holds (canWrite), host-owned fields must be
-// untouched, and request-domain signature bindings must obey
-// ClassifySignatureMutation — which on this path rejects SignatureStale,
-// because there is no apply block to clear the wire token later.
+// verifyUnconditionalInvariants checks the host-owned facts and provenance
+// bindings that NO write grant authorises: torana_meta_json, and the
+// request-domain signature bindings (stale/forged/added/dropped — on this
+// path there is no apply block to clear a wire token later, so stale is a
+// violation and a plugin must clear the token itself when it changes covered
+// content).
 //
-// Section changes are detected by fingerprinting both requests; torana_meta_json
-// and the signature tokens are read directly because they are not part of any
-// grantable section. Errors name the section and the missing grant so an
-// operator can approve exactly what the plugin needs.
-func verifyRequestMutation(accepted, out *pb.ChatRequest, canWrite func(section string) bool) error {
+// This is the part of verification the all-grants fast path must NOT skip:
+// grants authorise SECTIONS, never host facts or provider signatures, so a
+// plugin holding every request grant can still forge host metadata or
+// mint/replace/stale-bind a signature. host-owned first, then signatures —
+// first error wins.
+func verifyUnconditionalInvariants(accepted, out *pb.ChatRequest) error {
 	// Host-owned: no grant covers torana_meta_json, so this is checked before
-	// any section grant and regardless of how many grants the plugin holds.
+	// anything else and regardless of how many grants the plugin holds.
 	if !bytes.Equal(accepted.ToranaMetaJson, out.ToranaMetaJson) {
 		return fmt.Errorf("plugin changed host-owned torana_meta_json")
 	}
+	return verifyRequestSignatures(accepted, out)
+}
 
+// verifyGrantedSections compares the section fingerprints (messages, tools,
+// model, params) and requires a grant for every changed section. Skipped by
+// the all-grants fast path, because every section is grantable to that
+// plugin; run for everyone else.
+func verifyGrantedSections(accepted, out *pb.ChatRequest, canWrite func(section string) bool) error {
 	acc := fingerprintRequestSections(accepted)
 	res := fingerprintRequestSections(out)
 
-	// Roles are compared over the union of both sides: a role that left a slot
-	// and the role that took it are both marked changed, which is the
-	// conservative reading of a reorder or replacement.
+	// Roles are compared over the sorted union of both sides: a role that
+	// left a slot and the role that took it are both marked changed, which is
+	// the conservative reading of a reorder or replacement. Sorting the union
+	// makes the first reported violation deterministic — map iteration order
+	// is not.
+	var roles []string
+	seen := make(map[string]bool, len(res.messages)+len(acc.messages))
+	mark := func(role string) {
+		if !seen[role] {
+			seen[role] = true
+			roles = append(roles, role)
+		}
+	}
 	for role, sum := range res.messages {
 		if acc.messages[role] != sum {
-			grant := string(sdk.MessageWriteSection(role))
-			if !canWrite(grant) {
-				return fmt.Errorf("plugin changed messages.%s without %s", role, grant)
-			}
+			mark(role)
 		}
 	}
 	for role, sum := range acc.messages {
 		if res.messages[role] != sum {
-			grant := string(sdk.MessageWriteSection(role))
-			if !canWrite(grant) {
-				return fmt.Errorf("plugin changed messages.%s without %s", role, grant)
-			}
+			mark(role)
+		}
+	}
+	sort.Strings(roles)
+	for _, role := range roles {
+		grant := string(sdk.MessageWriteSection(role))
+		if !canWrite(grant) {
+			return fmt.Errorf("plugin changed messages.%s without %s", role, grant)
 		}
 	}
 
@@ -249,8 +334,23 @@ func verifyRequestMutation(accepted, out *pb.ChatRequest, canWrite func(section 
 			return fmt.Errorf("plugin changed params without ir.params.write")
 		}
 	}
+	return nil
+}
 
-	return verifyRequestSignatures(accepted, out)
+// verifyRequestMutation is the full write-grant check: the unconditional
+// invariants first (host-owned fields and request-domain signature bindings),
+// then the granted sections. It is the unit-test entry point; discovery.go
+// calls verifyUnconditionalInvariants alone on the all-grants fast path.
+//
+// Section changes are detected by fingerprinting both requests; torana_meta_json
+// and the signature tokens are read directly because they are not part of any
+// grantable section. Errors name the section and the missing grant so an
+// operator can approve exactly what the plugin needs.
+func verifyRequestMutation(accepted, out *pb.ChatRequest, canWrite func(section string) bool) error {
+	if err := verifyUnconditionalInvariants(accepted, out); err != nil {
+		return err
+	}
+	return verifyGrantedSections(accepted, out, canWrite)
 }
 
 // requestSignatureFields is the request-domain subset of the SDK's opaque
@@ -295,41 +395,120 @@ type requestSignatureField struct {
 	refs    []protoreflect.FieldDescriptor
 }
 
-// verifyRequestSignatures applies the bound-signature rule to every message.
+// verifyRequestSignatures applies the bound-signature rule to every message,
+// aligning messages by identity instead of by slice index.
 //
-// Messages are paired positionally, matching the fingerprint. For each binding
-// and each output message, the accepted token and covered content are compared
-// against the output: boundContentChanged is decided over the binding's whole
-// content-ref set (thinking_signature covers thinking + redacted_thinking,
-// trailing_signature covers thinking + content, content_signature covers
-// content). A message that appears in the output where the accepted request
-// had none compares against absent values, so a token minted on an inserted
-// message classifies as added.
+// A granted deletion or insertion before a signed message shifts its index,
+// so positional pairing compared the message's UNCHANGED token against an
+// unrelated message and classified it as forged. Signatures bind content
+// within their own message, so alignment is per ROLE and per token value:
+//
+//   - output token != "": the accepted messages of the same role carrying the
+//     SAME token are the candidates. None → the token was minted (added) or
+//     replaced (forged). Multiple candidates sharing the token but covering
+//     DIFFERENT content are ambiguous — reject rather than guess. Otherwise
+//     the token is intact when any candidate's covered content equals the
+//     output's, and stale when not.
+//   - output token == "": the accepted messages of the same role with a
+//     non-empty token are the candidates. Any candidate whose covered content
+//     equals the output's means the token was dropped — rejected. Otherwise
+//     the token was cleared over changed content (the prescribed response) or
+//     was never present — allowed.
+//
+// Covered content is decided over the binding's whole content-ref set
+// (thinking_signature covers thinking + redacted_thinking, trailing_signature
+// covers thinking + content, content_signature covers content). Accepted
+// tokens with no output counterpart (the message was deleted, or the token
+// cleared with its content changed) are allowed: deletion is grantable, and
+// cleared-with-change is the prescribed response.
 func verifyRequestSignatures(accepted, out *pb.ChatRequest) error {
 	for _, check := range requestSignatureFields {
-		for i, om := range out.Messages {
+		for _, om := range out.Messages {
 			if om == nil {
 				continue
 			}
-			var am *pb.Message
-			if i < len(accepted.Messages) {
-				am = accepted.Messages[i]
-			}
-			boundChanged := false
-			for _, ref := range check.refs {
-				if messageStringField(am, ref) != messageStringField(om, ref) {
-					boundChanged = true
-					break
+			outToken := messageStringField(om, check.sig)
+
+			var candidates []*pb.Message
+			acceptedSameRoleHasToken := false
+			for _, am := range accepted.Messages {
+				if am == nil || am.Role != om.Role {
+					continue
+				}
+				acceptedToken := messageStringField(am, check.sig)
+				if acceptedToken != "" {
+					acceptedSameRoleHasToken = true
+				}
+				if (outToken == "" && acceptedToken != "") || (outToken != "" && acceptedToken == outToken) {
+					candidates = append(candidates, am)
 				}
 			}
-			class := outboundpolicy.ClassifySignatureMutation(
-				messageStringField(am, check.sig), messageStringField(om, check.sig), boundChanged)
-			if !class.Allowed() {
-				return fmt.Errorf("plugin %s signature %s", check.binding.SignatureField, class)
+
+			if outToken != "" {
+				switch {
+				case len(candidates) == 0:
+					class := outboundpolicy.SignatureAdded
+					if acceptedSameRoleHasToken {
+						// The role already carries tokens; a different non-empty
+						// value is a replacement, not a mint.
+						class = outboundpolicy.SignatureForged
+					}
+					return fmt.Errorf("plugin %s signature %s", check.binding.SignatureField, class)
+				case hasConflictingDuplicateToken(candidates, check.refs):
+					return fmt.Errorf("plugin %s signature duplicate token with conflicting content",
+						check.binding.SignatureField)
+				case messageContentEqual(candidates[0], om, check.refs):
+					continue // intact
+				default:
+					return fmt.Errorf("plugin %s signature %s", check.binding.SignatureField,
+						outboundpolicy.SignatureStale)
+				}
+			}
+
+			// Output token cleared (or never present): dropping provenance
+			// from content the provider actually signed is rejected; clearing
+			// it over changed content, or having no token on either side, is
+			// allowed.
+			for _, am := range candidates {
+				if messageContentEqual(am, om, check.refs) {
+					return fmt.Errorf("plugin %s signature %s", check.binding.SignatureField,
+						outboundpolicy.SignatureDropped)
+				}
 			}
 		}
 	}
 	return nil
+}
+
+// hasConflictingDuplicateToken reports whether the accepted candidates that
+// share one token cover DIFFERENT content, in which case the output cannot be
+// paired reliably and the mutation is ambiguous. Candidates that share both
+// token and content are fine — they are the same signed fact.
+func hasConflictingDuplicateToken(candidates []*pb.Message, refs []protoreflect.FieldDescriptor) bool {
+	if len(candidates) < 2 {
+		return false
+	}
+	first := candidates[0]
+	for _, c := range candidates[1:] {
+		if !messageContentEqual(first, c, refs) {
+			return true
+		}
+	}
+	return false
+}
+
+// messageContentEqual compares two messages over a binding's covered-content
+// fields. Two nil messages compare equal (absent content); one nil does not.
+func messageContentEqual(a, b *pb.Message, refs []protoreflect.FieldDescriptor) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	for _, ref := range refs {
+		if messageStringField(a, ref) != messageStringField(b, ref) {
+			return false
+		}
+	}
+	return true
 }
 
 // messageStringField reads a string field of a Message, or "" when the message
@@ -363,9 +542,11 @@ type grants interface {
 }
 
 // holdsAllRequestGrants reports whether the plugin holds every request write
-// grant, in which case no verification is needed: every section it could
-// change is grantable to it. ir.stream.write is deliberately absent — it
-// governs the stream topology path, not the request sections verified here.
+// grant, in which case section verification is unnecessary: every section it
+// could change is grantable to it. The unconditional invariants (host-owned
+// fields, signature provenance) are still checked — grants never authorise
+// those. ir.stream.write is deliberately absent — it governs the stream
+// topology path, not the request sections verified here.
 func holdsAllRequestGrants(p grants) bool {
 	for _, grant := range allRequestGrants {
 		if !p.HasGrant(grant) {

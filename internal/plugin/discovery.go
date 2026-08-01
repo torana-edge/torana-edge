@@ -1030,23 +1030,36 @@ func (pp *PluginPipeline) RunBeforeRequest(ctx context.Context, reqID uint64, ch
 		var replacement *pbv2.ChatRequest
 		if res != nil {
 			replacement = res.GetReplaceRequest()
-			if replacement != nil && !holdsAllRequestGrants(lp.plugin) {
+			if replacement != nil {
 				// Write-grant verification: the plugin may change only the
-				// sections its operator granted it. A fully-granted plugin
-				// skips this entirely — every section it could change is
-				// grantable to it, so fingerprinting would be pure cost.
-				if err := verifyRequestMutation(current, replacement, lp.plugin.HasGrant); err != nil {
+				// sections its operator granted it, and may never touch
+				// host-owned facts or provenance. A fully-granted plugin
+				// skips only the section comparison — grants authorise
+				// SECTIONS, never host facts or provider-signature bindings,
+				// so the all-grants fast path still runs the unconditional
+				// invariants (torana_meta_json, signature provenance).
+				var verr error
+				if holdsAllRequestGrants(lp.plugin) {
+					verr = verifyUnconditionalInvariants(current, replacement)
+				} else {
+					verr = verifyRequestMutation(current, replacement, lp.plugin.HasGrant)
+				}
+				if verr != nil {
 					log.Printf("[plugin] %s run_before_request: rejected invalid replacement: %v",
-						lp.manifest.Name, err)
+						lp.manifest.Name, verr)
+					// A refused replacement gets the same treatment as a trap:
+					// non-block verdicts recorded before it are discarded — a
+					// respond or route chosen by code that then produced an
+					// invalid replacement is not trustworthy — while a
+					// recorded block still fails closed and short-circuits in
+					// the check below.
+					pp.discardTrapped(reqID, lp.manifest.Name)
 					if lp.failureMode == "block" {
 						return chat, fmt.Errorf("plugin %s returned an invalid request replacement: %w",
-							lp.manifest.Name, err)
+							lp.manifest.Name, verr)
 					}
 					// allow: skip this plugin's replacement; the previous current
-					// stays so the invalid output never chains downstream. A
-					// block recorded by this plugin still short-circuits in
-					// the check below — every exit from this iteration consults
-					// it, exactly like the trap and decode-error branches.
+					// stays so the invalid output never chains downstream.
 					replacement = nil
 				}
 			}
