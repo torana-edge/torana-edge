@@ -26,26 +26,82 @@ official-plugins:
 	done
 	@echo "bundles in ../torana-plugins/dist"
 
+# --- WASM fixture builds (content-addressed) ---
+#
+# Every fixture is a REAL target with real prerequisites. The build decision
+# is made by scripts/testdata.sh from a content fingerprint — source paths and
+# contents (add/modify/delete), root go.mod/go.sum (SDK pin), the build
+# command, and the Go toolchain version — so an unchanged tree runs ZERO go
+# builds, a changed fixture rebuilds only itself, and an SDK-pin /
+# build-command / toolchain change rebuilds everything. Directory
+# prerequisites catch source addition/deletion (the directory mtime moves);
+# mtime alone never decides a rebuild.
+STAMP_DIR := .cache/fixtures
+FIXTURES := $(addsuffix /plugin.wasm,$(TESTDATA_DIRS))
+
+# Per-fixture rule. $1 is the fixture directory.
+define fixture_rule
+$(1)/plugin.wasm: $(1) $(wildcard $(1)/*.go) go.mod go.sum Makefile
+	@scripts/testdata.sh $(1) $(STAMP_DIR)/$(notdir $(1)).stamp $$@ -- $(WASM_BUILD) -o plugin.wasm .
+endef
+$(foreach d,$(TESTDATA_DIRS),$(eval $(call fixture_rule,$(d))))
+
+# hello.wasm: same engine. Its source directory shares its name with the
+# aggregate target, so a force prerequisite (always re-runs the fingerprint
+# script, which no-ops when unchanged) replaces the directory prerequisite.
+.PHONY: force-hello
+testdata/hello.wasm: force-hello $(wildcard testdata/*.go) go.mod go.sum Makefile
+	@scripts/testdata.sh testdata $(STAMP_DIR)/hello.stamp $@ -- $(WASM_BUILD) -o hello.wasm .
+
+# Aggregate: conservative parallel cold builds (4 workers); warm no-op is a
+# near-instant up-to-date pass.
 testdata:
-	@for dir in $(TESTDATA_DIRS); do \
-		echo "building $$dir/plugin.wasm"; \
-		(cd $$dir && $(WASM_BUILD) -o plugin.wasm .) || exit 1; \
-	done
-	@echo "building testdata/hello.wasm"
-	@cd testdata && $(WASM_BUILD) -o hello.wasm .
+	$(MAKE) -j4 $(FIXTURES) testdata/hello.wasm
 
 install:
 	go install -buildvcs=false -ldflags "$(LDFLAGS)" ./cmd/torana/
 
-# test: the everyday iteration gate — fixtures plus the ordinary full suite
-# (a few minutes). test-race is the slow pre-merge gate: the same suite under
-# -race takes ~15 minutes (the proxy package alone is ~13), so it is a
-# deliberate, separate step rather than the default command.
-test: testdata
-	go test ./... -timeout 600s
+# --- Test targets ---
+#
+# Persistent local wazero compilation cache: the same mechanism CI uses
+# (TORANA_CI_CACHE), defaulting to an ignored repo-local directory so every
+# local run — and every correction round — reuses compiled fixtures across
+# processes. An environment-provided TORANA_CI_CACHE overrides the default.
+CACHE_DIR := $(CURDIR)/.cache/wazero
+TORANA_CI_CACHE ?= $(CACHE_DIR)
+export TORANA_CI_CACHE
+$(shell mkdir -p $(CACHE_DIR))
 
+# test: the everyday iteration gate — fixtures plus the strict ordinary full
+# suite. TORANA_E2E=1 makes a missing required fixture an actionable FAILURE
+# instead of a silent skip; GOWORK=off matches the verified gate. No
+# testing.Short or build-tag omissions: this is the complete ./... suite.
+test: testdata
+	GOWORK=off TORANA_E2E=1 go test ./... -timeout 600s
+
+# test-race is the slow pre-merge gate: the same complete suite under -race.
 test-race: testdata
-	go test ./... -race -timeout 1800s
+	GOWORK=off TORANA_E2E=1 go test ./... -race -timeout 1800s
+
+# Package-scoped targets for correction rounds: build only the package's
+# required fixture set (see scripts/fixtures-for-pkg.sh), strict everywhere.
+# usage: make test-pkg PKG=./internal/proxy   (accepted form: ./internal/...)
+define check_pkg
+	@test -n "$(PKG)" || { echo "usage: make $(1) PKG=./internal/proxy" >&2; exit 1; }
+	@case "$(PKG)" in ./internal/*|internal/*) ;; *) echo "PKG must be ./internal/... (got $(PKG))" >&2; exit 1;; esac
+endef
+
+PKG_FIXTURES = $(addprefix examples/plugins/,$(shell scripts/fixtures-for-pkg.sh $(PKG)))
+
+test-pkg:
+	$(call check_pkg,test-pkg)
+	@$(MAKE) $(addsuffix /plugin.wasm,$(PKG_FIXTURES))
+	GOWORK=off TORANA_E2E=1 go test $(PKG) -timeout 600s
+
+test-race-pkg:
+	$(call check_pkg,test-race-pkg)
+	@$(MAKE) $(addsuffix /plugin.wasm,$(PKG_FIXTURES))
+	GOWORK=off TORANA_E2E=1 go test $(PKG) -race -timeout 1800s
 
 lint:
 	golangci-lint run
@@ -53,6 +109,7 @@ lint:
 clean:
 	rm -f $(BINARY)
 	rm -f $(foreach d,$(TESTDATA_DIRS),$(d)/plugin.wasm) testdata/hello.wasm
+	rm -rf .cache
 
 release:
 	GOOS=linux   GOARCH=amd64 go build -buildvcs=false -ldflags "$(LDFLAGS)" -o dist/torana-linux-amd64   ./cmd/torana/

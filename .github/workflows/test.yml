@@ -7,8 +7,16 @@ on:
     branches: [main]
 
 jobs:
+  # The race suite is the pre-merge gate, sharded across four workers with
+  # FULL coverage: internal/wasm, internal/plugin, internal/proxy, and an
+  # auto-inventoried remainder. The shard-exhaustiveness job proves the union
+  # equals `go list ./...` exactly — no duplicates, no omissions.
   test:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [wasm, plugin, proxy, remainder]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -27,15 +35,54 @@ jobs:
         run: go build ./...
       - name: Build WASM plugins
         run: make testdata
-      - name: Test
-        # Race suite is the pre-merge gate (the proxy package alone takes
-        # ~13 min under -race); 1800s matches make test-race. The ordinary
-        # suite is `make test` locally.
-        run: TORANA_CI_CACHE=/tmp/wazero-cache TORANA_E2E=1 go test ./... -race -timeout 1800s
+      - name: Test shard
+        run: |
+          case "${{ matrix.shard }}" in
+            wasm)     PKGS="./internal/wasm/..." ;;
+            plugin)   PKGS="./internal/plugin/..." ;;
+            proxy)    PKGS="./internal/proxy/..." ;;
+            remainder)
+              PKGS=$(go list ./... | grep -vE '^github.com/torana-edge/torana-edge/internal/(wasm|plugin|proxy)(/|$)' | tr '\n' ' ')
+              ;;
+          esac
+          GOWORK=off TORANA_CI_CACHE=/tmp/wazero-cache TORANA_E2E=1 go test $PKGS -race -timeout 1800s
+
+  # Proves the shard matrix covers every package exactly once. Runs on the
+  # same package inventory the matrix uses.
+  shard-exhaustiveness:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+      - name: Assert the shard union equals go list ./...
+        run: |
+          all=$(go list ./... | sort)
+          remainder=$(echo "$all" | grep -vE '^github.com/torana-edge/torana-edge/internal/(wasm|plugin|proxy)(/|$)')
+          union=$( { echo "$all" | grep -E '^github.com/torana-edge/torana-edge/internal/wasm(/|$)'
+                     echo "$all" | grep -E '^github.com/torana-edge/torana-edge/internal/plugin(/|$)'
+                     echo "$all" | grep -E '^github.com/torana-edge/torana-edge/internal/proxy(/|$)'
+                     echo "$remainder"; } | sort -u )
+          if [ "$union" != "$all" ]; then
+            echo "shard union does not equal the full package inventory:" >&2
+            comm -3 <(echo "$all") <(echo "$union") >&2
+            exit 1
+          fi
+          echo "shard union == go list ./... ($(echo "$union" | wc -l) packages, no duplicates)"
+
+  # Vet and vulnerability scanning run once, outside the test matrix.
+  analysis:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
       - name: Vet
-        run: go vet ./...
+        run: GOWORK=off go vet ./...
       - name: Vulnerability scan
-        run: go run golang.org/x/vuln/cmd/govulncheck@v1.6.0 ./...
+        run: GOWORK=off go run golang.org/x/vuln/cmd/govulncheck@v1.6.0 ./...
 
   lint:
     runs-on: ubuntu-latest
