@@ -22,6 +22,10 @@ import (
 	"github.com/torana-edge/torana-edge/internal/provider"
 	"github.com/torana-edge/torana-edge/internal/proxy"
 
+	// The outbound field-policy registry is validated once at startup; a
+	// broken table would make every verifier decision garbage.
+	"github.com/torana-edge/torana-plugin-sdk/outboundpolicy"
+
 	// Register format adapters so their init() calls wire the registry.
 	_ "github.com/torana-edge/torana-edge/internal/format/anthropic"
 	_ "github.com/torana-edge/torana-edge/internal/format/bedrock"
@@ -33,6 +37,13 @@ import (
 // "dev" or a commit SHA and intentionally skip product-version compatibility
 // gates while continuing to enforce the plugin ABI and capability contract.
 var version = "dev"
+
+// validateOutboundPolicy verifies the outbound enforcement inventory of the
+// pinned SDK once, as the serve path requires before it will start. Extracted
+// from main() so it is testable without starting the server.
+func validateOutboundPolicy() error {
+	return outboundpolicy.Validate()
+}
 
 // usage documents the commands and every environment variable Torana reads.
 //
@@ -101,6 +112,15 @@ func main() {
 			usage(os.Stderr)
 			os.Exit(2)
 		}
+	}
+
+	// The SDK self-validates its outbound field-policy registry (every proto
+	// field has exactly one policy, delegate targets complete, signature
+	// bindings valid). A broken policy table means every verifier decision is
+	// garbage, so refuse to start rather than answer with wrong verdicts.
+	// Validate exactly once at startup, per the SDK contract.
+	if err := validateOutboundPolicy(); err != nil {
+		log.Fatalf("Failed to validate outbound policy registry: %v", err)
 	}
 
 	// --- configuration --------------------------------------------------

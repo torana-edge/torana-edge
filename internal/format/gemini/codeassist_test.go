@@ -366,6 +366,98 @@ func TestStreamFramingBareVsWrapped(t *testing.T) {
 	}
 }
 
+// TestCodeAssistTrailingSignatureBindsPrecedingText: a model turn whose text
+// is followed by Code Assist's trailing signature-only part
+// ({"thoughtSignature":<sig>,"text":""}) must carry the signature on the
+// assistant message — the non-stream path must not drop it the way the old
+// `case p.Text != ""` did. Per SignatureScopeTrailingStandalone it binds the
+// preceding closed text content of this turn.
+func TestCodeAssistTrailingSignatureBindsPrecedingText(t *testing.T) {
+	body := `{"contents":[{"role":"model","parts":[
+		{"text":"The directory contains two files."},
+		{"thoughtSignature":"SIG_TRAILING","text":""}
+	]}]}`
+	chat, err := (&Adapter{}).Unmarshal([]byte(body))
+	if err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if len(chat.Messages) != 1 {
+		t.Fatalf("messages = %d, want 1", len(chat.Messages))
+	}
+	msg := chat.Messages[0]
+	if msg.Role != engine.RoleAssistant {
+		t.Errorf("role = %q, want assistant", msg.Role)
+	}
+	if msg.Content != "The directory contains two files." {
+		t.Errorf("content = %q, want the preceding text", msg.Content)
+	}
+	if msg.ThinkingSignature != "SIG_TRAILING" {
+		t.Errorf("ThinkingSignature = %q, want SIG_TRAILING — trailing signature-only part was dropped", msg.ThinkingSignature)
+	}
+
+	// The signature must survive re-marshal on the turn's text part.
+	out, err := (&Adapter{}).Marshal(chat)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if !strings.Contains(string(out), `"thoughtSignature":"SIG_TRAILING"`) {
+		t.Errorf("marshal lost the trailing signature: %s", out)
+	}
+}
+
+// TestCodeAssistTrailingSignatureNotBoundToToolCallOnlyTurn: a turn made only
+// of tool calls followed by a trailing signature-only part must NOT get the
+// signature attached to the tool-call message. Per SignatureScopeTrailingStandalone
+// the standalone signature binds only the preceding closed text/thinking
+// content of the turn and "does not bind tool-call blocks"; with no text-bearing
+// message in this turn it is dropped rather than misbound — the same clear
+// semantics the stream path's host normalization applies. Asserting the drop
+// keeps it a decision, not the accidental loss of the old code.
+func TestCodeAssistTrailingSignatureNotBoundToToolCallOnlyTurn(t *testing.T) {
+	body := `{"contents":[{"role":"model","parts":[
+		{"functionCall":{"name":"list_dir","args":{"p":"/x"},"id":"c1"}},
+		{"thoughtSignature":"SIG_ORPHAN","text":""}
+	]}]}`
+	chat, err := (&Adapter{}).Unmarshal([]byte(body))
+	if err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if len(chat.Messages) != 1 {
+		t.Fatalf("messages = %d, want 1", len(chat.Messages))
+	}
+	msg := chat.Messages[0]
+	if len(msg.ToolCalls) != 1 || msg.ToolCalls[0].Name != "list_dir" {
+		t.Fatalf("tool calls = %+v, want [list_dir]", msg.ToolCalls)
+	}
+	if msg.ThinkingSignature != "" {
+		t.Errorf("ThinkingSignature = %q, want empty — a standalone signature does not bind tool-call blocks", msg.ThinkingSignature)
+	}
+}
+
+// TestCodeAssistTrailingSignatureBindsFollowingText: when the signature-only
+// part precedes the turn's text (no text content yet), it binds the next
+// text-bearing message of this turn instead of being dropped.
+func TestCodeAssistTrailingSignatureBindsFollowingText(t *testing.T) {
+	body := `{"contents":[{"role":"model","parts":[
+		{"thoughtSignature":"SIG_LEAD","text":""},
+		{"text":"the actual reply"}
+	]}]}`
+	chat, err := (&Adapter{}).Unmarshal([]byte(body))
+	if err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if len(chat.Messages) != 1 {
+		t.Fatalf("messages = %d, want 1", len(chat.Messages))
+	}
+	msg := chat.Messages[0]
+	if msg.Content != "the actual reply" {
+		t.Errorf("content = %q, want the following text", msg.Content)
+	}
+	if msg.ThinkingSignature != "SIG_LEAD" {
+		t.Errorf("ThinkingSignature = %q, want SIG_LEAD — signature should bind the next text-bearing message", msg.ThinkingSignature)
+	}
+}
+
 func drain(ch <-chan engine.StreamEvent) []engine.StreamEvent {
 	var out []engine.StreamEvent
 	for ev := range ch {

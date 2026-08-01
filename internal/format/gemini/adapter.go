@@ -282,6 +282,13 @@ func appendUserOrTool(chat *engine.ChatRequest, content geminiContent, callIDs m
 // its id and thoughtSignature.
 func appendModel(chat *engine.ChatRequest, content geminiContent, prevCallIdx map[string]int, callIDs map[string]string) {
 	msg := engine.Message{Role: engine.RoleAssistant}
+	// A trailing standalone signature part (Code Assist's final
+	// {"thoughtSignature":<sig>,"text":""} part after earlier text) binds the
+	// preceding closed text/thinking content of this turn and never a
+	// tool-call block (SignatureScopeTrailingStandalone). Hold it until a
+	// text-bearing message of this turn exists; if none does, drop it rather
+	// than misbind it to a tool-call-only message.
+	var pendingSig string
 	for _, p := range content.Parts {
 		switch {
 		case p.FunctionResponse != nil:
@@ -307,6 +314,23 @@ func appendModel(chat *engine.ChatRequest, content geminiContent, prevCallIdx ma
 			msg.Content += p.Text
 			if p.ThoughtSignature != "" {
 				msg.ThinkingSignature = p.ThoughtSignature
+			}
+			if pendingSig != "" {
+				// The signature-only part preceded this text: bind it to the
+				// turn's text-bearing message per the scope contract.
+				msg.ThinkingSignature = pendingSig
+				pendingSig = ""
+			}
+		case p.ThoughtSignature != "":
+			// Signature-only part (text: ""): bind it to the preceding closed
+			// text content of this turn. If this message has no text yet (a
+			// tool-call-only turn), the signature does not bind tool-call
+			// blocks — hold it for a following text-bearing message of this
+			// turn, else drop it.
+			if msg.Content != "" {
+				msg.ThinkingSignature = p.ThoughtSignature
+			} else {
+				pendingSig = p.ThoughtSignature
 			}
 		}
 	}

@@ -31,6 +31,17 @@ func TestUsageDocumentsEveryEnvironmentVariable(t *testing.T) {
 	}
 }
 
+// main() refuses to start when the pinned SDK's outbound field-policy
+// registry is broken, because a broken policy table makes every verifier
+// decision garbage. This exercises the exact function the serve path calls at
+// startup; it fails when the SDK ships an invalid registry (the failure mode
+// the check exists to surface loudly).
+func TestValidateOutboundPolicy(t *testing.T) {
+	if err := validateOutboundPolicy(); err != nil {
+		t.Fatalf("outbound policy registry invalid: %v", err)
+	}
+}
+
 // The help text must name every subcommand main() dispatches, or a command
 // exists that nobody can discover.
 func TestUsageDocumentsEverySubcommand(t *testing.T) {
