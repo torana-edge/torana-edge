@@ -4,6 +4,9 @@ import (
 	"context"
 	"os"
 	"testing"
+
+	sdk "github.com/torana-edge/torana-plugin-sdk"
+	pb "github.com/torana-edge/torana-plugin-sdk/pb/v2"
 )
 
 // requireWASM skips locally when the plugin binary is missing but fails in
@@ -45,7 +48,15 @@ func TestLoadRealPlugins(t *testing.T) {
 			if err != nil {
 				t.Fatalf("load: %v", err)
 			}
-			if err := p.ValidateHooks(ctx, hooks); err != nil {
+			declared := make([]pb.Hook, 0, len(hooks))
+			for _, h := range hooks {
+				hk, ok := sdk.ManifestHookName(h)
+				if !ok {
+					t.Fatalf("unknown hook %q in the test table", h)
+				}
+				declared = append(declared, hk)
+			}
+			if err := p.ValidateHooks(ctx, declared); err != nil {
 				t.Fatalf("hooks: %v", err)
 			}
 		})

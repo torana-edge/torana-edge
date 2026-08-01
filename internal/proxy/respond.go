@@ -7,23 +7,14 @@ import (
 
 	"github.com/torana-edge/torana-edge/internal/engine"
 	"github.com/torana-edge/torana-edge/internal/format"
+	"github.com/torana-edge/torana-edge/internal/wasm"
 )
 
-// respondVerdict is the plugin-supplied direct response carried in
-// ToranaMeta["_respond"] (set via sdk.RespondRequest).
-type respondVerdict struct {
-	Content string `json:"content"`
-}
-
-// renderRespond turns a plugin's raw _respond value into a synthetic 200
+// renderRespond turns a recorded respond verdict into a synthetic 200
 // response shaped like the caller's provider — a complete chat completion
 // body, or an SSE stream when the client requested streaming. The transport
 // returns it verbatim; upstream is never called.
-func renderRespond(f *format.Format, model string, raw any, stream bool) *BlockResponse {
-	b, _ := json.Marshal(raw)
-	var v respondVerdict
-	_ = json.Unmarshal(b, &v)
-
+func renderRespond(f *format.Format, model string, v *wasm.RespondVerdict, stream bool) *BlockResponse {
 	if stream {
 		return &BlockResponse{
 			Status:      200,

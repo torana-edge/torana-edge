@@ -4,7 +4,7 @@ import (
 	"context"
 
 	sdk "github.com/torana-edge/torana-plugin-sdk"
-	"github.com/torana-edge/torana-plugin-sdk/pb"
+	pb "github.com/torana-edge/torana-plugin-sdk/pb/v2"
 )
 
 func main() {}
@@ -21,7 +21,7 @@ func main() {}
 // There are three identical copies (a, b, c) only because the pipeline keys
 // plugins by name, so the same bundle cannot be loaded twice.
 func init() {
-	sdk.OnBeforeRequest(func(ctx context.Context, req *pb.ChatRequest) (*pb.ChatRequest, error) {
-		return nil, nil
+	sdk.OnBeforeRequest(func(ctx context.Context, req *pb.ChatRequest) (sdk.RequestResult, error) {
+		return sdk.PassRequest(), nil
 	})
 }

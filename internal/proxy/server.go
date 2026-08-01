@@ -45,7 +45,7 @@ import (
 	"github.com/torana-edge/torana-edge/internal/provider"
 	"github.com/torana-edge/torana-edge/internal/secret"
 	"github.com/torana-edge/torana-edge/internal/wasm"
-	"github.com/torana-edge/torana-plugin-sdk/pb"
+	pb "github.com/torana-edge/torana-plugin-sdk/pb/v2"
 )
 
 const maxBodySize = 10 * 1024 * 1024 // 10 MB
@@ -281,19 +281,67 @@ type reqState struct {
 	// "route" (env.route_request). Empty when no pipeline is loaded or no
 	// veto/redirect was applied.
 	Verdict string
+	// VerdictPlugin names the plugin that issued Verdict. v1 carried verdicts
+	// as anonymous ToranaMeta keys, so an operator seeing a blocked request
+	// could not tell which plugin blocked it — the first question anyone asks.
+	VerdictPlugin string
+	// PluginFailure marks a plugin failure on an OBSERVATIONAL path, where
+	// failure_mode cannot be applied because the response has already gone to
+	// the caller. Recorded so the failure is visible to an operator rather than
+	// the host claiming a block it did not perform.
+	PluginFailure bool
+	// streamDone closes when the streaming goroutine has finished, INCLUDING
+	// the observational after-response hook.
+	//
+	// That goroutine closes the pipe before running the hook, so EOF lets
+	// ReverseProxy.ServeHTTP return while the hook is still executing. Without
+	// waiting, the handler recorded the feed and ran EndRequest concurrently:
+	// plugin_failure was nondeterministically missing, request-scoped metadata
+	// could be deleted out from under the hook, and reqState was read and
+	// written by two goroutines at once.
+	//
+	// COST, stated plainly: waiting here IS on the client's critical path.
+	// Closing the pipe does not give the client EOF — Go's HTTP server writes
+	// the chunked terminator (or HTTP/2 END_STREAM) when the HANDLER returns,
+	// so a client reading to EOF waits for this hook and every preceding
+	// drain. An earlier comment claimed the opposite; it was wrong, and wrong
+	// in the same way as the deferred-cleanup comment it replaced.
+	//
+	// So an observational streaming hook can add up to the per-plugin call
+	// timeout (5s), times the number of plugins declaring it, to transport
+	// completion. Clients that stop on the protocol sentinel ([DONE], or the
+	// provider's stop event) do not notice, because those bytes are already
+	// written; clients that wait for HTTP completion do.
+	//
+	// This is a DELIBERATE first cut: correctness of request-state lifetime
+	// over latency, while there are no users. Making observational
+	// post-processing genuinely off the response path needs a non-cancelled
+	// bounded context and moves cleanup and final metrics ownership to the
+	// finalizer — recorded as a follow-up in HANDOFF_TO_AGENT.md.
+	//
+	// Set in ModifyResponse, which runs inside ServeHTTP on the handler's own
+	// goroutine, so the handler's later read is ordered after the write.
+	streamDone chan struct{}
 	// OriginalReq is the pristine pre-pipeline request (pb bytes), snapshotted
 	// only when a loaded plugin holds env.original_request.
 	OriginalReq []byte
+	// OriginalReqSet marks that the snapshot was actually taken. Presence is
+	// not length: an all-default ChatRequest marshals to zero bytes, so a
+	// captured empty request and an uncaptured one are the same slice.
+	OriginalReqSet bool
 	// OriginalResp is the raw upstream response body (non-streaming JSON path
 	// only), stashed before response hooks run, only when a loaded plugin
 	// holds env.original_response.
 	OriginalResp []byte
+	// OriginalRespSet marks capture. An upstream body can legitimately be
+	// empty, so again this is separate from length.
+	OriginalRespSet bool
 	// CompactionReports are queued by request-side WASM host calls and priced
 	// only after routing has selected the final provider/model.
 	CompactionReports          []attributedCompactionReport
 	InitialProvider            string
 	InitialFormat              string
-	PendingRoute               *routeVerdict
+	PendingRoute               *wasm.RouteVerdict
 	CompactionRequestPrepared  bool
 	CompactionReportsCommitted bool
 }
@@ -318,6 +366,42 @@ func (rs *reqState) responseMeta() map[string]any {
 			"output_tokens":      rs.UsageOut,
 			"cache_read_tokens":  rs.UsageCacheRead,
 			"cache_write_tokens": rs.UsageCacheWrite,
+		},
+	}
+}
+
+// chatResponse builds the canonical response handed to run_after_response.
+//
+// One builder for all three paths on purpose. v1 had each path fill a
+// ChatRequest its own way -- a synthesized assistant message, model plus
+// metadata with no messages, and on the streaming path the outbound REQUEST --
+// so what a plugin received depended on a path it could not observe. Sharing
+// the construction is what stops that returning.
+//
+// msg is the assistant's reply, or nil when there is none (upstream error, or
+// a streamed body already sent).
+//
+// id is the PROVIDER's message id, empty when the path does not surface one.
+// reqState.ID is a host-internal counter and deliberately not used here:
+// putting it in a provider-shaped field would hand plugins a value that looks
+// like an upstream identifier and is not.
+func (rs *reqState) chatResponse(model, id string, msg *engine.ResponseMessage, finishReason string) *engine.ChatResponse {
+	var durationMS int64
+	if !rs.Start.IsZero() {
+		durationMS = time.Since(rs.Start).Milliseconds()
+	}
+	return &engine.ChatResponse{
+		Model:          model,
+		ID:             id,
+		Message:        msg,
+		FinishReason:   finishReason,
+		UpstreamStatus: rs.UpstreamStatus,
+		DurationMS:     durationMS,
+		Usage: &engine.StreamUsage{
+			InputTokens:      rs.UsageIn,
+			OutputTokens:     rs.UsageOut,
+			CacheReadTokens:  rs.UsageCacheRead,
+			CacheWriteTokens: rs.UsageCacheWrite,
 		},
 	}
 }
@@ -401,9 +485,25 @@ func (s *Server) evaluateCompaction(ctx context.Context, report economics.Compac
 	if targetName == "" {
 		targetName = rs.Provider
 	}
-	if rs.PendingRoute != nil {
+	// Read the route verdict directly rather than a copy cached when a plugin
+	// happened to return a replacement.
+	//
+	// Routing is a host-call SIDE EFFECT in v2, so a route-only plugin
+	// correctly returns PassRequest. The cached copy was only refreshed by
+	// RequestMutationFunc, which fires on ReplaceRequest — so such a plugin
+	// priced compaction against the ORIGINAL provider and model while the
+	// request went somewhere else. The old router fixture hid this by
+	// returning ReplaceRequest after routing, which is the v1
+	// "return the same request" footgun v2 exists to remove.
+	pendingRoute := rs.PendingRoute
+	if rs.Pipeline != nil {
+		if v := rs.Pipeline.Verdicts(rs.ID).Route(); v != nil {
+			pendingRoute = v
+		}
+	}
+	if pendingRoute != nil {
 		cfg := s.GetConfig().Providers
-		targetName = rs.PendingRoute.Provider
+		targetName = pendingRoute.Provider
 		if targetName == "" {
 			targetName = rs.InitialProvider
 		}
@@ -412,8 +512,8 @@ func (s *Server) evaluateCompaction(ctx context.Context, report economics.Compac
 			return economics.CompactionDecision{Reason: economics.UnavailableRouteUnresolved}
 		}
 		report.Provider = targetName
-		if rs.PendingRoute.Model != "" {
-			report.Model = rs.PendingRoute.Model
+		if pendingRoute.Model != "" {
+			report.Model = pendingRoute.Model
 		}
 	}
 	target, offload := s.compactionPricing(rs, report)
@@ -759,7 +859,9 @@ func New(cfg Config) (*Server, error) {
 				// is the only way to see what the caller actually sent.
 				if pl.HasGrant("env.original_request") {
 					if b, err := proto.Marshal(pbconv.ToPBChatRequest(chat)); err == nil {
-						reqStateFrom(req.Context()).OriginalReq = b
+						rsOrig := reqStateFrom(req.Context())
+						rsOrig.OriginalReq = b
+						rsOrig.OriginalReqSet = true
 					}
 				}
 
@@ -779,7 +881,33 @@ func New(cfg Config) (*Server, error) {
 
 				modified, err := pl.RunBeforeRequest(req.Context(), reqStateFrom(req.Context()).ID, chat)
 				if err != nil {
-					log.Printf("plugin pipeline error: %v", err)
+					// failure_mode: block, applied at the TRANSPORT boundary.
+					//
+					// The pipeline already decided to refuse — only a plugin
+					// configured to block produces an error here. Logging and
+					// continuing sent the request upstream anyway, so a
+					// security plugin whose manifest says "block" was fail-open
+					// on the real HTTP path while unit-level pipeline tests
+					// reported it blocked.
+					//
+					// The body has not been committed yet, so this can be a
+					// proper refusal. The message is generic: which plugin
+					// failed and why is operator information, not something to
+					// hand the caller.
+					log.Printf("plugin pipeline error (failure_mode=block): %v", err)
+					if rc, ok := req.Context().Value(routeContextKey{}).(*RouteContext); ok {
+						rc.Block = renderBlock(prov.Format, &wasm.BlockVerdict{
+							Status:  502,
+							Code:    "plugin_failure",
+							Message: "a plugin required for this request failed",
+						})
+					}
+					rsFail := reqStateFrom(req.Context())
+					rsFail.Verdict = "block"
+					req.Body = io.NopCloser(bytes.NewReader(nil))
+					req.ContentLength = 0
+					discardCompactionReports(rsFail)
+					return
 				} else if modified != nil {
 					chat = modified
 				}
@@ -790,46 +918,50 @@ func New(cfg Config) (*Server, error) {
 					delete(chat.ToranaMeta, "_request_headers")
 				}
 
-				// Request veto: a plugin holding env.block_request may reject
-				// the request outright. Honor it only when the capability is
-				// declared, render a provider-shaped error, and short-circuit
-				// — the transport returns rc.Block instead of calling upstream.
-				if pl.HasGrant("env.block_request") && chat.ToranaMeta != nil {
-					if raw, ok := chat.ToranaMeta["_block"]; ok {
-						delete(chat.ToranaMeta, "_block")
-						if rc, ok := req.Context().Value(routeContextKey{}).(*RouteContext); ok {
-							rc.Block = renderBlock(prov.Format, raw)
-						}
-						reqStateFrom(req.Context()).Verdict = "block"
-						req.Body = io.NopCloser(bytes.NewReader(nil))
-						req.ContentLength = 0
-						discardCompactionReports(reqStateFrom(req.Context()))
-						return
+				// Verdicts are recorded by attributed, permission-checked host
+				// calls now. The grant was verified per plugin at the call
+				// site, so there is deliberately NO pipeline-wide HasGrant
+				// check here: v1 asked "does ANY loaded plugin hold
+				// env.block_request?", which meant one approved blocker let
+				// every other plugin's verdict through. That was the hole in
+				// the capability model.
+				verdicts := pl.Verdicts(reqStateFrom(req.Context()).ID)
+
+				// Request veto: render a provider-shaped error and
+				// short-circuit — the transport returns rc.Block instead of
+				// calling upstream.
+				if block := verdicts.Block(); block != nil {
+					if rc, ok := req.Context().Value(routeContextKey{}).(*RouteContext); ok {
+						rc.Block = renderBlock(prov.Format, block)
 					}
+					rs := reqStateFrom(req.Context())
+					rs.Verdict = "block"
+					rs.VerdictPlugin = block.Plugin
+					req.Body = io.NopCloser(bytes.NewReader(nil))
+					req.ContentLength = 0
+					discardCompactionReports(rs)
+					return
 				}
 
-				// Respond-directly: a plugin holding env.respond_request may
-				// serve the full response itself (response cache, mock mode).
-				// The host renders a provider-shaped completion — SSE if the
-				// client streams — and the transport returns it without
-				// calling upstream: zero tokens spent. A block verdict wins
-				// over a respond verdict (checked above).
-				if pl.HasGrant("env.respond_request") && chat.ToranaMeta != nil {
-					if raw, ok := chat.ToranaMeta["_respond"]; ok {
-						delete(chat.ToranaMeta, "_respond")
-						if rc, ok := req.Context().Value(routeContextKey{}).(*RouteContext); ok {
-							rc.Block = renderRespond(fmt, chat.Model, raw, chat.Stream)
-						}
-						rs := reqStateFrom(req.Context())
-						rs.Synthetic = true
-						rs.Model = chat.Model
-						rs.Provider = provName
-						rs.Verdict = "respond"
-						req.Body = io.NopCloser(bytes.NewReader(nil))
-						req.ContentLength = 0
-						discardCompactionReports(rs)
-						return
+				// Respond-directly: a plugin may serve the full response itself
+				// (response cache, mock mode). The host renders a
+				// provider-shaped completion — SSE if the client streams — and
+				// the transport returns it without calling upstream: zero
+				// tokens spent. Block wins over respond, checked above.
+				if respond := verdicts.Respond(); respond != nil {
+					if rc, ok := req.Context().Value(routeContextKey{}).(*RouteContext); ok {
+						rc.Block = renderRespond(fmt, chat.Model, respond, chat.Stream)
 					}
+					rs := reqStateFrom(req.Context())
+					rs.Synthetic = true
+					rs.Model = chat.Model
+					rs.Provider = provName
+					rs.Verdict = "respond"
+					rs.VerdictPlugin = respond.Plugin
+					req.Body = io.NopCloser(bytes.NewReader(nil))
+					req.ContentLength = 0
+					discardCompactionReports(rs)
+					return
 				}
 			}
 
@@ -840,10 +972,14 @@ func New(cfg Config) (*Server, error) {
 				rs.Provider = provName
 			}
 
+			// Identity override is an attributed, granted verdict now. v1 read
+			// it from an unprefixed ToranaMeta["identity"] key with NO
+			// permission check at all — it did not appear in sdk.Permissions
+			// or ABI.md, so any plugin could rewrite the rate-limit key.
 			identity := ""
-			if chat.ToranaMeta != nil {
-				if id, ok := chat.ToranaMeta["identity"].(string); ok {
-					identity = id
+			if pl := reqStateFrom(req.Context()).Pipeline; pl != nil {
+				if v := pl.Verdicts(reqStateFrom(req.Context()).ID).Identity(); v != nil {
+					identity = v.Identity
 				}
 			}
 			if identity == "" {
@@ -858,14 +994,17 @@ func New(cfg Config) (*Server, error) {
 			// extraction so rate limiting still keys on the caller, and
 			// before marshal so the model override reaches the wire. Bad
 			// verdicts fail open to the original route.
-			if pl := reqStateFrom(req.Context()).Pipeline; pl != nil && pl.HasGrant("env.route_request") && chat.ToranaMeta != nil {
-				if raw, ok := chat.ToranaMeta["_route"]; ok {
-					delete(chat.ToranaMeta, "_route")
-					s.applyRoute(req, chat, prov.Format, provName, raw, currentCfg.Providers)
+			// No pipeline-wide HasGrant: the grant was checked per plugin at
+			// the host call, and asking whether ANY plugin holds it is the
+			// capability hole this migration closes.
+			if pl := reqStateFrom(req.Context()).Pipeline; pl != nil {
+				if route := pl.Verdicts(reqStateFrom(req.Context()).ID).Route(); route != nil {
+					s.applyRoute(req, chat, prov.Format, provName, route, currentCfg.Providers)
 					// Model may have been overridden; refresh the metrics fact.
 					rstate := reqStateFrom(req.Context())
 					rstate.Model = chat.Model
 					rstate.Verdict = "route"
+					rstate.VerdictPlugin = route.Plugin
 				}
 			}
 
@@ -941,12 +1080,23 @@ func New(cfg Config) (*Server, error) {
 				ctx := resp.Request.Context()
 				rs := reqStateFrom(ctx)
 				if pl := rs.Pipeline; pl != nil {
-					errChat := &engine.ChatRequest{
-						Model:      rs.Model,
-						ToranaMeta: map[string]any{"_response": rs.responseMeta()},
-					}
-					if _, err := pl.RunAfterResponse(ctx, rs.ID, errChat); err != nil {
-						log.Printf("plugin run_after_response (error path): %v", err)
+					// No assistant message: upstream failed, so there is no
+					// reply. UpstreamStatus carries the failure, and plugins
+					// must not assume Message is set. Immutable — there is no
+					// body to rewrite.
+					errResp := rs.chatResponse(rs.Model, "", nil, "")
+					// Observational only, and honestly so. This runs on the
+					// upstream-ERROR path: the caller is already getting a
+					// failure, there is no body to withhold, and refusing
+					// again would replace one error with a less informative
+					// one. failure_mode cannot apply here — recorded as a
+					// blocked-but-unenforceable outcome so an operator can see
+					// the plugin failed rather than the host claiming a block
+					// it never performed.
+					if _, err := pl.RunAfterResponse(ctx, rs.ID, errResp, false); err != nil {
+						log.Printf("plugin run_after_response (error path, observational — "+
+							"failure_mode cannot apply, upstream already failed): %v", err)
+						rs.PluginFailure = true
 					}
 				}
 				return nil
@@ -1012,9 +1162,19 @@ func New(cfg Config) (*Server, error) {
 						for event := range in {
 							outEvents, err := pl.RunOnStreamChunk(resp.Request.Context(), reqID, &event)
 							if err != nil {
-								log.Printf("plugin stream error: %v", err)
-								out <- event
-								continue
+								// failure_mode: block on a stream whose
+								// headers and body have already gone to the
+								// caller. There is nothing to refuse any more,
+								// so the honest action is to TERMINATE.
+								//
+								// Replaying the event was the fail-open: the
+								// plugin refused it, and forwarding it anyway
+								// delivers exactly the content the block
+								// policy exists to withhold. A truncated
+								// stream is visible to the caller; a silently
+								// unfiltered one is not.
+								log.Printf("plugin stream error (failure_mode=block), terminating stream: %v", err)
+								return
 							}
 							for _, ev := range outEvents {
 								out <- ev
@@ -1039,7 +1199,13 @@ func New(cfg Config) (*Server, error) {
 					streamPl = pl
 				}
 				pr, pw := io.Pipe()
+				done := make(chan struct{})
+				rs.streamDone = done
 				go func() {
+					// Closed on EVERY exit, including a panic unwinding through
+					// here: a handler blocked forever on this channel would be
+					// worse than the race it exists to remove.
+					defer close(done)
 					if streamPl != nil {
 						defer streamPl.Release()
 					}
@@ -1068,13 +1234,32 @@ func New(cfg Config) (*Server, error) {
 					// here: the whole stream has been serialized.
 					ctx := resp.Request.Context()
 					if pl := reqStateFrom(ctx).Pipeline; pl != nil {
-						if chat, _ := ctx.Value(engine.ChatRequestKey).(*engine.ChatRequest); chat != nil {
-							if chat.ToranaMeta == nil {
-								chat.ToranaMeta = map[string]any{}
-							}
-							chat.ToranaMeta["_response"] = rs.responseMeta()
-							if _, err := pl.RunAfterResponse(ctx, reqStateFrom(ctx).ID, chat); err != nil {
-								log.Printf("plugin run_after_response (stream): %v", err)
+						// v1 passed the outbound REQUEST here, so a plugin
+						// reading the assistant's reply got the last USER
+						// message instead — a real bug, not just confusing
+						// naming, and invisible because the shape typechecked.
+						//
+						// The streamed body is already on the wire, so there
+						// is no assembled reply to hand over and nothing can
+						// be rewritten: Message is nil and mutable is false.
+						// A plugin that needs the streamed content observes it
+						// through run_on_stream_chunk, which sees every event.
+						streamResp := rs.chatResponse(rs.Model, "", nil, "")
+						// Observational only. Every stream event has been
+						// written, so there is nothing left to withhold and
+						// failure_mode has nothing to act on. "Observational"
+						// describes AUTHORITY, not timing: this still runs
+						// before the handler returns, so it is on the client's
+						// critical path (see reqState.streamDone).
+						// Content filtering on a stream belongs to
+						// run_on_stream_chunk, which CAN terminate — see the
+						// stream hook above. Recorded so the failure is
+						// visible rather than claimed as a block.
+						if _, err := pl.RunAfterResponse(ctx, reqStateFrom(ctx).ID, streamResp, false); err != nil {
+							log.Printf("plugin run_after_response (stream, observational — "+
+								"failure_mode cannot apply, body already sent): %v", err)
+							if rsObs := reqStateFrom(ctx); rsObs != nil {
+								rsObs.PluginFailure = true
 							}
 						}
 					}
@@ -1123,15 +1308,33 @@ func New(cfg Config) (*Server, error) {
 					// hook mutates it.
 					if pl.HasGrant("env.original_response") {
 						rs.OriginalResp = bodyBytes
+						rs.OriginalRespSet = true
 					}
 					chat, _ := ctx.Value(engine.ChatRequestKey).(*engine.ChatRequest)
 					// Records provider usage into rs as a side effect.
 					modified, modErr := runJSONResponseHooks(ctx, pl, rs.ID, f.Name, chat, bodyBytes)
 					if modErr != nil {
-						log.Printf("wasm json response hook error: %v", modErr)
-					} else {
-						bodyBytes = modified
+						// failure_mode: block on the non-streaming response.
+						// The body has NOT been written yet — ModifyResponse
+						// still owns it — so this is refusable, and forwarding
+						// the provider's body after a plugin refused it is the
+						// same fail-open as the request path.
+						log.Printf("wasm json response hook error (failure_mode=block): %v", modErr)
+						rs.Verdict = "block"
+						blocked := renderBlock(f.Name, &wasm.BlockVerdict{
+							Status:  502,
+							Code:    "plugin_failure",
+							Message: "a plugin required for this response failed",
+						})
+						resp.StatusCode = blocked.Status
+						resp.Status = ""
+						resp.Header.Set("Content-Type", blocked.ContentType)
+						resp.Header.Del("Content-Length")
+						resp.Body = io.NopCloser(bytes.NewReader(blocked.Body))
+						resp.ContentLength = int64(len(blocked.Body))
+						return nil
 					}
+					bodyBytes = modified
 				} else if f != nil {
 					// No pipeline — still meter provider-reported usage.
 					var body map[string]any
@@ -1914,15 +2117,24 @@ func New(cfg Config) (*Server, error) {
 			}
 		}
 		r = r.WithContext(context.WithValue(r.Context(), reqStateKey{}, rs))
-		// Drop request-scoped plugin state when the request completes,
-		// then release the pinned pipeline. Safe to defer here:
-		// ReverseProxy.ServeHTTP only returns after the response body
-		// (including the SSE pipe) is fully copied.
+		// Drop request-scoped plugin state when the request completes, then
+		// release the pinned pipeline.
+		//
+		// This runs after the streamDone wait below. ServeHTTP returning is NOT
+		// sufficient on the streaming path: the goroutine closes the pipe
+		// before its observational hook, so EOF releases ServeHTTP while the
+		// hook still needs this state.
 		defer func() {
-			if rs.Pipeline != nil {
-				rs.Pipeline.EndRequest(rs.ID)
-				rs.Pipeline.Release()
-			}
+			// Wait here too, not only after ServeHTTP.
+			//
+			// ReverseProxy panics with http.ErrAbortHandler when a client
+			// disconnects mid-stream, and this handler re-panics it. During
+			// that unwind the normal-path wait is skipped entirely, so
+			// EndRequest could delete request-scoped metadata while the stream
+			// goroutine was still draining or running its observational hook.
+			// Putting the wait in the deferred cleanup gives normal return,
+			// ErrAbortHandler and any other panic the same invariant.
+			rs.finalizeRequest()
 		}()
 		// If no provider matches and no default, reject.
 		prov, _, _ := provider.Resolve(r.URL.Path, currentCfg.Providers)
@@ -1948,6 +2160,13 @@ func New(cfg Config) (*Server, error) {
 		r.Body = tr
 
 		proxy.ServeHTTP(tw, r)
+
+		// Wait for the streaming goroutine's observational hook before reading
+		// rs for stats and the feed. The deferred cleanup waits too; this one
+		// orders the reads below, which happen before it.
+		//
+		// This is on the client's critical path — see reqState.streamDone.
+		rs.awaitStreamDone()
 
 		s.recordCompactionReports(rs)
 		s.stats.RecordRequest(tr.bytesRead, tw.bytesWritten)
@@ -1990,6 +2209,7 @@ func New(cfg Config) (*Server, error) {
 			BytesIn:          tr.bytesRead,
 			BytesOut:         tw.bytesWritten,
 			Verdict:          rs.Verdict,
+			PluginFailure:    rs.PluginFailure,
 		})
 	})
 
@@ -2434,26 +2654,17 @@ func (s *Server) newRuntime() *wasm.Runtime {
 		rs.CompactionReports = append(rs.CompactionReports, attributedCompactionReport{Plugin: pluginName, Report: report})
 	}
 	rt.EvaluateCompactionFunc = s.evaluateCompaction
+	// Compaction savings are priced against the FINAL provider/model, so the
+	// pending route has to be known before pricing runs. It used to be sniffed
+	// out of the mutated request's ToranaMeta["_route"]; the verdict is
+	// recorded at the host call now, so read it directly rather than
+	// re-deriving it from a request the plugin happened to return.
 	rt.RequestMutationFunc = func(ctx context.Context, requestPB []byte) {
-		var request pb.ChatRequest
-		if proto.Unmarshal(requestPB, &request) != nil {
+		rs := reqStateFrom(ctx)
+		if rs == nil {
 			return
 		}
-		var meta map[string]any
-		if json.Unmarshal(request.ToranaMetaJson, &meta) != nil {
-			reqStateFrom(ctx).PendingRoute = nil
-			return
-		}
-		raw, ok := meta["_route"]
-		if !ok {
-			reqStateFrom(ctx).PendingRoute = nil
-			return
-		}
-		b, _ := json.Marshal(raw)
-		var verdict routeVerdict
-		if json.Unmarshal(b, &verdict) == nil {
-			reqStateFrom(ctx).PendingRoute = &verdict
-		}
+		rs.PendingRoute = rt.VerdictsFor(rs.ID).Route()
 	}
 	// Plugins report compaction savings via torana_record_savings,
 	// attributed per plugin in /stats and OTLP.
@@ -2471,17 +2682,30 @@ func (s *Server) newRuntime() *wasm.Runtime {
 		rt.StateGetFunc = s.pluginState.Get
 		rt.StateSetFunc = s.pluginState.Set
 		rt.StateKeysFunc = s.pluginState.Keys
+		rt.StateDeleteFunc = s.pluginState.Delete
 	}
 	rt.CachePricingFunc = s.cachePricing
 	rt.SendRequestFunc = s.sendPluginRequest
 	// Pristine request/response snapshots (env.original_request /
 	// env.original_response), read from the request state the same
 	// way offload does.
-	rt.OriginalRequestFunc = func(ctx context.Context) []byte {
-		return reqStateFrom(ctx).OriginalReq
+	// (bytes, captured). The callbacks are installed unconditionally, so
+	// "returned nil" cannot mean "unavailable" — on the streaming and
+	// upstream-error paths nothing is ever snapshotted, and framing that as a
+	// successful empty value is the NOT_FOUND-vs-empty ambiguity v2 removes.
+	rt.OriginalRequestFunc = func(ctx context.Context) ([]byte, bool) {
+		rs := reqStateFrom(ctx)
+		if rs == nil {
+			return nil, false
+		}
+		return rs.OriginalReq, rs.OriginalReqSet
 	}
-	rt.OriginalResponseFunc = func(ctx context.Context) []byte {
-		return reqStateFrom(ctx).OriginalResp
+	rt.OriginalResponseFunc = func(ctx context.Context) ([]byte, bool) {
+		rs := reqStateFrom(ctx)
+		if rs == nil {
+			return nil, false
+		}
+		return rs.OriginalResp, rs.OriginalRespSet
 	}
 	return rt
 }
@@ -2858,4 +3082,48 @@ func (tr *trackingReader) Read(p []byte) (n int, err error) {
 	n, err = tr.ReadCloser.Read(p)
 	tr.bytesRead += int64(n)
 	return n, err
+}
+
+// awaitStreamDone blocks until the streaming goroutine has finished, including
+// its observational hook. It is idempotent and safe on a non-streaming request.
+//
+// Called from BOTH the normal path and the deferred cleanup, because a client
+// disconnect mid-stream unwinds through http.ErrAbortHandler and skips the
+// normal path entirely — which would drop request-scoped state while the hook
+// was still using it.
+func (rs *reqState) awaitStreamDone() {
+	if rs == nil || rs.streamDone == nil {
+		return
+	}
+	<-rs.streamDone
+}
+
+// finalizeRequest is the exceptional-and-normal cleanup order for one request:
+// wait for the streaming goroutine (if any), then drop request-scoped state.
+//
+// The deferred handler cleanup calls this so http.ErrAbortHandler unwind shares
+// the same order as a normal return. Factored so a unit test can prove the
+// wait gates cleanup without standing up a guest or network disconnect.
+func (rs *reqState) finalizeRequest() {
+	if rs == nil {
+		return
+	}
+	finalizeRequestState(rs.streamDone, func() {
+		if rs.Pipeline != nil {
+			rs.Pipeline.EndRequest(rs.ID)
+			rs.Pipeline.Release()
+		}
+	})
+}
+
+// finalizeRequestState waits for stream completion then runs drop.
+// streamDone may be nil (non-streaming). Exported to tests in this package via
+// the same symbol — do not call from handlers directly; use finalizeRequest.
+func finalizeRequestState(streamDone <-chan struct{}, drop func()) {
+	if streamDone != nil {
+		<-streamDone
+	}
+	if drop != nil {
+		drop()
+	}
 }

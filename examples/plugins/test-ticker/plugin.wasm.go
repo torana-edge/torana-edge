@@ -2,11 +2,10 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 
 	sdk "github.com/torana-edge/torana-plugin-sdk"
-	"github.com/torana-edge/torana-plugin-sdk/pb"
+	pb "github.com/torana-edge/torana-plugin-sdk/pb/v2"
 )
 
 func main() {}
@@ -18,34 +17,30 @@ func main() {}
 // calls, and a later run_before_request reads it back — that round trip is how
 // the e2e proves a tick actually fired rather than merely being scheduled.
 func init() {
-	sdk.OnTick(func(ctx context.Context, tick *pb.TickRequest) (*pb.TickResult, error) {
+	sdk.OnTick(func(ctx context.Context, tick *pb.TickRequest) (sdk.TickResult, error) {
 		// Echo the whole TickRequest back so tests can assert the host
 		// populated every field, not just that something arrived.
-		args, _ := json.Marshal(map[string]any{
-			"key": "last_tick",
-			"value": fmt.Sprintf("id=%d millis=%d interval=%d",
-				tick.TickId, tick.UnixMillis, tick.IntervalMs),
-		})
-		_, _ = sdk.HostCall("env.cache_set", string(args))
+		_, _ = sdk.CacheSet("last_tick", fmt.Sprintf("id=%d millis=%d interval=%d",
+			tick.TickId, tick.UnixMillis, tick.IntervalMs))
 
-		// Tick 1 reports nothing to do, so the "nil means did nothing" path is
-		// exercised by a real guest rather than only in unit tests.
+		// Tick 1 reports nothing to do, so the idle path is exercised by a real
+		// guest rather than only in unit tests. v2 spells it TickIdle: v1
+		// needed a `handled` flag because an all-defaults TickResult marshals
+		// to zero bytes.
 		if tick.TickId == 1 {
-			return nil, nil
+			return sdk.TickIdle(), nil
 		}
-		return &pb.TickResult{
-			Handled: true,
-			Actions: int32(tick.TickId),
-			Note:    fmt.Sprintf("tick %d", tick.TickId),
-		}, nil
+		return sdk.TickDid(int32(tick.TickId), fmt.Sprintf("tick %d", tick.TickId)), nil
 	})
 
-	sdk.OnBeforeRequest(func(ctx context.Context, req *pb.ChatRequest) (*pb.ChatRequest, error) {
-		v, err := sdk.HostCall("env.cache_get", "last_tick")
-		if err != nil || v == "" {
-			return nil, nil
+	sdk.OnBeforeRequest(func(ctx context.Context, req *pb.ChatRequest) (sdk.RequestResult, error) {
+		v, herr, err := sdk.CacheGet("last_tick")
+		if err != nil || herr != nil || v == "" {
+			// A miss means no tick has fired yet, which is the state this
+			// fixture exists to observe changing.
+			return sdk.PassRequest(), nil
 		}
 		req.Model = req.Model + "+" + v
-		return req, nil
+		return sdk.ReplaceRequest(req), nil
 	})
 }

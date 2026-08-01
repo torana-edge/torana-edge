@@ -4,7 +4,7 @@ import (
 	"context"
 
 	sdk "github.com/torana-edge/torana-plugin-sdk"
-	"github.com/torana-edge/torana-plugin-sdk/pb"
+	pb "github.com/torana-edge/torana-plugin-sdk/pb/v2"
 )
 
 func main() {}
@@ -16,23 +16,23 @@ func main() {}
 // rather than "a metric arrived". A real observability plugin's values depend on
 // request timing, which makes it a poor thing to assert against.
 func init() {
-	sdk.OnBeforeRequest(func(ctx context.Context, req *pb.ChatRequest) (*pb.ChatRequest, error) {
+	sdk.OnBeforeRequest(func(ctx context.Context, req *pb.ChatRequest) (sdk.RequestResult, error) {
 		labels := map[string]string{"model": req.Model, "fixture": "test-metrics"}
 		sdk.EmitMetric("test_counter", sdk.MetricCounter, 1, labels)
 		sdk.EmitMetric("test_histogram", sdk.MetricHistogram, 42.5, labels)
 		sdk.EmitMetric("test_gauge", sdk.MetricGauge, 7, labels)
 		// Deliberately no mutation: emitting a metric must not alter the
 		// request, and a test asserting the prefix is untouched needs that.
-		return nil, nil
+		return sdk.PassRequest(), nil
 	})
 
 	// The response half of the same ABI. Without this hook declared, a test
 	// calling RunAfterResponse dispatches to nothing and passes for the wrong
 	// reason — which is what happened when this fixture replaced otel, whose
 	// manifest declared both.
-	sdk.OnAfterResponse(func(ctx context.Context, resp *pb.ChatRequest) (*pb.ChatRequest, error) {
+	sdk.OnAfterResponse(func(ctx context.Context, resp *pb.ChatResponse, mutable bool) (sdk.ResponseResult, error) {
 		sdk.EmitMetric("test_response_counter", sdk.MetricCounter, 1,
 			map[string]string{"model": resp.Model, "fixture": "test-metrics", "phase": "response"})
-		return nil, nil
+		return sdk.PassResponse(), nil
 	})
 }

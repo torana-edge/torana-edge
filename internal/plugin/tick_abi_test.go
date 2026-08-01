@@ -6,7 +6,7 @@ import (
 
 	"github.com/torana-edge/torana-edge/internal/engine"
 	"github.com/torana-edge/torana-edge/internal/wasm"
-	"github.com/torana-edge/torana-plugin-sdk/pb"
+	pb "github.com/torana-edge/torana-plugin-sdk/pb/v2"
 )
 
 func tickRequest(id uint64) *pb.TickRequest {

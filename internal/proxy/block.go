@@ -1,31 +1,31 @@
 package proxy
 
-import "encoding/json"
+import (
+	"encoding/json"
 
-// blockVerdict is the plugin-supplied rejection carried in ToranaMeta["_block"]
-// (set via sdk.BlockRequest). Status/code default if a plugin omits them.
-type blockVerdict struct {
-	Status  int    `json:"status"`
-	Code    string `json:"code"`
-	Message string `json:"message"`
-}
+	"github.com/torana-edge/torana-edge/internal/wasm"
+)
 
-// renderBlock turns a plugin's raw _block value into a synthetic response,
+// renderBlock turns a recorded block verdict into a synthetic response,
 // rendering the error body in the caller's provider format.
-func renderBlock(format string, raw any) *BlockResponse {
-	b, _ := json.Marshal(raw)
-	var v blockVerdict
-	_ = json.Unmarshal(b, &v)
-	if v.Status == 0 {
-		v.Status = 422
+//
+// The verdict is a typed value now. v1 round-tripped it through
+// ToranaMeta["_block"] as an `any`, so it was re-marshalled and re-parsed to
+// find out what the plugin had said — and a malformed value silently became
+// the defaults.
+func renderBlock(format string, v *wasm.BlockVerdict) *BlockResponse {
+	status := int(v.Status)
+	if status == 0 {
+		status = 422
 	}
-	if v.Code == "" {
-		v.Code = "request_blocked"
+	code := v.Code
+	if code == "" {
+		code = "request_blocked"
 	}
 	return &BlockResponse{
-		Status:      v.Status,
+		Status:      status,
 		ContentType: "application/json",
-		Body:        renderProviderError(format, v.Status, v.Code, v.Message),
+		Body:        renderProviderError(format, status, code, v.Message),
 	}
 }
 

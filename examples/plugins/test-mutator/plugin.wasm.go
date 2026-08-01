@@ -5,7 +5,7 @@ import (
 	"strings"
 
 	sdk "github.com/torana-edge/torana-plugin-sdk"
-	"github.com/torana-edge/torana-plugin-sdk/pb"
+	pb "github.com/torana-edge/torana-plugin-sdk/pb/v2"
 )
 
 func main() {}
@@ -22,7 +22,7 @@ func main() {}
 const marker = " [seen by test-mutator]"
 
 func init() {
-	sdk.OnBeforeRequest(func(ctx context.Context, req *pb.ChatRequest) (*pb.ChatRequest, error) {
+	sdk.OnBeforeRequest(func(ctx context.Context, req *pb.ChatRequest) (sdk.RequestResult, error) {
 		changed := false
 		for _, m := range req.Messages {
 			if m.Role == "user" && m.Content != "" && !strings.HasSuffix(m.Content, marker) {
@@ -39,9 +39,9 @@ func init() {
 			}
 		}
 		if !changed {
-			return nil, nil
+			return sdk.PassRequest(), nil
 		}
-		return req, nil
+		return sdk.ReplaceRequest(req), nil
 	})
 }
 
@@ -54,24 +54,26 @@ func init() {
 // substitution tests it far more precisely than a real plugin whose output
 // depends on its own logic.
 func init() {
-	sdk.OnAfterResponse(func(ctx context.Context, resp *pb.ChatRequest) (*pb.ChatRequest, error) {
+	sdk.OnAfterResponse(func(ctx context.Context, resp *pb.ChatResponse, mutable bool) (sdk.ResponseResult, error) {
+		// A response carries exactly one message in v2, so there is no outer
+		// loop and no question of which message the tool call belonged to.
+		if resp.Message == nil {
+			return sdk.PassResponse(), nil
+		}
 		var changed bool
-		for i := range resp.Messages {
-			for j := range resp.Messages[i].ToolCalls {
-				tc := resp.Messages[i].ToolCalls[j]
-				if tc == nil {
-					continue
-				}
-				// A fixed replacement: the test asserts these exact bytes came
-				// back, which proves the host both read and wrote the right
-				// place in the body.
-				tc.ArgumentsJson = []byte(`{"mutated_by":"test-mutator"}`)
-				changed = true
+		for _, tc := range resp.Message.ToolCalls {
+			if tc == nil {
+				continue
 			}
+			// A fixed replacement: the test asserts these exact bytes came
+			// back, which proves the host both read and wrote the right place
+			// in the body.
+			tc.ArgumentsJson = []byte(`{"mutated_by":"test-mutator"}`)
+			changed = true
 		}
 		if !changed {
-			return nil, nil
+			return sdk.PassResponse(), nil
 		}
-		return resp, nil
+		return sdk.ReplaceResponse(resp), nil
 	})
 }

@@ -3,7 +3,7 @@
   "id": "torana-test/test-blocker-nogrant",
   "name": "test-blocker-nogrant",
   "version": "0.1.0",
-  "abi_version": "v1",
+  "abi_version": "v2",
   "failure_mode": "pass",
   "description": "Example plugin: attempts to veto but does NOT declare env.block_request, so the proxy ignores it",
   "hooks": [

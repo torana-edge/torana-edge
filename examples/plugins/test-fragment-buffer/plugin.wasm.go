@@ -3,10 +3,9 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 
 	sdk "github.com/torana-edge/torana-plugin-sdk"
-	"github.com/torana-edge/torana-plugin-sdk/pb"
+	pb "github.com/torana-edge/torana-plugin-sdk/pb/v2"
 )
 
 func main() {}
@@ -27,39 +26,55 @@ func main() {}
 // The accumulation is verbatim. A fixture that also transformed the arguments
 // would make a failure ambiguous between "state was lost" and "the transform
 // changed".
-
-func bufferKey(index int32) string {
-	return fmt.Sprintf("fragbuf:%d", index)
-}
+//
+// It uses MetaAppend rather than meta_get + meta_set. The pair was two round
+// trips and a lost update: two fragments interleaving between the read and the
+// write silently drop one, and the corrupted tool call surfaces much later as
+// invalid JSON reaching the agent. MetaAppend is one atomic call, keyed by
+// block index — which also removes the hand-rolled key and the need to reset
+// it, since v2 block indexes are unique within a streamed message and never
+// reused.
 
 func init() {
-	sdk.OnStreamChunk(func(ctx context.Context, ev *pb.StreamEvent) (*pb.StreamEventResult, error) {
+	sdk.OnStreamChunk(func(ctx context.Context, ev *pb.StreamEvent) (sdk.StreamResult, error) {
 		delta, ok := ev.Event.(*pb.StreamEvent_ToolCallDelta)
 		if !ok || delta.ToolCallDelta == nil {
-			return sdk.Pass(), nil
+			return sdk.PassEvent(), nil
+		}
+		td := delta.ToolCallDelta
+
+		// Persist BEFORE suppressing. An error between the two would lose the
+		// fragment with no way to recover it.
+		if _, herr, err := sdk.MetaAppend(td.Index, []byte(td.ArgumentsDelta)); err != nil {
+			return sdk.PassEvent(), err
+		} else if herr != nil {
+			// The buffer is unreliable, so suppressing would truncate the tool
+			// call. Passing the fragment through leaves it intact.
+			return sdk.PassEvent(), nil
 		}
 
-		td := delta.ToolCallDelta
-		key := bufferKey(td.Index)
-
-		prev, _ := sdk.HostCall("env.meta_get", key)
-		accumulated := prev + td.ArgumentsDelta
+		// An empty fragment reads back the complete buffer without appending.
+		accumulated, herr, err := sdk.MetaAppend(td.Index, nil)
+		if err != nil {
+			return sdk.PassEvent(), err
+		}
+		if herr != nil {
+			return sdk.PassEvent(), nil
+		}
 
 		// Incomplete: swallow the fragment and keep waiting. The host must
 		// still be holding this state when the next chunk arrives.
-		if !json.Valid([]byte(accumulated)) {
-			sdk.HostCall("env.meta_set", fmt.Sprintf(`{"key":%q,"value":%q}`, key, accumulated))
-			return sdk.Emit(), nil
+		if !json.Valid(accumulated) {
+			return sdk.SuppressEvent(), nil
 		}
 
-		// Complete. Emit the accumulated arguments in one delta, tagged so a
-		// test can tell this path ran rather than a fragment slipping through.
-		sdk.HostCall("env.meta_set", fmt.Sprintf(`{"key":%q,"value":%q}`, key, ""))
-		return sdk.Emit(&pb.StreamEvent{
+		// Complete. Emit the accumulated arguments in one delta, so a test can
+		// tell this path ran rather than a fragment slipping through.
+		return sdk.EmitEvents(&pb.StreamEvent{
 			Event: &pb.StreamEvent_ToolCallDelta{
 				ToolCallDelta: &pb.ToolCallDelta{
 					Index:          td.Index,
-					ArgumentsDelta: accumulated,
+					ArgumentsDelta: string(accumulated),
 				},
 			},
 		}), nil

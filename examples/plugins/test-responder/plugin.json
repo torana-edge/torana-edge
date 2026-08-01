@@ -3,7 +3,7 @@
   "id": "torana-test/test-responder",
   "name": "test-responder",
   "version": "0.1.0",
-  "abi_version": "v1",
+  "abi_version": "v2",
   "failure_mode": "pass",
   "description": "Example plugin: serves a canned completion via env.respond_request when a message contains 'respondme'",
   "hooks": [

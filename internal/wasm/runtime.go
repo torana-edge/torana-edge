@@ -19,20 +19,9 @@ import (
 	"github.com/torana-edge/torana-edge/internal/cache"
 	"github.com/torana-edge/torana-edge/internal/economics"
 	"github.com/torana-edge/torana-edge/internal/metrics"
+	pbv2 "github.com/torana-edge/torana-plugin-sdk/pb/v2"
+	"google.golang.org/protobuf/proto"
 )
-
-// permissionDeniedJSON is what a guest receives when it calls a host function
-// it was not granted.
-//
-// It is a WIRE CONSTANT, not an implementation detail: every SDK matches it
-// verbatim to tell a refusal from an ordinary empty result, and
-// already-published plugin binaries cannot be recompiled from this repository.
-// Changing the bytes breaks them silently — the plugin carries on as though the
-// call had succeeded.
-//
-// Named rather than repeated so a second denial site cannot drift from the
-// first.
-const permissionDeniedJSON = `{"status":"error","message":"permission denied"}`
 
 // ============================================================================
 // Plugin — WASM module with instance pooling and permission enforcement
@@ -91,8 +80,12 @@ func normalizeRuntimeOptions(options RuntimeOptions) RuntimeOptions {
 }
 
 type Plugin struct {
-	name    string
-	grants  map[string]bool
+	name   string
+	grants map[string]bool
+	// hooks is the guest's supported_hooks bitmap, read once at validation.
+	// Dispatch consults it instead of probing for a per-hook export, which no
+	// longer exists. Guarded by stateMu with the other mutable fields.
+	hooks   pbv2.HookBitmap
 	config  string // per-plugin config JSON (plugins.config.<name>); "" if none
 	runtime wazero.Runtime
 
@@ -176,24 +169,53 @@ func (p *Plugin) discardIdleInstances() {
 // wasm package (e.g. plugin.PluginPipeline.RunOnHTTPRequest).
 func (p *Plugin) HasGrant(perm string) bool { return p.hasGrant(perm) }
 
-// ValidateHooks checks that every named hook from the manifest is actually
-// exported by the WASM module. Returns an error listing all missing hooks.
-func (p *Plugin) ValidateHooks(ctx context.Context, hooks []string) error {
-	inst, err := p.newInstance(ctx)
-	if err != nil {
-		return fmt.Errorf("wasm: %s: create validation instance: %w", p.name, err)
-	}
-	defer inst.mod.Close(ctx)
-	var missing []string
-	for _, h := range hooks {
-		if fn := inst.mod.ExportedFunction(h); fn == nil {
-			missing = append(missing, h)
-		}
-	}
-	if len(missing) > 0 {
-		return fmt.Errorf("wasm: %s: hooks not exported by module: %v", p.name, missing)
+// ValidateHooks checks the guest's declared hook set against its manifest.
+//
+// v2 guests export one run_hook, so there is no per-hook export to probe.
+// Instead they publish a supported_hooks bitmap, read once at LoadPlugin, and
+// this compares it against what the manifest declares. The ctx argument is
+// retained for callers and future host-side checks.
+//
+// This is stricter than the v1 check it replaces. v1 could only ask "does this
+// export exist", so a guest exporting MORE than it declared passed silently —
+// the manifest is what an operator approves, so undeclared behaviour was
+// invisible to the thing meant to authorise it. Exact equality closes that.
+func (p *Plugin) ValidateHooks(ctx context.Context, declared []pbv2.Hook) error {
+	p.stateMu.RLock()
+	bitmap := p.hooks
+	p.stateMu.RUnlock()
+	if err := pbv2.ValidateManifestHooks(bitmap, declared); err != nil {
+		return fmt.Errorf("wasm: %s: %w", p.name, err)
 	}
 	return nil
+}
+
+// supports reports whether the guest implements h, from the validated bitmap.
+func (p *Plugin) supports(h pbv2.Hook) bool {
+	p.stateMu.RLock()
+	defer p.stateMu.RUnlock()
+	return p.hooks.Has(h)
+}
+
+// supportedHooks reads the guest's declared hook set.
+//
+// A missing export is a v1 guest, or one built against an SDK predating the
+// single-export ABI. Saying so beats "hook not found" at the first dispatch,
+// which is where the same guest used to surface.
+func supportedHooks(ctx context.Context, mod api.Module) (pbv2.HookBitmap, error) {
+	fn := mod.ExportedFunction("supported_hooks")
+	if fn == nil {
+		return 0, fmt.Errorf("module exports no supported_hooks: it is a v1 guest, " +
+			"and v2 hosts dispatch through a single run_hook export")
+	}
+	res, err := fn.Call(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("supported_hooks: %w", err)
+	}
+	if len(res) != 1 {
+		return 0, fmt.Errorf("supported_hooks returned %d values, want 1", len(res))
+	}
+	return pbv2.HookBitmap(res[0]), nil
 }
 
 // acquire returns a plugin instance from the pool.
@@ -285,9 +307,14 @@ func (p *Plugin) newInstance(ctx context.Context) (*pluginInstance, error) {
 	return &pluginInstance{mod: mod, logEnabled: logEnabled}, nil
 }
 
-// CallRequest passes byte payload to the WASM hook and returns the result.
+// CallRequest dispatches one hook into the guest and returns its result bytes.
 // Uses instance pooling for concurrent request handling.
-func (p *Plugin) CallRequest(ctx context.Context, hook string, reqID uint64, inBytes []byte, output *[]byte) error {
+//
+// hook selects which handler the guest runs. v2 guests expose a single run_hook
+// export and route internally on the HookInput payload, so the hook identity
+// travels in the payload the caller already built; this argument exists to skip
+// guests that do not implement it, and to name the hook in errors.
+func (p *Plugin) CallRequest(ctx context.Context, hook pbv2.Hook, reqID uint64, inBytes []byte, output *[]byte) error {
 	if output == nil {
 		return fmt.Errorf("wasm: %s nil output", p.name)
 	}
@@ -316,10 +343,17 @@ func (p *Plugin) CallRequest(ctx context.Context, hook string, reqID uint64, inB
 
 	mod := inst.mod
 
-	fn := mod.ExportedFunction(hook)
-	if fn == nil {
+	// A guest that does not implement this hook is not an error: the pipeline
+	// offers every hook to every plugin. v1 detected it by a missing export;
+	// v2 asks the validated bitmap, so an unimplemented hook costs nothing
+	// rather than allocating and copying a payload the guest would discard.
+	if !p.supports(hook) {
 		healthy = true
 		return nil
+	}
+	fn := mod.ExportedFunction("run_hook")
+	if fn == nil {
+		return fmt.Errorf("wasm: %s exports no run_hook", p.name)
 	}
 
 	allocFn := mod.ExportedFunction("alloc")
@@ -342,7 +376,12 @@ func (p *Plugin) CallRequest(ctx context.Context, hook string, reqID uint64, inB
 	}
 
 	// Call hook.
-	ret, err := fn.Call(callCtx, reqID, uint64(inPtr), uint64(len(inBytes)))
+	//
+	// Two arguments, not three. v1 passed the request id separately; v2 moved
+	// it into HookInput, so the caller has already encoded it and passing it
+	// again is an arity mismatch that fails every guest call. reqID is still
+	// carried on the context above, which is what scopes host-side meta state.
+	ret, err := fn.Call(callCtx, uint64(inPtr), uint64(len(inBytes)))
 	if deallocFn != nil {
 		if _, deallocErr := deallocFn.Call(callCtx, uint64(inPtr), uint64(len(inBytes))); deallocErr != nil && err == nil {
 			err = fmt.Errorf("wasm: %s dealloc input: %w", p.name, deallocErr)
@@ -422,7 +461,19 @@ type Runtime struct {
 	metaMu  sync.RWMutex
 	// meta holds request-scoped, plugin-private state: reqID → namespaced
 	// key → value. Buckets are dropped via EndRequest when a request ends.
-	meta map[uint64]map[string]string
+	// Values are []byte, not string, so meta_append can grow them in place. A
+	// string forces a full copy per fragment, which made assembling one tool
+	// call O(total x fragments) on the hot stream path.
+	meta      map[uint64]map[string][]byte
+	verdictMu sync.RWMutex
+	// verdicts holds request-scoped plugin verdicts: reqID → what plugins
+	// asked the host to do about this request. v1 carried these back inside
+	// the returned request's ToranaMeta, which meant the host could not know a
+	// block had happened until every plugin had run — so a rejected,
+	// PII-laden request was still handed to the compactor and warmer. As host
+	// calls they arrive immediately and carry attribution.
+	verdicts map[uint64]*RequestVerdicts
+
 	// cache is the cross-request TTL store shared between plugins
 	// (e.g. compactor writes intents, keyword_compactor reads them).
 	cache cache.Store
@@ -456,12 +507,18 @@ type Runtime struct {
 	// OriginalRequestFunc returns the pristine pre-pipeline request as pb
 	// bytes for env.original_request (empty when unavailable). Set by the
 	// server; grant-gated at dispatch.
-	OriginalRequestFunc func(ctx context.Context) []byte
+	// Returns (bytes, captured). Presence is NOT length: an all-default
+	// ChatRequest marshals to zero bytes, and the server installs the callback
+	// unconditionally, so "returned nil" means not captured on this path
+	// (streaming, upstream error, pre-capture) rather than an empty request.
+	OriginalRequestFunc func(ctx context.Context) ([]byte, bool)
 
 	// OriginalResponseFunc returns the raw upstream response body for
 	// env.original_response (empty when unavailable — e.g. streaming
 	// responses, which are never buffered). Set by the server.
-	OriginalResponseFunc func(ctx context.Context) []byte
+	// Returns (bytes, captured). An upstream body can legitimately be empty, so
+	// again presence is separate from length.
+	OriginalResponseFunc func(ctx context.Context) ([]byte, bool)
 
 	// PluginCounterFunc handles torana_plugin_counter host calls — plugins
 	// increment named counters that appear in the /stats response.
@@ -475,6 +532,10 @@ type Runtime struct {
 	StateGetFunc  func(plugin, key string) (string, bool)
 	StateSetFunc  func(plugin, key, value string) error
 	StateKeysFunc func(plugin string) []string
+	// StateDeleteFunc backs env.state_delete. v1 deleted by setting an empty
+	// value, which made storing an empty string impossible; v2 makes deletion
+	// explicit and shares the env.state_set grant.
+	StateDeleteFunc func(plugin, key string) error
 
 	// CachePricingFunc answers torana_cache_pricing: given a provider and
 	// model, what the prompt cache costs and how long it lives. Data, not a
@@ -551,7 +612,7 @@ func newRuntime(ctx context.Context, store cache.Store, ownsCache bool, options 
 				WithMemoryLimitPages(options.MemoryLimitPages).
 				WithCloseOnContextDone(true)),
 		plugins:   make(map[string]*Plugin),
-		meta:      make(map[uint64]map[string]string),
+		meta:      make(map[uint64]map[string][]byte),
 		cache:     store,
 		ownsCache: ownsCache,
 		options:   options,
@@ -573,30 +634,46 @@ func (r *Runtime) EndRequest(reqID uint64) {
 	r.metaMu.Lock()
 	delete(r.meta, reqID)
 	r.metaMu.Unlock()
+
+	// Verdicts are request-scoped too. Leaking a block into a later request
+	// that happened to reuse the id would refuse traffic nobody objected to.
+	r.verdictMu.Lock()
+	delete(r.verdicts, reqID)
+	r.verdictMu.Unlock()
 }
 
 // metaGet reads a request-scoped meta value.
 func (r *Runtime) metaGet(reqID uint64, key string) string {
-	r.metaMu.RLock()
-	defer r.metaMu.RUnlock()
-	return r.meta[reqID][key]
+	v, _ := r.metaGetPresence(reqID, key)
+	return v
 }
 
-// metaSet writes a request-scoped meta value; empty value deletes the key
-// (plugins use this convention for cleanup).
+// metaGetPresence distinguishes an absent key from one holding an empty value.
+//
+// v2 reports absence as NOT_FOUND and a stored empty string as a successful
+// empty value. Reading through the map's zero value collapsed the two, which
+// made a buffered or cached empty string unusable.
+func (r *Runtime) metaGetPresence(reqID uint64, key string) (string, bool) {
+	r.metaMu.RLock()
+	defer r.metaMu.RUnlock()
+	v, ok := r.meta[reqID][key]
+	return string(v), ok
+}
+
+// metaSet writes a request-scoped meta value.
+//
+// An empty value STORES an empty value. v1 deleted the key here, so a plugin
+// could not distinguish "nothing stored" from "I stored nothing" and could not
+// store an empty string at all. Deletion is not part of the meta surface.
 func (r *Runtime) metaSet(reqID uint64, key, value string) {
 	r.metaMu.Lock()
 	defer r.metaMu.Unlock()
-	if value == "" {
-		delete(r.meta[reqID], key)
-		return
-	}
 	bucket, ok := r.meta[reqID]
 	if !ok {
-		bucket = make(map[string]string)
+		bucket = make(map[string][]byte)
 		r.meta[reqID] = bucket
 	}
-	bucket[key] = value
+	bucket[key] = []byte(value)
 }
 
 // reqIDFrom extracts the request ID host calls were invoked under.
@@ -631,6 +708,22 @@ func (r *Runtime) LoadPlugin(name string, wasmBytes []byte) (*Plugin, error) {
 	if err != nil {
 		return nil, fmt.Errorf("wasm: %s: %w", name, err)
 	}
+
+	// Read the guest's hook set HERE, not in ValidateHooks.
+	//
+	// Dispatch consults this bitmap to skip hooks a guest does not implement.
+	// If it were only populated by ValidateHooks, a plugin loaded without that
+	// call would have a zero bitmap and every dispatch would silently no-op —
+	// a plugin that appears loaded and does nothing, with no error anywhere.
+	// Reading it at load means there is no unvalidated state to get wrong;
+	// ValidateHooks then only compares it against the manifest.
+	bitmap, err := supportedHooks(r.ctx, inst.mod)
+	if err != nil {
+		_ = inst.mod.Close(r.ctx)
+		return nil, fmt.Errorf("wasm: %s: %w", name, err)
+	}
+	p.hooks = bitmap
+
 	p.pool <- inst
 
 	r.mu.Lock()
@@ -657,10 +750,17 @@ func metaKey(plugin, key string) string { return plugin + "\x00" + key }
 
 func (r *Runtime) installHostFunctions() {
 	env := r.runtime.NewHostModuleBuilder("env")
-	env.NewFunctionBuilder().WithFunc(func(ctx context.Context, mod api.Module, kPtr, kLen uint32) uint64 {
-		key := metaKey(pluginNameOf(mod), readStr(mod, kPtr, kLen))
-		return writeStr(ctx, mod, r.metaGet(reqIDFrom(ctx), key))
-	}).Export("meta_get")
+
+	// There is deliberately NO raw env.meta_get export, and no env.abort.
+	//
+	// Both were unchecked side doors: meta_get read request metadata with no
+	// grant check at all, so a handwritten guest could declare only
+	// env.meta_set and still read — defeating the per-command boundary the
+	// dispatcher enforces. abort logged without env.log, so a guest could spam
+	// host logs it was never granted.
+	//
+	// Neither is imported by either v2 SDK. Everything now goes through
+	// host_call, where the grant is checked per plugin.
 
 	env.NewFunctionBuilder().WithFunc(func(ctx context.Context, mod api.Module, level int32, ptr, length uint32) {
 		pluginName := pluginNameOf(mod)
@@ -678,10 +778,6 @@ func (r *Runtime) installHostFunctions() {
 			log.Printf("[plugin %s] %s", pluginName, msg)
 		}
 	}).Export("log")
-
-	env.NewFunctionBuilder().WithFunc(func(ctx context.Context, mod api.Module, message, fileName, lineNumber, columnNumber uint32) {
-		log.Printf("[wasm] abort at line %d col %d", lineNumber, columnNumber)
-	}).Export("abort")
 
 	env.NewFunctionBuilder().WithFunc(func(ctx context.Context, mod api.Module, metricType int32, ptr, length uint32, value float64, labelsPtr, labelsLen uint32) {
 		pluginName := pluginNameOf(mod)
@@ -706,10 +802,20 @@ func (r *Runtime) installHostFunctions() {
 	env.NewFunctionBuilder().WithFunc(func(ctx context.Context, mod api.Module, cmdPtr, cmdLen, argsPtr, argsLen uint32) uint64 {
 		cmd := readStr(mod, cmdPtr, cmdLen)
 		args := readStr(mod, argsPtr, argsLen)
+		return writeBytes(ctx, mod, r.dispatchHostCall(ctx, pluginNameOf(mod), cmd, args))
+	}).Export("host_call")
 
-		// Enforce per-command permission: env.host_call.<command>
-		pluginName := pluginNameOf(mod)
+	env.Instantiate(r.ctx)
+}
 
+// dispatchHostCall executes one host call and returns the framed reply.
+//
+// Extracted from the export closure so it is testable at all. The permission
+// boundary lives here — the SDK's guest-side checks are ergonomics, and a
+// handwritten guest never runs them — so it needs tests that call it directly
+// rather than only through a compiled fixture.
+func (r *Runtime) dispatchHostCall(ctx context.Context, pluginName, cmd, args string) []byte {
+	{
 		r.mu.RLock()
 		p := r.plugins[pluginName]
 		r.mu.RUnlock()
@@ -721,94 +827,235 @@ func (r *Runtime) installHostFunctions() {
 				perm = "env.host_call." + cmd
 			}
 		}
+		// Two commands are NOT operator-facing capabilities, so deriving their
+		// permission from the command string looks for a grant that cannot
+		// exist and refuses every call. Both mutate a namespace the plugin can
+		// already write, so they share that namespace's grant rather than
+		// adding approval ceremony for no new security line.
+		switch cmd {
+		case pbv2.MetaAppendCommand:
+			perm = pbv2.MetaAppendPermission
+		case pbv2.StateDeleteCommand:
+			perm = pbv2.StateDeletePermission
+		}
 		if p == nil || !p.hasGrant(perm) {
-			log.Printf("[wasm] permission denied: %s tried %s", mod.Name(), perm)
-			return writeStr(ctx, mod, permissionDeniedJSON)
+			log.Printf("[wasm] permission denied: %s tried %s", pluginName, perm)
+			// A framed refusal, not the v1 string. Guests decode
+			// HostCallResult now, so the old envelope would surface as a
+			// protocol error and a plugin could not tell a missing grant from
+			// a broken boundary.
+			return frameHostCall(nil,
+				hostErr(pbv2.ErrorCode_ERROR_CODE_PERMISSION_DENIED, "permission denied: %s", perm))
 		}
 
-		var res string
+		// v2: every reply is a framed HostCallResult. Cases set value/herr; the
+		// single exit below frames whichever was set. Extension commands put
+		// their JSON body in the value arm — the BODY is opaque, the envelope
+		// is not.
+		var value []byte
+		var herr *pbv2.HostError
+		var res string // extension/domain JSON, moved into value at the exit
 		switch cmd {
-		case "env.meta_set":
-			var kv struct {
-				Key   string `json:"key"`
-				Value any    `json:"value"`
+		case "env.block_request":
+			var a pbv2.BlockRequestArgs
+			if err := proto.Unmarshal([]byte(args), &a); err != nil {
+				herr = hostErr(pbv2.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "invalid BlockRequestArgs: %v", err)
+				break
 			}
-			if err := json.Unmarshal([]byte(args), &kv); err == nil {
-				key := metaKey(pluginName, kv.Key)
-				switch v := kv.Value.(type) {
-				case string:
-					r.metaSet(reqIDFrom(ctx), key, v)
-				default:
-					b, _ := json.Marshal(v)
-					r.metaSet(reqIDFrom(ctx), key, string(b))
-				}
-				res = `{"status":"ok"}`
-			} else {
-				res = `{"status":"error","message":"invalid payload"}`
+			if err := a.Validate(); err != nil {
+				herr = hostErr(pbv2.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "%v", err)
+				break
+			}
+			r.verdictsBucket(reqIDFrom(ctx)).setBlock(pluginName, &a)
+		case "env.respond_request":
+			var a pbv2.RespondRequestArgs
+			if err := proto.Unmarshal([]byte(args), &a); err != nil {
+				herr = hostErr(pbv2.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "invalid RespondRequestArgs: %v", err)
+				break
+			}
+			if err := a.Validate(); err != nil {
+				herr = hostErr(pbv2.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "%v", err)
+				break
+			}
+			r.verdictsBucket(reqIDFrom(ctx)).setRespond(pluginName, a.Content)
+		case "env.route_request":
+			var a pbv2.RouteRequestArgs
+			if err := proto.Unmarshal([]byte(args), &a); err != nil {
+				herr = hostErr(pbv2.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "invalid RouteRequestArgs: %v", err)
+				break
+			}
+			if err := a.Validate(); err != nil {
+				herr = hostErr(pbv2.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "%v", err)
+				break
+			}
+			r.verdictsBucket(reqIDFrom(ctx)).setRoute(pluginName, a.Provider, a.Model)
+		case "env.set_identity":
+			var a pbv2.SetIdentityArgs
+			if err := proto.Unmarshal([]byte(args), &a); err != nil {
+				herr = hostErr(pbv2.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "invalid SetIdentityArgs: %v", err)
+				break
+			}
+			if err := a.Validate(); err != nil {
+				herr = hostErr(pbv2.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "%v", err)
+				break
+			}
+			r.verdictsBucket(reqIDFrom(ctx)).setIdentity(pluginName, a.Identity)
+		case pbv2.MetaAppendCommand:
+			var a pbv2.MetaAppendArgs
+			if err := proto.Unmarshal([]byte(args), &a); err != nil {
+				herr = hostErr(pbv2.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "invalid MetaAppendArgs: %v", err)
+				break
+			}
+			if err := a.Validate(); err != nil {
+				herr = hostErr(pbv2.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "%v", err)
+				break
+			}
+			// One atomic call. A meta_get + meta_set pair was two round trips
+			// and a lost update: two fragments interleaving between the read
+			// and the write silently drop one, and the corrupted tool call
+			// surfaces much later as invalid JSON reaching the agent.
+			existing, present, err := r.metaAppend(reqIDFrom(ctx),
+				metaKey(pluginName, "append:"+strconv.FormatInt(int64(a.BlockIndex), 10)), a.Fragment)
+			if err != nil {
+				// Refused, not truncated: a truncated tool call is worse than
+				// a refused one, because the agent will try to execute it.
+				herr = hostErr(pbv2.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "%v", err)
+				break
+			}
+			// Non-empty fragment acks with an empty value; an empty fragment
+			// reads the buffer back. Returning the cumulative buffer after
+			// every delta would be O(total x fragments) on the stream path.
+			value = pbv2.MetaAppendSuccessValue(a.Fragment, []byte(existing), present)
+		case "env.meta_set":
+			// A decode failure used to be swallowed by `if err == nil`, so the
+			// write silently did not happen. It is now a classified refusal.
+			var a pbv2.MetaSetArgs
+			if err := proto.Unmarshal([]byte(args), &a); err != nil {
+				herr = hostErr(pbv2.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "invalid MetaSetArgs: %v", err)
+				break
+			}
+			if err := a.Validate(); err != nil {
+				herr = hostErr(pbv2.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "%v", err)
+				break
+			}
+			// An empty value STORES an empty value; it is not a delete.
+			if err := r.metaSetBounded(reqIDFrom(ctx), metaKey(pluginName, a.Key), a.Value); err != nil {
+				herr = hostErr(pbv2.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "%v", err)
 			}
 		case "env.meta_get":
-			res = r.metaGet(reqIDFrom(ctx), metaKey(pluginName, args))
+			var a pbv2.MetaGetArgs
+			if err := proto.Unmarshal([]byte(args), &a); err != nil {
+				herr = hostErr(pbv2.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "invalid MetaGetArgs: %v", err)
+				break
+			}
+			if err := a.Validate(); err != nil {
+				herr = hostErr(pbv2.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "%v", err)
+				break
+			}
+			v, present := r.metaGetPresence(reqIDFrom(ctx), metaKey(pluginName, a.Key))
+			if !present {
+				herr = hostErr(pbv2.ErrorCode_ERROR_CODE_NOT_FOUND, "metadata key not found")
+				break
+			}
+			value = []byte(v)
 		case "env.cache_set":
-			var kv struct {
-				Key   string `json:"key"`
-				Value any    `json:"value"`
+			var a pbv2.CacheSetArgs
+			if err := proto.Unmarshal([]byte(args), &a); err != nil {
+				herr = hostErr(pbv2.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "invalid CacheSetArgs: %v", err)
+				break
 			}
-			if err := json.Unmarshal([]byte(args), &kv); err == nil {
-				switch v := kv.Value.(type) {
-				case string:
-					r.cache.Set(kv.Key, v)
-				default:
-					b, _ := json.Marshal(v)
-					r.cache.Set(kv.Key, string(b))
-				}
-				res = `{"status":"ok"}`
-			} else {
-				res = `{"status":"error","message":"invalid payload"}`
+			if err := a.Validate(); err != nil {
+				herr = hostErr(pbv2.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "%v", err)
+				break
 			}
+			r.cache.Set(a.Key, a.Value)
 		case "env.cache_get":
-			res, _ = r.cache.Get(args)
+			var a pbv2.CacheGetArgs
+			if err := proto.Unmarshal([]byte(args), &a); err != nil {
+				herr = hostErr(pbv2.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "invalid CacheGetArgs: %v", err)
+				break
+			}
+			if err := a.Validate(); err != nil {
+				herr = hostErr(pbv2.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "%v", err)
+				break
+			}
+			// The presence bool was previously discarded, so a miss and a
+			// stored empty string were the same answer.
+			v, present := r.cache.Get(a.Key)
+			if !present {
+				herr = hostErr(pbv2.ErrorCode_ERROR_CODE_NOT_FOUND, "cache key not found")
+				break
+			}
+			value = []byte(v)
 		case "env.state_set":
 			// Durable, plugin-private, survives a restart. The plugin name
 			// comes from the module, never the payload, so one plugin cannot
 			// write into another's namespace.
-			var kv struct {
-				Key   string `json:"key"`
-				Value any    `json:"value"`
+			var a pbv2.StateSetArgs
+			if err := proto.Unmarshal([]byte(args), &a); err != nil {
+				herr = hostErr(pbv2.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "invalid StateSetArgs: %v", err)
+				break
 			}
-			if err := json.Unmarshal([]byte(args), &kv); err != nil {
-				res = `{"status":"error","message":"invalid payload"}`
-			} else if r.StateSetFunc == nil {
-				res = `{"status":"error","message":"durable plugin state is not configured"}`
-			} else {
-				value := ""
-				switch v := kv.Value.(type) {
-				case nil:
-					// Explicit null deletes, same as an empty string.
-				case string:
-					value = v
-				default:
-					b, _ := json.Marshal(v)
-					value = string(b)
-				}
-				if err := r.StateSetFunc(pluginName, kv.Key, value); err != nil {
-					res = fmt.Sprintf(`{"status":"error","message":%q}`, err.Error())
-				} else {
-					res = `{"status":"ok"}`
-				}
+			if err := a.Validate(); err != nil {
+				herr = hostErr(pbv2.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "%v", err)
+				break
+			}
+			if r.StateSetFunc == nil {
+				herr = hostErr(pbv2.ErrorCode_ERROR_CODE_NOT_CONFIGURED, "durable plugin state is not configured")
+				break
+			}
+			// An empty value STORES an empty value. v1 deleted here, which is
+			// why deletion is now its own command.
+			if err := r.StateSetFunc(pluginName, a.Key, a.Value); err != nil {
+				herr = hostErr(pbv2.ErrorCode_ERROR_CODE_INTERNAL, "%v", err)
+			}
+		case pbv2.StateDeleteCommand:
+			var a pbv2.StateDeleteArgs
+			if err := proto.Unmarshal([]byte(args), &a); err != nil {
+				herr = hostErr(pbv2.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "invalid StateDeleteArgs: %v", err)
+				break
+			}
+			if err := a.Validate(); err != nil {
+				herr = hostErr(pbv2.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "%v", err)
+				break
+			}
+			if r.StateDeleteFunc == nil {
+				herr = hostErr(pbv2.ErrorCode_ERROR_CODE_NOT_CONFIGURED, "durable plugin state is not configured")
+				break
+			}
+			// Deleting an absent key succeeds: the caller wants it gone.
+			if err := r.StateDeleteFunc(pluginName, a.Key); err != nil {
+				herr = hostErr(pbv2.ErrorCode_ERROR_CODE_INTERNAL, "%v", err)
 			}
 		case "env.state_get":
-			if r.StateGetFunc == nil {
-				res = ""
-			} else {
-				res, _ = r.StateGetFunc(pluginName, args)
+			var a pbv2.StateGetArgs
+			if err := proto.Unmarshal([]byte(args), &a); err != nil {
+				herr = hostErr(pbv2.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "invalid StateGetArgs: %v", err)
+				break
 			}
+			if err := a.Validate(); err != nil {
+				herr = hostErr(pbv2.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "%v", err)
+				break
+			}
+			if r.StateGetFunc == nil {
+				herr = hostErr(pbv2.ErrorCode_ERROR_CODE_NOT_CONFIGURED, "durable plugin state is not configured")
+				break
+			}
+			v, present := r.StateGetFunc(pluginName, a.Key)
+			if !present {
+				herr = hostErr(pbv2.ErrorCode_ERROR_CODE_NOT_FOUND, "state key not found")
+				break
+			}
+			value = []byte(v)
 		case "env.state_keys":
 			if r.StateKeysFunc == nil {
-				res = "[]"
-			} else {
-				b, _ := json.Marshal(r.StateKeysFunc(pluginName))
-				res = string(b)
+				// An empty list said "no keys", which is not the same as "no
+				// store" — a plugin would conclude its writes had vanished.
+				herr = hostErr(pbv2.ErrorCode_ERROR_CODE_NOT_CONFIGURED, "durable plugin state is not configured")
+				break
 			}
+			b, _ := json.Marshal(r.StateKeysFunc(pluginName))
+			value = b
 		case "env.now":
 			// WASI preview1 gives the guest no clock, deliberately. Plugins
 			// that reason about elapsed time — cache lifetimes, deadlines,
@@ -818,7 +1065,7 @@ func (r *Runtime) installHostFunctions() {
 			// result into a request makes its output non-deterministic, which
 			// busts the provider's prompt cache on every turn. See
 			// PLUGIN_SEMANTICS §6.
-			res = strconv.FormatInt(time.Now().UnixMilli(), 10)
+			value = []byte(strconv.FormatInt(time.Now().UnixMilli(), 10))
 		case "torana_send_request":
 			if r.SendRequestFunc == nil {
 				res = `{"status":"error","message":"plugin egress is not configured"}`
@@ -833,20 +1080,38 @@ func (r *Runtime) installHostFunctions() {
 			}
 		case "env.plugin_config":
 			// Return this plugin's config blob (plugins.config.<name>).
-			res = p.pluginConfig()
-			if res == "" {
-				res = "{}"
+			cfg := p.pluginConfig()
+			if cfg == "" {
+				cfg = "{}"
 			}
+			value = []byte(cfg)
 		case "env.original_request":
-			// Pristine pre-pipeline request, pb-encoded. Empty = unavailable.
-			if r.OriginalRequestFunc != nil {
-				res = string(r.OriginalRequestFunc(ctx))
+			// Pristine pre-pipeline request, pb-encoded. Absence is NOT_FOUND,
+			// not an empty value: an all-default ChatRequest legitimately
+			// marshals to zero bytes.
+			if r.OriginalRequestFunc == nil {
+				herr = hostErr(pbv2.ErrorCode_ERROR_CODE_NOT_FOUND, "no original request captured")
+				break
 			}
+			raw, captured := r.OriginalRequestFunc(ctx)
+			if !captured {
+				herr = hostErr(pbv2.ErrorCode_ERROR_CODE_NOT_FOUND, "no original request captured")
+				break
+			}
+			value = raw
 		case "env.original_response":
-			// Raw upstream response body (non-streaming only). Empty = unavailable.
-			if r.OriginalResponseFunc != nil {
-				res = string(r.OriginalResponseFunc(ctx))
+			// Raw upstream response body (non-streaming only). An upstream body
+			// can legitimately be empty, so absence is again the error arm.
+			if r.OriginalResponseFunc == nil {
+				herr = hostErr(pbv2.ErrorCode_ERROR_CODE_NOT_FOUND, "no original response captured")
+				break
 			}
+			raw, captured := r.OriginalResponseFunc(ctx)
+			if !captured {
+				herr = hostErr(pbv2.ErrorCode_ERROR_CODE_NOT_FOUND, "no original response captured")
+				break
+			}
+			value = raw
 		case "torana_db_query":
 			res = `{"status":"error","message":"database not configured — set plugins.config.compactor.dsn"}`
 		case "torana_kms_decrypt":
@@ -923,13 +1188,19 @@ func (r *Runtime) installHostFunctions() {
 		case "verify_virtual_key":
 			res = `{"status":"error","message":"unimplemented: enterprise auth is available in torana-edge/private-nucleus"}`
 		default:
-			res = `{"status":"error","message":"unknown host call"}`
+			herr = hostErr(pbv2.ErrorCode_ERROR_CODE_NOT_FOUND, "unknown host call %q", cmd)
 		}
 
-		return writeStr(ctx, mod, res)
-	}).Export("host_call")
+		if herr == nil && value == nil && res != "" {
+			value = []byte(res)
+		}
+		return frameHostCall(value, herr)
+	}
+}
 
-	env.Instantiate(r.ctx)
+// dispatchHostCallForTest exposes the dispatcher to tests in this package.
+func (r *Runtime) dispatchHostCallForTest(ctx context.Context, pluginName, cmd, args string) []byte {
+	return r.dispatchHostCall(ctx, pluginName, cmd, args)
 }
 
 func readStr(mod api.Module, ptr, length uint32) string {
@@ -941,6 +1212,41 @@ func readStr(mod api.Module, ptr, length uint32) string {
 }
 
 // writeStr calls the WASM module's 'alloc' function to allocate space, then writes the string.
+// frameHostCall builds the HostCallResult a v2 guest decodes.
+//
+// Exactly one arm is set. A nil value with no error is a successful EMPTY
+// value, which is distinct from an error and from absence — that distinction
+// is the whole reason the envelope exists, so it must survive here.
+func frameHostCall(value []byte, herr *pbv2.HostError) []byte {
+	result := &pbv2.HostCallResult{}
+	if herr != nil {
+		result.Result = &pbv2.HostCallResult_Error{Error: herr}
+	} else {
+		result.Result = &pbv2.HostCallResult_Value{Value: value}
+	}
+	raw, err := proto.Marshal(result)
+	if err != nil {
+		// Marshalling a two-field message cannot realistically fail, but a
+		// zero-length reply is a protocol error to the guest rather than a
+		// silent success, so say something rather than nothing.
+		log.Printf("[wasm] frame host-call result: %v", err)
+		return nil
+	}
+	return raw
+}
+
+// hostErr builds a classified refusal.
+func hostErr(code pbv2.ErrorCode, format string, args ...any) *pbv2.HostError {
+	return &pbv2.HostError{Code: code, Message: fmt.Sprintf(format, args...)}
+}
+
+func writeBytes(ctx context.Context, mod api.Module, b []byte) uint64 {
+	if len(b) == 0 {
+		return 0
+	}
+	return writeStr(ctx, mod, string(b))
+}
+
 func writeStr(ctx context.Context, mod api.Module, s string) uint64 {
 	b := []byte(s)
 	if len(b) == 0 {

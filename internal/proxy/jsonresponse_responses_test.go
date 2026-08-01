@@ -35,7 +35,7 @@ const responsesReply = `{
 }`
 
 func TestExtractOpenAIResponsesUsage(t *testing.T) {
-	refs := extractOpenAI(decode(t, responsesReply))
+	refs := extractOpenAI(decode(t, responsesReply), []byte(responsesReply))
 
 	if refs.usage == nil {
 		t.Fatal("no usage read from a Responses reply — this is the silent zero-cost bug")
@@ -56,7 +56,7 @@ func TestExtractOpenAIResponsesUsage(t *testing.T) {
 // does not write would let a plugin believe it had redacted something.
 func TestExtractOpenAIResponsesContentIsMutable(t *testing.T) {
 	body := decode(t, responsesReply)
-	refs := extractOpenAI(body)
+	refs := extractOpenAI(body, []byte(responsesReply))
 
 	if refs.content != "here is the answer" {
 		t.Fatalf("content = %q, want %q", refs.content, "here is the answer")
@@ -97,13 +97,14 @@ func TestExtractOpenAIResponsesContentIsMutable(t *testing.T) {
 // adding a branch for Responses is exactly the kind of change that quietly
 // reroutes it.
 func TestExtractOpenAIChatStillWorks(t *testing.T) {
-	refs := extractOpenAI(decode(t, `{
+	const chatReply = `{
       "model": "gpt-4",
       "choices": [{"message": {"content": "hello", "tool_calls": [
         {"id": "call_1", "function": {"name": "read", "arguments": "{\"path\":\"a.go\"}"}}]}}],
       "usage": {"prompt_tokens": 10, "completion_tokens": 5,
                 "prompt_tokens_details": {"cached_tokens": 8}}
-    }`))
+    }`
+	refs := extractOpenAI(decode(t, chatReply), []byte(chatReply))
 
 	if refs.usage == nil || refs.usage.InputTokens != 10 || refs.usage.CacheReadTokens != 8 {
 		t.Errorf("chat usage misread: %+v", refs.usage)
@@ -127,8 +128,9 @@ func TestResponsesArgumentsStayAJSONString(t *testing.T) {
 		"arguments as string": `{"type":"function_call","call_id":"c1","name":"ping","arguments":"{\"a\":1}"}`,
 	} {
 		t.Run(name, func(t *testing.T) {
-			body := decode(t, `{"object":"response","model":"m","output":[`+item+`]}`)
-			refs := extractOpenAI(body)
+			raw := `{"object":"response","model":"m","output":[` + item + `]}`
+			body := decode(t, raw)
+			refs := extractOpenAI(body, []byte(raw))
 
 			if len(refs.toolCalls) != 1 {
 				t.Fatalf("got %d tool calls", len(refs.toolCalls))
@@ -153,8 +155,9 @@ func TestResponsesArgumentsStayAJSONString(t *testing.T) {
 // Invalid JSON must be refused rather than written to the wire, where it would
 // reach the client as a malformed tool call.
 func TestResponsesArgumentsRejectInvalidJSON(t *testing.T) {
-	body := decode(t, `{"object":"response","model":"m","output":[{"type":"function_call","call_id":"c1","name":"ping","arguments":"{}"}]}`)
-	refs := extractOpenAI(body)
+	const raw = `{"object":"response","model":"m","output":[{"type":"function_call","call_id":"c1","name":"ping","arguments":"{}"}]}`
+	body := decode(t, raw)
+	refs := extractOpenAI(body, []byte(raw))
 	if err := refs.toolCalls[0].setArgs("not json"); err == nil {
 		t.Error("invalid JSON was accepted into the tool call arguments")
 	}
@@ -165,15 +168,16 @@ func TestResponsesArgumentsRejectInvalidJSON(t *testing.T) {
 // read-only, so a redaction plugin would report success having rewritten one
 // paragraph of a multi-part answer, and the PII would still ship.
 func TestResponsesRedactionReachesEveryTextPart(t *testing.T) {
-	body := decode(t, `{
+	const raw = `{
       "object": "response", "model": "m",
       "output": [{"type":"message","content":[
         {"type":"output_text","text":"my email is "},
         {"type":"output_text","text":"alice@example.com"},
         {"type":"output_text","text":" — do not share"}
       ]}]
-    }`)
-	refs := extractOpenAI(body)
+    }`
+	body := decode(t, raw)
+	refs := extractOpenAI(body, []byte(raw))
 
 	if refs.content != "my email is alice@example.com — do not share" {
 		t.Errorf("a plugin should see the whole reply, got %q", refs.content)

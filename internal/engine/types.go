@@ -5,7 +5,6 @@ type chatRequestCtxKey struct{}
 // ChatRequestKey is the context key used to store/retrieve *ChatRequest.
 var ChatRequestKey = chatRequestCtxKey{}
 
-
 // --- Request side ---
 
 // ChatRequest is the canonical representation of a chat completion request
@@ -146,4 +145,84 @@ type StreamUsage struct {
 	// this turn (Anthropic cache_creation_input_tokens, Bedrock
 	// cacheWriteInputTokens); 0 for providers that don't report it.
 	CacheWriteTokens int
+}
+
+// --- Response side ---
+
+// ResponseMessage is the assistant's reply in a completed response, in the
+// narrow shape the host can actually apply: presence-preserving content and
+// in-place tool-call mutations only. It deliberately is not Message — request
+// semantics (role, thinking, content parts, cache control) have no writable
+// response counterpart, and reusing Message would claim a writable surface
+// the host does not deliver.
+//
+// The relative constraints (content presence identical to the accepted
+// response, fixed tool-call cardinality and positional order) are enforced by
+// the host pipeline per plugin before any replacement is accepted, and
+// re-verified at the apply boundary.
+type ResponseMessage struct {
+	// Content is the assistant's text with proto presence preserved: nil
+	// means the provider body has no writable text slot, a non-nil pointer
+	// (possibly to "") means a present text part. Present-empty is not
+	// absent, and a plugin cannot change presence — only the value.
+	Content *string
+	// ToolCalls carries the response's tool invocations in provider order.
+	// Fixed cardinality: a plugin may mutate element N in place but cannot
+	// add, remove, or reorder calls. ID and Signature are host-owned.
+	ToolCalls []ResponseToolCall
+}
+
+// ResponseToolCall is one tool invocation in a completed response.
+//
+// ArgumentsJSON is the provider's verbatim arguments bytes. It must never be
+// decoded and re-encoded on the canonical path: key order is part of the
+// cacheable prompt prefix, and an integer above JavaScript's exact range
+// cannot survive a float64 round-trip.
+type ResponseToolCall struct {
+	ID   string
+	Name string
+	// ArgumentsJSON is the provider's raw arguments object, byte for byte.
+	ArgumentsJSON []byte
+	// Signature is an opaque provider-specific token attached to this call
+	// (e.g. Gemini/Code Assist thoughtSignature). Preserved across a
+	// round-trip; the only permitted transition is the host clearing an
+	// existing token whose covered content changed. A plugin cannot mint one.
+	Signature string
+}
+
+// ChatResponse is the canonical representation of a completed chat response,
+// regardless of provider wire format.
+//
+// It exists because v1 had no response type, so run_after_response was handed a
+// ChatRequest and three different call paths filled it three incompatible ways:
+// a synthesized assistant message on the non-streaming path, model + metadata
+// with no messages on the upstream-error path, and — on the streaming path —
+// the outbound REQUEST, whose Messages are the conversation history rather than
+// the reply. A plugin reading the assistant's answer got the last user message
+// instead, depending on a path it could not observe.
+//
+// Mirrors torana.v2.ChatResponse field for field so the conversion cannot lose
+// or invent anything.
+type ChatResponse struct {
+	Model string
+	ID    string
+	// Message is the assistant's reply: exactly one message, because a
+	// response IS one message. The v1 shape allowed a list and thereby allowed
+	// the ambiguity above.
+	//
+	// ResponseMessage, not Message: the response side has its own narrow shape
+	// (presence-preserving content, raw arguments bytes) and reusing the
+	// request Message would let the two drift.
+	Message *ResponseMessage
+	// FinishReason is the provider's stop reason ("stop", "tool_use", ...).
+	FinishReason string
+	Usage        *StreamUsage
+	// UpstreamStatus is the provider's HTTP status. Non-2xx means Message is
+	// usually absent, which is why plugins must not assume it is set.
+	UpstreamStatus int
+	// DurationMS is how long the upstream call took.
+	DurationMS int64
+	// ProviderExtensions carries unparsed provider fields passed through
+	// transparently, as on the request side.
+	ProviderExtensions map[string]any
 }

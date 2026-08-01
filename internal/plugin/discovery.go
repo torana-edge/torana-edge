@@ -21,7 +21,7 @@ import (
 	"github.com/torana-edge/torana-edge/internal/engine/pbconv"
 	"github.com/torana-edge/torana-edge/internal/wasm"
 	sdk "github.com/torana-edge/torana-plugin-sdk"
-	"github.com/torana-edge/torana-plugin-sdk/pb"
+	pbv2 "github.com/torana-edge/torana-plugin-sdk/pb/v2"
 	"golang.org/x/mod/semver"
 	"google.golang.org/protobuf/proto"
 )
@@ -236,8 +236,15 @@ func validateManifest(manifest PluginManifest) error {
 	if manifest.ID == "" || manifest.Name == "" {
 		return fmt.Errorf("id and name are required")
 	}
-	if manifest.ABIVersion != "v1" {
-		return fmt.Errorf("unsupported abi_version %q", manifest.ABIVersion)
+	// This host dispatches v2 exclusively: one run_hook export, HookInput in,
+	// HookResult out. A v1 guest exports per-hook functions this host never
+	// calls, so accepting its manifest would load a plugin that can never run
+	// — the failure would surface as "my plugin does nothing" rather than as a
+	// version mismatch anyone can act on.
+	if manifest.ABIVersion != "v2" {
+		return fmt.Errorf("unsupported abi_version %q: this host speaks ABI v2 "+
+			"(single run_hook export); rebuild the plugin against a v2 SDK",
+			manifest.ABIVersion)
 	}
 	if _, err := parseSemver(manifest.Version); err != nil {
 		return fmt.Errorf("invalid version: %w", err)
@@ -759,7 +766,15 @@ func reloadPipeline(runtime *wasm.Runtime, config PluginConfig) (*PluginPipeline
 			pl.SetConfig(string(raw))
 		}
 		// Validate that every declared hook is actually exported by the WASM module.
-		if err := pl.ValidateHooks(context.Background(), hookNames(bundle.Manifest.Hooks)); err != nil {
+		declaredHooks, hookErr := manifestHooks(bundle.Manifest.Hooks)
+		if hookErr != nil {
+			if config.Strict {
+				return nil, fmt.Errorf("enabled plugin %q: %w", name, hookErr)
+			}
+			log.Printf("[plugin] %s: %v — skipping", name, hookErr)
+			continue
+		}
+		if err := pl.ValidateHooks(context.Background(), declaredHooks); err != nil {
 			if config.Strict {
 				return nil, fmt.Errorf("enabled plugin %q failed hook validation: %w", name, err)
 			}
@@ -917,6 +932,19 @@ func cloneAgentOperation(operation AgentOperation) AgentOperation {
 // EndRequest drops all request-scoped plugin state for a finished request.
 func (pp *PluginPipeline) EndRequest(reqID uint64) { pp.runtime.EndRequest(reqID) }
 
+// Verdicts returns what plugins asked the host to do about this request.
+//
+// The grant was already checked per-plugin at the host call, so callers must
+// NOT re-check it pipeline-wide. v1 asked "does any loaded plugin hold
+// env.block_request?" — which meant one approved blocker let every other
+// plugin's verdict through. Attribution now travels with the verdict.
+func (pp *PluginPipeline) Verdicts(reqID uint64) *wasm.RequestVerdicts {
+	if pp == nil {
+		return nil
+	}
+	return pp.runtime.VerdictsFor(reqID)
+}
+
 // HasGrant reports whether any loaded plugin has actually been granted the
 // named permission by the operator. Manifest requests alone confer no access.
 func (pp *PluginPipeline) HasGrant(perm string) bool {
@@ -955,30 +983,69 @@ func (pp *PluginPipeline) RunBeforeRequest(ctx context.Context, reqID uint64, ch
 	pp.Acquire()
 	defer pp.Release()
 
-	pbReq := pbconv.ToPBChatRequest(chat)
-	reqBytes, err := proto.Marshal(pbReq)
-	if err != nil {
-		return chat, err
-	}
-
-	resultBytes := reqBytes
+	current := pbconv.ToPBChatRequest(chat)
 	modified := false
 	for _, lp := range pp.plugins {
 		if !hasHook(lp.manifest, "run_before_request") {
 			continue
 		}
+		inBytes, err := encodeHookInput(reqID, requestPayload{req: current})
+		if err != nil {
+			return chat, err
+		}
 		var outBytes []byte
-		if err := lp.plugin.CallRequest(ctx, "run_before_request", reqID, resultBytes, &outBytes); err != nil {
+		if err := lp.plugin.CallRequest(ctx, pbv2.Hook_HOOK_BEFORE_REQUEST, reqID, inBytes, &outBytes); err != nil {
 			log.Printf("[plugin] %s run_before_request: %v", lp.manifest.Name, err)
+			pp.discardTrapped(reqID, lp.manifest.Name)
+			// The block check must happen on EVERY exit from this iteration,
+			// not only the successful one. A plugin that blocks and then traps
+			// leaves the block standing, and continuing here would hand the
+			// request to every downstream plugin anyway — exactly the
+			// PII-keeps-flowing problem short-circuiting exists to stop.
+			if pp.blocked(reqID) {
+				break
+			}
 			if lp.failureMode == "block" {
 				return chat, fmt.Errorf("plugin %s blocked request after failure: %w", lp.manifest.Name, err)
 			}
 			continue
 		}
-		if len(outBytes) > 0 {
-			resultBytes = outBytes
-			modified = true
-			pp.runtime.ObserveRequestMutation(ctx, outBytes)
+		res, err := decodeHookResult(outBytes, pbv2.Hook_HOOK_BEFORE_REQUEST)
+		if err != nil {
+			// A malformed or misdispatched action is the plugin's fault and is
+			// refused whole rather than partly applied. A handwritten guest can
+			// issue host calls and THEN return an invalid frame, so this path
+			// gets the same treatment as a trap: its non-block verdicts are
+			// discarded and a recorded block still short-circuits.
+			log.Printf("[plugin] %s run_before_request: invalid result: %v", lp.manifest.Name, err)
+			pp.discardTrapped(reqID, lp.manifest.Name)
+			if pp.blocked(reqID) {
+				break
+			}
+			if lp.failureMode == "block" {
+				return chat, fmt.Errorf("plugin %s returned an invalid result: %w", lp.manifest.Name, err)
+			}
+			continue
+		}
+		if res != nil {
+			if replacement := res.GetReplaceRequest(); replacement != nil {
+				current = replacement
+				modified = true
+				// ObserveRequestMutation wants the request bytes, not the
+				// envelope, so it is re-marshalled from the accepted action.
+				if raw, err := proto.Marshal(replacement); err == nil {
+					pp.runtime.ObserveRequestMutation(ctx, raw)
+				}
+			}
+		}
+
+		// Block short-circuits. v1 could not know a block had happened until
+		// every plugin had run, so a rejected request was still handed to the
+		// compactor and the warmer. A replacement from the blocking plugin is
+		// kept but never sent upstream: block wins, and forcing an author to
+		// discard edits before blocking would be a new footgun.
+		if pp.blocked(reqID) {
+			break
 		}
 	}
 
@@ -986,85 +1053,127 @@ func (pp *PluginPipeline) RunBeforeRequest(ctx context.Context, reqID uint64, ch
 		// No plugin produced output — skip the pb round-trip entirely.
 		return chat, nil
 	}
-	var resReq pb.ChatRequest
-	if err := proto.Unmarshal(resultBytes, &resReq); err != nil {
-		return chat, err
-	}
-	return pbconv.FromPBChatRequest(&resReq), nil
+	return pbconv.FromPBChatRequest(current), nil
 }
 
 // RunAfterResponse calls every plugin that implements run_after_response.
-func (pp *PluginPipeline) RunAfterResponse(ctx context.Context, reqID uint64, chat *engine.ChatRequest) (*engine.ChatRequest, error) {
+//
+// mutable says whether a returned replacement will be applied. It is false on
+// the streamed and upstream-error paths, where the bytes have already gone to
+// the caller or there is no body to rewrite. v1 discarded those replacements
+// silently, so a plugin learned its edits had no effect only by observing that
+// they had no effect.
+func (pp *PluginPipeline) RunAfterResponse(ctx context.Context, reqID uint64, resp *engine.ChatResponse, mutable bool) (*engine.ChatResponse, error) {
 	pp.Acquire()
 	defer pp.Release()
 
-	pbReq := pbconv.ToPBChatRequest(chat)
-	reqBytes, err := proto.Marshal(pbReq)
-	if err != nil {
-		return chat, err
+	if resp == nil {
+		return nil, nil
 	}
-
-	resultBytes := reqBytes
+	current := pbconv.ToPBChatResponse(resp)
 	modified := false
 	for _, lp := range pp.plugins {
 		if !hasHook(lp.manifest, "run_after_response") {
 			continue
 		}
+		inBytes, err := encodeHookInput(reqID, responsePayload{resp: current, mutable: mutable})
+		if err != nil {
+			return resp, err
+		}
 		var outBytes []byte
-		if err := lp.plugin.CallRequest(ctx, "run_after_response", reqID, resultBytes, &outBytes); err != nil {
+		if err := lp.plugin.CallRequest(ctx, pbv2.Hook_HOOK_AFTER_RESPONSE, reqID, inBytes, &outBytes); err != nil {
 			log.Printf("[plugin] %s run_after_response: %v", lp.manifest.Name, err)
 			if lp.failureMode == "block" {
-				return chat, fmt.Errorf("plugin %s blocked response after failure: %w", lp.manifest.Name, err)
+				return resp, fmt.Errorf("plugin %s blocked response after failure: %w", lp.manifest.Name, err)
 			}
 			continue
 		}
-		if len(outBytes) > 0 {
-			resultBytes = outBytes
+		res, err := decodeHookResult(outBytes, pbv2.Hook_HOOK_AFTER_RESPONSE)
+		if err != nil {
+			log.Printf("[plugin] %s run_after_response: invalid result: %v", lp.manifest.Name, err)
+			if lp.failureMode == "block" {
+				return resp, fmt.Errorf("plugin %s returned an invalid result: %w", lp.manifest.Name, err)
+			}
+			continue
+		}
+		if res == nil {
+			continue
+		}
+		if replacement := res.GetReplaceResponse(); replacement != nil {
+			if !mutable {
+				// Announced up front via HookInput.Mutable, so this is a
+				// plugin ignoring the signal rather than a surprise. Say so
+				// once instead of discarding it silently as v1 did.
+				log.Printf("[plugin] %s returned a response replacement on an immutable path; discarding",
+					lp.manifest.Name)
+				continue
+			}
+			// The SDK validated the replacement's absolute well-formedness in
+			// isolation, but a replacement is a MUTATION of the accepted
+			// response: content presence and tool-call cardinality are
+			// relative constraints only the host can enforce. Reject the
+			// whole replacement before it can become the next plugin's input
+			// or reach the response body.
+			if err := validateResponseReplacement(current, replacement); err != nil {
+				log.Printf("[plugin] %s run_after_response: rejected invalid replacement: %v",
+					lp.manifest.Name, err)
+				if lp.failureMode == "block" {
+					return resp, fmt.Errorf("plugin %s returned an invalid response replacement: %w",
+						lp.manifest.Name, err)
+				}
+				// allow: skip this plugin's replacement; the previous current
+				// stays so the invalid output never chains downstream.
+				continue
+			}
+			// The replacement is accepted as a whole. A tool call that left
+			// its provider token untouched over changed content is valid
+			// (the apply block clears the wire token), but the pipeline must
+			// not hand the next plugin a signature over content the provider
+			// never signed — normalize before chaining.
+			clearStaleSignatures(current, replacement)
+			current = replacement
 			modified = true
 		}
 	}
 
 	if !modified {
-		// No plugin produced output — skip the pb round-trip entirely.
-		return chat, nil
+		return resp, nil
 	}
-	var resReq pb.ChatRequest
-	if err := proto.Unmarshal(resultBytes, &resReq); err != nil {
-		return chat, err
-	}
-	return pbconv.FromPBChatRequest(&resReq), nil
+	return pbconv.FromPBChatResponse(current), nil
 }
 
 // RunOnStreamChunk calls every plugin that implements run_on_stream_chunk.
 //
-// Each plugin sees every event produced by the previous plugin in the chain
-// and returns a StreamEventResult per event: a zero-length return passes the
-// event through unchanged; handled=true splices in its events (empty =
-// suppress, one = replace, many = fan-out). The final event set replaces the
-// input chunk in the stream — possibly empty.
+// Each plugin sees every event produced by the previous plugin in the chain.
+// A zero-byte return passes the event through unchanged. Otherwise the action
+// is either Suppress (drop it) or EmitEvents (replace it, or fan out to many).
+//
+// v2 removed the `handled` flag: suppression is an action rather than
+// "handled=true with an empty list", so emitting nothing and passing through
+// are no longer the same bytes on the wire.
 func (pp *PluginPipeline) RunOnStreamChunk(ctx context.Context, reqID uint64, chunk *engine.StreamEvent) ([]engine.StreamEvent, error) {
 	pp.Acquire()
 	defer pp.Release()
 
-	current := []*pb.StreamEvent{pbconv.ToPBStreamEvent(chunk)}
+	current := []*pbv2.StreamEvent{pbconv.ToPBStreamEvent(chunk)}
 
 	for _, lp := range pp.plugins {
 		if !hasHook(lp.manifest, "run_on_stream_chunk") {
 			continue
 		}
-		next := make([]*pb.StreamEvent, 0, len(current))
+		next := make([]*pbv2.StreamEvent, 0, len(current))
 		for _, ev := range current {
-			evBytes, err := proto.Marshal(ev)
+			evBytes, err := encodeHookInput(reqID, streamPayload{ev: ev})
 			if err != nil {
-				log.Printf("[plugin] %s run_on_stream_chunk marshal: %v", lp.manifest.Name, err)
+				log.Printf("[plugin] %s run_on_stream_chunk encode: %v", lp.manifest.Name, err)
 				if lp.failureMode == "block" {
-					return nil, fmt.Errorf("plugin %s blocked stream after marshal failure: %w", lp.manifest.Name, err)
+					return nil, fmt.Errorf("plugin %s blocked stream after encode failure: %w", lp.manifest.Name, err)
 				}
 				next = append(next, ev)
 				continue
 			}
 			var outBytes []byte
-			if err := lp.plugin.CallRequest(ctx, "run_on_stream_chunk", reqID, evBytes, &outBytes); err != nil {
+			if err := lp.plugin.CallRequest(ctx, pbv2.Hook_HOOK_ON_STREAM_CHUNK, reqID, evBytes, &outBytes); err != nil {
 				log.Printf("[plugin] %s run_on_stream_chunk: %v", lp.manifest.Name, err)
 				if lp.failureMode == "block" {
 					return nil, fmt.Errorf("plugin %s blocked stream after failure: %w", lp.manifest.Name, err)
@@ -1072,25 +1181,32 @@ func (pp *PluginPipeline) RunOnStreamChunk(ctx context.Context, reqID uint64, ch
 				next = append(next, ev)
 				continue
 			}
-			if len(outBytes) == 0 {
-				// Passthrough: plugin did not handle this event.
-				next = append(next, ev)
-				continue
-			}
-			var res pb.StreamEventResult
-			if err := proto.Unmarshal(outBytes, &res); err != nil {
-				log.Printf("[plugin] %s run_on_stream_chunk unmarshal: %v", lp.manifest.Name, err)
+			res, err := decodeHookResult(outBytes, pbv2.Hook_HOOK_ON_STREAM_CHUNK)
+			if err != nil {
+				log.Printf("[plugin] %s run_on_stream_chunk: invalid result: %v", lp.manifest.Name, err)
 				if lp.failureMode == "block" {
 					return nil, fmt.Errorf("plugin %s blocked stream after invalid output: %w", lp.manifest.Name, err)
 				}
 				next = append(next, ev)
 				continue
 			}
-			if !res.Handled {
-				next = append(next, ev)
+			if res == nil {
+				next = append(next, ev) // pass-through
 				continue
 			}
-			next = append(next, res.Events...)
+			if res.GetSuppress() != nil {
+				// Deliberately emit nothing. Distinct on the wire from
+				// pass-through, so an assembler buffering fragments can say
+				// "not yet" without the host replaying the fragment.
+				continue
+			}
+			if emit := res.GetEmitEvents(); emit != nil {
+				// Validation already refused an empty or malformed list, so
+				// this is a real replacement or fan-out.
+				next = append(next, emit.Events...)
+				continue
+			}
+			next = append(next, ev)
 		}
 		current = next
 	}
@@ -1121,7 +1237,7 @@ var ErrServeHTTPForbidden = fmt.Errorf("plugin does not hold env.serve_http perm
 //	(nil, other error)           — internal dispatch error; caller → 503.
 //
 // httpReq is built directly from net/http — it does not cross the engine IR.
-func (pp *PluginPipeline) RunOnHTTPRequest(ctx context.Context, reqID uint64, pluginName string, httpReq *pb.HttpRequest) (*pb.HttpResponse, error) {
+func (pp *PluginPipeline) RunOnHTTPRequest(ctx context.Context, reqID uint64, pluginName string, httpReq *pbv2.HttpRequest) (*pbv2.HttpResponse, error) {
 	pp.Acquire()
 	defer pp.Release()
 
@@ -1147,32 +1263,28 @@ func (pp *PluginPipeline) RunOnHTTPRequest(ctx context.Context, reqID uint64, pl
 		return nil, ErrServeHTTPForbidden
 	}
 
-	inBytes, err := proto.Marshal(httpReq)
+	inBytes, err := encodeHookInput(reqID, httpPayload{req: httpReq})
 	if err != nil {
-		return nil, fmt.Errorf("plugin %s: marshal http request: %w", pluginName, err)
+		return nil, fmt.Errorf("plugin %s: %w", pluginName, err)
 	}
 
 	var outBytes []byte
-	if err := target.plugin.CallRequest(ctx, "run_on_http_request", reqID, inBytes, &outBytes); err != nil {
+	if err := target.plugin.CallRequest(ctx, pbv2.Hook_HOOK_ON_HTTP_REQUEST, reqID, inBytes, &outBytes); err != nil {
 		return nil, fmt.Errorf("plugin %s: run_on_http_request: %w", pluginName, err)
 	}
 
-	// Zero-length return → plugin did not handle the request.
-	if len(outBytes) == 0 {
+	res, err := decodeHookResult(outBytes, pbv2.Hook_HOOK_ON_HTTP_REQUEST)
+	if err != nil {
+		return nil, fmt.Errorf("plugin %s: invalid http result: %w", pluginName, err)
+	}
+	// Pass-through: the plugin did not serve this request. v1 needed a
+	// `handled` flag here because an all-defaults HttpResponse marshals to
+	// zero bytes and was therefore indistinguishable from declining. v2 makes
+	// serving an action, so the absence of one IS declining.
+	if res == nil {
 		return nil, nil
 	}
-
-	var resp pb.HttpResponse
-	if err := proto.Unmarshal(outBytes, &resp); err != nil {
-		return nil, fmt.Errorf("plugin %s: unmarshal http response: %w", pluginName, err)
-	}
-
-	// Explicit handled flag required — see proto comment.
-	if !resp.Handled {
-		return nil, nil
-	}
-
-	return &resp, nil
+	return res.GetServeHttp(), nil
 }
 
 // TickOutcome is one plugin's report from a single tick.
@@ -1196,13 +1308,13 @@ type TickOutcome struct {
 // plugin that traps has failed to do its own background work and cannot
 // implicate anyone else's. Errors are logged and iteration continues, so one
 // broken plugin cannot silently stop every other plugin's timer.
-func (pp *PluginPipeline) RunOnTick(ctx context.Context, reqID uint64, tick *pb.TickRequest) []TickOutcome {
+func (pp *PluginPipeline) RunOnTick(ctx context.Context, reqID uint64, tick *pbv2.TickRequest) []TickOutcome {
 	pp.Acquire()
 	defer pp.Release()
 
-	inBytes, err := proto.Marshal(tick)
+	inBytes, err := encodeHookInput(reqID, tickPayload{tick: tick})
 	if err != nil {
-		log.Printf("[plugin] tick: marshal: %v", err)
+		log.Printf("[plugin] tick: %v", err)
 		return nil
 	}
 
@@ -1218,26 +1330,29 @@ func (pp *PluginPipeline) RunOnTick(ctx context.Context, reqID uint64, tick *pb.
 			continue
 		}
 		var outBytes []byte
-		if err := lp.plugin.CallRequest(ctx, "run_on_tick", reqID, inBytes, &outBytes); err != nil {
+		if err := lp.plugin.CallRequest(ctx, pbv2.Hook_HOOK_ON_TICK, reqID, inBytes, &outBytes); err != nil {
 			log.Printf("[plugin] %s run_on_tick: %v", lp.manifest.Name, err)
 			continue
 		}
-		if len(outBytes) == 0 {
-			continue // nothing to do this tick
-		}
-		var res pb.TickResult
-		if err := proto.Unmarshal(outBytes, &res); err != nil {
-			log.Printf("[plugin] %s run_on_tick: unmarshal: %v", lp.manifest.Name, err)
+		res, err := decodeHookResult(outBytes, pbv2.Hook_HOOK_ON_TICK)
+		if err != nil {
+			log.Printf("[plugin] %s run_on_tick: invalid result: %v", lp.manifest.Name, err)
 			continue
 		}
-		// Explicit handled flag required — see proto comment.
-		if !res.Handled {
+		// Pass-through means an idle tick: nothing was done, so there is
+		// nothing to report. v1 needed a `handled` flag because an
+		// all-defaults TickResult marshals to zero bytes.
+		if res == nil {
+			continue
+		}
+		outcome := res.GetTickOutcome()
+		if outcome == nil {
 			continue
 		}
 		outcomes = append(outcomes, TickOutcome{
 			Plugin:  lp.manifest.Name,
-			Actions: int(res.Actions),
-			Note:    res.Note,
+			Actions: int(outcome.Actions),
+			Note:    outcome.Note,
 		})
 	}
 	return outcomes
@@ -1512,4 +1627,26 @@ func WatchPlugins(ctx context.Context, dir string, configFn func() PluginConfig,
 	}()
 
 	return nil
+}
+
+// blocked reports whether any plugin has refused this request.
+//
+// Consulted on every exit from a hook iteration — trap, invalid result and
+// success alike. Checking only the success path let a plugin block, then trap,
+// and still have every downstream plugin see the request.
+func (pp *PluginPipeline) blocked(reqID uint64) bool {
+	v := pp.runtime.VerdictsFor(reqID)
+	return v != nil && v.Block() != nil
+}
+
+// discardTrapped applies trap semantics for a plugin whose call failed or whose
+// result was refused.
+//
+// A block SURVIVES: a security verdict fails closed, and code that decided to
+// refuse a request and then crashed still refused it. Respond, route and
+// identity are DISCARDED — a half-built synthetic response, or a reroute chosen
+// by code that crashed or returned garbage immediately afterwards, is not
+// trustworthy enough to act on.
+func (pp *PluginPipeline) discardTrapped(reqID uint64, plugin string) {
+	pp.runtime.DiscardTrappedVerdicts(reqID, plugin)
 }

@@ -369,7 +369,6 @@ func TestRoundTrip_ResponsesAPI(t *testing.T) {
 		t.Errorf("message 1 mismatch: %+v", chat.Messages[1])
 	}
 
-
 	if chat.Messages[2].Role != engine.RoleTool || chat.Messages[2].ToolCallID != "call_abc" || chat.Messages[2].Content != "Rainy" {
 		t.Errorf("message 2 mismatch: %+v", chat.Messages[2])
 	}

@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 
 	"github.com/torana-edge/torana-edge/internal/engine"
-	"github.com/torana-edge/torana-plugin-sdk/pb"
+	pb "github.com/torana-edge/torana-plugin-sdk/pb/v2"
 )
 
 func ToPBChatRequest(c *engine.ChatRequest) *pb.ChatRequest {
@@ -41,31 +41,7 @@ func ToPBChatRequest(c *engine.ChatRequest) *pb.ChatRequest {
 	}
 
 	for _, m := range c.Messages {
-		msg := &pb.Message{
-			Role:              string(m.Role),
-			Content:           m.Content,
-			Thinking:          m.Thinking,
-			ThinkingSignature: m.ThinkingSignature,
-			RedactedThinking:  m.RedactedThinking,
-			ToolCallId:        m.ToolCallID,
-			ToolName:          m.ToolName,
-		}
-		if len(m.ContentParts) > 0 {
-			msg.ContentPartsJson, _ = json.Marshal(m.ContentParts)
-		}
-		if len(m.CacheControl) > 0 {
-			msg.CacheControlJson, _ = json.Marshal(m.CacheControl)
-		}
-		for _, tc := range m.ToolCalls {
-			argsJson, _ := json.Marshal(tc.Arguments)
-			msg.ToolCalls = append(msg.ToolCalls, &pb.ToolCall{
-				Id:            tc.ID,
-				Name:          tc.Name,
-				ArgumentsJson: argsJson,
-				Signature:     tc.Signature,
-			})
-		}
-		out.Messages = append(out.Messages, msg)
+		out.Messages = append(out.Messages, toPBMessage(m))
 	}
 
 	for _, t := range c.Tools {
@@ -119,34 +95,7 @@ func FromPBChatRequest(c *pb.ChatRequest) *engine.ChatRequest {
 	}
 
 	for _, m := range c.Messages {
-		msg := engine.Message{
-			Role:              engine.Role(m.Role),
-			Content:           m.Content,
-			Thinking:          m.Thinking,
-			ThinkingSignature: m.ThinkingSignature,
-			RedactedThinking:  m.RedactedThinking,
-			ToolCallID:        m.ToolCallId,
-			ToolName:          m.ToolName,
-		}
-		if len(m.ContentPartsJson) > 0 {
-			json.Unmarshal(m.ContentPartsJson, &msg.ContentParts)
-		}
-		if len(m.CacheControlJson) > 0 {
-			json.Unmarshal(m.CacheControlJson, &msg.CacheControl)
-		}
-		for _, tc := range m.ToolCalls {
-			var args map[string]any
-			if len(tc.ArgumentsJson) > 0 {
-				json.Unmarshal(tc.ArgumentsJson, &args)
-			}
-			msg.ToolCalls = append(msg.ToolCalls, engine.ToolCall{
-				ID:        tc.Id,
-				Name:      tc.Name,
-				Arguments: args,
-				Signature: tc.Signature,
-			})
-		}
-		out.Messages = append(out.Messages, msg)
+		out.Messages = append(out.Messages, fromPBMessage(m))
 	}
 
 	for _, t := range c.Tools {
@@ -176,12 +125,17 @@ func ToPBStreamEvent(e *engine.StreamEvent) *pb.StreamEvent {
 	} else if e.ThinkingDelta != nil {
 		out.Event = &pb.StreamEvent_ThinkingDelta{ThinkingDelta: *e.ThinkingDelta}
 	} else if e.ToolCallStart != nil {
-		out.Event = &pb.StreamEvent_ToolCallStart{
-			ToolCallStart: &pb.ToolCallStart{
-				Index:     int32(e.ToolCallStart.Index),
-				Id:        e.ToolCallStart.ID,
-				Name:      e.ToolCallStart.Name,
-				Signature: e.ToolCallStart.Signature,
+		// v2 has no ToolCallStart: a tool call opens a content block like any
+		// other content, so one sequence covers text, thinking and tools, and
+		// the block index is what binds deltas and signatures to it.
+		out.Event = &pb.StreamEvent_ContentBlockStart{
+			ContentBlockStart: &pb.ContentBlockStart{
+				Index: int32(e.ToolCallStart.Index),
+				Block: &pb.ContentBlockStart_ToolCall{ToolCall: &pb.ToolCallRef{
+					Id:        e.ToolCallStart.ID,
+					Name:      e.ToolCallStart.Name,
+					Signature: e.ToolCallStart.Signature,
+				}},
 			},
 		}
 	} else if e.SignatureDelta != nil {
@@ -194,14 +148,18 @@ func ToPBStreamEvent(e *engine.StreamEvent) *pb.StreamEvent {
 			},
 		}
 	} else if e.ToolCallEnd != nil {
-		out.Event = &pb.StreamEvent_ToolCallEnd{
-			ToolCallEnd: &pb.ToolCallEnd{Index: int32(e.ToolCallEnd.Index)},
+		out.Event = &pb.StreamEvent_ContentBlockStop{
+			ContentBlockStop: &pb.ContentBlockStop{Index: int32(e.ToolCallEnd.Index)},
 		}
 	} else if e.FinishReason != "" {
-		out.Event = &pb.StreamEvent_FinishReason{FinishReason: e.FinishReason}
+		// v2 carries the finish reason on MessageStop rather than as a
+		// standalone event, so the end of a message is one thing to observe.
+		out.Event = &pb.StreamEvent_MessageStop{
+			MessageStop: &pb.MessageStop{FinishReason: e.FinishReason},
+		}
 	} else if e.Usage != nil {
 		out.Event = &pb.StreamEvent_Usage{
-			Usage: &pb.StreamUsage{
+			Usage: &pb.Usage{
 				InputTokens:      int32(e.Usage.InputTokens),
 				OutputTokens:     int32(e.Usage.OutputTokens),
 				CacheReadTokens:  int32(e.Usage.CacheReadTokens),
@@ -226,12 +184,18 @@ func FromPBStreamEvent(e *pb.StreamEvent) *engine.StreamEvent {
 		out.TextDelta = &v.TextDelta
 	case *pb.StreamEvent_ThinkingDelta:
 		out.ThinkingDelta = &v.ThinkingDelta
-	case *pb.StreamEvent_ToolCallStart:
-		out.ToolCallStart = &engine.ToolCallStart{
-			Index:     int(v.ToolCallStart.Index),
-			ID:        v.ToolCallStart.Id,
-			Name:      v.ToolCallStart.Name,
-			Signature: v.ToolCallStart.Signature,
+	case *pb.StreamEvent_ContentBlockStart:
+		// Only tool-call blocks map back: the engine IR has no separate
+		// open-event for text or thinking, which arrive as bare deltas. A
+		// text/thinking/provider block start therefore has no v1-shaped
+		// counterpart and is dropped rather than invented.
+		if tc, ok := v.ContentBlockStart.Block.(*pb.ContentBlockStart_ToolCall); ok && tc.ToolCall != nil {
+			out.ToolCallStart = &engine.ToolCallStart{
+				Index:     int(v.ContentBlockStart.Index),
+				ID:        tc.ToolCall.Id,
+				Name:      tc.ToolCall.Name,
+				Signature: tc.ToolCall.Signature,
+			}
 		}
 	case *pb.StreamEvent_SignatureDelta:
 		sig := v.SignatureDelta
@@ -241,12 +205,12 @@ func FromPBStreamEvent(e *pb.StreamEvent) *engine.StreamEvent {
 			Index:          int(v.ToolCallDelta.Index),
 			ArgumentsDelta: v.ToolCallDelta.ArgumentsDelta,
 		}
-	case *pb.StreamEvent_ToolCallEnd:
+	case *pb.StreamEvent_ContentBlockStop:
 		out.ToolCallEnd = &engine.ToolCallEnd{
-			Index: int(v.ToolCallEnd.Index),
+			Index: int(v.ContentBlockStop.Index),
 		}
-	case *pb.StreamEvent_FinishReason:
-		out.FinishReason = v.FinishReason
+	case *pb.StreamEvent_MessageStop:
+		out.FinishReason = v.MessageStop.FinishReason
 	case *pb.StreamEvent_Usage:
 		out.Usage = &engine.StreamUsage{
 			InputTokens:      int(v.Usage.InputTokens),
@@ -260,5 +224,178 @@ func FromPBStreamEvent(e *pb.StreamEvent) *engine.StreamEvent {
 			Message: v.Error.Message,
 		}
 	}
+	return out
+}
+
+// Message conversion belongs to the request side only. The response side has
+// its own narrow shape (ResponseMessage), so duplicating the request mapping
+// for it would claim fields the host cannot deliver on a response.
+
+func toPBMessage(m engine.Message) *pb.Message {
+	msg := &pb.Message{
+		Role:              string(m.Role),
+		Content:           m.Content,
+		Thinking:          m.Thinking,
+		ThinkingSignature: m.ThinkingSignature,
+		RedactedThinking:  m.RedactedThinking,
+		ToolCallId:        m.ToolCallID,
+		ToolName:          m.ToolName,
+	}
+	if len(m.ContentParts) > 0 {
+		msg.ContentPartsJson, _ = json.Marshal(m.ContentParts)
+	}
+	if len(m.CacheControl) > 0 {
+		msg.CacheControlJson, _ = json.Marshal(m.CacheControl)
+	}
+	for _, tc := range m.ToolCalls {
+		argsJson, _ := json.Marshal(tc.Arguments)
+		msg.ToolCalls = append(msg.ToolCalls, &pb.ToolCall{
+			Id:            tc.ID,
+			Name:          tc.Name,
+			ArgumentsJson: argsJson,
+			Signature:     tc.Signature,
+		})
+	}
+	return msg
+}
+
+func fromPBMessage(m *pb.Message) engine.Message {
+	if m == nil {
+		return engine.Message{}
+	}
+	msg := engine.Message{
+		Role:              engine.Role(m.Role),
+		Content:           m.Content,
+		Thinking:          m.Thinking,
+		ThinkingSignature: m.ThinkingSignature,
+		RedactedThinking:  m.RedactedThinking,
+		ToolCallID:        m.ToolCallId,
+		ToolName:          m.ToolName,
+	}
+	if len(m.ContentPartsJson) > 0 {
+		json.Unmarshal(m.ContentPartsJson, &msg.ContentParts)
+	}
+	if len(m.CacheControlJson) > 0 {
+		json.Unmarshal(m.CacheControlJson, &msg.CacheControl)
+	}
+	for _, tc := range m.ToolCalls {
+		var args map[string]any
+		if len(tc.ArgumentsJson) > 0 {
+			json.Unmarshal(tc.ArgumentsJson, &args)
+		}
+		msg.ToolCalls = append(msg.ToolCalls, engine.ToolCall{
+			ID:        tc.Id,
+			Name:      tc.Name,
+			Arguments: args,
+			Signature: tc.Signature,
+		})
+	}
+	return msg
+}
+
+func ToPBChatResponse(r *engine.ChatResponse) *pb.ChatResponse {
+	if r == nil {
+		return nil
+	}
+	out := &pb.ChatResponse{
+		Model:          r.Model,
+		Id:             r.ID,
+		FinishReason:   r.FinishReason,
+		UpstreamStatus: int32(r.UpstreamStatus),
+		DurationMs:     r.DurationMS,
+	}
+	if r.Message != nil {
+		out.Message = toPBResponseMessage(r.Message)
+	}
+	if r.Usage != nil {
+		out.Usage = &pb.Usage{
+			InputTokens:      int32(r.Usage.InputTokens),
+			OutputTokens:     int32(r.Usage.OutputTokens),
+			CacheReadTokens:  int32(r.Usage.CacheReadTokens),
+			CacheWriteTokens: int32(r.Usage.CacheWriteTokens),
+		}
+	}
+	if len(r.ProviderExtensions) > 0 {
+		out.ProviderExtensionsJson, _ = json.Marshal(r.ProviderExtensions)
+	}
+	return out
+}
+
+func FromPBChatResponse(r *pb.ChatResponse) *engine.ChatResponse {
+	if r == nil {
+		return nil
+	}
+	out := &engine.ChatResponse{
+		Model:          r.Model,
+		ID:             r.Id,
+		FinishReason:   r.FinishReason,
+		UpstreamStatus: int(r.UpstreamStatus),
+		DurationMS:     r.DurationMs,
+	}
+	if r.Message != nil {
+		out.Message = fromPBResponseMessage(r.Message)
+	}
+	if r.Usage != nil {
+		out.Usage = &engine.StreamUsage{
+			InputTokens:      int(r.Usage.InputTokens),
+			OutputTokens:     int(r.Usage.OutputTokens),
+			CacheReadTokens:  int(r.Usage.CacheReadTokens),
+			CacheWriteTokens: int(r.Usage.CacheWriteTokens),
+		}
+	}
+	if len(r.ProviderExtensionsJson) > 0 {
+		json.Unmarshal(r.ProviderExtensionsJson, &out.ProviderExtensions)
+	}
+	return out
+}
+
+// toPBResponseMessage maps the canonical response message onto the wire.
+// ArgumentsJSON is copied, never decoded: the pb message outlives the engine
+// value the caller may keep mutating (the apply path rewrites argsJSON in
+// place), and aliasing would let that mutation change the accepted baseline.
+// Content is a *string, which Go strings make safe to alias — nothing can
+// mutate through it.
+func toPBResponseMessage(m *engine.ResponseMessage) *pb.ResponseMessage {
+	out := &pb.ResponseMessage{Content: m.Content}
+	for _, tc := range m.ToolCalls {
+		out.ToolCalls = append(out.ToolCalls, &pb.ToolCall{
+			Id:            tc.ID,
+			Name:          tc.Name,
+			ArgumentsJson: cloneBytes(tc.ArgumentsJSON),
+			Signature:     tc.Signature,
+		})
+	}
+	return out
+}
+
+// fromPBResponseMessage maps the wire response message back to the canonical
+// shape. Bytes are copied in both directions: the pb message is decoded from
+// bytes a guest produced, and the returned engine value outlives the pb
+// message's ownership.
+func fromPBResponseMessage(m *pb.ResponseMessage) *engine.ResponseMessage {
+	out := &engine.ResponseMessage{Content: m.Content}
+	for _, tc := range m.ToolCalls {
+		if tc == nil {
+			// Defensive: the SDK refuses nil tool calls in validated results,
+			// but this conversion also runs on host-built inputs. A nil entry
+			// would panic downstream; skip it rather than crash the process.
+			continue
+		}
+		out.ToolCalls = append(out.ToolCalls, engine.ResponseToolCall{
+			ID:            tc.Id,
+			Name:          tc.Name,
+			ArgumentsJSON: cloneBytes(tc.ArgumentsJson),
+			Signature:     tc.Signature,
+		})
+	}
+	return out
+}
+
+func cloneBytes(b []byte) []byte {
+	if b == nil {
+		return nil
+	}
+	out := make([]byte, len(b))
+	copy(out, b)
 	return out
 }

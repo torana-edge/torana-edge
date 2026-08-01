@@ -71,7 +71,7 @@ func Usage(w io.Writer) {
 // that is actually published: a scaffold naming an unreleased tag produces a
 // project that cannot build.
 const (
-	ScaffoldSDKVersion = "v0.2.0"
+	ScaffoldSDKVersion = "v0.2.1-0.20260731210855-2422741feb82"
 	// scaffoldGoVersion tracks the SDK's own go directive. A scaffolded module
 	// declaring an OLDER Go version than its dependency requires fails to build
 	// with "module requires go >= x", which is the same class of unbuildable
@@ -110,14 +110,20 @@ import (
 	"context"
 
 	sdk "github.com/torana-edge/torana-plugin-sdk"
-	"github.com/torana-edge/torana-plugin-sdk/pb"
+	pb "github.com/torana-edge/torana-plugin-sdk/pb/v2"
 )
 
+// main is empty on purpose. Under -buildmode=c-shared the runtime calls
+// _initialize, which runs init() -- main() is NEVER called. Registering in
+// main() produces a plugin that loads and does nothing, with no error anywhere.
 func main() {}
 
 func init() {
-	sdk.OnBeforeRequest(func(ctx context.Context, req *pb.ChatRequest) (*pb.ChatRequest, error) {
-		return req, nil
+	sdk.OnBeforeRequest(func(ctx context.Context, req *pb.ChatRequest) (sdk.RequestResult, error) {
+		// PassRequest leaves the request untouched. Return
+		// sdk.ReplaceRequest(req) after changing something -- and declare the
+		// matching ir.*.write grant in plugin.json, or the host rejects it.
+		return sdk.PassRequest(), nil
 	})
 }
 `,
@@ -126,7 +132,7 @@ func init() {
   "id": "local/%s",
   "name": "%s",
   "version": "0.1.0",
-  "abi_version": "v1",
+  "abi_version": "v2",
   "description": "A local Torana plugin",
   "hooks": [
     {"name": "run_before_request"}

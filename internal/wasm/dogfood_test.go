@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/torana-edge/torana-plugin-sdk/pb"
+	pb "github.com/torana-edge/torana-plugin-sdk/pb/v2"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -36,14 +36,34 @@ func TestIntentRawABI(t *testing.T) {
 			ParametersJson: []byte(`{"type":"object","properties":{"path":{"type":"string"}}}`),
 		}},
 	}
-	input, _ := proto.Marshal(req)
+	// v2 wraps the payload in a HookInput and the reply in a HookResult.
+	input, _ := proto.Marshal(&pb.HookInput{
+		RequestId: 1,
+		Payload:   &pb.HookInput_ChatRequest{ChatRequest: req},
+	})
 
 	var outBytes []byte
-	if err := p.CallRequest(context.Background(), "run_before_request", 1, input, &outBytes); err != nil {
+	if err := p.CallRequest(context.Background(), pb.Hook_HOOK_BEFORE_REQUEST, 1, input, &outBytes); err != nil {
 		t.Fatal(err)
 	}
 	if len(outBytes) == 0 {
 		t.Fatal("the guest returned pass-through; the fixture always mutates, so the ABI round-trip lost the request")
+	}
+
+	res, err := pb.DecodeHookResult(outBytes)
+	if err != nil {
+		t.Fatalf("decode hook result: %v", err)
+	}
+	if err := res.ValidateFor(pb.Hook_HOOK_BEFORE_REQUEST); err != nil {
+		t.Fatalf("the host would reject this: %v", err)
+	}
+	replacement := res.GetReplaceRequest()
+	if replacement == nil {
+		t.Fatal("the guest returned no request replacement")
+	}
+	outBytes, err = proto.Marshal(replacement)
+	if err != nil {
+		t.Fatal(err)
 	}
 
 	var out pb.ChatRequest

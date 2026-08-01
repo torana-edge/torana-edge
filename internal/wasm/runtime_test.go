@@ -6,25 +6,20 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	pb "github.com/torana-edge/torana-plugin-sdk/pb/v2"
 )
 
-// timeoutPluginWasm exports the Torana alloc ABI plus a hook that loops
-// forever. It is intentionally tiny so cancellation coverage never depends on
-// a compiler being installed in CI.
-var timeoutPluginWasm = []byte{
-	0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00,
-	0x01, 0x0d, 0x02, 0x60, 0x01, 0x7f, 0x01, 0x7f,
-	0x60, 0x03, 0x7e, 0x7e, 0x7e, 0x01, 0x7e,
-	0x03, 0x03, 0x02, 0x00, 0x01,
-	0x05, 0x03, 0x01, 0x00, 0x01,
-	0x07, 0x19, 0x03,
-	0x06, 0x6d, 0x65, 0x6d, 0x6f, 0x72, 0x79, 0x02, 0x00,
-	0x05, 0x61, 0x6c, 0x6c, 0x6f, 0x63, 0x00, 0x00,
-	0x04, 0x6c, 0x6f, 0x6f, 0x70, 0x00, 0x01,
-	0x0a, 0x0f, 0x02,
-	0x04, 0x00, 0x41, 0x00, 0x0b,
-	0x08, 0x00, 0x03, 0x40, 0x0c, 0x00, 0x0b, 0x00, 0x0b,
-}
+// timeoutPluginWasm is a minimal v2 guest whose run_hook loops forever.
+//
+// Built programmatically rather than as a hex blob: the previous literal had
+// to be re-hand-assembled whenever an export or signature changed, and section
+// lengths silently disagreeing with their contents produces a module that
+// fails to instantiate for reasons unrelated to the test.
+//
+// It is intentionally tiny so cancellation coverage never depends on a
+// compiler being installed in CI.
+var timeoutPluginWasm = MinimalV2Module(true)
 
 func TestCallRequestTimeoutDiscardsInstance(t *testing.T) {
 	r := NewRuntimeWithOptions(context.Background(), RuntimeOptions{
@@ -39,7 +34,7 @@ func TestCallRequestTimeoutDiscardsInstance(t *testing.T) {
 	}
 	started := time.Now()
 	var output []byte
-	err = p.CallRequest(context.Background(), "loop", 1, []byte("x"), &output)
+	err = p.CallRequest(context.Background(), pb.Hook_HOOK_BEFORE_REQUEST, 1, []byte("x"), &output)
 	if err == nil {
 		t.Fatal("expected timed-out guest call to fail")
 	}
@@ -116,20 +111,30 @@ func TestMetaRequestScoping(t *testing.T) {
 
 // TestMetaEmptyValueDeletes: setting an empty value removes the key
 // (the cleanup convention plugins rely on).
-func TestMetaEmptyValueDeletes(t *testing.T) {
+// An empty meta value is a VALUE, not a delete.
+//
+// This test asserted the opposite, which was correct for v1. Under that rule a
+// plugin could not store an empty string and could not tell "nothing stored"
+// from "I stored nothing" — the ambiguity v2 removes, and the reason absence is
+// now reported as NOT_FOUND.
+func TestMetaEmptyValueIsStoredNotDeleted(t *testing.T) {
 	r := NewRuntime(context.Background())
 	defer r.Close()
 
 	r.metaSet(1, "frag:x", "data")
 	r.metaSet(1, "frag:x", "")
-	if got := r.metaGet(1, "frag:x"); got != "" {
-		t.Fatalf("got %q want deleted", got)
+
+	got, present := r.metaGetPresence(1, "frag:x")
+	if !present {
+		t.Fatal("an empty value deleted the key; empty is a value, not a delete")
 	}
-	r.metaMu.RLock()
-	_, exists := r.meta[1]["frag:x"]
-	r.metaMu.RUnlock()
-	if exists {
-		t.Fatal("key still present after empty-value delete")
+	if got != "" {
+		t.Fatalf("got %q, want an empty value", got)
+	}
+
+	// A key never written is absent, which is a different answer.
+	if _, present := r.metaGetPresence(1, "frag:never"); present {
+		t.Fatal("an unwritten key reported present")
 	}
 }
 

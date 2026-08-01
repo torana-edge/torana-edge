@@ -3,7 +3,7 @@
   "id": "torana-test/test-observer",
   "name": "test-observer",
   "version": "0.1.0",
-  "abi_version": "v1",
+  "abi_version": "v2",
   "failure_mode": "pass",
   "description": "Test fixture: proves plugins receive the _response signal (latency/status/usage) on normal and error responses",
   "hooks": [

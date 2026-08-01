@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "id": "torana-test/test-trapper-response",
+  "name": "test-trapper-response",
+  "version": "0.1.0",
+  "abi_version": "v2",
+  "failure_mode": "block",
+  "description": "Traps in run_after_response; proves failure_mode blocks before the body is committed",
+  "hooks": [{"name": "run_after_response"}],
+  "permissions": []
+}

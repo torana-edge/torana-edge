@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -590,4 +591,420 @@ func TestHotReloadDuringInflightRequest(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("old pipeline never drained after request completion")
 	}
+}
+
+// failure_mode: block must be enforced where the response is actually
+// produced, not only inside the pipeline.
+//
+// The pipeline returned an error for a trapping block-mode plugin and both
+// call sites logged it and carried on: the request went upstream, the caller
+// got a normal completion, and only a unit-level pipeline test would have said
+// "blocked". A security plugin whose manifest says block was fail-open on the
+// real HTTP path.
+//
+// End-to-end on purpose. The bug lived in the gap between the pipeline and the
+// transport, which is exactly the seam a pipeline-level test cannot see.
+func TestFailureModeBlockRefusesAtTheTransport(t *testing.T) {
+	requireWASM(t, fixturesDir+"/test-trapper/plugin.wasm")
+
+	var upstreamCalls int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&upstreamCalls, 1)
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"choices":[{"message":{"role":"assistant","content":"leaked"}}]}`)
+	}))
+	defer upstream.Close()
+
+	cfg := Config{
+		Port: "0",
+		Providers: provider.Config{
+			Providers: map[string]provider.Provider{"oai": {URL: upstream.URL, Format: "openai"}},
+			Plugins: provider.PluginsConfig{
+				Dir: fixturesDir, Order: []string{"test-trapper"}, AllowUnapproved: true,
+			},
+		},
+	}
+	srv, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	go srv.Serve(ln)
+	defer srv.Shutdown(context.Background())
+
+	body := `{"model":"gpt-x","messages":[{"role":"user","content":"hello"}]}`
+	// The /provider/<name>/ prefix is what routes to a configured provider. An
+	// earlier version of this test posted to a bare /v1/chat/completions, got
+	// "no provider configured for this path", and passed for that reason
+	// instead of the block — it was green with the fix reverted.
+	url := "http://" + ln.Addr().String() + "/provider/oai/v1/chat/completions"
+	resp, err := http.Post(url, "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	defer resp.Body.Close()
+	got, _ := io.ReadAll(resp.Body)
+
+	if strings.Contains(string(got), "no provider configured") {
+		t.Fatalf("the request never reached the pipeline (%s); this test would pass "+
+			"for the wrong reason", got)
+	}
+	if n := atomic.LoadInt32(&upstreamCalls); n != 0 {
+		t.Errorf("upstream was called %d times; a block-mode plugin trapped, so the "+
+			"request must never have been sent", n)
+	}
+	if resp.StatusCode == http.StatusOK {
+		t.Fatalf("caller got 200 after a block-mode plugin trapped; body=%s", got)
+	}
+	if strings.Contains(string(got), "leaked") {
+		t.Fatalf("the upstream completion reached the caller despite the block: %s", got)
+	}
+}
+
+// failure_mode: block on the NON-STREAMING response path.
+//
+// The body has not been written yet — ModifyResponse still owns it — so this
+// is refusable, and forwarding the provider's body after a plugin refused it
+// is the same fail-open as sending the request upstream after a refusal.
+// A different transport path from the request hook, and it was independently
+// wrong.
+func TestFailureModeBlockRefusesTheNonStreamingResponse(t *testing.T) {
+	requireWASM(t, fixturesDir+"/test-trapper-response/plugin.wasm")
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"id":"chatcmpl-1","model":"gpt-x","choices":[{"message":{"role":"assistant","content":"leaked"},"finish_reason":"stop"}]}`)
+	}))
+	defer upstream.Close()
+
+	cfg := Config{Port: "0", Providers: provider.Config{
+		Providers: map[string]provider.Provider{"oai": {URL: upstream.URL, Format: "openai"}},
+		Plugins: provider.PluginsConfig{
+			Dir: fixturesDir, Order: []string{"test-trapper-response"}, AllowUnapproved: true,
+		},
+	}}
+	srv, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	go srv.Serve(ln)
+	defer srv.Shutdown(context.Background())
+
+	resp, err := http.Post("http://"+ln.Addr().String()+"/provider/oai/v1/chat/completions",
+		"application/json", strings.NewReader(`{"model":"gpt-x","messages":[{"role":"user","content":"hi"}]}`))
+	if err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	defer resp.Body.Close()
+	got, _ := io.ReadAll(resp.Body)
+
+	if strings.Contains(string(got), "no provider configured") {
+		t.Fatalf("the request never reached the pipeline (%s)", got)
+	}
+	if strings.Contains(string(got), "leaked") {
+		t.Fatalf("the provider body reached the caller after a block-mode response "+
+			"hook trapped: %s", got)
+	}
+	if resp.StatusCode == http.StatusOK {
+		t.Fatalf("caller got 200 after a block-mode response hook trapped: %s", got)
+	}
+}
+
+// failure_mode: block on a stream whose headers and body have already begun.
+//
+// Nothing can be refused any more, so the honest action is to TERMINATE.
+// Replaying the refused event was the fail-open — it delivers exactly the
+// content the block policy exists to withhold.
+func TestFailureModeBlockTerminatesTheStream(t *testing.T) {
+	requireWASM(t, fixturesDir+"/test-trapper-stream/plugin.wasm")
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fl, _ := w.(http.Flusher)
+		fmt.Fprint(w, `data: {"choices":[{"index":0,"delta":{"content":"leaked"}}]}`+"\n\n")
+		if fl != nil {
+			fl.Flush()
+		}
+		fmt.Fprint(w, "data: [DONE]\n\n")
+		if fl != nil {
+			fl.Flush()
+		}
+	}))
+	defer upstream.Close()
+
+	cfg := Config{Port: "0", Providers: provider.Config{
+		Providers: map[string]provider.Provider{"oai": {URL: upstream.URL, Format: "openai"}},
+		Plugins: provider.PluginsConfig{
+			Dir: fixturesDir, Order: []string{"test-trapper-stream"}, AllowUnapproved: true,
+		},
+	}}
+	srv, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	go srv.Serve(ln)
+	defer srv.Shutdown(context.Background())
+
+	resp, err := http.Post("http://"+ln.Addr().String()+"/provider/oai/v1/chat/completions",
+		"application/json", strings.NewReader(`{"model":"gpt-x","stream":true,"messages":[{"role":"user","content":"hi"}]}`))
+	if err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	defer resp.Body.Close()
+	got, _ := io.ReadAll(resp.Body)
+
+	if strings.Contains(string(got), "no provider configured") {
+		t.Fatalf("the request never reached the pipeline (%s)", got)
+	}
+	if strings.Contains(string(got), "leaked") {
+		t.Fatalf("the refused event was replayed to the caller: %s", got)
+	}
+}
+
+// The streaming observational hook must finish before the handler records the
+// feed and drops request state.
+//
+// The streaming goroutine closes the pipe BEFORE running run_after_response, so
+// EOF lets ReverseProxy.ServeHTTP return while the hook is still executing. The
+// handler then recorded the feed and ran EndRequest concurrently: plugin_failure
+// was nondeterministically absent, request-scoped state could be deleted out
+// from under the hook, and reqState was read and written by two goroutines.
+//
+// Asserted on the emitted feed event rather than a log line, because the field
+// is the operator-visible artifact. Run this package under -race to catch the
+// third symptom.
+func TestStreamingObservationalHookCompletesBeforeFeedRecording(t *testing.T) {
+	requireWASM(t, fixturesDir+"/test-trapper-after-stream/plugin.wasm")
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fl, _ := w.(http.Flusher)
+		fmt.Fprint(w, `data: {"choices":[{"index":0,"delta":{"content":"hello"}}]}`+"\n\n")
+		if fl != nil {
+			fl.Flush()
+		}
+		fmt.Fprint(w, "data: [DONE]\n\n")
+		if fl != nil {
+			fl.Flush()
+		}
+	}))
+	defer upstream.Close()
+
+	cfg := Config{Port: "0", Providers: provider.Config{
+		Providers: map[string]provider.Provider{"oai": {URL: upstream.URL, Format: "openai"}},
+		Plugins: provider.PluginsConfig{
+			Dir: fixturesDir, Order: []string{"test-trapper-after-stream"}, AllowUnapproved: true,
+		},
+	}}
+	srv, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	go srv.Serve(ln)
+	defer srv.Shutdown(context.Background())
+
+	resp, err := http.Post("http://"+ln.Addr().String()+"/provider/oai/v1/chat/completions",
+		"application/json", strings.NewReader(`{"model":"gpt-x","stream":true,"messages":[{"role":"user","content":"hi"}]}`))
+	if err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+
+	if strings.Contains(string(body), "no provider configured") {
+		t.Fatalf("the request never reached the pipeline (%s)", body)
+	}
+	// The stream itself must still succeed: the hook is observational.
+	if !strings.Contains(string(body), "hello") {
+		t.Fatalf("the streamed body did not reach the caller: %s", body)
+	}
+
+	// No sleep and no retry. If the handler no longer waits for the hook, the
+	// event is recorded before PluginFailure is set and this fails every time.
+	events := srv.feed.Snapshot()
+	if len(events) == 0 {
+		t.Fatal("no feed event was recorded")
+	}
+	last := events[len(events)-1]
+	if !last.PluginFailure {
+		t.Fatalf("plugin_failure is absent from the feed event (%+v) — the handler "+
+			"recorded it before the observational hook finished", last)
+	}
+	if last.Verdict == "block" {
+		t.Error("an observational failure was reported as a block; nothing was withheld")
+	}
+}
+
+// The observational streaming hook IS on the client's critical path, and this
+// pins that as a recorded decision.
+//
+// Closing the pipe does not give the client EOF: Go's HTTP server writes the
+// chunked terminator when the HANDLER returns, and the handler waits for this
+// hook. An earlier comment in server.go claimed the opposite — this test exists
+// so the real behaviour cannot drift back into a comfortable assumption.
+//
+// "Observational" describes the hook's AUTHORITY (it cannot change the
+// response), not its timing.
+func TestObservationalStreamingHookIsOnTheClientCriticalPath(t *testing.T) {
+	requireWASM(t, fixturesDir+"/test-slow-after-stream/plugin.wasm")
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fl, _ := w.(http.Flusher)
+		fmt.Fprint(w, `data: {"choices":[{"index":0,"delta":{"content":"hello"}}]}`+"\n\n")
+		if fl != nil {
+			fl.Flush()
+		}
+		fmt.Fprint(w, "data: [DONE]\n\n")
+		if fl != nil {
+			fl.Flush()
+		}
+	}))
+	defer upstream.Close()
+
+	newServer := func(t *testing.T, order []string) string {
+		t.Helper()
+		cfg := Config{Port: "0", Providers: provider.Config{
+			Providers: map[string]provider.Provider{"oai": {URL: upstream.URL, Format: "openai"}},
+			Plugins: provider.PluginsConfig{
+				Dir: fixturesDir, Order: order, AllowUnapproved: true,
+			},
+		}}
+		srv, err := New(cfg)
+		if err != nil {
+			t.Fatalf("New: %v", err)
+		}
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatalf("listen: %v", err)
+		}
+		go srv.Serve(ln)
+		t.Cleanup(func() { srv.Shutdown(context.Background()) })
+		return ln.Addr().String()
+	}
+
+	timeToEOF := func(t *testing.T, addr string) time.Duration {
+		t.Helper()
+		start := time.Now()
+		resp, err := http.Post("http://"+addr+"/provider/oai/v1/chat/completions",
+			"application/json", strings.NewReader(`{"model":"gpt-x","stream":true,"messages":[{"role":"user","content":"hi"}]}`))
+		if err != nil {
+			t.Fatalf("post: %v", err)
+		}
+		body, _ := io.ReadAll(resp.Body) // reads to EOF, i.e. handler return
+		resp.Body.Close()
+		if !strings.Contains(string(body), "hello") {
+			t.Fatalf("stream body missing: %s", body)
+		}
+		return time.Since(start)
+	}
+
+	// Warm both: first request pays WASM instantiation.
+	fast := newServer(t, []string{"test-inert-a"})
+	slow := newServer(t, []string{"test-slow-after-stream"})
+	timeToEOF(t, fast)
+	timeToEOF(t, slow)
+
+	fastEOF := timeToEOF(t, fast)
+	slowEOF := timeToEOF(t, slow)
+
+	// The slow hook must be visible in time-to-EOF. If observational
+	// post-processing is ever moved off the response path, this test should
+	// FAIL and be replaced with its opposite — that is the point of pinning it.
+	if slowEOF <= fastEOF {
+		t.Fatalf("time to EOF did not grow with a slow observational hook "+
+			"(fast=%s slow=%s). If post-processing was made asynchronous, invert "+
+			"this test and update reqState.streamDone's contract.", fastEOF, slowEOF)
+	}
+	t.Logf("time to EOF: fast=%s slow=%s — the observational hook is synchronous "+
+		"with HTTP completion by design", fastEOF, slowEOF)
+}
+
+// A client disconnect mid-stream must not take down the server.
+//
+// ReverseProxy panics with http.ErrAbortHandler when copying to a gone client;
+// this handler re-panics it so net/http handles the abort quietly. Lifetime
+// ordering (EndRequest after streamDone) is pinned by
+// TestRequestCleanupWaitsForStreamingGoroutineOnExceptionalExit — this test
+// only covers the network path still serving after that unwind.
+func TestClientDisconnectDoesNotTakeDownServer(t *testing.T) {
+	requireWASM(t, fixturesDir+"/test-trapper-after-stream/plugin.wasm")
+
+	release := make(chan struct{})
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fl, _ := w.(http.Flusher)
+		fmt.Fprint(w, `data: {"choices":[{"index":0,"delta":{"content":"first"}}]}`+"\n\n")
+		if fl != nil {
+			fl.Flush()
+		}
+		<-release
+		fmt.Fprint(w, "data: [DONE]\n\n")
+		if fl != nil {
+			fl.Flush()
+		}
+	}))
+	defer upstream.Close()
+
+	cfg := Config{Port: "0", Providers: provider.Config{
+		Providers: map[string]provider.Provider{"oai": {URL: upstream.URL, Format: "openai"}},
+		Plugins: provider.PluginsConfig{
+			Dir: fixturesDir, Order: []string{"test-trapper-after-stream"}, AllowUnapproved: true,
+		},
+	}}
+	srv, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	go srv.Serve(ln)
+	defer srv.Shutdown(context.Background())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	req, _ := http.NewRequestWithContext(ctx, http.MethodPost,
+		"http://"+ln.Addr().String()+"/provider/oai/v1/chat/completions",
+		strings.NewReader(`{"model":"gpt-x","stream":true,"messages":[{"role":"user","content":"hi"}]}`))
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	buf := make([]byte, 16)
+	_, _ = resp.Body.Read(buf)
+	cancel()
+	resp.Body.Close()
+	close(release)
+
+	deadline := time.Now().Add(5 * time.Second)
+	var lastErr error
+	for time.Now().Before(deadline) {
+		probe, err := http.Post("http://"+ln.Addr().String()+"/provider/oai/v1/chat/completions",
+			"application/json", strings.NewReader(`{"model":"gpt-x","messages":[{"role":"user","content":"hi"}]}`))
+		if err == nil {
+			probe.Body.Close()
+			return
+		}
+		lastErr = err
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("server did not survive the disconnect unwind: %v", lastErr)
 }

@@ -3,7 +3,7 @@
   "id": "torana-test/test-responder-nogrant",
   "name": "test-responder-nogrant",
   "version": "0.1.0",
-  "abi_version": "v1",
+  "abi_version": "v2",
   "failure_mode": "pass",
   "description": "Negative fixture: sets _respond without the env.respond_request grant; the proxy must ignore it",
   "hooks": [

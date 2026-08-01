@@ -14,7 +14,7 @@ import (
 	"strings"
 
 	"github.com/torana-edge/torana-edge/internal/plugin"
-	"github.com/torana-edge/torana-plugin-sdk/pb"
+	pb "github.com/torana-edge/torana-plugin-sdk/pb/v2"
 )
 
 type agentAPIOperation struct {

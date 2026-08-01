@@ -6,7 +6,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/torana-edge/torana-plugin-sdk/pb"
+	pb "github.com/torana-edge/torana-plugin-sdk/pb/v2"
 
 	"github.com/torana-edge/torana-edge/internal/plugin"
 )

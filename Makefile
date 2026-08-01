@@ -1,4 +1,4 @@
-.PHONY: build install clean test release official-plugins testdata lint
+.PHONY: build install clean test test-race release official-plugins testdata lint
 
 BINARY := torana
 VERSION ?= $(shell git describe --tags --exact-match 2>/dev/null || git rev-parse --short HEAD 2>/dev/null || echo "dev")
@@ -10,7 +10,7 @@ LDFLAGS := -s -w -X main.version=$(VERSION)
 # the only tree that has them; this repo tests the host against the fixtures
 # below. `make official-plugins` builds them from a sibling checkout when you
 # want the plugin-behaviour suite to run locally.
-TESTDATA_DIRS := examples/plugins/test-stream-mutator examples/plugins/test-blocker examples/plugins/test-blocker-nogrant examples/plugins/test-observer examples/plugins/test-responder examples/plugins/test-responder-nogrant examples/plugins/test-original examples/plugins/test-router examples/plugins/test-ticker examples/plugins/test-http-server examples/plugins/test-metrics examples/plugins/test-mutator examples/plugins/test-hostcall examples/plugins/test-fragment-buffer examples/plugins/test-inert-a examples/plugins/test-inert-b examples/plugins/test-inert-c
+TESTDATA_DIRS := examples/plugins/test-stream-mutator examples/plugins/test-blocker examples/plugins/test-blocker-nogrant examples/plugins/test-observer examples/plugins/test-responder examples/plugins/test-responder-nogrant examples/plugins/test-original examples/plugins/test-router examples/plugins/test-ticker examples/plugins/test-http-server examples/plugins/test-metrics examples/plugins/test-mutator examples/plugins/test-hostcall examples/plugins/test-fragment-buffer examples/plugins/test-inert-a examples/plugins/test-inert-b examples/plugins/test-inert-c examples/plugins/test-trapper examples/plugins/test-block-then-trap examples/plugins/test-invalid-replacement examples/plugins/test-forge-response-fields examples/plugins/test-invented-content examples/plugins/test-records-invocation examples/plugins/test-trapper-response examples/plugins/test-trapper-stream examples/plugins/test-tool-rewriter examples/plugins/test-malformed-result examples/plugins/test-trapper-after-stream examples/plugins/test-slow-after-stream
 WASM_BUILD = GOOS=wasip1 GOARCH=wasm go build -trimpath -buildvcs=false -buildmode=c-shared
 
 build:
@@ -37,8 +37,15 @@ testdata:
 install:
 	go install -buildvcs=false -ldflags "$(LDFLAGS)" ./cmd/torana/
 
+# test: the everyday iteration gate — fixtures plus the ordinary full suite
+# (a few minutes). test-race is the slow pre-merge gate: the same suite under
+# -race takes ~15 minutes (the proxy package alone is ~13), so it is a
+# deliberate, separate step rather than the default command.
 test: testdata
-	go test ./... -race -timeout 600s
+	go test ./... -timeout 600s
+
+test-race: testdata
+	go test ./... -race -timeout 1800s
 
 lint:
 	golangci-lint run

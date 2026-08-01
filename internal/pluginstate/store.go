@@ -125,8 +125,11 @@ func (s *Store) Get(plugin, key string) (string, bool) {
 	return v, ok
 }
 
-// Set stores a value, replacing any previous one. An empty value deletes the
-// key, which is how a plugin releases state without a separate host call.
+// Set stores a value, replacing any previous one.
+//
+// An empty value STORES an empty value. It used to delete the key, which made
+// storing an empty string impossible and contradicted the meta and cache
+// stores. Deletion is Delete.
 func (s *Store) Set(plugin, key, value string) error {
 	if s == nil {
 		return fmt.Errorf("state store not configured")
@@ -139,20 +142,6 @@ func (s *Store) Set(plugin, key, value string) error {
 	}
 
 	s.mu.Lock()
-	if value == "" {
-		if old, ok := s.data[plugin][key]; ok {
-			s.totalBytes -= entrySize(key, old)
-			delete(s.data[plugin], key)
-			if len(s.data[plugin]) == 0 {
-				delete(s.data, plugin)
-			}
-			s.dirty = true
-			s.generation++
-		}
-		s.mu.Unlock()
-		return s.flush()
-	}
-
 	bucket, ok := s.data[plugin]
 	if !ok {
 		bucket = make(map[string]string)
@@ -175,6 +164,34 @@ func (s *Store) Set(plugin, key, value string) error {
 	s.totalBytes += delta
 	s.dirty = true
 	s.generation++
+	s.mu.Unlock()
+
+	return s.flush()
+}
+
+// Delete releases one key.
+//
+// Deleting a key that does not exist succeeds: the caller wants the key gone,
+// and reporting an error would make every cleanup path branch on a condition
+// it does not care about.
+func (s *Store) Delete(plugin, key string) error {
+	if s == nil {
+		return fmt.Errorf("state store not configured")
+	}
+	if plugin == "" || key == "" {
+		return fmt.Errorf("plugin and key are required")
+	}
+
+	s.mu.Lock()
+	if old, ok := s.data[plugin][key]; ok {
+		s.totalBytes -= entrySize(key, old)
+		delete(s.data[plugin], key)
+		if len(s.data[plugin]) == 0 {
+			delete(s.data, plugin)
+		}
+		s.dirty = true
+		s.generation++
+	}
 	s.mu.Unlock()
 
 	return s.flush()

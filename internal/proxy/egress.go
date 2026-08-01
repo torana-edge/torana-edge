@@ -18,7 +18,7 @@ import (
 	"github.com/torana-edge/torana-edge/internal/format"
 	"github.com/torana-edge/torana-edge/internal/metrics"
 	"github.com/torana-edge/torana-edge/internal/provider"
-	"github.com/torana-edge/torana-plugin-sdk/pb"
+	pb "github.com/torana-edge/torana-plugin-sdk/pb/v2"
 )
 
 // torana_send_request lets a plugin originate a provider request.
