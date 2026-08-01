@@ -1027,8 +1027,30 @@ func (pp *PluginPipeline) RunBeforeRequest(ctx context.Context, reqID uint64, ch
 			}
 			continue
 		}
+		var replacement *pbv2.ChatRequest
 		if res != nil {
-			if replacement := res.GetReplaceRequest(); replacement != nil {
+			replacement = res.GetReplaceRequest()
+			if replacement != nil && !holdsAllRequestGrants(lp.plugin) {
+				// Write-grant verification: the plugin may change only the
+				// sections its operator granted it. A fully-granted plugin
+				// skips this entirely — every section it could change is
+				// grantable to it, so fingerprinting would be pure cost.
+				if err := verifyRequestMutation(current, replacement, lp.plugin.HasGrant); err != nil {
+					log.Printf("[plugin] %s run_before_request: rejected invalid replacement: %v",
+						lp.manifest.Name, err)
+					if lp.failureMode == "block" {
+						return chat, fmt.Errorf("plugin %s returned an invalid request replacement: %w",
+							lp.manifest.Name, err)
+					}
+					// allow: skip this plugin's replacement; the previous current
+					// stays so the invalid output never chains downstream. A
+					// block recorded by this plugin still short-circuits in
+					// the check below — every exit from this iteration consults
+					// it, exactly like the trap and decode-error branches.
+					replacement = nil
+				}
+			}
+			if replacement != nil {
 				current = replacement
 				modified = true
 				// ObserveRequestMutation wants the request bytes, not the

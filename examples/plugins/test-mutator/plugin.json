@@ -19,6 +19,42 @@
     {
       "name": "env.log",
       "description": "Diagnostic logging"
+    },
+    {
+      "name": "ir.messages.write.user",
+      "description": "Rewrite user message content"
+    },
+    {
+      "name": "ir.messages.write.assistant",
+      "description": "Rewrite assistant messages"
+    },
+    {
+      "name": "ir.messages.write.system",
+      "description": "Rewrite system messages"
+    },
+    {
+      "name": "ir.messages.write.tool",
+      "description": "Rewrite tool messages"
+    },
+    {
+      "name": "ir.messages.write.developer",
+      "description": "Rewrite developer messages"
+    },
+    {
+      "name": "ir.messages.write.other",
+      "description": "Rewrite unmodelled-role messages"
+    },
+    {
+      "name": "ir.tools.write",
+      "description": "Rewrite tool definitions"
+    },
+    {
+      "name": "ir.model.write",
+      "description": "Rewrite the model"
+    },
+    {
+      "name": "ir.params.write",
+      "description": "Rewrite sampling parameters"
     }
   ]
 }

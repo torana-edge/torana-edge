@@ -30,6 +30,10 @@
     {
       "name": "env.log",
       "description": "Diagnostic logging"
+    },
+    {
+      "name": "ir.model.write",
+      "description": "Rewrite the model to echo the tick"
     }
   ]
 }
