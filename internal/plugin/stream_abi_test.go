@@ -10,6 +10,8 @@ import (
 
 	"github.com/torana-edge/torana-edge/internal/cache"
 	"github.com/torana-edge/torana-edge/internal/engine"
+	"github.com/torana-edge/torana-edge/internal/format/gemini"
+	"github.com/torana-edge/torana-edge/internal/format/openai"
 	"github.com/torana-edge/torana-edge/internal/wasm"
 )
 
@@ -1012,4 +1014,317 @@ func TestIntentNativeIEnrichesDescriptionOnly(t *testing.T) {
 	if v, ok := store.Get("intent:call_native"); !ok || v != "find the retry budget" {
 		t.Fatalf("native i not captured into cache: %q ok=%v", v, ok)
 	}
+}
+
+// TestStreamBlockTopologySurvivesPlugins: a text block passed through a plugin
+// (which only touches TextDelta) must come back with its block topology
+// intact — BlockStart stays BlockStart and BlockStop stays BlockStop. The v2
+// wire's stop carries only an index; the host's per-request BlockKindTracker
+// is what keeps a plugin-passed text block's stop from being misread as a tool
+// call's end (which would leave the serializer with an open part it never
+// flushes — the exact loss this preserves).
+func TestStreamBlockTopologySurvivesPlugins(t *testing.T) {
+	requireWASM(t, fixturesDir+"/test-stream-mutator/plugin.wasm")
+	pp := newTestPipeline(t, fixturesDir, []string{"test-stream-mutator"})
+
+	text := "hello"
+	out := run(t, pp, engine.StreamEvent{BlockStart: &engine.BlockStart{Index: 0, Kind: engine.BlockKindText}})
+	if len(out) != 1 || out[0].BlockStart == nil || out[0].BlockStart.Kind != engine.BlockKindText || out[0].BlockStart.Index != 0 {
+		t.Fatalf("BlockStart did not survive plugins: %+v", out)
+	}
+
+	out = run(t, pp, engine.StreamEvent{TextDelta: &text})
+	if len(out) != 1 || out[0].TextDelta == nil || *out[0].TextDelta != "hello" {
+		t.Fatalf("TextDelta did not survive plugins: %+v", out)
+	}
+
+	out = run(t, pp, engine.StreamEvent{BlockStop: &engine.BlockStop{Index: 0}})
+	if len(out) != 1 || out[0].BlockStop == nil || out[0].BlockStop.Index != 0 {
+		t.Fatalf("BlockStop became %+v — the open-block kind must survive plugins", out)
+	}
+	if out[0].ToolCallEnd != nil {
+		t.Fatalf("text block stop misread as ToolCallEnd: %+v", out[0].ToolCallEnd)
+	}
+
+	// A tool block still resolves its stop to ToolCallEnd. Indexes are unique
+	// per streamed message, so the tool block takes the NEXT index (1) rather
+	// than reusing the text block's 0.
+	out = run(t, pp, toolStart(1, "call_1", "read_file"))
+	if len(out) != 1 || out[0].ToolCallStart == nil {
+		t.Fatalf("ToolCallStart did not survive plugins: %+v", out)
+	}
+	out = run(t, pp, toolEnd(1))
+	if len(out) != 1 || out[0].ToolCallEnd == nil || out[0].ToolCallEnd.Index != 1 {
+		t.Fatalf("tool stop did not survive plugins as ToolCallEnd: %+v", out)
+	}
+	if out[0].BlockStop != nil {
+		t.Fatalf("tool stop misread as BlockStop: %+v", out[0].BlockStop)
+	}
+}
+
+// flatEvent is the reduced shape asserted after a pipeline pass: which kind
+// of event, at which block index, with which payload fields.
+type flatEvent struct {
+	kind  string // start | delta | end | finish
+	index int
+	id    string
+	name  string
+	delta string
+}
+
+func flatStream(events []engine.StreamEvent) []flatEvent {
+	out := make([]flatEvent, 0, len(events))
+	for _, ev := range events {
+		switch {
+		case ev.ToolCallStart != nil:
+			out = append(out, flatEvent{kind: "start", index: ev.ToolCallStart.Index, id: ev.ToolCallStart.ID, name: ev.ToolCallStart.Name})
+		case ev.ToolCallDelta != nil:
+			out = append(out, flatEvent{kind: "delta", index: ev.ToolCallDelta.Index, delta: ev.ToolCallDelta.ArgumentsDelta})
+		case ev.ToolCallEnd != nil:
+			out = append(out, flatEvent{kind: "end", index: ev.ToolCallEnd.Index})
+		case ev.FinishReason != "":
+			out = append(out, flatEvent{kind: "finish", delta: ev.FinishReason})
+		case ev.Error != nil:
+			out = append(out, flatEvent{kind: "error", delta: ev.Error.Message})
+		}
+	}
+	return out
+}
+
+// pipeStream pushes every parsed engine event of one response stream through
+// the plugin pipeline under one request ID (one tracker = one streamed
+// message) and returns what came back.
+func pipeStream(t *testing.T, pp *PluginPipeline, reqID uint64, events []engine.StreamEvent) []engine.StreamEvent {
+	t.Helper()
+	var got []engine.StreamEvent
+	for _, ev := range events {
+		out, err := pp.RunOnStreamChunk(context.Background(), reqID, &ev)
+		if err != nil {
+			t.Fatalf("RunOnStreamChunk: %v", err)
+		}
+		got = append(got, out...)
+	}
+	return got
+}
+
+// TestOpenAIParallelChatSurvivesPlugins: a real OpenAI Chat SSE stream with
+// two parallel tool calls — interleaved starts and argument deltas, then both
+// stops — parsed into engine events and pushed through the real plugin
+// pipeline must come back with every start/delta/stop intact at its own
+// index, and must NOT error. The round-4 tracker allows multiple tool blocks
+// open at once (the Chat adapter emits ToolCallEnd for both calls only at
+// finish_reason="tool_calls", so both are open simultaneously), which the
+// round-3 single-open rule would have rejected at the plugin boundary.
+func TestOpenAIParallelChatSurvivesPlugins(t *testing.T) {
+	requireWASM(t, fixturesDir+"/test-inert-a/plugin.wasm")
+	pp := newTestPipeline(t, fixturesDir, []string{"test-inert-a"})
+
+	sse := strings.Join([]string{
+		`data: {"choices":[{"index":0,"delta":{"role":"assistant","content":null,"tool_calls":[{"index":0,"id":"call_weather","type":"function","function":{"name":"get_weather","arguments":""}}]}}]}`,
+		`data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":1,"id":"call_time","type":"function","function":{"name":"get_time","arguments":""}}]}}]}`,
+		`data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"city\":"}}]}}]}`,
+		`data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":1,"function":{"arguments":"{\"tz\":"}}]}}]}`,
+		`data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"Pune\"}"}}]}}]}`,
+		`data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":1,"function":{"arguments":"\"UTC\"}"}}]}}]}`,
+		`data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`,
+		`data: [DONE]`,
+	}, "\n")
+
+	events := drainChunks((&openai.StreamAdapter{}).ParseStream(strings.NewReader(sse)))
+	if len(events) != 9 {
+		t.Fatalf("parsed %d events, want 9: %+v", len(events), flatStream(events))
+	}
+
+	got := flatStream(pipeStream(t, pp, 300, events))
+	want := []flatEvent{
+		{kind: "start", index: 0, id: "call_weather", name: "get_weather"},
+		{kind: "start", index: 1, id: "call_time", name: "get_time"},
+		{kind: "delta", index: 0, delta: `{"city":`},
+		{kind: "delta", index: 1, delta: `{"tz":`},
+		{kind: "delta", index: 0, delta: `"Pune"}`},
+		{kind: "delta", index: 1, delta: `"UTC"}`},
+		{kind: "end", index: 0},
+		{kind: "end", index: 1},
+		{kind: "finish", delta: "tool_calls"},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("pipeline returned %d events, want %d: %+v", len(got), len(want), got)
+	}
+	for i, w := range want {
+		if got[i] != w {
+			t.Errorf("event %d = %+v, want %+v", i, got[i], w)
+		}
+	}
+}
+
+// TestOpenAIResponsesParallelSurvivesPlugins: the Responses API's interleaved
+// parallel calls — two function_call items added back to back, argument
+// deltas alternating by item, and each call completed at its own time — must
+// survive parse → pb → plugin → engine without error. The second call's stop
+// arrives while the first is still open (non-ascending stop order), which is
+// exactly the concurrency the round-4 tracker permits.
+func TestOpenAIResponsesParallelSurvivesPlugins(t *testing.T) {
+	requireWASM(t, fixturesDir+"/test-inert-a/plugin.wasm")
+	pp := newTestPipeline(t, fixturesDir, []string{"test-inert-a"})
+
+	sse := strings.Join([]string{
+		`data: {"type":"response.output_item.added","item":{"id":"item_weather","type":"function_call","name":"weather","call_id":"call_weather"}}`,
+		`data: {"type":"response.output_item.added","item":{"id":"item_time","type":"function_call","name":"time","call_id":"call_time"}}`,
+		`data: {"type":"response.function_call_arguments.delta","item_id":"item_time","delta":"{\"tz\":"}`,
+		`data: {"type":"response.function_call_arguments.delta","item_id":"item_weather","delta":"{\"city\":"}`,
+		`data: {"type":"response.function_call_arguments.delta","item_id":"item_time","delta":"\"UTC\"}"}`,
+		`data: {"type":"response.function_call_arguments.done","item_id":"item_time"}`,
+		`data: {"type":"response.function_call_arguments.delta","item_id":"item_weather","delta":"\"Pune\"}"}`,
+		`data: {"type":"response.function_call_arguments.done","item_id":"item_weather"}`,
+	}, "\n")
+
+	events := drainChunks((&openai.StreamAdapter{}).ParseStream(strings.NewReader(sse)))
+	if len(events) != 8 {
+		t.Fatalf("parsed %d events, want 8: %+v", len(events), flatStream(events))
+	}
+
+	got := flatStream(pipeStream(t, pp, 301, events))
+	want := []flatEvent{
+		{kind: "start", index: 0, id: "call_weather", name: "weather"},
+		{kind: "start", index: 1, id: "call_time", name: "time"},
+		{kind: "delta", index: 1, delta: `{"tz":`},
+		{kind: "delta", index: 0, delta: `{"city":`},
+		{kind: "delta", index: 1, delta: `"UTC"}`},
+		{kind: "end", index: 1},
+		{kind: "delta", index: 0, delta: `"Pune"}`},
+		{kind: "end", index: 0},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("pipeline returned %d events, want %d: %+v", len(got), len(want), got)
+	}
+	for i, w := range want {
+		if got[i] != w {
+			t.Errorf("event %d = %+v, want %+v", i, got[i], w)
+		}
+	}
+}
+
+// TestStreamLosslessThroughPipeline is the end-to-end claim of the lossless IR
+// work: a Code Assist wire stream parsed into engine events, run through a
+// plugin, and re-serialized must reproduce the SAME part structure — the
+// current-block signature stays beside its text in ONE part, and a trailing
+// standalone signature stays its own empty-text part. Before block events
+// existed, the pipeline's stateless stop conversion turned a text block's stop
+// into ToolCallEnd, which the serializer could not flush.
+func TestStreamLosslessThroughPipeline(t *testing.T) {
+	requireWASM(t, fixturesDir+"/test-stream-mutator/plugin.wasm")
+	pp := newTestPipeline(t, fixturesDir, []string{"test-stream-mutator"})
+
+	// Each subtest is ONE response stream, and the host tracks block topology
+	// per REQUEST — one response stream is one streamed message, and indexes
+	// stay unique within it. Distinct request IDs keep the two subtests'
+	// streams from sharing a tracker.
+	for i, tc := range []struct {
+		name string
+		wire string
+		want []string // expected serialized raw part JSON, in order
+	}{
+		{
+			name: "current text signature stays one part",
+			wire: `data: {"response":{"candidates":[{"content":{"role":"model","parts":[` +
+				`{"text":"A","thoughtSignature":"S"}` +
+				`]}}]}}`,
+			want: []string{`{"text":"A","thoughtSignature":"S"}`},
+		},
+		{
+			name: "trailing standalone stays its own part",
+			wire: `data: {"response":{"candidates":[{"content":{"role":"model","parts":[` +
+				`{"text":"A"},{"text":"","thoughtSignature":"S"}` +
+				`]}}]}}`,
+			want: []string{`{"text":"A"}`, `{"text":"","thoughtSignature":"S"}`},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			reqID := uint64(200 + i)
+			sa := &gemini.StreamAdapter{Wrapped: true}
+			events := drainChunks(sa.ParseStream(strings.NewReader(tc.wire)))
+
+			var piped []engine.StreamEvent
+			for _, ev := range events {
+				out, err := pp.RunOnStreamChunk(context.Background(), reqID, &ev)
+				if err != nil {
+					t.Fatalf("RunOnStreamChunk: %v", err)
+				}
+				piped = append(piped, out...)
+			}
+
+			var buf strings.Builder
+			if err := sa.SerializeStream(context.Background(), &buf, replayEngine(piped)); err != nil {
+				t.Fatalf("SerializeStream: %v", err)
+			}
+
+			parts := rawPartsOf(t, buf.String())
+			if len(parts) != len(tc.want) {
+				t.Fatalf("serialized %d parts, want %d: %v", len(parts), len(tc.want), parts)
+			}
+			for i, want := range tc.want {
+				got := string(parts[i])
+				if got != want {
+					t.Errorf("part %d = %s, want %s", i, got, want)
+				}
+			}
+		})
+	}
+}
+
+// drainChunks collects a ParseStream channel into a slice.
+func drainChunks(ch <-chan engine.StreamEvent) []engine.StreamEvent {
+	var out []engine.StreamEvent
+	for ev := range ch {
+		out = append(out, ev)
+	}
+	return out
+}
+
+// replayEngine feeds events back one at a time.
+func replayEngine(events []engine.StreamEvent) <-chan engine.StreamEvent {
+	ch := make(chan engine.StreamEvent, len(events))
+	for _, ev := range events {
+		ch <- ev
+	}
+	close(ch)
+	return ch
+}
+
+// rawPartsOf re-parses serialized SSE and returns the parts of the first
+// candidate's content as compact raw JSON (key presence included).
+func rawPartsOf(t *testing.T, output string) []json.RawMessage {
+	t.Helper()
+	var parts []json.RawMessage
+	for _, block := range strings.Split(output, "\n\n") {
+		block = strings.TrimSpace(block)
+		if block == "" {
+			continue
+		}
+		data, ok := strings.CutPrefix(block, "data:")
+		if !ok {
+			t.Fatalf("frame missing data: prefix: %q", block)
+		}
+		var frame map[string]any
+		if err := json.Unmarshal([]byte(strings.TrimSpace(data)), &frame); err != nil {
+			t.Fatalf("frame not valid JSON: %v (%q)", err, block)
+		}
+		if resp, ok := frame["response"].(map[string]any); ok {
+			frame = resp
+		}
+		cands, _ := frame["candidates"].([]any)
+		if len(cands) == 0 {
+			continue
+		}
+		content, _ := cands[0].(map[string]any)["content"].(map[string]any)
+		if content == nil {
+			continue
+		}
+		ps, _ := content["parts"].([]any)
+		for _, p := range ps {
+			raw, _ := json.Marshal(p)
+			parts = append(parts, raw)
+		}
+	}
+	return parts
 }

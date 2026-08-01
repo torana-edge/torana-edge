@@ -14,7 +14,10 @@ func TestToolCallStartSignatureRoundTrip(t *testing.T) {
 	ev := &engine.StreamEvent{ToolCallStart: &engine.ToolCallStart{
 		Index: 0, ID: "call_1", Name: "list_dir", Signature: "THOUGHT_SIG_XYZ",
 	}}
-	got := FromPBStreamEvent(ToPBStreamEvent(ev))
+	got, err := (&BlockKindTracker{}).FromPBStreamEvent(ToPBStreamEvent(ev))
+	if err != nil {
+		t.Fatalf("conversion: %v", err)
+	}
 	if got.ToolCallStart == nil {
 		t.Fatal("tool call start lost")
 	}
@@ -26,7 +29,10 @@ func TestToolCallStartSignatureRoundTrip(t *testing.T) {
 func TestSignatureDeltaRoundTrip(t *testing.T) {
 	sig := "STANDALONE_SIG"
 	ev := &engine.StreamEvent{SignatureDelta: &sig}
-	got := FromPBStreamEvent(ToPBStreamEvent(ev))
+	got, err := (&BlockKindTracker{}).FromPBStreamEvent(ToPBStreamEvent(ev))
+	if err != nil {
+		t.Fatalf("conversion: %v", err)
+	}
 	if got.SignatureDelta == nil || *got.SignatureDelta != "STANDALONE_SIG" {
 		t.Errorf("signature delta lost through pb round-trip: %v", got.SignatureDelta)
 	}

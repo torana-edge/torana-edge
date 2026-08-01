@@ -70,11 +70,11 @@ func (s *StreamAdapter) ParseStream(body io.Reader) <-chan engine.StreamEvent {
 		defer close(ch)
 		reader := bufio.NewReader(body)
 		var lastUsage *geminiUsageMetadata
-		// Per-stream tool-call block counter. The ABI invariant
-		// (SignatureScopeToolCallBlockByIndex) requires block indexes unique
-		// within one streamed message: parallel Gemini parts must each receive
-		// a distinct sequential index, shared by that block's Start/Delta/End.
-		// Shared across chunks because parts arrive split over SSE frames.
+		// Per-stream content-block counter. The ABI invariant requires block
+		// indexes unique within one streamed message: every part that opens a
+		// block — tool, text, or thinking — must receive a distinct sequential
+		// index, shared by that block's Start/Delta/End. Shared across chunks
+		// because parts arrive split over SSE frames.
 		var blockIndex int
 		for {
 			line, err := reader.ReadBytes('\n')
@@ -182,23 +182,54 @@ func emitPart(ch chan<- engine.StreamEvent, part geminiPart, blockIndex *int) bo
 		ch <- engine.StreamEvent{ToolCallDelta: &engine.ToolCallDelta{Index: idx, ArgumentsDelta: delta}}
 		ch <- engine.StreamEvent{ToolCallEnd: &engine.ToolCallEnd{Index: idx}}
 	case part.Thought:
-		if partText(part) != "" {
-			t := partText(part)
+		// One thought part is one thinking block — ARM PRESENCE decides:
+		// thought:true opens a thinking block even when the text member is
+		// empty or absent (v2 permits zero-delta blocks, and an empty block
+		// still consumes an index). The signature rides INSIDE the open
+		// block (the provider's same-part signature binds the current
+		// block).
+		idx := *blockIndex
+		*blockIndex = idx + 1
+		ch <- engine.StreamEvent{BlockStart: &engine.BlockStart{Index: idx, Kind: engine.BlockKindThinking}}
+		if t := partText(part); t != "" {
 			ch <- engine.StreamEvent{ThinkingDelta: &t}
 		}
 		if part.ThoughtSignature != "" {
 			sig := part.ThoughtSignature
 			ch <- engine.StreamEvent{SignatureDelta: &sig}
 		}
-	case partText(part) != "":
-		t := partText(part)
-		ch <- engine.StreamEvent{TextDelta: &t}
+		ch <- engine.StreamEvent{BlockStop: &engine.BlockStop{Index: idx}}
+	case part.Text != nil && *part.Text == "" && part.ThoughtSignature != "":
+		// Trailing standalone signature — kept NARROW to the settled Code
+		// Assist shape: the NON-thinking explicit-empty-text signature part
+		// (final {"text":"","thoughtSignature":…}). NO block events, so
+		// the signature stays unbound to any open block. A thought:true
+		// part with a signature is handled above as a thinking block with
+		// the signature INSIDE it.
+		sig := part.ThoughtSignature
+		ch <- engine.StreamEvent{SignatureDelta: &sig}
+	case part.Text != nil:
+		// One text part is one text block — ARM PRESENCE decides: an
+		// explicit text member opens a text block even when empty (a
+		// zero-delta block consumes an index; dropping it would shift every
+		// later block's index). Every block (tool, text, thinking) consumes
+		// a sequential index from the shared per-stream counter: the v2
+		// invariant requires unique indexes within one streamed message.
+		idx := *blockIndex
+		*blockIndex = idx + 1
+		ch <- engine.StreamEvent{BlockStart: &engine.BlockStart{Index: idx, Kind: engine.BlockKindText}}
+		if t := *part.Text; t != "" {
+			ch <- engine.StreamEvent{TextDelta: &t}
+		}
 		if part.ThoughtSignature != "" {
 			sig := part.ThoughtSignature
 			ch <- engine.StreamEvent{SignatureDelta: &sig}
 		}
+		ch <- engine.StreamEvent{BlockStop: &engine.BlockStop{Index: idx}}
 	case part.ThoughtSignature != "":
-		// Standalone signature part (Code Assist emits one on the final chunk).
+		// Bare signature part with no text member at all (absent, not
+		// explicit-empty): not the contract trailing shape, but tolerated on
+		// the stream path — standalone SignatureDelta, unbound.
 		sig := part.ThoughtSignature
 		ch <- engine.StreamEvent{SignatureDelta: &sig}
 	}
@@ -221,6 +252,12 @@ func mapGeminiFinishReason(r string) string {
 
 // --- SerializeStream ---
 
+// serializeState buffers ONE tool call's wire part while its argument deltas
+// arrive. State is keyed by the block index: the ABI permits concurrent tool
+// blocks (parallel calls), and each index owns its own id/name/signature/args
+// accumulator — a second start at a busy index or a delta/stop for an index
+// that never started is malformed IR and errors rather than corrupting a
+// sibling call's scope.
 type serializeState struct {
 	ID        string
 	Name      string
@@ -228,10 +265,23 @@ type serializeState struct {
 	ArgsJSON  strings.Builder
 }
 
+// serializePart is one buffered, not-yet-flushed text or thinking part: the
+// serializer accumulates its deltas and mid-block signature into a single
+// wire part, flushed by the matching BlockStop. One part is open at a time,
+// mirroring the ABI's single-open-block invariant.
+type serializePart struct {
+	isThinking bool
+	text       strings.Builder
+	sig        string // mid-block signature; empty means the part carries none
+}
+
 // SerializeStream writes StreamEvents as Gemini SSE frames to writer, wrapping
 // each in {"response":…} for the Code Assist flavor (s.Wrapped).
 func (s *StreamAdapter) SerializeStream(ctx context.Context, w io.Writer, events <-chan engine.StreamEvent) error {
-	var toolState *serializeState
+	// toolStates holds the buffered tool call for each block index opened by
+	// ToolCallStart; concurrent tool blocks each own their index's state.
+	toolStates := make(map[int]*serializeState)
+	var openPart *serializePart
 	var pendingUsage *engine.StreamUsage
 
 	for event := range events {
@@ -255,38 +305,123 @@ func (s *StreamAdapter) SerializeStream(ctx context.Context, w io.Writer, events
 		case event.Usage != nil:
 			pendingUsage = event.Usage
 
+		case event.BlockStart != nil:
+			// Provider blocks cannot be rendered on the Gemini wire: the part
+			// model has text/thought/functionCall arms but no provider slot,
+			// and casting a provider block to a text part would silently
+			// change the topology the host verified. Error instead — never
+			// cast.
+			if event.BlockStart.Kind == engine.BlockKindProvider {
+				return fmt.Errorf("gemini: provider block kind %q is not supported by this serializer", event.BlockStart.ProviderKind)
+			}
+			// Open a text or thinking part. Well-formed streams have no part
+			// open here (the ABI allows one block at a time); a leftover part
+			// would mean the previous block never stopped, which the
+			// stream-verifier rework polices — flush defensively rather than
+			// lose the buffered content.
+			if openPart != nil {
+				if err := flushPart(w, openPart, s.Wrapped); err != nil {
+					return err
+				}
+			}
+			openPart = &serializePart{isThinking: event.BlockStart.Kind == engine.BlockKindThinking}
+
+		case event.BlockStop != nil:
+			if openPart != nil {
+				if err := flushPart(w, openPart, s.Wrapped); err != nil {
+					return err
+				}
+				openPart = nil
+			}
+			// No open part: a stray stop (e.g. a tool block's stop arriving as
+			// BlockStop from a hand-built stream) has nothing to flush.
+
 		case event.TextDelta != nil:
-			if err := writeFrame(w, chunkPart(geminiPart{Text: new(*event.TextDelta)}), s.Wrapped); err != nil {
-				return err
+			if openPart != nil {
+				// Delta inside the open part: accumulate — the provider part
+				// model splits one part's text over many deltas.
+				openPart.text.WriteString(*event.TextDelta)
+			} else {
+				// Bare delta with no open block (legacy paths/tests that emit
+				// deltas without block events): emit a per-delta part, as
+				// before blocks existed. Compat, kept for those callers.
+				if err := writeFrame(w, chunkPart(geminiPart{Text: new(*event.TextDelta)}), s.Wrapped); err != nil {
+					return err
+				}
 			}
 
 		case event.ThinkingDelta != nil:
-			if err := writeFrame(w, chunkPart(geminiPart{Thought: true, Text: new(*event.ThinkingDelta)}), s.Wrapped); err != nil {
-				return err
+			if openPart != nil {
+				openPart.text.WriteString(*event.ThinkingDelta)
+			} else {
+				if err := writeFrame(w, chunkPart(geminiPart{Thought: true, Text: new(*event.ThinkingDelta)}), s.Wrapped); err != nil {
+					return err
+				}
 			}
 
 		case event.SignatureDelta != nil:
-			// The standalone signature part keeps the provider's EXPLICIT empty
-			// text member ({"text":"","thoughtSignature":…}): a bare
-			// {"thoughtSignature":…} would not round-trip the text arm.
-			if err := writeFrame(w, chunkPart(geminiPart{Text: new(""), ThoughtSignature: *event.SignatureDelta}), s.Wrapped); err != nil {
-				return err
+			if openPart != nil {
+				// Mid-block signature: attach to the open part — the
+				// provider's same-part thoughtSignature binds the current
+				// block. An empty signature is a CLEAR marker: it overwrites
+				// any earlier signature and the flushed part carries none
+				// (flushPart only emits non-empty signatures).
+				openPart.sig = *event.SignatureDelta
+			} else if *event.SignatureDelta != "" {
+				// The standalone signature part keeps the provider's EXPLICIT
+				// empty text member ({"text":"","thoughtSignature":…}): a bare
+				// {"thoughtSignature":…} would not round-trip the text arm.
+				if err := writeFrame(w, chunkPart(geminiPart{Text: new(""), ThoughtSignature: *event.SignatureDelta}), s.Wrapped); err != nil {
+					return err
+				}
 			}
+			// An empty signature with no open part is a clear marker with
+			// nothing to clear: emit nothing rather than a signature-only
+			// part for an empty token.
 
 		case event.ToolCallStart != nil:
-			toolState = &serializeState{ID: event.ToolCallStart.ID, Name: event.ToolCallStart.Name, Signature: event.ToolCallStart.Signature}
+			if _, dup := toolStates[event.ToolCallStart.Index]; dup {
+				return fmt.Errorf("gemini: duplicate tool call start at index %d", event.ToolCallStart.Index)
+			}
+			toolStates[event.ToolCallStart.Index] = &serializeState{
+				ID:        event.ToolCallStart.ID,
+				Name:      event.ToolCallStart.Name,
+				Signature: event.ToolCallStart.Signature,
+			}
 
-		case event.ToolCallDelta != nil && toolState != nil:
-			toolState.ArgsJSON.WriteString(event.ToolCallDelta.ArgumentsDelta)
+		case event.ToolCallDelta != nil:
+			st, ok := toolStates[event.ToolCallDelta.Index]
+			if !ok {
+				return fmt.Errorf("gemini: tool call delta for unknown index %d", event.ToolCallDelta.Index)
+			}
+			st.ArgsJSON.WriteString(event.ToolCallDelta.ArgumentsDelta)
 
-		case event.ToolCallEnd != nil && toolState != nil:
-			if err := emitFunctionCall(w, toolState, s.Wrapped); err != nil {
+		case event.ToolCallEnd != nil:
+			st, ok := toolStates[event.ToolCallEnd.Index]
+			if !ok {
+				return fmt.Errorf("gemini: tool call end for unknown index %d", event.ToolCallEnd.Index)
+			}
+			if err := emitFunctionCall(w, st, s.Wrapped); err != nil {
 				return err
 			}
-			toolState = nil
+			delete(toolStates, event.ToolCallEnd.Index)
 		}
 	}
 	return nil
+}
+
+// flushPart emits the buffered open part as ONE wire part, carrying the
+// provider part's explicit text member (even when empty) and its mid-block
+// signature when one is set.
+func flushPart(w io.Writer, p *serializePart, wrapped bool) error {
+	part := geminiPart{
+		Text:    new(p.text.String()),
+		Thought: p.isThinking,
+	}
+	if p.sig != "" {
+		part.ThoughtSignature = p.sig
+	}
+	return writeFrame(w, chunkPart(part), wrapped)
 }
 
 func emitFunctionCall(w io.Writer, st *serializeState, wrapped bool) error {

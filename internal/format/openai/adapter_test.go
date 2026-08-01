@@ -448,3 +448,244 @@ func TestRoundTrip_ResponsesAPI(t *testing.T) {
 		t.Errorf("serialized output mismatch:\n%s", serialized)
 	}
 }
+
+// TestSerializeProviderBlockErrorChat: provider blocks have no representation
+// on the chat.completion.chunk wire, so a provider BlockStart must error
+// explicitly — the pre-fix behavior silently dropped the events. Canonical
+// text/thinking blocks are NOT errors: they lower to the delta arms (see
+// TestSerializeCanonicalBlocksChat).
+func TestSerializeProviderBlockErrorChat(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		ev   engine.StreamEvent
+		want string
+	}{
+		{
+			name: "provider block start",
+			ev: engine.StreamEvent{BlockStart: &engine.BlockStart{
+				Index: 0, Kind: engine.BlockKindProvider, ProviderKind: "redacted",
+			}},
+			want: `openai: provider block kind "redacted" is not supported by this serializer`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			evCh := make(chan engine.StreamEvent, 1)
+			evCh <- tc.ev
+			close(evCh)
+			var buf bytes.Buffer
+			err := (&StreamAdapter{}).SerializeStream(context.Background(), &buf, evCh)
+			if err == nil {
+				t.Fatal("provider block event did not error")
+			}
+			// The chat serializer wraps its per-event errors with
+			// "openai serialize: "; the message itself must carry the
+			// explicit support-or-error decision.
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("error = %q, want it to contain %q", err.Error(), tc.want)
+			}
+		})
+	}
+}
+
+// TestSerializeCanonicalBlocksChat: text/thinking are canonical Torana
+// content, so a plugin-emitted BlockStart(text)+TextDelta+BlockStop (and the
+// thinking analogue) must SERIALIZE on the chat protocol, not abort the turn.
+// The start/stop boundaries have no chat frame, so they lower to no wire
+// content and the deltas ride the content/reasoning_content arms; an empty
+// block naturally produces no wire content.
+func TestSerializeCanonicalBlocksChat(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		events   []engine.StreamEvent
+		wantWire []string // substrings that must appear in the SSE output
+	}{
+		{
+			name: "text block",
+			events: []engine.StreamEvent{
+				{BlockStart: &engine.BlockStart{Index: 0, Kind: engine.BlockKindText}},
+				{TextDelta: strPtr("hello")},
+				{BlockStop: &engine.BlockStop{Index: 0}},
+				{FinishReason: "stop"},
+			},
+			wantWire: []string{`"content":"hello"`},
+		},
+		{
+			name: "thinking block",
+			events: []engine.StreamEvent{
+				{BlockStart: &engine.BlockStart{Index: 0, Kind: engine.BlockKindThinking}},
+				{ThinkingDelta: strPtr("step by step")},
+				{BlockStop: &engine.BlockStop{Index: 0}},
+				{FinishReason: "stop"},
+			},
+			wantWire: []string{`"reasoning_content":"step by step"`},
+		},
+		{
+			name: "empty text block lowers to no wire content",
+			events: []engine.StreamEvent{
+				{BlockStart: &engine.BlockStart{Index: 0, Kind: engine.BlockKindText}},
+				{BlockStop: &engine.BlockStop{Index: 0}},
+				{FinishReason: "stop"},
+			},
+			wantWire: []string{`"finish_reason":"stop"`},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			evCh := make(chan engine.StreamEvent, len(tc.events))
+			for _, ev := range tc.events {
+				evCh <- ev
+			}
+			close(evCh)
+			var buf bytes.Buffer
+			if err := (&StreamAdapter{}).SerializeStream(context.Background(), &buf, evCh); err != nil {
+				t.Fatalf("canonical block stream must serialize, got error: %v", err)
+			}
+			for _, want := range tc.wantWire {
+				if !strings.Contains(buf.String(), want) {
+					t.Errorf("serialized output missing %q:\n%s", want, buf.String())
+				}
+			}
+		})
+	}
+}
+
+// TestSerializeMalformedBlocksErrorChat: sequence discipline is enforced
+// BEFORE lowering — a malformed boundary (second start while open, index
+// reuse, stop with no open block) errors, never silently accepted.
+func TestSerializeMalformedBlocksErrorChat(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		events []engine.StreamEvent
+	}{
+		{
+			name: "second start while open",
+			events: []engine.StreamEvent{
+				{BlockStart: &engine.BlockStart{Index: 0, Kind: engine.BlockKindText}},
+				{BlockStart: &engine.BlockStart{Index: 1, Kind: engine.BlockKindThinking}},
+			},
+		},
+		{
+			name: "index reuse after close",
+			events: []engine.StreamEvent{
+				{BlockStart: &engine.BlockStart{Index: 0, Kind: engine.BlockKindText}},
+				{BlockStop: &engine.BlockStop{Index: 0}},
+				{BlockStart: &engine.BlockStart{Index: 0, Kind: engine.BlockKindThinking}},
+			},
+		},
+		{
+			name: "stop with no open block",
+			events: []engine.StreamEvent{
+				{BlockStop: &engine.BlockStop{Index: 0}},
+			},
+		},
+		{
+			name: "stop mismatching the open block",
+			events: []engine.StreamEvent{
+				{BlockStart: &engine.BlockStart{Index: 5, Kind: engine.BlockKindText}},
+				{BlockStop: &engine.BlockStop{Index: 3}},
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			evCh := make(chan engine.StreamEvent, len(tc.events))
+			for _, ev := range tc.events {
+				evCh <- ev
+			}
+			close(evCh)
+			var buf bytes.Buffer
+			err := (&StreamAdapter{}).SerializeStream(context.Background(), &buf, evCh)
+			if err == nil {
+				t.Fatal("malformed block topology did not error")
+			}
+			if !strings.Contains(err.Error(), "openai:") {
+				t.Errorf("error = %q, want an openai: sequence error", err.Error())
+			}
+		})
+	}
+}
+
+// TestSerializeCanonicalBlocksResponses: text/thinking are canonical Torana
+// content, so BlockStart+delta+BlockStop must serialize on the Responses
+// protocol too — boundaries lower to no wire content and the deltas ride the
+// output_text.delta arm.
+func TestSerializeCanonicalBlocksResponses(t *testing.T) {
+	ctx := context.WithValue(context.Background(), engine.ChatRequestKey, &engine.ChatRequest{
+		ProviderExtensions: map[string]any{"_openai_variant": "responses"},
+	})
+
+	for _, tc := range []struct {
+		name     string
+		events   []engine.StreamEvent
+		wantWire []string
+	}{
+		{
+			name: "text block",
+			events: []engine.StreamEvent{
+				{BlockStart: &engine.BlockStart{Index: 0, Kind: engine.BlockKindText}},
+				{TextDelta: strPtr("hello")},
+				{BlockStop: &engine.BlockStop{Index: 0}},
+				{FinishReason: "stop"},
+			},
+			wantWire: []string{`"type":"response.output_text.delta"`, `"delta":"hello"`},
+		},
+		{
+			name: "thinking block",
+			events: []engine.StreamEvent{
+				{BlockStart: &engine.BlockStart{Index: 0, Kind: engine.BlockKindThinking}},
+				{ThinkingDelta: strPtr("step by step")},
+				{BlockStop: &engine.BlockStop{Index: 0}},
+				{FinishReason: "stop"},
+			},
+			wantWire: []string{`"type":"response.output_text.delta"`, `"delta":"step by step"`},
+		},
+		{
+			name: "empty text block lowers to no wire content",
+			events: []engine.StreamEvent{
+				{BlockStart: &engine.BlockStart{Index: 0, Kind: engine.BlockKindText}},
+				{BlockStop: &engine.BlockStop{Index: 0}},
+				{FinishReason: "stop"},
+			},
+			wantWire: []string{`"type":"response.completed"`},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			evCh := make(chan engine.StreamEvent, len(tc.events))
+			for _, ev := range tc.events {
+				evCh <- ev
+			}
+			close(evCh)
+			var buf bytes.Buffer
+			if err := (&StreamAdapter{}).SerializeStream(ctx, &buf, evCh); err != nil {
+				t.Fatalf("canonical block stream must serialize, got error: %v", err)
+			}
+			for _, want := range tc.wantWire {
+				if !strings.Contains(buf.String(), want) {
+					t.Errorf("serialized output missing %q:\n%s", want, buf.String())
+				}
+			}
+		})
+	}
+}
+
+// TestSerializeProviderBlockErrorResponses: provider blocks keep the explicit
+// error on the Responses serializer — their semantics are genuinely
+// unavailable on this protocol.
+func TestSerializeProviderBlockErrorResponses(t *testing.T) {
+	ctx := context.WithValue(context.Background(), engine.ChatRequestKey, &engine.ChatRequest{
+		ProviderExtensions: map[string]any{"_openai_variant": "responses"},
+	})
+	evCh := make(chan engine.StreamEvent, 1)
+	evCh <- engine.StreamEvent{BlockStart: &engine.BlockStart{
+		Index: 0, Kind: engine.BlockKindProvider, ProviderKind: "redacted",
+	}}
+	close(evCh)
+
+	var buf bytes.Buffer
+	err := (&StreamAdapter{}).SerializeStream(ctx, &buf, evCh)
+	if err == nil {
+		t.Fatal("provider block start did not error on the responses serializer")
+	}
+	want := `openai: provider block kind "redacted" is not supported by this serializer`
+	if err.Error() != want {
+		t.Errorf("error = %q, want %q", err.Error(), want)
+	}
+}

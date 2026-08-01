@@ -116,22 +116,33 @@ func TestStreamParse(t *testing.T) {
 		events = append(events, ev)
 	}
 
-	if len(events) != 5 {
-		t.Fatalf("Expected 5 events, got %d: %+v", len(events), events)
+	// The text part opens and closes an explicit text block (the v2 topology
+	// requires every content block to open with a start event), consuming
+	// block index 0; the tool call that follows takes index 1.
+	if len(events) != 7 {
+		t.Fatalf("Expected 7 events, got %d: %+v", len(events), events)
 	}
 
-	if events[0].TextDelta == nil || *events[0].TextDelta != "Let me check the weather." {
-		t.Errorf("Event 0: expected TextDelta, got %+v", events[0])
+	if events[0].BlockStart == nil || events[0].BlockStart.Index != 0 || events[0].BlockStart.Kind != engine.BlockKindText {
+		t.Errorf("Event 0: expected BlockStart(text, 0), got %+v", events[0])
 	}
 
-	if events[1].ToolCallStart == nil || events[1].ToolCallStart.Name != "get_weather" {
-		t.Errorf("Event 1: expected ToolCallStart get_weather, got %+v", events[1])
+	if events[1].TextDelta == nil || *events[1].TextDelta != "Let me check the weather." {
+		t.Errorf("Event 1: expected TextDelta, got %+v", events[1])
 	}
 
-	if events[2].ToolCallDelta == nil {
-		t.Errorf("Event 2: expected ToolCallDelta, got %+v", events[2])
+	if events[2].BlockStop == nil || events[2].BlockStop.Index != 0 {
+		t.Errorf("Event 2: expected BlockStop(0), got %+v", events[2])
+	}
+
+	if events[3].ToolCallStart == nil || events[3].ToolCallStart.Index != 1 || events[3].ToolCallStart.Name != "get_weather" {
+		t.Errorf("Event 3: expected ToolCallStart(1) get_weather, got %+v", events[3])
+	}
+
+	if events[4].ToolCallDelta == nil {
+		t.Errorf("Event 4: expected ToolCallDelta, got %+v", events[4])
 	} else {
-		delta := events[2].ToolCallDelta.ArgumentsDelta
+		delta := events[4].ToolCallDelta.ArgumentsDelta
 		var args map[string]any
 		if err := json.Unmarshal([]byte(delta), &args); err != nil {
 			t.Errorf("ToolCallDelta args not valid JSON: %s (error: %v)", delta, err)
@@ -141,12 +152,12 @@ func TestStreamParse(t *testing.T) {
 		}
 	}
 
-	if events[3].ToolCallEnd == nil {
-		t.Errorf("Event 3: expected ToolCallEnd, got %+v", events[3])
+	if events[5].ToolCallEnd == nil || events[5].ToolCallEnd.Index != 1 {
+		t.Errorf("Event 5: expected ToolCallEnd(1), got %+v", events[5])
 	}
 
-	if events[4].FinishReason != "stop" {
-		t.Errorf("Event 4: expected FinishReason 'stop', got %s", events[4].FinishReason)
+	if events[6].FinishReason != "stop" {
+		t.Errorf("Event 6: expected FinishReason 'stop', got %s", events[6].FinishReason)
 	}
 }
 

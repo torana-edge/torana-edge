@@ -590,6 +590,17 @@ type PluginPipeline struct {
 	drained   chan struct{}
 	closed    chan struct{}
 	drainOnce sync.Once
+
+	// streamKinds tracks, per request, which content block is ACTUALLY open at
+	// each index across RunOnStreamChunk calls, so a plugin-passed
+	// ContentBlockStop converts back to the engine event matching the block
+	// it closes (ToolCallEnd for tool blocks, BlockStop for text/thinking/,
+	// provider) and unknown/mismatched/duplicate/reused topology errors
+	// instead of being guessed. The v2 wire's stop carries only an index;
+	// without this, every plugin-passed text/thinking stop would come back
+	// as ToolCallEnd and the lossless block topology would not survive
+	// plugins. Entries live for the request and are dropped by EndRequest.
+	streamKinds map[uint64]*pbconv.BlockKindTracker
 }
 
 // SkippedPlugin describes an enabled plugin that was not loaded because it
@@ -811,11 +822,12 @@ func reloadPipeline(runtime *wasm.Runtime, config PluginConfig) (*PluginPipeline
 		}
 	}
 	return &PluginPipeline{
-		plugins: loaded,
-		runtime: runtime,
-		skipped: skipped,
-		drained: make(chan struct{}),
-		closed:  make(chan struct{}),
+		plugins:     loaded,
+		runtime:     runtime,
+		skipped:     skipped,
+		drained:     make(chan struct{}),
+		closed:      make(chan struct{}),
+		streamKinds: make(map[uint64]*pbconv.BlockKindTracker),
 	}, nil
 }
 
@@ -930,7 +942,12 @@ func cloneAgentOperation(operation AgentOperation) AgentOperation {
 }
 
 // EndRequest drops all request-scoped plugin state for a finished request.
-func (pp *PluginPipeline) EndRequest(reqID uint64) { pp.runtime.EndRequest(reqID) }
+func (pp *PluginPipeline) EndRequest(reqID uint64) {
+	pp.runtime.EndRequest(reqID)
+	pp.mu.Lock()
+	delete(pp.streamKinds, reqID)
+	pp.mu.Unlock()
+}
 
 // Verdicts returns what plugins asked the host to do about this request.
 //
@@ -1190,6 +1207,14 @@ func (pp *PluginPipeline) RunOnStreamChunk(ctx context.Context, reqID uint64, ch
 	pp.Acquire()
 	defer pp.Release()
 
+	pp.mu.Lock()
+	tracker := pp.streamKinds[reqID]
+	if tracker == nil {
+		tracker = &pbconv.BlockKindTracker{}
+		pp.streamKinds[reqID] = tracker
+	}
+	pp.mu.Unlock()
+
 	current := []*pbv2.StreamEvent{pbconv.ToPBStreamEvent(chunk)}
 
 	for _, lp := range pp.plugins {
@@ -1248,7 +1273,24 @@ func (pp *PluginPipeline) RunOnStreamChunk(ctx context.Context, reqID uint64, ch
 
 	out := make([]engine.StreamEvent, 0, len(current))
 	for _, ev := range current {
-		out = append(out, *pbconv.FromPBStreamEvent(ev))
+		// Kind-aware conversion: the tracker remembers which content block is
+		// ACTUALLY open at each index (recorded from the converted starts,
+		// which are what the rest of the host consumes), so a
+		// ContentBlockStop becomes ToolCallEnd or BlockStop to match the
+		// block it closes. A pass-through stream therefore survives plugins
+		// with its block topology intact.
+		converted, err := tracker.FromPBStreamEvent(ev)
+		if err != nil {
+			// The v2 ABI declares unknown/mismatched/duplicate/reused
+			// topology invalid: a plugin emitted a stop with no open block at
+			// its index, or a start at an index that is already open. The
+			// conversion must never guess a kind, so this is a hard error —
+			// on the streaming path the caller terminates the stream rather
+			// than deliver a silently reclassified event.
+			log.Printf("[plugin] stream topology error: %v", err)
+			return nil, fmt.Errorf("plugin stream topology: %w", err)
+		}
+		out = append(out, *converted)
 	}
 	return out, nil
 }

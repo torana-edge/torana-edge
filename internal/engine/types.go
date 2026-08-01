@@ -103,11 +103,15 @@ type ToolDef struct {
 // --- Response streaming side ---
 
 // StreamEvent is a single event emitted during a streaming response.
-// Exactly one field is non-nil per event. Consumers switch on the non-nil field.
+// Exactly one field is non-nil per event (SignatureDelta is metadata paired
+// with the surrounding block rather than a content event; see below).
+// Consumers switch on the non-nil field.
 type StreamEvent struct {
 	// Exactly one field is non-nil per event.
 	TextDelta     *string        // text content fragment
 	ThinkingDelta *string        // thinking/reasoning text fragment
+	BlockStart    *BlockStart    // opens an explicit text/thinking/provider content block
+	BlockStop     *BlockStop     // closes the text/thinking/provider block opened at the same index
 	ToolCallStart *ToolCallStart // new tool call beginning
 	ToolCallDelta *ToolCallDelta // arguments JSON fragment (string)
 	ToolCallEnd   *ToolCallEnd   // tool call arguments complete
@@ -121,6 +125,48 @@ type StreamEvent struct {
 	// an "exactly one field" content event; adapters that don't understand it
 	// ignore it.
 	SignatureDelta *string
+}
+
+// BlockKind classifies an explicit non-tool content block.
+type BlockKind int
+
+const (
+	BlockKindText BlockKind = iota
+	BlockKindThinking
+	BlockKindProvider
+)
+
+func (k BlockKind) String() string {
+	switch k {
+	case BlockKindText:
+		return "text"
+	case BlockKindThinking:
+		return "thinking"
+	case BlockKindProvider:
+		return "provider"
+	default:
+		return "unknown"
+	}
+}
+
+// BlockStart opens an explicit text/thinking/provider content block at Index.
+// Tool-call blocks keep ToolCallStart, which already carries the block payload
+// (id/name/signature). The v2 ABI requires every content block to open with a
+// start event so signatures can be bound to the right scope.
+type BlockStart struct {
+	Index int
+	Kind  BlockKind
+	// ProviderKind is the provider's verbatim kind string for a provider
+	// block (the v2 ABI passes ProviderBlock.kind through verbatim; the host
+	// must not change it after verification). Meaningful only when Kind ==
+	// BlockKindProvider; empty for text/thinking blocks.
+	ProviderKind string
+}
+
+// BlockStop closes the text/thinking/provider block opened at Index.
+// Tool-call blocks keep ToolCallEnd.
+type BlockStop struct {
+	Index int
 }
 
 // ToolCallStart signals the beginning of a tool call in the stream.

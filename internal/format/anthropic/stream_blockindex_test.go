@@ -82,3 +82,85 @@ func TestSerializeToolBlockIndexes(t *testing.T) {
 		}
 	}
 }
+
+// TestSerializeExplicitBlockEvents: plugin-emitted text/thinking block events
+// render faithfully as per-kind content_block_start/delta/stop frames with
+// consistent indexes — the pre-fix serializer silently dropped BlockStart/
+// BlockStop (a plugin-emitted block would vanish), and casting a thinking
+// block to a text frame would corrupt the topology the host verified.
+func TestSerializeExplicitBlockEvents(t *testing.T) {
+	text := "hi"
+	thinking := "reason"
+	events := make(chan engine.StreamEvent, 8)
+	events <- engine.StreamEvent{BlockStart: &engine.BlockStart{Index: 0, Kind: engine.BlockKindText}}
+	events <- engine.StreamEvent{TextDelta: &text}
+	events <- engine.StreamEvent{BlockStop: &engine.BlockStop{Index: 0}}
+	events <- engine.StreamEvent{BlockStart: &engine.BlockStart{Index: 1, Kind: engine.BlockKindThinking}}
+	events <- engine.StreamEvent{ThinkingDelta: &thinking}
+	events <- engine.StreamEvent{BlockStop: &engine.BlockStop{Index: 1}}
+	events <- engine.StreamEvent{FinishReason: "stop"}
+	close(events)
+
+	var buf bytes.Buffer
+	if err := (&StreamAdapter{}).SerializeStream(context.Background(), &buf, events); err != nil {
+		t.Fatalf("SerializeStream: %v", err)
+	}
+
+	type frame struct {
+		Type         string `json:"type"`
+		Index        int    `json:"index"`
+		ContentBlock *struct {
+			Type     string `json:"type"`
+			Text     string `json:"text"`
+			Thinking string `json:"thinking"`
+		} `json:"content_block"`
+	}
+	var starts, stops []int
+	var types []string
+	for _, line := range strings.Split(buf.String(), "\n") {
+		if !strings.HasPrefix(line, "data: ") {
+			continue
+		}
+		var f frame
+		if err := json.Unmarshal([]byte(strings.TrimPrefix(line, "data: ")), &f); err != nil {
+			t.Fatalf("bad frame: %v (%q)", err, line)
+		}
+		if f.ContentBlock != nil {
+			starts = append(starts, f.Index)
+			types = append(types, f.ContentBlock.Type)
+		}
+		if f.Type == "content_block_stop" {
+			stops = append(stops, f.Index)
+		}
+	}
+	if len(starts) != 2 || starts[0] != 0 || starts[1] != 1 {
+		t.Fatalf("block start indexes = %v, want [0 1]", starts)
+	}
+	if len(stops) != 2 || stops[0] != 0 || stops[1] != 1 {
+		t.Fatalf("block stop indexes = %v, want [0 1]", stops)
+	}
+	if len(types) != 2 || types[0] != "text" || types[1] != "thinking" {
+		t.Fatalf("block types = %v, want [text thinking]", types)
+	}
+}
+
+// TestSerializeProviderBlockErrors: provider blocks have no Anthropic wire
+// representation — the serializer must error explicitly rather than drop or
+// cast them.
+func TestSerializeProviderBlockErrors(t *testing.T) {
+	events := make(chan engine.StreamEvent, 1)
+	events <- engine.StreamEvent{BlockStart: &engine.BlockStart{
+		Index: 0, Kind: engine.BlockKindProvider, ProviderKind: "redacted",
+	}}
+	close(events)
+
+	var buf bytes.Buffer
+	err := (&StreamAdapter{}).SerializeStream(context.Background(), &buf, events)
+	if err == nil {
+		t.Fatal("provider block did not error")
+	}
+	want := `anthropic: provider block kind "redacted" is not supported by this serializer`
+	if err.Error() != want {
+		t.Errorf("error = %q, want %q", err.Error(), want)
+	}
+}
