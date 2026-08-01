@@ -1040,7 +1040,7 @@ func (pp *PluginPipeline) RunBeforeRequest(ctx context.Context, reqID uint64, ch
 				// invariants (torana_meta_json, signature provenance).
 				var verr error
 				if holdsAllRequestGrants(lp.plugin) {
-					verr = verifyUnconditionalInvariants(current, replacement)
+					verr = verifyFastPath(current, replacement)
 				} else {
 					verr = verifyRequestMutation(current, replacement, lp.plugin.HasGrant)
 				}
@@ -1480,6 +1480,21 @@ func validateApproval(bundle PluginBundle, approval Approval) ([]string, string,
 			return nil, "", fmt.Errorf("permission %q was not requested by manifest", permission)
 		}
 		grants = append(grants, permission)
+	}
+	// All-or-nothing: every permission the manifest declares must be in the
+	// approval, or the plugin cannot be enabled. Approving a SUBSET of the
+	// declared set would grant the plugin powers its operator never reviewed
+	// — the empty subset of a grant-declaring manifest is exactly that — so
+	// the approval's permission set must equal the declared set (empty ==
+	// empty is fine for grantless fixtures).
+	approved := make(map[string]struct{}, len(approval.Permissions))
+	for _, permission := range approval.Permissions {
+		approved[permission] = struct{}{}
+	}
+	for name := range requested {
+		if _, ok := approved[name]; !ok {
+			return nil, "", fmt.Errorf("permission %q requested by manifest was not approved", name)
+		}
 	}
 	failureMode := approval.FailureMode
 	if failureMode == "" {

@@ -340,11 +340,12 @@ func TestWarmerWithoutClockGrantStoresNothing(t *testing.T) {
 		Dir: dir, Order: []string{"cache_warmer"},
 		Approvals: map[string]Approval{"torana/cache_warmer": {
 			Digest: digest,
-			// Everything the plugin asks for except env.now.
+			// The full declared set: all-or-nothing approval means a subset
+			// (everything except one permission) would be rejected.
 			Permissions: []string{
 				"env.background_tick", "env.host_call.torana_send_request",
 				"env.host_call.torana_cache_pricing", "env.state_get",
-				"env.state_set", "env.state_keys", "env.plugin_config", "env.log",
+				"env.state_set", "env.state_keys", "env.now", "env.plugin_config", "env.log",
 			},
 		}},
 		Config: map[string]json.RawMessage{

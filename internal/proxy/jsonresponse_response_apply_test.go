@@ -115,7 +115,7 @@ func TestResponseApplyRejectsForgedGuestFields(t *testing.T) {
 			Dir:   fixturesDir,
 			Order: []string{"test-forge-response-fields"},
 			Approvals: map[string]plugin.Approval{
-				"torana-test/test-forge-response-fields": {Digest: digest, FailureMode: "block"},
+				"torana-test/test-forge-response-fields": {Digest: digest, Permissions: []string{"env.log"}, FailureMode: "block"},
 			},
 		})
 		if err != nil {

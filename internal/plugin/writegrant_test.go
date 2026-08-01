@@ -333,6 +333,113 @@ func TestVerifyUnconditionalInvariantsUnchangedPasses(t *testing.T) {
 	}
 }
 
+// --- F2 round-3: unknown protobuf fields are never grantable ---------------
+
+// appendUnknownField100 marshals src and appends an unknown field (number
+// 100, varint 1 — the a0 06 01 shape a handwritten guest can emit) so the
+// result carries unknown bytes the schema does not know.
+func appendUnknownField100(t testing.TB, src, into proto.Message) {
+	t.Helper()
+	raw, err := proto.Marshal(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw = append(raw, 0xa0, 0x06, 0x01)
+	if err := proto.Unmarshal(raw, into); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Unknown fields nested inside ChatRequest/Message/ToolCall/ToolDef bypassed
+// every grant in round 2 (only the envelope was checked). They are now an
+// unconditional invariant: rejected at every nesting level, naming the path.
+func TestVerifyUnknownFieldsRejectedAtEveryNestingLevel(t *testing.T) {
+	cases := []struct {
+		name string
+		out  func() *pb.ChatRequest
+		want string
+	}{
+		{name: "request", want: "plugin wrote unknown fields in request",
+			out: func() *pb.ChatRequest {
+				var r pb.ChatRequest
+				appendUnknownField100(t, baseRequest(), &r)
+				return &r
+			}},
+		{name: "message", want: "plugin wrote unknown fields in messages[1]",
+			out: func() *pb.ChatRequest {
+				r := baseRequest()
+				var m pb.Message
+				appendUnknownField100(t, r.Messages[1], &m)
+				r.Messages[1] = &m
+				return r
+			}},
+		{name: "tool call", want: "plugin wrote unknown fields in messages[2].tool_calls[0]",
+			out: func() *pb.ChatRequest {
+				r := baseRequest()
+				var tc pb.ToolCall
+				appendUnknownField100(t, r.Messages[2].ToolCalls[0], &tc)
+				r.Messages[2].ToolCalls[0] = &tc
+				return r
+			}},
+		{name: "tool def", want: "plugin wrote unknown fields in tools[0]",
+			out: func() *pb.ChatRequest {
+				r := baseRequest()
+				var td pb.ToolDef
+				appendUnknownField100(t, r.Tools[0], &td)
+				r.Tools[0] = &td
+				return r
+			}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := verifyRequestMutation(baseRequest(), tc.out(), grant())
+			if err == nil {
+				t.Fatal("unknown fields must be rejected with no grants")
+			}
+			if err.Error() != tc.want {
+				t.Errorf("error = %q, want %q", err, tc.want)
+			}
+		})
+	}
+}
+
+// Unknown fields are never grantable: even a plugin holding every request
+// grant must be rejected, on the full check AND on the all-grants fast path.
+func TestVerifyUnknownFieldsRejectedWithAllGrants(t *testing.T) {
+	accepted := baseRequest()
+	var out pb.ChatRequest
+	appendUnknownField100(t, accepted, &out)
+
+	all := grant("ir.messages.write.user", "ir.messages.write.assistant",
+		"ir.messages.write.system", "ir.messages.write.tool",
+		"ir.messages.write.developer", "ir.messages.write.other",
+		"ir.tools.write", "ir.model.write", "ir.params.write")
+	if err := verifyRequestMutation(accepted, &out, all); err == nil {
+		t.Fatal("unknown fields must be rejected even with every request grant")
+	}
+	if err := verifyFastPath(accepted, &out); err == nil {
+		t.Fatal("the all-grants fast path must reject unknown fields")
+	}
+}
+
+// Unknown fields are the FIRST unconditional invariant: a replacement that
+// both writes unknown bytes and forges host-owned meta is named for the
+// unknown fields.
+func TestVerifyUnknownFieldsNamedBeforeHostOwnedMeta(t *testing.T) {
+	accepted := baseRequest()
+	var out pb.ChatRequest
+	appendUnknownField100(t, accepted, &out)
+	out.ToranaMetaJson = []byte(`{"_provider":"evil"}`)
+
+	err := verifyUnconditionalInvariants(accepted, &out)
+	if err == nil {
+		t.Fatal("the replacement must be rejected")
+	}
+	if err.Error() != "plugin wrote unknown fields in request" {
+		t.Errorf("error = %q, want the unknown-field invariant to fire first", err)
+	}
+}
+
 // --- F3: identity-based signature alignment ---------------------------------
 
 // The reviewer's exact reproduction: a granted deletion BEFORE a signed
@@ -405,14 +512,17 @@ func TestVerifyRequestSignaturesReorderDetachesToken(t *testing.T) {
 }
 
 // Two accepted messages sharing one token over DIFFERENT content cannot be
-// paired reliably — reject as ambiguous rather than guess.
+// paired when the output's token covers NEITHER — reject as ambiguous rather
+// than guess which occurrence was meant. (When the output matches one of them
+// exactly, that occurrence is consumed and the other is a grantable deletion
+// — asserted by TestVerifyRequestSignaturesConflictingTokenExactMatchConsumes.)
 func TestVerifyRequestSignaturesDuplicateTokenConflictingContent(t *testing.T) {
 	accepted := &pb.ChatRequest{Messages: []*pb.Message{
 		{Role: "user", Content: "A", ContentSignature: "t"},
 		{Role: "user", Content: "B", ContentSignature: "t"},
 	}}
 	out := &pb.ChatRequest{Messages: []*pb.Message{
-		{Role: "user", Content: "A", ContentSignature: "t"},
+		{Role: "user", Content: "C", ContentSignature: "t"},
 	}}
 	err := verifyRequestMutation(accepted, out, grant("ir.messages.write.user"))
 	if err == nil {
@@ -420,6 +530,22 @@ func TestVerifyRequestSignaturesDuplicateTokenConflictingContent(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "duplicate token with conflicting content") {
 		t.Errorf("error = %q, want the ambiguity named", err)
+	}
+}
+
+// The same conflicting accepted pair, but the output's token matches ONE
+// occurrence exactly: the match consumes that occurrence one-to-one, and the
+// unmatched occurrence is a grantable deletion — not an ambiguity.
+func TestVerifyRequestSignaturesConflictingTokenExactMatchConsumes(t *testing.T) {
+	accepted := &pb.ChatRequest{Messages: []*pb.Message{
+		{Role: "user", Content: "A", ContentSignature: "t"},
+		{Role: "user", Content: "B", ContentSignature: "t"},
+	}}
+	out := &pb.ChatRequest{Messages: []*pb.Message{
+		{Role: "user", Content: "A", ContentSignature: "t"},
+	}}
+	if err := verifyRequestMutation(accepted, out, grant("ir.messages.write.user")); err != nil {
+		t.Fatalf("an exact token+content match must consume its occurrence, got: %v", err)
 	}
 }
 
@@ -449,6 +575,80 @@ func TestVerifyRequestSignaturesAcceptedTokenWithoutCounterpartAllowed(t *testin
 	canWrite := grant("ir.messages.write.user", "ir.messages.write.assistant")
 	if err := verifyRequestMutation(accepted, out, canWrite); err != nil {
 		t.Fatalf("deleting a signed message must verify, got: %v", err)
+	}
+}
+
+// --- Round-3: one-to-one multiset alignment --------------------------------
+
+// Reviewer reproduction (a): one accepted token authorising TWO output copies
+// of the same signed message. The first copy consumes the occurrence; the
+// second has no unconsumed occurrence left — the token was reused to mint
+// provenance, and must be rejected. (Same shape as the output-token
+// cardinality rule: two output copies of the same token+content, with one
+// accepted occurrence, reject the second.)
+func TestVerifyRequestSignaturesDuplicatedSignedMessageRejected(t *testing.T) {
+	accepted := &pb.ChatRequest{Messages: []*pb.Message{
+		{Role: "assistant", Content: "A", ContentSignature: "token"},
+	}}
+	out := &pb.ChatRequest{Messages: []*pb.Message{
+		{Role: "assistant", Content: "A", ContentSignature: "token"},
+		{Role: "assistant", Content: "A", ContentSignature: "token"},
+	}}
+	err := verifyRequestMutation(accepted, out, grant("ir.messages.write.assistant"))
+	if err == nil {
+		t.Fatal("one accepted token must not authorise two signed output copies")
+	}
+	if err.Error() != "plugin content_signature signature reused" {
+		t.Errorf("error = %q, want the reused binding named", err)
+	}
+}
+
+// Reviewer reproduction (b): an unchanged clone must pass with NO grants. The
+// signed copy consumes the accepted signed occurrence in phase 1, so the
+// unsigned copy's content has no REMAINING signed counterpart in phase 2 —
+// the round-2 false positive ("signature dropped") must not fire.
+func TestVerifyRequestSignaturesUnchangedCloneWithUnsignedCopyPasses(t *testing.T) {
+	accepted := &pb.ChatRequest{Messages: []*pb.Message{
+		{Role: "assistant", Content: "A", ContentSignature: "token"},
+		{Role: "assistant", Content: "A"},
+	}}
+	out := proto.Clone(accepted).(*pb.ChatRequest)
+	if err := verifyRequestMutation(accepted, out, grant()); err != nil {
+		t.Fatalf("an unchanged clone must verify with no grants, got: %v", err)
+	}
+}
+
+// Two accepted occurrences of the same token+content authorise exactly two
+// output copies: each consumes one occurrence, and the pairing is faithful.
+func TestVerifyRequestSignaturesTwoCopiesConsumeTwoOccurrences(t *testing.T) {
+	accepted := &pb.ChatRequest{Messages: []*pb.Message{
+		{Role: "assistant", Content: "A", ContentSignature: "token"},
+		{Role: "assistant", Content: "A", ContentSignature: "token"},
+	}}
+	out := &pb.ChatRequest{Messages: []*pb.Message{
+		{Role: "assistant", Content: "A", ContentSignature: "token"},
+		{Role: "assistant", Content: "A", ContentSignature: "token"},
+	}}
+	if err := verifyRequestMutation(accepted, out, grant("ir.messages.write.assistant")); err != nil {
+		t.Fatalf("two accepted occurrences must authorise two output copies, got: %v", err)
+	}
+}
+
+// A granted role change carrying the same token over unchanged covered content
+// is NOT an added signature: the SDK's request contracts bind the content
+// refs, not role, so alignment ignores role entirely. The role change itself
+// stays governed by ir.messages.write.<role> — both roles are granted here so
+// the message-section check passes and the signature check decides.
+func TestVerifyRequestSignaturesRoleChangeKeepsTokenAndContent(t *testing.T) {
+	accepted := &pb.ChatRequest{Messages: []*pb.Message{
+		{Role: "user", Content: "A", ContentSignature: "token"},
+	}}
+	out := &pb.ChatRequest{Messages: []*pb.Message{
+		{Role: "assistant", Content: "A", ContentSignature: "token"},
+	}}
+	canWrite := grant("ir.messages.write.user", "ir.messages.write.assistant")
+	if err := verifyRequestMutation(accepted, out, canWrite); err != nil {
+		t.Fatalf("a granted role change with token and content intact must verify, got: %v", err)
 	}
 }
 
@@ -540,18 +740,19 @@ func TestHoldsAllRequestGrants(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Pipeline tests. All-or-nothing approval is settled: a plugin is granted
-// either everything its manifest declares or nothing. test-mutator's manifest
-// declares the full request write set, so a pipeline approval here is either
-// the empty set (a grantless mutating plugin — rejection fixtures) or the
-// full set (the all-grants fast path). Intermediate grant sets are exercised
-// at the UNIT level with canWrite closures above, never by faking a partial
-// approval. Fixtures whose manifests declare exactly the grants they need
-// (test-forge-host-meta, test-stale-bind: the full write set; test-mutator:
-// the full write set) hit the fast path; test-verdict-then-invalid declares
-// only its verdict permissions and is therefore grantless for writes.
-// BundleDigestForDir is computed from disk, so the manifest change and the
-// approval stay consistent.
+// Pipeline tests. All-or-nothing approval is settled AND ENFORCED: an
+// approval must carry exactly the permissions its manifest declares, or the
+// plugin cannot be enabled — the empty subset of a grant-declaring manifest
+// is not a valid approval. test-mutator declares the full request write set
+// (plus env.log), so it can only ever be approved fully (the all-grants fast
+// path); grantless-mutation rejection fixtures use test-verdict-then-invalid,
+// whose full declared set (its verdict permissions) is still grantless for
+// writes. Intermediate grant sets are exercised at the UNIT level with
+// canWrite closures above, never by faking a partial approval. Fixtures whose
+// manifests declare exactly the grants they need (test-forge-host-meta,
+// test-stale-bind, test-mutator: the full write set) hit the fast path when
+// approved fully. BundleDigestForDir is computed from disk, so the manifest
+// change and the approval stay consistent.
 // ---------------------------------------------------------------------------
 
 func newApprovedPipeline(t *testing.T, name string, permissions []string, failureMode string) *PluginPipeline {
@@ -580,10 +781,13 @@ func newApprovedPipeline(t *testing.T, name string, permissions []string, failur
 
 // A plugin holding NO request grants that rewrites a message must have its
 // replacement refused. Under allow mode there is no error and the accepted
-// request chains onward unchanged.
+// request chains onward unchanged. (test-verdict-then-invalid declares only
+// its verdict permissions, so its full-set approval is still grantless for
+// writes — the all-or-nothing rule's empty subset no longer exists.)
 func TestRunBeforeRequestGrantlessMutationRejectedAllow(t *testing.T) {
-	requireWASM(t, fixturesDir+"/test-mutator/plugin.wasm")
-	pp := newApprovedPipeline(t, "test-mutator", nil, "pass")
+	requireWASM(t, fixturesDir+"/test-verdict-then-invalid/plugin.wasm")
+	pp := newApprovedPipeline(t, "test-verdict-then-invalid",
+		[]string{"env.respond_request", "env.block_request"}, "pass")
 
 	chat := &engine.ChatRequest{
 		Model:    "gpt-x",
@@ -604,8 +808,9 @@ func TestRunBeforeRequestGrantlessMutationRejectedAllow(t *testing.T) {
 // The same grantless mutation under a block override is an attributed error
 // naming the plugin, with the original request returned alongside it.
 func TestRunBeforeRequestGrantlessMutationRejectedBlock(t *testing.T) {
-	requireWASM(t, fixturesDir+"/test-mutator/plugin.wasm")
-	pp := newApprovedPipeline(t, "test-mutator", nil, "block")
+	requireWASM(t, fixturesDir+"/test-verdict-then-invalid/plugin.wasm")
+	pp := newApprovedPipeline(t, "test-verdict-then-invalid",
+		[]string{"env.respond_request", "env.block_request"}, "block")
 
 	chat := &engine.ChatRequest{
 		Model:    "gpt-x",
@@ -615,7 +820,7 @@ func TestRunBeforeRequestGrantlessMutationRejectedBlock(t *testing.T) {
 	if err == nil {
 		t.Fatal("block mode must return an error for a grantless mutation")
 	}
-	if !strings.Contains(err.Error(), "test-mutator") {
+	if !strings.Contains(err.Error(), "test-verdict-then-invalid") {
 		t.Errorf("error %q does not name the offending plugin", err)
 	}
 	if !strings.Contains(err.Error(), "invalid request replacement") {
@@ -840,16 +1045,38 @@ func BenchmarkVerifyRequestMutation(b *testing.B) {
 }
 
 // BenchmarkVerifyRequestMutationFastPath is what a plugin holding every request
-// grant pays instead: one predicate over the grant set, no fingerprinting.
+// grant pays: the all-grants predicate PLUS the unconditional invariants
+// (unknown-field walk, host-owned meta, request-domain signature bindings) —
+// the EXACT production branch discovery.go takes via verifyFastPath. The
+// section fingerprint comparison is deliberately excluded; it is measured
+// separately by BenchmarkVerifyRequestMutation. Both share the unmarshal-per-
+// iteration harness, so the two numbers are directly comparable per size.
 func BenchmarkVerifyRequestMutationFastPath(b *testing.B) {
 	all := fakeGrants(map[string]bool{})
 	for _, g := range allRequestGrants {
 		all[g] = true
 	}
-	b.ReportAllocs()
-	for i := 0; i < b.N; i++ {
-		if !holdsAllRequestGrants(all) {
-			b.Fatal("all grants must short-circuit")
+	for _, n := range benchSizes {
+		req := pbconv.ToPBChatRequest(benchConversation(n))
+		raw, err := proto.Marshal(req)
+		if err != nil {
+			b.Fatal(err)
 		}
+		b.Run(fmt.Sprintf("msgs=%d", n), func(b *testing.B) {
+			b.SetBytes(int64(len(raw)))
+			b.ReportAllocs()
+			for i := 0; i < b.N; i++ {
+				var out pb.ChatRequest
+				if err := proto.Unmarshal(raw, &out); err != nil {
+					b.Fatal(err)
+				}
+				if !holdsAllRequestGrants(all) {
+					b.Fatal("all grants must short-circuit")
+				}
+				if err := verifyFastPath(req, &out); err != nil {
+					b.Fatal("unmodified request must verify clean on the fast path")
+				}
+			}
+		})
 	}
 }

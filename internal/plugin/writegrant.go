@@ -53,15 +53,15 @@ import (
 // fire — a signature field is also in the message fingerprint, so a signature
 // mutation flags the message section AND the binding check):
 //
-//  1. unconditional invariants — host-owned fields (torana_meta_json) and the
-//     request-domain signature bindings (stale/forged/added/dropped); these
-//     are checked by verifyUnconditionalInvariants and can never be
-//     authorised by a grant;
+//  1. unconditional invariants — unknown protobuf fields (any nesting level),
+//     host-owned fields (torana_meta_json) and the request-domain signature
+//     bindings (stale/forged/added/dropped/reused); these are checked by
+//     verifyUnconditionalInvariants and can never be authorised by a grant;
 //  2. changed sections without their grant (verifyGrantedSections).
 //
 // A fully-granted plugin skips only the section comparison via
 // holdsAllRequestGrants: grants authorise SECTIONS, never host facts or
-// provenance, so the all-grants fast path still runs
+// provenance, so the all-grants fast path (verifyFastPath) still runs
 // verifyUnconditionalInvariants.
 
 // requestSections is the fingerprint of one request: 32 bytes per grantable
@@ -259,25 +259,70 @@ func fingerprintRequestSections(req *pb.ChatRequest) requestSections {
 	return p
 }
 
-// verifyUnconditionalInvariants checks the host-owned facts and provenance
-// bindings that NO write grant authorises: torana_meta_json, and the
-// request-domain signature bindings (stale/forged/added/dropped — on this
-// path there is no apply block to clear a wire token later, so stale is a
-// violation and a plugin must clear the token itself when it changes covered
-// content).
+// verifyUnconditionalInvariants checks the host facts and provenance bindings
+// that NO write grant authorises: unknown protobuf fields at any nesting
+// level, torana_meta_json, and the request-domain signature bindings
+// (stale/forged/added/dropped/reused — on this path there is no apply block to
+// clear a wire token later, so stale is a violation and a plugin must clear
+// the token itself when it changes covered content).
 //
 // This is the part of verification the all-grants fast path must NOT skip:
 // grants authorise SECTIONS, never host facts or provider signatures, so a
-// plugin holding every request grant can still forge host metadata or
-// mint/replace/stale-bind a signature. host-owned first, then signatures —
-// first error wins.
+// plugin holding every request grant can still smuggle unknown fields, forge
+// host metadata or mint/replace/stale-bind a signature. Unknown fields first
+// (bytes the host cannot validate at all), then host-owned meta, then
+// signatures — first error wins.
 func verifyUnconditionalInvariants(accepted, out *pb.ChatRequest) error {
+	if err := verifyUnknownFields(accepted, out); err != nil {
+		return err
+	}
 	// Host-owned: no grant covers torana_meta_json, so this is checked before
 	// anything else and regardless of how many grants the plugin holds.
 	if !bytes.Equal(accepted.ToranaMetaJson, out.ToranaMetaJson) {
 		return fmt.Errorf("plugin changed host-owned torana_meta_json")
 	}
 	return verifyRequestSignatures(accepted, out)
+}
+
+// verifyUnknownFields rejects ANY unknown protobuf bytes in the OUTPUT
+// request, at every nesting level: the top-level ChatRequest, every Message,
+// every ToolCall and every ToolDef. Unknown fields are bytes whose semantics
+// the host cannot validate (the schema does not know them) and no write
+// section covers, so a plugin may not introduce them — not even with every
+// grant. They survive marshalling into the next hook's input, so a
+// hand-written guest could otherwise smuggle arbitrary bytes downstream
+// untouched by every grant check. The error names the nesting path so the
+// offending slot is obvious. (accepted is threaded for symmetry with the
+// sibling invariants; the rule is unconditional on OUT.)
+func verifyUnknownFields(accepted, out *pb.ChatRequest) error {
+	if len(out.ProtoReflect().GetUnknown()) > 0 {
+		return fmt.Errorf("plugin wrote unknown fields in request")
+	}
+	for i, m := range out.Messages {
+		if m == nil {
+			continue
+		}
+		if len(m.ProtoReflect().GetUnknown()) > 0 {
+			return fmt.Errorf("plugin wrote unknown fields in messages[%d]", i)
+		}
+		for j, tc := range m.ToolCalls {
+			if tc == nil {
+				continue
+			}
+			if len(tc.ProtoReflect().GetUnknown()) > 0 {
+				return fmt.Errorf("plugin wrote unknown fields in messages[%d].tool_calls[%d]", i, j)
+			}
+		}
+	}
+	for i, t := range out.Tools {
+		if t == nil {
+			continue
+		}
+		if len(t.ProtoReflect().GetUnknown()) > 0 {
+			return fmt.Errorf("plugin wrote unknown fields in tools[%d]", i)
+		}
+	}
+	return nil
 }
 
 // verifyGrantedSections compares the section fingerprints (messages, tools,
@@ -353,6 +398,15 @@ func verifyRequestMutation(accepted, out *pb.ChatRequest, canWrite func(section 
 	return verifyGrantedSections(accepted, out, canWrite)
 }
 
+// verifyFastPath is the exact branch discovery.go takes for a plugin holding
+// every request grant: the unconditional invariants only. Grants authorise
+// SECTIONS, never host facts or provenance, so the section comparison is the
+// only part a fully-granted plugin can skip. Factored as its own function so
+// the fast-path benchmark measures the production branch verbatim.
+func verifyFastPath(accepted, out *pb.ChatRequest) error {
+	return verifyUnconditionalInvariants(accepted, out)
+}
+
 // requestSignatureFields is the request-domain subset of the SDK's opaque
 // signature inventory, resolved once with its Message field descriptors.
 //
@@ -395,82 +449,140 @@ type requestSignatureField struct {
 	refs    []protoreflect.FieldDescriptor
 }
 
+// signedOccurrence is one accepted message carrying a non-empty token for a
+// binding: the digest of its covered content, and whether phase 1 has
+// consumed it. The digest lets both phases compare covered content by hash
+// instead of re-reading fields per output message.
+type signedOccurrence struct {
+	digest [32]byte
+	used   bool
+}
+
 // verifyRequestSignatures applies the bound-signature rule to every message,
-// aligning messages by identity instead of by slice index.
-//
-// A granted deletion or insertion before a signed message shifts its index,
-// so positional pairing compared the message's UNCHANGED token against an
-// unrelated message and classified it as forged. Signatures bind content
-// within their own message, so alignment is per ROLE and per token value:
-//
-//   - output token != "": the accepted messages of the same role carrying the
-//     SAME token are the candidates. None → the token was minted (added) or
-//     replaced (forged). Multiple candidates sharing the token but covering
-//     DIFFERENT content are ambiguous — reject rather than guess. Otherwise
-//     the token is intact when any candidate's covered content equals the
-//     output's, and stale when not.
-//   - output token == "": the accepted messages of the same role with a
-//     non-empty token are the candidates. Any candidate whose covered content
-//     equals the output's means the token was dropped — rejected. Otherwise
-//     the token was cleared over changed content (the prescribed response) or
-//     was never present — allowed.
+// aligning the output's signed messages ONE-TO-ONE against the accepted
+// signed occurrences (a multiset alignment), WITHOUT role in the match key —
+// the SDK's request contracts bind the declared content refs, not role, so a
+// granted role change carrying the same token over unchanged covered content
+// is intact, and role stays governed by ir.messages.write.<role> alone.
 //
 // Covered content is decided over the binding's whole content-ref set
 // (thinking_signature covers thinking + redacted_thinking, trailing_signature
 // covers thinking + content, content_signature covers content). Accepted
-// tokens with no output counterpart (the message was deleted, or the token
-// cleared with its content changed) are allowed: deletion is grantable, and
-// cleared-with-change is the prescribed response.
+// occurrences are indexed by token value (phase 1) and by covered-content
+// digest (phase 2), so lookups are not quadratic.
+//
+// Phase 1 — output messages with a non-empty token, each consuming one
+// unconsumed accepted occurrence with the SAME token value:
+//
+//   - an exact covered-content match consumes that occurrence (intact);
+//   - no match but several unconsumed candidates covering DIFFERENT content
+//     is ambiguous — reject rather than guess which one was meant;
+//   - no match and the remaining candidates agree (one candidate, or several
+//     covering the same content) is stale — the token was kept over changed
+//     content;
+//   - no unconsumed occurrence with that token at all: a different non-empty
+//     token over content a remaining occurrence still covers is forged
+//     (replaced); a token value the accepted request carried but whose
+//     occurrences were all consumed is reused — one accepted token
+//     authorising a second signed message — and rejected; otherwise the
+//     token was minted (added).
+//
+// Phase 2 — AFTER phase 1, output messages with an EMPTY token: their covered
+// content compared against the REMAINING unconsumed accepted occurrences
+// (any token value). An exact match means the token was dropped from content
+// the provider actually signed — rejected. No match means the token was
+// cleared over changed content (the prescribed response) or never existed —
+// allowed.
+//
+// Accepted occurrences with no output counterpart at all (the signed message
+// was deleted) are allowed: deletion is grantable.
 func verifyRequestSignatures(accepted, out *pb.ChatRequest) error {
 	for _, check := range requestSignatureFields {
+		byToken := map[string][]*signedOccurrence{}
+		byContent := map[[32]byte][]*signedOccurrence{}
+		everSeen := map[string]bool{}
+		for _, am := range accepted.Messages {
+			if am == nil {
+				continue
+			}
+			token := messageStringField(am, check.sig)
+			if token == "" {
+				continue
+			}
+			occ := &signedOccurrence{digest: coveredContentDigest(am, check.refs)}
+			byToken[token] = append(byToken[token], occ)
+			byContent[occ.digest] = append(byContent[occ.digest], occ)
+			everSeen[token] = true
+		}
+
+		// Phase 1: consume output tokens against the accepted occurrences.
 		for _, om := range out.Messages {
 			if om == nil {
 				continue
 			}
 			outToken := messageStringField(om, check.sig)
-
-			var candidates []*pb.Message
-			acceptedSameRoleHasToken := false
-			for _, am := range accepted.Messages {
-				if am == nil || am.Role != om.Role {
-					continue
-				}
-				acceptedToken := messageStringField(am, check.sig)
-				if acceptedToken != "" {
-					acceptedSameRoleHasToken = true
-				}
-				if (outToken == "" && acceptedToken != "") || (outToken != "" && acceptedToken == outToken) {
-					candidates = append(candidates, am)
+			if outToken == "" {
+				continue
+			}
+			outDigest := coveredContentDigest(om, check.refs)
+			matched := -1
+			for i, occ := range byToken[outToken] {
+				if !occ.used && occ.digest == outDigest {
+					matched = i
+					break
 				}
 			}
+			if matched >= 0 {
+				byToken[outToken][matched].used = true
+				continue // intact
+			}
 
-			if outToken != "" {
-				switch {
-				case len(candidates) == 0:
-					class := outboundpolicy.SignatureAdded
-					if acceptedSameRoleHasToken {
-						// The role already carries tokens; a different non-empty
-						// value is a replacement, not a mint.
-						class = outboundpolicy.SignatureForged
+			var unused []*signedOccurrence
+			for _, occ := range byToken[outToken] {
+				if !occ.used {
+					unused = append(unused, occ)
+				}
+			}
+			switch {
+			case len(unused) == 0:
+				// No unconsumed occurrence carries this token value. A
+				// DIFFERENT non-empty token over content a remaining
+				// occurrence still covers is a replacement — forged. A token
+				// value the accepted request carried but whose occurrences
+				// were all consumed is a reuse — rejected. Otherwise the
+				// token was minted over content no accepted token covered —
+				// added.
+				for _, occ := range byContent[outDigest] {
+					if !occ.used {
+						return fmt.Errorf("plugin %s signature %s", check.binding.SignatureField,
+							outboundpolicy.SignatureForged)
 					}
-					return fmt.Errorf("plugin %s signature %s", check.binding.SignatureField, class)
-				case hasConflictingDuplicateToken(candidates, check.refs):
-					return fmt.Errorf("plugin %s signature duplicate token with conflicting content",
-						check.binding.SignatureField)
-				case messageContentEqual(candidates[0], om, check.refs):
-					continue // intact
-				default:
-					return fmt.Errorf("plugin %s signature %s", check.binding.SignatureField,
-						outboundpolicy.SignatureStale)
 				}
+				if everSeen[outToken] {
+					return fmt.Errorf("plugin %s signature reused", check.binding.SignatureField)
+				}
+				return fmt.Errorf("plugin %s signature %s", check.binding.SignatureField,
+					outboundpolicy.SignatureAdded)
+			case conflictingContent(unused):
+				return fmt.Errorf("plugin %s signature duplicate token with conflicting content",
+					check.binding.SignatureField)
+			default:
+				return fmt.Errorf("plugin %s signature %s", check.binding.SignatureField,
+					outboundpolicy.SignatureStale)
 			}
+		}
 
-			// Output token cleared (or never present): dropping provenance
-			// from content the provider actually signed is rejected; clearing
-			// it over changed content, or having no token on either side, is
-			// allowed.
-			for _, am := range candidates {
-				if messageContentEqual(am, om, check.refs) {
+		// Phase 2: remaining unsigned outputs must not match any remaining
+		// signed accepted occurrence — that would be provenance dropped from
+		// content the provider signed. Occurrences consumed in phase 1 do not
+		// count, so a signed copy plus a cleared copy of the same content
+		// passes: the signed occurrence is already spoken for.
+		for _, om := range out.Messages {
+			if om == nil || messageStringField(om, check.sig) != "" {
+				continue
+			}
+			for _, occ := range byContent[coveredContentDigest(om, check.refs)] {
+				if !occ.used {
 					return fmt.Errorf("plugin %s signature %s", check.binding.SignatureField,
 						outboundpolicy.SignatureDropped)
 				}
@@ -480,35 +592,34 @@ func verifyRequestSignatures(accepted, out *pb.ChatRequest) error {
 	return nil
 }
 
-// hasConflictingDuplicateToken reports whether the accepted candidates that
-// share one token cover DIFFERENT content, in which case the output cannot be
-// paired reliably and the mutation is ambiguous. Candidates that share both
-// token and content are fine — they are the same signed fact.
-func hasConflictingDuplicateToken(candidates []*pb.Message, refs []protoreflect.FieldDescriptor) bool {
-	if len(candidates) < 2 {
+// conflictingContent reports whether the unconsumed candidates for one token
+// cover DIFFERENT content, in which case the output cannot be paired reliably
+// and the mutation is ambiguous. Candidates sharing a digest are the same
+// signed fact and fine.
+func conflictingContent(occurrences []*signedOccurrence) bool {
+	if len(occurrences) < 2 {
 		return false
 	}
-	first := candidates[0]
-	for _, c := range candidates[1:] {
-		if !messageContentEqual(first, c, refs) {
+	first := occurrences[0].digest
+	for _, occ := range occurrences[1:] {
+		if occ.digest != first {
 			return true
 		}
 	}
 	return false
 }
 
-// messageContentEqual compares two messages over a binding's covered-content
-// fields. Two nil messages compare equal (absent content); one nil does not.
-func messageContentEqual(a, b *pb.Message, refs []protoreflect.FieldDescriptor) bool {
-	if a == nil || b == nil {
-		return a == b
-	}
+// coveredContentDigest hashes a message's covered-content fields for one
+// binding, length-framed so field boundaries cannot be confused. Absent
+// fields hash as empty.
+func coveredContentDigest(m *pb.Message, refs []protoreflect.FieldDescriptor) [32]byte {
+	h := sha256.New()
 	for _, ref := range refs {
-		if messageStringField(a, ref) != messageStringField(b, ref) {
-			return false
-		}
+		writeFramed(h, []byte(messageStringField(m, ref)))
 	}
-	return true
+	var sum [32]byte
+	copy(sum[:], h.Sum(nil))
+	return sum
 }
 
 // messageStringField reads a string field of a Message, or "" when the message

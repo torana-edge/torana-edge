@@ -186,7 +186,7 @@ func TestRunAfterResponseForgeBlockAttributed(t *testing.T) {
 		Dir:   fixturesDir,
 		Order: []string{"test-forge-response-fields"},
 		Approvals: map[string]Approval{
-			"torana-test/test-forge-response-fields": {Digest: digest, FailureMode: "block"},
+			"torana-test/test-forge-response-fields": {Digest: digest, Permissions: []string{"env.log"}, FailureMode: "block"},
 		},
 	})
 	if err != nil {
