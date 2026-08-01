@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -403,7 +404,7 @@ func TestEgressRejectsInvalidPath(t *testing.T) {
 	if herr.Code != pb.ErrorCode_ERROR_CODE_INVALID_ARGUMENT {
 		t.Errorf("code = %v, want INVALID_ARGUMENT — the guest supplied an invalid path", herr.Code)
 	}
-	if !strings.Contains(herr.Message, "build request") {
+	if !strings.Contains(herr.Message, "invalid path") {
 		t.Errorf("unexpected message: %s", herr.Message)
 	}
 	if *calls != 0 {
@@ -495,4 +496,209 @@ func TestEgressInvalidRequestDoesNotConsumeBudget(t *testing.T) {
 	if *calls != 1 {
 		t.Errorf("upstream saw %d calls, want exactly the 1 valid one", *calls)
 	}
+}
+
+// TestEgressPathCannotEscapeProviderOrigin — the guest path must stay on the
+// configured provider origin. A path like "@attacker.example/v1" against a
+// configured URL turns the configured host into URL userinfo and redirects
+// the request — with the provider's credential — to attacker.example.
+// Refusals happen before any network I/O and consume no budget; legitimate
+// query strings and provider-specific :invoke paths keep working.
+func TestEgressPathCannotEscapeProviderOrigin(t *testing.T) {
+	var attackerMu sync.Mutex
+	attackerHits := 0
+	attacker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attackerMu.Lock()
+		attackerHits++
+		attackerMu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer attacker.Close()
+	attackerHost := strings.TrimPrefix(attacker.URL, "http://")
+
+	malicious := []struct{ name, path string }{
+		{"userinfo", "@attacker.example/v1"},
+		{"network-path", "//" + attackerHost + "/v1"},
+		{"absolute", attacker.URL + "/v1"},
+		{"crlf", "/v1\r\nHost: " + attackerHost},
+	}
+	for _, tc := range malicious {
+		t.Run(tc.name, func(t *testing.T) {
+			// A fresh one-call server per shape: the refusal must also be
+			// budget-neutral.
+			srv, calls := egressServer(t, provider.EgressBudget{MaxCallsPerMinute: 1})
+			_, herr := send(t, srv, "warmer", egressPayload(t, "oai", tc.path))
+			if herr == nil || herr.Code != pb.ErrorCode_ERROR_CODE_INVALID_ARGUMENT {
+				t.Fatalf("path %q was not refused as INVALID_ARGUMENT: %v", tc.path, herr)
+			}
+			attackerMu.Lock()
+			hits := attackerHits
+			attackerMu.Unlock()
+			if hits != 0 {
+				t.Fatalf("attacker server saw %d requests", hits)
+			}
+			if *calls != 0 {
+				t.Fatalf("a refused path consumed a budget slot (upstream calls = %d)", *calls)
+			}
+		})
+	}
+
+	// Legitimate shapes still reach the configured upstream: query strings and
+	// Bedrock-style :invoke paths.
+	srv, calls := egressServer(t, provider.EgressBudget{MaxCallsPerMinute: 10})
+	for _, path := range []string{"/v1/chat/completions?stream=true", "/model/amazon.titan-text-express-v1:invoke"} {
+		got, herr := send(t, srv, "warmer", egressPayload(t, "oai", path))
+		if herr != nil {
+			t.Fatalf("legitimate path %q refused: %v", path, herr)
+		}
+		if got.HTTPStatus != 200 {
+			t.Errorf("path %q: http_status = %d, want 200", path, got.HTTPStatus)
+		}
+	}
+	if *calls != 2 {
+		t.Errorf("upstream saw %d calls, want exactly the 2 legitimate ones", *calls)
+	}
+}
+
+// TestEgressInputContractIsBudgetNeutral — every caller bug is refused before
+// authorization, so a one-call budget survives any number of invalid
+// attempts. A PRESENT empty request_pb is a valid all-default message (a
+// protobuf can legitimately encode to zero bytes); an ABSENT key is a caller
+// bug. A maximum-integer timeout is clamped, never multiplied into an
+// overflow that expires locally while consuming a slot.
+func TestEgressInputContractIsBudgetNeutral(t *testing.T) {
+	valid := egressPayload(t, "oai", "/v1/chat/completions")
+
+	cases := []struct {
+		name        string
+		payload     string
+		wantRefusal bool
+	}{
+		{"missing request_pb", `{"provider":"oai","path":"/v1/chat/completions"}`, true},
+		{"missing provider", `{"request_pb":"","path":"/v1/chat/completions"}`, true},
+		{"missing path", `{"provider":"oai","request_pb":"` + egressPayloadPB(t) + `"}`, true},
+		{"bad base64", `{"provider":"oai","request_pb":"!!!","path":"/v1/chat/completions"}`, true},
+		{"garbage protobuf", `{"provider":"oai","request_pb":"QUFBQQ==","path":"/v1/chat/completions"}`, true},
+		{"absolute path", `{"provider":"oai","request_pb":"` + egressPayloadPB(t) + `","path":"https://attacker.example/v1"}`, true},
+		{"network path", `{"provider":"oai","request_pb":"` + egressPayloadPB(t) + `","path":"//attacker.example/v1"}`, true},
+		{"userinfo path", `{"provider":"oai","request_pb":"` + egressPayloadPB(t) + `","path":"@attacker.example/v1"}`, true},
+		{"negative timeout", `{"provider":"oai","request_pb":"` + egressPayloadPB(t) + `","path":"/v1/chat/completions","timeout_ms":-1}`, true},
+		{"present empty request_pb", `{"provider":"oai","request_pb":"","path":"/v1/chat/completions"}`, false},
+		{"max-int timeout", `{"provider":"oai","request_pb":"` + egressPayloadPB(t) + `","path":"/v1/chat/completions","timeout_ms":9223372036854775807}`, false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, calls := egressServer(t, provider.EgressBudget{MaxCallsPerMinute: 1})
+
+			got, herr := send(t, srv, "warmer", tc.payload)
+			if tc.wantRefusal {
+				if herr == nil || herr.Code != pb.ErrorCode_ERROR_CODE_INVALID_ARGUMENT {
+					t.Fatalf("invalid input was not refused as INVALID_ARGUMENT: %v", herr)
+				}
+				if *calls != 0 {
+					t.Fatalf("an invalid request consumed a budget slot (upstream calls = %d)", *calls)
+				}
+				// The one-call slot must still be free.
+				got, herr = send(t, srv, "warmer", valid)
+				if herr != nil {
+					t.Fatalf("the valid request was refused after an invalid one: %v", herr)
+				}
+				if *calls != 1 {
+					t.Errorf("upstream saw %d calls, want 1", *calls)
+				}
+			} else {
+				if herr != nil {
+					t.Fatalf("a valid request was refused: %v", herr)
+				}
+				if *calls != 1 {
+					t.Errorf("upstream saw %d calls, want 1", *calls)
+				}
+			}
+			if !tc.wantRefusal && got.HTTPStatus != 200 {
+				t.Errorf("http_status = %d, want 200", got.HTTPStatus)
+			}
+		})
+	}
+}
+
+// egressPayloadPB returns a base64 pb.ChatRequest for the valid payload shape
+// (the same encoding egressPayload uses).
+func egressPayloadPB(t *testing.T) string {
+	t.Helper()
+	chat := &engine.ChatRequest{
+		Model:    "gpt-x",
+		Messages: []engine.Message{{Role: engine.RoleUser, Content: "warm"}},
+	}
+	raw, err := proto.Marshal(pbconv.ToPBChatRequest(chat))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return base64.StdEncoding.EncodeToString(raw)
+}
+
+// TestEgressResponseLimits — an oversized provider body is a refusal, not a
+// silently truncated success; an exactly-at-limit body is a full success.
+func TestEgressResponseLimits(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		size       int
+		wantRefuse bool
+	}{
+		{"exact limit", maxEgressResponseBytes, false},
+		{"over limit", maxEgressResponseBytes + 1, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			calls := 0
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls++
+				w.Header().Set("Content-Type", "application/json")
+				w.Write(bytes.Repeat([]byte("x"), tc.size))
+			}))
+			defer upstream.Close()
+
+			srv := newEgressTestServer(t, upstream.URL)
+			got, herr := send(t, srv, "warmer", egressPayload(t, "oai", "/v1/chat/completions"))
+			if tc.wantRefuse {
+				if herr == nil || herr.Code != pb.ErrorCode_ERROR_CODE_UNAVAILABLE {
+					t.Fatalf("oversized body was not refused as UNAVAILABLE: %v", herr)
+				}
+			} else {
+				if herr != nil {
+					t.Fatalf("exact-limit body refused: %v", herr)
+				}
+				if got.HTTPStatus != 200 {
+					t.Errorf("http_status = %d, want 200", got.HTTPStatus)
+				}
+				raw, err := base64.StdEncoding.DecodeString(got.Body)
+				if err != nil {
+					t.Fatalf("decode body: %v", err)
+				}
+				if len(raw) != tc.size {
+					t.Errorf("body = %d bytes, want %d", len(raw), tc.size)
+				}
+			}
+			if calls != 1 {
+				t.Errorf("upstream saw %d calls, want 1 (a transport attempt is expected)", calls)
+			}
+		})
+	}
+}
+
+// newEgressTestServer builds a server with one configured provider backed by
+// the given upstream and a generous budget for the "warmer" plugin.
+func newEgressTestServer(t *testing.T, upstreamURL string) *Server {
+	t.Helper()
+	t.Setenv("EGRESS_TEST_KEY", "sk-provider")
+	cfg := provider.DefaultConfig()
+	cfg.Providers = map[string]provider.Provider{
+		"oai": {URL: upstreamURL, Format: "openai", APIKeyEnv: "EGRESS_TEST_KEY"},
+	}
+	cfg.Plugins.Runtime.Egress = map[string]provider.EgressBudget{"warmer": {MaxCallsPerMinute: 10}}
+	srv, err := New(Config{Port: "0", Providers: cfg, ConfigPath: filepath.Join(t.TempDir(), "config.json")})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	t.Cleanup(func() { srv.conversations.Close() })
+	return srv
 }

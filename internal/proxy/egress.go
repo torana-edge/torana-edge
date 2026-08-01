@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
+	"strings"
 	"sync"
 	"time"
 
@@ -185,7 +187,11 @@ type egressRequest struct {
 	// RequestPB is a base64-encoded pb.ChatRequest. Protobuf rather than JSON
 	// because it is the same wire the hooks already speak, so a plugin can
 	// forward a request it received without a lossy re-encoding.
-	RequestPB string `json:"request_pb"`
+	//
+	// Pointer so an ABSENT key is distinguishable from a present zero-length
+	// protobuf: an explicitly present all-default message encodes to zero
+	// bytes and is a valid request, while a missing field is a caller bug.
+	RequestPB *string `json:"request_pb"`
 	// Path overrides the upstream path. Torana never synthesizes a chat path —
 	// it reuses whatever the caller sent — so a plugin replaying a conversation
 	// must supply the path that conversation used.
@@ -233,7 +239,10 @@ func (s *Server) sendPluginRequest(ctx context.Context, pluginName, payloadJSON 
 		return wasm.ExtensionRefusal(pb.ErrorCode_ERROR_CODE_NOT_CONFIGURED, "unknown provider %q", req.Provider)
 	}
 
-	raw, err := base64.StdEncoding.DecodeString(req.RequestPB)
+	if req.RequestPB == nil {
+		return wasm.ExtensionRefusal(pb.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "request_pb is required")
+	}
+	raw, err := base64.StdEncoding.DecodeString(*req.RequestPB)
 	if err != nil {
 		return wasm.ExtensionRefusal(pb.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "request_pb is not valid base64: %v", err)
 	}
@@ -265,19 +274,53 @@ func (s *Server) sendPluginRequest(ctx context.Context, pluginName, payloadJSON 
 	if path == "" {
 		return wasm.ExtensionRefusal(pb.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "path is required — Torana does not synthesize provider paths")
 	}
+	// The guest path contract: a root-relative request URI with no scheme, no
+	// authority, and no userinfo. String concatenation is NOT safe here — a
+	// path like "@attacker.example/v1" against a configured origin becomes
+	// userinfo and redirects the request (and the provider credential) to
+	// attacker.example. Parse both sides and prove the resolved target stays
+	// on the configured origin before any credential or budget action.
+	if !strings.HasPrefix(path, "/") {
+		return wasm.ExtensionRefusal(pb.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "path must be root-relative, got %q", path)
+	}
+	base, err := url.Parse(prov.URL)
+	if err != nil || base.Scheme == "" || base.Host == "" {
+		return wasm.ExtensionRefusal(pb.ErrorCode_ERROR_CODE_NOT_CONFIGURED, "provider %q has an invalid URL %q", req.Provider, prov.URL)
+	}
+	u, err := url.ParseRequestURI(path)
+	if err != nil {
+		return wasm.ExtensionRefusal(pb.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "invalid path %q: %v", path, err)
+	}
+	// A path beginning with "//" is a network-path reference in URI syntax
+	// (ParseRequestURI folds it into the path); reject it outright so the
+	// authority can never be ambiguous, along with absolute forms, opaque
+	// forms, and userinfo.
+	if u.Scheme != "" || u.Host != "" || u.User != nil || u.Opaque != "" || strings.HasPrefix(u.Path, "//") {
+		return wasm.ExtensionRefusal(pb.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "path must stay on the configured provider origin, got %q", path)
+	}
+	target := base.ResolveReference(u)
+	if target.Scheme != base.Scheme || target.Host != base.Host || target.Hostname() != base.Hostname() {
+		return wasm.ExtensionRefusal(pb.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "path escapes the configured provider origin, got %q", path)
+	}
 
+	if req.TimeoutMS < 0 {
+		return wasm.ExtensionRefusal(pb.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "timeout_ms must not be negative")
+	}
 	timeout := defaultEgressTimeout
 	if req.TimeoutMS > 0 {
-		timeout = time.Duration(req.TimeoutMS) * time.Millisecond
-		if timeout > maxEgressTimeout {
+		// Clamp BEFORE converting to a duration: a huge positive value can
+		// overflow time.Duration and become negative, expiring locally while
+		// still consuming a call slot.
+		if req.TimeoutMS > int(maxEgressTimeout/time.Millisecond) {
 			timeout = maxEgressTimeout
+		} else {
+			timeout = time.Duration(req.TimeoutMS) * time.Millisecond
 		}
 	}
 	callCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	url := prov.URL + path
-	httpReq, err := http.NewRequestWithContext(callCtx, http.MethodPost, url, bytes.NewReader(body))
+	httpReq, err := http.NewRequestWithContext(callCtx, http.MethodPost, target.String(), bytes.NewReader(body))
 	if err != nil {
 		// The path is guest-supplied (Torana forwards the caller's path rather
 		// than synthesizing one), so a URL that cannot be built is a caller bug.
@@ -315,10 +358,17 @@ func (s *Server) sendPluginRequest(ctx context.Context, pluginName, payloadJSON 
 	}
 	defer resp.Body.Close()
 
-	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxEgressResponseBytes))
+	// limit+1 read so an oversized body is DETECTED as an overflow rather than
+	// silently truncated into a partial success: a truncated provider outcome
+	// would meter and cache the wrong prefix.
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxEgressResponseBytes+1))
 	if err != nil {
 		s.stats.RecordPluginCounter(pluginName, "egress_failed", 1)
 		return wasm.ExtensionRefusal(pb.ErrorCode_ERROR_CODE_UNAVAILABLE, "read response: %v", err)
+	}
+	if len(respBody) > maxEgressResponseBytes {
+		s.stats.RecordPluginCounter(pluginName, "egress_failed", 1)
+		return wasm.ExtensionRefusal(pb.ErrorCode_ERROR_CODE_UNAVAILABLE, "egress response exceeds %d bytes", maxEgressResponseBytes)
 	}
 
 	out := egressResponse{HTTPStatus: resp.StatusCode, Body: base64.StdEncoding.EncodeToString(respBody)}

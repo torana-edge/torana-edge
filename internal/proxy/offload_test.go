@@ -446,3 +446,76 @@ func TestOffloadValidation(t *testing.T) {
 		})
 	}
 }
+
+// TestOffloadRejectsApiKeyEnvPresence — the field is REMOVED, not deprecated:
+// any occurrence — empty string or null — is rejected as INVALID_ARGUMENT,
+// not silently honored or ignored.
+func TestOffloadRejectsApiKeyEnvPresence(t *testing.T) {
+	upstream := offloadServer(t, "", "cheap-1")
+	defer upstream.Close()
+
+	s, err := New(Config{Providers: offloadConfig(upstream.URL)})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	ctx := context.WithValue(context.Background(), reqStateKey{}, &reqState{ID: 1})
+
+	for _, payload := range []string{
+		`{"system_prompt":"s","user_prompt":"u","api_key_env":""}`,
+		`{"system_prompt":"s","user_prompt":"u","api_key_env":null}`,
+		`{"system_prompt":"s","user_prompt":"u","api_key_env":"MY_VAR"}`,
+	} {
+		_, herr := offloadCall(t, s, ctx, payload)
+		if herr == nil || herr.Code != pbv2.ErrorCode_ERROR_CODE_INVALID_ARGUMENT {
+			t.Fatalf("payload %s was not rejected as INVALID_ARGUMENT: %v", payload, herr)
+		}
+	}
+}
+
+// TestOffloadResponseLimits — an oversized offload body is a refusal, not a
+// truncated completion; an exactly-at-limit body is a full success.
+func TestOffloadResponseLimits(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		size       int
+		wantRefuse bool
+	}{
+		{"exact limit", maxOffloadResponseBytes, false},
+		{"over limit", maxOffloadResponseBytes + 1, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// A body that is exactly the limit AND parses: pad the content
+			// field so the whole JSON lands on the byte boundary.
+			prefix := `{"choices":[{"message":{"content":"`
+			suffix := `"}}]}`
+			content := strings.Repeat("a", tc.size-len(prefix)-len(suffix))
+			body := prefix + content + suffix
+
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.Write([]byte(body))
+			}))
+			defer upstream.Close()
+
+			s, err := New(Config{Providers: offloadConfig(upstream.URL)})
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+			ctx := context.WithValue(context.Background(), reqStateKey{}, &reqState{ID: 1})
+
+			got, herr := offloadCall(t, s, ctx, `{"system_prompt":"s","user_prompt":"u"}`)
+			if tc.wantRefuse {
+				if herr == nil || herr.Code != pbv2.ErrorCode_ERROR_CODE_UNAVAILABLE {
+					t.Fatalf("oversized body was not refused as UNAVAILABLE: %v", herr)
+				}
+			} else {
+				if herr != nil {
+					t.Fatalf("exact-limit body refused: %v", herr)
+				}
+				if len(got.Completion) != tc.size-len(prefix)-len(suffix) {
+					t.Errorf("completion = %d chars, want %d", len(got.Completion), tc.size-len(prefix)-len(suffix))
+				}
+			}
+		})
+	}
+}

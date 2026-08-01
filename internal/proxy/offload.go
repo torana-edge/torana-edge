@@ -16,6 +16,11 @@ import (
 // offloadTimeout bounds a single cheap-model summarization call.
 const offloadTimeout = 30 * time.Second
 
+// maxOffloadResponseBytes bounds what is read back from the offload provider.
+// A cheap-model summarization is a few KB; this is generous without allowing
+// an unbounded read of a faulty endpoint's memory.
+const maxOffloadResponseBytes = 1 << 20
+
 // offloadCompletionResult answers the torana_offload_completion host call: it
 // POSTs the plugin-supplied prompts to the configured offload provider and
 // returns the classified outcome. The value arm carries the marshaled
@@ -52,14 +57,14 @@ func (s *Server) offloadCompletionResult(ctx context.Context, payloadJSON string
 		// guaranteed-local model for PII scanning). Must exist in Providers.
 		Provider string `json:"provider"`
 		// APIKeyEnv is obsolete: credentials are configured on the provider (or
-		// the offload block), never selected by the guest. Parsed only so a
-		// non-empty value can be rejected loudly instead of silently honored.
-		APIKeyEnv string `json:"api_key_env"`
+		// the offload block), never selected by the guest. RawMessage so FIELD
+		// PRESENCE is detected — "" and null are just as obsolete as a value.
+		APIKeyEnv json.RawMessage `json:"api_key_env"`
 	}
 	if err := json.Unmarshal([]byte(payloadJSON), &p); err != nil {
 		return wasm.ExtensionRefusal(pbv2.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "offload: parse payload: %v", err)
 	}
-	if p.APIKeyEnv != "" {
+	if len(p.APIKeyEnv) > 0 {
 		return wasm.ExtensionRefusal(pbv2.ErrorCode_ERROR_CODE_INVALID_ARGUMENT,
 			"offload: api_key_env is obsolete; configure credentials on the provider")
 	}
@@ -145,9 +150,14 @@ func (s *Server) offloadCompletionResult(ctx context.Context, payloadJSON string
 		return wasm.ExtensionRefusal(pbv2.ErrorCode_ERROR_CODE_UNAVAILABLE, "offload: %v", err)
 	}
 	defer resp.Body.Close()
-	respBytes, err := io.ReadAll(resp.Body)
+	// limit+1 read so an oversized body is detected as an overflow instead of
+	// being truncated into a partial completion.
+	respBytes, err := io.ReadAll(io.LimitReader(resp.Body, maxOffloadResponseBytes+1))
 	if err != nil {
 		return wasm.ExtensionRefusal(pbv2.ErrorCode_ERROR_CODE_UNAVAILABLE, "offload: read response: %v", err)
+	}
+	if len(respBytes) > maxOffloadResponseBytes {
+		return wasm.ExtensionRefusal(pbv2.ErrorCode_ERROR_CODE_UNAVAILABLE, "offload: response exceeds %d bytes", maxOffloadResponseBytes)
 	}
 	if resp.StatusCode != 200 {
 		return wasm.ExtensionRefusal(pbv2.ErrorCode_ERROR_CODE_UNAVAILABLE,
