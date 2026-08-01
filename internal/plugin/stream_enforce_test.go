@@ -541,6 +541,129 @@ func TestVerifyStreamPolicyConsumesSDKRegistry(t *testing.T) {
 	}
 }
 
+// TestVerifyStreamPolicyRecursesAddedMessageFields proves that a topology
+// grant authorizes the new boundary itself, never the assistant-owned facts
+// nested below it. A ToolCallRef's id/name must be charged on both invention
+// and removal; a bound signature remains the signature verifier's concern.
+func TestVerifyStreamPolicyRecursesAddedMessageFields(t *testing.T) {
+	toolStart := func(signature string) *pbv2.StreamEvent {
+		return &pbv2.StreamEvent{Event: &pbv2.StreamEvent_ContentBlockStart{
+			ContentBlockStart: &pbv2.ContentBlockStart{
+				Index: 0,
+				Block: &pbv2.ContentBlockStart_ToolCall{ToolCall: &pbv2.ToolCallRef{
+					Id: "call_1", Name: "read", Signature: signature,
+				}},
+			},
+		}}
+	}
+	for _, tc := range []struct {
+		name     string
+		accepted []*pbv2.StreamEvent
+		returned []*pbv2.StreamEvent
+	}{
+		{"unsigned invention", nil, []*pbv2.StreamEvent{toolStart("")}},
+		{"unsigned removal", []*pbv2.StreamEvent{toolStart("")}, nil},
+		{"signed invention", nil, []*pbv2.StreamEvent{toolStart("provider-token")}},
+		{"signed removal", []*pbv2.StreamEvent{toolStart("provider-token")}, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := verifyStreamPolicy(tc.accepted, tc.returned, grant("ir.stream.write"))
+			if err == nil || !strings.Contains(err.Error(), "ir.messages.write.assistant") {
+				t.Fatalf("topology alone authorized nested tool semantics: %v", err)
+			}
+			err = verifyStreamPolicy(tc.accepted, tc.returned, grant("ir.stream.write", "ir.messages.write.assistant"))
+			if err != nil {
+				t.Fatalf("union grants rejected nested tool transaction: %v", err)
+			}
+		})
+	}
+}
+
+// TestVerifyStreamPolicyCorrelatesExactEventsFirst pins occurrence-aware
+// correlation. Exact host-owned events must reserve before changed fragments
+// are paired, and an exact reordering is topology-only rather than a made-up
+// semantic rewrite. The cases deliberately include duplicates.
+func TestVerifyStreamPolicyCorrelatesExactEventsFirst(t *testing.T) {
+	text := func(s string) *pbv2.StreamEvent { return textDelta(s) }
+	messageStart := &pbv2.StreamEvent{Event: &pbv2.StreamEvent_MessageStart{
+		MessageStart: &pbv2.MessageStart{Role: "assistant", Id: "m", Model: "model"},
+	}}
+	streamErr := &pbv2.StreamEvent{Event: &pbv2.StreamEvent_Error{
+		Error: &pbv2.StreamError{Code: 503, Message: "unchanged"},
+	}}
+	trailingHostEvents := map[string]*pbv2.StreamEvent{
+		"usage":         usageEvent(),
+		"message start": messageStart,
+		"stream error":  streamErr,
+		"message stop":  messageStopEvent("stop"),
+	}
+	for name, trailing := range trailingHostEvents {
+		t.Run("suppression before unchanged "+name, func(t *testing.T) {
+			err := verifyStreamPolicy(
+				[]*pbv2.StreamEvent{text("remove"), trailing},
+				[]*pbv2.StreamEvent{trailing},
+				grant("ir.stream.write", "ir.messages.write.assistant"),
+			)
+			if err != nil {
+				t.Fatalf("shifted unchanged host event was misclassified: %v", err)
+			}
+		})
+	}
+	for _, tc := range []struct {
+		name     string
+		accepted []*pbv2.StreamEvent
+		returned []*pbv2.StreamEvent
+		grants   []string
+		want     string
+	}{
+		{
+			name:     "assembly before unchanged usage",
+			accepted: []*pbv2.StreamEvent{text("a"), text("b"), usageEvent()},
+			returned: []*pbv2.StreamEvent{text("ab"), usageEvent()},
+			grants:   []string{"ir.stream.write", "ir.messages.write.assistant"},
+		},
+		{
+			name:     "assembly before unchanged message stop",
+			accepted: []*pbv2.StreamEvent{text("a"), text("b"), messageStopEvent("stop")},
+			returned: []*pbv2.StreamEvent{text("ab"), messageStopEvent("stop")},
+			grants:   []string{"ir.stream.write", "ir.messages.write.assistant"},
+		},
+		{
+			name:     "pure exact reorder is topology only",
+			accepted: []*pbv2.StreamEvent{text("a"), text("b")},
+			returned: []*pbv2.StreamEvent{text("b"), text("a")},
+			grants:   []string{"ir.stream.write"},
+		},
+		{
+			name:     "reorder plus mutation needs semantic union",
+			accepted: []*pbv2.StreamEvent{text("a"), text("b")},
+			returned: []*pbv2.StreamEvent{text("b"), text("c")},
+			grants:   []string{"ir.stream.write"},
+			want:     "ir.messages.write.assistant",
+		},
+		{
+			name:     "duplicate cardinality still charges removed semantic event",
+			accepted: []*pbv2.StreamEvent{text("a"), text("a")},
+			returned: []*pbv2.StreamEvent{text("a")},
+			grants:   []string{"ir.stream.write"},
+			want:     "ir.messages.write.assistant",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := verifyStreamPolicy(tc.accepted, tc.returned, grant(tc.grants...))
+			if tc.want == "" {
+				if err != nil {
+					t.Fatalf("exact-first transaction rejected: %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("error = %v, want %q", err, tc.want)
+			}
+		})
+	}
+}
+
 // TestEnforcePassOutputIsAtomicRegression reproduces the pre-round-2 state
 // poison: an invalid start marked index 1 seen before pass-mode replay, so a
 // later legitimate start at that index was rejected. Both the walker and the
@@ -623,10 +746,33 @@ func TestEnforceScopeOrdinalAdvancesOnceAcrossPlugins(t *testing.T) {
 
 	pp.mu.Lock()
 	vs := pp.streamVerify[reqID]
-	got := vs.scopeNum
+	pluginScopes := []int{vs.plugins[0].scopeNum, vs.plugins[1].scopeNum}
 	pp.mu.Unlock()
-	if got != 1 {
-		t.Fatalf("one accepted block close across two plugins advanced scope to %d, want 1", got)
+	for i, got := range pluginScopes {
+		if got != 1 {
+			t.Fatalf("plugin %d saw one accepted block close but reported scope %d, want 1", i, got)
+		}
+	}
+	pp.EndRequest(reqID)
+}
+
+// TestEnforceTransformedBoundariesUseDownstreamScope exercises the exact
+// transformed-stream case: one non-close host text delta fans out into TWO
+// completed boundaries before a downstream plugin sees it. The downstream
+// no-grant reindex is a late policy terminal at scope 2, never scope 0.
+func TestEnforceTransformedBoundariesUseDownstreamScope(t *testing.T) {
+	requireWASM(t, fixturesDir+"/test-stream-fanout-boundaries/plugin.wasm")
+	requireWASM(t, fixturesDir+"/test-stream-reindex-nogrant/plugin.wasm")
+	pp := newTestPipeline(t, fixturesDir, []string{"test-stream-fanout-boundaries", "test-stream-reindex-nogrant"})
+	const reqID = 7021
+
+	_, err := pp.RunOnStreamChunkVerified(context.Background(), reqID, &engine.StreamEvent{TextDelta: strPtr("source")})
+	var term *StreamTerminalError
+	if !errors.As(err, &term) || term.Kind != streamTerminalPlugin || term.Plugin != "test-stream-reindex-nogrant" {
+		t.Fatalf("expected downstream topology terminal, got %T: %v", err, err)
+	}
+	if term.Scope != 2 {
+		t.Fatalf("two downstream boundaries reported scope %d, want 2: %v", term.Scope, term)
 	}
 	pp.EndRequest(reqID)
 }

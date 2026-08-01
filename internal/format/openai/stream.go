@@ -406,6 +406,12 @@ func (s *StreamAdapter) serializeChatStream(ctx context.Context, w io.Writer, ev
 			return fmt.Errorf("openai serialize write: %w", err)
 		}
 	}
+	// ctx.Done and a closed events channel may both be ready. If the channel
+	// branch won the select above, never turn that aborted stream into a clean
+	// OpenAI completion marker.
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if _, err := fmt.Fprint(w, "data: [DONE]\n\n"); err != nil {
 		return fmt.Errorf("openai serialize write: %w", err)
 	}
@@ -583,6 +589,11 @@ func (s *StreamAdapter) serializeResponsesStream(ctx context.Context, w io.Write
 				return err
 			}
 		}
+	}
+	// See serializeChatStream: closure is not proof of normal completion when
+	// cancellation raced the channel receive.
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 	if _, err := fmt.Fprint(w, "data: [DONE]\n\n"); err != nil {
 		return err

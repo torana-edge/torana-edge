@@ -307,6 +307,11 @@ type pluginStreamState struct {
 	// walker enforces the per-event returned-side discipline on this
 	// plugin's output.
 	walker *streamDisciplineWalker
+	// scopeNum is this plugin's accepted-stream ordinal. It intentionally
+	// belongs to the plugin, not the request: upstream plugins may fan out or
+	// move boundaries before this plugin observes them, so a host-only counter
+	// would report scope 0 (or the wrong ordinal) for transformed streams.
+	scopeNum int
 }
 
 // streamVerifierState is the per-request enforcement state: the host-side
@@ -319,7 +324,6 @@ type streamVerifierState struct {
 	// without run_on_stream_chunk.
 	plugins  []*pluginStreamState
 	terminal *StreamTerminalError
-	scopeNum int
 }
 
 func newStreamVerifierState(pp *PluginPipeline) *streamVerifierState {
@@ -418,21 +422,23 @@ func isScopeCloseEvent(ev *pbv2.StreamEvent) bool {
 	return false
 }
 
-// closeScope runs the LATE scope check for one plugin: the SDK field-policy
-// transaction plus verifyStreamPrefix over the whole-stream prefix ending at
-// this scope close. A violation is late
+// closeScope runs the LATE scope check for one plugin and advances that
+// plugin's accepted-stream ordinal. The SDK field-policy transaction plus
+// verifyStreamPrefix run over the whole-stream prefix ending at this scope. A violation is late
 // (earlier output of the block has already been forwarded) and terminates
 // under BOTH failure modes. An *acceptedStreamError from the verifier's own
 // accepted-side validation is a HOST defect — the plugin's failure_mode never
 // applies.
-func (vs *streamVerifierState) closeScope(pvs *pluginStreamState, scopes ...int) error {
-	scope := 0
-	if len(scopes) == 0 {
-		vs.scopeNum++
-		scope = vs.scopeNum
-	} else {
-		scope = scopes[0]
-	}
+func (vs *streamVerifierState) closeScope(pvs *pluginStreamState) error {
+	pvs.scopeNum++
+	return vs.checkScope(pvs, pvs.scopeNum)
+}
+
+// checkScope verifies a completed transaction at an already-assigned ordinal.
+// A single upstream HookResult may fan out several close events before the
+// next plugin invocation. That fan-out is intentionally one atomic policy
+// transaction, but its diagnostics use the last real ordinal rather than 0.
+func (vs *streamVerifierState) checkScope(pvs *pluginStreamState, scope int) error {
 	if err := verifyStreamPrefix(pvs.accepted, pvs.returned, pvs.lp.plugin.HasGrant); err != nil {
 		var ae *acceptedStreamError
 		if errors.As(err, &ae) {
@@ -551,27 +557,18 @@ func (pp *PluginPipeline) EndStreamVerified(reqID uint64) error {
 			continue
 		}
 		if err := pvs.walker.end(); err != nil {
-			return vs.terminate(streamTerminalPlugin, pvs.lp.manifest.Name, -1, vs.scopeNum, err)
+			return vs.terminate(streamTerminalPlugin, pvs.lp.manifest.Name, -1, pvs.scopeNum, err)
 		}
 	}
 	// End-of-stream scope: anything accumulated since the last accepted-side
-	// scope close (including a stream that never closed a scope). The ordinal
-	// advances once for the accepted scope, not once per plugin.
-	pending := false
-	for _, pvs := range vs.plugins {
-		if pvs != nil && pvs.scopeStart < len(pvs.accepted) {
-			pending = true
-			break
-		}
-	}
-	if pending {
-		vs.scopeNum++
-	}
+	// scope close (including a stream that never closed a scope). Each plugin's
+	// ordinal follows its own accepted stream, which is the only stable model
+	// after upstream fan-out/suppression.
 	for _, pvs := range vs.plugins {
 		if pvs == nil || pvs.scopeStart >= len(pvs.accepted) {
 			continue
 		}
-		if err := vs.closeScope(pvs, vs.scopeNum); err != nil {
+		if err := vs.closeScope(pvs); err != nil {
 			return err
 		}
 	}
@@ -590,16 +587,11 @@ func (pp *PluginPipeline) runOnStreamChunk(ctx context.Context, reqID uint64, ch
 	pp.mu.Unlock()
 
 	hostEvent := pbconv.ToPBStreamEvent(chunk)
-	scope := 0
 	if vs != nil {
 		// Pre-commit host-side validation: a malformed ACCEPTED event is a
 		// host/adaptor defect and terminates before the event is forwarded.
 		if err := vs.host.walk(hostEvent); err != nil {
 			return nil, vs.terminate(streamTerminalHost, "host", eventIndex(hostEvent), 0, err)
-		}
-		if isScopeCloseEvent(hostEvent) {
-			vs.scopeNum++
-			scope = vs.scopeNum
 		}
 	}
 
@@ -732,23 +724,29 @@ func (pp *PluginPipeline) runOnStreamChunk(ctx context.Context, reqID uint64, ch
 		// runs after this plugin processed the close event, so the returned
 		// buffer includes the plugin's output for it.
 		if vs != nil && pvs != nil {
-			scopeClosed := false
+			scopeCloses := 0
 			messageStopped := false
 			for i := callAcceptedStart; i < len(pvs.accepted); i++ {
 				if isScopeCloseEvent(pvs.accepted[i]) {
-					scopeClosed = true
+					scopeCloses++
 				}
 				if _, ok := pvs.accepted[i].Event.(*pbv2.StreamEvent_MessageStop); ok {
 					messageStopped = true
 				}
 			}
-			if scopeClosed {
+			if scopeCloses != 0 {
+				// All accepted events in this HookResult are one atomic policy
+				// transaction. Count every close it created so the terminal's
+				// scope reports the last real boundary, even when no host event
+				// itself closed a scope.
+				pvs.scopeNum += scopeCloses
+				scope := pvs.scopeNum
 				if messageStopped {
 					if err := pvs.walker.end(); err != nil {
 						return nil, vs.terminate(streamTerminalPlugin, pvs.lp.manifest.Name, -1, scope, err)
 					}
 				}
-				if err := vs.closeScope(pvs, scope); err != nil {
+				if err := vs.checkScope(pvs, scope); err != nil {
 					return nil, err
 				}
 			}

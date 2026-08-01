@@ -448,6 +448,12 @@ func (s *StreamAdapter) SerializeStream(ctx context.Context, w io.Writer, events
 			}
 		}
 	}
+	// A closed event channel can win a select at the same time cancellation is
+	// ready. Check again before synthesizing the successful message envelope
+	// and message_stop frame.
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 
 	// An empty event stream still yields a valid message envelope.
 	if err := ensureStarted(); err != nil {

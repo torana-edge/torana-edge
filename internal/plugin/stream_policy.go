@@ -54,79 +54,134 @@ func (d streamPolicyDiff) topology(path string) error {
 	return d.require(string(outboundpolicy.StreamTopologySection()), path)
 }
 
-// events compares the event sequence as a stream transaction.  Pairing by
-// position preserves the meaning of a one-for-one text or tool-argument
-// rewrite (semantic grant only).  Count/action changes are topology, and an
-// otherwise identical multiset in a different order is topology as well.
-// Fragment assembly necessarily changes count, so it charges topology plus the
-// recursively observed semantic fields of the added/removed fragments.
+// events compares the event sequence as a stream transaction. Exact events
+// are reserved occurrence-by-occurrence before any changed event is paired.
+// This is essential for buffering: suppressing a text fragment must not pair
+// it with a following, unchanged Usage frame merely because the Usage shifted
+// left. Only the residual, genuinely changed events are paired positionally.
+// Count/action/boundary changes and moved exact events require topology;
+// added/removed residual events still recurse to charge semantic fields and
+// reject host-owned facts.
 func (d streamPolicyDiff) events(accepted, returned []*pbv2.StreamEvent, path string) error {
 	if len(accepted) != len(returned) {
 		if err := d.topology(path); err != nil {
 			return err
 		}
 	}
-	if sameEventMultiset(accepted, returned) && !sameEventOrder(accepted, returned) {
+	matches, err := exactEventMatches(accepted, returned)
+	if err != nil {
+		return fmt.Errorf("stream policy exact correlation: %w", err)
+	}
+	acceptedReserved := make([]bool, len(accepted))
+	returnedReserved := make([]bool, len(returned))
+	moved := false
+	for _, match := range matches {
+		acceptedReserved[match.accepted] = true
+		returnedReserved[match.returned] = true
+		moved = moved || match.accepted != match.returned
+	}
+	if moved {
 		if err := d.topology(path + " order"); err != nil {
 			return err
 		}
 	}
 
-	n := len(accepted)
-	if len(returned) < n {
-		n = len(returned)
+	var changedAccepted, changedReturned []int
+	for i := range accepted {
+		if !acceptedReserved[i] {
+			changedAccepted = append(changedAccepted, i)
+		}
+	}
+	for i := range returned {
+		if !returnedReserved[i] {
+			changedReturned = append(changedReturned, i)
+		}
+	}
+	n := len(changedAccepted)
+	if len(changedReturned) < n {
+		n = len(changedReturned)
 	}
 	for i := 0; i < n; i++ {
-		p := fmt.Sprintf("%s[%d]", path, i)
-		if err := d.event(accepted[i], returned[i], p); err != nil {
+		ai, ri := changedAccepted[i], changedReturned[i]
+		if err := d.event(accepted[ai], returned[ri], fmt.Sprintf("%s[%d→%d]", path, ai, ri)); err != nil {
 			return err
 		}
 	}
-	for i := n; i < len(accepted); i++ {
-		if err := d.eventMissing(accepted[i], fmt.Sprintf("%s[%d]", path, i)); err != nil {
+	for i := n; i < len(changedAccepted); i++ {
+		ai := changedAccepted[i]
+		if err := d.eventMissing(accepted[ai], fmt.Sprintf("%s[%d]", path, ai)); err != nil {
 			return err
 		}
 	}
-	for i := n; i < len(returned); i++ {
-		if err := d.eventMissing(returned[i], fmt.Sprintf("%s[%d]", path, i)); err != nil {
+	for i := n; i < len(changedReturned); i++ {
+		ri := changedReturned[i]
+		if err := d.eventMissing(returned[ri], fmt.Sprintf("%s[%d]", path, ri)); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func sameEventOrder(a, b []*pbv2.StreamEvent) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if !proto.Equal(a[i], b[i]) {
-			return false
-		}
-	}
-	return true
+type exactEventMatch struct {
+	accepted int
+	returned int
 }
 
-func sameEventMultiset(a, b []*pbv2.StreamEvent) bool {
-	if len(a) != len(b) {
-		return false
+// exactEventMatches first reserves same-position occurrences, then reserves
+// every remaining proto.Equal occurrence by a deterministic wire key. The
+// same-position phase gives duplicate events a stable, minimum-movement
+// correspondence; the second phase makes a reordering topology-only.
+func exactEventMatches(accepted, returned []*pbv2.StreamEvent) ([]exactEventMatch, error) {
+	acceptedReserved := make([]bool, len(accepted))
+	returnedReserved := make([]bool, len(returned))
+	matches := make([]exactEventMatch, 0, min(len(accepted), len(returned)))
+	for i := range accepted {
+		if i < len(returned) && proto.Equal(accepted[i], returned[i]) {
+			acceptedReserved[i] = true
+			returnedReserved[i] = true
+			matches = append(matches, exactEventMatch{accepted: i, returned: i})
+		}
 	}
-	counts := make(map[string]int, len(a))
-	for _, ev := range a {
-		wire, err := proto.Marshal(ev)
+	byWire := make(map[string][]int, len(returned))
+	for i, ev := range returned {
+		if returnedReserved[i] {
+			continue
+		}
+		wire, err := streamEventWireKey(ev)
 		if err != nil {
-			return false
+			return nil, err
 		}
-		counts[string(wire)]++
+		byWire[wire] = append(byWire[wire], i)
 	}
-	for _, ev := range b {
-		wire, err := proto.Marshal(ev)
-		if err != nil || counts[string(wire)] == 0 {
-			return false
+	for i, ev := range accepted {
+		if acceptedReserved[i] {
+			continue
 		}
-		counts[string(wire)]--
+		wire, err := streamEventWireKey(ev)
+		if err != nil {
+			return nil, err
+		}
+		for _, j := range byWire[wire] {
+			if !returnedReserved[j] && proto.Equal(ev, returned[j]) {
+				acceptedReserved[i] = true
+				returnedReserved[j] = true
+				matches = append(matches, exactEventMatch{accepted: i, returned: j})
+				break
+			}
+		}
 	}
-	return true
+	return matches, nil
+}
+
+func streamEventWireKey(ev *pbv2.StreamEvent) (string, error) {
+	if ev == nil {
+		return "<nil>", nil
+	}
+	wire, err := (proto.MarshalOptions{Deterministic: true}).Marshal(ev)
+	if err != nil {
+		return "", err
+	}
+	return string(wire), nil
 }
 
 func eventArm(ev *pbv2.StreamEvent) string {
@@ -295,21 +350,39 @@ func (d streamPolicyDiff) changedPresent(m protoreflect.Message, fd protoreflect
 		return nil // verifyStream{Prefix} owns the whole-scope rule.
 	case outboundpolicy.PolicySection, outboundpolicy.PolicyTopology:
 		section, _ := p.Section()
-		return d.require(string(section), path)
+		if err := d.require(string(section), path); err != nil {
+			return err
+		}
+		// A changed message-valued section/topology field grants its parent
+		// AND recursively accounts for every nested fact. In particular,
+		// topology may permit a new ContentBlockStart but not invent its
+		// ToolCallRef id/name without assistant-write authority.
+		return d.recursePresent(m, fd, path)
 	case outboundpolicy.PolicyContainer, outboundpolicy.PolicyFixedContainer, outboundpolicy.PolicyDelegate:
-		if fd.IsList() {
-			for i := 0; i < m.Get(fd).List().Len(); i++ {
-				if err := d.messagePresent(m.Get(fd).List().Get(i).Message(), fmt.Sprintf("%s[%d]", path, i)); err != nil {
-					return err
-				}
-			}
-			return nil
-		}
-		if fd.Kind() == protoreflect.MessageKind || fd.Kind() == protoreflect.GroupKind {
-			return d.messagePresent(m.Get(fd).Message(), path)
-		}
+		return d.recursePresent(m, fd, path)
 	}
 	return fmt.Errorf("stream policy cannot add/remove %s", path)
+}
+
+// recursePresent applies nested policies to a material value newly present on
+// one side of the transaction. Scalar section/topology fields have no nested
+// facts after their parent was charged; containers must actually be messages.
+func (d streamPolicyDiff) recursePresent(m protoreflect.Message, fd protoreflect.FieldDescriptor, path string) error {
+	if fd.IsList() {
+		for i := 0; i < m.Get(fd).List().Len(); i++ {
+			if fd.Kind() != protoreflect.MessageKind && fd.Kind() != protoreflect.GroupKind {
+				return fmt.Errorf("stream policy container %s is not a message", path)
+			}
+			if err := d.messagePresent(m.Get(fd).List().Get(i).Message(), fmt.Sprintf("%s[%d]", path, i)); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	if fd.Kind() == protoreflect.MessageKind || fd.Kind() == protoreflect.GroupKind {
+		return d.messagePresent(m.Get(fd).Message(), path)
+	}
+	return nil
 }
 
 func (d streamPolicyDiff) changedBoth(a, b protoreflect.Value, fd protoreflect.FieldDescriptor, p outboundpolicy.FieldPolicy, path string) error {

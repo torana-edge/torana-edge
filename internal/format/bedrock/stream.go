@@ -572,6 +572,11 @@ func (s *Stream) SerializeStream(ctx context.Context, w io.Writer, events <-chan
 			}
 		}
 	}
+	// A closed channel is only a clean end when the serializer context remains
+	// live. Avoid flushing/closing a partial Bedrock stream after cancellation.
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 
 	// Close any open thinking block at end of stream
 	if err := closeThinking(); err != nil {
