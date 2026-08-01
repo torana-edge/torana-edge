@@ -307,10 +307,10 @@ type pluginStreamState struct {
 	// walker enforces the per-event returned-side discipline on this
 	// plugin's output.
 	walker *streamDisciplineWalker
-	// scopeNum is this plugin's accepted-stream ordinal. It intentionally
+	// scopeNum is this plugin's verified completed-scope ordinal. It intentionally
 	// belongs to the plugin, not the request: upstream plugins may fan out or
-	// move boundaries before this plugin observes them, so a host-only counter
-	// would report scope 0 (or the wrong ordinal) for transformed streams.
+	// move boundaries before this plugin observes them, and a plugin may CREATE
+	// a complete returned scope before its accepted input closes.
 	scopeNum int
 }
 
@@ -602,9 +602,11 @@ func (pp *PluginPipeline) runOnStreamChunk(ctx context.Context, reqID uint64, ch
 		}
 		var pvs *pluginStreamState
 		callAcceptedStart := 0
+		callReturnedStart := 0
 		if vs != nil {
 			pvs = vs.plugins[pi]
 			callAcceptedStart = len(pvs.accepted)
+			callReturnedStart = len(pvs.returned)
 			for _, ev := range current {
 				pvs.accepted = append(pvs.accepted, ev)
 			}
@@ -716,32 +718,46 @@ func (pp *PluginPipeline) runOnStreamChunk(ctx context.Context, reqID uint64, ch
 		}
 		current = next
 
-		// Scope close on the ACCEPTED side: if this plugin saw a
-		// ContentBlockStop or MessageStop this call, the scope it closes is
-		// now fully captured on both sides — run the LATE check. The check
-		// is driven by the plugin's OWN accepted events (a fan-out or
-		// suppression by an upstream plugin can move the boundary), and it
-		// runs after this plugin processed the close event, so the returned
-		// buffer includes the plugin's output for it.
+		// A completed scope on EITHER side is enough to verify the current
+		// transaction before next escapes to another plugin or the serializer.
+		// Accepted-side closes cover ordinary pass-through/suppression; returned-
+		// side closes cover a plugin that creates a complete replacement block
+		// from a non-close input. Without the latter, a last plugin could invent
+		// a tool or text block and release it before EndStreamVerified catches it.
+		// The two counters are deliberately paired: coincident accepted/returned
+		// stops represent one scope, while fan-out on either side advances to the
+		// last real ordinal in this single atomic HookResult batch.
 		if vs != nil && pvs != nil {
-			scopeCloses := 0
-			messageStopped := false
+			acceptedCloses, returnedCloses := 0, 0
+			acceptedMessageStop, returnedMessageStop := false, false
 			for i := callAcceptedStart; i < len(pvs.accepted); i++ {
 				if isScopeCloseEvent(pvs.accepted[i]) {
-					scopeCloses++
+					acceptedCloses++
 				}
 				if _, ok := pvs.accepted[i].Event.(*pbv2.StreamEvent_MessageStop); ok {
-					messageStopped = true
+					acceptedMessageStop = true
 				}
+			}
+			for i := callReturnedStart; i < len(pvs.returned); i++ {
+				if isScopeCloseEvent(pvs.returned[i]) {
+					returnedCloses++
+				}
+				if _, ok := pvs.returned[i].Event.(*pbv2.StreamEvent_MessageStop); ok {
+					returnedMessageStop = true
+				}
+			}
+			scopeCloses := acceptedCloses
+			if returnedCloses > scopeCloses {
+				scopeCloses = returnedCloses
 			}
 			if scopeCloses != 0 {
 				// All accepted events in this HookResult are one atomic policy
-				// transaction. Count every close it created so the terminal's
-				// scope reports the last real boundary, even when no host event
-				// itself closed a scope.
+				// transaction. Count the larger side so a coincident close is not
+				// double-counted while a multi-scope fan-out reports its last real
+				// boundary.
 				pvs.scopeNum += scopeCloses
 				scope := pvs.scopeNum
-				if messageStopped {
+				if acceptedMessageStop || returnedMessageStop {
 					if err := pvs.walker.end(); err != nil {
 						return nil, vs.terminate(streamTerminalPlugin, pvs.lp.manifest.Name, -1, scope, err)
 					}

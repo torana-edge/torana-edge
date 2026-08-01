@@ -777,6 +777,78 @@ func TestEnforceTransformedBoundariesUseDownstreamScope(t *testing.T) {
 	pp.EndRequest(reqID)
 }
 
+// TestEnforceReturnedCompleteScopeBeforeRelease proves a LAST plugin cannot
+// invent and close a complete scope from a bare non-close input, then rely on
+// EndStreamVerified running after the unauthorized events have reached the
+// serializer. A returned-side close triggers the transaction before this call
+// returns any output.
+func TestEnforceReturnedCompleteScopeBeforeRelease(t *testing.T) {
+	t.Run("ungranted complete text block is terminal with no output", func(t *testing.T) {
+		requireWASM(t, fixturesDir+"/test-stream-complete-block-nogrant/plugin.wasm")
+		pp := newTestPipeline(t, fixturesDir, []string{"test-stream-complete-block-nogrant"})
+		const reqID = 7022
+		out, err := pp.RunOnStreamChunkVerified(context.Background(), reqID, &engine.StreamEvent{TextDelta: strPtr("accepted")})
+		if len(out) != 0 {
+			t.Fatalf("ungranted completed scope escaped before terminal: %+v", out)
+		}
+		var term *StreamTerminalError
+		if !errors.As(err, &term) || term.Kind != streamTerminalPlugin || term.Plugin != "test-stream-complete-block-nogrant" {
+			t.Fatalf("expected no-grant plugin terminal, got %T: %v", err, err)
+		}
+		if term.Scope != 1 || !strings.Contains(term.Error(), "ir.stream.write") {
+			t.Fatalf("wrong returned-scope terminal: %v", term)
+		}
+		pp.EndRequest(reqID)
+	})
+
+	t.Run("union grants allow complete text block", func(t *testing.T) {
+		requireWASM(t, fixturesDir+"/test-stream-complete-block-granted/plugin.wasm")
+		pp := newTestPipeline(t, fixturesDir, []string{"test-stream-complete-block-granted"})
+		const reqID = 7023
+		out, err := pp.RunOnStreamChunkVerified(context.Background(), reqID, &engine.StreamEvent{TextDelta: strPtr("accepted")})
+		if err != nil {
+			t.Fatalf("granted complete scope rejected: %v", err)
+		}
+		if len(out) != 3 || out[0].BlockStart == nil || out[1].TextDelta == nil || out[2].BlockStop == nil {
+			t.Fatalf("granted complete scope lowered incorrectly: %+v", out)
+		}
+		if err := pp.EndStreamVerified(reqID); err != nil {
+			t.Fatalf("granted completed scope failed at end: %v", err)
+		}
+		pp.EndRequest(reqID)
+	})
+
+	t.Run("invented signed tool is signature added even with grants", func(t *testing.T) {
+		requireWASM(t, fixturesDir+"/test-stream-complete-signed-tool/plugin.wasm")
+		pp := newTestPipeline(t, fixturesDir, []string{"test-stream-complete-signed-tool"})
+		const reqID = 7024
+		out, err := pp.RunOnStreamChunkVerified(context.Background(), reqID, &engine.StreamEvent{TextDelta: strPtr("accepted")})
+		if len(out) != 0 {
+			t.Fatalf("invented signed tool escaped before terminal: %+v", out)
+		}
+		var term *StreamTerminalError
+		if !errors.As(err, &term) || term.Kind != streamTerminalPlugin || !strings.Contains(term.Error(), "signature added") {
+			t.Fatalf("invented signature did not classify as added: %T: %v", err, err)
+		}
+		pp.EndRequest(reqID)
+	})
+
+	t.Run("two returned scopes are one atomic check at the last ordinal", func(t *testing.T) {
+		requireWASM(t, fixturesDir+"/test-stream-complete-block-nogrant/plugin.wasm")
+		pp := newTestPipeline(t, fixturesDir, []string{"test-stream-complete-block-nogrant"})
+		const reqID = 7025
+		out, err := pp.RunOnStreamChunkVerified(context.Background(), reqID, &engine.StreamEvent{TextDelta: strPtr("two")})
+		if len(out) != 0 {
+			t.Fatalf("partial two-scope output escaped before terminal: %+v", out)
+		}
+		var term *StreamTerminalError
+		if !errors.As(err, &term) || term.Kind != streamTerminalPlugin || term.Scope != 2 {
+			t.Fatalf("two returned scopes reported wrong terminal: %T: %v", err, err)
+		}
+		pp.EndRequest(reqID)
+	})
+}
+
 // TestEndStreamVerifiedRejectsReturnedMissingStop closes the laundering hole
 // where a plugin could forward a start/delta but suppress its stop and rely on
 // ir.stream.write to make the incomplete returned block look like whole-block
