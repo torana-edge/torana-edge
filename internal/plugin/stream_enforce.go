@@ -632,9 +632,7 @@ func (pp *PluginPipeline) runOnStreamChunk(ctx context.Context, reqID uint64, ch
 			pvs = vs.plugins[pi]
 			callAcceptedStart = len(pvs.accepted)
 			callReturnedStart = len(pvs.returned)
-			for _, ev := range current {
-				pvs.accepted = append(pvs.accepted, ev)
-			}
+			pvs.accepted = append(pvs.accepted, current...)
 		}
 		next := make([]*pbv2.StreamEvent, 0, len(current))
 		for _, ev := range current {
