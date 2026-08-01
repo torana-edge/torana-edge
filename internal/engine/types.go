@@ -58,6 +58,23 @@ type Message struct {
 	// untouched. Breakpoints are positional: adapters re-emit the marker on
 	// the last wire block rendered for this message. Nil when absent.
 	CacheControl map[string]any
+
+	// TrailingSignature is a standalone provider signature on a trailing
+	// signature-only part (Code Assist's final {"thoughtSignature","text":""}
+	// part after earlier text). SignatureScopeTrailingStandalone: binds the
+	// preceding closed text/thinking content of this message; does not bind
+	// tool-call blocks. The host must clear it when the covered content
+	// changes, or reject the mutation. Empty when the provider sent none.
+	TrailingSignature string
+
+	// ContentSignature is a provider signature carried ON an ordinary text
+	// part (Gemini/Code Assist thoughtSignature beside non-thought text),
+	// covering that part's content. SignatureScopeSameMessage: binds this
+	// message's Content field. Distinct from ThinkingSignature (thinking
+	// blocks) and TrailingSignature (standalone final part). The host must
+	// clear it when the covered content changes, or reject the mutation.
+	// Empty when the provider sent no content-bound signature.
+	ContentSignature string
 }
 
 // ToolCall represents an assistant's request to invoke a tool.

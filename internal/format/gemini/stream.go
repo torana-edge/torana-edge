@@ -70,6 +70,12 @@ func (s *StreamAdapter) ParseStream(body io.Reader) <-chan engine.StreamEvent {
 		defer close(ch)
 		reader := bufio.NewReader(body)
 		var lastUsage *geminiUsageMetadata
+		// Per-stream tool-call block counter. The ABI invariant
+		// (SignatureScopeToolCallBlockByIndex) requires block indexes unique
+		// within one streamed message: parallel Gemini parts must each receive
+		// a distinct sequential index, shared by that block's Start/Delta/End.
+		// Shared across chunks because parts arrive split over SSE frames.
+		var blockIndex int
 		for {
 			line, err := reader.ReadBytes('\n')
 			trimmed := bytes.TrimSpace(line)
@@ -86,7 +92,7 @@ func (s *StreamAdapter) ParseStream(body io.Reader) <-chan engine.StreamEvent {
 					payload = nil
 				}
 				if len(payload) > 0 {
-					if aborted := emitChunk(ch, payload, &lastUsage); aborted {
+					if aborted := emitChunk(ch, payload, &lastUsage, &blockIndex); aborted {
 						return
 					}
 				}
@@ -105,7 +111,7 @@ func (s *StreamAdapter) ParseStream(body io.Reader) <-chan engine.StreamEvent {
 
 // emitChunk parses one SSE payload and pushes its events. Returns true if the
 // stream should abort (unrecoverable error already sent).
-func emitChunk(ch chan<- engine.StreamEvent, payload []byte, lastUsage **geminiUsageMetadata) bool {
+func emitChunk(ch chan<- engine.StreamEvent, payload []byte, lastUsage **geminiUsageMetadata, blockIndex *int) bool {
 	var frame streamFrame
 	if err := json.Unmarshal(payload, &frame); err != nil {
 		ch <- engine.StreamEvent{Error: &engine.StreamError{Code: -1, Message: fmt.Sprintf("gemini: parse frame: %v", err)}}
@@ -131,7 +137,7 @@ func emitChunk(ch chan<- engine.StreamEvent, payload []byte, lastUsage **geminiU
 
 	if candidate.Content != nil {
 		for _, part := range candidate.Content.Parts {
-			if aborted := emitPart(ch, part); aborted {
+			if aborted := emitPart(ch, part, blockIndex); aborted {
 				return true
 			}
 		}
@@ -154,33 +160,38 @@ func emitChunk(ch chan<- engine.StreamEvent, payload []byte, lastUsage **geminiU
 	return false
 }
 
-func emitPart(ch chan<- engine.StreamEvent, part geminiPart) bool {
+func emitPart(ch chan<- engine.StreamEvent, part geminiPart, blockIndex *int) bool {
 	switch {
 	case part.FunctionCall != nil:
+		// One functionCall part is one tool-call block: assign the block's
+		// sequential index once and share it across Start/Delta/End so the
+		// events of a block stay bound together (SignatureScopeToolCallBlockByIndex).
+		idx := *blockIndex
+		*blockIndex = idx + 1
 		id := part.FunctionCall.ID
 		if id == "" {
 			id = part.FunctionCall.Name
 		}
-		ch <- engine.StreamEvent{ToolCallStart: &engine.ToolCallStart{Index: 0, ID: id, Name: part.FunctionCall.Name, Signature: part.ThoughtSignature}}
+		ch <- engine.StreamEvent{ToolCallStart: &engine.ToolCallStart{Index: idx, ID: id, Name: part.FunctionCall.Name, Signature: part.ThoughtSignature}}
 		argsJSON, err := json.Marshal(part.FunctionCall.Args)
 		if err != nil {
 			ch <- engine.StreamEvent{Error: &engine.StreamError{Code: -1, Message: fmt.Sprintf("gemini: marshal function call args: %v", err)}}
 			return true
 		}
 		delta := string(argsJSON)
-		ch <- engine.StreamEvent{ToolCallDelta: &engine.ToolCallDelta{Index: 0, ArgumentsDelta: delta}}
-		ch <- engine.StreamEvent{ToolCallEnd: &engine.ToolCallEnd{Index: 0}}
+		ch <- engine.StreamEvent{ToolCallDelta: &engine.ToolCallDelta{Index: idx, ArgumentsDelta: delta}}
+		ch <- engine.StreamEvent{ToolCallEnd: &engine.ToolCallEnd{Index: idx}}
 	case part.Thought:
-		if part.Text != "" {
-			t := part.Text
+		if partText(part) != "" {
+			t := partText(part)
 			ch <- engine.StreamEvent{ThinkingDelta: &t}
 		}
 		if part.ThoughtSignature != "" {
 			sig := part.ThoughtSignature
 			ch <- engine.StreamEvent{SignatureDelta: &sig}
 		}
-	case part.Text != "":
-		t := part.Text
+	case partText(part) != "":
+		t := partText(part)
 		ch <- engine.StreamEvent{TextDelta: &t}
 		if part.ThoughtSignature != "" {
 			sig := part.ThoughtSignature
@@ -245,17 +256,20 @@ func (s *StreamAdapter) SerializeStream(ctx context.Context, w io.Writer, events
 			pendingUsage = event.Usage
 
 		case event.TextDelta != nil:
-			if err := writeFrame(w, chunkPart(geminiPart{Text: *event.TextDelta}), s.Wrapped); err != nil {
+			if err := writeFrame(w, chunkPart(geminiPart{Text: new(*event.TextDelta)}), s.Wrapped); err != nil {
 				return err
 			}
 
 		case event.ThinkingDelta != nil:
-			if err := writeFrame(w, chunkPart(geminiPart{Thought: true, Text: *event.ThinkingDelta}), s.Wrapped); err != nil {
+			if err := writeFrame(w, chunkPart(geminiPart{Thought: true, Text: new(*event.ThinkingDelta)}), s.Wrapped); err != nil {
 				return err
 			}
 
 		case event.SignatureDelta != nil:
-			if err := writeFrame(w, chunkPart(geminiPart{ThoughtSignature: *event.SignatureDelta}), s.Wrapped); err != nil {
+			// The standalone signature part keeps the provider's EXPLICIT empty
+			// text member ({"text":"","thoughtSignature":…}): a bare
+			// {"thoughtSignature":…} would not round-trip the text arm.
+			if err := writeFrame(w, chunkPart(geminiPart{Text: new(""), ThoughtSignature: *event.SignatureDelta}), s.Wrapped); err != nil {
 				return err
 			}
 

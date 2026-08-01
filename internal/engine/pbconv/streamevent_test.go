@@ -55,6 +55,25 @@ func TestToolCallMapsOntoTheContentBlockSequence(t *testing.T) {
 	}
 }
 
+// Parallel tool calls must arrive at the wire with their distinct sequential
+// block indexes intact: the index is what binds each delta and signature to its
+// block (SignatureScopeToolCallBlockByIndex), so collapsing them would make
+// deltas of one call bind to another.
+func TestToPBStreamEventPreservesDistinctBlockIndexes(t *testing.T) {
+	for _, idx := range []int{0, 1} {
+		start := ToPBStreamEvent(&engine.StreamEvent{
+			ToolCallStart: &engine.ToolCallStart{Index: idx, ID: "c", Name: "n"},
+		})
+		cbs, ok := start.Event.(*pb.StreamEvent_ContentBlockStart)
+		if !ok {
+			t.Fatalf("ToolCallStart(%d) did not become a ContentBlockStart: %T", idx, start.Event)
+		}
+		if cbs.ContentBlockStart.Index != int32(idx) {
+			t.Errorf("block index = %d, want %d", cbs.ContentBlockStart.Index, idx)
+		}
+	}
+}
+
 func TestToolCallSequenceRoundTrips(t *testing.T) {
 	for _, in := range []*engine.StreamEvent{
 		{ToolCallStart: &engine.ToolCallStart{Index: 1, ID: "c", Name: "n", Signature: "s"}},

@@ -203,7 +203,8 @@ func fingerprintSectionsSafe(req *pb.ChatRequest) safePrints {
 		var idx [8]byte
 		binary.LittleEndian.PutUint64(idx[:], uint64(i))
 		writeFramed(h, idx[:], []byte(m.Role), []byte(m.Content), m.ContentPartsJson,
-			[]byte(m.Thinking), []byte(m.ThinkingSignature), []byte(m.RedactedThinking),
+			[]byte(m.Thinking), []byte(m.ThinkingSignature), []byte(m.ContentSignature),
+			[]byte(m.TrailingSignature), []byte(m.RedactedThinking),
 			[]byte(m.ToolCallId), []byte(m.ToolName), m.CacheControlJson)
 		for _, tc := range m.ToolCalls {
 			writeFramed(h, []byte(tc.Id), []byte(tc.Name), tc.ArgumentsJson, []byte(tc.Signature))
@@ -446,6 +447,8 @@ var messageFieldSections = map[string]string{
 	"content_parts_json": "ir.messages.write.<role>",
 	"thinking":           "ir.messages.write.<role>",
 	"thinking_signature": "ir.messages.write.<role>",
+	"content_signature":  "ir.messages.write.<role>",
+	"trailing_signature": "ir.messages.write.<role>",
 	"redacted_thinking":  "ir.messages.write.<role>",
 	"tool_calls":         "ir.messages.write.<role>",
 	"tool_call_id":       "ir.messages.write.<role>",
