@@ -913,7 +913,12 @@ func verifyToolScopes(accepted, returned []toolCallScope, canWrite func(string) 
 // that gate, a marker whose typed content exactly matches an accepted
 // occurrence is that occurrence's token stripped over unchanged content
 // (dropped, rejected); a marker otherwise clears the accepted signed
-// occurrence at ITS OWN span ordinal (that span's content was rewritten).
+// occurrence at ITS OWN span ordinal (that span's content was rewritten) —
+// except that an EMPTY accepted scope is never rewritten (round-6): its
+// marker is classified by the same empty-binding rule verifyUnpairedBinding
+// applies without one, so a same-kind empty span stays dropped and a
+// DIFFERENT-kind empty span at the ordinal is suppression, topology-gated on
+// ir.stream.write.
 // What remains is decided from the returned span structure by
 // verifyUnpairedBinding: a missing span at the binding's position means the
 // signed block itself was suppressed (topology-gated), an EMPTY signed scope
@@ -1090,6 +1095,20 @@ func verifySignatureDeltaBindings(av, rv streamSignatureView, canWrite func(stri
 				}
 			}
 			if cleared >= 0 {
+				if acc[i].content.isEmpty() {
+					// Round-6: an explicit empty marker beside an EMPTY
+					// accepted scope must not bypass the kind check. The
+					// marker is the prescribed way to clear a token during a
+					// legitimate in-kind rewrite, but a different-kind span at
+					// the binding's ordinal means the signed block itself was
+					// suppressed — the same empty-binding classification
+					// verifyUnpairedBinding applies WITHOUT the marker: same
+					// kind is a dropped empty span (rejected), different kind
+					// is suppression, topology-gated on ir.stream.write.
+					if err := verifyUnpairedBinding(kind, acc[i], rv, canWrite); err != nil {
+						return err
+					}
+				}
 				emptyUsed[cleared] = true
 				consumed[i] = true
 				continue

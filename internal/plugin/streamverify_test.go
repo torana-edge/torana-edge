@@ -1515,6 +1515,101 @@ func TestStreamVerifyEmptyKindScopesDiffer(t *testing.T) {
 	}
 }
 
+// TestStreamVerifyEmptyKindClearMarkerIsTopology pins round-6: the
+// same-ordinal explicit empty clear marker must not bypass the kind check.
+// Round-5 taught verifyUnpairedBinding that a DIFFERENT-kind empty span at a
+// binding's ordinal is suppression (the signed block itself was suppressed;
+// topology, gated on ir.stream.write), but Phase 3 consumed a same-ordinal
+// empty SignatureDelta("") marker FIRST and never reached that
+// classification — accepted StartText(0)+Sig(T)+Stop(0) →
+// returned StartThinking(0)+Sig("")+Stop(0) passed with NO grants. The
+// marker is the prescribed way to clear a token during a legitimate in-kind
+// rewrite, and must not convert a different-kind replacement into an
+// ungranted rewrite: an EMPTY accepted scope is classified by the same
+// empty-binding rule with or without the marker, so the different-kind case
+// is suppression (the exact error without ir.stream.write, nil with it) and
+// the same-kind case stays dropped. Pinned for text→thinking AND
+// thinking→text, for zero-delta and explicit empty-delta signed blocks, with
+// and without the grant.
+func TestStreamVerifyEmptyKindClearMarkerIsTopology(t *testing.T) {
+	// emptyText/emptyThinking render an explicit text/thinking block with an
+	// optional (possibly EMPTY) delta of the matching kind and a
+	// signature_delta inside — sig "" renders the empty clear marker.
+	emptyText := func(sig string, emptyDelta bool) []*pbv2.StreamEvent {
+		out := []*pbv2.StreamEvent{{Event: &pbv2.StreamEvent_ContentBlockStart{
+			ContentBlockStart: &pbv2.ContentBlockStart{
+				Index: 0, Block: &pbv2.ContentBlockStart_Text{Text: &pbv2.TextBlock{}},
+			},
+		}}}
+		if emptyDelta {
+			out = append(out, textDelta(""))
+		}
+		out = append(out, signatureDelta(sig))
+		return append(out, &pbv2.StreamEvent{Event: &pbv2.StreamEvent_ContentBlockStop{
+			ContentBlockStop: &pbv2.ContentBlockStop{Index: 0},
+		}})
+	}
+	emptyThinking := func(sig string, emptyDelta bool) []*pbv2.StreamEvent {
+		out := []*pbv2.StreamEvent{{Event: &pbv2.StreamEvent_ContentBlockStart{
+			ContentBlockStart: &pbv2.ContentBlockStart{
+				Index: 0, Block: &pbv2.ContentBlockStart_Thinking{Thinking: &pbv2.ThinkingBlock{}},
+			},
+		}}}
+		if emptyDelta {
+			out = append(out, thinkingDelta(""))
+		}
+		out = append(out, signatureDelta(sig))
+		return append(out, &pbv2.StreamEvent{Event: &pbv2.StreamEvent_ContentBlockStop{
+			ContentBlockStop: &pbv2.ContentBlockStop{Index: 0},
+		}})
+	}
+
+	const wantErr = "suppressed a signed text/thinking block without " + streamWriteGrant
+	for _, tc := range []struct {
+		name     string
+		accepted []*pbv2.StreamEvent
+		returned []*pbv2.StreamEvent
+	}{
+		{"zero-delta: empty text scope cleared into empty thinking", emptyText(streamSigA, false), emptyThinking("", false)},
+		{"zero-delta: empty thinking scope cleared into empty text", emptyThinking(streamSigA, false), emptyText("", false)},
+		{"empty-delta: empty text scope cleared into empty thinking", emptyText(streamSigA, true), emptyThinking("", true)},
+		{"empty-delta: empty thinking scope cleared into empty text", emptyThinking(streamSigA, true), emptyText("", true)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := verifyStream(tc.accepted, tc.returned, noGrants)
+			if err == nil || err.Error() != wantErr {
+				t.Fatalf("different-kind empty clear without grant: err = %v, want exact suppression error", err)
+			}
+			if err := verifyStream(tc.accepted, tc.returned, withStreamWrite); err != nil {
+				t.Fatalf("different-kind empty clear with grant rejected: %v", err)
+			}
+		})
+	}
+
+	// Same-kind empty clear markers stay DROPPED: an unchanged empty scope
+	// with the token stripped is never a rewrite, marker or not. The
+	// zero-delta no-marker forms are pinned by
+	// TestStreamVerifyExplicitEmptySignedBlock; the empty-delta forms and
+	// the explicit-marker forms are pinned here under withEveryGrant.
+	for _, tc := range []struct {
+		name     string
+		accepted []*pbv2.StreamEvent
+		returned []*pbv2.StreamEvent
+	}{
+		{"zero-delta: empty text scope cleared in kind", emptyText(streamSigA, false), emptyText("", false)},
+		{"zero-delta: empty thinking scope cleared in kind", emptyThinking(streamSigA, false), emptyThinking("", false)},
+		{"empty-delta: empty text scope cleared in kind", emptyText(streamSigA, true), emptyText("", true)},
+		{"empty-delta: empty thinking scope cleared in kind", emptyThinking(streamSigA, true), emptyThinking("", true)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := verifyStream(tc.accepted, tc.returned, withEveryGrant)
+			if err == nil || !strings.Contains(err.Error(), "dropped") {
+				t.Fatalf("same-kind empty clear: err = %v, want dropped", err)
+			}
+		})
+	}
+}
+
 // TestStreamVerifyExactMatchesReserveReturnedSpans pins round-4 F2: Phase 1
 // consumes exact (token, typed-content) matches in consumed/retConsumed, but
 // the Phase-3 remaining multiset was rebuilt from ALL returned spans and
