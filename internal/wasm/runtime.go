@@ -481,20 +481,18 @@ type Runtime struct {
 	// release; shared stores (NewRuntimeWithCache) outlive the runtime.
 	ownsCache bool
 
-	// OffloadFunc handles torana_offload_completion host calls.
-	// Set by the server during initialization.
-	OffloadFunc func(ctx context.Context, payloadJSON string) (string, error)
-	// OffloadResultFunc exposes provider/model/usage while preserving the old
-	// OffloadFunc contract for external embedders.
-	OffloadResultFunc func(ctx context.Context, payloadJSON string) (economics.OffloadResult, error)
+	// OffloadResultFunc handles torana_offload_completion host calls. Set by
+	// the server during initialization. The callback returns a classified
+	// ExtensionResult: the value arm is the marshaled OffloadResult, refusals
+	// are framed classified HostErrors. This is the ONE offload callback — the
+	// legacy OffloadFunc form was removed (internal/wasm is host-internal, so
+	// there are no external embedders to preserve it for).
+	OffloadResultFunc func(ctx context.Context, payloadJSON string) ExtensionResult
 
-	// SavingsFunc handles torana_record_savings host calls (compaction
-	// byte savings reported by plugins), attributed to the calling plugin.
-	// Set by the server.
-	SavingsFunc func(plugin string, originalBytes, finalBytes int64)
-	// CompactionReportFunc receives the richer, batch-aware savings ABI. When
-	// set it supersedes SavingsFunc; the old callback remains for embedders and
-	// tests using the original two-field contract.
+	// CompactionReportFunc handles torana_record_savings host calls
+	// (compaction byte savings reported by plugins), attributed to the
+	// calling plugin. Set by the server. This is the ONE savings callback —
+	// the legacy two-field SavingsFunc form was removed.
 	CompactionReportFunc func(ctx context.Context, plugin string, report economics.CompactionReport)
 	// EvaluateCompactionFunc performs the optional operator-priced economic
 	// gate before a plugin mutates history.
@@ -540,13 +538,34 @@ type Runtime struct {
 	// CachePricingFunc answers torana_cache_pricing: given a provider and
 	// model, what the prompt cache costs and how long it lives. Data, not a
 	// decision — the host holds the prices, the plugin holds the policy.
-	CachePricingFunc func(ctx context.Context, payloadJSON string) string
+	// Returns the classified outcome: malformed input is a refused
+	// INVALID_ARGUMENT, an unknown provider a refused NOT_CONFIGURED, and a
+	// legitimate query result — priced, or explicitly unpriced/unconfigured —
+	// is a domain value whose status field the guest reads.
+	CachePricingFunc func(ctx context.Context, payloadJSON string) ExtensionResult
 
 	// SendRequestFunc backs torana_send_request: a plugin-originated provider
 	// request. The plugin name is passed so the host can meter it against that
 	// plugin's budget and attribute it in the feed — spend a plugin initiates
 	// must still be traceable to the plugin that initiated it.
-	SendRequestFunc func(ctx context.Context, plugin, payloadJSON string) string
+	//
+	// It returns the domain envelope and a classified refusal. The value arm
+	// carries provider outcomes only — never a refusal, which would leave the
+	// SDK keying its sentinel off a status string. Refusals travel framed in
+	// the HostError arm: INVALID_ARGUMENT for malformed payloads, NOT_CONFIGURED
+	// for unknown providers, missing budgets or missing format adapters, and
+	// UNAVAILABLE for transport failure.
+	//
+	// The outcome is a classified ExtensionResult: provider outcomes travel in
+	// the value arm, refusals in the refusal arm.
+	SendRequestFunc func(ctx context.Context, plugin, payloadJSON string) ExtensionResult
+
+	// VerifyVirtualKeyFunc answers verify_virtual_key: whether a caller's
+	// virtual key is valid. The OSS proxy does not wire it — private-nucleus
+	// does — so an absent callback is a NOT_CONFIGURED refusal, never
+	// UNAVAILABLE: a declared permission that can never succeed in this host
+	// is a configuration gap, not a transient outage a plugin should retry.
+	VerifyVirtualKeyFunc func(ctx context.Context, payloadJSON string) ExtensionResult
 }
 
 // ObserveRequestMutation forwards a defensive copy to the host callback.
@@ -854,7 +873,9 @@ func (r *Runtime) dispatchHostCall(ctx context.Context, pluginName, cmd, args st
 		// is not.
 		var value []byte
 		var herr *pbv2.HostError
-		var res string // extension/domain JSON, moved into value at the exit
+		// res carries DOMAIN RESULTS only — refusals are framed classified
+		// hostErr, never a status string smuggled through the value arm.
+		var res string // domain JSON, moved into value at the exit
 		switch cmd {
 		case "env.block_request":
 			var a pbv2.BlockRequestArgs
@@ -1068,16 +1089,16 @@ func (r *Runtime) dispatchHostCall(ctx context.Context, pluginName, cmd, args st
 			value = []byte(strconv.FormatInt(time.Now().UnixMilli(), 10))
 		case "torana_send_request":
 			if r.SendRequestFunc == nil {
-				res = `{"status":"error","message":"plugin egress is not configured"}`
-			} else {
-				res = r.SendRequestFunc(ctx, pluginName, args)
+				herr = hostErr(pbv2.ErrorCode_ERROR_CODE_NOT_CONFIGURED, "plugin egress is not configured")
+				break
 			}
+			value, herr = r.applyExtensionResult("torana_send_request", r.SendRequestFunc(ctx, pluginName, args))
 		case "torana_cache_pricing":
 			if r.CachePricingFunc == nil {
-				res = `{"status":"unavailable","reason":"pricing_unconfigured"}`
-			} else {
-				res = r.CachePricingFunc(ctx, args)
+				herr = hostErr(pbv2.ErrorCode_ERROR_CODE_NOT_CONFIGURED, "cache pricing is not configured")
+				break
 			}
+			value, herr = r.applyExtensionResult("torana_cache_pricing", r.CachePricingFunc(ctx, args))
 		case "env.plugin_config":
 			// Return this plugin's config blob (plugins.config.<name>).
 			cfg := p.pluginConfig()
@@ -1113,26 +1134,24 @@ func (r *Runtime) dispatchHostCall(ctx context.Context, pluginName, cmd, args st
 			}
 			value = raw
 		case "torana_db_query":
-			res = `{"status":"error","message":"database not configured — set plugins.config.compactor.dsn"}`
+			herr = hostErr(pbv2.ErrorCode_ERROR_CODE_NOT_CONFIGURED, "database not configured — set plugins.config.compactor.dsn")
 		case "torana_kms_decrypt":
-			res = `{"status":"error","message":"KMS not configured — set TORANA_KMS_ENDPOINT"}`
+			herr = hostErr(pbv2.ErrorCode_ERROR_CODE_NOT_CONFIGURED, "KMS not configured — set TORANA_KMS_ENDPOINT")
 		case "torana_record_savings":
 			var report economics.CompactionReport
 			if err := json.Unmarshal([]byte(args), &report); err != nil {
-				res = `{"status":"error","message":"invalid payload"}`
+				herr = hostErr(pbv2.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "invalid payload")
 				break
 			}
 			report.Normalize()
 			if !report.Valid() {
-				res = `{"status":"error","message":"invalid payload"}`
+				herr = hostErr(pbv2.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "invalid payload")
 			} else if r.CompactionReportFunc != nil {
 				r.CompactionReportFunc(ctx, pluginName, report)
-				res = `{"status":"ok"}`
-			} else if r.SavingsFunc != nil {
-				r.SavingsFunc(pluginName, report.OriginalBytes, report.FinalBytes)
-				res = `{"status":"ok"}`
+				// Success is an EMPTY value arm: the savings were recorded, and
+				// there is no domain body to acknowledge with.
 			} else {
-				res = `{"status":"error","message":"savings tracking not configured"}`
+				herr = hostErr(pbv2.ErrorCode_ERROR_CODE_NOT_CONFIGURED, "savings tracking not configured")
 			}
 		case "torana_plugin_counter":
 			var counter struct {
@@ -1140,53 +1159,42 @@ func (r *Runtime) dispatchHostCall(ctx context.Context, pluginName, cmd, args st
 				Delta   int64  `json:"delta"`
 			}
 			if err := json.Unmarshal([]byte(args), &counter); err != nil || counter.Counter == "" {
-				res = `{"status":"error","message":"invalid payload"}`
+				herr = hostErr(pbv2.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "invalid payload")
 			} else if r.PluginCounterFunc != nil {
 				r.PluginCounterFunc(pluginName, counter.Counter, counter.Delta)
-				res = `{"status":"ok"}`
+				// Success is an EMPTY value arm: the counter was incremented, and
+				// there is no domain body to acknowledge with.
 			} else {
-				res = `{"status":"error","message":"plugin counter tracking not configured"}`
+				herr = hostErr(pbv2.ErrorCode_ERROR_CODE_NOT_CONFIGURED, "plugin counter tracking not configured")
 			}
 		case "torana_evaluate_compaction":
 			var report economics.CompactionReport
 			if err := json.Unmarshal([]byte(args), &report); err != nil {
-				res = `{"apply":false,"reason":"invalid_payload"}`
+				herr = hostErr(pbv2.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "invalid payload")
 				break
 			}
 			report.Normalize()
 			if !report.Valid() {
-				res = `{"apply":false,"reason":"invalid_payload"}`
+				herr = hostErr(pbv2.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "invalid payload")
 			} else if r.EvaluateCompactionFunc == nil {
-				res = `{"apply":false,"reason":"pricing_unconfigured"}`
+				herr = hostErr(pbv2.ErrorCode_ERROR_CODE_NOT_CONFIGURED, "compaction pricing is not configured")
 			} else {
 				decision := r.EvaluateCompactionFunc(ctx, report)
 				payload, _ := json.Marshal(decision)
 				res = string(payload)
 			}
 		case "torana_offload_completion":
-			if r.OffloadResultFunc != nil {
-				result, err := r.OffloadResultFunc(ctx, args)
-				if err != nil {
-					res = fmt.Sprintf(`{"status":"error","message":%q}`, err.Error())
-				} else {
-					payload, _ := json.Marshal(struct {
-						Status string `json:"status"`
-						economics.OffloadResult
-					}{Status: "ok", OffloadResult: result})
-					res = string(payload)
-				}
-			} else if r.OffloadFunc != nil {
-				result, err := r.OffloadFunc(ctx, args)
-				if err != nil {
-					res = fmt.Sprintf(`{"status":"error","message":%q}`, err.Error())
-				} else {
-					res = fmt.Sprintf(`{"status":"ok","completion":%q}`, result)
-				}
-			} else {
-				res = `{"status":"error","message":"offload not configured"}`
+			if r.OffloadResultFunc == nil {
+				herr = hostErr(pbv2.ErrorCode_ERROR_CODE_NOT_CONFIGURED, "offload not configured")
+				break
 			}
+			value, herr = r.applyExtensionResult("torana_offload_completion", r.OffloadResultFunc(ctx, args))
 		case "verify_virtual_key":
-			res = `{"status":"error","message":"unimplemented: enterprise auth is available in torana-edge/private-nucleus"}`
+			if r.VerifyVirtualKeyFunc == nil {
+				herr = hostErr(pbv2.ErrorCode_ERROR_CODE_NOT_CONFIGURED, "virtual key verification is not configured")
+				break
+			}
+			value, herr = r.applyExtensionResult("verify_virtual_key", r.VerifyVirtualKeyFunc(ctx, args))
 		default:
 			herr = hostErr(pbv2.ErrorCode_ERROR_CODE_NOT_FOUND, "unknown host call %q", cmd)
 		}

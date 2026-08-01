@@ -79,15 +79,20 @@ func newWarmerPipeline(t *testing.T, h *warmerHarness, conversations string, sta
 	rt.StateGetFunc = state.Get
 	rt.StateSetFunc = state.Set
 	rt.StateKeysFunc = state.Keys
-	rt.CachePricingFunc = func(_ context.Context, _ string) string { return h.pricing }
-	rt.SendRequestFunc = func(_ context.Context, _, payload string) string {
+	rt.CachePricingFunc = func(_ context.Context, _ string) wasm.ExtensionResult {
+		return wasm.ExtensionValue([]byte(h.pricing))
+	}
+	rt.SendRequestFunc = func(_ context.Context, _, payload string) wasm.ExtensionResult {
 		var req struct {
 			Provider  string `json:"provider"`
 			RequestPB string `json:"request_pb"`
 			Path      string `json:"path"`
 		}
 		if err := json.Unmarshal([]byte(payload), &req); err != nil {
-			return `{"status":"error","message":"bad payload"}`
+			// A payload the host cannot even parse is a caller bug, framed as a
+			// classified refusal — production never emits a {"message":...}
+			// value arm for a failure.
+			return wasm.ExtensionRefusal(pb.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "bad payload: %v", err)
 		}
 		raw, _ := base64.StdEncoding.DecodeString(req.RequestPB)
 		var chat pb.ChatRequest
@@ -101,20 +106,23 @@ func newWarmerPipeline(t *testing.T, h *warmerHarness, conversations string, sta
 		// anything cannot catch a malformed request, which is how an earlier
 		// version of this plugin shipped a refresh that appended a second
 		// consecutive user turn -- valid to this fake, rejected by Bedrock and
-		// fragile on Anthropic.
+		// fragile on Anthropic. The request was SENT, so the provider's refusal
+		// is a REACHED-provider outcome: a value arm carrying the actual HTTP
+		// status, exactly what the host reports for a provider 4xx.
 		if why := providerWouldReject(&chat); why != "" {
-			return `{"status":"error","message":"` + why + `"}`
+			return wasm.ExtensionValue([]byte(`{"http_status":400}`))
 		}
 
 		if h.httpStatus != 0 && h.httpStatus != 200 {
 			// The host reports transport success separately from what the
-			// provider said, so a refused request still arrives as status "ok".
-			return `{"status":"ok","http_status":` + strconv.Itoa(h.httpStatus) + `}`
+			// provider said, so a refused request still arrives as a value arm
+			// carrying the HTTP status (the error arm is the transport channel).
+			return wasm.ExtensionValue([]byte(`{"http_status":` + strconv.Itoa(h.httpStatus) + `}`))
 		}
 		if h.cacheHit {
-			return `{"status":"ok","http_status":200,"usage":{"input":100,"output":1,"cache_read":95,"cache_write":0}}`
+			return wasm.ExtensionValue([]byte(`{"http_status":200,"usage":{"input":100,"output":1,"cache_read":95,"cache_write":0}}`))
 		}
-		return `{"status":"ok","http_status":200,"usage":{"input":100,"output":1,"cache_read":0,"cache_write":100}}`
+		return wasm.ExtensionValue([]byte(`{"http_status":200,"usage":{"input":100,"output":1,"cache_read":0,"cache_write":100}}`))
 	}
 
 	cfg := map[string]any{"conversations": conversations, "warm_for_minutes": 45}
@@ -325,11 +333,13 @@ func TestWarmerWithoutClockGrantStoresNothing(t *testing.T) {
 		t.Fatal(err)
 	}
 	rt.StateGetFunc, rt.StateSetFunc, rt.StateKeysFunc = state.Get, state.Set, state.Keys
-	rt.CachePricingFunc = func(_ context.Context, _ string) string { return okPricing() }
+	rt.CachePricingFunc = func(_ context.Context, _ string) wasm.ExtensionResult {
+		return wasm.ExtensionValue([]byte(okPricing()))
+	}
 	sent := 0
-	rt.SendRequestFunc = func(_ context.Context, _, _ string) string {
+	rt.SendRequestFunc = func(_ context.Context, _, _ string) wasm.ExtensionResult {
 		sent++
-		return `{"status":"ok","http_status":200,"usage":{"cache_read":95}}`
+		return wasm.ExtensionValue([]byte(`{"http_status":200,"usage":{"cache_read":95}}`))
 	}
 
 	digest, err := BundleDigestForDir(dir + "/cache_warmer")

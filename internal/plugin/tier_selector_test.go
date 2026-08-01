@@ -36,7 +36,7 @@ func tierSelectorPipeline(t *testing.T, refreshOnRead bool, readRate, writeRate 
 	rt.StateGetFunc = state.Get
 	rt.StateSetFunc = state.Set
 	rt.StateKeysFunc = state.Keys
-	rt.CachePricingFunc = func(_ context.Context, _ string) string {
+	rt.CachePricingFunc = func(_ context.Context, _ string) wasm.ExtensionResult {
 		b, _ := json.Marshal(map[string]any{
 			"status":                   "ok",
 			"cache_read_usd_per_mtok":  readRate,
@@ -53,7 +53,7 @@ func tierSelectorPipeline(t *testing.T, refreshOnRead bool, readRate, writeRate 
 					"marker": map[string]any{"type": "ephemeral", "ttl": "1h"}},
 			},
 		})
-		return string(b)
+		return wasm.ExtensionValue(b)
 	}
 
 	pp, err := NewPipeline(rt, PluginConfig{
@@ -91,9 +91,9 @@ func tierSelectorPipelineWithMode(t *testing.T, mode string) *PluginPipeline {
 	}
 	rt.StateGetFunc = state.Get
 	rt.StateSetFunc = state.Set
-	rt.CachePricingFunc = func(_ context.Context, _ string) string {
-		return `{"status":"ok","refresh_on_read":true,"shortest_ttl_seconds":300,` +
-			`"write_read_ratio":12.5,"break_even_refreshes":11,` + anthropicTiers + `}`
+	rt.CachePricingFunc = func(_ context.Context, _ string) wasm.ExtensionResult {
+		return wasm.ExtensionValue([]byte(`{"status":"ok","refresh_on_read":true,"shortest_ttl_seconds":300,` +
+			`"write_read_ratio":12.5,"break_even_refreshes":11,` + anthropicTiers + `}`))
 	}
 
 	pp, err := NewPipeline(rt, PluginConfig{
@@ -220,8 +220,8 @@ func TestUnknownPricingLeavesRequestAlone(t *testing.T) {
 	state, _ := pluginstate.New(pluginstate.Options{})
 	rt.StateGetFunc = state.Get
 	rt.StateSetFunc = state.Set
-	rt.CachePricingFunc = func(_ context.Context, _ string) string {
-		return `{"status":"unavailable","reason":"no_pricing_configured"}`
+	rt.CachePricingFunc = func(_ context.Context, _ string) wasm.ExtensionResult {
+		return wasm.ExtensionValue([]byte(`{"status":"unavailable","reason":"no_pricing_configured"}`))
 	}
 
 	pp, err := NewPipeline(rt, PluginConfig{
@@ -277,8 +277,8 @@ func TestOffModeDoesNothing(t *testing.T) {
 	state, _ := pluginstate.New(pluginstate.Options{})
 	rt.StateGetFunc = state.Get
 	rt.StateSetFunc = state.Set
-	rt.CachePricingFunc = func(_ context.Context, _ string) string {
-		return `{"status":"ok","refresh_on_read":true,"shortest_ttl_seconds":300,"write_read_ratio":12.5,` + anthropicTiers + `}`
+	rt.CachePricingFunc = func(_ context.Context, _ string) wasm.ExtensionResult {
+		return wasm.ExtensionValue([]byte(`{"status":"ok","refresh_on_read":true,"shortest_ttl_seconds":300,"write_read_ratio":12.5,` + anthropicTiers + `}`))
 	}
 
 	pp, err := NewPipeline(rt, PluginConfig{
@@ -320,8 +320,8 @@ func TestDecisionSurvivesRestart(t *testing.T) {
 		}
 		rt.StateGetFunc = state.Get
 		rt.StateSetFunc = state.Set
-		rt.CachePricingFunc = func(_ context.Context, _ string) string {
-			return `{"status":"ok","refresh_on_read":true,"shortest_ttl_seconds":300,"write_read_ratio":12.5,"break_even_refreshes":11,` + anthropicTiers + `}`
+		rt.CachePricingFunc = func(_ context.Context, _ string) wasm.ExtensionResult {
+			return wasm.ExtensionValue([]byte(`{"status":"ok","refresh_on_read":true,"shortest_ttl_seconds":300,"write_read_ratio":12.5,"break_even_refreshes":11,` + anthropicTiers + `}`))
 		}
 		pp, err := NewPipeline(rt, PluginConfig{
 			Dir:             bundles,

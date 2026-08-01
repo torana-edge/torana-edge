@@ -3,11 +3,14 @@ package proxy
 import (
 	"context"
 	"encoding/json"
+	"math"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/torana-edge/torana-edge/internal/economics"
 	"github.com/torana-edge/torana-edge/internal/provider"
+	pbv2 "github.com/torana-edge/torana-plugin-sdk/pb/v2"
 )
 
 // anthropicRates are Claude Sonnet's shape: reads at 10% of base input, writes
@@ -37,13 +40,24 @@ func pricingServer(t *testing.T, prov provider.Provider) *Server {
 	return srv
 }
 
-func askPricing(t *testing.T, srv *Server, payload string) cachePricingResponse {
+// askPricing drives the REAL callback and decodes whichever arm it landed on:
+// the value arm is the domain pricing body (status is genuine data: ok vs
+// unavailable), a refusal is the framed classified HostError (caller bugs and
+// operator gaps travel there).
+func askPricing(t *testing.T, srv *Server, payload string) (cachePricingResponse, *pbv2.HostError) {
 	t.Helper()
-	var out cachePricingResponse
-	if err := json.Unmarshal([]byte(srv.cachePricing(context.Background(), payload)), &out); err != nil {
-		t.Fatalf("decode pricing response: %v", err)
+	res := srv.cachePricing(context.Background(), payload)
+	if err := res.Validate(); err != nil {
+		t.Fatalf("callback returned an invalid result: %v", err)
 	}
-	return out
+	if res.Refusal() != nil {
+		return cachePricingResponse{}, res.Refusal()
+	}
+	var out cachePricingResponse
+	if err := json.Unmarshal(res.Value(), &out); err != nil {
+		t.Fatalf("decode pricing response: %v (body %q)", err, string(res.Value()))
+	}
+	return out, nil
 }
 
 func fullyConfigured() provider.Provider {
@@ -66,7 +80,10 @@ func fullyConfigured() provider.Provider {
 // here makes a warming plugin lose money confidently.
 func TestBreakEvenArithmetic(t *testing.T) {
 	srv := pricingServer(t, fullyConfigured())
-	got := askPricing(t, srv, `{"provider":"anth","model":"claude-sonnet-4-5"}`)
+	got, herr := askPricing(t, srv, `{"provider":"anth","model":"claude-sonnet-4-5"}`)
+	if herr != nil {
+		t.Fatalf("priced query refused: %v", herr)
+	}
 
 	if got.Status != "ok" {
 		t.Fatalf("status = %q (%s), want ok", got.Status, got.Reason)
@@ -89,8 +106,12 @@ func TestBreakEvenArithmetic(t *testing.T) {
 }
 
 // TestUnavailableRatherThanGuessed is the discipline that keeps this honest.
-// Every gap must be an explicit unavailable with a machine-readable reason: a
-// plugin can only decline to spend money if the host refuses to invent numbers.
+// Every legitimate query gap — a model nobody priced, rates without cache
+// semantics — is an explicit "unavailable" with a machine-readable reason in
+// the VALUE arm: a plugin can only decline to spend money if the host refuses
+// to invent numbers. These are query RESULTS, not transport failures, which
+// is why they stay domain data while malformed input and unknown providers
+// are framed refusals (see TestCachePricingClassification).
 func TestUnavailableRatherThanGuessed(t *testing.T) {
 	noCacheRates := fullyConfigured()
 	noCacheRates.Pricing = map[string]economics.ModelPricing{
@@ -109,14 +130,15 @@ func TestUnavailableRatherThanGuessed(t *testing.T) {
 		payload string
 		want    string
 	}{
-		{"unknown provider", fullyConfigured(), `{"provider":"nope","model":"m"}`, pricingReasonUnknownProvider},
 		{"no pricing", noPricing, `{"provider":"anth","model":"claude-sonnet-4-5"}`, pricingReasonNoPricing},
 		{"no cache rates", noCacheRates, `{"provider":"anth","model":"claude-sonnet-4-5"}`, pricingReasonNoCacheRates},
 		{"no cache semantics", noCacheConfig, `{"provider":"anth","model":"claude-sonnet-4-5"}`, pricingReasonNoCacheConfig},
-		{"malformed payload", fullyConfigured(), `not json`, pricingReasonBadPayload},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got := askPricing(t, pricingServer(t, tc.prov), tc.payload)
+			got, herr := askPricing(t, pricingServer(t, tc.prov), tc.payload)
+			if herr != nil {
+				t.Fatalf("a legitimate query gap was framed as a refusal: %v", herr)
+			}
 			if got.Status != "unavailable" {
 				t.Fatalf("status = %q, want unavailable", got.Status)
 			}
@@ -127,11 +149,63 @@ func TestUnavailableRatherThanGuessed(t *testing.T) {
 	}
 }
 
+// TestCachePricingClassification is the F2 regression matrix over the REAL
+// callback: caller bugs and operator gaps are FRAMED classified refusals
+// (never smuggled through the value arm as a status string), while every
+// legitimate query result stays a domain value.
+func TestCachePricingClassification(t *testing.T) {
+	srv := pricingServer(t, fullyConfigured())
+
+	for _, tc := range []struct {
+		name    string
+		payload string
+		want    pbv2.ErrorCode
+	}{
+		{"malformed JSON", `not json`, pbv2.ErrorCode_ERROR_CODE_INVALID_ARGUMENT},
+		{"missing provider", `{"model":"claude-sonnet-4-5"}`, pbv2.ErrorCode_ERROR_CODE_INVALID_ARGUMENT},
+		{"missing model", `{"provider":"anth"}`, pbv2.ErrorCode_ERROR_CODE_INVALID_ARGUMENT},
+		{"unknown provider", `{"provider":"nope","model":"m"}`, pbv2.ErrorCode_ERROR_CODE_NOT_CONFIGURED},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, herr := askPricing(t, srv, tc.payload)
+			if herr == nil {
+				t.Fatalf("expected a framed refusal, got a value")
+			}
+			if herr.Code != tc.want {
+				t.Errorf("code = %v, want %v", herr.Code, tc.want)
+			}
+		})
+	}
+
+	// The domain arms are untouched by the framing split.
+	t.Run("unpriced model stays domain unavailable", func(t *testing.T) {
+		got, herr := askPricing(t, srv, `{"provider":"anth","model":"claude-opus-4-1"}`)
+		if herr != nil {
+			t.Fatalf("unpriced model refused: %v", herr)
+		}
+		if got.Status != "unavailable" || got.Reason != pricingReasonNoPricing {
+			t.Errorf("unpriced model returned status=%q reason=%q", got.Status, got.Reason)
+		}
+	})
+	t.Run("priced stays domain ok", func(t *testing.T) {
+		got, herr := askPricing(t, srv, `{"provider":"anth","model":"claude-sonnet-4-5"}`)
+		if herr != nil {
+			t.Fatalf("priced query refused: %v", herr)
+		}
+		if got.Status != "ok" || got.CacheReadUSDPerMTok != 0.3 {
+			t.Errorf("priced query returned status=%q read=%v", got.Status, got.CacheReadUSDPerMTok)
+		}
+	})
+}
+
 // TestUnknownModelIsUnpriced — pricing is keyed by exact model name with "*" as
 // the provider default, and a model nobody priced must not inherit another's
 // rates.
 func TestUnknownModelIsUnpriced(t *testing.T) {
-	got := askPricing(t, pricingServer(t, fullyConfigured()), `{"provider":"anth","model":"claude-opus-4-1"}`)
+	got, herr := askPricing(t, pricingServer(t, fullyConfigured()), `{"provider":"anth","model":"claude-opus-4-1"}`)
+	if herr != nil {
+		t.Fatalf("unpriced model refused: %v", herr)
+	}
 	if got.Status != "unavailable" || got.Reason != pricingReasonNoPricing {
 		t.Errorf("unpriced model returned status=%q reason=%q", got.Status, got.Reason)
 	}
@@ -145,7 +219,10 @@ func TestFreeCacheReportsNoAffordability(t *testing.T) {
 	free.Pricing = map[string]economics.ModelPricing{
 		"local": {CacheReadUSDPerMTok: f64(0), CacheWriteUSDPerMTok: f64(0)},
 	}
-	got := askPricing(t, pricingServer(t, free), `{"provider":"anth","model":"local"}`)
+	got, herr := askPricing(t, pricingServer(t, free), `{"provider":"anth","model":"local"}`)
+	if herr != nil {
+		t.Fatalf("free-cache query refused: %v", herr)
+	}
 
 	if got.Status != "ok" {
 		t.Fatalf("status = %q (%s), want ok", got.Status, got.Reason)
@@ -153,6 +230,47 @@ func TestFreeCacheReportsNoAffordability(t *testing.T) {
 	if got.BreakEvenRefreshes != 0 || got.WriteReadRatio != 0 {
 		t.Errorf("free cache reported ratio=%v refreshes=%d, want zeroes",
 			got.WriteReadRatio, got.BreakEvenRefreshes)
+	}
+}
+
+// TestCachePricingFramesMarshalFailureAsInternal — a cache-tier marker that
+// JSON cannot represent (here: NaN) is operator configuration, not guest
+// input, and config validation does not reject it — so the host must frame
+// the serialization failure as INTERNAL rather than smuggle an invented
+// {"status":"unavailable"} through the value arm as if it were a legitimate
+// pricing answer.
+func TestCachePricingFramesMarshalFailureAsInternal(t *testing.T) {
+	nanMarker := fullyConfigured()
+	nanMarker.Cache.Tiers[0].Marker = map[string]any{"type": math.NaN()}
+
+	// Config validation must NOT reject the marker (it is opaque); the host
+	// learns of the failure only when the pricing body is serialized.
+	srv, err := New(Config{
+		Port: "0",
+		Providers: func() provider.Config {
+			c := provider.DefaultConfig()
+			c.Providers = map[string]provider.Provider{"anth": nanMarker}
+			return c
+		}(),
+		ConfigPath: filepath.Join(t.TempDir(), "config.json"),
+	})
+	if err != nil {
+		t.Fatalf("config validation rejected the opaque marker: %v — the proof needs it to pass", err)
+	}
+	t.Cleanup(func() { srv.conversations.Close() })
+
+	res := srv.cachePricing(context.Background(), `{"provider":"anth","model":"claude-sonnet-4-5"}`)
+	if err := res.Validate(); err != nil {
+		t.Fatalf("callback returned an invalid result: %v", err)
+	}
+	if res.Refusal() == nil {
+		t.Fatalf("a serialization failure was framed as a value: %q", string(res.Value()))
+	}
+	if res.Refusal().Code != pbv2.ErrorCode_ERROR_CODE_INTERNAL {
+		t.Errorf("code = %v, want INTERNAL — an unrepresentable pricing body is a host invariant, not a query result", res.Refusal().Code)
+	}
+	if !strings.Contains(res.Refusal().Message, "encode pricing response") {
+		t.Errorf("message = %q, want it to name the encode failure", res.Refusal().Message)
 	}
 }
 
@@ -165,7 +283,10 @@ func TestNonRefreshableReportsSemanticsAnyway(t *testing.T) {
 		RefreshOnRead: false,
 		Tiers:         []provider.CacheTier{{TTLSeconds: 300, WriteMultiplier: 1.0}},
 	}
-	got := askPricing(t, pricingServer(t, auto), `{"provider":"anth","model":"claude-sonnet-4-5"}`)
+	got, herr := askPricing(t, pricingServer(t, auto), `{"provider":"anth","model":"claude-sonnet-4-5"}`)
+	if herr != nil {
+		t.Fatalf("non-refreshable query refused: %v", herr)
+	}
 
 	if got.Status != "ok" {
 		t.Fatalf("status = %q, want ok", got.Status)

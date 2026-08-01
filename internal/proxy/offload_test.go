@@ -7,9 +7,12 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
+	"github.com/torana-edge/torana-edge/internal/economics"
 	"github.com/torana-edge/torana-edge/internal/provider"
+	pbv2 "github.com/torana-edge/torana-plugin-sdk/pb/v2"
 )
 
 func offloadServer(t *testing.T, wantAuth, wantModel string) *httptest.Server {
@@ -43,6 +46,25 @@ func offloadConfig(url string) provider.Config {
 	}
 }
 
+// offloadCall drives the REAL callback and decodes whichever arm it landed
+// on: the value arm is the marshaled OffloadResult; a refusal is the framed
+// classified HostError. Callers assert on the arm that matches their case.
+func offloadCall(t *testing.T, s *Server, ctx context.Context, payload string) (economics.OffloadResult, *pbv2.HostError) {
+	t.Helper()
+	res := s.offloadCompletionResult(ctx, payload)
+	if err := res.Validate(); err != nil {
+		t.Fatalf("callback returned an invalid result: %v", err)
+	}
+	if res.Refusal() != nil {
+		return economics.OffloadResult{}, res.Refusal()
+	}
+	var out economics.OffloadResult
+	if err := json.Unmarshal(res.Value(), &out); err != nil {
+		t.Fatalf("decode offload result: %v (body %q)", err, string(res.Value()))
+	}
+	return out, nil
+}
+
 // TestOffloadUsesCallerCredential: without a dedicated key, the caller's
 // request credential is forwarded to the offload provider.
 func TestOffloadUsesCallerCredential(t *testing.T) {
@@ -55,12 +77,12 @@ func TestOffloadUsesCallerCredential(t *testing.T) {
 	}
 
 	ctx := context.WithValue(context.Background(), reqStateKey{}, &reqState{ID: 1, CallerAuth: "caller-key"})
-	got, err := s.offloadCompletion(ctx, `{"system_prompt":"sum","user_prompt":"text"}`)
-	if err != nil {
-		t.Fatalf("offloadCompletion: %v", err)
+	got, herr := offloadCall(t, s, ctx, `{"system_prompt":"sum","user_prompt":"text"}`)
+	if herr != nil {
+		t.Fatalf("offloadCompletion refused: %v", herr)
 	}
-	if got != "summary" {
-		t.Fatalf("got %q want summary", got)
+	if got.Completion != "summary" {
+		t.Fatalf("got %q want summary", got.Completion)
 	}
 }
 
@@ -76,9 +98,9 @@ func TestOffloadResultReturnsProviderModelAndUsage(t *testing.T) {
 		t.Fatalf("New: %v", err)
 	}
 	ctx := context.WithValue(context.Background(), reqStateKey{}, &reqState{ID: 1, CallerAuth: "k"})
-	got, err := s.offloadCompletionResult(ctx, `{"system_prompt":"sum","user_prompt":"text"}`)
-	if err != nil {
-		t.Fatalf("offloadCompletionResult: %v", err)
+	got, herr := offloadCall(t, s, ctx, `{"system_prompt":"sum","user_prompt":"text"}`)
+	if herr != nil {
+		t.Fatalf("offloadCompletion refused: %v", herr)
 	}
 	if got.Completion != "summary" || got.Provider != "cheap" || got.Model != "cheap-1" {
 		t.Fatalf("identity/completion not returned: %+v", got)
@@ -100,9 +122,9 @@ func TestOffloadResultReturnsDeepSeekCacheUsageAndRecordsStats(t *testing.T) {
 		t.Fatalf("New: %v", err)
 	}
 	ctx := context.WithValue(context.Background(), reqStateKey{}, &reqState{ID: 1, CallerAuth: "k"})
-	got, err := s.offloadCompletionResult(ctx, `{"system_prompt":"sum","user_prompt":"text"}`)
-	if err != nil {
-		t.Fatalf("offloadCompletionResult: %v", err)
+	got, herr := offloadCall(t, s, ctx, `{"system_prompt":"sum","user_prompt":"text"}`)
+	if herr != nil {
+		t.Fatalf("offloadCompletion refused: %v", herr)
 	}
 	if got.Usage.CacheReadTokens != 900 {
 		t.Fatalf("DeepSeek cache usage not returned: %+v", got.Usage)
@@ -128,8 +150,8 @@ func TestOffloadDedicatedKeyWins(t *testing.T) {
 	}
 
 	ctx := context.WithValue(context.Background(), reqStateKey{}, &reqState{ID: 1, CallerAuth: "caller-key"})
-	if _, err := s.offloadCompletion(ctx, `{"system_prompt":"sum","user_prompt":"text"}`); err != nil {
-		t.Fatalf("offloadCompletion: %v", err)
+	if _, herr := offloadCall(t, s, ctx, `{"system_prompt":"sum","user_prompt":"text"}`); herr != nil {
+		t.Fatalf("offloadCompletion refused: %v", herr)
 	}
 }
 
@@ -154,8 +176,8 @@ func TestOffloadRequestBudget(t *testing.T) {
 		t.Fatalf("New: %v", err)
 	}
 	ctx := context.WithValue(context.Background(), reqStateKey{}, &reqState{ID: 1, CallerAuth: "k"})
-	if _, err := s.offloadCompletion(ctx, `{"system_prompt":"sum","user_prompt":"text"}`); err != nil {
-		t.Fatalf("offloadCompletion: %v", err)
+	if _, herr := offloadCall(t, s, ctx, `{"system_prompt":"sum","user_prompt":"text"}`); herr != nil {
+		t.Fatalf("offloadCompletion refused: %v", herr)
 	}
 	if gotMaxTokens < 4096 {
 		t.Fatalf("offload max_tokens = %v, want >= 4096 (reasoning budget headroom)", gotMaxTokens)
@@ -177,12 +199,12 @@ func TestOffloadEmptyContentSurfacesFinishReason(t *testing.T) {
 		t.Fatalf("New: %v", err)
 	}
 	ctx := context.WithValue(context.Background(), reqStateKey{}, &reqState{ID: 1, CallerAuth: "k"})
-	_, err = s.offloadCompletion(ctx, `{"system_prompt":"sum","user_prompt":"text"}`)
-	if err == nil {
-		t.Fatal("expected error for empty completion")
+	_, herr := offloadCall(t, s, ctx, `{"system_prompt":"sum","user_prompt":"text"}`)
+	if herr == nil {
+		t.Fatal("expected a refusal for empty completion")
 	}
-	if !strings.Contains(err.Error(), "length") {
-		t.Fatalf("error %q should surface finish_reason \"length\"", err)
+	if !strings.Contains(herr.Message, "length") {
+		t.Fatalf("refusal %q should surface finish_reason \"length\"", herr.Message)
 	}
 }
 
@@ -215,12 +237,12 @@ func TestOffloadProviderOverride(t *testing.T) {
 		t.Fatalf("New: %v", err)
 	}
 	ctx := context.WithValue(context.Background(), reqStateKey{}, &reqState{ID: 1, CallerAuth: "caller-key"})
-	got, err := s.offloadCompletion(ctx, `{"system_prompt":"s","user_prompt":"u","provider":"local","model":"local-1"}`)
-	if err != nil {
-		t.Fatalf("offloadCompletion: %v", err)
+	got, herr := offloadCall(t, s, ctx, `{"system_prompt":"s","user_prompt":"u","provider":"local","model":"local-1"}`)
+	if herr != nil {
+		t.Fatalf("offloadCompletion refused: %v", herr)
 	}
-	if got != "local-summary" {
-		t.Fatalf("got %q, want local-summary (call must hit the overridden provider)", got)
+	if got.Completion != "local-summary" {
+		t.Fatalf("got %q, want local-summary (call must hit the overridden provider)", got.Completion)
 	}
 	if gotModel != "local-1" {
 		t.Fatalf("model = %q, want local-1", gotModel)
@@ -262,8 +284,8 @@ func TestOffloadProviderOverrideCannotReceiveDefaultEncryptedKey(t *testing.T) {
 		t.Fatalf("Encrypt: %v", err)
 	}
 	s.config.Providers.Offload.APIKeyEnc = encrypted
-	if _, err := s.offloadCompletion(context.Background(), `{"provider":"local","model":"local-1","user_prompt":"u"}`); err != nil {
-		t.Fatalf("offloadCompletion: %v", err)
+	if _, herr := offloadCall(t, s, context.Background(), `{"provider":"local","model":"local-1","user_prompt":"u"}`); herr != nil {
+		t.Fatalf("offloadCompletion refused: %v", herr)
 	}
 	if gotAuth != "" {
 		t.Fatalf("Authorization = %q, want empty", gotAuth)
@@ -291,63 +313,114 @@ func TestOffloadProviderOverrideUsesOnlyOverrideProviderCredential(t *testing.T)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	if _, err := s.offloadCompletion(context.Background(), `{"provider":"local","model":"local-1","user_prompt":"u"}`); err != nil {
-		t.Fatalf("offloadCompletion: %v", err)
+	if _, herr := offloadCall(t, s, context.Background(), `{"provider":"local","model":"local-1","user_prompt":"u"}`); herr != nil {
+		t.Fatalf("offloadCompletion refused: %v", herr)
 	}
 	if gotAuth != "Bearer local-secret" {
 		t.Fatalf("Authorization = %q, want provider-scoped credential", gotAuth)
 	}
 }
 
-func TestOffloadProviderOverrideCannotSelectArbitraryEnvironmentSecret(t *testing.T) {
-	t.Setenv("UNRELATED_PROCESS_SECRET", "must-not-leak")
-	cfg := provider.Config{
+// TestOffloadClassification is the F1 regression matrix over the REAL
+// callback: every failure branch must land on the code a plugin can act on,
+// instead of the old blanket UNAVAILABLE.
+//
+//   - INVALID_ARGUMENT: caller bugs — malformed payload, override missing its
+//     model, guest-selected api_key_env.
+//   - NOT_CONFIGURED: operator gaps — offload disabled, unknown override
+//     provider.
+//   - UNAVAILABLE: valid call that could not complete — transport failure,
+//     upstream non-200.
+func TestOffloadClassification(t *testing.T) {
+	upstream := offloadServer(t, "", "cheap-1")
+	defer upstream.Close()
+
+	disabled := provider.Config{
+		Providers: map[string]provider.Provider{"cheap": {URL: upstream.URL, Format: "openai"}},
+		// Offload not enabled at all.
+	}
+	enabled := provider.Config{
 		Providers: map[string]provider.Provider{
-			"cheap": {URL: "http://unused", Format: "openai"},
-			"local": {URL: "http://127.0.0.1:1", Format: "openai"},
+			"cheap": {URL: upstream.URL, Format: "openai"},
+			"local": {URL: upstream.URL, Format: "openai"},
 		},
 		Offload: provider.OffloadConfig{Enabled: true, Provider: "cheap", Model: "cheap-1"},
 	}
-	s, err := New(Config{Providers: cfg})
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-	_, err = s.offloadCompletion(context.Background(), `{
-		"provider":"local","model":"local-1","user_prompt":"u",
-		"api_key_env":"UNRELATED_PROCESS_SECRET"
-	}`)
-	if err == nil || !strings.Contains(err.Error(), "host-owned") {
-		t.Fatalf("arbitrary environment selector error = %v", err)
-	}
-}
-
-// TestOffloadOverrideRequiresModel: overriding the provider without a model errors
-// (off.Model belongs to the default provider).
-func TestOffloadOverrideRequiresModel(t *testing.T) {
-	cfg := provider.Config{
+	withDead := provider.Config{
 		Providers: map[string]provider.Provider{
-			"cheap": {URL: "http://x", Format: "openai"},
-			"local": {URL: "http://y", Format: "openai"},
+			"cheap": {URL: upstream.URL, Format: "openai"},
+			"dead":  {URL: "http://127.0.0.1:1", Format: "openai"},
 		},
 		Offload: provider.OffloadConfig{Enabled: true, Provider: "cheap", Model: "cheap-1"},
 	}
-	s, _ := New(Config{Providers: cfg})
-	ctx := context.WithValue(context.Background(), reqStateKey{}, &reqState{ID: 1})
-	if _, err := s.offloadCompletion(ctx, `{"user_prompt":"u","provider":"local"}`); err == nil {
-		t.Fatal("expected error when overriding provider without a model")
+	non200 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, `{"error":"boom"}`, http.StatusBadGateway)
+	}))
+	defer non200.Close()
+	withNon200 := provider.Config{
+		Providers: map[string]provider.Provider{
+			"cheap": {URL: non200.URL, Format: "openai"},
+		},
+		Offload: provider.OffloadConfig{Enabled: true, Provider: "cheap", Model: "cheap-1"},
 	}
-}
 
-// TestOffloadDisabledErrors: offload without config errors instead of
-// guessing a provider.
-func TestOffloadDisabledErrors(t *testing.T) {
-	s, err := New(Config{})
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-	if _, err := s.offloadCompletion(context.Background(), `{"user_prompt":"x"}`); err == nil {
-		t.Fatal("expected error for unconfigured offload")
-	}
+	t.Run("malformed payload", func(t *testing.T) {
+		s, _ := New(Config{Providers: enabled})
+		_, herr := offloadCall(t, s, context.Background(), `not json`)
+		if herr == nil || herr.Code != pbv2.ErrorCode_ERROR_CODE_INVALID_ARGUMENT {
+			t.Fatalf("malformed payload: got %v, want INVALID_ARGUMENT", herr)
+		}
+	})
+	t.Run("offload disabled", func(t *testing.T) {
+		s, _ := New(Config{Providers: disabled})
+		_, herr := offloadCall(t, s, context.Background(), `{"user_prompt":"u"}`)
+		if herr == nil || herr.Code != pbv2.ErrorCode_ERROR_CODE_NOT_CONFIGURED {
+			t.Fatalf("disabled offload: got %v, want NOT_CONFIGURED", herr)
+		}
+	})
+	t.Run("unknown override provider", func(t *testing.T) {
+		s, _ := New(Config{Providers: enabled})
+		_, herr := offloadCall(t, s, context.Background(), `{"user_prompt":"u","provider":"ghost","model":"m"}`)
+		if herr == nil || herr.Code != pbv2.ErrorCode_ERROR_CODE_NOT_CONFIGURED {
+			t.Fatalf("unknown override: got %v, want NOT_CONFIGURED", herr)
+		}
+	})
+	t.Run("override without model", func(t *testing.T) {
+		s, _ := New(Config{Providers: enabled})
+		_, herr := offloadCall(t, s, context.Background(), `{"user_prompt":"u","provider":"local"}`)
+		if herr == nil || herr.Code != pbv2.ErrorCode_ERROR_CODE_INVALID_ARGUMENT {
+			t.Fatalf("override without model: got %v, want INVALID_ARGUMENT", herr)
+		}
+	})
+	t.Run("guest-selected api_key_env", func(t *testing.T) {
+		// The guest field is obsolete: it must be rejected even when it names
+		// the provider's own configured variable — a guest may never select
+		// process environment variables.
+		t.Setenv("UNRELATED_PROCESS_SECRET", "must-not-leak")
+		t.Setenv("TORANA_LOCAL_KEY", "local-secret")
+		s, _ := New(Config{Providers: enabled})
+		_, herr := offloadCall(t, s, context.Background(), `{
+			"provider":"local","model":"local-1","user_prompt":"u",
+			"api_key_env":"TORANA_LOCAL_KEY"
+		}`)
+		if herr == nil || herr.Code != pbv2.ErrorCode_ERROR_CODE_INVALID_ARGUMENT || !strings.Contains(herr.Message, "obsolete") {
+			t.Fatalf("guest api_key_env: got %v, want INVALID_ARGUMENT naming the field obsolete", herr)
+		}
+	})
+	t.Run("transport failure", func(t *testing.T) {
+		s, _ := New(Config{Providers: withDead})
+		_, herr := offloadCall(t, s, context.Background(), `{"user_prompt":"u","provider":"dead","model":"m"}`)
+		if herr == nil || herr.Code != pbv2.ErrorCode_ERROR_CODE_UNAVAILABLE {
+			t.Fatalf("dead endpoint: got %v, want UNAVAILABLE", herr)
+		}
+	})
+	t.Run("upstream non-200", func(t *testing.T) {
+		s, _ := New(Config{Providers: withNon200})
+		_, herr := offloadCall(t, s, context.Background(), `{"user_prompt":"u"}`)
+		if herr == nil || herr.Code != pbv2.ErrorCode_ERROR_CODE_UNAVAILABLE {
+			t.Fatalf("non-200: got %v, want UNAVAILABLE", herr)
+		}
+	})
 }
 
 // TestOffloadValidation: enabling offload with a bad reference fails at
@@ -373,4 +446,157 @@ func TestOffloadValidation(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestOffloadRejectsApiKeyEnvPresence — the field is REMOVED, not deprecated:
+// any occurrence — empty string or null — is rejected as INVALID_ARGUMENT,
+// not silently honored or ignored.
+func TestOffloadRejectsApiKeyEnvPresence(t *testing.T) {
+	upstream := offloadServer(t, "", "cheap-1")
+	defer upstream.Close()
+
+	s, err := New(Config{Providers: offloadConfig(upstream.URL)})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	ctx := context.WithValue(context.Background(), reqStateKey{}, &reqState{ID: 1})
+
+	for _, payload := range []string{
+		`{"system_prompt":"s","user_prompt":"u","api_key_env":""}`,
+		`{"system_prompt":"s","user_prompt":"u","api_key_env":null}`,
+		`{"system_prompt":"s","user_prompt":"u","api_key_env":"MY_VAR"}`,
+	} {
+		_, herr := offloadCall(t, s, ctx, payload)
+		if herr == nil || herr.Code != pbv2.ErrorCode_ERROR_CODE_INVALID_ARGUMENT {
+			t.Fatalf("payload %s was not rejected as INVALID_ARGUMENT: %v", payload, herr)
+		}
+	}
+}
+
+// TestOffloadResponseLimits — an oversized offload body is a refusal, not a
+// truncated completion; an exactly-at-limit body is a full success.
+func TestOffloadResponseLimits(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		size       int
+		wantRefuse bool
+	}{
+		{"exact limit", maxOffloadResponseBytes, false},
+		{"over limit", maxOffloadResponseBytes + 1, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// A body that is exactly the limit AND parses: pad the content
+			// field so the whole JSON lands on the byte boundary.
+			prefix := `{"choices":[{"message":{"content":"`
+			suffix := `"}}]}`
+			content := strings.Repeat("a", tc.size-len(prefix)-len(suffix))
+			body := prefix + content + suffix
+
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.Write([]byte(body))
+			}))
+			defer upstream.Close()
+
+			s, err := New(Config{Providers: offloadConfig(upstream.URL)})
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+			ctx := context.WithValue(context.Background(), reqStateKey{}, &reqState{ID: 1})
+
+			got, herr := offloadCall(t, s, ctx, `{"system_prompt":"s","user_prompt":"u"}`)
+			if tc.wantRefuse {
+				if herr == nil || herr.Code != pbv2.ErrorCode_ERROR_CODE_INVALID_ARGUMENT {
+					t.Fatalf("oversized body was not refused as INVALID_ARGUMENT: %v", herr)
+				}
+			} else {
+				if herr != nil {
+					t.Fatalf("exact-limit body refused: %v", herr)
+				}
+				if len(got.Completion) != tc.size-len(prefix)-len(suffix) {
+					t.Errorf("completion = %d chars, want %d", len(got.Completion), tc.size-len(prefix)-len(suffix))
+				}
+			}
+		})
+	}
+}
+
+// TestOffloadRedirectsStayOnOrigin — the offload client uses the same
+// redirect policy as egress: a cross-origin redirect must not be followed
+// (no credential crosses, the attacker receives nothing), and a same-origin
+// loop terminates at the ten-hop bound with a non-retryable refusal.
+func TestOffloadRedirectsStayOnOrigin(t *testing.T) {
+	t.Run("cross-origin redirect is not followed", func(t *testing.T) {
+		var attackerMu sync.Mutex
+		attackerHits := 0
+		var attackerAuth string
+		attacker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			attackerMu.Lock()
+			attackerHits++
+			attackerAuth = r.Header.Get("Authorization")
+			attackerMu.Unlock()
+			w.WriteHeader(http.StatusOK)
+		}))
+		defer attacker.Close()
+
+		upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			http.Redirect(w, r, attacker.URL+"/steal", http.StatusFound)
+		}))
+		defer upstream.Close()
+
+		s, err := New(Config{Providers: offloadConfig(upstream.URL)})
+		if err != nil {
+			t.Fatalf("New: %v", err)
+		}
+		ctx := context.WithValue(context.Background(), reqStateKey{}, &reqState{ID: 1})
+
+		_, herr := offloadCall(t, s, ctx, `{"system_prompt":"s","user_prompt":"u"}`)
+		if herr == nil {
+			t.Fatal("a cross-origin redirect completed")
+		}
+		attackerMu.Lock()
+		hits, auth := attackerHits, attackerAuth
+		attackerMu.Unlock()
+		if hits != 0 {
+			t.Fatalf("attacker server saw %d requests", hits)
+		}
+		if auth != "" {
+			t.Fatalf("credential reached the attacker: auth=%q", auth)
+		}
+	})
+
+	t.Run("same-origin redirect loop is bounded", func(t *testing.T) {
+		var mu sync.Mutex
+		hits := 0
+		upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			mu.Lock()
+			hits++
+			mu.Unlock()
+			http.Redirect(w, r, "/loop", http.StatusTemporaryRedirect)
+		}))
+		defer upstream.Close()
+
+		s, err := New(Config{Providers: offloadConfig(upstream.URL)})
+		if err != nil {
+			t.Fatalf("New: %v", err)
+		}
+		ctx := context.WithValue(context.Background(), reqStateKey{}, &reqState{ID: 1})
+
+		_, herr := offloadCall(t, s, ctx, `{"system_prompt":"s","user_prompt":"u"}`)
+		if herr == nil {
+			t.Fatal("a redirect loop completed")
+		}
+		if herr.Code != pbv2.ErrorCode_ERROR_CODE_NOT_CONFIGURED {
+			t.Fatalf("a redirect loop was classified %v, want NOT_CONFIGURED (deterministic, non-retryable)", herr.Code)
+		}
+		mu.Lock()
+		n := hits
+		mu.Unlock()
+		if n > 11 {
+			t.Fatalf("redirect loop issued %d requests, want <= 11 (10-hop bound)", n)
+		}
+		if n < 2 {
+			t.Fatalf("redirect loop issued %d requests, want > 1 (the loop was actually followed)", n)
+		}
+	})
 }

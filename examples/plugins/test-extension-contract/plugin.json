@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "id": "torana-test/test-extension-contract",
+  "name": "test-extension-contract",
+  "version": "0.1.0",
+  "abi_version": "v2",
+  "failure_mode": "pass",
+  "description": "Test fixture: drives the REAL extension-callback surface (egress, cache pricing, offload, record-savings) through the production composition and records what the guest observed",
+  "hooks": [
+    {
+      "name": "run_before_request"
+    }
+  ],
+  "permissions": [
+    {
+      "name": "env.host_call.torana_send_request",
+      "description": "Originate a provider request (metred against the plugin's egress budget)"
+    },
+    {
+      "name": "env.host_call.torana_cache_pricing",
+      "description": "Query cache pricing"
+    },
+    {
+      "name": "env.host_call.torana_offload_completion",
+      "description": "Offload a summarization to the configured cheap model"
+    },
+    {
+      "name": "env.host_call.torana_record_savings",
+      "description": "Report compaction byte savings"
+    },
+    {
+      "name": "ir.model.write",
+      "description": "Tag the request model with the observed host answers so the e2e can read them from the captured upstream body"
+    }
+  ]
+}

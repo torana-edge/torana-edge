@@ -5,9 +5,12 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
+	"strings"
 	"sync"
 	"time"
 
@@ -18,6 +21,7 @@ import (
 	"github.com/torana-edge/torana-edge/internal/format"
 	"github.com/torana-edge/torana-edge/internal/metrics"
 	"github.com/torana-edge/torana-edge/internal/provider"
+	"github.com/torana-edge/torana-edge/internal/wasm"
 	pb "github.com/torana-edge/torana-plugin-sdk/pb/v2"
 )
 
@@ -74,6 +78,28 @@ func newEgressMeter() *egressMeter {
 	}
 }
 
+// Typed egress-budget sentinels. authorize returns one of these (wrapped with
+// the plugin-specific detail) so sendPluginRequest can classify by errors.Is
+// instead of matching message text — and, more importantly, so the two
+// exhaustion states stay distinct from the unconfigured state:
+//
+//   - no budget configured is NOT_CONFIGURED: the feature exists but the
+//     operator has not said how much this plugin may spend;
+//   - an EXISTING rate/token budget whose rolling limit is exhausted is
+//     UNAVAILABLE: configured but unusable right now (the window will roll).
+var (
+	// ErrEgressBudgetNotConfigured is returned when no budget exists for the
+	// plugin. The message keeps the operator-facing "budget not configured"
+	// phrasing.
+	ErrEgressBudgetNotConfigured = errors.New("egress budget not configured")
+	// ErrEgressRateExhausted is returned when an existing call-rate budget is
+	// exhausted. The message keeps the "calls/minute" phrasing.
+	ErrEgressRateExhausted = errors.New("egress call-rate budget exhausted")
+	// ErrEgressTokenExhausted is returned when an existing token budget is
+	// exhausted. The message keeps the "tokens/hour" phrasing.
+	ErrEgressTokenExhausted = errors.New("egress token budget exhausted")
+)
+
 // authorize reserves one call against the budget, reporting why not if refused.
 //
 // The token check compares against tokens ALREADY spent, because a call's cost
@@ -84,7 +110,8 @@ func newEgressMeter() *egressMeter {
 // cheap but collectively enormous.
 func (m *egressMeter) authorize(plugin string, budget provider.EgressBudget) error {
 	if budget.MaxCallsPerMinute <= 0 {
-		return fmt.Errorf("egress budget not configured for plugin %q — set plugins.runtime.egress.%s.max_calls_per_minute", plugin, plugin)
+		return fmt.Errorf("%w for plugin %q — set plugins.runtime.egress.%s.max_calls_per_minute",
+			ErrEgressBudgetNotConfigured, plugin, plugin)
 	}
 	now := m.now()
 
@@ -93,7 +120,8 @@ func (m *egressMeter) authorize(plugin string, budget provider.EgressBudget) err
 
 	m.calls[plugin] = within(m.calls[plugin], now.Add(-time.Minute))
 	if len(m.calls[plugin]) >= budget.MaxCallsPerMinute {
-		return fmt.Errorf("plugin %q has used its %d calls/minute budget", plugin, budget.MaxCallsPerMinute)
+		return fmt.Errorf("%w: plugin %q has used its %d calls/minute budget",
+			ErrEgressRateExhausted, plugin, budget.MaxCallsPerMinute)
 	}
 
 	if budget.MaxTokensPerHour > 0 {
@@ -108,12 +136,30 @@ func (m *egressMeter) authorize(plugin string, budget provider.EgressBudget) err
 		}
 		m.tokens[plugin] = kept
 		if spent >= budget.MaxTokensPerHour {
-			return fmt.Errorf("plugin %q has used its %d tokens/hour budget", plugin, budget.MaxTokensPerHour)
+			return fmt.Errorf("%w: plugin %q has used its %d tokens/hour budget",
+				ErrEgressTokenExhausted, plugin, budget.MaxTokensPerHour)
 		}
 	}
 
 	m.calls[plugin] = append(m.calls[plugin], now)
 	return nil
+}
+
+// classifyEgressRefusal maps an authorize failure to the ErrorCode a plugin
+// can branch on, exhaustively: no budget is NOT_CONFIGURED (the capability
+// exists but the operator has not sized it); an EXISTING exhausted budget
+// (rate or token) is UNAVAILABLE (configured but unusable right now — the
+// window rolls); ANY OTHER error is a host bug and must be INTERNAL, never
+// silently collapsed into UNAVAILABLE.
+func classifyEgressRefusal(err error) pb.ErrorCode {
+	switch {
+	case errors.Is(err, ErrEgressBudgetNotConfigured):
+		return pb.ErrorCode_ERROR_CODE_NOT_CONFIGURED
+	case errors.Is(err, ErrEgressRateExhausted), errors.Is(err, ErrEgressTokenExhausted):
+		return pb.ErrorCode_ERROR_CODE_UNAVAILABLE
+	default:
+		return pb.ErrorCode_ERROR_CODE_INTERNAL
+	}
 }
 
 // recordTokens charges tokens actually spent, after the fact.
@@ -141,7 +187,11 @@ type egressRequest struct {
 	// RequestPB is a base64-encoded pb.ChatRequest. Protobuf rather than JSON
 	// because it is the same wire the hooks already speak, so a plugin can
 	// forward a request it received without a lossy re-encoding.
-	RequestPB string `json:"request_pb"`
+	//
+	// Pointer so an ABSENT key is distinguishable from a present zero-length
+	// protobuf: an explicitly present all-default message encodes to zero
+	// bytes and is a valid request, while a missing field is a caller bug.
+	RequestPB *string `json:"request_pb"`
 	// Path overrides the upstream path. Torana never synthesizes a chat path —
 	// it reuses whatever the caller sent — so a plugin replaying a conversation
 	// must supply the path that conversation used.
@@ -149,9 +199,11 @@ type egressRequest struct {
 	TimeoutMS int    `json:"timeout_ms,omitempty"`
 }
 
+// egressResponse is the provider-outcome envelope: what the provider said
+// (HTTP status, body, metering). There is deliberately NO message/status
+// field — the error arm is the status channel, and a reached-but-refused
+// provider is reported by its HTTPStatus.
 type egressResponse struct {
-	Status     string `json:"status"`
-	Message    string `json:"message,omitempty"`
 	HTTPStatus int    `json:"http_status,omitempty"`
 	Body       string `json:"body,omitempty"` // base64, provider-format
 	Usage      *struct {
@@ -162,19 +214,21 @@ type egressResponse struct {
 	} `json:"usage,omitempty"`
 }
 
-func egressError(format string, args ...any) string {
-	b, _ := json.Marshal(egressResponse{Status: "error", Message: fmt.Sprintf(format, args...)})
-	return string(b)
-}
-
 // sendPluginRequest answers the torana_send_request host call.
-func (s *Server) sendPluginRequest(ctx context.Context, pluginName, payloadJSON string) string {
+//
+// Refusals are framed classified HostErrors: INVALID_ARGUMENT for malformed
+// payloads, unrenderable guest requests, and invalid guest paths;
+// NOT_CONFIGURED for unknown providers and missing budgets; UNAVAILABLE for
+// exhausted budgets and transport failures; INTERNAL for a host-side envelope
+// encode failure. The value arm carries provider outcomes only, and no longer
+// carries a constant status field — the error arm is the status channel.
+func (s *Server) sendPluginRequest(ctx context.Context, pluginName, payloadJSON string) wasm.ExtensionResult {
 	var req egressRequest
 	if err := json.Unmarshal([]byte(payloadJSON), &req); err != nil {
-		return egressError("invalid payload: %v", err)
+		return wasm.ExtensionRefusal(pb.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "invalid payload: %v", err)
 	}
 	if req.Provider == "" {
-		return egressError("provider is required")
+		return wasm.ExtensionRefusal(pb.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "provider is required")
 	}
 
 	cfg := s.GetConfig().Providers
@@ -182,26 +236,23 @@ func (s *Server) sendPluginRequest(ctx context.Context, pluginName, payloadJSON 
 	if !ok {
 		// Naming an unconfigured provider is the whole containment boundary:
 		// a plugin can only reach endpoints the operator already trusts.
-		return egressError("unknown provider %q", req.Provider)
+		return wasm.ExtensionRefusal(pb.ErrorCode_ERROR_CODE_NOT_CONFIGURED, "unknown provider %q", req.Provider)
 	}
 
-	budget := cfg.Plugins.Runtime.EgressBudgetFor(pluginName)
-	if err := s.egress.authorize(pluginName, budget); err != nil {
-		s.stats.RecordPluginCounter(pluginName, "egress_refused", 1)
-		return egressError("%v", err)
+	if req.RequestPB == nil {
+		return wasm.ExtensionRefusal(pb.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "request_pb is required")
 	}
-
-	raw, err := base64.StdEncoding.DecodeString(req.RequestPB)
+	raw, err := base64.StdEncoding.DecodeString(*req.RequestPB)
 	if err != nil {
-		return egressError("request_pb is not valid base64: %v", err)
+		return wasm.ExtensionRefusal(pb.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "request_pb is not valid base64: %v", err)
 	}
 	var pbReq pb.ChatRequest
 	if err := proto.Unmarshal(raw, &pbReq); err != nil {
-		return egressError("request_pb is not a ChatRequest: %v", err)
+		return wasm.ExtensionRefusal(pb.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "request_pb is not a ChatRequest: %v", err)
 	}
 	chat := pbconv.FromPBChatRequest(&pbReq)
 	if chat == nil {
-		return egressError("request_pb decoded to nothing")
+		return wasm.ExtensionRefusal(pb.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "request_pb decoded to nothing")
 	}
 	// Proxy-internal metadata must not travel upstream, and a plugin has no
 	// business setting it on an outbound request anyway.
@@ -209,32 +260,74 @@ func (s *Server) sendPluginRequest(ctx context.Context, pluginName, payloadJSON 
 
 	f := format.Lookup(prov.Format)
 	if f == nil || f.Request == nil {
-		return egressError("provider %q has no usable format adapter (%q)", req.Provider, prov.Format)
+		return wasm.ExtensionRefusal(pb.ErrorCode_ERROR_CODE_NOT_CONFIGURED, "provider %q has no usable format adapter (%q)", req.Provider, prov.Format)
 	}
 	body, err := f.Request.Marshal(chat)
 	if err != nil {
-		return egressError("encode request for %s: %v", prov.Format, err)
+		// The request the GUEST supplied cannot be rendered by the provider's
+		// format adapter (e.g. a NaN sampling parameter the adapter refuses to
+		// serialize). Retrying cannot help — the guest must fix the request.
+		return wasm.ExtensionRefusal(pb.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "encode request for %s: %v", prov.Format, err)
 	}
 
 	path := req.Path
 	if path == "" {
-		return egressError("path is required — Torana does not synthesize provider paths")
+		return wasm.ExtensionRefusal(pb.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "path is required — Torana does not synthesize provider paths")
+	}
+	// The guest path contract: a root-relative request URI with no scheme, no
+	// authority, and no userinfo. String concatenation is NOT safe here — a
+	// path like "@attacker.example/v1" against a configured origin becomes
+	// userinfo and redirects the request (and the provider credential) to
+	// attacker.example. Parse both sides and prove the resolved target stays
+	// on the configured origin before any credential or budget action.
+	if !strings.HasPrefix(path, "/") {
+		return wasm.ExtensionRefusal(pb.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "path must be root-relative, got %q", path)
+	}
+	base, err := url.Parse(prov.URL)
+	if err != nil || base.Scheme == "" || base.Host == "" {
+		return wasm.ExtensionRefusal(pb.ErrorCode_ERROR_CODE_NOT_CONFIGURED, "provider %q has an invalid URL %q", req.Provider, prov.URL)
+	}
+	u, err := url.ParseRequestURI(path)
+	if err != nil {
+		return wasm.ExtensionRefusal(pb.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "invalid path %q: %v", path, err)
+	}
+	// A path beginning with "//" is a network-path reference in URI syntax
+	// (ParseRequestURI folds it into the path); reject it outright so the
+	// authority can never be ambiguous, along with absolute forms, opaque
+	// forms, and userinfo.
+	// ParseRequestURI folds a raw '#' into the path rather than parsing it as
+	// a fragment, so reject fragments on the raw input; a real '#' in a path
+	// must be %23-encoded.
+	if strings.Contains(path, "#") || u.Scheme != "" || u.Host != "" || u.User != nil || u.Opaque != "" || strings.HasPrefix(u.Path, "//") {
+		return wasm.ExtensionRefusal(pb.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "path must stay on the configured provider origin, got %q", path)
+	}
+	target := base.ResolveReference(u)
+	if target.Scheme != base.Scheme || target.Host != base.Host || target.Hostname() != base.Hostname() {
+		return wasm.ExtensionRefusal(pb.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "path escapes the configured provider origin, got %q", path)
 	}
 
+	if req.TimeoutMS < 0 {
+		return wasm.ExtensionRefusal(pb.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "timeout_ms must not be negative")
+	}
 	timeout := defaultEgressTimeout
 	if req.TimeoutMS > 0 {
-		timeout = time.Duration(req.TimeoutMS) * time.Millisecond
-		if timeout > maxEgressTimeout {
+		// Clamp BEFORE converting to a duration: a huge positive value can
+		// overflow time.Duration and become negative, expiring locally while
+		// still consuming a call slot.
+		if req.TimeoutMS > int(maxEgressTimeout/time.Millisecond) {
 			timeout = maxEgressTimeout
+		} else {
+			timeout = time.Duration(req.TimeoutMS) * time.Millisecond
 		}
 	}
 	callCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	url := prov.URL + path
-	httpReq, err := http.NewRequestWithContext(callCtx, http.MethodPost, url, bytes.NewReader(body))
+	httpReq, err := http.NewRequestWithContext(callCtx, http.MethodPost, target.String(), bytes.NewReader(body))
 	if err != nil {
-		return egressError("build request: %v", err)
+		// The path is guest-supplied (Torana forwards the caller's path rather
+		// than synthesizing one), so a URL that cannot be built is a caller bug.
+		return wasm.ExtensionRefusal(pb.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "build request: %v", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("Accept-Encoding", "identity")
@@ -248,21 +341,58 @@ func (s *Server) sendPluginRequest(ctx context.Context, pluginName, payloadJSON 
 		httpReq.Header.Set("X-Api-Key", key)
 	}
 
+	// Budget authorization happens AFTER all guest-input and request-build
+	// validation and immediately BEFORE the network call: the budget is the
+	// containment boundary for PROVIDER SPEND, not a caller-bug counter. A
+	// malformed request that never reaches a provider consumes nothing; a
+	// TRANSPORT ATTEMPT does — the slot was authorized, and a refused request
+	// still needs the window to roll.
+	budget := cfg.Plugins.Runtime.EgressBudgetFor(pluginName)
+	if err := s.egress.authorize(pluginName, budget); err != nil {
+		s.stats.RecordPluginCounter(pluginName, "egress_refused", 1)
+		return wasm.ExtensionRefusal(classifyEgressRefusal(err), "%v", err)
+	}
+
+	// The origin proof applies to the INITIAL request only; an http.Client
+	// follows redirects by default, and Go strips Authorization but NOT
+	// X-Api-Key on a cross-host redirect. redirectPolicy confines redirects to
+	// the configured origin (any scheme/host change becomes the reached
+	// provider outcome via http.ErrUseLastResponse, preserving the 3xx and the
+	// fact that a transport attempt and budget slot occurred) and enforces the
+	// ten-hop bound a custom CheckRedirect would otherwise remove.
+	client := &http.Client{Timeout: timeout, CheckRedirect: redirectPolicy(base)}
 	start := time.Now()
-	resp, err := (&http.Client{Timeout: timeout}).Do(httpReq)
+	resp, err := client.Do(httpReq)
 	if err != nil {
 		s.stats.RecordPluginCounter(pluginName, "egress_failed", 1)
-		return egressError("request to %s failed: %v", req.Provider, err)
+		if errors.Is(err, errTooManyRedirects) {
+			// A same-origin redirect loop is deterministic: retrying the same
+			// request hits the same loop and spends again. NOT_CONFIGURED —
+			// the operator must fix the configured provider endpoint.
+			return wasm.ExtensionRefusal(pb.ErrorCode_ERROR_CODE_NOT_CONFIGURED, "provider %q redirected in a loop: %v", req.Provider, err)
+		}
+		return wasm.ExtensionRefusal(pb.ErrorCode_ERROR_CODE_UNAVAILABLE, "request to %s failed: %v", req.Provider, err)
 	}
 	defer resp.Body.Close()
 
-	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxEgressResponseBytes))
+	// limit+1 read so an oversized body is DETECTED as an overflow rather than
+	// silently truncated into a partial success: a truncated provider outcome
+	// would meter and cache the wrong prefix.
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxEgressResponseBytes+1))
 	if err != nil {
 		s.stats.RecordPluginCounter(pluginName, "egress_failed", 1)
-		return egressError("read response: %v", err)
+		return wasm.ExtensionRefusal(pb.ErrorCode_ERROR_CODE_UNAVAILABLE, "read response: %v", err)
+	}
+	if len(respBody) > maxEgressResponseBytes {
+		// Deterministic, not transient: repeating the same request hits the
+		// same limit and spends money again, so it is a caller-shape problem,
+		// not a retryable outage (no dedicated resource-exhausted code exists
+		// yet; INVALID_ARGUMENT is the closest class until one lands).
+		s.stats.RecordPluginCounter(pluginName, "egress_failed", 1)
+		return wasm.ExtensionRefusal(pb.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "egress response exceeds %d bytes — reduce the request (e.g. max_tokens) or raise the limit", maxEgressResponseBytes)
 	}
 
-	out := egressResponse{Status: "ok", HTTPStatus: resp.StatusCode, Body: base64.StdEncoding.EncodeToString(respBody)}
+	out := egressResponse{HTTPStatus: resp.StatusCode, Body: base64.StdEncoding.EncodeToString(respBody)}
 
 	// Usage is best-effort: a provider that reports none, or a body that is
 	// not the JSON shape this format expects, simply means no metering data.
@@ -284,7 +414,13 @@ func (s *Server) sendPluginRequest(ctx context.Context, pluginName, payloadJSON 
 
 	s.stats.RecordPluginCounter(pluginName, "egress_calls", 1)
 	s.recordEgressEvent(pluginName, req.Provider, chat.Model, resp.StatusCode, start, usage)
-	return marshalEgress(out)
+	env, err := marshalEgress(out)
+	if err != nil {
+		// egressResponse is host-built (base64 body, ints); reaching here is a
+		// host invariant, not a guest input.
+		return wasm.ExtensionRefusal(pb.ErrorCode_ERROR_CODE_INTERNAL, "encode response: %v", err)
+	}
+	return wasm.ExtensionValue([]byte(env))
 }
 
 // recordEgressEvent puts plugin-originated traffic in the same feed as user
@@ -309,10 +445,10 @@ func (s *Server) recordEgressEvent(pluginName, providerName, model string, statu
 	s.feed.Add(ev)
 }
 
-func marshalEgress(r egressResponse) string {
+func marshalEgress(r egressResponse) (string, error) {
 	b, err := json.Marshal(r)
 	if err != nil {
-		return egressError("encode response: %v", err)
+		return "", err
 	}
-	return string(b)
+	return string(b), nil
 }
