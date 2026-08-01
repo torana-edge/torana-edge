@@ -70,6 +70,18 @@ import (
 // together is NOT forged at this layer — the index movement is a topology
 // change whose charge belongs to 2b's full walk. A token that did NOT move
 // with its block's facts (token-detached reindex) is stale and IS caught.
+// (Round-2 F1) Reindexing is topology, but it must not erase signature
+// correlation: a returned scope whose covered facts (id, name, assembled
+// arguments) reproduce an accepted scope one-to-one at a DIFFERENT index is
+// still that block, and its token is classified over the unchanged content —
+// stripped is dropped, replaced is forged, and both are rejected regardless
+// of grants.
+//
+// (Round-2 F3) An explicit text/thinking block opened and closed with zero
+// deltas is a span with EMPTY typed content: the block exists even without
+// content, so an empty signed block whose token disappears is a dropped
+// signature — never a suppressed block, which is what absence from the span
+// list would otherwise claim.
 //
 // The event walk is a single O(n) pass per stream: tool scopes are built in
 // the main walk, one builder per OPEN tool block (concurrent blocks keep
@@ -99,6 +111,13 @@ func (e *acceptedStreamError) Error() string { return "accepted stream: " + e.ms
 //     kind or inside an open tool/provider block, or a tool-call delta / stop
 //     naming no open block of the matching kind. (A text delta inside a
 //     thinking block is the pinned case.)
+//   - the FULL ABI topology (round-2 F4): the state is openNonTool{index,
+//     kind} + openTools[index] + seen[index] — every stop/delta must name an
+//     open block of the matching kind (a non-tool stop binds the open
+//     non-tool block BY INDEX), non-tool blocks are exclusive and never
+//     overlap tool blocks, indexes are never reused, MessageStop with ANY
+//     open block is rejected immediately, and after MessageStop only Usage
+//     (and a terminal StreamError) may follow — never a content/block event.
 //   - missing stop at successful completion: the stream ends with an explicit
 //     content block still open and no StreamError to abandon it. Implicit
 //     bare-delta spans are the boundary-less host representation and need no
@@ -106,14 +125,16 @@ func (e *acceptedStreamError) Error() string { return "accepted stream: " + e.ms
 //   - events after StreamError: StreamError is terminal; anything after it is
 //     malformed.
 //
+// StreamError remains the ONLY terminal path that abandons open blocks: a
+// missing stop is invalid unless the stream already ended at a StreamError.
+//
 // The walk is a single O(n) pass and mirrors scanStreamSignatures' span state
 // machine exactly (span closes at any block start, at a non-tool stop, and at
 // a signature_delta), so the current/trailing/unbound verdict agrees with the
 // scope walk that verifyStream runs: the unbound test here is the negation of
 // "current or trailing" as scanStreamSignatures defines it.
 // openBlockKind names the kind of the single open non-tool block during
-// accepted-stream validation. Non-tool blocks are exclusive (only TOOL blocks
-// may be concurrent), so one slot suffices.
+// accepted-stream validation.
 type openBlockKind int
 
 const (
@@ -135,10 +156,23 @@ func (k openBlockKind) String() string {
 	return "none"
 }
 
+// openNonTool is the single open non-tool content block during accepted-stream
+// validation, with its index AND kind. Non-tool blocks are exclusive (only
+// TOOL blocks may be concurrent), so one slot suffices — but the slot must
+// carry the index: a non-tool stop names the open non-tool block BY INDEX, and
+// accepting a stop at any other index would validate a wrong close (round-2
+// F4: StartText(3) + Stop(9) must not pass).
+type openNonTool struct {
+	index int32
+	kind  openBlockKind
+}
+
 func validateAcceptedStream(events []*pbv2.StreamEvent) error {
-	var block openBlockKind
+	var nonTool *openNonTool
 	var openTools = make(map[int32]bool)
+	var seen = make(map[int32]bool) // every started index, tool or not
 	var sawError bool
+	var messageStopped bool
 	var spanOpen bool // a text/thinking span is in flight (explicit or implicit)
 	var sawText bool  // any text/thinking delta was seen at all
 
@@ -146,44 +180,91 @@ func validateAcceptedStream(events []*pbv2.StreamEvent) error {
 		if sawError {
 			return &acceptedStreamError{msg: fmt.Sprintf("event after StreamError at position %d", i)}
 		}
+		if messageStopped {
+			// Per the ABI, Usage may still arrive after MessageStop (providers
+			// differ on where it lands); StreamError is terminal at any point.
+			// No other content/block event may follow MessageStop.
+			switch ev.Event.(type) {
+			case *pbv2.StreamEvent_Usage, *pbv2.StreamEvent_Error:
+			default:
+				return &acceptedStreamError{msg: fmt.Sprintf("event at position %d after MessageStop", i)}
+			}
+		}
 		switch e := ev.Event.(type) {
 		case *pbv2.StreamEvent_Error:
 			sawError = true
+		case *pbv2.StreamEvent_Usage:
+			// No stream state to enforce for Usage.
+		case *pbv2.StreamEvent_MessageStart:
+			// Message framing; nothing to enforce before MessageStop.
+		case *pbv2.StreamEvent_MessageStop:
+			if nonTool != nil || len(openTools) > 0 {
+				return &acceptedStreamError{msg: fmt.Sprintf("MessageStop at position %d while a content block is still open", i)}
+			}
+			messageStopped = true
 		case *pbv2.StreamEvent_ContentBlockStart:
 			spanOpen = false // any start closes an implicit run, as in the scope walk
+			idx := e.ContentBlockStart.Index
+			if seen[idx] {
+				return &acceptedStreamError{msg: fmt.Sprintf("content block index %d reused at position %d", idx, i)}
+			}
+			seen[idx] = true
 			switch e.ContentBlockStart.Block.(type) {
 			case *pbv2.ContentBlockStart_Text:
-				block = textBlockOpen
+				if nonTool != nil {
+					return &acceptedStreamError{msg: fmt.Sprintf("non-tool content block start at position %d while a %s block is open", i, nonTool.kind)}
+				}
+				if len(openTools) > 0 {
+					return &acceptedStreamError{msg: fmt.Sprintf("non-tool content block start at position %d while a tool block is open", i)}
+				}
+				nonTool = &openNonTool{index: idx, kind: textBlockOpen}
 			case *pbv2.ContentBlockStart_Thinking:
-				block = thinkingBlockOpen
-			case *pbv2.ContentBlockStart_ToolCall:
-				openTools[e.ContentBlockStart.Index] = true
+				if nonTool != nil {
+					return &acceptedStreamError{msg: fmt.Sprintf("non-tool content block start at position %d while a %s block is open", i, nonTool.kind)}
+				}
+				if len(openTools) > 0 {
+					return &acceptedStreamError{msg: fmt.Sprintf("non-tool content block start at position %d while a tool block is open", i)}
+				}
+				nonTool = &openNonTool{index: idx, kind: thinkingBlockOpen}
 			case *pbv2.ContentBlockStart_Provider:
-				block = providerBlockOpen
+				if nonTool != nil {
+					return &acceptedStreamError{msg: fmt.Sprintf("non-tool content block start at position %d while a %s block is open", i, nonTool.kind)}
+				}
+				if len(openTools) > 0 {
+					return &acceptedStreamError{msg: fmt.Sprintf("non-tool content block start at position %d while a tool block is open", i)}
+				}
+				nonTool = &openNonTool{index: idx, kind: providerBlockOpen}
+			case *pbv2.ContentBlockStart_ToolCall:
+				if nonTool != nil {
+					return &acceptedStreamError{msg: fmt.Sprintf("tool call block start at position %d while a non-tool block is open", i)}
+				}
+				openTools[idx] = true
 			}
 		case *pbv2.StreamEvent_ContentBlockStop:
-			if openTools[e.ContentBlockStop.Index] {
-				delete(openTools, e.ContentBlockStop.Index)
+			idx := e.ContentBlockStop.Index
+			if openTools[idx] {
+				delete(openTools, idx)
 				continue
 			}
-			if block == noBlock {
-				return &acceptedStreamError{msg: fmt.Sprintf("content block stop at position %d names no open block", i)}
+			if nonTool != nil && nonTool.index == idx {
+				nonTool = nil
+				spanOpen = false
+				continue
 			}
-			block = noBlock
-			spanOpen = false
+			return &acceptedStreamError{msg: fmt.Sprintf("content block stop at position %d names no open block", i)}
 		case *pbv2.StreamEvent_TextDelta:
-			if block == thinkingBlockOpen || block == providerBlockOpen {
-				return &acceptedStreamError{msg: fmt.Sprintf("text delta at position %d inside a %s block", i, block)}
+			if nonTool != nil && nonTool.kind != textBlockOpen {
+				return &acceptedStreamError{msg: fmt.Sprintf("text delta at position %d inside a %s block", i, nonTool.kind)}
 			}
-			if len(openTools) > 0 {
+			if nonTool == nil && len(openTools) > 0 {
 				return &acceptedStreamError{msg: fmt.Sprintf("text delta at position %d while a tool block is open", i)}
 			}
 			spanOpen, sawText = true, true
 		case *pbv2.StreamEvent_ThinkingDelta:
-			if block == textBlockOpen || block == providerBlockOpen {
-				return &acceptedStreamError{msg: fmt.Sprintf("thinking delta at position %d inside a %s block", i, block)}
+			if nonTool != nil && nonTool.kind != thinkingBlockOpen {
+				return &acceptedStreamError{msg: fmt.Sprintf("thinking delta at position %d inside a %s block", i, nonTool.kind)}
 			}
-			if len(openTools) > 0 {
+			if nonTool == nil && len(openTools) > 0 {
 				return &acceptedStreamError{msg: fmt.Sprintf("thinking delta at position %d while a tool block is open", i)}
 			}
 			spanOpen, sawText = true, true
@@ -192,11 +273,11 @@ func validateAcceptedStream(events []*pbv2.StreamEvent) error {
 			// block is current (the signature ends the span); a signature
 			// inside an open tool/provider block, or one with no text/thinking
 			// content anywhere, binds nothing.
-			if spanOpen || block == textBlockOpen || block == thinkingBlockOpen {
+			if spanOpen || (nonTool != nil && (nonTool.kind == textBlockOpen || nonTool.kind == thinkingBlockOpen)) {
 				spanOpen = false
 				continue
 			}
-			if block == providerBlockOpen || len(openTools) > 0 || !sawText {
+			if (nonTool != nil && nonTool.kind == providerBlockOpen) || len(openTools) > 0 || !sawText {
 				return &acceptedStreamError{msg: "signature_delta has no covered content (does not bind tool-call blocks)"}
 			}
 		case *pbv2.StreamEvent_ToolCallDelta:
@@ -206,7 +287,7 @@ func validateAcceptedStream(events []*pbv2.StreamEvent) error {
 		}
 	}
 
-	if !sawError && (block != noBlock || len(openTools) > 0) {
+	if !sawError && (nonTool != nil || len(openTools) > 0) {
 		return &acceptedStreamError{msg: "stream ends with an open content block; missing ContentBlockStop (or StreamError)"}
 	}
 	return nil
@@ -364,7 +445,10 @@ type streamSignatureView struct {
 	// different span at that ordinal) and a dropped token over unchanged
 	// content (the same span). Spans close at ContentBlockStop, at any
 	// ContentBlockStart that is not a continuation, at a signature_delta
-	// (the signature ends the span it covers), and at end of stream.
+	// (the signature ends the span it covers), and at end of stream. An
+	// explicit text/thinking block closed with zero deltas contributes an
+	// EMPTY span (round-2 F3): the block is present even without content,
+	// so a missing span still means the block itself was suppressed.
 	spans []typedContent
 	// closed is the concatenated typed content of every span closed so far —
 	// the TrailingStandalone scope for a signature emitted at this point.
@@ -416,6 +500,7 @@ type streamSignatureView struct {
 func scanStreamSignatures(events []*pbv2.StreamEvent) streamSignatureView {
 	var v streamSignatureView
 	var blockOpen, blockText bool
+	var blockSawSpan bool // the open explicit text/thinking block already closed a span (round-2 F3)
 	var spanOpen bool
 	var spanText, spanThink strings.Builder
 	var closedText, closedThink strings.Builder
@@ -433,6 +518,9 @@ func scanStreamSignatures(events []*pbv2.StreamEvent) streamSignatureView {
 		spanText.Reset()
 		spanThink.Reset()
 		spanOpen = false
+		if blockOpen && blockText {
+			blockSawSpan = true
+		}
 	}
 
 	for _, ev := range events {
@@ -443,6 +531,7 @@ func scanStreamSignatures(events []*pbv2.StreamEvent) streamSignatureView {
 			switch cbs.Block.(type) {
 			case *pbv2.ContentBlockStart_Text, *pbv2.ContentBlockStart_Thinking:
 				blockOpen, blockText = true, true
+				blockSawSpan = false
 			case *pbv2.ContentBlockStart_ToolCall:
 				if _, ok := openTools[cbs.Index]; !ok {
 					b := &toolScopeBuilder{index: cbs.Index}
@@ -459,8 +548,17 @@ func scanStreamSignatures(events []*pbv2.StreamEvent) streamSignatureView {
 				v.toolScopes = append(v.toolScopes, b.scope())
 				continue
 			}
+			if blockOpen && blockText && !blockSawSpan && !spanOpen {
+				// An explicit text/thinking block closed with zero deltas is
+				// still a span with EMPTY typed content (round-2 F3): the
+				// block exists even without content, so an empty signed block
+				// whose token disappears is a dropped signature — not a
+				// suppressed block, which is what absence from the span list
+				// would otherwise claim.
+				v.spans = append(v.spans, typedContent{})
+			}
 			closeSpan()
-			blockOpen, blockText = false, false
+			blockOpen, blockText, blockSawSpan = false, false, false
 		case *pbv2.StreamEvent_ToolCallDelta:
 			if b, ok := openTools[e.ToolCallDelta.Index]; ok {
 				b.args.WriteString(e.ToolCallDelta.ArgumentsDelta)
@@ -576,11 +674,21 @@ func verifyStream(accepted, returned []*pbv2.StreamEvent, canWrite func(string) 
 // from the token change and the scope diff. A token that did NOT move with
 // its block's facts (token-detached reindex) is caught here as stale.
 //
-// Phase 3 — a returned scope with no accepted counterpart at its index is
-// invented: a SIGNED invented block is a minted signature (added) and is
-// rejected regardless of grants (round-1 decision 2: the signature verifier
-// is the single implementation of bound-signature semantics); an UNSIGNED
-// invented block is a cardinality change and needs ir.stream.write.
+// Phase 2b — (round-2 F1) cross-index correlation by IDENTICAL covered facts.
+// A returned scope whose (id, name, assembled arguments) — not the index, not
+// the token — reproduce an unconsumed accepted scope one-to-one at ANY index
+// is the SAME block reindexed; ClassifySignatureMutation decides the token
+// over the unchanged content. The same-index form of a dropped signature is
+// rejected, and changing only the index must not bypass that: reindexing is
+// topology, but it must not erase signature/content correlation. With the
+// facts identical the only possible verdicts are dropped (token stripped) and
+// forged (token replaced) — both rejected regardless of grants.
+//
+// Phase 3 — a returned scope with no accepted counterpart is invented: a
+// SIGNED invented block is a minted signature (added) and is rejected
+// regardless of grants (round-1 decision 2: the signature verifier is the
+// single implementation of bound-signature semantics); an UNSIGNED invented
+// block is a cardinality change and needs ir.stream.write.
 //
 // Phase 4 — accepted scopes no returned scope consumed are suppressed: a
 // SIGNED block's disappearance is the recorded host obligation and is
@@ -625,6 +733,27 @@ func verifyToolScopes(accepted, returned []toolCallScope, canWrite func(string) 
 			continue
 		}
 
+		// Phase 2b: cross-index correlation by identical covered facts.
+		matched = -1
+		for i := range accepted {
+			if !consumed[i] &&
+				accepted[i].id == r.id &&
+				accepted[i].name == r.name &&
+				accepted[i].arguments == r.arguments {
+				matched = i
+				break
+			}
+		}
+		if matched >= 0 {
+			class := outboundpolicy.ClassifySignatureMutation(
+				accepted[matched].signature, r.signature, false)
+			if !class.Allowed() {
+				return fmt.Errorf("tool block %d signature %s", r.index, class)
+			}
+			consumed[matched] = true
+			continue
+		}
+
 		// Phase 3: invented block.
 		if r.signature != "" {
 			return fmt.Errorf("invented signed tool block %d: signature added", r.index)
@@ -665,15 +794,21 @@ func verifyToolScopes(accepted, returned []toolCallScope, canWrite func(string) 
 // guessed); no same-token candidate at all is forged when an unconsumed
 // accepted occurrence of the scope remains, else added.
 //
-// Phase 3 — accepted occurrences no returned token covers: an explicit empty
-// returned occurrence whose typed content exactly matches is a dropped token
-// (explicitly emptied over content the provider signed — rejected); otherwise
-// empty returned occurrences pair positionally and clear (the prescribed
-// response to a legitimate rewrite). What remains is decided from the returned
-// span structure by verifyUnpairedBinding: the same content surviving is a
-// dropped token (rejected), different content is clearing (allowed), and a
-// missing span at the binding's position means the signed block itself was
-// suppressed (topology-gated).
+// Phase 3 — accepted occurrences no returned token covers. An explicit empty
+// returned occurrence is a clear marker belonging to the returned SPAN it was
+// emitted in — never a pool of interchangeable markers to be consumed
+// positionally (round-2 F2): an unchanged accepted signed occurrence surviving
+// anywhere without its token is rejected as dropped BEFORE any clear marker
+// is assigned, so a marker attached to a DIFFERENT (rewritten) span cannot
+// hide a dropped token. After that gate, a marker whose typed content exactly
+// matches an accepted occurrence is that occurrence's token stripped over
+// unchanged content (dropped, rejected); a marker otherwise clears the
+// accepted signed occurrence at ITS OWN span ordinal (that span's content was
+// rewritten). What remains is decided from the returned span structure by
+// verifyUnpairedBinding: the same content surviving is a dropped token
+// (rejected), different content is clearing (allowed), and a missing span at
+// the binding's position means the signed block itself was suppressed
+// (topology-gated).
 //
 // An UNBOUND signature_delta in the plugin's OUTPUT is a violation (a
 // floating token the plugin could mint); in ACCEPTED input it is a host
@@ -744,20 +879,47 @@ func verifySignatureDeltaBindings(av, rv streamSignatureView, canWrite func(stri
 		}
 
 		// Phase 3: accepted occurrences the returned stream no longer signs.
-		var emptyRet []int // indexes into ret of explicit empty occurrences
+		var emptyRet []sigBinding // explicit empty returned occurrences, stream order
 		for j := range ret {
 			if ret[j].signature == "" {
-				emptyRet = append(emptyRet, j)
+				emptyRet = append(emptyRet, ret[j])
 			}
 		}
 		emptyUsed := make([]bool, len(emptyRet))
 		exactEmpty := func(c typedContent) int {
-			for k, j := range emptyRet {
-				if !emptyUsed[k] && ret[j].content.equals(c) {
+			for k, m := range emptyRet {
+				if !emptyUsed[k] && m.content.equals(c) {
 					return k
 				}
 			}
 			return -1
+		}
+		// (a) Dropped, decided BEFORE any clear marker is assigned (round-2
+		// F2): an accepted signed occurrence whose typed content survives
+		// UNCHANGED in the returned stream — and whose token no returned
+		// occurrence covers (an exact token+content match would have
+		// consumed it in phase 1) — had its token stripped from content the
+		// provider actually signed. A marker attached to a different,
+		// rewritten span must never be consumed as if it cleared this
+		// occurrence.
+		for i := range acc {
+			if consumed[i] || acc[i].signature == "" {
+				continue
+			}
+			var survives bool
+			if kind == sigBindingTrailing {
+				survives = rv.closed.equals(acc[i].content)
+			} else {
+				for _, s := range rv.spans {
+					if s.equals(acc[i].content) {
+						survives = true
+						break
+					}
+				}
+			}
+			if survives {
+				return fmt.Errorf("%s signature_delta dropped", kind)
+			}
 		}
 		for i := range acc {
 			if consumed[i] || acc[i].signature == "" {
@@ -771,13 +933,20 @@ func verifySignatureDeltaBindings(av, rv streamSignatureView, canWrite func(stri
 				consumed[i] = true
 				return fmt.Errorf("%s signature_delta dropped", kind)
 			}
-			// Positional cleared pairing: an unused empty marker clears this
-			// accepted occurrence (content was rewritten).
-			cleared := 0
-			for cleared < len(emptyUsed) && emptyUsed[cleared] {
-				cleared++
+			// Clear markers correlate by their OWN returned span identity
+			// (round-2 F2): the marker emitted in returned span j is the
+			// prescribed clearing response for the accepted signed occurrence
+			// at span j — that span's content was rewritten, so (a) did not
+			// reject it. A marker is never consumed for a DIFFERENT accepted
+			// occurrence merely because it is the next unused one.
+			cleared := -1
+			for k, m := range emptyRet {
+				if !emptyUsed[k] && m.span == acc[i].span {
+					cleared = k
+					break
+				}
 			}
-			if cleared < len(emptyUsed) {
+			if cleared >= 0 {
 				emptyUsed[cleared] = true
 				consumed[i] = true
 				continue

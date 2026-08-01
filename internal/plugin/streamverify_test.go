@@ -131,6 +131,35 @@ func isAcceptedErr(err error) bool {
 	return errors.As(err, &ae)
 }
 
+// signedTextBlock renders an explicit text block with a signature_delta
+// INSIDE it — a current-block binding over the typed text (the signature
+// closes the block's span, matching the provider-part model). sig may be ""
+// to render an explicit empty clear marker.
+func signedTextBlock(index int32, text, sig string) []*pbv2.StreamEvent {
+	out := []*pbv2.StreamEvent{{Event: &pbv2.StreamEvent_ContentBlockStart{
+		ContentBlockStart: &pbv2.ContentBlockStart{
+			Index: index, Block: &pbv2.ContentBlockStart_Text{Text: &pbv2.TextBlock{}},
+		},
+	}}}
+	out = append(out, textDelta(text))
+	out = append(out, signatureDelta(sig))
+	return append(out, &pbv2.StreamEvent{Event: &pbv2.StreamEvent_ContentBlockStop{
+		ContentBlockStop: &pbv2.ContentBlockStop{Index: index},
+	}})
+}
+
+func messageStopEvent(finishReason string) *pbv2.StreamEvent {
+	return &pbv2.StreamEvent{Event: &pbv2.StreamEvent_MessageStop{
+		MessageStop: &pbv2.MessageStop{FinishReason: finishReason},
+	}}
+}
+
+func usageEvent() *pbv2.StreamEvent {
+	return &pbv2.StreamEvent{Event: &pbv2.StreamEvent_Usage{
+		Usage: &pbv2.Usage{InputTokens: 1, OutputTokens: 1},
+	}}
+}
+
 // TestVerifyStreamConformsToSDKStreamFixtures runs the SDK's cross-repo
 // transactional contract through verifyStream's signature axis: for every
 // fixture, an Allowed Want means verifyStream must return nil, and a rejected
@@ -993,6 +1022,356 @@ func TestStreamVerifyMultiSpanCorrelation(t *testing.T) {
 			t.Fatalf("re-framed drop with grant rejected: %v", err)
 		}
 	})
+}
+
+// TestStreamVerifyCrossIndexIdenticalFacts pins round-2 F1: after exact
+// full-fact matching, tool blocks are correlated one-to-one ACROSS indexes by
+// their IDENTICAL covered facts (id, name, assembled arguments), and the
+// token is classified over the unchanged content. A coherent reindex (facts
+// AND token moving together) is still intact at this layer, but a reindex
+// with the token stripped is a dropped signature — the same verdict as the
+// same-index form — and a reindex with the token replaced is forged. Neither
+// is topology: ir.stream.write must not be able to erase signature/content
+// correlation, so both are rejected even with every grant.
+func TestStreamVerifyCrossIndexIdenticalFacts(t *testing.T) {
+	accepted := toolBlock(0, "call_1", "read_file", streamSigA, `{"path":"/a"}`)
+
+	t.Run("reindex with the token stripped is dropped, even with every grant", func(t *testing.T) {
+		// The exact round-2 F1 reproduction: the same unchanged signed call
+		// at a different index, token gone. The accepted block would be
+		// read as invented-unsigned and suppressed-signed (both grantable);
+		// identical facts must instead identify the block and classify the
+		// missing token as dropped.
+		returned := toolBlock(7, "call_1", "read_file", "", `{"path":"/a"}`)
+		err := verifyStream(accepted, returned, withEveryGrant)
+		if err == nil {
+			t.Fatal("reindex-with-stripped-token passed with every grant")
+		}
+		if !strings.Contains(err.Error(), "dropped") {
+			t.Fatalf("reindex-with-stripped-token: err = %v, want dropped", err)
+		}
+	})
+	t.Run("reindex with the token replaced is forged", func(t *testing.T) {
+		returned := toolBlock(7, "call_1", "read_file", streamSigB, `{"path":"/a"}`)
+		err := verifyStream(accepted, returned, withEveryGrant)
+		if err == nil || !strings.Contains(err.Error(), "forged") {
+			t.Fatalf("reindex with token replaced: err = %v, want forged", err)
+		}
+	})
+	t.Run("the same-index form is dropped too", func(t *testing.T) {
+		returned := toolBlock(0, "call_1", "read_file", "", `{"path":"/a"}`)
+		err := verifyStream(accepted, returned, withEveryGrant)
+		if err == nil || !strings.Contains(err.Error(), "dropped") {
+			t.Fatalf("same-index stripped token: err = %v, want dropped", err)
+		}
+	})
+	t.Run("reindex with the token intact is still a coherent pass", func(t *testing.T) {
+		returned := toolBlock(7, "call_1", "read_file", streamSigA, `{"path":"/a"}`)
+		if err := verifyStream(accepted, returned, noGrants); err != nil {
+			t.Fatalf("coherent reindex rejected: %v", err)
+		}
+	})
+}
+
+// TestStreamVerifyEmptyMarkerOwnIdentity pins round-2 F2: an explicit empty
+// returned signature_delta is a clear marker belonging to the returned SPAN
+// it was emitted in — never a pool of interchangeable markers consumed
+// positionally. Every UNCHANGED accepted signed content occurrence surviving
+// anywhere without its token is rejected as dropped BEFORE any clear marker
+// is assigned, so a marker attached to a different (rewritten) span cannot
+// hide a dropped token. The pinned shape: accepted block A signed T1 and
+// block B signed T2; returned A unchanged with no token and B rewritten with
+// an empty marker — previously consumed as "cleared" with no grants at all.
+func TestStreamVerifyEmptyMarkerOwnIdentity(t *testing.T) {
+	// Explicit blocks so the spans keep their identity across the rewrite
+	// (the boundary-less representation would re-frame them into one span,
+	// which is the separately-pinned re-framing case).
+	accepted := append(signedTextBlock(0, "A-content", streamSigA),
+		signedTextBlock(1, "B-content", streamSigB)...)
+
+	t.Run("unchanged A without its token is dropped before B's marker is assigned", func(t *testing.T) {
+		returned := append(textBlock(0, "A-content"),
+			signedTextBlock(1, "B-rewritten", "")...)
+		err := verifyStream(accepted, returned, noGrants)
+		if err == nil || !strings.Contains(err.Error(), "dropped") {
+			t.Fatalf("two-block regression: err = %v, want dropped", err)
+		}
+		if err := verifyStream(accepted, returned, withEveryGrant); err == nil ||
+			!strings.Contains(err.Error(), "dropped") {
+			t.Fatalf("two-block regression with every grant: err = %v, want dropped", err)
+		}
+	})
+	t.Run("reversed order hides nothing either", func(t *testing.T) {
+		// The rewritten span with its marker comes first, the unchanged
+		// block second; the marker's own identity (returned span 0) would
+		// point at the rewritten span, and the unchanged A still survives
+		// without its token — dropped, order notwithstanding.
+		returned := append(signedTextBlock(0, "B-rewritten", ""),
+			textBlock(1, "A-content")...)
+		if err := verifyStream(accepted, returned, withEveryGrant); err == nil ||
+			!strings.Contains(err.Error(), "dropped") {
+			t.Fatalf("reversed two-block regression: err = %v, want dropped", err)
+		}
+	})
+	t.Run("both blocks rewritten, each with its own marker, clears both", func(t *testing.T) {
+		returned := append(signedTextBlock(0, "A-rewritten", ""),
+			signedTextBlock(1, "B-rewritten", "")...)
+		if err := verifyStream(accepted, returned, noGrants); err != nil {
+			t.Fatalf("both rewritten with their own markers rejected: %v", err)
+		}
+	})
+	t.Run("A kept with its token, B rewritten with its own marker, clears B", func(t *testing.T) {
+		returned := append(signedTextBlock(0, "A-content", streamSigA),
+			signedTextBlock(1, "B-rewritten", "")...)
+		if err := verifyStream(accepted, returned, noGrants); err != nil {
+			t.Fatalf("legitimate clear rejected: %v", err)
+		}
+	})
+}
+
+// TestStreamVerifyExplicitEmptySignedBlock pins round-2 F3: an explicit
+// text/thinking block opened and closed with ZERO deltas is still a span with
+// empty typed content — the block exists even without content. An empty
+// signed block whose token disappears while the block survives is a dropped
+// signature, not a suppressed block: rejected even with every grant, with or
+// without an explicit empty clear marker. Only when the whole block vanishes
+// is it suppression (topology-gated).
+func TestStreamVerifyExplicitEmptySignedBlock(t *testing.T) {
+	emptyText := func(sig string, marker bool) []*pbv2.StreamEvent {
+		out := []*pbv2.StreamEvent{{Event: &pbv2.StreamEvent_ContentBlockStart{
+			ContentBlockStart: &pbv2.ContentBlockStart{
+				Index: 0, Block: &pbv2.ContentBlockStart_Text{Text: &pbv2.TextBlock{}},
+			},
+		}}}
+		if marker {
+			out = append(out, signatureDelta(sig))
+		}
+		return append(out, &pbv2.StreamEvent{Event: &pbv2.StreamEvent_ContentBlockStop{
+			ContentBlockStop: &pbv2.ContentBlockStop{Index: 0},
+		}})
+	}
+	emptyThinking := func(sig string, marker bool) []*pbv2.StreamEvent {
+		out := []*pbv2.StreamEvent{{Event: &pbv2.StreamEvent_ContentBlockStart{
+			ContentBlockStart: &pbv2.ContentBlockStart{
+				Index: 0, Block: &pbv2.ContentBlockStart_Thinking{Thinking: &pbv2.ThinkingBlock{}},
+			},
+		}}}
+		if marker {
+			out = append(out, signatureDelta(sig))
+		}
+		return append(out, &pbv2.StreamEvent{Event: &pbv2.StreamEvent_ContentBlockStop{
+			ContentBlockStop: &pbv2.ContentBlockStop{Index: 0},
+		}})
+	}
+
+	acceptedText := emptyText(streamSigA, true)
+	acceptedThinking := emptyThinking(streamSigA, true)
+
+	for _, tc := range []struct {
+		name     string
+		accepted []*pbv2.StreamEvent
+		returned []*pbv2.StreamEvent
+	}{
+		{"empty text block, no marker", acceptedText, emptyText("", false)},
+		{"empty text block, explicit empty marker", acceptedText, emptyText("", true)},
+		{"empty thinking block, no marker", acceptedThinking, emptyThinking("", false)},
+		{"empty thinking block, explicit empty marker", acceptedThinking, emptyThinking("", true)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// The block is still present; only its signature disappeared.
+			// SignatureDropped, not a suppressed signed block — grants must
+			// not save it.
+			err := verifyStream(tc.accepted, tc.returned, withEveryGrant)
+			if err == nil {
+				t.Fatal("empty signed block losing its token passed with every grant")
+			}
+			if !strings.Contains(err.Error(), "dropped") {
+				t.Fatalf("empty signed block: err = %v, want dropped", err)
+			}
+		})
+	}
+
+	t.Run("suppressing the whole empty signed block is topology, not dropped", func(t *testing.T) {
+		// The block itself disappears — a suppressed signed block, gated on
+		// ir.stream.write. The empty span representation is what keeps this
+		// distinguishable from a present empty block with a dropped token.
+		if err := verifyStream(acceptedText, nil, noGrants); err == nil ||
+			!strings.Contains(err.Error(), streamWriteGrant) {
+			t.Fatalf("suppressed empty signed block without grant: err = %v, want topology rejection", err)
+		}
+		if err := verifyStream(acceptedText, nil, withStreamWrite); err != nil {
+			t.Fatalf("suppressed empty signed block with grant rejected: %v", err)
+		}
+	})
+}
+
+// TestValidateAcceptedStreamABITopology pins round-2 F4: validateAcceptedStream
+// implements the FULL ABI topology, not a kind-only approximation. Every
+// stop/delta must match its open block BY INDEX, indexes are never reused,
+// non-tool blocks are exclusive and never overlap tool blocks, MessageStop
+// with any open block is rejected immediately (a later stop cannot hide it),
+// and after MessageStop only Usage (or a terminal StreamError) may follow.
+// All failures are *acceptedStreamError and are propagated by verifyStream
+// as host defects, never plugin violations.
+func TestValidateAcceptedStreamABITopology(t *testing.T) {
+	textStart := func(index int32) *pbv2.StreamEvent {
+		return &pbv2.StreamEvent{Event: &pbv2.StreamEvent_ContentBlockStart{
+			ContentBlockStart: &pbv2.ContentBlockStart{
+				Index: index, Block: &pbv2.ContentBlockStart_Text{Text: &pbv2.TextBlock{}},
+			},
+		}}
+	}
+	textStop := func(index int32) *pbv2.StreamEvent {
+		return &pbv2.StreamEvent{Event: &pbv2.StreamEvent_ContentBlockStop{
+			ContentBlockStop: &pbv2.ContentBlockStop{Index: index},
+		}}
+	}
+	toolDelta := func(index int32, frag string) *pbv2.StreamEvent {
+		return &pbv2.StreamEvent{Event: &pbv2.StreamEvent_ToolCallDelta{
+			ToolCallDelta: &pbv2.ToolCallDelta{Index: index, ArgumentsDelta: frag},
+		}}
+	}
+
+	invalid := []struct {
+		name    string
+		events  []*pbv2.StreamEvent
+		wantMsg string
+	}{
+		{
+			name: "wrong non-tool stop index: StartText(3) closed by Stop(9)",
+			events: []*pbv2.StreamEvent{
+				textStart(3), textDelta("x"), textStop(9),
+			},
+			wantMsg: "names no open block",
+		},
+		{
+			name: "MessageStop with an open tool block, stop hidden until after",
+			events: []*pbv2.StreamEvent{
+				toolStartEvent(0, "call_1", "read_file"),
+				messageStopEvent("tool_calls"),
+				textStop(0),
+			},
+			wantMsg: "MessageStop",
+		},
+		{
+			name: "MessageStop with an open text block",
+			events: []*pbv2.StreamEvent{
+				textStart(0), textDelta("x"), messageStopEvent("stop"),
+			},
+			wantMsg: "MessageStop",
+		},
+		{
+			name: "index reused after close",
+			events: append(append([]*pbv2.StreamEvent{},
+				toolBlock(0, "call_1", "read_file", "", `{}`)...),
+				toolStartEvent(0, "call_2", "write_file")),
+			wantMsg: "reused",
+		},
+		{
+			name: "index reused while open",
+			events: []*pbv2.StreamEvent{
+				toolStartEvent(0, "call_1", "read_file"),
+				toolStartEvent(0, "call_2", "write_file"),
+			},
+			wantMsg: "reused",
+		},
+		{
+			name: "non-tool start while a tool block is open",
+			events: []*pbv2.StreamEvent{
+				toolStartEvent(0, "call_1", "read_file"),
+				textStart(1),
+			},
+			wantMsg: "while a tool block is open",
+		},
+		{
+			name: "tool start while a non-tool block is open",
+			events: []*pbv2.StreamEvent{
+				textStart(0), textStart(1),
+			},
+			wantMsg: "while a text block is open",
+		},
+		{
+			name: "second non-tool block while one is open",
+			events: []*pbv2.StreamEvent{
+				textStart(0),
+				{Event: &pbv2.StreamEvent_ContentBlockStart{ContentBlockStart: &pbv2.ContentBlockStart{
+					Index: 1, Block: &pbv2.ContentBlockStart_Thinking{Thinking: &pbv2.ThinkingBlock{}},
+				}}},
+			},
+			wantMsg: "while a text block is open",
+		},
+		{
+			name: "content after MessageStop",
+			events: []*pbv2.StreamEvent{
+				toolStartEvent(0, "call_1", "read_file"), textStop(0),
+				messageStopEvent("stop"), textDelta("too late"),
+			},
+			wantMsg: "after MessageStop",
+		},
+		{
+			name: "tool delta after MessageStop",
+			events: []*pbv2.StreamEvent{
+				messageStopEvent("stop"), toolDelta(0, `{}`),
+			},
+			wantMsg: "after MessageStop",
+		},
+	}
+	for _, tc := range invalid {
+		t.Run("invalid: "+tc.name, func(t *testing.T) {
+			err := validateAcceptedStream(tc.events)
+			if err == nil {
+				t.Fatal("malformed accepted stream validated")
+			}
+			if !isAcceptedErr(err) {
+				t.Fatalf("error is not an *acceptedStreamError: %T %v", err, err)
+			}
+			if !strings.Contains(err.Error(), tc.wantMsg) {
+				t.Fatalf("error does not mention %q: %v", tc.wantMsg, err)
+			}
+			// verifyStream must propagate the typed host defect unchanged,
+			// no matter what the plugin returned.
+			if err := verifyStream(tc.events, nil, withEveryGrant); err == nil || !isAcceptedErr(err) {
+				t.Fatalf("verifyStream over malformed accepted input: err = %v, want acceptedStreamError", err)
+			}
+		})
+	}
+
+	valid := []struct {
+		name   string
+		events []*pbv2.StreamEvent
+	}{
+		{
+			name: "usage after MessageStop is allowed",
+			events: []*pbv2.StreamEvent{
+				toolStartEvent(0, "call_1", "read_file"), textStop(0),
+				messageStopEvent("stop"), usageEvent(),
+			},
+		},
+		{
+			name: "usage before MessageStop is allowed",
+			events: []*pbv2.StreamEvent{
+				toolStartEvent(0, "call_1", "read_file"), textStop(0),
+				usageEvent(), messageStopEvent("stop"),
+			},
+		},
+		{
+			name: "concurrent tool blocks close before MessageStop",
+			events: []*pbv2.StreamEvent{
+				toolStartEvent(0, "call_1", "read_file"),
+				toolStartEvent(1, "call_2", "write_file"),
+				toolDelta(1, `{"b":1}`), toolDelta(0, `{"a":1}`),
+				textStop(0), textStop(1),
+				messageStopEvent("tool_calls"),
+			},
+		},
+	}
+	for _, tc := range valid {
+		t.Run("valid: "+tc.name, func(t *testing.T) {
+			if err := validateAcceptedStream(tc.events); err != nil {
+				t.Fatalf("valid accepted stream rejected: %v", err)
+			}
+		})
+	}
 }
 
 // BenchmarkVerifyStreamPassThrough measures the whole stream verification on
