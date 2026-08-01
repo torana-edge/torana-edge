@@ -284,7 +284,17 @@ func (s *StreamAdapter) SerializeStream(ctx context.Context, w io.Writer, events
 	var openPart *serializePart
 	var pendingUsage *engine.StreamUsage
 
-	for event := range events {
+	for {
+		var event engine.StreamEvent
+		var ok bool
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case event, ok = <-events:
+		}
+		if !ok {
+			break
+		}
 		switch {
 		case event.Error != nil:
 			_ = writeFrame(w, chunkFinish("OTHER", nil), s.Wrapped)

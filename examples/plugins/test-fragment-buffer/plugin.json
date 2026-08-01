@@ -14,6 +14,14 @@
   ],
   "permissions": [
     {
+      "name": "ir.messages.write.assistant",
+      "description": "Rewrite assembled streamed tool arguments"
+    },
+    {
+      "name": "ir.stream.write",
+      "description": "Suppress fragments and emit an assembled replacement"
+    },
+    {
       "name": "env.meta_get",
       "description": "read request-scoped fragment buffer"
     },

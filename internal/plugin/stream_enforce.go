@@ -25,15 +25,17 @@ package plugin
 //     they terminate as a typed host terminal regardless of any plugin's
 //     failure_mode.
 //
-// Scope verification runs verifyStream over WHOLE-STREAM prefixes ending at
-// each scope close, not over the block's events alone. Scope slices are
+// Scope verification runs the policy transaction plus verifyStreamPrefix over
+// whole-stream prefixes ending at each scope close, not over the block's
+// events alone. Scope slices are
 // unsound here: validateAcceptedStream's rules are whole-message rules
 // (trailing signature_delta bindings, concurrent tool blocks still open at a
 // sibling block's close, index reuse across the message), so a slice can be
-// rejected for a defect it does not contain. Prefixes are always valid
-// inputs (every prefix ending at a scope close satisfies the whole-stream
-// rules exactly when the stream is well-formed), at the cost of re-walking
-// the stream once per scope close — measured in BenchmarkStreamEnforcement.
+// rejected for a defect it does not contain. Prefix checks deliberately defer
+// strict missing-stop validation until MessageStop or EndStreamVerified: a
+// sibling tool may legitimately still be open at another tool's stop. The
+// transaction re-walks the prefix once per scope close — measured in
+// BenchmarkStreamEnforcement.
 //
 // Enforcement is request-scoped: a streamVerifierState lives per reqID in
 // PluginPipeline.streamVerify and is dropped by EndRequest, in the same place
@@ -110,9 +112,9 @@ func (e *StreamTerminalError) Unwrap() error { return e.Err }
 //
 // One instance validates the host's accepted events (host-defect domain);
 // one instance per stream plugin validates that plugin's RETURNED events
-// (plugin-violation domain). end() — the missing-stop check — is only run
-// for the host walker: returned-side full-walk discipline beyond signatures
-// is deliberately the full walk's business, not this PR's.
+// (plugin-violation domain). end() — the missing-stop check — runs for the
+// host and every returned stream at MessageStop and EndStreamVerified; it is
+// deliberately not a prefix rule because tool siblings may be concurrent.
 type streamDisciplineWalker struct {
 	nonTool        *openNonTool
 	openTools      map[int32]bool
@@ -253,9 +255,34 @@ func (w *streamDisciplineWalker) walk(ev *pbv2.StreamEvent) error {
 	return nil
 }
 
+// clone returns an independent validation snapshot. A rejected HookResult
+// must not poison the live walker before pass-mode replay: a start can mark an
+// index seen before a later overlap check rejects it.
+func (w *streamDisciplineWalker) clone() *streamDisciplineWalker {
+	out := *w
+	if w.nonTool != nil {
+		nt := *w.nonTool
+		out.nonTool = &nt
+	}
+	if w.openTools != nil {
+		out.openTools = make(map[int32]bool, len(w.openTools))
+		for idx, open := range w.openTools {
+			out.openTools[idx] = open
+		}
+	}
+	if w.seen != nil {
+		out.seen = make(map[int32]bool, len(w.seen))
+		for idx, seen := range w.seen {
+			out.seen[idx] = seen
+		}
+	}
+	return &out
+}
+
 // end applies the end-of-stream rule: a stream that ends with an explicit
 // content block still open and no StreamError to abandon it is malformed.
-// Only the HOST walker runs this (the accepted side is host discipline).
+// The accepted walker reports host defects; returned walkers report plugin
+// violations at their terminal boundaries.
 func (w *streamDisciplineWalker) end() error {
 	if !w.sawError && (w.nonTool != nil || len(w.openTools) > 0) {
 		return fmt.Errorf("stream ends with an open content block; missing ContentBlockStop (or StreamError)")
@@ -273,9 +300,9 @@ type pluginStreamState struct {
 	// returned is every event this plugin produced — after pass-mode replay
 	// substitution — in the same call order as accepted.
 	returned []*pbv2.StreamEvent
-	// scopeStart is the accepted-buffer offset where the current scope
-	// began; reset at every scope close. Used to decide whether
-	// end-of-stream has events left to verify.
+	// scopeStart is the accepted-buffer offset where the current scope began;
+	// reset at every scope close. It only decides whether a final policy
+	// transaction is pending; returned completeness is checked independently.
 	scopeStart int
 	// walker enforces the per-event returned-side discipline on this
 	// plugin's output.
@@ -326,45 +353,59 @@ func (vs *streamVerifierState) terminate(kind, plugin string, index int32, scope
 	return term
 }
 
-// acceptPluginOutput applies the PRE-COMMIT returned-side discipline check to
-// one event the plugin emitted for the given accepted event. On a violation
-// under "block" it terminates; under "pass" it drops the emitted event and
-// replays the accepted one for this position. If the replayed accepted event
-// itself violates the plugin's output stream, the divergence is beyond
-// event-level repair and the stream terminates. Once the state is terminal,
-// every call returns the recorded terminal without dispatching further work.
-func (vs *streamVerifierState) acceptPluginOutput(pvs *pluginStreamState, accepted, emitted *pbv2.StreamEvent) (*pbv2.StreamEvent, *StreamTerminalError) {
+// acceptPluginOutput atomically validates one complete HookResult candidate.
+// A multi-event EmitEvents action is one replacement, never a sequence of
+// independently committed writes. The returned walker is snapshotted first;
+// on pass-mode failure every candidate event is discarded and the accepted
+// input is replayed exactly once from the original state.
+func (vs *streamVerifierState) acceptPluginOutputs(pvs *pluginStreamState, accepted *pbv2.StreamEvent, emitted []*pbv2.StreamEvent) ([]*pbv2.StreamEvent, *StreamTerminalError) {
 	if vs.terminal != nil {
 		return nil, vs.terminal
 	}
-	if err := pvs.walker.walk(emitted); err != nil {
-		if pvs.lp.failureMode == "block" {
-			return nil, vs.terminate(streamTerminalPlugin, pvs.lp.manifest.Name, eventIndex(emitted), 0, err)
+	candidate := pvs.walker.clone()
+	for _, ev := range emitted {
+		if err := candidate.walk(ev); err != nil {
+			if pvs.lp.failureMode == "block" {
+				return nil, vs.terminate(streamTerminalPlugin, pvs.lp.manifest.Name, eventIndex(ev), 0, err)
+			}
+			replay := pvs.walker.clone()
+			if rerr := replay.walk(accepted); rerr != nil {
+				return nil, vs.terminate(streamTerminalPlugin, pvs.lp.manifest.Name, eventIndex(accepted), 0, rerr)
+			}
+			pvs.walker = replay
+			return []*pbv2.StreamEvent{accepted}, nil
 		}
-		if rerr := pvs.walker.walk(accepted); rerr != nil {
-			return nil, vs.terminate(streamTerminalPlugin, pvs.lp.manifest.Name, eventIndex(accepted), 0, rerr)
-		}
-		return accepted, nil
 	}
+	pvs.walker = candidate
 	return emitted, nil
 }
 
-// acceptPassThrough feeds a plugin's pass-through (or pass-mode failure
-// replay) event through the returned-side discipline walker. The only
-// substitution the contract offers is the accepted event itself — which is
-// exactly this event — so no valid substitute exists when it violates: the
-// plugin's output stream has diverged beyond event-level repair and the
-// stream terminates. (Passing an event through does not exempt it from the
-// output discipline: a stop for a block the plugin suppressed earlier, or a
-// delta after a start it suppressed, is still malformed output.)
+// acceptPluginOutput is the single-event form retained for the focused state
+// tests and for callers that have no fan-out. Real HookResult handling uses
+// acceptPluginOutputs so the whole EmitEvents action remains atomic.
+func (vs *streamVerifierState) acceptPluginOutput(pvs *pluginStreamState, accepted, emitted *pbv2.StreamEvent) (*pbv2.StreamEvent, *StreamTerminalError) {
+	got, term := vs.acceptPluginOutputs(pvs, accepted, []*pbv2.StreamEvent{emitted})
+	if term != nil {
+		return nil, term
+	}
+	if len(got) != 1 {
+		return nil, vs.terminate(streamTerminalPlugin, pvs.lp.manifest.Name, eventIndex(emitted), 0, errors.New("single stream output produced wrong cardinality"))
+	}
+	return got[0], nil
+}
+
+// acceptPassThrough commits an accepted event through the same snapshotting
+// path as a HookResult. This keeps encode/decode/trap pass-mode recovery from
+// having a different (and potentially state-poisoning) transition path.
 func (vs *streamVerifierState) acceptPassThrough(pvs *pluginStreamState, ev *pbv2.StreamEvent) (*pbv2.StreamEvent, *StreamTerminalError) {
-	if vs.terminal != nil {
-		return nil, vs.terminal
+	got, term := vs.acceptPluginOutputs(pvs, ev, []*pbv2.StreamEvent{ev})
+	if term != nil {
+		return nil, term
 	}
-	if err := pvs.walker.walk(ev); err != nil {
-		return nil, vs.terminate(streamTerminalPlugin, pvs.lp.manifest.Name, eventIndex(ev), 0, err)
+	if len(got) != 1 { // unreachable; defensive against future refactors.
+		return nil, vs.terminate(streamTerminalPlugin, pvs.lp.manifest.Name, eventIndex(ev), 0, errors.New("stream pass-through produced no event"))
 	}
-	return ev, nil
+	return got[0], nil
 }
 
 // isScopeCloseEvent reports whether an accepted-side event closes a scope:
@@ -377,20 +418,33 @@ func isScopeCloseEvent(ev *pbv2.StreamEvent) bool {
 	return false
 }
 
-// closeScope runs the LATE scope check for one plugin: verifyStream over the
-// whole-stream prefixes ending at this scope close. A violation is late
+// closeScope runs the LATE scope check for one plugin: the SDK field-policy
+// transaction plus verifyStreamPrefix over the whole-stream prefix ending at
+// this scope close. A violation is late
 // (earlier output of the block has already been forwarded) and terminates
 // under BOTH failure modes. An *acceptedStreamError from the verifier's own
 // accepted-side validation is a HOST defect — the plugin's failure_mode never
 // applies.
-func (vs *streamVerifierState) closeScope(pvs *pluginStreamState) error {
-	vs.scopeNum++
-	if err := verifyStream(pvs.accepted, pvs.returned, pvs.lp.plugin.HasGrant); err != nil {
+func (vs *streamVerifierState) closeScope(pvs *pluginStreamState, scopes ...int) error {
+	scope := 0
+	if len(scopes) == 0 {
+		vs.scopeNum++
+		scope = vs.scopeNum
+	} else {
+		scope = scopes[0]
+	}
+	if err := verifyStreamPrefix(pvs.accepted, pvs.returned, pvs.lp.plugin.HasGrant); err != nil {
 		var ae *acceptedStreamError
 		if errors.As(err, &ae) {
-			return vs.terminate(streamTerminalHost, "host", -1, vs.scopeNum, err)
+			return vs.terminate(streamTerminalHost, "host", -1, scope, err)
 		}
-		return vs.terminate(streamTerminalPlugin, pvs.lp.manifest.Name, toolBlockIndexFrom(err), vs.scopeNum, err)
+		return vs.terminate(streamTerminalPlugin, pvs.lp.manifest.Name, toolBlockIndexFrom(err), scope, err)
+	}
+	// Signature binding has its own normative error classes (dropped/stale/
+	// forged/added), so it runs before the broader registry transaction. The
+	// field walk still applies to every successful signature transaction.
+	if err := verifyStreamPolicy(pvs.accepted, pvs.returned, pvs.lp.plugin.HasGrant); err != nil {
+		return vs.terminate(streamTerminalPlugin, pvs.lp.manifest.Name, toolBlockIndexFrom(err), scope, err)
 	}
 	pvs.scopeStart = len(pvs.accepted)
 	return nil
@@ -489,13 +543,35 @@ func (pp *PluginPipeline) EndStreamVerified(reqID uint64) error {
 	if err := vs.host.end(); err != nil {
 		return vs.terminate(streamTerminalHost, "host", -1, 0, err)
 	}
+	// Returned-side completeness is independent of whether a policy scope is
+	// pending: a plugin may have suppressed its final stop, and that must not
+	// be laundered as whole-block suppression under ir.stream.write.
+	for _, pvs := range vs.plugins {
+		if pvs == nil {
+			continue
+		}
+		if err := pvs.walker.end(); err != nil {
+			return vs.terminate(streamTerminalPlugin, pvs.lp.manifest.Name, -1, vs.scopeNum, err)
+		}
+	}
 	// End-of-stream scope: anything accumulated since the last accepted-side
-	// scope close (including a stream that never closed a scope).
+	// scope close (including a stream that never closed a scope). The ordinal
+	// advances once for the accepted scope, not once per plugin.
+	pending := false
+	for _, pvs := range vs.plugins {
+		if pvs != nil && pvs.scopeStart < len(pvs.accepted) {
+			pending = true
+			break
+		}
+	}
+	if pending {
+		vs.scopeNum++
+	}
 	for _, pvs := range vs.plugins {
 		if pvs == nil || pvs.scopeStart >= len(pvs.accepted) {
 			continue
 		}
-		if err := vs.closeScope(pvs); err != nil {
+		if err := vs.closeScope(pvs, vs.scopeNum); err != nil {
 			return err
 		}
 	}
@@ -514,11 +590,16 @@ func (pp *PluginPipeline) runOnStreamChunk(ctx context.Context, reqID uint64, ch
 	pp.mu.Unlock()
 
 	hostEvent := pbconv.ToPBStreamEvent(chunk)
+	scope := 0
 	if vs != nil {
 		// Pre-commit host-side validation: a malformed ACCEPTED event is a
 		// host/adaptor defect and terminates before the event is forwarded.
 		if err := vs.host.walk(hostEvent); err != nil {
 			return nil, vs.terminate(streamTerminalHost, "host", eventIndex(hostEvent), 0, err)
+		}
+		if isScopeCloseEvent(hostEvent) {
+			vs.scopeNum++
+			scope = vs.scopeNum
 		}
 	}
 
@@ -613,18 +694,18 @@ func (pp *PluginPipeline) runOnStreamChunk(ctx context.Context, reqID uint64, ch
 			}
 			if emit := res.GetEmitEvents(); emit != nil {
 				// Validation already refused an empty or malformed list, so
-				// this is a real replacement or fan-out.
-				for _, outEv := range emit.Events {
-					if vs != nil && pvs != nil {
-						accepted, term := vs.acceptPluginOutput(pvs, ev, outEv)
-						if term != nil {
-							return nil, term
-						}
-						next = append(next, accepted)
-						pvs.returned = append(pvs.returned, accepted)
-					} else {
-						next = append(next, outEv)
+				// this is a real replacement or fan-out. Validate and commit
+				// the ENTIRE action atomically: a later bad child cannot leave
+				// an earlier child forwarded under failure_mode=pass.
+				if vs != nil && pvs != nil {
+					accepted, term := vs.acceptPluginOutputs(pvs, ev, emit.Events)
+					if term != nil {
+						return nil, term
 					}
+					next = append(next, accepted...)
+					pvs.returned = append(pvs.returned, accepted...)
+				} else {
+					next = append(next, emit.Events...)
 				}
 				continue
 			}
@@ -652,14 +733,22 @@ func (pp *PluginPipeline) runOnStreamChunk(ctx context.Context, reqID uint64, ch
 		// buffer includes the plugin's output for it.
 		if vs != nil && pvs != nil {
 			scopeClosed := false
+			messageStopped := false
 			for i := callAcceptedStart; i < len(pvs.accepted); i++ {
 				if isScopeCloseEvent(pvs.accepted[i]) {
 					scopeClosed = true
-					break
+				}
+				if _, ok := pvs.accepted[i].Event.(*pbv2.StreamEvent_MessageStop); ok {
+					messageStopped = true
 				}
 			}
 			if scopeClosed {
-				if err := vs.closeScope(pvs); err != nil {
+				if messageStopped {
+					if err := pvs.walker.end(); err != nil {
+						return nil, vs.terminate(streamTerminalPlugin, pvs.lp.manifest.Name, -1, scope, err)
+					}
+				}
+				if err := vs.closeScope(pvs, scope); err != nil {
 					return nil, err
 				}
 			}

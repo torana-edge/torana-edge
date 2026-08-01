@@ -477,6 +477,203 @@ func TestEnforceEndStreamHostMissingStop(t *testing.T) {
 	}
 }
 
+// TestVerifyStreamPolicyConsumesSDKRegistry pins the enforcement boundary
+// independently of WASM dispatch. The registry is authoritative: semantic
+// changes need their section, cardinality/action changes additionally need
+// topology, and a host fact is never grantable.
+func TestVerifyStreamPolicyConsumesSDKRegistry(t *testing.T) {
+	text := func(s string) *pbv2.StreamEvent { return textDelta(s) }
+	usage := func(n int32) *pbv2.StreamEvent {
+		return &pbv2.StreamEvent{Event: &pbv2.StreamEvent_Usage{Usage: &pbv2.Usage{InputTokens: n}}}
+	}
+	for _, tc := range []struct {
+		name     string
+		accepted []*pbv2.StreamEvent
+		returned []*pbv2.StreamEvent
+		grants   []string
+		want     string
+	}{
+		{
+			name:     "one-for-one text rewrite needs assistant",
+			accepted: []*pbv2.StreamEvent{text("secret")},
+			returned: []*pbv2.StreamEvent{text("redacted")},
+			want:     "ir.messages.write.assistant",
+		},
+		{
+			name:     "granted one-for-one text rewrite passes",
+			accepted: []*pbv2.StreamEvent{text("secret")},
+			returned: []*pbv2.StreamEvent{text("redacted")},
+			grants:   []string{"ir.messages.write.assistant"},
+		},
+		{
+			name:     "suppression needs topology and semantic grant",
+			accepted: []*pbv2.StreamEvent{text("secret")},
+			returned: nil,
+			grants:   []string{"ir.stream.write"},
+			want:     "ir.messages.write.assistant",
+		},
+		{
+			name:     "suppression passes with union of grants",
+			accepted: []*pbv2.StreamEvent{text("secret")},
+			returned: nil,
+			grants:   []string{"ir.stream.write", "ir.messages.write.assistant"},
+		},
+		{
+			name:     "usage is host owned even with every grant",
+			accepted: []*pbv2.StreamEvent{usage(1)},
+			returned: []*pbv2.StreamEvent{usage(2)},
+			grants:   []string{"ir.stream.write", "ir.messages.write.assistant"},
+			want:     "host-owned",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := verifyStreamPolicy(tc.accepted, tc.returned, grant(tc.grants...))
+			if tc.want == "" {
+				if err != nil {
+					t.Fatalf("policy rejected granted mutation: %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("error = %v, want %q", err, tc.want)
+			}
+		})
+	}
+}
+
+// TestEnforcePassOutputIsAtomicRegression reproduces the pre-round-2 state
+// poison: an invalid start marked index 1 seen before pass-mode replay, so a
+// later legitimate start at that index was rejected. Both the walker and the
+// fan-out candidate now commit only after complete validation succeeds.
+func TestEnforcePassOutputIsAtomicRegression(t *testing.T) {
+	vs, pvs := enforceState(t, "test-stream-mutator")
+	startText := func(idx int32) *pbv2.StreamEvent {
+		return &pbv2.StreamEvent{Event: &pbv2.StreamEvent_ContentBlockStart{
+			ContentBlockStart: &pbv2.ContentBlockStart{Index: idx, Block: &pbv2.ContentBlockStart_Text{Text: &pbv2.TextBlock{}}},
+		}}
+	}
+	startThinking := func(idx int32) *pbv2.StreamEvent {
+		return &pbv2.StreamEvent{Event: &pbv2.StreamEvent_ContentBlockStart{
+			ContentBlockStart: &pbv2.ContentBlockStart{Index: idx, Block: &pbv2.ContentBlockStart_Thinking{Thinking: &pbv2.ThinkingBlock{}}},
+		}}
+	}
+	if _, term := vs.acceptPluginOutput(pvs, startText(0), startText(0)); term != nil {
+		t.Fatalf("setup start: %v", term)
+	}
+
+	// The first candidate child is valid, the second overlaps the text block.
+	// Pass mode must discard BOTH children and replay the accepted delta once.
+	got, term := vs.acceptPluginOutputs(pvs, textDelta("original"), []*pbv2.StreamEvent{textDelta("replacement"), startThinking(1)})
+	if term != nil {
+		t.Fatalf("pass-mode candidate terminated: %v", term)
+	}
+	if len(got) != 1 || got[0].GetTextDelta() != "original" {
+		t.Fatalf("pass replay = %+v, want exactly the accepted event", got)
+	}
+	if _, term := vs.acceptPluginOutput(pvs, stopEvent(0), stopEvent(0)); term != nil {
+		t.Fatalf("close original block: %v", term)
+	}
+	if _, term := vs.acceptPluginOutput(pvs, startThinking(1), startThinking(1)); term != nil {
+		t.Fatalf("legitimate index after rejected candidate was poisoned: %v", term)
+	}
+}
+
+// TestEnforceParallelToolPrefixAllowsSiblingOpen pins the prefix/final split:
+// closing tool 0 while tool 1 remains live is a valid scope prefix. Completeness
+// is enforced only when the returned stream reaches MessageStop/end-of-stream.
+func TestEnforceParallelToolPrefixAllowsSiblingOpen(t *testing.T) {
+	vs, pvs := enforceState(t, "test-stream-mutator")
+	startTool := func(idx int32, id, name string) *pbv2.StreamEvent {
+		return &pbv2.StreamEvent{Event: &pbv2.StreamEvent_ContentBlockStart{
+			ContentBlockStart: &pbv2.ContentBlockStart{Index: idx, Block: &pbv2.ContentBlockStart_ToolCall{ToolCall: &pbv2.ToolCallRef{Id: id, Name: name}}},
+		}}
+	}
+	arg := func(idx int32, fragment string) *pbv2.StreamEvent {
+		return &pbv2.StreamEvent{Event: &pbv2.StreamEvent_ToolCallDelta{ToolCallDelta: &pbv2.ToolCallDelta{Index: idx, ArgumentsDelta: fragment}}}
+	}
+	accepted := []*pbv2.StreamEvent{
+		startTool(0, "a", "one"), startTool(1, "b", "two"),
+		arg(0, `{`), arg(1, `{`), stopEvent(0),
+	}
+	pvs.accepted = append(pvs.accepted, accepted...)
+	pvs.returned = append(pvs.returned, accepted...)
+	if err := vs.closeScope(pvs); err != nil {
+		t.Fatalf("valid parallel-tool prefix rejected: %v", err)
+	}
+	pvs.accepted = append(pvs.accepted, arg(1, `}`), stopEvent(1))
+	pvs.returned = append(pvs.returned, arg(1, `}`), stopEvent(1))
+	if err := vs.closeScope(pvs); err != nil {
+		t.Fatalf("parallel tool completion rejected: %v", err)
+	}
+}
+
+// TestEnforceScopeOrdinalAdvancesOnceAcrossPlugins pins the attribution
+// contract: a completed accepted scope has one stable ordinal even when every
+// plugin gets a chance to inspect it. The former per-plugin increment made the
+// same host block report a different scope depending on pipeline order.
+func TestEnforceScopeOrdinalAdvancesOnceAcrossPlugins(t *testing.T) {
+	requireWASM(t, fixturesDir+"/test-stream-mutator/plugin.wasm")
+	requireWASM(t, fixturesDir+"/test-tool-rewriter/plugin.wasm")
+	pp := newTestPipeline(t, fixturesDir, []string{"test-stream-mutator", "test-tool-rewriter"})
+	const reqID = 7019
+
+	runVerified(t, pp, reqID, engine.StreamEvent{BlockStart: &engine.BlockStart{Index: 0, Kind: engine.BlockKindText}})
+	runVerified(t, pp, reqID, engine.StreamEvent{TextDelta: strPtr("ordinary text")})
+	runVerified(t, pp, reqID, engine.StreamEvent{BlockStop: &engine.BlockStop{Index: 0}})
+
+	pp.mu.Lock()
+	vs := pp.streamVerify[reqID]
+	got := vs.scopeNum
+	pp.mu.Unlock()
+	if got != 1 {
+		t.Fatalf("one accepted block close across two plugins advanced scope to %d, want 1", got)
+	}
+	pp.EndRequest(reqID)
+}
+
+// TestEndStreamVerifiedRejectsReturnedMissingStop closes the laundering hole
+// where a plugin could forward a start/delta but suppress its stop and rely on
+// ir.stream.write to make the incomplete returned block look like whole-block
+// suppression. Returned completeness is mandatory even when there is no
+// remaining policy scope to compare.
+func TestEndStreamVerifiedRejectsReturnedMissingStop(t *testing.T) {
+	pp := enforcePipeline(t, "test-stream-mutator")
+	vs := newStreamVerifierState(pp)
+	const reqID = 7020
+	pp.mu.Lock()
+	pp.streamVerify[reqID] = vs
+	pp.mu.Unlock()
+	pvs := vs.plugins[0]
+	start := &pbv2.StreamEvent{Event: &pbv2.StreamEvent_ContentBlockStart{
+		ContentBlockStart: &pbv2.ContentBlockStart{Index: 0, Block: &pbv2.ContentBlockStart_ToolCall{ToolCall: &pbv2.ToolCallRef{Id: "c", Name: "read"}}},
+	}}
+	stop := stopEvent(0)
+	if err := vs.host.walk(start); err != nil {
+		t.Fatalf("host start: %v", err)
+	}
+	if err := vs.host.walk(stop); err != nil {
+		t.Fatalf("host stop: %v", err)
+	}
+	if err := pvs.walker.walk(start); err != nil {
+		t.Fatalf("returned start: %v", err)
+	}
+	// Simulate a prior completed policy transaction so only walker.end can
+	// catch the missing returned stop.
+	pvs.accepted = []*pbv2.StreamEvent{start, stop}
+	pvs.returned = []*pbv2.StreamEvent{start}
+	pvs.scopeStart = len(pvs.accepted)
+
+	err := pp.EndStreamVerified(reqID)
+	var term *StreamTerminalError
+	if !errors.As(err, &term) || term.Kind != streamTerminalPlugin {
+		t.Fatalf("missing returned stop must be a plugin terminal, got %T: %v", err, err)
+	}
+	if !strings.Contains(term.Error(), "missing ContentBlockStop") {
+		t.Fatalf("missing-stop invariant absent: %v", term)
+	}
+	pp.EndRequest(reqID)
+}
+
 // TestStreamTerminalErrorFormatting pins the operator-visible attribution
 // text: kind, plugin, index and the invariant all appear.
 func TestStreamTerminalErrorFormatting(t *testing.T) {
@@ -589,6 +786,38 @@ func TestStreamEnforcementValidSignedStreamPasses(t *testing.T) {
 	}
 	if err := pp.EndStreamVerified(reqID); err != nil {
 		t.Fatalf("valid signed stream fired at end-of-stream: %v", err)
+	}
+	pp.EndRequest(reqID)
+}
+
+// TestStreamEnforcementRejectsUngrantedTextMutation is the production-path
+// regression for the review finding that prompted 2b round 2. The fixture
+// deliberately declares only env.log yet rewrites a streamed assistant delta;
+// the scope transaction must reject it rather than silently letting a plugin
+// mutate content outside its declared capability.
+func TestStreamEnforcementRejectsUngrantedTextMutation(t *testing.T) {
+	requireWASM(t, fixturesDir+"/test-stream-mutator-nogrant/plugin.wasm")
+	pp := newTestPipeline(t, fixturesDir, []string{"test-stream-mutator-nogrant"})
+	const reqID = 7010
+
+	start := engine.StreamEvent{BlockStart: &engine.BlockStart{Index: 0, Kind: engine.BlockKindText}}
+	if _, err := pp.RunOnStreamChunkVerified(context.Background(), reqID, &start); err != nil {
+		t.Fatalf("block start: %v", err)
+	}
+	secret := "the secret plan"
+	if _, err := pp.RunOnStreamChunkVerified(context.Background(), reqID, &engine.StreamEvent{TextDelta: &secret}); err != nil {
+		t.Fatalf("delta before scope close: %v", err)
+	}
+	_, err := pp.RunOnStreamChunkVerified(context.Background(), reqID, &engine.StreamEvent{BlockStop: &engine.BlockStop{Index: 0}})
+	if err == nil {
+		t.Fatal("ungranted text rewrite must terminate at its completed scope")
+	}
+	var term *StreamTerminalError
+	if !errors.As(err, &term) || term.Kind != streamTerminalPlugin || term.Plugin != "test-stream-mutator-nogrant" {
+		t.Fatalf("wrong terminal attribution: %T: %v", err, err)
+	}
+	if !strings.Contains(term.Error(), "ir.messages.write.assistant") {
+		t.Fatalf("missing required grant in terminal: %v", term)
 	}
 	pp.EndRequest(reqID)
 }

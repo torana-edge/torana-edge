@@ -743,6 +743,31 @@ func verifyStream(accepted, returned []*pbv2.StreamEvent, canWrite func(string) 
 	return verifySignatureDeltaBindings(av, rv, canWrite)
 }
 
+// verifyStreamPrefix is verifyStream for a still-live message prefix.  The
+// incremental accepted walker has already established every per-event rule;
+// unlike verifyStream it deliberately does NOT require all sibling tool blocks
+// to be closed yet.  Open concurrent tools are valid after another tool's
+// stop, and applying the end-of-stream rule here would turn that valid prefix
+// into a host defect.  Strict completeness remains mandatory at MessageStop
+// and EndStreamVerified.
+func verifyStreamPrefix(accepted, returned []*pbv2.StreamEvent, canWrite func(string) bool) error {
+	if canWrite == nil {
+		canWrite = func(string) bool { return false }
+	}
+	w := &streamDisciplineWalker{}
+	for _, ev := range accepted {
+		if err := w.walk(ev); err != nil {
+			return &acceptedStreamError{msg: err.Error()}
+		}
+	}
+	av := scanStreamSignatures(accepted)
+	rv := scanStreamSignatures(returned)
+	if err := verifyToolScopes(av.toolScopes, rv.toolScopes, canWrite); err != nil {
+		return err
+	}
+	return verifySignatureDeltaBindings(av, rv, canWrite)
+}
+
 // verifyToolScopes applies the bound-signature rule to every tool-call block.
 //
 // Scopes are assembled by index WITHIN each side (the walk does this); the
