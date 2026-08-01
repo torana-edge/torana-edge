@@ -9,12 +9,18 @@ don't cost you one.
 ```bash
 go build ./...
 make testdata     # builds the WASM test fixtures the plugin tests need
-make test         # plugins + testdata + go test ./... -race
+make test         # quick gate: fixtures + go test ./... (a few minutes)
+make test-race    # slow pre-merge gate: fixtures + go test ./... -race (~15 min)
 ```
 
-`.wasm` files are build artifacts and are gitignored, so `make test` builds the
+`.wasm` files are build artifacts and are gitignored, so both targets build the
 fixtures first. `TORANA_E2E=1` turns a missing fixture from a skip into a hard
 failure.
+
+`make test` is the everyday iteration command. `make test-race` is the slow
+gate run before merging — the proxy package alone takes ~13 minutes under
+`-race`, so it is a deliberate separate step rather than the default (CI runs
+it with the same 1800s timeout).
 
 ### The official plugins are not in this repository
 
@@ -80,8 +86,9 @@ style.
 
 Some specific things:
 
-- **Run `-race`.** `make test` does. Anything touching the plugin runtime,
-  the conversation registry, or stats is concurrent by nature.
+- **Run `-race` before merging.** `make test-race` does (the quick `make test`
+  does not). Anything touching the plugin runtime, the conversation registry,
+  or stats is concurrent by nature.
 - **Don't switch wazero to interpreter mode to make `-race` faster.** `-race`
   makes wazero's compiler pathologically slow and it is tempting, but interpreter
   mode stops exercising the code path that actually ships.

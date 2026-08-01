@@ -1,4 +1,4 @@
-.PHONY: build install clean test release official-plugins testdata lint
+.PHONY: build install clean test test-race release official-plugins testdata lint
 
 BINARY := torana
 VERSION ?= $(shell git describe --tags --exact-match 2>/dev/null || git rev-parse --short HEAD 2>/dev/null || echo "dev")
@@ -37,7 +37,14 @@ testdata:
 install:
 	go install -buildvcs=false -ldflags "$(LDFLAGS)" ./cmd/torana/
 
+# test: the everyday iteration gate — fixtures plus the ordinary full suite
+# (a few minutes). test-race is the slow pre-merge gate: the same suite under
+# -race takes ~15 minutes (the proxy package alone is ~13), so it is a
+# deliberate, separate step rather than the default command.
 test: testdata
+	go test ./... -timeout 600s
+
+test-race: testdata
 	go test ./... -race -timeout 1800s
 
 lint:

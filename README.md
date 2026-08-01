@@ -217,8 +217,11 @@ Before raising pull requests, developers and AI agents must ensure that all code
 # Run local lint checks (golangci-lint)
 make lint
 
-# Run all unit and integration tests
+# Run the quick iteration gate — fixtures + full suite (a few minutes)
 make test
+
+# Run the slow pre-merge race gate — same suite under -race (~15 minutes)
+make test-race
 ```
 
 ## License

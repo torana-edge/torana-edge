@@ -440,3 +440,90 @@ func TestCandidate0OnlyGemini(t *testing.T) {
 		t.Fatalf("candidate 1 args not byte-identical in the output:\n%s", out)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Round 11 finding 1: the gemini CONTENT slot must come from candidate 0 —
+// the selected response — exactly like tool calls. A later candidate is an
+// alternative, so its text must be neither exposed as ResponseMessage.content
+// nor mutated on the wire. rawSlots still cover every candidate (args byte
+// preservation is unaffected).
+// ---------------------------------------------------------------------------
+
+func TestGeminiContentSlotCandidateZeroOnly(t *testing.T) {
+	// Candidate 0 has only a tool call; candidate 1 has text. The text must
+	// NOT become the writable slot.
+	body := `{"candidates":[
+		{"content":{"parts":[{"functionCall":{"id":"c1","name":"ping"}}]}},
+		{"content":{"parts":[{"text":"alternative"}]}}
+	]}`
+	refs := extractResponse("gemini", decode(t, body), []byte(body))
+	if !refs.hasMessage {
+		t.Fatal("candidate 0 with content must count as a message")
+	}
+	if refs.setContent != nil {
+		t.Fatalf("content slot bound from the UNSELECTED candidate: %q", refs.content)
+	}
+	if refs.content != "" {
+		t.Fatalf("unselected candidate text leaked into content: %q", refs.content)
+	}
+
+	// Present-empty text on candidate 0 IS the selected writable slot, even
+	// when candidate 1 carries real text.
+	body = `{"candidates":[
+		{"content":{"parts":[{"text":""}]}},
+		{"content":{"parts":[{"text":"alternative"}]}}
+	]}`
+	refs = extractResponse("gemini", decode(t, body), []byte(body))
+	if refs.setContent == nil {
+		t.Fatal("candidate-0 present-empty text must bind the writable slot")
+	}
+	if refs.content != "" {
+		t.Fatalf("content = %q, want present-empty from candidate 0", refs.content)
+	}
+}
+
+// Hook level: a content-mutating plugin must neither see candidate-1 text as
+// ResponseMessage.content nor change candidate 1 on the wire.
+func TestGeminiAlternativeTextNotMutated(t *testing.T) {
+	requireWASM(t, fixturesDir+"/test-observer/plugin.wasm")
+	pp := newProxyTestPipeline(t, []string{"test-observer"})
+
+	body := []byte(`{"candidates":[
+		{"content":{"parts":[{"functionCall":{"id":"c1","name":"ping","args":{"x":1}}}]}},
+		{"content":{"parts":[{"text":"alternative"}]}}
+	]}`)
+
+	out, err := runJSONResponseHooks(context.Background(), pp, 1, "gemini", nil, body)
+	if err != nil {
+		t.Fatalf("runJSONResponseHooks: %v", err)
+	}
+	if strings.Contains(string(out), "observed status=") {
+		t.Fatalf("observer rewrote the unselected candidate's text:\n%s", out)
+	}
+	if !strings.Contains(string(out), `"text":"alternative"`) {
+		t.Fatalf("candidate 1 text changed on the wire:\n%s", out)
+	}
+}
+
+// Present-empty text on candidate 0 stays the selected slot end to end: the
+// plugin's value change lands there, and candidate 1 is untouched.
+func TestGeminiPresentEmptyTextIsSelectedSlot(t *testing.T) {
+	requireWASM(t, fixturesDir+"/test-invented-content/plugin.wasm")
+	pp := newProxyTestPipeline(t, []string{"test-invented-content"})
+
+	body := []byte(`{"candidates":[
+		{"content":{"parts":[{"text":""}]}},
+		{"content":{"parts":[{"text":"alternative"}]}}
+	]}`)
+
+	out, err := runJSONResponseHooks(context.Background(), pp, 1, "gemini", nil, body)
+	if err != nil {
+		t.Fatalf("runJSONResponseHooks: %v", err)
+	}
+	if !strings.Contains(string(out), `"text":"invented"`) {
+		t.Fatalf("candidate-0 present-empty slot not rewritten:\n%s", out)
+	}
+	if !strings.Contains(string(out), `"text":"alternative"`) {
+		t.Fatalf("candidate 1 text changed on the wire:\n%s", out)
+	}
+}

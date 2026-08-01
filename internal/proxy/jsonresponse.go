@@ -540,11 +540,16 @@ func extractGemini(body map[string]any, raw []byte) responseRefs {
 			if part == nil {
 				continue
 			}
-			// Content slot = first part with a present string text key.
-			if s, isStr := part["text"].(string); isStr && refs.setContent == nil {
-				partRef := part
-				refs.content = s
-				refs.setContent = func(s string) { partRef["text"] = s }
+			// Content slot = first part of CANDIDATE 0 with a present string
+			// text key. Candidate 0 is the selected response; a later
+			// candidate is an alternative, not another turn, so its text must
+			// be neither exposed as ResponseMessage.content nor mutated.
+			if ci == 0 {
+				if s, isStr := part["text"].(string); isStr && refs.setContent == nil {
+					partRef := part
+					refs.content = s
+					refs.setContent = func(s string) { partRef["text"] = s }
+				}
 			}
 			if fc, ok := part["functionCall"].(map[string]any); ok {
 				path := make([]any, 0, len(prefix)+7)
