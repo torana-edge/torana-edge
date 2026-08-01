@@ -464,10 +464,35 @@ func TestDuplicateStartErrors(t *testing.T) {
 	}
 }
 
-// Indexes are unique per streamed MESSAGE, not per stream: a later message in
-// the same request may reuse a closed index (e.g. a second turn's tool call
-// taking index 0 again). Only a start at an OPEN index is a duplicate.
-func TestStartAtClosedIndexIsLegal(t *testing.T) {
+// At most ONE content block may be open at a time: a second start at a
+// DIFFERENT index while a block is open is invalid — the index-bound wire
+// cannot interleave two blocks' events.
+func TestSecondStartWhileOpenRejected(t *testing.T) {
+	tracker := &BlockKindTracker{}
+	text := &pb.StreamEvent{Event: &pb.StreamEvent_ContentBlockStart{ContentBlockStart: &pb.ContentBlockStart{
+		Index: 0, Block: &pb.ContentBlockStart_Text{Text: &pb.TextBlock{}},
+	}}}
+	thinking := &pb.StreamEvent{Event: &pb.StreamEvent_ContentBlockStart{ContentBlockStart: &pb.ContentBlockStart{
+		Index: 1, Block: &pb.ContentBlockStart_Thinking{Thinking: &pb.ThinkingBlock{}},
+	}}}
+	if _, err := tracker.FromPBStreamEvent(text); err != nil {
+		t.Fatalf("first start: %v", err)
+	}
+	_, err := tracker.FromPBStreamEvent(thinking)
+	if err == nil {
+		t.Fatal("second start at a different index while a block is open did not error")
+	}
+	want := "pbconv: content block start at index 1 while a text block at index 0 is still open"
+	if err.Error() != want {
+		t.Errorf("error = %q, want %q", err.Error(), want)
+	}
+}
+
+// Indexes are unique across the ENTIRE streamed message: a start whose index
+// was already used is invalid EVEN AFTER its block closed. One response stream
+// is one streamed message; the tracker is request-scoped and drops
+// MessageStart, so it cannot infer a reset between "messages".
+func TestIndexReuseAfterCloseRejected(t *testing.T) {
 	tracker := &BlockKindTracker{}
 	text := &pb.StreamEvent{Event: &pb.StreamEvent_ContentBlockStart{ContentBlockStart: &pb.ContentBlockStart{
 		Index: 0, Block: &pb.ContentBlockStart_Text{Text: &pb.TextBlock{}},
@@ -476,10 +501,39 @@ func TestStartAtClosedIndexIsLegal(t *testing.T) {
 	tool := &pb.StreamEvent{Event: &pb.StreamEvent_ContentBlockStart{ContentBlockStart: &pb.ContentBlockStart{
 		Index: 0, Block: &pb.ContentBlockStart_ToolCall{ToolCall: &pb.ToolCallRef{Id: "c", Name: "n"}},
 	}}}
-	for i, ev := range []*pb.StreamEvent{text, stop, tool} {
+	for i, ev := range []*pb.StreamEvent{text, stop} {
 		if _, err := tracker.FromPBStreamEvent(ev); err != nil {
-			t.Fatalf("event %d (start at a closed index): %v", i, err)
+			t.Fatalf("event %d: %v", i, err)
 		}
+	}
+	_, err := tracker.FromPBStreamEvent(tool)
+	if err == nil {
+		t.Fatal("start at a closed index within one message did not error — indexes must stay unique per message")
+	}
+	want := "pbconv: content block index 0 reused within one streamed message"
+	if err.Error() != want {
+		t.Errorf("error = %q, want %q", err.Error(), want)
+	}
+}
+
+// A stop must name the single open block: a stop at a different index while a
+// block is open is invalid topology, never a guess.
+func TestMismatchedStopRejected(t *testing.T) {
+	tracker := &BlockKindTracker{}
+	text := &pb.StreamEvent{Event: &pb.StreamEvent_ContentBlockStart{ContentBlockStart: &pb.ContentBlockStart{
+		Index: 5, Block: &pb.ContentBlockStart_Text{Text: &pb.TextBlock{}},
+	}}}
+	stop := &pb.StreamEvent{Event: &pb.StreamEvent_ContentBlockStop{ContentBlockStop: &pb.ContentBlockStop{Index: 3}}}
+	if _, err := tracker.FromPBStreamEvent(text); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	_, err := tracker.FromPBStreamEvent(stop)
+	if err == nil {
+		t.Fatal("stop at a different index than the open block did not error")
+	}
+	want := "pbconv: content block stop at index 3 does not match the open text block at index 5"
+	if err.Error() != want {
+		t.Errorf("error = %q, want %q", err.Error(), want)
 	}
 }
 

@@ -218,26 +218,37 @@ func ToPBStreamEvent(e *engine.StreamEvent) *pb.StreamEvent {
 	return out
 }
 
-// BlockKindTracker records which content block is ACTUALLY open at each index
-// while a streamed message is converted pb → engine, so a ContentBlockStop —
-// which carries only an index — converts back to the engine event that matches
-// the block it closes: ToolCallEnd for tool blocks, BlockStop for
+// BlockKindTracker records which content block is ACTUALLY open while a
+// streamed message is converted pb → engine, so a ContentBlockStop — which
+// carries only an index — converts back to the engine event that matches the
+// block it closes: ToolCallEnd for tool blocks, BlockStop for
 // text/thinking/provider blocks.
 //
 // The v2 wire binds a stop by index alone; the block kind lives on the start
-// event. The v2 contract also makes a stop that does not name the currently
-// open start INVALID, so this tracker never guesses: a stop with no open block
-// at its index is an error, and a second start at an index that already has an
-// open block (duplicate/reused topology) is an error. A start at a CLOSED index
-// is legal — indexes are unique per streamed MESSAGE, and a later message in
-// the same request may reuse them — so only the currently-open set is checked.
+// event. The v2 contract is stricter than per-index uniqueness: at most ONE
+// content block may be open at a time, and indexes are unique across the
+// ENTIRE streamed message — never reused after a block closes. This tracker
+// enforces both, so it never guesses: a second start while a block is open is
+// an error regardless of index, a start whose index was already used in this
+// message is an error even after its block closed, and a stop that does not
+// name the single open block is an error.
 //
-// A tracker is per streamed message (or per request, when the stream crosses
-// host calls). It is NOT safe for concurrent use.
+// One response stream is ONE streamed message. A tracker is request-scoped
+// (streams cross host calls) and never sees MessageStart, so it cannot infer
+// a reset — indexes stay unique for the whole request. It is NOT safe for
+// concurrent use.
 type BlockKindTracker struct {
-	// open maps each currently-open block index to the kind of the block
-	// opened there. Stops resolve by this actual kind; nothing is guessed.
-	open map[int]blockKind
+	// openKind/openIndex/hasOpen are the one content block currently open in
+	// this message. Stops resolve by this actual kind; nothing is guessed.
+	// The kind is retained ONLY to lower a matching stop to ToolCallEnd
+	// (tool) vs BlockStop (text/thinking/provider).
+	openKind  blockKind
+	openIndex int
+	hasOpen   bool
+	// seen records every index that has opened a block in this message.
+	// Indexes are unique per message: a start whose index was already used —
+	// even after its block closed — is invalid topology.
+	seen map[int]struct{}
 }
 
 // blockKind is the kind of a content block recorded as open at an index.
@@ -267,11 +278,11 @@ func (k blockKind) String() string {
 }
 
 // FromPBStreamEvent converts one event, resolving ContentBlockStop by the kind
-// of the block this tracker recorded as open at its index. It returns an error
-// for topology the v2 ABI declares invalid: a stop that names no open block
-// (unknown, mismatched, or stop-after-close), or a start at an index where a
-// block is already open (duplicate/reused). The conversion boundary never
-// fabricates a kind.
+// of the block this tracker recorded as open. It returns an error for topology
+// the v2 ABI declares invalid: a second start while a block is open (regardless
+// of index), a start whose index was already used in this message (even after
+// its block closed), or a stop that does not name the single open block. The
+// conversion boundary never fabricates a kind.
 func (t *BlockKindTracker) FromPBStreamEvent(e *pb.StreamEvent) (*engine.StreamEvent, error) {
 	out := &engine.StreamEvent{}
 	switch v := e.Event.(type) {
@@ -283,42 +294,53 @@ func (t *BlockKindTracker) FromPBStreamEvent(e *pb.StreamEvent) (*engine.StreamE
 		if v.ContentBlockStart == nil {
 			return out, nil
 		}
-		if t.open == nil {
-			t.open = make(map[int]blockKind)
-		}
 		cbs := v.ContentBlockStart
-		if kind, ok := t.open[int(cbs.Index)]; ok {
-			return nil, fmt.Errorf("pbconv: duplicate content block start at index %d: a %s block is already open", cbs.Index, kind)
+		idx := int(cbs.Index)
+		// At most ONE content block open at a time — a second start is
+		// invalid even at a different index (it would interleave two blocks'
+		// events, which the index-bound wire cannot represent).
+		if t.hasOpen {
+			return nil, fmt.Errorf("pbconv: content block start at index %d while a %s block at index %d is still open", idx, t.openKind, t.openIndex)
+		}
+		if t.seen == nil {
+			t.seen = make(map[int]struct{})
+		}
+		if _, used := t.seen[idx]; used {
+			return nil, fmt.Errorf("pbconv: content block index %d reused within one streamed message", idx)
 		}
 		switch b := cbs.Block.(type) {
 		case *pb.ContentBlockStart_ToolCall:
 			if b.ToolCall != nil {
 				out.ToolCallStart = &engine.ToolCallStart{
-					Index:     int(cbs.Index),
+					Index:     idx,
 					ID:        b.ToolCall.Id,
 					Name:      b.ToolCall.Name,
 					Signature: b.ToolCall.Signature,
 				}
-				t.open[int(cbs.Index)] = blockKindTool
+				t.openKind, t.openIndex, t.hasOpen = blockKindTool, idx, true
+				t.seen[idx] = struct{}{}
 			}
 		case *pb.ContentBlockStart_Text:
 			if b.Text != nil {
-				out.BlockStart = &engine.BlockStart{Index: int(cbs.Index), Kind: engine.BlockKindText}
-				t.open[int(cbs.Index)] = blockKindText
+				out.BlockStart = &engine.BlockStart{Index: idx, Kind: engine.BlockKindText}
+				t.openKind, t.openIndex, t.hasOpen = blockKindText, idx, true
+				t.seen[idx] = struct{}{}
 			}
 		case *pb.ContentBlockStart_Thinking:
 			if b.Thinking != nil {
-				out.BlockStart = &engine.BlockStart{Index: int(cbs.Index), Kind: engine.BlockKindThinking}
-				t.open[int(cbs.Index)] = blockKindThinking
+				out.BlockStart = &engine.BlockStart{Index: idx, Kind: engine.BlockKindThinking}
+				t.openKind, t.openIndex, t.hasOpen = blockKindThinking, idx, true
+				t.seen[idx] = struct{}{}
 			}
 		case *pb.ContentBlockStart_Provider:
 			if b.Provider != nil {
 				out.BlockStart = &engine.BlockStart{
-					Index:        int(cbs.Index),
+					Index:        idx,
 					Kind:         engine.BlockKindProvider,
 					ProviderKind: b.Provider.Kind,
 				}
-				t.open[int(cbs.Index)] = blockKindProvider
+				t.openKind, t.openIndex, t.hasOpen = blockKindProvider, idx, true
+				t.seen[idx] = struct{}{}
 			}
 		}
 	case *pb.StreamEvent_SignatureDelta:
@@ -334,16 +356,18 @@ func (t *BlockKindTracker) FromPBStreamEvent(e *pb.StreamEvent) (*engine.StreamE
 			return out, nil
 		}
 		idx := int(v.ContentBlockStop.Index)
-		kind, ok := t.open[idx]
-		if !ok {
+		if !t.hasOpen {
 			return nil, fmt.Errorf("pbconv: content block stop at index %d has no open block (unknown, mismatched, or already-closed topology)", idx)
 		}
-		if kind == blockKindTool {
+		if idx != t.openIndex {
+			return nil, fmt.Errorf("pbconv: content block stop at index %d does not match the open %s block at index %d", idx, t.openKind, t.openIndex)
+		}
+		if t.openKind == blockKindTool {
 			out.ToolCallEnd = &engine.ToolCallEnd{Index: idx}
 		} else {
 			out.BlockStop = &engine.BlockStop{Index: idx}
 		}
-		delete(t.open, idx)
+		t.hasOpen = false
 	case *pb.StreamEvent_MessageStop:
 		out.FinishReason = v.MessageStop.FinishReason
 	case *pb.StreamEvent_Usage:

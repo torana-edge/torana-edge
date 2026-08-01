@@ -258,8 +258,59 @@ func mapBedrockStopReason(reason string) string {
 
 // --- SerializeStream ---
 
+// blockTopology tracks the one content block open in the stream being
+// serialized, enforcing the v2 ABI's single-open-block + unique-index
+// discipline on explicit block events BEFORE they are lowered to the wire. A
+// second start while a block is open (any index), a start whose index was
+// already used in this message, or a stop that does not name the open block is
+// malformed topology and errors — never silently accepted.
+//
+// Tool-call blocks ride the raw ToolCallStart/Delta/End events and do NOT go
+// through this state; it exists only for the explicit text/thinking
+// BlockStart/BlockStop events the host's verified IR emits.
+type blockTopology struct {
+	prefix string
+	kind   engine.BlockKind
+	index  int
+	open   bool
+	seen   map[int]struct{}
+}
+
+// start records an explicit block start, or errors if the discipline is
+// violated. It does not decide what the wire renders — the caller lowers each
+// kind to its protocol arm.
+func (b *blockTopology) start(index int, kind engine.BlockKind) error {
+	if b.open {
+		return fmt.Errorf("%s: content block start at index %d while a %s block at index %d is still open", b.prefix, index, b.kind, b.index)
+	}
+	if b.seen == nil {
+		b.seen = make(map[int]struct{})
+	}
+	if _, used := b.seen[index]; used {
+		return fmt.Errorf("%s: content block index %d reused within one streamed message", b.prefix, index)
+	}
+	b.kind, b.index, b.open = kind, index, true
+	b.seen[index] = struct{}{}
+	return nil
+}
+
+// stop validates that the stop names the open block and returns the kind of
+// the block it closed (so the caller can lower the close to its protocol arm).
+func (b *blockTopology) stop(index int) (engine.BlockKind, error) {
+	if !b.open {
+		return engine.BlockKindText, fmt.Errorf("%s: content block stop at index %d has no open block", b.prefix, index)
+	}
+	if index != b.index {
+		return engine.BlockKindText, fmt.Errorf("%s: content block stop at index %d does not match the open %s block at index %d", b.prefix, index, b.kind, b.index)
+	}
+	kind := b.kind
+	b.open = false
+	return kind, nil
+}
+
 func (s *Stream) SerializeStream(ctx context.Context, w io.Writer, events <-chan engine.StreamEvent) error {
 	bw := bufio.NewWriter(w)
+	blocks := &blockTopology{prefix: "bedrock"}
 	thinkingOpen := false
 
 	closeThinking := func() error {
@@ -277,19 +328,25 @@ func (s *Stream) SerializeStream(ctx context.Context, w io.Writer, events <-chan
 
 	for evt := range events {
 		if evt.BlockStart != nil {
-			// Explicit block events (plugin-emitted or relayed): the wire
-			// renders thinking blocks faithfully as contentBlockStart frames —
-			// never cast. Text blocks have no start/stop frames on the
-			// ConverseStream wire (the parser treats a text start as
-			// informational and the wire has no text stop), and provider
-			// blocks have no representation at all, so both error rather than
-			// vanish.
+			// Explicit block events (plugin-emitted or relayed). Provider
+			// blocks have no ConverseStream representation at all, so they
+			// error rather than vanish. Text/thinking are canonical Torana
+			// content: thinking blocks render faithfully as
+			// contentBlockStart(thinking) frames — never cast — while text
+			// blocks lower to the text delta path (the wire has no text
+			// start/stop frames, so an empty text block produces no wire
+			// content). Sequence discipline runs before lowering either.
 			switch evt.BlockStart.Kind {
 			case engine.BlockKindProvider:
 				return fmt.Errorf("bedrock: provider block kind %q is not supported by this serializer", evt.BlockStart.ProviderKind)
 			case engine.BlockKindText:
-				return fmt.Errorf("bedrock: text content blocks are not supported by this serializer")
+				if err := blocks.start(evt.BlockStart.Index, engine.BlockKindText); err != nil {
+					return err
+				}
 			case engine.BlockKindThinking:
+				if err := blocks.start(evt.BlockStart.Index, engine.BlockKindThinking); err != nil {
+					return err
+				}
 				if !thinkingOpen {
 					thinkingOpen = true
 					startEvt := bedrockStreamEvent{
@@ -310,12 +367,17 @@ func (s *Stream) SerializeStream(ctx context.Context, w io.Writer, events <-chan
 		}
 
 		if evt.BlockStop != nil {
-			// Close the block the stop names. Only a thinking block is
-			// representable as an open block on this wire; a stop with
-			// nothing open has nothing to render — emit nothing, as the
-			// gemini serializer does for a stray stop.
-			if err := closeThinking(); err != nil {
-				return fmt.Errorf("bedrock serialize: %w", err)
+			// Close the block the stop names: sequence-validated, never
+			// silently accepted. A thinking stop renders a contentBlockStop
+			// frame; a text stop has no frame on the ConverseStream wire.
+			closed, err := blocks.stop(evt.BlockStop.Index)
+			if err != nil {
+				return err
+			}
+			if closed == engine.BlockKindThinking {
+				if err := closeThinking(); err != nil {
+					return fmt.Errorf("bedrock serialize: %w", err)
+				}
 			}
 			continue
 		}

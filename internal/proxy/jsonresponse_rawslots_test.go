@@ -62,7 +62,10 @@ func TestRawPreservationUnselectedChoiceOpenai(t *testing.T) {
 	// a raw splice must never disturb it either — and a `\/` escape does NOT
 	// round-trip through json.Marshal, so only the verbatim splice can
 	// preserve it.
-	for _, tc := range []struct {
+	// Each subtest is ONE response (one request on the real host), and the
+	// host tracks stream topology per REQUEST — indexes stay unique within a
+	// request, so each response gets its own request ID.
+	for i, tc := range []struct {
 		name  string
 		args1 string // raw wire bytes of choice 1's arguments string slot
 	}{
@@ -77,7 +80,7 @@ func TestRawPreservationUnselectedChoiceOpenai(t *testing.T) {
 					{"id":"call_2","type":"function","function":{"name":"b","arguments":` + tc.args1 + `}}]}}
 			]}`
 
-			out, err := runJSONResponseHooks(context.Background(), pp, 1, "openai", nil, []byte(body))
+			out, err := runJSONResponseHooks(context.Background(), pp, uint64(i+1), "openai", nil, []byte(body))
 			if err != nil {
 				t.Fatalf("runJSONResponseHooks: %v", err)
 			}

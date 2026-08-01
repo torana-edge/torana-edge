@@ -331,9 +331,61 @@ func (s *StreamAdapter) SerializeStream(ctx context.Context, w io.Writer, events
 	return s.serializeChatStream(w, events)
 }
 
+// blockTopology tracks the one content block open in the stream being
+// serialized, enforcing the v2 ABI's single-open-block + unique-index
+// discipline on explicit block events BEFORE they are lowered to the wire. A
+// second start while a block is open (any index), a start whose index was
+// already used in this message, or a stop that does not name the open block is
+// malformed topology and errors — never silently accepted.
+//
+// Tool-call blocks ride the raw ToolCallStart/Delta/End events and do NOT go
+// through this state (their protocol allows several open calls at once); it
+// exists only for the explicit text/thinking BlockStart/BlockStop events the
+// host's verified IR emits.
+type blockTopology struct {
+	prefix string
+	kind   engine.BlockKind
+	index  int
+	open   bool
+	seen   map[int]struct{}
+}
+
+// start records an explicit block start, or errors if the discipline is
+// violated. It does not decide what the wire renders — the caller lowers each
+// kind to its protocol arm.
+func (b *blockTopology) start(index int, kind engine.BlockKind) error {
+	if b.open {
+		return fmt.Errorf("%s: content block start at index %d while a %s block at index %d is still open", b.prefix, index, b.kind, b.index)
+	}
+	if b.seen == nil {
+		b.seen = make(map[int]struct{})
+	}
+	if _, used := b.seen[index]; used {
+		return fmt.Errorf("%s: content block index %d reused within one streamed message", b.prefix, index)
+	}
+	b.kind, b.index, b.open = kind, index, true
+	b.seen[index] = struct{}{}
+	return nil
+}
+
+// stop validates that the stop names the open block and returns the kind of
+// the block it closed (so the caller can lower the close to its protocol arm).
+func (b *blockTopology) stop(index int) (engine.BlockKind, error) {
+	if !b.open {
+		return engine.BlockKindText, fmt.Errorf("%s: content block stop at index %d has no open block", b.prefix, index)
+	}
+	if index != b.index {
+		return engine.BlockKindText, fmt.Errorf("%s: content block stop at index %d does not match the open %s block at index %d", b.prefix, index, b.kind, b.index)
+	}
+	kind := b.kind
+	b.open = false
+	return kind, nil
+}
+
 func (s *StreamAdapter) serializeChatStream(w io.Writer, events <-chan engine.StreamEvent) error {
+	blocks := &blockTopology{prefix: "openai"}
 	for evt := range events {
-		line, err := serializeEvent(evt)
+		line, err := serializeEvent(evt, blocks)
 		if err != nil {
 			return fmt.Errorf("openai serialize: %w", err)
 		}
@@ -353,21 +405,28 @@ func (s *StreamAdapter) serializeChatStream(w io.Writer, events <-chan engine.St
 func (s *StreamAdapter) serializeResponsesStream(w io.Writer, events <-chan engine.StreamEvent) error {
 	toolCallStarted := make(map[int]string)        // index -> ID
 	toolCallArgs := make(map[int]*strings.Builder) // index -> accumulated arguments
+	blocks := &blockTopology{prefix: "openai"}
 
 	for evt := range events {
 		switch {
 		case evt.BlockStart != nil:
-			// The Responses protocol has no content-block start/stop concept:
-			// a block boundary cannot be rendered faithfully (an empty block
-			// would vanish entirely), so error instead of silently casting or
-			// dropping it. Never cast.
+			// Provider blocks have no representation on the Responses wire:
+			// they error rather than vanish. Canonical text/thinking blocks
+			// have no start/stop frames either, so the start lowers to no
+			// wire content (an empty block naturally produces none) and the
+			// deltas ride the output_text.delta arm — sequence-validated
+			// first, never cast.
 			if evt.BlockStart.Kind == engine.BlockKindProvider {
 				return fmt.Errorf("openai: provider block kind %q is not supported by this serializer", evt.BlockStart.ProviderKind)
 			}
-			return fmt.Errorf("openai: %v content blocks are not supported by this serializer", evt.BlockStart.Kind)
+			if err := blocks.start(evt.BlockStart.Index, evt.BlockStart.Kind); err != nil {
+				return err
+			}
 
 		case evt.BlockStop != nil:
-			return fmt.Errorf("openai: content block stops are not supported by this serializer")
+			if _, err := blocks.stop(evt.BlockStop.Index); err != nil {
+				return err
+			}
 
 		case evt.Error != nil:
 			payload := map[string]any{
@@ -511,20 +570,28 @@ func (s *StreamAdapter) serializeResponsesStream(w io.Writer, events <-chan engi
 	return nil
 }
 
-func serializeEvent(evt engine.StreamEvent) (string, error) {
+func serializeEvent(evt engine.StreamEvent, blocks *blockTopology) (string, error) {
 	switch {
 	case evt.BlockStart != nil:
-		// The chat protocol has no content-block start/stop concept: a
-		// block boundary cannot be rendered faithfully (an empty block would
-		// vanish entirely), so error instead of silently casting or dropping
-		// it. Never cast.
+		// Provider blocks have no representation on the chat wire: they
+		// error rather than vanish. Canonical text/thinking blocks have no
+		// start/stop frames either, so the start lowers to no wire content
+		// (an empty block naturally produces none) and the deltas ride the
+		// content/reasoning_content arms — sequence-validated first, never
+		// cast.
 		if evt.BlockStart.Kind == engine.BlockKindProvider {
 			return "", fmt.Errorf("openai: provider block kind %q is not supported by this serializer", evt.BlockStart.ProviderKind)
 		}
-		return "", fmt.Errorf("openai: %v content blocks are not supported by this serializer", evt.BlockStart.Kind)
+		if err := blocks.start(evt.BlockStart.Index, evt.BlockStart.Kind); err != nil {
+			return "", err
+		}
+		return "", nil
 
 	case evt.BlockStop != nil:
-		return "", fmt.Errorf("openai: content block stops are not supported by this serializer")
+		if _, err := blocks.stop(evt.BlockStop.Index); err != nil {
+			return "", err
+		}
+		return "", nil
 
 	case evt.TextDelta != nil:
 		return textDeltaSSE(*evt.TextDelta), nil

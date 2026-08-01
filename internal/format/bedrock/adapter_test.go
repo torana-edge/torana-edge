@@ -363,40 +363,136 @@ func TestSerializeThinkingBlock(t *testing.T) {
 	}
 }
 
-// TestSerializeUnrenderableBlocksError: text and provider blocks have no
-// faithful ConverseStream representation (the wire has no text block start/
-// stop frames and no provider frames at all), so the serializer must error
-// explicitly rather than silently drop them.
-func TestSerializeUnrenderableBlocksError(t *testing.T) {
+// TestSerializeTextBlock: text is canonical Torana content, so a
+// plugin-emitted BlockStart(text)+TextDelta+BlockStop must SERIALIZE on the
+// ConverseStream wire, not abort the turn. The wire has no text start/stop
+// frames, so the boundaries lower to nothing and the delta rides the text
+// delta path; an empty text block produces no wire content.
+func TestSerializeTextBlock(t *testing.T) {
+	stream := &Stream{}
+
+	text := "hello"
+	events := []engine.StreamEvent{
+		{BlockStart: &engine.BlockStart{Index: 0, Kind: engine.BlockKindText}},
+		{TextDelta: &text},
+		{BlockStop: &engine.BlockStop{Index: 0}},
+		{FinishReason: "stop"},
+	}
+
+	evCh := make(chan engine.StreamEvent, len(events))
+	for _, ev := range events {
+		evCh <- ev
+	}
+	close(evCh)
+
+	var buf bytes.Buffer
+	if err := stream.SerializeStream(context.Background(), &buf, evCh); err != nil {
+		t.Fatalf("canonical text block must serialize, got error: %v", err)
+	}
+
+	out := buf.String()
+	if !strings.Contains(out, `"delta":{"text":"hello"}`) {
+		t.Errorf("missing text delta: %s", out)
+	}
+	if strings.Contains(out, `"contentBlockStart"`) {
+		t.Errorf("text block start must not emit a contentBlockStart frame: %s", out)
+	}
+	if strings.Contains(out, `"contentBlockStop"`) {
+		t.Errorf("text block stop must not emit a contentBlockStop frame: %s", out)
+	}
+	if !strings.Contains(out, `"stopReason":"end_turn"`) {
+		t.Errorf("missing messageStop: %s", out)
+	}
+}
+
+// TestSerializeEmptyTextBlock: an empty canonical text block (BlockStart +
+// BlockStop with no deltas) lowers to NO wire content — normal for a protocol
+// without empty-block topology, not an error.
+func TestSerializeEmptyTextBlock(t *testing.T) {
+	evCh := make(chan engine.StreamEvent, 2)
+	evCh <- engine.StreamEvent{BlockStart: &engine.BlockStart{Index: 0, Kind: engine.BlockKindText}}
+	evCh <- engine.StreamEvent{BlockStop: &engine.BlockStop{Index: 0}}
+	close(evCh)
+
+	var buf bytes.Buffer
+	if err := (&Stream{}).SerializeStream(context.Background(), &buf, evCh); err != nil {
+		t.Fatalf("empty canonical text block must serialize, got error: %v", err)
+	}
+	if buf.Len() != 0 {
+		t.Errorf("empty text block produced wire content: %q", buf.String())
+	}
+}
+
+// TestSerializeProviderBlockError: provider blocks have no ConverseStream
+// representation at all, so a provider BlockStart must error explicitly —
+// their semantics are genuinely unavailable on this protocol.
+func TestSerializeProviderBlockError(t *testing.T) {
+	evCh := make(chan engine.StreamEvent, 1)
+	evCh <- engine.StreamEvent{BlockStart: &engine.BlockStart{
+		Index: 0, Kind: engine.BlockKindProvider, ProviderKind: "redacted",
+	}}
+	close(evCh)
+	var buf bytes.Buffer
+	err := (&Stream{}).SerializeStream(context.Background(), &buf, evCh)
+	if err == nil {
+		t.Fatal("provider block did not error")
+	}
+	want := `bedrock: provider block kind "redacted" is not supported by this serializer`
+	if err.Error() != want {
+		t.Errorf("error = %q, want %q", err.Error(), want)
+	}
+}
+
+// TestSerializeMalformedBlocksError: sequence discipline is enforced BEFORE
+// lowering — a malformed boundary (second start while open, index reuse,
+// stop with no open block) errors, never silently accepted.
+func TestSerializeMalformedBlocksError(t *testing.T) {
 	for _, tc := range []struct {
-		name string
-		ev   engine.StreamEvent
-		want string
+		name   string
+		events []engine.StreamEvent
 	}{
 		{
-			name: "text block",
-			ev:   engine.StreamEvent{BlockStart: &engine.BlockStart{Index: 0, Kind: engine.BlockKindText}},
-			want: "bedrock: text content blocks are not supported by this serializer",
+			name: "second start while open",
+			events: []engine.StreamEvent{
+				{BlockStart: &engine.BlockStart{Index: 0, Kind: engine.BlockKindText}},
+				{BlockStart: &engine.BlockStart{Index: 1, Kind: engine.BlockKindThinking}},
+			},
 		},
 		{
-			name: "provider block",
-			ev: engine.StreamEvent{BlockStart: &engine.BlockStart{
-				Index: 0, Kind: engine.BlockKindProvider, ProviderKind: "redacted",
-			}},
-			want: `bedrock: provider block kind "redacted" is not supported by this serializer`,
+			name: "index reuse after close",
+			events: []engine.StreamEvent{
+				{BlockStart: &engine.BlockStart{Index: 0, Kind: engine.BlockKindText}},
+				{BlockStop: &engine.BlockStop{Index: 0}},
+				{BlockStart: &engine.BlockStart{Index: 0, Kind: engine.BlockKindText}},
+			},
+		},
+		{
+			name: "stop with no open block",
+			events: []engine.StreamEvent{
+				{BlockStop: &engine.BlockStop{Index: 0}},
+			},
+		},
+		{
+			name: "stop mismatching the open block",
+			events: []engine.StreamEvent{
+				{BlockStart: &engine.BlockStart{Index: 5, Kind: engine.BlockKindText}},
+				{BlockStop: &engine.BlockStop{Index: 3}},
+			},
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			evCh := make(chan engine.StreamEvent, 1)
-			evCh <- tc.ev
+			evCh := make(chan engine.StreamEvent, len(tc.events))
+			for _, ev := range tc.events {
+				evCh <- ev
+			}
 			close(evCh)
 			var buf bytes.Buffer
 			err := (&Stream{}).SerializeStream(context.Background(), &buf, evCh)
 			if err == nil {
-				t.Fatal("unrenderable block did not error")
+				t.Fatal("malformed block topology did not error")
 			}
-			if err.Error() != tc.want {
-				t.Errorf("error = %q, want %q", err.Error(), tc.want)
+			if !strings.Contains(err.Error(), "bedrock:") {
+				t.Errorf("error = %q, want a bedrock: sequence error", err.Error())
 			}
 		})
 	}

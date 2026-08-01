@@ -1045,13 +1045,15 @@ func TestStreamBlockTopologySurvivesPlugins(t *testing.T) {
 		t.Fatalf("text block stop misread as ToolCallEnd: %+v", out[0].ToolCallEnd)
 	}
 
-	// A tool block still resolves its stop to ToolCallEnd.
-	out = run(t, pp, toolStart(0, "call_1", "read_file"))
+	// A tool block still resolves its stop to ToolCallEnd. Indexes are unique
+	// per streamed message, so the tool block takes the NEXT index (1) rather
+	// than reusing the text block's 0.
+	out = run(t, pp, toolStart(1, "call_1", "read_file"))
 	if len(out) != 1 || out[0].ToolCallStart == nil {
 		t.Fatalf("ToolCallStart did not survive plugins: %+v", out)
 	}
-	out = run(t, pp, toolEnd(0))
-	if len(out) != 1 || out[0].ToolCallEnd == nil || out[0].ToolCallEnd.Index != 0 {
+	out = run(t, pp, toolEnd(1))
+	if len(out) != 1 || out[0].ToolCallEnd == nil || out[0].ToolCallEnd.Index != 1 {
 		t.Fatalf("tool stop did not survive plugins as ToolCallEnd: %+v", out)
 	}
 	if out[0].BlockStop != nil {
@@ -1070,7 +1072,11 @@ func TestStreamLosslessThroughPipeline(t *testing.T) {
 	requireWASM(t, fixturesDir+"/test-stream-mutator/plugin.wasm")
 	pp := newTestPipeline(t, fixturesDir, []string{"test-stream-mutator"})
 
-	for _, tc := range []struct {
+	// Each subtest is ONE response stream, and the host tracks block topology
+	// per REQUEST — one response stream is one streamed message, and indexes
+	// stay unique within it. Distinct request IDs keep the two subtests'
+	// streams from sharing a tracker.
+	for i, tc := range []struct {
 		name string
 		wire string
 		want []string // expected serialized raw part JSON, in order
@@ -1091,12 +1097,13 @@ func TestStreamLosslessThroughPipeline(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			reqID := uint64(200 + i)
 			sa := &gemini.StreamAdapter{Wrapped: true}
 			events := drainChunks(sa.ParseStream(strings.NewReader(tc.wire)))
 
 			var piped []engine.StreamEvent
 			for _, ev := range events {
-				out, err := pp.RunOnStreamChunk(context.Background(), 42, &ev)
+				out, err := pp.RunOnStreamChunk(context.Background(), reqID, &ev)
 				if err != nil {
 					t.Fatalf("RunOnStreamChunk: %v", err)
 				}

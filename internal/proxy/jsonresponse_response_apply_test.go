@@ -124,7 +124,10 @@ func TestResponseApplyRejectsForgedGuestFields(t *testing.T) {
 		return pp
 	}
 
-	for _, tc := range []struct {
+	// Each subtest is ONE response (one request on the real host), and the
+	// host tracks stream topology per REQUEST — indexes stay unique within a
+	// request, so the allow subtests give each response its own request ID.
+	for i, tc := range []struct {
 		name   string
 		format string
 		body   string
@@ -146,7 +149,7 @@ func TestResponseApplyRejectsForgedGuestFields(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name+"/allow", func(t *testing.T) {
-			out, err := runJSONResponseHooks(context.Background(), pp, 1, tc.format, nil, []byte(tc.body))
+			out, err := runJSONResponseHooks(context.Background(), pp, uint64(i+1), tc.format, nil, []byte(tc.body))
 			if err != nil {
 				t.Fatalf("allow mode must not error: %v", err)
 			}
@@ -160,7 +163,7 @@ func TestResponseApplyRejectsForgedGuestFields(t *testing.T) {
 
 		t.Run(tc.name+"/block", func(t *testing.T) {
 			bpp := forgeBlockPipeline(t)
-			out, err := runJSONResponseHooks(context.Background(), bpp, 1, tc.format, nil, []byte(tc.body))
+			out, err := runJSONResponseHooks(context.Background(), bpp, uint64(i+1), tc.format, nil, []byte(tc.body))
 			if err == nil {
 				t.Fatal("block mode must return an error for a forged host-owned field")
 			}
