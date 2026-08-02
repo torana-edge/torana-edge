@@ -230,19 +230,14 @@ func (m *lifecycleModel) observe(ev string) error {
 		return nil
 	}
 	if gs == nil {
-		if kind == "quiesced" || kind == "compiled-released" {
+		if kind == "quiesced" {
 			// An INJECTED plugin (tests construct one directly in the map) is
-			// published-and-owned by construction; its quiescence/release is
-			// legal. quiesced moves it to releasing; the subsequent
-			// compiled-released completes it.
+			// published-and-owned by construction; its quiescence is legal and
+			// enters releasing, so the subsequent compiled-released must still
+			// cross the quiesced boundary.
 			gen++
 			m.gensOf[label+"/"+name] = gen
-			st := &genState{phase: "releasing", compiledOwned: true}
-			if kind == "compiled-released" {
-				st.phase = "released"
-				st.compiledOwned = false
-			}
-			m.gens[m.key(label, name, gen)] = st
+			m.gens[m.key(label, name, gen)] = &genState{phase: "releasing", compiledOwned: true}
 			return nil
 		}
 		return fmt.Errorf("%s for unknown generation of %s/%s", kind, label, name)
@@ -286,7 +281,9 @@ func (m *lifecycleModel) observe(ev string) error {
 		}
 		gs.activeCalls++
 	case "call-finished":
-		if gs.phase != "published" && gs.phase != "releasing" {
+		// Legal only while published: after quiescence no active call can
+		// exist to finish (the write lock is held from quiesced onward).
+		if gs.phase != "published" {
 			return fmt.Errorf("call-finished of %s/%s gen %d from %q", label, name, gen, gs.phase)
 		}
 		if gs.activeCalls <= 0 {
@@ -294,10 +291,14 @@ func (m *lifecycleModel) observe(ev string) error {
 		}
 		gs.activeCalls--
 	case "unload-begin":
+		// Intent only: this fires BEFORE the plugin's write lock, so calls
+		// may legally win admission in that interval (exactly like the
+		// accepted close interleaving). Validate the generation is published
+		// and LEAVE it published: quiesced performs published -> releasing.
 		if gs.phase != "published" {
 			return fmt.Errorf("unload-begin of %s/%s gen %d from %q", label, name, gen, gs.phase)
 		}
-		gs.phase = "releasing"
+		// no state change
 	case "quiesced":
 		// The per-plugin quiescence boundary: the write lock is held, so no
 		// active calls remain and no further acquisition is legal.
@@ -309,11 +310,15 @@ func (m *lifecycleModel) observe(ev string) error {
 		}
 		gs.phase = "releasing"
 	case "compiled-released":
-		if gs.phase != "constructing" && gs.phase != "published" && gs.phase != "releasing" {
-			return fmt.Errorf("compiled-released of %s/%s gen %d from %q", label, name, gen, gs.phase)
-		}
+		// quiesced is the mandatory normal-release boundary: construction
+		// cleanup releases from constructing, and every other release must
+		// come from releasing (entered ONLY by quiesced). A published
+		// generation can never release without quiescence.
 		if !gs.compiledOwned {
 			return fmt.Errorf("duplicate compiled-released of %s/%s", label, name)
+		}
+		if gs.phase != "constructing" && gs.phase != "releasing" {
+			return fmt.Errorf("compiled-released of %s/%s gen %d from %q (release requires quiesced)", label, name, gen, gs.phase)
 		}
 		if gs.activeCalls != 0 {
 			return fmt.Errorf("compiled-released of %s/%s with %d active calls", label, name, gs.activeCalls)
@@ -1077,21 +1082,31 @@ func TestLifecycleFailedCompiledCloseStillCounts(t *testing.T) {
 	rec.validate()
 }
 
-// TestLifecycleCloseKeepsReachabilityUntilQuiescence — F1: during Close's
-// write-lock wait, the plugin is STILL published (reachability retained until
-// quiescence) and its resources are NOT released; after the transaction the
-// map is empty, resources are closed, and a stale-pointer CallRequest fails
-// cleanly — there is no published-but-closed window.
+// TestLifecycleCloseKeepsReachabilityUntilQuiescence — F1: the quiesced
+// observer fires UNDER the transaction's write lock, immediately after the
+// exact-pointer deletion and BEFORE any resource release. It is used as a
+// deterministic in-transaction barrier: while it is held, the plugin is
+// absent from the map, its resources are NOT yet closed, no release has
+// fired, and a stale call cannot pass the held write lock. Releasing the
+// barrier lets cleanup complete. This pins delete-before-close (and the
+// absence of any published-but-closed interval) without sleeps.
 func TestLifecycleCloseKeepsReachabilityUntilQuiescence(t *testing.T) {
 	r := newTestRuntime(t)
 	rec := newEventRecorder(t)
 	rec.install(r, "rt")
 	acquired := make(chan struct{})
-	release := make(chan struct{})
+	releaseCall := make(chan struct{})
+	quiesced := make(chan struct{})
+	releaseQuiesce := make(chan struct{})
 	r.testHooks.instanceAcquired = func(name string) {
 		rec.record("rt:instance-acquired:" + name)
 		close(acquired)
-		<-release
+		<-releaseCall
+	}
+	r.testHooks.quiesced = func(name string) {
+		rec.record("rt:quiesced:" + name)
+		close(quiesced)
+		<-releaseQuiesce
 	}
 
 	p, err := r.LoadPlugin("fast", MinimalV2Module(false))
@@ -1129,9 +1144,45 @@ func TestLifecycleCloseKeepsReachabilityUntilQuiescence(t *testing.T) {
 		t.Fatal("pool closed before quiescence")
 	}
 
-	close(release)
+	close(releaseCall)
 	if err := <-done; err != nil {
-		t.Fatalf("the call after the barrier: %v", err)
+		t.Fatalf("the active call: %v", err)
+	}
+	// Close acquires the write lock, deletes the exact pointer, and fires
+	// quiesced: the in-transaction barrier now holds the write lock.
+	<-quiesced
+
+	r.mu.RLock()
+	_, stillPublishedAtQuiesced := r.plugins["fast"]
+	r.mu.RUnlock()
+	if stillPublishedAtQuiesced {
+		t.Fatal("plugin still published AT quiescence (deletion must precede it)")
+	}
+	p.stateMu.RLock()
+	poolClosedAtQuiesced := p.poolClosed
+	p.stateMu.RUnlock()
+	if poolClosedAtQuiesced {
+		t.Fatal("pool closed before the release phase of the transaction")
+	}
+	if rec.count("rt:compiled-released:fast") != 0 {
+		t.Fatalf("compiled released before quiescence: %d", rec.count("rt:compiled-released:fast"))
+	}
+
+	// A stale call cannot pass the write lock the barrier holds: while the
+	// barrier is up, Close cannot have finished, so completion is impossible.
+	staleDone := make(chan error, 1)
+	go func() {
+		staleDone <- p.CallRequest(context.Background(), pb.Hook_HOOK_BEFORE_REQUEST, 1, []byte{}, &out)
+	}()
+	select {
+	case err := <-staleDone:
+		t.Fatalf("a stale call passed the held write lock (%v)", err)
+	default:
+	}
+
+	close(releaseQuiesce)
+	if err := <-staleDone; err == nil {
+		t.Fatal("a stale-pointer call succeeded after Close")
 	}
 	<-closed
 
@@ -1140,9 +1191,6 @@ func TestLifecycleCloseKeepsReachabilityUntilQuiescence(t *testing.T) {
 	r.mu.RUnlock()
 	if still {
 		t.Fatal("plugin still published after Close")
-	}
-	if err := p.CallRequest(context.Background(), pb.Hook_HOOK_BEFORE_REQUEST, 1, []byte{}, &out); err == nil {
-		t.Fatal("a stale-pointer call succeeded after Close")
 	}
 	if rec.count("rt:compiled-released:fast") != 1 {
 		t.Fatalf("released %d times, want 1", rec.count("rt:compiled-released:fast"))
@@ -1205,51 +1253,90 @@ func TestLifecycleCloseAllowsWinningAdmissionUntilQuiesced(t *testing.T) {
 }
 
 // TestLifecycleModelNegativeMatrix — F3: the model's rejection branches are
-// proven adversarial: each row feeds an ILLEGAL stream and must error at the
-// designated event.
+// proven adversarial. Every row is an EXPLICIT event sequence whose FINAL
+// event must be rejected (all prefix events must succeed) with a stable
+// error substring naming the intended invariant; rows whose terminal-guard
+// state is deliberately unreachable through legal transitions seed the model
+// state directly (that is exactly why direct setup is appropriate there).
 func TestLifecycleModelNegativeMatrix(t *testing.T) {
-	rt := func(evs ...string) []string {
-		out := []string{"rt:load-begin:n"}
-		out = append(out, "rt:compiled-acquired:n")
-		out = append(out, "rt:published:n")
-		out = append(out, evs...)
-		return out
-	}
+	pub := []string{"rt:load-begin:n", "rt:compiled-acquired:n", "rt:published:n"}
 	rows := []struct {
-		name string
-		evs  []string
-		at   string // the event that must be rejected
+		name    string
+		events  []string
+		wantErr string // stable substring of the rejection
+		arrange func(m *lifecycleModel)
 	}{
-		{"publish without compiled ownership", []string{}, "rt:published:n"},
-		{"duplicate compiled acquire", rt("rt:compiled-acquired:n"), "rt:compiled-acquired:n"},
-		{"duplicate compiled release", rt("rt:compiled-released:n", "rt:compiled-released:n"), "rt:compiled-released:n"},
-		{"call finish without acquisition", rt("rt:call-finished:n"), "rt:call-finished:n"},
-		{"release while active", rt("rt:instance-acquired:n", "rt:compiled-released:n"), "rt:compiled-released:n"},
-		{"quiesce with active calls", rt("rt:instance-acquired:n", "rt:quiesced:n"), "rt:quiesced:n"},
-		{"construct failed while compiled-owned", []string{"rt:load-begin:n", "rt:compiled-acquired:n", "rt:construct-failed:n"}, "rt:construct-failed:n"},
-		{"load after close begins", rt("rt:close-begin", "rt:load-begin:n"), "rt:load-begin:n"},
-		{"instance after quiesced", rt("rt:quiesced:n", "rt:instance-acquired:n"), "rt:instance-acquired:n"},
-		{"close-end with live phase", rt("rt:close-begin", "rt:close-end"), "rt:close-end"},
-		{"close-end with owned handle", rt("rt:quiesced:n", "rt:close-begin", "rt:close-end"), "rt:close-end"},
-		{"close-end with active calls", rt("rt:instance-acquired:n", "rt:close-begin", "rt:close-end"), "rt:close-end"},
-		{"generation N+1 before N ends", rt("rt:load-begin:n"), "rt:load-begin:n"},
-		{"call finish twice", rt("rt:instance-acquired:n", "rt:call-finished:n", "rt:call-finished:n"), "rt:call-finished:n"},
+		{"publish without compiled ownership", []string{"rt:load-begin:n", "rt:published:n"}, "without compiled ownership", nil},
+		{"duplicate compiled acquire", append(pub, "rt:compiled-acquired:n"), "compiled-acquired of rt/n gen 1 from \"published\"", nil},
+		{"duplicate compiled release", append(append(pub, "rt:quiesced:n", "rt:compiled-released:n"), "rt:compiled-released:n"), "duplicate compiled-released", nil},
+		{"published release without quiescence", append(pub, "rt:compiled-released:n"), "release requires quiesced", nil},
+		{"call finish without acquisition", append(pub, "rt:call-finished:n"), "without an active call", nil},
+		{"quiesce with active calls", append(pub, "rt:instance-acquired:n", "rt:quiesced:n"), "with 1 active calls", nil},
+		{"release while active", []string{"rt:close-begin", "rt:compiled-released:n"}, "with 1 active calls", func(m *lifecycleModel) {
+			m.gensOf["rt/n"] = 1
+			m.gens[m.key("rt", "n", 1)] = &genState{phase: "releasing", compiledOwned: true, activeCalls: 1}
+		}},
+		{"construct failed while compiled-owned", []string{"rt:load-begin:n", "rt:compiled-acquired:n", "rt:construct-failed:n"}, "still owning the compiled handle", nil},
+		{"load after close begins", append(pub, "rt:close-begin", "rt:load-begin:n"), "load-begin while runtime closing", nil},
+		{"unload intent without published", append(pub, "rt:quiesced:n", "rt:unload-begin:n"), "unload-begin of rt/n gen 1 from \"releasing\"", nil},
+		{"instance after quiesced", append(pub, "rt:quiesced:n", "rt:instance-acquired:n"), "instance-acquired of rt/n gen 1 from \"releasing\"", nil},
+		{"close-end with live phase", append(pub, "rt:close-begin", "rt:close-end"), "close-end with rt/n/1 in \"published\"", nil},
+		{"close-end with owned handle", []string{"rt:close-begin", "rt:close-end"}, "still owning a compiled handle", func(m *lifecycleModel) {
+			m.gensOf["rt/n"] = 1
+			m.gens[m.key("rt", "n", 1)] = &genState{phase: "released", compiledOwned: true}
+		}},
+		{"close-end with active calls", []string{"rt:close-begin", "rt:close-end"}, "active calls", func(m *lifecycleModel) {
+			m.gensOf["rt/n"] = 1
+			m.gens[m.key("rt", "n", 1)] = &genState{phase: "released", activeCalls: 1}
+		}},
+		{"generation N+1 before N ends", append(pub, "rt:load-begin:n"), "with a live generation in \"published\"", nil},
+		{"call finish twice", append(pub, "rt:instance-acquired:n", "rt:call-finished:n", "rt:call-finished:n"), "without an active call", nil},
 	}
 	for _, row := range rows {
 		t.Run(row.name, func(t *testing.T) {
 			m := newLifecycleModel()
-			for i, ev := range row.evs {
+			if row.arrange != nil {
+				row.arrange(m)
+			}
+			for i, ev := range row.events {
 				err := m.observe(ev)
-				if i == len(row.evs)-1 {
+				if i == len(row.events)-1 {
 					if err == nil {
-						t.Fatalf("stream accepted; the final event %q must be rejected", ev)
+						t.Fatalf("the final event %q was accepted; it must be rejected", ev)
+					}
+					if row.wantErr != "" && !strings.Contains(err.Error(), row.wantErr) {
+						t.Fatalf("rejection %q does not contain %q", err.Error(), row.wantErr)
 					}
 					return
 				}
 				if err != nil {
-					t.Fatalf("event %q errored early: %v", ev, err)
+					t.Fatalf("prefix event %q errored early: %v", ev, err)
 				}
 			}
 		})
+	}
+}
+
+// TestLifecycleModelUnloadAdmissionWindowAccepted — positive trace: a call
+// wins admission between unload-begin (intent, fired before the write lock)
+// and quiesced (the boundary). The model must accept the full stream.
+func TestLifecycleModelUnloadAdmissionWindowAccepted(t *testing.T) {
+	m := newLifecycleModel()
+	events := []string{
+		"rt:load-begin:n",
+		"rt:compiled-acquired:n",
+		"rt:published:n",
+		"rt:unload-begin:n", // intent only: generation stays published
+		"rt:instance-acquired:n",
+		"rt:call-finished:n",
+		"rt:quiesced:n",
+		"rt:compiled-released:n",
+		"rt:close-begin",
+		"rt:close-end",
+	}
+	for _, ev := range events {
+		if err := m.observe(ev); err != nil {
+			t.Fatalf("legal unload-interleaving stream rejected at %q: %v", ev, err)
+		}
 	}
 }

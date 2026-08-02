@@ -812,6 +812,10 @@ func (r *Runtime) closeLocked() error {
 			delete(r.plugins, name)
 		}
 		r.mu.Unlock()
+		// The quiesced boundary fires under the write lock, immediately after
+		// the exact-pointer deletion and before any resource release: no
+		// further admission is legal and no release may precede it.
+		r.fireQuiesced(name)
 		if err := r.closePluginResourcesLocked(p); err != nil {
 			errs = append(errs, fmt.Errorf("%s: %w", name, err))
 		}
@@ -863,6 +867,7 @@ func (r *Runtime) UnloadPlugin(name string) error {
 	r.mu.Lock()
 	delete(r.plugins, name)
 	r.mu.Unlock()
+	r.fireQuiesced(name)
 	return r.closePluginResourcesLocked(p)
 }
 
@@ -873,17 +878,10 @@ func (r *Runtime) UnloadPlugin(name string) error {
 // exactly once, in instance-before-compiled order. While the write lock is
 // held no release() can run, which closes the check-then-close/requeue
 // TOCTOU.
-func (r *Runtime) closePluginResources(p *Plugin) error {
-	p.callMu.Lock()
-	defer p.callMu.Unlock()
-	return r.closePluginResourcesLocked(p)
-}
-
-// closePluginResourcesLocked assumes the caller holds p.callMu (write).
+// closePluginResourcesLocked assumes the caller holds p.callMu (write) and
+// that the quiesced boundary has already fired (the call sites fire it right
+// after the exact-pointer deletion).
 func (r *Runtime) closePluginResourcesLocked(p *Plugin) error {
-	// The write lock IS the per-plugin quiescence boundary: mark it so the
-	// reference model can pin that no acquisition follows before release.
-	r.fireQuiesced(p.name)
 	p.stateMu.Lock()
 	p.poolClosed = true
 	p.stateMu.Unlock()
