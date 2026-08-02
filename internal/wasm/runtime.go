@@ -697,6 +697,10 @@ type lifecycleHooks struct {
 	constructFailed func(name string)
 	// unloadBegin fires when an UnloadPlugin transaction starts quiescing.
 	unloadBegin func(name string)
+	// quiesced fires when a plugin's callMu WRITE lock has been acquired —
+	// the per-plugin quiescence boundary: no further instance acquisition is
+	// legal from this point, and compiled release may not precede it.
+	quiesced func(name string)
 	// instanceAcquired fires when a plugin instance is successfully acquired
 	// for a call.
 	instanceAcquired func(name string)
@@ -770,9 +774,10 @@ func (r *Runtime) Close() error {
 
 func (r *Runtime) closeLocked() error {
 	// The whole transaction holds lifecycleMu: loads/unloads see closing and
-	// cannot mutate the ownership set. The plugin map stays intact until each
-	// plugin's OWN quiescence completes, so an admitted call's host calls keep
-	// resolving itself through r.plugins while Close waits for it.
+	// cannot mutate the ownership set. Each plugin stays published in the map
+	// until ITS OWN write-lock quiescence completes (an admitted call's host
+	// calls keep resolving itself through r.plugins while Close waits), then
+	// is removed and its resources released under the same write lock.
 	r.lifecycleMu.Lock()
 	defer r.lifecycleMu.Unlock()
 	r.lifecycleState = lifecycleClosing
@@ -796,15 +801,21 @@ func (r *Runtime) closeLocked() error {
 	var errs []error
 	for _, name := range names {
 		p := plugins[name]
-		if err := r.closePluginResources(p); err != nil {
-			errs = append(errs, fmt.Errorf("%s: %w", name, err))
-		}
-		// Remove the exact pointer only after its calls quiesced.
+		// ONE atomic per-plugin transaction, exactly like UnloadPlugin:
+		// quiesce under the write lock, delete the exact pointer while still
+		// holding it, THEN close instances and the compiled handle. There is
+		// never an interval in which a plugin is still published after its
+		// resources have been released.
+		p.callMu.Lock()
 		r.mu.Lock()
 		if cur, still := r.plugins[name]; still && cur == p {
 			delete(r.plugins, name)
 		}
 		r.mu.Unlock()
+		if err := r.closePluginResourcesLocked(p); err != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", name, err))
+		}
+		p.callMu.Unlock()
 	}
 	// Instances and compiled handles are closed before the runtime and cache:
 	// an owned cache close must not prevent module cleanup, and vice versa.
@@ -843,8 +854,10 @@ func (r *Runtime) UnloadPlugin(name string) error {
 	}
 	r.fireUnloadBegin(name)
 
-	// Quiesce BEFORE removing reachability: an admitted call may still issue
-	// host calls that resolve itself through r.plugins.
+	// Quiesce BEFORE removing reachability: reachability is retained UNTIL
+	// the write lock is held (an admitted call may still issue host calls
+	// that resolve itself through r.plugins), then removed, then resources
+	// are released — all under the write lock.
 	p.callMu.Lock()
 	defer p.callMu.Unlock()
 	r.mu.Lock()
@@ -868,6 +881,9 @@ func (r *Runtime) closePluginResources(p *Plugin) error {
 
 // closePluginResourcesLocked assumes the caller holds p.callMu (write).
 func (r *Runtime) closePluginResourcesLocked(p *Plugin) error {
+	// The write lock IS the per-plugin quiescence boundary: mark it so the
+	// reference model can pin that no acquisition follows before release.
+	r.fireQuiesced(p.name)
 	p.stateMu.Lock()
 	p.poolClosed = true
 	p.stateMu.Unlock()
@@ -946,6 +962,12 @@ func (r *Runtime) fireCompiledAcquired(name string) {
 func (r *Runtime) fireConstructFailed(name string) {
 	if r.testHooks != nil && r.testHooks.constructFailed != nil {
 		r.testHooks.constructFailed(name)
+	}
+}
+
+func (r *Runtime) fireQuiesced(name string) {
+	if r.testHooks != nil && r.testHooks.quiesced != nil {
+		r.testHooks.quiesced(name)
 	}
 }
 

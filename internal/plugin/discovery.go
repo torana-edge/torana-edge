@@ -788,9 +788,9 @@ func reloadPipeline(runtime *wasm.Runtime, config PluginConfig) (*PluginPipeline
 		// A post-load rejection must UNLOAD the plugin: it was already published
 		// into the runtime, and retaining it would keep its instance and compiled
 		// handle (a shared-cache reference) alive for the pipeline's lifetime.
-		// Unload removes reachability first and releases everything exactly once;
-		// strict whole-pipeline failure is cleaned when the caller closes the
-		// runtime.
+		// Unload retains reachability until quiescence, removes it, and then
+		// releases everything exactly once; strict whole-pipeline failure is
+		// cleaned when the caller closes the runtime.
 		declaredHooks, hookErr := manifestHooks(bundle.Manifest.Hooks)
 		if hookErr != nil {
 			if config.Strict {

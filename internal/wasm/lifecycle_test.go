@@ -68,6 +68,7 @@ func (rec *eventRecorder) install(r *Runtime, label string) {
 		callFinished:     func(n string) { rec.record(label + ":call-finished:" + n) },
 		compiledReleased: func(n string) { rec.record(label + ":compiled-released:" + n) },
 		unloadBegin:      func(n string) { rec.record(label + ":unload-begin:" + n) },
+		quiesced:         func(n string) { rec.record(label + ":quiesced:" + n) },
 		closeBegin:       func() { rec.record(label + ":close-begin") },
 		closeEnd:         func() { rec.record(label + ":close-end") },
 	}
@@ -137,13 +138,7 @@ func (rec *eventRecorder) seqOf(suffix string) (int, bool) {
 }
 
 func (rec *eventRecorder) validate() {
-	m := newLifecycleModel()
-	for _, ev := range rec.snapshot() {
-		ev = ev[strings.Index(ev, ":")+1:] // strip the sequence prefix
-		if err := m.observe(ev); err != nil {
-			rec.t.Fatalf("reference model rejected %q: %v\nstream: %v", ev, err, rec.snapshot())
-		}
-	}
+	validateModel(rec.t, rec.snapshot())
 }
 
 // genState is one (runtime, name, generation) entry of the reference model.
@@ -156,16 +151,21 @@ type genState struct {
 }
 
 // lifecycleModel is the small independent reference model. Runtime states
-// open -> closing -> closed (per label); plugin generations per
-// (label, name), keyed by an internal counter.
+// open -> closing -> closed (per label). GENERATION HISTORY IS RETAINED:
+// states are keyed by (label, name, generation) and terminal checks inspect
+// every generation of a runtime, not only the current one.
 type lifecycleModel struct {
 	runtime map[string]string
-	gens    map[string]*genState
-	gensOf  map[string]int
+	gens    map[string]*genState // key: label/name/gen
+	gensOf  map[string]int       // key: label/name -> current generation
 }
 
 func newLifecycleModel() *lifecycleModel {
 	return &lifecycleModel{runtime: map[string]string{}, gens: map[string]*genState{}, gensOf: map[string]int{}}
+}
+
+func (m *lifecycleModel) key(label, name string, gen int) string {
+	return fmt.Sprintf("%s/%s/%d", label, name, gen)
 }
 
 func (m *lifecycleModel) observe(ev string) error {
@@ -185,9 +185,8 @@ func (m *lifecycleModel) observe(ev string) error {
 	if rtState == "" {
 		rtState = "open"
 	}
-	key := label + "/" + name
-	gen := m.gensOf[key]
-	gs := m.gens[key]
+	gen := m.gensOf[label+"/"+name]
+	gs := m.gens[m.key(label, name, gen)]
 
 	// Events that do not need a live generation.
 	switch kind {
@@ -196,11 +195,11 @@ func (m *lifecycleModel) observe(ev string) error {
 			return fmt.Errorf("load-begin while runtime %s", rtState)
 		}
 		if gs != nil && gs.phase != "absent" && gs.phase != "released" {
-			return fmt.Errorf("load-begin of %s with a live generation in %q", key, gs.phase)
+			return fmt.Errorf("load-begin of %s/%s with a live generation in %q (generation %d must end first)", label, name, gs.phase, gen)
 		}
 		gen++
-		m.gensOf[key] = gen
-		m.gens[key] = &genState{phase: "constructing"}
+		m.gensOf[label+"/"+name] = gen
+		m.gens[m.key(label, name, gen)] = &genState{phase: "constructing"}
 		return nil
 	case "close-begin":
 		if rtState != "open" {
@@ -212,8 +211,7 @@ func (m *lifecycleModel) observe(ev string) error {
 		if rtState != "closing" {
 			return fmt.Errorf("close-end while runtime %s", rtState)
 		}
-		// Terminal invariant: every generation of this runtime is absent or
-		// released, owns no compiled handle, and has zero active calls.
+		// Terminal invariant over ALL retained generations of this runtime.
 		for k, g := range m.gens {
 			if !strings.HasPrefix(k, label+"/") {
 				continue
@@ -232,74 +230,93 @@ func (m *lifecycleModel) observe(ev string) error {
 		return nil
 	}
 	if gs == nil {
-		if kind == "compiled-released" {
+		if kind == "quiesced" || kind == "compiled-released" {
 			// An INJECTED plugin (tests construct one directly in the map) is
-			// published-and-owned by construction; its release is legal.
-			m.gens[key] = &genState{phase: "released"}
-			m.gensOf[key] = gen + 1
+			// published-and-owned by construction; its quiescence/release is
+			// legal. quiesced moves it to releasing; the subsequent
+			// compiled-released completes it.
+			gen++
+			m.gensOf[label+"/"+name] = gen
+			st := &genState{phase: "releasing", compiledOwned: true}
+			if kind == "compiled-released" {
+				st.phase = "released"
+				st.compiledOwned = false
+			}
+			m.gens[m.key(label, name, gen)] = st
 			return nil
 		}
-		return fmt.Errorf("%s for unknown generation of %s", kind, key)
+		return fmt.Errorf("%s for unknown generation of %s/%s", kind, label, name)
 	}
 
 	switch kind {
 	case "compiled-acquired":
 		if gs.phase != "constructing" {
-			return fmt.Errorf("compiled-acquired of %s from %q", key, gs.phase)
+			return fmt.Errorf("compiled-acquired of %s/%s gen %d from %q", label, name, gen, gs.phase)
 		}
 		if gs.compiledOwned {
-			return fmt.Errorf("duplicate compiled-acquired of %s", key)
+			return fmt.Errorf("duplicate compiled-acquired of %s/%s", label, name)
 		}
 		gs.compiledOwned = true
 	case "published":
 		if gs.phase != "constructing" {
-			return fmt.Errorf("published of %s from %q", key, gs.phase)
+			return fmt.Errorf("published of %s/%s gen %d from %q", label, name, gen, gs.phase)
 		}
 		if !gs.compiledOwned {
-			return fmt.Errorf("published of %s without compiled ownership", key)
+			return fmt.Errorf("published of %s/%s without compiled ownership", label, name)
 		}
 		gs.phase = "published"
 	case "construct-failed":
 		if gs.phase != "constructing" {
-			return fmt.Errorf("construct-failed of %s from %q", key, gs.phase)
+			return fmt.Errorf("construct-failed of %s/%s gen %d from %q", label, name, gen, gs.phase)
 		}
 		if gs.compiledOwned {
-			return fmt.Errorf("construct-failed of %s while still owning the compiled handle", key)
+			return fmt.Errorf("construct-failed of %s/%s while still owning the compiled handle", label, name)
 		}
 		if gs.activeCalls != 0 {
-			return fmt.Errorf("construct-failed of %s with active calls", key)
+			return fmt.Errorf("construct-failed of %s/%s with active calls", label, name)
 		}
 		gs.phase = "absent"
 	case "instance-acquired":
-		if rtState != "open" {
-			return fmt.Errorf("instance-acquired after close began on %s", key)
-		}
+		// Cleanup intent may overlap calls that win admission BEFORE that
+		// plugin's write lock is acquired: the per-generation QUIESCED event
+		// is the boundary, not close-begin. Production global no-new-request
+		// admission is PluginPipeline.DrainAndClose's job.
 		if gs.phase != "published" {
-			return fmt.Errorf("instance-acquired of %s from %q", key, gs.phase)
+			return fmt.Errorf("instance-acquired of %s/%s gen %d from %q", label, name, gen, gs.phase)
 		}
 		gs.activeCalls++
 	case "call-finished":
 		if gs.phase != "published" && gs.phase != "releasing" {
-			return fmt.Errorf("call-finished of %s from %q", key, gs.phase)
+			return fmt.Errorf("call-finished of %s/%s gen %d from %q", label, name, gen, gs.phase)
 		}
 		if gs.activeCalls <= 0 {
-			return fmt.Errorf("call-finished of %s without an active call", key)
+			return fmt.Errorf("call-finished of %s/%s without an active call", label, name)
 		}
 		gs.activeCalls--
 	case "unload-begin":
 		if gs.phase != "published" {
-			return fmt.Errorf("unload-begin of %s from %q", key, gs.phase)
+			return fmt.Errorf("unload-begin of %s/%s gen %d from %q", label, name, gen, gs.phase)
+		}
+		gs.phase = "releasing"
+	case "quiesced":
+		// The per-plugin quiescence boundary: the write lock is held, so no
+		// active calls remain and no further acquisition is legal.
+		if gs.phase != "published" && gs.phase != "releasing" {
+			return fmt.Errorf("quiesced of %s/%s gen %d from %q", label, name, gen, gs.phase)
+		}
+		if gs.activeCalls != 0 {
+			return fmt.Errorf("quiesced of %s/%s with %d active calls", label, name, gs.activeCalls)
 		}
 		gs.phase = "releasing"
 	case "compiled-released":
 		if gs.phase != "constructing" && gs.phase != "published" && gs.phase != "releasing" {
-			return fmt.Errorf("compiled-released of %s from %q", key, gs.phase)
+			return fmt.Errorf("compiled-released of %s/%s gen %d from %q", label, name, gen, gs.phase)
 		}
 		if !gs.compiledOwned {
-			return fmt.Errorf("duplicate compiled-released of %s", key)
+			return fmt.Errorf("duplicate compiled-released of %s/%s", label, name)
 		}
 		if gs.activeCalls != 0 {
-			return fmt.Errorf("compiled-released of %s with %d active calls", key, gs.activeCalls)
+			return fmt.Errorf("compiled-released of %s/%s with %d active calls", label, name, gs.activeCalls)
 		}
 		gs.compiledOwned = false
 		if gs.phase != "constructing" {
@@ -310,6 +327,28 @@ func (m *lifecycleModel) observe(ev string) error {
 		return fmt.Errorf("unknown event %q", ev)
 	}
 	return nil
+}
+
+// validateModel runs the model over a raw event stream (label:kind:name
+// suffixes; the leading sequence number is stripped) and asserts the runtime
+// ends CLOSED — a scenario that promised a terminal close must actually
+// complete one.
+func validateModel(t *testing.T, events []string) {
+	t.Helper()
+	m := newLifecycleModel()
+	labels := map[string]bool{}
+	for _, ev := range events {
+		ev = ev[strings.Index(ev, ":")+1:]
+		labels[ev[:strings.Index(ev, ":")]] = true
+		if err := m.observe(ev); err != nil {
+			t.Fatalf("reference model rejected %q: %v\nstream: %v", ev, err, events)
+		}
+	}
+	for label := range labels {
+		if m.runtime[label] != "closed" {
+			t.Fatalf("runtime %s ended in %q, want closed (an unfinished stream cannot be a terminal proof)", label, m.runtime[label])
+		}
+	}
 }
 
 // TestLifecycleCloseReleasesCompiledExactlyOnce — every acquired compiled
@@ -718,10 +757,11 @@ func TestLifecycleActiveCallBlocksCompiledRelease(t *testing.T) {
 	seqInst, _ := rec.seqOf("rt:instance-acquired:fast")
 	seqClose, _ := rec.seqOf("rt:close-begin")
 	seqFinish, _ := rec.seqOf("rt:call-finished:fast")
+	seqQuiesced, _ := rec.seqOf("rt:quiesced:fast")
 	seqRelease, _ := rec.seqOf("rt:compiled-released:fast")
-	if !(seqInst < seqClose && seqClose < seqFinish && seqFinish < seqRelease) {
-		t.Fatalf("event order wrong: instance=%d close-begin=%d call-finish=%d release=%d",
-			seqInst, seqClose, seqFinish, seqRelease)
+	if !(seqInst < seqClose && seqClose < seqFinish && seqFinish < seqQuiesced && seqQuiesced < seqRelease) {
+		t.Fatalf("event order wrong: instance=%d close-begin=%d call-finish=%d quiesced=%d release=%d",
+			seqInst, seqClose, seqFinish, seqQuiesced, seqRelease)
 	}
 	rec.validate()
 }
@@ -775,6 +815,9 @@ func TestLifecycleUnloadBlocksUntilCallsQuiesce(t *testing.T) {
 	}
 	if rec.count("rt:compiled-released:fast") != 1 {
 		t.Fatalf("unload released compiled %d times, want 1", rec.count("rt:compiled-released:fast"))
+	}
+	if err := r.Close(); err != nil {
+		t.Fatal(err)
 	}
 	rec.validate()
 }
@@ -865,51 +908,77 @@ func TestLifecycleUnloadExactlyOnceAndRemovesReachability(t *testing.T) {
 }
 
 // TestLifecycleReferenceModelScenarios — the reference model, driven through
-// the REAL runtime for a table of scenarios; every recorded event must be a
-// legal model transition.
+// the REAL runtime for a table of scenarios. Every operation's result is
+// ASSERTED (the intentionally failing calls assert their failure class, all
+// others require success), and validate() additionally requires the runtime
+// to end closed — a truncated scenario can never pass as a prefix.
 func TestLifecycleReferenceModelScenarios(t *testing.T) {
 	bytes := MinimalV2Module(false)
 	scenarios := []struct {
 		name string
-		run  func(t *testing.T, r *Runtime, rec *eventRecorder)
+		run  func(t *testing.T, r *Runtime) error
 	}{
 		{
 			"load close",
-			func(t *testing.T, r *Runtime, rec *eventRecorder) {
-				r.LoadPlugin("p", bytes)
-				r.Close()
+			func(t *testing.T, r *Runtime) error {
+				if _, err := r.LoadPlugin("p", bytes); err != nil {
+					return fmt.Errorf("load: %w", err)
+				}
+				return r.Close()
 			},
 		},
 		{
 			"load unload reload close",
-			func(t *testing.T, r *Runtime, rec *eventRecorder) {
-				r.LoadPlugin("p", bytes)
-				r.UnloadPlugin("p")
-				r.LoadPlugin("p", bytes)
-				r.Close()
+			func(t *testing.T, r *Runtime) error {
+				if _, err := r.LoadPlugin("p", bytes); err != nil {
+					return fmt.Errorf("load: %w", err)
+				}
+				if err := r.UnloadPlugin("p"); err != nil {
+					return fmt.Errorf("unload: %w", err)
+				}
+				if _, err := r.LoadPlugin("p", bytes); err != nil {
+					return fmt.Errorf("reload: %w", err)
+				}
+				return r.Close()
 			},
 		},
 		{
 			"failed construction then load close",
-			func(t *testing.T, r *Runtime, rec *eventRecorder) {
-				_, _ = r.LoadPlugin("trap", MinimalV2ModuleTrapsAtInit())
-				r.LoadPlugin("p", bytes)
-				r.Close()
+			func(t *testing.T, r *Runtime) error {
+				_, err := r.LoadPlugin("trap", MinimalV2ModuleTrapsAtInit())
+				if err == nil || strings.Contains(err.Error(), "compile") {
+					return fmt.Errorf("trap load must fail at instantiation, got %v", err)
+				}
+				if _, err := r.LoadPlugin("p", bytes); err != nil {
+					return fmt.Errorf("load after failed construction: %w", err)
+				}
+				return r.Close()
 			},
 		},
 		{
 			"duplicate rejected then close",
-			func(t *testing.T, r *Runtime, rec *eventRecorder) {
-				r.LoadPlugin("p", bytes)
-				_, _ = r.LoadPlugin("p", bytes)
-				r.Close()
+			func(t *testing.T, r *Runtime) error {
+				if _, err := r.LoadPlugin("p", bytes); err != nil {
+					return fmt.Errorf("load: %w", err)
+				}
+				_, err := r.LoadPlugin("p", bytes)
+				if err == nil || !strings.Contains(err.Error(), "already loaded") {
+					return fmt.Errorf("duplicate load must fail as already-loaded, got %v", err)
+				}
+				return r.Close()
 			},
 		},
 		{
 			"close then load rejected",
-			func(t *testing.T, r *Runtime, rec *eventRecorder) {
-				r.Close()
-				_, _ = r.LoadPlugin("p", bytes)
+			func(t *testing.T, r *Runtime) error {
+				if err := r.Close(); err != nil {
+					return err
+				}
+				_, err := r.LoadPlugin("p", bytes)
+				if err == nil || !strings.Contains(err.Error(), "runtime is closed") {
+					return fmt.Errorf("post-close load must fail as closed, got %v", err)
+				}
+				return nil
 			},
 		},
 	}
@@ -918,8 +987,10 @@ func TestLifecycleReferenceModelScenarios(t *testing.T) {
 			r := newTestRuntime(t)
 			rec := newEventRecorder(t)
 			rec.install(r, "rt")
-			sc.run(t, r, rec)
-			rec.validate()
+			if err := sc.run(t, r); err != nil {
+				t.Fatal(err)
+			}
+			rec.validate() // also asserts the runtime ended closed
 		})
 	}
 }
@@ -1004,4 +1075,181 @@ func TestLifecycleFailedCompiledCloseStillCounts(t *testing.T) {
 		t.Fatalf("failed close recorded %d releases, want 1", rec.count("rt:compiled-released:bad"))
 	}
 	rec.validate()
+}
+
+// TestLifecycleCloseKeepsReachabilityUntilQuiescence — F1: during Close's
+// write-lock wait, the plugin is STILL published (reachability retained until
+// quiescence) and its resources are NOT released; after the transaction the
+// map is empty, resources are closed, and a stale-pointer CallRequest fails
+// cleanly — there is no published-but-closed window.
+func TestLifecycleCloseKeepsReachabilityUntilQuiescence(t *testing.T) {
+	r := newTestRuntime(t)
+	rec := newEventRecorder(t)
+	rec.install(r, "rt")
+	acquired := make(chan struct{})
+	release := make(chan struct{})
+	r.testHooks.instanceAcquired = func(name string) {
+		rec.record("rt:instance-acquired:" + name)
+		close(acquired)
+		<-release
+	}
+
+	p, err := r.LoadPlugin("fast", MinimalV2Module(false))
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := []byte{}
+	done := make(chan error, 1)
+	go func() {
+		done <- p.CallRequest(context.Background(), pb.Hook_HOOK_BEFORE_REQUEST, 1, []byte{}, &out)
+	}()
+	<-acquired
+
+	closed := make(chan struct{})
+	go func() {
+		if err := r.Close(); err != nil {
+			t.Errorf("Close: %v", err)
+		}
+		close(closed)
+	}()
+	rec.wait("rt:close-begin")
+
+	// While Close waits for the write lock, the plugin is still published and
+	// its resources are NOT closed (no published-but-closed interval).
+	r.mu.RLock()
+	_, stillPublished := r.plugins["fast"]
+	r.mu.RUnlock()
+	if !stillPublished {
+		t.Fatal("plugin removed from the map BEFORE quiescence")
+	}
+	p.stateMu.RLock()
+	poolClosed := p.poolClosed
+	p.stateMu.RUnlock()
+	if poolClosed {
+		t.Fatal("pool closed before quiescence")
+	}
+
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatalf("the call after the barrier: %v", err)
+	}
+	<-closed
+
+	r.mu.RLock()
+	_, still := r.plugins["fast"]
+	r.mu.RUnlock()
+	if still {
+		t.Fatal("plugin still published after Close")
+	}
+	if err := p.CallRequest(context.Background(), pb.Hook_HOOK_BEFORE_REQUEST, 1, []byte{}, &out); err == nil {
+		t.Fatal("a stale-pointer call succeeded after Close")
+	}
+	if rec.count("rt:compiled-released:fast") != 1 {
+		t.Fatalf("released %d times, want 1", rec.count("rt:compiled-released:fast"))
+	}
+	rec.validate()
+}
+
+// TestLifecycleCloseAllowsWinningAdmissionUntilQuiesced — F2: cleanup intent
+// (close-begin) may overlap calls that win admission before THAT plugin's
+// write lock is acquired. The model's boundary is the per-generation quiesced
+// event, not the global close-begin.
+func TestLifecycleCloseAllowsWinningAdmissionUntilQuiesced(t *testing.T) {
+	r := newTestRuntime(t)
+	rec := newEventRecorder(t)
+	rec.install(r, "rt")
+	acquiredA := make(chan struct{})
+	releaseA := make(chan struct{})
+	r.testHooks.instanceAcquired = func(name string) {
+		rec.record("rt:instance-acquired:" + name)
+		if name == "a" {
+			close(acquiredA)
+			<-releaseA
+		}
+	}
+
+	for _, n := range []string{"a", "b"} {
+		if _, err := r.LoadPlugin(n, MinimalV2Module(false)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	outA := []byte{}
+	doneA := make(chan error, 1)
+	go func() {
+		doneA <- r.plugins["a"].CallRequest(context.Background(), pb.Hook_HOOK_BEFORE_REQUEST, 1, []byte{}, &outA)
+	}()
+	<-acquiredA
+
+	closed := make(chan struct{})
+	go func() {
+		if err := r.Close(); err != nil {
+			t.Errorf("Close: %v", err)
+		}
+		close(closed)
+	}()
+	rec.wait("rt:close-begin")
+
+	// b wins admission AFTER close-begin but BEFORE its own write lock:
+	// the runtime produces this legal trace, and the model must accept it.
+	outB := []byte{}
+	if err := r.plugins["b"].CallRequest(context.Background(), pb.Hook_HOOK_BEFORE_REQUEST, 1, []byte{}, &outB); err != nil {
+		t.Fatalf("b could not win admission after close-begin: %v", err)
+	}
+
+	close(releaseA)
+	if err := <-doneA; err != nil {
+		t.Fatalf("call a: %v", err)
+	}
+	<-closed
+	rec.validate() // the model accepts b's instance-acquired between close-begin and b's quiesced
+}
+
+// TestLifecycleModelNegativeMatrix — F3: the model's rejection branches are
+// proven adversarial: each row feeds an ILLEGAL stream and must error at the
+// designated event.
+func TestLifecycleModelNegativeMatrix(t *testing.T) {
+	rt := func(evs ...string) []string {
+		out := []string{"rt:load-begin:n"}
+		out = append(out, "rt:compiled-acquired:n")
+		out = append(out, "rt:published:n")
+		out = append(out, evs...)
+		return out
+	}
+	rows := []struct {
+		name string
+		evs  []string
+		at   string // the event that must be rejected
+	}{
+		{"publish without compiled ownership", []string{}, "rt:published:n"},
+		{"duplicate compiled acquire", rt("rt:compiled-acquired:n"), "rt:compiled-acquired:n"},
+		{"duplicate compiled release", rt("rt:compiled-released:n", "rt:compiled-released:n"), "rt:compiled-released:n"},
+		{"call finish without acquisition", rt("rt:call-finished:n"), "rt:call-finished:n"},
+		{"release while active", rt("rt:instance-acquired:n", "rt:compiled-released:n"), "rt:compiled-released:n"},
+		{"quiesce with active calls", rt("rt:instance-acquired:n", "rt:quiesced:n"), "rt:quiesced:n"},
+		{"construct failed while compiled-owned", []string{"rt:load-begin:n", "rt:compiled-acquired:n", "rt:construct-failed:n"}, "rt:construct-failed:n"},
+		{"load after close begins", rt("rt:close-begin", "rt:load-begin:n"), "rt:load-begin:n"},
+		{"instance after quiesced", rt("rt:quiesced:n", "rt:instance-acquired:n"), "rt:instance-acquired:n"},
+		{"close-end with live phase", rt("rt:close-begin", "rt:close-end"), "rt:close-end"},
+		{"close-end with owned handle", rt("rt:quiesced:n", "rt:close-begin", "rt:close-end"), "rt:close-end"},
+		{"close-end with active calls", rt("rt:instance-acquired:n", "rt:close-begin", "rt:close-end"), "rt:close-end"},
+		{"generation N+1 before N ends", rt("rt:load-begin:n"), "rt:load-begin:n"},
+		{"call finish twice", rt("rt:instance-acquired:n", "rt:call-finished:n", "rt:call-finished:n"), "rt:call-finished:n"},
+	}
+	for _, row := range rows {
+		t.Run(row.name, func(t *testing.T) {
+			m := newLifecycleModel()
+			for i, ev := range row.evs {
+				err := m.observe(ev)
+				if i == len(row.evs)-1 {
+					if err == nil {
+						t.Fatalf("stream accepted; the final event %q must be rejected", ev)
+					}
+					return
+				}
+				if err != nil {
+					t.Fatalf("event %q errored early: %v", ev, err)
+				}
+			}
+		})
+	}
 }
