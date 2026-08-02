@@ -785,10 +785,19 @@ func reloadPipeline(runtime *wasm.Runtime, config PluginConfig) (*PluginPipeline
 			pl.SetConfig(string(raw))
 		}
 		// Validate that every declared hook is actually exported by the WASM module.
+		// A post-load rejection must UNLOAD the plugin: it was already published
+		// into the runtime, and retaining it would keep its instance and compiled
+		// handle (a shared-cache reference) alive for the pipeline's lifetime.
+		// Unload retains reachability until quiescence, removes it, and then
+		// releases everything exactly once; strict whole-pipeline failure is
+		// cleaned when the caller closes the runtime.
 		declaredHooks, hookErr := manifestHooks(bundle.Manifest.Hooks)
 		if hookErr != nil {
 			if config.Strict {
 				return nil, fmt.Errorf("enabled plugin %q: %w", name, hookErr)
+			}
+			if unloadErr := runtime.UnloadPlugin(name); unloadErr != nil {
+				log.Printf("[plugin] %s: unload after rejection: %v", name, unloadErr)
 			}
 			log.Printf("[plugin] %s: %v — skipping", name, hookErr)
 			continue
@@ -796,6 +805,9 @@ func reloadPipeline(runtime *wasm.Runtime, config PluginConfig) (*PluginPipeline
 		if err := pl.ValidateHooks(context.Background(), declaredHooks); err != nil {
 			if config.Strict {
 				return nil, fmt.Errorf("enabled plugin %q failed hook validation: %w", name, err)
+			}
+			if unloadErr := runtime.UnloadPlugin(name); unloadErr != nil {
+				log.Printf("[plugin] %s: unload after rejection: %v", name, unloadErr)
 			}
 			log.Printf("[plugin] %s: hook validation failed: %v — skipping", name, err)
 			continue
