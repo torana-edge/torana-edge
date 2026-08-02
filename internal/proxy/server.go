@@ -95,17 +95,6 @@ func applyPluginResponseHeaders(dst http.Header, encoded []byte) error {
 	return nil
 }
 
-// allowedPluginHeaders is the only set of request headers ever exposed to
-// plugins (via ToranaMeta["_request_headers"]), and only when a loaded
-// plugin holds the env.request_headers permission.
-var allowedPluginHeaders = []string{
-	"Authorization",
-	"X-Api-Key",
-	"X-Torana-User",
-	"X-Torana-Team",
-	"X-Torana-Tenant",
-}
-
 // Config holds everything needed to start the proxy server.
 type Config struct {
 	// Port is the TCP port the proxy listens on (e.g. "8080").
@@ -865,21 +854,13 @@ func New(cfg Config) (*Server, error) {
 					}
 				}
 
-				// Credential-bearing headers are exposed to plugins only
-				// when a loaded plugin declares the env.request_headers
-				// permission, and only from an allowlist — plugins must
-				// never see arbitrary caller headers by default.
-				if pl.HasGrant("env.request_headers") {
-					headers := make(map[string]any)
-					for _, k := range allowedPluginHeaders {
-						if v := req.Header.Get(k); v != "" {
-							headers[k] = v
-						}
-					}
-					chat.ToranaMeta["_request_headers"] = headers
-				}
-
-				modified, err := pl.RunBeforeRequest(req.Context(), reqStateFrom(req.Context()).ID, chat)
+				// Credential-bearing headers are projected into the request
+				// PER PLUGIN inside the pipeline: the exact executing plugin
+				// receives the allowlisted _request_headers only when IT
+				// holds the approved env.request_headers grant. The raw
+				// header map is untrusted caller input; the pipeline
+				// snapshots and allowlists it. No pipeline-wide injection.
+				modified, err := pl.RunBeforeRequest(req.Context(), reqStateFrom(req.Context()).ID, chat, req.Header)
 				if err != nil {
 					// failure_mode: block, applied at the TRANSPORT boundary.
 					//
@@ -2082,18 +2063,18 @@ func New(cfg Config) (*Server, error) {
 				return
 			}
 		}
-		headersJSON, _ := json.Marshal(map[string][]string(r.Header))
 		httpReq := &pb.HttpRequest{
-			Method:      r.Method,
-			Path:        pluginRelPath,
-			Query:       r.URL.RawQuery,
-			Scheme:      requestScheme(r),
-			RemoteAddr:  r.RemoteAddr,
-			HeadersJson: headersJSON,
-			Body:        bodyBytes,
+			Method:     r.Method,
+			Path:       pluginRelPath,
+			Query:      r.URL.RawQuery,
+			Scheme:     requestScheme(r),
+			RemoteAddr: r.RemoteAddr,
+			Body:       bodyBytes,
 		}
-
-		resp, err := dispatchPluginHTTPRequest(r.Context(), pp, pluginName, httpReq)
+		// Headers are NOT serialized here: the raw incoming map travels to the
+		// dispatch boundary, which applies the three-class header policy
+		// against the exact executing plugin's grants.
+		resp, err := dispatchPluginHTTPRequest(r.Context(), pp, pluginName, httpReq, r.Header)
 		if err != nil {
 			if errors.Is(err, plugin.ErrServeHTTPForbidden) {
 				http.Error(w, "plugin lacks env.serve_http permission", http.StatusForbidden)

@@ -793,7 +793,7 @@ func TestRunBeforeRequestGrantlessMutationRejectedAllow(t *testing.T) {
 		Model:    "gpt-x",
 		Messages: []engine.Message{{Role: engine.RoleUser, Content: "hello"}},
 	}
-	out, err := pp.RunBeforeRequest(context.Background(), 1, chat)
+	out, err := pp.RunBeforeRequest(context.Background(), 1, chat, nil)
 	if err != nil {
 		t.Fatalf("allow mode must not error on a refused replacement: %v", err)
 	}
@@ -816,7 +816,7 @@ func TestRunBeforeRequestGrantlessMutationRejectedBlock(t *testing.T) {
 		Model:    "gpt-x",
 		Messages: []engine.Message{{Role: engine.RoleUser, Content: "hello"}},
 	}
-	out, err := pp.RunBeforeRequest(context.Background(), 2, chat)
+	out, err := pp.RunBeforeRequest(context.Background(), 2, chat, nil)
 	if err == nil {
 		t.Fatal("block mode must return an error for a grantless mutation")
 	}
@@ -854,7 +854,7 @@ func TestRunBeforeRequestFullyGrantedFastPath(t *testing.T) {
 			Parameters: map[string]any{"type": "object"},
 		}},
 	}
-	out, err := pp.RunBeforeRequest(context.Background(), 4, chat)
+	out, err := pp.RunBeforeRequest(context.Background(), 4, chat, nil)
 	if err != nil {
 		t.Fatalf("RunBeforeRequest: %v", err)
 	}
@@ -880,7 +880,7 @@ func TestRunBeforeRequestAllGrantsHostOwnedMetaRejectedAllow(t *testing.T) {
 		Model:    "gpt-x",
 		Messages: []engine.Message{{Role: engine.RoleUser, Content: "hello"}},
 	}
-	out, err := pp.RunBeforeRequest(context.Background(), 1, chat)
+	out, err := pp.RunBeforeRequest(context.Background(), 1, chat, nil)
 	if err != nil {
 		t.Fatalf("allow mode must not error on a refused replacement: %v", err)
 	}
@@ -902,7 +902,7 @@ func TestRunBeforeRequestAllGrantsHostOwnedMetaRejectedBlock(t *testing.T) {
 		Model:    "gpt-x",
 		Messages: []engine.Message{{Role: engine.RoleUser, Content: "hello"}},
 	}
-	out, err := pp.RunBeforeRequest(context.Background(), 2, chat)
+	out, err := pp.RunBeforeRequest(context.Background(), 2, chat, nil)
 	if err == nil {
 		t.Fatal("block mode must return an error for a host-owned violation on the fast path")
 	}
@@ -934,7 +934,7 @@ func TestRunBeforeRequestAllGrantsStaleBindRejectedAllow(t *testing.T) {
 			{Role: engine.RoleUser, Content: "signed content", ContentSignature: "cs-token"},
 		},
 	}
-	out, err := pp.RunBeforeRequest(context.Background(), 3, chat)
+	out, err := pp.RunBeforeRequest(context.Background(), 3, chat, nil)
 	if err != nil {
 		t.Fatalf("allow mode must not error on a refused replacement: %v", err)
 	}
@@ -962,7 +962,7 @@ func TestRunBeforeRequestRejectedReplacementDiscardsRespond(t *testing.T) {
 		Model:    "gpt-x",
 		Messages: []engine.Message{{Role: engine.RoleUser, Content: "respondme hello"}},
 	}
-	out, err := pp.RunBeforeRequest(context.Background(), reqID, chat)
+	out, err := pp.RunBeforeRequest(context.Background(), reqID, chat, nil)
 	if err != nil {
 		t.Fatalf("failure_mode is pass, so a refused replacement must not error: %v", err)
 	}
@@ -991,7 +991,7 @@ func TestRunBeforeRequestRejectedReplacementKeepsBlock(t *testing.T) {
 		Model:    "gpt-x",
 		Messages: []engine.Message{{Role: engine.RoleUser, Content: "blockme hello"}},
 	}
-	out, err := pp.RunBeforeRequest(context.Background(), reqID, chat)
+	out, err := pp.RunBeforeRequest(context.Background(), reqID, chat, nil)
 	if err != nil {
 		t.Fatalf("failure_mode is pass, so a refused replacement must not error: %v", err)
 	}

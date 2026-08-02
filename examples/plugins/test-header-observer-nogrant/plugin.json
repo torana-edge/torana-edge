@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "id": "torana-test/test-header-observer-nogrant",
+  "name": "test-header-observer-nogrant",
+  "version": "0.1.0",
+  "abi_version": "v2",
+  "minimum_torana_version": "0.1.0",
+  "failure_mode": "pass",
+  "description": "Test fixture: chat _request_headers observer WITHOUT the env.request_headers grant",
+  "hooks": [
+    {
+      "name": "run_before_request"
+    }
+  ],
+  "permissions": [
+    {
+      "name": "ir.messages.write.assistant",
+      "description": "Append the observation message"
+    },
+    {
+      "name": "env.cache_get",
+      "description": "Deterministic snapshot barrier"
+    },
+    {
+      "name": "ir.messages.write.user",
+      "description": "Message count is folded into every role's fingerprint; appending requires it"
+    }
+  ]
+}

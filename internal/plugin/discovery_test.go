@@ -594,7 +594,7 @@ func TestPipelineRunBeforeRequest_FullDispatch(t *testing.T) {
 			},
 		}},
 	}
-	result, err := pipeline.RunBeforeRequest(ctx, 1, chat)
+	result, err := pipeline.RunBeforeRequest(ctx, 1, chat, nil)
 	if err != nil {
 		t.Fatalf("RunBeforeRequest: %v", err)
 	}

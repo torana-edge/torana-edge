@@ -24,7 +24,7 @@ func TestRunOnHTTPRequest_UnknownPlugin(t *testing.T) {
 	resp, err := pp.RunOnHTTPRequest(context.Background(), 1, "nonexistent", &pb.HttpRequest{
 		Method: "GET",
 		Path:   "/",
-	})
+	}, nil)
 	if err != nil {
 		t.Fatalf("expected (nil, nil) for unknown plugin, got error: %v", err)
 	}
@@ -84,7 +84,7 @@ func TestRunOnHTTPRequest_ForbiddenWithoutGrant(t *testing.T) {
 	resp, err := pp.RunOnHTTPRequest(context.Background(), 1, "test-http-server", &pb.HttpRequest{
 		Method: "GET",
 		Path:   "/",
-	})
+	}, nil)
 	if !errors.Is(err, ErrServeHTTPForbidden) {
 		t.Fatalf("expected ErrServeHTTPForbidden, got resp=%v err=%v", resp, err)
 	}
@@ -104,7 +104,7 @@ func TestRunOnHTTPRequest_ServingPlugin(t *testing.T) {
 	resp, err := pp.RunOnHTTPRequest(context.Background(), 1, "test-http-server", &pb.HttpRequest{
 		Method: "GET",
 		Path:   "/",
-	})
+	}, nil)
 	if err != nil {
 		t.Fatalf("RunOnHTTPRequest: %v", err)
 	}

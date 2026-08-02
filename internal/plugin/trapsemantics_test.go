@@ -27,7 +27,7 @@ func TestBlockSurvivesATrapAndStopsDownstreamPlugins(t *testing.T) {
 		Model:    "gpt-x",
 		Messages: []engine.Message{{Role: engine.RoleUser, Content: "hello"}},
 	}
-	out, err := pp.RunBeforeRequest(context.Background(), reqID, chat)
+	out, err := pp.RunBeforeRequest(context.Background(), reqID, chat, nil)
 	if err != nil {
 		t.Fatalf("failure_mode is pass, so a trap must not error: %v", err)
 	}
@@ -82,7 +82,7 @@ func TestBlockSurvivesAMalformedResultAndStopsDownstream(t *testing.T) {
 		Model:    "gpt-x",
 		Messages: []engine.Message{{Role: engine.RoleUser, Content: "hello"}},
 	}
-	out, err := pp.RunBeforeRequest(context.Background(), reqID, chat)
+	out, err := pp.RunBeforeRequest(context.Background(), reqID, chat, nil)
 	if err != nil {
 		t.Fatalf("failure_mode is pass, so a malformed result must not error: %v", err)
 	}

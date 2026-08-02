@@ -38,7 +38,7 @@ func runBeforeRequestForModel(t *testing.T, pp *PluginPipeline, model string) st
 	out, err := pp.RunBeforeRequest(context.Background(), 99, &engine.ChatRequest{
 		Model:    model,
 		Messages: []engine.Message{{Role: engine.RoleUser, Content: "hello"}},
-	})
+	}, nil)
 	if err != nil {
 		t.Fatalf("RunBeforeRequest: %v", err)
 	}

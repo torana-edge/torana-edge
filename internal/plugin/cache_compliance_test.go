@@ -96,7 +96,7 @@ func TestPluginPrefixDeterminism(t *testing.T) {
 			}
 
 			run := func(reqID uint64) []byte {
-				out, err := pipeline.RunBeforeRequest(ctx, reqID, cacheComplianceRequest())
+				out, err := pipeline.RunBeforeRequest(ctx, reqID, cacheComplianceRequest(), nil)
 				if err != nil {
 					t.Fatalf("RunBeforeRequest: %v", err)
 				}
@@ -133,7 +133,7 @@ func TestCacheControlSurvivesPluginRoundTrip(t *testing.T) {
 		t.Fatalf("NewPipeline: %v", err)
 	}
 
-	out, err := pipeline.RunBeforeRequest(ctx, 1, cacheComplianceRequest())
+	out, err := pipeline.RunBeforeRequest(ctx, 1, cacheComplianceRequest(), nil)
 	if err != nil {
 		t.Fatalf("RunBeforeRequest: %v", err)
 	}

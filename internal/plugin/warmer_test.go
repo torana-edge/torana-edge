@@ -220,7 +220,7 @@ func TestWarmerRefreshesOptedInConversation(t *testing.T) {
 	h := &warmerHarness{pricing: okPricing(), cacheHit: true}
 	pp := newWarmerPipeline(t, h, "conv-a3f9", nil)
 
-	if _, err := pp.RunBeforeRequest(context.Background(), 1, warmerRequest("conv-a3f9")); err != nil {
+	if _, err := pp.RunBeforeRequest(context.Background(), 1, warmerRequest("conv-a3f9"), nil); err != nil {
 		t.Fatalf("RunBeforeRequest: %v", err)
 	}
 	// Past the 240s refresh interval, but inside the 45-minute deadline.
@@ -257,7 +257,7 @@ func TestWarmerRefreshIsAValidRequest(t *testing.T) {
 	h := &warmerHarness{pricing: okPricing(), cacheHit: true}
 	pp := newWarmerPipeline(t, h, "conv-a3f9", nil)
 
-	if _, err := pp.RunBeforeRequest(context.Background(), 1, warmerRequestBreakpointOnUser("conv-a3f9")); err != nil {
+	if _, err := pp.RunBeforeRequest(context.Background(), 1, warmerRequestBreakpointOnUser("conv-a3f9"), nil); err != nil {
 		t.Fatal(err)
 	}
 	tick(t, pp, 1, 5*time.Minute)
@@ -299,7 +299,7 @@ func TestWarmerSkipsPrefixEndingMidToolCall(t *testing.T) {
 			"_provider": "anth", "_conversation_id": "conv-a3f9", "_path": "/v1/messages",
 		},
 	}
-	if _, err := pp.RunBeforeRequest(context.Background(), 1, in); err != nil {
+	if _, err := pp.RunBeforeRequest(context.Background(), 1, in, nil); err != nil {
 		t.Fatal(err)
 	}
 	outcomes := tick(t, pp, 1, 5*time.Minute)
@@ -366,7 +366,7 @@ func TestWarmerWithoutClockGrantStoresNothing(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := pp.RunBeforeRequest(context.Background(), 1, warmerRequestBreakpointOnUser("conv-a3f9")); err != nil {
+	if _, err := pp.RunBeforeRequest(context.Background(), 1, warmerRequestBreakpointOnUser("conv-a3f9"), nil); err != nil {
 		t.Fatal(err)
 	}
 	outcomes := tick(t, pp, 1, 5*time.Minute)
@@ -398,7 +398,7 @@ func TestWarmerStopsOnProviderRefusal(t *testing.T) {
 	h := &warmerHarness{pricing: okPricing(), cacheHit: true, httpStatus: 401}
 	pp := newWarmerPipeline(t, h, "conv-a3f9", nil)
 
-	if _, err := pp.RunBeforeRequest(context.Background(), 1, warmerRequestBreakpointOnUser("conv-a3f9")); err != nil {
+	if _, err := pp.RunBeforeRequest(context.Background(), 1, warmerRequestBreakpointOnUser("conv-a3f9"), nil); err != nil {
 		t.Fatal(err)
 	}
 	first := tick(t, pp, 1, 5*time.Minute)
@@ -428,7 +428,7 @@ func TestWarmerIgnoresUnlistedConversations(t *testing.T) {
 	h := &warmerHarness{pricing: okPricing(), cacheHit: true}
 	pp := newWarmerPipeline(t, h, "conv-other", nil)
 
-	if _, err := pp.RunBeforeRequest(context.Background(), 1, warmerRequest("conv-a3f9")); err != nil {
+	if _, err := pp.RunBeforeRequest(context.Background(), 1, warmerRequest("conv-a3f9"), nil); err != nil {
 		t.Fatal(err)
 	}
 	tick(t, pp, 1, 5*time.Minute)
@@ -446,7 +446,7 @@ func TestWarmerStopsWhenCacheAlreadyExpired(t *testing.T) {
 	h := &warmerHarness{pricing: okPricing(), cacheHit: false} // reports a write
 	pp := newWarmerPipeline(t, h, "conv-a3f9", nil)
 
-	if _, err := pp.RunBeforeRequest(context.Background(), 1, warmerRequest("conv-a3f9")); err != nil {
+	if _, err := pp.RunBeforeRequest(context.Background(), 1, warmerRequest("conv-a3f9"), nil); err != nil {
 		t.Fatal(err)
 	}
 	tick(t, pp, 1, 5*time.Minute)
@@ -474,7 +474,7 @@ func TestWarmerStopsAtBreakEven(t *testing.T) {
 		`"warm_interval_seconds":240}`}
 	pp := newWarmerPipeline(t, h, "conv-a3f9", nil)
 
-	if _, err := pp.RunBeforeRequest(context.Background(), 1, warmerRequest("conv-a3f9")); err != nil {
+	if _, err := pp.RunBeforeRequest(context.Background(), 1, warmerRequest("conv-a3f9"), nil); err != nil {
 		t.Fatal(err)
 	}
 	for i := 1; i <= 6; i++ {
@@ -492,7 +492,7 @@ func TestWarmerDeclinesUnknownPricing(t *testing.T) {
 	h := &warmerHarness{cacheHit: true, pricing: `{"status":"unavailable","reason":"no_pricing_configured"}`}
 	pp := newWarmerPipeline(t, h, "conv-a3f9", nil)
 
-	if _, err := pp.RunBeforeRequest(context.Background(), 1, warmerRequest("conv-a3f9")); err != nil {
+	if _, err := pp.RunBeforeRequest(context.Background(), 1, warmerRequest("conv-a3f9"), nil); err != nil {
 		t.Fatal(err)
 	}
 	tick(t, pp, 1, 5*time.Minute)
@@ -510,7 +510,7 @@ func TestWarmerDeclinesNonRefreshableCache(t *testing.T) {
 		`"break_even_refreshes":11,"refresh_on_read":false,"shortest_ttl_seconds":300}`}
 	pp := newWarmerPipeline(t, h, "conv-a3f9", nil)
 
-	if _, err := pp.RunBeforeRequest(context.Background(), 1, warmerRequest("conv-a3f9")); err != nil {
+	if _, err := pp.RunBeforeRequest(context.Background(), 1, warmerRequest("conv-a3f9"), nil); err != nil {
 		t.Fatal(err)
 	}
 	outcomes := tick(t, pp, 1, 5*time.Minute)
@@ -530,7 +530,7 @@ func TestWarmerRespectsRefreshInterval(t *testing.T) {
 	h := &warmerHarness{pricing: okPricing(), cacheHit: true}
 	pp := newWarmerPipeline(t, h, "conv-a3f9", nil)
 
-	if _, err := pp.RunBeforeRequest(context.Background(), 1, warmerRequest("conv-a3f9")); err != nil {
+	if _, err := pp.RunBeforeRequest(context.Background(), 1, warmerRequest("conv-a3f9"), nil); err != nil {
 		t.Fatal(err)
 	}
 	tick(t, pp, 1, 5*time.Minute)
@@ -556,7 +556,7 @@ func TestWarmerDoesNotMutateRequests(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	out, err := pp.RunBeforeRequest(context.Background(), 1, in)
+	out, err := pp.RunBeforeRequest(context.Background(), 1, in, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -580,7 +580,7 @@ func TestWarmerStateSurvivesRestart(t *testing.T) {
 
 	h := &warmerHarness{pricing: okPricing(), cacheHit: true}
 	first := newWarmerPipeline(t, h, "conv-a3f9", state)
-	if _, err := first.RunBeforeRequest(context.Background(), 1, warmerRequest("conv-a3f9")); err != nil {
+	if _, err := first.RunBeforeRequest(context.Background(), 1, warmerRequest("conv-a3f9"), nil); err != nil {
 		t.Fatal(err)
 	}
 
