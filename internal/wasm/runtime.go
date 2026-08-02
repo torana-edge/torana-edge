@@ -1067,6 +1067,12 @@ func (r *Runtime) LoadPlugin(name string, wasmBytes []byte) (*Plugin, error) {
 	// code instead of recompiling it.
 	compiled, err := r.runtime.CompileModule(r.ctx, wasmBytes)
 	if err != nil {
+		// No compiled handle is owned in this branch, but the construction
+		// transaction that load-begin opened must end: the model treats
+		// construct-failed as the terminal event for a constructing
+		// generation, and a live constructing generation would otherwise be
+		// rejected at close-end.
+		r.fireConstructFailed(name)
 		return nil, fmt.Errorf("wasm: %s: compile: %w", name, err)
 	}
 	r.fireCompiledAcquired(name)

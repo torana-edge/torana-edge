@@ -922,6 +922,9 @@ func TestLifecycleReferenceModelScenarios(t *testing.T) {
 	scenarios := []struct {
 		name string
 		run  func(t *testing.T, r *Runtime) error
+		// check runs after the scenario, before the model validates the
+		// recorded stream.
+		check func(t *testing.T, rec *eventRecorder)
 	}{
 		{
 			"load close",
@@ -931,6 +934,7 @@ func TestLifecycleReferenceModelScenarios(t *testing.T) {
 				}
 				return r.Close()
 			},
+			nil,
 		},
 		{
 			"load unload reload close",
@@ -946,6 +950,47 @@ func TestLifecycleReferenceModelScenarios(t *testing.T) {
 				}
 				return r.Close()
 			},
+			nil,
+		},
+		{
+			"compile failure then load close",
+			func(t *testing.T, r *Runtime) error {
+				// Deliberately invalid WASM: magic bytes only, no version or
+				// sections. wazero rejects it at CompileModule, so the load
+				// must fail specifically at compile.
+				_, err := r.LoadPlugin("bad", []byte{0x00, 0x61, 0x73, 0x6d})
+				if err == nil || !strings.Contains(err.Error(), "compile") {
+					return fmt.Errorf("invalid WASM must fail at compile, got %v", err)
+				}
+				if _, err := r.LoadPlugin("bad", bytes); err != nil {
+					return fmt.Errorf("load after compile failure: %w", err)
+				}
+				return r.Close()
+			},
+			func(t *testing.T, rec *eventRecorder) {
+				// The first generation's transaction ends at construct-failed
+				// with NO acquire or release in its window (the later
+				// acquire/release belongs to the successful reload of the
+				// same name).
+				_, failOk := rec.seqOf("rt:construct-failed:bad")
+				loadSeq, loadOk := rec.seqOf("rt:load-begin:bad")
+				if !failOk || !loadOk {
+					t.Fatalf("expected load-begin and construct-failed for the failed load")
+				}
+				for _, ev := range rec.snapshot() {
+					var seq int
+					fmt.Sscanf(ev, "%d:", &seq)
+					if seq < loadSeq {
+						continue
+					}
+					if strings.HasSuffix(ev, "rt:compiled-acquired:bad") || strings.HasSuffix(ev, "rt:compiled-released:bad") {
+						t.Fatalf("the failed-load window acquired or released a compiled handle: %s", ev)
+					}
+					if strings.HasSuffix(ev, "rt:construct-failed:bad") {
+						break // window ends at construct-failed
+					}
+				}
+			},
 		},
 		{
 			"failed construction then load close",
@@ -959,6 +1004,7 @@ func TestLifecycleReferenceModelScenarios(t *testing.T) {
 				}
 				return r.Close()
 			},
+			nil,
 		},
 		{
 			"duplicate rejected then close",
@@ -972,6 +1018,7 @@ func TestLifecycleReferenceModelScenarios(t *testing.T) {
 				}
 				return r.Close()
 			},
+			nil,
 		},
 		{
 			"close then load rejected",
@@ -985,6 +1032,7 @@ func TestLifecycleReferenceModelScenarios(t *testing.T) {
 				}
 				return nil
 			},
+			nil,
 		},
 	}
 	for _, sc := range scenarios {
@@ -994,6 +1042,9 @@ func TestLifecycleReferenceModelScenarios(t *testing.T) {
 			rec.install(r, "rt")
 			if err := sc.run(t, r); err != nil {
 				t.Fatal(err)
+			}
+			if sc.check != nil {
+				sc.check(t, rec)
 			}
 			rec.validate() // also asserts the runtime ended closed
 		})
@@ -1168,21 +1219,17 @@ func TestLifecycleCloseKeepsReachabilityUntilQuiescence(t *testing.T) {
 		t.Fatalf("compiled released before quiescence: %d", rec.count("rt:compiled-released:fast"))
 	}
 
-	// A stale call cannot pass the write lock the barrier holds: while the
-	// barrier is up, Close cannot have finished, so completion is impossible.
-	staleDone := make(chan error, 1)
-	go func() {
-		staleDone <- p.CallRequest(context.Background(), pb.Hook_HOOK_BEFORE_REQUEST, 1, []byte{}, &out)
-	}()
-	select {
-	case err := <-staleDone:
-		t.Fatalf("a stale call passed the held write lock (%v)", err)
-	default:
+	// A stale call cannot pass the write lock the barrier holds: the lock is
+	// deterministically observable, so assert it directly rather than racing
+	// a goroutine against the scheduler.
+	if p.callMu.TryRLock() {
+		p.callMu.RUnlock()
+		t.Fatal("a stale call could acquire the read lock while the write lock is held")
 	}
 
 	close(releaseQuiesce)
-	if err := <-staleDone; err == nil {
-		t.Fatal("a stale-pointer call succeeded after Close")
+	if err := p.CallRequest(context.Background(), pb.Hook_HOOK_BEFORE_REQUEST, 1, []byte{}, &out); err == nil || !strings.Contains(err.Error(), "plugin is closed") {
+		t.Fatalf("a stale-pointer call after Close returned %v, want a plugin-is-closed error", err)
 	}
 	<-closed
 
