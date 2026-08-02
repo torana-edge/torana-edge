@@ -48,6 +48,10 @@
     {
       "name": "ir.params.write",
       "description": "Rewrite sampling parameters"
+    },
+    {
+      "name": "ir.cache_control.write",
+      "description": "Rewrite cache breakpoint markers (all-grants fixture)"
     }
   ]
 }

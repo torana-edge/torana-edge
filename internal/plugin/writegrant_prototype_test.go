@@ -41,6 +41,9 @@ type changedSections struct {
 	tools    bool
 	model    bool
 	params   bool
+	// cacheControl marks a change to Message.cache_control_json or
+	// ToolDef.cache_control_json, governed by ir.cache_control.write alone.
+	cacheControl bool
 	// hostOwned marks a change to a field no grant covers, because the host
 	// owns it. torana_meta_json is the only one: the host writes _provider and
 	// friends into it, and under v2 verdicts are host calls rather than keys in
@@ -50,7 +53,7 @@ type changedSections struct {
 }
 
 func (c changedSections) any() bool {
-	return len(c.messages) > 0 || c.tools || c.model || c.params || c.hostOwned
+	return len(c.messages) > 0 || c.tools || c.model || c.params || c.cacheControl || c.hostOwned
 }
 
 // compareSections diffs a plugin's output against the previously accepted
@@ -80,7 +83,7 @@ func compareSections(accepted, out *pb.ChatRequest) changedSections {
 			c.messages[b.Role] = true
 		case b == nil:
 			c.messages[a.Role] = true
-		case !proto.Equal(a, b):
+		case !sameMessageWithoutMarker(a, b):
 			c.messages[a.Role] = true
 			c.messages[b.Role] = true
 		}
@@ -90,7 +93,7 @@ func compareSections(accepted, out *pb.ChatRequest) changedSections {
 		c.tools = true
 	} else {
 		for i := range accepted.Tools {
-			if !proto.Equal(accepted.Tools[i], out.Tools[i]) {
+			if !sameToolWithoutMarker(accepted.Tools[i], out.Tools[i]) {
 				c.tools = true
 				break
 			}
@@ -100,7 +103,70 @@ func compareSections(accepted, out *pb.ChatRequest) changedSections {
 	c.model = accepted.Model != out.Model
 	c.params = !sameParams(accepted, out)
 	c.hostOwned = !bytes.Equal(accepted.ToranaMetaJson, out.ToranaMetaJson)
+	c.cacheControl = cacheControlChanged(accepted, out)
 	return c
+}
+
+// cacheControlChanged compares the cache breakpoint markers positionally,
+// mirroring the production fingerprint section: ONLY marker-carrying messages
+// and tools participate (a marker moved between any two positions counts as
+// changed even when its bytes are unchanged; marker-less structural changes
+// do not).
+func cacheControlChanged(accepted, out *pb.ChatRequest) bool {
+	n := len(accepted.Messages)
+	if len(out.Messages) > n {
+		n = len(out.Messages)
+	}
+	for i := 0; i < n; i++ {
+		var a, b []byte
+		if i < len(accepted.Messages) && len(accepted.Messages[i].CacheControlJson) > 0 {
+			a = accepted.Messages[i].CacheControlJson
+		}
+		if i < len(out.Messages) && len(out.Messages[i].CacheControlJson) > 0 {
+			b = out.Messages[i].CacheControlJson
+		}
+		if !bytes.Equal(a, b) {
+			return true
+		}
+	}
+	nt := len(accepted.Tools)
+	if len(out.Tools) > nt {
+		nt = len(out.Tools)
+	}
+	for i := 0; i < nt; i++ {
+		var a, b []byte
+		if i < len(accepted.Tools) && len(accepted.Tools[i].CacheControlJson) > 0 {
+			a = accepted.Tools[i].CacheControlJson
+		}
+		if i < len(out.Tools) && len(out.Tools[i].CacheControlJson) > 0 {
+			b = out.Tools[i].CacheControlJson
+		}
+		if !bytes.Equal(a, b) {
+			return true
+		}
+	}
+	return false
+}
+
+// sameMessageWithoutMarker compares two messages EXCLUDING
+// cache_control_json: markers are governed by ir.cache_control.write as a
+// section of their own (cacheControlChanged), never by the role sections —
+// the oracle must agree with the production fingerprint, or a marker-only
+// mutation would look like a role change to the exact comparison.
+func sameMessageWithoutMarker(a, b *pb.Message) bool {
+	ca := proto.Clone(a).(*pb.Message)
+	cb := proto.Clone(b).(*pb.Message)
+	ca.CacheControlJson, cb.CacheControlJson = nil, nil
+	return proto.Equal(ca, cb)
+}
+
+// sameToolWithoutMarker compares two tool definitions EXCLUDING
+// cache_control_json, for the same reason.
+func sameToolWithoutMarker(a, b *pb.ToolDef) bool {
+	ca := proto.Clone(a).(*pb.ToolDef)
+	cb := proto.Clone(b).(*pb.ToolDef)
+	ca.CacheControlJson, cb.CacheControlJson = nil, nil
+	return proto.Equal(ca, cb)
 }
 
 func sameParams(a, b *pb.ChatRequest) bool {

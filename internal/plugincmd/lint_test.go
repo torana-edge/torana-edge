@@ -795,3 +795,120 @@ func Unused() { _ = sdk.StateSet("k", "v") }
 
 	assertClean(t, lintMessages(t, dir))
 }
+
+// --- ir.cache_control.write (batch-3 prerequisite) ------------------------
+
+// A plugin using the cache-breakpoint helpers with the grant declared is
+// clean.
+func TestLintCacheBreakpointHelperWithGrantIsClean(t *testing.T) {
+	dir := writePlugin(t,
+		manifestWith(`{"name":"run_before_request"}`,
+			`{"name":"ir.cache_control.write","description":"markers"}`),
+		`package main
+
+import (
+	"context"
+
+	sdk "github.com/torana-edge/torana-plugin-sdk"
+	pb "github.com/torana-edge/torana-plugin-sdk/pb/v2"
+)
+
+func main() {}
+
+func init() {
+	sdk.OnBeforeRequest(func(ctx context.Context, req *pb.ChatRequest) (*pb.ChatRequest, error) {
+		sdk.SetCacheBreakpoint(req.Messages[0], map[string]any{"type": "ephemeral"})
+		return nil, nil
+	})
+}
+`)
+	assertClean(t, lintMessages(t, dir))
+}
+
+// Helper use WITHOUT the declaration is caught: the scanner attributes
+// SetCacheBreakpoint / MoveCacheBreakpoint to ir.cache_control.write.
+func TestLintCacheBreakpointHelperWithoutGrantIsCaught(t *testing.T) {
+	dir := writePlugin(t,
+		manifestWith(`{"name":"run_before_request"}`, ``),
+		`package main
+
+import (
+	"context"
+
+	sdk "github.com/torana-edge/torana-plugin-sdk"
+	pb "github.com/torana-edge/torana-plugin-sdk/pb/v2"
+)
+
+func main() {}
+
+func init() {
+	sdk.OnBeforeRequest(func(ctx context.Context, req *pb.ChatRequest) (*pb.ChatRequest, error) {
+		sdk.MoveCacheBreakpoint(req.Messages[0], req.Messages[1])
+		return nil, nil
+	})
+}
+`)
+	msgs := lintMessages(t, dir)
+	assertContains(t, msgs, `uses "ir.cache_control.write" but plugin.json does not request it`)
+}
+
+// Direct protobuf assignment exercises a write grant with no attributable
+// call site: the declared grant must never be warned as unused.
+func TestLintDirectCacheControlAssignmentNotFlaggedUnused(t *testing.T) {
+	dir := writePlugin(t,
+		manifestWith(`{"name":"run_before_request"}`,
+			`{"name":"ir.cache_control.write","description":"markers"}`),
+		`package main
+
+import (
+	"context"
+
+	sdk "github.com/torana-edge/torana-plugin-sdk"
+	pb "github.com/torana-edge/torana-plugin-sdk/pb/v2"
+)
+
+func main() {}
+
+func init() {
+	sdk.OnBeforeRequest(func(ctx context.Context, req *pb.ChatRequest) (*pb.ChatRequest, error) {
+		req.Messages[0].CacheControlJson = []byte(`+"`"+`{"type":"ephemeral"}`+"`"+`)
+		return nil, nil
+	})
+}
+`)
+	assertClean(t, lintMessages(t, dir))
+}
+
+// The rule is general: NO write grant is warned as unused, because every one
+// of them is exercised by direct protobuf mutation.
+func TestLintNoWriteGrantWarnedUnused(t *testing.T) {
+	dir := writePlugin(t,
+		manifestWith(`{"name":"run_before_request"}`,
+			`{"name":"ir.model.write","description":"model"},`+
+				`{"name":"ir.messages.write.user","description":"user"},`+
+				`{"name":"ir.tools.write","description":"tools"},`+
+				`{"name":"ir.cache_control.write","description":"markers"}`),
+		`package main
+
+import (
+	"context"
+
+	sdk "github.com/torana-edge/torana-plugin-sdk"
+	pb "github.com/torana-edge/torana-plugin-sdk/pb/v2"
+)
+
+func main() {}
+
+func init() {
+	sdk.OnBeforeRequest(func(ctx context.Context, req *pb.ChatRequest) (*pb.ChatRequest, error) {
+		return nil, nil
+	})
+}
+`)
+	msgs := lintMessages(t, dir)
+	for _, m := range msgs {
+		if strings.Contains(m, "no code uses it") {
+			t.Fatalf("write grant warned as unused: %s", m)
+		}
+	}
+}

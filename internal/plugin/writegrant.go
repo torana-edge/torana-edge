@@ -67,10 +67,11 @@ import (
 // requestSections is the fingerprint of one request: 32 bytes per grantable
 // section, plus a per-role message map.
 type requestSections struct {
-	messages map[string][32]byte
-	tools    [32]byte
-	model    [32]byte
-	params   [32]byte
+	messages     map[string][32]byte
+	tools        [32]byte
+	model        [32]byte
+	params       [32]byte
+	cacheControl [32]byte
 }
 
 func (p requestSections) equal(q requestSections) bool {
@@ -82,7 +83,7 @@ func (p requestSections) equal(q requestSections) bool {
 			return false
 		}
 	}
-	return p.tools == q.tools && p.model == q.model && p.params == q.params
+	return p.tools == q.tools && p.model == q.model && p.params == q.params && p.cacheControl == q.cacheControl
 }
 
 // writeFramed length-prefixes every field, so field boundaries cannot be moved
@@ -144,7 +145,10 @@ func fingerprintMessage(m *pb.Message) [32]byte {
 	writeField(h, 8, m.RedactedThinking != "", []byte(m.RedactedThinking))
 	writeField(h, 9, m.ToolCallId != "", []byte(m.ToolCallId))
 	writeField(h, 10, m.ToolName != "", []byte(m.ToolName))
-	writeField(h, 11, len(m.CacheControlJson) > 0, m.CacheControlJson)
+	// cache_control_json is deliberately NOT here: it is governed by
+	// ir.cache_control.write, a section of its own (fingerprintCacheControlSection),
+	// never by the message-role grants. Role sections must not see marker
+	// changes, or a cache-economics plugin would need every role grant.
 
 	var count [8]byte
 	binary.LittleEndian.PutUint64(count[:], uint64(len(m.ToolCalls)))
@@ -204,14 +208,18 @@ func fingerprintRequestSections(req *pb.ChatRequest) requestSections {
 		p.messages[role] = sum
 	}
 
+	p.cacheControl = fingerprintCacheControlSection(req)
+
 	h := sha256.New()
 	for _, t := range req.Tools {
 		strict := byte(0)
 		if t.Strict {
 			strict = 1
 		}
+		// CacheControlJson is NOT part of the tools section: it is governed
+		// by ir.cache_control.write (see fingerprintCacheControlSection).
 		writeFramed(h, []byte(t.Name), []byte(t.Description), t.ParametersJson,
-			t.CacheControlJson, []byte{strict})
+			[]byte{strict})
 	}
 	copy(p.tools[:], h.Sum(nil))
 
@@ -257,6 +265,43 @@ func fingerprintRequestSections(req *pb.ChatRequest) requestSections {
 	copy(p.params[:], h.Sum(nil))
 
 	return p
+}
+
+// fingerprintCacheControlSection digests the cache breakpoint markers of a
+// request — Message.cache_control_json and ToolDef.cache_control_json — as
+// ONE section governed by ir.cache_control.write. ONLY marker-carrying
+// messages and tools contribute frames, each framed with its ABSOLUTE index:
+// a marker moved between any two positions changes the section even when its
+// bytes are unchanged, and a marker added, removed, inserted, or deleted
+// changes it too. Marker-less structural changes (inserting or deleting a
+// plain message) do NOT touch the section — a plugin that never looks at a
+// marker must not need the grant. proto3 bytes carries no presence: a
+// zero-length value IS the marker-less state, so empty and absent are the
+// same and no artificial presence framing exists. No other field
+// participates: content, role, tool identity/schema, model, params, and
+// signatures stay in their own sections (or are host-owned).
+func fingerprintCacheControlSection(req *pb.ChatRequest) [32]byte {
+	h := sha256.New()
+	var idx [8]byte
+	for i, m := range req.Messages {
+		if len(m.CacheControlJson) == 0 {
+			continue
+		}
+		binary.LittleEndian.PutUint64(idx[:], uint64(i))
+		writeFramed(h, idx[:])
+		writeField(h, 1, true, m.CacheControlJson)
+	}
+	for i, t := range req.Tools {
+		if len(t.CacheControlJson) == 0 {
+			continue
+		}
+		binary.LittleEndian.PutUint64(idx[:], uint64(i))
+		writeFramed(h, idx[:])
+		writeField(h, 2, true, t.CacheControlJson)
+	}
+	var sum [32]byte
+	copy(sum[:], h.Sum(nil))
+	return sum
 }
 
 // verifyUnconditionalInvariants checks the host facts and provenance bindings
@@ -367,6 +412,11 @@ func verifyGrantedSections(accepted, out *pb.ChatRequest, canWrite func(section 
 	if acc.tools != res.tools {
 		if !canWrite("ir.tools.write") {
 			return fmt.Errorf("plugin changed tools without ir.tools.write")
+		}
+	}
+	if acc.cacheControl != res.cacheControl {
+		if !canWrite("ir.cache_control.write") {
+			return fmt.Errorf("plugin changed cache_control without ir.cache_control.write")
 		}
 	}
 	if acc.model != res.model {
@@ -650,6 +700,7 @@ func messageStringField(m *pb.Message, fd protoreflect.FieldDescriptor) string {
 // holding every one of them can change any section verification guards, so
 // verification is pure cost for it.
 var allRequestGrants = []string{
+	"ir.cache_control.write",
 	"ir.messages.write.user",
 	"ir.messages.write.assistant",
 	"ir.messages.write.system",
@@ -721,7 +772,7 @@ var messageFieldSections = map[string]string{
 	"tool_calls":         "ir.messages.write.<role>",
 	"tool_call_id":       "ir.messages.write.<role>",
 	"tool_name":          "ir.messages.write.<role>",
-	"cache_control_json": "ir.messages.write.<role>",
+	"cache_control_json": "ir.cache_control.write",
 }
 
 var toolCallFieldSections = map[string]string{
@@ -736,5 +787,5 @@ var toolDefFieldSections = map[string]string{
 	"description":        "ir.tools.write",
 	"parameters_json":    "ir.tools.write",
 	"strict":             "ir.tools.write",
-	"cache_control_json": "ir.tools.write",
+	"cache_control_json": "ir.cache_control.write",
 }
