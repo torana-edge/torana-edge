@@ -153,6 +153,9 @@ func TestValidateAgentResponseHeaders(t *testing.T) {
 
 func TestPluginAgentOperationDispatch(t *testing.T) {
 	if _, err := os.Stat(fixturesDir + "/test-http-server/plugin.wasm"); err != nil {
+		if os.Getenv("TORANA_E2E") != "" {
+			t.Fatalf("test-http-server fixture is not built; run make testdata: %v", err)
+		}
 		t.Skip("test-http-server fixture is not built; run make testdata")
 	}
 	config := provider.DefaultConfig()
@@ -215,6 +218,9 @@ func TestPluginAgentOperationDispatch(t *testing.T) {
 func TestPluginListDistinguishesLoadedBundleFromChangedDiskBundle(t *testing.T) {
 	sourceDir := fixturesDir + "/test-http-server"
 	if _, err := os.Stat(filepath.Join(sourceDir, "plugin.wasm")); err != nil {
+		if os.Getenv("TORANA_E2E") != "" {
+			t.Fatalf("test-http-server fixture is not built; run make testdata: %v", err)
+		}
 		t.Skip("test-http-server fixture is not built; run make testdata")
 	}
 	pluginsDir := t.TempDir()

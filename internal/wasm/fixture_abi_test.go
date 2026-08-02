@@ -81,6 +81,9 @@ func TestFixturesClaimingV2AreActuallyV2(t *testing.T) {
 	}
 
 	if checked == 0 {
+		if os.Getenv("TORANA_E2E") != "" {
+			t.Fatal("no built v2 fixtures present — run 'make testdata'")
+		}
 		t.Skip("no built v2 fixtures present; run 'make testdata'")
 	}
 	t.Logf("verified %d fixtures claiming v2", checked)
@@ -94,6 +97,9 @@ func TestV2FixturesAnswerARealDispatch(t *testing.T) {
 	dir := filepath.Join("..", "..", "examples", "plugins", "test-inert-a")
 	wasmBytes, err := os.ReadFile(filepath.Join(dir, "plugin.wasm"))
 	if err != nil {
+		if os.Getenv("TORANA_E2E") != "" {
+			t.Fatalf("test-inert-a not built — run 'make testdata': %v", err)
+		}
 		t.Skip("test-inert-a not built; run 'make testdata'")
 	}
 

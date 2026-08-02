@@ -47,3 +47,6 @@ node_modules/
 # Scratch files — never commit these
 fix_lint.sh
 *.diff
+
+# Local test-cycle state (wazero compilation cache, fixture stamps)
+/.cache/

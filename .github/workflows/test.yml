@@ -7,8 +7,17 @@ on:
     branches: [main]
 
 jobs:
+  # The race suite is the pre-merge gate, sharded across four workers with
+  # FULL coverage: internal/wasm, internal/plugin, internal/proxy, and an
+  # auto-inventoried remainder. The partition is defined ONCE in
+  # scripts/ci-shards.sh and consumed by the matrix, the fixture build, and
+  # the exhaustiveness check — no copy of the selection logic lives in YAML.
   test:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [wasm, plugin, proxy, remainder]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -16,26 +25,88 @@ jobs:
         with:
           go-version: "1.26"
       - name: Cache Wazero compilation
+        # Per-shard namespace: each worker restores and saves the compiled
+        # modules relevant to ITS shard. A shared key would let the fast
+        # remainder shard claim the key first with an empty cache, and the
+        # heavy shards could never save theirs.
         uses: actions/cache@v4
         with:
           path: /tmp/wazero-cache
-          key: ${{ runner.os }}-${{ runner.arch }}-go${{ steps.go.outputs.go-version }}-wazero-${{ hashFiles('go.mod', 'go.sum', 'Makefile', 'examples/plugins/**/*.go', 'testdata/**/*.go') }}
+          key: ${{ runner.os }}-${{ runner.arch }}-go${{ steps.go.outputs.go-version }}-wazero-${{ matrix.shard }}-${{ hashFiles('go.mod', 'go.sum', 'Makefile', 'examples/plugins/**/*.go') }}
           restore-keys: |
-            ${{ runner.os }}-${{ runner.arch }}-go${{ steps.go.outputs.go-version }}-wazero-
-            ${{ runner.os }}-${{ runner.arch }}-wazero-
+            ${{ runner.os }}-${{ runner.arch }}-go${{ steps.go.outputs.go-version }}-wazero-${{ matrix.shard }}-
+            ${{ runner.os }}-${{ runner.arch }}-wazero-${{ matrix.shard }}-
       - name: Build
         run: go build ./...
-      - name: Build WASM plugins
-        run: make testdata
-      - name: Test
-        # Race suite is the pre-merge gate (the proxy package alone takes
-        # ~13 min under -race); 1800s matches make test-race. The ordinary
-        # suite is `make test` locally.
-        run: TORANA_CI_CACHE=/tmp/wazero-cache TORANA_E2E=1 go test ./... -race -timeout 1800s
+      - name: Build the shard's fixtures only
+        run: |
+          fixtures=$(scripts/ci-shards.sh fixtures ${{ matrix.shard }})
+          if [ -n "$fixtures" ]; then
+            # -j4 for cold multi-fixture builds (measured: 43 fixtures in
+            # ~1.2s wall with -j4 vs 16s serial).
+            make -j4 $fixtures
+          else
+            echo "this shard needs no fixtures"
+          fi
+      - name: Test shard
+        run: |
+          PKGS=$(scripts/ci-shards.sh ${{ matrix.shard }} | tr '\n' ' ')
+          GOWORK=off TORANA_CI_CACHE=/tmp/wazero-cache TORANA_E2E=1 go test $PKGS -race -timeout 1800s
+
+  # Proves the shard partition against the live package inventory. The check
+  # itself (duplicates, overlaps, union, cardinality) lives in the same helper
+  # the matrix consumes.
+  shard-exhaustiveness:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+      - name: Verify the shard partition
+        run: scripts/ci-shards.sh check
+
+  # Independent proof of the per-package fixture mapping: ONE FRESH CHECKOUT
+  # PER heavy package. Each matrix entry builds exactly what ITS package's
+  # mapping says and immediately runs that package's strict suite. Any fixture
+  # a test requests that the mapping forgot fails here — including
+  # dynamically constructed names no static scan can see. (A single job that
+  # built wasm's all-42 mapping first would make the other two proofs
+  # vacuous.)
+  pkg-fixture-proof:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        pkg: [./internal/wasm, ./internal/plugin, ./internal/proxy]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+      - name: Build exactly this package's mapped fixtures
+        run: make -j4 testdata-pkg PKG=${{ matrix.pkg }}
+      - name: This package's strict suite must find every fixture it requests
+        run: |
+          # -count=1: this job is an EXECUTION proof — a cached pass would
+          # prove nothing about the fixtures built just above.
+          GOWORK=off TORANA_CI_CACHE=/tmp/wazero-cache TORANA_E2E=1 \
+            go test ${{ matrix.pkg }}/... -count=1 -timeout 1800s
+
+  # Vet and vulnerability scanning run once, outside the test matrix.
+  analysis:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+      - name: POSIX shell syntax (Ubuntu /bin/sh is dash, not bash)
+        run: dash -n scripts/ci-shards.sh scripts/testdata.sh scripts/fixtures-for-pkg.sh
       - name: Vet
-        run: go vet ./...
+        run: GOWORK=off go vet ./...
       - name: Vulnerability scan
-        run: go run golang.org/x/vuln/cmd/govulncheck@v1.6.0 ./...
+        run: GOWORK=off go run golang.org/x/vuln/cmd/govulncheck@v1.6.0 ./...
 
   lint:
     runs-on: ubuntu-latest

@@ -974,8 +974,38 @@ func TestStreamingObservationalHookCompletesBeforeFeedRecording(t *testing.T) {
 //
 // "Observational" describes the hook's AUTHORITY (it cannot change the
 // response), not its timing.
+//
+// The hook's duration is a HOST-CONTROLLED LATCH, not a timer: the fixture's
+// after-response hook issues a granted torana_send_request to a provider whose
+// httptest handler blocks on a Go channel the test owns. The test proves EOF
+// is held while the hook is gated and completes only after release, with the
+// stream body intact. If observational post-processing is ever moved off the
+// response path, EOF completes before entered and this test FAILS — that is
+// the point of pinning it. The 30s context is deadlock protection only, never
+// the assertion.
 func TestObservationalStreamingHookIsOnTheClientCriticalPath(t *testing.T) {
 	requireWASM(t, fixturesDir+"/test-slow-after-stream/plugin.wasm")
+
+	enteredCh := make(chan struct{})
+	releaseCh := make(chan struct{})
+	// entered/release are idempotent (sync.Once) and release happens on EVERY
+	// exit path, so a premature failure can never leave the latch handler
+	// blocked and hang httptest.Server.Close in the deferred cleanup.
+	var enteredOnce, releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseCh) }) }
+	latch := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		enteredOnce.Do(func() { close(enteredCh) })
+		select {
+		case <-releaseCh:
+		case <-r.Context().Done():
+			return // cancellation-aware: never block server shutdown forever
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"id":"c1","choices":[{"message":{"role":"assistant","content":"released"}}]}`)
+	}))
+	// One combined cleanup: release BEFORE shutdown, on every exit path.
+	// sync.Once makes the explicit failure-branch releases idempotent.
+	defer func() { release(); latch.Close() }()
 
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
@@ -991,62 +1021,94 @@ func TestObservationalStreamingHookIsOnTheClientCriticalPath(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	newServer := func(t *testing.T, order []string) string {
-		t.Helper()
-		cfg := Config{Port: "0", Providers: provider.Config{
-			Providers: map[string]provider.Provider{"oai": {URL: upstream.URL, Format: "openai"}},
-			Plugins: provider.PluginsConfig{
-				Dir: fixturesDir, Order: order, AllowUnapproved: true,
+	cfg := Config{Port: "0", Providers: provider.Config{
+		Providers: map[string]provider.Provider{
+			"oai":   {URL: upstream.URL, Format: "openai"},
+			"latch": {URL: latch.URL, Format: "openai"},
+		},
+		Plugins: provider.PluginsConfig{
+			Dir: fixturesDir, Order: []string{"test-slow-after-stream"},
+			AllowUnapproved: true,
+			Runtime: provider.PluginRuntimeConfig{
+				Egress: map[string]provider.EgressBudget{
+					"test-slow-after-stream": {MaxCallsPerMinute: 10},
+				},
 			},
-		}}
-		srv, err := New(cfg)
-		if err != nil {
-			t.Fatalf("New: %v", err)
-		}
-		ln, err := net.Listen("tcp", "127.0.0.1:0")
-		if err != nil {
-			t.Fatalf("listen: %v", err)
-		}
-		go srv.Serve(ln)
-		t.Cleanup(func() { srv.Shutdown(context.Background()) })
-		return ln.Addr().String()
+		},
+	}}
+	srv, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	go srv.Serve(ln)
+	t.Cleanup(func() { srv.Shutdown(context.Background()) })
+	addr := ln.Addr().String()
+
+	// Deadlock protection only.
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, "POST",
+		"http://"+addr+"/provider/oai/v1/chat/completions",
+		strings.NewReader(`{"model":"gpt-x","stream":true,"messages":[{"role":"user","content":"hi"}]}`))
+	if err != nil {
+		t.Fatalf("build request: %v", err)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("post: %v", err)
 	}
 
-	timeToEOF := func(t *testing.T, addr string) time.Duration {
-		t.Helper()
-		start := time.Now()
-		resp, err := http.Post("http://"+addr+"/provider/oai/v1/chat/completions",
-			"application/json", strings.NewReader(`{"model":"gpt-x","stream":true,"messages":[{"role":"user","content":"hi"}]}`))
-		if err != nil {
-			t.Fatalf("post: %v", err)
-		}
-		body, _ := io.ReadAll(resp.Body) // reads to EOF, i.e. handler return
+	eof := make(chan struct{})
+	var body []byte
+	var readErr error
+	go func() {
+		body, readErr = io.ReadAll(resp.Body) // reads to EOF, i.e. handler return
 		resp.Body.Close()
-		if !strings.Contains(string(body), "hello") {
-			t.Fatalf("stream body missing: %s", body)
-		}
-		return time.Since(start)
+		close(eof)
+	}()
+
+	select {
+	case <-enteredCh:
+	case <-ctx.Done():
+		release()
+		t.Fatal("the after-response hook never entered the egress latch")
 	}
 
-	// Warm both: first request pays WASM instantiation.
-	fast := newServer(t, []string{"test-inert-a"})
-	slow := newServer(t, []string{"test-slow-after-stream"})
-	timeToEOF(t, fast)
-	timeToEOF(t, slow)
-
-	fastEOF := timeToEOF(t, fast)
-	slowEOF := timeToEOF(t, slow)
-
-	// The slow hook must be visible in time-to-EOF. If observational
-	// post-processing is ever moved off the response path, this test should
-	// FAIL and be replaced with its opposite — that is the point of pinning it.
-	if slowEOF <= fastEOF {
-		t.Fatalf("time to EOF did not grow with a slow observational hook "+
-			"(fast=%s slow=%s). If post-processing was made asynchronous, invert "+
-			"this test and update reqState.streamDone's contract.", fastEOF, slowEOF)
+	// While the hook is gated, the client must NOT have EOF: the hook is on
+	// the critical path by design. A non-blocking check, not a timing claim.
+	select {
+	case <-eof:
+		release()
+		t.Fatal("client EOF completed while the observational hook was still gated — " +
+			"if post-processing was made asynchronous, invert this test and update " +
+			"reqState.streamDone's contract")
+	default:
 	}
-	t.Logf("time to EOF: fast=%s slow=%s — the observational hook is synchronous "+
-		"with HTTP completion by design", fastEOF, slowEOF)
+
+	release()
+
+	select {
+	case <-eof:
+	case <-ctx.Done():
+		t.Fatal("client EOF did not complete after the latch released")
+	}
+	if readErr != nil {
+		t.Fatalf("reading the stream body: %v", readErr)
+	}
+	// Pin the EXACT body: the proxy's canonical chunk plus the protocol
+	// terminator, with nothing inserted, dropped, or re-ordered between them.
+	// (The upstream's raw frame is re-serialized by the proxy serializer.)
+	want := "data: {\"choices\":[{\"delta\":{\"content\":\"hello\"},\"index\":0}],\"id\":\"chatcmpl-torana\",\"object\":\"chat.completion.chunk\"}\n\n" +
+		"data: [DONE]\n\n"
+	if string(body) != want {
+		t.Fatalf("stream body differs from the exact expected SSE:\n got: %q\nwant: %q", body, want)
+	}
+	t.Log("the observational hook holds EOF until released — synchronous with HTTP completion by design")
 }
 
 // A client disconnect mid-stream must not take down the server.

@@ -5,7 +5,12 @@
   "version": "0.1.0",
   "abi_version": "v2",
   "failure_mode": "pass",
-  "description": "Slow observational after-response hook; pins that its cost is on the client's critical path",
+  "description": "Observational after-response hook gated by a test-controlled egress latch; pins that its cost is on the client's critical path",
   "hooks": [{"name": "run_after_response"}],
-  "permissions": []
+  "permissions": [
+    {
+      "name": "env.host_call.torana_send_request",
+      "description": "Originate a provider request (the latch the test releases)"
+    }
+  ]
 }

@@ -3,6 +3,7 @@ package plugin
 import (
 	"context"
 	"errors"
+	"os"
 	"testing"
 
 	"github.com/torana-edge/torana-edge/internal/wasm"
@@ -58,6 +59,9 @@ func TestRunOnHTTPRequest_ForbiddenWithoutGrant(t *testing.T) {
 		}
 	}
 	if httpBundle == nil {
+		if os.Getenv("TORANA_E2E") != "" {
+			t.Fatal("test-http-server fixture not found — run 'make testdata'")
+		}
 		t.Skip("test-http-server fixture not found")
 	}
 
