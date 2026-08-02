@@ -912,3 +912,349 @@ func init() {
 		}
 	}
 }
+
+// TestLintAttributesSetIdentity — sdk.SetIdentity maps to env.set_identity,
+// so using it without the declared permission is caught in the
+// used-but-undeclared direction.
+func TestLintAttributesSetIdentity(t *testing.T) {
+	dir := writePlugin(t,
+		manifestWith(`{"name":"run_before_request"}`, ``),
+		`package main
+
+import (
+	"context"
+
+	sdk "github.com/torana-edge/torana-plugin-sdk"
+	pb "github.com/torana-edge/torana-plugin-sdk/pb/v2"
+)
+
+func main() {}
+
+func init() {
+	sdk.OnBeforeRequest(func(ctx context.Context, req *pb.ChatRequest) (*pb.ChatRequest, error) {
+		sdk.SetIdentity("tenant:x|team:y")
+		return nil, nil
+	})
+}
+`)
+	msgs := lintMessages(t, dir)
+	assertContains(t, msgs, `uses "env.set_identity" but plugin.json does not request it`)
+}
+
+// TestLintAttributesStreamMutationActions — every SDK stream mutation helper
+// maps to ir.stream.write in the used-but-undeclared direction; each helper
+// name gets an explicit decision.
+func TestLintAttributesStreamMutationActions(t *testing.T) {
+	actions := []string{
+		`sdk.SuppressEvent()`,
+		`sdk.EmitEvents()`,
+		`sdk.EmitAssembledToolCall(sdk.ToolCall{}, "{}")`,
+		`sdk.ReplaceToolArguments("{}")`,
+		`sdk.SuppressToolCall()`,
+		`sdk.ReplaceText("x")`,
+		`sdk.SuppressText()`,
+	}
+	for _, action := range actions {
+		t.Run(action, func(t *testing.T) {
+			dir := writePlugin(t,
+				manifestWith(`{"name":"run_before_request"}`, ``),
+				`package main
+
+import (
+	"context"
+
+	sdk "github.com/torana-edge/torana-plugin-sdk"
+	pb "github.com/torana-edge/torana-plugin-sdk/pb/v2"
+)
+
+func main() {}
+
+func init() {
+	sdk.OnBeforeRequest(func(ctx context.Context, req *pb.ChatRequest) (*pb.ChatRequest, error) {
+		`+action+`
+		return nil, nil
+	})
+}
+`)
+			msgs := lintMessages(t, dir)
+			assertContains(t, msgs, `uses "ir.stream.write" but plugin.json does not request it`)
+		})
+	}
+}
+
+// TestLintOnToolCallFormsRequireStreamWrite — the bounded receiver analysis
+// attributes ir.stream.write for OnToolCall on a NewStreamHandler-rooted
+// value in every fluent shape: stored, chained, fluent OnTextDelta->OnToolCall,
+// and an assigned fluent chain.
+func TestLintOnToolCallFormsRequireStreamWrite(t *testing.T) {
+	forms := map[string]string{
+		"stored": `handler := sdk.NewStreamHandler()
+	handler.OnToolCall(func(ctx context.Context, call sdk.ToolCall) (sdk.ToolCallAction, error) {
+		return sdk.PassToolCall(), nil
+	})
+	handler.Register()`,
+		"chained": `sdk.NewStreamHandler().OnToolCall(func(ctx context.Context, call sdk.ToolCall) (sdk.ToolCallAction, error) {
+		return sdk.PassToolCall(), nil
+	}).Register()`,
+		"fluent text then tool": `sdk.NewStreamHandler().OnTextDelta(func(ctx context.Context, text string) (sdk.TextAction, error) {
+		return sdk.PassText(), nil
+	}).OnToolCall(func(ctx context.Context, call sdk.ToolCall) (sdk.ToolCallAction, error) {
+		return sdk.PassToolCall(), nil
+	}).Register()`,
+		"assigned fluent chain": `handler := sdk.NewStreamHandler().OnTextDelta(func(ctx context.Context, text string) (sdk.TextAction, error) {
+		return sdk.PassText(), nil
+	})
+	handler.OnToolCall(func(ctx context.Context, call sdk.ToolCall) (sdk.ToolCallAction, error) {
+		return sdk.PassToolCall(), nil
+	})
+	handler.Register()`,
+	}
+	for name, body := range forms {
+		t.Run(name, func(t *testing.T) {
+			dir := writePlugin(t,
+				manifestWith(`{"name":"run_on_stream_chunk"}`, ``),
+				`package main
+
+import (
+	"context"
+
+	sdk "github.com/torana-edge/torana-plugin-sdk"
+	pb "github.com/torana-edge/torana-plugin-sdk/pb/v2"
+)
+
+func main() {}
+
+func init() {
+	`+body+`
+}
+`)
+			msgs := lintMessages(t, dir)
+			assertContains(t, msgs, `uses "ir.stream.write" but plugin.json does not request it`)
+		})
+	}
+}
+
+// TestLintNegativeHelpersNeverInferStreamWrite — every deliberately
+// non-attributed assembler, plumbing, and pass helper is pinned
+// INDIVIDUALLY: a mistaken mapping of any one of them would produce a
+// diagnostic row here.
+func TestLintNegativeHelpersNeverInferStreamWrite(t *testing.T) {
+	negatives := map[string]string{
+		"NewStreamHandler":   `sdk.NewStreamHandler()`,
+		"NewStreamAssembler": `sdk.NewStreamAssembler()`,
+		"WithToolAssembly":   `sdk.NewStreamAssembler().WithToolAssembly()`,
+		"Feed":               `sdk.NewStreamAssembler().Feed(nil)`,
+		"Register":           `sdk.NewStreamHandler().Register()`,
+		"OnTextDelta": `sdk.NewStreamHandler().OnTextDelta(func(ctx context.Context, text string) (sdk.TextAction, error) {
+		return sdk.PassText(), nil
+	})`,
+		"PassEvent":    `sdk.PassEvent()`,
+		"PassToolCall": `sdk.PassToolCall()`,
+		"PassText":     `sdk.PassText()`,
+		"PassRequest":  `sdk.PassRequest()`,
+		"PassResponse": `sdk.PassResponse()`,
+	}
+	for name, body := range negatives {
+		t.Run(name, func(t *testing.T) {
+			dir := writePlugin(t,
+				manifestWith(`{"name":"run_on_stream_chunk"}`, ``),
+				`package main
+
+import (
+	"context"
+
+	sdk "github.com/torana-edge/torana-plugin-sdk"
+	pb "github.com/torana-edge/torana-plugin-sdk/pb/v2"
+)
+
+func main() {}
+
+func init() {
+	`+body+`
+}
+`)
+			msgs := lintMessages(t, dir)
+			for _, m := range msgs {
+				if strings.Contains(m, "ir.stream.write") {
+					t.Fatalf("%s inferred ir.stream.write: %s", name, m)
+				}
+			}
+		})
+	}
+}
+
+// TestLintDeclaredStreamWriteNotWarnedAsUnused — the declared-but-unused
+// suppression for write grants keeps a text-only plugin that DECLARES
+// ir.stream.write quiet; attribution is about the undeclared direction.
+func TestLintDeclaredStreamWriteNotWarnedAsUnused(t *testing.T) {
+	dir := writePlugin(t,
+		manifestWith(`{"name":"run_on_stream_chunk"}`,
+			`{"name":"ir.stream.write","description":"stream"}`),
+		`package main
+
+import (
+	"context"
+
+	sdk "github.com/torana-edge/torana-plugin-sdk"
+	pb "github.com/torana-edge/torana-plugin-sdk/pb/v2"
+)
+
+func main() {}
+
+func init() {
+	sdk.NewStreamHandler().OnTextDelta(func(ctx context.Context, text string) (sdk.TextAction, error) {
+		return sdk.PassText(), nil
+	}).Register()
+}
+`)
+	msgs := lintMessages(t, dir)
+	for _, m := range msgs {
+		if strings.Contains(m, "no code uses it") {
+			t.Fatalf("write grant warned as unused: %s", m)
+		}
+	}
+}
+
+// TestLintStreamHandlerProvenanceIsLexical — provenance is per-function and
+// per-declaration-identity, never identifier text: a local named "handler"
+// seeded from sdk.NewStreamHandler() in one function must not mark an
+// unrelated receiver of the same name in another function, a parameter of
+// any type, or a shadowed local.
+func TestLintStreamHandlerProvenanceIsLexical(t *testing.T) {
+	dir := writePlugin(t,
+		manifestWith(`{"name":"run_on_stream_chunk"}`, ``),
+		`package main
+
+import (
+	"context"
+
+	sdk "github.com/torana-edge/torana-plugin-sdk"
+	pb "github.com/torana-edge/torana-plugin-sdk/pb/v2"
+)
+
+type custom struct{}
+
+func (*custom) OnToolCall() {}
+
+func seed() {
+	handler := sdk.NewStreamHandler()
+	_ = handler
+}
+
+func unrelated(handler *custom) {
+	handler.OnToolCall()
+}
+
+func init() {}
+`)
+	msgs := lintMessages(t, dir)
+	for _, m := range msgs {
+		if strings.Contains(m, "ir.stream.write") {
+			t.Fatalf("provenance leaked across functions by identifier text: %s", m)
+		}
+	}
+}
+
+// TestLintStreamHandlerProvenanceRespectsParameterBoundary — a
+// *sdk.StreamHandler parameter never attributes ir.stream.write, even when a
+// local of the same name was constructed from NewStreamHandler in another
+// function.
+func TestLintStreamHandlerProvenanceRespectsParameterBoundary(t *testing.T) {
+	dir := writePlugin(t,
+		manifestWith(`{"name":"run_on_stream_chunk"}`, ``),
+		`package main
+
+import (
+	"context"
+
+	sdk "github.com/torana-edge/torana-plugin-sdk"
+	pb "github.com/torana-edge/torana-plugin-sdk/pb/v2"
+)
+
+func seed() {
+	handler := sdk.NewStreamHandler()
+	_ = handler
+}
+
+func use(handler *sdk.StreamHandler) {
+	handler.OnToolCall()
+}
+
+func init() {}
+`)
+	msgs := lintMessages(t, dir)
+	for _, m := range msgs {
+		if strings.Contains(m, "ir.stream.write") {
+			t.Fatalf("parameter boundary violated: %s", m)
+		}
+	}
+}
+
+// TestLintStreamHandlerProvenanceShadowing — a shadowed local of the same
+// name (inner block or closure parameter) does not inherit provenance.
+func TestLintStreamHandlerProvenanceShadowing(t *testing.T) {
+	for name, body := range map[string]string{
+		"inner block shadow": `handler := sdk.NewStreamHandler()
+	_ = handler
+	{
+		type custom struct{}
+		var handler *custom
+		handler.OnToolCall()
+	}`,
+		"closure parameter shadow": `handler := sdk.NewStreamHandler()
+	_ = handler
+	func(handler *sdk.StreamHandler) {
+		handler.OnToolCall()
+	}(handler)`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			dir := writePlugin(t,
+				manifestWith(`{"name":"run_on_stream_chunk"}`, ``),
+				`package main
+
+import (
+	"context"
+
+	sdk "github.com/torana-edge/torana-plugin-sdk"
+	pb "github.com/torana-edge/torana-plugin-sdk/pb/v2"
+)
+
+func init() {
+	`+body+`
+}
+`)
+			msgs := lintMessages(t, dir)
+			for _, m := range msgs {
+				if strings.Contains(m, "ir.stream.write") {
+					t.Fatalf("shadowed local inherited provenance: %s", m)
+				}
+			}
+		})
+	}
+}
+
+// TestLintOnToolCallVarDeclarationForm — the var declaration form
+// (var handler = sdk.NewStreamHandler()) is tracked like :=/assignment.
+func TestLintOnToolCallVarDeclarationForm(t *testing.T) {
+	dir := writePlugin(t,
+		manifestWith(`{"name":"run_on_stream_chunk"}`, ``),
+		`package main
+
+import (
+	"context"
+
+	sdk "github.com/torana-edge/torana-plugin-sdk"
+	pb "github.com/torana-edge/torana-plugin-sdk/pb/v2"
+)
+
+func init() {
+	var handler = sdk.NewStreamHandler()
+	handler.OnToolCall(func(ctx context.Context, call sdk.ToolCall) (sdk.ToolCallAction, error) {
+		return sdk.PassToolCall(), nil
+	})
+	handler.Register()
+}
+`)
+	msgs := lintMessages(t, dir)
+	assertContains(t, msgs, `uses "ir.stream.write" but plugin.json does not request it`)
+}

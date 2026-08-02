@@ -1,6 +1,7 @@
 package wasm
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"strings"
@@ -69,6 +70,10 @@ type extensionMatrixRow struct {
 	// UNSPECIFIED refusal code, "unknown-code" uses a numeric code this build
 	// does not recognise.
 	invalidResult string
+	// refusalCode and refusalMessage parametrize a "refused" row's callback,
+	// so a classified refusal can be pinned for every code the seam requires.
+	refusalCode    pbv2.ErrorCode
+	refusalMessage string
 }
 
 // wireExtension installs the host callback a "wired" (or func-backed refusal
@@ -84,27 +89,39 @@ func wireExtension(t *testing.T, r *Runtime, row extensionMatrixRow) {
 		// host-bug shapes only an in-package test can build.
 		switch row.invalidResult {
 		case "both":
-			r.SendRequestFunc = func(_ context.Context, _, _ string) ExtensionResult {
-				return ExtensionResult{value: []byte("value"), refusal: hostErr(pbv2.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "refusal")}
+			bad := ExtensionResult{value: []byte("value"), refusal: hostErr(pbv2.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "refusal")}
+			if row.cmd == "verify_virtual_key" {
+				r.VerifyVirtualKeyFunc = func(_ context.Context, _ string) ExtensionResult { return bad }
+			} else {
+				r.SendRequestFunc = func(_ context.Context, _, _ string) ExtensionResult { return bad }
 			}
 		case "value-empty":
 			// A PRESENT empty value alongside a refusal: len(r.value) > 0 used
 			// to miss this — the value is empty, but it is still a value, and
 			// the guest still cannot tell which arm to trust.
-			r.SendRequestFunc = func(_ context.Context, _, _ string) ExtensionResult {
-				return ExtensionResult{value: []byte{}, refusal: hostErr(pbv2.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "refusal")}
+			bad := ExtensionResult{value: []byte{}, refusal: hostErr(pbv2.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "refusal")}
+			if row.cmd == "verify_virtual_key" {
+				r.VerifyVirtualKeyFunc = func(_ context.Context, _ string) ExtensionResult { return bad }
+			} else {
+				r.SendRequestFunc = func(_ context.Context, _, _ string) ExtensionResult { return bad }
 			}
 		case "unspecified":
-			r.SendRequestFunc = func(_ context.Context, _, _ string) ExtensionResult {
-				return ExtensionResult{refusal: hostErr(pbv2.ErrorCode_ERROR_CODE_UNSPECIFIED, "no code")}
+			bad := ExtensionResult{refusal: hostErr(pbv2.ErrorCode_ERROR_CODE_UNSPECIFIED, "no code")}
+			if row.cmd == "verify_virtual_key" {
+				r.VerifyVirtualKeyFunc = func(_ context.Context, _ string) ExtensionResult { return bad }
+			} else {
+				r.SendRequestFunc = func(_ context.Context, _, _ string) ExtensionResult { return bad }
 			}
 		case "unknown-code":
 			// A numeric code this build does not recognise (e.g. 99 from a
 			// newer ABI): the guest cannot branch on it, so the dispatcher must
 			// frame INTERNAL rather than let it leak to the SDK as a protocol
 			// error.
-			r.SendRequestFunc = func(_ context.Context, _, _ string) ExtensionResult {
-				return ExtensionResult{refusal: hostErr(pbv2.ErrorCode(99), "unknown code")}
+			bad := ExtensionResult{refusal: hostErr(pbv2.ErrorCode(99), "unknown code")}
+			if row.cmd == "verify_virtual_key" {
+				r.VerifyVirtualKeyFunc = func(_ context.Context, _ string) ExtensionResult { return bad }
+			} else {
+				r.SendRequestFunc = func(_ context.Context, _, _ string) ExtensionResult { return bad }
 			}
 		default:
 			t.Fatalf("%s: unknown invalid-result variant %q", row.name, row.invalidResult)
@@ -168,6 +185,13 @@ func wireExtension(t *testing.T, r *Runtime, row extensionMatrixRow) {
 			return ExtensionValue([]byte(`{"completion":"done"}`))
 		}
 	case "verify_virtual_key":
+		if row.state == "refused" {
+			code, message := row.refusalCode, row.refusalMessage
+			r.VerifyVirtualKeyFunc = func(_ context.Context, _ string) ExtensionResult {
+				return ExtensionRefusal(code, "%s", message)
+			}
+			return
+		}
 		r.VerifyVirtualKeyFunc = func(_ context.Context, _ string) ExtensionResult {
 			return ExtensionValue([]byte(row.want.body))
 		}
@@ -279,6 +303,46 @@ func TestExtensionCommandFramingMatrix(t *testing.T) {
 		{name: "verify_virtual_key/wired", cmd: "verify_virtual_key", state: "wired",
 			args: `{"key":"vk_abc"}`,
 			want: extensionMatrixWant{arm: "value", body: `{"valid":true}`}},
+		// Every classified refusal the seam requires passes through a WIRED
+		// callback unchanged, code and message exact (the unwired
+		// NOT_CONFIGURED row is a different invariant and does not prove a
+		// callback's own refusal is preserved).
+		{name: "verify_virtual_key/refused-not-configured", cmd: "verify_virtual_key", state: "refused",
+			refusalCode: pbv2.ErrorCode_ERROR_CODE_NOT_CONFIGURED, refusalMessage: "verifier unwired for tenant",
+			args: `{"key":"vk_abc"}`,
+			want: extensionMatrixWant{arm: "error", code: pbv2.ErrorCode_ERROR_CODE_NOT_CONFIGURED,
+				message: "verifier unwired for tenant"}},
+		{name: "verify_virtual_key/refused-unavailable", cmd: "verify_virtual_key", state: "refused",
+			refusalCode: pbv2.ErrorCode_ERROR_CODE_UNAVAILABLE, refusalMessage: "verifier backend down",
+			args: `{"key":"vk_abc"}`,
+			want: extensionMatrixWant{arm: "error", code: pbv2.ErrorCode_ERROR_CODE_UNAVAILABLE,
+				message: "verifier backend down"}},
+		{name: "verify_virtual_key/refused-permission-denied", cmd: "verify_virtual_key", state: "refused",
+			refusalCode: pbv2.ErrorCode_ERROR_CODE_PERMISSION_DENIED, refusalMessage: "verifier refused",
+			args: `{"key":"vk_abc"}`,
+			want: extensionMatrixWant{arm: "error", code: pbv2.ErrorCode_ERROR_CODE_PERMISSION_DENIED,
+				message: "verifier refused"}},
+		{name: "verify_virtual_key/refused-invalid-argument", cmd: "verify_virtual_key", state: "refused",
+			refusalCode: pbv2.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, refusalMessage: "malformed key shape",
+			args: `{"key":"vk_abc"}`,
+			want: extensionMatrixWant{arm: "error", code: pbv2.ErrorCode_ERROR_CODE_INVALID_ARGUMENT,
+				message: "malformed key shape"}},
+		{name: "verify_virtual_key/invalid-both", cmd: "verify_virtual_key", state: "invalid", invalidResult: "both",
+			args: `{"key":"vk_abc"}`,
+			want: extensionMatrixWant{arm: "error", code: pbv2.ErrorCode_ERROR_CODE_INTERNAL,
+				message: "extension callback returned an invalid result"}},
+		{name: "verify_virtual_key/invalid-value-empty", cmd: "verify_virtual_key", state: "invalid", invalidResult: "value-empty",
+			args: `{"key":"vk_abc"}`,
+			want: extensionMatrixWant{arm: "error", code: pbv2.ErrorCode_ERROR_CODE_INTERNAL,
+				message: "extension callback returned an invalid result"}},
+		{name: "verify_virtual_key/invalid-unspecified", cmd: "verify_virtual_key", state: "invalid", invalidResult: "unspecified",
+			args: `{"key":"vk_abc"}`,
+			want: extensionMatrixWant{arm: "error", code: pbv2.ErrorCode_ERROR_CODE_INTERNAL,
+				message: "extension callback returned an invalid result"}},
+		{name: "verify_virtual_key/invalid-unknown-code", cmd: "verify_virtual_key", state: "invalid", invalidResult: "unknown-code",
+			args: `{"key":"vk_abc"}`,
+			want: extensionMatrixWant{arm: "error", code: pbv2.ErrorCode_ERROR_CODE_INTERNAL,
+				message: "extension callback returned an invalid result"}},
 
 		// A callback that returns a MALFORMED ExtensionResult must not leak to
 		// the guest: both arms set (including a present empty value), an
@@ -384,5 +448,29 @@ func TestExtensionResultValidation(t *testing.T) {
 		if err := r.Validate(); err == nil {
 			t.Errorf("invalid result %d (%+v) accepted", i, r)
 		}
+	}
+}
+
+// TestVerifyVirtualKeyPayloadReachesCallbackByteIdentical — the typed
+// {"key":...} request body travels from the dispatcher to
+// VerifyVirtualKeyFunc byte-identical: a token containing characters that
+// need JSON escaping (quotes, backslashes, control characters) arrives
+// exactly as the guest wrote it, and the value-arm reply returns unchanged.
+func TestVerifyVirtualKeyPayloadReachesCallbackByteIdentical(t *testing.T) {
+	r, p := newGrantedPlugin(t, "env.host_call.verify_virtual_key")
+
+	payload := []byte("{\"key\":\"sk-torana-a\\\"b\\\\c\\t\\n\"}")
+	var received []byte
+	r.VerifyVirtualKeyFunc = func(_ context.Context, args string) ExtensionResult {
+		received = []byte(args)
+		return ExtensionValue([]byte(`{"status":"ok","tenant_id":"t"}`))
+	}
+
+	res := hostCallDirect(t, r, p, "verify_virtual_key", payload)
+	if !bytes.Equal(received, payload) {
+		t.Fatalf("callback received %q, want the exact payload %q", received, payload)
+	}
+	if res.GetValue() == nil || !bytes.Equal(res.GetValue(), []byte(`{"status":"ok","tenant_id":"t"}`)) {
+		t.Fatalf("value arm did not round-trip unchanged: %v", res)
 	}
 }
