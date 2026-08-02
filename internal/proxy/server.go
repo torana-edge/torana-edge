@@ -2086,6 +2086,9 @@ func New(cfg Config) (*Server, error) {
 		httpReq := &pb.HttpRequest{
 			Method:      r.Method,
 			Path:        pluginRelPath,
+			Query:       r.URL.RawQuery,
+			Scheme:      requestScheme(r),
+			RemoteAddr:  r.RemoteAddr,
 			HeadersJson: headersJSON,
 			Body:        bodyBytes,
 		}
@@ -2369,6 +2372,23 @@ func (s *Server) controlPlaneGuardWithHeaders(next http.HandlerFunc, allowSameOr
 		setControlPlaneSecurityHeaders(w, allowSameOriginFrame)
 		next(w, r)
 	}
+}
+
+// requestScheme reports the scheme of an inbound request for a plugin's
+// HttpRequest, derived from the ACTUAL ACCEPTED CONNECTION only: "https" for
+// a TLS connection, "http" otherwise. An absolute-form request URI is
+// supplied by the caller and is not proof of transport security — trusting it
+// would let a loopback client make a plaintext request appear secure to a
+// plugin (plugins use scheme for absolute URLs, secure-cookie behavior, and
+// security decisions). X-Forwarded-Proto is equally untrusted without a
+// separately designed trusted-proxy boundary. Both HTTP dispatch routes
+// (/_torana/plugin/ and /_torana/api/v1/agent/...) use this, so a plugin sees
+// one scheme vocabulary no matter which route served it.
+func requestScheme(r *http.Request) string {
+	if r.TLS != nil {
+		return "https"
+	}
+	return "http"
 }
 
 func isLoopbackRemote(remoteAddr string) bool {

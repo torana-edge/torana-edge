@@ -369,6 +369,9 @@ func (s *Server) handlePluginAgentOperation(w http.ResponseWriter, r *http.Reque
 	request := &pb.HttpRequest{
 		Method:      r.Method,
 		Path:        "/agent" + operation.Path,
+		Query:       r.URL.RawQuery,
+		Scheme:      requestScheme(r),
+		RemoteAddr:  r.RemoteAddr,
 		HeadersJson: headersJSON,
 		Body:        body,
 	}

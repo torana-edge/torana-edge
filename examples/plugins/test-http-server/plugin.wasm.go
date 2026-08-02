@@ -30,9 +30,33 @@ func init() {
 	sdk.OnHTTPRequest(func(ctx context.Context, req *pb.HttpRequest) (sdk.HTTPResult, error) {
 		if req.Path == "/agent/status" {
 			body, err := json.Marshal(map[string]any{
-				"plugin": "test-http-server",
-				"status": "ready",
-				"method": req.Method,
+				"plugin":      "test-http-server",
+				"status":      "ready",
+				"method":      req.Method,
+				"query":       req.Query,
+				"scheme":      req.Scheme,
+				"remote_addr": req.RemoteAddr,
+			})
+			if err != nil {
+				return sdk.PassHTTP(), err
+			}
+			return sdk.ServeHTTP(&pb.HttpResponse{
+				Status:      200,
+				HeadersJson: []byte(`{"Content-Type":["application/json"]}`),
+				Body:        body,
+			}), nil
+		}
+		if req.Path == "/echo" {
+			// Fixture-only JSON echo for the plugin route. The browser page
+			// stays exactly as it always was: raw caller input is never
+			// reflected into HTML. This path exists so tests can assert the
+			// forwarded fields byte-exactly.
+			body, err := json.Marshal(map[string]any{
+				"method":      req.Method,
+				"path":        req.Path,
+				"query":       req.Query,
+				"scheme":      req.Scheme,
+				"remote_addr": req.RemoteAddr,
 			})
 			if err != nil {
 				return sdk.PassHTTP(), err
