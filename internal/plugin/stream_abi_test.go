@@ -102,7 +102,7 @@ func registerEnvMap(t *testing.T, pp *PluginPipeline, reqID uint64, toolName str
 			},
 		}},
 	}
-	if _, err := pp.RunBeforeRequest(context.Background(), reqID, chat); err != nil {
+	if _, err := pp.RunBeforeRequest(context.Background(), reqID, chat, nil); err != nil {
 		t.Fatalf("RunBeforeRequest: %v", err)
 	}
 }
@@ -243,7 +243,7 @@ func TestRegistryPathReversal(t *testing.T) {
 			},
 		}},
 	}
-	if _, err := pp.RunBeforeRequest(ctx, reqID, chat); err != nil {
+	if _, err := pp.RunBeforeRequest(ctx, reqID, chat, nil); err != nil {
 		t.Fatalf("RunBeforeRequest: %v", err)
 	}
 
@@ -382,7 +382,7 @@ func TestIntentRehydratesHistory(t *testing.T) {
 			{Role: engine.RoleTool, ToolCallID: "call_hist", Content: "package proxy ..."},
 		},
 	}
-	out2, err := pp.RunBeforeRequest(context.Background(), 2, chat)
+	out2, err := pp.RunBeforeRequest(context.Background(), 2, chat, nil)
 	if err != nil {
 		t.Fatalf("RunBeforeRequest: %v", err)
 	}
@@ -442,7 +442,7 @@ func TestIntentFillsUncachedHistory(t *testing.T) {
 		return ""
 	}
 
-	out, err := pp.RunBeforeRequest(context.Background(), 3, mkChat("trace the retry logic"))
+	out, err := pp.RunBeforeRequest(context.Background(), 3, mkChat("trace the retry logic"), nil)
 	if err != nil {
 		t.Fatalf("RunBeforeRequest: %v", err)
 	}
@@ -483,7 +483,7 @@ func TestIntentFillOff(t *testing.T) {
 			{Role: engine.RoleTool, ToolCallID: "call_never_seen", Content: "..."},
 		},
 	}
-	out, err := pp.RunBeforeRequest(context.Background(), 3, chat)
+	out, err := pp.RunBeforeRequest(context.Background(), 3, chat, nil)
 	if err != nil {
 		t.Fatalf("RunBeforeRequest: %v", err)
 	}
@@ -527,7 +527,7 @@ func TestIntentBridgesToRequestSideID(t *testing.T) {
 			{Role: engine.RoleTool, ToolCallID: "call_req_42", Content: "package proxy ..."},
 		},
 	}
-	if _, err := pp.RunBeforeRequest(context.Background(), 2, chat); err != nil {
+	if _, err := pp.RunBeforeRequest(context.Background(), 2, chat, nil); err != nil {
 		t.Fatalf("RunBeforeRequest: %v", err)
 	}
 	got, ok := store.Get("intent:call_req_42")
@@ -581,7 +581,7 @@ func TestIntentBridgeFeedsKeywordCompactor(t *testing.T) {
 			{Role: engine.RoleUser, Content: "Great, now fix it."},
 		},
 	}
-	out, err := pp.RunBeforeRequest(context.Background(), 5, chat)
+	out, err := pp.RunBeforeRequest(context.Background(), 5, chat, nil)
 	if err != nil {
 		t.Fatalf("RunBeforeRequest: %v", err)
 	}
@@ -664,7 +664,7 @@ func TestCompactorsRespectToolResultConsumptionBoundary(t *testing.T) {
 				t.Run(tc.name, func(t *testing.T) {
 					store := cache.NewLocalCache(time.Minute)
 					pp := newTestPipelineWith(t, bundles, []string{pluginName}, store, config)
-					out, err := pp.RunBeforeRequest(context.Background(), 1, &engine.ChatRequest{Messages: tc.messages})
+					out, err := pp.RunBeforeRequest(context.Background(), 1, &engine.ChatRequest{Messages: tc.messages}, nil)
 					if err != nil {
 						t.Fatalf("RunBeforeRequest: %v", err)
 					}
@@ -759,11 +759,11 @@ func TestCompactorToolPolicies(t *testing.T) {
 						toolCallNamedMessage("replay", "web_search"), toolResultNamedMessage("replay", "web_search"),
 					}}
 				}
-				first, err := pp.RunBeforeRequest(context.Background(), 1, request())
+				first, err := pp.RunBeforeRequest(context.Background(), 1, request(), nil)
 				if err != nil {
 					t.Fatalf("first replay: %v", err)
 				}
-				second, err := pp.RunBeforeRequest(context.Background(), 2, request())
+				second, err := pp.RunBeforeRequest(context.Background(), 2, request(), nil)
 				if err != nil {
 					t.Fatalf("second replay: %v", err)
 				}
@@ -791,7 +791,7 @@ func runToolPolicyRequest(t *testing.T, pluginName, rawConfig string, messages [
 	store := cache.NewLocalCache(time.Minute)
 	pp := newTestPipelineWith(t, officialBundlesDir(t), []string{pluginName}, store,
 		map[string]json.RawMessage{pluginName: json.RawMessage(rawConfig)})
-	out, err := pp.RunBeforeRequest(context.Background(), 1, &engine.ChatRequest{Messages: messages})
+	out, err := pp.RunBeforeRequest(context.Background(), 1, &engine.ChatRequest{Messages: messages}, nil)
 	if err != nil {
 		t.Fatalf("RunBeforeRequest: %v", err)
 	}
@@ -878,7 +878,7 @@ func TestIntentInjectsNoSyntheticMessages(t *testing.T) {
 			"type": "object", "properties": map[string]any{"path": map[string]any{"type": "string"}},
 		}}},
 	}
-	out, err := pp.RunBeforeRequest(context.Background(), 77, chat)
+	out, err := pp.RunBeforeRequest(context.Background(), 77, chat, nil)
 	if err != nil {
 		t.Fatalf("RunBeforeRequest: %v", err)
 	}
@@ -964,7 +964,7 @@ func TestIntentNativeIEnrichesDescriptionOnly(t *testing.T) {
 		},
 		Messages: []engine.Message{{Role: engine.RoleUser, Content: "go"}},
 	}
-	out, err := pp.RunBeforeRequest(context.Background(), 6, chat)
+	out, err := pp.RunBeforeRequest(context.Background(), 6, chat, nil)
 	if err != nil {
 		t.Fatalf("RunBeforeRequest: %v", err)
 	}

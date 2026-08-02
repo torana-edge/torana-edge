@@ -71,7 +71,7 @@ func Usage(w io.Writer) {
 // that is actually published: a scaffold naming an unreleased tag produces a
 // project that cannot build.
 const (
-	ScaffoldSDKVersion = "v0.2.1-0.20260802125903-d4908a648024"
+	ScaffoldSDKVersion = "v0.2.1-0.20260802181044-1ee4e4ff64fe"
 	// scaffoldGoVersion tracks the SDK's own go directive. A scaffolded module
 	// declaring an OLDER Go version than its dependency requires fails to build
 	// with "module requires go >= x", which is the same class of unbuildable

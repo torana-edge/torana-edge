@@ -20,7 +20,7 @@ type recordingPluginHTTPDispatcher struct {
 	endID uint64
 }
 
-func (dispatcher *recordingPluginHTTPDispatcher) RunOnHTTPRequest(_ context.Context, requestID uint64, _ string, _ *pb.HttpRequest) (*pb.HttpResponse, error) {
+func (dispatcher *recordingPluginHTTPDispatcher) RunOnHTTPRequest(_ context.Context, requestID uint64, _ string, _ *pb.HttpRequest, _ map[string][]string) (*pb.HttpResponse, error) {
 	dispatcher.runID = requestID
 	// v2 dropped Handled: a non-nil response IS the plugin serving the
 	// request, and declining is a nil response.
@@ -33,7 +33,7 @@ func (dispatcher *recordingPluginHTTPDispatcher) EndRequest(requestID uint64) {
 
 func TestPluginHTTPDispatchEndsRequestState(t *testing.T) {
 	dispatcher := &recordingPluginHTTPDispatcher{}
-	if _, err := dispatchPluginHTTPRequest(context.Background(), dispatcher, "test", &pb.HttpRequest{}); err != nil {
+	if _, err := dispatchPluginHTTPRequest(context.Background(), dispatcher, "test", &pb.HttpRequest{}, nil); err != nil {
 		t.Fatalf("dispatch: %v", err)
 	}
 	if dispatcher.runID == 0 || dispatcher.endID != dispatcher.runID {

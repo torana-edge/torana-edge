@@ -169,7 +169,7 @@ func TestTierDecisionIsStickyAcrossTurns(t *testing.T) {
 
 	var markers []string
 	for i := uint64(1); i <= 5; i++ {
-		out, err := pp.RunBeforeRequest(ctx, i, tierRequest("anth"))
+		out, err := pp.RunBeforeRequest(ctx, i, tierRequest("anth"), nil)
 		if err != nil {
 			t.Fatalf("turn %d: %v", i, err)
 		}
@@ -200,7 +200,7 @@ func TestAutoModeLeavesBusyConversationsAlone(t *testing.T) {
 
 	in := tierRequest("anth")
 	before := markerJSON(t, in)
-	out, err := pp.RunBeforeRequest(context.Background(), 1, in)
+	out, err := pp.RunBeforeRequest(context.Background(), 1, in, nil)
 	if err != nil {
 		t.Fatalf("RunBeforeRequest: %v", err)
 	}
@@ -235,7 +235,7 @@ func TestUnknownPricingLeavesRequestAlone(t *testing.T) {
 
 	in := tierRequest("anth")
 	before := markerJSON(t, in)
-	out, err := pp.RunBeforeRequest(context.Background(), 1, in)
+	out, err := pp.RunBeforeRequest(context.Background(), 1, in, nil)
 	if err != nil {
 		t.Fatalf("RunBeforeRequest: %v", err)
 	}
@@ -255,7 +255,7 @@ func TestNoBreakpointIsNotTouched(t *testing.T) {
 		Messages:   []engine.Message{{Role: engine.RoleUser, Content: "hello"}},
 		ToranaMeta: map[string]any{"_provider": "anth", "_conversation_id": "conv-x"},
 	}
-	out, err := pp.RunBeforeRequest(context.Background(), 1, in)
+	out, err := pp.RunBeforeRequest(context.Background(), 1, in, nil)
 	if err != nil {
 		t.Fatalf("RunBeforeRequest: %v", err)
 	}
@@ -295,7 +295,7 @@ func TestOffModeDoesNothing(t *testing.T) {
 
 	in := tierRequest("anth")
 	before := markerJSON(t, in)
-	out, err := pp.RunBeforeRequest(context.Background(), 1, in)
+	out, err := pp.RunBeforeRequest(context.Background(), 1, in, nil)
 	if err != nil {
 		t.Fatalf("RunBeforeRequest: %v", err)
 	}
@@ -337,11 +337,11 @@ func TestDecisionSurvivesRestart(t *testing.T) {
 		return pp
 	}
 
-	first, err := build().RunBeforeRequest(context.Background(), 1, tierRequest("anth"))
+	first, err := build().RunBeforeRequest(context.Background(), 1, tierRequest("anth"), nil)
 	if err != nil {
 		t.Fatalf("first run: %v", err)
 	}
-	second, err := build().RunBeforeRequest(context.Background(), 2, tierRequest("anth"))
+	second, err := build().RunBeforeRequest(context.Background(), 2, tierRequest("anth"), nil)
 	if err != nil {
 		t.Fatalf("after restart: %v", err)
 	}

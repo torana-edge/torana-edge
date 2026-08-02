@@ -250,7 +250,7 @@ func BenchmarkBoundaryCrossing(b *testing.B) {
 					// These fixtures never mutate, so one request can be
 					// reused: nothing to copy, nothing to exclude from the
 					// timed region.
-					if _, err := pp.RunBeforeRequest(ctx, uint64(i+1), chat); err != nil {
+					if _, err := pp.RunBeforeRequest(ctx, uint64(i+1), chat, nil); err != nil {
 						b.Fatal(err)
 					}
 				}
@@ -286,7 +286,7 @@ func BenchmarkRunBeforeRequest(b *testing.B) {
 					fresh := benchConversationFrom(chat)
 					b.StartTimer()
 
-					if _, err := pp.RunBeforeRequest(ctx, uint64(i+1), fresh); err != nil {
+					if _, err := pp.RunBeforeRequest(ctx, uint64(i+1), fresh, nil); err != nil {
 						b.Fatal(err)
 					}
 				}

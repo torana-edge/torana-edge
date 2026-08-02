@@ -57,14 +57,20 @@ type agentAPIError struct {
 }
 
 type pluginHTTPDispatcher interface {
-	RunOnHTTPRequest(context.Context, uint64, string, *pb.HttpRequest) (*pb.HttpResponse, error)
+	RunOnHTTPRequest(context.Context, uint64, string, *pb.HttpRequest, map[string][]string) (*pb.HttpResponse, error)
 	EndRequest(uint64)
 }
 
-func dispatchPluginHTTPRequest(ctx context.Context, dispatcher pluginHTTPDispatcher, pluginName string, request *pb.HttpRequest) (*pb.HttpResponse, error) {
+// dispatchPluginHTTPRequest runs one HTTP dispatch through the dispatcher
+// (the pinned pipeline in production) and guarantees request cleanup. It is
+// deliberately small: the routes only know how to build the request, and
+// dispatch only knows how to run it. rawHeaders is the caller's incoming
+// header map; the dispatch boundary (PluginPipeline.RunOnHTTPRequest)
+// snapshots and filters it.
+func dispatchPluginHTTPRequest(ctx context.Context, dispatcher pluginHTTPDispatcher, pluginName string, request *pb.HttpRequest, rawHeaders map[string][]string) (*pb.HttpResponse, error) {
 	requestID := reqCounter.Add(1)
 	defer dispatcher.EndRequest(requestID)
-	return dispatcher.RunOnHTTPRequest(ctx, requestID, pluginName, request)
+	return dispatcher.RunOnHTTPRequest(ctx, requestID, pluginName, request, rawHeaders)
 }
 
 type bufferedAgentResponse struct {
@@ -359,23 +365,20 @@ func (s *Server) handlePluginAgentOperation(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	headers := make(map[string][]string)
-	for _, name := range []string{"Accept", "Content-Type", "User-Agent", "X-Torana-Agent"} {
-		if values := r.Header.Values(name); len(values) > 0 {
-			headers[name] = values
-		}
-	}
-	headersJSON, _ := json.Marshal(headers)
 	request := &pb.HttpRequest{
-		Method:      r.Method,
-		Path:        "/agent" + operation.Path,
-		Query:       r.URL.RawQuery,
-		Scheme:      requestScheme(r),
-		RemoteAddr:  r.RemoteAddr,
-		HeadersJson: headersJSON,
-		Body:        body,
+		Method:     r.Method,
+		Path:       "/agent" + operation.Path,
+		Query:      r.URL.RawQuery,
+		Scheme:     requestScheme(r),
+		RemoteAddr: r.RemoteAddr,
+		Body:       body,
 	}
-	response, dispatchErr := dispatchPluginHTTPRequest(r.Context(), pipeline, pluginName, request)
+	// Headers are NOT selected here: the raw incoming map travels to the
+	// dispatch boundary, which applies the same three-class header policy as
+	// the plugin route. The agent route's historical four-header subset is
+	// subsumed by that single policy (its X-Torana-Agent entry is never
+	// forwarded under the approved contract).
+	response, dispatchErr := dispatchPluginHTTPRequest(r.Context(), pipeline, pluginName, request, r.Header)
 	if dispatchErr != nil {
 		if errors.Is(dispatchErr, plugin.ErrServeHTTPForbidden) {
 			writeAgentError(w, http.StatusForbidden, "plugin_permission_denied", "plugin lacks env.serve_http approval")

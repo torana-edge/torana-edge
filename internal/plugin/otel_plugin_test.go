@@ -30,7 +30,7 @@ func TestMetricFixtureEmitMetricABI(t *testing.T) {
 		},
 		Tools: []engine.ToolDef{{Name: "read"}},
 	}
-	if _, err := pp.RunBeforeRequest(context.Background(), 1, chat); err != nil {
+	if _, err := pp.RunBeforeRequest(context.Background(), 1, chat, nil); err != nil {
 		t.Fatalf("run_before_request: %v", err)
 	}
 	// v2 hands run_after_response a real ChatResponse. Passing the request

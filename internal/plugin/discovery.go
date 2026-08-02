@@ -1017,108 +1017,35 @@ func (pp *PluginPipeline) DrainAndClose() {
 	<-pp.closed
 }
 
-// RunOnChatRequest calls every plugin that implements run_before_request.
-func (pp *PluginPipeline) RunBeforeRequest(ctx context.Context, reqID uint64, chat *engine.ChatRequest) (*engine.ChatRequest, error) {
+// RunBeforeRequest calls every plugin that implements run_before_request.
+//
+// rawHeaders is the caller's incoming header map, UNTRUSTED input: the
+// pipeline snapshots it at entry and applies its own fixed allowlist
+// selection. The chat surface projects the five credential/identity headers
+// into the host-owned _request_headers meta field PER PLUGIN: the field is
+// injected only while the exact granted plugin's hook input is encoded, and
+// the exact pre-injection ToranaMetaJson bytes are restored before the next
+// plugin sees the request. Nil means no headers.
+func (pp *PluginPipeline) RunBeforeRequest(ctx context.Context, reqID uint64, chat *engine.ChatRequest, rawHeaders map[string][]string) (*engine.ChatRequest, error) {
 	pp.Acquire()
 	defer pp.Release()
 
+	headers := snapshotHeaders(rawHeaders)
 	current := pbconv.ToPBChatRequest(chat)
 	modified := false
 	for _, lp := range pp.plugins {
 		if !hasHook(lp.manifest, "run_before_request") {
 			continue
 		}
-		inBytes, err := encodeHookInput(reqID, requestPayload{req: current})
+		next, stop, err := pp.runBeforeRequestPlugin(ctx, reqID, lp, current, headers)
 		if err != nil {
 			return chat, err
 		}
-		var outBytes []byte
-		if err := lp.plugin.CallRequest(ctx, pbv2.Hook_HOOK_BEFORE_REQUEST, reqID, inBytes, &outBytes); err != nil {
-			log.Printf("[plugin] %s run_before_request: %v", lp.manifest.Name, err)
-			pp.discardTrapped(reqID, lp.manifest.Name)
-			// The block check must happen on EVERY exit from this iteration,
-			// not only the successful one. A plugin that blocks and then traps
-			// leaves the block standing, and continuing here would hand the
-			// request to every downstream plugin anyway — exactly the
-			// PII-keeps-flowing problem short-circuiting exists to stop.
-			if pp.blocked(reqID) {
-				break
-			}
-			if lp.failureMode == "block" {
-				return chat, fmt.Errorf("plugin %s blocked request after failure: %w", lp.manifest.Name, err)
-			}
-			continue
+		if next != nil {
+			current = next
+			modified = true
 		}
-		res, err := decodeHookResult(outBytes, pbv2.Hook_HOOK_BEFORE_REQUEST)
-		if err != nil {
-			// A malformed or misdispatched action is the plugin's fault and is
-			// refused whole rather than partly applied. A handwritten guest can
-			// issue host calls and THEN return an invalid frame, so this path
-			// gets the same treatment as a trap: its non-block verdicts are
-			// discarded and a recorded block still short-circuits.
-			log.Printf("[plugin] %s run_before_request: invalid result: %v", lp.manifest.Name, err)
-			pp.discardTrapped(reqID, lp.manifest.Name)
-			if pp.blocked(reqID) {
-				break
-			}
-			if lp.failureMode == "block" {
-				return chat, fmt.Errorf("plugin %s returned an invalid result: %w", lp.manifest.Name, err)
-			}
-			continue
-		}
-		var replacement *pbv2.ChatRequest
-		if res != nil {
-			replacement = res.GetReplaceRequest()
-			if replacement != nil {
-				// Write-grant verification: the plugin may change only the
-				// sections its operator granted it, and may never touch
-				// host-owned facts or provenance. A fully-granted plugin
-				// skips only the section comparison — grants authorise
-				// SECTIONS, never host facts or provider-signature bindings,
-				// so the all-grants fast path still runs the unconditional
-				// invariants (torana_meta_json, signature provenance).
-				var verr error
-				if holdsAllRequestGrants(lp.plugin) {
-					verr = verifyFastPath(current, replacement)
-				} else {
-					verr = verifyRequestMutation(current, replacement, lp.plugin.HasGrant)
-				}
-				if verr != nil {
-					log.Printf("[plugin] %s run_before_request: rejected invalid replacement: %v",
-						lp.manifest.Name, verr)
-					// A refused replacement gets the same treatment as a trap:
-					// non-block verdicts recorded before it are discarded — a
-					// respond or route chosen by code that then produced an
-					// invalid replacement is not trustworthy — while a
-					// recorded block still fails closed and short-circuits in
-					// the check below.
-					pp.discardTrapped(reqID, lp.manifest.Name)
-					if lp.failureMode == "block" {
-						return chat, fmt.Errorf("plugin %s returned an invalid request replacement: %w",
-							lp.manifest.Name, verr)
-					}
-					// allow: skip this plugin's replacement; the previous current
-					// stays so the invalid output never chains downstream.
-					replacement = nil
-				}
-			}
-			if replacement != nil {
-				current = replacement
-				modified = true
-				// ObserveRequestMutation wants the request bytes, not the
-				// envelope, so it is re-marshalled from the accepted action.
-				if raw, err := proto.Marshal(replacement); err == nil {
-					pp.runtime.ObserveRequestMutation(ctx, raw)
-				}
-			}
-		}
-
-		// Block short-circuits. v1 could not know a block had happened until
-		// every plugin had run, so a rejected request was still handed to the
-		// compactor and the warmer. A replacement from the blocking plugin is
-		// kept but never sent upstream: block wins, and forcing an author to
-		// discard edits before blocking would be a new footgun.
-		if pp.blocked(reqID) {
+		if stop {
 			break
 		}
 	}
@@ -1128,6 +1055,140 @@ func (pp *PluginPipeline) RunBeforeRequest(ctx context.Context, reqID uint64, ch
 		return chat, nil
 	}
 	return pbconv.FromPBChatRequest(current), nil
+}
+
+// runBeforeRequestPlugin dispatches ONE plugin's run_before_request hook with
+// the per-plugin header projection: _request_headers is injected only for the
+// exact granted plugin (from the pristine entry snapshot) and the exact
+// pre-injection ToranaMetaJson bytes are restored on EVERY exit path before
+// the request chains onward or returns.
+//
+// Return values: next = accepted replacement (nil = none; the only way the
+// request changes), stop = a recorded block short-circuits the chain, err =
+// an immediate error for the caller (failure-mode block paths).
+func (pp *PluginPipeline) runBeforeRequestPlugin(ctx context.Context, reqID uint64, lp *loadedPlugin, current *pbv2.ChatRequest, headers map[string][]string) (next *pbv2.ChatRequest, stop bool, err error) {
+	// The per-plugin projection. The grant is checked on the exact executable
+	// plugin object (lp.plugin), never on a manifest declaration and never
+	// pipeline-wide.
+	savedMeta := current.ToranaMetaJson
+	if len(headers) > 0 && lp.plugin.HasGrant("env.request_headers") {
+		injectRequestHeaders(current, projectChatHeaders(headers))
+	}
+	defer func() {
+		// Byte-exact restoration on the request that chains (current) and on
+		// any accepted replacement (next), on every exit path: successful
+		// pass, accepted replacement, refused replacement, malformed result,
+		// trap, block short-circuit, and immediate failure-mode return.
+		restoreRequestHeaders(current, savedMeta)
+		restoreRequestHeaders(next, savedMeta)
+	}()
+
+	inBytes, err := encodeHookInput(reqID, requestPayload{req: current})
+	if err != nil {
+		return nil, false, err
+	}
+	var outBytes []byte
+	if err := lp.plugin.CallRequest(ctx, pbv2.Hook_HOOK_BEFORE_REQUEST, reqID, inBytes, &outBytes); err != nil {
+		log.Printf("[plugin] %s run_before_request: %v", lp.manifest.Name, err)
+		pp.discardTrapped(reqID, lp.manifest.Name)
+		// The block check must happen on EVERY exit from this iteration,
+		// not only the successful one. A plugin that blocks and then traps
+		// leaves the block standing, and continuing here would hand the
+		// request to every downstream plugin anyway — exactly the
+		// PII-keeps-flowing problem short-circuiting exists to stop.
+		if pp.blocked(reqID) {
+			return nil, true, nil
+		}
+		if lp.failureMode == "block" {
+			return nil, false, fmt.Errorf("plugin %s blocked request after failure: %w", lp.manifest.Name, err)
+		}
+		return nil, false, nil
+	}
+	res, err := decodeHookResult(outBytes, pbv2.Hook_HOOK_BEFORE_REQUEST)
+	if err != nil {
+		// A malformed or misdispatched action is the plugin's fault and is
+		// refused whole rather than partly applied. A handwritten guest can
+		// issue host calls and THEN return an invalid frame, so this path
+		// gets the same treatment as a trap: its non-block verdicts are
+		// discarded and a recorded block still short-circuits.
+		log.Printf("[plugin] %s run_before_request: invalid result: %v", lp.manifest.Name, err)
+		pp.discardTrapped(reqID, lp.manifest.Name)
+		if pp.blocked(reqID) {
+			return nil, true, nil
+		}
+		if lp.failureMode == "block" {
+			return nil, false, fmt.Errorf("plugin %s returned an invalid result: %w", lp.manifest.Name, err)
+		}
+		return nil, false, nil
+	}
+	var replacement *pbv2.ChatRequest
+	if res != nil {
+		replacement = res.GetReplaceRequest()
+		if replacement != nil {
+			// Write-grant verification: the plugin may change only the
+			// sections its operator granted it, and may never touch
+			// host-owned facts or provenance. A fully-granted plugin
+			// skips only the section comparison — grants authorise
+			// SECTIONS, never host facts or provider-signature bindings,
+			// so the all-grants fast path still runs the unconditional
+			// invariants (torana_meta_json, signature provenance).
+			// The injected _request_headers field is host-owned meta, so a
+			// replacement that deletes or forges it fails the byte-identity
+			// check below.
+			var verr error
+			if holdsAllRequestGrants(lp.plugin) {
+				verr = verifyFastPath(current, replacement)
+			} else {
+				verr = verifyRequestMutation(current, replacement, lp.plugin.HasGrant)
+			}
+			if verr != nil {
+				log.Printf("[plugin] %s run_before_request: rejected invalid replacement: %v",
+					lp.manifest.Name, verr)
+				// A refused replacement gets the same treatment as a trap:
+				// non-block verdicts recorded before it are discarded — a
+				// respond or route chosen by code that then produced an
+				// invalid replacement is not trustworthy — while a
+				// recorded block still fails closed and short-circuits in
+				// the check below.
+				pp.discardTrapped(reqID, lp.manifest.Name)
+				if lp.failureMode == "block" {
+					return nil, false, fmt.Errorf("plugin %s returned an invalid request replacement: %w",
+						lp.manifest.Name, verr)
+				}
+				// allow: skip this plugin's replacement; the previous current
+				// stays so the invalid output never chains downstream.
+				replacement = nil
+			}
+		}
+		if replacement != nil {
+			// The projection exists ONLY for the exact guest call: restore
+			// the exact pre-injection metadata on the accepted replacement
+			// BEFORE the host mutation observer sees it, so temporary
+			// credentials never cross that boundary. (The defer below is
+			// defense in depth for every other exit.)
+			restoreRequestHeaders(replacement, savedMeta)
+			// ObserveRequestMutation wants the request bytes, not the
+			// envelope, so it is re-marshalled from the accepted action.
+			if raw, err := proto.Marshal(replacement); err == nil {
+				pp.runtime.ObserveRequestMutation(ctx, raw)
+			}
+			// The block check runs on EVERY exit: a plugin that blocks AND
+			// replaces must not let any downstream plugin observe the
+			// rejected request. The replacement is kept (block wins at the
+			// transport), but the chain stops here.
+			return replacement, pp.blocked(reqID), nil
+		}
+	}
+
+	// Block short-circuits. v1 could not know a block had happened until
+	// every plugin had run, so a rejected request was still handed to the
+	// compactor and the warmer. A replacement from the blocking plugin is
+	// kept but never sent upstream: block wins, and forcing an author to
+	// discard edits before blocking would be a new footgun.
+	if pp.blocked(reqID) {
+		return nil, true, nil
+	}
+	return nil, false, nil
 }
 
 // RunAfterResponse calls every plugin that implements run_after_response.
@@ -1336,9 +1397,16 @@ var ErrServeHTTPForbidden = fmt.Errorf("plugin does not hold env.serve_http perm
 //	(nil, other error)           — internal dispatch error; caller → 503.
 //
 // httpReq is built directly from net/http — it does not cross the engine IR.
-func (pp *PluginPipeline) RunOnHTTPRequest(ctx context.Context, reqID uint64, pluginName string, httpReq *pbv2.HttpRequest) (*pbv2.HttpResponse, error) {
+func (pp *PluginPipeline) RunOnHTTPRequest(ctx context.Context, reqID uint64, pluginName string, httpReq *pbv2.HttpRequest, rawHeaders map[string][]string) (*pbv2.HttpResponse, error) {
 	pp.Acquire()
 	defer pp.Release()
+
+	// Header policy runs HERE, at the dispatch boundary, against the exact
+	// executing plugin's approved grants. rawHeaders is UNTRUSTED caller
+	// input, snapshotted at entry; a caller-supplied prefiltered headers_json
+	// is never authoritative. Filtering operates on a clone, so the caller's
+	// httpReq argument stays byte-identical.
+	headers := snapshotHeaders(rawHeaders)
 
 	// Find the named plugin.
 	var target *loadedPlugin
@@ -1362,7 +1430,18 @@ func (pp *PluginPipeline) RunOnHTTPRequest(ctx context.Context, reqID uint64, pl
 		return nil, ErrServeHTTPForbidden
 	}
 
-	inBytes, err := encodeHookInput(reqID, httpPayload{req: httpReq})
+	// The three-class filter: operational headers always, credential headers
+	// only when the exact executing plugin holds the approved
+	// env.request_headers grant, everything else never.
+	cloned := proto.Clone(httpReq).(*pbv2.HttpRequest)
+	filtered := filterHTTPHeaders(headers, target.plugin.HasGrant("env.request_headers"))
+	encoded, err := json.Marshal(filtered)
+	if err != nil {
+		return nil, fmt.Errorf("plugin %s: encode filtered headers: %w", pluginName, err)
+	}
+	cloned.HeadersJson = encoded
+
+	inBytes, err := encodeHookInput(reqID, httpPayload{req: cloned})
 	if err != nil {
 		return nil, fmt.Errorf("plugin %s: %w", pluginName, err)
 	}
