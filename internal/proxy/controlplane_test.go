@@ -371,6 +371,8 @@ func TestControlPlaneGuard(t *testing.T) {
 			"/_torana/api/v1/",
 			"/_torana/api/v1/agent/plugins/test/status",
 			"/_torana/plugin/test",
+			"/_torana/plugin/test?q=1",
+			"/_torana/api/v1/agent/plugins/test/status?since=7",
 		}
 		for _, ep := range endpoints {
 			req := localControlPlaneRequest(http.MethodGet, ep, nil)

@@ -6,16 +6,38 @@
       "id": "status",
       "method": "GET",
       "path": "/status",
-      "description": "Read the fixture's identity and the method the host forwarded.",
+      "description": "Read the fixture's identity, the forwarded method, query, scheme, and caller address.",
       "risk": "read",
       "idempotent": true,
       "output_schema": {
         "type": "object",
-        "required": ["plugin", "status", "method"],
+        "required": [
+          "plugin",
+          "status",
+          "method",
+          "query",
+          "scheme",
+          "remote_addr"
+        ],
         "properties": {
-          "plugin": {"const": "test-http-server"},
-          "status": {"const": "ready"},
-          "method": {"type": "string"}
+          "plugin": {
+            "const": "test-http-server"
+          },
+          "status": {
+            "const": "ready"
+          },
+          "method": {
+            "type": "string"
+          },
+          "query": {
+            "type": "string"
+          },
+          "scheme": {
+            "type": "string"
+          },
+          "remote_addr": {
+            "type": "string"
+          }
         },
         "additionalProperties": false
       }
