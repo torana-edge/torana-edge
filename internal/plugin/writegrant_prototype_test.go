@@ -41,6 +41,9 @@ type changedSections struct {
 	tools    bool
 	model    bool
 	params   bool
+	// cacheControl marks a change to Message.cache_control_json or
+	// ToolDef.cache_control_json, governed by ir.cache_control.write alone.
+	cacheControl bool
 	// hostOwned marks a change to a field no grant covers, because the host
 	// owns it. torana_meta_json is the only one: the host writes _provider and
 	// friends into it, and under v2 verdicts are host calls rather than keys in
@@ -50,7 +53,7 @@ type changedSections struct {
 }
 
 func (c changedSections) any() bool {
-	return len(c.messages) > 0 || c.tools || c.model || c.params || c.hostOwned
+	return len(c.messages) > 0 || c.tools || c.model || c.params || c.cacheControl || c.hostOwned
 }
 
 // compareSections diffs a plugin's output against the previously accepted
@@ -100,7 +103,49 @@ func compareSections(accepted, out *pb.ChatRequest) changedSections {
 	c.model = accepted.Model != out.Model
 	c.params = !sameParams(accepted, out)
 	c.hostOwned = !bytes.Equal(accepted.ToranaMetaJson, out.ToranaMetaJson)
+	c.cacheControl = cacheControlChanged(accepted, out)
 	return c
+}
+
+// cacheControlChanged compares the cache breakpoint markers positionally,
+// mirroring the production fingerprint section: ONLY marker-carrying messages
+// and tools participate (a marker moved between any two positions counts as
+// changed even when its bytes are unchanged; marker-less structural changes
+// do not).
+func cacheControlChanged(accepted, out *pb.ChatRequest) bool {
+	n := len(accepted.Messages)
+	if len(out.Messages) > n {
+		n = len(out.Messages)
+	}
+	for i := 0; i < n; i++ {
+		var a, b []byte
+		if i < len(accepted.Messages) && len(accepted.Messages[i].CacheControlJson) > 0 {
+			a = accepted.Messages[i].CacheControlJson
+		}
+		if i < len(out.Messages) && len(out.Messages[i].CacheControlJson) > 0 {
+			b = out.Messages[i].CacheControlJson
+		}
+		if !bytes.Equal(a, b) {
+			return true
+		}
+	}
+	nt := len(accepted.Tools)
+	if len(out.Tools) > nt {
+		nt = len(out.Tools)
+	}
+	for i := 0; i < nt; i++ {
+		var a, b []byte
+		if i < len(accepted.Tools) && len(accepted.Tools[i].CacheControlJson) > 0 {
+			a = accepted.Tools[i].CacheControlJson
+		}
+		if i < len(out.Tools) && len(out.Tools[i].CacheControlJson) > 0 {
+			b = out.Tools[i].CacheControlJson
+		}
+		if !bytes.Equal(a, b) {
+			return true
+		}
+	}
+	return false
 }
 
 func sameParams(a, b *pb.ChatRequest) bool {
