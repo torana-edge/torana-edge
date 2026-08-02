@@ -874,7 +874,7 @@ func TestEmptyMultiPackageUnion(t *testing.T) {
 	}
 }
 
-// TestMain pins the hermetic property// TestMain pins the hermetic property: no test in this package may leave the
+// TestMain pins the hermetic property: no test in this package may leave the
 // tracked checkout modified (fixtures, stamps, and the local cache are
 // gitignored and therefore invisible to git status).
 func TestMain(m *testing.M) {
