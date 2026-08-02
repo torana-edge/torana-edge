@@ -16,6 +16,47 @@ func MinimalV2Module(loopForever bool) []byte {
 	return minimalModule(loopForever, true)
 }
 
+// MinimalV2ModuleTrapsAtInit builds a module that COMPILES successfully and
+// deterministically fails during instantiation: a start section runs
+// run_hook's body, which executes unreachable. The lifecycle construction-
+// failure test asserts the error is post-compile via the
+// compiled-acquired -> compiled-released -> construct-failed stream, without
+// any large-memory fixture.
+func MinimalV2ModuleTrapsAtInit() []byte {
+	sec := func(id byte, body []byte) []byte {
+		return append([]byte{id, byte(len(body))}, body...)
+	}
+	name := func(s string) []byte {
+		return append([]byte{byte(len(s))}, s...)
+	}
+	types := sec(0x01, []byte{
+		0x03,
+		0x60, 0x01, 0x7f, 0x01, 0x7f, // (i32)->i32: alloc
+		0x60, 0x02, 0x7f, 0x7f, 0x01, 0x7e, // (i32,i32)->i64: run_hook
+		0x60, 0x00, 0x00, // ()->(): the start trap function (must be nullary)
+	})
+	funcs := sec(0x03, []byte{0x03, 0x00, 0x01, 0x02})
+	mem := sec(0x05, []byte{0x01, 0x00, 0x01})
+	exports := []byte{0x03}
+	exports = append(exports, append(name("memory"), 0x02, 0x00)...)
+	exports = append(exports, append(name("alloc"), 0x00, 0x00)...)
+	exports = append(exports, append(name("run_hook"), 0x00, 0x01)...)
+	start := sec(0x08, []byte{0x02}) // start function index 2: traps
+	code := sec(0x0a, []byte{
+		0x03,
+		0x04, 0x00, 0x41, 0x00, 0x0b, // alloc: size 4, locals 0, i32.const 0, end
+		0x04, 0x00, 0x42, 0x00, 0x0b, // run_hook: size 4, locals 0, i64.const 0, end
+		0x03, 0x00, 0x00, 0x0b, // trap fn: size 3, locals 0, unreachable, end
+	})
+	out := []byte{0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00}
+	out = append(out, types...)
+	out = append(out, funcs...)
+	out = append(out, mem...)
+	out = append(out, sec(0x07, exports)...)
+	out = append(out, start...)
+	return append(out, code...)
+}
+
 // MinimalV2ModuleNoHooks builds the same shape as MinimalV2Module but omits
 // the supported_hooks export: compilation and instantiation succeed, and the
 // hook-discovery step (supportedHooks) fails. Used to prove the post-compile

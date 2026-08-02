@@ -372,10 +372,7 @@ func (p *Plugin) CallRequest(ctx context.Context, hook pbv2.Hook, reqID uint64, 
 	// timeout bounds the wait) before the pool is drained and the compiled
 	// handle is released.
 	p.callMu.RLock()
-	defer func() {
-		p.fireCallFinished()
-		p.callMu.RUnlock()
-	}()
+	defer p.callMu.RUnlock()
 	if output == nil {
 		return fmt.Errorf("wasm: %s nil output", p.name)
 	}
@@ -400,6 +397,9 @@ func (p *Plugin) CallRequest(ctx context.Context, hook pbv2.Hook, reqID uint64, 
 		} else {
 			p.discard(inst)
 		}
+		// call-finished fires only for a call that acquired an instance, and
+		// only after its release/discard ran (the admission lock is still held).
+		p.fireCallFinished()
 	}()
 
 	mod := inst.mod
@@ -688,8 +688,15 @@ type lifecycleHooks struct {
 	// loadBegin fires when a LoadPlugin transaction starts (after the
 	// lifecycle/duplicate guards).
 	loadBegin func(name string)
+	// compiledAcquired fires immediately after a successful CompileModule.
+	compiledAcquired func(name string)
 	// published fires when a plugin is inserted into the map.
 	published func(name string)
+	// constructFailed fires when a LoadPlugin transaction fails after it
+	// began (construction ends absent; resources already released).
+	constructFailed func(name string)
+	// unloadBegin fires when an UnloadPlugin transaction starts quiescing.
+	unloadBegin func(name string)
 	// instanceAcquired fires when a plugin instance is successfully acquired
 	// for a call.
 	instanceAcquired func(name string)
@@ -762,14 +769,21 @@ func (r *Runtime) Close() error {
 }
 
 func (r *Runtime) closeLocked() error {
+	// The whole transaction holds lifecycleMu: loads/unloads see closing and
+	// cannot mutate the ownership set. The plugin map stays intact until each
+	// plugin's OWN quiescence completes, so an admitted call's host calls keep
+	// resolving itself through r.plugins while Close waits for it.
 	r.lifecycleMu.Lock()
+	defer r.lifecycleMu.Unlock()
 	r.lifecycleState = lifecycleClosing
-	r.mu.Lock()
-	plugins := r.plugins
-	r.plugins = make(map[string]*Plugin)
-	r.mu.Unlock()
-	r.lifecycleMu.Unlock()
 	r.fireCloseBegin()
+
+	r.mu.RLock()
+	plugins := make(map[string]*Plugin, len(r.plugins))
+	for name, p := range r.plugins {
+		plugins[name] = p
+	}
+	r.mu.RUnlock()
 
 	// Deterministic order: sorted names (map iteration is random, and the
 	// joined error must be stable across runs and tests).
@@ -781,9 +795,16 @@ func (r *Runtime) closeLocked() error {
 
 	var errs []error
 	for _, name := range names {
-		if err := r.closePluginResources(plugins[name]); err != nil {
+		p := plugins[name]
+		if err := r.closePluginResources(p); err != nil {
 			errs = append(errs, fmt.Errorf("%s: %w", name, err))
 		}
+		// Remove the exact pointer only after its calls quiesced.
+		r.mu.Lock()
+		if cur, still := r.plugins[name]; still && cur == p {
+			delete(r.plugins, name)
+		}
+		r.mu.Unlock()
 	}
 	// Instances and compiled handles are closed before the runtime and cache:
 	// an owned cache close must not prevent module cleanup, and vice versa.
@@ -794,9 +815,7 @@ func (r *Runtime) closeLocked() error {
 		r.cache.Close()
 	}
 
-	r.lifecycleMu.Lock()
 	r.lifecycleState = lifecycleClosed
-	r.lifecycleMu.Unlock()
 	r.fireCloseEnd()
 	return errors.Join(errs...)
 }
@@ -807,22 +826,31 @@ func (r *Runtime) closeLocked() error {
 // deterministic no-op. Used by control-plane rejection paths (a pipeline that
 // loads then rejects a plugin in non-strict mode must not retain it).
 func (r *Runtime) UnloadPlugin(name string) error {
+	// The ENTIRE transaction — lookup, quiescence, reachability removal, and
+	// resource release — runs under lifecycleMu, so Close can never return
+	// while an unloaded generation still quiesces and a same-name load can
+	// never publish against a live generation.
 	r.lifecycleMu.Lock()
+	defer r.lifecycleMu.Unlock()
 	if r.lifecycleState != lifecycleOpen {
-		r.lifecycleMu.Unlock()
 		return nil
 	}
-	r.mu.Lock()
+	r.mu.RLock()
 	p, ok := r.plugins[name]
-	if ok {
-		delete(r.plugins, name)
-	}
-	r.mu.Unlock()
-	r.lifecycleMu.Unlock()
+	r.mu.RUnlock()
 	if !ok {
 		return nil
 	}
-	return r.closePluginResources(p)
+	r.fireUnloadBegin(name)
+
+	// Quiesce BEFORE removing reachability: an admitted call may still issue
+	// host calls that resolve itself through r.plugins.
+	p.callMu.Lock()
+	defer p.callMu.Unlock()
+	r.mu.Lock()
+	delete(r.plugins, name)
+	r.mu.Unlock()
+	return r.closePluginResourcesLocked(p)
 }
 
 // closePluginResources closes one plugin's resources under the call-admission
@@ -835,6 +863,11 @@ func (r *Runtime) UnloadPlugin(name string) error {
 func (r *Runtime) closePluginResources(p *Plugin) error {
 	p.callMu.Lock()
 	defer p.callMu.Unlock()
+	return r.closePluginResourcesLocked(p)
+}
+
+// closePluginResourcesLocked assumes the caller holds p.callMu (write).
+func (r *Runtime) closePluginResourcesLocked(p *Plugin) error {
 	p.stateMu.Lock()
 	p.poolClosed = true
 	p.stateMu.Unlock()
@@ -901,6 +934,24 @@ func (r *Runtime) fireLoadBegin(name string) {
 func (r *Runtime) firePublished(name string) {
 	if r.testHooks != nil && r.testHooks.published != nil {
 		r.testHooks.published(name)
+	}
+}
+
+func (r *Runtime) fireCompiledAcquired(name string) {
+	if r.testHooks != nil && r.testHooks.compiledAcquired != nil {
+		r.testHooks.compiledAcquired(name)
+	}
+}
+
+func (r *Runtime) fireConstructFailed(name string) {
+	if r.testHooks != nil && r.testHooks.constructFailed != nil {
+		r.testHooks.constructFailed(name)
+	}
+}
+
+func (r *Runtime) fireUnloadBegin(name string) {
+	if r.testHooks != nil && r.testHooks.unloadBegin != nil {
+		r.testHooks.unloadBegin(name)
 	}
 }
 
@@ -998,6 +1049,7 @@ func (r *Runtime) LoadPlugin(name string, wasmBytes []byte) (*Plugin, error) {
 	if err != nil {
 		return nil, fmt.Errorf("wasm: %s: compile: %w", name, err)
 	}
+	r.fireCompiledAcquired(name)
 
 	p := &Plugin{
 		name:        name,
@@ -1017,6 +1069,7 @@ func (r *Runtime) LoadPlugin(name string, wasmBytes []byte) (*Plugin, error) {
 	if err != nil {
 		closeErr := compiled.Close(r.ctx)
 		r.fireCompiledReleased(name)
+		r.fireConstructFailed(name)
 		return nil, errors.Join(fmt.Errorf("wasm: %s: %w", name, err), wrapCloseErr("compiled", closeErr))
 	}
 
@@ -1033,6 +1086,7 @@ func (r *Runtime) LoadPlugin(name string, wasmBytes []byte) (*Plugin, error) {
 		instErr := inst.mod.Close(r.ctx)
 		compiledErr := compiled.Close(r.ctx)
 		r.fireCompiledReleased(name)
+		r.fireConstructFailed(name)
 		return nil, errors.Join(fmt.Errorf("wasm: %s: %w", name, err),
 			wrapCloseErr("instance", instErr), wrapCloseErr("compiled", compiledErr))
 	}

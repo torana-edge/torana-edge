@@ -49,7 +49,6 @@ func (rec *eventRecorder) record(ev string) {
 	rec.seq++
 	full := fmt.Sprintf("%d:%s", rec.seq, ev)
 	rec.events = append(rec.events, full)
-	// Barriers are keyed by the RAW event (no sequence prefix).
 	if ch := rec.barriers[ev]; ch != nil {
 		close(ch)
 	}
@@ -58,14 +57,17 @@ func (rec *eventRecorder) record(ev string) {
 
 // install wires the recorder into a runtime's observer seam. label
 // distinguishes runtimes in multi-runtime tests (the reference model keys
-// plugin state by runtime+name).
+// plugin state by runtime+name+generation).
 func (rec *eventRecorder) install(r *Runtime, label string) {
 	r.testHooks = &lifecycleHooks{
-		loadBegin:        func(n string) { rec.record(label + ":load:" + n) },
-		published:        func(n string) { rec.record(label + ":publish:" + n) },
-		instanceAcquired: func(n string) { rec.record(label + ":instance:" + n) },
-		callFinished:     func(n string) { rec.record(label + ":call-finish:" + n) },
-		compiledReleased: func(n string) { rec.record(label + ":release:" + n) },
+		loadBegin:        func(n string) { rec.record(label + ":load-begin:" + n) },
+		compiledAcquired: func(n string) { rec.record(label + ":compiled-acquired:" + n) },
+		published:        func(n string) { rec.record(label + ":published:" + n) },
+		constructFailed:  func(n string) { rec.record(label + ":construct-failed:" + n) },
+		instanceAcquired: func(n string) { rec.record(label + ":instance-acquired:" + n) },
+		callFinished:     func(n string) { rec.record(label + ":call-finished:" + n) },
+		compiledReleased: func(n string) { rec.record(label + ":compiled-released:" + n) },
+		unloadBegin:      func(n string) { rec.record(label + ":unload-begin:" + n) },
 		closeBegin:       func() { rec.record(label + ":close-begin") },
 		closeEnd:         func() { rec.record(label + ":close-end") },
 	}
@@ -90,7 +92,6 @@ func (rec *eventRecorder) wait(suffix string) {
 	}
 }
 
-// fired reports whether an event with the given suffix has occurred.
 func (rec *eventRecorder) fired(suffix string) bool {
 	rec.mu.Lock()
 	defer rec.mu.Unlock()
@@ -110,7 +111,6 @@ func (rec *eventRecorder) snapshot() []string {
 	return out
 }
 
-// count returns how many events match the suffix.
 func (rec *eventRecorder) count(suffix string) int {
 	rec.mu.Lock()
 	defer rec.mu.Unlock()
@@ -123,7 +123,6 @@ func (rec *eventRecorder) count(suffix string) int {
 	return n
 }
 
-// seqOf returns the sequence number of the first event matching the suffix.
 func (rec *eventRecorder) seqOf(suffix string) (int, bool) {
 	rec.mu.Lock()
 	defer rec.mu.Unlock()
@@ -137,7 +136,6 @@ func (rec *eventRecorder) seqOf(suffix string) (int, bool) {
 	return 0, false
 }
 
-// validate replays the recorded stream through the reference model.
 func (rec *eventRecorder) validate() {
 	m := newLifecycleModel()
 	for _, ev := range rec.snapshot() {
@@ -148,93 +146,175 @@ func (rec *eventRecorder) validate() {
 	}
 }
 
-// lifecycleModel is the small independent reference model: runtime
-// open -> closing -> closed; per plugin absent -> constructing -> published
-// -> released (construction failures return to absent).
+// genState is one (runtime, name, generation) entry of the reference model.
+// Phase and compiled-handle ownership are ORTHOGONAL: a construction failure
+// can own a compiled handle before it ever publishes.
+type genState struct {
+	phase         string // absent | constructing | published | releasing | released
+	compiledOwned bool
+	activeCalls   int
+}
+
+// lifecycleModel is the small independent reference model. Runtime states
+// open -> closing -> closed (per label); plugin generations per
+// (label, name), keyed by an internal counter.
 type lifecycleModel struct {
-	// runtime state per label (multi-runtime tests drive several runtimes
-	// through one recorder).
 	runtime map[string]string
-	plugins map[string]string
+	gens    map[string]*genState
+	gensOf  map[string]int
 }
 
 func newLifecycleModel() *lifecycleModel {
-	return &lifecycleModel{runtime: map[string]string{"rt": "open"}, plugins: map[string]string{}}
+	return &lifecycleModel{runtime: map[string]string{}, gens: map[string]*genState{}, gensOf: map[string]int{}}
 }
 
 func (m *lifecycleModel) observe(ev string) error {
 	label := "rt"
-	kind := ev
-	name := ""
+	rest := ev
 	if i := strings.Index(ev, ":"); i >= 0 {
 		label = ev[:i]
-		rest := ev[i+1:]
-		if j := strings.Index(rest, ":"); j >= 0 {
-			kind = rest[:j]
-			name = rest[j+1:]
-		} else {
-			kind = rest
-		}
+		rest = ev[i+1:]
 	}
-	key := label + "/" + name
+	kind := rest
+	name := ""
+	if j := strings.Index(rest, ":"); j >= 0 {
+		kind = rest[:j]
+		name = rest[j+1:]
+	}
 	rtState := m.runtime[label]
 	if rtState == "" {
 		rtState = "open"
 	}
+	key := label + "/" + name
+	gen := m.gensOf[key]
+	gs := m.gens[key]
+
+	// Events that do not need a live generation.
 	switch kind {
-	case "load":
+	case "load-begin":
 		if rtState != "open" {
-			return fmt.Errorf("load while runtime %s", rtState)
+			return fmt.Errorf("load-begin while runtime %s", rtState)
 		}
-		if st, ok := m.plugins[key]; ok && st != "absent" && st != "released" {
-			return fmt.Errorf("load of %s in state %s", key, st)
+		if gs != nil && gs.phase != "absent" && gs.phase != "released" {
+			return fmt.Errorf("load-begin of %s with a live generation in %q", key, gs.phase)
 		}
-		m.plugins[key] = "constructing"
-	case "publish":
-		if rtState != "open" {
-			return fmt.Errorf("publish while runtime %s", rtState)
-		}
-		if m.plugins[key] != "constructing" {
-			return fmt.Errorf("publish of %s from state %q", key, m.plugins[key])
-		}
-		m.plugins[key] = "published"
-	case "instance", "call-finish":
-		if m.plugins[key] != "published" {
-			return fmt.Errorf("%s for %s from state %q", kind, key, m.plugins[key])
-		}
-	case "release":
-		st := m.plugins[key]
-		switch st {
-		case "published":
-			m.plugins[key] = "released"
-		case "constructing":
-			m.plugins[key] = "absent" // construction failure: ends absent
-		case "":
-			// An injected plugin (tests construct one directly in the map)
-			// is published by construction; its release is legal.
-			m.plugins[key] = "released"
-		default:
-			return fmt.Errorf("release of %s from state %q", key, st)
-		}
+		gen++
+		m.gensOf[key] = gen
+		m.gens[key] = &genState{phase: "constructing"}
+		return nil
 	case "close-begin":
 		if rtState != "open" {
 			return fmt.Errorf("close-begin while runtime %s", rtState)
 		}
 		m.runtime[label] = "closing"
+		return nil
 	case "close-end":
 		if rtState != "closing" {
 			return fmt.Errorf("close-end while runtime %s", rtState)
 		}
+		// Terminal invariant: every generation of this runtime is absent or
+		// released, owns no compiled handle, and has zero active calls.
+		for k, g := range m.gens {
+			if !strings.HasPrefix(k, label+"/") {
+				continue
+			}
+			if g.phase != "absent" && g.phase != "released" {
+				return fmt.Errorf("close-end with %s in %q", k, g.phase)
+			}
+			if g.compiledOwned {
+				return fmt.Errorf("close-end with %s still owning a compiled handle", k)
+			}
+			if g.activeCalls != 0 {
+				return fmt.Errorf("close-end with %d active calls on %s", g.activeCalls, k)
+			}
+		}
 		m.runtime[label] = "closed"
+		return nil
+	}
+	if gs == nil {
+		if kind == "compiled-released" {
+			// An INJECTED plugin (tests construct one directly in the map) is
+			// published-and-owned by construction; its release is legal.
+			m.gens[key] = &genState{phase: "released"}
+			m.gensOf[key] = gen + 1
+			return nil
+		}
+		return fmt.Errorf("%s for unknown generation of %s", kind, key)
+	}
+
+	switch kind {
+	case "compiled-acquired":
+		if gs.phase != "constructing" {
+			return fmt.Errorf("compiled-acquired of %s from %q", key, gs.phase)
+		}
+		if gs.compiledOwned {
+			return fmt.Errorf("duplicate compiled-acquired of %s", key)
+		}
+		gs.compiledOwned = true
+	case "published":
+		if gs.phase != "constructing" {
+			return fmt.Errorf("published of %s from %q", key, gs.phase)
+		}
+		if !gs.compiledOwned {
+			return fmt.Errorf("published of %s without compiled ownership", key)
+		}
+		gs.phase = "published"
+	case "construct-failed":
+		if gs.phase != "constructing" {
+			return fmt.Errorf("construct-failed of %s from %q", key, gs.phase)
+		}
+		if gs.compiledOwned {
+			return fmt.Errorf("construct-failed of %s while still owning the compiled handle", key)
+		}
+		if gs.activeCalls != 0 {
+			return fmt.Errorf("construct-failed of %s with active calls", key)
+		}
+		gs.phase = "absent"
+	case "instance-acquired":
+		if rtState != "open" {
+			return fmt.Errorf("instance-acquired after close began on %s", key)
+		}
+		if gs.phase != "published" {
+			return fmt.Errorf("instance-acquired of %s from %q", key, gs.phase)
+		}
+		gs.activeCalls++
+	case "call-finished":
+		if gs.phase != "published" && gs.phase != "releasing" {
+			return fmt.Errorf("call-finished of %s from %q", key, gs.phase)
+		}
+		if gs.activeCalls <= 0 {
+			return fmt.Errorf("call-finished of %s without an active call", key)
+		}
+		gs.activeCalls--
+	case "unload-begin":
+		if gs.phase != "published" {
+			return fmt.Errorf("unload-begin of %s from %q", key, gs.phase)
+		}
+		gs.phase = "releasing"
+	case "compiled-released":
+		if gs.phase != "constructing" && gs.phase != "published" && gs.phase != "releasing" {
+			return fmt.Errorf("compiled-released of %s from %q", key, gs.phase)
+		}
+		if !gs.compiledOwned {
+			return fmt.Errorf("duplicate compiled-released of %s", key)
+		}
+		if gs.activeCalls != 0 {
+			return fmt.Errorf("compiled-released of %s with %d active calls", key, gs.activeCalls)
+		}
+		gs.compiledOwned = false
+		if gs.phase != "constructing" {
+			gs.phase = "released" // close/unload completion
+		}
+		// constructing: construct-failed must follow to end absent.
 	default:
 		return fmt.Errorf("unknown event %q", ev)
 	}
 	return nil
 }
 
-// TestLifecycleCloseReleasesCompiledExactlyOnce — rows 1/2: every acquired
-// compiled handle is released exactly once; repeated Close never increments
-// release counts; the recorded stream satisfies the reference model.
+// TestLifecycleCloseReleasesCompiledExactlyOnce — every acquired compiled
+// handle is released exactly once; repeated Close never increments release
+// counts; the recorded stream satisfies the reference model.
 func TestLifecycleCloseReleasesCompiledExactlyOnce(t *testing.T) {
 	r := newTestRuntime(t)
 	rec := newEventRecorder(t)
@@ -248,14 +328,15 @@ func TestLifecycleCloseReleasesCompiledExactlyOnce(t *testing.T) {
 	if err := r.Close(); err != nil {
 		t.Fatalf("first Close: %v", err)
 	}
-	if rec.count("release:inert-a") != 1 || rec.count("release:observer") != 1 {
-		t.Fatalf("release counts = inert-a:%d observer:%d, want 1 each", rec.count("release:inert-a"), rec.count("release:observer"))
+	if rec.count("rt:compiled-released:inert-a") != 1 || rec.count("rt:compiled-released:observer") != 1 {
+		t.Fatalf("release counts = inert-a:%d observer:%d, want 1 each",
+			rec.count("rt:compiled-released:inert-a"), rec.count("rt:compiled-released:observer"))
 	}
 	if err := r.Close(); err != nil {
 		t.Fatalf("second Close: %v", err)
 	}
-	if rec.count("release:inert-a") != 1 || rec.count("release:observer") != 1 {
-		t.Fatalf("repeated Close incremented release counts")
+	if rec.count("rt:compiled-released:inert-a") != 1 || rec.count("rt:compiled-released:observer") != 1 {
+		t.Fatal("repeated Close incremented release counts")
 	}
 	rec.validate()
 }
@@ -284,14 +365,14 @@ func TestLifecycleConcurrentCloseIsExactlyOnce(t *testing.T) {
 			t.Fatalf("concurrent Close %d: %v", i, err)
 		}
 	}
-	if rec.count("release:inert-a") != 1 {
-		t.Fatalf("concurrent Close released %d times, want 1", rec.count("release:inert-a"))
+	if rec.count("rt:compiled-released:inert-a") != 1 {
+		t.Fatalf("concurrent Close released %d times, want 1", rec.count("rt:compiled-released:inert-a"))
 	}
 	rec.validate()
 }
 
-// TestLifecycleLoadAfterCloseFails — rows 3/10: LoadPlugin and UnloadPlugin
-// after Close fail/no-op deterministically and never acquire resources.
+// TestLifecycleLoadAfterCloseFails — LoadPlugin and UnloadPlugin after Close
+// fail/no-op deterministically and never acquire resources.
 func TestLifecycleLoadAfterCloseFails(t *testing.T) {
 	r := newTestRuntime(t)
 	rec := newEventRecorder(t)
@@ -310,15 +391,14 @@ func TestLifecycleLoadAfterCloseFails(t *testing.T) {
 	if err := r.UnloadPlugin("inert-a"); err != nil {
 		t.Fatalf("post-close UnloadPlugin errored: %v", err)
 	}
-	if rec.fired("load:observer") {
+	if rec.fired("rt:load-begin:observer") {
 		t.Fatal("post-close load began a construction transaction")
 	}
 	rec.validate()
 }
 
 // TestLifecycleLoadVsCloseOrderings — both LEGAL orderings are proven with
-// deterministic barriers instead of a scheduler race: close-first makes every
-// load fail as closed; load-first publishes before close and releases once.
+// deterministic barriers instead of a scheduler race.
 func TestLifecycleLoadVsCloseOrderings(t *testing.T) {
 	t.Run("close first", func(t *testing.T) {
 		r := newTestRuntime(t)
@@ -332,7 +412,7 @@ func TestLifecycleLoadVsCloseOrderings(t *testing.T) {
 				t.Fatal("load succeeded after close")
 			}
 		}
-		if rec.fired("load:after-0") {
+		if rec.fired("rt:load-begin:after-0") {
 			t.Fatal("a load after close began a construction transaction")
 		}
 		rec.validate()
@@ -341,7 +421,6 @@ func TestLifecycleLoadVsCloseOrderings(t *testing.T) {
 		r := newTestRuntime(t)
 		rec := newEventRecorder(t)
 		rec.install(r, "rt")
-		// Barrier: every load completes before close starts.
 		for i := 0; i < 3; i++ {
 			if _, err := r.LoadPlugin(fmt.Sprintf("before-%d", i), MinimalV2Module(false)); err != nil {
 				t.Fatal(err)
@@ -351,8 +430,8 @@ func TestLifecycleLoadVsCloseOrderings(t *testing.T) {
 			t.Fatal(err)
 		}
 		for i := 0; i < 3; i++ {
-			if rec.count(fmt.Sprintf("release:before-%d", i)) != 1 {
-				t.Fatalf("before-%d released %d times, want 1", i, rec.count(fmt.Sprintf("release:before-%d", i)))
+			if rec.count(fmt.Sprintf("rt:compiled-released:before-%d", i)) != 1 {
+				t.Fatalf("before-%d released %d times, want 1", i, rec.count(fmt.Sprintf("rt:compiled-released:before-%d", i)))
 			}
 		}
 		rec.validate()
@@ -375,8 +454,8 @@ func TestLifecycleDuplicateLoadRejectedBeforeCompile(t *testing.T) {
 	if err := r.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if rec.count("release:inert-a") != 1 {
-		t.Fatalf("duplicate load released %d times, want 1", rec.count("release:inert-a"))
+	if rec.count("rt:compiled-released:inert-a") != 1 {
+		t.Fatalf("duplicate load released %d times, want 1", rec.count("rt:compiled-released:inert-a"))
 	}
 	rec.validate()
 }
@@ -416,29 +495,37 @@ func TestLifecycleConcurrentDuplicateLoads(t *testing.T) {
 	if err := r.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if rec.count("release:dup") != 1 {
-		t.Fatalf("concurrent duplicates released %d times, want 1", rec.count("release:dup"))
+	if rec.count("rt:compiled-released:dup") != 1 {
+		t.Fatalf("concurrent duplicates released %d times, want 1", rec.count("rt:compiled-released:dup"))
 	}
 	rec.validate()
 }
 
-// TestLifecycleConstructionFailureReleasesCompiled — row 5: the memory-hog
-// guest COMPILES under a 16 MiB limit (its declared minimum is small) and
-// fails at INSTANTIATION (init grows to 64 MiB), exercising the post-compile
-// newInstance error path, which must release the compiled handle.
+// TestLifecycleConstructionFailureReleasesCompiled — a hand-built module that
+// traps at INIT compiles successfully and fails during instantiation: the
+// stream is load-begin -> compiled-acquired -> compiled-released ->
+// construct-failed, proving the post-compile path releases the handle.
 func TestLifecycleConstructionFailureReleasesCompiled(t *testing.T) {
-	r := NewRuntimeWithOptions(context.Background(), RuntimeOptions{PoolSize: 1, MemoryLimitPages: 256})
+	r := newTestRuntime(t)
 	rec := newEventRecorder(t)
 	rec.install(r, "rt")
-	_, err := r.LoadPlugin("hog", loadFixtureBytes(t, "test-memory-hog"))
+	_, err := r.LoadPlugin("trap", MinimalV2ModuleTrapsAtInit())
 	if err == nil {
-		t.Fatal("load of the 64 MiB guest under a 16 MiB limit unexpectedly succeeded")
+		t.Fatal("a module that traps at init loaded")
 	}
 	if strings.Contains(err.Error(), "compile") {
-		t.Fatalf("the limit rejected at COMPILE (err: %v) — the test must exercise the instantiation path", err)
+		t.Fatalf("the trap module failed at COMPILE (err: %v) — the test must exercise the instantiation path", err)
 	}
-	if rec.count("release:hog") != 1 {
-		t.Fatalf("construction failure released compiled %d times, want 1", rec.count("release:hog"))
+	for _, ev := range []string{"rt:compiled-acquired:trap", "rt:compiled-released:trap", "rt:construct-failed:trap"} {
+		if !rec.fired(ev) {
+			t.Fatalf("missing event %s; stream: %v", ev, rec.snapshot())
+		}
+	}
+	seqAcq, _ := rec.seqOf("rt:compiled-acquired:trap")
+	seqRel, _ := rec.seqOf("rt:compiled-released:trap")
+	seqFail, _ := rec.seqOf("rt:construct-failed:trap")
+	if !(seqAcq < seqRel && seqRel < seqFail) {
+		t.Fatalf("construction-failure order wrong: acquired=%d released=%d failed=%d", seqAcq, seqRel, seqFail)
 	}
 	if err := r.Close(); err != nil {
 		t.Fatal(err)
@@ -446,10 +533,10 @@ func TestLifecycleConstructionFailureReleasesCompiled(t *testing.T) {
 	rec.validate()
 }
 
-// TestLifecycleHookDiscoveryFailureReleasesCompiled — row 6: a guest that
-// compiles and instantiates but exports no supported_hooks fails hook
-// discovery; the error path releases BOTH the instance and the compiled
-// handle and joins the cleanup errors with the primary error.
+// TestLifecycleHookDiscoveryFailureReleasesCompiled — a guest that compiles
+// and instantiates but exports no supported_hooks fails hook discovery; the
+// error path releases BOTH the instance and the compiled handle and joins the
+// cleanup errors with the primary error.
 func TestLifecycleHookDiscoveryFailureReleasesCompiled(t *testing.T) {
 	r := newTestRuntime(t)
 	rec := newEventRecorder(t)
@@ -461,8 +548,11 @@ func TestLifecycleHookDiscoveryFailureReleasesCompiled(t *testing.T) {
 	if !strings.Contains(err.Error(), "supported_hooks") {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if rec.count("release:nohooks") != 1 {
-		t.Fatalf("hook-discovery failure released compiled %d times, want 1", rec.count("release:nohooks"))
+	if rec.count("rt:compiled-released:nohooks") != 1 {
+		t.Fatalf("hook-discovery failure released compiled %d times, want 1", rec.count("rt:compiled-released:nohooks"))
+	}
+	if !rec.fired("rt:construct-failed:nohooks") {
+		t.Fatal("hook-discovery failure did not end construction with construct-failed")
 	}
 	if err := r.Close(); err != nil {
 		t.Fatal(err)
@@ -501,9 +591,9 @@ func (f *fakeModule) Close(context.Context) error {
 
 func (f *fakeModule) IsClosed() bool { return false }
 
-// TestLifecycleCleanupErrorsJoinedAndSorted — row 8: one failed close does
-// not block the others; the failing plugin's error surfaces and the good
-// plugin's release is still attempted.
+// TestLifecycleCleanupErrorsJoinedAndSorted — one failed close does not block
+// the others; the failing plugin's error surfaces and the good plugin's
+// release is still attempted.
 func TestLifecycleCleanupErrorsJoinedAndSorted(t *testing.T) {
 	r := newTestRuntime(t)
 	rec := newEventRecorder(t)
@@ -530,17 +620,17 @@ func TestLifecycleCleanupErrorsJoinedAndSorted(t *testing.T) {
 	if !strings.Contains(err.Error(), "boom") {
 		t.Fatalf("the failing plugin's error is missing: %v", err)
 	}
-	if rec.count("release:a-good") != 1 {
+	if rec.count("rt:compiled-released:a-good") != 1 {
 		t.Fatalf("a-good was not released despite b-failing's error")
 	}
-	if rec.count("release:b-failing") != 1 {
+	if rec.count("rt:compiled-released:b-failing") != 1 {
 		t.Fatalf("b-failing was not released")
 	}
 	rec.validate()
 }
 
-// TestLifecycleInstancesClosedBeforeCompiled — row 9: instances are closed
-// before the compiled handle.
+// TestLifecycleInstancesClosedBeforeCompiled — instances are closed before
+// the compiled handle.
 func TestLifecycleInstancesClosedBeforeCompiled(t *testing.T) {
 	r := newTestRuntime(t)
 	rec := newEventRecorder(t)
@@ -566,19 +656,27 @@ func TestLifecycleInstancesClosedBeforeCompiled(t *testing.T) {
 	rec.validate()
 }
 
-// TestLifecycleActiveCallBlocksCompiledRelease — the quiescence core (row
-// 14): a call that has ACQUIRED an instance (deterministic barrier) must be
-// quiesced by the admission lock — Close cannot release the compiled handle
-// until the call finishes, and the event order is instance -> call-finish ->
-// release, with exactly one release.
+// TestLifecycleActiveCallBlocksCompiledRelease — quiescence: a call that has
+// ACQUIRED an instance (the observer barrier blocks it post-acquire, while
+// callMu.RLock is held) must be quiesced by the admission lock — Close's
+// write lock cannot release the compiled handle until the call finishes, and
+// the event order is instance-acquired -> close-begin -> call-finished ->
+// compiled-released, with exactly one release.
 func TestLifecycleActiveCallBlocksCompiledRelease(t *testing.T) {
-	r := NewRuntimeWithOptions(context.Background(), RuntimeOptions{
-		PoolSize:    1,
-		CallTimeout: 700 * time.Millisecond,
-	})
+	r := newTestRuntime(t)
 	rec := newEventRecorder(t)
 	rec.install(r, "rt")
-	p, err := r.LoadPlugin("spin", MinimalV2Module(true)) // run_hook spins forever
+	acquired := make(chan struct{})
+	release := make(chan struct{})
+	// Override the observer: signal + block INSIDE CallRequest while the
+	// admission read lock is held (no recorder mutex is held while blocked).
+	r.testHooks.instanceAcquired = func(name string) {
+		rec.record("rt:instance-acquired:" + name)
+		close(acquired)
+		<-release
+	}
+
+	p, err := r.LoadPlugin("fast", MinimalV2Module(false))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -587,9 +685,7 @@ func TestLifecycleActiveCallBlocksCompiledRelease(t *testing.T) {
 	go func() {
 		done <- p.CallRequest(context.Background(), pb.Hook_HOOK_BEFORE_REQUEST, 1, []byte{}, &out)
 	}()
-
-	// Deterministic barrier: the call holds an instance.
-	rec.wait("rt:instance:spin")
+	<-acquired // deterministic: the call holds an instance under callMu.RLock
 
 	closed := make(chan struct{})
 	go func() {
@@ -598,44 +694,54 @@ func TestLifecycleActiveCallBlocksCompiledRelease(t *testing.T) {
 		}
 		close(closed)
 	}()
+	rec.wait("rt:close-begin")
 
-	// The compiled handle must NOT be released while the call is active.
+	// State checks after the deterministic barrier — no timing assertions.
 	select {
-	case <-time.After(200 * time.Millisecond):
 	case <-closed:
-		t.Fatal("Close completed while the call was still active")
+		t.Fatal("Close completed while the call was still blocked")
+	default:
 	}
-	if rec.fired("release:spin") {
+	if rec.fired("rt:compiled-released:fast") {
 		t.Fatal("compiled handle released while a call was active")
 	}
 
-	// The call's own timeout bounds the quiescence wait.
-	if err := <-done; err == nil {
-		t.Fatal("the spinning call unexpectedly succeeded")
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatalf("the call after the barrier: %v", err)
 	}
 	<-closed
 
-	if rec.count("release:spin") != 1 {
-		t.Fatalf("compiled released %d times, want exactly 1", rec.count("release:spin"))
+	if rec.count("rt:compiled-released:fast") != 1 {
+		t.Fatalf("compiled released %d times, want exactly 1", rec.count("rt:compiled-released:fast"))
 	}
-	if seqCall, ok := rec.seqOf("call-finish:spin"); ok {
-		if seqRelease, ok2 := rec.seqOf("release:spin"); ok2 && seqRelease < seqCall {
-			t.Fatalf("release (%d) preceded the call's finish (%d)", seqRelease, seqCall)
-		}
+	seqInst, _ := rec.seqOf("rt:instance-acquired:fast")
+	seqClose, _ := rec.seqOf("rt:close-begin")
+	seqFinish, _ := rec.seqOf("rt:call-finished:fast")
+	seqRelease, _ := rec.seqOf("rt:compiled-released:fast")
+	if !(seqInst < seqClose && seqClose < seqFinish && seqFinish < seqRelease) {
+		t.Fatalf("event order wrong: instance=%d close-begin=%d call-finish=%d release=%d",
+			seqInst, seqClose, seqFinish, seqRelease)
 	}
 	rec.validate()
 }
 
 // TestLifecycleUnloadBlocksUntilCallsQuiesce — UnloadPlugin takes the same
-// admission write lock: an active call delays the unload until it finishes.
+// admission write lock; an active call delays the unload until it finishes,
+// and reachability stays intact while the call's host calls could resolve it.
 func TestLifecycleUnloadBlocksUntilCallsQuiesce(t *testing.T) {
-	r := NewRuntimeWithOptions(context.Background(), RuntimeOptions{
-		PoolSize:    1,
-		CallTimeout: 700 * time.Millisecond,
-	})
+	r := newTestRuntime(t)
 	rec := newEventRecorder(t)
 	rec.install(r, "rt")
-	p, err := r.LoadPlugin("spin", MinimalV2Module(true))
+	acquired := make(chan struct{})
+	release := make(chan struct{})
+	r.testHooks.instanceAcquired = func(name string) {
+		rec.record("rt:instance-acquired:" + name)
+		close(acquired)
+		<-release
+	}
+
+	p, err := r.LoadPlugin("fast", MinimalV2Module(false))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -644,28 +750,37 @@ func TestLifecycleUnloadBlocksUntilCallsQuiesce(t *testing.T) {
 	go func() {
 		done <- p.CallRequest(context.Background(), pb.Hook_HOOK_BEFORE_REQUEST, 1, []byte{}, &out)
 	}()
-	rec.wait("rt:instance:spin")
+	<-acquired
 
 	unloaded := make(chan error, 1)
 	go func() {
-		unloaded <- r.UnloadPlugin("spin")
+		unloaded <- r.UnloadPlugin("fast")
 	}()
+	rec.wait("rt:unload-begin:fast")
 	select {
-	case <-time.After(200 * time.Millisecond):
 	case <-unloaded:
-		t.Fatal("unload completed while a call was still active")
+		t.Fatal("unload completed while a call was still blocked")
+	default:
 	}
-	<-done
+	if rec.fired("rt:compiled-released:fast") {
+		t.Fatal("unload released the compiled handle while a call was active")
+	}
+
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatalf("the call after the barrier: %v", err)
+	}
 	if err := <-unloaded; err != nil {
 		t.Fatal(err)
 	}
-	if rec.count("release:spin") != 1 {
-		t.Fatalf("unload released compiled %d times, want 1", rec.count("release:spin"))
+	if rec.count("rt:compiled-released:fast") != 1 {
+		t.Fatalf("unload released compiled %d times, want 1", rec.count("rt:compiled-released:fast"))
 	}
 	rec.validate()
 }
 
-// TestLifecycleNoPublishedPluginsAfterClose — row 13 invariant.
+// TestLifecycleNoPublishedPluginsAfterClose — the map is empty once close
+// completes (each plugin removed after its own quiescence).
 func TestLifecycleNoPublishedPluginsAfterClose(t *testing.T) {
 	r := newTestRuntime(t)
 	rec := newEventRecorder(t)
@@ -713,7 +828,7 @@ func TestLifecycleSortedNamesDeterministic(t *testing.T) {
 }
 
 // TestLifecycleUnloadExactlyOnceAndRemovesReachability — UnloadPlugin removes
-// reachability before releasing, releases exactly once, and a second unload
+// reachability after quiescence, releases exactly once, and a second unload
 // is a no-op.
 func TestLifecycleUnloadExactlyOnceAndRemovesReachability(t *testing.T) {
 	r := newTestRuntime(t)
@@ -734,8 +849,8 @@ func TestLifecycleUnloadExactlyOnceAndRemovesReachability(t *testing.T) {
 	if err := r.UnloadPlugin("inert-a"); err != nil {
 		t.Fatalf("second unload errored: %v", err)
 	}
-	if rec.count("release:inert-a") != 1 {
-		t.Fatalf("unload released compiled %d times, want exactly 1", rec.count("release:inert-a"))
+	if rec.count("rt:compiled-released:inert-a") != 1 {
+		t.Fatalf("unload released compiled %d times, want exactly 1", rec.count("rt:compiled-released:inert-a"))
 	}
 	if _, err := r.LoadPlugin("inert-a", loadFixtureBytes(t, "test-inert-a")); err != nil {
 		t.Fatalf("reload after unload failed: %v", err)
@@ -743,8 +858,8 @@ func TestLifecycleUnloadExactlyOnceAndRemovesReachability(t *testing.T) {
 	if err := r.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if rec.count("release:inert-a") != 2 {
-		t.Fatalf("two loads/unloads released %d times, want 2", rec.count("release:inert-a"))
+	if rec.count("rt:compiled-released:inert-a") != 2 {
+		t.Fatalf("two loads/unloads released %d times, want 2", rec.count("rt:compiled-released:inert-a"))
 	}
 	rec.validate()
 }
@@ -777,7 +892,7 @@ func TestLifecycleReferenceModelScenarios(t *testing.T) {
 		{
 			"failed construction then load close",
 			func(t *testing.T, r *Runtime, rec *eventRecorder) {
-				_, _ = r.LoadPlugin("hog", loadFixtureBytes(t, "test-memory-hog"))
+				_, _ = r.LoadPlugin("trap", MinimalV2ModuleTrapsAtInit())
 				r.LoadPlugin("p", bytes)
 				r.Close()
 			},
@@ -800,7 +915,7 @@ func TestLifecycleReferenceModelScenarios(t *testing.T) {
 	}
 	for _, sc := range scenarios {
 		t.Run(sc.name, func(t *testing.T) {
-			r := NewRuntimeWithOptions(context.Background(), RuntimeOptions{PoolSize: 1, MemoryLimitPages: 256})
+			r := newTestRuntime(t)
 			rec := newEventRecorder(t)
 			rec.install(r, "rt")
 			sc.run(t, r, rec)
@@ -809,9 +924,10 @@ func TestLifecycleReferenceModelScenarios(t *testing.T) {
 	}
 }
 
-// TestLifecycleHotReloadBoundary — rows 11/12: an unchanged digest's NEW
-// acquire (on the reload runtime) precedes the OLD release (on the closed
-// runtime); a changed digest releases the obsolete handle exactly once.
+// TestLifecycleHotReloadBoundary — an unchanged digest's NEW acquire (the
+// reload runtime's published event) precedes the OLD release (the closed
+// runtime's compiled-released); a changed digest releases the obsolete handle
+// once per holder.
 func TestLifecycleHotReloadBoundary(t *testing.T) {
 	rec := newEventRecorder(t)
 	rt1 := NewRuntime(context.Background())
@@ -825,8 +941,7 @@ func TestLifecycleHotReloadBoundary(t *testing.T) {
 	if _, err := rt1.LoadPlugin("p", digestA); err != nil {
 		t.Fatal(err)
 	}
-	// The reload runtime acquires the SAME digest while rt1 is still open —
-	// the shared cache keeps the code alive across the swap.
+	// The reload runtime acquires the SAME digest while rt1 is still open.
 	if _, err := rt2.LoadPlugin("p", digestA); err != nil {
 		t.Fatal(err)
 	}
@@ -834,19 +949,19 @@ func TestLifecycleHotReloadBoundary(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	seqNew, okNew := rec.seqOf("publish:p")
-	seqOld, okOld := rec.seqOf("release:p")
+	// Exact generation-labelled events — never suffix-first matches.
+	seqNew, okNew := rec.seqOf("rt2:published:p")
+	seqOld, okOld := rec.seqOf("rt1:compiled-released:p")
 	if !okNew || !okOld {
-		t.Fatalf("missing events; stream: %v", rec.snapshot())
+		t.Fatalf("missing labelled events; stream: %v", rec.snapshot())
 	}
 	if seqNew > seqOld {
-		t.Fatalf("the reload acquire (publish:%d) came AFTER the old release (%d) — "+
+		t.Fatalf("the reload acquire (rt2:published:%d) came AFTER the old release (rt1:%d) — "+
 			"an unchanged digest must not drop to zero across the swap", seqNew, seqOld)
 	}
 
-	// Changed digest: a third runtime takes digest B; closing rt2 releases
-	// its handle on the now-obsolete A (each acquire releases exactly once,
-	// so A's refcount reaches zero only when BOTH holders have released).
+	// Changed digest: a third runtime takes digest B; closing rt2 releases its
+	// handle on the now-obsolete A (one release per holder).
 	rt3 := NewRuntime(context.Background())
 	rec.install(rt3, "rt3")
 	if _, err := rt3.LoadPlugin("p", digestB); err != nil {
@@ -855,15 +970,15 @@ func TestLifecycleHotReloadBoundary(t *testing.T) {
 	if err := rt2.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if rec.count("rt1:release:p") != 1 || rec.count("rt2:release:p") != 1 {
+	if rec.count("rt1:compiled-released:p") != 1 || rec.count("rt2:compiled-released:p") != 1 {
 		t.Fatalf("the obsolete digest was not released once per holder: rt1=%d rt2=%d",
-			rec.count("rt1:release:p"), rec.count("rt2:release:p"))
+			rec.count("rt1:compiled-released:p"), rec.count("rt2:compiled-released:p"))
 	}
 	if err := rt3.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if rec.count("rt3:release:p") != 1 {
-		t.Fatalf("digest B released %d times, want 1", rec.count("rt3:release:p"))
+	if rec.count("rt3:compiled-released:p") != 1 {
+		t.Fatalf("digest B released %d times, want 1", rec.count("rt3:compiled-released:p"))
 	}
 	rec.validate()
 }
@@ -885,8 +1000,8 @@ func TestLifecycleFailedCompiledCloseStillCounts(t *testing.T) {
 	if err := r.Close(); err == nil {
 		t.Fatal("expected the injected close error")
 	}
-	if rec.count("release:bad") != 1 {
-		t.Fatalf("failed close recorded %d releases, want 1", rec.count("release:bad"))
+	if rec.count("rt:compiled-released:bad") != 1 {
+		t.Fatalf("failed close recorded %d releases, want 1", rec.count("rt:compiled-released:bad"))
 	}
 	rec.validate()
 }
