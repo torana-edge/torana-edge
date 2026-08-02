@@ -30,26 +30,43 @@ const sdkModulePath = "github.com/torana-edge/torana-plugin-sdk"
 //
 // sdk.HostCall is handled separately: its capability comes from the command
 // string, which is only knowable when that argument is a literal.
+//
+// ATTRIBUTION SCOPE: this table pins an intentional positive or negative
+// decision for every helper in the CURRENT pinned SDK inventory. A static
+// table cannot discover a newly added exported function by itself — a future
+// helper addition is caught by the compile-time tests that reference the
+// reviewed names, and by the explicit stream-handler table in lint_test.go —
+// so the honest claim is "every current helper has a decision", never "every
+// future helper is covered". Adding a helper to the SDK means adding its
+// decision here in the same change.
 var sdkPermission = map[string]string{
-	"Log":                 "env.log",
-	"EmitMetric":          "env.emit_metric",
-	"PluginConfig":        "env.plugin_config",
-	"StateGet":            "env.state_get",
-	"StateGetJSON":        "env.state_get",
-	"StateSet":            "env.state_set",
-	"StateSetJSON":        "env.state_set",
-	"StateDelete":         "env.state_set",
-	"StateKeys":           "env.state_keys",
-	"Now":                 "env.now",
-	"OriginalRequest":     "env.original_request",
-	"OriginalResponse":    "env.original_response",
-	"GetCachePricing":     "env.host_call.torana_cache_pricing",
-	"SendRequest":         "env.host_call.torana_send_request",
-	"SetCacheBreakpoint":  "ir.cache_control.write",
-	"MoveCacheBreakpoint": "ir.cache_control.write",
-	"BlockRequest":        "env.block_request",
-	"RespondRequest":      "env.respond_request",
-	"RouteRequest":        "env.route_request",
+	"Log":                   "env.log",
+	"EmitMetric":            "env.emit_metric",
+	"PluginConfig":          "env.plugin_config",
+	"StateGet":              "env.state_get",
+	"StateGetJSON":          "env.state_get",
+	"StateSet":              "env.state_set",
+	"StateSetJSON":          "env.state_set",
+	"StateDelete":           "env.state_set",
+	"StateKeys":             "env.state_keys",
+	"Now":                   "env.now",
+	"OriginalRequest":       "env.original_request",
+	"OriginalResponse":      "env.original_response",
+	"GetCachePricing":       "env.host_call.torana_cache_pricing",
+	"SendRequest":           "env.host_call.torana_send_request",
+	"SetCacheBreakpoint":    "ir.cache_control.write",
+	"MoveCacheBreakpoint":   "ir.cache_control.write",
+	"BlockRequest":          "env.block_request",
+	"RespondRequest":        "env.respond_request",
+	"RouteRequest":          "env.route_request",
+	"SetIdentity":           "env.set_identity",
+	"SuppressEvent":         "ir.stream.write",
+	"EmitEvents":            "ir.stream.write",
+	"EmitAssembledToolCall": "ir.stream.write",
+	"ReplaceToolArguments":  "ir.stream.write",
+	"SuppressToolCall":      "ir.stream.write",
+	"ReplaceText":           "ir.stream.write",
+	"SuppressText":          "ir.stream.write",
 }
 
 // sdkHook maps a registration call to the hook it implements.
@@ -494,65 +511,172 @@ func scanFile(fset *token.FileSet, file *ast.File, u *usage) {
 			if d.Recv == nil {
 				enclosing = d.Name.Name
 			}
-			scanNode(fset, d.Body, alias, enclosing, u)
+			scanScope(fset, d.Body, alias, enclosing, u, handlerProvenance{})
 		default:
 			// Package-level var/const initializers run before main and are a
 			// valid registration site.
-			scanNode(fset, decl, alias, "", u)
+			scanScope(fset, decl, alias, "", u, handlerProvenance{})
 		}
 	}
 }
 
-func scanNode(fset *token.FileSet, node ast.Node, alias, enclosing string, u *usage) {
+// handlerProvenance maps DECLARATION IDENTITY to constructed-ness within one
+// lexical scope, never identifier text.
+//
+// ident/object relationship can be ambiguous without type information (e.g.
+// composite literals T{K: 0}). The LHS identifiers of AssignStmt and
+// ValueSpec we track are unambiguous local declarations or assignments, so
+// the parser's lexical object resolution is exact for exactly this use.
+//
+//nolint:staticcheck // SA1019: ast.Object is deprecated because the
+type handlerProvenance map[*ast.Object]bool
+
+// scanScope walks one function body (or package-level declaration) with a
+// per-scope provenance environment keyed by DECLARATION IDENTITY (the
+// parser's resolved *ast.Object), never by identifier text. Each function
+// and each function literal gets its OWN environment, so unrelated
+// functions, files, parameters, and shadowed locals cannot inherit a
+// handler provenance: the "one function scope" boundary of the design is
+// enforced by construction.
+func scanScope(fset *token.FileSet, node ast.Node, alias, enclosing string, u *usage, env handlerProvenance) {
 	ast.Inspect(node, func(n ast.Node) bool {
 		// A function literal is its own scope for this purpose: a handler
 		// registered inside one still runs wherever the literal is invoked.
-		// Its enclosing declaration is what matters, so it is inherited.
-		call, ok := n.(*ast.CallExpr)
-		if !ok {
-			return true
-		}
-		sel, ok := call.Fun.(*ast.SelectorExpr)
-		if !ok {
-			return true
-		}
-		ident, ok := sel.X.(*ast.Ident)
-		if !ok || ident.Name != alias {
-			return true
-		}
-
-		pos := fset.Position(sel.Pos())
-		fn := sel.Sel.Name
-
-		if hook, ok := sdkHook[fn]; ok {
-			if enclosing == "main" {
-				u.registeredInMain[hook] = pos
-			} else if _, seen := u.hooks[hook]; !seen {
-				u.hooks[hook] = pos
+		// Its enclosing declaration is what matters, so it is inherited —
+		// but provenance does NOT cross the closure boundary.
+		switch t := n.(type) {
+		case *ast.FuncLit:
+			scanScope(fset, t.Body, alias, enclosing, u, handlerProvenance{})
+			return false
+		case *ast.AssignStmt:
+			// Bounded stream-handler provenance: an identifier assigned from
+			// sdk.NewStreamHandler() — directly or through a fluent chain —
+			// carries the receiver identity, so a later h.OnToolCall(...)
+			// attributes ir.stream.write. Single pass, one function scope,
+			// constructed values only: no interprocedural, parameter,
+			// return, closure, or struct-field propagation.
+			if len(t.Lhs) == 1 && len(t.Rhs) == 1 {
+				if ident, ok := t.Lhs[0].(*ast.Ident); ok && ident.Obj != nil && streamHandlerValue(t.Rhs[0], alias, env) { //nolint:staticcheck // SA1019 — see handlerProvenance.
+					env[ident.Obj] = true //nolint:staticcheck // SA1019 — see handlerProvenance.
+				}
 			}
 			return true
-		}
-
-		if perm, ok := sdkPermission[fn]; ok {
-			if _, seen := u.permissions[perm]; !seen {
-				u.permissions[perm] = pos
+		case *ast.ValueSpec:
+			// var handler = sdk.NewStreamHandler() — the declaration form,
+			// not only :=/assignment.
+			if len(t.Names) == 1 && len(t.Values) == 1 {
+				if ident := t.Names[0]; ident.Obj != nil && streamHandlerValue(t.Values[0], alias, env) { //nolint:staticcheck // SA1019 — see handlerProvenance.
+					env[ident.Obj] = true //nolint:staticcheck // SA1019 — see handlerProvenance.
+				}
 			}
 			return true
-		}
-
-		if fn == "HostCall" {
-			cmd, ok := literalString(call, 0)
-			if !ok {
-				u.dynamicHostCall = append(u.dynamicHostCall, pos)
-				return true
-			}
-			perm := permissionForCommand(cmd)
-			if _, seen := u.permissions[perm]; !seen {
-				u.permissions[perm] = pos
-			}
+		case *ast.CallExpr:
+			return scanCall(fset, t, alias, enclosing, u, env)
 		}
 		return true
 	})
+}
+
+// scanCall attributes one call expression: alias-qualified sdk helpers, hook
+// registrations, literal HostCall commands, and — through the bounded
+// receiver analysis — OnToolCall on a value constructed from
+// sdk.NewStreamHandler (stored or fluent-chain forms) within THIS scope's
+// lexical environment.
+func scanCall(fset *token.FileSet, call *ast.CallExpr, alias, enclosing string, u *usage, env handlerProvenance) bool {
+	sel, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok {
+		return true
+	}
+	ident, ok := sel.X.(*ast.Ident)
+	if !ok || ident.Name != alias {
+		// A receiver-method call: attribute ir.stream.write ONLY for
+		// OnToolCall on a NewStreamHandler-rooted value in this scope.
+		// OnTextDelta and Register alone never infer the grant; text-only
+		// observers stay grant-free.
+		if sel.Sel.Name == "OnToolCall" && streamHandlerValue(sel.X, alias, env) {
+			pos := fset.Position(sel.Pos())
+			if _, seen := u.permissions["ir.stream.write"]; !seen {
+				u.permissions["ir.stream.write"] = pos
+			}
+		}
+		return true
+	}
+
+	pos := fset.Position(sel.Pos())
+	fn := sel.Sel.Name
+
+	if hook, ok := sdkHook[fn]; ok {
+		if enclosing == "main" {
+			u.registeredInMain[hook] = pos
+		} else if _, seen := u.hooks[hook]; !seen {
+			u.hooks[hook] = pos
+		}
+		return true
+	}
+
+	if perm, ok := sdkPermission[fn]; ok {
+		if _, seen := u.permissions[perm]; !seen {
+			u.permissions[perm] = pos
+		}
+		return true
+	}
+
+	if fn == "HostCall" {
+		cmd, ok := literalString(call, 0)
+		if !ok {
+			u.dynamicHostCall = append(u.dynamicHostCall, pos)
+			return true
+		}
+		perm := permissionForCommand(cmd)
+		if _, seen := u.permissions[perm]; !seen {
+			u.permissions[perm] = pos
+		}
+	}
+	return true
+}
+
+// streamHandlerValue reports whether expr evaluates to a value constructed
+// from sdk.NewStreamHandler(). A fluent builder chain preserves the receiver
+// identity: sdk.NewStreamHandler().OnTextDelta(...).OnToolCall(...) is
+// rooted at NewStreamHandler even though OnTextDelta sits between, and an
+// identifier previously assigned from such a chain carries the same
+// identity. Provenance is LEXICAL: identifiers resolve through their
+// declaration identity (*ast.Object) against the CURRENT scope's
+// environment, so a same-named identifier in another function, a parameter,
+// or a shadowed local can never inherit it. The analysis is deliberately
+// bounded: within one function scope, constructed values only — no
+// interprocedural, parameter, return, closure, or struct-field propagation.
+// Lint is an early warning; the host stream verifier remains the
+// enforcement boundary.
+func streamHandlerValue(expr ast.Expr, alias string, env handlerProvenance) bool {
+	switch e := expr.(type) {
+	case *ast.CallExpr:
+		sel, ok := e.Fun.(*ast.SelectorExpr)
+		if !ok {
+			return false
+		}
+		if isStreamHandlerRoot(sel, alias) {
+			return true
+		}
+		return streamHandlerValue(sel.X, alias, env)
+	case *ast.SelectorExpr:
+		// A package-qualified selector (sdk.StreamHandler and friends) is a
+		// type or package member, never a constructed value; the alias ident
+		// itself is never a variable.
+		if _, ok := e.X.(*ast.Ident); ok {
+			return false
+		}
+		return streamHandlerValue(e.X, alias, env)
+	case *ast.Ident:
+		return e.Obj != nil && env[e.Obj] //nolint:staticcheck // SA1019 — see handlerProvenance.
+	}
+	return false
+}
+
+// isStreamHandlerRoot reports whether sel is sdk.NewStreamHandler.
+func isStreamHandlerRoot(sel *ast.SelectorExpr, alias string) bool {
+	ident, ok := sel.X.(*ast.Ident)
+	return ok && ident.Name == alias && sel.Sel.Name == "NewStreamHandler"
 }
 
 // permissionForCommand mirrors the host's derivation at
