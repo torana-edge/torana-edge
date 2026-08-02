@@ -3,11 +3,13 @@ package wasm
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
 	"math"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -101,6 +103,15 @@ type Plugin struct {
 	slots   chan struct{}
 	poolMu  sync.Mutex
 	stateMu sync.RWMutex
+
+	// poolClosed is set once by the owning runtime's close/unload path: after
+	// it, acquire fails deterministically and release(inst) CLOSES the instance
+	// instead of returning it to the (dead) pool. Guarded by stateMu.
+	poolClosed bool
+
+	// compiledCloseOnce makes the compiled-handle release exactly once even
+	// when close and unload race or repeat.
+	compiledCloseOnce sync.Once
 
 	poolSize    int
 	callTimeout time.Duration
@@ -225,6 +236,13 @@ func (p *Plugin) acquire(ctx context.Context) (*pluginInstance, error) {
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
+	p.stateMu.RLock()
+	closed := p.poolClosed
+	p.stateMu.RUnlock()
+	if closed {
+		<-p.slots
+		return nil, fmt.Errorf("wasm: %s: plugin is closed", p.name)
+	}
 	select {
 	case inst := <-p.pool:
 		if inst != nil {
@@ -245,6 +263,16 @@ func (p *Plugin) acquire(ctx context.Context) (*pluginInstance, error) {
 func (p *Plugin) release(inst *pluginInstance) {
 	defer func() { <-p.slots }()
 	if inst == nil || inst.mod == nil || inst.mod.IsClosed() {
+		return
+	}
+	p.stateMu.RLock()
+	closed := p.poolClosed
+	p.stateMu.RUnlock()
+	if closed {
+		// The pool is dead: a closed instance must never be returned to it.
+		// This is the active-call-vs-close path — the in-flight call finishes
+		// and its instance is closed here instead of re-queued.
+		_ = inst.mod.Close(context.Background())
 		return
 	}
 	if inst.logEnabled != p.hasGrant("env.log") {
@@ -474,6 +502,21 @@ type Runtime struct {
 	// calls they arrive immediately and carry attribution.
 	verdicts map[uint64]*RequestVerdicts
 
+	// lifecycleMu serializes LoadPlugin, UnloadPlugin, and Close. LoadPlugin
+	// holds it for its ENTIRE construction transaction (duplicate rejection
+	// and publication are one critical section), and Close marks closing under
+	// it before snapshotting the plugin map. After closed, loads and unloads
+	// fail/no-op deterministically.
+	lifecycleMu    sync.Mutex
+	lifecycleState lifecycleState
+	closeOnce      sync.Once
+	closeErr       error
+
+	// compiledCloses is the deterministic close-counting seam for lifecycle
+	// tests: one entry per plugin name, incremented exactly when its compiled
+	// handle is released. Guarded by lifecycleMu.
+	compiledCloses map[string]int
+
 	// cache is the cross-request TTL store shared between plugins
 	// (e.g. compactor writes intents, keyword_compactor reads them).
 	cache cache.Store
@@ -596,6 +639,15 @@ func init() {
 	wasmCompilationCache = wazero.NewCompilationCache()
 }
 
+// lifecycleState is the Runtime's ownership lifecycle.
+type lifecycleState int
+
+const (
+	lifecycleOpen lifecycleState = iota
+	lifecycleClosing
+	lifecycleClosed
+)
+
 func NewRuntime(ctx context.Context) *Runtime {
 	r := newRuntime(ctx, cache.NewLocalCache(cacheTTL), true, defaultRuntimeOptions())
 	return r
@@ -630,22 +682,128 @@ func newRuntime(ctx context.Context, store cache.Store, ownsCache bool, options 
 				WithCompilationCache(wasmCompilationCache).
 				WithMemoryLimitPages(options.MemoryLimitPages).
 				WithCloseOnContextDone(true)),
-		plugins:   make(map[string]*Plugin),
-		meta:      make(map[uint64]map[string][]byte),
-		cache:     store,
-		ownsCache: ownsCache,
-		options:   options,
+		plugins:        make(map[string]*Plugin),
+		meta:           make(map[uint64]map[string][]byte),
+		cache:          store,
+		ownsCache:      ownsCache,
+		options:        options,
+		compiledCloses: make(map[string]int),
 	}
 	wasi_snapshot_preview1.MustInstantiate(r.ctx, r.runtime)
 	r.installHostFunctions()
 	return r
 }
 
+// Close releases every owned plugin (pool instances, then each compiled
+// handle exactly once, in sorted name order for a deterministic joined error),
+// the wazero runtime, and — when owned — the cache store. Repeated and
+// concurrent Close calls return the SAME cached result; nothing is released
+// twice.
 func (r *Runtime) Close() error {
+	r.closeOnce.Do(func() {
+		r.closeErr = r.closeLocked()
+	})
+	return r.closeErr
+}
+
+func (r *Runtime) closeLocked() error {
+	r.lifecycleMu.Lock()
+	r.lifecycleState = lifecycleClosing
+	r.mu.Lock()
+	plugins := r.plugins
+	r.plugins = make(map[string]*Plugin)
+	r.mu.Unlock()
+	r.lifecycleMu.Unlock()
+
+	// Deterministic order: sorted names (map iteration is random, and the
+	// joined error must be stable across runs and tests).
+	names := make([]string, 0, len(plugins))
+	for name := range plugins {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	var errs []error
+	for _, name := range names {
+		if err := r.closePluginResources(plugins[name]); err != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", name, err))
+		}
+	}
+	// Instances and compiled handles are closed before the runtime and cache:
+	// an owned cache close must not prevent module cleanup, and vice versa.
+	if err := r.runtime.Close(r.ctx); err != nil {
+		errs = append(errs, fmt.Errorf("wazero runtime: %w", err))
+	}
 	if r.ownsCache {
 		r.cache.Close()
 	}
-	return r.runtime.Close(r.ctx)
+
+	r.lifecycleMu.Lock()
+	r.lifecycleState = lifecycleClosed
+	r.lifecycleMu.Unlock()
+	return errors.Join(errs...)
+}
+
+// UnloadPlugin removes a loaded plugin from the runtime, releasing its pool
+// instances and compiled handle exactly once. Reachability from the plugin
+// map is removed BEFORE any resource is closed. After Runtime.Close it is a
+// deterministic no-op. Used by control-plane rejection paths (a pipeline that
+// loads then rejects a plugin in non-strict mode must not retain it).
+func (r *Runtime) UnloadPlugin(name string) error {
+	r.lifecycleMu.Lock()
+	if r.lifecycleState != lifecycleOpen {
+		r.lifecycleMu.Unlock()
+		return nil
+	}
+	r.mu.Lock()
+	p, ok := r.plugins[name]
+	if ok {
+		delete(r.plugins, name)
+	}
+	r.mu.Unlock()
+	r.lifecycleMu.Unlock()
+	if !ok {
+		return nil
+	}
+	return r.closePluginResources(p)
+}
+
+// closePluginResources closes one plugin's pool instances (marking the pool
+// closed so in-flight returns are closed rather than re-queued) and then its
+// compiled handle, exactly once, recording the close-count seam.
+func (r *Runtime) closePluginResources(p *Plugin) error {
+	p.stateMu.Lock()
+	p.poolClosed = true
+	p.stateMu.Unlock()
+
+	// Instances first: wazero documents compiled-close as safe with
+	// outstanding instantiated modules, but instance-first is the clearer
+	// ownership order and does not rely on that subtle guarantee.
+	var instErrs []error
+	for {
+		select {
+		case inst := <-p.pool:
+			if inst != nil && inst.mod != nil {
+				if err := inst.mod.Close(r.ctx); err != nil {
+					instErrs = append(instErrs, err)
+				}
+			}
+		default:
+			goto drained
+		}
+	}
+drained:
+
+	var compiledErr error
+	p.compiledCloseOnce.Do(func() {
+		if p.compiled != nil {
+			compiledErr = p.compiled.Close(r.ctx)
+		}
+		r.lifecycleMu.Lock()
+		r.compiledCloses[p.name]++
+		r.lifecycleMu.Unlock()
+	})
+	return errors.Join(append(instErrs, compiledErr)...)
 }
 
 // EndRequest drops all plugin meta state for a finished request.
@@ -703,6 +861,24 @@ func reqIDFrom(ctx context.Context) uint64 {
 }
 
 func (r *Runtime) LoadPlugin(name string, wasmBytes []byte) (*Plugin, error) {
+	// The ENTIRE construction transaction runs under the lifecycle lock:
+	// duplicate rejection, compilation, and publication are one critical
+	// section, so a load can neither publish after Close's snapshot nor race
+	// a duplicate into the map. Plugin loading is control-plane work.
+	r.lifecycleMu.Lock()
+	defer r.lifecycleMu.Unlock()
+	if r.lifecycleState != lifecycleOpen {
+		return nil, fmt.Errorf("wasm: %s: runtime is closed", name)
+	}
+	r.mu.RLock()
+	_, dup := r.plugins[name]
+	r.mu.RUnlock()
+	if dup {
+		// A second load of the same name is a caller/configuration error;
+		// reject BEFORE compilation so nothing is ever acquired for it.
+		return nil, fmt.Errorf("wasm: plugin %q is already loaded", name)
+	}
+
 	// Compile once here; every pool instance is then instantiated cheaply
 	// from p.compiled. With the shared compilation cache (see NewRuntime),
 	// a runtime built on hot-reload reuses an unchanged module's machine
@@ -722,9 +898,15 @@ func (r *Runtime) LoadPlugin(name string, wasmBytes []byte) (*Plugin, error) {
 		callTimeout: r.options.CallTimeout,
 	}
 
-	// Pre-warm the pool with one instance.
+	// Pre-warm the pool with one instance. Any failure after a successful
+	// compile must release the compiled handle: it owns a shared-cache
+	// reference and would otherwise retain generated code forever.
 	inst, err := p.newInstance(r.ctx)
 	if err != nil {
+		_ = compiled.Close(r.ctx)
+		// lifecycleMu is held (the deferred unlock above); the seam is
+		// incremented directly rather than re-locking.
+		r.compiledCloses[name]++
 		return nil, fmt.Errorf("wasm: %s: %w", name, err)
 	}
 
@@ -739,6 +921,9 @@ func (r *Runtime) LoadPlugin(name string, wasmBytes []byte) (*Plugin, error) {
 	bitmap, err := supportedHooks(r.ctx, inst.mod)
 	if err != nil {
 		_ = inst.mod.Close(r.ctx)
+		_ = compiled.Close(r.ctx)
+		// lifecycleMu is held (see above).
+		r.compiledCloses[name]++
 		return nil, fmt.Errorf("wasm: %s: %w", name, err)
 	}
 	p.hooks = bitmap
@@ -750,6 +935,14 @@ func (r *Runtime) LoadPlugin(name string, wasmBytes []byte) (*Plugin, error) {
 	r.mu.Unlock()
 	log.Printf("[wasm] loaded plugin %s (pool=%d timeout=%s memory_limit=%dMiB)", name, p.poolSize, p.callTimeout, int(r.options.MemoryLimitPages)/16)
 	return p, nil
+}
+
+// recordCompiledClose increments the deterministic close-count seam. Callers
+// hold lifecycleMu (LoadPlugin does; closePluginResources re-locks).
+func (r *Runtime) recordCompiledClose(name string) {
+	r.lifecycleMu.Lock()
+	r.compiledCloses[name]++
+	r.lifecycleMu.Unlock()
 }
 
 // pluginNameOf strips the "-<instance>" suffix wazero module names carry.
