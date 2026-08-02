@@ -97,9 +97,17 @@ test: testdata
 	GOWORK=off TORANA_E2E=1 go test ./... -timeout 600s
 
 # test-race is the slow pre-merge gate: the same complete suite under -race.
+# Packages are SERIALIZED (-p=1): under -race the wazero-heavy package test
+# binaries (internal/wasm, internal/plugin, internal/proxy) each reach
+# multi-GiB RSS (kernel logs: plugin.test ~4.2 GiB anonymous, the others
+# ~3 GiB), so default package parallelism can exhaust a 16 GiB developer
+# machine — two overlapping full gates OOM-killed the host twice (see the
+# crash report). CI keeps its explicit per-package shards (separate
+# runners), which remain the fast design; only the LOCAL full gate is
+# serialized.
 test-race: testdata
 	@mkdir -p "$${TORANA_CI_CACHE:-$(CACHE_DIR)}"
-	GOWORK=off TORANA_E2E=1 go test ./... -race -timeout 1800s
+	GOWORK=off TORANA_E2E=1 go test -p=1 ./... -race -timeout 1800s
 
 # Package-scoped targets for correction rounds: build only the package's
 # required fixture set (see scripts/fixtures-for-pkg.sh), strict everywhere.

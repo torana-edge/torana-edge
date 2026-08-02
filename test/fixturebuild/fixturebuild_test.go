@@ -874,6 +874,29 @@ func TestEmptyMultiPackageUnion(t *testing.T) {
 	}
 }
 
+// TestLocalRaceTargetIsSerialized — the local full-race gate must run with
+// -p=1: under -race the wazero-heavy package binaries each reach multi-GiB
+// RSS, and default package parallelism can OOM a 16 GiB machine (two
+// overlapping full gates OOM-killed the host; see the crash report). The CI
+// per-package shards are intentionally NOT serialized — separate runners.
+func TestLocalRaceTargetIsSerialized(t *testing.T) {
+	repo := repoRoot(t)
+	b, err := os.ReadFile(filepath.Join(repo, "Makefile"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var found bool
+	for _, line := range strings.Split(string(b), "\n") {
+		if strings.Contains(line, "go test -p=1 ./... -race") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("test-race does not run with -p=1 — a default-parallel race gate can OOM the host")
+	}
+}
+
 // TestMain pins the hermetic property: no test in this package may leave the
 // tracked checkout modified (fixtures, stamps, and the local cache are
 // gitignored and therefore invisible to git status).
