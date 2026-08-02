@@ -758,8 +758,23 @@ func TestCacheDirOverride(t *testing.T) {
 		}
 	})
 	t.Run("default is the ignored repo-local dir", func(t *testing.T) {
+		// CI exports TORANA_CI_CACHE; the default only applies when the
+		// environment does not provide an override.
+		var env []string
+		for _, e := range os.Environ() {
+			if !strings.HasPrefix(e, "TORANA_CI_CACHE=") {
+				env = append(env, e)
+			}
+		}
+		cmd := exec.Command("make", "-s", "cache-dir")
+		cmd.Dir = repo
+		cmd.Env = env
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("make cache-dir: %v\n%s", err, out)
+		}
 		want := filepath.Join(repo, ".cache", "wazero")
-		if got := effective(t); got != want {
+		if got := strings.TrimSpace(string(out)); got != want {
 			t.Fatalf("effective = %q, want %q", got, want)
 		}
 	})
