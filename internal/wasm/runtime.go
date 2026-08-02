@@ -109,6 +109,18 @@ type Plugin struct {
 	// instead of returning it to the (dead) pool. Guarded by stateMu.
 	poolClosed bool
 
+	// callMu is the call-admission lock: CallRequest holds it read for its
+	// ENTIRE lifecycle (acquire through deferred release), and plugin cleanup
+	// takes it write — blocking new calls and waiting until every active call
+	// has returned before marking the pool closed and releasing the compiled
+	// handle. Cleanup cannot wait forever: every call's context carries the
+	// per-call timeout. This closes the check-then-close/requeue TOCTOU in
+	// release: while cleanup holds the write lock, no release can run.
+	callMu sync.RWMutex
+
+	// lifecycle is the owning runtime's observer seam (nil in production).
+	lifecycle *lifecycleHooks
+
 	// compiledCloseOnce makes the compiled-handle release exactly once even
 	// when close and unload race or repeat.
 	compiledCloseOnce sync.Once
@@ -246,6 +258,7 @@ func (p *Plugin) acquire(ctx context.Context) (*pluginInstance, error) {
 	select {
 	case inst := <-p.pool:
 		if inst != nil {
+			p.fireInstanceAcquired()
 			return inst, nil
 		}
 	default:
@@ -256,7 +269,16 @@ func (p *Plugin) acquire(ctx context.Context) (*pluginInstance, error) {
 		<-p.slots
 		return nil, err
 	}
+	p.fireInstanceAcquired()
 	return inst, nil
+}
+
+// fireInstanceAcquired invokes the observer seam when a call has acquired an
+// instance (the admission read lock is held).
+func (p *Plugin) fireInstanceAcquired() {
+	if p.lifecycle != nil && p.lifecycle.instanceAcquired != nil {
+		p.lifecycle.instanceAcquired(p.name)
+	}
 }
 
 // release returns an instance to the pool.
@@ -343,6 +365,17 @@ func (p *Plugin) newInstance(ctx context.Context) (*pluginInstance, error) {
 // travels in the payload the caller already built; this argument exists to skip
 // guests that do not implement it, and to name the hook in errors.
 func (p *Plugin) CallRequest(ctx context.Context, hook pbv2.Hook, reqID uint64, inBytes []byte, output *[]byte) error {
+	// Call admission: the read lock is held for the ENTIRE call lifecycle —
+	// guards, acquire, the guest call, and the deferred release. Plugin
+	// cleanup takes the write lock, so a call in flight here both blocks
+	// close's resource release and is guaranteed to finish (its per-call
+	// timeout bounds the wait) before the pool is drained and the compiled
+	// handle is released.
+	p.callMu.RLock()
+	defer func() {
+		p.fireCallFinished()
+		p.callMu.RUnlock()
+	}()
 	if output == nil {
 		return fmt.Errorf("wasm: %s nil output", p.name)
 	}
@@ -512,10 +545,10 @@ type Runtime struct {
 	closeOnce      sync.Once
 	closeErr       error
 
-	// compiledCloses is the deterministic close-counting seam for lifecycle
-	// tests: one entry per plugin name, incremented exactly when its compiled
-	// handle is released. Guarded by lifecycleMu.
-	compiledCloses map[string]int
+	// testHooks is a nil-by-default lifecycle observer seam used by the
+	// reference-model tests. Production never installs it: the hooks cost
+	// nothing when nil and no test counters live in the production struct.
+	testHooks *lifecycleHooks
 
 	// cache is the cross-request TTL store shared between plugins
 	// (e.g. compactor writes intents, keyword_compactor reads them).
@@ -648,6 +681,29 @@ const (
 	lifecycleClosed
 )
 
+// lifecycleHooks is the deterministic observer seam for lifecycle tests. Every
+// event fires exactly when the transition happens (including post-compile
+// failure paths), and the reference model replays the recorded stream.
+type lifecycleHooks struct {
+	// loadBegin fires when a LoadPlugin transaction starts (after the
+	// lifecycle/duplicate guards).
+	loadBegin func(name string)
+	// published fires when a plugin is inserted into the map.
+	published func(name string)
+	// instanceAcquired fires when a plugin instance is successfully acquired
+	// for a call.
+	instanceAcquired func(name string)
+	// callFinished fires when a CallRequest's deferred release has run (the
+	// admission read lock is still held at this point).
+	callFinished func(name string)
+	// compiledReleased fires exactly when a compiled handle is released
+	// (closePluginResources or a post-compile LoadPlugin failure path).
+	compiledReleased func(name string)
+	// closeBegin and closeEnd bracket Runtime.Close's resource release.
+	closeBegin func()
+	closeEnd   func()
+}
+
 func NewRuntime(ctx context.Context) *Runtime {
 	r := newRuntime(ctx, cache.NewLocalCache(cacheTTL), true, defaultRuntimeOptions())
 	return r
@@ -682,12 +738,11 @@ func newRuntime(ctx context.Context, store cache.Store, ownsCache bool, options 
 				WithCompilationCache(wasmCompilationCache).
 				WithMemoryLimitPages(options.MemoryLimitPages).
 				WithCloseOnContextDone(true)),
-		plugins:        make(map[string]*Plugin),
-		meta:           make(map[uint64]map[string][]byte),
-		cache:          store,
-		ownsCache:      ownsCache,
-		options:        options,
-		compiledCloses: make(map[string]int),
+		plugins:   make(map[string]*Plugin),
+		meta:      make(map[uint64]map[string][]byte),
+		cache:     store,
+		ownsCache: ownsCache,
+		options:   options,
 	}
 	wasi_snapshot_preview1.MustInstantiate(r.ctx, r.runtime)
 	r.installHostFunctions()
@@ -714,6 +769,7 @@ func (r *Runtime) closeLocked() error {
 	r.plugins = make(map[string]*Plugin)
 	r.mu.Unlock()
 	r.lifecycleMu.Unlock()
+	r.fireCloseBegin()
 
 	// Deterministic order: sorted names (map iteration is random, and the
 	// joined error must be stable across runs and tests).
@@ -741,6 +797,7 @@ func (r *Runtime) closeLocked() error {
 	r.lifecycleMu.Lock()
 	r.lifecycleState = lifecycleClosed
 	r.lifecycleMu.Unlock()
+	r.fireCloseEnd()
 	return errors.Join(errs...)
 }
 
@@ -768,10 +825,16 @@ func (r *Runtime) UnloadPlugin(name string) error {
 	return r.closePluginResources(p)
 }
 
-// closePluginResources closes one plugin's pool instances (marking the pool
-// closed so in-flight returns are closed rather than re-queued) and then its
-// compiled handle, exactly once, recording the close-count seam.
+// closePluginResources closes one plugin's resources under the call-admission
+// WRITE lock: new calls are blocked and every active call must finish (its
+// per-call timeout bounds the wait) and release before the pool is marked
+// closed, idle instances are drained, and the compiled handle is released —
+// exactly once, in instance-before-compiled order. While the write lock is
+// held no release() can run, which closes the check-then-close/requeue
+// TOCTOU.
 func (r *Runtime) closePluginResources(p *Plugin) error {
+	p.callMu.Lock()
+	defer p.callMu.Unlock()
 	p.stateMu.Lock()
 	p.poolClosed = true
 	p.stateMu.Unlock()
@@ -799,11 +862,58 @@ drained:
 		if p.compiled != nil {
 			compiledErr = p.compiled.Close(r.ctx)
 		}
-		r.lifecycleMu.Lock()
-		r.compiledCloses[p.name]++
-		r.lifecycleMu.Unlock()
+		r.fireCompiledReleased(p.name)
 	})
 	return errors.Join(append(instErrs, compiledErr)...)
+}
+
+// fireCallFinished invokes the observer seam when a call's deferred release
+// has run (the admission read lock is still held).
+func (p *Plugin) fireCallFinished() {
+	if p.lifecycle != nil && p.lifecycle.callFinished != nil {
+		p.lifecycle.callFinished(p.name)
+	}
+}
+
+// wrapCloseErr converts a cleanup error into a stable joined fragment (nil
+// when the close succeeded).
+func wrapCloseErr(what string, err error) error {
+	if err == nil {
+		return nil
+	}
+	return fmt.Errorf("%s close: %w", what, err)
+}
+
+// fireCompiledReleased invokes the observer seam for a compiled-handle
+// release. Nil hooks are a no-op; tests install a recorder.
+func (r *Runtime) fireCompiledReleased(name string) {
+	if r.testHooks != nil && r.testHooks.compiledReleased != nil {
+		r.testHooks.compiledReleased(name)
+	}
+}
+
+func (r *Runtime) fireLoadBegin(name string) {
+	if r.testHooks != nil && r.testHooks.loadBegin != nil {
+		r.testHooks.loadBegin(name)
+	}
+}
+
+func (r *Runtime) firePublished(name string) {
+	if r.testHooks != nil && r.testHooks.published != nil {
+		r.testHooks.published(name)
+	}
+}
+
+func (r *Runtime) fireCloseBegin() {
+	if r.testHooks != nil && r.testHooks.closeBegin != nil {
+		r.testHooks.closeBegin()
+	}
+}
+
+func (r *Runtime) fireCloseEnd() {
+	if r.testHooks != nil && r.testHooks.closeEnd != nil {
+		r.testHooks.closeEnd()
+	}
 }
 
 // EndRequest drops all plugin meta state for a finished request.
@@ -878,6 +988,7 @@ func (r *Runtime) LoadPlugin(name string, wasmBytes []byte) (*Plugin, error) {
 		// reject BEFORE compilation so nothing is ever acquired for it.
 		return nil, fmt.Errorf("wasm: plugin %q is already loaded", name)
 	}
+	r.fireLoadBegin(name)
 
 	// Compile once here; every pool instance is then instantiated cheaply
 	// from p.compiled. With the shared compilation cache (see NewRuntime),
@@ -891,6 +1002,7 @@ func (r *Runtime) LoadPlugin(name string, wasmBytes []byte) (*Plugin, error) {
 	p := &Plugin{
 		name:        name,
 		compiled:    compiled,
+		lifecycle:   r.testHooks,
 		runtime:     r.runtime,
 		pool:        make(chan *pluginInstance, r.options.PoolSize),
 		slots:       make(chan struct{}, r.options.PoolSize),
@@ -903,11 +1015,9 @@ func (r *Runtime) LoadPlugin(name string, wasmBytes []byte) (*Plugin, error) {
 	// reference and would otherwise retain generated code forever.
 	inst, err := p.newInstance(r.ctx)
 	if err != nil {
-		_ = compiled.Close(r.ctx)
-		// lifecycleMu is held (the deferred unlock above); the seam is
-		// incremented directly rather than re-locking.
-		r.compiledCloses[name]++
-		return nil, fmt.Errorf("wasm: %s: %w", name, err)
+		closeErr := compiled.Close(r.ctx)
+		r.fireCompiledReleased(name)
+		return nil, errors.Join(fmt.Errorf("wasm: %s: %w", name, err), wrapCloseErr("compiled", closeErr))
 	}
 
 	// Read the guest's hook set HERE, not in ValidateHooks.
@@ -920,11 +1030,11 @@ func (r *Runtime) LoadPlugin(name string, wasmBytes []byte) (*Plugin, error) {
 	// ValidateHooks then only compares it against the manifest.
 	bitmap, err := supportedHooks(r.ctx, inst.mod)
 	if err != nil {
-		_ = inst.mod.Close(r.ctx)
-		_ = compiled.Close(r.ctx)
-		// lifecycleMu is held (see above).
-		r.compiledCloses[name]++
-		return nil, fmt.Errorf("wasm: %s: %w", name, err)
+		instErr := inst.mod.Close(r.ctx)
+		compiledErr := compiled.Close(r.ctx)
+		r.fireCompiledReleased(name)
+		return nil, errors.Join(fmt.Errorf("wasm: %s: %w", name, err),
+			wrapCloseErr("instance", instErr), wrapCloseErr("compiled", compiledErr))
 	}
 	p.hooks = bitmap
 
@@ -933,16 +1043,9 @@ func (r *Runtime) LoadPlugin(name string, wasmBytes []byte) (*Plugin, error) {
 	r.mu.Lock()
 	r.plugins[name] = p
 	r.mu.Unlock()
+	r.firePublished(name)
 	log.Printf("[wasm] loaded plugin %s (pool=%d timeout=%s memory_limit=%dMiB)", name, p.poolSize, p.callTimeout, int(r.options.MemoryLimitPages)/16)
 	return p, nil
-}
-
-// recordCompiledClose increments the deterministic close-count seam. Callers
-// hold lifecycleMu (LoadPlugin does; closePluginResources re-locks).
-func (r *Runtime) recordCompiledClose(name string) {
-	r.lifecycleMu.Lock()
-	r.compiledCloses[name]++
-	r.lifecycleMu.Unlock()
 }
 
 // pluginNameOf strips the "-<instance>" suffix wazero module names carry.

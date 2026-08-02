@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "id": "torana-test/test-memory-hog",
+  "name": "test-memory-hog",
+  "version": "0.1.0",
+  "abi_version": "v2",
+  "failure_mode": "pass",
+  "description": "Allocates 48 MiB at init: fits the default limit, fails a 16 MiB-limited instantiation",
+  "hooks": [{"name": "run_before_request"}],
+  "permissions": []
+}

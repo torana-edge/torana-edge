@@ -15,6 +15,7 @@ import (
 // Strict whole-pipeline failure remains the caller's runtime-close concern.
 func TestPipelineRejectionUnloadsPlugin(t *testing.T) {
 	rt := wasm.NewRuntime(context.Background())
+	t.Cleanup(func() { _ = rt.Close() })
 
 	// A temp bundle dir: copy the test-inert-a fixture but declare a hook the
 	// guest does not export, so ValidateHooks rejects it AFTER LoadPlugin.
