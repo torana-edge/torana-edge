@@ -83,7 +83,7 @@ func compareSections(accepted, out *pb.ChatRequest) changedSections {
 			c.messages[b.Role] = true
 		case b == nil:
 			c.messages[a.Role] = true
-		case !proto.Equal(a, b):
+		case !sameMessageWithoutMarker(a, b):
 			c.messages[a.Role] = true
 			c.messages[b.Role] = true
 		}
@@ -93,7 +93,7 @@ func compareSections(accepted, out *pb.ChatRequest) changedSections {
 		c.tools = true
 	} else {
 		for i := range accepted.Tools {
-			if !proto.Equal(accepted.Tools[i], out.Tools[i]) {
+			if !sameToolWithoutMarker(accepted.Tools[i], out.Tools[i]) {
 				c.tools = true
 				break
 			}
@@ -146,6 +146,27 @@ func cacheControlChanged(accepted, out *pb.ChatRequest) bool {
 		}
 	}
 	return false
+}
+
+// sameMessageWithoutMarker compares two messages EXCLUDING
+// cache_control_json: markers are governed by ir.cache_control.write as a
+// section of their own (cacheControlChanged), never by the role sections —
+// the oracle must agree with the production fingerprint, or a marker-only
+// mutation would look like a role change to the exact comparison.
+func sameMessageWithoutMarker(a, b *pb.Message) bool {
+	ca := proto.Clone(a).(*pb.Message)
+	cb := proto.Clone(b).(*pb.Message)
+	ca.CacheControlJson, cb.CacheControlJson = nil, nil
+	return proto.Equal(ca, cb)
+}
+
+// sameToolWithoutMarker compares two tool definitions EXCLUDING
+// cache_control_json, for the same reason.
+func sameToolWithoutMarker(a, b *pb.ToolDef) bool {
+	ca := proto.Clone(a).(*pb.ToolDef)
+	cb := proto.Clone(b).(*pb.ToolDef)
+	ca.CacheControlJson, cb.CacheControlJson = nil, nil
+	return proto.Equal(ca, cb)
 }
 
 func sameParams(a, b *pb.ChatRequest) bool {

@@ -249,6 +249,73 @@ func TestMarkerMoveCannotEvade(t *testing.T) {
 	if err := verifyRequestMutation(accepted, del, delBoth); err != nil {
 		t.Fatalf("delete with both grants must pass: %v", err)
 	}
+
+	// ---- ToolDef markers: same positional rules through the FINGERPRINT
+	// verifier ----
+	toolAcc := &pb.ChatRequest{Tools: []*pb.ToolDef{
+		{Name: "read", Description: "d"},
+		{Name: "write", Description: "d", CacheControlJson: marker()},
+	}}
+	// Unchanged marker moved between tool indices.
+	toolMoved := &pb.ChatRequest{Tools: []*pb.ToolDef{
+		{Name: "read", Description: "d", CacheControlJson: marker()},
+		{Name: "write", Description: "d"},
+	}}
+	if err := verifyRequestMutation(toolAcc, toolMoved, ccOnly); err != nil {
+		t.Fatalf("a tool marker move with unchanged bytes must be a cache-control change only, got: %v", err)
+	}
+	if err := verifyRequestMutation(toolAcc, toolMoved, allRoleAndToolGrants); err == nil {
+		t.Fatal("a tool marker move must fail without ir.cache_control.write")
+	}
+	// Marker-bearing tool ADD: cache-control AND ir.tools.write both charge.
+	toolAdded := &pb.ChatRequest{Tools: []*pb.ToolDef{
+		{Name: "read", Description: "d"},
+		{Name: "write", Description: "d", CacheControlJson: marker()},
+		{Name: "grep", Description: "d", CacheControlJson: marker()},
+	}}
+	toolsOnly := func(section string) bool { return section == "ir.tools.write" }
+	if err := verifyRequestMutation(toolAcc, toolAdded, toolsOnly); err == nil {
+		t.Fatal("adding a marker-bearing tool must charge ir.cache_control.write")
+	}
+	if err := verifyRequestMutation(toolAcc, toolAdded, ccOnly); err == nil {
+		t.Fatal("adding a tool must charge ir.tools.write")
+	}
+	toolUnion := func(section string) bool { return toolsOnly(section) || ccOnly(section) }
+	if err := verifyRequestMutation(toolAcc, toolAdded, toolUnion); err != nil {
+		t.Fatalf("tool add with both grants must pass: %v", err)
+	}
+	// Marker-bearing tool DELETE: same union.
+	toolDel := &pb.ChatRequest{Tools: []*pb.ToolDef{
+		{Name: "read", Description: "d"},
+	}}
+	if err := verifyRequestMutation(toolAcc, toolDel, toolsOnly); err == nil {
+		t.Fatal("deleting a marker-bearing tool must charge ir.cache_control.write")
+	}
+	if err := verifyRequestMutation(toolAcc, toolDel, toolUnion); err != nil {
+		t.Fatalf("tool delete with both grants must pass: %v", err)
+	}
+
+	// ---- The comparison ORACLE must agree with the fingerprint on every
+	// ToolDef case above (parallel positional implementations cannot drift).
+	if !compareSections(toolAcc, toolMoved).cacheControl {
+		t.Fatal("oracle: tool marker move not flagged as cacheControl")
+	}
+	if compareSections(toolAcc, toolMoved).tools {
+		t.Fatal("oracle: tool marker move must not flag the tools section")
+	}
+	ccAdd := compareSections(toolAcc, toolAdded)
+	if !ccAdd.cacheControl || !ccAdd.tools {
+		t.Fatalf("oracle: tool add must flag cacheControl AND tools, got %+v", ccAdd)
+	}
+	ccDel := compareSections(toolAcc, toolDel)
+	if !ccDel.cacheControl || !ccDel.tools {
+		t.Fatalf("oracle: tool delete must flag cacheControl AND tools, got %+v", ccDel)
+	}
+	// And the message-side move for completeness.
+	msgMoved := compareSections(accepted, out)
+	if !msgMoved.cacheControl || len(msgMoved.messages) != 0 {
+		t.Fatalf("oracle: message marker move must flag cacheControl only, got %+v", msgMoved)
+	}
 }
 
 // TestHoldsAllRequestGrantsIncludesCacheControl — the all-grants fast path
@@ -280,10 +347,12 @@ type ccFakeGrants struct{ set map[string]bool }
 
 func (f *ccFakeGrants) HasGrant(p string) bool { return f.set[p] }
 
-// TestManifestAndLintAcceptTheGrant — manifest validation and lint accept
-// ir.cache_control.write (they derive from sdk.Permissions, which the SDK PR
-// extended).
-func TestManifestAndLintAcceptTheGrant(t *testing.T) {
+// TestManifestAcceptsTheGrant — manifest validation accepts
+// ir.cache_control.write (supportedPermissions derives from sdk.Permissions,
+// which the SDK PR extended). The LINTER's acceptance and attribution
+// regressions live in internal/plugincmd (lint_test.go), which runs the real
+// scanner; this package only validates the manifest.
+func TestManifestAcceptsTheGrant(t *testing.T) {
 	if _, ok := supportedPermissions[ccGrant]; !ok {
 		t.Fatal("supportedPermissions does not include ir.cache_control.write")
 	}

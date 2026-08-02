@@ -31,23 +31,25 @@ const sdkModulePath = "github.com/torana-edge/torana-plugin-sdk"
 // sdk.HostCall is handled separately: its capability comes from the command
 // string, which is only knowable when that argument is a literal.
 var sdkPermission = map[string]string{
-	"Log":              "env.log",
-	"EmitMetric":       "env.emit_metric",
-	"PluginConfig":     "env.plugin_config",
-	"StateGet":         "env.state_get",
-	"StateGetJSON":     "env.state_get",
-	"StateSet":         "env.state_set",
-	"StateSetJSON":     "env.state_set",
-	"StateDelete":      "env.state_set",
-	"StateKeys":        "env.state_keys",
-	"Now":              "env.now",
-	"OriginalRequest":  "env.original_request",
-	"OriginalResponse": "env.original_response",
-	"GetCachePricing":  "env.host_call.torana_cache_pricing",
-	"SendRequest":      "env.host_call.torana_send_request",
-	"BlockRequest":     "env.block_request",
-	"RespondRequest":   "env.respond_request",
-	"RouteRequest":     "env.route_request",
+	"Log":                 "env.log",
+	"EmitMetric":          "env.emit_metric",
+	"PluginConfig":        "env.plugin_config",
+	"StateGet":            "env.state_get",
+	"StateGetJSON":        "env.state_get",
+	"StateSet":            "env.state_set",
+	"StateSetJSON":        "env.state_set",
+	"StateDelete":         "env.state_set",
+	"StateKeys":           "env.state_keys",
+	"Now":                 "env.now",
+	"OriginalRequest":     "env.original_request",
+	"OriginalResponse":    "env.original_response",
+	"GetCachePricing":     "env.host_call.torana_cache_pricing",
+	"SendRequest":         "env.host_call.torana_send_request",
+	"SetCacheBreakpoint":  "ir.cache_control.write",
+	"MoveCacheBreakpoint": "ir.cache_control.write",
+	"BlockRequest":        "env.block_request",
+	"RespondRequest":      "env.respond_request",
+	"RouteRequest":        "env.route_request",
 }
 
 // sdkHook maps a registration call to the hook it implements.
@@ -74,6 +76,19 @@ var hookGatePermission = map[string]string{
 // gets ignored, and then it is worse than no linter.
 var unattributable = map[string]bool{
 	"env.request_headers": true,
+}
+
+// writeGrantsAreUnattributable reports whether perm is an ir.*.write grant.
+// Write grants are exercised by direct protobuf mutations (Content = …,
+// CacheControlJson = …, Model = …), which have no reliably attributable SDK
+// call site, and field-name inference was explicitly rejected. A plugin that
+// declares a write grant must never be warned as unused — the grant is
+// verified by the HOST against the actual output, which is the only honest
+// attribution. (sdk.SetCacheBreakpoint / sdk.MoveCacheBreakpoint DO map to
+// ir.cache_control.write in sdkPermission, so helper use is still caught in
+// the used-but-undeclared direction.)
+func writeGrantsAreUnattributable(perm string) bool {
+	return sdk.IsWritePermission(perm)
 }
 
 type severity int
@@ -259,7 +274,7 @@ func lintPermissions(manifest plugin.PluginManifest, u *usage, hooks map[string]
 			if _, used := u.permissions[perm]; used {
 				continue
 			}
-			if unattributable[perm] {
+			if unattributable[perm] || writeGrantsAreUnattributable(perm) {
 				continue
 			}
 			// A hook gate is used by declaring its hook, not by calling

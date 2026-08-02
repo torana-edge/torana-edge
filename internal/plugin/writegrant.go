@@ -275,10 +275,11 @@ func fingerprintRequestSections(req *pb.ChatRequest) requestSections {
 // bytes are unchanged, and a marker added, removed, inserted, or deleted
 // changes it too. Marker-less structural changes (inserting or deleting a
 // plain message) do NOT touch the section — a plugin that never looks at a
-// marker must not need the grant. Presence is carried so present-empty and
-// absent never collide; no other field participates: content, role, tool
-// identity/schema, model, params, and signatures stay in their own sections
-// (or are host-owned).
+// marker must not need the grant. proto3 bytes carries no presence: a
+// zero-length value IS the marker-less state, so empty and absent are the
+// same and no artificial presence framing exists. No other field
+// participates: content, role, tool identity/schema, model, params, and
+// signatures stay in their own sections (or are host-owned).
 func fingerprintCacheControlSection(req *pb.ChatRequest) [32]byte {
 	h := sha256.New()
 	var idx [8]byte
