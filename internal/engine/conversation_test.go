@@ -98,10 +98,12 @@ func TestConversationIDIsFormatAgnostic(t *testing.T) {
 		ProviderExtensions: mustMeta(map[string]any{"prompt_cache_key": "some-harness-key"}),
 	}
 	codeAssist := &ChatRequest{
-		Messages: msgs(sys("prompt"), user("hello")),
+		CodeAssist: true, // typed host-only topology (never in the ABI)
+		Messages:   msgs(sys("prompt"), user("hello")),
 		ProviderExtensions: mustMeta(map[string]any{
-			"_codeassist":    true,
-			"_request_extra": map[string]any{"sessionId": "harness-session-abc"},
+			// The deliberate 4b envelope: outer extras at top, inner extras
+			// under `request`.
+			"request": map[string]any{"sessionId": "harness-session-abc"},
 		}),
 	}
 

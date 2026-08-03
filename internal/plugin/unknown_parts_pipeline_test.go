@@ -9,6 +9,9 @@ import (
 
 	"github.com/torana-edge/torana-edge/internal/engine"
 	"github.com/torana-edge/torana-edge/internal/format/gemini"
+	"github.com/torana-edge/torana-edge/internal/provider"
+	"github.com/torana-edge/torana-edge/internal/wasm"
+	pb "github.com/torana-edge/torana-plugin-sdk/pb/v2"
 )
 
 // geminiAdapter is the adapter the final-wire assertions marshal through.
@@ -328,31 +331,51 @@ func assertFRPWire(t *testing.T, wire []byte, arm, inner string) error {
 	return nil
 }
 
-// TestCodeAssistTypedFactsSurviveWASMPass — the typed Code Assist variant
-// and the provider-visible envelope survive a real WASM pass: the plugin
-// cannot forge or lose the typed flag, and the envelope extras reach the
-// final wire at their exact scopes.
-func TestCodeAssistTypedFactsSurviveWASMPass(t *testing.T) {
-	requireWASM(t, fixturesDir+"/test-inert-a/plugin.wasm")
-	pp := newTestPipeline(t, fixturesDir, []string{"test-inert-a"})
+// TestTypedHostFactsSurviveRealReplacement — a REAL replacement
+// (test-mutator rewrites the user text) exercises the PB round-trip and
+// the restoration path: ALL THREE typed host facts (Code Assist variant,
+// OpenAI variant, Responses layout) are restored EXACTLY from the
+// accepted request — a plugin can neither forge nor lose them — and the
+// Code Assist envelope extras reach the final wire at their exact scopes.
+func TestTypedHostFactsSurviveRealReplacement(t *testing.T) {
+	requireWASM(t, fixturesDir+"/test-mutator/plugin.wasm")
+	pp := newTestPipeline(t, fixturesDir, []string{"test-mutator"})
 
 	env, err := engine.ParseOptionalJSONObject([]byte(`{"project":"p-1","request":{"sessionId":"s-9"}}`))
 	if err != nil {
 		t.Fatal(err)
 	}
+	layout, err := engine.ParseOptionalJSONArray([]byte(`[{"type":"message","role":"user","content":"hi"},{"type":"reasoning","encrypted_content":"opaque"}]`))
+	if err != nil {
+		t.Fatal(err)
+	}
 	chat := &engine.ChatRequest{
-		Model:              "gemini-3.5-flash",
-		CodeAssist:         true,
-		ProviderExtensions: env,
-		Messages:           []engine.Message{{Role: engine.RoleUser, Blocks: []engine.Block{{Text: &engine.TextBlock{Text: "hi"}}}}},
+		Model:                "gemini-3.5-flash",
+		CodeAssist:           true,
+		OpenAIVariant:        engine.OpenAIResponses,
+		ResponsesInputLayout: layout,
+		ProviderExtensions:   env,
+		Messages:             []engine.Message{{Role: engine.RoleUser, Blocks: []engine.Block{{Text: &engine.TextBlock{Text: "hi"}}}}},
 	}
 	out, err := pp.RunBeforeRequest(context.Background(), 13, chat, nil)
 	if err != nil {
 		t.Fatalf("RunBeforeRequest: %v", err)
 	}
-	if !out.CodeAssist {
-		t.Fatal("the typed Code Assist variant was lost through the pass")
+	// The mutator rewrote the text (a REAL replacement happened).
+	if out.Messages[0].Blocks[0].Text.Text == "hi" {
+		t.Fatal("test-mutator did not replace (the pin is vacuous)")
 	}
+	// EXACT restoration of all three host-only facts.
+	if !out.CodeAssist {
+		t.Fatal("the typed Code Assist variant was lost through the replacement")
+	}
+	if out.OpenAIVariant != engine.OpenAIResponses {
+		t.Fatalf("the OpenAI variant was lost: %v", out.OpenAIVariant)
+	}
+	if out.ResponsesInputLayout.IsAbsent() || string(out.ResponsesInputLayout.Bytes()) != string(layout.Bytes()) {
+		t.Fatalf("the Responses layout was lost: %q", out.ResponsesInputLayout.Bytes())
+	}
+	// The envelope extras survive the replacement at their exact scopes.
 	wire, err := geminiAdapter.Marshal(out)
 	if err != nil {
 		t.Fatal(err)
@@ -371,4 +394,108 @@ func TestCodeAssistTypedFactsSurviveWASMPass(t *testing.T) {
 	if req["sessionId"] != "s-9" {
 		t.Fatalf("inner extra lost: %v", req["sessionId"])
 	}
+}
+
+// smuggleValidator is the gemini Code Assist candidate validator used by
+// the pipeline pins (mirrors the proxy wiring).
+func smuggleValidator(topo engine.TopologyFacts, current, replacement *pb.ChatRequest) error {
+	if topo.CodeAssist {
+		return gemini.VerifyCodeAssistEnvelopePB(replacement.ProviderExtensionsJson)
+	}
+	return nil
+}
+
+// codeAssistRequest builds a Code Assist engine request with the typed
+// flag and a valid envelope.
+func codeAssistRequest() *engine.ChatRequest {
+	env, err := engine.ParseOptionalJSONObject([]byte(`{"project":"p-1","request":{"sessionId":"s-9"}}`))
+	if err != nil {
+		panic(err)
+	}
+	return &engine.ChatRequest{
+		Model:              "gemini-3.5-flash",
+		CodeAssist:         true,
+		ProviderExtensions: env,
+		Messages:           []engine.Message{{Role: engine.RoleUser, Blocks: []engine.Block{{Text: &engine.TextBlock{Text: "hi"}}}}},
+	}
+}
+
+// TestEnvelopeSmugglingBlockMode — a real guest smuggling a canonical
+// member into the Code Assist envelope is attributed to THAT plugin: in
+// block mode the replacement is refused with the plugin named.
+func TestEnvelopeSmugglingBlockMode(t *testing.T) {
+	requireWASM(t, fixturesDir+"/test-envelope-smuggler/plugin.wasm")
+	pp := newTestPipeline(t, fixturesDir, []string{"test-envelope-smuggler"})
+	pp.CandidateValidator = smuggleValidator
+
+	chat := codeAssistRequest()
+	_, err := pp.RunBeforeRequest(context.Background(), 20, chat, nil)
+	if err == nil {
+		t.Fatal("block-mode smuggling must be refused")
+	}
+	if !strings.Contains(err.Error(), "test-envelope-smuggler") {
+		t.Fatalf("error must name the plugin: %v", err)
+	}
+}
+
+// TestEnvelopeSmugglingPassRollsBackAndChains — in pass mode the smuggled
+// replacement is dropped and the PRE-PLUGIN request chains to a downstream
+// observer, which must see the untouched envelope.
+func TestEnvelopeSmugglingPassRollsBackAndChains(t *testing.T) {
+	requireWASM(t, fixturesDir+"/test-envelope-smuggler/plugin.wasm")
+	requireWASM(t, fixturesDir+"/test-inert-a/plugin.wasm")
+	pp := newTestPipeline(t, fixturesDir, []string{"test-envelope-smuggler", "test-inert-a"})
+	// The smuggler's manifest failure mode is block; override to pass via
+	// an approval map so this pin exercises the pass semantics.
+	digest, err := pluginBundleDigest(t, "test-envelope-smuggler")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pp = pipelineWithApproval(t, fixturesDir, []string{"test-envelope-smuggler", "test-inert-a"}, map[string]provider.PluginApproval{
+		"test-envelope-smuggler": {Digest: digest, Permissions: []string{"ir.params.write"}, FailureMode: "pass"},
+	})
+	pp.CandidateValidator = smuggleValidator
+
+	chat := codeAssistRequest()
+	out, err := pp.RunBeforeRequest(context.Background(), 21, chat, nil)
+	if err != nil {
+		t.Fatalf("pass mode must not error: %v", err)
+	}
+	if out == nil {
+		t.Fatal("no chained output")
+	}
+	// The downstream chain saw the PRE-PLUGIN request: no smuggled model,
+	// the envelope intact.
+	ext := string(out.ProviderExtensions.Bytes())
+	if strings.Contains(ext, "smuggled-model") {
+		t.Fatalf("the smuggled member chained downstream: %s", ext)
+	}
+	if !out.CodeAssist {
+		t.Fatal("typed variant lost")
+	}
+	if !strings.Contains(ext, `"sessionId":"s-9"`) {
+		t.Fatalf("envelope altered through the pass: %s", ext)
+	}
+}
+
+// pluginBundleDigest computes the digest of a fixture directory.
+func pluginBundleDigest(t *testing.T, name string) (string, error) {
+	t.Helper()
+	return BundleDigestForDir(fixturesDir + "/" + name)
+}
+
+// pipelineWithApproval builds a pipeline with an explicit approval map.
+func pipelineWithApproval(t testing.TB, dir string, order []string, approvals map[string]provider.PluginApproval) *PluginPipeline {
+	conv := map[string]Approval{}
+	for name, a := range approvals {
+		conv[name] = Approval{Digest: a.Digest, Permissions: a.Permissions, FailureMode: a.FailureMode}
+	}
+	t.Helper()
+	rt := wasm.NewRuntime(context.Background())
+	t.Cleanup(func() { rt.Close() })
+	pp, err := NewPipeline(rt, PluginConfig{Dir: dir, Order: order, Approvals: conv})
+	if err != nil {
+		t.Fatalf("NewPipeline: %v", err)
+	}
+	return pp
 }

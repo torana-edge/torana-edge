@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
+	"strconv"
 	"testing"
 
 	plugin_sdk "github.com/torana-edge/torana-plugin-sdk"
@@ -133,6 +134,26 @@ func referencePrefixKey(c *pb.ChatRequest, topo TopologyFacts) string {
 	frameStr("variant")
 	frameStr(string(rune('0' + topo.OpenAIVariant)))
 	frameBytes(topo.ResponsesInputLayout.Bytes())
+
+	// Generation params (part of the model-visible prefix).
+	frameStr("params")
+	if c.MaxTokens != nil {
+		frameStr("max_tokens")
+		frameStr(strconv.FormatInt(int64(*c.MaxTokens), 10))
+	}
+	if c.Temperature != nil {
+		frameStr("temperature")
+		frameStr(strconv.FormatFloat(float64(*c.Temperature), 'g', -1, 64))
+	}
+	if c.TopP != nil {
+		frameStr("top_p")
+		frameStr(strconv.FormatFloat(float64(*c.TopP), 'g', -1, 64))
+	}
+	frameStr("stops")
+	frameStr(strconv.Itoa(len(c.StopSequences)))
+	for _, st := range c.StopSequences {
+		frameStr(st)
+	}
 
 	// The reference model mirrors production fail-closed semantics: an
 	// SDK fingerprint error makes the whole key empty.
@@ -274,5 +295,36 @@ func TestCachePrefixKeyTopologySensitive(t *testing.T) {
 	combo := key(TopologyFacts{CodeAssist: true, OpenAIVariant: OpenAIResponses})
 	if combo == plain || combo == codeAssist || combo == responses {
 		t.Fatal("combined facts must produce a distinct key")
+	}
+}
+
+// TestCachePrefixKeyParamsSensitive — the generation params are part of
+// the model-visible prefix: max_tokens, temperature, top_p, and stops
+// each flip the key (checkpoint inventory), and the reference model
+// agrees.
+func TestCachePrefixKeyParamsSensitive(t *testing.T) {
+	base := &pb.ChatRequest{Model: "m", Messages: []*pb.Message{pbUserMsg("u")}}
+	mt := int32(1024)
+	temp := 0.7
+	topP := 0.9
+	rows := map[string]func(*pb.ChatRequest){
+		"max_tokens":  func(r *pb.ChatRequest) { r.MaxTokens = &mt },
+		"temperature": func(r *pb.ChatRequest) { r.Temperature = &temp },
+		"top_p":       func(r *pb.ChatRequest) { r.TopP = &topP },
+		"stops":       func(r *pb.ChatRequest) { r.StopSequences = []string{"a", "b"} },
+	}
+	plain := CachePrefixKey(base)
+	for name, mut := range rows {
+		t.Run(name, func(t *testing.T) {
+			r := proto.Clone(base).(*pb.ChatRequest)
+			mut(r)
+			got := CachePrefixKey(r)
+			if got == plain {
+				t.Fatalf("%s did not flip the key", name)
+			}
+			if got != referencePrefixKey(r, TopologyFacts{}) {
+				t.Fatal("params key diverged from the reference model")
+			}
+		})
 	}
 }

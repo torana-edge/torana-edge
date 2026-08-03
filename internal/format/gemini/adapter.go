@@ -780,53 +780,37 @@ func (a *Adapter) Marshal(chat *engine.ChatRequest) ([]byte, error) {
 //   - every other wrapper/inner extra passes through from the envelope at
 //     its exact wire scope.
 func marshalCodeAssist(chat *engine.ChatRequest, sys *geminiSystemInstruction, contents []geminiContent, tools []geminiTool) ([]byte, error) {
-	// An absent envelope (host-constructed chats with only the typed
-	// variant) defaults to the empty envelope: no extras, empty scopes.
-	if chat.ProviderExtensions.IsAbsent() {
-		empty, perr := engine.ParseOptionalJSONObject([]byte(`{}`))
+	// PURE: a LOCAL envelope value is built; the input chat is never
+	// mutated (marshal must not change the request/cache identity).
+	// Only an ABSENT envelope may locally default to the documented empty
+	// envelope; a PRESENT envelope missing the structural `request` member
+	// is REFUSED (the grammar says request is an object).
+	env := chat.ProviderExtensions
+	if env.IsAbsent() {
+		// The ABSENT envelope defaults to the documented EMPTY envelope
+		// (with its structural request member); a PRESENT envelope missing
+		// `request` is refused below.
+		empty, perr := engine.ParseOptionalJSONObject([]byte(`{"request":{}}`))
 		if perr != nil {
 			return nil, perr
 		}
-		chat.ProviderExtensions = empty
+		env = empty
 	}
-	ext, _, err := chat.ProviderExtensions.DecodeObject()
-	if err != nil {
+	if _, _, err := env.DecodeObject(); err != nil {
 		return nil, fmt.Errorf("code assist extensions: %w", err)
 	}
-	// The `request` structural member is REQUIRED by the envelope grammar;
-	// a host-constructed envelope without it defaults to the empty inner
-	// scope BEFORE verification.
-	if _, ok := ext[envelopeRequestMember]; !ok {
-		chat.ProviderExtensions, err = chat.ProviderExtensions.SetMember(envelopeRequestMember, json.RawMessage(`{}`))
-		if err != nil {
-			return nil, err
-		}
-		ext, _, err = chat.ProviderExtensions.DecodeObject()
-		if err != nil {
-			return nil, err
-		}
+	if raw := readExtRaw(env, envelopeRequestMember); raw == nil {
+		return nil, fmt.Errorf("code assist envelope: present envelope missing the structural %q member", envelopeRequestMember)
 	}
-	if err := verifyCodeAssistEnvelope(chat.ProviderExtensions); err != nil {
+	if err := verifyCodeAssistEnvelope(env); err != nil {
 		return nil, err
 	}
+	ext, _, err := env.DecodeObject()
 	if err != nil {
 		return nil, fmt.Errorf("code assist extensions: %w", err)
-	}
-	if err := verifyCodeAssistEnvelope(chat.ProviderExtensions); err != nil {
-		return nil, err
-	}
-	if _, ok := ext[envelopeRequestMember]; !ok {
-		chat.ProviderExtensions, err = chat.ProviderExtensions.SetMember(envelopeRequestMember, json.RawMessage(`{}`))
-		if err != nil {
-			return nil, err
-		}
-		ext, _, err = chat.ProviderExtensions.DecodeObject()
-		if err != nil {
-			return nil, err
-		}
 	}
 
-	// Inner scope: envelope extras + canonical rebuilds.
+	// Inner scope: envelope extras + canonical rebuilds (the local env).
 	reqExtra, err := engine.ParseOptionalJSONObject(ext[envelopeRequestMember])
 	if err != nil {
 		return nil, fmt.Errorf("code assist extensions: %w", err)
@@ -872,12 +856,7 @@ func marshalCodeAssist(chat *engine.ChatRequest, sys *geminiSystemInstruction, c
 	}
 
 	// Outer scope: envelope extras + canonical model.
-	wrapper, err := engine.ParseOptionalJSONObject(ext[envelopeRequestMember])
-	_ = wrapper // the outer scope is the envelope itself minus `request`
-	if err != nil {
-		return nil, err
-	}
-	outer, err := chat.ProviderExtensions.DeleteMember(envelopeRequestMember)
+	outer, err := env.DeleteMember(envelopeRequestMember)
 	if err != nil {
 		return nil, err
 	}
@@ -911,22 +890,32 @@ func verifyCodeAssistEnvelope(env engine.OptionalJSONObject) error {
 	if !ok {
 		return fmt.Errorf("code assist envelope: missing %q structural member", envelopeRequestMember)
 	}
-	var inner map[string]json.RawMessage
-	if json.Unmarshal(innerRaw, &inner) != nil {
-		return fmt.Errorf("code assist envelope: %q is not an object", envelopeRequestMember)
+	// The strict REQUIRED-object authority: null, arrays, scalars, and
+	// malformed text are classified errors, never panics, never a nil map.
+	inner, err := engine.ParseRequiredJSONObject(innerRaw)
+	if err != nil {
+		return fmt.Errorf("code assist envelope: %q must be a strict JSON object: %w", envelopeRequestMember, err)
+	}
+	innerMap, _, err := inner.DecodeObject()
+	if err != nil {
+		return fmt.Errorf("code assist envelope: %q: %w", envelopeRequestMember, err)
 	}
 	for _, k := range []string{"systemInstruction", "contents", "tools", "safetySettings"} {
-		if _, ok := inner[k]; ok {
+		if _, ok := innerMap[k]; ok {
 			return fmt.Errorf("code assist envelope: canonical inner member %q smuggled through the extras path", k)
 		}
 	}
-	if gcRaw, ok := inner["generationConfig"]; ok {
-		var gc map[string]json.RawMessage
-		if json.Unmarshal(gcRaw, &gc) != nil {
-			return fmt.Errorf("code assist envelope: generationConfig is not an object")
+	if gcRaw, ok := innerMap["generationConfig"]; ok {
+		gc, err := engine.ParseRequiredJSONObject(gcRaw)
+		if err != nil {
+			return fmt.Errorf("code assist envelope: generationConfig must be a strict JSON object: %w", err)
+		}
+		gcMap, _, err := gc.DecodeObject()
+		if err != nil {
+			return fmt.Errorf("code assist envelope: generationConfig: %w", err)
 		}
 		for _, k := range []string{"maxOutputTokens", "temperature", "topP", "stopSequences"} {
-			if _, ok := gc[k]; ok {
+			if _, ok := gcMap[k]; ok {
 				return fmt.Errorf("code assist envelope: canonical generationConfig member %q smuggled through the extras path", k)
 			}
 		}
@@ -937,62 +926,73 @@ func verifyCodeAssistEnvelope(env engine.OptionalJSONObject) error {
 // rebuildGenerationConfig overlays the canonical members from the PB
 // request onto the preserved generationConfig siblings.
 func rebuildGenerationConfig(chat *engine.ChatRequest, inner engine.OptionalJSONObject) (engine.OptionalJSONObject, error) {
-	gc := map[string]json.RawMessage{}
+	// SPAN-OPERATION based (finding 4): the preserved generationConfig is
+	// rebuilt via DeleteMember/SetMember on the raw object wrapper so
+	// unknown sibling members retain their EXACT lexemes (order,
+	// whitespace, numeric spellings, escapes, nested bytes).
+	var gc engine.OptionalJSONObject
+	var err error
 	if !inner.IsAbsent() {
 		m, _, err := inner.DecodeObject()
 		if err != nil {
 			return inner, err
 		}
 		if raw, ok := m["generationConfig"]; ok {
-			if err := json.Unmarshal(raw, &gc); err != nil {
-				return inner, fmt.Errorf("code assist extensions: generationConfig is not an object")
+			parsed, err := engine.ParseOptionalJSONObject(raw)
+			if err != nil {
+				return inner, fmt.Errorf("code assist extensions: generationConfig must be a strict JSON object: %w", err)
+			}
+			gc = parsed
+		}
+	}
+	// Overlay canonical members (delete absent ones, set present ones) —
+	// span ops keep the unknown siblings byte-exact.
+	canonical := []string{"maxOutputTokens", "temperature", "topP", "stopSequences"}
+	for _, k := range canonical {
+		if !gc.IsAbsent() {
+			m, _, derr := gc.DecodeObject()
+			if derr != nil {
+				return inner, derr
+			}
+			if _, ok := m[k]; ok {
+				gc, derr = gc.DeleteMember(k)
+				if derr != nil {
+					return inner, derr
+				}
 			}
 		}
 	}
-	set := func(k string, v any) error {
-		b, err := json.Marshal(v)
-		if err != nil {
-			return err
+	set := func(k string, v any) (engine.OptionalJSONObject, error) {
+		b, merr := json.Marshal(v)
+		if merr != nil {
+			return gc, merr
 		}
-		gc[k] = b
-		return nil
+		return gc.SetMember(k, b)
 	}
 	if chat.MaxTokens != nil {
-		if err := set("maxOutputTokens", *chat.MaxTokens); err != nil {
+		if gc, err = set("maxOutputTokens", *chat.MaxTokens); err != nil {
 			return inner, err
 		}
-	} else {
-		delete(gc, "maxOutputTokens")
 	}
 	if chat.Temperature != nil {
-		if err := set("temperature", *chat.Temperature); err != nil {
+		if gc, err = set("temperature", *chat.Temperature); err != nil {
 			return inner, err
 		}
-	} else {
-		delete(gc, "temperature")
 	}
 	if chat.TopP != nil {
-		if err := set("topP", *chat.TopP); err != nil {
+		if gc, err = set("topP", *chat.TopP); err != nil {
 			return inner, err
 		}
-	} else {
-		delete(gc, "topP")
 	}
 	if len(chat.StopSequences) > 0 {
-		if err := set("stopSequences", chat.StopSequences); err != nil {
+		if gc, err = set("stopSequences", chat.StopSequences); err != nil {
 			return inner, err
 		}
-	} else {
-		delete(gc, "stopSequences")
 	}
-	if len(gc) == 0 {
+	if gc.IsAbsent() {
 		return inner.DeleteMember("generationConfig")
 	}
-	raw, err := json.Marshal(gc)
-	if err != nil {
-		return inner, err
-	}
-	return inner.SetMember("generationConfig", raw)
+	return inner.SetMember("generationConfig", gc.Bytes())
 }
 
 // readExtBool reads a bool member from a raw extensions object.
@@ -1678,7 +1678,10 @@ func geminiPartWithFacts(payload []byte, signature string, partMetadataJson []by
 
 // stripGenerationCanonicalMembers removes the canonical generationConfig
 // members (rebuilt from the PB request) from the preserved inner extras,
-// keeping unknown sibling members lossless.
+// keeping unknown sibling members LOSSLESS: the removal is done with the
+// raw wrapper's span operations (DeleteMember on a local object copy,
+// then SetMember back), never a map round-trip — member order,
+// whitespace, numeric lexemes, escapes, and nested bytes survive.
 func stripGenerationCanonicalMembers(inner engine.OptionalJSONObject) (engine.OptionalJSONObject, error) {
 	if inner.IsAbsent() {
 		return inner, nil
@@ -1691,31 +1694,21 @@ func stripGenerationCanonicalMembers(inner engine.OptionalJSONObject) (engine.Op
 	if !ok {
 		return inner, nil
 	}
-	var gc map[string]json.RawMessage
-	if json.Unmarshal(gcRaw, &gc) != nil {
-		return inner, fmt.Errorf("gemini code assist: generationConfig is not an object")
+	gc, err := engine.ParseOptionalJSONObject(gcRaw)
+	if err != nil {
+		return inner, fmt.Errorf("gemini code assist: generationConfig must be a strict JSON object: %w", err)
 	}
 	canonical := []string{"maxOutputTokens", "temperature", "topP", "stopSequences"}
-	keep := map[string]json.RawMessage{}
-	for k, v := range gc {
-		canon := false
-		for _, c := range canonical {
-			if k == c {
-				canon = true
-			}
-		}
-		if !canon {
-			keep[k] = v
+	for _, k := range canonical {
+		gc, err = gc.DeleteMember(k)
+		if err != nil {
+			return inner, err
 		}
 	}
-	rebuilt, err := json.Marshal(keep)
-	if err != nil {
-		return inner, err
-	}
-	if len(keep) == 0 {
+	if gc.IsAbsent() {
 		return inner.DeleteMember("generationConfig")
 	}
-	return inner.SetMember("generationConfig", rebuilt)
+	return inner.SetMember("generationConfig", gc.Bytes())
 }
 
 // readExtRaw returns a raw member of the provider extensions, or nil when
@@ -1733,4 +1726,23 @@ func readExtRaw(ext engine.OptionalJSONObject, key string) []byte {
 		return nil
 	}
 	return raw
+}
+
+// VerifyCodeAssistEnvelopePB is the exported candidate validator for the
+// plugin seam: it parses the replacement's provider_extensions_json and
+// enforces the Code Assist envelope grammar (smuggled canonical members
+// refused). The seam runs it AFTER the write-grant verification, per
+// plugin, with the settled failure semantics (pass rolls back, block
+// refuses); the direct marshal check remains the defensive backstop.
+func VerifyCodeAssistEnvelopePB(providerExtensionsJson []byte) error {
+	if len(providerExtensionsJson) == 0 {
+		// An absent envelope on a code-assist replacement is legal (the
+		// marshal defaults it to the empty envelope).
+		return nil
+	}
+	env, err := engine.ParseOptionalJSONObject(providerExtensionsJson)
+	if err != nil {
+		return fmt.Errorf("code assist envelope: %w", err)
+	}
+	return verifyCodeAssistEnvelope(env)
 }

@@ -584,6 +584,16 @@ type PluginPipeline struct {
 	// failed load — remains a hard error.
 	skipped []SkippedPlugin
 
+	// CandidateValidator, when set, runs AFTER the write-grant verification
+	// on every accepted replacement candidate: provider-specific output
+	// invalidity (e.g. a Code Assist envelope smuggling canonical members)
+	// is attributed to the exact plugin — pass rolls back to the accepted
+	// input, block produces the plugin refusal. The closure captures the
+	// FORMAT policy at pipeline construction (per-format, never
+	// pipeline-global); the accepted host TOPOLOGY arrives per request via
+	// RunBeforeRequest. Format policy stays out of the pipeline core.
+	CandidateValidator func(topo engine.TopologyFacts, current, replacement *pbv2.ChatRequest) error
+
 	mu        sync.Mutex
 	active    int
 	draining  bool
@@ -1034,6 +1044,11 @@ func (pp *PluginPipeline) RunBeforeRequest(ctx context.Context, reqID uint64, ch
 	// Code Assist flag, Responses layout) are restored onto the plugin
 	// replacement below — they are never in the ABI.
 	accepted := chat
+	acceptedTopo := engine.TopologyFacts{
+		CodeAssist:           accepted.CodeAssist,
+		OpenAIVariant:        accepted.OpenAIVariant,
+		ResponsesInputLayout: accepted.ResponsesInputLayout,
+	}
 
 	headers := snapshotHeaders(rawHeaders)
 	// The accepted-input closure: the engine request is checked against the
@@ -1051,7 +1066,7 @@ func (pp *PluginPipeline) RunBeforeRequest(ctx context.Context, reqID uint64, ch
 		if !hasHook(lp.manifest, "run_before_request") {
 			continue
 		}
-		next, stop, err := pp.runBeforeRequestPlugin(ctx, reqID, lp, current, headers)
+		next, stop, err := pp.runBeforeRequestPlugin(ctx, reqID, lp, current, headers, acceptedTopo)
 		if err != nil {
 			return chat, err
 		}
@@ -1079,7 +1094,9 @@ func (pp *PluginPipeline) RunBeforeRequest(ctx context.Context, reqID uint64, ch
 	// never in the ABI, so the plugin round-trip cannot carry them — the
 	// host restores them from the accepted request. A plugin can neither
 	// forge nor lose the variant/layout facts.
-	chat.CodeAssist = chat.CodeAssist || accepted.CodeAssist
+	// EXACT restoration: the accepted request is the sole authority for
+	// the host-only topology facts.
+	chat.CodeAssist = accepted.CodeAssist
 	chat.OpenAIVariant = accepted.OpenAIVariant
 	chat.ResponsesInputLayout = accepted.ResponsesInputLayout
 	return chat, nil
@@ -1094,7 +1111,7 @@ func (pp *PluginPipeline) RunBeforeRequest(ctx context.Context, reqID uint64, ch
 // Return values: next = accepted replacement (nil = none; the only way the
 // request changes), stop = a recorded block short-circuits the chain, err =
 // an immediate error for the caller (failure-mode block paths).
-func (pp *PluginPipeline) runBeforeRequestPlugin(ctx context.Context, reqID uint64, lp *loadedPlugin, current *pbv2.ChatRequest, headers map[string][]string) (next *pbv2.ChatRequest, stop bool, err error) {
+func (pp *PluginPipeline) runBeforeRequestPlugin(ctx context.Context, reqID uint64, lp *loadedPlugin, current *pbv2.ChatRequest, headers map[string][]string, topo engine.TopologyFacts) (next *pbv2.ChatRequest, stop bool, err error) {
 	// The per-plugin projection. The grant is checked on the exact executable
 	// plugin object (lp.plugin), never on a manifest declaration and never
 	// pipeline-wide.
@@ -1185,6 +1202,22 @@ func (pp *PluginPipeline) runBeforeRequestPlugin(ctx context.Context, reqID uint
 				}
 				// allow: skip this plugin's replacement; the previous current
 				// stays so the invalid output never chains downstream.
+				replacement = nil
+			}
+		}
+		if replacement != nil && pp.CandidateValidator != nil {
+			// Provider-specific output invalidity (after the generic/grant
+			// validation): attributed to THIS plugin, with the settled
+			// failure semantics — pass rolls back to the accepted input,
+			// block produces the plugin refusal.
+			if cerr := pp.CandidateValidator(topo, current, replacement); cerr != nil {
+				log.Printf("[plugin] %s run_before_request: rejected provider-invalid replacement: %v",
+					lp.manifest.Name, cerr)
+				pp.discardTrapped(reqID, lp.manifest.Name)
+				if lp.failureMode == "block" {
+					return nil, false, fmt.Errorf("plugin %s returned a provider-invalid request replacement: %w",
+						lp.manifest.Name, cerr)
+				}
 				replacement = nil
 			}
 		}

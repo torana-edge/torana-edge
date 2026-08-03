@@ -38,6 +38,7 @@ import (
 	"github.com/torana-edge/torana-edge/internal/engine"
 	"github.com/torana-edge/torana-edge/internal/engine/pbconv"
 	"github.com/torana-edge/torana-edge/internal/format"
+	"github.com/torana-edge/torana-edge/internal/format/gemini"
 	"github.com/torana-edge/torana-edge/internal/metrics"
 	"github.com/torana-edge/torana-edge/internal/mitm"
 	"github.com/torana-edge/torana-edge/internal/plugin"
@@ -2917,6 +2918,17 @@ func (s *Server) rebuildPipelineLocked(pcfg provider.PluginsConfig) (*plugin.Plu
 	if err != nil {
 		rt.Close()
 		return nil, err
+	}
+	// Provider-specific candidate validation, dispatched on the ACCEPTED
+	// host topology (never pipeline-global format policy): a Code Assist
+	// replacement envelope smuggling canonical members is plugin-output
+	// invalidity — pass rolls back to the accepted input, block produces
+	// the plugin refusal.
+	pp.CandidateValidator = func(topo engine.TopologyFacts, current, replacement *pb.ChatRequest) error {
+		if topo.CodeAssist {
+			return gemini.VerifyCodeAssistEnvelopePB(replacement.ProviderExtensionsJson)
+		}
+		return nil
 	}
 
 	old := s.pluginPipeline.Swap(pp)

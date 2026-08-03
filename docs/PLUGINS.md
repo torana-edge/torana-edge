@@ -154,3 +154,15 @@ telemetry or compaction: degraded is better than broken.
 
 `block` means a failing plugin rejects the request. Right for anything
 security-shaped — a PII scanner that fails open is worse than no PII scanner.
+
+## Format-specific provider extensions
+
+Each format has a documented per-format envelope grammar for its
+provider-visible unparsed fields. The Gemini/Code Assist two-scope
+envelope (outer-wrapper extras + the structural `request` member holding
+inner-request extras, with the canonical members FORBIDDEN as extras and
+rebuilt from the canonical ABI fields) is specified in
+`docs/GEMINI_ANTIGRAVITY.md`; replacements that smuggle canonical members
+through the extras path are plugin-output invalidity (`pass` rolls back,
+`block` refuses). The host-only topology facts (format variant, Code
+Assist flag, Responses layout) are typed and never part of the ABI.

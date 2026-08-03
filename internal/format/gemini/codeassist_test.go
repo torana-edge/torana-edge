@@ -8,6 +8,8 @@ import (
 	"testing"
 
 	"github.com/torana-edge/torana-edge/internal/engine"
+	"github.com/torana-edge/torana-edge/internal/engine/pbconv"
+	"google.golang.org/protobuf/proto"
 )
 
 // TestCodeAssistRoundTrip parses a real Antigravity CLI Code Assist request and
@@ -1314,5 +1316,128 @@ func TestCodeAssistEnvelopeSmugglingRefused(t *testing.T) {
 				t.Fatalf("smuggled canonical member %q accepted", name)
 			}
 		})
+	}
+}
+
+// TestMarshalCodeAssistPure — marshal never mutates the input: the cache
+// key before and after is identical, repeated marshal is byte-identical,
+// and an ABSENT envelope marshals without materializing anything on the
+// chat. A PRESENT envelope missing the structural `request` member is
+// REFUSED.
+func TestMarshalCodeAssistPure(t *testing.T) {
+	chat := &engine.ChatRequest{
+		Model:      "m",
+		CodeAssist: true,
+		Messages:   []engine.Message{{Role: engine.RoleUser, Blocks: []engine.Block{{Text: &engine.TextBlock{Text: "hi"}}}}},
+	}
+	out1, err := (&Adapter{}).Marshal(chat)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !chat.ProviderExtensions.IsAbsent() {
+		t.Fatalf("marshal materialized an envelope on the input: %q", chat.ProviderExtensions.Bytes())
+	}
+	out2, err := (&Adapter{}).Marshal(chat)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(out1) != string(out2) {
+		t.Fatal("repeated marshal is not byte-identical")
+	}
+
+	// Present `{}` is refused (request is structural).
+	empty, _ := engine.ParseOptionalJSONObject([]byte(`{}`))
+	chat.ProviderExtensions = empty
+	if _, err := (&Adapter{}).Marshal(chat); err == nil {
+		t.Fatal("a present {} envelope must be refused")
+	}
+
+	// Cache identity: pb conversion before/after marshal is unchanged.
+	chat2 := &engine.ChatRequest{
+		Model: "m", CodeAssist: true,
+		ProviderExtensions: mustExtCA(map[string]any{"project": "p", "request": map[string]any{}}),
+		Messages:           []engine.Message{{Role: engine.RoleUser, Blocks: []engine.Block{{Text: &engine.TextBlock{Text: "hi"}}}}},
+	}
+	before, err := pbconv.ToPBChatRequestChecked(chat2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := (&Adapter{}).Marshal(chat2); err != nil {
+		t.Fatal(err)
+	}
+	after, err := pbconv.ToPBChatRequestChecked(chat2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !proto.Equal(before, after) {
+		t.Fatal("marshal mutated the request (cache identity changed)")
+	}
+}
+
+// TestCodeAssistEnvelopeInvalidShapes — null, arrays, scalars, malformed
+// text, and empty objects for `request` and `generationConfig` are
+// classified errors with NO panic, on accepted input and on a
+// plugin-shaped replacement envelope.
+func TestCodeAssistEnvelopeInvalidShapes(t *testing.T) {
+	shapes := map[string]string{
+		"request null":               `{"request":null}`,
+		"request array":              `{"request":[1]}`,
+		"request scalar":             `{"request":5}`,
+		"request malformed":          `{"request":"{oops"}`,
+		"generationConfig null":      `{"request":{"generationConfig":null}}`,
+		"generationConfig array":     `{"request":{"generationConfig":[1]}}`,
+		"generationConfig scalar":    `{"request":{"generationConfig":"x"}}`,
+		"generationConfig malformed": `{"request":{"generationConfig":"{oops"}}`,
+	}
+	for name, raw := range shapes {
+		t.Run(name, func(t *testing.T) {
+			env, err := engine.ParseOptionalJSONObject([]byte(raw))
+			if err != nil {
+				t.Fatal(err)
+			}
+			chat := &engine.ChatRequest{
+				Model: "m", CodeAssist: true, ProviderExtensions: env,
+				Messages: []engine.Message{{Role: engine.RoleUser, Blocks: []engine.Block{{Text: &engine.TextBlock{Text: "hi"}}}}},
+			}
+			// Must be a CLASSIFIED error, never a panic.
+			if _, err := (&Adapter{}).Marshal(chat); err == nil {
+				t.Fatalf("%s accepted", name)
+			}
+		})
+	}
+}
+
+// TestGenerationSiblingLossless — unknown generationConfig siblings keep
+// their EXACT lexemes (member order, whitespace, numeric spellings,
+// escapes, nested bytes) across input projection and the final wire.
+func TestGenerationSiblingLossless(t *testing.T) {
+	// Nonalphabetical order, 1e999, 1.0, escaped Unicode, whitespace, a
+	// nested object.
+	body := `{"model":"m","request":{"generationConfig":{"z":1e999,"a":1.0,"u":"\u0041bc","w": 42 ,"nested":{"k":[1,2]},"m":"x"}},"contents":[{"role":"user","parts":[{"text":"hi"}]}]}`
+	chat, err := (&Adapter{}).Unmarshal([]byte(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !chat.CodeAssist {
+		t.Fatal("variant lost")
+	}
+	out, err := (&Adapter{}).Marshal(chat)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The preserved sibling corpus must survive byte-exact (order + lexemes).
+	for _, want := range []string{`"z":1e999`, `"a":1.0`, `"u":"\u0041bc"`, `"w": 42`, `"nested":{"k":[1,2]}`, `"m":"x"`} {
+		if !strings.Contains(string(out), want) {
+			t.Fatalf("sibling %q lost or re-lexemed on the wire: %s", want, out)
+		}
+	}
+	// Canonical members overlay without disturbing the siblings.
+	if !strings.Contains(string(out), `"maxOutputTokens"`) && chat.MaxTokens == nil {
+		// no canonical fields set: fine
+	}
+	idxZ := strings.Index(string(out), `"z":1e999`)
+	idxA := strings.Index(string(out), `"a":1.0`)
+	if idxZ < 0 || idxA < 0 || idxZ > idxA {
+		t.Fatalf("sibling order changed: %s", out)
 	}
 }

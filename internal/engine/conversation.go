@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"hash"
+	"strconv"
 
 	"google.golang.org/protobuf/proto"
 
@@ -193,6 +194,28 @@ func CachePrefixKeyTopology(pbReq *pb.ChatRequest, topo TopologyFacts) string {
 	writeHashField(h, "variant")
 	writeHashField(h, string(rune('0'+topo.OpenAIVariant)))
 	writeHashFieldBytes(h, topo.ResponsesInputLayout.Bytes())
+
+	// The generation PARAMS are part of the model-visible prefix (the
+	// checkpoint inventory): max_tokens/temperature/top_p/stops change the
+	// provider cache entry exactly like the model.
+	writeHashField(h, "params")
+	if pbReq.MaxTokens != nil {
+		writeHashField(h, "max_tokens")
+		writeHashField(h, strconv.FormatInt(int64(*pbReq.MaxTokens), 10))
+	}
+	if pbReq.Temperature != nil {
+		writeHashField(h, "temperature")
+		writeHashField(h, strconv.FormatFloat(float64(*pbReq.Temperature), 'g', -1, 64))
+	}
+	if pbReq.TopP != nil {
+		writeHashField(h, "top_p")
+		writeHashField(h, strconv.FormatFloat(float64(*pbReq.TopP), 'g', -1, 64))
+	}
+	writeHashField(h, "stops")
+	writeHashField(h, strconv.Itoa(len(pbReq.StopSequences)))
+	for _, st := range pbReq.StopSequences {
+		writeHashField(h, st)
+	}
 
 	// The SDK fingerprint is ERROR-RETURNING; every error is a fail-closed
 	// EMPTY KEY — an unrepresentable body must never hash a partial prefix.

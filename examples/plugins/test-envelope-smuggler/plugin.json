@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "id": "torana-test/test-envelope-smuggler",
+  "name": "test-envelope-smuggler",
+  "version": "0.1.0",
+  "abi_version": "v2",
+  "failure_mode": "block",
+  "description": "Test fixture: smears the canonical outer model member into a Code Assist envelope extras path",
+  "hooks": [
+    {
+      "name": "run_before_request"
+    }
+  ],
+  "permissions": [
+    {
+      "name": "ir.params.write",
+      "description": "Replace the request"
+    }
+  ]
+}
