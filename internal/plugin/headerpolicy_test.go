@@ -25,7 +25,7 @@ func chatWithHeaders() (*engine.ChatRequest, map[string][]string) {
 	chat := &engine.ChatRequest{
 		Model: "gpt-x",
 		Messages: []engine.Message{
-			{Role: engine.RoleUser, Content: "hello"},
+			{Role: engine.RoleUser, Blocks: []engine.Block{{Text: &engine.TextBlock{Text: "hello"}}}},
 		},
 	}
 	raw := map[string][]string{
@@ -47,8 +47,8 @@ func observerNotes(t *testing.T, out *engine.ChatRequest) []string {
 	t.Helper()
 	var notes []string
 	for _, m := range out.Messages {
-		if m.Role == engine.RoleAssistant && strings.HasPrefix(m.Content, "observer ") {
-			notes = append(notes, m.Content)
+		if m.Role == engine.RoleAssistant && strings.HasPrefix(engineText(m), "observer ") {
+			notes = append(notes, engineText(m))
 		}
 	}
 	return notes
@@ -142,7 +142,7 @@ func TestChatHeadersNilRawIsNoOp(t *testing.T) {
 	pp := newTestPipeline(t, fixturesDir, []string{"test-header-observer"})
 	chat := &engine.ChatRequest{
 		Model:    "gpt-x",
-		Messages: []engine.Message{{Role: engine.RoleUser, Content: "hello"}},
+		Messages: []engine.Message{{Role: engine.RoleUser, Blocks: []engine.Block{{Text: &engine.TextBlock{Text: "hello"}}}}},
 	}
 	out, err := pp.RunBeforeRequest(context.Background(), 1, chat, nil)
 	if err != nil {
@@ -162,7 +162,7 @@ func TestChatHeadersOperationalHeadersNotProjected(t *testing.T) {
 	pp := newTestPipeline(t, fixturesDir, []string{"test-header-observer"})
 	chat := &engine.ChatRequest{
 		Model:    "gpt-x",
-		Messages: []engine.Message{{Role: engine.RoleUser, Content: "hello"}},
+		Messages: []engine.Message{{Role: engine.RoleUser, Blocks: []engine.Block{{Text: &engine.TextBlock{Text: "hello"}}}}},
 	}
 	raw := map[string][]string{
 		"Accept":         {"text/html"},
@@ -303,10 +303,26 @@ func newApprovedMultiPipeline(t *testing.T, order []string, approvals map[string
 // assertNoCredentialMeta fails when the returned engine request carries
 // _request_headers in its ToranaMeta — the projection must never survive the
 // chain into the returned PB round-trip.
+func mustMetaHP(m map[string]any) engine.OptionalJSONObject {
+	b, err := json.Marshal(m)
+	if err != nil {
+		panic(err)
+	}
+	r, err := engine.ParseOptionalJSONObject(b)
+	if err != nil {
+		panic(err)
+	}
+	return r
+}
+
 func assertNoCredentialMeta(t *testing.T, out *engine.ChatRequest) {
 	t.Helper()
-	if out != nil && out.ToranaMeta != nil {
-		if _, ok := out.ToranaMeta["_request_headers"]; ok {
+	if out != nil && !out.ToranaMeta.IsAbsent() {
+		members, _, err := out.ToranaMeta.DecodeObject()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, ok := members["_request_headers"]; ok {
 			t.Fatal("credential metadata leaked into the returned chat")
 		}
 	}
@@ -464,7 +480,7 @@ func TestChatHeadersBlockPlusReplacementShortCircuits(t *testing.T) {
 	pp := newTestPipeline(t, fixturesDir, []string{"test-blocker", "test-header-observer"})
 
 	chat, raw := chatWithHeaders()
-	chat.Messages[0].Content = "blockme now"
+	chat.Messages[0].Blocks = []engine.Block{{Text: &engine.TextBlock{Text: "blockme now"}}}
 	out, err := pp.RunBeforeRequest(context.Background(), 1, chat, raw)
 	if err != nil {
 		t.Fatalf("RunBeforeRequest: %v", err)
@@ -477,7 +493,7 @@ func TestChatHeadersBlockPlusReplacementShortCircuits(t *testing.T) {
 	}
 	// The blocker's accepted replacement is preserved internally (block wins
 	// at the transport; the replacement state still returns).
-	if out == nil || len(out.Messages) != 1 || out.Messages[0].Content != "blockme now" {
+	if out == nil || len(out.Messages) != 1 || engineText(out.Messages[0]) != "blockme now" {
 		t.Fatalf("the accepted replacement was not preserved: %+v", out.Messages)
 	}
 	assertNoCredentialMeta(t, out)
@@ -502,7 +518,7 @@ func TestChatHeadersMutationObserverSeesNoProjection(t *testing.T) {
 	// Unrelated host metadata whose exact lexeme survives ONLY exact byte
 	// restoration: json.Number("9007199254740993") marshals verbatim, but any
 	// unmarshal-into-float64 round trip would round it to ...992.
-	chat.ToranaMeta = map[string]any{"_provider": json.Number("9007199254740993")}
+	chat.ToranaMeta = mustMetaHP(map[string]any{"_provider": json.Number("9007199254740993")})
 	expected := pbconv.ToPBChatRequest(chat).ToranaMetaJson
 
 	out, err := pp.RunBeforeRequest(context.Background(), 1, chat, raw)

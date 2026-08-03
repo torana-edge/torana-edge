@@ -25,7 +25,7 @@ func TestBlockSurvivesATrapAndStopsDownstreamPlugins(t *testing.T) {
 	const reqID = 42
 	chat := &engine.ChatRequest{
 		Model:    "gpt-x",
-		Messages: []engine.Message{{Role: engine.RoleUser, Content: "hello"}},
+		Messages: []engine.Message{{Role: engine.RoleUser, Blocks: []engine.Block{{Text: &engine.TextBlock{Text: "hello"}}}}},
 	}
 	out, err := pp.RunBeforeRequest(context.Background(), reqID, chat, nil)
 	if err != nil {
@@ -80,7 +80,7 @@ func TestBlockSurvivesAMalformedResultAndStopsDownstream(t *testing.T) {
 	const reqID = 43
 	chat := &engine.ChatRequest{
 		Model:    "gpt-x",
-		Messages: []engine.Message{{Role: engine.RoleUser, Content: "hello"}},
+		Messages: []engine.Message{{Role: engine.RoleUser, Blocks: []engine.Block{{Text: &engine.TextBlock{Text: "hello"}}}}},
 	}
 	out, err := pp.RunBeforeRequest(context.Background(), reqID, chat, nil)
 	if err != nil {

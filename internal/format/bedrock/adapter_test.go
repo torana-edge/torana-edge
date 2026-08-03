@@ -11,6 +11,52 @@ import (
 	"github.com/torana-edge/torana-edge/internal/engine"
 )
 
+// Ordered-body test helpers (engine.Message).
+
+func hasCacheBlock(m engine.Message) bool {
+	for _, b := range m.Blocks {
+		if b.CacheBreakpoint != nil {
+			return true
+		}
+	}
+	return false
+}
+
+func textBlock(s string) engine.Block {
+	return engine.Block{Text: &engine.TextBlock{Text: s}}
+}
+
+func msgBlock(role engine.Role, text string) engine.Message {
+	return engine.Message{Role: role, Blocks: []engine.Block{textBlock(text)}}
+}
+
+func textOf(m engine.Message) string { return m.Text() }
+
+type tcView struct {
+	ID, Name  string
+	Args      engine.RequiredJSONObject
+	Signature string
+}
+
+func toolCalls(m engine.Message) []tcView {
+	var out []tcView
+	for _, b := range m.Blocks {
+		if b.ToolUse != nil {
+			out = append(out, tcView{ID: b.ToolUse.ID, Name: b.ToolUse.Name, Args: b.ToolUse.Arguments, Signature: b.ToolUse.Signature})
+		}
+	}
+	return out
+}
+
+func toolResults(m engine.Message) []*engine.ToolResultBlock {
+	var out []*engine.ToolResultBlock
+	for _, b := range m.Blocks {
+		if b.ToolResult != nil {
+			out = append(out, b.ToolResult)
+		}
+	}
+	return out
+}
 func TestRoundTrip(t *testing.T) {
 	adapter := &Adapter{}
 
@@ -57,30 +103,30 @@ func TestRoundTrip(t *testing.T) {
 	if chat.Messages[0].Role != engine.RoleSystem {
 		t.Errorf("msg 0 role: got %s, want system", chat.Messages[0].Role)
 	}
-	if chat.Messages[0].Content != "You are helpful." {
-		t.Errorf("msg 0 content: got %q, want 'You are helpful.'", chat.Messages[0].Content)
+	if textOf(chat.Messages[0]) != "You are helpful." {
+		t.Errorf("msg 0 content: got %q, want 'You are helpful.'", textOf(chat.Messages[0]))
 	}
 
 	if chat.Messages[1].Role != engine.RoleUser {
 		t.Errorf("msg 1 role: got %s, want user", chat.Messages[1].Role)
 	}
-	if chat.Messages[1].Content != "What's the weather?" {
-		t.Errorf("msg 1 content: got %q", chat.Messages[1].Content)
+	if textOf(chat.Messages[1]) != "What's the weather?" {
+		t.Errorf("msg 1 content: got %q", textOf(chat.Messages[1]))
 	}
 
 	if chat.Messages[2].Role != engine.RoleAssistant {
 		t.Errorf("msg 2 role: got %s, want assistant", chat.Messages[2].Role)
 	}
-	if len(chat.Messages[2].ToolCalls) != 1 {
-		t.Fatalf("expected 1 tool call, got %d", len(chat.Messages[2].ToolCalls))
+	if len(toolCalls(chat.Messages[2])) != 1 {
+		t.Fatalf("expected 1 tool call, got %d", len(toolCalls(chat.Messages[2])))
 	}
-	if chat.Messages[2].ToolCalls[0].Name != "get_weather" {
-		t.Errorf("tool call name: got %s", chat.Messages[2].ToolCalls[0].Name)
+	if got := toolCalls(chat.Messages[2])[0].Name; got != "get_weather" {
+		t.Errorf("tool call name: got %s", got)
 	}
-	if chat.Messages[2].ToolCalls[0].ID != "toolu_1" {
-		t.Errorf("tool call id: got %s", chat.Messages[2].ToolCalls[0].ID)
+	if got := toolCalls(chat.Messages[2])[0].ID; got != "toolu_1" {
+		t.Errorf("tool call id: got %s", got)
 	}
-	vals, _, err := chat.Messages[2].ToolCalls[0].Arguments.DecodeObject()
+	vals, _, err := toolCalls(chat.Messages[2])[0].Args.DecodeObject()
 	if err != nil {
 		t.Fatalf("tool call args decode: %v", err)
 	}
@@ -89,14 +135,17 @@ func TestRoundTrip(t *testing.T) {
 		t.Errorf("tool call args: got %v", vals)
 	}
 
-	if chat.Messages[3].Role != engine.RoleTool {
-		t.Errorf("msg 3 role: got %s, want tool", chat.Messages[3].Role)
+	// Bedrock has no tool role: the result rides its user message at its
+	// exact wire position (no synthetic RoleTool split).
+	if chat.Messages[3].Role != engine.RoleUser {
+		t.Errorf("msg 3 role: got %s, want user (result rides its user message)", chat.Messages[3].Role)
 	}
-	if chat.Messages[3].ToolCallID != "toolu_1" {
-		t.Errorf("msg 3 tool_call_id: got %s", chat.Messages[3].ToolCallID)
+	trs := toolResults(chat.Messages[3])
+	if len(trs) != 1 || trs[0].ToolCallID != "toolu_1" {
+		t.Errorf("msg 3 tool result: got %+v, want toolu_1", trs)
 	}
-	if chat.Messages[3].Content != "Sunny, 72F" {
-		t.Errorf("msg 3 content: got %q", chat.Messages[3].Content)
+	if len(trs[0].Content) != 1 || trs[0].Content[0].Text != "Sunny, 72F" {
+		t.Errorf("msg 3 result content: got %+v", trs[0].Content)
 	}
 
 	// Verify tools — Parameters are nested under inputSchema.json

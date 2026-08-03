@@ -701,11 +701,14 @@ func runJSONResponseHooks(ctx context.Context, pl *plugin.PluginPipeline, reqID 
 	if chat != nil {
 		respChat.ToranaMeta = chat.ToranaMeta
 	}
-	if respChat.ToranaMeta == nil {
-		respChat.ToranaMeta = map[string]any{}
+	if respChat.ToranaMeta.IsAbsent() {
+		respChat.ToranaMeta, _ = engine.ParseOptionalJSONObject([]byte(`{}`))
 	}
-	// Expose latency/status/usage to response hooks.
-	respChat.ToranaMeta["_response"] = rs.responseMeta()
+	// Expose latency/status/usage to response hooks (engine-side only;
+	// ToPBChatResponse never serializes ToranaMeta).
+	if v, err := json.Marshal(rs.responseMeta()); err == nil {
+		respChat.ToranaMeta, _ = respChat.ToranaMeta.SetMember("_response", v)
+	}
 
 	// The canonical response preserves what the wire can prove: an assistant
 	// message only when the provider response actually contains one (a

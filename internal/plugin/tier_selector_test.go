@@ -119,26 +119,58 @@ const anthropicTiers = `"tiers":[` +
 	`{"ttl_seconds":3600,"write_multiplier":2.0,"marker":{"type":"ephemeral","ttl":"1h"}}]`
 
 // tierRequest is a conversation with a breakpoint after the system prompt.
+func tierMeta(provider, convID string) engine.OptionalJSONObject {
+	b, err := json.Marshal(map[string]any{"_provider": provider, "_conversation_id": convID})
+	if err != nil {
+		panic(err)
+	}
+	r, err := engine.ParseOptionalJSONObject(b)
+	if err != nil {
+		panic(err)
+	}
+	return r
+}
+
+func cacheMarker(m engine.Message) map[string]json.RawMessage {
+	for _, b := range m.Blocks {
+		if b.CacheBreakpoint != nil {
+			v, _, err := b.CacheBreakpoint.Marker.DecodeObject()
+			if err != nil {
+				return nil
+			}
+			return v
+		}
+	}
+	return nil
+}
+
+func tierMarker() engine.RequiredJSONObject {
+	r, err := engine.ParseRequiredJSONObject([]byte(`{"type":"ephemeral"}`))
+	if err != nil {
+		panic(err)
+	}
+	return r
+}
+
 func tierRequest(provider string) *engine.ChatRequest {
 	return &engine.ChatRequest{
 		Model: "claude-sonnet-4-5",
 		Messages: []engine.Message{
-			{Role: engine.RoleSystem, Content: "You are a coding agent.",
-				CacheControl: map[string]any{"type": "ephemeral"}},
-			{Role: engine.RoleUser, Content: "refactor the loader"},
+			{Role: engine.RoleSystem, Blocks: []engine.Block{
+				{Text: &engine.TextBlock{Text: "You are a coding agent."}},
+				{CacheBreakpoint: &engine.CacheBreakpointBlock{Marker: tierMarker()}},
+			}},
+			{Role: engine.RoleUser, Blocks: []engine.Block{{Text: &engine.TextBlock{Text: "refactor the loader"}}}},
 		},
-		ToranaMeta: map[string]any{
-			"_provider":        provider,
-			"_conversation_id": "conv-a3f9",
-		},
+		ToranaMeta: tierMeta(provider, "conv-a3f9"),
 	}
 }
 
-func markerOf(t *testing.T, chat *engine.ChatRequest) map[string]any {
+func markerOf(t *testing.T, chat *engine.ChatRequest) map[string]json.RawMessage {
 	t.Helper()
 	for _, m := range chat.Messages {
-		if len(m.CacheControl) > 0 {
-			return m.CacheControl
+		if marker := cacheMarker(m); marker != nil {
+			return marker
 		}
 	}
 	return nil
@@ -252,15 +284,15 @@ func TestNoBreakpointIsNotTouched(t *testing.T) {
 
 	in := &engine.ChatRequest{
 		Model:      "claude-sonnet-4-5",
-		Messages:   []engine.Message{{Role: engine.RoleUser, Content: "hello"}},
-		ToranaMeta: map[string]any{"_provider": "anth", "_conversation_id": "conv-x"},
+		Messages:   []engine.Message{{Role: engine.RoleUser, Blocks: []engine.Block{{Text: &engine.TextBlock{Text: "hello"}}}}},
+		ToranaMeta: tierMeta("anth", "conv-x"),
 	}
 	out, err := pp.RunBeforeRequest(context.Background(), 1, in, nil)
 	if err != nil {
 		t.Fatalf("RunBeforeRequest: %v", err)
 	}
 	for i, m := range out.Messages {
-		if len(m.CacheControl) > 0 {
+		if cacheMarker(m) != nil {
 			t.Errorf("plugin added a breakpoint at message %d that nobody asked for", i)
 		}
 	}

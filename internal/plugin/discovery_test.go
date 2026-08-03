@@ -586,7 +586,7 @@ func TestPipelineRunBeforeRequest_FullDispatch(t *testing.T) {
 	}
 
 	chat := &engine.ChatRequest{
-		Messages: []engine.Message{{Role: engine.RoleUser, Content: "hi"}},
+		Messages: []engine.Message{{Role: engine.RoleUser, Blocks: []engine.Block{{Text: &engine.TextBlock{Text: "hi"}}}}},
 		Tools: []engine.ToolDef{{
 			Name:       "read",
 			Parameters: mustReq(`{"type":"object","properties":{"path":{"type":"string"}}}`),
@@ -606,13 +606,23 @@ func TestPipelineRunBeforeRequest_FullDispatch(t *testing.T) {
 	if got := result.Tools[0].Description; got != "described by test-mutator" {
 		t.Errorf("tool definition did not survive the dispatch path: description = %q", got)
 	}
-	if len(result.Messages) != 1 || !strings.HasSuffix(result.Messages[0].Content, "[seen by test-mutator]") {
+	if len(result.Messages) != 1 || !strings.HasSuffix(engineText(result.Messages[0]), "[seen by test-mutator]") {
 		t.Errorf("message did not survive the dispatch path: %+v", result.Messages)
 	}
 }
 
 // mustReq panics on invalid raw: test fixtures are trusted, and a fixture
 // that no longer parses must fail loudly.
+func engineText(m engine.Message) string {
+	var out string
+	for _, b := range m.Blocks {
+		if b.Text != nil {
+			out += b.Text.Text
+		}
+	}
+	return out
+}
+
 func mustReq(raw string) engine.RequiredJSONObject {
 	r, err := engine.ParseRequiredJSONObject([]byte(raw))
 	if err != nil {

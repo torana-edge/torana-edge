@@ -59,8 +59,8 @@ func benchConversation(messages int) *engine.ChatRequest {
 		Temperature: &temp,
 		MaxTokens:   &maxTok,
 		Messages: []engine.Message{{
-			Role:    engine.RoleSystem,
-			Content: strings.Repeat("You are a coding assistant. ", 40),
+			Role:   engine.RoleSystem,
+			Blocks: []engine.Block{{Text: &engine.TextBlock{Text: strings.Repeat("You are a coding assistant. ", 40)}}},
 		}},
 		Tools: []engine.ToolDef{
 			{
@@ -84,24 +84,26 @@ func benchConversation(messages int) *engine.ChatRequest {
 		switch i % 3 {
 		case 0:
 			req.Messages = append(req.Messages, engine.Message{
-				Role:    engine.RoleUser,
-				Content: fmt.Sprintf("Turn %d: please investigate the failing test in the parser.", i),
+				Role:   engine.RoleUser,
+				Blocks: []engine.Block{{Text: &engine.TextBlock{Text: fmt.Sprintf("Turn %d: please investigate the failing test in the parser.", i)}}},
 			})
 		case 1:
 			req.Messages = append(req.Messages, engine.Message{
 				Role: engine.RoleAssistant,
-				ToolCalls: []engine.ToolCall{{
+				Blocks: []engine.Block{{ToolUse: &engine.ToolUseBlock{
 					ID:        fmt.Sprintf("call_%d", i),
 					Name:      "read_file",
 					Arguments: mustBenchArgs(fmt.Sprintf(`{"path": "internal/parser/parse_%d.go"}`, i)),
-				}},
+				}}},
 			})
 		default:
 			req.Messages = append(req.Messages, engine.Message{
-				Role:       engine.RoleTool,
-				ToolCallID: fmt.Sprintf("call_%d", i-1),
-				ToolName:   "read_file",
-				Content:    toolOutput,
+				Role: engine.RoleTool,
+				Blocks: []engine.Block{{ToolResult: &engine.ToolResultBlock{
+					ToolCallID: fmt.Sprintf("call_%d", i-1),
+					ToolName:   "read_file",
+					Content:    []engine.ToolResultContentBlock{{Text: toolOutput}},
+				}}},
 			})
 		}
 	}

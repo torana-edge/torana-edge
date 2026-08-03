@@ -167,24 +167,43 @@ type Server struct {
 type routeContextKey struct{}
 
 func isOpenAIResponsesRequest(chat *engine.ChatRequest) bool {
-	if chat == nil || chat.ProviderExtensions == nil {
+	// The variant sentinel is host-authored; a decode failure (guest-mutated
+	// extensions) is treated as "not responses" — the documented invariant.
+	if chat == nil || chat.ProviderExtensions.IsAbsent() {
 		return false
 	}
-	variant, _ := chat.ProviderExtensions["_openai_variant"].(string)
-	return variant == "responses"
+	m, _, err := chat.ProviderExtensions.DecodeObject()
+	if err != nil {
+		return false
+	}
+	raw, ok := m["_openai_variant"]
+	if !ok {
+		return false
+	}
+	var variant string
+	return json.Unmarshal(raw, &variant) == nil && variant == "responses"
 }
 
 func applyOpenAIResponsesCompaction(chat *engine.ChatRequest, p provider.Provider) {
 	if !isOpenAIResponsesRequest(chat) || p.ResponsesCompaction == nil {
 		return
 	}
-	if _, supplied := chat.ProviderExtensions["context_management"]; supplied {
-		return
+	if !chat.ProviderExtensions.IsAbsent() {
+		if m, _, err := chat.ProviderExtensions.DecodeObject(); err == nil {
+			if _, supplied := m["context_management"]; supplied {
+				return
+			}
+		}
 	}
-	chat.ProviderExtensions["context_management"] = []any{map[string]any{
+	cm, _ := json.Marshal([]any{map[string]any{
 		"type":              "compaction",
 		"compact_threshold": p.ResponsesCompaction.CompactThreshold,
-	}}
+	}})
+	upd, err := chat.ProviderExtensions.SetMember("context_management", cm)
+	if err != nil {
+		return
+	}
+	chat.ProviderExtensions = upd
 }
 
 type RouteContext struct {
@@ -846,8 +865,8 @@ func New(cfg Config) (*Server, error) {
 				return
 			}
 
-			if chat.ToranaMeta == nil {
-				chat.ToranaMeta = make(map[string]any)
+			if chat.ToranaMeta.IsAbsent() {
+				chat.ToranaMeta, _ = engine.ParseOptionalJSONObject([]byte(`{}`))
 			}
 			// Economic-gate host calls run inside request hooks, so make the
 			// initially routed provider/model available before the pipeline.
@@ -871,12 +890,18 @@ func New(cfg Config) (*Server, error) {
 			// up the economics of what it is about to do. ToranaMeta never
 			// reaches the wire and is excluded from the determinism check, so
 			// this is safe to vary per request.
-			chat.ToranaMeta["_provider"] = provName
-			chat.ToranaMeta["_conversation_id"] = rs.ConversationID
+			if v, err := json.Marshal(provName); err == nil {
+				chat.ToranaMeta, _ = chat.ToranaMeta.SetMember("_provider", v)
+			}
+			if v, err := json.Marshal(rs.ConversationID); err == nil {
+				chat.ToranaMeta, _ = chat.ToranaMeta.SetMember("_conversation_id", v)
+			}
 			// The path too: Torana forwards whatever the caller sent rather
 			// than synthesizing one, so a plugin replaying this conversation
 			// has no other way to know where it goes.
-			chat.ToranaMeta["_path"] = strippedPath
+			if v, err := json.Marshal(strippedPath); err == nil {
+				chat.ToranaMeta, _ = chat.ToranaMeta.SetMember("_path", v)
+			}
 
 			// --- WASM plugin pipeline --------------------------------------
 
@@ -935,9 +960,7 @@ func New(cfg Config) (*Server, error) {
 				// Defense in depth: never let credentials linger in meta
 				// past the request hook (format adapters don't serialize
 				// ToranaMeta, but response hooks receive it).
-				if chat.ToranaMeta != nil {
-					delete(chat.ToranaMeta, "_request_headers")
-				}
+				chat.ToranaMeta, _ = chat.ToranaMeta.DeleteMember("_request_headers")
 
 				// Verdicts are recorded by attributed, permission-checked host
 				// calls now. The grant was verified per plugin at the call
@@ -1044,11 +1067,18 @@ func New(cfg Config) (*Server, error) {
 			// (see the usage tap in ModifyResponse) — unless the client asked
 			// for it itself, in which case nothing is injected or suppressed.
 			if fmt.Name == "openai" && chat.Stream && !isOpenAIResponsesRequest(chat) {
-				if _, ok := chat.ProviderExtensions["stream_options"]; !ok {
-					if chat.ProviderExtensions == nil {
-						chat.ProviderExtensions = map[string]any{}
+				has := false
+				if !chat.ProviderExtensions.IsAbsent() {
+					if m, _, err := chat.ProviderExtensions.DecodeObject(); err == nil {
+						_, has = m["stream_options"]
 					}
-					chat.ProviderExtensions["stream_options"] = map[string]any{"include_usage": true}
+				}
+				if !has {
+					so, _ := json.Marshal(map[string]any{"include_usage": true})
+					if chat.ProviderExtensions.IsAbsent() {
+						chat.ProviderExtensions, _ = engine.ParseOptionalJSONObject([]byte(`{}`))
+					}
+					chat.ProviderExtensions, _ = chat.ProviderExtensions.SetMember("stream_options", so)
 					reqStateFrom(req.Context()).UsageInjected = true
 				}
 			}

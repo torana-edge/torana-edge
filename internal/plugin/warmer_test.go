@@ -160,25 +160,66 @@ func providerWouldReject(req *pb.ChatRequest) string {
 		prev = m.Role
 	}
 	last := req.Messages[len(req.Messages)-1]
-	if last.Role == "assistant" && len(last.ToolCalls) > 0 {
+	if last.Role == "assistant" && hasToolUse(last) {
 		return "final assistant turn has tool calls with no tool result"
 	}
 	return ""
+}
+
+func pbText(m *pb.Message) string {
+	var out string
+	for _, b := range m.Blocks {
+		if t := b.GetText(); t != nil {
+			out += t.Text
+		}
+	}
+	return out
+}
+
+func hasToolUse(m *pb.Message) bool {
+	for _, b := range m.Blocks {
+		if b.GetToolUse() != nil {
+			return true
+		}
+	}
+	return false
+}
+
+func warmerMeta(m map[string]any) engine.OptionalJSONObject {
+	b, err := json.Marshal(m)
+	if err != nil {
+		panic(err)
+	}
+	r, err := engine.ParseOptionalJSONObject(b)
+	if err != nil {
+		panic(err)
+	}
+	return r
+}
+
+func warmerMarker() engine.RequiredJSONObject {
+	r, err := engine.ParseRequiredJSONObject([]byte(`{"type":"ephemeral"}`))
+	if err != nil {
+		panic(err)
+	}
+	return r
 }
 
 func warmerRequest(conversationID string) *engine.ChatRequest {
 	return &engine.ChatRequest{
 		Model: "claude-sonnet-4-5",
 		Messages: []engine.Message{
-			{Role: engine.RoleSystem, Content: "You are a coding agent.",
-				CacheControl: map[string]any{"type": "ephemeral"}},
-			{Role: engine.RoleUser, Content: "refactor the loader"},
+			{Role: engine.RoleSystem, Blocks: []engine.Block{
+				{Text: &engine.TextBlock{Text: "You are a coding agent."}},
+				{CacheBreakpoint: &engine.CacheBreakpointBlock{Marker: warmerMarker()}},
+			}},
+			{Role: engine.RoleUser, Blocks: []engine.Block{{Text: &engine.TextBlock{Text: "refactor the loader"}}}},
 		},
-		ToranaMeta: map[string]any{
+		ToranaMeta: warmerMeta(map[string]any{
 			"_provider":        "anth",
 			"_conversation_id": conversationID,
 			"_path":            "/v1/messages",
-		},
+		}),
 	}
 }
 
@@ -190,15 +231,17 @@ func warmerRequestBreakpointOnUser(conversationID string) *engine.ChatRequest {
 	return &engine.ChatRequest{
 		Model: "claude-sonnet-4-5",
 		Messages: []engine.Message{
-			{Role: engine.RoleSystem, Content: "You are a coding agent."},
-			{Role: engine.RoleUser, Content: "refactor the loader"},
-			{Role: engine.RoleAssistant, Content: "which file?"},
-			{Role: engine.RoleUser, Content: "discovery.go",
-				CacheControl: map[string]any{"type": "ephemeral"}},
+			{Role: engine.RoleSystem, Blocks: []engine.Block{{Text: &engine.TextBlock{Text: "You are a coding agent."}}}},
+			{Role: engine.RoleUser, Blocks: []engine.Block{{Text: &engine.TextBlock{Text: "refactor the loader"}}}},
+			{Role: engine.RoleAssistant, Blocks: []engine.Block{{Text: &engine.TextBlock{Text: "which file?"}}}},
+			{Role: engine.RoleUser, Blocks: []engine.Block{
+				{Text: &engine.TextBlock{Text: "discovery.go"}},
+				{CacheBreakpoint: &engine.CacheBreakpointBlock{Marker: warmerMarker()}},
+			}},
 		},
-		ToranaMeta: map[string]any{
+		ToranaMeta: warmerMeta(map[string]any{
 			"_provider": "anth", "_conversation_id": conversationID, "_path": "/v1/messages",
-		},
+		}),
 	}
 }
 
@@ -239,7 +282,7 @@ func TestWarmerRefreshesOptedInConversation(t *testing.T) {
 	if len(got.Request.Messages) == 0 {
 		t.Fatal("refresh carried no messages")
 	}
-	if got.Request.Messages[0].Content != "You are a coding agent." {
+	if pbText(got.Request.Messages[0]) != "You are a coding agent." {
 		t.Error("refresh did not carry the cached prefix, so it would not touch the entry")
 	}
 }
@@ -274,8 +317,8 @@ func TestWarmerRefreshIsAValidRequest(t *testing.T) {
 		t.Errorf("refresh carried %d messages, want the 4 of the cached prefix — "+
 			"anything else is not the entry we are trying to touch", n)
 	}
-	if last := got.Request.Messages[len(got.Request.Messages)-1]; last.Content != "discovery.go" {
-		t.Errorf("refresh ends on %q, want the prefix's own last message", last.Content)
+	if last := got.Request.Messages[len(got.Request.Messages)-1]; pbText(last) != "discovery.go" {
+		t.Errorf("refresh ends on %q, want the prefix's own last message", pbText(last))
 	}
 }
 
@@ -289,15 +332,16 @@ func TestWarmerSkipsPrefixEndingMidToolCall(t *testing.T) {
 	in := &engine.ChatRequest{
 		Model: "claude-sonnet-4-5",
 		Messages: []engine.Message{
-			{Role: engine.RoleSystem, Content: "You are a coding agent."},
-			{Role: engine.RoleUser, Content: "read the file"},
-			{Role: engine.RoleAssistant,
-				ToolCalls:    []engine.ToolCall{{ID: "call_1", Name: "read"}},
-				CacheControl: map[string]any{"type": "ephemeral"}},
+			{Role: engine.RoleSystem, Blocks: []engine.Block{{Text: &engine.TextBlock{Text: "You are a coding agent."}}}},
+			{Role: engine.RoleUser, Blocks: []engine.Block{{Text: &engine.TextBlock{Text: "read the file"}}}},
+			{Role: engine.RoleAssistant, Blocks: []engine.Block{
+				{ToolUse: &engine.ToolUseBlock{ID: "call_1", Name: "read"}},
+				{CacheBreakpoint: &engine.CacheBreakpointBlock{Marker: warmerMarker()}},
+			}},
 		},
-		ToranaMeta: map[string]any{
+		ToranaMeta: warmerMeta(map[string]any{
 			"_provider": "anth", "_conversation_id": "conv-a3f9", "_path": "/v1/messages",
-		},
+		}),
 	}
 	if _, err := pp.RunBeforeRequest(context.Background(), 1, in, nil); err != nil {
 		t.Fatal(err)

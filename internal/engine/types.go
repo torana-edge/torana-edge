@@ -10,21 +10,24 @@ var ChatRequestKey = chatRequestCtxKey{}
 // ChatRequest is the canonical representation of a chat completion request
 // regardless of provider wire format.
 type ChatRequest struct {
-	Model              string // model name as sent by client (e.g. "deepseek-v4-pro")
-	Messages           []Message
-	Tools              []ToolDef
-	Stream             bool
-	MaxTokens          *int
-	Temperature        *float64
-	TopP               *float64
-	StopSequences      []string
-	SafetySettings     []any          // Google Vertex/Gemini safety configuration
-	ProviderExtensions map[string]any // unparsed fields passed through transparently
-
-	// ToranaMeta carries proxy-internal metadata that format adapters
-	// MUST NOT serialize to the wire. Used for request-scoped state
-	// (e.g. mutation registries) shared between hooks.
-	ToranaMeta map[string]any
+	Model         string // model name as sent by client (e.g. "deepseek-v4-pro")
+	Messages      []Message
+	Tools         []ToolDef
+	Stream        bool
+	MaxTokens     *int
+	Temperature   *float64
+	TopP          *float64
+	StopSequences []string
+	// SafetySettings is the authoritative raw safety-config array (Gemini
+	// shape); absent vs present-empty are distinct.
+	SafetySettings OptionalJSONArray
+	// ProviderExtensions carries unknown top-level provider fields as the
+	// authoritative raw object (deterministic member order, lexeme-exact).
+	ProviderExtensions OptionalJSONObject
+	// ToranaMeta carries proxy-internal metadata that format adapters MUST
+	// NOT serialize to the wire. Used for request-scoped state (e.g.
+	// mutation registries) shared between hooks. Host-owned.
+	ToranaMeta OptionalJSONObject
 }
 
 // Role classifies a message's speaker.
@@ -41,57 +44,15 @@ const (
 // For simple text messages, Content holds the text body and tool fields are zero.
 // For assistant tool-call messages, Content is empty and ToolCalls is populated.
 // For tool-result messages, ToolCallID identifies the call and ToolName names the tool.
+// Message represents a single turn in a chat conversation.
+//
+// The message BODY is the ordered Block sequence — the SOLE authority for
+// every content fact (text, thinking, tool use, tool results, cache
+// breakpoints, unknown provider arms, signatures), in provider wire order.
+// See block.go for the block kinds and their absolute rules.
 type Message struct {
-	Role              Role
-	Content           string     // text body; empty for tool-call-only messages
-	ContentParts      []any      // multimodal array content (e.g. vision)
-	Thinking          string     // extended thinking / reasoning text
-	ThinkingSignature string     // Anthropic cryptographic signature (empty for other providers)
-	RedactedThinking  string     // encrypted/redacted thinking blocks from Anthropic
-	ToolCalls         []ToolCall // assistant → tool invocations
-	ToolCallID        string     // tool messages: which call this result answers
-	ToolName          string     // tool messages: which tool produced this result
-
-	// CacheControl is an opaque provider cache breakpoint attached to this
-	// message (e.g. Anthropic {"type":"ephemeral"}, Bedrock cachePoint).
-	// Stored verbatim so provider-specific shapes and TTLs pass through
-	// untouched. Breakpoints are positional: adapters re-emit the marker on
-	// the last wire block rendered for this message. Nil when absent.
-	CacheControl map[string]any
-
-	// TrailingSignature is a standalone provider signature on a trailing
-	// signature-only part (Code Assist's final {"thoughtSignature","text":""}
-	// part after earlier text). SignatureScopeTrailingStandalone: binds the
-	// preceding closed text/thinking content of this message; does not bind
-	// tool-call blocks. The host must clear it when the covered content
-	// changes, or reject the mutation. Empty when the provider sent none.
-	TrailingSignature string
-
-	// ContentSignature is a provider signature carried ON an ordinary text
-	// part (Gemini/Code Assist thoughtSignature beside non-thought text),
-	// covering that part's content. SignatureScopeSameMessage: binds this
-	// message's Content field. Distinct from ThinkingSignature (thinking
-	// blocks) and TrailingSignature (standalone final part). The host must
-	// clear it when the covered content changes, or reject the mutation.
-	// Empty when the provider sent no content-bound signature.
-	ContentSignature string
-}
-
-// ToolCall represents an assistant's request to invoke a tool.
-type ToolCall struct {
-	ID   string
-	Name string
-	// Arguments is the REQUIRED authoritative JSON object of the call
-	// arguments (the reassessment-approved RequiredJSONObject wrapper): the
-	// zero value is the canonical `{}`, never absent, and the bytes are
-	// validated raw lexemes (1e999, large integers, key order, escaped
-	// Unicode all survive PB -> engine -> adapter untouched).
-	Arguments RequiredJSONObject
-	// Signature is an opaque provider-specific token attached to this call
-	// (e.g. Gemini/Code Assist thoughtSignature). It MUST be preserved across
-	// a round-trip so replayed history keeps the model's reasoning binding;
-	// empty for providers that don't emit one.
-	Signature string
+	Role   Role
+	Blocks []Block
 }
 
 // ToolDef describes a function available to the model.
@@ -104,8 +65,9 @@ type ToolDef struct {
 	Parameters RequiredJSONObject
 	Strict     bool
 	// CacheControl marks a cache breakpoint after this tool definition
-	// (Anthropic allows cache_control on tool entries). Opaque; nil when absent.
-	CacheControl map[string]any
+	// (Anthropic allows cache_control on tool entries). Opaque raw marker
+	// object; absent when zero.
+	CacheControl OptionalJSONObject
 }
 
 // --- Response streaming side ---

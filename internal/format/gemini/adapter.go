@@ -25,6 +25,7 @@ package gemini
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/torana-edge/torana-edge/internal/engine"
 	"github.com/torana-edge/torana-edge/internal/format"
@@ -155,6 +156,7 @@ func (a *Adapter) Unmarshal(rawBody []byte) (*engine.ChatRequest, error) {
 	if err := json.Unmarshal(reqBytes, &gReq); err != nil {
 		return nil, fmt.Errorf("gemini: unmarshal inner request: %w", err)
 	}
+	var err error
 
 	chat := &engine.ChatRequest{Stream: false, Model: "gemini"}
 
@@ -165,40 +167,80 @@ func (a *Adapter) Unmarshal(rawBody []byte) (*engine.ChatRequest, error) {
 		chat.StopSequences = gReq.GenerationConfig.StopSequences
 	}
 	if len(gReq.SafetySettings) > 0 {
-		chat.SafetySettings = gReq.SafetySettings
+		safetyRaw, serr := json.Marshal(gReq.SafetySettings)
+		if serr != nil {
+			return nil, fmt.Errorf("gemini safety settings: %w", serr)
+		}
+		chat.SafetySettings, err = engine.ParseOptionalJSONArray(safetyRaw)
+		if err != nil {
+			return nil, fmt.Errorf("gemini safety settings: %w", err)
+		}
 	}
 
 	if wrapped {
-		chat.ProviderExtensions = codeAssistExtensions(top, reqBytes)
-		if m, ok := chat.ProviderExtensions[extWrapper].(map[string]any)["model"].(string); ok && m != "" {
+		// Code Assist envelope: HOST-ONLY topology. The wrapper (top-level
+		// minus "request") and the inner request's non-rebuilt fields are
+		// captured RAW; the sentinels are appended in fixed order.
+		var wrapper, reqExtra engine.OptionalJSONObject
+		topObj, toerr := engine.ParseOptionalJSONObject(rawBody)
+		if toerr != nil {
+			return nil, fmt.Errorf("gemini code assist extensions: %w", toerr)
+		}
+		wrapper, err = topObj.WithoutMembers("request")
+		if err != nil {
+			return nil, fmt.Errorf("gemini code assist extensions: %w", err)
+		}
+		innerObj, ierr := engine.ParseOptionalJSONObject(reqBytes)
+		if ierr != nil {
+			return nil, fmt.Errorf("gemini code assist extensions: %w", ierr)
+		}
+		reqExtra, err = innerObj.WithoutMembers("systemInstruction", "contents", "tools")
+		if err != nil {
+			return nil, fmt.Errorf("gemini code assist extensions: %w", err)
+		}
+		ext := engine.OptionalJSONObject{}
+		if ext, err = ext.SetMember(extCodeAssist, json.RawMessage("true")); err == nil {
+			ext, err = ext.SetMember(extWrapper, wrapper.Bytes())
+		}
+		if err == nil {
+			ext, err = ext.SetMember(extRequestExtra, reqExtra.Bytes())
+		}
+		if err != nil {
+			return nil, fmt.Errorf("gemini code assist extensions: %w", err)
+		}
+		chat.ProviderExtensions = ext
+		if m, ok := readExtString(chat.ProviderExtensions, extWrapper+".model"); ok && m != "" {
 			chat.Model = m
 		}
 	} else {
-		// Bare Gemini: preserve unknown top-level fields as before.
-		var raw map[string]any
-		if err := json.Unmarshal(rawBody, &raw); err == nil {
-			for _, k := range []string{"systemInstruction", "contents", "tools", "generationConfig", "safetySettings"} {
-				delete(raw, k)
-			}
-			if len(raw) > 0 {
-				chat.ProviderExtensions = raw
-			}
+		// Bare Gemini: preserve unknown top-level fields deterministically
+		// (original body minus the canonical fields, fixed delete order).
+		ext, xerr := engine.ParseOptionalJSONObject(rawBody)
+		if xerr != nil {
+			return nil, fmt.Errorf("gemini provider extensions: %w", xerr)
+		}
+		ext, xerr = ext.WithoutMembers("systemInstruction", "contents", "tools", "generationConfig", "safetySettings")
+		if xerr != nil {
+			return nil, fmt.Errorf("gemini provider extensions: %w", xerr)
+		}
+		if ext, xerr = format.NormalizeExtensionObject(ext); xerr != nil {
+			return nil, fmt.Errorf("gemini provider extensions: %w", xerr)
+		}
+		if !ext.IsAbsent() {
+			chat.ProviderExtensions = ext
 		}
 	}
 
-	// System instruction → RoleSystem message.
+	// System instruction → RoleSystem message with ordered text blocks.
 	if gReq.SystemInstruction != nil {
-		var sb string
+		msg := engine.Message{Role: engine.RoleSystem}
 		for _, p := range gReq.SystemInstruction.Parts {
 			if partText(p) != "" {
-				if sb != "" {
-					sb += "\n"
-				}
-				sb += partText(p)
+				msg.Blocks = append(msg.Blocks, engine.Block{Text: &engine.TextBlock{Text: partText(p)}})
 			}
 		}
-		if sb != "" {
-			chat.Messages = append(chat.Messages, engine.Message{Role: engine.RoleSystem, Content: sb})
+		if len(msg.Blocks) > 0 {
+			chat.Messages = append(chat.Messages, msg)
 		}
 	}
 
@@ -207,27 +249,12 @@ func (a *Adapter) Unmarshal(rawBody []byte) (*engine.ChatRequest, error) {
 	callIDs := map[string]string{}
 
 	for _, content := range gReq.Contents {
-		switch content.Role {
-		case "user":
-			appendUserOrTool(chat, content, callIDs)
-		case "model":
-			if err := appendModel(chat, content, prevCallIdx, callIDs); err != nil {
-				return nil, err
-			}
-		default:
-			// Unknown role: treat text as user text.
-			msg := engine.Message{Role: engine.RoleUser}
-			for _, p := range content.Parts {
-				if partText(p) != "" {
-					if msg.Content != "" {
-						msg.Content += "\n"
-					}
-					msg.Content += partText(p)
-				}
-			}
-			if msg.Content != "" {
-				chat.Messages = append(chat.Messages, msg)
-			}
+		msg, err := geminiContentToMessage(content, prevCallIdx, callIDs)
+		if err != nil {
+			return nil, err
+		}
+		if len(msg.Blocks) > 0 {
+			chat.Messages = append(chat.Messages, msg)
 		}
 	}
 
@@ -248,128 +275,57 @@ func (a *Adapter) Unmarshal(rawBody []byte) (*engine.ChatRequest, error) {
 	return chat, nil
 }
 
-// codeAssistExtensions captures everything needed to reconstruct the wrapper
-// and the inner request's non-plugin fields verbatim on Marshal.
-func codeAssistExtensions(top map[string]json.RawMessage, reqBytes []byte) map[string]any {
-	wrapper := map[string]any{}
-	for k, v := range top {
-		if k == "request" {
-			continue
-		}
-		var val any
-		if json.Unmarshal(v, &val) == nil {
-			wrapper[k] = val
-		}
-	}
-	var innerMap map[string]any
-	json.Unmarshal(reqBytes, &innerMap)
-	// Remove the fields we rebuild from the IR; keep generationConfig,
-	// toolConfig, labels, sessionId, safetySettings, … untouched.
-	for _, k := range []string{"systemInstruction", "contents", "tools"} {
-		delete(innerMap, k)
-	}
-	return map[string]any{
-		extCodeAssist:   true,
-		extWrapper:      wrapper,
-		extRequestExtra: innerMap,
-	}
-}
-
-// appendUserOrTool handles a role:"user" content: plain text, or (rarely, for
-// bare Gemini) functionResponse parts that become RoleTool messages.
-func appendUserOrTool(chat *engine.ChatRequest, content geminiContent, callIDs map[string]string) {
-	msg := engine.Message{Role: engine.RoleUser}
-	for _, p := range content.Parts {
-		switch {
-		case partText(p) != "":
-			if msg.Content != "" {
-				msg.Content += "\n"
-			}
-			msg.Content += partText(p)
-		case p.FunctionResponse != nil:
-			appendToolResult(chat, p.FunctionResponse, callIDs)
-		}
-	}
-	if msg.Content != "" {
-		chat.Messages = append(chat.Messages, msg)
-	}
-}
-
-// appendModel handles a role:"model" content, which under Code Assist may hold
-// a functionCall, a functionResponse (tool result), thinking, or text — each
-// preserving its id and thoughtSignature. A signature beside non-thought text
-// is the content-bound signature (SignatureScopeSameMessage: binds the merged
-// Content) and lands in ContentSignature; a signature on a thought:true part
-// is the current-block signature and lands in ThinkingSignature. A part with
-// EXPLICIT empty text and only a thoughtSignature is the trailing standalone
-// signature (Code Assist's final {"thoughtSignature":<sig>,"text":""} part,
-// SignatureScopeTrailingStandalone): it binds the preceding closed text/
-// thinking content of this turn, never a tool-call block. It is only valid
-// AFTER text/thinking in the same content; a signature-only part with no
-// preceding text/thinking is malformed and rejected (a leading standalone, or
-// one stranded on a tool-call-only turn), and a BARE signature part (no "text"
-// key at all) is not the trailing shape — the contract requires the explicit
-// empty-text arm — so it too is rejected.
+// geminiContentToMessage projects ONE wire content onto the ordered body:
+// parts become blocks in wire order (text, thinking, tool use, tool result,
+// unknown arms); functionResponse parts RIDE their message at their exact
+// position (no synthetic RoleTool split). Signature topology rules:
 //
-// Ordered signed-part topology is preserved or rejected: a current-block
-// signature must never move over unsigned content (the Content/Thinking merge
-// would replay a provider signature over parts it did not sign), so multiple
-// text-bearing or thinking-bearing parts with any signature in the content are
-// rejected, and the trailing standalone signature must be final and singular.
-// A content mixing text/thinking with tool-call parts is rejected outright:
-// buildContents intentionally splits tool calls into their own model contents
-// for Code Assist, so the ordered mixed shape cannot round-trip.
-func appendModel(chat *engine.ChatRequest, content geminiContent, prevCallIdx map[string]int, callIDs map[string]string) error {
-	msg := engine.Message{Role: engine.RoleAssistant}
+//   - a thoughtSignature beside non-thought text is the content-bound token
+//     on THAT text block;
+//   - a signature on a thought:true part is the current-block token;
+//   - a signature-only part with the EXPLICIT empty-text arm is the trailing
+//     standalone (final; rejected without preceding covered content, or bare
+//     without the text arm, or duplicated).
+func geminiContentToMessage(content geminiContent, prevCallIdx map[string]int, callIDs map[string]string) (engine.Message, error) {
+	msg := engine.Message{Role: mapRoleG(content.Role)}
 
-	// Pre-pass counts for the topology reject rules. Signatures on tool-call
-	// parts are call-bound (each call keeps its own) and never move, so they
-	// are excluded from "any signature". A valid trailing part carries the
-	// EXPLICIT "text":"" arm, so it is not counted as text-bearing; a bare
-	// signature part (no "text" key) is counted standalone and rejected below.
-	textParts, thinkingParts, standaloneParts := 0, 0, 0
-	sigOnText, sigOnThinking := false, false
-	hasText, hasTool := false, false
+	// Pre-pass: the trailing-standalone reject rules (leading / stranded /
+	// bare / duplicate) and the mixed text/thinking-with-tool rejection
+	// (Code Assist's wire shape cannot round-trip mixed contents).
+	standalone := 0
+	hasTextOrThinking := false
+	hasTool := false
 	for _, p := range content.Parts {
 		switch {
 		case p.FunctionCall != nil || p.FunctionResponse != nil:
 			hasTool = true
-		case p.Thought && p.Text != nil && *p.Text != "":
-			thinkingParts++
-			if p.ThoughtSignature != "" {
-				sigOnThinking = true
-			}
-			hasText = true
 		case p.Text != nil && *p.Text != "":
-			textParts++
-			if p.ThoughtSignature != "" {
-				sigOnText = true
-			}
-			hasText = true
-		case p.ThoughtSignature != "":
-			standaloneParts++
+			hasTextOrThinking = true
+		case p.Thought && p.Text != nil && *p.Text != "":
+			hasTextOrThinking = true
+		case p.ThoughtSignature != "" && !p.Thought && p.Text != nil && *p.Text == "":
+			// The trailing-standalone shape only (explicit empty text,
+			// signature, no thought flag): text/thinking-bound signatures
+			// are per-block tokens, never counted here.
+			standalone++
 		}
 	}
-
-	// A content mixing text/thinking with tool-call parts cannot round-trip:
-	// buildContents splits tool calls into their own model contents for Code
-	// Assist, so the ordered mixed shape would be lost. Rejected unconditionally.
-	if hasText && hasTool {
-		return fmt.Errorf("gemini: mixed text/thinking and tool-call parts in one content are not representable")
+	if hasTextOrThinking && hasTool {
+		return msg, fmt.Errorf("gemini: mixed text/thinking and tool-call parts in one content are not representable")
+	}
+	if standalone > 1 {
+		return msg, fmt.Errorf("gemini: duplicate standalone signature")
 	}
 
-	// A second signature-only part is always malformed, wherever it sits:
-	// the trailing slot is singular (covers text,sigA,sigB and sig-only,sig-only).
-	if standaloneParts > 1 {
-		return fmt.Errorf("gemini: duplicate standalone signature")
-	}
-
-	sigInContent := sigOnThinking || sigOnText || standaloneParts > 0
-	seenText := false
+	seenCovered := false
 	for i, p := range content.Parts {
 		switch {
 		case p.FunctionResponse != nil:
-			appendToolResult(chat, p.FunctionResponse, callIDs)
+			tr, err := geminiToolResultBlock(p.FunctionResponse, callIDs)
+			if err != nil {
+				return msg, err
+			}
+			msg.Blocks = append(msg.Blocks, engine.Block{ToolResult: tr})
 		case p.FunctionCall != nil:
 			name := p.FunctionCall.Name
 			id := p.FunctionCall.ID
@@ -380,79 +336,66 @@ func appendModel(chat *engine.ChatRequest, content geminiContent, prevCallIdx ma
 			callIDs[name] = id
 			args, err := engine.ParseRequiredObjectOrEmpty(p.FunctionCall.Args)
 			if err != nil {
-				return fmt.Errorf("tool call %q args: %w", name, err)
+				return msg, fmt.Errorf("tool call %q args: %w", name, err)
 			}
-			msg.ToolCalls = append(msg.ToolCalls, engine.ToolCall{
-				ID:        id,
-				Name:      name,
-				Arguments: args,
-				Signature: p.ThoughtSignature,
-			})
-		case p.Thought && p.Text != nil && *p.Text != "":
-			// Thinking part: its text goes to Thinking (never Content), and a
-			// signature on it is the current-block ThinkingSignature — the ONLY
-			// source of that slot. Joined with "\n" like Content.
-			if msg.Thinking != "" {
-				msg.Thinking += "\n"
+			msg.Blocks = append(msg.Blocks, engine.Block{ToolUse: &engine.ToolUseBlock{
+				ID: id, Name: name, Arguments: args, Signature: p.ThoughtSignature,
+			}})
+		case p.Thought && p.Text != nil:
+			msg.Blocks = append(msg.Blocks, engine.Block{Thinking: &engine.ThinkingBlock{
+				Text: *p.Text, Signature: p.ThoughtSignature,
+			}})
+			if *p.Text != "" {
+				seenCovered = true
 			}
-			msg.Thinking += *p.Text
-			if p.ThoughtSignature != "" {
-				msg.ThinkingSignature = p.ThoughtSignature
-			}
-			seenText = true
-		case p.Text != nil && *p.Text != "":
-			if msg.Content != "" {
-				msg.Content += "\n"
-			}
-			msg.Content += *p.Text
-			if p.ThoughtSignature != "" {
-				// A part carrying BOTH text and a signature is the content-bound
-				// (SameMessage) signature covering this Content — NOT the
-				// thinking-block slot, which comes only from thought:true parts.
-				msg.ContentSignature = p.ThoughtSignature
-			}
-			seenText = true
-		case p.ThoughtSignature != "":
-			// Signature-only part. The valid trailing shape is an EXPLICIT
-			// empty-text part ({"text":"","thoughtSignature":…}); a bare part
-			// with no "text" key at all is not that contract and is rejected.
-			if p.Text == nil {
-				return fmt.Errorf("gemini: standalone signature part must carry explicit empty text")
-			}
-			if !seenText {
-				if !hasText {
-					return fmt.Errorf("gemini: standalone signature on a tool-call-only turn")
+		case p.ThoughtSignature != "" && p.Text == nil:
+			// A signature with NO text arm is not the supported trailing
+			// shape — the TrailingStandalone contract requires the EXPLICIT
+			// empty-text arm — so refuse instead of guessing at a binding.
+			return msg, fmt.Errorf("gemini: standalone signature part must carry explicit empty text")
+		case p.ThoughtSignature != "" && !p.Thought && p.Text != nil && *p.Text == "":
+			// Trailing standalone: explicit empty-text arm, preceded by
+			// covered content, singular, final. (Ordered before the plain
+			// text case so the signature-only shape never becomes a text
+			// block with a content-bound token.)
+			if !seenCovered {
+				if !hasTextOrThinking {
+					return msg, fmt.Errorf("gemini: standalone signature on a tool-call-only turn")
 				}
-				return fmt.Errorf("gemini: trailing signature without preceding text/thinking content")
+				return msg, fmt.Errorf("gemini: trailing signature without preceding text/thinking content")
 			}
 			if i != len(content.Parts)-1 {
-				return fmt.Errorf("gemini: standalone signature is not the final part")
+				return msg, fmt.Errorf("gemini: standalone signature is not the final part")
 			}
-			msg.TrailingSignature = p.ThoughtSignature
+			msg.Blocks = append(msg.Blocks, engine.Block{TrailingSignature: &engine.TrailingSignatureBlock{Signature: p.ThoughtSignature}})
+		case p.Text != nil:
+			msg.Blocks = append(msg.Blocks, engine.Block{Text: &engine.TextBlock{
+				Text: *p.Text, Signature: p.ThoughtSignature,
+			}})
+			if *p.Text != "" {
+				seenCovered = true
+			}
+		default:
+			// Unknown part arms ride raw: the payload with the canonical
+			// members removed.
+			raw, rerr := json.Marshal(p)
+			if rerr != nil {
+				return msg, rerr
+			}
+			payload, perr := stripGeminiPartFacts(raw)
+			if perr != nil {
+				return msg, fmt.Errorf("gemini part payload: %w", perr)
+			}
+			msg.Blocks = append(msg.Blocks, engine.Block{Unknown: &engine.UnknownBlock{Kind: "part", Payload: payload}})
 		}
 	}
-
-	// A single signature plus merged multiple text parts would replay the
-	// signature over content the provider did not sign (findings 1): reject.
-	if textParts >= 2 && (sigOnText || standaloneParts > 0) {
-		return fmt.Errorf("gemini: multiple text parts with a signature are not representable")
-	}
-	// Same class of error for merged thinking parts.
-	if thinkingParts >= 2 && sigInContent {
-		return fmt.Errorf("gemini: multiple thinking parts with a signature are not representable")
-	}
-
-	if msg.Content != "" || msg.Thinking != "" || len(msg.ToolCalls) > 0 {
-		chat.Messages = append(chat.Messages, msg)
-	}
-	return nil
+	return msg, nil
 }
 
-func appendToolResult(chat *engine.ChatRequest, fr *geminiFuncResp, callIDs map[string]string) {
-	// Code Assist wraps tool output as {"output": "<text>"}. Store the raw text
-	// as Content (real newlines) so compactor plugins can line-split it like any
-	// other provider's tool result; re-wrapped on Marshal. Richer responses are
-	// kept as JSON.
+// geminiToolResultBlock projects a functionResponse part onto a ToolResult
+// block (the plain-text content; the Code Assist {"output":...} wrapping is
+// a marshal-side provider shape).
+func geminiToolResultBlock(fr *geminiFuncResp, callIDs map[string]string) (*engine.ToolResultBlock, error) {
 	content := ""
 	if s, ok := singleStringField(fr.Response, "output"); ok {
 		content = s
@@ -471,12 +414,72 @@ func appendToolResult(chat *engine.ChatRequest, fr *geminiFuncResp, callIDs map[
 			id = fr.Name + "_0"
 		}
 	}
-	chat.Messages = append(chat.Messages, engine.Message{
-		Role:       engine.RoleTool,
+	return &engine.ToolResultBlock{
 		ToolCallID: id,
 		ToolName:   fr.Name,
-		Content:    content,
-	})
+		Content:    []engine.ToolResultContentBlock{{Text: content}},
+	}, nil
+}
+
+// stripGeminiPartFacts removes the known canonical members of a part object.
+func stripGeminiPartFacts(raw json.RawMessage) (engine.RequiredJSONObject, error) {
+	if len(raw) == 0 || raw[0] != '{' {
+		return engine.RequiredJSONObject{}, fmt.Errorf("expected a JSON object part")
+	}
+	obj, err := engine.ParseRequiredJSONObject(raw)
+	if err != nil {
+		return obj, err
+	}
+	for _, k := range []string{"text", "thought", "thoughtSignature", "functionCall", "functionResponse"} {
+		obj, err = obj.DeleteMember(k)
+		if err != nil {
+			return obj, err
+		}
+	}
+	return obj, nil
+}
+
+// readExtString reads a dotted path (wrapper.member) from a raw extensions
+// object; absent or non-string yields ok=false.
+func readExtString(ext engine.OptionalJSONObject, path string) (string, bool) {
+	if ext.IsAbsent() {
+		return "", false
+	}
+	m, _, err := ext.DecodeObject()
+	if err != nil {
+		return "", false
+	}
+	parts := strings.SplitN(path, ".", 2)
+	raw, ok := m[parts[0]]
+	if !ok {
+		return "", false
+	}
+	if len(parts) == 1 {
+		var s string
+		return s, json.Unmarshal(raw, &s) == nil
+	}
+	var inner map[string]json.RawMessage
+	if json.Unmarshal(raw, &inner) != nil {
+		return "", false
+	}
+	val, ok := inner[parts[1]]
+	if !ok {
+		return "", false
+	}
+	var s string
+	return s, json.Unmarshal(val, &s) == nil
+}
+
+// mapRoleG maps gemini wire roles to engine roles.
+func mapRoleG(role string) engine.Role {
+	switch role {
+	case "user":
+		return engine.RoleUser
+	case "model":
+		return engine.RoleAssistant
+	default:
+		return engine.Role(role)
+	}
 }
 
 // singleStringField returns v[key] as a string if resp is exactly {key: string}.
@@ -492,10 +495,18 @@ func singleStringField(resp map[string]any, key string) (string, bool) {
 
 // Marshal converts a ChatRequest back into Gemini or Code Assist JSON.
 func (a *Adapter) Marshal(chat *engine.ChatRequest) ([]byte, error) {
-	codeAssist, _ := chat.ProviderExtensions[extCodeAssist].(bool)
+	codeAssist := false
+	if !chat.ProviderExtensions.IsAbsent() {
+		if b, ok := readExtBool(chat.ProviderExtensions, extCodeAssist); ok {
+			codeAssist = b
+		}
+	}
 
 	sys := buildSystemInstruction(chat.Messages)
-	contents := buildContents(chat.Messages, codeAssist)
+	contents, err := buildContents(chat.Messages, codeAssist)
+	if err != nil {
+		return nil, err
+	}
 	tools := buildTools(chat.Tools)
 
 	if codeAssist {
@@ -511,46 +522,99 @@ func (a *Adapter) Marshal(chat *engine.ChatRequest) ([]byte, error) {
 			StopSequences:   chat.StopSequences,
 		}
 	}
-	if len(chat.SafetySettings) > 0 {
-		gReq.SafetySettings = chat.SafetySettings
+	if !chat.SafetySettings.IsAbsent() {
+		var ss []any
+		if err := json.Unmarshal(chat.SafetySettings.Bytes(), &ss); err != nil {
+			return nil, fmt.Errorf("gemini safety settings: %w", err)
+		}
+		gReq.SafetySettings = ss
 	}
 
 	b, err := json.Marshal(gReq)
 	if err != nil {
 		return nil, err
 	}
-	if len(chat.ProviderExtensions) > 0 {
+	if !chat.ProviderExtensions.IsAbsent() {
 		var outMap map[string]json.RawMessage
-		json.Unmarshal(b, &outMap)
-		for k, v := range chat.ProviderExtensions {
-			outMap[k], _ = json.Marshal(v)
+		if err := json.Unmarshal(b, &outMap); err != nil {
+			return nil, err
+		}
+		if err := format.MergeRawMembers(outMap, chat.ProviderExtensions.Bytes()); err != nil {
+			return nil, fmt.Errorf("gemini provider extensions merge: %w", err)
 		}
 		return json.Marshal(outMap)
 	}
 	return b, nil
 }
 
-// marshalCodeAssist rebuilds the wrapper, overlaying only the plugin-touched
-// fields onto the preserved inner request and wrapper maps.
+// marshalCodeAssist rebuilds the envelope from the raw captures: the inner
+// request keeps every preserved member byte-exact; only the IR-rebuilt
+// fields (contents/systemInstruction/tools) are overlaid.
 func marshalCodeAssist(chat *engine.ChatRequest, sys *geminiSystemInstruction, contents []geminiContent, tools []geminiTool) ([]byte, error) {
-	inner := cloneMap(mapExt(chat.ProviderExtensions, extRequestExtra))
-	inner["contents"] = contents
+	ext, _, err := chat.ProviderExtensions.DecodeObject()
+	if err != nil {
+		return nil, fmt.Errorf("code assist extensions: %w", err)
+	}
+	inner, err := engine.ParseOptionalJSONObject(ext[extRequestExtra])
+	if err != nil {
+		return nil, fmt.Errorf("code assist extensions: %w", err)
+	}
+	contentsBytes, err := json.Marshal(contents)
+	if err != nil {
+		return nil, err
+	}
+	if inner, err = inner.SetMember("contents", contentsBytes); err != nil {
+		return nil, err
+	}
 	if sys != nil {
-		inner["systemInstruction"] = sys
-	} else {
-		delete(inner, "systemInstruction")
+		sysBytes, serr := json.Marshal(sys)
+		if serr != nil {
+			return nil, serr
+		}
+		if inner, err = inner.SetMember("systemInstruction", sysBytes); err != nil {
+			return nil, err
+		}
+	} else if inner, err = inner.DeleteMember("systemInstruction"); err != nil {
+		return nil, err
 	}
 	if len(tools) > 0 {
-		inner["tools"] = tools
-	} else {
-		delete(inner, "tools")
+		toolsBytes, terr := json.Marshal(tools)
+		if terr != nil {
+			return nil, terr
+		}
+		if inner, err = inner.SetMember("tools", toolsBytes); err != nil {
+			return nil, err
+		}
+	} else if inner, err = inner.DeleteMember("tools"); err != nil {
+		return nil, err
 	}
 
-	wrapper := cloneMap(mapExt(chat.ProviderExtensions, extWrapper))
-	wrapper["request"] = inner
-	return json.Marshal(wrapper)
+	wrapper, err := engine.ParseOptionalJSONObject(ext[extWrapper])
+	if err != nil {
+		return nil, fmt.Errorf("code assist extensions: %w", err)
+	}
+	if wrapper, err = wrapper.SetMember("request", inner.Bytes()); err != nil {
+		return nil, err
+	}
+	return wrapper.Bytes(), nil
 }
 
+// readExtBool reads a bool member from a raw extensions object.
+func readExtBool(ext engine.OptionalJSONObject, key string) (bool, bool) {
+	if ext.IsAbsent() {
+		return false, false
+	}
+	m, _, err := ext.DecodeObject()
+	if err != nil {
+		return false, false
+	}
+	raw, ok := m[key]
+	if !ok {
+		return false, false
+	}
+	var b bool
+	return b, json.Unmarshal(raw, &b) == nil
+}
 func buildSystemInstruction(msgs []engine.Message) *geminiSystemInstruction {
 	var si *geminiSystemInstruction
 	for _, msg := range msgs {
@@ -558,16 +622,23 @@ func buildSystemInstruction(msgs []engine.Message) *geminiSystemInstruction {
 			if si == nil {
 				si = &geminiSystemInstruction{Role: "user"}
 			}
-			si.Parts = append(si.Parts, geminiPart{Text: new(msg.Content)})
+			for _, b := range msg.Blocks {
+				if b.Text != nil {
+					si.Parts = append(si.Parts, geminiPart{Text: new(b.Text.Text)})
+				}
+			}
 		}
 	}
 	return si
 }
 
-// buildContents reconstructs the Gemini contents array. When codeAssist is set
-// it matches the Antigravity CLI's wire shape: functionCall and functionResponse
-// each live in their own role:"model" content, with id + thoughtSignature.
-func buildContents(msgs []engine.Message, codeAssist bool) []geminiContent {
+// buildContents reconstructs the Gemini contents array from the ordered
+// body. When codeAssist is set it matches the Antigravity CLI's wire shape:
+// functionCall and functionResponse each live in their own role:"model"
+// content, with id + thoughtSignature. Unrepresentable block kinds fail
+// closed: cache breakpoints, redacted thinking, trailing signatures
+// (bare Gemini), and unknown arms outside a content part.
+func buildContents(msgs []engine.Message, codeAssist bool) ([]geminiContent, error) {
 	toolResultRole := "user"
 	if codeAssist {
 		toolResultRole = "model"
@@ -575,66 +646,118 @@ func buildContents(msgs []engine.Message, codeAssist bool) []geminiContent {
 	var out []geminiContent
 	for _, msg := range msgs {
 		switch msg.Role {
-		case engine.RoleUser:
-			if msg.Content != "" {
-				out = append(out, geminiContent{Role: "user", Parts: []geminiPart{{Text: new(msg.Content)}}})
+		case engine.RoleUser, engine.RoleSystem:
+			content := geminiContent{Role: "user"}
+			for _, b := range msg.Blocks {
+				switch {
+				case b.Text != nil:
+					content.Parts = append(content.Parts, geminiPart{Text: new(b.Text.Text)})
+				case b.ToolResult != nil:
+					text := ""
+					for _, c := range b.ToolResult.Content {
+						if c.Unknown != nil || c.CacheBreakpoint != nil {
+							return nil, fmt.Errorf("gemini: structured tool-result content is not representable")
+						}
+						text += c.Text
+					}
+					content.Parts = append(content.Parts, geminiPart{
+						FunctionResponse: &geminiFuncResp{
+							Name: b.ToolResult.ToolName, ID: b.ToolResult.ToolCallID,
+							Response: toolResponseMap(text, codeAssist),
+						},
+					})
+				default:
+					return nil, fmt.Errorf("gemini: block kind not representable in a %s content", msg.Role)
+				}
+			}
+			if len(content.Parts) > 0 {
+				out = append(out, content)
 			}
 		case engine.RoleAssistant:
-			if msg.Content != "" || msg.ContentSignature != "" || msg.Thinking != "" || msg.TrailingSignature != "" {
-				var parts []geminiPart
-				if msg.Thinking != "" {
-					// Thinking precedes text per Gemini's contract: the thinking
-					// part is FIRST, carrying the current-block signature.
-					tp := geminiPart{Thought: true, Text: new(msg.Thinking)}
-					if msg.ThinkingSignature != "" {
-						tp.ThoughtSignature = msg.ThinkingSignature
+			// Split the ordered body into contents per the Gemini wire
+			// contract: text/thinking contents, then tool-call contents
+			// (parallel calls in ONE content, matching the model's output).
+			var textContent *geminiContent
+			var toolParts []geminiPart
+			for _, b := range msg.Blocks {
+				switch {
+				case b.Text != nil:
+					if textContent == nil {
+						textContent = &geminiContent{Role: "model"}
 					}
-					parts = append(parts, tp)
-				}
-				// The text part is emitted only when it carries content OR a
-				// content-bound signature — never invented for thinking-only
-				// turns. Its signature is the ContentSignature (SameMessage
-				// scope over this text), never the thinking-block signature.
-				if msg.Content != "" || msg.ContentSignature != "" {
-					p := geminiPart{Text: new(msg.Content)}
-					if msg.ContentSignature != "" {
-						p.ThoughtSignature = msg.ContentSignature
+					textContent.Parts = append(textContent.Parts, geminiPart{Text: new(b.Text.Text), ThoughtSignature: b.Text.Signature})
+				case b.Thinking != nil:
+					if textContent == nil {
+						textContent = &geminiContent{Role: "model"}
 					}
-					parts = append(parts, p)
-				}
-				if msg.TrailingSignature != "" {
-					// Code Assist's trailing signature-only part: its OWN final
-					// part in the same content as the text, with the EXPLICIT
-					// empty text arm the provider emits — never merged into the
-					// text part (topology-preserving round-trip).
-					parts = append(parts, geminiPart{Text: new(""), ThoughtSignature: msg.TrailingSignature})
-				}
-				out = append(out, geminiContent{Role: "model", Parts: parts})
-			}
-			// Keep a turn's parallel tool calls in ONE content block, matching
-			// how the model produced them: Gemini attaches a thoughtSignature to
-			// only the first call of a parallel group, and splitting them into
-			// separate blocks makes the server reject the signature-less ones
-			// ("missing thought_signature", position N).
-			if len(msg.ToolCalls) > 0 {
-				parts := make([]geminiPart, 0, len(msg.ToolCalls))
-				for _, tc := range msg.ToolCalls {
-					parts = append(parts, geminiPart{
-						ThoughtSignature: tc.Signature,
-						FunctionCall:     &geminiFuncCall{Name: tc.Name, Args: tc.Arguments.Bytes(), ID: tc.ID},
+					textContent.Parts = append(textContent.Parts, geminiPart{
+						Thought: true, Text: new(b.Thinking.Text), ThoughtSignature: b.Thinking.Signature,
 					})
+				case b.ToolUse != nil:
+					toolParts = append(toolParts, geminiPart{
+						ThoughtSignature: b.ToolUse.Signature,
+						FunctionCall:     &geminiFuncCall{Name: b.ToolUse.Name, Args: b.ToolUse.Arguments.Bytes(), ID: b.ToolUse.ID},
+					})
+				case b.ToolResult != nil:
+					text := ""
+					for _, c := range b.ToolResult.Content {
+						if c.Unknown != nil || c.CacheBreakpoint != nil {
+							return nil, fmt.Errorf("gemini: structured tool-result content is not representable")
+						}
+						text += c.Text
+					}
+					out = append(out, geminiContent{Role: toolResultRole, Parts: []geminiPart{{
+						FunctionResponse: &geminiFuncResp{
+							Name: b.ToolResult.ToolName, ID: b.ToolResult.ToolCallID,
+							Response: toolResponseMap(text, codeAssist),
+						},
+					}}})
+				case b.TrailingSignature != nil:
+					// The trailing signature-only part is a plain Gemini
+					// part (explicit empty text + thoughtSignature), NOT an
+					// envelope artifact — it round-trips on the unwrapped
+					// shape exactly as unmarshal parsed it.
+					if textContent == nil {
+						textContent = &geminiContent{Role: "model"}
+					}
+					textContent.Parts = append(textContent.Parts, geminiPart{Text: new(""), ThoughtSignature: b.TrailingSignature.Signature})
+				default:
+					return nil, fmt.Errorf("gemini: block kind not representable in an assistant content")
 				}
-				out = append(out, geminiContent{Role: "model", Parts: parts})
+			}
+			if textContent != nil {
+				out = append(out, *textContent)
+			}
+			if len(toolParts) > 0 {
+				out = append(out, geminiContent{Role: "model", Parts: toolParts})
 			}
 		case engine.RoleTool:
-			out = append(out, geminiContent{Role: toolResultRole, Parts: []geminiPart{{
-				FunctionResponse: &geminiFuncResp{Name: msg.ToolName, ID: msg.ToolCallID, Response: toolResponseMap(msg.Content, codeAssist)},
-			}}})
+			// A tool-role message is only representable when it carries one
+			// tool result; emit it in the tool-result content shape.
+			for _, b := range msg.Blocks {
+				if b.ToolResult == nil {
+					return nil, fmt.Errorf("gemini: tool-role message with a non-tool-result block")
+				}
+				text := ""
+				for _, c := range b.ToolResult.Content {
+					if c.Unknown != nil || c.CacheBreakpoint != nil {
+						return nil, fmt.Errorf("gemini: structured tool-result content is not representable")
+					}
+					text += c.Text
+				}
+				out = append(out, geminiContent{Role: toolResultRole, Parts: []geminiPart{{
+					FunctionResponse: &geminiFuncResp{
+						Name: b.ToolResult.ToolName, ID: b.ToolResult.ToolCallID,
+						Response: toolResponseMap(text, codeAssist),
+					},
+				}}})
+			}
+		default:
+			return nil, fmt.Errorf("gemini: unmodelled message role %q", msg.Role)
 		}
 	}
-	return out
+	return out, nil
 }
-
 func buildTools(tools []engine.ToolDef) []geminiTool {
 	if len(tools) == 0 {
 		return nil

@@ -62,7 +62,11 @@ func TestResponsesOpaqueItemsSurviveKnownMessageMutation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	chat.Messages[0].Content = "changed"
+	for _, b := range chat.Messages[0].Blocks {
+		if b.Text != nil {
+			b.Text.Text = "changed"
+		}
+	}
 	encoded, err := (&Adapter{}).Marshal(chat)
 	if err != nil {
 		t.Fatal(err)

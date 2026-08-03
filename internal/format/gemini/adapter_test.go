@@ -9,6 +9,43 @@ import (
 	"github.com/torana-edge/torana-edge/internal/engine"
 )
 
+// Ordered-body test helpers (engine.Message).
+
+func textBlock(s string) engine.Block {
+	return engine.Block{Text: &engine.TextBlock{Text: s}}
+}
+
+func msgBlock(role engine.Role, text string) engine.Message {
+	return engine.Message{Role: role, Blocks: []engine.Block{textBlock(text)}}
+}
+
+func textOf(m engine.Message) string { return m.Text() }
+
+type tcView struct {
+	ID, Name  string
+	Args      engine.RequiredJSONObject
+	Signature string
+}
+
+func toolCalls(m engine.Message) []tcView {
+	var out []tcView
+	for _, b := range m.Blocks {
+		if b.ToolUse != nil {
+			out = append(out, tcView{ID: b.ToolUse.ID, Name: b.ToolUse.Name, Args: b.ToolUse.Arguments, Signature: b.ToolUse.Signature})
+		}
+	}
+	return out
+}
+
+func toolResults(m engine.Message) []*engine.ToolResultBlock {
+	var out []*engine.ToolResultBlock
+	for _, b := range m.Blocks {
+		if b.ToolResult != nil {
+			out = append(out, b.ToolResult)
+		}
+	}
+	return out
+}
 func TestRoundTrip(t *testing.T) {
 	a := &Adapter{}
 
@@ -38,22 +75,22 @@ func TestRoundTrip(t *testing.T) {
 	if chat.Messages[0].Role != engine.RoleSystem {
 		t.Errorf("Message 0: expected system, got %s", chat.Messages[0].Role)
 	}
-	if chat.Messages[0].Content != "You are a helpful assistant." {
-		t.Errorf("Message 0: wrong content: %s", chat.Messages[0].Content)
+	if textOf(chat.Messages[0]) != "You are a helpful assistant." {
+		t.Errorf("Message 0: wrong content: %s", textOf(chat.Messages[0]))
 	}
 
 	if chat.Messages[1].Role != engine.RoleUser {
 		t.Errorf("Message 1: expected user, got %s", chat.Messages[1].Role)
 	}
 
-	if len(chat.Messages[2].ToolCalls) != 1 {
-		t.Fatalf("Message 2: expected 1 tool call, got %d", len(chat.Messages[2].ToolCalls))
+	if len(toolCalls(chat.Messages[2])) != 1 {
+		t.Fatalf("Message 2: expected 1 tool call, got %d", len(toolCalls(chat.Messages[2])))
 	}
-	tc := chat.Messages[2].ToolCalls[0]
+	tc := toolCalls(chat.Messages[2])[0]
 	if tc.Name != "get_weather" {
 		t.Errorf("ToolCall name: expected get_weather, got %s", tc.Name)
 	}
-	vals, _, err := tc.Arguments.DecodeObject()
+	vals, _, err := tc.Args.DecodeObject()
 	if err != nil {
 		t.Fatalf("ToolCall args decode: %v", err)
 	}

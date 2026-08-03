@@ -224,6 +224,22 @@ func (o OptionalJSONObject) DeleteMember(key string) (OptionalJSONObject, error)
 	return OptionalJSONObject{v: jsonBytes{bytes: out}}, nil
 }
 
+// WithoutMembers returns a copy with the listed members removed, applied in
+// FIXED argument order. Remaining members keep their exact lexemes and input
+// order, so the result is byte-identical for identical input — the
+// deterministic alternative to rebuilding objects from map iteration.
+// Absent input stays absent; keys that are not present are no-ops.
+func (o OptionalJSONObject) WithoutMembers(keys ...string) (OptionalJSONObject, error) {
+	cur := o
+	for _, k := range keys {
+		var err error
+		if cur, err = cur.DeleteMember(k); err != nil {
+			return o, err
+		}
+	}
+	return cur, nil
+}
+
 // ---------------------------------------------------------------------------
 // RequiredJSONObject
 // ---------------------------------------------------------------------------

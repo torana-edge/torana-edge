@@ -1,17 +1,40 @@
 package engine
 
-import "testing"
+import (
+	"encoding/json"
+	"testing"
+)
+
+func mustMeta(m map[string]any) OptionalJSONObject {
+	b, err := json.Marshal(m)
+	if err != nil {
+		panic(err)
+	}
+	r, err := ParseOptionalJSONObject(b)
+	if err != nil {
+		panic(err)
+	}
+	return r
+}
 
 func msgs(m ...Message) []Message { return m }
 
-func sys(s string) Message  { return Message{Role: RoleSystem, Content: s} }
-func user(s string) Message { return Message{Role: RoleUser, Content: s} }
-func asst(s string) Message { return Message{Role: RoleAssistant, Content: s} }
+func textBlock(s string) Block { return Block{Text: &TextBlock{Text: s}} }
+
+func sys(s string) Message  { return Message{Role: RoleSystem, Blocks: []Block{textBlock(s)}} }
+func user(s string) Message { return Message{Role: RoleUser, Blocks: []Block{textBlock(s)}} }
+func asst(s string) Message { return Message{Role: RoleAssistant, Blocks: []Block{textBlock(s)}} }
 
 // ephemeral is an Anthropic-shaped breakpoint. Any format carrying the same
 // shape through the IR — including a chat-completions provider that adopts it —
 // exercises the identical code path.
-func ephemeral() map[string]any { return map[string]any{"type": "ephemeral"} }
+func ephemeral() RequiredJSONObject {
+	r, err := ParseRequiredJSONObject([]byte(`{"type":"ephemeral"}`))
+	if err != nil {
+		panic(err)
+	}
+	return r
+}
 
 // --- ConversationID: the durable label ---
 
@@ -66,18 +89,18 @@ func TestConversationIDIsFormatAgnostic(t *testing.T) {
 	// Same IR, different provider-specific baggage on the side.
 	anthropic := &ChatRequest{
 		Messages:           msgs(sys("prompt"), user("hello")),
-		ProviderExtensions: map[string]any{"anthropic_version": "2023-06-01"},
+		ProviderExtensions: mustMeta(map[string]any{"anthropic_version": "2023-06-01"}),
 	}
 	chatCompletions := &ChatRequest{
 		Messages:           msgs(sys("prompt"), user("hello")),
-		ProviderExtensions: map[string]any{"prompt_cache_key": "some-harness-key"},
+		ProviderExtensions: mustMeta(map[string]any{"prompt_cache_key": "some-harness-key"}),
 	}
 	codeAssist := &ChatRequest{
 		Messages: msgs(sys("prompt"), user("hello")),
-		ProviderExtensions: map[string]any{
+		ProviderExtensions: mustMeta(map[string]any{
 			"_codeassist":    true,
 			"_request_extra": map[string]any{"sessionId": "harness-session-abc"},
-		},
+		}),
 	}
 
 	want := ConversationID(anthropic)
@@ -110,7 +133,9 @@ func TestConversationIDUnidentifiable(t *testing.T) {
 	if got := ConversationID(&ChatRequest{}); got != "" {
 		t.Errorf("empty request = %q, want empty", got)
 	}
-	toolOnly := &ChatRequest{Messages: msgs(Message{Role: RoleTool, Content: "result", ToolCallID: "1"})}
+	toolOnly := &ChatRequest{Messages: msgs(Message{Role: RoleTool, Blocks: []Block{{ToolResult: &ToolResultBlock{
+		ToolCallID: "1", Content: []ToolResultContentBlock{{Text: "result"}},
+	}}}})}
 	if got := ConversationID(toolOnly); got != "" {
 		t.Errorf("tool-only request = %q, want empty", got)
 	}
@@ -126,14 +151,18 @@ func TestConversationIDSystemOnly(t *testing.T) {
 // TestConversationIDMultimodalDeterministic covers the ContentParts path: an
 // image-bearing first turn must hash the same way twice.
 func TestConversationIDMultimodalDeterministic(t *testing.T) {
-	parts := func() []any {
-		return []any{
-			map[string]any{"type": "text", "text": "what is this"},
-			map[string]any{"type": "image", "source": map[string]any{"data": "abc", "media_type": "image/png"}},
+	userParts := func() Message {
+		img, err := ParseRequiredJSONObject([]byte(`{"source":{"data":"abc","media_type":"image/png"}}`))
+		if err != nil {
+			panic(err)
 		}
+		return Message{Role: RoleUser, Blocks: []Block{
+			{Text: &TextBlock{Text: "what is this"}},
+			{Unknown: &UnknownBlock{Kind: "image", Payload: img}},
+		}}
 	}
-	a := &ChatRequest{Messages: msgs(sys("p"), Message{Role: RoleUser, ContentParts: parts()})}
-	b := &ChatRequest{Messages: msgs(sys("p"), Message{Role: RoleUser, ContentParts: parts()})}
+	a := &ChatRequest{Messages: msgs(sys("p"), userParts())}
+	b := &ChatRequest{Messages: msgs(sys("p"), userParts())}
 
 	got := ConversationID(a)
 	if got == "" {
@@ -162,7 +191,10 @@ func TestKeyLength(t *testing.T) {
 // the key — otherwise every turn looks like a new cache entry and warming can
 // never target anything.
 func TestCachePrefixKeyStableWhenPrefixStable(t *testing.T) {
-	cached := Message{Role: RoleSystem, Content: "big system prompt", CacheControl: ephemeral()}
+	cached := Message{Role: RoleSystem, Blocks: []Block{
+		{Text: &TextBlock{Text: "big system prompt"}},
+		{CacheBreakpoint: &CacheBreakpointBlock{Marker: ephemeral()}},
+	}}
 	turn1 := &ChatRequest{Model: "m", Messages: msgs(cached, user("hello"))}
 	turn9 := &ChatRequest{Model: "m", Messages: msgs(cached, user("hello"), asst("hi"), user("more"), asst("ok"))}
 
@@ -178,12 +210,18 @@ func TestCachePrefixKeyChangesWhenPrefixRewritten(t *testing.T) {
 	before := &ChatRequest{Model: "m", Messages: msgs(
 		sys("prompt"),
 		user("original first message"),
-		Message{Role: RoleAssistant, Content: "long history", CacheControl: ephemeral()},
+		Message{Role: RoleAssistant, Blocks: []Block{
+			{Text: &TextBlock{Text: "long history"}},
+			{CacheBreakpoint: &CacheBreakpointBlock{Marker: ephemeral()}},
+		}},
 	)}
 	after := &ChatRequest{Model: "m", Messages: msgs(
 		sys("prompt"),
 		user("[summary of earlier turns]"),
-		Message{Role: RoleAssistant, Content: "long history", CacheControl: ephemeral()},
+		Message{Role: RoleAssistant, Blocks: []Block{
+			{Text: &TextBlock{Text: "long history"}},
+			{CacheBreakpoint: &CacheBreakpointBlock{Marker: ephemeral()}},
+		}},
 	)}
 
 	if CachePrefixKey(before) == CachePrefixKey(after) {
@@ -194,7 +232,10 @@ func TestCachePrefixKeyChangesWhenPrefixRewritten(t *testing.T) {
 // TestCachePrefixKeySplitsOnModel — provider caches never span models, so the
 // same prefix on two models is two entries.
 func TestCachePrefixKeySplitsOnModel(t *testing.T) {
-	base := msgs(Message{Role: RoleSystem, Content: "p", CacheControl: ephemeral()}, user("hi"))
+	base := msgs(Message{Role: RoleSystem, Blocks: []Block{
+		{Text: &TextBlock{Text: "p"}},
+		{CacheBreakpoint: &CacheBreakpointBlock{Marker: ephemeral()}},
+	}}, user("hi"))
 	sonnet := &ChatRequest{Model: "claude-sonnet-4-5", Messages: base}
 	opus := &ChatRequest{Model: "claude-opus-4-1", Messages: base}
 
@@ -206,7 +247,10 @@ func TestCachePrefixKeySplitsOnModel(t *testing.T) {
 // TestCachePrefixKeyIncludesToolDefs — tool definitions sit inside the cached
 // prefix, so changing them invalidates the entry even when messages are equal.
 func TestCachePrefixKeyIncludesToolDefs(t *testing.T) {
-	base := msgs(Message{Role: RoleSystem, Content: "p", CacheControl: ephemeral()}, user("hi"))
+	base := msgs(Message{Role: RoleSystem, Blocks: []Block{
+		{Text: &TextBlock{Text: "p"}},
+		{CacheBreakpoint: &CacheBreakpointBlock{Marker: ephemeral()}},
+	}}, user("hi"))
 	a := &ChatRequest{Model: "m", Messages: base, Tools: []ToolDef{{Name: "bash"}}}
 	b := &ChatRequest{Model: "m", Messages: base, Tools: []ToolDef{{Name: "bash"}, {Name: "read"}}}
 
@@ -219,14 +263,20 @@ func TestCachePrefixKeyIncludesToolDefs(t *testing.T) {
 // is cached, which is a different entry.
 func TestCachePrefixKeyTracksBreakpointMove(t *testing.T) {
 	early := &ChatRequest{Model: "m", Messages: msgs(
-		Message{Role: RoleSystem, Content: "p", CacheControl: ephemeral()},
+		Message{Role: RoleSystem, Blocks: []Block{
+			{Text: &TextBlock{Text: "p"}},
+			{CacheBreakpoint: &CacheBreakpointBlock{Marker: ephemeral()}},
+		}},
 		user("hello"),
 		asst("hi"),
 	)}
 	late := &ChatRequest{Model: "m", Messages: msgs(
 		sys("p"),
 		user("hello"),
-		Message{Role: RoleAssistant, Content: "hi", CacheControl: ephemeral()},
+		Message{Role: RoleAssistant, Blocks: []Block{
+			{Text: &TextBlock{Text: "hi"}},
+			{CacheBreakpoint: &CacheBreakpointBlock{Marker: ephemeral()}},
+		}},
 	)}
 
 	if CachePrefixKey(early) == CachePrefixKey(late) {
@@ -264,11 +314,10 @@ func TestCachePrefixKeyPreservesSignatures(t *testing.T) {
 	mk := func(sig string) *ChatRequest {
 		return &ChatRequest{Model: "m", Messages: msgs(
 			sys("p"),
-			Message{
-				Role:         RoleAssistant,
-				ToolCalls:    []ToolCall{{ID: "1", Name: "bash", Signature: sig}},
-				CacheControl: ephemeral(),
-			},
+			Message{Role: RoleAssistant, Blocks: []Block{
+				{ToolUse: &ToolUseBlock{ID: "1", Name: "bash", Signature: sig}},
+				{CacheBreakpoint: &CacheBreakpointBlock{Marker: ephemeral()}},
+			}},
 		)}
 	}
 	if CachePrefixKey(mk("sig-a")) == CachePrefixKey(mk("sig-b")) {
@@ -280,12 +329,10 @@ func TestCachePrefixKeyPreservesSignatures(t *testing.T) {
 	mkContent := func(sig string) *ChatRequest {
 		return &ChatRequest{Model: "m", Messages: msgs(
 			sys("p"),
-			Message{
-				Role:             RoleAssistant,
-				Content:          "answer",
-				ContentSignature: sig,
-				CacheControl:     ephemeral(),
-			},
+			Message{Role: RoleAssistant, Blocks: []Block{
+				{Text: &TextBlock{Text: "answer", Signature: sig}},
+				{CacheBreakpoint: &CacheBreakpointBlock{Marker: ephemeral()}},
+			}},
 		)}
 	}
 	if CachePrefixKey(mkContent("sig-a")) == CachePrefixKey(mkContent("sig-b")) {
@@ -296,12 +343,11 @@ func TestCachePrefixKeyPreservesSignatures(t *testing.T) {
 	mkTrailing := func(sig string) *ChatRequest {
 		return &ChatRequest{Model: "m", Messages: msgs(
 			sys("p"),
-			Message{
-				Role:              RoleAssistant,
-				Content:           "answer",
-				TrailingSignature: sig,
-				CacheControl:      ephemeral(),
-			},
+			Message{Role: RoleAssistant, Blocks: []Block{
+				{Text: &TextBlock{Text: "answer"}},
+				{TrailingSignature: &TrailingSignatureBlock{Signature: sig}},
+				{CacheBreakpoint: &CacheBreakpointBlock{Marker: ephemeral()}},
+			}},
 		)}
 	}
 	if CachePrefixKey(mkTrailing("sig-a")) == CachePrefixKey(mkTrailing("sig-b")) {

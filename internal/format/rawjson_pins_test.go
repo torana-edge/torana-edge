@@ -23,6 +23,44 @@ import (
 	pb "github.com/torana-edge/torana-plugin-sdk/pb/v2"
 )
 
+// Ordered-body test helpers (engine.Message).
+
+func textBlock(s string) engine.Block {
+	return engine.Block{Text: &engine.TextBlock{Text: s}}
+}
+
+func msgBlock(role engine.Role, text string) engine.Message {
+	return engine.Message{Role: role, Blocks: []engine.Block{textBlock(text)}}
+}
+
+func textOf(m engine.Message) string { return m.Text() }
+
+type tcView struct {
+	ID, Name  string
+	Args      engine.RequiredJSONObject
+	Signature string
+}
+
+func toolCalls(m engine.Message) []tcView {
+	var out []tcView
+	for _, b := range m.Blocks {
+		if b.ToolUse != nil {
+			out = append(out, tcView{ID: b.ToolUse.ID, Name: b.ToolUse.Name, Args: b.ToolUse.Arguments, Signature: b.ToolUse.Signature})
+		}
+	}
+	return out
+}
+
+func toolResults(m engine.Message) []*engine.ToolResultBlock {
+	var out []*engine.ToolResultBlock
+	for _, b := range m.Blocks {
+		if b.ToolResult != nil {
+			out = append(out, b.ToolResult)
+		}
+	}
+	return out
+}
+
 // lexemeCases are the provider-valid lexemes that must survive verbatim.
 var lexemeCases = []struct {
 	name string
@@ -44,7 +82,7 @@ func TestRawJSONArgumentsRoundTripAnthropic(t *testing.T) {
 			if err != nil {
 				t.Fatalf("unmarshal: %v", err)
 			}
-			got := chat.Messages[0].ToolCalls[0].Arguments.String()
+			got := toolCalls(chat.Messages[0])[0].Args.String()
 			for _, w := range tc.want {
 				if !strings.Contains(got, w) {
 					t.Fatalf("arguments lexeme %q lost: %s", w, got)
@@ -74,7 +112,7 @@ func TestRawJSONArgumentsRoundTripOpenAI(t *testing.T) {
 			if err != nil {
 				t.Fatalf("unmarshal: %v", err)
 			}
-			got := chat.Messages[0].ToolCalls[0].Arguments.String()
+			got := toolCalls(chat.Messages[0])[0].Args.String()
 			for _, w := range tc.want {
 				if !strings.Contains(got, w) {
 					t.Fatalf("arguments lexeme %q lost: %s", w, got)
@@ -104,7 +142,7 @@ func TestRawJSONArgumentsRoundTripGemini(t *testing.T) {
 			if err != nil {
 				t.Fatalf("unmarshal: %v", err)
 			}
-			got := chat.Messages[0].ToolCalls[0].Arguments.String()
+			got := toolCalls(chat.Messages[0])[0].Args.String()
 			for _, w := range tc.want {
 				if !strings.Contains(got, w) {
 					t.Fatalf("arguments lexeme %q lost: %s", w, got)
@@ -132,7 +170,7 @@ func TestRawJSONArgumentsRoundTripBedrock(t *testing.T) {
 			if err != nil {
 				t.Fatalf("unmarshal: %v", err)
 			}
-			got := chat.Messages[0].ToolCalls[0].Arguments.String()
+			got := toolCalls(chat.Messages[0])[0].Args.String()
 			for _, w := range tc.want {
 				if !strings.Contains(got, w) {
 					t.Fatalf("arguments lexeme %q lost: %s", w, got)
@@ -210,7 +248,7 @@ func TestRawJSONNilNormalization(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if got := chat.Messages[0].ToolCalls[0].Arguments.String(); got != `{}` {
+	if got := toolCalls(chat.Messages[0])[0].Args.String(); got != `{}` {
 		t.Fatalf("empty arguments string = %q, want {}", got)
 	}
 	// Anthropic: tool_use without input.
@@ -219,7 +257,7 @@ func TestRawJSONNilNormalization(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if got := chat.Messages[0].ToolCalls[0].Arguments.String(); got != `{}` {
+	if got := toolCalls(chat.Messages[0])[0].Args.String(); got != `{}` {
 		t.Fatalf("missing input = %q, want {}", got)
 	}
 	// Gemini: tool without parameters -> {} schema (unconstrained).
@@ -242,11 +280,11 @@ func TestRawJSONNilNormalization(t *testing.T) {
 // become a nil/partial engine value — FromPBChatRequest errors.
 func TestRawJSONFromPBError(t *testing.T) {
 	good := pbconv.ToPBChatRequest(&engine.ChatRequest{Messages: []engine.Message{
-		{Role: engine.RoleAssistant, ToolCalls: []engine.ToolCall{
-			{ID: "t1", Name: "read", Arguments: mustPinned(`{"path":"x"}`)},
-		}},
+		{Role: engine.RoleAssistant, Blocks: []engine.Block{{ToolUse: &engine.ToolUseBlock{
+			ID: "t1", Name: "read", Arguments: mustPinned(`{"path":"x"}`),
+		}}}},
 	}})
-	good.Messages[0].ToolCalls[0].ArgumentsJson = []byte(`[1,2]`)
+	good.Messages[0].Blocks[0].GetToolUse().ArgumentsJson = []byte(`[1,2]`)
 	if _, err := pbconv.FromPBChatRequest(good); err == nil {
 		t.Fatal("malformed arguments_json accepted by FromPBChatRequest")
 	}
@@ -264,10 +302,10 @@ func TestRawJSONCacheKeyPins(t *testing.T) {
 		return &engine.ChatRequest{
 			Model: "m",
 			Messages: []engine.Message{
-				{Role: engine.RoleUser, Content: "hi"},
-				{Role: engine.RoleAssistant, ToolCalls: []engine.ToolCall{
-					{ID: "t1", Name: "read", Arguments: mustPinned(args)},
-				}},
+				{Role: engine.RoleUser, Blocks: []engine.Block{{Text: &engine.TextBlock{Text: "hi"}}}},
+				{Role: engine.RoleAssistant, Blocks: []engine.Block{{ToolUse: &engine.ToolUseBlock{
+					ID: "t1", Name: "read", Arguments: mustPinned(args),
+				}}}},
 			},
 			Tools: []engine.ToolDef{{Name: "read", Parameters: mustPinned(params)}},
 		}
@@ -329,11 +367,11 @@ func TestRawJSONFromPBNilGraph(t *testing.T) {
 	}{
 		{"nil message element", &pb.ChatRequest{Messages: []*pb.Message{nil}}},
 		{"nil tool def element", &pb.ChatRequest{Tools: []*pb.ToolDef{nil}}},
-		{"nil tool call element", &pb.ChatRequest{Messages: []*pb.Message{
-			{Role: "assistant", ToolCalls: []*pb.ToolCall{nil}},
+		{"nil block element", &pb.ChatRequest{Messages: []*pb.Message{
+			{Role: "assistant", Blocks: []*pb.RequestBlock{nil}},
 		}}},
 		{"nil message inside valid list", &pb.ChatRequest{Messages: []*pb.Message{
-			{Role: "user", Content: "hi"}, nil,
+			{Role: "user", Blocks: []*pb.RequestBlock{{Kind: &pb.RequestBlock_Text{Text: &pb.RequestTextBlock{Text: "hi"}}}}}, nil,
 		}}},
 	}
 	for _, c := range cases {
@@ -582,7 +620,7 @@ func TestRawJSONMatrixExact(t *testing.T) {
 				if err != nil {
 					t.Fatalf("unmarshal: %v", err)
 				}
-				got := chat.Messages[0].ToolCalls[0].Arguments.Bytes()
+				got := toolCalls(chat.Messages[0])[0].Args.Bytes()
 				if string(got) != c.obj {
 					t.Fatalf("wrapper bytes = %q, want %q", got, c.obj)
 				}

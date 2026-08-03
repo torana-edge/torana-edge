@@ -6,6 +6,8 @@ import (
 
 	sdk "github.com/torana-edge/torana-plugin-sdk"
 	pb "github.com/torana-edge/torana-plugin-sdk/pb/v2"
+
+	"github.com/torana-edge/torana-edge/examples/plugins/blockutil"
 )
 
 func main() {}
@@ -16,7 +18,7 @@ func main() {}
 func init() {
 	sdk.OnBeforeRequest(func(ctx context.Context, req *pb.ChatRequest) (sdk.RequestResult, error) {
 		for _, m := range req.Messages {
-			if strings.Contains(m.Content, "respondme") {
+			if strings.Contains(blockutil.TextOf(m), "respondme") {
 				sdk.RespondRequest("this must never reach a client")
 				return sdk.ReplaceRequest(req), nil
 			}

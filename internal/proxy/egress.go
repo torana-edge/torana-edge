@@ -268,7 +268,7 @@ func (s *Server) sendPluginRequest(ctx context.Context, pluginName, payloadJSON 
 	}
 	// Proxy-internal metadata must not travel upstream, and a plugin has no
 	// business setting it on an outbound request anyway.
-	chat.ToranaMeta = nil
+	chat.ToranaMeta = engine.OptionalJSONObject{}
 
 	f := format.Lookup(prov.Format)
 	if f == nil || f.Request == nil {

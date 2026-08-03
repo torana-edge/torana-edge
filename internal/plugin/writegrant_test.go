@@ -9,6 +9,7 @@ import (
 	"github.com/torana-edge/torana-edge/internal/engine"
 	"github.com/torana-edge/torana-edge/internal/engine/pbconv"
 	"github.com/torana-edge/torana-edge/internal/wasm"
+	"github.com/torana-edge/torana-plugin-sdk/outboundpolicy"
 	pb "github.com/torana-edge/torana-plugin-sdk/pb/v2"
 	"google.golang.org/protobuf/proto"
 )
@@ -37,6 +38,75 @@ func mustReqWG(raw string) engine.RequiredJSONObject {
 	return r
 }
 
+func setTextSig(m *pb.Message, sig string) {
+	for _, b := range m.Blocks {
+		if b.GetText() != nil {
+			b.GetText().Signature = sig
+			return
+		}
+	}
+	panic("no text block to sign")
+}
+
+func setThinkingSig(m *pb.Message, sig string) {
+	for _, b := range m.Blocks {
+		if b.GetThinking() != nil {
+			b.GetThinking().Signature = sig
+			return
+		}
+	}
+	panic("no thinking block to sign")
+}
+
+func setRedacted(m *pb.Message, data string) {
+	for _, b := range m.Blocks {
+		if b.GetRedactedThinking() != nil {
+			b.GetRedactedThinking().Data = data
+			return
+		}
+	}
+	panic("no redacted block")
+}
+
+func setTrailing(m *pb.Message, sig string) {
+	for _, b := range m.Blocks {
+		if b.GetTrailingSignature() != nil {
+			b.GetTrailingSignature().Signature = sig
+			return
+		}
+	}
+	panic("no trailing block")
+}
+
+func textSigOf(m *pb.Message) string {
+	for _, b := range m.Blocks {
+		if b.GetText() != nil {
+			return b.GetText().Signature
+		}
+	}
+	return ""
+}
+
+func setText(m *pb.Message, text string) {
+	for _, b := range m.Blocks {
+		if b.GetText() != nil {
+			b.GetText().Text = text
+			return
+		}
+	}
+	m.Blocks = append(m.Blocks, &pb.RequestBlock{Kind: &pb.RequestBlock_Text{Text: &pb.RequestTextBlock{Text: text}}})
+}
+
+func setThinking(m *pb.Message, text string) {
+	for _, b := range m.Blocks {
+		if b.GetThinking() != nil {
+			b.GetThinking().Text = text
+			return
+		}
+	}
+	m.Blocks = append(m.Blocks, &pb.RequestBlock{Kind: &pb.RequestBlock_Thinking{Thinking: &pb.RequestThinkingBlock{Text: text}}})
+}
+
 func TestVerifyRequestMutationGrantedChangeAccepted(t *testing.T) {
 	cases := []struct {
 		name   string
@@ -45,7 +115,7 @@ func TestVerifyRequestMutationGrantedChangeAccepted(t *testing.T) {
 		perm   string
 	}{
 		{name: "message", perm: "ir.messages.write.user",
-			mutate: func(r *pb.ChatRequest) { r.Messages[1].Content = "A'" }},
+			mutate: func(r *pb.ChatRequest) { setText(r.Messages[1], "A'") }},
 		{name: "tool", perm: "ir.tools.write",
 			mutate: func(r *pb.ChatRequest) { r.Tools[0].ParametersJson = []byte(`{"type":"array"}`) }},
 		{name: "model", perm: "ir.model.write",
@@ -61,10 +131,10 @@ func TestVerifyRequestMutationGrantedChangeAccepted(t *testing.T) {
 		{name: "developer-role", perm: "ir.messages.write.developer",
 			base: func() *pb.ChatRequest {
 				r := baseRequest()
-				r.Messages[1] = &pb.Message{Role: "developer", Content: "dev"}
+				r.Messages[1] = &pb.Message{Role: "developer", Blocks: []*pb.RequestBlock{{Kind: &pb.RequestBlock_Text{Text: &pb.RequestTextBlock{Text: "dev"}}}}}
 				return r
 			},
-			mutate: func(r *pb.ChatRequest) { r.Messages[1].Content = "dev'" }},
+			mutate: func(r *pb.ChatRequest) { setText(r.Messages[1], "dev'") }},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -99,7 +169,7 @@ func TestVerifyRequestMutationUngrantedRejected(t *testing.T) {
 		want   string
 	}{
 		{name: "message", want: "plugin changed messages.user without ir.messages.write.user",
-			mutate: func(r *pb.ChatRequest) { r.Messages[1].Content = "A'" }},
+			mutate: func(r *pb.ChatRequest) { setText(r.Messages[1], "A'") }},
 		{name: "tool", want: "plugin changed tools without ir.tools.write",
 			mutate: func(r *pb.ChatRequest) { r.Tools[0].ParametersJson = []byte(`{"type":"array"}`) }},
 		{name: "model", want: "plugin changed model without ir.model.write",
@@ -117,10 +187,10 @@ func TestVerifyRequestMutationUngrantedRejected(t *testing.T) {
 		{name: "unmodelled-role", want: "plugin changed messages.weird without ir.messages.write.other",
 			base: func() *pb.ChatRequest {
 				r := baseRequest()
-				r.Messages = append(r.Messages, &pb.Message{Role: "weird", Content: "W"})
+				r.Messages = append(r.Messages, &pb.Message{Role: "weird", Blocks: []*pb.RequestBlock{{Kind: &pb.RequestBlock_Text{Text: &pb.RequestTextBlock{Text: "W"}}}}})
 				return r
 			},
-			mutate: func(r *pb.ChatRequest) { r.Messages[4].Content = "W'" }},
+			mutate: func(r *pb.ChatRequest) { setText(r.Messages[4], "W'") }},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -148,7 +218,7 @@ func TestVerifyRequestMutationUngrantedRejected(t *testing.T) {
 func TestVerifyRequestMutationFirstUngrantedSectionNamed(t *testing.T) {
 	accepted := baseRequest()
 	out := baseRequest()
-	out.Messages[1].Content = "A'" // ungranted
+	setText(out.Messages[1], "A'") // ungranted
 	out.Tools[0].Name = "write"    // would be granted
 	out.Model = "claude-opus-4"    // would be granted
 	temp := 1.0
@@ -165,6 +235,25 @@ func TestVerifyRequestMutationFirstUngrantedSectionNamed(t *testing.T) {
 
 // torana_meta_json is host-owned: changing it is a violation no grant covers,
 // so even a plugin holding every request grant must be rejected.
+func engineSigOf(m engine.Message) string {
+	for _, b := range m.Blocks {
+		if b.Text != nil {
+			return b.Text.Signature
+		}
+	}
+	return ""
+}
+
+func engineTextOf(m engine.Message) string {
+	var out string
+	for _, b := range m.Blocks {
+		if b.Text != nil {
+			out += b.Text.Text
+		}
+	}
+	return out
+}
+
 func TestVerifyRequestMutationHostOwnedMetaAlwaysViolation(t *testing.T) {
 	accepted := baseRequest()
 	out := baseRequest()
@@ -184,16 +273,17 @@ func TestVerifyRequestMutationHostOwnedMetaAlwaysViolation(t *testing.T) {
 }
 
 // contentSignedRequest carries only a content_signature; thinkingSignedRequest
-// only a thinking_signature (over thinking + redacted_thinking);
-// trailingSignedRequest only a trailing_signature (over thinking + content).
+// only a thinking_signature (over the thinking block's own text);
+// trailingSignedRequest only a trailing_signature (over the preceding
+// text + thinking block texts).
 // Each matrix case starts from the baseline whose SINGLE token makes the
 // expected class unambiguous — the SDK's trailing binding also covers content,
 // so a fully-signed baseline would name the earlier binding first.
 func contentSignedRequest() *pb.ChatRequest {
 	r := baseRequest()
 	m := r.Messages[1]
-	m.Content = "signed content"
-	m.ContentSignature = "cs-token"
+	setText(m, "signed content")
+	setTextSig(m, "cs-token")
 	return r
 }
 
@@ -201,26 +291,40 @@ func contentSignedRequest() *pb.ChatRequest {
 // baseline for the "token appeared" case, where minting one is forgery.
 func unsignedContentRequest() *pb.ChatRequest {
 	r := baseRequest()
-	r.Messages[1].Content = "signed content"
+	setText(r.Messages[1], "signed content")
 	return r
 }
 
 func thinkingSignedRequest() *pb.ChatRequest {
 	r := baseRequest()
 	m := r.Messages[1]
-	m.Thinking = "signed thinking"
-	m.ThinkingSignature = "ts-token"
-	m.RedactedThinking = "redacted"
+	setThinking(m, "signed thinking")
+	setThinkingSig(m, "ts-token")
+	appendRedacted(m, "redacted")
 	return r
+}
+
+// appendRedacted adds a redacted-thinking block (a distinct block kind).
+func appendRedacted(m *pb.Message, data string) {
+	m.Blocks = append(m.Blocks, &pb.RequestBlock{Kind: &pb.RequestBlock_RedactedThinking{
+		RedactedThinking: &pb.RequestRedactedThinkingBlock{Data: data},
+	}})
 }
 
 func trailingSignedRequest() *pb.ChatRequest {
 	r := baseRequest()
 	m := r.Messages[1]
-	m.Content = "signed content"
-	m.Thinking = "signed thinking"
-	m.TrailingSignature = "trailing-token"
+	setText(m, "signed content")
+	setThinking(m, "signed thinking")
+	appendTrailing(m, "trailing-token")
 	return r
+}
+
+// appendTrailing adds the final trailing-signature block.
+func appendTrailing(m *pb.Message, sig string) {
+	m.Blocks = append(m.Blocks, &pb.RequestBlock{Kind: &pb.RequestBlock_TrailingSignature{
+		TrailingSignature: &pb.RequestTrailingSignatureBlock{Signature: sig},
+	}})
 }
 
 // The bound-signature rule on the REQUEST path: there is no apply block to
@@ -244,42 +348,44 @@ func TestVerifyRequestMutationSignatureMatrix(t *testing.T) {
 		{name: "untouched", base: contentSignedRequest, want: ""},
 		{name: "content changed token kept -> stale", base: contentSignedRequest,
 			want:  "plugin content_signature signature stale",
-			apply: func(r *pb.ChatRequest) { r.Messages[1].Content = "signed content'" }},
+			apply: func(r *pb.ChatRequest) { setText(r.Messages[1], "signed content'") }},
 		{name: "content changed token cleared -> accepted", base: contentSignedRequest,
 			apply: func(r *pb.ChatRequest) {
-				r.Messages[1].Content = "signed content'"
-				r.Messages[1].ContentSignature = ""
+				setText(r.Messages[1], "signed content'")
+				setTextSig(r.Messages[1], "")
 			}},
 		{name: "token dropped without change -> dropped", base: contentSignedRequest,
 			want:  "plugin content_signature signature dropped",
-			apply: func(r *pb.ChatRequest) { r.Messages[1].ContentSignature = "" }},
+			apply: func(r *pb.ChatRequest) { setTextSig(r.Messages[1], "") }},
 		{name: "token forged -> forged", base: contentSignedRequest,
 			want:  "plugin content_signature signature forged",
-			apply: func(r *pb.ChatRequest) { r.Messages[1].ContentSignature = "evil" }},
+			apply: func(r *pb.ChatRequest) { setTextSig(r.Messages[1], "evil") }},
 		{name: "token added -> added", base: unsignedContentRequest,
 			want: "plugin content_signature signature added",
 			apply: func(r *pb.ChatRequest) {
-				r.Messages[1].ContentSignature = "minted"
-				r.Messages[1].Content = "signed content" // unchanged
+				setTextSig(r.Messages[1], "minted")
+				setText(r.Messages[1], "signed content") // unchanged
 			}},
 		{name: "thinking changed token kept -> stale", base: thinkingSignedRequest,
 			want:  "plugin thinking_signature signature stale",
-			apply: func(r *pb.ChatRequest) { r.Messages[1].Thinking = "signed thinking'" }},
-		{name: "redacted thinking changed token kept -> stale", base: thinkingSignedRequest,
-			want:  "plugin thinking_signature signature stale",
-			apply: func(r *pb.ChatRequest) { r.Messages[1].RedactedThinking = "redacted'" }},
+			apply: func(r *pb.ChatRequest) { setThinking(r.Messages[1], "signed thinking'") }},
+		// Redacted thinking is its own block kind — the thinking token
+		// covers only the thinking block's text, so changing the redacted
+		// block keeps the token intact.
+		{name: "redacted thinking changed token kept -> accepted", base: thinkingSignedRequest,
+			apply: func(r *pb.ChatRequest) { setRedacted(r.Messages[1], "redacted'") }},
 		{name: "thinking changed token cleared -> accepted", base: thinkingSignedRequest,
 			apply: func(r *pb.ChatRequest) {
-				r.Messages[1].Thinking = "signed thinking'"
-				r.Messages[1].ThinkingSignature = ""
+				setThinking(r.Messages[1], "signed thinking'")
+				setThinkingSig(r.Messages[1], "")
 			}},
 		{name: "trailing content changed token kept -> stale", base: trailingSignedRequest,
 			want:  "plugin trailing_signature signature stale",
-			apply: func(r *pb.ChatRequest) { r.Messages[1].Content = "signed content'" }},
+			apply: func(r *pb.ChatRequest) { setText(r.Messages[1], "signed content'") }},
 		{name: "trailing thinking changed token cleared -> accepted", base: trailingSignedRequest,
 			apply: func(r *pb.ChatRequest) {
-				r.Messages[1].Thinking = "signed thinking'"
-				r.Messages[1].TrailingSignature = ""
+				setThinking(r.Messages[1], "signed thinking'")
+				setTrailing(r.Messages[1], "")
 			}},
 	}
 	for _, tc := range cases {
@@ -324,7 +430,7 @@ func TestVerifyUnconditionalInvariantsHostOwnedMetaRejected(t *testing.T) {
 func TestVerifyUnconditionalInvariantsSignatureStaleRejected(t *testing.T) {
 	accepted := contentSignedRequest()
 	out := contentSignedRequest()
-	out.Messages[1].Content = "signed content'" // token kept over changed content
+	setText(out.Messages[1], "signed content'") // token kept over changed content
 	err := verifyUnconditionalInvariants(accepted, out)
 	if err == nil {
 		t.Fatal("a stale signature must fail the unconditional invariants")
@@ -381,12 +487,12 @@ func TestVerifyUnknownFieldsRejectedAtEveryNestingLevel(t *testing.T) {
 				r.Messages[1] = &m
 				return r
 			}},
-		{name: "tool call", want: "plugin wrote unknown fields in messages[2].tool_calls[0]",
+		{name: "tool call", want: "plugin wrote unknown fields in messages[2].blocks[0].tool_use",
 			out: func() *pb.ChatRequest {
 				r := baseRequest()
-				var tc pb.ToolCall
-				appendUnknownField100(t, r.Messages[2].ToolCalls[0], &tc)
-				r.Messages[2].ToolCalls[0] = &tc
+				var tc pb.RequestToolUseBlock
+				appendUnknownField100(t, r.Messages[2].Blocks[0].GetToolUse(), &tc)
+				r.Messages[2].Blocks[0].Kind = &pb.RequestBlock_ToolUse{ToolUse: &tc}
 				return r
 			}},
 		{name: "tool def", want: "plugin wrote unknown fields in tools[0]",
@@ -456,11 +562,11 @@ func TestVerifyUnknownFieldsNamedBeforeHostOwnedMeta(t *testing.T) {
 // alignment pairs by (role, token value) and sees the token intact.
 func TestVerifyRequestSignaturesDeletionBeforeSignedMessage(t *testing.T) {
 	accepted := &pb.ChatRequest{Messages: []*pb.Message{
-		{Role: "user", Content: "discard me"},
-		{Role: "assistant", Content: "signed", ContentSignature: "token"},
+		{Role: "user", Blocks: []*pb.RequestBlock{{Kind: &pb.RequestBlock_Text{Text: &pb.RequestTextBlock{Text: "discard me"}}}}},
+		{Role: "assistant", Blocks: []*pb.RequestBlock{{Kind: &pb.RequestBlock_Text{Text: &pb.RequestTextBlock{Text: "signed", Signature: "token"}}}}},
 	}}
 	out := &pb.ChatRequest{Messages: []*pb.Message{
-		{Role: "assistant", Content: "signed", ContentSignature: "token"},
+		{Role: "assistant", Blocks: []*pb.RequestBlock{{Kind: &pb.RequestBlock_Text{Text: &pb.RequestTextBlock{Text: "signed", Signature: "token"}}}}},
 	}}
 	canWrite := grant("ir.messages.write.user", "ir.messages.write.assistant")
 	if err := verifyRequestMutation(accepted, out, canWrite); err != nil {
@@ -470,11 +576,11 @@ func TestVerifyRequestSignaturesDeletionBeforeSignedMessage(t *testing.T) {
 
 func TestVerifyRequestSignaturesInsertionBeforeSignedMessage(t *testing.T) {
 	accepted := &pb.ChatRequest{Messages: []*pb.Message{
-		{Role: "assistant", Content: "signed", ContentSignature: "token"},
+		{Role: "assistant", Blocks: []*pb.RequestBlock{{Kind: &pb.RequestBlock_Text{Text: &pb.RequestTextBlock{Text: "signed", Signature: "token"}}}}},
 	}}
 	out := &pb.ChatRequest{Messages: []*pb.Message{
-		{Role: "user", Content: "inserted"},
-		{Role: "assistant", Content: "signed", ContentSignature: "token"},
+		{Role: "user", Blocks: []*pb.RequestBlock{{Kind: &pb.RequestBlock_Text{Text: &pb.RequestTextBlock{Text: "inserted"}}}}},
+		{Role: "assistant", Blocks: []*pb.RequestBlock{{Kind: &pb.RequestBlock_Text{Text: &pb.RequestTextBlock{Text: "signed", Signature: "token"}}}}},
 	}}
 	canWrite := grant("ir.messages.write.user", "ir.messages.write.assistant")
 	if err := verifyRequestMutation(accepted, out, canWrite); err != nil {
@@ -486,12 +592,12 @@ func TestVerifyRequestSignaturesInsertionBeforeSignedMessage(t *testing.T) {
 // their content, so both pair by token and stay intact.
 func TestVerifyRequestSignaturesReorderSameRole(t *testing.T) {
 	accepted := &pb.ChatRequest{Messages: []*pb.Message{
-		{Role: "assistant", Content: "signed1", ContentSignature: "t1"},
-		{Role: "assistant", Content: "signed2", ContentSignature: "t2"},
+		{Role: "assistant", Blocks: []*pb.RequestBlock{{Kind: &pb.RequestBlock_Text{Text: &pb.RequestTextBlock{Text: "signed1", Signature: "t1"}}}}},
+		{Role: "assistant", Blocks: []*pb.RequestBlock{{Kind: &pb.RequestBlock_Text{Text: &pb.RequestTextBlock{Text: "signed2", Signature: "t2"}}}}},
 	}}
 	out := &pb.ChatRequest{Messages: []*pb.Message{
-		{Role: "assistant", Content: "signed2", ContentSignature: "t2"},
-		{Role: "assistant", Content: "signed1", ContentSignature: "t1"},
+		{Role: "assistant", Blocks: []*pb.RequestBlock{{Kind: &pb.RequestBlock_Text{Text: &pb.RequestTextBlock{Text: "signed2", Signature: "t2"}}}}},
+		{Role: "assistant", Blocks: []*pb.RequestBlock{{Kind: &pb.RequestBlock_Text{Text: &pb.RequestTextBlock{Text: "signed1", Signature: "t1"}}}}},
 	}}
 	if err := verifyRequestMutation(accepted, out, grant("ir.messages.write.assistant")); err != nil {
 		t.Fatalf("swapping two signed messages with their tokens must verify, got: %v", err)
@@ -503,12 +609,12 @@ func TestVerifyRequestSignaturesReorderSameRole(t *testing.T) {
 // onto different content is stale even under a reorder.
 func TestVerifyRequestSignaturesReorderDetachesToken(t *testing.T) {
 	accepted := &pb.ChatRequest{Messages: []*pb.Message{
-		{Role: "assistant", Content: "signed1", ContentSignature: "t1"},
-		{Role: "assistant", Content: "signed2", ContentSignature: "t2"},
+		{Role: "assistant", Blocks: []*pb.RequestBlock{{Kind: &pb.RequestBlock_Text{Text: &pb.RequestTextBlock{Text: "signed1", Signature: "t1"}}}}},
+		{Role: "assistant", Blocks: []*pb.RequestBlock{{Kind: &pb.RequestBlock_Text{Text: &pb.RequestTextBlock{Text: "signed2", Signature: "t2"}}}}},
 	}}
 	out := &pb.ChatRequest{Messages: []*pb.Message{
-		{Role: "assistant", Content: "signed2", ContentSignature: "t1"},
-		{Role: "assistant", Content: "signed1", ContentSignature: "t2"},
+		{Role: "assistant", Blocks: []*pb.RequestBlock{{Kind: &pb.RequestBlock_Text{Text: &pb.RequestTextBlock{Text: "signed2", Signature: "t1"}}}}},
+		{Role: "assistant", Blocks: []*pb.RequestBlock{{Kind: &pb.RequestBlock_Text{Text: &pb.RequestTextBlock{Text: "signed1", Signature: "t2"}}}}},
 	}}
 	err := verifyRequestMutation(accepted, out, grant("ir.messages.write.assistant"))
 	if err == nil {
@@ -526,11 +632,11 @@ func TestVerifyRequestSignaturesReorderDetachesToken(t *testing.T) {
 // — asserted by TestVerifyRequestSignaturesConflictingTokenExactMatchConsumes.)
 func TestVerifyRequestSignaturesDuplicateTokenConflictingContent(t *testing.T) {
 	accepted := &pb.ChatRequest{Messages: []*pb.Message{
-		{Role: "user", Content: "A", ContentSignature: "t"},
-		{Role: "user", Content: "B", ContentSignature: "t"},
+		{Role: "user", Blocks: []*pb.RequestBlock{{Kind: &pb.RequestBlock_Text{Text: &pb.RequestTextBlock{Text: "A", Signature: "t"}}}}},
+		{Role: "user", Blocks: []*pb.RequestBlock{{Kind: &pb.RequestBlock_Text{Text: &pb.RequestTextBlock{Text: "B", Signature: "t"}}}}},
 	}}
 	out := &pb.ChatRequest{Messages: []*pb.Message{
-		{Role: "user", Content: "C", ContentSignature: "t"},
+		{Role: "user", Blocks: []*pb.RequestBlock{{Kind: &pb.RequestBlock_Text{Text: &pb.RequestTextBlock{Text: "C", Signature: "t"}}}}},
 	}}
 	err := verifyRequestMutation(accepted, out, grant("ir.messages.write.user"))
 	if err == nil {
@@ -546,11 +652,11 @@ func TestVerifyRequestSignaturesDuplicateTokenConflictingContent(t *testing.T) {
 // unmatched occurrence is a grantable deletion — not an ambiguity.
 func TestVerifyRequestSignaturesConflictingTokenExactMatchConsumes(t *testing.T) {
 	accepted := &pb.ChatRequest{Messages: []*pb.Message{
-		{Role: "user", Content: "A", ContentSignature: "t"},
-		{Role: "user", Content: "B", ContentSignature: "t"},
+		{Role: "user", Blocks: []*pb.RequestBlock{{Kind: &pb.RequestBlock_Text{Text: &pb.RequestTextBlock{Text: "A", Signature: "t"}}}}},
+		{Role: "user", Blocks: []*pb.RequestBlock{{Kind: &pb.RequestBlock_Text{Text: &pb.RequestTextBlock{Text: "B", Signature: "t"}}}}},
 	}}
 	out := &pb.ChatRequest{Messages: []*pb.Message{
-		{Role: "user", Content: "A", ContentSignature: "t"},
+		{Role: "user", Blocks: []*pb.RequestBlock{{Kind: &pb.RequestBlock_Text{Text: &pb.RequestTextBlock{Text: "A", Signature: "t"}}}}},
 	}}
 	if err := verifyRequestMutation(accepted, out, grant("ir.messages.write.user")); err != nil {
 		t.Fatalf("an exact token+content match must consume its occurrence, got: %v", err)
@@ -560,11 +666,11 @@ func TestVerifyRequestSignaturesConflictingTokenExactMatchConsumes(t *testing.T)
 // Candidates sharing both token AND content are the same signed fact — fine.
 func TestVerifyRequestSignaturesDuplicateTokenIdenticalContent(t *testing.T) {
 	accepted := &pb.ChatRequest{Messages: []*pb.Message{
-		{Role: "user", Content: "A", ContentSignature: "t"},
-		{Role: "user", Content: "A", ContentSignature: "t"},
+		{Role: "user", Blocks: []*pb.RequestBlock{{Kind: &pb.RequestBlock_Text{Text: &pb.RequestTextBlock{Text: "A", Signature: "t"}}}}},
+		{Role: "user", Blocks: []*pb.RequestBlock{{Kind: &pb.RequestBlock_Text{Text: &pb.RequestTextBlock{Text: "A", Signature: "t"}}}}},
 	}}
 	out := &pb.ChatRequest{Messages: []*pb.Message{
-		{Role: "user", Content: "A", ContentSignature: "t"},
+		{Role: "user", Blocks: []*pb.RequestBlock{{Kind: &pb.RequestBlock_Text{Text: &pb.RequestTextBlock{Text: "A", Signature: "t"}}}}},
 	}}
 	if err := verifyRequestMutation(accepted, out, grant("ir.messages.write.user")); err != nil {
 		t.Fatalf("duplicate tokens over identical content must verify, got: %v", err)
@@ -575,10 +681,10 @@ func TestVerifyRequestSignaturesDuplicateTokenIdenticalContent(t *testing.T) {
 // signed message is a grantable deletion.
 func TestVerifyRequestSignaturesAcceptedTokenWithoutCounterpartAllowed(t *testing.T) {
 	accepted := &pb.ChatRequest{Messages: []*pb.Message{
-		{Role: "user", Content: "signed", ContentSignature: "token"},
+		{Role: "user", Blocks: []*pb.RequestBlock{{Kind: &pb.RequestBlock_Text{Text: &pb.RequestTextBlock{Text: "signed", Signature: "token"}}}}},
 	}}
 	out := &pb.ChatRequest{Messages: []*pb.Message{
-		{Role: "assistant", Content: "fresh"},
+		{Role: "assistant", Blocks: []*pb.RequestBlock{{Kind: &pb.RequestBlock_Text{Text: &pb.RequestTextBlock{Text: "fresh"}}}}},
 	}}
 	canWrite := grant("ir.messages.write.user", "ir.messages.write.assistant")
 	if err := verifyRequestMutation(accepted, out, canWrite); err != nil {
@@ -596,11 +702,11 @@ func TestVerifyRequestSignaturesAcceptedTokenWithoutCounterpartAllowed(t *testin
 // accepted occurrence, reject the second.)
 func TestVerifyRequestSignaturesDuplicatedSignedMessageRejected(t *testing.T) {
 	accepted := &pb.ChatRequest{Messages: []*pb.Message{
-		{Role: "assistant", Content: "A", ContentSignature: "token"},
+		{Role: "assistant", Blocks: []*pb.RequestBlock{{Kind: &pb.RequestBlock_Text{Text: &pb.RequestTextBlock{Text: "A", Signature: "token"}}}}},
 	}}
 	out := &pb.ChatRequest{Messages: []*pb.Message{
-		{Role: "assistant", Content: "A", ContentSignature: "token"},
-		{Role: "assistant", Content: "A", ContentSignature: "token"},
+		{Role: "assistant", Blocks: []*pb.RequestBlock{{Kind: &pb.RequestBlock_Text{Text: &pb.RequestTextBlock{Text: "A", Signature: "token"}}}}},
+		{Role: "assistant", Blocks: []*pb.RequestBlock{{Kind: &pb.RequestBlock_Text{Text: &pb.RequestTextBlock{Text: "A", Signature: "token"}}}}},
 	}}
 	err := verifyRequestMutation(accepted, out, grant("ir.messages.write.assistant"))
 	if err == nil {
@@ -617,8 +723,8 @@ func TestVerifyRequestSignaturesDuplicatedSignedMessageRejected(t *testing.T) {
 // the round-2 false positive ("signature dropped") must not fire.
 func TestVerifyRequestSignaturesUnchangedCloneWithUnsignedCopyPasses(t *testing.T) {
 	accepted := &pb.ChatRequest{Messages: []*pb.Message{
-		{Role: "assistant", Content: "A", ContentSignature: "token"},
-		{Role: "assistant", Content: "A"},
+		{Role: "assistant", Blocks: []*pb.RequestBlock{{Kind: &pb.RequestBlock_Text{Text: &pb.RequestTextBlock{Text: "A", Signature: "token"}}}}},
+		{Role: "assistant", Blocks: []*pb.RequestBlock{{Kind: &pb.RequestBlock_Text{Text: &pb.RequestTextBlock{Text: "A"}}}}},
 	}}
 	out := proto.Clone(accepted).(*pb.ChatRequest)
 	if err := verifyRequestMutation(accepted, out, grant()); err != nil {
@@ -630,12 +736,12 @@ func TestVerifyRequestSignaturesUnchangedCloneWithUnsignedCopyPasses(t *testing.
 // output copies: each consumes one occurrence, and the pairing is faithful.
 func TestVerifyRequestSignaturesTwoCopiesConsumeTwoOccurrences(t *testing.T) {
 	accepted := &pb.ChatRequest{Messages: []*pb.Message{
-		{Role: "assistant", Content: "A", ContentSignature: "token"},
-		{Role: "assistant", Content: "A", ContentSignature: "token"},
+		{Role: "assistant", Blocks: []*pb.RequestBlock{{Kind: &pb.RequestBlock_Text{Text: &pb.RequestTextBlock{Text: "A", Signature: "token"}}}}},
+		{Role: "assistant", Blocks: []*pb.RequestBlock{{Kind: &pb.RequestBlock_Text{Text: &pb.RequestTextBlock{Text: "A", Signature: "token"}}}}},
 	}}
 	out := &pb.ChatRequest{Messages: []*pb.Message{
-		{Role: "assistant", Content: "A", ContentSignature: "token"},
-		{Role: "assistant", Content: "A", ContentSignature: "token"},
+		{Role: "assistant", Blocks: []*pb.RequestBlock{{Kind: &pb.RequestBlock_Text{Text: &pb.RequestTextBlock{Text: "A", Signature: "token"}}}}},
+		{Role: "assistant", Blocks: []*pb.RequestBlock{{Kind: &pb.RequestBlock_Text{Text: &pb.RequestTextBlock{Text: "A", Signature: "token"}}}}},
 	}}
 	if err := verifyRequestMutation(accepted, out, grant("ir.messages.write.assistant")); err != nil {
 		t.Fatalf("two accepted occurrences must authorise two output copies, got: %v", err)
@@ -649,10 +755,10 @@ func TestVerifyRequestSignaturesTwoCopiesConsumeTwoOccurrences(t *testing.T) {
 // the message-section check passes and the signature check decides.
 func TestVerifyRequestSignaturesRoleChangeKeepsTokenAndContent(t *testing.T) {
 	accepted := &pb.ChatRequest{Messages: []*pb.Message{
-		{Role: "user", Content: "A", ContentSignature: "token"},
+		{Role: "user", Blocks: []*pb.RequestBlock{{Kind: &pb.RequestBlock_Text{Text: &pb.RequestTextBlock{Text: "A", Signature: "token"}}}}},
 	}}
 	out := &pb.ChatRequest{Messages: []*pb.Message{
-		{Role: "assistant", Content: "A", ContentSignature: "token"},
+		{Role: "assistant", Blocks: []*pb.RequestBlock{{Kind: &pb.RequestBlock_Text{Text: &pb.RequestTextBlock{Text: "A", Signature: "token"}}}}},
 	}}
 	canWrite := grant("ir.messages.write.user", "ir.messages.write.assistant")
 	if err := verifyRequestMutation(accepted, out, canWrite); err != nil {
@@ -668,8 +774,8 @@ func TestVerifyRequestSignaturesRoleChangeKeepsTokenAndContent(t *testing.T) {
 func TestVerifyGrantedSectionsReportsSortedRoleFirst(t *testing.T) {
 	accepted := baseRequest()
 	out := baseRequest()
-	out.Messages[1].Content = "A'"                                 // user
-	out.Messages[2].ToolCalls[0].ArgumentsJson = []byte(`{"p":2}`) // assistant
+	setText(out.Messages[1], "A'")                                           // user
+	out.Messages[2].Blocks[0].GetToolUse().ArgumentsJson = []byte(`{"p":2}`) // assistant
 
 	err := verifyRequestMutation(accepted, out, grant())
 	if err == nil {
@@ -683,22 +789,31 @@ func TestVerifyGrantedSectionsReportsSortedRoleFirst(t *testing.T) {
 // The request-domain binding inventory is part of the enforcement contract: a
 // token the SDK starts covering that this host does not know about would be a
 // signature a plugin could forge unnoticed. outboundpolicy.Validate pins the
-// shapes SDK-side; this pins what the verifier actually consumes, so a fourth
-// binding fails loudly here instead of silently narrowing enforcement.
+// shapes SDK-side; this pins what the verifier actually consumes, so a new
+// binding fails loudly here instead of silently narrowing enforcement. Under
+// the ordered body the tokens are BLOCK signatures, keyed by their message.
 func TestRequestSignatureBindingsArePinned(t *testing.T) {
 	got := make([]string, 0, len(requestSignatureFields))
 	covered := map[string][]string{}
 	for _, check := range requestSignatureFields {
-		got = append(got, check.binding.SignatureField)
-		for _, ref := range check.refs {
-			covered[check.binding.SignatureField] = append(covered[check.binding.SignatureField], string(ref.Name()))
+		key := string(check.binding.Message)
+		got = append(got, key)
+		if check.scope == outboundpolicy.SignatureScopeTrailingStandalone {
+			for _, ref := range check.trailRefs {
+				covered[key] = append(covered[key], string(ref.msg)+"."+string(ref.fd.Name()))
+			}
+		} else {
+			for _, ref := range check.sameRefs {
+				covered[key] = append(covered[key], string(ref.Name()))
+			}
 		}
 	}
 
 	wantFields := map[string]bool{
-		"thinking_signature": true,
-		"content_signature":  true,
-		"trailing_signature": true,
+		"torana.v2.RequestThinkingBlock":          true,
+		"torana.v2.RequestTextBlock":              true,
+		"torana.v2.RequestToolUseBlock":           true,
+		"torana.v2.RequestTrailingSignatureBlock": true,
 	}
 	if len(got) != len(wantFields) {
 		t.Fatalf("request signature bindings = %v, want exactly %v", got, wantFields)
@@ -710,9 +825,10 @@ func TestRequestSignatureBindingsArePinned(t *testing.T) {
 	}
 	// The pinned covered-content sets (mirrors the SDK's request contracts).
 	wantCovered := map[string][]string{
-		"thinking_signature": {"thinking", "redacted_thinking"},
-		"content_signature":  {"content"},
-		"trailing_signature": {"thinking", "content"},
+		"torana.v2.RequestThinkingBlock":          {"text"},
+		"torana.v2.RequestTextBlock":              {"text"},
+		"torana.v2.RequestToolUseBlock":           {"id", "name", "arguments_json"},
+		"torana.v2.RequestTrailingSignatureBlock": {"torana.v2.RequestTextBlock.text", "torana.v2.RequestThinkingBlock.text"},
 	}
 	for field, want := range wantCovered {
 		if strings.Join(covered[field], ",") != strings.Join(want, ",") {
@@ -799,13 +915,13 @@ func TestRunBeforeRequestGrantlessMutationRejectedAllow(t *testing.T) {
 
 	chat := &engine.ChatRequest{
 		Model:    "gpt-x",
-		Messages: []engine.Message{{Role: engine.RoleUser, Content: "hello"}},
+		Messages: []engine.Message{{Role: engine.RoleUser, Blocks: []engine.Block{{Text: &engine.TextBlock{Text: "hello"}}}}},
 	}
 	out, err := pp.RunBeforeRequest(context.Background(), 1, chat, nil)
 	if err != nil {
 		t.Fatalf("allow mode must not error on a refused replacement: %v", err)
 	}
-	if out == nil || len(out.Messages) != 1 || out.Messages[0].Content != "hello" {
+	if out == nil || len(out.Messages) != 1 || engineTextOf(out.Messages[0]) != "hello" {
 		t.Fatalf("grantless mutation was applied: %+v", out.Messages)
 	}
 	if out.Model != "gpt-x" {
@@ -822,7 +938,7 @@ func TestRunBeforeRequestGrantlessMutationRejectedBlock(t *testing.T) {
 
 	chat := &engine.ChatRequest{
 		Model:    "gpt-x",
-		Messages: []engine.Message{{Role: engine.RoleUser, Content: "hello"}},
+		Messages: []engine.Message{{Role: engine.RoleUser, Blocks: []engine.Block{{Text: &engine.TextBlock{Text: "hello"}}}}},
 	}
 	out, err := pp.RunBeforeRequest(context.Background(), 2, chat, nil)
 	if err == nil {
@@ -856,7 +972,7 @@ func TestRunBeforeRequestFullyGrantedFastPath(t *testing.T) {
 
 	chat := &engine.ChatRequest{
 		Model:    "gpt-x",
-		Messages: []engine.Message{{Role: engine.RoleUser, Content: "hello"}},
+		Messages: []engine.Message{{Role: engine.RoleUser, Blocks: []engine.Block{{Text: &engine.TextBlock{Text: "hello"}}}}},
 		Tools: []engine.ToolDef{{
 			Name:       "read",
 			Parameters: mustReqWG(`{"type":"object"}`),
@@ -866,7 +982,7 @@ func TestRunBeforeRequestFullyGrantedFastPath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RunBeforeRequest: %v", err)
 	}
-	if len(out.Messages) != 1 || !strings.HasSuffix(out.Messages[0].Content, "[seen by test-mutator]") {
+	if len(out.Messages) != 1 || !strings.HasSuffix(engineTextOf(out.Messages[0]), "[seen by test-mutator]") {
 		t.Errorf("fast-path mutation was not applied: %+v", out.Messages)
 	}
 	if len(out.Tools) != 1 || out.Tools[0].Description != "described by test-mutator" {
@@ -886,17 +1002,17 @@ func TestRunBeforeRequestAllGrantsHostOwnedMetaRejectedAllow(t *testing.T) {
 
 	chat := &engine.ChatRequest{
 		Model:    "gpt-x",
-		Messages: []engine.Message{{Role: engine.RoleUser, Content: "hello"}},
+		Messages: []engine.Message{{Role: engine.RoleUser, Blocks: []engine.Block{{Text: &engine.TextBlock{Text: "hello"}}}}},
 	}
 	out, err := pp.RunBeforeRequest(context.Background(), 1, chat, nil)
 	if err != nil {
 		t.Fatalf("allow mode must not error on a refused replacement: %v", err)
 	}
-	if out == nil || len(out.Messages) != 1 || out.Messages[0].Content != "hello" {
+	if out == nil || len(out.Messages) != 1 || engineTextOf(out.Messages[0]) != "hello" {
 		t.Fatalf("the forged-metadata replacement leaked into the request: %+v", out.Messages)
 	}
-	if len(out.ToranaMeta) != 0 {
-		t.Errorf("host-owned metadata was changed on the fast path: %v", out.ToranaMeta)
+	if !out.ToranaMeta.IsAbsent() {
+		t.Errorf("host-owned metadata was changed on the fast path: %s", out.ToranaMeta)
 	}
 }
 
@@ -908,7 +1024,7 @@ func TestRunBeforeRequestAllGrantsHostOwnedMetaRejectedBlock(t *testing.T) {
 
 	chat := &engine.ChatRequest{
 		Model:    "gpt-x",
-		Messages: []engine.Message{{Role: engine.RoleUser, Content: "hello"}},
+		Messages: []engine.Message{{Role: engine.RoleUser, Blocks: []engine.Block{{Text: &engine.TextBlock{Text: "hello"}}}}},
 	}
 	out, err := pp.RunBeforeRequest(context.Background(), 2, chat, nil)
 	if err == nil {
@@ -939,18 +1055,18 @@ func TestRunBeforeRequestAllGrantsStaleBindRejectedAllow(t *testing.T) {
 	chat := &engine.ChatRequest{
 		Model: "gpt-x",
 		Messages: []engine.Message{
-			{Role: engine.RoleUser, Content: "signed content", ContentSignature: "cs-token"},
+			{Role: engine.RoleUser, Blocks: []engine.Block{{Text: &engine.TextBlock{Text: "signed content", Signature: "cs-token"}}}},
 		},
 	}
 	out, err := pp.RunBeforeRequest(context.Background(), 3, chat, nil)
 	if err != nil {
 		t.Fatalf("allow mode must not error on a refused replacement: %v", err)
 	}
-	if out == nil || len(out.Messages) != 1 || out.Messages[0].Content != "signed content" {
+	if out == nil || len(out.Messages) != 1 || engineTextOf(out.Messages[0]) != "signed content" {
 		t.Fatalf("the stale-bound replacement leaked into the request: %+v", out.Messages)
 	}
-	if out.Messages[0].ContentSignature != "cs-token" {
-		t.Errorf("content_signature changed: %q", out.Messages[0].ContentSignature)
+	if engineSigOf(out.Messages[0]) != "cs-token" {
+		t.Errorf("content_signature changed: %q", engineSigOf(out.Messages[0]))
 	}
 }
 
@@ -968,7 +1084,7 @@ func TestRunBeforeRequestRejectedReplacementDiscardsRespond(t *testing.T) {
 	const reqID = 5
 	chat := &engine.ChatRequest{
 		Model:    "gpt-x",
-		Messages: []engine.Message{{Role: engine.RoleUser, Content: "respondme hello"}},
+		Messages: []engine.Message{{Role: engine.RoleUser, Blocks: []engine.Block{{Text: &engine.TextBlock{Text: "respondme hello"}}}}},
 	}
 	out, err := pp.RunBeforeRequest(context.Background(), reqID, chat, nil)
 	if err != nil {
@@ -982,7 +1098,7 @@ func TestRunBeforeRequestRejectedReplacementDiscardsRespond(t *testing.T) {
 	if v.Block() != nil {
 		t.Fatal("no block was recorded in this case")
 	}
-	if out == nil || len(out.Messages) != 1 || out.Messages[0].Content != "respondme hello" {
+	if out == nil || len(out.Messages) != 1 || engineTextOf(out.Messages[0]) != "respondme hello" {
 		t.Fatalf("the grantless replacement was applied: %+v", out.Messages)
 	}
 }
@@ -997,7 +1113,7 @@ func TestRunBeforeRequestRejectedReplacementKeepsBlock(t *testing.T) {
 	const reqID = 6
 	chat := &engine.ChatRequest{
 		Model:    "gpt-x",
-		Messages: []engine.Message{{Role: engine.RoleUser, Content: "blockme hello"}},
+		Messages: []engine.Message{{Role: engine.RoleUser, Blocks: []engine.Block{{Text: &engine.TextBlock{Text: "blockme hello"}}}}},
 	}
 	out, err := pp.RunBeforeRequest(context.Background(), reqID, chat, nil)
 	if err != nil {
@@ -1013,7 +1129,7 @@ func TestRunBeforeRequestRejectedReplacementKeepsBlock(t *testing.T) {
 	if v.Respond() != nil {
 		t.Error("a respond verdict from the same refused call was kept")
 	}
-	if out == nil || len(out.Messages) != 1 || out.Messages[0].Content != "blockme hello" {
+	if out == nil || len(out.Messages) != 1 || engineTextOf(out.Messages[0]) != "blockme hello" {
 		t.Fatalf("the grantless replacement was applied: %+v", out.Messages)
 	}
 }
@@ -1096,11 +1212,11 @@ func BenchmarkVerifyRequestMutationFastPath(b *testing.B) {
 // occurrence is a grantable deletion. NOT a dropped token.
 func TestVerifyRequestSignaturesDeletingSignedTwinKeepsUnsigned(t *testing.T) {
 	accepted := &pb.ChatRequest{Messages: []*pb.Message{
-		{Role: "assistant", Content: "A", ContentSignature: "token"},
-		{Role: "assistant", Content: "A"},
+		{Role: "assistant", Blocks: []*pb.RequestBlock{{Kind: &pb.RequestBlock_Text{Text: &pb.RequestTextBlock{Text: "A", Signature: "token"}}}}},
+		{Role: "assistant", Blocks: []*pb.RequestBlock{{Kind: &pb.RequestBlock_Text{Text: &pb.RequestTextBlock{Text: "A"}}}}},
 	}}
 	out := &pb.ChatRequest{Messages: []*pb.Message{
-		{Role: "assistant", Content: "A"},
+		{Role: "assistant", Blocks: []*pb.RequestBlock{{Kind: &pb.RequestBlock_Text{Text: &pb.RequestTextBlock{Text: "A"}}}}},
 	}}
 	canWrite := grant("ir.messages.write.assistant")
 	if err := verifyRequestMutation(accepted, out, canWrite); err != nil {
@@ -1113,10 +1229,10 @@ func TestVerifyRequestSignaturesDeletingSignedTwinKeepsUnsigned(t *testing.T) {
 // the provider signed. Rejected.
 func TestVerifyRequestSignaturesDroppedStillRejectedWithoutUnsignedTwin(t *testing.T) {
 	accepted := &pb.ChatRequest{Messages: []*pb.Message{
-		{Role: "assistant", Content: "A", ContentSignature: "token"},
+		{Role: "assistant", Blocks: []*pb.RequestBlock{{Kind: &pb.RequestBlock_Text{Text: &pb.RequestTextBlock{Text: "A", Signature: "token"}}}}},
 	}}
 	out := &pb.ChatRequest{Messages: []*pb.Message{
-		{Role: "assistant", Content: "A"},
+		{Role: "assistant", Blocks: []*pb.RequestBlock{{Kind: &pb.RequestBlock_Text{Text: &pb.RequestTextBlock{Text: "A"}}}}},
 	}}
 	canWrite := grant("ir.messages.write.assistant")
 	err := verifyRequestMutation(accepted, out, canWrite)
@@ -1133,12 +1249,12 @@ func TestVerifyRequestSignaturesDroppedStillRejectedWithoutUnsignedTwin(t *testi
 // signed token being dropped. Rejected.
 func TestVerifyRequestSignaturesSurplusUnsignedCopyIsDropped(t *testing.T) {
 	accepted := &pb.ChatRequest{Messages: []*pb.Message{
-		{Role: "assistant", Content: "A", ContentSignature: "token"},
-		{Role: "assistant", Content: "A"},
+		{Role: "assistant", Blocks: []*pb.RequestBlock{{Kind: &pb.RequestBlock_Text{Text: &pb.RequestTextBlock{Text: "A", Signature: "token"}}}}},
+		{Role: "assistant", Blocks: []*pb.RequestBlock{{Kind: &pb.RequestBlock_Text{Text: &pb.RequestTextBlock{Text: "A"}}}}},
 	}}
 	out := &pb.ChatRequest{Messages: []*pb.Message{
-		{Role: "assistant", Content: "A"},
-		{Role: "assistant", Content: "A"},
+		{Role: "assistant", Blocks: []*pb.RequestBlock{{Kind: &pb.RequestBlock_Text{Text: &pb.RequestTextBlock{Text: "A"}}}}},
+		{Role: "assistant", Blocks: []*pb.RequestBlock{{Kind: &pb.RequestBlock_Text{Text: &pb.RequestTextBlock{Text: "A"}}}}},
 	}}
 	canWrite := grant("ir.messages.write.assistant")
 	err := verifyRequestMutation(accepted, out, canWrite)

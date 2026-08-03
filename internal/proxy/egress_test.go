@@ -39,7 +39,7 @@ func egressPayload(t *testing.T, providerName, path string) string {
 	t.Helper()
 	chat := &engine.ChatRequest{
 		Model:    "gpt-x",
-		Messages: []engine.Message{{Role: engine.RoleUser, Content: "warm"}},
+		Messages: []engine.Message{{Role: engine.RoleUser, Blocks: []engine.Block{{Text: &engine.TextBlock{Text: "warm"}}}}},
 	}
 	raw, err := proto.Marshal(pbconv.ToPBChatRequest(chat))
 	if err != nil {
@@ -372,7 +372,7 @@ func TestEgressRejectsUnrenderableRequest(t *testing.T) {
 	chat := &engine.ChatRequest{
 		Model:       "gpt-x",
 		Temperature: proto.Float64(math.NaN()),
-		Messages:    []engine.Message{{Role: engine.RoleUser, Content: "warm"}},
+		Messages:    []engine.Message{{Role: engine.RoleUser, Blocks: []engine.Block{{Text: &engine.TextBlock{Text: "warm"}}}}},
 	}
 	raw, err := proto.Marshal(pbconv.ToPBChatRequest(chat))
 	if err != nil {
@@ -640,7 +640,7 @@ func egressPayloadPB(t *testing.T) string {
 	t.Helper()
 	chat := &engine.ChatRequest{
 		Model:    "gpt-x",
-		Messages: []engine.Message{{Role: engine.RoleUser, Content: "warm"}},
+		Messages: []engine.Message{{Role: engine.RoleUser, Blocks: []engine.Block{{Text: &engine.TextBlock{Text: "warm"}}}}},
 	}
 	raw, err := proto.Marshal(pbconv.ToPBChatRequest(chat))
 	if err != nil {
@@ -862,10 +862,10 @@ func TestEgressRejectsContractViolations(t *testing.T) {
 		pbReq := pbconv.ToPBChatRequest(&engine.ChatRequest{
 			Model: "gpt-x",
 			Messages: []engine.Message{
-				{Role: engine.RoleUser, Content: "hi"},
-				{Role: engine.RoleAssistant, ToolCalls: []engine.ToolCall{
-					{ID: "t1", Name: "read", Arguments: mustReq(`{}`)},
-				}},
+				{Role: engine.RoleUser, Blocks: []engine.Block{{Text: &engine.TextBlock{Text: "hi"}}}},
+				{Role: engine.RoleAssistant, Blocks: []engine.Block{{ToolUse: &engine.ToolUseBlock{
+					ID: "t1", Name: "read", Arguments: mustReq(`{}`),
+				}}}},
 			},
 			Tools: []engine.ToolDef{{Name: "read", Parameters: mustReq(`{}`)}},
 		})
@@ -908,10 +908,10 @@ func TestEgressRejectsContractViolations(t *testing.T) {
 		// for a DIFFERENT boundary.
 		{"nil message (zero-length wire)", reqFor(func(r *pb.ChatRequest) { r.Messages = append(r.Messages, nil) }), "replacement contract"},
 		{"nil tool def (zero-length wire)", reqFor(func(r *pb.ChatRequest) { r.Tools = append(r.Tools, nil) }), "replacement contract"},
-		{"nil tool call (zero-length wire)", reqFor(func(r *pb.ChatRequest) { r.Messages[1].ToolCalls = append(r.Messages[1].ToolCalls, nil) }), "replacement contract"},
-		{"empty arguments bytes", reqFor(func(r *pb.ChatRequest) { r.Messages[1].ToolCalls[0].ArgumentsJson = nil }), "replacement contract"},
+		{"nil tool call (zero-length wire)", reqFor(func(r *pb.ChatRequest) { r.Messages[1].Blocks = append(r.Messages[1].Blocks, nil) }), "replacement contract"},
+		{"empty arguments bytes", reqFor(func(r *pb.ChatRequest) { r.Messages[1].Blocks[0].GetToolUse().ArgumentsJson = nil }), "replacement contract"},
 		{"empty parameters bytes", reqFor(func(r *pb.ChatRequest) { r.Tools[0].ParametersJson = nil }), "replacement contract"},
-		{"malformed arguments", reqFor(func(r *pb.ChatRequest) { r.Messages[1].ToolCalls[0].ArgumentsJson = []byte(`[1,2]`) }), "replacement contract"},
+		{"malformed arguments", reqFor(func(r *pb.ChatRequest) { r.Messages[1].Blocks[0].GetToolUse().ArgumentsJson = []byte(`[1,2]`) }), "replacement contract"},
 		{"malformed parameters", reqFor(func(r *pb.ChatRequest) { r.Tools[0].ParametersJson = []byte(`"nope"`) }), "replacement contract"},
 	}
 	for _, tc := range cases {

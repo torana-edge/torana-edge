@@ -3,6 +3,7 @@ package openai
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -13,6 +14,18 @@ import (
 // A closed events channel and canceled context are both ready in production
 // when enforcement aborts a serializer. The channel branch must never win and
 // fabricate either OpenAI success marker.
+func mustExtSC(m map[string]any) engine.OptionalJSONObject {
+	b, err := json.Marshal(m)
+	if err != nil {
+		panic(err)
+	}
+	r, err := engine.ParseOptionalJSONObject(b)
+	if err != nil {
+		panic(err)
+	}
+	return r
+}
+
 func TestSerializeCanceledClosedStreamDoesNotFinish(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
@@ -23,7 +36,7 @@ func TestSerializeCanceledClosedStreamDoesNotFinish(t *testing.T) {
 		{
 			"responses",
 			context.WithValue(context.Background(), engine.ChatRequestKey, &engine.ChatRequest{
-				ProviderExtensions: map[string]any{"_openai_variant": "responses"},
+				ProviderExtensions: mustExtSC(map[string]any{"_openai_variant": "responses"}),
 			}),
 			[]string{"[DONE]", "response.completed"},
 		},

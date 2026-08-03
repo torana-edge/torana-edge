@@ -32,27 +32,58 @@ func cacheComplianceRequest() *engine.ChatRequest {
 	return &engine.ChatRequest{
 		Model: "claude-sonnet-4-20250514",
 		Messages: []engine.Message{
-			{Role: engine.RoleSystem, Content: "You are a coding agent.",
-				CacheControl: map[string]any{"type": "ephemeral"}},
-			{Role: engine.RoleUser, Content: "find the bug in server.go"},
-			{Role: engine.RoleAssistant, ToolCalls: []engine.ToolCall{{
+			{Role: engine.RoleSystem, Blocks: []engine.Block{
+				{Text: &engine.TextBlock{Text: "You are a coding agent."}},
+				{CacheBreakpoint: &engine.CacheBreakpointBlock{Marker: mustMarker(`{"type":"ephemeral"}`)}},
+			}},
+			{Role: engine.RoleUser, Blocks: []engine.Block{{Text: &engine.TextBlock{Text: "find the bug in server.go"}}}},
+			{Role: engine.RoleAssistant, Blocks: []engine.Block{{ToolUse: &engine.ToolUseBlock{
 				ID: "call_1", Name: "read",
 				Arguments: mustReqCompliance(`{"path": "server.go"}`), // no "i": forces heuristic fill
-			}}},
-			{Role: engine.RoleTool, ToolCallID: "call_1", ToolName: "read", Content: bigResult},
-			{Role: engine.RoleUser, Content: "now fix it",
-				CacheControl: map[string]any{"type": "ephemeral"}},
+			}}}},
+			{Role: engine.RoleTool, Blocks: []engine.Block{{ToolResult: &engine.ToolResultBlock{
+				ToolCallID: "call_1", ToolName: "read", Content: []engine.ToolResultContentBlock{{Text: bigResult}},
+			}}}},
+			{Role: engine.RoleUser, Blocks: []engine.Block{
+				{Text: &engine.TextBlock{Text: "now fix it"}},
+				{CacheBreakpoint: &engine.CacheBreakpointBlock{Marker: mustMarker(`{"type":"ephemeral"}`)}},
+			}},
 		},
 		Tools: []engine.ToolDef{
 			{Name: "read", Parameters: mustReqCompliance(`{"type":"object","properties":{"path":{"type":"string"}}}`)},
 			{Name: "write", Parameters: mustReqCompliance(`{"type":"object","properties":{"path":{"type":"string"},"content":{"type":"string"}}}`),
-				CacheControl: map[string]any{"type": "ephemeral"}},
+				CacheControl: mustOptMarker(`{"type":"ephemeral"}`)},
 		},
 	}
 }
 
 // mustReq panics on invalid raw: test fixtures are trusted, and a fixture
 // that no longer parses must fail loudly.
+func hasCacheBreakpoint(m engine.Message) bool {
+	for _, b := range m.Blocks {
+		if b.CacheBreakpoint != nil {
+			return true
+		}
+	}
+	return false
+}
+
+func mustOptMarker(raw string) engine.OptionalJSONObject {
+	r, err := engine.ParseOptionalJSONObject([]byte(raw))
+	if err != nil {
+		panic(err)
+	}
+	return r
+}
+
+func mustMarker(raw string) engine.RequiredJSONObject {
+	r, err := engine.ParseRequiredJSONObject([]byte(raw))
+	if err != nil {
+		panic(err)
+	}
+	return r
+}
+
 func mustReqCompliance(raw string) engine.RequiredJSONObject {
 	r, err := engine.ParseRequiredJSONObject([]byte(raw))
 	if err != nil {
@@ -67,7 +98,7 @@ func mustReqCompliance(raw string) engine.RequiredJSONObject {
 func stableBytes(t *testing.T, chat *engine.ChatRequest) []byte {
 	t.Helper()
 	clone := *chat
-	clone.ToranaMeta = nil
+	clone.ToranaMeta = engine.OptionalJSONObject{}
 	b, err := json.Marshal(&clone)
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
@@ -145,16 +176,16 @@ func TestCacheControlSurvivesPluginRoundTrip(t *testing.T) {
 
 	// The intent plugin mutates tools AND messages, so the returned request
 	// went through a full pb round-trip.
-	if out.Messages[0].Role != engine.RoleSystem || out.Messages[0].CacheControl == nil {
+	if out.Messages[0].Role != engine.RoleSystem || !hasCacheBreakpoint(out.Messages[0]) {
 		t.Errorf("system message cache_control stripped by plugin round-trip: %+v", out.Messages[0])
 	}
 	last := out.Messages[len(out.Messages)-1]
-	if last.CacheControl == nil {
+	if !hasCacheBreakpoint(last) {
 		t.Errorf("user message cache_control stripped by plugin round-trip: %+v", last)
 	}
 	var marked bool
 	for _, td := range out.Tools {
-		if td.Name == "write" && td.CacheControl != nil {
+		if td.Name == "write" && !td.CacheControl.IsAbsent() {
 			marked = true
 		}
 	}

@@ -324,7 +324,7 @@ const streamID = "chatcmpl-torana"
 // SerializeStream writes StreamEvents from the channel as SSE to writer.
 func (s *StreamAdapter) SerializeStream(ctx context.Context, w io.Writer, events <-chan engine.StreamEvent) error {
 	if chat, ok := ctx.Value(engine.ChatRequestKey).(*engine.ChatRequest); ok {
-		if variant, ok := chat.ProviderExtensions["_openai_variant"].(string); ok && variant == "responses" {
+		if variant, ok := readExtStringO(chat.ProviderExtensions, "_openai_variant"); ok && variant == "responses" {
 			return s.serializeResponsesStream(ctx, w, events)
 		}
 	}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 
+	"github.com/torana-edge/torana-edge/examples/plugins/blockutil"
 	sdk "github.com/torana-edge/torana-plugin-sdk"
 	pb "github.com/torana-edge/torana-plugin-sdk/pb/v2"
 )
@@ -16,7 +17,7 @@ func main() {}
 func init() {
 	sdk.OnBeforeRequest(func(ctx context.Context, req *pb.ChatRequest) (sdk.RequestResult, error) {
 		for _, m := range req.Messages {
-			if strings.Contains(m.Content, "respondme") {
+			if strings.Contains(blockutil.TextOf(m), "respondme") {
 				sdk.RespondRequest("canned response from test-responder")
 				return sdk.ReplaceRequest(req), nil
 			}

@@ -11,6 +11,43 @@ import (
 	"github.com/torana-edge/torana-edge/internal/engine"
 )
 
+// Ordered-body test helpers (engine.Message).
+
+func textBlock(s string) engine.Block {
+	return engine.Block{Text: &engine.TextBlock{Text: s}}
+}
+
+func msgBlock(role engine.Role, text string) engine.Message {
+	return engine.Message{Role: role, Blocks: []engine.Block{textBlock(text)}}
+}
+
+func textOf(m engine.Message) string { return m.Text() }
+
+type tcView struct {
+	ID, Name  string
+	Args      engine.RequiredJSONObject
+	Signature string
+}
+
+func toolCalls(m engine.Message) []tcView {
+	var out []tcView
+	for _, b := range m.Blocks {
+		if b.ToolUse != nil {
+			out = append(out, tcView{ID: b.ToolUse.ID, Name: b.ToolUse.Name, Args: b.ToolUse.Arguments, Signature: b.ToolUse.Signature})
+		}
+	}
+	return out
+}
+
+func toolResults(m engine.Message) []*engine.ToolResultBlock {
+	var out []*engine.ToolResultBlock
+	for _, b := range m.Blocks {
+		if b.ToolResult != nil {
+			out = append(out, b.ToolResult)
+		}
+	}
+	return out
+}
 func TestRoundTrip_ChatCompletions(t *testing.T) {
 	adapter := &Adapter{}
 
@@ -43,8 +80,8 @@ func TestRoundTrip_ChatCompletions(t *testing.T) {
 	if chat.Messages[0].Role != engine.RoleSystem {
 		t.Errorf("msg 0 role: got %s, want system", chat.Messages[0].Role)
 	}
-	if chat.Messages[0].Content != "You are helpful." {
-		t.Errorf("msg 0 content: got %q", chat.Messages[0].Content)
+	if textOf(chat.Messages[0]) != "You are helpful." {
+		t.Errorf("msg 0 content: got %q", textOf(chat.Messages[0]))
 	}
 
 	if chat.Messages[1].Role != engine.RoleUser {
@@ -54,13 +91,13 @@ func TestRoundTrip_ChatCompletions(t *testing.T) {
 	if chat.Messages[2].Role != engine.RoleAssistant {
 		t.Errorf("msg 2 role: got %s, want assistant", chat.Messages[2].Role)
 	}
-	if len(chat.Messages[2].ToolCalls) != 1 {
-		t.Fatalf("expected 1 tool call, got %d", len(chat.Messages[2].ToolCalls))
+	if len(toolCalls(chat.Messages[2])) != 1 {
+		t.Fatalf("expected 1 tool call, got %d", len(toolCalls(chat.Messages[2])))
 	}
-	if chat.Messages[2].ToolCalls[0].Name != "get_weather" {
-		t.Errorf("tool call name: got %s", chat.Messages[2].ToolCalls[0].Name)
+	if got := toolCalls(chat.Messages[2])[0].Name; got != "get_weather" {
+		t.Errorf("tool call name: got %s", got)
 	}
-	vals, _, err := chat.Messages[2].ToolCalls[0].Arguments.DecodeObject()
+	vals, _, err := toolCalls(chat.Messages[2])[0].Args.DecodeObject()
 	if err != nil {
 		t.Fatalf("tool call args decode: %v", err)
 	}
@@ -72,8 +109,8 @@ func TestRoundTrip_ChatCompletions(t *testing.T) {
 	if chat.Messages[3].Role != engine.RoleTool {
 		t.Errorf("msg 3 role: got %s, want tool", chat.Messages[3].Role)
 	}
-	if chat.Messages[3].ToolCallID != "call_1" {
-		t.Errorf("msg 3 tool_call_id: got %s", chat.Messages[3].ToolCallID)
+	if toolResults(chat.Messages[3])[0].ToolCallID != "call_1" {
+		t.Errorf("msg 3 tool_call_id: got %s", toolResults(chat.Messages[3])[0].ToolCallID)
 	}
 
 	if len(chat.Tools) != 1 {
@@ -114,8 +151,8 @@ func TestUnmarshal_ResponsesAPI(t *testing.T) {
 	if chat.Messages[0].Role != engine.RoleUser {
 		t.Errorf("role: got %s, want user", chat.Messages[0].Role)
 	}
-	if chat.Messages[0].Content != "Hello, what is the weather?" {
-		t.Errorf("content: got %q", chat.Messages[0].Content)
+	if textOf(chat.Messages[0]) != "Hello, what is the weather?" {
+		t.Errorf("content: got %q", textOf(chat.Messages[0]))
 	}
 	if len(chat.Tools) != 1 {
 		t.Fatalf("expected 1 tool, got %d", len(chat.Tools))
@@ -278,11 +315,17 @@ func TestResponsesFieldPreservation(t *testing.T) {
 		t.Fatalf("Unmarshal: %v", err)
 	}
 
-	if req.ProviderExtensions["instructions"] != "Be helpful." {
-		t.Errorf("expected instructions to be preserved, got %v", req.ProviderExtensions["instructions"])
+	var extMap map[string]json.RawMessage
+	json.Unmarshal(req.ProviderExtensions.Bytes(), &extMap)
+	var extInstr string
+	json.Unmarshal(extMap["instructions"], &extInstr)
+	if extInstr != "Be helpful." {
+		t.Errorf("expected instructions to be preserved, got %v", extInstr)
 	}
-	if req.ProviderExtensions["temperature"] != 0.5 {
-		t.Errorf("expected temperature to be preserved, got %v", req.ProviderExtensions["temperature"])
+	var extTemp json.Number
+	json.Unmarshal(extMap["temperature"], &extTemp)
+	if extTemp.String() != "0.5" {
+		t.Errorf("expected temperature to be preserved, got %v", extTemp)
 	}
 
 	out, err := a.Marshal(req)
@@ -315,7 +358,7 @@ func TestProviderExtensions_RoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(chat.ProviderExtensions) == 0 {
+	if chat.ProviderExtensions.IsAbsent() {
 		t.Fatal("expected ProviderExtensions to be populated for unknown field x-custom-metadata")
 	}
 
@@ -365,15 +408,17 @@ func TestRoundTrip_ResponsesAPI(t *testing.T) {
 		t.Fatalf("expected 3 messages, got %d", len(chat.Messages))
 	}
 
-	if chat.Messages[0].Role != engine.RoleUser || chat.Messages[0].Content != "Hello!" {
+	if chat.Messages[0].Role != engine.RoleUser || textOf(chat.Messages[0]) != "Hello!" {
 		t.Errorf("message 0 mismatch: %+v", chat.Messages[0])
 	}
 
-	if chat.Messages[1].Role != engine.RoleAssistant || len(chat.Messages[1].ToolCalls) != 1 || chat.Messages[1].ToolCalls[0].ID != "call_abc" || chat.Messages[1].ToolCalls[0].Name != "get_weather" {
+	tcs := toolCalls(chat.Messages[1])
+	if chat.Messages[1].Role != engine.RoleAssistant || len(tcs) != 1 || tcs[0].ID != "call_abc" || tcs[0].Name != "get_weather" {
 		t.Errorf("message 1 mismatch: %+v", chat.Messages[1])
 	}
 
-	if chat.Messages[2].Role != engine.RoleTool || chat.Messages[2].ToolCallID != "call_abc" || chat.Messages[2].Content != "Rainy" {
+	trs := toolResults(chat.Messages[2])
+	if chat.Messages[2].Role != engine.RoleTool || len(trs) != 1 || trs[0].ToolCallID != "call_abc" || trs[0].Content[0].Text != "Rainy" {
 		t.Errorf("message 2 mismatch: %+v", chat.Messages[2])
 	}
 
@@ -440,7 +485,9 @@ func TestRoundTrip_ResponsesAPI(t *testing.T) {
 	close(evtCh)
 
 	ctx := context.WithValue(context.Background(), engine.ChatRequestKey, chat)
-	chat.ProviderExtensions["_openai_variant"] = "responses"
+	if v, err := json.Marshal("responses"); err == nil {
+		chat.ProviderExtensions, _ = chat.ProviderExtensions.SetMember("_openai_variant", v)
+	}
 
 	var buf bytes.Buffer
 	if err := sa.SerializeStream(ctx, &buf, evtCh); err != nil {
@@ -612,8 +659,9 @@ func TestSerializeMalformedBlocksErrorChat(t *testing.T) {
 // protocol too — boundaries lower to no wire content and the deltas ride the
 // output_text.delta arm.
 func TestSerializeCanonicalBlocksResponses(t *testing.T) {
+	ext, _ := engine.ParseOptionalJSONObject([]byte(`{"_openai_variant":"responses"}`))
 	ctx := context.WithValue(context.Background(), engine.ChatRequestKey, &engine.ChatRequest{
-		ProviderExtensions: map[string]any{"_openai_variant": "responses"},
+		ProviderExtensions: ext,
 	})
 
 	for _, tc := range []struct {
@@ -674,8 +722,9 @@ func TestSerializeCanonicalBlocksResponses(t *testing.T) {
 // error on the Responses serializer — their semantics are genuinely
 // unavailable on this protocol.
 func TestSerializeProviderBlockErrorResponses(t *testing.T) {
+	ext, _ := engine.ParseOptionalJSONObject([]byte(`{"_openai_variant":"responses"}`))
 	ctx := context.WithValue(context.Background(), engine.ChatRequestKey, &engine.ChatRequest{
-		ProviderExtensions: map[string]any{"_openai_variant": "responses"},
+		ProviderExtensions: ext,
 	})
 	evCh := make(chan engine.StreamEvent, 1)
 	evCh <- engine.StreamEvent{BlockStart: &engine.BlockStart{

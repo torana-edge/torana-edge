@@ -12,6 +12,14 @@ import (
 
 // TestObserverJSONHooksDirect drives runJSONResponseHooks with the
 // test-observer fixture to isolate _response delivery from proxy transport.
+func mustMetaObj() engine.OptionalJSONObject {
+	r, err := engine.ParseOptionalJSONObject([]byte(`{}`))
+	if err != nil {
+		panic(err)
+	}
+	return r
+}
+
 func TestObserverJSONHooksDirect(t *testing.T) {
 	requireWASM(t, "../../examples/plugins/test-observer/plugin.wasm")
 
@@ -27,7 +35,7 @@ func TestObserverJSONHooksDirect(t *testing.T) {
 
 	rs := &reqState{ID: 1, UpstreamStatus: 200, UsageIn: 7, UsageOut: 3}
 	ctx := context.WithValue(context.Background(), reqStateKey{}, rs)
-	chat := &engine.ChatRequest{Model: "gpt-x", ToranaMeta: map[string]any{}}
+	chat := &engine.ChatRequest{Model: "gpt-x", ToranaMeta: mustMetaObj()}
 	body := []byte(`{"id":"x","model":"gpt-x","choices":[{"message":{"role":"assistant","content":"hi"}}],"usage":{"prompt_tokens":7,"completion_tokens":3}}`)
 
 	out, err := runJSONResponseHooks(ctx, pp, rs.ID, "openai", chat, body)

@@ -22,6 +22,18 @@ func mustReqArgs(t *testing.T, raw string) engine.RequiredJSONObject {
 	return r
 }
 
+func mustExtCA(m map[string]any) engine.OptionalJSONObject {
+	b, err := json.Marshal(m)
+	if err != nil {
+		panic(err)
+	}
+	r, err := engine.ParseOptionalJSONObject(b)
+	if err != nil {
+		panic(err)
+	}
+	return r
+}
+
 func TestCodeAssistRoundTrip(t *testing.T) {
 	raw, err := os.ReadFile("testdata/codeassist-request.json")
 	if err != nil {
@@ -33,7 +45,11 @@ func TestCodeAssistRoundTrip(t *testing.T) {
 		t.Fatalf("Unmarshal: %v", err)
 	}
 
-	if ca, _ := chat.ProviderExtensions[extCodeAssist].(bool); !ca {
+	var extMap map[string]json.RawMessage
+	json.Unmarshal(chat.ProviderExtensions.Bytes(), &extMap)
+	var ca bool
+	json.Unmarshal(extMap[extCodeAssist], &ca)
+	if !ca {
 		t.Fatal("expected Code Assist marker to be set")
 	}
 	if chat.Model != "gemini-3.5-flash-extra-low" {
@@ -41,18 +57,21 @@ func TestCodeAssistRoundTrip(t *testing.T) {
 	}
 
 	// Messages: system, user, assistant(tool call), tool(result), assistant(text).
-	var toolCall *engine.ToolCall
-	var toolResult *engine.Message
+	var toolCall *engine.ToolUseBlock
+	var toolResult *engine.ToolResultBlock
 	var textMsg *engine.Message
 	for i := range chat.Messages {
 		m := &chat.Messages[i]
-		if len(m.ToolCalls) > 0 {
-			toolCall = &m.ToolCalls[0]
+		for _, b := range m.Blocks {
+			if b.ToolUse != nil {
+				toolCall = b.ToolUse
+				break
+			}
 		}
-		if m.Role == engine.RoleTool {
-			toolResult = m
+		if rs := toolResults(*m); len(rs) > 0 {
+			toolResult = rs[0]
 		}
-		if m.Role == engine.RoleAssistant && m.Content != "" {
+		if m.Role == engine.RoleAssistant && textOf(*m) != "" {
 			textMsg = m
 		}
 	}
@@ -74,14 +93,22 @@ func TestCodeAssistRoundTrip(t *testing.T) {
 	if textMsg == nil {
 		t.Fatal("no assistant text message parsed")
 	}
-	if textMsg.Content != "The directory contains two files." {
-		t.Errorf("assistant text content = %q, want the fixture's text", textMsg.Content)
+	if textOf(*textMsg) != "The directory contains two files." {
+		t.Errorf("assistant text content = %q, want the fixture's text", textOf(*textMsg))
 	}
-	if textMsg.ContentSignature != "SIG_TEXT" {
-		t.Errorf("ContentSignature = %q, want SIG_TEXT (signature beside non-thought text)", textMsg.ContentSignature)
+	var sig string
+	for _, b := range textMsg.Blocks {
+		if b.Text != nil {
+			sig = b.Text.Signature
+		}
 	}
-	if textMsg.ThinkingSignature != "" {
-		t.Errorf("ThinkingSignature = %q, want empty — text-part signature must not use the thinking slot", textMsg.ThinkingSignature)
+	if sig != "SIG_TEXT" {
+		t.Errorf("text signature = %q, want SIG_TEXT (signature beside non-thought text)", sig)
+	}
+	for _, b := range textMsg.Blocks {
+		if b.Thinking != nil && b.Thinking.Signature != "" {
+			t.Errorf("thinking signature = %q, want empty — text-part signature must not use the thinking slot", b.Thinking.Signature)
+		}
 	}
 
 	out, err := a.Marshal(chat)
@@ -261,24 +288,28 @@ func TestCodeAssistToolResultUnwrapsForCompaction(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var tr *engine.Message
+	var tr *engine.ToolResultBlock
 	for i := range chat.Messages {
-		if chat.Messages[i].Role == engine.RoleTool {
-			tr = &chat.Messages[i]
+		if rs := toolResults(chat.Messages[i]); len(rs) > 0 {
+			tr = rs[0]
 		}
 	}
 	if tr == nil {
 		t.Fatal("no tool result")
 	}
-	if tr.Content != "line1\nline2\nline3" {
-		t.Errorf("tool result not unwrapped to raw text: %q", tr.Content)
+	var text string
+	for _, c := range tr.Content {
+		text += c.Text
 	}
-	if strings.Count(tr.Content, "\n") != 2 {
-		t.Errorf("newlines not preserved for line-splitting: %q", tr.Content)
+	if text != "line1\nline2\nline3" {
+		t.Errorf("tool result not unwrapped to raw text: %q", text)
+	}
+	if strings.Count(text, "\n") != 2 {
+		t.Errorf("newlines not preserved for line-splitting: %q", text)
 	}
 
 	// Simulate a compactor rewriting the content, then re-marshal.
-	tr.Content = "line2"
+	tr.Content = []engine.ToolResultContentBlock{{Text: "line2"}}
 	out, err := a.Marshal(chat)
 	if err != nil {
 		t.Fatal(err)
@@ -298,16 +329,16 @@ func TestCodeAssistToolResultUnwrapsForCompaction(t *testing.T) {
 // Splitting them makes the server 400 with "missing thought_signature".
 func TestCodeAssistParallelCallsShareOneBlock(t *testing.T) {
 	chat := &engine.ChatRequest{
-		ProviderExtensions: map[string]any{
+		ProviderExtensions: mustExtCA(map[string]any{
 			extCodeAssist:   true,
 			extWrapper:      map[string]any{"model": "gemini-3.5-flash"},
 			extRequestExtra: map[string]any{},
-		},
+		}),
 		Messages: []engine.Message{
-			{Role: engine.RoleUser, Content: "do two things"},
-			{Role: engine.RoleAssistant, ToolCalls: []engine.ToolCall{
-				{ID: "a1", Name: "list_dir", Arguments: mustReqArgs(t, `{"p": "/x"}`), Signature: "SIG_FIRST"},
-				{ID: "a2", Name: "read_file", Arguments: mustReqArgs(t, `{"f": "y"}`)}, // no signature
+			{Role: engine.RoleUser, Blocks: []engine.Block{{Text: &engine.TextBlock{Text: "do two things"}}}},
+			{Role: engine.RoleAssistant, Blocks: []engine.Block{
+				{ToolUse: &engine.ToolUseBlock{ID: "a1", Name: "list_dir", Arguments: mustReqArgs(t, `{"p": "/x"}`), Signature: "SIG_FIRST"}},
+				{ToolUse: &engine.ToolUseBlock{ID: "a2", Name: "read_file", Arguments: mustReqArgs(t, `{"f": "y"}`)}}, // no signature
 			}},
 		},
 	}
@@ -476,14 +507,22 @@ func TestCodeAssistTrailingSignatureRoundTrip(t *testing.T) {
 	if msg.Role != engine.RoleAssistant {
 		t.Errorf("role = %q, want assistant", msg.Role)
 	}
-	if msg.Content != "answer" {
-		t.Errorf("content = %q, want the preceding text", msg.Content)
+	if textOf(msg) != "answer" {
+		t.Errorf("content = %q, want the preceding text", textOf(msg))
 	}
-	if msg.TrailingSignature != "SIG" {
-		t.Errorf("TrailingSignature = %q, want SIG", msg.TrailingSignature)
+	var trail string
+	for _, b := range msg.Blocks {
+		if b.TrailingSignature != nil {
+			trail = b.TrailingSignature.Signature
+		}
 	}
-	if msg.ThinkingSignature != "" {
-		t.Errorf("ThinkingSignature = %q, want empty — trailing signature must not merge into the current block", msg.ThinkingSignature)
+	if trail != "SIG" {
+		t.Errorf("TrailingSignature = %q, want SIG", trail)
+	}
+	for _, b := range msg.Blocks {
+		if b.Thinking != nil && b.Thinking.Signature != "" {
+			t.Errorf("thinking signature = %q, want empty — trailing signature must not merge into the current block", b.Thinking.Signature)
+		}
 	}
 
 	out, err := (&Adapter{}).Marshal(chat)
@@ -524,17 +563,33 @@ func TestCodeAssistTrailingSignatureRoundTripWithThinking(t *testing.T) {
 		t.Fatalf("messages = %d, want 1", len(chat.Messages))
 	}
 	msg := chat.Messages[0]
-	if msg.Thinking != "think" {
-		t.Errorf("Thinking = %q, want the thought part's text", msg.Thinking)
+	var thinking, thinkSig, text string
+	for _, b := range msg.Blocks {
+		switch {
+		case b.Thinking != nil:
+			thinking = b.Thinking.Text
+			thinkSig = b.Thinking.Signature
+		case b.Text != nil:
+			text = b.Text.Text
+		}
 	}
-	if msg.ThinkingSignature != "SIG_A" {
-		t.Errorf("ThinkingSignature = %q, want SIG_A (current block)", msg.ThinkingSignature)
+	if thinking != "think" {
+		t.Errorf("thinking = %q, want the thought part's text", thinking)
 	}
-	if msg.Content != "answer" {
-		t.Errorf("content = %q, want ONLY the text part — thinking must not leak into Content", msg.Content)
+	if thinkSig != "SIG_A" {
+		t.Errorf("ThinkingSignature = %q, want SIG_A (current block)", thinkSig)
 	}
-	if msg.TrailingSignature != "SIG_B" {
-		t.Errorf("TrailingSignature = %q, want SIG_B (trailing standalone)", msg.TrailingSignature)
+	if text != "answer" {
+		t.Errorf("content = %q, want ONLY the text part — thinking must not leak into Content", text)
+	}
+	var trail string
+	for _, b := range msg.Blocks {
+		if b.TrailingSignature != nil {
+			trail = b.TrailingSignature.Signature
+		}
+	}
+	if trail != "SIG_B" {
+		t.Errorf("TrailingSignature = %q, want SIG_B (trailing standalone)", trail)
 	}
 
 	out, err := (&Adapter{}).Marshal(chat)
@@ -571,9 +626,8 @@ func TestCodeAssistTrailingSignatureRoundTripWithThinking(t *testing.T) {
 		t.Fatalf("re-unmarshal messages = %d, want 1", len(again.Messages))
 	}
 	re := again.Messages[0]
-	if re.Content != msg.Content || re.Thinking != msg.Thinking || re.ThinkingSignature != msg.ThinkingSignature || re.TrailingSignature != msg.TrailingSignature {
-		t.Errorf("round trip not stable: got {%q, %q, %q, %q}, want {%q, %q, %q, %q}",
-			re.Content, re.Thinking, re.ThinkingSignature, re.TrailingSignature, msg.Content, msg.Thinking, msg.ThinkingSignature, msg.TrailingSignature)
+	if textOf(re) != textOf(msg) || reBlocks(re) != reBlocks(msg) {
+		t.Errorf("round trip not stable: %s vs %s", reBlocks(re), reBlocks(msg))
 	}
 }
 
@@ -581,6 +635,25 @@ func TestCodeAssistTrailingSignatureRoundTripWithThinking(t *testing.T) {
 // part with NO preceding text/thinking in the same content is malformed — it
 // would bind nothing (the scope covers only preceding closed content) — so
 // Unmarshal rejects it instead of guessing at a binding.
+func reBlocks(m engine.Message) string {
+	var out []string
+	for _, b := range m.Blocks {
+		switch {
+		case b.Text != nil:
+			out = append(out, "text:"+b.Text.Text+":"+b.Text.Signature)
+		case b.Thinking != nil:
+			out = append(out, "think:"+b.Thinking.Text+":"+b.Thinking.Signature)
+		case b.TrailingSignature != nil:
+			out = append(out, "trail:"+b.TrailingSignature.Signature)
+		case b.ToolUse != nil:
+			out = append(out, "call:"+b.ToolUse.ID)
+		case b.ToolResult != nil:
+			out = append(out, "result:"+b.ToolResult.ToolCallID)
+		}
+	}
+	return strings.Join(out, "|")
+}
+
 func TestCodeAssistTrailingSignatureRejectedLeadingStandalone(t *testing.T) {
 	body := `{"contents":[{"role":"model","parts":[
 		{"thoughtSignature":"SIG_LEAD","text":""},
@@ -659,12 +732,13 @@ func TestCodeAssistTrailingSignatureRejectedDuplicate(t *testing.T) {
 	}
 }
 
-// TestCodeAssistRejectedMultipleTextPartsWithSignature: two text parts plus
-// any signature in the content are unrepresentable — merging the parts into
-// one Content string would replay the signature over text the provider did
-// not sign (Google contract: a signature lives on its original Part). This
-// covers both a signature on one text part and a trailing standalone part.
-func TestCodeAssistRejectedMultipleTextPartsWithSignature(t *testing.T) {
+// TestCodeAssistMultipleTextPartsWithSignature: per-block signatures are
+// first-class in the ordered body — a signature lives on ITS text part, so
+// multiple text parts with a signature on one of them round-trip exactly
+// (the ordered ABI replaced the single flat Content slot these cases were
+// rejected under). A trailing standalone after several text parts binds the
+// whole preceding covered content.
+func TestCodeAssistMultipleTextPartsWithSignature(t *testing.T) {
 	for name, body := range map[string]string{
 		"sig on text part": `{"contents":[{"role":"model","parts":[
 			{"text":"a","thoughtSignature":"S"},
@@ -677,37 +751,55 @@ func TestCodeAssistRejectedMultipleTextPartsWithSignature(t *testing.T) {
 		]}]}`,
 	} {
 		t.Run(name, func(t *testing.T) {
-			_, err := (&Adapter{}).Unmarshal([]byte(body))
-			if err == nil {
-				t.Fatal("Unmarshal succeeded, want parse error")
+			chat, err := (&Adapter{}).Unmarshal([]byte(body))
+			if err != nil {
+				t.Fatalf("Unmarshal: %v", err)
 			}
-			if !strings.Contains(err.Error(), "gemini: multiple text parts with a signature are not representable") {
-				t.Errorf("error = %q, want the multi-text-with-signature condition named", err.Error())
+			out, err := (&Adapter{}).Marshal(chat)
+			if err != nil {
+				t.Fatalf("Marshal: %v", err)
+			}
+			again, err := (&Adapter{}).Unmarshal(out)
+			if err != nil {
+				t.Fatalf("re-Unmarshal: %v", err)
+			}
+			if len(again.Messages) != 1 || reBlocks(again.Messages[0]) != reBlocks(chat.Messages[0]) {
+				t.Fatalf("round trip not stable: %s", out)
 			}
 		})
 	}
 }
 
-// TestCodeAssistRejectedMultipleThinkingPartsWithSignature: two thinking parts
-// plus any signature in the content are unrepresentable — the same class of
-// error as the multi-text case, for the merged Thinking string.
-func TestCodeAssistRejectedMultipleThinkingPartsWithSignature(t *testing.T) {
+// TestCodeAssistMultipleThinkingPartsWithSignature: per-block signatures make
+// two signed thinking parts representable — each Thinking block keeps its own
+// current-block token and the parts round-trip in order.
+func TestCodeAssistMultipleThinkingPartsWithSignature(t *testing.T) {
 	body := `{"contents":[{"role":"model","parts":[
 		{"thought":true,"text":"a","thoughtSignature":"S"},
 		{"thought":true,"text":"b"}
 	]}]}`
-	_, err := (&Adapter{}).Unmarshal([]byte(body))
-	if err == nil {
-		t.Fatal("Unmarshal succeeded, want parse error")
+	chat, err := (&Adapter{}).Unmarshal([]byte(body))
+	if err != nil {
+		t.Fatalf("Unmarshal: %v", err)
 	}
-	if !strings.Contains(err.Error(), "gemini: multiple thinking parts with a signature are not representable") {
-		t.Errorf("error = %q, want the multi-thinking-with-signature condition named", err.Error())
+	out, err := (&Adapter{}).Marshal(chat)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	again, err := (&Adapter{}).Unmarshal(out)
+	if err != nil {
+		t.Fatalf("re-Unmarshal: %v", err)
+	}
+	if len(again.Messages) != 1 || reBlocks(again.Messages[0]) != reBlocks(chat.Messages[0]) {
+		t.Fatalf("round trip not stable: %s", out)
 	}
 }
 
-// TestCodeAssistUnsignedTextPartsMerge: multiple text parts with NO signature
-// anywhere still merge into Content — the existing unsigned-merge contract.
-func TestCodeAssistUnsignedTextPartsMerge(t *testing.T) {
+// TestCodeAssistUnsignedTextParts: multiple unsigned text parts stay
+// SEPARATE ordered blocks — the ordered body IS the wire order, and merging
+// would invent a part boundary the provider never sent. The marshal re-emits
+// one part per block, byte-stable.
+func TestCodeAssistUnsignedTextParts(t *testing.T) {
 	body := `{"contents":[{"role":"model","parts":[
 		{"text":"a"},
 		{"text":"b"}
@@ -716,11 +808,13 @@ func TestCodeAssistUnsignedTextPartsMerge(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Unmarshal: %v", err)
 	}
-	if len(chat.Messages) != 1 || chat.Messages[0].Content != "a\nb" {
-		t.Fatalf("unsigned text parts must merge into one Content: %+v", chat.Messages)
+	if len(chat.Messages) != 1 || len(chat.Messages[0].Blocks) != 2 {
+		t.Fatalf("unsigned text parts must keep their part boundaries: %+v", chat.Messages)
 	}
-	if chat.Messages[0].ThinkingSignature != "" || chat.Messages[0].TrailingSignature != "" {
-		t.Errorf("unsigned merge must not fabricate signatures: %+v", chat.Messages[0])
+	for _, b := range chat.Messages[0].Blocks {
+		if (b.Text != nil && b.Text.Signature != "") || b.TrailingSignature != nil {
+			t.Errorf("unsigned parts must not fabricate signatures: %+v", chat.Messages[0])
+		}
 	}
 
 	out, err := (&Adapter{}).Marshal(chat)
@@ -728,11 +822,13 @@ func TestCodeAssistUnsignedTextPartsMerge(t *testing.T) {
 		t.Fatalf("Marshal: %v", err)
 	}
 	parts := rawModelParts(t, out)
-	if len(parts) != 1 {
-		t.Fatalf("parts = %d, want the single merged text part", len(parts))
+	if len(parts) != 2 {
+		t.Fatalf("parts = %d, want the two original text parts", len(parts))
 	}
-	rawText(t, parts[0], "a\nb")
+	rawText(t, parts[0], "a")
+	rawText(t, parts[1], "b")
 	rawAbsent(t, parts[0], "thoughtSignature")
+	rawAbsent(t, parts[1], "thoughtSignature")
 }
 
 // TestCodeAssistRejectedMixedTextThinkingWithToolCall: a role:"model" content
@@ -770,6 +866,42 @@ func TestCodeAssistRejectedMixedTextThinkingWithToolCall(t *testing.T) {
 // the merged Content — NOT ThinkingSignature, whose SDK binding covers only
 // thinking/redacted_thinking blocks) and re-marshals to the exact same single
 // part with the signature beside the text.
+func textSigOf(m engine.Message) string {
+	for _, b := range m.Blocks {
+		if b.Text != nil {
+			return b.Text.Signature
+		}
+	}
+	return ""
+}
+
+func thinkOf(m engine.Message) string {
+	for _, b := range m.Blocks {
+		if b.Thinking != nil {
+			return b.Thinking.Text
+		}
+	}
+	return ""
+}
+
+func thinkSigOf(m engine.Message) string {
+	for _, b := range m.Blocks {
+		if b.Thinking != nil {
+			return b.Thinking.Signature
+		}
+	}
+	return ""
+}
+
+func trailOf(m engine.Message) string {
+	for _, b := range m.Blocks {
+		if b.TrailingSignature != nil {
+			return b.TrailingSignature.Signature
+		}
+	}
+	return ""
+}
+
 func TestCodeAssistContentSignatureRoundTrip(t *testing.T) {
 	body := `{"contents":[{"role":"model","parts":[
 		{"text":"answer","thoughtSignature":"SIG"}
@@ -782,17 +914,28 @@ func TestCodeAssistContentSignatureRoundTrip(t *testing.T) {
 		t.Fatalf("messages = %d, want 1", len(chat.Messages))
 	}
 	msg := chat.Messages[0]
-	if msg.Content != "answer" {
-		t.Errorf("Content = %q, want the text part's text", msg.Content)
+	if textOf(msg) != "answer" {
+		t.Errorf("Content = %q, want the text part's text", textOf(msg))
 	}
-	if msg.ContentSignature != "SIG" {
-		t.Errorf("ContentSignature = %q, want SIG (SameMessage scope over content)", msg.ContentSignature)
+	var textSig, thinkSig, trailSig string
+	for _, b := range msg.Blocks {
+		switch {
+		case b.Text != nil:
+			textSig = b.Text.Signature
+		case b.Thinking != nil:
+			thinkSig = b.Thinking.Signature
+		case b.TrailingSignature != nil:
+			trailSig = b.TrailingSignature.Signature
+		}
 	}
-	if msg.ThinkingSignature != "" {
-		t.Errorf("ThinkingSignature = %q, want empty — text-part signature must not use the thinking slot", msg.ThinkingSignature)
+	if textSig != "SIG" {
+		t.Errorf("ContentSignature = %q, want SIG (SameMessage scope over content)", textSig)
 	}
-	if msg.TrailingSignature != "" {
-		t.Errorf("TrailingSignature = %q, want empty — not a standalone part", msg.TrailingSignature)
+	if thinkSig != "" {
+		t.Errorf("ThinkingSignature = %q, want empty — text-part signature must not use the thinking slot", thinkSig)
+	}
+	if trailSig != "" {
+		t.Errorf("TrailingSignature = %q, want empty — not a standalone part", trailSig)
 	}
 
 	out, err := (&Adapter{}).Marshal(chat)
@@ -830,14 +973,26 @@ func TestCodeAssistContentSignatureCombinedShape(t *testing.T) {
 		t.Fatalf("messages = %d, want 1", len(chat.Messages))
 	}
 	msg := chat.Messages[0]
-	if msg.Thinking != "think" || msg.ThinkingSignature != "A" {
-		t.Errorf("Thinking/ThinkingSignature = {%q, %q}, want {think, A}", msg.Thinking, msg.ThinkingSignature)
+	var think, thinkSig, textSig, trailSig string
+	for _, b := range msg.Blocks {
+		switch {
+		case b.Thinking != nil:
+			think = b.Thinking.Text
+			thinkSig = b.Thinking.Signature
+		case b.Text != nil:
+			textSig = b.Text.Signature
+		case b.TrailingSignature != nil:
+			trailSig = b.TrailingSignature.Signature
+		}
 	}
-	if msg.Content != "answer" || msg.ContentSignature != "B" {
-		t.Errorf("Content/ContentSignature = {%q, %q}, want {answer, B}", msg.Content, msg.ContentSignature)
+	if think != "think" || thinkSig != "A" {
+		t.Errorf("Thinking/ThinkingSignature = {%q, %q}, want {think, A}", think, thinkSig)
 	}
-	if msg.TrailingSignature != "C" {
-		t.Errorf("TrailingSignature = %q, want C", msg.TrailingSignature)
+	if textOf(msg) != "answer" || textSig != "B" {
+		t.Errorf("Content/ContentSignature = {%q, %q}, want {answer, B}", textOf(msg), textSig)
+	}
+	if trailSig != "C" {
+		t.Errorf("TrailingSignature = %q, want C", trailSig)
 	}
 
 	out, err := (&Adapter{}).Marshal(chat)
@@ -876,10 +1031,8 @@ func TestCodeAssistContentSignatureCombinedShape(t *testing.T) {
 		t.Fatalf("re-unmarshal messages = %d, want 1", len(again.Messages))
 	}
 	re := again.Messages[0]
-	if re.Content != msg.Content || re.ContentSignature != msg.ContentSignature || re.Thinking != msg.Thinking || re.ThinkingSignature != msg.ThinkingSignature || re.TrailingSignature != msg.TrailingSignature {
-		t.Errorf("round trip not stable: got {%q,%q,%q,%q,%q}, want {%q,%q,%q,%q,%q}",
-			re.Content, re.ContentSignature, re.Thinking, re.ThinkingSignature, re.TrailingSignature,
-			msg.Content, msg.ContentSignature, msg.Thinking, msg.ThinkingSignature, msg.TrailingSignature)
+	if reBlocks(re) != reBlocks(msg) {
+		t.Errorf("round trip not stable: %s vs %s", reBlocks(re), reBlocks(msg))
 	}
 }
 
@@ -924,8 +1077,8 @@ func TestCodeAssistThinkingOnlyNoInventedTextPart(t *testing.T) {
 		t.Fatalf("messages = %d, want 1", len(chat.Messages))
 	}
 	msg := chat.Messages[0]
-	if msg.Thinking != "r" || msg.ThinkingSignature != "S" || msg.Content != "" || msg.ContentSignature != "" {
-		t.Errorf("got {%q,%q,%q,%q}, want {r,S,<empty>,<empty>}", msg.Thinking, msg.ThinkingSignature, msg.Content, msg.ContentSignature)
+	if thinkOf(msg) != "r" || thinkSigOf(msg) != "S" || textOf(msg) != "" || textSigOf(msg) != "" {
+		t.Errorf("got {%q,%q,%q,%q}, want {r,S,<empty>,<empty>}", thinkOf(msg), thinkSigOf(msg), textOf(msg), textSigOf(msg))
 	}
 
 	out, err := (&Adapter{}).Marshal(chat)
@@ -962,8 +1115,8 @@ func TestCodeAssistThinkingTrailingNoContent(t *testing.T) {
 		t.Fatalf("messages = %d, want 1", len(chat.Messages))
 	}
 	msg := chat.Messages[0]
-	if msg.Thinking != "r" || msg.ThinkingSignature != "" || msg.Content != "" || msg.TrailingSignature != "S" {
-		t.Errorf("got {%q,%q,%q,%q}, want {r,<empty>,<empty>,S}", msg.Thinking, msg.ThinkingSignature, msg.Content, msg.TrailingSignature)
+	if thinkOf(msg) != "r" || thinkSigOf(msg) != "" || textOf(msg) != "" || trailOf(msg) != "S" {
+		t.Errorf("got {%q,%q,%q,%q}, want {r,<empty>,<empty>,S}", thinkOf(msg), thinkSigOf(msg), textOf(msg), trailOf(msg))
 	}
 
 	out, err := (&Adapter{}).Marshal(chat)

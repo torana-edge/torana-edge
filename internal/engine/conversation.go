@@ -6,6 +6,9 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"hash"
+
+	plugin_sdk "github.com/torana-edge/torana-plugin-sdk"
+	pb "github.com/torana-edge/torana-plugin-sdk/pb/v2"
 )
 
 // Conversation and cache-prefix identity.
@@ -136,44 +139,85 @@ func CachePrefixKey(c *ChatRequest) string {
 		// Raw authoritative bytes, framed: lexemes (1e999, key order)
 		// are part of the cache identity, never canonicalized away.
 		writeHashFieldBytes(h, t.Parameters.Bytes())
-		writeHashField(h, canonicalJSON(t.CacheControl))
+		writeHashFieldBytes(h, t.CacheControl.Bytes())
 	}
+
+	// Host-only envelope layer — deliberately DISTINCT from the SDK body
+	// fingerprint below: provider extensions and safety settings are
+	// top-level provider-visible prefix state the plugins never reproduce.
+	writeHashFieldBytes(h, c.ProviderExtensions.Bytes())
+	writeHashFieldBytes(h, c.SafetySettings.Bytes())
 
 	for _, m := range c.Messages[:cachedMessageCount(c)] {
 		writeHashField(h, "msg")
-		writeHashField(h, string(m.Role))
-		writeHashField(h, m.Content)
-		writeHashField(h, canonicalJSON(m.ContentParts))
-		writeHashField(h, m.Thinking)
-		writeHashField(h, m.ThinkingSignature)
-		// The replayed provider prefix carries the content-bound and trailing
-		// standalone signatures exactly like the thinking signature: two
-		// requests differing only in one of these tokens must not share a
-		// cache key (warming would target a different Gemini prefix than the
-		// one actually sent). Tagged and conditional so unsigned requests keep
-		// their existing keys.
-		if m.ContentSignature != "" {
-			writeHashField(h, "content-signature")
-			writeHashField(h, m.ContentSignature)
-		}
-		if m.TrailingSignature != "" {
-			writeHashField(h, "trailing-signature")
-			writeHashField(h, m.TrailingSignature)
-		}
-		writeHashField(h, m.RedactedThinking)
-		writeHashField(h, m.ToolCallID)
-		writeHashField(h, m.ToolName)
-		writeHashField(h, canonicalJSON(m.CacheControl))
-		for _, tc := range m.ToolCalls {
-			writeHashField(h, "call")
-			writeHashField(h, tc.ID)
-			writeHashField(h, tc.Name)
-			// Raw authoritative bytes, framed (see tools above).
-			writeHashFieldBytes(h, tc.Arguments.Bytes())
-			writeHashField(h, tc.Signature)
-		}
+		// The canonical body fingerprint: the SDK's shared implementation
+		// (role + ordered blocks: kind, presence, order, identities, exact
+		// raw bytes, signatures, nested tool-result content, cache
+		// positions — typed length framing). The cache-tier stickiness
+		// mirror uses the same implementation; Edge never re-implements
+		// block semantics.
+		writeHashField(h, plugin_sdk.RequestBlocksFingerprint(MessageToPB(&m)))
 	}
 	return shortHex(h)
+}
+
+// MessageToPB projects a message to its pb/v2 form for the SHARED SDK
+// fingerprint. The pbconv converter is the request-path source of truth;
+// the differential matrix (TestMessageToPBDifferential in pbconv) pins
+// byte equality between this projection and pbconv's per-message output so
+// the two can never drift.
+func MessageToPB(m *Message) *pb.Message {
+	out := &pb.Message{Role: string(m.Role)}
+	for _, b := range m.Blocks {
+		rb := &pb.RequestBlock{}
+		switch {
+		case b.Text != nil:
+			rb.Kind = &pb.RequestBlock_Text{Text: &pb.RequestTextBlock{Text: b.Text.Text, Signature: b.Text.Signature}}
+		case b.Thinking != nil:
+			rb.Kind = &pb.RequestBlock_Thinking{Thinking: &pb.RequestThinkingBlock{Text: b.Thinking.Text, Signature: b.Thinking.Signature}}
+		case b.RedactedThinking != nil:
+			rb.Kind = &pb.RequestBlock_RedactedThinking{RedactedThinking: &pb.RequestRedactedThinkingBlock{Data: b.RedactedThinking.Data}}
+		case b.ToolUse != nil:
+			rb.Kind = &pb.RequestBlock_ToolUse{ToolUse: &pb.RequestToolUseBlock{
+				Id: b.ToolUse.ID, Name: b.ToolUse.Name,
+				ArgumentsJson: b.ToolUse.Arguments.Bytes(),
+				Signature:     b.ToolUse.Signature,
+			}}
+		case b.ToolResult != nil:
+			tr := &pb.RequestToolResultBlock{ToolCallId: b.ToolResult.ToolCallID, ToolName: b.ToolResult.ToolName}
+			for _, c := range b.ToolResult.Content {
+				tcb := &pb.ToolResultContentBlock{}
+				switch {
+				case c.Unknown != nil:
+					tcb.Kind = &pb.ToolResultContentBlock_Unknown{Unknown: &pb.ToolResultUnknownBlock{
+						Kind: c.Unknown.Kind, PayloadJson: c.Unknown.Payload.Bytes(),
+					}}
+				case c.CacheBreakpoint != nil:
+					tcb.Kind = &pb.ToolResultContentBlock_CacheBreakpoint{CacheBreakpoint: &pb.ToolResultCacheBreakpoint{
+						MarkerJson: c.CacheBreakpoint.Marker.Bytes(),
+					}}
+				default:
+					tcb.Kind = &pb.ToolResultContentBlock_Text{Text: &pb.ToolResultTextBlock{Text: c.Text}}
+				}
+				tr.Content = append(tr.Content, tcb)
+			}
+			rb.Kind = &pb.RequestBlock_ToolResult{ToolResult: tr}
+		case b.CacheBreakpoint != nil:
+			rb.Kind = &pb.RequestBlock_CacheBreakpoint{CacheBreakpoint: &pb.RequestCacheBreakpoint{
+				MarkerJson: b.CacheBreakpoint.Marker.Bytes(),
+			}}
+		case b.Unknown != nil:
+			rb.Kind = &pb.RequestBlock_Unknown{Unknown: &pb.RequestUnknownBlock{
+				Kind: b.Unknown.Kind, PayloadJson: b.Unknown.Payload.Bytes(),
+			}}
+		case b.TrailingSignature != nil:
+			rb.Kind = &pb.RequestBlock_TrailingSignature{TrailingSignature: &pb.RequestTrailingSignatureBlock{
+				Signature: b.TrailingSignature.Signature,
+			}}
+		}
+		out.Blocks = append(out.Blocks, rb)
+	}
+	return out
 }
 
 // cachedMessageCount returns how many leading messages fall inside the cached
@@ -182,8 +226,11 @@ func CachePrefixKey(c *ChatRequest) string {
 func cachedMessageCount(c *ChatRequest) int {
 	last := -1
 	for i, m := range c.Messages {
-		if len(m.CacheControl) > 0 {
-			last = i
+		for _, b := range m.Blocks {
+			if b.CacheBreakpoint != nil {
+				last = i
+				break
+			}
 		}
 	}
 	if last < 0 {
@@ -195,13 +242,9 @@ func cachedMessageCount(c *ChatRequest) int {
 // messageText reduces a message to the bytes worth hashing for the conversation
 // label. Multimodal content goes through JSON.
 func messageText(m Message) string {
-	if m.Content != "" {
-		return m.Content
-	}
-	if len(m.ContentParts) > 0 {
-		return canonicalJSON(m.ContentParts)
-	}
-	return ""
+	// The text projection in wire order; non-text blocks contribute nothing
+	// to the conversation label's textual fingerprint.
+	return m.Text()
 }
 
 // canonicalJSON renders a value deterministically. encoding/json emits object

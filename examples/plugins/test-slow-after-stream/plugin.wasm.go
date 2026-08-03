@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 
+	"github.com/torana-edge/torana-edge/examples/plugins/blockutil"
 	sdk "github.com/torana-edge/torana-plugin-sdk"
 	pb "github.com/torana-edge/torana-plugin-sdk/pb/v2"
 )
@@ -23,7 +24,7 @@ func main() {}
 func init() {
 	sdk.OnAfterResponse(func(ctx context.Context, resp *pb.ChatResponse, mutable bool) (sdk.ResponseResult, error) {
 		_, _ = sdk.SendRequest(
-			&pb.ChatRequest{Model: "gpt-x", Messages: []*pb.Message{{Role: "user", Content: "hi"}}},
+			&pb.ChatRequest{Model: "gpt-x", Messages: []*pb.Message{{Role: "user", Blocks: blockutil.TextBlocks("hi")}}},
 			sdk.SendRequestOptions{Provider: "latch", Path: "/release"},
 		)
 		return sdk.PassResponse(), nil
