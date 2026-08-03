@@ -163,13 +163,27 @@ func CachePrefixKey(pbReq *pb.ChatRequest) string {
 	writeHashFieldBytes(h, pbReq.ProviderExtensionsJson)
 	writeHashFieldBytes(h, pbReq.SafetySettingsJson)
 
+	// The SDK fingerprint is ERROR-RETURNING; every error is a fail-closed
+	// EMPTY KEY — an unrepresentable body must never hash a partial prefix.
+	fp := func(m *pb.Message) (string, bool) {
+		s, err := plugin_sdk.RequestBlocksFingerprint(m)
+		if err != nil {
+			return "", false
+		}
+		return s, true
+	}
+
 	if last == nil {
 		// No marker: automatic prefix caching — the whole request is the
 		// prefix (the key moves every turn; an honest reflection of a cache
 		// the caller does not control).
 		for _, m := range pbReq.Messages {
+			f, ok := fp(m)
+			if !ok {
+				return ""
+			}
 			writeHashField(h, "msg")
-			writeHashField(h, plugin_sdk.RequestBlocksFingerprint(m))
+			writeHashField(h, f)
 		}
 		return shortHex(h)
 	}
@@ -182,19 +196,27 @@ func CachePrefixKey(pbReq *pb.ChatRequest) string {
 			break
 		}
 		if i < last.msg {
-			writeHashField(h, "msg")
 			// The canonical body fingerprint: the SDK's shared implementation
 			// (role + ordered blocks: kind, presence, order, identities,
 			// exact raw bytes, signatures, nested tool-result content, cache
 			// positions — typed length framing). The cache-tier stickiness
 			// mirror uses the same implementation; Edge never re-implements
 			// block semantics.
-			writeHashField(h, plugin_sdk.RequestBlocksFingerprint(m))
+			f, ok := fp(m)
+			if !ok {
+				return ""
+			}
+			writeHashField(h, "msg")
+			writeHashField(h, f)
 			continue
 		}
 		trunc := truncatePBMessage(m, last.block, last.nested)
+		f, ok := fp(trunc)
+		if !ok {
+			return ""
+		}
 		writeHashField(h, "msg")
-		writeHashField(h, plugin_sdk.RequestBlocksFingerprint(trunc))
+		writeHashField(h, f)
 	}
 	return shortHex(h)
 }

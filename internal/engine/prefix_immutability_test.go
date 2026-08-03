@@ -123,10 +123,24 @@ func referencePrefixKey(c *pb.ChatRequest) string {
 	frameBytes(c.ProviderExtensionsJson)
 	frameBytes(c.SafetySettingsJson)
 
+	// The reference model mirrors production fail-closed semantics: an
+	// SDK fingerprint error makes the whole key empty.
+	fp := func(m *pb.Message) (string, bool) {
+		s, err := plugin_sdk.RequestBlocksFingerprint(m)
+		if err != nil {
+			return "", false
+		}
+		return s, true
+	}
+
 	if last == nil {
 		for _, m := range c.Messages {
+			f, ok := fp(m)
+			if !ok {
+				return ""
+			}
 			frameStr("msg")
-			frameStr(plugin_sdk.RequestBlocksFingerprint(m))
+			frameStr(f)
 		}
 	} else if last.kind != markerCarrierTool {
 		for i, m := range c.Messages {
@@ -134,8 +148,12 @@ func referencePrefixKey(c *pb.ChatRequest) string {
 				break
 			}
 			if i < last.msg {
+				f, ok := fp(m)
+				if !ok {
+					return ""
+				}
 				frameStr("msg")
-				frameStr(plugin_sdk.RequestBlocksFingerprint(m))
+				frameStr(f)
 				continue
 			}
 			// Independent truncation: rebuild the message from scratch.
@@ -153,8 +171,12 @@ func referencePrefixKey(c *pb.ChatRequest) string {
 				}
 				trunc.Blocks = append(trunc.Blocks, b)
 			}
+			f, ok := fp(trunc)
+			if !ok {
+				return ""
+			}
 			frameStr("msg")
-			frameStr(plugin_sdk.RequestBlocksFingerprint(trunc))
+			frameStr(f)
 		}
 	}
 	return hex.EncodeToString(h.Sum(nil)[:keyBytes])

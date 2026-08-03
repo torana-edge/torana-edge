@@ -133,7 +133,15 @@ func fingerprintMessage(m *pb.Message) [32]byte {
 	body := bodyWithoutCacheBlocks(m)
 	h := sha256.New()
 	writeField(h, 1, m.Role != "", []byte(m.Role))
-	writeFramed(h, []byte(plugin_sdk.RequestBlocksFingerprint(body)))
+	// The SDK fingerprint is ERROR-RETURNING: a verification failure
+	// (unrepresentable body) must FAIL CLOSED — the zero digest can never
+	// match a genuine grant digest, so the grant check errors on the
+	// caller side instead of silently hashing a partial body.
+	s, err := plugin_sdk.RequestBlocksFingerprint(body)
+	if err != nil {
+		return [32]byte{}
+	}
+	writeFramed(h, []byte(s))
 	var sum [32]byte
 	copy(sum[:], h.Sum(nil))
 	return sum
@@ -552,7 +560,7 @@ var requestSignatureFields = func() []requestSignatureField {
 				b.SignatureField, b.Message))
 		}
 		scope := outboundpolicy.SignatureScopeSameMessage
-		var sameRefs []protoreflect.FieldDescriptor
+		var sameRefs []resolvedRef
 		var trailRefs []trailSignatureRef
 		for _, ref := range b.Content {
 			if ref.Scope != outboundpolicy.SignatureScopeSameMessage {
@@ -574,12 +582,13 @@ var requestSignatureFields = func() []requestSignatureField {
 				continue
 			}
 			fd := fields.ByName(protoreflect.Name(ref.Field))
-			if fd == nil || (fd.Kind() != protoreflect.StringKind && fd.Kind() != protoreflect.BytesKind) {
+			kind, ok := classifyCoveredRef(fd, ref)
+			if !ok {
 				panic(fmt.Sprintf(
-					"writegrant: request signature binding %q covers unknown or non-string %s field",
-					b.SignatureField, b.Message))
+					"writegrant: request signature binding %q covers unsupported %s field %s",
+					b.SignatureField, b.Message, ref.Field))
 			}
-			sameRefs = append(sameRefs, fd)
+			sameRefs = append(sameRefs, resolvedRef{fd: fd, kind: kind})
 		}
 		out = append(out, requestSignatureField{
 			binding: b, scope: scope, name: requestTokenName(b.Message), sig: sig,
@@ -598,8 +607,60 @@ type requestSignatureField struct {
 	scope     outboundpolicy.SignatureScope
 	name      string // semantic token name for errors: content_signature, ...
 	sig       protoreflect.FieldDescriptor
-	sameRefs  []protoreflect.FieldDescriptor
+	sameRefs  []resolvedRef
 	trailRefs []trailSignatureRef
+}
+
+// resolvedRef is one covered SameMessage field with its digest framing
+// class (REV 4 §4 covered-field-kind model: plain string/bytes framed
+// value; proto3 OPTIONAL bool/string framed presence+value; the ONE pinned
+// repeated-message content field digested by the SDK primitive).
+type resolvedRef struct {
+	fd   protoreflect.FieldDescriptor
+	kind coveredRefKind
+}
+
+// coveredRefKind classifies the digest framing for a covered field.
+type coveredRefKind int
+
+const (
+	refPlainString coveredRefKind = iota + 1
+	refPlainBytes
+	refOptionalBool
+	refOptionalString
+	refPinnedContent
+)
+
+// pinnedRepeatedContentTarget is the ONE repeated-message field the
+// covered-kind model allows (mirrors the SDK's pinnedRepeatedContentTarget
+// in outboundpolicy): its digest is the SDK's total
+// ToolResultContentFingerprint, never a host re-implementation.
+const pinnedRepeatedContentTarget = "torana.v2.RequestToolResultBlock.content"
+
+// classifyCoveredRef validates a covered SameMessage field against the
+// typed covered-field-kind model and returns its framing class. Repeated
+// or message-typed fields fail unless they are the pinned content target;
+// plain non-optional scalars other than string/bytes fail.
+func classifyCoveredRef(fd protoreflect.FieldDescriptor, ref outboundpolicy.SignatureContentRef) (coveredRefKind, bool) {
+	if fd == nil {
+		return 0, false
+	}
+	switch {
+	case fd.IsList() && fd.Kind() == protoreflect.MessageKind &&
+		fd.FullName() == pinnedRepeatedContentTarget:
+		return refPinnedContent, true
+	case fd.IsList():
+		return 0, false
+	case fd.Kind() == protoreflect.BoolKind && fd.HasOptionalKeyword():
+		return refOptionalBool, true
+	case fd.Kind() == protoreflect.StringKind && fd.HasOptionalKeyword():
+		return refOptionalString, true
+	case fd.Kind() == protoreflect.StringKind:
+		return refPlainString, true
+	case fd.Kind() == protoreflect.BytesKind:
+		return refPlainBytes, true
+	}
+	return 0, false
 }
 
 // trailSignatureRef is one covered field on a covered block kind for the
@@ -677,10 +738,12 @@ func requestBlockMessage(b *pb.RequestBlock, want protoreflect.FullName) protore
 // SameMessage scopes: every block of the binding's kind — each block's
 // signature is its own token over its own covered fields. TrailingStandalone:
 // at most one token per message (the trailing block), covering the text of
-// every preceding text/thinking block in wire order.
-func (r requestSignatureField) occurrences(m *pb.Message) []tokenOccurrence {
+// every preceding text/thinking block in wire order. An unrepresentable
+// covered value is an error (fail closed), never a zero digest that could
+// silently match on both sides.
+func (r requestSignatureField) occurrences(m *pb.Message) ([]tokenOccurrence, error) {
 	if m == nil {
-		return nil
+		return nil, nil
 	}
 	if r.scope == outboundpolicy.SignatureScopeTrailingStandalone {
 		var trail protoreflect.Message
@@ -690,7 +753,7 @@ func (r requestSignatureField) occurrences(m *pb.Message) []tokenOccurrence {
 			}
 		}
 		if trail == nil {
-			return nil
+			return nil, nil
 		}
 		token := trail.Get(r.sig).String()
 		h := sha256.New()
@@ -703,7 +766,7 @@ func (r requestSignatureField) occurrences(m *pb.Message) []tokenOccurrence {
 		}
 		var sum [32]byte
 		copy(sum[:], h.Sum(nil))
-		return []tokenOccurrence{{token: token, digest: sum}}
+		return []tokenOccurrence{{token: token, digest: sum}}, nil
 	}
 	var out []tokenOccurrence
 	for _, b := range m.Blocks {
@@ -711,24 +774,72 @@ func (r requestSignatureField) occurrences(m *pb.Message) []tokenOccurrence {
 		if pm == nil {
 			continue
 		}
+		d, err := digestBlockFields(pm, r.sameRefs)
+		if err != nil {
+			return nil, fmt.Errorf("writegrant: %s occurrence: %w", r.name, err)
+		}
 		out = append(out, tokenOccurrence{
 			token:  pm.Get(r.sig).String(),
-			digest: digestBlockFields(pm, r.sameRefs),
+			digest: d,
 		})
 	}
-	return out
+	return out, nil
 }
 
 // digestBlockFields hashes a block's covered-content fields, length-framed
 // so field boundaries cannot be confused. Absent fields hash as empty.
-func digestBlockFields(pm protoreflect.Message, refs []protoreflect.FieldDescriptor) [32]byte {
+// digestBlockFields hashes a block's covered-content fields, length-framed
+// per the REV 4 §4 covered-field-kind model: plain string/bytes frame the
+// value; proto3 OPTIONAL bool/string frame PRESENCE + value (an explicit
+// false or an explicit scheduling value is a different digest than
+// absence); the pinned repeated content field is digested by the SDK's
+// total ToolResultContentFingerprint — the host never re-implements nested
+// block semantics. An unrepresentable covered value (invalid nested
+// payload) is an ERROR: the digest must fail the verification, never hash
+// a partial body.
+func digestBlockFields(pm protoreflect.Message, refs []resolvedRef) ([32]byte, error) {
 	h := sha256.New()
 	for _, ref := range refs {
-		writeFramed(h, []byte(pm.Get(ref).String()))
+		switch ref.kind {
+		case refPlainString, refPlainBytes:
+			writeFramed(h, []byte(pm.Get(ref.fd).String()))
+		case refOptionalBool, refOptionalString:
+			// proto3 optional presence is part of the covered content:
+			// presence + value, exactly like the SDK fingerprint's
+			// wc/wcval and sched/schedval frames.
+			writeField(h, byte(ref.kind), pm.Has(ref.fd), []byte(pm.Get(ref.fd).String()))
+		case refPinnedContent:
+			blocks, err := contentBlocks(pm.Get(ref.fd).List())
+			if err != nil {
+				return [32]byte{}, err
+			}
+			sum, err := plugin_sdk.ToolResultContentFingerprint(blocks)
+			if err != nil {
+				return [32]byte{}, fmt.Errorf("writegrant: covered nested content: %w", err)
+			}
+			writeFramed(h, sum[:])
+		default:
+			return [32]byte{}, fmt.Errorf("writegrant: unknown covered ref kind %d", ref.kind)
+		}
 	}
 	var sum [32]byte
 	copy(sum[:], h.Sum(nil))
-	return sum
+	return sum, nil
+}
+
+// contentBlocks converts a protoreflect list of ToolResultContentBlock
+// messages to the SDK's slice. Any element that is not the pinned message
+// type is a host/proto drift error.
+func contentBlocks(l protoreflect.List) ([]*pb.ToolResultContentBlock, error) {
+	out := make([]*pb.ToolResultContentBlock, 0, l.Len())
+	for i := 0; i < l.Len(); i++ {
+		el, ok := l.Get(i).Message().Interface().(*pb.ToolResultContentBlock)
+		if !ok {
+			return nil, fmt.Errorf("writegrant: covered content element %d is not a ToolResultContentBlock", i)
+		}
+		out = append(out, el)
+	}
+	return out, nil
 }
 
 // verifyRequestSignatures applies the bound-signature rule to every message,
@@ -780,7 +891,11 @@ func verifyRequestSignatures(accepted, out *pb.ChatRequest) error {
 		unsignedByContent := map[[32]byte]int{}
 		everSeen := map[string]bool{}
 		for _, am := range accepted.Messages {
-			for _, occ := range check.occurrences(am) {
+			occs, err := check.occurrences(am)
+			if err != nil {
+				return err
+			}
+			for _, occ := range occs {
 				if occ.token == "" {
 					unsignedByContent[occ.digest]++
 					continue
@@ -794,7 +909,11 @@ func verifyRequestSignatures(accepted, out *pb.ChatRequest) error {
 
 		// Phase 1: consume output tokens against the accepted occurrences.
 		for _, om := range out.Messages {
-			for _, tocc := range check.occurrences(om) {
+			toccs, err := check.occurrences(om)
+			if err != nil {
+				return err
+			}
+			for _, tocc := range toccs {
 				if tocc.token == "" {
 					continue
 				}
@@ -857,7 +976,11 @@ func verifyRequestSignatures(accepted, out *pb.ChatRequest) error {
 		// not count, so a signed copy plus a cleared copy of the same content
 		// passes: the signed occurrence is already spoken for.
 		for _, om := range out.Messages {
-			for _, tocc := range check.occurrences(om) {
+			toccs, err := check.occurrences(om)
+			if err != nil {
+				return err
+			}
+			for _, tocc := range toccs {
 				if tocc.token != "" {
 					continue
 				}
@@ -979,13 +1102,15 @@ var requestBlockFieldSections = map[string]string{
 }
 
 var requestTextBlockFieldSections = map[string]string{
-	"text":      "ir.messages.write.<role>",
-	"signature": "ir.messages.write.<role>",
+	"text":               "ir.messages.write.<role>",
+	"signature":          "ir.messages.write.<role>",
+	"part_metadata_json": "ir.messages.write.<role>",
 }
 
 var requestThinkingBlockFieldSections = map[string]string{
-	"text":      "ir.messages.write.<role>",
-	"signature": "ir.messages.write.<role>",
+	"text":               "ir.messages.write.<role>",
+	"signature":          "ir.messages.write.<role>",
+	"part_metadata_json": "ir.messages.write.<role>",
 }
 
 var requestRedactedThinkingBlockFieldSections = map[string]string{
@@ -993,16 +1118,21 @@ var requestRedactedThinkingBlockFieldSections = map[string]string{
 }
 
 var requestToolUseBlockFieldSections = map[string]string{
-	"id":             "ir.messages.write.<role>",
-	"name":           "ir.messages.write.<role>",
-	"arguments_json": "ir.messages.write.<role>",
-	"signature":      "ir.messages.write.<role>",
+	"id":                 "ir.messages.write.<role>",
+	"name":               "ir.messages.write.<role>",
+	"arguments_json":     "ir.messages.write.<role>",
+	"signature":          "ir.messages.write.<role>",
+	"part_metadata_json": "ir.messages.write.<role>",
 }
 
 var requestToolResultBlockFieldSections = map[string]string{
-	"tool_call_id": "ir.messages.write.<role>",
-	"tool_name":    "ir.messages.write.<role>",
-	"content":      "ir.messages.write.<role>",
+	"tool_call_id":       "ir.messages.write.<role>",
+	"tool_name":          "ir.messages.write.<role>",
+	"content":            "ir.messages.write.<role>",
+	"part_metadata_json": "ir.messages.write.<role>",
+	"will_continue":      "ir.messages.write.<role>",
+	"scheduling":         "ir.messages.write.<role>",
+	"signature":          "ir.messages.write.<role>",
 }
 
 var toolResultContentBlockFieldSections = map[string]string{
@@ -1021,12 +1151,15 @@ var toolResultUnknownBlockFieldSections = map[string]string{
 }
 
 var requestUnknownBlockFieldSections = map[string]string{
-	"kind":         "ir.messages.write.<role>",
-	"payload_json": "ir.messages.write.<role>",
+	"kind":               "ir.messages.write.<role>",
+	"payload_json":       "ir.messages.write.<role>",
+	"part_metadata_json": "ir.messages.write.<role>",
+	"signature":          "ir.messages.write.<role>",
 }
 
 var requestTrailingSignatureBlockFieldSections = map[string]string{
-	"signature": "ir.messages.write.<role>",
+	"signature":          "ir.messages.write.<role>",
+	"part_metadata_json": "ir.messages.write.<role>",
 }
 
 var requestCacheBreakpointFieldSections = map[string]string{

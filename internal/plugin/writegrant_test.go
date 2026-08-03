@@ -9,7 +9,6 @@ import (
 	"github.com/torana-edge/torana-edge/internal/engine"
 	"github.com/torana-edge/torana-edge/internal/engine/pbconv"
 	"github.com/torana-edge/torana-edge/internal/wasm"
-	"github.com/torana-edge/torana-plugin-sdk/outboundpolicy"
 	pb "github.com/torana-edge/torana-plugin-sdk/pb/v2"
 	"google.golang.org/protobuf/proto"
 )
@@ -798,14 +797,14 @@ func TestRequestSignatureBindingsArePinned(t *testing.T) {
 	for _, check := range requestSignatureFields {
 		key := string(check.binding.Message)
 		got = append(got, key)
-		if check.scope == outboundpolicy.SignatureScopeTrailingStandalone {
-			for _, ref := range check.trailRefs {
-				covered[key] = append(covered[key], string(ref.msg)+"."+string(ref.fd.Name()))
-			}
-		} else {
-			for _, ref := range check.sameRefs {
-				covered[key] = append(covered[key], string(ref.Name()))
-			}
+		// The trailing binding carries BOTH scopes: the SameMessage
+		// part_metadata_json ref first, then the TrailingStandalone refs
+		// (the SDK's declared order).
+		for _, ref := range check.sameRefs {
+			covered[key] = append(covered[key], string(ref.fd.Name()))
+		}
+		for _, ref := range check.trailRefs {
+			covered[key] = append(covered[key], string(ref.msg)+"."+string(ref.fd.Name()))
 		}
 	}
 
@@ -813,6 +812,8 @@ func TestRequestSignatureBindingsArePinned(t *testing.T) {
 		"torana.v2.RequestThinkingBlock":          true,
 		"torana.v2.RequestTextBlock":              true,
 		"torana.v2.RequestToolUseBlock":           true,
+		"torana.v2.RequestToolResultBlock":        true,
+		"torana.v2.RequestUnknownBlock":           true,
 		"torana.v2.RequestTrailingSignatureBlock": true,
 	}
 	if len(got) != len(wantFields) {
@@ -823,12 +824,17 @@ func TestRequestSignatureBindingsArePinned(t *testing.T) {
 			t.Errorf("unexpected request signature binding %q", f)
 		}
 	}
-	// The pinned covered-content sets (mirrors the SDK's request contracts).
+	// The pinned covered-content sets (mirrors the SDK's request contracts
+	// incl. the typed covered-field-kind model: part_metadata_json on every
+	// token, will_continue/scheduling presence-aware, content via the SDK
+	// nested digest).
 	wantCovered := map[string][]string{
-		"torana.v2.RequestThinkingBlock":          {"text"},
-		"torana.v2.RequestTextBlock":              {"text"},
-		"torana.v2.RequestToolUseBlock":           {"id", "name", "arguments_json"},
-		"torana.v2.RequestTrailingSignatureBlock": {"torana.v2.RequestTextBlock.text", "torana.v2.RequestThinkingBlock.text"},
+		"torana.v2.RequestThinkingBlock":          {"text", "part_metadata_json"},
+		"torana.v2.RequestTextBlock":              {"text", "part_metadata_json"},
+		"torana.v2.RequestToolUseBlock":           {"id", "name", "arguments_json", "part_metadata_json"},
+		"torana.v2.RequestToolResultBlock":        {"tool_call_id", "tool_name", "part_metadata_json", "will_continue", "scheduling", "content"},
+		"torana.v2.RequestUnknownBlock":           {"kind", "payload_json", "part_metadata_json"},
+		"torana.v2.RequestTrailingSignatureBlock": {"part_metadata_json", "torana.v2.RequestTextBlock.text", "torana.v2.RequestThinkingBlock.text"},
 	}
 	for field, want := range wantCovered {
 		if strings.Join(covered[field], ",") != strings.Join(want, ",") {
