@@ -633,13 +633,18 @@ func TestParseFailClosedAmbiguousArmRowsTransport(t *testing.T) {
 // (fold-in acceptance contract; currently SKIPPED because the gemini
 // adapter has no scheduling grammar yet): the golden value-free 400 with
 // ZERO request hooks, zero response hooks, zero limiter buckets, zero
-// upstream — byte-identical under plugin presence AND both failure modes,
-// exactly like the provider-arm transport rows above.
+// upstream — under BOTH failure modes.
+//
+// The request-hook proof is NON-VACUOUS: the allow-mode row runs
+// test-trapper (which traps EVERY before-request invocation) overridden to
+// failure mode pass. If the local 400 ever ran a request hook, the trap
+// fires and the pass path forwards the request upstream — hits would be 1
+// and the body would be the upstream reply. (test-observer's before hook
+// leaves no trace on a skipped request and would prove nothing here.)
 func TestSchedulingValueFree400Transport(t *testing.T) {
 	t.Skip("SDK signed-Part correction pending; these rows run when the gemini scheduling grammar lands (Edge fold-in)")
 	requireWASM(t, "../../examples/plugins/test-trapper/plugin.wasm")
 	requireWASM(t, "../../examples/plugins/test-observer/plugin.wasm")
-	requireWASM(t, "../../examples/plugins/test-mutator/plugin.wasm")
 
 	rows := []string{
 		`{"model":"m","contents":[{"role":"user","parts":[{"functionResponse":{"name":"read","response":{"output":"x"},"id":"c1","scheduling":"SCHEDULING_UNSPECIFIED"}}]}]}`,
@@ -647,6 +652,7 @@ func TestSchedulingValueFree400Transport(t *testing.T) {
 	}
 	for i, body := range rows {
 		t.Run("gemini/scheduling"+string(rune('a'+i)), func(t *testing.T) {
+			// No plugins: golden 400, zero upstream, zero limiter buckets.
 			status, out, hits, srv := parseFailE2E(t, "gemini", nil, body)
 			if status != http.StatusBadRequest || string(out) != goldenInvalidRequest("gemini") {
 				t.Fatalf("no-plugins 400 wrong: status=%d body=%s", status, out)
@@ -658,20 +664,20 @@ func TestSchedulingValueFree400Transport(t *testing.T) {
 				t.Fatalf("%d limiter buckets materialized; must be 0", n)
 			}
 
-			statusA, bodyA, hitsA, srvA := parseFailE2E(t, "gemini", []string{"test-observer"}, body)
-			if statusA != http.StatusBadRequest || !bytes.Equal(bodyA, out) {
-				t.Fatalf("allow-mode 400 differs from the no-plugins body: status=%d body=%s", statusA, bodyA)
+			// PASS-mode trapper: a request hook would trap and forward
+			// upstream — zero hits + the golden 400 prove NO hook ran.
+			statusP, bodyP, hitsP, srvP := parseFailE2EApproved(t, "gemini", []string{"test-trapper"}, body, http.StatusOK, "pass")
+			if statusP != http.StatusBadRequest || !bytes.Equal(bodyP, out) {
+				t.Fatalf("pass-mode trapper 400 differs from the no-plugins body: status=%d body=%s (a request hook ran and the request leaked upstream)", statusP, bodyP)
 			}
-			if n := atomic.LoadInt32(hitsA); n != 0 {
-				t.Fatalf("upstream called %d times with the observer; must be 0", n)
+			if n := atomic.LoadInt32(hitsP); n != 0 {
+				t.Fatalf("upstream called %d times with the pass-mode trapper; the trap fired, so a request hook RAN on the local 400", n)
 			}
-			if n := limiterBucketCount(srvA); n != 0 {
-				t.Fatalf("%d limiter buckets materialized with the observer; must be 0", n)
-			}
-			if v, ok := srvA.sharedCache.Get("observed_error_status"); ok {
-				t.Fatalf("a response hook ran with the observer: cache %q", v)
+			if n := limiterBucketCount(srvP); n != 0 {
+				t.Fatalf("%d limiter buckets materialized with the pass-mode trapper; must be 0", n)
 			}
 
+			// BLOCK-mode trapper: same golden 400, zero upstream.
 			statusB, bodyB, hitsB, srvB := parseFailE2E(t, "gemini", []string{"test-trapper"}, body)
 			if statusB != http.StatusBadRequest || !bytes.Equal(bodyB, out) {
 				t.Fatalf("block-mode 400 differs from the no-plugins body: status=%d body=%s", statusB, bodyB)
@@ -681,6 +687,25 @@ func TestSchedulingValueFree400Transport(t *testing.T) {
 			}
 			if n := limiterBucketCount(srvB); n != 0 {
 				t.Fatalf("%d limiter buckets materialized with the trapper; must be 0", n)
+			}
+
+			// Response-hook independence under BOTH failure modes: an
+			// observer would record observed_error_status if any response
+			// hook ran after the local 400. Allow-mode observer…
+			statusA, bodyA, _, srvA := parseFailE2E(t, "gemini", []string{"test-observer"}, body)
+			if statusA != http.StatusBadRequest || !bytes.Equal(bodyA, out) {
+				t.Fatalf("allow-mode observer 400 differs: status=%d body=%s", statusA, bodyA)
+			}
+			if v, ok := srvA.sharedCache.Get("observed_error_status"); ok {
+				t.Fatalf("a response hook ran with the allow-mode observer: cache %q", v)
+			}
+			// …and block-mode observer.
+			statusO, bodyO, _, srvO := parseFailE2EApproved(t, "gemini", []string{"test-observer"}, body, http.StatusOK, "block")
+			if statusO != http.StatusBadRequest || !bytes.Equal(bodyO, out) {
+				t.Fatalf("block-mode observer 400 differs: status=%d body=%s", statusO, bodyO)
+			}
+			if v, ok := srvO.sharedCache.Get("observed_error_status"); ok {
+				t.Fatalf("a response hook ran with the block-mode observer: cache %q", v)
 			}
 		})
 	}
