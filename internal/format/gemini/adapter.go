@@ -60,12 +60,14 @@ func init() {
 // and round-tripped via ProviderExtensions, independent of the format name.
 type Adapter struct{}
 
-// ProviderExtensions keys used to round-trip the Code Assist envelope.
-const (
-	extCodeAssist   = "_codeassist"    // bool marker: request arrived Code-Assist-wrapped
-	extWrapper      = "_wrapper"       // map: wrapper fields except "request"
-	extRequestExtra = "_request_extra" // map: inner request fields except contents/systemInstruction/tools
-)
+// The Code Assist envelope is PROVIDER-VISIBLE (checkpoint revision 4,
+// class A): provider_extensions_json holds the original wire object with
+// the canonical ABI-owned members projected out — top level = outer-
+// wrapper extras, the `request` member = inner-request extras (with
+// generationConfig's canonical members stripped). The VARIANT fact
+// (Code-Assist-wrapped vs bare) is typed host-only topology (class B):
+// engine.ChatRequest.CodeAssist.
+const envelopeRequestMember = "request"
 
 // --- Wire types for unmarshal/marshal ---
 
@@ -285,15 +287,29 @@ func (a *Adapter) Unmarshal(rawBody []byte) (*engine.ChatRequest, error) {
 	}
 
 	if wrapped {
-		// Code Assist envelope: HOST-ONLY topology. The wrapper (top-level
-		// minus "request") and the inner request's non-rebuilt fields are
-		// captured RAW; the sentinels are appended in fixed order.
-		var wrapper, reqExtra engine.OptionalJSONObject
+		// Code Assist: the variant is TYPED host-only topology; the
+		// envelope is PROVIDER-VISIBLE (the original wire object with
+		// canonical members projected out, checkpoint 4b): top level =
+		// outer-wrapper extras (model is FORBIDDEN as an extra — it is
+		// rebuilt from ChatRequest.Model), the `request` member =
+		// inner-request extras (systemInstruction/contents/tools/
+		// safetySettings and generationConfig's canonical members are
+		// FORBIDDEN as extras — rebuilt from canonical ABI fields; unknown
+		// generation siblings survive inside the preserved generationConfig).
+		chat.CodeAssist = true
 		topObj, toerr := engine.ParseOptionalJSONObject(rawBody)
 		if toerr != nil {
 			return nil, fmt.Errorf("gemini code assist extensions: %w", toerr)
 		}
-		wrapper, err = topObj.WithoutMembers("request")
+		env, err := topObj.WithoutMembers(envelopeRequestMember)
+		if err != nil {
+			return nil, fmt.Errorf("gemini code assist extensions: %w", err)
+		}
+		// Outer model is canonical: rebuilt from ChatRequest.Model, never
+		// a preserved extra.
+		modelRaw := readExtRaw(env, "model")
+		hasModel := len(modelRaw) > 0
+		env, err = env.DeleteMember("model")
 		if err != nil {
 			return nil, fmt.Errorf("gemini code assist extensions: %w", err)
 		}
@@ -301,23 +317,22 @@ func (a *Adapter) Unmarshal(rawBody []byte) (*engine.ChatRequest, error) {
 		if ierr != nil {
 			return nil, fmt.Errorf("gemini code assist extensions: %w", ierr)
 		}
-		reqExtra, err = innerObj.WithoutMembers("systemInstruction", "contents", "tools")
+		reqExtra, err := innerObj.WithoutMembers("systemInstruction", "contents", "tools", "safetySettings")
 		if err != nil {
 			return nil, fmt.Errorf("gemini code assist extensions: %w", err)
 		}
-		ext := engine.OptionalJSONObject{}
-		if ext, err = ext.SetMember(extCodeAssist, json.RawMessage("true")); err == nil {
-			ext, err = ext.SetMember(extWrapper, wrapper.Bytes())
-		}
-		if err == nil {
-			ext, err = ext.SetMember(extRequestExtra, reqExtra.Bytes())
-		}
-		if err != nil {
+		if reqExtra, err = stripGenerationCanonicalMembers(reqExtra); err != nil {
 			return nil, fmt.Errorf("gemini code assist extensions: %w", err)
 		}
-		chat.ProviderExtensions = ext
-		if m, ok := readExtString(chat.ProviderExtensions, extWrapper+".model"); ok && m != "" {
-			chat.Model = m
+		if env, err = env.SetMember(envelopeRequestMember, reqExtra.Bytes()); err != nil {
+			return nil, fmt.Errorf("gemini code assist extensions: %w", err)
+		}
+		chat.ProviderExtensions = env
+		if hasModel {
+			var m string
+			if json.Unmarshal(modelRaw, &m) == nil && m != "" {
+				chat.Model = m
+			}
 		}
 	} else {
 		// Bare Gemini: preserve unknown top-level fields deterministically
@@ -698,12 +713,7 @@ func (a *Adapter) Marshal(chat *engine.ChatRequest) ([]byte, error) {
 	if err := pbconv.ValidateFullRequest(chat); err != nil {
 		return nil, fmt.Errorf("gemini: %w", err)
 	}
-	codeAssist := false
-	if !chat.ProviderExtensions.IsAbsent() {
-		if b, ok := readExtBool(chat.ProviderExtensions, extCodeAssist); ok {
-			codeAssist = b
-		}
-	}
+	codeAssist := chat.CodeAssist
 
 	sys, err := buildSystemInstruction(chat.Messages)
 	if err != nil {
@@ -753,23 +763,89 @@ func (a *Adapter) Marshal(chat *engine.ChatRequest) ([]byte, error) {
 	return b, nil
 }
 
-// marshalCodeAssist rebuilds the envelope from the raw captures: the inner
-// request keeps every preserved member byte-exact; only the IR-rebuilt
-// fields (contents/systemInstruction/tools) are overlaid.
+// marshalCodeAssist rebuilds the Code Assist wire from the typed facts and
+// the PROVIDER-VISIBLE envelope (checkpoint 4b):
+//
+//   - OUTPUT VERIFICATION first: the replacement envelope must not smuggle
+//     canonical members through the extras path (outer model; inner
+//     systemInstruction/contents/tools/safetySettings; generationConfig
+//     canonical members) — a plugin that did is refused, never silently
+//     ignored;
+//   - outer `model` is rebuilt from ChatRequest.Model (canonical wins);
+//   - inner `generationConfig` is rebuilt: canonical members from the PB
+//     request, unknown sibling members preserved losslessly from the
+//     envelope's inner scope;
+//   - inner `safetySettings` rebuilt from safety_settings_json;
+//   - systemInstruction/contents/tools rebuilt from their canonical fields;
+//   - every other wrapper/inner extra passes through from the envelope at
+//     its exact wire scope.
 func marshalCodeAssist(chat *engine.ChatRequest, sys *geminiSystemInstruction, contents []geminiContent, tools []geminiTool) ([]byte, error) {
+	// An absent envelope (host-constructed chats with only the typed
+	// variant) defaults to the empty envelope: no extras, empty scopes.
+	if chat.ProviderExtensions.IsAbsent() {
+		empty, perr := engine.ParseOptionalJSONObject([]byte(`{}`))
+		if perr != nil {
+			return nil, perr
+		}
+		chat.ProviderExtensions = empty
+	}
 	ext, _, err := chat.ProviderExtensions.DecodeObject()
 	if err != nil {
 		return nil, fmt.Errorf("code assist extensions: %w", err)
 	}
-	inner, err := engine.ParseOptionalJSONObject(ext[extRequestExtra])
+	// The `request` structural member is REQUIRED by the envelope grammar;
+	// a host-constructed envelope without it defaults to the empty inner
+	// scope BEFORE verification.
+	if _, ok := ext[envelopeRequestMember]; !ok {
+		chat.ProviderExtensions, err = chat.ProviderExtensions.SetMember(envelopeRequestMember, json.RawMessage(`{}`))
+		if err != nil {
+			return nil, err
+		}
+		ext, _, err = chat.ProviderExtensions.DecodeObject()
+		if err != nil {
+			return nil, err
+		}
+	}
+	if err := verifyCodeAssistEnvelope(chat.ProviderExtensions); err != nil {
+		return nil, err
+	}
 	if err != nil {
 		return nil, fmt.Errorf("code assist extensions: %w", err)
+	}
+	if err := verifyCodeAssistEnvelope(chat.ProviderExtensions); err != nil {
+		return nil, err
+	}
+	if _, ok := ext[envelopeRequestMember]; !ok {
+		chat.ProviderExtensions, err = chat.ProviderExtensions.SetMember(envelopeRequestMember, json.RawMessage(`{}`))
+		if err != nil {
+			return nil, err
+		}
+		ext, _, err = chat.ProviderExtensions.DecodeObject()
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	// Inner scope: envelope extras + canonical rebuilds.
+	reqExtra, err := engine.ParseOptionalJSONObject(ext[envelopeRequestMember])
+	if err != nil {
+		return nil, fmt.Errorf("code assist extensions: %w", err)
+	}
+	if !chat.SafetySettings.IsAbsent() {
+		if reqExtra, err = reqExtra.SetMember("safetySettings", chat.SafetySettings.Bytes()); err != nil {
+			return nil, err
+		}
+	} else if reqExtra, err = reqExtra.DeleteMember("safetySettings"); err != nil {
+		return nil, err
+	}
+	if reqExtra, err = rebuildGenerationConfig(chat, reqExtra); err != nil {
+		return nil, err
 	}
 	contentsBytes, err := json.Marshal(contents)
 	if err != nil {
 		return nil, err
 	}
-	if inner, err = inner.SetMember("contents", contentsBytes); err != nil {
+	if reqExtra, err = reqExtra.SetMember("contents", contentsBytes); err != nil {
 		return nil, err
 	}
 	if sys != nil {
@@ -777,10 +853,10 @@ func marshalCodeAssist(chat *engine.ChatRequest, sys *geminiSystemInstruction, c
 		if serr != nil {
 			return nil, serr
 		}
-		if inner, err = inner.SetMember("systemInstruction", sysBytes); err != nil {
+		if reqExtra, err = reqExtra.SetMember("systemInstruction", sysBytes); err != nil {
 			return nil, err
 		}
-	} else if inner, err = inner.DeleteMember("systemInstruction"); err != nil {
+	} else if reqExtra, err = reqExtra.DeleteMember("systemInstruction"); err != nil {
 		return nil, err
 	}
 	if len(tools) > 0 {
@@ -788,21 +864,135 @@ func marshalCodeAssist(chat *engine.ChatRequest, sys *geminiSystemInstruction, c
 		if terr != nil {
 			return nil, terr
 		}
-		if inner, err = inner.SetMember("tools", toolsBytes); err != nil {
+		if reqExtra, err = reqExtra.SetMember("tools", toolsBytes); err != nil {
 			return nil, err
 		}
-	} else if inner, err = inner.DeleteMember("tools"); err != nil {
+	} else if reqExtra, err = reqExtra.DeleteMember("tools"); err != nil {
 		return nil, err
 	}
 
-	wrapper, err := engine.ParseOptionalJSONObject(ext[extWrapper])
+	// Outer scope: envelope extras + canonical model.
+	wrapper, err := engine.ParseOptionalJSONObject(ext[envelopeRequestMember])
+	_ = wrapper // the outer scope is the envelope itself minus `request`
 	if err != nil {
-		return nil, fmt.Errorf("code assist extensions: %w", err)
-	}
-	if wrapper, err = wrapper.SetMember("request", inner.Bytes()); err != nil {
 		return nil, err
 	}
-	return wrapper.Bytes(), nil
+	outer, err := chat.ProviderExtensions.DeleteMember(envelopeRequestMember)
+	if err != nil {
+		return nil, err
+	}
+	modelBytes, merr := json.Marshal(chat.Model)
+	if merr != nil {
+		return nil, merr
+	}
+	if outer, err = outer.SetMember("model", modelBytes); err != nil {
+		return nil, err
+	}
+	if outer, err = outer.SetMember(envelopeRequestMember, reqExtra.Bytes()); err != nil {
+		return nil, err
+	}
+	return outer.Bytes(), nil
+}
+
+// verifyCodeAssistEnvelope enforces the 4b grammar on a (possibly
+// plugin-replaced) envelope: canonical members are FORBIDDEN as extras at
+// both scopes and in generationConfig.
+func verifyCodeAssistEnvelope(env engine.OptionalJSONObject) error {
+	m, _, err := env.DecodeObject()
+	if err != nil {
+		return fmt.Errorf("code assist envelope: %w", err)
+	}
+	for _, k := range []string{"model"} {
+		if _, ok := m[k]; ok {
+			return fmt.Errorf("code assist envelope: canonical outer member %q smuggled through the extras path", k)
+		}
+	}
+	innerRaw, ok := m[envelopeRequestMember]
+	if !ok {
+		return fmt.Errorf("code assist envelope: missing %q structural member", envelopeRequestMember)
+	}
+	var inner map[string]json.RawMessage
+	if json.Unmarshal(innerRaw, &inner) != nil {
+		return fmt.Errorf("code assist envelope: %q is not an object", envelopeRequestMember)
+	}
+	for _, k := range []string{"systemInstruction", "contents", "tools", "safetySettings"} {
+		if _, ok := inner[k]; ok {
+			return fmt.Errorf("code assist envelope: canonical inner member %q smuggled through the extras path", k)
+		}
+	}
+	if gcRaw, ok := inner["generationConfig"]; ok {
+		var gc map[string]json.RawMessage
+		if json.Unmarshal(gcRaw, &gc) != nil {
+			return fmt.Errorf("code assist envelope: generationConfig is not an object")
+		}
+		for _, k := range []string{"maxOutputTokens", "temperature", "topP", "stopSequences"} {
+			if _, ok := gc[k]; ok {
+				return fmt.Errorf("code assist envelope: canonical generationConfig member %q smuggled through the extras path", k)
+			}
+		}
+	}
+	return nil
+}
+
+// rebuildGenerationConfig overlays the canonical members from the PB
+// request onto the preserved generationConfig siblings.
+func rebuildGenerationConfig(chat *engine.ChatRequest, inner engine.OptionalJSONObject) (engine.OptionalJSONObject, error) {
+	gc := map[string]json.RawMessage{}
+	if !inner.IsAbsent() {
+		m, _, err := inner.DecodeObject()
+		if err != nil {
+			return inner, err
+		}
+		if raw, ok := m["generationConfig"]; ok {
+			if err := json.Unmarshal(raw, &gc); err != nil {
+				return inner, fmt.Errorf("code assist extensions: generationConfig is not an object")
+			}
+		}
+	}
+	set := func(k string, v any) error {
+		b, err := json.Marshal(v)
+		if err != nil {
+			return err
+		}
+		gc[k] = b
+		return nil
+	}
+	if chat.MaxTokens != nil {
+		if err := set("maxOutputTokens", *chat.MaxTokens); err != nil {
+			return inner, err
+		}
+	} else {
+		delete(gc, "maxOutputTokens")
+	}
+	if chat.Temperature != nil {
+		if err := set("temperature", *chat.Temperature); err != nil {
+			return inner, err
+		}
+	} else {
+		delete(gc, "temperature")
+	}
+	if chat.TopP != nil {
+		if err := set("topP", *chat.TopP); err != nil {
+			return inner, err
+		}
+	} else {
+		delete(gc, "topP")
+	}
+	if len(chat.StopSequences) > 0 {
+		if err := set("stopSequences", chat.StopSequences); err != nil {
+			return inner, err
+		}
+	} else {
+		delete(gc, "stopSequences")
+	}
+	if len(gc) == 0 {
+		return inner.DeleteMember("generationConfig")
+	}
+	raw, err := json.Marshal(gc)
+	if err != nil {
+		return inner, err
+	}
+	return inner.SetMember("generationConfig", raw)
 }
 
 // readExtBool reads a bool member from a raw extensions object.
@@ -1484,4 +1674,63 @@ func geminiPartWithFacts(payload []byte, signature string, partMetadataJson []by
 		}
 	}
 	return json.RawMessage(obj.Bytes()), nil
+}
+
+// stripGenerationCanonicalMembers removes the canonical generationConfig
+// members (rebuilt from the PB request) from the preserved inner extras,
+// keeping unknown sibling members lossless.
+func stripGenerationCanonicalMembers(inner engine.OptionalJSONObject) (engine.OptionalJSONObject, error) {
+	if inner.IsAbsent() {
+		return inner, nil
+	}
+	m, _, err := inner.DecodeObject()
+	if err != nil {
+		return inner, err
+	}
+	gcRaw, ok := m["generationConfig"]
+	if !ok {
+		return inner, nil
+	}
+	var gc map[string]json.RawMessage
+	if json.Unmarshal(gcRaw, &gc) != nil {
+		return inner, fmt.Errorf("gemini code assist: generationConfig is not an object")
+	}
+	canonical := []string{"maxOutputTokens", "temperature", "topP", "stopSequences"}
+	keep := map[string]json.RawMessage{}
+	for k, v := range gc {
+		canon := false
+		for _, c := range canonical {
+			if k == c {
+				canon = true
+			}
+		}
+		if !canon {
+			keep[k] = v
+		}
+	}
+	rebuilt, err := json.Marshal(keep)
+	if err != nil {
+		return inner, err
+	}
+	if len(keep) == 0 {
+		return inner.DeleteMember("generationConfig")
+	}
+	return inner.SetMember("generationConfig", rebuilt)
+}
+
+// readExtRaw returns a raw member of the provider extensions, or nil when
+// absent or not an object.
+func readExtRaw(ext engine.OptionalJSONObject, key string) []byte {
+	if ext.IsAbsent() {
+		return nil
+	}
+	m, _, err := ext.DecodeObject()
+	if err != nil {
+		return nil
+	}
+	raw, ok := m[key]
+	if !ok {
+		return nil
+	}
+	return raw
 }

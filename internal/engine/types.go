@@ -28,7 +28,32 @@ type ChatRequest struct {
 	// NOT serialize to the wire. Used for request-scoped state (e.g.
 	// mutation registries) shared between hooks. Host-owned.
 	ToranaMeta OptionalJSONObject
+
+	// Host-only TOPOLOGY facts (class B of the raw-JSON checkpoint): these
+	// are typed, out of band, NEVER part of the ABI, and are restored
+	// across plugin replacements at the pipeline boundary — a plugin can
+	// neither forge nor lose them.
+	//
+	// CodeAssist records that the Gemini request arrived Code-Assist-
+	// wrapped (the wire envelope topology changes reconstruction).
+	CodeAssist bool
+	// OpenAIVariant records Chat Completions vs Responses for the OpenAI
+	// format (the wire shape changes reconstruction).
+	OpenAIVariant OpenAIVariant
+	// ResponsesInputLayout is the caller's typed Responses input array
+	// captured at parse: opaque items (reasoning, compaction, future
+	// types) are re-spliced at their recorded positions verbatim on
+	// marshal. Absent = the ordered body IS the layout.
+	ResponsesInputLayout OptionalJSONArray
 }
+
+// OpenAIVariant classifies the OpenAI wire variant.
+type OpenAIVariant int
+
+const (
+	OpenAIChat OpenAIVariant = iota
+	OpenAIResponses
+)
 
 // Role classifies a message's speaker.
 type Role string

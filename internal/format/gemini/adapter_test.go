@@ -505,8 +505,7 @@ func TestEmptyToolResultTextWraps(t *testing.T) {
 					}}}},
 				}
 				if tc.codeAssist {
-					ext, _ := engine.ParseOptionalJSONObject([]byte(`{"_codeassist":true}`))
-					chat.ProviderExtensions = ext
+					chat.CodeAssist = true
 				}
 				out, err := (&Adapter{}).Marshal(chat)
 				if err != nil {

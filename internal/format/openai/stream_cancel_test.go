@@ -36,7 +36,7 @@ func TestSerializeCanceledClosedStreamDoesNotFinish(t *testing.T) {
 		{
 			"responses",
 			context.WithValue(context.Background(), engine.ChatRequestKey, &engine.ChatRequest{
-				ProviderExtensions: mustExtSC(map[string]any{"_openai_variant": "responses"}),
+				OpenAIVariant: engine.OpenAIResponses,
 			}),
 			[]string{"[DONE]", "response.completed"},
 		},

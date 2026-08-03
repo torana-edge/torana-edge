@@ -113,8 +113,7 @@ func mustExts(m map[string]any) engine.OptionalJSONObject {
 }
 
 func TestApplyOpenAIResponsesCompaction(t *testing.T) {
-	chat := &engine.ChatRequest{ProviderExtensions: mustExts(map[string]any{
-		"_openai_variant":      "responses",
+	chat := &engine.ChatRequest{OpenAIVariant: engine.OpenAIResponses, ProviderExtensions: mustExts(map[string]any{
 		"previous_response_id": "resp_123",
 	})}
 	applyOpenAIResponsesCompaction(chat, responsesCompactionProvider(75000))
@@ -138,8 +137,7 @@ func TestApplyOpenAIResponsesCompaction(t *testing.T) {
 
 func TestApplyOpenAIResponsesCompactionCallerWins(t *testing.T) {
 	callerPolicy := []any{map[string]any{"type": "compaction", "compact_threshold": float64(42000)}}
-	chat := &engine.ChatRequest{ProviderExtensions: mustExts(map[string]any{
-		"_openai_variant":    "responses",
+	chat := &engine.ChatRequest{OpenAIVariant: engine.OpenAIResponses, ProviderExtensions: mustExts(map[string]any{
 		"context_management": callerPolicy,
 	})}
 	applyOpenAIResponsesCompaction(chat, responsesCompactionProvider(75000))
@@ -171,7 +169,7 @@ func TestApplyOpenAIResponsesCompactionNeverTouchesChatCompletions(t *testing.T)
 }
 
 func TestApplyOpenAIResponsesCompactionAbsentIsDisabled(t *testing.T) {
-	chat := &engine.ChatRequest{ProviderExtensions: mustExts(map[string]any{"_openai_variant": "responses"})}
+	chat := &engine.ChatRequest{OpenAIVariant: engine.OpenAIResponses, ProviderExtensions: mustExts(map[string]any{})}
 	applyOpenAIResponsesCompaction(chat, provider.Provider{Format: "openai"})
 	cm, _, err := chat.ProviderExtensions.DecodeObject()
 	if err != nil {

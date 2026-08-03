@@ -45,12 +45,8 @@ func TestCodeAssistRoundTrip(t *testing.T) {
 		t.Fatalf("Unmarshal: %v", err)
 	}
 
-	var extMap map[string]json.RawMessage
-	json.Unmarshal(chat.ProviderExtensions.Bytes(), &extMap)
-	var ca bool
-	json.Unmarshal(extMap[extCodeAssist], &ca)
-	if !ca {
-		t.Fatal("expected Code Assist marker to be set")
+	if !chat.CodeAssist {
+		t.Fatal("expected the typed Code Assist variant to be set")
 	}
 	if chat.Model != "gemini-3.5-flash-extra-low" {
 		t.Errorf("model from wrapper not lifted: %q", chat.Model)
@@ -333,11 +329,8 @@ func TestCodeAssistToolResultUnwrapsForCompaction(t *testing.T) {
 // Splitting them makes the server 400 with "missing thought_signature".
 func TestCodeAssistParallelCallsShareOneBlock(t *testing.T) {
 	chat := &engine.ChatRequest{
-		ProviderExtensions: mustExtCA(map[string]any{
-			extCodeAssist:   true,
-			extWrapper:      map[string]any{"model": "gemini-3.5-flash"},
-			extRequestExtra: map[string]any{},
-		}),
+		CodeAssist:         true,
+		ProviderExtensions: mustExtCA(map[string]any{"request": map[string]any{}}),
 		Messages: []engine.Message{
 			{Role: engine.RoleUser, Blocks: []engine.Block{{Text: &engine.TextBlock{Text: "do two things"}}}},
 			{Role: engine.RoleAssistant, Blocks: []engine.Block{
@@ -1213,4 +1206,113 @@ func replay(events []engine.StreamEvent) <-chan engine.StreamEvent {
 	}
 	close(ch)
 	return ch
+}
+
+// TestCodeAssistOverlayCanonicalWins — the 4b overlay: canonical fields
+// control the emitted wire (outer model; inner generationConfig members,
+// safetySettings, systemInstruction/contents/tools) while unknown
+// wrapper/inner siblings pass through losslessly at their exact scopes.
+func TestCodeAssistOverlayCanonicalWins(t *testing.T) {
+	maxTok := 2048
+	temp := 0.7
+	topP := 0.9
+	safety, _ := engine.ParseOptionalJSONArray([]byte(`[{"category":"HARM_CATEGORY_HARASSMENT","threshold":"BLOCK_NONE"}]`))
+	chat := &engine.ChatRequest{
+		Model:       "gemini-3.5-flash-extra-low",
+		MaxTokens:   &maxTok,
+		Temperature: &temp,
+		TopP:        &topP,
+		CodeAssist:  true,
+		ProviderExtensions: mustExtCA(map[string]any{
+			"project": "my-project", // wrapper extra
+			"request": map[string]any{
+				"sessionId": "s-1", // inner extra
+				"generationConfig": map[string]any{
+					"candidateCount": 3, // unknown generation sibling (canonical members are stripped at parse)
+				},
+			},
+		}),
+		SafetySettings: safety,
+		Messages: []engine.Message{
+			{Role: engine.RoleUser, Blocks: []engine.Block{{Text: &engine.TextBlock{Text: "hi"}}}},
+		},
+	}
+	out, err := (&Adapter{}).Marshal(chat)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var top map[string]any
+	if err := json.Unmarshal(out, &top); err != nil {
+		t.Fatal(err)
+	}
+	// Canonical outer model wins.
+	if top["model"] != "gemini-3.5-flash-extra-low" {
+		t.Fatalf("canonical model lost: %v", top["model"])
+	}
+	// Wrapper extra survives at the top scope.
+	if top["project"] != "my-project" {
+		t.Fatalf("wrapper extra lost: %v", top["project"])
+	}
+	req := top["request"].(map[string]any)
+	if req["sessionId"] != "s-1" {
+		t.Fatalf("inner extra lost: %v", req["sessionId"])
+	}
+	gc := req["generationConfig"].(map[string]any)
+	if gc["maxOutputTokens"] != float64(2048) {
+		t.Fatalf("canonical maxOutputTokens not rebuilt: %v", gc["maxOutputTokens"])
+	}
+	if gc["temperature"] != 0.7 || gc["topP"] != 0.9 {
+		t.Fatalf("canonical generation members not rebuilt: %v", gc)
+	}
+	if gc["candidateCount"] != float64(3) {
+		t.Fatalf("unknown generation sibling lost: %v", gc["candidateCount"])
+	}
+	if len(gc) != 4 {
+		t.Fatalf("generationConfig = %v, want exactly the 3 canonical + 1 sibling", gc)
+	}
+	if _, ok := req["safetySettings"]; !ok {
+		t.Fatalf("canonical safetySettings not rebuilt: %v", req)
+	}
+}
+
+// TestCodeAssistEnvelopeSmugglingRefused — a replacement envelope that
+// smuggles canonical members through the extras path is REFUSED at
+// marshal (normal plugin failure mode), never silently ignored.
+func TestCodeAssistEnvelopeSmugglingRefused(t *testing.T) {
+	rows := map[string]map[string]any{
+		"outer model": {
+			"model":   "evil-model",
+			"request": map[string]any{},
+		},
+		"inner contents": {
+			"request": map[string]any{"contents": []any{}},
+		},
+		"inner tools": {
+			"request": map[string]any{"tools": []any{}},
+		},
+		"inner safetySettings": {
+			"request": map[string]any{"safetySettings": []any{}},
+		},
+		"inner systemInstruction": {
+			"request": map[string]any{"systemInstruction": map[string]any{}},
+		},
+		"generation canonical": {
+			"request": map[string]any{"generationConfig": map[string]any{"maxOutputTokens": 1}},
+		},
+	}
+	for name, env := range rows {
+		t.Run(name, func(t *testing.T) {
+			chat := &engine.ChatRequest{
+				Model:              "m",
+				CodeAssist:         true,
+				ProviderExtensions: mustExtCA(env),
+				Messages: []engine.Message{
+					{Role: engine.RoleUser, Blocks: []engine.Block{{Text: &engine.TextBlock{Text: "hi"}}}},
+				},
+			}
+			if _, err := (&Adapter{}).Marshal(chat); err == nil {
+				t.Fatalf("smuggled canonical member %q accepted", name)
+			}
+		})
+	}
 }

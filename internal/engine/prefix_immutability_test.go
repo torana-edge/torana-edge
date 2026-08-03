@@ -87,7 +87,7 @@ func TestCachePrefixKeyAliasAdversarial(t *testing.T) {
 // expected framed hash with its OWN sha256 framing (a separate
 // implementation of the length-prefix scheme), its OWN truncation, and the
 // hard-coded domain tag — never the production helpers.
-func referencePrefixKey(c *pb.ChatRequest) string {
+func referencePrefixKey(c *pb.ChatRequest, topo TopologyFacts) string {
 	const domain = "torana/cache-prefix/v1"
 	h := sha256.New()
 	frameStr := func(s string) {
@@ -122,6 +122,17 @@ func referencePrefixKey(c *pb.ChatRequest) string {
 	}
 	frameBytes(c.ProviderExtensionsJson)
 	frameBytes(c.SafetySettingsJson)
+
+	// The typed host-only topology facts (reconstruction-changing).
+	frameStr("topology")
+	if topo.CodeAssist {
+		frameStr("codeassist")
+	} else {
+		frameStr("bare")
+	}
+	frameStr("variant")
+	frameStr(string(rune('0' + topo.OpenAIVariant)))
+	frameBytes(topo.ResponsesInputLayout.Bytes())
 
 	// The reference model mirrors production fail-closed semantics: an
 	// SDK fingerprint error makes the whole key empty.
@@ -218,7 +229,7 @@ func TestCachePrefixKeyMatchesReferenceModel(t *testing.T) {
 	for name, c := range cases {
 		t.Run(name, func(t *testing.T) {
 			got := CachePrefixKey(c)
-			want := referencePrefixKey(c)
+			want := referencePrefixKey(c, TopologyFacts{})
 			if got != want {
 				t.Fatalf("production key %q != reference key %q", got, want)
 			}
@@ -226,5 +237,42 @@ func TestCachePrefixKeyMatchesReferenceModel(t *testing.T) {
 				t.Fatal("key unexpectedly empty")
 			}
 		})
+	}
+}
+
+// TestCachePrefixKeyTopologySensitive — the typed host-only topology facts
+// change the key: the code-assist flag, the OpenAI variant, and the
+// Responses layout bytes each flip it (different reconstruction => a key
+// that aliased them would target the wrong provider cache entry).
+func TestCachePrefixKeyTopologySensitive(t *testing.T) {
+	base := &pb.ChatRequest{Model: "m", Messages: []*pb.Message{pbUserMsg("u")}}
+	key := func(topo TopologyFacts) string { return CachePrefixKeyTopology(base, topo) }
+	ref := func(topo TopologyFacts) string { return referencePrefixKey(base, topo) }
+
+	plain := key(TopologyFacts{})
+	if plain == "" || plain != ref(TopologyFacts{}) {
+		t.Fatalf("plain key %q vs reference %q", plain, ref(TopologyFacts{}))
+	}
+	codeAssist := key(TopologyFacts{CodeAssist: true})
+	if codeAssist == plain || codeAssist != ref(TopologyFacts{CodeAssist: true}) {
+		t.Fatal("code-assist flag must flip the key and match the reference")
+	}
+	responses := key(TopologyFacts{OpenAIVariant: OpenAIResponses})
+	if responses == plain || responses != ref(TopologyFacts{OpenAIVariant: OpenAIResponses}) {
+		t.Fatal("openai variant must flip the key and match the reference")
+	}
+	layout, err := ParseOptionalJSONArray([]byte(`[{"type":"message","content":"x"},{"type":"reasoning"}]`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	withLayout := key(TopologyFacts{ResponsesInputLayout: layout})
+	if withLayout == plain || withLayout != ref(TopologyFacts{ResponsesInputLayout: layout}) {
+		t.Fatal("responses layout must flip the key and match the reference")
+	}
+	// Combined facts are order-independent in effect: any distinct
+	// combination is a distinct key.
+	combo := key(TopologyFacts{CodeAssist: true, OpenAIVariant: OpenAIResponses})
+	if combo == plain || combo == codeAssist || combo == responses {
+		t.Fatal("combined facts must produce a distinct key")
 	}
 }

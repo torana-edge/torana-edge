@@ -485,9 +485,7 @@ func TestRoundTrip_ResponsesAPI(t *testing.T) {
 	close(evtCh)
 
 	ctx := context.WithValue(context.Background(), engine.ChatRequestKey, chat)
-	if v, err := json.Marshal("responses"); err == nil {
-		chat.ProviderExtensions, _ = chat.ProviderExtensions.SetMember("_openai_variant", v)
-	}
+	chat.OpenAIVariant = engine.OpenAIResponses
 
 	var buf bytes.Buffer
 	if err := sa.SerializeStream(ctx, &buf, evtCh); err != nil {
@@ -659,9 +657,8 @@ func TestSerializeMalformedBlocksErrorChat(t *testing.T) {
 // protocol too — boundaries lower to no wire content and the deltas ride the
 // output_text.delta arm.
 func TestSerializeCanonicalBlocksResponses(t *testing.T) {
-	ext, _ := engine.ParseOptionalJSONObject([]byte(`{"_openai_variant":"responses"}`))
 	ctx := context.WithValue(context.Background(), engine.ChatRequestKey, &engine.ChatRequest{
-		ProviderExtensions: ext,
+		OpenAIVariant: engine.OpenAIResponses,
 	})
 
 	for _, tc := range []struct {
@@ -722,9 +719,8 @@ func TestSerializeCanonicalBlocksResponses(t *testing.T) {
 // error on the Responses serializer — their semantics are genuinely
 // unavailable on this protocol.
 func TestSerializeProviderBlockErrorResponses(t *testing.T) {
-	ext, _ := engine.ParseOptionalJSONObject([]byte(`{"_openai_variant":"responses"}`))
 	ctx := context.WithValue(context.Background(), engine.ChatRequestKey, &engine.ChatRequest{
-		ProviderExtensions: ext,
+		OpenAIVariant: engine.OpenAIResponses,
 	})
 	evCh := make(chan engine.StreamEvent, 1)
 	evCh <- engine.StreamEvent{BlockStart: &engine.BlockStart{
@@ -777,4 +773,41 @@ func mustReqOAI(raw string) engine.RequiredJSONObject {
 		panic(err)
 	}
 	return r
+}
+
+// TestNoOpenAISentinels — the dead `_openai_original_model` sentinel and
+// the old `_openai_variant`/`_openai_input_layout` keys are GONE: no
+// Responses round-trip carries them in provider_extensions_json; the
+// variant and layout are typed host-only facts, the model comes from
+// ChatRequest.Model.
+func TestNoOpenAISentinels(t *testing.T) {
+	body := `{"object":"response","model":"m2","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}],"stream":false}`
+	chat, err := (&Adapter{}).Unmarshal([]byte(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if chat.OpenAIVariant != engine.OpenAIResponses {
+		t.Fatalf("variant = %v, want responses", chat.OpenAIVariant)
+	}
+	if chat.ResponsesInputLayout.IsAbsent() {
+		t.Fatal("the typed Responses layout must be captured")
+	}
+	if !chat.ProviderExtensions.IsAbsent() {
+		ext := string(chat.ProviderExtensions.Bytes())
+		for _, sentinel := range []string{"_openai_original_model", "_openai_variant", "_openai_input_layout"} {
+			if strings.Contains(ext, sentinel) {
+				t.Fatalf("sentinel %q still in provider extensions: %s", sentinel, ext)
+			}
+		}
+	}
+	out, err := (&Adapter{}).Marshal(chat)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(out), "_openai_original_model") {
+		t.Fatalf("sentinel on the wire: %s", out)
+	}
+	if !strings.Contains(string(out), `"model":"m2"`) {
+		t.Fatalf("canonical model lost: %s", out)
+	}
 }

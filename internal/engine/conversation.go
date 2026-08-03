@@ -126,7 +126,27 @@ func ConversationID(c *ChatRequest) string {
 // prefix projection is hashed — the marker message is truncated at the
 // exact block/nested position (pure PB construction, never mutating or
 // aliasing the input) and hashed with the SDK's shared body fingerprint.
+// TopologyFacts carries the host-only reconstruction facts folded into
+// the cache key (raw-JSON checkpoint section 4): the wire reconstruction
+// depends on the Code Assist variant, the OpenAI variant, and the
+// Responses input layout, so a key that ignored them could alias two
+// different provider wires. The plugin mirror cannot reproduce these
+// host-only facts (S1 obligation: cache_tier_selector reconciliation).
+type TopologyFacts struct {
+	CodeAssist           bool
+	OpenAIVariant        OpenAIVariant
+	ResponsesInputLayout OptionalJSONArray
+}
+
+// CachePrefixKey is the PB-only form with no topology facts (mirror
+// stable; host call sites pass the facts via CachePrefixKeyTopology).
 func CachePrefixKey(pbReq *pb.ChatRequest) string {
+	return CachePrefixKeyTopology(pbReq, TopologyFacts{})
+}
+
+// CachePrefixKeyTopology is CachePrefixKey with the typed host-only
+// topology facts folded in.
+func CachePrefixKeyTopology(pbReq *pb.ChatRequest, topo TopologyFacts) string {
 	if pbReq == nil {
 		return ""
 	}
@@ -162,6 +182,17 @@ func CachePrefixKey(pbReq *pb.ChatRequest) string {
 	// top-level provider-visible prefix state the plugins never reproduce.
 	writeHashFieldBytes(h, pbReq.ProviderExtensionsJson)
 	writeHashFieldBytes(h, pbReq.SafetySettingsJson)
+
+	// The typed host-only TOPOLOGY facts that change reconstruction.
+	writeHashField(h, "topology")
+	if topo.CodeAssist {
+		writeHashField(h, "codeassist")
+	} else {
+		writeHashField(h, "bare")
+	}
+	writeHashField(h, "variant")
+	writeHashField(h, string(rune('0'+topo.OpenAIVariant)))
+	writeHashFieldBytes(h, topo.ResponsesInputLayout.Bytes())
 
 	// The SDK fingerprint is ERROR-RETURNING; every error is a fail-closed
 	// EMPTY KEY — an unrepresentable body must never hash a partial prefix.

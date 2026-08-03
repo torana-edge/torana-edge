@@ -1030,6 +1030,11 @@ func (pp *PluginPipeline) RunBeforeRequest(ctx context.Context, reqID uint64, ch
 	pp.Acquire()
 	defer pp.Release()
 
+	// The accepted request: its typed host-only TOPOLOGY facts (variant,
+	// Code Assist flag, Responses layout) are restored onto the plugin
+	// replacement below — they are never in the ABI.
+	accepted := chat
+
 	headers := snapshotHeaders(rawHeaders)
 	// The accepted-input closure: the engine request is checked against the
 	// SDK replacement domain BEFORE the first hook — zero/multi-arm blocks,
@@ -1070,6 +1075,13 @@ func (pp *PluginPipeline) RunBeforeRequest(ctx context.Context, reqID uint64, ch
 		// backstop.
 		return nil, fmt.Errorf("convert replacement: %w", convErr)
 	}
+	// The typed host-only TOPOLOGY facts survive the replacement: they are
+	// never in the ABI, so the plugin round-trip cannot carry them — the
+	// host restores them from the accepted request. A plugin can neither
+	// forge nor lose the variant/layout facts.
+	chat.CodeAssist = chat.CodeAssist || accepted.CodeAssist
+	chat.OpenAIVariant = accepted.OpenAIVariant
+	chat.ResponsesInputLayout = accepted.ResponsesInputLayout
 	return chat, nil
 }
 

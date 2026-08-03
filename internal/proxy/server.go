@@ -167,21 +167,9 @@ type Server struct {
 type routeContextKey struct{}
 
 func isOpenAIResponsesRequest(chat *engine.ChatRequest) bool {
-	// The variant sentinel is host-authored; a decode failure (guest-mutated
-	// extensions) is treated as "not responses" — the documented invariant.
-	if chat == nil || chat.ProviderExtensions.IsAbsent() {
-		return false
-	}
-	m, _, err := chat.ProviderExtensions.DecodeObject()
-	if err != nil {
-		return false
-	}
-	raw, ok := m["_openai_variant"]
-	if !ok {
-		return false
-	}
-	var variant string
-	return json.Unmarshal(raw, &variant) == nil && variant == "responses"
+	// The variant is a typed host-only topology fact: plugins can neither
+	// forge nor lose it (restored at the pipeline boundary).
+	return chat != nil && chat.OpenAIVariant == engine.OpenAIResponses
 }
 
 func applyOpenAIResponsesCompaction(chat *engine.ChatRequest, p provider.Provider) {
@@ -1110,7 +1098,11 @@ func New(cfg Config) (*Server, error) {
 			// SDK's full-domain validator on the PB itself — the fail-safe
 			// "" is the only outcome for an out-of-domain request.
 			if pbReq, cerr := pbconv.ToPBChatRequestChecked(chat); cerr == nil {
-				rs.CachePrefixKey = engine.CachePrefixKey(pbReq)
+				rs.CachePrefixKey = engine.CachePrefixKeyTopology(pbReq, engine.TopologyFacts{
+					CodeAssist:           chat.CodeAssist,
+					OpenAIVariant:        chat.OpenAIVariant,
+					ResponsesInputLayout: chat.ResponsesInputLayout,
+				})
 			}
 			rs.Path = rc.StrippedPath
 

@@ -26,11 +26,6 @@ func init() {
 // and Responses API formats.
 type Adapter struct{}
 
-// responsesInputLayoutExt stores the caller's typed Responses input array so
-// opaque items (reasoning, compaction, and future item types) survive the
-// canonical ChatRequest pipeline. It is internal and never emitted itself.
-const responsesInputLayoutExt = "_openai_input_layout"
-
 // --- wire types for unmarshal ------------------------------------------------
 
 // chatRequest is the Chat Completions JSON shape.
@@ -125,12 +120,10 @@ func (a *Adapter) Marshal(chat *engine.ChatRequest) ([]byte, error) {
 	if err := pbconv.ValidateFullRequest(chat); err != nil {
 		return nil, fmt.Errorf("openai: %w", err)
 	}
-	// The variant sentinel is host-only topology (typed host-state replaces
-	// it later); a malformed/absent object falls back to chat completions.
-	if !chat.ProviderExtensions.IsAbsent() {
-		if variant, ok := readExtStringO(chat.ProviderExtensions, "_openai_variant"); ok && variant == "responses" {
-			return marshalResponses(chat)
-		}
+	// The typed host-only topology fact decides the wire variant; a plugin
+	// can neither forge nor lose it.
+	if chat.OpenAIVariant == engine.OpenAIResponses {
+		return marshalResponses(chat)
 	}
 	return marshalChat(chat)
 }
@@ -190,8 +183,8 @@ func marshalResponses(chat *engine.ChatRequest) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	if layout := readExtRaw(chat.ProviderExtensions, responsesInputLayoutExt); layout != nil {
-		items, lerr := responsesItemsWithLayout(projected, layout)
+	if !chat.ResponsesInputLayout.IsAbsent() {
+		items, lerr := responsesItemsWithLayout(projected, chat.ResponsesInputLayout.Bytes())
 		if lerr != nil {
 			return nil, lerr
 		}
@@ -293,19 +286,6 @@ func responsesItemsWithLayout(projected []any, layout []byte) ([]any, error) {
 		return nil, fmt.Errorf("openai responses: %d projected item(s) have no layout slot", len(projected)-mi)
 	}
 	return items, nil
-}
-
-// readExtRaw returns a raw member of the provider extensions, or nil when
-// absent.
-func readExtRaw(ext engine.OptionalJSONObject, key string) []byte {
-	if ext.IsAbsent() {
-		return nil
-	}
-	m, _, err := ext.DecodeObject()
-	if err != nil {
-		return nil
-	}
-	return m[key]
 }
 
 // responsesItemsFromMessages projects messages onto Responses input items in
@@ -605,23 +585,6 @@ func stripOpenAIPartFacts(raw json.RawMessage, keys ...string) (engine.RequiredJ
 	return obj, nil
 }
 
-// readExtStringO reads a string member from a raw extensions object.
-func readExtStringO(ext engine.OptionalJSONObject, key string) (string, bool) {
-	if ext.IsAbsent() {
-		return "", false
-	}
-	m, _, err := ext.DecodeObject()
-	if err != nil {
-		return "", false
-	}
-	raw, ok := m[key]
-	if !ok {
-		return "", false
-	}
-	var s string
-	return s, json.Unmarshal(raw, &s) == nil
-}
-
 // mustParseToolArgs is the Responses unmarshal site for tool-call
 // arguments: the caller's arguments field is JSON text (decoded once at the
 // parse boundary — the documented canonicalization); empty text normalizes
@@ -712,18 +675,8 @@ func (a *Adapter) unmarshalResponses(rawBody []byte) (*engine.ChatRequest, error
 	if xerr != nil {
 		return nil, fmt.Errorf("openai responses provider extensions: %w", xerr)
 	}
-	if ext, xerr = ext.SetMember("_openai_variant", json.RawMessage(`"responses"`)); xerr != nil {
-		return nil, fmt.Errorf("openai responses provider extensions: %w", xerr)
-	}
-	if rr.Model != "" {
-		modelBytes, merr := json.Marshal(rr.Model)
-		if merr != nil {
-			return nil, fmt.Errorf("openai responses provider extensions: %w", merr)
-		}
-		if ext, xerr = ext.SetMember("_openai_original_model", modelBytes); xerr != nil {
-			return nil, fmt.Errorf("openai responses provider extensions: %w", xerr)
-		}
-	}
+	// The variant is typed host-only topology, never an ABI sentinel.
+	req.OpenAIVariant = engine.OpenAIResponses
 	req.ProviderExtensions = ext
 
 	// Input: string or array.
@@ -751,9 +704,11 @@ func (a *Adapter) unmarshalResponses(rawBody []byte) (*engine.ChatRequest, error
 						req.Messages = append(req.Messages, msg)
 					}
 				}
-				if ext, xerr = ext.SetMember(responsesInputLayoutExt, rr.Input); xerr != nil {
-					return nil, fmt.Errorf("openai responses provider extensions: %w", xerr)
+				layout, lerr := engine.ParseOptionalJSONArray(rr.Input)
+				if lerr != nil {
+					return nil, fmt.Errorf("openai responses input layout: %w", lerr)
 				}
+				req.ResponsesInputLayout = layout
 			} else {
 				// Try legacy array of messages.
 				var msgs []chatMessage

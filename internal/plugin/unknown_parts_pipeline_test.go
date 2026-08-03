@@ -327,3 +327,48 @@ func assertFRPWire(t *testing.T, wire []byte, arm, inner string) error {
 	}
 	return nil
 }
+
+// TestCodeAssistTypedFactsSurviveWASMPass — the typed Code Assist variant
+// and the provider-visible envelope survive a real WASM pass: the plugin
+// cannot forge or lose the typed flag, and the envelope extras reach the
+// final wire at their exact scopes.
+func TestCodeAssistTypedFactsSurviveWASMPass(t *testing.T) {
+	requireWASM(t, fixturesDir+"/test-inert-a/plugin.wasm")
+	pp := newTestPipeline(t, fixturesDir, []string{"test-inert-a"})
+
+	env, err := engine.ParseOptionalJSONObject([]byte(`{"project":"p-1","request":{"sessionId":"s-9"}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	chat := &engine.ChatRequest{
+		Model:              "gemini-3.5-flash",
+		CodeAssist:         true,
+		ProviderExtensions: env,
+		Messages:           []engine.Message{{Role: engine.RoleUser, Blocks: []engine.Block{{Text: &engine.TextBlock{Text: "hi"}}}}},
+	}
+	out, err := pp.RunBeforeRequest(context.Background(), 13, chat, nil)
+	if err != nil {
+		t.Fatalf("RunBeforeRequest: %v", err)
+	}
+	if !out.CodeAssist {
+		t.Fatal("the typed Code Assist variant was lost through the pass")
+	}
+	wire, err := geminiAdapter.Marshal(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(wire, &doc); err != nil {
+		t.Fatal(err)
+	}
+	if doc["project"] != "p-1" {
+		t.Fatalf("wrapper extra lost: %v", doc["project"])
+	}
+	req, ok := doc["request"].(map[string]any)
+	if !ok {
+		t.Fatalf("no request member: %s", wire)
+	}
+	if req["sessionId"] != "s-9" {
+		t.Fatalf("inner extra lost: %v", req["sessionId"])
+	}
+}
