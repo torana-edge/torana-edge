@@ -250,6 +250,15 @@ func (s *Server) sendPluginRequest(ctx context.Context, pluginName, payloadJSON 
 	if err := proto.Unmarshal(raw, &pbReq); err != nil {
 		return wasm.ExtensionRefusal(pb.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "request_pb is not a ChatRequest: %v", err)
 	}
+	// Guest-controlled request_pb must satisfy the v2 replacement contract
+	// (SDK ValidateReplacement) BEFORE conversion: empty required tool
+	// arguments/schemas, nil nested values, and malformed JSON are refused
+	// here — provider-side omissions normalize at the provider parse
+	// boundary, never for a handwritten v2 guest.
+	if err := pbReq.ValidateReplacement(); err != nil {
+		return wasm.ExtensionRefusal(pb.ErrorCode_ERROR_CODE_INVALID_ARGUMENT,
+			"request_pb does not satisfy the v2 replacement contract: %v", err)
+	}
 	chat, err := pbconv.FromPBChatRequest(&pbReq)
 	if err != nil {
 		return wasm.ExtensionRefusal(pb.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "request_pb is not well-formed: %v", err)

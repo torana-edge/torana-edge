@@ -101,7 +101,10 @@ func FromPBChatRequest(c *pb.ChatRequest) (*engine.ChatRequest, error) {
 		json.Unmarshal(c.ToranaMetaJson, &out.ToranaMeta)
 	}
 
-	for _, m := range c.Messages {
+	for i, m := range c.Messages {
+		if m == nil {
+			return nil, fmt.Errorf("pb messages[%d] is nil", i)
+		}
 		msg, err := fromPBMessage(m)
 		if err != nil {
 			return nil, err
@@ -109,7 +112,10 @@ func FromPBChatRequest(c *pb.ChatRequest) (*engine.ChatRequest, error) {
 		out.Messages = append(out.Messages, msg)
 	}
 
-	for _, t := range c.Tools {
+	for i, t := range c.Tools {
+		if t == nil {
+			return nil, fmt.Errorf("pb tools[%d] is nil", i)
+		}
 		params, err := engine.ParseRequiredObjectOrEmpty(t.ParametersJson)
 		if err != nil {
 			return nil, fmt.Errorf("pb tool %q parameters_json: %w", t.Name, err)
@@ -474,7 +480,7 @@ func toPBMessage(m engine.Message) *pb.Message {
 
 func fromPBMessage(m *pb.Message) (engine.Message, error) {
 	if m == nil {
-		return engine.Message{}, nil
+		return engine.Message{}, fmt.Errorf("pb message is nil")
 	}
 	msg := engine.Message{
 		Role:              engine.Role(m.Role),
@@ -493,7 +499,10 @@ func fromPBMessage(m *pb.Message) (engine.Message, error) {
 	if len(m.CacheControlJson) > 0 {
 		json.Unmarshal(m.CacheControlJson, &msg.CacheControl)
 	}
-	for _, tc := range m.ToolCalls {
+	for j, tc := range m.ToolCalls {
+		if tc == nil {
+			return engine.Message{}, fmt.Errorf("pb message tool_calls[%d] is nil", j)
+		}
 		args, err := engine.ParseRequiredObjectOrEmpty(tc.ArgumentsJson)
 		if err != nil {
 			return engine.Message{}, fmt.Errorf("pb message tool call %q arguments_json: %w", tc.Name, err)

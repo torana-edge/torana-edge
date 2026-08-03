@@ -395,10 +395,10 @@ func (a *Adapter) Marshal(chat *engine.ChatRequest) ([]byte, error) {
 	}
 
 	if len(chat.ProviderExtensions) > 0 {
-		var outMap map[string]any
+		var outMap map[string]json.RawMessage
 		json.Unmarshal(b, &outMap)
 		for k, v := range chat.ProviderExtensions {
-			outMap[k] = v
+			outMap[k], _ = json.Marshal(v)
 		}
 		return json.Marshal(outMap)
 	}

@@ -9,6 +9,7 @@ package format_test
 // error path (malformed PB arguments cannot silently become nil).
 
 import (
+	"bytes"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -259,7 +260,7 @@ func TestRawJSONFromPBError(t *testing.T) {
 // requests identical except the arguments lexeme differ in key; the same
 // bytes in different fields differ; the canonical {} is deterministic.
 func TestRawJSONCacheKeyPins(t *testing.T) {
-	base := func(args string) *engine.ChatRequest {
+	base := func(args, params string) *engine.ChatRequest {
 		return &engine.ChatRequest{
 			Model: "m",
 			Messages: []engine.Message{
@@ -268,28 +269,38 @@ func TestRawJSONCacheKeyPins(t *testing.T) {
 					{ID: "t1", Name: "read", Arguments: mustPinned(args)},
 				}},
 			},
-			Tools: []engine.ToolDef{{Name: "read", Parameters: mustPinned(`{"type":"object"}`)}},
+			Tools: []engine.ToolDef{{Name: "read", Parameters: mustPinned(params)}},
 		}
 	}
-	k1 := engine.CachePrefixKey(base(`{"path":"a"}`))
-	k2 := engine.CachePrefixKey(base(`{"path":"a","x":1e999}`))
-	if k1 == k2 {
+	// Lexeme difference changes the key.
+	if k1, k2 := engine.CachePrefixKey(base(`{"path":"a"}`, `{"type":"object"}`)),
+		engine.CachePrefixKey(base(`{"path":"a","x":1e999}`, `{"type":"object"}`)); k1 == k2 {
 		t.Fatal("lexeme difference did not change the cache key")
 	}
-	k3 := engine.CachePrefixKey(base(`{"x":1e999,"path":"a"}`))
-	if k2 == k3 {
+	// Key order difference changes the key.
+	if k1, k2 := engine.CachePrefixKey(base(`{"x":1e999,"path":"a"}`, `{"type":"object"}`)),
+		engine.CachePrefixKey(base(`{"path":"a","x":1e999}`, `{"type":"object"}`)); k1 == k2 {
 		t.Fatal("key order difference did not change the cache key")
 	}
-	// Same bytes in a different field (arguments vs parameters) differ.
-	swapped := base(`{"type":"object"}`)
-	swapped.Messages[1].ToolCalls[0].Arguments = mustPinned(`{"path":"a"}`)
-	swapped.Tools[0].Parameters = mustPinned(`{"path":"a"}`)
-	_ = swapped
-	// Canonical {} is deterministic.
-	a := engine.CachePrefixKey(base(`{}`))
-	b := engine.CachePrefixKey(base(`{}`))
-	if a != b {
+	// Field identity/position is part of the framed transcript: the SAME two
+	// byte payloads swapped between arguments and parameters must NOT share
+	// a key (they would collide if writeHashFieldBytes alone carried the
+	// bytes without the surrounding positional framing).
+	payloadA := `{"path":"a"}`
+	payloadB := `{"type":"object"}`
+	ab := engine.CachePrefixKey(base(payloadA, payloadB))
+	ba := engine.CachePrefixKey(base(payloadB, payloadA))
+	if ab == ba {
+		t.Fatal("identical bytes in different fields produced the same cache key")
+	}
+	// Positive controls: identical requests and canonical-zero wrappers are
+	// deterministic and equal.
+	if k1, k2 := engine.CachePrefixKey(base(`{}`, `{}`)), engine.CachePrefixKey(base(`{}`, `{}`)); k1 != k2 {
 		t.Fatal("canonical {} cache key is not deterministic")
+	}
+	if k1, k2 := engine.CachePrefixKey(base(`{"path":"a"}`, `{"type":"object"}`)),
+		engine.CachePrefixKey(base(`{"path":"a"}`, `{"type":"object"}`)); k1 != k2 {
+		t.Fatal("identical requests produced different cache keys")
 	}
 }
 
@@ -306,4 +317,302 @@ func mustPinned(raw string) engine.RequiredJSONObject {
 func jsonMarshalString(raw string) string {
 	b, _ := json.Marshal(raw)
 	return string(b)
+}
+
+// TestRawJSONFromPBNilGraph: the converter is TOTAL over arbitrary
+// protobuf object graphs — nil nested messages, tool defs, and tool calls
+// are indexed refusals, never panics, never silent empties.
+func TestRawJSONFromPBNilGraph(t *testing.T) {
+	cases := []struct {
+		name string
+		req  *pb.ChatRequest
+	}{
+		{"nil message element", &pb.ChatRequest{Messages: []*pb.Message{nil}}},
+		{"nil tool def element", &pb.ChatRequest{Tools: []*pb.ToolDef{nil}}},
+		{"nil tool call element", &pb.ChatRequest{Messages: []*pb.Message{
+			{Role: "assistant", ToolCalls: []*pb.ToolCall{nil}},
+		}}},
+		{"nil message inside valid list", &pb.ChatRequest{Messages: []*pb.Message{
+			{Role: "user", Content: "hi"}, nil,
+		}}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if _, err := pbconv.FromPBChatRequest(c.req); err == nil {
+				t.Fatal("nil graph accepted")
+			}
+		})
+	}
+}
+
+// TestRawJSONMatrixExact: the full lexeme corpus runs for BOTH required
+// fields on EVERY applicable format arm (OpenAI Chat AND Responses), with
+// exact boundary equality: wrapper.Bytes() equals the expected input
+// representation, and the marshal output extracts the exact raw object
+// (or the exact JSON-text string for OpenAI) which must byte-equal it.
+func TestRawJSONMatrixExact(t *testing.T) {
+	corpus := []struct {
+		name string
+		obj  string // the object representation expected at the engine boundary
+	}{
+		{"big number", `{"z":1e999,"a":18446744073709551615,"o":1.0}`},
+		{"escaped unicode", `{"s":"\ud83d\ude00","e":"\u0061"}`},
+		{"non-alphabetical order", `{"z":1,"a":2,"m":3}`},
+		{"whitespace members", `{ "z" : 1 , "a" : 2 }`},
+	}
+	type arm struct {
+		name      string
+		body      func(string, string) string // format body with args+params inserted
+		unmarshal func([]byte) (*engine.ChatRequest, error)
+		marshal   func(*engine.ChatRequest) ([]byte, error)
+		// argsExactText marks arms where the arguments travel as a JSON
+		// TEXT STRING (OpenAI): string content survives byte-exact,
+		// including intra-value whitespace. Every other raw field rides in
+		// a struct json.RawMessage, and Go's encoding/json COMPACTS
+		// Marshaler output in struct fields (documented behaviour), so the
+		// wire carries the lexemes, key order, and content with
+		// insignificant whitespace deterministically removed.
+		argsExactText bool
+		extractArgs   func(t *testing.T, out []byte) []byte
+		extractParams func(t *testing.T, out []byte) []byte
+	}
+	arms := []arm{
+		{
+			name: "anthropic",
+			body: func(args, params string) string {
+				return `{"model":"m","tools":[{"name":"read_file","input_schema":` + params + `}],"messages":[{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"read_file","input":` + args + `}]}]}`
+			},
+			unmarshal: func(b []byte) (*engine.ChatRequest, error) { return (&anthropic.Adapter{}).Unmarshal(b) },
+			marshal:   func(c *engine.ChatRequest) ([]byte, error) { return (&anthropic.Adapter{}).Marshal(c) },
+			extractArgs: func(t *testing.T, out []byte) []byte {
+				var m struct {
+					Messages []struct {
+						Content []struct {
+							Type  string          `json:"type"`
+							Input json.RawMessage `json:"input"`
+						} `json:"content"`
+					} `json:"messages"`
+				}
+				if err := json.Unmarshal(out, &m); err != nil {
+					t.Fatalf("extract: %v", err)
+				}
+				return m.Messages[0].Content[0].Input
+			},
+			extractParams: func(t *testing.T, out []byte) []byte {
+				var m struct {
+					Tools []struct {
+						InputSchema json.RawMessage `json:"input_schema"`
+					} `json:"tools"`
+				}
+				if err := json.Unmarshal(out, &m); err != nil {
+					t.Fatalf("extract: %v", err)
+				}
+				return m.Tools[0].InputSchema
+			},
+		},
+		{
+			name:          "openai-chat",
+			argsExactText: true,
+			body: func(args, params string) string {
+				return `{"model":"m","tools":[{"type":"function","function":{"name":"read_file","parameters":` + params + `}}],"messages":[{"role":"assistant","tool_calls":[{"id":"t1","type":"function","function":{"name":"read_file","arguments":` + jsonMarshalString(args) + `}}]}]}`
+			},
+			unmarshal: func(b []byte) (*engine.ChatRequest, error) { return (&openai.Adapter{}).Unmarshal(b) },
+			marshal:   func(c *engine.ChatRequest) ([]byte, error) { return (&openai.Adapter{}).Marshal(c) },
+			extractArgs: func(t *testing.T, out []byte) []byte {
+				var m struct {
+					Messages []struct {
+						ToolCalls []struct {
+							Function struct {
+								Arguments string `json:"arguments"`
+							} `json:"function"`
+						} `json:"tool_calls"`
+					} `json:"messages"`
+				}
+				if err := json.Unmarshal(out, &m); err != nil {
+					t.Fatalf("extract: %v", err)
+				}
+				return []byte(m.Messages[0].ToolCalls[0].Function.Arguments)
+			},
+			extractParams: func(t *testing.T, out []byte) []byte {
+				var m struct {
+					Tools []struct {
+						Function struct {
+							Parameters json.RawMessage `json:"parameters"`
+						} `json:"function"`
+					} `json:"tools"`
+				}
+				if err := json.Unmarshal(out, &m); err != nil {
+					t.Fatalf("extract: %v", err)
+				}
+				return m.Tools[0].Function.Parameters
+			},
+		},
+		{
+			name:          "openai-responses",
+			argsExactText: true,
+			body: func(args, params string) string {
+				return `{"model":"m","input":[{"type":"function_call","call_id":"t1","name":"read_file","arguments":` + jsonMarshalString(args) + `}],"tools":[{"type":"function","name":"read_file","parameters":` + params + `}]}`
+			},
+			unmarshal: func(b []byte) (*engine.ChatRequest, error) { return (&openai.Adapter{}).Unmarshal(b) },
+			marshal:   func(c *engine.ChatRequest) ([]byte, error) { return (&openai.Adapter{}).Marshal(c) },
+			extractArgs: func(t *testing.T, out []byte) []byte {
+				var m struct {
+					Input []struct {
+						Type      string `json:"type"`
+						Arguments string `json:"arguments"`
+					} `json:"input"`
+				}
+				if err := json.Unmarshal(out, &m); err != nil {
+					t.Fatalf("extract: %v", err)
+				}
+				return []byte(m.Input[0].Arguments)
+			},
+			extractParams: func(t *testing.T, out []byte) []byte {
+				var m struct {
+					Tools []struct {
+						Parameters json.RawMessage `json:"parameters"`
+					} `json:"tools"`
+				}
+				if err := json.Unmarshal(out, &m); err != nil {
+					t.Fatalf("extract: %v", err)
+				}
+				return m.Tools[0].Parameters
+			},
+		},
+		{
+			name: "gemini",
+			body: func(args, params string) string {
+				return `{"tools":[{"functionDeclarations":[{"name":"read_file","parameters":` + params + `}]}],"contents":[{"role":"model","parts":[{"functionCall":{"name":"read_file","args":` + args + `}}]}]}`
+			},
+			unmarshal: func(b []byte) (*engine.ChatRequest, error) { return (&gemini.Adapter{}).Unmarshal(b) },
+			marshal:   func(c *engine.ChatRequest) ([]byte, error) { return (&gemini.Adapter{}).Marshal(c) },
+			extractArgs: func(t *testing.T, out []byte) []byte {
+				var m struct {
+					Contents []struct {
+						Parts []struct {
+							FunctionCall struct {
+								Args json.RawMessage `json:"args"`
+							} `json:"functionCall"`
+						} `json:"parts"`
+					} `json:"contents"`
+				}
+				if err := json.Unmarshal(out, &m); err != nil {
+					t.Fatalf("extract: %v", err)
+				}
+				return m.Contents[0].Parts[0].FunctionCall.Args
+			},
+			extractParams: func(t *testing.T, out []byte) []byte {
+				var m struct {
+					Tools []struct {
+						FunctionDeclarations []struct {
+							Parameters json.RawMessage `json:"parameters"`
+						} `json:"functionDeclarations"`
+					} `json:"tools"`
+				}
+				if err := json.Unmarshal(out, &m); err != nil {
+					t.Fatalf("extract: %v", err)
+				}
+				return m.Tools[0].FunctionDeclarations[0].Parameters
+			},
+		},
+		{
+			name: "bedrock",
+			body: func(args, params string) string {
+				return `{"modelId":"m","toolConfig":{"tools":[{"toolSpec":{"name":"read_file","inputSchema":{"json":` + params + `}}}]},"messages":[{"role":"assistant","content":[{"toolUse":{"toolUseId":"t1","name":"read_file","input":` + args + `}}]}]}`
+			},
+			unmarshal: func(b []byte) (*engine.ChatRequest, error) { return (&bedrock.Adapter{}).Unmarshal(b) },
+			marshal:   func(c *engine.ChatRequest) ([]byte, error) { return (&bedrock.Adapter{}).Marshal(c) },
+			extractArgs: func(t *testing.T, out []byte) []byte {
+				var m struct {
+					Messages []struct {
+						Content []struct {
+							ToolUse struct {
+								Input json.RawMessage `json:"input"`
+							} `json:"toolUse"`
+						} `json:"content"`
+					} `json:"messages"`
+				}
+				if err := json.Unmarshal(out, &m); err != nil {
+					t.Fatalf("extract: %v", err)
+				}
+				return m.Messages[0].Content[0].ToolUse.Input
+			},
+			extractParams: func(t *testing.T, out []byte) []byte {
+				var m struct {
+					ToolConfig struct {
+						Tools []struct {
+							ToolSpec struct {
+								InputSchema struct {
+									JSON json.RawMessage `json:"json"`
+								} `json:"inputSchema"`
+							} `json:"toolSpec"`
+						} `json:"tools"`
+					} `json:"toolConfig"`
+				}
+				if err := json.Unmarshal(out, &m); err != nil {
+					t.Fatalf("extract: %v", err)
+				}
+				return m.ToolConfig.Tools[0].ToolSpec.InputSchema.JSON
+			},
+		},
+	}
+	schema := `{"z":1,"properties":{"a":{"type":"string"},"m":{"type":"number"}},"required":["a"],"type":"object"}`
+	for _, a := range arms {
+		for _, c := range corpus {
+			wantWireArgs := c.obj
+			if !a.argsExactText {
+				// RawMessage struct fields are compacted at the wire by
+				// Go's Marshaler compaction; lexemes, key order, and
+				// content survive.
+				var buf bytes.Buffer
+				if err := json.Compact(&buf, []byte(c.obj)); err != nil {
+					t.Fatalf("compact: %v", err)
+				}
+				wantWireArgs = buf.String()
+			}
+			// Schemas are RawMessage struct fields on every arm (never a
+			// string-embedded text), so they always compact.
+			var buf bytes.Buffer
+			if err := json.Compact(&buf, []byte(c.obj)); err != nil {
+				t.Fatalf("compact: %v", err)
+			}
+			wantWireParams := buf.String()
+			t.Run(a.name+"/args:"+c.name, func(t *testing.T) {
+				chat, err := a.unmarshal([]byte(a.body(c.obj, schema)))
+				if err != nil {
+					t.Fatalf("unmarshal: %v", err)
+				}
+				got := chat.Messages[0].ToolCalls[0].Arguments.Bytes()
+				if string(got) != c.obj {
+					t.Fatalf("wrapper bytes = %q, want %q", got, c.obj)
+				}
+				out, err := a.marshal(chat)
+				if err != nil {
+					t.Fatalf("marshal: %v", err)
+				}
+				extracted := a.extractArgs(t, out)
+				if string(extracted) != wantWireArgs {
+					t.Fatalf("wire args = %q, want %q", extracted, wantWireArgs)
+				}
+			})
+			t.Run(a.name+"/params:"+c.name, func(t *testing.T) {
+				chat, err := a.unmarshal([]byte(a.body(`{"p":1}`, c.obj)))
+				if err != nil {
+					t.Fatalf("unmarshal: %v", err)
+				}
+				got := chat.Tools[0].Parameters.Bytes()
+				if string(got) != c.obj {
+					t.Fatalf("wrapper schema = %q, want %q", got, c.obj)
+				}
+				out, err := a.marshal(chat)
+				if err != nil {
+					t.Fatalf("marshal: %v", err)
+				}
+				extracted := a.extractParams(t, out)
+				if string(extracted) != wantWireParams {
+					t.Fatalf("wire schema = %q, want %q", extracted, wantWireParams)
+				}
+			})
+		}
+	}
 }
