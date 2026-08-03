@@ -1414,13 +1414,16 @@ func TestCodeAssistEnvelopeInvalidShapes(t *testing.T) {
 func TestGenerationSiblingLossless(t *testing.T) {
 	// Nonalphabetical order, 1e999, 1.0, escaped Unicode, whitespace, a
 	// nested object — inside a valid wrapped request.
-	body := `{"model":"m","request":{"generationConfig":{"z":1e999,"a":1.0,"u":"\u0041bc","w": 42 ,"nested":{"k":[1,2]},"m":"x"}},"contents":[{"role":"user","parts":[{"text":"hi"}]}]}`
+	body := `{"model":"m","request":{"generationConfig":{"z":1e999,"a":1.0,"u":"\u0041bc","w": 42 ,"nested":{"k":[1,2]},"m":"x"},"contents":[{"role":"user","parts":[{"text":"hi"}]}]}}`
 	chat, err := (&Adapter{}).Unmarshal([]byte(body))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !chat.CodeAssist {
 		t.Fatal("variant lost")
+	}
+	if len(chat.Messages) != 1 || chat.Messages[0].Blocks[0].Text.Text != "hi" {
+		t.Fatalf("no message parsed from the wrapped request (contents must live INSIDE request): %+v", chat.Messages)
 	}
 	out, err := (&Adapter{}).Marshal(chat)
 	if err != nil {
@@ -1446,19 +1449,19 @@ func TestGenerationConfigAbsentVsEmpty(t *testing.T) {
 		wantKind string // "absent" | "empty" | "siblings"
 	}{
 		"canonical only": {
-			`{"model":"m","request":{"generationConfig":{"maxOutputTokens":100,"temperature":0.5}},"contents":[{"role":"user","parts":[{"text":"hi"}]}]}`,
+			`{"model":"m","request":{"generationConfig":{"maxOutputTokens":100,"temperature":0.5},"contents":[{"role":"user","parts":[{"text":"hi"}]}]}}`,
 			"absent",
 		},
 		"wire empty": {
-			`{"model":"m","request":{"generationConfig":{}},"contents":[{"role":"user","parts":[{"text":"hi"}]}]}`,
+			`{"model":"m","request":{"generationConfig":{},"contents":[{"role":"user","parts":[{"text":"hi"}]}]}}`,
 			"empty",
 		},
 		"unknown only": {
-			`{"model":"m","request":{"generationConfig":{"candidateCount":3}},"contents":[{"role":"user","parts":[{"text":"hi"}]}]}`,
+			`{"model":"m","request":{"generationConfig":{"candidateCount":3},"contents":[{"role":"user","parts":[{"text":"hi"}]}]}}`,
 			"siblings",
 		},
 		"canonical + unknown": {
-			`{"model":"m","request":{"generationConfig":{"maxOutputTokens":100,"candidateCount":3}},"contents":[{"role":"user","parts":[{"text":"hi"}]}]}`,
+			`{"model":"m","request":{"generationConfig":{"maxOutputTokens":100,"candidateCount":3},"contents":[{"role":"user","parts":[{"text":"hi"}]}]}}`,
 			"siblings",
 		},
 	}

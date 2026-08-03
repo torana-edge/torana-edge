@@ -415,13 +415,32 @@ func TestOpenAIResponsesReplacementLayout(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// The final Responses wire re-splices the opaque reasoning item at its
-	// recorded position AND carries the replaced text.
-	if !strings.Contains(string(wire), `"encrypted_content":"opaque-reasoning"`) {
-		t.Fatalf("opaque item not re-spliced: %s", wire)
+	// STRICT final-input decode: exactly two items in the recorded order —
+	// slot 0 the replaced representable message (with the MUTATED content),
+	// slot 1 the opaque reasoning item with its exact payload; nothing
+	// added, dropped, or moved.
+	var doc map[string]any
+	if err := json.Unmarshal(wire, &doc); err != nil {
+		t.Fatal(err)
 	}
-	if !strings.Contains(string(wire), `"input":[`) || !strings.Contains(string(wire), `"model":"gpt-5.4"`) {
+	if doc["model"] != "gpt-5.4" {
 		t.Fatalf("responses variant lost on the wire: %s", wire)
+	}
+	items, ok := doc["input"].([]any)
+	if !ok || len(items) != 2 {
+		t.Fatalf("final input must have exactly 2 items, got %v", doc["input"])
+	}
+	slot0, ok := items[0].(map[string]any)
+	if !ok || slot0["type"] != "message" || slot0["role"] != "user" {
+		t.Fatalf("slot 0 is not the message item: %v", items[0])
+	}
+	ct, ok := slot0["content"].(string)
+	if !ok || ct == "hi" || !strings.Contains(ct, "seen by test-mutator") {
+		t.Fatalf("slot 0 does not carry the MUTATED content: %v", slot0["content"])
+	}
+	slot1, ok := items[1].(map[string]any)
+	if !ok || slot1["type"] != "reasoning" || slot1["encrypted_content"] != "opaque-reasoning" {
+		t.Fatalf("slot 1 is not the opaque reasoning item at its recorded position: %v", items[1])
 	}
 }
 
@@ -496,23 +515,25 @@ func TestEnvelopeSmugglingBlockMode(t *testing.T) {
 }
 
 // TestEnvelopeSmugglingPassRollsBackAndChains — in pass mode the smuggled
-// replacement is dropped and the PRE-PLUGIN request chains to a downstream
-// observer, which must see the untouched envelope.
+// replacement is dropped and the PRE-PLUGIN request chains to an
+// OBSERVABLE downstream guest (test-records-invocation tags the model):
+// exactly ONE downstream invocation, ordered after the refused smuggler,
+// with the BYTE-EXACT pre-smuggler envelope at that hook boundary.
 func TestEnvelopeSmugglingPassRollsBackAndChains(t *testing.T) {
 	requireWASM(t, fixturesDir+"/test-envelope-smuggler/plugin.wasm")
-	requireWASM(t, fixturesDir+"/test-inert-a/plugin.wasm")
-	pp := newTestPipeline(t, fixturesDir, []string{"test-envelope-smuggler", "test-inert-a"})
-	// The smuggler's manifest failure mode is block; override to pass via
-	// an approval map so this pin exercises the pass semantics.
-	digest, err := pluginBundleDigest(t, "test-envelope-smuggler")
+	requireWASM(t, fixturesDir+"/test-records-invocation/plugin.wasm")
+
+	smugDigest, err := BundleDigestForDir(fixturesDir + "/test-envelope-smuggler")
 	if err != nil {
 		t.Fatal(err)
 	}
-	pp = pipelineWithApproval(t, fixturesDir, []string{"test-envelope-smuggler", "test-inert-a"}, map[string]provider.PluginApproval{
-		"test-envelope-smuggler": {Digest: digest, Permissions: []string{"ir.params.write"}, FailureMode: "pass"},
-		// The DOWNSTREAM observer must be approved too: the rollback pin
-		// proves the chained pre-plugin request reached it.
-		"test-inert-a": {},
+	recDigest, err := BundleDigestForDir(fixturesDir + "/test-records-invocation")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pp := pipelineWithApproval(t, fixturesDir, []string{"test-envelope-smuggler", "test-records-invocation"}, map[string]provider.PluginApproval{
+		"test-envelope-smuggler":  {Digest: smugDigest, Permissions: []string{"ir.params.write"}, FailureMode: "pass"},
+		"test-records-invocation": {Digest: recDigest, Permissions: []string{"ir.model.write"}, FailureMode: "pass"},
 	}, smuggleValidator)
 
 	chat := codeAssistRequest()
@@ -523,18 +544,22 @@ func TestEnvelopeSmugglingPassRollsBackAndChains(t *testing.T) {
 	if out == nil {
 		t.Fatal("no chained output")
 	}
-	// The downstream chain saw the PRE-PLUGIN request BYTE-EXACTLY: the
-	// accepted envelope is identical (no smuggled model), the typed
-	// variant is intact, and the mutator-free chain preserved the text.
-	if !out.CodeAssist {
-		t.Fatal("typed variant lost")
+	// EXACTLY ONE downstream invocation, after the refused smuggler: the
+	// model carries the invocation tag (the downstream ran on the chained
+	// request), and the tag appears once.
+	if out.Model != "gemini-3.5-flash+downstream-ran" {
+		t.Fatalf("downstream did not observe the chained request exactly once: model=%q", out.Model)
 	}
+	// BYTE-EXACT pre-smuggler envelope at that hook boundary.
 	if string(out.ProviderExtensions.Bytes()) != string(chat.ProviderExtensions.Bytes()) {
 		t.Fatalf("the downstream envelope differs from the pre-plugin request:\n got %s\nwant %s",
 			out.ProviderExtensions.Bytes(), chat.ProviderExtensions.Bytes())
 	}
 	if strings.Contains(string(out.ProviderExtensions.Bytes()), "smuggled-model") {
 		t.Fatal("the smuggled member chained downstream")
+	}
+	if !out.CodeAssist {
+		t.Fatal("typed variant lost")
 	}
 }
 
