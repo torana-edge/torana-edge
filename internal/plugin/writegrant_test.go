@@ -347,6 +347,33 @@ func setTrailingMeta(m *pb.Message, raw string) {
 	panic("no trailing block")
 }
 
+// toolResultSignedRequest is baseRequest with a signature token on the
+// tool-result block — the SDK's RequestToolResultBlock binding covering
+// tool_call_id, tool_name, part_metadata_json, will_continue (presence +
+// value), scheduling (presence + value), and the nested content digest.
+func toolResultSignedRequest() *pb.ChatRequest {
+	r := baseRequest()
+	m := r.Messages[3]
+	m.Blocks[0].GetToolResult().Signature = "tr-token"
+	return r
+}
+
+func setToolResultSig(m *pb.Message, sig string) {
+	m.Blocks[0].GetToolResult().Signature = sig
+}
+
+func setToolResultWC(m *pb.Message, v *bool) {
+	m.Blocks[0].GetToolResult().WillContinue = v
+}
+
+func setToolResultSched(m *pb.Message, v *string) {
+	m.Blocks[0].GetToolResult().Scheduling = v
+}
+
+func setToolResultMeta(m *pb.Message, raw string) {
+	m.Blocks[0].GetToolResult().PartMetadataJson = []byte(raw)
+}
+
 // The bound-signature rule on the REQUEST path: there is no apply block to
 // invalidate a wire token later, so SignatureStale is a violation here (it is
 // tolerated on the response path). Clearing the token over changed content is
@@ -355,7 +382,10 @@ func setTrailingMeta(m *pb.Message, raw string) {
 // role, because the signature fields are also in the message fingerprint — the
 // section check passes, and the binding check decides.
 func TestVerifyRequestMutationSignatureMatrix(t *testing.T) {
-	user := grant("ir.messages.write.user")
+	// The tool-result rows sign messages.tool blocks, so the matrix grants
+	// both roles; every row's section change passes and the BINDING check
+	// decides.
+	user := grant("ir.messages.write.user", "ir.messages.write.tool")
 
 	cases := []struct {
 		name string
@@ -427,6 +457,32 @@ func TestVerifyRequestMutationSignatureMatrix(t *testing.T) {
 				setTrailingMeta(r.Messages[1], `{"src":"y"}`)
 				setTrailing(r.Messages[1], "")
 			}},
+		// The TOOL-RESULT token (the SDK's RequestToolResultBlock binding):
+		// covered fields include the presence-aware will_continue and
+		// scheduling and the nested content digest.
+		{name: "tool result untouched", base: toolResultSignedRequest, want: ""},
+		{name: "tool result content changed token kept -> stale", base: toolResultSignedRequest,
+			want: "plugin torana.v2.RequestToolResultBlock signature stale",
+			apply: func(r *pb.ChatRequest) {
+				r.Messages[3].Blocks[0].GetToolResult().Content[0].GetText().Text = "B'"
+			}},
+		{name: "tool result will_continue presence changed token kept -> stale", base: toolResultSignedRequest,
+			want:  "plugin torana.v2.RequestToolResultBlock signature stale",
+			apply: func(r *pb.ChatRequest) { f := false; setToolResultWC(r.Messages[3], &f) }},
+		{name: "tool result scheduling value changed token kept -> stale", base: toolResultSignedRequest,
+			want:  "plugin torana.v2.RequestToolResultBlock signature stale",
+			apply: func(r *pb.ChatRequest) { v := "SILENT"; setToolResultSched(r.Messages[3], &v) }},
+		{name: "tool result metadata changed token kept -> stale", base: toolResultSignedRequest,
+			want:  "plugin torana.v2.RequestToolResultBlock signature stale",
+			apply: func(r *pb.ChatRequest) { setToolResultMeta(r.Messages[3], `{"src":"x"}`) }},
+		{name: "tool result content changed token cleared -> accepted", base: toolResultSignedRequest,
+			apply: func(r *pb.ChatRequest) {
+				r.Messages[3].Blocks[0].GetToolResult().Content[0].GetText().Text = "B'"
+				setToolResultSig(r.Messages[3], "")
+			}},
+		{name: "tool result token forged -> forged", base: toolResultSignedRequest,
+			want:  "plugin torana.v2.RequestToolResultBlock signature forged",
+			apply: func(r *pb.ChatRequest) { setToolResultSig(r.Messages[3], "evil") }},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

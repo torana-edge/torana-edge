@@ -229,11 +229,11 @@ func TestGeminiPartGrammar(t *testing.T) {
 		"inlineData+fileData on one part": `{"model":"m","contents":[{"role":"user","parts":[{"inlineData":{"mimeType":"image/png"},"fileData":{"fileUri":"gs://b/x"}}]}]}`,
 		"text+functionCall on one part":   `{"model":"m","contents":[{"role":"model","parts":[{"text":"x","functionCall":{"name":"r","args":{},"id":"c1"}}]}]}`,
 		"thought on a non-text arm":       `{"model":"m","contents":[{"role":"model","parts":[{"thought":true,"functionCall":{"name":"r","args":{},"id":"c1"}}]}]}`,
-		"thoughtSignature on a media arm": `{"model":"m","contents":[{"role":"user","parts":[{"inlineData":{"mimeType":"image/png"},"thoughtSignature":"S"}]}]}`,
-		"modifiers only (no arm)":         `{"model":"m","contents":[{"role":"model","parts":[{"thought":true,"thoughtSignature":"S"}]}]}`,
-		"system unknown arm":              `{"model":"m","systemInstruction":{"parts":[{"inlineData":{"mimeType":"image/png"}}]},"contents":[{"role":"user","parts":[{"text":"hi"}]}]}`,
-		"system future arm":               `{"model":"m","systemInstruction":{"parts":[{"customFuture":{"x":1}}]},"contents":[{"role":"user","parts":[{"text":"hi"}]}]}`,
-		"system thought":                  `{"model":"m","systemInstruction":{"parts":[{"thought":true,"text":"r"}]},"contents":[{"role":"user","parts":[{"text":"hi"}]}]}`,
+
+		"modifiers only (no arm)": `{"model":"m","contents":[{"role":"model","parts":[{"thought":true,"thoughtSignature":"S"}]}]}`,
+		"system unknown arm":      `{"model":"m","systemInstruction":{"parts":[{"inlineData":{"mimeType":"image/png"}}]},"contents":[{"role":"user","parts":[{"text":"hi"}]}]}`,
+		"system future arm":       `{"model":"m","systemInstruction":{"parts":[{"customFuture":{"x":1}}]},"contents":[{"role":"user","parts":[{"text":"hi"}]}]}`,
+		"system thought":          `{"model":"m","systemInstruction":{"parts":[{"thought":true,"text":"r"}]},"contents":[{"role":"user","parts":[{"text":"hi"}]}]}`,
 	}
 	for name, body := range refuse {
 		t.Run("refuse/"+name, func(t *testing.T) {
@@ -249,6 +249,9 @@ func TestGeminiPartGrammar(t *testing.T) {
 		"trailing standalone":     `{"model":"m","contents":[{"role":"model","parts":[{"text":"a"},{"text":"","thoughtSignature":"S"}]}]}`,
 		"call-bound signature":    `{"model":"m","contents":[{"role":"model","parts":[{"functionCall":{"name":"r","args":{},"id":"c1"},"thoughtSignature":"S"}]}]}`,
 		"future arm alone":        `{"model":"m","contents":[{"role":"user","parts":[{"customFutureArm":{"nested":[1,2,3]}}]}]}`,
+		// REV 4: thoughtSignature is legal on ANY arm (provider guidance),
+		// including media arms — the signature is a typed carrier.
+		"thoughtSignature on a media arm": `{"model":"m","contents":[{"role":"user","parts":[{"inlineData":{"mimeType":"image/png"},"thoughtSignature":"S"}]}]}`,
 	}
 	for name, body := range accept {
 		t.Run("accept/"+name, func(t *testing.T) {
@@ -274,7 +277,6 @@ func TestGeminiPartGrammar(t *testing.T) {
 // DOCUMENTED ancillary members of inlineData/fileData parts, not arms: the
 // current grammar rejects these valid requests.
 func TestGeminiMediaAncillaryRepro(t *testing.T) {
-	t.Skip("SDK signed-Part contract correction pending (design checkpoint submitted); these rows are the acceptance contract for the SDK re-pin")
 	accept := map[string]string{
 		"inlineData+videoMetadata": `{"model":"m","contents":[{"role":"user","parts":[{"inlineData":{"mimeType":"video/mp4","data":"AAAA"},"videoMetadata":{"durationOffset":"1s","startOffset":"0s"}}]}]}`,
 		// mediaResolution is the OBJECT wire shape pinned from the
@@ -320,7 +322,6 @@ func TestGeminiMediaAncillaryRepro(t *testing.T) {
 // upstream) are TestSchedulingValueFree400Transport in the proxy package;
 // the adapter rows alone are not transport proof.
 func TestGeminiSchedulingRepro(t *testing.T) {
-	t.Skip("SDK signed-Part contract correction pending (design checkpoint submitted); these rows are the acceptance contract for the SDK re-pin")
 
 	// frParts structurally decodes the marshaled wire and returns every
 	// functionResponse member of the first message's parts.
@@ -435,7 +436,6 @@ func TestGeminiSchedulingRepro(t *testing.T) {
 // grammar rejects it (RED) and even when accepted there is no ABI carrier:
 // the signature would be stripped from the raw payload and lost.
 func TestGeminiSignedMediaRepro(t *testing.T) {
-	t.Skip("SDK signed-Part contract correction pending (design checkpoint submitted); these rows are the acceptance contract for the SDK re-pin")
 	body := `{"model":"m","contents":[{"role":"user","parts":[{"inlineData":{"mimeType":"image/png","data":"iVBOR"},"thoughtSignature":"MEDIA_SIG"}]}]}`
 	// FUTURE CONTRACT: thoughtSignature is legal on ANY content part per
 	// Google's guidance — a signed media part must be accepted, with the
@@ -458,7 +458,6 @@ func TestGeminiSignedMediaRepro(t *testing.T) {
 // part's thoughtSignature, so a signed functionResponse is silently
 // stripped on the way out: the wire signature never survives a pass.
 func TestGeminiSignedFunctionResponseRepro(t *testing.T) {
-	t.Skip("SDK signed-Part contract correction pending (design checkpoint submitted); these rows are the acceptance contract for the SDK re-pin")
 	body := `{"model":"m","contents":[{"role":"user","parts":[{"functionResponse":{"name":"read","response":{"output":"out"},"id":"c1"},"thoughtSignature":"RESP_SIG"}]}]}`
 	chat, err := (&Adapter{}).Unmarshal([]byte(body))
 	if err != nil {

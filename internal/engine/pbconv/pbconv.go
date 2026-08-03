@@ -3,6 +3,7 @@ package pbconv
 import (
 	"encoding/json"
 	"fmt"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/torana-edge/torana-edge/internal/engine"
 	pb "github.com/torana-edge/torana-plugin-sdk/pb/v2"
@@ -467,20 +468,38 @@ func toPBMessage(m engine.Message) *pb.Message {
 		rb := &pb.RequestBlock{}
 		switch {
 		case b.Text != nil:
-			rb.Kind = &pb.RequestBlock_Text{Text: &pb.RequestTextBlock{Text: b.Text.Text, Signature: b.Text.Signature}}
+			rb.Kind = &pb.RequestBlock_Text{Text: &pb.RequestTextBlock{
+				Text: b.Text.Text, Signature: b.Text.Signature,
+				PartMetadataJson: b.Text.PartMetadataJson.Bytes(),
+			}}
 		case b.Thinking != nil:
-			rb.Kind = &pb.RequestBlock_Thinking{Thinking: &pb.RequestThinkingBlock{Text: b.Thinking.Text, Signature: b.Thinking.Signature}}
+			rb.Kind = &pb.RequestBlock_Thinking{Thinking: &pb.RequestThinkingBlock{
+				Text: b.Thinking.Text, Signature: b.Thinking.Signature,
+				PartMetadataJson: b.Thinking.PartMetadataJson.Bytes(),
+			}}
 		case b.RedactedThinking != nil:
 			rb.Kind = &pb.RequestBlock_RedactedThinking{RedactedThinking: &pb.RequestRedactedThinkingBlock{Data: b.RedactedThinking.Data}}
 		case b.ToolUse != nil:
 			rb.Kind = &pb.RequestBlock_ToolUse{ToolUse: &pb.RequestToolUseBlock{
-				Id:            b.ToolUse.ID,
-				Name:          b.ToolUse.Name,
-				ArgumentsJson: b.ToolUse.Arguments.Bytes(),
-				Signature:     b.ToolUse.Signature,
+				Id:               b.ToolUse.ID,
+				Name:             b.ToolUse.Name,
+				ArgumentsJson:    b.ToolUse.Arguments.Bytes(),
+				Signature:        b.ToolUse.Signature,
+				PartMetadataJson: b.ToolUse.PartMetadataJson.Bytes(),
 			}}
 		case b.ToolResult != nil:
-			tr := &pb.RequestToolResultBlock{ToolCallId: b.ToolResult.ToolCallID, ToolName: b.ToolResult.ToolName}
+			tr := &pb.RequestToolResultBlock{
+				ToolCallId:       b.ToolResult.ToolCallID,
+				ToolName:         b.ToolResult.ToolName,
+				PartMetadataJson: b.ToolResult.PartMetadataJson.Bytes(),
+				Signature:        b.ToolResult.Signature,
+			}
+			if b.ToolResult.WillContinue != nil {
+				tr.WillContinue = proto.Bool(*b.ToolResult.WillContinue)
+			}
+			if b.ToolResult.Scheduling != nil {
+				tr.Scheduling = proto.String(*b.ToolResult.Scheduling)
+			}
 			for _, c := range b.ToolResult.Content {
 				tcb := &pb.ToolResultContentBlock{}
 				switch {
@@ -504,11 +523,15 @@ func toPBMessage(m engine.Message) *pb.Message {
 			}}
 		case b.Unknown != nil:
 			rb.Kind = &pb.RequestBlock_Unknown{Unknown: &pb.RequestUnknownBlock{
-				Kind: b.Unknown.Kind, PayloadJson: b.Unknown.Payload.Bytes(),
+				Kind:             b.Unknown.Kind,
+				PayloadJson:      b.Unknown.Payload.Bytes(),
+				PartMetadataJson: b.Unknown.PartMetadataJson.Bytes(),
+				Signature:        b.Unknown.Signature,
 			}}
 		case b.TrailingSignature != nil:
 			rb.Kind = &pb.RequestBlock_TrailingSignature{TrailingSignature: &pb.RequestTrailingSignatureBlock{
-				Signature: b.TrailingSignature.Signature,
+				Signature:        b.TrailingSignature.Signature,
+				PartMetadataJson: b.TrailingSignature.PartMetadataJson.Bytes(),
 			}}
 		}
 		msg.Blocks = append(msg.Blocks, rb)
@@ -545,12 +568,20 @@ func fromPBBlock(b *pb.RequestBlock, what string) (engine.Block, error) {
 		if k.Text == nil {
 			return engine.Block{}, fmt.Errorf("%s text arm is a typed nil", what)
 		}
-		return engine.Block{Text: &engine.TextBlock{Text: k.Text.Text, Signature: k.Text.Signature}}, nil
+		pm, err := pbPartMetadata(k.Text.PartMetadataJson, what+".text")
+		if err != nil {
+			return engine.Block{}, err
+		}
+		return engine.Block{Text: &engine.TextBlock{Text: k.Text.Text, Signature: k.Text.Signature, PartMetadataJson: pm}}, nil
 	case *pb.RequestBlock_Thinking:
 		if k.Thinking == nil {
 			return engine.Block{}, fmt.Errorf("%s thinking arm is a typed nil", what)
 		}
-		return engine.Block{Thinking: &engine.ThinkingBlock{Text: k.Thinking.Text, Signature: k.Thinking.Signature}}, nil
+		pm, err := pbPartMetadata(k.Thinking.PartMetadataJson, what+".thinking")
+		if err != nil {
+			return engine.Block{}, err
+		}
+		return engine.Block{Thinking: &engine.ThinkingBlock{Text: k.Thinking.Text, Signature: k.Thinking.Signature, PartMetadataJson: pm}}, nil
 	case *pb.RequestBlock_RedactedThinking:
 		if k.RedactedThinking == nil {
 			return engine.Block{}, fmt.Errorf("%s redacted_thinking arm is a typed nil", what)
@@ -564,14 +595,36 @@ func fromPBBlock(b *pb.RequestBlock, what string) (engine.Block, error) {
 		if err != nil {
 			return engine.Block{}, fmt.Errorf("%s.tool_use arguments_json: %w", what, err)
 		}
+		pm, err := pbPartMetadata(k.ToolUse.PartMetadataJson, what+".tool_use")
+		if err != nil {
+			return engine.Block{}, err
+		}
 		return engine.Block{ToolUse: &engine.ToolUseBlock{
 			ID: k.ToolUse.Id, Name: k.ToolUse.Name, Arguments: args, Signature: k.ToolUse.Signature,
+			PartMetadataJson: pm,
 		}}, nil
 	case *pb.RequestBlock_ToolResult:
 		if k.ToolResult == nil {
 			return engine.Block{}, fmt.Errorf("%s tool_result arm is a typed nil", what)
 		}
-		tr := &engine.ToolResultBlock{ToolCallID: k.ToolResult.ToolCallId, ToolName: k.ToolResult.ToolName}
+		pm, err := pbPartMetadata(k.ToolResult.PartMetadataJson, what+".tool_result")
+		if err != nil {
+			return engine.Block{}, err
+		}
+		tr := &engine.ToolResultBlock{
+			ToolCallID:       k.ToolResult.ToolCallId,
+			ToolName:         k.ToolResult.ToolName,
+			PartMetadataJson: pm,
+			Signature:        k.ToolResult.Signature,
+		}
+		if k.ToolResult.WillContinue != nil {
+			v := k.ToolResult.GetWillContinue()
+			tr.WillContinue = &v
+		}
+		if k.ToolResult.Scheduling != nil {
+			v := k.ToolResult.GetScheduling()
+			tr.Scheduling = &v
+		}
 		for c, cb := range k.ToolResult.Content {
 			if cb == nil {
 				return engine.Block{}, fmt.Errorf("%s.tool_result content[%d] is nil", what, c)
@@ -600,12 +653,24 @@ func fromPBBlock(b *pb.RequestBlock, what string) (engine.Block, error) {
 		if err != nil {
 			return engine.Block{}, fmt.Errorf("%s.unknown payload_json: %w", what, err)
 		}
-		return engine.Block{Unknown: &engine.UnknownBlock{Kind: k.Unknown.Kind, Payload: payload}}, nil
+		pm, err := pbPartMetadata(k.Unknown.PartMetadataJson, what+".unknown")
+		if err != nil {
+			return engine.Block{}, err
+		}
+		return engine.Block{Unknown: &engine.UnknownBlock{
+			Kind: k.Unknown.Kind, Payload: payload, PartMetadataJson: pm, Signature: k.Unknown.Signature,
+		}}, nil
 	case *pb.RequestBlock_TrailingSignature:
 		if k.TrailingSignature == nil {
 			return engine.Block{}, fmt.Errorf("%s trailing_signature arm is a typed nil", what)
 		}
-		return engine.Block{TrailingSignature: &engine.TrailingSignatureBlock{Signature: k.TrailingSignature.Signature}}, nil
+		pm, err := pbPartMetadata(k.TrailingSignature.PartMetadataJson, what+".trailing_signature")
+		if err != nil {
+			return engine.Block{}, err
+		}
+		return engine.Block{TrailingSignature: &engine.TrailingSignatureBlock{
+			Signature: k.TrailingSignature.Signature, PartMetadataJson: pm,
+		}}, nil
 	default:
 		return engine.Block{}, fmt.Errorf("%s has no kind arm", what)
 	}
@@ -746,4 +811,19 @@ func cloneBytes(b []byte) []byte {
 	out := make([]byte, len(b))
 	copy(out, b)
 	return out
+}
+
+// pbPartMetadata converts the pb bytes carrier to the engine object form
+// (absent bytes -> absent object; present bytes must be a strict JSON
+// object — the SDK validator already gates it, this is the defensive
+// backstop).
+func pbPartMetadata(raw []byte, what string) (engine.RequiredJSONObject, error) {
+	if len(raw) == 0 {
+		return engine.RequiredJSONObject{}, nil
+	}
+	obj, err := engine.ParseRequiredJSONObject(raw)
+	if err != nil {
+		return engine.RequiredJSONObject{}, fmt.Errorf("%s part_metadata_json: %w", what, err)
+	}
+	return obj, nil
 }

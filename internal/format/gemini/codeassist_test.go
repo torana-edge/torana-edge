@@ -275,10 +275,15 @@ func TestCodeAssistStreamText(t *testing.T) {
 	}
 }
 
-// TestCodeAssistToolResultUnwrapsForCompaction verifies that a Code Assist
-// {"output": "<multiline text>"} tool result is stored as raw text (real
-// newlines) so line-based compactor plugins can split it, and is re-wrapped as
-// {"output": …} on Marshal.
+// TestCodeAssistToolResultUnwrapsForCompaction verifies the REV 4 §5
+// SINGLE-AUTHORITY model on the Code Assist shape: an exact
+// {"output": "<multiline>"} response is stored as the RAW response object
+// TEXT (the JSON-encoded form, backslash-n escapes intact) — the
+// compactor's length/economic gates use the raw JSON baseline (the
+// documented size delta vs the old unwrap semantic), and a compactor
+// rewrite produces NON-OBJECT text that Marshal re-wraps as
+// {"output": …} — a rewrite therefore updates the wire; no stale raw copy
+// can win because the text IS the raw.
 func TestCodeAssistToolResultUnwrapsForCompaction(t *testing.T) {
 	body := `{"model":"m","request":{"contents":[
 		{"role":"model","parts":[{"functionResponse":{"id":"c1","name":"view_file","response":{"output":"line1\nline2\nline3"}}}]}
@@ -301,14 +306,13 @@ func TestCodeAssistToolResultUnwrapsForCompaction(t *testing.T) {
 	for _, c := range tr.Content {
 		text += c.Text
 	}
-	if text != "line1\nline2\nline3" {
-		t.Errorf("tool result not unwrapped to raw text: %q", text)
-	}
-	if strings.Count(text, "\n") != 2 {
-		t.Errorf("newlines not preserved for line-splitting: %q", text)
+	// The raw object text is the SINGLE authority (verbatim, lexeme-exact;
+	// JSON-encoded newlines, NOT decoded).
+	if text != "{\"output\":\"line1\\nline2\\nline3\"}" {
+		t.Errorf("tool result not stored as the raw response object text: %q", text)
 	}
 
-	// Simulate a compactor rewriting the content, then re-marshal.
+	// A compactor rewrite (non-object text) re-wraps on Marshal.
 	tr.Content = []engine.ToolResultContentBlock{{Text: "line2"}}
 	out, err := a.Marshal(chat)
 	if err != nil {

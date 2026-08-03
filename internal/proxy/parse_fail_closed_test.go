@@ -13,11 +13,14 @@ package proxy
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"io"
 	"log"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
@@ -100,11 +103,12 @@ func parseFailE2EApproved(t *testing.T, format string, order []string, body stri
 			if err != nil {
 				t.Fatalf("BundleDigestForDir: %v", err)
 			}
+			perms := manifestPermissions("../../examples/plugins/" + order[0])
 			provCfg.Plugins = provider.PluginsConfig{
 				Dir:   "../../examples/plugins",
 				Order: order,
 				Approvals: map[string]provider.PluginApproval{
-					order[0]: {Digest: digest, FailureMode: approvalFailureMode},
+					order[0]: {Digest: digest, Permissions: perms, FailureMode: approvalFailureMode},
 				},
 			}
 		} else {
@@ -642,7 +646,6 @@ func TestParseFailClosedAmbiguousArmRowsTransport(t *testing.T) {
 // and the body would be the upstream reply. (test-observer's before hook
 // leaves no trace on a skipped request and would prove nothing here.)
 func TestSchedulingValueFree400Transport(t *testing.T) {
-	t.Skip("SDK signed-Part correction pending; these rows run when the gemini scheduling grammar lands (Edge fold-in)")
 	requireWASM(t, "../../examples/plugins/test-trapper/plugin.wasm")
 	requireWASM(t, "../../examples/plugins/test-observer/plugin.wasm")
 
@@ -699,7 +702,8 @@ func TestSchedulingValueFree400Transport(t *testing.T) {
 			if v, ok := srvA.sharedCache.Get("observed_error_status"); ok {
 				t.Fatalf("a response hook ran with the allow-mode observer: cache %q", v)
 			}
-			// …and block-mode observer.
+			// …and block-mode observer (the approval must carry the
+			// observer's manifest permissions, env.cache_get).
 			statusO, bodyO, _, srvO := parseFailE2EApproved(t, "gemini", []string{"test-observer"}, body, http.StatusOK, "block")
 			if statusO != http.StatusBadRequest || !bytes.Equal(bodyO, out) {
 				t.Fatalf("block-mode observer 400 differs: status=%d body=%s", statusO, bodyO)
@@ -709,4 +713,27 @@ func TestSchedulingValueFree400Transport(t *testing.T) {
 			}
 		})
 	}
+}
+
+// manifestPermissions reads the plugin.json permissions of a fixture
+// directory (the approval map must carry exactly the manifest's declared
+// permissions).
+func manifestPermissions(dir string) []string {
+	raw, err := os.ReadFile(filepath.Join(dir, "plugin.json"))
+	if err != nil {
+		return nil
+	}
+	var m struct {
+		Permissions []struct {
+			Name string `json:"name"`
+		} `json:"permissions"`
+	}
+	if json.Unmarshal(raw, &m) != nil {
+		return nil
+	}
+	var out []string
+	for _, p := range m.Permissions {
+		out = append(out, p.Name)
+	}
+	return out
 }

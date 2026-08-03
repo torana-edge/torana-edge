@@ -45,12 +45,19 @@ type TextBlock struct {
 	// thoughtSignature beside non-thought text). Empty when the provider
 	// sent none; host-side provenance rules govern it.
 	Signature string
+	// PartMetadataJson is the provider Part-level custom metadata
+	// (Gemini partMetadata), absent or a strict JSON object. Covered by
+	// the block's signature binding.
+	PartMetadataJson RequiredJSONObject
 }
 
 // ThinkingBlock is extended thinking / reasoning text.
 type ThinkingBlock struct {
 	Text      string
 	Signature string // current-block provenance token
+	// PartMetadataJson is provider Part-level custom metadata, absent or a
+	// strict JSON object; covered by this block's signature binding.
+	PartMetadataJson RequiredJSONObject
 }
 
 // RedactedThinkingBlock is a provider redaction placeholder.
@@ -68,6 +75,9 @@ type ToolUseBlock struct {
 	// Signature is the call-bound provenance token (e.g. Gemini
 	// thoughtSignature). Host-side provenance rules govern it.
 	Signature string
+	// PartMetadataJson is provider Part-level custom metadata, absent or a
+	// strict JSON object; covered by this block's signature binding.
+	PartMetadataJson RequiredJSONObject
 }
 
 // ToolResultBlock is a tool result at its exact wire position.
@@ -79,6 +89,22 @@ type ToolResultBlock struct {
 	// is unrepresentable. Non-empty: one explicit empty text element is the
 	// canonical empty-result spelling.
 	Content []ToolResultContentBlock
+	// PartMetadataJson is provider Part-level custom metadata, absent or a
+	// strict JSON object; covered by this block's signature binding.
+	PartMetadataJson RequiredJSONObject
+	// WillContinue is the gemini functionResponse willContinue: PRESENCE is
+	// meaningful (explicit false differs from absent); only applicable to
+	// NON_BLOCKING function calls.
+	WillContinue *bool
+	// Scheduling is the gemini functionResponse scheduling: the exact wire
+	// enum string (SILENT/WHEN_IDLE/INTERRUPT) or absent (provider default
+	// WHEN_IDLE). Presence is meaningful; the vocabulary is the adapter's
+	// boundary rule (unknown values are the value-free 400).
+	Scheduling *string
+	// Signature is the opaque provider token bound to this result (gemini
+	// thoughtSignature on a functionResponse part). Provenance-governed
+	// exactly like the other request tokens.
+	Signature string
 }
 
 // ToolResultContentBlock is one ordered element of a tool result's nested
@@ -108,6 +134,12 @@ type CacheBreakpointBlock struct {
 type UnknownBlock struct {
 	Kind    string
 	Payload RequiredJSONObject
+	// PartMetadataJson is provider Part-level custom metadata, absent or a
+	// strict JSON object; covered by this block's signature binding.
+	PartMetadataJson RequiredJSONObject
+	// Signature is the opaque provider token bound to this unknown part
+	// (gemini thoughtSignature on a media/future arm).
+	Signature string
 }
 
 // TrailingSignatureBlock is Code Assist's trailing signature-only part: the
@@ -115,6 +147,9 @@ type UnknownBlock struct {
 // message (never tool-call blocks). Assistant-only, singular, and FINAL.
 type TrailingSignatureBlock struct {
 	Signature string
+	// PartMetadataJson is provider Part-level custom metadata (the trailing
+	// standalone is a real Gemini Part), absent or a strict JSON object.
+	PartMetadataJson RequiredJSONObject
 }
 
 // TextBlocks returns the text of every text block in wire order.
