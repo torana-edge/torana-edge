@@ -35,13 +35,22 @@ func mustReq(raw string) engine.RequiredJSONObject {
 }
 
 // egressPayload builds what a plugin would pass to torana_send_request.
+func mustCheckedPB(t *testing.T, chat *engine.ChatRequest) *pb.ChatRequest {
+	t.Helper()
+	pbReq, err := pbconv.ToPBChatRequestChecked(chat)
+	if err != nil {
+		t.Fatalf("checked projection: %v", err)
+	}
+	return pbReq
+}
+
 func egressPayload(t *testing.T, providerName, path string) string {
 	t.Helper()
 	chat := &engine.ChatRequest{
 		Model:    "gpt-x",
 		Messages: []engine.Message{{Role: engine.RoleUser, Blocks: []engine.Block{{Text: &engine.TextBlock{Text: "warm"}}}}},
 	}
-	raw, err := proto.Marshal(pbconv.ToPBChatRequest(chat))
+	raw, err := proto.Marshal(mustCheckedPB(t, chat))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -369,12 +378,15 @@ func TestEgressMeterWindowsRoll(t *testing.T) {
 func TestEgressRejectsUnrenderableRequest(t *testing.T) {
 	srv, calls := egressServer(t, provider.EgressBudget{MaxCallsPerMinute: 10})
 
-	chat := &engine.ChatRequest{
+	// The guest-supplied PB is built DIRECTLY (not through the host's
+	// checked projection): a protobuf double carries NaN bit-exactly, and
+	// the send_request gate's ValidateReplacement is what must refuse it.
+	pbReq := &pb.ChatRequest{
 		Model:       "gpt-x",
 		Temperature: proto.Float64(math.NaN()),
-		Messages:    []engine.Message{{Role: engine.RoleUser, Blocks: []engine.Block{{Text: &engine.TextBlock{Text: "warm"}}}}},
+		Messages:    []*pb.Message{{Role: "user", Blocks: []*pb.RequestBlock{{Kind: &pb.RequestBlock_Text{Text: &pb.RequestTextBlock{Text: "warm"}}}}}},
 	}
-	raw, err := proto.Marshal(pbconv.ToPBChatRequest(chat))
+	raw, err := proto.Marshal(pbReq)
 	if err != nil {
 		t.Fatalf("marshal ChatRequest: %v", err)
 	}
@@ -642,7 +654,7 @@ func egressPayloadPB(t *testing.T) string {
 		Model:    "gpt-x",
 		Messages: []engine.Message{{Role: engine.RoleUser, Blocks: []engine.Block{{Text: &engine.TextBlock{Text: "warm"}}}}},
 	}
-	raw, err := proto.Marshal(pbconv.ToPBChatRequest(chat))
+	raw, err := proto.Marshal(mustCheckedPB(t, chat))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -859,7 +871,7 @@ func TestEgressRejectsContractViolations(t *testing.T) {
 
 	reqFor := func(mutate func(*pb.ChatRequest)) string {
 		t.Helper()
-		pbReq := pbconv.ToPBChatRequest(&engine.ChatRequest{
+		pbReq := mustCheckedPB(t, &engine.ChatRequest{
 			Model: "gpt-x",
 			Messages: []engine.Message{
 				{Role: engine.RoleUser, Blocks: []engine.Block{{Text: &engine.TextBlock{Text: "hi"}}}},

@@ -34,13 +34,17 @@ func TestBedrockArmMatrix(t *testing.T) {
 		return err
 	}
 	cases := map[string]string{
-		"text+toolUse on one block":     `{"modelId":"m","messages":[{"role":"user","content":[{"text":"hi","toolUse":{"toolUseId":"c1","name":"r","input":{}}}]}]}`,
-		"text+thinking on one block":    `{"modelId":"m","messages":[{"role":"assistant","content":[{"text":"hi","thinking":{"thinking":"r"}}]}]}`,
-		"two unknown discriminants":     `{"modelId":"m","messages":[{"role":"user","content":[{"image":{"source":{"bytes":"x"}},"document":{"format":"pdf"}}]}]}`,
-		"known arm plus unknown member": `{"modelId":"m","messages":[{"role":"user","content":[{"text":"hi","custom":1}]}]}`,
-		"nested two discriminants":      `{"modelId":"m","messages":[{"role":"user","content":[{"toolResult":{"toolUseId":"c1","content":[{"text":"a","json":{"x":1}}]}}]}]}`,
-		"unknown role":                  `{"modelId":"m","messages":[{"role":"developer","content":[{"text":"hi"}]}]}`,
-		"system role in messages":       `{"modelId":"m","messages":[{"role":"system","content":[{"text":"hi"}]}]}`,
+		"text+toolUse on one block":      `{"modelId":"m","messages":[{"role":"user","content":[{"text":"hi","toolUse":{"toolUseId":"c1","name":"r","input":{}}}]}]}`,
+		"text+thinking on one block":     `{"modelId":"m","messages":[{"role":"assistant","content":[{"text":"hi","thinking":{"thinking":"r"}}]}]}`,
+		"two unknown discriminants":      `{"modelId":"m","messages":[{"role":"user","content":[{"image":{"source":{"bytes":"x"}},"document":{"format":"pdf"}}]}]}`,
+		"known arm plus unknown member":  `{"modelId":"m","messages":[{"role":"user","content":[{"text":"hi","custom":1}]}]}`,
+		"nested two discriminants":       `{"modelId":"m","messages":[{"role":"user","content":[{"toolResult":{"toolUseId":"c1","content":[{"text":"a","json":{"x":1}}]}}]}]}`,
+		"unknown role":                   `{"modelId":"m","messages":[{"role":"developer","content":[{"text":"hi"}]}]}`,
+		"system role in messages":        `{"modelId":"m","messages":[{"role":"system","content":[{"text":"hi"}]}]}`,
+		"system entry text+cachePoint":   `{"modelId":"m","system":[{"text":"hi","cachePoint":{"type":"default"}}],"messages":[{"role":"user","content":[{"text":"hi"}]}]}`,
+		"system entry empty":             `{"modelId":"m","system":[{}],"messages":[{"role":"user","content":[{"text":"hi"}]}]}`,
+		"toolConfig toolSpec+cachePoint": `{"modelId":"m","toolConfig":{"tools":[{"toolSpec":{"name":"r","inputSchema":{"json":{"type":"object"}}},"cachePoint":{"type":"default"}}]},"messages":[{"role":"user","content":[{"text":"hi"}]}]}`,
+		"toolConfig entry empty":         `{"modelId":"m","toolConfig":{"tools":[{}]},"messages":[{"role":"user","content":[{"text":"hi"}]}]}`,
 	}
 	for name, body := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -73,6 +77,8 @@ func TestOpenAIRequiredMemberMatrix(t *testing.T) {
 	}
 	cases := map[string]string{
 		"text part without text member": `{"model":"m","messages":[{"role":"user","content":[{"type":"text"}]}]}`,
+		"part without type member":      `{"model":"m","messages":[{"role":"user","content":[{"text":"hi"}]}]}`,
+		"empty part":                    `{"model":"m","messages":[{"role":"user","content":[{}]}]}`,
 	}
 	for name, body := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -90,8 +96,11 @@ func TestAnthropicRequiredMemberMatrix(t *testing.T) {
 		"text block without text member": `{"model":"m","max_tokens":64,"messages":[{"role":"user","content":[{"type":"text"}]}]}`,
 		"tool_use with malformed input":  `{"model":"m","max_tokens":64,"messages":[{"role":"assistant","content":[{"type":"tool_use","id":"c1","name":"r","input":"nope"}]}]}`,
 
-		"tool_use without id":             `{"model":"m","max_tokens":64,"messages":[{"role":"assistant","content":[{"type":"tool_use","name":"r","input":{}}]}]}`,
-		"tool_result without tool_use_id": `{"model":"m","max_tokens":64,"messages":[{"role":"user","content":[{"type":"tool_result","content":"out"}]}]}`,
+		"tool_use without id":              `{"model":"m","max_tokens":64,"messages":[{"role":"assistant","content":[{"type":"tool_use","name":"r","input":{}}]}]}`,
+		"tool_result without tool_use_id":  `{"model":"m","max_tokens":64,"messages":[{"role":"user","content":[{"type":"tool_result","content":"out"}]}]}`,
+		"text block with tool-use members": `{"model":"m","max_tokens":64,"messages":[{"role":"assistant","content":[{"type":"text","text":"hi","id":"c1","name":"r","input":{}}]}]}`,
+		"tool_use with text member":        `{"model":"m","max_tokens":64,"messages":[{"role":"assistant","content":[{"type":"tool_use","id":"c1","name":"r","input":{},"text":"x"}]}]}`,
+		"tool_result with text member":     `{"model":"m","max_tokens":64,"messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"c1","content":"out","text":"x"}]}]}`,
 	}
 	for name, body := range cases {
 		t.Run(name, func(t *testing.T) {

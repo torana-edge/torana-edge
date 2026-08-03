@@ -71,7 +71,7 @@ func TestToolCallSignatureRoundTrip(t *testing.T) {
 			ID: "a1", Name: "f", Arguments: mustReq(t, `{"x": 1.0}`), Signature: "REQ_SIG",
 		}}}},
 	}}
-	got, err := FromPBChatRequest(ToPBChatRequest(chat))
+	got, err := FromPBChatRequest(toPBChatRequest(chat))
 	if err != nil {
 		t.Fatalf("round trip: %v", err)
 	}
@@ -92,7 +92,7 @@ func TestContentSignatureRoundTrip(t *testing.T) {
 	chat := &engine.ChatRequest{Messages: []engine.Message{
 		{Role: engine.RoleAssistant, Blocks: []engine.Block{{Text: &engine.TextBlock{Text: "answer", Signature: "CONTENT_SIG"}}}},
 	}}
-	got, err := FromPBChatRequest(ToPBChatRequest(chat))
+	got, err := FromPBChatRequest(toPBChatRequest(chat))
 	if err != nil {
 		t.Fatalf("round trip: %v", err)
 	}
@@ -116,7 +116,7 @@ func TestTrailingSignatureRoundTrip(t *testing.T) {
 			{TrailingSignature: &engine.TrailingSignatureBlock{Signature: "TRAIL_SIG"}},
 		}},
 	}}
-	got, err := FromPBChatRequest(ToPBChatRequest(chat))
+	got, err := FromPBChatRequest(toPBChatRequest(chat))
 	if err != nil {
 		t.Fatalf("round trip: %v", err)
 	}

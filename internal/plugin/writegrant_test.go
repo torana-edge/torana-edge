@@ -1147,7 +1147,10 @@ func BenchmarkVerifyRequestMutation(b *testing.B) {
 		"ir.messages.write.developer", "ir.messages.write.other",
 		"ir.tools.write", "ir.model.write", "ir.params.write")
 	for _, n := range benchSizes {
-		req := pbconv.ToPBChatRequest(benchConversation(n))
+		req, cerr := pbconv.ToPBChatRequestChecked(benchConversation(n))
+		if cerr != nil {
+			b.Fatal(cerr)
+		}
 		raw, err := proto.Marshal(req)
 		if err != nil {
 			b.Fatal(err)
@@ -1181,7 +1184,10 @@ func BenchmarkVerifyRequestMutationFastPath(b *testing.B) {
 		all[g] = true
 	}
 	for _, n := range benchSizes {
-		req := pbconv.ToPBChatRequest(benchConversation(n))
+		req, cerr := pbconv.ToPBChatRequestChecked(benchConversation(n))
+		if cerr != nil {
+			b.Fatal(cerr)
+		}
 		raw, err := proto.Marshal(req)
 		if err != nil {
 			b.Fatal(err)

@@ -303,6 +303,15 @@ func newApprovedMultiPipeline(t *testing.T, order []string, approvals map[string
 // assertNoCredentialMeta fails when the returned engine request carries
 // _request_headers in its ToranaMeta — the projection must never survive the
 // chain into the returned PB round-trip.
+func mustCheckedPB(t *testing.T, chat *engine.ChatRequest) *pbv2.ChatRequest {
+	t.Helper()
+	pbReq, err := pbconv.ToPBChatRequestChecked(chat)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return pbReq
+}
+
 func mustMetaHP(m map[string]any) engine.OptionalJSONObject {
 	b, err := json.Marshal(m)
 	if err != nil {
@@ -519,7 +528,7 @@ func TestChatHeadersMutationObserverSeesNoProjection(t *testing.T) {
 	// restoration: json.Number("9007199254740993") marshals verbatim, but any
 	// unmarshal-into-float64 round trip would round it to ...992.
 	chat.ToranaMeta = mustMetaHP(map[string]any{"_provider": json.Number("9007199254740993")})
-	expected := pbconv.ToPBChatRequest(chat).ToranaMetaJson
+	expected := mustCheckedPB(t, chat).ToranaMetaJson
 
 	out, err := pp.RunBeforeRequest(context.Background(), 1, chat, raw)
 	if err != nil {

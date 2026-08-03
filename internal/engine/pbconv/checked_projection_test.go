@@ -211,11 +211,12 @@ func TestCheckedProjectionAcceptsAdapterOutputs(t *testing.T) {
 	}
 }
 
-type unmarshaler interface {
+type adapterAPI interface {
 	Unmarshal([]byte) (*engine.ChatRequest, error)
+	Marshal(*engine.ChatRequest) ([]byte, error)
 }
 
-func adapterFor(name string) unmarshaler {
+func adapterFor(name string) adapterAPI {
 	switch name {
 	case "anthropic":
 		return &anthropic.Adapter{}
@@ -239,5 +240,57 @@ func TestCheckedProjectionErrorNamesTheState(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "zero") && !strings.Contains(err.Error(), "arm") {
 		t.Fatalf("error = %q, want the arm state named", err)
+	}
+}
+
+// TestSharedDomainTable — the accepted-input and replacement-output sides
+// share ONE table: a whitespace-only tool name is accepted by BOTH
+// ValidateEngineRequest and the SDK's ValidateReplacement (the SDK rejects
+// only name == ""), so the host never rejects what a plugin may return.
+func TestSharedDomainTable(t *testing.T) {
+	c := validChat()
+	c.Tools[0].Name = "   "
+	pbReq, err := pbconv.ToPBChatRequestChecked(c)
+	if err != nil {
+		t.Fatalf("whitespace-only tool name refused on the accepted side: %v", err)
+	}
+	if err := pbReq.ValidateReplacement(); err != nil {
+		t.Fatalf("whitespace-only tool name refused on the replacement side: %v", err)
+	}
+	// The empty-name refusal is the shared rule on both sides.
+	c.Tools[0].Name = ""
+	if _, err := pbconv.ToPBChatRequestChecked(c); err == nil {
+		t.Fatal("empty tool name accepted on the accepted side")
+	}
+}
+
+// TestAdapterMarshalEntryValidates — every provider Marshal entry point runs
+// the owning validation: a multi-arm engine request is refused at marshal,
+// so no future call site can bypass the checked boundary by calling an
+// adapter directly.
+func TestAdapterMarshalEntryValidates(t *testing.T) {
+	multiArm := &engine.ChatRequest{
+		Model: "m",
+		Messages: []engine.Message{{Role: engine.RoleUser, Blocks: []engine.Block{
+			{Text: &engine.TextBlock{Text: "a"}, ToolUse: &engine.ToolUseBlock{ID: "c1", Name: "r", Arguments: mustReqObj(`{}`)}},
+		}}},
+	}
+	for _, name := range []string{"anthropic", "bedrock", "gemini", "openai"} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := adapterFor(name).Marshal(multiArm); err == nil {
+				t.Fatalf("%s marshal accepted a multi-arm engine request", name)
+			}
+		})
+	}
+	// A valid request still marshals.
+	simple := &engine.ChatRequest{
+		Model:    "m",
+		Messages: []engine.Message{{Role: engine.RoleUser, Blocks: []engine.Block{{Text: &engine.TextBlock{Text: "hi"}}}}},
+	}
+	for _, name := range []string{"anthropic", "bedrock", "gemini", "openai"} {
+		ok, err := adapterFor(name).Marshal(simple)
+		if err != nil || len(ok) == 0 {
+			t.Fatalf("%s: valid request failed to marshal: %v", name, err)
+		}
 	}
 }

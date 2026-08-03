@@ -241,6 +241,15 @@ func TestRawJSONParametersRoundTrip(t *testing.T) {
 // TestRawJSONNilNormalization: provider inputs with NO arguments/schema
 // normalize to the canonical {} — never to absence — at the wrapper and on
 // the wire and in the PB.
+func mustCheckedPB(t *testing.T, chat *engine.ChatRequest) *pb.ChatRequest {
+	t.Helper()
+	pbReq, err := pbconv.ToPBChatRequestChecked(chat)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return pbReq
+}
+
 func TestRawJSONNilNormalization(t *testing.T) {
 	// OpenAI: empty arguments string.
 	body := `{"model":"m","messages":[{"role":"assistant","tool_calls":[{"id":"t1","type":"function","function":{"name":"read_file","arguments":""}}]}]}`
@@ -270,7 +279,7 @@ func TestRawJSONNilNormalization(t *testing.T) {
 		t.Fatalf("missing parameters = %q, want {}", got)
 	}
 	// PB conversion emits {} for the zero wrapper.
-	pbReq := pbconv.ToPBChatRequest(chat)
+	pbReq := mustCheckedPB(t, chat)
 	if len(pbReq.Tools) != 1 || string(pbReq.Tools[0].ParametersJson) != `{}` {
 		t.Fatalf("PB parameters = %q, want {}", pbReq.Tools[0].ParametersJson)
 	}
@@ -279,7 +288,7 @@ func TestRawJSONNilNormalization(t *testing.T) {
 // TestRawJSONFromPBError: malformed arguments_json in a PB cannot silently
 // become a nil/partial engine value — FromPBChatRequest errors.
 func TestRawJSONFromPBError(t *testing.T) {
-	good := pbconv.ToPBChatRequest(&engine.ChatRequest{Messages: []engine.Message{
+	good := mustCheckedPB(t, &engine.ChatRequest{Messages: []engine.Message{
 		{Role: engine.RoleAssistant, Blocks: []engine.Block{{ToolUse: &engine.ToolUseBlock{
 			ID: "t1", Name: "read", Arguments: mustPinned(`{"path":"x"}`),
 		}}}},

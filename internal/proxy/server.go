@@ -922,10 +922,16 @@ func New(cfg Config) (*Server, error) {
 				// chained (each sees its predecessor's output); this host call
 				// is the only way to see what the caller actually sent.
 				if pl.HasGrant("env.original_request") {
-					if b, err := proto.Marshal(pbconv.ToPBChatRequest(chat)); err == nil {
-						rsOrig := reqStateFrom(req.Context())
-						rsOrig.OriginalReq = b
-						rsOrig.OriginalReqSet = true
+					// The checked projection only: the snapshot is taken
+					// after the entry validation, so a failure here is
+					// unreachable in practice; skipping keeps the snapshot
+					// from ever being a first-arm-wins path.
+					if pbReq, cerr := pbconv.ToPBChatRequestChecked(chat); cerr == nil {
+						if b, err := proto.Marshal(pbReq); err == nil {
+							rsOrig := reqStateFrom(req.Context())
+							rsOrig.OriginalReq = b
+							rsOrig.OriginalReqSet = true
+						}
 					}
 				}
 

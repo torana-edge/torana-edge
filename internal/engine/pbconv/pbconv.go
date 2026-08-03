@@ -8,7 +8,7 @@ import (
 	pb "github.com/torana-edge/torana-plugin-sdk/pb/v2"
 )
 
-func ToPBChatRequest(c *engine.ChatRequest) *pb.ChatRequest {
+func toPBChatRequest(c *engine.ChatRequest) *pb.ChatRequest {
 	if c == nil {
 		return nil
 	}

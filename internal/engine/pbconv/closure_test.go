@@ -60,7 +60,10 @@ func mustReqObj(raw string) engine.RequiredJSONObject {
 // request body the plugins see.
 func TestMessageToPBDifferential(t *testing.T) {
 	for i, m := range messageCorpus() {
-		got := engine.MessageToPB(&m)
+		got, err := engine.MessageToPB(&m)
+		if err != nil {
+			t.Fatalf("message %d: MessageToPB: %v", i, err)
+		}
 		want := toPBMessage(m)
 		if !proto.Equal(got, want) {
 			t.Fatalf("message %d: MessageToPB != toPBMessage\n  engine: %v\n  pbconv: %v", i, got, want)

@@ -29,6 +29,7 @@ import (
 	"strings"
 
 	"github.com/torana-edge/torana-edge/internal/engine"
+	"github.com/torana-edge/torana-edge/internal/engine/pbconv"
 	"github.com/torana-edge/torana-edge/internal/format"
 )
 
@@ -87,6 +88,40 @@ type geminiSystemInstruction struct {
 	Parts []geminiPart `json:"parts"`
 }
 
+// UnmarshalJSON applies the same Part grammar to the system array, then
+// enforces the system seam: a system part must be a PLAIN text arm (no
+// thought, no signature, no function/media/future arms) — anything Torana
+// cannot represent in the system array is the value-free 400, never a
+// silent drop.
+func (si *geminiSystemInstruction) UnmarshalJSON(data []byte) error {
+	var raw struct {
+		Role  string            `json:"role"`
+		Parts []json.RawMessage `json:"parts"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	si.Role = raw.Role
+	for _, p := range raw.Parts {
+		arm, err := validateGeminiPartRaw(p, "system")
+		if err != nil {
+			return err
+		}
+		if arm != "text" {
+			return fmt.Errorf("gemini: system instruction parts must be text only (part arm %q)", arm)
+		}
+		var gp geminiPart
+		if err := json.Unmarshal(p, &gp); err != nil {
+			return err
+		}
+		if gp.Thought || gp.ThoughtSignature != "" {
+			return fmt.Errorf("gemini: system instruction parts must be plain text (no thought or signature)")
+		}
+		si.Parts = append(si.Parts, gp)
+	}
+	return nil
+}
+
 type geminiContent struct {
 	Role  string `json:"role"`
 	Parts []any  `json:"parts"` // geminiPart (typed known arms) or json.RawMessage (unknown arms, raw projection)
@@ -114,6 +149,12 @@ func (c *geminiContent) UnmarshalJSON(data []byte) error {
 	c.Role = raw.Role
 	c.Parts = make([]any, 0, len(raw.Parts))
 	for _, p := range raw.Parts {
+		// The executable Part grammar over the RAW members — a typed decode
+		// cannot see facts the grammar must refuse (text+inlineData, two
+		// media arms, a modifier without its carrier).
+		if _, err := validateGeminiPartRaw(p, "content"); err != nil {
+			return err
+		}
 		var gp geminiPart
 		if err := json.Unmarshal(p, &gp); err != nil {
 			return err
@@ -275,9 +316,8 @@ func (a *Adapter) Unmarshal(rawBody []byte) (*engine.ChatRequest, error) {
 	if gReq.SystemInstruction != nil {
 		msg := engine.Message{Role: engine.RoleSystem}
 		for _, p := range gReq.SystemInstruction.Parts {
-			if p.FunctionCall != nil || p.FunctionResponse != nil || p.Thought {
-				return nil, fmt.Errorf("gemini: system instruction parts must be text only")
-			}
+			// The grammar ran at decode: the arm is text and the part is
+			// plain (no thought/signature); the projection is the text.
 			if partText(p) != "" {
 				msg.Blocks = append(msg.Blocks, engine.Block{Text: &engine.TextBlock{Text: partText(p)}})
 			}
@@ -339,25 +379,11 @@ func geminiContentToMessage(content geminiContent, prevCallIdx map[string]int, c
 	hasTextOrThinking := false
 	hasTool := false
 	for _, pAny := range content.Parts {
+		// The executable Part grammar already ran over the RAW members at
+		// decode (validateGeminiPartRaw): exactly one arm, documented
+		// modifier combinations only. The typed switch below therefore has
+		// exactly one arm to choose.
 		p := pAny.(geminiWirePart).part
-		// The provider-arm matrix: a gemini part carries at most ONE content
-		// arm among {text (incl. the thought modifier), functionCall,
-		// functionResponse}. A part with two is ambiguous — the projection
-		// switch would pick one by precedence and silently drop the other —
-		// so it is refused here, deterministically.
-		arms := 0
-		if p.Text != nil {
-			arms++
-		}
-		if p.FunctionCall != nil {
-			arms++
-		}
-		if p.FunctionResponse != nil {
-			arms++
-		}
-		if arms > 1 {
-			return msg, fmt.Errorf("gemini: part has %d content arms, want exactly one", arms)
-		}
 		switch {
 		case p.FunctionCall != nil || p.FunctionResponse != nil:
 			hasTool = true
@@ -558,6 +584,12 @@ func singleStringField(resp map[string]any, key string) (string, bool) {
 
 // Marshal converts a ChatRequest back into Gemini or Code Assist JSON.
 func (a *Adapter) Marshal(chat *engine.ChatRequest) ([]byte, error) {
+	// The owning validation at EVERY marshal entry: the engine pointer sum
+	// must be in the closed domain before any arm is projected — a future
+	// call site cannot bypass the checked boundary by accident.
+	if err := pbconv.ValidateEngineRequest(chat); err != nil {
+		return nil, fmt.Errorf("gemini: %w", err)
+	}
 	codeAssist := false
 	if !chat.ProviderExtensions.IsAbsent() {
 		if b, ok := readExtBool(chat.ProviderExtensions, extCodeAssist); ok {
@@ -679,10 +711,59 @@ func readExtBool(ext engine.OptionalJSONObject, key string) (bool, bool) {
 	return b, json.Unmarshal(raw, &b) == nil
 }
 
+// geminiAncillaryPartMembers are the DOCUMENTED part modifiers: thought
+// (marks a text arm as the thinking arm) and thoughtSignature (the
+// provenance token bound to text/functionCall/functionResponse). Every
+// other member is an ARM member.
+var geminiAncillaryPartMembers = map[string]bool{
+	"thought":          true,
+	"thoughtSignature": true,
+}
+
 // geminiCanonicalPartMembers are the members the block kinds own; an
 // Unknown part payload must never carry them (the projection invariant,
 // enforced at marshal exactly like the other adapters).
 var geminiCanonicalPartMembers = []string{"text", "thought", "thoughtSignature", "functionCall", "functionResponse"}
+
+// validateGeminiPartRaw is the executable Gemini Part grammar, over the RAW
+// member set (deterministic — counting and membership are
+// order-independent, so a map-iteration flip can never change the verdict):
+//
+//   - exactly ONE arm member: {text, functionCall, functionResponse,
+//     inlineData, fileData, or any future arm}; zero arms (a part of only
+//     modifiers) or two+ arms (text+inlineData, inlineData+fileData, ...)
+//     are ambiguous and refused;
+//   - thought is legal ONLY on a text arm (the thinking arm);
+//   - thoughtSignature is legal ONLY on text (content-bound or the trailing
+//     standalone), functionCall, or functionResponse;
+//   - any other member is itself an arm member, so a known arm carrying an
+//     unknown extra member is a two-arm part and refused — no provider
+//     member can silently disappear through the typed decode.
+//
+// It returns the single arm member name.
+func validateGeminiPartRaw(raw json.RawMessage, where string) (string, error) {
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return "", fmt.Errorf("gemini: %s part: %w", where, err)
+	}
+	arms := make([]string, 0, 1)
+	for k := range m {
+		if !geminiAncillaryPartMembers[k] {
+			arms = append(arms, k)
+		}
+	}
+	if len(arms) != 1 {
+		return "", fmt.Errorf("gemini: %s part has %d arm members, want exactly one", where, len(arms))
+	}
+	arm := arms[0]
+	if _, hasThought := m["thought"]; hasThought && arm != "text" {
+		return "", fmt.Errorf("gemini: %s part: thought is only legal on a text arm", where)
+	}
+	if _, hasSig := m["thoughtSignature"]; hasSig && arm != "text" && arm != "functionCall" && arm != "functionResponse" {
+		return "", fmt.Errorf("gemini: %s part: thoughtSignature is only legal on text/functionCall/functionResponse arms", where)
+	}
+	return arm, nil
+}
 
 func rejectGeminiProjection(u *engine.UnknownBlock) error {
 	payload, _, err := u.Payload.DecodeObject()

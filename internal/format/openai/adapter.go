@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/torana-edge/torana-edge/internal/engine"
+	"github.com/torana-edge/torana-edge/internal/engine/pbconv"
 	"github.com/torana-edge/torana-edge/internal/format"
 )
 
@@ -118,6 +119,12 @@ func (a *Adapter) Unmarshal(rawBody []byte) (*engine.ChatRequest, error) {
 
 // Marshal converts a ChatRequest back to Chat Completions or Responses wire format.
 func (a *Adapter) Marshal(chat *engine.ChatRequest) ([]byte, error) {
+	// The owning validation at EVERY marshal entry: the engine pointer sum
+	// must be in the closed domain before any arm is projected — a future
+	// call site cannot bypass the checked boundary by accident.
+	if err := pbconv.ValidateEngineRequest(chat); err != nil {
+		return nil, fmt.Errorf("openai: %w", err)
+	}
 	// The variant sentinel is host-only topology (typed host-state replaces
 	// it later); a malformed/absent object falls back to chat completions.
 	if !chat.ProviderExtensions.IsAbsent() {
@@ -551,25 +558,26 @@ func openAIPartToBlock(p json.RawMessage) (engine.Block, error) {
 	if err := json.Unmarshal(p, &probe); err != nil {
 		return engine.Block{}, fmt.Errorf("content part: %w", err)
 	}
-	if probe.Type == "text" || probe.Type == "" {
+	if probe.Type == "text" {
 		// The provider-arm matrix: a DECLARED text arm must actually carry
 		// its required member — {"type":"text"} with no text member is
 		// malformed, not an implicit empty text (the explicit empty text is
-		// spelled {"type":"text","text":""}).
+		// spelled {"type":"text","text":""}). A part with NO type member is
+		// outside the normative grammar entirely — no legacy form survives
+		// merely because the old parser accepted it.
 		var t struct {
 			Text *string `json:"text"`
 		}
 		if err := json.Unmarshal(p, &t); err != nil {
 			return engine.Block{}, fmt.Errorf("content part: %w", err)
 		}
-		if probe.Type == "text" && t.Text == nil {
+		if t.Text == nil {
 			return engine.Block{}, fmt.Errorf("openai chat: text part without a text member")
 		}
-		text := ""
-		if t.Text != nil {
-			text = *t.Text
-		}
-		return engine.Block{Text: &engine.TextBlock{Text: text}}, nil
+		return engine.Block{Text: &engine.TextBlock{Text: *t.Text}}, nil
+	}
+	if probe.Type == "" {
+		return engine.Block{}, fmt.Errorf("openai chat: content part without a type member")
 	}
 	payload, err := stripOpenAIPartFacts(p, "type")
 	if err != nil {

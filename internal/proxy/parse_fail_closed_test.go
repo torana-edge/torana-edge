@@ -539,3 +539,78 @@ func TestParseFailClosedBlockModeLimiter(t *testing.T) {
 		t.Fatalf("allow-mode: %d limiter buckets materialized; must be 0", n)
 	}
 }
+
+// TestParseFailClosedAmbiguousArmRowsTransport — the provider-arm matrix
+// rows that are NOT caught by generic JSON-text validation must yield the
+// golden value-free 400 through the REAL configured-format transport: zero
+// request hooks (a mutating plugin never sees the request), zero response
+// hooks (observer cache absent), zero limiter buckets, zero upstream, byte-
+// identical under plugin presence AND both failure modes.
+func TestParseFailClosedAmbiguousArmRowsTransport(t *testing.T) {
+	requireWASM(t, "../../examples/plugins/test-trapper/plugin.wasm")
+	requireWASM(t, "../../examples/plugins/test-observer/plugin.wasm")
+	requireWASM(t, "../../examples/plugins/test-mutator/plugin.wasm")
+
+	rows := []struct {
+		format string
+		body   string
+	}{
+		{"bedrock", `{"modelId":"m","system":[{"text":"hi","cachePoint":{"type":"default"}}],"messages":[{"role":"user","content":[{"text":"hi"}]}]}`},
+		{"bedrock", `{"modelId":"m","toolConfig":{"tools":[{"toolSpec":{"name":"r","inputSchema":{"json":{"type":"object"}}},"cachePoint":{"type":"default"}}]},"messages":[{"role":"user","content":[{"text":"hi"}]}]}`},
+		{"bedrock", `{"modelId":"m","messages":[{"role":"developer","content":[{"text":"hi"}]}]}`},
+		{"gemini", `{"model":"m","contents":[{"role":"user","parts":[{"text":"x","inlineData":{"mimeType":"image/png"}}]}]}`},
+		{"gemini", `{"model":"m","contents":[{"role":"user","parts":[{"inlineData":{"mimeType":"image/png"},"fileData":{"fileUri":"gs://b/x"}}]}]}`},
+		{"gemini", `{"model":"m","systemInstruction":{"parts":[{"inlineData":{"mimeType":"image/png"}}]},"contents":[{"role":"user","parts":[{"text":"hi"}]}]}`},
+		{"openai", `{"model":"m","messages":[{"role":"user","content":[{"text":"hi"}]}]}`},
+		{"anthropic", `{"model":"m","max_tokens":64,"messages":[{"role":"assistant","content":[{"type":"text","text":"hi","id":"c1","name":"r","input":{}}]}]}`},
+	}
+	for i, row := range rows {
+		t.Run(row.format+"/row"+string(rune('a'+i)), func(t *testing.T) {
+			// No plugins.
+			status, body, hits, srv := parseFailE2E(t, row.format, nil, row.body)
+			if status != http.StatusBadRequest || string(body) != goldenInvalidRequest(row.format) {
+				t.Fatalf("no-plugins 400 wrong: status=%d body=%s", status, body)
+			}
+			if n := atomic.LoadInt32(hits); n != 0 {
+				t.Fatalf("upstream called %d times; must be 0", n)
+			}
+			if n := limiterBucketCount(srv); n != 0 {
+				t.Fatalf("%d limiter buckets materialized; must be 0", n)
+			}
+
+			// Allow-mode observer: same golden 400, no hooks, no upstream.
+			statusA, bodyA, hitsA, srvA := parseFailE2E(t, row.format, []string{"test-observer"}, row.body)
+			if statusA != http.StatusBadRequest || !bytes.Equal(bodyA, body) {
+				t.Fatalf("allow-mode 400 differs from the no-plugins body: status=%d body=%s", statusA, bodyA)
+			}
+			if n := atomic.LoadInt32(hitsA); n != 0 {
+				t.Fatalf("upstream called %d times with the observer; must be 0", n)
+			}
+			if v, ok := srvA.sharedCache.Get("observed_error_status"); ok {
+				t.Fatalf("a response hook ran with the observer: cache %q", v)
+			}
+
+			// Block-mode trapper: a request or response hook would swap the
+			// body — the golden 400 proves zero hooks ran.
+			statusB, bodyB, hitsB, _ := parseFailE2E(t, row.format, []string{"test-trapper"}, row.body)
+			if statusB != http.StatusBadRequest || !bytes.Equal(bodyB, body) {
+				t.Fatalf("block-mode 400 differs from the no-plugins body: status=%d body=%s (a hook ran)", statusB, bodyB)
+			}
+			if strings.Contains(string(bodyB), "plugin_failure") {
+				t.Fatalf("body mentions plugin_failure: %s", bodyB)
+			}
+			if n := atomic.LoadInt32(hitsB); n != 0 {
+				t.Fatalf("upstream called %d times with the trapper; must be 0", n)
+			}
+
+			// A mutating request plugin must never see the request.
+			_, bodyM, hitsM, _ := parseFailE2E(t, row.format, []string{"test-mutator"}, row.body)
+			if !bytes.Equal(bodyM, body) {
+				t.Fatalf("mutator-mode 400 differs from the no-plugins body: %s", bodyM)
+			}
+			if n := atomic.LoadInt32(hitsM); n != 0 {
+				t.Fatalf("upstream called %d times with the mutator; must be 0", n)
+			}
+		})
+	}
+}

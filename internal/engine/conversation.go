@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"hash"
 
 	plugin_sdk "github.com/torana-edge/torana-plugin-sdk"
@@ -130,9 +131,26 @@ func CachePrefixKey(c *ChatRequest) string {
 	writeHashField(h, domainCachePrefix)
 	writeHashField(h, c.Model)
 
-	// Tool definitions precede messages in the cached prefix for every format
-	// that caches them, so they are hashed first and in wire order.
-	for _, t := range c.Tools {
+	// The ordered-prefix reference model: the provider-visible serialization
+	// order is TOOLS FIRST, then messages (outer blocks, then nested
+	// tool-result content). The prefix closes at the LAST marker in that
+	// order, at its exact carrier; a message marker supersedes an earlier
+	// tool marker; with no marker the whole request is the automatic-cache
+	// prefix. Only the prefix projection is hashed — never a complete
+	// message containing a marker.
+	last := lastCacheMarker(c)
+
+	// Tools: with a tool marker as the LAST marker, only tools through it
+	// are in the prefix; with a message marker (or none), every tool
+	// precedes the prefix boundary and is hashed.
+	toolLimit := len(c.Tools)
+	if last != nil && last.kind == markerCarrierTool {
+		toolLimit = last.tool + 1
+	}
+	for i, t := range c.Tools {
+		if i >= toolLimit {
+			break
+		}
 		writeHashField(h, "tool")
 		writeHashField(h, t.Name)
 		writeHashField(h, t.Description)
@@ -148,25 +166,141 @@ func CachePrefixKey(c *ChatRequest) string {
 	writeHashFieldBytes(h, c.ProviderExtensions.Bytes())
 	writeHashFieldBytes(h, c.SafetySettings.Bytes())
 
-	for _, m := range c.Messages[:cachedMessageCount(c)] {
+	if last == nil {
+		// No marker: automatic prefix caching — the whole request is the
+		// prefix (the key moves every turn; an honest reflection of a cache
+		// the caller does not control).
+		for i := range c.Messages {
+			if !writeMessageFingerprint(h, &c.Messages[i]) {
+				return ""
+			}
+		}
+		return shortHex(h)
+	}
+	if last.kind == markerCarrierTool {
+		// The prefix ended in the tools section: no message is part of it.
+		return shortHex(h)
+	}
+	// The prefix ends at a message marker: full messages before it, then the
+	// marker message truncated at the exact block/nested position (the
+	// marker itself included).
+	for i := range c.Messages {
+		if i > last.msg {
+			break
+		}
+		if i < last.msg {
+			if !writeMessageFingerprint(h, &c.Messages[i]) {
+				return ""
+			}
+			continue
+		}
+		pbMsg, err := MessageToPB(prefixMessage(&c.Messages[i], last.block, last.nested))
+		if err != nil {
+			return ""
+		}
 		writeHashField(h, "msg")
-		// The canonical body fingerprint: the SDK's shared implementation
-		// (role + ordered blocks: kind, presence, order, identities, exact
-		// raw bytes, signatures, nested tool-result content, cache
-		// positions — typed length framing). The cache-tier stickiness
-		// mirror uses the same implementation; Edge never re-implements
-		// block semantics.
-		writeHashField(h, plugin_sdk.RequestBlocksFingerprint(MessageToPB(&m)))
+		writeHashField(h, plugin_sdk.RequestBlocksFingerprint(pbMsg))
 	}
 	return shortHex(h)
 }
 
+// writeMessageFingerprint hashes one full message with the SDK's shared
+// body fingerprint; false on a projection error (the request is outside the
+// closed domain — fail-safe empty key).
+func writeMessageFingerprint(h hash.Hash, m *Message) bool {
+	pbMsg, err := MessageToPB(m)
+	if err != nil {
+		return false
+	}
+	writeHashField(h, "msg")
+	// The canonical body fingerprint: the SDK's shared implementation
+	// (role + ordered blocks: kind, presence, order, identities, exact
+	// raw bytes, signatures, nested tool-result content, cache positions —
+	// typed length framing). The cache-tier stickiness mirror uses the same
+	// implementation; Edge never re-implements block semantics.
+	writeHashField(h, plugin_sdk.RequestBlocksFingerprint(pbMsg))
+	return true
+}
+
+// markerCarrierKind distinguishes the three cache-marker carriers in the
+// ordered-prefix model.
+type markerCarrierKind int
+
+const (
+	markerCarrierTool markerCarrierKind = iota + 1
+	markerCarrierTopLevel
+	markerCarrierNested
+)
+
+// cacheMarkerPos is one marker's position in the ordered prefix.
+type cacheMarkerPos struct {
+	kind   markerCarrierKind
+	tool   int // markerCarrierTool
+	msg    int // markerCarrierTopLevel / markerCarrierNested
+	block  int // markerCarrierTopLevel / markerCarrierNested
+	nested int // markerCarrierNested; -1 otherwise
+}
+
+// lastCacheMarker returns the LAST marker in serialization order (tools
+// first, then messages: outer blocks, then nested tool-result content), or
+// nil when the request carries no marker.
+func lastCacheMarker(c *ChatRequest) *cacheMarkerPos {
+	var last *cacheMarkerPos
+	for i, t := range c.Tools {
+		if !t.CacheControl.IsAbsent() {
+			last = &cacheMarkerPos{kind: markerCarrierTool, tool: i}
+		}
+	}
+	for i := range c.Messages {
+		for j, b := range c.Messages[i].Blocks {
+			if b.CacheBreakpoint != nil {
+				last = &cacheMarkerPos{kind: markerCarrierTopLevel, msg: i, block: j, nested: -1}
+			}
+			if b.ToolResult != nil {
+				for k, cblk := range b.ToolResult.Content {
+					if cblk.CacheBreakpoint != nil {
+						last = &cacheMarkerPos{kind: markerCarrierNested, msg: i, block: j, nested: k}
+					}
+				}
+			}
+		}
+	}
+	return last
+}
+
+// prefixMessage returns the message truncated at the marker position,
+// inclusive: blocks[0..lastBlock], with the marker block's tool-result
+// content cut at nested[0..lastNested] when the marker is nested.
+func prefixMessage(m *Message, lastBlock, lastNested int) *Message {
+	out := Message{Role: m.Role}
+	for j, b := range m.Blocks {
+		if j > lastBlock {
+			break
+		}
+		out.Blocks = append(out.Blocks, b)
+	}
+	if lastNested >= 0 && len(out.Blocks) > 0 {
+		lb := out.Blocks[len(out.Blocks)-1]
+		if lb.ToolResult != nil {
+			lb.ToolResult.Content = lb.ToolResult.Content[:lastNested+1]
+		}
+	}
+	return &out
+}
+
 // MessageToPB projects a message to its pb/v2 form for the SHARED SDK
-// fingerprint. The pbconv converter is the request-path source of truth;
-// the differential matrix (TestMessageToPBDifferential in pbconv) pins
-// byte equality between this projection and pbconv's per-message output so
-// the two can never drift.
-func MessageToPB(m *Message) *pb.Message {
+// fingerprint. It is a CHECKED projection: the pointer-sum representation
+// can carry zero or multiple arms, and the conversion would silently pick
+// the first — so the single-arm invariant (and the nested tool-result
+// conflict rule) is enforced HERE before any fact can be discarded. The
+// pbconv converter is the request-path source of truth; the differential
+// matrix (TestMessageToPBDifferential in pbconv) pins byte equality between
+// this projection and pbconv's per-message output so the two can never
+// drift.
+func MessageToPB(m *Message) (*pb.Message, error) {
+	if err := ValidateMessage(m); err != nil {
+		return nil, err
+	}
 	out := &pb.Message{Role: string(m.Role)}
 	for _, b := range m.Blocks {
 		rb := &pb.RequestBlock{}
@@ -217,26 +351,81 @@ func MessageToPB(m *Message) *pb.Message {
 		}
 		out.Blocks = append(out.Blocks, rb)
 	}
-	return out
+	return out, nil
 }
 
-// cachedMessageCount returns how many leading messages fall inside the cached
-// prefix: through the last message carrying a breakpoint, or all of them when
-// no message does.
-func cachedMessageCount(c *ChatRequest) int {
-	last := -1
-	for i, m := range c.Messages {
-		for _, b := range m.Blocks {
-			if b.CacheBreakpoint != nil {
-				last = i
-				break
+// ValidateMessage checks the ENGINE-side structural facts of one message
+// that the protobuf oneof cannot carry: exactly one block arm per block,
+// and no nested tool-result conflicts. The remaining absolute rules (role,
+// UTF-8, identity, JSON shapes, trailing placement) are the SDK validator's
+// common domain, applied by the checked Engine->PB boundary.
+func ValidateMessage(m *Message) error {
+	if m == nil {
+		return fmt.Errorf("message is nil")
+	}
+	for j := range m.Blocks {
+		if err := validateBlock(&m.Blocks[j]); err != nil {
+			return fmt.Errorf("block %d: %w", j, err)
+		}
+	}
+	return nil
+}
+
+func validateBlock(b *Block) error {
+	arms := 0
+	if b.Text != nil {
+		arms++
+	}
+	if b.Thinking != nil {
+		arms++
+	}
+	if b.RedactedThinking != nil {
+		arms++
+	}
+	if b.ToolUse != nil {
+		arms++
+	}
+	if b.ToolResult != nil {
+		arms++
+	}
+	if b.CacheBreakpoint != nil {
+		arms++
+	}
+	if b.Unknown != nil {
+		arms++
+	}
+	if b.TrailingSignature != nil {
+		arms++
+	}
+	switch arms {
+	case 0:
+		return fmt.Errorf("block has zero arms")
+	case 1:
+	default:
+		return fmt.Errorf("block has %d arms, want exactly one", arms)
+	}
+	if b.ToolResult != nil {
+		if len(b.ToolResult.Content) == 0 {
+			return fmt.Errorf("tool result has empty nested content")
+		}
+		for k := range b.ToolResult.Content {
+			c := &b.ToolResult.Content[k]
+			nested := 0
+			if c.Text != "" {
+				nested++
+			}
+			if c.Unknown != nil {
+				nested++
+			}
+			if c.CacheBreakpoint != nil {
+				nested++
+			}
+			if nested > 1 {
+				return fmt.Errorf("nested content element %d has %d conflicting arms", k, nested)
 			}
 		}
 	}
-	if last < 0 {
-		return len(c.Messages)
-	}
-	return last + 1
+	return nil
 }
 
 // messageText reduces a message to the bytes worth hashing for the conversation

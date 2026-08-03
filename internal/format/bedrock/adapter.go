@@ -10,6 +10,7 @@ import (
 	"math"
 
 	"github.com/torana-edge/torana-edge/internal/engine"
+	"github.com/torana-edge/torana-edge/internal/engine/pbconv"
 	"github.com/torana-edge/torana-edge/internal/format"
 )
 
@@ -150,7 +151,16 @@ func (a *Adapter) Unmarshal(rawBody []byte) (*engine.ChatRequest, error) {
 	// preceding tool definitions.
 	if req.ToolConfig != nil {
 		for _, t := range req.ToolConfig.Tools {
-			if t.CachePoint != nil && t.ToolSpec == nil {
+			// The toolConfig entries obey the same single-arm grammar:
+			// toolSpec XOR cachePoint; an entry with both would drop one
+			// fact by switch precedence, an entry with neither is
+			// malformed — both refused, never silently skipped.
+			switch {
+			case t.ToolSpec != nil && t.CachePoint != nil:
+				return nil, fmt.Errorf("bedrock: toolConfig entry carries both toolSpec and cachePoint")
+			case t.ToolSpec == nil && t.CachePoint == nil:
+				return nil, fmt.Errorf("bedrock: toolConfig entry has no toolSpec and no cachePoint")
+			case t.CachePoint != nil:
 				if n := len(chat.Tools); n > 0 {
 					cc, cerr := engine.ParseRequiredJSONObject(mustMarshalB(t.CachePoint))
 					if cerr != nil {
@@ -158,20 +168,18 @@ func (a *Adapter) Unmarshal(rawBody []byte) (*engine.ChatRequest, error) {
 					}
 					chat.Tools[n-1].CacheControl, _ = engine.ParseOptionalJSONObject(cc.Bytes())
 				}
-				continue
+			default:
+				// t.ToolSpec != nil: a real tool definition.
+				params, err := engine.ParseRequiredObjectOrEmpty(t.ToolSpec.InputSchema.JSON)
+				if err != nil {
+					return nil, fmt.Errorf("tool %q input schema: %w", t.ToolSpec.Name, err)
+				}
+				chat.Tools = append(chat.Tools, engine.ToolDef{
+					Name:        t.ToolSpec.Name,
+					Description: t.ToolSpec.Description,
+					Parameters:  params,
+				})
 			}
-			if t.ToolSpec == nil {
-				continue
-			}
-			params, err := engine.ParseRequiredObjectOrEmpty(t.ToolSpec.InputSchema.JSON)
-			if err != nil {
-				return nil, fmt.Errorf("tool %q input schema: %w", t.ToolSpec.Name, err)
-			}
-			chat.Tools = append(chat.Tools, engine.ToolDef{
-				Name:        t.ToolSpec.Name,
-				Description: t.ToolSpec.Description,
-				Parameters:  params,
-			})
 		}
 	}
 
@@ -221,15 +229,23 @@ func parseSystemBlocks(raw json.RawMessage) ([]engine.Block, error) {
 	}
 	var out []engine.Block
 	for _, b := range blocks {
-		if b.CachePoint != nil {
+		// The system entries obey the same single-arm grammar: text XOR
+		// cachePoint. An entry with both would drop one arm by switch
+		// precedence; an entry with neither is malformed.
+		switch {
+		case b.Text != "" && b.CachePoint != nil:
+			return nil, fmt.Errorf("bedrock: system entry carries both text and cachePoint")
+		case b.Text == "" && b.CachePoint == nil:
+			return nil, fmt.Errorf("bedrock: system entry has no text and no cachePoint")
+		case b.CachePoint != nil:
 			marker, err := engine.ParseRequiredJSONObject(mustMarshalB(b.CachePoint))
 			if err != nil {
 				return nil, fmt.Errorf("system cachePoint: %w", err)
 			}
 			out = append(out, engine.Block{CacheBreakpoint: &engine.CacheBreakpointBlock{Marker: marker}})
-			continue
+		default:
+			out = append(out, engine.Block{Text: &engine.TextBlock{Text: b.Text}})
 		}
-		out = append(out, engine.Block{Text: &engine.TextBlock{Text: b.Text}})
 	}
 	return out, nil
 }
@@ -493,6 +509,12 @@ func mapRoleB(role string) (engine.Role, error) {
 }
 
 func (a *Adapter) Marshal(chat *engine.ChatRequest) ([]byte, error) {
+	// The owning validation at EVERY marshal entry: the engine pointer sum
+	// must be in the closed domain before any arm is projected — a future
+	// call site cannot bypass the checked boundary by accident.
+	if err := pbconv.ValidateEngineRequest(chat); err != nil {
+		return nil, fmt.Errorf("bedrock: %w", err)
+	}
 	modelID := "anthropic.claude-sonnet-4-20250514-v1:0"
 	if chat.Model != "" {
 		modelID = chat.Model

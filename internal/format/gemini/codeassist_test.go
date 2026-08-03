@@ -1055,8 +1055,8 @@ func TestCodeAssistRejectedBareSignaturePart(t *testing.T) {
 			if err == nil {
 				t.Fatal("Unmarshal succeeded, want parse error")
 			}
-			if !strings.Contains(err.Error(), "gemini: standalone signature part must carry explicit empty text") {
-				t.Errorf("error = %q, want the explicit-empty-text condition named", err.Error())
+			if !strings.Contains(err.Error(), "arm members") && !strings.Contains(err.Error(), "explicit empty text") {
+				t.Errorf("error = %q, want the arm-grammar condition named", err.Error())
 			}
 		})
 	}

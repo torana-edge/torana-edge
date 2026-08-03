@@ -135,7 +135,9 @@ func BenchmarkPbconvToPB(b *testing.B) {
 		b.Run(fmt.Sprintf("msgs=%d", n), func(b *testing.B) {
 			b.ReportAllocs()
 			for i := 0; i < b.N; i++ {
-				_ = pbconv.ToPBChatRequest(chat)
+				if _, err := pbconv.ToPBChatRequestChecked(chat); err != nil {
+					b.Fatal(err)
+				}
 			}
 		})
 	}
@@ -144,7 +146,10 @@ func BenchmarkPbconvToPB(b *testing.B) {
 // BenchmarkPbconvFromPB is the return leg, run once per request today.
 func BenchmarkPbconvFromPB(b *testing.B) {
 	for _, n := range benchSizes {
-		pbReq := pbconv.ToPBChatRequest(benchConversation(n))
+		pbReq, cerr := pbconv.ToPBChatRequestChecked(benchConversation(n))
+		if cerr != nil {
+			b.Fatal(cerr)
+		}
 		b.Run(fmt.Sprintf("msgs=%d", n), func(b *testing.B) {
 			b.ReportAllocs()
 			for i := 0; i < b.N; i++ {
@@ -159,7 +164,10 @@ func BenchmarkPbconvFromPB(b *testing.B) {
 // BenchmarkProtoMarshal is the once-per-request encode at discovery.go:943.
 func BenchmarkProtoMarshal(b *testing.B) {
 	for _, n := range benchSizes {
-		pbReq := pbconv.ToPBChatRequest(benchConversation(n))
+		pbReq, cerr := pbconv.ToPBChatRequestChecked(benchConversation(n))
+		if cerr != nil {
+			b.Fatal(cerr)
+		}
 		b.Run(fmt.Sprintf("msgs=%d", n), func(b *testing.B) {
 			b.ReportAllocs()
 			for i := 0; i < b.N; i++ {
@@ -175,7 +183,11 @@ func BenchmarkProtoMarshal(b *testing.B) {
 // measured alone so the two halves can be told apart.
 func BenchmarkVerificationUnmarshal(b *testing.B) {
 	for _, n := range benchSizes {
-		raw, err := proto.Marshal(pbconv.ToPBChatRequest(benchConversation(n)))
+		pbReq, cerr := pbconv.ToPBChatRequestChecked(benchConversation(n))
+		if cerr != nil {
+			b.Fatal(cerr)
+		}
+		raw, err := proto.Marshal(pbReq)
 		if err != nil {
 			b.Fatal(err)
 		}
@@ -203,7 +215,10 @@ func BenchmarkVerificationUnmarshal(b *testing.B) {
 // here was faster and unsafe: it missed a cross-role reorder outright.
 func BenchmarkWriteGrantVerification(b *testing.B) {
 	for _, n := range benchSizes {
-		req := pbconv.ToPBChatRequest(benchConversation(n))
+		req, cerr := pbconv.ToPBChatRequestChecked(benchConversation(n))
+		if cerr != nil {
+			b.Fatal(cerr)
+		}
 		raw, err := proto.Marshal(req)
 		if err != nil {
 			b.Fatal(err)

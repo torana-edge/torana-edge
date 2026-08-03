@@ -8,6 +8,7 @@ import (
 	"math"
 
 	"github.com/torana-edge/torana-edge/internal/engine"
+	"github.com/torana-edge/torana-edge/internal/engine/pbconv"
 	"github.com/torana-edge/torana-edge/internal/format"
 )
 
@@ -189,13 +190,33 @@ func (cb *contentBlock) UnmarshalJSON(data []byte) error {
 		if json.Unmarshal(data, &t) == nil && t.Text == nil {
 			return fmt.Errorf("anthropic: text block without a text member")
 		}
+		// The provider-arm matrix: a DECLARED arm may not carry members of
+		// another arm — a text block with tool-use identity/input would be
+		// a cross-arm fact the switch would silently drop.
+		if raw.ID != "" || raw.Name != "" || len(raw.Input) > 0 || raw.ToolUseID != "" || raw.Thinking != "" || raw.Data != "" || raw.Content != nil {
+			return fmt.Errorf("anthropic: text block carries members of another arm")
+		}
 	case anthropicToolUse:
 		if raw.ID == "" || raw.Name == "" {
 			return fmt.Errorf("anthropic: tool_use block requires id and name")
 		}
+		if raw.Text != "" || raw.Thinking != "" || raw.Data != "" || raw.ToolUseID != "" || raw.Content != nil {
+			return fmt.Errorf("anthropic: tool_use block carries members of another arm")
+		}
 	case anthropicToolResult:
 		if raw.ToolUseID == "" {
 			return fmt.Errorf("anthropic: tool_result block requires tool_use_id")
+		}
+		if raw.Text != "" || raw.ID != "" || raw.Name != "" || len(raw.Input) > 0 || raw.Thinking != "" || raw.Data != "" {
+			return fmt.Errorf("anthropic: tool_result block carries members of another arm")
+		}
+	case anthropicThinking:
+		if raw.Text != "" || raw.ID != "" || raw.Name != "" || len(raw.Input) > 0 || raw.ToolUseID != "" || raw.Data != "" || raw.Content != nil {
+			return fmt.Errorf("anthropic: thinking block carries members of another arm")
+		}
+	case anthropicRedacted:
+		if raw.Text != "" || raw.Thinking != "" || raw.ID != "" || raw.Name != "" || len(raw.Input) > 0 || raw.ToolUseID != "" || raw.Content != nil {
+			return fmt.Errorf("anthropic: redacted_thinking block carries members of another arm")
 		}
 	}
 	if raw.Content == nil {
@@ -535,6 +556,12 @@ func mustMarshalA(v any) []byte {
 
 // Marshal converts a canonical ChatRequest into Anthropic Messages JSON.
 func (a *Adapter) Marshal(chat *engine.ChatRequest) ([]byte, error) {
+	// The owning validation at EVERY marshal entry: the engine pointer sum
+	// must be in the closed domain before any arm is projected — a future
+	// call site cannot bypass the checked boundary by accident.
+	if err := pbconv.ValidateEngineRequest(chat); err != nil {
+		return nil, fmt.Errorf("anthropic: %w", err)
+	}
 	model := chat.Model
 	if model == "" {
 		model = "claude-sonnet-4-20250514"

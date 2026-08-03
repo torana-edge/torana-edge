@@ -212,3 +212,52 @@ func mustRaw(t *testing.T, part map[string]any) []byte {
 	}
 	return b
 }
+
+// The executable Part grammar (review round 2 finding 3): exactly one arm
+// member per part, only documented modifier combinations, deliberate
+// future-arm policy. Every ambiguous row must be the value-free parse
+// error; every legal combination must parse and round-trip.
+
+func TestGeminiPartGrammar(t *testing.T) {
+	unmarshal := func(body string) error {
+		_, err := (&Adapter{}).Unmarshal([]byte(body))
+		return err
+	}
+	refuse := map[string]string{
+		"text+inlineData on one part":     `{"model":"m","contents":[{"role":"user","parts":[{"text":"x","inlineData":{"mimeType":"image/png"}}]}]}`,
+		"inlineData+fileData on one part": `{"model":"m","contents":[{"role":"user","parts":[{"inlineData":{"mimeType":"image/png"},"fileData":{"fileUri":"gs://b/x"}}]}]}`,
+		"text+functionCall on one part":   `{"model":"m","contents":[{"role":"model","parts":[{"text":"x","functionCall":{"name":"r","args":{},"id":"c1"}}]}]}`,
+		"thought on a non-text arm":       `{"model":"m","contents":[{"role":"model","parts":[{"thought":true,"functionCall":{"name":"r","args":{},"id":"c1"}}]}]}`,
+		"thoughtSignature on a media arm": `{"model":"m","contents":[{"role":"user","parts":[{"inlineData":{"mimeType":"image/png"},"thoughtSignature":"S"}]}]}`,
+		"modifiers only (no arm)":         `{"model":"m","contents":[{"role":"model","parts":[{"thought":true,"thoughtSignature":"S"}]}]}`,
+		"system unknown arm":              `{"model":"m","systemInstruction":{"parts":[{"inlineData":{"mimeType":"image/png"}}]},"contents":[{"role":"user","parts":[{"text":"hi"}]}]}`,
+		"system future arm":               `{"model":"m","systemInstruction":{"parts":[{"customFuture":{"x":1}}]},"contents":[{"role":"user","parts":[{"text":"hi"}]}]}`,
+		"system thought":                  `{"model":"m","systemInstruction":{"parts":[{"thought":true,"text":"r"}]},"contents":[{"role":"user","parts":[{"text":"hi"}]}]}`,
+	}
+	for name, body := range refuse {
+		t.Run("refuse/"+name, func(t *testing.T) {
+			if err := unmarshal(body); err == nil {
+				t.Fatal("ambiguous part accepted")
+			}
+		})
+	}
+
+	accept := map[string]string{
+		"thinking arm":            `{"model":"m","contents":[{"role":"model","parts":[{"thought":true,"text":"r","thoughtSignature":"S"}]}]}`,
+		"content-bound signature": `{"model":"m","contents":[{"role":"model","parts":[{"text":"a","thoughtSignature":"S"}]}]}`,
+		"trailing standalone":     `{"model":"m","contents":[{"role":"model","parts":[{"text":"a"},{"text":"","thoughtSignature":"S"}]}]}`,
+		"call-bound signature":    `{"model":"m","contents":[{"role":"model","parts":[{"functionCall":{"name":"r","args":{},"id":"c1"},"thoughtSignature":"S"}]}]}`,
+		"future arm alone":        `{"model":"m","contents":[{"role":"user","parts":[{"customFutureArm":{"nested":[1,2,3]}}]}]}`,
+	}
+	for name, body := range accept {
+		t.Run("accept/"+name, func(t *testing.T) {
+			chat, err := (&Adapter{}).Unmarshal([]byte(body))
+			if err != nil {
+				t.Fatalf("legal combination refused: %v", err)
+			}
+			if _, err := (&Adapter{}).Marshal(chat); err != nil {
+				t.Fatalf("legal combination failed to marshal: %v", err)
+			}
+		})
+	}
+}
