@@ -243,3 +243,145 @@ func TestValidateRandomizedDifferential(t *testing.T) {
 		t.Fatalf("mutation sweep incomplete: %d checks, want %d", checked, want)
 	}
 }
+
+// TestEscapeDecodingControlBytes: the five short control escapes decode to
+// their CONTROL BYTES, not to their letters. Each row is checked in both
+// directions:
+//   - distinct: the short escape and its ordinary letter are DIFFERENT
+//     decoded keys, so the pair is accepted;
+//   - equivalent: the short escape and the equivalent \u00XX spelling are
+//     the SAME decoded key, so the pair is rejected as a duplicate.
+func TestEscapeDecodingControlBytes(t *testing.T) {
+	rows := []struct {
+		name    string
+		short   string // escape spelling, e.g. `\n` (as JSON text)
+		letter  string // ordinary letter key spelling
+		unicode string // equivalent \u00XX spelling
+	}{
+		{"backspace", `\b`, `b`, `\u0008`},
+		{"formfeed", `\f`, `f`, `\u000c`},
+		{"newline", `\n`, `n`, `\u000a`},
+		{"carriage-return", `\r`, `r`, `\u000d`},
+		{"tab", `\t`, `t`, `\u0009`},
+	}
+	for _, row := range rows {
+		t.Run(row.name+"/distinct-from-letter", func(t *testing.T) {
+			doc := `{"` + row.short + `":1,"` + row.letter + `":2}`
+			if err := Validate([]byte(doc)); err != nil {
+				t.Fatalf("short escape and its letter must be DISTINCT keys: %v\n%s", err, doc)
+			}
+		})
+		t.Run(row.name+"/duplicate-of-unicode", func(t *testing.T) {
+			doc := `{"` + row.short + `":1,"` + row.unicode + `":2}`
+			if err := Validate([]byte(doc)); err == nil {
+				t.Fatalf("short escape and its \\u00XX spelling must be the SAME decoded key: %s", doc)
+			}
+		})
+	}
+	// Identity escapes stay pinned: the escaped byte is the letter itself.
+	for name, pair := range map[string][2]string{
+		"quote":     {`\"`, `\u0022`},
+		"backslash": {`\\`, `\u005c`},
+		"solidus":   {`\/`, `\u002f`},
+	} {
+		t.Run(name+"/duplicate-of-unicode", func(t *testing.T) {
+			doc := `{"` + pair[0] + `":1,"` + pair[1] + `":2}`
+			if err := Validate([]byte(doc)); err == nil {
+				t.Fatalf("identity escape and its \\u00XX spelling must be the SAME decoded key: %s", doc)
+			}
+		})
+		t.Run(name+"/distinct-from-letter", func(t *testing.T) {
+			doc := `{"` + pair[0] + `":1,"x":2}`
+			if err := Validate([]byte(doc)); err != nil {
+				t.Fatalf("identity escape key must be accepted: %v\n%s", err, doc)
+			}
+		})
+	}
+	// Value-string positive controls: escaped control bytes are valid inside
+	// values (the shared validator must keep accepting them outside keys).
+	for _, doc := range []string{
+		`{"a":"\n\t\r\b\f"}`,
+		`{"a":"line1\nline2\ttabbed"}`,
+	} {
+		if err := Validate([]byte(doc)); err != nil {
+			t.Fatalf("escaped control bytes in a value rejected: %v\n%s", err, doc)
+		}
+	}
+}
+
+// TestEscapeReferenceModel: the validator's duplicate decisions are compared
+// against an independent encoding/json reference over a generated corpus of
+// VALID escape spellings (the reference decode therefore always succeeds).
+// Two keys are duplicates iff their reference-decoded forms are equal; the
+// validator must reject exactly the equal pairs and accept exactly the
+// distinct pairs, so an escape misdecoding can never hide behind the
+// mutation-test exemption. Invalid spellings are covered separately by
+// TestEscapeReferenceModelInvalidSpellings and the malformed-structure
+// matrix.
+func TestEscapeReferenceModel(t *testing.T) {
+	spellings := []string{
+		`\b`, `\u0008`, `b`, `\u0062`,
+		`\f`, `\u000c`, `f`, `\u0066`,
+		`\n`, `\u000a`, `n`, `\u006e`,
+		`\r`, `\u000d`, `r`, `\u0072`,
+		`\t`, `\u0009`, `t`, `\u0074`,
+		`\"`, `\u0022`,
+		`\\`, `\u005c`,
+		`\/`, `\u002f`,
+		`x`, `plain`,
+	}
+	refDecode := func(spelling string) (string, bool) {
+		var m map[string]int
+		if err := json.Unmarshal([]byte(`{"`+spelling+`":1}`), &m); err != nil {
+			return "", false
+		}
+		for k := range m {
+			return k, true
+		}
+		return "", false
+	}
+	for i, a := range spellings {
+		for j, b := range spellings {
+			if i == j {
+				continue
+			}
+			da, _ := refDecode(a)
+			db, _ := refDecode(b)
+			doc := `{"` + a + `":1,"` + b + `":2}`
+			err := Validate([]byte(doc))
+			switch {
+			case da == db:
+				// Same decoded identity: must be rejected as a duplicate.
+				if err == nil {
+					t.Fatalf("reference-duplicate pair accepted (%q == %q): %s", da, db, doc)
+				}
+			default:
+				// Distinct decoded identities: must be accepted.
+				if err != nil {
+					t.Fatalf("reference-distinct pair rejected (%q != %q): %v\n%s", da, db, err, doc)
+				}
+			}
+		}
+	}
+}
+
+// TestEscapeReferenceModelInvalidSpellings: invalid escape spellings are
+// rejected by BOTH the validator and encoding/json, so the reference model's
+// valid-only corpus cannot hide a validator that swallows malformed escapes.
+func TestEscapeReferenceModelInvalidSpellings(t *testing.T) {
+	for _, spelling := range []string{
+		`\x`,   // not a JSON escape
+		`\u12`, // truncated hex
+		`\u00g0`,
+		`\`,
+	} {
+		doc := `{"` + spelling + `":1}`
+		if err := Validate([]byte(doc)); err == nil {
+			t.Fatalf("invalid spelling %q passed Validate", spelling)
+		}
+		var m map[string]int
+		if err := json.Unmarshal([]byte(doc), &m); err == nil {
+			t.Fatalf("invalid spelling %q accepted by encoding/json — not an invalid spelling", spelling)
+		}
+	}
+}

@@ -247,8 +247,19 @@ func (v *validator) decodeString() ([]byte, error) {
 			e := v.data[v.pos]
 			v.pos++
 			switch e {
-			case '"', '\\', '/', 'b', 'f', 'n', 'r', 't':
+			case '"', '\\', '/':
+				// Identity escapes: the decoded byte IS the escape letter.
 				v.buf = append(v.buf, e)
+			case 'b':
+				v.buf = append(v.buf, '\b') // 0x08
+			case 'f':
+				v.buf = append(v.buf, '\f') // 0x0c
+			case 'n':
+				v.buf = append(v.buf, '\n') // 0x0a
+			case 'r':
+				v.buf = append(v.buf, '\r') // 0x0d
+			case 't':
+				v.buf = append(v.buf, '\t') // 0x09
 			case 'u':
 				r, err := v.hexRune()
 				if err != nil {
