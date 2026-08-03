@@ -38,6 +38,7 @@ import (
 	"github.com/torana-edge/torana-edge/internal/engine"
 	"github.com/torana-edge/torana-edge/internal/engine/pbconv"
 	"github.com/torana-edge/torana-edge/internal/format"
+	"github.com/torana-edge/torana-edge/internal/format/jsontext"
 	"github.com/torana-edge/torana-edge/internal/metrics"
 	"github.com/torana-edge/torana-edge/internal/mitm"
 	"github.com/torana-edge/torana-edge/internal/plugin"
@@ -190,14 +191,17 @@ type RouteContext struct {
 	ProviderName string
 	StrippedPath string
 	Identity     string
-	// Block, when set by the Director after a plugin vetoes the request
-	// (env.block_request), tells the transport to return this synthetic
-	// error response instead of calling upstream.
+	// Block, when set by the Director, tells the transport to return this
+	// synthetic provider-shaped response instead of calling upstream. Set by
+	// plugin vetoes (env.block_request) and by the host's own input-validation
+	// rejections (renderInvalidRequest).
 	Block *BlockResponse
 }
 
-// BlockResponse is a synthetic, provider-shaped error a plugin requested via
-// env.block_request. The transport returns it verbatim; no upstream call is made.
+// BlockResponse is a synthetic, provider-shaped response the transport
+// returns verbatim; no upstream call is made. Produced by plugin vetoes
+// (env.block_request) and by the host's input-validation rejections
+// (renderInvalidRequest); the constructor names the owner in each case.
 type BlockResponse struct {
 	Status      int
 	ContentType string
@@ -261,9 +265,11 @@ type reqState struct {
 	// synthesizes a chat path and anything replaying this conversation needs
 	// the one the caller used.
 	Path string
-	// Synthetic marks a response served by a plugin (env.respond_request):
-	// the transport returns it verbatim and ModifyResponse must not re-parse
-	// it or run response hooks over it.
+	// Synthetic marks a complete host-local provider-shaped response: served
+	// by a plugin (env.respond_request) or by the host's own input-validation
+	// rejection (a body a known configured format cannot parse). The
+	// transport returns it verbatim and ModifyResponse must not re-parse it,
+	// record an upstream status, or run response hooks over it.
 	Synthetic bool
 	// Verdict is the control-plane outcome applied by the plugin pipeline:
 	// "block" (env.block_request), "respond" (env.respond_request),
@@ -798,11 +804,45 @@ func New(cfg Config) (*Server, error) {
 			// request we intend to parse.
 			req.Header.Set("Accept-Encoding", "identity")
 
+			// rejectMalformed is the single fail-closed path for every body a
+			// KNOWN CONFIGURED format cannot parse (validator or adapter): a
+			// value-free, provider-native HTTP 400 short-circuits before rate
+			// limiting and upstream, identical with or without plugins and
+			// independent of failure_mode (no valid IR exists, so no request
+			// hook runs; the transport returns rc.Block verbatim). The
+			// adapter/validator error is never logged or surfaced: several
+			// adapters embed raw body fragments in their errors.
+			rejectMalformed := func() {
+				log.Printf("format %s: rejecting malformed request body", prov.Format)
+				// Route context is an internal invariant, created immediately
+				// above for every routed request: a missing context must never
+				// silently turn the rejection into an empty-body upstream
+				// request.
+				rc := req.Context().Value(routeContextKey{}).(*RouteContext)
+				rc.Block = renderInvalidRequest(prov.Format)
+				rs := reqStateFrom(req.Context())
+				rs.Synthetic = true
+				req.Body = io.NopCloser(bytes.NewReader(nil))
+				req.ContentLength = 0
+			}
+
+			// JSON-text validation first: the format adapters decode with
+			// encoding/json, which silently replaces invalid UTF-8 and lone
+			// surrogates, accepts duplicate member names (last wins), and lets
+			// escape-equivalent keys land in different logical positions — a
+			// plugin and the provider could inspect different requests. One
+			// shared, value-free check for every known configured format
+			// rejects those parser-differential hazards before the adapter
+			// sees the body. It is deliberately lenient beyond that (number
+			// tokens, unknown members): it can only reject what the adapter
+			// would also reject, never accept a document the adapter refuses.
+			if err := jsontext.Validate(body); err != nil {
+				rejectMalformed()
+				return
+			}
 			chat, err := fmt.Request.Unmarshal(body)
 			if err != nil {
-				log.Printf("format %s unmarshal error: %v — passing through", fmt.Name, err)
-				req.Body = io.NopCloser(bytes.NewReader(body))
-				req.ContentLength = int64(len(body))
+				rejectMalformed()
 				return
 			}
 
@@ -1044,13 +1084,15 @@ func New(cfg Config) (*Server, error) {
 
 		ModifyResponse: func(resp *http.Response) error {
 			if rs := reqStateFrom(resp.Request.Context()); rs != nil {
-				rs.UpstreamStatus = resp.StatusCode
-				// Plugin-served response (env.respond_request): already a
-				// complete, provider-shaped body — don't re-parse it or run
-				// response hooks over it.
+				// Complete host-local provider-shaped response (plugin
+				// respond, host input rejection): NOT an upstream response —
+				// record no upstream status and run no response hooks, so a
+				// local 400 cannot masquerade as an upstream outcome or
+				// trigger observational after-response plugins.
 				if rs.Synthetic {
 					return nil
 				}
+				rs.UpstreamStatus = resp.StatusCode
 			}
 			// Skip the mutation pipeline for error responses — don't try to
 			// reverse-translate a 4xx/5xx body that isn't a valid chat

@@ -116,11 +116,21 @@ func anthropicPIIEnv(t *testing.T, piiCfg string) (
 // of typed text blocks (v1 mapped this to a tool message with empty scalar
 // Content and skipped it).
 func anthropicToolResultConvo(toolResultContent any) string {
-	b, _ := json.Marshal(map[string]any{
-		"model": "claude-3-5-sonnet",
-		"system": []map[string]any{
+	return anthropicToolResultConvoWithSystem(
+		[]map[string]any{
 			{"type": "text", "text": "You are a coding agent. Read files and report their contents."},
 		},
+		toolResultContent)
+}
+
+// anthropicToolResultConvoWithSystem is anthropicToolResultConvo with an
+// explicit system value, so the STRING system form (the historical parse
+// bypass) can be exercised: a string system is a VALID Anthropic form that
+// v1's adapter rejected, silently skipping every before-request plugin.
+func anthropicToolResultConvoWithSystem(system any, toolResultContent any) string {
+	b, _ := json.Marshal(map[string]any{
+		"model":  "claude-3-5-sonnet",
+		"system": system,
 		"tools": []map[string]any{
 			{
 				"name":        "read_file",
@@ -454,6 +464,60 @@ func TestCapturedBlockArmExactness(t *testing.T) {
 				t.Fatalf("illegal union field accepted: %+v", block)
 			}
 		})
+	}
+}
+
+// TestPIIAnthropicToolResultArrayBlockStringSystem — the SAME blocked shape
+// with the system sent as the VALID STRING form, the exact historical parse
+// bypass. The adapter must accept the string (canonicalizing it to one text
+// block — the captured clean twin therefore still carries the canonical ARRAY
+// form and passes the exact-topology check), the pipeline must run, and the
+// blocked twin must get the byte-exact 422 with zero additional upstream
+// calls, exactly like the array-form test.
+func TestPIIAnthropicToolResultArrayBlockStringSystem(t *testing.T) {
+	post, hits, captured := anthropicPIIEnv(t, `{"tools":["*"],"on_error":"block"}`)
+
+	const sysText = "You are a coding agent. Read files and report their contents."
+
+	// 1. Clean twin with a STRING system: reaches upstream exactly once; the
+	// captured request has the canonicalized array system with the same text.
+	cleanBody := anthropicToolResultConvoWithSystem(sysText, []map[string]any{
+		{"type": "text", "text": "ok"},
+		{"type": "text", "text": "no secrets here"},
+	})
+	status, body := post(cleanBody)
+	if status != http.StatusOK {
+		t.Fatalf("clean status = %d, want 200; body=%s", status, body)
+	}
+	if n := atomic.LoadInt32(hits); n != 1 {
+		t.Fatalf("clean upstream hits = %d, want 1", n)
+	}
+	got := captured()
+	if len(got) != 1 {
+		t.Fatalf("captured requests = %d, want 1", len(got))
+	}
+	cap := mustDecodeCaptured(t, got[0])
+	assertCapturedHeader(t, cap)
+	assertCleanTopology(t, cap)
+
+	// 2. Blocked twin with a STRING system and the PII-bearing array-valued
+	// tool_result: the pipeline runs (the string parses now) and the refusal
+	// is the byte-exact 422; the upstream is never called again.
+	blockedBody := anthropicToolResultConvoWithSystem(sysText, []map[string]any{
+		{"type": "text", "text": ""},
+		{"type": "text", "text": "contact: someone@example.com"},
+	})
+	status, body = post(blockedBody)
+	if status != 422 {
+		t.Fatalf("blocked status = %d, want 422; body=%s", status, body)
+	}
+	if n := atomic.LoadInt32(hits); n != 1 {
+		t.Fatalf("upstream hits = %d after the blocked request, want 1 (never called again)", n)
+	}
+	const wantMessage = "Blocked: PII detected in `read_file` output and NOT sent upstream. Found: email (line 2). Do not resend this content; reformulate to exclude or redact these values before returning the tool result."
+	wantBody := renderProviderError("anthropic", 422, "pii_detected", wantMessage)
+	if !bytes.Equal(body, wantBody) {
+		t.Fatalf("block body is not byte-exactly the renderer envelope:\n  got  %s\n  want %s", body, wantBody)
 	}
 }
 

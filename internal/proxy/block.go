@@ -2,6 +2,8 @@ package proxy
 
 import (
 	"encoding/json"
+	"fmt"
+	"net/http"
 
 	"github.com/torana-edge/torana-edge/internal/wasm"
 )
@@ -26,6 +28,28 @@ func renderBlock(format string, v *wasm.BlockVerdict) *BlockResponse {
 		Status:      status,
 		ContentType: "application/json",
 		Body:        renderProviderError(format, status, code, v.Message),
+	}
+}
+
+// renderInvalidRequest is the host's fail-closed response to a body that a
+// KNOWN CONFIGURED format cannot parse (the approved parse-bypass seam): a
+// value-free, provider-native HTTP 400 that short-circuits BEFORE rate
+// limiting and upstream, identical whether plugins are loaded or not, and
+// independent of plugin failure_mode — no request hooks run because there is
+// no valid IR to hand them. The message is bounded and names only the
+// configured format; it never reflects body or header data (several adapter
+// errors embed raw request fragments, so the adapter error itself is never
+// surfaced).
+func renderInvalidRequest(format string) *BlockResponse {
+	code := "invalid_request_error"
+	if format == "gemini" || format == "gemini-codeassist" {
+		code = "INVALID_ARGUMENT"
+	}
+	return &BlockResponse{
+		Status:      http.StatusBadRequest,
+		ContentType: "application/json",
+		Body: renderProviderError(format, http.StatusBadRequest, code,
+			fmt.Sprintf("the request body could not be parsed as a valid %s request", format)),
 	}
 }
 

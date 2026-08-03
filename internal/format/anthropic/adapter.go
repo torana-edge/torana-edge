@@ -2,6 +2,7 @@
 package anthropic
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 
@@ -17,7 +18,7 @@ type anthropicRequest struct {
 	Temperature   *float64           `json:"temperature,omitempty"`
 	TopP          *float64           `json:"top_p,omitempty"`
 	StopSequences []string           `json:"stop_sequences,omitempty"`
-	System        []contentBlock     `json:"system,omitempty"`
+	System        []contentBlock     `json:"system,omitempty"` // string or array; string canonicalizes to one text block
 	Messages      []anthropicMessage `json:"messages"`
 	Tools         []anthropicToolDef `json:"tools,omitempty"`
 	Stream        bool               `json:"stream,omitempty"`
@@ -27,6 +28,81 @@ type anthropicRequest struct {
 type anthropicMessage struct {
 	Role    string         `json:"role"`
 	Content []contentBlock `json:"content"`
+}
+
+// UnmarshalJSON accepts BOTH valid Anthropic system forms: a bare string
+// (canonicalized to ONE text block, per the approved parse-bypass seam) and
+// the content-block array (existing semantics incl. cache breakpoints).
+func (ar *anthropicRequest) UnmarshalJSON(data []byte) error {
+	type alias anthropicRequest
+	var raw struct {
+		alias
+		System json.RawMessage `json:"system"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	*ar = anthropicRequest(raw.alias)
+	if raw.System == nil {
+		return nil
+	}
+	// The Anthropic system union is string | Array<TextBlockParam> — NOT
+	// nullable. An explicit null is a parse error like any other wrong type
+	// (json.Unmarshal(null, &s) would otherwise succeed leaving s empty and
+	// silently treat the null as absent).
+	if bytes.Equal(bytes.TrimSpace(raw.System), []byte("null")) {
+		return fmt.Errorf("system: expected string or array")
+	}
+
+	// Try string first: canonicalize to one text block. An empty string
+	// yields an empty text block, which the system coalescing drops, so
+	// `"system": ""` behaves like an absent system.
+	var s string
+	if json.Unmarshal(raw.System, &s) == nil {
+		ar.System = []contentBlock{{Type: "text", Text: s}}
+		return nil
+	}
+
+	// Try array: every element must be a TextBlockParam. The official arm is
+	// Array<TextBlockParam>, NOT arbitrary contentBlock — a null element, an
+	// empty object, a missing `type`, a non-`text` type, or a missing `text`
+	// is a parse error (never silently dropped, which would weaken the
+	// system prompt the pipeline inspected). The supported member inventory
+	// is type, text, cache_control; any other member (e.g. citations) is not
+	// representable by Torana's IR and is rejected with the same value-free
+	// error rather than silently discarded. Empty text is distinct from
+	// missing text: `{"type":"text","text":""}` is a valid empty block
+	// (absent-like after coalescing), `{"type":"text"}` is not.
+	var rawBlocks []json.RawMessage
+	if err := json.Unmarshal(raw.System, &rawBlocks); err != nil {
+		return fmt.Errorf("system: expected string or array: %w", err)
+	}
+	blocks := make([]contentBlock, 0, len(rawBlocks))
+	for i, rb := range rawBlocks {
+		if bytes.Equal(bytes.TrimSpace(rb), []byte("null")) {
+			return fmt.Errorf("system: element %d: expected a text block", i)
+		}
+		var el struct {
+			Type         string         `json:"type"`
+			Text         *string        `json:"text"`
+			CacheControl map[string]any `json:"cache_control"`
+		}
+		dec := json.NewDecoder(bytes.NewReader(rb))
+		dec.DisallowUnknownFields()
+		if err := dec.Decode(&el); err != nil {
+			return fmt.Errorf("system: element %d: %w", i, err)
+		}
+		if el.Type != "text" || el.Text == nil {
+			return fmt.Errorf("system: element %d: expected a text block with a text member", i)
+		}
+		blocks = append(blocks, contentBlock{
+			Type:         "text",
+			Text:         *el.Text,
+			CacheControl: el.CacheControl,
+		})
+	}
+	ar.System = blocks
+	return nil
 }
 
 // UnmarshalJSON handles string content (Claude Code style) and array content.
