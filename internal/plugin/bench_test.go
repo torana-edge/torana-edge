@@ -238,7 +238,10 @@ func BenchmarkWriteGrantVerification(b *testing.B) {
 			}
 		})
 
-		accepted := fingerprintRequestSections(req)
+		accepted, err := fingerprintRequestSections(req)
+		if err != nil {
+			b.Fatal(err)
+		}
 		b.Run(fmt.Sprintf("fingerprint/msgs=%d", n), func(b *testing.B) {
 			b.SetBytes(int64(len(raw)))
 			b.ReportAllocs()
@@ -247,7 +250,11 @@ func BenchmarkWriteGrantVerification(b *testing.B) {
 				if err := proto.Unmarshal(raw, &out); err != nil {
 					b.Fatal(err)
 				}
-				if !accepted.equal(fingerprintRequestSections(&out)) {
+				res, err := fingerprintRequestSections(&out)
+				if err != nil {
+					b.Fatal(err)
+				}
+				if !accepted.equal(res) {
 					b.Fatal("unmodified request must fingerprint equal")
 				}
 			}

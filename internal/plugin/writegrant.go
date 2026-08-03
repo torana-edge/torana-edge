@@ -129,22 +129,22 @@ func writeField(h hash.Hash, field byte, present bool, value []byte) {
 // cache-economics plugin would need every role grant. The cache section
 // covers marker values AND positions, so a content/topology change that
 // shifts a cache block changes BOTH sections — the union obligation.
-func fingerprintMessage(m *pb.Message) [32]byte {
+func fingerprintMessage(m *pb.Message) ([32]byte, error) {
 	body := bodyWithoutCacheBlocks(m)
 	h := sha256.New()
 	writeField(h, 1, m.Role != "", []byte(m.Role))
-	// The SDK fingerprint is ERROR-RETURNING: a verification failure
-	// (unrepresentable body) must FAIL CLOSED — the zero digest can never
-	// match a genuine grant digest, so the grant check errors on the
-	// caller side instead of silently hashing a partial body.
+	// The SDK fingerprint is ERROR-RETURNING and the error PROPAGATES
+	// (never a zero digest): two erroring projections at the same
+	// role/position must not compare equal. The section-fingerprint path
+	// fails the whole verification on any unrepresentable body.
 	s, err := plugin_sdk.RequestBlocksFingerprint(body)
 	if err != nil {
-		return [32]byte{}
+		return [32]byte{}, fmt.Errorf("writegrant: role-section body fingerprint: %w", err)
 	}
 	writeFramed(h, []byte(s))
 	var sum [32]byte
 	copy(sum[:], h.Sum(nil))
-	return sum
+	return sum, nil
 }
 
 // bodyWithoutCacheBlocks returns the message with its cache-breakpoint
@@ -197,7 +197,7 @@ func nestedWithoutCache(content []*pb.ToolResultContentBlock) []*pb.ToolResultCo
 // ever contribute the same bytes. Folding only a role's own subsequence
 // leaves a cross-role reorder invisible, because neither role's subsequence
 // changes.
-func fingerprintRequestSections(req *pb.ChatRequest) requestSections {
+func fingerprintRequestSections(req *pb.ChatRequest) (requestSections, error) {
 	p := requestSections{messages: map[string][32]byte{}}
 
 	hashers := map[string]hash.Hash{}
@@ -207,7 +207,10 @@ func fingerprintRequestSections(req *pb.ChatRequest) requestSections {
 			h = sha256.New()
 			hashers[m.Role] = h
 		}
-		d := fingerprintMessage(m)
+		d, err := fingerprintMessage(m)
+		if err != nil {
+			return p, err
+		}
 		var idx [8]byte
 		binary.LittleEndian.PutUint64(idx[:], uint64(i))
 		writeFramed(h, idx[:], d[:])
@@ -280,7 +283,7 @@ func fingerprintRequestSections(req *pb.ChatRequest) requestSections {
 	writeFramed(h, scratch[:])
 	copy(p.params[:], h.Sum(nil))
 
-	return p
+	return p, nil
 }
 
 // fingerprintCacheControlSection digests the cache breakpoint markers of a
@@ -449,8 +452,14 @@ func verifyUnknownFields(accepted, out *pb.ChatRequest) error {
 // the all-grants fast path, because every section is grantable to that
 // plugin; run for everyone else.
 func verifyGrantedSections(accepted, out *pb.ChatRequest, canWrite func(section string) bool) error {
-	acc := fingerprintRequestSections(accepted)
-	res := fingerprintRequestSections(out)
+	acc, err := fingerprintRequestSections(accepted)
+	if err != nil {
+		return err
+	}
+	res, err := fingerprintRequestSections(out)
+	if err != nil {
+		return err
+	}
 
 	// Roles are compared over the sorted union of both sides: a role that
 	// left a slot and the role that took it are both marked changed, which is
@@ -757,6 +766,16 @@ func (r requestSignatureField) occurrences(m *pb.Message) ([]tokenOccurrence, er
 		}
 		token := trail.Get(r.sig).String()
 		h := sha256.New()
+		// The MIXED scope: the trailing token is bound to BOTH its own
+		// SameMessage carriers (part_metadata_json on the trailing block —
+		// typed framing, so presence/value changes are distinct) AND the
+		// ordered preceding text/thinking content. SameMessage first, then
+		// the TrailingStandalone refs (the SDK's declared order).
+		sameDigest, err := digestBlockFields(trail, r.sameRefs)
+		if err != nil {
+			return nil, fmt.Errorf("writegrant: %s trailing occurrence: %w", r.name, err)
+		}
+		writeFramed(h, sameDigest[:])
 		for _, b := range m.Blocks {
 			for _, ref := range r.trailRefs {
 				if pm := requestBlockMessage(b, ref.msg); pm != nil {

@@ -278,8 +278,14 @@ func TestNestedCacheOracleAgreement(t *testing.T) {
 			roleChanged := len(c.messages) > 0
 			cacheChanged := c.cacheControl
 
-			fpA := fingerprintRequestSections(r.accepted)
-			fpO := fingerprintRequestSections(r.out)
+			fpA, err := fingerprintRequestSections(r.accepted)
+			if err != nil {
+				t.Fatal(err)
+			}
+			fpO, err := fingerprintRequestSections(r.out)
+			if err != nil {
+				t.Fatal(err)
+			}
 			roleFpChanged := !sameRoleSections(fpA, fpO)
 
 			ccA := fingerprintCacheControlSection(r.accepted)

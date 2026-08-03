@@ -326,6 +326,27 @@ func appendTrailing(m *pb.Message, sig string) {
 	}})
 }
 
+// trailingMetaSignedRequest is trailingSignedRequest with part metadata on
+// the trailing block itself — the SameMessage half of the mixed-scope
+// binding.
+func trailingMetaSignedRequest() *pb.ChatRequest {
+	r := trailingSignedRequest()
+	setTrailingMeta(r.Messages[1], `{"src":"x"}`)
+	return r
+}
+
+// setTrailingMeta sets (or clears, with "") the trailing block's
+// part_metadata_json.
+func setTrailingMeta(m *pb.Message, raw string) {
+	for _, b := range m.Blocks {
+		if ts := b.GetTrailingSignature(); ts != nil {
+			ts.PartMetadataJson = []byte(raw)
+			return
+		}
+	}
+	panic("no trailing block")
+}
+
 // The bound-signature rule on the REQUEST path: there is no apply block to
 // invalidate a wire token later, so SignatureStale is a violation here (it is
 // tolerated on the response path). Clearing the token over changed content is
@@ -384,6 +405,26 @@ func TestVerifyRequestMutationSignatureMatrix(t *testing.T) {
 		{name: "trailing thinking changed token cleared -> accepted", base: trailingSignedRequest,
 			apply: func(r *pb.ChatRequest) {
 				setThinking(r.Messages[1], "signed thinking'")
+				setTrailing(r.Messages[1], "")
+			}},
+		// MIXED-SCOPE trailing binding (batch-1 review finding 1): the
+		// trailing token also covers the trailing block's OWN
+		// part_metadata_json (SameMessage), not only the preceding
+		// text/thinking content.
+		{name: "trailing metadata unchanged token kept -> accepted", base: trailingMetaSignedRequest,
+			apply: func(r *pb.ChatRequest) { setText(r.Messages[1], "signed content") }},
+		{name: "trailing metadata changed token kept -> stale", base: trailingMetaSignedRequest,
+			want:  "plugin trailing_signature signature stale",
+			apply: func(r *pb.ChatRequest) { setTrailingMeta(r.Messages[1], `{"src":"y"}`) }},
+		{name: "trailing metadata presence cleared token kept -> stale", base: trailingMetaSignedRequest,
+			want:  "plugin trailing_signature signature stale",
+			apply: func(r *pb.ChatRequest) { setTrailingMeta(r.Messages[1], "") }},
+		{name: "trailing metadata value changed token kept -> stale", base: trailingMetaSignedRequest,
+			want:  "plugin trailing_signature signature stale",
+			apply: func(r *pb.ChatRequest) { setTrailingMeta(r.Messages[1], `{"src":"x","extra":1}`) }},
+		{name: "trailing metadata changed token cleared -> accepted", base: trailingMetaSignedRequest,
+			apply: func(r *pb.ChatRequest) {
+				setTrailingMeta(r.Messages[1], `{"src":"y"}`)
 				setTrailing(r.Messages[1], "")
 			}},
 	}

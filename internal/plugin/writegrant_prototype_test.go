@@ -375,11 +375,18 @@ func TestCompareSectionsDetectsEveryMutation(t *testing.T) {
 func TestSafeFingerprintDetectsEveryMutation(t *testing.T) {
 	for _, m := range mutations() {
 		t.Run(m.name, func(t *testing.T) {
-			accepted := fingerprintRequestSections(baseRequest())
+			accepted, err := fingerprintRequestSections(baseRequest())
+			if err != nil {
+				t.Fatal(err)
+			}
 			out := baseRequest()
 			m.apply(out)
 
-			if accepted.equal(fingerprintRequestSections(out)) {
+			fpOut, err := fingerprintRequestSections(out)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if accepted.equal(fpOut) {
 				t.Fatal("mutation invisible to the fingerprint — not safe for enforcement")
 			}
 		})
@@ -392,7 +399,15 @@ func TestUnmodifiedRequestIsUnchanged(t *testing.T) {
 	if c := compareSections(baseRequest(), baseRequest()); c.any() {
 		t.Fatalf("unmodified request reported as changed: %+v", c)
 	}
-	if !fingerprintRequestSections(baseRequest()).equal(fingerprintRequestSections(baseRequest())) {
+	fp1, err := fingerprintRequestSections(baseRequest())
+	if err != nil {
+		t.Fatal(err)
+	}
+	fp2, err := fingerprintRequestSections(baseRequest())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !fp1.equal(fp2) {
 		t.Fatal("unmodified request produced different fingerprints")
 	}
 }
@@ -490,12 +505,31 @@ func TestEveryGovernedFieldIsDetected(t *testing.T) {
 			t.Run(tg.name+"/"+name, func(t *testing.T) {
 				accepted := baseRequest()
 				out := baseRequest()
-				mutateField(t, tg.pick(out), fd)
+				if tg.name == "Message" && name == "blocks" {
+					// Appending an arm-less RequestBlock would be an
+					// UNREPRESENTABLE body (the SDK fingerprint errors and
+					// the verification fails — pinned by
+					// TestFingerprintErrorCannotBecomeSectionDigest).
+					// Mutate the list with a VALID block so this row
+					// proves the list change is detected.
+					out.Messages[3].Blocks = append(out.Messages[3].Blocks,
+						&pb.RequestBlock{Kind: &pb.RequestBlock_Text{Text: &pb.RequestTextBlock{Text: "x"}}})
+				} else {
+					mutateField(t, tg.pick(out), fd)
+				}
 
 				if !compareSections(accepted, out).any() {
 					t.Error("exact comparison did not detect a change to this field")
 				}
-				if fingerprintRequestSections(accepted).equal(fingerprintRequestSections(out)) {
+				fpAcc, err := fingerprintRequestSections(accepted)
+				if err != nil {
+					t.Fatal(err)
+				}
+				fpOut, err := fingerprintRequestSections(out)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if fpAcc.equal(fpOut) {
 					t.Error("fingerprint did not detect a change to this field")
 				}
 			})
@@ -568,7 +602,15 @@ func TestOptionalPresenceIsNotForgeable(t *testing.T) {
 	b := baseRequest()
 	b.MaxTokens, b.Temperature = nil, &zero64
 
-	if fingerprintRequestSections(a).equal(fingerprintRequestSections(b)) {
+	fpA, err := fingerprintRequestSections(a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fpB, err := fingerprintRequestSections(b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fpA.equal(fpB) {
 		t.Fatal("presence of one optional field is forgeable as another's value")
 	}
 	if !compareSections(a, b).any() {
@@ -588,7 +630,15 @@ func TestNegativeZeroIsDetected(t *testing.T) {
 	if !compareSections(a, b).any() {
 		t.Fatal("exact comparison treated -0.0 and +0.0 as identical")
 	}
-	if fingerprintRequestSections(a).equal(fingerprintRequestSections(b)) {
+	fpA, err := fingerprintRequestSections(a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fpB, err := fingerprintRequestSections(b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fpA.equal(fpB) {
 		t.Fatal("fingerprint treated -0.0 and +0.0 as identical")
 	}
 }
@@ -793,11 +843,19 @@ func TestMessageFingerprintUnambiguousAcrossBoundaryShift(t *testing.T) {
 			"for this to reproduce the reviewer's reproduction")
 	}
 	// 3. The production fingerprint must NOT collide.
-	if fingerprintRequestSections(accepted).equal(fingerprintRequestSections(out)) {
+	fpA, err := fingerprintRequestSections(accepted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fpB, err := fingerprintRequestSections(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fpA.equal(fpB) {
 		t.Fatal("message fingerprint still ambiguous across a tool-call boundary shift")
 	}
 	// 4. verifyRequestMutation must reject with NO grants.
-	err := verifyRequestMutation(accepted, out, grant())
+	err = verifyRequestMutation(accepted, out, grant())
 	if err == nil {
 		t.Fatal("the boundary shift must be rejected without any grant")
 	}
@@ -844,10 +902,59 @@ func TestMessageFingerprintBoundaryShiftAcrossThreeMessages(t *testing.T) {
 	if !compareSections(accepted, out).any() {
 		t.Fatal("exact comparison missed the three-message boundary shift")
 	}
-	if fingerprintRequestSections(accepted).equal(fingerprintRequestSections(out)) {
+	fpA, err := fingerprintRequestSections(accepted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fpB, err := fingerprintRequestSections(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fpA.equal(fpB) {
 		t.Fatal("fingerprint missed a tool-call boundary shift across three messages")
 	}
 	if err := verifyRequestMutation(accepted, out, grant()); err == nil {
 		t.Fatal("the three-message boundary shift must be rejected without any grant")
+	}
+}
+
+// TestFingerprintErrorCannotBecomeSectionDigest (batch-1 review finding 2):
+// an SDK fingerprint error (an unrepresentable body — an arm-less block,
+// a typed-nil arm) must FAIL the whole verification, never become a
+// comparable section digest. Two erroring projections at the same
+// role/position must not compare equal.
+func TestFingerprintErrorCannotBecomeSectionDigest(t *testing.T) {
+	valid := baseRequest()
+	broken := baseRequest()
+	broken.Messages[3].Blocks = append(broken.Messages[3].Blocks, &pb.RequestBlock{})
+
+	// The section fingerprint errors on the broken side.
+	if _, err := fingerprintRequestSections(broken); err == nil {
+		t.Fatal("an arm-less block must error the section fingerprint, not hash")
+	}
+	// verifyGrantedSections propagates the error (never a section verdict).
+	if err := verifyGrantedSections(valid, broken, grant()); err == nil {
+		t.Fatal("verifyGrantedSections must propagate the fingerprint error")
+	}
+	// verifyRequestMutation propagates too.
+	if err := verifyRequestMutation(valid, broken, grant()); err == nil {
+		t.Fatal("verifyRequestMutation must propagate the fingerprint error")
+	}
+	// The all-grants fast path relies on the already-pinned owning
+	// REPLACEMENT-VALIDATOR boundary (the host runs it before dispatch):
+	// the arm-less block is rejected THERE, never hashed. Pinning the
+	// boundary directly — verifyFastPath itself must not need a second
+	// validator copy.
+	if err := broken.ValidateReplacement(); err == nil {
+		t.Fatal("ValidateReplacement must reject an arm-less block (the fast-path boundary)")
+	}
+	// And the fast path is only reachable for validated bodies: a body
+	// that passes validation never errors the section fingerprint.
+	fp, err := fingerprintRequestSections(valid)
+	if err != nil {
+		t.Fatalf("a validated body must fingerprint cleanly: %v", err)
+	}
+	if fp.equal(requestSections{}) {
+		t.Fatal("a validated body must produce a non-zero section digest")
 	}
 }
