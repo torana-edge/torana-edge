@@ -2,6 +2,7 @@
 package anthropic
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 
@@ -44,6 +45,13 @@ func (ar *anthropicRequest) UnmarshalJSON(data []byte) error {
 	*ar = anthropicRequest(raw.alias)
 	if raw.System == nil {
 		return nil
+	}
+	// The Anthropic system union is string | Array<TextBlockParam> — NOT
+	// nullable. An explicit null is a parse error like any other wrong type
+	// (json.Unmarshal(null, &s) would otherwise succeed leaving s empty and
+	// silently treat the null as absent).
+	if bytes.Equal(bytes.TrimSpace(raw.System), []byte("null")) {
+		return fmt.Errorf("system: expected string or array")
 	}
 
 	// Try string first: canonicalize to one text block. An empty string

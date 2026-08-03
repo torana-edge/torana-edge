@@ -605,11 +605,13 @@ func TestSystemStringArrayEquivalence(t *testing.T) {
 	}
 }
 
-// TestSystemEmptyAndNull: `"system": ""` and `"system": null` behave like an
-// absent system (the empty canonical block is dropped by the coalescing).
-func TestSystemEmptyAndNull(t *testing.T) {
+// TestSystemEmptyAndAbsent: `"system": ""` behaves like an absent system
+// (the empty canonical block is dropped by the coalescing). An explicit null
+// is NOT accepted — the union is string | Array, not nullable; it is covered
+// by the invalid-types matrix.
+func TestSystemEmptyAndAbsent(t *testing.T) {
 	adapter := &Adapter{}
-	for _, sys := range []string{`"system": ""`, `"system": null`, ``} {
+	for _, sys := range []string{`"system": ""`, ``} {
 		input := "{\n\t\t\"model\": \"m\",\n\t\t" + sys + `,
 		"messages": [{"role": "user", "content": "hi"}]
 	}`
@@ -630,10 +632,11 @@ func TestSystemEmptyAndNull(t *testing.T) {
 }
 
 // TestSystemInvalidTypes: a system that is neither a string nor an array is a
-// parse error, and the error never embeds the raw body.
+// parse error — including an explicit null — and the error never embeds the
+// raw body.
 func TestSystemInvalidTypes(t *testing.T) {
 	adapter := &Adapter{}
-	for _, sys := range []string{`5`, `{"type":"text"}`, `true`} {
+	for _, sys := range []string{`5`, `{"type":"text"}`, `true`, `null`} {
 		input := `{"model": "m", "system": ` + sys + `, "messages": [{"role": "user", "content": "hi"}]}`
 		_, err := adapter.Unmarshal([]byte(input))
 		if err == nil {

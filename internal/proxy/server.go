@@ -190,14 +190,17 @@ type RouteContext struct {
 	ProviderName string
 	StrippedPath string
 	Identity     string
-	// Block, when set by the Director after a plugin vetoes the request
-	// (env.block_request), tells the transport to return this synthetic
-	// error response instead of calling upstream.
+	// Block, when set by the Director, tells the transport to return this
+	// synthetic provider-shaped response instead of calling upstream. Set by
+	// plugin vetoes (env.block_request) and by the host's own input-validation
+	// rejections (renderInvalidRequest).
 	Block *BlockResponse
 }
 
-// BlockResponse is a synthetic, provider-shaped error a plugin requested via
-// env.block_request. The transport returns it verbatim; no upstream call is made.
+// BlockResponse is a synthetic, provider-shaped response the transport
+// returns verbatim; no upstream call is made. Produced by plugin vetoes
+// (env.block_request) and by the host's input-validation rejections
+// (renderInvalidRequest); the constructor names the owner in each case.
 type BlockResponse struct {
 	Status      int
 	ContentType string
@@ -261,9 +264,11 @@ type reqState struct {
 	// synthesizes a chat path and anything replaying this conversation needs
 	// the one the caller used.
 	Path string
-	// Synthetic marks a response served by a plugin (env.respond_request):
-	// the transport returns it verbatim and ModifyResponse must not re-parse
-	// it or run response hooks over it.
+	// Synthetic marks a complete host-local provider-shaped response: served
+	// by a plugin (env.respond_request) or by the host's own input-validation
+	// rejection (a body a known configured format cannot parse). The
+	// transport returns it verbatim and ModifyResponse must not re-parse it,
+	// record an upstream status, or run response hooks over it.
 	Synthetic bool
 	// Verdict is the control-plane outcome applied by the plugin pipeline:
 	// "block" (env.block_request), "respond" (env.respond_request),
@@ -812,11 +817,16 @@ func New(cfg Config) (*Server, error) {
 				// failure_mode (no valid IR exists, so no request hook runs;
 				// the transport returns rc.Block verbatim). The adapter
 				// error is never logged or surfaced: several adapters embed
-				// raw body fragments in their errors.
+				// body fragments in their errors.
 				log.Printf("format %s: rejecting malformed request body", fmt.Name)
-				if rc, ok := req.Context().Value(routeContextKey{}).(*RouteContext); ok {
-					rc.Block = renderInvalidRequest(prov.Format)
-				}
+				// Route context is an internal invariant, created immediately
+				// above for every routed request: a missing context must never
+				// silently turn the rejection into an empty-body upstream
+				// request.
+				rc := req.Context().Value(routeContextKey{}).(*RouteContext)
+				rc.Block = renderInvalidRequest(prov.Format)
+				rs := reqStateFrom(req.Context())
+				rs.Synthetic = true
 				req.Body = io.NopCloser(bytes.NewReader(nil))
 				req.ContentLength = 0
 				return
@@ -1060,13 +1070,15 @@ func New(cfg Config) (*Server, error) {
 
 		ModifyResponse: func(resp *http.Response) error {
 			if rs := reqStateFrom(resp.Request.Context()); rs != nil {
-				rs.UpstreamStatus = resp.StatusCode
-				// Plugin-served response (env.respond_request): already a
-				// complete, provider-shaped body — don't re-parse it or run
-				// response hooks over it.
+				// Complete host-local provider-shaped response (plugin
+				// respond, host input rejection): NOT an upstream response —
+				// record no upstream status and run no response hooks, so a
+				// local 400 cannot masquerade as an upstream outcome or
+				// trigger observational after-response plugins.
 				if rs.Synthetic {
 					return nil
 				}
+				rs.UpstreamStatus = resp.StatusCode
 			}
 			// Skip the mutation pipeline for error responses — don't try to
 			// reverse-translate a 4xx/5xx body that isn't a valid chat
