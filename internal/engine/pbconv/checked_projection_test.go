@@ -294,3 +294,69 @@ func TestAdapterMarshalEntryValidates(t *testing.T) {
 		}
 	}
 }
+
+// Review round 3 finding 2: the owning boundaries must be closed over the
+// FULL SDK domain, not just the structural engine facts. These rows were
+// written BEFORE the canonical full-domain validation existed: adapter
+// marshal entries and the cache projection accepted SDK-invalid requests.
+
+func TestFullDomainRefusedByEveryAdapterMarshalEntry(t *testing.T) {
+	invalid := map[string]*engine.ChatRequest{
+		"empty role": {
+			Model:    "m",
+			Messages: []engine.Message{{Role: "", Blocks: []engine.Block{{Text: &engine.TextBlock{Text: "hi"}}}}},
+		},
+		"message without blocks": {
+			Model:    "m",
+			Messages: []engine.Message{{Role: engine.RoleUser}},
+		},
+		"empty tool-use id": {
+			Model: "m",
+			Messages: []engine.Message{{Role: engine.RoleAssistant, Blocks: []engine.Block{
+				{ToolUse: &engine.ToolUseBlock{ID: "", Name: "read", Arguments: mustReqObj(`{}`)}},
+			}}},
+		},
+		"empty tool-use name": {
+			Model: "m",
+			Messages: []engine.Message{{Role: engine.RoleAssistant, Blocks: []engine.Block{
+				{ToolUse: &engine.ToolUseBlock{ID: "c1", Name: "", Arguments: mustReqObj(`{}`)}},
+			}}},
+		},
+		"trailing on user message": {
+			Model: "m",
+			Messages: []engine.Message{{Role: engine.RoleUser, Blocks: []engine.Block{
+				{Text: &engine.TextBlock{Text: "a"}},
+				{TrailingSignature: &engine.TrailingSignatureBlock{Signature: "S"}},
+			}}},
+		},
+		"trailing not final": {
+			Model: "m",
+			Messages: []engine.Message{{Role: engine.RoleAssistant, Blocks: []engine.Block{
+				{Text: &engine.TextBlock{Text: "a"}},
+				{TrailingSignature: &engine.TrailingSignatureBlock{Signature: "S"}},
+				{Text: &engine.TextBlock{Text: "b"}},
+			}}},
+		},
+	}
+	for name, chat := range invalid {
+		for _, aname := range []string{"anthropic", "bedrock", "gemini", "openai"} {
+			t.Run(name+"/"+aname, func(t *testing.T) {
+				if _, err := adapterFor(aname).Marshal(chat); err == nil {
+					t.Fatalf("%s marshal accepted an SDK-invalid request (%s)", aname, name)
+				}
+			})
+		}
+	}
+}
+
+// TestCachePrefixKeyRefusesSDKInvalidMessage — the cache projection must
+// refuse (empty key) rather than hash an SDK-invalid message.
+func TestCachePrefixKeyRefusesSDKInvalidMessage(t *testing.T) {
+	chat := &engine.ChatRequest{
+		Model:    "m",
+		Messages: []engine.Message{{Role: engine.RoleUser}}, // no blocks: SDK-invalid
+	}
+	if got := engine.CachePrefixKey(chat); got != "" {
+		t.Fatalf("cache key %q for an SDK-invalid message; want the fail-safe empty key", got)
+	}
+}

@@ -339,14 +339,16 @@ func TestCachePrefixKeyPreservesSignatures(t *testing.T) {
 		t.Error("a changed content signature kept the cache key")
 	}
 
-	// TrailingSignature: same invariant for the standalone final token.
+	// TrailingSignature: same invariant for the standalone final token. The
+	// trailing block is FINAL by contract and a marker would close the
+	// prefix BEFORE it, so this fixture carries NO marker — the whole
+	// request is the automatic-cache prefix and the signature is part of it.
 	mkTrailing := func(sig string) *ChatRequest {
 		return &ChatRequest{Model: "m", Messages: msgs(
 			sys("p"),
 			Message{Role: RoleAssistant, Blocks: []Block{
 				{Text: &TextBlock{Text: "answer"}},
 				{TrailingSignature: &TrailingSignatureBlock{Signature: sig}},
-				{CacheBreakpoint: &CacheBreakpointBlock{Marker: ephemeral()}},
 			}},
 		)}
 	}
@@ -364,10 +366,17 @@ func TestCachePrefixKeyPreservesSignatures(t *testing.T) {
 
 // TestCachePrefixKeyEmpty — nothing cacheable yields "".
 func TestCachePrefixKeyEmpty(t *testing.T) {
+	// "" is reserved for nil — nothing cacheable. A non-nil request is in
+	// the SDK domain even with zero messages (the tool prefix is keyable),
+	// so it produces a deterministic key, never a silent "".
 	if got := CachePrefixKey(nil); got != "" {
 		t.Errorf("nil request = %q, want empty", got)
 	}
-	if got := CachePrefixKey(&ChatRequest{}); got != "" {
-		t.Errorf("empty request = %q, want empty", got)
+	empty := &ChatRequest{}
+	if got := CachePrefixKey(empty); got == "" {
+		t.Error("a non-nil empty request must produce a deterministic key")
+	}
+	if CachePrefixKey(empty) != CachePrefixKey(&ChatRequest{}) {
+		t.Error("the empty-request key must be deterministic")
 	}
 }

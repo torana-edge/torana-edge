@@ -53,19 +53,32 @@ func ValidateEngineRequest(c *engine.ChatRequest) error {
 	return nil
 }
 
-// ToPBChatRequestChecked is the SINGLE checked Engine->PB boundary: it
-// refuses engine states the conversion would silently discard (arms,
-// conflicts, floats, domain), converts, then runs the SDK's absolute
-// replacement validator on the result. Every adapter/host path that hands an
-// engine request to the wire goes through this (or through a PB that already
-// passed ValidateReplacement).
-func ToPBChatRequestChecked(c *engine.ChatRequest) (*pb.ChatRequest, error) {
+// ValidateFullRequest is the ONE canonical owning validation: structural
+// engine facts (arms, conflicts, floats, domain — the facts the conversion
+// would silently discard) PLUS the projection PLUS the SDK's absolute
+// replacement validator (role/blocks presence, UTF-8, tool-use identity,
+// JSON rules, trailing placement — the common domain). Every owning
+// boundary — adapter marshal entries, the transport, the plugin entry, the
+// original-request snapshot, and the cache projection — consumes this same
+// operation; "structural validation here, full validation elsewhere" is not
+// a convention that may exist.
+func ValidateFullRequest(c *engine.ChatRequest) error {
 	if err := ValidateEngineRequest(c); err != nil {
-		return nil, fmt.Errorf("invalid engine request: %w", err)
+		return fmt.Errorf("invalid engine request: %w", err)
 	}
 	out := toPBChatRequest(c)
 	if err := out.ValidateReplacement(); err != nil {
-		return nil, fmt.Errorf("engine request fails the replacement contract: %w", err)
+		return fmt.Errorf("engine request fails the replacement contract: %w", err)
 	}
-	return out, nil
+	return nil
+}
+
+// ToPBChatRequestChecked is the checked Engine->PB boundary: the canonical
+// full-domain validation, then the conversion (which is now safe — nothing
+// the oneof could silently discard or normalize remains).
+func ToPBChatRequestChecked(c *engine.ChatRequest) (*pb.ChatRequest, error) {
+	if err := ValidateFullRequest(c); err != nil {
+		return nil, err
+	}
+	return toPBChatRequest(c), nil
 }

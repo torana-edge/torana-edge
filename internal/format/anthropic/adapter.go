@@ -175,49 +175,8 @@ func (cb *contentBlock) UnmarshalJSON(data []byte) error {
 		return err
 	}
 	*cb = contentBlock(raw.rawBlock)
-	// The provider-arm matrix: a DECLARED anthropic arm must carry its
-	// required members — a text block without a text member, a tool_use
-	// without id/name, or a tool_result without tool_use_id is malformed,
-	// not an implicit default. (Explicit empty text is spelled
-	// {"type":"text","text":""}; a MISSING tool_use input is the approved
-	// nil->{} normalization, not an error — a present-but-invalid input is
-	// refused by the required-object constructor.)
-	switch raw.Type {
-	case anthropicText:
-		var t struct {
-			Text *string `json:"text"`
-		}
-		if json.Unmarshal(data, &t) == nil && t.Text == nil {
-			return fmt.Errorf("anthropic: text block without a text member")
-		}
-		// The provider-arm matrix: a DECLARED arm may not carry members of
-		// another arm — a text block with tool-use identity/input would be
-		// a cross-arm fact the switch would silently drop.
-		if raw.ID != "" || raw.Name != "" || len(raw.Input) > 0 || raw.ToolUseID != "" || raw.Thinking != "" || raw.Data != "" || raw.Content != nil {
-			return fmt.Errorf("anthropic: text block carries members of another arm")
-		}
-	case anthropicToolUse:
-		if raw.ID == "" || raw.Name == "" {
-			return fmt.Errorf("anthropic: tool_use block requires id and name")
-		}
-		if raw.Text != "" || raw.Thinking != "" || raw.Data != "" || raw.ToolUseID != "" || raw.Content != nil {
-			return fmt.Errorf("anthropic: tool_use block carries members of another arm")
-		}
-	case anthropicToolResult:
-		if raw.ToolUseID == "" {
-			return fmt.Errorf("anthropic: tool_result block requires tool_use_id")
-		}
-		if raw.Text != "" || raw.ID != "" || raw.Name != "" || len(raw.Input) > 0 || raw.Thinking != "" || raw.Data != "" {
-			return fmt.Errorf("anthropic: tool_result block carries members of another arm")
-		}
-	case anthropicThinking:
-		if raw.Text != "" || raw.ID != "" || raw.Name != "" || len(raw.Input) > 0 || raw.ToolUseID != "" || raw.Data != "" || raw.Content != nil {
-			return fmt.Errorf("anthropic: thinking block carries members of another arm")
-		}
-	case anthropicRedacted:
-		if raw.Text != "" || raw.Thinking != "" || raw.ID != "" || raw.Name != "" || len(raw.Input) > 0 || raw.ToolUseID != "" || raw.Content != nil {
-			return fmt.Errorf("anthropic: redacted_thinking block carries members of another arm")
-		}
+	if err := validateContentBlockMembers(raw.Type, data, contentBlock(raw.rawBlock)); err != nil {
+		return err
 	}
 	if raw.Content == nil {
 		return nil
@@ -234,6 +193,69 @@ func (cb *contentBlock) UnmarshalJSON(data []byte) error {
 		return nil
 	}
 	return fmt.Errorf("content: expected string or array, got %s", string(raw.Content))
+}
+
+// anthropicArmAllowedMembers is the per-arm allowed-member table for the
+// provider-arm matrix. PRESENCE is the invariant — a foreign member is
+// refused regardless of its value (empty string, null, empty object/array,
+// or an ordinary value): the earlier value-based checks could not
+// distinguish a foreign member present with an empty value from absence.
+// cache_control is the documented marker member on every arm. An additive
+// wire member fails here until a deliberate table decision is made.
+var anthropicArmAllowedMembers = map[string]map[string]bool{
+	anthropicText: {
+		"type": true, "text": true, "cache_control": true,
+	},
+	anthropicThinking: {
+		"type": true, "thinking": true, "signature": true, "cache_control": true,
+	},
+	anthropicRedacted: {
+		"type": true, "data": true, "cache_control": true,
+	},
+	anthropicToolUse: {
+		"type": true, "id": true, "name": true, "input": true, "cache_control": true,
+	},
+	anthropicToolResult: {
+		"type": true, "tool_use_id": true, "content": true, "cache_control": true,
+	},
+}
+
+// validateContentBlockMembers enforces the per-arm member set over the RAW
+// decoded members (presence-based) plus the arm's required members.
+func validateContentBlockMembers(arm string, data []byte, raw contentBlock) error {
+	allowed, known := anthropicArmAllowedMembers[arm]
+	if !known {
+		// An untyped block (no declared arm) is outside the matrix; the
+		// adapter's unknown arm handles it raw.
+		return nil
+	}
+	var members map[string]json.RawMessage
+	if err := json.Unmarshal(data, &members); err != nil {
+		return err
+	}
+	for name := range members {
+		if !allowed[name] {
+			return fmt.Errorf("anthropic: %s block carries a member %q outside its arm table", arm, name)
+		}
+	}
+	switch arm {
+	case anthropicText:
+		var t struct {
+			Text *string `json:"text"`
+		}
+		if json.Unmarshal(data, &t) == nil && t.Text == nil {
+			return fmt.Errorf("anthropic: text block without a text member")
+		}
+	case anthropicToolUse:
+		if raw.ID == "" || raw.Name == "" {
+			return fmt.Errorf("anthropic: tool_use block requires id and name")
+		}
+	case anthropicToolResult:
+		if raw.ToolUseID == "" {
+			return fmt.Errorf("anthropic: tool_result block requires tool_use_id")
+		}
+	}
+	return nil
 }
 
 // MarshalJSON handles re-serializing content blocks.
@@ -559,7 +581,7 @@ func (a *Adapter) Marshal(chat *engine.ChatRequest) ([]byte, error) {
 	// The owning validation at EVERY marshal entry: the engine pointer sum
 	// must be in the closed domain before any arm is projected — a future
 	// call site cannot bypass the checked boundary by accident.
-	if err := pbconv.ValidateEngineRequest(chat); err != nil {
+	if err := pbconv.ValidateFullRequest(chat); err != nil {
 		return nil, fmt.Errorf("anthropic: %w", err)
 	}
 	model := chat.Model

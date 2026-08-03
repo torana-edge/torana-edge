@@ -96,11 +96,19 @@ func TestAnthropicRequiredMemberMatrix(t *testing.T) {
 		"text block without text member": `{"model":"m","max_tokens":64,"messages":[{"role":"user","content":[{"type":"text"}]}]}`,
 		"tool_use with malformed input":  `{"model":"m","max_tokens":64,"messages":[{"role":"assistant","content":[{"type":"tool_use","id":"c1","name":"r","input":"nope"}]}]}`,
 
-		"tool_use without id":              `{"model":"m","max_tokens":64,"messages":[{"role":"assistant","content":[{"type":"tool_use","name":"r","input":{}}]}]}`,
-		"tool_result without tool_use_id":  `{"model":"m","max_tokens":64,"messages":[{"role":"user","content":[{"type":"tool_result","content":"out"}]}]}`,
-		"text block with tool-use members": `{"model":"m","max_tokens":64,"messages":[{"role":"assistant","content":[{"type":"text","text":"hi","id":"c1","name":"r","input":{}}]}]}`,
-		"tool_use with text member":        `{"model":"m","max_tokens":64,"messages":[{"role":"assistant","content":[{"type":"tool_use","id":"c1","name":"r","input":{},"text":"x"}]}]}`,
-		"tool_result with text member":     `{"model":"m","max_tokens":64,"messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"c1","content":"out","text":"x"}]}]}`,
+		"tool_use without id":                     `{"model":"m","max_tokens":64,"messages":[{"role":"assistant","content":[{"type":"tool_use","name":"r","input":{}}]}]}`,
+		"tool_result without tool_use_id":         `{"model":"m","max_tokens":64,"messages":[{"role":"user","content":[{"type":"tool_result","content":"out"}]}]}`,
+		"text block with tool-use members":        `{"model":"m","max_tokens":64,"messages":[{"role":"assistant","content":[{"type":"text","text":"hi","id":"c1","name":"r","input":{}}]}]}`,
+		"text block with empty foreign id":        `{"model":"m","max_tokens":64,"messages":[{"role":"user","content":[{"type":"text","text":"hi","id":""}]}]}`,
+		"text block with null foreign id":         `{"model":"m","max_tokens":64,"messages":[{"role":"user","content":[{"type":"text","text":"hi","id":null}]}]}`,
+		"text block with null foreign input":      `{"model":"m","max_tokens":64,"messages":[{"role":"user","content":[{"type":"text","text":"hi","input":null}]}]}`,
+		"text block with empty foreign object":    `{"model":"m","max_tokens":64,"messages":[{"role":"user","content":[{"type":"text","text":"hi","input":{}}]}]}`,
+		"tool_use with empty foreign text":        `{"model":"m","max_tokens":64,"messages":[{"role":"assistant","content":[{"type":"tool_use","id":"c1","name":"r","input":{},"text":""}]}]}`,
+		"tool_result with null foreign text":      `{"model":"m","max_tokens":64,"messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"c1","content":"out","text":null}]}]}`,
+		"text block with unknown additive member": `{"model":"m","max_tokens":64,"messages":[{"role":"user","content":[{"type":"text","text":"hi","future_field":1}]}]}`,
+		"tool_use with unknown additive member":   `{"model":"m","max_tokens":64,"messages":[{"role":"assistant","content":[{"type":"tool_use","id":"c1","name":"r","input":{},"future_field":{}}]}]}`,
+		"tool_use with text member":               `{"model":"m","max_tokens":64,"messages":[{"role":"assistant","content":[{"type":"tool_use","id":"c1","name":"r","input":{},"text":"x"}]}]}`,
+		"tool_result with text member":            `{"model":"m","max_tokens":64,"messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"c1","content":"out","text":"x"}]}]}`,
 	}
 	for name, body := range cases {
 		t.Run(name, func(t *testing.T) {

@@ -578,7 +578,8 @@ func TestParseFailClosedAmbiguousArmRowsTransport(t *testing.T) {
 				t.Fatalf("%d limiter buckets materialized; must be 0", n)
 			}
 
-			// Allow-mode observer: same golden 400, no hooks, no upstream.
+			// Allow-mode observer: same golden 400, no hooks, no upstream,
+			// no limiter bucket.
 			statusA, bodyA, hitsA, srvA := parseFailE2E(t, row.format, []string{"test-observer"}, row.body)
 			if statusA != http.StatusBadRequest || !bytes.Equal(bodyA, body) {
 				t.Fatalf("allow-mode 400 differs from the no-plugins body: status=%d body=%s", statusA, bodyA)
@@ -586,13 +587,16 @@ func TestParseFailClosedAmbiguousArmRowsTransport(t *testing.T) {
 			if n := atomic.LoadInt32(hitsA); n != 0 {
 				t.Fatalf("upstream called %d times with the observer; must be 0", n)
 			}
+			if n := limiterBucketCount(srvA); n != 0 {
+				t.Fatalf("%d limiter buckets materialized with the observer; must be 0", n)
+			}
 			if v, ok := srvA.sharedCache.Get("observed_error_status"); ok {
 				t.Fatalf("a response hook ran with the observer: cache %q", v)
 			}
 
 			// Block-mode trapper: a request or response hook would swap the
 			// body — the golden 400 proves zero hooks ran.
-			statusB, bodyB, hitsB, _ := parseFailE2E(t, row.format, []string{"test-trapper"}, row.body)
+			statusB, bodyB, hitsB, srvB := parseFailE2E(t, row.format, []string{"test-trapper"}, row.body)
 			if statusB != http.StatusBadRequest || !bytes.Equal(bodyB, body) {
 				t.Fatalf("block-mode 400 differs from the no-plugins body: status=%d body=%s (a hook ran)", statusB, bodyB)
 			}
@@ -602,14 +606,23 @@ func TestParseFailClosedAmbiguousArmRowsTransport(t *testing.T) {
 			if n := atomic.LoadInt32(hitsB); n != 0 {
 				t.Fatalf("upstream called %d times with the trapper; must be 0", n)
 			}
+			if n := limiterBucketCount(srvB); n != 0 {
+				t.Fatalf("%d limiter buckets materialized with the trapper; must be 0", n)
+			}
 
-			// A mutating request plugin must never see the request.
-			_, bodyM, hitsM, _ := parseFailE2E(t, row.format, []string{"test-mutator"}, row.body)
+			// A mutating request plugin must never see the request: had a
+			// before-request hook run, test-mutator would have produced a
+			// REPLACEMENT — the request would reach the adapter marshal (or
+			// upstream) and the golden 400 could not come back byte-identical.
+			_, bodyM, hitsM, srvM := parseFailE2E(t, row.format, []string{"test-mutator"}, row.body)
 			if !bytes.Equal(bodyM, body) {
 				t.Fatalf("mutator-mode 400 differs from the no-plugins body: %s", bodyM)
 			}
 			if n := atomic.LoadInt32(hitsM); n != 0 {
 				t.Fatalf("upstream called %d times with the mutator; must be 0", n)
+			}
+			if n := limiterBucketCount(srvM); n != 0 {
+				t.Fatalf("%d limiter buckets materialized with the mutator; must be 0", n)
 			}
 		})
 	}

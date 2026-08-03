@@ -20,14 +20,14 @@ func messageCorpus() []engine.Message {
 		}},
 		{Role: engine.RoleUser, Blocks: []engine.Block{
 			{Text: &engine.TextBlock{Text: "hello"}},
-			{Text: &engine.TextBlock{Text: "", Signature: "trailing-SIG"}},
-			{TrailingSignature: &engine.TrailingSignatureBlock{Signature: "T"}},
+			{Text: &engine.TextBlock{Text: "", Signature: "explicit-empty-sig"}},
 		}},
 		{Role: engine.RoleAssistant, Blocks: []engine.Block{
 			{Thinking: &engine.ThinkingBlock{Text: "reasoning", Signature: "TSIG"}},
 			{Text: &engine.TextBlock{Text: "answer", Signature: "CSIG"}},
 			{ToolUse: &engine.ToolUseBlock{ID: "call_1", Name: "read", Arguments: mustReqObj(`{"path":"a.go"}`), Signature: "CALLSIG"}},
 			{RedactedThinking: &engine.RedactedThinkingBlock{Data: "redacted-bytes"}},
+			{TrailingSignature: &engine.TrailingSignatureBlock{Signature: "TRAIL"}},
 		}},
 		{Role: engine.RoleUser, Blocks: []engine.Block{
 			{ToolResult: &engine.ToolResultBlock{

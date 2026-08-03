@@ -124,9 +124,13 @@ func ConversationID(c *ChatRequest) string {
 // a changed key may occasionally mean only that something cosmetic moved, whose
 // cost is one unnecessary re-warm.
 func CachePrefixKey(c *ChatRequest) string {
-	if c == nil || len(c.Messages) == 0 {
+	if c == nil {
 		return ""
 	}
+	// NOTE: the SDK replacement domain permits zero messages (a tools-only
+	// request is valid), so a tools-only request WITH a tool marker keys
+	// the tool prefix, and without a marker keys the whole (tool) request.
+	// "" is reserved for nil — nothing cacheable.
 	h := sha256.New()
 	writeHashField(h, domainCachePrefix)
 	writeHashField(h, c.Model)
@@ -271,19 +275,26 @@ func lastCacheMarker(c *ChatRequest) *cacheMarkerPos {
 // prefixMessage returns the message truncated at the marker position,
 // inclusive: blocks[0..lastBlock], with the marker block's tool-result
 // content cut at nested[0..lastNested] when the marker is nested.
+//
+// PURE: the truncated carrier is deep-copied — the nested content slice is
+// rebuilt, never aliased — so computing a cache key can never truncate the
+// caller's live request (the *ToolResultBlock pointer must not be written
+// through).
 func prefixMessage(m *Message, lastBlock, lastNested int) *Message {
 	out := Message{Role: m.Role}
 	for j, b := range m.Blocks {
 		if j > lastBlock {
 			break
 		}
-		out.Blocks = append(out.Blocks, b)
-	}
-	if lastNested >= 0 && len(out.Blocks) > 0 {
-		lb := out.Blocks[len(out.Blocks)-1]
-		if lb.ToolResult != nil {
-			lb.ToolResult.Content = lb.ToolResult.Content[:lastNested+1]
+		if j == lastBlock && lastNested >= 0 && b.ToolResult != nil {
+			nb := b
+			tr := *b.ToolResult
+			tr.Content = append([]ToolResultContentBlock(nil), b.ToolResult.Content[:lastNested+1]...)
+			nb.ToolResult = &tr
+			out.Blocks = append(out.Blocks, nb)
+			continue
 		}
+		out.Blocks = append(out.Blocks, b)
 	}
 	return &out
 }
@@ -350,6 +361,13 @@ func MessageToPB(m *Message) (*pb.Message, error) {
 			}}
 		}
 		out.Blocks = append(out.Blocks, rb)
+	}
+	// The FULL message domain, not just the structural facts: the SDK's
+	// absolute rules (role presence, UTF-8, tool-use identity, trailing
+	// placement) apply to the cache projection exactly like every other
+	// owning boundary — an SDK-invalid message must never be hashed.
+	if err := (&pb.ChatRequest{Messages: []*pb.Message{out}}).ValidateReplacement(); err != nil {
+		return nil, err
 	}
 	return out, nil
 }

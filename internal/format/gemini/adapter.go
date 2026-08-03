@@ -587,7 +587,7 @@ func (a *Adapter) Marshal(chat *engine.ChatRequest) ([]byte, error) {
 	// The owning validation at EVERY marshal entry: the engine pointer sum
 	// must be in the closed domain before any arm is projected — a future
 	// call site cannot bypass the checked boundary by accident.
-	if err := pbconv.ValidateEngineRequest(chat); err != nil {
+	if err := pbconv.ValidateFullRequest(chat); err != nil {
 		return nil, fmt.Errorf("gemini: %w", err)
 	}
 	codeAssist := false

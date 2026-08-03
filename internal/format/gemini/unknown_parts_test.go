@@ -261,3 +261,88 @@ func TestGeminiPartGrammar(t *testing.T) {
 		})
 	}
 }
+
+// Review round 3 finding 3 reproductions — the Gemini Part grammar is not
+// Google's actual grammar, and the ABI has no signature carriers for
+// media/future arms or tool results. These rows are RED pending the SDK
+// signed-Part contract correction (design checkpoint submitted for
+// approval); they pin the FAILING behaviors so the SDK re-pin must close
+// them.
+
+// TestGeminiMediaAncillaryRepro — videoMetadata and mediaResolution are
+// DOCUMENTED ancillary members of inlineData/fileData parts, not arms: the
+// current grammar rejects these valid requests.
+func TestGeminiMediaAncillaryRepro(t *testing.T) {
+	t.Skip("SDK signed-Part contract correction pending (design checkpoint submitted); these rows are the acceptance contract for the SDK re-pin")
+	accept := map[string]string{
+		"inlineData+videoMetadata":               `{"model":"m","contents":[{"role":"user","parts":[{"inlineData":{"mimeType":"video/mp4","data":"AAAA"},"videoMetadata":{"durationOffset":"1s","startOffset":"0s"}}]}]}`,
+		"inlineData+mediaResolution":             `{"model":"m","contents":[{"role":"user","parts":[{"inlineData":{"mimeType":"image/png","data":"iVBOR"},"mediaResolution":"720p"}]}]}`,
+		"fileData+videoMetadata+mediaResolution": `{"model":"m","contents":[{"role":"user","parts":[{"fileData":{"fileUri":"gs://b/x.mp4","mimeType":"video/mp4"},"videoMetadata":{"durationOffset":"2s"},"mediaResolution":"1080p"}]}]}`,
+	}
+	for name, body := range accept {
+		t.Run("accept/"+name, func(t *testing.T) {
+			chat, err := (&Adapter{}).Unmarshal([]byte(body))
+			if err != nil {
+				t.Fatalf("valid media part refused: %v", err)
+			}
+			if _, err := (&Adapter{}).Marshal(chat); err != nil {
+				t.Fatalf("valid media part failed to marshal: %v", err)
+			}
+		})
+	}
+	refuse := map[string]string{
+		"text+videoMetadata": `{"model":"m","contents":[{"role":"user","parts":[{"text":"x","videoMetadata":{"startOffset":"0s"}}]}]}`,
+	}
+	for name, body := range refuse {
+		t.Run("refuse/"+name, func(t *testing.T) {
+			if _, err := (&Adapter{}).Unmarshal([]byte(body)); err == nil {
+				t.Fatal("ancillary member on a non-media arm accepted")
+			}
+		})
+	}
+}
+
+// TestGeminiSignedMediaRepro — Google's thought-signature guidance permits
+// thoughtSignature on ANY content part, including inlineData; the current
+// grammar rejects it (RED) and even when accepted there is no ABI carrier:
+// the signature would be stripped from the raw payload and lost.
+func TestGeminiSignedMediaRepro(t *testing.T) {
+	t.Skip("SDK signed-Part contract correction pending (design checkpoint submitted); these rows are the acceptance contract for the SDK re-pin")
+	body := `{"model":"m","contents":[{"role":"user","parts":[{"inlineData":{"mimeType":"image/png","data":"iVBOR"},"thoughtSignature":"MEDIA_SIG"}]}]}`
+	// FUTURE CONTRACT: thoughtSignature is legal on ANY content part per
+	// Google's guidance — a signed media part must be accepted, with the
+	// signature projected into the first-class ABI carrier (the SDK
+	// correction) and reattached on marshal.
+	chat, err := (&Adapter{}).Unmarshal([]byte(body))
+	if err != nil {
+		t.Fatalf("signed media part refused: %v", err)
+	}
+	out, err := (&Adapter{}).Marshal(chat)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if !strings.Contains(string(out), "MEDIA_SIG") {
+		t.Fatalf("the media thoughtSignature was stripped: %s", out)
+	}
+}
+
+// TestGeminiSignedFunctionResponseRepro — geminiToolResultBlock ignores the
+// part's thoughtSignature, so a signed functionResponse is silently
+// stripped on the way out: the wire signature never survives a pass.
+func TestGeminiSignedFunctionResponseRepro(t *testing.T) {
+	t.Skip("SDK signed-Part contract correction pending (design checkpoint submitted); these rows are the acceptance contract for the SDK re-pin")
+	body := `{"model":"m","contents":[{"role":"user","parts":[{"functionResponse":{"name":"read","response":{"output":"out"},"id":"c1"},"thoughtSignature":"RESP_SIG"}]}]}`
+	chat, err := (&Adapter{}).Unmarshal([]byte(body))
+	if err != nil {
+		t.Fatalf("signed functionResponse refused: %v", err)
+	}
+	out, err := (&Adapter{}).Marshal(chat)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if strings.Contains(string(out), "RESP_SIG") {
+		t.Log("signed functionResponse currently round-trips (carrier exists?)")
+		return
+	}
+	t.Fatalf("the functionResponse thoughtSignature was stripped: %s", out)
+}
