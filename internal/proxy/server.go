@@ -38,7 +38,6 @@ import (
 	"github.com/torana-edge/torana-edge/internal/engine"
 	"github.com/torana-edge/torana-edge/internal/engine/pbconv"
 	"github.com/torana-edge/torana-edge/internal/format"
-	"github.com/torana-edge/torana-edge/internal/format/jsontext"
 	"github.com/torana-edge/torana-edge/internal/metrics"
 	"github.com/torana-edge/torana-edge/internal/mitm"
 	"github.com/torana-edge/torana-edge/internal/plugin"
@@ -47,6 +46,7 @@ import (
 	"github.com/torana-edge/torana-edge/internal/secret"
 	"github.com/torana-edge/torana-edge/internal/wasm"
 	pb "github.com/torana-edge/torana-plugin-sdk/pb/v2"
+	pbjsontext "github.com/torana-edge/torana-plugin-sdk/pb/v2/jsontext"
 )
 
 const maxBodySize = 10 * 1024 * 1024 // 10 MB
@@ -836,7 +836,7 @@ func New(cfg Config) (*Server, error) {
 			// sees the body. It is deliberately lenient beyond that (number
 			// tokens, unknown members): it can only reject what the adapter
 			// would also reject, never accept a document the adapter refuses.
-			if err := jsontext.Validate(body); err != nil {
+			if err := pbjsontext.Validate(body); err != nil {
 				rejectMalformed()
 				return
 			}
