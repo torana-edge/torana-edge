@@ -275,9 +275,13 @@ func TestGeminiPartGrammar(t *testing.T) {
 func TestGeminiMediaAncillaryRepro(t *testing.T) {
 	t.Skip("SDK signed-Part contract correction pending (design checkpoint submitted); these rows are the acceptance contract for the SDK re-pin")
 	accept := map[string]string{
-		"inlineData+videoMetadata":               `{"model":"m","contents":[{"role":"user","parts":[{"inlineData":{"mimeType":"video/mp4","data":"AAAA"},"videoMetadata":{"durationOffset":"1s","startOffset":"0s"}}]}]}`,
-		"inlineData+mediaResolution":             `{"model":"m","contents":[{"role":"user","parts":[{"inlineData":{"mimeType":"image/png","data":"iVBOR"},"mediaResolution":"720p"}]}]}`,
-		"fileData+videoMetadata+mediaResolution": `{"model":"m","contents":[{"role":"user","parts":[{"fileData":{"fileUri":"gs://b/x.mp4","mimeType":"video/mp4"},"videoMetadata":{"durationOffset":"2s"},"mediaResolution":"1080p"}]}]}`,
+		"inlineData+videoMetadata": `{"model":"m","contents":[{"role":"user","parts":[{"inlineData":{"mimeType":"video/mp4","data":"AAAA"},"videoMetadata":{"durationOffset":"1s","startOffset":"0s"}}]}]}`,
+		// mediaResolution is the OBJECT wire shape pinned from the
+		// Vertex-compatible content proto (level member, canonical
+		// MEDIA_RESOLUTION_LOW/MEDIUM/HIGH/ULTRA_HIGH spellings) — the
+		// earlier invented "720p"/"1080p" strings are NOT the wire grammar.
+		"inlineData+mediaResolution":             `{"model":"m","contents":[{"role":"user","parts":[{"inlineData":{"mimeType":"image/png","data":"iVBOR"},"mediaResolution":{"level":"MEDIA_RESOLUTION_LOW"}}]}]}`,
+		"fileData+videoMetadata+mediaResolution": `{"model":"m","contents":[{"role":"user","parts":[{"fileData":{"fileUri":"gs://b/x.mp4","mimeType":"video/mp4"},"videoMetadata":{"durationOffset":"2s"},"mediaResolution":{"level":"MEDIA_RESOLUTION_ULTRA_HIGH"}}]}]}`,
 	}
 	for name, body := range accept {
 		t.Run("accept/"+name, func(t *testing.T) {
@@ -297,6 +301,51 @@ func TestGeminiMediaAncillaryRepro(t *testing.T) {
 		t.Run("refuse/"+name, func(t *testing.T) {
 			if _, err := (&Adapter{}).Unmarshal([]byte(body)); err == nil {
 				t.Fatal("ancillary member on a non-media arm accepted")
+			}
+		})
+	}
+}
+
+// TestGeminiSchedulingRepro — functionResponse scheduling presence is
+// meaningful and vocabulary-governed: absence is the provider default
+// WHEN_IDLE (distinct), the three canonical spellings are accepted and
+// preserved, and SCHEDULING_UNSPECIFIED behaves EXACTLY like any other
+// unknown value — the value-free 400 (never a silent default).
+func TestGeminiSchedulingRepro(t *testing.T) {
+	t.Skip("SDK signed-Part contract correction pending (design checkpoint submitted); these rows are the acceptance contract for the SDK re-pin")
+	accept := map[string]string{
+		"absent (provider default)": `{"model":"m","contents":[{"role":"user","parts":[{"functionResponse":{"name":"read","response":{"output":"x"},"id":"c1"}}]}]}`,
+		"scheduling SILENT":         `{"model":"m","contents":[{"role":"user","parts":[{"functionResponse":{"name":"read","response":{"output":"x"},"id":"c1","scheduling":"SILENT"}}]}]}`,
+		"scheduling WHEN_IDLE":      `{"model":"m","contents":[{"role":"user","parts":[{"functionResponse":{"name":"read","response":{"output":"x"},"id":"c1","scheduling":"WHEN_IDLE"}}]}]}`,
+		"scheduling INTERRUPT":      `{"model":"m","contents":[{"role":"user","parts":[{"functionResponse":{"name":"read","response":{"output":"x"},"id":"c1","scheduling":"INTERRUPT"}}]}]}`,
+		"willContinue explicit":     `{"model":"m","contents":[{"role":"user","parts":[{"functionResponse":{"name":"read","response":{"output":"x"},"id":"c1","willContinue":false}}]}]}`,
+	}
+	for name, body := range accept {
+		t.Run("accept/"+name, func(t *testing.T) {
+			chat, err := (&Adapter{}).Unmarshal([]byte(body))
+			if err != nil {
+				t.Fatalf("valid scheduling combination refused: %v", err)
+			}
+			out, err := (&Adapter{}).Marshal(chat)
+			if err != nil {
+				t.Fatalf("valid scheduling combination failed to marshal: %v", err)
+			}
+			if name != "absent (provider default)" && strings.Contains(name, "willContinue") == false {
+				// the explicit value must survive the pass verbatim
+				if !strings.Contains(string(out), strings.SplitN(name, " ", 2)[1]) {
+					t.Fatalf("scheduling value stripped: %s", out)
+				}
+			}
+		})
+	}
+	refuse := map[string]string{
+		"scheduling UNSPECIFIED":   `{"model":"m","contents":[{"role":"user","parts":[{"functionResponse":{"name":"read","response":{"output":"x"},"id":"c1","scheduling":"SCHEDULING_UNSPECIFIED"}}]}]}`,
+		"scheduling unknown value": `{"model":"m","contents":[{"role":"user","parts":[{"functionResponse":{"name":"read","response":{"output":"x"},"id":"c1","scheduling":"WHATEVER"}}]}]}`,
+	}
+	for name, body := range refuse {
+		t.Run("refuse/"+name, func(t *testing.T) {
+			if _, err := (&Adapter{}).Unmarshal([]byte(body)); err == nil {
+				t.Fatal("unknown scheduling value accepted")
 			}
 		})
 	}
