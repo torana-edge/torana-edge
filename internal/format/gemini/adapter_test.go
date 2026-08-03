@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/torana-edge/torana-edge/internal/engine"
+	"github.com/torana-edge/torana-edge/internal/engine/pbconv"
 )
 
 // Ordered-body test helpers (engine.Message).
@@ -287,4 +288,275 @@ func parseSSEFrames(t *testing.T, output string) []geminiStreamChunk {
 		chunks = append(chunks, bare)
 	}
 	return chunks
+}
+
+// TestPartMetadataCarrierTable — the SIX part_metadata_json carriers are
+// absent-OR-strict-object at every boundary: parse -> Engine -> PB ->
+// Engine -> final Gemini wire. Absent stays absent (never an invented
+// {}), present-empty stays present-empty, populated stays byte-exact.
+// The final wire is re-parsed with the same grammar so the assertion is
+// on the provider wire, not the internal structs.
+func TestPartMetadataCarrierTable(t *testing.T) {
+	rows := []struct {
+		name    string
+		body    string
+		carrier func(*engine.ChatRequest) *engine.OptionalJSONObject
+		absent  bool
+	}{
+		{
+			"text absent", `{"model":"m","contents":[{"role":"user","parts":[{"text":"hi"}]}]}`,
+			func(c *engine.ChatRequest) *engine.OptionalJSONObject {
+				return &c.Messages[0].Blocks[0].Text.PartMetadataJson
+			},
+			true,
+		},
+		{
+			"text present-empty", `{"model":"m","contents":[{"role":"user","parts":[{"text":"hi","partMetadata":{}}]}]}`,
+			func(c *engine.ChatRequest) *engine.OptionalJSONObject {
+				return &c.Messages[0].Blocks[0].Text.PartMetadataJson
+			},
+			false,
+		},
+		{
+			"text populated", `{"model":"m","contents":[{"role":"user","parts":[{"text":"hi","partMetadata":{"src":"x","n":1}}]}]}`,
+			func(c *engine.ChatRequest) *engine.OptionalJSONObject {
+				return &c.Messages[0].Blocks[0].Text.PartMetadataJson
+			},
+			false,
+		},
+		{
+			"thinking", `{"model":"m","contents":[{"role":"model","parts":[{"thought":true,"text":"r","partMetadata":{"k":"v"}}]}]}`,
+			func(c *engine.ChatRequest) *engine.OptionalJSONObject {
+				return &c.Messages[0].Blocks[0].Thinking.PartMetadataJson
+			},
+			false,
+		},
+		{
+			"tool use", `{"model":"m","contents":[{"role":"model","parts":[{"functionCall":{"name":"r","args":{},"id":"c1"},"partMetadata":{"k":"v"}}]}]}`,
+			func(c *engine.ChatRequest) *engine.OptionalJSONObject {
+				return &c.Messages[0].Blocks[0].ToolUse.PartMetadataJson
+			},
+			false,
+		},
+		{
+			"tool result", `{"model":"m","contents":[{"role":"user","parts":[{"functionResponse":{"name":"read","response":{"output":"x"},"id":"c1"},"partMetadata":{"k":"v"}}]}]}`,
+			func(c *engine.ChatRequest) *engine.OptionalJSONObject {
+				return &c.Messages[0].Blocks[0].ToolResult.PartMetadataJson
+			},
+			false,
+		},
+		{
+			"unknown media", `{"model":"m","contents":[{"role":"user","parts":[{"inlineData":{"mimeType":"image/png","data":"iVBOR"},"partMetadata":{"k":"v"}}]}]}`,
+			func(c *engine.ChatRequest) *engine.OptionalJSONObject {
+				return &c.Messages[0].Blocks[0].Unknown.PartMetadataJson
+			},
+			false,
+		},
+		{
+			"trailing standalone", `{"model":"m","contents":[{"role":"model","parts":[{"text":"a"},{"text":"","thoughtSignature":"S","partMetadata":{"k":"v"}}]}]}`,
+			func(c *engine.ChatRequest) *engine.OptionalJSONObject {
+				return &c.Messages[0].Blocks[1].TrailingSignature.PartMetadataJson
+			},
+			false,
+		},
+		{
+			"system text", `{"model":"m","systemInstruction":{"parts":[{"text":"sys","partMetadata":{"k":"v"}}]},"contents":[{"role":"user","parts":[{"text":"hi"}]}]}`,
+			func(c *engine.ChatRequest) *engine.OptionalJSONObject {
+				return &c.Messages[0].Blocks[0].Text.PartMetadataJson
+			},
+			false,
+		},
+	}
+	for _, row := range rows {
+		t.Run(row.name, func(t *testing.T) {
+			chat, err := (&Adapter{}).Unmarshal([]byte(row.body))
+			if err != nil {
+				t.Fatal(err)
+			}
+			carrier := row.carrier(chat)
+			if row.absent {
+				if !carrier.IsAbsent() || len(carrier.Bytes()) != 0 {
+					t.Fatalf("absent carrier became %q (invented {}?)", carrier.Bytes())
+				}
+			} else if carrier.IsAbsent() {
+				t.Fatalf("present metadata lost at parse")
+			}
+
+			// Engine -> PB -> Engine: absence must survive (nil stays nil).
+			pbReq, err := pbconv.ToPBChatRequestChecked(chat)
+			if err != nil {
+				t.Fatal(err)
+			}
+			back, err := pbconv.FromPBChatRequest(pbReq)
+			if err != nil {
+				t.Fatal(err)
+			}
+			carrier2 := row.carrier(back)
+			if row.absent {
+				if !carrier2.IsAbsent() || len(carrier2.Bytes()) != 0 {
+					t.Fatalf("absent carrier invented at the PB boundary: %q", carrier2.Bytes())
+				}
+			} else if carrier2.IsAbsent() {
+				t.Fatalf("metadata lost through PB")
+			} else if string(carrier2.Bytes()) != string(carrier.Bytes()) {
+				t.Fatalf("metadata changed through PB: %q -> %q", carrier.Bytes(), carrier2.Bytes())
+			}
+
+			// Engine -> final Gemini wire -> re-parse: the wire carries the
+			// fact exactly.
+			out, err := (&Adapter{}).Marshal(back)
+			if err != nil {
+				t.Fatal(err)
+			}
+			reparsed, err := (&Adapter{}).Unmarshal(out)
+			if err != nil {
+				t.Fatal(err)
+			}
+			carrier3 := row.carrier(reparsed)
+			if row.absent {
+				if !carrier3.IsAbsent() {
+					t.Fatalf("absent carrier invented on the wire: %q", carrier3.Bytes())
+				}
+			} else if string(carrier3.Bytes()) != string(carrier.Bytes()) {
+				t.Fatalf("metadata changed through the wire: %q -> %q", carrier.Bytes(), carrier3.Bytes())
+			}
+		})
+	}
+}
+
+// TestFunctionResponsePartRoundTrip — the sealed union is the exact
+// one-arm WRAPPER object at every boundary: parse -> nested Unknown
+// payload -> final wire, for BOTH arms incl. displayName.
+func TestFunctionResponsePartRoundTrip(t *testing.T) {
+	rows := map[string]string{
+		"inlineData": `{"model":"m","contents":[{"role":"user","parts":[{"functionResponse":{"name":"read","response":{"output":"x"},"id":"c1","parts":[{"inlineData":{"mimeType":"image/png","data":"iVBOR","displayName":"pic.png"}}]}}]}]}`,
+		"fileData":   `{"model":"m","contents":[{"role":"user","parts":[{"functionResponse":{"name":"read","response":{"output":"x"},"id":"c1","parts":[{"fileData":{"mimeType":"video/mp4","fileUri":"gs://b/x.mp4","displayName":"clip"}}]}}]}]}`,
+	}
+	for name, body := range rows {
+		t.Run(name, func(t *testing.T) {
+			chat, err := (&Adapter{}).Unmarshal([]byte(body))
+			if err != nil {
+				t.Fatal(err)
+			}
+			tr := chat.Messages[0].Blocks[0].ToolResult
+			if tr == nil || len(tr.Content) != 2 || tr.Content[1].Unknown == nil {
+				t.Fatalf("nested media element missing: %+v", tr)
+			}
+			// The payload is the exact one-arm WRAPPER object.
+			payload := string(tr.Content[1].Unknown.Payload.Bytes())
+			if !strings.Contains(payload, name) {
+				t.Fatalf("payload %q is not the wrapper object", payload)
+			}
+			out, err := (&Adapter{}).Marshal(chat)
+			if err != nil {
+				t.Fatal(err)
+			}
+			// The final wire carries the sealed part byte-exactly.
+			if !strings.Contains(string(out), `"displayName"`) {
+				t.Fatalf("displayName lost on the wire: %s", out)
+			}
+			reparsed, err := (&Adapter{}).Unmarshal(out)
+			if err != nil {
+				t.Fatalf("final wire re-parse: %v (%s)", err, out)
+			}
+			tr2 := reparsed.Messages[0].Blocks[0].ToolResult
+			if string(tr2.Content[1].Unknown.Payload.Bytes()) != payload {
+				t.Fatalf("payload changed through the wire: %q -> %q", payload, tr2.Content[1].Unknown.Payload.Bytes())
+			}
+		})
+	}
+}
+
+// TestFunctionResponsePartNegatives — the sealed union refuses every
+// escape: missing/wrong-typed required members, two arms, extra outer
+// members, extra inner members, and no-arm parts.
+func TestFunctionResponsePartNegatives(t *testing.T) {
+	rows := map[string]string{
+		"missing mimeType":   `{"model":"m","contents":[{"role":"user","parts":[{"functionResponse":{"name":"r","response":{},"id":"c1","parts":[{"inlineData":{"data":"x"}}]}}]}]}`,
+		"missing data":       `{"model":"m","contents":[{"role":"user","parts":[{"functionResponse":{"name":"r","response":{},"id":"c1","parts":[{"inlineData":{"mimeType":"image/png"}}]}}]}]}`,
+		"wrong-typed data":   `{"model":"m","contents":[{"role":"user","parts":[{"functionResponse":{"name":"r","response":{},"id":"c1","parts":[{"inlineData":{"mimeType":"image/png","data":5}}]}}]}]}`,
+		"missing fileUri":    `{"model":"m","contents":[{"role":"user","parts":[{"functionResponse":{"name":"r","response":{},"id":"c1","parts":[{"fileData":{"mimeType":"video/mp4"}}]}}]}]}`,
+		"two arms":           `{"model":"m","contents":[{"role":"user","parts":[{"functionResponse":{"name":"r","response":{},"id":"c1","parts":[{"inlineData":{"mimeType":"i","data":"d"},"fileData":{"mimeType":"v","fileUri":"u"}}]}}]}]}`,
+		"extra outer member": `{"model":"m","contents":[{"role":"user","parts":[{"functionResponse":{"name":"r","response":{},"id":"c1","parts":[{"inlineData":{"mimeType":"i","data":"d"},"thought":true}]}}]}]}`,
+		"extra inner member": `{"model":"m","contents":[{"role":"user","parts":[{"functionResponse":{"name":"r","response":{},"id":"c1","parts":[{"inlineData":{"mimeType":"i","data":"d","videoMetadata":{}}}]}}]}]}`,
+		"no arm":             `{"model":"m","contents":[{"role":"user","parts":[{"functionResponse":{"name":"r","response":{},"id":"c1","parts":[{}]}}]}]}`,
+	}
+	for name, body := range rows {
+		t.Run(name, func(t *testing.T) {
+			if _, err := (&Adapter{}).Unmarshal([]byte(body)); err == nil {
+				t.Fatalf("%s accepted", name)
+			}
+		})
+	}
+}
+
+// TestFunctionResponseUnknownMembersRefused — the six-field inventory is
+// exact: any additional functionResponse member is the value-free 400,
+// never a silently dropped fact.
+func TestFunctionResponseUnknownMembersRefused(t *testing.T) {
+	rows := map[string]string{
+		"extra member":    `{"model":"m","contents":[{"role":"user","parts":[{"functionResponse":{"name":"r","response":{},"id":"c1","extraField":1}}]}]}`,
+		"provider future": `{"model":"m","contents":[{"role":"user","parts":[{"functionResponse":{"name":"r","response":{},"id":"c1","toolUses":[]}}]}]}`,
+	}
+	for name, body := range rows {
+		t.Run(name, func(t *testing.T) {
+			if _, err := (&Adapter{}).Unmarshal([]byte(body)); err == nil {
+				t.Fatalf("%s accepted", name)
+			}
+		})
+	}
+}
+
+// TestResponseObjectStrictDetection — the §5 verbatim path is decided by
+// the SHARED strict object authority: duplicate keys, escape-equivalent
+// duplicates, lone surrogates, invalid UTF-8, trailing values, and
+// non-object top-level shapes are NOT verbatim (they get the documented
+// semantic wrap), while a valid strict object survives lexeme-exact
+// (numeric lexemes + member order).
+func TestResponseObjectStrictDetection(t *testing.T) {
+	// A valid strict object is verbatim: lexemes and order survive.
+	body := `{"model":"m","contents":[{"role":"user","parts":[{"functionResponse":{"name":"r","response":{"z":1e999,"a":{"b":2},"n":-0.5},"id":"c1"}}]}]}`
+	chat, err := (&Adapter{}).Unmarshal([]byte(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tr := chat.Messages[0].Blocks[0].ToolResult
+	if tr.Content[0].Text != `{"z":1e999,"a":{"b":2},"n":-0.5}` {
+		t.Fatalf("strict object not verbatim: %q", tr.Content[0].Text)
+	}
+	out, err := (&Adapter{}).Marshal(chat)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(out), `"response":{"z":1e999,"a":{"b":2},"n":-0.5}`) {
+		t.Fatalf("strict object not re-emitted verbatim: %s", out)
+	}
+
+	// Non-strict texts get the semantic wrap (never verbatim).
+	wrapped := map[string]string{
+		"duplicate keys":        `{"a":1,"a":2}`,
+		"escape-equivalent dup": `{"a":1,"\u0061":2}`,
+		"lone surrogate":        `{"a":"\ud800"}`,
+		"invalid utf8":          "{\"a\":\"\xff\xfe\"}",
+		"trailing value":        `{"a":1} true`,
+		"array top-level":       `[1,2]`,
+		"string top-level":      `"x"`,
+		"null top-level":        `null`,
+		"not json at all":       `not json`,
+	}
+	for name, text := range wrapped {
+		t.Run(name, func(t *testing.T) {
+			got := geminiResponseObject(text, false)
+			var m map[string]any
+			if err := json.Unmarshal(got, &m); err != nil {
+				t.Fatalf("wrap output not an object: %s", got)
+			}
+			if _, ok := m["content"]; !ok {
+				t.Fatalf("expected the semantic content wrap, got %s", got)
+			}
+			if string(got) == text {
+				t.Fatal("non-strict text emitted verbatim")
+			}
+		})
+	}
 }

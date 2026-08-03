@@ -813,17 +813,15 @@ func cloneBytes(b []byte) []byte {
 	return out
 }
 
-// pbPartMetadata converts the pb bytes carrier to the engine object form
-// (absent bytes -> absent object; present bytes must be a strict JSON
-// object — the SDK validator already gates it, this is the defensive
-// backstop).
-func pbPartMetadata(raw []byte, what string) (engine.RequiredJSONObject, error) {
-	if len(raw) == 0 {
-		return engine.RequiredJSONObject{}, nil
-	}
-	obj, err := engine.ParseRequiredJSONObject(raw)
+// pbPartMetadata converts the pb bytes carrier to the engine object form:
+// ABSENT bytes stay ABSENT (never an invented `{}`); present bytes must be
+// a strict JSON object and stay byte-exact (a present `{}` is distinct
+// from absence). The SDK validator already gates the bytes; this is the
+// defensive backstop.
+func pbPartMetadata(raw []byte, what string) (engine.OptionalJSONObject, error) {
+	obj, err := engine.ParseOptionalJSONObject(raw)
 	if err != nil {
-		return engine.RequiredJSONObject{}, fmt.Errorf("%s part_metadata_json: %w", what, err)
+		return engine.OptionalJSONObject{}, fmt.Errorf("%s part_metadata_json: %w", what, err)
 	}
 	return obj, nil
 }

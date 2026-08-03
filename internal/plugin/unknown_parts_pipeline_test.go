@@ -75,8 +75,8 @@ func TestUnknownPartsSurviveWASMReplacement(t *testing.T) {
 // thoughtSignature on the unknown arm, partMetadata on the part, and a
 // signed tool-result block with presence-aware will_continue/scheduling.
 func signedMediaPartRequest() *engine.ChatRequest {
-	pm := mustReqForTest(`{"src":"gcs://bucket/raw.png"}`)
-	meta := mustReqForTest(`{"team":"x"}`)
+	pm := mustOptReqForTest(`{"src":"gcs://bucket/raw.png"}`)
+	meta := mustOptReqForTest(`{"team":"x"}`)
 	wc := false
 	sched := "SILENT"
 	return &engine.ChatRequest{
@@ -170,4 +170,13 @@ func TestSignedPartsSurviveWASMReplacement(t *testing.T) {
 	if tr == nil || tr.Signature != "RESP_SIG" {
 		t.Fatalf("tool-result signature changed through the replacement: %+v", out.Messages[1].Blocks[0])
 	}
+}
+
+// mustOptReqForTest parses a strict object into the optional carrier.
+func mustOptReqForTest(raw string) engine.OptionalJSONObject {
+	obj, err := engine.ParseOptionalJSONObject([]byte(raw))
+	if err != nil {
+		panic(err)
+	}
+	return obj
 }

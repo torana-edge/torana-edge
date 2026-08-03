@@ -374,6 +374,65 @@ func setToolResultMeta(m *pb.Message, raw string) {
 	m.Blocks[0].GetToolResult().PartMetadataJson = []byte(raw)
 }
 
+func setThinkingMeta(m *pb.Message, raw string) {
+	for _, b := range m.Blocks {
+		if t := b.GetThinking(); t != nil {
+			t.PartMetadataJson = []byte(raw)
+			return
+		}
+	}
+	panic("no thinking block")
+}
+
+func setToolUseMeta(m *pb.Message, raw string) {
+	for _, b := range m.Blocks {
+		if tu := b.GetToolUse(); tu != nil {
+			tu.PartMetadataJson = []byte(raw)
+			return
+		}
+	}
+	panic("no tool-use block")
+}
+
+func setUnknownMeta(m *pb.Message, raw string) {
+	for _, b := range m.Blocks {
+		if u := b.GetUnknown(); u != nil {
+			u.PartMetadataJson = []byte(raw)
+			return
+		}
+	}
+	panic("no unknown block")
+}
+
+func setUnknownSig(m *pb.Message, sig string) {
+	for _, b := range m.Blocks {
+		if u := b.GetUnknown(); u != nil {
+			u.Signature = sig
+			return
+		}
+	}
+	panic("no unknown block")
+}
+
+// toolUseSignedRequest is baseRequest with a signature on the assistant
+// tool-use block (the SDK's RequestToolUseBlock binding).
+func toolUseSignedRequest() *pb.ChatRequest {
+	r := baseRequest()
+	r.Messages[2].Blocks[0].GetToolUse().Signature = "tu-token"
+	return r
+}
+
+// unknownSignedRequest is baseRequest with an unknown block carrying a
+// signature (the SDK's RequestUnknownBlock binding) in the user message.
+func unknownSignedRequest() *pb.ChatRequest {
+	r := baseRequest()
+	r.Messages[1].Blocks = append(r.Messages[1].Blocks, &pb.RequestBlock{Kind: &pb.RequestBlock_Unknown{
+		Unknown: &pb.RequestUnknownBlock{Kind: "part", PayloadJson: []byte(`{"inlineData":{"mimeType":"image/png","data":"iVBOR"}}`)},
+	}})
+	setUnknownSig(r.Messages[1], "u-token")
+	return r
+}
+
 // The bound-signature rule on the REQUEST path: there is no apply block to
 // invalidate a wire token later, so SignatureStale is a violation here (it is
 // tolerated on the response path). Clearing the token over changed content is
@@ -385,7 +444,7 @@ func TestVerifyRequestMutationSignatureMatrix(t *testing.T) {
 	// The tool-result rows sign messages.tool blocks, so the matrix grants
 	// both roles; every row's section change passes and the BINDING check
 	// decides.
-	user := grant("ir.messages.write.user", "ir.messages.write.tool")
+	user := grant("ir.messages.write.user", "ir.messages.write.tool", "ir.messages.write.assistant")
 
 	cases := []struct {
 		name string
@@ -483,6 +542,31 @@ func TestVerifyRequestMutationSignatureMatrix(t *testing.T) {
 		{name: "tool result token forged -> forged", base: toolResultSignedRequest,
 			want:  "plugin torana.v2.RequestToolResultBlock signature forged",
 			apply: func(r *pb.ChatRequest) { setToolResultSig(r.Messages[3], "evil") }},
+		// Metadata is a covered carrier on EVERY signed block kind.
+		{name: "thinking metadata changed token kept -> stale", base: thinkingSignedRequest,
+			want:  "plugin thinking_signature signature stale",
+			apply: func(r *pb.ChatRequest) { setThinkingMeta(r.Messages[1], `{"src":"x"}`) }},
+		{name: "thinking metadata changed token cleared -> accepted", base: thinkingSignedRequest,
+			apply: func(r *pb.ChatRequest) {
+				setThinkingMeta(r.Messages[1], `{"src":"x"}`)
+				setThinkingSig(r.Messages[1], "")
+			}},
+		{name: "tool use metadata changed token kept -> stale", base: toolUseSignedRequest,
+			want:  "plugin tool_use_signature signature stale",
+			apply: func(r *pb.ChatRequest) { setToolUseMeta(r.Messages[2], `{"src":"x"}`) }},
+		{name: "tool use metadata changed token cleared -> accepted", base: toolUseSignedRequest,
+			apply: func(r *pb.ChatRequest) {
+				setToolUseMeta(r.Messages[2], `{"src":"x"}`)
+				r.Messages[2].Blocks[0].GetToolUse().Signature = ""
+			}},
+		{name: "unknown metadata changed token kept -> stale", base: unknownSignedRequest,
+			want:  "plugin torana.v2.RequestUnknownBlock signature stale",
+			apply: func(r *pb.ChatRequest) { setUnknownMeta(r.Messages[1], `{"src":"x"}`) }},
+		{name: "unknown metadata changed token cleared -> accepted", base: unknownSignedRequest,
+			apply: func(r *pb.ChatRequest) {
+				setUnknownMeta(r.Messages[1], `{"src":"x"}`)
+				setUnknownSig(r.Messages[1], "")
+			}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1372,5 +1456,27 @@ func TestVerifyRequestSignaturesSurplusUnsignedCopyIsDropped(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "dropped") {
 		t.Errorf("error %q does not name the dropped class", err)
+	}
+}
+
+// TestFastPathMetadataChangeRejected — the ALL-GRANTS fast path still
+// enforces the signature bindings unconditionally: a metadata change with
+// a retained token is stale provenance and is rejected even when every
+// section is grantable.
+func TestFastPathMetadataChangeRejected(t *testing.T) {
+	accepted := thinkingSignedRequest()
+	out := thinkingSignedRequest()
+	setThinkingMeta(out.Messages[1], `{"src":"x"}`)
+
+	if err := verifyFastPath(accepted, out); err == nil {
+		t.Fatal("metadata change with a retained token must fail the all-grants fast path")
+	}
+	// Clearing the token over the changed metadata is the prescribed
+	// response and passes the fast path.
+	out2 := thinkingSignedRequest()
+	setThinkingMeta(out2.Messages[1], `{"src":"x"}`)
+	setThinkingSig(out2.Messages[1], "")
+	if err := verifyFastPath(accepted, out2); err != nil {
+		t.Fatalf("cleared token over changed metadata must pass: %v", err)
 	}
 }

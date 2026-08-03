@@ -347,9 +347,16 @@ func (a *Adapter) Unmarshal(rawBody []byte) (*engine.ChatRequest, error) {
 		for _, p := range gReq.SystemInstruction.Parts {
 			// The grammar ran at decode: the arm is text and the part is
 			// plain (no thought/signature); the projection is the text.
-			if partText(p) != "" {
-				msg.Blocks = append(msg.Blocks, engine.Block{Text: &engine.TextBlock{Text: partText(p)}})
+			// EXPLICIT EMPTY text is a first-class arm (its position and
+			// metadata survive) and partMetadata is a typed carrier on
+			// system text too.
+			pm, err := partMetadata(p.PartMetadata)
+			if err != nil {
+				return nil, err
 			}
+			msg.Blocks = append(msg.Blocks, engine.Block{Text: &engine.TextBlock{
+				Text: partText(p), PartMetadataJson: pm,
+			}})
 		}
 		if len(msg.Blocks) > 0 {
 			chat.Messages = append(chat.Messages, msg)
@@ -587,23 +594,28 @@ func geminiToolResultBlock(fr *geminiFuncResp, callIDs map[string]string) (*engi
 }
 
 // geminiFuncRespPartPayload preserves a sealed FunctionResponsePart element
-// as its raw nested unknown payload (the exact arm object).
+// as the exact one-arm WRAPPER object (the approved authority shape):
+// {"inlineData":{...}} or {"fileData":{...}}.
 func geminiFuncRespPartPayload(p geminiFuncRespPart) (engine.RequiredJSONObject, error) {
-	if p.InlineData != nil && p.FileData == nil {
-		raw, err := json.Marshal(p.InlineData)
-		if err != nil {
-			return engine.RequiredJSONObject{}, err
-		}
-		return engine.ParseRequiredJSONObject(raw)
+	var wrapper map[string]any
+	switch {
+	case p.InlineData != nil && p.FileData == nil:
+		wrapper = map[string]any{"inlineData": p.InlineData}
+	case p.FileData != nil && p.InlineData == nil:
+		wrapper = map[string]any{"fileData": p.FileData}
+	default:
+		return engine.RequiredJSONObject{}, fmt.Errorf("gemini: FunctionResponsePart must have exactly one arm")
 	}
-	if p.FileData != nil && p.InlineData == nil {
-		raw, err := json.Marshal(p.FileData)
-		if err != nil {
-			return engine.RequiredJSONObject{}, err
-		}
-		return engine.ParseRequiredJSONObject(raw)
+	raw, err := json.Marshal(wrapper)
+	if err != nil {
+		return engine.RequiredJSONObject{}, err
 	}
-	return engine.RequiredJSONObject{}, fmt.Errorf("gemini: FunctionResponsePart must have exactly one arm")
+	// The sealed-union validator runs over the wrapper BEFORE it becomes a
+	// payload, so an unrepresentable shape never reaches the engine.
+	if err := validateGeminiFuncRespPart(raw, "marshal"); err != nil {
+		return engine.RequiredJSONObject{}, err
+	}
+	return engine.ParseRequiredJSONObject(raw)
 }
 
 // stripGeminiPartFacts removes the known canonical members of a part object.
@@ -908,7 +920,28 @@ func validateGeminiPartRaw(raw json.RawMessage, where string) (string, error) {
 // scheduling must be the exact wire vocabulary (SCHEDULING_UNSPECIFIED and
 // any unknown value -> the value-free 400, absence stays distinct); the
 // optional parts array is the SEALED FunctionResponsePart union.
+// geminiFunctionResponseMembers is the approved SIX-field inventory of the
+// functionResponse object (REV 4 §5): any other member is a value-free 400
+// — never a silently dropped provider fact.
+var geminiFunctionResponseMembers = map[string]bool{
+	"name":         true,
+	"response":     true,
+	"id":           true,
+	"willContinue": true,
+	"scheduling":   true,
+	"parts":        true,
+}
+
 func validateGeminiFunctionResponse(raw json.RawMessage, where string) error {
+	var memberSet map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &memberSet); err != nil {
+		return fmt.Errorf("gemini: %s part functionResponse: %w", where, err)
+	}
+	for k := range memberSet {
+		if !geminiFunctionResponseMembers[k] {
+			return fmt.Errorf("gemini: %s part functionResponse: unknown member %q (the approved inventory is name/response/id/willContinue/scheduling/parts)", where, k)
+		}
+	}
 	var fr struct {
 		Name         string            `json:"name"`
 		Response     json.RawMessage   `json:"response"`
@@ -940,53 +973,98 @@ func validateGeminiFunctionResponse(raw json.RawMessage, where string) error {
 }
 
 // validateGeminiFuncRespPart applies the sealed FunctionResponsePart
-// grammar: exactly one of inlineData/fileData, each with the pinned member
-// shapes; any other member is a value-free 400.
+// grammar to the exact one-arm WRAPPER object: exactly one outer arm
+// (inlineData|fileData), the arm's INNER bytes validated with the pinned
+// member shapes (required members present and typed, displayName
+// optional), and NO unknown members at either level. Any other shape is a
+// value-free 400.
 func validateGeminiFuncRespPart(raw json.RawMessage, where string) error {
-	var m map[string]json.RawMessage
-	if err := json.Unmarshal(raw, &m); err != nil {
+	if _, _, err := validateFuncRespPartWrapper(raw); err != nil {
 		return fmt.Errorf("gemini: %s: %w", where, err)
 	}
+	return nil
+}
+
+// validateFuncRespPartWrapper is the ONE shared authority for the sealed
+// FunctionResponsePart shape, used by BOTH parse (wire -> engine) and
+// marshal (engine -> wire): the exact one-arm wrapper object with pinned
+// inner member shapes. It returns the arm and the arm's raw inner bytes.
+func validateFuncRespPartWrapper(raw json.RawMessage) (string, json.RawMessage, error) {
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return "", nil, fmt.Errorf("FunctionResponsePart is not an object")
+	}
 	var arm string
-	for k := range m {
+	var inner json.RawMessage
+	for k, v := range m {
 		if arm != "" {
-			return fmt.Errorf("gemini: %s: FunctionResponsePart has more than one arm", where)
+			return "", nil, fmt.Errorf("FunctionResponsePart has more than one arm")
+		}
+		if k != "inlineData" && k != "fileData" {
+			return "", nil, fmt.Errorf("FunctionResponsePart has an unknown outer member %q", k)
 		}
 		arm = k
+		inner = v
 	}
+	if arm == "" {
+		return "", nil, fmt.Errorf("FunctionResponsePart has no arm")
+	}
+	if err := validateFuncRespPartInner(arm, inner); err != nil {
+		return "", nil, err
+	}
+	return arm, inner, nil
+}
+
+// validateFuncRespPartInner validates the arm's INNER bytes against the
+// pinned member shapes: required members present and correctly typed,
+// optional displayName, and no unknown inner members.
+func validateFuncRespPartInner(arm string, inner json.RawMessage) error {
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(inner, &m); err != nil {
+		return fmt.Errorf("%s is not an object", arm)
+	}
+	var required, optional []string
 	switch arm {
 	case "inlineData":
-		var b struct {
-			MimeType    string `json:"mimeType"`
-			Data        string `json:"data"`
-			DisplayName string `json:"displayName"`
-		}
-		if err := json.Unmarshal(raw, &b); err != nil {
-			return fmt.Errorf("gemini: %s: %w", where, err)
-		}
-		if b.MimeType == "" || b.Data == "" {
-			return fmt.Errorf("gemini: %s: inlineData requires mimeType and data", where)
-		}
+		required = []string{"mimeType", "data"}
+		optional = []string{"displayName"}
 	case "fileData":
-		var f struct {
-			MimeType    string `json:"mimeType"`
-			FileURI     string `json:"fileUri"`
-			DisplayName string `json:"displayName"`
-		}
-		if err := json.Unmarshal(raw, &f); err != nil {
-			return fmt.Errorf("gemini: %s: %w", where, err)
-		}
-		if f.MimeType == "" || f.FileURI == "" {
-			return fmt.Errorf("gemini: %s: fileData requires mimeType and fileUri", where)
-		}
-	default:
-		return fmt.Errorf("gemini: %s: FunctionResponsePart has no arm", where)
+		required = []string{"mimeType", "fileUri"}
+		optional = []string{"displayName"}
 	}
-	// No top-level Part ancillaries inside a FunctionResponsePart: the
-	// sealed union allows exactly the arm member.
+	for _, k := range required {
+		raw, ok := m[k]
+		if !ok {
+			return fmt.Errorf("%s requires member %q", arm, k)
+		}
+		var s string
+		if json.Unmarshal(raw, &s) != nil {
+			return fmt.Errorf("%s member %q must be a string", arm, k)
+		}
+		if s == "" {
+			return fmt.Errorf("%s member %q must be non-empty", arm, k)
+		}
+	}
 	for k := range m {
-		if k != arm {
-			return fmt.Errorf("gemini: %s: unexpected member %q in FunctionResponsePart", where, k)
+		known := false
+		for _, r := range required {
+			if k == r {
+				known = true
+			}
+		}
+		for _, o := range optional {
+			if k == o {
+				known = true
+			}
+		}
+		if !known {
+			return fmt.Errorf("%s has an unknown inner member %q", arm, k)
+		}
+	}
+	if raw, ok := m["displayName"]; ok {
+		var s string
+		if json.Unmarshal(raw, &s) != nil {
+			return fmt.Errorf("%s member displayName must be a string", arm)
 		}
 	}
 	return nil
@@ -1014,7 +1092,10 @@ func buildSystemInstruction(msgs []engine.Message) *geminiSystemInstruction {
 			}
 			for _, b := range msg.Blocks {
 				if b.Text != nil {
-					si.Parts = append(si.Parts, geminiPart{Text: new(b.Text.Text)})
+					// Explicit empty text and partMetadata survive.
+					si.Parts = append(si.Parts, geminiPart{
+						Text: new(b.Text.Text), PartMetadata: b.Text.PartMetadataJson.Bytes(),
+					})
 				}
 			}
 		}
@@ -1041,7 +1122,9 @@ func buildContents(msgs []engine.Message, codeAssist bool) ([]geminiContent, err
 			for _, b := range msg.Blocks {
 				switch {
 				case b.Text != nil:
-					content.Parts = append(content.Parts, geminiPart{Text: new(b.Text.Text)})
+					content.Parts = append(content.Parts, geminiPart{
+						Text: new(b.Text.Text), PartMetadata: b.Text.PartMetadataJson.Bytes(),
+					})
 				case b.Unknown != nil:
 					// Unknown part arms are re-emitted RAW at their exact
 					// position (the projection invariant is enforced: the
@@ -1091,13 +1174,17 @@ func buildContents(msgs []engine.Message, codeAssist bool) ([]geminiContent, err
 					if textContent == nil {
 						textContent = &geminiContent{Role: "model"}
 					}
-					textContent.Parts = append(textContent.Parts, geminiPart{Text: new(b.Text.Text), ThoughtSignature: b.Text.Signature})
+					textContent.Parts = append(textContent.Parts, geminiPart{
+						Text: new(b.Text.Text), ThoughtSignature: b.Text.Signature,
+						PartMetadata: b.Text.PartMetadataJson.Bytes(),
+					})
 				case b.Thinking != nil:
 					if textContent == nil {
 						textContent = &geminiContent{Role: "model"}
 					}
 					textContent.Parts = append(textContent.Parts, geminiPart{
 						Thought: true, Text: new(b.Thinking.Text), ThoughtSignature: b.Thinking.Signature,
+						PartMetadata: b.Thinking.PartMetadataJson.Bytes(),
 					})
 				case b.Unknown != nil:
 					if err := rejectGeminiProjection(b.Unknown); err != nil {
@@ -1110,6 +1197,7 @@ func buildContents(msgs []engine.Message, codeAssist bool) ([]geminiContent, err
 				case b.ToolUse != nil:
 					toolParts = append(toolParts, geminiPart{
 						ThoughtSignature: b.ToolUse.Signature,
+						PartMetadata:     b.ToolUse.PartMetadataJson.Bytes(),
 						FunctionCall:     &geminiFuncCall{Name: b.ToolUse.Name, Args: b.ToolUse.Arguments.Bytes(), ID: b.ToolUse.ID},
 					})
 				case b.ToolResult != nil:
@@ -1130,7 +1218,10 @@ func buildContents(msgs []engine.Message, codeAssist bool) ([]geminiContent, err
 					if textContent == nil {
 						textContent = &geminiContent{Role: "model"}
 					}
-					textContent.Parts = append(textContent.Parts, geminiPart{Text: new(""), ThoughtSignature: b.TrailingSignature.Signature})
+					textContent.Parts = append(textContent.Parts, geminiPart{
+						Text: new(""), ThoughtSignature: b.TrailingSignature.Signature,
+						PartMetadata: b.TrailingSignature.PartMetadataJson.Bytes(),
+					})
 				default:
 					return nil, fmt.Errorf("gemini: block kind not representable in an assistant content")
 				}
@@ -1229,14 +1320,14 @@ func geminiToolResultWire(tr *engine.ToolResultBlock, codeAssist bool) (*geminiF
 }
 
 // geminiResponseObject is the §5 single-authority response construction:
-// strict-object text is emitted VERBATIM (lexeme-exact), any other text
-// gets the documented semantic wrap.
+// text that the SHARED strict object authority accepts is emitted VERBATIM
+// (lexeme-exact — numeric lexemes and member order survive, and the same
+// validation the platform applies elsewhere rejects duplicate decoded
+// keys, escape-equivalent duplicates, lone surrogates, invalid UTF-8, and
+// trailing values); any other text gets the documented semantic wrap.
 func geminiResponseObject(text string, codeAssist bool) json.RawMessage {
-	trimmed := bytes.TrimSpace([]byte(text))
-	if len(trimmed) > 0 && trimmed[0] == '{' {
-		if json.Valid(trimmed) {
-			return json.RawMessage(text) // verbatim, lexeme-exact
-		}
+	if _, err := engine.ParseOptionalJSONObject([]byte(text)); err == nil {
+		return json.RawMessage(text) // verbatim, lexeme-exact strict object
 	}
 	// The documented semantic wrap for a rewritten (non-object) text.
 	if codeAssist {
@@ -1248,28 +1339,29 @@ func geminiResponseObject(text string, codeAssist bool) json.RawMessage {
 }
 
 // geminiFuncRespPartFromUnknown projects a nested Unknown media element
-// (the sealed FunctionResponsePart grammar) back to the wire. The payload
-// must be exactly one arm object.
+// back to the wire. The payload MUST be the exact one-arm wrapper object —
+// the SAME sealed-union validator as parse runs over it, so no
+// plugin-added outer/inner member or wrong shape can silently reach the
+// provider wire.
 func geminiFuncRespPartFromUnknown(u *engine.UnknownBlock) (geminiFuncRespPart, error) {
-	obj, _, err := u.Payload.DecodeObject()
+	arm, inner, err := validateFuncRespPartWrapper(u.Payload.Bytes())
 	if err != nil {
 		return geminiFuncRespPart{}, fmt.Errorf("gemini: FunctionResponsePart payload: %w", err)
 	}
 	var out geminiFuncRespPart
-	if raw, ok := obj["inlineData"]; ok {
+	switch arm {
+	case "inlineData":
 		var b geminiFuncRespBlob
-		if err := json.Unmarshal(raw, &b); err != nil {
+		if err := json.Unmarshal(inner, &b); err != nil {
 			return out, fmt.Errorf("gemini: inlineData part: %w", err)
 		}
 		out.InlineData = &b
-	} else if raw, ok := obj["fileData"]; ok {
+	case "fileData":
 		var f geminiFuncRespFile
-		if err := json.Unmarshal(raw, &f); err != nil {
+		if err := json.Unmarshal(inner, &f); err != nil {
 			return out, fmt.Errorf("gemini: fileData part: %w", err)
 		}
 		out.FileData = &f
-	} else {
-		return out, fmt.Errorf("gemini: FunctionResponsePart payload has no sealed arm")
 	}
 	return out, nil
 }
@@ -1291,14 +1383,12 @@ func cloneMap(m map[string]any) map[string]any {
 }
 
 // partMetadata validates a part's raw partMetadata member into the engine
-// carrier (absent -> absent; present must be a strict JSON object).
-func partMetadata(raw json.RawMessage) (engine.RequiredJSONObject, error) {
-	if len(raw) == 0 {
-		return engine.RequiredJSONObject{}, nil
-	}
-	obj, err := engine.ParseRequiredJSONObject(raw)
+// carrier: ABSENT stays absent (never an invented `{}`); present must be a
+// strict JSON object and stays byte-exact (a present `{}` is distinct).
+func partMetadata(raw json.RawMessage) (engine.OptionalJSONObject, error) {
+	obj, err := engine.ParseOptionalJSONObject(raw)
 	if err != nil {
-		return engine.RequiredJSONObject{}, fmt.Errorf("gemini: partMetadata: %w", err)
+		return engine.OptionalJSONObject{}, fmt.Errorf("gemini: partMetadata: %w", err)
 	}
 	return obj, nil
 }

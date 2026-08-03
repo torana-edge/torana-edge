@@ -48,7 +48,7 @@ type TextBlock struct {
 	// PartMetadataJson is the provider Part-level custom metadata
 	// (Gemini partMetadata), absent or a strict JSON object. Covered by
 	// the block's signature binding.
-	PartMetadataJson RequiredJSONObject
+	PartMetadataJson OptionalJSONObject
 }
 
 // ThinkingBlock is extended thinking / reasoning text.
@@ -57,7 +57,7 @@ type ThinkingBlock struct {
 	Signature string // current-block provenance token
 	// PartMetadataJson is provider Part-level custom metadata, absent or a
 	// strict JSON object; covered by this block's signature binding.
-	PartMetadataJson RequiredJSONObject
+	PartMetadataJson OptionalJSONObject
 }
 
 // RedactedThinkingBlock is a provider redaction placeholder.
@@ -77,7 +77,7 @@ type ToolUseBlock struct {
 	Signature string
 	// PartMetadataJson is provider Part-level custom metadata, absent or a
 	// strict JSON object; covered by this block's signature binding.
-	PartMetadataJson RequiredJSONObject
+	PartMetadataJson OptionalJSONObject
 }
 
 // ToolResultBlock is a tool result at its exact wire position.
@@ -91,7 +91,7 @@ type ToolResultBlock struct {
 	Content []ToolResultContentBlock
 	// PartMetadataJson is provider Part-level custom metadata, absent or a
 	// strict JSON object; covered by this block's signature binding.
-	PartMetadataJson RequiredJSONObject
+	PartMetadataJson OptionalJSONObject
 	// WillContinue is the gemini functionResponse willContinue: PRESENCE is
 	// meaningful (explicit false differs from absent); only applicable to
 	// NON_BLOCKING function calls.
@@ -136,7 +136,7 @@ type UnknownBlock struct {
 	Payload RequiredJSONObject
 	// PartMetadataJson is provider Part-level custom metadata, absent or a
 	// strict JSON object; covered by this block's signature binding.
-	PartMetadataJson RequiredJSONObject
+	PartMetadataJson OptionalJSONObject
 	// Signature is the opaque provider token bound to this unknown part
 	// (gemini thoughtSignature on a media/future arm).
 	Signature string
@@ -149,7 +149,7 @@ type TrailingSignatureBlock struct {
 	Signature string
 	// PartMetadataJson is provider Part-level custom metadata (the trailing
 	// standalone is a real Gemini Part), absent or a strict JSON object.
-	PartMetadataJson RequiredJSONObject
+	PartMetadataJson OptionalJSONObject
 }
 
 // TextBlocks returns the text of every text block in wire order.
