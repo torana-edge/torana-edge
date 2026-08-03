@@ -1471,6 +1471,16 @@ func TestGenerationConfigAbsentVsEmpty(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			// EVERY row must have parsed exactly one user message with the
+			// expected text (safe cardinality check before indexing) — a
+			// fixture with contents outside request fails here, never on
+			// the projection assertions.
+			if len(chat.Messages) != 1 || len(chat.Messages[0].Blocks) != 1 {
+				t.Fatalf("expected exactly one message with one block: %+v", chat.Messages)
+			}
+			if chat.Messages[0].Blocks[0].Text == nil || chat.Messages[0].Blocks[0].Text.Text != "hi" {
+				t.Fatalf("expected the user text %q: %+v", "hi", chat.Messages[0].Blocks[0])
+			}
 			// The parsed envelope's inner scope decides the projection
 			// outcome BEFORE any marshal.
 			m, _, _ := chat.ProviderExtensions.DecodeObject()

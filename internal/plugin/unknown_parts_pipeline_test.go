@@ -563,12 +563,6 @@ func TestEnvelopeSmugglingPassRollsBackAndChains(t *testing.T) {
 	}
 }
 
-// pluginBundleDigest computes the digest of a fixture directory.
-func pluginBundleDigest(t *testing.T, name string) (string, error) {
-	t.Helper()
-	return BundleDigestForDir(fixturesDir + "/" + name)
-}
-
 // pipelineWithApproval builds a pipeline with an explicit approval map.
 func pipelineWithApproval(t testing.TB, dir string, order []string, approvals map[string]provider.PluginApproval, validator func(topo engine.TopologyFacts, current, replacement *pb.ChatRequest) error) *PluginPipeline {
 	conv := map[string]Approval{}
