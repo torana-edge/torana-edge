@@ -2,10 +2,15 @@ package plugin
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/torana-edge/torana-edge/internal/engine"
+	"github.com/torana-edge/torana-edge/internal/format/gemini"
 )
+
+// geminiAdapter is the adapter the final-wire assertions marshal through.
+var geminiAdapter = &gemini.Adapter{}
 
 // The unknown-part contract through REAL guests (review finding 3): a
 // provider-valid unmodelled part survives a WASM pass and a WASM
@@ -179,4 +184,75 @@ func mustOptReqForTest(raw string) engine.OptionalJSONObject {
 		panic(err)
 	}
 	return obj
+}
+
+// frpRequest carries a tool result with ONE FunctionResponsePart (the
+// exact one-arm wrapper as the nested Unknown payload).
+func frpRequest(arm, inner string) *engine.ChatRequest {
+	return &engine.ChatRequest{
+		Model: "gemini",
+		Messages: []engine.Message{{Role: engine.RoleTool, Blocks: []engine.Block{{ToolResult: &engine.ToolResultBlock{
+			ToolCallID: "c1",
+			ToolName:   "read",
+			Content: []engine.ToolResultContentBlock{
+				{Text: `{"output":"x"}`},
+				{Unknown: &engine.UnknownBlock{Kind: "part", Payload: mustReqForTest(`{` + arm + `:{` + inner + `}}`)}},
+			},
+		}}}}},
+	}
+}
+
+// TestFunctionResponsePartSurvivesWASMPassAndReplacement — the exact
+// one-arm WRAPPER payload survives a real WASM pass AND a replacement
+// byte-exactly (both arms incl. displayName), and the returned engine
+// request marshals through the gemini adapter to the final
+// functionResponse.parts structure.
+func TestFunctionResponsePartSurvivesWASMPassAndReplacement(t *testing.T) {
+	arms := []struct{ arm, inner string }{
+		{`"inlineData"`, `"mimeType":"image/png","data":"iVBOR","displayName":"pic.png"`},
+		{`"fileData"`, `"mimeType":"video/mp4","fileUri":"gs://b/x.mp4","displayName":"clip"`},
+	}
+	for _, a := range arms {
+		t.Run(a.arm, func(t *testing.T) {
+			want := `{` + a.arm + `:{` + a.inner + `}}`
+
+			// Pass (test-inert-a).
+			requireWASM(t, fixturesDir+"/test-inert-a/plugin.wasm")
+			pp := newTestPipeline(t, fixturesDir, []string{"test-inert-a"})
+			chat := frpRequest(a.arm, a.inner)
+			out, err := pp.RunBeforeRequest(context.Background(), 11, chat, nil)
+			if err != nil {
+				t.Fatalf("pass: %v", err)
+			}
+			if got := string(out.Messages[0].Blocks[0].ToolResult.Content[1].Unknown.Payload.Bytes()); got != want {
+				t.Fatalf("pass changed the wrapper payload:\n got %s\nwant %s", got, want)
+			}
+			wire, err := geminiAdapter.Marshal(out)
+			if err != nil {
+				t.Fatalf("pass: marshal: %v", err)
+			}
+			if !strings.Contains(string(wire), a.arm) || !strings.Contains(string(wire), `"displayName"`) {
+				t.Fatalf("pass: final wire lost the sealed part: %s", wire)
+			}
+
+			// Replacement (test-mutator rewrites the user text).
+			requireWASM(t, fixturesDir+"/test-mutator/plugin.wasm")
+			pp2 := newTestPipeline(t, fixturesDir, []string{"test-mutator"})
+			chat2 := frpRequest(a.arm, a.inner)
+			out2, err := pp2.RunBeforeRequest(context.Background(), 12, chat2, nil)
+			if err != nil {
+				t.Fatalf("replacement: %v", err)
+			}
+			if got := string(out2.Messages[0].Blocks[0].ToolResult.Content[1].Unknown.Payload.Bytes()); got != want {
+				t.Fatalf("replacement changed the wrapper payload:\n got %s\nwant %s", got, want)
+			}
+			wire2, err := geminiAdapter.Marshal(out2)
+			if err != nil {
+				t.Fatalf("replacement: marshal: %v", err)
+			}
+			if !strings.Contains(string(wire2), a.arm) || !strings.Contains(string(wire2), `"displayName"`) {
+				t.Fatalf("replacement: final wire lost the sealed part: %s", wire2)
+			}
+		})
+	}
 }

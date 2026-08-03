@@ -1117,7 +1117,12 @@ func buildContents(msgs []engine.Message, codeAssist bool) ([]geminiContent, err
 	var out []geminiContent
 	for _, msg := range msgs {
 		switch msg.Role {
-		case engine.RoleUser, engine.RoleSystem:
+		case engine.RoleSystem:
+			// System text is emitted EXCLUSIVELY through
+			// systemInstruction (buildSystemInstruction); a duplicate
+			// user content would double the system text on the wire.
+			continue
+		case engine.RoleUser:
 			content := geminiContent{Role: "user"}
 			for _, b := range msg.Blocks {
 				switch {
@@ -1187,13 +1192,25 @@ func buildContents(msgs []engine.Message, codeAssist bool) ([]geminiContent, err
 						PartMetadata: b.Thinking.PartMetadataJson.Bytes(),
 					})
 				case b.Unknown != nil:
+					// The SAME projection/reattachment as every other role:
+					// a signed media/future Part from the model must not
+					// lose thoughtSignature or partMetadata on the wire.
 					if err := rejectGeminiProjection(b.Unknown); err != nil {
 						return nil, err
 					}
 					if textContent == nil {
 						textContent = &geminiContent{Role: "model"}
 					}
-					textContent.Parts = append(textContent.Parts, json.RawMessage(b.Unknown.Payload.Bytes()))
+					payload := b.Unknown.Payload.Bytes()
+					if b.Unknown.Signature != "" || len(b.Unknown.PartMetadataJson.Bytes()) > 0 {
+						raw, err := geminiPartWithFacts(payload, b.Unknown.Signature, b.Unknown.PartMetadataJson.Bytes())
+						if err != nil {
+							return nil, err
+						}
+						textContent.Parts = append(textContent.Parts, raw)
+					} else {
+						textContent.Parts = append(textContent.Parts, json.RawMessage(payload))
+					}
 				case b.ToolUse != nil:
 					toolParts = append(toolParts, geminiPart{
 						ThoughtSignature: b.ToolUse.Signature,
@@ -1326,7 +1343,10 @@ func geminiToolResultWire(tr *engine.ToolResultBlock, codeAssist bool) (*geminiF
 // keys, escape-equivalent duplicates, lone surrogates, invalid UTF-8, and
 // trailing values); any other text gets the documented semantic wrap.
 func geminiResponseObject(text string, codeAssist bool) json.RawMessage {
-	if _, err := engine.ParseOptionalJSONObject([]byte(text)); err == nil {
+	// The REQUIRED strict-object constructor: empty or whitespace-only
+	// text is NOT an absent object (the optional constructor would accept
+	// it and emit an empty response) — it gets the semantic wrap.
+	if _, err := engine.ParseRequiredJSONObject([]byte(text)); err == nil {
 		return json.RawMessage(text) // verbatim, lexeme-exact strict object
 	}
 	// The documented semantic wrap for a rewritten (non-object) text.

@@ -366,6 +366,13 @@ func TestPartMetadataCarrierTable(t *testing.T) {
 			},
 			false,
 		},
+		{
+			"assistant/model unknown", `{"model":"m","contents":[{"role":"model","parts":[{"inlineData":{"mimeType":"image/png","data":"iVBOR"},"thoughtSignature":"MODEL_SIG","partMetadata":{"k":"v"}}]}]}`,
+			func(c *engine.ChatRequest) *engine.OptionalJSONObject {
+				return &c.Messages[0].Blocks[0].Unknown.PartMetadataJson
+			},
+			false,
+		},
 	}
 	for _, row := range rows {
 		t.Run(row.name, func(t *testing.T) {
@@ -419,6 +426,111 @@ func TestPartMetadataCarrierTable(t *testing.T) {
 				}
 			} else if string(carrier3.Bytes()) != string(carrier.Bytes()) {
 				t.Fatalf("metadata changed through the wire: %q -> %q", carrier.Bytes(), carrier3.Bytes())
+			}
+			// The ASSISTANT/MODEL unknown row additionally pins the exact
+			// final-wire signature.
+			if row.name == "assistant/model unknown" {
+				if reparsed.Messages[0].Blocks[0].Unknown.Signature != "MODEL_SIG" {
+					t.Fatalf("model unknown signature lost on the wire: %+v", reparsed.Messages[0].Blocks[0].Unknown)
+				}
+			}
+		})
+	}
+}
+
+// TestSystemInstructionSingleEmission — system text is emitted EXACTLY
+// ONCE: only through systemInstruction, never duplicated into contents.
+// Explicit-empty system text survives.
+func TestSystemInstructionSingleEmission(t *testing.T) {
+	body := `{"model":"m","systemInstruction":{"parts":[{"text":"sys","partMetadata":{"k":"v"}},{"text":""}]},"contents":[{"role":"user","parts":[{"text":"hi"}]}]}`
+	chat, err := (&Adapter{}).Unmarshal([]byte(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := (&Adapter{}).Marshal(chat)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var top struct {
+		System struct {
+			Parts []map[string]any `json:"parts"`
+		} `json:"systemInstruction"`
+		Contents []struct {
+			Role  string           `json:"role"`
+			Parts []map[string]any `json:"parts"`
+		} `json:"contents"`
+	}
+	if err := json.Unmarshal(out, &top); err != nil {
+		t.Fatal(err)
+	}
+	if len(top.System.Parts) != 2 {
+		t.Fatalf("system parts = %d, want exactly 2 (non-empty + explicit empty): %s", len(top.System.Parts), out)
+	}
+	if top.System.Parts[0]["text"] != "sys" || top.System.Parts[0]["partMetadata"] == nil {
+		t.Fatalf("system text/metadata lost: %v", top.System.Parts[0])
+	}
+	if txt, ok := top.System.Parts[1]["text"].(string); !ok || txt != "" {
+		t.Fatalf("explicit empty system text lost: %v", top.System.Parts[1])
+	}
+	if len(top.Contents) != 1 || top.Contents[0].Role != "user" {
+		t.Fatalf("contents must contain only the non-system messages: %+v", top.Contents)
+	}
+	if len(top.Contents[0].Parts) != 1 {
+		t.Fatalf("system text duplicated into contents: %+v", top.Contents)
+	}
+}
+
+// TestEmptyToolResultTextWraps — EMPTY tool output is a normal user case:
+// it must marshal through the REAL adapter as the semantic wrap, not fail
+// as a misclassified absent object. Bare Gemini and Code Assist rows.
+func TestEmptyToolResultTextWraps(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		codeAssist bool
+		wantKey    string
+	}{
+		{"bare", false, "content"},
+		{"code assist", true, "output"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			chat := &engine.ChatRequest{
+				Model: "m",
+				Messages: []engine.Message{{Role: engine.RoleUser, Blocks: []engine.Block{{
+					ToolResult: &engine.ToolResultBlock{
+						ToolCallID: "c1", ToolName: "read",
+						Content: []engine.ToolResultContentBlock{{Text: ""}},
+					},
+				}}}},
+			}
+			if tc.codeAssist {
+				ext, _ := engine.ParseOptionalJSONObject([]byte(`{"_codeassist":true}`))
+				chat.ProviderExtensions = ext
+			}
+			out, err := (&Adapter{}).Marshal(chat)
+			if err != nil {
+				t.Fatalf("empty tool output must marshal: %v", err)
+			}
+			var top map[string]any
+			if err := json.Unmarshal(out, &top); err != nil {
+				t.Fatal(err)
+			}
+			var doc map[string]any
+			if tc.codeAssist {
+				req, ok := top["request"].(map[string]any)
+				if !ok {
+					t.Fatalf("no request envelope: %s", out)
+				}
+				doc = req
+			} else {
+				doc = top
+			}
+			contents := doc["contents"].([]any)
+			msg := contents[0].(map[string]any)
+			part := msg["parts"].([]any)[0].(map[string]any)
+			fr := part["functionResponse"].(map[string]any)
+			resp := fr["response"].(map[string]any)
+			if _, ok := resp[tc.wantKey]; !ok {
+				t.Fatalf("empty output must wrap as %q, got %v", tc.wantKey, resp)
 			}
 		})
 	}
@@ -558,5 +670,47 @@ func TestResponseObjectStrictDetection(t *testing.T) {
 				t.Fatal("non-strict text emitted verbatim")
 			}
 		})
+	}
+}
+
+// TestFunctionResponseNullSemantics — per the pinned provider JSON
+// contract, an explicit JSON null for an OPTIONAL functionResponse member
+// (id, willContinue, scheduling, parts) is ABSENT: pointer decoding must
+// not give null accidental semantics (a null scheduling is NOT an invalid
+// vocabulary value; a null willContinue is NOT an explicit false).
+func TestFunctionResponseNullSemantics(t *testing.T) {
+	body := `{"model":"m","contents":[{"role":"user","parts":[{"functionResponse":{"name":"r","response":{"output":"x"},"id":null,"willContinue":null,"scheduling":null,"parts":null}}]}]}`
+	chat, err := (&Adapter{}).Unmarshal([]byte(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tr := chat.Messages[0].Blocks[0].ToolResult
+	// null id == ABSENT id at the wire boundary: both take the documented
+	// bare-Gemini synthesis (never an error, never a distinct value).
+	noID := `{"model":"m","contents":[{"role":"user","parts":[{"functionResponse":{"name":"r","response":{"output":"x"}}}]}]}`
+	absentChat, err := (&Adapter{}).Unmarshal([]byte(noID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tr.ToolCallID != absentChat.Messages[0].Blocks[0].ToolResult.ToolCallID {
+		t.Fatalf("null id diverged from absent: %q vs %q", tr.ToolCallID, absentChat.Messages[0].Blocks[0].ToolResult.ToolCallID)
+	}
+	if tr.WillContinue != nil {
+		t.Fatalf("null willContinue gained a value: %v", *tr.WillContinue)
+	}
+	if tr.Scheduling != nil {
+		t.Fatalf("null scheduling gained a value: %q", *tr.Scheduling)
+	}
+	if len(tr.Content) != 1 {
+		t.Fatalf("null parts materialized: %d content elements", len(tr.Content))
+	}
+	// And the marshal round-trips: the nulls are gone (absent), the
+	// response survives.
+	out, err := (&Adapter{}).Marshal(chat)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(out), "null") {
+		t.Fatalf("marshal emitted null members: %s", out)
 	}
 }
