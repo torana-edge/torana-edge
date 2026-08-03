@@ -709,6 +709,14 @@ func marshalNestedContent(content []engine.ToolResultContentBlock) (any, error) 
 			if err != nil {
 				return nil, fmt.Errorf("nested unknown payload: %w", err)
 			}
+			for _, canon := range []string{"type", "cache_control"} {
+				if _, dup := payload[canon]; dup {
+					return nil, fmt.Errorf("anthropic: nested unknown payload duplicates canonical member %q (projection invariant)", canon)
+				}
+			}
+			if c.Unknown.Kind == anthropicText || c.Unknown.Kind == anthropicToolResult {
+				return nil, fmt.Errorf("anthropic: nested unknown block kind %q names a modeled arm (projection invariant)", c.Unknown.Kind)
+			}
 			block := make(map[string]any, len(payload)+1)
 			block["type"] = c.Unknown.Kind
 			for k, v := range payload {
@@ -740,6 +748,21 @@ func marshalUnknownBlock(u *engine.UnknownBlock) (contentBlock, error) {
 	payload, _, err := u.Payload.DecodeObject()
 	if err != nil {
 		return contentBlock{}, fmt.Errorf("unknown payload: %w", err)
+	}
+	// The projection invariant is executable here: the payload must never
+	// duplicate the canonical discriminant or the cache member — a
+	// plugin-provided payload that does would silently override the kind or
+	// smuggle a cache fact the verifier never saw. A kind that names a
+	// MODELED arm would fabricate a block the verifier never saw. Reject
+	// before marshal.
+	for _, canon := range []string{"type", "cache_control"} {
+		if _, dup := payload[canon]; dup {
+			return contentBlock{}, fmt.Errorf("anthropic: unknown payload duplicates canonical member %q (projection invariant)", canon)
+		}
+	}
+	switch u.Kind {
+	case anthropicText, anthropicThinking, anthropicRedacted, anthropicToolUse, anthropicToolResult:
+		return contentBlock{}, fmt.Errorf("anthropic: unknown block kind %q names a modeled arm (projection invariant)", u.Kind)
 	}
 	block := make(map[string]any, len(payload)+1)
 	block["type"] = u.Kind

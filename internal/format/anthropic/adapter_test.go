@@ -804,3 +804,38 @@ func TestSystemArrayTextBlockParam(t *testing.T) {
 		})
 	}
 }
+
+// TestUnknownProjectionInvariant: the payload of an Unknown block must never
+// duplicate the canonical discriminant or the cache member, and the kind must
+// not name a modeled arm — both are rejected before marshal (the executable
+// projection obligation).
+func TestUnknownProjectionInvariant(t *testing.T) {
+	adapter := &Adapter{}
+	chat := &engine.ChatRequest{
+		Model:     "claude-x",
+		MaxTokens: intPtr(64),
+		Messages: []engine.Message{{
+			Role: engine.RoleUser,
+			Blocks: []engine.Block{
+				{Unknown: &engine.UnknownBlock{Kind: "image", Payload: mustReqArgs(t, `{"source":{"data":"abc"}}`)}},
+			},
+		}},
+	}
+	if _, err := adapter.Marshal(chat); err != nil {
+		t.Fatalf("a clean unknown payload must marshal: %v", err)
+	}
+
+	chat.Messages[0].Blocks[0].Unknown.Payload = mustReqArgs(t, `{"type":"image","source":{"data":"abc"}}`)
+	if _, err := adapter.Marshal(chat); err == nil {
+		t.Fatal("a payload duplicating the discriminant must be rejected")
+	}
+	chat.Messages[0].Blocks[0].Unknown.Payload = mustReqArgs(t, `{"source":{"data":"abc"},"cache_control":{"type":"ephemeral"}}`)
+	if _, err := adapter.Marshal(chat); err == nil {
+		t.Fatal("a payload smuggling the cache member must be rejected")
+	}
+	chat.Messages[0].Blocks[0].Unknown.Payload = mustReqArgs(t, `{"source":{"data":"abc"}}`)
+	chat.Messages[0].Blocks[0].Unknown.Kind = "text"
+	if _, err := adapter.Marshal(chat); err == nil {
+		t.Fatal("an unknown kind naming a modeled arm must be rejected")
+	}
+}

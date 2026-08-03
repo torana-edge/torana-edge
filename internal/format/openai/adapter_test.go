@@ -742,3 +742,39 @@ func TestSerializeProviderBlockErrorResponses(t *testing.T) {
 		t.Errorf("error = %q, want %q", err.Error(), want)
 	}
 }
+
+// TestUnknownProjectionInvariant: openai unknown content parts must not
+// duplicate the canonical "type" discriminant, and the kind must not name a
+// modeled arm — rejected before marshal.
+func TestUnknownProjectionInvariant(t *testing.T) {
+	adapter := &Adapter{}
+	chat := &engine.ChatRequest{
+		Model: "gpt-x",
+		Messages: []engine.Message{{
+			Role: engine.RoleUser,
+			Blocks: []engine.Block{
+				{Unknown: &engine.UnknownBlock{Kind: "custom_part", Payload: mustReqOAI(`{"x":1}`)}},
+			},
+		}},
+	}
+	if _, err := adapter.Marshal(chat); err != nil {
+		t.Fatalf("a clean unknown payload must marshal: %v", err)
+	}
+	chat.Messages[0].Blocks[0].Unknown.Payload = mustReqOAI(`{"type":"custom_part","x":1}`)
+	if _, err := adapter.Marshal(chat); err == nil {
+		t.Fatal("a payload duplicating the discriminant must be rejected")
+	}
+	chat.Messages[0].Blocks[0].Unknown.Payload = mustReqOAI(`{"x":1}`)
+	chat.Messages[0].Blocks[0].Unknown.Kind = "text"
+	if _, err := adapter.Marshal(chat); err == nil {
+		t.Fatal("an unknown kind naming a modeled arm must be rejected")
+	}
+}
+
+func mustReqOAI(raw string) engine.RequiredJSONObject {
+	r, err := engine.ParseRequiredJSONObject([]byte(raw))
+	if err != nil {
+		panic(err)
+	}
+	return r
+}

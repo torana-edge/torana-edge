@@ -602,6 +602,9 @@ func marshalNestedB(content []engine.ToolResultContentBlock) ([]any, error) {
 	for _, c := range content {
 		switch {
 		case c.Unknown != nil:
+			if c.Unknown.Kind == "text" {
+				return nil, fmt.Errorf("bedrock: nested unknown block kind %q names a modeled arm (projection invariant)", c.Unknown.Kind)
+			}
 			payload, _, err := c.Unknown.Payload.DecodeObject()
 			if err != nil {
 				return nil, fmt.Errorf("nested unknown payload: %w", err)
@@ -623,6 +626,13 @@ func marshalNestedB(content []engine.ToolResultContentBlock) ([]any, error) {
 // reattachDiscriminantB re-attaches the unknown block's kind as the
 // single-member discriminant ({"image": {...}}).
 func reattachDiscriminantB(u *engine.UnknownBlock) ([]byte, error) {
+	// The projection invariant: the kind IS the discriminant — a kind that
+	// names a modeled arm would fabricate a wire block the verifier never
+	// saw, so it is rejected before marshal.
+	switch u.Kind {
+	case "text", "toolUse", "toolResult":
+		return nil, fmt.Errorf("bedrock: unknown block kind %q names a modeled arm (projection invariant)", u.Kind)
+	}
 	payload, _, err := u.Payload.DecodeObject()
 	if err != nil {
 		return nil, fmt.Errorf("unknown payload: %w", err)

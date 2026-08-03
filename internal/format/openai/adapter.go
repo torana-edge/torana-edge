@@ -230,6 +230,26 @@ func marshalResponses(chat *engine.ChatRequest) ([]byte, error) {
 	return b, nil
 }
 
+// rejectOpenAIProjection enforces the projection invariant before marshal:
+// an unknown block's payload must not duplicate the canonical "type"
+// discriminant (which would silently override the kind), and the kind must
+// not name a modeled arm (which would fabricate a wire block the verifier
+// never saw).
+func rejectOpenAIProjection(u *engine.UnknownBlock) error {
+	payload, _, err := u.Payload.DecodeObject()
+	if err != nil {
+		return fmt.Errorf("unknown payload: %w", err)
+	}
+	if _, dup := payload["type"]; dup {
+		return fmt.Errorf("openai: unknown payload duplicates canonical member %q (projection invariant)", "type")
+	}
+	switch u.Kind {
+	case "text", "tool_calls", "tool_call":
+		return fmt.Errorf("openai: unknown block kind %q names a modeled arm (projection invariant)", u.Kind)
+	}
+	return nil
+}
+
 // responsesItemsWithLayout splices the projected items into the captured
 // input layout: representable layout slots (message / function_call /
 // function_call_output) take the projected items in order; opaque slots are
@@ -319,6 +339,9 @@ func responsesItemsFromMessages(messages []engine.Message) ([]any, error) {
 				case b.Text != nil:
 					items = append(items, messageItem(string(m.Role), b.Text.Text))
 				case b.Unknown != nil:
+					if err := rejectOpenAIProjection(b.Unknown); err != nil {
+						return nil, err
+					}
 					payload, _, err := b.Unknown.Payload.DecodeObject()
 					if err != nil {
 						return nil, fmt.Errorf("unknown payload: %w", err)
@@ -343,6 +366,9 @@ func responsesItemsFromMessages(messages []engine.Message) ([]any, error) {
 				case b.Text != nil:
 					items = append(items, messageItem(string(m.Role), b.Text.Text))
 				case b.Unknown != nil:
+					if err := rejectOpenAIProjection(b.Unknown); err != nil {
+						return nil, err
+					}
 					payload, _, err := b.Unknown.Payload.DecodeObject()
 					if err != nil {
 						return nil, fmt.Errorf("unknown payload: %w", err)
@@ -895,6 +921,9 @@ func marshalChatMessage(m engine.Message) (marshalMsg, error) {
 		case b.CacheBreakpoint != nil:
 			return mm, fmt.Errorf("openai chat: cache breakpoint block %d is not representable", i)
 		case b.Unknown != nil:
+			if err := rejectOpenAIProjection(b.Unknown); err != nil {
+				return mm, err
+			}
 			payload, _, err := b.Unknown.Payload.DecodeObject()
 			if err != nil {
 				return mm, fmt.Errorf("unknown payload: %w", err)

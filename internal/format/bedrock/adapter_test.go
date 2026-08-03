@@ -552,3 +552,34 @@ func TestSerializeMalformedBlocksError(t *testing.T) {
 		})
 	}
 }
+
+// TestUnknownProjectionInvariant: bedrock discriminants are member names, so
+// a kind naming a modeled arm would fabricate a wire block the verifier never
+// saw — rejected before marshal.
+func mustReqB(raw string) engine.RequiredJSONObject {
+	r, err := engine.ParseRequiredJSONObject([]byte(raw))
+	if err != nil {
+		panic(err)
+	}
+	return r
+}
+
+func TestUnknownProjectionInvariant(t *testing.T) {
+	adapter := &Adapter{}
+	chat := &engine.ChatRequest{
+		Model: "bedrock-x",
+		Messages: []engine.Message{{
+			Role: engine.RoleUser,
+			Blocks: []engine.Block{
+				{Unknown: &engine.UnknownBlock{Kind: "document", Payload: mustReqB(`{"format":"pdf"}`)}},
+			},
+		}},
+	}
+	if _, err := adapter.Marshal(chat); err != nil {
+		t.Fatalf("a clean unknown payload must marshal: %v", err)
+	}
+	chat.Messages[0].Blocks[0].Unknown.Kind = "text"
+	if _, err := adapter.Marshal(chat); err == nil {
+		t.Fatal("an unknown kind naming a modeled arm must be rejected")
+	}
+}
