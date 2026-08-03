@@ -897,11 +897,18 @@ func TestEgressRejectsContractViolations(t *testing.T) {
 		payload string
 		want    string
 	}{
-		// NOTE: nil repeated elements are dropped by proto.Marshal before
-		// they reach the extension wire, so the nil-graph totality
-		// guarantee is pinned at the converter level
-		// (TestRawJSONFromPBNilGraph). These rows are the states that DO
-		// survive the wire.
+		// NOTE: nil repeated elements survive protobuf transport as
+		// ZERO-LENGTH embedded messages and decode to non-nil empty values.
+		// A nil Message decodes to an empty Message{} whose empty role the
+		// shared contract refuses (the SDK role rule); nil ToolDef and nil
+		// ToolCall decode to empty nested messages refused by the required
+		// name rules. All three rows are therefore reachable through the
+		// extension wire. The direct in-memory converter rows
+		// (TestRawJSONFromPBNilGraph) pin the Go-side defensive guarantee
+		// for a DIFFERENT boundary.
+		{"nil message (zero-length wire)", reqFor(func(r *pb.ChatRequest) { r.Messages = append(r.Messages, nil) }), "replacement contract"},
+		{"nil tool def (zero-length wire)", reqFor(func(r *pb.ChatRequest) { r.Tools = append(r.Tools, nil) }), "replacement contract"},
+		{"nil tool call (zero-length wire)", reqFor(func(r *pb.ChatRequest) { r.Messages[1].ToolCalls = append(r.Messages[1].ToolCalls, nil) }), "replacement contract"},
 		{"empty arguments bytes", reqFor(func(r *pb.ChatRequest) { r.Messages[1].ToolCalls[0].ArgumentsJson = nil }), "replacement contract"},
 		{"empty parameters bytes", reqFor(func(r *pb.ChatRequest) { r.Tools[0].ParametersJson = nil }), "replacement contract"},
 		{"malformed arguments", reqFor(func(r *pb.ChatRequest) { r.Messages[1].ToolCalls[0].ArgumentsJson = []byte(`[1,2]`) }), "replacement contract"},
