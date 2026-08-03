@@ -607,3 +607,16 @@ func deleteMember(raw []byte, key string) ([]byte, error) {
 	}
 	return joined, nil
 }
+
+// ParseRequiredObjectOrEmpty is the host/provider NORMALIZATION constructor
+// for required object fields: nil or empty bytes mean the canonical empty
+// object (the zero wrapper), while any present bytes must be a strict JSON
+// object. This is the single documented normalization point for tool
+// arguments and tool schemas on the accepted side (providers that omit the
+// member or send an empty arguments string normalize to `{}` here).
+func ParseRequiredObjectOrEmpty(raw []byte) (RequiredJSONObject, error) {
+	if len(raw) == 0 {
+		return RequiredJSONObject{}, nil
+	}
+	return ParseRequiredJSONObject(raw)
+}

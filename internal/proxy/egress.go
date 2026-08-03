@@ -250,7 +250,10 @@ func (s *Server) sendPluginRequest(ctx context.Context, pluginName, payloadJSON 
 	if err := proto.Unmarshal(raw, &pbReq); err != nil {
 		return wasm.ExtensionRefusal(pb.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "request_pb is not a ChatRequest: %v", err)
 	}
-	chat := pbconv.FromPBChatRequest(&pbReq)
+	chat, err := pbconv.FromPBChatRequest(&pbReq)
+	if err != nil {
+		return wasm.ExtensionRefusal(pb.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "request_pb is not well-formed: %v", err)
+	}
 	if chat == nil {
 		return wasm.ExtensionRefusal(pb.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "request_pb decoded to nothing")
 	}

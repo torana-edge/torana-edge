@@ -46,11 +46,10 @@ func ToPBChatRequest(c *engine.ChatRequest) *pb.ChatRequest {
 	}
 
 	for _, t := range c.Tools {
-		paramsJson, _ := json.Marshal(t.Parameters)
 		td := &pb.ToolDef{
 			Name:           t.Name,
 			Description:    t.Description,
-			ParametersJson: paramsJson,
+			ParametersJson: t.Parameters.Bytes(),
 			Strict:         t.Strict,
 		}
 		if len(t.CacheControl) > 0 {
@@ -62,9 +61,16 @@ func ToPBChatRequest(c *engine.ChatRequest) *pb.ChatRequest {
 	return out
 }
 
-func FromPBChatRequest(c *pb.ChatRequest) *engine.ChatRequest {
+// FromPBChatRequest converts a canonical PB request into the engine form.
+// It is ERROR-RETURNING: the required object fields (tool arguments and
+// tool schemas) are reconstructed through the validating wrappers, so a PB
+// carrying malformed JSON cannot silently become a nil/partial engine
+// value. Every call site's input either came from ToPBChatRequest (validated
+// bytes) or from a replacement that passed SDK ValidateReplacement, so the
+// error path is the defensive backstop, not the normal flow.
+func FromPBChatRequest(c *pb.ChatRequest) (*engine.ChatRequest, error) {
 	if c == nil {
-		return nil
+		return nil, nil
 	}
 	out := &engine.ChatRequest{
 		Model:         c.Model,
@@ -96,13 +102,17 @@ func FromPBChatRequest(c *pb.ChatRequest) *engine.ChatRequest {
 	}
 
 	for _, m := range c.Messages {
-		out.Messages = append(out.Messages, fromPBMessage(m))
+		msg, err := fromPBMessage(m)
+		if err != nil {
+			return nil, err
+		}
+		out.Messages = append(out.Messages, msg)
 	}
 
 	for _, t := range c.Tools {
-		var params map[string]any
-		if len(t.ParametersJson) > 0 {
-			json.Unmarshal(t.ParametersJson, &params)
+		params, err := engine.ParseRequiredObjectOrEmpty(t.ParametersJson)
+		if err != nil {
+			return nil, fmt.Errorf("pb tool %q parameters_json: %w", t.Name, err)
 		}
 		td := engine.ToolDef{
 			Name:        t.Name,
@@ -116,7 +126,7 @@ func FromPBChatRequest(c *pb.ChatRequest) *engine.ChatRequest {
 		out.Tools = append(out.Tools, td)
 	}
 
-	return out
+	return out, nil
 }
 
 func ToPBStreamEvent(e *engine.StreamEvent) *pb.StreamEvent {
@@ -452,20 +462,19 @@ func toPBMessage(m engine.Message) *pb.Message {
 		msg.CacheControlJson, _ = json.Marshal(m.CacheControl)
 	}
 	for _, tc := range m.ToolCalls {
-		argsJson, _ := json.Marshal(tc.Arguments)
 		msg.ToolCalls = append(msg.ToolCalls, &pb.ToolCall{
 			Id:            tc.ID,
 			Name:          tc.Name,
-			ArgumentsJson: argsJson,
+			ArgumentsJson: tc.Arguments.Bytes(),
 			Signature:     tc.Signature,
 		})
 	}
 	return msg
 }
 
-func fromPBMessage(m *pb.Message) engine.Message {
+func fromPBMessage(m *pb.Message) (engine.Message, error) {
 	if m == nil {
-		return engine.Message{}
+		return engine.Message{}, nil
 	}
 	msg := engine.Message{
 		Role:              engine.Role(m.Role),
@@ -485,9 +494,9 @@ func fromPBMessage(m *pb.Message) engine.Message {
 		json.Unmarshal(m.CacheControlJson, &msg.CacheControl)
 	}
 	for _, tc := range m.ToolCalls {
-		var args map[string]any
-		if len(tc.ArgumentsJson) > 0 {
-			json.Unmarshal(tc.ArgumentsJson, &args)
+		args, err := engine.ParseRequiredObjectOrEmpty(tc.ArgumentsJson)
+		if err != nil {
+			return engine.Message{}, fmt.Errorf("pb message tool call %q arguments_json: %w", tc.Name, err)
 		}
 		msg.ToolCalls = append(msg.ToolCalls, engine.ToolCall{
 			ID:        tc.Id,
@@ -496,7 +505,7 @@ func fromPBMessage(m *pb.Message) engine.Message {
 			Signature: tc.Signature,
 		})
 	}
-	return msg
+	return msg, nil
 }
 
 func ToPBChatResponse(r *engine.ChatResponse) *pb.ChatResponse {

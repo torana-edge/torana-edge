@@ -90,16 +90,8 @@ func registerEnvMap(t *testing.T, pp *PluginPipeline, reqID uint64, toolName str
 	t.Helper()
 	chat := &engine.ChatRequest{
 		Tools: []engine.ToolDef{{
-			Name: toolName,
-			Parameters: map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"env": map[string]any{
-						"type":                 "object",
-						"additionalProperties": map[string]any{"type": "string"},
-					},
-				},
-			},
+			Name:       toolName,
+			Parameters: mustReq(`{"type":"object","properties":{"env":{"type":"object","additionalProperties":{"type":"string"}}}}`),
 		}},
 	}
 	if _, err := pp.RunBeforeRequest(context.Background(), reqID, chat, nil); err != nil {
@@ -230,17 +222,8 @@ func TestRegistryPathReversal(t *testing.T) {
 	// KV-array mutation in the registry under this request ID.
 	chat := &engine.ChatRequest{
 		Tools: []engine.ToolDef{{
-			Name: "write",
-			Parameters: map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"env": map[string]any{
-						"type":                 "object",
-						"additionalProperties": map[string]any{"type": "string"},
-					},
-					"pairs": map[string]any{"type": "array"},
-				},
-			},
+			Name:       "write",
+			Parameters: mustReq(`{"type":"object","properties":{"env":{"type":"object","additionalProperties":{"type":"string"}},"pairs":{"type":"array"}}}`),
 		}},
 	}
 	if _, err := pp.RunBeforeRequest(ctx, reqID, chat, nil); err != nil {
@@ -371,13 +354,11 @@ func TestIntentRehydratesHistory(t *testing.T) {
 	// Turn 2 request: the harness replays the (stripped) tool call in history.
 	// The intent plugin must re-hydrate "i" from the cache.
 	chat := &engine.ChatRequest{
-		Tools: []engine.ToolDef{{Name: "read", Parameters: map[string]any{
-			"type": "object", "properties": map[string]any{"path": map[string]any{"type": "string"}},
-		}}},
+		Tools: []engine.ToolDef{{Name: "read", Parameters: mustReq(`{"type":"object","properties":{"path":{"type":"string"}}}`)}},
 		Messages: []engine.Message{
 			{Role: engine.RoleUser, Content: "trace the retry logic"},
 			{Role: engine.RoleAssistant, ToolCalls: []engine.ToolCall{
-				{ID: "call_hist", Name: "read", Arguments: map[string]any{"path": "failover.go"}},
+				{ID: "call_hist", Name: "read", Arguments: mustReq(`{"path":"x"}`)},
 			}},
 			{Role: engine.RoleTool, ToolCallID: "call_hist", Content: "package proxy ..."},
 		},
@@ -386,19 +367,19 @@ func TestIntentRehydratesHistory(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RunBeforeRequest: %v", err)
 	}
-	var histArgs map[string]any
+	var histArgs map[string]json.RawMessage
 	for _, m := range out2.Messages {
 		if m.Role == engine.RoleAssistant && len(m.ToolCalls) == 1 && m.ToolCalls[0].ID == "call_hist" {
-			histArgs = m.ToolCalls[0].Arguments
+			histArgs, _, _ = m.ToolCalls[0].Arguments.DecodeObject()
 		}
 	}
 	if histArgs == nil {
 		t.Fatalf("history tool call missing after rehydration: %v", out2.Messages)
 	}
-	if got, _ := histArgs["i"].(string); got != "where is the retry budget configured" {
+	if got := string(histArgs["i"]); got != `"where is the retry budget configured"` {
 		t.Fatalf(`"i" not re-hydrated onto history tool call: got %q (args %v)`, got, histArgs)
 	}
-	if histArgs["path"] != "failover.go" {
+	if string(histArgs["path"]) != `"failover.go"` {
 		t.Fatalf("rehydration clobbered original args: %v", histArgs)
 	}
 }
@@ -418,13 +399,11 @@ func TestIntentFillsUncachedHistory(t *testing.T) {
 
 	mkChat := func(userMsg string) *engine.ChatRequest {
 		return &engine.ChatRequest{
-			Tools: []engine.ToolDef{{Name: "read", Parameters: map[string]any{
-				"type": "object", "properties": map[string]any{"path": map[string]any{"type": "string"}},
-			}}},
+			Tools: []engine.ToolDef{{Name: "read", Parameters: mustReq(`{"type":"object","properties":{"path":{"type":"string"}}}`)}},
 			Messages: []engine.Message{
 				{Role: engine.RoleUser, Content: userMsg},
 				{Role: engine.RoleAssistant, ToolCalls: []engine.ToolCall{
-					{ID: "call_never_seen", Name: "read", Arguments: map[string]any{"path": "x.go"}},
+					{ID: "call_never_seen", Name: "read", Arguments: mustReq(`{"path":"x"}`)},
 				}},
 				{Role: engine.RoleTool, ToolCallID: "call_never_seen", Content: "..."},
 			},
@@ -434,7 +413,8 @@ func TestIntentFillsUncachedHistory(t *testing.T) {
 		t.Helper()
 		for _, m := range out.Messages {
 			if m.Role == engine.RoleAssistant && len(m.ToolCalls) == 1 {
-				i, _ := m.ToolCalls[0].Arguments["i"].(string)
+				vals, _, _ := m.ToolCalls[0].Arguments.DecodeObject()
+				i := string(vals["i"])
 				return i
 			}
 		}
@@ -472,13 +452,11 @@ func TestIntentFillOff(t *testing.T) {
 		map[string]json.RawMessage{"intent": json.RawMessage(`{"fill":"off"}`)})
 
 	chat := &engine.ChatRequest{
-		Tools: []engine.ToolDef{{Name: "read", Parameters: map[string]any{
-			"type": "object", "properties": map[string]any{"path": map[string]any{"type": "string"}},
-		}}},
+		Tools: []engine.ToolDef{{Name: "read", Parameters: mustReq(`{"type":"object","properties":{"path":{"type":"string"}}}`)}},
 		Messages: []engine.Message{
 			{Role: engine.RoleUser, Content: "hi"},
 			{Role: engine.RoleAssistant, ToolCalls: []engine.ToolCall{
-				{ID: "call_never_seen", Name: "read", Arguments: map[string]any{"path": "x.go"}},
+				{ID: "call_never_seen", Name: "read", Arguments: mustReq(`{"path":"x"}`)},
 			}},
 			{Role: engine.RoleTool, ToolCallID: "call_never_seen", Content: "..."},
 		},
@@ -489,7 +467,8 @@ func TestIntentFillOff(t *testing.T) {
 	}
 	for _, m := range out.Messages {
 		if m.Role == engine.RoleAssistant && len(m.ToolCalls) == 1 {
-			if _, hasI := m.ToolCalls[0].Arguments["i"]; hasI {
+			vals, _, _ := m.ToolCalls[0].Arguments.DecodeObject()
+			if _, hasI := vals["i"]; hasI {
 				t.Fatalf("fill=off: uncached history tool call should stay untouched: %v", m.ToolCalls[0].Arguments)
 			}
 		}
@@ -516,13 +495,11 @@ func TestIntentBridgesToRequestSideID(t *testing.T) {
 
 	// Turn 2 request: the harness replays the same call under ITS OWN ID.
 	chat := &engine.ChatRequest{
-		Tools: []engine.ToolDef{{Name: "read", Parameters: map[string]any{
-			"type": "object", "properties": map[string]any{"path": map[string]any{"type": "string"}},
-		}}},
+		Tools: []engine.ToolDef{{Name: "read", Parameters: mustReq(`{"type":"object","properties":{"path":{"type":"string"}}}`)}},
 		Messages: []engine.Message{
 			{Role: engine.RoleUser, Content: "trace the retry logic"},
 			{Role: engine.RoleAssistant, ToolCalls: []engine.ToolCall{
-				{ID: "call_req_42", Name: "read", Arguments: map[string]any{"path": "failover.go"}},
+				{ID: "call_req_42", Name: "read", Arguments: mustReq(`{"path":"x"}`)},
 			}},
 			{Role: engine.RoleTool, ToolCallID: "call_req_42", Content: "package proxy ..."},
 		},
@@ -568,13 +545,11 @@ func TestIntentBridgeFeedsKeywordCompactor(t *testing.T) {
 	big := strings.Join(lines, "\n")
 
 	chat := &engine.ChatRequest{
-		Tools: []engine.ToolDef{{Name: "read", Parameters: map[string]any{
-			"type": "object", "properties": map[string]any{"path": map[string]any{"type": "string"}},
-		}}},
+		Tools: []engine.ToolDef{{Name: "read", Parameters: mustReq(`{"type":"object","properties":{"path":{"type":"string"}}}`)}},
 		Messages: []engine.Message{
 			{Role: engine.RoleUser, Content: "trace the retry logic"},
 			{Role: engine.RoleAssistant, ToolCalls: []engine.ToolCall{
-				{ID: "call_req_77", Name: "read", Arguments: map[string]any{"path": "failover.go"}},
+				{ID: "call_req_77", Name: "read", Arguments: mustReq(`{"path":"x"}`)},
 			}},
 			{Role: engine.RoleTool, ToolCallID: "call_req_77", Content: big},
 			{Role: engine.RoleAssistant, Content: "I have read the file."},
@@ -871,12 +846,10 @@ func TestIntentInjectsNoSyntheticMessages(t *testing.T) {
 		Messages: []engine.Message{
 			{Role: engine.RoleSystem, Content: "sys"},
 			{Role: engine.RoleUser, Content: "do the thing"},
-			{Role: engine.RoleAssistant, ToolCalls: []engine.ToolCall{{ID: "call_real_1", Name: "read", Arguments: map[string]any{"path": "x"}}}},
+			{Role: engine.RoleAssistant, ToolCalls: []engine.ToolCall{{ID: "call_real_1", Name: "read", Arguments: mustReq(`{"path":"x"}`)}}},
 			{Role: engine.RoleTool, ToolCallID: "call_real_1", Content: "result"},
 		},
-		Tools: []engine.ToolDef{{Name: "read", Parameters: map[string]any{
-			"type": "object", "properties": map[string]any{"path": map[string]any{"type": "string"}},
-		}}},
+		Tools: []engine.ToolDef{{Name: "read", Parameters: mustReq(`{"type":"object","properties":{"path":{"type":"string"}}}`)}},
 	}
 	out, err := pp.RunBeforeRequest(context.Background(), 77, chat, nil)
 	if err != nil {
@@ -947,20 +920,11 @@ func TestIntentNativeIEnrichesDescriptionOnly(t *testing.T) {
 	store := cache.NewLocalCache(time.Minute)
 	pp := newTestPipelineWith(t, bundles, []string{"intent"}, store, nil)
 
-	nativeParams := map[string]any{
-		"type": "object",
-		"properties": map[string]any{
-			"i":    map[string]any{"type": "string", "description": "omp's own intent semantics"},
-			"path": map[string]any{"type": "string"},
-		},
-		"required": []any{"path"},
-	}
+	nativeParams := mustReq(`{"type":"object","properties":{"i":{"type":"string","description":"omp's own intent semantics"},"path":{"type":"string"}},"required":["path"]}`)
 	chat := &engine.ChatRequest{
 		Tools: []engine.ToolDef{
 			{Name: "read", Parameters: nativeParams},
-			{Name: "plain", Parameters: map[string]any{
-				"type": "object", "properties": map[string]any{"q": map[string]any{"type": "string"}},
-			}},
+			{Name: "plain", Parameters: mustReq(`{"type":"object","properties":{"q":{"type":"string"}}}`)},
 		},
 		Messages: []engine.Message{{Role: engine.RoleUser, Content: "go"}},
 	}
@@ -971,29 +935,33 @@ func TestIntentNativeIEnrichesDescriptionOnly(t *testing.T) {
 	if out == nil {
 		out = chat
 	}
-	var native, plain map[string]any
+	var native, plain map[string]json.RawMessage
 	for _, tool := range out.Tools {
 		switch tool.Name {
 		case "read":
-			native = tool.Parameters
+			native, _, _ = tool.Parameters.DecodeObject()
 		case "plain":
-			plain = tool.Parameters
+			plain, _, _ = tool.Parameters.DecodeObject()
 		}
 	}
 	// Native tool: description upgraded, structure preserved.
-	props := native["properties"].(map[string]any)
-	desc, _ := props["i"].(map[string]any)["description"].(string)
+	var props map[string]json.RawMessage
+	json.Unmarshal(native["properties"], &props)
+	var iProp map[string]json.RawMessage
+	json.Unmarshal(props["i"], &iProp)
+	desc := string(iProp["description"])
 	if !strings.Contains(desc, "NOT the action taken") {
 		t.Fatalf("native i description not enriched: %q", desc)
 	}
-	if req := native["required"].([]any); len(req) != 1 || req[0] != "path" {
+	if req := string(native["required"]); req != `["path"]` {
 		t.Fatalf("native tool required list mutated: %v", req)
 	}
 	if _, ok := native["additionalProperties"]; ok {
 		t.Fatalf("additionalProperties bolted onto native-i tool")
 	}
 	// The plain tool still gets the injection.
-	pprops := plain["properties"].(map[string]any)
+	var pprops map[string]json.RawMessage
+	json.Unmarshal(plain["properties"], &pprops)
 	if _, ok := pprops["i"]; !ok {
 		t.Fatalf("plain tool did not get i injected: %v", plain)
 	}

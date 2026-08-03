@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	pbjsontext "github.com/torana-edge/torana-plugin-sdk/pb/v2/jsontext"
 	"io"
 	"log"
 	"strings"
@@ -440,15 +441,16 @@ func flushPart(w io.Writer, p *serializePart, wrapped bool) error {
 }
 
 func emitFunctionCall(w io.Writer, st *serializeState, wrapped bool) error {
-	var args map[string]any
-	if err := json.Unmarshal([]byte(st.ArgsJSON.String()), &args); err != nil {
-		log.Printf("[gemini] function call %q: accumulated args are not valid JSON (%v): %.200s", st.Name, err, st.ArgsJSON.String())
+	// The accumulated args are raw JSON lexemes; the function-call part
+	// carries them verbatim (the response path never re-encodes them).
+	if err := pbjsontext.Validate([]byte(st.ArgsJSON.String())); err != nil {
+		log.Printf("[gemini] function call %q: accumulated args are not valid JSON: %.200s", st.Name, st.ArgsJSON.String())
 		_ = writeFrame(w, chunkFinish("OTHER", nil), wrapped)
-		return fmt.Errorf("gemini: function call %q args invalid: %w", st.Name, err)
+		return fmt.Errorf("gemini: function call %q args invalid", st.Name)
 	}
 	part := geminiPart{
 		ThoughtSignature: st.Signature,
-		FunctionCall:     &geminiFuncCall{Name: st.Name, Args: args, ID: st.ID},
+		FunctionCall:     &geminiFuncCall{Name: st.Name, Args: []byte(st.ArgsJSON.String()), ID: st.ID},
 	}
 	return writeFrame(w, chunkPart(part), wrapped)
 }

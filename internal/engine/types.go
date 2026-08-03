@@ -79,9 +79,14 @@ type Message struct {
 
 // ToolCall represents an assistant's request to invoke a tool.
 type ToolCall struct {
-	ID        string
-	Name      string
-	Arguments map[string]any // parsed JSON object
+	ID   string
+	Name string
+	// Arguments is the REQUIRED authoritative JSON object of the call
+	// arguments (the reassessment-approved RequiredJSONObject wrapper): the
+	// zero value is the canonical `{}`, never absent, and the bytes are
+	// validated raw lexemes (1e999, large integers, key order, escaped
+	// Unicode all survive PB -> engine -> adapter untouched).
+	Arguments RequiredJSONObject
 	// Signature is an opaque provider-specific token attached to this call
 	// (e.g. Gemini/Code Assist thoughtSignature). It MUST be preserved across
 	// a round-trip so replayed history keeps the model's reasoning binding;
@@ -93,8 +98,11 @@ type ToolCall struct {
 type ToolDef struct {
 	Name        string
 	Description string
-	Parameters  map[string]any // JSON Schema object: {"type":"object","properties":{...},"required":[...]}
-	Strict      bool
+	// Parameters is the REQUIRED authoritative JSON Schema object (the
+	// RequiredJSONObject wrapper): zero = canonical `{}` (a valid
+	// unconstrained schema), never absent, validated raw lexemes.
+	Parameters RequiredJSONObject
+	Strict     bool
 	// CacheControl marks a cache breakpoint after this tool definition
 	// (Anthropic allows cache_control on tool entries). Opaque; nil when absent.
 	CacheControl map[string]any

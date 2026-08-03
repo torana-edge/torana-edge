@@ -60,9 +60,13 @@ func TestRoundTrip_ChatCompletions(t *testing.T) {
 	if chat.Messages[2].ToolCalls[0].Name != "get_weather" {
 		t.Errorf("tool call name: got %s", chat.Messages[2].ToolCalls[0].Name)
 	}
-	city, ok := chat.Messages[2].ToolCalls[0].Arguments["city"].(string)
-	if !ok || city != "SF" {
-		t.Errorf("tool call args: got %v", chat.Messages[2].ToolCalls[0].Arguments)
+	vals, _, err := chat.Messages[2].ToolCalls[0].Arguments.DecodeObject()
+	if err != nil {
+		t.Fatalf("tool call args decode: %v", err)
+	}
+	city, ok := vals["city"]
+	if !ok || string(city) != `"SF"` {
+		t.Errorf("tool call args: got %v", vals)
 	}
 
 	if chat.Messages[3].Role != engine.RoleTool {

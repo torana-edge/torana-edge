@@ -13,6 +13,15 @@ import (
 // TestCodeAssistRoundTrip parses a real Antigravity CLI Code Assist request and
 // verifies the wrapper, tool IDs, thoughtSignatures, and untouched fields
 // (toolConfig, thinkingConfig, sessionId) survive Unmarshal→Marshal.
+func mustReqArgs(t *testing.T, raw string) engine.RequiredJSONObject {
+	t.Helper()
+	r, err := engine.ParseRequiredJSONObject([]byte(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return r
+}
+
 func TestCodeAssistRoundTrip(t *testing.T) {
 	raw, err := os.ReadFile("testdata/codeassist-request.json")
 	if err != nil {
@@ -297,8 +306,8 @@ func TestCodeAssistParallelCallsShareOneBlock(t *testing.T) {
 		Messages: []engine.Message{
 			{Role: engine.RoleUser, Content: "do two things"},
 			{Role: engine.RoleAssistant, ToolCalls: []engine.ToolCall{
-				{ID: "a1", Name: "list_dir", Arguments: map[string]any{"p": "/x"}, Signature: "SIG_FIRST"},
-				{ID: "a2", Name: "read_file", Arguments: map[string]any{"f": "y"}}, // no signature
+				{ID: "a1", Name: "list_dir", Arguments: mustReqArgs(t, `{"p": "/x"}`), Signature: "SIG_FIRST"},
+				{ID: "a2", Name: "read_file", Arguments: mustReqArgs(t, `{"f": "y"}`)}, // no signature
 			}},
 		},
 	}

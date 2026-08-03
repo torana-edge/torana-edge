@@ -37,23 +37,28 @@ func cacheComplianceRequest() *engine.ChatRequest {
 			{Role: engine.RoleUser, Content: "find the bug in server.go"},
 			{Role: engine.RoleAssistant, ToolCalls: []engine.ToolCall{{
 				ID: "call_1", Name: "read",
-				Arguments: map[string]any{"path": "server.go"}, // no "i": forces heuristic fill
+				Arguments: mustReqCompliance(`{"path": "server.go"}`), // no "i": forces heuristic fill
 			}}},
 			{Role: engine.RoleTool, ToolCallID: "call_1", ToolName: "read", Content: bigResult},
 			{Role: engine.RoleUser, Content: "now fix it",
 				CacheControl: map[string]any{"type": "ephemeral"}},
 		},
 		Tools: []engine.ToolDef{
-			{Name: "read", Parameters: map[string]any{
-				"type":       "object",
-				"properties": map[string]any{"path": map[string]any{"type": "string"}},
-			}},
-			{Name: "write", Parameters: map[string]any{
-				"type":       "object",
-				"properties": map[string]any{"path": map[string]any{"type": "string"}, "content": map[string]any{"type": "string"}},
-			}, CacheControl: map[string]any{"type": "ephemeral"}},
+			{Name: "read", Parameters: mustReqCompliance(`{"type":"object","properties":{"path":{"type":"string"}}}`)},
+			{Name: "write", Parameters: mustReqCompliance(`{"type":"object","properties":{"path":{"type":"string"},"content":{"type":"string"}}}`),
+				CacheControl: map[string]any{"type": "ephemeral"}},
 		},
 	}
+}
+
+// mustReq panics on invalid raw: test fixtures are trusted, and a fixture
+// that no longer parses must fail loudly.
+func mustReqCompliance(raw string) engine.RequiredJSONObject {
+	r, err := engine.ParseRequiredJSONObject([]byte(raw))
+	if err != nil {
+		panic(err)
+	}
+	return r
 }
 
 // stableBytes renders the request for comparison. ToranaMeta is excluded: it

@@ -133,7 +133,9 @@ func CachePrefixKey(c *ChatRequest) string {
 		writeHashField(h, "tool")
 		writeHashField(h, t.Name)
 		writeHashField(h, t.Description)
-		writeHashField(h, canonicalJSON(t.Parameters))
+		// Raw authoritative bytes, framed: lexemes (1e999, key order)
+		// are part of the cache identity, never canonicalized away.
+		writeHashFieldBytes(h, t.Parameters.Bytes())
 		writeHashField(h, canonicalJSON(t.CacheControl))
 	}
 
@@ -166,7 +168,8 @@ func CachePrefixKey(c *ChatRequest) string {
 			writeHashField(h, "call")
 			writeHashField(h, tc.ID)
 			writeHashField(h, tc.Name)
-			writeHashField(h, canonicalJSON(tc.Arguments))
+			// Raw authoritative bytes, framed (see tools above).
+			writeHashFieldBytes(h, tc.Arguments.Bytes())
 			writeHashField(h, tc.Signature)
 		}
 	}
@@ -219,6 +222,16 @@ func canonicalJSON(v any) string {
 // forged by content. Without it, a system prompt whose tail happens to look like
 // the next field would hash identically to a different split of the same bytes,
 // and two distinct conversations would share a key.
+// writeHashFieldBytes frames raw authoritative JSON bytes into the cache
+// hash: length-tagged, so identical content in different fields cannot
+// collide and absent vs `{}` hash differently.
+func writeHashFieldBytes(h hash.Hash, b []byte) {
+	var lb [8]byte
+	binary.BigEndian.PutUint64(lb[:], uint64(len(b)))
+	h.Write(lb[:])
+	h.Write(b)
+}
+
 func writeHashField(h hash.Hash, s string) {
 	var n [8]byte
 	binary.BigEndian.PutUint64(n[:], uint64(len(s)))

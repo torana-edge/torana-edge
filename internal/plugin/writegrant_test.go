@@ -29,6 +29,14 @@ type fakeGrants map[string]bool
 
 func (f fakeGrants) HasGrant(perm string) bool { return f[perm] }
 
+func mustReqWG(raw string) engine.RequiredJSONObject {
+	r, err := engine.ParseRequiredJSONObject([]byte(raw))
+	if err != nil {
+		panic(err)
+	}
+	return r
+}
+
 func TestVerifyRequestMutationGrantedChangeAccepted(t *testing.T) {
 	cases := []struct {
 		name   string
@@ -851,7 +859,7 @@ func TestRunBeforeRequestFullyGrantedFastPath(t *testing.T) {
 		Messages: []engine.Message{{Role: engine.RoleUser, Content: "hello"}},
 		Tools: []engine.ToolDef{{
 			Name:       "read",
-			Parameters: map[string]any{"type": "object"},
+			Parameters: mustReqWG(`{"type":"object"}`),
 		}},
 	}
 	out, err := pp.RunBeforeRequest(context.Background(), 4, chat, nil)

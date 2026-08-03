@@ -53,8 +53,12 @@ func TestRoundTrip(t *testing.T) {
 	if tc.Name != "get_weather" {
 		t.Errorf("ToolCall name: expected get_weather, got %s", tc.Name)
 	}
-	if tc.Arguments["location"] != "Paris" {
-		t.Errorf("ToolCall args: location = %v", tc.Arguments["location"])
+	vals, _, err := tc.Arguments.DecodeObject()
+	if err != nil {
+		t.Fatalf("ToolCall args decode: %v", err)
+	}
+	if string(vals["location"]) != `"Paris"` {
+		t.Errorf("ToolCall args: location = %v", vals["location"])
 	}
 
 	if len(chat.Tools) != 1 {

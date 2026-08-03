@@ -38,13 +38,25 @@ func TestSignatureDeltaRoundTrip(t *testing.T) {
 	}
 }
 
+func mustReq(t *testing.T, raw string) engine.RequiredJSONObject {
+	t.Helper()
+	r, err := engine.ParseRequiredJSONObject([]byte(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return r
+}
+
 func TestToolCallSignatureRoundTrip(t *testing.T) {
 	chat := &engine.ChatRequest{Messages: []engine.Message{
 		{Role: engine.RoleAssistant, ToolCalls: []engine.ToolCall{
-			{ID: "a1", Name: "f", Arguments: map[string]any{"x": 1.0}, Signature: "REQ_SIG"},
+			{ID: "a1", Name: "f", Arguments: mustReq(t, `{"x": 1.0}`), Signature: "REQ_SIG"},
 		}},
 	}}
-	got := FromPBChatRequest(ToPBChatRequest(chat))
+	got, err := FromPBChatRequest(ToPBChatRequest(chat))
+	if err != nil {
+		t.Fatalf("round trip: %v", err)
+	}
 	if len(got.Messages) != 1 || len(got.Messages[0].ToolCalls) != 1 {
 		t.Fatal("tool call lost")
 	}
@@ -62,7 +74,10 @@ func TestContentSignatureRoundTrip(t *testing.T) {
 	chat := &engine.ChatRequest{Messages: []engine.Message{
 		{Role: engine.RoleAssistant, Content: "answer", ContentSignature: "CONTENT_SIG"},
 	}}
-	got := FromPBChatRequest(ToPBChatRequest(chat))
+	got, err := FromPBChatRequest(ToPBChatRequest(chat))
+	if err != nil {
+		t.Fatalf("round trip: %v", err)
+	}
 	if len(got.Messages) != 1 {
 		t.Fatal("message lost")
 	}
@@ -80,7 +95,10 @@ func TestTrailingSignatureRoundTrip(t *testing.T) {
 	chat := &engine.ChatRequest{Messages: []engine.Message{
 		{Role: engine.RoleAssistant, Content: "answer", TrailingSignature: "TRAIL_SIG"},
 	}}
-	got := FromPBChatRequest(ToPBChatRequest(chat))
+	got, err := FromPBChatRequest(ToPBChatRequest(chat))
+	if err != nil {
+		t.Fatalf("round trip: %v", err)
+	}
 	if len(got.Messages) != 1 {
 		t.Fatal("message lost")
 	}

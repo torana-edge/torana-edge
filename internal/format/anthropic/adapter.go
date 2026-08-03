@@ -134,16 +134,16 @@ func (am *anthropicMessage) UnmarshalJSON(data []byte) error {
 }
 
 type contentBlock struct {
-	Type      string         `json:"type"`
-	Text      string         `json:"text,omitempty"`
-	ID        string         `json:"id,omitempty"`
-	Name      string         `json:"name,omitempty"`
-	Input     map[string]any `json:"input,omitempty"`
-	ToolUseID string         `json:"tool_use_id,omitempty"`
-	Content   any            `json:"content,omitempty"` // string or array of blocks
-	Thinking  string         `json:"thinking,omitempty"`
-	Signature string         `json:"signature,omitempty"`
-	Data      string         `json:"data,omitempty"`
+	Type      string          `json:"type"`
+	Text      string          `json:"text,omitempty"`
+	ID        string          `json:"id,omitempty"`
+	Name      string          `json:"name,omitempty"`
+	Input     json.RawMessage `json:"input,omitempty"` // raw lexemes, verbatim
+	ToolUseID string          `json:"tool_use_id,omitempty"`
+	Content   any             `json:"content,omitempty"` // string or array of blocks
+	Thinking  string          `json:"thinking,omitempty"`
+	Signature string          `json:"signature,omitempty"`
+	Data      string          `json:"data,omitempty"`
 	// Cache breakpoint marker, e.g. {"type":"ephemeral"}. Preserved verbatim
 	// (opaque map) so TTL variants pass through. Dropping it disables the
 	// provider's prompt cache for the whole prefix.
@@ -152,10 +152,10 @@ type contentBlock struct {
 }
 
 type anthropicToolDef struct {
-	Name         string         `json:"name"`
-	Description  string         `json:"description,omitempty"`
-	InputSchema  map[string]any `json:"input_schema"`
-	CacheControl map[string]any `json:"cache_control,omitempty"`
+	Name         string          `json:"name"`
+	Description  string          `json:"description,omitempty"`
+	InputSchema  json.RawMessage `json:"input_schema"` // raw JSON Schema lexemes, verbatim
+	CacheControl map[string]any  `json:"cache_control,omitempty"`
 }
 
 // UnmarshalJSON handles the polymorphic tool_result content (string or array).
@@ -312,10 +312,14 @@ func (a *Adapter) Unmarshal(rawBody []byte) (*engine.ChatRequest, error) {
 				sawContent = true
 				contentParts = append(contentParts, block)
 			case "tool_use":
+				args, err := engine.ParseRequiredObjectOrEmpty(block.Input)
+				if err != nil {
+					return nil, fmt.Errorf("tool_use %q input: %w", block.Name, err)
+				}
 				toolCalls = append(toolCalls, engine.ToolCall{
 					ID:        block.ID,
 					Name:      block.Name,
-					Arguments: block.Input,
+					Arguments: args,
 				})
 			case "tool_result":
 				if !sawContent {
@@ -372,10 +376,14 @@ func (a *Adapter) Unmarshal(rawBody []byte) (*engine.ChatRequest, error) {
 
 	// Tools.
 	for _, t := range ar.Tools {
+		params, err := engine.ParseRequiredObjectOrEmpty(t.InputSchema)
+		if err != nil {
+			return nil, fmt.Errorf("tool %q input_schema: %w", t.Name, err)
+		}
 		chat.Tools = append(chat.Tools, engine.ToolDef{
 			Name:         t.Name,
 			Description:  t.Description,
-			Parameters:   t.InputSchema,
+			Parameters:   params,
 			CacheControl: t.CacheControl,
 		})
 	}
@@ -486,7 +494,7 @@ func (a *Adapter) Marshal(chat *engine.ChatRequest) ([]byte, error) {
 					Type:  "tool_use",
 					ID:    tc.ID,
 					Name:  tc.Name,
-					Input: tc.Arguments,
+					Input: tc.Arguments.Bytes(),
 				})
 			}
 		default:
@@ -527,7 +535,7 @@ func (a *Adapter) Marshal(chat *engine.ChatRequest) ([]byte, error) {
 		ar.Tools = append(ar.Tools, anthropicToolDef{
 			Name:         t.Name,
 			Description:  t.Description,
-			InputSchema:  t.Parameters,
+			InputSchema:  t.Parameters.Bytes(),
 			CacheControl: t.CacheControl,
 		})
 	}

@@ -35,6 +35,22 @@ import (
 // a system prompt, alternating user/assistant turns, and tool calls whose
 // results carry the bulk of the bytes. Tool results dominate real payloads,
 // which is why they dominate here.
+func mustBenchArgs(raw string) engine.RequiredJSONObject {
+	r, err := engine.ParseRequiredJSONObject([]byte(raw))
+	if err != nil {
+		panic(err)
+	}
+	return r
+}
+
+var mustBenchParams = func() engine.RequiredJSONObject {
+	r, err := engine.ParseRequiredJSONObject([]byte(`{"type":"object","properties":{},"required":[]}`))
+	if err != nil {
+		panic(err)
+	}
+	return r
+}()
+
 func benchConversation(messages int) *engine.ChatRequest {
 	temp := 0.0
 	maxTok := 4096
@@ -50,20 +66,12 @@ func benchConversation(messages int) *engine.ChatRequest {
 			{
 				Name:        "read_file",
 				Description: "Read a file from the workspace",
-				Parameters: map[string]any{
-					"type":       "object",
-					"properties": map[string]any{"path": map[string]any{"type": "string"}},
-					"required":   []any{"path"},
-				},
+				Parameters:  mustBenchParams,
 			},
 			{
 				Name:        "run_command",
 				Description: "Run a shell command",
-				Parameters: map[string]any{
-					"type":       "object",
-					"properties": map[string]any{"cmd": map[string]any{"type": "string"}},
-					"required":   []any{"cmd"},
-				},
+				Parameters:  mustBenchParams,
 			},
 		},
 	}
@@ -85,7 +93,7 @@ func benchConversation(messages int) *engine.ChatRequest {
 				ToolCalls: []engine.ToolCall{{
 					ID:        fmt.Sprintf("call_%d", i),
 					Name:      "read_file",
-					Arguments: map[string]any{"path": fmt.Sprintf("internal/parser/parse_%d.go", i)},
+					Arguments: mustBenchArgs(fmt.Sprintf(`{"path": "internal/parser/parse_%d.go"}`, i)),
 				}},
 			})
 		default:
@@ -138,7 +146,9 @@ func BenchmarkPbconvFromPB(b *testing.B) {
 		b.Run(fmt.Sprintf("msgs=%d", n), func(b *testing.B) {
 			b.ReportAllocs()
 			for i := 0; i < b.N; i++ {
-				_ = pbconv.FromPBChatRequest(pbReq)
+				if _, err := pbconv.FromPBChatRequest(pbReq); err != nil {
+					panic(err)
+				}
 			}
 		})
 	}

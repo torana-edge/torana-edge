@@ -80,9 +80,13 @@ func TestRoundTrip(t *testing.T) {
 	if chat.Messages[2].ToolCalls[0].ID != "toolu_1" {
 		t.Errorf("tool call id: got %s", chat.Messages[2].ToolCalls[0].ID)
 	}
-	city, ok := chat.Messages[2].ToolCalls[0].Arguments["city"].(string)
-	if !ok || city != "SF" {
-		t.Errorf("tool call args: got %v", chat.Messages[2].ToolCalls[0].Arguments)
+	vals, _, err := chat.Messages[2].ToolCalls[0].Arguments.DecodeObject()
+	if err != nil {
+		t.Fatalf("tool call args decode: %v", err)
+	}
+	city, ok := vals["city"]
+	if !ok || string(city) != `"SF"` {
+		t.Errorf("tool call args: got %v", vals)
 	}
 
 	if chat.Messages[3].Role != engine.RoleTool {
@@ -105,12 +109,13 @@ func TestRoundTrip(t *testing.T) {
 	if chat.Tools[0].Description != "Get weather" {
 		t.Errorf("tool description: got %s", chat.Tools[0].Description)
 	}
-	if chat.Tools[0].Parameters == nil {
-		t.Fatal("tool parameters are nil")
+	paramsVals, _, err := chat.Tools[0].Parameters.DecodeObject()
+	if err != nil {
+		t.Fatalf("tool parameters decode: %v", err)
 	}
-	paramsType, ok := chat.Tools[0].Parameters["type"].(string)
-	if !ok || paramsType != "object" {
-		t.Errorf("tool parameters type: got %v", chat.Tools[0].Parameters)
+	paramsType, ok := paramsVals["type"]
+	if !ok || string(paramsType) != `"object"` {
+		t.Errorf("tool parameters type: got %v", chat.Tools[0].Parameters.String())
 	}
 
 	// Marshal back

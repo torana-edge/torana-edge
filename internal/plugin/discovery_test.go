@@ -565,6 +565,7 @@ func TestDiscoverPluginsRejectsDuplicateIdentity(t *testing.T) {
 // pipeline → hook call) using a real compiled WASM plugin, rather than calling
 // CallRequest directly. This catches manifest/dispatch mismatches that the
 // existing direct-call tests miss.
+
 func TestPipelineRunBeforeRequest_FullDispatch(t *testing.T) {
 	requireWASM(t, fixturesDir+"/test-mutator/plugin.wasm")
 
@@ -587,11 +588,8 @@ func TestPipelineRunBeforeRequest_FullDispatch(t *testing.T) {
 	chat := &engine.ChatRequest{
 		Messages: []engine.Message{{Role: engine.RoleUser, Content: "hi"}},
 		Tools: []engine.ToolDef{{
-			Name: "read",
-			Parameters: map[string]any{
-				"type":       "object",
-				"properties": map[string]any{"path": map[string]any{"type": "string"}},
-			},
+			Name:       "read",
+			Parameters: mustReq(`{"type":"object","properties":{"path":{"type":"string"}}}`),
 		}},
 	}
 	result, err := pipeline.RunBeforeRequest(ctx, 1, chat, nil)
@@ -611,4 +609,14 @@ func TestPipelineRunBeforeRequest_FullDispatch(t *testing.T) {
 	if len(result.Messages) != 1 || !strings.HasSuffix(result.Messages[0].Content, "[seen by test-mutator]") {
 		t.Errorf("message did not survive the dispatch path: %+v", result.Messages)
 	}
+}
+
+// mustReq panics on invalid raw: test fixtures are trusted, and a fixture
+// that no longer parses must fail loudly.
+func mustReq(raw string) engine.RequiredJSONObject {
+	r, err := engine.ParseRequiredJSONObject([]byte(raw))
+	if err != nil {
+		panic(err)
+	}
+	return r
 }

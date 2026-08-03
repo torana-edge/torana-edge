@@ -11,6 +11,26 @@ import (
 	"github.com/torana-edge/torana-edge/internal/engine"
 )
 
+func mustReqArgs(t *testing.T, raw string) engine.RequiredJSONObject {
+	t.Helper()
+	r, err := engine.ParseRequiredJSONObject([]byte(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return r
+}
+
+// mustReqOrEmpty uses the normalization constructor: empty means the
+// canonical {}.
+func mustReqOrEmpty(t *testing.T, raw string) engine.RequiredJSONObject {
+	t.Helper()
+	r, err := engine.ParseRequiredObjectOrEmpty([]byte(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return r
+}
+
 func TestRoundTrip(t *testing.T) {
 	adapter := &Adapter{}
 
@@ -77,9 +97,13 @@ func TestRoundTrip(t *testing.T) {
 	if tc.Name != "get_weather" {
 		t.Errorf("tool call name: got %s, want get_weather", tc.Name)
 	}
-	city, ok := tc.Arguments["city"].(string)
-	if !ok || city != "SF" {
-		t.Errorf("tool call args: got %v", tc.Arguments)
+	vals, _, err := tc.Arguments.DecodeObject()
+	if err != nil {
+		t.Fatalf("tool call args decode: %v", err)
+	}
+	city, ok := vals["city"]
+	if !ok || string(city) != `"SF"` {
+		t.Errorf("tool call args: got %v", vals)
 	}
 
 	// Tool result message.
@@ -324,8 +348,8 @@ func TestParallelToolResultsCoalesce(t *testing.T) {
 		Messages: []engine.Message{
 			{Role: engine.RoleUser, Content: "read both files"},
 			{Role: engine.RoleAssistant, ToolCalls: []engine.ToolCall{
-				{ID: "toolu_a", Name: "read", Arguments: map[string]any{"path": "a.go"}},
-				{ID: "toolu_b", Name: "read", Arguments: map[string]any{"path": "b.go"}},
+				{ID: "toolu_a", Name: "read", Arguments: mustReqArgs(t, `{"path": "a.go"}`)},
+				{ID: "toolu_b", Name: "read", Arguments: mustReqArgs(t, `{"path": "b.go"}`)},
 			}},
 			{Role: engine.RoleTool, ToolCallID: "toolu_a", Content: "package alpha"},
 			{Role: engine.RoleTool, ToolCallID: "toolu_b", Content: "package beta"},
@@ -388,9 +412,9 @@ func TestParallelToolResultsCoalesce(t *testing.T) {
 func TestToolUseAlwaysHasInput(t *testing.T) {
 	adapter := &Adapter{}
 
-	cases := map[string]map[string]any{
-		"nil args":   nil,
-		"empty args": {},
+	cases := map[string]string{
+		"nil args":   "",
+		"empty args": "{}",
 	}
 	for name, args := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -400,7 +424,7 @@ func TestToolUseAlwaysHasInput(t *testing.T) {
 				Messages: []engine.Message{
 					{Role: engine.RoleUser, Content: "list files"},
 					{Role: engine.RoleAssistant, ToolCalls: []engine.ToolCall{
-						{ID: "toolu_1", Name: "list_files", Arguments: args},
+						{ID: "toolu_1", Name: "list_files", Arguments: mustReqOrEmpty(t, args)},
 					}},
 					{Role: engine.RoleTool, ToolCallID: "toolu_1", Content: "ok"},
 				},

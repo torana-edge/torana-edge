@@ -113,9 +113,9 @@ func partText(p geminiPart) string {
 }
 
 type geminiFuncCall struct {
-	Name string         `json:"name"`
-	Args map[string]any `json:"args"`
-	ID   string         `json:"id,omitempty"`
+	Name string          `json:"name"`
+	Args json.RawMessage `json:"args"` // raw lexemes, verbatim
+	ID   string          `json:"id,omitempty"`
 }
 
 type geminiFuncResp struct {
@@ -129,9 +129,9 @@ type geminiTool struct {
 }
 
 type geminiFuncDecl struct {
-	Name        string         `json:"name"`
-	Description string         `json:"description,omitempty"`
-	Parameters  map[string]any `json:"parameters,omitempty"`
+	Name        string          `json:"name"`
+	Description string          `json:"description,omitempty"`
+	Parameters  json.RawMessage `json:"parameters,omitempty"` // raw JSON Schema lexemes
 }
 
 // --- Unmarshal ---
@@ -233,10 +233,14 @@ func (a *Adapter) Unmarshal(rawBody []byte) (*engine.ChatRequest, error) {
 
 	for _, tool := range gReq.Tools {
 		for _, decl := range tool.FunctionDeclarations {
+			params, err := engine.ParseRequiredObjectOrEmpty(decl.Parameters)
+			if err != nil {
+				return nil, fmt.Errorf("tool %q parameters: %w", decl.Name, err)
+			}
 			chat.Tools = append(chat.Tools, engine.ToolDef{
 				Name:        decl.Name,
 				Description: decl.Description,
-				Parameters:  decl.Parameters,
+				Parameters:  params,
 			})
 		}
 	}
@@ -374,10 +378,14 @@ func appendModel(chat *engine.ChatRequest, content geminiContent, prevCallIdx ma
 				id = fmt.Sprintf("%s_%d", name, prevCallIdx[name])
 			}
 			callIDs[name] = id
+			args, err := engine.ParseRequiredObjectOrEmpty(p.FunctionCall.Args)
+			if err != nil {
+				return fmt.Errorf("tool call %q args: %w", name, err)
+			}
 			msg.ToolCalls = append(msg.ToolCalls, engine.ToolCall{
 				ID:        id,
 				Name:      name,
-				Arguments: p.FunctionCall.Args,
+				Arguments: args,
 				Signature: p.ThoughtSignature,
 			})
 		case p.Thought && p.Text != nil && *p.Text != "":
@@ -613,7 +621,7 @@ func buildContents(msgs []engine.Message, codeAssist bool) []geminiContent {
 				for _, tc := range msg.ToolCalls {
 					parts = append(parts, geminiPart{
 						ThoughtSignature: tc.Signature,
-						FunctionCall:     &geminiFuncCall{Name: tc.Name, Args: tc.Arguments, ID: tc.ID},
+						FunctionCall:     &geminiFuncCall{Name: tc.Name, Args: tc.Arguments.Bytes(), ID: tc.ID},
 					})
 				}
 				out = append(out, geminiContent{Role: "model", Parts: parts})
@@ -633,7 +641,7 @@ func buildTools(tools []engine.ToolDef) []geminiTool {
 	}
 	decls := make([]geminiFuncDecl, 0, len(tools))
 	for _, t := range tools {
-		decls = append(decls, geminiFuncDecl{Name: t.Name, Description: t.Description, Parameters: t.Parameters})
+		decls = append(decls, geminiFuncDecl{Name: t.Name, Description: t.Description, Parameters: t.Parameters.Bytes()})
 	}
 	return []geminiTool{{FunctionDeclarations: decls}}
 }

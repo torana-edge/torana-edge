@@ -1054,7 +1054,13 @@ func (pp *PluginPipeline) RunBeforeRequest(ctx context.Context, reqID uint64, ch
 		// No plugin produced output — skip the pb round-trip entirely.
 		return chat, nil
 	}
-	return pbconv.FromPBChatRequest(current), nil
+	chat, err := pbconv.FromPBChatRequest(current)
+	if err != nil {
+		// The replacement path's PB always passed SDK ValidateReplacement
+		// (or came from ToPBChatRequest), so this is a defensive backstop.
+		return nil, fmt.Errorf("convert replacement: %w", err)
+	}
+	return chat, nil
 }
 
 // runBeforeRequestPlugin dispatches ONE plugin's run_before_request hook with

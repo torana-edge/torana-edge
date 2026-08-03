@@ -69,9 +69,9 @@ type chatToolDef struct {
 }
 
 type chatToolFuncDef struct {
-	Name        string         `json:"name"`
-	Description string         `json:"description,omitempty"`
-	Parameters  map[string]any `json:"parameters,omitempty"`
+	Name        string          `json:"name"`
+	Description string          `json:"description,omitempty"`
+	Parameters  json.RawMessage `json:"parameters,omitempty"` // raw JSON Schema lexemes
 }
 
 // responseRequest is the Responses API JSON shape.
@@ -84,10 +84,10 @@ type responseRequest struct {
 }
 
 type responseTool struct {
-	Type        string         `json:"type"`
-	Name        string         `json:"name"`
-	Description string         `json:"description,omitempty"`
-	Parameters  map[string]any `json:"parameters,omitempty"`
+	Type        string          `json:"type"`
+	Name        string          `json:"name"`
+	Description string          `json:"description,omitempty"`
+	Parameters  json.RawMessage `json:"parameters,omitempty"` // raw JSON Schema lexemes
 }
 
 type responsesInputItem struct {
@@ -188,7 +188,7 @@ func marshalResponses(chat *engine.ChatRequest) ([]byte, error) {
 			Type:        "function",
 			Name:        t.Name,
 			Description: t.Description,
-			Parameters:  t.Parameters,
+			Parameters:  t.Parameters.Bytes(),
 		})
 	}
 
@@ -224,12 +224,11 @@ func responsesItemsFromMessages(messages []engine.Message) []any {
 		case engine.RoleAssistant:
 			if len(m.ToolCalls) > 0 {
 				for _, tc := range m.ToolCalls {
-					argsBytes, _ := json.Marshal(tc.Arguments)
 					items = append(items, map[string]any{
 						"type":      "function_call",
 						"call_id":   tc.ID,
 						"name":      tc.Name,
-						"arguments": string(argsBytes),
+						"arguments": tc.Arguments.String(),
 					})
 				}
 				continue
@@ -323,16 +322,23 @@ func (a *Adapter) unmarshalChat(rawBody []byte) (*engine.ChatRequest, error) {
 
 	// Messages.
 	for _, m := range cr.Messages {
-		msg := convertChatMessage(m)
+		msg, err := convertChatMessage(m)
+		if err != nil {
+			return nil, err
+		}
 		req.Messages = append(req.Messages, msg)
 	}
 
 	// Tools.
 	for _, t := range cr.Tools {
+		params, err := engine.ParseRequiredObjectOrEmpty(t.Function.Parameters)
+		if err != nil {
+			return nil, fmt.Errorf("tool %q parameters: %w", t.Function.Name, err)
+		}
 		td := engine.ToolDef{
 			Name:        t.Function.Name,
 			Description: t.Function.Description,
-			Parameters:  t.Function.Parameters,
+			Parameters:  params,
 			Strict:      t.Strict,
 		}
 		req.Tools = append(req.Tools, td)
@@ -340,7 +346,7 @@ func (a *Adapter) unmarshalChat(rawBody []byte) (*engine.ChatRequest, error) {
 
 	return req, nil
 }
-func convertChatMessage(m chatMessage) engine.Message {
+func convertChatMessage(m chatMessage) (engine.Message, error) {
 	msg := engine.Message{
 		Role:       engine.Role(m.Role),
 		ToolCallID: m.ToolCallID,
@@ -366,7 +372,10 @@ func convertChatMessage(m chatMessage) engine.Message {
 
 	// Tool calls.
 	for _, tc := range m.ToolCalls {
-		args := parseArgs(tc.Function.Arguments)
+		args, err := engine.ParseRequiredObjectOrEmpty([]byte(tc.Function.Arguments))
+		if err != nil {
+			return msg, fmt.Errorf("tool call %q arguments: %w", tc.Function.Name, err)
+		}
 		msg.ToolCalls = append(msg.ToolCalls, engine.ToolCall{
 			ID:        tc.ID,
 			Name:      tc.Function.Name,
@@ -374,20 +383,15 @@ func convertChatMessage(m chatMessage) engine.Message {
 		})
 	}
 
-	return msg
+	return msg, nil
 }
 
-// parseArgs parses a JSON string into map[string]any. On parse failure
-// returns an empty map so the pipeline doesn't crash on malformed args.
-func parseArgs(raw string) map[string]any {
-	if raw == "" {
-		return nil
-	}
-	var args map[string]any
-	if err := json.Unmarshal([]byte(raw), &args); err != nil {
-		return nil
-	}
-	return args
+// mustParseToolArgs is the Responses unmarshal site for tool-call
+// arguments: the caller's arguments field is JSON text (decoded once at the
+// parse boundary — the documented canonicalization); empty text normalizes
+// to the canonical `{}`.
+func mustParseToolArgs(raw string) (engine.RequiredJSONObject, error) {
+	return engine.ParseRequiredObjectOrEmpty([]byte(raw))
 }
 
 // ---------------------------------------------------------------------------
@@ -466,13 +470,17 @@ func (a *Adapter) unmarshalResponses(rawBody []byte) (*engine.ChatRequest, error
 						req.Messages = append(req.Messages, msg)
 
 					case "function_call":
+						args, err := mustParseToolArgs(item.Arguments)
+						if err != nil {
+							return nil, fmt.Errorf("tool call %q arguments: %w", item.Name, err)
+						}
 						msg := engine.Message{
 							Role: engine.RoleAssistant,
 							ToolCalls: []engine.ToolCall{
 								{
 									ID:        item.CallID,
 									Name:      item.Name,
-									Arguments: parseArgs(item.Arguments),
+									Arguments: args,
 								},
 							},
 						}
@@ -492,7 +500,11 @@ func (a *Adapter) unmarshalResponses(rawBody []byte) (*engine.ChatRequest, error
 				var msgs []chatMessage
 				if err := json.Unmarshal(rr.Input, &msgs); err == nil {
 					for _, m := range msgs {
-						req.Messages = append(req.Messages, convertChatMessage(m))
+						msg, err := convertChatMessage(m)
+						if err != nil {
+							return nil, err
+						}
+						req.Messages = append(req.Messages, msg)
 					}
 				}
 			}
@@ -501,10 +513,14 @@ func (a *Adapter) unmarshalResponses(rawBody []byte) (*engine.ChatRequest, error
 
 	// Tools (Responses API uses flat tool shape: {type, name, description, parameters}).
 	for _, t := range rr.Tools {
+		params, err := engine.ParseRequiredObjectOrEmpty(t.Parameters)
+		if err != nil {
+			return nil, fmt.Errorf("tool %q parameters: %w", t.Name, err)
+		}
 		td := engine.ToolDef{
 			Name:        t.Name,
 			Description: t.Description,
-			Parameters:  t.Parameters,
+			Parameters:  params,
 		}
 		req.Tools = append(req.Tools, td)
 	}
@@ -554,9 +570,9 @@ type marshalTool struct {
 }
 
 type marshalToolFn struct {
-	Name        string         `json:"name"`
-	Description string         `json:"description,omitempty"`
-	Parameters  map[string]any `json:"parameters,omitempty"`
+	Name        string          `json:"name"`
+	Description string          `json:"description,omitempty"`
+	Parameters  json.RawMessage `json:"parameters,omitempty"` // raw JSON Schema lexemes
 }
 
 // modelOrDefault returns m if non-empty, otherwise d.
@@ -602,15 +618,11 @@ func marshalChat(chat *engine.ChatRequest) ([]byte, error) {
 			mm.ReasoningContent = &m.Thinking
 		}
 
-		// Tool calls.
+		// Tool calls. Arguments are the authoritative raw lexemes (the
+		// required wrapper is never nil — the canonical `{}` fallback is
+		// built into it).
 		for _, tc := range m.ToolCalls {
-			args := "{}"
-			if tc.Arguments != nil {
-				b, err := json.Marshal(tc.Arguments)
-				if err == nil {
-					args = string(b)
-				}
-			}
+			args := tc.Arguments.String()
 			mm.ToolCalls = append(mm.ToolCalls, marshalTC{
 				ID:   tc.ID,
 				Type: "function",
@@ -632,7 +644,7 @@ func marshalChat(chat *engine.ChatRequest) ([]byte, error) {
 			Function: marshalToolFn{
 				Name:        t.Name,
 				Description: t.Description,
-				Parameters:  t.Parameters,
+				Parameters:  t.Parameters.Bytes(),
 			},
 		})
 	}

@@ -55,9 +55,9 @@ type bedrockThinking struct {
 }
 
 type bedrockToolUse struct {
-	ToolUseID string         `json:"toolUseId"`
-	Name      string         `json:"name"`
-	Input     map[string]any `json:"input"`
+	ToolUseID string          `json:"toolUseId"`
+	Name      string          `json:"name"`
+	Input     json.RawMessage `json:"input"` // raw lexemes, verbatim
 }
 
 type bedrockToolResult struct {
@@ -83,7 +83,7 @@ type bedrockToolSpec struct {
 }
 
 type bedrockSchema struct {
-	JSON map[string]any `json:"json"`
+	JSON json.RawMessage `json:"json"` // raw JSON Schema lexemes, verbatim
 }
 
 type bedrockSystemBlock struct {
@@ -134,7 +134,10 @@ func (a *Adapter) Unmarshal(rawBody []byte) (*engine.ChatRequest, error) {
 			return nil, fmt.Errorf("bedrock: unmarshal message content: %w", err)
 		}
 
-		msgs, leadingCache := blocksToMessages(bm.Role, blocks)
+		msgs, leadingCache, err := blocksToMessages(bm.Role, blocks)
+		if err != nil {
+			return nil, fmt.Errorf("bedrock message: %w", err)
+		}
 		// A cachePoint before any content in this wire message caches the
 		// prefix ending at the previous message.
 		if leadingCache != nil && len(chat.Messages) > 0 {
@@ -159,10 +162,14 @@ func (a *Adapter) Unmarshal(rawBody []byte) (*engine.ChatRequest, error) {
 			if t.ToolSpec == nil {
 				continue
 			}
+			params, err := engine.ParseRequiredObjectOrEmpty(t.ToolSpec.InputSchema.JSON)
+			if err != nil {
+				return nil, fmt.Errorf("tool %q input schema: %w", t.ToolSpec.Name, err)
+			}
 			td := engine.ToolDef{
 				Name:        t.ToolSpec.Name,
 				Description: t.ToolSpec.Description,
-				Parameters:  t.ToolSpec.InputSchema.JSON,
+				Parameters:  params,
 			}
 			chat.Tools = append(chat.Tools, td)
 		}
@@ -227,7 +234,7 @@ func parseContentBlocks(raw json.RawMessage) ([]bedrockContentBlock, error) {
 // produced by the blocks before it (positional breakpoint); a cachePoint that
 // precedes all content is returned as leadingCache for the caller to attach
 // to the previous message.
-func blocksToMessages(role string, blocks []bedrockContentBlock) (msgs []engine.Message, leadingCache map[string]any) {
+func blocksToMessages(role string, blocks []bedrockContentBlock) (msgs []engine.Message, leadingCache map[string]any, err error) {
 	var textParts []string
 	var thinkingText string
 	var thinkingSig string
@@ -267,12 +274,16 @@ func blocksToMessages(role string, blocks []bedrockContentBlock) (msgs []engine.
 		case b.ToolUse != nil:
 			// Flush pending text first
 			flushText()
+			args, perr := engine.ParseRequiredObjectOrEmpty(b.ToolUse.Input)
+			if perr != nil {
+				return nil, nil, fmt.Errorf("tool use %q input: %w", b.ToolUse.Name, perr)
+			}
 			msgs = append(msgs, engine.Message{
 				Role: engine.RoleAssistant,
 				ToolCalls: []engine.ToolCall{{
 					ID:        b.ToolUse.ToolUseID,
 					Name:      b.ToolUse.Name,
-					Arguments: b.ToolUse.Input,
+					Arguments: args,
 				}},
 			})
 		case b.ToolResult != nil:
@@ -306,7 +317,7 @@ func blocksToMessages(role string, blocks []bedrockContentBlock) (msgs []engine.
 	// Flush any remaining text
 	flushText()
 
-	return msgs, leadingCache
+	return msgs, leadingCache, nil
 }
 
 // mapRole converts Bedrock role strings to engine.Role.
@@ -357,7 +368,7 @@ func (a *Adapter) Marshal(chat *engine.ChatRequest) ([]byte, error) {
 					Name:        td.Name,
 					Description: td.Description,
 					InputSchema: bedrockSchema{
-						JSON: td.Parameters,
+						JSON: td.Parameters.Bytes(),
 					},
 				},
 			})
@@ -447,7 +458,7 @@ func marshalMessage(m engine.Message) bedrockMsg {
 				ToolUse: &bedrockToolUse{
 					ToolUseID: tc.ID,
 					Name:      tc.Name,
-					Input:     tc.Arguments,
+					Input:     tc.Arguments.Bytes(),
 				},
 			})
 		}
