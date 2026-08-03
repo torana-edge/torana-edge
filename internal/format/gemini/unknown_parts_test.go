@@ -1,6 +1,7 @@
 package gemini
 
 import (
+	"bytes"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -308,11 +309,52 @@ func TestGeminiMediaAncillaryRepro(t *testing.T) {
 
 // TestGeminiSchedulingRepro — functionResponse scheduling presence is
 // meaningful and vocabulary-governed: absence is the provider default
-// WHEN_IDLE (distinct), the three canonical spellings are accepted and
-// preserved, and SCHEDULING_UNSPECIFIED behaves EXACTLY like any other
-// unknown value — the value-free 400 (never a silent default).
+// WHEN_IDLE (distinct from any explicit value), the three canonical
+// spellings are accepted and preserved EXACTLY (structurally decoded, not
+// string-matched), an explicit willContinue:false survives as present
+// false, and SCHEDULING_UNSPECIFIED behaves EXACTLY like any other unknown
+// value — the value-free 400 (never a silent default).
+//
+// These are ADAPTER-GRAMMAR rows (parse/marshal through the format
+// adapter). The REAL-TRANSPORT rows (golden 400, zero hooks/buckets/
+// upstream) are TestSchedulingValueFree400Transport in the proxy package;
+// the adapter rows alone are not transport proof.
 func TestGeminiSchedulingRepro(t *testing.T) {
 	t.Skip("SDK signed-Part contract correction pending (design checkpoint submitted); these rows are the acceptance contract for the SDK re-pin")
+
+	// frParts structurally decodes the marshaled wire and returns every
+	// functionResponse member of the first message's parts.
+	frParts := func(t *testing.T, out []byte) []map[string]any {
+		t.Helper()
+		var doc map[string]any
+		dec := json.NewDecoder(bytes.NewReader(out))
+		dec.UseNumber()
+		if err := dec.Decode(&doc); err != nil {
+			t.Fatalf("marshaled output is not decodable JSON: %v", err)
+		}
+		contents, _ := doc["contents"].([]any)
+		if len(contents) == 0 {
+			t.Fatalf("no contents in output: %s", out)
+		}
+		msg, _ := contents[0].(map[string]any)
+		parts, _ := msg["parts"].([]any)
+		var frs []map[string]any
+		for _, p := range parts {
+			pm, _ := p.(map[string]any)
+			if fr, ok := pm["functionResponse"].(map[string]any); ok {
+				frs = append(frs, fr)
+			}
+		}
+		if len(frs) == 0 {
+			t.Fatalf("no functionResponse parts in output: %s", out)
+		}
+		return frs
+	}
+	hasKey := func(m map[string]any, k string) bool {
+		_, ok := m[k]
+		return ok
+	}
+
 	accept := map[string]string{
 		"absent (provider default)": `{"model":"m","contents":[{"role":"user","parts":[{"functionResponse":{"name":"read","response":{"output":"x"},"id":"c1"}}]}]}`,
 		"scheduling SILENT":         `{"model":"m","contents":[{"role":"user","parts":[{"functionResponse":{"name":"read","response":{"output":"x"},"id":"c1","scheduling":"SILENT"}}]}]}`,
@@ -330,10 +372,47 @@ func TestGeminiSchedulingRepro(t *testing.T) {
 			if err != nil {
 				t.Fatalf("valid scheduling combination failed to marshal: %v", err)
 			}
-			if name != "absent (provider default)" && strings.Contains(name, "willContinue") == false {
-				// the explicit value must survive the pass verbatim
-				if !strings.Contains(string(out), strings.SplitN(name, " ", 2)[1]) {
-					t.Fatalf("scheduling value stripped: %s", out)
+			frs := frParts(t, out)
+			switch {
+			case name == "absent (provider default)":
+				// Absence must REMAIN absent: no scheduling/willContinue
+				// key anywhere in the marshaled functionResponses.
+				for i, fr := range frs {
+					if hasKey(fr, "scheduling") || hasKey(fr, "willContinue") {
+						t.Fatalf("absent row: presence materialized in output part %d: %v", i, fr)
+					}
+				}
+			case name == "willContinue explicit":
+				// Explicit false must remain PRESENT and false.
+				found := false
+				for _, fr := range frs {
+					if v, ok := fr["willContinue"]; ok {
+						b, isBool := v.(bool)
+						if !isBool || b {
+							t.Fatalf("willContinue = %v (%T), want present false", v, v)
+						}
+						found = true
+					}
+				}
+				if !found {
+					t.Fatalf("explicit willContinue:false was dropped: %s", out)
+				}
+			default:
+				// Each explicit scheduling value must remain present and
+				// EXACT.
+				want := strings.TrimPrefix(name, "scheduling ")
+				found := false
+				for _, fr := range frs {
+					if v, ok := fr["scheduling"]; ok {
+						str, isStr := v.(string)
+						if !isStr || str != want {
+							t.Fatalf("scheduling = %v, want exact %q", v, want)
+						}
+						found = true
+					}
+				}
+				if !found {
+					t.Fatalf("explicit scheduling %q was dropped: %s", want, out)
 				}
 			}
 		})

@@ -627,3 +627,61 @@ func TestParseFailClosedAmbiguousArmRowsTransport(t *testing.T) {
 		})
 	}
 }
+
+// TestSchedulingValueFree400Transport — the SCHEDULING_UNSPECIFIED and
+// unknown-scheduling rows at the REAL configured-format transport boundary
+// (fold-in acceptance contract; currently SKIPPED because the gemini
+// adapter has no scheduling grammar yet): the golden value-free 400 with
+// ZERO request hooks, zero response hooks, zero limiter buckets, zero
+// upstream — byte-identical under plugin presence AND both failure modes,
+// exactly like the provider-arm transport rows above.
+func TestSchedulingValueFree400Transport(t *testing.T) {
+	t.Skip("SDK signed-Part correction pending; these rows run when the gemini scheduling grammar lands (Edge fold-in)")
+	requireWASM(t, "../../examples/plugins/test-trapper/plugin.wasm")
+	requireWASM(t, "../../examples/plugins/test-observer/plugin.wasm")
+	requireWASM(t, "../../examples/plugins/test-mutator/plugin.wasm")
+
+	rows := []string{
+		`{"model":"m","contents":[{"role":"user","parts":[{"functionResponse":{"name":"read","response":{"output":"x"},"id":"c1","scheduling":"SCHEDULING_UNSPECIFIED"}}]}]}`,
+		`{"model":"m","contents":[{"role":"user","parts":[{"functionResponse":{"name":"read","response":{"output":"x"},"id":"c1","scheduling":"WHATEVER"}}]}]}`,
+	}
+	for i, body := range rows {
+		t.Run("gemini/scheduling"+string(rune('a'+i)), func(t *testing.T) {
+			status, out, hits, srv := parseFailE2E(t, "gemini", nil, body)
+			if status != http.StatusBadRequest || string(out) != goldenInvalidRequest("gemini") {
+				t.Fatalf("no-plugins 400 wrong: status=%d body=%s", status, out)
+			}
+			if n := atomic.LoadInt32(hits); n != 0 {
+				t.Fatalf("upstream called %d times; must be 0", n)
+			}
+			if n := limiterBucketCount(srv); n != 0 {
+				t.Fatalf("%d limiter buckets materialized; must be 0", n)
+			}
+
+			statusA, bodyA, hitsA, srvA := parseFailE2E(t, "gemini", []string{"test-observer"}, body)
+			if statusA != http.StatusBadRequest || !bytes.Equal(bodyA, out) {
+				t.Fatalf("allow-mode 400 differs from the no-plugins body: status=%d body=%s", statusA, bodyA)
+			}
+			if n := atomic.LoadInt32(hitsA); n != 0 {
+				t.Fatalf("upstream called %d times with the observer; must be 0", n)
+			}
+			if n := limiterBucketCount(srvA); n != 0 {
+				t.Fatalf("%d limiter buckets materialized with the observer; must be 0", n)
+			}
+			if v, ok := srvA.sharedCache.Get("observed_error_status"); ok {
+				t.Fatalf("a response hook ran with the observer: cache %q", v)
+			}
+
+			statusB, bodyB, hitsB, srvB := parseFailE2E(t, "gemini", []string{"test-trapper"}, body)
+			if statusB != http.StatusBadRequest || !bytes.Equal(bodyB, out) {
+				t.Fatalf("block-mode 400 differs from the no-plugins body: status=%d body=%s", statusB, bodyB)
+			}
+			if n := atomic.LoadInt32(hitsB); n != 0 {
+				t.Fatalf("upstream called %d times with the trapper; must be 0", n)
+			}
+			if n := limiterBucketCount(srvB); n != 0 {
+				t.Fatalf("%d limiter buckets materialized with the trapper; must be 0", n)
+			}
+		})
+	}
+}
