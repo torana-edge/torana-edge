@@ -13,6 +13,7 @@ import (
 	sdk "github.com/torana-edge/torana-plugin-sdk"
 	"github.com/torana-edge/torana-plugin-sdk/outboundpolicy"
 	pb "github.com/torana-edge/torana-plugin-sdk/pb/v2"
+	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protoreflect"
 	"google.golang.org/protobuf/reflect/protoregistry"
 )
@@ -139,14 +140,42 @@ func fingerprintMessage(m *pb.Message) [32]byte {
 }
 
 // bodyWithoutCacheBlocks returns the message with its cache-breakpoint
-// blocks removed — the role-section view of the ordered body.
+// carriers removed — the role-section view of the ordered body. This is
+// RECURSIVE: a top-level RequestBlock.cache_breakpoint is dropped, and a
+// ToolResult block is deep-copied with its nested
+// ToolResultContentBlock.cache_breakpoint elements dropped while every other
+// nested element AND its order survive. Cache facts are governed by
+// ir.cache_control.write alone (fingerprintCacheControlSection), never by
+// the message-role grants; a nested marker must therefore be invisible to
+// the role view exactly like a top-level one.
 func bodyWithoutCacheBlocks(m *pb.Message) *pb.Message {
 	out := &pb.Message{Role: m.Role}
 	for _, b := range m.Blocks {
 		if b.GetCacheBreakpoint() != nil {
 			continue
 		}
+		if tr := b.GetToolResult(); tr != nil {
+			cloned := proto.Clone(b).(*pb.RequestBlock)
+			trOut := cloned.GetToolResult()
+			trOut.Content = nestedWithoutCache(tr.Content)
+			out.Blocks = append(out.Blocks, cloned)
+			continue
+		}
 		out.Blocks = append(out.Blocks, b)
+	}
+	return out
+}
+
+// nestedWithoutCache returns the nested tool-result content with every
+// cache-breakpoint element removed, preserving all other elements and their
+// order. The input is not mutated.
+func nestedWithoutCache(content []*pb.ToolResultContentBlock) []*pb.ToolResultContentBlock {
+	out := make([]*pb.ToolResultContentBlock, 0, len(content))
+	for _, c := range content {
+		if c.GetCacheBreakpoint() != nil {
+			continue
+		}
+		out = append(out, c)
 	}
 	return out
 }
@@ -247,9 +276,12 @@ func fingerprintRequestSections(req *pb.ChatRequest) requestSections {
 }
 
 // fingerprintCacheControlSection digests the cache breakpoint markers of a
-// request — Message.cache_control_json and ToolDef.cache_control_json — as
-// ONE section governed by ir.cache_control.write. ONLY marker-carrying
-// messages and tools contribute frames, each framed with its ABSOLUTE index:
+// request — the three carriers: top-level RequestBlock.cache_breakpoint,
+// nested ToolResultContentBlock.cache_breakpoint, and
+// ToolDef.cache_control_json — as ONE section governed by
+// ir.cache_control.write. ONLY marker-carrying carriers contribute frames,
+// each framed with its ABSOLUTE message index (tools: tool index) plus a
+// distinct carrier tag and the position within the carrier:
 // a marker moved between any two positions changes the section even when its
 // bytes are unchanged, and a marker added, removed, inserted, or deleted
 // changes it too. Marker-less structural changes (inserting or deleting a
@@ -262,27 +294,48 @@ func fingerprintRequestSections(req *pb.ChatRequest) requestSections {
 func fingerprintCacheControlSection(req *pb.ChatRequest) [32]byte {
 	h := sha256.New()
 	var idx [8]byte
+	var pos [8]byte
 	for i, m := range req.Messages {
 		for bi, b := range m.Blocks {
-			cb := b.GetCacheBreakpoint()
-			if cb == nil {
+			if cb := b.GetCacheBreakpoint(); cb != nil {
+				// Carrier 1: top-level message breakpoint. Absolute message
+				// index + outer block index + bytes.
+				binary.LittleEndian.PutUint64(idx[:], uint64(i))
+				writeFramed(h, idx[:])
+				binary.LittleEndian.PutUint64(pos[:], uint64(bi))
+				writeFramed(h, pos[:])
+				writeField(h, 1, true, cb.MarkerJson)
 				continue
 			}
-			binary.LittleEndian.PutUint64(idx[:], uint64(i))
-			writeFramed(h, idx[:])
-			var pos [8]byte
-			binary.LittleEndian.PutUint64(pos[:], uint64(bi))
-			writeFramed(h, pos[:])
-			writeField(h, 1, true, cb.MarkerJson)
+			if tr := b.GetToolResult(); tr != nil {
+				for ci, c := range tr.Content {
+					cb := c.GetCacheBreakpoint()
+					if cb == nil {
+						continue
+					}
+					// Carrier 2: nested tool-result breakpoint. Absolute
+					// message index + outer block index + NESTED content
+					// index + bytes — a marker moved between nested
+					// positions (or between carriers) changes the section.
+					binary.LittleEndian.PutUint64(idx[:], uint64(i))
+					writeFramed(h, idx[:])
+					binary.LittleEndian.PutUint64(pos[:], uint64(bi))
+					writeFramed(h, pos[:])
+					binary.LittleEndian.PutUint64(pos[:], uint64(ci))
+					writeFramed(h, pos[:])
+					writeField(h, 2, true, cb.MarkerJson)
+				}
+			}
 		}
 	}
 	for i, t := range req.Tools {
 		if len(t.CacheControlJson) == 0 {
 			continue
 		}
+		// Carrier 3: tool-definition breakpoint.
 		binary.LittleEndian.PutUint64(idx[:], uint64(i))
 		writeFramed(h, idx[:])
-		writeField(h, 2, true, t.CacheControlJson)
+		writeField(h, 3, true, t.CacheControlJson)
 	}
 	var sum [32]byte
 	copy(sum[:], h.Sum(nil))

@@ -166,22 +166,54 @@ func stripCacheBlocks(m *pb.Message) *pb.Message {
 	ca := proto.Clone(m).(*pb.Message)
 	var kept []*pb.RequestBlock
 	for _, b := range ca.Blocks {
-		if b.GetCacheBreakpoint() == nil {
-			kept = append(kept, b)
+		if b.GetCacheBreakpoint() != nil {
+			continue
 		}
+		if tr := b.GetToolResult(); tr != nil {
+			tr.Content = nestedWithoutCache(tr.Content)
+		}
+		kept = append(kept, b)
 	}
 	ca.Blocks = kept
 	return ca
 }
 
+// cacheMarkers encodes a message's cache carriers POSITIONALLY, mirroring
+// the production cache section: each marker frame carries the outer block
+// index, the carrier tag (1 top-level, 2 nested), the nested index (-1 for
+// top-level), and the marker bytes. A marker moved between any two positions
+// changes the encoding even when its bytes are unchanged.
 func cacheMarkers(m *pb.Message) []byte {
 	var out []byte
-	for _, b := range m.Blocks {
-		if b.GetCacheBreakpoint() != nil {
-			out = append(out, b.GetCacheBreakpoint().MarkerJson...)
+	for bi, b := range m.Blocks {
+		if cb := b.GetCacheBreakpoint(); cb != nil {
+			out = append(out, markerFrame(bi, 1, -1, cb.MarkerJson)...)
+		}
+		if tr := b.GetToolResult(); tr != nil {
+			for ci, c := range tr.Content {
+				if cb := c.GetCacheBreakpoint(); cb != nil {
+					out = append(out, markerFrame(bi, 2, ci, cb.MarkerJson)...)
+				}
+			}
 		}
 	}
 	return out
+}
+
+func markerFrame(blockIdx int, carrier int, nestedIdx int, bytes []byte) []byte {
+	var f []byte
+	var b [8]byte
+	binary.LittleEndian.PutUint64(b[:], uint64(blockIdx))
+	f = append(f, b[:]...)
+	binary.LittleEndian.PutUint64(b[:], uint64(carrier))
+	f = append(f, b[:]...)
+	binary.LittleEndian.PutUint64(b[:], uint64(nestedIdx))
+	f = append(f, b[:]...)
+	var n [8]byte
+	binary.LittleEndian.PutUint64(n[:], uint64(len(bytes)))
+	f = append(f, n[:]...)
+	f = append(f, bytes...)
+	return f
 }
 
 func sameToolWithoutMarker(a, b *pb.ToolDef) bool {

@@ -88,8 +88,39 @@ type geminiSystemInstruction struct {
 }
 
 type geminiContent struct {
-	Role  string       `json:"role"`
-	Parts []geminiPart `json:"parts"`
+	Role  string `json:"role"`
+	Parts []any  `json:"parts"` // geminiPart (typed known arms) or json.RawMessage (unknown arms, raw projection)
+}
+
+// geminiWirePart pairs one wire part's typed decode with its RAW element.
+// Unknown members that the typed struct does not declare survive via raw
+// (inlineData, fileData, future arms) — the projection is lossless.
+type geminiWirePart struct {
+	part geminiPart
+	raw  json.RawMessage
+}
+
+// UnmarshalJSON decodes every part TWICE: typed (the known-arm switch) and
+// raw (the unknown-arm capture). A part that only the raw form can carry
+// must never be reconstructed from the typed struct.
+func (c *geminiContent) UnmarshalJSON(data []byte) error {
+	var raw struct {
+		Role  string            `json:"role"`
+		Parts []json.RawMessage `json:"parts"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	c.Role = raw.Role
+	c.Parts = make([]any, 0, len(raw.Parts))
+	for _, p := range raw.Parts {
+		var gp geminiPart
+		if err := json.Unmarshal(p, &gp); err != nil {
+			return err
+		}
+		c.Parts = append(c.Parts, geminiWirePart{part: gp, raw: p})
+	}
+	return nil
 }
 
 // geminiPart is a polymorphic content part. Code Assist may combine a
@@ -237,10 +268,16 @@ func (a *Adapter) Unmarshal(rawBody []byte) (*engine.ChatRequest, error) {
 		}
 	}
 
-	// System instruction → RoleSystem message with ordered text blocks.
+	// System instruction → RoleSystem message with ordered text blocks. The
+	// system array is TEXT-ONLY (the parse-bypass seam): a non-text part
+	// (functionCall, functionResponse, thought, unknown arms) would be a
+	// silent fact drop, so it is refused at parse.
 	if gReq.SystemInstruction != nil {
 		msg := engine.Message{Role: engine.RoleSystem}
 		for _, p := range gReq.SystemInstruction.Parts {
+			if p.FunctionCall != nil || p.FunctionResponse != nil || p.Thought {
+				return nil, fmt.Errorf("gemini: system instruction parts must be text only")
+			}
 			if partText(p) != "" {
 				msg.Blocks = append(msg.Blocks, engine.Block{Text: &engine.TextBlock{Text: partText(p)}})
 			}
@@ -301,7 +338,26 @@ func geminiContentToMessage(content geminiContent, prevCallIdx map[string]int, c
 	standalone := 0
 	hasTextOrThinking := false
 	hasTool := false
-	for _, p := range content.Parts {
+	for _, pAny := range content.Parts {
+		p := pAny.(geminiWirePart).part
+		// The provider-arm matrix: a gemini part carries at most ONE content
+		// arm among {text (incl. the thought modifier), functionCall,
+		// functionResponse}. A part with two is ambiguous — the projection
+		// switch would pick one by precedence and silently drop the other —
+		// so it is refused here, deterministically.
+		arms := 0
+		if p.Text != nil {
+			arms++
+		}
+		if p.FunctionCall != nil {
+			arms++
+		}
+		if p.FunctionResponse != nil {
+			arms++
+		}
+		if arms > 1 {
+			return msg, fmt.Errorf("gemini: part has %d content arms, want exactly one", arms)
+		}
 		switch {
 		case p.FunctionCall != nil || p.FunctionResponse != nil:
 			hasTool = true
@@ -324,7 +380,8 @@ func geminiContentToMessage(content geminiContent, prevCallIdx map[string]int, c
 	}
 
 	seenCovered := false
-	for i, p := range content.Parts {
+	for i, pAny := range content.Parts {
+		p := pAny.(geminiWirePart).part
 		switch {
 		case p.FunctionResponse != nil:
 			tr, err := geminiToolResultBlock(p.FunctionResponse, callIDs)
@@ -382,12 +439,12 @@ func geminiContentToMessage(content geminiContent, prevCallIdx map[string]int, c
 				seenCovered = true
 			}
 		default:
-			// Unknown part arms ride raw: the payload with the canonical
-			// members removed.
-			raw, rerr := json.Marshal(p)
-			if rerr != nil {
-				return msg, rerr
-			}
+			// Unknown part arms ride the RAW element with the canonical
+			// members removed (the projection invariant). The raw capture
+			// keeps every member the typed struct does not declare —
+			// inlineData, fileData, future arms — so the projection is
+			// LOSSLESS; the typed struct is never re-marshaled here.
+			raw := pAny.(geminiWirePart).raw
 			payload, perr := stripGeminiPartFacts(raw)
 			if perr != nil {
 				return msg, fmt.Errorf("gemini part payload: %w", perr)
@@ -621,6 +678,25 @@ func readExtBool(ext engine.OptionalJSONObject, key string) (bool, bool) {
 	var b bool
 	return b, json.Unmarshal(raw, &b) == nil
 }
+
+// geminiCanonicalPartMembers are the members the block kinds own; an
+// Unknown part payload must never carry them (the projection invariant,
+// enforced at marshal exactly like the other adapters).
+var geminiCanonicalPartMembers = []string{"text", "thought", "thoughtSignature", "functionCall", "functionResponse"}
+
+func rejectGeminiProjection(u *engine.UnknownBlock) error {
+	payload, _, err := u.Payload.DecodeObject()
+	if err != nil {
+		return fmt.Errorf("gemini: unknown part payload: %w", err)
+	}
+	for _, canon := range geminiCanonicalPartMembers {
+		if _, dup := payload[canon]; dup {
+			return fmt.Errorf("gemini: unknown part payload duplicates canonical member %q (projection invariant)", canon)
+		}
+	}
+	return nil
+}
+
 func buildSystemInstruction(msgs []engine.Message) *geminiSystemInstruction {
 	var si *geminiSystemInstruction
 	for _, msg := range msgs {
@@ -658,6 +734,15 @@ func buildContents(msgs []engine.Message, codeAssist bool) ([]geminiContent, err
 				switch {
 				case b.Text != nil:
 					content.Parts = append(content.Parts, geminiPart{Text: new(b.Text.Text)})
+				case b.Unknown != nil:
+					// Unknown part arms are re-emitted RAW at their exact
+					// position (the projection invariant is enforced: the
+					// payload must not carry a canonical member a plugin
+					// could have injected).
+					if err := rejectGeminiProjection(b.Unknown); err != nil {
+						return nil, err
+					}
+					content.Parts = append(content.Parts, json.RawMessage(b.Unknown.Payload.Bytes()))
 				case b.ToolResult != nil:
 					text := ""
 					for _, c := range b.ToolResult.Content {
@@ -684,7 +769,7 @@ func buildContents(msgs []engine.Message, codeAssist bool) ([]geminiContent, err
 			// contract: text/thinking contents, then tool-call contents
 			// (parallel calls in ONE content, matching the model's output).
 			var textContent *geminiContent
-			var toolParts []geminiPart
+			var toolParts []any
 			for _, b := range msg.Blocks {
 				switch {
 				case b.Text != nil:
@@ -699,6 +784,14 @@ func buildContents(msgs []engine.Message, codeAssist bool) ([]geminiContent, err
 					textContent.Parts = append(textContent.Parts, geminiPart{
 						Thought: true, Text: new(b.Thinking.Text), ThoughtSignature: b.Thinking.Signature,
 					})
+				case b.Unknown != nil:
+					if err := rejectGeminiProjection(b.Unknown); err != nil {
+						return nil, err
+					}
+					if textContent == nil {
+						textContent = &geminiContent{Role: "model"}
+					}
+					textContent.Parts = append(textContent.Parts, json.RawMessage(b.Unknown.Payload.Bytes()))
 				case b.ToolUse != nil:
 					toolParts = append(toolParts, geminiPart{
 						ThoughtSignature: b.ToolUse.Signature,
@@ -712,7 +805,7 @@ func buildContents(msgs []engine.Message, codeAssist bool) ([]geminiContent, err
 						}
 						text += c.Text
 					}
-					out = append(out, geminiContent{Role: toolResultRole, Parts: []geminiPart{{
+					out = append(out, geminiContent{Role: toolResultRole, Parts: []any{geminiPart{
 						FunctionResponse: &geminiFuncResp{
 							Name: b.ToolResult.ToolName, ID: b.ToolResult.ToolCallID,
 							Response: toolResponseMap(text, codeAssist),
@@ -751,7 +844,7 @@ func buildContents(msgs []engine.Message, codeAssist bool) ([]geminiContent, err
 					}
 					text += c.Text
 				}
-				out = append(out, geminiContent{Role: toolResultRole, Parts: []geminiPart{{
+				out = append(out, geminiContent{Role: toolResultRole, Parts: []any{geminiPart{
 					FunctionResponse: &geminiFuncResp{
 						Name: b.ToolResult.ToolName, ID: b.ToolResult.ToolCallID,
 						Response: toolResponseMap(text, codeAssist),

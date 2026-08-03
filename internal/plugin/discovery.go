@@ -1031,7 +1031,16 @@ func (pp *PluginPipeline) RunBeforeRequest(ctx context.Context, reqID uint64, ch
 	defer pp.Release()
 
 	headers := snapshotHeaders(rawHeaders)
-	current := pbconv.ToPBChatRequest(chat)
+	// The accepted-input closure: the engine request is checked against the
+	// SDK replacement domain BEFORE the first hook — zero/multi-arm blocks,
+	// nested conflicts, non-finite floats, and out-of-range max tokens are
+	// refused here, never silently truncated by the conversion. This runs
+	// even with zero plugins (the no-plugin path): a request outside the
+	// closed domain is a host-local failure, never a silent fact drop.
+	current, err := pbconv.ToPBChatRequestChecked(chat)
+	if err != nil {
+		return nil, fmt.Errorf("invalid engine request: %w", err)
+	}
 	modified := false
 	for _, lp := range pp.plugins {
 		if !hasHook(lp.manifest, "run_before_request") {
@@ -1054,11 +1063,12 @@ func (pp *PluginPipeline) RunBeforeRequest(ctx context.Context, reqID uint64, ch
 		// No plugin produced output — skip the pb round-trip entirely.
 		return chat, nil
 	}
-	chat, err := pbconv.FromPBChatRequest(current)
-	if err != nil {
+	chat, convErr := pbconv.FromPBChatRequest(current)
+	if convErr != nil {
 		// The replacement path's PB always passed SDK ValidateReplacement
-		// (or came from ToPBChatRequest), so this is a defensive backstop.
-		return nil, fmt.Errorf("convert replacement: %w", err)
+		// (or came from the checked boundary), so this is a defensive
+		// backstop.
+		return nil, fmt.Errorf("convert replacement: %w", convErr)
 	}
 	return chat, nil
 }

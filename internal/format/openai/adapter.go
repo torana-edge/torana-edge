@@ -552,11 +552,24 @@ func openAIPartToBlock(p json.RawMessage) (engine.Block, error) {
 		return engine.Block{}, fmt.Errorf("content part: %w", err)
 	}
 	if probe.Type == "text" || probe.Type == "" {
+		// The provider-arm matrix: a DECLARED text arm must actually carry
+		// its required member — {"type":"text"} with no text member is
+		// malformed, not an implicit empty text (the explicit empty text is
+		// spelled {"type":"text","text":""}).
 		var t struct {
-			Text string `json:"text"`
+			Text *string `json:"text"`
 		}
-		json.Unmarshal(p, &t)
-		return engine.Block{Text: &engine.TextBlock{Text: t.Text}}, nil
+		if err := json.Unmarshal(p, &t); err != nil {
+			return engine.Block{}, fmt.Errorf("content part: %w", err)
+		}
+		if probe.Type == "text" && t.Text == nil {
+			return engine.Block{}, fmt.Errorf("openai chat: text part without a text member")
+		}
+		text := ""
+		if t.Text != nil {
+			text = *t.Text
+		}
+		return engine.Block{Text: &engine.TextBlock{Text: text}}, nil
 	}
 	payload, err := stripOpenAIPartFacts(p, "type")
 	if err != nil {

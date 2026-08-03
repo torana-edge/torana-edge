@@ -864,6 +864,16 @@ func New(cfg Config) (*Server, error) {
 				rejectMalformed()
 				return
 			}
+			// The accepted-input closure, at the transport: an engine state
+			// outside the SDK replacement domain (zero/multi-arm blocks,
+			// nested conflicts, non-finite floats, out-of-range max tokens)
+			// is a host-local failure — value-free 400, zero upstream, with
+			// or without plugins. The adapter/validator error is never
+			// surfaced (raw body fragments).
+			if _, cerr := pbconv.ToPBChatRequestChecked(chat); cerr != nil {
+				rejectMalformed()
+				return
+			}
 
 			if chat.ToranaMeta.IsAbsent() {
 				chat.ToranaMeta, _ = engine.ParseOptionalJSONObject([]byte(`{}`))

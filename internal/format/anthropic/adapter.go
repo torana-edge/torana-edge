@@ -174,6 +174,30 @@ func (cb *contentBlock) UnmarshalJSON(data []byte) error {
 		return err
 	}
 	*cb = contentBlock(raw.rawBlock)
+	// The provider-arm matrix: a DECLARED anthropic arm must carry its
+	// required members — a text block without a text member, a tool_use
+	// without id/name, or a tool_result without tool_use_id is malformed,
+	// not an implicit default. (Explicit empty text is spelled
+	// {"type":"text","text":""}; a MISSING tool_use input is the approved
+	// nil->{} normalization, not an error — a present-but-invalid input is
+	// refused by the required-object constructor.)
+	switch raw.Type {
+	case anthropicText:
+		var t struct {
+			Text *string `json:"text"`
+		}
+		if json.Unmarshal(data, &t) == nil && t.Text == nil {
+			return fmt.Errorf("anthropic: text block without a text member")
+		}
+	case anthropicToolUse:
+		if raw.ID == "" || raw.Name == "" {
+			return fmt.Errorf("anthropic: tool_use block requires id and name")
+		}
+	case anthropicToolResult:
+		if raw.ToolUseID == "" {
+			return fmt.Errorf("anthropic: tool_result block requires tool_use_id")
+		}
+	}
 	if raw.Content == nil {
 		return nil
 	}

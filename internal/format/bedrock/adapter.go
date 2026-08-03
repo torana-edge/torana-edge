@@ -256,9 +256,26 @@ func parseContentBlocks(raw json.RawMessage) ([]bedrockContentBlock, []json.RawM
 // (a leading cachePoint is returned for the caller to attach to the covered
 // previous message).
 func contentBlocksToMessage(role string, blocks []bedrockContentBlock, rawEls []json.RawMessage) (engine.Message, engine.RequiredJSONObject, error) {
-	msg := engine.Message{Role: mapRole(role)}
+	engRole, rerr := mapRoleB(role)
+	if rerr != nil {
+		return engine.Message{}, engine.RequiredJSONObject{}, rerr
+	}
+	msg := engine.Message{Role: engRole}
 	var leading engine.RequiredJSONObject
 	for i, b := range blocks {
+		// The provider-arm matrix: a bedrock content block is a SINGLE-MEMBER
+		// discriminant object ({"text":…}, {"toolUse":…}, {"cachePoint":…},
+		// …). An object with two or more members is ambiguous — the typed
+		// decode would pick one arm by switch precedence and the unknown
+		// path would pick a map key by iteration — so it is refused here,
+		// deterministically, before projection.
+		if i < len(rawEls) {
+			if err := requireSingleMemberBlock(rawEls[i]); err != nil {
+				return msg, leading, err
+			}
+		} else if armCount(&b) != 1 {
+			return msg, leading, fmt.Errorf("bedrock: content block %d has %d arms, want exactly one", i, armCount(&b))
+		}
 		switch {
 		case b.CachePoint != nil:
 			marker, err := engine.ParseRequiredJSONObject(mustMarshalB(b.CachePoint))
@@ -332,6 +349,18 @@ func contentBlocksToMessage(role string, blocks []bedrockContentBlock, rawEls []
 // nested kinds (text / unknown). rawNested holds the block's raw content
 // array aligned by index.
 func bedrockNestedToEngine(part any, rawNested []json.RawMessage, j int) (engine.ToolResultContentBlock, error) {
+	// The nested elements obey the same single-member grammar: a nested
+	// object with two discriminants is ambiguous and refused before the
+	// (map-iteration) kind selection.
+	raw := json.RawMessage(nil)
+	if j < len(rawNested) {
+		raw = rawNested[j]
+	}
+	if len(raw) > 0 {
+		if err := requireSingleMemberBlock(raw); err != nil {
+			return engine.ToolResultContentBlock{}, fmt.Errorf("nested element %d: %w", j, err)
+		}
+	}
 	if m, ok := part.(map[string]any); ok && len(m) == 1 {
 		if txt, ok := m["text"].(string); ok {
 			return engine.ToolResultContentBlock{Text: txt}, nil
@@ -345,10 +374,6 @@ func bedrockNestedToEngine(part any, rawNested []json.RawMessage, j int) (engine
 				break
 			}
 		}
-	}
-	raw := json.RawMessage(nil)
-	if j < len(rawNested) {
-		raw = rawNested[j]
 	}
 	payload, err := stripBedrockFacts(raw)
 	if err != nil {
@@ -414,14 +439,56 @@ func mustMarshalB(v any) []byte {
 	return b
 }
 
-func mapRole(role string) engine.Role {
+// mapRoleB maps a wire role onto the engine role under Bedrock's NORMATIVE
+// two-role grammar (user | assistant; system is a separate array). Anything
+// else is refused at parse — never coerced to user, which would both change
+// provider semantics and mischarge a plugin mutation to the user role
+// section instead of the catch-all (or a rejection).
+// requireSingleMemberBlock refuses a raw bedrock block object whose member
+// count is not exactly one — the single-member discriminant grammar.
+func requireSingleMemberBlock(raw json.RawMessage) error {
+	if len(raw) == 0 || raw[0] != '{' {
+		return fmt.Errorf("bedrock: expected a JSON object block")
+	}
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return fmt.Errorf("bedrock: block object: %w", err)
+	}
+	if len(m) != 1 {
+		return fmt.Errorf("bedrock: block object has %d members, want exactly one (the discriminant)", len(m))
+	}
+	return nil
+}
+
+// armCount counts the typed content arms of a decoded bedrock block.
+func armCount(b *bedrockContentBlock) int {
+	n := 0
+	if b.Text != nil {
+		n++
+	}
+	if b.Thinking != nil {
+		n++
+	}
+	if b.ToolUse != nil {
+		n++
+	}
+	if b.ToolResult != nil {
+		n++
+	}
+	if b.CachePoint != nil {
+		n++
+	}
+	return n
+}
+
+func mapRoleB(role string) (engine.Role, error) {
 	switch role {
 	case "user":
-		return engine.RoleUser
+		return engine.RoleUser, nil
 	case "assistant":
-		return engine.RoleAssistant
+		return engine.RoleAssistant, nil
 	default:
-		return engine.RoleUser
+		return "", fmt.Errorf("bedrock: role %q is not valid (expected user or assistant)", role)
 	}
 }
 
@@ -541,7 +608,11 @@ func marshalSystemBlocks(m engine.Message) ([]bedrockSystemBlock, error) {
 // tool-role messages are unrepresentable; tool_use is assistant-only and
 // tool_result is user-only.
 func marshalMessage(m engine.Message) (bedrockMsg, error) {
-	bm := bedrockMsg{Role: reverseRole(m.Role)}
+	role, rerr := reverseRole(m.Role)
+	if rerr != nil {
+		return bedrockMsg{}, rerr
+	}
+	bm := bedrockMsg{Role: role}
 	var blocks []bedrockContentBlock
 	for i, b := range m.Blocks {
 		var cb bedrockContentBlock
@@ -697,15 +768,26 @@ func blockKindB(b engine.Block) string {
 		return "empty"
 	}
 }
-func reverseRole(role engine.Role) string {
+
+// reverseRole maps an engine role onto the wire under Bedrock's normative
+// two-role grammar. Unmodelled roles are REFUSED — never coerced to user
+// (the mirror of the parse-side rule; a plugin mutation on an unmodelled
+// role must not silently charge the user section or change provider
+// semantics).
+func reverseRole(role engine.Role) (string, error) {
 	switch role {
 	case engine.RoleAssistant:
-		return "assistant"
+		return "assistant", nil
 	case engine.RoleTool:
-		return "user" // tool results are sent as user messages in Bedrock
+		// Tool results are sent as user messages in Bedrock (the wire has
+		// no tool role) — this is the documented projection, not a
+		// coercion of an unmodelled role.
+		return "user", nil
 	case engine.RoleSystem:
-		return "system"
+		return "system", nil
+	case engine.RoleUser:
+		return "user", nil
 	default:
-		return "user"
+		return "", fmt.Errorf("bedrock: role %q is not valid (expected user or assistant)", role)
 	}
 }
