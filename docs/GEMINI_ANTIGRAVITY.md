@@ -173,7 +173,11 @@ canonical ABI-owned members projected out:
   numeric lexemes, escapes, and nested bytes);
 - absence vs empty-object is explicit and deterministic: an ABSENT
   envelope defaults to the empty envelope; a PRESENT envelope missing the
-  structural `request` member is REFUSED.
+  structural `request` member is REFUSED; for `generationConfig`, input
+  projection REMOVES the member when no unknown sibling remains after the
+  canonical deletion (canonical-only input never leaks a derived `{}`),
+  while an EXPLICITLY EMPTY wire object is a plugin/provider-authored fact
+  and is preserved as `{}`.
 
 **Variant ownership**: the Code-Assist-vs-bare fact is typed host-only
 topology (`ChatRequest.CodeAssist`), never in the ABI; a plugin can
@@ -191,5 +195,5 @@ The adapter marshal additionally refuses such an envelope defensively
 generationConfig` null, arrays, scalars, malformed text) are classified
 errors with no panic.
 
-See the canonical plugin-author guidance (`docs/PLUGINS.md`) for the
+See the canonical plugin-author guidance (`PLUGINS.md`) for the
 grant model; the Edge host owns this per-format grammar.

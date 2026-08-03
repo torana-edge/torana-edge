@@ -584,15 +584,10 @@ type PluginPipeline struct {
 	// failed load — remains a hard error.
 	skipped []SkippedPlugin
 
-	// CandidateValidator, when set, runs AFTER the write-grant verification
-	// on every accepted replacement candidate: provider-specific output
-	// invalidity (e.g. a Code Assist envelope smuggling canonical members)
-	// is attributed to the exact plugin — pass rolls back to the accepted
-	// input, block produces the plugin refusal. The closure captures the
-	// FORMAT policy at pipeline construction (per-format, never
-	// pipeline-global); the accepted host TOPOLOGY arrives per request via
-	// RunBeforeRequest. Format policy stays out of the pipeline core.
-	CandidateValidator func(topo engine.TopologyFacts, current, replacement *pbv2.ChatRequest) error
+	// candidateValidator is the CONSTRUCTION-BOUND per-plugin candidate
+	// validator (see PluginConfig.CandidateValidator): immutable after
+	// NewPipeline, so requests can never race a mutation.
+	candidateValidator func(topo engine.TopologyFacts, current, replacement *pbv2.ChatRequest) error
 
 	mu        sync.Mutex
 	active    int
@@ -852,13 +847,14 @@ func reloadPipeline(runtime *wasm.Runtime, config PluginConfig) (*PluginPipeline
 		}
 	}
 	return &PluginPipeline{
-		plugins:      loaded,
-		runtime:      runtime,
-		skipped:      skipped,
-		drained:      make(chan struct{}),
-		closed:       make(chan struct{}),
-		streamKinds:  make(map[uint64]*pbconv.BlockKindTracker),
-		streamVerify: make(map[uint64]*streamVerifierState),
+		plugins:            loaded,
+		runtime:            runtime,
+		skipped:            skipped,
+		drained:            make(chan struct{}),
+		closed:             make(chan struct{}),
+		streamKinds:        make(map[uint64]*pbconv.BlockKindTracker),
+		streamVerify:       make(map[uint64]*streamVerifierState),
+		candidateValidator: config.CandidateValidator,
 	}, nil
 }
 
@@ -1205,12 +1201,12 @@ func (pp *PluginPipeline) runBeforeRequestPlugin(ctx context.Context, reqID uint
 				replacement = nil
 			}
 		}
-		if replacement != nil && pp.CandidateValidator != nil {
+		if replacement != nil && pp.candidateValidator != nil {
 			// Provider-specific output invalidity (after the generic/grant
 			// validation): attributed to THIS plugin, with the settled
 			// failure semantics — pass rolls back to the accepted input,
 			// block produces the plugin refusal.
-			if cerr := pp.CandidateValidator(topo, current, replacement); cerr != nil {
+			if cerr := pp.candidateValidator(topo, current, replacement); cerr != nil {
 				log.Printf("[plugin] %s run_before_request: rejected provider-invalid replacement: %v",
 					lp.manifest.Name, cerr)
 				pp.discardTrapped(reqID, lp.manifest.Name)
@@ -1623,6 +1619,16 @@ type PluginConfig struct {
 	Order     []string                   `json:"order"`
 	Config    map[string]json.RawMessage `json:"config"`
 	Approvals map[string]Approval        `json:"approvals,omitempty"`
+	// CandidateValidator runs AFTER the write-grant verification on every
+	// accepted replacement candidate (per-plugin result transaction):
+	// provider-specific output invalidity (e.g. a Code Assist envelope
+	// smuggling canonical members) is attributed to the exact plugin —
+	// pass rolls back to the accepted input, block produces the plugin
+	// refusal. Set at CONSTRUCTION (immutable, race-free); the closure
+	// captures the format policy, the accepted host TOPOLOGY arrives per
+	// request via RunBeforeRequest. Format policy stays out of the
+	// pipeline core.
+	CandidateValidator func(topo engine.TopologyFacts, current, replacement *pbv2.ChatRequest) error
 	// HostVersion is build metadata supplied by the executable. It is never
 	// persisted in operator configuration.
 	HostVersion string `json:"-"`

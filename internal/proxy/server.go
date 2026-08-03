@@ -2906,6 +2906,11 @@ func (s *Server) newRuntime() *wasm.Runtime {
 // s.sharedCache) and returns the displaced pipeline, undrained. Caller holds rebuildMu.
 func (s *Server) rebuildPipelineLocked(pcfg provider.PluginsConfig) (*plugin.PluginPipeline, error) {
 	rt := s.newRuntime()
+	// Provider-specific candidate validation, dispatched on the ACCEPTED
+	// host topology (never pipeline-global format policy): a Code Assist
+	// replacement envelope smuggling canonical members is plugin-output
+	// invalidity — pass rolls back to the accepted input, block produces
+	// the plugin refusal. Construction-bound (immutable, race-free).
 	pp, err := plugin.NewPipeline(rt, plugin.PluginConfig{
 		Dir:             pcfg.Dir,
 		Order:           pcfg.Order,
@@ -2914,21 +2919,16 @@ func (s *Server) rebuildPipelineLocked(pcfg provider.PluginsConfig) (*plugin.Plu
 		AllowUnapproved: pcfg.AllowUnapproved,
 		Strict:          true,
 		HostVersion:     s.config.HostVersion,
+		CandidateValidator: func(topo engine.TopologyFacts, current, replacement *pb.ChatRequest) error {
+			if topo.CodeAssist {
+				return gemini.VerifyCodeAssistEnvelopePB(replacement.ProviderExtensionsJson)
+			}
+			return nil
+		},
 	})
 	if err != nil {
 		rt.Close()
 		return nil, err
-	}
-	// Provider-specific candidate validation, dispatched on the ACCEPTED
-	// host topology (never pipeline-global format policy): a Code Assist
-	// replacement envelope smuggling canonical members is plugin-output
-	// invalidity — pass rolls back to the accepted input, block produces
-	// the plugin refusal.
-	pp.CandidateValidator = func(topo engine.TopologyFacts, current, replacement *pb.ChatRequest) error {
-		if topo.CodeAssist {
-			return gemini.VerifyCodeAssistEnvelopePB(replacement.ProviderExtensionsJson)
-		}
-		return nil
 	}
 
 	old := s.pluginPipeline.Swap(pp)

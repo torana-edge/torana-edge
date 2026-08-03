@@ -162,7 +162,7 @@ provider-visible unparsed fields. The Gemini/Code Assist two-scope
 envelope (outer-wrapper extras + the structural `request` member holding
 inner-request extras, with the canonical members FORBIDDEN as extras and
 rebuilt from the canonical ABI fields) is specified in
-`docs/GEMINI_ANTIGRAVITY.md`; replacements that smuggle canonical members
+`GEMINI_ANTIGRAVITY.md`; replacements that smuggle canonical members
 through the extras path are plugin-output invalidity (`pass` rolls back,
 `block` refuses). The host-only topology facts (format variant, Code
 Assist flag, Responses layout) are typed and never part of the ABI.

@@ -9,6 +9,7 @@ import (
 
 	"github.com/torana-edge/torana-edge/internal/engine"
 	"github.com/torana-edge/torana-edge/internal/format/gemini"
+	"github.com/torana-edge/torana-edge/internal/format/openai"
 	"github.com/torana-edge/torana-edge/internal/provider"
 	"github.com/torana-edge/torana-edge/internal/wasm"
 	pb "github.com/torana-edge/torana-plugin-sdk/pb/v2"
@@ -16,6 +17,7 @@ import (
 
 // geminiAdapter is the adapter the final-wire assertions marshal through.
 var geminiAdapter = &gemini.Adapter{}
+var openaiAdapter = &openai.Adapter{}
 
 // The unknown-part contract through REAL guests (review finding 3): a
 // provider-valid unmodelled part survives a WASM pass and a WASM
@@ -331,51 +333,32 @@ func assertFRPWire(t *testing.T, wire []byte, arm, inner string) error {
 	return nil
 }
 
-// TestTypedHostFactsSurviveRealReplacement — a REAL replacement
-// (test-mutator rewrites the user text) exercises the PB round-trip and
-// the restoration path: ALL THREE typed host facts (Code Assist variant,
-// OpenAI variant, Responses layout) are restored EXACTLY from the
-// accepted request — a plugin can neither forge nor lose them — and the
-// Code Assist envelope extras reach the final wire at their exact scopes.
-func TestTypedHostFactsSurviveRealReplacement(t *testing.T) {
+// TestCodeAssistReplacementCanonicalOverlay — a REAL replacement
+// (test-mutator rewrites the user text) with the approved canonical
+// overlay: model/max_tokens/temperature/top_p/safety changes on the
+// ACCEPTED request reach the exact final Gemini wire while the wrapper/
+// inner extras survive at their exact scopes.
+func TestCodeAssistReplacementCanonicalOverlay(t *testing.T) {
 	requireWASM(t, fixturesDir+"/test-mutator/plugin.wasm")
 	pp := newTestPipeline(t, fixturesDir, []string{"test-mutator"})
 
-	env, err := engine.ParseOptionalJSONObject([]byte(`{"project":"p-1","request":{"sessionId":"s-9"}}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	layout, err := engine.ParseOptionalJSONArray([]byte(`[{"type":"message","role":"user","content":"hi"},{"type":"reasoning","encrypted_content":"opaque"}]`))
-	if err != nil {
-		t.Fatal(err)
-	}
+	maxTok := 4096
+	temp := 0.4
+	topP := 0.8
+	safety, _ := engine.ParseOptionalJSONArray([]byte(`[{"category":"HARM_CATEGORY_HARASSMENT","threshold":"BLOCK_NONE"}]`))
+	env, _ := engine.ParseOptionalJSONObject([]byte(`{"project":"p-1","request":{"sessionId":"s-9"}}`))
 	chat := &engine.ChatRequest{
-		Model:                "gemini-3.5-flash",
-		CodeAssist:           true,
-		OpenAIVariant:        engine.OpenAIResponses,
-		ResponsesInputLayout: layout,
-		ProviderExtensions:   env,
-		Messages:             []engine.Message{{Role: engine.RoleUser, Blocks: []engine.Block{{Text: &engine.TextBlock{Text: "hi"}}}}},
+		Model: "gemini-3.5-flash-extra-low", MaxTokens: &maxTok, Temperature: &temp, TopP: &topP,
+		SafetySettings: safety, CodeAssist: true, ProviderExtensions: env,
+		Messages: []engine.Message{{Role: engine.RoleUser, Blocks: []engine.Block{{Text: &engine.TextBlock{Text: "hi"}}}}},
 	}
-	out, err := pp.RunBeforeRequest(context.Background(), 13, chat, nil)
+	out, err := pp.RunBeforeRequest(context.Background(), 14, chat, nil)
 	if err != nil {
-		t.Fatalf("RunBeforeRequest: %v", err)
+		t.Fatal(err)
 	}
-	// The mutator rewrote the text (a REAL replacement happened).
 	if out.Messages[0].Blocks[0].Text.Text == "hi" {
 		t.Fatal("test-mutator did not replace (the pin is vacuous)")
 	}
-	// EXACT restoration of all three host-only facts.
-	if !out.CodeAssist {
-		t.Fatal("the typed Code Assist variant was lost through the replacement")
-	}
-	if out.OpenAIVariant != engine.OpenAIResponses {
-		t.Fatalf("the OpenAI variant was lost: %v", out.OpenAIVariant)
-	}
-	if out.ResponsesInputLayout.IsAbsent() || string(out.ResponsesInputLayout.Bytes()) != string(layout.Bytes()) {
-		t.Fatalf("the Responses layout was lost: %q", out.ResponsesInputLayout.Bytes())
-	}
-	// The envelope extras survive the replacement at their exact scopes.
 	wire, err := geminiAdapter.Marshal(out)
 	if err != nil {
 		t.Fatal(err)
@@ -384,15 +367,90 @@ func TestTypedHostFactsSurviveRealReplacement(t *testing.T) {
 	if err := json.Unmarshal(wire, &doc); err != nil {
 		t.Fatal(err)
 	}
+	if doc["model"] != "gemini-3.5-flash-extra-low" {
+		t.Fatalf("canonical model lost: %v", doc["model"])
+	}
 	if doc["project"] != "p-1" {
 		t.Fatalf("wrapper extra lost: %v", doc["project"])
 	}
-	req, ok := doc["request"].(map[string]any)
-	if !ok {
-		t.Fatalf("no request member: %s", wire)
-	}
+	req := doc["request"].(map[string]any)
 	if req["sessionId"] != "s-9" {
 		t.Fatalf("inner extra lost: %v", req["sessionId"])
+	}
+	gc := req["generationConfig"].(map[string]any)
+	if gc["maxOutputTokens"] != float64(4096) || gc["temperature"] != 0.4 || gc["topP"] != 0.8 {
+		t.Fatalf("canonical generation members lost: %v", gc)
+	}
+	if _, ok := req["safetySettings"]; !ok {
+		t.Fatalf("canonical safety lost: %v", req)
+	}
+}
+
+// TestOpenAIResponsesReplacementLayout — a REAL replacement on a Responses
+// request: the typed variant and the exact input layout survive and
+// re-splice opaque items on the final Responses wire.
+func TestOpenAIResponsesReplacementLayout(t *testing.T) {
+	requireWASM(t, fixturesDir+"/test-mutator/plugin.wasm")
+	pp := newTestPipeline(t, fixturesDir, []string{"test-mutator"})
+
+	layout, _ := engine.ParseOptionalJSONArray([]byte(`[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]},{"type":"reasoning","encrypted_content":"opaque-reasoning"}]`))
+	chat := &engine.ChatRequest{
+		Model: "gpt-5.4", OpenAIVariant: engine.OpenAIResponses, ResponsesInputLayout: layout,
+		Messages: []engine.Message{{Role: engine.RoleUser, Blocks: []engine.Block{{Text: &engine.TextBlock{Text: "hi"}}}}},
+	}
+	out, err := pp.RunBeforeRequest(context.Background(), 15, chat, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Messages[0].Blocks[0].Text.Text == "hi" {
+		t.Fatal("test-mutator did not replace (the pin is vacuous)")
+	}
+	if out.OpenAIVariant != engine.OpenAIResponses {
+		t.Fatal("variant lost through the replacement")
+	}
+	if out.ResponsesInputLayout.IsAbsent() || string(out.ResponsesInputLayout.Bytes()) != string(layout.Bytes()) {
+		t.Fatalf("layout lost through the replacement: %q", out.ResponsesInputLayout.Bytes())
+	}
+	wire, err := openaiAdapter.Marshal(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The final Responses wire re-splices the opaque reasoning item at its
+	// recorded position AND carries the replaced text.
+	if !strings.Contains(string(wire), `"encrypted_content":"opaque-reasoning"`) {
+		t.Fatalf("opaque item not re-spliced: %s", wire)
+	}
+	if !strings.Contains(string(wire), `"input":[`) || !strings.Contains(string(wire), `"model":"gpt-5.4"`) {
+		t.Fatalf("responses variant lost on the wire: %s", wire)
+	}
+}
+
+// TestCodeAssistSiblingCorpusThroughReplacement — the lexical sibling
+// corpus passes through a REAL replacement and stays exact on the final
+// wire.
+func TestCodeAssistSiblingCorpusThroughReplacement(t *testing.T) {
+	requireWASM(t, fixturesDir+"/test-mutator/plugin.wasm")
+	pp := newTestPipeline(t, fixturesDir, []string{"test-mutator"})
+
+	env, _ := engine.ParseOptionalJSONObject([]byte(`{"request":{"generationConfig":{"z":1e999,"a":1.0,"w": 42 ,"nested":{"k":[1,2]}}}}`))
+	chat := &engine.ChatRequest{
+		Model: "m", CodeAssist: true, ProviderExtensions: env,
+		Messages: []engine.Message{{Role: engine.RoleUser, Blocks: []engine.Block{{Text: &engine.TextBlock{Text: "hi"}}}}},
+	}
+	out, err := pp.RunBeforeRequest(context.Background(), 16, chat, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Messages[0].Blocks[0].Text.Text == "hi" {
+		t.Fatal("test-mutator did not replace (the pin is vacuous)")
+	}
+	wire, err := geminiAdapter.Marshal(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	preserved := `"generationConfig":{"z":1e999,"a":1.0,"w": 42 ,"nested":{"k":[1,2]}}`
+	if !strings.Contains(string(wire), preserved) {
+		t.Fatalf("sibling corpus not lexeme-exact after the replacement:\nwant %s\n got %s", preserved, wire)
 	}
 }
 
@@ -425,8 +483,7 @@ func codeAssistRequest() *engine.ChatRequest {
 // block mode the replacement is refused with the plugin named.
 func TestEnvelopeSmugglingBlockMode(t *testing.T) {
 	requireWASM(t, fixturesDir+"/test-envelope-smuggler/plugin.wasm")
-	pp := newTestPipeline(t, fixturesDir, []string{"test-envelope-smuggler"})
-	pp.CandidateValidator = smuggleValidator
+	pp := pipelineWithValidator(t, fixturesDir, []string{"test-envelope-smuggler"}, smuggleValidator)
 
 	chat := codeAssistRequest()
 	_, err := pp.RunBeforeRequest(context.Background(), 20, chat, nil)
@@ -453,8 +510,10 @@ func TestEnvelopeSmugglingPassRollsBackAndChains(t *testing.T) {
 	}
 	pp = pipelineWithApproval(t, fixturesDir, []string{"test-envelope-smuggler", "test-inert-a"}, map[string]provider.PluginApproval{
 		"test-envelope-smuggler": {Digest: digest, Permissions: []string{"ir.params.write"}, FailureMode: "pass"},
-	})
-	pp.CandidateValidator = smuggleValidator
+		// The DOWNSTREAM observer must be approved too: the rollback pin
+		// proves the chained pre-plugin request reached it.
+		"test-inert-a": {},
+	}, smuggleValidator)
 
 	chat := codeAssistRequest()
 	out, err := pp.RunBeforeRequest(context.Background(), 21, chat, nil)
@@ -464,17 +523,18 @@ func TestEnvelopeSmugglingPassRollsBackAndChains(t *testing.T) {
 	if out == nil {
 		t.Fatal("no chained output")
 	}
-	// The downstream chain saw the PRE-PLUGIN request: no smuggled model,
-	// the envelope intact.
-	ext := string(out.ProviderExtensions.Bytes())
-	if strings.Contains(ext, "smuggled-model") {
-		t.Fatalf("the smuggled member chained downstream: %s", ext)
-	}
+	// The downstream chain saw the PRE-PLUGIN request BYTE-EXACTLY: the
+	// accepted envelope is identical (no smuggled model), the typed
+	// variant is intact, and the mutator-free chain preserved the text.
 	if !out.CodeAssist {
 		t.Fatal("typed variant lost")
 	}
-	if !strings.Contains(ext, `"sessionId":"s-9"`) {
-		t.Fatalf("envelope altered through the pass: %s", ext)
+	if string(out.ProviderExtensions.Bytes()) != string(chat.ProviderExtensions.Bytes()) {
+		t.Fatalf("the downstream envelope differs from the pre-plugin request:\n got %s\nwant %s",
+			out.ProviderExtensions.Bytes(), chat.ProviderExtensions.Bytes())
+	}
+	if strings.Contains(string(out.ProviderExtensions.Bytes()), "smuggled-model") {
+		t.Fatal("the smuggled member chained downstream")
 	}
 }
 
@@ -485,7 +545,7 @@ func pluginBundleDigest(t *testing.T, name string) (string, error) {
 }
 
 // pipelineWithApproval builds a pipeline with an explicit approval map.
-func pipelineWithApproval(t testing.TB, dir string, order []string, approvals map[string]provider.PluginApproval) *PluginPipeline {
+func pipelineWithApproval(t testing.TB, dir string, order []string, approvals map[string]provider.PluginApproval, validator func(topo engine.TopologyFacts, current, replacement *pb.ChatRequest) error) *PluginPipeline {
 	conv := map[string]Approval{}
 	for name, a := range approvals {
 		conv[name] = Approval{Digest: a.Digest, Permissions: a.Permissions, FailureMode: a.FailureMode}
@@ -493,7 +553,20 @@ func pipelineWithApproval(t testing.TB, dir string, order []string, approvals ma
 	t.Helper()
 	rt := wasm.NewRuntime(context.Background())
 	t.Cleanup(func() { rt.Close() })
-	pp, err := NewPipeline(rt, PluginConfig{Dir: dir, Order: order, Approvals: conv})
+	pp, err := NewPipeline(rt, PluginConfig{Dir: dir, Order: order, Approvals: conv, CandidateValidator: validator})
+	if err != nil {
+		t.Fatalf("NewPipeline: %v", err)
+	}
+	return pp
+}
+
+// pipelineWithValidator builds a pipeline with the candidate validator at
+// CONSTRUCTION (the same seam production uses).
+func pipelineWithValidator(t testing.TB, dir string, order []string, validator func(topo engine.TopologyFacts, current, replacement *pb.ChatRequest) error) *PluginPipeline {
+	t.Helper()
+	rt := wasm.NewRuntime(context.Background())
+	t.Cleanup(func() { rt.Close() })
+	pp, err := NewPipeline(rt, PluginConfig{Dir: dir, Order: order, AllowUnapproved: true, CandidateValidator: validator})
 	if err != nil {
 		t.Fatalf("NewPipeline: %v", err)
 	}

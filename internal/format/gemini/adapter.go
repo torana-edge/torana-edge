@@ -1698,6 +1698,13 @@ func stripGenerationCanonicalMembers(inner engine.OptionalJSONObject) (engine.Op
 	if err != nil {
 		return inner, fmt.Errorf("gemini code assist: generationConfig must be a strict JSON object: %w", err)
 	}
+	// The absent-vs-empty rule (settled): input projection REMOVES
+	// generationConfig when NO unknown sibling remains after the canonical
+	// deletion (canonical-only input leaves no member to preserve); an
+	// EXPLICITLY EMPTY wire object is a plugin/provider-authored fact and
+	// is PRESERVED as `{}`. Member-count inspection via the raw wrapper —
+	// never a re-encoding.
+	before := gc
 	canonical := []string{"maxOutputTokens", "temperature", "topP", "stopSequences"}
 	for _, k := range canonical {
 		gc, err = gc.DeleteMember(k)
@@ -1706,6 +1713,13 @@ func stripGenerationCanonicalMembers(inner engine.OptionalJSONObject) (engine.Op
 		}
 	}
 	if gc.IsAbsent() {
+		return inner.DeleteMember("generationConfig")
+	}
+	beforeMap, _, _ := before.DecodeObject()
+	afterMap, _, _ := gc.DecodeObject()
+	if len(afterMap) == 0 && len(beforeMap) > 0 {
+		// Canonical-only input: nothing left to preserve — remove the
+		// member entirely rather than leak a derived `{}`.
 		return inner.DeleteMember("generationConfig")
 	}
 	return inner.SetMember("generationConfig", gc.Bytes())

@@ -1409,10 +1409,11 @@ func TestCodeAssistEnvelopeInvalidShapes(t *testing.T) {
 
 // TestGenerationSiblingLossless — unknown generationConfig siblings keep
 // their EXACT lexemes (member order, whitespace, numeric spellings,
-// escapes, nested bytes) across input projection and the final wire.
+// escapes, nested bytes) across input projection and the final wire. The
+// body is a VALID wrapped Code Assist request (contents inside request).
 func TestGenerationSiblingLossless(t *testing.T) {
 	// Nonalphabetical order, 1e999, 1.0, escaped Unicode, whitespace, a
-	// nested object.
+	// nested object — inside a valid wrapped request.
 	body := `{"model":"m","request":{"generationConfig":{"z":1e999,"a":1.0,"u":"\u0041bc","w": 42 ,"nested":{"k":[1,2]},"m":"x"}},"contents":[{"role":"user","parts":[{"text":"hi"}]}]}`
 	chat, err := (&Adapter{}).Unmarshal([]byte(body))
 	if err != nil {
@@ -1425,19 +1426,81 @@ func TestGenerationSiblingLossless(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// The preserved sibling corpus must survive byte-exact (order + lexemes).
-	for _, want := range []string{`"z":1e999`, `"a":1.0`, `"u":"\u0041bc"`, `"w": 42`, `"nested":{"k":[1,2]}`, `"m":"x"`} {
-		if !strings.Contains(string(out), want) {
-			t.Fatalf("sibling %q lost or re-lexemed on the wire: %s", want, out)
-		}
+	// The COMPLETE preserved generationConfig must appear EXACTLY
+	// (members in their original order, whitespace and lexemes intact) —
+	// a single substring assertion, not independent fragments.
+	preserved := `{"z":1e999,"a":1.0,"u":"\u0041bc","w": 42 ,"nested":{"k":[1,2]},"m":"x"}`
+	if !strings.Contains(string(out), preserved) {
+		t.Fatalf("preserved generationConfig not lexeme-exact on the wire:\nwant %s\n got %s", preserved, out)
 	}
-	// Canonical members overlay without disturbing the siblings.
-	if !strings.Contains(string(out), `"maxOutputTokens"`) && chat.MaxTokens == nil {
-		// no canonical fields set: fine
+}
+
+// TestGenerationConfigAbsentVsEmpty — the settled rule: input projection
+// REMOVES generationConfig when no unknown sibling remains (canonical-only
+// input never leaks a derived {}); an EXPLICITLY EMPTY wire object is
+// preserved; unknown-only and canonical+unknown keep the siblings; the
+// marshal overlays canonical members without disturbing any of them.
+func TestGenerationConfigAbsentVsEmpty(t *testing.T) {
+	rows := map[string]struct {
+		body     string
+		wantKind string // "absent" | "empty" | "siblings"
+	}{
+		"canonical only": {
+			`{"model":"m","request":{"generationConfig":{"maxOutputTokens":100,"temperature":0.5}},"contents":[{"role":"user","parts":[{"text":"hi"}]}]}`,
+			"absent",
+		},
+		"wire empty": {
+			`{"model":"m","request":{"generationConfig":{}},"contents":[{"role":"user","parts":[{"text":"hi"}]}]}`,
+			"empty",
+		},
+		"unknown only": {
+			`{"model":"m","request":{"generationConfig":{"candidateCount":3}},"contents":[{"role":"user","parts":[{"text":"hi"}]}]}`,
+			"siblings",
+		},
+		"canonical + unknown": {
+			`{"model":"m","request":{"generationConfig":{"maxOutputTokens":100,"candidateCount":3}},"contents":[{"role":"user","parts":[{"text":"hi"}]}]}`,
+			"siblings",
+		},
 	}
-	idxZ := strings.Index(string(out), `"z":1e999`)
-	idxA := strings.Index(string(out), `"a":1.0`)
-	if idxZ < 0 || idxA < 0 || idxZ > idxA {
-		t.Fatalf("sibling order changed: %s", out)
+	for name, row := range rows {
+		t.Run(name, func(t *testing.T) {
+			chat, err := (&Adapter{}).Unmarshal([]byte(row.body))
+			if err != nil {
+				t.Fatal(err)
+			}
+			// The parsed envelope's inner scope decides the projection
+			// outcome BEFORE any marshal.
+			m, _, _ := chat.ProviderExtensions.DecodeObject()
+			var inner map[string]json.RawMessage
+			if err := json.Unmarshal(m["request"], &inner); err != nil {
+				t.Fatal(err)
+			}
+			gcRaw, present := inner["generationConfig"]
+			switch row.wantKind {
+			case "absent":
+				if present {
+					t.Fatalf("canonical-only input leaked generationConfig: %s", gcRaw)
+				}
+			case "empty":
+				if !present || string(gcRaw) != "{}" {
+					t.Fatalf("explicit empty must be preserved as {}: %s", gcRaw)
+				}
+			case "siblings":
+				if !present || !strings.Contains(string(gcRaw), "candidateCount") {
+					t.Fatalf("siblings lost: %s", gcRaw)
+				}
+				if strings.Contains(string(gcRaw), "maxOutputTokens") {
+					t.Fatalf("canonical member survived the projection: %s", gcRaw)
+				}
+			}
+			// Marshal round-trips without disturbing the outcome.
+			out, err := (&Adapter{}).Marshal(chat)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if row.wantKind == "siblings" && !strings.Contains(string(out), "candidateCount") {
+				t.Fatalf("sibling lost on the wire: %s", out)
+			}
+		})
 	}
 }
