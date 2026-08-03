@@ -3,6 +3,7 @@ package gemini
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -492,47 +493,60 @@ func TestEmptyToolResultTextWraps(t *testing.T) {
 		{"bare", false, "content"},
 		{"code assist", true, "output"},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			chat := &engine.ChatRequest{
-				Model: "m",
-				Messages: []engine.Message{{Role: engine.RoleUser, Blocks: []engine.Block{{
-					ToolResult: &engine.ToolResultBlock{
-						ToolCallID: "c1", ToolName: "read",
-						Content: []engine.ToolResultContentBlock{{Text: ""}},
-					},
-				}}}},
-			}
-			if tc.codeAssist {
-				ext, _ := engine.ParseOptionalJSONObject([]byte(`{"_codeassist":true}`))
-				chat.ProviderExtensions = ext
-			}
-			out, err := (&Adapter{}).Marshal(chat)
-			if err != nil {
-				t.Fatalf("empty tool output must marshal: %v", err)
-			}
-			var top map[string]any
-			if err := json.Unmarshal(out, &top); err != nil {
-				t.Fatal(err)
-			}
-			var doc map[string]any
-			if tc.codeAssist {
-				req, ok := top["request"].(map[string]any)
-				if !ok {
-					t.Fatalf("no request envelope: %s", out)
+		for _, text := range []string{"", "   "} {
+			t.Run(tc.name+"/"+fmt.Sprintf("%q", text), func(t *testing.T) {
+				chat := &engine.ChatRequest{
+					Model: "m",
+					Messages: []engine.Message{{Role: engine.RoleUser, Blocks: []engine.Block{{
+						ToolResult: &engine.ToolResultBlock{
+							ToolCallID: "c1", ToolName: "read",
+							Content: []engine.ToolResultContentBlock{{Text: text}},
+						},
+					}}}},
 				}
-				doc = req
-			} else {
-				doc = top
-			}
-			contents := doc["contents"].([]any)
-			msg := contents[0].(map[string]any)
-			part := msg["parts"].([]any)[0].(map[string]any)
-			fr := part["functionResponse"].(map[string]any)
-			resp := fr["response"].(map[string]any)
-			if _, ok := resp[tc.wantKey]; !ok {
-				t.Fatalf("empty output must wrap as %q, got %v", tc.wantKey, resp)
-			}
-		})
+				if tc.codeAssist {
+					ext, _ := engine.ParseOptionalJSONObject([]byte(`{"_codeassist":true}`))
+					chat.ProviderExtensions = ext
+				}
+				out, err := (&Adapter{}).Marshal(chat)
+				if err != nil {
+					t.Fatalf("empty tool output must marshal: %v", err)
+				}
+				var top map[string]any
+				if err := json.Unmarshal(out, &top); err != nil {
+					t.Fatal(err)
+				}
+				var doc map[string]any
+				if tc.codeAssist {
+					req, ok := top["request"].(map[string]any)
+					if !ok {
+						t.Fatalf("no request envelope: %s", out)
+					}
+					doc = req
+				} else {
+					doc = top
+				}
+				contents := doc["contents"].([]any)
+				msg := contents[0].(map[string]any)
+				part := msg["parts"].([]any)[0].(map[string]any)
+				fr := part["functionResponse"].(map[string]any)
+				resp := fr["response"].(map[string]any)
+				// EXACT value under exactly the expected key.
+				if got, ok := resp[tc.wantKey].(string); !ok || got != text {
+					t.Fatalf("expected %q under %q, got %v", text, tc.wantKey, resp)
+				}
+				other := "output"
+				if tc.wantKey == "output" {
+					other = "content"
+				}
+				if _, ok := resp[other]; ok {
+					t.Fatalf("opposite key %q must be absent: %v", other, resp)
+				}
+				if len(resp) != 1 {
+					t.Fatalf("response must be exactly the wrap: %v", resp)
+				}
+			})
+		}
 	}
 }
 
@@ -713,4 +727,56 @@ func TestFunctionResponseNullSemantics(t *testing.T) {
 	if strings.Contains(string(out), "null") {
 		t.Fatalf("marshal emitted null members: %s", out)
 	}
+}
+
+// TestSystemUnknownBlockFailsClosed — the provider-independent contract
+// permits a system Unknown block (ValidateFullRequest accepts it), but
+// Gemini system parts are TEXT-ONLY: marshal must REJECT the request
+// rather than silently drop the block.
+func TestSystemUnknownBlockFailsClosed(t *testing.T) {
+	chat := &engine.ChatRequest{
+		Model: "m",
+		Messages: []engine.Message{
+			{Role: engine.RoleSystem, Blocks: []engine.Block{{
+				Unknown: &engine.UnknownBlock{Kind: "part", Payload: mustReqObj(`{"inlineData":{"mimeType":"image/png","data":"iVBOR"}}`)},
+			}}},
+			{Role: engine.RoleUser, Blocks: []engine.Block{{Text: &engine.TextBlock{Text: "hi"}}}},
+		},
+	}
+	// The common contract accepts it…
+	if err := pbconv.ValidateFullRequest(chat); err != nil {
+		t.Fatalf("the engine contract must accept a system unknown block: %v", err)
+	}
+	// …but the Gemini adapter rejects it instead of dropping it.
+	if _, err := (&Adapter{}).Marshal(chat); err == nil {
+		t.Fatal("gemini marshal must fail closed on a non-text system block")
+	}
+}
+
+// TestSystemToolBlockFailsClosed — same boundary for a system tool-use
+// block.
+func TestSystemToolBlockFailsClosed(t *testing.T) {
+	chat := &engine.ChatRequest{
+		Model: "m",
+		Messages: []engine.Message{
+			{Role: engine.RoleSystem, Blocks: []engine.Block{{
+				ToolUse: &engine.ToolUseBlock{ID: "c1", Name: "read", Arguments: mustReqObj(`{"p":1}`)},
+			}}},
+			{Role: engine.RoleUser, Blocks: []engine.Block{{Text: &engine.TextBlock{Text: "hi"}}}},
+		},
+	}
+	if err := pbconv.ValidateFullRequest(chat); err != nil {
+		t.Fatalf("the engine contract must accept a system tool-use block: %v", err)
+	}
+	if _, err := (&Adapter{}).Marshal(chat); err == nil {
+		t.Fatal("gemini marshal must fail closed on a non-text system block")
+	}
+}
+
+func mustReqObj(raw string) engine.RequiredJSONObject {
+	obj, err := engine.ParseRequiredJSONObject([]byte(raw))
+	if err != nil {
+		panic(err)
+	}
+	return obj
 }

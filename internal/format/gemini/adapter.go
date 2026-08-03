@@ -705,7 +705,10 @@ func (a *Adapter) Marshal(chat *engine.ChatRequest) ([]byte, error) {
 		}
 	}
 
-	sys := buildSystemInstruction(chat.Messages)
+	sys, err := buildSystemInstruction(chat.Messages)
+	if err != nil {
+		return nil, err
+	}
 	contents, err := buildContents(chat.Messages, codeAssist)
 	if err != nil {
 		return nil, err
@@ -1083,24 +1086,56 @@ func rejectGeminiProjection(u *engine.UnknownBlock) error {
 	return nil
 }
 
-func buildSystemInstruction(msgs []engine.Message) *geminiSystemInstruction {
+// buildSystemInstruction projects the system messages onto the Gemini
+// system array, FAILING CLOSED on any block the system seam cannot
+// represent: the provider-independent replacement contract allows any
+// block kind in a system message, but Gemini system parts are TEXT-ONLY —
+// a silently dropped system Unknown/tool block would be exactly the
+// silent-loss class the adapter boundary must reject. Text blocks
+// (including explicit empty) survive with their metadata.
+func buildSystemInstruction(msgs []engine.Message) (*geminiSystemInstruction, error) {
 	var si *geminiSystemInstruction
 	for _, msg := range msgs {
-		if msg.Role == engine.RoleSystem {
-			if si == nil {
-				si = &geminiSystemInstruction{Role: "user"}
+		if msg.Role != engine.RoleSystem {
+			continue
+		}
+		if si == nil {
+			si = &geminiSystemInstruction{Role: "user"}
+		}
+		for _, b := range msg.Blocks {
+			if b.Text == nil {
+				return nil, fmt.Errorf("gemini: system message has a %s block, not representable in the text-only system array", blockKindName(b))
 			}
-			for _, b := range msg.Blocks {
-				if b.Text != nil {
-					// Explicit empty text and partMetadata survive.
-					si.Parts = append(si.Parts, geminiPart{
-						Text: new(b.Text.Text), PartMetadata: b.Text.PartMetadataJson.Bytes(),
-					})
-				}
-			}
+			// Explicit empty text and partMetadata survive.
+			si.Parts = append(si.Parts, geminiPart{
+				Text: new(b.Text.Text), PartMetadata: b.Text.PartMetadataJson.Bytes(),
+			})
 		}
 	}
-	return si
+	return si, nil
+}
+
+// blockKindName names a block for fail-closed diagnostics.
+func blockKindName(b engine.Block) string {
+	switch {
+	case b.Text != nil:
+		return "text"
+	case b.Thinking != nil:
+		return "thinking"
+	case b.RedactedThinking != nil:
+		return "redacted_thinking"
+	case b.ToolUse != nil:
+		return "tool_use"
+	case b.ToolResult != nil:
+		return "tool_result"
+	case b.CacheBreakpoint != nil:
+		return "cache_breakpoint"
+	case b.Unknown != nil:
+		return "unknown"
+	case b.TrailingSignature != nil:
+		return "trailing_signature"
+	}
+	return "none"
 }
 
 // buildContents reconstructs the Gemini contents array from the ordered

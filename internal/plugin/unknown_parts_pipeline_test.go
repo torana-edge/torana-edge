@@ -2,6 +2,8 @@ package plugin
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -231,8 +233,8 @@ func TestFunctionResponsePartSurvivesWASMPassAndReplacement(t *testing.T) {
 			if err != nil {
 				t.Fatalf("pass: marshal: %v", err)
 			}
-			if !strings.Contains(string(wire), a.arm) || !strings.Contains(string(wire), `"displayName"`) {
-				t.Fatalf("pass: final wire lost the sealed part: %s", wire)
+			if err := assertFRPWire(t, wire, a.arm, a.inner); err != nil {
+				t.Fatalf("pass: %v", err)
 			}
 
 			// Replacement (test-mutator rewrites the user text).
@@ -250,9 +252,78 @@ func TestFunctionResponsePartSurvivesWASMPassAndReplacement(t *testing.T) {
 			if err != nil {
 				t.Fatalf("replacement: marshal: %v", err)
 			}
-			if !strings.Contains(string(wire2), a.arm) || !strings.Contains(string(wire2), `"displayName"`) {
-				t.Fatalf("replacement: final wire lost the sealed part: %s", wire2)
+			if err := assertFRPWire(t, wire2, a.arm, a.inner); err != nil {
+				t.Fatalf("replacement: %v", err)
 			}
 		})
 	}
+}
+
+// assertFRPWire STRUCTURALLY decodes the final gemini wire and pins the
+// exact functionResponse.parts shape: exactly one content with one part
+// carrying a functionResponse, exactly one parts element with exactly the
+// expected arm, and exact mimeType/data/fileUri/displayName values.
+func assertFRPWire(t *testing.T, wire []byte, arm, inner string) error {
+	t.Helper()
+	arm = strings.Trim(arm, `"`) // the caller passes the JSON-quoted arm
+	_ = inner
+	var doc map[string]any
+	if err := json.Unmarshal(wire, &doc); err != nil {
+		return fmt.Errorf("wire is not JSON: %v", err)
+	}
+	contents, ok := doc["contents"].([]any)
+	if !ok || len(contents) != 1 {
+		return fmt.Errorf("want exactly one content, got %v", contents)
+	}
+	msg, ok := contents[0].(map[string]any)
+	if !ok {
+		return fmt.Errorf("content is not an object")
+	}
+	parts, ok := msg["parts"].([]any)
+	if !ok || len(parts) != 1 {
+		return fmt.Errorf("want exactly one part, got %v", parts)
+	}
+	part, ok := parts[0].(map[string]any)
+	if !ok {
+		return fmt.Errorf("part is not an object")
+	}
+	frRaw, ok := part["functionResponse"].(map[string]any)
+	if !ok {
+		return fmt.Errorf("no functionResponse on the part: %v", part)
+	}
+	frParts, ok := frRaw["parts"].([]any)
+	if !ok || len(frParts) != 1 {
+		return fmt.Errorf("want exactly one functionResponse.parts element, got %v", frRaw["parts"])
+	}
+	frp, ok := frParts[0].(map[string]any)
+	if !ok {
+		return fmt.Errorf("parts element is not an object")
+	}
+	if len(frp) != 1 {
+		return fmt.Errorf("parts element has %d outer members, want exactly the one arm: %v", len(frp), frp)
+	}
+	armVal, ok := frp[arm]
+	if !ok {
+		return fmt.Errorf("parts element lacks arm %q: %v", arm, frp)
+	}
+	innerObj, ok := armVal.(map[string]any)
+	if !ok {
+		return fmt.Errorf("arm %q is not an object", arm)
+	}
+	want := map[string]string{}
+	if arm == "inlineData" {
+		want = map[string]string{"mimeType": "image/png", "data": "iVBOR", "displayName": "pic.png"}
+	} else {
+		want = map[string]string{"mimeType": "video/mp4", "fileUri": "gs://b/x.mp4", "displayName": "clip"}
+	}
+	if len(innerObj) != len(want) {
+		return fmt.Errorf("arm %q has %d inner members, want exactly %d: %v", arm, len(innerObj), len(want), innerObj)
+	}
+	for k, v := range want {
+		got, ok := innerObj[k].(string)
+		if !ok || got != v {
+			return fmt.Errorf("arm %q member %q = %v, want %q", arm, k, innerObj[k], v)
+		}
+	}
+	return nil
 }
