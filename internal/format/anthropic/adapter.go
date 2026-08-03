@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"math"
 
 	"github.com/torana-edge/torana-edge/internal/engine"
 	"github.com/torana-edge/torana-edge/internal/format"
@@ -232,6 +233,12 @@ func (a *Adapter) Unmarshal(rawBody []byte) (*engine.ChatRequest, error) {
 	var ar anthropicRequest
 	if err := json.Unmarshal(rawBody, &ar); err != nil {
 		return nil, fmt.Errorf("anthropic unmarshal: %w", err)
+	}
+	// Accepted-domain closure: max_tokens must be in 1..MaxInt32 (the
+	// canonical field the SDK pins); anything else is refused here as a
+	// 400-class parse error, never silently clamped or re-emitted.
+	if ar.MaxTokens != nil && (*ar.MaxTokens < 1 || *ar.MaxTokens > math.MaxInt32) {
+		return nil, fmt.Errorf("anthropic: max_tokens %d is outside 1..%d", *ar.MaxTokens, math.MaxInt32)
 	}
 
 	chat := &engine.ChatRequest{

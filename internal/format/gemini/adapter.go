@@ -25,6 +25,7 @@ package gemini
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"strings"
 
 	"github.com/torana-edge/torana-edge/internal/engine"
@@ -160,6 +161,11 @@ func (a *Adapter) Unmarshal(rawBody []byte) (*engine.ChatRequest, error) {
 
 	chat := &engine.ChatRequest{Stream: false, Model: "gemini"}
 
+	if gReq.GenerationConfig != nil && gReq.GenerationConfig.MaxOutputTokens != nil &&
+		(*gReq.GenerationConfig.MaxOutputTokens < 1 || *gReq.GenerationConfig.MaxOutputTokens > math.MaxInt32) {
+		return nil, fmt.Errorf("gemini: maxOutputTokens %d is outside 1..%d",
+			*gReq.GenerationConfig.MaxOutputTokens, math.MaxInt32)
+	}
 	if gReq.GenerationConfig != nil {
 		chat.MaxTokens = gReq.GenerationConfig.MaxOutputTokens
 		chat.Temperature = gReq.GenerationConfig.Temperature

@@ -7,6 +7,7 @@ package bedrock
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 
 	"github.com/torana-edge/torana-edge/internal/engine"
 	"github.com/torana-edge/torana-edge/internal/format"
@@ -174,6 +175,11 @@ func (a *Adapter) Unmarshal(rawBody []byte) (*engine.ChatRequest, error) {
 		}
 	}
 
+	if req.InferenceConfig != nil && req.InferenceConfig.MaxTokens != nil &&
+		(*req.InferenceConfig.MaxTokens < 1 || *req.InferenceConfig.MaxTokens > math.MaxInt32) {
+		return nil, fmt.Errorf("bedrock: maxTokens %d is outside 1..%d",
+			*req.InferenceConfig.MaxTokens, math.MaxInt32)
+	}
 	if req.InferenceConfig != nil {
 		chat.MaxTokens = req.InferenceConfig.MaxTokens
 		chat.Temperature = req.InferenceConfig.Temperature

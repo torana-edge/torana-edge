@@ -6,6 +6,7 @@ package openai
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"strings"
 
 	"github.com/torana-edge/torana-edge/internal/engine"
@@ -407,6 +408,9 @@ func (a *Adapter) unmarshalChat(rawBody []byte) (*engine.ChatRequest, error) {
 		return nil, fmt.Errorf("openai chat unmarshal: %w", err)
 	}
 
+	if cr.MaxTokens != nil && (*cr.MaxTokens < 1 || *cr.MaxTokens > math.MaxInt32) {
+		return nil, fmt.Errorf("openai chat: max_tokens %d is outside 1..%d", *cr.MaxTokens, math.MaxInt32)
+	}
 	req := &engine.ChatRequest{
 		Model:       cr.Model,
 		Stream:      cr.Stream,
