@@ -35,7 +35,7 @@ func ValidateEngineRequest(c *engine.ChatRequest) error {
 		return fmt.Errorf("top_p is not finite")
 	}
 	for i := range c.Messages {
-		if err := engine.ValidateMessage(&c.Messages[i]); err != nil {
+		if err := validateEngineMessage(&c.Messages[i]); err != nil {
 			return fmt.Errorf("message %d: %w", i, err)
 		}
 	}
@@ -48,6 +48,76 @@ func ValidateEngineRequest(c *engine.ChatRequest) error {
 		// Edge does not invent stricter host-only rules.)
 		if c.Tools[i].Name == "" {
 			return fmt.Errorf("tool %d: empty name", i)
+		}
+	}
+	return nil
+}
+
+func validateEngineMessage(m *engine.Message) error {
+	if m == nil {
+		return fmt.Errorf("message is nil")
+	}
+	for j := range m.Blocks {
+		if err := validateEngineBlock(&m.Blocks[j]); err != nil {
+			return fmt.Errorf("block %d: %w", j, err)
+		}
+	}
+	return nil
+}
+
+func validateEngineBlock(b *engine.Block) error {
+	arms := 0
+	if b.Text != nil {
+		arms++
+	}
+	if b.Thinking != nil {
+		arms++
+	}
+	if b.RedactedThinking != nil {
+		arms++
+	}
+	if b.ToolUse != nil {
+		arms++
+	}
+	if b.ToolResult != nil {
+		arms++
+	}
+	if b.CacheBreakpoint != nil {
+		arms++
+	}
+	if b.Unknown != nil {
+		arms++
+	}
+	if b.TrailingSignature != nil {
+		arms++
+	}
+	switch arms {
+	case 0:
+		return fmt.Errorf("block has zero arms")
+	case 1:
+		// exactly one arm: the ordered-body invariant
+	default:
+		return fmt.Errorf("block has %d arms, want exactly one", arms)
+	}
+	if b.ToolResult != nil {
+		if len(b.ToolResult.Content) == 0 {
+			return fmt.Errorf("tool result has empty nested content")
+		}
+		for k := range b.ToolResult.Content {
+			c := &b.ToolResult.Content[k]
+			nested := 0
+			if c.Text != "" {
+				nested++
+			}
+			if c.Unknown != nil {
+				nested++
+			}
+			if c.CacheBreakpoint != nil {
+				nested++
+			}
+			if nested > 1 {
+				return fmt.Errorf("nested content element %d has %d conflicting arms", k, nested)
+			}
 		}
 	}
 	return nil

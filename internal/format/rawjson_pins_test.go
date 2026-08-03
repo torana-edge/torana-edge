@@ -241,6 +241,7 @@ func TestRawJSONParametersRoundTrip(t *testing.T) {
 // TestRawJSONNilNormalization: provider inputs with NO arguments/schema
 // normalize to the canonical {} — never to absence — at the wrapper and on
 // the wire and in the PB.
+
 func mustCheckedPB(t *testing.T, chat *engine.ChatRequest) *pb.ChatRequest {
 	t.Helper()
 	pbReq, err := pbconv.ToPBChatRequestChecked(chat)
@@ -320,13 +321,13 @@ func TestRawJSONCacheKeyPins(t *testing.T) {
 		}
 	}
 	// Lexeme difference changes the key.
-	if k1, k2 := engine.CachePrefixKey(base(`{"path":"a"}`, `{"type":"object"}`)),
-		engine.CachePrefixKey(base(`{"path":"a","x":1e999}`, `{"type":"object"}`)); k1 == k2 {
+	if k1, k2 := mustCacheKey(t, base(`{"path":"a"}`, `{"type":"object"}`)),
+		mustCacheKey(t, base(`{"path":"a","x":1e999}`, `{"type":"object"}`)); k1 == k2 {
 		t.Fatal("lexeme difference did not change the cache key")
 	}
 	// Key order difference changes the key.
-	if k1, k2 := engine.CachePrefixKey(base(`{"x":1e999,"path":"a"}`, `{"type":"object"}`)),
-		engine.CachePrefixKey(base(`{"path":"a","x":1e999}`, `{"type":"object"}`)); k1 == k2 {
+	if k1, k2 := mustCacheKey(t, base(`{"x":1e999,"path":"a"}`, `{"type":"object"}`)),
+		mustCacheKey(t, base(`{"path":"a","x":1e999}`, `{"type":"object"}`)); k1 == k2 {
 		t.Fatal("key order difference did not change the cache key")
 	}
 	// Field identity/position is part of the framed transcript: the SAME two
@@ -335,18 +336,18 @@ func TestRawJSONCacheKeyPins(t *testing.T) {
 	// bytes without the surrounding positional framing).
 	payloadA := `{"path":"a"}`
 	payloadB := `{"type":"object"}`
-	ab := engine.CachePrefixKey(base(payloadA, payloadB))
-	ba := engine.CachePrefixKey(base(payloadB, payloadA))
+	ab := mustCacheKey(t, base(payloadA, payloadB))
+	ba := mustCacheKey(t, base(payloadB, payloadA))
 	if ab == ba {
 		t.Fatal("identical bytes in different fields produced the same cache key")
 	}
 	// Positive controls: identical requests and canonical-zero wrappers are
 	// deterministic and equal.
-	if k1, k2 := engine.CachePrefixKey(base(`{}`, `{}`)), engine.CachePrefixKey(base(`{}`, `{}`)); k1 != k2 {
+	if k1, k2 := mustCacheKey(t, base(`{}`, `{}`)), mustCacheKey(t, base(`{}`, `{}`)); k1 != k2 {
 		t.Fatal("canonical {} cache key is not deterministic")
 	}
-	if k1, k2 := engine.CachePrefixKey(base(`{"path":"a"}`, `{"type":"object"}`)),
-		engine.CachePrefixKey(base(`{"path":"a"}`, `{"type":"object"}`)); k1 != k2 {
+	if k1, k2 := mustCacheKey(t, base(`{"path":"a"}`, `{"type":"object"}`)),
+		mustCacheKey(t, base(`{"path":"a"}`, `{"type":"object"}`)); k1 != k2 {
 		t.Fatal("identical requests produced different cache keys")
 	}
 }

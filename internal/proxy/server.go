@@ -1103,7 +1103,15 @@ func New(cfg Config) (*Server, error) {
 			// after content routing may have changed the model, and after every
 			// plugin has had its say. Computing it earlier would key the entry
 			// on a request that was never sent.
-			rs.CachePrefixKey = engine.CachePrefixKey(chat)
+			// The cache key consumes an ALREADY-VALIDATED PB: the checked
+			// conversion is the owning gate (the transport validated this
+			// request at entry and every replacement passed
+			// ValidateReplacement), and the key operation re-runs the
+			// SDK's full-domain validator on the PB itself — the fail-safe
+			// "" is the only outcome for an out-of-domain request.
+			if pbReq, cerr := pbconv.ToPBChatRequestChecked(chat); cerr == nil {
+				rs.CachePrefixKey = engine.CachePrefixKey(pbReq)
+			}
 			rs.Path = rc.StrippedPath
 
 			newBody, err := fmt.Request.Marshal(chat)

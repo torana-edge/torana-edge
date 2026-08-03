@@ -3,6 +3,8 @@ package engine
 import (
 	"encoding/json"
 	"testing"
+
+	pb "github.com/torana-edge/torana-plugin-sdk/pb/v2"
 )
 
 func mustMeta(m map[string]any) OptionalJSONObject {
@@ -177,26 +179,41 @@ func TestConversationIDMultimodalDeterministic(t *testing.T) {
 // into `torana conversations` output.
 func TestKeyLength(t *testing.T) {
 	c := &ChatRequest{Messages: msgs(user("hello"))}
-	for name, got := range map[string]string{"ConversationID": ConversationID(c), "CachePrefixKey": CachePrefixKey(c)} {
+	pbC := &pb.ChatRequest{Model: c.Model, Messages: []*pb.Message{{Role: "user", Blocks: []*pb.RequestBlock{{
+		Kind: &pb.RequestBlock_Text{Text: &pb.RequestTextBlock{Text: "hello"}},
+	}}}}}
+	for name, got := range map[string]string{"ConversationID": ConversationID(c), "CachePrefixKey": CachePrefixKey(pbC)} {
 		if len(got) != keyBytes*2 {
 			t.Errorf("%s = %q, length %d, want %d", name, got, len(got), keyBytes*2)
 		}
 	}
 }
 
-// --- CachePrefixKey: the cache entry ---
+// --- CachePrefixKey: the cache entry (PB API) ---
+
+func pbSys(text string) *pb.Message {
+	return &pb.Message{Role: "system", Blocks: []*pb.RequestBlock{{Kind: &pb.RequestBlock_Text{Text: &pb.RequestTextBlock{Text: text}}}}}
+}
+
+func pbAsst(text string) *pb.Message {
+	return &pb.Message{Role: "assistant", Blocks: []*pb.RequestBlock{{Kind: &pb.RequestBlock_Text{Text: &pb.RequestTextBlock{Text: text}}}}}
+}
+
+func pbCachedSys(text string) *pb.Message {
+	return &pb.Message{Role: "system", Blocks: []*pb.RequestBlock{
+		{Kind: &pb.RequestBlock_Text{Text: &pb.RequestTextBlock{Text: text}}},
+		{Kind: &pb.RequestBlock_CacheBreakpoint{CacheBreakpoint: &pb.RequestCacheBreakpoint{MarkerJson: pbMarkerBytes(`{"type":"ephemeral"}`)}}},
+	}}
+}
 
 // TestCachePrefixKeyStableWhenPrefixStable is the core warming property. With a
 // breakpoint after the system prompt, appending turns beyond it must not change
 // the key — otherwise every turn looks like a new cache entry and warming can
 // never target anything.
 func TestCachePrefixKeyStableWhenPrefixStable(t *testing.T) {
-	cached := Message{Role: RoleSystem, Blocks: []Block{
-		{Text: &TextBlock{Text: "big system prompt"}},
-		{CacheBreakpoint: &CacheBreakpointBlock{Marker: ephemeral()}},
-	}}
-	turn1 := &ChatRequest{Model: "m", Messages: msgs(cached, user("hello"))}
-	turn9 := &ChatRequest{Model: "m", Messages: msgs(cached, user("hello"), asst("hi"), user("more"), asst("ok"))}
+	cached := pbCachedSys("big system prompt")
+	turn1 := &pb.ChatRequest{Model: "m", Messages: []*pb.Message{cached, pbUserMsg("hello")}}
+	turn9 := &pb.ChatRequest{Model: "m", Messages: []*pb.Message{cached, pbUserMsg("hello"), pbAsst("hi"), pbUserMsg("more"), pbAsst("ok")}}
 
 	if got, want := CachePrefixKey(turn9), CachePrefixKey(turn1); got != want {
 		t.Errorf("key moved though the cached prefix did not: turn9=%s turn1=%s", got, want)
@@ -207,22 +224,16 @@ func TestCachePrefixKeyStableWhenPrefixStable(t *testing.T) {
 // two-key split necessary. A compaction that rewrites history kills the cache
 // entry, and the key must follow — warming a dead prefix is pure cost.
 func TestCachePrefixKeyChangesWhenPrefixRewritten(t *testing.T) {
-	before := &ChatRequest{Model: "m", Messages: msgs(
-		sys("prompt"),
-		user("original first message"),
-		Message{Role: RoleAssistant, Blocks: []Block{
-			{Text: &TextBlock{Text: "long history"}},
-			{CacheBreakpoint: &CacheBreakpointBlock{Marker: ephemeral()}},
-		}},
-	)}
-	after := &ChatRequest{Model: "m", Messages: msgs(
-		sys("prompt"),
-		user("[summary of earlier turns]"),
-		Message{Role: RoleAssistant, Blocks: []Block{
-			{Text: &TextBlock{Text: "long history"}},
-			{CacheBreakpoint: &CacheBreakpointBlock{Marker: ephemeral()}},
-		}},
-	)}
+	before := &pb.ChatRequest{Model: "m", Messages: []*pb.Message{
+		pbSys("prompt"),
+		pbUserMsg("original first message"),
+		pbCachedSys("long history"),
+	}}
+	after := &pb.ChatRequest{Model: "m", Messages: []*pb.Message{
+		pbSys("prompt"),
+		pbUserMsg("[summary of earlier turns]"),
+		pbCachedSys("long history"),
+	}}
 
 	if CachePrefixKey(before) == CachePrefixKey(after) {
 		t.Error("a rewritten prefix kept its cache key")
@@ -232,12 +243,9 @@ func TestCachePrefixKeyChangesWhenPrefixRewritten(t *testing.T) {
 // TestCachePrefixKeySplitsOnModel — provider caches never span models, so the
 // same prefix on two models is two entries.
 func TestCachePrefixKeySplitsOnModel(t *testing.T) {
-	base := msgs(Message{Role: RoleSystem, Blocks: []Block{
-		{Text: &TextBlock{Text: "p"}},
-		{CacheBreakpoint: &CacheBreakpointBlock{Marker: ephemeral()}},
-	}}, user("hi"))
-	sonnet := &ChatRequest{Model: "claude-sonnet-4-5", Messages: base}
-	opus := &ChatRequest{Model: "claude-opus-4-1", Messages: base}
+	base := []*pb.Message{pbCachedSys("p"), pbUserMsg("hi")}
+	sonnet := &pb.ChatRequest{Model: "claude-sonnet-4-5", Messages: base}
+	opus := &pb.ChatRequest{Model: "claude-opus-4-1", Messages: base}
 
 	if CachePrefixKey(sonnet) == CachePrefixKey(opus) {
 		t.Error("two models shared one cache key")
@@ -247,12 +255,9 @@ func TestCachePrefixKeySplitsOnModel(t *testing.T) {
 // TestCachePrefixKeyIncludesToolDefs — tool definitions sit inside the cached
 // prefix, so changing them invalidates the entry even when messages are equal.
 func TestCachePrefixKeyIncludesToolDefs(t *testing.T) {
-	base := msgs(Message{Role: RoleSystem, Blocks: []Block{
-		{Text: &TextBlock{Text: "p"}},
-		{CacheBreakpoint: &CacheBreakpointBlock{Marker: ephemeral()}},
-	}}, user("hi"))
-	a := &ChatRequest{Model: "m", Messages: base, Tools: []ToolDef{{Name: "bash"}}}
-	b := &ChatRequest{Model: "m", Messages: base, Tools: []ToolDef{{Name: "bash"}, {Name: "read"}}}
+	base := []*pb.Message{pbCachedSys("p"), pbUserMsg("hi")}
+	a := &pb.ChatRequest{Model: "m", Messages: base, Tools: []*pb.ToolDef{{Name: "bash", ParametersJson: pbMarkerBytes(`{}`)}}}
+	b := &pb.ChatRequest{Model: "m", Messages: base, Tools: []*pb.ToolDef{{Name: "bash", ParametersJson: pbMarkerBytes(`{}`)}, {Name: "read", ParametersJson: pbMarkerBytes(`{}`)}}}
 
 	if CachePrefixKey(a) == CachePrefixKey(b) {
 		t.Error("adding a tool definition kept the cache key")
@@ -262,22 +267,19 @@ func TestCachePrefixKeyIncludesToolDefs(t *testing.T) {
 // TestCachePrefixKeyTracksBreakpointMove — moving the breakpoint changes how much
 // is cached, which is a different entry.
 func TestCachePrefixKeyTracksBreakpointMove(t *testing.T) {
-	early := &ChatRequest{Model: "m", Messages: msgs(
-		Message{Role: RoleSystem, Blocks: []Block{
-			{Text: &TextBlock{Text: "p"}},
-			{CacheBreakpoint: &CacheBreakpointBlock{Marker: ephemeral()}},
+	early := &pb.ChatRequest{Model: "m", Messages: []*pb.Message{
+		pbCachedSys("p"),
+		pbUserMsg("hello"),
+		pbAsst("hi"),
+	}}
+	late := &pb.ChatRequest{Model: "m", Messages: []*pb.Message{
+		pbSys("p"),
+		pbUserMsg("hello"),
+		{Role: "assistant", Blocks: []*pb.RequestBlock{
+			{Kind: &pb.RequestBlock_Text{Text: &pb.RequestTextBlock{Text: "hi"}}},
+			{Kind: &pb.RequestBlock_CacheBreakpoint{CacheBreakpoint: &pb.RequestCacheBreakpoint{MarkerJson: pbMarkerBytes(`{"type":"ephemeral"}`)}}},
 		}},
-		user("hello"),
-		asst("hi"),
-	)}
-	late := &ChatRequest{Model: "m", Messages: msgs(
-		sys("p"),
-		user("hello"),
-		Message{Role: RoleAssistant, Blocks: []Block{
-			{Text: &TextBlock{Text: "hi"}},
-			{CacheBreakpoint: &CacheBreakpointBlock{Marker: ephemeral()}},
-		}},
-	)}
+	}}
 
 	if CachePrefixKey(early) == CachePrefixKey(late) {
 		t.Error("breakpoint position did not affect the cache key")
@@ -289,8 +291,8 @@ func TestCachePrefixKeyTracksBreakpointMove(t *testing.T) {
 // prefix, so the key moves every turn. That is honest — the caller does not
 // control that cache and cannot warm it.
 func TestCachePrefixKeyNoBreakpointHashesEverything(t *testing.T) {
-	turn1 := &ChatRequest{Model: "m", Messages: msgs(sys("p"), user("hello"))}
-	turn2 := &ChatRequest{Model: "m", Messages: msgs(sys("p"), user("hello"), asst("hi"))}
+	turn1 := &pb.ChatRequest{Model: "m", Messages: []*pb.Message{pbSys("p"), pbUserMsg("hello")}}
+	turn2 := &pb.ChatRequest{Model: "m", Messages: []*pb.Message{pbSys("p"), pbUserMsg("hello"), pbAsst("hi")}}
 
 	if CachePrefixKey(turn1) == CachePrefixKey(turn2) {
 		t.Error("with no breakpoint, an appended turn must change the key")
@@ -302,23 +304,26 @@ func TestCachePrefixKeyNoBreakpointHashesEverything(t *testing.T) {
 // mistaken for the other.
 func TestCachePrefixKeyDistinctFromConversationID(t *testing.T) {
 	c := &ChatRequest{Messages: msgs(user("hello"))}
-	if ConversationID(c) == CachePrefixKey(c) {
+	if ConversationID(c) == CachePrefixKey(&pb.ChatRequest{Model: c.Model, Messages: []*pb.Message{pbUserMsg("hello")}}) {
 		t.Error("conversation and cache-prefix domains are not separated")
 	}
 }
 
 // TestCachePrefixKeyPreservesSignatures — a dropped thoughtSignature was a real
 // production bug in the Gemini path. Signatures are part of the replayed prefix,
-// so the key must notice when one changes.
+// so the key must notice when one changes. The tool-call and content-bound
+// signatures ride blocks BEFORE a marker (in-prefix); the trailing signature is
+// FINAL by contract, so its fixture carries NO marker — the whole request is
+// the automatic-cache prefix.
 func TestCachePrefixKeyPreservesSignatures(t *testing.T) {
-	mk := func(sig string) *ChatRequest {
-		return &ChatRequest{Model: "m", Messages: msgs(
-			sys("p"),
-			Message{Role: RoleAssistant, Blocks: []Block{
-				{ToolUse: &ToolUseBlock{ID: "1", Name: "bash", Signature: sig}},
-				{CacheBreakpoint: &CacheBreakpointBlock{Marker: ephemeral()}},
+	mk := func(sig string) *pb.ChatRequest {
+		return &pb.ChatRequest{Model: "m", Messages: []*pb.Message{
+			pbSys("p"),
+			{Role: "assistant", Blocks: []*pb.RequestBlock{
+				{Kind: &pb.RequestBlock_ToolUse{ToolUse: &pb.RequestToolUseBlock{Id: "1", Name: "bash", Signature: sig, ArgumentsJson: pbMarkerBytes(`{}`)}}},
+				{Kind: &pb.RequestBlock_CacheBreakpoint{CacheBreakpoint: &pb.RequestCacheBreakpoint{MarkerJson: pbMarkerBytes(`{"type":"ephemeral"}`)}}},
 			}},
-		)}
+		}}
 	}
 	if CachePrefixKey(mk("sig-a")) == CachePrefixKey(mk("sig-b")) {
 		t.Error("a changed tool-call signature kept the cache key")
@@ -326,14 +331,14 @@ func TestCachePrefixKeyPreservesSignatures(t *testing.T) {
 
 	// ContentSignature: a signature bound to a text part is part of the
 	// replayed prefix; two requests differing only in it must split the key.
-	mkContent := func(sig string) *ChatRequest {
-		return &ChatRequest{Model: "m", Messages: msgs(
-			sys("p"),
-			Message{Role: RoleAssistant, Blocks: []Block{
-				{Text: &TextBlock{Text: "answer", Signature: sig}},
-				{CacheBreakpoint: &CacheBreakpointBlock{Marker: ephemeral()}},
+	mkContent := func(sig string) *pb.ChatRequest {
+		return &pb.ChatRequest{Model: "m", Messages: []*pb.Message{
+			pbSys("p"),
+			{Role: "assistant", Blocks: []*pb.RequestBlock{
+				{Kind: &pb.RequestBlock_Text{Text: &pb.RequestTextBlock{Text: "answer", Signature: sig}}},
+				{Kind: &pb.RequestBlock_CacheBreakpoint{CacheBreakpoint: &pb.RequestCacheBreakpoint{MarkerJson: pbMarkerBytes(`{"type":"ephemeral"}`)}}},
 			}},
-		)}
+		}}
 	}
 	if CachePrefixKey(mkContent("sig-a")) == CachePrefixKey(mkContent("sig-b")) {
 		t.Error("a changed content signature kept the cache key")
@@ -343,14 +348,14 @@ func TestCachePrefixKeyPreservesSignatures(t *testing.T) {
 	// trailing block is FINAL by contract and a marker would close the
 	// prefix BEFORE it, so this fixture carries NO marker — the whole
 	// request is the automatic-cache prefix and the signature is part of it.
-	mkTrailing := func(sig string) *ChatRequest {
-		return &ChatRequest{Model: "m", Messages: msgs(
-			sys("p"),
-			Message{Role: RoleAssistant, Blocks: []Block{
-				{Text: &TextBlock{Text: "answer"}},
-				{TrailingSignature: &TrailingSignatureBlock{Signature: sig}},
+	mkTrailing := func(sig string) *pb.ChatRequest {
+		return &pb.ChatRequest{Model: "m", Messages: []*pb.Message{
+			pbSys("p"),
+			{Role: "assistant", Blocks: []*pb.RequestBlock{
+				{Kind: &pb.RequestBlock_Text{Text: &pb.RequestTextBlock{Text: "answer"}}},
+				{Kind: &pb.RequestBlock_TrailingSignature{TrailingSignature: &pb.RequestTrailingSignatureBlock{Signature: sig}}},
 			}},
-		)}
+		}}
 	}
 	if CachePrefixKey(mkTrailing("sig-a")) == CachePrefixKey(mkTrailing("sig-b")) {
 		t.Error("a changed trailing signature kept the cache key")
@@ -364,19 +369,23 @@ func TestCachePrefixKeyPreservesSignatures(t *testing.T) {
 	}
 }
 
-// TestCachePrefixKeyEmpty — nothing cacheable yields "".
+// TestCachePrefixKeyEmpty — the key op is self-gated by the SDK's full-domain
+// validator: "" for nil and for out-of-domain requests; a non-nil in-domain
+// request (even with zero messages) gets a deterministic key.
 func TestCachePrefixKeyEmpty(t *testing.T) {
-	// "" is reserved for nil — nothing cacheable. A non-nil request is in
-	// the SDK domain even with zero messages (the tool prefix is keyable),
-	// so it produces a deterministic key, never a silent "".
 	if got := CachePrefixKey(nil); got != "" {
 		t.Errorf("nil request = %q, want empty", got)
 	}
-	empty := &ChatRequest{}
+	empty := &pb.ChatRequest{}
 	if got := CachePrefixKey(empty); got == "" {
-		t.Error("a non-nil empty request must produce a deterministic key")
+		t.Error("a non-nil in-domain empty request must produce a deterministic key")
 	}
-	if CachePrefixKey(empty) != CachePrefixKey(&ChatRequest{}) {
+	if CachePrefixKey(empty) != CachePrefixKey(&pb.ChatRequest{}) {
 		t.Error("the empty-request key must be deterministic")
+	}
+	// Out-of-domain: a message without blocks gets no key.
+	invalid := &pb.ChatRequest{Model: "m", Messages: []*pb.Message{{Role: "user"}}}
+	if got := CachePrefixKey(invalid); got != "" {
+		t.Errorf("an SDK-invalid request got a key %q; want the fail-safe empty key", got)
 	}
 }

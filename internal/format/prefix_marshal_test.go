@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/torana-edge/torana-edge/internal/engine"
+	"github.com/torana-edge/torana-edge/internal/engine/pbconv"
 	"github.com/torana-edge/torana-edge/internal/format/anthropic"
 	"github.com/torana-edge/torana-edge/internal/format/bedrock"
 )
@@ -28,7 +29,7 @@ func TestMarshalAfterCachePrefixKeyKeepsSuffix(t *testing.T) {
 			{Text: &engine.TextBlock{Text: "outer-suffix"}},
 		}}},
 	}
-	if engine.CachePrefixKey(chat) == "" {
+	if mustCacheKey(t, chat) == "" {
 		t.Fatal("key empty")
 	}
 
@@ -54,7 +55,7 @@ func TestMarshalAfterCachePrefixKeyKeepsSuffix(t *testing.T) {
 			{Text: &engine.TextBlock{Text: "outer-suffix"}},
 		}}},
 	}
-	if engine.CachePrefixKey(bedChat) == "" {
+	if mustCacheKey(t, bedChat) == "" {
 		t.Fatal("key empty")
 	}
 	bed, err := (&bedrock.Adapter{}).Marshal(bedChat)
@@ -64,6 +65,15 @@ func TestMarshalAfterCachePrefixKeyKeepsSuffix(t *testing.T) {
 	if !strings.Contains(string(bed), "outer-suffix") {
 		t.Fatalf("bedrock suffix block missing after key computation: %s", bed)
 	}
+}
+
+func mustCacheKey(t *testing.T, chat *engine.ChatRequest) string {
+	t.Helper()
+	pbReq, err := pbconv.ToPBChatRequestChecked(chat)
+	if err != nil {
+		t.Fatalf("checked projection: %v", err)
+	}
+	return engine.CachePrefixKey(pbReq)
 }
 
 func mustMarkerForTest(raw string) engine.RequiredJSONObject {

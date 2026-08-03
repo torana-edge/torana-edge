@@ -53,29 +53,6 @@ func mustReqObj(raw string) engine.RequiredJSONObject {
 	return r
 }
 
-// TestMessageToPBDifferential pins byte equality between the engine's
-// canonical projection (used by the shared SDK fingerprint in CachePrefixKey)
-// and the pbconv request-path converter. The two implementations must never
-// drift: a difference would make the cache key disagree with the actual
-// request body the plugins see.
-func TestMessageToPBDifferential(t *testing.T) {
-	for i, m := range messageCorpus() {
-		got, err := engine.MessageToPB(&m)
-		if err != nil {
-			t.Fatalf("message %d: MessageToPB: %v", i, err)
-		}
-		want := toPBMessage(m)
-		if !proto.Equal(got, want) {
-			t.Fatalf("message %d: MessageToPB != toPBMessage\n  engine: %v\n  pbconv: %v", i, got, want)
-		}
-		gotRaw, _ := proto.Marshal(got)
-		wantRaw, _ := proto.Marshal(want)
-		if string(gotRaw) != string(wantRaw) {
-			t.Fatalf("message %d: wire bytes differ: %x vs %x", i, gotRaw, wantRaw)
-		}
-	}
-}
-
 // TestPBMarshalClosure pins the request-path round trip: every corpus message
 // survives ToPB -> FromPB byte-identically, and the canonical PB survives
 // FromPB -> ToPB identically. This is the reference model the adapters and

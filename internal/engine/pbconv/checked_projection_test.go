@@ -11,6 +11,8 @@ import (
 	"github.com/torana-edge/torana-edge/internal/format/bedrock"
 	"github.com/torana-edge/torana-edge/internal/format/gemini"
 	"github.com/torana-edge/torana-edge/internal/format/openai"
+	pb "github.com/torana-edge/torana-plugin-sdk/pb/v2"
+	"google.golang.org/protobuf/proto"
 )
 
 // The accepted-input closure (review finding 2): the Engine->PB boundary is
@@ -349,14 +351,63 @@ func TestFullDomainRefusedByEveryAdapterMarshalEntry(t *testing.T) {
 	}
 }
 
-// TestCachePrefixKeyRefusesSDKInvalidMessage — the cache projection must
-// refuse (empty key) rather than hash an SDK-invalid message.
-func TestCachePrefixKeyRefusesSDKInvalidMessage(t *testing.T) {
-	chat := &engine.ChatRequest{
-		Model:    "m",
-		Messages: []engine.Message{{Role: engine.RoleUser}}, // no blocks: SDK-invalid
+// TestCachePrefixKeyRefusesSDKInvalidRequests — the cache operation is
+// gated by the SDK's full-domain validator on the PB it hashes: EVERY
+// out-of-domain family gets the fail-safe empty key, not just a
+// message-level row. The negatives are built as PBs directly (the raw
+// invalidities survive the projection domain), plus a valid tools-only
+// control.
+func TestCachePrefixKeyRefusesSDKInvalidRequests(t *testing.T) {
+	valid := &pb.ChatRequest{Model: "m", Messages: []*pb.Message{{Role: "user", Blocks: []*pb.RequestBlock{{
+		Kind: &pb.RequestBlock_Text{Text: &pb.RequestTextBlock{Text: "hi"}},
+	}}}}}
+	if got := engine.CachePrefixKey(valid); got == "" {
+		t.Fatal("a valid request must produce a key")
 	}
-	if got := engine.CachePrefixKey(chat); got != "" {
-		t.Fatalf("cache key %q for an SDK-invalid message; want the fail-safe empty key", got)
+
+	negatives := map[string]*pb.ChatRequest{
+		"message without blocks": {Model: "m", Messages: []*pb.Message{{Role: "user"}}},
+		"empty role": {Model: "m", Messages: []*pb.Message{{Role: "", Blocks: []*pb.RequestBlock{{
+			Kind: &pb.RequestBlock_Text{Text: &pb.RequestTextBlock{Text: "hi"}},
+		}}}}},
+		"empty tool name": {Model: "m", Messages: []*pb.Message{{Role: "user", Blocks: []*pb.RequestBlock{{
+			Kind: &pb.RequestBlock_Text{Text: &pb.RequestTextBlock{Text: "hi"}},
+		}}}}, Tools: []*pb.ToolDef{{Name: "", ParametersJson: []byte(`{}`)}}},
+		"malformed tool parameters": {Model: "m", Messages: []*pb.Message{{Role: "user", Blocks: []*pb.RequestBlock{{
+			Kind: &pb.RequestBlock_Text{Text: &pb.RequestTextBlock{Text: "hi"}},
+		}}}}, Tools: []*pb.ToolDef{{Name: "read", ParametersJson: []byte(`[1,2]`)}}},
+		"empty tool parameters": {Model: "m", Messages: []*pb.Message{{Role: "user", Blocks: []*pb.RequestBlock{{
+			Kind: &pb.RequestBlock_Text{Text: &pb.RequestTextBlock{Text: "hi"}},
+		}}}}, Tools: []*pb.ToolDef{{Name: "read", ParametersJson: nil}}},
+		"max_tokens below 1": {Model: "m", MaxTokens: proto.Int32(0), Messages: []*pb.Message{{Role: "user", Blocks: []*pb.RequestBlock{{
+			Kind: &pb.RequestBlock_Text{Text: &pb.RequestTextBlock{Text: "hi"}},
+		}}}}},
+		"non-finite temperature": {Model: "m", Temperature: proto.Float64(math.NaN()), Messages: []*pb.Message{{Role: "user", Blocks: []*pb.RequestBlock{{
+			Kind: &pb.RequestBlock_Text{Text: &pb.RequestTextBlock{Text: "hi"}},
+		}}}}},
+		"invalid provider_extensions": {Model: "m", ProviderExtensionsJson: []byte(`nope`), Messages: []*pb.Message{{Role: "user", Blocks: []*pb.RequestBlock{{
+			Kind: &pb.RequestBlock_Text{Text: &pb.RequestTextBlock{Text: "hi"}},
+		}}}}},
+		"invalid safety_settings (object, not array)": {Model: "m", SafetySettingsJson: []byte(`{}`), Messages: []*pb.Message{{Role: "user", Blocks: []*pb.RequestBlock{{
+			Kind: &pb.RequestBlock_Text{Text: &pb.RequestTextBlock{Text: "hi"}},
+		}}}}},
+		"invalid torana_meta": {Model: "m", ToranaMetaJson: []byte(`[1]`), Messages: []*pb.Message{{Role: "user", Blocks: []*pb.RequestBlock{{
+			Kind: &pb.RequestBlock_Text{Text: &pb.RequestTextBlock{Text: "hi"}},
+		}}}}},
+	}
+	for name, pbReq := range negatives {
+		t.Run(name, func(t *testing.T) {
+			if got := engine.CachePrefixKey(pbReq); got != "" {
+				t.Fatalf("cache key %q for an SDK-invalid request; want the fail-safe empty key", got)
+			}
+		})
+	}
+
+	// Valid tools-only control: the SDK domain permits zero messages, so a
+	// tools-only request with a tool marker keys the tool prefix.
+	toolsOnly := &pb.ChatRequest{Model: "m",
+		Tools: []*pb.ToolDef{{Name: "read", ParametersJson: []byte(`{}`), CacheControlJson: []byte(`{"type":"ephemeral"}`)}}}
+	if got := engine.CachePrefixKey(toolsOnly); got == "" {
+		t.Fatal("a valid tools-only request must key the tool prefix")
 	}
 }

@@ -43,9 +43,9 @@ func TestProjectionCallSiteInventory(t *testing.T) {
 	roots := []string{filepath.Join(root, "internal"), filepath.Join(root, "cmd")}
 	var files []string
 	for _, root := range roots {
-		_ = filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		werr := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
 			if err != nil {
-				return nil
+				return err
 			}
 			if d.IsDir() {
 				return nil
@@ -55,17 +55,34 @@ func TestProjectionCallSiteInventory(t *testing.T) {
 			}
 			return nil
 		})
+		if werr != nil {
+			t.Fatalf("FAIL-CLOSED: walk %s: %v", root, werr)
+		}
 	}
 	if len(files) == 0 {
 		t.Fatal("no production Go files scanned")
 	}
 
+	// Resolve import paths per file so an import ALIAS cannot evade the
+	// check: the local selector name is looked up through the file's import
+	// declarations and compared by IMPORT PATH, never by identifier spelling.
 	checkedCalls := 0
 	for _, path := range files {
 		fset := token.NewFileSet()
 		node, err := parser.ParseFile(fset, path, nil, 0)
 		if err != nil {
-			t.Fatalf("parse %s: %v", path, err)
+			t.Fatalf("FAIL-CLOSED: parse %s: %v", path, err)
+		}
+		alias := map[string]string{}
+		for _, imp := range node.Imports {
+			pathName := strings.Trim(imp.Path.Value, `"`)
+			local := pathName
+			if imp.Name != nil {
+				local = imp.Name.Name
+			} else if i := strings.LastIndex(pathName, "/"); i >= 0 {
+				local = pathName[i+1:]
+			}
+			alias[local] = pathName
 		}
 		ast.Inspect(node, func(n ast.Node) bool {
 			call, ok := n.(*ast.CallExpr)
@@ -80,15 +97,24 @@ func TestProjectionCallSiteInventory(t *testing.T) {
 			if !ok {
 				return true
 			}
-			switch pkg.Name + "." + sel.Sel.Name {
-			case "pbconv.ToPBChatRequest", "pbconv.toPBChatRequest":
-				t.Errorf("%s: the unchecked full-request projector is called; only ToPBChatRequestChecked may be used", fset.Position(call.Pos()))
-			case "pbconv.ToPBChatRequestChecked":
-				checkedCalls++
-			case "engine.MessageToPB":
-				if rel, rerr := filepath.Rel(root, path); rerr != nil || rel != "internal/engine/conversation.go" {
-					t.Errorf("%s: MessageToPB called outside the cache projection; use a checked boundary", fset.Position(call.Pos()))
+			impPath, known := alias[pkg.Name]
+			if !known {
+				return true
+			}
+			switch impPath {
+			case "github.com/torana-edge/torana-edge/internal/engine/pbconv":
+				switch sel.Sel.Name {
+				case "ToPBChatRequest", "toPBChatRequest":
+					t.Errorf("%s: the unchecked full-request projector is called; only ToPBChatRequestChecked may be used", fset.Position(call.Pos()))
+				case "ToPBChatRequestChecked":
+					checkedCalls++
 				}
+			case "github.com/torana-edge/torana-edge/internal/engine":
+				// The engine's only exported projection is the checked
+				// MessageToPB-free cache key (PB-in) and the checked
+				// per-message validator; no first-arm-wins converter exists
+				// there anymore. Assert nothing can reach a raw projector:
+				// the package exposes none.
 			}
 			return true
 		})
