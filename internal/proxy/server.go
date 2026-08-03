@@ -38,6 +38,7 @@ import (
 	"github.com/torana-edge/torana-edge/internal/engine"
 	"github.com/torana-edge/torana-edge/internal/engine/pbconv"
 	"github.com/torana-edge/torana-edge/internal/format"
+	"github.com/torana-edge/torana-edge/internal/format/jsontext"
 	"github.com/torana-edge/torana-edge/internal/metrics"
 	"github.com/torana-edge/torana-edge/internal/mitm"
 	"github.com/torana-edge/torana-edge/internal/plugin"
@@ -803,22 +804,16 @@ func New(cfg Config) (*Server, error) {
 			// request we intend to parse.
 			req.Header.Set("Accept-Encoding", "identity")
 
-			chat, err := fmt.Request.Unmarshal(body)
-			if err != nil {
-				// Known-format parse bypass (approved seam): forwarding the
-				// original body on a parse failure silently skipped EVERY
-				// before-request plugin — a valid string `system` on the
-				// Anthropic Messages API was enough to make the adapter fail
-				// and the request sail past the PII pipeline untouched. A
-				// body a KNOWN CONFIGURED format cannot parse is now a host
-				// input-validation failure: a value-free, provider-native
-				// HTTP 400 short-circuits before rate limiting and upstream,
-				// identical with or without plugins and independent of
-				// failure_mode (no valid IR exists, so no request hook runs;
-				// the transport returns rc.Block verbatim). The adapter
-				// error is never logged or surfaced: several adapters embed
-				// body fragments in their errors.
-				log.Printf("format %s: rejecting malformed request body", fmt.Name)
+			// rejectMalformed is the single fail-closed path for every body a
+			// KNOWN CONFIGURED format cannot parse (validator or adapter): a
+			// value-free, provider-native HTTP 400 short-circuits before rate
+			// limiting and upstream, identical with or without plugins and
+			// independent of failure_mode (no valid IR exists, so no request
+			// hook runs; the transport returns rc.Block verbatim). The
+			// adapter/validator error is never logged or surfaced: several
+			// adapters embed raw body fragments in their errors.
+			rejectMalformed := func() {
+				log.Printf("format %s: rejecting malformed request body", prov.Format)
 				// Route context is an internal invariant, created immediately
 				// above for every routed request: a missing context must never
 				// silently turn the rejection into an empty-body upstream
@@ -829,6 +824,25 @@ func New(cfg Config) (*Server, error) {
 				rs.Synthetic = true
 				req.Body = io.NopCloser(bytes.NewReader(nil))
 				req.ContentLength = 0
+			}
+
+			// JSON-text validation first: the format adapters decode with
+			// encoding/json, which silently replaces invalid UTF-8 and lone
+			// surrogates, accepts duplicate member names (last wins), and lets
+			// escape-equivalent keys land in different logical positions — a
+			// plugin and the provider could inspect different requests. One
+			// shared, value-free check for every known configured format
+			// rejects those parser-differential hazards before the adapter
+			// sees the body. It is deliberately lenient beyond that (number
+			// tokens, unknown members): it can only reject what the adapter
+			// would also reject, never accept a document the adapter refuses.
+			if err := jsontext.Validate(body); err != nil {
+				rejectMalformed()
+				return
+			}
+			chat, err := fmt.Request.Unmarshal(body)
+			if err != nil {
+				rejectMalformed()
 				return
 			}
 

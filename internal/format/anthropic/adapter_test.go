@@ -675,3 +675,52 @@ func TestSystemCacheMarkerPreserved(t *testing.T) {
 		t.Fatalf("cache marker missing from re-marshalled system: %s", out)
 	}
 }
+
+// TestSystemArrayTextBlockParam: the system array arm is strictly
+// Array<TextBlockParam> — invalid elements are parse errors, never silently
+// dropped. Supported member inventory: type, text, cache_control.
+func TestSystemArrayTextBlockParam(t *testing.T) {
+	adapter := &Adapter{}
+	valid := []struct {
+		name string
+		sys  string
+	}{
+		{"text block", `[{"type":"text","text":"hi"}]`},
+		{"empty text is distinct from missing", `[{"type":"text","text":""}]`},
+		{"cache control preserved", `[{"type":"text","text":"hi","cache_control":{"type":"ephemeral"}}]`},
+		{"empty array", `[]`},
+	}
+	for _, tc := range valid {
+		t.Run(tc.name, func(t *testing.T) {
+			input := `{"model":"m","system":` + tc.sys + `,"messages":[{"role":"user","content":"hi"}]}`
+			if _, err := adapter.Unmarshal([]byte(input)); err != nil {
+				t.Fatalf("valid system %s rejected: %v", tc.sys, err)
+			}
+		})
+	}
+	invalid := []struct {
+		name string
+		sys  string
+	}{
+		{"null element", `[null]`},
+		{"empty object", `[{}]`},
+		{"missing type", `[{"text":"hi"}]`},
+		{"non-text type", `[{"type":"tool_use","id":"x","name":"n","input":{}}]`},
+		{"missing text", `[{"type":"text"}]`},
+		{"text null", `[{"type":"text","text":null}]`},
+		{"unknown member dropped", `[{"type":"text","text":"hi","citations":[]}]`},
+		{"second element invalid", `[{"type":"text","text":"hi"},null]`},
+	}
+	for _, tc := range invalid {
+		t.Run(tc.name, func(t *testing.T) {
+			input := `{"model":"m","system":` + tc.sys + `,"messages":[{"role":"user","content":"hi"}]}`
+			_, err := adapter.Unmarshal([]byte(input))
+			if err == nil {
+				t.Fatalf("invalid system accepted: %s", tc.sys)
+			}
+			if strings.Contains(err.Error(), tc.sys) {
+				t.Fatalf("error embeds raw body data: %v", err)
+			}
+		})
+	}
+}

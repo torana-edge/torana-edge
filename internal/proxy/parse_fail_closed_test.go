@@ -25,6 +25,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/torana-edge/torana-edge/internal/plugin"
 	"github.com/torana-edge/torana-edge/internal/provider"
 )
 
@@ -70,6 +71,15 @@ func parseFailE2E(t *testing.T, format string, order []string, body string) (int
 // for rows that must exercise the genuine upstream-error hook path.
 func parseFailE2EUpstream(t *testing.T, format string, order []string, body string, upstreamStatus int) (int, []byte, *int32, *Server) {
 	t.Helper()
+	return parseFailE2EApproved(t, format, order, body, upstreamStatus, "")
+}
+
+// parseFailE2EApproved is parseFailE2EUpstream with an explicit approval
+// failure-mode override for the first plugin in order, so a block-mode
+// fixture can be forced to allow (or vice versa) for the failure-mode
+// independence rows.
+func parseFailE2EApproved(t *testing.T, format string, order []string, body string, upstreamStatus int, approvalFailureMode string) (int, []byte, *int32, *Server) {
+	t.Helper()
 	var hits int32
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt32(&hits, 1)
@@ -85,7 +95,21 @@ func parseFailE2EUpstream(t *testing.T, format string, order []string, body stri
 	}
 	if len(order) > 0 {
 		requireWASM(t, "../../examples/plugins/"+order[0]+"/plugin.wasm")
-		provCfg.Plugins = provider.PluginsConfig{Dir: "../../examples/plugins", Order: order, AllowUnapproved: true}
+		if approvalFailureMode != "" {
+			digest, err := plugin.BundleDigestForDir("../../examples/plugins/" + order[0])
+			if err != nil {
+				t.Fatalf("BundleDigestForDir: %v", err)
+			}
+			provCfg.Plugins = provider.PluginsConfig{
+				Dir:   "../../examples/plugins",
+				Order: order,
+				Approvals: map[string]provider.PluginApproval{
+					order[0]: {Digest: digest, FailureMode: approvalFailureMode},
+				},
+			}
+		} else {
+			provCfg.Plugins = provider.PluginsConfig{Dir: "../../examples/plugins", Order: order, AllowUnapproved: true}
+		}
 	}
 	srv, err := New(Config{Port: "0", Providers: provCfg})
 	if err != nil {
@@ -301,16 +325,25 @@ func TestParseFailClosedValueFree(t *testing.T) {
 		if strings.Contains(data, marker) || strings.Contains(data, secret) || strings.Contains(data, "sk-ant") {
 			t.Fatalf("%s contains request data (marker/secret)", name)
 		}
+		if strings.Contains(data, `"unique_marker"`) || strings.Contains(data, "unique_marker") {
+			t.Fatalf("%s contains a raw-body fragment", name)
+		}
 	}
-	// The sanitized log line is structurally exact: the standard log header
-	// timestamp followed ONLY by the format-named rejection — no adapter
-	// error, no body data.
+	// Exactly ONE sanitized rejection line for the request, structurally
+	// exact: the standard log header timestamp followed ONLY by the
+	// format-named rejection — no adapter error, no body data. Counting makes
+	// the assertion non-vacuous: a missing line fails just like a wrong one.
+	rejectionLines := 0
 	for _, line := range strings.Split(logs, "\n") {
 		if strings.Contains(line, "rejecting malformed request body") {
+			rejectionLines++
 			if !logHeaderRe.MatchString(line) {
 				t.Fatalf("sanitized log line unexpected: %q", line)
 			}
 		}
+	}
+	if rejectionLines != 1 {
+		t.Fatalf("sanitized rejection lines = %d, want exactly 1", rejectionLines)
 	}
 	if n := atomic.LoadInt32(hits); n != 0 {
 		t.Fatalf("upstream called %d times; must be 0", n)
@@ -370,5 +403,139 @@ func TestUnknownNonemptyFormatRejectedAtConfigTime(t *testing.T) {
 	err := cfg.Validate()
 	if err == nil || !strings.Contains(err.Error(), "unsupported format") {
 		t.Fatalf("err = %v, want an unsupported-format config-time rejection", err)
+	}
+}
+
+// TestParseFailClosedParserDifferentialHazards: JSON-text hazards that
+// encoding/json silently normalizes (duplicate keys incl. escape-equivalent
+// names, invalid UTF-8, lone surrogates) are rejected BEFORE the adapter for
+// every configured format, with the same golden 400, zero limiter buckets,
+// and zero upstream calls. The validator is shared code; anthropic and openai
+// get the full set, gemini and bedrock one row each.
+func TestParseFailClosedParserDifferentialHazards(t *testing.T) {
+	hazards := []string{
+		`{"messages":[1],"messages":[2]}`,
+		`{"messages":[1],"\u006d\u0065ssages":[2]}`,
+		`{"a":{"b":1,"b":2}}`,
+		"{\"a\":\"\xff\xfe\"}",
+		`{"a":"\ud800"}`,
+		`{"a":"\udc00"}`,
+	}
+	full := map[string][]string{
+		"anthropic": hazards,
+		"openai":    hazards,
+		"gemini":    hazards[:1],
+		"bedrock":   hazards[:1],
+	}
+	for format, rows := range full {
+		for i, body := range rows {
+			t.Run(format+"/hazard"+string(rune('a'+i)), func(t *testing.T) {
+				status, respBody, hits, srv := parseFailE2E(t, format, nil, body)
+				if status != http.StatusBadRequest {
+					t.Fatalf("status = %d, want 400; body=%s", status, respBody)
+				}
+				if got := string(respBody); got != goldenInvalidRequest(format) {
+					t.Fatalf("envelope differs from the golden bytes:\ngot:  %s\nwant: %s", got, goldenInvalidRequest(format))
+				}
+				if n := atomic.LoadInt32(hits); n != 0 {
+					t.Fatalf("upstream called %d times; a hazard body must never reach upstream", n)
+				}
+				if n := limiterBucketCount(srv); n != 0 {
+					t.Fatalf("%d limiter buckets materialized; the fail-closed 400 must not acquire the limiter", n)
+				}
+			})
+		}
+	}
+}
+
+// TestParseFailClosedHazardPositiveControls: a valid surrogate pair and a
+// literal escaped backslash-u sequence are NOT hazards — they must reach
+// upstream normally.
+func TestParseFailClosedHazardPositiveControls(t *testing.T) {
+	for name, body := range map[string]string{
+		"surrogate pair":      `{"model":"m","system":[{"type":"text","text":"\ud83d\ude00"}],"messages":[{"role":"user","content":"hi"}]}`,
+		"literal backslash-u": `{"model":"m","messages":[{"role":"user","content":"\\u0061 literal"}]}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			status, respBody, hits, _ := parseFailE2E(t, "anthropic", nil, body)
+			if status != http.StatusOK {
+				t.Fatalf("status = %d, want 200; body=%s", status, respBody)
+			}
+			if n := atomic.LoadInt32(hits); n != 1 {
+				t.Fatalf("upstream calls = %d, want 1", n)
+			}
+		})
+	}
+}
+
+// TestParseFailClosedSystemArrayElements: invalid Anthropic system-array
+// elements (null, empty object, missing type, non-text type, missing text,
+// unrepresentable members) are host 400s with the golden envelope and zero
+// upstream; a valid empty-text block is accepted.
+func TestParseFailClosedSystemArrayElements(t *testing.T) {
+	invalid := []string{
+		`{"model":"m","system":[null],"messages":[]}`,
+		`{"model":"m","system":[{}],"messages":[]}`,
+		`{"model":"m","system":[{"text":"hi"}],"messages":[]}`,
+		`{"model":"m","system":[{"type":"tool_use","id":"x","name":"n","input":{}}],"messages":[]}`,
+		`{"model":"m","system":[{"type":"text"}],"messages":[]}`,
+		`{"model":"m","system":[{"type":"text","text":"hi","citations":[]}],"messages":[]}`,
+	}
+	for i, body := range invalid {
+		t.Run("invalid"+string(rune('a'+i)), func(t *testing.T) {
+			status, respBody, hits, _ := parseFailE2E(t, "anthropic", nil, body)
+			if status != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400; body=%s", status, respBody)
+			}
+			if got := string(respBody); got != goldenInvalidRequest("anthropic") {
+				t.Fatalf("envelope differs: %s", got)
+			}
+			if n := atomic.LoadInt32(hits); n != 0 {
+				t.Fatalf("upstream called %d times; must be 0", n)
+			}
+		})
+	}
+	// Valid empty-text block: accepted, forwarded.
+	status, respBody, hits, _ := parseFailE2E(t, "anthropic", nil,
+		`{"model":"m","system":[{"type":"text","text":""}],"messages":[{"role":"user","content":"hi"}]}`)
+	if status != http.StatusOK {
+		t.Fatalf("empty-text block status = %d, want 200; body=%s", status, respBody)
+	}
+	if n := atomic.LoadInt32(hits); n != 1 {
+		t.Fatalf("upstream calls = %d, want 1", n)
+	}
+}
+
+// TestParseFailClosedPassModeTrapper: the non-vacuous hook proof under the
+// PASS failure mode. test-trapper traps EVERY before-request invocation; its
+// manifest failure mode is block, overridden to pass here. If the local
+// parse 400 ever ran a request hook, the trap would fire and (pass mode) the
+// request would be forwarded upstream — hits would be 1 and the body would be
+// the upstream reply. The golden 400 with zero hits therefore proves the hook
+// was skipped, unlike test-observer whose before hook leaves no observable
+// trace on a skipped request.
+func TestParseFailClosedPassModeTrapper(t *testing.T) {
+	status, body, hits, srv := parseFailE2EApproved(t, "anthropic", []string{"test-trapper"}, `not-json{`, http.StatusOK, "pass")
+	if status != http.StatusBadRequest || string(body) != goldenInvalidRequest("anthropic") {
+		t.Fatalf("pass-mode trapper: status=%d body=%s (a request hook ran and the request leaked upstream)", status, body)
+	}
+	if n := atomic.LoadInt32(hits); n != 0 {
+		t.Fatalf("upstream called %d times; the trap fired, so a request hook RAN on the local 400", n)
+	}
+	if n := limiterBucketCount(srv); n != 0 {
+		t.Fatalf("%d limiter buckets materialized; the fail-closed 400 must not acquire the limiter", n)
+	}
+}
+
+// TestParseFailClosedBlockModeLimiter: block-mode rows assert zero limiter
+// buckets alongside the existing byte-identity proof.
+func TestParseFailClosedBlockModeLimiter(t *testing.T) {
+	_, _, _, srvBlock := parseFailE2E(t, "anthropic", []string{"test-trapper"}, `not-json{`)
+	if n := limiterBucketCount(srvBlock); n != 0 {
+		t.Fatalf("block-mode: %d limiter buckets materialized; must be 0", n)
+	}
+	_, _, _, srvAllow := parseFailE2E(t, "anthropic", []string{"test-observer"}, `not-json{`)
+	if n := limiterBucketCount(srvAllow); n != 0 {
+		t.Fatalf("allow-mode: %d limiter buckets materialized; must be 0", n)
 	}
 }
