@@ -800,9 +800,25 @@ func New(cfg Config) (*Server, error) {
 
 			chat, err := fmt.Request.Unmarshal(body)
 			if err != nil {
-				log.Printf("format %s unmarshal error: %v — passing through", fmt.Name, err)
-				req.Body = io.NopCloser(bytes.NewReader(body))
-				req.ContentLength = int64(len(body))
+				// Known-format parse bypass (approved seam): forwarding the
+				// original body on a parse failure silently skipped EVERY
+				// before-request plugin — a valid string `system` on the
+				// Anthropic Messages API was enough to make the adapter fail
+				// and the request sail past the PII pipeline untouched. A
+				// body a KNOWN CONFIGURED format cannot parse is now a host
+				// input-validation failure: a value-free, provider-native
+				// HTTP 400 short-circuits before rate limiting and upstream,
+				// identical with or without plugins and independent of
+				// failure_mode (no valid IR exists, so no request hook runs;
+				// the transport returns rc.Block verbatim). The adapter
+				// error is never logged or surfaced: several adapters embed
+				// raw body fragments in their errors.
+				log.Printf("format %s: rejecting malformed request body", fmt.Name)
+				if rc, ok := req.Context().Value(routeContextKey{}).(*RouteContext); ok {
+					rc.Block = renderInvalidRequest(prov.Format)
+				}
+				req.Body = io.NopCloser(bytes.NewReader(nil))
+				req.ContentLength = 0
 				return
 			}
 

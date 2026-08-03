@@ -532,3 +532,143 @@ func TestToolResultsStayAdjacentToToolUse(t *testing.T) {
 		t.Fatalf("trailing text dropped in round trip: %s", out)
 	}
 }
+
+// TestSystemStringForm: a bare string `system` is a VALID Anthropic form and
+// must canonicalize to exactly ONE system text message with the exact text
+// and no cache marker.
+func TestSystemStringForm(t *testing.T) {
+	adapter := &Adapter{}
+	input := `{
+		"model": "claude-sonnet-4-20250514",
+		"system": "You are a coding agent. Read files and report their contents.",
+		"messages": [{"role": "user", "content": "read server.go"}]
+	}`
+	chat, err := adapter.Unmarshal([]byte(input))
+	if err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(chat.Messages) != 2 || chat.Messages[0].Role != engine.RoleSystem {
+		t.Fatalf("messages = %+v, want system + user", chat.Messages)
+	}
+	if chat.Messages[0].Content != "You are a coding agent. Read files and report their contents." {
+		t.Fatalf("system content = %q", chat.Messages[0].Content)
+	}
+	if chat.Messages[0].CacheControl != nil {
+		t.Fatalf("string system must not carry a cache marker: %+v", chat.Messages[0].CacheControl)
+	}
+}
+
+// TestSystemStringArrayEquivalence: the string form and the one-text-block
+// array form must produce the IDENTICAL canonical IR — and therefore the
+// identical marshalled request.
+func TestSystemStringArrayEquivalence(t *testing.T) {
+	adapter := &Adapter{}
+	stringForm := `{
+		"model": "m",
+		"system": "Be terse.",
+		"messages": [{"role": "user", "content": "hi"}]
+	}`
+	arrayForm := `{
+		"model": "m",
+		"system": [{"type": "text", "text": "Be terse."}],
+		"messages": [{"role": "user", "content": "hi"}]
+	}`
+	fromString, err := adapter.Unmarshal([]byte(stringForm))
+	if err != nil {
+		t.Fatalf("unmarshal string form: %v", err)
+	}
+	fromArray, err := adapter.Unmarshal([]byte(arrayForm))
+	if err != nil {
+		t.Fatalf("unmarshal array form: %v", err)
+	}
+	// Same model, same messages.
+	if fromString.Model != fromArray.Model || len(fromString.Messages) != len(fromArray.Messages) {
+		t.Fatalf("IRs differ: %+v vs %+v", fromString, fromArray)
+	}
+	for i := range fromString.Messages {
+		if fromString.Messages[i].Role != fromArray.Messages[i].Role ||
+			fromString.Messages[i].Content != fromArray.Messages[i].Content {
+			t.Fatalf("message %d differs: %+v vs %+v", i, fromString.Messages[i], fromArray.Messages[i])
+		}
+	}
+	// Marshal canonicalizes the string form to the array form: byte-identical.
+	outS, err := adapter.Marshal(fromString)
+	if err != nil {
+		t.Fatalf("marshal string-derived: %v", err)
+	}
+	outA, err := adapter.Marshal(fromArray)
+	if err != nil {
+		t.Fatalf("marshal array-derived: %v", err)
+	}
+	if !bytes.Equal(outS, outA) {
+		t.Fatalf("marshalled bodies differ:\nstring: %s\narray:  %s", outS, outA)
+	}
+}
+
+// TestSystemEmptyAndNull: `"system": ""` and `"system": null` behave like an
+// absent system (the empty canonical block is dropped by the coalescing).
+func TestSystemEmptyAndNull(t *testing.T) {
+	adapter := &Adapter{}
+	for _, sys := range []string{`"system": ""`, `"system": null`, ``} {
+		input := "{\n\t\t\"model\": \"m\",\n\t\t" + sys + `,
+		"messages": [{"role": "user", "content": "hi"}]
+	}`
+		// The no-system variant has no trailing comma problem only when sys is empty.
+		if sys == `` {
+			input = `{"model": "m", "messages": [{"role": "user", "content": "hi"}]}`
+		}
+		chat, err := adapter.Unmarshal([]byte(input))
+		if err != nil {
+			t.Fatalf("unmarshal %s: %v", sys, err)
+		}
+		for _, m := range chat.Messages {
+			if m.Role == engine.RoleSystem {
+				t.Fatalf("system %s produced a system message: %+v", sys, chat.Messages)
+			}
+		}
+	}
+}
+
+// TestSystemInvalidTypes: a system that is neither a string nor an array is a
+// parse error, and the error never embeds the raw body.
+func TestSystemInvalidTypes(t *testing.T) {
+	adapter := &Adapter{}
+	for _, sys := range []string{`5`, `{"type":"text"}`, `true`} {
+		input := `{"model": "m", "system": ` + sys + `, "messages": [{"role": "user", "content": "hi"}]}`
+		_, err := adapter.Unmarshal([]byte(input))
+		if err == nil {
+			t.Fatalf("system %s accepted", sys)
+		}
+		if strings.Contains(err.Error(), sys) {
+			t.Fatalf("error embeds raw body data %s: %v", sys, err)
+		}
+	}
+}
+
+// TestSystemCacheMarkerPreserved: the array form keeps cache-breakpoint
+// semantics on the coalesced system message.
+func TestSystemCacheMarkerPreserved(t *testing.T) {
+	adapter := &Adapter{}
+	input := `{
+		"model": "m",
+		"system": [
+			{"type": "text", "text": "prefix"},
+			{"type": "text", "text": "suffix", "cache_control": {"type": "ephemeral"}}
+		],
+		"messages": [{"role": "user", "content": "hi"}]
+	}`
+	chat, err := adapter.Unmarshal([]byte(input))
+	if err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if chat.Messages[0].Role != engine.RoleSystem || chat.Messages[0].CacheControl == nil {
+		t.Fatalf("cache marker lost: %+v", chat.Messages[0])
+	}
+	out, err := adapter.Marshal(chat)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if !strings.Contains(string(out), `"cache_control":{"type":"ephemeral"}`) {
+		t.Fatalf("cache marker missing from re-marshalled system: %s", out)
+	}
+}

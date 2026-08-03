@@ -17,7 +17,7 @@ type anthropicRequest struct {
 	Temperature   *float64           `json:"temperature,omitempty"`
 	TopP          *float64           `json:"top_p,omitempty"`
 	StopSequences []string           `json:"stop_sequences,omitempty"`
-	System        []contentBlock     `json:"system,omitempty"`
+	System        []contentBlock     `json:"system,omitempty"` // string or array; string canonicalizes to one text block
 	Messages      []anthropicMessage `json:"messages"`
 	Tools         []anthropicToolDef `json:"tools,omitempty"`
 	Stream        bool               `json:"stream,omitempty"`
@@ -27,6 +27,41 @@ type anthropicRequest struct {
 type anthropicMessage struct {
 	Role    string         `json:"role"`
 	Content []contentBlock `json:"content"`
+}
+
+// UnmarshalJSON accepts BOTH valid Anthropic system forms: a bare string
+// (canonicalized to ONE text block, per the approved parse-bypass seam) and
+// the content-block array (existing semantics incl. cache breakpoints).
+func (ar *anthropicRequest) UnmarshalJSON(data []byte) error {
+	type alias anthropicRequest
+	var raw struct {
+		alias
+		System json.RawMessage `json:"system"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	*ar = anthropicRequest(raw.alias)
+	if raw.System == nil {
+		return nil
+	}
+
+	// Try string first: canonicalize to one text block. An empty string
+	// yields an empty text block, which the system coalescing drops, so
+	// `"system": ""` behaves like an absent system.
+	var s string
+	if json.Unmarshal(raw.System, &s) == nil {
+		ar.System = []contentBlock{{Type: "text", Text: s}}
+		return nil
+	}
+
+	// Try array.
+	var blocks []contentBlock
+	if err := json.Unmarshal(raw.System, &blocks); err != nil {
+		return fmt.Errorf("system: expected string or array: %w", err)
+	}
+	ar.System = blocks
+	return nil
 }
 
 // UnmarshalJSON handles string content (Claude Code style) and array content.
