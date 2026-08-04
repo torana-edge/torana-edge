@@ -141,6 +141,14 @@ func TestStreamSuppressAndFanOut(t *testing.T) {
 	if out[0].ToolCallStart == nil || out[1].ToolCallDelta == nil || out[2].ToolCallEnd == nil {
 		t.Fatalf("expected [start, delta, end], got %+v", out)
 	}
+	// The host ASSEMBLES this topology: the re-emitted start carries the
+	// original identity and every index binds to the assembled call.
+	if out[0].ToolCallStart.Index != 0 || out[0].ToolCallStart.ID != "call_1" || out[0].ToolCallStart.Name != "write" {
+		t.Fatalf("synthesized start topology wrong: %+v", out[0].ToolCallStart)
+	}
+	if out[1].ToolCallDelta.Index != 0 || out[2].ToolCallEnd.Index != 0 {
+		t.Fatalf("synthesized delta/end indices wrong: %+v / %+v", out[1].ToolCallDelta, out[2].ToolCallEnd)
+	}
 
 	var args map[string]any
 	if err := json.Unmarshal([]byte(out[1].ToolCallDelta.ArgumentsDelta), &args); err != nil {
@@ -194,6 +202,16 @@ func TestStreamRequestIsolation(t *testing.T) {
 		out := runAs(t, pp, reqID, toolEnd(0))
 		if len(out) != 3 || out[0].ToolCallStart == nil || out[1].ToolCallDelta == nil || out[2].ToolCallEnd == nil {
 			t.Fatalf("req %d: expected [start, delta, end], got %+v", reqID, out)
+		}
+		wantID := "call_r1"
+		if reqID == 2 {
+			wantID = "call_r2"
+		}
+		if out[0].ToolCallStart.Index != 0 || out[0].ToolCallStart.ID != wantID || out[0].ToolCallStart.Name != "write" {
+			t.Fatalf("req %d: synthesized start topology wrong: %+v", reqID, out[0].ToolCallStart)
+		}
+		if out[1].ToolCallDelta.Index != 0 || out[2].ToolCallEnd.Index != 0 {
+			t.Fatalf("req %d: synthesized delta/end indices wrong", reqID)
 		}
 		var args map[string]any
 		if err := json.Unmarshal([]byte(out[1].ToolCallDelta.ArgumentsDelta), &args); err != nil {
@@ -314,6 +332,15 @@ func TestStreamChaining(t *testing.T) {
 	out := run(t, pp, toolEnd(0))
 	if len(out) != 3 || out[0].ToolCallStart == nil || out[1].ToolCallDelta == nil || out[2].ToolCallEnd == nil {
 		t.Fatalf("expected [start, delta, end], got %+v", out)
+	}
+	// The CHAINED assembly: schema_translator synthesizes the block, the
+	// intent plugin re-assembles it — the final start still carries the
+	// original identity and the indices stay bound.
+	if out[0].ToolCallStart.Index != 0 || out[0].ToolCallStart.ID != "call_2" || out[0].ToolCallStart.Name != "write" {
+		t.Fatalf("chained synthesized start topology wrong: %+v", out[0].ToolCallStart)
+	}
+	if out[1].ToolCallDelta.Index != 0 || out[2].ToolCallEnd.Index != 0 {
+		t.Fatalf("chained synthesized delta/end indices wrong: %+v / %+v", out[1].ToolCallDelta, out[2].ToolCallEnd)
 	}
 
 	var args map[string]any
@@ -1326,4 +1353,96 @@ func rawPartsOf(t *testing.T, output string) []json.RawMessage {
 		}
 	}
 	return parts
+}
+
+// TestIntentPrependAuthorizedOverFullDomain — the system-prompt PREPEND
+// shifts every message's absolute index: the role sections (user, assistant,
+// system, tool, DEVELOPER, unmodelled/other), the position-keyed
+// tool-results section, and the cache-control section (absolute marker
+// positions) all move. The intent's manifest declares every mathematically
+// required grant, so a rich request carrying a developer message, an
+// unmodelled role, a top-level marker, a NESTED marker, and a tool result
+// must survive host verification with the fill applied and every unrelated
+// byte (markers, developer/unmodelled text, tool result) EXACT.
+func TestIntentPrependAuthorizedOverFullDomain(t *testing.T) {
+	bundles := officialBundlesDir(t)
+	requireBundle(t, bundles, "intent")
+	store := cache.NewLocalCache(time.Minute)
+	pp := newTestPipelineWith(t, bundles, []string{"intent"}, store, nil)
+
+	marker := warmerMarker()
+	chat := &engine.ChatRequest{
+		Tools: []engine.ToolDef{{Name: "read", Parameters: mustReq(`{"type":"object","properties":{"path":{"type":"string"}}}`)}},
+		Messages: []engine.Message{
+			{Role: "developer", Blocks: []engine.Block{{Text: &engine.TextBlock{Text: "dev instruction"}}}},
+			{Role: engine.RoleUser, Blocks: []engine.Block{
+				{Text: &engine.TextBlock{Text: "read the file"}},
+				{CacheBreakpoint: &engine.CacheBreakpointBlock{Marker: marker}},
+			}},
+			{Role: "weird", Blocks: []engine.Block{{Text: &engine.TextBlock{Text: "unmodelled content"}}}},
+			{Role: engine.RoleUser, Blocks: []engine.Block{
+				{Text: &engine.TextBlock{Text: "u2"}},
+				{ToolResult: &engine.ToolResultBlock{
+					ToolCallID: "call_x", ToolName: "read",
+					Content: []engine.ToolResultContentBlock{
+						{Text: "RESULT-TEXT"},
+						{CacheBreakpoint: &engine.CacheBreakpointBlock{Marker: marker}},
+					},
+				}},
+			}},
+			{Role: engine.RoleAssistant, Blocks: []engine.Block{{ToolUse: &engine.ToolUseBlock{ID: "call_hist", Name: "read", Arguments: mustReq(`{"path":"failover.go"}`)}}}},
+		},
+	}
+	store.Set("intentc:[\"read\",{\"path\":\"failover.go\"}]", "where is the retry budget configured")
+	out, err := pp.RunBeforeRequest(context.Background(), 9, chat, nil)
+	if err != nil {
+		t.Fatalf("RunBeforeRequest: %v", err)
+	}
+
+	// The system message was prepended (the mutation survived verification).
+	if len(out.Messages) == 0 || out.Messages[0].Role != engine.RoleSystem || out.Messages[0].Blocks[0].Text == nil {
+		t.Fatalf("the system prompt was not prepended: %+v", out.Messages)
+	}
+	if !strings.Contains(out.Messages[0].Blocks[0].Text.Text, "Every tool call has an \"i\" field") {
+		t.Fatalf("the prepended system prompt lacks the addendum: %q", out.Messages[0].Blocks[0].Text.Text)
+	}
+
+	// The history call was re-hydrated with the bridged intent.
+	for _, m := range out.Messages {
+		if m.Role == engine.RoleAssistant && len(m.Blocks) == 1 && m.Blocks[0].ToolUse != nil && m.Blocks[0].ToolUse.ID == "call_hist" {
+			vals, _, _ := m.Blocks[0].ToolUse.Arguments.DecodeObject()
+			if got := string(vals["i"]); got != `"where is the retry budget configured"` {
+				t.Fatalf(`"i" not re-hydrated: got %q`, got)
+			}
+		}
+	}
+
+	// Unrelated bytes EXACT: the developer text, the unmodelled text, the
+	// tool-result text, and BOTH marker lexemes survive byte-identical.
+	sawDev, sawWeird, sawResult, sawTopMarker, sawNestedMarker := false, false, false, false, false
+	for _, m := range out.Messages {
+		for _, b := range m.Blocks {
+			switch {
+			case b.Text != nil && m.Role == "developer" && b.Text.Text == "dev instruction":
+				sawDev = true
+			case b.Text != nil && m.Role == "weird" && b.Text.Text == "unmodelled content":
+				sawWeird = true
+			case b.ToolResult != nil && b.ToolResult.ToolCallID == "call_x":
+				sawResult = len(b.ToolResult.Content) == 2 && b.ToolResult.Content[0].Text == "RESULT-TEXT"
+				if b.ToolResult.Content[1].CacheBreakpoint != nil {
+					sawNestedMarker = string(b.ToolResult.Content[1].CacheBreakpoint.Marker.Bytes()) == string(marker.Bytes())
+				}
+			case b.CacheBreakpoint != nil:
+				sawTopMarker = string(b.CacheBreakpoint.Marker.Bytes()) == string(marker.Bytes())
+			}
+		}
+	}
+	for name, ok := range map[string]bool{
+		"developer text": sawDev, "unmodelled text": sawWeird, "tool result": sawResult,
+		"top-level marker": sawTopMarker, "nested marker": sawNestedMarker,
+	} {
+		if !ok {
+			t.Fatalf("%s was not preserved byte-exact", name)
+		}
+	}
 }
