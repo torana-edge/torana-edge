@@ -890,13 +890,7 @@ func (r requestSignatureField) occurrences(m *pb.Message) ([]tokenOccurrence, er
 		// refs, NO own-metadata frame — the only projection that can
 		// authorize a removal.
 		preh := sha256.New()
-		for _, b := range m.Blocks {
-			for _, ref := range r.trailRefs {
-				if pm := requestBlockMessage(b, ref.msg); pm != nil {
-					writeFramed(preh, []byte(pm.Get(ref.fd).String()))
-				}
-			}
-		}
+		writeTrailingRefs(preh, m, r.trailRefs)
 		var preceding [32]byte
 		copy(preceding[:], preh.Sum(nil))
 
@@ -915,13 +909,7 @@ func (r requestSignatureField) occurrences(m *pb.Message) ([]tokenOccurrence, er
 			}
 			writeFramed(h, sameDigest[:])
 		}
-		for _, b := range m.Blocks {
-			for _, ref := range r.trailRefs {
-				if pm := requestBlockMessage(b, ref.msg); pm != nil {
-					writeFramed(h, []byte(pm.Get(ref.fd).String()))
-				}
-			}
-		}
+		writeTrailingRefs(h, m, r.trailRefs)
 		var sum [32]byte
 		copy(sum[:], h.Sum(nil))
 		return []tokenOccurrence{{token: token, digest: sum, preceding: preceding, trailAbsent: trail == nil}}, nil
@@ -942,6 +930,43 @@ func (r requestSignatureField) occurrences(m *pb.Message) ([]tokenOccurrence, er
 		})
 	}
 	return out, nil
+}
+
+// writeTrailingRefs frames the ordered preceding covered elements into h —
+// the SHARED typed encoder for BOTH the preceding-only digest and the mixed
+// digest's TrailingStandalone section. Each covered element (a block whose
+// kind matches a trailRef) contributes, for every ref it matches: the
+// element's ORDINAL in the covered subsequence (repeated Text/Thinking
+// order is part of the signed content), the full covered message identity
+// and ref field identity, and the value. Frames are typed, so
+// Text("x"),Thinking("y") and Thinking("x"),Text("y") NEVER collide, an
+// explicit empty value is distinct from an absent element, and a
+// Text→Thinking kind swap is signed content movement. Uncovered absolute
+// topology (uncovered block kinds, block indexes) is deliberately NOT
+// framed — the covered projection is the trailing token's claim.
+func writeTrailingRefs(h hash.Hash, m *pb.Message, refs []trailSignatureRef) {
+	ordinal := 0
+	for _, b := range m.Blocks {
+		covered := false
+		for _, ref := range refs {
+			pm := requestBlockMessage(b, ref.msg)
+			if pm == nil {
+				continue
+			}
+			if !covered {
+				// One ordinal per covered ELEMENT (block), shared by its refs.
+				var ord [8]byte
+				binary.LittleEndian.PutUint64(ord[:], uint64(ordinal))
+				writeFramed(h, ord[:])
+				covered = true
+			}
+			writeFramed(h, []byte(string(ref.msg)+"."+string(ref.fd.Name())))
+			writeFramed(h, []byte(pm.Get(ref.fd).String()))
+		}
+		if covered {
+			ordinal++
+		}
+	}
 }
 
 // digestBlockFields hashes a block's covered-content fields, length-framed
@@ -1045,6 +1070,28 @@ func contentBlocks(l protoreflect.List) ([]*pb.ToolResultContentBlock, error) {
 // accepted). The carrier's own metadata can never authorize its deletion.
 func verifyRequestSignatures(accepted, out *pb.ChatRequest) error {
 	for _, check := range requestSignatureFields {
+		// FAIL-CLOSED (both sides): the accepted replacement domain
+		// requires a PRESENT trailing carrier to carry a non-empty
+		// signature. Legitimate clearing is represented by removing the
+		// entire carrier; a present-but-empty carrier is an
+		// unrepresentable provenance state and must never reach the digest
+		// paths — its own metadata could otherwise manufacture a "cleared"
+		// verdict over unchanged preceding content.
+		if check.scope == outboundpolicy.SignatureScopeTrailingStandalone {
+			for _, src := range []*pb.ChatRequest{accepted, out} {
+				for _, m := range src.Messages {
+					for _, b := range m.Blocks {
+						pm := requestBlockMessage(b, check.binding.Message)
+						if pm == nil {
+							continue
+						}
+						if pm.Get(check.sig).String() == "" {
+							return fmt.Errorf("plugin %s trailing carrier is present but empty", check.name)
+						}
+					}
+				}
+			}
+		}
 		byToken := map[string][]*signedOccurrence{}
 		byContent := map[[32]byte][]*signedOccurrence{}
 		// TrailingStandalone ONLY: signed occurrences indexed by their

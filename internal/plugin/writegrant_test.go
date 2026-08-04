@@ -9,6 +9,7 @@ import (
 	"github.com/torana-edge/torana-edge/internal/engine"
 	"github.com/torana-edge/torana-edge/internal/engine/pbconv"
 	"github.com/torana-edge/torana-edge/internal/wasm"
+	"github.com/torana-edge/torana-plugin-sdk/outboundpolicy"
 	pb "github.com/torana-edge/torana-plugin-sdk/pb/v2"
 	"google.golang.org/protobuf/proto"
 )
@@ -326,6 +327,42 @@ func appendTrailing(m *pb.Message, sig string) {
 	}})
 }
 
+// removeTrailing removes the trailing-signature block entirely — the ONLY
+// sanctioned representation of clearing a trailing token (a present carrier
+// must carry a non-empty signature).
+func removeTrailing(m *pb.Message) {
+	var kept []*pb.RequestBlock
+	for _, b := range m.Blocks {
+		if b.GetTrailingSignature() != nil {
+			continue
+		}
+		kept = append(kept, b)
+	}
+	m.Blocks = kept
+}
+
+// swapFirstCoveredKind swaps the first Text block and the first Thinking
+// block of the message, preserving their payloads — a covered KIND change
+// with identical bytes (the typed trailing-ref pin).
+func swapFirstCoveredKind(m *pb.Message) {
+	var ti, ki int = -1, -1
+	for i, b := range m.Blocks {
+		if ti < 0 && b.GetText() != nil {
+			ti = i
+		}
+		if ki < 0 && b.GetThinking() != nil {
+			ki = i
+		}
+	}
+	if ti < 0 || ki < 0 {
+		panic("swapFirstCoveredKind: need both a text and a thinking block")
+	}
+	txt := m.Blocks[ti].GetText().Text
+	thk := m.Blocks[ki].GetThinking().Text
+	m.Blocks[ti].Kind = &pb.RequestBlock_Thinking{Thinking: &pb.RequestThinkingBlock{Text: txt}}
+	m.Blocks[ki].Kind = &pb.RequestBlock_Text{Text: &pb.RequestTextBlock{Text: thk}}
+}
+
 // trailingMetaSignedRequest is trailingSignedRequest with part metadata on
 // the trailing block itself — the SameMessage half of the mixed-scope
 // binding.
@@ -492,10 +529,21 @@ func TestVerifyRequestMutationSignatureMatrix(t *testing.T) {
 		{name: "trailing content changed token kept -> stale", base: trailingSignedRequest,
 			want:  "plugin trailing_signature signature stale",
 			apply: func(r *pb.ChatRequest) { setText(r.Messages[1], "signed content'") }},
-		{name: "trailing thinking changed token cleared -> accepted", base: trailingSignedRequest,
+		{name: "trailing thinking changed + whole carrier removed -> sanctioned", base: trailingSignedRequest,
 			apply: func(r *pb.ChatRequest) {
 				setThinking(r.Messages[1], "signed thinking'")
-				setTrailing(r.Messages[1], "")
+				removeTrailing(r.Messages[1])
+			}},
+		{name: "trailing present-empty token -> fail closed", base: trailingSignedRequest,
+			want:  "plugin trailing_signature trailing carrier is present but empty",
+			apply: func(r *pb.ChatRequest) { setTrailing(r.Messages[1], "") }},
+		{name: "trailing Text<->Thinking swap token kept -> stale", base: trailingSignedRequest,
+			want:  "plugin trailing_signature signature stale",
+			apply: func(r *pb.ChatRequest) { swapFirstCoveredKind(r.Messages[1]) }},
+		{name: "trailing type swap + whole carrier removed -> sanctioned", base: trailingSignedRequest,
+			apply: func(r *pb.ChatRequest) {
+				swapFirstCoveredKind(r.Messages[1])
+				removeTrailing(r.Messages[1])
 			}},
 		// MIXED-SCOPE trailing binding (batch-1 review finding 1): the
 		// trailing token also covers the trailing block's OWN
@@ -512,11 +560,18 @@ func TestVerifyRequestMutationSignatureMatrix(t *testing.T) {
 		{name: "trailing metadata value changed token kept -> stale", base: trailingMetaSignedRequest,
 			want:  "plugin trailing_signature signature stale",
 			apply: func(r *pb.ChatRequest) { setTrailingMeta(r.Messages[1], `{"src":"x","extra":1}`) }},
-		{name: "trailing metadata changed token cleared -> accepted", base: trailingMetaSignedRequest,
+		// The non-circular rule: own-metadata changes NEVER authorize the
+		// carrier's removal (dropped), and a present-empty token is an
+		// unrepresentable domain state (fail closed).
+		{name: "trailing metadata changed + whole carrier removed -> dropped", base: trailingMetaSignedRequest,
+			want: "plugin trailing_signature signature dropped",
 			apply: func(r *pb.ChatRequest) {
 				setTrailingMeta(r.Messages[1], `{"src":"y"}`)
-				setTrailing(r.Messages[1], "")
+				removeTrailing(r.Messages[1])
 			}},
+		{name: "trailing metadata changed + present-empty token -> fail closed", base: trailingMetaSignedRequest,
+			want:  "plugin trailing_signature trailing carrier is present but empty",
+			apply: func(r *pb.ChatRequest) { setTrailing(r.Messages[1], "") }},
 		// The TOOL-RESULT token (the SDK's RequestToolResultBlock binding):
 		// covered fields include the presence-aware will_continue and
 		// scheduling and the nested content digest.
@@ -589,6 +644,60 @@ func TestVerifyRequestMutationSignatureMatrix(t *testing.T) {
 			}
 			if err.Error() != tc.want {
 				t.Errorf("error = %q, want %q", err, tc.want)
+			}
+		})
+	}
+}
+
+// The SAME table through the all-grants fast path: grants are never part of
+// the provenance verdicts, so verifyFastPath (the exact branch discovery.go
+// takes for a fully-granted plugin) must accept exactly the rows the full
+// verifier accepts and reject exactly the rows it rejects.
+func TestTrailingMatrixThroughFastPath(t *testing.T) {
+	cases := []struct {
+		name   string
+		base   func() *pb.ChatRequest
+		apply  func(*pb.ChatRequest)
+		accept bool
+	}{
+		{"untouched", trailingMetaSignedRequest, nil, true},
+		{"preceding content changed token kept -> stale", trailingSignedRequest,
+			func(r *pb.ChatRequest) { setText(r.Messages[1], "signed content'") }, false},
+		{"preceding thinking changed + carrier removed -> sanctioned", trailingSignedRequest,
+			func(r *pb.ChatRequest) {
+				setThinking(r.Messages[1], "signed thinking'")
+				removeTrailing(r.Messages[1])
+			}, true},
+		{"own metadata changed + token kept -> stale", trailingMetaSignedRequest,
+			func(r *pb.ChatRequest) { setTrailingMeta(r.Messages[1], `{"src":"y"}`) }, false},
+		{"own metadata changed + present-empty token -> fail closed", trailingMetaSignedRequest,
+			func(r *pb.ChatRequest) { setTrailing(r.Messages[1], "") }, false},
+		{"own metadata changed + carrier removed -> dropped", trailingMetaSignedRequest,
+			func(r *pb.ChatRequest) {
+				setTrailingMeta(r.Messages[1], `{"src":"y"}`)
+				removeTrailing(r.Messages[1])
+			}, false},
+		{"unchanged preceding + carrier removed -> dropped", trailingSignedRequest,
+			func(r *pb.ChatRequest) { removeTrailing(r.Messages[1]) }, false},
+		{"unrelated tool-result change + carrier removed -> dropped", trailingSignedRequest,
+			func(r *pb.ChatRequest) {
+				r.Messages[3].Blocks[0].GetToolResult().Content[0].GetText().Text = "B'"
+				removeTrailing(r.Messages[1])
+			}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			accepted := tc.base()
+			out := tc.base()
+			if tc.apply != nil {
+				tc.apply(out)
+			}
+			err := verifyFastPath(accepted, out)
+			if tc.accept && err != nil {
+				t.Fatalf("fast path must accept, got: %v", err)
+			}
+			if !tc.accept && err == nil {
+				t.Fatal("fast path must reject")
 			}
 		})
 	}
@@ -1481,4 +1590,56 @@ func TestFastPathMetadataChangeRejected(t *testing.T) {
 	if err := verifyFastPath(accepted, out2); err != nil {
 		t.Fatalf("cleared token over changed metadata must pass: %v", err)
 	}
+}
+
+// The typed trailing-ref encoder: the preceding projection is TYPED and
+// ORDERED, so identical payloads at different kinds, different orders, and
+// empty-vs-absent never collide. The digest under test is the occurrence's
+// preceding-only digest (no trailing carrier present), produced by the
+// production occurrences path.
+func TestTrailingPrecedingDigestTyped(t *testing.T) {
+	var trailing *requestSignatureField
+	for i := range requestSignatureFields {
+		if requestSignatureFields[i].scope == outboundpolicy.SignatureScopeTrailingStandalone {
+			trailing = &requestSignatureFields[i]
+			break
+		}
+	}
+	if trailing == nil {
+		t.Fatal("no trailing binding resolved")
+	}
+	text := func(s string) *pb.RequestBlock {
+		return &pb.RequestBlock{Kind: &pb.RequestBlock_Text{Text: &pb.RequestTextBlock{Text: s}}}
+	}
+	thinking := func(s string) *pb.RequestBlock {
+		return &pb.RequestBlock{Kind: &pb.RequestBlock_Thinking{Thinking: &pb.RequestThinkingBlock{Text: s}}}
+	}
+	digest := func(blocks ...*pb.RequestBlock) [32]byte {
+		occs, err := trailing.occurrences(&pb.Message{Role: "assistant", Blocks: blocks})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(occs) != 1 || !occs[0].trailAbsent {
+			t.Fatalf("expected one absent-carrier occurrence, got %+v", occs)
+		}
+		return occs[0].preceding
+	}
+
+	different := func(name string, a, b [32]byte) {
+		t.Helper()
+		if a == b {
+			t.Fatalf("%s: digests collided", name)
+		}
+	}
+
+	// Text↔Thinking with identical payloads must not collide.
+	different("text-then-thinking vs thinking-then-text",
+		digest(text("x"), thinking("y")), digest(thinking("x"), text("y")))
+	// Same kind, swapped payloads: order is signed.
+	different("repeated text order", digest(text("a"), text("b")), digest(text("b"), text("a")))
+	different("repeated thinking order", digest(thinking("a"), thinking("b")), digest(thinking("b"), thinking("a")))
+	// An explicit empty value is distinct from a non-empty value...
+	different("explicit empty vs value", digest(text("")), digest(text("x")))
+	// ...and from an absent element.
+	different("explicit empty vs absent", digest(text("")), digest())
 }

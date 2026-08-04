@@ -148,6 +148,7 @@ func TestToolResultSeamVerifierGrantBoundary(t *testing.T) {
 				m.Blocks[1].GetToolResult().Content[0].GetCacheBreakpoint().MarkerJson = []byte(`{"type":"1h"}`)
 			}},
 			{"trailing carrier removed", func(m *pb.Message) { m.Blocks = m.Blocks[:4] }},
+			{"trailing present-empty token", func(m *pb.Message) { m.Blocks[4].GetTrailingSignature().Signature = "" }},
 		}
 		for _, tc := range cases {
 			t.Run(tc.name, func(t *testing.T) {

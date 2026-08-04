@@ -88,7 +88,7 @@ func compareSections(accepted, out *pb.ChatRequest) changedSections {
 			c.messages[b.Role] = true
 		case b == nil:
 			c.messages[a.Role] = true
-		case !sameMessageWithoutMarker(a, b):
+		case !sameRoleView(a, b):
 			c.messages[a.Role] = true
 			c.messages[b.Role] = true
 		}
@@ -154,11 +154,13 @@ func cacheControlChanged(accepted, out *pb.ChatRequest) bool {
 	return false
 }
 
-// sameMessageWithoutMarker compares two messages EXCLUDING
-// cache_control_json: markers are governed by ir.cache_control.write as a
-// section of their own (cacheControlChanged), never by the role sections —
-// the oracle must agree with the production fingerprint, or a marker-only
-// mutation would look like a role change to the exact comparison.
+// sameRoleView compares two messages under the FULL role view: cache
+// carriers and the trailing carrier removed, provider signature tokens
+// cleared, tool-result text values placeholdered — the exact families the
+// production role fingerprint normalizes (TestRoleViewOracleAgreement pins
+// the agreement). Cache facts are governed by ir.cache_control.write as a
+// section of their own (cacheControlChanged) and text values by
+// ir.tool_results.write (toolResultsChanged), never by the role sections.
 // toolResultsChanged compares the position-keyed tool-result text values
 // exactly, mirroring the production fingerprintToolResultsSection: every
 // TEXT arm's value at its (message index, block index, content index) slot.
@@ -203,15 +205,72 @@ func toolResultTextSlots(m *pb.Message) []byte {
 	return out
 }
 
-func sameMessageWithoutMarker(a, b *pb.Message) bool {
-	// The oracle compares the PRODUCTION role view: cache carriers and the
-	// trailing carrier removed, provider signature tokens cleared, and
-	// tool-result text values placeholdered — the exact view
-	// fingerprintMessage hashes. Text value changes must land in
-	// toolResultsChanged, never here.
-	ca := roleViewMessage(a)
-	cb := roleViewMessage(b)
-	return proto.Equal(ca, cb)
+// sameRoleView compares two messages under the ROLE VIEW, encoded by the
+// INDEPENDENT test-local oracle (independentRoleView) — never the
+// production normalization. The oracle must agree with the production role
+// fingerprint (TestRoleViewOracleAgreement), or a normalization omission in
+// either direction goes undetected.
+func sameRoleView(a, b *pb.Message) bool {
+	return bytes.Equal(independentRoleView(a), independentRoleView(b))
+}
+
+// independentRoleView is the test-local role-view ENCODER: its own
+// normalization (cache carriers and the trailing carrier skipped, the five
+// embedded provider signature tokens cleared, tool-result text values
+// replaced by its OWN placeholder constant) followed by its own
+// deterministic encoding (protobuf serialization of the independently
+// normalized clone). It deliberately does NOT call roleViewMessage,
+// roleNestedContent, the production placeholder, or fingerprintMessage — a
+// production normalization omission must not be inherited by the oracle.
+const independentRolePlaceholder = "\x00independent-role-view-text"
+
+func independentRoleView(m *pb.Message) []byte {
+	if m == nil {
+		return nil
+	}
+	out := &pb.Message{Role: m.Role}
+	for _, b := range m.Blocks {
+		if b.GetCacheBreakpoint() != nil {
+			continue
+		}
+		if b.GetTrailingSignature() != nil {
+			continue
+		}
+		cloned := proto.Clone(b).(*pb.RequestBlock)
+		switch k := cloned.Kind.(type) {
+		case *pb.RequestBlock_Text:
+			k.Text.Signature = ""
+		case *pb.RequestBlock_Thinking:
+			k.Thinking.Signature = ""
+		case *pb.RequestBlock_ToolUse:
+			k.ToolUse.Signature = ""
+		case *pb.RequestBlock_Unknown:
+			k.Unknown.Signature = ""
+		case *pb.RequestBlock_ToolResult:
+			k.ToolResult.Signature = ""
+			var content []*pb.ToolResultContentBlock
+			for _, c := range k.ToolResult.Content {
+				if c.GetCacheBreakpoint() != nil {
+					continue
+				}
+				cc := proto.Clone(c).(*pb.ToolResultContentBlock)
+				if t := cc.GetText(); t != nil {
+					t.Text = independentRolePlaceholder
+				}
+				content = append(content, cc)
+			}
+			k.ToolResult.Content = content
+		}
+		out.Blocks = append(out.Blocks, cloned)
+	}
+	// Deterministic for the same message value (protobuf guarantees
+	// deterministic serialization); any retained-field difference changes
+	// the bytes.
+	raw, err := proto.Marshal(out)
+	if err != nil {
+		panic(err)
+	}
+	return raw
 }
 
 // cacheMarkers encodes a message's cache carriers POSITIONALLY, mirroring
@@ -1010,5 +1069,153 @@ func TestFingerprintErrorCannotBecomeSectionDigest(t *testing.T) {
 	}
 	if fp.equal(requestSections{}) {
 		t.Fatal("a validated body must produce a non-zero section digest")
+	}
+}
+
+// TestRoleViewOracleAgreement — the INDEPENDENT oracle and the production
+// role fingerprint must move together for EVERY normalized family and EVERY
+// retained family: a mutation is invisible to the role section iff the
+// oracle says the role views are equal. The oracle never calls the
+// production normalization, so an omission on either side fails here.
+func TestRoleViewOracleAgreement(t *testing.T) {
+	base := func() *pb.Message {
+		return &pb.Message{Role: "assistant", Blocks: []*pb.RequestBlock{
+			{Kind: &pb.RequestBlock_Text{Text: &pb.RequestTextBlock{Text: "leading", Signature: "text-sig", PartMetadataJson: []byte(`{"t":1}`)}}},
+			{Kind: &pb.RequestBlock_Thinking{Thinking: &pb.RequestThinkingBlock{Text: "thought", Signature: "think-sig"}}},
+			{Kind: &pb.RequestBlock_ToolUse{ToolUse: &pb.RequestToolUseBlock{Id: "c1", Name: "read", ArgumentsJson: []byte(`{"p":1}`), Signature: "use-sig"}}},
+			{Kind: &pb.RequestBlock_Unknown{Unknown: &pb.RequestUnknownBlock{Kind: "x", PayloadJson: []byte(`{"k":1}`), Signature: "unk-sig"}}},
+			{Kind: &pb.RequestBlock_ToolResult{ToolResult: &pb.RequestToolResultBlock{
+				ToolCallId: "c2", ToolName: "write", WillContinue: proto.Bool(false), PartMetadataJson: []byte(`{"m":1}`), Signature: "res-sig",
+				Content: []*pb.ToolResultContentBlock{
+					{Kind: &pb.ToolResultContentBlock_Text{Text: &pb.ToolResultTextBlock{Text: "result"}}},
+					{Kind: &pb.ToolResultContentBlock_CacheBreakpoint{CacheBreakpoint: &pb.ToolResultCacheBreakpoint{MarkerJson: []byte(`{"type":"ephemeral"}`)}}},
+				},
+			}}},
+			{Kind: &pb.RequestBlock_CacheBreakpoint{CacheBreakpoint: &pb.RequestCacheBreakpoint{MarkerJson: []byte(`{"type":"standard"}`)}}},
+			{Kind: &pb.RequestBlock_TrailingSignature{TrailingSignature: &pb.RequestTrailingSignatureBlock{Signature: "trail-sig", PartMetadataJson: []byte(`{"s":1}`)}}},
+		}}
+	}
+	prodMoved := func(a, b *pb.Message) bool {
+		da, err := fingerprintMessage(a)
+		if err != nil {
+			t.Fatal(err)
+		}
+		db, err := fingerprintMessage(b)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return da != db
+	}
+	oracleMoved := func(a, b *pb.Message) bool {
+		return !bytes.Equal(independentRoleView(a), independentRoleView(b))
+	}
+
+	// NORMALIZED families: invisible to the role section (their facts live
+	// in the cache section, the tool-results section, or the unconditional
+	// provenance verifier).
+	normalized := []struct {
+		name   string
+		mutate func(*pb.Message)
+	}{
+		{"top-level cache marker changed", func(m *pb.Message) { m.Blocks[5].GetCacheBreakpoint().MarkerJson = []byte(`{"type":"1h"}`) }},
+		{"nested cache marker changed", func(m *pb.Message) {
+			m.Blocks[4].GetToolResult().Content[1].GetCacheBreakpoint().MarkerJson = []byte(`{"type":"1h"}`)
+		}},
+		{"trailing signature changed", func(m *pb.Message) { m.Blocks[6].GetTrailingSignature().Signature = "other" }},
+		{"trailing metadata changed", func(m *pb.Message) { m.Blocks[6].GetTrailingSignature().PartMetadataJson = []byte(`{"s":2}`) }},
+		{"trailing carrier removed", func(m *pb.Message) { m.Blocks = m.Blocks[:6] }},
+		{"text signature cleared", func(m *pb.Message) { m.Blocks[0].GetText().Signature = "" }},
+		{"thinking signature cleared", func(m *pb.Message) { m.Blocks[1].GetThinking().Signature = "" }},
+		{"tool-use signature cleared", func(m *pb.Message) { m.Blocks[2].GetToolUse().Signature = "" }},
+		{"unknown signature cleared", func(m *pb.Message) { m.Blocks[3].GetUnknown().Signature = "" }},
+		{"result signature cleared", func(m *pb.Message) { m.Blocks[4].GetToolResult().Signature = "" }},
+		{"result text value changed", func(m *pb.Message) { m.Blocks[4].GetToolResult().Content[0].GetText().Text = "changed" }},
+	}
+	// RETAINED families: visible to the role section (role-governed).
+	retained := []struct {
+		name   string
+		mutate func(*pb.Message)
+	}{
+		{"prompt text changed", func(m *pb.Message) { m.Blocks[0].GetText().Text = "other" }},
+		{"thinking text changed", func(m *pb.Message) { m.Blocks[1].GetThinking().Text = "other" }},
+		{"tool identity changed", func(m *pb.Message) { m.Blocks[4].GetToolResult().ToolName = "other" }},
+		{"text metadata changed", func(m *pb.Message) { m.Blocks[0].GetText().PartMetadataJson = []byte(`{"t":2}`) }},
+		{"result metadata changed", func(m *pb.Message) { m.Blocks[4].GetToolResult().PartMetadataJson = []byte(`{"m":2}`) }},
+		{"will_continue changed", func(m *pb.Message) { w := true; m.Blocks[4].GetToolResult().WillContinue = &w }},
+		{"scheduling presence added", func(m *pb.Message) { v := "SILENT"; m.Blocks[4].GetToolResult().Scheduling = &v }},
+		{"arm topology changed", func(m *pb.Message) {
+			m.Blocks[4].GetToolResult().Content[0].Kind = &pb.ToolResultContentBlock_Unknown{Unknown: &pb.ToolResultUnknownBlock{Kind: "x", PayloadJson: []byte(`{}`)}}
+		}},
+		{"block order changed", func(m *pb.Message) { m.Blocks[0], m.Blocks[1] = m.Blocks[1], m.Blocks[0] }},
+	}
+
+	for _, tc := range append(append([]struct {
+		name   string
+		mutate func(*pb.Message)
+	}{}, normalized...), retained...) {
+		t.Run(tc.name, func(t *testing.T) {
+			a := base()
+			b := base()
+			tc.mutate(b)
+			if prodMoved(a, b) != oracleMoved(a, b) {
+				t.Fatalf("production role movement %v != oracle movement %v",
+					prodMoved(a, b), oracleMoved(a, b))
+			}
+		})
+	}
+}
+
+// TestRoleViewNormalizationWeakenedDetected — the normalization is
+// NON-VACUOUS: for every normalized family, the RAW body differs between
+// base and mutated (a hypothetical production that failed to normalize
+// WOULD see the change and misattribute it to the role section), while the
+// independently normalized views are equal (the correct normalization hides
+// it). A no-op placeholder that never touched its family would fail the raw
+// side; a normalization that never ran would fail the normalized side.
+func TestRoleViewNormalizationWeakenedDetected(t *testing.T) {
+	base := func() *pb.Message {
+		return &pb.Message{Role: "assistant", Blocks: []*pb.RequestBlock{
+			{Kind: &pb.RequestBlock_Text{Text: &pb.RequestTextBlock{Text: "leading", Signature: "text-sig"}}},
+			{Kind: &pb.RequestBlock_ToolResult{ToolResult: &pb.RequestToolResultBlock{
+				ToolCallId: "c2", Signature: "res-sig",
+				Content: []*pb.ToolResultContentBlock{
+					{Kind: &pb.ToolResultContentBlock_Text{Text: &pb.ToolResultTextBlock{Text: "result"}}},
+					{Kind: &pb.ToolResultContentBlock_CacheBreakpoint{CacheBreakpoint: &pb.ToolResultCacheBreakpoint{MarkerJson: []byte(`{"type":"ephemeral"}`)}}},
+				},
+			}}},
+			{Kind: &pb.RequestBlock_TrailingSignature{TrailingSignature: &pb.RequestTrailingSignatureBlock{Signature: "trail-sig"}}},
+		}}
+	}
+	raw := func(m *pb.Message) []byte {
+		out, err := proto.Marshal(m)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+	rows := []struct {
+		name   string
+		mutate func(*pb.Message)
+	}{
+		{"cache carrier not stripped", func(m *pb.Message) {
+			m.Blocks[1].GetToolResult().Content[1].GetCacheBreakpoint().MarkerJson = []byte(`{"type":"1h"}`)
+		}},
+		{"trailing carrier not stripped", func(m *pb.Message) { m.Blocks[2].GetTrailingSignature().Signature = "other" }},
+		{"text signature not cleared", func(m *pb.Message) { m.Blocks[0].GetText().Signature = "" }},
+		{"result signature not cleared", func(m *pb.Message) { m.Blocks[1].GetToolResult().Signature = "" }},
+		{"result text not placeholdered", func(m *pb.Message) { m.Blocks[1].GetToolResult().Content[0].GetText().Text = "changed" }},
+	}
+	for _, tc := range rows {
+		t.Run(tc.name, func(t *testing.T) {
+			a := base()
+			b := base()
+			tc.mutate(b)
+			if bytes.Equal(raw(a), raw(b)) {
+				t.Fatalf("the mutation must move the RAW body (the family is real): %s", tc.name)
+			}
+			if !bytes.Equal(independentRoleView(a), independentRoleView(b)) {
+				t.Fatalf("the mutation must be invisible to the NORMALIZED view: %s", tc.name)
+			}
+		})
 	}
 }
