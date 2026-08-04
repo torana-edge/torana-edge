@@ -77,15 +77,6 @@ func setTrailing(m *pb.Message, sig string) {
 	panic("no trailing block")
 }
 
-func textSigOf(m *pb.Message) string {
-	for _, b := range m.Blocks {
-		if b.GetText() != nil {
-			return b.GetText().Signature
-		}
-	}
-	return ""
-}
-
 func setText(m *pb.Message, text string) {
 	for _, b := range m.Blocks {
 		if b.GetText() != nil {

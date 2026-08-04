@@ -27,17 +27,6 @@ func sys(s string) Message  { return Message{Role: RoleSystem, Blocks: []Block{t
 func user(s string) Message { return Message{Role: RoleUser, Blocks: []Block{textBlock(s)}} }
 func asst(s string) Message { return Message{Role: RoleAssistant, Blocks: []Block{textBlock(s)}} }
 
-// ephemeral is an Anthropic-shaped breakpoint. Any format carrying the same
-// shape through the IR — including a chat-completions provider that adopts it —
-// exercises the identical code path.
-func ephemeral() RequiredJSONObject {
-	r, err := ParseRequiredJSONObject([]byte(`{"type":"ephemeral"}`))
-	if err != nil {
-		panic(err)
-	}
-	return r
-}
-
 // --- ConversationID: the durable label ---
 
 // TestConversationIDStableAcrossTurns is the property the label rests on: as a

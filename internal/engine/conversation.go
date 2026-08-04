@@ -4,7 +4,6 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
-	"encoding/json"
 	"hash"
 	"strconv"
 
@@ -350,20 +349,6 @@ func messageText(m Message) string {
 	// The text projection in wire order; non-text blocks contribute nothing
 	// to the conversation label's textual fingerprint.
 	return m.Text()
-}
-
-// canonicalJSON renders a value deterministically. encoding/json emits object
-// keys sorted, so equal maps always produce equal bytes — the property the
-// hashes depend on for multimodal content, tool arguments, and cache markers.
-func canonicalJSON(v any) string {
-	if v == nil {
-		return ""
-	}
-	b, err := json.Marshal(v)
-	if err != nil {
-		return ""
-	}
-	return string(b)
 }
 
 // writeHashField length-prefixes every input so field boundaries cannot be

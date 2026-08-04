@@ -25,16 +25,6 @@ import (
 
 // Ordered-body test helpers (engine.Message).
 
-func textBlock(s string) engine.Block {
-	return engine.Block{Text: &engine.TextBlock{Text: s}}
-}
-
-func msgBlock(role engine.Role, text string) engine.Message {
-	return engine.Message{Role: role, Blocks: []engine.Block{textBlock(text)}}
-}
-
-func textOf(m engine.Message) string { return m.Text() }
-
 type tcView struct {
 	ID, Name  string
 	Args      engine.RequiredJSONObject
@@ -46,16 +36,6 @@ func toolCalls(m engine.Message) []tcView {
 	for _, b := range m.Blocks {
 		if b.ToolUse != nil {
 			out = append(out, tcView{ID: b.ToolUse.ID, Name: b.ToolUse.Name, Args: b.ToolUse.Arguments, Signature: b.ToolUse.Signature})
-		}
-	}
-	return out
-}
-
-func toolResults(m engine.Message) []*engine.ToolResultBlock {
-	var out []*engine.ToolResultBlock
-	for _, b := range m.Blocks {
-		if b.ToolResult != nil {
-			out = append(out, b.ToolResult)
 		}
 	}
 	return out

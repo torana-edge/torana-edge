@@ -174,14 +174,3 @@ func (m *Message) Text() string {
 	}
 	return out
 }
-
-// hasCoveredBlock reports whether a text or thinking block exists — the
-// trailing-signature token requires a preceding covered block.
-func (m *Message) hasCoveredBlock() bool {
-	for _, b := range m.Blocks {
-		if b.Text != nil || b.Thinking != nil {
-			return true
-		}
-	}
-	return false
-}

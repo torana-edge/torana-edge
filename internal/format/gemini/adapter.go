@@ -27,7 +27,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
-	"strings"
 
 	"github.com/torana-edge/torana-edge/internal/engine"
 	"github.com/torana-edge/torana-edge/internal/engine/pbconv"
@@ -651,37 +650,6 @@ func stripGeminiPartFacts(raw json.RawMessage) (engine.RequiredJSONObject, error
 	return obj, nil
 }
 
-// readExtString reads a dotted path (wrapper.member) from a raw extensions
-// object; absent or non-string yields ok=false.
-func readExtString(ext engine.OptionalJSONObject, path string) (string, bool) {
-	if ext.IsAbsent() {
-		return "", false
-	}
-	m, _, err := ext.DecodeObject()
-	if err != nil {
-		return "", false
-	}
-	parts := strings.SplitN(path, ".", 2)
-	raw, ok := m[parts[0]]
-	if !ok {
-		return "", false
-	}
-	if len(parts) == 1 {
-		var s string
-		return s, json.Unmarshal(raw, &s) == nil
-	}
-	var inner map[string]json.RawMessage
-	if json.Unmarshal(raw, &inner) != nil {
-		return "", false
-	}
-	val, ok := inner[parts[1]]
-	if !ok {
-		return "", false
-	}
-	var s string
-	return s, json.Unmarshal(val, &s) == nil
-}
-
 // mapRoleG maps gemini wire roles to engine roles.
 func mapRoleG(role string) engine.Role {
 	switch role {
@@ -692,15 +660,6 @@ func mapRoleG(role string) engine.Role {
 	default:
 		return engine.Role(role)
 	}
-}
-
-// singleStringField returns v[key] as a string if resp is exactly {key: string}.
-func singleStringField(resp map[string]any, key string) (string, bool) {
-	if len(resp) != 1 {
-		return "", false
-	}
-	s, ok := resp[key].(string)
-	return s, ok
 }
 
 // --- Marshal ---
@@ -995,23 +954,6 @@ func rebuildGenerationConfig(chat *engine.ChatRequest, inner engine.OptionalJSON
 	return inner.SetMember("generationConfig", gc.Bytes())
 }
 
-// readExtBool reads a bool member from a raw extensions object.
-func readExtBool(ext engine.OptionalJSONObject, key string) (bool, bool) {
-	if ext.IsAbsent() {
-		return false, false
-	}
-	m, _, err := ext.DecodeObject()
-	if err != nil {
-		return false, false
-	}
-	raw, ok := m[key]
-	if !ok {
-		return false, false
-	}
-	var b bool
-	return b, json.Unmarshal(raw, &b) == nil
-}
-
 // geminiAncillaryPartMembers are the DOCUMENTED part modifiers (REV 4 §1):
 // thought (marks a text arm as the thinking arm), thoughtSignature (the
 // provenance token — legal on ANY arm per the provider guidance), and
@@ -1047,9 +989,6 @@ var geminiSchedulingVocabulary = map[string]bool{
 	"WHEN_IDLE": true,
 	"INTERRUPT": true,
 }
-
-// geminiSchedulingValues is the canonical spelling order.
-var geminiSchedulingValues = []string{"SILENT", "WHEN_IDLE", "INTERRUPT"}
 
 // validateGeminiPartRaw is the executable Gemini Part grammar, over the RAW
 // member set (deterministic — counting and membership are
@@ -1609,22 +1548,6 @@ func geminiFuncRespPartFromUnknown(u *engine.UnknownBlock) (geminiFuncRespPart, 
 		out.FileData = &f
 	}
 	return out, nil
-}
-
-func mapExt(ext map[string]any, key string) map[string]any {
-	if ext == nil {
-		return nil
-	}
-	m, _ := ext[key].(map[string]any)
-	return m
-}
-
-func cloneMap(m map[string]any) map[string]any {
-	out := make(map[string]any, len(m)+2)
-	for k, v := range m {
-		out[k] = v
-	}
-	return out
 }
 
 // partMetadata validates a part's raw partMetadata member into the engine

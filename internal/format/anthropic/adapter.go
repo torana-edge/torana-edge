@@ -922,14 +922,3 @@ func unmapRole(r engine.Role) string {
 		return string(r)
 	}
 }
-
-func joinStrings(parts []string, sep string) string {
-	if len(parts) == 0 {
-		return ""
-	}
-	result := parts[0]
-	for _, p := range parts[1:] {
-		result += sep + p
-	}
-	return result
-}

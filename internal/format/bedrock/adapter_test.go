@@ -22,14 +22,6 @@ func hasCacheBlock(m engine.Message) bool {
 	return false
 }
 
-func textBlock(s string) engine.Block {
-	return engine.Block{Text: &engine.TextBlock{Text: s}}
-}
-
-func msgBlock(role engine.Role, text string) engine.Message {
-	return engine.Message{Role: role, Blocks: []engine.Block{textBlock(text)}}
-}
-
 func textOf(m engine.Message) string { return m.Text() }
 
 type tcView struct {

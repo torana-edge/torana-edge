@@ -315,7 +315,7 @@ func assertFRPWire(t *testing.T, wire []byte, arm, inner string) error {
 	if !ok {
 		return fmt.Errorf("arm %q is not an object", arm)
 	}
-	want := map[string]string{}
+	var want map[string]string
 	if arm == "inlineData" {
 		want = map[string]string{"mimeType": "image/png", "data": "iVBOR", "displayName": "pic.png"}
 	} else {
