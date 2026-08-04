@@ -396,7 +396,7 @@ func TestApplyHostErrorClearsQueuedReport(t *testing.T) {
 		Verdict:                   "route",
 		VerdictPlugin:             "test-router",
 		Synthetic:                 false,
-		PluginFailure:             false,
+		PluginFailure:             true,
 		CompactionReports:         []attributedCompactionReport{{Plugin: "p", Report: economics.CompactionReport{OriginalBytes: 100, FinalBytes: 40}}},
 		CompactionRequestPrepared: true,
 	}
