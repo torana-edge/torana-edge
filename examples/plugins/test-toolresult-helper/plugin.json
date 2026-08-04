@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "id": "torana-test/test-toolresult-helper",
+  "name": "test-toolresult-helper",
+  "version": "0.1.0",
+  "abi_version": "v2",
+  "failure_mode": "block",
+  "description": "Test fixture: SDK tool-result seam helper via a real guest",
+  "hooks": [
+    {
+      "name": "run_before_request"
+    }
+  ],
+  "permissions": [
+    {
+      "name": "ir.tool_results.write",
+      "description": "Position-keyed tool-result text value changes"
+    }
+  ]
+}

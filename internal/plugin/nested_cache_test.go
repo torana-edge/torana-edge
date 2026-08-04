@@ -87,17 +87,26 @@ func TestNestedCacheMarkerAddChangeDelete(t *testing.T) {
 	})
 }
 
-// TestNestedAdjacentTextChangeIsRoleOnly — changing the nested text NEXT TO
-// an unchanged marker is role business: the marker authority covers marker
-// value/position, never surrounding content.
-func TestNestedAdjacentTextChangeIsRoleOnly(t *testing.T) {
+// TestNestedAdjacentTextChangeIsToolResultsOnly — changing the nested text
+// NEXT TO an unchanged marker is tool-results business: the marker authority
+// covers marker value/position, never surrounding content, and the text
+// VALUE is position-keyed into ir.tool_results.write (the role view
+// placeholders it, so no role grant is involved).
+func TestNestedAdjacentTextChangeIsToolResultsOnly(t *testing.T) {
 	accepted := nestedWith(nestedBase(), marker())
 	out := nestedBase()
 	out.Messages[1].Blocks[2].GetToolResult().Content[0].GetText().Text = "a'"
 	out = nestedWith(out, marker())
 
-	if err := verifyRequestMutation(accepted, out, allRoleAndToolGrants); err != nil {
-		t.Fatalf("adjacent nested text change with role grants: %v", err)
+	if err := verifyRequestMutation(accepted, out, toolResultsOnly); err != nil {
+		t.Fatalf("adjacent nested text change with only ir.tool_results.write: %v", err)
+	}
+	err := verifyRequestMutation(accepted, out, allRoleAndToolGrants)
+	if err == nil {
+		t.Fatal("adjacent nested text change must fail without ir.tool_results.write")
+	}
+	if !strings.Contains(err.Error(), "ir.tool_results.write") {
+		t.Fatalf("error does not name the missing grant: %v", err)
 	}
 	if err := verifyRequestMutation(accepted, out, ccOnly); err == nil {
 		t.Fatal("adjacent nested text change must fail under only ir.cache_control.write")
@@ -106,7 +115,10 @@ func TestNestedAdjacentTextChangeIsRoleOnly(t *testing.T) {
 
 // TestNestedMarkerMoveCannotEvade — an unchanged nested marker moved between
 // nested positions changes the cache section (position is part of the
-// authority) and must not change the role sections.
+// authority) AND shifts the surviving text arm's content slot (the
+// position-keyed tool-results section): the union of the two grants is
+// required, and the role sections must not move (the role view strips the
+// marker and placeholders the text values).
 func TestNestedMarkerMoveCannotEvade(t *testing.T) {
 	accepted := nestedBase()
 	accepted.Messages[1].Blocks[2].GetToolResult().Content = append(
@@ -115,28 +127,35 @@ func TestNestedMarkerMoveCannotEvade(t *testing.T) {
 	)
 	accepted = nestedWith(accepted, marker())
 
-	// Move the marker from nested position 1 to nested position 2.
+	// Move the marker from nested position 1 to nested position 2 (the text
+	// arm "b" shifts from content slot 1 to slot 2).
 	out := cloneChat(accepted)
 	tr := out.Messages[1].Blocks[2].GetToolResult()
 	cb := tr.Content[1]
 	tr.Content = append(tr.Content[:1], tr.Content[2:]...)
 	tr.Content = append(tr.Content, cb)
 
-	if err := verifyRequestMutation(accepted, out, ccOnly); err != nil {
-		t.Fatalf("nested marker move with only ir.cache_control.write: %v", err)
+	if err := verifyRequestMutation(accepted, out, ccOnly); err == nil {
+		t.Fatal("the marker move shifts a text arm's slot: must fail without ir.tool_results.write")
 	}
-	if err := verifyRequestMutation(accepted, out, allRoleAndToolGrants); err == nil {
+	if err := verifyRequestMutation(accepted, out, toolResultsOnly); err == nil {
 		t.Fatal("an unchanged nested marker moved between positions must fail without ir.cache_control.write")
 	}
-	// The role view must be untouched: the same move with the union passes.
-	union := func(section string) bool { return ccOnly(section) || allRoleAndToolGrants(section) }
+	if err := verifyRequestMutation(accepted, out, allRoleAndToolGrants); err == nil {
+		t.Fatal("the marker move must fail with role grants alone")
+	}
+	// The role view must be untouched: the cache+tool-results union passes
+	// with NO role grant.
+	union := func(section string) bool { return ccOnly(section) || toolResultsOnly(section) }
 	if err := verifyRequestMutation(accepted, out, union); err != nil {
 		t.Fatalf("nested marker move must not change the role sections: %v", err)
 	}
 }
 
 // TestNestedMarkerMovePlusContentRequiresUnion — moving a nested marker AND
-// changing surrounding content needs the UNION of the role and cache grants.
+// changing surrounding content needs the UNION of the cache and
+// tool-results grants (the content VALUE is position-keyed, the marker is
+// cache-governed; the role view sees neither).
 func TestNestedMarkerMovePlusContentRequiresUnion(t *testing.T) {
 	accepted := nestedBase()
 	accepted.Messages[1].Blocks[2].GetToolResult().Content = append(
@@ -147,17 +166,20 @@ func TestNestedMarkerMovePlusContentRequiresUnion(t *testing.T) {
 
 	out := cloneChat(accepted)
 	tr := out.Messages[1].Blocks[2].GetToolResult()
-	tr.Content[1].GetText().Text = "b'" // adjacent content change
+	tr.Content[1].GetText().Text = "b'" // adjacent content value change
 	cb := tr.Content[2]
 	tr.Content = []*pb.ToolResultContentBlock{tr.Content[0], cb, tr.Content[1]} // marker moved to position 1
 
 	if err := verifyRequestMutation(accepted, out, ccOnly); err == nil {
 		t.Fatal("content change must not pass under only ir.cache_control.write")
 	}
-	if err := verifyRequestMutation(accepted, out, allRoleAndToolGrants); err == nil {
+	if err := verifyRequestMutation(accepted, out, toolResultsOnly); err == nil {
 		t.Fatal("marker move must not pass without ir.cache_control.write")
 	}
-	union := func(section string) bool { return ccOnly(section) || allRoleAndToolGrants(section) }
+	if err := verifyRequestMutation(accepted, out, allRoleAndToolGrants); err == nil {
+		t.Fatal("the union must not pass with role grants alone")
+	}
+	union := func(section string) bool { return ccOnly(section) || toolResultsOnly(section) }
 	if err := verifyRequestMutation(accepted, out, union); err != nil {
 		t.Fatalf("the union of grants must pass: %v", err)
 	}

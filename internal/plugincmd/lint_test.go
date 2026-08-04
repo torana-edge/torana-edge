@@ -879,6 +879,93 @@ func init() {
 	assertClean(t, lintMessages(t, dir))
 }
 
+// A plugin using the tool-result seam helper with the grant declared is
+// clean.
+func TestLintToolResultHelperWithGrantIsClean(t *testing.T) {
+	dir := writePlugin(t,
+		manifestWith(`{"name":"run_before_request"}`,
+			`{"name":"ir.tool_results.write","description":"text"}`),
+		`package main
+
+import (
+	"context"
+
+	sdk "github.com/torana-edge/torana-plugin-sdk"
+	pb "github.com/torana-edge/torana-plugin-sdk/pb/v2"
+)
+
+func main() {}
+
+func init() {
+	sdk.OnBeforeRequest(func(ctx context.Context, req *pb.ChatRequest) (*pb.ChatRequest, error) {
+		_, err := sdk.ReplaceToolResultText(req.Messages[0], 0, "changed")
+		if err != nil {
+			return nil, err
+		}
+		return nil, nil
+	})
+}
+`)
+	assertClean(t, lintMessages(t, dir))
+}
+
+// Helper use WITHOUT the declaration is caught: the scanner attributes
+// ReplaceToolResultText to ir.tool_results.write.
+func TestLintToolResultHelperWithoutGrantIsCaught(t *testing.T) {
+	dir := writePlugin(t,
+		manifestWith(`{"name":"run_before_request"}`, ``),
+		`package main
+
+import (
+	"context"
+
+	sdk "github.com/torana-edge/torana-plugin-sdk"
+	pb "github.com/torana-edge/torana-plugin-sdk/pb/v2"
+)
+
+func main() {}
+
+func init() {
+	sdk.OnBeforeRequest(func(ctx context.Context, req *pb.ChatRequest) (*pb.ChatRequest, error) {
+		_, err := sdk.ReplaceToolResultText(req.Messages[0], 0, "changed")
+		if err != nil {
+			return nil, err
+		}
+		return nil, nil
+	})
+}
+`)
+	msgs := lintMessages(t, dir)
+	assertContains(t, msgs, `uses "ir.tool_results.write" but plugin.json does not request it`)
+}
+
+// Direct protobuf assignment exercises the same grant with no attributable
+// call site: the declared grant must never be warned as unused.
+func TestLintDirectToolResultAssignmentNotFlaggedUnused(t *testing.T) {
+	dir := writePlugin(t,
+		manifestWith(`{"name":"run_before_request"}`,
+			`{"name":"ir.tool_results.write","description":"text"}`),
+		`package main
+
+import (
+	"context"
+
+	sdk "github.com/torana-edge/torana-plugin-sdk"
+	pb "github.com/torana-edge/torana-plugin-sdk/pb/v2"
+)
+
+func main() {}
+
+func init() {
+	sdk.OnBeforeRequest(func(ctx context.Context, req *pb.ChatRequest) (*pb.ChatRequest, error) {
+		req.Messages[0].Blocks[0].GetToolResult().Content[0].GetText().Text = "changed"
+		return nil, nil
+	})
+}
+`)
+	assertClean(t, lintMessages(t, dir))
+}
+
 // The rule is general: NO write grant is warned as unused, because every one
 // of them is exercised by direct protobuf mutation.
 func TestLintNoWriteGrantWarnedUnused(t *testing.T) {

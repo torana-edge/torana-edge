@@ -115,6 +115,10 @@ func TestVerifyRequestMutationGrantedChangeAccepted(t *testing.T) {
 				v := 1.0
 				r.Temperature = &v
 			}},
+		{name: "tool result text", perm: "ir.tool_results.write",
+			mutate: func(r *pb.ChatRequest) {
+				r.Messages[3].Blocks[0].GetToolResult().Content[0].GetText().Text = "B'"
+			}},
 		// The role is part of the message section: changing it marks the role
 		// that left the slot AND the role that took it, so the developer case
 		// starts from a request whose message is already developer.
@@ -168,6 +172,10 @@ func TestVerifyRequestMutationUngrantedRejected(t *testing.T) {
 			mutate: func(r *pb.ChatRequest) {
 				v := 1.0
 				r.Temperature = &v
+			}},
+		{name: "tool result text", want: "plugin changed tool result text without ir.tool_results.write",
+			mutate: func(r *pb.ChatRequest) {
+				r.Messages[3].Blocks[0].GetToolResult().Content[0].GetText().Text = "B'"
 			}},
 		// The only changed role is the unmodelled one, so the sorted union
 		// names it and proves an unmodelled role maps to the catch-all
@@ -252,7 +260,8 @@ func TestVerifyRequestMutationHostOwnedMetaAlwaysViolation(t *testing.T) {
 	all := grant("ir.messages.write.user", "ir.messages.write.assistant",
 		"ir.messages.write.system", "ir.messages.write.tool",
 		"ir.messages.write.developer", "ir.messages.write.other",
-		"ir.tools.write", "ir.model.write", "ir.params.write")
+		"ir.tools.write", "ir.tool_results.write", "ir.cache_control.write",
+		"ir.model.write", "ir.params.write")
 	err := verifyRequestMutation(accepted, out, all)
 	if err == nil {
 		t.Fatal("a torana_meta_json change must be a violation even with all grants")
@@ -434,8 +443,9 @@ func unknownSignedRequest() *pb.ChatRequest {
 func TestVerifyRequestMutationSignatureMatrix(t *testing.T) {
 	// The tool-result rows sign messages.tool blocks, so the matrix grants
 	// both roles; every row's section change passes and the BINDING check
-	// decides.
-	user := grant("ir.messages.write.user", "ir.messages.write.tool", "ir.messages.write.assistant")
+	// decides. Tool-result text VALUE changes move the position-keyed
+	// tool-results section, so the new grant is part of the set too.
+	user := grant("ir.messages.write.user", "ir.messages.write.tool", "ir.messages.write.assistant", "ir.tool_results.write")
 
 	cases := []struct {
 		name string
@@ -698,7 +708,8 @@ func TestVerifyUnknownFieldsRejectedWithAllGrants(t *testing.T) {
 	all := grant("ir.messages.write.user", "ir.messages.write.assistant",
 		"ir.messages.write.system", "ir.messages.write.tool",
 		"ir.messages.write.developer", "ir.messages.write.other",
-		"ir.tools.write", "ir.model.write", "ir.params.write")
+		"ir.tools.write", "ir.tool_results.write", "ir.cache_control.write",
+		"ir.model.write", "ir.params.write")
 	if err := verifyRequestMutation(accepted, &out, all); err == nil {
 		t.Fatal("unknown fields must be rejected even with every request grant")
 	}

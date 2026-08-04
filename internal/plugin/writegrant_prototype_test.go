@@ -45,6 +45,10 @@ type changedSections struct {
 	// cacheControl marks a change to Message.cache_control_json or
 	// ToolDef.cache_control_json, governed by ir.cache_control.write alone.
 	cacheControl bool
+	// toolResults marks a change to a position-keyed tool-result TEXT VALUE,
+	// governed by ir.tool_results.write alone (the role view placeholders
+	// these values, so they never land in messages).
+	toolResults bool
 	// hostOwned marks a change to a field no grant covers, because the host
 	// owns it. torana_meta_json is the only one: the host writes _provider and
 	// friends into it, and under v2 verdicts are host calls rather than keys in
@@ -54,7 +58,7 @@ type changedSections struct {
 }
 
 func (c changedSections) any() bool {
-	return len(c.messages) > 0 || c.tools || c.model || c.params || c.cacheControl || c.hostOwned
+	return len(c.messages) > 0 || c.tools || c.model || c.params || c.cacheControl || c.toolResults || c.hostOwned
 }
 
 // compareSections diffs a plugin's output against the previously accepted
@@ -105,6 +109,7 @@ func compareSections(accepted, out *pb.ChatRequest) changedSections {
 	c.params = !sameParams(accepted, out)
 	c.hostOwned = !bytes.Equal(accepted.ToranaMetaJson, out.ToranaMetaJson)
 	c.cacheControl = cacheControlChanged(accepted, out)
+	c.toolResults = toolResultsChanged(accepted, out)
 	return c
 }
 
@@ -154,28 +159,59 @@ func cacheControlChanged(accepted, out *pb.ChatRequest) bool {
 // section of their own (cacheControlChanged), never by the role sections —
 // the oracle must agree with the production fingerprint, or a marker-only
 // mutation would look like a role change to the exact comparison.
-func sameMessageWithoutMarker(a, b *pb.Message) bool {
-	ca := stripCacheBlocks(a)
-	cb := stripCacheBlocks(b)
-	return proto.Equal(ca, cb)
+// toolResultsChanged compares the position-keyed tool-result text values
+// exactly, mirroring the production fingerprintToolResultsSection: every
+// TEXT arm's value at its (message index, block index, content index) slot.
+// A value change at a slot, or a text arm whose slot moved (topology), both
+// count — exactly the production section.
+func toolResultsChanged(accepted, out *pb.ChatRequest) bool {
+	n := len(accepted.Messages)
+	if len(out.Messages) > n {
+		n = len(out.Messages)
+	}
+	for i := 0; i < n; i++ {
+		var a, b []byte
+		if i < len(accepted.Messages) {
+			a = toolResultTextSlots(accepted.Messages[i])
+		}
+		if i < len(out.Messages) {
+			b = toolResultTextSlots(out.Messages[i])
+		}
+		if !bytes.Equal(a, b) {
+			return true
+		}
+	}
+	return false
 }
 
-// sameToolWithoutMarker compares two tool definitions EXCLUDING
-// cache_control_json, for the same reason.
-func stripCacheBlocks(m *pb.Message) *pb.Message {
-	ca := proto.Clone(m).(*pb.Message)
-	var kept []*pb.RequestBlock
-	for _, b := range ca.Blocks {
-		if b.GetCacheBreakpoint() != nil {
+// toolResultTextSlots encodes one message's tool-result text values
+// positionally: each TEXT arm's slot (block index, ORIGINAL content index)
+// and value, in wire order.
+func toolResultTextSlots(m *pb.Message) []byte {
+	var out []byte
+	for bi, b := range m.Blocks {
+		tr := b.GetToolResult()
+		if tr == nil {
 			continue
 		}
-		if tr := b.GetToolResult(); tr != nil {
-			tr.Content = nestedWithoutCache(tr.Content)
+		for ci, c := range tr.Content {
+			if t := c.GetText(); t != nil {
+				out = append(out, markerFrame(bi, 1, ci, []byte(t.Text))...)
+			}
 		}
-		kept = append(kept, b)
 	}
-	ca.Blocks = kept
-	return ca
+	return out
+}
+
+func sameMessageWithoutMarker(a, b *pb.Message) bool {
+	// The oracle compares the PRODUCTION role view: cache carriers and the
+	// trailing carrier removed, provider signature tokens cleared, and
+	// tool-result text values placeholdered — the exact view
+	// fingerprintMessage hashes. Text value changes must land in
+	// toolResultsChanged, never here.
+	ca := roleViewMessage(a)
+	cb := roleViewMessage(b)
+	return proto.Equal(ca, cb)
 }
 
 // cacheMarkers encodes a message's cache carriers POSITIONALLY, mirroring
@@ -267,7 +303,10 @@ type mutation struct {
 	// wantRoles are the message roles the change must be attributed to. Empty
 	// means the change is not in the messages section.
 	wantRoles []string
-	apply     func(*pb.ChatRequest)
+	// wantToolResults asserts the change is attributed to the position-keyed
+	// tool-results section (ir.tool_results.write).
+	wantToolResults bool
+	apply           func(*pb.ChatRequest)
 }
 
 func baseRequest() *pb.ChatRequest {
@@ -290,24 +329,31 @@ func baseRequest() *pb.ChatRequest {
 func mutations() []mutation {
 	return []mutation{
 		{
-			// The case the first prototype missed entirely.
-			name:      "cross-role reorder",
-			wantRoles: []string{"user", "tool"},
+			// The case the first prototype missed entirely. The swap also
+			// MOVES the tool-result text tuple to another message slot, so
+			// the position-keyed tool-results section fires too.
+			name:            "cross-role reorder",
+			wantRoles:       []string{"user", "tool"},
+			wantToolResults: true,
 			apply: func(r *pb.ChatRequest) {
 				r.Messages[1], r.Messages[3] = r.Messages[3], r.Messages[1]
 			},
 		},
 		{
-			name:      "same-role content edit",
-			wantRoles: []string{"tool"},
+			// A text VALUE change at the same slot: the role view
+			// placeholders it, so it is a tool-results change, never a role
+			// change.
+			name:            "same-role content edit",
+			wantToolResults: true,
 			apply: func(r *pb.ChatRequest) {
-				r.Messages[3].Blocks[0].GetToolResult().Content[0].Kind = &pb.ToolResultContentBlock_Text{Text: &pb.ToolResultTextBlock{Text: "B'"}}
+				r.Messages[3].Blocks[0].GetToolResult().Content[0].GetText().Text = "B'"
 			},
 		},
 		{
 			// Unframed concatenation makes these two indistinguishable.
-			name:      "field boundary shift",
-			wantRoles: []string{"tool"},
+			name:            "field boundary shift",
+			wantRoles:       []string{"tool"},
+			wantToolResults: true,
 			apply: func(r *pb.ChatRequest) {
 				r.Messages[3].Blocks[0].GetToolResult().ToolName = "read" + r.Messages[3].Blocks[0].GetToolResult().Content[0].GetText().Text
 				r.Messages[3].Blocks[0].GetToolResult().Content[0].GetText().Text = ""
@@ -321,9 +367,11 @@ func mutations() []mutation {
 			},
 		},
 		{
-			name:      "message deleted",
-			wantRoles: []string{"tool"},
-			apply:     func(r *pb.ChatRequest) { r.Messages = r.Messages[:3] },
+			// Deleting the tool message removes its text tuple.
+			name:            "message deleted",
+			wantRoles:       []string{"tool"},
+			wantToolResults: true,
+			apply:           func(r *pb.ChatRequest) { r.Messages = r.Messages[:3] },
 		},
 		{
 			name:      "tool call arguments rewritten",
@@ -365,6 +413,12 @@ func TestCompareSectionsDetectsEveryMutation(t *testing.T) {
 				if !c.messages[role] {
 					t.Errorf("change not attributed to role %q; got %v", role, c.messages)
 				}
+			}
+			if m.wantToolResults && !c.toolResults {
+				t.Error("change not attributed to the tool-results section")
+			}
+			if !m.wantToolResults && c.toolResults {
+				t.Errorf("change attributed to the tool-results section, want none: %+v", c)
 			}
 		})
 	}

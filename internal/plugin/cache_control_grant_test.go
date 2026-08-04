@@ -37,6 +37,11 @@ func marker() []byte { return []byte(`{"type":"ephemeral"}`) }
 // ccOnly grants exactly ir.cache_control.write.
 func ccOnly(section string) bool { return section == ccGrant }
 
+// toolResultsOnly grants exactly ir.tool_results.write.
+func toolResultsOnly(section string) bool { return section == trGrant }
+
+const trGrant = "ir.tool_results.write"
+
 // allRoleAndToolGrants grants every message-role section and ir.tools.write,
 // deliberately NOT ir.cache_control.write.
 func allRoleAndToolGrants(section string) bool {
