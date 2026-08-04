@@ -263,10 +263,11 @@ func independentRoleView(m *pb.Message) []byte {
 		}
 		out.Blocks = append(out.Blocks, cloned)
 	}
-	// Deterministic for the same message value (protobuf guarantees
-	// deterministic serialization); any retained-field difference changes
-	// the bytes.
-	raw, err := proto.Marshal(out)
+	// Deterministic serialization is requested EXPLICITLY (protobuf-go is
+	// deterministic by default but does not guarantee it): the oracle must
+	// be byte-stable across runs. Any retained-field difference changes the
+	// bytes.
+	raw, err := proto.MarshalOptions{Deterministic: true}.Marshal(out)
 	if err != nil {
 		panic(err)
 	}

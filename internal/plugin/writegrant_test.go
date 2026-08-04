@@ -2,6 +2,8 @@ package plugin
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/binary"
 	"fmt"
 	"strings"
 	"testing"
@@ -1642,4 +1644,192 @@ func TestTrailingPrecedingDigestTyped(t *testing.T) {
 	different("explicit empty vs value", digest(text("")), digest(text("x")))
 	// ...and from an absent element.
 	different("explicit empty vs absent", digest(text("")), digest())
+}
+
+// --- independent byte-level trailing reference encoder ----------------------
+//
+// The PRODUCTION preceding/mixed digests are compared against an
+// INDEPENDENT reference encoder at the byte level: the expected framed
+// stream (covered ordinal, full message identity, field identity, value —
+// each u64LE-length-framed, exactly the production writeFramed contract) is
+// re-derived here WITHOUT calling writeTrailingRefs, occurrences,
+// requestBlockMessage, digestBlockFields, or any other production helper. A
+// framing drift in production (wrong identity bytes, ordinal
+// representation/order, a missing or extra field) breaks the equality.
+
+// refFrame length-frames one part the production way: u64LE length + bytes.
+func refFrame(out, p []byte) []byte {
+	var lb [8]byte
+	binary.LittleEndian.PutUint64(lb[:], uint64(len(p)))
+	out = append(out, lb[:]...)
+	return append(out, p...)
+}
+
+// refHash hashes the parts, each length-framed.
+func refHash(parts ...[]byte) [32]byte {
+	h := sha256.New()
+	for _, p := range parts {
+		_, _ = h.Write(refFrame(nil, p))
+	}
+	var sum [32]byte
+	copy(sum[:], h.Sum(nil))
+	return sum
+}
+
+// streamHash hashes an ALREADY-FRAMED stream raw — the production digest is
+// sha256 over the concatenated frames, with no outer length frame.
+func streamHash(stream []byte) [32]byte {
+	return sha256.Sum256(stream)
+}
+
+// independentTrailingStream encodes the covered preceding sequence at the
+// byte level: per covered element (wire order), the ordinal within the
+// covered subsequence (u64LE, length-framed), then per covered ref the full
+// "<message>.<field>" identity and the value (both length-framed).
+// Uncovered interleaved blocks contribute nothing.
+func independentTrailingStream(m *pb.Message) []byte {
+	var out []byte
+	ordinal := 0
+	for _, b := range m.Blocks {
+		var ident, val []byte
+		switch {
+		case b.GetText() != nil:
+			ident, val = []byte("torana.v2.RequestTextBlock.text"), []byte(b.GetText().Text)
+		case b.GetThinking() != nil:
+			ident, val = []byte("torana.v2.RequestThinkingBlock.text"), []byte(b.GetThinking().Text)
+		default:
+			continue // uncovered interleaved block
+		}
+		var ob [8]byte
+		binary.LittleEndian.PutUint64(ob[:], uint64(ordinal))
+		out = refFrame(out, ob[:])
+		out = refFrame(out, ident)
+		out = refFrame(out, val)
+		ordinal++
+	}
+	return out
+}
+
+// TestTrailingDigestsMatchIndependentReference — the production preceding
+// and mixed digests are EXACTLY the independently framed streams:
+//
+//   - preceding == hash(independentTrailingStream), carrier absent and
+//     present;
+//   - mixed (carrier present) == length-framed own-metadata digest followed
+//     by the same independent stream;
+//   - mixed (carrier absent) == the independent stream alone;
+//   - a WEAKENED reference (wrong type identity) is provably unequal — the
+//     equality is not vacuous.
+func TestTrailingDigestsMatchIndependentReference(t *testing.T) {
+	var trailing *requestSignatureField
+	for i := range requestSignatureFields {
+		if requestSignatureFields[i].scope == outboundpolicy.SignatureScopeTrailingStandalone {
+			trailing = &requestSignatureFields[i]
+			break
+		}
+	}
+	if trailing == nil {
+		t.Fatal("no trailing binding resolved")
+	}
+	text := func(s string) *pb.RequestBlock {
+		return &pb.RequestBlock{Kind: &pb.RequestBlock_Text{Text: &pb.RequestTextBlock{Text: s}}}
+	}
+	thinking := func(s string) *pb.RequestBlock {
+		return &pb.RequestBlock{Kind: &pb.RequestBlock_Thinking{Thinking: &pb.RequestThinkingBlock{Text: s}}}
+	}
+	toolUse := func() *pb.RequestBlock {
+		return &pb.RequestBlock{Kind: &pb.RequestBlock_ToolUse{ToolUse: &pb.RequestToolUseBlock{Id: "c", Name: "read", ArgumentsJson: []byte(`{}`)}}}
+	}
+	trailingBlock := func(sig string, meta []byte) *pb.RequestBlock {
+		return &pb.RequestBlock{Kind: &pb.RequestBlock_TrailingSignature{
+			TrailingSignature: &pb.RequestTrailingSignatureBlock{Signature: sig, PartMetadataJson: meta},
+		}}
+	}
+	// Mixed/repeated Text+Thinking, an explicit empty value, and an
+	// uncovered interleaved tool-use block.
+	msg := func(withCarrier bool, meta []byte) *pb.Message {
+		m := &pb.Message{Role: "assistant", Blocks: []*pb.RequestBlock{
+			text("a"), thinking("x"), text(""), toolUse(), thinking("y"), text("b"),
+		}}
+		if withCarrier {
+			m.Blocks = append(m.Blocks, trailingBlock("token", meta))
+		}
+		return m
+	}
+
+	meta := []byte(`{"m":1}`)
+	for _, withCarrier := range []bool{false, true} {
+		m := msg(withCarrier, meta)
+		occs, err := trailing.occurrences(m)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(occs) != 1 {
+			t.Fatalf("occurrences = %d, want 1", len(occs))
+		}
+		wantPreceding := streamHash(independentTrailingStream(m))
+		if occs[0].preceding != wantPreceding {
+			t.Fatalf("preceding digest mismatch (carrier present=%v): got %x, want %x",
+				withCarrier, occs[0].preceding, wantPreceding)
+		}
+		if !withCarrier {
+			// Absent carrier: the mixed digest is the stream alone.
+			wantMixed := streamHash(independentTrailingStream(m))
+			if occs[0].digest != wantMixed {
+				t.Fatalf("absent-carrier mixed digest mismatch: got %x, want %x", occs[0].digest, wantMixed)
+			}
+		}
+	}
+
+	// Carrier present: mixed == length-framed own-metadata digest (the
+	// SameMessage half: part_metadata_json, plain-bytes framing) followed by
+	// the same independent stream.
+	m := msg(true, meta)
+	occs, err := trailing.occurrences(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The SameMessage half of the mixed digest: digestBlockFields frames a
+	// bytes ref through protoreflect Value.String(), which is the fmt.Sprint
+	// form of the byte slice — mirror THAT byte-for-byte.
+	ownMeta := refHash([]byte(fmt.Sprint(meta)))
+	mixedH := sha256.New()
+	_, _ = mixedH.Write(refFrame(nil, ownMeta[:]))
+	_, _ = mixedH.Write(independentTrailingStream(m))
+	var wantMixed [32]byte
+	copy(wantMixed[:], mixedH.Sum(nil))
+	if occs[0].digest != wantMixed {
+		t.Fatalf("present-carrier mixed digest mismatch: got %x, want %x", occs[0].digest, wantMixed)
+	}
+
+	// WEAKENED reference: a wrong type identity (Thinking framed as Text)
+	// must NOT match the production preceding digest — the equality above is
+	// not satisfied by a vacuous fixture.
+	weakened := func(mm *pb.Message) []byte {
+		var out []byte
+		ordinal := 0
+		for _, b := range mm.Blocks {
+			var ident, val []byte
+			switch {
+			case b.GetText() != nil:
+				ident, val = []byte("torana.v2.RequestTextBlock.text"), []byte(b.GetText().Text)
+			case b.GetThinking() != nil:
+				// THE BUG: thinking framed under the TEXT identity.
+				ident, val = []byte("torana.v2.RequestTextBlock.text"), []byte(b.GetThinking().Text)
+			default:
+				continue
+			}
+			var ob [8]byte
+			binary.LittleEndian.PutUint64(ob[:], uint64(ordinal))
+			out = refFrame(out, ob[:])
+			out = refFrame(out, ident)
+			out = refFrame(out, val)
+			ordinal++
+		}
+		return out
+	}
+	weak := streamHash(weakened(m))
+	if weak == occs[0].preceding {
+		t.Fatal("the weakened reference (wrong type identity) matches production — the equality is vacuous")
+	}
 }
