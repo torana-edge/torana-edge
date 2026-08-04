@@ -122,8 +122,8 @@ func TestStreamSuppressAndFanOut(t *testing.T) {
 	registerEnvMap(t, pp, 1, "write")
 
 	out := run(t, pp, toolStart(0, "call_1", "write"))
-	if len(out) != 1 || out[0].ToolCallStart == nil {
-		t.Fatalf("expected ToolCallStart passthrough, got %+v", out)
+	if len(out) != 0 {
+		t.Fatalf("expected the start suppressed (host-side assembly), got %+v", out)
 	}
 
 	// Fragmented KV-array args: {"env":[{"key":"A","value":"1"}]}
@@ -135,16 +135,16 @@ func TestStreamSuppressAndFanOut(t *testing.T) {
 	}
 
 	out = run(t, pp, toolEnd(0))
-	if len(out) != 2 {
-		t.Fatalf("expected [delta, end] fan-out, got %d events: %+v", len(out), out)
+	if len(out) != 3 {
+		t.Fatalf("expected [start, delta, end] fan-out, got %d events: %+v", len(out), out)
 	}
-	if out[0].ToolCallDelta == nil || out[1].ToolCallEnd == nil {
-		t.Fatalf("expected [delta, end], got %+v", out)
+	if out[0].ToolCallStart == nil || out[1].ToolCallDelta == nil || out[2].ToolCallEnd == nil {
+		t.Fatalf("expected [start, delta, end], got %+v", out)
 	}
 
 	var args map[string]any
-	if err := json.Unmarshal([]byte(out[0].ToolCallDelta.ArgumentsDelta), &args); err != nil {
-		t.Fatalf("emitted args not valid JSON: %v (%q)", err, out[0].ToolCallDelta.ArgumentsDelta)
+	if err := json.Unmarshal([]byte(out[1].ToolCallDelta.ArgumentsDelta), &args); err != nil {
+		t.Fatalf("emitted args not valid JSON: %v (%q)", err, out[1].ToolCallDelta.ArgumentsDelta)
 	}
 	env, ok := args["env"].(map[string]any)
 	if !ok {
@@ -192,11 +192,11 @@ func TestStreamRequestIsolation(t *testing.T) {
 
 	for reqID, wantKey := range map[uint64]string{1: "A", 2: "B"} {
 		out := runAs(t, pp, reqID, toolEnd(0))
-		if len(out) != 2 || out[0].ToolCallDelta == nil {
-			t.Fatalf("req %d: expected [delta, end], got %+v", reqID, out)
+		if len(out) != 3 || out[0].ToolCallStart == nil || out[1].ToolCallDelta == nil || out[2].ToolCallEnd == nil {
+			t.Fatalf("req %d: expected [start, delta, end], got %+v", reqID, out)
 		}
 		var args map[string]any
-		if err := json.Unmarshal([]byte(out[0].ToolCallDelta.ArgumentsDelta), &args); err != nil {
+		if err := json.Unmarshal([]byte(out[1].ToolCallDelta.ArgumentsDelta), &args); err != nil {
 			t.Fatalf("req %d: invalid args %q: %v", reqID, out[0].ToolCallDelta.ArgumentsDelta, err)
 		}
 		env, _ := args["env"].(map[string]any)
@@ -237,12 +237,12 @@ func TestRegistryPathReversal(t *testing.T) {
 	runAs(t, pp, reqID, toolDelta(0, `"pairs":[{"key":"k","value":"v"}]}`))
 
 	out := runAs(t, pp, reqID, toolEnd(0))
-	if len(out) != 2 || out[0].ToolCallDelta == nil {
-		t.Fatalf("expected [delta, end], got %+v", out)
+	if len(out) != 3 || out[0].ToolCallStart == nil || out[1].ToolCallDelta == nil || out[2].ToolCallEnd == nil {
+		t.Fatalf("expected [start, delta, end], got %+v", out)
 	}
 	var args map[string]any
-	if err := json.Unmarshal([]byte(out[0].ToolCallDelta.ArgumentsDelta), &args); err != nil {
-		t.Fatalf("invalid args %q: %v", out[0].ToolCallDelta.ArgumentsDelta, err)
+	if err := json.Unmarshal([]byte(out[1].ToolCallDelta.ArgumentsDelta), &args); err != nil {
+		t.Fatalf("invalid args %q: %v", out[1].ToolCallDelta.ArgumentsDelta, err)
 	}
 	env, ok := args["env"].(map[string]any)
 	if !ok || env["A"] != "1" {
@@ -263,19 +263,25 @@ func TestUnregisteredToolNotReversed(t *testing.T) {
 	requireBundle(t, bundles, "schema_translator")
 	pp := newTestPipeline(t, bundles, []string{"schema_translator"})
 
-	// No RunBeforeRequest translation for this request → empty mutation
-	// registry → nothing is registered for tool "emit".
+	// The registry envelope must exist (the stream hook cannot prove
+	// pass-through without it): every request-side invocation publishes one,
+	// even when nothing changed. A tool with no open maps translates
+	// nothing, leaving "emit" unregistered.
 	const reqID = 7
+	chat := &engine.ChatRequest{Tools: []engine.ToolDef{{Name: "read", Parameters: mustReq(`{"type":"object","properties":{"path":{"type":"string"}}}`)}}}
+	if _, err := pp.RunBeforeRequest(context.Background(), reqID, chat, nil); err != nil {
+		t.Fatalf("RunBeforeRequest: %v", err)
+	}
 	runAs(t, pp, reqID, toolStart(0, "call_native", "emit"))
 	runAs(t, pp, reqID, toolDelta(0, `{"tags":[{"key":"k","value":"v"}]}`))
 
 	out := runAs(t, pp, reqID, toolEnd(0))
-	if len(out) != 2 || out[0].ToolCallDelta == nil {
-		t.Fatalf("expected [delta, end], got %+v", out)
+	if len(out) != 3 || out[0].ToolCallStart == nil || out[1].ToolCallDelta == nil || out[2].ToolCallEnd == nil {
+		t.Fatalf("expected [start, delta, end], got %+v", out)
 	}
 	var args map[string]any
-	if err := json.Unmarshal([]byte(out[0].ToolCallDelta.ArgumentsDelta), &args); err != nil {
-		t.Fatalf("invalid args %q: %v", out[0].ToolCallDelta.ArgumentsDelta, err)
+	if err := json.Unmarshal([]byte(out[1].ToolCallDelta.ArgumentsDelta), &args); err != nil {
+		t.Fatalf("invalid args %q: %v", out[1].ToolCallDelta.ArgumentsDelta, err)
 	}
 	if _, isArray := args["tags"].([]any); !isArray {
 		t.Fatalf("native KV array was reversed on an unregistered tool: %v", args)
@@ -294,8 +300,8 @@ func TestStreamChaining(t *testing.T) {
 	// KV-array mutation is registered and reversed via the registry.
 	registerEnvMap(t, pp, 1, "write")
 
-	if out := run(t, pp, toolStart(0, "call_2", "write")); len(out) != 1 {
-		t.Fatalf("expected start passthrough, got %+v", out)
+	if out := run(t, pp, toolStart(0, "call_2", "write")); len(out) != 0 {
+		t.Fatalf("expected the start suppressed (host-side assembly), got %+v", out)
 	}
 	// Args carry an injected "i" intent plus a KV-array map.
 	if out := run(t, pp, toolDelta(0, `{"i":"find the bug",`)); len(out) != 0 {
@@ -306,13 +312,13 @@ func TestStreamChaining(t *testing.T) {
 	}
 
 	out := run(t, pp, toolEnd(0))
-	if len(out) != 2 || out[0].ToolCallDelta == nil || out[1].ToolCallEnd == nil {
-		t.Fatalf("expected [delta, end], got %+v", out)
+	if len(out) != 3 || out[0].ToolCallStart == nil || out[1].ToolCallDelta == nil || out[2].ToolCallEnd == nil {
+		t.Fatalf("expected [start, delta, end], got %+v", out)
 	}
 
 	var args map[string]any
-	if err := json.Unmarshal([]byte(out[0].ToolCallDelta.ArgumentsDelta), &args); err != nil {
-		t.Fatalf("emitted args not valid JSON: %v (%q)", err, out[0].ToolCallDelta.ArgumentsDelta)
+	if err := json.Unmarshal([]byte(out[1].ToolCallDelta.ArgumentsDelta), &args); err != nil {
+		t.Fatalf("emitted args not valid JSON: %v (%q)", err, out[1].ToolCallDelta.ArgumentsDelta)
 	}
 	if _, hasI := args["i"]; hasI {
 		t.Fatalf(`expected "i" stripped by the intent plugin, got %v`, args)
@@ -335,18 +341,18 @@ func TestIntentRehydratesHistory(t *testing.T) {
 
 	// Turn 1 response: model emits a tool call carrying "i"; the plugin caches
 	// the intent under the tool_call_id and strips it from the emitted args.
-	if out := run(t, pp, toolStart(0, "call_hist", "read")); len(out) != 1 {
-		t.Fatalf("expected start passthrough, got %+v", out)
+	if out := run(t, pp, toolStart(0, "call_hist", "read")); len(out) != 0 {
+		t.Fatalf("expected the start suppressed (host-side assembly), got %+v", out)
 	}
 	if out := run(t, pp, toolDelta(0, `{"i":"where is the retry budget configured","path":"failover.go"}`)); len(out) != 0 {
 		t.Fatalf("expected fragment suppressed, got %+v", out)
 	}
 	out := run(t, pp, toolEnd(0))
-	if len(out) != 2 || out[0].ToolCallDelta == nil {
-		t.Fatalf("expected [delta, end], got %+v", out)
+	if len(out) != 3 || out[0].ToolCallStart == nil || out[1].ToolCallDelta == nil || out[2].ToolCallEnd == nil {
+		t.Fatalf("expected [start, delta, end], got %+v", out)
 	}
 	var stripped map[string]any
-	json.Unmarshal([]byte(out[0].ToolCallDelta.ArgumentsDelta), &stripped)
+	json.Unmarshal([]byte(out[1].ToolCallDelta.ArgumentsDelta), &stripped)
 	if _, hasI := stripped["i"]; hasI {
 		t.Fatalf(`turn 1: "i" should be stripped from emitted args, got %v`, stripped)
 	}
@@ -357,7 +363,7 @@ func TestIntentRehydratesHistory(t *testing.T) {
 		Tools: []engine.ToolDef{{Name: "read", Parameters: mustReq(`{"type":"object","properties":{"path":{"type":"string"}}}`)}},
 		Messages: []engine.Message{
 			{Role: engine.RoleUser, Blocks: []engine.Block{{Text: &engine.TextBlock{Text: "trace the retry logic"}}}},
-			{Role: engine.RoleAssistant, Blocks: []engine.Block{{ToolUse: &engine.ToolUseBlock{ID: "call_hist", Name: "read", Arguments: mustReq(`{"path":"x"}`)}}}},
+			{Role: engine.RoleAssistant, Blocks: []engine.Block{{ToolUse: &engine.ToolUseBlock{ID: "call_hist", Name: "read", Arguments: mustReq(`{"path":"failover.go"}`)}}}},
 			{Role: engine.RoleTool, Blocks: []engine.Block{{ToolResult: &engine.ToolResultBlock{ToolCallID: "call_hist", Content: []engine.ToolResultContentBlock{{Text: "package proxy ..."}}}}}},
 		},
 	}
@@ -400,7 +406,7 @@ func TestIntentFillsUncachedHistory(t *testing.T) {
 			Tools: []engine.ToolDef{{Name: "read", Parameters: mustReq(`{"type":"object","properties":{"path":{"type":"string"}}}`)}},
 			Messages: []engine.Message{
 				{Role: engine.RoleUser, Blocks: []engine.Block{{Text: &engine.TextBlock{Text: userMsg}}}},
-				{Role: engine.RoleAssistant, Blocks: []engine.Block{{ToolUse: &engine.ToolUseBlock{ID: "call_never_seen", Name: "read", Arguments: mustReq(`{"path":"x"}`)}}}},
+				{Role: engine.RoleAssistant, Blocks: []engine.Block{{ToolUse: &engine.ToolUseBlock{ID: "call_never_seen", Name: "read", Arguments: mustReq(`{"path":"x.go"}`)}}}},
 				{Role: engine.RoleTool, Blocks: []engine.Block{{ToolResult: &engine.ToolResultBlock{ToolCallID: "call_never_seen", Content: []engine.ToolResultContentBlock{{Text: "..."}}}}}},
 			},
 		}
@@ -410,7 +416,10 @@ func TestIntentFillsUncachedHistory(t *testing.T) {
 		for _, m := range out.Messages {
 			if m.Role == engine.RoleAssistant && len(m.Blocks) == 1 && m.Blocks[0].ToolUse != nil {
 				vals, _, _ := m.Blocks[0].ToolUse.Arguments.DecodeObject()
-				i := string(vals["i"])
+				// DecodeObject returns exact lexemes: a JSON string value is
+				// quoted. Unquote for the comparison.
+				var i string
+				_ = json.Unmarshal(vals["i"], &i)
 				return i
 			}
 		}
@@ -492,7 +501,7 @@ func TestIntentBridgesToRequestSideID(t *testing.T) {
 		Tools: []engine.ToolDef{{Name: "read", Parameters: mustReq(`{"type":"object","properties":{"path":{"type":"string"}}}`)}},
 		Messages: []engine.Message{
 			{Role: engine.RoleUser, Blocks: []engine.Block{{Text: &engine.TextBlock{Text: "trace the retry logic"}}}},
-			{Role: engine.RoleAssistant, Blocks: []engine.Block{{ToolUse: &engine.ToolUseBlock{ID: "call_req_42", Name: "read", Arguments: mustReq(`{"path":"x"}`)}}}},
+			{Role: engine.RoleAssistant, Blocks: []engine.Block{{ToolUse: &engine.ToolUseBlock{ID: "call_req_42", Name: "read", Arguments: mustReq(`{"path":"failover.go"}`)}}}},
 			{Role: engine.RoleTool, Blocks: []engine.Block{{ToolResult: &engine.ToolResultBlock{ToolCallID: "call_req_42", Content: []engine.ToolResultContentBlock{{Text: "package proxy ..."}}}}}},
 		},
 	}
@@ -540,7 +549,7 @@ func TestIntentBridgeFeedsKeywordCompactor(t *testing.T) {
 		Tools: []engine.ToolDef{{Name: "read", Parameters: mustReq(`{"type":"object","properties":{"path":{"type":"string"}}}`)}},
 		Messages: []engine.Message{
 			{Role: engine.RoleUser, Blocks: []engine.Block{{Text: &engine.TextBlock{Text: "trace the retry logic"}}}},
-			{Role: engine.RoleAssistant, Blocks: []engine.Block{{ToolUse: &engine.ToolUseBlock{ID: "call_req_77", Name: "read", Arguments: mustReq(`{"path":"x"}`)}}}},
+			{Role: engine.RoleAssistant, Blocks: []engine.Block{{ToolUse: &engine.ToolUseBlock{ID: "call_req_77", Name: "read", Arguments: mustReq(`{"path":"failover.go"}`)}}}},
 			{Role: engine.RoleTool, Blocks: []engine.Block{{ToolResult: &engine.ToolResultBlock{ToolCallID: "call_req_77", Content: []engine.ToolResultContentBlock{{Text: big}}}}}},
 			{Role: engine.RoleAssistant, Blocks: []engine.Block{{Text: &engine.TextBlock{Text: "I have read the file."}}}},
 			{Role: engine.RoleUser, Blocks: []engine.Block{{Text: &engine.TextBlock{Text: "Great, now fix it."}}}},
@@ -993,11 +1002,11 @@ func TestIntentNativeIEnrichesDescriptionOnly(t *testing.T) {
 	runAs(t, pp, 6, toolStart(0, "call_native", "read"))
 	runAs(t, pp, 6, toolDelta(0, `{"i":"find the retry budget","path":"failover.go"}`))
 	out2 := runAs(t, pp, 6, toolEnd(0))
-	if len(out2) != 2 || out2[0].ToolCallDelta == nil {
-		t.Fatalf("expected [delta, end], got %+v", out2)
+	if len(out2) != 3 || out2[0].ToolCallStart == nil || out2[1].ToolCallDelta == nil || out2[2].ToolCallEnd == nil {
+		t.Fatalf("expected [start, delta, end], got %+v", out2)
 	}
 	var args map[string]any
-	json.Unmarshal([]byte(out2[0].ToolCallDelta.ArgumentsDelta), &args)
+	json.Unmarshal([]byte(out2[1].ToolCallDelta.ArgumentsDelta), &args)
 	if args["i"] != "find the retry budget" {
 		t.Fatalf(`native "i" must NOT be stripped, got %v`, args)
 	}
