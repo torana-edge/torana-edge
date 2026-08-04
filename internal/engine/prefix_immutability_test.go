@@ -136,8 +136,18 @@ func TestCachePrefixKeyMatchesReferenceModel(t *testing.T) {
 		"tool marker": {Model: "m", Messages: []*pb.Message{pbUserMsg("u")},
 			Tools: []*pb.ToolDef{{Name: "read", ParametersJson: pbMarkerBytes(`{"type":"object"}`), CacheControlJson: pbMarkerBytes(`{"type":"ephemeral"}`)}}},
 		"multiple markers (message wins)": {Model: "m",
-			Tools:    []*pb.ToolDef{{Name: "read", ParametersJson: pbMarkerBytes(`{}`), CacheControlJson: pbMarkerBytes(`{"type":"ephemeral"}`)}},
-			Messages: []*pb.Message{pbUserMsg("u"), pbUserMsg("v")}},
+			Tools: []*pb.ToolDef{{Name: "read", ParametersJson: pbMarkerBytes(`{}`), CacheControlJson: pbMarkerBytes(`{"type":"ephemeral"}`)}},
+			// The later OUTER message marker supersedes the tool marker: the
+			// prefix includes both messages (truncated at the marker block),
+			// with suffix content after it excluded.
+			Messages: []*pb.Message{
+				pbUserMsg("u"),
+				{Role: "user", Blocks: []*pb.RequestBlock{
+					{Kind: &pb.RequestBlock_Text{Text: &pb.RequestTextBlock{Text: "v"}}},
+					{Kind: &pb.RequestBlock_CacheBreakpoint{CacheBreakpoint: &pb.RequestCacheBreakpoint{MarkerJson: pbMarkerBytes(`{"type":"ephemeral"}`)}}},
+					{Kind: &pb.RequestBlock_Text{Text: &pb.RequestTextBlock{Text: "suffix"}}},
+				}},
+			}},
 		"no marker": {Model: "m", Messages: []*pb.Message{pbUserMsg("a"), pbUserMsg("b")}},
 		"nested marker in second message": {Model: "m", Messages: []*pb.Message{
 			pbUserMsg("first"),
