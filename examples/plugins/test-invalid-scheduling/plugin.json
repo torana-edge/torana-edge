@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "id": "torana-test/test-invalid-scheduling",
+  "name": "test-invalid-scheduling",
+  "version": "0.1.0",
+  "abi_version": "v2",
+  "failure_mode": "block",
+  "description": "Test fixture: injects an SDK-valid but adapter-unmarshalable scheduling value",
+  "hooks": [
+    {
+      "name": "run_before_request"
+    }
+  ],
+  "permissions": [
+    {
+      "name": "ir.messages.write.user",
+      "description": "Inject the invalid scheduling into the user-role tool result"
+    },
+    {
+      "name": "ir.messages.write.tool",
+      "description": "Inject the invalid scheduling"
+    }
+  ]
+}

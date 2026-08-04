@@ -1109,14 +1109,34 @@ func New(cfg Config) (*Server, error) {
 
 			newBody, err := fmt.Request.Marshal(chat)
 			if err != nil {
-				log.Printf("format %s marshal error: %v — passing through", fmt.Name, err)
-				newBody = body
-				// The original request is sent, so queued reports about plugin
-				// mutations must never become savings metrics.
-				discardCompactionReports(reqStateFrom(req.Context()))
-			} else {
-				reqStateFrom(req.Context()).CompactionRequestPrepared = true
+				// HOST MARSHAL FAILURE — the terminal host_error path (PR B,
+				// MARSHAL_FAILURE_CHECKPOINT §5): the accepted IR passed the
+				// SDK replacement contract (every plugin replacement is
+				// ValidateReplacement-gated) but the provider adapter cannot
+				// project it onto the wire. This is HOST-LOCAL and
+				// independent of plugin failure mode (the replacement was
+				// contract-valid, so failure_mode pass/block do not apply) —
+				// never the silent original-body fallback. The provider-
+				// native value-free 500 is served synthetically: zero
+				// upstream, zero limiter acquisition, no response hooks /
+				// upstream status, no compaction credit. Exactly ONE
+				// sanitized log line carries the diagnostic (the body never
+				// echoes raw error text); route/identity stay diagnostic
+				// facts and the verdict is host_error, never route/block/
+				// respond.
+				log.Printf("format %s marshal error: %v — serving host_error", fmt.Name, err)
+				rc.Block = renderHostError(prov.Format)
+				rs := reqStateFrom(req.Context())
+				rs.Synthetic = true
+				rs.Verdict = "host_error"
+				rs.VerdictPlugin = ""
+				rs.PluginFailure = false
+				req.Body = io.NopCloser(bytes.NewReader(nil))
+				req.ContentLength = 0
+				discardCompactionReports(rs)
+				return
 			}
+			reqStateFrom(req.Context()).CompactionRequestPrepared = true
 
 			// Stash format and chat for ModifyResponse.
 			ctx = req.Context()
