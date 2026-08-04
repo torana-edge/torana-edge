@@ -1129,10 +1129,13 @@ func New(cfg Config) (*Server, error) {
 				// plugin could load with request secrets. Exactly one
 				// value-free log line names the configured format and the
 				// host marshal-failure category.
+				// applyHostError OWNS the complete terminal state transition
+				// (verdict, attribution, block response, compaction cleanup)
+				// exactly once — no caller-side duplicate cleanup, so the
+				// production path is byte-identical to the unit seam.
 				applyHostError(reqStateFrom(req.Context()), rc, prov)
 				req.Body = io.NopCloser(bytes.NewReader(nil))
 				req.ContentLength = 0
-				discardCompactionReports(rs)
 				return
 			}
 			reqStateFrom(req.Context()).CompactionRequestPrepared = true

@@ -67,7 +67,17 @@ func captureLogs(t *testing.T) *logSink {
 // request must never materialize one.
 func parseFailE2E(t *testing.T, format string, order []string, body string) (int, []byte, *int32, *Server) {
 	t.Helper()
-	return parseFailE2EUpstream(t, format, order, body, http.StatusOK)
+	status, b, _, hits, srv := parseFailE2EWithHeader(t, format, order, body, http.StatusOK, "")
+	return status, b, hits, srv
+}
+
+// parseFailE2EWithHeader is parseFailE2E plus the response HEADER, so a
+// real-terminal row can pin Content-Type through HTTP (a transport
+// regression dropping or changing it must fail).
+func parseFailE2EWithHeader(t *testing.T, format string, order []string, body string, upstreamStatus int, approvalFailureMode string) (int, []byte, http.Header, *int32, *Server) {
+	t.Helper()
+	status, b, hdr, hits, srv := parseFailE2EApprovedH(t, format, order, body, upstreamStatus, approvalFailureMode)
+	return status, b, hdr, hits, srv
 }
 
 // parseFailE2EUpstream is parseFailE2E with a configurable upstream status,
@@ -82,6 +92,13 @@ func parseFailE2EUpstream(t *testing.T, format string, order []string, body stri
 // fixture can be forced to allow (or vice versa) for the failure-mode
 // independence rows.
 func parseFailE2EApproved(t *testing.T, format string, order []string, body string, upstreamStatus int, approvalFailureMode string) (int, []byte, *int32, *Server) {
+	t.Helper()
+	status, b, _, hits, srv := parseFailE2EApprovedH(t, format, order, body, upstreamStatus, approvalFailureMode)
+	return status, b, hits, srv
+}
+
+// parseFailE2EApprovedH is parseFailE2EApproved with the response header.
+func parseFailE2EApprovedH(t *testing.T, format string, order []string, body string, upstreamStatus int, approvalFailureMode string) (int, []byte, http.Header, *int32, *Server) {
 	t.Helper()
 	var hits int32
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -135,7 +152,7 @@ func parseFailE2EApproved(t *testing.T, format string, order []string, body stri
 	}
 	defer resp.Body.Close()
 	b, _ := io.ReadAll(resp.Body)
-	return resp.StatusCode, b, &hits, srv
+	return resp.StatusCode, b, resp.Header, &hits, srv
 }
 
 // limiterBucketCount returns the number of materialized limiter buckets.

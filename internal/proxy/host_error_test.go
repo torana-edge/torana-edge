@@ -22,6 +22,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -124,14 +125,12 @@ func TestHostErrorSanitizedLog(t *testing.T) {
 	if strings.Contains(logs, "tool result scheduling") {
 		t.Fatalf("raw adapter diagnostic leaked into the log: %q", logs)
 	}
-	matches := 0
-	for _, line := range strings.Split(strings.TrimSpace(logs), "\n") {
-		if strings.Contains(line, "host marshal failure") {
-			matches++
-		}
-	}
-	if matches != 1 {
-		t.Fatalf("host marshal failure lines = %d, want exactly 1; log: %q", matches, logs)
+	// EXACTLY ONE structurally matched sanitized line: a timestamp-aware,
+	// anchored expression for the full line — any extra text, a different
+	// format name, or a duplicated/truncated line fails.
+	lineRe := regexp.MustCompile(`(?m)^\d{4}/\d{2}/\d{2} \d{2}:\d{2}:\d{2} format gemini: host marshal failure — serving host_error$`)
+	if m := lineRe.FindAllString(logs, -1); len(m) != 1 {
+		t.Fatalf("sanitized host-error lines = %d, want exactly 1; log: %q", len(m), logs)
 	}
 }
 
@@ -207,7 +206,7 @@ func TestHostErrorGoldenShapes(t *testing.T) {
 // reachability row.
 func TestHostErrorPerFormatTerminal(t *testing.T) {
 	requireWASM(t, "../../examples/plugins/test-invalid-scheduling/plugin.wasm")
-	requireWASM(t, "../../examples/plugins/test-trailing-signature/plugin.wasm")
+	requireWASM(t, "../../examples/plugins/test-tool-role-message/plugin.wasm")
 	requireWASM(t, "../../examples/plugins/test-redacted-thinking/plugin.wasm")
 
 	geminiBody := `{"model":"m","contents":[{"role":"user","parts":[{"functionResponse":{"name":"read","response":{"output":"x"},"id":"c1"}}]}]}`
@@ -220,13 +219,16 @@ func TestHostErrorPerFormatTerminal(t *testing.T) {
 	}{
 		{"gemini", "test-invalid-scheduling", geminiBody},
 		{"gemini-codeassist", "test-invalid-scheduling", codeAssistBody},
-		{"anthropic", "test-trailing-signature", `{"model":"m","max_tokens":64,"messages":[{"role":"user","content":"hi"}]}`},
+		{"anthropic", "test-tool-role-message", `{"model":"m","max_tokens":64,"messages":[{"role":"user","content":"hi"}]}`},
 		{"openai", "test-redacted-thinking", `{"model":"m","messages":[{"role":"user","content":"redactme"}]}`},
 		{"bedrock", "test-redacted-thinking", `{"modelId":"m","messages":[{"role":"user","content":[{"text":"redactme"}]}]}`},
 	}
 	for _, row := range rows {
 		t.Run(row.format, func(t *testing.T) {
-			status, body, hits, srv := parseFailE2E(t, row.format, []string{row.plugin}, row.body)
+			status, body, hdr, hits, srv := parseFailE2EWithHeader(t, row.format, []string{row.plugin}, row.body, http.StatusOK, "")
+			if ct := hdr.Get("Content-Type"); ct != "application/json" {
+				t.Fatalf("Content-Type = %q, want application/json through HTTP", ct)
+			}
 			if status != http.StatusInternalServerError {
 				t.Fatalf("status = %d, want 500; body=%s", status, body)
 			}
@@ -382,17 +384,20 @@ func mustDigest(t *testing.T, name string) string {
 }
 
 // TestApplyHostErrorClearsQueuedReport — unit revert-proof for the
-// terminal: a request that already queued an attributed compaction report
-// (torana_record_savings) and set the prepared flag loses BOTH when the
-// terminal fires, so the request-tail recordCompactionReports commits
-// nothing. Removing discardCompactionReports from applyHostError fails
-// this test.
+// terminal: seeded with a realistic PRIOR route state (Verdict="route",
+// non-empty VerdictPlugin, queued attributed compaction report, prepared
+// flag), applyHostError must atomically produce host_error: clear the
+// route verdict/attribution, clear PluginFailure, install the 500 block,
+// and clear the report state. Reverting ANY owned assignment (verdict,
+// attribution, synthetic, block, discard) fails this test; the production
+// path owns the transition exactly once (no caller-side duplicate).
 func TestApplyHostErrorClearsQueuedReport(t *testing.T) {
 	rs := &reqState{
-		CompactionReports: []attributedCompactionReport{{
-			Plugin: "p",
-			Report: economics.CompactionReport{OriginalBytes: 100, FinalBytes: 40},
-		}},
+		Verdict:                   "route",
+		VerdictPlugin:             "test-router",
+		Synthetic:                 false,
+		PluginFailure:             false,
+		CompactionReports:         []attributedCompactionReport{{Plugin: "p", Report: economics.CompactionReport{OriginalBytes: 100, FinalBytes: 40}}},
 		CompactionRequestPrepared: true,
 	}
 	rc := &RouteContext{}
@@ -402,8 +407,23 @@ func TestApplyHostErrorClearsQueuedReport(t *testing.T) {
 	if rc.Block == nil || rc.Block.Status != http.StatusInternalServerError {
 		t.Fatalf("block = %+v, want the 500 host_error", rc.Block)
 	}
-	if !rs.Synthetic || rs.Verdict != "host_error" || rs.VerdictPlugin != "" || rs.PluginFailure {
-		t.Fatalf("verdict state = synthetic=%v verdict=%q plugin=%q failure=%v", rs.Synthetic, rs.Verdict, rs.VerdictPlugin, rs.PluginFailure)
+	if !bytes.Equal(rc.Block.Body, literalHostError("gemini")) {
+		t.Fatalf("block body = %s, want the literal gemini host_error", rc.Block.Body)
+	}
+	if rc.Block.ContentType != "application/json" {
+		t.Fatalf("block content-type = %q, want application/json", rc.Block.ContentType)
+	}
+	if rs.Verdict != "host_error" {
+		t.Fatalf("verdict = %q, want host_error (the route verdict must be replaced)", rs.Verdict)
+	}
+	if rs.VerdictPlugin != "" {
+		t.Fatalf("verdict plugin = %q, want empty", rs.VerdictPlugin)
+	}
+	if rs.PluginFailure {
+		t.Fatal("plugin_failure must be false on the terminal")
+	}
+	if !rs.Synthetic {
+		t.Fatal("synthetic must be true on the terminal")
 	}
 	if len(rs.CompactionReports) != 0 {
 		t.Fatalf("queued report survived the terminal: %+v", rs.CompactionReports)
@@ -427,7 +447,7 @@ func TestApplyHostErrorClearsQueuedReport(t *testing.T) {
 // If the terminal committed the queued report, the counter would be 2.
 func TestHostErrorDiscardsQueuedReportNonVacuous(t *testing.T) {
 	requireWASM(t, "../../examples/plugins/test-extension-contract/plugin.wasm")
-	requireWASM(t, "../../examples/plugins/test-invalid-scheduling/plugin.wasm")
+	requireWASM(t, "../../examples/plugins/test-redacted-thinking/plugin.wasm")
 
 	var upstreamBodies []string
 	var hits int32
@@ -490,8 +510,9 @@ func TestHostErrorDiscardsQueuedReportNonVacuous(t *testing.T) {
 		t.Fatalf("control recorded %d applications, want 1 (the counter must move)", got)
 	}
 
-	// TERMINAL: same queue, then the marshal failure — the report must be
-	// discarded, never committed.
+	// TERMINAL: same queue, then the marshal failure (the redacted-thinking
+	// fixture appends a redacted block the openai adapter refuses) — the
+	// report must be discarded, never committed.
 	status, body = post("record-savings", true)
 	if status != http.StatusInternalServerError {
 		t.Fatalf("terminal status = %d, want 500; body=%s", status, body)
@@ -518,7 +539,10 @@ func TestHostErrorFailureModeIndependence(t *testing.T) {
 	var want []byte
 	for _, fm := range []string{"pass", "block"} {
 		t.Run(fm, func(t *testing.T) {
-			status, out, hits, srv := parseFailE2EApproved(t, "gemini", []string{"test-invalid-scheduling"}, body, http.StatusOK, fm)
+			status, out, hdr, hits, srv := parseFailE2EApprovedH(t, "gemini", []string{"test-invalid-scheduling"}, body, http.StatusOK, fm)
+			if ct := hdr.Get("Content-Type"); ct != "application/json" {
+				t.Fatalf("Content-Type = %q, want application/json through HTTP", ct)
+			}
 			if status != http.StatusInternalServerError {
 				t.Fatalf("status = %d, want 500; body=%s", status, out)
 			}
@@ -551,18 +575,30 @@ func TestRespondPrecedesHostError(t *testing.T) {
 
 	body := `{"model":"m","contents":[{"role":"user","parts":[{"text":"respondme please"}]},{"role":"user","parts":[{"functionResponse":{"name":"read","response":{"output":"x"},"id":"c1"}}]}]}`
 	sink := captureLogs(t)
-	status, out, hits, _ := parseFailE2E(t, "gemini", []string{"test-responder", "test-invalid-scheduling"}, body)
+	status, out, hdr, hits, srv := parseFailE2EWithHeader(t, "gemini", []string{"test-responder", "test-invalid-scheduling"}, body, http.StatusOK, "")
 	if status != http.StatusOK {
 		t.Fatalf("status = %d, want the responder's 200; body=%s", status, out)
 	}
-	if !strings.Contains(string(out), "canned response from test-responder") {
-		t.Fatalf("responder body missing: %s", out)
+	if ct := hdr.Get("Content-Type"); ct != "application/json" {
+		t.Fatalf("Content-Type = %q, want application/json through HTTP", ct)
+	}
+	// EXACT independent bytes of the gemini direct-completion envelope —
+	// extra members, a host-error envelope with the canned text, or
+	// provider-envelope drift all fail.
+	want := []byte(`{"candidates":[{"content":{"parts":[{"text":"canned response from test-responder"}],"role":"model"},"finishReason":"STOP"}],"usageMetadata":{"candidatesTokenCount":0,"promptTokenCount":0,"totalTokenCount":0}}`)
+	if !bytes.Equal(out, want) {
+		t.Fatalf("respond body\n got: %s\nwant: %s", out, want)
 	}
 	if n := atomic.LoadInt32(hits); n != 0 {
 		t.Fatalf("upstream calls = %d, want 0", n)
 	}
 	if strings.Contains(sink.String(), "host marshal failure") {
 		t.Fatalf("host_error log line appeared on the respond path: %q", sink.String())
+	}
+	events := srv.feed.Snapshot()
+	last := events[len(events)-1]
+	if last.Verdict != "respond" {
+		t.Fatalf("feed verdict = %q, want respond", last.Verdict)
 	}
 }
 
