@@ -1109,14 +1109,36 @@ func New(cfg Config) (*Server, error) {
 
 			newBody, err := fmt.Request.Marshal(chat)
 			if err != nil {
-				log.Printf("format %s marshal error: %v — passing through", fmt.Name, err)
-				newBody = body
-				// The original request is sent, so queued reports about plugin
-				// mutations must never become savings metrics.
-				discardCompactionReports(reqStateFrom(req.Context()))
-			} else {
-				reqStateFrom(req.Context()).CompactionRequestPrepared = true
+				// HOST MARSHAL FAILURE — the terminal host_error path (PR B,
+				// MARSHAL_FAILURE_CHECKPOINT §5): the accepted IR passed the
+				// SDK replacement contract (every plugin replacement is
+				// ValidateReplacement-gated) but the provider adapter cannot
+				// project it onto the wire. This is HOST-LOCAL and
+				// independent of plugin failure mode (the replacement was
+				// contract-valid, so failure_mode pass/block do not apply) —
+				// never the silent original-body fallback. The provider-
+				// native value-free 500 is served synthetically: zero
+				// upstream, zero limiter acquisition, no response hooks /
+				// upstream status, no compaction credit. Exactly ONE
+				// sanitized log line carries the diagnostic (the body never
+				// echoes raw error text); route/identity stay diagnostic
+				// facts and the verdict is host_error, never route/block/
+				// respond.
+				// The adapter error is NEVER interpolated: it embeds guest-controlled
+				// data (tool names, roles, kinds, raw fragments) that a
+				// plugin could load with request secrets. Exactly one
+				// value-free log line names the configured format and the
+				// host marshal-failure category.
+				// applyHostError OWNS the complete terminal state transition
+				// (verdict, attribution, block response, compaction cleanup)
+				// exactly once — no caller-side duplicate cleanup, so the
+				// production path is byte-identical to the unit seam.
+				applyHostError(reqStateFrom(req.Context()), rc, prov)
+				req.Body = io.NopCloser(bytes.NewReader(nil))
+				req.ContentLength = 0
+				return
 			}
+			reqStateFrom(req.Context()).CompactionRequestPrepared = true
 
 			// Stash format and chat for ModifyResponse.
 			ctx = req.Context()

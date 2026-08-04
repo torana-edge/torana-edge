@@ -67,7 +67,17 @@ func captureLogs(t *testing.T) *logSink {
 // request must never materialize one.
 func parseFailE2E(t *testing.T, format string, order []string, body string) (int, []byte, *int32, *Server) {
 	t.Helper()
-	return parseFailE2EUpstream(t, format, order, body, http.StatusOK)
+	status, b, _, hits, srv := parseFailE2EWithHeader(t, format, order, body, http.StatusOK, "")
+	return status, b, hits, srv
+}
+
+// parseFailE2EWithHeader is parseFailE2E plus the response HEADER, so a
+// real-terminal row can pin Content-Type through HTTP (a transport
+// regression dropping or changing it must fail).
+func parseFailE2EWithHeader(t *testing.T, format string, order []string, body string, upstreamStatus int, approvalFailureMode string) (int, []byte, http.Header, *int32, *Server) {
+	t.Helper()
+	status, b, hdr, hits, srv := parseFailE2EApprovedH(t, format, order, body, upstreamStatus, approvalFailureMode)
+	return status, b, hdr, hits, srv
 }
 
 // parseFailE2EUpstream is parseFailE2E with a configurable upstream status,
@@ -82,6 +92,13 @@ func parseFailE2EUpstream(t *testing.T, format string, order []string, body stri
 // fixture can be forced to allow (or vice versa) for the failure-mode
 // independence rows.
 func parseFailE2EApproved(t *testing.T, format string, order []string, body string, upstreamStatus int, approvalFailureMode string) (int, []byte, *int32, *Server) {
+	t.Helper()
+	status, b, _, hits, srv := parseFailE2EApprovedH(t, format, order, body, upstreamStatus, approvalFailureMode)
+	return status, b, hits, srv
+}
+
+// parseFailE2EApprovedH is parseFailE2EApproved with the response header.
+func parseFailE2EApprovedH(t *testing.T, format string, order []string, body string, upstreamStatus int, approvalFailureMode string) (int, []byte, http.Header, *int32, *Server) {
 	t.Helper()
 	var hits int32
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -135,7 +152,7 @@ func parseFailE2EApproved(t *testing.T, format string, order []string, body stri
 	}
 	defer resp.Body.Close()
 	b, _ := io.ReadAll(resp.Body)
-	return resp.StatusCode, b, &hits, srv
+	return resp.StatusCode, b, resp.Header, &hits, srv
 }
 
 // limiterBucketCount returns the number of materialized limiter buckets.
@@ -736,4 +753,56 @@ func manifestPermissions(dir string) []string {
 		out = append(out, p.Name)
 	}
 	return out
+}
+
+// parseFailE2EWithValidator is parseFailE2E with the production gemini
+// candidate validator wired at pipeline construction (the same seam the
+// host uses), so provider-invalid replacements are attributed to the
+// exact plugin in the E2E harness too.
+func parseFailE2EWithValidator(t *testing.T, format string, order []string, body string, approvals map[string]provider.PluginApproval) (int, []byte, *int32, *Server) {
+	t.Helper()
+	var hits int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&hits, 1)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"id":"x","choices":[{"message":{"role":"assistant","content":"ok"}}]}`))
+	}))
+	t.Cleanup(upstream.Close)
+
+	provCfg := provider.Config{
+		Providers: map[string]provider.Provider{"p": {URL: upstream.URL, Format: format}},
+		Limits:    provider.Limits{Concurrency: 8},
+	}
+	if len(order) > 0 {
+		for _, name := range order {
+			requireWASM(t, "../../examples/plugins/"+name+"/plugin.wasm")
+		}
+		if len(approvals) > 0 {
+			provCfg.Plugins = provider.PluginsConfig{Dir: "../../examples/plugins", Order: order, Approvals: approvals}
+		} else {
+			provCfg.Plugins = provider.PluginsConfig{Dir: "../../examples/plugins", Order: order, AllowUnapproved: true}
+		}
+	}
+	srv, err := New(Config{Port: "0", Providers: provCfg})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	go srv.Serve(ln)
+	t.Cleanup(func() { srv.Shutdown(context.Background()) })
+
+	client := &http.Client{Timeout: 30 * time.Second}
+	req, _ := http.NewRequest("POST", "http://"+ln.Addr().String()+"/provider/p/v1/messages", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("POST: %v", err)
+	}
+	defer resp.Body.Close()
+	b, _ := io.ReadAll(resp.Body)
+	return resp.StatusCode, b, &hits, srv
 }

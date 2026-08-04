@@ -3,8 +3,10 @@ package proxy
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 
+	"github.com/torana-edge/torana-edge/internal/provider"
 	"github.com/torana-edge/torana-edge/internal/wasm"
 )
 
@@ -77,4 +79,52 @@ func renderProviderError(format string, status int, code, message string) []byte
 	}
 	out, _ := json.Marshal(payload)
 	return out
+}
+
+// renderHostError produces the terminal provider-native 500 for a HOST
+// MARSHAL FAILURE: the accepted IR was contract-valid (every replacement
+// passed the SDK validator), but the provider adapter cannot project it
+// onto the wire. The body is value-free — the diagnostic lives in the
+// single sanitized host log line, never echoed to the caller. Served
+// synthetically: zero upstream, zero limiter, no response hooks / upstream
+// status, no compaction credit.
+func renderHostError(format string) *BlockResponse {
+	code := "server_error"
+	switch format {
+	case "anthropic":
+		code = "api_error"
+	case "gemini", "gemini-codeassist":
+		code = "INTERNAL"
+	case "bedrock":
+		code = "InternalServerException"
+	}
+	message := "the request could not be encoded for the provider"
+	return &BlockResponse{
+		Status:      http.StatusInternalServerError,
+		ContentType: "application/json",
+		Body:        renderProviderError(format, http.StatusInternalServerError, code, message),
+	}
+}
+
+// applyHostError is the construction-bound terminal for a HOST MARSHAL
+// FAILURE (PR B, MARSHAL_FAILURE_CHECKPOINT §5): the accepted IR was
+// contract-valid but the provider adapter cannot project it onto the
+// wire. It is HOST-LOCAL and independent of plugin failure mode (the
+// replacement was contract-valid, so failure_mode pass/block do not
+// apply). Served synthetically: zero upstream, zero limiter, no response
+// hooks / upstream status, no compaction credit — the queued compaction
+// reports and the prepared flag are discarded, so the request-tail
+// recordCompactionReports commits nothing. Exactly ONE value-free log
+// line names the configured format and the category; the adapter error
+// is NEVER interpolated (it embeds guest-controlled data). The verdict
+// is host_error, never route/block/respond; route/model/identity stay
+// diagnostic facts.
+func applyHostError(rs *reqState, rc *RouteContext, prov *provider.Provider) {
+	log.Printf("format %s: host marshal failure — serving host_error", prov.Format)
+	rc.Block = renderHostError(prov.Format)
+	rs.Synthetic = true
+	rs.Verdict = "host_error"
+	rs.VerdictPlugin = ""
+	rs.PluginFailure = false
+	discardCompactionReports(rs)
 }
