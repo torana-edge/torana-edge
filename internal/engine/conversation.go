@@ -5,11 +5,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"hash"
-	"strconv"
 
-	"google.golang.org/protobuf/proto"
-
-	plugin_sdk "github.com/torana-edge/torana-plugin-sdk"
 	pb "github.com/torana-edge/torana-plugin-sdk/pb/v2"
 )
 
@@ -118,20 +114,28 @@ func ConversationID(c *ChatRequest) string {
 // (the SDK domain permits zero messages, so a tools-only request with a
 // tool marker keys the tool prefix).
 //
-// The ordered-prefix reference model: the provider-visible serialization
-// order is TOOLS FIRST, then messages (outer blocks, then nested
-// tool-result content). The prefix closes at the LAST marker in that order,
-// at its exact carrier; a message marker supersedes an earlier tool marker;
-// with no marker the whole request is the automatic-cache prefix. Only the
-// prefix projection is hashed — the marker message is truncated at the
-// exact block/nested position (pure PB construction, never mutating or
-// aliasing the input) and hashed with the SDK's shared body fingerprint.
-// TopologyFacts carries the host-only reconstruction facts folded into
-// the cache key (raw-JSON checkpoint section 4): the wire reconstruction
-// depends on the Code Assist variant, the OpenAI variant, and the
-// Responses input layout, so a key that ignored them could alias two
-// different provider wires. The plugin mirror cannot reproduce these
-// host-only facts (S1 obligation: cache_tier_selector reconciliation).
+// The observable prefix is ONE SDK-owned projection
+// (RequestObservablePrefix): it owns the full-domain validation gate
+// (out-of-domain ⇒ error, never a partial projection), the
+// tools-first/outer/nested last-marker model, exact truncation, and the
+// model/tools/messages/extensions/safety/generation-params field set —
+// Edge does NOT re-implement the marker traversal (the cache-tier
+// reconciliation removed the duplicated algorithm; no second
+// request-prefix implementation exists to drift).
+//
+// The Edge cache key frames that projection under its own domain and adds
+// ONLY the host-only topology facts (raw-JSON checkpoint section 4): the
+// wire reconstruction depends on the Code Assist variant, the OpenAI
+// variant, and the Responses input layout, so a key that ignored them
+// could alias two different provider wires. The plugin mirror cannot
+// reproduce these host-only facts (S1 obligation: cache_tier_selector
+// reconciliation); the topology layer is the ENTIRE divergence between
+// the Edge key and the observable prefix.
+//
+// The concrete key BYTES changed vs the pre-reconciliation composition
+// (the projection is now framed raw instead of re-fingerprinted
+// field-by-field) while the approved sensitivity contract is preserved —
+// acceptable pre-release; no legacy-key compatibility branch is wanted.
 type TopologyFacts struct {
 	CodeAssist           bool
 	OpenAIVariant        OpenAIVariant
@@ -150,40 +154,23 @@ func CachePrefixKeyTopology(pbReq *pb.ChatRequest, topo TopologyFacts) string {
 	if pbReq == nil {
 		return ""
 	}
-	// The owning gate: the SDK's own full-domain validator runs on the PB
-	// the key hashes. A request outside the domain gets no key.
-	if err := pbReq.ValidateReplacement(); err != nil {
+	// The SDK projection is SELF-GATED: any error (an out-of-domain request)
+	// maps to the existing fail-closed EMPTY KEY — an unrepresentable body
+	// must never hash a partial prefix. "" is reserved for nil and for
+	// out-of-domain requests.
+	prefix, err := pb.RequestObservablePrefix(pbReq)
+	if err != nil {
 		return ""
 	}
 	h := sha256.New()
 	writeHashField(h, domainCachePrefix)
-	writeHashField(h, pbReq.Model)
+	// The observable component, framed raw (length-prefixed): lexemes
+	// (1e999, key order) are part of the cache identity, never
+	// canonicalized away.
+	writeHashFieldBytes(h, prefix)
 
-	last := lastCacheMarkerPB(pbReq)
-	toolLimit := len(pbReq.Tools)
-	if last != nil && last.kind == markerCarrierTool {
-		toolLimit = last.tool + 1
-	}
-	for i, t := range pbReq.Tools {
-		if i >= toolLimit {
-			break
-		}
-		writeHashField(h, "tool")
-		writeHashField(h, t.Name)
-		writeHashField(h, t.Description)
-		// Raw authoritative bytes, framed: lexemes (1e999, key order)
-		// are part of the cache identity, never canonicalized away.
-		writeHashFieldBytes(h, t.ParametersJson)
-		writeHashFieldBytes(h, t.CacheControlJson)
-	}
-
-	// Host-only envelope layer — deliberately DISTINCT from the SDK body
-	// fingerprint below: provider extensions and safety settings are
-	// top-level provider-visible prefix state the plugins never reproduce.
-	writeHashFieldBytes(h, pbReq.ProviderExtensionsJson)
-	writeHashFieldBytes(h, pbReq.SafetySettingsJson)
-
-	// The typed host-only TOPOLOGY facts that change reconstruction.
+	// The typed host-only TOPOLOGY facts that change reconstruction — the
+	// entire divergence from the observable prefix.
 	writeHashField(h, "topology")
 	if topo.CodeAssist {
 		writeHashField(h, "codeassist")
@@ -194,153 +181,7 @@ func CachePrefixKeyTopology(pbReq *pb.ChatRequest, topo TopologyFacts) string {
 	writeHashField(h, string(rune('0'+topo.OpenAIVariant)))
 	writeHashFieldBytes(h, topo.ResponsesInputLayout.Bytes())
 
-	// The generation PARAMS are part of the model-visible prefix (the
-	// checkpoint inventory): max_tokens/temperature/top_p/stops change the
-	// provider cache entry exactly like the model.
-	writeHashField(h, "params")
-	if pbReq.MaxTokens != nil {
-		writeHashField(h, "max_tokens")
-		writeHashField(h, strconv.FormatInt(int64(*pbReq.MaxTokens), 10))
-	}
-	if pbReq.Temperature != nil {
-		writeHashField(h, "temperature")
-		writeHashField(h, strconv.FormatFloat(float64(*pbReq.Temperature), 'g', -1, 64))
-	}
-	if pbReq.TopP != nil {
-		writeHashField(h, "top_p")
-		writeHashField(h, strconv.FormatFloat(float64(*pbReq.TopP), 'g', -1, 64))
-	}
-	writeHashField(h, "stops")
-	writeHashField(h, strconv.Itoa(len(pbReq.StopSequences)))
-	for _, st := range pbReq.StopSequences {
-		writeHashField(h, st)
-	}
-
-	// The SDK fingerprint is ERROR-RETURNING; every error is a fail-closed
-	// EMPTY KEY — an unrepresentable body must never hash a partial prefix.
-	fp := func(m *pb.Message) (string, bool) {
-		s, err := plugin_sdk.RequestBlocksFingerprint(m)
-		if err != nil {
-			return "", false
-		}
-		return s, true
-	}
-
-	if last == nil {
-		// No marker: automatic prefix caching — the whole request is the
-		// prefix (the key moves every turn; an honest reflection of a cache
-		// the caller does not control).
-		for _, m := range pbReq.Messages {
-			f, ok := fp(m)
-			if !ok {
-				return ""
-			}
-			writeHashField(h, "msg")
-			writeHashField(h, f)
-		}
-		return shortHex(h)
-	}
-	if last.kind == markerCarrierTool {
-		// The prefix ended in the tools section: no message is part of it.
-		return shortHex(h)
-	}
-	for i, m := range pbReq.Messages {
-		if i > last.msg {
-			break
-		}
-		if i < last.msg {
-			// The canonical body fingerprint: the SDK's shared implementation
-			// (role + ordered blocks: kind, presence, order, identities,
-			// exact raw bytes, signatures, nested tool-result content, cache
-			// positions — typed length framing). The cache-tier stickiness
-			// mirror uses the same implementation; Edge never re-implements
-			// block semantics.
-			f, ok := fp(m)
-			if !ok {
-				return ""
-			}
-			writeHashField(h, "msg")
-			writeHashField(h, f)
-			continue
-		}
-		trunc := truncatePBMessage(m, last.block, last.nested)
-		f, ok := fp(trunc)
-		if !ok {
-			return ""
-		}
-		writeHashField(h, "msg")
-		writeHashField(h, f)
-	}
 	return shortHex(h)
-}
-
-// markerCarrierKind distinguishes the three cache-marker carriers in the
-// ordered-prefix model.
-type markerCarrierKind int
-
-const (
-	markerCarrierTool markerCarrierKind = iota + 1
-	markerCarrierTopLevel
-	markerCarrierNested
-)
-
-// cacheMarkerPos is one marker's position in the ordered prefix.
-type cacheMarkerPos struct {
-	kind   markerCarrierKind
-	tool   int // markerCarrierTool
-	msg    int // markerCarrierTopLevel / markerCarrierNested
-	block  int // markerCarrierTopLevel / markerCarrierNested
-	nested int // markerCarrierNested; -1 otherwise
-}
-
-// lastCacheMarkerPB returns the LAST marker in serialization order (tools
-// first, then messages: outer blocks, then nested tool-result content), or
-// nil when the request carries no marker.
-func lastCacheMarkerPB(pbReq *pb.ChatRequest) *cacheMarkerPos {
-	var last *cacheMarkerPos
-	for i, t := range pbReq.Tools {
-		if len(t.CacheControlJson) > 0 {
-			last = &cacheMarkerPos{kind: markerCarrierTool, tool: i}
-		}
-	}
-	for i, m := range pbReq.Messages {
-		for j, b := range m.Blocks {
-			if b.GetCacheBreakpoint() != nil {
-				last = &cacheMarkerPos{kind: markerCarrierTopLevel, msg: i, block: j, nested: -1}
-			}
-			if tr := b.GetToolResult(); tr != nil {
-				for k, c := range tr.Content {
-					if c.GetCacheBreakpoint() != nil {
-						last = &cacheMarkerPos{kind: markerCarrierNested, msg: i, block: j, nested: k}
-					}
-				}
-			}
-		}
-	}
-	return last
-}
-
-// truncatePBMessage returns the message truncated at the marker position,
-// inclusive: blocks[0..lastBlock], with the marker block's tool-result
-// content cut at nested[0..lastNested] when the marker is nested. PURE PB
-// construction (proto.Clone + fresh slices) — the input is never mutated or
-// aliased, so computing a key can never truncate the caller's live request.
-func truncatePBMessage(m *pb.Message, lastBlock, lastNested int) *pb.Message {
-	out := &pb.Message{Role: m.Role}
-	for j, b := range m.Blocks {
-		if j > lastBlock {
-			break
-		}
-		if j == lastBlock && lastNested >= 0 && b.GetToolResult() != nil {
-			nb := proto.Clone(b).(*pb.RequestBlock)
-			tr := nb.GetToolResult()
-			tr.Content = tr.Content[:lastNested+1]
-			out.Blocks = append(out.Blocks, nb)
-			continue
-		}
-		out.Blocks = append(out.Blocks, b)
-	}
-	return out
 }
 
 // messageText reduces a message to the bytes worth hashing for the conversation
