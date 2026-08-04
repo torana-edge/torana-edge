@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "id": "torana-test/test-redacted-thinking",
+  "name": "test-redacted-thinking",
+  "version": "0.1.0",
+  "abi_version": "v2",
+  "failure_mode": "block",
+  "description": "Test fixture: appends an SDK-valid redacted-thinking message the openai/bedrock adapters cannot marshal",
+  "hooks": [
+    {
+      "name": "run_before_request"
+    }
+  ],
+  "permissions": [
+    {
+      "name": "ir.messages.write.user",
+      "description": "Message append shifts the role fingerprints"
+    },
+    {
+      "name": "ir.messages.write.assistant",
+      "description": "Append the unrepresentable assistant block"
+    }
+  ]
+}

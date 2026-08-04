@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "id": "torana-test/test-trailing-signature",
+  "name": "test-trailing-signature",
+  "version": "0.1.0",
+  "abi_version": "v2",
+  "failure_mode": "block",
+  "description": "Test fixture: appends an SDK-valid tool-role message the anthropic adapter cannot marshal",
+  "hooks": [
+    {
+      "name": "run_before_request"
+    }
+  ],
+  "permissions": [
+    {
+      "name": "ir.messages.write.user",
+      "description": "Message append shifts the role fingerprints"
+    },
+    {
+      "name": "ir.messages.write.tool",
+      "description": "Append the unrepresentable tool-role message"
+    }
+  ]
+}

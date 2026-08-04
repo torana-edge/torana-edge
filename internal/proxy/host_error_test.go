@@ -16,11 +16,18 @@ package proxy
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"io"
+	"net"
 	"net/http"
+	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
+	"github.com/torana-edge/torana-edge/internal/economics"
 	"github.com/torana-edge/torana-edge/internal/plugin"
 	"github.com/torana-edge/torana-edge/internal/provider"
 )
@@ -87,6 +94,47 @@ func TestHostMarshalFailureTerminalE2E(t *testing.T) {
 	}
 }
 
+// TestHostErrorSanitizedLog (C1s) — the secret-bearing pin: the invalid
+// scheduling value carries a unique guest-controlled secret. The response
+// is the value-free literal, and the COMPLETE captured log must omit the
+// secret AND the raw adapter diagnostic (the adapter error embeds the
+// scheduling string — interpolating it would leak request data a plugin
+// could load with secrets). Exactly ONE structurally matched host-error
+// line may exist.
+func TestHostErrorSanitizedLog(t *testing.T) {
+	requireWASM(t, "../../examples/plugins/test-invalid-scheduling/plugin.wasm")
+
+	body := `{"model":"m","contents":[{"role":"user","parts":[{"functionResponse":{"name":"read","response":{"output":"x"},"id":"c1"}}]}]}`
+	sink := captureLogs(t)
+	status, out, hits, _ := parseFailE2E(t, "gemini", []string{"test-invalid-scheduling"}, body)
+	if status != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500; body=%s", status, out)
+	}
+	if !bytes.Equal(out, literalHostError("gemini")) {
+		t.Fatalf("body = %s, want the value-free literal (no diagnostic echo)", out)
+	}
+	if n := atomic.LoadInt32(hits); n != 0 {
+		t.Fatalf("upstream calls = %d, want 0", n)
+	}
+	logs := sink.String()
+	const secret = "SECRET-7f3d9c2a-SCHEDULING"
+	if strings.Contains(logs, secret) {
+		t.Fatalf("guest-controlled secret leaked into the log: %q", logs)
+	}
+	if strings.Contains(logs, "tool result scheduling") {
+		t.Fatalf("raw adapter diagnostic leaked into the log: %q", logs)
+	}
+	matches := 0
+	for _, line := range strings.Split(strings.TrimSpace(logs), "\n") {
+		if strings.Contains(line, "host marshal failure") {
+			matches++
+		}
+	}
+	if matches != 1 {
+		t.Fatalf("host marshal failure lines = %d, want exactly 1; log: %q", matches, logs)
+	}
+}
+
 // TestHostMarshalFailureNoResponseHook (C1b): with an observer plugin the
 // terminal 500 still runs no response hook.
 func TestHostMarshalFailureNoResponseHook(t *testing.T) {
@@ -106,56 +154,116 @@ func TestHostMarshalFailureNoResponseHook(t *testing.T) {
 // TestHostErrorGoldenShapes (C2): the exact provider-native value-free 500
 // shape per format, pinned INDEPENDENTLY from the renderer.
 func TestHostErrorGoldenShapes(t *testing.T) {
-	rows := map[string]struct {
-		status string // the error.status member for gemini
-		code   string // the error.type/code member for the others
+	// INDEPENDENT literal golden bytes per configured format: the exact
+	// provider-native value-free 500. Byte equality rejects any added,
+	// missing, or reordered member — map-shaped assertions would permit
+	// drift.
+	literal := map[string]struct {
+		body []byte
+		ct   string
 	}{
-		"anthropic":         {"", "api_error"},
-		"openai":            {"", "server_error"},
-		"gemini":            {"INTERNAL", ""},
-		"gemini-codeassist": {"INTERNAL", ""},
-		"bedrock":           {"", "InternalServerException"},
+		"anthropic": {
+			[]byte(`{"error":{"message":"the request could not be encoded for the provider","type":"api_error"},"type":"error"}`),
+			"application/json",
+		},
+		"openai": {
+			[]byte(`{"error":{"code":"server_error","message":"the request could not be encoded for the provider","type":"server_error"}}`),
+			"application/json",
+		},
+		"gemini": {
+			[]byte(`{"error":{"code":500,"message":"the request could not be encoded for the provider","status":"INTERNAL"}}`),
+			"application/json",
+		},
+		"gemini-codeassist": {
+			[]byte(`{"error":{"code":500,"message":"the request could not be encoded for the provider","status":"INTERNAL"}}`),
+			"application/json",
+		},
+		"bedrock": {
+			[]byte(`{"message":"the request could not be encoded for the provider"}`),
+			"application/json",
+		},
 	}
-	for format, want := range rows {
-		t.Run(format, func(t *testing.T) {
+	for format, want := range literal {
+		t.Run(format+"/unit", func(t *testing.T) {
 			got := renderHostError(format)
 			if got.Status != http.StatusInternalServerError {
 				t.Fatalf("status = %d, want 500", got.Status)
 			}
-			var m map[string]any
-			if err := json.Unmarshal(got.Body, &m); err != nil {
-				t.Fatalf("body not JSON: %s", got.Body)
+			if got.ContentType != want.ct {
+				t.Fatalf("content-type = %q, want %q", got.ContentType, want.ct)
 			}
-			switch format {
-			case "gemini", "gemini-codeassist":
-				gerr := m["error"].(map[string]any)
-				if gerr["status"] != want.status {
-					t.Fatalf("gemini status = %v, want %v", gerr["status"], want.status)
-				}
-				if gerr["code"] != float64(500) {
-					t.Fatalf("gemini code = %v, want 500", gerr["code"])
-				}
-			case "bedrock":
-				if m["message"] == nil {
-					t.Fatalf("bedrock envelope missing message: %s", got.Body)
-				}
-			default:
-				gerr := m["error"].(map[string]any)
-				if gerr["type"] != want.code {
-					t.Fatalf("%s error type = %v, want %v", format, gerr["type"], want.code)
-				}
-			}
-			// Value-free: the body never echoes raw error text.
-			if bytes.Contains(got.Body, []byte("scheduling")) {
-				t.Fatalf("terminal body leaks a diagnostic: %s", got.Body)
+			if !bytes.Equal(got.Body, want.body) {
+				t.Fatalf("body\n got: %s\nwant: %s", got.Body, want.body)
 			}
 		})
 	}
 }
 
-// TestBlockPrecedenceBeforeMarshal (C3): a block verdict short-circuits
-// BEFORE the marshal seam; the block response wins and no host_error is
-// produced even when a later marshal would fail.
+// TestHostErrorPerFormatTerminal (C2) drives EVERY configured format
+// through the ACTUAL server terminal: a contract-valid replacement the
+// format's adapter cannot marshal (a real provider-specific reproduction,
+// not a registry mutation) must produce the exact literal 500, zero
+// upstream, and the host_error verdict. The gemini row is the real-WASM
+// reachability row.
+func TestHostErrorPerFormatTerminal(t *testing.T) {
+	requireWASM(t, "../../examples/plugins/test-invalid-scheduling/plugin.wasm")
+	requireWASM(t, "../../examples/plugins/test-trailing-signature/plugin.wasm")
+	requireWASM(t, "../../examples/plugins/test-redacted-thinking/plugin.wasm")
+
+	geminiBody := `{"model":"m","contents":[{"role":"user","parts":[{"functionResponse":{"name":"read","response":{"output":"x"},"id":"c1"}}]}]}`
+	codeAssistBody := `{"model":"m","request":{"contents":[{"role":"user","parts":[{"functionResponse":{"name":"read","response":{"output":"x"},"id":"c1"}}]}]}}`
+
+	rows := []struct {
+		format string
+		plugin string
+		body   string
+	}{
+		{"gemini", "test-invalid-scheduling", geminiBody},
+		{"gemini-codeassist", "test-invalid-scheduling", codeAssistBody},
+		{"anthropic", "test-trailing-signature", `{"model":"m","max_tokens":64,"messages":[{"role":"user","content":"hi"}]}`},
+		{"openai", "test-redacted-thinking", `{"model":"m","messages":[{"role":"user","content":"redactme"}]}`},
+		{"bedrock", "test-redacted-thinking", `{"modelId":"m","messages":[{"role":"user","content":[{"text":"redactme"}]}]}`},
+	}
+	for _, row := range rows {
+		t.Run(row.format, func(t *testing.T) {
+			status, body, hits, srv := parseFailE2E(t, row.format, []string{row.plugin}, row.body)
+			if status != http.StatusInternalServerError {
+				t.Fatalf("status = %d, want 500; body=%s", status, body)
+			}
+			want := literalHostError(row.format)
+			if !bytes.Equal(body, want) {
+				t.Fatalf("body\n got: %s\nwant: %s", body, want)
+			}
+			if n := atomic.LoadInt32(hits); n != 0 {
+				t.Fatalf("upstream called %d times; must be 0", n)
+			}
+			events := srv.feed.Snapshot()
+			if len(events) == 0 {
+				t.Fatal("no feed event")
+			}
+			last := events[len(events)-1]
+			if last.Verdict != "host_error" || last.PluginFailure {
+				t.Fatalf("verdict = %q plugin_failure=%v, want host_error/false", last.Verdict, last.PluginFailure)
+			}
+		})
+	}
+}
+
+// literalHostError is the independent golden bytes (single source for the
+// terminal rows; kept separate from the renderer so drift is caught).
+func literalHostError(format string) []byte {
+	switch format {
+	case "anthropic":
+		return []byte(`{"error":{"message":"the request could not be encoded for the provider","type":"api_error"},"type":"error"}`)
+	case "openai":
+		return []byte(`{"error":{"code":"server_error","message":"the request could not be encoded for the provider","type":"server_error"}}`)
+	case "gemini", "gemini-codeassist":
+		return []byte(`{"error":{"code":500,"message":"the request could not be encoded for the provider","status":"INTERNAL"}}`)
+	default: // bedrock
+		return []byte(`{"message":"the request could not be encoded for the provider"}`)
+	}
+}
+
 func TestBlockPrecedenceBeforeMarshal(t *testing.T) {
 	requireWASM(t, "../../examples/plugins/test-blocker/plugin.wasm")
 	requireWASM(t, "../../examples/plugins/test-invalid-scheduling/plugin.wasm")
@@ -271,4 +379,255 @@ func mustDigest(t *testing.T, name string) string {
 		t.Fatal(err)
 	}
 	return d
+}
+
+// TestApplyHostErrorClearsQueuedReport — unit revert-proof for the
+// terminal: a request that already queued an attributed compaction report
+// (torana_record_savings) and set the prepared flag loses BOTH when the
+// terminal fires, so the request-tail recordCompactionReports commits
+// nothing. Removing discardCompactionReports from applyHostError fails
+// this test.
+func TestApplyHostErrorClearsQueuedReport(t *testing.T) {
+	rs := &reqState{
+		CompactionReports: []attributedCompactionReport{{
+			Plugin: "p",
+			Report: economics.CompactionReport{OriginalBytes: 100, FinalBytes: 40},
+		}},
+		CompactionRequestPrepared: true,
+	}
+	rc := &RouteContext{}
+	prov := &provider.Provider{Format: "gemini"}
+	applyHostError(rs, rc, prov)
+
+	if rc.Block == nil || rc.Block.Status != http.StatusInternalServerError {
+		t.Fatalf("block = %+v, want the 500 host_error", rc.Block)
+	}
+	if !rs.Synthetic || rs.Verdict != "host_error" || rs.VerdictPlugin != "" || rs.PluginFailure {
+		t.Fatalf("verdict state = synthetic=%v verdict=%q plugin=%q failure=%v", rs.Synthetic, rs.Verdict, rs.VerdictPlugin, rs.PluginFailure)
+	}
+	if len(rs.CompactionReports) != 0 {
+		t.Fatalf("queued report survived the terminal: %+v", rs.CompactionReports)
+	}
+	if rs.CompactionRequestPrepared || rs.CompactionReportsCommitted {
+		t.Fatalf("compaction flags survived the terminal: prepared=%v committed=%v", rs.CompactionRequestPrepared, rs.CompactionReportsCommitted)
+	}
+}
+
+// TestHostErrorDiscardsQueuedReportNonVacuous — the compaction-credit
+// proof with a REAL guest-queued report:
+//
+//  1. CONTROL: the extension-contract fixture queues a valid attributed
+//     report (record-savings ack landed in the upstream body) and the
+//     request completes — the server records ONE compaction application,
+//     proving the harness counter moves.
+//  2. TERMINAL: the same report is queued, THEN the invalid-scheduling
+//     fixture poisons a tool result — the host_error terminal fires and
+//     the queued report is discarded: the application counter stays at 1.
+//
+// If the terminal committed the queued report, the counter would be 2.
+func TestHostErrorDiscardsQueuedReportNonVacuous(t *testing.T) {
+	requireWASM(t, "../../examples/plugins/test-extension-contract/plugin.wasm")
+	requireWASM(t, "../../examples/plugins/test-invalid-scheduling/plugin.wasm")
+
+	var upstreamBodies []string
+	var hits int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&hits, 1)
+		b, _ := io.ReadAll(r.Body)
+		upstreamBodies = append(upstreamBodies, string(b))
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"id":"x","choices":[{"message":{"role":"assistant","content":"ok"}}]}`))
+	}))
+	t.Cleanup(upstream.Close)
+
+	provCfg := provider.Config{
+		Providers: map[string]provider.Provider{"p": {URL: upstream.URL, Format: "openai"}},
+		Limits:    provider.Limits{Concurrency: 8},
+		Plugins:   provider.PluginsConfig{Dir: "../../examples/plugins", Order: []string{"test-extension-contract", "test-redacted-thinking"}, AllowUnapproved: true},
+	}
+	srv, err := New(Config{Port: "0", Providers: provCfg})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	go srv.Serve(ln)
+	t.Cleanup(func() { srv.Shutdown(context.Background()) })
+
+	client := &http.Client{Timeout: 30 * time.Second}
+	post := func(model string, poison bool) (int, []byte) {
+		content := `{"role":"user","content":"hi"}`
+		if poison {
+			content = `{"role":"user","content":"redactme"}`
+		}
+		body := `{"model":"` + model + `","messages":[` + content + `]}`
+		req, _ := http.NewRequest("POST", "http://"+ln.Addr().String()+"/provider/p/v1/messages", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := client.Do(req)
+		if err != nil {
+			t.Fatalf("POST: %v", err)
+		}
+		defer resp.Body.Close()
+		b, _ := io.ReadAll(resp.Body)
+		return resp.StatusCode, b
+	}
+
+	// CONTROL: the report is queued (the guest ack lands in the replaced
+	// model on the wire) and the request completes — one application.
+	status, body := post("record-savings", false)
+	if status != http.StatusOK {
+		t.Fatalf("control status = %d; body=%s", status, body)
+	}
+	if len(upstreamBodies) != 1 || !strings.Contains(upstreamBodies[0], `raw_succeeded\":true`) {
+		// The observation rides inside the replaced model string, so the
+		// wire shows the JSON escaped (\"raw_succeeded\":true).
+		t.Fatalf("control did not reach upstream with the record-savings ack: %q", upstreamBodies)
+	}
+	if got := srv.stats.Snapshot().CompactionApplications; got != 1 {
+		t.Fatalf("control recorded %d applications, want 1 (the counter must move)", got)
+	}
+
+	// TERMINAL: same queue, then the marshal failure — the report must be
+	// discarded, never committed.
+	status, body = post("record-savings", true)
+	if status != http.StatusInternalServerError {
+		t.Fatalf("terminal status = %d, want 500; body=%s", status, body)
+	}
+	if !bytes.Equal(body, literalHostError("openai")) {
+		t.Fatalf("terminal body = %s, want the literal openai host_error", body)
+	}
+	if got := atomic.LoadInt32(&hits); got != 1 {
+		t.Fatalf("upstream calls = %d, want exactly the control's 1", got)
+	}
+	if got := srv.stats.Snapshot().CompactionApplications; got != 1 {
+		t.Fatalf("terminal recorded %d applications, want 1 — the queued report must be discarded, not committed", got)
+	}
+}
+
+// TestHostErrorFailureModeIndependence — the SAME valid-output
+// marshal-failure guest under pass AND block approvals: the host_error
+// terminal is independent of plugin failure mode (the replacement was
+// contract-valid, so failure_mode never applies), and the outcomes are
+// byte-identical.
+func TestHostErrorFailureModeIndependence(t *testing.T) {
+	requireWASM(t, "../../examples/plugins/test-invalid-scheduling/plugin.wasm")
+	body := `{"model":"m","contents":[{"role":"user","parts":[{"functionResponse":{"name":"read","response":{"output":"x"},"id":"c1"}}]}]}`
+	var want []byte
+	for _, fm := range []string{"pass", "block"} {
+		t.Run(fm, func(t *testing.T) {
+			status, out, hits, srv := parseFailE2EApproved(t, "gemini", []string{"test-invalid-scheduling"}, body, http.StatusOK, fm)
+			if status != http.StatusInternalServerError {
+				t.Fatalf("status = %d, want 500; body=%s", status, out)
+			}
+			if want == nil {
+				want = out
+			} else if !bytes.Equal(out, want) {
+				t.Fatalf("pass/block outcomes differ:\n pass: %s\nblock: %s", want, out)
+			}
+			if n := atomic.LoadInt32(hits); n != 0 {
+				t.Fatalf("upstream calls = %d, want 0", n)
+			}
+			events := srv.feed.Snapshot()
+			last := events[len(events)-1]
+			if last.Verdict != "host_error" || last.PluginFailure {
+				t.Fatalf("verdict = %q plugin_failure=%v, want host_error/false", last.Verdict, last.PluginFailure)
+			}
+		})
+	}
+	if !bytes.Equal(want, literalHostError("gemini")) {
+		t.Fatalf("host_error body = %s, want the literal gemini shape", want)
+	}
+}
+
+// TestRespondPrecedesHostError — a responder verdict wins over a would-be
+// marshal failure: the exact respond body/status is served, no host_error
+// log line or body appears, and upstream is never called.
+func TestRespondPrecedesHostError(t *testing.T) {
+	requireWASM(t, "../../examples/plugins/test-responder/plugin.wasm")
+	requireWASM(t, "../../examples/plugins/test-invalid-scheduling/plugin.wasm")
+
+	body := `{"model":"m","contents":[{"role":"user","parts":[{"text":"respondme please"}]},{"role":"user","parts":[{"functionResponse":{"name":"read","response":{"output":"x"},"id":"c1"}}]}]}`
+	sink := captureLogs(t)
+	status, out, hits, _ := parseFailE2E(t, "gemini", []string{"test-responder", "test-invalid-scheduling"}, body)
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, want the responder's 200; body=%s", status, out)
+	}
+	if !strings.Contains(string(out), "canned response from test-responder") {
+		t.Fatalf("responder body missing: %s", out)
+	}
+	if n := atomic.LoadInt32(hits); n != 0 {
+		t.Fatalf("upstream calls = %d, want 0", n)
+	}
+	if strings.Contains(sink.String(), "host marshal failure") {
+		t.Fatalf("host_error log line appeared on the respond path: %q", sink.String())
+	}
+}
+
+// TestHostErrorReplacesRouteVerdict — a model-only route verdict was
+// applied BEFORE the marshal seam; the terminal must replace the feed
+// verdict with host_error while retaining the routed model/provider as
+// diagnostics. Neither original nor routed upstream is called.
+func TestHostErrorReplacesRouteVerdict(t *testing.T) {
+	requireWASM(t, "../../examples/plugins/test-router/plugin.wasm")
+	requireWASM(t, "../../examples/plugins/test-invalid-scheduling/plugin.wasm")
+
+	var hits int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&hits, 1)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{}`))
+	}))
+	t.Cleanup(upstream.Close)
+
+	provCfg := provider.Config{
+		Providers: map[string]provider.Provider{"main": {URL: upstream.URL, Format: "gemini"}},
+		Limits:    provider.Limits{Concurrency: 8},
+		Plugins:   provider.PluginsConfig{Dir: "../../examples/plugins", Order: []string{"test-router", "test-invalid-scheduling"}, AllowUnapproved: true},
+	}
+	srv, err := New(Config{Port: "0", Providers: provCfg})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	go srv.Serve(ln)
+	t.Cleanup(func() { srv.Shutdown(context.Background()) })
+
+	body := `{"model":"m","contents":[{"role":"user","parts":[{"text":"routemodel"}]},{"role":"user","parts":[{"functionResponse":{"name":"read","response":{"output":"x"},"id":"c1"}}]}]}`
+	client := &http.Client{Timeout: 30 * time.Second}
+	req, _ := http.NewRequest("POST", "http://"+ln.Addr().String()+"/provider/main/v1/messages", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("POST: %v", err)
+	}
+	defer resp.Body.Close()
+	out, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500; body=%s", resp.StatusCode, out)
+	}
+	if !bytes.Equal(out, literalHostError("gemini")) {
+		t.Fatalf("body = %s, want the literal gemini host_error", out)
+	}
+	if n := atomic.LoadInt32(&hits); n != 0 {
+		t.Fatalf("upstream calls = %d, want 0", n)
+	}
+	events := srv.feed.Snapshot()
+	last := events[len(events)-1]
+	if last.Verdict != "host_error" {
+		t.Fatalf("feed verdict = %q, want host_error (the route verdict must be replaced)", last.Verdict)
+	}
+	if last.PluginFailure {
+		t.Fatalf("plugin failure = %v, want false", last.PluginFailure)
+	}
+	// The routed model is retained as a diagnostic fact.
+	if last.Model != "tiny-model" {
+		t.Fatalf("feed model = %q, want the routed tiny-model", last.Model)
+	}
 }

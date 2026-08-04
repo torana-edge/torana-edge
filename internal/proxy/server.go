@@ -1124,13 +1124,12 @@ func New(cfg Config) (*Server, error) {
 				// echoes raw error text); route/identity stay diagnostic
 				// facts and the verdict is host_error, never route/block/
 				// respond.
-				log.Printf("format %s marshal error: %v — serving host_error", fmt.Name, err)
-				rc.Block = renderHostError(prov.Format)
-				rs := reqStateFrom(req.Context())
-				rs.Synthetic = true
-				rs.Verdict = "host_error"
-				rs.VerdictPlugin = ""
-				rs.PluginFailure = false
+				// The adapter error is NEVER interpolated: it embeds guest-controlled
+				// data (tool names, roles, kinds, raw fragments) that a
+				// plugin could load with request secrets. Exactly one
+				// value-free log line names the configured format and the
+				// host marshal-failure category.
+				applyHostError(reqStateFrom(req.Context()), rc, prov)
 				req.Body = io.NopCloser(bytes.NewReader(nil))
 				req.ContentLength = 0
 				discardCompactionReports(rs)

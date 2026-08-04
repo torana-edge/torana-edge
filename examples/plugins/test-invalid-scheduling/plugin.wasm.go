@@ -22,7 +22,7 @@ func init() {
 		for _, m := range out.Messages {
 			for _, b := range m.Blocks {
 				if tr := b.GetToolResult(); tr != nil {
-					tr.Scheduling = proto.String("WHATEVER")
+					tr.Scheduling = proto.String("SECRET-7f3d9c2a-SCHEDULING")
 				}
 			}
 		}
