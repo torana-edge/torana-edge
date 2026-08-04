@@ -35,6 +35,22 @@ import (
 // a system prompt, alternating user/assistant turns, and tool calls whose
 // results carry the bulk of the bytes. Tool results dominate real payloads,
 // which is why they dominate here.
+func mustBenchArgs(raw string) engine.RequiredJSONObject {
+	r, err := engine.ParseRequiredJSONObject([]byte(raw))
+	if err != nil {
+		panic(err)
+	}
+	return r
+}
+
+var mustBenchParams = func() engine.RequiredJSONObject {
+	r, err := engine.ParseRequiredJSONObject([]byte(`{"type":"object","properties":{},"required":[]}`))
+	if err != nil {
+		panic(err)
+	}
+	return r
+}()
+
 func benchConversation(messages int) *engine.ChatRequest {
 	temp := 0.0
 	maxTok := 4096
@@ -43,27 +59,19 @@ func benchConversation(messages int) *engine.ChatRequest {
 		Temperature: &temp,
 		MaxTokens:   &maxTok,
 		Messages: []engine.Message{{
-			Role:    engine.RoleSystem,
-			Content: strings.Repeat("You are a coding assistant. ", 40),
+			Role:   engine.RoleSystem,
+			Blocks: []engine.Block{{Text: &engine.TextBlock{Text: strings.Repeat("You are a coding assistant. ", 40)}}},
 		}},
 		Tools: []engine.ToolDef{
 			{
 				Name:        "read_file",
 				Description: "Read a file from the workspace",
-				Parameters: map[string]any{
-					"type":       "object",
-					"properties": map[string]any{"path": map[string]any{"type": "string"}},
-					"required":   []any{"path"},
-				},
+				Parameters:  mustBenchParams,
 			},
 			{
 				Name:        "run_command",
 				Description: "Run a shell command",
-				Parameters: map[string]any{
-					"type":       "object",
-					"properties": map[string]any{"cmd": map[string]any{"type": "string"}},
-					"required":   []any{"cmd"},
-				},
+				Parameters:  mustBenchParams,
 			},
 		},
 	}
@@ -76,24 +84,26 @@ func benchConversation(messages int) *engine.ChatRequest {
 		switch i % 3 {
 		case 0:
 			req.Messages = append(req.Messages, engine.Message{
-				Role:    engine.RoleUser,
-				Content: fmt.Sprintf("Turn %d: please investigate the failing test in the parser.", i),
+				Role:   engine.RoleUser,
+				Blocks: []engine.Block{{Text: &engine.TextBlock{Text: fmt.Sprintf("Turn %d: please investigate the failing test in the parser.", i)}}},
 			})
 		case 1:
 			req.Messages = append(req.Messages, engine.Message{
 				Role: engine.RoleAssistant,
-				ToolCalls: []engine.ToolCall{{
+				Blocks: []engine.Block{{ToolUse: &engine.ToolUseBlock{
 					ID:        fmt.Sprintf("call_%d", i),
 					Name:      "read_file",
-					Arguments: map[string]any{"path": fmt.Sprintf("internal/parser/parse_%d.go", i)},
-				}},
+					Arguments: mustBenchArgs(fmt.Sprintf(`{"path": "internal/parser/parse_%d.go"}`, i)),
+				}}},
 			})
 		default:
 			req.Messages = append(req.Messages, engine.Message{
-				Role:       engine.RoleTool,
-				ToolCallID: fmt.Sprintf("call_%d", i-1),
-				ToolName:   "read_file",
-				Content:    toolOutput,
+				Role: engine.RoleTool,
+				Blocks: []engine.Block{{ToolResult: &engine.ToolResultBlock{
+					ToolCallID: fmt.Sprintf("call_%d", i-1),
+					ToolName:   "read_file",
+					Content:    []engine.ToolResultContentBlock{{Text: toolOutput}},
+				}}},
 			})
 		}
 	}
@@ -125,7 +135,9 @@ func BenchmarkPbconvToPB(b *testing.B) {
 		b.Run(fmt.Sprintf("msgs=%d", n), func(b *testing.B) {
 			b.ReportAllocs()
 			for i := 0; i < b.N; i++ {
-				_ = pbconv.ToPBChatRequest(chat)
+				if _, err := pbconv.ToPBChatRequestChecked(chat); err != nil {
+					b.Fatal(err)
+				}
 			}
 		})
 	}
@@ -134,11 +146,16 @@ func BenchmarkPbconvToPB(b *testing.B) {
 // BenchmarkPbconvFromPB is the return leg, run once per request today.
 func BenchmarkPbconvFromPB(b *testing.B) {
 	for _, n := range benchSizes {
-		pbReq := pbconv.ToPBChatRequest(benchConversation(n))
+		pbReq, cerr := pbconv.ToPBChatRequestChecked(benchConversation(n))
+		if cerr != nil {
+			b.Fatal(cerr)
+		}
 		b.Run(fmt.Sprintf("msgs=%d", n), func(b *testing.B) {
 			b.ReportAllocs()
 			for i := 0; i < b.N; i++ {
-				_ = pbconv.FromPBChatRequest(pbReq)
+				if _, err := pbconv.FromPBChatRequest(pbReq); err != nil {
+					panic(err)
+				}
 			}
 		})
 	}
@@ -147,7 +164,10 @@ func BenchmarkPbconvFromPB(b *testing.B) {
 // BenchmarkProtoMarshal is the once-per-request encode at discovery.go:943.
 func BenchmarkProtoMarshal(b *testing.B) {
 	for _, n := range benchSizes {
-		pbReq := pbconv.ToPBChatRequest(benchConversation(n))
+		pbReq, cerr := pbconv.ToPBChatRequestChecked(benchConversation(n))
+		if cerr != nil {
+			b.Fatal(cerr)
+		}
 		b.Run(fmt.Sprintf("msgs=%d", n), func(b *testing.B) {
 			b.ReportAllocs()
 			for i := 0; i < b.N; i++ {
@@ -163,7 +183,11 @@ func BenchmarkProtoMarshal(b *testing.B) {
 // measured alone so the two halves can be told apart.
 func BenchmarkVerificationUnmarshal(b *testing.B) {
 	for _, n := range benchSizes {
-		raw, err := proto.Marshal(pbconv.ToPBChatRequest(benchConversation(n)))
+		pbReq, cerr := pbconv.ToPBChatRequestChecked(benchConversation(n))
+		if cerr != nil {
+			b.Fatal(cerr)
+		}
+		raw, err := proto.Marshal(pbReq)
 		if err != nil {
 			b.Fatal(err)
 		}
@@ -191,7 +215,10 @@ func BenchmarkVerificationUnmarshal(b *testing.B) {
 // here was faster and unsafe: it missed a cross-role reorder outright.
 func BenchmarkWriteGrantVerification(b *testing.B) {
 	for _, n := range benchSizes {
-		req := pbconv.ToPBChatRequest(benchConversation(n))
+		req, cerr := pbconv.ToPBChatRequestChecked(benchConversation(n))
+		if cerr != nil {
+			b.Fatal(cerr)
+		}
 		raw, err := proto.Marshal(req)
 		if err != nil {
 			b.Fatal(err)
@@ -211,7 +238,10 @@ func BenchmarkWriteGrantVerification(b *testing.B) {
 			}
 		})
 
-		accepted := fingerprintRequestSections(req)
+		accepted, err := fingerprintRequestSections(req)
+		if err != nil {
+			b.Fatal(err)
+		}
 		b.Run(fmt.Sprintf("fingerprint/msgs=%d", n), func(b *testing.B) {
 			b.SetBytes(int64(len(raw)))
 			b.ReportAllocs()
@@ -220,7 +250,11 @@ func BenchmarkWriteGrantVerification(b *testing.B) {
 				if err := proto.Unmarshal(raw, &out); err != nil {
 					b.Fatal(err)
 				}
-				if !accepted.equal(fingerprintRequestSections(&out)) {
+				res, err := fingerprintRequestSections(&out)
+				if err != nil {
+					b.Fatal(err)
+				}
+				if !accepted.equal(res) {
 					b.Fatal("unmodified request must fingerprint equal")
 				}
 			}

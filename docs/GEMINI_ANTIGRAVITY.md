@@ -148,3 +148,52 @@ Upstream returned 200
   Keep `intent` before one compactor and configure explicit policies; source
   reads remain exact for three later assistant turns and unmatched tools remain
   exact. See [COMPACTION.md](COMPACTION.md).
+
+## Code Assist provider-extension envelope (mandatory grammar)
+
+The Code Assist wrapper and inner-request fields are REAL provider fields:
+they live in `provider_extensions_json` (the normative "unparsed provider
+fields" contract), NOT in hidden host state. The ABI object holds the
+DELIBERATE two-scope envelope, which IS the original wire object with the
+canonical ABI-owned members projected out:
+
+- **envelope top level = outer-wrapper extras** (their exact wire
+  position); the top-level `request` member is the STRUCTURAL container
+  for the inner-request extras;
+- **outer `model` is FORBIDDEN as an extra** — rebuilt from
+  `ChatRequest.model` (canonical wins);
+- **inner `systemInstruction`, `contents`, `tools`, `safetySettings` are
+  FORBIDDEN as extras** — rebuilt from the canonical ABI fields;
+- **inner `generationConfig` may exist ONLY as an object containing
+  UNKNOWN sibling members**; its canonical members (`maxOutputTokens`,
+  `temperature`, `topP`, `stopSequences`) are FORBIDDEN in the preserved
+  extra object and rebuilt from the canonical ABI fields;
+- unknown outer, inner, and generation siblings remain LOSSLESS
+  (deterministic span operations preserve member order, whitespace,
+  numeric lexemes, escapes, and nested bytes);
+- absence vs empty-object is explicit and deterministic: an ABSENT
+  envelope defaults to the empty envelope; a PRESENT envelope missing the
+  structural `request` member is REFUSED; for `generationConfig`, input
+  projection REMOVES the member when no unknown sibling remains after the
+  canonical deletion (canonical-only input never leaks a derived `{}`),
+  while an EXPLICITLY EMPTY wire object is a plugin/provider-authored fact
+  and is preserved as `{}`.
+
+**Variant ownership**: the Code-Assist-vs-bare fact is typed host-only
+topology (`ChatRequest.CodeAssist`), never in the ABI; a plugin can
+neither forge nor lose it (restored at the pipeline boundary).
+
+**Grant ownership**: the envelope is inspectable and replaceable by a
+plugin holding `ir.params.write`; the canonical members are NOT extras —
+a replacement smuggling any canonical member through the extras path is
+**plugin-output invalidity**, attributed to that exact plugin: `pass`
+rolls back to the accepted input, `block` produces the plugin refusal.
+The adapter marshal additionally refuses such an envelope defensively
+(never silently ignored).
+
+**Failure behavior**: malformed envelope shapes (`request`/`
+generationConfig` null, arrays, scalars, malformed text) are classified
+errors with no panic.
+
+See the canonical plugin-author guidance (`PLUGINS.md`) for the
+grant model; the Edge host owns this per-format grammar.

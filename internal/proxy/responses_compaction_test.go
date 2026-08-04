@@ -100,48 +100,82 @@ func TestResponsesCompactionDirectorNeverInjectsChatCompletions(t *testing.T) {
 	}
 }
 
+func mustExts(m map[string]any) engine.OptionalJSONObject {
+	b, err := json.Marshal(m)
+	if err != nil {
+		panic(err)
+	}
+	r, err := engine.ParseOptionalJSONObject(b)
+	if err != nil {
+		panic(err)
+	}
+	return r
+}
+
 func TestApplyOpenAIResponsesCompaction(t *testing.T) {
-	chat := &engine.ChatRequest{ProviderExtensions: map[string]any{
-		"_openai_variant":      "responses",
+	chat := &engine.ChatRequest{OpenAIVariant: engine.OpenAIResponses, ProviderExtensions: mustExts(map[string]any{
 		"previous_response_id": "resp_123",
-	}}
+	})}
 	applyOpenAIResponsesCompaction(chat, responsesCompactionProvider(75000))
 
-	want := []any{map[string]any{"type": "compaction", "compact_threshold": 75000}}
-	if !reflect.DeepEqual(chat.ProviderExtensions["context_management"], want) {
-		t.Fatalf("context_management = %#v, want %#v", chat.ProviderExtensions["context_management"], want)
+	want := []any{map[string]any{"type": "compaction", "compact_threshold": float64(75000)}}
+	got, _, err := chat.ProviderExtensions.DecodeObject()
+	if err != nil {
+		t.Fatalf("decode extensions: %v", err)
 	}
-	if chat.ProviderExtensions["previous_response_id"] != "resp_123" {
+	var gotCM []any
+	if err := json.Unmarshal(got["context_management"], &gotCM); err != nil {
+		t.Fatalf("context_management not a JSON array: %v", err)
+	}
+	if !reflect.DeepEqual(gotCM, want) {
+		t.Fatalf("context_management = %#v, want %#v", gotCM, want)
+	}
+	if string(got["previous_response_id"]) != `"resp_123"` {
 		t.Fatalf("previous_response_id changed: %#v", chat.ProviderExtensions)
 	}
 }
 
 func TestApplyOpenAIResponsesCompactionCallerWins(t *testing.T) {
 	callerPolicy := []any{map[string]any{"type": "compaction", "compact_threshold": float64(42000)}}
-	chat := &engine.ChatRequest{ProviderExtensions: map[string]any{
-		"_openai_variant":    "responses",
+	chat := &engine.ChatRequest{OpenAIVariant: engine.OpenAIResponses, ProviderExtensions: mustExts(map[string]any{
 		"context_management": callerPolicy,
-	}}
+	})}
 	applyOpenAIResponsesCompaction(chat, responsesCompactionProvider(75000))
-	if !reflect.DeepEqual(chat.ProviderExtensions["context_management"], callerPolicy) {
-		t.Fatalf("caller policy was overwritten: %#v", chat.ProviderExtensions["context_management"])
+	got, _, err := chat.ProviderExtensions.DecodeObject()
+	if err != nil {
+		t.Fatalf("decode extensions: %v", err)
+	}
+	var gotCM []any
+	if err := json.Unmarshal(got["context_management"], &gotCM); err != nil {
+		t.Fatalf("context_management not a JSON array: %v", err)
+	}
+	if !reflect.DeepEqual(gotCM, callerPolicy) {
+		t.Fatalf("caller policy was overwritten: %#v", gotCM)
 	}
 }
 
 func TestApplyOpenAIResponsesCompactionNeverTouchesChatCompletions(t *testing.T) {
-	chat := &engine.ChatRequest{ProviderExtensions: map[string]any{
+	chat := &engine.ChatRequest{ProviderExtensions: mustExts(map[string]any{
 		"previous_response_id": "must-not-imply-responses",
-	}}
+	})}
 	applyOpenAIResponsesCompaction(chat, responsesCompactionProvider(75000))
-	if _, exists := chat.ProviderExtensions["context_management"]; exists {
-		t.Fatalf("Chat Completions request was modified: %#v", chat.ProviderExtensions)
+	cm, _, err := chat.ProviderExtensions.DecodeObject()
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if _, exists := cm["context_management"]; exists {
+		t.Fatalf("Chat Completions request was modified: %#v", cm)
 	}
 }
 
 func TestApplyOpenAIResponsesCompactionAbsentIsDisabled(t *testing.T) {
-	chat := &engine.ChatRequest{ProviderExtensions: map[string]any{"_openai_variant": "responses"}}
+	chat := &engine.ChatRequest{OpenAIVariant: engine.OpenAIResponses, ProviderExtensions: mustExts(map[string]any{})}
 	applyOpenAIResponsesCompaction(chat, provider.Provider{Format: "openai"})
-	if _, exists := chat.ProviderExtensions["context_management"]; exists {
-		t.Fatalf("disabled compaction modified request: %#v", chat.ProviderExtensions)
+	cm, _, err := chat.ProviderExtensions.DecodeObject()
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if _, exists := cm["context_management"]; exists {
+		t.Fatalf("disabled compaction modified request: %#v", cm)
 	}
 }

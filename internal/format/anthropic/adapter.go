@@ -5,8 +5,10 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"math"
 
 	"github.com/torana-edge/torana-edge/internal/engine"
+	"github.com/torana-edge/torana-edge/internal/engine/pbconv"
 	"github.com/torana-edge/torana-edge/internal/format"
 )
 
@@ -28,6 +30,9 @@ type anthropicRequest struct {
 type anthropicMessage struct {
 	Role    string         `json:"role"`
 	Content []contentBlock `json:"content"`
+	// ContentRaw holds the raw "content" member bytes (unmarshal side only;
+	// never serialized) so block lexemes survive the ordered-body projection.
+	ContentRaw json.RawMessage `json:"-"`
 }
 
 // UnmarshalJSON accepts BOTH valid Anthropic system forms: a bare string
@@ -116,6 +121,7 @@ func (am *anthropicMessage) UnmarshalJSON(data []byte) error {
 		return err
 	}
 	*am = anthropicMessage(raw.alias)
+	am.ContentRaw = append(json.RawMessage(nil), raw.Content...)
 
 	// Try string first.
 	var s string
@@ -134,16 +140,16 @@ func (am *anthropicMessage) UnmarshalJSON(data []byte) error {
 }
 
 type contentBlock struct {
-	Type      string         `json:"type"`
-	Text      string         `json:"text,omitempty"`
-	ID        string         `json:"id,omitempty"`
-	Name      string         `json:"name,omitempty"`
-	Input     map[string]any `json:"input,omitempty"`
-	ToolUseID string         `json:"tool_use_id,omitempty"`
-	Content   any            `json:"content,omitempty"` // string or array of blocks
-	Thinking  string         `json:"thinking,omitempty"`
-	Signature string         `json:"signature,omitempty"`
-	Data      string         `json:"data,omitempty"`
+	Type      string          `json:"type"`
+	Text      string          `json:"text,omitempty"`
+	ID        string          `json:"id,omitempty"`
+	Name      string          `json:"name,omitempty"`
+	Input     json.RawMessage `json:"input,omitempty"` // raw lexemes, verbatim
+	ToolUseID string          `json:"tool_use_id,omitempty"`
+	Content   any             `json:"content,omitempty"` // string or array of blocks
+	Thinking  string          `json:"thinking,omitempty"`
+	Signature string          `json:"signature,omitempty"`
+	Data      string          `json:"data,omitempty"`
 	// Cache breakpoint marker, e.g. {"type":"ephemeral"}. Preserved verbatim
 	// (opaque map) so TTL variants pass through. Dropping it disables the
 	// provider's prompt cache for the whole prefix.
@@ -152,10 +158,10 @@ type contentBlock struct {
 }
 
 type anthropicToolDef struct {
-	Name         string         `json:"name"`
-	Description  string         `json:"description,omitempty"`
-	InputSchema  map[string]any `json:"input_schema"`
-	CacheControl map[string]any `json:"cache_control,omitempty"`
+	Name         string          `json:"name"`
+	Description  string          `json:"description,omitempty"`
+	InputSchema  json.RawMessage `json:"input_schema"` // raw JSON Schema lexemes, verbatim
+	CacheControl map[string]any  `json:"cache_control,omitempty"`
 }
 
 // UnmarshalJSON handles the polymorphic tool_result content (string or array).
@@ -169,6 +175,9 @@ func (cb *contentBlock) UnmarshalJSON(data []byte) error {
 		return err
 	}
 	*cb = contentBlock(raw.rawBlock)
+	if err := validateContentBlockMembers(raw.Type, data, contentBlock(raw.rawBlock)); err != nil {
+		return err
+	}
 	if raw.Content == nil {
 		return nil
 	}
@@ -184,6 +193,69 @@ func (cb *contentBlock) UnmarshalJSON(data []byte) error {
 		return nil
 	}
 	return fmt.Errorf("content: expected string or array, got %s", string(raw.Content))
+}
+
+// anthropicArmAllowedMembers is the per-arm allowed-member table for the
+// provider-arm matrix. PRESENCE is the invariant — a foreign member is
+// refused regardless of its value (empty string, null, empty object/array,
+// or an ordinary value): the earlier value-based checks could not
+// distinguish a foreign member present with an empty value from absence.
+// cache_control is the documented marker member on every arm. An additive
+// wire member fails here until a deliberate table decision is made.
+var anthropicArmAllowedMembers = map[string]map[string]bool{
+	anthropicText: {
+		"type": true, "text": true, "cache_control": true,
+	},
+	anthropicThinking: {
+		"type": true, "thinking": true, "signature": true, "cache_control": true,
+	},
+	anthropicRedacted: {
+		"type": true, "data": true, "cache_control": true,
+	},
+	anthropicToolUse: {
+		"type": true, "id": true, "name": true, "input": true, "cache_control": true,
+	},
+	anthropicToolResult: {
+		"type": true, "tool_use_id": true, "content": true, "cache_control": true,
+	},
+}
+
+// validateContentBlockMembers enforces the per-arm member set over the RAW
+// decoded members (presence-based) plus the arm's required members.
+func validateContentBlockMembers(arm string, data []byte, raw contentBlock) error {
+	allowed, known := anthropicArmAllowedMembers[arm]
+	if !known {
+		// An untyped block (no declared arm) is outside the matrix; the
+		// adapter's unknown arm handles it raw.
+		return nil
+	}
+	var members map[string]json.RawMessage
+	if err := json.Unmarshal(data, &members); err != nil {
+		return err
+	}
+	for name := range members {
+		if !allowed[name] {
+			return fmt.Errorf("anthropic: %s block carries a member %q outside its arm table", arm, name)
+		}
+	}
+	switch arm {
+	case anthropicText:
+		var t struct {
+			Text *string `json:"text"`
+		}
+		if json.Unmarshal(data, &t) == nil && t.Text == nil {
+			return fmt.Errorf("anthropic: text block without a text member")
+		}
+	case anthropicToolUse:
+		if raw.ID == "" || raw.Name == "" {
+			return fmt.Errorf("anthropic: tool_use block requires id and name")
+		}
+	case anthropicToolResult:
+		if raw.ToolUseID == "" {
+			return fmt.Errorf("anthropic: tool_result block requires tool_use_id")
+		}
+	}
+	return nil
 }
 
 // MarshalJSON handles re-serializing content blocks.
@@ -229,6 +301,12 @@ func (a *Adapter) Unmarshal(rawBody []byte) (*engine.ChatRequest, error) {
 	if err := json.Unmarshal(rawBody, &ar); err != nil {
 		return nil, fmt.Errorf("anthropic unmarshal: %w", err)
 	}
+	// Accepted-domain closure: max_tokens must be in 1..MaxInt32 (the
+	// canonical field the SDK pins); anything else is refused here as a
+	// 400-class parse error, never silently clamped or re-emitted.
+	if ar.MaxTokens != nil && (*ar.MaxTokens < 1 || *ar.MaxTokens > math.MaxInt32) {
+		return nil, fmt.Errorf("anthropic: max_tokens %d is outside 1..%d", *ar.MaxTokens, math.MaxInt32)
+	}
 
 	chat := &engine.ChatRequest{
 		Model:         ar.Model,
@@ -239,152 +317,273 @@ func (a *Adapter) Unmarshal(rawBody []byte) (*engine.ChatRequest, error) {
 		StopSequences: ar.StopSequences,
 	}
 
-	var raw map[string]any
-	if err := json.Unmarshal(rawBody, &raw); err == nil {
-		delete(raw, "model")
-		delete(raw, "max_tokens")
-		delete(raw, "temperature")
-		delete(raw, "top_p")
-		delete(raw, "stop_sequences")
-		delete(raw, "system")
-		delete(raw, "messages")
-		delete(raw, "tools")
-		delete(raw, "stream")
-		if len(raw) > 0 {
-			chat.ProviderExtensions = raw
-		}
+	// Provider extensions: parse the ORIGINAL body and delete the canonical
+	// fields in fixed order — deterministic, lexeme-exact unknown members.
+	ext, xerr := engine.ParseOptionalJSONObject(rawBody)
+	if xerr != nil {
+		return nil, fmt.Errorf("provider extensions: %w", xerr)
+	}
+	ext, xerr = ext.WithoutMembers("model", "max_tokens", "temperature", "top_p",
+		"stop_sequences", "system", "messages", "tools", "stream")
+	if xerr != nil {
+		return nil, fmt.Errorf("provider extensions: %w", xerr)
+	}
+	if ext, xerr = format.NormalizeExtensionObject(ext); xerr != nil {
+		return nil, fmt.Errorf("provider extensions: %w", xerr)
+	}
+	if !ext.IsAbsent() {
+		chat.ProviderExtensions = ext
 	}
 
-	// System: concatenate text blocks into first message. A cache breakpoint
-	// on any system block (Claude Code marks the last one) is carried on the
-	// coalesced message; Marshal re-emits it on the last system block, which
-	// preserves the breakpoint position after coalescing.
+	// System: text blocks in wire order with their positional cache
+	// breakpoints. The strict TextBlockParam parsing (parse-bypass) stays:
+	// every system element must be a text block, so only text + cache
+	// breakpoints are representable here.
 	if len(ar.System) > 0 {
-		var sysText []string
-		var sysCache map[string]any
+		var blocks []engine.Block
 		for _, b := range ar.System {
-			if b.Type == "text" && b.Text != "" {
-				sysText = append(sysText, b.Text)
+			// Empty text is absent-like for the system array: `"system": ""`
+			// and `{"type":"text","text":""}` produce no system message
+			// (explicit-empty is a first-class arm for MESSAGE bodies, not
+			// for the system preamble).
+			if b.Text == "" {
+				continue
 			}
+			blocks = append(blocks, engine.Block{Text: &engine.TextBlock{Text: b.Text}})
 			if b.CacheControl != nil {
-				sysCache = b.CacheControl
+				marker, err := engine.ParseRequiredJSONObject(mustMarshalA(b.CacheControl))
+				if err != nil {
+					return nil, fmt.Errorf("system cache_control: %w", err)
+				}
+				blocks = append(blocks, engine.Block{CacheBreakpoint: &engine.CacheBreakpointBlock{Marker: marker}})
 			}
 		}
-		if len(sysText) > 0 {
-			chat.Messages = append(chat.Messages, engine.Message{
-				Role:         engine.RoleSystem,
-				Content:      joinStrings(sysText, "\n"),
-				CacheControl: sysCache,
-			})
+		// An all-empty system array (e.g. `"system": ""`) is absent-like:
+		// no message, exactly as if the member were missing.
+		if len(blocks) > 0 {
+			chat.Messages = append(chat.Messages, engine.Message{Role: engine.RoleSystem, Blocks: blocks})
 		}
 	}
 
-	// Messages: flatten content blocks.
+	// Messages: project the wire content array onto the ordered block
+	// sequence ONE message at a time — provider message boundaries and roles
+	// stay intact (tool results ride their user message at their exact
+	// position; there is no synthetic RoleTool split).
 	for _, am := range ar.Messages {
-		role := mapRole(am.Role)
-		var textParts []string
-		var contentParts []any
-		var toolCalls []engine.ToolCall
-		var toolResults []engine.Message
-		var thinking, thinkingSignature, redactedThinking string
-		// resultsFirst records whether the original message opened with
-		// tool_result blocks (Claude Code sends [tool_result..., text] — the
-		// text is its injected context). The IR split must keep that order:
-		// re-marshaling the text BEFORE the results interposes a user message
-		// between the assistant's tool_use and its tool_results, which strict
-		// providers reject ("tool_use ids were found without tool_result
-		// blocks immediately after").
-		resultsFirst := false
-		sawContent := false
-		// contentCache carries a cache breakpoint from a non-tool_result block
-		// onto the coalesced content message (tool_result markers stay on their
-		// own tool message, keeping the breakpoint's position exact).
-		var contentCache map[string]any
-
-		for _, block := range am.Content {
-			switch block.Type {
-			case "text":
-				sawContent = true
-				if block.Text != "" {
-					textParts = append(textParts, block.Text)
-				}
-			case "image":
-				sawContent = true
-				contentParts = append(contentParts, block)
-			case "tool_use":
-				toolCalls = append(toolCalls, engine.ToolCall{
-					ID:        block.ID,
-					Name:      block.Name,
-					Arguments: block.Input,
-				})
-			case "tool_result":
-				if !sawContent {
-					resultsFirst = true
-				}
-				tr := engine.Message{
-					Role:         engine.RoleTool,
-					ToolCallID:   block.ToolUseID,
-					ToolName:     block.Name,
-					CacheControl: block.CacheControl,
-				}
-				if s, ok := block.Content.(string); ok {
-					tr.Content = s
-				} else if arr, ok := block.Content.([]any); ok {
-					tr.ContentParts = arr
-				}
-				toolResults = append(toolResults, tr)
-			case "thinking":
-				thinking = block.Thinking
-				thinkingSignature = block.Signature
-			case "redacted_thinking":
-				redactedThinking = block.Data
+		msg := engine.Message{Role: mapRole(am.Role)}
+		for i, block := range am.Content {
+			blk, cerr := anthropicBlockToEngine(block, i, am.ContentRaw)
+			if cerr != nil {
+				return nil, cerr
 			}
-			// image blocks travel verbatim inside ContentParts (marker
-			// included), tool_result markers ride their own tool message.
-			if block.Type != "tool_result" && block.Type != "image" && block.CacheControl != nil {
-				contentCache = block.CacheControl
+			msg.Blocks = append(msg.Blocks, blk)
+			// A cache_control member on a content block closes the cached
+			// prefix at that position: project it as a CacheBreakpoint block
+			// AFTER the covered block (the canonical positional form). This
+			// includes tool_result and image blocks — the member is a
+			// block-level fact, never folded into the payload (the
+			// projection invariant).
+			if block.CacheControl != nil {
+				marker, merr := engine.ParseRequiredJSONObject(mustMarshalA(block.CacheControl))
+				if merr != nil {
+					return nil, fmt.Errorf("content cache_control: %w", merr)
+				}
+				msg.Blocks = append(msg.Blocks, engine.Block{CacheBreakpoint: &engine.CacheBreakpointBlock{Marker: marker}})
 			}
 		}
-
-		contentMsg := engine.Message{
-			Role:              role,
-			Content:           joinStrings(textParts, ""),
-			ContentParts:      contentParts,
-			ToolCalls:         toolCalls,
-			Thinking:          thinking,
-			ThinkingSignature: thinkingSignature,
-			RedactedThinking:  redactedThinking,
-			CacheControl:      contentCache,
-		}
-		hasContent := len(textParts) > 0 || len(contentParts) > 0 || len(toolCalls) > 0 || thinking != "" || redactedThinking != ""
-		if resultsFirst {
-			chat.Messages = append(chat.Messages, toolResults...)
-			if hasContent {
-				chat.Messages = append(chat.Messages, contentMsg)
-			}
-		} else {
-			if hasContent {
-				chat.Messages = append(chat.Messages, contentMsg)
-			}
-			chat.Messages = append(chat.Messages, toolResults...)
-		}
+		chat.Messages = append(chat.Messages, msg)
 	}
 
 	// Tools.
 	for _, t := range ar.Tools {
-		chat.Tools = append(chat.Tools, engine.ToolDef{
-			Name:         t.Name,
-			Description:  t.Description,
-			Parameters:   t.InputSchema,
-			CacheControl: t.CacheControl,
-		})
+		params, err := engine.ParseRequiredObjectOrEmpty(t.InputSchema)
+		if err != nil {
+			return nil, fmt.Errorf("tool %q input_schema: %w", t.Name, err)
+		}
+		td := engine.ToolDef{
+			Name:        t.Name,
+			Description: t.Description,
+			Parameters:  params,
+		}
+		if t.CacheControl != nil {
+			cc, cerr := engine.ParseRequiredJSONObject(mustMarshalA(t.CacheControl))
+			if cerr != nil {
+				return nil, fmt.Errorf("tool %q cache_control: %w", t.Name, cerr)
+			}
+			td.CacheControl, _ = engine.ParseOptionalJSONObject(cc.Bytes())
+		}
+		chat.Tools = append(chat.Tools, td)
 	}
 
 	return chat, nil
 }
 
+// anthropicBlockKinds are the wire block kinds the adapter models; anything
+// else is preserved as an Unknown block (kind + payload with the
+// discriminant and cache member removed).
+const (
+	anthropicText       = "text"
+	anthropicThinking   = "thinking"
+	anthropicRedacted   = "redacted_thinking"
+	anthropicToolUse    = "tool_use"
+	anthropicToolResult = "tool_result"
+	anthropicImage      = "image"
+)
+
+// anthropicBlockToEngine projects one wire content block onto the ordered
+// body. Tool-result content arrays become nested tool-result content; image
+// and unknown arms become Unknown blocks with the discriminant ("type") and
+// any cache member removed from the payload.
+func anthropicBlockToEngine(block contentBlock, i int, contentRaw json.RawMessage) (engine.Block, error) {
+	switch block.Type {
+	case anthropicText:
+		return engine.Block{Text: &engine.TextBlock{Text: block.Text}}, nil
+	case anthropicThinking:
+		return engine.Block{Thinking: &engine.ThinkingBlock{Text: block.Thinking, Signature: block.Signature}}, nil
+	case anthropicRedacted:
+		return engine.Block{RedactedThinking: &engine.RedactedThinkingBlock{Data: block.Data}}, nil
+	case anthropicToolUse:
+		args, err := engine.ParseRequiredObjectOrEmpty(block.Input)
+		if err != nil {
+			return engine.Block{}, fmt.Errorf("tool_use %q input: %w", block.Name, err)
+		}
+		return engine.Block{ToolUse: &engine.ToolUseBlock{
+			ID: block.ID, Name: block.Name, Arguments: args,
+		}}, nil
+	case anthropicToolResult:
+		tr := &engine.ToolResultBlock{ToolCallID: block.ToolUseID, ToolName: block.Name}
+		if s, ok := block.Content.(string); ok {
+			tr.Content = []engine.ToolResultContentBlock{{Text: s}}
+			return engine.Block{ToolResult: tr}, nil
+		}
+		if arr, ok := block.Content.([]any); ok {
+			// Raw nested elements, aligned by index with arr: decode the
+			// block's raw "content" member so lexemes survive the
+			// projection (a map re-encode would lose them).
+			var rawNested []json.RawMessage
+			if blockRaw := rawElement(contentRaw, i); blockRaw != nil {
+				var rawTR struct {
+					Content json.RawMessage `json:"content"`
+				}
+				if json.Unmarshal(blockRaw, &rawTR) == nil {
+					json.Unmarshal(rawTR.Content, &rawNested)
+				}
+			}
+			for j, p := range arr {
+				elem, err := anthropicNestedContentToEngine(p, rawNested, j)
+				if err != nil {
+					return engine.Block{}, err
+				}
+				tr.Content = append(tr.Content, elem)
+			}
+			if len(tr.Content) == 0 {
+				tr.Content = []engine.ToolResultContentBlock{{Text: ""}}
+			}
+			return engine.Block{ToolResult: tr}, nil
+		}
+		return engine.Block{}, fmt.Errorf("tool_result content: expected string or array")
+	default:
+		// image and any unmodelled arm: preserve the raw element with the
+		// discriminant and cache member removed (the projection invariant;
+		// the kind is the single authority).
+		kind := block.Type
+		if kind == "" {
+			kind = "unknown"
+		}
+		raw := rawElement(contentRaw, i)
+		payload, err := stripBlockFacts(raw, "type", "cache_control")
+		if err != nil {
+			return engine.Block{}, fmt.Errorf("block %q payload: %w", kind, err)
+		}
+		return engine.Block{Unknown: &engine.UnknownBlock{Kind: kind, Payload: payload}}, nil
+	}
+}
+
+// anthropicNestedContentToEngine projects one tool-result content element
+// onto the nested kinds (text / unknown / cache breakpoint). rawNested holds
+// the block's raw content array, aligned by index with the typed elements.
+func anthropicNestedContentToEngine(p any, rawNested []json.RawMessage, j int) (engine.ToolResultContentBlock, error) {
+	if m, ok := p.(map[string]any); ok {
+		if t, _ := m["type"].(string); t == anthropicText || t == "" {
+			if txt, ok := m["text"].(string); ok {
+				return engine.ToolResultContentBlock{Text: txt}, nil
+			}
+		}
+		if cc, ok := m["cache_control"].(map[string]any); ok && cc != nil {
+			marker, err := engine.ParseRequiredJSONObject(mustMarshalA(cc))
+			if err != nil {
+				return engine.ToolResultContentBlock{}, fmt.Errorf("nested cache_control: %w", err)
+			}
+			return engine.ToolResultContentBlock{CacheBreakpoint: &engine.CacheBreakpointBlock{Marker: marker}}, nil
+		}
+	}
+	kind := "unknown"
+	if m, ok := p.(map[string]any); ok {
+		if t, ok := m["type"].(string); ok && t != "" {
+			kind = t
+		}
+	}
+	raw := json.RawMessage(nil)
+	if j < len(rawNested) {
+		raw = rawNested[j]
+	}
+	payload, err := stripBlockFacts(raw, "type", "cache_control")
+	if err != nil {
+		return engine.ToolResultContentBlock{}, fmt.Errorf("nested block %q payload: %w", kind, err)
+	}
+	return engine.ToolResultContentBlock{Unknown: &engine.UnknownBlock{Kind: kind, Payload: payload}}, nil
+}
+
+// rawElement returns element i of a raw JSON array, or nil.
+func rawElement(raw json.RawMessage, i int) json.RawMessage {
+	if len(raw) == 0 || raw[0] != '[' {
+		return nil
+	}
+	var els []json.RawMessage
+	if json.Unmarshal(raw, &els) != nil || i < 0 || i >= len(els) {
+		return nil
+	}
+	return els[i]
+}
+
+// stripBlockFacts removes the canonical discriminant and cache members from
+// a raw block object (span-preserving), so the payload never duplicates the
+// block kinds' authority. A missing raw element is a refusal.
+func stripBlockFacts(raw json.RawMessage, keys ...string) (engine.RequiredJSONObject, error) {
+	if len(raw) > 0 && raw[0] == '{' {
+		obj, err := engine.ParseRequiredJSONObject(raw)
+		if err != nil {
+			return obj, err
+		}
+		for _, k := range keys {
+			obj, err = obj.DeleteMember(k)
+			if err != nil {
+				return obj, err
+			}
+		}
+		return obj, nil
+	}
+	return engine.RequiredJSONObject{}, fmt.Errorf("expected a JSON object block")
+}
+
+// mustMarshalA encodes a wire-decoded map back to bytes (used only for
+// cache markers, which are small and authored by the provider).
+func mustMarshalA(v any) []byte {
+	b, err := json.Marshal(v)
+	if err != nil {
+		panic(err)
+	}
+	return b
+}
+
 // Marshal converts a canonical ChatRequest into Anthropic Messages JSON.
 func (a *Adapter) Marshal(chat *engine.ChatRequest) ([]byte, error) {
+	// The owning validation at EVERY marshal entry: the engine pointer sum
+	// must be in the closed domain before any arm is projected — a future
+	// call site cannot bypass the checked boundary by accident.
+	if err := pbconv.ValidateFullRequest(chat); err != nil {
+		return nil, fmt.Errorf("anthropic: %w", err)
+	}
 	model := chat.Model
 	if model == "" {
 		model = "claude-sonnet-4-20250514"
@@ -402,134 +601,55 @@ func (a *Adapter) Marshal(chat *engine.ChatRequest) ([]byte, error) {
 		ar.MaxTokens = &defaultMax
 	}
 
-	// System message: first Message with RoleSystem → system array.
+	// System: the first system message's blocks project onto the system
+	// array (text blocks; positional cache breakpoints become members on the
+	// block they close). Unrepresentable blocks in a system message fail
+	// closed with an actionable error.
 	for _, m := range chat.Messages {
 		if m.Role == engine.RoleSystem {
-			ar.System = append(ar.System, contentBlock{
-				Type:         "text",
-				Text:         m.Content,
-				CacheControl: m.CacheControl,
-			})
+			sys, err := marshalSystemBlocks(m)
+			if err != nil {
+				return nil, err
+			}
+			ar.System = sys
+			break // only first system message
 		}
 	}
 
-	// Other messages → content blocks.
-	//
-	// Consecutive tool-result messages are coalesced into a SINGLE user
-	// message. The Anthropic API requires every `tool_use` block in an
-	// assistant turn to be answered by `tool_result` blocks in the one
-	// immediately-following message. Emitting a separate user message per
-	// tool result splits a parallel tool-call batch across several user
-	// messages, so only the first result lands "in the next message" and the
-	// rest are rejected:
-	//   messages.N: `tool_use` ids were found without `tool_result` blocks
-	//   immediately after ...
-	// Coding agents (Claude Code) issue parallel tool calls constantly, so
-	// this path is hit on essentially every multi-tool turn.
-	for i := 0; i < len(chat.Messages); i++ {
-		m := chat.Messages[i]
+	// Messages: the ordered body projects onto the wire content array one
+	// message at a time — provider message boundaries and roles stay intact.
+	for _, m := range chat.Messages {
 		if m.Role == engine.RoleSystem {
 			continue // handled above
 		}
-
 		if m.Role == engine.RoleTool {
-			am := anthropicMessage{Role: unmapRole(engine.RoleTool), Content: []contentBlock{}}
-			for i < len(chat.Messages) && chat.Messages[i].Role == engine.RoleTool {
-				tm := chat.Messages[i]
-				if tm.Thinking != "" {
-					am.Content = append(am.Content, thinkingBlock(tm))
-				}
-				cb := contentBlock{
-					Type:         "tool_result",
-					ToolUseID:    tm.ToolCallID,
-					Name:         tm.ToolName,
-					CacheControl: tm.CacheControl,
-				}
-				if len(tm.ContentParts) > 0 {
-					cb.Content = tm.ContentParts
-				} else {
-					cb.Content = tm.Content
-				}
-				am.Content = append(am.Content, cb)
-				i++
-			}
-			i-- // for-loop post-statement re-increments
-			ar.Messages = append(ar.Messages, am)
-			continue
+			// Anthropic has no native tool-role message: a tool-role message
+			// is unrepresentable on this wire and must fail closed rather
+			// than be dropped or reordered.
+			return nil, fmt.Errorf("anthropic: tool-role messages are not representable; " +
+				"tool results must ride their user message as ToolResult blocks")
 		}
-
-		am := anthropicMessage{
-			Role: unmapRole(m.Role),
+		am := anthropicMessage{Role: unmapRole(m.Role)}
+		blocks, err := marshalContentBlocks(m)
+		if err != nil {
+			return nil, err
 		}
-
-		switch {
-		case len(m.ToolCalls) > 0:
-			// Assistant with tool calls.
-			if m.Thinking != "" || m.RedactedThinking != "" {
-				am.Content = append(am.Content, thinkingBlock(m))
-			}
-			if len(m.ContentParts) > 0 {
-				for _, p := range m.ContentParts {
-					b, _ := json.Marshal(p)
-					var cb contentBlock
-					json.Unmarshal(b, &cb)
-					am.Content = append(am.Content, cb)
-				}
-			} else if m.Content != "" {
-				am.Content = append(am.Content, contentBlock{
-					Type: "text",
-					Text: m.Content,
-				})
-			}
-			for _, tc := range m.ToolCalls {
-				am.Content = append(am.Content, contentBlock{
-					Type:  "tool_use",
-					ID:    tc.ID,
-					Name:  tc.Name,
-					Input: tc.Arguments,
-				})
-			}
-		default:
-			// Simple text message.
-			if m.Thinking != "" || m.RedactedThinking != "" {
-				am.Content = append(am.Content, thinkingBlock(m))
-			}
-			if len(m.ContentParts) > 0 {
-				for _, p := range m.ContentParts {
-					b, _ := json.Marshal(p)
-					var cb contentBlock
-					json.Unmarshal(b, &cb)
-					am.Content = append(am.Content, cb)
-				}
-			} else if m.Content != "" {
-				am.Content = append(am.Content, contentBlock{
-					Type: "text",
-					Text: m.Content,
-				})
-			}
-		}
-
-		// Re-attach the message's cache breakpoint to the last emitted block —
-		// breakpoints are positional ("cache everything up to here"), so after
-		// block coalescing the end of the message is the faithful spot.
-		if m.CacheControl != nil && len(am.Content) > 0 {
-			last := &am.Content[len(am.Content)-1]
-			if last.CacheControl == nil {
-				last.CacheControl = m.CacheControl
-			}
-		}
-
+		am.Content = blocks
 		ar.Messages = append(ar.Messages, am)
 	}
 
 	// Tools.
 	for _, t := range chat.Tools {
-		ar.Tools = append(ar.Tools, anthropicToolDef{
+		td := anthropicToolDef{
 			Name:         t.Name,
 			Description:  t.Description,
-			InputSchema:  t.Parameters,
-			CacheControl: t.CacheControl,
-		})
+			InputSchema:  t.Parameters.Bytes(),
+			CacheControl: decodeMarker(t.CacheControl),
+		}
+		if len(td.CacheControl) == 0 {
+			td.CacheControl = nil
+		}
+		ar.Tools = append(ar.Tools, td)
 	}
 
 	b, err := json.Marshal(ar)
@@ -537,11 +657,13 @@ func (a *Adapter) Marshal(chat *engine.ChatRequest) ([]byte, error) {
 		return nil, err
 	}
 
-	if len(chat.ProviderExtensions) > 0 {
-		var outMap map[string]any
-		json.Unmarshal(b, &outMap)
-		for k, v := range chat.ProviderExtensions {
-			outMap[k] = v
+	if !chat.ProviderExtensions.IsAbsent() {
+		var outMap map[string]json.RawMessage
+		if err := json.Unmarshal(b, &outMap); err != nil {
+			return nil, err
+		}
+		if err := format.MergeRawMembers(outMap, chat.ProviderExtensions.Bytes()); err != nil {
+			return nil, fmt.Errorf("provider extensions merge: %w", err)
 		}
 		return json.Marshal(outMap)
 	}
@@ -549,21 +671,234 @@ func (a *Adapter) Marshal(chat *engine.ChatRequest) ([]byte, error) {
 	return b, nil
 }
 
-// thinkingBlock returns the Anthropic content block for thinking/reasoning content.
-func thinkingBlock(m engine.Message) contentBlock {
-	if m.RedactedThinking != "" {
-		return contentBlock{
-			Type: "redacted_thinking",
-			Data: m.RedactedThinking,
+// marshalSystemBlocks projects a system message's ordered body onto the
+// system array. Text blocks emit text blocks; a CacheBreakpoint closes the
+// prefix at its position, so it becomes a cache_control MEMBER on the
+// preceding text block. Any other block kind, or a breakpoint at position 0,
+// is unrepresentable and fails closed.
+func marshalSystemBlocks(m engine.Message) ([]contentBlock, error) {
+	var out []contentBlock
+	for i, b := range m.Blocks {
+		switch {
+		case b.Text != nil:
+			out = append(out, contentBlock{Type: "text", Text: b.Text.Text})
+		case b.CacheBreakpoint != nil:
+			if i == 0 || len(out) == 0 {
+				return nil, fmt.Errorf("anthropic: system cache breakpoint at position %d "+
+					"has no preceding text block to attach to", i)
+			}
+			if out[len(out)-1].CacheControl == nil {
+				out[len(out)-1].CacheControl = decodeMarker(b.CacheBreakpoint.Marker)
+			}
+		default:
+			return nil, fmt.Errorf("anthropic: system block %d (%s) is not representable "+
+				"on the Anthropic system array", i, blockKind(b))
 		}
 	}
-	return contentBlock{
-		Type:      "thinking",
-		Thinking:  m.Thinking,
-		Signature: m.ThinkingSignature,
-	}
+	return out, nil
 }
 
+// marshalContentBlocks projects a message's ordered body onto the wire
+// content array, enforcing the Anthropic provider grammar fail-closed:
+//
+//   - text / thinking / redacted_thinking / tool_use / tool_result map to
+//     their wire blocks;
+//   - a CacheBreakpoint becomes a cache_control MEMBER on the block it
+//     closes (breakpoint at position 0 is unrepresentable);
+//   - Unknown blocks re-attach their discriminant as the wire "type";
+//   - a trailing signature is unrepresentable (Code Assist only);
+//   - tool_use is assistant-only and tool_result is user-only.
+func marshalContentBlocks(m engine.Message) ([]contentBlock, error) {
+	var out []contentBlock
+	for i, b := range m.Blocks {
+		var cb contentBlock
+		switch {
+		case b.Text != nil:
+			cb = contentBlock{Type: "text", Text: b.Text.Text}
+		case b.Thinking != nil:
+			cb = contentBlock{Type: "thinking", Thinking: b.Thinking.Text, Signature: b.Thinking.Signature}
+		case b.RedactedThinking != nil:
+			cb = contentBlock{Type: "redacted_thinking", Data: b.RedactedThinking.Data}
+		case b.ToolUse != nil:
+			if m.Role != engine.RoleAssistant {
+				return nil, fmt.Errorf("anthropic: tool_use block %d on a %q message is unrepresentable",
+					i, m.Role)
+			}
+			cb = contentBlock{
+				Type:  "tool_use",
+				ID:    b.ToolUse.ID,
+				Name:  b.ToolUse.Name,
+				Input: b.ToolUse.Arguments.Bytes(),
+			}
+		case b.ToolResult != nil:
+			if m.Role != engine.RoleUser {
+				return nil, fmt.Errorf("anthropic: tool_result block %d on a %q message is unrepresentable",
+					i, m.Role)
+			}
+			cb = contentBlock{
+				Type:      "tool_result",
+				ToolUseID: b.ToolResult.ToolCallID,
+				Name:      b.ToolResult.ToolName,
+			}
+			content, cerr := marshalNestedContent(b.ToolResult.Content)
+			if cerr != nil {
+				return nil, cerr
+			}
+			cb.Content = content
+		case b.CacheBreakpoint != nil:
+			if i == 0 || len(out) == 0 {
+				return nil, fmt.Errorf("anthropic: cache breakpoint at position %d "+
+					"has no preceding content block to attach to", i)
+			}
+			if out[len(out)-1].CacheControl == nil {
+				out[len(out)-1].CacheControl = decodeMarker(b.CacheBreakpoint.Marker)
+			}
+			continue
+		case b.Unknown != nil:
+			var uerr error
+			cb, uerr = marshalUnknownBlock(b.Unknown)
+			if uerr != nil {
+				return nil, fmt.Errorf("anthropic: %w", uerr)
+			}
+		case b.TrailingSignature != nil:
+			return nil, fmt.Errorf("anthropic: trailing signature block %d is not representable "+
+				"(Code Assist only)", i)
+		default:
+			return nil, fmt.Errorf("anthropic: block %d has no arm", i)
+		}
+		out = append(out, cb)
+	}
+	return out, nil
+}
+
+// marshalNestedContent projects nested tool-result content onto the wire
+// array (text blocks and unknown arms with their discriminants re-attached).
+// Nested cache breakpoints become cache_control members on the preceding
+// nested element (position 0 is unrepresentable).
+func marshalNestedContent(content []engine.ToolResultContentBlock) (any, error) {
+	if len(content) == 0 {
+		return "", nil
+	}
+	var out []any
+	for i, c := range content {
+		switch {
+		case c.Text != "" || (c.Unknown == nil && c.CacheBreakpoint == nil):
+			out = append(out, map[string]any{"type": "text", "text": c.Text})
+		case c.Unknown != nil:
+			payload, _, err := c.Unknown.Payload.DecodeObject()
+			if err != nil {
+				return nil, fmt.Errorf("nested unknown payload: %w", err)
+			}
+			for _, canon := range []string{"type", "cache_control"} {
+				if _, dup := payload[canon]; dup {
+					return nil, fmt.Errorf("anthropic: nested unknown payload duplicates canonical member %q (projection invariant)", canon)
+				}
+			}
+			if c.Unknown.Kind == anthropicText || c.Unknown.Kind == anthropicToolResult {
+				return nil, fmt.Errorf("anthropic: nested unknown block kind %q names a modeled arm (projection invariant)", c.Unknown.Kind)
+			}
+			block := make(map[string]any, len(payload)+1)
+			block["type"] = c.Unknown.Kind
+			for k, v := range payload {
+				block[k] = json.RawMessage(v)
+			}
+			out = append(out, block)
+		case c.CacheBreakpoint != nil:
+			if i == 0 || len(out) == 0 {
+				return nil, fmt.Errorf("anthropic: nested cache breakpoint at position %d "+
+					"has no preceding element to attach to", i)
+			}
+			prev, ok := out[len(out)-1].(map[string]any)
+			if !ok {
+				return nil, fmt.Errorf("anthropic: nested cache breakpoint after a non-object element")
+			}
+			if _, exists := prev["cache_control"]; !exists {
+				prev["cache_control"] = decodeMarker(c.CacheBreakpoint.Marker)
+			}
+		}
+	}
+	if len(out) == 0 {
+		return "", nil
+	}
+	return out, nil
+}
+
+// marshalUnknownBlock re-attaches the discriminant as the wire "type".
+func marshalUnknownBlock(u *engine.UnknownBlock) (contentBlock, error) {
+	payload, _, err := u.Payload.DecodeObject()
+	if err != nil {
+		return contentBlock{}, fmt.Errorf("unknown payload: %w", err)
+	}
+	// The projection invariant is executable here: the payload must never
+	// duplicate the canonical discriminant or the cache member — a
+	// plugin-provided payload that does would silently override the kind or
+	// smuggle a cache fact the verifier never saw. A kind that names a
+	// MODELED arm would fabricate a block the verifier never saw. Reject
+	// before marshal.
+	for _, canon := range []string{"type", "cache_control"} {
+		if _, dup := payload[canon]; dup {
+			return contentBlock{}, fmt.Errorf("anthropic: unknown payload duplicates canonical member %q (projection invariant)", canon)
+		}
+	}
+	switch u.Kind {
+	case anthropicText, anthropicThinking, anthropicRedacted, anthropicToolUse, anthropicToolResult:
+		return contentBlock{}, fmt.Errorf("anthropic: unknown block kind %q names a modeled arm (projection invariant)", u.Kind)
+	}
+	block := make(map[string]any, len(payload)+1)
+	block["type"] = u.Kind
+	for k, v := range payload {
+		block[k] = json.RawMessage(v)
+	}
+	b, err := json.Marshal(block)
+	if err != nil {
+		return contentBlock{}, err
+	}
+	var cb contentBlock
+	if err := json.Unmarshal(b, &cb); err != nil {
+		return contentBlock{}, err
+	}
+	return cb, nil
+}
+
+// decodeMarker decodes a marker object for the wire map shape. Accepts the
+// required wrapper (block markers) and the optional wrapper (tool-def
+// markers); absent/zero yields nil.
+func decodeMarker(m interface {
+	Bytes() []byte
+}) map[string]any {
+	var out map[string]any
+	if err := json.Unmarshal(m.Bytes(), &out); err != nil {
+		return nil
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// blockKind names a block for error messages.
+func blockKind(b engine.Block) string {
+	switch {
+	case b.Text != nil:
+		return "text"
+	case b.Thinking != nil:
+		return "thinking"
+	case b.RedactedThinking != nil:
+		return "redacted_thinking"
+	case b.ToolUse != nil:
+		return "tool_use"
+	case b.ToolResult != nil:
+		return "tool_result"
+	case b.CacheBreakpoint != nil:
+		return "cache_breakpoint"
+	case b.Unknown != nil:
+		return "unknown"
+	case b.TrailingSignature != nil:
+		return "trailing_signature"
+	default:
+		return "empty"
+	}
+}
 func mapRole(r string) engine.Role {
 	switch r {
 	case "user":
@@ -586,15 +921,4 @@ func unmapRole(r engine.Role) string {
 	default:
 		return string(r)
 	}
-}
-
-func joinStrings(parts []string, sep string) string {
-	if len(parts) == 0 {
-		return ""
-	}
-	result := parts[0]
-	for _, p := range parts[1:] {
-		result += sep + p
-	}
-	return result
 }

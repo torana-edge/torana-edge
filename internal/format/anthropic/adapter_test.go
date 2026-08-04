@@ -11,6 +11,64 @@ import (
 	"github.com/torana-edge/torana-edge/internal/engine"
 )
 
+// Ordered-body test helpers (engine.Message).
+
+func hasCacheBlock(m engine.Message) bool {
+	for _, b := range m.Blocks {
+		if b.CacheBreakpoint != nil {
+			return true
+		}
+	}
+	return false
+}
+
+func textOf(m engine.Message) string { return m.Text() }
+
+type tcView struct {
+	ID, Name  string
+	Args      engine.RequiredJSONObject
+	Signature string
+}
+
+func toolCalls(m engine.Message) []tcView {
+	var out []tcView
+	for _, b := range m.Blocks {
+		if b.ToolUse != nil {
+			out = append(out, tcView{ID: b.ToolUse.ID, Name: b.ToolUse.Name, Args: b.ToolUse.Arguments, Signature: b.ToolUse.Signature})
+		}
+	}
+	return out
+}
+
+func toolResults(m engine.Message) []*engine.ToolResultBlock {
+	var out []*engine.ToolResultBlock
+	for _, b := range m.Blocks {
+		if b.ToolResult != nil {
+			out = append(out, b.ToolResult)
+		}
+	}
+	return out
+}
+func mustReqArgs(t *testing.T, raw string) engine.RequiredJSONObject {
+	t.Helper()
+	r, err := engine.ParseRequiredJSONObject([]byte(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return r
+}
+
+// mustReqOrEmpty uses the normalization constructor: empty means the
+// canonical {}.
+func mustReqOrEmpty(t *testing.T, raw string) engine.RequiredJSONObject {
+	t.Helper()
+	r, err := engine.ParseRequiredObjectOrEmpty([]byte(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return r
+}
+
 func TestRoundTrip(t *testing.T) {
 	adapter := &Adapter{}
 
@@ -51,46 +109,52 @@ func TestRoundTrip(t *testing.T) {
 	if chat.Messages[0].Role != engine.RoleSystem {
 		t.Errorf("msg 0 role: got %s, want system", chat.Messages[0].Role)
 	}
-	if chat.Messages[0].Content != "You are helpful." {
-		t.Errorf("msg 0 content: got %q", chat.Messages[0].Content)
+	if textOf(chat.Messages[0]) != "You are helpful." {
+		t.Errorf("msg 0 content: got %q", textOf(chat.Messages[0]))
 	}
 
 	// User message.
 	if chat.Messages[1].Role != engine.RoleUser {
 		t.Errorf("msg 1 role: got %s, want user", chat.Messages[1].Role)
 	}
-	if chat.Messages[1].Content != "What is the weather?" {
-		t.Errorf("msg 1 content: got %q", chat.Messages[1].Content)
+	if textOf(chat.Messages[1]) != "What is the weather?" {
+		t.Errorf("msg 1 content: got %q", textOf(chat.Messages[1]))
 	}
 
 	// Assistant message with tool call.
 	if chat.Messages[2].Role != engine.RoleAssistant {
 		t.Errorf("msg 2 role: got %s, want assistant", chat.Messages[2].Role)
 	}
-	if len(chat.Messages[2].ToolCalls) != 1 {
-		t.Fatalf("expected 1 tool call, got %d", len(chat.Messages[2].ToolCalls))
+	if len(toolCalls(chat.Messages[2])) != 1 {
+		t.Fatalf("expected 1 tool call, got %d", len(toolCalls(chat.Messages[2])))
 	}
-	tc := chat.Messages[2].ToolCalls[0]
+	tc := toolCalls(chat.Messages[2])[0]
 	if tc.ID != "toolu_1" {
 		t.Errorf("tool call id: got %s, want toolu_1", tc.ID)
 	}
 	if tc.Name != "get_weather" {
 		t.Errorf("tool call name: got %s, want get_weather", tc.Name)
 	}
-	city, ok := tc.Arguments["city"].(string)
-	if !ok || city != "SF" {
-		t.Errorf("tool call args: got %v", tc.Arguments)
+	vals, _, err := tc.Args.DecodeObject()
+	if err != nil {
+		t.Fatalf("tool call args decode: %v", err)
+	}
+	city, ok := vals["city"]
+	if !ok || string(city) != `"SF"` {
+		t.Errorf("tool call args: got %v", vals)
 	}
 
-	// Tool result message.
-	if chat.Messages[3].Role != engine.RoleTool {
-		t.Errorf("msg 3 role: got %s, want tool", chat.Messages[3].Role)
+	// Tool result: anthropic has no tool role — the result rides its user
+	// message at its exact wire position (no synthetic RoleTool split).
+	if chat.Messages[3].Role != engine.RoleUser {
+		t.Errorf("msg 3 role: got %s, want user (result rides its user message)", chat.Messages[3].Role)
 	}
-	if chat.Messages[3].ToolCallID != "toolu_1" {
-		t.Errorf("msg 3 tool_call_id: got %s, want toolu_1", chat.Messages[3].ToolCallID)
+	trs := toolResults(chat.Messages[3])
+	if len(trs) != 1 || trs[0].ToolCallID != "toolu_1" {
+		t.Errorf("msg 3 tool result: got %+v, want toolu_1", trs)
 	}
-	if chat.Messages[3].Content != "Sunny, 72F" {
-		t.Errorf("msg 3 content: got %q", chat.Messages[3].Content)
+	if len(trs[0].Content) != 1 || trs[0].Content[0].Text != "Sunny, 72F" {
+		t.Errorf("msg 3 result content: got %+v", trs[0].Content)
 	}
 
 	// Tool definitions.
@@ -322,14 +386,20 @@ func TestParallelToolResultsCoalesce(t *testing.T) {
 		Model:     "claude-x",
 		MaxTokens: intPtr(256),
 		Messages: []engine.Message{
-			{Role: engine.RoleUser, Content: "read both files"},
-			{Role: engine.RoleAssistant, ToolCalls: []engine.ToolCall{
-				{ID: "toolu_a", Name: "read", Arguments: map[string]any{"path": "a.go"}},
-				{ID: "toolu_b", Name: "read", Arguments: map[string]any{"path": "b.go"}},
+			{Role: engine.RoleUser, Blocks: []engine.Block{{Text: &engine.TextBlock{Text: "read both files"}}}},
+			{Role: engine.RoleAssistant, Blocks: []engine.Block{
+				{ToolUse: &engine.ToolUseBlock{ID: "toolu_a", Name: "read", Arguments: mustReqArgs(t, `{"path": "a.go"}`)}},
+				{ToolUse: &engine.ToolUseBlock{ID: "toolu_b", Name: "read", Arguments: mustReqArgs(t, `{"path": "b.go"}`)}},
 			}},
-			{Role: engine.RoleTool, ToolCallID: "toolu_a", Content: "package alpha"},
-			{Role: engine.RoleTool, ToolCallID: "toolu_b", Content: "package beta"},
-			{Role: engine.RoleUser, Content: "thanks"},
+			{Role: engine.RoleUser, Blocks: []engine.Block{
+				{ToolResult: &engine.ToolResultBlock{
+					ToolCallID: "toolu_a", Content: []engine.ToolResultContentBlock{{Text: "package alpha"}},
+				}},
+				{ToolResult: &engine.ToolResultBlock{
+					ToolCallID: "toolu_b", Content: []engine.ToolResultContentBlock{{Text: "package beta"}},
+				}},
+			}},
+			{Role: engine.RoleUser, Blocks: []engine.Block{{Text: &engine.TextBlock{Text: "thanks"}}}},
 		},
 	}
 
@@ -388,9 +458,9 @@ func TestParallelToolResultsCoalesce(t *testing.T) {
 func TestToolUseAlwaysHasInput(t *testing.T) {
 	adapter := &Adapter{}
 
-	cases := map[string]map[string]any{
-		"nil args":   nil,
-		"empty args": {},
+	cases := map[string]string{
+		"nil args":   "",
+		"empty args": "{}",
 	}
 	for name, args := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -398,11 +468,13 @@ func TestToolUseAlwaysHasInput(t *testing.T) {
 				Model:     "claude-x",
 				MaxTokens: intPtr(64),
 				Messages: []engine.Message{
-					{Role: engine.RoleUser, Content: "list files"},
-					{Role: engine.RoleAssistant, ToolCalls: []engine.ToolCall{
-						{ID: "toolu_1", Name: "list_files", Arguments: args},
-					}},
-					{Role: engine.RoleTool, ToolCallID: "toolu_1", Content: "ok"},
+					{Role: engine.RoleUser, Blocks: []engine.Block{{Text: &engine.TextBlock{Text: "list files"}}}},
+					{Role: engine.RoleAssistant, Blocks: []engine.Block{{ToolUse: &engine.ToolUseBlock{
+						ID: "toolu_1", Name: "list_files", Arguments: mustReqOrEmpty(t, args),
+					}}}},
+					{Role: engine.RoleUser, Blocks: []engine.Block{{ToolResult: &engine.ToolResultBlock{
+						ToolCallID: "toolu_1", Content: []engine.ToolResultContentBlock{{Text: "ok"}},
+					}}}},
 				},
 			}
 			out, err := adapter.Marshal(chat)
@@ -550,11 +622,11 @@ func TestSystemStringForm(t *testing.T) {
 	if len(chat.Messages) != 2 || chat.Messages[0].Role != engine.RoleSystem {
 		t.Fatalf("messages = %+v, want system + user", chat.Messages)
 	}
-	if chat.Messages[0].Content != "You are a coding agent. Read files and report their contents." {
-		t.Fatalf("system content = %q", chat.Messages[0].Content)
+	if textOf(chat.Messages[0]) != "You are a coding agent. Read files and report their contents." {
+		t.Fatalf("system content = %q", textOf(chat.Messages[0]))
 	}
-	if chat.Messages[0].CacheControl != nil {
-		t.Fatalf("string system must not carry a cache marker: %+v", chat.Messages[0].CacheControl)
+	if hasCacheBlock(chat.Messages[0]) {
+		t.Fatalf("string system must not carry a cache marker")
 	}
 }
 
@@ -587,7 +659,7 @@ func TestSystemStringArrayEquivalence(t *testing.T) {
 	}
 	for i := range fromString.Messages {
 		if fromString.Messages[i].Role != fromArray.Messages[i].Role ||
-			fromString.Messages[i].Content != fromArray.Messages[i].Content {
+			textOf(fromString.Messages[i]) != textOf(fromArray.Messages[i]) {
 			t.Fatalf("message %d differs: %+v vs %+v", i, fromString.Messages[i], fromArray.Messages[i])
 		}
 	}
@@ -664,7 +736,7 @@ func TestSystemCacheMarkerPreserved(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if chat.Messages[0].Role != engine.RoleSystem || chat.Messages[0].CacheControl == nil {
+	if chat.Messages[0].Role != engine.RoleSystem || !hasCacheBlock(chat.Messages[0]) {
 		t.Fatalf("cache marker lost: %+v", chat.Messages[0])
 	}
 	out, err := adapter.Marshal(chat)
@@ -722,5 +794,40 @@ func TestSystemArrayTextBlockParam(t *testing.T) {
 				t.Fatalf("error embeds raw body data: %v", err)
 			}
 		})
+	}
+}
+
+// TestUnknownProjectionInvariant: the payload of an Unknown block must never
+// duplicate the canonical discriminant or the cache member, and the kind must
+// not name a modeled arm — both are rejected before marshal (the executable
+// projection obligation).
+func TestUnknownProjectionInvariant(t *testing.T) {
+	adapter := &Adapter{}
+	chat := &engine.ChatRequest{
+		Model:     "claude-x",
+		MaxTokens: intPtr(64),
+		Messages: []engine.Message{{
+			Role: engine.RoleUser,
+			Blocks: []engine.Block{
+				{Unknown: &engine.UnknownBlock{Kind: "image", Payload: mustReqArgs(t, `{"source":{"data":"abc"}}`)}},
+			},
+		}},
+	}
+	if _, err := adapter.Marshal(chat); err != nil {
+		t.Fatalf("a clean unknown payload must marshal: %v", err)
+	}
+
+	chat.Messages[0].Blocks[0].Unknown.Payload = mustReqArgs(t, `{"type":"image","source":{"data":"abc"}}`)
+	if _, err := adapter.Marshal(chat); err == nil {
+		t.Fatal("a payload duplicating the discriminant must be rejected")
+	}
+	chat.Messages[0].Blocks[0].Unknown.Payload = mustReqArgs(t, `{"source":{"data":"abc"},"cache_control":{"type":"ephemeral"}}`)
+	if _, err := adapter.Marshal(chat); err == nil {
+		t.Fatal("a payload smuggling the cache member must be rejected")
+	}
+	chat.Messages[0].Blocks[0].Unknown.Payload = mustReqArgs(t, `{"source":{"data":"abc"}}`)
+	chat.Messages[0].Blocks[0].Unknown.Kind = "text"
+	if _, err := adapter.Marshal(chat); err == nil {
+		t.Fatal("an unknown kind naming a modeled arm must be rejected")
 	}
 }

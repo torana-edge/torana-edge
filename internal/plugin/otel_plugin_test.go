@@ -26,7 +26,7 @@ func TestMetricFixtureEmitMetricABI(t *testing.T) {
 	chat := &engine.ChatRequest{
 		Model: "gpt-x",
 		Messages: []engine.Message{
-			{Role: engine.RoleUser, Content: "hello"},
+			{Role: engine.RoleUser, Blocks: []engine.Block{{Text: &engine.TextBlock{Text: "hello"}}}},
 		},
 		Tools: []engine.ToolDef{{Name: "read"}},
 	}

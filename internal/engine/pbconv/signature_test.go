@@ -38,18 +38,48 @@ func TestSignatureDeltaRoundTrip(t *testing.T) {
 	}
 }
 
+func textSigOf(m engine.Message) string {
+	for _, b := range m.Blocks {
+		if b.Text != nil {
+			return b.Text.Signature
+		}
+	}
+	return ""
+}
+
+func trailOf(m engine.Message) string {
+	for _, b := range m.Blocks {
+		if b.TrailingSignature != nil {
+			return b.TrailingSignature.Signature
+		}
+	}
+	return ""
+}
+
+func mustReq(t *testing.T, raw string) engine.RequiredJSONObject {
+	t.Helper()
+	r, err := engine.ParseRequiredJSONObject([]byte(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return r
+}
+
 func TestToolCallSignatureRoundTrip(t *testing.T) {
 	chat := &engine.ChatRequest{Messages: []engine.Message{
-		{Role: engine.RoleAssistant, ToolCalls: []engine.ToolCall{
-			{ID: "a1", Name: "f", Arguments: map[string]any{"x": 1.0}, Signature: "REQ_SIG"},
-		}},
+		{Role: engine.RoleAssistant, Blocks: []engine.Block{{ToolUse: &engine.ToolUseBlock{
+			ID: "a1", Name: "f", Arguments: mustReq(t, `{"x": 1.0}`), Signature: "REQ_SIG",
+		}}}},
 	}}
-	got := FromPBChatRequest(ToPBChatRequest(chat))
-	if len(got.Messages) != 1 || len(got.Messages[0].ToolCalls) != 1 {
+	got, err := FromPBChatRequest(toPBChatRequest(chat))
+	if err != nil {
+		t.Fatalf("round trip: %v", err)
+	}
+	if len(got.Messages) != 1 || len(got.Messages[0].Blocks) != 1 {
 		t.Fatal("tool call lost")
 	}
-	if got.Messages[0].ToolCalls[0].Signature != "REQ_SIG" {
-		t.Errorf("request-side tool call signature lost: %q", got.Messages[0].ToolCalls[0].Signature)
+	if got.Messages[0].Blocks[0].ToolUse.Signature != "REQ_SIG" {
+		t.Errorf("request-side tool call signature lost: %q", got.Messages[0].Blocks[0].ToolUse.Signature)
 	}
 }
 
@@ -60,14 +90,17 @@ func TestToolCallSignatureRoundTrip(t *testing.T) {
 // history loses the content binding on the next turn.
 func TestContentSignatureRoundTrip(t *testing.T) {
 	chat := &engine.ChatRequest{Messages: []engine.Message{
-		{Role: engine.RoleAssistant, Content: "answer", ContentSignature: "CONTENT_SIG"},
+		{Role: engine.RoleAssistant, Blocks: []engine.Block{{Text: &engine.TextBlock{Text: "answer", Signature: "CONTENT_SIG"}}}},
 	}}
-	got := FromPBChatRequest(ToPBChatRequest(chat))
+	got, err := FromPBChatRequest(toPBChatRequest(chat))
+	if err != nil {
+		t.Fatalf("round trip: %v", err)
+	}
 	if len(got.Messages) != 1 {
 		t.Fatal("message lost")
 	}
-	if got.Messages[0].ContentSignature != "CONTENT_SIG" {
-		t.Errorf("request-side content signature lost: %q", got.Messages[0].ContentSignature)
+	if textSigOf(got.Messages[0]) != "CONTENT_SIG" {
+		t.Errorf("request-side content signature lost: %q", textSigOf(got.Messages[0]))
 	}
 }
 
@@ -78,13 +111,19 @@ func TestContentSignatureRoundTrip(t *testing.T) {
 // history loses the binding on the next turn.
 func TestTrailingSignatureRoundTrip(t *testing.T) {
 	chat := &engine.ChatRequest{Messages: []engine.Message{
-		{Role: engine.RoleAssistant, Content: "answer", TrailingSignature: "TRAIL_SIG"},
+		{Role: engine.RoleAssistant, Blocks: []engine.Block{
+			{Text: &engine.TextBlock{Text: "answer"}},
+			{TrailingSignature: &engine.TrailingSignatureBlock{Signature: "TRAIL_SIG"}},
+		}},
 	}}
-	got := FromPBChatRequest(ToPBChatRequest(chat))
+	got, err := FromPBChatRequest(toPBChatRequest(chat))
+	if err != nil {
+		t.Fatalf("round trip: %v", err)
+	}
 	if len(got.Messages) != 1 {
 		t.Fatal("message lost")
 	}
-	if got.Messages[0].TrailingSignature != "TRAIL_SIG" {
-		t.Errorf("request-side trailing signature lost: %q", got.Messages[0].TrailingSignature)
+	if trailOf(got.Messages[0]) != "TRAIL_SIG" {
+		t.Errorf("request-side trailing signature lost: %q", trailOf(got.Messages[0]))
 	}
 }

@@ -38,7 +38,7 @@ import (
 	"github.com/torana-edge/torana-edge/internal/engine"
 	"github.com/torana-edge/torana-edge/internal/engine/pbconv"
 	"github.com/torana-edge/torana-edge/internal/format"
-	"github.com/torana-edge/torana-edge/internal/format/jsontext"
+	"github.com/torana-edge/torana-edge/internal/format/gemini"
 	"github.com/torana-edge/torana-edge/internal/metrics"
 	"github.com/torana-edge/torana-edge/internal/mitm"
 	"github.com/torana-edge/torana-edge/internal/plugin"
@@ -47,6 +47,7 @@ import (
 	"github.com/torana-edge/torana-edge/internal/secret"
 	"github.com/torana-edge/torana-edge/internal/wasm"
 	pb "github.com/torana-edge/torana-plugin-sdk/pb/v2"
+	pbjsontext "github.com/torana-edge/torana-plugin-sdk/pb/v2/jsontext"
 )
 
 const maxBodySize = 10 * 1024 * 1024 // 10 MB
@@ -167,24 +168,31 @@ type Server struct {
 type routeContextKey struct{}
 
 func isOpenAIResponsesRequest(chat *engine.ChatRequest) bool {
-	if chat == nil || chat.ProviderExtensions == nil {
-		return false
-	}
-	variant, _ := chat.ProviderExtensions["_openai_variant"].(string)
-	return variant == "responses"
+	// The variant is a typed host-only topology fact: plugins can neither
+	// forge nor lose it (restored at the pipeline boundary).
+	return chat != nil && chat.OpenAIVariant == engine.OpenAIResponses
 }
 
 func applyOpenAIResponsesCompaction(chat *engine.ChatRequest, p provider.Provider) {
 	if !isOpenAIResponsesRequest(chat) || p.ResponsesCompaction == nil {
 		return
 	}
-	if _, supplied := chat.ProviderExtensions["context_management"]; supplied {
-		return
+	if !chat.ProviderExtensions.IsAbsent() {
+		if m, _, err := chat.ProviderExtensions.DecodeObject(); err == nil {
+			if _, supplied := m["context_management"]; supplied {
+				return
+			}
+		}
 	}
-	chat.ProviderExtensions["context_management"] = []any{map[string]any{
+	cm, _ := json.Marshal([]any{map[string]any{
 		"type":              "compaction",
 		"compact_threshold": p.ResponsesCompaction.CompactThreshold,
-	}}
+	}})
+	upd, err := chat.ProviderExtensions.SetMember("context_management", cm)
+	if err != nil {
+		return
+	}
+	chat.ProviderExtensions = upd
 }
 
 type RouteContext struct {
@@ -836,7 +844,7 @@ func New(cfg Config) (*Server, error) {
 			// sees the body. It is deliberately lenient beyond that (number
 			// tokens, unknown members): it can only reject what the adapter
 			// would also reject, never accept a document the adapter refuses.
-			if err := jsontext.Validate(body); err != nil {
+			if err := pbjsontext.Validate(body); err != nil {
 				rejectMalformed()
 				return
 			}
@@ -845,9 +853,19 @@ func New(cfg Config) (*Server, error) {
 				rejectMalformed()
 				return
 			}
+			// The accepted-input closure, at the transport: an engine state
+			// outside the SDK replacement domain (zero/multi-arm blocks,
+			// nested conflicts, non-finite floats, out-of-range max tokens)
+			// is a host-local failure — value-free 400, zero upstream, with
+			// or without plugins. The adapter/validator error is never
+			// surfaced (raw body fragments).
+			if _, cerr := pbconv.ToPBChatRequestChecked(chat); cerr != nil {
+				rejectMalformed()
+				return
+			}
 
-			if chat.ToranaMeta == nil {
-				chat.ToranaMeta = make(map[string]any)
+			if chat.ToranaMeta.IsAbsent() {
+				chat.ToranaMeta, _ = engine.ParseOptionalJSONObject([]byte(`{}`))
 			}
 			// Economic-gate host calls run inside request hooks, so make the
 			// initially routed provider/model available before the pipeline.
@@ -871,12 +889,18 @@ func New(cfg Config) (*Server, error) {
 			// up the economics of what it is about to do. ToranaMeta never
 			// reaches the wire and is excluded from the determinism check, so
 			// this is safe to vary per request.
-			chat.ToranaMeta["_provider"] = provName
-			chat.ToranaMeta["_conversation_id"] = rs.ConversationID
+			if v, err := json.Marshal(provName); err == nil {
+				chat.ToranaMeta, _ = chat.ToranaMeta.SetMember("_provider", v)
+			}
+			if v, err := json.Marshal(rs.ConversationID); err == nil {
+				chat.ToranaMeta, _ = chat.ToranaMeta.SetMember("_conversation_id", v)
+			}
 			// The path too: Torana forwards whatever the caller sent rather
 			// than synthesizing one, so a plugin replaying this conversation
 			// has no other way to know where it goes.
-			chat.ToranaMeta["_path"] = strippedPath
+			if v, err := json.Marshal(strippedPath); err == nil {
+				chat.ToranaMeta, _ = chat.ToranaMeta.SetMember("_path", v)
+			}
 
 			// --- WASM plugin pipeline --------------------------------------
 
@@ -887,10 +911,16 @@ func New(cfg Config) (*Server, error) {
 				// chained (each sees its predecessor's output); this host call
 				// is the only way to see what the caller actually sent.
 				if pl.HasGrant("env.original_request") {
-					if b, err := proto.Marshal(pbconv.ToPBChatRequest(chat)); err == nil {
-						rsOrig := reqStateFrom(req.Context())
-						rsOrig.OriginalReq = b
-						rsOrig.OriginalReqSet = true
+					// The checked projection only: the snapshot is taken
+					// after the entry validation, so a failure here is
+					// unreachable in practice; skipping keeps the snapshot
+					// from ever being a first-arm-wins path.
+					if pbReq, cerr := pbconv.ToPBChatRequestChecked(chat); cerr == nil {
+						if b, err := proto.Marshal(pbReq); err == nil {
+							rsOrig := reqStateFrom(req.Context())
+							rsOrig.OriginalReq = b
+							rsOrig.OriginalReqSet = true
+						}
 					}
 				}
 
@@ -935,9 +965,7 @@ func New(cfg Config) (*Server, error) {
 				// Defense in depth: never let credentials linger in meta
 				// past the request hook (format adapters don't serialize
 				// ToranaMeta, but response hooks receive it).
-				if chat.ToranaMeta != nil {
-					delete(chat.ToranaMeta, "_request_headers")
-				}
+				chat.ToranaMeta, _ = chat.ToranaMeta.DeleteMember("_request_headers")
 
 				// Verdicts are recorded by attributed, permission-checked host
 				// calls now. The grant was verified per plugin at the call
@@ -1044,11 +1072,18 @@ func New(cfg Config) (*Server, error) {
 			// (see the usage tap in ModifyResponse) — unless the client asked
 			// for it itself, in which case nothing is injected or suppressed.
 			if fmt.Name == "openai" && chat.Stream && !isOpenAIResponsesRequest(chat) {
-				if _, ok := chat.ProviderExtensions["stream_options"]; !ok {
-					if chat.ProviderExtensions == nil {
-						chat.ProviderExtensions = map[string]any{}
+				has := false
+				if !chat.ProviderExtensions.IsAbsent() {
+					if m, _, err := chat.ProviderExtensions.DecodeObject(); err == nil {
+						_, has = m["stream_options"]
 					}
-					chat.ProviderExtensions["stream_options"] = map[string]any{"include_usage": true}
+				}
+				if !has {
+					so, _ := json.Marshal(map[string]any{"include_usage": true})
+					if chat.ProviderExtensions.IsAbsent() {
+						chat.ProviderExtensions, _ = engine.ParseOptionalJSONObject([]byte(`{}`))
+					}
+					chat.ProviderExtensions, _ = chat.ProviderExtensions.SetMember("stream_options", so)
 					reqStateFrom(req.Context()).UsageInjected = true
 				}
 			}
@@ -1057,7 +1092,19 @@ func New(cfg Config) (*Server, error) {
 			// after content routing may have changed the model, and after every
 			// plugin has had its say. Computing it earlier would key the entry
 			// on a request that was never sent.
-			rs.CachePrefixKey = engine.CachePrefixKey(chat)
+			// The cache key consumes an ALREADY-VALIDATED PB: the checked
+			// conversion is the owning gate (the transport validated this
+			// request at entry and every replacement passed
+			// ValidateReplacement), and the key operation re-runs the
+			// SDK's full-domain validator on the PB itself — the fail-safe
+			// "" is the only outcome for an out-of-domain request.
+			if pbReq, cerr := pbconv.ToPBChatRequestChecked(chat); cerr == nil {
+				rs.CachePrefixKey = engine.CachePrefixKeyTopology(pbReq, engine.TopologyFacts{
+					CodeAssist:           chat.CodeAssist,
+					OpenAIVariant:        chat.OpenAIVariant,
+					ResponsesInputLayout: chat.ResponsesInputLayout,
+				})
+			}
 			rs.Path = rc.StrippedPath
 
 			newBody, err := fmt.Request.Marshal(chat)
@@ -2859,6 +2906,11 @@ func (s *Server) newRuntime() *wasm.Runtime {
 // s.sharedCache) and returns the displaced pipeline, undrained. Caller holds rebuildMu.
 func (s *Server) rebuildPipelineLocked(pcfg provider.PluginsConfig) (*plugin.PluginPipeline, error) {
 	rt := s.newRuntime()
+	// Provider-specific candidate validation, dispatched on the ACCEPTED
+	// host topology (never pipeline-global format policy): a Code Assist
+	// replacement envelope smuggling canonical members is plugin-output
+	// invalidity — pass rolls back to the accepted input, block produces
+	// the plugin refusal. Construction-bound (immutable, race-free).
 	pp, err := plugin.NewPipeline(rt, plugin.PluginConfig{
 		Dir:             pcfg.Dir,
 		Order:           pcfg.Order,
@@ -2867,6 +2919,12 @@ func (s *Server) rebuildPipelineLocked(pcfg provider.PluginsConfig) (*plugin.Plu
 		AllowUnapproved: pcfg.AllowUnapproved,
 		Strict:          true,
 		HostVersion:     s.config.HostVersion,
+		CandidateValidator: func(topo engine.TopologyFacts, current, replacement *pb.ChatRequest) error {
+			if topo.CodeAssist {
+				return gemini.VerifyCodeAssistEnvelopePB(replacement.ProviderExtensionsJson)
+			}
+			return nil
+		},
 	})
 	if err != nil {
 		rt.Close()

@@ -13,6 +13,16 @@ import (
 // TestIntentRawABI drives the intent plugin through the raw
 // CallRequest ABI (alloc → write → hook → read result) with a real protobuf
 // payload, asserting the "i" intent field lands in the returned tool schema.
+func textOfPB(m *pb.Message) string {
+	var out string
+	for _, b := range m.Blocks {
+		if t := b.GetText(); t != nil {
+			out += t.Text
+		}
+	}
+	return out
+}
+
 func TestIntentRawABI(t *testing.T) {
 	path := fixturesDir + "/test-mutator/plugin.wasm"
 	requireWASM(t, path)
@@ -30,7 +40,7 @@ func TestIntentRawABI(t *testing.T) {
 	p.SetGrants([]string{"env.log"})
 
 	req := &pb.ChatRequest{
-		Messages: []*pb.Message{{Role: "user", Content: "hi"}},
+		Messages: []*pb.Message{{Role: "user", Blocks: []*pb.RequestBlock{{Kind: &pb.RequestBlock_Text{Text: &pb.RequestTextBlock{Text: "hi"}}}}}},
 		Tools: []*pb.ToolDef{{
 			Name:           "read",
 			ParametersJson: []byte(`{"type":"object","properties":{"path":{"type":"string"}}}`),
@@ -79,7 +89,7 @@ func TestIntentRawABI(t *testing.T) {
 	if got := out.Tools[0].Description; got != "described by test-mutator" {
 		t.Fatalf("tool definition did not survive the raw ABI round-trip: description = %q", got)
 	}
-	if len(out.Messages) != 1 || !strings.HasSuffix(out.Messages[0].Content, "[seen by test-mutator]") {
+	if len(out.Messages) != 1 || !strings.HasSuffix(textOfPB(out.Messages[0]), "[seen by test-mutator]") {
 		t.Fatalf("message did not survive the raw ABI round-trip: %+v", out.Messages)
 	}
 }

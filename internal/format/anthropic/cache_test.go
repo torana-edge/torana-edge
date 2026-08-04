@@ -44,10 +44,10 @@ func TestCacheControlRoundTrip(t *testing.T) {
 	}
 
 	// IR captured the markers.
-	if chat.Messages[0].Role != engine.RoleSystem || chat.Messages[0].CacheControl == nil {
+	if chat.Messages[0].Role != engine.RoleSystem || !hasCacheBlock(chat.Messages[0]) {
 		t.Errorf("system cache_control not captured: %+v", chat.Messages[0])
 	}
-	if chat.Tools[1].CacheControl == nil {
+	if chat.Tools[1].CacheControl.IsAbsent() {
 		t.Errorf("tool cache_control not captured: %+v", chat.Tools[1])
 	}
 

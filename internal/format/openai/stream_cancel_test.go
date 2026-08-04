@@ -10,9 +10,6 @@ import (
 	"github.com/torana-edge/torana-edge/internal/engine"
 )
 
-// A closed events channel and canceled context are both ready in production
-// when enforcement aborts a serializer. The channel branch must never win and
-// fabricate either OpenAI success marker.
 func TestSerializeCanceledClosedStreamDoesNotFinish(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
@@ -23,7 +20,7 @@ func TestSerializeCanceledClosedStreamDoesNotFinish(t *testing.T) {
 		{
 			"responses",
 			context.WithValue(context.Background(), engine.ChatRequestKey, &engine.ChatRequest{
-				ProviderExtensions: map[string]any{"_openai_variant": "responses"},
+				OpenAIVariant: engine.OpenAIResponses,
 			}),
 			[]string{"[DONE]", "response.completed"},
 		},

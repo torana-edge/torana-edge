@@ -8,11 +8,34 @@ import (
 	"testing"
 
 	"github.com/torana-edge/torana-edge/internal/engine"
+	"github.com/torana-edge/torana-edge/internal/engine/pbconv"
+	"google.golang.org/protobuf/proto"
 )
 
 // TestCodeAssistRoundTrip parses a real Antigravity CLI Code Assist request and
 // verifies the wrapper, tool IDs, thoughtSignatures, and untouched fields
 // (toolConfig, thinkingConfig, sessionId) survive Unmarshal→Marshal.
+func mustReqArgs(t *testing.T, raw string) engine.RequiredJSONObject {
+	t.Helper()
+	r, err := engine.ParseRequiredJSONObject([]byte(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return r
+}
+
+func mustExtCA(m map[string]any) engine.OptionalJSONObject {
+	b, err := json.Marshal(m)
+	if err != nil {
+		panic(err)
+	}
+	r, err := engine.ParseOptionalJSONObject(b)
+	if err != nil {
+		panic(err)
+	}
+	return r
+}
+
 func TestCodeAssistRoundTrip(t *testing.T) {
 	raw, err := os.ReadFile("testdata/codeassist-request.json")
 	if err != nil {
@@ -24,26 +47,29 @@ func TestCodeAssistRoundTrip(t *testing.T) {
 		t.Fatalf("Unmarshal: %v", err)
 	}
 
-	if ca, _ := chat.ProviderExtensions[extCodeAssist].(bool); !ca {
-		t.Fatal("expected Code Assist marker to be set")
+	if !chat.CodeAssist {
+		t.Fatal("expected the typed Code Assist variant to be set")
 	}
 	if chat.Model != "gemini-3.5-flash-extra-low" {
 		t.Errorf("model from wrapper not lifted: %q", chat.Model)
 	}
 
 	// Messages: system, user, assistant(tool call), tool(result), assistant(text).
-	var toolCall *engine.ToolCall
-	var toolResult *engine.Message
+	var toolCall *engine.ToolUseBlock
+	var toolResult *engine.ToolResultBlock
 	var textMsg *engine.Message
 	for i := range chat.Messages {
 		m := &chat.Messages[i]
-		if len(m.ToolCalls) > 0 {
-			toolCall = &m.ToolCalls[0]
+		for _, b := range m.Blocks {
+			if b.ToolUse != nil {
+				toolCall = b.ToolUse
+				break
+			}
 		}
-		if m.Role == engine.RoleTool {
-			toolResult = m
+		if rs := toolResults(*m); len(rs) > 0 {
+			toolResult = rs[0]
 		}
-		if m.Role == engine.RoleAssistant && m.Content != "" {
+		if m.Role == engine.RoleAssistant && textOf(*m) != "" {
 			textMsg = m
 		}
 	}
@@ -65,14 +91,22 @@ func TestCodeAssistRoundTrip(t *testing.T) {
 	if textMsg == nil {
 		t.Fatal("no assistant text message parsed")
 	}
-	if textMsg.Content != "The directory contains two files." {
-		t.Errorf("assistant text content = %q, want the fixture's text", textMsg.Content)
+	if textOf(*textMsg) != "The directory contains two files." {
+		t.Errorf("assistant text content = %q, want the fixture's text", textOf(*textMsg))
 	}
-	if textMsg.ContentSignature != "SIG_TEXT" {
-		t.Errorf("ContentSignature = %q, want SIG_TEXT (signature beside non-thought text)", textMsg.ContentSignature)
+	var sig string
+	for _, b := range textMsg.Blocks {
+		if b.Text != nil {
+			sig = b.Text.Signature
+		}
 	}
-	if textMsg.ThinkingSignature != "" {
-		t.Errorf("ThinkingSignature = %q, want empty — text-part signature must not use the thinking slot", textMsg.ThinkingSignature)
+	if sig != "SIG_TEXT" {
+		t.Errorf("text signature = %q, want SIG_TEXT (signature beside non-thought text)", sig)
+	}
+	for _, b := range textMsg.Blocks {
+		if b.Thinking != nil && b.Thinking.Signature != "" {
+			t.Errorf("thinking signature = %q, want empty — text-part signature must not use the thinking slot", b.Thinking.Signature)
+		}
 	}
 
 	out, err := a.Marshal(chat)
@@ -239,10 +273,15 @@ func TestCodeAssistStreamText(t *testing.T) {
 	}
 }
 
-// TestCodeAssistToolResultUnwrapsForCompaction verifies that a Code Assist
-// {"output": "<multiline text>"} tool result is stored as raw text (real
-// newlines) so line-based compactor plugins can split it, and is re-wrapped as
-// {"output": …} on Marshal.
+// TestCodeAssistToolResultUnwrapsForCompaction verifies the REV 4 §5
+// SINGLE-AUTHORITY model on the Code Assist shape: an exact
+// {"output": "<multiline>"} response is stored as the RAW response object
+// TEXT (the JSON-encoded form, backslash-n escapes intact) — the
+// compactor's length/economic gates use the raw JSON baseline (the
+// documented size delta vs the old unwrap semantic), and a compactor
+// rewrite produces NON-OBJECT text that Marshal re-wraps as
+// {"output": …} — a rewrite therefore updates the wire; no stale raw copy
+// can win because the text IS the raw.
 func TestCodeAssistToolResultUnwrapsForCompaction(t *testing.T) {
 	body := `{"model":"m","request":{"contents":[
 		{"role":"model","parts":[{"functionResponse":{"id":"c1","name":"view_file","response":{"output":"line1\nline2\nline3"}}}]}
@@ -252,24 +291,27 @@ func TestCodeAssistToolResultUnwrapsForCompaction(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var tr *engine.Message
+	var tr *engine.ToolResultBlock
 	for i := range chat.Messages {
-		if chat.Messages[i].Role == engine.RoleTool {
-			tr = &chat.Messages[i]
+		if rs := toolResults(chat.Messages[i]); len(rs) > 0 {
+			tr = rs[0]
 		}
 	}
 	if tr == nil {
 		t.Fatal("no tool result")
 	}
-	if tr.Content != "line1\nline2\nline3" {
-		t.Errorf("tool result not unwrapped to raw text: %q", tr.Content)
+	var text string
+	for _, c := range tr.Content {
+		text += c.Text
 	}
-	if strings.Count(tr.Content, "\n") != 2 {
-		t.Errorf("newlines not preserved for line-splitting: %q", tr.Content)
+	// The raw object text is the SINGLE authority (verbatim, lexeme-exact;
+	// JSON-encoded newlines, NOT decoded).
+	if text != "{\"output\":\"line1\\nline2\\nline3\"}" {
+		t.Errorf("tool result not stored as the raw response object text: %q", text)
 	}
 
-	// Simulate a compactor rewriting the content, then re-marshal.
-	tr.Content = "line2"
+	// A compactor rewrite (non-object text) re-wraps on Marshal.
+	tr.Content = []engine.ToolResultContentBlock{{Text: "line2"}}
 	out, err := a.Marshal(chat)
 	if err != nil {
 		t.Fatal(err)
@@ -289,16 +331,13 @@ func TestCodeAssistToolResultUnwrapsForCompaction(t *testing.T) {
 // Splitting them makes the server 400 with "missing thought_signature".
 func TestCodeAssistParallelCallsShareOneBlock(t *testing.T) {
 	chat := &engine.ChatRequest{
-		ProviderExtensions: map[string]any{
-			extCodeAssist:   true,
-			extWrapper:      map[string]any{"model": "gemini-3.5-flash"},
-			extRequestExtra: map[string]any{},
-		},
+		CodeAssist:         true,
+		ProviderExtensions: mustExtCA(map[string]any{"request": map[string]any{}}),
 		Messages: []engine.Message{
-			{Role: engine.RoleUser, Content: "do two things"},
-			{Role: engine.RoleAssistant, ToolCalls: []engine.ToolCall{
-				{ID: "a1", Name: "list_dir", Arguments: map[string]any{"p": "/x"}, Signature: "SIG_FIRST"},
-				{ID: "a2", Name: "read_file", Arguments: map[string]any{"f": "y"}}, // no signature
+			{Role: engine.RoleUser, Blocks: []engine.Block{{Text: &engine.TextBlock{Text: "do two things"}}}},
+			{Role: engine.RoleAssistant, Blocks: []engine.Block{
+				{ToolUse: &engine.ToolUseBlock{ID: "a1", Name: "list_dir", Arguments: mustReqArgs(t, `{"p": "/x"}`), Signature: "SIG_FIRST"}},
+				{ToolUse: &engine.ToolUseBlock{ID: "a2", Name: "read_file", Arguments: mustReqArgs(t, `{"f": "y"}`)}}, // no signature
 			}},
 		},
 	}
@@ -467,14 +506,22 @@ func TestCodeAssistTrailingSignatureRoundTrip(t *testing.T) {
 	if msg.Role != engine.RoleAssistant {
 		t.Errorf("role = %q, want assistant", msg.Role)
 	}
-	if msg.Content != "answer" {
-		t.Errorf("content = %q, want the preceding text", msg.Content)
+	if textOf(msg) != "answer" {
+		t.Errorf("content = %q, want the preceding text", textOf(msg))
 	}
-	if msg.TrailingSignature != "SIG" {
-		t.Errorf("TrailingSignature = %q, want SIG", msg.TrailingSignature)
+	var trail string
+	for _, b := range msg.Blocks {
+		if b.TrailingSignature != nil {
+			trail = b.TrailingSignature.Signature
+		}
 	}
-	if msg.ThinkingSignature != "" {
-		t.Errorf("ThinkingSignature = %q, want empty — trailing signature must not merge into the current block", msg.ThinkingSignature)
+	if trail != "SIG" {
+		t.Errorf("TrailingSignature = %q, want SIG", trail)
+	}
+	for _, b := range msg.Blocks {
+		if b.Thinking != nil && b.Thinking.Signature != "" {
+			t.Errorf("thinking signature = %q, want empty — trailing signature must not merge into the current block", b.Thinking.Signature)
+		}
 	}
 
 	out, err := (&Adapter{}).Marshal(chat)
@@ -515,17 +562,33 @@ func TestCodeAssistTrailingSignatureRoundTripWithThinking(t *testing.T) {
 		t.Fatalf("messages = %d, want 1", len(chat.Messages))
 	}
 	msg := chat.Messages[0]
-	if msg.Thinking != "think" {
-		t.Errorf("Thinking = %q, want the thought part's text", msg.Thinking)
+	var thinking, thinkSig, text string
+	for _, b := range msg.Blocks {
+		switch {
+		case b.Thinking != nil:
+			thinking = b.Thinking.Text
+			thinkSig = b.Thinking.Signature
+		case b.Text != nil:
+			text = b.Text.Text
+		}
 	}
-	if msg.ThinkingSignature != "SIG_A" {
-		t.Errorf("ThinkingSignature = %q, want SIG_A (current block)", msg.ThinkingSignature)
+	if thinking != "think" {
+		t.Errorf("thinking = %q, want the thought part's text", thinking)
 	}
-	if msg.Content != "answer" {
-		t.Errorf("content = %q, want ONLY the text part — thinking must not leak into Content", msg.Content)
+	if thinkSig != "SIG_A" {
+		t.Errorf("ThinkingSignature = %q, want SIG_A (current block)", thinkSig)
 	}
-	if msg.TrailingSignature != "SIG_B" {
-		t.Errorf("TrailingSignature = %q, want SIG_B (trailing standalone)", msg.TrailingSignature)
+	if text != "answer" {
+		t.Errorf("content = %q, want ONLY the text part — thinking must not leak into Content", text)
+	}
+	var trail string
+	for _, b := range msg.Blocks {
+		if b.TrailingSignature != nil {
+			trail = b.TrailingSignature.Signature
+		}
+	}
+	if trail != "SIG_B" {
+		t.Errorf("TrailingSignature = %q, want SIG_B (trailing standalone)", trail)
 	}
 
 	out, err := (&Adapter{}).Marshal(chat)
@@ -562,9 +625,8 @@ func TestCodeAssistTrailingSignatureRoundTripWithThinking(t *testing.T) {
 		t.Fatalf("re-unmarshal messages = %d, want 1", len(again.Messages))
 	}
 	re := again.Messages[0]
-	if re.Content != msg.Content || re.Thinking != msg.Thinking || re.ThinkingSignature != msg.ThinkingSignature || re.TrailingSignature != msg.TrailingSignature {
-		t.Errorf("round trip not stable: got {%q, %q, %q, %q}, want {%q, %q, %q, %q}",
-			re.Content, re.Thinking, re.ThinkingSignature, re.TrailingSignature, msg.Content, msg.Thinking, msg.ThinkingSignature, msg.TrailingSignature)
+	if textOf(re) != textOf(msg) || reBlocks(re) != reBlocks(msg) {
+		t.Errorf("round trip not stable: %s vs %s", reBlocks(re), reBlocks(msg))
 	}
 }
 
@@ -572,6 +634,25 @@ func TestCodeAssistTrailingSignatureRoundTripWithThinking(t *testing.T) {
 // part with NO preceding text/thinking in the same content is malformed — it
 // would bind nothing (the scope covers only preceding closed content) — so
 // Unmarshal rejects it instead of guessing at a binding.
+func reBlocks(m engine.Message) string {
+	var out []string
+	for _, b := range m.Blocks {
+		switch {
+		case b.Text != nil:
+			out = append(out, "text:"+b.Text.Text+":"+b.Text.Signature)
+		case b.Thinking != nil:
+			out = append(out, "think:"+b.Thinking.Text+":"+b.Thinking.Signature)
+		case b.TrailingSignature != nil:
+			out = append(out, "trail:"+b.TrailingSignature.Signature)
+		case b.ToolUse != nil:
+			out = append(out, "call:"+b.ToolUse.ID)
+		case b.ToolResult != nil:
+			out = append(out, "result:"+b.ToolResult.ToolCallID)
+		}
+	}
+	return strings.Join(out, "|")
+}
+
 func TestCodeAssistTrailingSignatureRejectedLeadingStandalone(t *testing.T) {
 	body := `{"contents":[{"role":"model","parts":[
 		{"thoughtSignature":"SIG_LEAD","text":""},
@@ -650,12 +731,13 @@ func TestCodeAssistTrailingSignatureRejectedDuplicate(t *testing.T) {
 	}
 }
 
-// TestCodeAssistRejectedMultipleTextPartsWithSignature: two text parts plus
-// any signature in the content are unrepresentable — merging the parts into
-// one Content string would replay the signature over text the provider did
-// not sign (Google contract: a signature lives on its original Part). This
-// covers both a signature on one text part and a trailing standalone part.
-func TestCodeAssistRejectedMultipleTextPartsWithSignature(t *testing.T) {
+// TestCodeAssistMultipleTextPartsWithSignature: per-block signatures are
+// first-class in the ordered body — a signature lives on ITS text part, so
+// multiple text parts with a signature on one of them round-trip exactly
+// (the ordered ABI replaced the single flat Content slot these cases were
+// rejected under). A trailing standalone after several text parts binds the
+// whole preceding covered content.
+func TestCodeAssistMultipleTextPartsWithSignature(t *testing.T) {
 	for name, body := range map[string]string{
 		"sig on text part": `{"contents":[{"role":"model","parts":[
 			{"text":"a","thoughtSignature":"S"},
@@ -668,37 +750,55 @@ func TestCodeAssistRejectedMultipleTextPartsWithSignature(t *testing.T) {
 		]}]}`,
 	} {
 		t.Run(name, func(t *testing.T) {
-			_, err := (&Adapter{}).Unmarshal([]byte(body))
-			if err == nil {
-				t.Fatal("Unmarshal succeeded, want parse error")
+			chat, err := (&Adapter{}).Unmarshal([]byte(body))
+			if err != nil {
+				t.Fatalf("Unmarshal: %v", err)
 			}
-			if !strings.Contains(err.Error(), "gemini: multiple text parts with a signature are not representable") {
-				t.Errorf("error = %q, want the multi-text-with-signature condition named", err.Error())
+			out, err := (&Adapter{}).Marshal(chat)
+			if err != nil {
+				t.Fatalf("Marshal: %v", err)
+			}
+			again, err := (&Adapter{}).Unmarshal(out)
+			if err != nil {
+				t.Fatalf("re-Unmarshal: %v", err)
+			}
+			if len(again.Messages) != 1 || reBlocks(again.Messages[0]) != reBlocks(chat.Messages[0]) {
+				t.Fatalf("round trip not stable: %s", out)
 			}
 		})
 	}
 }
 
-// TestCodeAssistRejectedMultipleThinkingPartsWithSignature: two thinking parts
-// plus any signature in the content are unrepresentable — the same class of
-// error as the multi-text case, for the merged Thinking string.
-func TestCodeAssistRejectedMultipleThinkingPartsWithSignature(t *testing.T) {
+// TestCodeAssistMultipleThinkingPartsWithSignature: per-block signatures make
+// two signed thinking parts representable — each Thinking block keeps its own
+// current-block token and the parts round-trip in order.
+func TestCodeAssistMultipleThinkingPartsWithSignature(t *testing.T) {
 	body := `{"contents":[{"role":"model","parts":[
 		{"thought":true,"text":"a","thoughtSignature":"S"},
 		{"thought":true,"text":"b"}
 	]}]}`
-	_, err := (&Adapter{}).Unmarshal([]byte(body))
-	if err == nil {
-		t.Fatal("Unmarshal succeeded, want parse error")
+	chat, err := (&Adapter{}).Unmarshal([]byte(body))
+	if err != nil {
+		t.Fatalf("Unmarshal: %v", err)
 	}
-	if !strings.Contains(err.Error(), "gemini: multiple thinking parts with a signature are not representable") {
-		t.Errorf("error = %q, want the multi-thinking-with-signature condition named", err.Error())
+	out, err := (&Adapter{}).Marshal(chat)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	again, err := (&Adapter{}).Unmarshal(out)
+	if err != nil {
+		t.Fatalf("re-Unmarshal: %v", err)
+	}
+	if len(again.Messages) != 1 || reBlocks(again.Messages[0]) != reBlocks(chat.Messages[0]) {
+		t.Fatalf("round trip not stable: %s", out)
 	}
 }
 
-// TestCodeAssistUnsignedTextPartsMerge: multiple text parts with NO signature
-// anywhere still merge into Content — the existing unsigned-merge contract.
-func TestCodeAssistUnsignedTextPartsMerge(t *testing.T) {
+// TestCodeAssistUnsignedTextParts: multiple unsigned text parts stay
+// SEPARATE ordered blocks — the ordered body IS the wire order, and merging
+// would invent a part boundary the provider never sent. The marshal re-emits
+// one part per block, byte-stable.
+func TestCodeAssistUnsignedTextParts(t *testing.T) {
 	body := `{"contents":[{"role":"model","parts":[
 		{"text":"a"},
 		{"text":"b"}
@@ -707,11 +807,13 @@ func TestCodeAssistUnsignedTextPartsMerge(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Unmarshal: %v", err)
 	}
-	if len(chat.Messages) != 1 || chat.Messages[0].Content != "a\nb" {
-		t.Fatalf("unsigned text parts must merge into one Content: %+v", chat.Messages)
+	if len(chat.Messages) != 1 || len(chat.Messages[0].Blocks) != 2 {
+		t.Fatalf("unsigned text parts must keep their part boundaries: %+v", chat.Messages)
 	}
-	if chat.Messages[0].ThinkingSignature != "" || chat.Messages[0].TrailingSignature != "" {
-		t.Errorf("unsigned merge must not fabricate signatures: %+v", chat.Messages[0])
+	for _, b := range chat.Messages[0].Blocks {
+		if (b.Text != nil && b.Text.Signature != "") || b.TrailingSignature != nil {
+			t.Errorf("unsigned parts must not fabricate signatures: %+v", chat.Messages[0])
+		}
 	}
 
 	out, err := (&Adapter{}).Marshal(chat)
@@ -719,11 +821,13 @@ func TestCodeAssistUnsignedTextPartsMerge(t *testing.T) {
 		t.Fatalf("Marshal: %v", err)
 	}
 	parts := rawModelParts(t, out)
-	if len(parts) != 1 {
-		t.Fatalf("parts = %d, want the single merged text part", len(parts))
+	if len(parts) != 2 {
+		t.Fatalf("parts = %d, want the two original text parts", len(parts))
 	}
-	rawText(t, parts[0], "a\nb")
+	rawText(t, parts[0], "a")
+	rawText(t, parts[1], "b")
 	rawAbsent(t, parts[0], "thoughtSignature")
+	rawAbsent(t, parts[1], "thoughtSignature")
 }
 
 // TestCodeAssistRejectedMixedTextThinkingWithToolCall: a role:"model" content
@@ -761,6 +865,42 @@ func TestCodeAssistRejectedMixedTextThinkingWithToolCall(t *testing.T) {
 // the merged Content — NOT ThinkingSignature, whose SDK binding covers only
 // thinking/redacted_thinking blocks) and re-marshals to the exact same single
 // part with the signature beside the text.
+func textSigOf(m engine.Message) string {
+	for _, b := range m.Blocks {
+		if b.Text != nil {
+			return b.Text.Signature
+		}
+	}
+	return ""
+}
+
+func thinkOf(m engine.Message) string {
+	for _, b := range m.Blocks {
+		if b.Thinking != nil {
+			return b.Thinking.Text
+		}
+	}
+	return ""
+}
+
+func thinkSigOf(m engine.Message) string {
+	for _, b := range m.Blocks {
+		if b.Thinking != nil {
+			return b.Thinking.Signature
+		}
+	}
+	return ""
+}
+
+func trailOf(m engine.Message) string {
+	for _, b := range m.Blocks {
+		if b.TrailingSignature != nil {
+			return b.TrailingSignature.Signature
+		}
+	}
+	return ""
+}
+
 func TestCodeAssistContentSignatureRoundTrip(t *testing.T) {
 	body := `{"contents":[{"role":"model","parts":[
 		{"text":"answer","thoughtSignature":"SIG"}
@@ -773,17 +913,28 @@ func TestCodeAssistContentSignatureRoundTrip(t *testing.T) {
 		t.Fatalf("messages = %d, want 1", len(chat.Messages))
 	}
 	msg := chat.Messages[0]
-	if msg.Content != "answer" {
-		t.Errorf("Content = %q, want the text part's text", msg.Content)
+	if textOf(msg) != "answer" {
+		t.Errorf("Content = %q, want the text part's text", textOf(msg))
 	}
-	if msg.ContentSignature != "SIG" {
-		t.Errorf("ContentSignature = %q, want SIG (SameMessage scope over content)", msg.ContentSignature)
+	var textSig, thinkSig, trailSig string
+	for _, b := range msg.Blocks {
+		switch {
+		case b.Text != nil:
+			textSig = b.Text.Signature
+		case b.Thinking != nil:
+			thinkSig = b.Thinking.Signature
+		case b.TrailingSignature != nil:
+			trailSig = b.TrailingSignature.Signature
+		}
 	}
-	if msg.ThinkingSignature != "" {
-		t.Errorf("ThinkingSignature = %q, want empty — text-part signature must not use the thinking slot", msg.ThinkingSignature)
+	if textSig != "SIG" {
+		t.Errorf("ContentSignature = %q, want SIG (SameMessage scope over content)", textSig)
 	}
-	if msg.TrailingSignature != "" {
-		t.Errorf("TrailingSignature = %q, want empty — not a standalone part", msg.TrailingSignature)
+	if thinkSig != "" {
+		t.Errorf("ThinkingSignature = %q, want empty — text-part signature must not use the thinking slot", thinkSig)
+	}
+	if trailSig != "" {
+		t.Errorf("TrailingSignature = %q, want empty — not a standalone part", trailSig)
 	}
 
 	out, err := (&Adapter{}).Marshal(chat)
@@ -821,14 +972,26 @@ func TestCodeAssistContentSignatureCombinedShape(t *testing.T) {
 		t.Fatalf("messages = %d, want 1", len(chat.Messages))
 	}
 	msg := chat.Messages[0]
-	if msg.Thinking != "think" || msg.ThinkingSignature != "A" {
-		t.Errorf("Thinking/ThinkingSignature = {%q, %q}, want {think, A}", msg.Thinking, msg.ThinkingSignature)
+	var think, thinkSig, textSig, trailSig string
+	for _, b := range msg.Blocks {
+		switch {
+		case b.Thinking != nil:
+			think = b.Thinking.Text
+			thinkSig = b.Thinking.Signature
+		case b.Text != nil:
+			textSig = b.Text.Signature
+		case b.TrailingSignature != nil:
+			trailSig = b.TrailingSignature.Signature
+		}
 	}
-	if msg.Content != "answer" || msg.ContentSignature != "B" {
-		t.Errorf("Content/ContentSignature = {%q, %q}, want {answer, B}", msg.Content, msg.ContentSignature)
+	if think != "think" || thinkSig != "A" {
+		t.Errorf("Thinking/ThinkingSignature = {%q, %q}, want {think, A}", think, thinkSig)
 	}
-	if msg.TrailingSignature != "C" {
-		t.Errorf("TrailingSignature = %q, want C", msg.TrailingSignature)
+	if textOf(msg) != "answer" || textSig != "B" {
+		t.Errorf("Content/ContentSignature = {%q, %q}, want {answer, B}", textOf(msg), textSig)
+	}
+	if trailSig != "C" {
+		t.Errorf("TrailingSignature = %q, want C", trailSig)
 	}
 
 	out, err := (&Adapter{}).Marshal(chat)
@@ -867,10 +1030,8 @@ func TestCodeAssistContentSignatureCombinedShape(t *testing.T) {
 		t.Fatalf("re-unmarshal messages = %d, want 1", len(again.Messages))
 	}
 	re := again.Messages[0]
-	if re.Content != msg.Content || re.ContentSignature != msg.ContentSignature || re.Thinking != msg.Thinking || re.ThinkingSignature != msg.ThinkingSignature || re.TrailingSignature != msg.TrailingSignature {
-		t.Errorf("round trip not stable: got {%q,%q,%q,%q,%q}, want {%q,%q,%q,%q,%q}",
-			re.Content, re.ContentSignature, re.Thinking, re.ThinkingSignature, re.TrailingSignature,
-			msg.Content, msg.ContentSignature, msg.Thinking, msg.ThinkingSignature, msg.TrailingSignature)
+	if reBlocks(re) != reBlocks(msg) {
+		t.Errorf("round trip not stable: %s vs %s", reBlocks(re), reBlocks(msg))
 	}
 }
 
@@ -893,8 +1054,8 @@ func TestCodeAssistRejectedBareSignaturePart(t *testing.T) {
 			if err == nil {
 				t.Fatal("Unmarshal succeeded, want parse error")
 			}
-			if !strings.Contains(err.Error(), "gemini: standalone signature part must carry explicit empty text") {
-				t.Errorf("error = %q, want the explicit-empty-text condition named", err.Error())
+			if !strings.Contains(err.Error(), "arm members") && !strings.Contains(err.Error(), "explicit empty text") {
+				t.Errorf("error = %q, want the arm-grammar condition named", err.Error())
 			}
 		})
 	}
@@ -915,8 +1076,8 @@ func TestCodeAssistThinkingOnlyNoInventedTextPart(t *testing.T) {
 		t.Fatalf("messages = %d, want 1", len(chat.Messages))
 	}
 	msg := chat.Messages[0]
-	if msg.Thinking != "r" || msg.ThinkingSignature != "S" || msg.Content != "" || msg.ContentSignature != "" {
-		t.Errorf("got {%q,%q,%q,%q}, want {r,S,<empty>,<empty>}", msg.Thinking, msg.ThinkingSignature, msg.Content, msg.ContentSignature)
+	if thinkOf(msg) != "r" || thinkSigOf(msg) != "S" || textOf(msg) != "" || textSigOf(msg) != "" {
+		t.Errorf("got {%q,%q,%q,%q}, want {r,S,<empty>,<empty>}", thinkOf(msg), thinkSigOf(msg), textOf(msg), textSigOf(msg))
 	}
 
 	out, err := (&Adapter{}).Marshal(chat)
@@ -953,8 +1114,8 @@ func TestCodeAssistThinkingTrailingNoContent(t *testing.T) {
 		t.Fatalf("messages = %d, want 1", len(chat.Messages))
 	}
 	msg := chat.Messages[0]
-	if msg.Thinking != "r" || msg.ThinkingSignature != "" || msg.Content != "" || msg.TrailingSignature != "S" {
-		t.Errorf("got {%q,%q,%q,%q}, want {r,<empty>,<empty>,S}", msg.Thinking, msg.ThinkingSignature, msg.Content, msg.TrailingSignature)
+	if thinkOf(msg) != "r" || thinkSigOf(msg) != "" || textOf(msg) != "" || trailOf(msg) != "S" {
+		t.Errorf("got {%q,%q,%q,%q}, want {r,<empty>,<empty>,S}", thinkOf(msg), thinkSigOf(msg), textOf(msg), trailOf(msg))
 	}
 
 	out, err := (&Adapter{}).Marshal(chat)
@@ -1047,4 +1208,312 @@ func replay(events []engine.StreamEvent) <-chan engine.StreamEvent {
 	}
 	close(ch)
 	return ch
+}
+
+// TestCodeAssistOverlayCanonicalWins — the 4b overlay: canonical fields
+// control the emitted wire (outer model; inner generationConfig members,
+// safetySettings, systemInstruction/contents/tools) while unknown
+// wrapper/inner siblings pass through losslessly at their exact scopes.
+func TestCodeAssistOverlayCanonicalWins(t *testing.T) {
+	maxTok := 2048
+	temp := 0.7
+	topP := 0.9
+	safety, _ := engine.ParseOptionalJSONArray([]byte(`[{"category":"HARM_CATEGORY_HARASSMENT","threshold":"BLOCK_NONE"}]`))
+	chat := &engine.ChatRequest{
+		Model:       "gemini-3.5-flash-extra-low",
+		MaxTokens:   &maxTok,
+		Temperature: &temp,
+		TopP:        &topP,
+		CodeAssist:  true,
+		ProviderExtensions: mustExtCA(map[string]any{
+			"project": "my-project", // wrapper extra
+			"request": map[string]any{
+				"sessionId": "s-1", // inner extra
+				"generationConfig": map[string]any{
+					"candidateCount": 3, // unknown generation sibling (canonical members are stripped at parse)
+				},
+			},
+		}),
+		SafetySettings: safety,
+		Messages: []engine.Message{
+			{Role: engine.RoleUser, Blocks: []engine.Block{{Text: &engine.TextBlock{Text: "hi"}}}},
+		},
+	}
+	out, err := (&Adapter{}).Marshal(chat)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var top map[string]any
+	if err := json.Unmarshal(out, &top); err != nil {
+		t.Fatal(err)
+	}
+	// Canonical outer model wins.
+	if top["model"] != "gemini-3.5-flash-extra-low" {
+		t.Fatalf("canonical model lost: %v", top["model"])
+	}
+	// Wrapper extra survives at the top scope.
+	if top["project"] != "my-project" {
+		t.Fatalf("wrapper extra lost: %v", top["project"])
+	}
+	req := top["request"].(map[string]any)
+	if req["sessionId"] != "s-1" {
+		t.Fatalf("inner extra lost: %v", req["sessionId"])
+	}
+	gc := req["generationConfig"].(map[string]any)
+	if gc["maxOutputTokens"] != float64(2048) {
+		t.Fatalf("canonical maxOutputTokens not rebuilt: %v", gc["maxOutputTokens"])
+	}
+	if gc["temperature"] != 0.7 || gc["topP"] != 0.9 {
+		t.Fatalf("canonical generation members not rebuilt: %v", gc)
+	}
+	if gc["candidateCount"] != float64(3) {
+		t.Fatalf("unknown generation sibling lost: %v", gc["candidateCount"])
+	}
+	if len(gc) != 4 {
+		t.Fatalf("generationConfig = %v, want exactly the 3 canonical + 1 sibling", gc)
+	}
+	if _, ok := req["safetySettings"]; !ok {
+		t.Fatalf("canonical safetySettings not rebuilt: %v", req)
+	}
+}
+
+// TestCodeAssistEnvelopeSmugglingRefused — a replacement envelope that
+// smuggles canonical members through the extras path is REFUSED at
+// marshal (normal plugin failure mode), never silently ignored.
+func TestCodeAssistEnvelopeSmugglingRefused(t *testing.T) {
+	rows := map[string]map[string]any{
+		"outer model": {
+			"model":   "evil-model",
+			"request": map[string]any{},
+		},
+		"inner contents": {
+			"request": map[string]any{"contents": []any{}},
+		},
+		"inner tools": {
+			"request": map[string]any{"tools": []any{}},
+		},
+		"inner safetySettings": {
+			"request": map[string]any{"safetySettings": []any{}},
+		},
+		"inner systemInstruction": {
+			"request": map[string]any{"systemInstruction": map[string]any{}},
+		},
+		"generation canonical": {
+			"request": map[string]any{"generationConfig": map[string]any{"maxOutputTokens": 1}},
+		},
+	}
+	for name, env := range rows {
+		t.Run(name, func(t *testing.T) {
+			chat := &engine.ChatRequest{
+				Model:              "m",
+				CodeAssist:         true,
+				ProviderExtensions: mustExtCA(env),
+				Messages: []engine.Message{
+					{Role: engine.RoleUser, Blocks: []engine.Block{{Text: &engine.TextBlock{Text: "hi"}}}},
+				},
+			}
+			if _, err := (&Adapter{}).Marshal(chat); err == nil {
+				t.Fatalf("smuggled canonical member %q accepted", name)
+			}
+		})
+	}
+}
+
+// TestMarshalCodeAssistPure — marshal never mutates the input: the cache
+// key before and after is identical, repeated marshal is byte-identical,
+// and an ABSENT envelope marshals without materializing anything on the
+// chat. A PRESENT envelope missing the structural `request` member is
+// REFUSED.
+func TestMarshalCodeAssistPure(t *testing.T) {
+	chat := &engine.ChatRequest{
+		Model:      "m",
+		CodeAssist: true,
+		Messages:   []engine.Message{{Role: engine.RoleUser, Blocks: []engine.Block{{Text: &engine.TextBlock{Text: "hi"}}}}},
+	}
+	out1, err := (&Adapter{}).Marshal(chat)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !chat.ProviderExtensions.IsAbsent() {
+		t.Fatalf("marshal materialized an envelope on the input: %q", chat.ProviderExtensions.Bytes())
+	}
+	out2, err := (&Adapter{}).Marshal(chat)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(out1) != string(out2) {
+		t.Fatal("repeated marshal is not byte-identical")
+	}
+
+	// Present `{}` is refused (request is structural).
+	empty, _ := engine.ParseOptionalJSONObject([]byte(`{}`))
+	chat.ProviderExtensions = empty
+	if _, err := (&Adapter{}).Marshal(chat); err == nil {
+		t.Fatal("a present {} envelope must be refused")
+	}
+
+	// Cache identity: pb conversion before/after marshal is unchanged.
+	chat2 := &engine.ChatRequest{
+		Model: "m", CodeAssist: true,
+		ProviderExtensions: mustExtCA(map[string]any{"project": "p", "request": map[string]any{}}),
+		Messages:           []engine.Message{{Role: engine.RoleUser, Blocks: []engine.Block{{Text: &engine.TextBlock{Text: "hi"}}}}},
+	}
+	before, err := pbconv.ToPBChatRequestChecked(chat2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := (&Adapter{}).Marshal(chat2); err != nil {
+		t.Fatal(err)
+	}
+	after, err := pbconv.ToPBChatRequestChecked(chat2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !proto.Equal(before, after) {
+		t.Fatal("marshal mutated the request (cache identity changed)")
+	}
+}
+
+// TestCodeAssistEnvelopeInvalidShapes — null, arrays, scalars, malformed
+// text, and empty objects for `request` and `generationConfig` are
+// classified errors with NO panic, on accepted input and on a
+// plugin-shaped replacement envelope.
+func TestCodeAssistEnvelopeInvalidShapes(t *testing.T) {
+	shapes := map[string]string{
+		"request null":               `{"request":null}`,
+		"request array":              `{"request":[1]}`,
+		"request scalar":             `{"request":5}`,
+		"request malformed":          `{"request":"{oops"}`,
+		"generationConfig null":      `{"request":{"generationConfig":null}}`,
+		"generationConfig array":     `{"request":{"generationConfig":[1]}}`,
+		"generationConfig scalar":    `{"request":{"generationConfig":"x"}}`,
+		"generationConfig malformed": `{"request":{"generationConfig":"{oops"}}`,
+	}
+	for name, raw := range shapes {
+		t.Run(name, func(t *testing.T) {
+			env, err := engine.ParseOptionalJSONObject([]byte(raw))
+			if err != nil {
+				t.Fatal(err)
+			}
+			chat := &engine.ChatRequest{
+				Model: "m", CodeAssist: true, ProviderExtensions: env,
+				Messages: []engine.Message{{Role: engine.RoleUser, Blocks: []engine.Block{{Text: &engine.TextBlock{Text: "hi"}}}}},
+			}
+			// Must be a CLASSIFIED error, never a panic.
+			if _, err := (&Adapter{}).Marshal(chat); err == nil {
+				t.Fatalf("%s accepted", name)
+			}
+		})
+	}
+}
+
+// TestGenerationSiblingLossless — unknown generationConfig siblings keep
+// their EXACT lexemes (member order, whitespace, numeric spellings,
+// escapes, nested bytes) across input projection and the final wire. The
+// body is a VALID wrapped Code Assist request (contents inside request).
+func TestGenerationSiblingLossless(t *testing.T) {
+	// Nonalphabetical order, 1e999, 1.0, escaped Unicode, whitespace, a
+	// nested object — inside a valid wrapped request.
+	body := `{"model":"m","request":{"generationConfig":{"z":1e999,"a":1.0,"u":"\u0041bc","w": 42 ,"nested":{"k":[1,2]},"m":"x"},"contents":[{"role":"user","parts":[{"text":"hi"}]}]}}`
+	chat, err := (&Adapter{}).Unmarshal([]byte(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !chat.CodeAssist {
+		t.Fatal("variant lost")
+	}
+	if len(chat.Messages) != 1 || chat.Messages[0].Blocks[0].Text.Text != "hi" {
+		t.Fatalf("no message parsed from the wrapped request (contents must live INSIDE request): %+v", chat.Messages)
+	}
+	out, err := (&Adapter{}).Marshal(chat)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The COMPLETE preserved generationConfig must appear EXACTLY
+	// (members in their original order, whitespace and lexemes intact) —
+	// a single substring assertion, not independent fragments.
+	preserved := `{"z":1e999,"a":1.0,"u":"\u0041bc","w": 42 ,"nested":{"k":[1,2]},"m":"x"}`
+	if !strings.Contains(string(out), preserved) {
+		t.Fatalf("preserved generationConfig not lexeme-exact on the wire:\nwant %s\n got %s", preserved, out)
+	}
+}
+
+// TestGenerationConfigAbsentVsEmpty — the settled rule: input projection
+// REMOVES generationConfig when no unknown sibling remains (canonical-only
+// input never leaks a derived {}); an EXPLICITLY EMPTY wire object is
+// preserved; unknown-only and canonical+unknown keep the siblings; the
+// marshal overlays canonical members without disturbing any of them.
+func TestGenerationConfigAbsentVsEmpty(t *testing.T) {
+	rows := map[string]struct {
+		body     string
+		wantKind string // "absent" | "empty" | "siblings"
+	}{
+		"canonical only": {
+			`{"model":"m","request":{"generationConfig":{"maxOutputTokens":100,"temperature":0.5},"contents":[{"role":"user","parts":[{"text":"hi"}]}]}}`,
+			"absent",
+		},
+		"wire empty": {
+			`{"model":"m","request":{"generationConfig":{},"contents":[{"role":"user","parts":[{"text":"hi"}]}]}}`,
+			"empty",
+		},
+		"unknown only": {
+			`{"model":"m","request":{"generationConfig":{"candidateCount":3},"contents":[{"role":"user","parts":[{"text":"hi"}]}]}}`,
+			"siblings",
+		},
+		"canonical + unknown": {
+			`{"model":"m","request":{"generationConfig":{"maxOutputTokens":100,"candidateCount":3},"contents":[{"role":"user","parts":[{"text":"hi"}]}]}}`,
+			"siblings",
+		},
+	}
+	for name, row := range rows {
+		t.Run(name, func(t *testing.T) {
+			chat, err := (&Adapter{}).Unmarshal([]byte(row.body))
+			if err != nil {
+				t.Fatal(err)
+			}
+			// EVERY row must have parsed exactly one user message with the
+			// expected text (safe cardinality check before indexing) — a
+			// fixture with contents outside request fails here, never on
+			// the projection assertions.
+			if len(chat.Messages) != 1 || len(chat.Messages[0].Blocks) != 1 {
+				t.Fatalf("expected exactly one message with one block: %+v", chat.Messages)
+			}
+			if chat.Messages[0].Blocks[0].Text == nil || chat.Messages[0].Blocks[0].Text.Text != "hi" {
+				t.Fatalf("expected the user text %q: %+v", "hi", chat.Messages[0].Blocks[0])
+			}
+			// The parsed envelope's inner scope decides the projection
+			// outcome BEFORE any marshal.
+			m, _, _ := chat.ProviderExtensions.DecodeObject()
+			var inner map[string]json.RawMessage
+			if err := json.Unmarshal(m["request"], &inner); err != nil {
+				t.Fatal(err)
+			}
+			gcRaw, present := inner["generationConfig"]
+			switch row.wantKind {
+			case "absent":
+				if present {
+					t.Fatalf("canonical-only input leaked generationConfig: %s", gcRaw)
+				}
+			case "empty":
+				if !present || string(gcRaw) != "{}" {
+					t.Fatalf("explicit empty must be preserved as {}: %s", gcRaw)
+				}
+			case "siblings":
+				if !present || !strings.Contains(string(gcRaw), "candidateCount") {
+					t.Fatalf("siblings lost: %s", gcRaw)
+				}
+				if strings.Contains(string(gcRaw), "maxOutputTokens") {
+					t.Fatalf("canonical member survived the projection: %s", gcRaw)
+				}
+			}
+			// Marshal round-trips without disturbing the outcome.
+			out, err := (&Adapter{}).Marshal(chat)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if row.wantKind == "siblings" && !strings.Contains(string(out), "candidateCount") {
+				t.Fatalf("sibling lost on the wire: %s", out)
+			}
+		})
+	}
 }

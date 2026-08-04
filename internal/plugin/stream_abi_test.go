@@ -90,16 +90,8 @@ func registerEnvMap(t *testing.T, pp *PluginPipeline, reqID uint64, toolName str
 	t.Helper()
 	chat := &engine.ChatRequest{
 		Tools: []engine.ToolDef{{
-			Name: toolName,
-			Parameters: map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"env": map[string]any{
-						"type":                 "object",
-						"additionalProperties": map[string]any{"type": "string"},
-					},
-				},
-			},
+			Name:       toolName,
+			Parameters: mustReq(`{"type":"object","properties":{"env":{"type":"object","additionalProperties":{"type":"string"}}}}`),
 		}},
 	}
 	if _, err := pp.RunBeforeRequest(context.Background(), reqID, chat, nil); err != nil {
@@ -230,17 +222,8 @@ func TestRegistryPathReversal(t *testing.T) {
 	// KV-array mutation in the registry under this request ID.
 	chat := &engine.ChatRequest{
 		Tools: []engine.ToolDef{{
-			Name: "write",
-			Parameters: map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"env": map[string]any{
-						"type":                 "object",
-						"additionalProperties": map[string]any{"type": "string"},
-					},
-					"pairs": map[string]any{"type": "array"},
-				},
-			},
+			Name:       "write",
+			Parameters: mustReq(`{"type":"object","properties":{"env":{"type":"object","additionalProperties":{"type":"string"}},"pairs":{"type":"array"}}}`),
 		}},
 	}
 	if _, err := pp.RunBeforeRequest(ctx, reqID, chat, nil); err != nil {
@@ -371,34 +354,30 @@ func TestIntentRehydratesHistory(t *testing.T) {
 	// Turn 2 request: the harness replays the (stripped) tool call in history.
 	// The intent plugin must re-hydrate "i" from the cache.
 	chat := &engine.ChatRequest{
-		Tools: []engine.ToolDef{{Name: "read", Parameters: map[string]any{
-			"type": "object", "properties": map[string]any{"path": map[string]any{"type": "string"}},
-		}}},
+		Tools: []engine.ToolDef{{Name: "read", Parameters: mustReq(`{"type":"object","properties":{"path":{"type":"string"}}}`)}},
 		Messages: []engine.Message{
-			{Role: engine.RoleUser, Content: "trace the retry logic"},
-			{Role: engine.RoleAssistant, ToolCalls: []engine.ToolCall{
-				{ID: "call_hist", Name: "read", Arguments: map[string]any{"path": "failover.go"}},
-			}},
-			{Role: engine.RoleTool, ToolCallID: "call_hist", Content: "package proxy ..."},
+			{Role: engine.RoleUser, Blocks: []engine.Block{{Text: &engine.TextBlock{Text: "trace the retry logic"}}}},
+			{Role: engine.RoleAssistant, Blocks: []engine.Block{{ToolUse: &engine.ToolUseBlock{ID: "call_hist", Name: "read", Arguments: mustReq(`{"path":"x"}`)}}}},
+			{Role: engine.RoleTool, Blocks: []engine.Block{{ToolResult: &engine.ToolResultBlock{ToolCallID: "call_hist", Content: []engine.ToolResultContentBlock{{Text: "package proxy ..."}}}}}},
 		},
 	}
 	out2, err := pp.RunBeforeRequest(context.Background(), 2, chat, nil)
 	if err != nil {
 		t.Fatalf("RunBeforeRequest: %v", err)
 	}
-	var histArgs map[string]any
+	var histArgs map[string]json.RawMessage
 	for _, m := range out2.Messages {
-		if m.Role == engine.RoleAssistant && len(m.ToolCalls) == 1 && m.ToolCalls[0].ID == "call_hist" {
-			histArgs = m.ToolCalls[0].Arguments
+		if m.Role == engine.RoleAssistant && len(m.Blocks) == 1 && m.Blocks[0].ToolUse != nil && m.Blocks[0].ToolUse.ID == "call_hist" {
+			histArgs, _, _ = m.Blocks[0].ToolUse.Arguments.DecodeObject()
 		}
 	}
 	if histArgs == nil {
 		t.Fatalf("history tool call missing after rehydration: %v", out2.Messages)
 	}
-	if got, _ := histArgs["i"].(string); got != "where is the retry budget configured" {
+	if got := string(histArgs["i"]); got != `"where is the retry budget configured"` {
 		t.Fatalf(`"i" not re-hydrated onto history tool call: got %q (args %v)`, got, histArgs)
 	}
-	if histArgs["path"] != "failover.go" {
+	if string(histArgs["path"]) != `"failover.go"` {
 		t.Fatalf("rehydration clobbered original args: %v", histArgs)
 	}
 }
@@ -418,23 +397,20 @@ func TestIntentFillsUncachedHistory(t *testing.T) {
 
 	mkChat := func(userMsg string) *engine.ChatRequest {
 		return &engine.ChatRequest{
-			Tools: []engine.ToolDef{{Name: "read", Parameters: map[string]any{
-				"type": "object", "properties": map[string]any{"path": map[string]any{"type": "string"}},
-			}}},
+			Tools: []engine.ToolDef{{Name: "read", Parameters: mustReq(`{"type":"object","properties":{"path":{"type":"string"}}}`)}},
 			Messages: []engine.Message{
-				{Role: engine.RoleUser, Content: userMsg},
-				{Role: engine.RoleAssistant, ToolCalls: []engine.ToolCall{
-					{ID: "call_never_seen", Name: "read", Arguments: map[string]any{"path": "x.go"}},
-				}},
-				{Role: engine.RoleTool, ToolCallID: "call_never_seen", Content: "..."},
+				{Role: engine.RoleUser, Blocks: []engine.Block{{Text: &engine.TextBlock{Text: userMsg}}}},
+				{Role: engine.RoleAssistant, Blocks: []engine.Block{{ToolUse: &engine.ToolUseBlock{ID: "call_never_seen", Name: "read", Arguments: mustReq(`{"path":"x"}`)}}}},
+				{Role: engine.RoleTool, Blocks: []engine.Block{{ToolResult: &engine.ToolResultBlock{ToolCallID: "call_never_seen", Content: []engine.ToolResultContentBlock{{Text: "..."}}}}}},
 			},
 		}
 	}
 	fillOf := func(out *engine.ChatRequest) string {
 		t.Helper()
 		for _, m := range out.Messages {
-			if m.Role == engine.RoleAssistant && len(m.ToolCalls) == 1 {
-				i, _ := m.ToolCalls[0].Arguments["i"].(string)
+			if m.Role == engine.RoleAssistant && len(m.Blocks) == 1 && m.Blocks[0].ToolUse != nil {
+				vals, _, _ := m.Blocks[0].ToolUse.Arguments.DecodeObject()
+				i := string(vals["i"])
 				return i
 			}
 		}
@@ -472,15 +448,11 @@ func TestIntentFillOff(t *testing.T) {
 		map[string]json.RawMessage{"intent": json.RawMessage(`{"fill":"off"}`)})
 
 	chat := &engine.ChatRequest{
-		Tools: []engine.ToolDef{{Name: "read", Parameters: map[string]any{
-			"type": "object", "properties": map[string]any{"path": map[string]any{"type": "string"}},
-		}}},
+		Tools: []engine.ToolDef{{Name: "read", Parameters: mustReq(`{"type":"object","properties":{"path":{"type":"string"}}}`)}},
 		Messages: []engine.Message{
-			{Role: engine.RoleUser, Content: "hi"},
-			{Role: engine.RoleAssistant, ToolCalls: []engine.ToolCall{
-				{ID: "call_never_seen", Name: "read", Arguments: map[string]any{"path": "x.go"}},
-			}},
-			{Role: engine.RoleTool, ToolCallID: "call_never_seen", Content: "..."},
+			{Role: engine.RoleUser, Blocks: []engine.Block{{Text: &engine.TextBlock{Text: "hi"}}}},
+			{Role: engine.RoleAssistant, Blocks: []engine.Block{{ToolUse: &engine.ToolUseBlock{ID: "call_never_seen", Name: "read", Arguments: mustReq(`{"path":"x"}`)}}}},
+			{Role: engine.RoleTool, Blocks: []engine.Block{{ToolResult: &engine.ToolResultBlock{ToolCallID: "call_never_seen", Content: []engine.ToolResultContentBlock{{Text: "..."}}}}}},
 		},
 	}
 	out, err := pp.RunBeforeRequest(context.Background(), 3, chat, nil)
@@ -488,9 +460,10 @@ func TestIntentFillOff(t *testing.T) {
 		t.Fatalf("RunBeforeRequest: %v", err)
 	}
 	for _, m := range out.Messages {
-		if m.Role == engine.RoleAssistant && len(m.ToolCalls) == 1 {
-			if _, hasI := m.ToolCalls[0].Arguments["i"]; hasI {
-				t.Fatalf("fill=off: uncached history tool call should stay untouched: %v", m.ToolCalls[0].Arguments)
+		if m.Role == engine.RoleAssistant && len(m.Blocks) == 1 && m.Blocks[0].ToolUse != nil {
+			vals, _, _ := m.Blocks[0].ToolUse.Arguments.DecodeObject()
+			if _, hasI := vals["i"]; hasI {
+				t.Fatalf("fill=off: uncached history tool call should stay untouched: %v", m.Blocks[0].ToolUse.Arguments)
 			}
 		}
 	}
@@ -516,15 +489,11 @@ func TestIntentBridgesToRequestSideID(t *testing.T) {
 
 	// Turn 2 request: the harness replays the same call under ITS OWN ID.
 	chat := &engine.ChatRequest{
-		Tools: []engine.ToolDef{{Name: "read", Parameters: map[string]any{
-			"type": "object", "properties": map[string]any{"path": map[string]any{"type": "string"}},
-		}}},
+		Tools: []engine.ToolDef{{Name: "read", Parameters: mustReq(`{"type":"object","properties":{"path":{"type":"string"}}}`)}},
 		Messages: []engine.Message{
-			{Role: engine.RoleUser, Content: "trace the retry logic"},
-			{Role: engine.RoleAssistant, ToolCalls: []engine.ToolCall{
-				{ID: "call_req_42", Name: "read", Arguments: map[string]any{"path": "failover.go"}},
-			}},
-			{Role: engine.RoleTool, ToolCallID: "call_req_42", Content: "package proxy ..."},
+			{Role: engine.RoleUser, Blocks: []engine.Block{{Text: &engine.TextBlock{Text: "trace the retry logic"}}}},
+			{Role: engine.RoleAssistant, Blocks: []engine.Block{{ToolUse: &engine.ToolUseBlock{ID: "call_req_42", Name: "read", Arguments: mustReq(`{"path":"x"}`)}}}},
+			{Role: engine.RoleTool, Blocks: []engine.Block{{ToolResult: &engine.ToolResultBlock{ToolCallID: "call_req_42", Content: []engine.ToolResultContentBlock{{Text: "package proxy ..."}}}}}},
 		},
 	}
 	if _, err := pp.RunBeforeRequest(context.Background(), 2, chat, nil); err != nil {
@@ -568,17 +537,13 @@ func TestIntentBridgeFeedsKeywordCompactor(t *testing.T) {
 	big := strings.Join(lines, "\n")
 
 	chat := &engine.ChatRequest{
-		Tools: []engine.ToolDef{{Name: "read", Parameters: map[string]any{
-			"type": "object", "properties": map[string]any{"path": map[string]any{"type": "string"}},
-		}}},
+		Tools: []engine.ToolDef{{Name: "read", Parameters: mustReq(`{"type":"object","properties":{"path":{"type":"string"}}}`)}},
 		Messages: []engine.Message{
-			{Role: engine.RoleUser, Content: "trace the retry logic"},
-			{Role: engine.RoleAssistant, ToolCalls: []engine.ToolCall{
-				{ID: "call_req_77", Name: "read", Arguments: map[string]any{"path": "failover.go"}},
-			}},
-			{Role: engine.RoleTool, ToolCallID: "call_req_77", Content: big},
-			{Role: engine.RoleAssistant, Content: "I have read the file."},
-			{Role: engine.RoleUser, Content: "Great, now fix it."},
+			{Role: engine.RoleUser, Blocks: []engine.Block{{Text: &engine.TextBlock{Text: "trace the retry logic"}}}},
+			{Role: engine.RoleAssistant, Blocks: []engine.Block{{ToolUse: &engine.ToolUseBlock{ID: "call_req_77", Name: "read", Arguments: mustReq(`{"path":"x"}`)}}}},
+			{Role: engine.RoleTool, Blocks: []engine.Block{{ToolResult: &engine.ToolResultBlock{ToolCallID: "call_req_77", Content: []engine.ToolResultContentBlock{{Text: big}}}}}},
+			{Role: engine.RoleAssistant, Blocks: []engine.Block{{Text: &engine.TextBlock{Text: "I have read the file."}}}},
+			{Role: engine.RoleUser, Blocks: []engine.Block{{Text: &engine.TextBlock{Text: "Great, now fix it."}}}},
 		},
 	}
 	out, err := pp.RunBeforeRequest(context.Background(), 5, chat, nil)
@@ -587,8 +552,8 @@ func TestIntentBridgeFeedsKeywordCompactor(t *testing.T) {
 	}
 	var result string
 	for _, m := range out.Messages {
-		if m.Role == engine.RoleTool && m.ToolCallID == "call_req_77" {
-			result = m.Content
+		if m.Role == engine.RoleTool && toolResultID(m) == "call_req_77" {
+			result = toolResultText(m)
 		}
 	}
 	if result == "" {
@@ -644,8 +609,8 @@ func TestCompactorsRespectToolResultConsumptionBoundary(t *testing.T) {
 					messages: []engine.Message{
 						toolCallMessage("old-1"),
 						toolResultMessage("old-1"),
-						{Role: engine.RoleAssistant, Content: "I consumed the result."},
-						{Role: engine.RoleUser, Content: "Continue."},
+						{Role: engine.RoleAssistant, Blocks: []engine.Block{{Text: &engine.TextBlock{Text: "I consumed the result."}}}},
+						{Role: engine.RoleUser, Blocks: []engine.Block{{Text: &engine.TextBlock{Text: "Continue."}}}},
 					},
 					wantCompacted: map[string]bool{"old-1": true},
 				},
@@ -671,16 +636,17 @@ func TestCompactorsRespectToolResultConsumptionBoundary(t *testing.T) {
 
 					seen := make(map[string]bool, len(tc.wantCompacted))
 					for _, msg := range out.Messages {
-						want, tracked := tc.wantCompacted[msg.ToolCallID]
+						want, tracked := tc.wantCompacted[toolResultID(msg)]
 						if msg.Role != engine.RoleTool || !tracked {
 							continue
 						}
-						seen[msg.ToolCallID] = true
-						if want && msg.Content == largeToolResult() {
-							t.Errorf("historical result %q was not compacted", msg.ToolCallID)
+						seen[toolResultID(msg)] = true
+						gotText := toolResultText(msg)
+						if want && gotText == largeToolResult() {
+							t.Errorf("historical result %q was not compacted", toolResultID(msg))
 						}
-						if !want && msg.Content != largeToolResult() {
-							t.Errorf("fresh result %q changed: got %q", msg.ToolCallID, msg.Content)
+						if !want && gotText != largeToolResult() {
+							t.Errorf("fresh result %q changed: got %q", toolResultID(msg), gotText)
 						}
 					}
 					for id := range tc.wantCompacted {
@@ -740,7 +706,7 @@ func TestCompactorToolPolicies(t *testing.T) {
 					messages := []engine.Message{
 						toolCallNamedMessage("safe", toolName),
 						toolResultNamedMessage("safe", toolName),
-						{Role: engine.RoleAssistant, Content: "consumed"},
+						{Role: engine.RoleAssistant, Blocks: []engine.Block{{Text: &engine.TextBlock{Text: "consumed"}}}},
 					}
 					out := runToolPolicyRequest(t, pluginName, config, messages)
 					if got := toolResultContent(t, out, "safe"); got != largeToolResult() {
@@ -802,25 +768,56 @@ func sourceHistory(id string, laterAssistants int) []engine.Message {
 	messages := []engine.Message{toolCallNamedMessage(id, "read_file"), toolResultNamedMessage(id, "read_file")}
 	for i := 0; i < laterAssistants; i++ {
 		messages = append(messages,
-			engine.Message{Role: engine.RoleAssistant, Content: "consumed"},
-			engine.Message{Role: engine.RoleUser, Content: "continue"})
+			engine.Message{Role: engine.RoleAssistant, Blocks: []engine.Block{{Text: &engine.TextBlock{Text: "consumed"}}}},
+			engine.Message{Role: engine.RoleUser, Blocks: []engine.Block{{Text: &engine.TextBlock{Text: "continue"}}}})
 	}
 	return messages
 }
 
+func toolUseBlocks(m engine.Message) []*engine.ToolUseBlock {
+	var out []*engine.ToolUseBlock
+	for _, b := range m.Blocks {
+		if b.ToolUse != nil {
+			out = append(out, b.ToolUse)
+		}
+	}
+	return out
+}
+
+func toolResultID(m engine.Message) string {
+	for _, b := range m.Blocks {
+		if b.ToolResult != nil {
+			return b.ToolResult.ToolCallID
+		}
+	}
+	return ""
+}
+
+func toolResultText(m engine.Message) string {
+	var out string
+	for _, b := range m.Blocks {
+		if b.ToolResult != nil {
+			for _, c := range b.ToolResult.Content {
+				out += c.Text
+			}
+		}
+	}
+	return out
+}
+
 func toolCallNamedMessage(id, name string) engine.Message {
-	return engine.Message{Role: engine.RoleAssistant, ToolCalls: []engine.ToolCall{{ID: id, Name: name}}}
+	return engine.Message{Role: engine.RoleAssistant, Blocks: []engine.Block{{ToolUse: &engine.ToolUseBlock{ID: id, Name: name}}}}
 }
 
 func toolResultNamedMessage(id, name string) engine.Message {
-	return engine.Message{Role: engine.RoleTool, ToolCallID: id, ToolName: name, Content: largeToolResult()}
+	return engine.Message{Role: engine.RoleTool, Blocks: []engine.Block{{ToolResult: &engine.ToolResultBlock{ToolCallID: id, ToolName: name, Content: []engine.ToolResultContentBlock{{Text: largeToolResult()}}}}}}
 }
 
 func toolResultContent(t *testing.T, req *engine.ChatRequest, id string) string {
 	t.Helper()
 	for _, message := range req.Messages {
-		if message.Role == engine.RoleTool && message.ToolCallID == id {
-			return message.Content
+		if message.Role == engine.RoleTool && toolResultID(message) == id {
+			return toolResultText(message)
 		}
 	}
 	t.Fatalf("tool result %q missing", id)
@@ -832,15 +829,15 @@ func toolCallMessage(ids ...string) engine.Message {
 }
 
 func parallelToolCallMessage(ids ...string) engine.Message {
-	calls := make([]engine.ToolCall, 0, len(ids))
+	blocks := make([]engine.Block, 0, len(ids))
 	for _, id := range ids {
-		calls = append(calls, engine.ToolCall{ID: id, Name: "read"})
+		blocks = append(blocks, engine.Block{ToolUse: &engine.ToolUseBlock{ID: id, Name: "read"}})
 	}
-	return engine.Message{Role: engine.RoleAssistant, ToolCalls: calls}
+	return engine.Message{Role: engine.RoleAssistant, Blocks: blocks}
 }
 
 func toolResultMessage(id string) engine.Message {
-	return engine.Message{Role: engine.RoleTool, ToolCallID: id, ToolName: "read", Content: largeToolResult()}
+	return engine.Message{Role: engine.RoleTool, Blocks: []engine.Block{{ToolResult: &engine.ToolResultBlock{ToolCallID: id, ToolName: "read", Content: []engine.ToolResultContentBlock{{Text: largeToolResult()}}}}}}
 }
 
 func largeToolResult() string {
@@ -869,14 +866,12 @@ func TestIntentInjectsNoSyntheticMessages(t *testing.T) {
 
 	chat := &engine.ChatRequest{
 		Messages: []engine.Message{
-			{Role: engine.RoleSystem, Content: "sys"},
-			{Role: engine.RoleUser, Content: "do the thing"},
-			{Role: engine.RoleAssistant, ToolCalls: []engine.ToolCall{{ID: "call_real_1", Name: "read", Arguments: map[string]any{"path": "x"}}}},
-			{Role: engine.RoleTool, ToolCallID: "call_real_1", Content: "result"},
+			{Role: engine.RoleSystem, Blocks: []engine.Block{{Text: &engine.TextBlock{Text: "sys"}}}},
+			{Role: engine.RoleUser, Blocks: []engine.Block{{Text: &engine.TextBlock{Text: "do the thing"}}}},
+			{Role: engine.RoleAssistant, Blocks: []engine.Block{{ToolUse: &engine.ToolUseBlock{ID: "call_real_1", Name: "read", Arguments: mustReq(`{"path":"x"}`)}}}},
+			{Role: engine.RoleTool, Blocks: []engine.Block{{ToolResult: &engine.ToolResultBlock{ToolCallID: "call_real_1", Content: []engine.ToolResultContentBlock{{Text: "result"}}}}}},
 		},
-		Tools: []engine.ToolDef{{Name: "read", Parameters: map[string]any{
-			"type": "object", "properties": map[string]any{"path": map[string]any{"type": "string"}},
-		}}},
+		Tools: []engine.ToolDef{{Name: "read", Parameters: mustReq(`{"type":"object","properties":{"path":{"type":"string"}}}`)}},
 	}
 	out, err := pp.RunBeforeRequest(context.Background(), 77, chat, nil)
 	if err != nil {
@@ -886,11 +881,11 @@ func TestIntentInjectsNoSyntheticMessages(t *testing.T) {
 	// Every assistant message carrying tool_calls must be immediately
 	// followed by tool messages answering each of its call IDs.
 	for i, m := range out.Messages {
-		if m.Role != engine.RoleAssistant || len(m.ToolCalls) == 0 {
+		if m.Role != engine.RoleAssistant || len(toolUseBlocks(m)) == 0 {
 			continue
 		}
 		want := map[string]bool{}
-		for _, tc := range m.ToolCalls {
+		for _, tc := range toolUseBlocks(m) {
 			want[tc.ID] = true
 		}
 		for j := i + 1; j < len(out.Messages) && len(want) > 0; j++ {
@@ -898,7 +893,7 @@ func TestIntentInjectsNoSyntheticMessages(t *testing.T) {
 				t.Fatalf("assistant tool_calls at %d followed by %q at %d (unanswered: %v)\nsequence: %v",
 					i, out.Messages[j].Role, j, want, roles(out.Messages))
 			}
-			delete(want, out.Messages[j].ToolCallID)
+			delete(want, toolResultID(out.Messages[j]))
 		}
 		if len(want) > 0 {
 			t.Fatalf("assistant tool_calls at %d never answered: %v", i, want)
@@ -910,15 +905,15 @@ func TestIntentInjectsNoSyntheticMessages(t *testing.T) {
 		t.Fatalf("intent plugin added messages (want 4, got %d): %v", len(out.Messages), roles(out.Messages))
 	}
 	for _, m := range out.Messages {
-		for _, tc := range m.ToolCalls {
+		for _, tc := range toolUseBlocks(m) {
 			if strings.Contains(tc.ID, "fewshot") {
 				t.Fatalf("synthetic few-shot message injected: %v", roles(out.Messages))
 			}
 		}
 	}
 	// The convention (with its example transcript) rides the system prompt.
-	if !strings.Contains(out.Messages[0].Content, `"i"`) {
-		t.Fatalf("system prompt missing the intent addendum: %q", out.Messages[0].Content)
+	if !strings.Contains(engineText(out.Messages[0]), `"i"`) {
+		t.Fatalf("system prompt missing the intent addendum: %q", engineText(out.Messages[0]))
 	}
 }
 
@@ -926,7 +921,7 @@ func roles(msgs []engine.Message) []string {
 	var out []string
 	for _, m := range msgs {
 		r := string(m.Role)
-		if len(m.ToolCalls) > 0 {
+		if len(toolUseBlocks(m)) > 0 {
 			r += "(tool_calls)"
 		}
 		out = append(out, r)
@@ -947,22 +942,13 @@ func TestIntentNativeIEnrichesDescriptionOnly(t *testing.T) {
 	store := cache.NewLocalCache(time.Minute)
 	pp := newTestPipelineWith(t, bundles, []string{"intent"}, store, nil)
 
-	nativeParams := map[string]any{
-		"type": "object",
-		"properties": map[string]any{
-			"i":    map[string]any{"type": "string", "description": "omp's own intent semantics"},
-			"path": map[string]any{"type": "string"},
-		},
-		"required": []any{"path"},
-	}
+	nativeParams := mustReq(`{"type":"object","properties":{"i":{"type":"string","description":"omp's own intent semantics"},"path":{"type":"string"}},"required":["path"]}`)
 	chat := &engine.ChatRequest{
 		Tools: []engine.ToolDef{
 			{Name: "read", Parameters: nativeParams},
-			{Name: "plain", Parameters: map[string]any{
-				"type": "object", "properties": map[string]any{"q": map[string]any{"type": "string"}},
-			}},
+			{Name: "plain", Parameters: mustReq(`{"type":"object","properties":{"q":{"type":"string"}}}`)},
 		},
-		Messages: []engine.Message{{Role: engine.RoleUser, Content: "go"}},
+		Messages: []engine.Message{{Role: engine.RoleUser, Blocks: []engine.Block{{Text: &engine.TextBlock{Text: "go"}}}}},
 	}
 	out, err := pp.RunBeforeRequest(context.Background(), 6, chat, nil)
 	if err != nil {
@@ -971,29 +957,33 @@ func TestIntentNativeIEnrichesDescriptionOnly(t *testing.T) {
 	if out == nil {
 		out = chat
 	}
-	var native, plain map[string]any
+	var native, plain map[string]json.RawMessage
 	for _, tool := range out.Tools {
 		switch tool.Name {
 		case "read":
-			native = tool.Parameters
+			native, _, _ = tool.Parameters.DecodeObject()
 		case "plain":
-			plain = tool.Parameters
+			plain, _, _ = tool.Parameters.DecodeObject()
 		}
 	}
 	// Native tool: description upgraded, structure preserved.
-	props := native["properties"].(map[string]any)
-	desc, _ := props["i"].(map[string]any)["description"].(string)
+	var props map[string]json.RawMessage
+	json.Unmarshal(native["properties"], &props)
+	var iProp map[string]json.RawMessage
+	json.Unmarshal(props["i"], &iProp)
+	desc := string(iProp["description"])
 	if !strings.Contains(desc, "NOT the action taken") {
 		t.Fatalf("native i description not enriched: %q", desc)
 	}
-	if req := native["required"].([]any); len(req) != 1 || req[0] != "path" {
+	if req := string(native["required"]); req != `["path"]` {
 		t.Fatalf("native tool required list mutated: %v", req)
 	}
 	if _, ok := native["additionalProperties"]; ok {
 		t.Fatalf("additionalProperties bolted onto native-i tool")
 	}
 	// The plain tool still gets the injection.
-	pprops := plain["properties"].(map[string]any)
+	var pprops map[string]json.RawMessage
+	json.Unmarshal(plain["properties"], &pprops)
 	if _, ok := pprops["i"]; !ok {
 		t.Fatalf("plain tool did not get i injected: %v", plain)
 	}

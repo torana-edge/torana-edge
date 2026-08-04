@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 
+	"github.com/torana-edge/torana-edge/examples/plugins/blockutil"
 	sdk "github.com/torana-edge/torana-plugin-sdk"
 	pb "github.com/torana-edge/torana-plugin-sdk/pb/v2"
 )
@@ -25,8 +26,8 @@ func init() {
 	sdk.OnBeforeRequest(func(ctx context.Context, req *pb.ChatRequest) (sdk.RequestResult, error) {
 		changed := false
 		for _, m := range req.Messages {
-			if m.Role == "user" && m.Content != "" && !strings.HasSuffix(m.Content, marker) {
-				m.Content += marker
+			if m.Role == "user" && blockutil.TextOf(m) != "" && !strings.HasSuffix(blockutil.TextOf(m), marker) {
+				blockutil.SetText(m, blockutil.TextOf(m)+marker)
 				changed = true
 			}
 		}

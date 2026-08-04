@@ -1,7 +1,6 @@
 package bedrock
 
 import (
-	"encoding/json"
 	"strings"
 	"testing"
 
@@ -34,25 +33,39 @@ func TestToolResultMultiBlock(t *testing.T) {
 		t.Fatalf("Unmarshal: %v", err)
 	}
 
+	// Bedrock has no tool role: the result rides its user message at its
+	// exact wire position (no synthetic RoleTool split).
 	var toolMsg *engine.Message
 	for i := range chat.Messages {
-		if chat.Messages[i].Role == engine.RoleTool {
+		if len(toolResults(chat.Messages[i])) > 0 {
 			toolMsg = &chat.Messages[i]
 			break
 		}
 	}
 	if toolMsg == nil {
-		t.Fatalf("no tool message found in %+v", chat.Messages)
+		t.Fatalf("no tool-result message found in %+v", chat.Messages)
 	}
 
-	if !strings.Contains(toolMsg.Content, "first chunk") || !strings.Contains(toolMsg.Content, "second chunk") {
-		t.Errorf("text blocks lost: Content=%q", toolMsg.Content)
+	rs := toolResults(*toolMsg)
+	if len(rs) != 1 {
+		t.Fatalf("no tool result: %+v", chat.Messages)
 	}
-	if len(toolMsg.ContentParts) != 1 {
-		t.Fatalf("expected 1 non-text part preserved, got %d: %v", len(toolMsg.ContentParts), toolMsg.ContentParts)
+	var text string
+	var parts []engine.ToolResultContentBlock
+	for _, c := range rs[0].Content {
+		if c.Text != "" {
+			text += c.Text
+		} else {
+			parts = append(parts, c)
+		}
 	}
-	b, _ := json.Marshal(toolMsg.ContentParts[0])
-	if !strings.Contains(string(b), "42") {
+	if !strings.Contains(text, "first chunk") || !strings.Contains(text, "second chunk") {
+		t.Errorf("text blocks lost: %q", text)
+	}
+	if len(parts) != 1 {
+		t.Fatalf("expected 1 non-text part preserved, got %d", len(parts))
+	}
+	if b := parts[0].Unknown.Payload.Bytes(); !strings.Contains(string(b), "42") {
 		t.Errorf("json block lost: %s", b)
 	}
 }

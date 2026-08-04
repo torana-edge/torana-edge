@@ -25,14 +25,32 @@ import (
 	"github.com/torana-edge/torana-plugin-sdk/sdktest"
 )
 
+// mustReq panics on invalid raw: test fixtures are trusted.
+func mustReq(raw string) engine.RequiredJSONObject {
+	r, err := engine.ParseRequiredJSONObject([]byte(raw))
+	if err != nil {
+		panic(err)
+	}
+	return r
+}
+
 // egressPayload builds what a plugin would pass to torana_send_request.
+func mustCheckedPB(t *testing.T, chat *engine.ChatRequest) *pb.ChatRequest {
+	t.Helper()
+	pbReq, err := pbconv.ToPBChatRequestChecked(chat)
+	if err != nil {
+		t.Fatalf("checked projection: %v", err)
+	}
+	return pbReq
+}
+
 func egressPayload(t *testing.T, providerName, path string) string {
 	t.Helper()
 	chat := &engine.ChatRequest{
 		Model:    "gpt-x",
-		Messages: []engine.Message{{Role: engine.RoleUser, Content: "warm"}},
+		Messages: []engine.Message{{Role: engine.RoleUser, Blocks: []engine.Block{{Text: &engine.TextBlock{Text: "warm"}}}}},
 	}
-	raw, err := proto.Marshal(pbconv.ToPBChatRequest(chat))
+	raw, err := proto.Marshal(mustCheckedPB(t, chat))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -350,20 +368,25 @@ func TestEgressMeterWindowsRoll(t *testing.T) {
 	}
 }
 
-// TestEgressRejectsUnrenderableRequest — a guest-supplied ChatRequest that the
-// provider's format adapter cannot render is a CALLER bug, not a transient
-// host outage: retrying the same request cannot help. A protobuf fixed64
-// double field carries NaN bit-exactly, survives pbconv, and makes the
-// adapter's json.Marshal fail — the guest-controlled vector this pins.
+// TestEgressRejectsUnrenderableRequest — a guest-supplied ChatRequest that
+// the provider's format adapter cannot render is a CALLER bug, not a
+// transient host outage: retrying the same request cannot help. A protobuf
+// double field carries NaN bit-exactly; the v2 replacement contract now
+// refuses it at the send_request gate (temperature must be finite) BEFORE
+// conversion — the guest-controlled vector this pins, refused earlier and
+// with the same classified INVALID_ARGUMENT semantics.
 func TestEgressRejectsUnrenderableRequest(t *testing.T) {
 	srv, calls := egressServer(t, provider.EgressBudget{MaxCallsPerMinute: 10})
 
-	chat := &engine.ChatRequest{
+	// The guest-supplied PB is built DIRECTLY (not through the host's
+	// checked projection): a protobuf double carries NaN bit-exactly, and
+	// the send_request gate's ValidateReplacement is what must refuse it.
+	pbReq := &pb.ChatRequest{
 		Model:       "gpt-x",
 		Temperature: proto.Float64(math.NaN()),
-		Messages:    []engine.Message{{Role: engine.RoleUser, Content: "warm"}},
+		Messages:    []*pb.Message{{Role: "user", Blocks: []*pb.RequestBlock{{Kind: &pb.RequestBlock_Text{Text: &pb.RequestTextBlock{Text: "warm"}}}}}},
 	}
-	raw, err := proto.Marshal(pbconv.ToPBChatRequest(chat))
+	raw, err := proto.Marshal(pbReq)
 	if err != nil {
 		t.Fatalf("marshal ChatRequest: %v", err)
 	}
@@ -383,7 +406,7 @@ func TestEgressRejectsUnrenderableRequest(t *testing.T) {
 	if herr.Code != pb.ErrorCode_ERROR_CODE_INVALID_ARGUMENT {
 		t.Errorf("code = %v, want INVALID_ARGUMENT — the guest supplied an unrenderable request", herr.Code)
 	}
-	if !strings.Contains(herr.Message, "encode request") {
+	if !strings.Contains(herr.Message, "replacement contract") && !strings.Contains(herr.Message, "encode request") {
 		t.Errorf("unexpected message: %s", herr.Message)
 	}
 	if *calls != 0 {
@@ -629,9 +652,9 @@ func egressPayloadPB(t *testing.T) string {
 	t.Helper()
 	chat := &engine.ChatRequest{
 		Model:    "gpt-x",
-		Messages: []engine.Message{{Role: engine.RoleUser, Content: "warm"}},
+		Messages: []engine.Message{{Role: engine.RoleUser, Blocks: []engine.Block{{Text: &engine.TextBlock{Text: "warm"}}}}},
 	}
-	raw, err := proto.Marshal(pbconv.ToPBChatRequest(chat))
+	raw, err := proto.Marshal(mustCheckedPB(t, chat))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -833,6 +856,91 @@ func TestEgressHostPathContract(t *testing.T) {
 			}
 			if !tc.Valid && *calls != 0 {
 				t.Fatalf("an invalid path consumed a budget slot (upstream calls = %d)", *calls)
+			}
+		})
+	}
+}
+
+// TestEgressRejectsContractViolations: guest-controlled request_pb must
+// satisfy the v2 replacement contract BEFORE conversion — nil nested
+// values, empty required tool bytes, and malformed object bytes are
+// classified refusals with NO outbound send and no panic; a valid `{}`
+// control passes validation and reaches the provider.
+func TestEgressRejectsContractViolations(t *testing.T) {
+	srv, calls := egressServer(t, provider.EgressBudget{MaxCallsPerMinute: 100})
+
+	reqFor := func(mutate func(*pb.ChatRequest)) string {
+		t.Helper()
+		pbReq := mustCheckedPB(t, &engine.ChatRequest{
+			Model: "gpt-x",
+			Messages: []engine.Message{
+				{Role: engine.RoleUser, Blocks: []engine.Block{{Text: &engine.TextBlock{Text: "hi"}}}},
+				{Role: engine.RoleAssistant, Blocks: []engine.Block{{ToolUse: &engine.ToolUseBlock{
+					ID: "t1", Name: "read", Arguments: mustReq(`{}`),
+				}}}},
+			},
+			Tools: []engine.ToolDef{{Name: "read", Parameters: mustReq(`{}`)}},
+		})
+		mutate(pbReq)
+		raw, err := proto.Marshal(pbReq)
+		if err != nil {
+			t.Fatal(err)
+		}
+		b, _ := json.Marshal(map[string]any{
+			"provider":   "oai",
+			"request_pb": base64.StdEncoding.EncodeToString(raw),
+			"path":       "/v1/chat/completions",
+		})
+		return string(b)
+	}
+
+	// Positive control: a valid {} arguments/schema request is accepted and
+	// reaches the provider (the guest met the v2 contract).
+	got, herr := send(t, srv, "warmer", reqFor(func(*pb.ChatRequest) {}))
+	if herr != nil {
+		t.Fatalf("valid {} control refused: %v", herr)
+	}
+	if got.HTTPStatus != 200 {
+		t.Fatalf("control status = %d", got.HTTPStatus)
+	}
+
+	cases := []struct {
+		name    string
+		payload string
+		want    string
+	}{
+		// NOTE: nil repeated elements survive protobuf transport as
+		// ZERO-LENGTH embedded messages and decode to non-nil empty values.
+		// A nil Message decodes to an empty Message{} whose empty role the
+		// shared contract refuses (the SDK role rule); nil ToolDef and nil
+		// ToolCall decode to empty nested messages refused by the required
+		// name rules. All three rows are therefore reachable through the
+		// extension wire. The direct in-memory converter rows
+		// (TestRawJSONFromPBNilGraph) pin the Go-side defensive guarantee
+		// for a DIFFERENT boundary.
+		{"nil message (zero-length wire)", reqFor(func(r *pb.ChatRequest) { r.Messages = append(r.Messages, nil) }), "replacement contract"},
+		{"nil tool def (zero-length wire)", reqFor(func(r *pb.ChatRequest) { r.Tools = append(r.Tools, nil) }), "replacement contract"},
+		{"nil tool call (zero-length wire)", reqFor(func(r *pb.ChatRequest) { r.Messages[1].Blocks = append(r.Messages[1].Blocks, nil) }), "replacement contract"},
+		{"empty arguments bytes", reqFor(func(r *pb.ChatRequest) { r.Messages[1].Blocks[0].GetToolUse().ArgumentsJson = nil }), "replacement contract"},
+		{"empty parameters bytes", reqFor(func(r *pb.ChatRequest) { r.Tools[0].ParametersJson = nil }), "replacement contract"},
+		{"malformed arguments", reqFor(func(r *pb.ChatRequest) { r.Messages[1].Blocks[0].GetToolUse().ArgumentsJson = []byte(`[1,2]`) }), "replacement contract"},
+		{"malformed parameters", reqFor(func(r *pb.ChatRequest) { r.Tools[0].ParametersJson = []byte(`"nope"`) }), "replacement contract"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			before := *calls
+			_, herr := send(t, srv, "warmer", tc.payload)
+			if herr == nil {
+				t.Fatalf("contract violation accepted")
+			}
+			if herr.Code != pb.ErrorCode_ERROR_CODE_INVALID_ARGUMENT {
+				t.Errorf("code = %v, want INVALID_ARGUMENT", herr.Code)
+			}
+			if !strings.Contains(herr.Message, tc.want) {
+				t.Errorf("message %q does not contain %q", herr.Message, tc.want)
+			}
+			if *calls != before {
+				t.Fatalf("upstream called %d times after a contract violation; must be 0", *calls-before)
 			}
 		})
 	}

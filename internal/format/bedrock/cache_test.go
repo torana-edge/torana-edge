@@ -36,17 +36,17 @@ func TestCachePointRoundTrip(t *testing.T) {
 		t.Fatalf("unmarshal: %v", err)
 	}
 
-	if chat.Messages[0].Role != engine.RoleSystem || chat.Messages[0].CacheControl == nil {
+	if chat.Messages[0].Role != engine.RoleSystem || !hasCacheBlock(chat.Messages[0]) {
 		t.Errorf("system cachePoint not captured: %+v", chat.Messages[0])
 	}
-	if chat.Messages[1].CacheControl == nil {
+	if !hasCacheBlock(chat.Messages[1]) {
 		t.Errorf("user message cachePoint not captured: %+v", chat.Messages[1])
 	}
 	// The system text must not gain stray newlines from the cachePoint entry.
-	if chat.Messages[0].Content != "You are helpful." {
-		t.Errorf("system text polluted by cachePoint entry: %q", chat.Messages[0].Content)
+	if textOf(chat.Messages[0]) != "You are helpful." {
+		t.Errorf("system text polluted by cachePoint entry: %q", textOf(chat.Messages[0]))
 	}
-	if len(chat.Tools) != 1 || chat.Tools[0].CacheControl == nil {
+	if len(chat.Tools) != 1 || chat.Tools[0].CacheControl.IsAbsent() {
 		t.Errorf("tool cachePoint not captured: %+v", chat.Tools)
 	}
 

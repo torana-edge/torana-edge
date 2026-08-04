@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 
+	"github.com/torana-edge/torana-edge/examples/plugins/blockutil"
 	sdk "github.com/torana-edge/torana-plugin-sdk"
 	pb "github.com/torana-edge/torana-plugin-sdk/pb/v2"
 )
@@ -90,7 +91,7 @@ func init() {
 			// dispatcher → real sendPluginRequest → authorize (no budget) →
 			// framed NOT_CONFIGURED → classified *HostCallRefusalError.
 			_, err := sdk.SendRequest(
-				&pb.ChatRequest{Model: "gpt-x", Messages: []*pb.Message{{Role: "user", Content: "hi"}}},
+				&pb.ChatRequest{Model: "gpt-x", Messages: []*pb.Message{{Role: "user", Blocks: blockutil.TextBlocks("hi")}}},
 				sdk.SendRequestOptions{Provider: "oai", Path: "/v1/chat/completions"},
 			)
 			var refusal *sdk.HostCallRefusalError

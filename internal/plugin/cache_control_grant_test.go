@@ -56,14 +56,20 @@ func allRoleAndToolGrants(section string) bool {
 func TestCacheControlOnlyMutationSucceedsPerRole(t *testing.T) {
 	for _, role := range []string{"user", "assistant", "system", "tool", "developer", "other"} {
 		t.Run(role, func(t *testing.T) {
-			accepted := &pb.ChatRequest{Messages: []*pb.Message{{Role: role, Content: "c"}}}
+			accepted := &pb.ChatRequest{Messages: []*pb.Message{{Role: role, Blocks: []*pb.RequestBlock{{Kind: &pb.RequestBlock_Text{Text: &pb.RequestTextBlock{Text: "c"}}}}}}}
 			// Marker ADDED.
-			out := &pb.ChatRequest{Messages: []*pb.Message{{Role: role, Content: "c", CacheControlJson: marker()}}}
+			out := &pb.ChatRequest{Messages: []*pb.Message{{Role: role, Blocks: []*pb.RequestBlock{
+				{Kind: &pb.RequestBlock_Text{Text: &pb.RequestTextBlock{Text: "c"}}},
+				{Kind: &pb.RequestBlock_CacheBreakpoint{CacheBreakpoint: &pb.RequestCacheBreakpoint{MarkerJson: marker()}}},
+			}}}}
 			if err := verifyRequestMutation(accepted, out, ccOnly); err != nil {
 				t.Fatalf("marker add with only ir.cache_control.write: %v", err)
 			}
 			// Marker CHANGED (same position).
-			out2 := &pb.ChatRequest{Messages: []*pb.Message{{Role: role, Content: "c", CacheControlJson: []byte(`{"type":"ephemeral","ttl":"1h"}`)}}}
+			out2 := &pb.ChatRequest{Messages: []*pb.Message{{Role: role, Blocks: []*pb.RequestBlock{
+				{Kind: &pb.RequestBlock_Text{Text: &pb.RequestTextBlock{Text: "c"}}},
+				{Kind: &pb.RequestBlock_CacheBreakpoint{CacheBreakpoint: &pb.RequestCacheBreakpoint{MarkerJson: []byte(`{"type":"ephemeral","ttl":"1h"}`)}}},
+			}}}}
 			if err := verifyRequestMutation(out, out2, ccOnly); err != nil {
 				t.Fatalf("marker change with only ir.cache_control.write: %v", err)
 			}
@@ -90,8 +96,13 @@ func TestToolDefCacheControlOnlyMutationSucceeds(t *testing.T) {
 // ir.cache_control.write, marker mutations are rejected and name the missing
 // grant.
 func TestCacheControlMutationFailsWithoutTheGrant(t *testing.T) {
-	accepted := &pb.ChatRequest{Messages: []*pb.Message{{Role: "user", Content: "c"}}}
-	out := &pb.ChatRequest{Messages: []*pb.Message{{Role: "user", Content: "c", CacheControlJson: marker()}}}
+	accepted := &pb.ChatRequest{Messages: []*pb.Message{{Role: "user", Blocks: []*pb.RequestBlock{
+		{Kind: &pb.RequestBlock_Text{Text: &pb.RequestTextBlock{Text: "c"}}},
+	}}}}
+	out := &pb.ChatRequest{Messages: []*pb.Message{{Role: "user", Blocks: []*pb.RequestBlock{
+		{Kind: &pb.RequestBlock_Text{Text: &pb.RequestTextBlock{Text: "c"}}},
+		{Kind: &pb.RequestBlock_CacheBreakpoint{CacheBreakpoint: &pb.RequestCacheBreakpoint{MarkerJson: marker()}}},
+	}}}}
 	err := verifyRequestMutation(accepted, out, allRoleAndToolGrants)
 	if err == nil {
 		t.Fatal("marker mutation must fail without ir.cache_control.write even with every role grant")
@@ -112,7 +123,7 @@ func TestCacheControlMutationFailsWithoutTheGrant(t *testing.T) {
 // TestOnlyCacheControlGrantCannotAuthorizeOtherFields — with ONLY
 // ir.cache_control.write, every non-marker mutation is rejected. The
 // per-field sweep mirrors the reflection-driven mutation suite: each
-// descriptor field of Message, ToolDef, ToolCall, and the top-level request
+// descriptor field of Message, ToolDef, RequestToolUseBlock, and the top-level request
 // is mutated and must FAIL under the cc-only grant unless it is
 // cache_control_json.
 func TestOnlyCacheControlGrantCannotAuthorizeOtherFields(t *testing.T) {
@@ -128,7 +139,7 @@ func TestOnlyCacheControlGrantCannotAuthorizeOtherFields(t *testing.T) {
 		{"ToolDef", func(r *pb.ChatRequest) protoMessage { return r.Tools[0] }, map[string]bool{
 			"cache_control_json": true,
 		}},
-		{"ToolCall", func(r *pb.ChatRequest) protoMessage { return r.Messages[1].ToolCalls[0] }, nil},
+		{"RequestToolUseBlock", func(r *pb.ChatRequest) protoMessage { return r.Messages[1].Blocks[1].GetToolUse() }, nil},
 	}
 	for _, tbl := range msgTables {
 		t.Run(tbl.name, func(t *testing.T) {
@@ -183,8 +194,13 @@ func TestOnlyCacheControlGrantCannotAuthorizeOtherFields(t *testing.T) {
 // needs BOTH grants; with either alone the entire output is rejected
 // atomically (the hook gets an error, so nothing is applied).
 func TestMixedCacheControlAndContentRequiresUnion(t *testing.T) {
-	accepted := &pb.ChatRequest{Messages: []*pb.Message{{Role: "user", Content: "c"}}}
-	out := &pb.ChatRequest{Messages: []*pb.Message{{Role: "user", Content: "changed", CacheControlJson: marker()}}}
+	accepted := &pb.ChatRequest{Messages: []*pb.Message{{Role: "user", Blocks: []*pb.RequestBlock{
+		{Kind: &pb.RequestBlock_Text{Text: &pb.RequestTextBlock{Text: "c"}}},
+	}}}}
+	out := &pb.ChatRequest{Messages: []*pb.Message{{Role: "user", Blocks: []*pb.RequestBlock{
+		{Kind: &pb.RequestBlock_Text{Text: &pb.RequestTextBlock{Text: "changed"}}},
+		{Kind: &pb.RequestBlock_CacheBreakpoint{CacheBreakpoint: &pb.RequestCacheBreakpoint{MarkerJson: marker()}}},
+	}}}}
 
 	if err := verifyRequestMutation(accepted, out, ccOnly); err == nil {
 		t.Fatal("content change passed under only ir.cache_control.write")
@@ -221,13 +237,23 @@ func TestMixedCacheControlAndContentRequiresUnion(t *testing.T) {
 // marker-carrying message add/delete charges the section too.
 func TestMarkerMoveCannotEvade(t *testing.T) {
 	accepted := &pb.ChatRequest{Messages: []*pb.Message{
-		{Role: "user", Content: "a", CacheControlJson: marker()},
-		{Role: "user", Content: "b"},
+		{Role: "user", Blocks: []*pb.RequestBlock{
+			{Kind: &pb.RequestBlock_Text{Text: &pb.RequestTextBlock{Text: "a"}}},
+			{Kind: &pb.RequestBlock_CacheBreakpoint{CacheBreakpoint: &pb.RequestCacheBreakpoint{MarkerJson: marker()}}},
+		}},
+		{Role: "user", Blocks: []*pb.RequestBlock{
+			{Kind: &pb.RequestBlock_Text{Text: &pb.RequestTextBlock{Text: "b"}}},
+		}},
 	}}
 	// Same bytes, marker moved to the other message.
 	out := &pb.ChatRequest{Messages: []*pb.Message{
-		{Role: "user", Content: "a"},
-		{Role: "user", Content: "b", CacheControlJson: marker()},
+		{Role: "user", Blocks: []*pb.RequestBlock{
+			{Kind: &pb.RequestBlock_Text{Text: &pb.RequestTextBlock{Text: "a"}}},
+		}},
+		{Role: "user", Blocks: []*pb.RequestBlock{
+			{Kind: &pb.RequestBlock_Text{Text: &pb.RequestTextBlock{Text: "b"}}},
+			{Kind: &pb.RequestBlock_CacheBreakpoint{CacheBreakpoint: &pb.RequestCacheBreakpoint{MarkerJson: marker()}}},
+		}},
 	}}
 	if err := verifyRequestMutation(accepted, out, ccOnly); err != nil {
 		t.Fatalf("a marker move with unchanged bytes must be a cache-control change only, got: %v", err)
@@ -239,7 +265,9 @@ func TestMarkerMoveCannotEvade(t *testing.T) {
 	// Delete a marker-carrying message: cache-control AND the role section
 	// change.
 	del := &pb.ChatRequest{Messages: []*pb.Message{
-		{Role: "user", Content: "b"},
+		{Role: "user", Blocks: []*pb.RequestBlock{
+			{Kind: &pb.RequestBlock_Text{Text: &pb.RequestTextBlock{Text: "b"}}},
+		}},
 	}}
 	delRole := func(section string) bool { return section == "ir.messages.write.user" }
 	if err := verifyRequestMutation(accepted, del, delRole); err == nil {
@@ -377,8 +405,11 @@ func ccBaseRequest() *pb.ChatRequest {
 	return &pb.ChatRequest{
 		Model: "m",
 		Messages: []*pb.Message{
-			{Role: "system", Content: "s"},
-			{Role: "user", Content: "u", ToolCalls: []*pb.ToolCall{{Id: "c1", Name: "read", ArgumentsJson: []byte(`{}`)}}},
+			{Role: "system", Blocks: []*pb.RequestBlock{{Kind: &pb.RequestBlock_Text{Text: &pb.RequestTextBlock{Text: "s"}}}}},
+			{Role: "user", Blocks: []*pb.RequestBlock{
+				{Kind: &pb.RequestBlock_Text{Text: &pb.RequestTextBlock{Text: "u"}}},
+				{Kind: &pb.RequestBlock_ToolUse{ToolUse: &pb.RequestToolUseBlock{Id: "c1", Name: "read", ArgumentsJson: []byte(`{}`)}}},
+			}},
 		},
 		Tools: []*pb.ToolDef{{Name: "read", Description: "d", ParametersJson: []byte(`{}`)}},
 	}

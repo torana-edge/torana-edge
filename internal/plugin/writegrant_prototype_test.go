@@ -10,6 +10,7 @@ import (
 
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protoreflect"
+	"google.golang.org/protobuf/reflect/protoregistry"
 
 	pb "github.com/torana-edge/torana-plugin-sdk/pb/v2"
 )
@@ -119,11 +120,11 @@ func cacheControlChanged(accepted, out *pb.ChatRequest) bool {
 	}
 	for i := 0; i < n; i++ {
 		var a, b []byte
-		if i < len(accepted.Messages) && len(accepted.Messages[i].CacheControlJson) > 0 {
-			a = accepted.Messages[i].CacheControlJson
+		if i < len(accepted.Messages) {
+			a = cacheMarkers(accepted.Messages[i])
 		}
-		if i < len(out.Messages) && len(out.Messages[i].CacheControlJson) > 0 {
-			b = out.Messages[i].CacheControlJson
+		if i < len(out.Messages) {
+			b = cacheMarkers(out.Messages[i])
 		}
 		if !bytes.Equal(a, b) {
 			return true
@@ -154,14 +155,67 @@ func cacheControlChanged(accepted, out *pb.ChatRequest) bool {
 // the oracle must agree with the production fingerprint, or a marker-only
 // mutation would look like a role change to the exact comparison.
 func sameMessageWithoutMarker(a, b *pb.Message) bool {
-	ca := proto.Clone(a).(*pb.Message)
-	cb := proto.Clone(b).(*pb.Message)
-	ca.CacheControlJson, cb.CacheControlJson = nil, nil
+	ca := stripCacheBlocks(a)
+	cb := stripCacheBlocks(b)
 	return proto.Equal(ca, cb)
 }
 
 // sameToolWithoutMarker compares two tool definitions EXCLUDING
 // cache_control_json, for the same reason.
+func stripCacheBlocks(m *pb.Message) *pb.Message {
+	ca := proto.Clone(m).(*pb.Message)
+	var kept []*pb.RequestBlock
+	for _, b := range ca.Blocks {
+		if b.GetCacheBreakpoint() != nil {
+			continue
+		}
+		if tr := b.GetToolResult(); tr != nil {
+			tr.Content = nestedWithoutCache(tr.Content)
+		}
+		kept = append(kept, b)
+	}
+	ca.Blocks = kept
+	return ca
+}
+
+// cacheMarkers encodes a message's cache carriers POSITIONALLY, mirroring
+// the production cache section: each marker frame carries the outer block
+// index, the carrier tag (1 top-level, 2 nested), the nested index (-1 for
+// top-level), and the marker bytes. A marker moved between any two positions
+// changes the encoding even when its bytes are unchanged.
+func cacheMarkers(m *pb.Message) []byte {
+	var out []byte
+	for bi, b := range m.Blocks {
+		if cb := b.GetCacheBreakpoint(); cb != nil {
+			out = append(out, markerFrame(bi, 1, -1, cb.MarkerJson)...)
+		}
+		if tr := b.GetToolResult(); tr != nil {
+			for ci, c := range tr.Content {
+				if cb := c.GetCacheBreakpoint(); cb != nil {
+					out = append(out, markerFrame(bi, 2, ci, cb.MarkerJson)...)
+				}
+			}
+		}
+	}
+	return out
+}
+
+func markerFrame(blockIdx int, carrier int, nestedIdx int, bytes []byte) []byte {
+	var f []byte
+	var b [8]byte
+	binary.LittleEndian.PutUint64(b[:], uint64(blockIdx))
+	f = append(f, b[:]...)
+	binary.LittleEndian.PutUint64(b[:], uint64(carrier))
+	f = append(f, b[:]...)
+	binary.LittleEndian.PutUint64(b[:], uint64(nestedIdx))
+	f = append(f, b[:]...)
+	var n [8]byte
+	binary.LittleEndian.PutUint64(n[:], uint64(len(bytes)))
+	f = append(f, n[:]...)
+	f = append(f, bytes...)
+	return f
+}
+
 func sameToolWithoutMarker(a, b *pb.ToolDef) bool {
 	ca := proto.Clone(a).(*pb.ToolDef)
 	cb := proto.Clone(b).(*pb.ToolDef)
@@ -224,10 +278,10 @@ func baseRequest() *pb.ChatRequest {
 		Temperature: &temp,
 		MaxTokens:   &maxTok,
 		Messages: []*pb.Message{
-			{Role: "system", Content: "you are helpful"},
-			{Role: "user", Content: "A"},
-			{Role: "assistant", ToolCalls: []*pb.ToolCall{{Id: "c1", Name: "read", ArgumentsJson: []byte(`{"p":1}`)}}},
-			{Role: "tool", ToolCallId: "c1", ToolName: "read", Content: "B"},
+			{Role: "system", Blocks: []*pb.RequestBlock{{Kind: &pb.RequestBlock_Text{Text: &pb.RequestTextBlock{Text: "you are helpful"}}}}},
+			{Role: "user", Blocks: []*pb.RequestBlock{{Kind: &pb.RequestBlock_Text{Text: &pb.RequestTextBlock{Text: "A"}}}}},
+			{Role: "assistant", Blocks: []*pb.RequestBlock{{Kind: &pb.RequestBlock_ToolUse{ToolUse: &pb.RequestToolUseBlock{Id: "c1", Name: "read", ArgumentsJson: []byte(`{"p":1}`)}}}}},
+			{Role: "tool", Blocks: []*pb.RequestBlock{{Kind: &pb.RequestBlock_ToolResult{ToolResult: &pb.RequestToolResultBlock{ToolCallId: "c1", ToolName: "read", Content: []*pb.ToolResultContentBlock{{Kind: &pb.ToolResultContentBlock_Text{Text: &pb.ToolResultTextBlock{Text: "B"}}}}}}}}},
 		},
 		Tools: []*pb.ToolDef{{Name: "read", Description: "read a file", ParametersJson: []byte(`{"type":"object"}`)}},
 	}
@@ -246,22 +300,24 @@ func mutations() []mutation {
 		{
 			name:      "same-role content edit",
 			wantRoles: []string{"tool"},
-			apply:     func(r *pb.ChatRequest) { r.Messages[3].Content = "B'" },
+			apply: func(r *pb.ChatRequest) {
+				r.Messages[3].Blocks[0].GetToolResult().Content[0].Kind = &pb.ToolResultContentBlock_Text{Text: &pb.ToolResultTextBlock{Text: "B'"}}
+			},
 		},
 		{
 			// Unframed concatenation makes these two indistinguishable.
 			name:      "field boundary shift",
 			wantRoles: []string{"tool"},
 			apply: func(r *pb.ChatRequest) {
-				r.Messages[3].ToolName = "read" + r.Messages[3].Content
-				r.Messages[3].Content = ""
+				r.Messages[3].Blocks[0].GetToolResult().ToolName = "read" + r.Messages[3].Blocks[0].GetToolResult().Content[0].GetText().Text
+				r.Messages[3].Blocks[0].GetToolResult().Content[0].GetText().Text = ""
 			},
 		},
 		{
 			name:      "message inserted",
 			wantRoles: []string{"user"},
 			apply: func(r *pb.ChatRequest) {
-				r.Messages = append(r.Messages, &pb.Message{Role: "user", Content: "C"})
+				r.Messages = append(r.Messages, &pb.Message{Role: "user", Blocks: []*pb.RequestBlock{{Kind: &pb.RequestBlock_Text{Text: &pb.RequestTextBlock{Text: "C"}}}}})
 			},
 		},
 		{
@@ -272,7 +328,7 @@ func mutations() []mutation {
 		{
 			name:      "tool call arguments rewritten",
 			wantRoles: []string{"assistant"},
-			apply:     func(r *pb.ChatRequest) { r.Messages[2].ToolCalls[0].ArgumentsJson = []byte(`{"p":2}`) },
+			apply:     func(r *pb.ChatRequest) { r.Messages[2].Blocks[0].GetToolUse().ArgumentsJson = []byte(`{"p":2}`) },
 		},
 		{
 			name:  "tool schema rewritten",
@@ -319,11 +375,18 @@ func TestCompareSectionsDetectsEveryMutation(t *testing.T) {
 func TestSafeFingerprintDetectsEveryMutation(t *testing.T) {
 	for _, m := range mutations() {
 		t.Run(m.name, func(t *testing.T) {
-			accepted := fingerprintRequestSections(baseRequest())
+			accepted, err := fingerprintRequestSections(baseRequest())
+			if err != nil {
+				t.Fatal(err)
+			}
 			out := baseRequest()
 			m.apply(out)
 
-			if accepted.equal(fingerprintRequestSections(out)) {
+			fpOut, err := fingerprintRequestSections(out)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if accepted.equal(fpOut) {
 				t.Fatal("mutation invisible to the fingerprint — not safe for enforcement")
 			}
 		})
@@ -336,7 +399,15 @@ func TestUnmodifiedRequestIsUnchanged(t *testing.T) {
 	if c := compareSections(baseRequest(), baseRequest()); c.any() {
 		t.Fatalf("unmodified request reported as changed: %+v", c)
 	}
-	if !fingerprintRequestSections(baseRequest()).equal(fingerprintRequestSections(baseRequest())) {
+	fp1, err := fingerprintRequestSections(baseRequest())
+	if err != nil {
+		t.Fatal(err)
+	}
+	fp2, err := fingerprintRequestSections(baseRequest())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !fp1.equal(fp2) {
 		t.Fatal("unmodified request produced different fingerprints")
 	}
 }
@@ -358,6 +429,19 @@ func TestEveryProtoFieldHasAGrantSection(t *testing.T) {
 	}{
 		{"ChatRequest", &pb.ChatRequest{}, chatRequestFieldSections},
 		{"Message", &pb.Message{}, messageFieldSections},
+		{"RequestBlock", &pb.RequestBlock{}, requestBlockFieldSections},
+		{"RequestTextBlock", &pb.RequestTextBlock{}, requestTextBlockFieldSections},
+		{"RequestThinkingBlock", &pb.RequestThinkingBlock{}, requestThinkingBlockFieldSections},
+		{"RequestRedactedThinkingBlock", &pb.RequestRedactedThinkingBlock{}, requestRedactedThinkingBlockFieldSections},
+		{"RequestToolUseBlock", &pb.RequestToolUseBlock{}, requestToolUseBlockFieldSections},
+		{"RequestToolResultBlock", &pb.RequestToolResultBlock{}, requestToolResultBlockFieldSections},
+		{"ToolResultContentBlock", &pb.ToolResultContentBlock{}, toolResultContentBlockFieldSections},
+		{"ToolResultTextBlock", &pb.ToolResultTextBlock{}, toolResultTextBlockFieldSections},
+		{"ToolResultUnknownBlock", &pb.ToolResultUnknownBlock{}, toolResultUnknownBlockFieldSections},
+		{"RequestUnknownBlock", &pb.RequestUnknownBlock{}, requestUnknownBlockFieldSections},
+		{"RequestTrailingSignatureBlock", &pb.RequestTrailingSignatureBlock{}, requestTrailingSignatureBlockFieldSections},
+		{"RequestCacheBreakpoint", &pb.RequestCacheBreakpoint{}, requestCacheBreakpointFieldSections},
+		{"ToolResultCacheBreakpoint", &pb.ToolResultCacheBreakpoint{}, toolResultCacheBreakpointFieldSections},
 		{"ToolCall", &pb.ToolCall{}, toolCallFieldSections},
 		{"ToolDef", &pb.ToolDef{}, toolDefFieldSections},
 	} {
@@ -402,7 +486,9 @@ func TestEveryGovernedFieldIsDetected(t *testing.T) {
 	targets := []target{
 		{"ChatRequest", func(r *pb.ChatRequest) proto.Message { return r }, chatRequestFieldSections},
 		{"Message", func(r *pb.ChatRequest) proto.Message { return r.Messages[3] }, messageFieldSections},
-		{"ToolCall", func(r *pb.ChatRequest) proto.Message { return r.Messages[2].ToolCalls[0] }, toolCallFieldSections},
+		{"RequestBlock", func(r *pb.ChatRequest) proto.Message { return r.Messages[2].Blocks[0] }, requestBlockFieldSections},
+		{"RequestTextBlock", func(r *pb.ChatRequest) proto.Message { return r.Messages[1].Blocks[0].GetText() }, requestTextBlockFieldSections},
+		{"RequestToolUseBlock", func(r *pb.ChatRequest) proto.Message { return r.Messages[2].Blocks[0].GetToolUse() }, requestToolUseBlockFieldSections},
 		{"ToolDef", func(r *pb.ChatRequest) proto.Message { return r.Tools[0] }, toolDefFieldSections},
 	}
 
@@ -419,12 +505,31 @@ func TestEveryGovernedFieldIsDetected(t *testing.T) {
 			t.Run(tg.name+"/"+name, func(t *testing.T) {
 				accepted := baseRequest()
 				out := baseRequest()
-				mutateField(t, tg.pick(out), fd)
+				if tg.name == "Message" && name == "blocks" {
+					// Appending an arm-less RequestBlock would be an
+					// UNREPRESENTABLE body (the SDK fingerprint errors and
+					// the verification fails — pinned by
+					// TestFingerprintErrorCannotBecomeSectionDigest).
+					// Mutate the list with a VALID block so this row
+					// proves the list change is detected.
+					out.Messages[3].Blocks = append(out.Messages[3].Blocks,
+						&pb.RequestBlock{Kind: &pb.RequestBlock_Text{Text: &pb.RequestTextBlock{Text: "x"}}})
+				} else {
+					mutateField(t, tg.pick(out), fd)
+				}
 
 				if !compareSections(accepted, out).any() {
 					t.Error("exact comparison did not detect a change to this field")
 				}
-				if fingerprintRequestSections(accepted).equal(fingerprintRequestSections(out)) {
+				fpAcc, err := fingerprintRequestSections(accepted)
+				if err != nil {
+					t.Fatal(err)
+				}
+				fpOut, err := fingerprintRequestSections(out)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if fpAcc.equal(fpOut) {
 					t.Error("fingerprint did not detect a change to this field")
 				}
 			})
@@ -450,6 +555,15 @@ func mutateField(t *testing.T, m proto.Message, fd protoreflect.FieldDescriptor)
 		r.Set(fd, protoreflect.ValueOfInt32(int32(r.Get(fd).Int())+1))
 	case fd.Kind() == protoreflect.DoubleKind:
 		r.Set(fd, protoreflect.ValueOfFloat64(r.Get(fd).Float()+1))
+	case fd.Kind() == protoreflect.MessageKind:
+		// Oneof block members (RequestBlock.text etc.) and nested message
+		// fields: replace with a fresh empty message of the same kind — a
+		// change the verifier must notice (the original had content).
+		mt, merr := protoregistry.GlobalTypes.FindMessageByName(fd.Message().FullName())
+		if merr != nil {
+			t.Fatalf("no message type for %s: %v", fd.Name(), merr)
+		}
+		r.Set(fd, protoreflect.ValueOfMessage(mt.New()))
 	default:
 		t.Fatalf("no mutation strategy for %s of kind %s", fd.Name(), fd.Kind())
 	}
@@ -488,7 +602,15 @@ func TestOptionalPresenceIsNotForgeable(t *testing.T) {
 	b := baseRequest()
 	b.MaxTokens, b.Temperature = nil, &zero64
 
-	if fingerprintRequestSections(a).equal(fingerprintRequestSections(b)) {
+	fpA, err := fingerprintRequestSections(a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fpB, err := fingerprintRequestSections(b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fpA.equal(fpB) {
 		t.Fatal("presence of one optional field is forgeable as another's value")
 	}
 	if !compareSections(a, b).any() {
@@ -508,7 +630,15 @@ func TestNegativeZeroIsDetected(t *testing.T) {
 	if !compareSections(a, b).any() {
 		t.Fatal("exact comparison treated -0.0 and +0.0 as identical")
 	}
-	if fingerprintRequestSections(a).equal(fingerprintRequestSections(b)) {
+	fpA, err := fingerprintRequestSections(a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fpB, err := fingerprintRequestSections(b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fpA.equal(fpB) {
 		t.Fatal("fingerprint treated -0.0 and +0.0 as identical")
 	}
 }
@@ -529,12 +659,20 @@ func oldSchemeRoleDigest(req *pb.ChatRequest, role string) [32]byte {
 		}
 		var idx [8]byte
 		binary.LittleEndian.PutUint64(idx[:], uint64(i))
-		writeFramed(h, idx[:], []byte(m.Role), []byte(m.Content), m.ContentPartsJson,
-			[]byte(m.Thinking), []byte(m.ThinkingSignature), []byte(m.ContentSignature),
-			[]byte(m.TrailingSignature), []byte(m.RedactedThinking),
-			[]byte(m.ToolCallId), []byte(m.ToolName), m.CacheControlJson)
-		for _, tc := range m.ToolCalls {
-			writeFramed(h, []byte(tc.Id), []byte(tc.Name), tc.ArgumentsJson, []byte(tc.Signature))
+		// The round-1 framing, expressed over the block model: message
+		// fields and tool-call fields concatenated into ONE role stream.
+		// Ten message fields + index + role = TWELVE frames per message, so
+		// a moved call (four frames) keeps the whole stream at a multiple
+		// of four — the exact periodicity the collision needs.
+		writeFramed(h, idx[:], []byte(m.Role), []byte(oldSchemeText(m)), []byte(oldSchemeContentParts(m)),
+			[]byte(oldSchemeThinking(m)), []byte(oldSchemeThinkingSig(m)), []byte(oldSchemeContentSig(m)),
+			[]byte(oldSchemeTrailingSig(m)), []byte(oldSchemeRedacted(m)), []byte(oldSchemeToolResultID(m)),
+			[]byte(oldSchemeToolResultName(m)), oldSchemeCacheMarker(m))
+		for _, b := range m.Blocks {
+			if b.GetToolUse() != nil {
+				writeFramed(h, []byte(b.GetToolUse().Id), []byte(b.GetToolUse().Name),
+					b.GetToolUse().ArgumentsJson, []byte(b.GetToolUse().Signature))
+			}
 		}
 	}
 	var count [8]byte
@@ -543,6 +681,91 @@ func oldSchemeRoleDigest(req *pb.ChatRequest, role string) [32]byte {
 	var sum [32]byte
 	copy(sum[:], h.Sum(nil))
 	return sum
+}
+
+// The round-1 field derivations from the block model. Each reads the FIRST
+// occurrence of the corresponding block kind; the boundary-shift fixtures
+// place exactly one of each.
+func oldSchemeText(m *pb.Message) string { return firstText(m).GetText() }
+func oldSchemeContentParts(m *pb.Message) string {
+	// The round-1 content_parts slot, derived from the SECOND text block
+	// (absent when there is none): the replica needs ten message fields to
+	// reproduce the twelve-frames-per-message round-1 layout.
+	var seen bool
+	for _, b := range m.Blocks {
+		if b.GetText() != nil {
+			if seen {
+				return b.GetText().GetText()
+			}
+			seen = true
+		}
+	}
+	return ""
+}
+func oldSchemeThinking(m *pb.Message) string    { return firstThinking(m).GetText() }
+func oldSchemeThinkingSig(m *pb.Message) string { return firstThinking(m).GetSignature() }
+func oldSchemeContentSig(m *pb.Message) string  { return firstText(m).GetSignature() }
+func oldSchemeTrailingSig(m *pb.Message) string { return firstTrailing(m).GetSignature() }
+func oldSchemeRedacted(m *pb.Message) string    { return firstRedacted(m).GetData() }
+func oldSchemeToolResultID(m *pb.Message) string {
+	if tr := firstToolResult(m); tr != nil {
+		return tr.ToolCallId
+	}
+	return ""
+}
+func oldSchemeToolResultName(m *pb.Message) string {
+	if tr := firstToolResult(m); tr != nil {
+		return tr.ToolName
+	}
+	return ""
+}
+func oldSchemeCacheMarker(m *pb.Message) []byte {
+	for _, b := range m.Blocks {
+		if b.GetCacheBreakpoint() != nil {
+			return b.GetCacheBreakpoint().MarkerJson
+		}
+	}
+	return nil
+}
+func firstText(m *pb.Message) *pb.RequestTextBlock {
+	for _, b := range m.Blocks {
+		if b.GetText() != nil {
+			return b.GetText()
+		}
+	}
+	return &pb.RequestTextBlock{}
+}
+func firstThinking(m *pb.Message) *pb.RequestThinkingBlock {
+	for _, b := range m.Blocks {
+		if b.GetThinking() != nil {
+			return b.GetThinking()
+		}
+	}
+	return &pb.RequestThinkingBlock{}
+}
+func firstTrailing(m *pb.Message) *pb.RequestTrailingSignatureBlock {
+	for _, b := range m.Blocks {
+		if b.GetTrailingSignature() != nil {
+			return b.GetTrailingSignature()
+		}
+	}
+	return &pb.RequestTrailingSignatureBlock{}
+}
+func firstRedacted(m *pb.Message) *pb.RequestRedactedThinkingBlock {
+	for _, b := range m.Blocks {
+		if b.GetRedactedThinking() != nil {
+			return b.GetRedactedThinking()
+		}
+	}
+	return &pb.RequestRedactedThinkingBlock{}
+}
+func firstToolResult(m *pb.Message) *pb.RequestToolResultBlock {
+	for _, b := range m.Blocks {
+		if b.GetToolResult() != nil {
+			return b.GetToolResult()
+		}
+	}
+	return nil
 }
 
 // boundaryShiftMessages builds the reviewer's reproduction: a same-role pair
@@ -558,30 +781,43 @@ func oldSchemeRoleDigest(req *pb.ChatRequest, role string) [32]byte {
 // preimage identical.
 func boundaryShiftMessages() (accepted, out *pb.ChatRequest) {
 	idx1 := string([]byte{1, 0, 0, 0, 0, 0, 0, 0})
-	call := &pb.ToolCall{Id: idx1, Name: "user", ArgumentsJson: []byte("S"), Signature: "T"}
-	periodic := &pb.Message{
-		Role:              "user",
-		Content:           "S",
-		ContentPartsJson:  []byte("T"),
-		Thinking:          idx1,
-		ThinkingSignature: "user",
-		ContentSignature:  "S",
-		TrailingSignature: "T",
-		RedactedThinking:  idx1,
-		ToolCallId:        "user",
-		ToolName:          "S",
-		CacheControlJson:  []byte("T"),
-	}
+	// The round-1 framing concatenates each message's index, role, nine
+	// message fields and its tool-call frames into ONE byte stream. The
+	// periodic message below is built so that stream is exactly four
+	// repetitions of (idx1, "user", "S", "T") whether the call sits on
+	// message 0 or message 1: the call's four frames (idx1, user, S, T)
+	// are byte-identical to the next message's leading frames, and the
+	// message fields cycle (S, T, idx1, user) — so moving the call between
+	// the messages leaves the round-1 preimage identical. The fixture is
+	// deliberately NOT a validated request (raw fixture bytes).
+	call := &pb.RequestToolUseBlock{Id: idx1, Name: "user", ArgumentsJson: []byte("S"), Signature: "T"}
+	// Message fields cycle (S, T, idx1, user) — text, contentParts (second
+	// text block), thinking, thinkingSig, contentSig, trailingSig, redacted,
+	// toolResultID, toolResultName, cacheMarker — so the twelve frames of
+	// index+role+fields are exactly three periods, and the whole stream
+	// (plus the moved four-frame call) stays at a multiple of four.
+	periodic := &pb.Message{Role: "user", Blocks: []*pb.RequestBlock{
+		{Kind: &pb.RequestBlock_Text{Text: &pb.RequestTextBlock{Text: "S", Signature: "S"}}},
+		{Kind: &pb.RequestBlock_Text{Text: &pb.RequestTextBlock{Text: "T"}}},
+		{Kind: &pb.RequestBlock_Thinking{Thinking: &pb.RequestThinkingBlock{Text: idx1, Signature: "user"}}},
+		{Kind: &pb.RequestBlock_TrailingSignature{TrailingSignature: &pb.RequestTrailingSignatureBlock{Signature: "T"}}},
+		{Kind: &pb.RequestBlock_RedactedThinking{RedactedThinking: &pb.RequestRedactedThinkingBlock{Data: idx1}}},
+		{Kind: &pb.RequestBlock_ToolResult{ToolResult: &pb.RequestToolResultBlock{ToolCallId: "user", ToolName: "S", Content: []*pb.ToolResultContentBlock{{Kind: &pb.ToolResultContentBlock_Text{Text: &pb.ToolResultTextBlock{Text: "T"}}}}}}},
+		{Kind: &pb.RequestBlock_CacheBreakpoint{CacheBreakpoint: &pb.RequestCacheBreakpoint{MarkerJson: []byte("T")}}},
+	}}
 
 	accepted = &pb.ChatRequest{Messages: []*pb.Message{
-		{Role: "user", Content: "M0", ToolCalls: []*pb.ToolCall{call}},
+		{Role: "user", Blocks: []*pb.RequestBlock{
+			{Kind: &pb.RequestBlock_Text{Text: &pb.RequestTextBlock{Text: "M0"}}},
+			{Kind: &pb.RequestBlock_ToolUse{ToolUse: call}},
+		}},
 		periodic,
 	}}
 	out = &pb.ChatRequest{Messages: []*pb.Message{
-		{Role: "user", Content: "M0"}, // call removed
+		{Role: "user", Blocks: []*pb.RequestBlock{{Kind: &pb.RequestBlock_Text{Text: &pb.RequestTextBlock{Text: "M0"}}}}}, // call removed
 	}}
 	moved := proto.Clone(periodic).(*pb.Message)
-	moved.ToolCalls = []*pb.ToolCall{call}
+	moved.Blocks = append(moved.Blocks, &pb.RequestBlock{Kind: &pb.RequestBlock_ToolUse{ToolUse: call}})
 	out.Messages = append(out.Messages, moved)
 	return accepted, out
 }
@@ -607,11 +843,19 @@ func TestMessageFingerprintUnambiguousAcrossBoundaryShift(t *testing.T) {
 			"for this to reproduce the reviewer's reproduction")
 	}
 	// 3. The production fingerprint must NOT collide.
-	if fingerprintRequestSections(accepted).equal(fingerprintRequestSections(out)) {
+	fpA, err := fingerprintRequestSections(accepted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fpB, err := fingerprintRequestSections(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fpA.equal(fpB) {
 		t.Fatal("message fingerprint still ambiguous across a tool-call boundary shift")
 	}
 	// 4. verifyRequestMutation must reject with NO grants.
-	err := verifyRequestMutation(accepted, out, grant())
+	err = verifyRequestMutation(accepted, out, grant())
 	if err == nil {
 		t.Fatal("the boundary shift must be rejected without any grant")
 	}
@@ -628,34 +872,89 @@ func TestMessageFingerprintUnambiguousAcrossBoundaryShift(t *testing.T) {
 // and the index pins every digest to its position.
 func TestMessageFingerprintBoundaryShiftAcrossThreeMessages(t *testing.T) {
 	idx1 := string([]byte{1, 0, 0, 0, 0, 0, 0, 0})
-	call := &pb.ToolCall{Id: idx1, Name: "user", ArgumentsJson: []byte("S"), Signature: "T"}
-	periodic := &pb.Message{
-		Role: "user", Content: "S", ContentPartsJson: []byte("T"),
-		Thinking: idx1, ThinkingSignature: "user", ContentSignature: "S",
-		TrailingSignature: "T", RedactedThinking: idx1,
-		ToolCallId: "user", ToolName: "S", CacheControlJson: []byte("T"),
-	}
+	call := &pb.RequestToolUseBlock{Id: idx1, Name: "user", ArgumentsJson: []byte("S"), Signature: "T"}
+	periodic := &pb.Message{Role: "user", Blocks: []*pb.RequestBlock{
+		{Kind: &pb.RequestBlock_Text{Text: &pb.RequestTextBlock{Text: "S", Signature: "S"}}},
+		{Kind: &pb.RequestBlock_Text{Text: &pb.RequestTextBlock{Text: "T"}}},
+		{Kind: &pb.RequestBlock_Thinking{Thinking: &pb.RequestThinkingBlock{Text: idx1, Signature: "user"}}},
+		{Kind: &pb.RequestBlock_TrailingSignature{TrailingSignature: &pb.RequestTrailingSignatureBlock{Signature: "T"}}},
+		{Kind: &pb.RequestBlock_RedactedThinking{RedactedThinking: &pb.RequestRedactedThinkingBlock{Data: idx1}}},
+		{Kind: &pb.RequestBlock_ToolResult{ToolResult: &pb.RequestToolResultBlock{ToolCallId: "user", ToolName: "S", Content: []*pb.ToolResultContentBlock{{Kind: &pb.ToolResultContentBlock_Text{Text: &pb.ToolResultTextBlock{Text: "T"}}}}}}},
+		{Kind: &pb.RequestBlock_CacheBreakpoint{CacheBreakpoint: &pb.RequestCacheBreakpoint{MarkerJson: []byte("T")}}},
+	}}
 
 	accepted := &pb.ChatRequest{Messages: []*pb.Message{
-		{Role: "user", Content: "M0", ToolCalls: []*pb.ToolCall{call}},
+		{Role: "user", Blocks: []*pb.RequestBlock{
+			{Kind: &pb.RequestBlock_Text{Text: &pb.RequestTextBlock{Text: "M0"}}},
+			{Kind: &pb.RequestBlock_ToolUse{ToolUse: call}},
+		}},
 		periodic,
 		proto.Clone(periodic).(*pb.Message),
 	}}
 	out := &pb.ChatRequest{Messages: []*pb.Message{
-		{Role: "user", Content: "M0"},
+		{Role: "user", Blocks: []*pb.RequestBlock{{Kind: &pb.RequestBlock_Text{Text: &pb.RequestTextBlock{Text: "M0"}}}}},
 		proto.Clone(periodic).(*pb.Message),
 	}}
 	last := proto.Clone(periodic).(*pb.Message)
-	last.ToolCalls = []*pb.ToolCall{call}
+	last.Blocks = append(last.Blocks, &pb.RequestBlock{Kind: &pb.RequestBlock_ToolUse{ToolUse: call}})
 	out.Messages = append(out.Messages, last)
 
 	if !compareSections(accepted, out).any() {
 		t.Fatal("exact comparison missed the three-message boundary shift")
 	}
-	if fingerprintRequestSections(accepted).equal(fingerprintRequestSections(out)) {
+	fpA, err := fingerprintRequestSections(accepted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fpB, err := fingerprintRequestSections(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fpA.equal(fpB) {
 		t.Fatal("fingerprint missed a tool-call boundary shift across three messages")
 	}
 	if err := verifyRequestMutation(accepted, out, grant()); err == nil {
 		t.Fatal("the three-message boundary shift must be rejected without any grant")
+	}
+}
+
+// TestFingerprintErrorCannotBecomeSectionDigest (batch-1 review finding 2):
+// an SDK fingerprint error (an unrepresentable body — an arm-less block,
+// a typed-nil arm) must FAIL the whole verification, never become a
+// comparable section digest. Two erroring projections at the same
+// role/position must not compare equal.
+func TestFingerprintErrorCannotBecomeSectionDigest(t *testing.T) {
+	valid := baseRequest()
+	broken := baseRequest()
+	broken.Messages[3].Blocks = append(broken.Messages[3].Blocks, &pb.RequestBlock{})
+
+	// The section fingerprint errors on the broken side.
+	if _, err := fingerprintRequestSections(broken); err == nil {
+		t.Fatal("an arm-less block must error the section fingerprint, not hash")
+	}
+	// verifyGrantedSections propagates the error (never a section verdict).
+	if err := verifyGrantedSections(valid, broken, grant()); err == nil {
+		t.Fatal("verifyGrantedSections must propagate the fingerprint error")
+	}
+	// verifyRequestMutation propagates too.
+	if err := verifyRequestMutation(valid, broken, grant()); err == nil {
+		t.Fatal("verifyRequestMutation must propagate the fingerprint error")
+	}
+	// The all-grants fast path relies on the already-pinned owning
+	// REPLACEMENT-VALIDATOR boundary (the host runs it before dispatch):
+	// the arm-less block is rejected THERE, never hashed. Pinning the
+	// boundary directly — verifyFastPath itself must not need a second
+	// validator copy.
+	if err := broken.ValidateReplacement(); err == nil {
+		t.Fatal("ValidateReplacement must reject an arm-less block (the fast-path boundary)")
+	}
+	// And the fast path is only reachable for validated bodies: a body
+	// that passes validation never errors the section fingerprint.
+	fp, err := fingerprintRequestSections(valid)
+	if err != nil {
+		t.Fatalf("a validated body must fingerprint cleanly: %v", err)
+	}
+	if fp.equal(requestSections{}) {
+		t.Fatal("a validated body must produce a non-zero section digest")
 	}
 }

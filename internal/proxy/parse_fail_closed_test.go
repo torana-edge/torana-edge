@@ -13,11 +13,14 @@ package proxy
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"io"
 	"log"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
@@ -100,11 +103,12 @@ func parseFailE2EApproved(t *testing.T, format string, order []string, body stri
 			if err != nil {
 				t.Fatalf("BundleDigestForDir: %v", err)
 			}
+			perms := manifestPermissions("../../examples/plugins/" + order[0])
 			provCfg.Plugins = provider.PluginsConfig{
 				Dir:   "../../examples/plugins",
 				Order: order,
 				Approvals: map[string]provider.PluginApproval{
-					order[0]: {Digest: digest, FailureMode: approvalFailureMode},
+					order[0]: {Digest: digest, Permissions: perms, FailureMode: approvalFailureMode},
 				},
 			}
 		} else {
@@ -538,4 +542,198 @@ func TestParseFailClosedBlockModeLimiter(t *testing.T) {
 	if n := limiterBucketCount(srvAllow); n != 0 {
 		t.Fatalf("allow-mode: %d limiter buckets materialized; must be 0", n)
 	}
+}
+
+// TestParseFailClosedAmbiguousArmRowsTransport — the provider-arm matrix
+// rows that are NOT caught by generic JSON-text validation must yield the
+// golden value-free 400 through the REAL configured-format transport: zero
+// request hooks (a mutating plugin never sees the request), zero response
+// hooks (observer cache absent), zero limiter buckets, zero upstream, byte-
+// identical under plugin presence AND both failure modes.
+func TestParseFailClosedAmbiguousArmRowsTransport(t *testing.T) {
+	requireWASM(t, "../../examples/plugins/test-trapper/plugin.wasm")
+	requireWASM(t, "../../examples/plugins/test-observer/plugin.wasm")
+	requireWASM(t, "../../examples/plugins/test-mutator/plugin.wasm")
+
+	rows := []struct {
+		format string
+		body   string
+	}{
+		{"bedrock", `{"modelId":"m","system":[{"text":"hi","cachePoint":{"type":"default"}}],"messages":[{"role":"user","content":[{"text":"hi"}]}]}`},
+		{"bedrock", `{"modelId":"m","toolConfig":{"tools":[{"toolSpec":{"name":"r","inputSchema":{"json":{"type":"object"}}},"cachePoint":{"type":"default"}}]},"messages":[{"role":"user","content":[{"text":"hi"}]}]}`},
+		{"bedrock", `{"modelId":"m","messages":[{"role":"developer","content":[{"text":"hi"}]}]}`},
+		{"gemini", `{"model":"m","contents":[{"role":"user","parts":[{"text":"x","inlineData":{"mimeType":"image/png"}}]}]}`},
+		{"gemini", `{"model":"m","contents":[{"role":"user","parts":[{"inlineData":{"mimeType":"image/png"},"fileData":{"fileUri":"gs://b/x"}}]}]}`},
+		{"gemini", `{"model":"m","systemInstruction":{"parts":[{"inlineData":{"mimeType":"image/png"}}]},"contents":[{"role":"user","parts":[{"text":"hi"}]}]}`},
+		{"openai", `{"model":"m","messages":[{"role":"user","content":[{"text":"hi"}]}]}`},
+		{"anthropic", `{"model":"m","max_tokens":64,"messages":[{"role":"assistant","content":[{"type":"text","text":"hi","id":"c1","name":"r","input":{}}]}]}`},
+	}
+	for i, row := range rows {
+		t.Run(row.format+"/row"+string(rune('a'+i)), func(t *testing.T) {
+			// No plugins.
+			status, body, hits, srv := parseFailE2E(t, row.format, nil, row.body)
+			if status != http.StatusBadRequest || string(body) != goldenInvalidRequest(row.format) {
+				t.Fatalf("no-plugins 400 wrong: status=%d body=%s", status, body)
+			}
+			if n := atomic.LoadInt32(hits); n != 0 {
+				t.Fatalf("upstream called %d times; must be 0", n)
+			}
+			if n := limiterBucketCount(srv); n != 0 {
+				t.Fatalf("%d limiter buckets materialized; must be 0", n)
+			}
+
+			// Allow-mode observer: same golden 400, no hooks, no upstream,
+			// no limiter bucket.
+			statusA, bodyA, hitsA, srvA := parseFailE2E(t, row.format, []string{"test-observer"}, row.body)
+			if statusA != http.StatusBadRequest || !bytes.Equal(bodyA, body) {
+				t.Fatalf("allow-mode 400 differs from the no-plugins body: status=%d body=%s", statusA, bodyA)
+			}
+			if n := atomic.LoadInt32(hitsA); n != 0 {
+				t.Fatalf("upstream called %d times with the observer; must be 0", n)
+			}
+			if n := limiterBucketCount(srvA); n != 0 {
+				t.Fatalf("%d limiter buckets materialized with the observer; must be 0", n)
+			}
+			if v, ok := srvA.sharedCache.Get("observed_error_status"); ok {
+				t.Fatalf("a response hook ran with the observer: cache %q", v)
+			}
+
+			// Block-mode trapper: a request or response hook would swap the
+			// body — the golden 400 proves zero hooks ran.
+			statusB, bodyB, hitsB, srvB := parseFailE2E(t, row.format, []string{"test-trapper"}, row.body)
+			if statusB != http.StatusBadRequest || !bytes.Equal(bodyB, body) {
+				t.Fatalf("block-mode 400 differs from the no-plugins body: status=%d body=%s (a hook ran)", statusB, bodyB)
+			}
+			if strings.Contains(string(bodyB), "plugin_failure") {
+				t.Fatalf("body mentions plugin_failure: %s", bodyB)
+			}
+			if n := atomic.LoadInt32(hitsB); n != 0 {
+				t.Fatalf("upstream called %d times with the trapper; must be 0", n)
+			}
+			if n := limiterBucketCount(srvB); n != 0 {
+				t.Fatalf("%d limiter buckets materialized with the trapper; must be 0", n)
+			}
+
+			// A mutating request plugin must never see the request: had a
+			// before-request hook run, test-mutator would have produced a
+			// REPLACEMENT — the request would reach the adapter marshal (or
+			// upstream) and the golden 400 could not come back byte-identical.
+			_, bodyM, hitsM, srvM := parseFailE2E(t, row.format, []string{"test-mutator"}, row.body)
+			if !bytes.Equal(bodyM, body) {
+				t.Fatalf("mutator-mode 400 differs from the no-plugins body: %s", bodyM)
+			}
+			if n := atomic.LoadInt32(hitsM); n != 0 {
+				t.Fatalf("upstream called %d times with the mutator; must be 0", n)
+			}
+			if n := limiterBucketCount(srvM); n != 0 {
+				t.Fatalf("%d limiter buckets materialized with the mutator; must be 0", n)
+			}
+		})
+	}
+}
+
+// TestSchedulingValueFree400Transport — the SCHEDULING_UNSPECIFIED and
+// unknown-scheduling rows at the REAL configured-format transport boundary
+// (fold-in acceptance contract; currently SKIPPED because the gemini
+// adapter has no scheduling grammar yet): the golden value-free 400 with
+// ZERO request hooks, zero response hooks, zero limiter buckets, zero
+// upstream — under BOTH failure modes.
+//
+// The request-hook proof is NON-VACUOUS: the allow-mode row runs
+// test-trapper (which traps EVERY before-request invocation) overridden to
+// failure mode pass. If the local 400 ever ran a request hook, the trap
+// fires and the pass path forwards the request upstream — hits would be 1
+// and the body would be the upstream reply. (test-observer's before hook
+// leaves no trace on a skipped request and would prove nothing here.)
+func TestSchedulingValueFree400Transport(t *testing.T) {
+	requireWASM(t, "../../examples/plugins/test-trapper/plugin.wasm")
+	requireWASM(t, "../../examples/plugins/test-observer/plugin.wasm")
+
+	rows := []string{
+		`{"model":"m","contents":[{"role":"user","parts":[{"functionResponse":{"name":"read","response":{"output":"x"},"id":"c1","scheduling":"SCHEDULING_UNSPECIFIED"}}]}]}`,
+		`{"model":"m","contents":[{"role":"user","parts":[{"functionResponse":{"name":"read","response":{"output":"x"},"id":"c1","scheduling":"WHATEVER"}}]}]}`,
+	}
+	for i, body := range rows {
+		t.Run("gemini/scheduling"+string(rune('a'+i)), func(t *testing.T) {
+			// No plugins: golden 400, zero upstream, zero limiter buckets.
+			status, out, hits, srv := parseFailE2E(t, "gemini", nil, body)
+			if status != http.StatusBadRequest || string(out) != goldenInvalidRequest("gemini") {
+				t.Fatalf("no-plugins 400 wrong: status=%d body=%s", status, out)
+			}
+			if n := atomic.LoadInt32(hits); n != 0 {
+				t.Fatalf("upstream called %d times; must be 0", n)
+			}
+			if n := limiterBucketCount(srv); n != 0 {
+				t.Fatalf("%d limiter buckets materialized; must be 0", n)
+			}
+
+			// PASS-mode trapper: a request hook would trap and forward
+			// upstream — zero hits + the golden 400 prove NO hook ran.
+			statusP, bodyP, hitsP, srvP := parseFailE2EApproved(t, "gemini", []string{"test-trapper"}, body, http.StatusOK, "pass")
+			if statusP != http.StatusBadRequest || !bytes.Equal(bodyP, out) {
+				t.Fatalf("pass-mode trapper 400 differs from the no-plugins body: status=%d body=%s (a request hook ran and the request leaked upstream)", statusP, bodyP)
+			}
+			if n := atomic.LoadInt32(hitsP); n != 0 {
+				t.Fatalf("upstream called %d times with the pass-mode trapper; the trap fired, so a request hook RAN on the local 400", n)
+			}
+			if n := limiterBucketCount(srvP); n != 0 {
+				t.Fatalf("%d limiter buckets materialized with the pass-mode trapper; must be 0", n)
+			}
+
+			// BLOCK-mode trapper: same golden 400, zero upstream.
+			statusB, bodyB, hitsB, srvB := parseFailE2E(t, "gemini", []string{"test-trapper"}, body)
+			if statusB != http.StatusBadRequest || !bytes.Equal(bodyB, out) {
+				t.Fatalf("block-mode 400 differs from the no-plugins body: status=%d body=%s", statusB, bodyB)
+			}
+			if n := atomic.LoadInt32(hitsB); n != 0 {
+				t.Fatalf("upstream called %d times with the trapper; must be 0", n)
+			}
+			if n := limiterBucketCount(srvB); n != 0 {
+				t.Fatalf("%d limiter buckets materialized with the trapper; must be 0", n)
+			}
+
+			// Response-hook independence under BOTH failure modes: an
+			// observer would record observed_error_status if any response
+			// hook ran after the local 400. Allow-mode observer…
+			statusA, bodyA, _, srvA := parseFailE2E(t, "gemini", []string{"test-observer"}, body)
+			if statusA != http.StatusBadRequest || !bytes.Equal(bodyA, out) {
+				t.Fatalf("allow-mode observer 400 differs: status=%d body=%s", statusA, bodyA)
+			}
+			if v, ok := srvA.sharedCache.Get("observed_error_status"); ok {
+				t.Fatalf("a response hook ran with the allow-mode observer: cache %q", v)
+			}
+			// …and block-mode observer (the approval must carry the
+			// observer's manifest permissions, env.cache_get).
+			statusO, bodyO, _, srvO := parseFailE2EApproved(t, "gemini", []string{"test-observer"}, body, http.StatusOK, "block")
+			if statusO != http.StatusBadRequest || !bytes.Equal(bodyO, out) {
+				t.Fatalf("block-mode observer 400 differs: status=%d body=%s", statusO, bodyO)
+			}
+			if v, ok := srvO.sharedCache.Get("observed_error_status"); ok {
+				t.Fatalf("a response hook ran with the block-mode observer: cache %q", v)
+			}
+		})
+	}
+}
+
+// manifestPermissions reads the plugin.json permissions of a fixture
+// directory (the approval map must carry exactly the manifest's declared
+// permissions).
+func manifestPermissions(dir string) []string {
+	raw, err := os.ReadFile(filepath.Join(dir, "plugin.json"))
+	if err != nil {
+		return nil
+	}
+	var m struct {
+		Permissions []struct {
+			Name string `json:"name"`
+		} `json:"permissions"`
+	}
+	if json.Unmarshal(raw, &m) != nil {
+		return nil
+	}
+	var out []string
+	for _, p := range m.Permissions {
+		out = append(out, p.Name)
+	}
+	return out
 }

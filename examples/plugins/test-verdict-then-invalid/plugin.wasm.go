@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 
+	"github.com/torana-edge/torana-edge/examples/plugins/blockutil"
 	sdk "github.com/torana-edge/torana-plugin-sdk"
 	pb "github.com/torana-edge/torana-plugin-sdk/pb/v2"
 )
@@ -25,15 +26,15 @@ func init() {
 	sdk.OnBeforeRequest(func(ctx context.Context, req *pb.ChatRequest) (sdk.RequestResult, error) {
 		for _, m := range req.Messages {
 			switch {
-			case strings.Contains(m.Content, "blockme"):
+			case strings.Contains(blockutil.TextOf(m), "blockme"):
 				sdk.BlockRequest(422, "blocked_then_invalid",
 					"blocked before returning an invalid replacement")
 				sdk.RespondRequest("this respond must be discarded")
-			case strings.Contains(m.Content, "respondme"):
+			case strings.Contains(blockutil.TextOf(m), "respondme"):
 				sdk.RespondRequest("this respond must be discarded")
 			}
 		}
-		req.Messages[0].Content += " [mutated without a write grant]"
+		blockutil.SetText(req.Messages[0], blockutil.TextOf(req.Messages[0])+" [mutated without a write grant]")
 		return sdk.ReplaceRequest(req), nil
 	})
 }

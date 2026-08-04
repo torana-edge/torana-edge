@@ -584,6 +584,11 @@ type PluginPipeline struct {
 	// failed load — remains a hard error.
 	skipped []SkippedPlugin
 
+	// candidateValidator is the CONSTRUCTION-BOUND per-plugin candidate
+	// validator (see PluginConfig.CandidateValidator): immutable after
+	// NewPipeline, so requests can never race a mutation.
+	candidateValidator func(topo engine.TopologyFacts, current, replacement *pbv2.ChatRequest) error
+
 	mu        sync.Mutex
 	active    int
 	draining  bool
@@ -842,13 +847,14 @@ func reloadPipeline(runtime *wasm.Runtime, config PluginConfig) (*PluginPipeline
 		}
 	}
 	return &PluginPipeline{
-		plugins:      loaded,
-		runtime:      runtime,
-		skipped:      skipped,
-		drained:      make(chan struct{}),
-		closed:       make(chan struct{}),
-		streamKinds:  make(map[uint64]*pbconv.BlockKindTracker),
-		streamVerify: make(map[uint64]*streamVerifierState),
+		plugins:            loaded,
+		runtime:            runtime,
+		skipped:            skipped,
+		drained:            make(chan struct{}),
+		closed:             make(chan struct{}),
+		streamKinds:        make(map[uint64]*pbconv.BlockKindTracker),
+		streamVerify:       make(map[uint64]*streamVerifierState),
+		candidateValidator: config.CandidateValidator,
 	}, nil
 }
 
@@ -1030,14 +1036,33 @@ func (pp *PluginPipeline) RunBeforeRequest(ctx context.Context, reqID uint64, ch
 	pp.Acquire()
 	defer pp.Release()
 
+	// The accepted request: its typed host-only TOPOLOGY facts (variant,
+	// Code Assist flag, Responses layout) are restored onto the plugin
+	// replacement below — they are never in the ABI.
+	accepted := chat
+	acceptedTopo := engine.TopologyFacts{
+		CodeAssist:           accepted.CodeAssist,
+		OpenAIVariant:        accepted.OpenAIVariant,
+		ResponsesInputLayout: accepted.ResponsesInputLayout,
+	}
+
 	headers := snapshotHeaders(rawHeaders)
-	current := pbconv.ToPBChatRequest(chat)
+	// The accepted-input closure: the engine request is checked against the
+	// SDK replacement domain BEFORE the first hook — zero/multi-arm blocks,
+	// nested conflicts, non-finite floats, and out-of-range max tokens are
+	// refused here, never silently truncated by the conversion. This runs
+	// even with zero plugins (the no-plugin path): a request outside the
+	// closed domain is a host-local failure, never a silent fact drop.
+	current, err := pbconv.ToPBChatRequestChecked(chat)
+	if err != nil {
+		return nil, fmt.Errorf("invalid engine request: %w", err)
+	}
 	modified := false
 	for _, lp := range pp.plugins {
 		if !hasHook(lp.manifest, "run_before_request") {
 			continue
 		}
-		next, stop, err := pp.runBeforeRequestPlugin(ctx, reqID, lp, current, headers)
+		next, stop, err := pp.runBeforeRequestPlugin(ctx, reqID, lp, current, headers, acceptedTopo)
 		if err != nil {
 			return chat, err
 		}
@@ -1054,7 +1079,23 @@ func (pp *PluginPipeline) RunBeforeRequest(ctx context.Context, reqID uint64, ch
 		// No plugin produced output — skip the pb round-trip entirely.
 		return chat, nil
 	}
-	return pbconv.FromPBChatRequest(current), nil
+	chat, convErr := pbconv.FromPBChatRequest(current)
+	if convErr != nil {
+		// The replacement path's PB always passed SDK ValidateReplacement
+		// (or came from the checked boundary), so this is a defensive
+		// backstop.
+		return nil, fmt.Errorf("convert replacement: %w", convErr)
+	}
+	// The typed host-only TOPOLOGY facts survive the replacement: they are
+	// never in the ABI, so the plugin round-trip cannot carry them — the
+	// host restores them from the accepted request. A plugin can neither
+	// forge nor lose the variant/layout facts.
+	// EXACT restoration: the accepted request is the sole authority for
+	// the host-only topology facts.
+	chat.CodeAssist = accepted.CodeAssist
+	chat.OpenAIVariant = accepted.OpenAIVariant
+	chat.ResponsesInputLayout = accepted.ResponsesInputLayout
+	return chat, nil
 }
 
 // runBeforeRequestPlugin dispatches ONE plugin's run_before_request hook with
@@ -1066,7 +1107,7 @@ func (pp *PluginPipeline) RunBeforeRequest(ctx context.Context, reqID uint64, ch
 // Return values: next = accepted replacement (nil = none; the only way the
 // request changes), stop = a recorded block short-circuits the chain, err =
 // an immediate error for the caller (failure-mode block paths).
-func (pp *PluginPipeline) runBeforeRequestPlugin(ctx context.Context, reqID uint64, lp *loadedPlugin, current *pbv2.ChatRequest, headers map[string][]string) (next *pbv2.ChatRequest, stop bool, err error) {
+func (pp *PluginPipeline) runBeforeRequestPlugin(ctx context.Context, reqID uint64, lp *loadedPlugin, current *pbv2.ChatRequest, headers map[string][]string, topo engine.TopologyFacts) (next *pbv2.ChatRequest, stop bool, err error) {
 	// The per-plugin projection. The grant is checked on the exact executable
 	// plugin object (lp.plugin), never on a manifest declaration and never
 	// pipeline-wide.
@@ -1157,6 +1198,22 @@ func (pp *PluginPipeline) runBeforeRequestPlugin(ctx context.Context, reqID uint
 				}
 				// allow: skip this plugin's replacement; the previous current
 				// stays so the invalid output never chains downstream.
+				replacement = nil
+			}
+		}
+		if replacement != nil && pp.candidateValidator != nil {
+			// Provider-specific output invalidity (after the generic/grant
+			// validation): attributed to THIS plugin, with the settled
+			// failure semantics — pass rolls back to the accepted input,
+			// block produces the plugin refusal.
+			if cerr := pp.candidateValidator(topo, current, replacement); cerr != nil {
+				log.Printf("[plugin] %s run_before_request: rejected provider-invalid replacement: %v",
+					lp.manifest.Name, cerr)
+				pp.discardTrapped(reqID, lp.manifest.Name)
+				if lp.failureMode == "block" {
+					return nil, false, fmt.Errorf("plugin %s returned a provider-invalid request replacement: %w",
+						lp.manifest.Name, cerr)
+				}
 				replacement = nil
 			}
 		}
@@ -1562,6 +1619,16 @@ type PluginConfig struct {
 	Order     []string                   `json:"order"`
 	Config    map[string]json.RawMessage `json:"config"`
 	Approvals map[string]Approval        `json:"approvals,omitempty"`
+	// CandidateValidator runs AFTER the write-grant verification on every
+	// accepted replacement candidate (per-plugin result transaction):
+	// provider-specific output invalidity (e.g. a Code Assist envelope
+	// smuggling canonical members) is attributed to the exact plugin —
+	// pass rolls back to the accepted input, block produces the plugin
+	// refusal. Set at CONSTRUCTION (immutable, race-free); the closure
+	// captures the format policy, the accepted host TOPOLOGY arrives per
+	// request via RunBeforeRequest. Format policy stays out of the
+	// pipeline core.
+	CandidateValidator func(topo engine.TopologyFacts, current, replacement *pbv2.ChatRequest) error
 	// HostVersion is build metadata supplied by the executable. It is never
 	// persisted in operator configuration.
 	HostVersion string `json:"-"`

@@ -3,12 +3,13 @@ package pbconv
 import (
 	"encoding/json"
 	"fmt"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/torana-edge/torana-edge/internal/engine"
 	pb "github.com/torana-edge/torana-plugin-sdk/pb/v2"
 )
 
-func ToPBChatRequest(c *engine.ChatRequest) *pb.ChatRequest {
+func toPBChatRequest(c *engine.ChatRequest) *pb.ChatRequest {
 	if c == nil {
 		return nil
 	}
@@ -31,30 +32,21 @@ func ToPBChatRequest(c *engine.ChatRequest) *pb.ChatRequest {
 		*out.TopP = *c.TopP
 	}
 
-	if len(c.ProviderExtensions) > 0 {
-		out.ProviderExtensionsJson, _ = json.Marshal(c.ProviderExtensions)
-	}
-	if len(c.SafetySettings) > 0 {
-		out.SafetySettingsJson, _ = json.Marshal(c.SafetySettings)
-	}
-	if len(c.ToranaMeta) > 0 {
-		out.ToranaMetaJson, _ = json.Marshal(c.ToranaMeta)
-	}
+	out.ProviderExtensionsJson = c.ProviderExtensions.Bytes()
+	out.SafetySettingsJson = c.SafetySettings.Bytes()
+	out.ToranaMetaJson = c.ToranaMeta.Bytes()
 
 	for _, m := range c.Messages {
 		out.Messages = append(out.Messages, toPBMessage(m))
 	}
 
 	for _, t := range c.Tools {
-		paramsJson, _ := json.Marshal(t.Parameters)
 		td := &pb.ToolDef{
-			Name:           t.Name,
-			Description:    t.Description,
-			ParametersJson: paramsJson,
-			Strict:         t.Strict,
-		}
-		if len(t.CacheControl) > 0 {
-			td.CacheControlJson, _ = json.Marshal(t.CacheControl)
+			Name:             t.Name,
+			Description:      t.Description,
+			ParametersJson:   t.Parameters.Bytes(),
+			Strict:           t.Strict,
+			CacheControlJson: t.CacheControl.Bytes(),
 		}
 		out.Tools = append(out.Tools, td)
 	}
@@ -62,9 +54,16 @@ func ToPBChatRequest(c *engine.ChatRequest) *pb.ChatRequest {
 	return out
 }
 
-func FromPBChatRequest(c *pb.ChatRequest) *engine.ChatRequest {
+// FromPBChatRequest converts a canonical PB request into the engine form.
+// It is ERROR-RETURNING: the required object fields (tool arguments and
+// tool schemas) are reconstructed through the validating wrappers, so a PB
+// carrying malformed JSON cannot silently become a nil/partial engine
+// value. Every call site's input either came from ToPBChatRequest (validated
+// bytes) or from a replacement that passed SDK ValidateReplacement, so the
+// error path is the defensive backstop, not the normal flow.
+func FromPBChatRequest(c *pb.ChatRequest) (*engine.ChatRequest, error) {
 	if c == nil {
-		return nil
+		return nil, nil
 	}
 	out := &engine.ChatRequest{
 		Model:         c.Model,
@@ -86,23 +85,45 @@ func FromPBChatRequest(c *pb.ChatRequest) *engine.ChatRequest {
 	}
 
 	if len(c.ProviderExtensionsJson) > 0 {
-		json.Unmarshal(c.ProviderExtensionsJson, &out.ProviderExtensions)
+		v, err := engine.ParseOptionalJSONObject(c.ProviderExtensionsJson)
+		if err != nil {
+			return nil, fmt.Errorf("pb provider_extensions_json: %w", err)
+		}
+		out.ProviderExtensions = v
 	}
 	if len(c.SafetySettingsJson) > 0 {
-		json.Unmarshal(c.SafetySettingsJson, &out.SafetySettings)
+		v, err := engine.ParseOptionalJSONArray(c.SafetySettingsJson)
+		if err != nil {
+			return nil, fmt.Errorf("pb safety_settings_json: %w", err)
+		}
+		out.SafetySettings = v
 	}
 	if len(c.ToranaMetaJson) > 0 {
-		json.Unmarshal(c.ToranaMetaJson, &out.ToranaMeta)
+		v, err := engine.ParseOptionalJSONObject(c.ToranaMetaJson)
+		if err != nil {
+			return nil, fmt.Errorf("pb torana_meta_json: %w", err)
+		}
+		out.ToranaMeta = v
 	}
 
-	for _, m := range c.Messages {
-		out.Messages = append(out.Messages, fromPBMessage(m))
+	for i, m := range c.Messages {
+		if m == nil {
+			return nil, fmt.Errorf("pb messages[%d] is nil", i)
+		}
+		msg, err := fromPBMessage(m)
+		if err != nil {
+			return nil, err
+		}
+		out.Messages = append(out.Messages, msg)
 	}
 
-	for _, t := range c.Tools {
-		var params map[string]any
-		if len(t.ParametersJson) > 0 {
-			json.Unmarshal(t.ParametersJson, &params)
+	for i, t := range c.Tools {
+		if t == nil {
+			return nil, fmt.Errorf("pb tools[%d] is nil", i)
+		}
+		params, err := engine.ParseRequiredObjectOrEmpty(t.ParametersJson)
+		if err != nil {
+			return nil, fmt.Errorf("pb tool %q parameters_json: %w", t.Name, err)
 		}
 		td := engine.ToolDef{
 			Name:        t.Name,
@@ -111,12 +132,16 @@ func FromPBChatRequest(c *pb.ChatRequest) *engine.ChatRequest {
 			Strict:      t.Strict,
 		}
 		if len(t.CacheControlJson) > 0 {
-			json.Unmarshal(t.CacheControlJson, &td.CacheControl)
+			cc, cerr := engine.ParseOptionalJSONObject(t.CacheControlJson)
+			if cerr != nil {
+				return nil, fmt.Errorf("pb tool %q cache_control_json: %w", t.Name, cerr)
+			}
+			td.CacheControl = cc
 		}
 		out.Tools = append(out.Tools, td)
 	}
 
-	return out
+	return out, nil
 }
 
 func ToPBStreamEvent(e *engine.StreamEvent) *pb.StreamEvent {
@@ -433,70 +458,252 @@ func (t *BlockKindTracker) FromPBStreamEvent(e *pb.StreamEvent) (*engine.StreamE
 // its own narrow shape (ResponseMessage), so duplicating the request mapping
 // for it would claim fields the host cannot deliver on a response.
 
+// toPBMessage projects the ordered message body one-for-one onto the shared
+// pb/v2 shape. This is the REQUEST-PATH source of truth; the engine's
+// conversation.go fingerprint projection is pinned byte-equal to it by the
+// differential matrix.
 func toPBMessage(m engine.Message) *pb.Message {
-	msg := &pb.Message{
-		Role:              string(m.Role),
-		Content:           m.Content,
-		Thinking:          m.Thinking,
-		ThinkingSignature: m.ThinkingSignature,
-		RedactedThinking:  m.RedactedThinking,
-		ToolCallId:        m.ToolCallID,
-		ToolName:          m.ToolName,
-		TrailingSignature: m.TrailingSignature,
-		ContentSignature:  m.ContentSignature,
-	}
-	if len(m.ContentParts) > 0 {
-		msg.ContentPartsJson, _ = json.Marshal(m.ContentParts)
-	}
-	if len(m.CacheControl) > 0 {
-		msg.CacheControlJson, _ = json.Marshal(m.CacheControl)
-	}
-	for _, tc := range m.ToolCalls {
-		argsJson, _ := json.Marshal(tc.Arguments)
-		msg.ToolCalls = append(msg.ToolCalls, &pb.ToolCall{
-			Id:            tc.ID,
-			Name:          tc.Name,
-			ArgumentsJson: argsJson,
-			Signature:     tc.Signature,
-		})
+	msg := &pb.Message{Role: string(m.Role)}
+	for _, b := range m.Blocks {
+		rb := &pb.RequestBlock{}
+		switch {
+		case b.Text != nil:
+			rb.Kind = &pb.RequestBlock_Text{Text: &pb.RequestTextBlock{
+				Text: b.Text.Text, Signature: b.Text.Signature,
+				PartMetadataJson: b.Text.PartMetadataJson.Bytes(),
+			}}
+		case b.Thinking != nil:
+			rb.Kind = &pb.RequestBlock_Thinking{Thinking: &pb.RequestThinkingBlock{
+				Text: b.Thinking.Text, Signature: b.Thinking.Signature,
+				PartMetadataJson: b.Thinking.PartMetadataJson.Bytes(),
+			}}
+		case b.RedactedThinking != nil:
+			rb.Kind = &pb.RequestBlock_RedactedThinking{RedactedThinking: &pb.RequestRedactedThinkingBlock{Data: b.RedactedThinking.Data}}
+		case b.ToolUse != nil:
+			rb.Kind = &pb.RequestBlock_ToolUse{ToolUse: &pb.RequestToolUseBlock{
+				Id:               b.ToolUse.ID,
+				Name:             b.ToolUse.Name,
+				ArgumentsJson:    b.ToolUse.Arguments.Bytes(),
+				Signature:        b.ToolUse.Signature,
+				PartMetadataJson: b.ToolUse.PartMetadataJson.Bytes(),
+			}}
+		case b.ToolResult != nil:
+			tr := &pb.RequestToolResultBlock{
+				ToolCallId:       b.ToolResult.ToolCallID,
+				ToolName:         b.ToolResult.ToolName,
+				PartMetadataJson: b.ToolResult.PartMetadataJson.Bytes(),
+				Signature:        b.ToolResult.Signature,
+			}
+			if b.ToolResult.WillContinue != nil {
+				tr.WillContinue = proto.Bool(*b.ToolResult.WillContinue)
+			}
+			if b.ToolResult.Scheduling != nil {
+				tr.Scheduling = proto.String(*b.ToolResult.Scheduling)
+			}
+			for _, c := range b.ToolResult.Content {
+				tcb := &pb.ToolResultContentBlock{}
+				switch {
+				case c.Unknown != nil:
+					tcb.Kind = &pb.ToolResultContentBlock_Unknown{Unknown: &pb.ToolResultUnknownBlock{
+						Kind: c.Unknown.Kind, PayloadJson: c.Unknown.Payload.Bytes(),
+					}}
+				case c.CacheBreakpoint != nil:
+					tcb.Kind = &pb.ToolResultContentBlock_CacheBreakpoint{CacheBreakpoint: &pb.ToolResultCacheBreakpoint{
+						MarkerJson: c.CacheBreakpoint.Marker.Bytes(),
+					}}
+				default:
+					tcb.Kind = &pb.ToolResultContentBlock_Text{Text: &pb.ToolResultTextBlock{Text: c.Text}}
+				}
+				tr.Content = append(tr.Content, tcb)
+			}
+			rb.Kind = &pb.RequestBlock_ToolResult{ToolResult: tr}
+		case b.CacheBreakpoint != nil:
+			rb.Kind = &pb.RequestBlock_CacheBreakpoint{CacheBreakpoint: &pb.RequestCacheBreakpoint{
+				MarkerJson: b.CacheBreakpoint.Marker.Bytes(),
+			}}
+		case b.Unknown != nil:
+			rb.Kind = &pb.RequestBlock_Unknown{Unknown: &pb.RequestUnknownBlock{
+				Kind:             b.Unknown.Kind,
+				PayloadJson:      b.Unknown.Payload.Bytes(),
+				PartMetadataJson: b.Unknown.PartMetadataJson.Bytes(),
+				Signature:        b.Unknown.Signature,
+			}}
+		case b.TrailingSignature != nil:
+			rb.Kind = &pb.RequestBlock_TrailingSignature{TrailingSignature: &pb.RequestTrailingSignatureBlock{
+				Signature:        b.TrailingSignature.Signature,
+				PartMetadataJson: b.TrailingSignature.PartMetadataJson.Bytes(),
+			}}
+		}
+		msg.Blocks = append(msg.Blocks, rb)
 	}
 	return msg
 }
 
-func fromPBMessage(m *pb.Message) engine.Message {
+// fromPBMessage converts the ordered body back. TOTAL over arbitrary pb
+// graphs: nil blocks, typed-nil oneof arms, and malformed object bytes are
+// indexed refusals, never panics, never silent empties. The wrapper
+// reconstruction is the defensive backstop; validated inputs (host-produced
+// or SDK-gated) never reach the error path.
+func fromPBMessage(m *pb.Message) (engine.Message, error) {
 	if m == nil {
-		return engine.Message{}
+		return engine.Message{}, fmt.Errorf("pb message is nil")
 	}
-	msg := engine.Message{
-		Role:              engine.Role(m.Role),
-		Content:           m.Content,
-		Thinking:          m.Thinking,
-		ThinkingSignature: m.ThinkingSignature,
-		RedactedThinking:  m.RedactedThinking,
-		ToolCallID:        m.ToolCallId,
-		ToolName:          m.ToolName,
-		TrailingSignature: m.TrailingSignature,
-		ContentSignature:  m.ContentSignature,
-	}
-	if len(m.ContentPartsJson) > 0 {
-		json.Unmarshal(m.ContentPartsJson, &msg.ContentParts)
-	}
-	if len(m.CacheControlJson) > 0 {
-		json.Unmarshal(m.CacheControlJson, &msg.CacheControl)
-	}
-	for _, tc := range m.ToolCalls {
-		var args map[string]any
-		if len(tc.ArgumentsJson) > 0 {
-			json.Unmarshal(tc.ArgumentsJson, &args)
+	msg := engine.Message{Role: engine.Role(m.Role)}
+	for j, b := range m.Blocks {
+		if b == nil {
+			return engine.Message{}, fmt.Errorf("pb message blocks[%d] is nil", j)
 		}
-		msg.ToolCalls = append(msg.ToolCalls, engine.ToolCall{
-			ID:        tc.Id,
-			Name:      tc.Name,
-			Arguments: args,
-			Signature: tc.Signature,
-		})
+		blk, err := fromPBBlock(b, fmt.Sprintf("pb message blocks[%d]", j))
+		if err != nil {
+			return engine.Message{}, err
+		}
+		msg.Blocks = append(msg.Blocks, blk)
 	}
-	return msg
+	return msg, nil
+}
+
+func fromPBBlock(b *pb.RequestBlock, what string) (engine.Block, error) {
+	switch k := b.Kind.(type) {
+	case *pb.RequestBlock_Text:
+		if k.Text == nil {
+			return engine.Block{}, fmt.Errorf("%s text arm is a typed nil", what)
+		}
+		pm, err := pbPartMetadata(k.Text.PartMetadataJson, what+".text")
+		if err != nil {
+			return engine.Block{}, err
+		}
+		return engine.Block{Text: &engine.TextBlock{Text: k.Text.Text, Signature: k.Text.Signature, PartMetadataJson: pm}}, nil
+	case *pb.RequestBlock_Thinking:
+		if k.Thinking == nil {
+			return engine.Block{}, fmt.Errorf("%s thinking arm is a typed nil", what)
+		}
+		pm, err := pbPartMetadata(k.Thinking.PartMetadataJson, what+".thinking")
+		if err != nil {
+			return engine.Block{}, err
+		}
+		return engine.Block{Thinking: &engine.ThinkingBlock{Text: k.Thinking.Text, Signature: k.Thinking.Signature, PartMetadataJson: pm}}, nil
+	case *pb.RequestBlock_RedactedThinking:
+		if k.RedactedThinking == nil {
+			return engine.Block{}, fmt.Errorf("%s redacted_thinking arm is a typed nil", what)
+		}
+		return engine.Block{RedactedThinking: &engine.RedactedThinkingBlock{Data: k.RedactedThinking.Data}}, nil
+	case *pb.RequestBlock_ToolUse:
+		if k.ToolUse == nil {
+			return engine.Block{}, fmt.Errorf("%s tool_use arm is a typed nil", what)
+		}
+		args, err := engine.ParseRequiredObjectOrEmpty(k.ToolUse.ArgumentsJson)
+		if err != nil {
+			return engine.Block{}, fmt.Errorf("%s.tool_use arguments_json: %w", what, err)
+		}
+		pm, err := pbPartMetadata(k.ToolUse.PartMetadataJson, what+".tool_use")
+		if err != nil {
+			return engine.Block{}, err
+		}
+		return engine.Block{ToolUse: &engine.ToolUseBlock{
+			ID: k.ToolUse.Id, Name: k.ToolUse.Name, Arguments: args, Signature: k.ToolUse.Signature,
+			PartMetadataJson: pm,
+		}}, nil
+	case *pb.RequestBlock_ToolResult:
+		if k.ToolResult == nil {
+			return engine.Block{}, fmt.Errorf("%s tool_result arm is a typed nil", what)
+		}
+		pm, err := pbPartMetadata(k.ToolResult.PartMetadataJson, what+".tool_result")
+		if err != nil {
+			return engine.Block{}, err
+		}
+		tr := &engine.ToolResultBlock{
+			ToolCallID:       k.ToolResult.ToolCallId,
+			ToolName:         k.ToolResult.ToolName,
+			PartMetadataJson: pm,
+			Signature:        k.ToolResult.Signature,
+		}
+		if k.ToolResult.WillContinue != nil {
+			v := k.ToolResult.GetWillContinue()
+			tr.WillContinue = &v
+		}
+		if k.ToolResult.Scheduling != nil {
+			v := k.ToolResult.GetScheduling()
+			tr.Scheduling = &v
+		}
+		for c, cb := range k.ToolResult.Content {
+			if cb == nil {
+				return engine.Block{}, fmt.Errorf("%s.tool_result content[%d] is nil", what, c)
+			}
+			elem, err := fromPBToolResultContent(cb, fmt.Sprintf("%s.tool_result content[%d]", what, c))
+			if err != nil {
+				return engine.Block{}, err
+			}
+			tr.Content = append(tr.Content, elem)
+		}
+		return engine.Block{ToolResult: tr}, nil
+	case *pb.RequestBlock_CacheBreakpoint:
+		if k.CacheBreakpoint == nil {
+			return engine.Block{}, fmt.Errorf("%s cache_breakpoint arm is a typed nil", what)
+		}
+		marker, err := engine.ParseRequiredJSONObject(k.CacheBreakpoint.MarkerJson)
+		if err != nil {
+			return engine.Block{}, fmt.Errorf("%s.cache_breakpoint marker_json: %w", what, err)
+		}
+		return engine.Block{CacheBreakpoint: &engine.CacheBreakpointBlock{Marker: marker}}, nil
+	case *pb.RequestBlock_Unknown:
+		if k.Unknown == nil {
+			return engine.Block{}, fmt.Errorf("%s unknown arm is a typed nil", what)
+		}
+		payload, err := engine.ParseRequiredJSONObject(k.Unknown.PayloadJson)
+		if err != nil {
+			return engine.Block{}, fmt.Errorf("%s.unknown payload_json: %w", what, err)
+		}
+		pm, err := pbPartMetadata(k.Unknown.PartMetadataJson, what+".unknown")
+		if err != nil {
+			return engine.Block{}, err
+		}
+		return engine.Block{Unknown: &engine.UnknownBlock{
+			Kind: k.Unknown.Kind, Payload: payload, PartMetadataJson: pm, Signature: k.Unknown.Signature,
+		}}, nil
+	case *pb.RequestBlock_TrailingSignature:
+		if k.TrailingSignature == nil {
+			return engine.Block{}, fmt.Errorf("%s trailing_signature arm is a typed nil", what)
+		}
+		pm, err := pbPartMetadata(k.TrailingSignature.PartMetadataJson, what+".trailing_signature")
+		if err != nil {
+			return engine.Block{}, err
+		}
+		return engine.Block{TrailingSignature: &engine.TrailingSignatureBlock{
+			Signature: k.TrailingSignature.Signature, PartMetadataJson: pm,
+		}}, nil
+	default:
+		return engine.Block{}, fmt.Errorf("%s has no kind arm", what)
+	}
+}
+
+func fromPBToolResultContent(cb *pb.ToolResultContentBlock, what string) (engine.ToolResultContentBlock, error) {
+	switch k := cb.Kind.(type) {
+	case *pb.ToolResultContentBlock_Text:
+		if k.Text == nil {
+			return engine.ToolResultContentBlock{}, fmt.Errorf("%s text arm is a typed nil", what)
+		}
+		return engine.ToolResultContentBlock{Text: k.Text.Text}, nil
+	case *pb.ToolResultContentBlock_Unknown:
+		if k.Unknown == nil {
+			return engine.ToolResultContentBlock{}, fmt.Errorf("%s unknown arm is a typed nil", what)
+		}
+		payload, err := engine.ParseRequiredJSONObject(k.Unknown.PayloadJson)
+		if err != nil {
+			return engine.ToolResultContentBlock{}, fmt.Errorf("%s.unknown payload_json: %w", what, err)
+		}
+		return engine.ToolResultContentBlock{Unknown: &engine.UnknownBlock{Kind: k.Unknown.Kind, Payload: payload}}, nil
+	case *pb.ToolResultContentBlock_CacheBreakpoint:
+		if k.CacheBreakpoint == nil {
+			return engine.ToolResultContentBlock{}, fmt.Errorf("%s cache_breakpoint arm is a typed nil", what)
+		}
+		marker, err := engine.ParseRequiredJSONObject(k.CacheBreakpoint.MarkerJson)
+		if err != nil {
+			return engine.ToolResultContentBlock{}, fmt.Errorf("%s.cache_breakpoint marker_json: %w", what, err)
+		}
+		return engine.ToolResultContentBlock{CacheBreakpoint: &engine.CacheBreakpointBlock{Marker: marker}}, nil
+	default:
+		return engine.ToolResultContentBlock{}, fmt.Errorf("%s has no kind arm", what)
+	}
 }
 
 func ToPBChatResponse(r *engine.ChatResponse) *pb.ChatResponse {
@@ -604,4 +811,17 @@ func cloneBytes(b []byte) []byte {
 	out := make([]byte, len(b))
 	copy(out, b)
 	return out
+}
+
+// pbPartMetadata converts the pb bytes carrier to the engine object form:
+// ABSENT bytes stay ABSENT (never an invented `{}`); present bytes must be
+// a strict JSON object and stay byte-exact (a present `{}` is distinct
+// from absence). The SDK validator already gates the bytes; this is the
+// defensive backstop.
+func pbPartMetadata(raw []byte, what string) (engine.OptionalJSONObject, error) {
+	obj, err := engine.ParseOptionalJSONObject(raw)
+	if err != nil {
+		return engine.OptionalJSONObject{}, fmt.Errorf("%s part_metadata_json: %w", what, err)
+	}
+	return obj, nil
 }

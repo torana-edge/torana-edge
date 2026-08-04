@@ -7,6 +7,8 @@ import (
 
 	sdk "github.com/torana-edge/torana-plugin-sdk"
 	pb "github.com/torana-edge/torana-plugin-sdk/pb/v2"
+
+	"github.com/torana-edge/torana-edge/examples/plugins/blockutil"
 )
 
 func main() {}
@@ -36,8 +38,8 @@ func init() {
 			present = "true"
 		}
 		req.Messages = append(req.Messages, &pb.Message{
-			Role:    "assistant",
-			Content: fmt.Sprintf("observer auth=%s apikey=%s present=%s", auth, apikey, present),
+			Role:   "assistant",
+			Blocks: blockutil.TextBlocks(fmt.Sprintf("observer auth=%s apikey=%s present=%s", auth, apikey, present)),
 		})
 		return sdk.ReplaceRequest(req), nil
 	})

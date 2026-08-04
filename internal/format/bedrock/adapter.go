@@ -7,9 +7,10 @@ package bedrock
 import (
 	"encoding/json"
 	"fmt"
-	"strings"
+	"math"
 
 	"github.com/torana-edge/torana-edge/internal/engine"
+	"github.com/torana-edge/torana-edge/internal/engine/pbconv"
 	"github.com/torana-edge/torana-edge/internal/format"
 )
 
@@ -55,9 +56,9 @@ type bedrockThinking struct {
 }
 
 type bedrockToolUse struct {
-	ToolUseID string         `json:"toolUseId"`
-	Name      string         `json:"name"`
-	Input     map[string]any `json:"input"`
+	ToolUseID string          `json:"toolUseId"`
+	Name      string          `json:"name"`
+	Input     json.RawMessage `json:"input"` // raw lexemes, verbatim
 }
 
 type bedrockToolResult struct {
@@ -83,7 +84,7 @@ type bedrockToolSpec struct {
 }
 
 type bedrockSchema struct {
-	JSON map[string]any `json:"json"`
+	JSON json.RawMessage `json:"json"` // raw JSON Schema lexemes, verbatim
 }
 
 type bedrockSystemBlock struct {
@@ -112,62 +113,81 @@ func (a *Adapter) Unmarshal(rawBody []byte) (*engine.ChatRequest, error) {
 
 	chat := &engine.ChatRequest{Model: req.ModelID}
 
-	// Parse system blocks
+	// Parse system blocks: text blocks in wire order with their positional
+	// cachePoint elements projected as CacheBreakpoint blocks.
 	if len(req.System) > 0 {
-		sysText, sysCache, err := parseSystemBlocks(req.System)
+		sys, err := parseSystemBlocks(req.System)
 		if err != nil {
 			return nil, fmt.Errorf("bedrock: unmarshal system: %w", err)
 		}
-		if len(sysText) > 0 {
-			chat.Messages = append(chat.Messages, engine.Message{
-				Role:         engine.RoleSystem,
-				Content:      sysText,
-				CacheControl: sysCache,
-			})
+		if len(sys) > 0 {
+			chat.Messages = append(chat.Messages, engine.Message{Role: engine.RoleSystem, Blocks: sys})
 		}
 	}
 
-	// Parse messages
+	// Parse messages: ONE engine message per wire message — provider message
+	// boundaries and roles stay intact; tool results ride their user message
+	// at their exact position (no synthetic RoleTool split).
 	for _, bm := range req.Messages {
-		blocks, err := parseContentBlocks(bm.Content)
+		blocks, rawEls, err := parseContentBlocks(bm.Content)
 		if err != nil {
 			return nil, fmt.Errorf("bedrock: unmarshal message content: %w", err)
 		}
-
-		msgs, leadingCache := blocksToMessages(bm.Role, blocks)
-		// A cachePoint before any content in this wire message caches the
-		// prefix ending at the previous message.
-		if leadingCache != nil && len(chat.Messages) > 0 {
-			prev := &chat.Messages[len(chat.Messages)-1]
-			if prev.CacheControl == nil {
-				prev.CacheControl = leadingCache
-			}
+		msg, leading, err := contentBlocksToMessage(bm.Role, blocks, rawEls)
+		if err != nil {
+			return nil, fmt.Errorf("bedrock message: %w", err)
 		}
-		chat.Messages = append(chat.Messages, msgs...)
+		// A cachePoint before any content in this wire message closes the
+		// prefix ending at the PREVIOUS message: attach it as the last block
+		// of that message (the covered content).
+		if !leadingIsZero(leading) && len(chat.Messages) > 0 {
+			prev := &chat.Messages[len(chat.Messages)-1]
+			prev.Blocks = append(prev.Blocks, engine.Block{CacheBreakpoint: &engine.CacheBreakpointBlock{Marker: leading}})
+		}
+		chat.Messages = append(chat.Messages, msg)
 	}
 
 	// Parse tools: a {"cachePoint":...} entry marks a breakpoint after the
 	// preceding tool definitions.
 	if req.ToolConfig != nil {
 		for _, t := range req.ToolConfig.Tools {
-			if t.CachePoint != nil && t.ToolSpec == nil {
+			// The toolConfig entries obey the same single-arm grammar:
+			// toolSpec XOR cachePoint; an entry with both would drop one
+			// fact by switch precedence, an entry with neither is
+			// malformed — both refused, never silently skipped.
+			switch {
+			case t.ToolSpec != nil && t.CachePoint != nil:
+				return nil, fmt.Errorf("bedrock: toolConfig entry carries both toolSpec and cachePoint")
+			case t.ToolSpec == nil && t.CachePoint == nil:
+				return nil, fmt.Errorf("bedrock: toolConfig entry has no toolSpec and no cachePoint")
+			case t.CachePoint != nil:
 				if n := len(chat.Tools); n > 0 {
-					chat.Tools[n-1].CacheControl = t.CachePoint
+					cc, cerr := engine.ParseRequiredJSONObject(mustMarshalB(t.CachePoint))
+					if cerr != nil {
+						return nil, fmt.Errorf("bedrock tool cache_control: %w", cerr)
+					}
+					chat.Tools[n-1].CacheControl, _ = engine.ParseOptionalJSONObject(cc.Bytes())
 				}
-				continue
+			default:
+				// t.ToolSpec != nil: a real tool definition.
+				params, err := engine.ParseRequiredObjectOrEmpty(t.ToolSpec.InputSchema.JSON)
+				if err != nil {
+					return nil, fmt.Errorf("tool %q input schema: %w", t.ToolSpec.Name, err)
+				}
+				chat.Tools = append(chat.Tools, engine.ToolDef{
+					Name:        t.ToolSpec.Name,
+					Description: t.ToolSpec.Description,
+					Parameters:  params,
+				})
 			}
-			if t.ToolSpec == nil {
-				continue
-			}
-			td := engine.ToolDef{
-				Name:        t.ToolSpec.Name,
-				Description: t.ToolSpec.Description,
-				Parameters:  t.ToolSpec.InputSchema.JSON,
-			}
-			chat.Tools = append(chat.Tools, td)
 		}
 	}
 
+	if req.InferenceConfig != nil && req.InferenceConfig.MaxTokens != nil &&
+		(*req.InferenceConfig.MaxTokens < 1 || *req.InferenceConfig.MaxTokens > math.MaxInt32) {
+		return nil, fmt.Errorf("bedrock: maxTokens %d is outside 1..%d",
+			*req.InferenceConfig.MaxTokens, math.MaxInt32)
+	}
 	if req.InferenceConfig != nil {
 		chat.MaxTokens = req.InferenceConfig.MaxTokens
 		chat.Temperature = req.InferenceConfig.Temperature
@@ -178,151 +198,323 @@ func (a *Adapter) Unmarshal(rawBody []byte) (*engine.ChatRequest, error) {
 	// Bedrock Converse has no stream field — streaming is a separate API (ConverseStream).
 	chat.Stream = false
 
-	var raw map[string]any
-	if err := json.Unmarshal(rawBody, &raw); err == nil {
-		delete(raw, "modelId")
-		delete(raw, "system")
-		delete(raw, "messages")
-		delete(raw, "toolConfig")
-		delete(raw, "inferenceConfig")
-		if len(raw) > 0 {
-			chat.ProviderExtensions = raw
-		}
+	// Provider extensions: original body minus the canonical fields, deleted
+	// in fixed order (deterministic; unknown members keep lexemes + order).
+	ext, xerr := engine.ParseOptionalJSONObject(rawBody)
+	if xerr != nil {
+		return nil, fmt.Errorf("bedrock provider extensions: %w", xerr)
+	}
+	ext, xerr = ext.WithoutMembers("modelId", "system", "messages", "toolConfig", "inferenceConfig")
+	if xerr != nil {
+		return nil, fmt.Errorf("bedrock provider extensions: %w", xerr)
+	}
+	if ext, xerr = format.NormalizeExtensionObject(ext); xerr != nil {
+		return nil, fmt.Errorf("bedrock provider extensions: %w", xerr)
+	}
+	if !ext.IsAbsent() {
+		chat.ProviderExtensions = ext
 	}
 
 	return chat, nil
 }
 
-// parseSystemBlocks parses the system array into a concatenated string plus
-// any cache breakpoint marker found among the blocks.
-func parseSystemBlocks(raw json.RawMessage) (string, map[string]any, error) {
+// parseSystemBlocks projects the system array onto ordered blocks: text
+// blocks in wire order; cachePoint elements become CacheBreakpoint blocks at
+// their position. A leading cachePoint (before any text) is preserved at
+// position 0 — the canonical positional form.
+func parseSystemBlocks(raw json.RawMessage) ([]engine.Block, error) {
 	var blocks []bedrockSystemBlock
-	if err := json.Unmarshal(raw, &blocks); err != nil {
-		return "", nil, err
-	}
-	var parts []string
-	var cache map[string]any
-	for _, b := range blocks {
-		if b.CachePoint != nil {
-			cache = b.CachePoint
-			continue
-		}
-		parts = append(parts, b.Text)
-	}
-	return strings.Join(parts, "\n"), cache, nil
-}
-
-// parseContentBlocks unmarshals the content JSON as an array of bedrockContentBlock.
-func parseContentBlocks(raw json.RawMessage) ([]bedrockContentBlock, error) {
-	var blocks []bedrockContentBlock
 	if err := json.Unmarshal(raw, &blocks); err != nil {
 		return nil, err
 	}
-	return blocks, nil
-}
-
-// blocksToMessages converts content blocks into one or more engine.Message values.
-// Text blocks are concatenated into a single message. Tool use and tool result blocks
-// each produce their own message. A cachePoint block attaches to the message
-// produced by the blocks before it (positional breakpoint); a cachePoint that
-// precedes all content is returned as leadingCache for the caller to attach
-// to the previous message.
-func blocksToMessages(role string, blocks []bedrockContentBlock) (msgs []engine.Message, leadingCache map[string]any) {
-	var textParts []string
-	var thinkingText string
-	var thinkingSig string
-
-	irRole := mapRole(role)
-
-	flushText := func() {
-		if len(textParts) > 0 || thinkingText != "" {
-			msgs = append(msgs, engine.Message{
-				Role:              irRole,
-				Content:           strings.Join(textParts, ""),
-				Thinking:          thinkingText,
-				ThinkingSignature: thinkingSig,
-			})
-			textParts = nil
-			thinkingText = ""
-			thinkingSig = ""
+	var out []engine.Block
+	for _, b := range blocks {
+		// The system entries obey the same single-arm grammar: text XOR
+		// cachePoint. An entry with both would drop one arm by switch
+		// precedence; an entry with neither is malformed.
+		switch {
+		case b.Text != "" && b.CachePoint != nil:
+			return nil, fmt.Errorf("bedrock: system entry carries both text and cachePoint")
+		case b.Text == "" && b.CachePoint == nil:
+			return nil, fmt.Errorf("bedrock: system entry has no text and no cachePoint")
+		case b.CachePoint != nil:
+			marker, err := engine.ParseRequiredJSONObject(mustMarshalB(b.CachePoint))
+			if err != nil {
+				return nil, fmt.Errorf("system cachePoint: %w", err)
+			}
+			out = append(out, engine.Block{CacheBreakpoint: &engine.CacheBreakpointBlock{Marker: marker}})
+		default:
+			out = append(out, engine.Block{Text: &engine.TextBlock{Text: b.Text}})
 		}
 	}
+	return out, nil
+}
 
-	for _, b := range blocks {
+// parseContentBlocks unmarshals the content JSON as an array of
+// bedrockContentBlock, returning the raw element bytes alongside (aligned by
+// index) so unknown arms and nested payloads survive the projection
+// lexeme-exact.
+func parseContentBlocks(raw json.RawMessage) ([]bedrockContentBlock, []json.RawMessage, error) {
+	var blocks []bedrockContentBlock
+	if err := json.Unmarshal(raw, &blocks); err != nil {
+		return nil, nil, err
+	}
+	var rawEls []json.RawMessage
+	if err := json.Unmarshal(raw, &rawEls); err != nil {
+		return nil, nil, err
+	}
+	return blocks, rawEls, nil
+}
+
+// contentBlocksToMessage projects ONE wire message's content array onto
+// the ordered body, preserving block order exactly. cachePoint elements are
+// positional on BOTH sides: they project directly to CacheBreakpoint blocks
+// (a leading cachePoint is returned for the caller to attach to the covered
+// previous message).
+func contentBlocksToMessage(role string, blocks []bedrockContentBlock, rawEls []json.RawMessage) (engine.Message, engine.RequiredJSONObject, error) {
+	engRole, rerr := mapRoleB(role)
+	if rerr != nil {
+		return engine.Message{}, engine.RequiredJSONObject{}, rerr
+	}
+	msg := engine.Message{Role: engRole}
+	var leading engine.RequiredJSONObject
+	for i, b := range blocks {
+		// The provider-arm matrix: a bedrock content block is a SINGLE-MEMBER
+		// discriminant object ({"text":…}, {"toolUse":…}, {"cachePoint":…},
+		// …). An object with two or more members is ambiguous — the typed
+		// decode would pick one arm by switch precedence and the unknown
+		// path would pick a map key by iteration — so it is refused here,
+		// deterministically, before projection.
+		if i < len(rawEls) {
+			if err := requireSingleMemberBlock(rawEls[i]); err != nil {
+				return msg, leading, err
+			}
+		} else if armCount(&b) != 1 {
+			return msg, leading, fmt.Errorf("bedrock: content block %d has %d arms, want exactly one", i, armCount(&b))
+		}
 		switch {
 		case b.CachePoint != nil:
-			flushText()
-			if n := len(msgs); n > 0 {
-				if msgs[n-1].CacheControl == nil {
-					msgs[n-1].CacheControl = b.CachePoint
-				}
-			} else if leadingCache == nil {
-				leadingCache = b.CachePoint
+			marker, err := engine.ParseRequiredJSONObject(mustMarshalB(b.CachePoint))
+			if err != nil {
+				return msg, leading, fmt.Errorf("cachePoint: %w", err)
 			}
+			if len(msg.Blocks) == 0 {
+				leading = marker
+				continue
+			}
+			msg.Blocks = append(msg.Blocks, engine.Block{CacheBreakpoint: &engine.CacheBreakpointBlock{Marker: marker}})
 		case b.Text != nil:
-			textParts = append(textParts, *b.Text)
+			msg.Blocks = append(msg.Blocks, engine.Block{Text: &engine.TextBlock{Text: *b.Text}})
 		case b.Thinking != nil:
-			thinkingText = b.Thinking.Thinking
-			thinkingSig = b.Thinking.Signature
+			msg.Blocks = append(msg.Blocks, engine.Block{Thinking: &engine.ThinkingBlock{
+				Text: b.Thinking.Thinking, Signature: b.Thinking.Signature,
+			}})
 		case b.ToolUse != nil:
-			// Flush pending text first
-			flushText()
-			msgs = append(msgs, engine.Message{
-				Role: engine.RoleAssistant,
-				ToolCalls: []engine.ToolCall{{
-					ID:        b.ToolUse.ToolUseID,
-					Name:      b.ToolUse.Name,
-					Arguments: b.ToolUse.Input,
-				}},
-			})
-		case b.ToolResult != nil:
-			// Flush pending text first
-			flushText()
-
-			// Concatenate ALL text-only blocks into Content; anything else
-			// (images, json blocks) is preserved via ContentParts.
-			var resultTexts []string
-			var contentParts []any
-			for _, part := range b.ToolResult.Content {
-				if m, ok := part.(map[string]any); ok && len(m) == 1 {
-					if txt, ok := m["text"].(string); ok {
-						resultTexts = append(resultTexts, txt)
-						continue
-					}
-				}
-				contentParts = append(contentParts, part)
+			args, perr := engine.ParseRequiredObjectOrEmpty(b.ToolUse.Input)
+			if perr != nil {
+				return msg, leading, fmt.Errorf("tool use %q input: %w", b.ToolUse.Name, perr)
 			}
-			resultContent := strings.Join(resultTexts, "\n")
-
-			msgs = append(msgs, engine.Message{
-				Role:         engine.RoleTool,
-				ToolCallID:   b.ToolResult.ToolUseID,
-				Content:      resultContent,
-				ContentParts: contentParts,
-			})
+			msg.Blocks = append(msg.Blocks, engine.Block{ToolUse: &engine.ToolUseBlock{
+				ID: b.ToolUse.ToolUseID, Name: b.ToolUse.Name, Arguments: args,
+			}})
+		case b.ToolResult != nil:
+			tr := &engine.ToolResultBlock{ToolCallID: b.ToolResult.ToolUseID}
+			var rawTR struct {
+				ToolResult struct {
+					Content json.RawMessage `json:"content"`
+				} `json:"toolResult"`
+			}
+			if i < len(rawEls) {
+				json.Unmarshal(rawEls[i], &rawTR)
+			}
+			var partsRaw []json.RawMessage
+			json.Unmarshal(rawTR.ToolResult.Content, &partsRaw)
+			for j, part := range b.ToolResult.Content {
+				elem, eerr := bedrockNestedToEngine(part, partsRaw, j)
+				if eerr != nil {
+					return msg, leading, eerr
+				}
+				tr.Content = append(tr.Content, elem)
+			}
+			if len(tr.Content) == 0 {
+				tr.Content = []engine.ToolResultContentBlock{{Text: ""}}
+			}
+			msg.Blocks = append(msg.Blocks, engine.Block{ToolResult: tr})
+		default:
+			// image / document / json / any unmodelled arm: raw preservation
+			// with the discriminant removed (the projection invariant).
+			kind := "unknown"
+			raw := json.RawMessage(nil)
+			if i < len(rawEls) {
+				raw = rawEls[i]
+				if k := firstMemberName(raw); k != "" {
+					kind = k
+				}
+			}
+			payload, perr := stripBedrockFacts(raw)
+			if perr != nil {
+				return msg, leading, fmt.Errorf("block %q payload: %w", kind, perr)
+			}
+			msg.Blocks = append(msg.Blocks, engine.Block{Unknown: &engine.UnknownBlock{Kind: kind, Payload: payload}})
 		}
 	}
-
-	// Flush any remaining text
-	flushText()
-
-	return msgs, leadingCache
+	return msg, leading, nil
 }
 
-// mapRole converts Bedrock role strings to engine.Role.
-func mapRole(role string) engine.Role {
+// bedrockNestedToEngine projects one tool-result content element onto the
+// nested kinds (text / unknown). rawNested holds the block's raw content
+// array aligned by index.
+func bedrockNestedToEngine(part any, rawNested []json.RawMessage, j int) (engine.ToolResultContentBlock, error) {
+	// The nested elements obey the same single-member grammar: a nested
+	// object with two discriminants is ambiguous and refused before the
+	// (map-iteration) kind selection.
+	raw := json.RawMessage(nil)
+	if j < len(rawNested) {
+		raw = rawNested[j]
+	}
+	if len(raw) > 0 {
+		if err := requireSingleMemberBlock(raw); err != nil {
+			return engine.ToolResultContentBlock{}, fmt.Errorf("nested element %d: %w", j, err)
+		}
+	}
+	if m, ok := part.(map[string]any); ok && len(m) == 1 {
+		if txt, ok := m["text"].(string); ok {
+			return engine.ToolResultContentBlock{Text: txt}, nil
+		}
+	}
+	kind := "unknown"
+	if m, ok := part.(map[string]any); ok {
+		for k := range m {
+			if k != "text" {
+				kind = k
+				break
+			}
+		}
+	}
+	payload, err := stripBedrockFacts(raw)
+	if err != nil {
+		return engine.ToolResultContentBlock{}, fmt.Errorf("nested block %q payload: %w", kind, err)
+	}
+	return engine.ToolResultContentBlock{Unknown: &engine.UnknownBlock{Kind: kind, Payload: payload}}, nil
+}
+
+// firstMemberName returns the first member name of a raw object (the
+// bedrock block discriminant, e.g. "image"/"document"/"json").
+func firstMemberName(raw json.RawMessage) string {
+	if len(raw) == 0 || raw[0] != '{' {
+		return ""
+	}
+	var m map[string]json.RawMessage
+	if json.Unmarshal(raw, &m) != nil {
+		return ""
+	}
+	for k := range m {
+		return k
+	}
+	return ""
+}
+
+// stripBedrockFacts unwraps a raw bedrock block object: the discriminant
+// IS the member name ("image"/"document"/"json"), so the payload is the
+// member's VALUE, projected span-preserving. A missing raw element is a
+// refusal (the adapter's raw capture is authoritative).
+func stripBedrockFacts(raw json.RawMessage) (engine.RequiredJSONObject, error) {
+	if len(raw) == 0 || raw[0] != '{' {
+		return engine.RequiredJSONObject{}, fmt.Errorf("expected a JSON object block")
+	}
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return engine.RequiredJSONObject{}, err
+	}
+	for k, v := range m {
+		if k == "text" {
+			continue // text arms are handled before this helper
+		}
+		val := v
+		if len(val) == 0 || val[0] != '{' {
+			return engine.RequiredJSONObject{}, fmt.Errorf("discriminant %q payload: expected a JSON object", k)
+		}
+		return engine.ParseRequiredJSONObject(val)
+	}
+	return engine.RequiredJSONObject{}, fmt.Errorf("expected a JSON object block")
+}
+
+// leadingIsZero reports whether a leading marker was never captured (the
+// zero RequiredJSONObject is the canonical {} — indistinguishable from a
+// genuinely empty marker object, which bedrock would not emit).
+func leadingIsZero(m engine.RequiredJSONObject) bool {
+	return string(m.Bytes()) == "{}"
+}
+
+// mustMarshalB encodes a wire-decoded map back to bytes (cache markers).
+func mustMarshalB(v any) []byte {
+	b, err := json.Marshal(v)
+	if err != nil {
+		panic(err)
+	}
+	return b
+}
+
+// mapRoleB maps a wire role onto the engine role under Bedrock's NORMATIVE
+// two-role grammar (user | assistant; system is a separate array). Anything
+// else is refused at parse — never coerced to user, which would both change
+// provider semantics and mischarge a plugin mutation to the user role
+// section instead of the catch-all (or a rejection).
+// requireSingleMemberBlock refuses a raw bedrock block object whose member
+// count is not exactly one — the single-member discriminant grammar.
+func requireSingleMemberBlock(raw json.RawMessage) error {
+	if len(raw) == 0 || raw[0] != '{' {
+		return fmt.Errorf("bedrock: expected a JSON object block")
+	}
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return fmt.Errorf("bedrock: block object: %w", err)
+	}
+	if len(m) != 1 {
+		return fmt.Errorf("bedrock: block object has %d members, want exactly one (the discriminant)", len(m))
+	}
+	return nil
+}
+
+// armCount counts the typed content arms of a decoded bedrock block.
+func armCount(b *bedrockContentBlock) int {
+	n := 0
+	if b.Text != nil {
+		n++
+	}
+	if b.Thinking != nil {
+		n++
+	}
+	if b.ToolUse != nil {
+		n++
+	}
+	if b.ToolResult != nil {
+		n++
+	}
+	if b.CachePoint != nil {
+		n++
+	}
+	return n
+}
+
+func mapRoleB(role string) (engine.Role, error) {
 	switch role {
 	case "user":
-		return engine.RoleUser
+		return engine.RoleUser, nil
 	case "assistant":
-		return engine.RoleAssistant
+		return engine.RoleAssistant, nil
 	default:
-		return engine.RoleUser
+		return "", fmt.Errorf("bedrock: role %q is not valid (expected user or assistant)", role)
 	}
 }
 
-// --- Marshal ---
 func (a *Adapter) Marshal(chat *engine.ChatRequest) ([]byte, error) {
+	// The owning validation at EVERY marshal entry: the engine pointer sum
+	// must be in the closed domain before any arm is projected — a future
+	// call site cannot bypass the checked boundary by accident.
+	if err := pbconv.ValidateFullRequest(chat); err != nil {
+		return nil, fmt.Errorf("bedrock: %w", err)
+	}
 	modelID := "anthropic.claude-sonnet-4-20250514-v1:0"
 	if chat.Model != "" {
 		modelID = chat.Model
@@ -333,8 +525,16 @@ func (a *Adapter) Marshal(chat *engine.ChatRequest) ([]byte, error) {
 
 	// System message
 	for _, m := range chat.Messages {
-		if m.Role == engine.RoleSystem && m.Content != "" {
-			req.System = marshalSystemBlocks(m.Content, m.CacheControl)
+		if m.Role == engine.RoleSystem {
+			sys, err := marshalSystemBlocks(m)
+			if err != nil {
+				return nil, err
+			}
+			sysRaw, merr := json.Marshal(sys)
+			if merr != nil {
+				return nil, merr
+			}
+			req.System = sysRaw
 			break // only first system message
 		}
 	}
@@ -344,7 +544,14 @@ func (a *Adapter) Marshal(chat *engine.ChatRequest) ([]byte, error) {
 		if m.Role == engine.RoleSystem {
 			continue
 		}
-		bm := marshalMessage(m)
+		if m.Role == engine.RoleTool {
+			return nil, fmt.Errorf("bedrock: tool-role messages are not representable; " +
+				"tool results must ride their user message as ToolResult blocks")
+		}
+		bm, err := marshalMessage(m)
+		if err != nil {
+			return nil, err
+		}
 		req.Messages = append(req.Messages, bm)
 	}
 
@@ -357,13 +564,13 @@ func (a *Adapter) Marshal(chat *engine.ChatRequest) ([]byte, error) {
 					Name:        td.Name,
 					Description: td.Description,
 					InputSchema: bedrockSchema{
-						JSON: td.Parameters,
+						JSON: td.Parameters.Bytes(),
 					},
 				},
 			})
-			if td.CacheControl != nil {
+			if !td.CacheControl.IsAbsent() {
 				req.ToolConfig.Tools = append(req.ToolConfig.Tools, bedrockTool{
-					CachePoint: td.CacheControl,
+					CachePoint: decodeMapB(td.CacheControl),
 				})
 			}
 		}
@@ -383,11 +590,13 @@ func (a *Adapter) Marshal(chat *engine.ChatRequest) ([]byte, error) {
 		return nil, err
 	}
 
-	if len(chat.ProviderExtensions) > 0 {
-		var outMap map[string]any
-		json.Unmarshal(b, &outMap)
-		for k, v := range chat.ProviderExtensions {
-			outMap[k] = v
+	if !chat.ProviderExtensions.IsAbsent() {
+		var outMap map[string]json.RawMessage
+		if err := json.Unmarshal(b, &outMap); err != nil {
+			return nil, err
+		}
+		if err := format.MergeRawMembers(outMap, chat.ProviderExtensions.Bytes()); err != nil {
+			return nil, fmt.Errorf("bedrock provider extensions merge: %w", err)
 		}
 		return json.Marshal(outMap)
 	}
@@ -395,91 +604,212 @@ func (a *Adapter) Marshal(chat *engine.ChatRequest) ([]byte, error) {
 	return b, nil
 }
 
-func marshalSystemBlocks(text string, cache map[string]any) json.RawMessage {
-	blocks := []bedrockSystemBlock{{Text: text}}
-	if cache != nil {
-		blocks = append(blocks, bedrockSystemBlock{CachePoint: cache})
+// marshalSystemBlocks projects a system message's ordered body onto the
+// system array: text blocks in wire order; CacheBreakpoint blocks become
+// cachePoint ELEMENTS at their position (bedrock markers are positional on
+// both sides). Any other kind fails closed.
+func marshalSystemBlocks(m engine.Message) ([]bedrockSystemBlock, error) {
+	var out []bedrockSystemBlock
+	for i, b := range m.Blocks {
+		switch {
+		case b.Text != nil:
+			out = append(out, bedrockSystemBlock{Text: b.Text.Text})
+		case b.CacheBreakpoint != nil:
+			out = append(out, bedrockSystemBlock{CachePoint: decodeMapB2(b.CacheBreakpoint.Marker)})
+		default:
+			return nil, fmt.Errorf("bedrock: system block %d (%s) is not representable on the system array",
+				i, blockKindB(b))
+		}
 	}
-	b, _ := json.Marshal(blocks)
-	return b
+	return out, nil
 }
 
-func marshalMessage(m engine.Message) bedrockMsg {
-	bm := bedrockMsg{
-		Role: reverseRole(m.Role),
+// marshalMessage projects one message's ordered body onto the wire content
+// array, enforcing the Bedrock provider grammar fail-closed: cachePoint
+// elements are positional; a trailing signature, redacted thinking, and
+// tool-role messages are unrepresentable; tool_use is assistant-only and
+// tool_result is user-only.
+func marshalMessage(m engine.Message) (bedrockMsg, error) {
+	role, rerr := reverseRole(m.Role)
+	if rerr != nil {
+		return bedrockMsg{}, rerr
 	}
-
+	bm := bedrockMsg{Role: role}
 	var blocks []bedrockContentBlock
-
-	switch m.Role {
-	case engine.RoleTool:
-		// Tool result: emit toolResult block with preserved parts
-		var trContent []any
-		if m.Content != "" || len(m.ContentParts) == 0 {
-			trContent = append(trContent, map[string]any{"text": m.Content})
+	for i, b := range m.Blocks {
+		var cb bedrockContentBlock
+		switch {
+		case b.Text != nil:
+			text := b.Text.Text
+			cb = bedrockContentBlock{Text: &text}
+		case b.Thinking != nil:
+			cb = bedrockContentBlock{Thinking: &bedrockThinking{
+				Thinking: b.Thinking.Text, Signature: b.Thinking.Signature,
+			}}
+		case b.ToolUse != nil:
+			if m.Role != engine.RoleAssistant {
+				return bedrockMsg{}, fmt.Errorf("bedrock: toolUse block %d on a %q message is unrepresentable", i, m.Role)
+			}
+			cb = bedrockContentBlock{ToolUse: &bedrockToolUse{
+				ToolUseID: b.ToolUse.ID, Name: b.ToolUse.Name, Input: b.ToolUse.Arguments.Bytes(),
+			}}
+		case b.ToolResult != nil:
+			if m.Role != engine.RoleUser {
+				return bedrockMsg{}, fmt.Errorf("bedrock: toolResult block %d on a %q message is unrepresentable", i, m.Role)
+			}
+			content, cerr := marshalNestedB(b.ToolResult.Content)
+			if cerr != nil {
+				return bedrockMsg{}, cerr
+			}
+			cb = bedrockContentBlock{ToolResult: &bedrockToolResult{
+				ToolUseID: b.ToolResult.ToolCallID, Content: content,
+			}}
+		case b.CacheBreakpoint != nil:
+			cb = bedrockContentBlock{CachePoint: decodeMapB2(b.CacheBreakpoint.Marker)}
+		case b.Unknown != nil:
+			raw, uerr := reattachDiscriminantB(b.Unknown)
+			if uerr != nil {
+				return bedrockMsg{}, fmt.Errorf("bedrock: %w", uerr)
+			}
+			if err := json.Unmarshal(raw, &cb); err != nil {
+				return bedrockMsg{}, fmt.Errorf("bedrock: unknown block: %w", err)
+			}
+		case b.RedactedThinking != nil:
+			return bedrockMsg{}, fmt.Errorf("bedrock: redacted_thinking block %d is not representable", i)
+		case b.TrailingSignature != nil:
+			return bedrockMsg{}, fmt.Errorf("bedrock: trailing signature block %d is not representable (Code Assist only)", i)
+		default:
+			return bedrockMsg{}, fmt.Errorf("bedrock: block %d has no arm", i)
 		}
-		if len(m.ContentParts) > 0 {
-			trContent = append(trContent, m.ContentParts...)
-		}
-		blocks = append(blocks, bedrockContentBlock{
-			ToolResult: &bedrockToolResult{
-				ToolUseID: m.ToolCallID,
-				Content:   trContent,
-			},
-		})
-
-	case engine.RoleAssistant:
-		// Assistant may have thinking, text, tool calls, or combinations.
-		if m.Thinking != "" {
-			blocks = append(blocks, bedrockContentBlock{
-				Thinking: &bedrockThinking{
-					Thinking:  m.Thinking,
-					Signature: m.ThinkingSignature,
-				},
-			})
-		}
-		if m.Content != "" {
-			text := m.Content
-			blocks = append(blocks, bedrockContentBlock{Text: &text})
-		}
-		for _, tc := range m.ToolCalls {
-			blocks = append(blocks, bedrockContentBlock{
-				ToolUse: &bedrockToolUse{
-					ToolUseID: tc.ID,
-					Name:      tc.Name,
-					Input:     tc.Arguments,
-				},
-			})
-		}
-
-	default:
-		// User (or any other role): just text.
-		if m.Content != "" {
-			text := m.Content
-			blocks = append(blocks, bedrockContentBlock{Text: &text})
-		}
+		blocks = append(blocks, cb)
 	}
-
-	// Re-emit the message's cache breakpoint after its content.
-	if m.CacheControl != nil {
-		blocks = append(blocks, bedrockContentBlock{CachePoint: m.CacheControl})
+	raw, merr := json.Marshal(blocks)
+	if merr != nil {
+		return bedrockMsg{}, fmt.Errorf("bedrock message blocks: %w", merr)
 	}
-
-	raw, _ := json.Marshal(blocks)
 	bm.Content = raw
-	return bm
+	return bm, nil
 }
 
-// reverseRole converts engine.Role to Bedrock role strings.
-func reverseRole(role engine.Role) string {
+// marshalNestedB projects nested tool-result content onto the wire array
+// (text blocks and unknown arms with their discriminants re-attached).
+func marshalNestedB(content []engine.ToolResultContentBlock) ([]any, error) {
+	if len(content) == 0 {
+		return []any{}, nil
+	}
+	var out []any
+	for _, c := range content {
+		switch {
+		case c.Unknown != nil:
+			if c.Unknown.Kind == "text" {
+				return nil, fmt.Errorf("bedrock: nested unknown block kind %q names a modeled arm (projection invariant)", c.Unknown.Kind)
+			}
+			payload, _, err := c.Unknown.Payload.DecodeObject()
+			if err != nil {
+				return nil, fmt.Errorf("nested unknown payload: %w", err)
+			}
+			block := make(map[string]any, len(payload)+1)
+			block[c.Unknown.Kind] = map[string]json.RawMessage(payload)
+			out = append(out, block)
+		case c.CacheBreakpoint != nil:
+			// Bedrock does not permit cachePoint inside toolResult content:
+			// fail closed rather than drop.
+			return nil, fmt.Errorf("bedrock: nested cache breakpoints are not representable in toolResult content")
+		default:
+			out = append(out, map[string]any{"text": c.Text})
+		}
+	}
+	return out, nil
+}
+
+// reattachDiscriminantB re-attaches the unknown block's kind as the
+// single-member discriminant ({"image": {...}}).
+func reattachDiscriminantB(u *engine.UnknownBlock) ([]byte, error) {
+	// The projection invariant: the kind IS the discriminant — a kind that
+	// names a modeled arm would fabricate a wire block the verifier never
+	// saw, so it is rejected before marshal.
+	switch u.Kind {
+	case "text", "toolUse", "toolResult":
+		return nil, fmt.Errorf("bedrock: unknown block kind %q names a modeled arm (projection invariant)", u.Kind)
+	}
+	payload, _, err := u.Payload.DecodeObject()
+	if err != nil {
+		return nil, fmt.Errorf("unknown payload: %w", err)
+	}
+	block := map[string]any{u.Kind: map[string]json.RawMessage(payload)}
+	return json.Marshal(block)
+}
+
+// decodeMapB2 decodes a required marker for the wire map shape.
+func decodeMapB2(m engine.RequiredJSONObject) map[string]any {
+	var out map[string]any
+	if err := json.Unmarshal(m.Bytes(), &out); err != nil {
+		return nil
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// decodeMapB decodes an optional marker for the wire map shape.
+func decodeMapB(o engine.OptionalJSONObject) map[string]any {
+	if o.IsAbsent() {
+		return nil
+	}
+	var out map[string]any
+	if err := json.Unmarshal(o.Bytes(), &out); err != nil {
+		return nil
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// blockKindB names a block for error messages.
+func blockKindB(b engine.Block) string {
+	switch {
+	case b.Text != nil:
+		return "text"
+	case b.Thinking != nil:
+		return "thinking"
+	case b.RedactedThinking != nil:
+		return "redacted_thinking"
+	case b.ToolUse != nil:
+		return "tool_use"
+	case b.ToolResult != nil:
+		return "tool_result"
+	case b.CacheBreakpoint != nil:
+		return "cache_breakpoint"
+	case b.Unknown != nil:
+		return "unknown"
+	case b.TrailingSignature != nil:
+		return "trailing_signature"
+	default:
+		return "empty"
+	}
+}
+
+// reverseRole maps an engine role onto the wire under Bedrock's normative
+// two-role grammar. Unmodelled roles are REFUSED — never coerced to user
+// (the mirror of the parse-side rule; a plugin mutation on an unmodelled
+// role must not silently charge the user section or change provider
+// semantics).
+func reverseRole(role engine.Role) (string, error) {
 	switch role {
 	case engine.RoleAssistant:
-		return "assistant"
+		return "assistant", nil
 	case engine.RoleTool:
-		return "user" // tool results are sent as user messages in Bedrock
+		// Tool results are sent as user messages in Bedrock (the wire has
+		// no tool role) — this is the documented projection, not a
+		// coercion of an unmodelled role.
+		return "user", nil
 	case engine.RoleSystem:
-		return "system"
+		return "system", nil
+	case engine.RoleUser:
+		return "user", nil
 	default:
-		return "user"
+		return "", fmt.Errorf("bedrock: role %q is not valid (expected user or assistant)", role)
 	}
 }

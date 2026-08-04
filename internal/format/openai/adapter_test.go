@@ -11,6 +11,35 @@ import (
 	"github.com/torana-edge/torana-edge/internal/engine"
 )
 
+// Ordered-body test helpers (engine.Message).
+
+func textOf(m engine.Message) string { return m.Text() }
+
+type tcView struct {
+	ID, Name  string
+	Args      engine.RequiredJSONObject
+	Signature string
+}
+
+func toolCalls(m engine.Message) []tcView {
+	var out []tcView
+	for _, b := range m.Blocks {
+		if b.ToolUse != nil {
+			out = append(out, tcView{ID: b.ToolUse.ID, Name: b.ToolUse.Name, Args: b.ToolUse.Arguments, Signature: b.ToolUse.Signature})
+		}
+	}
+	return out
+}
+
+func toolResults(m engine.Message) []*engine.ToolResultBlock {
+	var out []*engine.ToolResultBlock
+	for _, b := range m.Blocks {
+		if b.ToolResult != nil {
+			out = append(out, b.ToolResult)
+		}
+	}
+	return out
+}
 func TestRoundTrip_ChatCompletions(t *testing.T) {
 	adapter := &Adapter{}
 
@@ -43,8 +72,8 @@ func TestRoundTrip_ChatCompletions(t *testing.T) {
 	if chat.Messages[0].Role != engine.RoleSystem {
 		t.Errorf("msg 0 role: got %s, want system", chat.Messages[0].Role)
 	}
-	if chat.Messages[0].Content != "You are helpful." {
-		t.Errorf("msg 0 content: got %q", chat.Messages[0].Content)
+	if textOf(chat.Messages[0]) != "You are helpful." {
+		t.Errorf("msg 0 content: got %q", textOf(chat.Messages[0]))
 	}
 
 	if chat.Messages[1].Role != engine.RoleUser {
@@ -54,22 +83,26 @@ func TestRoundTrip_ChatCompletions(t *testing.T) {
 	if chat.Messages[2].Role != engine.RoleAssistant {
 		t.Errorf("msg 2 role: got %s, want assistant", chat.Messages[2].Role)
 	}
-	if len(chat.Messages[2].ToolCalls) != 1 {
-		t.Fatalf("expected 1 tool call, got %d", len(chat.Messages[2].ToolCalls))
+	if len(toolCalls(chat.Messages[2])) != 1 {
+		t.Fatalf("expected 1 tool call, got %d", len(toolCalls(chat.Messages[2])))
 	}
-	if chat.Messages[2].ToolCalls[0].Name != "get_weather" {
-		t.Errorf("tool call name: got %s", chat.Messages[2].ToolCalls[0].Name)
+	if got := toolCalls(chat.Messages[2])[0].Name; got != "get_weather" {
+		t.Errorf("tool call name: got %s", got)
 	}
-	city, ok := chat.Messages[2].ToolCalls[0].Arguments["city"].(string)
-	if !ok || city != "SF" {
-		t.Errorf("tool call args: got %v", chat.Messages[2].ToolCalls[0].Arguments)
+	vals, _, err := toolCalls(chat.Messages[2])[0].Args.DecodeObject()
+	if err != nil {
+		t.Fatalf("tool call args decode: %v", err)
+	}
+	city, ok := vals["city"]
+	if !ok || string(city) != `"SF"` {
+		t.Errorf("tool call args: got %v", vals)
 	}
 
 	if chat.Messages[3].Role != engine.RoleTool {
 		t.Errorf("msg 3 role: got %s, want tool", chat.Messages[3].Role)
 	}
-	if chat.Messages[3].ToolCallID != "call_1" {
-		t.Errorf("msg 3 tool_call_id: got %s", chat.Messages[3].ToolCallID)
+	if toolResults(chat.Messages[3])[0].ToolCallID != "call_1" {
+		t.Errorf("msg 3 tool_call_id: got %s", toolResults(chat.Messages[3])[0].ToolCallID)
 	}
 
 	if len(chat.Tools) != 1 {
@@ -110,8 +143,8 @@ func TestUnmarshal_ResponsesAPI(t *testing.T) {
 	if chat.Messages[0].Role != engine.RoleUser {
 		t.Errorf("role: got %s, want user", chat.Messages[0].Role)
 	}
-	if chat.Messages[0].Content != "Hello, what is the weather?" {
-		t.Errorf("content: got %q", chat.Messages[0].Content)
+	if textOf(chat.Messages[0]) != "Hello, what is the weather?" {
+		t.Errorf("content: got %q", textOf(chat.Messages[0]))
 	}
 	if len(chat.Tools) != 1 {
 		t.Fatalf("expected 1 tool, got %d", len(chat.Tools))
@@ -274,11 +307,17 @@ func TestResponsesFieldPreservation(t *testing.T) {
 		t.Fatalf("Unmarshal: %v", err)
 	}
 
-	if req.ProviderExtensions["instructions"] != "Be helpful." {
-		t.Errorf("expected instructions to be preserved, got %v", req.ProviderExtensions["instructions"])
+	var extMap map[string]json.RawMessage
+	json.Unmarshal(req.ProviderExtensions.Bytes(), &extMap)
+	var extInstr string
+	json.Unmarshal(extMap["instructions"], &extInstr)
+	if extInstr != "Be helpful." {
+		t.Errorf("expected instructions to be preserved, got %v", extInstr)
 	}
-	if req.ProviderExtensions["temperature"] != 0.5 {
-		t.Errorf("expected temperature to be preserved, got %v", req.ProviderExtensions["temperature"])
+	var extTemp json.Number
+	json.Unmarshal(extMap["temperature"], &extTemp)
+	if extTemp.String() != "0.5" {
+		t.Errorf("expected temperature to be preserved, got %v", extTemp)
 	}
 
 	out, err := a.Marshal(req)
@@ -311,7 +350,7 @@ func TestProviderExtensions_RoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(chat.ProviderExtensions) == 0 {
+	if chat.ProviderExtensions.IsAbsent() {
 		t.Fatal("expected ProviderExtensions to be populated for unknown field x-custom-metadata")
 	}
 
@@ -361,15 +400,17 @@ func TestRoundTrip_ResponsesAPI(t *testing.T) {
 		t.Fatalf("expected 3 messages, got %d", len(chat.Messages))
 	}
 
-	if chat.Messages[0].Role != engine.RoleUser || chat.Messages[0].Content != "Hello!" {
+	if chat.Messages[0].Role != engine.RoleUser || textOf(chat.Messages[0]) != "Hello!" {
 		t.Errorf("message 0 mismatch: %+v", chat.Messages[0])
 	}
 
-	if chat.Messages[1].Role != engine.RoleAssistant || len(chat.Messages[1].ToolCalls) != 1 || chat.Messages[1].ToolCalls[0].ID != "call_abc" || chat.Messages[1].ToolCalls[0].Name != "get_weather" {
+	tcs := toolCalls(chat.Messages[1])
+	if chat.Messages[1].Role != engine.RoleAssistant || len(tcs) != 1 || tcs[0].ID != "call_abc" || tcs[0].Name != "get_weather" {
 		t.Errorf("message 1 mismatch: %+v", chat.Messages[1])
 	}
 
-	if chat.Messages[2].Role != engine.RoleTool || chat.Messages[2].ToolCallID != "call_abc" || chat.Messages[2].Content != "Rainy" {
+	trs := toolResults(chat.Messages[2])
+	if chat.Messages[2].Role != engine.RoleTool || len(trs) != 1 || trs[0].ToolCallID != "call_abc" || trs[0].Content[0].Text != "Rainy" {
 		t.Errorf("message 2 mismatch: %+v", chat.Messages[2])
 	}
 
@@ -436,7 +477,7 @@ func TestRoundTrip_ResponsesAPI(t *testing.T) {
 	close(evtCh)
 
 	ctx := context.WithValue(context.Background(), engine.ChatRequestKey, chat)
-	chat.ProviderExtensions["_openai_variant"] = "responses"
+	chat.OpenAIVariant = engine.OpenAIResponses
 
 	var buf bytes.Buffer
 	if err := sa.SerializeStream(ctx, &buf, evtCh); err != nil {
@@ -609,7 +650,7 @@ func TestSerializeMalformedBlocksErrorChat(t *testing.T) {
 // output_text.delta arm.
 func TestSerializeCanonicalBlocksResponses(t *testing.T) {
 	ctx := context.WithValue(context.Background(), engine.ChatRequestKey, &engine.ChatRequest{
-		ProviderExtensions: map[string]any{"_openai_variant": "responses"},
+		OpenAIVariant: engine.OpenAIResponses,
 	})
 
 	for _, tc := range []struct {
@@ -671,7 +712,7 @@ func TestSerializeCanonicalBlocksResponses(t *testing.T) {
 // unavailable on this protocol.
 func TestSerializeProviderBlockErrorResponses(t *testing.T) {
 	ctx := context.WithValue(context.Background(), engine.ChatRequestKey, &engine.ChatRequest{
-		ProviderExtensions: map[string]any{"_openai_variant": "responses"},
+		OpenAIVariant: engine.OpenAIResponses,
 	})
 	evCh := make(chan engine.StreamEvent, 1)
 	evCh <- engine.StreamEvent{BlockStart: &engine.BlockStart{
@@ -687,5 +728,78 @@ func TestSerializeProviderBlockErrorResponses(t *testing.T) {
 	want := `openai: provider block kind "redacted" is not supported by this serializer`
 	if err.Error() != want {
 		t.Errorf("error = %q, want %q", err.Error(), want)
+	}
+}
+
+// TestUnknownProjectionInvariant: openai unknown content parts must not
+// duplicate the canonical "type" discriminant, and the kind must not name a
+// modeled arm — rejected before marshal.
+func TestUnknownProjectionInvariant(t *testing.T) {
+	adapter := &Adapter{}
+	chat := &engine.ChatRequest{
+		Model: "gpt-x",
+		Messages: []engine.Message{{
+			Role: engine.RoleUser,
+			Blocks: []engine.Block{
+				{Unknown: &engine.UnknownBlock{Kind: "custom_part", Payload: mustReqOAI(`{"x":1}`)}},
+			},
+		}},
+	}
+	if _, err := adapter.Marshal(chat); err != nil {
+		t.Fatalf("a clean unknown payload must marshal: %v", err)
+	}
+	chat.Messages[0].Blocks[0].Unknown.Payload = mustReqOAI(`{"type":"custom_part","x":1}`)
+	if _, err := adapter.Marshal(chat); err == nil {
+		t.Fatal("a payload duplicating the discriminant must be rejected")
+	}
+	chat.Messages[0].Blocks[0].Unknown.Payload = mustReqOAI(`{"x":1}`)
+	chat.Messages[0].Blocks[0].Unknown.Kind = "text"
+	if _, err := adapter.Marshal(chat); err == nil {
+		t.Fatal("an unknown kind naming a modeled arm must be rejected")
+	}
+}
+
+func mustReqOAI(raw string) engine.RequiredJSONObject {
+	r, err := engine.ParseRequiredJSONObject([]byte(raw))
+	if err != nil {
+		panic(err)
+	}
+	return r
+}
+
+// TestNoOpenAISentinels — the dead `_openai_original_model` sentinel and
+// the old `_openai_variant`/`_openai_input_layout` keys are GONE: no
+// Responses round-trip carries them in provider_extensions_json; the
+// variant and layout are typed host-only facts, the model comes from
+// ChatRequest.Model.
+func TestNoOpenAISentinels(t *testing.T) {
+	body := `{"object":"response","model":"m2","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}],"stream":false}`
+	chat, err := (&Adapter{}).Unmarshal([]byte(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if chat.OpenAIVariant != engine.OpenAIResponses {
+		t.Fatalf("variant = %v, want responses", chat.OpenAIVariant)
+	}
+	if chat.ResponsesInputLayout.IsAbsent() {
+		t.Fatal("the typed Responses layout must be captured")
+	}
+	if !chat.ProviderExtensions.IsAbsent() {
+		ext := string(chat.ProviderExtensions.Bytes())
+		for _, sentinel := range []string{"_openai_original_model", "_openai_variant", "_openai_input_layout"} {
+			if strings.Contains(ext, sentinel) {
+				t.Fatalf("sentinel %q still in provider extensions: %s", sentinel, ext)
+			}
+		}
+	}
+	out, err := (&Adapter{}).Marshal(chat)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(out), "_openai_original_model") {
+		t.Fatalf("sentinel on the wire: %s", out)
+	}
+	if !strings.Contains(string(out), `"model":"m2"`) {
+		t.Fatalf("canonical model lost: %s", out)
 	}
 }
