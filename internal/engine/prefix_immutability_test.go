@@ -4,10 +4,8 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
-	"strconv"
 	"testing"
 
-	plugin_sdk "github.com/torana-edge/torana-plugin-sdk"
 	pb "github.com/torana-edge/torana-plugin-sdk/pb/v2"
 	"google.golang.org/protobuf/proto"
 )
@@ -84,10 +82,13 @@ func TestCachePrefixKeyAliasAdversarial(t *testing.T) {
 	}
 }
 
-// referencePrefixKey is the INDEPENDENT reference model: it re-derives the
-// expected framed hash with its OWN sha256 framing (a separate
-// implementation of the length-prefix scheme), its OWN truncation, and the
-// hard-coded domain tag — never the production helpers.
+// referencePrefixKey is the INDEPENDENT reference model for the EDGE
+// FRAMING: it consumes the SDK-owned observable projection (the
+// cross-consumer contract — the observable component IS the SDK result,
+// never re-derived here) and re-implements ONLY the Edge framing (the
+// length-prefix scheme, the domain tag, and the host-only topology layer)
+// with its OWN code. The projection error path mirrors production
+// fail-closed semantics: an out-of-domain request yields "".
 func referencePrefixKey(c *pb.ChatRequest, topo TopologyFacts) string {
 	const domain = "torana/cache-prefix/v1"
 	h := sha256.New()
@@ -104,25 +105,11 @@ func referencePrefixKey(c *pb.ChatRequest, topo TopologyFacts) string {
 		h.Write(b)
 	}
 	frameStr(domain)
-	frameStr(c.Model)
-
-	last := lastCacheMarkerPB(c)
-	toolLimit := len(c.Tools)
-	if last != nil && last.kind == markerCarrierTool {
-		toolLimit = last.tool + 1
+	prefix, err := pb.RequestObservablePrefix(c)
+	if err != nil {
+		return ""
 	}
-	for i, t := range c.Tools {
-		if i >= toolLimit {
-			break
-		}
-		frameStr("tool")
-		frameStr(t.Name)
-		frameStr(t.Description)
-		frameBytes(t.ParametersJson)
-		frameBytes(t.CacheControlJson)
-	}
-	frameBytes(c.ProviderExtensionsJson)
-	frameBytes(c.SafetySettingsJson)
+	frameBytes(prefix)
 
 	// The typed host-only topology facts (reconstruction-changing).
 	frameStr("topology")
@@ -135,88 +122,9 @@ func referencePrefixKey(c *pb.ChatRequest, topo TopologyFacts) string {
 	frameStr(string(rune('0' + topo.OpenAIVariant)))
 	frameBytes(topo.ResponsesInputLayout.Bytes())
 
-	// Generation params (part of the model-visible prefix).
-	frameStr("params")
-	if c.MaxTokens != nil {
-		frameStr("max_tokens")
-		frameStr(strconv.FormatInt(int64(*c.MaxTokens), 10))
-	}
-	if c.Temperature != nil {
-		frameStr("temperature")
-		frameStr(strconv.FormatFloat(float64(*c.Temperature), 'g', -1, 64))
-	}
-	if c.TopP != nil {
-		frameStr("top_p")
-		frameStr(strconv.FormatFloat(float64(*c.TopP), 'g', -1, 64))
-	}
-	frameStr("stops")
-	frameStr(strconv.Itoa(len(c.StopSequences)))
-	for _, st := range c.StopSequences {
-		frameStr(st)
-	}
-
-	// The reference model mirrors production fail-closed semantics: an
-	// SDK fingerprint error makes the whole key empty.
-	fp := func(m *pb.Message) (string, bool) {
-		s, err := plugin_sdk.RequestBlocksFingerprint(m)
-		if err != nil {
-			return "", false
-		}
-		return s, true
-	}
-
-	if last == nil {
-		for _, m := range c.Messages {
-			f, ok := fp(m)
-			if !ok {
-				return ""
-			}
-			frameStr("msg")
-			frameStr(f)
-		}
-	} else if last.kind != markerCarrierTool {
-		for i, m := range c.Messages {
-			if i > last.msg {
-				break
-			}
-			if i < last.msg {
-				f, ok := fp(m)
-				if !ok {
-					return ""
-				}
-				frameStr("msg")
-				frameStr(f)
-				continue
-			}
-			// Independent truncation: rebuild the message from scratch.
-			trunc := &pb.Message{Role: m.Role}
-			for j, b := range m.Blocks {
-				if j > last.block {
-					break
-				}
-				if j == last.block && last.nested >= 0 && b.GetToolResult() != nil {
-					nb := proto.Clone(b).(*pb.RequestBlock)
-					tr := nb.GetToolResult()
-					tr.Content = tr.Content[:last.nested+1]
-					trunc.Blocks = append(trunc.Blocks, nb)
-					continue
-				}
-				trunc.Blocks = append(trunc.Blocks, b)
-			}
-			f, ok := fp(trunc)
-			if !ok {
-				return ""
-			}
-			frameStr("msg")
-			frameStr(f)
-		}
-	}
 	return hex.EncodeToString(h.Sum(nil)[:keyBytes])
 }
 
-// TestCachePrefixKeyMatchesReferenceModel — production equals the
-// independent reference for top-level, nested, tool, multiple-marker, and
-// no-marker cases.
 func TestCachePrefixKeyMatchesReferenceModel(t *testing.T) {
 	cases := map[string]*pb.ChatRequest{
 		"nested marker": nestedMarkerPB(),

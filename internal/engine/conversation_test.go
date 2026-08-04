@@ -2,6 +2,7 @@ package engine
 
 import (
 	"encoding/json"
+	"google.golang.org/protobuf/proto"
 	"testing"
 
 	pb "github.com/torana-edge/torana-plugin-sdk/pb/v2"
@@ -379,4 +380,126 @@ func TestCachePrefixKeyEmpty(t *testing.T) {
 	if got := CachePrefixKey(invalid); got != "" {
 		t.Errorf("an SDK-invalid request got a key %q; want the fail-safe empty key", got)
 	}
+}
+
+// prefixKeyBase is a VALID request with a top-level breakpoint marker (the
+// prefix truncation path) carrying every observable field.
+func prefixKeyBase() *pb.ChatRequest {
+	return &pb.ChatRequest{
+		Model:         "m",
+		MaxTokens:     proto.Int32(64),
+		Temperature:   proto.Float64(0.5),
+		TopP:          proto.Float64(0.9),
+		StopSequences: []string{"END"},
+		Tools: []*pb.ToolDef{{
+			Name:           "read",
+			Description:    "d",
+			ParametersJson: []byte(`{"type":"object"}`),
+		}},
+		ProviderExtensionsJson: []byte(`{"custom":{"b":1,"a":2}}`),
+		SafetySettingsJson:     []byte(`[{"category":"HARM_CATEGORY_X"}]`),
+		Messages: []*pb.Message{
+			{Role: "user", Blocks: []*pb.RequestBlock{{Kind: &pb.RequestBlock_Text{Text: &pb.RequestTextBlock{Text: "hi"}}}}},
+			{Role: "user", Blocks: []*pb.RequestBlock{
+				{Kind: &pb.RequestBlock_Text{Text: &pb.RequestTextBlock{Text: "more"}}},
+				{Kind: &pb.RequestBlock_CacheBreakpoint{CacheBreakpoint: &pb.RequestCacheBreakpoint{MarkerJson: []byte(`{"type":"ephemeral"}`)}}},
+			}},
+		},
+	}
+}
+
+// TestCachePrefixKeyObservableFieldSensitivity — the approved sensitivity
+// contract survives the reconciliation: every observable field (model,
+// tools, messages, provider extensions, safety settings, generation
+// params) moves the key, while stream and torana_meta_json (excluded by
+// the SDK projection) must NOT.
+func TestCachePrefixKeyObservableFieldSensitivity(t *testing.T) {
+	included := map[string]func(*pb.ChatRequest){
+		"model":                    func(r *pb.ChatRequest) { r.Model = "m2" },
+		"tools":                    func(r *pb.ChatRequest) { r.Tools[0].Description = "d2" },
+		"messages":                 func(r *pb.ChatRequest) { r.Messages[0].Blocks[0].GetText().Text = "changed" },
+		"provider_extensions_json": func(r *pb.ChatRequest) { r.ProviderExtensionsJson = []byte(`{"custom":{"a":2,"b":1}}`) },
+		"safety_settings_json":     func(r *pb.ChatRequest) { r.SafetySettingsJson = []byte(`[]`) },
+		"max_tokens":               func(r *pb.ChatRequest) { r.MaxTokens = proto.Int32(128) },
+		"temperature":              func(r *pb.ChatRequest) { r.Temperature = proto.Float64(0.25) },
+		"top_p":                    func(r *pb.ChatRequest) { r.TopP = proto.Float64(0.1) },
+		"stop_sequences":           func(r *pb.ChatRequest) { r.StopSequences = []string{"END", "STOP"} },
+	}
+	excluded := map[string]func(*pb.ChatRequest){
+		"stream":           func(r *pb.ChatRequest) { r.Stream = true },
+		"torana_meta_json": func(r *pb.ChatRequest) { r.ToranaMetaJson = []byte(`{"_provider":"x"}`) },
+	}
+	for name, mutate := range included {
+		t.Run("included/"+name, func(t *testing.T) {
+			base := prefixKeyBase()
+			before := CachePrefixKey(base)
+			if before == "" {
+				t.Fatal("fixture key empty; vacuous")
+			}
+			mutate(base)
+			if got := CachePrefixKey(base); got == before {
+				t.Errorf("observable field %s did not move the key", name)
+			}
+		})
+	}
+	for name, mutate := range excluded {
+		t.Run("excluded/"+name, func(t *testing.T) {
+			base := prefixKeyBase()
+			before := CachePrefixKey(base)
+			mutate(base)
+			if got := CachePrefixKey(base); got != before {
+				t.Errorf("excluded field %s moved the key", name)
+			}
+		})
+	}
+}
+
+// TestCachePrefixKeyTopologyOnlyDivergence — identical observable prefixes
+// with different host-only topology facts key differently; identical
+// prefixes with identical topology key identically. The topology layer is
+// the ENTIRE divergence between the Edge key and the observable prefix.
+func TestCachePrefixKeyTopologyOnlyDivergence(t *testing.T) {
+	base := prefixKeyBase()
+	prefix := CachePrefixKey(base)
+	if prefix == "" {
+		t.Fatal("fixture key empty; vacuous")
+	}
+
+	variants := []struct {
+		name string
+		topo TopologyFacts
+	}{
+		{"bare/chat", TopologyFacts{CodeAssist: false, OpenAIVariant: OpenAIChat, ResponsesInputLayout: OptionalJSONArray{}}},
+		{"codeassist", TopologyFacts{CodeAssist: true, OpenAIVariant: OpenAIChat, ResponsesInputLayout: OptionalJSONArray{}}},
+		{"responses-variant", TopologyFacts{CodeAssist: false, OpenAIVariant: OpenAIResponses, ResponsesInputLayout: OptionalJSONArray{}}},
+		{"responses-layout", TopologyFacts{CodeAssist: false, OpenAIVariant: OpenAIChat, ResponsesInputLayout: mustArray(`[{"type":"message"}]`)}},
+	}
+	seen := map[string]string{}
+	for _, v := range variants {
+		// Identical PB + identical topology ⇒ identical key.
+		if a, b := CachePrefixKeyTopology(proto.Clone(base).(*pb.ChatRequest), v.topo), CachePrefixKeyTopology(proto.Clone(base).(*pb.ChatRequest), v.topo); a != b || a == "" {
+			t.Fatalf("variant %s: identical topology must key identically (got %q/%q)", v.name, a, b)
+		}
+		// Identical PB + different topology ⇒ different key.
+		k := CachePrefixKeyTopology(proto.Clone(base).(*pb.ChatRequest), v.topo)
+		for other, otherK := range seen {
+			if k == otherK {
+				t.Fatalf("variant %s collides with %s: the topology layer must diverge the key", v.name, other)
+			}
+		}
+		seen[v.name] = k
+	}
+	// The plain CachePrefixKey equals the zero-topology framing.
+	if got := CachePrefixKey(base); got != CachePrefixKeyTopology(base, TopologyFacts{}) {
+		t.Fatal("CachePrefixKey must equal the zero-topology framing")
+	}
+}
+
+// mustArray parses a JSON array into the typed OptionalJSONArray.
+func mustArray(raw string) OptionalJSONArray {
+	arr, err := ParseOptionalJSONArray([]byte(raw))
+	if err != nil {
+		panic(err)
+	}
+	return arr
 }
