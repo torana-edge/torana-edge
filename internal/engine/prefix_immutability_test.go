@@ -105,7 +105,7 @@ func referencePrefixKey(c *pb.ChatRequest, topo TopologyFacts) string {
 		h.Write(b)
 	}
 	frameStr(domain)
-	prefix, err := pb.RequestObservablePrefix(c)
+	prefix, _, err := pb.RequestObservablePrefix(c)
 	if err != nil {
 		return ""
 	}

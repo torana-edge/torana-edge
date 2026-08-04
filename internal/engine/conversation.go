@@ -158,7 +158,7 @@ func CachePrefixKeyTopology(pbReq *pb.ChatRequest, topo TopologyFacts) string {
 	// maps to the existing fail-closed EMPTY KEY — an unrepresentable body
 	// must never hash a partial prefix. "" is reserved for nil and for
 	// out-of-domain requests.
-	prefix, err := pb.RequestObservablePrefix(pbReq)
+	prefix, _, err := pb.RequestObservablePrefix(pbReq)
 	if err != nil {
 		return ""
 	}

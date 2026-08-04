@@ -8,7 +8,7 @@ require (
 	github.com/redis/go-redis/v9 v9.21.0
 	github.com/santhosh-tekuri/jsonschema/v6 v6.0.2
 	github.com/tetratelabs/wazero v1.12.0
-	github.com/torana-edge/torana-plugin-sdk v0.2.1-0.20260804080047-a35eef6bd677
+	github.com/torana-edge/torana-plugin-sdk v0.2.1-0.20260804092442-d5c0145c75af
 	go.opentelemetry.io/otel v1.44.0
 	go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc v1.44.0
 	go.opentelemetry.io/otel/metric v1.44.0
