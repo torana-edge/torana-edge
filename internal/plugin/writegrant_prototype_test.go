@@ -45,6 +45,10 @@ type changedSections struct {
 	// cacheControl marks a change to Message.cache_control_json or
 	// ToolDef.cache_control_json, governed by ir.cache_control.write alone.
 	cacheControl bool
+	// toolResults marks a change to a position-keyed tool-result TEXT VALUE,
+	// governed by ir.tool_results.write alone (the role view placeholders
+	// these values, so they never land in messages).
+	toolResults bool
 	// hostOwned marks a change to a field no grant covers, because the host
 	// owns it. torana_meta_json is the only one: the host writes _provider and
 	// friends into it, and under v2 verdicts are host calls rather than keys in
@@ -54,7 +58,7 @@ type changedSections struct {
 }
 
 func (c changedSections) any() bool {
-	return len(c.messages) > 0 || c.tools || c.model || c.params || c.cacheControl || c.hostOwned
+	return len(c.messages) > 0 || c.tools || c.model || c.params || c.cacheControl || c.toolResults || c.hostOwned
 }
 
 // compareSections diffs a plugin's output against the previously accepted
@@ -84,7 +88,7 @@ func compareSections(accepted, out *pb.ChatRequest) changedSections {
 			c.messages[b.Role] = true
 		case b == nil:
 			c.messages[a.Role] = true
-		case !sameMessageWithoutMarker(a, b):
+		case !sameRoleView(a, b):
 			c.messages[a.Role] = true
 			c.messages[b.Role] = true
 		}
@@ -105,6 +109,7 @@ func compareSections(accepted, out *pb.ChatRequest) changedSections {
 	c.params = !sameParams(accepted, out)
 	c.hostOwned = !bytes.Equal(accepted.ToranaMetaJson, out.ToranaMetaJson)
 	c.cacheControl = cacheControlChanged(accepted, out)
+	c.toolResults = toolResultsChanged(accepted, out)
 	return c
 }
 
@@ -149,33 +154,124 @@ func cacheControlChanged(accepted, out *pb.ChatRequest) bool {
 	return false
 }
 
-// sameMessageWithoutMarker compares two messages EXCLUDING
-// cache_control_json: markers are governed by ir.cache_control.write as a
-// section of their own (cacheControlChanged), never by the role sections —
-// the oracle must agree with the production fingerprint, or a marker-only
-// mutation would look like a role change to the exact comparison.
-func sameMessageWithoutMarker(a, b *pb.Message) bool {
-	ca := stripCacheBlocks(a)
-	cb := stripCacheBlocks(b)
-	return proto.Equal(ca, cb)
+// sameRoleView compares two messages under the FULL role view: cache
+// carriers and the trailing carrier removed, provider signature tokens
+// cleared, tool-result text values placeholdered — the exact families the
+// production role fingerprint normalizes (TestRoleViewOracleAgreement pins
+// the agreement). Cache facts are governed by ir.cache_control.write as a
+// section of their own (cacheControlChanged) and text values by
+// ir.tool_results.write (toolResultsChanged), never by the role sections.
+// toolResultsChanged compares the position-keyed tool-result text values
+// exactly, mirroring the production fingerprintToolResultsSection: every
+// TEXT arm's value at its (message index, block index, content index) slot.
+// A value change at a slot, or a text arm whose slot moved (topology), both
+// count — exactly the production section.
+func toolResultsChanged(accepted, out *pb.ChatRequest) bool {
+	n := len(accepted.Messages)
+	if len(out.Messages) > n {
+		n = len(out.Messages)
+	}
+	for i := 0; i < n; i++ {
+		var a, b []byte
+		if i < len(accepted.Messages) {
+			a = toolResultTextSlots(accepted.Messages[i])
+		}
+		if i < len(out.Messages) {
+			b = toolResultTextSlots(out.Messages[i])
+		}
+		if !bytes.Equal(a, b) {
+			return true
+		}
+	}
+	return false
 }
 
-// sameToolWithoutMarker compares two tool definitions EXCLUDING
-// cache_control_json, for the same reason.
-func stripCacheBlocks(m *pb.Message) *pb.Message {
-	ca := proto.Clone(m).(*pb.Message)
-	var kept []*pb.RequestBlock
-	for _, b := range ca.Blocks {
+// toolResultTextSlots encodes one message's tool-result text values
+// positionally: each TEXT arm's slot (block index, ORIGINAL content index)
+// and value, in wire order.
+func toolResultTextSlots(m *pb.Message) []byte {
+	var out []byte
+	for bi, b := range m.Blocks {
+		tr := b.GetToolResult()
+		if tr == nil {
+			continue
+		}
+		for ci, c := range tr.Content {
+			if t := c.GetText(); t != nil {
+				out = append(out, markerFrame(bi, 1, ci, []byte(t.Text))...)
+			}
+		}
+	}
+	return out
+}
+
+// sameRoleView compares two messages under the ROLE VIEW, encoded by the
+// INDEPENDENT test-local oracle (independentRoleView) — never the
+// production normalization. The oracle must agree with the production role
+// fingerprint (TestRoleViewOracleAgreement), or a normalization omission in
+// either direction goes undetected.
+func sameRoleView(a, b *pb.Message) bool {
+	return bytes.Equal(independentRoleView(a), independentRoleView(b))
+}
+
+// independentRoleView is the test-local role-view ENCODER: its own
+// normalization (cache carriers and the trailing carrier skipped, the five
+// embedded provider signature tokens cleared, tool-result text values
+// replaced by its OWN placeholder constant) followed by its own
+// deterministic encoding (protobuf serialization of the independently
+// normalized clone). It deliberately does NOT call roleViewMessage,
+// roleNestedContent, the production placeholder, or fingerprintMessage — a
+// production normalization omission must not be inherited by the oracle.
+const independentRolePlaceholder = "\x00independent-role-view-text"
+
+func independentRoleView(m *pb.Message) []byte {
+	if m == nil {
+		return nil
+	}
+	out := &pb.Message{Role: m.Role}
+	for _, b := range m.Blocks {
 		if b.GetCacheBreakpoint() != nil {
 			continue
 		}
-		if tr := b.GetToolResult(); tr != nil {
-			tr.Content = nestedWithoutCache(tr.Content)
+		if b.GetTrailingSignature() != nil {
+			continue
 		}
-		kept = append(kept, b)
+		cloned := proto.Clone(b).(*pb.RequestBlock)
+		switch k := cloned.Kind.(type) {
+		case *pb.RequestBlock_Text:
+			k.Text.Signature = ""
+		case *pb.RequestBlock_Thinking:
+			k.Thinking.Signature = ""
+		case *pb.RequestBlock_ToolUse:
+			k.ToolUse.Signature = ""
+		case *pb.RequestBlock_Unknown:
+			k.Unknown.Signature = ""
+		case *pb.RequestBlock_ToolResult:
+			k.ToolResult.Signature = ""
+			var content []*pb.ToolResultContentBlock
+			for _, c := range k.ToolResult.Content {
+				if c.GetCacheBreakpoint() != nil {
+					continue
+				}
+				cc := proto.Clone(c).(*pb.ToolResultContentBlock)
+				if t := cc.GetText(); t != nil {
+					t.Text = independentRolePlaceholder
+				}
+				content = append(content, cc)
+			}
+			k.ToolResult.Content = content
+		}
+		out.Blocks = append(out.Blocks, cloned)
 	}
-	ca.Blocks = kept
-	return ca
+	// Deterministic serialization is requested EXPLICITLY (protobuf-go is
+	// deterministic by default but does not guarantee it): the oracle must
+	// be byte-stable across runs. Any retained-field difference changes the
+	// bytes.
+	raw, err := proto.MarshalOptions{Deterministic: true}.Marshal(out)
+	if err != nil {
+		panic(err)
+	}
+	return raw
 }
 
 // cacheMarkers encodes a message's cache carriers POSITIONALLY, mirroring
@@ -267,7 +363,10 @@ type mutation struct {
 	// wantRoles are the message roles the change must be attributed to. Empty
 	// means the change is not in the messages section.
 	wantRoles []string
-	apply     func(*pb.ChatRequest)
+	// wantToolResults asserts the change is attributed to the position-keyed
+	// tool-results section (ir.tool_results.write).
+	wantToolResults bool
+	apply           func(*pb.ChatRequest)
 }
 
 func baseRequest() *pb.ChatRequest {
@@ -290,24 +389,31 @@ func baseRequest() *pb.ChatRequest {
 func mutations() []mutation {
 	return []mutation{
 		{
-			// The case the first prototype missed entirely.
-			name:      "cross-role reorder",
-			wantRoles: []string{"user", "tool"},
+			// The case the first prototype missed entirely. The swap also
+			// MOVES the tool-result text tuple to another message slot, so
+			// the position-keyed tool-results section fires too.
+			name:            "cross-role reorder",
+			wantRoles:       []string{"user", "tool"},
+			wantToolResults: true,
 			apply: func(r *pb.ChatRequest) {
 				r.Messages[1], r.Messages[3] = r.Messages[3], r.Messages[1]
 			},
 		},
 		{
-			name:      "same-role content edit",
-			wantRoles: []string{"tool"},
+			// A text VALUE change at the same slot: the role view
+			// placeholders it, so it is a tool-results change, never a role
+			// change.
+			name:            "same-role content edit",
+			wantToolResults: true,
 			apply: func(r *pb.ChatRequest) {
-				r.Messages[3].Blocks[0].GetToolResult().Content[0].Kind = &pb.ToolResultContentBlock_Text{Text: &pb.ToolResultTextBlock{Text: "B'"}}
+				r.Messages[3].Blocks[0].GetToolResult().Content[0].GetText().Text = "B'"
 			},
 		},
 		{
 			// Unframed concatenation makes these two indistinguishable.
-			name:      "field boundary shift",
-			wantRoles: []string{"tool"},
+			name:            "field boundary shift",
+			wantRoles:       []string{"tool"},
+			wantToolResults: true,
 			apply: func(r *pb.ChatRequest) {
 				r.Messages[3].Blocks[0].GetToolResult().ToolName = "read" + r.Messages[3].Blocks[0].GetToolResult().Content[0].GetText().Text
 				r.Messages[3].Blocks[0].GetToolResult().Content[0].GetText().Text = ""
@@ -321,9 +427,11 @@ func mutations() []mutation {
 			},
 		},
 		{
-			name:      "message deleted",
-			wantRoles: []string{"tool"},
-			apply:     func(r *pb.ChatRequest) { r.Messages = r.Messages[:3] },
+			// Deleting the tool message removes its text tuple.
+			name:            "message deleted",
+			wantRoles:       []string{"tool"},
+			wantToolResults: true,
+			apply:           func(r *pb.ChatRequest) { r.Messages = r.Messages[:3] },
 		},
 		{
 			name:      "tool call arguments rewritten",
@@ -365,6 +473,12 @@ func TestCompareSectionsDetectsEveryMutation(t *testing.T) {
 				if !c.messages[role] {
 					t.Errorf("change not attributed to role %q; got %v", role, c.messages)
 				}
+			}
+			if m.wantToolResults && !c.toolResults {
+				t.Error("change not attributed to the tool-results section")
+			}
+			if !m.wantToolResults && c.toolResults {
+				t.Errorf("change attributed to the tool-results section, want none: %+v", c)
 			}
 		})
 	}
@@ -956,5 +1070,153 @@ func TestFingerprintErrorCannotBecomeSectionDigest(t *testing.T) {
 	}
 	if fp.equal(requestSections{}) {
 		t.Fatal("a validated body must produce a non-zero section digest")
+	}
+}
+
+// TestRoleViewOracleAgreement — the INDEPENDENT oracle and the production
+// role fingerprint must move together for EVERY normalized family and EVERY
+// retained family: a mutation is invisible to the role section iff the
+// oracle says the role views are equal. The oracle never calls the
+// production normalization, so an omission on either side fails here.
+func TestRoleViewOracleAgreement(t *testing.T) {
+	base := func() *pb.Message {
+		return &pb.Message{Role: "assistant", Blocks: []*pb.RequestBlock{
+			{Kind: &pb.RequestBlock_Text{Text: &pb.RequestTextBlock{Text: "leading", Signature: "text-sig", PartMetadataJson: []byte(`{"t":1}`)}}},
+			{Kind: &pb.RequestBlock_Thinking{Thinking: &pb.RequestThinkingBlock{Text: "thought", Signature: "think-sig"}}},
+			{Kind: &pb.RequestBlock_ToolUse{ToolUse: &pb.RequestToolUseBlock{Id: "c1", Name: "read", ArgumentsJson: []byte(`{"p":1}`), Signature: "use-sig"}}},
+			{Kind: &pb.RequestBlock_Unknown{Unknown: &pb.RequestUnknownBlock{Kind: "x", PayloadJson: []byte(`{"k":1}`), Signature: "unk-sig"}}},
+			{Kind: &pb.RequestBlock_ToolResult{ToolResult: &pb.RequestToolResultBlock{
+				ToolCallId: "c2", ToolName: "write", WillContinue: proto.Bool(false), PartMetadataJson: []byte(`{"m":1}`), Signature: "res-sig",
+				Content: []*pb.ToolResultContentBlock{
+					{Kind: &pb.ToolResultContentBlock_Text{Text: &pb.ToolResultTextBlock{Text: "result"}}},
+					{Kind: &pb.ToolResultContentBlock_CacheBreakpoint{CacheBreakpoint: &pb.ToolResultCacheBreakpoint{MarkerJson: []byte(`{"type":"ephemeral"}`)}}},
+				},
+			}}},
+			{Kind: &pb.RequestBlock_CacheBreakpoint{CacheBreakpoint: &pb.RequestCacheBreakpoint{MarkerJson: []byte(`{"type":"standard"}`)}}},
+			{Kind: &pb.RequestBlock_TrailingSignature{TrailingSignature: &pb.RequestTrailingSignatureBlock{Signature: "trail-sig", PartMetadataJson: []byte(`{"s":1}`)}}},
+		}}
+	}
+	prodMoved := func(a, b *pb.Message) bool {
+		da, err := fingerprintMessage(a)
+		if err != nil {
+			t.Fatal(err)
+		}
+		db, err := fingerprintMessage(b)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return da != db
+	}
+	oracleMoved := func(a, b *pb.Message) bool {
+		return !bytes.Equal(independentRoleView(a), independentRoleView(b))
+	}
+
+	// NORMALIZED families: invisible to the role section (their facts live
+	// in the cache section, the tool-results section, or the unconditional
+	// provenance verifier).
+	normalized := []struct {
+		name   string
+		mutate func(*pb.Message)
+	}{
+		{"top-level cache marker changed", func(m *pb.Message) { m.Blocks[5].GetCacheBreakpoint().MarkerJson = []byte(`{"type":"1h"}`) }},
+		{"nested cache marker changed", func(m *pb.Message) {
+			m.Blocks[4].GetToolResult().Content[1].GetCacheBreakpoint().MarkerJson = []byte(`{"type":"1h"}`)
+		}},
+		{"trailing signature changed", func(m *pb.Message) { m.Blocks[6].GetTrailingSignature().Signature = "other" }},
+		{"trailing metadata changed", func(m *pb.Message) { m.Blocks[6].GetTrailingSignature().PartMetadataJson = []byte(`{"s":2}`) }},
+		{"trailing carrier removed", func(m *pb.Message) { m.Blocks = m.Blocks[:6] }},
+		{"text signature cleared", func(m *pb.Message) { m.Blocks[0].GetText().Signature = "" }},
+		{"thinking signature cleared", func(m *pb.Message) { m.Blocks[1].GetThinking().Signature = "" }},
+		{"tool-use signature cleared", func(m *pb.Message) { m.Blocks[2].GetToolUse().Signature = "" }},
+		{"unknown signature cleared", func(m *pb.Message) { m.Blocks[3].GetUnknown().Signature = "" }},
+		{"result signature cleared", func(m *pb.Message) { m.Blocks[4].GetToolResult().Signature = "" }},
+		{"result text value changed", func(m *pb.Message) { m.Blocks[4].GetToolResult().Content[0].GetText().Text = "changed" }},
+	}
+	// RETAINED families: visible to the role section (role-governed).
+	retained := []struct {
+		name   string
+		mutate func(*pb.Message)
+	}{
+		{"prompt text changed", func(m *pb.Message) { m.Blocks[0].GetText().Text = "other" }},
+		{"thinking text changed", func(m *pb.Message) { m.Blocks[1].GetThinking().Text = "other" }},
+		{"tool identity changed", func(m *pb.Message) { m.Blocks[4].GetToolResult().ToolName = "other" }},
+		{"text metadata changed", func(m *pb.Message) { m.Blocks[0].GetText().PartMetadataJson = []byte(`{"t":2}`) }},
+		{"result metadata changed", func(m *pb.Message) { m.Blocks[4].GetToolResult().PartMetadataJson = []byte(`{"m":2}`) }},
+		{"will_continue changed", func(m *pb.Message) { w := true; m.Blocks[4].GetToolResult().WillContinue = &w }},
+		{"scheduling presence added", func(m *pb.Message) { v := "SILENT"; m.Blocks[4].GetToolResult().Scheduling = &v }},
+		{"arm topology changed", func(m *pb.Message) {
+			m.Blocks[4].GetToolResult().Content[0].Kind = &pb.ToolResultContentBlock_Unknown{Unknown: &pb.ToolResultUnknownBlock{Kind: "x", PayloadJson: []byte(`{}`)}}
+		}},
+		{"block order changed", func(m *pb.Message) { m.Blocks[0], m.Blocks[1] = m.Blocks[1], m.Blocks[0] }},
+	}
+
+	for _, tc := range append(append([]struct {
+		name   string
+		mutate func(*pb.Message)
+	}{}, normalized...), retained...) {
+		t.Run(tc.name, func(t *testing.T) {
+			a := base()
+			b := base()
+			tc.mutate(b)
+			if prodMoved(a, b) != oracleMoved(a, b) {
+				t.Fatalf("production role movement %v != oracle movement %v",
+					prodMoved(a, b), oracleMoved(a, b))
+			}
+		})
+	}
+}
+
+// TestRoleViewNormalizationWeakenedDetected — the normalization is
+// NON-VACUOUS: for every normalized family, the RAW body differs between
+// base and mutated (a hypothetical production that failed to normalize
+// WOULD see the change and misattribute it to the role section), while the
+// independently normalized views are equal (the correct normalization hides
+// it). A no-op placeholder that never touched its family would fail the raw
+// side; a normalization that never ran would fail the normalized side.
+func TestRoleViewNormalizationWeakenedDetected(t *testing.T) {
+	base := func() *pb.Message {
+		return &pb.Message{Role: "assistant", Blocks: []*pb.RequestBlock{
+			{Kind: &pb.RequestBlock_Text{Text: &pb.RequestTextBlock{Text: "leading", Signature: "text-sig"}}},
+			{Kind: &pb.RequestBlock_ToolResult{ToolResult: &pb.RequestToolResultBlock{
+				ToolCallId: "c2", Signature: "res-sig",
+				Content: []*pb.ToolResultContentBlock{
+					{Kind: &pb.ToolResultContentBlock_Text{Text: &pb.ToolResultTextBlock{Text: "result"}}},
+					{Kind: &pb.ToolResultContentBlock_CacheBreakpoint{CacheBreakpoint: &pb.ToolResultCacheBreakpoint{MarkerJson: []byte(`{"type":"ephemeral"}`)}}},
+				},
+			}}},
+			{Kind: &pb.RequestBlock_TrailingSignature{TrailingSignature: &pb.RequestTrailingSignatureBlock{Signature: "trail-sig"}}},
+		}}
+	}
+	raw := func(m *pb.Message) []byte {
+		out, err := proto.Marshal(m)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+	rows := []struct {
+		name   string
+		mutate func(*pb.Message)
+	}{
+		{"cache carrier not stripped", func(m *pb.Message) {
+			m.Blocks[1].GetToolResult().Content[1].GetCacheBreakpoint().MarkerJson = []byte(`{"type":"1h"}`)
+		}},
+		{"trailing carrier not stripped", func(m *pb.Message) { m.Blocks[2].GetTrailingSignature().Signature = "other" }},
+		{"text signature not cleared", func(m *pb.Message) { m.Blocks[0].GetText().Signature = "" }},
+		{"result signature not cleared", func(m *pb.Message) { m.Blocks[1].GetToolResult().Signature = "" }},
+		{"result text not placeholdered", func(m *pb.Message) { m.Blocks[1].GetToolResult().Content[0].GetText().Text = "changed" }},
+	}
+	for _, tc := range rows {
+		t.Run(tc.name, func(t *testing.T) {
+			a := base()
+			b := base()
+			tc.mutate(b)
+			if bytes.Equal(raw(a), raw(b)) {
+				t.Fatalf("the mutation must move the RAW body (the family is real): %s", tc.name)
+			}
+			if !bytes.Equal(independentRoleView(a), independentRoleView(b)) {
+				t.Fatalf("the mutation must be invisible to the NORMALIZED view: %s", tc.name)
+			}
+		})
 	}
 }

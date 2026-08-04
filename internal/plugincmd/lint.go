@@ -56,6 +56,7 @@ var sdkPermission = map[string]string{
 	"SendRequest":           "env.host_call.torana_send_request",
 	"SetCacheBreakpoint":    "ir.cache_control.write",
 	"MoveCacheBreakpoint":   "ir.cache_control.write",
+	"ReplaceToolResultText": "ir.tool_results.write",
 	"BlockRequest":          "env.block_request",
 	"RespondRequest":        "env.respond_request",
 	"RouteRequest":          "env.route_request",
@@ -95,14 +96,15 @@ var unattributable = map[string]bool{
 	"env.request_headers": true,
 }
 
-// writeGrantsAreUnattributable reports whether perm is an ir.*.write grant.
-// Write grants are exercised by direct protobuf mutations (Content = …,
-// CacheControlJson = …, Model = …), which have no reliably attributable SDK
-// call site, and field-name inference was explicitly rejected. A plugin that
-// declares a write grant must never be warned as unused — the grant is
-// verified by the HOST against the actual output, which is the only honest
-// attribution. (sdk.SetCacheBreakpoint / sdk.MoveCacheBreakpoint DO map to
-// ir.cache_control.write in sdkPermission, so helper use is still caught in
+// writeGrantsAreUnattributable reports whether perm is an ir.*.write grant
+// that has NO attributable SDK call site. Write grants are exercised by
+// direct protobuf mutations (Content = …, CacheControlJson = …, Model = …),
+// which have no reliably attributable SDK call site, and field-name
+// inference was explicitly rejected. A plugin that declares such a grant
+// must never be warned as unused — the grant is verified by the HOST
+// against the actual output, which is the only honest attribution.
+// (sdk.SetCacheBreakpoint / sdk.MoveCacheBreakpoint / sdk.ReplaceToolResultText
+// DO map to their grants in sdkPermission, so helper use is still caught in
 // the used-but-undeclared direction.)
 func writeGrantsAreUnattributable(perm string) bool {
 	return sdk.IsWritePermission(perm)

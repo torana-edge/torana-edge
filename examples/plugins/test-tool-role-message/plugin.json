@@ -13,12 +13,16 @@
   ],
   "permissions": [
     {
+      "name": "ir.messages.write.tool",
+      "description": "Append the unrepresentable tool-role message"
+    },
+    {
       "name": "ir.messages.write.user",
       "description": "Message append shifts the role fingerprints"
     },
     {
-      "name": "ir.messages.write.tool",
-      "description": "Append the unrepresentable tool-role message"
+      "name": "ir.tool_results.write",
+      "description": "appended tool-result text value (union with the role grant)"
     }
   ]
 }

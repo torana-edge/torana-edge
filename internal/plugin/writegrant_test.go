@@ -2,6 +2,8 @@ package plugin
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/binary"
 	"fmt"
 	"strings"
 	"testing"
@@ -9,6 +11,7 @@ import (
 	"github.com/torana-edge/torana-edge/internal/engine"
 	"github.com/torana-edge/torana-edge/internal/engine/pbconv"
 	"github.com/torana-edge/torana-edge/internal/wasm"
+	"github.com/torana-edge/torana-plugin-sdk/outboundpolicy"
 	pb "github.com/torana-edge/torana-plugin-sdk/pb/v2"
 	"google.golang.org/protobuf/proto"
 )
@@ -115,6 +118,10 @@ func TestVerifyRequestMutationGrantedChangeAccepted(t *testing.T) {
 				v := 1.0
 				r.Temperature = &v
 			}},
+		{name: "tool result text", perm: "ir.tool_results.write",
+			mutate: func(r *pb.ChatRequest) {
+				r.Messages[3].Blocks[0].GetToolResult().Content[0].GetText().Text = "B'"
+			}},
 		// The role is part of the message section: changing it marks the role
 		// that left the slot AND the role that took it, so the developer case
 		// starts from a request whose message is already developer.
@@ -168,6 +175,10 @@ func TestVerifyRequestMutationUngrantedRejected(t *testing.T) {
 			mutate: func(r *pb.ChatRequest) {
 				v := 1.0
 				r.Temperature = &v
+			}},
+		{name: "tool result text", want: "plugin changed tool result text without ir.tool_results.write",
+			mutate: func(r *pb.ChatRequest) {
+				r.Messages[3].Blocks[0].GetToolResult().Content[0].GetText().Text = "B'"
 			}},
 		// The only changed role is the unmodelled one, so the sorted union
 		// names it and proves an unmodelled role maps to the catch-all
@@ -252,7 +263,8 @@ func TestVerifyRequestMutationHostOwnedMetaAlwaysViolation(t *testing.T) {
 	all := grant("ir.messages.write.user", "ir.messages.write.assistant",
 		"ir.messages.write.system", "ir.messages.write.tool",
 		"ir.messages.write.developer", "ir.messages.write.other",
-		"ir.tools.write", "ir.model.write", "ir.params.write")
+		"ir.tools.write", "ir.tool_results.write", "ir.cache_control.write",
+		"ir.model.write", "ir.params.write")
 	err := verifyRequestMutation(accepted, out, all)
 	if err == nil {
 		t.Fatal("a torana_meta_json change must be a violation even with all grants")
@@ -315,6 +327,42 @@ func appendTrailing(m *pb.Message, sig string) {
 	m.Blocks = append(m.Blocks, &pb.RequestBlock{Kind: &pb.RequestBlock_TrailingSignature{
 		TrailingSignature: &pb.RequestTrailingSignatureBlock{Signature: sig},
 	}})
+}
+
+// removeTrailing removes the trailing-signature block entirely — the ONLY
+// sanctioned representation of clearing a trailing token (a present carrier
+// must carry a non-empty signature).
+func removeTrailing(m *pb.Message) {
+	var kept []*pb.RequestBlock
+	for _, b := range m.Blocks {
+		if b.GetTrailingSignature() != nil {
+			continue
+		}
+		kept = append(kept, b)
+	}
+	m.Blocks = kept
+}
+
+// swapFirstCoveredKind swaps the first Text block and the first Thinking
+// block of the message, preserving their payloads — a covered KIND change
+// with identical bytes (the typed trailing-ref pin).
+func swapFirstCoveredKind(m *pb.Message) {
+	var ti, ki int = -1, -1
+	for i, b := range m.Blocks {
+		if ti < 0 && b.GetText() != nil {
+			ti = i
+		}
+		if ki < 0 && b.GetThinking() != nil {
+			ki = i
+		}
+	}
+	if ti < 0 || ki < 0 {
+		panic("swapFirstCoveredKind: need both a text and a thinking block")
+	}
+	txt := m.Blocks[ti].GetText().Text
+	thk := m.Blocks[ki].GetThinking().Text
+	m.Blocks[ti].Kind = &pb.RequestBlock_Thinking{Thinking: &pb.RequestThinkingBlock{Text: txt}}
+	m.Blocks[ki].Kind = &pb.RequestBlock_Text{Text: &pb.RequestTextBlock{Text: thk}}
 }
 
 // trailingMetaSignedRequest is trailingSignedRequest with part metadata on
@@ -434,8 +482,9 @@ func unknownSignedRequest() *pb.ChatRequest {
 func TestVerifyRequestMutationSignatureMatrix(t *testing.T) {
 	// The tool-result rows sign messages.tool blocks, so the matrix grants
 	// both roles; every row's section change passes and the BINDING check
-	// decides.
-	user := grant("ir.messages.write.user", "ir.messages.write.tool", "ir.messages.write.assistant")
+	// decides. Tool-result text VALUE changes move the position-keyed
+	// tool-results section, so the new grant is part of the set too.
+	user := grant("ir.messages.write.user", "ir.messages.write.tool", "ir.messages.write.assistant", "ir.tool_results.write")
 
 	cases := []struct {
 		name string
@@ -482,10 +531,21 @@ func TestVerifyRequestMutationSignatureMatrix(t *testing.T) {
 		{name: "trailing content changed token kept -> stale", base: trailingSignedRequest,
 			want:  "plugin trailing_signature signature stale",
 			apply: func(r *pb.ChatRequest) { setText(r.Messages[1], "signed content'") }},
-		{name: "trailing thinking changed token cleared -> accepted", base: trailingSignedRequest,
+		{name: "trailing thinking changed + whole carrier removed -> sanctioned", base: trailingSignedRequest,
 			apply: func(r *pb.ChatRequest) {
 				setThinking(r.Messages[1], "signed thinking'")
-				setTrailing(r.Messages[1], "")
+				removeTrailing(r.Messages[1])
+			}},
+		{name: "trailing present-empty token -> fail closed", base: trailingSignedRequest,
+			want:  "plugin trailing_signature trailing carrier is present but empty",
+			apply: func(r *pb.ChatRequest) { setTrailing(r.Messages[1], "") }},
+		{name: "trailing Text<->Thinking swap token kept -> stale", base: trailingSignedRequest,
+			want:  "plugin trailing_signature signature stale",
+			apply: func(r *pb.ChatRequest) { swapFirstCoveredKind(r.Messages[1]) }},
+		{name: "trailing type swap + whole carrier removed -> sanctioned", base: trailingSignedRequest,
+			apply: func(r *pb.ChatRequest) {
+				swapFirstCoveredKind(r.Messages[1])
+				removeTrailing(r.Messages[1])
 			}},
 		// MIXED-SCOPE trailing binding (batch-1 review finding 1): the
 		// trailing token also covers the trailing block's OWN
@@ -502,11 +562,18 @@ func TestVerifyRequestMutationSignatureMatrix(t *testing.T) {
 		{name: "trailing metadata value changed token kept -> stale", base: trailingMetaSignedRequest,
 			want:  "plugin trailing_signature signature stale",
 			apply: func(r *pb.ChatRequest) { setTrailingMeta(r.Messages[1], `{"src":"x","extra":1}`) }},
-		{name: "trailing metadata changed token cleared -> accepted", base: trailingMetaSignedRequest,
+		// The non-circular rule: own-metadata changes NEVER authorize the
+		// carrier's removal (dropped), and a present-empty token is an
+		// unrepresentable domain state (fail closed).
+		{name: "trailing metadata changed + whole carrier removed -> dropped", base: trailingMetaSignedRequest,
+			want: "plugin trailing_signature signature dropped",
 			apply: func(r *pb.ChatRequest) {
 				setTrailingMeta(r.Messages[1], `{"src":"y"}`)
-				setTrailing(r.Messages[1], "")
+				removeTrailing(r.Messages[1])
 			}},
+		{name: "trailing metadata changed + present-empty token -> fail closed", base: trailingMetaSignedRequest,
+			want:  "plugin trailing_signature trailing carrier is present but empty",
+			apply: func(r *pb.ChatRequest) { setTrailing(r.Messages[1], "") }},
 		// The TOOL-RESULT token (the SDK's RequestToolResultBlock binding):
 		// covered fields include the presence-aware will_continue and
 		// scheduling and the nested content digest.
@@ -579,6 +646,60 @@ func TestVerifyRequestMutationSignatureMatrix(t *testing.T) {
 			}
 			if err.Error() != tc.want {
 				t.Errorf("error = %q, want %q", err, tc.want)
+			}
+		})
+	}
+}
+
+// The SAME table through the all-grants fast path: grants are never part of
+// the provenance verdicts, so verifyFastPath (the exact branch discovery.go
+// takes for a fully-granted plugin) must accept exactly the rows the full
+// verifier accepts and reject exactly the rows it rejects.
+func TestTrailingMatrixThroughFastPath(t *testing.T) {
+	cases := []struct {
+		name   string
+		base   func() *pb.ChatRequest
+		apply  func(*pb.ChatRequest)
+		accept bool
+	}{
+		{"untouched", trailingMetaSignedRequest, nil, true},
+		{"preceding content changed token kept -> stale", trailingSignedRequest,
+			func(r *pb.ChatRequest) { setText(r.Messages[1], "signed content'") }, false},
+		{"preceding thinking changed + carrier removed -> sanctioned", trailingSignedRequest,
+			func(r *pb.ChatRequest) {
+				setThinking(r.Messages[1], "signed thinking'")
+				removeTrailing(r.Messages[1])
+			}, true},
+		{"own metadata changed + token kept -> stale", trailingMetaSignedRequest,
+			func(r *pb.ChatRequest) { setTrailingMeta(r.Messages[1], `{"src":"y"}`) }, false},
+		{"own metadata changed + present-empty token -> fail closed", trailingMetaSignedRequest,
+			func(r *pb.ChatRequest) { setTrailing(r.Messages[1], "") }, false},
+		{"own metadata changed + carrier removed -> dropped", trailingMetaSignedRequest,
+			func(r *pb.ChatRequest) {
+				setTrailingMeta(r.Messages[1], `{"src":"y"}`)
+				removeTrailing(r.Messages[1])
+			}, false},
+		{"unchanged preceding + carrier removed -> dropped", trailingSignedRequest,
+			func(r *pb.ChatRequest) { removeTrailing(r.Messages[1]) }, false},
+		{"unrelated tool-result change + carrier removed -> dropped", trailingSignedRequest,
+			func(r *pb.ChatRequest) {
+				r.Messages[3].Blocks[0].GetToolResult().Content[0].GetText().Text = "B'"
+				removeTrailing(r.Messages[1])
+			}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			accepted := tc.base()
+			out := tc.base()
+			if tc.apply != nil {
+				tc.apply(out)
+			}
+			err := verifyFastPath(accepted, out)
+			if tc.accept && err != nil {
+				t.Fatalf("fast path must accept, got: %v", err)
+			}
+			if !tc.accept && err == nil {
+				t.Fatal("fast path must reject")
 			}
 		})
 	}
@@ -698,7 +819,8 @@ func TestVerifyUnknownFieldsRejectedWithAllGrants(t *testing.T) {
 	all := grant("ir.messages.write.user", "ir.messages.write.assistant",
 		"ir.messages.write.system", "ir.messages.write.tool",
 		"ir.messages.write.developer", "ir.messages.write.other",
-		"ir.tools.write", "ir.model.write", "ir.params.write")
+		"ir.tools.write", "ir.tool_results.write", "ir.cache_control.write",
+		"ir.model.write", "ir.params.write")
 	if err := verifyRequestMutation(accepted, &out, all); err == nil {
 		t.Fatal("unknown fields must be rejected even with every request grant")
 	}
@@ -1469,5 +1591,245 @@ func TestFastPathMetadataChangeRejected(t *testing.T) {
 	setThinkingSig(out2.Messages[1], "")
 	if err := verifyFastPath(accepted, out2); err != nil {
 		t.Fatalf("cleared token over changed metadata must pass: %v", err)
+	}
+}
+
+// The typed trailing-ref encoder: the preceding projection is TYPED and
+// ORDERED, so identical payloads at different kinds, different orders, and
+// empty-vs-absent never collide. The digest under test is the occurrence's
+// preceding-only digest (no trailing carrier present), produced by the
+// production occurrences path.
+func TestTrailingPrecedingDigestTyped(t *testing.T) {
+	var trailing *requestSignatureField
+	for i := range requestSignatureFields {
+		if requestSignatureFields[i].scope == outboundpolicy.SignatureScopeTrailingStandalone {
+			trailing = &requestSignatureFields[i]
+			break
+		}
+	}
+	if trailing == nil {
+		t.Fatal("no trailing binding resolved")
+	}
+	text := func(s string) *pb.RequestBlock {
+		return &pb.RequestBlock{Kind: &pb.RequestBlock_Text{Text: &pb.RequestTextBlock{Text: s}}}
+	}
+	thinking := func(s string) *pb.RequestBlock {
+		return &pb.RequestBlock{Kind: &pb.RequestBlock_Thinking{Thinking: &pb.RequestThinkingBlock{Text: s}}}
+	}
+	digest := func(blocks ...*pb.RequestBlock) [32]byte {
+		occs, err := trailing.occurrences(&pb.Message{Role: "assistant", Blocks: blocks})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(occs) != 1 || !occs[0].trailAbsent {
+			t.Fatalf("expected one absent-carrier occurrence, got %+v", occs)
+		}
+		return occs[0].preceding
+	}
+
+	different := func(name string, a, b [32]byte) {
+		t.Helper()
+		if a == b {
+			t.Fatalf("%s: digests collided", name)
+		}
+	}
+
+	// Text↔Thinking with identical payloads must not collide.
+	different("text-then-thinking vs thinking-then-text",
+		digest(text("x"), thinking("y")), digest(thinking("x"), text("y")))
+	// Same kind, swapped payloads: order is signed.
+	different("repeated text order", digest(text("a"), text("b")), digest(text("b"), text("a")))
+	different("repeated thinking order", digest(thinking("a"), thinking("b")), digest(thinking("b"), thinking("a")))
+	// An explicit empty value is distinct from a non-empty value...
+	different("explicit empty vs value", digest(text("")), digest(text("x")))
+	// ...and from an absent element.
+	different("explicit empty vs absent", digest(text("")), digest())
+}
+
+// --- independent byte-level trailing reference encoder ----------------------
+//
+// The PRODUCTION preceding/mixed digests are compared against an
+// INDEPENDENT reference encoder at the byte level: the expected framed
+// stream (covered ordinal, full message identity, field identity, value —
+// each u64LE-length-framed, exactly the production writeFramed contract) is
+// re-derived here WITHOUT calling writeTrailingRefs, occurrences,
+// requestBlockMessage, digestBlockFields, or any other production helper. A
+// framing drift in production (wrong identity bytes, ordinal
+// representation/order, a missing or extra field) breaks the equality.
+
+// refFrame length-frames one part the production way: u64LE length + bytes.
+func refFrame(out, p []byte) []byte {
+	var lb [8]byte
+	binary.LittleEndian.PutUint64(lb[:], uint64(len(p)))
+	out = append(out, lb[:]...)
+	return append(out, p...)
+}
+
+// refHash hashes the parts, each length-framed.
+func refHash(parts ...[]byte) [32]byte {
+	h := sha256.New()
+	for _, p := range parts {
+		_, _ = h.Write(refFrame(nil, p))
+	}
+	var sum [32]byte
+	copy(sum[:], h.Sum(nil))
+	return sum
+}
+
+// streamHash hashes an ALREADY-FRAMED stream raw — the production digest is
+// sha256 over the concatenated frames, with no outer length frame.
+func streamHash(stream []byte) [32]byte {
+	return sha256.Sum256(stream)
+}
+
+// independentTrailingStream encodes the covered preceding sequence at the
+// byte level: per covered element (wire order), the ordinal within the
+// covered subsequence (u64LE, length-framed), then per covered ref the full
+// "<message>.<field>" identity and the value (both length-framed).
+// Uncovered interleaved blocks contribute nothing.
+func independentTrailingStream(m *pb.Message) []byte {
+	var out []byte
+	ordinal := 0
+	for _, b := range m.Blocks {
+		var ident, val []byte
+		switch {
+		case b.GetText() != nil:
+			ident, val = []byte("torana.v2.RequestTextBlock.text"), []byte(b.GetText().Text)
+		case b.GetThinking() != nil:
+			ident, val = []byte("torana.v2.RequestThinkingBlock.text"), []byte(b.GetThinking().Text)
+		default:
+			continue // uncovered interleaved block
+		}
+		var ob [8]byte
+		binary.LittleEndian.PutUint64(ob[:], uint64(ordinal))
+		out = refFrame(out, ob[:])
+		out = refFrame(out, ident)
+		out = refFrame(out, val)
+		ordinal++
+	}
+	return out
+}
+
+// TestTrailingDigestsMatchIndependentReference — the production preceding
+// and mixed digests are EXACTLY the independently framed streams:
+//
+//   - preceding == hash(independentTrailingStream), carrier absent and
+//     present;
+//   - mixed (carrier present) == length-framed own-metadata digest followed
+//     by the same independent stream;
+//   - mixed (carrier absent) == the independent stream alone;
+//   - a WEAKENED reference (wrong type identity) is provably unequal — the
+//     equality is not vacuous.
+func TestTrailingDigestsMatchIndependentReference(t *testing.T) {
+	var trailing *requestSignatureField
+	for i := range requestSignatureFields {
+		if requestSignatureFields[i].scope == outboundpolicy.SignatureScopeTrailingStandalone {
+			trailing = &requestSignatureFields[i]
+			break
+		}
+	}
+	if trailing == nil {
+		t.Fatal("no trailing binding resolved")
+	}
+	text := func(s string) *pb.RequestBlock {
+		return &pb.RequestBlock{Kind: &pb.RequestBlock_Text{Text: &pb.RequestTextBlock{Text: s}}}
+	}
+	thinking := func(s string) *pb.RequestBlock {
+		return &pb.RequestBlock{Kind: &pb.RequestBlock_Thinking{Thinking: &pb.RequestThinkingBlock{Text: s}}}
+	}
+	toolUse := func() *pb.RequestBlock {
+		return &pb.RequestBlock{Kind: &pb.RequestBlock_ToolUse{ToolUse: &pb.RequestToolUseBlock{Id: "c", Name: "read", ArgumentsJson: []byte(`{}`)}}}
+	}
+	trailingBlock := func(sig string, meta []byte) *pb.RequestBlock {
+		return &pb.RequestBlock{Kind: &pb.RequestBlock_TrailingSignature{
+			TrailingSignature: &pb.RequestTrailingSignatureBlock{Signature: sig, PartMetadataJson: meta},
+		}}
+	}
+	// Mixed/repeated Text+Thinking, an explicit empty value, and an
+	// uncovered interleaved tool-use block.
+	msg := func(withCarrier bool, meta []byte) *pb.Message {
+		m := &pb.Message{Role: "assistant", Blocks: []*pb.RequestBlock{
+			text("a"), thinking("x"), text(""), toolUse(), thinking("y"), text("b"),
+		}}
+		if withCarrier {
+			m.Blocks = append(m.Blocks, trailingBlock("token", meta))
+		}
+		return m
+	}
+
+	meta := []byte(`{"m":1}`)
+	for _, withCarrier := range []bool{false, true} {
+		m := msg(withCarrier, meta)
+		occs, err := trailing.occurrences(m)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(occs) != 1 {
+			t.Fatalf("occurrences = %d, want 1", len(occs))
+		}
+		wantPreceding := streamHash(independentTrailingStream(m))
+		if occs[0].preceding != wantPreceding {
+			t.Fatalf("preceding digest mismatch (carrier present=%v): got %x, want %x",
+				withCarrier, occs[0].preceding, wantPreceding)
+		}
+		if !withCarrier {
+			// Absent carrier: the mixed digest is the stream alone.
+			wantMixed := streamHash(independentTrailingStream(m))
+			if occs[0].digest != wantMixed {
+				t.Fatalf("absent-carrier mixed digest mismatch: got %x, want %x", occs[0].digest, wantMixed)
+			}
+		}
+	}
+
+	// Carrier present: mixed == length-framed own-metadata digest (the
+	// SameMessage half: part_metadata_json, plain-bytes framing) followed by
+	// the same independent stream.
+	m := msg(true, meta)
+	occs, err := trailing.occurrences(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The SameMessage half of the mixed digest: digestBlockFields frames a
+	// bytes ref through protoreflect Value.String(), which is the fmt.Sprint
+	// form of the byte slice — mirror THAT byte-for-byte.
+	ownMeta := refHash([]byte(fmt.Sprint(meta)))
+	mixedH := sha256.New()
+	_, _ = mixedH.Write(refFrame(nil, ownMeta[:]))
+	_, _ = mixedH.Write(independentTrailingStream(m))
+	var wantMixed [32]byte
+	copy(wantMixed[:], mixedH.Sum(nil))
+	if occs[0].digest != wantMixed {
+		t.Fatalf("present-carrier mixed digest mismatch: got %x, want %x", occs[0].digest, wantMixed)
+	}
+
+	// WEAKENED reference: a wrong type identity (Thinking framed as Text)
+	// must NOT match the production preceding digest — the equality above is
+	// not satisfied by a vacuous fixture.
+	weakened := func(mm *pb.Message) []byte {
+		var out []byte
+		ordinal := 0
+		for _, b := range mm.Blocks {
+			var ident, val []byte
+			switch {
+			case b.GetText() != nil:
+				ident, val = []byte("torana.v2.RequestTextBlock.text"), []byte(b.GetText().Text)
+			case b.GetThinking() != nil:
+				// THE BUG: thinking framed under the TEXT identity.
+				ident, val = []byte("torana.v2.RequestTextBlock.text"), []byte(b.GetThinking().Text)
+			default:
+				continue
+			}
+			var ob [8]byte
+			binary.LittleEndian.PutUint64(ob[:], uint64(ordinal))
+			out = refFrame(out, ob[:])
+			out = refFrame(out, ident)
+			out = refFrame(out, val)
+			ordinal++
+		}
+		return out
+	}
+	weak := streamHash(weakened(m))
+	if weak == occs[0].preceding {
+		t.Fatal("the weakened reference (wrong type identity) matches production — the equality is vacuous")
 	}
 }

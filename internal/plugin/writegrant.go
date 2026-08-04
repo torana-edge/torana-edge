@@ -22,8 +22,10 @@ import (
 //
 // A plugin handed a ChatRequest may change only the sections its operator
 // granted it: messages by role (ir.messages.write.<role>), tool definitions
-// (ir.tools.write), the model (ir.model.write) and sampling params
-// (ir.params.write). Everything else is host-owned and immutable under plugin
+// (ir.tools.write), the model (ir.model.write), sampling params
+// (ir.params.write), cache breakpoints (ir.cache_control.write) and
+// position-keyed tool-result text values (ir.tool_results.write). Everything
+// else is host-owned and immutable under plugin
 // mutation — torana_meta_json is host state (the host writes _provider and
 // friends into it, and under v2 verdicts are host calls rather than keys in
 // it), so changing it is a violation outright, with no grant that permits it.
@@ -52,9 +54,10 @@ import (
 // section forward. The exact-comparison alternative (compareSections) remains
 // in writegrant_prototype_test.go as the mutation suite's oracle.
 //
-// Check order, first error wins (documented because both may legitimately
-// fire — a signature field is also in the message fingerprint, so a signature
-// mutation flags the message section AND the binding check):
+// Check order, first error wins (the signature bindings and the section
+// fingerprints are disjoint by construction — the role view clears the
+// provider tokens, so a signature mutation is adjudicated ONLY by the
+// binding check, never by a section grant):
 //
 //  1. unconditional invariants — unknown protobuf fields (any nesting level),
 //     host-owned fields (torana_meta_json) and the request-domain signature
@@ -75,6 +78,7 @@ type requestSections struct {
 	model        [32]byte
 	params       [32]byte
 	cacheControl [32]byte
+	toolResults  [32]byte
 }
 
 func (p requestSections) equal(q requestSections) bool {
@@ -86,7 +90,7 @@ func (p requestSections) equal(q requestSections) bool {
 			return false
 		}
 	}
-	return p.tools == q.tools && p.model == q.model && p.params == q.params && p.cacheControl == q.cacheControl
+	return p.tools == q.tools && p.model == q.model && p.params == q.params && p.cacheControl == q.cacheControl && p.toolResults == q.toolResults
 }
 
 // writeFramed length-prefixes every field, so field boundaries cannot be moved
@@ -122,15 +126,22 @@ func writeField(h hash.Hash, field byte, present bool, value []byte) {
 //
 // The record is the SHARED SDK body fingerprint (role + ordered blocks:
 // kind, presence, order, identities, exact raw bytes, signatures, nested
-// tool-result content) computed over the body with the cache-breakpoint
-// blocks REMOVED — cache facts are governed by ir.cache_control.write, a
-// section of its own (fingerprintCacheControlSection), never by the
-// message-role grants. Role sections must not see marker changes, or a
-// cache-economics plugin would need every role grant. The cache section
-// covers marker values AND positions, so a content/topology change that
-// shifts a cache block changes BOTH sections — the union obligation.
+// tool-result content) computed over the role view (roleViewMessage) — the
+// body with the cache-breakpoint carriers and the trailing-signature block
+// REMOVED, the five embedded provider signature tokens CLEARED, and every
+// tool-result text VALUE replaced by a constant placeholder. Cache facts
+// are governed by ir.cache_control.write, a section of its own
+// (fingerprintCacheControlSection), never by the message-role grants; role
+// sections must not see marker changes, or a cache-economics plugin would
+// need every role grant. Provider signature tokens and the entire trailing
+// carrier are unconditional provenance (verifyRequestSignatures), never
+// role-grantable, and tool-result text VALUES are governed by
+// ir.tool_results.write (fingerprintToolResultsSection) — none of them may
+// move a role section. The cache section covers marker values AND
+// positions, so a content/topology change that shifts a cache block changes
+// BOTH sections — the union obligation.
 func fingerprintMessage(m *pb.Message) ([32]byte, error) {
-	body := bodyWithoutCacheBlocks(m)
+	body := roleViewMessage(m)
 	h := sha256.New()
 	writeField(h, 1, m.Role != "", []byte(m.Role))
 	// The SDK fingerprint is ERROR-RETURNING and the error PROPAGATES
@@ -147,43 +158,87 @@ func fingerprintMessage(m *pb.Message) ([32]byte, error) {
 	return sum, nil
 }
 
-// bodyWithoutCacheBlocks returns the message with its cache-breakpoint
-// carriers removed — the role-section view of the ordered body. This is
-// RECURSIVE: a top-level RequestBlock.cache_breakpoint is dropped, and a
-// ToolResult block is deep-copied with its nested
-// ToolResultContentBlock.cache_breakpoint elements dropped while every other
-// nested element AND its order survive. Cache facts are governed by
-// ir.cache_control.write alone (fingerprintCacheControlSection), never by
-// the message-role grants; a nested marker must therefore be invisible to
-// the role view exactly like a top-level one.
-func bodyWithoutCacheBlocks(m *pb.Message) *pb.Message {
+// roleViewMessage returns the message under the ROLE-SECTION view of the
+// ordered body — the view whose changes are governed by the per-role
+// ir.messages.write.<role> grants. It is the ordered body with EVERYTHING
+// that is not role-grantable normalized away:
+//
+//   - cache-breakpoint carriers (top-level and nested) are REMOVED — cache
+//     facts are governed by ir.cache_control.write alone
+//     (fingerprintCacheControlSection), never by the message-role grants, so
+//     a cache-economics plugin must not need every role grant. This is
+//     RECURSIVE: a ToolResult block is deep-copied with its nested
+//     ToolResultContentBlock.cache_breakpoint elements dropped while every
+//     other nested element AND its order survive;
+//   - the ENTIRE trailing-signature block is REMOVED — the trailing carrier
+//     (presence, value, part_metadata_json) is unconditional provenance,
+//     adjudicated by verifyRequestSignatures alone, never by a role grant;
+//   - the five embedded provider signature tokens are CLEARED — bound
+//     signatures are unconditional provenance (verifyRequestSignatures), and
+//     a plugin's prescribed response (clearing the token over changed
+//     covered content) must not move a role section;
+//   - tool-result TEXT VALUES are replaced by a constant placeholder — text
+//     value changes at the exact (message, block, content) position are
+//     governed by ir.tool_results.write (fingerprintToolResultsSection),
+//     never by the role grants; the role view keeps the arm's kind, presence
+//     and order (topology stays role-governed) but must not see its value.
+//
+// Everything else — role, block kinds, presence, order, identities,
+// arguments, payloads, part metadata, will_continue/scheduling
+// presence+value — stays visible: those are role-governed or
+// signature-covered (and a signature-covered field that is ALSO role-visible
+// moves the role section when changed, which is the union obligation). The
+// input is never mutated.
+func roleViewMessage(m *pb.Message) *pb.Message {
 	out := &pb.Message{Role: m.Role}
 	for _, b := range m.Blocks {
 		if b.GetCacheBreakpoint() != nil {
 			continue
 		}
-		if tr := b.GetToolResult(); tr != nil {
-			cloned := proto.Clone(b).(*pb.RequestBlock)
-			trOut := cloned.GetToolResult()
-			trOut.Content = nestedWithoutCache(tr.Content)
-			out.Blocks = append(out.Blocks, cloned)
+		if b.GetTrailingSignature() != nil {
 			continue
 		}
-		out.Blocks = append(out.Blocks, b)
+		cloned := proto.Clone(b).(*pb.RequestBlock)
+		switch k := cloned.Kind.(type) {
+		case *pb.RequestBlock_Text:
+			k.Text.Signature = ""
+		case *pb.RequestBlock_Thinking:
+			k.Thinking.Signature = ""
+		case *pb.RequestBlock_ToolUse:
+			k.ToolUse.Signature = ""
+		case *pb.RequestBlock_Unknown:
+			k.Unknown.Signature = ""
+		case *pb.RequestBlock_ToolResult:
+			k.ToolResult.Signature = ""
+			k.ToolResult.Content = roleNestedContent(k.ToolResult.Content)
+		}
+		out.Blocks = append(out.Blocks, cloned)
 	}
 	return out
 }
 
-// nestedWithoutCache returns the nested tool-result content with every
-// cache-breakpoint element removed, preserving all other elements and their
-// order. The input is not mutated.
-func nestedWithoutCache(content []*pb.ToolResultContentBlock) []*pb.ToolResultContentBlock {
+// roleTextPlaceholder is the constant every tool-result text VALUE is
+// replaced with in the role view. Two messages differing ONLY in tool-result
+// text values project identically — the value lives in the
+// ir.tool_results.write section, never here. The constant is a NUL-prefixed
+// sentinel that cannot be mistaken for framing or for a real value.
+const roleTextPlaceholder = "\x00torana-role-view-text"
+
+// roleNestedContent returns the nested tool-result content under the role
+// view: cache-breakpoint elements removed, every surviving TEXT element's
+// value replaced by the placeholder, all other elements and their order
+// preserved. The input is not mutated.
+func roleNestedContent(content []*pb.ToolResultContentBlock) []*pb.ToolResultContentBlock {
 	out := make([]*pb.ToolResultContentBlock, 0, len(content))
 	for _, c := range content {
 		if c.GetCacheBreakpoint() != nil {
 			continue
 		}
-		out = append(out, c)
+		cloned := proto.Clone(c).(*pb.ToolResultContentBlock)
+		if t := cloned.GetText(); t != nil {
+			t.Text = roleTextPlaceholder
+		}
+		out = append(out, cloned)
 	}
 	return out
 }
@@ -228,6 +283,7 @@ func fingerprintRequestSections(req *pb.ChatRequest) (requestSections, error) {
 	}
 
 	p.cacheControl = fingerprintCacheControlSection(req)
+	p.toolResults = fingerprintToolResultsSection(req)
 
 	h := sha256.New()
 	for _, t := range req.Tools {
@@ -347,6 +403,54 @@ func fingerprintCacheControlSection(req *pb.ChatRequest) [32]byte {
 		binary.LittleEndian.PutUint64(idx[:], uint64(i))
 		writeFramed(h, idx[:])
 		writeField(h, 3, true, t.CacheControlJson)
+	}
+	var sum [32]byte
+	copy(sum[:], h.Sum(nil))
+	return sum
+}
+
+// fingerprintToolResultsSection digests the tool-result TEXT VALUES of a
+// request, position-keyed: every text arm's value framed with its ABSOLUTE
+// message index, its block index, and its ORIGINAL content index (over the
+// FULL content list, cache arms included — a marker inserted before a text
+// arm moves the arm's content position, so the union obligation with
+// ir.cache_control.write fires). The position pins the value to its exact
+// (message, block, content) slot: a value change at the slot moves this
+// section alone; a value that MOVED to another slot moves it too (with the
+// role section, whose view keeps arm presence/order). The role view
+// placeholders these values, so this section is the ONLY projection that
+// sees them — a text-only change requires exactly ir.tool_results.write
+// and nothing else.
+//
+// This is the ONE section whose changes are governed by
+// ir.tool_results.write. Marker facts stay in fingerprintCacheControlSection,
+// and everything else (identity, metadata, scalars, topology, prompt text)
+// stays in the role sections — the union of the changed projections is the
+// required grant set, never more.
+func fingerprintToolResultsSection(req *pb.ChatRequest) [32]byte {
+	h := sha256.New()
+	var idx [8]byte
+	var pos [8]byte
+	for i, m := range req.Messages {
+		for bi, b := range m.Blocks {
+			tr := b.GetToolResult()
+			if tr == nil {
+				continue
+			}
+			for ci, c := range tr.Content {
+				t := c.GetText()
+				if t == nil {
+					continue
+				}
+				binary.LittleEndian.PutUint64(idx[:], uint64(i))
+				writeFramed(h, idx[:])
+				binary.LittleEndian.PutUint64(pos[:], uint64(bi))
+				writeFramed(h, pos[:])
+				binary.LittleEndian.PutUint64(pos[:], uint64(ci))
+				writeFramed(h, pos[:])
+				writeField(h, 1, true, []byte(t.Text))
+			}
+		}
 	}
 	var sum [32]byte
 	copy(sum[:], h.Sum(nil))
@@ -500,6 +604,11 @@ func verifyGrantedSections(accepted, out *pb.ChatRequest, canWrite func(section 
 	if acc.cacheControl != res.cacheControl {
 		if !canWrite("ir.cache_control.write") {
 			return fmt.Errorf("plugin changed cache_control without ir.cache_control.write")
+		}
+	}
+	if acc.toolResults != res.toolResults {
+		if !canWrite(string(sdk.SectionToolResultsWrite)) {
+			return fmt.Errorf("plugin changed tool result text without %s", sdk.SectionToolResultsWrite)
 		}
 	}
 	if acc.model != res.model {
@@ -703,15 +812,22 @@ func requestTokenName(msg protoreflect.FullName) string {
 // kind carrying a signature) or one message (TrailingStandalone: the
 // singular trailing block).
 type signedOccurrence struct {
-	digest [32]byte
-	used   bool
+	digest    [32]byte
+	preceding [32]byte // TrailingStandalone: the preceding-only digest
+	used      bool
 }
 
 // tokenOccurrence is one signature occurrence found in a message: its token
-// (empty = unsigned) and the digest of its covered content.
+// (empty = unsigned) and the digest of its covered content. For the
+// TrailingStandalone binding, preceding is the digest of the PRECEDING
+// text/thinking refs ALONE (no own-metadata frame) and trailAbsent reports
+// that the carrier block itself is gone — the two inputs of the non-circular
+// removal rule.
 type tokenOccurrence struct {
-	token  string
-	digest [32]byte
+	token       string
+	digest      [32]byte
+	preceding   [32]byte
+	trailAbsent bool
 }
 
 // requestBlockMessage returns the block's oneof message of the given type,
@@ -761,31 +877,42 @@ func (r requestSignatureField) occurrences(m *pb.Message) ([]tokenOccurrence, er
 				trail = pm
 			}
 		}
-		if trail == nil {
-			return nil, nil
+		// The occurrence is emitted EVEN WHEN THE CARRIER IS ABSENT: a
+		// removed carrier must be adjudicated (the non-circular rule), never
+		// silently treated as a grantable deletion. token is then empty and
+		// trailAbsent true; the preceding-only digest is what phase 2
+		// compares.
+		token := ""
+		if trail != nil {
+			token = trail.Get(r.sig).String()
 		}
-		token := trail.Get(r.sig).String()
+		// The PRECEDING-ONLY digest: the ordered preceding text/thinking
+		// refs, NO own-metadata frame — the only projection that can
+		// authorize a removal.
+		preh := sha256.New()
+		writeTrailingRefs(preh, m, r.trailRefs)
+		var preceding [32]byte
+		copy(preceding[:], preh.Sum(nil))
+
 		h := sha256.New()
 		// The MIXED scope: the trailing token is bound to BOTH its own
 		// SameMessage carriers (part_metadata_json on the trailing block —
 		// typed framing, so presence/value changes are distinct) AND the
 		// ordered preceding text/thinking content. SameMessage first, then
-		// the TrailingStandalone refs (the SDK's declared order).
-		sameDigest, err := digestBlockFields(trail, r.sameRefs)
-		if err != nil {
-			return nil, fmt.Errorf("writegrant: %s trailing occurrence: %w", r.name, err)
-		}
-		writeFramed(h, sameDigest[:])
-		for _, b := range m.Blocks {
-			for _, ref := range r.trailRefs {
-				if pm := requestBlockMessage(b, ref.msg); pm != nil {
-					writeFramed(h, []byte(pm.Get(ref.fd).String()))
-				}
+		// the TrailingStandalone refs (the SDK's declared order). An absent
+		// carrier has NO own-metadata frame at all, so absent and
+		// present-empty never collide.
+		if trail != nil {
+			sameDigest, err := digestBlockFields(trail, r.sameRefs)
+			if err != nil {
+				return nil, fmt.Errorf("writegrant: %s trailing occurrence: %w", r.name, err)
 			}
+			writeFramed(h, sameDigest[:])
 		}
+		writeTrailingRefs(h, m, r.trailRefs)
 		var sum [32]byte
 		copy(sum[:], h.Sum(nil))
-		return []tokenOccurrence{{token: token, digest: sum}}, nil
+		return []tokenOccurrence{{token: token, digest: sum, preceding: preceding, trailAbsent: trail == nil}}, nil
 	}
 	var out []tokenOccurrence
 	for _, b := range m.Blocks {
@@ -803,6 +930,43 @@ func (r requestSignatureField) occurrences(m *pb.Message) ([]tokenOccurrence, er
 		})
 	}
 	return out, nil
+}
+
+// writeTrailingRefs frames the ordered preceding covered elements into h —
+// the SHARED typed encoder for BOTH the preceding-only digest and the mixed
+// digest's TrailingStandalone section. Each covered element (a block whose
+// kind matches a trailRef) contributes, for every ref it matches: the
+// element's ORDINAL in the covered subsequence (repeated Text/Thinking
+// order is part of the signed content), the full covered message identity
+// and ref field identity, and the value. Frames are typed, so
+// Text("x"),Thinking("y") and Thinking("x"),Text("y") NEVER collide, an
+// explicit empty value is distinct from an absent element, and a
+// Text→Thinking kind swap is signed content movement. Uncovered absolute
+// topology (uncovered block kinds, block indexes) is deliberately NOT
+// framed — the covered projection is the trailing token's claim.
+func writeTrailingRefs(h hash.Hash, m *pb.Message, refs []trailSignatureRef) {
+	ordinal := 0
+	for _, b := range m.Blocks {
+		covered := false
+		for _, ref := range refs {
+			pm := requestBlockMessage(b, ref.msg)
+			if pm == nil {
+				continue
+			}
+			if !covered {
+				// One ordinal per covered ELEMENT (block), shared by its refs.
+				var ord [8]byte
+				binary.LittleEndian.PutUint64(ord[:], uint64(ordinal))
+				writeFramed(h, ord[:])
+				covered = true
+			}
+			writeFramed(h, []byte(string(ref.msg)+"."+string(ref.fd.Name())))
+			writeFramed(h, []byte(pm.Get(ref.fd).String()))
+		}
+		if covered {
+			ordinal++
+		}
+	}
 }
 
 // digestBlockFields hashes a block's covered-content fields, length-framed
@@ -898,11 +1062,41 @@ func contentBlocks(l protoreflect.List) ([]*pb.ToolResultContentBlock, error) {
 // allowed.
 //
 // Accepted occurrences with no output counterpart at all (the signed message
-// was deleted) are allowed: deletion is grantable.
+// was deleted) are allowed: deletion is grantable. The trailing carrier is
+// the ONE exception: its occurrence is emitted even when the carrier is
+// ABSENT, and phase 2 adjudicates the removal by the non-circular rule
+// (removal over an unchanged preceding projection is dropped — rejected;
+// removal over a lawfully changed preceding projection is cleared —
+// accepted). The carrier's own metadata can never authorize its deletion.
 func verifyRequestSignatures(accepted, out *pb.ChatRequest) error {
 	for _, check := range requestSignatureFields {
+		// FAIL-CLOSED (both sides): the accepted replacement domain
+		// requires a PRESENT trailing carrier to carry a non-empty
+		// signature. Legitimate clearing is represented by removing the
+		// entire carrier; a present-but-empty carrier is an
+		// unrepresentable provenance state and must never reach the digest
+		// paths — its own metadata could otherwise manufacture a "cleared"
+		// verdict over unchanged preceding content.
+		if check.scope == outboundpolicy.SignatureScopeTrailingStandalone {
+			for _, src := range []*pb.ChatRequest{accepted, out} {
+				for _, m := range src.Messages {
+					for _, b := range m.Blocks {
+						pm := requestBlockMessage(b, check.binding.Message)
+						if pm == nil {
+							continue
+						}
+						if pm.Get(check.sig).String() == "" {
+							return fmt.Errorf("plugin %s trailing carrier is present but empty", check.name)
+						}
+					}
+				}
+			}
+		}
 		byToken := map[string][]*signedOccurrence{}
 		byContent := map[[32]byte][]*signedOccurrence{}
+		// TrailingStandalone ONLY: signed occurrences indexed by their
+		// preceding-only digest — the non-circular removal rule's lookup.
+		byPreceding := map[[32]byte][]*signedOccurrence{}
 		// Counts of accepted UNSIGNED occurrences per covered-content digest:
 		// an unsigned output occurrence with an unchanged unsigned counterpart
 		// is spoken for and must not be diagnosed as a dropped token (the
@@ -919,9 +1113,12 @@ func verifyRequestSignatures(accepted, out *pb.ChatRequest) error {
 					unsignedByContent[occ.digest]++
 					continue
 				}
-				so := &signedOccurrence{digest: occ.digest}
+				so := &signedOccurrence{digest: occ.digest, preceding: occ.preceding}
 				byToken[occ.token] = append(byToken[occ.token], so)
 				byContent[occ.digest] = append(byContent[occ.digest], so)
+				if check.scope == outboundpolicy.SignatureScopeTrailingStandalone {
+					byPreceding[occ.preceding] = append(byPreceding[occ.preceding], so)
+				}
 				everSeen[occ.token] = true
 			}
 		}
@@ -1003,6 +1200,27 @@ func verifyRequestSignatures(accepted, out *pb.ChatRequest) error {
 				if tocc.token != "" {
 					continue
 				}
+				if tocc.trailAbsent {
+					// The non-circular removal rule: a REMOVED trailing
+					// carrier is authorized ONLY by an independently changed
+					// preceding text/thinking projection. An unchanged
+					// unsigned twin is spoken for first; a signed accepted
+					// occurrence over the SAME preceding content is a
+					// dropped token. Never does the carrier's own metadata
+					// authorize its deletion — the absent occurrence has no
+					// own-metadata frame to compare.
+					if unsignedByContent[tocc.digest] > 0 {
+						unsignedByContent[tocc.digest]--
+						continue
+					}
+					for _, occ := range byPreceding[tocc.preceding] {
+						if !occ.used {
+							return fmt.Errorf("plugin %s signature %s", check.name,
+								outboundpolicy.SignatureDropped)
+						}
+					}
+					continue
+				}
 				if unsignedByContent[tocc.digest] > 0 {
 					unsignedByContent[tocc.digest]--
 					continue // unchanged unsigned counterpart exists
@@ -1047,6 +1265,7 @@ var allRequestGrants = []string{
 	"ir.messages.write.tool",
 	"ir.messages.write.developer",
 	"ir.messages.write.other",
+	"ir.tool_results.write",
 	"ir.tools.write",
 	"ir.model.write",
 	"ir.params.write",
@@ -1122,13 +1341,13 @@ var requestBlockFieldSections = map[string]string{
 
 var requestTextBlockFieldSections = map[string]string{
 	"text":               "ir.messages.write.<role>",
-	"signature":          "ir.messages.write.<role>",
+	"signature":          hostOwnedField,
 	"part_metadata_json": "ir.messages.write.<role>",
 }
 
 var requestThinkingBlockFieldSections = map[string]string{
 	"text":               "ir.messages.write.<role>",
-	"signature":          "ir.messages.write.<role>",
+	"signature":          hostOwnedField,
 	"part_metadata_json": "ir.messages.write.<role>",
 }
 
@@ -1140,7 +1359,7 @@ var requestToolUseBlockFieldSections = map[string]string{
 	"id":                 "ir.messages.write.<role>",
 	"name":               "ir.messages.write.<role>",
 	"arguments_json":     "ir.messages.write.<role>",
-	"signature":          "ir.messages.write.<role>",
+	"signature":          hostOwnedField,
 	"part_metadata_json": "ir.messages.write.<role>",
 }
 
@@ -1151,7 +1370,7 @@ var requestToolResultBlockFieldSections = map[string]string{
 	"part_metadata_json": "ir.messages.write.<role>",
 	"will_continue":      "ir.messages.write.<role>",
 	"scheduling":         "ir.messages.write.<role>",
-	"signature":          "ir.messages.write.<role>",
+	"signature":          hostOwnedField,
 }
 
 var toolResultContentBlockFieldSections = map[string]string{
@@ -1161,7 +1380,11 @@ var toolResultContentBlockFieldSections = map[string]string{
 }
 
 var toolResultTextBlockFieldSections = map[string]string{
-	"text": "ir.messages.write.<role>",
+	// The VALUE is governed by ir.tool_results.write alone (position-keyed,
+	// fingerprintToolResultsSection); the role view placeholders it. The
+	// text ARM's kind/presence/order stay role-governed (the content list
+	// in requestToolResultBlockFieldSections).
+	"text": "ir.tool_results.write",
 }
 
 var toolResultUnknownBlockFieldSections = map[string]string{
@@ -1173,12 +1396,12 @@ var requestUnknownBlockFieldSections = map[string]string{
 	"kind":               "ir.messages.write.<role>",
 	"payload_json":       "ir.messages.write.<role>",
 	"part_metadata_json": "ir.messages.write.<role>",
-	"signature":          "ir.messages.write.<role>",
+	"signature":          hostOwnedField,
 }
 
 var requestTrailingSignatureBlockFieldSections = map[string]string{
-	"signature":          "ir.messages.write.<role>",
-	"part_metadata_json": "ir.messages.write.<role>",
+	"signature":          hostOwnedField,
+	"part_metadata_json": hostOwnedField,
 }
 
 var requestCacheBreakpointFieldSections = map[string]string{
