@@ -117,7 +117,9 @@ func (s *Server) offloadCompletionResult(ctx context.Context, payloadJSON string
 	} else {
 		apiKey = s.resolveSecret(off.APIKeyEnv, off.APIKeyEnc)
 		if apiKey == "" {
-			apiKey = reqStateFrom(ctx).CallerAuth
+			if rs := reqStateFrom(ctx); rs != nil {
+				apiKey = rs.CallerAuth
+			}
 		}
 	}
 

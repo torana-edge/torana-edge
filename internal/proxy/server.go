@@ -484,6 +484,9 @@ func (s *Server) compactionPricing(rs *reqState, report economics.CompactionRepo
 
 func (s *Server) evaluateCompaction(ctx context.Context, report economics.CompactionReport) economics.CompactionDecision {
 	rs := reqStateFrom(ctx)
+	if rs == nil {
+		return economics.CompactionDecision{Reason: economics.UnavailableRouteUnresolved}
+	}
 	targetName := report.Provider
 	if targetName == "" {
 		targetName = rs.Provider
@@ -554,13 +557,26 @@ func (s *Server) evaluateCompaction(ctx context.Context, report economics.Compac
 	return decision
 }
 
-// reqStateFrom returns the request state stashed by the HTTP handler,
-// or a zero-value fallback for requests outside the handler (tests).
+// reqStateFrom returns the request state stashed by the HTTP handler. Missing
+// state is explicit: returning a fresh throwaway object made writes appear to
+// succeed while silently discarding them.
 func reqStateFrom(ctx context.Context) *reqState {
 	if rs, ok := ctx.Value(reqStateKey{}).(*reqState); ok {
 		return rs
 	}
-	return &reqState{}
+	return nil
+}
+
+// ensureReqState repairs alternate ReverseProxy entry points by attaching one
+// durable state object to the request. The normal HTTP handler has already
+// installed the fully populated state before Rewrite runs.
+func ensureReqState(req *http.Request) *reqState {
+	if rs := reqStateFrom(req.Context()); rs != nil {
+		return rs
+	}
+	rs := &reqState{}
+	*req = *req.WithContext(context.WithValue(req.Context(), reqStateKey{}, rs))
+	return rs
 }
 
 // --- Construction -----------------------------------------------------------
@@ -737,6 +753,7 @@ func New(cfg Config) (*Server, error) {
 		// pr.SetXForwarded), and unparsable query parameters are dropped.
 		Rewrite: func(pr *httputil.ProxyRequest) {
 			req := pr.Out
+			ensureReqState(req)
 			var body []byte
 			if req.Body != nil {
 				// ServeHTTP has already enforced maxBodySize with a
@@ -2885,6 +2902,9 @@ func (s *Server) newRuntime() *wasm.Runtime {
 	}
 	rt.CompactionReportFunc = func(ctx context.Context, pluginName string, report economics.CompactionReport) {
 		rs := reqStateFrom(ctx)
+		if rs == nil {
+			return
+		}
 		rs.CompactionReports = append(rs.CompactionReports, attributedCompactionReport{Plugin: pluginName, Report: report})
 	}
 	rt.EvaluateCompactionFunc = s.evaluateCompaction
