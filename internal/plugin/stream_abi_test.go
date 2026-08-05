@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -215,7 +216,7 @@ func TestStreamRequestIsolation(t *testing.T) {
 		}
 		var args map[string]any
 		if err := json.Unmarshal([]byte(out[1].ToolCallDelta.ArgumentsDelta), &args); err != nil {
-			t.Fatalf("req %d: invalid args %q: %v", reqID, out[0].ToolCallDelta.ArgumentsDelta, err)
+			t.Fatalf("req %d: invalid args %q: %v", reqID, out[1].ToolCallDelta.ArgumentsDelta, err)
 		}
 		env, _ := args["env"].(map[string]any)
 		if len(env) != 1 || env[wantKey] == nil {
@@ -1368,7 +1369,11 @@ func TestIntentPrependAuthorizedOverFullDomain(t *testing.T) {
 	bundles := officialBundlesDir(t)
 	requireBundle(t, bundles, "intent")
 	store := cache.NewLocalCache(time.Minute)
-	pp := newTestPipelineWith(t, bundles, []string{"intent"}, store, nil)
+	// The row ISOLATES the prepend: fill is off, so the history call is not
+	// a mutation target — the suffix comparison below is over a request the
+	// plugin only prepends to.
+	pp := newTestPipelineWith(t, bundles, []string{"intent"}, store,
+		map[string]json.RawMessage{"intent": json.RawMessage(`{"fill":"off"}`)})
 
 	marker := warmerMarker()
 	chat := &engine.ChatRequest{
@@ -1391,58 +1396,53 @@ func TestIntentPrependAuthorizedOverFullDomain(t *testing.T) {
 				}},
 			}},
 			{Role: engine.RoleAssistant, Blocks: []engine.Block{{ToolUse: &engine.ToolUseBlock{ID: "call_hist", Name: "read", Arguments: mustReq(`{"path":"failover.go"}`)}}}},
+			{Role: engine.RoleTool, Blocks: []engine.Block{{ToolResult: &engine.ToolResultBlock{ToolCallID: "call_hist", ToolName: "read", Content: []engine.ToolResultContentBlock{{Text: "tool output"}}}}}},
 		},
 	}
-	store.Set("intentc:[\"read\",{\"path\":\"failover.go\"}]", "where is the retry budget configured")
+	want := chat.Messages
+
 	out, err := pp.RunBeforeRequest(context.Background(), 9, chat, nil)
 	if err != nil {
 		t.Fatalf("RunBeforeRequest: %v", err)
 	}
 
-	// The system message was prepended (the mutation survived verification).
-	if len(out.Messages) == 0 || out.Messages[0].Role != engine.RoleSystem || out.Messages[0].Blocks[0].Text == nil {
-		t.Fatalf("the system prompt was not prepended: %+v", out.Messages)
+	// EXACTLY ONE new leading system message carrying the addendum.
+	if len(out.Messages) != len(want)+1 {
+		t.Fatalf("message count = %d, want %d (exactly one prepended system message)", len(out.Messages), len(want)+1)
 	}
-	if !strings.Contains(out.Messages[0].Blocks[0].Text.Text, "Every tool call has an \"i\" field") {
-		t.Fatalf("the prepended system prompt lacks the addendum: %q", out.Messages[0].Blocks[0].Text.Text)
-	}
-
-	// The history call was re-hydrated with the bridged intent.
-	for _, m := range out.Messages {
-		if m.Role == engine.RoleAssistant && len(m.Blocks) == 1 && m.Blocks[0].ToolUse != nil && m.Blocks[0].ToolUse.ID == "call_hist" {
-			vals, _, _ := m.Blocks[0].ToolUse.Arguments.DecodeObject()
-			if got := string(vals["i"]); got != `"where is the retry budget configured"` {
-				t.Fatalf(`"i" not re-hydrated: got %q`, got)
-			}
-		}
+	if out.Messages[0].Role != engine.RoleSystem || out.Messages[0].Blocks[0].Text == nil ||
+		!strings.Contains(out.Messages[0].Blocks[0].Text.Text, "Every tool call has an \"i\" field") {
+		t.Fatalf("the prepended system message is wrong: %+v", out.Messages[0])
 	}
 
-	// Unrelated bytes EXACT: the developer text, the unmodelled text, the
-	// tool-result text, and BOTH marker lexemes survive byte-identical.
-	sawDev, sawWeird, sawResult, sawTopMarker, sawNestedMarker := false, false, false, false, false
-	for _, m := range out.Messages {
-		for _, b := range m.Blocks {
-			switch {
-			case b.Text != nil && m.Role == "developer" && b.Text.Text == "dev instruction":
-				sawDev = true
-			case b.Text != nil && m.Role == "weird" && b.Text.Text == "unmodelled content":
-				sawWeird = true
-			case b.ToolResult != nil && b.ToolResult.ToolCallID == "call_x":
-				sawResult = len(b.ToolResult.Content) == 2 && b.ToolResult.Content[0].Text == "RESULT-TEXT"
-				if b.ToolResult.Content[1].CacheBreakpoint != nil {
-					sawNestedMarker = string(b.ToolResult.Content[1].CacheBreakpoint.Marker.Bytes()) == string(marker.Bytes())
-				}
-			case b.CacheBreakpoint != nil:
-				sawTopMarker = string(b.CacheBreakpoint.Marker.Bytes()) == string(marker.Bytes())
-			}
-		}
+	// The untouched suffix is STRUCTURALLY/BYTE exact: no drop, reorder,
+	// duplication, or field change — developer/unmodelled/user/assistant/
+	// tool roles, both marker lexemes, the tool-result identity and content,
+	// the call identity, all unasserted text.
+	if !reflect.DeepEqual(out.Messages[1:], want) {
+		gotJSON, _ := json.Marshal(out.Messages[1:])
+		wantJSON, _ := json.Marshal(want)
+		t.Fatalf("the message suffix changed:\n got %s\nwant %s", gotJSON, wantJSON)
 	}
-	for name, ok := range map[string]bool{
-		"developer text": sawDev, "unmodelled text": sawWeird, "tool result": sawResult,
-		"top-level marker": sawTopMarker, "nested marker": sawNestedMarker,
-	} {
-		if !ok {
-			t.Fatalf("%s was not preserved byte-exact", name)
-		}
+
+	// The tool-definition mutation is asserted SEPARATELY (it is part of the
+	// same request but not the prepend): the schema gains the "i" property
+	// and keeps the original one.
+	if len(out.Tools) != 1 || out.Tools[0].Name != "read" {
+		t.Fatalf("tools changed: %+v", out.Tools)
+	}
+	var props map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(out.Tools[0].Parameters.Bytes()), &props); err != nil {
+		t.Fatalf("output schema not JSON: %v", err)
+	}
+	var inner map[string]json.RawMessage
+	if err := json.Unmarshal(props["properties"], &inner); err != nil {
+		t.Fatalf("output properties not JSON: %v", err)
+	}
+	if _, ok := inner["i"]; !ok {
+		t.Fatalf("the tool schema did not gain the i property: %s", out.Tools[0].Parameters.Bytes())
+	}
+	if _, ok := inner["path"]; !ok {
+		t.Fatalf("the tool schema lost the original property: %s", out.Tools[0].Parameters.Bytes())
 	}
 }
