@@ -27,8 +27,8 @@ func TestLoadRealPlugins(t *testing.T) {
 	cases := map[string][]string{
 		"schema_translator": {"run_before_request", "run_on_stream_chunk"},
 		"keyword_compactor": {"run_before_request"},
-		"compactor":         {"run_before_request", "run_on_stream_chunk"},
-		"otel":              {"run_before_request", "run_after_response"},
+		"compactor":         {"run_before_request"},
+		"otel":              {"run_before_request", "run_after_response", "run_on_http_request"},
 		"auth":              {"run_before_request"},
 	}
 

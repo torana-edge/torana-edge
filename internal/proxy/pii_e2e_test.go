@@ -144,8 +144,11 @@ func TestPIIModelBlock(t *testing.T) {
 	if status != 422 {
 		t.Fatalf("status = %d, want 422; body=%s", status, body)
 	}
-	if !strings.Contains(string(body), "person_name") {
-		t.Fatalf("error should name the model finding: %s", body)
+	// The approved normalization never echoes a model-controlled category
+	// verbatim: "person_name" is not a documented category and maps to the
+	// safe "unspecified" — the message still names the finding.
+	if !strings.Contains(string(body), "unspecified") {
+		t.Fatalf("error should name the normalized finding: %s", body)
 	}
 	if n := atomic.LoadInt32(hits); n != 0 {
 		t.Fatalf("upstream called %d times; must be 0", n)
