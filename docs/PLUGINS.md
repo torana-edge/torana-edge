@@ -8,6 +8,10 @@ runs.
 This page is for operating them. If you want to *write* one, that lives with
 the SDK: [torana-plugin-sdk](https://github.com/torana-edge/torana-plugin-sdk).
 
+The current host accepts ABI v2 plugins. The supported authoring path is the
+Go v2 SDK; the SDK repository's Rust crate still implements ABI v1 and is not
+compatible with this host.
+
 ## Installing
 
 ```bash

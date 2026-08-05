@@ -107,7 +107,7 @@ both repos:
 
 **In the SDK:**
 
-1. Add messages to `proto/torana/v1/torana.proto`. **Additive only** — CI runs
+1. Add messages to `proto/torana/v2/torana.proto`. **Additive only** — CI runs
    `buf breaking` against `main`, so changing a field number or removing a field
    fails.
 2. Regenerate with `./scripts/generate-go.sh` and **commit the result**. CI
@@ -120,7 +120,10 @@ both repos:
 3. Register the hook in `sdk.go` **and add a no-op stub to `sdk_other.go`**.
    `sdk.go` is `//go:build wasip1`; without the stub, every plugin fails to
    compile for host-side tests.
-4. Add the Rust macro in `rust/torana-plugin-sdk/src/lib.rs`.
+4. Update the Go v2 SDK helpers and conformance tests. The existing Rust crate
+   is ABI v1 and does not satisfy the current host contract; do not describe a
+   host change as Rust-supported without a complete v2 port and integration
+   proof.
 5. Update `ABI.md`, `docs/WRITING_A_PLUGIN.md`, and **`docs/WASM_PLUGIN_GUIDE.md`**.
    That last one is the document that lets less capable models write correct
    plugins; a new capability that isn't in its host-function section and final
