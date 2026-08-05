@@ -54,6 +54,19 @@ func TestStreamToolCallBlockIndexesParallelInOneChunk(t *testing.T) {
 	}
 }
 
+func TestStreamRejectsMultipleCandidatesInsteadOfDroppingThem(t *testing.T) {
+	frame := `data: {"response":{"candidates":[` +
+		`{"content":{"role":"model","parts":[{"text":"first"}]}},` +
+		`{"content":{"role":"model","parts":[{"text":"second"}]}}]}}`
+	events := parseStreamSSE(t, frame)
+	if len(events) != 1 || events[0].Error == nil {
+		t.Fatalf("events = %+v, want one terminal error", events)
+	}
+	if events[0].Error.Message != "gemini: multiple streamed candidates are unsupported" {
+		t.Fatalf("error = %q", events[0].Error.Message)
+	}
+}
+
 // TestStreamToolCallBlockIndexesSharedAcrossChunks pins the same invariant when
 // parts arrive split over multiple SSE frames: the per-stream block counter
 // must carry across chunks, and it counts EVERY block — text, thinking, and
