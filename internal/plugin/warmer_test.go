@@ -351,8 +351,12 @@ func TestWarmerSkipsPrefixEndingMidToolCall(t *testing.T) {
 	if h.sentCount() != 0 {
 		t.Errorf("sent %d refreshes for a prefix that cannot be sent standalone", h.sentCount())
 	}
-	if len(outcomes) == 0 || !strings.Contains(outcomes[0].Note, "tool call") {
-		t.Errorf("the refusal was not explained: %+v", outcomes)
+	// The current contract declines at the STORE (an assistant final turn
+	// with any tool_use block is never warmed): no entry is written, so the
+	// tick has nothing to skip and produces no outcome — the decline is the
+	// absence of a warming obligation, not a tick-time explanation.
+	if len(outcomes) != 0 {
+		t.Errorf("a declined prefix must produce no warming outcome: %+v", outcomes)
 	}
 }
 
