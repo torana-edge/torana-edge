@@ -150,6 +150,11 @@ func TestPIIModelBlock(t *testing.T) {
 	if !strings.Contains(string(body), "unspecified") {
 		t.Fatalf("error should name the normalized finding: %s", body)
 	}
+	// The approved rule is never-echoed-verbatim: the raw model-controlled
+	// category must be ABSENT from the complete response bytes.
+	if strings.Contains(string(body), "person_name") {
+		t.Fatalf("the raw model category was echoed verbatim: %s", body)
+	}
 	if n := atomic.LoadInt32(hits); n != 0 {
 		t.Fatalf("upstream called %d times; must be 0", n)
 	}
