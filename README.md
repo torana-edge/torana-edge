@@ -18,7 +18,7 @@ CLI (`agy`)** — Torana also offers an optional TLS-terminating MITM ingress. S
 
 ## Key Features
 
-- **WASM Plugin Ecosystem:** Write plugins in Go, Rust, or any WASI-compatible language against the [torana-plugin-sdk](https://github.com/torana-edge/torana-plugin-sdk) and compile to `.wasm`. Hot-loaded, no proxy restart.
+- **WASM Plugin Ecosystem:** Write plugins with the Go ABI v2 [torana-plugin-sdk](https://github.com/torana-edge/torana-plugin-sdk) and compile to `.wasm`. Hot-loaded, no proxy restart. The repository's older Rust SDK is still ABI v1 and is not compatible with this v2-only host.
 - **Operator-approved plugins:** A plugin declares the capabilities it wants; it does not receive them. You inspect and approve each bundle, and the approval is bound to that bundle's SHA-256 digest — rebuild or change permissions and it needs approving again. Sandboxed in `wazero`: a plugin gets the IR and nothing else, no filesystem, no sockets you did not grant.
 - **Tool-aware compaction:** Explicit policies keep source and failure evidence exact while allowing recoverable searches/listings to be reduced deterministically—even on first exposure when configured.
 - **Economic model delegation:** Historical results can be summarized through a cheaper model only when route-aware cache/offload economics estimate positive net savings.
@@ -79,7 +79,8 @@ CLI (`agy`)** — Torana also offers an optional TLS-terminating MITM ingress. S
 
 **Writing a plugin?** That lives with the SDK:
 [torana-plugin-sdk](https://github.com/torana-edge/torana-plugin-sdk) — the
-`torana.v1` ABI, Go and Rust SDKs, and the authoring guides.
+the ABI v2 Go SDK and authoring guides. The bundled Rust ABI v1 crate is
+historical and unsupported by the current host until it is ported or removed.
 
 **Official plugins** live in [torana-plugins](https://github.com/torana-edge/torana-plugins).
 
