@@ -629,8 +629,11 @@ func Save(path string, cfg Config) error {
 	if dir == "" {
 		dir = "."
 	}
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("creating config dir: %w", err)
+	}
+	if err := os.Chmod(dir, 0o700); err != nil {
+		return fmt.Errorf("securing config dir: %w", err)
 	}
 
 	tmpFile, err := os.CreateTemp(dir, ".config.json.tmp-*")

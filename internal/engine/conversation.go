@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"hash"
+	"strconv"
 
 	pb "github.com/torana-edge/torana-plugin-sdk/pb/v2"
 )
@@ -178,7 +179,7 @@ func CachePrefixKeyTopology(pbReq *pb.ChatRequest, topo TopologyFacts) string {
 		writeHashField(h, "bare")
 	}
 	writeHashField(h, "variant")
-	writeHashField(h, string(rune('0'+topo.OpenAIVariant)))
+	writeHashField(h, strconv.Itoa(int(topo.OpenAIVariant)))
 	writeHashFieldBytes(h, topo.ResponsesInputLayout.Bytes())
 
 	return shortHex(h)
@@ -192,10 +193,6 @@ func messageText(m Message) string {
 	return m.Text()
 }
 
-// writeHashField length-prefixes every input so field boundaries cannot be
-// forged by content. Without it, a system prompt whose tail happens to look like
-// the next field would hash identically to a different split of the same bytes,
-// and two distinct conversations would share a key.
 // writeHashFieldBytes frames raw authoritative JSON bytes into the cache
 // hash: length-tagged, so identical content in different fields cannot
 // collide and absent vs `{}` hash differently.
@@ -206,6 +203,10 @@ func writeHashFieldBytes(h hash.Hash, b []byte) {
 	h.Write(b)
 }
 
+// writeHashField length-prefixes every input so field boundaries cannot be
+// forged by content. Without it, a system prompt whose tail happens to look like
+// the next field would hash identically to a different split of the same bytes,
+// and two distinct conversations would share a key.
 func writeHashField(h hash.Hash, s string) {
 	var n [8]byte
 	binary.BigEndian.PutUint64(n[:], uint64(len(s)))

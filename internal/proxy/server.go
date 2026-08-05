@@ -1198,8 +1198,8 @@ func New(cfg Config) (*Server, error) {
 
 			// SSE streaming: parse → pipeline → serialize.
 			if strings.Contains(contentType, "text/event-stream") {
-				fmt, _ := resp.Request.Context().Value(formatCtxKey{}).(*format.Format)
-				if fmt == nil {
+				streamFormat, _ := resp.Request.Context().Value(formatCtxKey{}).(*format.Format)
+				if streamFormat == nil {
 					return nil
 				}
 
@@ -1217,7 +1217,7 @@ func New(cfg Config) (*Server, error) {
 				// client response is being aborted.
 				streamCtx, cancelStream := context.WithCancel(resp.Request.Context())
 
-				events := fmt.Stream.ParseStream(upstreamBody)
+				events := streamFormat.Stream.ParseStream(upstreamBody)
 
 				// Host usage tap: record provider-reported tokens for metrics
 				// and the _response signal. When the host injected the usage
@@ -1389,7 +1389,7 @@ func New(cfg Config) (*Server, error) {
 					if streamPl != nil {
 						defer streamPl.Release()
 					}
-					serErr := fmt.Stream.SerializeStream(streamCtx, pw, events)
+					serErr := streamFormat.Stream.SerializeStream(streamCtx, pw, events)
 					if serErr != nil && term.Err() == nil {
 						// A serializer failure is abnormal too. Trigger immediately
 						// so the input pipeline exits and the pipe is never closed as
@@ -1440,7 +1440,7 @@ func New(cfg Config) (*Server, error) {
 					// closed.
 					<-tapDone
 					if serErr != nil {
-						log.Printf("format %s serialize error: %v", fmt.Name, serErr)
+						log.Printf("format %s serialize error: %v", streamFormat.Name, serErr)
 					}
 					// Observational run_after_response for streaming
 					// responses (metrics/audit plugins). Mutations are not

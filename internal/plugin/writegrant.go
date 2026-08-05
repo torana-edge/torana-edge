@@ -5,7 +5,6 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"fmt"
-	plugin_sdk "github.com/torana-edge/torana-plugin-sdk"
 	"hash"
 	"math"
 	"sort"
@@ -148,7 +147,7 @@ func fingerprintMessage(m *pb.Message) ([32]byte, error) {
 	// (never a zero digest): two erroring projections at the same
 	// role/position must not compare equal. The section-fingerprint path
 	// fails the whole verification on any unrepresentable body.
-	s, err := plugin_sdk.RequestBlocksFingerprint(body)
+	s, err := sdk.RequestBlocksFingerprint(body)
 	if err != nil {
 		return [32]byte{}, fmt.Errorf("writegrant: role-section body fingerprint: %w", err)
 	}
@@ -996,7 +995,7 @@ func digestBlockFields(pm protoreflect.Message, refs []resolvedRef) ([32]byte, e
 			if err != nil {
 				return [32]byte{}, err
 			}
-			sum, err := plugin_sdk.ToolResultContentFingerprint(blocks)
+			sum, err := sdk.ToolResultContentFingerprint(blocks)
 			if err != nil {
 				return [32]byte{}, fmt.Errorf("writegrant: covered nested content: %w", err)
 			}

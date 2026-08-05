@@ -58,6 +58,40 @@ func TestFailoverExhaustion(t *testing.T) {
 	}
 }
 
+func TestFailoverHandlesRetryableResponseWithNilBody(t *testing.T) {
+	calls := 0
+	base := roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		calls++
+		if calls == 1 {
+			return &http.Response{StatusCode: http.StatusInternalServerError, Header: make(http.Header)}, nil
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader("ok")),
+			Request:    req,
+		}, nil
+	})
+	cfg := provider.Config{Providers: map[string]provider.Provider{
+		"primary":  {URL: "https://primary.invalid", Fallback: []string{"fallback"}},
+		"fallback": {URL: "https://fallback.invalid"},
+	}}
+	frt := &failoverRoundTripper{base: base, cfg: func() provider.Config { return cfg }}
+	req, err := http.NewRequest(http.MethodPost, "https://primary.invalid/v1/chat", strings.NewReader("{}"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req = req.WithContext(context.WithValue(req.Context(), routeContextKey{}, &RouteContext{ProviderName: "primary"}))
+	resp, err := frt.RoundTrip(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK || calls != 2 {
+		t.Fatalf("status=%d calls=%d, want 200 and two attempts", resp.StatusCode, calls)
+	}
+}
+
 // TestFailoverReleasesTokenOnTransportError: a transport error with no
 // fallbacks must release the concurrency token. Regression: the token was
 // only released via rateLimitBody.Close, which never wraps a nil response,

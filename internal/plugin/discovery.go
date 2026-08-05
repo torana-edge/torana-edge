@@ -527,7 +527,7 @@ func bundleDigest(manifestBytes, wasmBytes, schemaBytes, agentBytes []byte) stri
 	parts := [][]byte{manifestBytes, wasmBytes, schemaBytes}
 	// Preserve existing approvals for bundles that do not ship agent.json.
 	// Adding the optional file appends a fourth length-delimited digest part.
-	if len(agentBytes) > 0 {
+	if agentBytes != nil {
 		parts = append(parts, agentBytes)
 	}
 	for _, part := range parts {

@@ -277,6 +277,9 @@ func (d streamPolicyDiff) messagePresent(m protoreflect.Message, path string) er
 	fields, _ := outboundpolicy.OutboundFieldNames(name)
 	for _, field := range fields {
 		fd := m.Descriptor().Fields().ByName(protoreflect.Name(field))
+		if fd == nil { // outboundpolicy.Validate is the startup proof; defensive.
+			return fmt.Errorf("stream policy field %s.%s is absent from the descriptor", name, field)
+		}
 		p, _ := outboundpolicy.OutboundFieldPolicy(name, field)
 		if !fieldMaterial(m, fd) {
 			continue
