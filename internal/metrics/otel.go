@@ -84,14 +84,15 @@ var (
 )
 
 // RecordProxyRequest records one proxied request's latency and outcome,
-// labeled by model, provider, and status class (2xx/4xx/5xx). No-op unless OTel
-// is configured.
+// labeled by bounded model family, provider, and status class (2xx/4xx/5xx).
+// Exact model is caller-controlled and deliberately never becomes a label.
+// No-op unless OTel is configured.
 func RecordProxyRequest(ctx context.Context, model, provider string, status int, durationMs float64) {
 	if meter == nil {
 		return
 	}
 	attrs := metric.WithAttributes(
-		attribute.String("model", model),
+		attribute.String("model_family", modelFamily(model)),
 		attribute.String("provider", provider),
 		attribute.String("status_class", statusClass(status)),
 	)
@@ -100,14 +101,14 @@ func RecordProxyRequest(ctx context.Context, model, provider string, status int,
 }
 
 // RecordTokens records provider-reported token usage for one request, labeled
-// by model, provider, and direction (input/output). No-op unless OTel is
+// by bounded model family, provider, and direction (input/output). No-op unless OTel is
 // configured; zero counts (provider didn't report) are skipped.
 func RecordTokens(ctx context.Context, model, provider string, in, out int) {
 	if meter == nil || (in == 0 && out == 0) {
 		return
 	}
 	base := []attribute.KeyValue{
-		attribute.String("model", model),
+		attribute.String("model_family", modelFamily(model)),
 		attribute.String("provider", provider),
 	}
 	if in > 0 {
@@ -126,7 +127,7 @@ func RecordCacheTokens(ctx context.Context, model, provider string, read, write 
 		return
 	}
 	base := []attribute.KeyValue{
-		attribute.String("model", model),
+		attribute.String("model_family", modelFamily(model)),
 		attribute.String("provider", provider),
 	}
 	if read > 0 {
