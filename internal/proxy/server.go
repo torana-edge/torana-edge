@@ -2434,8 +2434,10 @@ func New(cfg Config) (*Server, error) {
 		metrics.RecordCacheTokens(r.Context(), rs.Model, rs.Provider, rs.UsageCacheRead, rs.UsageCacheWrite)
 		// Record a per-request event in the live feed (control-plane dashboard).
 		// Add is O(1) and non-blocking — it never stalls the request goroutine.
-		// TODO(controlplane): populate Plugins once the pipeline exposes which
-		// plugins ran for this request ID.
+		var invokedPlugins []string
+		if rs.Pipeline != nil {
+			invokedPlugins = rs.Pipeline.InvokedPlugins(rs.ID)
+		}
 		s.feed.Add(metrics.RequestEvent{
 			Timestamp:        rs.Start.UTC().Format(time.RFC3339Nano),
 			Provider:         rs.Provider,
@@ -2450,6 +2452,7 @@ func New(cfg Config) (*Server, error) {
 			BytesOut:         tw.bytesWritten,
 			Verdict:          rs.Verdict,
 			PluginFailure:    rs.PluginFailure,
+			Plugins:          invokedPlugins,
 		})
 	})
 

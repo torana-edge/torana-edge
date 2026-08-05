@@ -90,6 +90,13 @@ func TestChatHeadersProjectPerPlugin(t *testing.T) {
 			}
 			requireNote(t, notes, "observer auth=Bearer sk-torana-real apikey=sk-torana-apikey present=true")
 			requireNote(t, notes, "observer auth= apikey= present=false")
+			if got := pp.InvokedPlugins(1); !slices.Equal(got, tc.order) {
+				t.Fatalf("invoked plugins = %v, want exact pipeline order %v", got, tc.order)
+			}
+			pp.EndRequest(1)
+			if got := pp.InvokedPlugins(1); got != nil {
+				t.Fatalf("finished request retained invocation telemetry: %v", got)
+			}
 		})
 	}
 }
