@@ -467,12 +467,18 @@ func TestIntentFillsUncachedHistory(t *testing.T) {
 		t.Fatalf("fill should be a pure function of tool name and args, got %q", fill)
 	}
 
-	// Never cached, never bridged: the intent cache must not contain the fill.
-	if v, ok := store.Get("intent:call_never_seen"); ok {
-		t.Fatalf("fill was bridged into the intent cache: %q", v)
-	}
-	if v, ok := store.Get(`intentc:["read",{"path":"x.go"}]`); ok {
-		t.Fatalf("fill was written under the content key: %q", v)
+	// Never cached, never bridged: a heuristic fill is request-local, so this
+	// run must leave the cache completely empty.
+	//
+	// This deliberately does NOT probe named keys. The two probes that lived
+	// here named the pre-domain raw key and the pre-hash content key, so once
+	// the shared domain and ContentAddressedCacheKey landed they were asserting
+	// that keys nobody writes are absent — passing for the wrong reason, and
+	// structurally unable to fail. Counting entries cannot rot that way: it
+	// stays correct across any future change to key derivation, and a fill that
+	// leaks under ANY key fails it.
+	if n := store.Len(); n != 0 {
+		t.Fatalf("heuristic fill wrote %d cache entries; fills must stay request-local", n)
 	}
 }
 
@@ -536,7 +542,7 @@ func TestIntentBridgesToRequestSideID(t *testing.T) {
 	if _, err := pp.RunBeforeRequest(context.Background(), 2, chat, nil); err != nil {
 		t.Fatalf("RunBeforeRequest: %v", err)
 	}
-	got, ok := store.Get("intent:call_req_42")
+	got, ok := store.Get(wasm.SharedCacheKey("intent:call_req_42"))
 	if !ok || got != "where is the retry budget configured" {
 		t.Fatalf("intent not bridged to request-side ID: got %q (ok=%v)", got, ok)
 	}
@@ -1038,7 +1044,7 @@ func TestIntentNativeIEnrichesDescriptionOnly(t *testing.T) {
 	if args["i"] != "find the retry budget" {
 		t.Fatalf(`native "i" must NOT be stripped, got %v`, args)
 	}
-	if v, ok := store.Get("intent:call_native"); !ok || v != "find the retry budget" {
+	if v, ok := store.Get(wasm.SharedCacheKey("intent:call_native")); !ok || v != "find the retry budget" {
 		t.Fatalf("native i not captured into cache: %q ok=%v", v, ok)
 	}
 }

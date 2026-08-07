@@ -1145,11 +1145,36 @@ func pluginNameOf(mod api.Module) string {
 // Cross-plugin cache exchange is a separate, explicit capability.
 func metaKey(plugin, key string) string { return plugin + "\x00" + key }
 
-func privateCacheKey(plugin, key string) string {
+func privateCacheKey(plugin, key string) string { return PrivateCacheKey(plugin, key) }
+
+// PrivateCacheKey is the host's per-plugin cache framing, exported on the same
+// terms as SharedCacheKey: only a test inspecting the backing cache.Store
+// should need it, and it should ask rather than re-derive.
+//
+// The plugin name is length-prefixed so ("ab","c") and ("a","bc") cannot
+// collide, and the whole prefix is host-supplied from the module identity, so a
+// guest cannot reach another plugin's entries whatever bytes it puts in key.
+func PrivateCacheKey(plugin, key string) string {
 	return "private\x00" + strconv.Itoa(len(plugin)) + "\x00" + plugin + key
 }
 
-func sharedCacheKey(key string) string { return "shared\x00" + key }
+func sharedCacheKey(key string) string { return SharedCacheKey(key) }
+
+// SharedCacheKey is the host's shared-cache domain framing, exported ONLY so a
+// test that inspects the backing cache.Store directly asks the host where a
+// guest's shared key landed instead of re-deriving it.
+//
+// A test that hardcodes "shared\x00"+key passes until the framing changes and
+// then fails for a reason that looks like a plugin bug. Worse, an EXISTENCE
+// probe (`if _, ok := store.Get(k); ok { fail }`) written against the wrong key
+// keeps passing forever — it is asserting that a key nobody writes is absent.
+// Both happened when domains were introduced; see internal/plugin's coordinated
+// intent tests.
+//
+// Callers outside a test have no reason for this: guests reach the shared
+// domain through env.shared_cache_get / env.shared_cache_set, which apply the
+// framing themselves.
+func SharedCacheKey(key string) string { return "shared\x00" + key }
 
 func (r *Runtime) installHostFunctions() {
 	env := r.runtime.NewHostModuleBuilder("env")
