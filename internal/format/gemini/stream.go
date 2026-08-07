@@ -130,6 +130,13 @@ func emitChunk(ch chan<- engine.StreamEvent, payload []byte, lastUsage **geminiU
 	if len(chunk.Candidates) == 0 {
 		return false
 	}
+	if len(chunk.Candidates) != 1 {
+		ch <- engine.StreamEvent{Error: &engine.StreamError{
+			Code:    -1,
+			Message: "gemini: multiple streamed candidates are unsupported",
+		}}
+		return true
+	}
 	candidate := chunk.Candidates[0]
 
 	if candidate.Content != nil {

@@ -223,6 +223,75 @@ data: [DONE]
 	}
 }
 
+func TestStreamParse_BuffersArgumentsUntilCompleteToolStart(t *testing.T) {
+	sse := `data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":2,"function":{"arguments":"{\"city\":"}}]}}]}
+
+data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":2,"id":"call_2"}]}}]}
+
+data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":2,"function":{"name":"weather","arguments":"\"SF\"}"}}]}}]}
+
+data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
+
+data: [DONE]
+`
+	events := collectStreamEvents(sse)
+	if len(events) != 5 {
+		t.Fatalf("events = %+v, want start, two deltas, end, finish", events)
+	}
+	if events[0].ToolCallStart == nil || events[0].ToolCallStart.ID != "call_2" || events[0].ToolCallStart.Name != "weather" {
+		t.Fatalf("start = %+v", events[0])
+	}
+	for i, want := range []string{`{"city":`, `"SF"}`} {
+		if events[i+1].ToolCallDelta == nil || events[i+1].ToolCallDelta.ArgumentsDelta != want {
+			t.Fatalf("delta %d = %+v, want %q", i, events[i+1], want)
+		}
+	}
+	for i, event := range events {
+		if event.TextDelta != nil {
+			t.Fatalf("event %d leaked tool arguments into assistant text: %+v", i, event)
+		}
+	}
+}
+
+func TestStreamParse_IncompleteToolStartFailsClosed(t *testing.T) {
+	sse := `data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"SECRET-TOOL-JSON"}}]}}]}
+
+data: [DONE]
+`
+	events := collectStreamEvents(sse)
+	if len(events) != 1 || events[0].Error == nil {
+		t.Fatalf("events = %+v, want one terminal error", events)
+	}
+	if strings.Contains(events[0].Error.Message, "SECRET-TOOL-JSON") {
+		t.Fatalf("error leaked arguments: %q", events[0].Error.Message)
+	}
+	if events[0].Error.Message != "openai: incomplete streamed tool-call start" {
+		t.Fatalf("error = %q", events[0].Error.Message)
+	}
+}
+
+func TestStreamParse_RejectsMultipleChoicesInsteadOfMergingThem(t *testing.T) {
+	sse := `data: {"choices":[` +
+		`{"index":0,"delta":{"content":"first"}},` +
+		`{"index":1,"delta":{"content":"second"}}]}` + "\n\n"
+	events := collectStreamEvents(sse)
+	if len(events) != 1 || events[0].Error == nil ||
+		events[0].Error.Message != "openai: multiple streamed choices are unsupported" {
+		t.Fatalf("events = %+v, want one multiple-choice error", events)
+	}
+}
+
+func TestStreamParse_MalformedDataFrameFailsClosedValueFree(t *testing.T) {
+	events := collectStreamEvents("data: {SECRET-BROKEN-JSON\n\n")
+	if len(events) != 1 || events[0].Error == nil {
+		t.Fatalf("events = %+v, want one malformed-event error", events)
+	}
+	if events[0].Error.Message != "openai: malformed streamed event" ||
+		strings.Contains(events[0].Error.Message, "SECRET-BROKEN-JSON") {
+		t.Fatalf("error = %q", events[0].Error.Message)
+	}
+}
+
 func TestStreamSerialize_RoundTrip(t *testing.T) {
 	sa := &StreamAdapter{}
 

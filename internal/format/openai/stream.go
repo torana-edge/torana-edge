@@ -80,6 +80,13 @@ type sseError struct {
 	Code    *int   `json:"code,omitempty"`
 }
 
+type chatToolCallState struct {
+	id      string
+	name    string
+	started bool
+	pending []string
+}
+
 // ---------------------------------------------------------------------------
 // ParseStream
 // ---------------------------------------------------------------------------
@@ -98,8 +105,24 @@ func (s *StreamAdapter) ParseStream(body io.Reader) <-chan engine.StreamEvent {
 func (s *StreamAdapter) parseStream(body io.Reader, ch chan<- engine.StreamEvent) {
 	scanner := streamio.NewScanner(body)
 
-	// toolCallStarted tracks which indices have emitted ToolCallStart.
-	toolCallStarted := make(map[int]bool)
+	// Chat Completions providers may split id, name, and arguments across
+	// chunks in any order. Buffer arguments until the complete start identity
+	// exists; tool JSON must never be reclassified as visible assistant text.
+	toolCalls := make(map[int]*chatToolCallState)
+	hasUnresolvedToolCall := func() bool {
+		for _, state := range toolCalls {
+			if !state.started {
+				return true
+			}
+		}
+		return false
+	}
+	emitUnresolvedToolCall := func() {
+		ch <- engine.StreamEvent{Error: &engine.StreamError{
+			Code:    -1,
+			Message: "openai: incomplete streamed tool-call start",
+		}}
+	}
 
 	// Responses API argument events identify their function call by item_id,
 	// while the call_id and name are supplied by output_item.added. Keep that
@@ -125,12 +148,19 @@ func (s *StreamAdapter) parseStream(body io.Reader, ch chan<- engine.StreamEvent
 
 		// Stream termination.
 		if payload == "[DONE]" {
+			if hasUnresolvedToolCall() {
+				emitUnresolvedToolCall()
+			}
 			return
 		}
 
 		var chunk sseChunk
 		if err := json.Unmarshal([]byte(payload), &chunk); err != nil {
-			continue // skip unparseable lines
+			ch <- engine.StreamEvent{Error: &engine.StreamError{
+				Code:    -1,
+				Message: "openai: malformed streamed event",
+			}}
+			return
 		}
 
 		// Handle error events.
@@ -158,6 +188,13 @@ func (s *StreamAdapter) parseStream(body io.Reader, ch chan<- engine.StreamEvent
 			s.parseResponsesEvent(chunk, ch, itemIDToIndex, &nextIndex)
 			continue
 		}
+		if len(chunk.Choices) > 1 {
+			ch <- engine.StreamEvent{Error: &engine.StreamError{
+				Code:    -1,
+				Message: "openai: multiple streamed choices are unsupported",
+			}}
+			return
+		}
 
 		// Process choices.
 		for _, choice := range chunk.Choices {
@@ -183,25 +220,41 @@ func (s *StreamAdapter) parseStream(body io.Reader, ch chan<- engine.StreamEvent
 
 			// Tool calls in delta.
 			for _, tc := range delta.ToolCalls {
-				// ToolCallStart: first time we see id+name for this index.
-				if tc.ID != "" && tc.Function.Name != "" && !toolCallStarted[tc.Index] {
-					toolCallStarted[tc.Index] = true
+				state := toolCalls[tc.Index]
+				if state == nil {
+					state = &chatToolCallState{}
+					toolCalls[tc.Index] = state
+				}
+				if tc.ID != "" {
+					state.id = tc.ID
+				}
+				if tc.Function.Name != "" {
+					state.name = tc.Function.Name
+				}
+
+				// ToolCallStart: first time the accumulated id+name is complete.
+				if state.id != "" && state.name != "" && !state.started {
+					state.started = true
 					ch <- engine.StreamEvent{
 						ToolCallStart: &engine.ToolCallStart{
 							Index: tc.Index,
-							ID:    tc.ID,
-							Name:  tc.Function.Name,
+							ID:    state.id,
+							Name:  state.name,
 						},
 					}
+					for _, arguments := range state.pending {
+						ch <- engine.StreamEvent{ToolCallDelta: &engine.ToolCallDelta{
+							Index:          tc.Index,
+							ArgumentsDelta: arguments,
+						}}
+					}
+					state.pending = nil
 				}
 
 				// ToolCallDelta: arguments fragment.
 				if tc.Function.Arguments != "" {
-					if !toolCallStarted[tc.Index] {
-						// Arguments arrived before the start chunk; emit as text.
-						ch <- engine.StreamEvent{
-							TextDelta: &tc.Function.Arguments,
-						}
+					if !state.started {
+						state.pending = append(state.pending, tc.Function.Arguments)
 					} else {
 						ch <- engine.StreamEvent{
 							ToolCallDelta: &engine.ToolCallDelta{
@@ -221,8 +274,12 @@ func (s *StreamAdapter) parseStream(body io.Reader, ch chan<- engine.StreamEvent
 				// first, in ascending order — map iteration order is
 				// nondeterministic.
 				if fr == "tool_calls" {
-					indexes := make([]int, 0, len(toolCallStarted))
-					for idx := range toolCallStarted {
+					if hasUnresolvedToolCall() {
+						emitUnresolvedToolCall()
+						return
+					}
+					indexes := make([]int, 0, len(toolCalls))
+					for idx := range toolCalls {
 						indexes = append(indexes, idx)
 					}
 					sort.Ints(indexes)
@@ -246,6 +303,10 @@ func (s *StreamAdapter) parseStream(body io.Reader, ch chan<- engine.StreamEvent
 			Code:    500,
 			Message: fmt.Sprintf("openai stream read: %v", err),
 		}}
+		return
+	}
+	if hasUnresolvedToolCall() {
+		emitUnresolvedToolCall()
 	}
 }
 
