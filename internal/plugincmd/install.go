@@ -264,7 +264,11 @@ func copyTree(src, dst string) error {
 		if err != nil {
 			return err
 		}
-		return os.WriteFile(target, data, info.Mode().Perm()&0o777)
+		mode := os.FileMode(0o644)
+		if info.Mode().Perm()&0o111 != 0 {
+			mode = 0o755
+		}
+		return os.WriteFile(target, data, mode)
 	})
 }
 

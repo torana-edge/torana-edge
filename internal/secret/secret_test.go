@@ -80,6 +80,9 @@ func TestPersistence(t *testing.T) {
 
 func TestKeyFileMode(t *testing.T) {
 	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
 	_, err := secret.Open(dir)
 	if err != nil {
 		t.Fatalf("Open failed: %v", err)
@@ -94,6 +97,13 @@ func TestKeyFileMode(t *testing.T) {
 	mode := info.Mode().Perm()
 	if mode != 0600 {
 		t.Fatalf("secret.key mode got %o, want 0600", mode)
+	}
+	dirInfo, err := os.Stat(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := dirInfo.Mode().Perm(); got != 0o700 {
+		t.Fatalf("data directory mode got %o, want 700", got)
 	}
 }
 

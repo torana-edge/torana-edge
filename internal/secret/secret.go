@@ -21,14 +21,18 @@ type Store struct {
 }
 
 // Open loads the key file at <dataDir>/secret.key, creating it (0600) with a
-// fresh 32-byte random key on first use. The dataDir is created (0755) if absent.
+// fresh 32-byte random key on first use. The dataDir is kept private because
+// even directory listings expose which local secrets exist.
 func Open(dataDir string) (*Store, error) {
 	if dataDir == "" {
 		return nil, fmt.Errorf("data directory path cannot be empty")
 	}
 
-	if err := os.MkdirAll(dataDir, 0755); err != nil {
+	if err := os.MkdirAll(dataDir, 0o700); err != nil {
 		return nil, fmt.Errorf("failed to create data directory: %w", err)
+	}
+	if err := os.Chmod(dataDir, 0o700); err != nil {
+		return nil, fmt.Errorf("securing data directory: %w", err)
 	}
 
 	keyPath := filepath.Join(dataDir, "secret.key")

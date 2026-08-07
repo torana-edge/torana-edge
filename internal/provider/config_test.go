@@ -11,6 +11,9 @@ import (
 
 func TestSaveAndLoadManagedConfig(t *testing.T) {
 	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
 	path := filepath.Join(dir, "config.json")
 
 	cfg := Config{
@@ -41,6 +44,13 @@ func TestSaveAndLoadManagedConfig(t *testing.T) {
 
 	if !loaded.Managed {
 		t.Errorf("expected loaded.Managed to be true, got false")
+	}
+	info, err := os.Stat(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0o700 {
+		t.Fatalf("config directory mode = %o, want 700", got)
 	}
 	if loaded.Port != 9090 {
 		t.Errorf("loaded.Port = %d, want 9090", loaded.Port)

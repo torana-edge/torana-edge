@@ -178,7 +178,7 @@ func (t *failoverRoundTripper) RoundTrip(req *http.Request) (*http.Response, err
 		retryResp, retryErr := t.base.RoundTrip(retryReq)
 
 		// Close previous response since we are going to try the next one or we got a new one
-		if lastResp != nil {
+		if lastResp != nil && lastResp.Body != nil {
 			lastResp.Body.Close()
 		}
 

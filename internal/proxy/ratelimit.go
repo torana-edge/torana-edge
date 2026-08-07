@@ -107,7 +107,7 @@ func hashIdentity(identity string) string {
 	return hex.EncodeToString(sum[:16])
 }
 
-func (rl *RateLimiter) getLimiterLocked(key string, rpm int) *Limiter {
+func (rl *RateLimiter) getLimiterLocked(key string) *Limiter {
 	if l, exists := rl.limits[key]; exists {
 		return l
 	}
@@ -130,7 +130,7 @@ func (rl *RateLimiter) Acquire(identity string) bool {
 		rl.mu.Unlock()
 		return true // limits disabled
 	}
-	l := rl.getLimiterLocked(hashIdentity(identity), rpm)
+	l := rl.getLimiterLocked(hashIdentity(identity))
 	rl.mu.Unlock()
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -169,7 +169,7 @@ func (rl *RateLimiter) Release(identity string) {
 	// Always release a bucket, including after a live change disables limits:
 	// an in-flight request may still be represented by its active count.
 	rl.mu.Lock()
-	l := rl.getLimiterLocked(hashIdentity(identity), rl.rpm)
+	l := rl.getLimiterLocked(hashIdentity(identity))
 	rl.mu.Unlock()
 	l.mu.Lock()
 	defer l.mu.Unlock()

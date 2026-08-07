@@ -248,6 +248,14 @@ func TestBundleDigestGoldenVector(t *testing.T) {
 	}
 }
 
+func TestBundleDigestDistinguishesAbsentAndEmptyOptionalFile(t *testing.T) {
+	absent := bundleDigest([]byte("manifest"), []byte("wasm"), []byte("schema"), nil)
+	presentEmpty := bundleDigest([]byte("manifest"), []byte("wasm"), []byte("schema"), []byte{})
+	if absent == presentEmpty {
+		t.Fatal("absent agent.json and a present empty agent.json have the same approval digest")
+	}
+}
+
 func TestValidateAgentDescriptor(t *testing.T) {
 	manifest := PluginManifest{
 		Name:        "example",

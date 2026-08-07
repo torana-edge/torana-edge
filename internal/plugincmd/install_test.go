@@ -135,6 +135,36 @@ func TestCopyTreeSupportsNestedSourcesAndRejectsSymlinks(t *testing.T) {
 	}
 }
 
+func TestCopyTreeDropsUntrustedWriteBits(t *testing.T) {
+	src := t.TempDir()
+	dst := t.TempDir()
+	files := map[string]os.FileMode{
+		"ordinary":   0o666,
+		"executable": 0o777,
+	}
+	for name, mode := range files {
+		path := filepath.Join(src, name)
+		if err := os.WriteFile(path, []byte(name), mode); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(path, mode); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := copyTree(src, dst); err != nil {
+		t.Fatal(err)
+	}
+	for name, want := range map[string]os.FileMode{"ordinary": 0o644, "executable": 0o755} {
+		info, err := os.Stat(filepath.Join(dst, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := info.Mode().Perm(); got != want {
+			t.Errorf("%s mode = %o, want %o", name, got, want)
+		}
+	}
+}
+
 func TestActivateBundleRemovesStaleOptionalFiles(t *testing.T) {
 	dest := t.TempDir()
 	target := filepath.Join(dest, "demo")
