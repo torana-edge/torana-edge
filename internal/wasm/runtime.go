@@ -1145,7 +1145,16 @@ func pluginNameOf(mod api.Module) string {
 // Cross-plugin cache exchange is a separate, explicit capability.
 func metaKey(plugin, key string) string { return plugin + "\x00" + key }
 
-func privateCacheKey(plugin, key string) string {
+func privateCacheKey(plugin, key string) string { return PrivateCacheKey(plugin, key) }
+
+// PrivateCacheKey is the host's per-plugin cache framing, exported on the same
+// terms as SharedCacheKey: only a test inspecting the backing cache.Store
+// should need it, and it should ask rather than re-derive.
+//
+// The plugin name is length-prefixed so ("ab","c") and ("a","bc") cannot
+// collide, and the whole prefix is host-supplied from the module identity, so a
+// guest cannot reach another plugin's entries whatever bytes it puts in key.
+func PrivateCacheKey(plugin, key string) string {
 	return "private\x00" + strconv.Itoa(len(plugin)) + "\x00" + plugin + key
 }
 
