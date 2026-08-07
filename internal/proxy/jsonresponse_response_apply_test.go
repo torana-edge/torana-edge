@@ -28,7 +28,7 @@ func TestResponseApplyDoesNotAddContentSlot(t *testing.T) {
 			"tool_calls":[{"id":"call_1","type":"function","function":{"name":"write","arguments":` + jsonStr(`{"k":"v"}`) + `}}]
 		}}]}`
 
-	out, err := runJSONResponseHooks(context.Background(), pp, 1, "openai", nil, []byte(body))
+	out, err := runJSONResponseHooks(responseHookContext(1), pp, 1, "openai", nil, []byte(body))
 	if err != nil {
 		t.Fatalf("runJSONResponseHooks: %v", err)
 	}
@@ -66,7 +66,7 @@ func TestResponseApplyRewritesCallsPositionally(t *testing.T) {
 			{"id":"call_b","type":"function","function":{"name":"b","arguments":` + jsonStr(`{"y":2}`) + `}}
 		]}}]}`
 
-	out, err := runJSONResponseHooks(context.Background(), pp, 1, "openai", nil, []byte(body))
+	out, err := runJSONResponseHooks(responseHookContext(1), pp, 1, "openai", nil, []byte(body))
 	if err != nil {
 		t.Fatalf("runJSONResponseHooks: %v", err)
 	}
@@ -149,7 +149,7 @@ func TestResponseApplyRejectsForgedGuestFields(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name+"/allow", func(t *testing.T) {
-			out, err := runJSONResponseHooks(context.Background(), pp, uint64(i+1), tc.format, nil, []byte(tc.body))
+			out, err := runJSONResponseHooks(responseHookContext(uint64(i+1)), pp, uint64(i+1), tc.format, nil, []byte(tc.body))
 			if err != nil {
 				t.Fatalf("allow mode must not error: %v", err)
 			}
@@ -163,7 +163,7 @@ func TestResponseApplyRejectsForgedGuestFields(t *testing.T) {
 
 		t.Run(tc.name+"/block", func(t *testing.T) {
 			bpp := forgeBlockPipeline(t)
-			out, err := runJSONResponseHooks(context.Background(), bpp, uint64(i+1), tc.format, nil, []byte(tc.body))
+			out, err := runJSONResponseHooks(responseHookContext(uint64(i+1)), bpp, uint64(i+1), tc.format, nil, []byte(tc.body))
 			if err == nil {
 				t.Fatal("block mode must return an error for a forged host-owned field")
 			}
@@ -217,7 +217,7 @@ func TestResponseApplyRejectsRelativeViolation(t *testing.T) {
 			{"id":"call_2","type":"function","function":{"name":"b","arguments":` + jsonStr(`{"y":2}`) + `}}
 		]}}]}`
 
-	out, err := runJSONResponseHooks(context.Background(), pp, 1, "openai", nil, []byte(body))
+	out, err := runJSONResponseHooks(responseHookContext(1), pp, 1, "openai", nil, []byte(body))
 	if err == nil {
 		t.Fatalf("a relative-policy-violating replacement was accepted")
 	}

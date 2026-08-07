@@ -55,7 +55,9 @@ func (s *Server) applyRoute(req *http.Request, chat *engine.ChatRequest, origFor
 	req.URL.RawPath = ""
 	// Failover fallbacks and metrics now follow the target.
 	rc.ProviderName = v.Provider
-	reqStateFrom(req.Context()).Provider = v.Provider
+	if rs := reqStateFrom(req.Context()); rs != nil {
+		rs.Provider = v.Provider
+	}
 
 	// Never forward the caller's credential to a rerouted provider.
 	applyProviderCredential(req, target, v.Provider, "route", s.resolveSecret)

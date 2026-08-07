@@ -626,6 +626,9 @@ func runJSONResponseHooks(ctx context.Context, pl *plugin.PluginPipeline, reqID 
 
 	// Record provider-reported token usage for host metrics and _response.
 	rs := reqStateFrom(ctx)
+	if rs == nil {
+		return nil, fmt.Errorf("json response: request state unavailable")
+	}
 	if refs.usage != nil {
 		rs.mergeUsage(refs.usage)
 	}

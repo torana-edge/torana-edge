@@ -103,7 +103,7 @@ func (t *failoverRoundTripper) RoundTrip(req *http.Request) (*http.Response, err
 	}
 
 	// First attempt.
-	if rs := reqStateFrom(req.Context()); rs.CompactionRequestPrepared {
+	if rs := reqStateFrom(req.Context()); rs != nil && rs.CompactionRequestPrepared {
 		// This is the first point after synthetic vetoes, local rate limits, and
 		// marshal fallback where the mutated request is actually handed to an
 		// upstream transport.
@@ -194,7 +194,9 @@ func (t *failoverRoundTripper) RoundTrip(req *http.Request) (*http.Response, err
 			continue
 		}
 		log.Printf("[failover] %s succeeded", fbName)
-		reqStateFrom(req.Context()).Provider = fbName
+		if rs := reqStateFrom(req.Context()); rs != nil {
+			rs.Provider = fbName
+		}
 		retryResp.Body = &rateLimitBody{ReadCloser: retryResp.Body, identity: identity, rateLimiter: t.rateLimiter}
 		return retryResp, nil
 	}
