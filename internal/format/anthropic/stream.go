@@ -189,7 +189,18 @@ func (s *StreamAdapter) ParseStream(body io.Reader) <-chan engine.StreamEvent {
 					}
 				}
 
+			// An error frame TERMINATES the stream. This is a deliberate
+			// behaviour change alongside the nil-guard below: the previous code
+			// emitted the error and kept parsing, so frames after a declared
+			// upstream failure were still translated and forwarded. Anthropic
+			// does not resume a stream after `error`, and continuing let a
+			// failed turn deliver partial content that looked complete. openai
+			// already returned here; all four adapters now agree.
 			case ev.Type == "error" && ev.Error == nil:
+				// An `error` frame with no `error` member used to panic on the
+				// deref below, in this goroutine, which has no recover — taking
+				// down the process rather than the request. Fail closed with a
+				// bounded diagnostic instead of trusting the frame's shape.
 				ch <- engine.StreamEvent{
 					Error: &engine.StreamError{
 						Code:    500,

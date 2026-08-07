@@ -1425,6 +1425,19 @@ func New(cfg Config) (*Server, error) {
 					// tap has drained a usage frame already buffered by the parser.
 					// Join it before building the observational response or closing
 					// streamDone, so the handler never reads reqState concurrently.
+					//
+					// This trades a data race for a liveness dependency, stated
+					// plainly: the wait ends only when the tap's range over the
+					// parser channel ends, which needs ParseStream to exit. Both
+					// paths that reach here have already made that happen — the
+					// abort path cancelled streamCtx (so the tap takes its
+					// Done branch and drains) and every path closes upstreamBody
+					// immediately above, which unblocks the parser's read. If a
+					// future reader/adapter can ignore a closed body, this
+					// becomes a hung request rather than a torn read, because
+					// streamDone would never close. Keep that invariant: any
+					// ParseStream implementation MUST terminate when its body is
+					// closed.
 					<-tapDone
 					if serErr != nil {
 						log.Printf("format %s serialize error: %v", fmt.Name, serErr)
