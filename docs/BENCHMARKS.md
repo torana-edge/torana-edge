@@ -1,5 +1,33 @@
 # Plugin pipeline benchmarks
 
+## Full HTTP data plane
+
+`internal/proxy/bench_test.go` measures the complete local non-streaming HTTP
+path against the same in-process upstream, both directly and through Torana:
+
+```bash
+go test ./internal/proxy -run '^$' -bench BenchmarkHTTPDataPlane \
+  -benchmem -benchtime=2s -count=5
+```
+
+Use paired `direct` and `torana` rows at the same concurrency. Their difference
+is Torana's local request parsing, provider adaptation, routing, reverse proxy,
+response parsing, usage accounting, and response rendering cost. It excludes
+network/provider latency and deliberately loads no plugins; the plugin
+benchmarks below isolate those costs.
+
+Report medians and dispersion from all five samples, the exact revision,
+machine, OS, Go version, GOMAXPROCS, payload, and concurrency. Do not turn this
+microbenchmark into a universal “requests supported” number: production
+capacity also depends on upstream latency, streaming event rate, enabled
+plugins, limits, logging, and deployment resources.
+
+“Cost” here means local CPU time and allocations. Convert CPU time to an
+infrastructure estimate only with an explicitly priced deployment shape and
+measured utilization; Torana itself does not add per-token model charges.
+
+## Plugin pipeline
+
 `internal/plugin/bench_test.go`. Run them with:
 
 ```bash
