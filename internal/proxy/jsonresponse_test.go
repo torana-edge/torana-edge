@@ -125,7 +125,7 @@ func TestJSONResponseHooksAllFormats(t *testing.T) {
 		t.Run(tc.format, func(t *testing.T) {
 			pp := newPluginPipeline(t, bundles, "test-mutator")
 
-			out, err := runJSONResponseHooks(context.Background(), pp, 1, tc.format, nil, []byte(tc.body))
+			out, err := runJSONResponseHooks(responseHookContext(1), pp, 1, tc.format, nil, []byte(tc.body))
 			if err != nil {
 				t.Fatalf("runJSONResponseHooks: %v", err)
 			}
@@ -190,7 +190,7 @@ func TestAfterResponseMutationClearsGeminiSignature(t *testing.T) {
 		]}}]
 	}`
 
-	out, err := runJSONResponseHooks(context.Background(), pp, 1, "gemini", nil, []byte(body))
+	out, err := runJSONResponseHooks(responseHookContext(1), pp, 1, "gemini", nil, []byte(body))
 	if err != nil {
 		t.Fatalf("runJSONResponseHooks: %v", err)
 	}

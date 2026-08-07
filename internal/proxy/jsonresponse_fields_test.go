@@ -77,7 +77,7 @@ func TestPipelineClearsSignatureWhenAStreamHookRewritesArguments(t *testing.T) {
 		{"thoughtSignature":"SIG_CALL_1","functionCall":{"id":"call_1","name":"search","args":{"q":"original"}}}
 	]}}]}`
 
-	out, err := runJSONResponseHooks(context.Background(), pp, 1, "gemini",
+	out, err := runJSONResponseHooks(responseHookContext(1), pp, 1, "gemini",
 		&engine.ChatRequest{Model: "gemini-x"}, []byte(body))
 	if err != nil {
 		t.Fatalf("hooks: %v", err)
@@ -101,7 +101,7 @@ func TestPipelinePreservesSignatureWhenNothingChanges(t *testing.T) {
 		{"thoughtSignature":"SIG_KEEP","functionCall":{"id":"c","name":"search","args":{"q":"x"}}}
 	]}}]}`
 
-	out, err := runJSONResponseHooks(context.Background(), pp, 2, "gemini",
+	out, err := runJSONResponseHooks(responseHookContext(2), pp, 2, "gemini",
 		&engine.ChatRequest{Model: "gemini-x"}, []byte(body))
 	if err != nil {
 		t.Fatalf("hooks: %v", err)

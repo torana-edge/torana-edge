@@ -127,7 +127,7 @@ func TestSlotContentNotInventedWhenAbsent(t *testing.T) {
 		"tool_calls":[{"id":"call_1","type":"function","function":{"name":"search","arguments":` + jsonStr(`{"q":"x"}`) + `}}]
 	}}]}`
 
-	out, err := runJSONResponseHooks(context.Background(), pp, 1, "openai", nil, []byte(body))
+	out, err := runJSONResponseHooks(responseHookContext(1), pp, 1, "openai", nil, []byte(body))
 	if err != nil {
 		t.Fatalf("runJSONResponseHooks: %v", err)
 	}
@@ -164,7 +164,7 @@ func TestSlotInventedRejectedBlock(t *testing.T) {
 		"tool_calls":[{"id":"call_1","type":"function","function":{"name":"search","arguments":` + jsonStr(`{"q":"x"}`) + `}}]
 	}}]}`
 
-	out, err := runJSONResponseHooks(context.Background(), pp, 1, "openai", nil, []byte(body))
+	out, err := runJSONResponseHooks(responseHookContext(1), pp, 1, "openai", nil, []byte(body))
 	if err == nil {
 		t.Fatalf("a presence-violating replacement was accepted under block mode")
 	}
@@ -181,7 +181,7 @@ func TestSlotPresentEmptyInvented(t *testing.T) {
 	// change hi->invented is legal.
 	body := `{"id":"chatcmpl-3","choices":[{"index":0,"message":{"role":"assistant","content":""}}]}`
 
-	out, err := runJSONResponseHooks(context.Background(), pp, 1, "openai", nil, []byte(body))
+	out, err := runJSONResponseHooks(responseHookContext(1), pp, 1, "openai", nil, []byte(body))
 	if err != nil {
 		t.Fatalf("runJSONResponseHooks: %v", err)
 	}
@@ -348,7 +348,7 @@ func TestSlotResponsesArgumentsString(t *testing.T) {
 		{"type":"function_call","call_id":"call_1","name":"read","arguments":` + jsonStr(`{"path":"server.go"}`) + `}
 	]}`
 
-	out, err := runJSONResponseHooks(context.Background(), pp, 1, "openai", nil, []byte(body))
+	out, err := runJSONResponseHooks(responseHookContext(1), pp, 1, "openai", nil, []byte(body))
 	if err != nil {
 		t.Fatalf("runJSONResponseHooks: %v", err)
 	}
@@ -378,7 +378,7 @@ func TestChoice0OnlyOpenai(t *testing.T) {
 			{"id":"call_2","type":"function","function":{"name":"b","arguments":` + jsonStr(`{"y":2}`) + `}}]}}
 	]}`
 
-	out, err := runJSONResponseHooks(context.Background(), pp, 1, "openai", nil, []byte(body))
+	out, err := runJSONResponseHooks(responseHookContext(1), pp, 1, "openai", nil, []byte(body))
 	if err != nil {
 		t.Fatalf("runJSONResponseHooks: %v", err)
 	}
@@ -415,7 +415,7 @@ func TestCandidate0OnlyGemini(t *testing.T) {
 		{"content":{"parts":[{"functionCall":{"id":"c2","name":"b","args":{"y":2}}}]}}
 	]}`)
 
-	out, err := runJSONResponseHooks(context.Background(), pp, 1, "gemini", nil, body)
+	out, err := runJSONResponseHooks(responseHookContext(1), pp, 1, "gemini", nil, body)
 	if err != nil {
 		t.Fatalf("runJSONResponseHooks: %v", err)
 	}
@@ -493,7 +493,7 @@ func TestGeminiAlternativeTextNotMutated(t *testing.T) {
 		{"content":{"parts":[{"text":"alternative"}]}}
 	]}`)
 
-	out, err := runJSONResponseHooks(context.Background(), pp, 1, "gemini", nil, body)
+	out, err := runJSONResponseHooks(responseHookContext(1), pp, 1, "gemini", nil, body)
 	if err != nil {
 		t.Fatalf("runJSONResponseHooks: %v", err)
 	}
@@ -516,7 +516,7 @@ func TestGeminiPresentEmptyTextIsSelectedSlot(t *testing.T) {
 		{"content":{"parts":[{"text":"alternative"}]}}
 	]}`)
 
-	out, err := runJSONResponseHooks(context.Background(), pp, 1, "gemini", nil, body)
+	out, err := runJSONResponseHooks(responseHookContext(1), pp, 1, "gemini", nil, body)
 	if err != nil {
 		t.Fatalf("runJSONResponseHooks: %v", err)
 	}

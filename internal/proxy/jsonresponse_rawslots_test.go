@@ -1,7 +1,6 @@
 package proxy
 
 import (
-	"context"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -30,7 +29,7 @@ func TestRawPreservationUnselectedCandidateGemini(t *testing.T) {
 		{"content":{"parts":[{"thoughtSignature":"sig2","functionCall":{"id":"c2","name":"b","args":{"zzz": 1, "aaa": 9007199254740993 }}}]}}
 	]}`)
 
-	out, err := runJSONResponseHooks(context.Background(), pp, 1, "gemini", nil, body)
+	out, err := runJSONResponseHooks(responseHookContext(1), pp, 1, "gemini", nil, body)
 	if err != nil {
 		t.Fatalf("runJSONResponseHooks: %v", err)
 	}
@@ -80,7 +79,7 @@ func TestRawPreservationUnselectedChoiceOpenai(t *testing.T) {
 					{"id":"call_2","type":"function","function":{"name":"b","arguments":` + tc.args1 + `}}]}}
 			]}`
 
-			out, err := runJSONResponseHooks(context.Background(), pp, uint64(i+1), "openai", nil, []byte(body))
+			out, err := runJSONResponseHooks(responseHookContext(uint64(i+1)), pp, uint64(i+1), "openai", nil, []byte(body))
 			if err != nil {
 				t.Fatalf("runJSONResponseHooks: %v", err)
 			}
@@ -141,7 +140,7 @@ func TestNoArgsSlotPluginCreatedArgs(t *testing.T) {
 		{"functionCall":{"id":"c1","name":"ping"}}
 	]}}]}`)
 
-	out, err := runJSONResponseHooks(context.Background(), pp, 1, "gemini", nil, body)
+	out, err := runJSONResponseHooks(responseHookContext(1), pp, 1, "gemini", nil, body)
 	if err != nil {
 		t.Fatalf("runJSONResponseHooks: %v", err)
 	}
