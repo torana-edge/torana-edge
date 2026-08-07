@@ -1,7 +1,5 @@
 package anthropic
 
-// AUDIT SCRATCH TESTS — not for commit.
-
 import (
 	"strings"
 	"testing"
@@ -9,20 +7,22 @@ import (
 	"github.com/torana-edge/torana-edge/internal/engine"
 )
 
-// An SSE error frame with no "error" member panics ParseStream's goroutine.
-// The goroutine has no recover, so this takes down the whole proxy process.
-func TestAuditErrorFrameWithoutErrorMemberPanics(t *testing.T) {
+func TestErrorFrameWithoutErrorMemberFailsClosed(t *testing.T) {
 	body := strings.NewReader("data: {\"type\":\"error\"}\n\n")
 	s := &StreamAdapter{}
+	var got []engine.StreamEvent
 	for ev := range s.ParseStream(body) {
-		t.Logf("event: %+v", ev)
+		got = append(got, ev)
+	}
+	if len(got) != 1 || got[0].Error == nil {
+		t.Fatalf("events = %+v, want one terminal error", got)
+	}
+	if !strings.Contains(got[0].Error.Message, "missing error detail") {
+		t.Fatalf("error = %q, want bounded missing-detail diagnostic", got[0].Error.Message)
 	}
 }
 
-// A data line longer than bufio.Scanner's default 64KiB limit silently ends
-// the stream: no error event, no scanner.Err() check — the pipeline sees a
-// clean EOF and the client gets a truncated response that looks complete.
-func TestAuditOversizedFrameSilentlyTruncates(t *testing.T) {
+func TestLargeFrameDoesNotSilentlyTruncate(t *testing.T) {
 	big := strings.Repeat("x", 70*1024)
 	var sb strings.Builder
 	sb.WriteString(`data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}` + "\n\n")
@@ -44,8 +44,7 @@ func TestAuditOversizedFrameSilentlyTruncates(t *testing.T) {
 			sawError = true
 		}
 	}
-	t.Logf("events=%d sawFinish=%v sawError=%v", len(got), sawFinish, sawError)
-	if !sawFinish && !sawError {
-		t.Errorf("stream truncated silently: the finish frame after the oversized delta was dropped and no error was reported")
+	if !sawFinish || sawError {
+		t.Fatalf("events=%d sawFinish=%v sawError=%v, want complete stream", len(got), sawFinish, sawError)
 	}
 }

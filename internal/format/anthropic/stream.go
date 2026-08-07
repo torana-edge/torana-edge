@@ -1,7 +1,6 @@
 package anthropic
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -9,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/torana-edge/torana-edge/internal/engine"
+	"github.com/torana-edge/torana-edge/internal/format/streamio"
 )
 
 // sseEvent is a raw SSE data payload as parsed JSON.
@@ -66,7 +66,7 @@ func (s *StreamAdapter) ParseStream(body io.Reader) <-chan engine.StreamEvent {
 	ch := make(chan engine.StreamEvent)
 	go func() {
 		defer close(ch)
-		scanner := bufio.NewScanner(body)
+		scanner := streamio.NewScanner(body)
 		var blockType string // tracks current content block type: "", "text", "tool_use", "thinking"
 		// From message_start, reported with output at message_delta.
 		var inputTokens, cacheRead, cacheWrite int
@@ -189,6 +189,15 @@ func (s *StreamAdapter) ParseStream(body io.Reader) <-chan engine.StreamEvent {
 					}
 				}
 
+			case ev.Type == "error" && ev.Error == nil:
+				ch <- engine.StreamEvent{
+					Error: &engine.StreamError{
+						Code:    500,
+						Message: "anthropic stream error event missing error detail",
+					},
+				}
+				return
+
 			case ev.Type == "error":
 				ch <- engine.StreamEvent{
 					Error: &engine.StreamError{
@@ -196,7 +205,14 @@ func (s *StreamAdapter) ParseStream(body io.Reader) <-chan engine.StreamEvent {
 						Message: ev.Error.Message,
 					},
 				}
+				return
 			}
+		}
+		if err := scanner.Err(); err != nil {
+			ch <- engine.StreamEvent{Error: &engine.StreamError{
+				Code:    500,
+				Message: fmt.Sprintf("anthropic stream read: %v", err),
+			}}
 		}
 	}()
 	return ch

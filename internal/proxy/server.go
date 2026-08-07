@@ -1225,11 +1225,13 @@ func New(cfg Config) (*Server, error) {
 				// stream shape is exactly what it asked for; otherwise it
 				// passes through (and on to plugins) untouched.
 				rs := reqStateFrom(resp.Request.Context())
+				tapDone := make(chan struct{})
 				{
 					in := events
 					tapped := make(chan engine.StreamEvent)
 					go func() {
 						defer close(tapped)
+						defer close(tapDone)
 						for ev := range in {
 							if ev.Usage != nil {
 								// Merge rather than overwrite: Anthropic reports
@@ -1418,6 +1420,12 @@ func New(cfg Config) (*Server, error) {
 					upstreamBody.Close()
 					for range events { //nolint:revive // intentional drain
 					}
+					// The usage tap is the sole writer of streaming usage state.
+					// A terminal plugin abort can close the final output before the
+					// tap has drained a usage frame already buffered by the parser.
+					// Join it before building the observational response or closing
+					// streamDone, so the handler never reads reqState concurrently.
+					<-tapDone
 					if serErr != nil {
 						log.Printf("format %s serialize error: %v", fmt.Name, serErr)
 					}

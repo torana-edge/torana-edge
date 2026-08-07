@@ -1,8 +1,6 @@
 package proxy
 
-// AUDIT SCRATCH TEST — not for commit.
-//
-// Reproduces the reqState data race on the stream-abort path: when
+// Reproduces the former reqState data race on the stream-abort path: when
 // RunOnStreamChunkVerified aborts, the pipeline goroutine detaches a drainer
 // (`go func() { for range in {} }()`) and returns, closing `out`. The
 // serializer goroutine then closes `done`, releasing ServeHTTP to read
@@ -23,7 +21,7 @@ import (
 	"github.com/torana-edge/torana-edge/internal/provider"
 )
 
-func TestAuditStreamAbortUsageRace(t *testing.T) {
+func TestStreamAbortWaitsForUsageTap(t *testing.T) {
 	requireWASM(t, fixturesDir+"/test-tool-rewriter/plugin.wasm")
 
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
