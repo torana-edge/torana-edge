@@ -142,7 +142,7 @@ func TestHostMarshalFailureNoResponseHook(t *testing.T) {
 
 	body := `{"model":"m","contents":[{"role":"user","parts":[{"functionResponse":{"name":"read","response":{"output":"x"},"id":"c1"}}]}]}`
 	_, out, _, srv := parseFailE2E(t, "gemini", []string{"test-invalid-scheduling", "test-observer"}, body)
-	if v, ok := srv.sharedCache.Get("observed_error_status"); ok {
+	if v, ok := srv.sharedCache.Get(observerCacheKey("observed_error_status")); ok {
 		t.Fatalf("a response hook ran after the host_error 500: cache %q", v)
 	}
 	if string(out) != hostErrorBody("gemini") {
