@@ -35,7 +35,7 @@ const (
 
 	// authBundleGrants is the v2 auth manifest's declared permission set,
 	// used verbatim for approval-override pipelines (all-or-nothing).
-	authBundleGrants = "env.host_call.verify_virtual_key,env.request_headers,env.set_identity"
+	authBundleGrants = "env.block_request,env.host_call.verify_virtual_key,env.request_headers,env.set_identity"
 )
 
 // authEnvOptions drives the single auth harness.
