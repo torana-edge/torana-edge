@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/torana-edge/torana-edge/internal/engine"
+	"github.com/torana-edge/torana-edge/internal/format/streamio"
 )
 
 // Stream implements format.StreamAdapter for Bedrock ConverseStream.
@@ -101,9 +102,7 @@ func (s *Stream) ParseStream(body io.Reader) <-chan engine.StreamEvent {
 	ch := make(chan engine.StreamEvent)
 	go func() {
 		defer close(ch)
-		scanner := bufio.NewScanner(body)
-		// Bedrock events can be larger than the default 64KB buffer for tool-heavy responses.
-		scanner.Buffer(make([]byte, 0, 64*1024), 2*1024*1024)
+		scanner := streamio.NewScanner(body)
 
 		// Index-aware open-block state, keyed by the wire contentBlockIndex:
 		// ConverseStream indexes are unique per block within one message, and

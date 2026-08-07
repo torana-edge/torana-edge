@@ -1,7 +1,6 @@
 package gemini
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -12,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/torana-edge/torana-edge/internal/engine"
+	"github.com/torana-edge/torana-edge/internal/format/streamio"
 )
 
 // StreamAdapter translates between Gemini SSE streams and StreamEvent channels.
@@ -69,7 +69,7 @@ func (s *StreamAdapter) ParseStream(body io.Reader) <-chan engine.StreamEvent {
 
 	go func() {
 		defer close(ch)
-		reader := bufio.NewReader(body)
+		scanner := streamio.NewScanner(body)
 		var lastUsage *geminiUsageMetadata
 		// Per-stream content-block counter. The ABI invariant requires block
 		// indexes unique within one streamed message: every part that opens a
@@ -77,9 +77,8 @@ func (s *StreamAdapter) ParseStream(body io.Reader) <-chan engine.StreamEvent {
 		// index, shared by that block's Start/Delta/End. Shared across chunks
 		// because parts arrive split over SSE frames.
 		var blockIndex int
-		for {
-			line, err := reader.ReadBytes('\n')
-			trimmed := bytes.TrimSpace(line)
+		for scanner.Scan() {
+			trimmed := bytes.TrimSpace(scanner.Bytes())
 			if len(trimmed) > 0 {
 				payload := trimmed
 				// Strip the SSE "data:" prefix if present.
@@ -98,12 +97,9 @@ func (s *StreamAdapter) ParseStream(body io.Reader) <-chan engine.StreamEvent {
 					}
 				}
 			}
-			if err != nil {
-				if err != io.EOF {
-					ch <- engine.StreamEvent{Error: &engine.StreamError{Code: -1, Message: fmt.Sprintf("gemini: read stream: %v", err)}}
-				}
-				return
-			}
+		}
+		if err := scanner.Err(); err != nil {
+			ch <- engine.StreamEvent{Error: &engine.StreamError{Code: -1, Message: fmt.Sprintf("gemini: read stream: %v", err)}}
 		}
 	}()
 

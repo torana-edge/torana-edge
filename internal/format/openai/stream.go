@@ -1,7 +1,6 @@
 package openai
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -10,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/torana-edge/torana-edge/internal/engine"
+	"github.com/torana-edge/torana-edge/internal/format/streamio"
 )
 
 // StreamAdapter implements format.StreamAdapter for OpenAI SSE streams.
@@ -96,9 +96,7 @@ func (s *StreamAdapter) ParseStream(body io.Reader) <-chan engine.StreamEvent {
 }
 
 func (s *StreamAdapter) parseStream(body io.Reader, ch chan<- engine.StreamEvent) {
-	scanner := bufio.NewScanner(body)
-	// SSE lines can be long for function arguments; bump the buffer.
-	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	scanner := streamio.NewScanner(body)
 
 	// toolCallStarted tracks which indices have emitted ToolCallStart.
 	toolCallStarted := make(map[int]bool)
@@ -242,6 +240,12 @@ func (s *StreamAdapter) parseStream(body io.Reader, ch chan<- engine.StreamEvent
 				}
 			}
 		}
+	}
+	if err := scanner.Err(); err != nil {
+		ch <- engine.StreamEvent{Error: &engine.StreamError{
+			Code:    500,
+			Message: fmt.Sprintf("openai stream read: %v", err),
+		}}
 	}
 }
 

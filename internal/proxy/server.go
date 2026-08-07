@@ -1225,11 +1225,13 @@ func New(cfg Config) (*Server, error) {
 				// stream shape is exactly what it asked for; otherwise it
 				// passes through (and on to plugins) untouched.
 				rs := reqStateFrom(resp.Request.Context())
+				tapDone := make(chan struct{})
 				{
 					in := events
 					tapped := make(chan engine.StreamEvent)
 					go func() {
 						defer close(tapped)
+						defer close(tapDone)
 						for ev := range in {
 							if ev.Usage != nil {
 								// Merge rather than overwrite: Anthropic reports
@@ -1418,6 +1420,25 @@ func New(cfg Config) (*Server, error) {
 					upstreamBody.Close()
 					for range events { //nolint:revive // intentional drain
 					}
+					// The usage tap is the sole writer of streaming usage state.
+					// A terminal plugin abort can close the final output before the
+					// tap has drained a usage frame already buffered by the parser.
+					// Join it before building the observational response or closing
+					// streamDone, so the handler never reads reqState concurrently.
+					//
+					// This trades a data race for a liveness dependency, stated
+					// plainly: the wait ends only when the tap's range over the
+					// parser channel ends, which needs ParseStream to exit. Both
+					// paths that reach here have already made that happen — the
+					// abort path cancelled streamCtx (so the tap takes its
+					// Done branch and drains) and every path closes upstreamBody
+					// immediately above, which unblocks the parser's read. If a
+					// future reader/adapter can ignore a closed body, this
+					// becomes a hung request rather than a torn read, because
+					// streamDone would never close. Keep that invariant: any
+					// ParseStream implementation MUST terminate when its body is
+					// closed.
+					<-tapDone
 					if serErr != nil {
 						log.Printf("format %s serialize error: %v", fmt.Name, serErr)
 					}
