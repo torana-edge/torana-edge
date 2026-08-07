@@ -2,7 +2,6 @@ package proxy
 
 import (
 	"bytes"
-	"encoding/json"
 	"io"
 	"log"
 	"net/http"
@@ -238,19 +237,12 @@ func fallbackNamesForProvider(name string, cfg provider.Config) []string {
 	if !ok {
 		return nil
 	}
-	fallbacks := p.Fallback
-
-	// Also check plugins.config.failover for allowed_fallbacks.
-	if failoverCfg, hasCfg := cfg.Plugins.Config["failover"]; hasCfg {
-		var fc struct {
-			AllowedFallbacks []string `json:"allowed_fallbacks"`
-		}
-		if err := json.Unmarshal(failoverCfg, &fc); err == nil && len(fc.AllowedFallbacks) > 0 {
-			fallbacks = fc.AllowedFallbacks
-		}
-	}
-
-	return fallbacks
+	// Failover is provider-owned configuration. A historical, undocumented
+	// plugins.config.failover.allowed_fallbacks value replaced this list
+	// globally (rather than filtering it), allowing a plugin config stanza to
+	// invent failovers for providers that declared none. It is intentionally
+	// ignored: there is no compatibility branch before the first release.
+	return p.Fallback
 }
 
 func statusOrErr(resp *http.Response, err error) string {

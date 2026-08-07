@@ -2343,10 +2343,15 @@ func New(cfg Config) (*Server, error) {
 		// Enforce request body limit before it reaches Director or failover
 		if r.Body != nil {
 			r.Body = http.MaxBytesReader(w, r.Body, maxBodySize)
-			// Read the whole body now to trigger the 413 if it's too large
+			// Read the whole body now to trigger the limit before dispatch.
 			bodyBytes, err := io.ReadAll(r.Body)
 			if err != nil {
-				http.Error(w, "Request Entity Too Large", http.StatusRequestEntityTooLarge)
+				var maxErr *http.MaxBytesError
+				if errors.As(err, &maxErr) {
+					http.Error(w, "Request Entity Too Large", http.StatusRequestEntityTooLarge)
+				} else {
+					http.Error(w, "Bad Request", http.StatusBadRequest)
+				}
 				return
 			}
 			r.Body.Close()

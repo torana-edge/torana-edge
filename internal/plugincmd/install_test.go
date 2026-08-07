@@ -10,6 +10,30 @@ import (
 	"github.com/torana-edge/torana-edge/internal/plugin"
 )
 
+func TestLocalPluginBuildEnvPinsToolchainAndWorkspace(t *testing.T) {
+	t.Setenv("GOTOOLCHAIN", "auto")
+	t.Setenv("GOWORK", "/tmp/hostile.work")
+	t.Setenv("GOOS", "hostile")
+	t.Setenv("GOARCH", "hostile")
+	env := localPluginBuildEnv("GOOS=wasip1", "GOARCH=wasm")
+
+	values := make(map[string][]string)
+	for _, entry := range env {
+		name, value, _ := strings.Cut(entry, "=")
+		values[name] = append(values[name], value)
+	}
+	for name, want := range map[string]string{
+		"GOTOOLCHAIN": "local",
+		"GOWORK":      "off",
+		"GOOS":        "wasip1",
+		"GOARCH":      "wasm",
+	} {
+		if got := values[name]; len(got) != 1 || got[0] != want {
+			t.Errorf("%s = %v, want exactly [%s]", name, got, want)
+		}
+	}
+}
+
 // TestInstalledDigestMatchesHost is the test that matters. `torana plugin
 // install` prints a digest and tells the operator to approve it; if that value
 // disagrees with the one the host computes at load time, the instruction is

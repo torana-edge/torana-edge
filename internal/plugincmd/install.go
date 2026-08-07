@@ -370,6 +370,7 @@ func installPlugin(args []string, stdout, stderr io.Writer) error {
 		// nothing to verify against. Resolve first, then build.
 		tidy := exec.Command("go", "mod", "tidy")
 		tidy.Dir = stage
+		tidy.Env = localPluginBuildEnv()
 		tidy.Stderr = stderr
 		if err := tidy.Run(); err != nil {
 			cleanup()
@@ -379,7 +380,7 @@ func installPlugin(args []string, stdout, stderr io.Writer) error {
 		wasm := filepath.Join(stage, "plugin.wasm")
 		build := exec.Command("go", "build", "-trimpath", "-buildmode=c-shared", "-buildvcs=false", "-o", wasm, ".")
 		build.Dir = stage
-		build.Env = append(os.Environ(), "GOOS=wasip1", "GOARCH=wasm")
+		build.Env = localPluginBuildEnv("GOOS=wasip1", "GOARCH=wasm")
 		build.Stderr = stderr
 		if err := build.Run(); err != nil {
 			cleanup()
@@ -440,6 +441,24 @@ func installPlugin(args []string, stdout, stderr io.Writer) error {
 	_, _ = fmt.Fprintln(stdout, "at http://127.0.0.1:8080/_torana/, review what each one requests, and approve")
 	_, _ = fmt.Fprintln(stdout, "its digest. Approval is bound to that digest — rebuild it and you approve again.")
 	return nil
+}
+
+// localPluginBuildEnv prevents source being installed from selecting and
+// downloading a different Go toolchain through its go.mod. Installation runs
+// before a plugin digest can be reviewed, so that boundary must use the
+// operator's already-installed toolchain. GOWORK is disabled as well: a
+// process-level workspace must not silently replace the staged module graph.
+func localPluginBuildEnv(extra ...string) []string {
+	blocked := map[string]struct{}{"GOTOOLCHAIN": {}, "GOWORK": {}, "GOOS": {}, "GOARCH": {}}
+	env := make([]string, 0, len(os.Environ())+2+len(extra))
+	for _, entry := range os.Environ() {
+		name, _, _ := strings.Cut(entry, "=")
+		if _, skip := blocked[name]; !skip {
+			env = append(env, entry)
+		}
+	}
+	env = append(env, "GOTOOLCHAIN=local", "GOWORK=off")
+	return append(env, extra...)
 }
 
 func activateBundle(installStage, target string) error {

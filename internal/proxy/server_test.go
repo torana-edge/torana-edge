@@ -167,6 +167,31 @@ func TestOversizedBodyRejection(t *testing.T) {
 	}
 }
 
+type failingRequestBody struct{ err error }
+
+func (b failingRequestBody) Read([]byte) (int, error) { return 0, b.err }
+func (failingRequestBody) Close() error               { return nil }
+
+func TestBodyReadFailureIsBadRequestNotTooLarge(t *testing.T) {
+	cfg := Config{Port: "0", Providers: testProviderConfig("http://127.0.0.1:1", "test", "openai")}
+	srv, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer srv.Shutdown(context.Background())
+
+	req := httptest.NewRequest(http.MethodPost, "/provider/test/v1/chat", nil)
+	req.Body = failingRequestBody{err: io.ErrUnexpectedEOF}
+	rec := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, body = %q; want 400", rec.Code, rec.Body.String())
+	}
+	if rec.Body.String() != "Bad Request\n" {
+		t.Fatalf("body = %q, want value-free bad-request response", rec.Body.String())
+	}
+}
+
 // TestProxyDefaultProvider verifies that the DefaultProvider field
 // routes paths without a /provider/ prefix to the named provider.
 func TestProxyDefaultProvider(t *testing.T) {
