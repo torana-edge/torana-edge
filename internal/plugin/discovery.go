@@ -614,6 +614,16 @@ type PluginPipeline struct {
 	// as streamKinds, so the enforcement state cannot outlive the request
 	// metadata it describes.
 	streamVerify map[uint64]*streamVerifierState
+
+	// requestPlugins records the first-fire order of plugins for each pinned
+	// request. It is request-scoped operator telemetry, not execution state;
+	// EndRequest deletes it with the other request-owned maps.
+	requestPlugins map[uint64]*requestPluginInvocations
+}
+
+type requestPluginInvocations struct {
+	names []string
+	seen  map[string]struct{}
 }
 
 // SkippedPlugin describes an enabled plugin that was not loaded because it
@@ -854,6 +864,7 @@ func reloadPipeline(runtime *wasm.Runtime, config PluginConfig) (*PluginPipeline
 		closed:             make(chan struct{}),
 		streamKinds:        make(map[uint64]*pbconv.BlockKindTracker),
 		streamVerify:       make(map[uint64]*streamVerifierState),
+		requestPlugins:     make(map[uint64]*requestPluginInvocations),
 		candidateValidator: config.CandidateValidator,
 	}, nil
 }
@@ -971,10 +982,48 @@ func cloneAgentOperation(operation AgentOperation) AgentOperation {
 // EndRequest drops all request-scoped plugin state for a finished request.
 func (pp *PluginPipeline) EndRequest(reqID uint64) {
 	pp.runtime.EndRequest(reqID)
+	pp.dropRequestTracking(reqID)
+}
+
+func (pp *PluginPipeline) dropRequestTracking(reqID uint64) {
 	pp.mu.Lock()
 	delete(pp.streamKinds, reqID)
 	delete(pp.streamVerify, reqID)
+	delete(pp.requestPlugins, reqID)
 	pp.mu.Unlock()
+}
+
+func (pp *PluginPipeline) recordInvocation(reqID uint64, name string) {
+	pp.mu.Lock()
+	defer pp.mu.Unlock()
+	if pp.requestPlugins == nil {
+		pp.requestPlugins = make(map[uint64]*requestPluginInvocations)
+	}
+	invocations := pp.requestPlugins[reqID]
+	if invocations == nil {
+		invocations = &requestPluginInvocations{seen: make(map[string]struct{})}
+		pp.requestPlugins[reqID] = invocations
+	}
+	if _, exists := invocations.seen[name]; exists {
+		return
+	}
+	invocations.seen[name] = struct{}{}
+	invocations.names = append(invocations.names, name)
+}
+
+// InvokedPlugins returns the first-fire order for the exact request and exact
+// pinned pipeline generation. The returned slice is detached from live state.
+func (pp *PluginPipeline) InvokedPlugins(reqID uint64) []string {
+	if pp == nil {
+		return nil
+	}
+	pp.mu.Lock()
+	defer pp.mu.Unlock()
+	invocations := pp.requestPlugins[reqID]
+	if invocations == nil {
+		return nil
+	}
+	return append([]string(nil), invocations.names...)
 }
 
 // Verdicts returns what plugins asked the host to do about this request.
@@ -1129,6 +1178,7 @@ func (pp *PluginPipeline) runBeforeRequestPlugin(ctx context.Context, reqID uint
 		return nil, false, err
 	}
 	var outBytes []byte
+	pp.recordInvocation(reqID, lp.manifest.Name)
 	if err := lp.plugin.CallRequest(ctx, pbv2.Hook_HOOK_BEFORE_REQUEST, reqID, inBytes, &outBytes); err != nil {
 		log.Printf("[plugin] %s run_before_request: %v", lp.manifest.Name, err)
 		pp.discardTrapped(reqID, lp.manifest.Name)
@@ -1273,6 +1323,7 @@ func (pp *PluginPipeline) RunAfterResponse(ctx context.Context, reqID uint64, re
 			return resp, err
 		}
 		var outBytes []byte
+		pp.recordInvocation(reqID, lp.manifest.Name)
 		if err := lp.plugin.CallRequest(ctx, pbv2.Hook_HOOK_AFTER_RESPONSE, reqID, inBytes, &outBytes); err != nil {
 			log.Printf("[plugin] %s run_after_response: %v", lp.manifest.Name, err)
 			if lp.failureMode == "block" {
@@ -1373,6 +1424,7 @@ func (pp *PluginPipeline) RunOnStreamChunk(ctx context.Context, reqID uint64, ch
 				continue
 			}
 			var outBytes []byte
+			pp.recordInvocation(reqID, lp.manifest.Name)
 			if err := lp.plugin.CallRequest(ctx, pbv2.Hook_HOOK_ON_STREAM_CHUNK, reqID, evBytes, &outBytes); err != nil {
 				log.Printf("[plugin] %s run_on_stream_chunk: %v", lp.manifest.Name, err)
 				if lp.failureMode == "block" {

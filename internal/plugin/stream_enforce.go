@@ -655,6 +655,7 @@ func (pp *PluginPipeline) runOnStreamChunk(ctx context.Context, reqID uint64, ch
 				continue
 			}
 			var outBytes []byte
+			pp.recordInvocation(reqID, lp.manifest.Name)
 			if err := lp.plugin.CallRequest(ctx, pbv2.Hook_HOOK_ON_STREAM_CHUNK, reqID, evBytes, &outBytes); err != nil {
 				log.Printf("[plugin] %s run_on_stream_chunk: %v", lp.manifest.Name, err)
 				if lp.failureMode == "block" {
