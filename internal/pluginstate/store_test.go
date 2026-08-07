@@ -30,7 +30,7 @@ func TestSetGetRoundTrip(t *testing.T) {
 }
 
 // TestNamespacedPerPlugin is the security-relevant property: durable state is
-// private, unlike env.cache_* where the shared keyspace is a deliberate feature.
+// private, like env.cache_* and unlike the explicit env.shared_cache_* channel.
 // A plugin persisting something sensitive must not hand it to its neighbours.
 func TestNamespacedPerPlugin(t *testing.T) {
 	s := newStore(t, Options{})
