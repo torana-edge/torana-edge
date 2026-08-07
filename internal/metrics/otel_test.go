@@ -2,8 +2,10 @@ package metrics
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
+	"go.opentelemetry.io/otel/attribute"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 
@@ -61,8 +63,8 @@ func metricNames(rm metricdata.ResourceMetrics) map[string]bool {
 	return names
 }
 
-// TestRecordProxyRequest: host request metrics are emitted with model/provider/
-// status labels.
+// TestRecordProxyRequest: host request metrics are emitted with bounded model
+// family/provider/status labels.
 func TestRecordProxyRequest(t *testing.T) {
 	do := collect(t)
 	RecordProxyRequest(context.Background(), "gpt-x", "oai", 200, 12.5)
@@ -148,6 +150,62 @@ func TestRecordTokens(t *testing.T) {
 	}
 	if got["input"] != 120 || got["output"] != 45 {
 		t.Fatalf("token datapoints wrong: %v", got)
+	}
+}
+
+func TestModelMetricLabelsHaveFiniteCardinality(t *testing.T) {
+	want := map[string]string{
+		"claude-sonnet-4": "claude", "GPT-5": "openai", "o3-mini": "openai",
+		"gemini-2.5-pro": "gemini", "deepseek-r1": "deepseek",
+		"meta-llama/llama-4": "llama", "mixtral-8x7b": "mistral",
+		"qwen3-coder": "qwen", "command-r": "command", "grok-4": "grok",
+		"attacker-unique-1": "other", "": "other",
+	}
+	for input, family := range want {
+		if got := modelFamily(input); got != family {
+			t.Errorf("modelFamily(%q) = %q, want %q", input, got, family)
+		}
+	}
+
+	seen := map[string]bool{}
+	for i := range 10_000 {
+		seen[modelFamily(fmt.Sprintf("client-controlled-%d", i))] = true
+	}
+	if len(seen) != 1 || !seen["other"] {
+		t.Fatalf("10k attacker labels produced %v, want only other", seen)
+	}
+}
+
+func TestRecordedMetricsNeverCarryExactModel(t *testing.T) {
+	do := collect(t)
+	secretModel := "client-secret-model-7f3d"
+	RecordProxyRequest(context.Background(), secretModel, "oai", 200, 1)
+	RecordTokens(context.Background(), secretModel, "oai", 1, 1)
+	RecordCacheTokens(context.Background(), secretModel, "oai", 1, 1)
+	for _, sm := range do().ScopeMetrics {
+		for _, metric := range sm.Metrics {
+			switch data := metric.Data.(type) {
+			case metricdata.Sum[int64]:
+				for _, point := range data.DataPoints {
+					assertBoundedModelAttributes(t, point.Attributes, secretModel)
+				}
+			case metricdata.Histogram[float64]:
+				for _, point := range data.DataPoints {
+					assertBoundedModelAttributes(t, point.Attributes, secretModel)
+				}
+			}
+		}
+	}
+}
+
+func assertBoundedModelAttributes(t *testing.T, attrs attribute.Set, forbidden string) {
+	t.Helper()
+	if _, present := attrs.Value("model"); present {
+		t.Fatal("exact model label is present")
+	}
+	family, present := attrs.Value("model_family")
+	if present && (family.AsString() != "other" || family.AsString() == forbidden) {
+		t.Fatalf("model_family = %q", family.AsString())
 	}
 }
 
