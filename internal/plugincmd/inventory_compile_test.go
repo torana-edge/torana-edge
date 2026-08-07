@@ -15,6 +15,12 @@ var (
 	_ = sdk.ReplaceText
 	_ = sdk.SuppressText
 	_ = sdk.SetIdentity
+	_ = sdk.MetaGet
+	_ = sdk.MetaSet
+	_ = sdk.CacheGet
+	_ = sdk.CacheSet
+	_ = sdk.SharedCacheGet
+	_ = sdk.SharedCacheSet
 	_ = sdk.PassEvent
 	_ = sdk.PassToolCall
 	_ = sdk.PassText

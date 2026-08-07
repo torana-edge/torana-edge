@@ -550,8 +550,10 @@ type Runtime struct {
 	// nothing when nil and no test counters live in the production struct.
 	testHooks *lifecycleHooks
 
-	// cache is the cross-request TTL store shared between plugins
-	// (e.g. compactor writes intents, keyword_compactor reads them).
+	// cache is the cross-request TTL store. Host-owned domain framing keeps
+	// ordinary per-plugin keys disjoint from the separately granted shared
+	// channel, even if a malicious guest chooses keys containing NULs or the
+	// other domain's textual prefix.
 	cache cache.Store
 	// ownsCache marks a runtime-private store (NewRuntime) that Close must
 	// release; shared stores (NewRuntimeWithCache) outlive the runtime.
@@ -1140,8 +1142,14 @@ func pluginNameOf(mod api.Module) string {
 // metaKey namespaces a plugin's meta key. Meta is plugin-private state
 // (fragment buffers, tool-call tracking) — without namespacing, plugins
 // sharing key conventions (tool:0, frag:<id>) clobber each other.
-// The shared cross-plugin channel is the cache (env.cache_*), not meta.
+// Cross-plugin cache exchange is a separate, explicit capability.
 func metaKey(plugin, key string) string { return plugin + "\x00" + key }
+
+func privateCacheKey(plugin, key string) string {
+	return "private\x00" + strconv.Itoa(len(plugin)) + "\x00" + plugin + key
+}
+
+func sharedCacheKey(key string) string { return "shared\x00" + key }
 
 func (r *Runtime) installHostFunctions() {
 	env := r.runtime.NewHostModuleBuilder("env")
@@ -1365,7 +1373,7 @@ func (r *Runtime) dispatchHostCall(ctx context.Context, pluginName, cmd, args st
 				herr = hostErr(pbv2.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "%v", err)
 				break
 			}
-			r.cache.Set(a.Key, a.Value)
+			r.cache.Set(privateCacheKey(pluginName, a.Key), a.Value)
 		case "env.cache_get":
 			var a pbv2.CacheGetArgs
 			if err := proto.Unmarshal([]byte(args), &a); err != nil {
@@ -1378,9 +1386,36 @@ func (r *Runtime) dispatchHostCall(ctx context.Context, pluginName, cmd, args st
 			}
 			// The presence bool was previously discarded, so a miss and a
 			// stored empty string were the same answer.
-			v, present := r.cache.Get(a.Key)
+			v, present := r.cache.Get(privateCacheKey(pluginName, a.Key))
 			if !present {
 				herr = hostErr(pbv2.ErrorCode_ERROR_CODE_NOT_FOUND, "cache key not found")
+				break
+			}
+			value = []byte(v)
+		case "env.shared_cache_set":
+			var a pbv2.CacheSetArgs
+			if err := proto.Unmarshal([]byte(args), &a); err != nil {
+				herr = hostErr(pbv2.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "invalid CacheSetArgs: %v", err)
+				break
+			}
+			if err := a.Validate(); err != nil {
+				herr = hostErr(pbv2.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "%v", err)
+				break
+			}
+			r.cache.Set(sharedCacheKey(a.Key), a.Value)
+		case "env.shared_cache_get":
+			var a pbv2.CacheGetArgs
+			if err := proto.Unmarshal([]byte(args), &a); err != nil {
+				herr = hostErr(pbv2.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "invalid CacheGetArgs: %v", err)
+				break
+			}
+			if err := a.Validate(); err != nil {
+				herr = hostErr(pbv2.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "%v", err)
+				break
+			}
+			v, present := r.cache.Get(sharedCacheKey(a.Key))
+			if !present {
+				herr = hostErr(pbv2.ErrorCode_ERROR_CODE_NOT_FOUND, "shared cache key not found")
 				break
 			}
 			value = []byte(v)

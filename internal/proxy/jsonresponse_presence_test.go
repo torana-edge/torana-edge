@@ -229,7 +229,7 @@ func TestObserverNoCandidateGemini(t *testing.T) {
 	}
 	// The observer caches the status ONLY from its Message==nil branch, so a
 	// hit proves run_after_response received ChatResponse{Message: nil}.
-	v, ok := store.Get("observed_error_status")
+	v, ok := store.Get(observerCacheKey("observed_error_status"))
 	if !ok || v != "200" {
 		t.Fatalf("observer's Message==nil branch did not run: cache %q, present %v", v, ok)
 	}

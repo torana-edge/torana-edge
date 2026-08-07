@@ -294,7 +294,7 @@ func TestParseFailClosedNoHooksNoUpstreamFacts(t *testing.T) {
 		t.Fatalf("channel-validity status = %d, want 500", status)
 	}
 	store := srv.sharedCache
-	if v, ok := store.Get("observed_error_status"); !ok || v != "500" {
+	if v, ok := store.Get(observerCacheKey("observed_error_status")); !ok || v != "500" {
 		t.Fatalf("channel validity: observer cache = %q (present %v), want 500 — the hook must run for a real upstream error", v, ok)
 	}
 
@@ -305,7 +305,7 @@ func TestParseFailClosedNoHooksNoUpstreamFacts(t *testing.T) {
 	if status != http.StatusBadRequest || string(body) != goldenInvalidRequest("anthropic") {
 		t.Fatalf("allow-mode local 400 wrong: status=%d body=%s", status, body)
 	}
-	if v, ok := srvAllow.sharedCache.Get("observed_error_status"); ok {
+	if v, ok := srvAllow.sharedCache.Get(observerCacheKey("observed_error_status")); ok {
 		t.Fatalf("after-response hook ran on the local 400: cache %q", v)
 	}
 	if n := atomic.LoadInt32(hits); n != 0 {
@@ -611,7 +611,7 @@ func TestParseFailClosedAmbiguousArmRowsTransport(t *testing.T) {
 			if n := limiterBucketCount(srvA); n != 0 {
 				t.Fatalf("%d limiter buckets materialized with the observer; must be 0", n)
 			}
-			if v, ok := srvA.sharedCache.Get("observed_error_status"); ok {
+			if v, ok := srvA.sharedCache.Get(observerCacheKey("observed_error_status")); ok {
 				t.Fatalf("a response hook ran with the observer: cache %q", v)
 			}
 
@@ -716,7 +716,7 @@ func TestSchedulingValueFree400Transport(t *testing.T) {
 			if statusA != http.StatusBadRequest || !bytes.Equal(bodyA, out) {
 				t.Fatalf("allow-mode observer 400 differs: status=%d body=%s", statusA, bodyA)
 			}
-			if v, ok := srvA.sharedCache.Get("observed_error_status"); ok {
+			if v, ok := srvA.sharedCache.Get(observerCacheKey("observed_error_status")); ok {
 				t.Fatalf("a response hook ran with the allow-mode observer: cache %q", v)
 			}
 			// …and block-mode observer (the approval must carry the
@@ -725,7 +725,7 @@ func TestSchedulingValueFree400Transport(t *testing.T) {
 			if statusO != http.StatusBadRequest || !bytes.Equal(bodyO, out) {
 				t.Fatalf("block-mode observer 400 differs: status=%d body=%s", statusO, bodyO)
 			}
-			if v, ok := srvO.sharedCache.Get("observed_error_status"); ok {
+			if v, ok := srvO.sharedCache.Get(observerCacheKey("observed_error_status")); ok {
 				t.Fatalf("a response hook ran with the block-mode observer: cache %q", v)
 			}
 		})

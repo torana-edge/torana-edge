@@ -434,10 +434,37 @@ func init() {
 		return nil, nil
 	})
 }
+
 `)
 	msgs := lintMessages(t, dir)
 	assertContains(t, msgs, `"env.host_call.torana_offload_completion"`)
 	assertContains(t, msgs, `"env.cache_get"`)
+}
+
+func TestLintAttributesPrivateAndSharedCacheHelpersSeparately(t *testing.T) {
+	dir := writePlugin(t,
+		manifestWith(`{"name":"run_before_request"}`, `{"name":"env.cache_get","description":"private read"}`),
+		`package main
+import (
+    "context"
+    sdk "github.com/torana-edge/torana-plugin-sdk"
+    pb "github.com/torana-edge/torana-plugin-sdk/pb/v2"
+)
+func main() {}
+func init() {
+    sdk.OnBeforeRequest(func(context.Context, *pb.ChatRequest) (sdk.RequestResult, error) {
+        _, _, _ = sdk.CacheGet("private")
+        _, _ = sdk.SharedCacheSet("contract:key", "value")
+        return sdk.PassRequest(), nil
+    })
+}`)
+	msgs := lintMessages(t, dir)
+	assertContains(t, msgs, `uses "env.shared_cache_set" but plugin.json does not request it`)
+	for _, msg := range msgs {
+		if strings.Contains(msg, `uses "env.cache_get" but plugin.json does not request it`) {
+			t.Fatalf("declared private cache helper was misattributed: %s", msg)
+		}
+	}
 }
 
 func TestLintWarnsOnUnusedCapability(t *testing.T) {

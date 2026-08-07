@@ -4,19 +4,17 @@
 // restart:
 //
 //   - env.meta_* is request-scoped. It is dropped when the request ends.
-//   - env.cache_* is cross-request but TTL'd and deliberately a shared flat
-//     keyspace, so any plugin can read any other plugin's entries.
+//   - env.cache_* is cross-request but TTL'd and plugin-private;
+//     env.shared_cache_* is the deliberate shared flat keyspace.
 //
 // Nothing existed for state a plugin must still have after the proxy restarts:
 // a cache-warming plugin's stored prefixes, a rate-limiter's counters, an
 // index's last-sync marker. This is that.
 //
-// Two differences from env.cache_* are deliberate:
+// Two differences from both cache families are deliberate:
 //
-//   - Keys are namespaced per plugin, like env.meta_*. The shared keyspace is a
-//     feature of the cache (plugins cooperate through it); durable state is
-//     private, and a plugin that persists secrets to disk should not be handing
-//     them to its neighbours.
+//   - Keys are namespaced per plugin, like env.meta_* and env.cache_*. Durable
+//     state is never part of the explicit shared-cache exchange channel.
 //   - Entries do not expire. Expiry is the plugin's business — the host cannot
 //     know whether a stored prefix is still wanted.
 //
