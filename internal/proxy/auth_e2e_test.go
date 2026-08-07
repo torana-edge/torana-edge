@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
@@ -456,12 +457,12 @@ func TestAuthIntegrationEscapedEnvelopeByteExact(t *testing.T) {
 	assertExactVerifyPayloads(t, n, payloads, `{"key":"sk-torana-a\"b\\c"}`)
 }
 
-// TestAuthIntegrationNoOverrideFallbacks — rejected, unwired, and advisory
-// outcomes produce NO identity verdict; the host fallback is the EXACT
-// Authorization header, or the default "default" identity bucket for
-// X-Api-Key-only. Provider keys, JWT-shaped bearers, and non-token
-// credentials never call the verifier. Callback bodies never call t.Fatal;
-// zero-call rows assert count==0 from the test goroutine.
+// TestAuthIntegrationNoOverrideFallbacks — unwired and advisory outcomes
+// produce NO identity verdict; the host fallback is the EXACT Authorization
+// header. Provider keys, JWT-shaped bearers, and non-token credentials never
+// call the verifier. Callback bodies never call t.Fatal; zero-call rows assert
+// count==0 from the test goroutine. Authoritative domain rejection is covered
+// separately below: it must never enter this fallback path.
 func TestAuthIntegrationNoOverrideFallbacks(t *testing.T) {
 	for name, tc := range map[string]struct {
 		opts        authEnvOptions
@@ -470,15 +471,6 @@ func TestAuthIntegrationNoOverrideFallbacks(t *testing.T) {
 		wantVerify  int
 		wantPayload string
 	}{
-		"domain rejected": {
-			opts: authEnvOptions{wire: func() wasm.ExtensionResult {
-				return wasm.ExtensionValue([]byte(`{"status":"rejected","message":"revoked"}`))
-			}},
-			headers:     map[string]string{"Authorization": "Bearer sk-torana-revoked"},
-			wantID:      "Bearer sk-torana-revoked",
-			wantVerify:  1,
-			wantPayload: `{"key":"sk-torana-revoked"}`,
-		},
 		"wired not configured refusal": {
 			opts: authEnvOptions{wire: func() wasm.ExtensionResult {
 				return wasm.ExtensionRefusal(pbv2.ErrorCode_ERROR_CODE_NOT_CONFIGURED, "%s", "not wired")
@@ -531,15 +523,6 @@ func TestAuthIntegrationNoOverrideFallbacks(t *testing.T) {
 			wantID:     "", // host default identity (rc.Identity stays empty)
 			wantVerify: 0,
 		},
-		"x-api-key-only rejected": {
-			opts: authEnvOptions{wire: func() wasm.ExtensionResult {
-				return wasm.ExtensionValue([]byte(`{"status":"rejected"}`))
-			}},
-			headers:     map[string]string{"X-Api-Key": "sk-torana-apikey"},
-			wantID:      "", // host default identity (rc.Identity stays empty)
-			wantVerify:  1,
-			wantPayload: `{"key":"sk-torana-apikey"}`,
-		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			post, identities, verdicts, verifier, limiterKeys, _ := authEnv(t, tc.opts)
@@ -565,6 +548,55 @@ func TestAuthIntegrationNoOverrideFallbacks(t *testing.T) {
 				wantBucket = hashIdentity("default")
 			}
 			assertBucketKeys(t, limiterKeys(), wantBucket)
+		})
+	}
+}
+
+// TestAuthIntegrationRejectedVirtualKeysBlock proves the authoritative value
+// arm cannot fall back to either the caller's Authorization credential or the
+// host's default X-Api-Key identity. The verifier diagnostic is deliberately
+// secret-bearing; only the plugin's fixed value-free denial may reach the
+// client.
+func TestAuthIntegrationRejectedVirtualKeysBlock(t *testing.T) {
+	const wantBody = `{"error":{"code":"virtual_key_rejected","message":"The Torana virtual key was rejected.","type":"virtual_key_rejected"}}`
+	for name, tc := range map[string]struct {
+		headers map[string]string
+		payload string
+	}{
+		"authorization": {
+			headers: map[string]string{"Authorization": "Bearer sk-torana-revoked"},
+			payload: `{"key":"sk-torana-revoked"}`,
+		},
+		"x-api-key": {
+			headers: map[string]string{"X-Api-Key": "sk-torana-apikey"},
+			payload: `{"key":"sk-torana-apikey"}`,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			post, identities, verdicts, verifier, limiterKeys, hits := authEnv(t, authEnvOptions{
+				wire: func() wasm.ExtensionResult {
+					return wasm.ExtensionValue([]byte(`{"status":"rejected","message":"SECRET-verifier-diagnostic"}`))
+				},
+			})
+			status, body := post(tc.headers, authChatBody)
+			if status != http.StatusUnauthorized || string(body) != wantBody {
+				t.Fatalf("rejection = status %d body %s", status, body)
+			}
+			if bytes.Contains(body, []byte("SECRET-verifier-diagnostic")) {
+				t.Fatalf("verifier diagnostic leaked: %s", body)
+			}
+			assertNoVerdict(t, verdicts())
+			n, payloads := verifier()
+			assertExactVerifyPayloads(t, n, payloads, tc.payload)
+			if got := identities(); len(got) != 1 || got[0] != "" {
+				t.Fatalf("blocked route identities = %v, want one empty identity", got)
+			}
+			if got := limiterKeys(); len(got) != 0 {
+				t.Fatalf("blocked request acquired limiter buckets: %v", got)
+			}
+			if got := atomic.LoadInt32(hits); got != 0 {
+				t.Fatalf("blocked request reached upstream %d times", got)
+			}
 		})
 	}
 }
