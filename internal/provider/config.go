@@ -6,11 +6,13 @@ package provider
 import (
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/url"
 	"os"
 	"path/filepath"
 	"reflect"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -138,13 +140,10 @@ func (c Config) Validate() error {
 		return fmt.Errorf("cache limits and redis db must not be negative")
 	}
 	if c.MITM.Enabled {
-		if c.MITM.Listen == "" || c.MITM.CADir == "" {
-			return fmt.Errorf("mitm.listen and mitm.ca_dir are required when MITM is enabled")
+		if err := c.MITM.ValidateIngress(); err != nil {
+			return err
 		}
 		for host, providerName := range c.MITM.Hosts {
-			if strings.TrimSpace(host) == "" {
-				return fmt.Errorf("mitm host must not be empty")
-			}
 			if _, ok := c.Providers[providerName]; !ok {
 				return fmt.Errorf("mitm host %q references unknown provider %q", host, providerName)
 			}
@@ -216,8 +215,8 @@ type Config struct {
 // all other hosts and non-chat paths are tunneled/forwarded verbatim.
 type MITMConfig struct {
 	Enabled bool `json:"enabled,omitempty"`
-	// Listen is the CONNECT proxy address (e.g. "127.0.0.1:8099"). Keep it on
-	// localhost — it decrypts caller traffic.
+	// Listen is the CONNECT proxy address (e.g. "127.0.0.1:8099"). A literal
+	// loopback address is enforced because this listener decrypts caller traffic.
 	Listen string `json:"listen,omitempty"`
 	// CADir holds the generated CA cert/key and the SSL_CERT_FILE bundle. The
 	// CA private key never leaves this dir and must not be committed.
@@ -225,6 +224,75 @@ type MITMConfig struct {
 	// Hosts maps an upstream hostname to the provider name that handles its
 	// chat calls (e.g. "cloudcode-pa.googleapis.com" -> "antigravity").
 	Hosts map[string]string `json:"hosts,omitempty"`
+}
+
+// ValidateIngress checks the security boundary that is intrinsic to the MITM
+// listener. It deliberately accepts only literal loopback addresses: resolving
+// a hostname at bind time would make DNS or hosts-file state part of whether a
+// CA-backed plaintext CONNECT proxy is exposed off-machine.
+func (c MITMConfig) ValidateIngress() error {
+	if c.Listen == "" || c.CADir == "" {
+		return fmt.Errorf("mitm.listen and mitm.ca_dir are required when MITM is enabled")
+	}
+	host, portText, err := net.SplitHostPort(c.Listen)
+	if err != nil {
+		return fmt.Errorf("mitm.listen %q must be a host:port address: %w", c.Listen, err)
+	}
+	ip := net.ParseIP(host)
+	if ip == nil || !ip.IsLoopback() {
+		return fmt.Errorf("mitm.listen %q must use a literal loopback address", c.Listen)
+	}
+	port, err := strconv.Atoi(portText)
+	if err != nil || port < 0 || port > 65535 {
+		return fmt.Errorf("mitm.listen %q must use a numeric port from 0 to 65535", c.Listen)
+	}
+	if len(c.Hosts) == 0 {
+		return fmt.Errorf("mitm.hosts must contain at least one intercepted host")
+	}
+	seen := make(map[string]string, len(c.Hosts))
+	for raw, providerName := range c.Hosts {
+		hostname, err := CanonicalMITMHostname(raw)
+		if err != nil {
+			return err
+		}
+		if strings.TrimSpace(providerName) == "" {
+			return fmt.Errorf("mitm host %q must name a provider", raw)
+		}
+		if prior, ok := seen[hostname]; ok {
+			return fmt.Errorf("mitm hosts %q and %q name the same canonical host %q", prior, raw, hostname)
+		}
+		seen[hostname] = raw
+	}
+	return nil
+}
+
+// CanonicalMITMHostname returns the DNS-comparison form used for configured
+// hosts, CONNECT authorities, and TLS SNI. DNS names are ASCII
+// case-insensitive and a final root dot is semantically irrelevant.
+func CanonicalMITMHostname(raw string) (string, error) {
+	host := strings.TrimSpace(raw)
+	if host == "" {
+		return "", fmt.Errorf("mitm host must not be empty")
+	}
+	if strings.Contains(host, ":") {
+		return "", fmt.Errorf("mitm host %q must not include a port", raw)
+	}
+	host = strings.TrimSuffix(strings.ToLower(host), ".")
+	if host == "" || len(host) > 253 {
+		return "", fmt.Errorf("mitm host %q is invalid", raw)
+	}
+	for _, label := range strings.Split(host, ".") {
+		if label == "" || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
+			return "", fmt.Errorf("mitm host %q is invalid", raw)
+		}
+		for i := range len(label) {
+			b := label[i]
+			if (b < 'a' || b > 'z') && (b < '0' || b > '9') && b != '-' {
+				return "", fmt.Errorf("mitm host %q is invalid", raw)
+			}
+		}
+	}
+	return host, nil
 }
 
 // OffloadConfig controls cheap-model tool result summarization

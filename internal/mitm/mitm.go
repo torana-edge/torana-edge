@@ -37,18 +37,25 @@ type Server struct {
 	// concurrently — the two must not race.
 	mu       sync.Mutex
 	listener net.Listener
+	conns    map[net.Conn]struct{}
 	closed   bool
 }
 
 // New builds a MITM server. toranaHandler is the proxy's provider mux, obtained
 // from proxy.Server.Handler().
 func New(cfg provider.MITMConfig, toranaHandler http.Handler) (*Server, error) {
-	if cfg.Listen == "" {
-		return nil, fmt.Errorf("mitm: listen address required")
+	if err := cfg.ValidateIngress(); err != nil {
+		return nil, fmt.Errorf("mitm: %w", err)
 	}
-	if cfg.CADir == "" {
-		return nil, fmt.Errorf("mitm: ca_dir required")
+	hosts := make(map[string]string, len(cfg.Hosts))
+	for raw, providerName := range cfg.Hosts {
+		hostname, err := provider.CanonicalMITMHostname(raw)
+		if err != nil {
+			return nil, fmt.Errorf("mitm: %w", err)
+		}
+		hosts[hostname] = providerName
 	}
+	cfg.Hosts = hosts
 	ca, err := LoadOrCreateCA(cfg.CADir)
 	if err != nil {
 		return nil, fmt.Errorf("mitm: ca: %w", err)
@@ -60,10 +67,16 @@ func New(cfg provider.MITMConfig, toranaHandler http.Handler) (*Server, error) {
 	log.Printf("mitm: CA ready at %s — point the client at HTTPS_PROXY=http://%s SSL_CERT_FILE=%s",
 		cfg.CADir, cfg.Listen, bundle)
 	return &Server{
-		cfg:      cfg,
-		ca:       ca,
-		torana:   toranaHandler,
-		passthru: &http.Transport{ForceAttemptHTTP2: false},
+		cfg:    cfg,
+		ca:     ca,
+		torana: toranaHandler,
+		passthru: &http.Transport{
+			DialContext:           (&net.Dialer{Timeout: 15 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
+			ForceAttemptHTTP2:     false,
+			TLSHandshakeTimeout:   10 * time.Second,
+			ResponseHeaderTimeout: 30 * time.Second,
+		},
+		conns: make(map[net.Conn]struct{}),
 	}, nil
 }
 
@@ -98,12 +111,18 @@ func (s *Server) Close() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.closed = true
+	var firstErr error
 	if s.listener != nil {
-		err := s.listener.Close()
+		firstErr = s.listener.Close()
 		s.listener = nil
-		return err
 	}
-	return nil
+	for conn := range s.conns {
+		if err := conn.Close(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+		delete(s.conns, conn)
+	}
+	return firstErr
 }
 
 func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
@@ -115,6 +134,11 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 	if h, _, err := net.SplitHostPort(r.Host); err == nil {
 		hostname = h
 	}
+	canonical, err := provider.CanonicalMITMHostname(hostname)
+	if err != nil {
+		http.Error(w, "mitm: invalid CONNECT host", http.StatusBadRequest)
+		return
+	}
 
 	hj, ok := w.(http.Hijacker)
 	if !ok {
@@ -125,16 +149,43 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		return
 	}
+	if !s.track(client) {
+		_ = client.Close()
+		return
+	}
 	if _, err := client.Write([]byte("HTTP/1.1 200 Connection Established\r\n\r\n")); err != nil {
-		client.Close()
+		s.untrack(client)
+		_ = client.Close()
 		return
 	}
 
-	if _, intercept := s.cfg.Hosts[hostname]; !intercept {
-		go s.tunnel(client, r.Host)
+	if _, intercept := s.cfg.Hosts[canonical]; !intercept {
+		go func() {
+			defer s.untrack(client)
+			s.tunnel(client, r.Host)
+		}()
 		return
 	}
-	go s.terminate(client, hostname)
+	go func() {
+		defer s.untrack(client)
+		s.terminate(client, canonical)
+	}()
+}
+
+func (s *Server) track(conn net.Conn) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return false
+	}
+	s.conns[conn] = struct{}{}
+	return true
+}
+
+func (s *Server) untrack(conn net.Conn) {
+	s.mu.Lock()
+	delete(s.conns, conn)
+	s.mu.Unlock()
 }
 
 // tunnel splices bytes to the real upstream without touching TLS (login,
@@ -154,17 +205,31 @@ func (s *Server) tunnel(client net.Conn, hostport string) {
 // through the Torana pipeline, everything else is forwarded verbatim.
 func (s *Server) terminate(client net.Conn, hostname string) {
 	defer client.Close()
+	if err := client.SetDeadline(time.Now().Add(15 * time.Second)); err != nil {
+		return
+	}
 	tlsConn := tls.Server(client, &tls.Config{
 		GetCertificate: func(chi *tls.ClientHelloInfo) (*tls.Certificate, error) {
 			name := chi.ServerName
 			if name == "" {
 				name = hostname
 			}
-			return s.ca.LeafFor(name)
+			canonical, err := provider.CanonicalMITMHostname(name)
+			if err != nil {
+				return nil, err
+			}
+			if canonical != hostname {
+				return nil, fmt.Errorf("mitm: TLS server name %q does not match CONNECT host %q", name, hostname)
+			}
+			return s.ca.LeafFor(canonical)
 		},
+		MinVersion: tls.VersionTLS12,
 		NextProtos: []string{"http/1.1"},
 	})
 	if err := tlsConn.Handshake(); err != nil {
+		return
+	}
+	if err := client.SetDeadline(time.Time{}); err != nil {
 		return
 	}
 	defer tlsConn.Close()
@@ -185,6 +250,9 @@ func (s *Server) terminate(client net.Conn, hostname string) {
 // dispatch handles one decrypted request. It returns true if the connection may
 // be reused for another request.
 func (s *Server) dispatch(conn net.Conn, req *http.Request, hostname string) bool {
+	removeHopByHopHeaders(req.Header)
+	req.TransferEncoding = nil
+	req.Trailer = nil
 	provName := s.cfg.Hosts[hostname]
 	if isChatPath(req.URL.Path) && provName != "" {
 		s.routeThroughTorana(conn, req, hostname, provName)
@@ -223,9 +291,6 @@ func (s *Server) forwardVerbatim(conn net.Conn, req *http.Request, hostname stri
 	}
 	out.ContentLength = req.ContentLength
 	for k, vs := range req.Header {
-		if strings.EqualFold(k, "Proxy-Connection") {
-			continue
-		}
 		for _, v := range vs {
 			out.Header.Add(k, v)
 		}
@@ -255,6 +320,29 @@ func (s *Server) forwardVerbatim(conn net.Conn, req *http.Request, hostname stri
 	}
 	io.Copy(conn, resp.Body)
 	return false
+}
+
+func removeHopByHopHeaders(header http.Header) {
+	for _, value := range header.Values("Connection") {
+		for token := range strings.SplitSeq(value, ",") {
+			if name := strings.TrimSpace(token); name != "" {
+				header.Del(name)
+			}
+		}
+	}
+	for _, name := range []string{
+		"Connection",
+		"Keep-Alive",
+		"Proxy-Authenticate",
+		"Proxy-Authorization",
+		"Proxy-Connection",
+		"Te",
+		"Trailer",
+		"Transfer-Encoding",
+		"Upgrade",
+	} {
+		header.Del(name)
+	}
 }
 
 func isChatPath(path string) bool {
