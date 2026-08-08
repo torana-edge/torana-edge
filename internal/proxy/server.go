@@ -2486,14 +2486,14 @@ func New(cfg Config) (*Server, error) {
 // --- Lifecycle --------------------------------------------------------------
 
 func (s *Server) controlPlaneGuard(next http.HandlerFunc) http.HandlerFunc {
-	return s.controlPlaneGuardWithHeaders(next, false)
+	return s.controlPlaneGuardWithHeaders(next, false, false)
 }
 
 func (s *Server) controlPlanePluginGuard(next http.HandlerFunc) http.HandlerFunc {
-	return s.controlPlaneGuardWithHeaders(next, true)
+	return s.controlPlaneGuardWithHeaders(next, true, true)
 }
 
-func (s *Server) controlPlaneGuardWithHeaders(next http.HandlerFunc, allowSameOriginFrame bool) http.HandlerFunc {
+func (s *Server) controlPlaneGuardWithHeaders(next http.HandlerFunc, allowSameOriginFrame, sandboxDocument bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if !isLoopbackRemote(r.RemoteAddr) {
 			http.Error(w, "control plane is localhost-only", http.StatusForbidden)
@@ -2507,7 +2507,7 @@ func (s *Server) controlPlaneGuardWithHeaders(next http.HandlerFunc, allowSameOr
 			http.Error(w, "invalid control-plane origin", http.StatusForbidden)
 			return
 		}
-		setControlPlaneSecurityHeaders(w, allowSameOriginFrame)
+		setControlPlaneSecurityHeaders(w, allowSameOriginFrame, sandboxDocument)
 		next(w, r)
 	}
 }
@@ -2585,7 +2585,7 @@ func isSameOriginControlPlaneRequest(r *http.Request) bool {
 	return strings.EqualFold(u.Host, r.Host)
 }
 
-func setControlPlaneSecurityHeaders(w http.ResponseWriter, allowSameOriginFrame bool) {
+func setControlPlaneSecurityHeaders(w http.ResponseWriter, allowSameOriginFrame, sandboxDocument bool) {
 	h := w.Header()
 	h.Set("Cache-Control", "no-store")
 	h.Set("Pragma", "no-cache")
@@ -2600,7 +2600,18 @@ func setControlPlaneSecurityHeaders(w http.ResponseWriter, allowSameOriginFrame 
 	// The embedded dashboard currently has an inline script and stylesheet, so
 	// unsafe-inline is constrained to same-origin content rather than opening
 	// the page to third-party script or frame sources.
-	h.Set("Content-Security-Policy", "default-src 'self'; base-uri 'none'; object-src 'none'; frame-ancestors "+frameAncestors+"; form-action 'self'; connect-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'")
+	policy := "default-src 'self'; base-uri 'none'; object-src 'none'; frame-ancestors " + frameAncestors + "; form-action 'self'; connect-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'"
+	if sandboxDocument {
+		// Plugin-served HTML shares the control-plane listener, but it must never
+		// share the control-plane ORIGIN. CSP sandbox without allow-same-origin
+		// gives the document an opaque origin even when it is opened directly in
+		// a new tab. Its scripts therefore cannot read or mutate /_torana/api;
+		// mutation requests carry Origin: null and fail the host origin guard.
+		// Keep the iframe sandbox too: the response policy is the owning boundary
+		// and protects every present and future navigation path.
+		policy += "; sandbox allow-scripts allow-forms"
+	}
+	h.Set("Content-Security-Policy", policy)
 }
 
 func (s *Server) GetConfig() Config {

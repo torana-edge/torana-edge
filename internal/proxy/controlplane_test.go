@@ -246,8 +246,36 @@ func TestControlPlaneGuard(t *testing.T) {
 				t.Errorf("%s = %q, want %q", key, got, want)
 			}
 		}
-		if !strings.Contains(rec.Header().Get("Content-Security-Policy"), "frame-ancestors 'none'") {
+		csp := rec.Header().Get("Content-Security-Policy")
+		if !strings.Contains(csp, "frame-ancestors 'none'") {
 			t.Error("v1 response missing restrictive CSP")
+		}
+		if strings.Contains(csp, "sandbox") {
+			t.Error("the trusted control-plane dashboard must not inherit the plugin document sandbox")
+		}
+	})
+
+	t.Run("plugin documents have an opaque origin even when opened directly", func(t *testing.T) {
+		handler := srv.controlPlanePluginGuard(func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = w.Write([]byte(`<script>fetch('/_torana/api/config')</script>`))
+		})
+		req := localControlPlaneRequest(http.MethodGet, "/_torana/plugin/hostile/", nil)
+		req.RemoteAddr = "127.0.0.1:12345"
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200", rec.Code)
+		}
+		csp := rec.Header().Get("Content-Security-Policy")
+		if !strings.Contains(csp, "sandbox allow-scripts allow-forms") {
+			t.Fatalf("plugin response CSP = %q, missing document sandbox", csp)
+		}
+		if strings.Contains(csp, "allow-same-origin") {
+			t.Fatalf("plugin response CSP restores the control-plane origin: %q", csp)
+		}
+		if !strings.Contains(csp, "frame-ancestors 'self'") {
+			t.Fatalf("plugin response CSP lost dashboard embedding: %q", csp)
 		}
 	})
 
@@ -268,6 +296,18 @@ func TestControlPlaneGuard(t *testing.T) {
 		handler.ServeHTTP(rec, req)
 		if rec.Code != http.StatusForbidden {
 			t.Errorf("cross-origin mutation status = %d, want 403", rec.Code)
+		}
+
+		// A CSP-sandboxed plugin document has an opaque origin serialized by the
+		// browser as "null". Even if it submits a form, that must not satisfy the
+		// control-plane mutation guard.
+		req = localControlPlaneRequest(http.MethodPost, "/_torana/api/v1/plugins", strings.NewReader(`{}`))
+		req.RemoteAddr = "127.0.0.1:12345"
+		req.Header.Set("Origin", "null")
+		rec = httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusForbidden {
+			t.Errorf("opaque-origin mutation status = %d, want 403", rec.Code)
 		}
 	})
 

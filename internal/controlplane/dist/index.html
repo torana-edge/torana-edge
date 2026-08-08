@@ -628,7 +628,7 @@
       if (p.serves_http) {
         const url = `/_torana/plugin/${encodeURIComponent(name)}/`;
         servedBlock = `<div class="subhead">Plugin UI</div>
-          <div class="info-note">This plugin interface runs in an isolated frame and cannot access control-plane data directly.</div>
+          <div class="info-note">This plugin interface runs in an opaque-origin sandbox enforced by both its response policy and this frame, so opening it directly cannot expose control-plane data.</div>
           <iframe class="detail-frame" sandbox="allow-scripts allow-forms" src="${url}" title="${escAttr(name)} UI"></iframe>`;
       }
 
