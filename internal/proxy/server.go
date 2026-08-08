@@ -119,19 +119,24 @@ type Config struct {
 // Server wraps the HTTP listener, the reverse proxy, and the WASM plugin
 // pipeline that runs on every request/response cycle.
 type Server struct {
-	configMu   sync.RWMutex
-	rebuildMu  sync.Mutex
-	listenerMu sync.Mutex
-	mitmMu     sync.Mutex
-	listener   net.Listener
-	mitmSrv    *mitm.Server
-	bindHost   string
-	configPath string
-	config     Config
-	secrets    *secret.Store
-	proxy      *httputil.ReverseProxy
-	httpServer *http.Server
-	stats      *metrics.StatsTracker
+	configMu sync.RWMutex
+	// controlPlaneMutationMu serializes the complete read-modify-persist-apply
+	// transaction across every administrative write endpoint. Per-resource
+	// locks are too narrow here: a settings save and a plugin save both replace
+	// the same provider.Config file and in-memory snapshot.
+	controlPlaneMutationMu sync.Mutex
+	rebuildMu              sync.Mutex
+	listenerMu             sync.Mutex
+	mitmMu                 sync.Mutex
+	listener               net.Listener
+	mitmSrv                *mitm.Server
+	bindHost               string
+	configPath             string
+	config                 Config
+	secrets                *secret.Store
+	proxy                  *httputil.ReverseProxy
+	httpServer             *http.Server
+	stats                  *metrics.StatsTracker
 	// feed is the bounded in-memory ring buffer of recent per-request events,
 	// exposed via /_torana/api/feed (snapshot) and /_torana/api/stream (SSE).
 	feed *metrics.RequestFeed
@@ -1634,11 +1639,16 @@ func New(cfg Config) (*Server, error) {
 			w.Write(b)
 
 		case http.MethodPut, http.MethodPost:
+			s.controlPlaneMutationMu.Lock()
+			defer s.controlPlaneMutationMu.Unlock()
 			// Settings write-back: providers / offload / limits / control_plane.
 			// The plugin pipeline (order + per-plugin config) is owned by
 			// /_torana/api/plugins and is preserved verbatim here.
-			lr := io.LimitReader(r.Body, maxBodySize+1)
-			data, err := io.ReadAll(lr)
+			data, err := readControlPlaneBody(r.Body)
+			if errors.Is(err, errControlPlaneBodyTooLarge) {
+				http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
+				return
+			}
 			if err != nil {
 				http.Error(w, "failed to read body", http.StatusBadRequest)
 				return
@@ -1850,6 +1860,8 @@ func New(cfg Config) (*Server, error) {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
+		s.controlPlaneMutationMu.Lock()
+		defer s.controlPlaneMutationMu.Unlock()
 
 		var req struct {
 			Order     *[]string                           `json:"order,omitempty"`
@@ -1857,8 +1869,11 @@ func New(cfg Config) (*Server, error) {
 			Approvals *map[string]provider.PluginApproval `json:"approvals,omitempty"`
 		}
 		if r.Body != nil {
-			lr := io.LimitReader(r.Body, maxBodySize+1)
-			data, err := io.ReadAll(lr)
+			data, err := readControlPlaneBody(r.Body)
+			if errors.Is(err, errControlPlaneBodyTooLarge) {
+				http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
+				return
+			}
 			if err != nil {
 				http.Error(w, "failed to read body", http.StatusBadRequest)
 				return
@@ -1973,6 +1988,8 @@ func New(cfg Config) (*Server, error) {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
+		s.controlPlaneMutationMu.Lock()
+		defer s.controlPlaneMutationMu.Unlock()
 
 		cur := s.GetConfig().Providers.Plugins
 		bundles, _ := plugin.DiscoverPlugins(cur.Dir)
@@ -2005,8 +2022,11 @@ func New(cfg Config) (*Server, error) {
 			http.Error(w, "invalid json body", http.StatusBadRequest)
 			return
 		}
-		lr := io.LimitReader(r.Body, maxBodySize+1)
-		data, err := io.ReadAll(lr)
+		data, err := readControlPlaneBody(r.Body)
+		if errors.Is(err, errControlPlaneBodyTooLarge) {
+			http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
+			return
+		}
 		if err != nil || len(data) == 0 {
 			http.Error(w, "invalid json body", http.StatusBadRequest)
 			return
@@ -2668,6 +2688,19 @@ func (s *Server) persistProviders(cfg provider.Config) error {
 		path = "config.json"
 	}
 	return provider.Save(path, cfg)
+}
+
+var errControlPlaneBodyTooLarge = errors.New("control-plane request body too large")
+
+func readControlPlaneBody(body io.Reader) ([]byte, error) {
+	data, err := io.ReadAll(io.LimitReader(body, maxBodySize+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(data) > maxBodySize {
+		return nil, errControlPlaneBodyTooLarge
+	}
+	return data, nil
 }
 
 // applyProviderConfigTransaction keeps persisted state and in-memory state in
