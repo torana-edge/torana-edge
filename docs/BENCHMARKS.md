@@ -26,6 +26,42 @@ plugins, limits, logging, and deployment resources.
 infrastructure estimate only with an explicitly priced deployment shape and
 measured utilization; Torana itself does not add per-token model charges.
 
+## Production-shaped process benchmark
+
+The microbenchmark above deliberately removes provider latency. Before making
+a release or capacity statement, run the separate-process harness instead:
+
+```bash
+./scripts/benchmark-production.sh results.jsonl
+```
+
+It builds the real `torana` binary, starts it as its own process with a separate
+OpenAI-compatible upstream, and drives both the direct and proxied paths from
+an external concurrent client. The controlled upstream waits 100 ms before
+responding; its streaming response then emits 100 text events 10 ms apart. The
+matrix covers non-streaming concurrency 1, 8 and 32 and streaming concurrency
+1 and 8. Every stream must retain at least 100 data events and terminate with
+`[DONE]`. Output is JSON Lines containing the revision and runtime metadata,
+request count, errors, throughput, p50/p95/p99/max latency, stream event count,
+and Torana process CPU time plus start/peak RSS. Direct rows sample the idle
+Torana process, which makes their CPU field an explicit measurement floor;
+proxied rows record the CPU consumed while Torana handled that row.
+
+The defaults run each measured row for 10 seconds after a 2-second warmup.
+Override them without editing the harness:
+
+```bash
+TORANA_BENCH_DURATION=30s TORANA_BENCH_WARMUP=5s \
+  TORANA_BENCH_PORT=28080 TORANA_BENCH_UPSTREAM_PORT=28081 \
+  ./scripts/benchmark-production.sh results.jsonl
+```
+
+This harness still uses a controlled loopback provider. Its latency and event
+cadence are production-shaped, not production evidence. Run on an otherwise
+idle Linux machine (`/proc` supplies RSS), retain every raw JSONL row, and state
+the machine and configuration beside any summary. Zero request errors and the
+stream-integrity checks are validity requirements, not performance results.
+
 ## Plugin pipeline
 
 `internal/plugin/bench_test.go`. Run them with:
