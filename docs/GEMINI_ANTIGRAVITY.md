@@ -134,16 +134,22 @@ Upstream returned 200
 - **Only the `cloudcode-pa` hosts are decrypted.** OAuth token exchange
   (`oauth2.googleapis.com`), login, and telemetry are opaquely tunneled — Torana
   never sees your credential exchange.
-- **The CA private key stays in `ca_dir`** (gitignored). It's trusted only by
-  `agy` via `SSL_CERT_FILE`. **Never** add it to the system trust store or commit
-  it.
+- **The CA private key stays in `ca_dir`** (gitignored). Torana sets that
+  directory to `0700` and the key to `0600` on Unix, refusing over-permissive
+  key files there. On every platform it refuses partial, malformed, mismatched,
+  symlinked, or expired CA material instead of silently rotating it. It's
+  trusted only by `agy` via `SSL_CERT_FILE`. **Never** add it to the system trust
+  store or commit it.
 - **Two release channels.** `agy` may call `daily-cloudcode-pa` (dev build) or
   `cloudcode-pa` (prod). Map both in `mitm.hosts`.
 - **Auth is `agy`'s own Google OAuth session** — Torana forwards the bearer and
   injects nothing. Running many rapid *automated* `agy` sessions through a proxy
   can trip Google's re-auth (a security response); if `agy` asks you to log in
   again, just re-run its sign-in flow.
-- **Keep `listen` on localhost** — the ingress decrypts caller traffic.
+- **`listen` must be a literal loopback address** (`127.0.0.1` or `::1`) — the
+  ingress decrypts caller traffic, so Torana refuses wildcard, LAN, and
+  hostname-based listeners. Configured host matching is DNS-case-insensitive;
+  the TLS server name must match the CONNECT authority.
 - **Intent + compaction:** `agy`'s tool calls already carry a goal-tied intent.
   Keep `intent` before one compactor and configure explicit policies; source
   reads remain exact for three later assistant turns and unmatched tools remain

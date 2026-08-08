@@ -18,7 +18,12 @@ func TestApplyMITMBadConfigKeepsRunningIngress(t *testing.T) {
 	t.Cleanup(func() { _ = srv.applyMITM(provider.MITMConfig{Enabled: false}) })
 
 	// Bring up a valid ingress (bind to an ephemeral port; CA materializes in a temp dir).
-	good := provider.MITMConfig{Enabled: true, Listen: "127.0.0.1:0", CADir: t.TempDir()}
+	good := provider.MITMConfig{
+		Enabled: true,
+		Listen:  "127.0.0.1:0",
+		CADir:   t.TempDir(),
+		Hosts:   map[string]string{"api.example.com": "test"},
+	}
 	if err := srv.applyMITM(good); err != nil {
 		t.Fatalf("applyMITM(good): %v", err)
 	}

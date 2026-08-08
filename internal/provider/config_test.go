@@ -9,6 +9,72 @@ import (
 	"testing"
 )
 
+func TestMITMIngressValidation(t *testing.T) {
+	base := MITMConfig{
+		Enabled: true,
+		Listen:  "127.0.0.1:8099",
+		CADir:   "/tmp/torana-mitm-test",
+		Hosts:   map[string]string{"api.example.com": "provider"},
+	}
+	for _, listen := range []string{"127.0.0.1:0", "[::1]:8099"} {
+		cfg := base
+		cfg.Listen = listen
+		if err := cfg.ValidateIngress(); err != nil {
+			t.Errorf("ValidateIngress(%q): %v", listen, err)
+		}
+	}
+	for _, listen := range []string{
+		"", "localhost:8099", "0.0.0.0:8099", "[::]:8099", "192.0.2.1:8099",
+		"127.0.0.1", "127.0.0.1:http", "127.0.0.1:65536",
+	} {
+		cfg := base
+		cfg.Listen = listen
+		if err := cfg.ValidateIngress(); err == nil {
+			t.Errorf("ValidateIngress(%q) accepted a non-literal-loopback or malformed listener", listen)
+		}
+	}
+}
+
+func TestMITMHostCanonicalizationAndCollision(t *testing.T) {
+	got, err := CanonicalMITMHostname(" CloudCode-PA.GoogleAPIs.COM. ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "cloudcode-pa.googleapis.com" {
+		t.Fatalf("canonical host = %q", got)
+	}
+	for _, host := range []string{
+		"", "   ", "example.com:443", "bad/name", "bad\\name", "bad\x00name", ".",
+		"*.example.com", "bad_name.example", "-bad.example", "bad-.example", "münchen.example",
+	} {
+		if _, err := CanonicalMITMHostname(host); err == nil {
+			t.Errorf("CanonicalMITMHostname(%q) succeeded", host)
+		}
+	}
+	cfg := MITMConfig{
+		Listen: "127.0.0.1:8099",
+		CADir:  "/tmp/torana-mitm-test",
+		Hosts: map[string]string{
+			"API.EXAMPLE.COM":  "one",
+			"api.example.com.": "two",
+		},
+	}
+	if err := cfg.ValidateIngress(); err == nil || !strings.Contains(err.Error(), "same canonical host") {
+		t.Fatalf("canonical collision error = %v", err)
+	}
+	for name, hosts := range map[string]map[string]string{
+		"empty map":      {},
+		"empty provider": {"api.example.com": ""},
+	} {
+		t.Run(name, func(t *testing.T) {
+			cfg := MITMConfig{Listen: "127.0.0.1:8099", CADir: "/tmp/torana-mitm-test", Hosts: hosts}
+			if err := cfg.ValidateIngress(); err == nil {
+				t.Fatal("ValidateIngress succeeded")
+			}
+		})
+	}
+}
+
 func TestSaveAndLoadManagedConfig(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.Chmod(dir, 0o755); err != nil {
