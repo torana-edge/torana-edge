@@ -2,9 +2,11 @@ package conversation
 
 import (
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 // fakeClock lets the eviction tests run without sleeping.
@@ -69,6 +71,82 @@ func TestUnidentifiableIgnored(t *testing.T) {
 	r.Observe(Observation{ID: "", Provider: "anthropic"})
 	if r.Len() != 0 {
 		t.Errorf("Len = %d, want 0 — an unidentifiable request was recorded", r.Len())
+	}
+}
+
+func TestIdentityFieldsStayExactOrObservationIsRejected(t *testing.T) {
+	r, _ := newTestRegistry(t, Options{})
+	for _, observation := range []Observation{
+		{ID: strings.Repeat("i", MaxIdentityBytes+1)},
+		{ID: "valid", CachePrefixKey: strings.Repeat("k", MaxIdentityBytes+1)},
+		{ID: "bad\xff"},
+		{ID: "valid", CachePrefixKey: "bad\xff"},
+	} {
+		r.Observe(observation)
+	}
+	if r.Len() != 0 {
+		t.Fatalf("invalid host identity was truncated or retained: %+v", r.List())
+	}
+	want := Observation{ID: strings.Repeat("i", MaxIdentityBytes), CachePrefixKey: strings.Repeat("k", MaxIdentityBytes)}
+	r.Observe(want)
+	got, ok := r.Get(want.ID)
+	if !ok || got.ID != want.ID || got.CachePrefixKey != want.CachePrefixKey {
+		t.Fatalf("boundary identity not retained exactly: %+v", got)
+	}
+}
+
+func TestDisplayMetadataIsUTF8SafeAndByteBounded(t *testing.T) {
+	r, _ := newTestRegistry(t, Options{})
+	r.Observe(Observation{
+		ID: "bounded", CachePrefixKey: "prefix",
+		Provider: strings.Repeat("界", MaxProviderBytes),
+		Model:    strings.Repeat("m", MaxModelBytes+100),
+		Format:   "bad\xff" + strings.Repeat("f", MaxFormatBytes),
+		Path:     "/" + strings.Repeat("界", MaxPathBytes),
+	})
+	got, ok := r.Get("bounded")
+	if !ok {
+		t.Fatal("bounded observation missing")
+	}
+	for name, field := range map[string]struct {
+		value string
+		limit int
+	}{
+		"provider": {got.Provider, MaxProviderBytes},
+		"model":    {got.Model, MaxModelBytes},
+		"format":   {got.Format, MaxFormatBytes},
+		"path":     {got.Path, MaxPathBytes},
+	} {
+		if !utf8.ValidString(field.value) || len(field.value) > field.limit {
+			t.Errorf("%s is not bounded UTF-8: bytes=%d valid=%v", name, len(field.value), utf8.ValidString(field.value))
+		}
+		if !strings.HasSuffix(field.value, "…") {
+			t.Errorf("%s does not visibly report truncation: %q", name, field.value)
+		}
+	}
+}
+
+func TestRecordCapAlsoBoundsGuestMetadataBytes(t *testing.T) {
+	r, _ := newTestRegistry(t, Options{MaxRecords: 50})
+	providerValue := strings.Repeat("p", 10_000)
+	modelValue := strings.Repeat("m", 10_000)
+	formatValue := strings.Repeat("f", 10_000)
+	pathValue := strings.Repeat("/path", 2_000)
+	for i := range 10_000 {
+		r.Observe(Observation{
+			ID: fmt.Sprintf("id-%05d", i), CachePrefixKey: fmt.Sprintf("key-%05d", i),
+			Provider: providerValue, Model: modelValue, Format: formatValue, Path: pathValue,
+		})
+	}
+	list := r.List()
+	if len(list) != 50 {
+		t.Fatalf("records = %d, want 50", len(list))
+	}
+	for _, record := range list {
+		if len(record.Provider) > MaxProviderBytes || len(record.Model) > MaxModelBytes ||
+			len(record.Format) > MaxFormatBytes || len(record.Path) > MaxPathBytes {
+			t.Fatalf("record escaped metadata bounds: %+v", record)
+		}
 	}
 }
 

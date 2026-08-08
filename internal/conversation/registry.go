@@ -19,8 +19,10 @@ package conversation
 
 import (
 	"sort"
+	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 )
 
 const (
@@ -33,6 +35,16 @@ const (
 	// turn. Long enough to cover a lunch break, short enough that yesterday's
 	// work is not still cluttering the list.
 	DefaultIdleTTL = 6 * time.Hour
+
+	// Identity fields are host-generated hashes and must remain exact. Metadata
+	// is display/replay context, so it is UTF-8-normalized and byte-bounded at
+	// the registry boundary. The record-count cap alone is not a memory bound
+	// when a request may carry a multi-megabyte model string.
+	MaxIdentityBytes = 128
+	MaxProviderBytes = 128
+	MaxModelBytes    = 512
+	MaxFormatBytes   = 64
+	MaxPathBytes     = 4096
 
 	janitorInterval = time.Minute
 )
@@ -133,7 +145,7 @@ func New(opts Options) *Registry {
 // returns "" for a request it cannot identify, and bucketing all of those under
 // one key would invent a conversation that does not exist.
 func (r *Registry) Observe(obs Observation) {
-	if r == nil || obs.ID == "" {
+	if r == nil || !validIdentity(obs.ID) || (obs.CachePrefixKey != "" && !validIdentity(obs.CachePrefixKey)) {
 		return
 	}
 	now := r.now()
@@ -147,11 +159,11 @@ func (r *Registry) Observe(obs Observation) {
 		r.records[obs.ID] = rec
 	}
 	rec.CachePrefixKey = obs.CachePrefixKey
-	rec.Provider = obs.Provider
-	rec.Model = obs.Model
-	rec.Format = obs.Format
+	rec.Provider = boundedMetadata(obs.Provider, MaxProviderBytes)
+	rec.Model = boundedMetadata(obs.Model, MaxModelBytes)
+	rec.Format = boundedMetadata(obs.Format, MaxFormatBytes)
 	if obs.Path != "" {
-		rec.Path = obs.Path
+		rec.Path = boundedMetadata(obs.Path, MaxPathBytes)
 	}
 	rec.LastActive = now
 	rec.Turns++
@@ -159,6 +171,25 @@ func (r *Registry) Observe(obs Observation) {
 	rec.LastCacheWrite = obs.CacheWrite
 
 	r.evictLocked()
+}
+
+func validIdentity(value string) bool {
+	return value != "" && len(value) <= MaxIdentityBytes && utf8.ValidString(value)
+}
+
+func boundedMetadata(value string, limit int) string {
+	if !utf8.ValidString(value) {
+		value = strings.ToValidUTF8(value, "�")
+	}
+	if len(value) <= limit {
+		return value
+	}
+	const omitted = "…"
+	end := limit - len(omitted)
+	for end > 0 && !utf8.RuneStart(value[end]) {
+		end--
+	}
+	return value[:end] + omitted
 }
 
 // List returns a snapshot ordered most-recently-active first. Callers get
