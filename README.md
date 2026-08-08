@@ -194,6 +194,13 @@ torana-edge/
 shares this listener, and it can rewrite configuration and approve plugins —
 approving a plugin means allowing code to run.
 
+Torana's initial operating model is **one developer on one workstation**. The
+conversation registry, plugin cache, limits, and control-plane permissions are
+not tenant-partitioned. Exposing the data plane can be useful for that
+developer's own tools, but it does not turn Torana into a multi-user or team
+gateway. Put a separately authenticated, tenant-aware service in front before
+using it that way.
+
 Setting `TORANA_BIND` to a reachable address exposes **the data plane only**.
 The control plane has a second, independent check: it requires the request's
 *source* address to be loopback, so remote requests to `/_torana/*` are refused

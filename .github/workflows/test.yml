@@ -48,6 +48,16 @@ jobs:
           else
             echo "this shard needs no fixtures"
           fi
+      - name: Warm the cold SDK-bump fixture cache
+        if: matrix.shard == 'wasm'
+        # An SDK pin changes every fixture's module bytes. Compiling all of
+        # them cold under the race detector exceeds the 30-minute test
+        # timeout, while the same non-race compile finishes in minutes and
+        # populates the exact wazero cache the race run consumes. On ordinary
+        # changes this is a cache-hit check measured in seconds.
+        run: |
+          GOWORK=off TORANA_CI_CACHE=/tmp/wazero-cache TORANA_E2E=1 \
+            go test ./internal/wasm -run '^TestFixturesClaimingV2AreActuallyV2$' -count=1 -timeout 1800s
       - name: Test shard
         run: |
           PKGS=$(scripts/ci-shards.sh ${{ matrix.shard }} | tr '\n' ' ')

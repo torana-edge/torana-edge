@@ -8,9 +8,9 @@ runs.
 This page is for operating them. If you want to *write* one, that lives with
 the SDK: [torana-plugin-sdk](https://github.com/torana-edge/torana-plugin-sdk).
 
-The current host accepts ABI v2 plugins. The supported authoring path is the
-Go v2 SDK; the SDK repository's Rust crate still implements ABI v1 and is not
-compatible with this host.
+The current host accepts ABI v2 plugins. The SDK repository supports ABI v2
+guests in Go and Rust; the first-party plugins use Go, while the Rust crate and
+conformance guest demonstrate the same host boundary from a second language.
 
 ## Installing
 
@@ -72,14 +72,15 @@ page inside the control plane.
 ### Capabilities worth pausing over
 
 Most capabilities only let a plugin see or shape a request you were already
-making. Three are different in kind, and are worth a second look before you
+making. Four are different in kind, and are worth a second look before you
 approve them.
 
 | Capability | What it actually allows |
 | --- | --- |
 | `env.background_tick` | Runs plugin code on a timer with **no request in flight**. Everything else a plugin does appears in a trace of your own traffic; this does not. |
 | `env.host_call.torana_send_request` | Lets the plugin **send its own provider requests**, which costs you money. It cannot choose a destination — only providers you configured — and never sees your credentials, but it can spend within the budget you set. |
-| `env.state_set` / `env.state_get` | Durable storage that **survives restarts**, written to disk beside your config. A plugin may keep prompt fragments there. |
+| `env.shared_cache_get` / `env.shared_cache_set` | Crosses the normal plugin-private cache boundary. A granted plugin can read or replace keys intentionally published for other approved plugins. Ordinary `env.cache_*` never does this. |
+| `env.state_set` / `env.state_get` | Durable, **plugin-private** storage that survives restarts, written to disk beside your config. A plugin may keep prompt fragments there. |
 
 None of the three does anything on its own. Ticks are off unless you set an
 interval, egress is refused unless you set a budget, and both are refused
@@ -158,6 +159,15 @@ telemetry or compaction: degraded is better than broken.
 
 `block` means a failing plugin rejects the request. Right for anything
 security-shaped — a PII scanner that fails open is worse than no PII scanner.
+
+One guest invocation is bounded by a five-second host timeout. A timeout or
+trap follows that plugin's approved `pass`/`block` policy; it is not retried.
+Before-request hooks delay the provider request, and stream/after-stream hooks
+delay completion of the client response because Torana must keep request state
+alive until the stream pipeline finishes. In other words, observational stream
+plugins are still on the client's critical path. If Torana itself is down, the
+client sees an ordinary connection failure unless the client has a separately
+configured direct-provider fallback; Torana does not silently bypass itself.
 
 ## Format-specific provider extensions
 
