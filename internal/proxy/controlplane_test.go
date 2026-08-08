@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -120,6 +121,195 @@ func localControlPlaneRequest(method, target string, body io.Reader) *http.Reque
 	req := httptest.NewRequest(method, target, body)
 	req.Host = "127.0.0.1"
 	return req
+}
+
+type blockingMutationBody struct {
+	reader  *strings.Reader
+	started chan struct{}
+	release <-chan struct{}
+	once    sync.Once
+}
+
+func (body *blockingMutationBody) Read(dst []byte) (int, error) {
+	body.once.Do(func() {
+		close(body.started)
+		<-body.release
+	})
+	return body.reader.Read(dst)
+}
+
+type observedMutationBody struct {
+	reader  *strings.Reader
+	started chan struct{}
+	once    sync.Once
+}
+
+func (body *observedMutationBody) Read(dst []byte) (int, error) {
+	body.once.Do(func() { close(body.started) })
+	return body.reader.Read(dst)
+}
+
+func authorizedControlPlaneMutation(method, target string, body io.Reader) *http.Request {
+	req := localControlPlaneRequest(method, target, body)
+	req.RemoteAddr = "127.0.0.1:12345"
+	req.Header.Set("X-Torana-Local-Request", "1")
+	req.Header.Set("Content-Type", "application/json")
+	return req
+}
+
+func TestControlPlaneMutationsAreOneTransactionDomain(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	cfg := provider.DefaultConfig()
+	cfg.Port = 8080
+	srv, err := New(Config{Port: "8080", Providers: cfg, ConfigPath: configPath})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer srv.Shutdown(context.Background())
+
+	incoming := cfg
+	incoming.Limits.RPM = 17
+	settingsJSON, err := json.Marshal(incoming)
+	if err != nil {
+		t.Fatalf("marshal settings: %v", err)
+	}
+	releaseFirst := make(chan struct{})
+	defer func() {
+		select {
+		case <-releaseFirst:
+		default:
+			close(releaseFirst)
+		}
+	}()
+	firstStarted := make(chan struct{})
+	firstBody := &blockingMutationBody{
+		reader: strings.NewReader(string(settingsJSON)), started: firstStarted, release: releaseFirst,
+	}
+	firstDone := make(chan int, 1)
+	go func() {
+		recorder := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(recorder, authorizedControlPlaneMutation(http.MethodPut, "/_torana/api/config", firstBody))
+		firstDone <- recorder.Code
+	}()
+	select {
+	case <-firstStarted: // the settings transaction owns the lock and is inside body read
+	case <-time.After(5 * time.Second):
+		t.Fatal("settings mutation did not begin")
+	}
+
+	secondStarted := make(chan struct{})
+	secondBody := &observedMutationBody{
+		reader: strings.NewReader(`{"config":{"future":{"enabled":true}}}`), started: secondStarted,
+	}
+	secondDone := make(chan int, 1)
+	go func() {
+		recorder := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(recorder, authorizedControlPlaneMutation(http.MethodPut, "/_torana/api/plugins", secondBody))
+		secondDone <- recorder.Code
+	}()
+
+	select {
+	case <-secondStarted:
+		close(releaseFirst)
+		t.Fatal("plugin mutation read its candidate while the settings transaction was still open")
+	case <-time.After(100 * time.Millisecond):
+		// Expected: the second endpoint has not even consumed its candidate.
+	}
+	close(releaseFirst)
+	if status := <-firstDone; status != http.StatusOK {
+		t.Fatalf("settings status = %d, want 200", status)
+	}
+	select {
+	case <-secondStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("plugin mutation did not resume after the settings transaction completed")
+	}
+	if status := <-secondDone; status != http.StatusOK {
+		t.Fatalf("plugins status = %d, want 200", status)
+	}
+	got := srv.GetConfig().Providers
+	if got.Limits.RPM != 17 || string(got.Plugins.Config["future"]) != `{"enabled":true}` {
+		t.Fatalf("live config lost a serialized update: rpm=%d plugin=%s", got.Limits.RPM, got.Plugins.Config["future"])
+	}
+	persisted, err := provider.Load(configPath)
+	if err != nil {
+		t.Fatalf("load persisted config: %v", err)
+	}
+	if persisted.Limits.RPM != 17 || !sameJSONConfig(persisted.Plugins.Config["future"], json.RawMessage(`{"enabled":true}`)) {
+		t.Fatalf("persisted config diverged: rpm=%d plugin=%s", persisted.Limits.RPM, persisted.Plugins.Config["future"])
+	}
+}
+
+func TestControlPlaneMutationBodyLimitIsExact(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	cfg := provider.DefaultConfig()
+	cfg.Port = 8080
+	cfg.Plugins.Config = map[string]json.RawMessage{"known": json.RawMessage(`{}`)}
+	srv, err := New(Config{Port: "8080", Providers: cfg, ConfigPath: configPath})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer srv.Shutdown(context.Background())
+
+	jsonObjectOfSize := func(size int) string {
+		const prefix, suffix = `{"padding":"`, `"}`
+		if size < len(prefix)+len(suffix) {
+			t.Fatalf("invalid fixture size %d", size)
+		}
+		return prefix + strings.Repeat("x", size-len(prefix)-len(suffix)) + suffix
+	}
+	for _, row := range []struct {
+		method string
+		path   string
+	}{
+		{http.MethodPut, "/_torana/api/config"},
+		{http.MethodPut, "/_torana/api/plugins"},
+		{http.MethodPost, "/_torana/api/plugins/known/config"},
+	} {
+		recorder := httptest.NewRecorder()
+		req := authorizedControlPlaneMutation(row.method, row.path, strings.NewReader(jsonObjectOfSize(maxBodySize+1)))
+		srv.Handler().ServeHTTP(recorder, req)
+		if recorder.Code != http.StatusRequestEntityTooLarge {
+			t.Errorf("%s %s status = %d, want 413", row.method, row.path, recorder.Code)
+		}
+	}
+
+	// The boundary itself is permitted. This payload is a no-op plugins update;
+	// it may be semantically rejected in the future, but never as too large.
+	recorder := httptest.NewRecorder()
+	req := authorizedControlPlaneMutation(http.MethodPut, "/_torana/api/plugins", strings.NewReader(jsonObjectOfSize(maxBodySize)))
+	srv.Handler().ServeHTTP(recorder, req)
+	if recorder.Code == http.StatusRequestEntityTooLarge {
+		t.Fatal("exactly maxBodySize bytes were rejected")
+	}
+}
+
+func TestControlPlaneMutationBodyReadFailuresStayBadRequests(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	cfg := provider.DefaultConfig()
+	cfg.Port = 8080
+	cfg.Plugins.Config = map[string]json.RawMessage{"known": json.RawMessage(`{}`)}
+	srv, err := New(Config{Port: "8080", Providers: cfg, ConfigPath: configPath})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer srv.Shutdown(context.Background())
+
+	for _, row := range []struct {
+		method string
+		path   string
+	}{
+		{http.MethodPut, "/_torana/api/config"},
+		{http.MethodPut, "/_torana/api/plugins"},
+		{http.MethodPost, "/_torana/api/plugins/known/config"},
+	} {
+		recorder := httptest.NewRecorder()
+		req := authorizedControlPlaneMutation(row.method, row.path, failingRequestBody{err: io.ErrUnexpectedEOF})
+		srv.Handler().ServeHTTP(recorder, req)
+		if recorder.Code != http.StatusBadRequest {
+			t.Errorf("%s %s status = %d, want 400", row.method, row.path, recorder.Code)
+		}
+	}
 }
 
 func TestControlPlanePluginsOrderingConstraintError(t *testing.T) {
