@@ -54,6 +54,32 @@ const maxBodySize = 10 * 1024 * 1024 // 10 MB
 const secretSetSentinel = "__set__"
 const maxPluginResponseHeaders = 64
 const maxPluginResponseHeaderBytes = 16 * 1024
+const reverseProxyBufferBytes = 32 * 1024
+
+// reverseProxyBufferPool owns only httputil's transient response-copy buffers.
+// ReverseProxy otherwise allocates 32 KiB for every request. The standard
+// library's BufferPool contract makes this lifetime explicit: a buffer is not
+// returned until that response copy has finished, so concurrent requests never
+// alias it and sync.Pool may discard idle memory whenever the GC needs to.
+type reverseProxyBufferPool struct {
+	pool sync.Pool
+}
+
+type reverseProxyBuffer [reverseProxyBufferBytes]byte
+
+func (p *reverseProxyBufferPool) Get() []byte {
+	if buffer, ok := p.pool.Get().(*reverseProxyBuffer); ok {
+		return buffer[:]
+	}
+	return new(reverseProxyBuffer)[:]
+}
+
+func (p *reverseProxyBufferPool) Put(buffer []byte) {
+	if cap(buffer) < reverseProxyBufferBytes {
+		return
+	}
+	p.pool.Put((*reverseProxyBuffer)(buffer[:reverseProxyBufferBytes]))
+}
 
 var allowedPluginResponseHeaders = map[string]struct{}{
 	"Content-Language": {},
@@ -748,6 +774,7 @@ func New(cfg Config) (*Server, error) {
 	type formatCtxKey struct{}
 
 	proxy := &httputil.ReverseProxy{
+		BufferPool: &reverseProxyBufferPool{},
 		// Rewrite, not Director: Director is deprecated as of Go 1.26. The body
 		// below is unchanged — req is pr.Out, the clone ReverseProxy builds for
 		// the upstream, which is exactly what Director received. Two behavioural
