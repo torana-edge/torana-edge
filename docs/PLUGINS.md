@@ -128,6 +128,22 @@ Every plugin-originated request appears in the live feed marked
 `plugin-egress` and attributed to the plugin, and `/stats` counts calls and
 refusals per plugin. If a plugin is spending, you can see it.
 
+### Plugin telemetry limits
+
+Plugin-defined counter, metric, and label names use the ASCII grammar
+`[A-Za-z0-9][A-Za-z0-9._-]{0,63}`. Each plugin may retain at most 64 `/stats`
+counter names and 64 OTel metric names; each OTel metric may retain at most 64
+distinct label sets, with at most eight labels per set. Label values must be
+valid UTF-8 and at most 128 bytes. The `plugin` label and host-owned Torana
+instrument names are reserved, so a guest cannot spoof attribution or collide
+with platform telemetry.
+
+These are lifetime bounds, not rolling caches: allowing entries to churn would
+still create unbounded OTel aggregations. A rejected `/stats` update increments
+that plugin's fixed `_rejected_updates` counter. A rejected OTel update
+increments `torana_plugin_metric_rejections_total{plugin,reason}`. Guest-chosen
+names or values are never copied into those overflow signals.
+
 ## Ordering
 
 Order matters and Torana enforces the constraints it can:

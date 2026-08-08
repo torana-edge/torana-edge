@@ -1,6 +1,8 @@
 package metrics
 
 import (
+	"fmt"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -74,5 +76,49 @@ func TestRecordPluginCounterConcurrent(t *testing.T) {
 
 	if got := s.Snapshot().PluginCounters["pii"]["hits"]; got != 50 {
 		t.Errorf("hits = %d, want 50", got)
+	}
+}
+
+func TestPluginCounterNamesAndCardinalityAreBounded(t *testing.T) {
+	s := NewStatsTracker()
+	for i := range maxPluginCounterNames + 10_000 {
+		s.RecordPluginCounter("attacker", fmt.Sprintf("counter-%02d", i), 1)
+	}
+	// Existing names remain usable at the cap. Every new, malformed, or
+	// reserved name is represented by one fixed host-owned overflow key.
+	s.RecordPluginCounter("attacker", "counter-00", 4)
+	for _, name := range []string{
+		" space",
+		"counter/with/slashes",
+		strings.Repeat("z", 65),
+		pluginCounterOverflow,
+	} {
+		s.RecordPluginCounter("attacker", name, 99)
+	}
+
+	counters := s.Snapshot().PluginCounters["attacker"]
+	if got, want := len(counters), maxPluginCounterNames+1; got != want {
+		t.Fatalf("counter map grew to %d entries, want bounded %d", got, want)
+	}
+	if got := counters["counter-00"]; got != 5 {
+		t.Fatalf("existing counter at cap = %d, want 5", got)
+	}
+	if got, want := counters[pluginCounterOverflow], int64(10_004); got != want {
+		t.Fatalf("overflow attempts = %d, want %d", got, want)
+	}
+}
+
+func TestPluginTelemetryNameGrammar(t *testing.T) {
+	valid := []string{"a", "0", "requests_total", "cache.hit-rate", "a" + strings.Repeat("z", 63)}
+	for _, name := range valid {
+		if !validPluginTelemetryName(name) {
+			t.Errorf("valid name %q rejected", name)
+		}
+	}
+	invalid := []string{"", "_reserved", "-leading", ".leading", "space name", "slash/name", "Kelvin", "a\x00b", strings.Repeat("a", 65)}
+	for _, name := range invalid {
+		if validPluginTelemetryName(name) {
+			t.Errorf("invalid name %q accepted", name)
+		}
 	}
 }

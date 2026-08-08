@@ -1217,13 +1217,11 @@ func (r *Runtime) installHostFunctions() {
 			return
 		}
 		name := readStr(mod, ptr, length)
-		var labels map[string]string
+		var labelsJSON []byte
 		if labelsLen > 0 {
-			if raw := readStr(mod, labelsPtr, labelsLen); raw != "" {
-				_ = json.Unmarshal([]byte(raw), &labels)
-			}
+			labelsJSON = []byte(readStr(mod, labelsPtr, labelsLen))
 		}
-		metrics.EmitPluginMetric(ctx, pluginName, name, int(metricType), value, labels)
+		metrics.EmitPluginMetricJSON(ctx, pluginName, name, int(metricType), value, labelsJSON)
 	}).Export("emit_metric")
 
 	// host_call — permission-enforced per-command.
