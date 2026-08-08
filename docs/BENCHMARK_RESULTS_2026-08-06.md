@@ -61,3 +61,28 @@ The next publishable load report should run a built Torana binary in a clean
 container, cover non-streaming and streaming traffic at several payload sizes,
 compare zero/one/representative plugin sets, record p50/p95/p99 latency and RSS,
 and hold each load level long enough to observe GC and saturation.
+
+## Allocation follow-up — 2026-08-08
+
+Issue #276 profiled the concurrency-1 Torana arm. The largest single owner was
+`httputil.ReverseProxy.copyBuffer`: without a `BufferPool`, the standard library
+allocated a fresh approximately 32 KiB response-copy buffer for every request.
+The buffer has a safe, explicit lifetime in `httputil.BufferPool`, so Torana now
+reuses it through a `sync.Pool`; concurrent response-integrity and race tests
+cover bodies larger than two buffers.
+
+Five paired 2-second samples on the same host and Go toolchain:
+
+| | Before (`427d3f0`) | With buffer pool | Change |
+|---|---:|---:|---:|
+| median bytes/op | 110,062 | 78,048 | **−29.1%** |
+| median allocs/op | 944 | 941 | −3 |
+| median time/op | 693.5 µs | 629.5 µs | −9.2% |
+
+The time result is within the benchmark's normal run-to-run spread; the claim
+is the byte reduction with no latency regression. The remaining object count is
+spread across JSON tokenization, strict JSON-text and protobuf validation, raw
+object span construction, protobuf conversion, and `net/http`. Those objects
+are variable-sized or mutable request state; pooling them without redesigning
+ownership would risk cross-request aliasing and secret retention. Further work
+should start from a fresh profile rather than adding broad object pools.
