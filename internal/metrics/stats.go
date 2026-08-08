@@ -237,6 +237,20 @@ func (s *StatsTracker) RecordPluginCounter(plugin, counter string, delta int64) 
 		m = map[string]int64{}
 		s.pluginCounters[plugin] = m
 	}
+	if !validPluginTelemetryName(counter) {
+		m[pluginCounterOverflow]++
+		return
+	}
+	if _, exists := m[counter]; !exists {
+		regularNames := len(m)
+		if _, hasOverflow := m[pluginCounterOverflow]; hasOverflow {
+			regularNames--
+		}
+		if regularNames >= maxPluginCounterNames {
+			m[pluginCounterOverflow]++
+			return
+		}
+	}
 	m[counter] += delta
 }
 

@@ -2,8 +2,12 @@ package metrics
 
 import (
 	"context"
+	"encoding/binary"
+	"encoding/json"
 	"log"
+	"math"
 	"os"
+	"sort"
 	"sync"
 	"time"
 
@@ -16,6 +20,7 @@ import (
 	semconv "go.opentelemetry.io/otel/semconv/v1.24.0"
 
 	"github.com/torana-edge/torana-edge/internal/economics"
+	pbjsontext "github.com/torana-edge/torana-plugin-sdk/pb/v2/jsontext"
 )
 
 // InitOTel sets up OpenTelemetry metrics if OTEL_EXPORTER_OTLP_ENDPOINT is set.
@@ -56,6 +61,7 @@ func InitOTel(ctx context.Context) (func(context.Context) error, error) {
 // here rather than in a plugin. Split out so tests can install a manual reader.
 func initInstruments(m metric.Meter) {
 	meter = m
+	pluginMetrics = newPluginMetricRegistry()
 	reqDuration, _ = m.Float64Histogram("torana_request_duration_ms", metric.WithUnit("ms"))
 	reqTotal, _ = m.Int64Counter("torana_requests_total")
 	tokensTotal, _ = m.Int64Counter("torana_tokens_total")
@@ -65,6 +71,7 @@ func initInstruments(m metric.Meter) {
 	compactionEstimatedUSD, _ = m.Float64Counter("torana_compaction_estimated_usd_total")
 	compactionUnavailable, _ = m.Int64Counter("torana_compaction_savings_unavailable_total")
 	routedTotal, _ = m.Int64Counter("torana_routed_requests_total")
+	pluginMetricRejected, _ = m.Int64Counter("torana_plugin_metric_rejections_total")
 }
 
 var (
@@ -78,10 +85,40 @@ var (
 	compactionEstimatedUSD    metric.Float64Counter
 	compactionUnavailable     metric.Int64Counter
 	routedTotal               metric.Int64Counter
-	counterCache              sync.Map
-	histogramCache            sync.Map
-	gaugeCache                sync.Map
+	pluginMetricRejected      metric.Int64Counter
+	pluginMetrics             = newPluginMetricRegistry()
 )
+
+type pluginMetricKey struct {
+	plugin string
+	name   string
+}
+
+type pluginMetricInstrument struct {
+	typ       int
+	counter   metric.Float64Counter
+	histogram metric.Float64Histogram
+	gauge     metric.Float64Gauge
+}
+
+// pluginMetricRegistry bounds every guest-selected dimension that the OTel
+// SDK otherwise retains for the lifetime of the process. Entries are never
+// evicted: eviction would let a guest keep creating new OTel aggregations even
+// though this registry appeared bounded.
+type pluginMetricRegistry struct {
+	mu          sync.Mutex
+	instruments map[string]pluginMetricInstrument
+	names       map[string]map[string]struct{}
+	series      map[pluginMetricKey]map[string]struct{}
+}
+
+func newPluginMetricRegistry() *pluginMetricRegistry {
+	return &pluginMetricRegistry{
+		instruments: map[string]pluginMetricInstrument{},
+		names:       map[string]map[string]struct{}{},
+		series:      map[pluginMetricKey]map[string]struct{}{},
+	}
+}
 
 // RecordProxyRequest records one proxied request's latency and outcome,
 // labeled by bounded model family, provider, and status class (2xx/4xx/5xx).
@@ -240,41 +277,162 @@ func RegisterStatsObservables(st *StatsTracker) {
 }
 
 // EmitPluginMetric records a custom metric emitted by a WASM plugin, tagged
-// with the plugin name plus any plugin-supplied labels.
+// with the plugin name plus bounded plugin-supplied labels. Invalid or
+// over-limit updates increment torana_plugin_metric_rejections_total with a
+// host-owned reason instead of silently disappearing or retaining guest data.
 // type: 0=counter, 1=histogram, 2=gauge
 func EmitPluginMetric(ctx context.Context, pluginName, metricName string, metricType int, value float64, labels map[string]string) {
 	if meter == nil {
 		return
 	}
-
-	attrs := make([]attribute.KeyValue, 0, len(labels)+1)
-	attrs = append(attrs, attribute.String("plugin", pluginName))
-	for k, v := range labels {
-		attrs = append(attrs, attribute.String(k, v))
+	attrs, series, reason := validatePluginMetric(metricName, metricType, value, labels)
+	if reason != "" {
+		recordPluginMetricRejection(ctx, pluginName, reason)
+		return
 	}
+	instrument, reason := pluginMetrics.admit(meter, pluginName, metricName, metricType, series)
+	if reason != "" {
+		recordPluginMetricRejection(ctx, pluginName, reason)
+		return
+	}
+	attrs = append([]attribute.KeyValue{attribute.String("plugin", pluginName)}, attrs...)
 	opt := metric.WithAttributes(attrs...)
-
-	switch metricType {
+	switch instrument.typ {
 	case 0:
-		v, ok := counterCache.Load(metricName)
-		if !ok {
-			c, _ := meter.Float64Counter(metricName)
-			v, _ = counterCache.LoadOrStore(metricName, c)
-		}
-		v.(metric.Float64Counter).Add(ctx, value, opt)
+		instrument.counter.Add(ctx, value, opt)
 	case 1:
-		v, ok := histogramCache.Load(metricName)
-		if !ok {
-			h, _ := meter.Float64Histogram(metricName)
-			v, _ = histogramCache.LoadOrStore(metricName, h)
-		}
-		v.(metric.Float64Histogram).Record(ctx, value, opt)
+		instrument.histogram.Record(ctx, value, opt)
 	case 2:
-		v, ok := gaugeCache.Load(metricName)
-		if !ok {
-			g, _ := meter.Float64Gauge(metricName)
-			v, _ = gaugeCache.LoadOrStore(metricName, g)
-		}
-		v.(metric.Float64Gauge).Record(ctx, value, opt)
+		instrument.gauge.Record(ctx, value, opt)
 	}
+}
+
+// EmitPluginMetricJSON is the handwritten-guest boundary. It rejects malformed,
+// duplicate-key, non-object, null, and parser-differential label documents
+// before decoding them; the Go SDK emits either no bytes or a valid object.
+func EmitPluginMetricJSON(ctx context.Context, pluginName, metricName string, metricType int, value float64, labelsJSON []byte) {
+	var labels map[string]string
+	if len(labelsJSON) > 0 {
+		if err := pbjsontext.Validate(labelsJSON); err != nil || json.Unmarshal(labelsJSON, &labels) != nil || labels == nil {
+			recordPluginMetricRejection(ctx, pluginName, "invalid_labels_json")
+			return
+		}
+	}
+	EmitPluginMetric(ctx, pluginName, metricName, metricType, value, labels)
+}
+
+func validatePluginMetric(name string, typ int, value float64, labels map[string]string) ([]attribute.KeyValue, string, string) {
+	if typ < 0 || typ > 2 {
+		return nil, "", "invalid_type"
+	}
+	if !validPluginTelemetryName(name) || hostMetricNames[name] {
+		return nil, "", "invalid_name"
+	}
+	if math.IsNaN(value) || math.IsInf(value, 0) {
+		return nil, "", "invalid_value"
+	}
+	if len(labels) > maxPluginMetricLabels {
+		return nil, "", "too_many_labels"
+	}
+	keys := make([]string, 0, len(labels))
+	for key, value := range labels {
+		if !validPluginTelemetryName(key) || key == "plugin" {
+			return nil, "", "invalid_label_key"
+		}
+		if !validPluginLabelValue(value) {
+			return nil, "", "invalid_label_value"
+		}
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	attrs := make([]attribute.KeyValue, 0, len(keys))
+	framed := make([]byte, 0, len(keys)*32)
+	var frame [8]byte
+	for _, key := range keys {
+		value := labels[key]
+		binary.LittleEndian.PutUint64(frame[:], uint64(len(key)))
+		framed = append(framed, frame[:]...)
+		framed = append(framed, key...)
+		binary.LittleEndian.PutUint64(frame[:], uint64(len(value)))
+		framed = append(framed, frame[:]...)
+		framed = append(framed, value...)
+		attrs = append(attrs, attribute.String(key, value))
+	}
+	return attrs, string(framed), ""
+}
+
+func (r *pluginMetricRegistry) admit(m metric.Meter, pluginName, metricName string, metricType int, series string) (pluginMetricInstrument, string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	pluginNames := r.names[pluginName]
+	_, nameKnown := pluginNames[metricName]
+	if !nameKnown && len(pluginNames) >= maxPluginMetricNames {
+		return pluginMetricInstrument{}, "name_limit"
+	}
+	instrument, instrumentKnown := r.instruments[metricName]
+	if instrumentKnown && instrument.typ != metricType {
+		return pluginMetricInstrument{}, "type_conflict"
+	}
+	if !instrumentKnown {
+		var err error
+		instrument.typ = metricType
+		switch metricType {
+		case 0:
+			instrument.counter, err = m.Float64Counter(metricName)
+		case 1:
+			instrument.histogram, err = m.Float64Histogram(metricName)
+		case 2:
+			instrument.gauge, err = m.Float64Gauge(metricName)
+		}
+		if err != nil {
+			return pluginMetricInstrument{}, "instrument_error"
+		}
+	}
+	key := pluginMetricKey{plugin: pluginName, name: metricName}
+	knownSeries := r.series[key]
+	if _, ok := knownSeries[series]; !ok && len(knownSeries) >= maxPluginMetricSeries {
+		return pluginMetricInstrument{}, "series_limit"
+	}
+	if pluginNames == nil {
+		pluginNames = map[string]struct{}{}
+		r.names[pluginName] = pluginNames
+	}
+	pluginNames[metricName] = struct{}{}
+	if !instrumentKnown {
+		r.instruments[metricName] = instrument
+	}
+	if knownSeries == nil {
+		knownSeries = map[string]struct{}{}
+		r.series[key] = knownSeries
+	}
+	knownSeries[series] = struct{}{}
+	return instrument, ""
+}
+
+var hostMetricNames = map[string]bool{
+	"torana_request_duration_ms":                  true,
+	"torana_requests_total":                       true,
+	"torana_tokens_total":                         true,
+	"torana_bytes_saved_total":                    true,
+	"torana_compaction_applications_total":        true,
+	"torana_compaction_estimated_tokens_total":    true,
+	"torana_compaction_estimated_usd_total":       true,
+	"torana_compaction_savings_unavailable_total": true,
+	"torana_routed_requests_total":                true,
+	"torana_compactions_total":                    true,
+	"torana_offload_failures_total":               true,
+	"torana_bytes_in_total":                       true,
+	"torana_bytes_out_total":                      true,
+	"torana_plugin_metric_rejections_total":       true,
+}
+
+func recordPluginMetricRejection(ctx context.Context, pluginName, reason string) {
+	if pluginMetricRejected == nil {
+		return
+	}
+	pluginMetricRejected.Add(ctx, 1, metric.WithAttributes(
+		attribute.String("plugin", pluginName),
+		attribute.String("reason", reason),
+	))
 }
