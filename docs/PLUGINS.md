@@ -36,6 +36,19 @@ rejected during bounded staging. You can
 read what you are about to run, and the digest is computed from what your own
 machine built. This is why a Go toolchain is required.
 
+That digest is deliberately a **local approval identity**, not a published
+cross-machine reproducibility claim. Official bundles are proven reproducible
+across different staging paths with one toolchain, but Go patch versions may
+produce different WASM bytes. Installation sets `GOTOOLCHAIN=local` so source
+cannot make your machine download and execute a different compiler before you
+have approved anything. Allowing an automatic download to pin the compiler
+would weaken that boundary; requiring every developer to preinstall one exact
+patch would make installation brittle for a registry digest Torana does not
+need. The registry therefore publishes source coordinates and permissions,
+not a supposedly universal bundle digest. Two developers may approve different
+local digests for the same source, and each approval still binds to the exact
+bytes that developer runs.
+
 ## Approving
 
 Installing does not enable anything. Torana loads no plugin you have not
