@@ -127,6 +127,11 @@ func (c Config) Validate() error {
 		if err := configured.ValidateCache(name); err != nil {
 			return err
 		}
+		for model, pricing := range configured.Pricing {
+			if !pricing.Valid() {
+				return fmt.Errorf("provider %q pricing for model %q must contain only finite, non-negative rates", name, model)
+			}
+		}
 	}
 	if err := c.Offload.Validate(c.Providers); err != nil {
 		return err

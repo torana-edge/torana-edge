@@ -13,6 +13,7 @@ const (
 	UnavailableNonPositiveNet       = "non_positive_estimated_net"
 	UnavailableRouteUnresolved      = "route_unresolved"
 	UnavailableFallbackUnpriced     = "fallback_unpriced_or_non_positive"
+	UnavailableNonFiniteEstimate    = "non_finite_estimate"
 )
 
 // ModelPricing is an operator-supplied price sheet, in USD per million tokens.
@@ -22,6 +23,22 @@ type ModelPricing struct {
 	OutputUSDPerMTok     *float64 `json:"output_usd_per_mtok,omitempty"`
 	CacheReadUSDPerMTok  *float64 `json:"cache_read_usd_per_mtok,omitempty"`
 	CacheWriteUSDPerMTok *float64 `json:"cache_write_usd_per_mtok,omitempty"`
+}
+
+// Valid reports whether every configured rate is a finite, non-negative USD
+// amount. Nil rates remain valid and mean unknown.
+func (p ModelPricing) Valid() bool {
+	for _, rate := range []*float64{
+		p.InputUSDPerMTok,
+		p.OutputUSDPerMTok,
+		p.CacheReadUSDPerMTok,
+		p.CacheWriteUSDPerMTok,
+	} {
+		if rate != nil && (*rate < 0 || !isFinite(*rate)) {
+			return false
+		}
+	}
+	return true
 }
 
 // Usage is billable token usage returned by an upstream. InputTokens is the
@@ -40,6 +57,9 @@ type Usage struct {
 // Cost returns the configured cost of usage. ok is false if a rate required
 // by a non-zero usage bucket is absent.
 func (u Usage) Cost(p ModelPricing) (cost float64, ok bool) {
+	if u.InputTokens < 0 || u.OutputTokens < 0 || u.CacheReadTokens < 0 || u.CacheWriteTokens < 0 {
+		return 0, false
+	}
 	input := u.InputTokens
 	if u.InputIncludesCacheRead {
 		input -= u.CacheReadTokens
@@ -60,12 +80,38 @@ func (u Usage) Cost(p ModelPricing) (cost float64, ok bool) {
 		if part.tokens <= 0 {
 			continue
 		}
-		if part.rate == nil || *part.rate < 0 {
+		if !validRate(part.rate) {
 			return 0, false
 		}
-		cost += float64(part.tokens) * *part.rate / 1_000_000
+		partCost, finite := tokenCost(part.tokens, *part.rate)
+		if !finite {
+			return 0, false
+		}
+		cost += partCost
+		if !isFinite(cost) {
+			return 0, false
+		}
 	}
 	return cost, true
+}
+
+func validRate(rate *float64) bool {
+	return rate != nil && *rate >= 0 && isFinite(*rate)
+}
+
+func isFinite(v float64) bool {
+	return !math.IsNaN(v) && !math.IsInf(v, 0)
+}
+
+// tokenCost divides before multiplying. Besides avoiding an unnecessary
+// intermediate overflow, it rejects a genuinely unrepresentable dollar value
+// instead of letting an infinity reach a decision or JSON response.
+func tokenCost(tokens int64, rate float64) (float64, bool) {
+	if tokens < 0 || rate < 0 || !isFinite(rate) {
+		return 0, false
+	}
+	cost := (float64(tokens) / 1_000_000) * rate
+	return cost, isFinite(cost)
 }
 
 // Offload records the summarizer call that produced a compaction.
@@ -170,16 +216,27 @@ func EstimateSavings(r CompactionReport, target ModelPricing, offloadPricing *Mo
 	if target.CacheReadUSDPerMTok == nil || target.CacheWriteUSDPerMTok == nil {
 		return SavingsEstimate{UnavailableReason: UnavailablePricing}
 	}
-	readRate, writeRate := *target.CacheReadUSDPerMTok, *target.CacheWriteUSDPerMTok
-	if readRate < 0 || writeRate < 0 {
+	if !validRate(target.CacheReadUSDPerMTok) || !validRate(target.CacheWriteUSDPerMTok) {
 		return SavingsEstimate{UnavailableReason: UnavailablePricing}
 	}
-	gross := float64(r.ExpectedApplications*r.EstimatedTokensRemoved) * readRate / 1_000_000
+	readRate, writeRate := *target.CacheReadUSDPerMTok, *target.CacheWriteUSDPerMTok
+	perApplication, finite := tokenCost(r.EstimatedTokensRemoved, readRate)
+	if !finite {
+		return SavingsEstimate{UnavailableReason: UnavailableNonFiniteEstimate}
+	}
+	gross := float64(r.ExpectedApplications) * perApplication
+	if !isFinite(gross) {
+		return SavingsEstimate{UnavailableReason: UnavailableNonFiniteEstimate}
+	}
 	rewritePremium := 0.0
 	// A cached replacement has already established the compact prefix. Reusing
 	// the same bytes on another request does not cause another cache rewrite.
 	if r.Source != "cache_reuse" {
-		rewritePremium = float64(r.EstimatedRewriteSpanTokens) * math.Max(0, writeRate-readRate) / 1_000_000
+		var finite bool
+		rewritePremium, finite = tokenCost(r.EstimatedRewriteSpanTokens, math.Max(0, writeRate-readRate))
+		if !finite {
+			return SavingsEstimate{EstimatedGrossUSD: &gross, UnavailableReason: UnavailableNonFiniteEstimate}
+		}
 	}
 	offloadCost := 0.0
 	if r.Offload != nil {
@@ -196,6 +253,9 @@ func EstimateSavings(r CompactionReport, target ModelPricing, offloadPricing *Mo
 		}
 	}
 	net := gross - rewritePremium - offloadCost
+	if !isFinite(net) {
+		return SavingsEstimate{EstimatedGrossUSD: &gross, UnavailableReason: UnavailableNonFiniteEstimate}
+	}
 	return SavingsEstimate{EstimatedGrossUSD: &gross, EstimatedNetUSD: &net}
 }
 
@@ -208,18 +268,25 @@ func EstimateApplicationSavings(r CompactionReport, target ModelPricing, offload
 	if r.EstimatedTokensRemoved <= 0 {
 		return SavingsEstimate{UnavailableReason: UnavailableTokenEstimate}
 	}
-	if target.CacheReadUSDPerMTok == nil || *target.CacheReadUSDPerMTok < 0 {
+	if !validRate(target.CacheReadUSDPerMTok) {
 		return SavingsEstimate{UnavailableReason: UnavailablePricing}
 	}
-	gross := float64(r.EstimatedTokensRemoved) * *target.CacheReadUSDPerMTok / 1_000_000
+	gross, finite := tokenCost(r.EstimatedTokensRemoved, *target.CacheReadUSDPerMTok)
+	if !finite {
+		return SavingsEstimate{UnavailableReason: UnavailableNonFiniteEstimate}
+	}
 	if r.Source == "cache_reuse" {
 		net := gross
 		return SavingsEstimate{EstimatedGrossUSD: &gross, EstimatedNetUSD: &net}
 	}
-	if r.EstimatedRewriteSpanTokens <= 0 || target.CacheWriteUSDPerMTok == nil || *target.CacheWriteUSDPerMTok < 0 {
+	if r.EstimatedRewriteSpanTokens <= 0 || !validRate(target.CacheWriteUSDPerMTok) {
 		return SavingsEstimate{EstimatedGrossUSD: &gross, UnavailableReason: UnavailablePricing}
 	}
-	net := gross - float64(r.EstimatedRewriteSpanTokens)*math.Max(0, *target.CacheWriteUSDPerMTok-*target.CacheReadUSDPerMTok)/1_000_000
+	rewritePremium, finite := tokenCost(r.EstimatedRewriteSpanTokens, math.Max(0, *target.CacheWriteUSDPerMTok-*target.CacheReadUSDPerMTok))
+	if !finite {
+		return SavingsEstimate{EstimatedGrossUSD: &gross, UnavailableReason: UnavailableNonFiniteEstimate}
+	}
+	net := gross - rewritePremium
 	if r.Offload != nil {
 		if !r.Offload.Usage.Reported {
 			return SavingsEstimate{EstimatedGrossUSD: &gross, UnavailableReason: UnavailableOffloadUsage}
@@ -232,6 +299,9 @@ func EstimateApplicationSavings(r CompactionReport, target ModelPricing, offload
 			return SavingsEstimate{EstimatedGrossUSD: &gross, UnavailableReason: UnavailableOffloadUsage}
 		}
 		net -= cost
+	}
+	if !isFinite(net) {
+		return SavingsEstimate{EstimatedGrossUSD: &gross, UnavailableReason: UnavailableNonFiniteEstimate}
 	}
 	return SavingsEstimate{EstimatedGrossUSD: &gross, EstimatedNetUSD: &net}
 }

@@ -1,6 +1,9 @@
 package economics
 
-import "testing"
+import (
+	"math"
+	"testing"
+)
 
 func rate(v float64) *float64 { return &v }
 
@@ -74,6 +77,75 @@ func TestDecisionDoesNotRechargeRewriteForCachedReplacement(t *testing.T) {
 	decision := DecideCompaction(r, &p, nil)
 	if !decision.Apply {
 		t.Fatalf("stable cached replacement should not pay another rewrite: %+v", decision)
+	}
+}
+
+func TestUsageCostRejectsInvalidInputsAndNonFiniteResults(t *testing.T) {
+	tests := []struct {
+		name    string
+		usage   Usage
+		pricing ModelPricing
+	}{
+		{"negative input", Usage{InputTokens: -1}, ModelPricing{}},
+		{"negative output", Usage{OutputTokens: -1}, ModelPricing{}},
+		{"negative cache read", Usage{CacheReadTokens: -1}, ModelPricing{}},
+		{"negative cache write", Usage{CacheWriteTokens: -1}, ModelPricing{}},
+		{"cache read exceeds inclusive input", Usage{InputTokens: 1, CacheReadTokens: 2, InputIncludesCacheRead: true}, ModelPricing{}},
+		{"nan rate", Usage{InputTokens: 1}, ModelPricing{InputUSDPerMTok: rate(math.NaN())}},
+		{"positive infinity rate", Usage{InputTokens: 1}, ModelPricing{InputUSDPerMTok: rate(math.Inf(1))}},
+		{"finite rate overflows dollars", Usage{InputTokens: math.MaxInt64}, ModelPricing{InputUSDPerMTok: rate(math.MaxFloat64)}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got, ok := tc.usage.Cost(tc.pricing); ok || got != 0 {
+				t.Fatalf("Cost() = (%v, %v), want (0, false)", got, ok)
+			}
+		})
+	}
+}
+
+func TestEstimateSavingsDoesNotOverflowIntegerProduct(t *testing.T) {
+	p := ModelPricing{CacheReadUSDPerMTok: rate(1), CacheWriteUSDPerMTok: rate(1)}
+	r := CompactionReport{
+		EstimatedTokensRemoved:     math.MaxInt64,
+		EstimatedRewriteSpanTokens: 1,
+		ExpectedApplications:       2,
+		Source:                     "cache_reuse",
+	}
+	est := EstimateSavings(r, p, nil)
+	if est.UnavailableReason != "" || est.EstimatedGrossUSD == nil || est.EstimatedNetUSD == nil {
+		t.Fatalf("large finite estimate unavailable: %+v", est)
+	}
+	want := float64(math.MaxInt64) * 2 / 1_000_000
+	if *est.EstimatedGrossUSD != want || *est.EstimatedNetUSD != want {
+		t.Fatalf("estimate = %+v, want gross/net %v", est, want)
+	}
+}
+
+func TestSavingsEstimatorsRejectNonFiniteRatesAndResults(t *testing.T) {
+	base := CompactionReport{
+		EstimatedTokensRemoved:     1,
+		EstimatedRewriteSpanTokens: 1,
+		ExpectedApplications:       1,
+		Source:                     "transformation",
+	}
+	for _, bad := range []float64{math.NaN(), math.Inf(1), math.Inf(-1)} {
+		p := ModelPricing{CacheReadUSDPerMTok: rate(bad), CacheWriteUSDPerMTok: rate(1)}
+		if got := EstimateSavings(base, p, nil); got.UnavailableReason != UnavailablePricing || got.EstimatedGrossUSD != nil || got.EstimatedNetUSD != nil {
+			t.Fatalf("EstimateSavings(%v) = %+v", bad, got)
+		}
+		if got := EstimateApplicationSavings(base, p, nil); got.UnavailableReason != UnavailablePricing || got.EstimatedGrossUSD != nil || got.EstimatedNetUSD != nil {
+			t.Fatalf("EstimateApplicationSavings(%v) = %+v", bad, got)
+		}
+	}
+	overflow := ModelPricing{CacheReadUSDPerMTok: rate(math.MaxFloat64), CacheWriteUSDPerMTok: rate(math.MaxFloat64)}
+	overflowReport := base
+	overflowReport.EstimatedTokensRemoved = math.MaxInt64
+	if got := EstimateSavings(overflowReport, overflow, nil); got.UnavailableReason != UnavailableNonFiniteEstimate || got.EstimatedGrossUSD != nil || got.EstimatedNetUSD != nil {
+		t.Fatalf("overflowing projected estimate escaped: %+v", got)
+	}
+	if got := EstimateApplicationSavings(overflowReport, overflow, nil); got.UnavailableReason != UnavailableNonFiniteEstimate || got.EstimatedGrossUSD != nil || got.EstimatedNetUSD != nil {
+		t.Fatalf("overflowing application estimate escaped: %+v", got)
 	}
 }
 
