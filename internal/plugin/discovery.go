@@ -22,6 +22,7 @@ import (
 	"github.com/torana-edge/torana-edge/internal/wasm"
 	sdk "github.com/torana-edge/torana-plugin-sdk"
 	pbv2 "github.com/torana-edge/torana-plugin-sdk/pb/v2"
+	"golang.org/x/mod/module"
 	"golang.org/x/mod/semver"
 	"google.golang.org/protobuf/proto"
 )
@@ -325,11 +326,18 @@ func compareSemver(left, right string) int {
 }
 
 // validateHostCompatibility applies optional product-version bounds only when
-// the host was built with a semantic version. Development builds identify
-// themselves with "dev" or a commit SHA, so compatibility remains governed by
-// abi_version, hooks, and permissions until Edge has releases.
+// the host was built from a release tag. Development builds identify
+// themselves with "dev", a commit SHA, or a Go pseudo-version, so compatibility
+// remains governed by abi_version, hooks, and permissions until Edge has a
+// release.
 func validateHostCompatibility(manifest PluginManifest, hostVersion string) error {
 	rawHostVersion := hostVersion
+	if module.IsPseudoVersion(canonicalSemver(rawHostVersion)) {
+		if manifest.MinimumToranaVersion != "" || manifest.MaximumToranaVersion != "" {
+			log.Printf("[plugin] %s: host version %q is a development pseudo-version; skipping minimum_torana_version/maximum_torana_version checks", manifest.Name, rawHostVersion)
+		}
+		return nil
+	}
 	hostVersion, err := parseSemver(rawHostVersion)
 	if err != nil {
 		if manifest.MinimumToranaVersion != "" || manifest.MaximumToranaVersion != "" {
