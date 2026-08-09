@@ -12,6 +12,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"runtime/debug"
 	"strconv"
 	"syscall"
 	"time"
@@ -33,10 +34,35 @@ import (
 	_ "github.com/torana-edge/torana-edge/internal/format/openai"
 )
 
-// version is injected for tagged builds by the Makefile. Untagged builds use
-// "dev" or a commit SHA and intentionally skip product-version compatibility
-// gates while continuing to enforce the plugin ABI and capability contract.
+// version is injected by release builds. `go install module@version` does not
+// run the Makefile, so init falls back to the module version embedded by the Go
+// toolchain. Keep the variable's initializer a string constant: Go's -X linker
+// flag only owns variables with that shape. Local builds retain "dev";
+// pseudo-versions remain identifiable as development builds and do not claim
+// the compatibility semantics of a tag.
 var version = "dev"
+
+func init() {
+	version = detectVersion(version)
+}
+
+func detectVersion(linked string) string {
+	if linked != "dev" {
+		return linked
+	}
+	info, ok := debug.ReadBuildInfo()
+	return versionFromBuildInfo(linked, info, ok)
+}
+
+func versionFromBuildInfo(fallback string, info *debug.BuildInfo, ok bool) string {
+	if fallback != "dev" {
+		return fallback
+	}
+	if !ok || info == nil || info.Main.Version == "" || info.Main.Version == "(devel)" {
+		return fallback
+	}
+	return info.Main.Version
+}
 
 // validateOutboundPolicy verifies the outbound enforcement inventory of the
 // pinned SDK once, as the serve path requires before it will start. Extracted

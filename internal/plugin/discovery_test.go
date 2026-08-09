@@ -384,6 +384,9 @@ func TestValidateManifestContract(t *testing.T) {
 	if err := validateHostCompatibility(invalid, "dev"); err != nil {
 		t.Fatalf("unversioned host must skip the optional bound: %v", err)
 	}
+	if err := validateHostCompatibility(invalid, "v0.0.0-20260808065220-fb5ce695e2d4"); err != nil {
+		t.Fatalf("development pseudo-version must skip the optional bound: %v", err)
+	}
 	if err := validateHostCompatibility(invalid, "98.0.0"); err == nil {
 		t.Fatal("known host below the minimum version was accepted")
 	}

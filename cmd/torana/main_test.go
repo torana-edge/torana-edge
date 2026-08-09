@@ -2,9 +2,37 @@ package main
 
 import (
 	"bytes"
+	"runtime/debug"
 	"strings"
 	"testing"
 )
+
+func TestVersionFromBuildInfo(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		fallback string
+		info     *debug.BuildInfo
+		ok       bool
+		want     string
+	}{
+		{name: "linked release wins", fallback: "v0.1.0", info: &debug.BuildInfo{Main: debug.Module{Version: "v9.9.9"}}, ok: true, want: "v0.1.0"},
+		{name: "tagged go install", fallback: "dev", info: &debug.BuildInfo{Main: debug.Module{Version: "v0.1.0"}}, ok: true, want: "v0.1.0"},
+		{name: "pseudo version is visible", fallback: "dev", info: &debug.BuildInfo{Main: debug.Module{Version: "v0.0.0-20260808065220-fb5ce695e2d4"}}, ok: true, want: "v0.0.0-20260808065220-fb5ce695e2d4"},
+		{name: "local build", fallback: "dev", info: &debug.BuildInfo{Main: debug.Module{Version: "(devel)"}}, ok: true, want: "dev"},
+		{name: "missing info", fallback: "dev", info: nil, ok: false, want: "dev"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := versionFromBuildInfo(tt.fallback, tt.info, tt.ok)
+			if got != tt.want {
+				t.Fatalf("version = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
 
 // Every environment variable Torana reads must appear in the help text.
 //
