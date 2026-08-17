@@ -1200,7 +1200,6 @@ func New(cfg Config) (*Server, error) {
 
 			req.Body = io.NopCloser(bytes.NewReader(newBody))
 			req.ContentLength = int64(len(newBody))
-			log.Printf("Proxying request to %s", req.URL.String())
 		},
 
 		ModifyResponse: func(resp *http.Response) error {
@@ -1219,7 +1218,6 @@ func New(cfg Config) (*Server, error) {
 			// reverse-translate a 4xx/5xx body that isn't a valid chat
 			// completion response. Audit/metrics plugins still observe the
 			// outcome through an observe-only hook carrying _response.
-			log.Printf("Upstream returned %d", resp.StatusCode)
 			if resp.StatusCode >= 400 {
 				ctx := resp.Request.Context()
 				rs := reqStateFrom(ctx)
