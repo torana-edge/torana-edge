@@ -11,6 +11,45 @@ duration=${TORANA_BENCH_DURATION:-10s}
 warmup=${TORANA_BENCH_WARMUP:-2s}
 proxy_port=${TORANA_BENCH_PORT:-18080}
 upstream_port=${TORANA_BENCH_UPSTREAM_PORT:-18081}
+profile=${TORANA_BENCH_PROFILE:-provider}
+case "$profile" in
+	provider)
+		default_first_byte=100ms
+		default_event_delay=10ms
+		default_events=100
+		default_response_bytes=4096
+		default_payload_bytes="4096"
+		default_nonstream_concurrency="1 8 32"
+		default_stream_concurrency="1 8"
+		default_run_stream=1
+		;;
+	saturation)
+		default_first_byte=0ms
+		default_event_delay=0ms
+		default_events=100
+		default_response_bytes=4096
+		default_payload_bytes="1024 16384 131072"
+		default_nonstream_concurrency="1 8 32 128"
+		default_stream_concurrency="1 8"
+		default_run_stream=0
+		;;
+	*)
+		echo "unknown TORANA_BENCH_PROFILE: $profile (want provider or saturation)" >&2
+		exit 2
+		;;
+esac
+first_byte=${TORANA_BENCH_FIRST_BYTE:-$default_first_byte}
+event_delay=${TORANA_BENCH_EVENT_DELAY:-$default_event_delay}
+events=${TORANA_BENCH_EVENTS:-$default_events}
+response_bytes=${TORANA_BENCH_RESPONSE_BYTES:-$default_response_bytes}
+payload_bytes=${TORANA_BENCH_PAYLOAD_BYTES:-$default_payload_bytes}
+nonstream_concurrency=${TORANA_BENCH_NONSTREAM_CONCURRENCY:-$default_nonstream_concurrency}
+stream_concurrency=${TORANA_BENCH_STREAM_CONCURRENCY:-$default_stream_concurrency}
+run_stream=${TORANA_BENCH_RUN_STREAM:-$default_run_stream}
+if [ "$run_stream" != 0 ] && [ "$run_stream" != 1 ]; then
+	echo "TORANA_BENCH_RUN_STREAM must be 0 or 1" >&2
+	exit 2
+fi
 output=${1:-"$repo_dir/benchmark-production.jsonl"}
 clock_ticks=$(getconf CLK_TCK)
 stage=$(mktemp -d)
@@ -35,7 +74,7 @@ cat >"$stage/config.json" <<EOF
 EOF
 
 "$stage/loadbench" upstream -listen "127.0.0.1:$upstream_port" \
-	-first-byte 100ms -event-delay 10ms -events 100 -response-bytes 4096 \
+	-first-byte "$first_byte" -event-delay "$event_delay" -events "$events" -response-bytes "$response_bytes" \
 	>"$stage/upstream.log" 2>&1 &
 upstream_pid=$!
 
@@ -58,28 +97,43 @@ if [ "$ready" -ne 1 ]; then
 fi
 
 : >"$output"
-"$stage/loadbench" metadata -revision "$(git rev-parse HEAD)" >>"$output"
+"$stage/loadbench" metadata -revision "$(git rev-parse HEAD)" \
+	-profile "$profile" -upstream-first-byte "$first_byte" \
+	-upstream-event-delay "$event_delay" -upstream-events "$events" \
+	-upstream-response-bytes "$response_bytes" -payload-bytes "$payload_bytes" \
+	-nonstream-concurrency "$nonstream_concurrency" \
+	-stream-concurrency "$stream_concurrency" -run-stream "$run_stream" >>"$output"
 run() {
 	"$stage/loadbench" load -duration "$duration" -warmup "$warmup" \
 		-rss-pid "$torana_pid" -clock-ticks "$clock_ticks" "$@" >>"$output"
 }
 
-for concurrency in 1 8 32; do
-	run -name "direct/nonstream/c=$concurrency" \
-		-target "http://127.0.0.1:$upstream_port/v1/chat/completions" \
-		-concurrency "$concurrency" -payload-bytes 4096
-	run -name "torana/nonstream/c=$concurrency" \
-		-target "http://127.0.0.1:$proxy_port/provider/bench/v1/chat/completions" \
-		-concurrency "$concurrency" -payload-bytes 4096
+for payload in $payload_bytes; do
+	payload_label=
+	if [ "$payload_bytes" != 4096 ]; then payload_label="/p=$payload"; fi
+	for concurrency in $nonstream_concurrency; do
+		run -name "direct/nonstream$payload_label/c=$concurrency" \
+			-target "http://127.0.0.1:$upstream_port/v1/chat/completions" \
+			-concurrency "$concurrency" -payload-bytes "$payload"
+		run -name "torana/nonstream$payload_label/c=$concurrency" \
+			-target "http://127.0.0.1:$proxy_port/provider/bench/v1/chat/completions" \
+			-concurrency "$concurrency" -payload-bytes "$payload"
+	done
 done
 
-for concurrency in 1 8; do
-	run -name "direct/stream/c=$concurrency" \
-		-target "http://127.0.0.1:$upstream_port/v1/chat/completions" \
-		-concurrency "$concurrency" -payload-bytes 4096 -stream -min-sse-events 100
-	run -name "torana/stream/c=$concurrency" \
-		-target "http://127.0.0.1:$proxy_port/provider/bench/v1/chat/completions" \
-		-concurrency "$concurrency" -payload-bytes 4096 -stream -min-sse-events 100
-done
+if [ "$run_stream" = 1 ]; then
+	for payload in $payload_bytes; do
+		payload_label=
+		if [ "$payload_bytes" != 4096 ]; then payload_label="/p=$payload"; fi
+		for concurrency in $stream_concurrency; do
+			run -name "direct/stream$payload_label/c=$concurrency" \
+				-target "http://127.0.0.1:$upstream_port/v1/chat/completions" \
+				-concurrency "$concurrency" -payload-bytes "$payload" -stream -min-sse-events "$events"
+			run -name "torana/stream$payload_label/c=$concurrency" \
+				-target "http://127.0.0.1:$proxy_port/provider/bench/v1/chat/completions" \
+				-concurrency "$concurrency" -payload-bytes "$payload" -stream -min-sse-events "$events"
+		done
+	done
+fi
 
 echo "wrote $output"

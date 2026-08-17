@@ -48,13 +48,29 @@ func main() {
 func runMetadata(args []string) error {
 	fs := flag.NewFlagSet("metadata", flag.ContinueOnError)
 	revision := fs.String("revision", "unknown", "git revision under test")
+	profile := fs.String("profile", "provider", "benchmark profile")
+	firstByte := fs.String("upstream-first-byte", "100ms", "upstream first-byte delay")
+	eventDelay := fs.String("upstream-event-delay", "10ms", "upstream SSE event delay")
+	events := fs.Int("upstream-events", 100, "upstream SSE event count")
+	responseBytes := fs.Int("upstream-response-bytes", 4096, "upstream response payload bytes")
+	payloadBytes := fs.String("payload-bytes", "4096", "space-separated request payload sizes")
+	nonstreamConcurrency := fs.String("nonstream-concurrency", "1 8 32", "space-separated non-streaming concurrency levels")
+	streamConcurrency := fs.String("stream-concurrency", "1 8", "space-separated streaming concurrency levels")
+	runStream := fs.Int("run-stream", 1, "whether the profile measures streaming rows")
 	if err := fs.Parse(args); err != nil {
 		return err
+	}
+	if *runStream != 0 && *runStream != 1 {
+		return errors.New("run-stream must be 0 or 1")
 	}
 	return json.NewEncoder(os.Stdout).Encode(map[string]any{
 		"kind": "metadata", "revision": *revision, "go_version": runtime.Version(),
 		"goos": runtime.GOOS, "goarch": runtime.GOARCH, "gomaxprocs": runtime.GOMAXPROCS(0),
-		"num_cpu": runtime.NumCPU(),
+		"num_cpu": runtime.NumCPU(), "profile": *profile,
+		"upstream_first_byte": *firstByte, "upstream_event_delay": *eventDelay,
+		"upstream_events": *events, "upstream_response_bytes": *responseBytes,
+		"payload_bytes": *payloadBytes, "nonstream_concurrency": *nonstreamConcurrency,
+		"stream_concurrency": *streamConcurrency, "run_stream": *runStream == 1,
 	})
 }
 
@@ -140,6 +156,7 @@ type loadResult struct {
 	Target            string  `json:"target"`
 	Streaming         bool    `json:"streaming"`
 	Concurrency       int     `json:"concurrency"`
+	PayloadBytes      int     `json:"payload_bytes"`
 	DurationSeconds   float64 `json:"duration_seconds"`
 	Requests          int     `json:"requests"`
 	Errors            int     `json:"errors"`
@@ -219,7 +236,7 @@ func runLoad(args []string) error {
 	}
 	sort.Slice(latencies, func(i, j int) bool { return latencies[i] < latencies[j] })
 	result := loadResult{
-		Name: *name, Target: *target, Streaming: *streaming, Concurrency: *concurrency,
+		Name: *name, Target: *target, Streaming: *streaming, Concurrency: *concurrency, PayloadBytes: *payloadBytes,
 		DurationSeconds: elapsed.Seconds(), Requests: len(latencies), Errors: failures,
 		RequestsPerSecond: float64(len(latencies)) / elapsed.Seconds(),
 		P50Millis:         millis(percentile(latencies, 0.50)), P95Millis: millis(percentile(latencies, 0.95)),
