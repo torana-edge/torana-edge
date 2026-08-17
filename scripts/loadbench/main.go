@@ -57,11 +57,15 @@ func runMetadata(args []string) error {
 	nonstreamConcurrency := fs.String("nonstream-concurrency", "1 8 32", "space-separated non-streaming concurrency levels")
 	streamConcurrency := fs.String("stream-concurrency", "1 8", "space-separated streaming concurrency levels")
 	runStream := fs.Int("run-stream", 1, "whether the profile measures streaming rows")
+	requestShape := fs.String("request-shape", "plain", "request body shape")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if *runStream != 0 && *runStream != 1 {
 		return errors.New("run-stream must be 0 or 1")
+	}
+	if err := validateRequestShape(*requestShape); err != nil {
+		return err
 	}
 	return json.NewEncoder(os.Stdout).Encode(map[string]any{
 		"kind": "metadata", "revision": *revision, "go_version": runtime.Version(),
@@ -71,6 +75,7 @@ func runMetadata(args []string) error {
 		"upstream_events": *events, "upstream_response_bytes": *responseBytes,
 		"payload_bytes": *payloadBytes, "nonstream_concurrency": *nonstreamConcurrency,
 		"stream_concurrency": *streamConcurrency, "run_stream": *runStream == 1,
+		"request_shape": *requestShape,
 	})
 }
 
@@ -157,6 +162,7 @@ type loadResult struct {
 	Streaming         bool    `json:"streaming"`
 	Concurrency       int     `json:"concurrency"`
 	PayloadBytes      int     `json:"payload_bytes"`
+	RequestShape      string  `json:"request_shape"`
 	DurationSeconds   float64 `json:"duration_seconds"`
 	Requests          int     `json:"requests"`
 	Errors            int     `json:"errors"`
@@ -183,6 +189,7 @@ func runLoad(args []string) error {
 	minEvents := fs.Int("min-sse-events", 0, "minimum data events required per successful stream")
 	allowErrors := fs.Bool("allow-errors", false, "report request errors without failing the command")
 	payloadBytes := fs.Int("payload-bytes", 4096, "user-message byte count")
+	requestShape := fs.String("request-shape", "plain", "plain or agent conversation")
 	rssPID := fs.Int("rss-pid", 0, "Linux process ID whose RSS should be sampled")
 	clockTicks := fs.Int64("clock-ticks", 100, "Linux clock ticks per second (getconf CLK_TCK)")
 	if err := fs.Parse(args); err != nil {
@@ -192,11 +199,7 @@ func runLoad(args []string) error {
 		return errors.New("target, positive duration/concurrency, and non-negative warmup/payload are required")
 	}
 
-	payload, err := json.Marshal(map[string]any{
-		"model":    "gpt-bench",
-		"messages": []any{map[string]any{"role": "user", "content": strings.Repeat("p", *payloadBytes)}},
-		"stream":   *streaming,
-	})
+	payload, err := requestPayload(*requestShape, *payloadBytes, *streaming)
 	if err != nil {
 		return err
 	}
@@ -236,7 +239,8 @@ func runLoad(args []string) error {
 	}
 	sort.Slice(latencies, func(i, j int) bool { return latencies[i] < latencies[j] })
 	result := loadResult{
-		Name: *name, Target: *target, Streaming: *streaming, Concurrency: *concurrency, PayloadBytes: *payloadBytes,
+		Name: *name, Target: *target, Streaming: *streaming, Concurrency: *concurrency,
+		PayloadBytes: *payloadBytes, RequestShape: *requestShape,
 		DurationSeconds: elapsed.Seconds(), Requests: len(latencies), Errors: failures,
 		RequestsPerSecond: float64(len(latencies)) / elapsed.Seconds(),
 		P50Millis:         millis(percentile(latencies, 0.50)), P95Millis: millis(percentile(latencies, 0.95)),
@@ -254,6 +258,62 @@ func runLoad(args []string) error {
 		return fmt.Errorf("measured phase had %d request failures: %w", failures, firstErr)
 	}
 	return nil
+}
+
+func requestPayload(shape string, payloadBytes int, streaming bool) ([]byte, error) {
+	if err := validateRequestShape(shape); err != nil {
+		return nil, err
+	}
+	content := strings.Repeat("p", payloadBytes)
+	var messages []any
+	var tools []any
+	switch shape {
+	case "plain":
+		messages = []any{map[string]any{"role": "user", "content": content}}
+	case "agent":
+		messages = []any{
+			map[string]any{"role": "system", "content": "You are a coding assistant."},
+			map[string]any{"role": "user", "content": "Inspect the parser failure."},
+			map[string]any{
+				"role": "assistant",
+				"tool_calls": []any{map[string]any{
+					"id": "call_bench", "type": "function",
+					"function": map[string]any{"name": "read_file", "arguments": `{"path":"internal/parser.go"}`},
+				}},
+			},
+			map[string]any{"role": "tool", "tool_call_id": "call_bench", "content": content},
+			map[string]any{"role": "assistant", "content": "I inspected the tool output."},
+			map[string]any{"role": "user", "content": "Continue with the fix."},
+		}
+		tools = []any{map[string]any{
+			"type": "function",
+			"function": map[string]any{
+				"name": "read_file", "description": "Read one workspace file",
+				"parameters": map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"path":     map[string]any{"type": "string"},
+						"metadata": map[string]any{"type": "object", "additionalProperties": map[string]any{"type": "string"}},
+					},
+					"required": []string{"path"},
+				},
+			},
+		}}
+	}
+	request := map[string]any{"model": "gpt-bench", "messages": messages, "stream": streaming}
+	if len(tools) > 0 {
+		request["tools"] = tools
+	}
+	return json.Marshal(request)
+}
+
+func validateRequestShape(shape string) error {
+	switch shape {
+	case "plain", "agent":
+		return nil
+	default:
+		return fmt.Errorf("unknown request shape %q (want plain or agent)", shape)
+	}
 }
 
 func loadPhase(client *http.Client, target string, payload []byte, streaming bool, concurrency int, duration time.Duration) ([]time.Duration, int, int64, error) {
