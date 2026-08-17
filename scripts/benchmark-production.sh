@@ -46,6 +46,7 @@ payload_bytes=${TORANA_BENCH_PAYLOAD_BYTES:-$default_payload_bytes}
 nonstream_concurrency=${TORANA_BENCH_NONSTREAM_CONCURRENCY:-$default_nonstream_concurrency}
 stream_concurrency=${TORANA_BENCH_STREAM_CONCURRENCY:-$default_stream_concurrency}
 run_stream=${TORANA_BENCH_RUN_STREAM:-$default_run_stream}
+request_shape=${TORANA_BENCH_REQUEST_SHAPE:-plain}
 if [ "$run_stream" != 0 ] && [ "$run_stream" != 1 ]; then
 	echo "TORANA_BENCH_RUN_STREAM must be 0 or 1" >&2
 	exit 2
@@ -102,10 +103,12 @@ fi
 	-upstream-event-delay "$event_delay" -upstream-events "$events" \
 	-upstream-response-bytes "$response_bytes" -payload-bytes "$payload_bytes" \
 	-nonstream-concurrency "$nonstream_concurrency" \
-	-stream-concurrency "$stream_concurrency" -run-stream "$run_stream" >>"$output"
+	-stream-concurrency "$stream_concurrency" -run-stream "$run_stream" \
+	-request-shape "$request_shape" >>"$output"
 run() {
 	"$stage/loadbench" load -duration "$duration" -warmup "$warmup" \
-		-rss-pid "$torana_pid" -clock-ticks "$clock_ticks" "$@" >>"$output"
+		-rss-pid "$torana_pid" -clock-ticks "$clock_ticks" \
+		-request-shape "$request_shape" "$@" >>"$output"
 }
 
 for payload in $payload_bytes; do

@@ -86,9 +86,22 @@ overridden with `TORANA_BENCH_FIRST_BYTE`, `TORANA_BENCH_EVENT_DELAY`,
 `TORANA_BENCH_PAYLOAD_BYTES`, `TORANA_BENCH_NONSTREAM_CONCURRENCY`,
 `TORANA_BENCH_STREAM_CONCURRENCY`, and `TORANA_BENCH_RUN_STREAM`.
 
+`TORANA_BENCH_REQUEST_SHAPE=agent` replaces the single user message with a
+coding-agent-shaped conversation: system/user turns, one historical tool call
+and result, a later assistant/user turn, and a map-valued tool schema. The
+configured payload size applies to the tool result. Use that shape when the
+plugins under test operate on tools or conversation history; the default
+`plain` shape remains byte-compatible with earlier runs.
+
 The first retained saturation run is in
 [the 2026-08-18 saturation report](BENCHMARK_SATURATION_RESULTS_2026-08-18.md),
 with every raw row kept alongside it.
+
+The first retained official-plugin chain run is in
+[the 2026-08-18 plugin-chain report](BENCHMARK_PLUGIN_CHAIN_RESULTS_2026-08-18.md).
+It uses the `agent` shape with `schema_translator`, `intent`,
+`keyword_compactor`, and `otel`, and includes a five-minute stability run plus
+pool-size and memory-limit comparisons.
 
 ## Plugin pipeline
 
