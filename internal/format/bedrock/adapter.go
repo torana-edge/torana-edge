@@ -19,6 +19,9 @@ func init() {
 		Name:    "bedrock",
 		Request: &Adapter{},
 		Stream:  &Stream{},
+		MatchesInference: format.PostInferencePaths(
+			"/converse", "/converse-stream", "/invoke", "/invoke-with-response-stream",
+		),
 	})
 }
 

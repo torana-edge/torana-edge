@@ -289,9 +289,10 @@ type Adapter struct{}
 
 func init() {
 	format.Register("/anthropic", format.Format{
-		Name:    "anthropic",
-		Request: &Adapter{},
-		Stream:  &StreamAdapter{},
+		Name:             "anthropic",
+		Request:          &Adapter{},
+		Stream:           &StreamAdapter{},
+		MatchesInference: format.PostInferencePaths("/messages"),
 	})
 }
 

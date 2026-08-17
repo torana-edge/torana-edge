@@ -55,7 +55,7 @@ func fixtureEnv(t *testing.T, order []string, formatName string, upstream http.H
 	client := &http.Client{Timeout: 30 * time.Second}
 
 	post := func(body string) (int, http.Header, []byte) {
-		req, _ := http.NewRequest("POST", base+"/provider/p/v1/chat/completions", strings.NewReader(body))
+		req, _ := http.NewRequest("POST", base+"/provider/p"+inferenceTestPath(formatName), strings.NewReader(body))
 		req.Header.Set("Content-Type", "application/json")
 		resp, err := client.Do(req)
 		if err != nil {

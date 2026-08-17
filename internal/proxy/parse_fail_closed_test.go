@@ -7,8 +7,8 @@ package proxy
 // independent of plugin failure_mode. The response is fully host-local
 // (Synthetic): no upstream status is recorded and no response hook runs. No
 // request hook runs either — no valid IR exists. Empty configured format and
-// empty-body passthrough remain intentional; an unknown nonempty format
-// remains a config-time error.
+// empty-body NON-INFERENCE passthrough remain intentional; an unknown nonempty
+// format remains a config-time error.
 
 import (
 	"bytes"
@@ -144,7 +144,7 @@ func parseFailE2EApprovedH(t *testing.T, format string, order []string, body str
 	t.Cleanup(func() { srv.Shutdown(context.Background()) })
 
 	client := &http.Client{Timeout: 30 * time.Second}
-	req, _ := http.NewRequest("POST", "http://"+ln.Addr().String()+"/provider/p/v1/messages", strings.NewReader(body))
+	req, _ := http.NewRequest("POST", "http://"+ln.Addr().String()+"/provider/p"+inferenceTestPath(format), strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := client.Do(req)
 	if err != nil {
@@ -386,16 +386,16 @@ func TestParseFailClosedStringSystemAccepted(t *testing.T) {
 	}
 }
 
-// TestParseFailClosedEmptyBodyPassthrough: an empty body on a configured
-// format (e.g. GET-style model-list requests) stays an intentional
-// transparent pass-through.
-func TestParseFailClosedEmptyBodyPassthrough(t *testing.T) {
+// TestParseFailClosedEmptyInferenceBodyRejected: endpoint ownership is
+// independent of body length. An empty body sent to a known inference endpoint
+// is malformed provider input, not an auxiliary request to pass through.
+func TestParseFailClosedEmptyInferenceBodyRejected(t *testing.T) {
 	status, _, hits, _ := parseFailE2E(t, "anthropic", nil, "")
-	if status != http.StatusOK {
-		t.Fatalf("status = %d, want 200 (empty body must pass through)", status)
+	if status != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 (empty inference body must fail closed)", status)
 	}
-	if n := atomic.LoadInt32(hits); n != 1 {
-		t.Fatalf("upstream calls = %d, want 1", n)
+	if n := atomic.LoadInt32(hits); n != 0 {
+		t.Fatalf("upstream calls = %d, want 0", n)
 	}
 }
 
@@ -796,7 +796,7 @@ func parseFailE2EWithValidator(t *testing.T, format string, order []string, body
 	t.Cleanup(func() { srv.Shutdown(context.Background()) })
 
 	client := &http.Client{Timeout: 30 * time.Second}
-	req, _ := http.NewRequest("POST", "http://"+ln.Addr().String()+"/provider/p/v1/messages", strings.NewReader(body))
+	req, _ := http.NewRequest("POST", "http://"+ln.Addr().String()+"/provider/p"+inferenceTestPath(format), strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := client.Do(req)
 	if err != nil {

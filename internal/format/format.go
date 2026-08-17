@@ -7,6 +7,8 @@ package format
 import (
 	"context"
 	"io"
+	"net/http"
+	"strings"
 
 	"github.com/torana-edge/torana-edge/internal/engine"
 )
@@ -31,7 +33,37 @@ type StreamAdapter interface {
 
 // Format bundles both adapters under a name.
 type Format struct {
-	Name    string
-	Request RequestAdapter
-	Stream  StreamAdapter
+	Name             string
+	Request          RequestAdapter
+	Stream           StreamAdapter
+	MatchesInference func(method, path string) bool
+}
+
+// PostInferencePaths returns a matcher for POST inference endpoints identified
+// by their complete path suffix. Providers commonly prepend deployment or API
+// version segments, so matching the stable endpoint suffix preserves those
+// layouts without treating a substring in the middle of an auxiliary path as
+// inference. Query strings are not part of URL.Path and are intentionally
+// irrelevant to endpoint classification.
+func PostInferencePaths(suffixes ...string) func(method, path string) bool {
+	owned := append([]string(nil), suffixes...)
+	return func(method, path string) bool {
+		if method != http.MethodPost {
+			return false
+		}
+		path = strings.TrimSuffix(path, "/")
+		for _, suffix := range owned {
+			if suffix != "" && strings.HasSuffix(path, suffix) {
+				return true
+			}
+		}
+		return false
+	}
+}
+
+// HandlesInference reports whether this format owns the request as an
+// inference operation. Everything else must remain ordinary reverse-proxy
+// traffic and must not be decoded into Torana's IR or sent through plugins.
+func (f *Format) HandlesInference(method, path string) bool {
+	return f != nil && f.MatchesInference != nil && f.MatchesInference(method, path)
 }

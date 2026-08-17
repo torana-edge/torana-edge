@@ -845,8 +845,11 @@ func New(cfg Config) (*Server, error) {
 			req.URL.Path = joinURLPath(target.Path, strippedPath)
 			req.URL.RawPath = ""
 
-			if fmt == nil || len(body) == 0 {
-				// No format adapter, or empty body (e.g. GET /models). Just forward.
+			if fmt == nil || !fmt.HandlesInference(req.Method, strippedPath) {
+				// Only explicitly recognized inference endpoints enter the IR and
+				// plugin pipeline. Provider account, status, telemetry, model-list,
+				// and unknown auxiliary endpoints remain ordinary reverse-proxy
+				// traffic even when they carry a non-empty JSON body.
 				req.Body = io.NopCloser(bytes.NewReader(body))
 				req.ContentLength = int64(len(body))
 				return
