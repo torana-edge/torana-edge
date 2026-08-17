@@ -3,10 +3,17 @@ package plugin
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/torana-edge/torana-edge/internal/engine"
+	"github.com/torana-edge/torana-edge/internal/format"
 	"github.com/torana-edge/torana-edge/internal/wasm"
+
+	_ "github.com/torana-edge/torana-edge/internal/format/anthropic"
+	_ "github.com/torana-edge/torana-edge/internal/format/bedrock"
+	_ "github.com/torana-edge/torana-edge/internal/format/gemini"
+	_ "github.com/torana-edge/torana-edge/internal/format/openai"
 )
 
 // Prompt-cache compliance harness.
@@ -191,5 +198,93 @@ func TestCacheControlSurvivesPluginRoundTrip(t *testing.T) {
 	}
 	if !marked {
 		t.Errorf("tool def cache_control stripped by plugin round-trip: %+v", out.Tools)
+	}
+}
+
+// TestProviderCacheFactsSurviveRealWASMToFinalWire closes the gap between the
+// format-only round trips and the canonical plugin compliance test. A real
+// mutating WASM guest changes message/tool content, after which each provider
+// adapter must still emit its provider-owned cache facts on the final wire.
+func TestProviderCacheFactsSurviveRealWASMToFinalWire(t *testing.T) {
+	requireWASM(t, fixturesDir+"/test-mutator/plugin.wasm")
+
+	ctx := context.Background()
+	runtime := wasm.NewRuntime(ctx)
+	defer runtime.Close()
+	pipeline, err := NewPipeline(runtime, PluginConfig{
+		Dir:             fixturesDir,
+		Order:           []string{"test-mutator"},
+		AllowUnapproved: true,
+	})
+	if err != nil {
+		t.Fatalf("NewPipeline: %v", err)
+	}
+	type wireFact struct {
+		text  string
+		count int
+	}
+
+	rows := []struct {
+		name      string
+		format    string
+		request   string
+		wireFacts []wireFact
+	}{
+		{
+			name: "anthropic ordered breakpoints", format: "anthropic",
+			request:   `{"model":"claude","max_tokens":8,"system":[{"type":"text","text":"sys","cache_control":{"type":"ephemeral"}}],"messages":[{"role":"user","content":[{"type":"text","text":"hi","cache_control":{"type":"ephemeral","ttl":"1h"}}]}],"tools":[{"name":"read","description":"","input_schema":{},"cache_control":{"type":"ephemeral"}}]}`,
+			wireFacts: []wireFact{{`"cache_control"`, 3}, {`"ttl":"1h"`, 1}, {`"content":[{"type":"text","text":"hi [seen by test-mutator]"`, 1}},
+		},
+		{
+			name: "bedrock positional breakpoints", format: "bedrock",
+			request:   `{"modelId":"m","system":[{"text":"sys"},{"cachePoint":{"type":"default"}}],"messages":[{"role":"user","content":[{"text":"hi"},{"cachePoint":{"type":"default"}}]}],"toolConfig":{"tools":[{"toolSpec":{"name":"read","description":"","inputSchema":{"json":{}}}},{"cachePoint":{"type":"default"}}]}}`,
+			wireFacts: []wireFact{{`"cachePoint":{"type":"default"}`, 3}, {`"text":"hi [seen by test-mutator]"`, 1}},
+		},
+		{
+			name: "openai automatic cache controls", format: "openai",
+			request:   `{"model":"gpt","messages":[{"role":"user","content":"hi"}],"prompt_cache_key":"session","prompt_cache_retention":"24h"}`,
+			wireFacts: []wireFact{{`"prompt_cache_key":"session"`, 1}, {`"prompt_cache_retention":"24h"`, 1}, {`"content":"hi [seen by test-mutator]"`, 1}},
+		},
+		{
+			name: "openai responses automatic cache controls", format: "openai",
+			request:   `{"model":"gpt","input":[{"role":"user","content":"hi"}],"prompt_cache_key":"session","prompt_cache_retention":"24h"}`,
+			wireFacts: []wireFact{{`"prompt_cache_key":"session"`, 1}, {`"prompt_cache_retention":"24h"`, 1}, {`"content":"hi [seen by test-mutator]"`, 1}},
+		},
+		{
+			name: "gemini external cache reference", format: "gemini",
+			request:   `{"cachedContent":"cachedContents/abc","contents":[{"role":"user","parts":[{"text":"hi"}]}]}`,
+			wireFacts: []wireFact{{`"cachedContent":"cachedContents/abc"`, 1}, {`"text":"hi [seen by test-mutator]"`, 1}},
+		},
+		{
+			name: "code assist external cache reference", format: "gemini-codeassist",
+			request:   `{"model":"gemini","request":{"cachedContent":"cachedContents/abc","contents":[{"role":"user","parts":[{"text":"hi"}]}]}}`,
+			wireFacts: []wireFact{{`"cachedContent":"cachedContents/abc"`, 1}, {`"text":"hi [seen by test-mutator]"`, 1}},
+		},
+	}
+
+	for i, row := range rows {
+		t.Run(row.name, func(t *testing.T) {
+			f := format.Lookup(row.format)
+			if f == nil {
+				t.Fatalf("format %q is not registered", row.format)
+			}
+			in, err := f.Request.Unmarshal([]byte(row.request))
+			if err != nil {
+				t.Fatalf("Unmarshal: %v", err)
+			}
+			out, err := pipeline.RunBeforeRequest(ctx, uint64(i+1), in, nil)
+			if err != nil {
+				t.Fatalf("RunBeforeRequest: %v", err)
+			}
+			wire, err := f.Request.Marshal(out)
+			if err != nil {
+				t.Fatalf("Marshal: %v", err)
+			}
+			for _, fact := range row.wireFacts {
+				if got := strings.Count(string(wire), fact.text); got != fact.count {
+					t.Errorf("final wire occurrence count for %s = %d, want %d: %s", fact.text, got, fact.count, wire)
+				}
+			}
+		})
 	}
 }

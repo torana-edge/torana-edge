@@ -11,25 +11,46 @@ import (
 // TestPromptCacheKeyPassthrough: OpenAI's caching is automatic, but the
 // optional prompt_cache_key routing hint must survive the IR round-trip
 // (unparsed top-level field → ProviderExtensions).
-func TestPromptCacheKeyPassthrough(t *testing.T) {
+func TestPromptCacheControlsPassthrough(t *testing.T) {
 	adapter := &Adapter{}
-	input := `{
-		"model": "gpt-4o",
-		"prompt_cache_key": "session-42",
-		"messages": [{"role": "user", "content": "hi"}]
-	}`
-	chat, err := adapter.Unmarshal([]byte(input))
-	if err != nil {
-		t.Fatalf("unmarshal: %v", err)
+	rows := []struct {
+		name  string
+		input string
+	}{
+		{"chat completions", `{
+			"model": "gpt-4o",
+			"prompt_cache_key": "session-42",
+			"prompt_cache_retention": "24h",
+			"messages": [{"role": "user", "content": "hi"}]
+		}`},
+		{"responses", `{
+			"model": "gpt-4o",
+			"prompt_cache_key": "session-42",
+			"prompt_cache_retention": "24h",
+			"input": [{"role": "user", "content": "hi"}]
+		}`},
 	}
-	out, err := adapter.Marshal(chat)
-	if err != nil {
-		t.Fatalf("marshal: %v", err)
-	}
-	var m map[string]any
-	json.Unmarshal(out, &m)
-	if m["prompt_cache_key"] != "session-42" {
-		t.Errorf("prompt_cache_key dropped: %s", out)
+	for _, row := range rows {
+		t.Run(row.name, func(t *testing.T) {
+			chat, err := adapter.Unmarshal([]byte(row.input))
+			if err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+			out, err := adapter.Marshal(chat)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			var m map[string]any
+			if err := json.Unmarshal(out, &m); err != nil {
+				t.Fatalf("decode output: %v", err)
+			}
+			if m["prompt_cache_key"] != "session-42" {
+				t.Errorf("prompt_cache_key dropped: %s", out)
+			}
+			if m["prompt_cache_retention"] != "24h" {
+				t.Errorf("prompt_cache_retention dropped: %s", out)
+			}
+		})
 	}
 }
 

@@ -1,8 +1,9 @@
 # Prompt caching
 
-Torana can see conversations and knows your configured prices, but it cannot see
-how long a provider keeps a cached prefix or whether reading one restarts the
-clock. Neither fact appears on the wire. You declare them once per provider, and
+Torana can see conversations, preserve provider cache fields, and use your
+configured prices. It does not infer the economic contract behind those fields:
+how long a provider keeps a prefix, whether a read restarts that lifetime, and
+what the read or write costs. You declare those facts once per provider, and
 anything that would spend money on the cache reads them.
 
 This is configuration rather than a built-in table on purpose. A provider that
@@ -43,7 +44,7 @@ by the same code path as Anthropic — nothing branches on a provider name.
 | `tiers` | The cache lifetimes this provider sells. Most offer one or none. |
 | `ttl_seconds` | How long an entry survives without being read. |
 | `write_multiplier` | Cost of writing this tier relative to the model's base input rate. A multiplier because it holds across models while the base rate does not. |
-| `marker` | The provider-specific breakpoint value that selects this tier. Stored and placed verbatim; Torana never interprets it. |
+| `marker` | The provider-specific JSON breakpoint value that selects this tier. Torana preserves its meaning and never invents provider fields; adapters may deterministically canonicalize object-member order at the input boundary. |
 | `warm_interval_seconds` | Optional. How often to send a refresh. Defaults to 80% of the shortest tier's TTL. |
 
 Omitting `cache` entirely is valid and means "unknown". Under unknown semantics,
@@ -54,16 +55,35 @@ rule the compactor follows when pricing is missing.
 ships no built-in rates, and a stale `write_multiplier` will produce confidently
 wrong arithmetic.
 
-## Which providers this applies to
+## Provider support is not one boolean
 
-Warming needs a lifetime you can refresh. That is not universal:
+Torana distinguishes three separate capabilities: preserving a provider cache
+field, observing cache usage, and actively changing or refreshing a breakpoint.
+Support for either of the first two does not imply the third.
 
-- **Anthropic** sells explicit breakpoints with a 5-minute TTL that reads refresh,
-  plus a 1-hour tier. Set `refresh_on_read: true`.
-- **Gemini** offers explicit context caching with a TTL you control.
-- **OpenAI and DeepSeek** use automatic prefix caching. There is no TTL you own
-  and nothing a request can refresh. Set `refresh_on_read: false`, or leave
-  `cache` unset. A periodic request against these providers is pure cost.
+| Provider format | Native behavior | What Torana does | Tier selector / warmer |
+|---|---|---|---|
+| **Anthropic Messages** | Explicit `cache_control` breakpoints; a 5-minute default and a 1-hour tier | Preserves ordered markers and observes cache creation/read tokens | Supported when configured. Reads refresh the default lifetime, so `refresh_on_read: true` is appropriate. |
+| **Amazon Bedrock Converse** | Explicit `cachePoint` elements on supported models and request arms | Preserves ordered markers and observes cache read/write tokens | Supported only when the configured model exposes refreshable inference-request breakpoints. |
+| **OpenAI Chat/Responses** | Automatic prefix caching, with optional `prompt_cache_key` and, on eligible models, `prompt_cache_retention` such as `24h` | Preserves these provider fields and observes cached tokens; never chooses retention for you | Not supported. A periodic inference request is not Torana-owned TTL management. |
+| **DeepSeek (OpenAI-compatible)** | Automatic disk prefix caching with hit/miss usage | Preserves compatible provider fields and observes hit tokens | Not supported. There is no Torana-managed breakpoint to select or refresh. |
+| **Gemini / Code Assist** | Implicit caching is automatic. Explicit caching creates a separate `cachedContents` resource with its own TTL, then generation requests reference it with `cachedContent`. | Preserves the reference and observes cached-content tokens; does not create or PATCH the resource | Not supported. Sending `generateContent` does not perform the cache resource's TTL update operation. |
+
+This matrix is about wire semantics, not provider branding. A compatible gateway
+may implement different economics. Configure it only after verifying that its
+inference-request marker really is refreshable by a read.
+
+Current provider references:
+
+- [Anthropic prompt caching](https://docs.anthropic.com/en/docs/build-with-claude/prompt-caching)
+- [Amazon Bedrock prompt caching](https://docs.aws.amazon.com/bedrock/latest/userguide/prompt-caching.html)
+- [OpenAI prompt caching](https://platform.openai.com/docs/guides/prompt-caching)
+- [DeepSeek context caching](https://api-docs.deepseek.com/guides/kv_cache)
+- [Gemini context caching](https://ai.google.dev/gemini-api/docs/caching)
+
+OpenAI extended retention can have different data-retention characteristics
+from in-memory caching. Treat `prompt_cache_retention` as an explicit provider
+choice and review the provider's current data controls before enabling it.
 
 ## The arithmetic that limits warming
 
@@ -127,16 +147,20 @@ lose the short tier, switches that conversation to the longer one.
 
 `auto` decides per conversation; `long` and `short` force it; `off` disables it.
 
-It needs no budget and sends no requests — it only changes a marker on requests
-you were already making. The decision is made once per cached prefix and never
+It needs no budget and sends no requests — it only changes an existing,
+representable cache marker on requests you were already making. If the request
+has no explicit breakpoint carrier, it declines without reading state or
+changing the request. The decision is made once per cached prefix and never
 revisited, because changing the marker changes the prefix and would invalidate
 the entry it is protecting.
 
 ### cache_warmer
 
-Refreshes a chosen conversation's cache so an idle gap does not cost you a
-rebuild. Requires `plugins.runtime.tick_interval_seconds` and an egress budget
-(see [Running plugins](PLUGINS.md)).
+Refreshes a chosen conversation's explicit, refresh-on-read breakpoint so an
+idle gap does not cost you a rebuild. It is not a generic request repeater and
+does not manage external cache resources such as Gemini `cachedContents`.
+Requires `plugins.runtime.tick_interval_seconds` and an egress budget (see
+[Running plugins](PLUGINS.md)).
 
 ```json
 {
@@ -171,7 +195,7 @@ torana conversations
 
 ID            LAST ACTIVE  TURNS  MODEL              CACHE
 a3f9c2e1      2m ago       12     claude-sonnet-4-5  118k read
-7b1e04aa      41m ago      3      gemini-2.5-pro     62k written
+7b1e04aa      41m ago      3      gemini-2.5-pro     62k read
 ```
 
 **Read** tokens mean the prefix was served from cache. **Written** tokens mean it

@@ -152,7 +152,7 @@ Once traffic has flowed, `torana conversations` lists what the proxy has seen:
 ```
 ID            LAST ACTIVE  TURNS  MODEL              CACHE
 a3f9c2e1      2m ago       12     claude-sonnet-4-5  118k cached
-7b1e04aa      41m ago      3      gemini-2.5-pro     62k written
+7b1e04aa      41m ago      3      gemini-2.5-pro     62k read
 ```
 
 The CACHE column is the provider's own accounting, and it is the quickest way to
