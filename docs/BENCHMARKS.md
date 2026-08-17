@@ -62,6 +62,11 @@ idle Linux machine (`/proc` supplies RSS), retain every raw JSONL row, and state
 the machine and configuration beside any summary. Zero request errors and the
 stream-integrity checks are validity requirements, not performance results.
 
+The current post-rewrite run and its raw rows are in
+[the 2026-08-18 report](BENCHMARK_PRODUCTION_RESULTS_2026-08-18.md). Keep older
+runs as historical comparisons; do not splice their best rows into a newer
+result.
+
 ## Plugin pipeline
 
 `internal/plugin/bench_test.go`. Run them with:
