@@ -313,3 +313,6 @@ limit after JSON framing. Treat RSS as whole-process evidence: one Torana
 process is reused across rows, so retained heap from an earlier row can raise a
 later row's starting point. Use separate invocations when an experiment needs a
 fresh process per row.
+
+The retained first run is documented in
+[`BENCHMARK_LARGE_REQUEST_RESULTS_2026-08-18.md`](BENCHMARK_LARGE_REQUEST_RESULTS_2026-08-18.md).
