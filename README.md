@@ -111,7 +111,7 @@ The inference boundary is explicit and method-sensitive:
 |---|---|
 | `openai` | `/chat/completions`, `/responses` |
 | `anthropic` | `/messages` |
-| `bedrock` | `/converse`, `/converse-stream`, `/invoke`, `/invoke-with-response-stream` |
+| `bedrock` | `/converse`, `/converse-stream` |
 | `gemini`, `gemini-codeassist` | `:generateContent`, `:streamGenerateContent` |
 
 Version, deployment, and model path prefixes may precede those suffixes. Other

@@ -44,11 +44,13 @@ func TestInferenceEndpointClassification(t *testing.T) {
 
 		{"bedrock", http.MethodPost, "/model/claude/converse", true},
 		{"bedrock", http.MethodPost, "/model/claude/converse-stream", true},
-		{"bedrock", http.MethodPost, "/model/claude/invoke", true},
-		{"bedrock", http.MethodPost, "/model/claude/invoke-with-response-stream", true},
+		// Invoke accepts model-specific native bodies rather than the Bedrock
+		// Converse wire that this adapter owns, so it must remain pass-through.
+		{"bedrock", http.MethodPost, "/model/claude/invoke", false},
+		{"bedrock", http.MethodPost, "/model/claude/invoke-with-response-stream", false},
 		{"bedrock", http.MethodGet, "/model/claude/converse", false},
 		{"bedrock", http.MethodPost, "/foundation-models", false},
-		{"bedrock", http.MethodPost, "/status/model/x/invoke/detail", false},
+		{"bedrock", http.MethodPost, "/status/model/x/converse/detail", false},
 	}
 
 	for _, row := range rows {
