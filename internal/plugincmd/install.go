@@ -222,9 +222,11 @@ func fetch(src source, stdout, stderr io.Writer) (string, func(), error) {
 	return dir, cleanup, nil
 }
 
-// copyTree recursively copies a bounded plugin source tree. Nested Go packages
-// and embedded assets are ordinary plugin inputs; symlinks and special files
-// are rejected so a hostile repository cannot escape the source root.
+// copyTree recursively copies a bounded plugin source tree. Nested Go/Rust
+// packages and embedded assets are ordinary plugin inputs; symlinks and special
+// files are rejected so a hostile repository cannot escape the source root.
+// Toolchain output is never source and can exceed the entire staging budget, so
+// top-level Go/Rust build directories are omitted from local installs.
 func copyTree(src, dst string) error {
 	files, bytesCopied := 0, int64(0)
 	return filepath.WalkDir(src, func(path string, entry os.DirEntry, walkErr error) error {
@@ -237,6 +239,9 @@ func copyTree(src, dst string) error {
 		}
 		if rel == "." {
 			return nil
+		}
+		if entry.IsDir() && filepath.Dir(rel) == "." && (entry.Name() == ".git" || entry.Name() == "target" || entry.Name() == ".torana-cargo-target") {
+			return filepath.SkipDir
 		}
 		if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 			return fmt.Errorf("source path escapes root: %s", path)
@@ -370,27 +375,25 @@ func installPlugin(args []string, stdout, stderr io.Writer) error {
 		}
 
 		fmt.Fprintf(stdout, "Building %s from source\n", src.name)
-		// Plugin modules ship go.mod without go.sum, so a fresh checkout has
-		// nothing to verify against. Resolve first, then build.
-		tidy := exec.Command("go", "mod", "tidy")
-		tidy.Dir = stage
-		tidy.Env = localPluginBuildEnv()
-		tidy.Stderr = stderr
-		if err := tidy.Run(); err != nil {
-			cleanup()
-			_ = os.RemoveAll(stage)
-			return fmt.Errorf("resolve dependencies for %s: %w", src.name, err)
-		}
 		wasm := filepath.Join(stage, "plugin.wasm")
-		build := exec.Command("go", "build", "-trimpath", "-buildmode=c-shared", "-buildvcs=false", "-o", wasm, ".")
-		build.Dir = stage
-		build.Env = localPluginBuildEnv("GOOS=wasip1", "GOARCH=wasm")
-		build.Stderr = stderr
-		if err := build.Run(); err != nil {
+		language, err := detectPluginLanguage(stage)
+		if err != nil {
 			cleanup()
 			_ = os.RemoveAll(stage)
-			return fmt.Errorf("build %s: %w (plugins are compiled locally, never downloaded prebuilt, so a Go toolchain is required)", src.name, err)
+			return fmt.Errorf("build %s: %w", src.name, err)
 		}
+		if err := validateSourceBuildPolicy(src, language); err != nil {
+			cleanup()
+			_ = os.RemoveAll(stage)
+			return fmt.Errorf("build %s: %w", src.name, err)
+		}
+		language, err = buildPluginSource(stage, wasm, true, io.Discard, stderr)
+		if err != nil {
+			cleanup()
+			_ = os.RemoveAll(stage)
+			return fmt.Errorf("build %s: %w", src.name, err)
+		}
+		fmt.Fprintf(stdout, "Built %s plugin locally\n", language)
 		srcDir = stage
 		stageCleanup := func() { _ = os.RemoveAll(stage) }
 		defer stageCleanup()
@@ -444,6 +447,22 @@ func installPlugin(args []string, stdout, stderr io.Writer) error {
 	_, _ = fmt.Fprintln(stdout, "Torana never loads a plugin you have not approved. Open the control plane")
 	_, _ = fmt.Fprintln(stdout, "at http://127.0.0.1:8080/_torana/, review what each one requests, and approve")
 	_, _ = fmt.Fprintln(stdout, "its digest. Approval is bound to that digest — rebuild it and you approve again.")
+	return nil
+}
+
+func validateSourceBuildPolicy(src source, language pluginLanguage) error {
+	if language == pluginRust && src.local == "" {
+		return errors.New("remote Rust plugins may contain native Cargo build scripts; clone and review the source, then install its local path")
+	}
+	if language == pluginRust {
+		hasLock, err := regularFileExists(filepath.Join(src.local, "Cargo.lock"))
+		if err != nil {
+			return err
+		}
+		if !hasLock {
+			return errors.New("local Rust plugin needs a reviewed Cargo.lock; run `cargo generate-lockfile`, review it, then install again")
+		}
+	}
 	return nil
 }
 

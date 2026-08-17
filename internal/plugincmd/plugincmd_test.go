@@ -37,7 +37,7 @@ func TestInitCreatesStandaloneSDKPlugin(t *testing.T) {
 	}
 	if !strings.Contains(string(manifest), `"schema_version": 1`) ||
 		!strings.Contains(string(manifest), `"failure_mode": "pass"`) {
-		t.Fatalf("v1 manifest fields missing:\n%s", manifest)
+		t.Fatalf("manifest schema/failure fields missing:\n%s", manifest)
 	}
 }
 

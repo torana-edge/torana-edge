@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 )
 
@@ -56,6 +55,8 @@ func Usage(w io.Writer) {
 	_, _ = fmt.Fprintln(w, "")
 	_, _ = fmt.Fprintln(w, "Plugins are compiled locally from source, never downloaded prebuilt,")
 	_, _ = fmt.Fprintln(w, "and are not loaded until you approve their digest in the control plane.")
+	_, _ = fmt.Fprintln(w, "Remote Rust sources must be cloned and reviewed before installing a local path,")
+	_, _ = fmt.Fprintln(w, "because Cargo build scripts execute native code before digest approval.")
 }
 
 // ScaffoldSDKVersion is the SDK release `torana plugin new` writes into a new
@@ -185,23 +186,32 @@ func buildPlugin(args []string, stdout, stderr io.Writer) error {
 	if err != nil {
 		return fmt.Errorf("resolve output: %w", err)
 	}
-	// Lint before compiling. `build` used to validate nothing at all, so the
+	language, err := detectPluginLanguage(absDir)
+	if err != nil {
+		return err
+	}
+	// Lint Go source before compiling. `build` used to validate nothing at all, so the
 	// first check on a manifest happened at install — or, for a hook declared
 	// with no handler, never. Reporting a WASM build as successful when the
 	// bundle cannot load, or loads and does nothing, is the wrong answer to
 	// give an author.
-	if findings, err := lintDir(absDir); err == nil {
-		var failed bool
-		for _, f := range findings {
-			if f.sev == sevError {
-				failed = true
-				_, _ = fmt.Fprintf(stderr, "error: %s\n", f.msg)
-			} else {
-				_, _ = fmt.Fprintf(stderr, "warning: %s\n", f.msg)
+	// Rust has an ABI-v2 SDK and the installed bundle receives the same host
+	// validation, but the Go AST capability-attribution linter does not pretend
+	// it can understand Rust source.
+	if language == pluginGo {
+		if findings, lintErr := lintDir(absDir); lintErr == nil {
+			var failed bool
+			for _, f := range findings {
+				if f.sev == sevError {
+					failed = true
+					_, _ = fmt.Fprintf(stderr, "error: %s\n", f.msg)
+				} else {
+					_, _ = fmt.Fprintf(stderr, "warning: %s\n", f.msg)
+				}
 			}
-		}
-		if failed {
-			return errors.New("plugin has lint errors — fix them, or run 'torana plugin lint' for detail")
+			if failed {
+				return errors.New("plugin has lint errors — fix them, or run 'torana plugin lint' for detail")
+			}
 		}
 	}
 
@@ -214,20 +224,8 @@ func buildPlugin(args []string, stdout, stderr io.Writer) error {
 	if err := copyTree(absDir, stage); err != nil {
 		return fmt.Errorf("stage plugin source: %w", err)
 	}
-	tidy := exec.Command("go", "mod", "tidy")
-	tidy.Dir = stage
-	tidy.Stdout = stdout
-	tidy.Stderr = stderr
-	if err := tidy.Run(); err != nil {
-		return fmt.Errorf("resolve plugin dependencies: %w", err)
-	}
-	cmd := exec.Command("go", "build", "-trimpath", "-buildmode=c-shared", "-buildvcs=false", "-o", absOut, ".")
-	cmd.Dir = stage
-	cmd.Env = append(os.Environ(), "GOOS=wasip1", "GOARCH=wasm")
-	cmd.Stdout = stdout
-	cmd.Stderr = stderr
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("build plugin: %w", err)
+	if _, err := buildPluginSource(stage, absOut, false, stdout, stderr); err != nil {
+		return err
 	}
 	fmt.Fprintf(stdout, "Built %s\n", absOut)
 	return nil
