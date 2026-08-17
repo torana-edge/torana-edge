@@ -16,9 +16,10 @@ import (
 
 func init() {
 	format.Register("/openai", format.Format{
-		Name:    "openai",
-		Request: &Adapter{},
-		Stream:  &StreamAdapter{},
+		Name:             "openai",
+		Request:          &Adapter{},
+		Stream:           &StreamAdapter{},
+		MatchesInference: format.PostInferencePaths("/chat/completions", "/responses"),
 	})
 }
 

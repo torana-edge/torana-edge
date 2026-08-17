@@ -85,8 +85,8 @@ func TestStreamEnforcementTerminalAbortsClientBody(t *testing.T) {
 	go srv.Serve(ln)
 	defer srv.Shutdown(context.Background())
 
-	resp, err := http.Post("http://"+ln.Addr().String()+"/provider/gem/v1/chat/completions",
-		"application/json", strings.NewReader(`{"model":"gemini-x","stream":true,"messages":[{"role":"user","content":"hi"}]}`))
+	resp, err := http.Post("http://"+ln.Addr().String()+"/provider/gem/v1beta/models/gemini-x:streamGenerateContent",
+		"application/json", strings.NewReader(`{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}`))
 	if err != nil {
 		t.Fatalf("post: %v", err)
 	}
@@ -131,8 +131,8 @@ func TestStreamEnforcementTerminalAbortsClientBody(t *testing.T) {
 	}
 
 	// The server survives the abort unwind.
-	probe, err := http.Post("http://"+ln.Addr().String()+"/provider/gem/v1/chat/completions",
-		"application/json", strings.NewReader(`{"model":"gemini-x","messages":[{"role":"user","content":"again"}]}`))
+	probe, err := http.Post("http://"+ln.Addr().String()+"/provider/gem/v1beta/models/gemini-x:generateContent",
+		"application/json", strings.NewReader(`{"contents":[{"role":"user","parts":[{"text":"again"}]}]}`))
 	if err != nil {
 		t.Fatalf("server did not survive the abort: %v", err)
 	}
@@ -199,8 +199,8 @@ func TestStreamEnforcementValidSignedStreamCompletes(t *testing.T) {
 	go srv.Serve(ln)
 	defer srv.Shutdown(context.Background())
 
-	resp, err := http.Post("http://"+ln.Addr().String()+"/provider/gem/v1/chat/completions",
-		"application/json", strings.NewReader(`{"model":"gemini-x","stream":true,"messages":[{"role":"user","content":"hi"}]}`))
+	resp, err := http.Post("http://"+ln.Addr().String()+"/provider/gem/v1beta/models/gemini-x:streamGenerateContent",
+		"application/json", strings.NewReader(`{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}`))
 	if err != nil {
 		t.Fatalf("post: %v", err)
 	}

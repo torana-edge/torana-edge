@@ -484,7 +484,7 @@ func TestHostErrorDiscardsQueuedReportNonVacuous(t *testing.T) {
 			content = `{"role":"user","content":"redactme"}`
 		}
 		body := `{"model":"` + model + `","messages":[` + content + `]}`
-		req, _ := http.NewRequest("POST", "http://"+ln.Addr().String()+"/provider/p/v1/messages", strings.NewReader(body))
+		req, _ := http.NewRequest("POST", "http://"+ln.Addr().String()+"/provider/p"+inferenceTestPath("openai"), strings.NewReader(body))
 		req.Header.Set("Content-Type", "application/json")
 		resp, err := client.Do(req)
 		if err != nil {
@@ -637,7 +637,7 @@ func TestHostErrorReplacesRouteVerdict(t *testing.T) {
 
 	body := `{"model":"m","contents":[{"role":"user","parts":[{"text":"routemodel"}]},{"role":"user","parts":[{"functionResponse":{"name":"read","response":{"output":"x"},"id":"c1"}}]}]}`
 	client := &http.Client{Timeout: 30 * time.Second}
-	req, _ := http.NewRequest("POST", "http://"+ln.Addr().String()+"/provider/main/v1/messages", strings.NewReader(body))
+	req, _ := http.NewRequest("POST", "http://"+ln.Addr().String()+"/provider/main"+inferenceTestPath("gemini"), strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := client.Do(req)
 	if err != nil {

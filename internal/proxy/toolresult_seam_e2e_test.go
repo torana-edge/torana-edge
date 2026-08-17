@@ -190,7 +190,7 @@ func TestToolResultSeamRealHookE2E(t *testing.T) {
 
 		body := `{"model":"` + model + `","request":{"contents":[{"role":"user","parts":[{"functionResponse":{"name":"read","response":{"output":"before"},"id":"c1"},"partMetadata":{"custom":{"b":1,"a":2}},"thoughtSignature":"sig-token"}]},{"role":"user","parts":[{"text":"sibling-text","partMetadata":{"s":"1"}}]}]}}`
 		client := &http.Client{Timeout: 30 * time.Second}
-		req, _ := http.NewRequest("POST", "http://"+ln.Addr().String()+"/provider/p/v1/messages", strings.NewReader(body))
+		req, _ := http.NewRequest("POST", "http://"+ln.Addr().String()+"/provider/p/v1internal:generateContent", strings.NewReader(body))
 		req.Header.Set("Content-Type", "application/json")
 		resp, err := client.Do(req)
 		if err != nil {

@@ -86,10 +86,11 @@ ABI-v2 Go and Rust SDKs, examples, conformance guests, and authoring guides.
 ## How It Works
 
 1. **Path-based routing** — Requests arrive at `/provider/<name>/<upstream-path>`. Torana strips the provider prefix, looks up the upstream URL and format, and forwards.
-2. **Canonical IR** — Format adapters (`internal/format/`) translate each provider's wire format into shared Go types (`ChatRequest`, `Message`, `ToolDef`, `StreamEvent`).
-3. **Protobuf Serialization** — The IR is serialized to Protobuf via `internal/engine/pbconv` and handed to the WASM runtime.
-4. **WASM Plugin Pipeline** — Loaded plugins execute sequentially (in `config.json` order). Each plugin receives the Protobuf bytes, mutates them via the SDK ([torana-plugin-sdk](https://github.com/torana-edge/torana-plugin-sdk)), and writes back.
-5. **Pass-through** — Requests without a recognized `/provider/` prefix return 502.
+2. **Selective interception** — Only recognized inference endpoints for that format enter Torana's IR. Model-list, account, status, telemetry, update, and unknown auxiliary endpoints are forwarded as ordinary HTTP without running inference plugins.
+3. **Canonical IR** — Format adapters (`internal/format/`) translate inference requests into shared Go types (`ChatRequest`, `Message`, `ToolDef`, `StreamEvent`).
+4. **Protobuf Serialization** — The IR is serialized to Protobuf via `internal/engine/pbconv` and handed to the WASM runtime.
+5. **WASM Plugin Pipeline** — Loaded plugins execute sequentially (in `config.json` order). Each plugin receives the Protobuf bytes, mutates them via the SDK ([torana-plugin-sdk](https://github.com/torana-edge/torana-plugin-sdk)), and writes back.
+6. **No route guessing** — Requests without a matching provider (and no configured default provider) return 502.
 
 ## Supported Formats
 
@@ -103,6 +104,19 @@ ABI-v2 Go and Rust SDKs, examples, conformance guests, and authoring guides.
 
 `gemini` and `gemini-codeassist` share one content model; they differ only in the
 request envelope and SSE framing (see [docs/GEMINI_ANTIGRAVITY.md](docs/GEMINI_ANTIGRAVITY.md)).
+
+The inference boundary is explicit and method-sensitive:
+
+| Format | POST path suffixes that enter IR/plugins |
+|---|---|
+| `openai` | `/chat/completions`, `/responses` |
+| `anthropic` | `/messages` |
+| `bedrock` | `/converse`, `/converse-stream` |
+| `gemini`, `gemini-codeassist` | `:generateContent`, `:streamGenerateContent` |
+
+Version, deployment, and model path prefixes may precede those suffixes. Other
+methods and paths are forwarded unchanged to the selected provider; a new vendor
+status or account endpoint cannot accidentally be decoded as a chat request.
 
 ## Official Plugins
 

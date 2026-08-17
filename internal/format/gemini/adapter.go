@@ -42,15 +42,17 @@ const (
 func init() {
 	// Bare Gemini (public Gemini API, Vertex AI): unwrapped SSE frames.
 	format.Register("/gemini", format.Format{
-		Name:    FormatGemini,
-		Request: &Adapter{},
-		Stream:  &StreamAdapter{Wrapped: false},
+		Name:             FormatGemini,
+		Request:          &Adapter{},
+		Stream:           &StreamAdapter{Wrapped: false},
+		MatchesInference: format.PostInferencePaths(":generateContent", ":streamGenerateContent"),
 	})
 	// Code Assist (Antigravity CLI): {"response":…}-wrapped SSE frames.
 	format.Register("/gemini-codeassist", format.Format{
-		Name:    FormatCodeAssist,
-		Request: &Adapter{},
-		Stream:  &StreamAdapter{Wrapped: true},
+		Name:             FormatCodeAssist,
+		Request:          &Adapter{},
+		Stream:           &StreamAdapter{Wrapped: true},
+		MatchesInference: format.PostInferencePaths(":generateContent", ":streamGenerateContent"),
 	})
 }
 
