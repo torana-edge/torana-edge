@@ -100,6 +100,11 @@ otherwise is a 401 from a provider you never called directly.
 
 ## Route your harness
 
+Torana only sends explicitly supported inference endpoints through its IR and
+plugins. Model-list, account, quota, status, telemetry, update, MCP, and unknown
+auxiliary requests pass through normally. See the precise per-format contract
+in [Coding-harness compatibility](HARNESS_COMPATIBILITY.md).
+
 ### omp (oh-my-pi)
 ```yaml
 # ~/.omp/agent/models.yml

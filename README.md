@@ -69,6 +69,7 @@ CLI (`agy`)** — Torana also offers an optional TLS-terminating MITM ingress. S
 | Guide | What it covers |
 | --- | --- |
 | [Quickstart](docs/QUICKSTART.md) | Install, add a provider, point a harness at Torana |
+| [Harness compatibility](docs/HARNESS_COMPATIBILITY.md) | Which inference endpoints enter plugins and which client traffic passes through |
 | [Running plugins](docs/PLUGINS.md) | Install, inspect, approve, order, and what the sandbox does |
 | [Agent control plane](docs/AGENT_CONTROL_PLANE.md) | The versioned JSON API and `agent.json` operation contracts |
 | [Local models](docs/LOCAL_MODELS.md) | Point a coding harness at Ollama or vLLM through Torana |
