@@ -296,3 +296,23 @@ proxy itself, and response-side hooks, none of which are benchmarked yet.
 - Concurrency. The pool is 4 (`wasm.Runtime`), so a fifth concurrent request
   waits on a slot. Every benchmark here is serial and says nothing about that,
   which matters most for the allocation figures above.
+
+## Near-limit request bodies
+
+The production harness also has a separate `large` profile for whole-process
+memory scaling. It runs 1, 4, and 8 MiB agent payloads at concurrency 1, 4,
+and 8 with a zero-delay controlled upstream and no streaming rows:
+
+```bash
+TORANA_BENCH_PROFILE=large \
+  ./scripts/benchmark-production.sh large.jsonl
+```
+
+The largest generated request remains below the configured 10 MiB request-body
+limit after JSON framing. Treat RSS as whole-process evidence: one Torana
+process is reused across rows, so retained heap from an earlier row can raise a
+later row's starting point. Use separate invocations when an experiment needs a
+fresh process per row.
+
+The retained first run is documented in
+[`BENCHMARK_LARGE_REQUEST_RESULTS_2026-08-18.md`](BENCHMARK_LARGE_REQUEST_RESULTS_2026-08-18.md).
