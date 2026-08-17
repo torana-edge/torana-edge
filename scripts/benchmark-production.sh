@@ -60,6 +60,8 @@ nonstream_concurrency=${TORANA_BENCH_NONSTREAM_CONCURRENCY:-$default_nonstream_c
 stream_concurrency=${TORANA_BENCH_STREAM_CONCURRENCY:-$default_stream_concurrency}
 run_stream=${TORANA_BENCH_RUN_STREAM:-$default_run_stream}
 request_shape=${TORANA_BENCH_REQUEST_SHAPE:-plain}
+profile_dir=${TORANA_BENCH_PROFILE_DIR:-}
+profile_port=${TORANA_BENCH_PROFILE_PORT:-18082}
 if [ "$run_stream" != 0 ] && [ "$run_stream" != 1 ]; then
 	echo "TORANA_BENCH_RUN_STREAM must be 0 or 1" >&2
 	exit 2
@@ -80,7 +82,12 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 cd "$repo_dir"
-CGO_ENABLED=0 go build -trimpath -o "$stage/torana" ./cmd/torana
+if [ -n "$profile_dir" ]; then
+	mkdir -p "$profile_dir"
+	CGO_ENABLED=0 go build -trimpath -tags torana_benchmark_profile -o "$stage/torana" ./cmd/torana
+else
+	CGO_ENABLED=0 go build -trimpath -o "$stage/torana" ./cmd/torana
+fi
 go build -trimpath -o "$stage/loadbench" ./scripts/loadbench
 
 cat >"$stage/config.json" <<EOF
@@ -92,8 +99,14 @@ EOF
 	>"$stage/upstream.log" 2>&1 &
 upstream_pid=$!
 
-TORANA_CONFIG="$stage/config.json" TORANA_DATA_DIR="$stage/data" \
-	TORANA_BIND=127.0.0.1 "$stage/torana" >"$stage/torana.log" 2>&1 &
+if [ -n "$profile_dir" ]; then
+	TORANA_CONFIG="$stage/config.json" TORANA_DATA_DIR="$stage/data" \
+		TORANA_BIND=127.0.0.1 TORANA_BENCH_PROFILE_ADDR="127.0.0.1:$profile_port" \
+		"$stage/torana" >"$stage/torana.log" 2>&1 &
+else
+	TORANA_CONFIG="$stage/config.json" TORANA_DATA_DIR="$stage/data" \
+		TORANA_BIND=127.0.0.1 "$stage/torana" >"$stage/torana.log" 2>&1 &
+fi
 torana_pid=$!
 
 ready=0
@@ -110,6 +123,22 @@ if [ "$ready" -ne 1 ]; then
 	exit 1
 fi
 
+if [ -n "$profile_dir" ]; then
+	profile_ready=0
+	for _ in $(seq 1 100); do
+		if curl -fsS "http://127.0.0.1:$profile_port/debug/torana/memstats" >/dev/null 2>&1; then
+			profile_ready=1
+			break
+		fi
+		sleep 0.1
+	done
+	if [ "$profile_ready" -ne 1 ]; then
+		echo "Torana benchmark profiler did not become ready" >&2
+		tail -n 50 "$stage/torana.log" >&2
+		exit 1
+	fi
+fi
+
 : >"$output"
 "$stage/loadbench" metadata -revision "$(git rev-parse HEAD)" \
 	-profile "$profile" -upstream-first-byte "$first_byte" \
@@ -117,11 +146,39 @@ fi
 	-upstream-response-bytes "$response_bytes" -payload-bytes "$payload_bytes" \
 	-nonstream-concurrency "$nonstream_concurrency" \
 	-stream-concurrency "$stream_concurrency" -run-stream "$run_stream" \
-	-request-shape "$request_shape" >>"$output"
+	-request-shape "$request_shape" -duration "$duration" -warmup "$warmup" >>"$output"
 run() {
 	"$stage/loadbench" load -duration "$duration" -warmup "$warmup" \
 		-rss-pid "$torana_pid" -clock-ticks "$clock_ticks" \
 		-request-shape "$request_shape" "$@" >>"$output"
+}
+
+profile_snapshot() {
+	name=$1
+	phase=$2
+	[ -n "$profile_dir" ] || return 0
+	safe_name=$(printf '%s' "$name" | tr '/=' '__')
+	base="$profile_dir/$safe_name.$phase"
+	if [ "$phase" = before ]; then
+		# Put profiler-serialization allocations before the numeric baseline so
+		# TotalAlloc deltas cover the load row, not the act of taking profiles.
+		curl -fsS "http://127.0.0.1:$profile_port/debug/pprof/heap?gc=1" >"$base.heap.pb.gz"
+		curl -fsS "http://127.0.0.1:$profile_port/debug/pprof/allocs" >"$base.allocs.pb.gz"
+		curl -fsS "http://127.0.0.1:$profile_port/debug/torana/memstats?gc=1" >"$base.memstats.json"
+	else
+		# Close the numeric interval before the after-profile serialization.
+		curl -fsS "http://127.0.0.1:$profile_port/debug/torana/memstats?gc=1" >"$base.memstats.json"
+		curl -fsS "http://127.0.0.1:$profile_port/debug/pprof/heap?gc=1" >"$base.heap.pb.gz"
+		curl -fsS "http://127.0.0.1:$profile_port/debug/pprof/allocs" >"$base.allocs.pb.gz"
+	fi
+}
+
+run_torana() {
+	name=$1
+	shift
+	profile_snapshot "$name" before
+	run -name "$name" "$@"
+	profile_snapshot "$name" after
 }
 
 for payload in $payload_bytes; do
@@ -131,7 +188,7 @@ for payload in $payload_bytes; do
 		run -name "direct/nonstream$payload_label/c=$concurrency" \
 			-target "http://127.0.0.1:$upstream_port/v1/chat/completions" \
 			-concurrency "$concurrency" -payload-bytes "$payload"
-		run -name "torana/nonstream$payload_label/c=$concurrency" \
+		run_torana "torana/nonstream$payload_label/c=$concurrency" \
 			-target "http://127.0.0.1:$proxy_port/provider/bench/v1/chat/completions" \
 			-concurrency "$concurrency" -payload-bytes "$payload"
 	done
@@ -145,11 +202,16 @@ if [ "$run_stream" = 1 ]; then
 			run -name "direct/stream$payload_label/c=$concurrency" \
 				-target "http://127.0.0.1:$upstream_port/v1/chat/completions" \
 				-concurrency "$concurrency" -payload-bytes "$payload" -stream -min-sse-events "$events"
-			run -name "torana/stream$payload_label/c=$concurrency" \
+			run_torana "torana/stream$payload_label/c=$concurrency" \
 				-target "http://127.0.0.1:$proxy_port/provider/bench/v1/chat/completions" \
 				-concurrency "$concurrency" -payload-bytes "$payload" -stream -min-sse-events "$events"
 		done
 	done
+fi
+
+if [ -n "$profile_dir" ]; then
+	"$stage/loadbench" memory-summary -results "$output" -profile-dir "$profile_dir" >"$profile_dir/summary.jsonl"
+	echo "wrote $profile_dir/summary.jsonl"
 fi
 
 echo "wrote $output"

@@ -1,13 +1,65 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 )
+
+func TestSummarizeMemory(t *testing.T) {
+	dir := t.TempDir()
+	name := "torana/nonstream/p=1048576/c=4"
+	base := filepath.Join(dir, profileFileName(name))
+	before := `{"total_alloc_bytes":1000,"heap_alloc_bytes":400,"heap_sys_bytes":800,"heap_inuse_bytes":500,"heap_released_bytes":100,"stack_inuse_bytes":50,"mallocs":100,"frees":60,"num_gc":2,"pause_total_ns":1000000,"gc_cpu_fraction":0.1}`
+	after := `{"total_alloc_bytes":5000,"heap_alloc_bytes":600,"heap_sys_bytes":1200,"heap_inuse_bytes":750,"heap_released_bytes":200,"stack_inuse_bytes":70,"mallocs":140,"frees":90,"num_gc":5,"pause_total_ns":3500000,"gc_cpu_fraction":0.2}`
+	if err := os.WriteFile(base+".before.memstats.json", []byte(before), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(base+".after.memstats.json", []byte(after), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	results := strings.NewReader(
+		`{"kind":"metadata"}` + "\n" +
+			`{"name":"direct/nonstream/p=1048576/c=4","requests":99}` + "\n" +
+			`{"name":"torana/nonstream/p=1048576/c=4","requests":4,"payload_bytes":1048576,"concurrency":4}` + "\n",
+	)
+	var out bytes.Buffer
+	if err := summarizeMemory(results, dir, &out); err != nil {
+		t.Fatal(err)
+	}
+	var got memorySummary
+	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Kind != "memory_profile" || got.Name != name || got.TotalAllocBytes != 4000 || got.AllocBytesPerRequest != 1000 || got.Mallocs != 40 || got.MallocsPerRequest != 10 || got.Frees != 30 || got.GCs != 3 || got.GCPauseMillis != 2.5 {
+		t.Fatalf("summary = %+v", got)
+	}
+	if got.HeapAllocDeltaBytes != 200 || got.HeapInuseDeltaBytes != 250 || got.HeapSysAfterBytes != 1200 || got.StackInuseAfterBytes != 70 {
+		t.Fatalf("heap summary = %+v", got)
+	}
+}
+
+func TestReadMemoryStatsIsStrict(t *testing.T) {
+	for _, raw := range []string{
+		`{"unknown":1}`,
+		`{} {}`,
+		`{}`,
+	} {
+		path := filepath.Join(t.TempDir(), "stats.json")
+		if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := readMemoryStats(path); err == nil {
+			t.Fatalf("accepted %q", raw)
+		}
+	}
+}
 
 func TestRequestPayloadShapes(t *testing.T) {
 	type function struct {
