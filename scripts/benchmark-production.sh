@@ -33,8 +33,21 @@ case "$profile" in
 		default_stream_concurrency="1 8"
 		default_run_stream=0
 		;;
+	large)
+		# Keep near-limit bodies separate from the ordinary saturation matrix.
+		# The largest generated request remains below Torana's 10 MiB limit
+		# after JSON framing.
+		default_first_byte=0ms
+		default_event_delay=0ms
+		default_events=100
+		default_response_bytes=4096
+		default_payload_bytes="1048576 4194304 8388608"
+		default_nonstream_concurrency="1 4 8"
+		default_stream_concurrency="1"
+		default_run_stream=0
+		;;
 	*)
-		echo "unknown TORANA_BENCH_PROFILE: $profile (want provider or saturation)" >&2
+		echo "unknown TORANA_BENCH_PROFILE: $profile (want provider, saturation, or large)" >&2
 		exit 2
 		;;
 esac
