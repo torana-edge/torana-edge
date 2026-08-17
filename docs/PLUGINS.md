@@ -31,15 +31,34 @@ SHA. There is no central index; `--official` is a convenience alias, not a
 privileged channel.
 
 Plugins are **compiled locally from source**, never downloaded prebuilt. Nested
-Go packages and embedded assets are supported; symlinks and special files are
-rejected during bounded staging. You can
+Go and Rust packages and embedded assets are supported; symlinks, special
+files, and existing toolchain output are rejected or omitted during bounded
+staging. You can
 read what you are about to run, and the digest is computed from what your own
-machine built. This is why a Go toolchain is required.
+machine built. Go plugins require the local Go toolchain. Rust plugins require
+Rust 1.85+, Cargo, and the `wasm32-wasip1` target:
+
+```bash
+rustup target add wasm32-wasip1
+torana plugin build ./my-rust-plugin
+cargo generate-lockfile      # review and keep the exact dependency graph
+torana plugin install ./my-rust-plugin
+```
+
+Cargo may execute native `build.rs` programs while compiling—before a WASM
+digest exists to approve. Torana therefore refuses one-step installation of a
+remote Rust source. Clone it, review the crate and dependency/build-script
+surface, and keep a reviewed `Cargo.lock`; installation builds with `--locked`.
+Then install the local path. The build pins Cargo to the operator's
+active Rust toolchain, so a source-tree `rust-toolchain` file cannot silently
+select or download a different compiler. This is intentionally stricter than
+the Go remote-source path, whose compiler does not execute package source while
+building.
 
 That digest is deliberately a **local approval identity**, not a published
 cross-machine reproducibility claim. Official bundles are proven reproducible
 across different staging paths with one toolchain, but Go patch versions may
-produce different WASM bytes. Installation sets `GOTOOLCHAIN=local` so source
+produce different WASM bytes. Go installation sets `GOTOOLCHAIN=local` so source
 cannot make your machine download and execute a different compiler before you
 have approved anything. Allowing an automatic download to pin the compiler
 would weaken that boundary; requiring every developer to preinstall one exact
