@@ -67,6 +67,29 @@ The current post-rewrite run and its raw rows are in
 runs as historical comparisons; do not splice their best rows into a newer
 result.
 
+For a separate CPU-saturation and payload-scaling matrix, use the built-in
+profile rather than editing the provider-shaped defaults:
+
+```bash
+TORANA_BENCH_PROFILE=saturation \
+  ./scripts/benchmark-production.sh saturation.jsonl
+```
+
+That profile removes the artificial upstream delay, disables streaming, and
+pairs direct/Torana rows for 1, 16, and 128 KiB requests at concurrency 1, 8,
+32, and 128. It measures all three local processes competing on one machine;
+it is useful for finding scaling knees and payload amplification, not for a
+universal capacity claim. Metadata in the JSONL records the exact profile,
+upstream settings, payload sizes, and concurrency matrix. Every setting can be
+overridden with `TORANA_BENCH_FIRST_BYTE`, `TORANA_BENCH_EVENT_DELAY`,
+`TORANA_BENCH_EVENTS`, `TORANA_BENCH_RESPONSE_BYTES`,
+`TORANA_BENCH_PAYLOAD_BYTES`, `TORANA_BENCH_NONSTREAM_CONCURRENCY`,
+`TORANA_BENCH_STREAM_CONCURRENCY`, and `TORANA_BENCH_RUN_STREAM`.
+
+The first retained saturation run is in
+[the 2026-08-18 saturation report](BENCHMARK_SATURATION_RESULTS_2026-08-18.md),
+with every raw row kept alongside it.
+
 ## Plugin pipeline
 
 `internal/plugin/bench_test.go`. Run them with:
