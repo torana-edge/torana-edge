@@ -120,10 +120,9 @@ both repos:
 3. Register the hook in `sdk.go` **and add a no-op stub to `sdk_other.go`**.
    `sdk.go` is `//go:build wasip1`; without the stub, every plugin fails to
    compile for host-side tests.
-4. Update the Go v2 SDK helpers and conformance tests. The existing Rust crate
-   is ABI v1 and does not satisfy the current host contract; do not describe a
-   host change as Rust-supported without a complete v2 port and integration
-   proof.
+4. Update the Go and Rust ABI-v2 SDK helpers and conformance tests. Keep both
+   compiled conformance guests in the Edge host test: language support is a
+   host-boundary contract, not merely two libraries that compile.
 5. Update `ABI.md`, `docs/WRITING_A_PLUGIN.md`, and **`docs/WASM_PLUGIN_GUIDE.md`**.
    That last one is the document that lets less capable models write correct
    plugins; a new capability that isn't in its host-function section and final

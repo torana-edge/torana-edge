@@ -312,7 +312,7 @@ func TestMakefileCoversEveryFixture(t *testing.T) {
 		}
 		dir := filepath.Join("examples", "plugins", e.Name())
 		if _, err := os.Stat(filepath.Join(repo, dir, "plugin.wasm.go")); err != nil {
-			continue // non-Go fixture (e.g. rust-redactor)
+			continue // a non-Go fixture may have its own build contract
 		}
 		if !listed[dir] {
 			t.Errorf("%s: has plugin.wasm.go but is not in Makefile TESTDATA_DIRS — a newly added guest that CI cannot build", dir)

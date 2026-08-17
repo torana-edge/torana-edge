@@ -2320,9 +2320,9 @@ func New(cfg Config) (*Server, error) {
 	}))
 
 	// v1 is the canonical public control-plane API. The unversioned API remains
-	// available for existing local scripts and the pre-v1 dashboard, but all v1
-	// requests are translated before dispatch so both paths share exactly the
-	// same auth, validation, and response behavior.
+	// available for existing local scripts and the original dashboard route, but
+	// all v1 requests are translated before dispatch so both paths share exactly
+	// the same auth, validation, and response behavior.
 	mux.HandleFunc("/_torana/api/v1", s.controlPlaneGuard(func(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/_torana/api/v1/", http.StatusMovedPermanently)
 	}))
