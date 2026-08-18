@@ -495,10 +495,11 @@ type ControlPlaneConfig struct {
 
 // PluginsConfig controls WASM plugin loading and execution.
 type PluginsConfig struct {
-	Dir     string                     `json:"dir"`    // plugins directory; empty uses DefaultPluginsDir when plugins are configured
-	Order   []string                   `json:"order"`  // execution order by plugin name
-	Config  map[string]json.RawMessage `json:"config"` // per-plugin config blobs
-	Runtime PluginRuntimeConfig        `json:"runtime,omitempty"`
+	Dir       string                     `json:"dir"`                  // plugins directory; empty uses DefaultPluginsDir when plugins are configured
+	Order     []string                   `json:"order"`                // load/lifecycle order and default execution order
+	HookOrder map[string][]string        `json:"hook_order,omitempty"` // exact per-hook execution overrides
+	Config    map[string]json.RawMessage `json:"config"`               // per-plugin config blobs
+	Runtime   PluginRuntimeConfig        `json:"runtime,omitempty"`
 	// Approvals are operator-owned and bound to the installed WASM digest.
 	// A plugin manifest may request capabilities but can never grant itself.
 	Approvals map[string]PluginApproval `json:"approvals,omitempty"`

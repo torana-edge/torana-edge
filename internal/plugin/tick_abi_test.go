@@ -78,11 +78,13 @@ func TestRunOnTick_SkippedWithoutGrant(t *testing.T) {
 	}
 	pl.SetGrants(nil) // declares the hook, holds no grant
 
+	lp := &loadedPlugin{manifest: bundle.Manifest, plugin: pl}
 	pp := &PluginPipeline{
-		plugins: []*loadedPlugin{{manifest: bundle.Manifest, plugin: pl}},
-		runtime: rt,
-		drained: make(chan struct{}),
-		closed:  make(chan struct{}),
+		plugins:     []*loadedPlugin{lp},
+		tickPlugins: []*loadedPlugin{lp},
+		runtime:     rt,
+		drained:     make(chan struct{}),
+		closed:      make(chan struct{}),
 	}
 
 	if got := pp.RunOnTick(context.Background(), 1, tickRequest(1)); len(got) != 0 {

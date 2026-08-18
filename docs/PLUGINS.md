@@ -210,7 +210,34 @@ plugin IDs; Torana refuses startup when an approved dependent appears without
 its approved dependency earlier in `plugins.order`. `torana plugin list` shows
 what is installed; the control plane shows what is actually live.
 
-`plugins.order` is authoritative; hooks do not have a manifest-level priority.
+`plugins.order` remains authoritative for loading, lifecycle, and the default
+execution order. A plugin cannot assign itself priority. When an operator needs
+different observation policy for a particular multi-plugin hook, use an exact
+`plugins.hook_order` override:
+
+```json
+{
+  "plugins": {
+    "order": ["audit", "policy", "observer"],
+    "hook_order": {
+      "run_after_response": ["policy", "observer", "audit"]
+    }
+  }
+}
+```
+
+An override must list every plugin named in `plugins.order` that declares that
+hook exactly once, even while a bundle awaits approval; skipped plugins simply
+do not appear in that immutable live generation and the remaining relative
+order is preserved.
+Missing, extra, duplicate, disabled, or wrong-hook names fail the configuration
+instead of being appended implicitly. Supported keys are
+`run_before_request`, `run_after_response`, `run_on_stream_chunk`, and
+`run_on_tick`; `run_on_http_request` is target-addressed and cannot be ordered.
+Declared upstream dependencies and the route-before-compaction economic rule
+still apply to the effective hook order. A hot reload builds immutable hook
+orders with the new plugin generation and swaps them atomically, so an
+in-flight request never observes half an order change.
 
 Plugins may declare optional `minimum_torana_version` and
 `maximum_torana_version` bounds. A tagged host with a semantic version enforces
