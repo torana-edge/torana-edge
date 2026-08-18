@@ -431,6 +431,7 @@ func TestOfficialPluginLinearMemoryProfile(t *testing.T) {
 		"otel",
 		"pii",
 		"schema_translator",
+		"tool_governor",
 	}
 	gotNames := make([]string, len(bundles))
 	for i := range bundles {
