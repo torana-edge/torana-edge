@@ -280,6 +280,58 @@ func TestOptionalJSONObjectWithoutMembersSinglePass(t *testing.T) {
 	}
 }
 
+func TestParseOptionalJSONObjectExcludingMatchesTwoStageProjection(t *testing.T) {
+	for _, row := range []struct {
+		name string
+		raw  string
+		keys []string
+	}{
+		{name: "all canonical", raw: `{"model":"gpt","messages":[{"content":"large"}],"stream":false}`, keys: []string{"model", "messages", "stream"}},
+		{name: "unknown lexemes retained", raw: ` {"model":"gpt","z":1e999,"a":18446744073709551615,"nested":{"b":1,"a":2}} `, keys: []string{"model"}},
+		{name: "escape equivalent key", raw: `{"\u006dodel":"gpt","x":1.0}`, keys: []string{"model"}},
+		{name: "missing removal", raw: `{ "x" : "brace } and comma ," , "y" : [1,2] }`, keys: []string{"model"}},
+		{name: "no removals", raw: `{"x":1}`, keys: nil},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			parsed, err := ParseOptionalJSONObject([]byte(row.raw))
+			if err != nil {
+				t.Fatal(err)
+			}
+			want, err := parsed.WithoutMembers(row.keys...)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err := ParseOptionalJSONObjectExcluding([]byte(row.raw), row.keys...)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.String() != want.String() {
+				t.Fatalf("fused projection differs:\n got %q\nwant %q", got.String(), want.String())
+			}
+		})
+	}
+
+	absent, err := ParseOptionalJSONObjectExcluding(nil, "x")
+	if err != nil || !absent.IsAbsent() {
+		t.Fatalf("nil = %q, %v; want absent", absent.String(), err)
+	}
+	for _, raw := range [][]byte{nil, []byte(`{"x":1}`)} {
+		if _, err := ParseOptionalJSONObjectExcluding(raw, string([]byte{0xff})); err == nil {
+			t.Fatal("accepted invalid UTF-8 exclusion key")
+		}
+	}
+	for _, raw := range []string{
+		`[]`,
+		`{"x":1,"x":2}`,
+		`{"x":"\ud800"}`,
+		`{"x":1} trailing`,
+	} {
+		if _, err := ParseOptionalJSONObjectExcluding([]byte(raw), "x"); err == nil {
+			t.Fatalf("accepted invalid input %q", raw)
+		}
+	}
+}
+
 func TestObjectSpanScannerMatchesIndependentDecoder(t *testing.T) {
 	corpus := []string{
 		`{"s":"brace } bracket ] comma , quote \" slash \\","n":-1.25e+9,"b":true,"z":null}`,

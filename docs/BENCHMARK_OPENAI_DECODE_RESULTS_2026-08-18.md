@@ -87,3 +87,20 @@ allocated bytes/request (-55.6%).
 
 - [`benchmark-openai-marshal-after-2026-08-18.jsonl`](benchmark-openai-marshal-after-2026-08-18.jsonl)
 - [`benchmark-openai-marshal-after-2026-08-18-summary.jsonl`](benchmark-openai-marshal-after-2026-08-18-summary.jsonl)
+
+## Follow-up: fused provider-extension extraction
+
+All provider adapters preserved unknown top-level fields by first copying the
+entire request into an `OptionalJSONObject` and then deleting canonical fields.
+The new fused span projection validates once and constructs only the retained
+extension object. Its corpus is byte-compared against the former two-stage
+result, including whitespace, escape-equivalent keys, large numeric lexemes,
+nested objects, missing exclusions, and invalid JSON-text cases.
+
+The 1 MiB engine benchmark moves from 1,058,805–1,058,809 bytes allocated/op to
+2,032 bytes/op. The matched production row moves from 53,845,228 to 45,853,411
+allocated bytes/request (-14.8%), with zero errors in both runs. Across all four
+units the original 121,303,100-byte baseline falls 62.2% to 45,853,411 bytes.
+
+- [`benchmark-extension-extract-after-2026-08-18.jsonl`](benchmark-extension-extract-after-2026-08-18.jsonl)
+- [`benchmark-extension-extract-after-2026-08-18-summary.jsonl`](benchmark-extension-extract-after-2026-08-18-summary.jsonl)

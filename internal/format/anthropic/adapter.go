@@ -320,11 +320,8 @@ func (a *Adapter) Unmarshal(rawBody []byte) (*engine.ChatRequest, error) {
 
 	// Provider extensions: parse the ORIGINAL body and delete the canonical
 	// fields in fixed order — deterministic, lexeme-exact unknown members.
-	ext, xerr := engine.ParseOptionalJSONObject(rawBody)
-	if xerr != nil {
-		return nil, fmt.Errorf("provider extensions: %w", xerr)
-	}
-	ext, xerr = ext.WithoutMembers("model", "max_tokens", "temperature", "top_p",
+	ext, xerr := engine.ParseOptionalJSONObjectExcluding(rawBody,
+		"model", "max_tokens", "temperature", "top_p",
 		"stop_sequences", "system", "messages", "tools", "stream")
 	if xerr != nil {
 		return nil, fmt.Errorf("provider extensions: %w", xerr)
