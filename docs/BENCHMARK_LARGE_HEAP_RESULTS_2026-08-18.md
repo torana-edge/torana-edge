@@ -65,6 +65,49 @@ the decoder refill copy where the adapter already owns a complete byte slice.
 Any optimization must retain duplicate-key, invalid-UTF-8, surrogate,
 number-lexeme, ordering, and provider round-trip guarantees.
 
+## Measured follow-up: validated span projection
+
+The two identified owners were then changed without weakening those guarantees:
+
+- SDK JSON-text validation stopped retaining decoded bytes for ordinary value
+  strings; decoded bytes remain mandatory for object keys, where they enforce
+  escape-equivalent duplicate detection.
+- Edge stopped decoding a validated raw object merely to learn its top-level
+  shape, and provider-extension projection now discovers member spans once and
+  removes canonical fields in one pass. Surviving key/value lexemes and order
+  remain exact; an independent decoder/reference corpus covers nested values,
+  escaped delimiters, large numbers, and every removal suffix.
+
+The exact same 18-row command was repeated on production revision
+`974ac35077668c7bc8fced0d92d82777c79879a8`. All rows again completed with zero
+errors:
+
+| Tool result | Concurrency | Allocated/request before | After | Reduction | Throughput before | After | Peak RSS before | After |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1 MiB | 1 | 53.7 MiB | 14.6 MiB | 72.9% | 7.0 req/s | 13.0 req/s | 50.5 MiB | 39.4 MiB |
+| 1 MiB | 4 | 53.7 MiB | 14.4 MiB | 73.2% | 34.2 req/s | 66.9 req/s | 80.8 MiB | 63.1 MiB |
+| 1 MiB | 8 | 53.6 MiB | 14.4 MiB | 73.1% | 82.0 req/s | 168.4 req/s | 134.8 MiB | 96.7 MiB |
+| 4 MiB | 1 | 216.4 MiB | 59.4 MiB | 72.6% | 2.6 req/s | 4.9 req/s | 98.5 MiB | 79.4 MiB |
+| 4 MiB | 4 | 215.9 MiB | 58.8 MiB | 72.8% | 10.6 req/s | 21.5 req/s | 219.5 MiB | 162.6 MiB |
+| 4 MiB | 8 | 215.7 MiB | 58.8 MiB | 72.7% | 20.5 req/s | 42.1 req/s | 421.6 MiB | 294.4 MiB |
+| 8 MiB | 1 | 424.3 MiB | 113.3 MiB | 73.3% | 1.6 req/s | 3.1 req/s | 160.5 MiB | 112.5 MiB |
+| 8 MiB | 4 | 426.1 MiB | 114.6 MiB | 73.1% | 6.1 req/s | 12.5 req/s | 436.6 MiB | 288.3 MiB |
+| 8 MiB | 8 | 424.7 MiB | 113.3 MiB | 73.3% | 9.8 req/s | 22.0 req/s | 825.0 MiB | 547.0 MiB |
+
+At concurrency 8, median latency fell by 50.6–52.5%, throughput increased
+2.05–2.25 times, and peak RSS fell by 28.3–33.7%. Allocation amplification is
+now about 14.2–14.6 bytes per payload byte instead of about 53. The forced-GC
+live heap remains small, so the residual is still temporary-copy/GC work rather
+than evidence of a growing retained heap.
+
+The follow-up raw rows are in
+[`benchmark-large-heap-after-json-optimization-2026-08-18.jsonl`](benchmark-large-heap-after-json-optimization-2026-08-18.jsonl),
+with exact runtime deltas in
+[`benchmark-large-heap-after-json-optimization-2026-08-18-summary.jsonl`](benchmark-large-heap-after-json-optimization-2026-08-18-summary.jsonl).
+This closes the two dominant profile owners, but not issue #199: the next
+profile should identify the remaining roughly 14x amplification before another
+implementation choice is made.
+
 ## Method and limitations
 
 - Revision: `ea4880d86907f49a5563117252963ed36b020790`
