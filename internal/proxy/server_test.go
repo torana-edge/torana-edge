@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -122,6 +123,17 @@ func TestProxyPassThrough(t *testing.T) {
 	}
 	if !strings.Contains(bodyStr, "method: POST") {
 		t.Error("request method not preserved")
+	}
+}
+
+func TestDefaultDeepSeekDocumentedPathHasOneVersionPrefix(t *testing.T) {
+	deepseek := provider.DefaultConfig().Providers["deepseek"]
+	base, err := url.Parse(deepseek.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := joinURLPath(base.Path, "/v1/chat/completions"), "/v1/chat/completions"; got != want {
+		t.Fatalf("upstream path = %q, want %q", got, want)
 	}
 }
 
