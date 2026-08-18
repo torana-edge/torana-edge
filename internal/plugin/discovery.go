@@ -1090,6 +1090,16 @@ func (pp *PluginPipeline) DrainAndClose() {
 // the exact pre-injection ToranaMetaJson bytes are restored before the next
 // plugin sees the request. Nil means no headers.
 func (pp *PluginPipeline) RunBeforeRequest(ctx context.Context, reqID uint64, chat *engine.ChatRequest, rawHeaders map[string][]string) (*engine.ChatRequest, error) {
+	out, _, err := pp.RunBeforeRequestTracked(ctx, reqID, chat, rawHeaders)
+	return out, err
+}
+
+// RunBeforeRequestTracked is RunBeforeRequest plus an explicit replacement
+// signal. The boolean is true only when a plugin returned an accepted request
+// replacement. Host callers use it to distinguish observational/pass-only
+// hooks from provider-visible request rewrites without comparing or
+// re-marshalling the whole request. Side effects and verdicts do not set it.
+func (pp *PluginPipeline) RunBeforeRequestTracked(ctx context.Context, reqID uint64, chat *engine.ChatRequest, rawHeaders map[string][]string) (*engine.ChatRequest, bool, error) {
 	pp.Acquire()
 	defer pp.Release()
 
@@ -1112,7 +1122,7 @@ func (pp *PluginPipeline) RunBeforeRequest(ctx context.Context, reqID uint64, ch
 	// closed domain is a host-local failure, never a silent fact drop.
 	current, err := pbconv.ToPBChatRequestChecked(chat)
 	if err != nil {
-		return nil, fmt.Errorf("invalid engine request: %w", err)
+		return nil, false, fmt.Errorf("invalid engine request: %w", err)
 	}
 	modified := false
 	for _, lp := range pp.plugins {
@@ -1121,7 +1131,7 @@ func (pp *PluginPipeline) RunBeforeRequest(ctx context.Context, reqID uint64, ch
 		}
 		next, stop, err := pp.runBeforeRequestPlugin(ctx, reqID, lp, current, headers, acceptedTopo)
 		if err != nil {
-			return chat, err
+			return chat, false, err
 		}
 		if next != nil {
 			current = next
@@ -1134,14 +1144,14 @@ func (pp *PluginPipeline) RunBeforeRequest(ctx context.Context, reqID uint64, ch
 
 	if !modified {
 		// No plugin produced output — skip the pb round-trip entirely.
-		return chat, nil
+		return chat, false, nil
 	}
 	chat, convErr := pbconv.FromPBChatRequest(current)
 	if convErr != nil {
 		// The replacement path's PB always passed SDK ValidateReplacement
 		// (or came from the checked boundary), so this is a defensive
 		// backstop.
-		return nil, fmt.Errorf("convert replacement: %w", convErr)
+		return nil, false, fmt.Errorf("convert replacement: %w", convErr)
 	}
 	// The typed host-only TOPOLOGY facts survive the replacement: they are
 	// never in the ABI, so the plugin round-trip cannot carry them — the
@@ -1152,7 +1162,7 @@ func (pp *PluginPipeline) RunBeforeRequest(ctx context.Context, reqID uint64, ch
 	chat.CodeAssist = accepted.CodeAssist
 	chat.OpenAIVariant = accepted.OpenAIVariant
 	chat.ResponsesInputLayout = accepted.ResponsesInputLayout
-	return chat, nil
+	return chat, true, nil
 }
 
 // runBeforeRequestPlugin dispatches ONE plugin's run_before_request hook with
