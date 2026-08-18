@@ -787,11 +787,11 @@ type marshalOutput struct {
 }
 
 type marshalMsg struct {
-	Role             string          `json:"role"`
-	Content          json.RawMessage `json:"content,omitempty"`
-	ReasoningContent *string         `json:"reasoning_content,omitempty"`
-	ToolCalls        []marshalTC     `json:"tool_calls,omitempty"`
-	ToolCallID       string          `json:"tool_call_id,omitempty"`
+	Role             string      `json:"role"`
+	Content          any         `json:"content,omitempty"`
+	ReasoningContent *string     `json:"reasoning_content,omitempty"`
+	ToolCalls        []marshalTC `json:"tool_calls,omitempty"`
+	ToolCallID       string      `json:"tool_call_id,omitempty"`
 }
 
 type marshalTC struct {
@@ -956,15 +956,13 @@ func marshalChatMessage(m engine.Message) (marshalMsg, error) {
 			content = append(content, map[string]any{"type": "text", "text": t})
 		}
 		content = append(content, unknownParts...)
-		b, _ := json.Marshal(content)
-		mm.Content = b
+		mm.Content = content
 	case len(textParts) == 1 && textParts[0] != "":
-		b, _ := json.Marshal(textParts[0])
-		mm.Content = b
+		mm.Content = textParts[0]
 	case m.Role == engine.RoleAssistant && len(mm.ToolCalls) > 0:
 		mm.Content = json.RawMessage("null")
 	case len(textParts) == 1:
-		mm.Content = json.RawMessage(`""`)
+		mm.Content = ""
 	}
 	return mm, nil
 }
