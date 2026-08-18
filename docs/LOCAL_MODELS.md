@@ -14,7 +14,7 @@ or any OpenAI-compatible local server.
       "fallback": ["deepseek"]
     },
     "deepseek": {
-      "url": "https://api.deepseek.com/beta",
+      "url": "https://api.deepseek.com",
       "format": "openai",
       "api_key_env": "DEEPSEEK_API_KEY"
     }

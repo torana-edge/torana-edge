@@ -608,7 +608,7 @@ func DefaultConfig() Config {
 		Port: 8080,
 		Providers: map[string]Provider{
 			"deepseek": {
-				URL:    "https://api.deepseek.com/beta",
+				URL:    "https://api.deepseek.com",
 				Format: "openai",
 			},
 			"deepseek-anthropic": {

@@ -180,6 +180,16 @@ func TestLoadUnmanagedConfig(t *testing.T) {
 	}
 }
 
+func TestDefaultDeepSeekUsesOpenAIAPIRoot(t *testing.T) {
+	deepseek, ok := DefaultConfig().Providers["deepseek"]
+	if !ok {
+		t.Fatal("default configuration has no deepseek provider")
+	}
+	if got, want := deepseek.URL, "https://api.deepseek.com"; got != want {
+		t.Fatalf("deepseek URL = %q, want API root %q; documented harness paths already carry /v1", got, want)
+	}
+}
+
 func TestManagedStorePath(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("TORANA_DATA_DIR", dir)
