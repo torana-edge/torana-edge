@@ -785,16 +785,7 @@ func New(cfg Config) (*Server, error) {
 			// apply on the next plugin reload.
 			configFn := func() plugin.PluginConfig {
 				p := s.GetConfig().Providers.Plugins
-				return plugin.PluginConfig{
-					Dir:             p.Dir,
-					Order:           p.Order,
-					HookOrder:       p.HookOrder,
-					Config:          p.Config,
-					Approvals:       pluginApprovals(p.Approvals),
-					AllowUnapproved: p.AllowUnapproved,
-					Strict:          true,
-					HostVersion:     s.config.HostVersion,
-				}
+				return s.pipelinePluginConfig(p)
 			}
 			watchDone := make(chan struct{})
 			s.watchDone = watchDone
@@ -3113,12 +3104,30 @@ func (s *Server) newRuntime() *wasm.Runtime {
 // s.sharedCache) and returns the displaced pipeline, undrained. Caller holds rebuildMu.
 func (s *Server) rebuildPipelineLocked(pcfg provider.PluginsConfig) (*plugin.PluginPipeline, error) {
 	rt := s.newRuntime()
+	pp, err := plugin.NewPipeline(rt, s.pipelinePluginConfig(pcfg))
+	if err != nil {
+		rt.Close()
+		return nil, err
+	}
+
+	old := s.pluginPipeline.Swap(pp)
+	if old != nil {
+		return old.(*plugin.PluginPipeline), nil
+	}
+	return nil, nil
+}
+
+// pipelinePluginConfig is the single construction seam for initial builds and
+// filesystem-triggered hot reloads. Security/format validation belongs to the
+// immutable pipeline generation; omitting it on either path would let the same
+// guest output be refused before a reload and accepted after one.
+func (s *Server) pipelinePluginConfig(pcfg provider.PluginsConfig) plugin.PluginConfig {
 	// Provider-specific candidate validation, dispatched on the ACCEPTED
 	// host topology (never pipeline-global format policy): a Code Assist
 	// replacement envelope smuggling canonical members is plugin-output
 	// invalidity — pass rolls back to the accepted input, block produces
 	// the plugin refusal. Construction-bound (immutable, race-free).
-	pp, err := plugin.NewPipeline(rt, plugin.PluginConfig{
+	return plugin.PluginConfig{
 		Dir:             pcfg.Dir,
 		Order:           pcfg.Order,
 		HookOrder:       pcfg.HookOrder,
@@ -3133,17 +3142,7 @@ func (s *Server) rebuildPipelineLocked(pcfg provider.PluginsConfig) (*plugin.Plu
 			}
 			return nil
 		},
-	})
-	if err != nil {
-		rt.Close()
-		return nil, err
 	}
-
-	old := s.pluginPipeline.Swap(pp)
-	if old != nil {
-		return old.(*plugin.PluginPipeline), nil
-	}
-	return nil, nil
 }
 
 // RebuildPipeline builds a fresh runtime + plugin pipeline using pcfg,
