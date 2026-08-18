@@ -240,6 +240,44 @@ func TestWrapperSetDeleteRoundTripByteExact(t *testing.T) {
 	}
 }
 
+func TestOptionalJSONObjectWithoutMembersSinglePass(t *testing.T) {
+	for _, row := range []struct {
+		name string
+		raw  string
+		keys []string
+		want string
+	}{
+		{name: "none", raw: `{ "a" : 1 , "b" : 2 }`, keys: []string{"missing"}, want: `{ "a" : 1 , "b" : 2 }`},
+		{name: "first", raw: "{ \"a\" : 1 ,\n\t\"b\" : 2 , \"c\":3 }", keys: []string{"a"}, want: `{ "b" : 2, "c":3 }`},
+		{name: "middle", raw: "{ \"a\" : 1 ,\n\t\"b\" : 2 , \"c\":3 }", keys: []string{"b"}, want: `{ "a" : 1, "c":3 }`},
+		{name: "last", raw: "{ \"a\" : 1 ,\n\t\"b\" : 2 , \"c\":3 }", keys: []string{"c"}, want: "{ \"a\" : 1,\n\t\"b\" : 2 }"},
+		{name: "separated", raw: "{ \"a\" : 1 ,\n\t\"b\" : {\"raw\":1e999} , \"c\":3, \"d\":\"x\" }", keys: []string{"b", "c"}, want: `{ "a" : 1, "d":"x" }`},
+		{name: "all", raw: "  {\n\t\"a\":1, \"b\":2 } \r\n", keys: []string{"a", "b"}, want: "  {\n\t } \r\n"},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			o, err := ParseOptionalJSONObject([]byte(row.raw))
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err := o.WithoutMembers(row.keys...)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.String() != row.want {
+				t.Fatalf("WithoutMembers = %q, want %q", got.String(), row.want)
+			}
+			if o.String() != row.raw {
+				t.Fatalf("input mutated: %q", o.String())
+			}
+		})
+	}
+
+	o := OptionalJSONObject{}
+	if _, err := o.WithoutMembers(string([]byte{0xff})); err == nil {
+		t.Fatal("absent object accepted an invalid UTF-8 key")
+	}
+}
+
 // Reference proof 3: whitespace-only empty objects round-trip exactly via
 // the structural closing-brace path.
 func TestWrapperEmptyObjectWhitespaceRoundTrip(t *testing.T) {

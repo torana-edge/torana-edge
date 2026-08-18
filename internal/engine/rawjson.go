@@ -95,11 +95,7 @@ func validateObject(raw []byte, allowAbsent bool) ([]byte, error) {
 	if err := pbjsontext.Validate(raw); err != nil {
 		return nil, fmt.Errorf("raw JSON: %w", err)
 	}
-	v, err := decodeUseNumber(raw)
-	if err != nil {
-		return nil, fmt.Errorf("raw JSON: %w", err)
-	}
-	if _, ok := v.(map[string]any); !ok {
+	if topLevelJSONByte(raw) != '{' {
 		return nil, fmt.Errorf("raw JSON must be a JSON object")
 	}
 	out := make([]byte, len(raw))
@@ -117,11 +113,7 @@ func validateArray(raw []byte, allowAbsent bool) ([]byte, error) {
 	if err := pbjsontext.Validate(raw); err != nil {
 		return nil, fmt.Errorf("raw JSON: %w", err)
 	}
-	v, err := decodeUseNumber(raw)
-	if err != nil {
-		return nil, fmt.Errorf("raw JSON: %w", err)
-	}
-	if _, ok := v.([]any); !ok {
+	if topLevelJSONByte(raw) != '[' {
 		return nil, fmt.Errorf("raw JSON must be a JSON array")
 	}
 	out := make([]byte, len(raw))
@@ -129,14 +121,17 @@ func validateArray(raw []byte, allowAbsent bool) ([]byte, error) {
 	return out, nil
 }
 
-func decodeUseNumber(raw []byte) (any, error) {
-	dec := json.NewDecoder(bytes.NewReader(raw))
-	dec.UseNumber()
-	var v any
-	if err := dec.Decode(&v); err != nil {
-		return nil, err
+// topLevelJSONByte returns the first non-whitespace byte. Callers invoke it
+// only after jsontext.Validate has already proved that raw contains exactly
+// one structurally valid JSON value. Inspecting the leading token therefore
+// proves the top-level shape without decoding and allocating the entire value.
+func topLevelJSONByte(raw []byte) byte {
+	for _, c := range raw {
+		if !isJSONSpace(c) {
+			return c
+		}
 	}
-	return v, nil
+	return 0
 }
 
 // ---------------------------------------------------------------------------
@@ -224,20 +219,25 @@ func (o OptionalJSONObject) DeleteMember(key string) (OptionalJSONObject, error)
 	return OptionalJSONObject{v: jsonBytes{bytes: out}}, nil
 }
 
-// WithoutMembers returns a copy with the listed members removed, applied in
-// FIXED argument order. Remaining members keep their exact lexemes and input
-// order, so the result is byte-identical for identical input — the
+// WithoutMembers returns a copy with the listed members removed in one
+// structural pass. Remaining members keep their exact key/value lexemes and
+// input order, so the result is byte-identical for identical input — the
 // deterministic alternative to rebuilding objects from map iteration.
 // Absent input stays absent; keys that are not present are no-ops.
 func (o OptionalJSONObject) WithoutMembers(keys ...string) (OptionalJSONObject, error) {
-	cur := o
 	for _, k := range keys {
-		var err error
-		if cur, err = cur.DeleteMember(k); err != nil {
+		if err := validateMemberKey(k); err != nil {
 			return o, err
 		}
 	}
-	return cur, nil
+	if o.v.absent() {
+		return o, nil
+	}
+	out, err := deleteMembers(o.v.bytes, keys)
+	if err != nil {
+		return o, err
+	}
+	return OptionalJSONObject{v: jsonBytes{bytes: out}}, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -337,7 +337,7 @@ func (r RequiredJSONObject) DeleteMember(key string) (RequiredJSONObject, error)
 	// the canonical `{}` — an empty result returns the zero representation
 	// (nil bytes materialize `{}`). The optional wrapper keeps its exact
 	// preserved spelling because a present empty object is still present.
-	if _, order, _, _, err := parseObjectSpans(out); err == nil && len(order) == 0 {
+	if order, _, _, err := parseObjectSpans(out); err == nil && len(order) == 0 {
 		return RequiredJSONObject{}, nil
 	}
 	return RequiredJSONObject{v: jsonBytes{bytes: out}}, nil
@@ -399,9 +399,14 @@ func (a OptionalJSONArray) Replace(newBytes []byte) (OptionalJSONArray, error) {
 // ---------------------------------------------------------------------------
 
 func decodeObjectView(raw []byte) (map[string]json.RawMessage, []string, error) {
-	vals, order, _, _, err := parseObjectSpans(raw)
+	order, spans, _, err := parseObjectSpans(raw)
 	if err != nil {
 		return nil, nil, err
+	}
+	vals := make(map[string]json.RawMessage, len(order))
+	for _, key := range order {
+		sp := spans[key]
+		vals[key] = append(json.RawMessage(nil), raw[sp.valStart:sp.valEnd]...)
 	}
 	return vals, order, nil
 }
@@ -434,54 +439,70 @@ func decodeArrayView(raw []byte) ([]json.RawMessage, error) {
 // memberSpan is one object member's exact structural spans.
 type memberSpan struct {
 	keyStart int
+	sepStart int
 	valStart int
 	valEnd   int
 	sepEnd   int
 }
 
-// parseObjectSpans strictly parses an object into ordered member values
-// (exact lexemes), the wire order, the member spans, and the offset of the
-// structural closing brace. The object must already be jsontext-valid.
-func parseObjectSpans(raw []byte) (map[string]json.RawMessage, []string, map[string]memberSpan, int, error) {
-	dec := json.NewDecoder(bytes.NewReader(raw))
-	dec.UseNumber()
-	tok, err := dec.Token()
-	if err != nil {
-		return nil, nil, nil, 0, fmt.Errorf("raw JSON: %w", err)
+// parseObjectSpans discovers the exact member spans and order without decoding
+// or copying member values. The object has already passed jsontext.Validate,
+// so this scanner only needs to locate structural boundaries while respecting
+// strings and escapes; it does not duplicate the normative JSON validator.
+func parseObjectSpans(raw []byte) ([]string, map[string]memberSpan, int, error) {
+	p := 0
+	for p < len(raw) && isJSONSpace(raw[p]) {
+		p++
 	}
-	if d, ok := tok.(json.Delim); !ok || d != '{' {
-		return nil, nil, nil, 0, fmt.Errorf("raw JSON must be an object")
+	if p >= len(raw) || raw[p] != '{' {
+		return nil, nil, 0, fmt.Errorf("raw JSON must be an object")
 	}
-	vals := map[string]json.RawMessage{}
+	p++
 	spans := map[string]memberSpan{}
 	var order []string
-	for dec.More() {
-		afterPrev := int(dec.InputOffset())
-		p := afterPrev
+	first := true
+	for {
 		for p < len(raw) && isJSONSpace(raw[p]) {
 			p++
 		}
-		if p < len(raw) && raw[p] == ',' {
+		if p < len(raw) && raw[p] == '}' {
+			return order, spans, p, nil
+		}
+		sepStart := p
+		if !first {
+			if p >= len(raw) || raw[p] != ',' {
+				return nil, nil, 0, fmt.Errorf("raw JSON: expected object member separator")
+			}
 			p++
 			for p < len(raw) && isJSONSpace(raw[p]) {
 				p++
 			}
 		}
 		keyStart := p
-		keyTok, err := dec.Token()
+		keyEnd, err := scanJSONStringEnd(raw, p)
 		if err != nil {
-			return nil, nil, nil, 0, fmt.Errorf("raw JSON: %w", err)
+			return nil, nil, 0, err
 		}
-		key, ok := keyTok.(string)
-		if !ok {
-			return nil, nil, nil, 0, fmt.Errorf("raw JSON: object member name is not a string")
+		var key string
+		if err := json.Unmarshal(raw[keyStart:keyEnd], &key); err != nil {
+			return nil, nil, 0, fmt.Errorf("raw JSON member name: %w", err)
 		}
-		var v json.RawMessage
-		if err := dec.Decode(&v); err != nil {
-			return nil, nil, nil, 0, fmt.Errorf("raw JSON: %w", err)
+		p = keyEnd
+		for p < len(raw) && isJSONSpace(raw[p]) {
+			p++
 		}
-		valEnd := int(dec.InputOffset())
-		valStart := valEnd - len(v)
+		if p >= len(raw) || raw[p] != ':' {
+			return nil, nil, 0, fmt.Errorf("raw JSON: expected object member colon")
+		}
+		p++
+		for p < len(raw) && isJSONSpace(raw[p]) {
+			p++
+		}
+		valStart := p
+		valEnd, err := scanJSONValueEnd(raw, p)
+		if err != nil {
+			return nil, nil, 0, err
+		}
 		sepEnd := valEnd
 		q := valEnd
 		for q < len(raw) && isJSONSpace(raw[q]) {
@@ -493,36 +514,61 @@ func parseObjectSpans(raw []byte) (map[string]json.RawMessage, []string, map[str
 				sepEnd++
 			}
 		}
-		vals[key] = append(json.RawMessage(nil), v...)
-		spans[key] = memberSpan{keyStart: keyStart, valStart: valStart, valEnd: valEnd, sepEnd: sepEnd}
+		spans[key] = memberSpan{keyStart: keyStart, sepStart: sepStart, valStart: valStart, valEnd: valEnd, sepEnd: sepEnd}
 		order = append(order, key)
+		p = valEnd
+		first = false
 	}
-	closeBrace := len(raw) - 1
-	if len(order) > 0 {
-		last := spans[order[len(order)-1]]
-		cb := last.sepEnd
-		for cb < len(raw) && isJSONSpace(raw[cb]) {
-			cb++
-		}
-		if cb < len(raw) && raw[cb] == '}' {
-			closeBrace = cb
-		}
-	} else {
-		// Empty object: skip leading whitespace to the opening brace, then
-		// whitespace to the structural closing brace.
-		cb := 0
-		for cb < len(raw) && isJSONSpace(raw[cb]) {
-			cb++
-		}
-		cb++ // the '{'
-		for cb < len(raw) && isJSONSpace(raw[cb]) {
-			cb++
-		}
-		if cb < len(raw) && raw[cb] == '}' {
-			closeBrace = cb
+}
+
+func scanJSONStringEnd(raw []byte, start int) (int, error) {
+	if start >= len(raw) || raw[start] != '"' {
+		return 0, fmt.Errorf("raw JSON: expected string")
+	}
+	for p := start + 1; p < len(raw); p++ {
+		switch raw[p] {
+		case '\\':
+			p++
+		case '"':
+			return p + 1, nil
 		}
 	}
-	return vals, order, spans, closeBrace, nil
+	return 0, fmt.Errorf("raw JSON: unterminated string")
+}
+
+func scanJSONValueEnd(raw []byte, start int) (int, error) {
+	if start >= len(raw) {
+		return 0, fmt.Errorf("raw JSON: missing value")
+	}
+	if raw[start] == '"' {
+		return scanJSONStringEnd(raw, start)
+	}
+	if raw[start] != '{' && raw[start] != '[' {
+		p := start
+		for p < len(raw) && raw[p] != ',' && raw[p] != '}' && raw[p] != ']' && !isJSONSpace(raw[p]) {
+			p++
+		}
+		return p, nil
+	}
+	depth := 0
+	for p := start; p < len(raw); p++ {
+		switch raw[p] {
+		case '"':
+			end, err := scanJSONStringEnd(raw, p)
+			if err != nil {
+				return 0, err
+			}
+			p = end - 1
+		case '{', '[':
+			depth++
+		case '}', ']':
+			depth--
+			if depth == 0 {
+				return p + 1, nil
+			}
+		}
+	}
+	return 0, fmt.Errorf("raw JSON: unterminated composite value")
 }
 
 func isJSONSpace(c byte) bool {
@@ -541,7 +587,7 @@ func setMember(raw []byte, key string, value json.RawMessage) ([]byte, error) {
 	if err := pbjsontext.Validate(value); err != nil {
 		return nil, fmt.Errorf("raw JSON member %q: %w", key, err)
 	}
-	_, _, spans, closeBrace, err := parseObjectSpans(raw)
+	_, spans, closeBrace, err := parseObjectSpans(raw)
 	if err != nil {
 		return nil, err
 	}
@@ -587,7 +633,7 @@ func deleteMember(raw []byte, key string) ([]byte, error) {
 	if err := validateMemberKey(key); err != nil {
 		return nil, err
 	}
-	_, order, spans, _, err := parseObjectSpans(raw)
+	order, spans, _, err := parseObjectSpans(raw)
 	if err != nil {
 		return nil, err
 	}
@@ -622,6 +668,51 @@ func deleteMember(raw []byte, key string) ([]byte, error) {
 		return nil, fmt.Errorf("raw JSON DeleteMember produced invalid bytes: %w", err)
 	}
 	return joined, nil
+}
+
+// deleteMembers removes all named members after one parse. It retains each
+// surviving member's exact key/value bytes and relative order. When removed
+// members separate two survivors, the latter survivor contributes its own
+// original structural separator (whitespace/comma/whitespace); removed member
+// bytes can therefore never leak into the result.
+func deleteMembers(raw []byte, keys []string) ([]byte, error) {
+	order, spans, _, err := parseObjectSpans(raw)
+	if err != nil {
+		return nil, err
+	}
+	remove := make(map[string]struct{}, len(keys))
+	for _, key := range keys {
+		remove[key] = struct{}{}
+	}
+	retained := make([]string, 0, len(order))
+	for _, key := range order {
+		if _, drop := remove[key]; !drop {
+			retained = append(retained, key)
+		}
+	}
+	if len(retained) == len(order) {
+		return append([]byte(nil), raw...), nil
+	}
+
+	var out []byte
+	if len(order) == 0 {
+		return append([]byte(nil), raw...), nil
+	}
+	firstOriginal := spans[order[0]]
+	lastOriginal := spans[order[len(order)-1]]
+	out = append(out, raw[:firstOriginal.keyStart]...)
+	for i, key := range retained {
+		sp := spans[key]
+		if i > 0 {
+			out = append(out, raw[sp.sepStart:sp.keyStart]...)
+		}
+		out = append(out, raw[sp.keyStart:sp.valEnd]...)
+	}
+	out = append(out, raw[lastOriginal.valEnd:]...)
+	if _, err := validateObject(out, false); err != nil {
+		return nil, fmt.Errorf("raw JSON WithoutMembers produced invalid bytes: %w", err)
+	}
+	return out, nil
 }
 
 // ParseRequiredObjectOrEmpty is the host/provider NORMALIZATION constructor
