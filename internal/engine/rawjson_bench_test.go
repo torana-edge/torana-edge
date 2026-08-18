@@ -47,3 +47,17 @@ func BenchmarkProjectOptionalJSONObject1MiB(b *testing.B) {
 		benchmarkJSONObjectSink = got
 	}
 }
+
+func BenchmarkParseOptionalJSONObjectExcluding1MiB(b *testing.B) {
+	raw := benchmarkLargeRequestObject()
+	b.ReportAllocs()
+	b.SetBytes(int64(len(raw)))
+	b.ResetTimer()
+	for range b.N {
+		got, err := ParseOptionalJSONObjectExcluding(raw, "model", "messages", "tools", "stream")
+		if err != nil {
+			b.Fatal(err)
+		}
+		benchmarkJSONObjectSink = got
+	}
+}

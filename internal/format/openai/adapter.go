@@ -453,11 +453,8 @@ func (a *Adapter) unmarshalChat(rawBody []byte) (*engine.ChatRequest, error) {
 
 	// Provider extensions: original body minus the canonical fields, deleted
 	// in fixed order (deterministic; unknown members keep lexemes + order).
-	ext, xerr := engine.ParseOptionalJSONObject(rawBody)
-	if xerr != nil {
-		return nil, fmt.Errorf("openai provider extensions: %w", xerr)
-	}
-	ext, xerr = ext.WithoutMembers("model", "messages", "tools", "stream",
+	ext, xerr := engine.ParseOptionalJSONObjectExcluding(rawBody,
+		"model", "messages", "tools", "stream",
 		"max_tokens", "temperature", "top_p", "stop")
 	if xerr != nil {
 		return nil, fmt.Errorf("openai provider extensions: %w", xerr)
@@ -691,11 +688,8 @@ func (a *Adapter) unmarshalResponses(rawBody []byte) (*engine.ChatRequest, error
 	// provider extensions (the typed host-state commit replaces them). The
 	// input LAYOUT is the ordered body itself — item order is block order,
 	// so the old layout sentinel is gone.
-	ext, xerr := engine.ParseOptionalJSONObject(rawBody)
-	if xerr != nil {
-		return nil, fmt.Errorf("openai responses provider extensions: %w", xerr)
-	}
-	ext, xerr = ext.WithoutMembers("model", "input", "tools", "stream")
+	ext, xerr := engine.ParseOptionalJSONObjectExcluding(rawBody,
+		"model", "input", "tools", "stream")
 	if xerr != nil {
 		return nil, fmt.Errorf("openai responses provider extensions: %w", xerr)
 	}

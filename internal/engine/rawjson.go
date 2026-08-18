@@ -155,6 +155,34 @@ func ParseOptionalJSONObject(raw []byte) (OptionalJSONObject, error) {
 	return OptionalJSONObject{v: jsonBytes{bytes: b}}, nil
 }
 
+// ParseOptionalJSONObjectExcluding validates raw and constructs an object
+// authority without the named top-level members in one span pass. It is the
+// allocation-safe form for provider adapters: parsing the complete request
+// into an authority and then deleting canonical fields copied a multi-megabyte
+// prompt only to discard that copy immediately. Unknown retained members keep
+// their exact key/value lexemes, order, and whitespace.
+func ParseOptionalJSONObjectExcluding(raw []byte, keys ...string) (OptionalJSONObject, error) {
+	for _, key := range keys {
+		if err := validateMemberKey(key); err != nil {
+			return OptionalJSONObject{}, err
+		}
+	}
+	if len(raw) == 0 {
+		return OptionalJSONObject{}, nil
+	}
+	if err := pbjsontext.Validate(raw); err != nil {
+		return OptionalJSONObject{}, fmt.Errorf("raw JSON: %w", err)
+	}
+	if topLevelJSONByte(raw) != '{' {
+		return OptionalJSONObject{}, fmt.Errorf("raw JSON must be a JSON object")
+	}
+	b, err := deleteMembers(raw, keys)
+	if err != nil {
+		return OptionalJSONObject{}, err
+	}
+	return OptionalJSONObject{v: jsonBytes{bytes: b}}, nil
+}
+
 // IsAbsent reports whether the object is absent (distinct from the
 // canonical empty shape `{}`).
 func (o OptionalJSONObject) IsAbsent() bool { return o.v.absent() }

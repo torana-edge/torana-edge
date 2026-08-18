@@ -203,11 +203,8 @@ func (a *Adapter) Unmarshal(rawBody []byte) (*engine.ChatRequest, error) {
 
 	// Provider extensions: original body minus the canonical fields, deleted
 	// in fixed order (deterministic; unknown members keep lexemes + order).
-	ext, xerr := engine.ParseOptionalJSONObject(rawBody)
-	if xerr != nil {
-		return nil, fmt.Errorf("bedrock provider extensions: %w", xerr)
-	}
-	ext, xerr = ext.WithoutMembers("modelId", "system", "messages", "toolConfig", "inferenceConfig")
+	ext, xerr := engine.ParseOptionalJSONObjectExcluding(rawBody,
+		"modelId", "system", "messages", "toolConfig", "inferenceConfig")
 	if xerr != nil {
 		return nil, fmt.Errorf("bedrock provider extensions: %w", xerr)
 	}

@@ -298,13 +298,9 @@ func (a *Adapter) Unmarshal(rawBody []byte) (*engine.ChatRequest, error) {
 		// FORBIDDEN as extras — rebuilt from canonical ABI fields; unknown
 		// generation siblings survive inside the preserved generationConfig).
 		chat.CodeAssist = true
-		topObj, toerr := engine.ParseOptionalJSONObject(rawBody)
+		env, toerr := engine.ParseOptionalJSONObjectExcluding(rawBody, envelopeRequestMember)
 		if toerr != nil {
 			return nil, fmt.Errorf("gemini code assist extensions: %w", toerr)
-		}
-		env, err := topObj.WithoutMembers(envelopeRequestMember)
-		if err != nil {
-			return nil, fmt.Errorf("gemini code assist extensions: %w", err)
 		}
 		// Outer model is canonical: rebuilt from ChatRequest.Model, never
 		// a preserved extra.
@@ -314,13 +310,10 @@ func (a *Adapter) Unmarshal(rawBody []byte) (*engine.ChatRequest, error) {
 		if err != nil {
 			return nil, fmt.Errorf("gemini code assist extensions: %w", err)
 		}
-		innerObj, ierr := engine.ParseOptionalJSONObject(reqBytes)
+		reqExtra, ierr := engine.ParseOptionalJSONObjectExcluding(reqBytes,
+			"systemInstruction", "contents", "tools", "safetySettings")
 		if ierr != nil {
 			return nil, fmt.Errorf("gemini code assist extensions: %w", ierr)
-		}
-		reqExtra, err := innerObj.WithoutMembers("systemInstruction", "contents", "tools", "safetySettings")
-		if err != nil {
-			return nil, fmt.Errorf("gemini code assist extensions: %w", err)
 		}
 		if reqExtra, err = stripGenerationCanonicalMembers(reqExtra); err != nil {
 			return nil, fmt.Errorf("gemini code assist extensions: %w", err)
@@ -338,11 +331,8 @@ func (a *Adapter) Unmarshal(rawBody []byte) (*engine.ChatRequest, error) {
 	} else {
 		// Bare Gemini: preserve unknown top-level fields deterministically
 		// (original body minus the canonical fields, fixed delete order).
-		ext, xerr := engine.ParseOptionalJSONObject(rawBody)
-		if xerr != nil {
-			return nil, fmt.Errorf("gemini provider extensions: %w", xerr)
-		}
-		ext, xerr = ext.WithoutMembers("systemInstruction", "contents", "tools", "generationConfig", "safetySettings")
+		ext, xerr := engine.ParseOptionalJSONObjectExcluding(rawBody,
+			"systemInstruction", "contents", "tools", "generationConfig", "safetySettings")
 		if xerr != nil {
 			return nil, fmt.Errorf("gemini provider extensions: %w", xerr)
 		}
