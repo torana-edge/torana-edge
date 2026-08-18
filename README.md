@@ -146,6 +146,7 @@ the control plane first. See [docs/PLUGINS.md](docs/PLUGINS.md).
 | `otel` | `run_before_request`, `run_after_response` | Emits request/response OTel metrics |
 | `cache_tier_selector` | `run_before_request` | Buys the cheapest prompt-cache lifetime for a conversation, and never changes its mind for a given prefix |
 | `cache_warmer` | `run_before_request`, `run_on_tick` | Refreshes a chosen conversation's cached prefix before it lapses, bounded by a deadline and a break-even budget |
+| `tool_governor` | `run_before_request` | Restricts or replaces the tool definitions advertised to the model; it is model-input policy, not an execution sandbox |
 
 `auth` is deliberately **not** in that list and is not installed by
 `--official`. Its own manifest says it is not published to the public registry:

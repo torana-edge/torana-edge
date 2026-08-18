@@ -210,6 +210,9 @@ Order matters and Torana enforces the constraints it can:
 - Run **one** of `compactor` or `keyword_compactor`, not both. Their manifests
   declare the conflict, so Torana rejects an approved generation containing
   both before either guest is loaded.
+- Put `tool_governor` before `intent` and `schema_translator`. Governance is
+  defined over the harness's original tool definitions; the later plugins may
+  then add intent fields or translate an approved schema for the provider.
 - Route-capable plugins must precede compaction economic-gate plugins.
 
 A misordering that Torana cannot detect fails quietly — the pipeline runs and
