@@ -316,3 +316,33 @@ fresh process per row.
 
 The retained first run is documented in
 [`BENCHMARK_LARGE_REQUEST_RESULTS_2026-08-18.md`](BENCHMARK_LARGE_REQUEST_RESULTS_2026-08-18.md).
+
+### Heap and GC attribution
+
+Set `TORANA_BENCH_PROFILE_DIR` to compile a benchmark-only Torana binary and
+capture forced-GC runtime counters plus before/after heap and cumulative-allocation
+profiles around every Torana row:
+
+```bash
+TORANA_BENCH_PROFILE=large \
+TORANA_BENCH_REQUEST_SHAPE=agent \
+TORANA_BENCH_DURATION=3s \
+TORANA_BENCH_WARMUP=0s \
+TORANA_BENCH_PROFILE_DIR="$PWD/large-profiles" \
+  ./scripts/benchmark-production.sh large-profile.jsonl
+```
+
+Use a zero warmup when dividing the reported allocation delta by the measured
+request count; otherwise the delta correctly includes warmup work that is not
+part of that count. `summary.jsonl` records cumulative allocated bytes,
+allocations, GC count and pause time, and forced-GC heap state for each Torana
+row. The directory also retains Go `heap` and `allocs` profiles for call-site
+attribution.
+
+The profiling HTTP surface exists only under the
+`torana_benchmark_profile` build tag and accepts only a literal loopback listen
+address. It is absent from release binaries; do not add a production pprof
+listener merely to collect benchmark evidence.
+
+The retained first heap/GC run and its allocation-owner findings are documented
+in [`BENCHMARK_LARGE_HEAP_RESULTS_2026-08-18.md`](BENCHMARK_LARGE_HEAP_RESULTS_2026-08-18.md).

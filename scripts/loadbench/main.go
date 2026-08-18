@@ -37,6 +37,8 @@ func main() {
 		err = runUpstream(os.Args[2:])
 	case "load":
 		err = runLoad(os.Args[2:])
+	case "memory-summary":
+		err = runMemorySummary(os.Args[2:])
 	default:
 		err = fmt.Errorf("unknown command %q", os.Args[1])
 	}
@@ -58,6 +60,8 @@ func runMetadata(args []string) error {
 	streamConcurrency := fs.String("stream-concurrency", "1 8", "space-separated streaming concurrency levels")
 	runStream := fs.Int("run-stream", 1, "whether the profile measures streaming rows")
 	requestShape := fs.String("request-shape", "plain", "request body shape")
+	duration := fs.String("duration", "10s", "measured duration per row")
+	warmup := fs.String("warmup", "2s", "warmup duration per row")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -75,7 +79,7 @@ func runMetadata(args []string) error {
 		"upstream_events": *events, "upstream_response_bytes": *responseBytes,
 		"payload_bytes": *payloadBytes, "nonstream_concurrency": *nonstreamConcurrency,
 		"stream_concurrency": *streamConcurrency, "run_stream": *runStream == 1,
-		"request_shape": *requestShape,
+		"request_shape": *requestShape, "duration": *duration, "warmup": *warmup,
 	})
 }
 
@@ -176,6 +180,159 @@ type loadResult struct {
 	RSSStartBytes     int64   `json:"rss_start_bytes,omitempty"`
 	RSSPeakBytes      int64   `json:"rss_peak_bytes,omitempty"`
 	ProcessCPUSeconds float64 `json:"process_cpu_seconds,omitempty"`
+}
+
+type memoryStatsSnapshot struct {
+	Alloc        uint64  `json:"alloc_bytes"`
+	TotalAlloc   uint64  `json:"total_alloc_bytes"`
+	HeapAlloc    uint64  `json:"heap_alloc_bytes"`
+	HeapSys      uint64  `json:"heap_sys_bytes"`
+	HeapIdle     uint64  `json:"heap_idle_bytes"`
+	HeapInuse    uint64  `json:"heap_inuse_bytes"`
+	HeapReleased uint64  `json:"heap_released_bytes"`
+	StackInuse   uint64  `json:"stack_inuse_bytes"`
+	Mallocs      uint64  `json:"mallocs"`
+	Frees        uint64  `json:"frees"`
+	NumGC        uint32  `json:"num_gc"`
+	PauseTotalNS uint64  `json:"pause_total_ns"`
+	GCCPUFrac    float64 `json:"gc_cpu_fraction"`
+}
+
+type memorySummary struct {
+	Kind                  string  `json:"kind"`
+	Name                  string  `json:"name"`
+	Requests              int     `json:"requests"`
+	PayloadBytes          int     `json:"payload_bytes"`
+	Concurrency           int     `json:"concurrency"`
+	TotalAllocBytes       uint64  `json:"total_alloc_bytes"`
+	AllocBytesPerRequest  float64 `json:"alloc_bytes_per_request"`
+	Mallocs               uint64  `json:"mallocs"`
+	MallocsPerRequest     float64 `json:"mallocs_per_request"`
+	Frees                 uint64  `json:"frees"`
+	GCs                   uint32  `json:"gcs"`
+	GCPauseMillis         float64 `json:"gc_pause_ms"`
+	GCCPUFractionBefore   float64 `json:"gc_cpu_fraction_before"`
+	GCCPUFractionAfter    float64 `json:"gc_cpu_fraction_after"`
+	HeapAllocBeforeBytes  uint64  `json:"heap_alloc_before_bytes"`
+	HeapAllocAfterBytes   uint64  `json:"heap_alloc_after_bytes"`
+	HeapAllocDeltaBytes   int64   `json:"heap_alloc_delta_bytes"`
+	HeapInuseBeforeBytes  uint64  `json:"heap_inuse_before_bytes"`
+	HeapInuseAfterBytes   uint64  `json:"heap_inuse_after_bytes"`
+	HeapInuseDeltaBytes   int64   `json:"heap_inuse_delta_bytes"`
+	HeapSysBeforeBytes    uint64  `json:"heap_sys_before_bytes"`
+	HeapSysAfterBytes     uint64  `json:"heap_sys_after_bytes"`
+	HeapReleasedAfter     uint64  `json:"heap_released_after_bytes"`
+	StackInuseBeforeBytes uint64  `json:"stack_inuse_before_bytes"`
+	StackInuseAfterBytes  uint64  `json:"stack_inuse_after_bytes"`
+}
+
+func runMemorySummary(args []string) error {
+	fs := flag.NewFlagSet("memory-summary", flag.ContinueOnError)
+	resultsPath := fs.String("results", "", "benchmark JSONL path")
+	profileDir := fs.String("profile-dir", "", "directory containing before/after memstats")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *resultsPath == "" || *profileDir == "" {
+		return errors.New("results and profile-dir are required")
+	}
+	results, err := os.Open(*resultsPath)
+	if err != nil {
+		return err
+	}
+	defer results.Close()
+	return summarizeMemory(results, *profileDir, os.Stdout)
+}
+
+func summarizeMemory(results io.Reader, profileDir string, out io.Writer) error {
+	scanner := bufio.NewScanner(results)
+	scanner.Buffer(make([]byte, 64<<10), 4<<20)
+	encoder := json.NewEncoder(out)
+	rows := 0
+	for scanner.Scan() {
+		var envelope struct {
+			Kind string `json:"kind"`
+			Name string `json:"name"`
+		}
+		if err := json.Unmarshal(scanner.Bytes(), &envelope); err != nil {
+			return fmt.Errorf("decode benchmark envelope: %w", err)
+		}
+		if envelope.Kind == "metadata" || !strings.HasPrefix(envelope.Name, "torana/") {
+			continue
+		}
+		var result loadResult
+		if err := json.Unmarshal(scanner.Bytes(), &result); err != nil {
+			return fmt.Errorf("decode benchmark result: %w", err)
+		}
+		if result.Requests <= 0 {
+			return fmt.Errorf("%s has no successful requests", result.Name)
+		}
+		base := profileDir + "/" + profileFileName(result.Name)
+		before, err := readMemoryStats(base + ".before.memstats.json")
+		if err != nil {
+			return fmt.Errorf("%s before stats: %w", result.Name, err)
+		}
+		after, err := readMemoryStats(base + ".after.memstats.json")
+		if err != nil {
+			return fmt.Errorf("%s after stats: %w", result.Name, err)
+		}
+		if after.TotalAlloc < before.TotalAlloc || after.Mallocs < before.Mallocs || after.Frees < before.Frees || after.NumGC < before.NumGC || after.PauseTotalNS < before.PauseTotalNS {
+			return fmt.Errorf("%s cumulative memory counters moved backwards", result.Name)
+		}
+		alloc := after.TotalAlloc - before.TotalAlloc
+		mallocs := after.Mallocs - before.Mallocs
+		summary := memorySummary{
+			Kind: "memory_profile", Name: result.Name, Requests: result.Requests,
+			PayloadBytes: result.PayloadBytes, Concurrency: result.Concurrency,
+			TotalAllocBytes: alloc, AllocBytesPerRequest: float64(alloc) / float64(result.Requests),
+			Mallocs: mallocs, MallocsPerRequest: float64(mallocs) / float64(result.Requests),
+			Frees: after.Frees - before.Frees, GCs: after.NumGC - before.NumGC,
+			GCPauseMillis:       float64(after.PauseTotalNS-before.PauseTotalNS) / float64(time.Millisecond),
+			GCCPUFractionBefore: before.GCCPUFrac, GCCPUFractionAfter: after.GCCPUFrac,
+			HeapAllocBeforeBytes: before.HeapAlloc, HeapAllocAfterBytes: after.HeapAlloc,
+			HeapAllocDeltaBytes:  int64(after.HeapAlloc) - int64(before.HeapAlloc),
+			HeapInuseBeforeBytes: before.HeapInuse, HeapInuseAfterBytes: after.HeapInuse,
+			HeapInuseDeltaBytes: int64(after.HeapInuse) - int64(before.HeapInuse),
+			HeapSysBeforeBytes:  before.HeapSys, HeapSysAfterBytes: after.HeapSys,
+			HeapReleasedAfter:     after.HeapReleased,
+			StackInuseBeforeBytes: before.StackInuse, StackInuseAfterBytes: after.StackInuse,
+		}
+		if err := encoder.Encode(summary); err != nil {
+			return err
+		}
+		rows++
+	}
+	if err := scanner.Err(); err != nil {
+		return err
+	}
+	if rows == 0 {
+		return errors.New("benchmark results contain no Torana rows")
+	}
+	return nil
+}
+
+func profileFileName(name string) string {
+	return strings.NewReplacer("/", "_", "=", "_").Replace(name)
+}
+
+func readMemoryStats(path string) (memoryStatsSnapshot, error) {
+	var stats memoryStatsSnapshot
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return stats, err
+	}
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&stats); err != nil {
+		return stats, err
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		return stats, errors.New("memstats contain trailing JSON")
+	}
+	if stats.TotalAlloc == 0 || stats.HeapSys == 0 || stats.Mallocs == 0 {
+		return stats, errors.New("memstats are missing required runtime counters")
+	}
+	return stats, nil
 }
 
 func runLoad(args []string) error {
