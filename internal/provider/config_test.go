@@ -94,6 +94,9 @@ func TestSaveAndLoadManagedConfig(t *testing.T) {
 		Plugins: PluginsConfig{
 			Dir:   "./custom-plugins",
 			Order: []string{"intent", "schema_translator"},
+			HookOrder: map[string][]string{
+				"run_after_response": {"schema_translator", "intent"},
+			},
 			Config: map[string]json.RawMessage{
 				"intent": json.RawMessage(`{"mode":"strict"}`),
 			},
@@ -131,6 +134,9 @@ func TestSaveAndLoadManagedConfig(t *testing.T) {
 	}
 	if !reflect.DeepEqual(loaded.Plugins.Order, []string{"intent", "schema_translator"}) {
 		t.Errorf("loaded.Plugins.Order = %v, want [intent schema_translator]", loaded.Plugins.Order)
+	}
+	if !reflect.DeepEqual(loaded.Plugins.HookOrder, map[string][]string{"run_after_response": {"schema_translator", "intent"}}) {
+		t.Errorf("loaded.Plugins.HookOrder = %v", loaded.Plugins.HookOrder)
 	}
 }
 
@@ -464,6 +470,7 @@ func TestSeedKeepsPluginsWithoutDir(t *testing.T) {
 	cfg := writeSeed(t, `{
 		"plugins": {
 			"order": ["intent", "compactor"],
+			"hook_order": {"run_before_request": ["intent", "compactor"]},
 			"allow_unapproved": false,
 			"approvals": {
 				"torana/pii": {"digest": "abc123", "permissions": ["env.block_request"]}
@@ -473,6 +480,9 @@ func TestSeedKeepsPluginsWithoutDir(t *testing.T) {
 
 	if !reflect.DeepEqual(cfg.Plugins.Order, []string{"intent", "compactor"}) {
 		t.Errorf("Plugins.Order = %v, want [intent compactor]", cfg.Plugins.Order)
+	}
+	if !reflect.DeepEqual(cfg.Plugins.HookOrder, map[string][]string{"run_before_request": {"intent", "compactor"}}) {
+		t.Errorf("Plugins.HookOrder = %v", cfg.Plugins.HookOrder)
 	}
 	approval, ok := cfg.Plugins.Approvals["torana/pii"]
 	if !ok {

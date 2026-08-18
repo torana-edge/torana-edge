@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -365,6 +366,7 @@ func TestControlPlanePluginsOrderingConstraintError(t *testing.T) {
 
 	client := &http.Client{Timeout: 5 * time.Second}
 	url := "http://" + ln.Addr().String()
+	originalPipeline := srv.pluginPipeline.Load()
 
 	// Try setting an invalid order: gate before router -> must return HTTP 400
 	invalidBody := `{"order":["gate","router"]}`
@@ -392,6 +394,48 @@ func TestControlPlanePluginsOrderingConstraintError(t *testing.T) {
 	currentPlugins := srv.GetConfig().Providers.Plugins
 	if len(currentPlugins.Order) != 2 || currentPlugins.Order[0] != "router" {
 		t.Errorf("in-memory config was not reverted, current order: %v", currentPlugins.Order)
+	}
+
+	// The same economic constraint is enforced on the effective before-hook
+	// order, and a rejected override is rolled back atomically.
+	invalidHookBody := `{"hook_order":{"run_before_request":["gate","router"]}}`
+	req, _ = http.NewRequest(http.MethodPost, url+"/_torana/api/plugins", bytes.NewBufferString(invalidHookBody))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Origin", url)
+	resp, err = client.Do(req)
+	if err != nil {
+		t.Fatalf("POST invalid hook_order: %v", err)
+	}
+	invalidHookResponse, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest || !strings.Contains(string(invalidHookResponse), "hook_order.run_before_request") {
+		t.Fatalf("invalid hook_order: status=%d body=%s", resp.StatusCode, invalidHookResponse)
+	}
+	if got := srv.GetConfig().Providers.Plugins.HookOrder; len(got) != 0 {
+		t.Fatalf("rejected hook_order persisted: %v", got)
+	}
+	if got := srv.pluginPipeline.Load(); got != originalPipeline {
+		t.Fatal("rejected hook_order replaced the live pipeline")
+	}
+
+	validHookBody := `{"hook_order":{"run_before_request":["router","gate"]}}`
+	req, _ = http.NewRequest(http.MethodPost, url+"/_torana/api/plugins", bytes.NewBufferString(validHookBody))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Origin", url)
+	resp, err = client.Do(req)
+	if err != nil {
+		t.Fatalf("POST valid hook_order: %v", err)
+	}
+	validHookResponse, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("valid hook_order: status=%d body=%s", resp.StatusCode, validHookResponse)
+	}
+	if got := srv.GetConfig().Providers.Plugins.HookOrder["run_before_request"]; !slices.Equal(got, []string{"router", "gate"}) {
+		t.Fatalf("hook_order was not applied: %v", got)
+	}
+	if got := srv.pluginPipeline.Load(); got == originalPipeline {
+		t.Fatal("accepted hook_order did not publish a new immutable pipeline generation")
 	}
 }
 

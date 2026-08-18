@@ -675,6 +675,7 @@ func New(cfg Config) (*Server, error) {
 	}
 	if cfg.Providers.Plugins.Dir == "" &&
 		(len(cfg.Providers.Plugins.Order) > 0 ||
+			len(cfg.Providers.Plugins.HookOrder) > 0 ||
 			len(cfg.Providers.Plugins.Config) > 0 ||
 			len(cfg.Providers.Plugins.Approvals) > 0) {
 		cfg.Providers.Plugins.Dir = provider.DefaultPluginsDir
@@ -787,6 +788,7 @@ func New(cfg Config) (*Server, error) {
 				return plugin.PluginConfig{
 					Dir:             p.Dir,
 					Order:           p.Order,
+					HookOrder:       p.HookOrder,
 					Config:          p.Config,
 					Approvals:       pluginApprovals(p.Approvals),
 					AllowUnapproved: p.AllowUnapproved,
@@ -1945,6 +1947,7 @@ func New(cfg Config) (*Server, error) {
 
 		var req struct {
 			Order     *[]string                           `json:"order,omitempty"`
+			HookOrder *map[string][]string                `json:"hook_order,omitempty"`
 			Config    map[string]json.RawMessage          `json:"config,omitempty"`
 			Approvals *map[string]provider.PluginApproval `json:"approvals,omitempty"`
 		}
@@ -1970,6 +1973,9 @@ func New(cfg Config) (*Server, error) {
 		newPlugins := oldPlugins
 		if req.Order != nil {
 			newPlugins.Order = *req.Order
+		}
+		if req.HookOrder != nil {
+			newPlugins.HookOrder = *req.HookOrder
 		}
 		if req.Config != nil {
 			// Validate against each bundle's declared schema, exactly as the
@@ -3115,6 +3121,7 @@ func (s *Server) rebuildPipelineLocked(pcfg provider.PluginsConfig) (*plugin.Plu
 	pp, err := plugin.NewPipeline(rt, plugin.PluginConfig{
 		Dir:             pcfg.Dir,
 		Order:           pcfg.Order,
+		HookOrder:       pcfg.HookOrder,
 		Config:          pcfg.Config,
 		Approvals:       pluginApprovals(pcfg.Approvals),
 		AllowUnapproved: pcfg.AllowUnapproved,

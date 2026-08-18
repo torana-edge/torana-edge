@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -583,6 +584,14 @@ type PluginPipeline struct {
 	plugins []*loadedPlugin
 	runtime *wasm.Runtime
 
+	// The multi-plugin dispatch orders are immutable snapshots of this exact
+	// loaded generation. plugins remains the lifecycle/status/target-lookup
+	// authority; HTTP dispatch is target-addressed and therefore has no order.
+	beforePlugins []*loadedPlugin
+	afterPlugins  []*loadedPlugin
+	streamPlugins []*loadedPlugin
+	tickPlugins   []*loadedPlugin
+
 	// skipped records plugins named in config.Order that were not loaded
 	// because the operator has not approved their current bundle digest.
 	// A missing approval is operator state, not a malformed configuration:
@@ -677,6 +686,157 @@ type LoadedPluginStatus struct {
 	Agent      *AgentDescriptor
 }
 
+var orderedMultiPluginHooks = [...]string{
+	"run_before_request",
+	"run_after_response",
+	"run_on_stream_chunk",
+	"run_on_tick",
+}
+
+func supportedOrderedHook(name string) bool {
+	for _, hook := range orderedMultiPluginHooks {
+		if name == hook {
+			return true
+		}
+	}
+	return false
+}
+
+// validateHookOrders makes every override an exact permutation of the enabled
+// manifests that declare that hook. Exactness is deliberate: installing a new
+// hook participant must not silently place it between observers and mutators.
+func validateHookOrders(config PluginConfig, byName map[string]PluginBundle) error {
+	enabled := make(map[string]struct{}, len(config.Order))
+	for _, name := range config.Order {
+		enabled[name] = struct{}{}
+	}
+
+	configuredHooks := make([]string, 0, len(config.HookOrder))
+	for hook := range config.HookOrder {
+		if !supportedOrderedHook(hook) {
+			configuredHooks = append(configuredHooks, hook)
+		}
+	}
+	if len(configuredHooks) > 0 {
+		sort.Strings(configuredHooks)
+		return fmt.Errorf("plugin hook_order contains unsupported hook %q", configuredHooks[0])
+	}
+
+	// Fixed traversal makes diagnostics deterministic even though JSON objects
+	// decode into a map.
+	for _, hook := range orderedMultiPluginHooks {
+		order, overridden := config.HookOrder[hook]
+		if !overridden {
+			continue
+		}
+
+		expected := make(map[string]struct{})
+		expectedOrder := make([]string, 0, len(config.Order))
+		for _, name := range config.Order {
+			bundle, ok := byName[name]
+			if ok && hasHook(bundle.Manifest, hook) {
+				expected[name] = struct{}{}
+				expectedOrder = append(expectedOrder, name)
+			}
+		}
+
+		seen := make(map[string]int, len(order))
+		for index, name := range order {
+			if _, duplicate := seen[name]; duplicate {
+				return fmt.Errorf("plugin hook_order.%s contains duplicate %q", hook, name)
+			}
+			seen[name] = index
+			if _, configured := enabled[name]; !configured {
+				return fmt.Errorf("plugin hook_order.%s contains %q, which is not in plugins.order", hook, name)
+			}
+			bundle, ok := byName[name]
+			if !ok {
+				return fmt.Errorf("plugin hook_order.%s contains missing or malformed plugin %q", hook, name)
+			}
+			if !hasHook(bundle.Manifest, hook) {
+				return fmt.Errorf("plugin hook_order.%s contains plugin %q, which does not declare that hook", hook, name)
+			}
+		}
+		for _, name := range expectedOrder {
+			if _, ok := seen[name]; !ok {
+				return fmt.Errorf("plugin hook_order.%s is missing plugin %q", hook, name)
+			}
+		}
+		if len(seen) != len(expected) {
+			return fmt.Errorf("plugin hook_order.%s must contain exactly %d plugins, got %d", hook, len(expected), len(seen))
+		}
+
+		// requires_upstream is a lifecycle dependency globally and an order
+		// dependency in each hook both sides share. Do not invent an order for
+		// hooks the upstream plugin does not implement.
+		indexByID := make(map[string]int, len(order))
+		for index, name := range order {
+			indexByID[byName[name].Manifest.ID] = index
+		}
+		for index, name := range order {
+			for _, requiredID := range byName[name].Manifest.RequiresUpstream {
+				if requiredIndex, shared := indexByID[requiredID]; shared && requiredIndex >= index {
+					return fmt.Errorf("ordering constraint violation: plugin %q requires plugin id %q earlier in plugins.hook_order.%s", name, requiredID, hook)
+				}
+			}
+		}
+	}
+	return nil
+}
+
+func loadedPluginsForHook(loaded []*loadedPlugin, overrides map[string][]string, hook string) []*loadedPlugin {
+	if order, overridden := overrides[hook]; overridden {
+		byName := make(map[string]*loadedPlugin, len(loaded))
+		for _, lp := range loaded {
+			byName[lp.manifest.Name] = lp
+		}
+		out := make([]*loadedPlugin, 0, len(order))
+		for _, name := range order {
+			if lp := byName[name]; lp != nil {
+				out = append(out, lp)
+			}
+		}
+		return out
+	}
+	out := make([]*loadedPlugin, 0, len(loaded))
+	for _, lp := range loaded {
+		if hasHook(lp.manifest, hook) {
+			out = append(out, lp)
+		}
+	}
+	return out
+}
+
+func validateBeforeHookEconomicOrder(config PluginConfig, byName map[string]PluginBundle) error {
+	order, overridden := config.HookOrder["run_before_request"]
+	if !overridden {
+		return nil // plugins.order already passed the same constraint.
+	}
+	seenCompactionGate := false
+	for _, name := range order {
+		bundle := byName[name]
+		approval, approved := config.approvalFor(bundle)
+		if !approved {
+			continue
+		}
+		grants, _, err := validateApproval(bundle, approval)
+		if err != nil {
+			continue // the ordinary approval pass owns this diagnostic.
+		}
+		hasRoute := false
+		hasCompactionGate := false
+		for _, grant := range grants {
+			hasRoute = hasRoute || grant == "env.route_request"
+			hasCompactionGate = hasCompactionGate || grant == "env.host_call.torana_evaluate_compaction"
+		}
+		if hasRoute && seenCompactionGate {
+			return fmt.Errorf("ordering constraint violation: route-capable plugin %q must precede compaction economic-gate plugins in plugins.hook_order.run_before_request", name)
+		}
+		seenCompactionGate = seenCompactionGate || hasCompactionGate
+	}
+	return nil
+}
+
 func NewPipeline(runtime *wasm.Runtime, config PluginConfig) (*PluginPipeline, error) {
 	return reloadPipeline(runtime, config)
 }
@@ -758,6 +918,12 @@ func reloadPipeline(runtime *wasm.Runtime, config PluginConfig) (*PluginPipeline
 		if !config.AllowUnapproved {
 			approvedUpstream[bundle.Manifest.ID] = struct{}{}
 		}
+	}
+	if err := validateHookOrders(config, byName); err != nil {
+		return nil, err
+	}
+	if err := validateBeforeHookEconomicOrder(config, byName); err != nil {
+		return nil, err
 	}
 	for _, name := range order {
 		bundle, ok := byName[name]
@@ -867,6 +1033,10 @@ func reloadPipeline(runtime *wasm.Runtime, config PluginConfig) (*PluginPipeline
 	return &PluginPipeline{
 		plugins:            loaded,
 		runtime:            runtime,
+		beforePlugins:      loadedPluginsForHook(loaded, config.HookOrder, "run_before_request"),
+		afterPlugins:       loadedPluginsForHook(loaded, config.HookOrder, "run_after_response"),
+		streamPlugins:      loadedPluginsForHook(loaded, config.HookOrder, "run_on_stream_chunk"),
+		tickPlugins:        loadedPluginsForHook(loaded, config.HookOrder, "run_on_tick"),
 		skipped:            skipped,
 		drained:            make(chan struct{}),
 		closed:             make(chan struct{}),
@@ -1125,10 +1295,7 @@ func (pp *PluginPipeline) RunBeforeRequestTracked(ctx context.Context, reqID uin
 		return nil, false, fmt.Errorf("invalid engine request: %w", err)
 	}
 	modified := false
-	for _, lp := range pp.plugins {
-		if !hasHook(lp.manifest, "run_before_request") {
-			continue
-		}
+	for _, lp := range pp.beforePlugins {
 		next, stop, err := pp.runBeforeRequestPlugin(ctx, reqID, lp, current, headers, acceptedTopo)
 		if err != nil {
 			return chat, false, err
@@ -1332,10 +1499,7 @@ func (pp *PluginPipeline) RunAfterResponse(ctx context.Context, reqID uint64, re
 	}
 	current := pbconv.ToPBChatResponse(resp)
 	modified := false
-	for _, lp := range pp.plugins {
-		if !hasHook(lp.manifest, "run_after_response") {
-			continue
-		}
+	for _, lp := range pp.afterPlugins {
 		inBytes, err := encodeHookInput(reqID, responsePayload{resp: current, mutable: mutable})
 		if err != nil {
 			return resp, err
@@ -1426,10 +1590,7 @@ func (pp *PluginPipeline) RunOnStreamChunk(ctx context.Context, reqID uint64, ch
 
 	current := []*pbv2.StreamEvent{pbconv.ToPBStreamEvent(chunk)}
 
-	for _, lp := range pp.plugins {
-		if !hasHook(lp.manifest, "run_on_stream_chunk") {
-			continue
-		}
+	for _, lp := range pp.streamPlugins {
 		next := make([]*pbv2.StreamEvent, 0, len(current))
 		for _, ev := range current {
 			evBytes, err := encodeHookInput(reqID, streamPayload{ev: ev})
@@ -1624,10 +1785,7 @@ func (pp *PluginPipeline) RunOnTick(ctx context.Context, reqID uint64, tick *pbv
 	}
 
 	var outcomes []TickOutcome
-	for _, lp := range pp.plugins {
-		if !hasHook(lp.manifest, "run_on_tick") {
-			continue
-		}
+	for _, lp := range pp.tickPlugins {
 		if !lp.plugin.HasGrant("env.background_tick") {
 			// Not an error worth logging every tick: an unapproved capability
 			// is ordinary operator state, and the plugin is already listed as
@@ -1672,8 +1830,8 @@ func (pp *PluginPipeline) TicksEnabled() bool {
 	}
 	pp.Acquire()
 	defer pp.Release()
-	for _, lp := range pp.plugins {
-		if hasHook(lp.manifest, "run_on_tick") && lp.plugin.HasGrant("env.background_tick") {
+	for _, lp := range pp.tickPlugins {
+		if lp.plugin.HasGrant("env.background_tick") {
 			return true
 		}
 	}
@@ -1687,6 +1845,7 @@ func (pp *PluginPipeline) TicksEnabled() bool {
 type PluginConfig struct {
 	Dir       string                     `json:"dir"`
 	Order     []string                   `json:"order"`
+	HookOrder map[string][]string        `json:"hook_order,omitempty"`
 	Config    map[string]json.RawMessage `json:"config"`
 	Approvals map[string]Approval        `json:"approvals,omitempty"`
 	// CandidateValidator runs AFTER the write-grant verification on every

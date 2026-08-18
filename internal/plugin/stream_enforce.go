@@ -326,19 +326,16 @@ type pluginStreamState struct {
 // guarded by PluginPipeline.mu and dropped by EndRequest.
 type streamVerifierState struct {
 	host *streamDisciplineWalker
-	// plugins is index-aligned with PluginPipeline.plugins; nil for plugins
-	// without run_on_stream_chunk.
+	// plugins is index-aligned with PluginPipeline.streamPlugins.
 	plugins  []*pluginStreamState
 	terminal *StreamTerminalError
 }
 
 func newStreamVerifierState(pp *PluginPipeline) *streamVerifierState {
 	vs := &streamVerifierState{host: &streamDisciplineWalker{}}
-	vs.plugins = make([]*pluginStreamState, len(pp.plugins))
-	for i, lp := range pp.plugins {
-		if hasHook(lp.manifest, "run_on_stream_chunk") {
-			vs.plugins[i] = &pluginStreamState{lp: lp, walker: &streamDisciplineWalker{}}
-		}
+	vs.plugins = make([]*pluginStreamState, len(pp.streamPlugins))
+	for i, lp := range pp.streamPlugins {
+		vs.plugins[i] = &pluginStreamState{lp: lp, walker: &streamDisciplineWalker{}}
 	}
 	return vs
 }
@@ -621,10 +618,7 @@ func (pp *PluginPipeline) runOnStreamChunk(ctx context.Context, reqID uint64, ch
 	}
 
 	current := []*pbv2.StreamEvent{hostEvent}
-	for pi, lp := range pp.plugins {
-		if !hasHook(lp.manifest, "run_on_stream_chunk") {
-			continue
-		}
+	for pi, lp := range pp.streamPlugins {
 		var pvs *pluginStreamState
 		callAcceptedStart := 0
 		callReturnedStart := 0
