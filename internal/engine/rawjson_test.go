@@ -11,7 +11,9 @@ package engine
 // structural closing-brace path.
 
 import (
+	"bytes"
 	"encoding/json"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -237,6 +239,95 @@ func TestWrapperSetDeleteRoundTripByteExact(t *testing.T) {
 		if back.String() != original {
 			t.Fatalf("round trip not byte-exact:\n got %q\nwant %q", back.String(), original)
 		}
+	}
+}
+
+func TestOptionalJSONObjectWithoutMembersSinglePass(t *testing.T) {
+	for _, row := range []struct {
+		name string
+		raw  string
+		keys []string
+		want string
+	}{
+		{name: "none", raw: `{ "a" : 1 , "b" : 2 }`, keys: []string{"missing"}, want: `{ "a" : 1 , "b" : 2 }`},
+		{name: "first", raw: "{ \"a\" : 1 ,\n\t\"b\" : 2 , \"c\":3 }", keys: []string{"a"}, want: `{ "b" : 2, "c":3 }`},
+		{name: "middle", raw: "{ \"a\" : 1 ,\n\t\"b\" : 2 , \"c\":3 }", keys: []string{"b"}, want: `{ "a" : 1, "c":3 }`},
+		{name: "last", raw: "{ \"a\" : 1 ,\n\t\"b\" : 2 , \"c\":3 }", keys: []string{"c"}, want: "{ \"a\" : 1,\n\t\"b\" : 2 }"},
+		{name: "separated", raw: "{ \"a\" : 1 ,\n\t\"b\" : {\"raw\":1e999} , \"c\":3, \"d\":\"x\" }", keys: []string{"b", "c"}, want: `{ "a" : 1, "d":"x" }`},
+		{name: "all", raw: "  {\n\t\"a\":1, \"b\":2 } \r\n", keys: []string{"a", "b"}, want: "  {\n\t } \r\n"},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			o, err := ParseOptionalJSONObject([]byte(row.raw))
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err := o.WithoutMembers(row.keys...)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.String() != row.want {
+				t.Fatalf("WithoutMembers = %q, want %q", got.String(), row.want)
+			}
+			if o.String() != row.raw {
+				t.Fatalf("input mutated: %q", o.String())
+			}
+		})
+	}
+
+	o := OptionalJSONObject{}
+	if _, err := o.WithoutMembers(string([]byte{0xff})); err == nil {
+		t.Fatal("absent object accepted an invalid UTF-8 key")
+	}
+}
+
+func TestObjectSpanScannerMatchesIndependentDecoder(t *testing.T) {
+	corpus := []string{
+		`{"s":"brace } bracket ] comma , quote \" slash \\","n":-1.25e+9,"b":true,"z":null}`,
+		` { "nested" : {"array":[1,{"k":"v"},[]]}, "escaped\u006bey":"\ud83d\ude00", "empty":{} } `,
+		"{\n\t\"first\": [false, null, \"x\"],\r\n\t\"second\": 18446744073709551615,\n\t\"third\": 1e999\n}",
+	}
+	for _, raw := range corpus {
+		t.Run(raw, func(t *testing.T) {
+			o, err := ParseOptionalJSONObject([]byte(raw))
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, order, err := o.DecodeObject()
+			if err != nil {
+				t.Fatal(err)
+			}
+			var ref map[string]json.RawMessage
+			if err := json.Unmarshal([]byte(raw), &ref); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(got, ref) {
+				t.Fatalf("decoded members differ:\n got %#v\nwant %#v", got, ref)
+			}
+			for start := range order {
+				keys := append([]string(nil), order[start:]...)
+				projected, err := o.WithoutMembers(keys...)
+				if err != nil {
+					t.Fatal(err)
+				}
+				var decoded map[string]json.RawMessage
+				if err := json.Unmarshal(projected.Bytes(), &decoded); err != nil {
+					t.Fatalf("projected object is invalid: %v\n%s", err, projected.String())
+				}
+				for _, key := range order[:start] {
+					if !bytes.Equal(decoded[key], ref[key]) {
+						t.Fatalf("surviving member %q changed: got %q want %q", key, decoded[key], ref[key])
+					}
+				}
+				for _, key := range keys {
+					if _, exists := decoded[key]; exists {
+						t.Fatalf("removed member %q survived in %s", key, projected.String())
+					}
+				}
+			}
+			if o.String() != raw {
+				t.Fatalf("source authority mutated: %q", o.String())
+			}
+		})
 	}
 }
 
