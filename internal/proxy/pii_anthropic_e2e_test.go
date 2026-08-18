@@ -182,12 +182,41 @@ type capturedMessage struct {
 	Content []capturedBlock `json:"content"`
 }
 
+// capturedSystem preserves which of Anthropic's two legal system arms was on
+// the final wire. The zero-copy inference path deliberately forwards an
+// unchanged request byte-for-byte, so a valid string must not be mistaken for
+// the adapter's canonical block-array representation.
+type capturedSystem struct {
+	String *string
+	Blocks []capturedBlock
+}
+
+func (s *capturedSystem) UnmarshalJSON(raw []byte) error {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) > 0 && trimmed[0] == '"' {
+		var text string
+		if err := decodeNested(raw, &text); err != nil {
+			return err
+		}
+		s.String = &text
+		s.Blocks = nil
+		return nil
+	}
+	var blocks []capturedBlock
+	if err := decodeNested(raw, &blocks); err != nil {
+		return err
+	}
+	s.String = nil
+	s.Blocks = blocks
+	return nil
+}
+
 // capturedAnthropicRequest is the strict structural shape of the outgoing
 // Anthropic request.
 type capturedAnthropicRequest struct {
 	Model     string            `json:"model"`
 	MaxTokens *int              `json:"max_tokens,omitempty"`
-	System    []capturedBlock   `json:"system"`
+	System    capturedSystem    `json:"system"`
 	Tools     []capturedToolDef `json:"tools"`
 	Messages  []capturedMessage `json:"messages"`
 }
@@ -253,14 +282,21 @@ func decodeNested(raw json.RawMessage, v any) error {
 // It returns an error so weakened-form rows can assert failure without a
 // t.Fatal-based helper.
 func checkCleanTopology(cap capturedAnthropicRequest) error {
-	if len(cap.System) != 1 {
-		return fmt.Errorf("system blocks = %d, want 1: %+v", len(cap.System), cap.System)
-	}
-	if err := validateBlockArm(&cap.System[0]); err != nil {
-		return fmt.Errorf("system block: %v", err)
-	}
-	if cap.System[0].Text == nil || *cap.System[0].Text != "You are a coding agent. Read files and report their contents." {
-		return fmt.Errorf("system block = %+v", cap.System[0])
+	const systemText = "You are a coding agent. Read files and report their contents."
+	switch {
+	case cap.System.String != nil:
+		if *cap.System.String != systemText || len(cap.System.Blocks) != 0 {
+			return fmt.Errorf("system string = %+v", cap.System)
+		}
+	case len(cap.System.Blocks) == 1:
+		if err := validateBlockArm(&cap.System.Blocks[0]); err != nil {
+			return fmt.Errorf("system block: %v", err)
+		}
+		if cap.System.Blocks[0].Text == nil || *cap.System.Blocks[0].Text != systemText {
+			return fmt.Errorf("system block = %+v", cap.System.Blocks[0])
+		}
+	default:
+		return fmt.Errorf("system value = %+v, want exact string or one text block", cap.System)
 	}
 
 	if len(cap.Tools) != 1 || cap.Tools[0].Name != "read_file" || cap.Tools[0].Description != "Read a file from the repository" {
@@ -356,15 +392,16 @@ func assertCleanTopology(t *testing.T, cap capturedAnthropicRequest) {
 	}
 }
 
-// assertCapturedHeader pins the canonical request header: the requested model
-// and the adapter's deterministic max_tokens default.
+// assertCapturedHeader pins the unchanged request header: the requested model
+// and absence of max_tokens. Adapter defaults are internal semantics, not
+// provider-visible mutations; the zero-copy path must not invent the member.
 func assertCapturedHeader(t *testing.T, cap capturedAnthropicRequest) {
 	t.Helper()
 	if cap.Model != "claude-3-5-sonnet" {
 		t.Fatalf("model = %q, want claude-3-5-sonnet", cap.Model)
 	}
-	if cap.MaxTokens == nil || *cap.MaxTokens != 4096 {
-		t.Fatalf("max_tokens = %v, want the adapter default 4096", cap.MaxTokens)
+	if cap.MaxTokens != nil {
+		t.Fatalf("max_tokens = %v, want absent as supplied by the caller", cap.MaxTokens)
 	}
 }
 
@@ -469,9 +506,8 @@ func TestCapturedBlockArmExactness(t *testing.T) {
 
 // TestPIIAnthropicToolResultArrayBlockStringSystem — the SAME blocked shape
 // with the system sent as the VALID STRING form, the exact historical parse
-// bypass. The adapter must accept the string (canonicalizing it to one text
-// block — the captured clean twin therefore still carries the canonical ARRAY
-// form and passes the exact-topology check), the pipeline must run, and the
+// bypass. The adapter must accept the string while the unchanged-wire path
+// preserves that exact arm, the pipeline must run, and the
 // blocked twin must get the byte-exact 422 with zero additional upstream
 // calls, exactly like the array-form test.
 func TestPIIAnthropicToolResultArrayBlockStringSystem(t *testing.T) {
@@ -479,8 +515,8 @@ func TestPIIAnthropicToolResultArrayBlockStringSystem(t *testing.T) {
 
 	const sysText = "You are a coding agent. Read files and report their contents."
 
-	// 1. Clean twin with a STRING system: reaches upstream exactly once; the
-	// captured request has the canonicalized array system with the same text.
+	// 1. Clean twin with a STRING system: reaches upstream exactly once and the
+	// captured request remains byte-identical, including the string arm.
 	cleanBody := anthropicToolResultConvoWithSystem(sysText, []map[string]any{
 		{"type": "text", "text": "ok"},
 		{"type": "text", "text": "no secrets here"},
@@ -496,9 +532,15 @@ func TestPIIAnthropicToolResultArrayBlockStringSystem(t *testing.T) {
 	if len(got) != 1 {
 		t.Fatalf("captured requests = %d, want 1", len(got))
 	}
+	if got[0] != cleanBody {
+		t.Fatalf("unchanged string-system request was re-encoded:\n got: %s\nwant: %s", got[0], cleanBody)
+	}
 	cap := mustDecodeCaptured(t, got[0])
 	assertCapturedHeader(t, cap)
 	assertCleanTopology(t, cap)
+	if cap.System.String == nil || len(cap.System.Blocks) != 0 {
+		t.Fatalf("system arm = %+v, want the original string arm", cap.System)
+	}
 
 	// 2. Blocked twin with a STRING system and the PII-bearing array-valued
 	// tool_result: the pipeline runs (the string parses now) and the refusal
@@ -549,9 +591,15 @@ func TestPIIAnthropicToolResultArrayBlock(t *testing.T) {
 	if len(got) != 1 {
 		t.Fatalf("captured requests = %d, want 1", len(got))
 	}
+	if got[0] != cleanBody {
+		t.Fatalf("unchanged array-system request was re-encoded:\n got: %s\nwant: %s", got[0], cleanBody)
+	}
 	cap := mustDecodeCaptured(t, got[0])
 	assertCapturedHeader(t, cap)
 	assertCleanTopology(t, cap)
+	if cap.System.String != nil || len(cap.System.Blocks) != 1 {
+		t.Fatalf("system arm = %+v, want the original one-block array arm", cap.System)
+	}
 
 	// Live weakened-form rows on the REAL captured bytes: a known-union field
 	// injected into the wrong arm must fail the structural check even though
@@ -582,7 +630,7 @@ func TestPIIAnthropicToolResultArrayBlock(t *testing.T) {
 		{
 			name: "cross-arm tool_use_id on a system text block",
 			mut: func(c *capturedAnthropicRequest) {
-				c.System[0].ToolUseID = "tu_9"
+				c.System.Blocks[0].ToolUseID = "tu_9"
 			},
 			wantErr: "text block",
 		},
