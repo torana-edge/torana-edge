@@ -118,7 +118,7 @@ func stableBytes(t *testing.T, chat *engine.ChatRequest) []byte {
 // guardrail that keeps plugins from busting turn-over-turn prompt caching.
 func TestPluginPrefixDeterminism(t *testing.T) {
 	bundles := officialBundlesDir(t)
-	for _, name := range []string{"schema_translator", "intent", "keyword_compactor", "compactor", "pii", "otel", "cache_tier_selector", "cache_warmer"} {
+	for _, name := range []string{"schema_translator", "intent", "keyword_compactor", "compactor", "pii", "otel", "cache_tier_selector", "cache_warmer", "tool_governor"} {
 		t.Run(name, func(t *testing.T) {
 			requireBundle(t, bundles, name)
 
