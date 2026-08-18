@@ -67,3 +67,23 @@ useful regression signals, not universal capacity or provider-latency claims.
 - [`benchmark-openai-decode-combined-before-2026-08-18-summary.jsonl`](benchmark-openai-decode-combined-before-2026-08-18-summary.jsonl)
 - [`benchmark-openai-decode-combined-after-2026-08-18.jsonl`](benchmark-openai-decode-combined-after-2026-08-18.jsonl)
 - [`benchmark-openai-decode-combined-after-2026-08-18-summary.jsonl`](benchmark-openai-decode-combined-after-2026-08-18-summary.jsonl)
+
+## Follow-up: direct scalar marshal
+
+The corresponding output path used to encode scalar content into an 8 MiB
+`json.RawMessage`, then copy it into the final request object. Keeping scalar
+strings and structured arrays typed until the one final `json.Marshal` removes
+that intermediate body while preserving byte-exact wire output.
+
+The isolated 1 MiB marshal benchmark moved from 2.16–2.22 MiB and 44
+allocations/op to 1.22–1.28 MiB and 41 allocations/op. Throughput increased
+from 79.6–84.2 MB/s to 344.9–369.3 MB/s.
+
+Against the matched ten-second combined row above, the production result moved
+from 62,187,901 to 53,845,228 allocated bytes/request (-13.4%), 1,964.3 to
+1,957.9 mallocs/request, and zero errors in both runs. Across all three narrow
+units, the original matched baseline moves from 121,303,100 to 53,845,228
+allocated bytes/request (-55.6%).
+
+- [`benchmark-openai-marshal-after-2026-08-18.jsonl`](benchmark-openai-marshal-after-2026-08-18.jsonl)
+- [`benchmark-openai-marshal-after-2026-08-18-summary.jsonl`](benchmark-openai-marshal-after-2026-08-18-summary.jsonl)
