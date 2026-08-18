@@ -59,6 +59,7 @@ var officialCatalog = []officialPlugin{
 	{name: "otel", install: true},
 	{name: "pii", install: true},
 	{name: "schema_translator", install: true},
+	{name: "tool_governor", install: true},
 	{
 		name:    "auth",
 		install: false,
