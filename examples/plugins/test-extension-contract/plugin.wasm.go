@@ -57,9 +57,9 @@ type observation struct {
 	PricingReason string `json:"pricing_reason,omitempty"`
 }
 
-// validReport is a CompactionReport the host's Normalize()/Valid() accept.
+// validReport is a current CompactionReport the host accepts.
 const validReport = `{"original_bytes":1000,"final_bytes":400,"estimated_tokens_removed":100,` +
-	`"estimated_rewrite_span_tokens":5000,"expected_applications":1}`
+	`"estimated_rewrite_span_tokens":5000,"expected_applications":1,"source":"transformation"}`
 
 // recordRaw captures the three-way outcome of a raw HostCallExtension call:
 // a Go error (the call failed before the host produced an arm), a framed

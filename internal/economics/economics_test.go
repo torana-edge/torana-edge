@@ -7,6 +7,26 @@ import (
 
 func rate(v float64) *float64 { return &v }
 
+func TestCompactionReportRequiresExplicitCurrentSource(t *testing.T) {
+	for _, source := range []string{"transformation", "cache_reuse"} {
+		report := CompactionReport{Source: source}
+		report.Normalize()
+		if !report.Valid() {
+			t.Fatalf("source %q rejected", source)
+		}
+	}
+	for _, source := range []string{"", "legacy", "other"} {
+		report := CompactionReport{Source: source}
+		report.Normalize()
+		if report.Valid() {
+			t.Fatalf("source %q accepted", source)
+		}
+		if report.Source != source {
+			t.Fatalf("Normalize changed source %q to %q", source, report.Source)
+		}
+	}
+}
+
 func TestEstimateSavingsChargesBatchRewriteOnce(t *testing.T) {
 	pricing := ModelPricing{CacheReadUSDPerMTok: rate(0.5), CacheWriteUSDPerMTok: rate(6.25)}
 	report := CompactionReport{

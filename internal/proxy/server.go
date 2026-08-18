@@ -3142,7 +3142,7 @@ func (s *Server) newRuntime() *wasm.Runtime {
 	}
 	// Plugins report compaction savings via torana_record_savings. The
 	// canonical CompactionReportFunc queues the report request-scoped;
-	// recordCompactionReports prices and records it (including the legacy
+	// recordCompactionReports prices and records it (including the aggregate
 	// compactions counter and the OTLP savings gauge) only once the route is
 	// committed.
 	rt.PluginCounterFunc = func(pluginName string, counter string, delta int64) {

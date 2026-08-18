@@ -153,13 +153,13 @@ func (s *StatsTracker) RecordCompaction(plugin string, originalBytes, finalBytes
 	}
 }
 
-// RecordCompactionReport records the richer batch ABI. Pricing arguments are
+// RecordCompactionReport records the canonical batch report. Pricing arguments are
 // optional; absent or incomplete prices preserve token/byte metrics and add an
 // explicit reason instead of inventing a dollar estimate.
 func (s *StatsTracker) RecordCompactionReport(plugin string, report economics.CompactionReport, targetPricing, offloadPricing *economics.ModelPricing) {
 	report.Normalize()
-	// Preserve the legacy counters as application-oriented compatibility
-	// fields. A batch is one application regardless of candidate count.
+	// Preserve the application-oriented aggregate counters. A batch is one
+	// application regardless of candidate count.
 	s.RecordCompaction(plugin, report.OriginalBytes, report.FinalBytes)
 	atomic.AddInt64(&s.estimatedTokensAvoided, report.EstimatedTokensRemoved)
 	if report.Source == "transformation" {
@@ -180,9 +180,6 @@ func (s *StatsTracker) RecordCompactionReport(plugin string, report economics.Co
 		} else if report.Source == "cache_reuse" {
 			ps.CacheReuses++
 		}
-	}
-	if report.Source == "legacy" {
-		return
 	}
 	if targetPricing == nil {
 		s.savingsUnavailable[economics.UnavailablePricing]++
