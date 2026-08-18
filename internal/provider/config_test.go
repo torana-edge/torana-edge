@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/torana-edge/torana-edge/internal/auditlog"
 )
 
 func TestMITMIngressValidation(t *testing.T) {
@@ -637,5 +639,31 @@ func TestShippedExampleExplainsItIsReadOnlyOnce(t *testing.T) {
 			t.Errorf("the plugins comment does not mention %q — a reader would not learn "+
 				"that editing this file after the first start does nothing", want)
 		}
+	}
+}
+
+func TestAuditConfigIsDefaultOffAndValidated(t *testing.T) {
+	base := Config{Port: 8080}
+	encoded, err := json.Marshal(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), `"audit"`) {
+		t.Fatalf("zero config exposed audit settings: %s", encoded)
+	}
+	if err := base.Validate(); err != nil {
+		t.Fatalf("default-off audit invalidated config: %v", err)
+	}
+
+	bad := base
+	bad.Audit = &auditlog.Config{Enabled: true, Path: "relative.jsonl"}
+	if err := bad.Validate(); err == nil || !strings.Contains(err.Error(), "audit.path") {
+		t.Fatalf("invalid audit config error = %v", err)
+	}
+
+	good := base
+	good.Audit = &auditlog.Config{Enabled: true, Path: filepath.Join(t.TempDir(), "audit.jsonl")}
+	if err := good.Validate(); err != nil {
+		t.Fatalf("valid audit config: %v", err)
 	}
 }
