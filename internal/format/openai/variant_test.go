@@ -13,10 +13,12 @@ func TestDetectVariant(t *testing.T) {
 		body string
 		want variant
 	}{
-		"chat by messages":        {`{"model":"gpt-4","messages":[{"role":"user","content":"hi"}]}`, variantChat},
-		"responses by input":      {`{"model":"gpt-4","input":"hi"}`, variantResponses},
-		"responses by object":     {`{"object":"response","output":[]}`, variantResponses},
-		"responses object spaced": {`{"object": "response","output":[]}`, variantResponses},
+		"chat by messages":                {`{"model":"gpt-4","messages":[{"role":"user","content":"hi"}]}`, variantChat},
+		"responses by input":              {`{"model":"gpt-4","input":"hi"}`, variantResponses},
+		"responses by object":             {`{"object":"response","output":[]}`, variantResponses},
+		"responses object spaced":         {`{"object": "response","output":[]}`, variantResponses},
+		"responses input null is present": {`{"model":"gpt-4","input":null}`, variantResponses},
+		"both deciding members present":   {`{"input":null,"messages":null}`, variantChat},
 
 		// The cases the substring scan got wrong. Inside a JSON string these
 		// keys are escaped, so the scan survived quoted prose — what defeats it

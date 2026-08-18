@@ -42,11 +42,35 @@ type chatRequest struct {
 }
 
 type chatMessage struct {
-	Role             string          `json:"role"`
-	Content          json.RawMessage `json:"content,omitempty"`
-	ReasoningContent *string         `json:"reasoning_content,omitempty"`
-	ToolCalls        []chatToolCall  `json:"tool_calls,omitempty"`
-	ToolCallID       string          `json:"tool_call_id,omitempty"`
+	Role             string         `json:"role"`
+	Content          chatContent    `json:"content,omitempty"`
+	ReasoningContent *string        `json:"reasoning_content,omitempty"`
+	ToolCalls        []chatToolCall `json:"tool_calls,omitempty"`
+	ToolCallID       string         `json:"tool_call_id,omitempty"`
+}
+
+// chatContent decodes scalar content directly into its durable string. A
+// json.RawMessage first copied the complete value and convertChatMessage then
+// decoded that copy again; coding-agent prompts make this the largest field in
+// the request. Structured content retains raw elements because each arm still
+// needs independent provider-grammar projection.
+type chatContent struct {
+	Text    *string
+	Parts   []json.RawMessage
+	Present bool
+}
+
+func (c *chatContent) UnmarshalJSON(raw []byte) error {
+	*c = chatContent{Present: true}
+	var text string
+	if err := json.Unmarshal(raw, &text); err == nil {
+		c.Text = &text
+		return nil
+	}
+	if err := json.Unmarshal(raw, &c.Parts); err != nil {
+		return err
+	}
+	return nil
 }
 
 type chatToolCall struct {
@@ -140,6 +164,13 @@ const (
 	variantResponses
 )
 
+type jsonPresence bool
+
+func (p *jsonPresence) UnmarshalJSON([]byte) error {
+	*p = true
+	return nil
+}
+
 // detectVariant decides which OpenAI API variant a body belongs to.
 //
 // It decodes rather than scanning for substrings. The scan it replaces was
@@ -152,9 +183,9 @@ const (
 // Only the three deciding keys are bound; everything else stays raw.
 func detectVariant(raw []byte) variant {
 	var probe struct {
-		Object   string          `json:"object"`
-		Input    json.RawMessage `json:"input"`
-		Messages json.RawMessage `json:"messages"`
+		Object   string       `json:"object"`
+		Input    jsonPresence `json:"input"`
+		Messages jsonPresence `json:"messages"`
 	}
 	if err := json.Unmarshal(raw, &probe); err != nil {
 		// Not a decodable JSON object. Chat is the historical default, and the
@@ -164,7 +195,7 @@ func detectVariant(raw []byte) variant {
 	if probe.Object == "response" {
 		return variantResponses
 	}
-	if len(probe.Input) > 0 && len(probe.Messages) == 0 {
+	if probe.Input && !probe.Messages {
 		return variantResponses
 	}
 	return variantChat
@@ -470,16 +501,11 @@ func convertChatMessage(m chatMessage) (engine.Message, error) {
 
 	// Content may be a string or array; array parts project to Text or
 	// Unknown blocks in wire order (empty text parts are first-class).
-	if len(m.Content) > 0 {
-		var s string
-		if err := json.Unmarshal(m.Content, &s); err == nil {
-			msg.Blocks = append(msg.Blocks, engine.Block{Text: &engine.TextBlock{Text: s}})
+	if m.Content.Present {
+		if m.Content.Text != nil {
+			msg.Blocks = append(msg.Blocks, engine.Block{Text: &engine.TextBlock{Text: *m.Content.Text}})
 		} else {
-			var parts []json.RawMessage
-			if err := json.Unmarshal(m.Content, &parts); err != nil {
-				return msg, fmt.Errorf("message content: %w", err)
-			}
-			for _, p := range parts {
+			for _, p := range m.Content.Parts {
 				blk, berr := openAIPartToBlock(p)
 				if berr != nil {
 					return msg, berr
@@ -512,11 +538,8 @@ func convertChatMessage(m chatMessage) (engine.Message, error) {
 			return msg, fmt.Errorf("tool message missing tool_call_id")
 		}
 		var text string
-		if len(m.Content) > 0 {
-			var s string
-			if err := json.Unmarshal(m.Content, &s); err == nil {
-				text = s
-			}
+		if m.Content.Text != nil {
+			text = *m.Content.Text
 		}
 		msg.Blocks = []engine.Block{{
 			ToolResult: &engine.ToolResultBlock{
