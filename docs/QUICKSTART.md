@@ -78,9 +78,10 @@ curl --fail-with-body --silent \
 See [AGENT_CONTROL_PLANE.md](AGENT_CONTROL_PLANE.md) for stable operation IDs,
 JSON error envelopes, mutation guidance, and plugin-contributed operations.
 
-> The baseline leaves all tool output exact. To enable compaction, approve and
-> enable `intent`, then place one approved compactor after it and configure
-> explicit tool policies. Unknown tools, mutations, and failures remain exact.
+> The baseline leaves all tool output exact. To enable compaction, approve one
+> compactor and configure explicit tool policies. `intent` is optional; placing
+> it before the compactor improves relevance, while a bounded local signal is
+> used when it is absent. Unknown tools, mutations, and failures remain exact.
 > See [COMPACTION.md](COMPACTION.md).
 
 

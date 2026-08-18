@@ -25,8 +25,8 @@ The supported modes are:
 | `exact` | Never alter the output. This is also the default for unknown tools. |
 | `source` | Reserved, but currently fails closed to `exact`. Live OMP dogfood showed that reread markers can make an agent repeatedly fetch different ranges of the same file. |
 | `deterministic` | Retain bounded head/tail evidence plus size, SHA-256, omitted-byte count, and a rerun instruction. Set `first_pass` to compact the first model exposure. |
-| `keyword` | `keyword_compactor` only: retain intent-matching lines after at least one exact exposure. |
-| `model` | `compactor` only: create an intent-guided offload summary after at least one exact exposure, then apply it only when the economic gate passes. |
+| `keyword` | `keyword_compactor` only: retain lines matching cached intent or bounded guidance derived from the historical user request and tool call, after at least one exact exposure. |
+| `model` | `compactor` only: create an offload summary guided by cached intent or the same bounded historical fallback, after at least one exact exposure, then apply it only when the economic gate passes. |
 
 Mutation tools, diffs, failed commands, errors, stack traces, and similar
 safety-sensitive outputs remain exact even if a broad rule matches them.
@@ -58,6 +58,14 @@ Example deterministic coding-agent policy:
   }
 }
 ```
+
+`intent` is optional for both compactors. When it runs earlier, its non-empty
+cached value is the higher-quality signal. When it is absent or the cache entry
+is empty, the compactor derives deterministic bounded guidance from user text
+at or before the exact result position, the tool name, and the exact arguments.
+Later conversation text cannot rewrite that historical signal. A missing intent
+is still counted in plugin metrics so operators can measure the relevance path
+in use.
 
 `first_pass` is intentionally honored only by `deterministic`. This is useful
 for large, reproducible listings, searches, and repetitive successful logs: the

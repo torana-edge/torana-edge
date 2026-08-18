@@ -151,9 +151,11 @@ Upstream returned 200
   hostname-based listeners. Configured host matching is DNS-case-insensitive;
   the TLS server name must match the CONNECT authority.
 - **Intent + compaction:** `agy`'s tool calls already carry a goal-tied intent.
-  Keep `intent` before one compactor and configure explicit policies; source
-  reads remain exact for three later assistant turns and unmatched tools remain
-  exact. See [COMPACTION.md](COMPACTION.md).
+  If you enable `intent`, keep it before one compactor for higher-quality
+  guidance; compactors can also derive bounded local guidance when it is
+  absent. Configure explicit policies; source reads remain exact for three
+  later assistant turns and unmatched tools remain exact. See
+  [COMPACTION.md](COMPACTION.md).
 
 ## Code Assist provider-extension envelope (mandatory grammar)
 
