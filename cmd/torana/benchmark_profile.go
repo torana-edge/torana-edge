@@ -8,6 +8,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -15,6 +16,7 @@ import (
 	httppprof "net/http/pprof"
 	"os"
 	"runtime"
+	"strconv"
 	"time"
 )
 
@@ -57,7 +59,7 @@ func init() {
 		IdleTimeout:       30 * time.Second,
 	}
 	go func() {
-		if err := server.Serve(listener); err != nil && err != http.ErrServerClosed {
+		if err := server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			log.Printf("Benchmark profile server stopped: %v", err)
 		}
 	}()
@@ -72,8 +74,9 @@ func validateBenchmarkProfileAddr(addr string) error {
 	if ip == nil || !ip.IsLoopback() {
 		return fmt.Errorf("host %q must be a literal loopback IP", host)
 	}
-	if port == "" {
-		return fmt.Errorf("port is required")
+	portNumber, err := strconv.Atoi(port)
+	if err != nil || portNumber < 1 || portNumber > 65535 {
+		return fmt.Errorf("port %q must be an integer from 1 through 65535", port)
 	}
 	return nil
 }

@@ -21,6 +21,9 @@ func TestValidateBenchmarkProfileAddr(t *testing.T) {
 		{name: "public", addr: "192.0.2.1:18082"},
 		{name: "hostname", addr: "localhost:18082"},
 		{name: "missing port", addr: "127.0.0.1"},
+		{name: "named port", addr: "127.0.0.1:http"},
+		{name: "zero port", addr: "127.0.0.1:0"},
+		{name: "large port", addr: "127.0.0.1:65536"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if err := validateBenchmarkProfileAddr(tc.addr); (err == nil) != tc.ok {
