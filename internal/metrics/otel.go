@@ -264,16 +264,18 @@ func RegisterStatsObservables(st *StatsTracker) {
 	}
 	compactions, _ := meter.Int64ObservableCounter("torana_compactions_total")
 	offloadFails, _ := meter.Int64ObservableCounter("torana_offload_failures_total")
+	auditWriteFails, _ := meter.Int64ObservableCounter("torana_audit_write_failures_total")
 	bytesIn, _ := meter.Int64ObservableCounter("torana_bytes_in_total")
 	bytesOut, _ := meter.Int64ObservableCounter("torana_bytes_out_total")
 	_, _ = meter.RegisterCallback(func(_ context.Context, o metric.Observer) error {
 		s := st.Snapshot()
 		o.ObserveInt64(compactions, s.Compactions)
 		o.ObserveInt64(offloadFails, s.OffloadFailures)
+		o.ObserveInt64(auditWriteFails, s.AuditWriteFailures)
 		o.ObserveInt64(bytesIn, s.TotalBytesIn)
 		o.ObserveInt64(bytesOut, s.TotalBytesOut)
 		return nil
-	}, compactions, offloadFails, bytesIn, bytesOut)
+	}, compactions, offloadFails, auditWriteFails, bytesIn, bytesOut)
 }
 
 // EmitPluginMetric records a custom metric emitted by a WASM plugin, tagged
@@ -422,6 +424,7 @@ var hostMetricNames = map[string]bool{
 	"torana_routed_requests_total":                true,
 	"torana_compactions_total":                    true,
 	"torana_offload_failures_total":               true,
+	"torana_audit_write_failures_total":           true,
 	"torana_bytes_in_total":                       true,
 	"torana_bytes_out_total":                      true,
 	"torana_plugin_metric_rejections_total":       true,

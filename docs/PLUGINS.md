@@ -95,6 +95,11 @@ The sandbox is real. A plugin runs in `wazero` with no filesystem, no network,
 and no environment. It sees the request as protobuf and nothing else. That is
 what makes it reasonable to run a plugin someone else wrote.
 
+Operator audit files are therefore a host feature, not a plugin capability. A
+plugin cannot select a local path or write the audit sink. The host records the
+ordered names of plugins it actually invoked and any attributed verdict; see
+[Structured audit log](AUDIT_LOG.md).
+
 Capabilities are not a sandbox boundary on their own — a manifest is the
 plugin's wishlist, and the boundary is *your* approval of a specific digest.
 Read the requests before granting them, particularly `env.host_call.*`, which

@@ -69,3 +69,12 @@ func TestRecordOffloadUsage(t *testing.T) {
 		t.Fatalf("offload totals wrong: %+v", got)
 	}
 }
+
+func TestRecordAuditWriteFailure(t *testing.T) {
+	s := NewStatsTracker()
+	s.RecordAuditWriteFailure()
+	s.RecordAuditWriteFailure()
+	if got := s.Snapshot().AuditWriteFailures; got != 2 {
+		t.Fatalf("audit write failures = %d, want 2", got)
+	}
+}

@@ -30,6 +30,37 @@ type Config struct {
 	MaxFiles     int    `json:"max_files,omitempty"`
 }
 
+// Record is the versioned, bounded-schema description of one intercepted
+// caller request. It intentionally contains no arbitrary error text or raw
+// request body. Tool arguments remain private except for the explicit intent
+// convention, which is itself documented as sensitive.
+type Record struct {
+	SchemaVersion        int        `json:"schema_version"`
+	Timestamp            string     `json:"timestamp"`
+	RequestID            uint64     `json:"request_id"`
+	InitialProvider      string     `json:"initial_provider"`
+	Provider             string     `json:"provider"`
+	Format               string     `json:"format"`
+	Path                 string     `json:"path"`
+	InitialModel         string     `json:"initial_model,omitempty"`
+	Model                string     `json:"model,omitempty"`
+	Status               int        `json:"status"`
+	IngressBytes         int64      `json:"ingress_bytes"`
+	UpstreamRequestBytes int64      `json:"upstream_request_bytes"`
+	Plugins              []string   `json:"plugins,omitempty"`
+	Verdict              string     `json:"verdict,omitempty"`
+	VerdictPlugin        string     `json:"verdict_plugin,omitempty"`
+	PluginFailure        bool       `json:"plugin_failure,omitempty"`
+	ErrorCode            string     `json:"error_code,omitempty"`
+	ToolCalls            []ToolCall `json:"tool_calls,omitempty"`
+}
+
+type ToolCall struct {
+	ID     string `json:"id"`
+	Name   string `json:"name"`
+	Intent string `json:"intent,omitempty"`
+}
+
 func (c Config) Validate() error {
 	if !c.Enabled {
 		return nil

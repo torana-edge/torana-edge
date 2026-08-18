@@ -524,6 +524,26 @@ func TestSeedKeepsDisabledMITM(t *testing.T) {
 	}
 }
 
+func TestSeedKeepsDisabledAudit(t *testing.T) {
+	cfg := writeSeed(t, `{
+		"audit": {
+			"enabled": false,
+			"path": "/operator/chosen/audit.jsonl",
+			"max_file_bytes": 1024,
+			"max_files": 2
+		}
+	}`)
+
+	want := &auditlog.Config{
+		Path:         "/operator/chosen/audit.jsonl",
+		MaxFileBytes: 1024,
+		MaxFiles:     2,
+	}
+	if !reflect.DeepEqual(cfg.Audit, want) {
+		t.Fatalf("disabled audit stanza lost in seed merge: got %#v, want %#v", cfg.Audit, want)
+	}
+}
+
 // A section the user did not write must keep its default, or every omitted
 // section would be zeroed.
 func TestSeedOmittedSectionsKeepDefaults(t *testing.T) {
@@ -581,6 +601,9 @@ func TestShippedExampleSurvivesTheMerge(t *testing.T) {
 	}
 	if !reflect.DeepEqual(cfg.Plugins, want.Plugins) {
 		t.Errorf("Plugins lost in merge:\n got %+v\nwant %+v", cfg.Plugins, want.Plugins)
+	}
+	if !reflect.DeepEqual(cfg.Audit, want.Audit) {
+		t.Errorf("Audit lost in merge:\n got %+v\nwant %+v", cfg.Audit, want.Audit)
 	}
 }
 

@@ -709,6 +709,9 @@ func Load(path string) (Config, error) {
 	if has("control_plane") {
 		cfg.ControlPlane = user.ControlPlane
 	}
+	if has("audit") {
+		cfg.Audit = user.Audit
+	}
 	return cfg, validate(cfg)
 }
 

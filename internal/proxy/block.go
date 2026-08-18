@@ -124,6 +124,7 @@ func applyHostError(rs *reqState, rc *RouteContext, prov *provider.Provider) {
 	rc.Block = renderHostError(prov.Format)
 	rs.Synthetic = true
 	rs.Verdict = "host_error"
+	rs.AuditErrorCode = "host_error"
 	rs.VerdictPlugin = ""
 	rs.PluginFailure = false
 	discardCompactionReports(rs)

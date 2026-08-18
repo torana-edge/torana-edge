@@ -70,6 +70,7 @@ CLI (`agy`)** — Torana also offers an optional TLS-terminating MITM ingress. S
 | --- | --- |
 | [Quickstart](docs/QUICKSTART.md) | Install, add a provider, point a harness at Torana |
 | [Harness compatibility](docs/HARNESS_COMPATIBILITY.md) | Which inference endpoints enter plugins and which client traffic passes through |
+| [Structured audit log](docs/AUDIT_LOG.md) | Default-off operator JSONL records, sensitive fields, rotation, and failure monitoring |
 | [Production benchmark](docs/BENCHMARK_PRODUCTION_RESULTS_2026-08-18.md) | Direct-vs-Torana latency, throughput, CPU, memory, raw data, and limits |
 | [Running plugins](docs/PLUGINS.md) | Install, inspect, approve, order, and what the sandbox does |
 | [Agent control plane](docs/AGENT_CONTROL_PLANE.md) | The versioned JSON API and `agent.json` operation contracts |

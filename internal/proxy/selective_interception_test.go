@@ -6,10 +6,13 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/torana-edge/torana-edge/internal/auditlog"
 	_ "github.com/torana-edge/torana-edge/internal/format/openai"
 	"github.com/torana-edge/torana-edge/internal/provider"
 )
@@ -200,6 +203,8 @@ func TestAuxiliaryEndpointsBypassIRAcrossFormats(t *testing.T) {
 			defer upstream.Close()
 
 			providers := testProviderConfig(upstream.URL, "test", row.format)
+			auditPath := filepath.Join(t.TempDir(), "audit.jsonl")
+			providers.Audit = &auditlog.Config{Enabled: true, Path: auditPath}
 			providers.Plugins = provider.PluginsConfig{
 				Dir:             "../../examples/plugins",
 				Order:           []string{"test-trapper", "test-trapper-response"},
@@ -255,6 +260,9 @@ func TestAuxiliaryEndpointsBypassIRAcrossFormats(t *testing.T) {
 				}
 			case <-time.After(2 * time.Second):
 				t.Fatal("auxiliary request never reached upstream")
+			}
+			if b, err := os.ReadFile(auditPath); err != nil || len(b) != 0 {
+				t.Fatalf("auxiliary traffic entered sensitive audit: bytes=%q err=%v", b, err)
 			}
 		})
 	}
