@@ -205,7 +205,8 @@ names or values are never copied into those overflow signals.
 
 Order matters and Torana enforces the constraints it can:
 
-- `intent` must run before either compactor — both consume its cache.
+- When enabled, `intent` must precede a compactor. Its cache improves relevance,
+  but both compactors derive bounded local guidance when it is absent.
 - Run **one** of `compactor` or `keyword_compactor`, not both.
 - Route-capable plugins must precede compaction economic-gate plugins.
 

@@ -140,8 +140,8 @@ the control plane first. See [docs/PLUGINS.md](docs/PLUGINS.md).
 |---|---|---|
 | `schema_translator` | `run_before_request`, `run_on_stream_chunk` | Converts open-map tool schemas to strict KV arrays and reverses them on responses |
 | `intent` | `run_before_request`, `run_on_stream_chunk` | Captures **why** each tool call is made: injects the required `"i"` field into tool schemas (plus a system-prompt example) and extracts it from the stream into the shared cache |
-| `keyword_compactor` | `run_before_request` | Policy-driven source markers, deterministic reductions, and intent-guided extractive compaction |
-| `compactor` | `run_before_request` | The same safety policy plus economically gated cheap-model summaries |
+| `keyword_compactor` | `run_before_request` | Policy-driven source markers, deterministic reductions, and extractive compaction with cached or locally derived guidance |
+| `compactor` | `run_before_request` | The same safety policy plus economically gated cheap-model summaries with cached or locally derived guidance |
 | `pii` | `run_before_request` | Scans tool results (local model + regex) and blocks the request if PII is found |
 | `otel` | `run_before_request`, `run_after_response` | Emits request/response OTel metrics |
 | `cache_tier_selector` | `run_before_request` | Buys the cheapest prompt-cache lifetime for a conversation, and never changes its mind for a given prefix |
@@ -154,8 +154,10 @@ installing it by default would put something explicitly not built as an access
 control into an access-control position. Its source remains available for study
 in [torana-plugins](https://github.com/torana-edge/torana-plugins).
 
-> **Order matters.** Put `intent` before whichever compactor you run — both
-> compactors are pure consumers of the intent cache. `keyword_compactor` and
+> **Order matters.** If enabled, put `intent` before whichever compactor you
+> run: its cached signal improves relevance, but is no longer an availability
+> dependency. Both compactors derive bounded local guidance when it is absent.
+> `keyword_compactor` and
 > `compactor` are **alternatives** (deterministic/local vs. cheap-model offload),
 > not a pipeline: run **one**, not both, or whichever comes first starves the other.
 > Recommended order: `["schema_translator", "intent", "keyword_compactor"]`.
