@@ -203,7 +203,7 @@ func wireExtension(t *testing.T, r *Runtime, row extensionMatrixRow) {
 func TestExtensionCommandFramingMatrix(t *testing.T) {
 	// A CompactionReport that Normalize()/Valid() accept.
 	validReport := `{"original_bytes":1000,"final_bytes":400,"estimated_tokens_removed":100,` +
-		`"estimated_rewrite_span_tokens":5000,"expected_applications":1}`
+		`"estimated_rewrite_span_tokens":5000,"expected_applications":1,"source":"transformation"}`
 
 	rows := []extensionMatrixRow{
 		// torana_send_request: value arm = provider outcome envelope; refusals
@@ -254,6 +254,12 @@ func TestExtensionCommandFramingMatrix(t *testing.T) {
 		{name: "record_savings/malformed", cmd: "torana_record_savings", state: "malformed",
 			args: `not json`,
 			want: extensionMatrixWant{arm: "error", code: pbv2.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, message: "invalid payload"}},
+		{name: "record_savings/missing-source", cmd: "torana_record_savings", state: "malformed",
+			args: `{"original_bytes":1000,"final_bytes":400}`,
+			want: extensionMatrixWant{arm: "error", code: pbv2.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, message: "invalid payload"}},
+		{name: "record_savings/removed-legacy-source", cmd: "torana_record_savings", state: "malformed",
+			args: `{"original_bytes":1000,"final_bytes":400,"source":"legacy"}`,
+			want: extensionMatrixWant{arm: "error", code: pbv2.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, message: "invalid payload"}},
 
 		// torana_plugin_counter: same split — empty success, refusals framed.
 		{name: "plugin_counter/wired", cmd: "torana_plugin_counter", state: "wired",
@@ -277,6 +283,12 @@ func TestExtensionCommandFramingMatrix(t *testing.T) {
 			want: extensionMatrixWant{arm: "error", code: pbv2.ErrorCode_ERROR_CODE_NOT_CONFIGURED, message: "compaction pricing is not configured"}},
 		{name: "evaluate_compaction/malformed", cmd: "torana_evaluate_compaction", state: "malformed",
 			args: `not json`,
+			want: extensionMatrixWant{arm: "error", code: pbv2.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, message: "invalid payload"}},
+		{name: "evaluate_compaction/missing-source", cmd: "torana_evaluate_compaction", state: "malformed",
+			args: `{"original_bytes":1000,"final_bytes":400}`,
+			want: extensionMatrixWant{arm: "error", code: pbv2.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, message: "invalid payload"}},
+		{name: "evaluate_compaction/removed-legacy-source", cmd: "torana_evaluate_compaction", state: "malformed",
+			args: `{"original_bytes":1000,"final_bytes":400,"source":"legacy"}`,
 			want: extensionMatrixWant{arm: "error", code: pbv2.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, message: "invalid payload"}},
 
 		// torana_offload_completion: the callback frames its own success value

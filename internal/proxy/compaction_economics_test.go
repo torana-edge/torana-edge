@@ -40,7 +40,7 @@ func TestEvaluateCompactionUsesRequestRoutePricing(t *testing.T) {
 func TestCompactionReportsCommitOnlyForUpstreamRequest(t *testing.T) {
 	s := &Server{stats: metrics.NewStatsTracker()}
 	report := attributedCompactionReport{Plugin: "compactor", Report: economics.CompactionReport{
-		OriginalBytes: 100, FinalBytes: 10, Source: "legacy",
+		OriginalBytes: 100, FinalBytes: 10, Source: "transformation",
 	}}
 	rs := &reqState{CompactionReports: []attributedCompactionReport{report}}
 	s.recordCompactionReports(rs)

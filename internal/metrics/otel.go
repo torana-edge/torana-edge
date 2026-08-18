@@ -214,9 +214,6 @@ func RecordCompactionEconomics(ctx context.Context, plugin string, report econom
 		attrs := append(append([]attribute.KeyValue{}, base...), attribute.String("kind", "rewrite_span"))
 		compactionEstimatedTokens.Add(ctx, report.EstimatedRewriteSpanTokens, metric.WithAttributes(attrs...))
 	}
-	if report.Source == "legacy" {
-		return
-	}
 	if targetPricing == nil {
 		attrs := append(append([]attribute.KeyValue{}, base...), attribute.String("reason", economics.UnavailablePricing))
 		compactionUnavailable.Add(ctx, 1, metric.WithAttributes(attrs...))

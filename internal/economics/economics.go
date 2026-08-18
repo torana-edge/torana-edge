@@ -130,8 +130,8 @@ type OffloadResult struct {
 	Usage      Usage  `json:"usage"`
 }
 
-// CompactionReport is the backward-compatible superset accepted by
-// torana_record_savings. A batch must be reported once, with RewriteSpanTokens
+// CompactionReport is the canonical batch accepted by torana_record_savings.
+// A batch must be reported once, with RewriteSpanTokens
 // measured from the earliest changed item to the end of the new prompt.
 type CompactionReport struct {
 	OriginalBytes int64 `json:"original_bytes"`
@@ -144,8 +144,8 @@ type CompactionReport struct {
 	ExpectedApplications       int64  `json:"expected_applications,omitempty"`
 
 	// Source distinguishes a newly generated canonical replacement from an
-	// application of a cached replacement. Empty denotes the legacy ABI.
-	Source  string   `json:"source,omitempty"` // transformation, cache_reuse, legacy
+	// application of a cached replacement. It is required.
+	Source  string   `json:"source"` // transformation, cache_reuse
 	Offload *Offload `json:"offload,omitempty"`
 
 	Provider string `json:"provider,omitempty"`
@@ -156,16 +156,13 @@ func (r *CompactionReport) Normalize() {
 	if r.CandidateCount == 0 {
 		r.CandidateCount = 1
 	}
-	if r.Source == "" {
-		r.Source = "legacy"
-	}
 }
 
 func (r CompactionReport) Valid() bool {
 	return r.OriginalBytes >= 0 && r.FinalBytes >= 0 &&
 		r.EstimatedTokensRemoved >= 0 && r.EstimatedRewriteSpanTokens >= 0 &&
 		r.CandidateCount > 0 && r.ExpectedApplications >= 0 &&
-		(r.Source == "legacy" || r.Source == "transformation" || r.Source == "cache_reuse")
+		(r.Source == "transformation" || r.Source == "cache_reuse")
 }
 
 // SavingsEstimate is intentionally explicit when dollars cannot be computed.
