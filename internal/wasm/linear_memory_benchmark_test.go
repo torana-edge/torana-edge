@@ -3,6 +3,8 @@ package wasm
 import (
 	"context"
 	"encoding/json"
+	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -36,6 +38,18 @@ type guestLinearMemoryRecord struct {
 	RSSPrewarmedBytes  uint64   `json:"rss_prewarmed_bytes,omitempty"`
 	RSSFullPoolBytes   uint64   `json:"rss_full_pool_bytes,omitempty"`
 	RSSAfterCallsBytes uint64   `json:"rss_after_calls_bytes,omitempty"`
+}
+
+type guestRepeatedMemoryRecord struct {
+	Guest            string                        `json:"guest"`
+	InitializedBytes []uint32                      `json:"initialized_bytes"`
+	Checkpoints      []guestRepeatedMemorySnapshot `json:"checkpoints"`
+}
+
+type guestRepeatedMemorySnapshot struct {
+	CallsPerInstance int      `json:"calls_per_instance"`
+	LinearBytes      []uint32 `json:"linear_bytes"`
+	RSSBytes         uint64   `json:"rss_bytes,omitempty"`
 }
 
 // TestGuestLinearMemoryProfile measures the memory visible through the Wasm
@@ -100,22 +114,7 @@ func TestGuestLinearMemoryProfile(t *testing.T) {
 
 			input := benchmarkBeforeRequestInput(t)
 
-			// Keep every other slot occupied while invoking one released
-			// instance. This makes the call target deterministic without adding
-			// a production inspection or dispatch API solely for the benchmark.
-			for i := range instances {
-				inst := instances[i]
-				instances[i] = nil
-				p.release(inst)
-				var output []byte
-				if err := p.CallRequest(context.Background(), pbv2.Hook_HOOK_BEFORE_REQUEST, 1, input, &output); err != nil {
-					t.Fatalf("instance %d call: %v", i, err)
-				}
-				if len(output) != 0 {
-					t.Fatalf("instance %d returned %d bytes, want pass-through", i, len(output))
-				}
-				instances[i] = acquireInstances(t, p, 1)[0]
-			}
+			exerciseEachInstance(t, p, instances, input, true)
 
 			after := instanceMemoryBytes(t, instances)
 			afterCallsRSS := retainedRSSBytes(t)
@@ -147,6 +146,68 @@ func TestGuestLinearMemoryProfile(t *testing.T) {
 				t.Fatalf("marshal result: %v", err)
 			}
 			t.Logf("WASM_LINEAR_MEMORY %s", encoded)
+		})
+	}
+}
+
+// TestGuestLinearMemoryRepeatedProfile distinguishes first-call heap growth
+// from growth proportional to request count. Calls are serialized onto each
+// exact instance; this is a retention probe, not a throughput benchmark.
+func TestGuestLinearMemoryRepeatedProfile(t *testing.T) {
+	guests := []struct {
+		name string
+		env  string
+	}{
+		{name: "go", env: "TORANA_GO_GUEST"},
+		{name: "rust", env: "TORANA_RUST_GUEST"},
+	}
+	for _, guest := range guests {
+		guest := guest
+		t.Run(guest.name, func(t *testing.T) {
+			path := os.Getenv(guest.env)
+			if path == "" {
+				t.Skipf("%s unset", guest.env)
+			}
+			wasmBytes, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatalf("read %s: %v", path, err)
+			}
+			const poolSize = 4
+			r := NewRuntimeWithOptions(context.Background(), RuntimeOptions{
+				PoolSize:    poolSize,
+				CallTimeout: 10 * time.Second,
+			})
+			defer r.Close()
+			p, err := r.LoadPlugin(guest.name+"-logger-repeat", wasmBytes)
+			if err != nil {
+				t.Fatalf("load: %v", err)
+			}
+			p.SetGrants([]string{"env.log"})
+			instances := acquireInstances(t, p, poolSize)
+			defer func() { releaseInstances(p, instances) }()
+			initialized := instanceMemoryBytes(t, instances)
+			input := benchmarkBeforeRequestInput(t)
+
+			oldWriter := log.Writer()
+			log.SetOutput(io.Discard)
+			defer log.SetOutput(oldWriter)
+			checkpoints := []int{1, 10, 100, 1000, 10_000}
+			record := guestRepeatedMemoryRecord{Guest: guest.name, InitializedBytes: initialized}
+			for calls := 1; calls <= checkpoints[len(checkpoints)-1]; calls++ {
+				exerciseEachInstance(t, p, instances, input, true)
+				if calls == checkpoints[len(record.Checkpoints)] {
+					record.Checkpoints = append(record.Checkpoints, guestRepeatedMemorySnapshot{
+						CallsPerInstance: calls,
+						LinearBytes:      instanceMemoryBytes(t, instances),
+						RSSBytes:         retainedRSSBytes(t),
+					})
+				}
+			}
+			encoded, err := json.Marshal(record)
+			if err != nil {
+				t.Fatalf("marshal result: %v", err)
+			}
+			t.Logf("WASM_REPEATED_MEMORY %s", encoded)
 		})
 	}
 }
@@ -252,16 +313,7 @@ func TestOfficialPluginLinearMemoryProfile(t *testing.T) {
 			defer func() { releaseInstances(p, instances) }()
 			initialized := instanceMemoryBytes(t, instances)
 			input := benchmarkBeforeRequestInput(t)
-			for i := range instances {
-				inst := instances[i]
-				instances[i] = nil
-				p.release(inst)
-				var output []byte
-				if err := p.CallRequest(context.Background(), pbv2.Hook_HOOK_BEFORE_REQUEST, 1, input, &output); err != nil {
-					t.Fatalf("instance %d call: %v", i, err)
-				}
-				instances[i] = acquireInstances(t, p, 1)[0]
-			}
+			exerciseEachInstance(t, p, instances, input, false)
 			after := instanceMemoryBytes(t, instances)
 			record := guestLinearMemoryRecord{
 				Guest:             bundle.name,
@@ -375,6 +427,26 @@ func acquireInstances(t *testing.T, p *Plugin, count int) []*pluginInstance {
 		instances = append(instances, inst)
 	}
 	return instances
+}
+
+// exerciseEachInstance keeps every other slot occupied while invoking one
+// released instance. This makes the call target deterministic without adding
+// a production inspection or dispatch API solely for the benchmark.
+func exerciseEachInstance(t *testing.T, p *Plugin, instances []*pluginInstance, input []byte, requirePass bool) {
+	t.Helper()
+	for i := range instances {
+		inst := instances[i]
+		instances[i] = nil
+		p.release(inst)
+		var output []byte
+		if err := p.CallRequest(context.Background(), pbv2.Hook_HOOK_BEFORE_REQUEST, 1, input, &output); err != nil {
+			t.Fatalf("instance %d call: %v", i, err)
+		}
+		if requirePass && len(output) != 0 {
+			t.Fatalf("instance %d returned %d bytes, want pass-through", i, len(output))
+		}
+		instances[i] = acquireInstances(t, p, 1)[0]
+	}
 }
 
 func releaseInstances(p *Plugin, instances []*pluginInstance) {
