@@ -3,6 +3,8 @@ package wasm
 import (
 	"context"
 	"encoding/json"
+	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -36,6 +38,38 @@ type guestLinearMemoryRecord struct {
 	RSSPrewarmedBytes  uint64   `json:"rss_prewarmed_bytes,omitempty"`
 	RSSFullPoolBytes   uint64   `json:"rss_full_pool_bytes,omitempty"`
 	RSSAfterCallsBytes uint64   `json:"rss_after_calls_bytes,omitempty"`
+}
+
+type guestRepeatedMemoryRecord struct {
+	Guest            string                        `json:"guest"`
+	InitializedBytes []uint32                      `json:"initialized_bytes"`
+	Checkpoints      []guestRepeatedMemorySnapshot `json:"checkpoints"`
+}
+
+type guestRepeatedMemorySnapshot struct {
+	CallsPerInstance int      `json:"calls_per_instance"`
+	LinearBytes      []uint32 `json:"linear_bytes"`
+	RSSBytes         uint64   `json:"rss_bytes,omitempty"`
+}
+
+type guestHostMemoryRecord struct {
+	Guest  string                    `json:"guest"`
+	Stages []guestHostMemorySnapshot `json:"stages"`
+}
+
+type guestHostMemorySnapshot struct {
+	Stage         string `json:"stage"`
+	RSSBytes      uint64 `json:"rss_bytes,omitempty"`
+	HeapAlloc     uint64 `json:"heap_alloc_bytes"`
+	HeapInuse     uint64 `json:"heap_inuse_bytes"`
+	HeapSys       uint64 `json:"heap_sys_bytes"`
+	HeapReleased  uint64 `json:"heap_released_bytes"`
+	StackInuse    uint64 `json:"stack_inuse_bytes"`
+	OtherSys      uint64 `json:"other_sys_bytes"`
+	GCSys         uint64 `json:"gc_sys_bytes"`
+	TotalHostSys  uint64 `json:"total_host_sys_bytes"`
+	LinearBytes   uint64 `json:"linear_bytes,omitempty"`
+	InstanceCount int    `json:"instance_count,omitempty"`
 }
 
 // TestGuestLinearMemoryProfile measures the memory visible through the Wasm
@@ -100,22 +134,7 @@ func TestGuestLinearMemoryProfile(t *testing.T) {
 
 			input := benchmarkBeforeRequestInput(t)
 
-			// Keep every other slot occupied while invoking one released
-			// instance. This makes the call target deterministic without adding
-			// a production inspection or dispatch API solely for the benchmark.
-			for i := range instances {
-				inst := instances[i]
-				instances[i] = nil
-				p.release(inst)
-				var output []byte
-				if err := p.CallRequest(context.Background(), pbv2.Hook_HOOK_BEFORE_REQUEST, 1, input, &output); err != nil {
-					t.Fatalf("instance %d call: %v", i, err)
-				}
-				if len(output) != 0 {
-					t.Fatalf("instance %d returned %d bytes, want pass-through", i, len(output))
-				}
-				instances[i] = acquireInstances(t, p, 1)[0]
-			}
+			exerciseEachInstance(t, p, instances, input, true)
 
 			after := instanceMemoryBytes(t, instances)
 			afterCallsRSS := retainedRSSBytes(t)
@@ -147,6 +166,127 @@ func TestGuestLinearMemoryProfile(t *testing.T) {
 				t.Fatalf("marshal result: %v", err)
 			}
 			t.Logf("WASM_LINEAR_MEMORY %s", encoded)
+		})
+	}
+}
+
+// TestGuestLinearMemoryRepeatedProfile distinguishes first-call heap growth
+// from growth proportional to request count. Calls are serialized onto each
+// exact instance; this is a retention probe, not a throughput benchmark.
+func TestGuestLinearMemoryRepeatedProfile(t *testing.T) {
+	guests := []struct {
+		name string
+		env  string
+	}{
+		{name: "go", env: "TORANA_GO_GUEST"},
+		{name: "rust", env: "TORANA_RUST_GUEST"},
+	}
+	for _, guest := range guests {
+		guest := guest
+		t.Run(guest.name, func(t *testing.T) {
+			path := os.Getenv(guest.env)
+			if path == "" {
+				t.Skipf("%s unset", guest.env)
+			}
+			wasmBytes, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatalf("read %s: %v", path, err)
+			}
+			const poolSize = 4
+			r := NewRuntimeWithOptions(context.Background(), RuntimeOptions{
+				PoolSize:    poolSize,
+				CallTimeout: 10 * time.Second,
+			})
+			defer r.Close()
+			p, err := r.LoadPlugin(guest.name+"-logger-repeat", wasmBytes)
+			if err != nil {
+				t.Fatalf("load: %v", err)
+			}
+			p.SetGrants([]string{"env.log"})
+			instances := acquireInstances(t, p, poolSize)
+			defer func() { releaseInstances(p, instances) }()
+			initialized := instanceMemoryBytes(t, instances)
+			input := benchmarkBeforeRequestInput(t)
+
+			oldWriter := log.Writer()
+			log.SetOutput(io.Discard)
+			defer log.SetOutput(oldWriter)
+			checkpoints := []int{1, 10, 100, 1000, 10_000}
+			record := guestRepeatedMemoryRecord{Guest: guest.name, InitializedBytes: initialized}
+			for calls := 1; calls <= checkpoints[len(checkpoints)-1]; calls++ {
+				exerciseEachInstance(t, p, instances, input, true)
+				if calls == checkpoints[len(record.Checkpoints)] {
+					record.Checkpoints = append(record.Checkpoints, guestRepeatedMemorySnapshot{
+						CallsPerInstance: calls,
+						LinearBytes:      instanceMemoryBytes(t, instances),
+						RSSBytes:         retainedRSSBytes(t),
+					})
+				}
+			}
+			encoded, err := json.Marshal(record)
+			if err != nil {
+				t.Fatalf("marshal result: %v", err)
+			}
+			t.Logf("WASM_REPEATED_MEMORY %s", encoded)
+		})
+	}
+}
+
+// TestGuestHostMemoryProfile separates Go-host heap classes from RSS and guest
+// linear memory at each plugin lifecycle boundary. Run each guest subtest in a
+// fresh process: the compiler cache and Go allocator are process-scoped.
+func TestGuestHostMemoryProfile(t *testing.T) {
+	guests := []struct {
+		name string
+		env  string
+	}{
+		{name: "go", env: "TORANA_GO_GUEST"},
+		{name: "rust", env: "TORANA_RUST_GUEST"},
+	}
+	for _, guest := range guests {
+		guest := guest
+		t.Run(guest.name, func(t *testing.T) {
+			path := os.Getenv(guest.env)
+			if path == "" {
+				t.Skipf("%s unset", guest.env)
+			}
+			wasmBytes, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatalf("read %s: %v", path, err)
+			}
+			record := guestHostMemoryRecord{Guest: guest.name}
+			record.Stages = append(record.Stages, retainedHostMemorySnapshot(t, "baseline", nil))
+
+			const poolSize = 4
+			r := NewRuntimeWithOptions(context.Background(), RuntimeOptions{
+				PoolSize:    poolSize,
+				CallTimeout: 10 * time.Second,
+			})
+			defer r.Close()
+			record.Stages = append(record.Stages, retainedHostMemorySnapshot(t, "runtime", nil))
+			p, err := r.LoadPlugin(guest.name+"-logger-host-memory", wasmBytes)
+			if err != nil {
+				t.Fatalf("load: %v", err)
+			}
+			record.Stages = append(record.Stages, retainedHostMemorySnapshot(t, "loaded", nil))
+			p.SetGrants([]string{"env.log"})
+			record.Stages = append(record.Stages, retainedHostMemorySnapshot(t, "after_grant", nil))
+
+			prewarmed := acquireInstances(t, p, 1)
+			releaseInstances(p, prewarmed)
+			record.Stages = append(record.Stages, retainedHostMemorySnapshot(t, "prewarmed", prewarmed))
+
+			instances := acquireInstances(t, p, poolSize)
+			defer func() { releaseInstances(p, instances) }()
+			record.Stages = append(record.Stages, retainedHostMemorySnapshot(t, "full_pool", instances))
+			exerciseEachInstance(t, p, instances, benchmarkBeforeRequestInput(t), true)
+			record.Stages = append(record.Stages, retainedHostMemorySnapshot(t, "after_calls", instances))
+
+			encoded, err := json.Marshal(record)
+			if err != nil {
+				t.Fatalf("marshal result: %v", err)
+			}
+			t.Logf("WASM_HOST_MEMORY %s", encoded)
 		})
 	}
 }
@@ -252,16 +392,7 @@ func TestOfficialPluginLinearMemoryProfile(t *testing.T) {
 			defer func() { releaseInstances(p, instances) }()
 			initialized := instanceMemoryBytes(t, instances)
 			input := benchmarkBeforeRequestInput(t)
-			for i := range instances {
-				inst := instances[i]
-				instances[i] = nil
-				p.release(inst)
-				var output []byte
-				if err := p.CallRequest(context.Background(), pbv2.Hook_HOOK_BEFORE_REQUEST, 1, input, &output); err != nil {
-					t.Fatalf("instance %d call: %v", i, err)
-				}
-				instances[i] = acquireInstances(t, p, 1)[0]
-			}
+			exerciseEachInstance(t, p, instances, input, false)
 			after := instanceMemoryBytes(t, instances)
 			record := guestLinearMemoryRecord{
 				Guest:             bundle.name,
@@ -363,6 +494,32 @@ func retainedRSSBytes(t *testing.T) uint64 {
 	return pages * uint64(pageSize)
 }
 
+func retainedHostMemorySnapshot(t *testing.T, stage string, instances []*pluginInstance) guestHostMemorySnapshot {
+	t.Helper()
+	rss := retainedRSSBytes(t)
+	var stats runtime.MemStats
+	runtime.ReadMemStats(&stats)
+	snapshot := guestHostMemorySnapshot{
+		Stage:         stage,
+		RSSBytes:      rss,
+		HeapAlloc:     stats.HeapAlloc,
+		HeapInuse:     stats.HeapInuse,
+		HeapSys:       stats.HeapSys,
+		HeapReleased:  stats.HeapReleased,
+		StackInuse:    stats.StackInuse,
+		OtherSys:      stats.OtherSys,
+		GCSys:         stats.GCSys,
+		TotalHostSys:  stats.Sys,
+		InstanceCount: len(instances),
+	}
+	for _, inst := range instances {
+		if inst != nil && inst.mod != nil && inst.mod.Memory() != nil {
+			snapshot.LinearBytes += uint64(inst.mod.Memory().Size())
+		}
+	}
+	return snapshot
+}
+
 func acquireInstances(t *testing.T, p *Plugin, count int) []*pluginInstance {
 	t.Helper()
 	instances := make([]*pluginInstance, 0, count)
@@ -375,6 +532,26 @@ func acquireInstances(t *testing.T, p *Plugin, count int) []*pluginInstance {
 		instances = append(instances, inst)
 	}
 	return instances
+}
+
+// exerciseEachInstance keeps every other slot occupied while invoking one
+// released instance. This makes the call target deterministic without adding
+// a production inspection or dispatch API solely for the benchmark.
+func exerciseEachInstance(t *testing.T, p *Plugin, instances []*pluginInstance, input []byte, requirePass bool) {
+	t.Helper()
+	for i := range instances {
+		inst := instances[i]
+		instances[i] = nil
+		p.release(inst)
+		var output []byte
+		if err := p.CallRequest(context.Background(), pbv2.Hook_HOOK_BEFORE_REQUEST, 1, input, &output); err != nil {
+			t.Fatalf("instance %d call: %v", i, err)
+		}
+		if requirePass && len(output) != 0 {
+			t.Fatalf("instance %d returned %d bytes, want pass-through", i, len(output))
+		}
+		instances[i] = acquireInstances(t, p, 1)[0]
+	}
 }
 
 func releaseInstances(p *Plugin, instances []*pluginInstance) {
