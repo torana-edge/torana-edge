@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/torana-edge/torana-edge/internal/auditlog"
 	"github.com/torana-edge/torana-edge/internal/cache"
 	"github.com/torana-edge/torana-edge/internal/economics"
 )
@@ -81,6 +82,11 @@ func supportedFormatNames() string {
 func (c Config) Validate() error {
 	if c.Port <= 0 || c.Port > 65535 {
 		return fmt.Errorf("port must be between 1 and 65535")
+	}
+	if c.Audit != nil {
+		if err := c.Audit.Validate(); err != nil {
+			return err
+		}
 	}
 	if c.Limits.Concurrency < 0 || c.Limits.RPM < 0 {
 		return fmt.Errorf("limits must not be negative")
@@ -218,6 +224,10 @@ type Config struct {
 	MITM MITMConfig `json:"mitm,omitempty"`
 	// ControlPlane configures access control for the /_torana/* endpoints.
 	ControlPlane ControlPlaneConfig `json:"control_plane,omitempty"`
+	// Audit is a sensitive, operator-owned JSONL record of intercepted
+	// inference requests. It is disabled by default and never applies to
+	// transparent auxiliary traffic.
+	Audit *auditlog.Config `json:"audit,omitempty"`
 }
 
 // MITMConfig configures the TLS-terminating ingress. When enabled, agy (or any
@@ -698,6 +708,9 @@ func Load(path string) (Config, error) {
 	}
 	if has("control_plane") {
 		cfg.ControlPlane = user.ControlPlane
+	}
+	if has("audit") {
+		cfg.Audit = user.Audit
 	}
 	return cfg, validate(cfg)
 }

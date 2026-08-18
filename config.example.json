@@ -37,6 +37,11 @@
       "format": "gemini-codeassist"
     }
   },
+  "audit": {
+    "_comment": "Optional sensitive operator audit for recognized inference requests only. Disabled by default. When enabled, path must be absolute; files are owner-only JSONL and rotate at 16 MiB with 5 files unless the bounds are overridden. Auxiliary provider APIs are never recorded. See docs/AUDIT_LOG.md.",
+    "enabled": false,
+    "path": ""
+  },
   "mitm": {
     "_comment": "TLS-terminating CONNECT proxy for harnesses that can't be pointed at a base URL (the Antigravity CLI's stripped Go binary ignores endpoint env vars but honors HTTPS_PROXY and a custom CA via SSL_CERT_FILE). Disabled unless 'enabled' is true. Only chat calls (…:streamGenerateContent / …:generateContent) on the mapped hosts run through the provider pipeline; all other hosts and paths are tunneled/forwarded verbatim so login and telemetry keep working. Point agy at it with HTTPS_PROXY=http://<listen> SSL_CERT_FILE=<ca_dir>/bundle.pem. 'listen' is restricted to a literal loopback address because it decrypts caller traffic. NEVER commit ca_dir (the CA private key lives there) or add the CA to the system trust store.",
     "enabled": false,

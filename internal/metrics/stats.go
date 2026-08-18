@@ -38,6 +38,7 @@ type Stats struct {
 	Compactions                int64                       `json:"compactions"`
 	BytesSaved                 int64                       `json:"bytes_saved"`
 	OffloadFailures            int64                       `json:"offload_failures"`
+	AuditWriteFailures         int64                       `json:"audit_write_failures"`
 	OffloadInputTokens         int64                       `json:"offload_input_tokens"`
 	OffloadOutputTokens        int64                       `json:"offload_output_tokens"`
 	OffloadCacheReadTokens     int64                       `json:"offload_cache_read_tokens"`
@@ -67,6 +68,7 @@ type StatsTracker struct {
 	compactions                int64
 	bytesSaved                 int64
 	offloadFailures            int64
+	auditWriteFailures         int64
 	offloadInputTokens         int64
 	offloadOutputTokens        int64
 	offloadCacheReadTokens     int64
@@ -211,6 +213,12 @@ func (s *StatsTracker) RecordOffloadFailure() {
 	atomic.AddInt64(&s.offloadFailures, 1)
 }
 
+// RecordAuditWriteFailure records a durable audit sink failure. The request is
+// never retried and the caller response is never rewritten after delivery.
+func (s *StatsTracker) RecordAuditWriteFailure() {
+	atomic.AddInt64(&s.auditWriteFailures, 1)
+}
+
 // RecordOffloadUsage records provider-reported usage for a successful
 // compaction offload. InputTokens includes cache reads for OpenAI-compatible
 // providers, matching Usage.InputIncludesCacheRead.
@@ -267,6 +275,7 @@ func (s *StatsTracker) Snapshot() Stats {
 		Compactions:                atomic.LoadInt64(&s.compactions),
 		BytesSaved:                 atomic.LoadInt64(&s.bytesSaved),
 		OffloadFailures:            atomic.LoadInt64(&s.offloadFailures),
+		AuditWriteFailures:         atomic.LoadInt64(&s.auditWriteFailures),
 		OffloadInputTokens:         atomic.LoadInt64(&s.offloadInputTokens),
 		OffloadOutputTokens:        atomic.LoadInt64(&s.offloadOutputTokens),
 		OffloadCacheReadTokens:     atomic.LoadInt64(&s.offloadCacheReadTokens),

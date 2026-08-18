@@ -31,6 +31,7 @@ import (
 	"golang.org/x/net/http/httpguts"
 	"google.golang.org/protobuf/proto"
 
+	"github.com/torana-edge/torana-edge/internal/auditlog"
 	"github.com/torana-edge/torana-edge/internal/cache"
 	"github.com/torana-edge/torana-edge/internal/controlplane"
 	"github.com/torana-edge/torana-edge/internal/conversation"
@@ -166,6 +167,12 @@ type Server struct {
 	// feed is the bounded in-memory ring buffer of recent per-request events,
 	// exposed via /_torana/api/feed (snapshot) and /_torana/api/stream (SSE).
 	feed *metrics.RequestFeed
+	// auditWriter is the default-off, operator-owned sensitive JSONL sink.
+	// auditMu keeps a completed append on the old writer from racing an atomic
+	// settings swap and close.
+	auditMu           sync.RWMutex
+	auditWriter       *auditlog.Writer
+	auditNextErrorLog atomic.Int64
 	// WASM plugin pipeline (loaded when configured)
 	pluginPipeline atomic.Value // *plugin.PluginPipeline
 	// True when a hot reload failed and the last known-good pipeline remains
@@ -264,6 +271,16 @@ type reqState struct {
 	// not pass through the boundary.
 	inboundBody    []byte
 	inboundBodySet bool
+	// Intercepted is true only after a configured format positively recognizes
+	// this method/path as inference traffic. Auxiliary harness/provider APIs
+	// remain transparent and must never enter the sensitive audit.
+	Intercepted bool
+	// Audit fields are host-owned snapshots of the accepted request. They never
+	// affect provider serialization or plugin input.
+	InitialModel              string
+	AuditUpstreamRequestBytes int64
+	AuditErrorCode            string
+	AuditToolCalls            []auditlog.ToolCall
 	// CallerAuth is the caller's Authorization header value, used as the
 	// fallback credential for offload completions. Host-side only — never
 	// exposed to plugins.
@@ -728,7 +745,14 @@ func New(cfg Config) (*Server, error) {
 		s.cacheMu.Unlock()
 		s.rateLimiter.Close()
 		s.conversations.Close()
+		s.swapAuditWriter(nil)
 	}
+	auditWriter, err := openAuditWriter(cfg.Providers.Audit)
+	if err != nil {
+		cleanupConstruction()
+		return nil, fmt.Errorf("proxy: %w", err)
+	}
+	s.auditWriter = auditWriter
 
 	// --- offload validation (fail fast on misconfiguration) ---------------
 	if err := cfg.Providers.Offload.Validate(cfg.Providers.Providers); err != nil {
@@ -886,6 +910,12 @@ func New(cfg Config) (*Server, error) {
 				req.ContentLength = int64(len(body))
 				return
 			}
+			rs := reqStateFrom(req.Context())
+			rs.Intercepted = true
+			rs.Provider = provName
+			rs.InitialProvider = provName
+			rs.InitialFormat = prov.Format
+			rs.Path = strippedPath
 
 			// The response pipeline reads upstream bodies as plaintext. If the
 			// caller's Accept-Encoding (e.g. Claude Code's gzip) were forwarded,
@@ -914,6 +944,7 @@ func New(cfg Config) (*Server, error) {
 				rc.Block = renderInvalidRequest(prov.Format)
 				rs := reqStateFrom(req.Context())
 				rs.Synthetic = true
+				rs.AuditErrorCode = "invalid_request"
 				req.Body = io.NopCloser(bytes.NewReader(nil))
 				req.ContentLength = 0
 			}
@@ -947,6 +978,7 @@ func New(cfg Config) (*Server, error) {
 				rejectMalformed()
 				return
 			}
+			rs.captureAuditRequest(chat)
 			// Preserve the caller's validated provider wire bytes unless a
 			// plugin or the host later changes provider-visible request state.
 			// Torana still parses, validates, observes, routes, meters and runs
@@ -960,7 +992,6 @@ func New(cfg Config) (*Server, error) {
 			// Economic-gate host calls run inside request hooks, so make the
 			// initially routed provider/model available before the pipeline.
 			// A later content-routing verdict refreshes these fields as before.
-			rs := reqStateFrom(req.Context())
 			rs.Provider = provName
 			rs.Model = chat.Model
 			rs.InitialProvider = provName
@@ -1045,6 +1076,7 @@ func New(cfg Config) (*Server, error) {
 					}
 					rsFail := reqStateFrom(req.Context())
 					rsFail.Verdict = "block"
+					rsFail.AuditErrorCode = "plugin_failure"
 					req.Body = io.NopCloser(bytes.NewReader(nil))
 					req.ContentLength = 0
 					discardCompactionReports(rsFail)
@@ -1057,6 +1089,7 @@ func New(cfg Config) (*Server, error) {
 				// past the request hook (format adapters don't serialize
 				// ToranaMeta, but response hooks receive it).
 				chat.ToranaMeta, _ = chat.ToranaMeta.DeleteMember("_request_headers")
+				rs.captureAuditRequest(chat)
 
 				// Verdicts are recorded by attributed, permission-checked host
 				// calls now. The grant was verified per plugin at the call
@@ -1077,6 +1110,10 @@ func New(cfg Config) (*Server, error) {
 					rs := reqStateFrom(req.Context())
 					rs.Verdict = "block"
 					rs.VerdictPlugin = block.Plugin
+					// The guest-controlled code may itself contain request-derived
+					// data. Attribution is preserved separately; the durable audit
+					// uses only this host-owned outcome class.
+					rs.AuditErrorCode = "plugin_block"
 					req.Body = io.NopCloser(bytes.NewReader(nil))
 					req.ContentLength = 0
 					discardCompactionReports(rs)
@@ -1181,6 +1218,7 @@ func New(cfg Config) (*Server, error) {
 					wireChanged = true
 				}
 			}
+			rs.captureAuditRequest(chat)
 
 			// Fingerprint the cache prefix as it will actually go on the wire:
 			// after content routing may have changed the model, and after every
@@ -1235,6 +1273,7 @@ func New(cfg Config) (*Server, error) {
 				req.ContentLength = 0
 				return
 			}
+			rs.AuditUpstreamRequestBytes = int64(len(newBody))
 			reqStateFrom(req.Context()).CompactionRequestPrepared = true
 
 			// Stash format and chat for ModifyResponse.
@@ -1402,6 +1441,8 @@ func New(cfg Config) (*Server, error) {
 										if rsObs := reqStateFrom(resp.Request.Context()); rsObs != nil {
 											rsObs.PluginFailure = true
 										}
+									} else if rsObs := reqStateFrom(resp.Request.Context()); rsObs != nil {
+										rsObs.AuditErrorCode = "host_error"
 									}
 									abort(err)
 									return
@@ -1446,11 +1487,16 @@ func New(cfg Config) (*Server, error) {
 									if rsObs := reqStateFrom(resp.Request.Context()); rsObs != nil {
 										rsObs.PluginFailure = true
 									}
+								} else if rsObs := reqStateFrom(resp.Request.Context()); rsObs != nil {
+									rsObs.AuditErrorCode = "host_error"
 								}
 								abort(err)
 								return
 							}
 							log.Printf("plugin stream end error, terminating stream: %v", err)
+							if rsObs := reqStateFrom(resp.Request.Context()); rsObs != nil {
+								rsObs.AuditErrorCode = "host_error"
+							}
 							abort(err)
 							return
 						}
@@ -1631,6 +1677,8 @@ func New(cfg Config) (*Server, error) {
 						// same fail-open as the request path.
 						log.Printf("wasm json response hook error (failure_mode=block): %v", modErr)
 						rs.Verdict = "block"
+						rs.PluginFailure = true
+						rs.AuditErrorCode = "plugin_failure"
 						blocked := renderBlock(f.Name, &wasm.BlockVerdict{
 							Status:  502,
 							Code:    "plugin_failure",
@@ -1732,6 +1780,10 @@ func New(cfg Config) (*Server, error) {
 				return
 			}
 			cur := s.GetConfig().Providers
+			// The embedded settings form predates the sensitive audit surface and
+			// rebuilds provider.Config. Omission means preserve; an explicit null
+			// remains the operator's way to disable and remove the configuration.
+			preserveAuditConfigIfOmitted(data, &cur, &incoming)
 			// Never let the settings surface mutate the pipeline.
 			incoming.Plugins = cur.Plugins
 			// Preserve the redacted control-plane token when the client
@@ -2556,6 +2608,7 @@ func New(cfg Config) (*Server, error) {
 			PluginFailure:    rs.PluginFailure,
 			Plugins:          invokedPlugins,
 		})
+		s.appendAudit(rs, tw.status, invokedPlugins)
 	})
 
 	srv := &http.Server{
@@ -2800,6 +2853,20 @@ func (s *Server) applyProviderConfigTransaction(current, incoming provider.Confi
 	cacheChanged := c1 != c2
 	mitmChanged := !reflect.DeepEqual(incoming.MITM, current.MITM)
 	portChanged := incoming.Port != current.Port
+	auditChanged := !reflect.DeepEqual(incoming.Audit, current.Audit)
+	var candidateAudit *auditlog.Writer
+	if auditChanged {
+		var err error
+		candidateAudit, err = openAuditWriter(incoming.Audit)
+		if err != nil {
+			return err
+		}
+		defer func() {
+			if candidateAudit != nil {
+				_ = candidateAudit.Close()
+			}
+		}()
+	}
 
 	rollbackLive := func() {
 		if portChanged {
@@ -2848,7 +2915,26 @@ func (s *Server) applyProviderConfigTransaction(current, incoming provider.Confi
 		rollbackLive()
 		return fmt.Errorf("failed to persist config to disk: %w", err)
 	}
-	s.SetProviders(incoming)
+	if auditChanged {
+		// Publish the persisted config and its already-opened writer under one
+		// lock ordering. A request can finish on the old sink or the new sink,
+		// never on a closed writer and never on an unvalidated destination.
+		s.configMu.Lock()
+		s.auditMu.Lock()
+		oldAudit := s.auditWriter
+		s.auditWriter = candidateAudit
+		candidateAudit = nil
+		s.config.Providers = incoming
+		s.auditMu.Unlock()
+		s.configMu.Unlock()
+		s.rateLimiter.Update(incoming.Limits.RPM, incoming.Limits.Concurrency)
+		if oldAudit != nil {
+			_ = oldAudit.Close()
+		}
+		log.Printf("config hot-reload: %d providers loaded", len(incoming.Providers))
+	} else {
+		s.SetProviders(incoming)
+	}
 	return nil
 }
 
@@ -3433,6 +3519,7 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	}
 	s.rateLimiter.Close()
 	s.conversations.Close()
+	s.swapAuditWriter(nil)
 	s.rebuildMu.Lock()
 	s.cacheMu.Lock()
 	if s.sharedCache != nil {

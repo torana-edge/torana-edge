@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/torana-edge/torana-edge/internal/auditlog"
 )
 
 func TestMITMIngressValidation(t *testing.T) {
@@ -522,6 +524,26 @@ func TestSeedKeepsDisabledMITM(t *testing.T) {
 	}
 }
 
+func TestSeedKeepsDisabledAudit(t *testing.T) {
+	cfg := writeSeed(t, `{
+		"audit": {
+			"enabled": false,
+			"path": "/operator/chosen/audit.jsonl",
+			"max_file_bytes": 1024,
+			"max_files": 2
+		}
+	}`)
+
+	want := &auditlog.Config{
+		Path:         "/operator/chosen/audit.jsonl",
+		MaxFileBytes: 1024,
+		MaxFiles:     2,
+	}
+	if !reflect.DeepEqual(cfg.Audit, want) {
+		t.Fatalf("disabled audit stanza lost in seed merge: got %#v, want %#v", cfg.Audit, want)
+	}
+}
+
 // A section the user did not write must keep its default, or every omitted
 // section would be zeroed.
 func TestSeedOmittedSectionsKeepDefaults(t *testing.T) {
@@ -580,6 +602,9 @@ func TestShippedExampleSurvivesTheMerge(t *testing.T) {
 	if !reflect.DeepEqual(cfg.Plugins, want.Plugins) {
 		t.Errorf("Plugins lost in merge:\n got %+v\nwant %+v", cfg.Plugins, want.Plugins)
 	}
+	if !reflect.DeepEqual(cfg.Audit, want.Audit) {
+		t.Errorf("Audit lost in merge:\n got %+v\nwant %+v", cfg.Audit, want.Audit)
+	}
 }
 
 // The README's first step is `cp config.example.json config.json`, so the
@@ -637,5 +662,31 @@ func TestShippedExampleExplainsItIsReadOnlyOnce(t *testing.T) {
 			t.Errorf("the plugins comment does not mention %q — a reader would not learn "+
 				"that editing this file after the first start does nothing", want)
 		}
+	}
+}
+
+func TestAuditConfigIsDefaultOffAndValidated(t *testing.T) {
+	base := Config{Port: 8080}
+	encoded, err := json.Marshal(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), `"audit"`) {
+		t.Fatalf("zero config exposed audit settings: %s", encoded)
+	}
+	if err := base.Validate(); err != nil {
+		t.Fatalf("default-off audit invalidated config: %v", err)
+	}
+
+	bad := base
+	bad.Audit = &auditlog.Config{Enabled: true, Path: "relative.jsonl"}
+	if err := bad.Validate(); err == nil || !strings.Contains(err.Error(), "audit.path") {
+		t.Fatalf("invalid audit config error = %v", err)
+	}
+
+	good := base
+	good.Audit = &auditlog.Config{Enabled: true, Path: filepath.Join(t.TempDir(), "audit.jsonl")}
+	if err := good.Validate(); err != nil {
+		t.Fatalf("valid audit config: %v", err)
 	}
 }
