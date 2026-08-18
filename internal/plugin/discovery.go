@@ -57,6 +57,9 @@ type PluginManifest struct {
 	// RequiresUpstream lists stable plugin IDs that must be approved and
 	// loaded earlier in the operator's configured order.
 	RequiresUpstream []string `json:"requires_upstream,omitempty"`
+	// ConflictsWith lists stable plugin IDs that cannot be active in the same
+	// immutable pipeline generation. A declaration by either side is enough.
+	ConflictsWith []string `json:"conflicts_with,omitempty"`
 }
 
 type ConfigField struct {
@@ -303,6 +306,22 @@ func validateManifest(manifest PluginManifest) error {
 			return fmt.Errorf("duplicate requires_upstream plugin id %q", requiredID)
 		}
 		seenRequirements[requiredID] = struct{}{}
+	}
+	seenConflicts := make(map[string]struct{}, len(manifest.ConflictsWith))
+	for _, conflictingID := range manifest.ConflictsWith {
+		if strings.TrimSpace(conflictingID) == "" {
+			return fmt.Errorf("conflicts_with entries must be non-empty plugin ids")
+		}
+		if conflictingID == manifest.ID {
+			return fmt.Errorf("conflicts_with cannot reference the plugin itself")
+		}
+		if _, duplicate := seenConflicts[conflictingID]; duplicate {
+			return fmt.Errorf("duplicate conflicts_with plugin id %q", conflictingID)
+		}
+		if _, required := seenRequirements[conflictingID]; required {
+			return fmt.Errorf("plugin id %q cannot appear in both requires_upstream and conflicts_with", conflictingID)
+		}
+		seenConflicts[conflictingID] = struct{}{}
 	}
 	return nil
 }
@@ -841,6 +860,31 @@ func NewPipeline(runtime *wasm.Runtime, config PluginConfig) (*PluginPipeline, e
 	return reloadPipeline(runtime, config)
 }
 
+// validateActivePluginConflicts rejects an incompatible approved composition
+// before any guest code is loaded. A declaration by either exact bundle is
+// sufficient, so a plugin can protect itself from an older peer that does not
+// yet know about it.
+func validateActivePluginConflicts(active []PluginBundle) error {
+	byID := make(map[string]PluginBundle, len(active))
+	for _, bundle := range active {
+		byID[bundle.Manifest.ID] = bundle
+	}
+	for _, bundle := range active {
+		for _, conflictingID := range bundle.Manifest.ConflictsWith {
+			other, ok := byID[conflictingID]
+			if !ok {
+				continue
+			}
+			return fmt.Errorf(
+				"plugin conflict: %q (%s) cannot run with %q (%s)",
+				bundle.Manifest.Name, bundle.Manifest.ID,
+				other.Manifest.Name, other.Manifest.ID,
+			)
+		}
+	}
+	return nil
+}
+
 func reloadPipeline(runtime *wasm.Runtime, config PluginConfig) (*PluginPipeline, error) {
 	bundles, err := DiscoverPlugins(config.Dir)
 	if err != nil {
@@ -865,6 +909,7 @@ func reloadPipeline(runtime *wasm.Runtime, config PluginConfig) (*PluginPipeline
 	var seenCompactionGate bool
 	approvedUpstream := make(map[string]struct{})
 	loadedUpstream := make(map[string]struct{})
+	activeBundles := make([]PluginBundle, 0, len(order))
 	for _, name := range order {
 		bundle, ok := byName[name]
 		if !ok {
@@ -915,9 +960,13 @@ func reloadPipeline(runtime *wasm.Runtime, config PluginConfig) (*PluginPipeline
 		if hasCompactionGate {
 			seenCompactionGate = true
 		}
+		activeBundles = append(activeBundles, bundle)
 		if !config.AllowUnapproved {
 			approvedUpstream[bundle.Manifest.ID] = struct{}{}
 		}
+	}
+	if err := validateActivePluginConflicts(activeBundles); err != nil {
+		return nil, err
 	}
 	if err := validateHookOrders(config, byName); err != nil {
 		return nil, err

@@ -232,6 +232,21 @@ func TestSecretSentinelMatchesDashboard(t *testing.T) {
 	}
 }
 
+func TestDashboardSurfacesPluginCompositionContracts(t *testing.T) {
+	dashboard := readDashboard(t)
+	for _, marker := range []string{
+		"p.requires_upstream",
+		"p.conflicts_with",
+		"other.conflicts_with",
+		"Cannot run with:",
+		"their manifests declare a plugin conflict",
+	} {
+		if !strings.Contains(dashboard, marker) {
+			t.Errorf("dashboard does not surface/enforce plugin composition contract: missing %q", marker)
+		}
+	}
+}
+
 func readDashboard(t *testing.T) string {
 	t.Helper()
 	b, err := os.ReadFile("../controlplane/dist/index.html")
