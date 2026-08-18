@@ -256,6 +256,13 @@ type reqStateKey struct{}
 // Director, ModifyResponse, and WASM host calls (via context).
 type reqState struct {
 	ID uint64
+	// inboundBody is the immutable, size-checked body snapshot owned by the
+	// HTTP boundary. Rewrite consumes the same bytes instead of reading the
+	// reset request body a second time. inboundBodySet distinguishes an
+	// accepted empty body from alternate ReverseProxy entry points that did
+	// not pass through the boundary.
+	inboundBody    []byte
+	inboundBodySet bool
 	// CallerAuth is the caller's Authorization header value, used as the
 	// fallback credential for offload completions. Host-side only — never
 	// exposed to plugins.
@@ -610,6 +617,51 @@ func ensureReqState(req *http.Request) *reqState {
 	return rs
 }
 
+// requestBodyForRewrite returns the boundary-owned body snapshot. Direct
+// ReverseProxy callers that bypass the HTTP boundary retain the historical
+// read-once fallback.
+func requestBodyForRewrite(req *http.Request) []byte {
+	rs := ensureReqState(req)
+	if rs.inboundBodySet {
+		if req.Body != nil {
+			req.Body.Close()
+		}
+		return rs.inboundBody
+	}
+	if req.Body == nil {
+		return nil
+	}
+	body, _ := io.ReadAll(io.LimitReader(req.Body, maxBodySize+1))
+	req.Body.Close()
+	return body
+}
+
+// readRequestBody uses the declared length only as an allocation hint. The
+// MaxBytesReader passed by the HTTP boundary remains the authority for the
+// limit and error semantics. One spare byte lets an exact-length body reach
+// EOF without io.ReadAll's geometric growth to roughly twice its size.
+func readRequestBody(r io.Reader, contentLength int64) ([]byte, error) {
+	if contentLength < 0 || contentLength > maxBodySize {
+		return io.ReadAll(r)
+	}
+	body := make([]byte, 0, int(contentLength)+1)
+	for {
+		n, err := r.Read(body[len(body):cap(body)])
+		body = body[:len(body)+n]
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				return body, nil
+			}
+			return body, err
+		}
+		if len(body) == cap(body) {
+			rest, readErr := io.ReadAll(r)
+			body = append(body, rest...)
+			return body, readErr
+		}
+	}
+}
+
 // --- Construction -----------------------------------------------------------
 
 // New builds a Server and wires the WASM plugin pipeline.
@@ -785,21 +837,7 @@ func New(cfg Config) (*Server, error) {
 		// pr.SetXForwarded), and unparsable query parameters are dropped.
 		Rewrite: func(pr *httputil.ProxyRequest) {
 			req := pr.Out
-			ensureReqState(req)
-			var body []byte
-			if req.Body != nil {
-				// ServeHTTP has already enforced maxBodySize with a
-				// MaxBytesReader and returned 413, so nothing oversized reaches
-				// here. There used to be a second check that replaced an
-				// oversized body with an EMPTY one and forwarded it — dead code
-				// that an external auditor reasonably read as a live bug
-				// ("body silently truncated, upstream 400s"). The limit belongs
-				// at the edge, where it can still return a status code; here it
-				// could only corrupt the request.
-				lr := io.LimitReader(req.Body, maxBodySize+1)
-				body, _ = io.ReadAll(lr)
-				req.Body.Close()
-			}
+			body := requestBodyForRewrite(req)
 
 			currentCfg := s.GetConfig()
 			prov, provName, strippedPath := provider.Resolve(req.URL.Path, currentCfg.Providers)
@@ -2430,7 +2468,7 @@ func New(cfg Config) (*Server, error) {
 		if r.Body != nil {
 			r.Body = http.MaxBytesReader(w, r.Body, maxBodySize)
 			// Read the whole body now to trigger the limit before dispatch.
-			bodyBytes, err := io.ReadAll(r.Body)
+			bodyBytes, err := readRequestBody(r.Body, r.ContentLength)
 			if err != nil {
 				var maxErr *http.MaxBytesError
 				if errors.As(err, &maxErr) {
@@ -2441,9 +2479,14 @@ func New(cfg Config) (*Server, error) {
 				return
 			}
 			r.Body.Close()
+			rs.inboundBody = bodyBytes
+			rs.inboundBodySet = true
 			r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 		}
-		tr := &trackingReader{ReadCloser: r.Body}
+		// The boundary read above consumed the caller's bytes. Rewrite reuses
+		// that snapshot, so seed the accounting rather than counting a second
+		// artificial read through trackingReader.
+		tr := &trackingReader{ReadCloser: r.Body, bytesRead: int64(len(rs.inboundBody))}
 		tw := &trackingWriter{ResponseWriter: w}
 		r.Body = tr
 
