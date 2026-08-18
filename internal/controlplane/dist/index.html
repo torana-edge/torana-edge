@@ -525,6 +525,17 @@
         showAlert(`Cannot enable ${name}: bundle digest is unavailable.`);
         return false;
       }
+      const conflict = pipelineOrder
+        .filter(otherName => otherName !== name)
+        .map(otherName => pluginByName[otherName])
+        .find(other => other && (
+          (p.conflicts_with || []).includes(other.id) ||
+          (other.conflicts_with || []).includes(p.id)
+        ));
+      if (conflict) {
+        showAlert(`Cannot enable ${name} with ${conflict.name}: their manifests declare a plugin conflict. Disable one of them.`);
+        return false;
+      }
       const permissionList = document.getElementById('pluginPermissionList');
       if (!permissionList || permissionList.dataset.plugin !== name) {
         showAlert(`Inspect ${name} and choose its capability grants before enabling.`);
@@ -538,8 +549,14 @@
         .filter(permission => requested.includes(permission));
       const failureMode = failureModeMap[name] || p.failure_mode || 'pass';
       const summary = selected.length ? selected.join('\n  • ') : 'none';
+      const requirements = (p.requires_upstream || []).length
+        ? `\nRequires earlier plugin IDs:\n  • ${(p.requires_upstream || []).join('\n  • ')}`
+        : '';
+      const conflicts = (p.conflicts_with || []).length
+        ? `\nConflicts with plugin IDs:\n  • ${(p.conflicts_with || []).join('\n  • ')}`
+        : '';
       const accepted = window.confirm(
-        `Approve ${approvalKey}?\n\nBundle: ${p.digest}\nSelected capability grants:\n  • ${summary}\nFailure policy: ${failureMode}\n\nUnselected capabilities remain unavailable. Any bundle change requires approval again.`
+        `Approve ${approvalKey}?\n\nBundle: ${p.digest}\nSelected capability grants:\n  • ${summary}\nFailure policy: ${failureMode}${requirements}${conflicts}\n\nUnselected capabilities remain unavailable. Any bundle change requires approval again.`
       );
       if (!accepted) return false;
       approvalMap[approvalKey] = {
@@ -623,6 +640,13 @@
           ${permissionOptions || '<div class="empty-state">This plugin requests no host capabilities.</div>'}
         </div>
       </fieldset>`;
+      const requirements = (p.requires_upstream || []).map(id => `<code>${escHtml(id)}</code>`).join(', ');
+      const conflicts = (p.conflicts_with || []).map(id => `<code>${escHtml(id)}</code>`).join(', ');
+      const compositionReview = requirements || conflicts ? `<div class="info-note">
+        ${requirements ? `<strong>Requires earlier:</strong> ${requirements}` : ''}
+        ${requirements && conflicts ? '<br>' : ''}
+        ${conflicts ? `<strong>Cannot run with:</strong> ${conflicts}` : ''}
+      </div>` : '';
 
       let servedBlock = '';
       if (p.serves_http) {
@@ -746,6 +770,7 @@
         ${p.description ? `<div class="section-desc">${escHtml(p.description)}</div>` : ''}
         <div class="detail-meta-grid">${hookChips}${permChips || '<span class="chip">no permissions</span>'}</div>
         ${p.digest ? `<div class="section-desc"><strong>Installed bundle digest:</strong> <code>${escHtml(p.digest)}</code>${p.loaded_digest ? `<br><strong>Loaded bundle digest:</strong> <code>${escHtml(p.loaded_digest)}</code>` : ''}<br><strong>Recommended failure policy:</strong> ${escHtml(p.failure_mode || 'pass')}</div>` : ''}
+        ${compositionReview}
         ${permissionReview}
         <label class="field max-field space-block-start-sm space-block-end-sm">
           <span>On plugin runtime failure</span>

@@ -413,6 +413,31 @@ func TestValidateManifestContract(t *testing.T) {
 	if err := validateManifest(invalid); err == nil {
 		t.Fatal("self dependency was accepted")
 	}
+	for _, tc := range []struct {
+		name      string
+		conflicts []string
+		requires  []string
+	}{
+		{name: "empty", conflicts: []string{""}},
+		{name: "whitespace", conflicts: []string{" \t"}},
+		{name: "self", conflicts: []string{valid.ID}},
+		{name: "duplicate", conflicts: []string{"local/other", "local/other"}},
+		{name: "also required", conflicts: []string{"local/other"}, requires: []string{"local/other"}},
+	} {
+		t.Run("conflicts_with rejects "+tc.name, func(t *testing.T) {
+			candidate := valid
+			candidate.ConflictsWith = tc.conflicts
+			candidate.RequiresUpstream = tc.requires
+			if err := validateManifest(candidate); err == nil {
+				t.Fatalf("invalid manifest accepted: %+v", candidate)
+			}
+		})
+	}
+	oneWay := valid
+	oneWay.ConflictsWith = []string{"local/other"}
+	if err := validateManifest(oneWay); err != nil {
+		t.Fatalf("valid one-way conflict declaration: %v", err)
+	}
 }
 
 func TestRequiresUpstreamRejectsMissingOrLaterDependencyBeforeLoadingCode(t *testing.T) {

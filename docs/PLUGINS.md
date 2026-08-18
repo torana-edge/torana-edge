@@ -207,7 +207,9 @@ Order matters and Torana enforces the constraints it can:
 
 - When enabled, `intent` must precede a compactor. Its cache improves relevance,
   but both compactors derive bounded local guidance when it is absent.
-- Run **one** of `compactor` or `keyword_compactor`, not both.
+- Run **one** of `compactor` or `keyword_compactor`, not both. Their manifests
+  declare the conflict, so Torana rejects an approved generation containing
+  both before either guest is loaded.
 - Route-capable plugins must precede compaction economic-gate plugins.
 
 A misordering that Torana cannot detect fails quietly — the pipeline runs and
@@ -215,6 +217,11 @@ produces less than you configured. Manifests can declare `requires_upstream`
 plugin IDs; Torana refuses startup when an approved dependent appears without
 its approved dependency earlier in `plugins.order`. `torana plugin list` shows
 what is installed; the control plane shows what is actually live.
+
+Manifests can also declare `conflicts_with` stable plugin IDs. If either exact
+approved bundle names the other, they cannot run in the same pipeline
+generation; order does not resolve the conflict. Unapproved or otherwise
+skipped bundles do not block an approved plugin from running.
 
 `plugins.order` remains authoritative for loading, lifecycle, and the default
 execution order. A plugin cannot assign itself priority. When an operator needs

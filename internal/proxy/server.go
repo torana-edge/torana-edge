@@ -1860,25 +1860,27 @@ func New(cfg Config) (*Server, error) {
 				orderIdx[n] = i
 			}
 			type pluginInfo struct {
-				ID           string                   `json:"id"`
-				Name         string                   `json:"name"`
-				Version      string                   `json:"version"`
-				Digest       string                   `json:"digest"`
-				FailureMode  string                   `json:"failure_mode"`
-				Description  string                   `json:"description"`
-				Hooks        []string                 `json:"hooks"`
-				Permissions  []string                 `json:"permissions"`
-				Enabled      bool                     `json:"enabled"`
-				Order        int                      `json:"order"`
-				State        string                   `json:"state"`
-				Loaded       bool                     `json:"loaded"`
-				LoadedDigest string                   `json:"loaded_digest,omitempty"`
-				ServesHTTP   bool                     `json:"serves_http"`
-				Schema       *plugin.ConfigSchema     `json:"schema,omitempty"`
-				Agent        *plugin.AgentDescriptor  `json:"agent,omitempty"`
-				LoadedAgent  *plugin.AgentDescriptor  `json:"loaded_agent,omitempty"`
-				Config       json.RawMessage          `json:"config,omitempty"`
-				Approval     *provider.PluginApproval `json:"approval,omitempty"`
+				ID               string                   `json:"id"`
+				Name             string                   `json:"name"`
+				Version          string                   `json:"version"`
+				Digest           string                   `json:"digest"`
+				FailureMode      string                   `json:"failure_mode"`
+				Description      string                   `json:"description"`
+				Hooks            []string                 `json:"hooks"`
+				Permissions      []string                 `json:"permissions"`
+				RequiresUpstream []string                 `json:"requires_upstream"`
+				ConflictsWith    []string                 `json:"conflicts_with"`
+				Enabled          bool                     `json:"enabled"`
+				Order            int                      `json:"order"`
+				State            string                   `json:"state"`
+				Loaded           bool                     `json:"loaded"`
+				LoadedDigest     string                   `json:"loaded_digest,omitempty"`
+				ServesHTTP       bool                     `json:"serves_http"`
+				Schema           *plugin.ConfigSchema     `json:"schema,omitempty"`
+				Agent            *plugin.AgentDescriptor  `json:"agent,omitempty"`
+				LoadedAgent      *plugin.AgentDescriptor  `json:"loaded_agent,omitempty"`
+				Config           json.RawMessage          `json:"config,omitempty"`
+				Approval         *provider.PluginApproval `json:"approval,omitempty"`
 			}
 			loadedByName := make(map[string]plugin.LoadedPluginStatus)
 			if rawPipeline := s.pluginPipeline.Load(); rawPipeline != nil {
@@ -1930,25 +1932,27 @@ func New(cfg Config) (*Server, error) {
 					}
 				}
 				infos = append(infos, pluginInfo{
-					ID:           m.ID,
-					Name:         m.Name,
-					Version:      m.Version,
-					Digest:       b.Digest,
-					FailureMode:  m.FailureMode,
-					Description:  m.Description,
-					Hooks:        hooks,
-					Permissions:  perms,
-					Enabled:      enabled,
-					Order:        idx,
-					State:        state,
-					Loaded:       loaded,
-					LoadedDigest: loadedStatus.Digest,
-					ServesHTTP:   loaded && loadedStatus.ServesHTTP,
-					Schema:       b.Schema,
-					Agent:        b.Agent,
-					LoadedAgent:  loadedStatus.Agent,
-					Config:       cur.Config[m.Name],
-					Approval:     approvalPtr,
+					ID:               m.ID,
+					Name:             m.Name,
+					Version:          m.Version,
+					Digest:           b.Digest,
+					FailureMode:      m.FailureMode,
+					Description:      m.Description,
+					Hooks:            hooks,
+					Permissions:      perms,
+					RequiresUpstream: append([]string{}, m.RequiresUpstream...),
+					ConflictsWith:    append([]string{}, m.ConflictsWith...),
+					Enabled:          enabled,
+					Order:            idx,
+					State:            state,
+					Loaded:           loaded,
+					LoadedDigest:     loadedStatus.Digest,
+					ServesHTTP:       loaded && loadedStatus.ServesHTTP,
+					Schema:           b.Schema,
+					Agent:            b.Agent,
+					LoadedAgent:      loadedStatus.Agent,
+					Config:           cur.Config[m.Name],
+					Approval:         approvalPtr,
 				})
 				seen[m.Name] = true
 			}
