@@ -3,6 +3,7 @@ package wasm
 import (
 	"context"
 	"fmt"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -57,6 +58,243 @@ func TestRuntimeOptionsAreNormalized(t *testing.T) {
 	}
 	if got.MemoryLimitPages != 65536 {
 		t.Fatalf("memory pages = %d, want WebAssembly maximum", got.MemoryLimitPages)
+	}
+	if got.InstanceIdleTimeout != defaultInstanceIdleTimeout {
+		t.Fatalf("idle timeout = %s, want %s", got.InstanceIdleTimeout, defaultInstanceIdleTimeout)
+	}
+	if got := normalizeRuntimeOptions(RuntimeOptions{InstanceIdleTimeout: -1}); got.InstanceIdleTimeout != 0 {
+		t.Fatalf("disabled idle timeout = %s, want zero", got.InstanceIdleTimeout)
+	}
+	if got := normalizeRuntimeOptions(RuntimeOptions{InstanceIdleTimeout: 17 * time.Second}); got.InstanceIdleTimeout != 17*time.Second {
+		t.Fatalf("custom idle timeout = %s", got.InstanceIdleTimeout)
+	}
+}
+
+func TestRetireIdleInstancesKeepsOneReady(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	var closed []string
+	p := &Plugin{
+		pool:        make(chan *pluginInstance, 4),
+		slots:       make(chan struct{}, 4),
+		idleTimeout: time.Minute,
+	}
+	for i, age := range []time.Duration{4 * time.Minute, 3 * time.Minute, 2 * time.Minute, 90 * time.Second} {
+		p.pool <- &pluginInstance{
+			mod:       &fakeModule{order: &closed, tag: fmt.Sprintf("i%d", i)},
+			idleSince: now.Add(-age),
+		}
+	}
+
+	p.retireIdleInstances(now)
+	if got := len(p.pool); got != 1 {
+		t.Fatalf("retained idle instances = %d, want one", got)
+	}
+	kept := <-p.pool
+	if got := kept.mod.(*fakeModule).tag; got != "i3" {
+		t.Fatalf("retained %s, want newest i3", got)
+	}
+	if got, want := closed, []string{"instance:i0", "instance:i1", "instance:i2"}; !slices.Equal(got, want) {
+		t.Fatalf("closed = %v, want %v", got, want)
+	}
+}
+
+func TestRetireIdleInstancesPreservesRecentAndActive(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	var closed []string
+	p := &Plugin{
+		pool:        make(chan *pluginInstance, 4),
+		slots:       make(chan struct{}, 4),
+		idleTimeout: time.Minute,
+	}
+	stale := &pluginInstance{mod: &fakeModule{order: &closed, tag: "stale"}, idleSince: now.Add(-2 * time.Minute)}
+	recentA := &pluginInstance{mod: &fakeModule{order: &closed, tag: "recent-a"}, idleSince: now.Add(-30 * time.Second)}
+	recentB := &pluginInstance{mod: &fakeModule{order: &closed, tag: "recent-b"}, idleSince: now.Add(-20 * time.Second)}
+	active := &pluginInstance{mod: &fakeModule{order: &closed, tag: "active"}}
+	p.pool <- stale
+	p.pool <- recentA
+	p.pool <- recentB
+	p.slots <- struct{}{} // active holds one admitted-call slot and is not idle.
+
+	p.retireIdleInstances(now)
+	if got := len(p.pool); got != 2 {
+		t.Fatalf("retained idle instances = %d, want two recent instances", got)
+	}
+	for i, want := range []string{"recent-a", "recent-b"} {
+		if got := (<-p.pool).mod.(*fakeModule).tag; got != want {
+			t.Fatalf("retained[%d] = %s, want %s", i, got, want)
+		}
+	}
+	if got, want := closed, []string{"instance:stale"}; !slices.Equal(got, want) {
+		t.Fatalf("closed = %v, want %v", got, want)
+	}
+	p.release(active)
+	if slices.Contains(closed, "instance:active") {
+		t.Fatal("an active instance was closed")
+	}
+}
+
+func TestRetireIdleInstancesDisabledAndClosedAreNoOps(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		timeout time.Duration
+		closed  bool
+	}{
+		{name: "disabled", timeout: 0},
+		{name: "plugin closed", timeout: time.Second, closed: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var closes []string
+			p := &Plugin{
+				pool:        make(chan *pluginInstance, 2),
+				slots:       make(chan struct{}, 2),
+				idleTimeout: tc.timeout,
+				poolClosed:  tc.closed,
+			}
+			p.pool <- &pluginInstance{mod: &fakeModule{order: &closes, tag: "a"}, idleSince: time.Unix(1, 0)}
+			p.pool <- &pluginInstance{mod: &fakeModule{order: &closes, tag: "b"}, idleSince: time.Unix(2, 0)}
+			p.retireIdleInstances(time.Unix(100, 0))
+			if len(p.pool) != 2 || len(closes) != 0 {
+				t.Fatalf("pool=%d closes=%v, want untouched", len(p.pool), closes)
+			}
+		})
+	}
+}
+
+func TestSetGrantsQuiescesCallsAndIdleSweep(t *testing.T) {
+	var closed []string
+	p := &Plugin{
+		pool:  make(chan *pluginInstance, 1),
+		slots: make(chan struct{}, 1),
+	}
+	p.pool <- &pluginInstance{mod: &fakeModule{order: &closed, tag: "old-policy"}}
+	p.callMu.RLock() // model an admitted call or in-progress idle sweep
+	done := make(chan struct{})
+	go func() {
+		p.SetGrants([]string{"env.log"})
+		close(done)
+	}()
+	select {
+	case <-done:
+		t.Fatal("SetGrants crossed the call/sweep quiescence boundary")
+	case <-time.After(20 * time.Millisecond):
+	}
+	p.callMu.RUnlock()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("SetGrants did not finish after quiescence")
+	}
+	if got := len(p.pool); got != 0 {
+		t.Fatalf("old-policy pool = %d, want drained", got)
+	}
+	if got, want := closed, []string{"instance:old-policy"}; !slices.Equal(got, want) {
+		t.Fatalf("closed = %v, want %v", got, want)
+	}
+	if !p.hasGrant("env.log") {
+		t.Fatal("new grant set was not installed")
+	}
+}
+
+func TestRuntimeRetiresBurstAndRegrowsOnDemand(t *testing.T) {
+	r := NewRuntimeWithOptions(context.Background(), RuntimeOptions{
+		PoolSize:            4,
+		CallTimeout:         time.Second,
+		InstanceIdleTimeout: 20 * time.Millisecond,
+	})
+	p, err := r.LoadPlugin("retirement", MinimalV2Module(false))
+	if err != nil {
+		t.Fatal(err)
+	}
+	instances := make([]*pluginInstance, 0, 4)
+	for range 4 {
+		inst, err := p.acquire(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		instances = append(instances, inst)
+	}
+	for _, inst := range instances {
+		p.release(inst)
+	}
+	deadline := time.Now().Add(time.Second)
+	for len(p.pool) != 1 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if got := len(p.pool); got != 1 {
+		t.Fatalf("idle pool = %d after timeout, want one", got)
+	}
+
+	regrown := acquireInstancesConcurrently(t, p, 4)
+	for _, inst := range regrown {
+		p.release(inst)
+	}
+	if got := len(p.pool); got != 4 {
+		t.Fatalf("regrown pool = %d, want four", got)
+	}
+	if err := r.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if r.idleStop != nil || r.idleDone != nil {
+		t.Fatal("idle-retirement worker survived runtime close")
+	}
+}
+
+func TestIdleRetirementConcurrentTraffic(t *testing.T) {
+	r := NewRuntimeWithOptions(context.Background(), RuntimeOptions{
+		PoolSize:            4,
+		CallTimeout:         time.Second,
+		InstanceIdleTimeout: 2 * time.Millisecond,
+	})
+	defer r.Close()
+	p, err := r.LoadPlugin("retirement-stress", MinimalV2Module(false))
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.SetGrants(nil)
+	start := make(chan struct{})
+	errs := make(chan error, 8)
+	var wg sync.WaitGroup
+	for range 8 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			for range 100 {
+				var output []byte
+				if err := p.CallRequest(context.Background(), pb.Hook_HOOK_BEFORE_REQUEST, 1, nil, &output); err != nil {
+					errs <- err
+					return
+				}
+			}
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Fatalf("concurrent call: %v", err)
+	}
+	deadline := time.Now().Add(time.Second)
+	for len(p.pool) != 1 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if got := len(p.pool); got != 1 {
+		t.Fatalf("idle pool = %d after concurrent traffic, want one", got)
+	}
+}
+
+func TestIdleRetirementStopsOnParentContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	r := NewRuntimeWithOptions(ctx, RuntimeOptions{InstanceIdleTimeout: time.Second})
+	done := r.idleDone
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("idle-retirement worker ignored parent cancellation")
+	}
+	if err := r.Close(); err != nil {
+		t.Fatal(err)
 	}
 }
 

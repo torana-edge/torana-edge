@@ -7,6 +7,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestMITMIngressValidation(t *testing.T) {
@@ -218,6 +219,54 @@ func TestConfigValidateRejectsInvalidProviderGraph(t *testing.T) {
 	}
 	if err := invalid.Validate(); err == nil {
 		t.Fatal("missing fallback provider was accepted")
+	}
+}
+
+func TestPluginRuntimeInstanceIdleTimeout(t *testing.T) {
+	zero := 0
+	custom := 17
+	for _, tc := range []struct {
+		name string
+		cfg  PluginRuntimeConfig
+		want time.Duration
+	}{
+		{name: "omitted selects runtime default", cfg: PluginRuntimeConfig{}, want: 0},
+		{name: "explicit zero disables", cfg: PluginRuntimeConfig{InstanceIdleTimeoutSeconds: &zero}, want: -1},
+		{name: "custom", cfg: PluginRuntimeConfig{InstanceIdleTimeoutSeconds: &custom}, want: 17 * time.Second},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.cfg.InstanceIdleTimeout(); got != tc.want {
+				t.Fatalf("InstanceIdleTimeout() = %s, want %s", got, tc.want)
+			}
+		})
+	}
+
+	for _, invalid := range []int{-1, 1, MaxInstanceIdleTimeoutSeconds + 1} {
+		cfg := Config{
+			Port: 8080,
+			Providers: map[string]Provider{
+				"primary": {URL: "https://api.example.test", Format: "openai"},
+			},
+			Plugins: PluginsConfig{Runtime: PluginRuntimeConfig{InstanceIdleTimeoutSeconds: &invalid}},
+		}
+		if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "instance_idle_timeout_seconds") {
+			t.Fatalf("invalid idle timeout %d error = %v", invalid, err)
+		}
+	}
+
+	encoded, err := json.Marshal(PluginRuntimeConfig{InstanceIdleTimeoutSeconds: &zero})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded PluginRuntimeConfig
+	if err := json.Unmarshal(encoded, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if decoded.InstanceIdleTimeoutSeconds == nil || *decoded.InstanceIdleTimeoutSeconds != 0 {
+		t.Fatalf("explicit-zero round trip = %#v", decoded.InstanceIdleTimeoutSeconds)
+	}
+	if decoded.InstanceIdleTimeout() != -1 {
+		t.Fatalf("explicit-zero round trip enabled retirement: %s", decoded.InstanceIdleTimeout())
 	}
 }
 
