@@ -154,3 +154,108 @@ func TestNonInferenceEndpointBypassesIRAndPlugins(t *testing.T) {
 		t.Fatal("empty auxiliary request never reached upstream")
 	}
 }
+
+func TestAuxiliaryEndpointsBypassIRAcrossFormats(t *testing.T) {
+	requireWASM(t, "../../examples/plugins/test-trapper/plugin.wasm")
+	requireWASM(t, "../../examples/plugins/test-trapper-response/plugin.wasm")
+
+	rows := []struct {
+		name   string
+		format string
+		path   string
+	}{
+		{"openai models", "openai", "/v1/models"},
+		{"anthropic token count", "anthropic", "/v1/messages/count_tokens"},
+		{"bedrock invoke", "bedrock", "/model/example/invoke"},
+		{"gemini token count", "gemini", "/v1beta/models/example:countTokens"},
+		{"code assist settings", "gemini-codeassist", "/v1internal:getCodeAssistGlobalUserSetting"},
+	}
+
+	for _, row := range rows {
+		t.Run(row.name, func(t *testing.T) {
+			type observation struct {
+				method      string
+				path        string
+				query       string
+				body        string
+				contentType string
+				vendor      string
+			}
+			seen := make(chan observation, 1)
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				body, _ := io.ReadAll(r.Body)
+				seen <- observation{
+					method:      r.Method,
+					path:        r.URL.Path,
+					query:       r.URL.RawQuery,
+					body:        string(body),
+					contentType: r.Header.Get("Content-Type"),
+					vendor:      r.Header.Get("X-Vendor-Aux"),
+				}
+				w.Header().Set("Content-Type", "application/octet-stream")
+				w.Header().Set("X-Upstream-Aux", "preserved")
+				w.WriteHeader(http.StatusMultiStatus)
+				_, _ = io.WriteString(w, "auxiliary-response-not-json")
+			}))
+			defer upstream.Close()
+
+			providers := testProviderConfig(upstream.URL, "test", row.format)
+			providers.Plugins = provider.PluginsConfig{
+				Dir:             "../../examples/plugins",
+				Order:           []string{"test-trapper", "test-trapper-response"},
+				AllowUnapproved: true,
+			}
+			srv, err := New(Config{Port: "0", Providers: providers})
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+			proxy := httptest.NewServer(srv.Handler())
+			defer func() {
+				proxy.Close()
+				_ = srv.Shutdown(context.Background())
+			}()
+
+			const requestBody = "not-json{SECRET-auxiliary-body"
+			req, err := http.NewRequest(http.MethodPost,
+				proxy.URL+"/provider/test"+row.path+"?feature=one&feature=two",
+				strings.NewReader(requestBody))
+			if err != nil {
+				t.Fatal(err)
+			}
+			req.Header.Set("Content-Type", "application/x-torana-aux")
+			req.Header.Set("X-Vendor-Aux", "preserve-me")
+			resp, err := (&http.Client{Timeout: 5 * time.Second}).Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			responseBody, readErr := io.ReadAll(resp.Body)
+			_ = resp.Body.Close()
+			if readErr != nil {
+				t.Fatal(readErr)
+			}
+
+			if resp.StatusCode != http.StatusMultiStatus || string(responseBody) != "auxiliary-response-not-json" {
+				t.Fatalf("response = %d %q, want byte-exact upstream 207", resp.StatusCode, responseBody)
+			}
+			if got := resp.Header.Get("X-Upstream-Aux"); got != "preserved" {
+				t.Fatalf("upstream response header = %q, want preserved", got)
+			}
+			select {
+			case got := <-seen:
+				want := observation{
+					method:      http.MethodPost,
+					path:        row.path,
+					query:       "feature=one&feature=two",
+					body:        requestBody,
+					contentType: "application/x-torana-aux",
+					vendor:      "preserve-me",
+				}
+				if got != want {
+					t.Fatalf("upstream request = %+v, want %+v", got, want)
+				}
+			case <-time.After(2 * time.Second):
+				t.Fatal("auxiliary request never reached upstream")
+			}
+		})
+	}
+}
