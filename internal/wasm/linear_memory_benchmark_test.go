@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -70,6 +71,16 @@ type guestHostMemorySnapshot struct {
 	TotalHostSys  uint64 `json:"total_host_sys_bytes"`
 	LinearBytes   uint64 `json:"linear_bytes,omitempty"`
 	InstanceCount int    `json:"instance_count,omitempty"`
+}
+
+type guestIdleRetirementRecord struct {
+	Guest                 string   `json:"guest"`
+	PoolSize              int      `json:"pool_size"`
+	BeforeIdleLinearBytes []uint32 `json:"before_idle_linear_bytes"`
+	AfterIdleLinearBytes  []uint32 `json:"after_idle_linear_bytes"`
+	RSSBeforeIdleBytes    uint64   `json:"rss_before_idle_bytes,omitempty"`
+	RSSAfterIdleBytes     uint64   `json:"rss_after_idle_bytes,omitempty"`
+	RegrowDurationMicros  int64    `json:"regrow_duration_micros"`
 }
 
 // TestGuestLinearMemoryProfile measures the memory visible through the Wasm
@@ -168,6 +179,68 @@ func TestGuestLinearMemoryProfile(t *testing.T) {
 			t.Logf("WASM_LINEAR_MEMORY %s", encoded)
 		})
 	}
+}
+
+// TestGuestIdleRetirementProfile measures the production idle-retirement
+// policy after one representative call per burst-created instance. It is
+// bundle-gated because the standard-Go guest owns the measured footprint.
+func TestGuestIdleRetirementProfile(t *testing.T) {
+	path := os.Getenv("TORANA_GO_GUEST")
+	if path == "" {
+		t.Skip("TORANA_GO_GUEST unset")
+	}
+	wasmBytes, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const poolSize = 4
+	r := NewRuntimeWithOptions(context.Background(), RuntimeOptions{
+		PoolSize:            poolSize,
+		CallTimeout:         10 * time.Second,
+		InstanceIdleTimeout: 50 * time.Millisecond,
+	})
+	defer r.Close()
+	p, err := r.LoadPlugin("go-logger-idle-retirement", wasmBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.SetGrants([]string{"env.log"})
+	instances := acquireInstancesConcurrently(t, p, poolSize)
+	exerciseEachInstance(t, p, instances, benchmarkBeforeRequestInput(t), true)
+	before := instanceMemoryBytes(t, instances)
+	rssBefore := retainedRSSBytes(t)
+	releaseInstances(p, instances)
+
+	deadline := time.Now().Add(2 * time.Second)
+	for len(p.pool) != 1 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if got := len(p.pool); got != 1 {
+		t.Fatalf("idle pool = %d, want one", got)
+	}
+	retained := acquireInstances(t, p, 1)
+	after := instanceMemoryBytes(t, retained)
+	releaseInstances(p, retained)
+	rssAfter := retainedRSSBytes(t)
+
+	regrowStart := time.Now()
+	regrown := acquireInstancesConcurrently(t, p, poolSize)
+	regrowDuration := time.Since(regrowStart)
+	releaseInstances(p, regrown)
+	record := guestIdleRetirementRecord{
+		Guest:                 "go",
+		PoolSize:              poolSize,
+		BeforeIdleLinearBytes: before,
+		AfterIdleLinearBytes:  after,
+		RSSBeforeIdleBytes:    rssBefore,
+		RSSAfterIdleBytes:     rssAfter,
+		RegrowDurationMicros:  regrowDuration.Microseconds(),
+	}
+	encoded, err := json.Marshal(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("WASM_IDLE_RETIREMENT %s", encoded)
 }
 
 // TestGuestLinearMemoryRepeatedProfile distinguishes first-call heap growth
@@ -530,6 +603,31 @@ func acquireInstances(t *testing.T, p *Plugin, count int) []*pluginInstance {
 			t.Fatalf("acquire instance %d: %v", len(instances), err)
 		}
 		instances = append(instances, inst)
+	}
+	return instances
+}
+
+func acquireInstancesConcurrently(t *testing.T, p *Plugin, count int) []*pluginInstance {
+	t.Helper()
+	instances := make([]*pluginInstance, count)
+	errs := make([]error, count)
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for i := range count {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			instances[i], errs[i] = p.acquire(context.Background())
+		}()
+	}
+	close(start)
+	wg.Wait()
+	for i, err := range errs {
+		if err != nil {
+			releaseInstances(p, instances)
+			t.Fatalf("acquire instance %d: %v", i, err)
+		}
 	}
 	return instances
 }

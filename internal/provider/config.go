@@ -91,6 +91,12 @@ func (c Config) Validate() error {
 				"%d would wake every background plugin that often, and each may spend money",
 			MinTickIntervalSeconds, t)
 	}
+	if t := c.Plugins.Runtime.InstanceIdleTimeoutSeconds; t != nil &&
+		(*t < 0 || (*t > 0 && *t < MinInstanceIdleTimeoutSeconds) || *t > MaxInstanceIdleTimeoutSeconds) {
+		return fmt.Errorf(
+			"plugins.runtime.instance_idle_timeout_seconds must be 0 (disabled) or between %d and %d",
+			MinInstanceIdleTimeoutSeconds, MaxInstanceIdleTimeoutSeconds)
+	}
 	for name, configured := range c.Providers {
 		if strings.TrimSpace(name) == "" {
 			return fmt.Errorf("provider name must not be empty")
@@ -505,12 +511,17 @@ type PluginsConfig struct {
 // never inspects.
 const DefaultPluginsDir = "./plugins"
 
-// PluginRuntimeConfig bounds untrusted WASM execution. Zero values select the
-// runtime's conservative defaults (4 idle instances, 5 seconds, 64 MiB).
+// PluginRuntimeConfig bounds untrusted WASM execution. Omitted values select
+// the runtime's conservative defaults (4 concurrent instances, 5 second call
+// timeout, 64 MiB per instance, and one-minute burst-instance retirement).
 type PluginRuntimeConfig struct {
 	PoolSize       int    `json:"pool_size,omitempty"`
 	CallTimeoutMS  int    `json:"call_timeout_ms,omitempty"`
 	MemoryLimitMiB uint32 `json:"memory_limit_mib,omitempty"`
+	// InstanceIdleTimeoutSeconds retires burst-created idle instances while
+	// retaining one ready instance per plugin. Nil selects the one-minute
+	// default; an explicit zero disables retirement.
+	InstanceIdleTimeoutSeconds *int `json:"instance_idle_timeout_seconds,omitempty"`
 	// TickIntervalSeconds is how often run_on_tick fires. Zero disables ticks
 	// entirely, which is the default: background execution is opt-in, and a
 	// proxy nobody configured for it should never run plugin code outside a
@@ -543,12 +554,34 @@ func (p PluginRuntimeConfig) EgressBudgetFor(plugin string) EgressBudget {
 // more likely to be a typo than an intention.
 const MinTickIntervalSeconds = 10
 
+const (
+	// MinInstanceIdleTimeoutSeconds prevents an operator typo from turning
+	// ordinary inter-request gaps into continuous guest teardown/recreation.
+	MinInstanceIdleTimeoutSeconds = 10
+	// MaxInstanceIdleTimeoutSeconds bounds duration conversion and keeps the
+	// setting meaningful as an idle-memory policy rather than permanent state.
+	MaxInstanceIdleTimeoutSeconds = 24 * 60 * 60
+)
+
 // TickInterval returns the configured cadence, or zero when ticks are off.
 func (p PluginRuntimeConfig) TickInterval() time.Duration {
 	if p.TickIntervalSeconds <= 0 {
 		return 0
 	}
 	return time.Duration(p.TickIntervalSeconds) * time.Second
+}
+
+// InstanceIdleTimeout maps the customer-facing optional setting to the
+// runtime's internal normalization contract: zero selects the default and a
+// negative duration explicitly disables retirement.
+func (p PluginRuntimeConfig) InstanceIdleTimeout() time.Duration {
+	if p.InstanceIdleTimeoutSeconds == nil {
+		return 0
+	}
+	if *p.InstanceIdleTimeoutSeconds == 0 {
+		return -1
+	}
+	return time.Duration(*p.InstanceIdleTimeoutSeconds) * time.Second
 }
 
 type PluginApproval struct {

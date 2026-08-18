@@ -36,6 +36,10 @@ const (
 	defaultPoolSize = 4
 	// defaultCallTimeout bounds every untrusted guest call, including _initialize.
 	defaultCallTimeout = 5 * time.Second
+	// defaultInstanceIdleTimeout retires burst-created instances after a quiet
+	// period while retaining one ready instance per plugin. PoolSize remains the
+	// concurrency ceiling; it no longer implies permanent burst retention.
+	defaultInstanceIdleTimeout = time.Minute
 	// defaultMemoryLimitPages caps a plugin at 64 MiB of Wasm linear memory.
 	// A page is 64 KiB. This is high enough for the current Go/WASI plugins while
 	// preventing an absent module maximum from becoming wazero's 4 GiB default.
@@ -46,19 +50,24 @@ const (
 // Zero values select conservative defaults, so existing callers retain working
 // behavior without inheriting unbounded resource use.
 type RuntimeOptions struct {
-	// PoolSize is the maximum number of idle instances retained per plugin.
+	// PoolSize is the maximum number of concurrent instances per plugin.
 	PoolSize int
 	// CallTimeout is the maximum duration of one guest function invocation.
 	CallTimeout time.Duration
 	// MemoryLimitPages is the maximum Wasm linear memory per instance (64 KiB/page).
 	MemoryLimitPages uint32
+	// InstanceIdleTimeout retires burst-created idle instances while retaining
+	// one ready instance per plugin. Zero selects the default; a negative value
+	// disables retirement for controlled comparisons.
+	InstanceIdleTimeout time.Duration
 }
 
 func defaultRuntimeOptions() RuntimeOptions {
 	return RuntimeOptions{
-		PoolSize:         defaultPoolSize,
-		CallTimeout:      defaultCallTimeout,
-		MemoryLimitPages: defaultMemoryLimitPages,
+		PoolSize:            defaultPoolSize,
+		CallTimeout:         defaultCallTimeout,
+		MemoryLimitPages:    defaultMemoryLimitPages,
+		InstanceIdleTimeout: defaultInstanceIdleTimeout,
 	}
 }
 
@@ -72,6 +81,11 @@ func normalizeRuntimeOptions(options RuntimeOptions) RuntimeOptions {
 	}
 	if options.MemoryLimitPages == 0 {
 		options.MemoryLimitPages = defaults.MemoryLimitPages
+	}
+	if options.InstanceIdleTimeout == 0 {
+		options.InstanceIdleTimeout = defaults.InstanceIdleTimeout
+	} else if options.InstanceIdleTimeout < 0 {
+		options.InstanceIdleTimeout = 0
 	}
 	// Wazero panics for a value above the WebAssembly maximum. Clamp here so a
 	// configuration mistake cannot crash the proxy at startup.
@@ -127,6 +141,7 @@ type Plugin struct {
 
 	poolSize    int
 	callTimeout time.Duration
+	idleTimeout time.Duration
 
 	instanceCount uint64
 }
@@ -134,11 +149,19 @@ type Plugin struct {
 type pluginInstance struct {
 	mod        api.Module
 	logEnabled bool
+	idleSince  time.Time
 }
 
 func (p *Plugin) Name() string { return p.name }
 
 func (p *Plugin) SetGrants(g []string) {
+	// Grant installation and idle-instance recycling are one transaction. The
+	// idle sweeper takes the read side of this lock, so it cannot temporarily
+	// remove an old-policy instance and requeue it after this method drains the
+	// pool. Calls are quiesced for the same reason: an instance observes one
+	// immutable grant/logging policy for its whole invocation.
+	p.callMu.Lock()
+	defer p.callMu.Unlock()
 	p.stateMu.Lock()
 	p.grants = make(map[string]bool)
 	for _, x := range g {
@@ -258,6 +281,7 @@ func (p *Plugin) acquire(ctx context.Context) (*pluginInstance, error) {
 	select {
 	case inst := <-p.pool:
 		if inst != nil {
+			inst.idleSince = time.Time{}
 			p.fireInstanceAcquired()
 			return inst, nil
 		}
@@ -301,11 +325,63 @@ func (p *Plugin) release(inst *pluginInstance) {
 		_ = inst.mod.Close(context.Background())
 		return
 	}
+	inst.idleSince = time.Now()
 	select {
 	case p.pool <- inst:
 	default:
 		// Pool full — close the extra instance.
 		inst.mod.Close(context.Background())
+	}
+}
+
+// retireIdleInstances closes only stale burst-created instances. One newest
+// idle instance is always retained so ordinary low-concurrency traffic stays
+// warm. The channel is drained as a snapshot; concurrent acquire/release is
+// safe, and a requeue that loses a race to a concurrent release closes the
+// extra instance instead of exceeding PoolSize.
+func (p *Plugin) retireIdleInstances(now time.Time) {
+	if p.idleTimeout <= 0 {
+		return
+	}
+	p.callMu.RLock()
+	defer p.callMu.RUnlock()
+	p.stateMu.RLock()
+	closed := p.poolClosed
+	p.stateMu.RUnlock()
+	if closed {
+		return
+	}
+
+	snapshotSize := len(p.pool)
+	idle := make([]*pluginInstance, 0, snapshotSize)
+snapshot:
+	for range snapshotSize {
+		select {
+		case inst := <-p.pool:
+			if inst != nil {
+				idle = append(idle, inst)
+			}
+		default:
+			break snapshot
+		}
+	}
+	newest := -1
+	for i, inst := range idle {
+		if newest == -1 || inst.idleSince.After(idle[newest].idleSince) {
+			newest = i
+		}
+	}
+	for i, inst := range idle {
+		stale := !inst.idleSince.IsZero() && now.Sub(inst.idleSince) >= p.idleTimeout
+		if i != newest && stale {
+			_ = inst.mod.Close(context.Background())
+			continue
+		}
+		select {
+		case p.pool <- inst:
+		default:
+			_ = inst.mod.Close(context.Background())
+		}
 	}
 }
 
@@ -321,12 +397,13 @@ func (p *Plugin) callContext(ctx context.Context) (context.Context, context.Canc
 }
 
 func (p *Plugin) newInstance(ctx context.Context) (*pluginInstance, error) {
+	// Only unique-name allocation needs serialization. wazero runtimes support
+	// concurrent instantiation; holding this lock through InstantiateModule
+	// turned a cold four-request burst into three sequential guest startups.
 	p.poolMu.Lock()
-	defer p.poolMu.Unlock()
-
-	// Wazero requires unique names for instances
 	p.instanceCount++
 	instanceName := fmt.Sprintf("%s-%d", p.name, p.instanceCount)
+	p.poolMu.Unlock()
 
 	// Instantiate from the already-compiled module. This avoids recompiling
 	// the ~8 MB Go/WASI module on every pool instance (and on every instance
@@ -544,6 +621,8 @@ type Runtime struct {
 	lifecycleState lifecycleState
 	closeOnce      sync.Once
 	closeErr       error
+	idleStop       chan struct{}
+	idleDone       chan struct{}
 
 	// testHooks is a nil-by-default lifecycle observer seam used by the
 	// reference-model tests. Production never installs it: the hooks cost
@@ -757,6 +836,11 @@ func newRuntime(ctx context.Context, store cache.Store, ownsCache bool, options 
 		ownsCache: ownsCache,
 		options:   options,
 	}
+	if options.InstanceIdleTimeout > 0 {
+		r.idleStop = make(chan struct{})
+		r.idleDone = make(chan struct{})
+		go r.retireIdleLoop()
+	}
 	wasi_snapshot_preview1.MustInstantiate(r.ctx, r.runtime)
 	r.installHostFunctions()
 	return r
@@ -775,6 +859,7 @@ func (r *Runtime) Close() error {
 }
 
 func (r *Runtime) closeLocked() error {
+	r.stopIdleRetirement()
 	// The whole transaction holds lifecycleMu: loads/unloads see closing and
 	// cannot mutate the ownership set. Each plugin stays published in the map
 	// until ITS OWN write-lock quiescence completes (an admitted call's host
@@ -835,6 +920,46 @@ func (r *Runtime) closeLocked() error {
 	r.lifecycleState = lifecycleClosed
 	r.fireCloseEnd()
 	return errors.Join(errs...)
+}
+
+func (r *Runtime) retireIdleLoop() {
+	defer close(r.idleDone)
+	interval := r.options.InstanceIdleTimeout / 2
+	if interval < time.Millisecond {
+		interval = time.Millisecond
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case now := <-ticker.C:
+			r.mu.RLock()
+			plugins := make([]*Plugin, 0, len(r.plugins))
+			for _, p := range r.plugins {
+				plugins = append(plugins, p)
+			}
+			r.mu.RUnlock()
+			for _, p := range plugins {
+				p.retireIdleInstances(now)
+			}
+		case <-r.idleStop:
+			return
+		case <-r.ctx.Done():
+			return
+		}
+	}
+}
+
+func (r *Runtime) stopIdleRetirement() {
+	if r.idleStop == nil {
+		return
+	}
+	close(r.idleStop)
+	<-r.idleDone
+	// closeOnce makes this one-shot, but nil the channels to make the ownership
+	// transition explicit and keep test inspection unambiguous.
+	r.idleStop = nil
+	r.idleDone = nil
 }
 
 // UnloadPlugin removes a loaded plugin from the runtime, releasing its pool
@@ -1088,6 +1213,7 @@ func (r *Runtime) LoadPlugin(name string, wasmBytes []byte) (*Plugin, error) {
 		slots:       make(chan struct{}, r.options.PoolSize),
 		poolSize:    r.options.PoolSize,
 		callTimeout: r.options.CallTimeout,
+		idleTimeout: r.options.InstanceIdleTimeout,
 	}
 
 	// Pre-warm the pool with one instance. Any failure after a successful
@@ -1120,13 +1246,14 @@ func (r *Runtime) LoadPlugin(name string, wasmBytes []byte) (*Plugin, error) {
 	}
 	p.hooks = bitmap
 
+	inst.idleSince = time.Now()
 	p.pool <- inst
 
 	r.mu.Lock()
 	r.plugins[name] = p
 	r.mu.Unlock()
 	r.firePublished(name)
-	log.Printf("[wasm] loaded plugin %s (pool=%d timeout=%s memory_limit=%dMiB)", name, p.poolSize, p.callTimeout, int(r.options.MemoryLimitPages)/16)
+	log.Printf("[wasm] loaded plugin %s (pool=%d timeout=%s memory_limit=%dMiB idle_timeout=%s)", name, p.poolSize, p.callTimeout, int(r.options.MemoryLimitPages)/16, p.idleTimeout)
 	return p, nil
 }
 

@@ -2957,9 +2957,10 @@ func (s *Server) newRuntime() *wasm.Runtime {
 		}
 	}
 	rt := wasm.NewRuntimeWithCacheAndOptions(context.Background(), s.currentCache(), wasm.RuntimeOptions{
-		PoolSize:         runtimeCfg.PoolSize,
-		CallTimeout:      time.Duration(runtimeCfg.CallTimeoutMS) * time.Millisecond,
-		MemoryLimitPages: memoryPages,
+		PoolSize:            runtimeCfg.PoolSize,
+		CallTimeout:         time.Duration(runtimeCfg.CallTimeoutMS) * time.Millisecond,
+		MemoryLimitPages:    memoryPages,
+		InstanceIdleTimeout: runtimeCfg.InstanceIdleTimeout(),
 	})
 	// Offload completion handler (cheap-model tool result
 	// summarization), recording failures in /stats. The callback returns a

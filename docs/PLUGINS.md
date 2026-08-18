@@ -120,6 +120,26 @@ outright without the grant. But an approved plugin holding all three can work,
 and spend, while you are not looking. Grant them to plugins whose source you have
 read.
 
+### Instance concurrency and idle memory
+
+Each plugin may execute on up to four WASM instances concurrently by default.
+Torana keeps one instance ready, grows lazily when concurrent requests need
+more, and retires the burst-created idle instances after at least one quiet
+minute. This preserves immediate low-traffic response while avoiding permanent
+retention of a previous traffic spike.
+
+The timeout is configurable, and an explicit zero disables retirement for an
+operator who prefers to keep every burst-created instance warm:
+
+```json
+{ "plugins": { "runtime": { "instance_idle_timeout_seconds": 120 } } }
+```
+
+`pool_size` remains the concurrency ceiling, not a promise to preallocate or
+permanently retain that many instances. Lowering it can reduce memory but also
+limits parallel plugin execution; measure the workload before changing it. A
+nonzero idle timeout must be between 10 seconds and 24 hours.
+
 ### Turning on background ticks
 
 Ticks are off by default. A plugin that declares `run_on_tick` still does
