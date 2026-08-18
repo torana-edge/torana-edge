@@ -204,14 +204,14 @@ func isOpenAIResponsesRequest(chat *engine.ChatRequest) bool {
 	return chat != nil && chat.OpenAIVariant == engine.OpenAIResponses
 }
 
-func applyOpenAIResponsesCompaction(chat *engine.ChatRequest, p provider.Provider) {
+func applyOpenAIResponsesCompaction(chat *engine.ChatRequest, p provider.Provider) bool {
 	if !isOpenAIResponsesRequest(chat) || p.ResponsesCompaction == nil {
-		return
+		return false
 	}
 	if !chat.ProviderExtensions.IsAbsent() {
 		if m, _, err := chat.ProviderExtensions.DecodeObject(); err == nil {
 			if _, supplied := m["context_management"]; supplied {
-				return
+				return false
 			}
 		}
 	}
@@ -221,9 +221,10 @@ func applyOpenAIResponsesCompaction(chat *engine.ChatRequest, p provider.Provide
 	}})
 	upd, err := chat.ProviderExtensions.SetMember("context_management", cm)
 	if err != nil {
-		return
+		return false
 	}
 	chat.ProviderExtensions = upd
+	return true
 }
 
 type RouteContext struct {
@@ -953,6 +954,12 @@ func New(cfg Config) (*Server, error) {
 				rejectMalformed()
 				return
 			}
+			// Preserve the caller's validated provider wire bytes unless a
+			// plugin or the host later changes provider-visible request state.
+			// Torana still parses, validates, observes, routes, meters and runs
+			// hooks on every supported inference endpoint. This flag controls
+			// only whether the final provider body must be regenerated.
+			wireChanged := false
 
 			if chat.ToranaMeta.IsAbsent() {
 				chat.ToranaMeta, _ = engine.ParseOptionalJSONObject([]byte(`{}`))
@@ -1020,7 +1027,7 @@ func New(cfg Config) (*Server, error) {
 				// holds the approved env.request_headers grant. The raw
 				// header map is untrusted caller input; the pipeline
 				// snapshots and allowlists it. No pipeline-wide injection.
-				modified, err := pl.RunBeforeRequest(req.Context(), reqStateFrom(req.Context()).ID, chat, req.Header)
+				modified, pluginChanged, err := pl.RunBeforeRequestTracked(req.Context(), reqStateFrom(req.Context()).ID, chat, req.Header)
 				if err != nil {
 					// failure_mode: block, applied at the TRANSPORT boundary.
 					//
@@ -1051,6 +1058,7 @@ func New(cfg Config) (*Server, error) {
 					return
 				} else if modified != nil {
 					chat = modified
+					wireChanged = wireChanged || pluginChanged
 				}
 				// Defense in depth: never let credentials linger in meta
 				// past the request hook (format adapters don't serialize
@@ -1138,7 +1146,9 @@ func New(cfg Config) (*Server, error) {
 			// capability hole this migration closes.
 			if pl := reqStateFrom(req.Context()).Pipeline; pl != nil {
 				if route := pl.Verdicts(reqStateFrom(req.Context()).ID).Route(); route != nil {
+					modelBeforeRoute := chat.Model
 					s.applyRoute(req, chat, prov.Format, provName, route, currentCfg.Providers)
+					wireChanged = wireChanged || chat.Model != modelBeforeRoute
 					// Model may have been overridden; refresh the metrics fact.
 					rstate := reqStateFrom(req.Context())
 					rstate.Model = chat.Model
@@ -1153,7 +1163,7 @@ func New(cfg Config) (*Server, error) {
 			// caller-supplied context_management policy.
 			if fmt.Name == "openai" && isOpenAIResponsesRequest(chat) {
 				routedProvider := currentCfg.Providers.Providers[rc.ProviderName]
-				applyOpenAIResponsesCompaction(chat, routedProvider)
+				wireChanged = applyOpenAIResponsesCompaction(chat, routedProvider) || wireChanged
 			}
 
 			// Token usage on openai streams is opt-in; opt in on the caller's
@@ -1175,6 +1185,7 @@ func New(cfg Config) (*Server, error) {
 					}
 					chat.ProviderExtensions, _ = chat.ProviderExtensions.SetMember("stream_options", so)
 					reqStateFrom(req.Context()).UsageInjected = true
+					wireChanged = true
 				}
 			}
 
@@ -1197,7 +1208,10 @@ func New(cfg Config) (*Server, error) {
 			}
 			rs.Path = rc.StrippedPath
 
-			newBody, err := fmt.Request.Marshal(chat)
+			newBody := body
+			if wireChanged {
+				newBody, err = fmt.Request.Marshal(chat)
+			}
 			if err != nil {
 				// HOST MARSHAL FAILURE — the terminal host_error path (PR B,
 				// MARSHAL_FAILURE_CHECKPOINT §5): the accepted IR passed the

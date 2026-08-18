@@ -622,6 +622,49 @@ func TestPipelineRunBeforeRequest_FullDispatch(t *testing.T) {
 	}
 }
 
+func TestRunBeforeRequestTrackedReportsOnlyAcceptedReplacement(t *testing.T) {
+	t.Run("empty pipeline", func(t *testing.T) {
+		pipeline := newTestPipeline(t, fixturesDir, nil)
+		in := &engine.ChatRequest{
+			Model:    "m",
+			Messages: []engine.Message{{Role: engine.RoleUser, Blocks: []engine.Block{{Text: &engine.TextBlock{Text: "hi"}}}}},
+		}
+		out, changed, err := pipeline.RunBeforeRequestTracked(context.Background(), 1, in, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if changed {
+			t.Fatal("empty pipeline reported a request replacement")
+		}
+		if out != in {
+			t.Fatal("unchanged path did not preserve the accepted engine request")
+		}
+	})
+
+	t.Run("real replacement", func(t *testing.T) {
+		requireWASM(t, fixturesDir+"/test-mutator/plugin.wasm")
+		pipeline := newTestPipeline(t, fixturesDir, []string{"test-mutator"})
+		in := &engine.ChatRequest{
+			Model:    "m",
+			Messages: []engine.Message{{Role: engine.RoleUser, Blocks: []engine.Block{{Text: &engine.TextBlock{Text: "hi"}}}}},
+			Tools: []engine.ToolDef{{
+				Name:       "read",
+				Parameters: mustReq(`{"type":"object"}`),
+			}},
+		}
+		out, changed, err := pipeline.RunBeforeRequestTracked(context.Background(), 2, in, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !changed {
+			t.Fatal("accepted plugin replacement was not reported")
+		}
+		if out == in || out.Tools[0].Description != "described by test-mutator" {
+			t.Fatalf("replacement was not applied: %+v", out)
+		}
+	})
+}
+
 // mustReq panics on invalid raw: test fixtures are trusted, and a fixture
 // that no longer parses must fail loudly.
 func engineText(m engine.Message) string {
