@@ -2,107 +2,23 @@
   "port": 8080,
   "providers": {
     "deepseek": {
-      "url": "https://api.deepseek.com/beta",
-      "format": "openai"
-    },
-    "openai": {
-      "url": "https://api.openai.com",
+      "url": "https://api.deepseek.com",
       "format": "openai",
-      "responses_compaction": {
-        "_comment": "Optional OpenAI-native compaction for the Responses API only. Torana adds context_management when the caller did not provide it. Omit this block to disable; Chat Completions requests are never changed.",
-        "compact_threshold": 100000
-      }
+      "api_key_env": "DEEPSEEK_API_KEY"
     },
-    "anthropic": {
-      "url": "https://api.anthropic.com",
-      "format": "anthropic"
-    },
-    "local-slm": {
-      "_comment": "Local OpenAI-compatible endpoint (Ollama, vLLM, LM Studio). Point offload here to summarize tool output on a self-hosted small model at zero marginal cost. Ollama serves the OpenAI API at http://localhost:11434/v1/chat/completions, so set url to the host root. Providers may also set 'api_key_env' naming an env var with their own API key — required for plugin-initiated rerouting (env.route_request), where the caller's credential is never forwarded; leave it unset for local endpoints that need no auth.",
-      "url": "http://localhost:11434",
-      "format": "openai"
-    },
-    "gemini": {
-      "_comment": "Public Gemini API (or Vertex AI) over the bare Gemini generateContent wire format — for tools you point at a base URL with an API key (Cline, Aider, Continue, Zed, opencode, …), exactly like the openai providers. No MITM needed: send requests to /provider/gemini/v1beta/models/<model>:streamGenerateContent. Set api_key_env if rerouting here; otherwise the caller's key/credential is forwarded.",
-      "url": "https://generativelanguage.googleapis.com",
-      "format": "gemini"
-    },
-    "antigravity": {
-      "_comment": "Google Code Assist backend for the Antigravity CLI (agy), reached via the MITM ingress below (agy can't be pointed at a base URL). Same content model as 'gemini' but wrapped in the Code Assist envelope, hence format 'gemini-codeassist'. The caller's own Google OAuth bearer is forwarded upstream — Torana injects no auth. Two channels exist: prod (this) and 'daily' (dev); the mitm.hosts map routes each hostname to the matching provider.",
-      "url": "https://cloudcode-pa.googleapis.com",
-      "format": "gemini-codeassist"
-    },
-    "antigravity-daily": {
-      "url": "https://daily-cloudcode-pa.googleapis.com",
-      "format": "gemini-codeassist"
-    }
-  },
-  "audit": {
-    "_comment": "Optional sensitive operator audit for recognized inference requests only. Disabled by default. When enabled, path must be absolute; files are owner-only JSONL and rotate at 16 MiB with 5 files unless the bounds are overridden. Auxiliary provider APIs are never recorded. See docs/AUDIT_LOG.md.",
-    "enabled": false,
-    "path": ""
-  },
-  "mitm": {
-    "_comment": "TLS-terminating CONNECT proxy for harnesses that can't be pointed at a base URL (the Antigravity CLI's stripped Go binary ignores endpoint env vars but honors HTTPS_PROXY and a custom CA via SSL_CERT_FILE). Disabled unless 'enabled' is true. Only chat calls (…:streamGenerateContent / …:generateContent) on the mapped hosts run through the provider pipeline; all other hosts and paths are tunneled/forwarded verbatim so login and telemetry keep working. Point agy at it with HTTPS_PROXY=http://<listen> SSL_CERT_FILE=<ca_dir>/bundle.pem. 'listen' is restricted to a literal loopback address because it decrypts caller traffic. NEVER commit ca_dir (the CA private key lives there) or add the CA to the system trust store.",
-    "enabled": false,
-    "listen": "127.0.0.1:8099",
-    "ca_dir": "./local/mitm",
-    "hosts": {
-      "cloudcode-pa.googleapis.com": "antigravity",
-      "daily-cloudcode-pa.googleapis.com": "antigravity-daily"
+    "deepseek-anthropic": {
+      "url": "https://api.deepseek.com/anthropic",
+      "format": "anthropic",
+      "api_key_env": "DEEPSEEK_API_KEY"
     }
   },
   "plugins": {
     "dir": "./plugins",
-    "runtime": {
-      "pool_size": 4,
-      "call_timeout_ms": 5000,
-      "memory_limit_mib": 64,
-      "instance_idle_timeout_seconds": 60
-    },
-    "_comment": "order is empty because this file has to start a Torana that has no plugins installed yet — naming a plugin whose bundle is absent is a hard startup failure, by design, so a missing plugin is never silently ignored. IMPORTANT: this file is only read on FIRST start. Torana copies it into a managed store (~/.config/torana/config.json, or $TORANA_DATA_DIR/config.json) and reads that from then on, so editing this file later changes nothing. To enable plugins: install them with 'torana plugin install --official', then approve, enable and order them in the control plane at http://127.0.0.1:8080/_torana/. Only edit this file before the first start. A safe coding-agent baseline is [\"schema_translator\", \"intent\"]; to compact tool results append ONE compactor after intent with explicit ordered tool_policies (unmatched tools stay exact). See docs/COMPACTION.md.",
-    "order": [],
-    "hook_order": {},
-    "config": {
-      "intent": {
-        "fill": "heuristic"
-      },
-      "compactor": {
-        "max_offload_input_chars": 0,
-        "expected_applications": 6,
-        "tool_policies": [
-          {"match": "read*", "mode": "exact"},
-          {"match": "view*", "mode": "exact"},
-          {"match": "web_search", "mode": "deterministic", "first_pass": true, "rerun": "Repeat the search to recover every result."}
-        ]
-      },
-      "pii": {
-        "provider": "local-slm",
-        "model": "qwen2.5:3b",
-        "tools": ["*"],
-        "on_error": "block",
-        "max_scan_chars": 0
-      }
-    }
+    "_comment": "No plugin is enabled implicitly. This seed is imported only on the first start into the managed store (~/.config/torana/config.json, or $TORANA_DATA_DIR/config.json). After that, inspect, approve, enable, configure, and order plugins in the control plane at http://127.0.0.1:8080/_torana/.",
+    "order": []
   },
-  "offload": {
-    "_comment": "Cheap-model tool result summarization used by the compactor plugin. 'provider' must exist above and use the openai format (deepseek-v4-flash is only a default, not a hard dependency — any openai-compatible model works, including a local SLM via the 'local-slm' provider). 'api_key_env' names an env var holding a dedicated offload key. IMPORTANT: leave it empty ONLY when the offload provider shares the caller's auth; for cross-provider offload (e.g. a Claude- or OpenAI-key caller summarizing on DeepSeek) or a keyless local model, set a dedicated key here — otherwise the caller's credential is reused and will fail to authenticate against a different provider.",
-    "enabled": false,
-    "provider": "deepseek",
-    "model": "deepseek-v4-flash",
-    "api_key_env": ""
-  },
-  "cache": {
-    "_comment": "Cross-request plugin state. The memory backend is TTL+LRU bounded; max_entries defaults to 10000 and max_bytes to 64 MiB. Redis deployments should configure server-side eviction. 'password_env' names the password environment variable — never put the password here.",
-    "backend": "memory",
-    "ttl_seconds": 900,
-    "max_entries": 10000,
-    "max_bytes": 67108864,
-    "redis": {
-      "addr": "127.0.0.1:6379",
-      "password_env": "",
-      "db": 0,
-      "prefix": "torana:"
-    }
+  "limits": {
+    "concurrency": 10,
+    "rpm": 100
   }
 }

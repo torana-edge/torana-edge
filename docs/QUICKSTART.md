@@ -5,29 +5,52 @@ normalizes provider formats and runs an ordered WASM plugin pipeline. Optional
 tool-aware and provider-native compaction can reduce repeated context while
 preserving exact evidence according to explicit policies.
 
-## Install from source
+## Prerequisites
+
+You need Git, Go 1.26.6 or newer, and a credential for at least one provider.
+The commands below use DeepSeek, but the routing model is the same for every
+configured provider.
+
+## Install the current pre-release
 
 ```bash
-go install github.com/torana-edge/torana-edge/cmd/torana@main
+git clone https://github.com/torana-edge/torana-edge.git
+cd torana-edge
+go build -o ./torana ./cmd/torana
+cp config.example.json config.json
 ```
 
 Torana Edge is intentionally unversioned. For a reproducible deployment, replace
-`main` with a reviewed commit SHA. The command installs the proxy only; no WASM
-plugins are bundled.
+`main` with a reviewed commit SHA before building. No WASM plugins are bundled.
+The supplied configuration is deliberately minimal and enables none.
 
-Install maintained plugins from their separate repository:
+First prove the proxy works without plugins. Export the key named by the example
+configuration and, for a disposable evaluation, keep managed state in the
+checkout:
 
 ```bash
-torana plugin install --official
+export DEEPSEEK_API_KEY='replace-with-your-deepseek-key'
+export TORANA_DATA_DIR="$PWD/.torana-data"
+./torana
 ```
 
-This clones the official repository once and builds each selected plugin
-locally. A Go toolchain and git are required. Installing does not approve or
-enable a plugin.
+Keep that terminal open. In another terminal:
+
+```bash
+curl --fail-with-body http://127.0.0.1:8080/health
+
+curl --fail-with-body http://127.0.0.1:8080/provider/deepseek/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"deepseek-v4-flash","messages":[{"role":"user","content":"Reply with exactly: Torana works"}]}'
+```
+
+The health endpoint returns `{"status":"ok"}` and the second command returns a
+normal provider response. The provider key comes from the environment named by
+`api_key_env`; it is never stored in `config.json`.
 
 ## Configure
 
-Create `config.json`:
+The copied `config.example.json` is equivalent to this minimal seed:
 ```json
 {
   "port": 8080,
@@ -37,10 +60,10 @@ Create `config.json`:
       "format": "openai",
       "api_key_env": "DEEPSEEK_API_KEY"
     },
-    "openai": {
-      "url": "https://api.openai.com",
-      "format": "openai",
-      "fallback": ["deepseek"]
+    "deepseek-anthropic": {
+      "url": "https://api.deepseek.com/anthropic",
+      "format": "anthropic",
+      "api_key_env": "DEEPSEEK_API_KEY"
     }
   },
   "plugins": {
@@ -63,9 +86,31 @@ warning when both files exist and differ. Edit the managed configuration through
 want the next start to re-import the seed. `TORANA_CONFIG` selects a different
 seed path; it does not bypass an existing managed store.
 
+For repeated first-run testing, point `TORANA_DATA_DIR` at a new empty directory
+for each run. That avoids accidentally exercising an older managed
+configuration while believing you are testing a changed seed.
+
 The empty order is intentional: discovered plugins are not implicitly trusted
-or enabled. Open the Control Plane, inspect and approve the exact bundle digest
-and requested capability subset, then enable plugins in the desired order.
+or enabled. After the plugin-free request above succeeds, install one plugin:
+
+```bash
+./torana plugin install github.com/torana-edge/torana-plugins/plugins/schema_translator
+./torana plugin list
+```
+
+Open the Control Plane, inspect and approve the exact bundle digest and requested
+capability subset, then enable `schema_translator` and put it in the pipeline.
+Send the request again and confirm it appears as an invoked plugin in the live
+feed. Installation alone never grants or enables anything.
+
+Once that lifecycle is clear, the maintained set can be built locally with:
+
+```bash
+./torana plugin install --official
+```
+
+It clones the official source repository and builds each selected plugin. The
+additional bundles also remain disabled until individually approved and ordered.
 
 Software agents and shell scripts can discover the same guarded control-plane
 capabilities as JSON:
@@ -91,7 +136,7 @@ A fallback provider needs a credential of its own. When Torana retries against
 one it **removes the caller's** — that key was issued to a different vendor, so
 forwarding it would leak it, and it would not authenticate there anyway.
 
-Give the fallback an `api_key_env`, as above. If the fallback is genuinely the
+Give the fallback an `api_key_env`. If the fallback is genuinely the
 same vendor (a second endpoint or region) or a local server that ignores
 credentials, set `"forward_caller_credential": true` on it instead.
 
@@ -106,6 +151,16 @@ plugins. Model-list, account, quota, status, telemetry, update, MCP, and unknown
 auxiliary requests pass through normally. See the precise per-format contract
 in [Coding-harness compatibility](HARNESS_COMPATIBILITY.md).
 
+You can verify the auxiliary-path half of that contract directly:
+
+```bash
+curl -i http://127.0.0.1:8080/provider/deepseek/models
+```
+
+The provider may return success or its own error for that endpoint. The important
+property is that it is forwarded as ordinary HTTP and does not appear in
+Torana's live inference feed.
+
 ### omp (oh-my-pi)
 ```yaml
 # ~/.omp/agent/models.yml
@@ -117,7 +172,7 @@ providers:
 ### Claude Code
 ```bash
 export ANTHROPIC_BASE_URL=http://localhost:8080/provider/deepseek-anthropic
-export ANTHROPIC_AUTH_TOKEN=<your-deepseek-key>
+export ANTHROPIC_AUTH_TOKEN='replace-with-your-deepseek-key'
 ```
 
 ### Antigravity CLI (agy)
@@ -173,7 +228,7 @@ content.
 ### Aider
 ```bash
 export OPENAI_API_BASE=http://localhost:8080/provider/deepseek/v1
-export OPENAI_API_KEY=<your-key>
+export OPENAI_API_KEY='replace-with-your-key'
 aider --model deepseek/deepseek-v4-flash
 ```
 
