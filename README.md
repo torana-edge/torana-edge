@@ -29,40 +29,88 @@ CLI (`agy`)** — Torana also offers an optional TLS-terminating MITM ingress. S
 
 ## Quick Start
 
-1. Copy and edit the example config:
+Torana is currently pre-release, so this walkthrough builds the reviewed
+`main` branch rather than pretending a stable release exists. You need Git, Go
+1.26.6 or newer, and a DeepSeek API key.
+
+1. Clone, build, and create a minimal configuration:
+
    ```bash
+   git clone https://github.com/torana-edge/torana-edge.git
+   cd torana-edge
+   go build -o ./torana ./cmd/torana
    cp config.example.json config.json
+   export DEEPSEEK_API_KEY='replace-with-your-deepseek-key'
    ```
-   This seed is read **only on the first start**. Torana then copies it into a
-   managed store (`~/.config/torana/config.json`, or
-   `$TORANA_DATA_DIR/config.json`) and
-   reads that from then on, so later edits to `config.json` have no effect —
-   change things in the control plane instead. See
-   [Quickstart](docs/QUICKSTART.md#configuration).
 
-2. Install the plugins you want. They live in
-   [torana-plugins](https://github.com/torana-edge/torana-plugins), not in this
-   repository, and `torana plugin install` fetches the source, builds it
-   locally and prints the digest — so nothing runs that you could not have read:
+2. Start with **no plugins** so the first check proves the proxy itself works.
+   For a disposable evaluation, keep managed state inside the checkout:
+
    ```bash
-   # The official set:
-   go run ./cmd/torana plugin install --official
-
-   # Or one at a time, from any repository:
-   go run ./cmd/torana plugin install github.com/torana-edge/torana-plugins/plugins/schema_translator
+   export TORANA_DATA_DIR="$PWD/.torana-data"
+   ./torana
    ```
-   **Plugin binaries are build artifacts and are never committed** (`*.wasm` is
-   gitignored), so rebuild after pulling or editing plugin sources.
 
-3. Run the proxy:
+   Keep that terminal open. Torana imports `config.json` only on this first
+   start; `$TORANA_DATA_DIR/config.json` is authoritative afterward. To repeat a
+   genuinely clean first run, use a new empty data directory. Do not edit the
+   seed and expect a running installation to change.
+
+3. In another terminal, verify health and send one real request:
+
    ```bash
-   go run ./cmd/torana
+   curl --fail-with-body http://127.0.0.1:8080/health
+
+   curl --fail-with-body http://127.0.0.1:8080/provider/deepseek/v1/chat/completions \
+     -H 'Content-Type: application/json' \
+     -d '{"model":"deepseek-v4-flash","messages":[{"role":"user","content":"Reply with exactly: Torana works"}]}'
    ```
 
-4. Point your AI harness at Torana:
+   The first command returns `{"status":"ok"}`. The second returns a normal
+   provider response through Torana. Your configured `api_key_env` supplies the
+   upstream credential; it is not written into `config.json`.
+
+4. Point your harness at the same provider route:
+
    ```bash
-   export OPENAI_BASE_URL=http://localhost:8080/provider/deepseek/v1
+   export OPENAI_BASE_URL=http://127.0.0.1:8080/provider/deepseek/v1
    ```
+
+   Harness-specific examples, including Claude Code and OpenCode, are in the
+   [Quickstart](docs/QUICKSTART.md#route-your-harness).
+
+5. Only after the proxy works, install one plugin from readable source:
+
+   ```bash
+   ./torana plugin install github.com/torana-edge/torana-plugins/plugins/schema_translator
+   ./torana plugin list
+   ```
+
+   Installation does **not** run the plugin. Open
+   [http://127.0.0.1:8080/_torana/](http://127.0.0.1:8080/_torana/), inspect its
+   requested capabilities and digest, approve it, enable it, and place it in
+   the pipeline. Send the request again and confirm `schema_translator` appears
+   in the live request feed. A changed bundle must be approved again.
+
+6. When you are comfortable with that lifecycle, install the maintained set:
+
+   ```bash
+   ./torana plugin install --official
+   ```
+
+   These plugins still remain disabled until you approve and order them. Build
+   artifacts are local and never committed (`*.wasm` is gitignored).
+
+Only recognized inference calls enter the IR and plugin pipeline. To exercise
+that boundary, request an auxiliary endpoint and confirm it does not appear in
+the live inference feed:
+
+```bash
+curl -i http://127.0.0.1:8080/provider/deepseek/models
+```
+
+The provider may return success or its own error for that path; Torana forwards
+it as ordinary HTTP rather than attempting to decode it as an inference call.
 
 ## Documentation
 
@@ -125,7 +173,7 @@ status or account endpoint cannot accidentally be decoded as a chat request.
 
 None are bundled. They live in
 [torana-plugins](https://github.com/torana-edge/torana-plugins) and are installed
-deliberately, one at a time:
+deliberately, either individually or as the maintained set:
 
 ```bash
 torana plugin install github.com/torana-edge/torana-plugins/plugins/pii
