@@ -154,6 +154,9 @@ Every provider has one authentication mode:
 - `credential` resolves a named Torana credential and injects it host-side;
 - `none` sends no credential, useful for a local model.
 
+The full source, slot, refresh, and custom-provider model is documented in
+[Credentials](CREDENTIALS.md).
+
 Configure a reusable environment-backed credential without putting its value in
 JSON:
 

@@ -145,6 +145,7 @@ it as ordinary HTTP rather than attempting to decode it as an inference call.
 | [Structured audit log](docs/AUDIT_LOG.md) | Default-off operator JSONL records, sensitive fields, rotation, and failure monitoring |
 | [Production benchmark](docs/BENCHMARK_PRODUCTION_RESULTS_2026-08-18.md) | Direct-vs-Torana latency, throughput, CPU, memory, raw data, and limits |
 | [Running plugins](docs/PLUGINS.md) | Install, inspect, approve, order, and what the sandbox does |
+| [Credentials](docs/CREDENTIALS.md) | Caller passthrough, encrypted/environment sources, plugin slots, and custom secret managers |
 | [Agent control plane](docs/AGENT_CONTROL_PLANE.md) | The versioned JSON API and `agent.json` operation contracts |
 | [Local models](docs/LOCAL_MODELS.md) | Point a coding harness at Ollama or vLLM through Torana |
 | [Antigravity CLI](docs/GEMINI_ANTIGRAVITY.md) | The optional TLS-terminating MITM ingress |
