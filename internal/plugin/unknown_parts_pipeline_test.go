@@ -12,7 +12,7 @@ import (
 	"github.com/torana-edge/torana-edge/internal/format/openai"
 	"github.com/torana-edge/torana-edge/internal/provider"
 	"github.com/torana-edge/torana-edge/internal/wasm"
-	pb "github.com/torana-edge/torana-plugin-sdk/pb/v2"
+	pb "github.com/torana-edge/torana-plugin-sdk/pb/v1"
 )
 
 // geminiAdapter is the adapter the final-wire assertions marshal through.

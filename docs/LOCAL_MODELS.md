@@ -11,12 +11,13 @@ or any OpenAI-compatible local server.
     "ollama": {
       "url": "http://localhost:11434",
       "format": "openai",
+      "auth": {"mode": "none"},
       "fallback": ["deepseek"]
     },
     "deepseek": {
       "url": "https://api.deepseek.com",
       "format": "openai",
-      "api_key_env": "DEEPSEEK_API_KEY"
+      "auth": {"mode": "credential", "credential": "deepseek-api-key"}
     }
   }
 }
@@ -24,10 +25,10 @@ or any OpenAI-compatible local server.
 
 Route your harness to `http://localhost:8080/provider/ollama`.
 
-The fallback declares its own `api_key_env`: on failover Torana removes the
-caller's credential rather than forwarding it to a different vendor. If your
-fallback is the same vendor or another local server, set
-`"forward_caller_credential": true` on it instead.
+The fallback declares its own Torana credential: on failover Torana removes the
+caller's credential rather than forwarding it to a different vendor. Give every
+authenticated fallback its own named credential; use `auth.mode: none` for a
+local server that needs no authentication.
 
 Typical use: use Ollama for offload compaction (mirrors the cheap model pattern)
 while keeping your primary provider (DeepSeek/OpenAI) for reasoning.
@@ -39,7 +40,8 @@ while keeping your primary provider (DeepSeek/OpenAI) for reasoning.
   "providers": {
     "vllm": {
       "url": "http://localhost:8000",
-      "format": "openai"
+      "format": "openai",
+      "auth": {"mode": "none"}
     }
   }
 }
@@ -58,6 +60,7 @@ a local model. Provider URLs are host roots because Torana appends
     "ollama": {
       "url": "http://localhost:11434",
       "format": "openai",
+      "auth": {"mode": "none"},
       "pricing": {
         "qwen2.5:3b": {
           "input_usd_per_mtok": 0,

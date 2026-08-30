@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 
 	sdk "github.com/torana-edge/torana-plugin-sdk"
-	pb "github.com/torana-edge/torana-plugin-sdk/pb/v2"
+	pb "github.com/torana-edge/torana-plugin-sdk/pb/v1"
 	"google.golang.org/protobuf/proto"
 )
 

@@ -151,7 +151,7 @@ func TestStreamParse(t *testing.T) {
 		events = append(events, ev)
 	}
 
-	// The text part opens and closes an explicit text block (the v2 topology
+	// The text part opens and closes an explicit text block (the current ABI topology
 	// requires every content block to open with a start event), consuming
 	// block index 0; the tool call that follows takes index 1.
 	if len(events) != 7 {

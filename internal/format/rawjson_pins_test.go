@@ -20,7 +20,7 @@ import (
 	"github.com/torana-edge/torana-edge/internal/format/bedrock"
 	"github.com/torana-edge/torana-edge/internal/format/gemini"
 	"github.com/torana-edge/torana-edge/internal/format/openai"
-	pb "github.com/torana-edge/torana-plugin-sdk/pb/v2"
+	pb "github.com/torana-edge/torana-plugin-sdk/pb/v1"
 )
 
 // Ordered-body test helpers (engine.Message).

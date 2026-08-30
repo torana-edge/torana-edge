@@ -15,7 +15,7 @@ import (
 	"time"
 
 	"github.com/torana-edge/torana-edge/internal/provider"
-	pb "github.com/torana-edge/torana-plugin-sdk/pb/v2"
+	pb "github.com/torana-edge/torana-plugin-sdk/pb/v1"
 )
 
 // TestExtensionContractE2E is the F5 composition proof: a real WASM fixture
@@ -87,7 +87,7 @@ func TestExtensionContractE2E(t *testing.T) {
 			},
 		},
 		{
-			// The obsolete guest api_key_env field is a caller bug.
+			// An unknown offload payload member is a caller bug.
 			"offload-bad-override",
 			func(t *testing.T, obs contractObservation) {
 				if obs.RawArm != "refusal" || obs.RawCode != int32(pb.ErrorCode_ERROR_CODE_INVALID_ARGUMENT) {
@@ -208,13 +208,12 @@ func newContractServer(t *testing.T, offload *provider.OffloadConfig) *contractE
 	cfg := provider.DefaultConfig()
 	cfg.Providers = map[string]provider.Provider{
 		// oai is the provider the fixture's send/pricing scenarios name.
-		"oai":   {URL: upstream.URL, Format: "openai"},
-		"cheap": {URL: upstream.URL, Format: "openai"},
-		// local has NO api_key_env, so a guest-named api_key_env is a mismatch
-		// (the bad-override scenario).
-		"local": {URL: upstream.URL, Format: "openai"},
+		"oai":   {URL: upstream.URL, Format: "openai", Auth: provider.ProviderAuth{Mode: "none"}},
+		"cheap": {URL: upstream.URL, Format: "openai", Auth: provider.ProviderAuth{Mode: "none"}},
+		// The bad-override scenario carries an unknown payload member.
+		"local": {URL: upstream.URL, Format: "openai", Auth: provider.ProviderAuth{Mode: "none"}},
 		// dead cannot be reached: the transport scenario.
-		"dead": {URL: "http://127.0.0.1:1", Format: "openai"},
+		"dead": {URL: "http://127.0.0.1:1", Format: "openai", Auth: provider.ProviderAuth{Mode: "none"}},
 	}
 	if offload != nil {
 		cfg.Offload = *offload

@@ -3,7 +3,7 @@
   "id": "torana-test/test-records-invocation",
   "name": "test-records-invocation",
   "version": "0.1.0",
-  "abi_version": "v2",
+  "abi_version": "v1",
   "failure_mode": "pass",
   "description": "Tags the model when invoked, so a test can prove it was not",
   "hooks": [{"name": "run_before_request"}],

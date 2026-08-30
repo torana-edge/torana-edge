@@ -1,14 +1,18 @@
 package plugin
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -16,13 +20,14 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/fsnotify/fsnotify"
 	"github.com/torana-edge/torana-edge/internal/engine"
 	"github.com/torana-edge/torana-edge/internal/engine/pbconv"
 	"github.com/torana-edge/torana-edge/internal/wasm"
 	sdk "github.com/torana-edge/torana-plugin-sdk"
-	pbv2 "github.com/torana-edge/torana-plugin-sdk/pb/v2"
+	pbv1 "github.com/torana-edge/torana-plugin-sdk/pb/v1"
 	"golang.org/x/mod/module"
 	"golang.org/x/mod/semver"
 	"google.golang.org/protobuf/proto"
@@ -42,24 +47,52 @@ type Hook struct {
 }
 
 type PluginManifest struct {
-	SchemaVersion        int          `json:"schema_version,omitempty"`
-	ID                   string       `json:"id,omitempty"`
-	Name                 string       `json:"name"`
-	Version              string       `json:"version"`
-	ABIVersion           string       `json:"abi_version,omitempty"`
-	MinimumToranaVersion string       `json:"minimum_torana_version,omitempty"`
-	MaximumToranaVersion string       `json:"maximum_torana_version,omitempty"`
-	FailureMode          string       `json:"failure_mode,omitempty"`
-	Repository           string       `json:"repository,omitempty"`
-	Description          string       `json:"description"`
-	Hooks                []Hook       `json:"hooks"`
-	Permissions          []Permission `json:"permissions"`
+	SchemaVersion        int                       `json:"schema_version,omitempty"`
+	ID                   string                    `json:"id,omitempty"`
+	Name                 string                    `json:"name"`
+	Version              string                    `json:"version"`
+	ABIVersion           string                    `json:"abi_version,omitempty"`
+	MinimumToranaVersion string                    `json:"minimum_torana_version,omitempty"`
+	MaximumToranaVersion string                    `json:"maximum_torana_version,omitempty"`
+	FailureMode          string                    `json:"failure_mode,omitempty"`
+	Repository           string                    `json:"repository,omitempty"`
+	Description          string                    `json:"description"`
+	Hooks                []Hook                    `json:"hooks"`
+	Permissions          []Permission              `json:"permissions"`
+	Credentials          []CredentialDeclaration   `json:"credentials,omitempty"`
+	Files                []FileDeclaration         `json:"files,omitempty"`
+	HTTPEndpoints        []HTTPEndpointDeclaration `json:"http_endpoints,omitempty"`
 	// RequiresUpstream lists stable plugin IDs that must be approved and
 	// loaded earlier in the operator's configured order.
 	RequiresUpstream []string `json:"requires_upstream,omitempty"`
 	// ConflictsWith lists stable plugin IDs that cannot be active in the same
 	// immutable pipeline generation. A declaration by either side is enough.
 	ConflictsWith []string `json:"conflicts_with,omitempty"`
+}
+
+type CredentialDeclaration struct {
+	Slot        string `json:"slot"`
+	Description string `json:"description"`
+	Required    bool   `json:"required,omitempty"`
+}
+
+type FileDeclaration struct {
+	Path          string   `json:"path"`
+	Operations    []string `json:"operations"`
+	MaxBytes      int64    `json:"max_bytes,omitempty"`
+	RetainedFiles int      `json:"retained_files,omitempty"`
+}
+
+type HTTPEndpointDeclaration struct {
+	Name              string   `json:"name"`
+	Description       string   `json:"description"`
+	Origin            string   `json:"origin,omitempty"`
+	Methods           []string `json:"methods"`
+	Required          bool     `json:"required,omitempty"`
+	TimeoutMS         int      `json:"timeout_ms,omitempty"`
+	MaxRequestBytes   int64    `json:"max_request_bytes,omitempty"`
+	MaxResponseBytes  int64    `json:"max_response_bytes,omitempty"`
+	MaxCallsPerMinute int      `json:"max_calls_per_minute,omitempty"`
 }
 
 type ConfigField struct {
@@ -241,14 +274,10 @@ func validateManifest(manifest PluginManifest) error {
 	if manifest.ID == "" || manifest.Name == "" {
 		return fmt.Errorf("id and name are required")
 	}
-	// This host dispatches v2 exclusively: one run_hook export, HookInput in,
-	// HookResult out. A v1 guest exports per-hook functions this host never
-	// calls, so accepting its manifest would load a plugin that can never run
-	// — the failure would surface as "my plugin does nothing" rather than as a
-	// version mismatch anyone can act on.
-	if manifest.ABIVersion != "v2" {
-		return fmt.Errorf("unsupported abi_version %q: this host speaks ABI v2 "+
-			"(single run_hook export); rebuild the plugin against a v2 SDK",
+	// The manifest must name the one public ABI this host implements.
+	if manifest.ABIVersion != "v1" {
+		return fmt.Errorf("unsupported abi_version %q: this host speaks ABI v1 "+
+			"(single run_hook export); rebuild the plugin against the current SDK",
 			manifest.ABIVersion)
 	}
 	if _, err := parseSemver(manifest.Version); err != nil {
@@ -294,6 +323,9 @@ func validateManifest(manifest PluginManifest) error {
 		}
 		seenPermissions[permission.Name] = struct{}{}
 	}
+	if err := validateResourceDeclarations(manifest, seenPermissions); err != nil {
+		return err
+	}
 	seenRequirements := make(map[string]struct{}, len(manifest.RequiresUpstream))
 	for _, requiredID := range manifest.RequiresUpstream {
 		if strings.TrimSpace(requiredID) == "" {
@@ -322,6 +354,124 @@ func validateManifest(manifest PluginManifest) error {
 			return fmt.Errorf("plugin id %q cannot appear in both requires_upstream and conflicts_with", conflictingID)
 		}
 		seenConflicts[conflictingID] = struct{}{}
+	}
+	return nil
+}
+
+func validateResourceDeclarations(manifest PluginManifest, permissions map[string]struct{}) error {
+	credentialSlots := make(map[string]struct{}, len(manifest.Credentials))
+	for _, declaration := range manifest.Credentials {
+		if strings.TrimSpace(declaration.Slot) == "" || strings.TrimSpace(declaration.Description) == "" {
+			return fmt.Errorf("credential declarations require slot and description")
+		}
+		if _, duplicate := credentialSlots[declaration.Slot]; duplicate {
+			return fmt.Errorf("duplicate credential slot %q", declaration.Slot)
+		}
+		credentialSlots[declaration.Slot] = struct{}{}
+	}
+	if len(manifest.Credentials) > 0 {
+		if _, ok := permissions["env.credential_get"]; !ok {
+			return fmt.Errorf("credential declarations require env.credential_get")
+		}
+	}
+
+	filePaths := make(map[string]struct{}, len(manifest.Files))
+	for _, declaration := range manifest.Files {
+		if err := validateLogicalPluginPath(declaration.Path); err != nil {
+			return fmt.Errorf("file declaration %q: %w", declaration.Path, err)
+		}
+		if _, duplicate := filePaths[declaration.Path]; duplicate {
+			return fmt.Errorf("duplicate file path %q", declaration.Path)
+		}
+		filePaths[declaration.Path] = struct{}{}
+		if declaration.MaxBytes < 0 || declaration.RetainedFiles < 0 {
+			return fmt.Errorf("file %q limits must not be negative", declaration.Path)
+		}
+		seen := make(map[string]struct{}, len(declaration.Operations))
+		for _, operation := range declaration.Operations {
+			permission := "env.file_" + operation
+			switch operation {
+			case "append", "read", "write", "list", "delete":
+			default:
+				return fmt.Errorf("file %q has unsupported operation %q", declaration.Path, operation)
+			}
+			if _, duplicate := seen[operation]; duplicate {
+				return fmt.Errorf("file %q has duplicate operation %q", declaration.Path, operation)
+			}
+			seen[operation] = struct{}{}
+			if _, ok := permissions[permission]; !ok {
+				return fmt.Errorf("file %q operation %q requires %s", declaration.Path, operation, permission)
+			}
+		}
+		if len(seen) == 0 {
+			return fmt.Errorf("file %q must declare at least one operation", declaration.Path)
+		}
+	}
+
+	endpointNames := make(map[string]struct{}, len(manifest.HTTPEndpoints))
+	for _, declaration := range manifest.HTTPEndpoints {
+		if strings.TrimSpace(declaration.Name) == "" || strings.TrimSpace(declaration.Description) == "" {
+			return fmt.Errorf("HTTP endpoint declarations require name and description")
+		}
+		if _, duplicate := endpointNames[declaration.Name]; duplicate {
+			return fmt.Errorf("duplicate HTTP endpoint %q", declaration.Name)
+		}
+		endpointNames[declaration.Name] = struct{}{}
+		if _, ok := permissions["env.http_request"]; !ok {
+			return fmt.Errorf("HTTP endpoint %q requires env.http_request", declaration.Name)
+		}
+		if declaration.Origin != "" {
+			if err := validatePluginHTTPOrigin(declaration.Origin); err != nil {
+				return fmt.Errorf("HTTP endpoint %q: %w", declaration.Name, err)
+			}
+		}
+		if len(declaration.Methods) == 0 {
+			return fmt.Errorf("HTTP endpoint %q must declare methods", declaration.Name)
+		}
+		seen := make(map[string]struct{}, len(declaration.Methods))
+		for _, method := range declaration.Methods {
+			if method == "" || method != strings.ToUpper(method) {
+				return fmt.Errorf("HTTP endpoint %q method %q must be uppercase", declaration.Name, method)
+			}
+			if _, duplicate := seen[method]; duplicate {
+				return fmt.Errorf("HTTP endpoint %q has duplicate method %q", declaration.Name, method)
+			}
+			seen[method] = struct{}{}
+		}
+		if declaration.TimeoutMS < 0 || declaration.MaxRequestBytes < 0 || declaration.MaxResponseBytes < 0 || declaration.MaxCallsPerMinute < 0 {
+			return fmt.Errorf("HTTP endpoint %q limits must not be negative", declaration.Name)
+		}
+	}
+	return nil
+}
+
+func validateLogicalPluginPath(path string) error {
+	if path == "" || len(path) > 240 || !utf8.ValidString(path) || strings.Contains(path, "\\") || strings.HasPrefix(path, "/") {
+		return fmt.Errorf("must be a relative UTF-8 path")
+	}
+	for _, component := range strings.Split(path, "/") {
+		if component == "" || component == "." || component == ".." {
+			return fmt.Errorf("contains an unsafe component")
+		}
+	}
+	return nil
+}
+
+func validatePluginHTTPOrigin(raw string) error {
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme == "" || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || (u.Path != "" && u.Path != "/") {
+		return fmt.Errorf("origin must be scheme and authority only")
+	}
+	if u.Scheme == "https" {
+		return nil
+	}
+	if u.Scheme != "http" {
+		return fmt.Errorf("origin must use https, or http on a literal loopback address")
+	}
+	host := u.Hostname()
+	ip := net.ParseIP(host)
+	if ip == nil || !ip.IsLoopback() {
+		return fmt.Errorf("http origin must use a literal loopback address")
 	}
 	return nil
 }
@@ -422,7 +572,7 @@ func loadBundle(dir string) (*PluginBundle, error) {
 		return nil, fmt.Errorf("read manifest: %w", err)
 	}
 	var manifest PluginManifest
-	if err := json.Unmarshal(mBytes, &manifest); err != nil {
+	if err := decodeManifest(mBytes, &manifest); err != nil {
 		return nil, fmt.Errorf("parse manifest: %w", err)
 	}
 	wasmPath := filepath.Join(dir, "plugin.wasm")
@@ -508,10 +658,22 @@ func ValidateManifestDir(dir string) (PluginManifest, error) {
 		return PluginManifest{}, fmt.Errorf("read manifest: %w", err)
 	}
 	var manifest PluginManifest
-	if err := json.Unmarshal(raw, &manifest); err != nil {
+	if err := decodeManifest(raw, &manifest); err != nil {
 		return PluginManifest{}, fmt.Errorf("parse manifest: %w", err)
 	}
 	return manifest, validateManifest(manifest)
+}
+
+func decodeManifest(raw []byte, manifest *PluginManifest) error {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(manifest); err != nil {
+		return err
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		return fmt.Errorf("trailing JSON")
+	}
+	return nil
 }
 
 // bundleDigest covers every executable or policy-bearing file consumed by the
@@ -623,7 +785,7 @@ type PluginPipeline struct {
 	// candidateValidator is the CONSTRUCTION-BOUND per-plugin candidate
 	// validator (see PluginConfig.CandidateValidator): immutable after
 	// NewPipeline, so requests can never race a mutation.
-	candidateValidator func(topo engine.TopologyFacts, current, replacement *pbv2.ChatRequest) error
+	candidateValidator func(topo engine.TopologyFacts, current, replacement *pbv1.ChatRequest) error
 
 	mu        sync.Mutex
 	active    int
@@ -637,7 +799,7 @@ type PluginPipeline struct {
 	// ContentBlockStop converts back to the engine event matching the block
 	// it closes (ToolCallEnd for tool blocks, BlockStop for text/thinking/,
 	// provider) and unknown/mismatched/duplicate/reused topology errors
-	// instead of being guessed. The v2 wire's stop carries only an index;
+	// instead of being guessed. The current ABI wire's stop carries only an index;
 	// without this, every plugin-passed text/thinking stop would come back
 	// as ToolCallEnd and the lossless block topology would not survive
 	// plugins. Entries live for the request and are dropped by EndRequest.
@@ -1010,6 +1172,14 @@ func reloadPipeline(runtime *wasm.Runtime, config PluginConfig) (*PluginPipeline
 			log.Printf("[plugin] %s: invalid approval: %v — skipping", name, err)
 			continue
 		}
+		resources, err := resolvePluginResources(bundle.Manifest, approval)
+		if err != nil {
+			if config.Strict {
+				return nil, fmt.Errorf("enabled plugin %q has invalid resource approval: %w", name, err)
+			}
+			log.Printf("[plugin] %s: invalid resource approval: %v — skipping", name, err)
+			continue
+		}
 		pl, err := runtime.LoadPlugin(name, bundle.WASMBytes)
 		if err != nil {
 			if config.Strict {
@@ -1019,6 +1189,7 @@ func reloadPipeline(runtime *wasm.Runtime, config PluginConfig) (*PluginPipeline
 			continue
 		}
 		pl.SetGrants(grants)
+		pl.SetResources(resources)
 		if raw, ok := config.Config[name]; ok && len(raw) > 0 {
 			pl.SetConfig(string(raw))
 		}
@@ -1390,7 +1561,7 @@ func (pp *PluginPipeline) RunBeforeRequestTracked(ctx context.Context, reqID uin
 // Return values: next = accepted replacement (nil = none; the only way the
 // request changes), stop = a recorded block short-circuits the chain, err =
 // an immediate error for the caller (failure-mode block paths).
-func (pp *PluginPipeline) runBeforeRequestPlugin(ctx context.Context, reqID uint64, lp *loadedPlugin, current *pbv2.ChatRequest, headers map[string][]string, topo engine.TopologyFacts) (next *pbv2.ChatRequest, stop bool, err error) {
+func (pp *PluginPipeline) runBeforeRequestPlugin(ctx context.Context, reqID uint64, lp *loadedPlugin, current *pbv1.ChatRequest, headers map[string][]string, topo engine.TopologyFacts) (next *pbv1.ChatRequest, stop bool, err error) {
 	// The per-plugin projection. The grant is checked on the exact executable
 	// plugin object (lp.plugin), never on a manifest declaration and never
 	// pipeline-wide.
@@ -1413,7 +1584,7 @@ func (pp *PluginPipeline) runBeforeRequestPlugin(ctx context.Context, reqID uint
 	}
 	var outBytes []byte
 	pp.recordInvocation(reqID, lp.manifest.Name)
-	if err := lp.plugin.CallRequest(ctx, pbv2.Hook_HOOK_BEFORE_REQUEST, reqID, inBytes, &outBytes); err != nil {
+	if err := lp.plugin.CallRequest(ctx, pbv1.Hook_HOOK_BEFORE_REQUEST, reqID, inBytes, &outBytes); err != nil {
 		log.Printf("[plugin] %s run_before_request: %v", lp.manifest.Name, err)
 		pp.discardTrapped(reqID, lp.manifest.Name)
 		// The block check must happen on EVERY exit from this iteration,
@@ -1429,7 +1600,7 @@ func (pp *PluginPipeline) runBeforeRequestPlugin(ctx context.Context, reqID uint
 		}
 		return nil, false, nil
 	}
-	res, err := decodeHookResult(outBytes, pbv2.Hook_HOOK_BEFORE_REQUEST)
+	res, err := decodeHookResult(outBytes, pbv1.Hook_HOOK_BEFORE_REQUEST)
 	if err != nil {
 		// A malformed or misdispatched action is the plugin's fault and is
 		// refused whole rather than partly applied. A handwritten guest can
@@ -1446,7 +1617,7 @@ func (pp *PluginPipeline) runBeforeRequestPlugin(ctx context.Context, reqID uint
 		}
 		return nil, false, nil
 	}
-	var replacement *pbv2.ChatRequest
+	var replacement *pbv1.ChatRequest
 	if res != nil {
 		replacement = res.GetReplaceRequest()
 		if replacement != nil {
@@ -1555,14 +1726,14 @@ func (pp *PluginPipeline) RunAfterResponse(ctx context.Context, reqID uint64, re
 		}
 		var outBytes []byte
 		pp.recordInvocation(reqID, lp.manifest.Name)
-		if err := lp.plugin.CallRequest(ctx, pbv2.Hook_HOOK_AFTER_RESPONSE, reqID, inBytes, &outBytes); err != nil {
+		if err := lp.plugin.CallRequest(ctx, pbv1.Hook_HOOK_AFTER_RESPONSE, reqID, inBytes, &outBytes); err != nil {
 			log.Printf("[plugin] %s run_after_response: %v", lp.manifest.Name, err)
 			if lp.failureMode == "block" {
 				return resp, fmt.Errorf("plugin %s blocked response after failure: %w", lp.manifest.Name, err)
 			}
 			continue
 		}
-		res, err := decodeHookResult(outBytes, pbv2.Hook_HOOK_AFTER_RESPONSE)
+		res, err := decodeHookResult(outBytes, pbv1.Hook_HOOK_AFTER_RESPONSE)
 		if err != nil {
 			log.Printf("[plugin] %s run_after_response: invalid result: %v", lp.manifest.Name, err)
 			if lp.failureMode == "block" {
@@ -1622,7 +1793,7 @@ func (pp *PluginPipeline) RunAfterResponse(ctx context.Context, reqID uint64, re
 // A zero-byte return passes the event through unchanged. Otherwise the action
 // is either Suppress (drop it) or EmitEvents (replace it, or fan out to many).
 //
-// v2 removed the `handled` flag: suppression is an action rather than
+// current ABI removed the `handled` flag: suppression is an action rather than
 // "handled=true with an empty list", so emitting nothing and passing through
 // are no longer the same bytes on the wire.
 func (pp *PluginPipeline) RunOnStreamChunk(ctx context.Context, reqID uint64, chunk *engine.StreamEvent) ([]engine.StreamEvent, error) {
@@ -1637,10 +1808,10 @@ func (pp *PluginPipeline) RunOnStreamChunk(ctx context.Context, reqID uint64, ch
 	}
 	pp.mu.Unlock()
 
-	current := []*pbv2.StreamEvent{pbconv.ToPBStreamEvent(chunk)}
+	current := []*pbv1.StreamEvent{pbconv.ToPBStreamEvent(chunk)}
 
 	for _, lp := range pp.streamPlugins {
-		next := make([]*pbv2.StreamEvent, 0, len(current))
+		next := make([]*pbv1.StreamEvent, 0, len(current))
 		for _, ev := range current {
 			evBytes, err := encodeHookInput(reqID, streamPayload{ev: ev})
 			if err != nil {
@@ -1653,7 +1824,7 @@ func (pp *PluginPipeline) RunOnStreamChunk(ctx context.Context, reqID uint64, ch
 			}
 			var outBytes []byte
 			pp.recordInvocation(reqID, lp.manifest.Name)
-			if err := lp.plugin.CallRequest(ctx, pbv2.Hook_HOOK_ON_STREAM_CHUNK, reqID, evBytes, &outBytes); err != nil {
+			if err := lp.plugin.CallRequest(ctx, pbv1.Hook_HOOK_ON_STREAM_CHUNK, reqID, evBytes, &outBytes); err != nil {
 				log.Printf("[plugin] %s run_on_stream_chunk: %v", lp.manifest.Name, err)
 				if lp.failureMode == "block" {
 					return nil, fmt.Errorf("plugin %s blocked stream after failure: %w", lp.manifest.Name, err)
@@ -1661,7 +1832,7 @@ func (pp *PluginPipeline) RunOnStreamChunk(ctx context.Context, reqID uint64, ch
 				next = append(next, ev)
 				continue
 			}
-			res, err := decodeHookResult(outBytes, pbv2.Hook_HOOK_ON_STREAM_CHUNK)
+			res, err := decodeHookResult(outBytes, pbv1.Hook_HOOK_ON_STREAM_CHUNK)
 			if err != nil {
 				log.Printf("[plugin] %s run_on_stream_chunk: invalid result: %v", lp.manifest.Name, err)
 				if lp.failureMode == "block" {
@@ -1701,7 +1872,7 @@ func (pp *PluginPipeline) RunOnStreamChunk(ctx context.Context, reqID uint64, ch
 		// with its block topology intact.
 		converted, err := tracker.FromPBStreamEvent(ev)
 		if err != nil {
-			// The v2 ABI declares unknown/mismatched/duplicate/reused
+			// The plugin ABI declares unknown/mismatched/duplicate/reused
 			// topology invalid: a plugin emitted a stop with no open block at
 			// its index, or a start at an index that is already open. The
 			// conversion must never guess a kind, so this is a hard error —
@@ -1734,7 +1905,7 @@ var ErrServeHTTPForbidden = fmt.Errorf("plugin does not hold env.serve_http perm
 //	(nil, other error)           — internal dispatch error; caller → 503.
 //
 // httpReq is built directly from net/http — it does not cross the engine IR.
-func (pp *PluginPipeline) RunOnHTTPRequest(ctx context.Context, reqID uint64, pluginName string, httpReq *pbv2.HttpRequest, rawHeaders map[string][]string) (*pbv2.HttpResponse, error) {
+func (pp *PluginPipeline) RunOnHTTPRequest(ctx context.Context, reqID uint64, pluginName string, httpReq *pbv1.HttpRequest, rawHeaders map[string][]string) (*pbv1.HttpResponse, error) {
 	pp.Acquire()
 	defer pp.Release()
 
@@ -1770,7 +1941,7 @@ func (pp *PluginPipeline) RunOnHTTPRequest(ctx context.Context, reqID uint64, pl
 	// The three-class filter: operational headers always, credential headers
 	// only when the exact executing plugin holds the approved
 	// env.request_headers grant, everything else never.
-	cloned := proto.Clone(httpReq).(*pbv2.HttpRequest)
+	cloned := proto.Clone(httpReq).(*pbv1.HttpRequest)
 	filtered := filterHTTPHeaders(headers, target.plugin.HasGrant("env.request_headers"))
 	encoded, err := json.Marshal(filtered)
 	if err != nil {
@@ -1784,17 +1955,17 @@ func (pp *PluginPipeline) RunOnHTTPRequest(ctx context.Context, reqID uint64, pl
 	}
 
 	var outBytes []byte
-	if err := target.plugin.CallRequest(ctx, pbv2.Hook_HOOK_ON_HTTP_REQUEST, reqID, inBytes, &outBytes); err != nil {
+	if err := target.plugin.CallRequest(ctx, pbv1.Hook_HOOK_ON_HTTP_REQUEST, reqID, inBytes, &outBytes); err != nil {
 		return nil, fmt.Errorf("plugin %s: run_on_http_request: %w", pluginName, err)
 	}
 
-	res, err := decodeHookResult(outBytes, pbv2.Hook_HOOK_ON_HTTP_REQUEST)
+	res, err := decodeHookResult(outBytes, pbv1.Hook_HOOK_ON_HTTP_REQUEST)
 	if err != nil {
 		return nil, fmt.Errorf("plugin %s: invalid http result: %w", pluginName, err)
 	}
 	// Pass-through: the plugin did not serve this request. v1 needed a
 	// `handled` flag here because an all-defaults HttpResponse marshals to
-	// zero bytes and was therefore indistinguishable from declining. v2 makes
+	// zero bytes and was therefore indistinguishable from declining. current ABI makes
 	// serving an action, so the absence of one IS declining.
 	if res == nil {
 		return nil, nil
@@ -1823,7 +1994,7 @@ type TickOutcome struct {
 // plugin that traps has failed to do its own background work and cannot
 // implicate anyone else's. Errors are logged and iteration continues, so one
 // broken plugin cannot silently stop every other plugin's timer.
-func (pp *PluginPipeline) RunOnTick(ctx context.Context, reqID uint64, tick *pbv2.TickRequest) []TickOutcome {
+func (pp *PluginPipeline) RunOnTick(ctx context.Context, reqID uint64, tick *pbv1.TickRequest) []TickOutcome {
 	pp.Acquire()
 	defer pp.Release()
 
@@ -1842,11 +2013,11 @@ func (pp *PluginPipeline) RunOnTick(ctx context.Context, reqID uint64, tick *pbv
 			continue
 		}
 		var outBytes []byte
-		if err := lp.plugin.CallRequest(ctx, pbv2.Hook_HOOK_ON_TICK, reqID, inBytes, &outBytes); err != nil {
+		if err := lp.plugin.CallRequest(ctx, pbv1.Hook_HOOK_ON_TICK, reqID, inBytes, &outBytes); err != nil {
 			log.Printf("[plugin] %s run_on_tick: %v", lp.manifest.Name, err)
 			continue
 		}
-		res, err := decodeHookResult(outBytes, pbv2.Hook_HOOK_ON_TICK)
+		res, err := decodeHookResult(outBytes, pbv1.Hook_HOOK_ON_TICK)
 		if err != nil {
 			log.Printf("[plugin] %s run_on_tick: invalid result: %v", lp.manifest.Name, err)
 			continue
@@ -1906,7 +2077,7 @@ type PluginConfig struct {
 	// captures the format policy, the accepted host TOPOLOGY arrives per
 	// request via RunBeforeRequest. Format policy stays out of the
 	// pipeline core.
-	CandidateValidator func(topo engine.TopologyFacts, current, replacement *pbv2.ChatRequest) error
+	CandidateValidator func(topo engine.TopologyFacts, current, replacement *pbv1.ChatRequest) error
 	// HostVersion is build metadata supplied by the executable. It is never
 	// persisted in operator configuration.
 	HostVersion string `json:"-"`
@@ -1925,9 +2096,20 @@ type PluginConfig struct {
 // It binds granted capabilities and the effective failure mode to one exact
 // WASM digest. Updating the artifact therefore requires explicit reapproval.
 type Approval struct {
-	Digest      string   `json:"digest"`
-	Permissions []string `json:"permissions"`
-	FailureMode string   `json:"failure_mode,omitempty"`
+	Digest        string                  `json:"digest"`
+	Permissions   []string                `json:"permissions"`
+	FailureMode   string                  `json:"failure_mode,omitempty"`
+	Credentials   map[string]string       `json:"credentials,omitempty"`
+	HTTPEndpoints map[string]HTTPApproval `json:"http_endpoints,omitempty"`
+}
+
+type HTTPApproval struct {
+	Origin            string   `json:"origin"`
+	Methods           []string `json:"methods"`
+	TimeoutMS         int      `json:"timeout_ms,omitempty"`
+	MaxRequestBytes   int64    `json:"max_request_bytes,omitempty"`
+	MaxResponseBytes  int64    `json:"max_response_bytes,omitempty"`
+	MaxCallsPerMinute int      `json:"max_calls_per_minute,omitempty"`
 }
 
 func (c PluginConfig) approvalFor(bundle PluginBundle) (Approval, bool) {
@@ -1937,9 +2119,11 @@ func (c PluginConfig) approvalFor(bundle PluginBundle) (Approval, bool) {
 			permissions = append(permissions, permission.Name)
 		}
 		return Approval{
-			Digest:      bundle.Digest,
-			Permissions: permissions,
-			FailureMode: bundle.Manifest.FailureMode,
+			Digest:        bundle.Digest,
+			Permissions:   permissions,
+			FailureMode:   bundle.Manifest.FailureMode,
+			Credentials:   map[string]string{},
+			HTTPEndpoints: defaultHTTPApprovals(bundle.Manifest),
 		}, true
 	}
 	keys := []string{bundle.Manifest.ID, bundle.Manifest.Name}
@@ -1952,6 +2136,124 @@ func (c PluginConfig) approvalFor(bundle PluginBundle) (Approval, bool) {
 		}
 	}
 	return Approval{}, false
+}
+
+func defaultHTTPApprovals(manifest PluginManifest) map[string]HTTPApproval {
+	out := make(map[string]HTTPApproval)
+	for _, declaration := range manifest.HTTPEndpoints {
+		if declaration.Origin == "" {
+			continue
+		}
+		out[declaration.Name] = HTTPApproval{Origin: declaration.Origin, Methods: append([]string(nil), declaration.Methods...), TimeoutMS: declaration.TimeoutMS, MaxRequestBytes: declaration.MaxRequestBytes, MaxResponseBytes: declaration.MaxResponseBytes, MaxCallsPerMinute: declaration.MaxCallsPerMinute}
+	}
+	return out
+}
+
+func resolvePluginResources(manifest PluginManifest, approval Approval) (wasm.PluginResources, error) {
+	resources := wasm.PluginResources{Credentials: map[string]string{}, Files: map[string]wasm.FileResource{}, HTTP: map[string]wasm.HTTPResource{}}
+	declaredCredentials := make(map[string]CredentialDeclaration, len(manifest.Credentials))
+	for _, declaration := range manifest.Credentials {
+		declaredCredentials[declaration.Slot] = declaration
+	}
+	for slot, credentialID := range approval.Credentials {
+		if _, ok := declaredCredentials[slot]; !ok {
+			return resources, fmt.Errorf("credential binding %q was not declared by manifest", slot)
+		}
+		if strings.TrimSpace(credentialID) == "" {
+			return resources, fmt.Errorf("credential binding %q must name a credential", slot)
+		}
+		resources.Credentials[slot] = credentialID
+	}
+	for slot, declaration := range declaredCredentials {
+		if declaration.Required && resources.Credentials[slot] == "" {
+			return resources, fmt.Errorf("required credential slot %q is not bound", slot)
+		}
+	}
+	for _, declaration := range manifest.Files {
+		maxBytes := declaration.MaxBytes
+		if maxBytes == 0 {
+			maxBytes = 16 << 20
+		}
+		retained := declaration.RetainedFiles
+		if retained == 0 {
+			retained = 5
+		}
+		operations := make(map[string]bool, len(declaration.Operations))
+		for _, operation := range declaration.Operations {
+			operations[operation] = true
+		}
+		resources.Files[declaration.Path] = wasm.FileResource{Operations: operations, MaxBytes: maxBytes, RetainedFiles: retained}
+	}
+	declaredHTTP := make(map[string]HTTPEndpointDeclaration, len(manifest.HTTPEndpoints))
+	for _, declaration := range manifest.HTTPEndpoints {
+		declaredHTTP[declaration.Name] = declaration
+	}
+	for name, binding := range approval.HTTPEndpoints {
+		declaration, ok := declaredHTTP[name]
+		if !ok {
+			return resources, fmt.Errorf("HTTP endpoint binding %q was not declared by manifest", name)
+		}
+		if err := validatePluginHTTPOrigin(binding.Origin); err != nil {
+			return resources, fmt.Errorf("HTTP endpoint %q approval: %w", name, err)
+		}
+		if binding.TimeoutMS < 0 || binding.MaxRequestBytes < 0 || binding.MaxResponseBytes < 0 || binding.MaxCallsPerMinute < 0 {
+			return resources, fmt.Errorf("HTTP endpoint %q approval limits must not be negative", name)
+		}
+		declaredMethods := make(map[string]bool, len(declaration.Methods))
+		for _, method := range declaration.Methods {
+			declaredMethods[method] = true
+		}
+		if len(binding.Methods) == 0 {
+			return resources, fmt.Errorf("HTTP endpoint %q approval must contain methods", name)
+		}
+		methods := make(map[string]bool, len(binding.Methods))
+		for _, method := range binding.Methods {
+			if !declaredMethods[method] {
+				return resources, fmt.Errorf("HTTP endpoint %q method %q was not declared", name, method)
+			}
+			if methods[method] {
+				return resources, fmt.Errorf("HTTP endpoint %q approval repeats method %q", name, method)
+			}
+			methods[method] = true
+		}
+		timeout := binding.TimeoutMS
+		if timeout == 0 {
+			timeout = declaration.TimeoutMS
+		}
+		if timeout == 0 {
+			timeout = 5000
+		}
+		maxRequest := binding.MaxRequestBytes
+		if maxRequest == 0 {
+			maxRequest = declaration.MaxRequestBytes
+		}
+		if maxRequest == 0 {
+			maxRequest = 1 << 20
+		}
+		maxResponse := binding.MaxResponseBytes
+		if maxResponse == 0 {
+			maxResponse = declaration.MaxResponseBytes
+		}
+		if maxResponse == 0 {
+			maxResponse = 4 << 20
+		}
+		calls := binding.MaxCallsPerMinute
+		if calls == 0 {
+			calls = declaration.MaxCallsPerMinute
+		}
+		if calls == 0 {
+			return resources, fmt.Errorf("HTTP endpoint %q approval requires max_calls_per_minute", name)
+		}
+		resources.HTTP[name] = wasm.HTTPResource{Name: name, Origin: binding.Origin, Methods: methods, Timeout: time.Duration(timeout) * time.Millisecond, MaxRequestBytes: maxRequest, MaxResponseBytes: maxResponse, MaxCallsPerMinute: calls}
+	}
+	for name, declaration := range declaredHTTP {
+		if declaration.Required {
+			if _, ok := resources.HTTP[name]; !ok {
+				return resources, fmt.Errorf("required HTTP endpoint %q is not approved", name)
+			}
+		}
+	}
+	return resources, nil
 }
 
 func validateApproval(bundle PluginBundle, approval Approval) ([]string, string, error) {

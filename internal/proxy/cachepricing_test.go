@@ -10,7 +10,7 @@ import (
 
 	"github.com/torana-edge/torana-edge/internal/economics"
 	"github.com/torana-edge/torana-edge/internal/provider"
-	pbv2 "github.com/torana-edge/torana-plugin-sdk/pb/v2"
+	pbv1 "github.com/torana-edge/torana-plugin-sdk/pb/v1"
 )
 
 // anthropicRates are Claude Sonnet's shape: reads at 10% of base input, writes
@@ -44,7 +44,7 @@ func pricingServer(t *testing.T, prov provider.Provider) *Server {
 // the value arm is the domain pricing body (status is genuine data: ok vs
 // unavailable), a refusal is the framed classified HostError (caller bugs and
 // operator gaps travel there).
-func askPricing(t *testing.T, srv *Server, payload string) (cachePricingResponse, *pbv2.HostError) {
+func askPricing(t *testing.T, srv *Server, payload string) (cachePricingResponse, *pbv1.HostError) {
 	t.Helper()
 	res := srv.cachePricing(context.Background(), payload)
 	if err := res.Validate(); err != nil {
@@ -159,12 +159,12 @@ func TestCachePricingClassification(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
 		payload string
-		want    pbv2.ErrorCode
+		want    pbv1.ErrorCode
 	}{
-		{"malformed JSON", `not json`, pbv2.ErrorCode_ERROR_CODE_INVALID_ARGUMENT},
-		{"missing provider", `{"model":"claude-sonnet-4-5"}`, pbv2.ErrorCode_ERROR_CODE_INVALID_ARGUMENT},
-		{"missing model", `{"provider":"anth"}`, pbv2.ErrorCode_ERROR_CODE_INVALID_ARGUMENT},
-		{"unknown provider", `{"provider":"nope","model":"m"}`, pbv2.ErrorCode_ERROR_CODE_NOT_CONFIGURED},
+		{"malformed JSON", `not json`, pbv1.ErrorCode_ERROR_CODE_INVALID_ARGUMENT},
+		{"missing provider", `{"model":"claude-sonnet-4-5"}`, pbv1.ErrorCode_ERROR_CODE_INVALID_ARGUMENT},
+		{"missing model", `{"provider":"anth"}`, pbv1.ErrorCode_ERROR_CODE_INVALID_ARGUMENT},
+		{"unknown provider", `{"provider":"nope","model":"m"}`, pbv1.ErrorCode_ERROR_CODE_NOT_CONFIGURED},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			_, herr := askPricing(t, srv, tc.payload)
@@ -266,7 +266,7 @@ func TestCachePricingFramesMarshalFailureAsInternal(t *testing.T) {
 	if res.Refusal() == nil {
 		t.Fatalf("a serialization failure was framed as a value: %q", string(res.Value()))
 	}
-	if res.Refusal().Code != pbv2.ErrorCode_ERROR_CODE_INTERNAL {
+	if res.Refusal().Code != pbv1.ErrorCode_ERROR_CODE_INTERNAL {
 		t.Errorf("code = %v, want INTERNAL — an unrepresentable pricing body is a host invariant, not a query result", res.Refusal().Code)
 	}
 	if !strings.Contains(res.Refusal().Message, "encode pricing response") {

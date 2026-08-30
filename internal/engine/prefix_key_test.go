@@ -3,7 +3,7 @@ package engine
 import (
 	"testing"
 
-	pb "github.com/torana-edge/torana-plugin-sdk/pb/v2"
+	pb "github.com/torana-edge/torana-plugin-sdk/pb/v1"
 )
 
 // The ordered-prefix cache identity (review round 2 finding 1): the prefix

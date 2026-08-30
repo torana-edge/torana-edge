@@ -320,16 +320,16 @@ func TestControlPlanePluginsOrderingConstraintError(t *testing.T) {
 	os.MkdirAll(pGateDir, 0755)
 	os.MkdirAll(pRouterDir, 0755)
 
-	// hooks must match what MinimalV2Module claims in supported_hooks: the host
+	// hooks must match what MinimalModule claims in supported_hooks: the host
 	// now requires exact equality, so a manifest declaring nothing is a module
 	// that can never be dispatched.
-	gateManifest := `{"name":"gate","version":"0.1.0","abi_version":"v2","hooks":[{"name":"run_before_request"}],"permissions":[{"name":"env.host_call.torana_evaluate_compaction"}]}`
-	routerManifest := `{"name":"router","version":"0.1.0","abi_version":"v2","hooks":[{"name":"run_before_request"}],"permissions":[{"name":"env.route_request"}]}`
-	// A bare module header is no longer loadable: the v2 host reads
+	gateManifest := `{"name":"gate","version":"0.1.0","abi_version":"v1","hooks":[{"name":"run_before_request"}],"permissions":[{"name":"env.host_call.torana_evaluate_compaction"}]}`
+	routerManifest := `{"name":"router","version":"0.1.0","abi_version":"v1","hooks":[{"name":"run_before_request"}],"permissions":[{"name":"env.route_request"}]}`
+	// A bare module header is no longer loadable: the plugin host reads
 	// supported_hooks at load, so an empty module is correctly rejected as a
 	// v1 guest. This test is about ordering constraints, not module validity,
-	// so it needs a real minimal v2 guest.
-	wasmBytes := wasm.MinimalV2Module(false)
+	// so it needs a real minimal plugin guest.
+	wasmBytes := wasm.MinimalModule(false)
 
 	os.WriteFile(filepath.Join(pGateDir, "plugin.json"), []byte(gateManifest), 0644)
 	os.WriteFile(filepath.Join(pGateDir, "plugin.wasm"), wasmBytes, 0644)
@@ -558,82 +558,6 @@ func TestControlPlaneGuard(t *testing.T) {
 		}
 	})
 
-	t.Run("non-loopback remains rejected when deprecated remote settings are configured", func(t *testing.T) {
-		remoteCfg := provCfg
-		remoteCfg.ControlPlane = provider.ControlPlaneConfig{
-			AllowRemote: true,
-			Token:       "",
-		}
-		srvRemote, _ := New(Config{Port: "8080", Providers: remoteCfg})
-
-		req := localControlPlaneRequest(http.MethodGet, "/_torana/api/config", nil)
-		req.RemoteAddr = "203.0.113.9:12345"
-		rec := httptest.NewRecorder()
-		srvRemote.Handler().ServeHTTP(rec, req)
-
-		if rec.Code != http.StatusForbidden {
-			t.Errorf("status = %d, want 403", rec.Code)
-		}
-	})
-
-	t.Run("remote token does not enable the embedded control plane", func(t *testing.T) {
-		tokCfg := provCfg
-		tokCfg.ControlPlane = provider.ControlPlaneConfig{
-			AllowRemote: true,
-			Token:       "secret-token-123",
-		}
-		srvTok, _ := New(Config{Port: "8080", Providers: tokCfg})
-		tokHandler := srvTok.Handler()
-
-		// All remote callers are rejected: v1 is intentionally localhost-only.
-		reqNoTok := localControlPlaneRequest(http.MethodGet, "/_torana/api/config", nil)
-		reqNoTok.RemoteAddr = "203.0.113.9:12345"
-		recNoTok := httptest.NewRecorder()
-		tokHandler.ServeHTTP(recNoTok, reqNoTok)
-		if recNoTok.Code != http.StatusForbidden {
-			t.Errorf("no token status = %d, want 403", recNoTok.Code)
-		}
-
-		// A token is not an alternate remote auth mechanism.
-		reqWrongTok := localControlPlaneRequest(http.MethodGet, "/_torana/api/config", nil)
-		reqWrongTok.RemoteAddr = "203.0.113.9:12345"
-		reqWrongTok.Header.Set("X-Torana-Token", "wrong-token")
-		recWrongTok := httptest.NewRecorder()
-		tokHandler.ServeHTTP(recWrongTok, reqWrongTok)
-		if recWrongTok.Code != http.StatusForbidden {
-			t.Errorf("wrong token status = %d, want 403", recWrongTok.Code)
-		}
-
-		// A correct legacy token also remains rejected remotely.
-		reqHeader := localControlPlaneRequest(http.MethodGet, "/_torana/api/config", nil)
-		reqHeader.RemoteAddr = "203.0.113.9:12345"
-		reqHeader.Header.Set("X-Torana-Token", "secret-token-123")
-		recHeader := httptest.NewRecorder()
-		tokHandler.ServeHTTP(recHeader, reqHeader)
-		if recHeader.Code != http.StatusForbidden {
-			t.Errorf("X-Torana-Token status = %d, want 403", recHeader.Code)
-		}
-
-		// Nor does Authorization: Bearer.
-		reqAuth := localControlPlaneRequest(http.MethodGet, "/_torana/api/config", nil)
-		reqAuth.RemoteAddr = "203.0.113.9:12345"
-		reqAuth.Header.Set("Authorization", "Bearer secret-token-123")
-		recAuth := httptest.NewRecorder()
-		tokHandler.ServeHTTP(recAuth, reqAuth)
-		if recAuth.Code != http.StatusForbidden {
-			t.Errorf("Authorization Bearer status = %d, want 403", recAuth.Code)
-		}
-
-		// Loopback caller with token configured -> 200 even without providing token
-		reqLoopback := localControlPlaneRequest(http.MethodGet, "/_torana/api/config", nil)
-		reqLoopback.RemoteAddr = "127.0.0.1:12345"
-		recLoopback := httptest.NewRecorder()
-		tokHandler.ServeHTTP(recLoopback, reqLoopback)
-		if recLoopback.Code != http.StatusOK {
-			t.Errorf("loopback with token configured status = %d, want 200", recLoopback.Code)
-		}
-	})
-
 	t.Run("all /_torana endpoints are guarded", func(t *testing.T) {
 		endpoints := []string{
 			"/_torana/",
@@ -677,37 +601,6 @@ func TestControlPlaneGuard(t *testing.T) {
 			t.Errorf("remote stats status = %d, want 403", rec.Code)
 		}
 	})
-}
-
-func TestControlPlaneSecretRedaction(t *testing.T) {
-	provCfg := provider.DefaultConfig()
-	provCfg.Port = 8080
-	provCfg.ControlPlane = provider.ControlPlaneConfig{
-		AllowRemote: true,
-		Token:       "super-secret-token-abcdef12345",
-	}
-
-	srv, err := New(Config{
-		Port:      "8080",
-		Providers: provCfg,
-	})
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-
-	req := localControlPlaneRequest(http.MethodGet, "/_torana/api/config", nil)
-	req.RemoteAddr = "127.0.0.1:12345"
-	rec := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200", rec.Code)
-	}
-
-	body := rec.Body.String()
-	if strings.Contains(body, "super-secret-token-abcdef12345") {
-		t.Errorf("GET /_torana/api/config leaked token in response body: %s", body)
-	}
 }
 
 func TestControlPlanePortRebind(t *testing.T) {

@@ -10,7 +10,7 @@ import (
 
 // No build artifacts may be tracked outside their intended locations.
 //
-// A 7 MB WASM binary was committed at the repository root during the v2
+// A 7 MB WASM binary was once committed at the repository root during a
 // migration. The cause is easy to repeat: `go build ./examples/plugins/<name>/`
 // writes an executable named after the DIRECTORY, with no extension, into the
 // current working directory — so `.gitignore`'s `*.wasm` rule does not match it

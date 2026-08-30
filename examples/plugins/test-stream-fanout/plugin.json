@@ -3,7 +3,7 @@
   "id": "torana-test/test-stream-fanout",
   "name": "test-stream-fanout",
   "version": "0.1.0",
-  "abi_version": "v2",
+  "abi_version": "v1",
   "failure_mode": "pass",
   "description": "Benchmark fixture: fans one streamed text delta into two",
   "hooks": [

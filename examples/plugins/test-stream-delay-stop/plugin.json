@@ -3,7 +3,7 @@
   "id": "torana-test/test-stream-delay-stop",
   "name": "test-stream-delay-stop",
   "version": "0.1.0",
-  "abi_version": "v2",
+  "abi_version": "v1",
   "failure_mode": "pass",
   "description": "Regression fixture: suppress one accepted stop and emit it on the next hook call",
   "hooks": [

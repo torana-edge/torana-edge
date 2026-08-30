@@ -3,7 +3,7 @@
   "id": "torana-test/test-original",
   "name": "test-original",
   "version": "0.1.0",
-  "abi_version": "v2",
+  "abi_version": "v1",
   "failure_mode": "pass",
   "description": "Test fixture: mutates the request, then proves env.original_request/env.original_response still expose the pristine data",
   "hooks": [

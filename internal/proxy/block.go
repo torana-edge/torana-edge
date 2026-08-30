@@ -106,6 +106,20 @@ func renderHostError(format string) *BlockResponse {
 	}
 }
 
+func renderCredentialUnavailable(format string) *BlockResponse {
+	code := "server_error"
+	if format == "anthropic" {
+		code = "api_error"
+	}
+	if format == "gemini" || format == "gemini-codeassist" {
+		code = "UNAVAILABLE"
+	}
+	if format == "bedrock" {
+		code = "ServiceUnavailableException"
+	}
+	return &BlockResponse{Status: http.StatusBadGateway, ContentType: "application/json", Body: renderProviderError(format, http.StatusBadGateway, code, "the configured provider credential is unavailable")}
+}
+
 // applyHostError is the construction-bound terminal for a HOST MARSHAL
 // FAILURE (PR B, MARSHAL_FAILURE_CHECKPOINT §5): the accepted IR was
 // contract-valid but the provider adapter cannot project it onto the

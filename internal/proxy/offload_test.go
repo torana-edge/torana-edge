@@ -12,7 +12,7 @@ import (
 
 	"github.com/torana-edge/torana-edge/internal/economics"
 	"github.com/torana-edge/torana-edge/internal/provider"
-	pbv2 "github.com/torana-edge/torana-plugin-sdk/pb/v2"
+	pbv1 "github.com/torana-edge/torana-plugin-sdk/pb/v1"
 )
 
 func offloadServer(t *testing.T, wantAuth, wantModel string) *httptest.Server {
@@ -36,7 +36,7 @@ func offloadServer(t *testing.T, wantAuth, wantModel string) *httptest.Server {
 func offloadConfig(url string) provider.Config {
 	return provider.Config{
 		Providers: map[string]provider.Provider{
-			"cheap": {URL: url, Format: "openai"},
+			"cheap": {URL: url, Format: "openai", Auth: provider.ProviderAuth{Mode: "none"}},
 		},
 		Offload: provider.OffloadConfig{
 			Enabled:  true,
@@ -49,7 +49,7 @@ func offloadConfig(url string) provider.Config {
 // offloadCall drives the REAL callback and decodes whichever arm it landed
 // on: the value arm is the marshaled OffloadResult; a refusal is the framed
 // classified HostError. Callers assert on the arm that matches their case.
-func offloadCall(t *testing.T, s *Server, ctx context.Context, payload string) (economics.OffloadResult, *pbv2.HostError) {
+func offloadCall(t *testing.T, s *Server, ctx context.Context, payload string) (economics.OffloadResult, *pbv1.HostError) {
 	t.Helper()
 	res := s.offloadCompletionResult(ctx, payload)
 	if err := res.Validate(); err != nil {
@@ -65,24 +65,18 @@ func offloadCall(t *testing.T, s *Server, ctx context.Context, payload string) (
 	return out, nil
 }
 
-// TestOffloadUsesCallerCredential: without a dedicated key, the caller's
-// request credential is forwarded to the offload provider.
-func TestOffloadUsesCallerCredential(t *testing.T) {
-	upstream := offloadServer(t, "Bearer caller-key", "cheap-1")
+// TestOffloadCallerAuthIsRejectedAtStartup proves that a host-originated call
+// cannot borrow a request credential. The selected provider must use
+// credential or none mode, and an invalid configuration never starts.
+func TestOffloadCallerAuthIsRejectedAtStartup(t *testing.T) {
+	upstream := offloadServer(t, "", "cheap-1")
 	defer upstream.Close()
-
-	s, err := New(Config{Providers: offloadConfig(upstream.URL)})
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-
-	ctx := context.WithValue(context.Background(), reqStateKey{}, &reqState{ID: 1, CallerAuth: "caller-key"})
-	got, herr := offloadCall(t, s, ctx, `{"system_prompt":"sum","user_prompt":"text"}`)
-	if herr != nil {
-		t.Fatalf("offloadCompletion refused: %v", herr)
-	}
-	if got.Completion != "summary" {
-		t.Fatalf("got %q want summary", got.Completion)
+	cfg := offloadConfig(upstream.URL)
+	cheap := cfg.Providers["cheap"]
+	cheap.Auth = provider.ProviderAuth{Mode: "caller"}
+	cfg.Providers["cheap"] = cheap
+	if _, err := New(Config{Providers: cfg}); err == nil || !strings.Contains(err.Error(), "host-originated offload requires credential or none") {
+		t.Fatalf("New error = %v, want caller-auth rejection", err)
 	}
 }
 
@@ -97,7 +91,7 @@ func TestOffloadResultReturnsProviderModelAndUsage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	ctx := context.WithValue(context.Background(), reqStateKey{}, &reqState{ID: 1, CallerAuth: "k"})
+	ctx := context.WithValue(context.Background(), reqStateKey{}, &reqState{ID: 1})
 	got, herr := offloadCall(t, s, ctx, `{"system_prompt":"sum","user_prompt":"text"}`)
 	if herr != nil {
 		t.Fatalf("offloadCompletion refused: %v", herr)
@@ -121,7 +115,7 @@ func TestOffloadResultReturnsDeepSeekCacheUsageAndRecordsStats(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	ctx := context.WithValue(context.Background(), reqStateKey{}, &reqState{ID: 1, CallerAuth: "k"})
+	ctx := context.WithValue(context.Background(), reqStateKey{}, &reqState{ID: 1})
 	got, herr := offloadCall(t, s, ctx, `{"system_prompt":"sum","user_prompt":"text"}`)
 	if herr != nil {
 		t.Fatalf("offloadCompletion refused: %v", herr)
@@ -135,21 +129,26 @@ func TestOffloadResultReturnsDeepSeekCacheUsageAndRecordsStats(t *testing.T) {
 	}
 }
 
-// TestOffloadDedicatedKeyWins: offload.api_key_env overrides the caller key.
-func TestOffloadDedicatedKeyWins(t *testing.T) {
+func TestOffloadUsesProviderCredential(t *testing.T) {
 	upstream := offloadServer(t, "Bearer dedicated-key", "cheap-1")
 	defer upstream.Close()
 
 	t.Setenv("TORANA_TEST_OFFLOAD_KEY", "dedicated-key")
 	cfg := offloadConfig(upstream.URL)
-	cfg.Offload.APIKeyEnv = "TORANA_TEST_OFFLOAD_KEY"
+	cfg.Credentials = provider.CredentialsConfig{
+		Sources: map[string]provider.CredentialSource{"env": {Type: "env"}},
+		Entries: map[string]provider.CredentialEntry{"offload": {Source: "env", Key: "TORANA_TEST_OFFLOAD_KEY"}},
+	}
+	cheap := cfg.Providers["cheap"]
+	cheap.Auth = provider.ProviderAuth{Mode: "credential", Credential: "offload"}
+	cfg.Providers["cheap"] = cheap
 
 	s, err := New(Config{Providers: cfg})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
 
-	ctx := context.WithValue(context.Background(), reqStateKey{}, &reqState{ID: 1, CallerAuth: "caller-key"})
+	ctx := context.WithValue(context.Background(), reqStateKey{}, &reqState{ID: 1})
 	if _, herr := offloadCall(t, s, ctx, `{"system_prompt":"sum","user_prompt":"text"}`); herr != nil {
 		t.Fatalf("offloadCompletion refused: %v", herr)
 	}
@@ -175,7 +174,7 @@ func TestOffloadRequestBudget(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	ctx := context.WithValue(context.Background(), reqStateKey{}, &reqState{ID: 1, CallerAuth: "k"})
+	ctx := context.WithValue(context.Background(), reqStateKey{}, &reqState{ID: 1})
 	if _, herr := offloadCall(t, s, ctx, `{"system_prompt":"sum","user_prompt":"text"}`); herr != nil {
 		t.Fatalf("offloadCompletion refused: %v", herr)
 	}
@@ -198,7 +197,7 @@ func TestOffloadEmptyContentSurfacesFinishReason(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	ctx := context.WithValue(context.Background(), reqStateKey{}, &reqState{ID: 1, CallerAuth: "k"})
+	ctx := context.WithValue(context.Background(), reqStateKey{}, &reqState{ID: 1})
 	_, herr := offloadCall(t, s, ctx, `{"system_prompt":"sum","user_prompt":"text"}`)
 	if herr == nil {
 		t.Fatal("expected a refusal for empty completion")
@@ -227,8 +226,8 @@ func TestOffloadProviderOverride(t *testing.T) {
 
 	cfg := provider.Config{
 		Providers: map[string]provider.Provider{
-			"cheap": {URL: "http://unused", Format: "openai"},
-			"local": {URL: local.URL, Format: "openai"},
+			"cheap": {URL: "http://unused", Format: "openai", Auth: provider.ProviderAuth{Mode: "none"}},
+			"local": {URL: local.URL, Format: "openai", Auth: provider.ProviderAuth{Mode: "none"}},
 		},
 		Offload: provider.OffloadConfig{Enabled: true, Provider: "cheap", Model: "cheap-1"},
 	}
@@ -236,7 +235,7 @@ func TestOffloadProviderOverride(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	ctx := context.WithValue(context.Background(), reqStateKey{}, &reqState{ID: 1, CallerAuth: "caller-key"})
+	ctx := context.WithValue(context.Background(), reqStateKey{}, &reqState{ID: 1})
 	got, herr := offloadCall(t, s, ctx, `{"system_prompt":"s","user_prompt":"u","provider":"local","model":"local-1"}`)
 	if herr != nil {
 		t.Fatalf("offloadCompletion refused: %v", herr)
@@ -252,10 +251,8 @@ func TestOffloadProviderOverride(t *testing.T) {
 	}
 }
 
-// An override must not inherit the default provider's encrypted key. This is
-// the credential-boundary regression: before the fix, resolving an empty
-// override env still passed off.APIKeyEnc to resolveSecret.
-func TestOffloadProviderOverrideCannotReceiveDefaultEncryptedKey(t *testing.T) {
+// An override must not inherit the default provider's named credential.
+func TestOffloadProviderOverrideCannotReceiveDefaultCredential(t *testing.T) {
 	var gotAuth string
 	local := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotAuth = r.Header.Get("Authorization")
@@ -265,9 +262,13 @@ func TestOffloadProviderOverrideCannotReceiveDefaultEncryptedKey(t *testing.T) {
 	defer local.Close()
 
 	cfg := provider.Config{
+		Credentials: provider.CredentialsConfig{
+			Sources: map[string]provider.CredentialSource{"env": {Type: "env"}},
+			Entries: map[string]provider.CredentialEntry{"default": {Source: "env", Key: "TORANA_DEFAULT_KEY"}},
+		},
 		Providers: map[string]provider.Provider{
-			"cheap": {URL: "http://unused", Format: "openai"},
-			"local": {URL: local.URL, Format: "openai"},
+			"cheap": {URL: "http://unused", Format: "openai", Auth: provider.ProviderAuth{Mode: "credential", Credential: "default"}},
+			"local": {URL: local.URL, Format: "openai", Auth: provider.ProviderAuth{Mode: "none"}},
 		},
 		Offload: provider.OffloadConfig{
 			Enabled:  true,
@@ -275,15 +276,11 @@ func TestOffloadProviderOverrideCannotReceiveDefaultEncryptedKey(t *testing.T) {
 			Model:    "cheap-1",
 		},
 	}
+	t.Setenv("TORANA_DEFAULT_KEY", "default-secret")
 	s, err := New(Config{Providers: cfg, ConfigPath: filepath.Join(t.TempDir(), "config.json")})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	encrypted, err := s.secrets.Encrypt("default-secret")
-	if err != nil {
-		t.Fatalf("Encrypt: %v", err)
-	}
-	s.config.Providers.Offload.APIKeyEnc = encrypted
 	if _, herr := offloadCall(t, s, context.Background(), `{"provider":"local","model":"local-1","user_prompt":"u"}`); herr != nil {
 		t.Fatalf("offloadCompletion refused: %v", herr)
 	}
@@ -303,9 +300,13 @@ func TestOffloadProviderOverrideUsesOnlyOverrideProviderCredential(t *testing.T)
 	defer local.Close()
 
 	cfg := provider.Config{
+		Credentials: provider.CredentialsConfig{
+			Sources: map[string]provider.CredentialSource{"env": {Type: "env"}},
+			Entries: map[string]provider.CredentialEntry{"local": {Source: "env", Key: "TORANA_LOCAL_KEY"}},
+		},
 		Providers: map[string]provider.Provider{
-			"cheap": {URL: "http://unused", Format: "openai"},
-			"local": {URL: local.URL, Format: "openai", APIKeyEnv: "TORANA_LOCAL_KEY"},
+			"cheap": {URL: "http://unused", Format: "openai", Auth: provider.ProviderAuth{Mode: "none"}},
+			"local": {URL: local.URL, Format: "openai", Auth: provider.ProviderAuth{Mode: "credential", Credential: "local"}},
 		},
 		Offload: provider.OffloadConfig{Enabled: true, Provider: "cheap", Model: "cheap-1"},
 	}
@@ -325,8 +326,8 @@ func TestOffloadProviderOverrideUsesOnlyOverrideProviderCredential(t *testing.T)
 // callback: every failure branch must land on the code a plugin can act on,
 // instead of the old blanket UNAVAILABLE.
 //
-//   - INVALID_ARGUMENT: caller bugs — malformed payload, override missing its
-//     model, guest-selected api_key_env.
+//   - INVALID_ARGUMENT: caller bugs — malformed payload, unknown members, or
+//     an override missing its model.
 //   - NOT_CONFIGURED: operator gaps — offload disabled, unknown override
 //     provider.
 //   - UNAVAILABLE: valid call that could not complete — transport failure,
@@ -341,15 +342,15 @@ func TestOffloadClassification(t *testing.T) {
 	}
 	enabled := provider.Config{
 		Providers: map[string]provider.Provider{
-			"cheap": {URL: upstream.URL, Format: "openai"},
-			"local": {URL: upstream.URL, Format: "openai"},
+			"cheap": {URL: upstream.URL, Format: "openai", Auth: provider.ProviderAuth{Mode: "none"}},
+			"local": {URL: upstream.URL, Format: "openai", Auth: provider.ProviderAuth{Mode: "none"}},
 		},
 		Offload: provider.OffloadConfig{Enabled: true, Provider: "cheap", Model: "cheap-1"},
 	}
 	withDead := provider.Config{
 		Providers: map[string]provider.Provider{
-			"cheap": {URL: upstream.URL, Format: "openai"},
-			"dead":  {URL: "http://127.0.0.1:1", Format: "openai"},
+			"cheap": {URL: upstream.URL, Format: "openai", Auth: provider.ProviderAuth{Mode: "none"}},
+			"dead":  {URL: "http://127.0.0.1:1", Format: "openai", Auth: provider.ProviderAuth{Mode: "none"}},
 		},
 		Offload: provider.OffloadConfig{Enabled: true, Provider: "cheap", Model: "cheap-1"},
 	}
@@ -359,7 +360,7 @@ func TestOffloadClassification(t *testing.T) {
 	defer non200.Close()
 	withNon200 := provider.Config{
 		Providers: map[string]provider.Provider{
-			"cheap": {URL: non200.URL, Format: "openai"},
+			"cheap": {URL: non200.URL, Format: "openai", Auth: provider.ProviderAuth{Mode: "none"}},
 		},
 		Offload: provider.OffloadConfig{Enabled: true, Provider: "cheap", Model: "cheap-1"},
 	}
@@ -367,57 +368,52 @@ func TestOffloadClassification(t *testing.T) {
 	t.Run("malformed payload", func(t *testing.T) {
 		s, _ := New(Config{Providers: enabled})
 		_, herr := offloadCall(t, s, context.Background(), `not json`)
-		if herr == nil || herr.Code != pbv2.ErrorCode_ERROR_CODE_INVALID_ARGUMENT {
+		if herr == nil || herr.Code != pbv1.ErrorCode_ERROR_CODE_INVALID_ARGUMENT {
 			t.Fatalf("malformed payload: got %v, want INVALID_ARGUMENT", herr)
 		}
 	})
 	t.Run("offload disabled", func(t *testing.T) {
 		s, _ := New(Config{Providers: disabled})
 		_, herr := offloadCall(t, s, context.Background(), `{"user_prompt":"u"}`)
-		if herr == nil || herr.Code != pbv2.ErrorCode_ERROR_CODE_NOT_CONFIGURED {
+		if herr == nil || herr.Code != pbv1.ErrorCode_ERROR_CODE_NOT_CONFIGURED {
 			t.Fatalf("disabled offload: got %v, want NOT_CONFIGURED", herr)
 		}
 	})
 	t.Run("unknown override provider", func(t *testing.T) {
 		s, _ := New(Config{Providers: enabled})
 		_, herr := offloadCall(t, s, context.Background(), `{"user_prompt":"u","provider":"ghost","model":"m"}`)
-		if herr == nil || herr.Code != pbv2.ErrorCode_ERROR_CODE_NOT_CONFIGURED {
+		if herr == nil || herr.Code != pbv1.ErrorCode_ERROR_CODE_NOT_CONFIGURED {
 			t.Fatalf("unknown override: got %v, want NOT_CONFIGURED", herr)
 		}
 	})
 	t.Run("override without model", func(t *testing.T) {
 		s, _ := New(Config{Providers: enabled})
 		_, herr := offloadCall(t, s, context.Background(), `{"user_prompt":"u","provider":"local"}`)
-		if herr == nil || herr.Code != pbv2.ErrorCode_ERROR_CODE_INVALID_ARGUMENT {
+		if herr == nil || herr.Code != pbv1.ErrorCode_ERROR_CODE_INVALID_ARGUMENT {
 			t.Fatalf("override without model: got %v, want INVALID_ARGUMENT", herr)
 		}
 	})
-	t.Run("guest-selected api_key_env", func(t *testing.T) {
-		// The guest field is obsolete: it must be rejected even when it names
-		// the provider's own configured variable — a guest may never select
-		// process environment variables.
-		t.Setenv("UNRELATED_PROCESS_SECRET", "must-not-leak")
-		t.Setenv("TORANA_LOCAL_KEY", "local-secret")
+	t.Run("unknown payload member", func(t *testing.T) {
 		s, _ := New(Config{Providers: enabled})
 		_, herr := offloadCall(t, s, context.Background(), `{
 			"provider":"local","model":"local-1","user_prompt":"u",
-			"api_key_env":"TORANA_LOCAL_KEY"
+			"unexpected":"value"
 		}`)
-		if herr == nil || herr.Code != pbv2.ErrorCode_ERROR_CODE_INVALID_ARGUMENT || !strings.Contains(herr.Message, "obsolete") {
-			t.Fatalf("guest api_key_env: got %v, want INVALID_ARGUMENT naming the field obsolete", herr)
+		if herr == nil || herr.Code != pbv1.ErrorCode_ERROR_CODE_INVALID_ARGUMENT {
+			t.Fatalf("unknown member: got %v, want INVALID_ARGUMENT", herr)
 		}
 	})
 	t.Run("transport failure", func(t *testing.T) {
 		s, _ := New(Config{Providers: withDead})
 		_, herr := offloadCall(t, s, context.Background(), `{"user_prompt":"u","provider":"dead","model":"m"}`)
-		if herr == nil || herr.Code != pbv2.ErrorCode_ERROR_CODE_UNAVAILABLE {
+		if herr == nil || herr.Code != pbv1.ErrorCode_ERROR_CODE_UNAVAILABLE {
 			t.Fatalf("dead endpoint: got %v, want UNAVAILABLE", herr)
 		}
 	})
 	t.Run("upstream non-200", func(t *testing.T) {
 		s, _ := New(Config{Providers: withNon200})
 		_, herr := offloadCall(t, s, context.Background(), `{"user_prompt":"u"}`)
-		if herr == nil || herr.Code != pbv2.ErrorCode_ERROR_CODE_UNAVAILABLE {
+		if herr == nil || herr.Code != pbv1.ErrorCode_ERROR_CODE_UNAVAILABLE {
 			t.Fatalf("non-200: got %v, want UNAVAILABLE", herr)
 		}
 	})
@@ -448,10 +444,7 @@ func TestOffloadValidation(t *testing.T) {
 	}
 }
 
-// TestOffloadRejectsApiKeyEnvPresence — the field is REMOVED, not deprecated:
-// any occurrence — empty string or null — is rejected as INVALID_ARGUMENT,
-// not silently honored or ignored.
-func TestOffloadRejectsApiKeyEnvPresence(t *testing.T) {
+func TestOffloadRejectsUnknownMembers(t *testing.T) {
 	upstream := offloadServer(t, "", "cheap-1")
 	defer upstream.Close()
 
@@ -462,12 +455,12 @@ func TestOffloadRejectsApiKeyEnvPresence(t *testing.T) {
 	ctx := context.WithValue(context.Background(), reqStateKey{}, &reqState{ID: 1})
 
 	for _, payload := range []string{
-		`{"system_prompt":"s","user_prompt":"u","api_key_env":""}`,
-		`{"system_prompt":"s","user_prompt":"u","api_key_env":null}`,
-		`{"system_prompt":"s","user_prompt":"u","api_key_env":"MY_VAR"}`,
+		`{"system_prompt":"s","user_prompt":"u","unexpected":""}`,
+		`{"system_prompt":"s","user_prompt":"u","unexpected":null}`,
+		`{"system_prompt":"s","user_prompt":"u","unexpected":{"nested":true}}`,
 	} {
 		_, herr := offloadCall(t, s, ctx, payload)
-		if herr == nil || herr.Code != pbv2.ErrorCode_ERROR_CODE_INVALID_ARGUMENT {
+		if herr == nil || herr.Code != pbv1.ErrorCode_ERROR_CODE_INVALID_ARGUMENT {
 			t.Fatalf("payload %s was not rejected as INVALID_ARGUMENT: %v", payload, herr)
 		}
 	}
@@ -506,7 +499,7 @@ func TestOffloadResponseLimits(t *testing.T) {
 
 			got, herr := offloadCall(t, s, ctx, `{"system_prompt":"s","user_prompt":"u"}`)
 			if tc.wantRefuse {
-				if herr == nil || herr.Code != pbv2.ErrorCode_ERROR_CODE_INVALID_ARGUMENT {
+				if herr == nil || herr.Code != pbv1.ErrorCode_ERROR_CODE_INVALID_ARGUMENT {
 					t.Fatalf("oversized body was not refused as INVALID_ARGUMENT: %v", herr)
 				}
 			} else {
@@ -586,7 +579,7 @@ func TestOffloadRedirectsStayOnOrigin(t *testing.T) {
 		if herr == nil {
 			t.Fatal("a redirect loop completed")
 		}
-		if herr.Code != pbv2.ErrorCode_ERROR_CODE_NOT_CONFIGURED {
+		if herr.Code != pbv1.ErrorCode_ERROR_CODE_NOT_CONFIGURED {
 			t.Fatalf("a redirect loop was classified %v, want NOT_CONFIGURED (deterministic, non-retryable)", herr.Code)
 		}
 		mu.Lock()

@@ -6,7 +6,7 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	"github.com/torana-edge/torana-edge/internal/engine"
-	pb "github.com/torana-edge/torana-plugin-sdk/pb/v2"
+	pb "github.com/torana-edge/torana-plugin-sdk/pb/v1"
 )
 
 func toPBChatRequest(c *engine.ChatRequest) *pb.ChatRequest {
@@ -151,7 +151,7 @@ func ToPBStreamEvent(e *engine.StreamEvent) *pb.StreamEvent {
 	} else if e.ThinkingDelta != nil {
 		out.Event = &pb.StreamEvent_ThinkingDelta{ThinkingDelta: *e.ThinkingDelta}
 	} else if e.ToolCallStart != nil {
-		// v2 has no ToolCallStart: a tool call opens a content block like any
+		// current ABI has no ToolCallStart: a tool call opens a content block like any
 		// other content, so one sequence covers text, thinking and tools, and
 		// the block index is what binds deltas and signatures to it.
 		out.Event = &pb.StreamEvent_ContentBlockStart{
@@ -165,7 +165,7 @@ func ToPBStreamEvent(e *engine.StreamEvent) *pb.StreamEvent {
 			},
 		}
 	} else if e.BlockStart != nil {
-		// Explicit non-tool content blocks map to their matching v2 arm so the
+		// Explicit non-tool content blocks map to their matching current ABI arm so the
 		// wire carries the full block topology: every content block opens with
 		// a start event naming its kind.
 		switch e.BlockStart.Kind {
@@ -218,7 +218,7 @@ func ToPBStreamEvent(e *engine.StreamEvent) *pb.StreamEvent {
 			ContentBlockStop: &pb.ContentBlockStop{Index: int32(e.ToolCallEnd.Index)},
 		}
 	} else if e.FinishReason != "" {
-		// v2 carries the finish reason on MessageStop rather than as a
+		// current ABI carries the finish reason on MessageStop rather than as a
 		// standalone event, so the end of a message is one thing to observe.
 		out.Event = &pb.StreamEvent_MessageStop{
 			MessageStop: &pb.MessageStop{FinishReason: e.FinishReason},
@@ -249,8 +249,8 @@ func ToPBStreamEvent(e *engine.StreamEvent) *pb.StreamEvent {
 // block it closes: ToolCallEnd for tool blocks, BlockStop for
 // text/thinking/provider blocks.
 //
-// The v2 wire binds a stop by index alone; the block kind lives on the start
-// event. The v2 contract: non-tool blocks (text/thinking/provider) are
+// The current ABI wire binds a stop by index alone; the block kind lives on the start
+// event. The current ABI contract: non-tool blocks (text/thinking/provider) are
 // exclusive — at most ONE may be open, and nothing else (not even a tool
 // block) may be open alongside it; TOOL blocks may be open concurrently at
 // distinct indexes (parallel tool calls ride the native protocols), but never
@@ -328,7 +328,7 @@ func (t *BlockKindTracker) startNonTool(idx int, kind blockKind) error {
 
 // FromPBStreamEvent converts one event, resolving ContentBlockStop by the kind
 // of the block this tracker recorded as open. It returns an error for topology
-// the v2 ABI declares invalid: a non-tool start while a non-tool block or any
+// the plugin ABI declares invalid: a non-tool start while a non-tool block or any
 // tool block is open, a tool start while a non-tool block is open, a start
 // whose index was already used in this message (even after its block closed),
 // or a stop that does not name an open block of the kind it closes. The
@@ -459,7 +459,7 @@ func (t *BlockKindTracker) FromPBStreamEvent(e *pb.StreamEvent) (*engine.StreamE
 // for it would claim fields the host cannot deliver on a response.
 
 // toPBMessage projects the ordered message body one-for-one onto the shared
-// pb/v2 shape. This is the REQUEST-PATH source of truth; the engine's
+// pb/v1 shape. This is the REQUEST-PATH source of truth; the engine's
 // conversation.go fingerprint projection is pinned byte-equal to it by the
 // differential matrix.
 func toPBMessage(m engine.Message) *pb.Message {
@@ -711,11 +711,13 @@ func ToPBChatResponse(r *engine.ChatResponse) *pb.ChatResponse {
 		return nil
 	}
 	out := &pb.ChatResponse{
-		Model:          r.Model,
-		Id:             r.ID,
-		FinishReason:   r.FinishReason,
-		UpstreamStatus: int32(r.UpstreamStatus),
-		DurationMs:     r.DurationMS,
+		Model:             r.Model,
+		Provider:          r.Provider,
+		CompletedAtUnixMs: r.CompletedAtUnixMS,
+		Id:                r.ID,
+		FinishReason:      r.FinishReason,
+		UpstreamStatus:    int32(r.UpstreamStatus),
+		DurationMs:        r.DurationMS,
 	}
 	if r.Message != nil {
 		out.Message = toPBResponseMessage(r.Message)
@@ -739,11 +741,13 @@ func FromPBChatResponse(r *pb.ChatResponse) *engine.ChatResponse {
 		return nil
 	}
 	out := &engine.ChatResponse{
-		Model:          r.Model,
-		ID:             r.Id,
-		FinishReason:   r.FinishReason,
-		UpstreamStatus: int(r.UpstreamStatus),
-		DurationMS:     r.DurationMs,
+		Model:             r.Model,
+		Provider:          r.Provider,
+		CompletedAtUnixMS: r.CompletedAtUnixMs,
+		ID:                r.Id,
+		FinishReason:      r.FinishReason,
+		UpstreamStatus:    int(r.UpstreamStatus),
+		DurationMS:        r.DurationMs,
 	}
 	if r.Message != nil {
 		out.Message = fromPBResponseMessage(r.Message)

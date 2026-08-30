@@ -7,7 +7,7 @@ import (
 	"sort"
 
 	"github.com/torana-edge/torana-edge/internal/wasm"
-	pbv2 "github.com/torana-edge/torana-plugin-sdk/pb/v2"
+	pbv1 "github.com/torana-edge/torana-plugin-sdk/pb/v1"
 )
 
 // cachePricingRequest is what a plugin asks about.
@@ -97,20 +97,20 @@ const (
 func (s *Server) cachePricing(_ context.Context, payloadJSON string) wasm.ExtensionResult {
 	var req cachePricingRequest
 	if err := json.Unmarshal([]byte(payloadJSON), &req); err != nil {
-		return wasm.ExtensionRefusal(pbv2.ErrorCode_ERROR_CODE_INVALID_ARGUMENT,
+		return wasm.ExtensionRefusal(pbv1.ErrorCode_ERROR_CODE_INVALID_ARGUMENT,
 			"invalid payload: %v", err)
 	}
 	if req.Provider == "" {
-		return wasm.ExtensionRefusal(pbv2.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "provider is required")
+		return wasm.ExtensionRefusal(pbv1.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "provider is required")
 	}
 	if req.Model == "" {
-		return wasm.ExtensionRefusal(pbv2.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "model is required")
+		return wasm.ExtensionRefusal(pbv1.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "model is required")
 	}
 
 	cfg := s.GetConfig().Providers
 	prov, ok := cfg.Providers[req.Provider]
 	if !ok {
-		return wasm.ExtensionRefusal(pbv2.ErrorCode_ERROR_CODE_NOT_CONFIGURED,
+		return wasm.ExtensionRefusal(pbv1.ErrorCode_ERROR_CODE_NOT_CONFIGURED,
 			"unknown provider %q", req.Provider)
 	}
 
@@ -178,7 +178,7 @@ func (s *Server) cachePricing(_ context.Context, payloadJSON string) wasm.Extens
 func pricingValue(out cachePricingResponse) wasm.ExtensionResult {
 	env, err := marshalPricing(out)
 	if err != nil {
-		return wasm.ExtensionRefusal(pbv2.ErrorCode_ERROR_CODE_INTERNAL, "encode pricing response: %v", err)
+		return wasm.ExtensionRefusal(pbv1.ErrorCode_ERROR_CODE_INTERNAL, "encode pricing response: %v", err)
 	}
 	return wasm.ExtensionValue([]byte(env))
 }

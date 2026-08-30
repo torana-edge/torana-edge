@@ -18,7 +18,7 @@ import (
 	"github.com/torana-edge/torana-edge/internal/provider"
 )
 
-// anthropicPIIEnv stands up the REAL server with the REAL v2 pii bundle and an
+// anthropicPIIEnv stands up the REAL server with the REAL current ABI pii bundle and an
 // Anthropic-format provider. The upstream counts hits and returns a valid
 // Anthropic response; a transport wrapper captures each outgoing request body
 // (read and restored) before delegating to the real transport.

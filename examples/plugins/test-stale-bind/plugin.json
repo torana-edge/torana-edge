@@ -3,7 +3,7 @@
   "id": "torana-test/test-stale-bind",
   "name": "test-stale-bind",
   "version": "0.1.0",
-  "abi_version": "v2",
+  "abi_version": "v1",
   "minimum_torana_version": "0.1.0",
   "failure_mode": "pass",
   "description": "Test fixture: holds every request write grant (so the host takes the all-grants fast path) and still keeps a provider content_signature over changed covered content, which no grant authorises",

@@ -53,7 +53,7 @@ import (
 
 	"github.com/torana-edge/torana-edge/internal/engine"
 	"github.com/torana-edge/torana-edge/internal/engine/pbconv"
-	pbv2 "github.com/torana-edge/torana-plugin-sdk/pb/v2"
+	pbv1 "github.com/torana-edge/torana-plugin-sdk/pb/v1"
 )
 
 // StreamTerminalError is the typed error a terminated stream returns. The
@@ -128,7 +128,7 @@ type streamDisciplineWalker struct {
 
 // walk validates one event and advances the walker state. The returned error
 // names the violated per-event rule.
-func (w *streamDisciplineWalker) walk(ev *pbv2.StreamEvent) error {
+func (w *streamDisciplineWalker) walk(ev *pbv1.StreamEvent) error {
 	if w.seen == nil {
 		w.seen = make(map[int32]bool)
 	}
@@ -142,24 +142,24 @@ func (w *streamDisciplineWalker) walk(ev *pbv2.StreamEvent) error {
 	}
 	if w.messageStopped {
 		switch ev.Event.(type) {
-		case *pbv2.StreamEvent_Usage, *pbv2.StreamEvent_Error:
+		case *pbv1.StreamEvent_Usage, *pbv1.StreamEvent_Error:
 		default:
 			return fmt.Errorf("event at position %d after MessageStop", pos)
 		}
 	}
 	switch e := ev.Event.(type) {
-	case *pbv2.StreamEvent_Error:
+	case *pbv1.StreamEvent_Error:
 		w.sawError = true
-	case *pbv2.StreamEvent_Usage:
+	case *pbv1.StreamEvent_Usage:
 		// No stream state to enforce for Usage.
-	case *pbv2.StreamEvent_MessageStart:
+	case *pbv1.StreamEvent_MessageStart:
 		// Message framing; nothing to enforce before MessageStop.
-	case *pbv2.StreamEvent_MessageStop:
+	case *pbv1.StreamEvent_MessageStop:
 		if w.nonTool != nil || len(w.openTools) > 0 {
 			return fmt.Errorf("MessageStop at position %d while a content block is still open", pos)
 		}
 		w.messageStopped = true
-	case *pbv2.StreamEvent_ContentBlockStart:
+	case *pbv1.StreamEvent_ContentBlockStart:
 		w.spanOpen = false // any start closes an implicit run
 		cbs := e.ContentBlockStart
 		if cbs == nil {
@@ -171,7 +171,7 @@ func (w *streamDisciplineWalker) walk(ev *pbv2.StreamEvent) error {
 		}
 		w.seen[idx] = true
 		switch cbs.Block.(type) {
-		case *pbv2.ContentBlockStart_Text:
+		case *pbv1.ContentBlockStart_Text:
 			if w.nonTool != nil {
 				return fmt.Errorf("non-tool content block start at position %d while a %s block is open", pos, w.nonTool.kind)
 			}
@@ -179,7 +179,7 @@ func (w *streamDisciplineWalker) walk(ev *pbv2.StreamEvent) error {
 				return fmt.Errorf("non-tool content block start at position %d while a tool block is open", pos)
 			}
 			w.nonTool = &openNonTool{index: idx, kind: textBlockOpen}
-		case *pbv2.ContentBlockStart_Thinking:
+		case *pbv1.ContentBlockStart_Thinking:
 			if w.nonTool != nil {
 				return fmt.Errorf("non-tool content block start at position %d while a %s block is open", pos, w.nonTool.kind)
 			}
@@ -187,7 +187,7 @@ func (w *streamDisciplineWalker) walk(ev *pbv2.StreamEvent) error {
 				return fmt.Errorf("non-tool content block start at position %d while a tool block is open", pos)
 			}
 			w.nonTool = &openNonTool{index: idx, kind: thinkingBlockOpen}
-		case *pbv2.ContentBlockStart_Provider:
+		case *pbv1.ContentBlockStart_Provider:
 			if w.nonTool != nil {
 				return fmt.Errorf("non-tool content block start at position %d while a %s block is open", pos, w.nonTool.kind)
 			}
@@ -195,13 +195,13 @@ func (w *streamDisciplineWalker) walk(ev *pbv2.StreamEvent) error {
 				return fmt.Errorf("non-tool content block start at position %d while a tool block is open", pos)
 			}
 			w.nonTool = &openNonTool{index: idx, kind: providerBlockOpen}
-		case *pbv2.ContentBlockStart_ToolCall:
+		case *pbv1.ContentBlockStart_ToolCall:
 			if w.nonTool != nil {
 				return fmt.Errorf("tool call block start at position %d while a non-tool block is open", pos)
 			}
 			w.openTools[idx] = true
 		}
-	case *pbv2.StreamEvent_ContentBlockStop:
+	case *pbv1.StreamEvent_ContentBlockStop:
 		cbs := e.ContentBlockStop
 		if cbs == nil {
 			return nil
@@ -217,7 +217,7 @@ func (w *streamDisciplineWalker) walk(ev *pbv2.StreamEvent) error {
 			return nil
 		}
 		return fmt.Errorf("content block stop at position %d names no open block", pos)
-	case *pbv2.StreamEvent_TextDelta:
+	case *pbv1.StreamEvent_TextDelta:
 		if w.nonTool != nil && w.nonTool.kind != textBlockOpen {
 			return fmt.Errorf("text delta at position %d inside a %s block", pos, w.nonTool.kind)
 		}
@@ -225,7 +225,7 @@ func (w *streamDisciplineWalker) walk(ev *pbv2.StreamEvent) error {
 			return fmt.Errorf("text delta at position %d while a tool block is open", pos)
 		}
 		w.spanOpen, w.sawText = true, true
-	case *pbv2.StreamEvent_ThinkingDelta:
+	case *pbv1.StreamEvent_ThinkingDelta:
 		if w.nonTool != nil && w.nonTool.kind != thinkingBlockOpen {
 			return fmt.Errorf("thinking delta at position %d inside a %s block", pos, w.nonTool.kind)
 		}
@@ -233,7 +233,7 @@ func (w *streamDisciplineWalker) walk(ev *pbv2.StreamEvent) error {
 			return fmt.Errorf("thinking delta at position %d while a tool block is open", pos)
 		}
 		w.spanOpen, w.sawText = true, true
-	case *pbv2.StreamEvent_SignatureDelta:
+	case *pbv1.StreamEvent_SignatureDelta:
 		// Mirrors the scope walk: an open span or an open text/thinking block
 		// is current (the signature ends the span); a signature inside an
 		// open tool/provider block, or one with no text/thinking content
@@ -247,7 +247,7 @@ func (w *streamDisciplineWalker) walk(ev *pbv2.StreamEvent) error {
 		if (w.nonTool != nil && w.nonTool.kind == providerBlockOpen) || len(w.openTools) > 0 || !w.sawText {
 			return fmt.Errorf("signature_delta has no covered content (does not bind tool-call blocks)")
 		}
-	case *pbv2.StreamEvent_ToolCallDelta:
+	case *pbv1.StreamEvent_ToolCallDelta:
 		if e.ToolCallDelta == nil || !w.openTools[e.ToolCallDelta.Index] {
 			return fmt.Errorf("tool call delta at position %d names no open tool block (%d)", pos, eventIndex(ev))
 		}
@@ -296,10 +296,10 @@ func (w *streamDisciplineWalker) end() error {
 type pluginStreamState struct {
 	lp *loadedPlugin
 	// accepted is every event this plugin saw as input, in call order.
-	accepted []*pbv2.StreamEvent
+	accepted []*pbv1.StreamEvent
 	// returned is every event this plugin produced — after pass-mode replay
 	// substitution — in the same call order as accepted.
-	returned []*pbv2.StreamEvent
+	returned []*pbv1.StreamEvent
 	// scopeStart is the accepted-buffer offset where the current scope began;
 	// reset at every scope close. It only decides whether a final policy
 	// transaction is pending; returned completeness is checked independently.
@@ -365,7 +365,7 @@ func (vs *streamVerifierState) terminate(kind, plugin string, index int32, scope
 // independently committed writes. The returned walker is snapshotted first;
 // on pass-mode failure every candidate event is discarded and the accepted
 // input is replayed exactly once from the original state.
-func (vs *streamVerifierState) acceptPluginOutputs(pvs *pluginStreamState, accepted *pbv2.StreamEvent, emitted []*pbv2.StreamEvent) ([]*pbv2.StreamEvent, *StreamTerminalError) {
+func (vs *streamVerifierState) acceptPluginOutputs(pvs *pluginStreamState, accepted *pbv1.StreamEvent, emitted []*pbv1.StreamEvent) ([]*pbv1.StreamEvent, *StreamTerminalError) {
 	if vs.terminal != nil {
 		return nil, vs.terminal
 	}
@@ -380,7 +380,7 @@ func (vs *streamVerifierState) acceptPluginOutputs(pvs *pluginStreamState, accep
 				return nil, vs.terminate(streamTerminalPlugin, pvs.lp.manifest.Name, eventIndex(accepted), 0, rerr)
 			}
 			pvs.walker = replay
-			return []*pbv2.StreamEvent{accepted}, nil
+			return []*pbv1.StreamEvent{accepted}, nil
 		}
 	}
 	pvs.walker = candidate
@@ -390,8 +390,8 @@ func (vs *streamVerifierState) acceptPluginOutputs(pvs *pluginStreamState, accep
 // acceptPluginOutput is the single-event form retained for the focused state
 // tests and for callers that have no fan-out. Real HookResult handling uses
 // acceptPluginOutputs so the whole EmitEvents action remains atomic.
-func (vs *streamVerifierState) acceptPluginOutput(pvs *pluginStreamState, accepted, emitted *pbv2.StreamEvent) (*pbv2.StreamEvent, *StreamTerminalError) {
-	got, term := vs.acceptPluginOutputs(pvs, accepted, []*pbv2.StreamEvent{emitted})
+func (vs *streamVerifierState) acceptPluginOutput(pvs *pluginStreamState, accepted, emitted *pbv1.StreamEvent) (*pbv1.StreamEvent, *StreamTerminalError) {
+	got, term := vs.acceptPluginOutputs(pvs, accepted, []*pbv1.StreamEvent{emitted})
 	if term != nil {
 		return nil, term
 	}
@@ -404,8 +404,8 @@ func (vs *streamVerifierState) acceptPluginOutput(pvs *pluginStreamState, accept
 // acceptPassThrough commits an accepted event through the same snapshotting
 // path as a HookResult. This keeps encode/decode/trap pass-mode recovery from
 // having a different (and potentially state-poisoning) transition path.
-func (vs *streamVerifierState) acceptPassThrough(pvs *pluginStreamState, ev *pbv2.StreamEvent) (*pbv2.StreamEvent, *StreamTerminalError) {
-	got, term := vs.acceptPluginOutputs(pvs, ev, []*pbv2.StreamEvent{ev})
+func (vs *streamVerifierState) acceptPassThrough(pvs *pluginStreamState, ev *pbv1.StreamEvent) (*pbv1.StreamEvent, *StreamTerminalError) {
+	got, term := vs.acceptPluginOutputs(pvs, ev, []*pbv1.StreamEvent{ev})
 	if term != nil {
 		return nil, term
 	}
@@ -417,9 +417,9 @@ func (vs *streamVerifierState) acceptPassThrough(pvs *pluginStreamState, ev *pbv
 
 // isScopeCloseEvent reports whether an accepted-side event closes a scope:
 // a content-block stop (tool or non-tool) or the message stop.
-func isScopeCloseEvent(ev *pbv2.StreamEvent) bool {
+func isScopeCloseEvent(ev *pbv1.StreamEvent) bool {
 	switch ev.Event.(type) {
-	case *pbv2.StreamEvent_ContentBlockStop, *pbv2.StreamEvent_MessageStop:
+	case *pbv1.StreamEvent_ContentBlockStop, *pbv1.StreamEvent_MessageStop:
 		return true
 	}
 	return false
@@ -475,17 +475,17 @@ func (vs *streamVerifierState) checkScope(pvs *pluginStreamState, scope int) err
 }
 
 // eventIndex returns the block index an event names, or -1.
-func eventIndex(ev *pbv2.StreamEvent) int32 {
+func eventIndex(ev *pbv1.StreamEvent) int32 {
 	switch e := ev.Event.(type) {
-	case *pbv2.StreamEvent_ContentBlockStart:
+	case *pbv1.StreamEvent_ContentBlockStart:
 		if e.ContentBlockStart != nil {
 			return e.ContentBlockStart.Index
 		}
-	case *pbv2.StreamEvent_ContentBlockStop:
+	case *pbv1.StreamEvent_ContentBlockStop:
 		if e.ContentBlockStop != nil {
 			return e.ContentBlockStop.Index
 		}
-	case *pbv2.StreamEvent_ToolCallDelta:
+	case *pbv1.StreamEvent_ToolCallDelta:
 		if e.ToolCallDelta != nil {
 			return e.ToolCallDelta.Index
 		}
@@ -617,7 +617,7 @@ func (pp *PluginPipeline) runOnStreamChunk(ctx context.Context, reqID uint64, ch
 		}
 	}
 
-	current := []*pbv2.StreamEvent{hostEvent}
+	current := []*pbv1.StreamEvent{hostEvent}
 	for pi, lp := range pp.streamPlugins {
 		var pvs *pluginStreamState
 		callAcceptedStart := 0
@@ -628,7 +628,7 @@ func (pp *PluginPipeline) runOnStreamChunk(ctx context.Context, reqID uint64, ch
 			callReturnedStart = len(pvs.returned)
 			pvs.accepted = append(pvs.accepted, current...)
 		}
-		next := make([]*pbv2.StreamEvent, 0, len(current))
+		next := make([]*pbv1.StreamEvent, 0, len(current))
 		for _, ev := range current {
 			evBytes, err := encodeHookInput(reqID, streamPayload{ev: ev})
 			if err != nil {
@@ -650,7 +650,7 @@ func (pp *PluginPipeline) runOnStreamChunk(ctx context.Context, reqID uint64, ch
 			}
 			var outBytes []byte
 			pp.recordInvocation(reqID, lp.manifest.Name)
-			if err := lp.plugin.CallRequest(ctx, pbv2.Hook_HOOK_ON_STREAM_CHUNK, reqID, evBytes, &outBytes); err != nil {
+			if err := lp.plugin.CallRequest(ctx, pbv1.Hook_HOOK_ON_STREAM_CHUNK, reqID, evBytes, &outBytes); err != nil {
 				log.Printf("[plugin] %s run_on_stream_chunk: %v", lp.manifest.Name, err)
 				if lp.failureMode == "block" {
 					return nil, fmt.Errorf("plugin %s blocked stream after failure: %w", lp.manifest.Name, err)
@@ -667,7 +667,7 @@ func (pp *PluginPipeline) runOnStreamChunk(ctx context.Context, reqID uint64, ch
 				}
 				continue
 			}
-			res, err := decodeHookResult(outBytes, pbv2.Hook_HOOK_ON_STREAM_CHUNK)
+			res, err := decodeHookResult(outBytes, pbv1.Hook_HOOK_ON_STREAM_CHUNK)
 			if err != nil {
 				log.Printf("[plugin] %s run_on_stream_chunk: invalid result: %v", lp.manifest.Name, err)
 				if lp.failureMode == "block" {
@@ -752,7 +752,7 @@ func (pp *PluginPipeline) runOnStreamChunk(ctx context.Context, reqID uint64, ch
 				if isScopeCloseEvent(pvs.accepted[i]) {
 					acceptedCloses++
 				}
-				if _, ok := pvs.accepted[i].Event.(*pbv2.StreamEvent_MessageStop); ok {
+				if _, ok := pvs.accepted[i].Event.(*pbv1.StreamEvent_MessageStop); ok {
 					acceptedMessageStop = true
 				}
 			}
@@ -760,7 +760,7 @@ func (pp *PluginPipeline) runOnStreamChunk(ctx context.Context, reqID uint64, ch
 				if isScopeCloseEvent(pvs.returned[i]) {
 					returnedCloses++
 				}
-				if _, ok := pvs.returned[i].Event.(*pbv2.StreamEvent_MessageStop); ok {
+				if _, ok := pvs.returned[i].Event.(*pbv1.StreamEvent_MessageStop); ok {
 					returnedMessageStop = true
 				}
 			}

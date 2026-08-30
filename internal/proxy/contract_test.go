@@ -23,8 +23,7 @@ var formRenderedProviderFields = []string{
 	"url",
 	"format",
 	"fallback",
-	"api_key_env",
-	"api_key_enc",
+	"auth",
 }
 
 // TestEveryProviderFieldIsRenderedOrPreserved is the highest-value test here.
@@ -190,7 +189,7 @@ func TestFormRenderedFieldsExistInTheDashboard(t *testing.T) {
 
 // dashboardReferences reports whether the SPA reads or writes this field.
 //
-// The SPA uses property access (p.url, off.api_key_env) rather than quoted
+// The SPA uses property access (p.url, prov.auth) rather than quoted
 // keys, so both spellings are accepted — but only as WHOLE identifiers. A plain
 // substring search matched "format" inside formatBytes and "url" inside any
 // href, which is how the first version of this check could not fail; a bare

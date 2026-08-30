@@ -18,7 +18,7 @@ import (
 	"github.com/torana-edge/torana-edge/internal/plugin"
 	"github.com/torana-edge/torana-edge/internal/provider"
 	"github.com/torana-edge/torana-edge/internal/wasm"
-	pbv2 "github.com/torana-edge/torana-plugin-sdk/pb/v2"
+	pbv1 "github.com/torana-edge/torana-plugin-sdk/pb/v1"
 )
 
 // Golden identity values for fixed vectors, computed ONCE at authoring time
@@ -26,14 +26,14 @@ import (
 // composes. The integration boundary pins these literals so the test cannot
 // drift together with an implementation that recomputes the algorithm.
 const (
-	goldenIdentityT1Tm1U1 = "auth-identity-v2:sha256:d66d5624f9d2345aac5be659937b7df1c46e50f2372a8cf400c35d2faf3168e6"
-	goldenIdentityT1Tm1U2 = "auth-identity-v2:sha256:fba7180750a73b5c3115d16d8d940a961a774e760a41dc2e4150123d30d92787"
-	goldenIdentityT1Tm2U1 = "auth-identity-v2:sha256:ead017e121a0d1771d13ec5eaaac20efc722e0bb52eeea484ca018b68e5fec7e"
-	goldenIdentityT2Tm1U1 = "auth-identity-v2:sha256:429e6f4918e292906604009704136b39a7eb8342124d6fb5542eaff0dd54f165"
-	goldenDigestTokenA    = "auth-verified-key-v2:sha256:525415c531efe883a60226b69a10c85ec59bb664763c5fac7683f290a28eca5a"
-	goldenDigestTokenB    = "auth-verified-key-v2:sha256:7636ea3ef36095e1002324d2dafcc75774b2162219ad47135d37a0c303e352c5"
+	goldenIdentityT1Tm1U1 = "auth-identity:sha256:d66d5624f9d2345aac5be659937b7df1c46e50f2372a8cf400c35d2faf3168e6"
+	goldenIdentityT1Tm1U2 = "auth-identity:sha256:fba7180750a73b5c3115d16d8d940a961a774e760a41dc2e4150123d30d92787"
+	goldenIdentityT1Tm2U1 = "auth-identity:sha256:ead017e121a0d1771d13ec5eaaac20efc722e0bb52eeea484ca018b68e5fec7e"
+	goldenIdentityT2Tm1U1 = "auth-identity:sha256:429e6f4918e292906604009704136b39a7eb8342124d6fb5542eaff0dd54f165"
+	goldenDigestTokenA    = "auth-verified-key:sha256:525415c531efe883a60226b69a10c85ec59bb664763c5fac7683f290a28eca5a"
+	goldenDigestTokenB    = "auth-verified-key:sha256:7636ea3ef36095e1002324d2dafcc75774b2162219ad47135d37a0c303e352c5"
 
-	// authBundleGrants is the v2 auth manifest's declared permission set,
+	// authBundleGrants is the current ABI auth manifest's declared permission set,
 	// used verbatim for approval-override pipelines (all-or-nothing).
 	authBundleGrants = "env.block_request,env.host_call.verify_virtual_key,env.request_headers,env.set_identity"
 )
@@ -50,7 +50,7 @@ type authEnvOptions struct {
 	failureMode string
 }
 
-// authEnv stands up the REAL server with the REAL v2 auth bundle from the
+// authEnv stands up the REAL server with the REAL current ABI auth bundle from the
 // bundles dir. Lifecycle is deterministic: the wired/unwired runtime is built
 // through the server's own newRuntime, the pipeline is constructed and
 // atomically swapped in (the displaced startup pipeline drained and closed
@@ -473,7 +473,7 @@ func TestAuthIntegrationNoOverrideFallbacks(t *testing.T) {
 	}{
 		"wired not configured refusal": {
 			opts: authEnvOptions{wire: func() wasm.ExtensionResult {
-				return wasm.ExtensionRefusal(pbv2.ErrorCode_ERROR_CODE_NOT_CONFIGURED, "%s", "not wired")
+				return wasm.ExtensionRefusal(pbv1.ErrorCode_ERROR_CODE_NOT_CONFIGURED, "%s", "not wired")
 			}},
 			headers:     map[string]string{"Authorization": "Bearer sk-torana-nc"},
 			wantID:      "Bearer sk-torana-nc",
@@ -491,7 +491,7 @@ func TestAuthIntegrationNoOverrideFallbacks(t *testing.T) {
 		},
 		"advisory unavailable": {
 			opts: authEnvOptions{wire: func() wasm.ExtensionResult {
-				return wasm.ExtensionRefusal(pbv2.ErrorCode_ERROR_CODE_UNAVAILABLE, "%s", "down")
+				return wasm.ExtensionRefusal(pbv1.ErrorCode_ERROR_CODE_UNAVAILABLE, "%s", "down")
 			}},
 			headers:     map[string]string{"Authorization": "Bearer sk-torana-down"},
 			wantID:      "Bearer sk-torana-down",
@@ -675,7 +675,7 @@ func TestAuthIntegrationContractRefusalFailureModes(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			post, identities, verdicts, verifier, limiterKeys, hits := authEnv(t, authEnvOptions{
 				wire: func() wasm.ExtensionResult {
-					return wasm.ExtensionRefusal(pbv2.ErrorCode_ERROR_CODE_PERMISSION_DENIED, "%s", "denied")
+					return wasm.ExtensionRefusal(pbv1.ErrorCode_ERROR_CODE_PERMISSION_DENIED, "%s", "denied")
 				},
 				failureMode: mode,
 			})

@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	pb "github.com/torana-edge/torana-plugin-sdk/pb/v2"
+	pb "github.com/torana-edge/torana-plugin-sdk/pb/v1"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -46,7 +46,7 @@ func TestIntentRawABI(t *testing.T) {
 			ParametersJson: []byte(`{"type":"object","properties":{"path":{"type":"string"}}}`),
 		}},
 	}
-	// v2 wraps the payload in a HookInput and the reply in a HookResult.
+	// current ABI wraps the payload in a HookInput and the reply in a HookResult.
 	input, _ := proto.Marshal(&pb.HookInput{
 		RequestId: 1,
 		Payload:   &pb.HookInput_ChatRequest{ChatRequest: req},

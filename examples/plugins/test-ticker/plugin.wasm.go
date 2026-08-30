@@ -5,7 +5,7 @@ import (
 	"fmt"
 
 	sdk "github.com/torana-edge/torana-plugin-sdk"
-	pb "github.com/torana-edge/torana-plugin-sdk/pb/v2"
+	pb "github.com/torana-edge/torana-plugin-sdk/pb/v1"
 )
 
 func main() {}
@@ -24,7 +24,7 @@ func init() {
 			tick.TickId, tick.UnixMillis, tick.IntervalMs))
 
 		// Tick 1 reports nothing to do, so the idle path is exercised by a real
-		// guest rather than only in unit tests. v2 spells it TickIdle: v1
+		// guest rather than only in unit tests. current ABI spells it TickIdle: v1
 		// needed a `handled` flag because an all-defaults TickResult marshals
 		// to zero bytes.
 		if tick.TickId == 1 {

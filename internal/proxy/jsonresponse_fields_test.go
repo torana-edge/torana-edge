@@ -15,7 +15,7 @@ import (
 //
 // `id` and `finish_reason` were hard-coded empty in the hook input, so a plugin
 // received typed fields the provider had actually supplied and saw nothing.
-// That is the same hostile silence v2 removes on the write side — a field that
+// That is the same hostile silence current ABI removes on the write side — a field that
 // exists, validates, and is always empty.
 func TestObservedResponseFactsAreExtractedPerFormat(t *testing.T) {
 	for _, tc := range []struct {

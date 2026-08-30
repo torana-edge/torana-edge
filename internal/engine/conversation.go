@@ -7,7 +7,7 @@ import (
 	"hash"
 	"strconv"
 
-	pb "github.com/torana-edge/torana-plugin-sdk/pb/v2"
+	pb "github.com/torana-edge/torana-plugin-sdk/pb/v1"
 )
 
 // Conversation and cache-prefix identity.

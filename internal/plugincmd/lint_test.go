@@ -26,7 +26,7 @@ const validManifest = `{
   "id": "test/example",
   "name": "example",
   "version": "0.1.0",
-  "abi_version": "v2",
+  "abi_version": "v1",
   "failure_mode": "pass",
   "description": "test fixture",
   "hooks": [{"name": "run_before_request"}],
@@ -39,7 +39,7 @@ func manifestWith(hooks, permissions string) string {
   "id": "test/example",
   "name": "example",
   "version": "0.1.0",
-  "abi_version": "v2",
+  "abi_version": "v1",
   "failure_mode": "pass",
   "description": "test fixture",
   "hooks": [` + hooks + `],
@@ -92,7 +92,7 @@ import (
 	"context"
 
 	sdk "github.com/torana-edge/torana-plugin-sdk"
-	pb "github.com/torana-edge/torana-plugin-sdk/pb/v2"
+	pb "github.com/torana-edge/torana-plugin-sdk/pb/v1"
 )
 
 func main() {
@@ -114,7 +114,7 @@ import (
 	"context"
 
 	sdk "github.com/torana-edge/torana-plugin-sdk"
-	pb "github.com/torana-edge/torana-plugin-sdk/pb/v2"
+	pb "github.com/torana-edge/torana-plugin-sdk/pb/v1"
 )
 
 func main() {}
@@ -144,7 +144,7 @@ import (
 	"context"
 
 	sdk "github.com/torana-edge/torana-plugin-sdk"
-	pb "github.com/torana-edge/torana-plugin-sdk/pb/v2"
+	pb "github.com/torana-edge/torana-plugin-sdk/pb/v1"
 )
 
 func main() {}
@@ -170,7 +170,7 @@ import (
 	"context"
 
 	sdk "github.com/torana-edge/torana-plugin-sdk"
-	pb "github.com/torana-edge/torana-plugin-sdk/pb/v2"
+	pb "github.com/torana-edge/torana-plugin-sdk/pb/v1"
 )
 
 func main() {
@@ -208,7 +208,7 @@ import (
 	"context"
 
 	sdk "github.com/torana-edge/torana-plugin-sdk"
-	pb "github.com/torana-edge/torana-plugin-sdk/pb/v2"
+	pb "github.com/torana-edge/torana-plugin-sdk/pb/v1"
 )
 
 func init() {
@@ -240,7 +240,7 @@ import (
 	"context"
 
 	sdk "github.com/torana-edge/torana-plugin-sdk"
-	pb "github.com/torana-edge/torana-plugin-sdk/pb/v2"
+	pb "github.com/torana-edge/torana-plugin-sdk/pb/v1"
 )
 
 func init() {
@@ -276,7 +276,7 @@ import (
 	"context"
 
 	sdk "github.com/torana-edge/torana-plugin-sdk"
-	pb "github.com/torana-edge/torana-plugin-sdk/pb/v2"
+	pb "github.com/torana-edge/torana-plugin-sdk/pb/v1"
 )
 
 func init() {
@@ -311,7 +311,7 @@ import (
 	"context"
 
 	sdk "github.com/torana-edge/torana-plugin-sdk"
-	pb "github.com/torana-edge/torana-plugin-sdk/pb/v2"
+	pb "github.com/torana-edge/torana-plugin-sdk/pb/v1"
 )
 
 func init() {
@@ -338,7 +338,7 @@ import (
 	"context"
 
 	sdk "github.com/torana-edge/torana-plugin-sdk"
-	pb "github.com/torana-edge/torana-plugin-sdk/pb/v2"
+	pb "github.com/torana-edge/torana-plugin-sdk/pb/v1"
 )
 
 func main() {}
@@ -363,7 +363,7 @@ import (
 	"context"
 
 	sdk "github.com/torana-edge/torana-plugin-sdk"
-	pb "github.com/torana-edge/torana-plugin-sdk/pb/v2"
+	pb "github.com/torana-edge/torana-plugin-sdk/pb/v1"
 )
 
 func main() {}
@@ -391,7 +391,7 @@ import (
 	"context"
 
 	sdk "github.com/torana-edge/torana-plugin-sdk"
-	pb "github.com/torana-edge/torana-plugin-sdk/pb/v2"
+	pb "github.com/torana-edge/torana-plugin-sdk/pb/v1"
 )
 
 func main() {}
@@ -421,7 +421,7 @@ import (
 	"context"
 
 	sdk "github.com/torana-edge/torana-plugin-sdk"
-	pb "github.com/torana-edge/torana-plugin-sdk/pb/v2"
+	pb "github.com/torana-edge/torana-plugin-sdk/pb/v1"
 )
 
 func main() {}
@@ -448,7 +448,7 @@ func TestLintAttributesPrivateAndSharedCacheHelpersSeparately(t *testing.T) {
 import (
     "context"
     sdk "github.com/torana-edge/torana-plugin-sdk"
-    pb "github.com/torana-edge/torana-plugin-sdk/pb/v2"
+    pb "github.com/torana-edge/torana-plugin-sdk/pb/v1"
 )
 func main() {}
 func init() {
@@ -477,7 +477,7 @@ import (
 	"context"
 
 	sdk "github.com/torana-edge/torana-plugin-sdk"
-	pb "github.com/torana-edge/torana-plugin-sdk/pb/v2"
+	pb "github.com/torana-edge/torana-plugin-sdk/pb/v1"
 )
 
 func main() {}
@@ -506,7 +506,7 @@ import (
 	"context"
 
 	sdk "github.com/torana-edge/torana-plugin-sdk"
-	pb "github.com/torana-edge/torana-plugin-sdk/pb/v2"
+	pb "github.com/torana-edge/torana-plugin-sdk/pb/v1"
 )
 
 func main() {}
@@ -533,7 +533,7 @@ import (
 	"context"
 
 	sdk "github.com/torana-edge/torana-plugin-sdk"
-	pb "github.com/torana-edge/torana-plugin-sdk/pb/v2"
+	pb "github.com/torana-edge/torana-plugin-sdk/pb/v1"
 )
 
 func main() {}
@@ -561,7 +561,7 @@ import (
 	"context"
 
 	sdk "github.com/torana-edge/torana-plugin-sdk"
-	pb "github.com/torana-edge/torana-plugin-sdk/pb/v2"
+	pb "github.com/torana-edge/torana-plugin-sdk/pb/v1"
 )
 
 func main() {}
@@ -588,7 +588,7 @@ import (
 	"context"
 
 	sdk "github.com/torana-edge/torana-plugin-sdk"
-	pb "github.com/torana-edge/torana-plugin-sdk/pb/v2"
+	pb "github.com/torana-edge/torana-plugin-sdk/pb/v1"
 )
 
 func main() {}
@@ -633,7 +633,7 @@ import (
 	"context"
 
 	"github.com/torana-edge/torana-plugin-sdk"
-	pb "github.com/torana-edge/torana-plugin-sdk/pb/v2"
+	pb "github.com/torana-edge/torana-plugin-sdk/pb/v1"
 )
 
 func main() {}
@@ -681,7 +681,7 @@ import (
 	"context"
 
 	sdk "github.com/torana-edge/torana-plugin-sdk"
-	pb "github.com/torana-edge/torana-plugin-sdk/pb/v2"
+	pb "github.com/torana-edge/torana-plugin-sdk/pb/v1"
 )
 
 func Register() {
@@ -730,7 +730,7 @@ import (
 	"context"
 
 	sdk "github.com/torana-edge/torana-plugin-sdk"
-	pb "github.com/torana-edge/torana-plugin-sdk/pb/v2"
+	pb "github.com/torana-edge/torana-plugin-sdk/pb/v1"
 )
 
 func main() {}
@@ -771,7 +771,7 @@ func Scratch() { _ = sdk.StateSet("k", "v") }
 		t.Fatal(err)
 	}
 	withImport := strings.Replace(string(raw),
-		`pb "github.com/torana-edge/torana-plugin-sdk/pb/v2"`,
+		`pb "github.com/torana-edge/torana-plugin-sdk/pb/v1"`,
 		"\"github.com/torana-edge/torana-plugin-sdk/pb\"\n\n\t\"example.com/plug/tools/unused\"", 1)
 	withImport = strings.Replace(withImport,
 		`sdk.Log("hi", sdk.LogLevelInfo)`,
@@ -792,7 +792,7 @@ import (
 	"context"
 
 	sdk "github.com/torana-edge/torana-plugin-sdk"
-	pb "github.com/torana-edge/torana-plugin-sdk/pb/v2"
+	pb "github.com/torana-edge/torana-plugin-sdk/pb/v1"
 )
 
 func main() {}
@@ -837,7 +837,7 @@ import (
 	"context"
 
 	sdk "github.com/torana-edge/torana-plugin-sdk"
-	pb "github.com/torana-edge/torana-plugin-sdk/pb/v2"
+	pb "github.com/torana-edge/torana-plugin-sdk/pb/v1"
 )
 
 func main() {}
@@ -863,7 +863,7 @@ import (
 	"context"
 
 	sdk "github.com/torana-edge/torana-plugin-sdk"
-	pb "github.com/torana-edge/torana-plugin-sdk/pb/v2"
+	pb "github.com/torana-edge/torana-plugin-sdk/pb/v1"
 )
 
 func main() {}
@@ -891,7 +891,7 @@ import (
 	"context"
 
 	sdk "github.com/torana-edge/torana-plugin-sdk"
-	pb "github.com/torana-edge/torana-plugin-sdk/pb/v2"
+	pb "github.com/torana-edge/torana-plugin-sdk/pb/v1"
 )
 
 func main() {}
@@ -918,7 +918,7 @@ import (
 	"context"
 
 	sdk "github.com/torana-edge/torana-plugin-sdk"
-	pb "github.com/torana-edge/torana-plugin-sdk/pb/v2"
+	pb "github.com/torana-edge/torana-plugin-sdk/pb/v1"
 )
 
 func main() {}
@@ -947,7 +947,7 @@ import (
 	"context"
 
 	sdk "github.com/torana-edge/torana-plugin-sdk"
-	pb "github.com/torana-edge/torana-plugin-sdk/pb/v2"
+	pb "github.com/torana-edge/torana-plugin-sdk/pb/v1"
 )
 
 func main() {}
@@ -978,7 +978,7 @@ import (
 	"context"
 
 	sdk "github.com/torana-edge/torana-plugin-sdk"
-	pb "github.com/torana-edge/torana-plugin-sdk/pb/v2"
+	pb "github.com/torana-edge/torana-plugin-sdk/pb/v1"
 )
 
 func main() {}
@@ -1008,7 +1008,7 @@ import (
 	"context"
 
 	sdk "github.com/torana-edge/torana-plugin-sdk"
-	pb "github.com/torana-edge/torana-plugin-sdk/pb/v2"
+	pb "github.com/torana-edge/torana-plugin-sdk/pb/v1"
 )
 
 func main() {}
@@ -1039,7 +1039,7 @@ import (
 	"context"
 
 	sdk "github.com/torana-edge/torana-plugin-sdk"
-	pb "github.com/torana-edge/torana-plugin-sdk/pb/v2"
+	pb "github.com/torana-edge/torana-plugin-sdk/pb/v1"
 )
 
 func main() {}
@@ -1078,7 +1078,7 @@ import (
 	"context"
 
 	sdk "github.com/torana-edge/torana-plugin-sdk"
-	pb "github.com/torana-edge/torana-plugin-sdk/pb/v2"
+	pb "github.com/torana-edge/torana-plugin-sdk/pb/v1"
 )
 
 func main() {}
@@ -1133,7 +1133,7 @@ import (
 	"context"
 
 	sdk "github.com/torana-edge/torana-plugin-sdk"
-	pb "github.com/torana-edge/torana-plugin-sdk/pb/v2"
+	pb "github.com/torana-edge/torana-plugin-sdk/pb/v1"
 )
 
 func main() {}
@@ -1178,7 +1178,7 @@ import (
 	"context"
 
 	sdk "github.com/torana-edge/torana-plugin-sdk"
-	pb "github.com/torana-edge/torana-plugin-sdk/pb/v2"
+	pb "github.com/torana-edge/torana-plugin-sdk/pb/v1"
 )
 
 func main() {}
@@ -1210,7 +1210,7 @@ import (
 	"context"
 
 	sdk "github.com/torana-edge/torana-plugin-sdk"
-	pb "github.com/torana-edge/torana-plugin-sdk/pb/v2"
+	pb "github.com/torana-edge/torana-plugin-sdk/pb/v1"
 )
 
 func main() {}
@@ -1243,7 +1243,7 @@ import (
 	"context"
 
 	sdk "github.com/torana-edge/torana-plugin-sdk"
-	pb "github.com/torana-edge/torana-plugin-sdk/pb/v2"
+	pb "github.com/torana-edge/torana-plugin-sdk/pb/v1"
 )
 
 type custom struct{}
@@ -1282,7 +1282,7 @@ import (
 	"context"
 
 	sdk "github.com/torana-edge/torana-plugin-sdk"
-	pb "github.com/torana-edge/torana-plugin-sdk/pb/v2"
+	pb "github.com/torana-edge/torana-plugin-sdk/pb/v1"
 )
 
 func seed() {
@@ -1330,7 +1330,7 @@ import (
 	"context"
 
 	sdk "github.com/torana-edge/torana-plugin-sdk"
-	pb "github.com/torana-edge/torana-plugin-sdk/pb/v2"
+	pb "github.com/torana-edge/torana-plugin-sdk/pb/v1"
 )
 
 func init() {
@@ -1358,7 +1358,7 @@ import (
 	"context"
 
 	sdk "github.com/torana-edge/torana-plugin-sdk"
-	pb "github.com/torana-edge/torana-plugin-sdk/pb/v2"
+	pb "github.com/torana-edge/torana-plugin-sdk/pb/v1"
 )
 
 func init() {

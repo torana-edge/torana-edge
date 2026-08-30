@@ -3,7 +3,7 @@
   "id": "torana-test/test-forge-host-meta",
   "name": "test-forge-host-meta",
   "version": "0.1.0",
-  "abi_version": "v2",
+  "abi_version": "v1",
   "minimum_torana_version": "0.1.0",
   "failure_mode": "pass",
   "description": "Test fixture: holds every request write grant (so the host takes the all-grants fast path) and still forges host-owned torana_meta_json, which no grant authorises",

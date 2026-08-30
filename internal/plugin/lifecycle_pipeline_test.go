@@ -34,7 +34,7 @@ func TestPipelineRejectionUnloadsPlugin(t *testing.T) {
 	  "id": "torana-test/test-inert-a",
 	  "name": "test-inert-a",
 	  "version": "0.1.0",
-	  "abi_version": "v2",
+	  "abi_version": "v1",
 	  "failure_mode": "pass",
 	  "hooks": [{"name": "run_before_request"}, {"name": "run_on_tick"}],
 	  "permissions": []

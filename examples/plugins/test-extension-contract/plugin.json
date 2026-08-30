@@ -3,7 +3,7 @@
   "id": "torana-test/test-extension-contract",
   "name": "test-extension-contract",
   "version": "0.1.0",
-  "abi_version": "v2",
+  "abi_version": "v1",
   "failure_mode": "pass",
   "description": "Test fixture: drives the REAL extension-callback surface (egress, cache pricing, offload, record-savings) through the production composition and records what the guest observed",
   "hooks": [

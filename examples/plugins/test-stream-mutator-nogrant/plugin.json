@@ -3,7 +3,7 @@
   "id": "torana-test/test-stream-mutator-nogrant",
   "name": "test-stream-mutator-nogrant",
   "version": "0.1.0",
-  "abi_version": "v2",
+  "abi_version": "v1",
   "failure_mode": "pass",
   "description": "Negative fixture: rewrites streamed assistant text without a write grant",
   "hooks": [

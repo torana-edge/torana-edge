@@ -11,7 +11,7 @@ import (
 
 	sdk "github.com/torana-edge/torana-plugin-sdk"
 	"github.com/torana-edge/torana-plugin-sdk/outboundpolicy"
-	pb "github.com/torana-edge/torana-plugin-sdk/pb/v2"
+	pb "github.com/torana-edge/torana-plugin-sdk/pb/v1"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protoreflect"
 	"google.golang.org/protobuf/reflect/protoregistry"
@@ -26,7 +26,7 @@ import (
 // position-keyed tool-result text values (ir.tool_results.write). Everything
 // else is host-owned and immutable under plugin
 // mutation — torana_meta_json is host state (the host writes _provider and
-// friends into it, and under v2 verdicts are host calls rather than keys in
+// friends into it, and under current ABI verdicts are host calls rather than keys in
 // it), so changing it is a violation outright, with no grant that permits it.
 //
 // Bound provider signatures (Message.thinking_signature,
@@ -752,7 +752,7 @@ const (
 // covered-kind model allows (mirrors the SDK's pinnedRepeatedContentTarget
 // in outboundpolicy): its digest is the SDK's total
 // ToolResultContentFingerprint, never a host re-implementation.
-const pinnedRepeatedContentTarget = "torana.v2.RequestToolResultBlock.content"
+const pinnedRepeatedContentTarget = "torana.v1.RequestToolResultBlock.content"
 
 // classifyCoveredRef validates a covered SameMessage field against the
 // typed covered-field-kind model and returns its framing class. Repeated
@@ -791,13 +791,13 @@ type trailSignatureRef struct {
 // flat model used — the vocabulary operators and tests already know.
 func requestTokenName(msg protoreflect.FullName) string {
 	switch msg {
-	case "torana.v2.RequestTextBlock":
+	case "torana.v1.RequestTextBlock":
 		return "content_signature"
-	case "torana.v2.RequestThinkingBlock":
+	case "torana.v1.RequestThinkingBlock":
 		return "thinking_signature"
-	case "torana.v2.RequestToolUseBlock":
+	case "torana.v1.RequestToolUseBlock":
 		return "tool_use_signature"
-	case "torana.v2.RequestTrailingSignatureBlock":
+	case "torana.v1.RequestTrailingSignatureBlock":
 		return "trailing_signature"
 	}
 	return string(msg)
@@ -1302,7 +1302,7 @@ const hostOwnedField = "<host-owned>"
 // wrong: the first version silently ignored provider_extensions_json,
 // safety_settings_json, torana_meta_json and ToolDef.strict. A hand-written
 // mutation list cannot prove coverage — it only demonstrates the cases someone
-// thought of. Reflection over the descriptor can, and will fail the moment v2
+// thought of. Reflection over the descriptor can, and will fail the moment current ABI
 // adds a field to the contract without deciding which grant governs it.
 var chatRequestFieldSections = map[string]string{
 	"model":                    "ir.model.write",
@@ -1411,7 +1411,7 @@ var toolResultCacheBreakpointFieldSections = map[string]string{
 	"marker_json": "ir.cache_control.write",
 }
 
-// toolCallFieldSections governs the response-side ToolCall shape, which v2
+// toolCallFieldSections governs the response-side ToolCall shape, which current ABI
 // keeps for streaming/response domains. It never appears in a request; the
 // request-domain tool-call carrier is RequestToolUseBlock.
 var toolCallFieldSections = map[string]string{

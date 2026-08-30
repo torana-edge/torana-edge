@@ -3,7 +3,7 @@
   "id": "torana-test/test-stream-reindex-nogrant",
   "name": "test-stream-reindex-nogrant",
   "version": "0.1.0",
-  "abi_version": "v2",
+  "abi_version": "v1",
   "failure_mode": "pass",
   "description": "Negative fixture: reindexes transformed stream boundaries without ir.stream.write",
   "hooks": [

@@ -28,6 +28,10 @@ func Run(args []string, stdout, stderr io.Writer) error {
 		return listPlugins(args[2:], stdout)
 	case "remove", "rm":
 		return removePlugin(args[2:], stdout)
+	case "files":
+		return listPluginFiles(args[2:], stdout)
+	case "file":
+		return pluginFile(args[2:], stdout)
 	case "help", "-h", "--help":
 		Usage(stdout)
 		return nil
@@ -46,6 +50,10 @@ func Usage(w io.Writer) {
 	_, _ = fmt.Fprintln(w, "  torana plugin install <source>... [--official] [--dir plugins]")
 	_, _ = fmt.Fprintln(w, "  torana plugin list [--dir plugins]")
 	_, _ = fmt.Fprintln(w, "  torana plugin remove <name>... [--dir plugins]")
+	_, _ = fmt.Fprintln(w, "  torana plugin files <name>")
+	_, _ = fmt.Fprintln(w, "  torana plugin file read <name> <logical-path>")
+	_, _ = fmt.Fprintln(w, "  torana plugin file tail <name> <logical-path> [--follow]")
+	_, _ = fmt.Fprintln(w, "  torana plugin file purge <name>")
 	_, _ = fmt.Fprintln(w, "")
 	_, _ = fmt.Fprintln(w, "A source is a local path or a repository path:")
 	_, _ = fmt.Fprintln(w, "  torana plugin install ./my-plugin")
@@ -72,7 +80,7 @@ func Usage(w io.Writer) {
 // that is actually published: a scaffold naming an unreleased tag produces a
 // project that cannot build.
 const (
-	ScaffoldSDKVersion = "v0.2.1-0.20260818001307-692f4a000394"
+	ScaffoldSDKVersion = "v0.2.1-0.20260830212027-1c1e1dd734e9"
 	// scaffoldGoVersion tracks the SDK's own go directive. A scaffolded module
 	// declaring an OLDER Go version than its dependency requires fails to build
 	// with "module requires go >= x", which is the same class of unbuildable
@@ -111,7 +119,7 @@ import (
 	"context"
 
 	sdk "github.com/torana-edge/torana-plugin-sdk"
-	pb "github.com/torana-edge/torana-plugin-sdk/pb/v2"
+	pb "github.com/torana-edge/torana-plugin-sdk/pb/v1"
 )
 
 // main is empty on purpose. Under -buildmode=c-shared the runtime calls
@@ -133,7 +141,7 @@ func init() {
   "id": "local/%s",
   "name": "%s",
   "version": "0.1.0",
-  "abi_version": "v2",
+  "abi_version": "v1",
   "description": "A local Torana plugin",
   "hooks": [
     {"name": "run_before_request"}
@@ -195,7 +203,7 @@ func buildPlugin(args []string, stdout, stderr io.Writer) error {
 	// with no handler, never. Reporting a WASM build as successful when the
 	// bundle cannot load, or loads and does nothing, is the wrong answer to
 	// give an author.
-	// Rust has an ABI-v2 SDK and the installed bundle receives the same host
+	// Rust has an ABI-v1 SDK and the installed bundle receives the same host
 	// validation, but the Go AST capability-attribution linter does not pretend
 	// it can understand Rust source.
 	if language == pluginGo {

@@ -7,13 +7,13 @@ import (
 	"testing"
 
 	"github.com/torana-edge/torana-edge/internal/cache"
-	pbv2 "github.com/torana-edge/torana-plugin-sdk/pb/v2"
+	pbv1 "github.com/torana-edge/torana-plugin-sdk/pb/v1"
 	"google.golang.org/protobuf/proto"
 )
 
 // httpEcho dispatches a direct RunOnHTTPRequest to the named fixture and
 // decodes the JSON echo.
-func httpEcho(t *testing.T, pp *PluginPipeline, pluginName string, httpReq *pbv2.HttpRequest, raw map[string][]string) map[string]any {
+func httpEcho(t *testing.T, pp *PluginPipeline, pluginName string, httpReq *pbv1.HttpRequest, raw map[string][]string) map[string]any {
 	t.Helper()
 	resp, err := pp.RunOnHTTPRequest(context.Background(), 1, pluginName, httpReq, raw)
 	if err != nil {
@@ -70,7 +70,7 @@ func TestHTTPDispatchBypassIsFiltered(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			// A pre-populated headers_json the caller tried to smuggle in.
-			httpReq := &pbv2.HttpRequest{
+			httpReq := &pbv1.HttpRequest{
 				Method:      "GET",
 				Path:        "/echo",
 				HeadersJson: []byte(`{"Authorization":["Bearer smuggled"],"Cookie":["session=secret"]}`),
@@ -102,7 +102,7 @@ func TestHTTPDispatchCallerRequestIsUntouched(t *testing.T) {
 	requireWASM(t, fixturesDir+"/test-http-server-nogrant/plugin.wasm")
 	pp := newTestPipeline(t, fixturesDir, []string{"test-http-server-nogrant"})
 
-	httpReq := &pbv2.HttpRequest{
+	httpReq := &pbv1.HttpRequest{
 		Method:      "GET",
 		Path:        "/echo",
 		HeadersJson: []byte(`{"Authorization":["Bearer smuggled"]}`),
@@ -155,7 +155,7 @@ func TestHTTPDispatchSnapshotIsImmuneToCallerMutation(t *testing.T) {
 	store := &httpMutatingStore{Store: cache.NewLocalCache(0), raw: raw}
 	pp := newTestPipelineWith(t, fixturesDir, []string{"test-http-server"}, store, nil)
 
-	httpReq := &pbv2.HttpRequest{Method: "GET", Path: "/echo"}
+	httpReq := &pbv1.HttpRequest{Method: "GET", Path: "/echo"}
 	echo := httpEcho(t, pp, "test-http-server", httpReq, raw)
 	headers := echoHeaders(t, echo)
 	if got := headers["Authorization"]; len(got) != 1 || got[0] != "Bearer sk-torana-real" {

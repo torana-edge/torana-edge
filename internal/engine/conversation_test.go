@@ -5,7 +5,7 @@ import (
 	"google.golang.org/protobuf/proto"
 	"testing"
 
-	pb "github.com/torana-edge/torana-plugin-sdk/pb/v2"
+	pb "github.com/torana-edge/torana-plugin-sdk/pb/v1"
 )
 
 func mustMeta(m map[string]any) OptionalJSONObject {

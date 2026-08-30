@@ -3,7 +3,7 @@
   "id": "torana-test/test-metrics",
   "name": "test-metrics",
   "version": "0.1.0",
-  "abi_version": "v2",
+  "abi_version": "v1",
   "minimum_torana_version": "0.1.0",
   "failure_mode": "pass",
   "description": "Test fixture: emits one metric of each type with labels, and mutates nothing",

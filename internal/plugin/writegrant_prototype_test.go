@@ -12,7 +12,7 @@ import (
 	"google.golang.org/protobuf/reflect/protoreflect"
 	"google.golang.org/protobuf/reflect/protoregistry"
 
-	pb "github.com/torana-edge/torana-plugin-sdk/pb/v2"
+	pb "github.com/torana-edge/torana-plugin-sdk/pb/v1"
 )
 
 // Mutation suite for the production write-grant verifier (writegrant.go).
@@ -51,7 +51,7 @@ type changedSections struct {
 	toolResults bool
 	// hostOwned marks a change to a field no grant covers, because the host
 	// owns it. torana_meta_json is the only one: the host writes _provider and
-	// friends into it, and under v2 verdicts are host calls rather than keys in
+	// friends into it, and under current ABI verdicts are host calls rather than keys in
 	// it, so a plugin has no legitimate reason to alter it at all. There is no
 	// grant that permits this — it is a violation outright.
 	hostOwned bool

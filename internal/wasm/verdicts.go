@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"sync"
 
-	pbv2 "github.com/torana-edge/torana-plugin-sdk/pb/v2"
+	pbv1 "github.com/torana-edge/torana-plugin-sdk/pb/v1"
 )
 
 // Plugin verdicts for one request.
@@ -50,7 +50,7 @@ type IdentityVerdict struct {
 	Identity string
 }
 
-func (v *RequestVerdicts) setBlock(plugin string, a *pbv2.BlockRequestArgs) {
+func (v *RequestVerdicts) setBlock(plugin string, a *pbv1.BlockRequestArgs) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	// First block wins. A later plugin cannot soften or restate another's

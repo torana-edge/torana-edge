@@ -85,7 +85,7 @@ local automation from a browser request that omitted same-origin metadata.
 
 The embedded control plane is localhost-only. Torana rejects:
 
-- non-loopback callers, including callers presenting legacy remote tokens;
+- every non-loopback caller;
 - DNS-rebinding requests with a foreign `Host`;
 - cross-origin mutation requests.
 

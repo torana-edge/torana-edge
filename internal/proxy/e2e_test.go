@@ -132,8 +132,11 @@ func TestE2E(t *testing.T) {
 
 	// --- mock offload provider ---------------------------------------------
 	offload := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if got := r.Header.Get("Authorization"); got != "Bearer sk-e2e" {
-			t.Errorf("offload Authorization: got %q want Bearer sk-e2e", got)
+		// Host-originated plugin work has no caller whose credential it may
+		// borrow. This provider is explicitly unauthenticated; the caller's
+		// request credential must not cross into the offload request.
+		if got := r.Header.Get("Authorization"); got != "" {
+			t.Errorf("caller Authorization leaked to offload: %q", got)
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.Write([]byte(`{
@@ -158,7 +161,7 @@ func TestE2E(t *testing.T) {
 				},
 				"anth": {URL: upstream.URL + "/anthropic", Format: "anthropic"},
 				"cheap": {
-					URL: offload.URL, Format: "openai",
+					URL: offload.URL, Format: "openai", Auth: provider.ProviderAuth{Mode: "none"},
 					Pricing: map[string]economics.ModelPricing{
 						"cheap-1": {InputUSDPerMTok: &freeRate, OutputUSDPerMTok: &freeRate},
 					},
@@ -1023,8 +1026,8 @@ func TestObservationalStreamingHookIsOnTheClientCriticalPath(t *testing.T) {
 
 	cfg := Config{Port: "0", Providers: provider.Config{
 		Providers: map[string]provider.Provider{
-			"oai":   {URL: upstream.URL, Format: "openai"},
-			"latch": {URL: latch.URL, Format: "openai"},
+			"oai":   {URL: upstream.URL, Format: "openai", Auth: provider.ProviderAuth{Mode: "none"}},
+			"latch": {URL: latch.URL, Format: "openai", Auth: provider.ProviderAuth{Mode: "none"}},
 		},
 		Plugins: provider.PluginsConfig{
 			Dir: fixturesDir, Order: []string{"test-slow-after-stream"},

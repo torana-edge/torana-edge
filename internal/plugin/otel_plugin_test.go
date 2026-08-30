@@ -33,7 +33,7 @@ func TestMetricFixtureEmitMetricABI(t *testing.T) {
 	if _, err := pp.RunBeforeRequest(context.Background(), 1, chat, nil); err != nil {
 		t.Fatalf("run_before_request: %v", err)
 	}
-	// v2 hands run_after_response a real ChatResponse. Passing the request
+	// current ABI hands run_after_response a real ChatResponse. Passing the request
 	// here was the v1 defect: a plugin reading the assistant's reply got the
 	// conversation history instead.
 	content := "hi"

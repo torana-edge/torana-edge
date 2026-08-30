@@ -15,7 +15,7 @@ import (
 	"github.com/torana-edge/torana-edge/internal/engine"
 	"github.com/torana-edge/torana-edge/internal/pluginstate"
 	"github.com/torana-edge/torana-edge/internal/wasm"
-	pb "github.com/torana-edge/torana-plugin-sdk/pb/v2"
+	pb "github.com/torana-edge/torana-plugin-sdk/pb/v1"
 )
 
 // The warmer spends money on a timer, so these tests are less about it working

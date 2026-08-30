@@ -5,10 +5,10 @@ import (
 	"testing"
 
 	"github.com/torana-edge/torana-edge/internal/engine"
-	pb "github.com/torana-edge/torana-plugin-sdk/pb/v2"
+	pb "github.com/torana-edge/torana-plugin-sdk/pb/v1"
 )
 
-// v2 replaced three v1 events with the canonical content-block sequence. The
+// current ABI replaced three v1 events with the canonical content-block sequence. The
 // mapping is pinned here because it is not a rename: a tool call now opens a
 // content block, and the block index is what binds its deltas and its signature
 // to it. Getting it wrong produces a stream that decodes cleanly and means
@@ -237,7 +237,7 @@ func convertWithKinds(t *testing.T, events []*pb.StreamEvent) []engine.StreamEve
 	return out
 }
 
-// The v2 topology must survive engine → pb → engine exactly: a text/thinking
+// The current ABI topology must survive engine → pb → engine exactly: a text/thinking
 // block's start AND stop keep their kind and index, and a tool block's stop
 // stays ToolCallEnd (never BlockStop). This is the lossless round trip the
 // host needs for plugin-passed streams.
@@ -412,7 +412,7 @@ func TestBlockTopologyRoundTripsPBToEngineToPB(t *testing.T) {
 	}
 }
 
-// A stop whose index names no currently open block is INVALID per the v2 ABI:
+// A stop whose index names no currently open block is INVALID per the plugin ABI:
 // the stop binds by index alone, and a stop that does not close the open block
 // at its index is unknown topology. The conversion must error, never guess a
 // kind (the pre-fix stateless path mapped every such stop to ToolCallEnd).
@@ -446,7 +446,7 @@ func TestStopAfterCloseErrors(t *testing.T) {
 }
 
 // A second start at an index that already has an open block (duplicate/reused
-// topology) is invalid: the v2 wire binds deltas and stops by index, so two
+// topology) is invalid: the current ABI wire binds deltas and stops by index, so two
 // starts on one index would interleave two blocks' events.
 func TestDuplicateStartErrors(t *testing.T) {
 	tracker := &BlockKindTracker{}

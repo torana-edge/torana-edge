@@ -24,14 +24,14 @@ Torana Edge is intentionally unversioned. For a reproducible deployment, replace
 `main` with a reviewed commit SHA before building. No WASM plugins are bundled.
 The supplied configuration is deliberately minimal and enables none.
 
-First prove the proxy works without plugins. Export the key named by the example
-configuration and, for a disposable evaluation, keep managed state in the
-checkout:
+First prove the proxy works without plugins. The example providers use caller
+authentication, so the harness or curl supplies the provider credential on each
+request. For a disposable evaluation, keep managed state in the checkout:
 
 ```bash
 export DEEPSEEK_API_KEY='replace-with-your-deepseek-key'
 export TORANA_DATA_DIR="$PWD/.torana-data"
-./torana
+./torana --debug
 ```
 
 Keep that terminal open. In another terminal:
@@ -40,13 +40,15 @@ Keep that terminal open. In another terminal:
 curl --fail-with-body http://127.0.0.1:8080/health
 
 curl --fail-with-body http://127.0.0.1:8080/provider/deepseek/v1/chat/completions \
+  -H "Authorization: Bearer ${DEEPSEEK_API_KEY}" \
   -H 'Content-Type: application/json' \
   -d '{"model":"deepseek-v4-flash","messages":[{"role":"user","content":"Reply with exactly: Torana works"}]}'
 ```
 
 The health endpoint returns `{"status":"ok"}` and the second command returns a
-normal provider response. The provider key comes from the environment named by
-`api_key_env`; it is never stored in `config.json`.
+normal provider response. The debug terminal prints safe request-received and
+request-completed lines, so you can verify the traffic really crossed Torana;
+it never logs headers or bodies.
 
 ## Configure
 
@@ -58,12 +60,12 @@ The copied `config.example.json` is equivalent to this minimal seed:
     "deepseek": {
       "url": "https://api.deepseek.com",
       "format": "openai",
-      "api_key_env": "DEEPSEEK_API_KEY"
+      "auth": {"mode": "caller"}
     },
     "deepseek-anthropic": {
       "url": "https://api.deepseek.com/anthropic",
       "format": "anthropic",
-      "api_key_env": "DEEPSEEK_API_KEY"
+      "auth": {"mode": "caller"}
     }
   },
   "plugins": {
@@ -76,6 +78,13 @@ The copied `config.example.json` is equivalent to this minimal seed:
   }
 }
 ```
+
+`limits.concurrency` is the maximum number of simultaneous upstream requests
+per identity; `limits.rpm` is a per-identity token bucket refilled over one
+minute. Set either value to `0` to disable that limit. Standard JSON does not
+support comments, so the shipped file stays directly parseable; these field
+descriptions and the hints in the local Control Plane are the annotated
+reference.
 
 On the first run, Torana imports this seed into its managed store at
 `~/.config/torana/config.json` (or `$TORANA_DATA_DIR/config.json`). After that,
@@ -94,14 +103,20 @@ The empty order is intentional: discovered plugins are not implicitly trusted
 or enabled. After the plugin-free request above succeeds, install one plugin:
 
 ```bash
-./torana plugin install github.com/torana-edge/torana-plugins/plugins/schema_translator
+./torana plugin install https://github.com/torana-edge/torana-plugins/tree/main/plugins/usage_logger
 ./torana plugin list
 ```
 
 Open the Control Plane, inspect and approve the exact bundle digest and requested
-capability subset, then enable `schema_translator` and put it in the pipeline.
-Send the request again and confirm it appears as an invoked plugin in the live
-feed. Installation alone never grants or enables anything.
+capability subset and private-file budget, then enable `usage_logger` and put it
+in the pipeline. Send a few requests and inspect its content-free output:
+
+```bash
+./torana plugin file tail usage_logger usage.jsonl
+```
+
+Installation alone never grants or enables anything, and the plugin cannot pick
+an OS path: Torana owns the private rotating file.
 
 Once that lifecycle is clear, the maintained set can be built locally with:
 
@@ -130,15 +145,41 @@ JSON error envelopes, mutation guidance, and plugin-contributed operations.
 > See [COMPACTION.md](COMPACTION.md).
 
 
-### Credentials on a fallback
+### Provider authentication and fallbacks
 
-A fallback provider needs a credential of its own. When Torana retries against
-one it **removes the caller's** — that key was issued to a different vendor, so
-forwarding it would leak it, and it would not authenticate there anyway.
+Every provider has one authentication mode:
 
-Give the fallback an `api_key_env`. If the fallback is genuinely the
-same vendor (a second endpoint or region) or a local server that ignores
-credentials, set `"forward_caller_credential": true` on it instead.
+- `caller` (the default when omitted) forwards the immutable credential
+  captured when that request entered Torana;
+- `credential` resolves a named Torana credential and injects it host-side;
+- `none` sends no credential, useful for a local model.
+
+The full source, slot, refresh, and custom-provider model is documented in
+[Credentials](CREDENTIALS.md).
+
+Configure a reusable environment-backed credential without putting its value in
+JSON:
+
+```bash
+./torana credential set fallback-api-key --env FALLBACK_API_KEY
+```
+
+Credential commands update durable configuration. If Torana is already
+running, restart it after adding, changing, or deleting a credential so the
+new provider registry and local encrypted store are loaded together.
+
+Then set the fallback provider's auth to
+`{"mode":"credential","credential":"fallback-api-key"}`.
+
+A cross-vendor fallback should use a credential of its own. Torana always
+removes credentials already installed on the mutable upstream request, then
+rebuilds authentication from the fallback's explicit mode. Use `caller` on a
+fallback only when the operator has deliberately established that it accepts
+the original caller credential (for example, another endpoint of the same
+vendor).
+
+If the fallback is a local server that ignores credentials, use `none`. Torana
+never guesses that two providers may share a credential.
 
 A fallback with neither is reported at startup, because the failure it produces
 otherwise is a 401 from a provider you never called directly.

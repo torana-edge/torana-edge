@@ -5,7 +5,7 @@ import (
 	"fmt"
 
 	"github.com/torana-edge/torana-plugin-sdk/outboundpolicy"
-	pbv2 "github.com/torana-edge/torana-plugin-sdk/pb/v2"
+	pbv1 "github.com/torana-edge/torana-plugin-sdk/pb/v1"
 )
 
 // validateResponseReplacement reports whether a plugin's replace_response output
@@ -14,7 +14,7 @@ import (
 // host-owned (fixed across accepted->output), tool_calls has fixed cardinality
 // with positional correspondence, and the observed provider/host facts (model,
 // id, usage, signatures) are immutable under plugin mutation.
-func validateResponseReplacement(current, replacement *pbv2.ChatResponse) error {
+func validateResponseReplacement(current, replacement *pbv1.ChatResponse) error {
 	// A nil replacement is pass-through, not a mutation to judge.
 	if replacement == nil {
 		return nil
@@ -109,7 +109,7 @@ func validateResponseReplacement(current, replacement *pbv2.ChatResponse) error 
 // rejected: rejection is whole-replacement, normalization is whole-replacement.
 // A guest that already cleared the token after a covered mutation is untouched
 // (nothing to normalize); forged/added/dropped tokens never reach here.
-func clearStaleSignatures(current, replacement *pbv2.ChatResponse) {
+func clearStaleSignatures(current, replacement *pbv1.ChatResponse) {
 	if current.Message == nil || replacement.Message == nil {
 		return
 	}
@@ -136,7 +136,7 @@ func clearStaleSignatures(current, replacement *pbv2.ChatResponse) {
 // is itself a host-owned fact (a plugin inventing a Usage block where the
 // provider reported none forges the bill). The unexported proto runtime state
 // makes reflect.DeepEqual unreliable here.
-func usageEqual(current, replacement *pbv2.Usage) bool {
+func usageEqual(current, replacement *pbv1.Usage) bool {
 	if current == nil || replacement == nil {
 		return current == replacement
 	}

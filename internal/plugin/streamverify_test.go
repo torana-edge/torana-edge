@@ -7,7 +7,7 @@ import (
 	"testing"
 
 	"github.com/torana-edge/torana-plugin-sdk/outboundpolicy"
-	pbv2 "github.com/torana-edge/torana-plugin-sdk/pb/v2"
+	pbv1 "github.com/torana-edge/torana-plugin-sdk/pb/v1"
 )
 
 // Tests for the stream signature verifier (Migration B part 2a, reworked per
@@ -30,89 +30,89 @@ import (
 const streamSigA = "provider-token-a"
 const streamSigB = "provider-token-b"
 
-func textDelta(s string) *pbv2.StreamEvent {
-	return &pbv2.StreamEvent{Event: &pbv2.StreamEvent_TextDelta{TextDelta: s}}
+func textDelta(s string) *pbv1.StreamEvent {
+	return &pbv1.StreamEvent{Event: &pbv1.StreamEvent_TextDelta{TextDelta: s}}
 }
 
-func thinkingDelta(s string) *pbv2.StreamEvent {
-	return &pbv2.StreamEvent{Event: &pbv2.StreamEvent_ThinkingDelta{ThinkingDelta: s}}
+func thinkingDelta(s string) *pbv1.StreamEvent {
+	return &pbv1.StreamEvent{Event: &pbv1.StreamEvent_ThinkingDelta{ThinkingDelta: s}}
 }
 
-func signatureDelta(sig string) *pbv2.StreamEvent {
-	return &pbv2.StreamEvent{Event: &pbv2.StreamEvent_SignatureDelta{SignatureDelta: sig}}
+func signatureDelta(sig string) *pbv1.StreamEvent {
+	return &pbv1.StreamEvent{Event: &pbv1.StreamEvent_SignatureDelta{SignatureDelta: sig}}
 }
 
-func streamErrorEvent() *pbv2.StreamEvent {
-	return &pbv2.StreamEvent{Event: &pbv2.StreamEvent_Error{
-		Error: &pbv2.StreamError{Code: 13, Message: "upstream failure"},
+func streamErrorEvent() *pbv1.StreamEvent {
+	return &pbv1.StreamEvent{Event: &pbv1.StreamEvent_Error{
+		Error: &pbv1.StreamError{Code: 13, Message: "upstream failure"},
 	}}
 }
 
-func toolStartEvent(index int32, id, name string) *pbv2.StreamEvent {
-	return &pbv2.StreamEvent{Event: &pbv2.StreamEvent_ContentBlockStart{
-		ContentBlockStart: &pbv2.ContentBlockStart{
+func toolStartEvent(index int32, id, name string) *pbv1.StreamEvent {
+	return &pbv1.StreamEvent{Event: &pbv1.StreamEvent_ContentBlockStart{
+		ContentBlockStart: &pbv1.ContentBlockStart{
 			Index: index,
-			Block: &pbv2.ContentBlockStart_ToolCall{ToolCall: &pbv2.ToolCallRef{Id: id, Name: name}},
+			Block: &pbv1.ContentBlockStart_ToolCall{ToolCall: &pbv1.ToolCallRef{Id: id, Name: name}},
 		},
 	}}
 }
 
-func toolBlock(index int32, id, name, signature, args string) []*pbv2.StreamEvent {
+func toolBlock(index int32, id, name, signature, args string) []*pbv1.StreamEvent {
 	return toolBlockDeltas(index, id, name, signature, args)
 }
 
 // toolBlockDeltas renders one signed tool block whose arguments arrive as the
 // given fragments, so tests can vary framing independently of content — same
 // helper the SDK fixtures use.
-func toolBlockDeltas(index int32, id, name, signature string, args ...string) []*pbv2.StreamEvent {
-	out := []*pbv2.StreamEvent{{Event: &pbv2.StreamEvent_ContentBlockStart{
-		ContentBlockStart: &pbv2.ContentBlockStart{
+func toolBlockDeltas(index int32, id, name, signature string, args ...string) []*pbv1.StreamEvent {
+	out := []*pbv1.StreamEvent{{Event: &pbv1.StreamEvent_ContentBlockStart{
+		ContentBlockStart: &pbv1.ContentBlockStart{
 			Index: index,
-			Block: &pbv2.ContentBlockStart_ToolCall{ToolCall: &pbv2.ToolCallRef{
+			Block: &pbv1.ContentBlockStart_ToolCall{ToolCall: &pbv1.ToolCallRef{
 				Id: id, Name: name, Signature: signature,
 			}},
 		},
 	}}}
 	for _, a := range args {
-		out = append(out, &pbv2.StreamEvent{Event: &pbv2.StreamEvent_ToolCallDelta{
-			ToolCallDelta: &pbv2.ToolCallDelta{Index: index, ArgumentsDelta: a},
+		out = append(out, &pbv1.StreamEvent{Event: &pbv1.StreamEvent_ToolCallDelta{
+			ToolCallDelta: &pbv1.ToolCallDelta{Index: index, ArgumentsDelta: a},
 		}})
 	}
-	return append(out, &pbv2.StreamEvent{Event: &pbv2.StreamEvent_ContentBlockStop{
-		ContentBlockStop: &pbv2.ContentBlockStop{Index: index},
+	return append(out, &pbv1.StreamEvent{Event: &pbv1.StreamEvent_ContentBlockStop{
+		ContentBlockStop: &pbv1.ContentBlockStop{Index: index},
 	}})
 }
 
 // textBlock renders an explicit text block with ContentBlockStart/Stop
 // boundaries — the ABI-conformant representation of text/thinking content.
-func textBlock(index int32, texts ...string) []*pbv2.StreamEvent {
-	out := []*pbv2.StreamEvent{{Event: &pbv2.StreamEvent_ContentBlockStart{
-		ContentBlockStart: &pbv2.ContentBlockStart{
+func textBlock(index int32, texts ...string) []*pbv1.StreamEvent {
+	out := []*pbv1.StreamEvent{{Event: &pbv1.StreamEvent_ContentBlockStart{
+		ContentBlockStart: &pbv1.ContentBlockStart{
 			Index: index,
-			Block: &pbv2.ContentBlockStart_Text{Text: &pbv2.TextBlock{}},
+			Block: &pbv1.ContentBlockStart_Text{Text: &pbv1.TextBlock{}},
 		},
 	}}}
 	for _, t := range texts {
 		out = append(out, textDelta(t))
 	}
-	return append(out, &pbv2.StreamEvent{Event: &pbv2.StreamEvent_ContentBlockStop{
-		ContentBlockStop: &pbv2.ContentBlockStop{Index: index},
+	return append(out, &pbv1.StreamEvent{Event: &pbv1.StreamEvent_ContentBlockStop{
+		ContentBlockStop: &pbv1.ContentBlockStop{Index: index},
 	}})
 }
 
 // thinkingBlock renders an explicit thinking block.
-func thinkingBlock(index int32, texts ...string) []*pbv2.StreamEvent {
-	out := []*pbv2.StreamEvent{{Event: &pbv2.StreamEvent_ContentBlockStart{
-		ContentBlockStart: &pbv2.ContentBlockStart{
+func thinkingBlock(index int32, texts ...string) []*pbv1.StreamEvent {
+	out := []*pbv1.StreamEvent{{Event: &pbv1.StreamEvent_ContentBlockStart{
+		ContentBlockStart: &pbv1.ContentBlockStart{
 			Index: index,
-			Block: &pbv2.ContentBlockStart_Thinking{Thinking: &pbv2.ThinkingBlock{}},
+			Block: &pbv1.ContentBlockStart_Thinking{Thinking: &pbv1.ThinkingBlock{}},
 		},
 	}}}
 	for _, t := range texts {
 		out = append(out, thinkingDelta(t))
 	}
-	return append(out, &pbv2.StreamEvent{Event: &pbv2.StreamEvent_ContentBlockStop{
-		ContentBlockStop: &pbv2.ContentBlockStop{Index: index},
+	return append(out, &pbv1.StreamEvent{Event: &pbv1.StreamEvent_ContentBlockStop{
+		ContentBlockStop: &pbv1.ContentBlockStop{Index: index},
 	}})
 }
 
@@ -135,28 +135,28 @@ func isAcceptedErr(err error) bool {
 // INSIDE it — a current-block binding over the typed text (the signature
 // closes the block's span, matching the provider-part model). sig may be ""
 // to render an explicit empty clear marker.
-func signedTextBlock(index int32, text, sig string) []*pbv2.StreamEvent {
-	out := []*pbv2.StreamEvent{{Event: &pbv2.StreamEvent_ContentBlockStart{
-		ContentBlockStart: &pbv2.ContentBlockStart{
-			Index: index, Block: &pbv2.ContentBlockStart_Text{Text: &pbv2.TextBlock{}},
+func signedTextBlock(index int32, text, sig string) []*pbv1.StreamEvent {
+	out := []*pbv1.StreamEvent{{Event: &pbv1.StreamEvent_ContentBlockStart{
+		ContentBlockStart: &pbv1.ContentBlockStart{
+			Index: index, Block: &pbv1.ContentBlockStart_Text{Text: &pbv1.TextBlock{}},
 		},
 	}}}
 	out = append(out, textDelta(text))
 	out = append(out, signatureDelta(sig))
-	return append(out, &pbv2.StreamEvent{Event: &pbv2.StreamEvent_ContentBlockStop{
-		ContentBlockStop: &pbv2.ContentBlockStop{Index: index},
+	return append(out, &pbv1.StreamEvent{Event: &pbv1.StreamEvent_ContentBlockStop{
+		ContentBlockStop: &pbv1.ContentBlockStop{Index: index},
 	}})
 }
 
-func messageStopEvent(finishReason string) *pbv2.StreamEvent {
-	return &pbv2.StreamEvent{Event: &pbv2.StreamEvent_MessageStop{
-		MessageStop: &pbv2.MessageStop{FinishReason: finishReason},
+func messageStopEvent(finishReason string) *pbv1.StreamEvent {
+	return &pbv1.StreamEvent{Event: &pbv1.StreamEvent_MessageStop{
+		MessageStop: &pbv1.MessageStop{FinishReason: finishReason},
 	}}
 }
 
-func usageEvent() *pbv2.StreamEvent {
-	return &pbv2.StreamEvent{Event: &pbv2.StreamEvent_Usage{
-		Usage: &pbv2.Usage{InputTokens: 1, OutputTokens: 1},
+func usageEvent() *pbv1.StreamEvent {
+	return &pbv1.StreamEvent{Event: &pbv1.StreamEvent_Usage{
+		Usage: &pbv1.Usage{InputTokens: 1, OutputTokens: 1},
 	}}
 }
 
@@ -208,7 +208,7 @@ func TestVerifyStreamConformsToSDKStreamFixtures(t *testing.T) {
 	for _, f := range fx {
 		var sawStarts []int32
 		for _, ev := range f.Accepted {
-			if s, ok := ev.Event.(*pbv2.StreamEvent_ContentBlockStart); ok && s.ContentBlockStart.GetToolCall() != nil {
+			if s, ok := ev.Event.(*pbv1.StreamEvent_ContentBlockStart); ok && s.ContentBlockStart.GetToolCall() != nil {
 				sawStarts = append(sawStarts, s.ContentBlockStart.Index)
 			}
 		}
@@ -227,11 +227,11 @@ func TestVerifyStreamConformsToSDKStreamFixtures(t *testing.T) {
 // while the real scope functions classify every fixture as Want.
 func TestStreamVerifyWrongScopesFailTheFixtures(t *testing.T) {
 	// Pools every delta regardless of block index.
-	poolsIndexes := func(events []*pbv2.StreamEvent, index int32) toolCallScope {
+	poolsIndexes := func(events []*pbv1.StreamEvent, index int32) toolCallScope {
 		s := toolCallScopeOf(events, index)
 		s.arguments = ""
 		for _, ev := range events {
-			if d, ok := ev.Event.(*pbv2.StreamEvent_ToolCallDelta); ok {
+			if d, ok := ev.Event.(*pbv1.StreamEvent_ToolCallDelta); ok {
 				s.arguments += d.ToolCallDelta.ArgumentsDelta
 			}
 		}
@@ -240,11 +240,11 @@ func TestStreamVerifyWrongScopesFailTheFixtures(t *testing.T) {
 	// Signs only the arguments, omitting id and name from the scope.
 	argsOnly := func(a, b toolCallScope) bool { return a.arguments != b.arguments }
 	// Compares the first fragment instead of the assembled arguments.
-	firstFragment := func(events []*pbv2.StreamEvent, index int32) toolCallScope {
+	firstFragment := func(events []*pbv1.StreamEvent, index int32) toolCallScope {
 		s := toolCallScopeOf(events, index)
 		s.arguments = ""
 		for _, ev := range events {
-			if d, ok := ev.Event.(*pbv2.StreamEvent_ToolCallDelta); ok && d.ToolCallDelta.Index == index {
+			if d, ok := ev.Event.(*pbv1.StreamEvent_ToolCallDelta); ok && d.ToolCallDelta.Index == index {
 				s.arguments = d.ToolCallDelta.ArgumentsDelta
 				break
 			}
@@ -254,7 +254,7 @@ func TestStreamVerifyWrongScopesFailTheFixtures(t *testing.T) {
 
 	for _, w := range []struct {
 		name    string
-		scope   func([]*pbv2.StreamEvent, int32) toolCallScope
+		scope   func([]*pbv1.StreamEvent, int32) toolCallScope
 		changed func(a, b toolCallScope) bool
 	}{
 		{"pools deltas across block indexes", poolsIndexes, toolCallContentChanged},
@@ -294,7 +294,7 @@ func TestStreamVerifyWrongScopesFailTheFixtures(t *testing.T) {
 func TestScanStreamSignaturesPinsTheScopeWalk(t *testing.T) {
 	// Boundary-less host representation: a bare run of text deltas closed by
 	// a signature is one current binding over the typed text.
-	v := scanStreamSignatures([]*pbv2.StreamEvent{textDelta("t1"), textDelta("t2"), signatureDelta(streamSigA)})
+	v := scanStreamSignatures([]*pbv1.StreamEvent{textDelta("t1"), textDelta("t2"), signatureDelta(streamSigA)})
 	if len(v.bindings) != 1 || v.bindings[0].kind != sigBindingCurrent {
 		t.Fatalf("boundary-less run: bindings = %+v, want one current binding", v.bindings)
 	}
@@ -303,18 +303,18 @@ func TestScanStreamSignaturesPinsTheScopeWalk(t *testing.T) {
 	}
 
 	// Thinking accumulates in its own slot: same bytes, different kind.
-	v = scanStreamSignatures([]*pbv2.StreamEvent{thinkingDelta("A"), signatureDelta(streamSigA)})
+	v = scanStreamSignatures([]*pbv1.StreamEvent{thinkingDelta("A"), signatureDelta(streamSigA)})
 	if len(v.bindings) != 1 || v.bindings[0].content.text != "" || v.bindings[0].content.thinking != "A" {
 		t.Fatalf("thinking run: bindings = %+v, want typed thinking A", v.bindings)
 	}
-	v = scanStreamSignatures([]*pbv2.StreamEvent{textDelta("A"), signatureDelta(streamSigA)})
+	v = scanStreamSignatures([]*pbv1.StreamEvent{textDelta("A"), signatureDelta(streamSigA)})
 	if len(v.bindings) != 1 || v.bindings[0].content.text != "A" || v.bindings[0].content.thinking != "" {
 		t.Fatalf("text run: bindings = %+v, want typed text A", v.bindings)
 	}
 
 	// A span can carry BOTH kinds (boundary-less host IR interleaves them);
 	// the record keeps the slots apart.
-	v = scanStreamSignatures([]*pbv2.StreamEvent{textDelta("x"), thinkingDelta("y"), signatureDelta(streamSigA)})
+	v = scanStreamSignatures([]*pbv1.StreamEvent{textDelta("x"), thinkingDelta("y"), signatureDelta(streamSigA)})
 	if len(v.bindings) != 1 {
 		t.Fatalf("mixed span: got %d bindings, want 1", len(v.bindings))
 	}
@@ -324,7 +324,7 @@ func TestScanStreamSignaturesPinsTheScopeWalk(t *testing.T) {
 
 	// A signature ends the span it covers; a later part's text opens a fresh
 	// span (the provider part model).
-	v = scanStreamSignatures([]*pbv2.StreamEvent{
+	v = scanStreamSignatures([]*pbv1.StreamEvent{
 		textDelta("p1"), signatureDelta(streamSigA), textDelta("p2"), signatureDelta(streamSigB),
 	})
 	if len(v.bindings) != 2 {
@@ -339,13 +339,13 @@ func TestScanStreamSignaturesPinsTheScopeWalk(t *testing.T) {
 
 	// ABI-conformant: signature inside the open block is current; signature
 	// after the stop is trailing over the closed content.
-	open := []*pbv2.StreamEvent{
-		{Event: &pbv2.StreamEvent_ContentBlockStart{ContentBlockStart: &pbv2.ContentBlockStart{
-			Index: 0, Block: &pbv2.ContentBlockStart_Text{Text: &pbv2.TextBlock{}},
+	open := []*pbv1.StreamEvent{
+		{Event: &pbv1.StreamEvent_ContentBlockStart{ContentBlockStart: &pbv1.ContentBlockStart{
+			Index: 0, Block: &pbv1.ContentBlockStart_Text{Text: &pbv1.TextBlock{}},
 		}}},
 		textDelta("a"),
 		signatureDelta(streamSigA),
-		{Event: &pbv2.StreamEvent_ContentBlockStop{ContentBlockStop: &pbv2.ContentBlockStop{Index: 0}}},
+		{Event: &pbv1.StreamEvent_ContentBlockStop{ContentBlockStop: &pbv1.ContentBlockStop{Index: 0}}},
 	}
 	v = scanStreamSignatures(open)
 	if len(v.bindings) != 1 || v.bindings[0].kind != sigBindingCurrent || v.bindings[0].content.text != "a" {
@@ -385,11 +385,11 @@ func TestScanStreamSignaturesPinsTheScopeWalk(t *testing.T) {
 	if len(v.bindings) != 1 || v.bindings[0].kind != sigBindingUnbound {
 		t.Fatalf("sig after tool-call-only content: %+v, want unbound", v.bindings)
 	}
-	v = scanStreamSignatures([]*pbv2.StreamEvent{signatureDelta(streamSigA)})
+	v = scanStreamSignatures([]*pbv1.StreamEvent{signatureDelta(streamSigA)})
 	if len(v.bindings) != 1 || v.bindings[0].kind != sigBindingUnbound {
 		t.Fatalf("leading sig: %+v, want unbound", v.bindings)
 	}
-	v = scanStreamSignatures([]*pbv2.StreamEvent{toolStartEvent(0, "c1", "read_file"), signatureDelta(streamSigA)})
+	v = scanStreamSignatures([]*pbv1.StreamEvent{toolStartEvent(0, "c1", "read_file"), signatureDelta(streamSigA)})
 	if len(v.bindings) != 1 || v.bindings[0].kind != sigBindingUnbound {
 		t.Fatalf("sig inside open tool block: %+v, want unbound", v.bindings)
 	}
@@ -399,8 +399,8 @@ func TestScanStreamSignaturesPinsTheScopeWalk(t *testing.T) {
 // is a typed record, so identical bytes in different kinds MUST differ.
 // Carrying a token from text "A" to thinking "A" (or vice versa) is stale.
 func TestStreamVerifyTypedScopes(t *testing.T) {
-	textSigned := []*pbv2.StreamEvent{textDelta("A"), signatureDelta(streamSigA)}
-	thinkingSigned := []*pbv2.StreamEvent{thinkingDelta("A"), signatureDelta(streamSigA)}
+	textSigned := []*pbv1.StreamEvent{textDelta("A"), signatureDelta(streamSigA)}
+	thinkingSigned := []*pbv1.StreamEvent{thinkingDelta("A"), signatureDelta(streamSigA)}
 
 	t.Run("identical text re-emission is intact", func(t *testing.T) {
 		if err := verifyStream(textSigned, textSigned, noGrants); err != nil {
@@ -425,14 +425,14 @@ func TestStreamVerifyTypedScopes(t *testing.T) {
 		}
 	})
 	t.Run("token cleared across the kind boundary is allowed", func(t *testing.T) {
-		returned := []*pbv2.StreamEvent{thinkingDelta("A")}
+		returned := []*pbv1.StreamEvent{thinkingDelta("A")}
 		if err := verifyStream(textSigned, returned, noGrants); err != nil {
 			t.Fatalf("cleared token over rewritten kind rejected: %v", err)
 		}
 	})
 	t.Run("kind swap within one span is stale", func(t *testing.T) {
-		accepted := []*pbv2.StreamEvent{textDelta("x"), thinkingDelta("y"), signatureDelta(streamSigA)}
-		returned := []*pbv2.StreamEvent{textDelta("y"), thinkingDelta("x"), signatureDelta(streamSigA)}
+		accepted := []*pbv1.StreamEvent{textDelta("x"), thinkingDelta("y"), signatureDelta(streamSigA)}
+		returned := []*pbv1.StreamEvent{textDelta("y"), thinkingDelta("x"), signatureDelta(streamSigA)}
 		err := verifyStream(accepted, returned, noGrants)
 		if err == nil || !strings.Contains(err.Error(), "stale") {
 			t.Fatalf("swapped typed slots with token kept: err = %v, want stale", err)
@@ -457,7 +457,7 @@ func TestStreamVerifyTypedScopes(t *testing.T) {
 // deletion/duplication/reuse/reorder cardinality is judged correctly.
 func TestStreamVerifyExactMatchFirst(t *testing.T) {
 	// The round-1 reproduction: the SAME token over two different contents.
-	accepted := []*pbv2.StreamEvent{
+	accepted := []*pbv1.StreamEvent{
 		textDelta("first"), signatureDelta(streamSigA),
 		textDelta("second"), signatureDelta(streamSigA),
 	}
@@ -467,7 +467,7 @@ func TestStreamVerifyExactMatchFirst(t *testing.T) {
 		}
 	})
 	t.Run("repeated token: mutating the second span is stale, not ambiguous", func(t *testing.T) {
-		returned := []*pbv2.StreamEvent{
+		returned := []*pbv1.StreamEvent{
 			textDelta("first"), signatureDelta(streamSigA),
 			textDelta("second changed"), signatureDelta(streamSigA),
 		}
@@ -477,7 +477,7 @@ func TestStreamVerifyExactMatchFirst(t *testing.T) {
 		}
 	})
 	t.Run("repeated token: dropping the second span is a signed-block suppression", func(t *testing.T) {
-		returned := []*pbv2.StreamEvent{textDelta("first"), signatureDelta(streamSigA)}
+		returned := []*pbv1.StreamEvent{textDelta("first"), signatureDelta(streamSigA)}
 		if err := verifyStream(accepted, returned, noGrants); err == nil ||
 			!strings.Contains(err.Error(), streamWriteGrant) {
 			t.Fatalf("second span gone without grant: err = %v, want topology rejection", err)
@@ -487,12 +487,12 @@ func TestStreamVerifyExactMatchFirst(t *testing.T) {
 		}
 	})
 
-	twoSigned := []*pbv2.StreamEvent{
+	twoSigned := []*pbv1.StreamEvent{
 		textDelta("first"), signatureDelta(streamSigA),
 		textDelta("second"), signatureDelta(streamSigB),
 	}
 	t.Run("deletion: removing a signed span suppresses it", func(t *testing.T) {
-		returned := []*pbv2.StreamEvent{textDelta("first"), signatureDelta(streamSigA)}
+		returned := []*pbv1.StreamEvent{textDelta("first"), signatureDelta(streamSigA)}
 		if err := verifyStream(twoSigned, returned, noGrants); err == nil ||
 			!strings.Contains(err.Error(), streamWriteGrant) {
 			t.Fatalf("deleted signed span without grant: err = %v, want topology rejection", err)
@@ -504,8 +504,8 @@ func TestStreamVerifyExactMatchFirst(t *testing.T) {
 	t.Run("duplication: an extra copy of a signed span is added", func(t *testing.T) {
 		// Every accepted occurrence is consumed by an exact match, so the
 		// extra copy has no counterpart: a token appeared where none was.
-		accepted := []*pbv2.StreamEvent{textDelta("first"), signatureDelta(streamSigA)}
-		returned := []*pbv2.StreamEvent{
+		accepted := []*pbv1.StreamEvent{textDelta("first"), signatureDelta(streamSigA)}
+		returned := []*pbv1.StreamEvent{
 			textDelta("first"), signatureDelta(streamSigA),
 			textDelta("first"), signatureDelta(streamSigA),
 		}
@@ -515,7 +515,7 @@ func TestStreamVerifyExactMatchFirst(t *testing.T) {
 		}
 	})
 	t.Run("reuse: applying a spent token to new content is forged", func(t *testing.T) {
-		returned := []*pbv2.StreamEvent{
+		returned := []*pbv1.StreamEvent{
 			textDelta("first"), signatureDelta(streamSigA),
 			textDelta("second"), signatureDelta(streamSigA),
 		}
@@ -525,7 +525,7 @@ func TestStreamVerifyExactMatchFirst(t *testing.T) {
 		}
 	})
 	t.Run("reorder: spans moving order with exact facts intact", func(t *testing.T) {
-		returned := []*pbv2.StreamEvent{
+		returned := []*pbv1.StreamEvent{
 			textDelta("second"), signatureDelta(streamSigB),
 			textDelta("first"), signatureDelta(streamSigA),
 		}
@@ -579,10 +579,10 @@ func TestStreamVerifyReindex(t *testing.T) {
 // even with every grant; an invented UNSIGNED tool block changes cardinality
 // and passes this layer with ir.stream.write.
 func TestStreamVerifyInventedToolBlock(t *testing.T) {
-	accepted := []*pbv2.StreamEvent{textDelta("ok")}
+	accepted := []*pbv1.StreamEvent{textDelta("ok")}
 
 	t.Run("invented unsigned block needs ir.stream.write", func(t *testing.T) {
-		returned := append([]*pbv2.StreamEvent{textDelta("ok")},
+		returned := append([]*pbv1.StreamEvent{textDelta("ok")},
 			toolBlock(0, "call_1", "read_file", "", `{}`)...)
 		if err := verifyStream(accepted, returned, noGrants); err == nil ||
 			!strings.Contains(err.Error(), streamWriteGrant) || !strings.Contains(err.Error(), "0") {
@@ -593,7 +593,7 @@ func TestStreamVerifyInventedToolBlock(t *testing.T) {
 		}
 	})
 	t.Run("invented signed block is added even with every grant", func(t *testing.T) {
-		returned := append([]*pbv2.StreamEvent{textDelta("ok")},
+		returned := append([]*pbv1.StreamEvent{textDelta("ok")},
 			toolBlock(0, "call_1", "read_file", streamSigA, `{}`)...)
 		err := verifyStream(accepted, returned, withEveryGrant)
 		if err == nil {
@@ -613,16 +613,16 @@ func TestStreamVerifyInventedToolBlock(t *testing.T) {
 func TestValidateAcceptedStream(t *testing.T) {
 	valid := []struct {
 		name   string
-		events []*pbv2.StreamEvent
+		events []*pbv1.StreamEvent
 	}{
 		{"empty stream", nil},
-		{"bare text deltas", []*pbv2.StreamEvent{textDelta("hi"), textDelta(" there")}},
-		{"bare text deltas closed by a signature", []*pbv2.StreamEvent{textDelta("hi"), signatureDelta(streamSigA)}},
+		{"bare text deltas", []*pbv1.StreamEvent{textDelta("hi"), textDelta(" there")}},
+		{"bare text deltas closed by a signature", []*pbv1.StreamEvent{textDelta("hi"), signatureDelta(streamSigA)}},
 		{"explicit text block", textBlock(0, "a", "b")},
 		{"explicit thinking block", thinkingBlock(0, "r")},
 		{"signed tool block", toolBlock(0, "call_1", "read_file", streamSigA, `{"path":"/a"}`)},
 		{"interleaved concurrent tools", outboundpolicy.SignatureStreamFixtures()[12].Accepted},
-		{"stream ending with StreamError", []*pbv2.StreamEvent{textDelta("a"), streamErrorEvent()}},
+		{"stream ending with StreamError", []*pbv1.StreamEvent{textDelta("a"), streamErrorEvent()}},
 	}
 	for _, tc := range valid {
 		t.Run("valid: "+tc.name, func(t *testing.T) {
@@ -642,12 +642,12 @@ func TestValidateAcceptedStream(t *testing.T) {
 
 	invalid := []struct {
 		name    string
-		events  []*pbv2.StreamEvent
+		events  []*pbv1.StreamEvent
 		wantMsg string
 	}{
 		{
 			name:    "unbound signature_delta (leading)",
-			events:  []*pbv2.StreamEvent{signatureDelta(streamSigA)},
+			events:  []*pbv1.StreamEvent{signatureDelta(streamSigA)},
 			wantMsg: "no covered content",
 		},
 		{
@@ -659,9 +659,9 @@ func TestValidateAcceptedStream(t *testing.T) {
 		},
 		{
 			name: "missing stop: explicit text block left open",
-			events: []*pbv2.StreamEvent{
-				{Event: &pbv2.StreamEvent_ContentBlockStart{ContentBlockStart: &pbv2.ContentBlockStart{
-					Index: 0, Block: &pbv2.ContentBlockStart_Text{Text: &pbv2.TextBlock{}},
+			events: []*pbv1.StreamEvent{
+				{Event: &pbv1.StreamEvent_ContentBlockStart{ContentBlockStart: &pbv1.ContentBlockStart{
+					Index: 0, Block: &pbv1.ContentBlockStart_Text{Text: &pbv1.TextBlock{}},
 				}}},
 				textDelta("a"),
 			},
@@ -669,14 +669,14 @@ func TestValidateAcceptedStream(t *testing.T) {
 		},
 		{
 			name:    "missing stop: tool block left open",
-			events:  []*pbv2.StreamEvent{toolStartEvent(0, "call_1", "read_file"), {Event: &pbv2.StreamEvent_ToolCallDelta{ToolCallDelta: &pbv2.ToolCallDelta{Index: 0, ArgumentsDelta: `{}`}}}},
+			events:  []*pbv1.StreamEvent{toolStartEvent(0, "call_1", "read_file"), {Event: &pbv1.StreamEvent_ToolCallDelta{ToolCallDelta: &pbv1.ToolCallDelta{Index: 0, ArgumentsDelta: `{}`}}}},
 			wantMsg: "missing ContentBlockStop",
 		},
 		{
 			name: "text delta inside a thinking block",
-			events: []*pbv2.StreamEvent{
-				{Event: &pbv2.StreamEvent_ContentBlockStart{ContentBlockStart: &pbv2.ContentBlockStart{
-					Index: 0, Block: &pbv2.ContentBlockStart_Thinking{Thinking: &pbv2.ThinkingBlock{}},
+			events: []*pbv1.StreamEvent{
+				{Event: &pbv1.StreamEvent_ContentBlockStart{ContentBlockStart: &pbv1.ContentBlockStart{
+					Index: 0, Block: &pbv1.ContentBlockStart_Thinking{Thinking: &pbv1.ThinkingBlock{}},
 				}}},
 				textDelta("x"),
 			},
@@ -684,9 +684,9 @@ func TestValidateAcceptedStream(t *testing.T) {
 		},
 		{
 			name: "thinking delta inside a text block",
-			events: []*pbv2.StreamEvent{
-				{Event: &pbv2.StreamEvent_ContentBlockStart{ContentBlockStart: &pbv2.ContentBlockStart{
-					Index: 0, Block: &pbv2.ContentBlockStart_Text{Text: &pbv2.TextBlock{}},
+			events: []*pbv1.StreamEvent{
+				{Event: &pbv1.StreamEvent_ContentBlockStart{ContentBlockStart: &pbv1.ContentBlockStart{
+					Index: 0, Block: &pbv1.ContentBlockStart_Text{Text: &pbv1.TextBlock{}},
 				}}},
 				thinkingDelta("x"),
 			},
@@ -694,22 +694,22 @@ func TestValidateAcceptedStream(t *testing.T) {
 		},
 		{
 			name:    "text delta inside an open tool block",
-			events:  []*pbv2.StreamEvent{toolStartEvent(0, "call_1", "read_file"), textDelta("x")},
+			events:  []*pbv1.StreamEvent{toolStartEvent(0, "call_1", "read_file"), textDelta("x")},
 			wantMsg: "while a tool block is open",
 		},
 		{
 			name:    "tool call delta naming no open tool block",
-			events:  []*pbv2.StreamEvent{{Event: &pbv2.StreamEvent_ToolCallDelta{ToolCallDelta: &pbv2.ToolCallDelta{Index: 3, ArgumentsDelta: `{}`}}}},
+			events:  []*pbv1.StreamEvent{{Event: &pbv1.StreamEvent_ToolCallDelta{ToolCallDelta: &pbv1.ToolCallDelta{Index: 3, ArgumentsDelta: `{}`}}}},
 			wantMsg: "names no open tool block",
 		},
 		{
 			name:    "content block stop naming no open block",
-			events:  []*pbv2.StreamEvent{{Event: &pbv2.StreamEvent_ContentBlockStop{ContentBlockStop: &pbv2.ContentBlockStop{Index: 0}}}},
+			events:  []*pbv1.StreamEvent{{Event: &pbv1.StreamEvent_ContentBlockStop{ContentBlockStop: &pbv1.ContentBlockStop{Index: 0}}}},
 			wantMsg: "names no open block",
 		},
 		{
 			name:    "events after StreamError",
-			events:  []*pbv2.StreamEvent{streamErrorEvent(), textDelta("after the error")},
+			events:  []*pbv1.StreamEvent{streamErrorEvent(), textDelta("after the error")},
 			wantMsg: "after StreamError",
 		},
 	}
@@ -734,15 +734,15 @@ func TestValidateAcceptedStream(t *testing.T) {
 // *acceptedStreamError (host defect) no matter what the plugin returned, while
 // a malformed signature_delta in the plugin's OUTPUT is a plain violation.
 func TestStreamVerifyAcceptedSideSeparation(t *testing.T) {
-	acceptedBad := []*pbv2.StreamEvent{signatureDelta(streamSigA)} // unbound: host defect
-	returnedBad := []*pbv2.StreamEvent{signatureDelta(streamSigA)} // unbound: plugin violation
+	acceptedBad := []*pbv1.StreamEvent{signatureDelta(streamSigA)} // unbound: host defect
+	returnedBad := []*pbv1.StreamEvent{signatureDelta(streamSigA)} // unbound: plugin violation
 
 	err := verifyStream(acceptedBad, returnedBad, noGrants)
 	if err == nil || !isAcceptedErr(err) {
 		t.Fatalf("verifyStream over malformed accepted input: err = %v, want acceptedStreamError", err)
 	}
 
-	good := []*pbv2.StreamEvent{textDelta("ok")}
+	good := []*pbv1.StreamEvent{textDelta("ok")}
 	err = verifyStream(good, returnedBad, noGrants)
 	if err == nil || isAcceptedErr(err) {
 		t.Fatalf("plugin-output unbound signature_delta: err = %v, want a plain violation", err)
@@ -765,8 +765,8 @@ func TestStreamVerifyAcceptedSideSeparation(t *testing.T) {
 // block). Suppressing an UNSIGNED accepted block is pure topology — the full
 // field-policy walk's business — and passes here by design.
 func TestStreamVerifyToolBlockSuppression(t *testing.T) {
-	accepted := append([]*pbv2.StreamEvent{textDelta("ok")}, toolBlock(0, "call_1", "read_file", streamSigA, `{"path":"/a"}`)...)
-	returned := []*pbv2.StreamEvent{textDelta("ok")}
+	accepted := append([]*pbv1.StreamEvent{textDelta("ok")}, toolBlock(0, "call_1", "read_file", streamSigA, `{"path":"/a"}`)...)
+	returned := []*pbv1.StreamEvent{textDelta("ok")}
 
 	if err := verifyStream(accepted, returned, noGrants); err == nil {
 		t.Fatal("suppressing a signed tool block without ir.stream.write passed")
@@ -777,8 +777,8 @@ func TestStreamVerifyToolBlockSuppression(t *testing.T) {
 		t.Fatalf("suppressing a signed tool block with ir.stream.write rejected: %v", err)
 	}
 
-	unsigned := append([]*pbv2.StreamEvent{textDelta("ok")}, toolBlock(0, "call_1", "read_file", "", `{}`)...)
-	if err := verifyStream(unsigned, []*pbv2.StreamEvent{textDelta("ok")}, noGrants); err != nil {
+	unsigned := append([]*pbv1.StreamEvent{textDelta("ok")}, toolBlock(0, "call_1", "read_file", "", `{}`)...)
+	if err := verifyStream(unsigned, []*pbv1.StreamEvent{textDelta("ok")}, noGrants); err != nil {
 		t.Fatalf("suppressing an unsigned accepted block is out of scope but was rejected: %v", err)
 	}
 }
@@ -789,7 +789,7 @@ func TestStreamVerifyToolBlockSuppression(t *testing.T) {
 // cleared is allowed, dropped without change is rejected, identical is intact,
 // and token replacement/minting are forged/added.
 func TestStreamVerifyCurrentBlockMatrix(t *testing.T) {
-	accepted := []*pbv2.StreamEvent{textDelta("the original text"), signatureDelta(streamSigA)}
+	accepted := []*pbv1.StreamEvent{textDelta("the original text"), signatureDelta(streamSigA)}
 
 	t.Run("identical re-emission is intact", func(t *testing.T) {
 		if err := verifyStream(accepted, accepted, noGrants); err != nil {
@@ -797,34 +797,34 @@ func TestStreamVerifyCurrentBlockMatrix(t *testing.T) {
 		}
 	})
 	t.Run("content changed, token kept is stale", func(t *testing.T) {
-		returned := []*pbv2.StreamEvent{textDelta("rewritten text"), signatureDelta(streamSigA)}
+		returned := []*pbv1.StreamEvent{textDelta("rewritten text"), signatureDelta(streamSigA)}
 		err := verifyStream(accepted, returned, noGrants)
 		if err == nil || !strings.Contains(err.Error(), "stale") {
 			t.Fatalf("kept token over changed content: err = %v, want stale", err)
 		}
 	})
 	t.Run("content changed, token cleared is allowed", func(t *testing.T) {
-		returned := []*pbv2.StreamEvent{textDelta("rewritten text")}
+		returned := []*pbv1.StreamEvent{textDelta("rewritten text")}
 		if err := verifyStream(accepted, returned, noGrants); err != nil {
 			t.Fatalf("cleared token over changed content rejected: %v", err)
 		}
 	})
 	t.Run("token dropped without change is dropped", func(t *testing.T) {
-		returned := []*pbv2.StreamEvent{textDelta("the original text")}
+		returned := []*pbv1.StreamEvent{textDelta("the original text")}
 		err := verifyStream(accepted, returned, noGrants)
 		if err == nil || !strings.Contains(err.Error(), "dropped") {
 			t.Fatalf("token stripped from unchanged content: err = %v, want dropped", err)
 		}
 	})
 	t.Run("token replaced is forged", func(t *testing.T) {
-		returned := []*pbv2.StreamEvent{textDelta("the original text"), signatureDelta(streamSigB)}
+		returned := []*pbv1.StreamEvent{textDelta("the original text"), signatureDelta(streamSigB)}
 		err := verifyStream(accepted, returned, noGrants)
 		if err == nil || !strings.Contains(err.Error(), "forged") {
 			t.Fatalf("token replaced: err = %v, want forged", err)
 		}
 	})
 	t.Run("token minted where none was is added", func(t *testing.T) {
-		unsigned := []*pbv2.StreamEvent{textDelta("the original text")}
+		unsigned := []*pbv1.StreamEvent{textDelta("the original text")}
 		err := verifyStream(unsigned, accepted, noGrants)
 		if err == nil || !strings.Contains(err.Error(), "added") {
 			t.Fatalf("token minted: err = %v, want added", err)
@@ -850,13 +850,13 @@ func TestStreamVerifyCurrentBlockMatrix(t *testing.T) {
 // explicit empty marker over UNCHANGED content as dropped even when the
 // plugin moved it out of order.
 func TestStreamVerifyCurrentBlockExplicitClearMarker(t *testing.T) {
-	accepted := []*pbv2.StreamEvent{textDelta("original"), signatureDelta(streamSigA)}
+	accepted := []*pbv1.StreamEvent{textDelta("original"), signatureDelta(streamSigA)}
 
-	changed := []*pbv2.StreamEvent{textDelta("rewritten"), signatureDelta("")}
+	changed := []*pbv1.StreamEvent{textDelta("rewritten"), signatureDelta("")}
 	if err := verifyStream(accepted, changed, noGrants); err != nil {
 		t.Fatalf("explicit empty token over changed content rejected: %v", err)
 	}
-	unchanged := []*pbv2.StreamEvent{textDelta("original"), signatureDelta("")}
+	unchanged := []*pbv1.StreamEvent{textDelta("original"), signatureDelta("")}
 	if err := verifyStream(accepted, unchanged, noGrants); err == nil ||
 		!strings.Contains(err.Error(), "dropped") {
 		t.Fatalf("explicit empty token over unchanged content: err = %v, want dropped", err)
@@ -925,7 +925,7 @@ func TestStreamVerifyTrailingMatrix(t *testing.T) {
 // a current-block signature: a signed text/thinking block that disappears is
 // topology, not a cleared token.
 func TestStreamVerifyCurrentBlockSuppression(t *testing.T) {
-	accepted := []*pbv2.StreamEvent{textDelta("signed text"), signatureDelta(streamSigA)}
+	accepted := []*pbv1.StreamEvent{textDelta("signed text"), signatureDelta(streamSigA)}
 
 	if err := verifyStream(accepted, nil, noGrants); err == nil ||
 		!strings.Contains(err.Error(), streamWriteGrant) {
@@ -946,8 +946,8 @@ func TestStreamVerifyUnboundSignatures(t *testing.T) {
 	// tool-call-only content — which has no covered content at all.
 	accepted := toolBlock(0, "call_1", "read_file", "", `{}`)
 
-	for name, returned := range map[string][]*pbv2.StreamEvent{
-		"after tool-call-only content": append(append([]*pbv2.StreamEvent{}, accepted...), signatureDelta(streamSigA)),
+	for name, returned := range map[string][]*pbv1.StreamEvent{
+		"after tool-call-only content": append(append([]*pbv1.StreamEvent{}, accepted...), signatureDelta(streamSigA)),
 		"leading the stream":           {signatureDelta(streamSigA)},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -960,7 +960,7 @@ func TestStreamVerifyUnboundSignatures(t *testing.T) {
 			}
 		})
 	}
-	inside := []*pbv2.StreamEvent{toolStartEvent(0, "c1", "read_file"), signatureDelta(streamSigA)}
+	inside := []*pbv1.StreamEvent{toolStartEvent(0, "c1", "read_file"), signatureDelta(streamSigA)}
 	if err := verifyStream(accepted, inside, noGrants); err == nil ||
 		!strings.Contains(err.Error(), "no covered content") {
 		t.Fatalf("signature inside an open tool block: err = %v, want rejection", err)
@@ -971,13 +971,13 @@ func TestStreamVerifyUnboundSignatures(t *testing.T) {
 // correlation across two current-block signatures: clearing the second token
 // is allowed, dropping it is not, and the two blocks are judged independently.
 func TestStreamVerifyMultiSpanCorrelation(t *testing.T) {
-	accepted := []*pbv2.StreamEvent{
+	accepted := []*pbv1.StreamEvent{
 		textDelta("first"), signatureDelta(streamSigA),
 		textDelta("second"), signatureDelta(streamSigB),
 	}
 
 	t.Run("clearing the second token over changed content is allowed", func(t *testing.T) {
-		returned := []*pbv2.StreamEvent{
+		returned := []*pbv1.StreamEvent{
 			textDelta("first"), signatureDelta(streamSigA),
 			textDelta("second rewritten"),
 		}
@@ -986,7 +986,7 @@ func TestStreamVerifyMultiSpanCorrelation(t *testing.T) {
 		}
 	})
 	t.Run("dropping the second token is dropped", func(t *testing.T) {
-		returned := []*pbv2.StreamEvent{
+		returned := []*pbv1.StreamEvent{
 			textDelta("first"), signatureDelta(streamSigA),
 			textDelta("second"),
 		}
@@ -996,7 +996,7 @@ func TestStreamVerifyMultiSpanCorrelation(t *testing.T) {
 		}
 	})
 	t.Run("changing the first span makes its kept token stale", func(t *testing.T) {
-		returned := []*pbv2.StreamEvent{
+		returned := []*pbv1.StreamEvent{
 			textDelta("first changed"), signatureDelta(streamSigA),
 			textDelta("second"), signatureDelta(streamSigB),
 		}
@@ -1013,7 +1013,7 @@ func TestStreamVerifyMultiSpanCorrelation(t *testing.T) {
 		// over surviving text are hostile, so rejection without the grant is
 		// the safe outcome; with the grant this framing passes (documented
 		// boundary: dropping-vs-suppressing are wire-indistinguishable here).
-		returned := []*pbv2.StreamEvent{textDelta("firstsecond")}
+		returned := []*pbv1.StreamEvent{textDelta("firstsecond")}
 		if err := verifyStream(accepted, returned, noGrants); err == nil ||
 			!strings.Contains(err.Error(), streamWriteGrant) {
 			t.Fatalf("re-framed drop without grant: err = %v, want topology rejection", err)
@@ -1137,30 +1137,30 @@ func TestStreamVerifyEmptyMarkerOwnIdentity(t *testing.T) {
 // without an explicit empty clear marker. Only when the whole block vanishes
 // is it suppression (topology-gated).
 func TestStreamVerifyExplicitEmptySignedBlock(t *testing.T) {
-	emptyText := func(sig string, marker bool) []*pbv2.StreamEvent {
-		out := []*pbv2.StreamEvent{{Event: &pbv2.StreamEvent_ContentBlockStart{
-			ContentBlockStart: &pbv2.ContentBlockStart{
-				Index: 0, Block: &pbv2.ContentBlockStart_Text{Text: &pbv2.TextBlock{}},
+	emptyText := func(sig string, marker bool) []*pbv1.StreamEvent {
+		out := []*pbv1.StreamEvent{{Event: &pbv1.StreamEvent_ContentBlockStart{
+			ContentBlockStart: &pbv1.ContentBlockStart{
+				Index: 0, Block: &pbv1.ContentBlockStart_Text{Text: &pbv1.TextBlock{}},
 			},
 		}}}
 		if marker {
 			out = append(out, signatureDelta(sig))
 		}
-		return append(out, &pbv2.StreamEvent{Event: &pbv2.StreamEvent_ContentBlockStop{
-			ContentBlockStop: &pbv2.ContentBlockStop{Index: 0},
+		return append(out, &pbv1.StreamEvent{Event: &pbv1.StreamEvent_ContentBlockStop{
+			ContentBlockStop: &pbv1.ContentBlockStop{Index: 0},
 		}})
 	}
-	emptyThinking := func(sig string, marker bool) []*pbv2.StreamEvent {
-		out := []*pbv2.StreamEvent{{Event: &pbv2.StreamEvent_ContentBlockStart{
-			ContentBlockStart: &pbv2.ContentBlockStart{
-				Index: 0, Block: &pbv2.ContentBlockStart_Thinking{Thinking: &pbv2.ThinkingBlock{}},
+	emptyThinking := func(sig string, marker bool) []*pbv1.StreamEvent {
+		out := []*pbv1.StreamEvent{{Event: &pbv1.StreamEvent_ContentBlockStart{
+			ContentBlockStart: &pbv1.ContentBlockStart{
+				Index: 0, Block: &pbv1.ContentBlockStart_Thinking{Thinking: &pbv1.ThinkingBlock{}},
 			},
 		}}}
 		if marker {
 			out = append(out, signatureDelta(sig))
 		}
-		return append(out, &pbv2.StreamEvent{Event: &pbv2.StreamEvent_ContentBlockStop{
-			ContentBlockStop: &pbv2.ContentBlockStop{Index: 0},
+		return append(out, &pbv1.StreamEvent{Event: &pbv1.StreamEvent_ContentBlockStop{
+			ContentBlockStop: &pbv1.ContentBlockStop{Index: 0},
 		}})
 	}
 
@@ -1169,8 +1169,8 @@ func TestStreamVerifyExplicitEmptySignedBlock(t *testing.T) {
 
 	for _, tc := range []struct {
 		name     string
-		accepted []*pbv2.StreamEvent
-		returned []*pbv2.StreamEvent
+		accepted []*pbv1.StreamEvent
+		returned []*pbv1.StreamEvent
 	}{
 		{"empty text block, no marker", acceptedText, emptyText("", false)},
 		{"empty text block, explicit empty marker", acceptedText, emptyText("", true)},
@@ -1222,17 +1222,17 @@ func TestStreamVerifyExplicitEmptySignedBlock(t *testing.T) {
 // THINKING, each with a later signed span and a later UNSIGNED span variant,
 // under withEveryGrant (all dropped, rejected).
 func TestStreamVerifyEmptySignedSpanThenContent(t *testing.T) {
-	textStart := func() *pbv2.StreamEvent {
-		return &pbv2.StreamEvent{Event: &pbv2.StreamEvent_ContentBlockStart{
-			ContentBlockStart: &pbv2.ContentBlockStart{
-				Index: 0, Block: &pbv2.ContentBlockStart_Text{Text: &pbv2.TextBlock{}},
+	textStart := func() *pbv1.StreamEvent {
+		return &pbv1.StreamEvent{Event: &pbv1.StreamEvent_ContentBlockStart{
+			ContentBlockStart: &pbv1.ContentBlockStart{
+				Index: 0, Block: &pbv1.ContentBlockStart_Text{Text: &pbv1.TextBlock{}},
 			},
 		}}
 	}
-	thinkingStart := func() *pbv2.StreamEvent {
-		return &pbv2.StreamEvent{Event: &pbv2.StreamEvent_ContentBlockStart{
-			ContentBlockStart: &pbv2.ContentBlockStart{
-				Index: 0, Block: &pbv2.ContentBlockStart_Thinking{Thinking: &pbv2.ThinkingBlock{}},
+	thinkingStart := func() *pbv1.StreamEvent {
+		return &pbv1.StreamEvent{Event: &pbv1.StreamEvent_ContentBlockStart{
+			ContentBlockStart: &pbv1.ContentBlockStart{
+				Index: 0, Block: &pbv1.ContentBlockStart_Thinking{Thinking: &pbv1.ThinkingBlock{}},
 			},
 		}}
 	}
@@ -1240,24 +1240,24 @@ func TestStreamVerifyEmptySignedSpanThenContent(t *testing.T) {
 	// build renders the accepted stream (empty signature first, then a
 	// "later" span, optionally signed) and the plugin's returned stream with
 	// the EMPTY signature dropped but the later content kept.
-	build := func(start func() *pbv2.StreamEvent, delta func(string) *pbv2.StreamEvent, laterSigned bool) (accepted, returned []*pbv2.StreamEvent) {
-		accepted = []*pbv2.StreamEvent{start()}
+	build := func(start func() *pbv1.StreamEvent, delta func(string) *pbv1.StreamEvent, laterSigned bool) (accepted, returned []*pbv1.StreamEvent) {
+		accepted = []*pbv1.StreamEvent{start()}
 		accepted = append(accepted, signatureDelta(streamSigA))
 		accepted = append(accepted, delta("later"))
 		if laterSigned {
 			accepted = append(accepted, signatureDelta(streamSigB))
 		}
-		accepted = append(accepted, &pbv2.StreamEvent{Event: &pbv2.StreamEvent_ContentBlockStop{
-			ContentBlockStop: &pbv2.ContentBlockStop{Index: 0},
+		accepted = append(accepted, &pbv1.StreamEvent{Event: &pbv1.StreamEvent_ContentBlockStop{
+			ContentBlockStop: &pbv1.ContentBlockStop{Index: 0},
 		}})
 
-		returned = []*pbv2.StreamEvent{start()}
+		returned = []*pbv1.StreamEvent{start()}
 		returned = append(returned, delta("later"))
 		if laterSigned {
 			returned = append(returned, signatureDelta(streamSigB))
 		}
-		returned = append(returned, &pbv2.StreamEvent{Event: &pbv2.StreamEvent_ContentBlockStop{
-			ContentBlockStop: &pbv2.ContentBlockStop{Index: 0},
+		returned = append(returned, &pbv1.StreamEvent{Event: &pbv1.StreamEvent_ContentBlockStop{
+			ContentBlockStop: &pbv1.ContentBlockStop{Index: 0},
 		}})
 		return accepted, returned
 	}
@@ -1275,8 +1275,8 @@ func TestStreamVerifyEmptySignedSpanThenContent(t *testing.T) {
 
 	for _, tc := range []struct {
 		name        string
-		start       func() *pbv2.StreamEvent
-		delta       func(string) *pbv2.StreamEvent
+		start       func() *pbv1.StreamEvent
+		delta       func(string) *pbv1.StreamEvent
 		laterSigned bool
 	}{
 		{"text, later unsigned span", textStart, textDelta, false},
@@ -1325,7 +1325,7 @@ func TestStreamVerifyToolGlobalExactFirst(t *testing.T) {
 
 	for _, tc := range []struct {
 		name     string
-		returned []*pbv2.StreamEvent
+		returned []*pbv1.StreamEvent
 	}{
 		{"modified block first", modifiedFirst},
 		{"exact match first", exactFirst},
@@ -1363,7 +1363,7 @@ func TestStreamVerifyUnsignedTwinSuppression(t *testing.T) {
 	// suppressed and the identical unsigned twin survives as the single
 	// returned block. Passes with ir.stream.write, rejected without — the
 	// surviving twin must not be read as a stripped signed token.
-	for name, accepted := range map[string][]*pbv2.StreamEvent{
+	for name, accepted := range map[string][]*pbv1.StreamEvent{
 		"signed twin first":   append(signedTextBlock(0, "A-content", streamSigA), textBlock(1, "A-content")...),
 		"unsigned twin first": append(textBlock(0, "A-content"), signedTextBlock(1, "A-content", streamSigA)...),
 	} {
@@ -1437,10 +1437,10 @@ func TestStreamVerifyEmptyKindScopesDiffer(t *testing.T) {
 	// emptyBlock renders an explicit text/thinking block whose content is a
 	// single (possibly EMPTY) delta of the matching kind, with an optional
 	// signature_delta inside — the four F1 shapes.
-	emptyText := func(sig string, emptyDelta bool) []*pbv2.StreamEvent {
-		out := []*pbv2.StreamEvent{{Event: &pbv2.StreamEvent_ContentBlockStart{
-			ContentBlockStart: &pbv2.ContentBlockStart{
-				Index: 0, Block: &pbv2.ContentBlockStart_Text{Text: &pbv2.TextBlock{}},
+	emptyText := func(sig string, emptyDelta bool) []*pbv1.StreamEvent {
+		out := []*pbv1.StreamEvent{{Event: &pbv1.StreamEvent_ContentBlockStart{
+			ContentBlockStart: &pbv1.ContentBlockStart{
+				Index: 0, Block: &pbv1.ContentBlockStart_Text{Text: &pbv1.TextBlock{}},
 			},
 		}}}
 		if emptyDelta {
@@ -1449,14 +1449,14 @@ func TestStreamVerifyEmptyKindScopesDiffer(t *testing.T) {
 		if sig != "" {
 			out = append(out, signatureDelta(sig))
 		}
-		return append(out, &pbv2.StreamEvent{Event: &pbv2.StreamEvent_ContentBlockStop{
-			ContentBlockStop: &pbv2.ContentBlockStop{Index: 0},
+		return append(out, &pbv1.StreamEvent{Event: &pbv1.StreamEvent_ContentBlockStop{
+			ContentBlockStop: &pbv1.ContentBlockStop{Index: 0},
 		}})
 	}
-	emptyThinking := func(sig string, emptyDelta bool) []*pbv2.StreamEvent {
-		out := []*pbv2.StreamEvent{{Event: &pbv2.StreamEvent_ContentBlockStart{
-			ContentBlockStart: &pbv2.ContentBlockStart{
-				Index: 0, Block: &pbv2.ContentBlockStart_Thinking{Thinking: &pbv2.ThinkingBlock{}},
+	emptyThinking := func(sig string, emptyDelta bool) []*pbv1.StreamEvent {
+		out := []*pbv1.StreamEvent{{Event: &pbv1.StreamEvent_ContentBlockStart{
+			ContentBlockStart: &pbv1.ContentBlockStart{
+				Index: 0, Block: &pbv1.ContentBlockStart_Thinking{Thinking: &pbv1.ThinkingBlock{}},
 			},
 		}}}
 		if emptyDelta {
@@ -1465,8 +1465,8 @@ func TestStreamVerifyEmptyKindScopesDiffer(t *testing.T) {
 		if sig != "" {
 			out = append(out, signatureDelta(sig))
 		}
-		return append(out, &pbv2.StreamEvent{Event: &pbv2.StreamEvent_ContentBlockStop{
-			ContentBlockStop: &pbv2.ContentBlockStop{Index: 0},
+		return append(out, &pbv1.StreamEvent{Event: &pbv1.StreamEvent_ContentBlockStop{
+			ContentBlockStop: &pbv1.ContentBlockStop{Index: 0},
 		}})
 	}
 
@@ -1475,8 +1475,8 @@ func TestStreamVerifyEmptyKindScopesDiffer(t *testing.T) {
 	// thinking-A — and no grant may save it.
 	for _, tc := range []struct {
 		name     string
-		accepted []*pbv2.StreamEvent
-		returned []*pbv2.StreamEvent
+		accepted []*pbv1.StreamEvent
+		returned []*pbv1.StreamEvent
 	}{
 		{"zero-delta: empty text scope -> empty thinking scope", emptyText(streamSigA, false), emptyThinking(streamSigA, false)},
 		{"zero-delta: empty thinking scope -> empty text scope", emptyThinking(streamSigA, false), emptyText(streamSigA, false)},
@@ -1499,7 +1499,7 @@ func TestStreamVerifyEmptyKindScopesDiffer(t *testing.T) {
 	// consumes the exact (token, typed-content) match as before.
 	for _, tc := range []struct {
 		name   string
-		stream func(sig string, emptyDelta bool) []*pbv2.StreamEvent
+		stream func(sig string, emptyDelta bool) []*pbv1.StreamEvent
 	}{
 		{"empty text block intact", emptyText},
 		{"empty thinking block intact", emptyThinking},
@@ -1535,40 +1535,40 @@ func TestStreamVerifyEmptyKindClearMarkerIsTopology(t *testing.T) {
 	// emptyText/emptyThinking render an explicit text/thinking block with an
 	// optional (possibly EMPTY) delta of the matching kind and a
 	// signature_delta inside — sig "" renders the empty clear marker.
-	emptyText := func(sig string, emptyDelta bool) []*pbv2.StreamEvent {
-		out := []*pbv2.StreamEvent{{Event: &pbv2.StreamEvent_ContentBlockStart{
-			ContentBlockStart: &pbv2.ContentBlockStart{
-				Index: 0, Block: &pbv2.ContentBlockStart_Text{Text: &pbv2.TextBlock{}},
+	emptyText := func(sig string, emptyDelta bool) []*pbv1.StreamEvent {
+		out := []*pbv1.StreamEvent{{Event: &pbv1.StreamEvent_ContentBlockStart{
+			ContentBlockStart: &pbv1.ContentBlockStart{
+				Index: 0, Block: &pbv1.ContentBlockStart_Text{Text: &pbv1.TextBlock{}},
 			},
 		}}}
 		if emptyDelta {
 			out = append(out, textDelta(""))
 		}
 		out = append(out, signatureDelta(sig))
-		return append(out, &pbv2.StreamEvent{Event: &pbv2.StreamEvent_ContentBlockStop{
-			ContentBlockStop: &pbv2.ContentBlockStop{Index: 0},
+		return append(out, &pbv1.StreamEvent{Event: &pbv1.StreamEvent_ContentBlockStop{
+			ContentBlockStop: &pbv1.ContentBlockStop{Index: 0},
 		}})
 	}
-	emptyThinking := func(sig string, emptyDelta bool) []*pbv2.StreamEvent {
-		out := []*pbv2.StreamEvent{{Event: &pbv2.StreamEvent_ContentBlockStart{
-			ContentBlockStart: &pbv2.ContentBlockStart{
-				Index: 0, Block: &pbv2.ContentBlockStart_Thinking{Thinking: &pbv2.ThinkingBlock{}},
+	emptyThinking := func(sig string, emptyDelta bool) []*pbv1.StreamEvent {
+		out := []*pbv1.StreamEvent{{Event: &pbv1.StreamEvent_ContentBlockStart{
+			ContentBlockStart: &pbv1.ContentBlockStart{
+				Index: 0, Block: &pbv1.ContentBlockStart_Thinking{Thinking: &pbv1.ThinkingBlock{}},
 			},
 		}}}
 		if emptyDelta {
 			out = append(out, thinkingDelta(""))
 		}
 		out = append(out, signatureDelta(sig))
-		return append(out, &pbv2.StreamEvent{Event: &pbv2.StreamEvent_ContentBlockStop{
-			ContentBlockStop: &pbv2.ContentBlockStop{Index: 0},
+		return append(out, &pbv1.StreamEvent{Event: &pbv1.StreamEvent_ContentBlockStop{
+			ContentBlockStop: &pbv1.ContentBlockStop{Index: 0},
 		}})
 	}
 
 	const wantErr = "suppressed a signed text/thinking block without " + streamWriteGrant
 	for _, tc := range []struct {
 		name     string
-		accepted []*pbv2.StreamEvent
-		returned []*pbv2.StreamEvent
+		accepted []*pbv1.StreamEvent
+		returned []*pbv1.StreamEvent
 	}{
 		{"zero-delta: empty text scope cleared into empty thinking", emptyText(streamSigA, false), emptyThinking("", false)},
 		{"zero-delta: empty thinking scope cleared into empty text", emptyThinking(streamSigA, false), emptyText("", false)},
@@ -1593,8 +1593,8 @@ func TestStreamVerifyEmptyKindClearMarkerIsTopology(t *testing.T) {
 	// the explicit-marker forms are pinned here under withEveryGrant.
 	for _, tc := range []struct {
 		name     string
-		accepted []*pbv2.StreamEvent
-		returned []*pbv2.StreamEvent
+		accepted []*pbv1.StreamEvent
+		returned []*pbv1.StreamEvent
 	}{
 		{"zero-delta: empty text scope cleared in kind", emptyText(streamSigA, false), emptyText("", false)},
 		{"zero-delta: empty thinking scope cleared in kind", emptyThinking(streamSigA, false), emptyThinking("", false)},
@@ -1644,13 +1644,13 @@ func TestStreamVerifyExactMatchesReserveReturnedSpans(t *testing.T) {
 	// The empty-span equivalent: the same two-identical-signed shape over
 	// explicit EMPTY text blocks (zero deltas). T1's returned empty span is
 	// reserved by the exact match; T2's block suppression is topology.
-	emptySignedAt := func(index int32, sig string) []*pbv2.StreamEvent {
-		return []*pbv2.StreamEvent{
-			{Event: &pbv2.StreamEvent_ContentBlockStart{ContentBlockStart: &pbv2.ContentBlockStart{
-				Index: index, Block: &pbv2.ContentBlockStart_Text{Text: &pbv2.TextBlock{}},
+	emptySignedAt := func(index int32, sig string) []*pbv1.StreamEvent {
+		return []*pbv1.StreamEvent{
+			{Event: &pbv1.StreamEvent_ContentBlockStart{ContentBlockStart: &pbv1.ContentBlockStart{
+				Index: index, Block: &pbv1.ContentBlockStart_Text{Text: &pbv1.TextBlock{}},
 			}}},
 			signatureDelta(sig),
-			{Event: &pbv2.StreamEvent_ContentBlockStop{ContentBlockStop: &pbv2.ContentBlockStop{Index: index}}},
+			{Event: &pbv1.StreamEvent_ContentBlockStop{ContentBlockStop: &pbv1.ContentBlockStop{Index: index}}},
 		}
 	}
 	emptyAccepted := append(emptySignedAt(0, streamSigA), emptySignedAt(1, streamSigB)...)
@@ -1686,30 +1686,30 @@ func TestStreamVerifyExactMatchesReserveReturnedSpans(t *testing.T) {
 // condemned stale. T2 must match exactly and T1's suppression must be
 // topology-authorized.
 func TestStreamVerifyEmptySpanPresenceDoesNotLeak(t *testing.T) {
-	emptyTextBlock := func(index int32, sig string) []*pbv2.StreamEvent {
-		out := []*pbv2.StreamEvent{{Event: &pbv2.StreamEvent_ContentBlockStart{
-			ContentBlockStart: &pbv2.ContentBlockStart{
-				Index: index, Block: &pbv2.ContentBlockStart_Text{Text: &pbv2.TextBlock{}},
+	emptyTextBlock := func(index int32, sig string) []*pbv1.StreamEvent {
+		out := []*pbv1.StreamEvent{{Event: &pbv1.StreamEvent_ContentBlockStart{
+			ContentBlockStart: &pbv1.ContentBlockStart{
+				Index: index, Block: &pbv1.ContentBlockStart_Text{Text: &pbv1.TextBlock{}},
 			},
 		}}}
 		if sig != "" {
 			out = append(out, signatureDelta(sig))
 		}
-		return append(out, &pbv2.StreamEvent{Event: &pbv2.StreamEvent_ContentBlockStop{
-			ContentBlockStop: &pbv2.ContentBlockStop{Index: index},
+		return append(out, &pbv1.StreamEvent{Event: &pbv1.StreamEvent_ContentBlockStop{
+			ContentBlockStop: &pbv1.ContentBlockStop{Index: index},
 		}})
 	}
-	emptyThinkingBlock := func(index int32, sig string) []*pbv2.StreamEvent {
-		out := []*pbv2.StreamEvent{{Event: &pbv2.StreamEvent_ContentBlockStart{
-			ContentBlockStart: &pbv2.ContentBlockStart{
-				Index: index, Block: &pbv2.ContentBlockStart_Thinking{Thinking: &pbv2.ThinkingBlock{}},
+	emptyThinkingBlock := func(index int32, sig string) []*pbv1.StreamEvent {
+		out := []*pbv1.StreamEvent{{Event: &pbv1.StreamEvent_ContentBlockStart{
+			ContentBlockStart: &pbv1.ContentBlockStart{
+				Index: index, Block: &pbv1.ContentBlockStart_Thinking{Thinking: &pbv1.ThinkingBlock{}},
 			},
 		}}}
 		if sig != "" {
 			out = append(out, signatureDelta(sig))
 		}
-		return append(out, &pbv2.StreamEvent{Event: &pbv2.StreamEvent_ContentBlockStop{
-			ContentBlockStop: &pbv2.ContentBlockStop{Index: index},
+		return append(out, &pbv1.StreamEvent{Event: &pbv1.StreamEvent_ContentBlockStop{
+			ContentBlockStop: &pbv1.ContentBlockStop{Index: index},
 		}})
 	}
 
@@ -1733,8 +1733,8 @@ func TestStreamVerifyEmptySpanPresenceDoesNotLeak(t *testing.T) {
 	// topology, gated on ir.stream.write.
 	for _, tc := range []struct {
 		name   string
-		first  func(index int32, sig string) []*pbv2.StreamEvent
-		second func(index int32, sig string) []*pbv2.StreamEvent
+		first  func(index int32, sig string) []*pbv1.StreamEvent
+		second func(index int32, sig string) []*pbv1.StreamEvent
 	}{
 		{"empty text suppressed, empty thinking retained", emptyTextBlock, emptyThinkingBlock},
 		{"empty thinking suppressed, empty text retained", emptyThinkingBlock, emptyTextBlock},
@@ -1786,39 +1786,39 @@ func TestStreamVerifyEmptySpanPresenceDoesNotLeak(t *testing.T) {
 // All failures are *acceptedStreamError and are propagated by verifyStream
 // as host defects, never plugin violations.
 func TestValidateAcceptedStreamABITopology(t *testing.T) {
-	textStart := func(index int32) *pbv2.StreamEvent {
-		return &pbv2.StreamEvent{Event: &pbv2.StreamEvent_ContentBlockStart{
-			ContentBlockStart: &pbv2.ContentBlockStart{
-				Index: index, Block: &pbv2.ContentBlockStart_Text{Text: &pbv2.TextBlock{}},
+	textStart := func(index int32) *pbv1.StreamEvent {
+		return &pbv1.StreamEvent{Event: &pbv1.StreamEvent_ContentBlockStart{
+			ContentBlockStart: &pbv1.ContentBlockStart{
+				Index: index, Block: &pbv1.ContentBlockStart_Text{Text: &pbv1.TextBlock{}},
 			},
 		}}
 	}
-	textStop := func(index int32) *pbv2.StreamEvent {
-		return &pbv2.StreamEvent{Event: &pbv2.StreamEvent_ContentBlockStop{
-			ContentBlockStop: &pbv2.ContentBlockStop{Index: index},
+	textStop := func(index int32) *pbv1.StreamEvent {
+		return &pbv1.StreamEvent{Event: &pbv1.StreamEvent_ContentBlockStop{
+			ContentBlockStop: &pbv1.ContentBlockStop{Index: index},
 		}}
 	}
-	toolDelta := func(index int32, frag string) *pbv2.StreamEvent {
-		return &pbv2.StreamEvent{Event: &pbv2.StreamEvent_ToolCallDelta{
-			ToolCallDelta: &pbv2.ToolCallDelta{Index: index, ArgumentsDelta: frag},
+	toolDelta := func(index int32, frag string) *pbv1.StreamEvent {
+		return &pbv1.StreamEvent{Event: &pbv1.StreamEvent_ToolCallDelta{
+			ToolCallDelta: &pbv1.ToolCallDelta{Index: index, ArgumentsDelta: frag},
 		}}
 	}
 
 	invalid := []struct {
 		name    string
-		events  []*pbv2.StreamEvent
+		events  []*pbv1.StreamEvent
 		wantMsg string
 	}{
 		{
 			name: "wrong non-tool stop index: StartText(3) closed by Stop(9)",
-			events: []*pbv2.StreamEvent{
+			events: []*pbv1.StreamEvent{
 				textStart(3), textDelta("x"), textStop(9),
 			},
 			wantMsg: "names no open block",
 		},
 		{
 			name: "MessageStop with an open tool block, stop hidden until after",
-			events: []*pbv2.StreamEvent{
+			events: []*pbv1.StreamEvent{
 				toolStartEvent(0, "call_1", "read_file"),
 				messageStopEvent("tool_calls"),
 				textStop(0),
@@ -1827,21 +1827,21 @@ func TestValidateAcceptedStreamABITopology(t *testing.T) {
 		},
 		{
 			name: "MessageStop with an open text block",
-			events: []*pbv2.StreamEvent{
+			events: []*pbv1.StreamEvent{
 				textStart(0), textDelta("x"), messageStopEvent("stop"),
 			},
 			wantMsg: "MessageStop",
 		},
 		{
 			name: "index reused after close",
-			events: append(append([]*pbv2.StreamEvent{},
+			events: append(append([]*pbv1.StreamEvent{},
 				toolBlock(0, "call_1", "read_file", "", `{}`)...),
 				toolStartEvent(0, "call_2", "write_file")),
 			wantMsg: "reused",
 		},
 		{
 			name: "index reused while open",
-			events: []*pbv2.StreamEvent{
+			events: []*pbv1.StreamEvent{
 				toolStartEvent(0, "call_1", "read_file"),
 				toolStartEvent(0, "call_2", "write_file"),
 			},
@@ -1849,7 +1849,7 @@ func TestValidateAcceptedStreamABITopology(t *testing.T) {
 		},
 		{
 			name: "non-tool start while a tool block is open",
-			events: []*pbv2.StreamEvent{
+			events: []*pbv1.StreamEvent{
 				toolStartEvent(0, "call_1", "read_file"),
 				textStart(1),
 			},
@@ -1857,24 +1857,24 @@ func TestValidateAcceptedStreamABITopology(t *testing.T) {
 		},
 		{
 			name: "tool start while a non-tool block is open",
-			events: []*pbv2.StreamEvent{
+			events: []*pbv1.StreamEvent{
 				textStart(0), textStart(1),
 			},
 			wantMsg: "while a text block is open",
 		},
 		{
 			name: "second non-tool block while one is open",
-			events: []*pbv2.StreamEvent{
+			events: []*pbv1.StreamEvent{
 				textStart(0),
-				{Event: &pbv2.StreamEvent_ContentBlockStart{ContentBlockStart: &pbv2.ContentBlockStart{
-					Index: 1, Block: &pbv2.ContentBlockStart_Thinking{Thinking: &pbv2.ThinkingBlock{}},
+				{Event: &pbv1.StreamEvent_ContentBlockStart{ContentBlockStart: &pbv1.ContentBlockStart{
+					Index: 1, Block: &pbv1.ContentBlockStart_Thinking{Thinking: &pbv1.ThinkingBlock{}},
 				}}},
 			},
 			wantMsg: "while a text block is open",
 		},
 		{
 			name: "content after MessageStop",
-			events: []*pbv2.StreamEvent{
+			events: []*pbv1.StreamEvent{
 				toolStartEvent(0, "call_1", "read_file"), textStop(0),
 				messageStopEvent("stop"), textDelta("too late"),
 			},
@@ -1882,7 +1882,7 @@ func TestValidateAcceptedStreamABITopology(t *testing.T) {
 		},
 		{
 			name: "tool delta after MessageStop",
-			events: []*pbv2.StreamEvent{
+			events: []*pbv1.StreamEvent{
 				messageStopEvent("stop"), toolDelta(0, `{}`),
 			},
 			wantMsg: "after MessageStop",
@@ -1910,25 +1910,25 @@ func TestValidateAcceptedStreamABITopology(t *testing.T) {
 
 	valid := []struct {
 		name   string
-		events []*pbv2.StreamEvent
+		events []*pbv1.StreamEvent
 	}{
 		{
 			name: "usage after MessageStop is allowed",
-			events: []*pbv2.StreamEvent{
+			events: []*pbv1.StreamEvent{
 				toolStartEvent(0, "call_1", "read_file"), textStop(0),
 				messageStopEvent("stop"), usageEvent(),
 			},
 		},
 		{
 			name: "usage before MessageStop is allowed",
-			events: []*pbv2.StreamEvent{
+			events: []*pbv1.StreamEvent{
 				toolStartEvent(0, "call_1", "read_file"), textStop(0),
 				usageEvent(), messageStopEvent("stop"),
 			},
 		},
 		{
 			name: "concurrent tool blocks close before MessageStop",
-			events: []*pbv2.StreamEvent{
+			events: []*pbv1.StreamEvent{
 				toolStartEvent(0, "call_1", "read_file"),
 				toolStartEvent(1, "call_2", "write_file"),
 				toolDelta(1, `{"b":1}`), toolDelta(0, `{"a":1}`),
@@ -2007,33 +2007,33 @@ func BenchmarkVerifyStreamFragmented(b *testing.B) {
 // text chunks, one signed tool block, and Code Assist's trailing signature.
 // Pass-through verification of it is the common-case cost. (Same shape as the
 // closed #243 branch's helper, for comparable numbers.)
-func benchStream(n int) []*pbv2.StreamEvent {
-	messageStart := func() *pbv2.StreamEvent {
-		return &pbv2.StreamEvent{Event: &pbv2.StreamEvent_MessageStart{
-			MessageStart: &pbv2.MessageStart{Role: "assistant", Model: "gemini-2.5"},
+func benchStream(n int) []*pbv1.StreamEvent {
+	messageStart := func() *pbv1.StreamEvent {
+		return &pbv1.StreamEvent{Event: &pbv1.StreamEvent_MessageStart{
+			MessageStart: &pbv1.MessageStart{Role: "assistant", Model: "gemini-2.5"},
 		}}
 	}
-	messageStop := func() *pbv2.StreamEvent {
-		return &pbv2.StreamEvent{Event: &pbv2.StreamEvent_MessageStop{
-			MessageStop: &pbv2.MessageStop{FinishReason: "stop"},
+	messageStop := func() *pbv1.StreamEvent {
+		return &pbv1.StreamEvent{Event: &pbv1.StreamEvent_MessageStop{
+			MessageStop: &pbv1.MessageStop{FinishReason: "stop"},
 		}}
 	}
 	if n <= 2 {
-		out := make([]*pbv2.StreamEvent, 0, n)
+		out := make([]*pbv1.StreamEvent, 0, n)
 		for i := range n {
 			out = append(out, textDelta(fmt.Sprintf("token chunk %d ", i)))
 		}
 		return out
 	}
 	if n < 6 {
-		out := make([]*pbv2.StreamEvent, 0, n)
+		out := make([]*pbv1.StreamEvent, 0, n)
 		out = append(out, messageStart())
 		for i := range n - 2 {
 			out = append(out, textDelta(fmt.Sprintf("token chunk %d ", i)))
 		}
 		return append(out, messageStop())
 	}
-	out := make([]*pbv2.StreamEvent, 0, n)
+	out := make([]*pbv1.StreamEvent, 0, n)
 	out = append(out, messageStart())
 	for i := range n - 6 {
 		out = append(out, textDelta(fmt.Sprintf("text chunk %d for the agent to verify ", i)))
@@ -2047,15 +2047,15 @@ func benchStream(n int) []*pbv2.StreamEvent {
 // argument deltas interleaved by index, wrapped in message framing — the
 // OpenAI Chat parallel-tool shape, which only an index-keyed single-pass
 // assembler can keep apart.
-func benchConcurrentTools(n int) []*pbv2.StreamEvent {
-	out := []*pbv2.StreamEvent{{Event: &pbv2.StreamEvent_MessageStart{
-		MessageStart: &pbv2.MessageStart{Role: "assistant", Model: "gemini-2.5"},
+func benchConcurrentTools(n int) []*pbv1.StreamEvent {
+	out := []*pbv1.StreamEvent{{Event: &pbv1.StreamEvent_MessageStart{
+		MessageStart: &pbv1.MessageStart{Role: "assistant", Model: "gemini-2.5"},
 	}}}
 	for i := range n {
-		out = append(out, &pbv2.StreamEvent{Event: &pbv2.StreamEvent_ContentBlockStart{
-			ContentBlockStart: &pbv2.ContentBlockStart{
+		out = append(out, &pbv1.StreamEvent{Event: &pbv1.StreamEvent_ContentBlockStart{
+			ContentBlockStart: &pbv1.ContentBlockStart{
 				Index: int32(i),
-				Block: &pbv2.ContentBlockStart_ToolCall{ToolCall: &pbv2.ToolCallRef{
+				Block: &pbv1.ContentBlockStart_ToolCall{ToolCall: &pbv1.ToolCallRef{
 					Id: fmt.Sprintf("call_%d", i), Name: "read_file", Signature: streamSigA,
 				}},
 			},
@@ -2065,33 +2065,33 @@ func benchConcurrentTools(n int) []*pbv2.StreamEvent {
 	// whole burst.
 	for frag := range 3 {
 		for i := range n {
-			out = append(out, &pbv2.StreamEvent{Event: &pbv2.StreamEvent_ToolCallDelta{
-				ToolCallDelta: &pbv2.ToolCallDelta{Index: int32(i), ArgumentsDelta: fmt.Sprintf(`{"path":"/f%d`, frag)},
+			out = append(out, &pbv1.StreamEvent{Event: &pbv1.StreamEvent_ToolCallDelta{
+				ToolCallDelta: &pbv1.ToolCallDelta{Index: int32(i), ArgumentsDelta: fmt.Sprintf(`{"path":"/f%d`, frag)},
 			}})
 		}
 	}
 	for i := range n {
-		out = append(out, &pbv2.StreamEvent{Event: &pbv2.StreamEvent_ContentBlockStop{
-			ContentBlockStop: &pbv2.ContentBlockStop{Index: int32(i)},
+		out = append(out, &pbv1.StreamEvent{Event: &pbv1.StreamEvent_ContentBlockStop{
+			ContentBlockStop: &pbv1.ContentBlockStop{Index: int32(i)},
 		}})
 	}
-	return append(out, &pbv2.StreamEvent{Event: &pbv2.StreamEvent_MessageStop{
-		MessageStop: &pbv2.MessageStop{FinishReason: "stop"},
+	return append(out, &pbv1.StreamEvent{Event: &pbv1.StreamEvent_MessageStop{
+		MessageStop: &pbv1.MessageStop{FinishReason: "stop"},
 	}})
 }
 
 // benchFragmentedTool builds one signed tool call whose arguments arrive as n
 // fragments, wrapped in message framing.
-func benchFragmentedTool(n int) []*pbv2.StreamEvent {
+func benchFragmentedTool(n int) []*pbv1.StreamEvent {
 	args := make([]string, 0, n)
 	for i := range n {
 		args = append(args, fmt.Sprintf(`{"chunk":%d,`, i))
 	}
-	out := []*pbv2.StreamEvent{{Event: &pbv2.StreamEvent_MessageStart{
-		MessageStart: &pbv2.MessageStart{Role: "assistant", Model: "gemini-2.5"},
+	out := []*pbv1.StreamEvent{{Event: &pbv1.StreamEvent_MessageStart{
+		MessageStart: &pbv1.MessageStart{Role: "assistant", Model: "gemini-2.5"},
 	}}}
 	out = append(out, toolBlockDeltas(0, "call_1", "read_file", streamSigA, args...)...)
-	return append(out, &pbv2.StreamEvent{Event: &pbv2.StreamEvent_MessageStop{
-		MessageStop: &pbv2.MessageStop{FinishReason: "stop"},
+	return append(out, &pbv1.StreamEvent{Event: &pbv1.StreamEvent_MessageStop{
+		MessageStop: &pbv1.MessageStop{FinishReason: "stop"},
 	}})
 }

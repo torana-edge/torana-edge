@@ -20,7 +20,7 @@ snapshot, so continuous traffic cannot make one sweep run indefinitely.
 
 ## Measurement
 
-The current-v2 standard-Go logger from the preceding reports ran in a
+The current standard-Go logger from the preceding reports ran in a
 four-instance pool. Each exact instance received the same 16 KiB coding-agent
 request. A 50 ms timeout accelerated the policy transition for the test; the
 production default is 60 seconds and executes the identical retirement path.

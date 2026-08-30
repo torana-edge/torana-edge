@@ -16,9 +16,7 @@ import (
 // model. Every violation fails OPEN to the original route (log + keep going)
 // — a bad verdict must not take the request down.
 //
-// Credential rule (mirrors the offload provider override): the caller's
-// credential is NEVER forwarded to a rerouted provider. Auth comes from the
-// target's api_key_env; empty means no auth (local endpoints).
+// The target provider's explicit auth policy is applied after routing.
 func (s *Server) applyRoute(req *http.Request, chat *engine.ChatRequest, origFormat, origName string, v *wasm.RouteVerdict, cfg provider.Config) {
 	if v.Model != "" {
 		chat.Model = v.Model
@@ -47,6 +45,17 @@ func (s *Server) applyRoute(req *http.Request, chat *engine.ChatRequest, origFor
 	if rc == nil {
 		return
 	}
+	authCandidate := req.Clone(req.Context())
+	authCandidate.Header = req.Header.Clone()
+	caller := callerCredentialsFrom(req)
+	if rs := reqStateFrom(req.Context()); rs != nil {
+		caller = rs.CallerCredentials
+	}
+	if err := applyProviderCredential(req.Context(), authCandidate, target, caller, s.resolveCredential); err != nil {
+		log.Printf("[route] provider %q credential unavailable — keeping %q", v.Provider, origName)
+		return
+	}
+	req.Header = authCandidate.Header
 
 	req.URL.Scheme = turl.Scheme
 	req.URL.Host = turl.Host
@@ -58,9 +67,6 @@ func (s *Server) applyRoute(req *http.Request, chat *engine.ChatRequest, origFor
 	if rs := reqStateFrom(req.Context()); rs != nil {
 		rs.Provider = v.Provider
 	}
-
-	// Never forward the caller's credential to a rerouted provider.
-	applyProviderCredential(req, target, v.Provider, "route", s.resolveSecret)
 
 	metrics.RecordRoutedRequest(req.Context(), origName, v.Provider)
 	log.Printf("[route] %s → %s (model %q)", origName, v.Provider, chat.Model)

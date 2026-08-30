@@ -3,7 +3,7 @@
   "id": "torana-test/test-slow-after-stream",
   "name": "test-slow-after-stream",
   "version": "0.1.0",
-  "abi_version": "v2",
+  "abi_version": "v1",
   "failure_mode": "pass",
   "description": "Observational after-response hook gated by a test-controlled egress latch; pins that its cost is on the client's critical path",
   "hooks": [{"name": "run_after_response"}],

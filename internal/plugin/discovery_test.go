@@ -61,6 +61,111 @@ func TestHookNames(t *testing.T) {
 	}
 }
 
+func TestManifestResourceDeclarationsAreCapabilityBound(t *testing.T) {
+	base := PluginManifest{
+		SchemaVersion: 1,
+		ID:            "local/resources",
+		Name:          "resources",
+		Version:       "0.1.0",
+		ABIVersion:    "v1",
+		FailureMode:   "pass",
+		Hooks:         []Hook{{Name: "run_before_request"}},
+	}
+	tests := []struct {
+		name      string
+		mutate    func(*PluginManifest)
+		wantError string
+	}{
+		{
+			name: "credential needs capability",
+			mutate: func(m *PluginManifest) {
+				m.Credentials = []CredentialDeclaration{{Slot: "api", Description: "service key", Required: true}}
+			},
+			wantError: "env.credential_get",
+		},
+		{
+			name: "file operation needs matching capability",
+			mutate: func(m *PluginManifest) {
+				m.Files = []FileDeclaration{{Path: "usage.jsonl", Operations: []string{"append"}, MaxBytes: 100}}
+			},
+			wantError: "env.file_append",
+		},
+		{
+			name: "HTTP needs capability",
+			mutate: func(m *PluginManifest) {
+				m.HTTPEndpoints = []HTTPEndpointDeclaration{{Name: "api", Description: "service", Origin: "https://api.example", Methods: []string{"GET"}}}
+			},
+			wantError: "env.http_request",
+		},
+		{
+			name: "HTTP plaintext public origin refused",
+			mutate: func(m *PluginManifest) {
+				m.Permissions = []Permission{{Name: "env.http_request"}}
+				m.HTTPEndpoints = []HTTPEndpointDeclaration{{Name: "api", Description: "service", Origin: "http://api.example", Methods: []string{"GET"}}}
+			},
+			wantError: "literal loopback",
+		},
+		{
+			name: "complete declaration accepted",
+			mutate: func(m *PluginManifest) {
+				m.Permissions = []Permission{{Name: "env.credential_get"}, {Name: "env.file_append"}, {Name: "env.http_request"}}
+				m.Credentials = []CredentialDeclaration{{Slot: "api", Description: "service key", Required: true}}
+				m.Files = []FileDeclaration{{Path: "usage.jsonl", Operations: []string{"append"}, MaxBytes: 100}}
+				m.HTTPEndpoints = []HTTPEndpointDeclaration{{Name: "api", Description: "service", Origin: "https://api.example", Methods: []string{"GET"}, MaxCallsPerMinute: 5}}
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			manifest := base
+			test.mutate(&manifest)
+			err := validateManifest(manifest)
+			if test.wantError == "" {
+				if err != nil {
+					t.Fatal(err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), test.wantError) {
+				t.Fatalf("error = %v, want %q", err, test.wantError)
+			}
+		})
+	}
+}
+
+func TestResolvePluginResourcesUsesApprovalNotGuestInput(t *testing.T) {
+	manifest := PluginManifest{
+		Credentials: []CredentialDeclaration{{Slot: "service", Description: "service key", Required: true}},
+		Files:       []FileDeclaration{{Path: "usage.jsonl", Operations: []string{"append"}, MaxBytes: 200, RetainedFiles: 3}},
+		HTTPEndpoints: []HTTPEndpointDeclaration{{
+			Name: "billing", Description: "billing API", Origin: "https://suggested.example", Methods: []string{"GET", "POST"}, Required: true,
+		}},
+	}
+	resources, err := resolvePluginResources(manifest, Approval{
+		Credentials: map[string]string{"service": "operator-id"},
+		HTTPEndpoints: map[string]HTTPApproval{"billing": {
+			Origin: "https://approved.example", Methods: []string{"POST"}, TimeoutMS: 900,
+			MaxRequestBytes: 100, MaxResponseBytes: 300, MaxCallsPerMinute: 4,
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resources.Credentials["service"] != "operator-id" {
+		t.Fatalf("credentials = %+v", resources.Credentials)
+	}
+	if file := resources.Files["usage.jsonl"]; file.MaxBytes != 200 || file.RetainedFiles != 3 || !file.Operations["append"] {
+		t.Fatalf("file = %+v", file)
+	}
+	if endpoint := resources.HTTP["billing"]; endpoint.Origin != "https://approved.example" || !endpoint.Methods["POST"] || endpoint.Methods["GET"] || endpoint.MaxCallsPerMinute != 4 {
+		t.Fatalf("HTTP endpoint = %+v", endpoint)
+	}
+
+	if _, err := resolvePluginResources(manifest, Approval{Credentials: map[string]string{}, HTTPEndpoints: map[string]HTTPApproval{}}); err == nil || !strings.Contains(err.Error(), "required credential") {
+		t.Fatalf("missing required binding error = %v", err)
+	}
+}
+
 func TestDiscoverPlugins_EmptyDir(t *testing.T) {
 	dir := t.TempDir()
 	bundles, err := DiscoverPlugins(dir)
@@ -353,7 +458,7 @@ func TestValidateManifestContract(t *testing.T) {
 		ID:            "local/example",
 		Name:          "example",
 		Version:       "0.1.0",
-		ABIVersion:    "v2",
+		ABIVersion:    "v1",
 		FailureMode:   "pass",
 		Hooks:         []Hook{{Name: "run_before_request"}},
 		Permissions:   []Permission{{Name: "env.log"}},
@@ -361,10 +466,7 @@ func TestValidateManifestContract(t *testing.T) {
 	if err := validateManifest(valid); err != nil {
 		t.Fatalf("valid manifest: %v", err)
 	}
-	// v1 is now the unsupported one: this host dispatches v2 exclusively, so a
-	// v1 guest's per-hook exports are never called. Accepting its manifest
-	// would load a plugin that can never run.
-	for _, unsupported := range []string{"v1", "v3", ""} {
+	for _, unsupported := range []string{"v2", "v3", ""} {
 		invalid := valid
 		invalid.ABIVersion = unsupported
 		if err := validateManifest(invalid); err == nil {
@@ -453,7 +555,7 @@ func TestRequiresUpstreamRejectsMissingOrLaterDependencyBeforeLoadingCode(t *tes
 			ID:               id,
 			Name:             name,
 			Version:          "0.1.0",
-			ABIVersion:       "v2",
+			ABIVersion:       "v1",
 			FailureMode:      "pass",
 			Repository:       "https://github.com/torana-edge/torana-plugins",
 			RequiresUpstream: requires,

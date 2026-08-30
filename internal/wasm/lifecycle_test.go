@@ -13,7 +13,7 @@ import (
 
 	"github.com/tetratelabs/wazero"
 	"github.com/tetratelabs/wazero/api"
-	pb "github.com/torana-edge/torana-plugin-sdk/pb/v2"
+	pb "github.com/torana-edge/torana-plugin-sdk/pb/v1"
 )
 
 func loadFixtureBytes(t *testing.T, name string) []byte {
@@ -452,7 +452,7 @@ func TestLifecycleLoadVsCloseOrderings(t *testing.T) {
 			t.Fatal(err)
 		}
 		for i := 0; i < 4; i++ {
-			if _, err := r.LoadPlugin(fmt.Sprintf("after-%d", i), MinimalV2Module(false)); err == nil {
+			if _, err := r.LoadPlugin(fmt.Sprintf("after-%d", i), MinimalModule(false)); err == nil {
 				t.Fatal("load succeeded after close")
 			}
 		}
@@ -466,7 +466,7 @@ func TestLifecycleLoadVsCloseOrderings(t *testing.T) {
 		rec := newEventRecorder(t)
 		rec.install(r, "rt")
 		for i := 0; i < 3; i++ {
-			if _, err := r.LoadPlugin(fmt.Sprintf("before-%d", i), MinimalV2Module(false)); err != nil {
+			if _, err := r.LoadPlugin(fmt.Sprintf("before-%d", i), MinimalModule(false)); err != nil {
 				t.Fatal(err)
 			}
 		}
@@ -510,7 +510,7 @@ func TestLifecycleConcurrentDuplicateLoads(t *testing.T) {
 	r := newTestRuntime(t)
 	rec := newEventRecorder(t)
 	rec.install(r, "rt")
-	bytes := MinimalV2Module(false)
+	bytes := MinimalModule(false)
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 	successes := 0
@@ -553,7 +553,7 @@ func TestLifecycleConstructionFailureReleasesCompiled(t *testing.T) {
 	r := newTestRuntime(t)
 	rec := newEventRecorder(t)
 	rec.install(r, "rt")
-	_, err := r.LoadPlugin("trap", MinimalV2ModuleTrapsAtInit())
+	_, err := r.LoadPlugin("trap", MinimalModuleTrapsAtInit())
 	if err == nil {
 		t.Fatal("a module that traps at init loaded")
 	}
@@ -585,7 +585,7 @@ func TestLifecycleHookDiscoveryFailureReleasesCompiled(t *testing.T) {
 	r := newTestRuntime(t)
 	rec := newEventRecorder(t)
 	rec.install(r, "rt")
-	_, err := r.LoadPlugin("nohooks", MinimalV2ModuleNoHooks())
+	_, err := r.LoadPlugin("nohooks", MinimalModuleNoHooks())
 	if err == nil {
 		t.Fatal("a guest without supported_hooks loaded")
 	}
@@ -720,7 +720,7 @@ func TestLifecycleActiveCallBlocksCompiledRelease(t *testing.T) {
 		<-release
 	}
 
-	p, err := r.LoadPlugin("fast", MinimalV2Module(false))
+	p, err := r.LoadPlugin("fast", MinimalModule(false))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -786,7 +786,7 @@ func TestLifecycleUnloadBlocksUntilCallsQuiesce(t *testing.T) {
 		<-release
 	}
 
-	p, err := r.LoadPlugin("fast", MinimalV2Module(false))
+	p, err := r.LoadPlugin("fast", MinimalModule(false))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -918,7 +918,7 @@ func TestLifecycleUnloadExactlyOnceAndRemovesReachability(t *testing.T) {
 // others require success), and validate() additionally requires the runtime
 // to end closed — a truncated scenario can never pass as a prefix.
 func TestLifecycleReferenceModelScenarios(t *testing.T) {
-	bytes := MinimalV2Module(false)
+	bytes := MinimalModule(false)
 	scenarios := []struct {
 		name string
 		run  func(t *testing.T, r *Runtime) error
@@ -995,7 +995,7 @@ func TestLifecycleReferenceModelScenarios(t *testing.T) {
 		{
 			"failed construction then load close",
 			func(t *testing.T, r *Runtime) error {
-				_, err := r.LoadPlugin("trap", MinimalV2ModuleTrapsAtInit())
+				_, err := r.LoadPlugin("trap", MinimalModuleTrapsAtInit())
 				if err == nil || strings.Contains(err.Error(), "compile") {
 					return fmt.Errorf("trap load must fail at instantiation, got %v", err)
 				}
@@ -1062,8 +1062,8 @@ func TestLifecycleHotReloadBoundary(t *testing.T) {
 	rt2 := NewRuntime(context.Background())
 	rec.install(rt2, "rt2")
 
-	digestA := MinimalV2Module(false)
-	digestB := MinimalV2Module(true) // changed bytes
+	digestA := MinimalModule(false)
+	digestB := MinimalModule(true) // changed bytes
 
 	if _, err := rt1.LoadPlugin("p", digestA); err != nil {
 		t.Fatal(err)
@@ -1160,7 +1160,7 @@ func TestLifecycleCloseKeepsReachabilityUntilQuiescence(t *testing.T) {
 		<-releaseQuiesce
 	}
 
-	p, err := r.LoadPlugin("fast", MinimalV2Module(false))
+	p, err := r.LoadPlugin("fast", MinimalModule(false))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1264,7 +1264,7 @@ func TestLifecycleCloseAllowsWinningAdmissionUntilQuiesced(t *testing.T) {
 	}
 
 	for _, n := range []string{"a", "b"} {
-		if _, err := r.LoadPlugin(n, MinimalV2Module(false)); err != nil {
+		if _, err := r.LoadPlugin(n, MinimalModule(false)); err != nil {
 			t.Fatal(err)
 		}
 	}

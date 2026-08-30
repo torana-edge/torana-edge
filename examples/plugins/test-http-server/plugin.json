@@ -3,7 +3,7 @@
   "id": "torana-test/test-http-server",
   "name": "test-http-server",
   "version": "0.1.0",
-  "abi_version": "v2",
+  "abi_version": "v1",
   "minimum_torana_version": "0.1.0",
   "failure_mode": "pass",
   "description": "Test fixture: serves an HTML page and a schema-validated agent operation over run_on_http_request",

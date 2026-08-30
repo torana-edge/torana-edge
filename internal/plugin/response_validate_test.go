@@ -7,22 +7,22 @@ import (
 
 	"github.com/torana-edge/torana-edge/internal/engine"
 	"github.com/torana-edge/torana-edge/internal/wasm"
-	pbv2 "github.com/torana-edge/torana-plugin-sdk/pb/v2"
+	pbv1 "github.com/torana-edge/torana-plugin-sdk/pb/v1"
 	"google.golang.org/protobuf/proto"
 )
 
 // ---------------------------------------------------------------------------
-// Unit tests: validateResponseReplacement over hand-built pbv2 values.
+// Unit tests: validateResponseReplacement over hand-built pbv1 values.
 // ---------------------------------------------------------------------------
 
 func strPtr(s string) *string { return &s }
 
-// pbv2Msg builds a ResponseMessage with the given content presence and the
+// pbMsg builds a ResponseMessage with the given content presence and the
 // requested number of structurally valid tool calls.
-func pbv2Msg(content *string, nCalls int) *pbv2.ResponseMessage {
-	m := &pbv2.ResponseMessage{Content: content}
+func pbMsg(content *string, nCalls int) *pbv1.ResponseMessage {
+	m := &pbv1.ResponseMessage{Content: content}
 	for i := 0; i < nCalls; i++ {
-		m.ToolCalls = append(m.ToolCalls, &pbv2.ToolCall{
+		m.ToolCalls = append(m.ToolCalls, &pbv1.ToolCall{
 			Id:            "call_" + string(rune('a'+i)),
 			Name:          "t",
 			ArgumentsJson: []byte(`{}`),
@@ -31,12 +31,12 @@ func pbv2Msg(content *string, nCalls int) *pbv2.ResponseMessage {
 	return m
 }
 
-func pbv2Resp(content *string, nCalls int) *pbv2.ChatResponse {
-	return &pbv2.ChatResponse{Message: pbv2Msg(content, nCalls)}
+func pbResp(content *string, nCalls int) *pbv1.ChatResponse {
+	return &pbv1.ChatResponse{Message: pbMsg(content, nCalls)}
 }
 
 func TestValidateResponseReplacementNilReplacement(t *testing.T) {
-	current := pbv2Resp(strPtr("hi"), 1)
+	current := pbResp(strPtr("hi"), 1)
 	if err := validateResponseReplacement(current, nil); err != nil {
 		t.Errorf("nil replacement must pass through: %v", err)
 	}
@@ -46,8 +46,8 @@ func TestValidateResponseReplacementMessagePresence(t *testing.T) {
 	t.Run("dropped", func(t *testing.T) {
 		// A response IS one message; a replacement with no message at all is
 		// a structural lie, not a mutation.
-		current := pbv2Resp(nil, 1)
-		replacement := &pbv2.ChatResponse{}
+		current := pbResp(nil, 1)
+		replacement := &pbv1.ChatResponse{}
 		err := validateResponseReplacement(current, replacement)
 		if err == nil {
 			t.Fatal("dropping the assistant message must be rejected")
@@ -57,8 +57,8 @@ func TestValidateResponseReplacementMessagePresence(t *testing.T) {
 		}
 	})
 	t.Run("invented", func(t *testing.T) {
-		current := &pbv2.ChatResponse{}
-		replacement := pbv2Resp(nil, 0)
+		current := &pbv1.ChatResponse{}
+		replacement := pbResp(nil, 0)
 		err := validateResponseReplacement(current, replacement)
 		if err == nil {
 			t.Fatal("inventing an assistant message where the accepted response had none must be rejected")
@@ -68,7 +68,7 @@ func TestValidateResponseReplacementMessagePresence(t *testing.T) {
 		}
 	})
 	t.Run("both absent", func(t *testing.T) {
-		if err := validateResponseReplacement(&pbv2.ChatResponse{}, &pbv2.ChatResponse{}); err != nil {
+		if err := validateResponseReplacement(&pbv1.ChatResponse{}, &pbv1.ChatResponse{}); err != nil {
 			t.Errorf("both absent must be valid: %v", err)
 		}
 	})
@@ -90,8 +90,8 @@ func TestValidateResponseReplacementToolCallCardinality(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			err := validateResponseReplacement(
-				pbv2Resp(nil, tc.currentCalls),
-				pbv2Resp(nil, tc.replacementCalls),
+				pbResp(nil, tc.currentCalls),
+				pbResp(nil, tc.replacementCalls),
 			)
 			if err == nil {
 				t.Fatalf("cardinality change %d -> %d must be rejected", tc.currentCalls, tc.replacementCalls)
@@ -102,7 +102,7 @@ func TestValidateResponseReplacementToolCallCardinality(t *testing.T) {
 		})
 	}
 	t.Run("equal counts allowed", func(t *testing.T) {
-		if err := validateResponseReplacement(pbv2Resp(nil, 2), pbv2Resp(nil, 2)); err != nil {
+		if err := validateResponseReplacement(pbResp(nil, 2), pbResp(nil, 2)); err != nil {
 			t.Errorf("equal cardinality must be valid: %v", err)
 		}
 	})
@@ -128,8 +128,8 @@ func TestValidateResponseReplacementContentPresence(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			err := validateResponseReplacement(
-				pbv2Resp(tc.currentContent, 0),
-				pbv2Resp(tc.replacementContent, 0),
+				pbResp(tc.currentContent, 0),
+				pbResp(tc.replacementContent, 0),
 			)
 			if tc.wantRejected {
 				if err == nil {
@@ -150,8 +150,8 @@ func TestValidateResponseReplacementContentPresence(t *testing.T) {
 // refused entirely on the cardinality violation — nothing about it is accepted
 // piecemeal.
 func TestValidateResponseReplacementAtomicRejection(t *testing.T) {
-	current := pbv2Resp(strPtr("original"), 2)
-	replacement := pbv2Resp(strPtr("poisoned-content"), 1)
+	current := pbResp(strPtr("original"), 2)
+	replacement := pbResp(strPtr("poisoned-content"), 1)
 	err := validateResponseReplacement(current, replacement)
 	if err == nil {
 		t.Fatal("a replacement that drops a tool call must be rejected even when its other changes are individually legal")
@@ -164,24 +164,24 @@ func TestValidateResponseReplacementAtomicRejection(t *testing.T) {
 // hostOwnedBase builds a fully-populated ChatResponse: every host-owned field
 // set, plus one tool call with a bound signature. Tests clone it and mutate a
 // single aspect, so a rejection can be attributed to exactly that change.
-func hostOwnedBase() *pbv2.ChatResponse {
+func hostOwnedBase() *pbv1.ChatResponse {
 	content := "hi"
-	return &pbv2.ChatResponse{
+	return &pbv1.ChatResponse{
 		Model:                  "gpt-4o",
 		Id:                     "resp_42",
 		FinishReason:           "stop",
 		UpstreamStatus:         200,
 		DurationMs:             1337,
 		ProviderExtensionsJson: []byte(`{"safety":{"blocked":false}}`),
-		Usage: &pbv2.Usage{
+		Usage: &pbv1.Usage{
 			InputTokens:      11,
 			OutputTokens:     22,
 			CacheReadTokens:  33,
 			CacheWriteTokens: 44,
 		},
-		Message: &pbv2.ResponseMessage{
+		Message: &pbv1.ResponseMessage{
 			Content: &content,
-			ToolCalls: []*pbv2.ToolCall{
+			ToolCalls: []*pbv1.ToolCall{
 				{Id: "call_a", Name: "get_weather", ArgumentsJson: []byte(`{"city":"sf"}`), Signature: "tok_abc"},
 			},
 		},
@@ -196,18 +196,18 @@ func TestValidateResponseReplacementHostOwnedChatResponseFields(t *testing.T) {
 	base := hostOwnedBase()
 	cases := []struct {
 		name   string
-		mutate func(*pbv2.ChatResponse)
+		mutate func(*pbv1.ChatResponse)
 	}{
-		{"model", func(r *pbv2.ChatResponse) { r.Model = "gpt-3.5" }},
-		{"id", func(r *pbv2.ChatResponse) { r.Id = "resp_forged" }},
-		{"finish_reason", func(r *pbv2.ChatResponse) { r.FinishReason = "length" }},
-		{"upstream_status", func(r *pbv2.ChatResponse) { r.UpstreamStatus = 500 }},
-		{"duration_ms", func(r *pbv2.ChatResponse) { r.DurationMs = 1 }},
-		{"provider_extensions_json", func(r *pbv2.ChatResponse) { r.ProviderExtensionsJson = []byte(`{"safety":{"blocked":true}}`) }},
+		{"model", func(r *pbv1.ChatResponse) { r.Model = "gpt-3.5" }},
+		{"id", func(r *pbv1.ChatResponse) { r.Id = "resp_forged" }},
+		{"finish_reason", func(r *pbv1.ChatResponse) { r.FinishReason = "length" }},
+		{"upstream_status", func(r *pbv1.ChatResponse) { r.UpstreamStatus = 500 }},
+		{"duration_ms", func(r *pbv1.ChatResponse) { r.DurationMs = 1 }},
+		{"provider_extensions_json", func(r *pbv1.ChatResponse) { r.ProviderExtensionsJson = []byte(`{"safety":{"blocked":true}}`) }},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name+" changed", func(t *testing.T) {
-			replacement := proto.Clone(base).(*pbv2.ChatResponse)
+			replacement := proto.Clone(base).(*pbv1.ChatResponse)
 			tc.mutate(replacement)
 			err := validateResponseReplacement(base, replacement)
 			if err == nil {
@@ -219,7 +219,7 @@ func TestValidateResponseReplacementHostOwnedChatResponseFields(t *testing.T) {
 		})
 	}
 	t.Run("identical re-emission accepted", func(t *testing.T) {
-		replacement := proto.Clone(base).(*pbv2.ChatResponse)
+		replacement := proto.Clone(base).(*pbv1.ChatResponse)
 		if err := validateResponseReplacement(base, replacement); err != nil {
 			t.Errorf("identical re-emission must be accepted: %v", err)
 		}
@@ -233,16 +233,16 @@ func TestValidateResponseReplacementHostOwnedUsage(t *testing.T) {
 	base := hostOwnedBase()
 	counts := []struct {
 		name string
-		mut  func(*pbv2.Usage)
+		mut  func(*pbv1.Usage)
 	}{
-		{"input_tokens", func(u *pbv2.Usage) { u.InputTokens++ }},
-		{"output_tokens", func(u *pbv2.Usage) { u.OutputTokens++ }},
-		{"cache_read_tokens", func(u *pbv2.Usage) { u.CacheReadTokens++ }},
-		{"cache_write_tokens", func(u *pbv2.Usage) { u.CacheWriteTokens++ }},
+		{"input_tokens", func(u *pbv1.Usage) { u.InputTokens++ }},
+		{"output_tokens", func(u *pbv1.Usage) { u.OutputTokens++ }},
+		{"cache_read_tokens", func(u *pbv1.Usage) { u.CacheReadTokens++ }},
+		{"cache_write_tokens", func(u *pbv1.Usage) { u.CacheWriteTokens++ }},
 	}
 	for _, tc := range counts {
 		t.Run(tc.name+" changed", func(t *testing.T) {
-			replacement := proto.Clone(base).(*pbv2.ChatResponse)
+			replacement := proto.Clone(base).(*pbv1.ChatResponse)
 			tc.mut(replacement.Usage)
 			err := validateResponseReplacement(base, replacement)
 			if err == nil {
@@ -254,29 +254,29 @@ func TestValidateResponseReplacementHostOwnedUsage(t *testing.T) {
 		})
 	}
 	t.Run("usage dropped", func(t *testing.T) {
-		replacement := proto.Clone(base).(*pbv2.ChatResponse)
+		replacement := proto.Clone(base).(*pbv1.ChatResponse)
 		replacement.Usage = nil
 		if err := validateResponseReplacement(base, replacement); err == nil {
 			t.Fatal("dropping usage must be rejected")
 		}
 	})
 	t.Run("usage invented", func(t *testing.T) {
-		current := proto.Clone(base).(*pbv2.ChatResponse)
+		current := proto.Clone(base).(*pbv1.ChatResponse)
 		current.Usage = nil
 		if err := validateResponseReplacement(current, base); err == nil {
 			t.Fatal("inventing usage where the provider reported none must be rejected")
 		}
 	})
 	t.Run("both absent accepted", func(t *testing.T) {
-		current := proto.Clone(base).(*pbv2.ChatResponse)
+		current := proto.Clone(base).(*pbv1.ChatResponse)
 		current.Usage = nil
-		replacement := proto.Clone(current).(*pbv2.ChatResponse)
+		replacement := proto.Clone(current).(*pbv1.ChatResponse)
 		if err := validateResponseReplacement(current, replacement); err != nil {
 			t.Errorf("both-absent usage must be accepted: %v", err)
 		}
 	})
 	t.Run("identical tally accepted", func(t *testing.T) {
-		if err := validateResponseReplacement(base, proto.Clone(base).(*pbv2.ChatResponse)); err != nil {
+		if err := validateResponseReplacement(base, proto.Clone(base).(*pbv1.ChatResponse)); err != nil {
 			t.Errorf("identical usage must be accepted: %v", err)
 		}
 	})
@@ -287,7 +287,7 @@ func TestValidateResponseReplacementHostOwnedUsage(t *testing.T) {
 func TestValidateResponseReplacementToolCallId(t *testing.T) {
 	t.Run("single call", func(t *testing.T) {
 		base := hostOwnedBase()
-		replacement := proto.Clone(base).(*pbv2.ChatResponse)
+		replacement := proto.Clone(base).(*pbv1.ChatResponse)
 		replacement.Message.ToolCalls[0].Id = "forged_id"
 		err := validateResponseReplacement(base, replacement)
 		if err == nil {
@@ -300,8 +300,8 @@ func TestValidateResponseReplacementToolCallId(t *testing.T) {
 	t.Run("second call indexed", func(t *testing.T) {
 		current := hostOwnedBase()
 		current.Message.ToolCalls = append(current.Message.ToolCalls,
-			&pbv2.ToolCall{Id: "call_b", Name: "search", ArgumentsJson: []byte(`{}`)})
-		replacement := proto.Clone(current).(*pbv2.ChatResponse)
+			&pbv1.ToolCall{Id: "call_b", Name: "search", ArgumentsJson: []byte(`{}`)})
+		replacement := proto.Clone(current).(*pbv1.ChatResponse)
 		replacement.Message.ToolCalls[1].Id = "forged_b"
 		err := validateResponseReplacement(current, replacement)
 		if err == nil {
@@ -322,7 +322,7 @@ func TestValidateResponseReplacementToolCallId(t *testing.T) {
 // (replaced with another non-empty token), added (minted where none existed).
 func TestValidateResponseReplacementSignatureMatrix(t *testing.T) {
 	base := hostOwnedBase() // call 0: signature "tok_abc"
-	changeContent := func(r *pbv2.ChatResponse) {
+	changeContent := func(r *pbv1.ChatResponse) {
 		r.Message.ToolCalls[0].Name = "get_forecast"
 		r.Message.ToolCalls[0].ArgumentsJson = []byte(`{"zip":94110}`)
 	}
@@ -343,9 +343,9 @@ func TestValidateResponseReplacementSignatureMatrix(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			current := proto.Clone(base).(*pbv2.ChatResponse)
+			current := proto.Clone(base).(*pbv1.ChatResponse)
 			current.Message.ToolCalls[0].Signature = tc.curSig
-			replacement := proto.Clone(current).(*pbv2.ChatResponse)
+			replacement := proto.Clone(current).(*pbv1.ChatResponse)
 			replacement.Message.ToolCalls[0].Signature = tc.repSig
 			if tc.contentChg {
 				changeContent(replacement)
@@ -370,7 +370,7 @@ func TestValidateResponseReplacementSignatureMatrix(t *testing.T) {
 // host-owned facts untouched, id kept, presence and cardinality fixed.
 func TestValidateResponseReplacementMixedValidMutation(t *testing.T) {
 	current := hostOwnedBase()
-	replacement := proto.Clone(current).(*pbv2.ChatResponse)
+	replacement := proto.Clone(current).(*pbv1.ChatResponse)
 	tc := replacement.Message.ToolCalls[0]
 	tc.Name = "get_forecast"
 	tc.ArgumentsJson = []byte(`{"zip":94110}`)
@@ -385,38 +385,38 @@ func TestValidateResponseReplacementMixedValidMutation(t *testing.T) {
 // host-owned ChatResponse facts are still facts — a plugin must not forge
 // them just because there is no assistant turn to anchor the comparison.
 func TestValidateResponseReplacementNoMessageHostOwned(t *testing.T) {
-	base := &pbv2.ChatResponse{
+	base := &pbv1.ChatResponse{
 		Model:                  "gpt-x",
 		Id:                     "resp_1",
 		FinishReason:           "stop",
-		Usage:                  &pbv2.Usage{InputTokens: 1, OutputTokens: 2},
+		Usage:                  &pbv1.Usage{InputTokens: 1, OutputTokens: 2},
 		UpstreamStatus:         200,
 		DurationMs:             99,
 		ProviderExtensionsJson: []byte(`{"x":1}`),
 	}
-	forge := func(mut func(r *pbv2.ChatResponse)) {
-		replacement := proto.Clone(base).(*pbv2.ChatResponse)
+	forge := func(mut func(r *pbv1.ChatResponse)) {
+		replacement := proto.Clone(base).(*pbv1.ChatResponse)
 		mut(replacement)
 		err := validateResponseReplacement(base, replacement)
 		if err == nil {
 			t.Errorf("no-message replacement forging host-owned fields must be rejected")
 		}
 	}
-	forge(func(r *pbv2.ChatResponse) { r.Model = "gpt-y" })
-	forge(func(r *pbv2.ChatResponse) { r.Id = "resp_forged" })
-	forge(func(r *pbv2.ChatResponse) { r.FinishReason = "tool_use" })
-	forge(func(r *pbv2.ChatResponse) { r.Usage.OutputTokens = 999 })
-	forge(func(r *pbv2.ChatResponse) { r.UpstreamStatus = 500 })
-	forge(func(r *pbv2.ChatResponse) { r.DurationMs = 1 })
-	forge(func(r *pbv2.ChatResponse) { r.ProviderExtensionsJson = []byte(`{}`) })
+	forge(func(r *pbv1.ChatResponse) { r.Model = "gpt-y" })
+	forge(func(r *pbv1.ChatResponse) { r.Id = "resp_forged" })
+	forge(func(r *pbv1.ChatResponse) { r.FinishReason = "tool_use" })
+	forge(func(r *pbv1.ChatResponse) { r.Usage.OutputTokens = 999 })
+	forge(func(r *pbv1.ChatResponse) { r.UpstreamStatus = 500 })
+	forge(func(r *pbv1.ChatResponse) { r.DurationMs = 1 })
+	forge(func(r *pbv1.ChatResponse) { r.ProviderExtensionsJson = []byte(`{}`) })
 	// A plugin may not invent a Usage block where the provider reported none.
-	noUsage := proto.Clone(base).(*pbv2.ChatResponse)
+	noUsage := proto.Clone(base).(*pbv1.ChatResponse)
 	noUsage.Usage = nil
 	if err := validateResponseReplacement(noUsage, base); err == nil {
 		t.Errorf("inventing usage on a no-message response must be rejected")
 	}
 	// Identical re-emission stays valid.
-	if err := validateResponseReplacement(base, proto.Clone(base).(*pbv2.ChatResponse)); err != nil {
+	if err := validateResponseReplacement(base, proto.Clone(base).(*pbv1.ChatResponse)); err != nil {
 		t.Errorf("identical no-message replacement must pass: %v", err)
 	}
 }
@@ -431,8 +431,8 @@ func TestClearStaleSignatures(t *testing.T) {
 	base := hostOwnedBase() // call 0: id call_a, name t, args {}, signature tok_abc
 
 	// Stale: token left untouched while name/args changed -> cleared.
-	current := proto.Clone(base).(*pbv2.ChatResponse)
-	replacement := proto.Clone(current).(*pbv2.ChatResponse)
+	current := proto.Clone(base).(*pbv1.ChatResponse)
+	replacement := proto.Clone(current).(*pbv1.ChatResponse)
 	replacement.Message.ToolCalls[0].Name = "get_forecast"
 	replacement.Message.ToolCalls[0].ArgumentsJson = []byte(`{"zip":94110}`)
 	clearStaleSignatures(current, replacement)
@@ -441,8 +441,8 @@ func TestClearStaleSignatures(t *testing.T) {
 	}
 
 	// Already cleared after a covered mutation: untouched by normalization.
-	current = proto.Clone(base).(*pbv2.ChatResponse)
-	replacement = proto.Clone(current).(*pbv2.ChatResponse)
+	current = proto.Clone(base).(*pbv1.ChatResponse)
+	replacement = proto.Clone(current).(*pbv1.ChatResponse)
 	replacement.Message.ToolCalls[0].ArgumentsJson = []byte(`{"a":1}`)
 	replacement.Message.ToolCalls[0].Signature = ""
 	clearStaleSignatures(current, replacement)
@@ -451,16 +451,16 @@ func TestClearStaleSignatures(t *testing.T) {
 	}
 
 	// No covered change: the token stays (intact pass-through).
-	current = proto.Clone(base).(*pbv2.ChatResponse)
-	replacement = proto.Clone(current).(*pbv2.ChatResponse)
+	current = proto.Clone(base).(*pbv1.ChatResponse)
+	replacement = proto.Clone(current).(*pbv1.ChatResponse)
 	clearStaleSignatures(current, replacement)
 	if got := replacement.Message.ToolCalls[0].Signature; got != "tok_abc" {
 		t.Errorf("intact token must survive normalization, got %q", got)
 	}
 
 	// No-message responses: no tool calls to normalize, no panic.
-	empty := &pbv2.ChatResponse{Model: "m"}
-	clearStaleSignatures(empty, proto.Clone(empty).(*pbv2.ChatResponse))
+	empty := &pbv1.ChatResponse{Model: "m"}
+	clearStaleSignatures(empty, proto.Clone(empty).(*pbv1.ChatResponse))
 }
 
 // ---------------------------------------------------------------------------

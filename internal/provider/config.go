@@ -4,8 +4,10 @@
 package provider
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/url"
 	"os"
@@ -27,13 +29,10 @@ type Provider struct {
 	Format              string                     `json:"format"`                         // wire format: "openai", "anthropic", "bedrock", "gemini", "gemini-codeassist"
 	Fallback            []string                   `json:"fallback,omitempty"`             // provider names to try on 429/5xx
 	ResponsesCompaction *ResponsesCompactionConfig `json:"responses_compaction,omitempty"` // native OpenAI Responses context compaction; nil disables it
-	// APIKeyEnv names an environment variable holding this provider's own
-	// API key. Used when a plugin reroutes a request here
-	// (env.route_request) — the caller's credential is never forwarded to a
-	// rerouted provider. Empty means the provider needs no auth (e.g. a
-	// local model server).
-	APIKeyEnv string `json:"api_key_env,omitempty"`
-	APIKeyEnc string `json:"api_key_enc,omitempty"`
+	// Auth states where upstream authentication comes from. Caller uses the
+	// immutable credential captured at ingress; credential resolves a named
+	// Torana credential; none sends no credential.
+	Auth ProviderAuth `json:"auth"`
 	// Pricing is optional, operator-supplied pricing by exact model name.
 	// "*" may be used as a provider default. Torana intentionally ships no
 	// built-in rates because provider prices and cache semantics change.
@@ -42,21 +41,37 @@ type Provider struct {
 	// whether reads refresh them. Neither is discoverable from the wire, and
 	// nil means unknown. See CacheConfig.
 	Cache *CacheConfig `json:"cache,omitempty"`
-	// ForwardCallerCredential lets this provider receive the CALLER's
-	// credential when it is used as a failover target and declares no key of
-	// its own.
-	//
-	// Off by default, because the default is the safe one: a fallback is
-	// normally a different vendor, and forwarding vendor A's key to vendor B
-	// leaks it. But a fallback is not always a different vendor — a second
-	// endpoint or region of the same one, or a local model server, is a
-	// legitimate and documented setup, and there the caller's credential is
-	// exactly the right one to send.
-	//
-	// Naming it is better than inferring it: a host-comparison heuristic
-	// cannot tell a second OpenAI endpoint from an unrelated vendor behind a
-	// proxy, and guessing wrong either leaks a key or breaks failover.
-	ForwardCallerCredential bool `json:"forward_caller_credential,omitempty"`
+}
+
+type ProviderAuth struct {
+	Mode       string `json:"mode"` // caller | credential | none
+	Credential string `json:"credential,omitempty"`
+}
+
+// EffectiveMode returns the configured mode. An omitted auth object defaults
+// to caller passthrough, which is the least-surprising first-run behavior for
+// a reverse proxy: Torana neither stores nor invents a provider credential.
+// Operators must opt into host-managed credentials or unauthenticated access.
+func (a ProviderAuth) EffectiveMode() string {
+	if a.Mode == "" {
+		return "caller"
+	}
+	return a.Mode
+}
+
+type CredentialsConfig struct {
+	Sources map[string]CredentialSource `json:"sources"`
+	Entries map[string]CredentialEntry  `json:"entries"`
+}
+
+type CredentialSource struct {
+	Type   string          `json:"type"`
+	Config json.RawMessage `json:"config,omitempty"`
+}
+
+type CredentialEntry struct {
+	Source string `json:"source"`
+	Key    string `json:"key"`
 }
 
 var supportedFormats = map[string]struct{}{
@@ -76,6 +91,43 @@ func supportedFormatNames() string {
 	}
 	sort.Strings(names)
 	return strings.Join(names, ", ")
+}
+
+func (a ProviderAuth) Validate(providerName string, credentials CredentialsConfig) error {
+	mode := a.EffectiveMode()
+	switch mode {
+	case "caller", "none":
+		if a.Credential != "" {
+			return fmt.Errorf("provider %q auth mode %q must not name a credential", providerName, mode)
+		}
+	case "credential":
+		if strings.TrimSpace(a.Credential) == "" {
+			return fmt.Errorf("provider %q auth mode credential requires credential", providerName)
+		}
+		if _, ok := credentials.Entries[a.Credential]; !ok {
+			return fmt.Errorf("provider %q references unknown credential %q", providerName, a.Credential)
+		}
+	default:
+		return fmt.Errorf("provider %q auth.mode must be caller, credential, or none", providerName)
+	}
+	return nil
+}
+
+func (c CredentialsConfig) Validate() error {
+	for name, source := range c.Sources {
+		if strings.TrimSpace(name) == "" || strings.TrimSpace(source.Type) == "" {
+			return fmt.Errorf("credential sources require non-empty names and types")
+		}
+	}
+	for id, entry := range c.Entries {
+		if strings.TrimSpace(id) == "" || strings.TrimSpace(entry.Source) == "" || strings.TrimSpace(entry.Key) == "" {
+			return fmt.Errorf("credential entries require non-empty id, source, and key")
+		}
+		if _, ok := c.Sources[entry.Source]; !ok {
+			return fmt.Errorf("credential %q references unknown source %q", id, entry.Source)
+		}
+	}
+	return nil
 }
 
 // Validate rejects configuration that cannot be routed deterministically.
@@ -125,6 +177,9 @@ func (c Config) Validate() error {
 					name, configured.Format, supportedFormatNames())
 			}
 		}
+		if err := configured.Auth.Validate(name, c.Credentials); err != nil {
+			return err
+		}
 		for _, fallback := range configured.Fallback {
 			if fallback == name {
 				return fmt.Errorf("provider %q cannot fall back to itself", name)
@@ -144,6 +199,9 @@ func (c Config) Validate() error {
 				return fmt.Errorf("provider %q pricing for model %q must contain only finite, non-negative rates", name, model)
 			}
 		}
+	}
+	if err := c.Credentials.Validate(); err != nil {
+		return err
 	}
 	if err := c.Offload.Validate(c.Providers); err != nil {
 		return err
@@ -187,7 +245,7 @@ func (c Config) UnauthenticatedFallbacks() []string {
 			if !ok || seen[fbName] {
 				continue
 			}
-			if fb.APIKeyEnv == "" && fb.APIKeyEnc == "" && !fb.ForwardCallerCredential {
+			if fb.Auth.EffectiveMode() == "none" {
 				seen[fbName] = true
 				names = append(names, fbName)
 			}
@@ -209,12 +267,13 @@ func (p Provider) PricingFor(model string) (economics.ModelPricing, bool) {
 
 // Config is the top-level Torana configuration.
 type Config struct {
-	Managed   bool                `json:"managed,omitempty"`
-	Port      int                 `json:"port"`
-	Providers map[string]Provider `json:"providers"`
-	Plugins   PluginsConfig       `json:"plugins,omitempty"`
-	Limits    Limits              `json:"limits,omitempty"`
-	Offload   OffloadConfig       `json:"offload,omitempty"`
+	Managed     bool                `json:"managed,omitempty"`
+	Port        int                 `json:"port"`
+	Providers   map[string]Provider `json:"providers"`
+	Credentials CredentialsConfig   `json:"credentials,omitempty"`
+	Plugins     PluginsConfig       `json:"plugins,omitempty"`
+	Limits      Limits              `json:"limits,omitempty"`
+	Offload     OffloadConfig       `json:"offload,omitempty"`
 	// Cache selects the cross-request plugin state backend: in-process
 	// memory (default) or Redis for distributed / restart-safe deployments.
 	Cache cache.Config `json:"cache,omitempty"`
@@ -222,8 +281,6 @@ type Config struct {
 	// base URL (e.g. the Antigravity CLI), routing intercepted hosts into the
 	// provider pipeline. Disabled unless configured.
 	MITM MITMConfig `json:"mitm,omitempty"`
-	// ControlPlane configures access control for the /_torana/* endpoints.
-	ControlPlane ControlPlaneConfig `json:"control_plane,omitempty"`
 	// Audit is a sensitive, operator-owned JSONL record of intercepted
 	// inference requests. It is disabled by default and never applies to
 	// transparent auxiliary traffic.
@@ -325,10 +382,6 @@ type OffloadConfig struct {
 	Provider string `json:"provider,omitempty"`
 	// Model is the cheap model requested for summarization.
 	Model string `json:"model,omitempty"`
-	// APIKeyEnv names an environment variable holding a dedicated offload
-	// API key. When empty, the caller's request credential is reused.
-	APIKeyEnv string `json:"api_key_env,omitempty"`
-	APIKeyEnc string `json:"api_key_enc,omitempty"`
 }
 
 // ResponsesCompactionConfig enables provider-native compaction for OpenAI
@@ -482,6 +535,9 @@ func (o OffloadConfig) Validate(providers map[string]Provider) error {
 	if p.Format != "openai" {
 		return fmt.Errorf("offload.provider %q must use the openai format, has %q", o.Provider, p.Format)
 	}
+	if p.Auth.EffectiveMode() == "caller" {
+		return fmt.Errorf("offload.provider %q uses caller auth; host-originated offload requires credential or none", o.Provider)
+	}
 	if o.Model == "" {
 		return fmt.Errorf("offload.model must be set when offload is enabled")
 	}
@@ -492,15 +548,6 @@ func (o OffloadConfig) Validate(providers map[string]Provider) error {
 type Limits struct {
 	Concurrency int `json:"concurrency,omitempty"`
 	RPM         int `json:"rpm,omitempty"`
-}
-
-// ControlPlaneConfig reserves settings for a future authenticated remote control
-// plane. The embedded control plane is localhost-only in v1; AllowRemote and
-// Token are retained only so older config files continue to parse and are not
-// silently lost. They do not enable remote access.
-type ControlPlaneConfig struct {
-	AllowRemote bool   `json:"allow_remote,omitempty"`
-	Token       string `json:"token,omitempty"`
 }
 
 // PluginsConfig controls WASM plugin loading and execution.
@@ -596,32 +643,48 @@ func (p PluginRuntimeConfig) InstanceIdleTimeout() time.Duration {
 }
 
 type PluginApproval struct {
-	Digest      string   `json:"digest"`
-	Permissions []string `json:"permissions"`
-	FailureMode string   `json:"failure_mode,omitempty"`
+	Digest        string                        `json:"digest"`
+	Permissions   []string                      `json:"permissions"`
+	FailureMode   string                        `json:"failure_mode,omitempty"`
+	Credentials   map[string]string             `json:"credentials,omitempty"`
+	HTTPEndpoints map[string]PluginHTTPApproval `json:"http_endpoints,omitempty"`
+}
+
+type PluginHTTPApproval struct {
+	Origin            string   `json:"origin"`
+	Methods           []string `json:"methods"`
+	TimeoutMS         int      `json:"timeout_ms,omitempty"`
+	MaxRequestBytes   int64    `json:"max_request_bytes,omitempty"`
+	MaxResponseBytes  int64    `json:"max_response_bytes,omitempty"`
+	MaxCallsPerMinute int      `json:"max_calls_per_minute,omitempty"`
 }
 
 // DefaultConfig returns the built-in configuration for common providers.
 // Users override or extend this with a config.json file.
 func DefaultConfig() Config {
 	return Config{
-		Port: 8080,
+		Port:        8080,
+		Credentials: CredentialsConfig{Sources: map[string]CredentialSource{"env": {Type: "env"}, "local": {Type: "local"}}, Entries: map[string]CredentialEntry{}},
 		Providers: map[string]Provider{
 			"deepseek": {
 				URL:    "https://api.deepseek.com",
 				Format: "openai",
+				Auth:   ProviderAuth{Mode: "caller"},
 			},
 			"deepseek-anthropic": {
 				URL:    "https://api.deepseek.com/anthropic",
 				Format: "anthropic",
+				Auth:   ProviderAuth{Mode: "caller"},
 			},
 			"openai": {
 				URL:    "https://api.openai.com",
 				Format: "openai",
+				Auth:   ProviderAuth{Mode: "caller"},
 			},
 			"anthropic": {
 				URL:    "https://api.anthropic.com",
 				Format: "anthropic",
+				Auth:   ProviderAuth{Mode: "caller"},
 			},
 		},
 	}
@@ -642,8 +705,13 @@ func Load(path string) (Config, error) {
 	}
 
 	var user Config
-	if err := json.Unmarshal(raw, &user); err != nil {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&user); err != nil {
 		return cfg, fmt.Errorf("parsing config %q: %w", path, err)
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		return cfg, fmt.Errorf("parsing config %q: trailing JSON", path)
 	}
 
 	if user.Managed {
@@ -691,6 +759,9 @@ func Load(path string) (Config, error) {
 	for name, p := range user.Providers {
 		cfg.Providers[name] = p
 	}
+	if has("credentials") {
+		cfg.Credentials = user.Credentials
+	}
 	if has("plugins") {
 		cfg.Plugins = user.Plugins
 	}
@@ -705,9 +776,6 @@ func Load(path string) (Config, error) {
 	}
 	if has("mitm") {
 		cfg.MITM = user.MITM
-	}
-	if has("control_plane") {
-		cfg.ControlPlane = user.ControlPlane
 	}
 	if has("audit") {
 		cfg.Audit = user.Audit

@@ -6,19 +6,19 @@ import (
 	"strings"
 	"testing"
 
-	pbv2 "github.com/torana-edge/torana-plugin-sdk/pb/v2"
+	pbv1 "github.com/torana-edge/torana-plugin-sdk/pb/v1"
 	"google.golang.org/protobuf/proto"
 )
 
-// This file used to pin the v1 denial envelope
+// This file pins the typed denial envelope
 // (`{"status":"error","message":"permission denied"}`) as a wire constant that
 // published plugin binaries matched verbatim.
 //
-// That contract is gone. The host refuses any manifest that is not ABI v2, and
-// every v2 denial is a framed HostCallResult error arm, so a guest classifies a
+// That contract is gone. The host refuses any manifest that is not ABI v1, and
+// every current ABI denial is a framed HostCallResult error arm, so a guest classifies a
 // refusal by CODE rather than by matching a string. The tests now pin the
 // replacement — including that the old envelope does not come back, since
-// reintroducing it would surface inside a v2 guest as a protocol error rather
+// reintroducing it would surface inside a plugin guest as a protocol error rather
 // than as the refusal it is.
 
 const legacyDenialEnvelope = `{"status":"error","message":"permission denied"}`
@@ -27,7 +27,7 @@ const legacyDenialEnvelope = `{"status":"error","message":"permission denied"}`
 func TestDenialIsFramedNotAStringEnvelope(t *testing.T) {
 	r := NewRuntime(context.Background())
 	defer r.Close()
-	p, err := r.LoadPlugin("denial-fixture", MinimalV2Module(false))
+	p, err := r.LoadPlugin("denial-fixture", MinimalModule(false))
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
@@ -35,21 +35,21 @@ func TestDenialIsFramedNotAStringEnvelope(t *testing.T) {
 
 	raw := r.dispatchHostCallForTest(context.Background(), p.name, "env.meta_get", "")
 	if string(raw) == legacyDenialEnvelope {
-		t.Fatal("the host returned the v1 denial string; a v2 guest decodes replies as " +
+		t.Fatal("the host returned the legacy denial string; a plugin guest decodes replies as " +
 			"HostCallResult, so this surfaces as a protocol error rather than a refusal")
 	}
-	var res pbv2.HostCallResult
+	var res pbv1.HostCallResult
 	if err := proto.Unmarshal(raw, &res); err != nil {
 		t.Fatalf("denial does not decode as HostCallResult: %v", err)
 	}
 	if err := res.Validate(); err != nil {
 		t.Fatalf("denial is not a valid HostCallResult: %v", err)
 	}
-	e, ok := res.Result.(*pbv2.HostCallResult_Error)
+	e, ok := res.Result.(*pbv1.HostCallResult_Error)
 	if !ok {
 		t.Fatal("a denied call succeeded")
 	}
-	if e.Error.Code != pbv2.ErrorCode_ERROR_CODE_PERMISSION_DENIED {
+	if e.Error.Code != pbv1.ErrorCode_ERROR_CODE_PERMISSION_DENIED {
 		t.Fatalf("got %v, want PERMISSION_DENIED", e.Error.Code)
 	}
 }
@@ -61,7 +61,7 @@ func TestLegacyDenialEnvelopeIsGone(t *testing.T) {
 		t.Fatal(err)
 	}
 	if strings.Contains(string(src), legacyDenialEnvelope) {
-		t.Error("the v1 denial envelope is back in runtime.go. Every v2 denial must be " +
+		t.Error("the legacy denial envelope is back in runtime.go. Every denial must be " +
 			"a framed HostCallResult error arm; a string envelope is indistinguishable " +
 			"from a corrupt reply to a guest that decodes protobuf.")
 	}
@@ -72,7 +72,7 @@ func TestLegacyDenialEnvelopeIsGone(t *testing.T) {
 // env.meta_get read request metadata with NO grant check, so a handwritten
 // guest could declare only env.meta_set and still read. env.abort logged
 // without env.log. Both bypassed the per-command dispatcher boundary entirely,
-// and neither is imported by either v2 SDK.
+// and neither is imported by either current ABI SDK.
 //
 // Asserted against the instantiated host module rather than the source, because
 // what matters is what a guest can actually import.
@@ -132,11 +132,11 @@ func TestOriginalsDistinguishAbsenceFromCapturedEmpty(t *testing.T) {
 			r, p := newGrantedPlugin(t, tc.cmd)
 			tc.set(r, false, nil)
 			res := hostCallDirect(t, r, p, tc.cmd, nil)
-			e, isErr := res.Result.(*pbv2.HostCallResult_Error)
+			e, isErr := res.Result.(*pbv1.HostCallResult_Error)
 			if !isErr {
 				t.Fatal("an uncaptured original reported success")
 			}
-			if e.Error.Code != pbv2.ErrorCode_ERROR_CODE_NOT_FOUND {
+			if e.Error.Code != pbv1.ErrorCode_ERROR_CODE_NOT_FOUND {
 				t.Fatalf("got %v, want NOT_FOUND", e.Error.Code)
 			}
 		})
@@ -145,7 +145,7 @@ func TestOriginalsDistinguishAbsenceFromCapturedEmpty(t *testing.T) {
 			r, p := newGrantedPlugin(t, tc.cmd)
 			tc.set(r, true, nil)
 			res := hostCallDirect(t, r, p, tc.cmd, nil)
-			v, isVal := res.Result.(*pbv2.HostCallResult_Value)
+			v, isVal := res.Result.(*pbv1.HostCallResult_Value)
 			if !isVal {
 				t.Fatalf("a captured empty original was reported as an error: %+v", res.Result)
 			}
@@ -158,7 +158,7 @@ func TestOriginalsDistinguishAbsenceFromCapturedEmpty(t *testing.T) {
 			r, p := newGrantedPlugin(t, tc.cmd)
 			tc.set(r, true, []byte("pristine"))
 			res := hostCallDirect(t, r, p, tc.cmd, nil)
-			v, isVal := res.Result.(*pbv2.HostCallResult_Value)
+			v, isVal := res.Result.(*pbv1.HostCallResult_Value)
 			if !isVal || string(v.Value) != "pristine" {
 				t.Fatalf("got %+v, want the captured bytes", res.Result)
 			}

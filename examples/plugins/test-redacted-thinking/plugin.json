@@ -3,7 +3,7 @@
   "id": "torana-test/test-redacted-thinking",
   "name": "test-redacted-thinking",
   "version": "0.1.0",
-  "abi_version": "v2",
+  "abi_version": "v1",
   "failure_mode": "block",
   "description": "Test fixture: appends an SDK-valid redacted-thinking message the openai/bedrock adapters cannot marshal",
   "hooks": [

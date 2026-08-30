@@ -4,7 +4,7 @@
 package blockutil
 
 import (
-	pb "github.com/torana-edge/torana-plugin-sdk/pb/v2"
+	pb "github.com/torana-edge/torana-plugin-sdk/pb/v1"
 )
 
 // TextBlocks wraps one text value as a single Text block.

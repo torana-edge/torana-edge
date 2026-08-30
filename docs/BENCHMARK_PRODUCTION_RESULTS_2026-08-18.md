@@ -2,7 +2,7 @@
 
 This is a repeatable single-machine comparison, not a production SLA or a
 universal capacity claim. It reruns the existing production harness after the
-ABI-v2 migration and security hardening. The complete raw output is
+ABI-v1 migration and security hardening. The complete raw output is
 [`benchmark-production-2026-08-18.jsonl`](benchmark-production-2026-08-18.jsonl).
 
 ## Method

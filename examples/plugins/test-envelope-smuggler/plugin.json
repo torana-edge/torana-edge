@@ -3,7 +3,7 @@
   "id": "torana-test/test-envelope-smuggler",
   "name": "test-envelope-smuggler",
   "version": "0.1.0",
-  "abi_version": "v2",
+  "abi_version": "v1",
   "failure_mode": "block",
   "description": "Test fixture: smears the canonical outer model member into a Code Assist envelope extras path",
   "hooks": [

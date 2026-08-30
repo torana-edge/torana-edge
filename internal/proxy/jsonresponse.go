@@ -115,7 +115,7 @@ type responseRefs struct {
 	usage    *engine.StreamUsage // provider-reported token usage (read-only)
 	// id and finishReason are OBSERVED host-owned facts. They were hard-coded
 	// empty in the hook input, so a plugin received typed fields the provider
-	// had actually supplied and saw nothing — the same hostile silence v2
+	// had actually supplied and saw nothing — the same hostile silence current ABI
 	// exists to remove, just on the read side instead of the write side.
 	id           string
 	finishReason string

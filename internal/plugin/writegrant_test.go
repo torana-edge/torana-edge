@@ -12,7 +12,7 @@ import (
 	"github.com/torana-edge/torana-edge/internal/engine/pbconv"
 	"github.com/torana-edge/torana-edge/internal/wasm"
 	"github.com/torana-edge/torana-plugin-sdk/outboundpolicy"
-	pb "github.com/torana-edge/torana-plugin-sdk/pb/v2"
+	pb "github.com/torana-edge/torana-plugin-sdk/pb/v1"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -579,18 +579,18 @@ func TestVerifyRequestMutationSignatureMatrix(t *testing.T) {
 		// scheduling and the nested content digest.
 		{name: "tool result untouched", base: toolResultSignedRequest, want: ""},
 		{name: "tool result content changed token kept -> stale", base: toolResultSignedRequest,
-			want: "plugin torana.v2.RequestToolResultBlock signature stale",
+			want: "plugin torana.v1.RequestToolResultBlock signature stale",
 			apply: func(r *pb.ChatRequest) {
 				r.Messages[3].Blocks[0].GetToolResult().Content[0].GetText().Text = "B'"
 			}},
 		{name: "tool result will_continue presence changed token kept -> stale", base: toolResultSignedRequest,
-			want:  "plugin torana.v2.RequestToolResultBlock signature stale",
+			want:  "plugin torana.v1.RequestToolResultBlock signature stale",
 			apply: func(r *pb.ChatRequest) { f := false; setToolResultWC(r.Messages[3], &f) }},
 		{name: "tool result scheduling value changed token kept -> stale", base: toolResultSignedRequest,
-			want:  "plugin torana.v2.RequestToolResultBlock signature stale",
+			want:  "plugin torana.v1.RequestToolResultBlock signature stale",
 			apply: func(r *pb.ChatRequest) { v := "SILENT"; setToolResultSched(r.Messages[3], &v) }},
 		{name: "tool result metadata changed token kept -> stale", base: toolResultSignedRequest,
-			want:  "plugin torana.v2.RequestToolResultBlock signature stale",
+			want:  "plugin torana.v1.RequestToolResultBlock signature stale",
 			apply: func(r *pb.ChatRequest) { setToolResultMeta(r.Messages[3], `{"src":"x"}`) }},
 		{name: "tool result content changed token cleared -> accepted", base: toolResultSignedRequest,
 			apply: func(r *pb.ChatRequest) {
@@ -598,7 +598,7 @@ func TestVerifyRequestMutationSignatureMatrix(t *testing.T) {
 				setToolResultSig(r.Messages[3], "")
 			}},
 		{name: "tool result token forged -> forged", base: toolResultSignedRequest,
-			want:  "plugin torana.v2.RequestToolResultBlock signature forged",
+			want:  "plugin torana.v1.RequestToolResultBlock signature forged",
 			apply: func(r *pb.ChatRequest) { setToolResultSig(r.Messages[3], "evil") }},
 		// Metadata is a covered carrier on EVERY signed block kind.
 		{name: "thinking metadata changed token kept -> stale", base: thinkingSignedRequest,
@@ -618,7 +618,7 @@ func TestVerifyRequestMutationSignatureMatrix(t *testing.T) {
 				r.Messages[2].Blocks[0].GetToolUse().Signature = ""
 			}},
 		{name: "unknown metadata changed token kept -> stale", base: unknownSignedRequest,
-			want:  "plugin torana.v2.RequestUnknownBlock signature stale",
+			want:  "plugin torana.v1.RequestUnknownBlock signature stale",
 			apply: func(r *pb.ChatRequest) { setUnknownMeta(r.Messages[1], `{"src":"x"}`) }},
 		{name: "unknown metadata changed token cleared -> accepted", base: unknownSignedRequest,
 			apply: func(r *pb.ChatRequest) {
@@ -1103,12 +1103,12 @@ func TestRequestSignatureBindingsArePinned(t *testing.T) {
 	}
 
 	wantFields := map[string]bool{
-		"torana.v2.RequestThinkingBlock":          true,
-		"torana.v2.RequestTextBlock":              true,
-		"torana.v2.RequestToolUseBlock":           true,
-		"torana.v2.RequestToolResultBlock":        true,
-		"torana.v2.RequestUnknownBlock":           true,
-		"torana.v2.RequestTrailingSignatureBlock": true,
+		"torana.v1.RequestThinkingBlock":          true,
+		"torana.v1.RequestTextBlock":              true,
+		"torana.v1.RequestToolUseBlock":           true,
+		"torana.v1.RequestToolResultBlock":        true,
+		"torana.v1.RequestUnknownBlock":           true,
+		"torana.v1.RequestTrailingSignatureBlock": true,
 	}
 	if len(got) != len(wantFields) {
 		t.Fatalf("request signature bindings = %v, want exactly %v", got, wantFields)
@@ -1123,12 +1123,12 @@ func TestRequestSignatureBindingsArePinned(t *testing.T) {
 	// token, will_continue/scheduling presence-aware, content via the SDK
 	// nested digest).
 	wantCovered := map[string][]string{
-		"torana.v2.RequestThinkingBlock":          {"text", "part_metadata_json"},
-		"torana.v2.RequestTextBlock":              {"text", "part_metadata_json"},
-		"torana.v2.RequestToolUseBlock":           {"id", "name", "arguments_json", "part_metadata_json"},
-		"torana.v2.RequestToolResultBlock":        {"tool_call_id", "tool_name", "part_metadata_json", "will_continue", "scheduling", "content"},
-		"torana.v2.RequestUnknownBlock":           {"kind", "payload_json", "part_metadata_json"},
-		"torana.v2.RequestTrailingSignatureBlock": {"part_metadata_json", "torana.v2.RequestTextBlock.text", "torana.v2.RequestThinkingBlock.text"},
+		"torana.v1.RequestThinkingBlock":          {"text", "part_metadata_json"},
+		"torana.v1.RequestTextBlock":              {"text", "part_metadata_json"},
+		"torana.v1.RequestToolUseBlock":           {"id", "name", "arguments_json", "part_metadata_json"},
+		"torana.v1.RequestToolResultBlock":        {"tool_call_id", "tool_name", "part_metadata_json", "will_continue", "scheduling", "content"},
+		"torana.v1.RequestUnknownBlock":           {"kind", "payload_json", "part_metadata_json"},
+		"torana.v1.RequestTrailingSignatureBlock": {"part_metadata_json", "torana.v1.RequestTextBlock.text", "torana.v1.RequestThinkingBlock.text"},
 	}
 	for field, want := range wantCovered {
 		if strings.Join(covered[field], ",") != strings.Join(want, ",") {
@@ -1694,9 +1694,9 @@ func independentTrailingStream(m *pb.Message) []byte {
 		var ident, val []byte
 		switch {
 		case b.GetText() != nil:
-			ident, val = []byte("torana.v2.RequestTextBlock.text"), []byte(b.GetText().Text)
+			ident, val = []byte("torana.v1.RequestTextBlock.text"), []byte(b.GetText().Text)
 		case b.GetThinking() != nil:
-			ident, val = []byte("torana.v2.RequestThinkingBlock.text"), []byte(b.GetThinking().Text)
+			ident, val = []byte("torana.v1.RequestThinkingBlock.text"), []byte(b.GetThinking().Text)
 		default:
 			continue // uncovered interleaved block
 		}
@@ -1812,10 +1812,10 @@ func TestTrailingDigestsMatchIndependentReference(t *testing.T) {
 			var ident, val []byte
 			switch {
 			case b.GetText() != nil:
-				ident, val = []byte("torana.v2.RequestTextBlock.text"), []byte(b.GetText().Text)
+				ident, val = []byte("torana.v1.RequestTextBlock.text"), []byte(b.GetText().Text)
 			case b.GetThinking() != nil:
 				// THE BUG: thinking framed under the TEXT identity.
-				ident, val = []byte("torana.v2.RequestTextBlock.text"), []byte(b.GetThinking().Text)
+				ident, val = []byte("torana.v1.RequestTextBlock.text"), []byte(b.GetThinking().Text)
 			default:
 				continue
 			}

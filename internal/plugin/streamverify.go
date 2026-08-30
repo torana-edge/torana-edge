@@ -5,7 +5,7 @@ import (
 	"strings"
 
 	"github.com/torana-edge/torana-plugin-sdk/outboundpolicy"
-	pbv2 "github.com/torana-edge/torana-plugin-sdk/pb/v2"
+	pbv1 "github.com/torana-edge/torana-plugin-sdk/pb/v1"
 )
 
 // Stream signature verification (Migration B, part 2a; reworked per the
@@ -170,7 +170,7 @@ type openNonTool struct {
 	kind  openBlockKind
 }
 
-func validateAcceptedStream(events []*pbv2.StreamEvent) error {
+func validateAcceptedStream(events []*pbv1.StreamEvent) error {
 	var nonTool *openNonTool
 	var openTools = make(map[int32]bool)
 	var seen = make(map[int32]bool) // every started index, tool or not
@@ -188,24 +188,24 @@ func validateAcceptedStream(events []*pbv2.StreamEvent) error {
 			// differ on where it lands); StreamError is terminal at any point.
 			// No other content/block event may follow MessageStop.
 			switch ev.Event.(type) {
-			case *pbv2.StreamEvent_Usage, *pbv2.StreamEvent_Error:
+			case *pbv1.StreamEvent_Usage, *pbv1.StreamEvent_Error:
 			default:
 				return &acceptedStreamError{msg: fmt.Sprintf("event at position %d after MessageStop", i)}
 			}
 		}
 		switch e := ev.Event.(type) {
-		case *pbv2.StreamEvent_Error:
+		case *pbv1.StreamEvent_Error:
 			sawError = true
-		case *pbv2.StreamEvent_Usage:
+		case *pbv1.StreamEvent_Usage:
 			// No stream state to enforce for Usage.
-		case *pbv2.StreamEvent_MessageStart:
+		case *pbv1.StreamEvent_MessageStart:
 			// Message framing; nothing to enforce before MessageStop.
-		case *pbv2.StreamEvent_MessageStop:
+		case *pbv1.StreamEvent_MessageStop:
 			if nonTool != nil || len(openTools) > 0 {
 				return &acceptedStreamError{msg: fmt.Sprintf("MessageStop at position %d while a content block is still open", i)}
 			}
 			messageStopped = true
-		case *pbv2.StreamEvent_ContentBlockStart:
+		case *pbv1.StreamEvent_ContentBlockStart:
 			spanOpen = false // any start closes an implicit run, as in the scope walk
 			idx := e.ContentBlockStart.Index
 			if seen[idx] {
@@ -213,7 +213,7 @@ func validateAcceptedStream(events []*pbv2.StreamEvent) error {
 			}
 			seen[idx] = true
 			switch e.ContentBlockStart.Block.(type) {
-			case *pbv2.ContentBlockStart_Text:
+			case *pbv1.ContentBlockStart_Text:
 				if nonTool != nil {
 					return &acceptedStreamError{msg: fmt.Sprintf("non-tool content block start at position %d while a %s block is open", i, nonTool.kind)}
 				}
@@ -221,7 +221,7 @@ func validateAcceptedStream(events []*pbv2.StreamEvent) error {
 					return &acceptedStreamError{msg: fmt.Sprintf("non-tool content block start at position %d while a tool block is open", i)}
 				}
 				nonTool = &openNonTool{index: idx, kind: textBlockOpen}
-			case *pbv2.ContentBlockStart_Thinking:
+			case *pbv1.ContentBlockStart_Thinking:
 				if nonTool != nil {
 					return &acceptedStreamError{msg: fmt.Sprintf("non-tool content block start at position %d while a %s block is open", i, nonTool.kind)}
 				}
@@ -229,7 +229,7 @@ func validateAcceptedStream(events []*pbv2.StreamEvent) error {
 					return &acceptedStreamError{msg: fmt.Sprintf("non-tool content block start at position %d while a tool block is open", i)}
 				}
 				nonTool = &openNonTool{index: idx, kind: thinkingBlockOpen}
-			case *pbv2.ContentBlockStart_Provider:
+			case *pbv1.ContentBlockStart_Provider:
 				if nonTool != nil {
 					return &acceptedStreamError{msg: fmt.Sprintf("non-tool content block start at position %d while a %s block is open", i, nonTool.kind)}
 				}
@@ -237,13 +237,13 @@ func validateAcceptedStream(events []*pbv2.StreamEvent) error {
 					return &acceptedStreamError{msg: fmt.Sprintf("non-tool content block start at position %d while a tool block is open", i)}
 				}
 				nonTool = &openNonTool{index: idx, kind: providerBlockOpen}
-			case *pbv2.ContentBlockStart_ToolCall:
+			case *pbv1.ContentBlockStart_ToolCall:
 				if nonTool != nil {
 					return &acceptedStreamError{msg: fmt.Sprintf("tool call block start at position %d while a non-tool block is open", i)}
 				}
 				openTools[idx] = true
 			}
-		case *pbv2.StreamEvent_ContentBlockStop:
+		case *pbv1.StreamEvent_ContentBlockStop:
 			idx := e.ContentBlockStop.Index
 			if openTools[idx] {
 				delete(openTools, idx)
@@ -255,7 +255,7 @@ func validateAcceptedStream(events []*pbv2.StreamEvent) error {
 				continue
 			}
 			return &acceptedStreamError{msg: fmt.Sprintf("content block stop at position %d names no open block", i)}
-		case *pbv2.StreamEvent_TextDelta:
+		case *pbv1.StreamEvent_TextDelta:
 			if nonTool != nil && nonTool.kind != textBlockOpen {
 				return &acceptedStreamError{msg: fmt.Sprintf("text delta at position %d inside a %s block", i, nonTool.kind)}
 			}
@@ -263,7 +263,7 @@ func validateAcceptedStream(events []*pbv2.StreamEvent) error {
 				return &acceptedStreamError{msg: fmt.Sprintf("text delta at position %d while a tool block is open", i)}
 			}
 			spanOpen, sawText = true, true
-		case *pbv2.StreamEvent_ThinkingDelta:
+		case *pbv1.StreamEvent_ThinkingDelta:
 			if nonTool != nil && nonTool.kind != thinkingBlockOpen {
 				return &acceptedStreamError{msg: fmt.Sprintf("thinking delta at position %d inside a %s block", i, nonTool.kind)}
 			}
@@ -271,7 +271,7 @@ func validateAcceptedStream(events []*pbv2.StreamEvent) error {
 				return &acceptedStreamError{msg: fmt.Sprintf("thinking delta at position %d while a tool block is open", i)}
 			}
 			spanOpen, sawText = true, true
-		case *pbv2.StreamEvent_SignatureDelta:
+		case *pbv1.StreamEvent_SignatureDelta:
 			// Mirrors the scope walk: an open span or an open text/thinking
 			// block is current (the signature ends the span); a signature
 			// inside an open tool/provider block, or one with no text/thinking
@@ -283,7 +283,7 @@ func validateAcceptedStream(events []*pbv2.StreamEvent) error {
 			if (nonTool != nil && nonTool.kind == providerBlockOpen) || len(openTools) > 0 || !sawText {
 				return &acceptedStreamError{msg: "signature_delta has no covered content (does not bind tool-call blocks)"}
 			}
-		case *pbv2.StreamEvent_ToolCallDelta:
+		case *pbv1.StreamEvent_ToolCallDelta:
 			if !openTools[e.ToolCallDelta.Index] {
 				return &acceptedStreamError{msg: fmt.Sprintf("tool call delta at position %d names no open tool block (%d)", i, e.ToolCallDelta.Index)}
 			}
@@ -357,17 +357,17 @@ type toolCallScope struct {
 // builder per open block. Exposed (unexported) for the wrong-verifier
 // discrimination tests, which build incorrect variants on top of it exactly
 // as the SDK's TestWrongVerifiersFailTheFixtures does.
-func toolCallScopeOf(events []*pbv2.StreamEvent, index int32) toolCallScope {
+func toolCallScopeOf(events []*pbv1.StreamEvent, index int32) toolCallScope {
 	var s toolCallScope
 	s.index = index
 	for _, ev := range events {
 		switch e := ev.Event.(type) {
-		case *pbv2.StreamEvent_ContentBlockStart:
+		case *pbv1.StreamEvent_ContentBlockStart:
 			cbs := e.ContentBlockStart
 			if cbs.Index != index {
 				continue
 			}
-			tc, ok := cbs.Block.(*pbv2.ContentBlockStart_ToolCall)
+			tc, ok := cbs.Block.(*pbv1.ContentBlockStart_ToolCall)
 			if !ok {
 				continue
 			}
@@ -375,7 +375,7 @@ func toolCallScopeOf(events []*pbv2.StreamEvent, index int32) toolCallScope {
 			s.signature = tc.ToolCall.Signature
 			s.id = tc.ToolCall.Id
 			s.name = tc.ToolCall.Name
-		case *pbv2.StreamEvent_ToolCallDelta:
+		case *pbv1.StreamEvent_ToolCallDelta:
 			if e.ToolCallDelta.Index == index {
 				s.arguments += e.ToolCallDelta.ArgumentsDelta
 			}
@@ -526,7 +526,7 @@ type streamSignatureView struct {
 // block opens a fresh span: each provider part's text is scoped separately,
 // matching the SDK's "same provider part carried text/thinking and a
 // thoughtSignature".
-func scanStreamSignatures(events []*pbv2.StreamEvent) streamSignatureView {
+func scanStreamSignatures(events []*pbv1.StreamEvent) streamSignatureView {
 	var v streamSignatureView
 	var blockOpen, blockText bool
 	var blockSawSpan bool // the open explicit text/thinking block already closed a span (round-2 F3)
@@ -584,29 +584,29 @@ func scanStreamSignatures(events []*pbv2.StreamEvent) streamSignatureView {
 
 	for _, ev := range events {
 		switch e := ev.Event.(type) {
-		case *pbv2.StreamEvent_ContentBlockStart:
+		case *pbv1.StreamEvent_ContentBlockStart:
 			closeSpan() // any start closes an implicit run AND clears residual span state (round-5)
 			cbs := e.ContentBlockStart
 			switch cbs.Block.(type) {
-			case *pbv2.ContentBlockStart_Text:
+			case *pbv1.ContentBlockStart_Text:
 				blockOpen, blockText = true, true
 				blockSawSpan = false
 				spanTextSeen = true // the explicit block's kind marks the empty scope (round-4 F1)
-			case *pbv2.ContentBlockStart_Thinking:
+			case *pbv1.ContentBlockStart_Thinking:
 				blockOpen, blockText = true, true
 				blockSawSpan = false
 				spanThinkSeen = true
-			case *pbv2.ContentBlockStart_ToolCall:
+			case *pbv1.ContentBlockStart_ToolCall:
 				if _, ok := openTools[cbs.Index]; !ok {
 					b := &toolScopeBuilder{index: cbs.Index}
-					tc := cbs.Block.(*pbv2.ContentBlockStart_ToolCall).ToolCall
+					tc := cbs.Block.(*pbv1.ContentBlockStart_ToolCall).ToolCall
 					b.signature, b.id, b.name = tc.Signature, tc.Id, tc.Name
 					openTools[cbs.Index] = b
 				}
-			case *pbv2.ContentBlockStart_Provider:
+			case *pbv1.ContentBlockStart_Provider:
 				blockOpen, blockText = true, false
 			}
-		case *pbv2.StreamEvent_ContentBlockStop:
+		case *pbv1.StreamEvent_ContentBlockStop:
 			if b, ok := openTools[e.ContentBlockStop.Index]; ok {
 				delete(openTools, e.ContentBlockStop.Index)
 				v.toolScopes = append(v.toolScopes, b.scope())
@@ -627,11 +627,11 @@ func scanStreamSignatures(events []*pbv2.StreamEvent) streamSignatureView {
 			}
 			closeSpan()
 			blockOpen, blockText, blockSawSpan = false, false, false
-		case *pbv2.StreamEvent_ToolCallDelta:
+		case *pbv1.StreamEvent_ToolCallDelta:
 			if b, ok := openTools[e.ToolCallDelta.Index]; ok {
 				b.args.WriteString(e.ToolCallDelta.ArgumentsDelta)
 			}
-		case *pbv2.StreamEvent_TextDelta:
+		case *pbv1.StreamEvent_TextDelta:
 			if (blockOpen && !blockText) || len(openTools) > 0 {
 				continue // ABI-violating text; charged by the strict walk
 			}
@@ -639,7 +639,7 @@ func scanStreamSignatures(events []*pbv2.StreamEvent) streamSignatureView {
 			spanTextSeen = true // even an EMPTY delta marks the arm (round-4 F1)
 			spanText.WriteString(e.TextDelta)
 			spanOpen = true
-		case *pbv2.StreamEvent_ThinkingDelta:
+		case *pbv1.StreamEvent_ThinkingDelta:
 			if (blockOpen && !blockText) || len(openTools) > 0 {
 				continue // ABI-violating thinking; charged by the strict walk
 			}
@@ -647,7 +647,7 @@ func scanStreamSignatures(events []*pbv2.StreamEvent) streamSignatureView {
 			spanThinkSeen = true // even an EMPTY delta marks the arm (round-4 F1)
 			spanThink.WriteString(e.ThinkingDelta)
 			spanOpen = true
-		case *pbv2.StreamEvent_SignatureDelta:
+		case *pbv1.StreamEvent_SignatureDelta:
 			switch {
 			case spanOpen || (blockOpen && blockText):
 				// Open text/thinking span: current-block binding over the
@@ -727,7 +727,7 @@ const streamWriteGrant = "ir.stream.write"
 //
 // canWrite reports whether the plugin holds a named write grant; a nil
 // canWrite is treated as holding none (verification never assumes grants).
-func verifyStream(accepted, returned []*pbv2.StreamEvent, canWrite func(string) bool) error {
+func verifyStream(accepted, returned []*pbv1.StreamEvent, canWrite func(string) bool) error {
 	if canWrite == nil {
 		canWrite = func(string) bool { return false }
 	}
@@ -750,7 +750,7 @@ func verifyStream(accepted, returned []*pbv2.StreamEvent, canWrite func(string) 
 // stop, and applying the end-of-stream rule here would turn that valid prefix
 // into a host defect.  Strict completeness remains mandatory at MessageStop
 // and EndStreamVerified.
-func verifyStreamPrefix(accepted, returned []*pbv2.StreamEvent, canWrite func(string) bool) error {
+func verifyStreamPrefix(accepted, returned []*pbv1.StreamEvent, canWrite func(string) bool) error {
 	if canWrite == nil {
 		canWrite = func(string) bool { return false }
 	}

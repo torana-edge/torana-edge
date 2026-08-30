@@ -3,7 +3,7 @@
   "id": "torana-test/test-trapper",
   "name": "test-trapper",
   "version": "0.1.0",
-  "abi_version": "v2",
+  "abi_version": "v1",
   "failure_mode": "block",
   "description": "Always traps; proves failure_mode block is enforced at the transport boundary",
   "hooks": [{"name": "run_before_request"}],

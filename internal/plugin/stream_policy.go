@@ -4,7 +4,7 @@ package plugin
 //
 // The SDK owns the inventory.  This host-side walk deliberately consumes that
 // inventory instead of maintaining a second table of stream fields: adding a
-// field to the v2 proto without a policy makes outboundpolicy.Validate fail at
+// field to the current ABI proto without a policy makes outboundpolicy.Validate fail at
 // startup, and this walk then has one authoritative answer for every field.
 //
 // Stream events are different from ordinary protobuf replacement messages in
@@ -22,7 +22,7 @@ import (
 	"fmt"
 
 	"github.com/torana-edge/torana-plugin-sdk/outboundpolicy"
-	pbv2 "github.com/torana-edge/torana-plugin-sdk/pb/v2"
+	pbv1 "github.com/torana-edge/torana-plugin-sdk/pb/v1"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protoreflect"
 )
@@ -31,7 +31,7 @@ import (
 // completed transaction.  It intentionally has no fast path: host-owned facts
 // and unknown protobuf bytes must be checked even for a plugin holding every
 // write grant.
-func verifyStreamPolicy(accepted, returned []*pbv2.StreamEvent, canWrite func(string) bool) error {
+func verifyStreamPolicy(accepted, returned []*pbv1.StreamEvent, canWrite func(string) bool) error {
 	if canWrite == nil {
 		canWrite = func(string) bool { return false }
 	}
@@ -62,7 +62,7 @@ func (d streamPolicyDiff) topology(path string) error {
 // Count/action/boundary changes and moved exact events require topology;
 // added/removed residual events still recurse to charge semantic fields and
 // reject host-owned facts.
-func (d streamPolicyDiff) events(accepted, returned []*pbv2.StreamEvent, path string) error {
+func (d streamPolicyDiff) events(accepted, returned []*pbv1.StreamEvent, path string) error {
 	if len(accepted) != len(returned) {
 		if err := d.topology(path); err != nil {
 			return err
@@ -131,7 +131,7 @@ type exactEventMatch struct {
 // every remaining proto.Equal occurrence by a deterministic wire key. The
 // same-position phase gives duplicate events a stable, minimum-movement
 // correspondence; the second phase makes a reordering topology-only.
-func exactEventMatches(accepted, returned []*pbv2.StreamEvent) ([]exactEventMatch, error) {
+func exactEventMatches(accepted, returned []*pbv1.StreamEvent) ([]exactEventMatch, error) {
 	acceptedReserved := make([]bool, len(accepted))
 	returnedReserved := make([]bool, len(returned))
 	matches := make([]exactEventMatch, 0, min(len(accepted), len(returned)))
@@ -173,7 +173,7 @@ func exactEventMatches(accepted, returned []*pbv2.StreamEvent) ([]exactEventMatc
 	return matches, nil
 }
 
-func streamEventWireKey(ev *pbv2.StreamEvent) (string, error) {
+func streamEventWireKey(ev *pbv1.StreamEvent) (string, error) {
 	if ev == nil {
 		return "<nil>", nil
 	}
@@ -184,14 +184,14 @@ func streamEventWireKey(ev *pbv2.StreamEvent) (string, error) {
 	return string(wire), nil
 }
 
-func eventArm(ev *pbv2.StreamEvent) string {
+func eventArm(ev *pbv1.StreamEvent) string {
 	if ev == nil || ev.Event == nil {
 		return "<nil>"
 	}
 	return fmt.Sprintf("%T", ev.Event)
 }
 
-func (d streamPolicyDiff) event(accepted, returned *pbv2.StreamEvent, path string) error {
+func (d streamPolicyDiff) event(accepted, returned *pbv1.StreamEvent, path string) error {
 	if accepted == nil || returned == nil {
 		if accepted == returned {
 			return nil
@@ -225,7 +225,7 @@ func (d streamPolicyDiff) event(accepted, returned *pbv2.StreamEvent, path strin
 // added or removed event.  The caller has already charged the event action as
 // topology; this recursive pass adds semantic grants and rejects host-owned
 // facts carried by the event.
-func (d streamPolicyDiff) eventMissing(ev *pbv2.StreamEvent, path string) error {
+func (d streamPolicyDiff) eventMissing(ev *pbv1.StreamEvent, path string) error {
 	if ev == nil {
 		return nil
 	}

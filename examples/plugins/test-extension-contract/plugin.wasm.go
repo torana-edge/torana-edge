@@ -7,7 +7,7 @@ import (
 
 	"github.com/torana-edge/torana-edge/examples/plugins/blockutil"
 	sdk "github.com/torana-edge/torana-plugin-sdk"
-	pb "github.com/torana-edge/torana-plugin-sdk/pb/v2"
+	pb "github.com/torana-edge/torana-plugin-sdk/pb/v1"
 )
 
 func main() {}
@@ -135,11 +135,9 @@ func init() {
 			recordRaw(&obs, v, herr, err)
 
 		case "offload-bad-override":
-			// The obsolete guest api_key_env field is rejected outright: a
-			// caller bug, INVALID_ARGUMENT — credentials are configured on the
-			// provider, never selected by the guest.
+			// Unknown request members are rejected outright as caller bugs.
 			payload := `{"provider":"local","model":"local-1","user_prompt":"u",` +
-				`"api_key_env":"GUEST_PICKED_SECRET"}`
+				`"unexpected":"value"}`
 			v, herr, err := sdk.HostCallExtension("torana_offload_completion", []byte(payload))
 			recordRaw(&obs, v, herr, err)
 

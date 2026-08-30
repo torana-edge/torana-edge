@@ -480,7 +480,7 @@ func TestMapperSyntheticPackage(t *testing.T) {
 }
 
 // TestWasmShardIsTheFullInventory — internal/wasm's all-fixture ABI inventory
-// requires every v2 fixture.
+// requires every ABI fixture.
 func TestWasmShardIsTheFullInventory(t *testing.T) {
 	repo := repoRoot(t)
 	got := runMapper(t, repo, "internal/wasm")

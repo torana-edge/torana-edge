@@ -3,7 +3,7 @@
   "id": "torana-test/test-invalid-replacement",
   "name": "test-invalid-replacement",
   "version": "0.1.0",
-  "abi_version": "v2",
+  "abi_version": "v1",
   "failure_mode": "pass",
   "description": "Test fixture: returns a response replacement that is structurally valid for the SDK but violates the host's relative policy (invented content presence + dropped tool call), so the host must reject it atomically",
   "hooks": [
