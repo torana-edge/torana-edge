@@ -40,13 +40,16 @@ Keep that terminal open. In another terminal:
 curl --fail-with-body http://127.0.0.1:8080/health
 
 curl --fail-with-body http://127.0.0.1:8080/provider/deepseek/v1/chat/completions \
+  -H "Authorization: Bearer ${DEEPSEEK_API_KEY}" \
   -H 'Content-Type: application/json' \
   -d '{"model":"deepseek-v4-flash","messages":[{"role":"user","content":"Reply with exactly: Torana works"}]}'
 ```
 
 The health endpoint returns `{"status":"ok"}` and the second command returns a
-normal provider response. The provider key comes from the environment named by
-`api_key_env`; it is never stored in `config.json`.
+normal provider response. The caller supplies its credential, just as a harness
+does. The environment named by `api_key_env` gives Torana a provider-owned key
+for reroutes, failovers, and plugin egress; it does not inject auth into an
+ordinary caller request, and the key is never stored in `config.json`.
 
 ## Configure
 
@@ -94,9 +97,14 @@ The empty order is intentional: discovered plugins are not implicitly trusted
 or enabled. After the plugin-free request above succeeds, install one plugin:
 
 ```bash
-./torana plugin install github.com/torana-edge/torana-plugins/plugins/schema_translator
+./torana plugin install \
+  https://github.com/torana-edge/torana-plugins/tree/main/plugins/schema_translator
 ./torana plugin list
 ```
+
+You can paste a GitHub or GitLab plugin-directory URL directly. The explicit
+`.git//subdirectory@ref` coordinate remains available for other Git hosts or
+refs containing `/`.
 
 Open the Control Plane, inspect and approve the exact bundle digest and requested
 capability subset, then enable `schema_translator` and put it in the pipeline.
@@ -154,7 +162,8 @@ in [Coding-harness compatibility](HARNESS_COMPATIBILITY.md).
 You can verify the auxiliary-path half of that contract directly:
 
 ```bash
-curl -i http://127.0.0.1:8080/provider/deepseek/models
+curl -i http://127.0.0.1:8080/provider/deepseek/models \
+  -H "Authorization: Bearer ${DEEPSEEK_API_KEY}"
 ```
 
 The provider may return success or its own error for that endpoint. The important

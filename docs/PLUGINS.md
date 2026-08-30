@@ -16,6 +16,8 @@ conformance guest demonstrate the same host boundary from a second language.
 
 ```bash
 torana plugin install --official                              # the maintained set
+torana plugin install https://github.com/you/your-plugins/tree/main/plugins/foo
+torana plugin install https://gitlab.com/you/your-plugins/-/tree/main/plugins/foo
 torana plugin install github.com/you/your-plugins/plugins/foo # anyone's repo
 torana plugin install github.com/you/your-plugins/plugins/foo@v1.2.0
 torana plugin install https://gitlab.example.com/group/subgroup/repo.git//plugins/foo@v1.2.0
@@ -24,11 +26,12 @@ torana plugin list
 torana plugin remove foo
 ```
 
-GitHub's `host/owner/repo/subdirectory@ref` shorthand remains supported. For
-arbitrary HTTPS hosts and nested GitLab groups, use the unambiguous
-`.git//subdirectory@ref` form shown above. A ref may be a branch, tag, or commit
-SHA. There is no central index; `--official` is a convenience alias, not a
-privileged channel.
+GitHub and GitLab directory URLs can be copied from the browser unchanged when
+the ref has no `/`. GitHub's `host/owner/repo/subdirectory@ref` shorthand also
+remains supported. For other HTTPS hosts, or for branch and tag names containing
+`/`, use the unambiguous `.git//subdirectory@ref` form shown above. A ref may be
+a branch, tag, or commit SHA. There is no central index; `--official` is a
+convenience alias, not a privileged channel.
 
 Plugins are **compiled locally from source**, never downloaded prebuilt. Nested
 Go and Rust packages and embedded assets are supported; symlinks, special

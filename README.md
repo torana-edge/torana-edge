@@ -62,13 +62,16 @@ Torana is currently pre-release, so this walkthrough builds the reviewed
    curl --fail-with-body http://127.0.0.1:8080/health
 
    curl --fail-with-body http://127.0.0.1:8080/provider/deepseek/v1/chat/completions \
+     -H "Authorization: Bearer ${DEEPSEEK_API_KEY}" \
      -H 'Content-Type: application/json' \
      -d '{"model":"deepseek-v4-flash","messages":[{"role":"user","content":"Reply with exactly: Torana works"}]}'
    ```
 
    The first command returns `{"status":"ok"}`. The second returns a normal
-   provider response through Torana. Your configured `api_key_env` supplies the
-   upstream credential; it is not written into `config.json`.
+   provider response through Torana. The caller supplies its credential, just
+   as a harness does. The configured `api_key_env` makes the same key available
+   for Torana-initiated reroutes, failovers, and plugin egress without writing it
+   into `config.json`; it does not inject auth into an ordinary caller request.
 
 4. Point your harness at the same provider route:
 
@@ -82,9 +85,14 @@ Torana is currently pre-release, so this walkthrough builds the reviewed
 5. Only after the proxy works, install one plugin from readable source:
 
    ```bash
-   ./torana plugin install github.com/torana-edge/torana-plugins/plugins/schema_translator
+   ./torana plugin install \
+     https://github.com/torana-edge/torana-plugins/tree/main/plugins/schema_translator
    ./torana plugin list
    ```
+
+   You can paste a GitHub or GitLab plugin-directory URL directly. Torana also
+   supports `host/owner/repo/subdirectory@ref` shorthand and the explicit
+   `.git//subdirectory@ref` form for other Git hosts or refs containing `/`.
 
    Installation does **not** run the plugin. Open
    [http://127.0.0.1:8080/_torana/](http://127.0.0.1:8080/_torana/), inspect its
@@ -106,7 +114,8 @@ that boundary, request an auxiliary endpoint and confirm it does not appear in
 the live inference feed:
 
 ```bash
-curl -i http://127.0.0.1:8080/provider/deepseek/models
+curl -i http://127.0.0.1:8080/provider/deepseek/models \
+  -H "Authorization: Bearer ${DEEPSEEK_API_KEY}"
 ```
 
 The provider may return success or its own error for that path; Torana forwards

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -99,12 +100,14 @@ type source struct {
 	name    string // plugin directory name
 }
 
-// parseSource accepts either a local path or a repository path of the form
+// parseSource accepts a local path, a browser directory URL, or a repository
+// path of the form
 //
 //	github.com/owner/repo/path/to/plugin[@ref]
 //
-// Any git host works — the host is not special-cased, so a self-hosted GitLab
-// or a private mirror is as installable as GitHub. That is the point: plugin
+// Browser URLs use the ordinary GitHub /tree/ref/path or GitLab
+// /-/tree/ref/path form. Any git host also works through the explicit
+// https://host/group/repo.git//path/to/plugin@ref coordinate. Plugin
 // distribution needs no central index and no publishing step.
 func parseSource(arg string) (source, error) {
 	if arg == "" {
@@ -147,6 +150,10 @@ func parseSource(arg string) (source, error) {
 		}, nil
 	}
 
+	if browser, recognized, err := parseBrowserSource(spec); recognized {
+		return browser, err
+	}
+
 	if at := strings.LastIndex(spec, "@"); at > 0 {
 		spec, ref = spec[:at], spec[at+1:]
 	}
@@ -169,6 +176,68 @@ func parseSource(arg string) (source, error) {
 		ref:     ref,
 		name:    filepath.Base(cleanSub),
 	}, nil
+}
+
+// parseBrowserSource recognizes directory URLs copied from GitHub-compatible
+// and GitLab repository browsers. Browser routes cannot unambiguously split a
+// slash-bearing ref from the directory that follows it, so this form accepts a
+// single path-segment ref. The explicit .git//subdirectory@ref coordinate
+// remains available for refs containing slashes.
+func parseBrowserSource(arg string) (source, bool, error) {
+	u, err := url.Parse(arg)
+	if err != nil || u.Scheme == "" {
+		return source{}, false, nil
+	}
+	invalid := func() (source, bool, error) {
+		return source{}, true, fmt.Errorf("%q is not a valid repository browser URL", arg)
+	}
+	if u.Scheme != "https" || u.Host == "" || u.User != nil {
+		return invalid()
+	}
+	escaped := strings.ToLower(u.EscapedPath())
+	if strings.Contains(escaped, "%2f") || strings.Contains(escaped, "%5c") {
+		return invalid()
+	}
+	parts := strings.Split(strings.Trim(u.Path, "/"), "/")
+	if len(parts) < 5 {
+		return invalid()
+	}
+
+	var repoParts, tail []string
+	// GitLab and compatible hosts make the repository boundary explicit.
+	for i := 2; i+1 < len(parts); i++ {
+		if parts[i] == "-" && parts[i+1] == "tree" {
+			repoParts = parts[:i]
+			tail = parts[i+2:]
+			break
+		}
+	}
+	// GitHub and compatible hosts use /owner/repository/tree/ref/path.
+	if repoParts == nil && len(parts) >= 5 && parts[2] == "tree" {
+		repoParts = parts[:2]
+		tail = parts[3:]
+	}
+	if len(repoParts) < 2 || len(tail) < 2 {
+		return invalid()
+	}
+	allParts := append(append([]string(nil), repoParts...), tail...)
+	for _, part := range allParts {
+		if part == "" || part == "." || part == ".." || strings.Contains(part, "\\") {
+			return invalid()
+		}
+	}
+
+	repoPath := strings.Join(repoParts, "/")
+	if !strings.HasSuffix(repoPath, ".git") {
+		repoPath += ".git"
+	}
+	repoURL := (&url.URL{Scheme: "https", Host: u.Host, Path: "/" + repoPath}).String()
+	return source{
+		repoURL: repoURL,
+		subPath: strings.Join(tail[1:], "/"),
+		ref:     tail[0],
+		name:    tail[len(tail)-1],
+	}, true, nil
 }
 
 // fetch materializes the plugin's source directory and returns its path plus a

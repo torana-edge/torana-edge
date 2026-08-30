@@ -49,6 +49,7 @@ func Usage(w io.Writer) {
 	_, _ = fmt.Fprintln(w, "")
 	_, _ = fmt.Fprintln(w, "A source is a local path or a repository path:")
 	_, _ = fmt.Fprintln(w, "  torana plugin install ./my-plugin")
+	_, _ = fmt.Fprintln(w, "  torana plugin install https://github.com/you/your-plugins/tree/main/plugins/foo")
 	_, _ = fmt.Fprintln(w, "  torana plugin install github.com/you/your-plugins/plugins/foo")
 	_, _ = fmt.Fprintln(w, "  torana plugin install github.com/you/your-plugins/plugins/foo@v1.2.0")
 	_, _ = fmt.Fprintln(w, "  torana plugin install --official")
