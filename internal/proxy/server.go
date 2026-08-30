@@ -1199,7 +1199,8 @@ func New(cfg Config) (*Server, error) {
 			// verdicts fail open to the original route.
 			// No pipeline-wide HasGrant: the grant was checked per plugin at
 			// the host call, and asking whether ANY plugin holds it is the
-			// capability hole this migration closes.
+			// capability hole; authorization remains bound to the plugin that
+			// produced the already-validated verdict.
 			if pl := reqStateFrom(req.Context()).Pipeline; pl != nil {
 				if route := pl.Verdicts(reqStateFrom(req.Context()).ID).Route(); route != nil {
 					modelBeforeRoute := chat.Model

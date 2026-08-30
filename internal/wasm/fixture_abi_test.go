@@ -11,18 +11,9 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
-// Every fixture whose manifest claims ABI v1 must actually be a plugin guest.
-//
-// During the migration a bulk edit set `"abi_version": "v1"` on all 19 fixture
-// manifests, including two polyglot ones whose Rust and AssemblyScript sources
-// still exported the three-argument v1 hook. They were outside TESTDATA_DIRS,
-// so nothing built them and nothing noticed — a manifest advertising a contract
-// its binary does not implement, which the host would only discover at load or
-// first dispatch.
-//
-// A compile check cannot catch this: the manifest and the binary are separate
-// artifacts, and the manifest is what an operator approves. This loads the real
-// module and asks it.
+// Every fixture whose manifest claims ABI v1 must load as a current plugin guest.
+// A compile check cannot prove this because the manifest and binary are separate
+// artifacts. Load the real module and verify the contract operators approve.
 func TestFixturesClaimingV1UseCurrentABI(t *testing.T) {
 	root := filepath.Join("..", "..", "examples", "plugins")
 	entries, err := os.ReadDir(root)
@@ -69,8 +60,7 @@ func TestFixturesClaimingV1UseCurrentABI(t *testing.T) {
 
 		p, err := r.LoadPlugin(e.Name(), wasmBytes)
 		if err != nil {
-			// LoadPlugin reads supported_hooks, so a v1 guest fails here with
-			// "exports no supported_hooks" — which is the point.
+			// LoadPlugin reads supported_hooks, so an incompatible guest fails here.
 			t.Errorf("%s claims abi_version v1 but does not load as one: %v", e.Name(), err)
 			continue
 		}
@@ -89,10 +79,9 @@ func TestFixturesClaimingV1UseCurrentABI(t *testing.T) {
 	t.Logf("verified %d ABI-v1 fixtures", checked)
 }
 
-// A current ABI fixture must answer a real dispatch, not merely export the right names.
-// Export arity is invisible until the call happens: the host passed three
-// arguments to a two-argument run_hook through this entire migration and every
-// build stayed green.
+// A current ABI fixture must answer a real dispatch, not merely export the right
+// names. Export arity is invisible until the call happens, so a build-only check
+// cannot establish guest/host compatibility.
 func TestFixturesAnswerARealDispatch(t *testing.T) {
 	dir := filepath.Join("..", "..", "examples", "plugins", "test-inert-a")
 	wasmBytes, err := os.ReadFile(filepath.Join(dir, "plugin.wasm"))
