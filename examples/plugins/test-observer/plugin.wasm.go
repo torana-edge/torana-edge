@@ -5,7 +5,7 @@ import (
 	"fmt"
 
 	sdk "github.com/torana-edge/torana-plugin-sdk"
-	pb "github.com/torana-edge/torana-plugin-sdk/pb/v2"
+	pb "github.com/torana-edge/torana-plugin-sdk/pb/v1"
 )
 
 func main() {}
@@ -20,7 +20,7 @@ func main() {}
 //
 // v1 delivered all of this as a "_response" blob inside ToranaMetaJson, because
 // run_after_response was handed a ChatRequest and there was nowhere else to put
-// it. v2 has a real ChatResponse, so status, usage and duration are ordinary
+// it. current ABI has a real ChatResponse, so status, usage and duration are ordinary
 // typed fields and the fixture reads them directly. Nothing here has to know
 // the shape of a side-channel JSON object any more.
 func init() {

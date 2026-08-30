@@ -239,14 +239,19 @@ func newFailoverEnv(t *testing.T, fallbackKeyEnv string, fallbackAuthRequired st
 
 	cfg := provider.Config{
 		Providers: map[string]provider.Provider{
-			"primary": {URL: primary.URL, Fallback: []string{"backup"}},
-			"backup":  {URL: fallback.URL, APIKeyEnv: fallbackKeyEnv},
+			"primary": {URL: primary.URL, Auth: provider.ProviderAuth{Mode: "caller"}, Fallback: []string{"backup"}},
+			"backup":  {URL: fallback.URL, Auth: provider.ProviderAuth{Mode: "none"}},
 		},
 	}
+	if fallbackKeyEnv != "" {
+		backup := cfg.Providers["backup"]
+		backup.Auth = provider.ProviderAuth{Mode: "credential", Credential: fallbackKeyEnv}
+		cfg.Providers["backup"] = backup
+	}
 	env.frt = &failoverRoundTripper{
-		base:          http.DefaultTransport,
-		cfg:           func() provider.Config { return cfg },
-		resolveSecret: func(envName, _ string) string { return os.Getenv(envName) },
+		base:              http.DefaultTransport,
+		cfg:               func() provider.Config { return cfg },
+		resolveCredential: func(_ context.Context, id string) ([]byte, error) { return []byte(os.Getenv(id)), nil },
 	}
 	return env
 }
@@ -338,7 +343,9 @@ func TestFailoverStripsCredentialEvenWithoutAResolver(t *testing.T) {
 	req.Header.Set("Authorization", "Bearer caller-secret")
 	req.Header.Set("X-Api-Key", "caller-secret")
 
-	applyProviderCredential(req, provider.Provider{URL: "https://fallback.example"}, "fb", "failover", nil)
+	if err := applyProviderCredential(context.Background(), req, provider.Provider{URL: "https://fallback.example", Auth: provider.ProviderAuth{Mode: "none"}}, callerCredentialsFrom(req), nil); err != nil {
+		t.Fatal(err)
+	}
 
 	if got := req.Header.Get("Authorization"); got != "" {
 		t.Errorf("caller Authorization survived a nil resolver: %q", got)
@@ -352,7 +359,7 @@ func TestFailoverStripsCredentialEvenWithoutAResolver(t *testing.T) {
 // break: a fallback that is a second endpoint of the same vendor, or a local
 // model server, where the caller's credential is the correct one to send.
 // Both documented failover examples are that shape.
-func TestForwardCallerCredentialIsOptIn(t *testing.T) {
+func TestProviderAuthModesAreExplicit(t *testing.T) {
 	newReq := func() *http.Request {
 		r, _ := http.NewRequest(http.MethodPost, "https://primary.example/v1/chat", nil)
 		r.Header.Set("Authorization", "Bearer caller-secret")
@@ -362,7 +369,9 @@ func TestForwardCallerCredentialIsOptIn(t *testing.T) {
 
 	t.Run("off by default", func(t *testing.T) {
 		req := newReq()
-		applyProviderCredential(req, provider.Provider{}, "fb", "failover", func(string, string) string { return "" })
+		if err := applyProviderCredential(context.Background(), req, provider.Provider{Auth: provider.ProviderAuth{Mode: "none"}}, callerCredentialsFrom(req), nil); err != nil {
+			t.Fatal(err)
+		}
 		if req.Header.Get("Authorization") != "" {
 			t.Error("caller credential forwarded without opting in")
 		}
@@ -370,8 +379,9 @@ func TestForwardCallerCredentialIsOptIn(t *testing.T) {
 
 	t.Run("forwarded when declared", func(t *testing.T) {
 		req := newReq()
-		applyProviderCredential(req, provider.Provider{ForwardCallerCredential: true}, "fb", "failover",
-			func(string, string) string { return "" })
+		if err := applyProviderCredential(context.Background(), req, provider.Provider{Auth: provider.ProviderAuth{Mode: "caller"}}, callerCredentialsFrom(req), nil); err != nil {
+			t.Fatal(err)
+		}
 		if got := req.Header.Get("Authorization"); got != "Bearer caller-secret" {
 			t.Errorf("Authorization = %q, want the caller's", got)
 		}
@@ -384,8 +394,10 @@ func TestForwardCallerCredentialIsOptIn(t *testing.T) {
 		// Opting in must not override a credential the fallback declares:
 		// that would send the wrong key to a provider that has its own.
 		req := newReq()
-		applyProviderCredential(req, provider.Provider{ForwardCallerCredential: true, APIKeyEnv: "FB_KEY"},
-			"fb", "failover", func(string, string) string { return "fallback-secret" })
+		if err := applyProviderCredential(context.Background(), req, provider.Provider{Auth: provider.ProviderAuth{Mode: "credential", Credential: "fallback"}}, callerCredentialsFrom(req),
+			func(context.Context, string) ([]byte, error) { return []byte("fallback-secret"), nil }); err != nil {
+			t.Fatal(err)
+		}
 		if got := req.Header.Get("Authorization"); got != "Bearer fallback-secret" {
 			t.Errorf("Authorization = %q, want the fallback's own key", got)
 		}

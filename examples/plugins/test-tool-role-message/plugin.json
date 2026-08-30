@@ -3,7 +3,7 @@
   "id": "torana-test/test-tool-role-message",
   "name": "test-tool-role-message",
   "version": "0.1.0",
-  "abi_version": "v2",
+  "abi_version": "v1",
   "failure_mode": "block",
   "description": "Test fixture: appends an SDK-valid tool-role message the anthropic adapter cannot marshal",
   "hooks": [

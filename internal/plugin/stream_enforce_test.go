@@ -21,7 +21,7 @@ import (
 	"testing"
 
 	"github.com/torana-edge/torana-edge/internal/engine"
-	pbv2 "github.com/torana-edge/torana-plugin-sdk/pb/v2"
+	pbv1 "github.com/torana-edge/torana-plugin-sdk/pb/v1"
 )
 
 // --- walker mirror ---------------------------------------------------------
@@ -43,46 +43,46 @@ func unwrapAccepted(err error) string {
 // time) matches validateAcceptedStream's error on the same whole sequence —
 // same rule, same position, same text.
 func TestStreamDisciplineWalkerMirrorsValidateAcceptedStream(t *testing.T) {
-	seq := func(evs ...*pbv2.StreamEvent) []*pbv2.StreamEvent { return evs }
-	text := func(s string) *pbv2.StreamEvent { return textDelta(s) }
-	sig := func(s string) *pbv2.StreamEvent { return signatureDelta(s) }
-	startText := func(idx int32) *pbv2.StreamEvent {
-		return &pbv2.StreamEvent{Event: &pbv2.StreamEvent_ContentBlockStart{
-			ContentBlockStart: &pbv2.ContentBlockStart{Index: idx, Block: &pbv2.ContentBlockStart_Text{Text: &pbv2.TextBlock{}}},
+	seq := func(evs ...*pbv1.StreamEvent) []*pbv1.StreamEvent { return evs }
+	text := func(s string) *pbv1.StreamEvent { return textDelta(s) }
+	sig := func(s string) *pbv1.StreamEvent { return signatureDelta(s) }
+	startText := func(idx int32) *pbv1.StreamEvent {
+		return &pbv1.StreamEvent{Event: &pbv1.StreamEvent_ContentBlockStart{
+			ContentBlockStart: &pbv1.ContentBlockStart{Index: idx, Block: &pbv1.ContentBlockStart_Text{Text: &pbv1.TextBlock{}}},
 		}}
 	}
-	startThinking := func(idx int32) *pbv2.StreamEvent {
-		return &pbv2.StreamEvent{Event: &pbv2.StreamEvent_ContentBlockStart{
-			ContentBlockStart: &pbv2.ContentBlockStart{Index: idx, Block: &pbv2.ContentBlockStart_Thinking{Thinking: &pbv2.ThinkingBlock{}}},
+	startThinking := func(idx int32) *pbv1.StreamEvent {
+		return &pbv1.StreamEvent{Event: &pbv1.StreamEvent_ContentBlockStart{
+			ContentBlockStart: &pbv1.ContentBlockStart{Index: idx, Block: &pbv1.ContentBlockStart_Thinking{Thinking: &pbv1.ThinkingBlock{}}},
 		}}
 	}
-	startProvider := func(idx int32) *pbv2.StreamEvent {
-		return &pbv2.StreamEvent{Event: &pbv2.StreamEvent_ContentBlockStart{
-			ContentBlockStart: &pbv2.ContentBlockStart{Index: idx, Block: &pbv2.ContentBlockStart_Provider{Provider: &pbv2.ProviderBlock{Kind: "x"}}},
+	startProvider := func(idx int32) *pbv1.StreamEvent {
+		return &pbv1.StreamEvent{Event: &pbv1.StreamEvent_ContentBlockStart{
+			ContentBlockStart: &pbv1.ContentBlockStart{Index: idx, Block: &pbv1.ContentBlockStart_Provider{Provider: &pbv1.ProviderBlock{Kind: "x"}}},
 		}}
 	}
-	startTool := func(idx int32) *pbv2.StreamEvent {
-		return &pbv2.StreamEvent{Event: &pbv2.StreamEvent_ContentBlockStart{
-			ContentBlockStart: &pbv2.ContentBlockStart{Index: idx, Block: &pbv2.ContentBlockStart_ToolCall{ToolCall: &pbv2.ToolCallRef{Id: "c", Name: "n"}}},
+	startTool := func(idx int32) *pbv1.StreamEvent {
+		return &pbv1.StreamEvent{Event: &pbv1.StreamEvent_ContentBlockStart{
+			ContentBlockStart: &pbv1.ContentBlockStart{Index: idx, Block: &pbv1.ContentBlockStart_ToolCall{ToolCall: &pbv1.ToolCallRef{Id: "c", Name: "n"}}},
 		}}
 	}
-	stop := func(idx int32) *pbv2.StreamEvent {
-		return &pbv2.StreamEvent{Event: &pbv2.StreamEvent_ContentBlockStop{
-			ContentBlockStop: &pbv2.ContentBlockStop{Index: idx},
+	stop := func(idx int32) *pbv1.StreamEvent {
+		return &pbv1.StreamEvent{Event: &pbv1.StreamEvent_ContentBlockStop{
+			ContentBlockStop: &pbv1.ContentBlockStop{Index: idx},
 		}}
 	}
-	toolDelta := func(idx int32, frag string) *pbv2.StreamEvent {
-		return &pbv2.StreamEvent{Event: &pbv2.StreamEvent_ToolCallDelta{
-			ToolCallDelta: &pbv2.ToolCallDelta{Index: idx, ArgumentsDelta: frag},
+	toolDelta := func(idx int32, frag string) *pbv1.StreamEvent {
+		return &pbv1.StreamEvent{Event: &pbv1.StreamEvent_ToolCallDelta{
+			ToolCallDelta: &pbv1.ToolCallDelta{Index: idx, ArgumentsDelta: frag},
 		}}
 	}
-	msgStop := func() *pbv2.StreamEvent { return messageStopEvent("stop") }
-	usage := func() *pbv2.StreamEvent { return usageEvent() }
-	errEv := func() *pbv2.StreamEvent { return streamErrorEvent() }
+	msgStop := func() *pbv1.StreamEvent { return messageStopEvent("stop") }
+	usage := func() *pbv1.StreamEvent { return usageEvent() }
+	errEv := func() *pbv1.StreamEvent { return streamErrorEvent() }
 
 	cases := []struct {
 		name string
-		seq  []*pbv2.StreamEvent
+		seq  []*pbv1.StreamEvent
 	}{
 		{"bare text run", seq(text("a"), text("b"))},
 		{"signed text block", seq(startText(0), text("a"), sig("s"), stop(0))},
@@ -194,12 +194,12 @@ func TestEnforcePreCommitPassReplaysAcceptedEvent(t *testing.T) {
 	// The plugin's output stream already has index 0 open; it emits a second
 	// start at index 0 — a duplicate-start discipline violation.
 	accepted := textDelta("hello")
-	emitted := &pbv2.StreamEvent{Event: &pbv2.StreamEvent_ContentBlockStart{
-		ContentBlockStart: &pbv2.ContentBlockStart{Index: 0, Block: &pbv2.ContentBlockStart_Text{Text: &pbv2.TextBlock{}}},
+	emitted := &pbv1.StreamEvent{Event: &pbv1.StreamEvent_ContentBlockStart{
+		ContentBlockStart: &pbv1.ContentBlockStart{Index: 0, Block: &pbv1.ContentBlockStart_Text{Text: &pbv1.TextBlock{}}},
 	}}
 	// Open index 0 on the returned walker first.
-	if err := pvs.walker.walk(&pbv2.StreamEvent{Event: &pbv2.StreamEvent_ContentBlockStart{
-		ContentBlockStart: &pbv2.ContentBlockStart{Index: 0, Block: &pbv2.ContentBlockStart_Text{Text: &pbv2.TextBlock{}}},
+	if err := pvs.walker.walk(&pbv1.StreamEvent{Event: &pbv1.StreamEvent_ContentBlockStart{
+		ContentBlockStart: &pbv1.ContentBlockStart{Index: 0, Block: &pbv1.ContentBlockStart_Text{Text: &pbv1.TextBlock{}}},
 	}}); err != nil {
 		t.Fatalf("setup walk: %v", err)
 	}
@@ -228,12 +228,12 @@ func TestEnforcePreCommitBlockTerminates(t *testing.T) {
 	pvs.lp.failureMode = "block"
 
 	accepted := textDelta("hello")
-	emitted := &pbv2.StreamEvent{Event: &pbv2.StreamEvent_ContentBlockStart{
-		ContentBlockStart: &pbv2.ContentBlockStart{Index: 0, Block: &pbv2.ContentBlockStart_Text{Text: &pbv2.TextBlock{}}},
+	emitted := &pbv1.StreamEvent{Event: &pbv1.StreamEvent_ContentBlockStart{
+		ContentBlockStart: &pbv1.ContentBlockStart{Index: 0, Block: &pbv1.ContentBlockStart_Text{Text: &pbv1.TextBlock{}}},
 	}}
 	// Open index 0 on the returned walker first.
-	if err := pvs.walker.walk(&pbv2.StreamEvent{Event: &pbv2.StreamEvent_ContentBlockStart{
-		ContentBlockStart: &pbv2.ContentBlockStart{Index: 0, Block: &pbv2.ContentBlockStart_Text{Text: &pbv2.TextBlock{}}},
+	if err := pvs.walker.walk(&pbv1.StreamEvent{Event: &pbv1.StreamEvent_ContentBlockStart{
+		ContentBlockStart: &pbv1.ContentBlockStart{Index: 0, Block: &pbv1.ContentBlockStart_Text{Text: &pbv1.TextBlock{}}},
 	}}); err != nil {
 		t.Fatalf("setup walk: %v", err)
 	}
@@ -276,14 +276,14 @@ func TestEnforcePreCommitUnknownStopBlockTerminates(t *testing.T) {
 	}
 }
 
-func stopEvent(idx int32) *pbv2.StreamEvent {
-	return &pbv2.StreamEvent{Event: &pbv2.StreamEvent_ContentBlockStop{
-		ContentBlockStop: &pbv2.ContentBlockStop{Index: idx},
+func stopEvent(idx int32) *pbv1.StreamEvent {
+	return &pbv1.StreamEvent{Event: &pbv1.StreamEvent_ContentBlockStop{
+		ContentBlockStop: &pbv1.ContentBlockStop{Index: idx},
 	}}
 }
 
 // signedToolBlock builds the PB events of one signed tool block.
-func signedToolBlock(index int32, id, name, signature, args string) []*pbv2.StreamEvent {
+func signedToolBlock(index int32, id, name, signature, args string) []*pbv1.StreamEvent {
 	return toolBlockDeltas(index, id, name, signature, args)
 }
 
@@ -462,8 +462,8 @@ func TestEnforceEndStreamClosesFinalScope(t *testing.T) {
 func TestEnforceEndStreamHostMissingStop(t *testing.T) {
 	vs, _ := enforceState(t, "test-stream-mutator")
 
-	if err := vs.host.walk(&pbv2.StreamEvent{Event: &pbv2.StreamEvent_ContentBlockStart{
-		ContentBlockStart: &pbv2.ContentBlockStart{Index: 0, Block: &pbv2.ContentBlockStart_Text{Text: &pbv2.TextBlock{}}},
+	if err := vs.host.walk(&pbv1.StreamEvent{Event: &pbv1.StreamEvent_ContentBlockStart{
+		ContentBlockStart: &pbv1.ContentBlockStart{Index: 0, Block: &pbv1.ContentBlockStart_Text{Text: &pbv1.TextBlock{}}},
 	}}); err != nil {
 		t.Fatalf("setup walk: %v", err)
 	}
@@ -482,46 +482,46 @@ func TestEnforceEndStreamHostMissingStop(t *testing.T) {
 // changes need their section, cardinality/action changes additionally need
 // topology, and a host fact is never grantable.
 func TestVerifyStreamPolicyConsumesSDKRegistry(t *testing.T) {
-	text := func(s string) *pbv2.StreamEvent { return textDelta(s) }
-	usage := func(n int32) *pbv2.StreamEvent {
-		return &pbv2.StreamEvent{Event: &pbv2.StreamEvent_Usage{Usage: &pbv2.Usage{InputTokens: n}}}
+	text := func(s string) *pbv1.StreamEvent { return textDelta(s) }
+	usage := func(n int32) *pbv1.StreamEvent {
+		return &pbv1.StreamEvent{Event: &pbv1.StreamEvent_Usage{Usage: &pbv1.Usage{InputTokens: n}}}
 	}
 	for _, tc := range []struct {
 		name     string
-		accepted []*pbv2.StreamEvent
-		returned []*pbv2.StreamEvent
+		accepted []*pbv1.StreamEvent
+		returned []*pbv1.StreamEvent
 		grants   []string
 		want     string
 	}{
 		{
 			name:     "one-for-one text rewrite needs assistant",
-			accepted: []*pbv2.StreamEvent{text("secret")},
-			returned: []*pbv2.StreamEvent{text("redacted")},
+			accepted: []*pbv1.StreamEvent{text("secret")},
+			returned: []*pbv1.StreamEvent{text("redacted")},
 			want:     "ir.messages.write.assistant",
 		},
 		{
 			name:     "granted one-for-one text rewrite passes",
-			accepted: []*pbv2.StreamEvent{text("secret")},
-			returned: []*pbv2.StreamEvent{text("redacted")},
+			accepted: []*pbv1.StreamEvent{text("secret")},
+			returned: []*pbv1.StreamEvent{text("redacted")},
 			grants:   []string{"ir.messages.write.assistant"},
 		},
 		{
 			name:     "suppression needs topology and semantic grant",
-			accepted: []*pbv2.StreamEvent{text("secret")},
+			accepted: []*pbv1.StreamEvent{text("secret")},
 			returned: nil,
 			grants:   []string{"ir.stream.write"},
 			want:     "ir.messages.write.assistant",
 		},
 		{
 			name:     "suppression passes with union of grants",
-			accepted: []*pbv2.StreamEvent{text("secret")},
+			accepted: []*pbv1.StreamEvent{text("secret")},
 			returned: nil,
 			grants:   []string{"ir.stream.write", "ir.messages.write.assistant"},
 		},
 		{
 			name:     "usage is host owned even with every grant",
-			accepted: []*pbv2.StreamEvent{usage(1)},
-			returned: []*pbv2.StreamEvent{usage(2)},
+			accepted: []*pbv1.StreamEvent{usage(1)},
+			returned: []*pbv1.StreamEvent{usage(2)},
 			grants:   []string{"ir.stream.write", "ir.messages.write.assistant"},
 			want:     "host-owned",
 		},
@@ -546,11 +546,11 @@ func TestVerifyStreamPolicyConsumesSDKRegistry(t *testing.T) {
 // nested below it. A ToolCallRef's id/name must be charged on both invention
 // and removal; a bound signature remains the signature verifier's concern.
 func TestVerifyStreamPolicyRecursesAddedMessageFields(t *testing.T) {
-	toolStart := func(signature string) *pbv2.StreamEvent {
-		return &pbv2.StreamEvent{Event: &pbv2.StreamEvent_ContentBlockStart{
-			ContentBlockStart: &pbv2.ContentBlockStart{
+	toolStart := func(signature string) *pbv1.StreamEvent {
+		return &pbv1.StreamEvent{Event: &pbv1.StreamEvent_ContentBlockStart{
+			ContentBlockStart: &pbv1.ContentBlockStart{
 				Index: 0,
-				Block: &pbv2.ContentBlockStart_ToolCall{ToolCall: &pbv2.ToolCallRef{
+				Block: &pbv1.ContentBlockStart_ToolCall{ToolCall: &pbv1.ToolCallRef{
 					Id: "call_1", Name: "read", Signature: signature,
 				}},
 			},
@@ -558,13 +558,13 @@ func TestVerifyStreamPolicyRecursesAddedMessageFields(t *testing.T) {
 	}
 	for _, tc := range []struct {
 		name     string
-		accepted []*pbv2.StreamEvent
-		returned []*pbv2.StreamEvent
+		accepted []*pbv1.StreamEvent
+		returned []*pbv1.StreamEvent
 	}{
-		{"unsigned invention", nil, []*pbv2.StreamEvent{toolStart("")}},
-		{"unsigned removal", []*pbv2.StreamEvent{toolStart("")}, nil},
-		{"signed invention", nil, []*pbv2.StreamEvent{toolStart("provider-token")}},
-		{"signed removal", []*pbv2.StreamEvent{toolStart("provider-token")}, nil},
+		{"unsigned invention", nil, []*pbv1.StreamEvent{toolStart("")}},
+		{"unsigned removal", []*pbv1.StreamEvent{toolStart("")}, nil},
+		{"signed invention", nil, []*pbv1.StreamEvent{toolStart("provider-token")}},
+		{"signed removal", []*pbv1.StreamEvent{toolStart("provider-token")}, nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			err := verifyStreamPolicy(tc.accepted, tc.returned, grant("ir.stream.write"))
@@ -584,14 +584,14 @@ func TestVerifyStreamPolicyRecursesAddedMessageFields(t *testing.T) {
 // are paired, and an exact reordering is topology-only rather than a made-up
 // semantic rewrite. The cases deliberately include duplicates.
 func TestVerifyStreamPolicyCorrelatesExactEventsFirst(t *testing.T) {
-	text := func(s string) *pbv2.StreamEvent { return textDelta(s) }
-	messageStart := &pbv2.StreamEvent{Event: &pbv2.StreamEvent_MessageStart{
-		MessageStart: &pbv2.MessageStart{Role: "assistant", Id: "m", Model: "model"},
+	text := func(s string) *pbv1.StreamEvent { return textDelta(s) }
+	messageStart := &pbv1.StreamEvent{Event: &pbv1.StreamEvent_MessageStart{
+		MessageStart: &pbv1.MessageStart{Role: "assistant", Id: "m", Model: "model"},
 	}}
-	streamErr := &pbv2.StreamEvent{Event: &pbv2.StreamEvent_Error{
-		Error: &pbv2.StreamError{Code: 503, Message: "unchanged"},
+	streamErr := &pbv1.StreamEvent{Event: &pbv1.StreamEvent_Error{
+		Error: &pbv1.StreamError{Code: 503, Message: "unchanged"},
 	}}
-	trailingHostEvents := map[string]*pbv2.StreamEvent{
+	trailingHostEvents := map[string]*pbv1.StreamEvent{
 		"usage":         usageEvent(),
 		"message start": messageStart,
 		"stream error":  streamErr,
@@ -600,8 +600,8 @@ func TestVerifyStreamPolicyCorrelatesExactEventsFirst(t *testing.T) {
 	for name, trailing := range trailingHostEvents {
 		t.Run("suppression before unchanged "+name, func(t *testing.T) {
 			err := verifyStreamPolicy(
-				[]*pbv2.StreamEvent{text("remove"), trailing},
-				[]*pbv2.StreamEvent{trailing},
+				[]*pbv1.StreamEvent{text("remove"), trailing},
+				[]*pbv1.StreamEvent{trailing},
 				grant("ir.stream.write", "ir.messages.write.assistant"),
 			)
 			if err != nil {
@@ -611,40 +611,40 @@ func TestVerifyStreamPolicyCorrelatesExactEventsFirst(t *testing.T) {
 	}
 	for _, tc := range []struct {
 		name     string
-		accepted []*pbv2.StreamEvent
-		returned []*pbv2.StreamEvent
+		accepted []*pbv1.StreamEvent
+		returned []*pbv1.StreamEvent
 		grants   []string
 		want     string
 	}{
 		{
 			name:     "assembly before unchanged usage",
-			accepted: []*pbv2.StreamEvent{text("a"), text("b"), usageEvent()},
-			returned: []*pbv2.StreamEvent{text("ab"), usageEvent()},
+			accepted: []*pbv1.StreamEvent{text("a"), text("b"), usageEvent()},
+			returned: []*pbv1.StreamEvent{text("ab"), usageEvent()},
 			grants:   []string{"ir.stream.write", "ir.messages.write.assistant"},
 		},
 		{
 			name:     "assembly before unchanged message stop",
-			accepted: []*pbv2.StreamEvent{text("a"), text("b"), messageStopEvent("stop")},
-			returned: []*pbv2.StreamEvent{text("ab"), messageStopEvent("stop")},
+			accepted: []*pbv1.StreamEvent{text("a"), text("b"), messageStopEvent("stop")},
+			returned: []*pbv1.StreamEvent{text("ab"), messageStopEvent("stop")},
 			grants:   []string{"ir.stream.write", "ir.messages.write.assistant"},
 		},
 		{
 			name:     "pure exact reorder is topology only",
-			accepted: []*pbv2.StreamEvent{text("a"), text("b")},
-			returned: []*pbv2.StreamEvent{text("b"), text("a")},
+			accepted: []*pbv1.StreamEvent{text("a"), text("b")},
+			returned: []*pbv1.StreamEvent{text("b"), text("a")},
 			grants:   []string{"ir.stream.write"},
 		},
 		{
 			name:     "reorder plus mutation needs semantic union",
-			accepted: []*pbv2.StreamEvent{text("a"), text("b")},
-			returned: []*pbv2.StreamEvent{text("b"), text("c")},
+			accepted: []*pbv1.StreamEvent{text("a"), text("b")},
+			returned: []*pbv1.StreamEvent{text("b"), text("c")},
 			grants:   []string{"ir.stream.write"},
 			want:     "ir.messages.write.assistant",
 		},
 		{
 			name:     "duplicate cardinality still charges removed semantic event",
-			accepted: []*pbv2.StreamEvent{text("a"), text("a")},
-			returned: []*pbv2.StreamEvent{text("a")},
+			accepted: []*pbv1.StreamEvent{text("a"), text("a")},
+			returned: []*pbv1.StreamEvent{text("a")},
 			grants:   []string{"ir.stream.write"},
 			want:     "ir.messages.write.assistant",
 		},
@@ -670,14 +670,14 @@ func TestVerifyStreamPolicyCorrelatesExactEventsFirst(t *testing.T) {
 // fan-out candidate now commit only after complete validation succeeds.
 func TestEnforcePassOutputIsAtomicRegression(t *testing.T) {
 	vs, pvs := enforceState(t, "test-stream-mutator")
-	startText := func(idx int32) *pbv2.StreamEvent {
-		return &pbv2.StreamEvent{Event: &pbv2.StreamEvent_ContentBlockStart{
-			ContentBlockStart: &pbv2.ContentBlockStart{Index: idx, Block: &pbv2.ContentBlockStart_Text{Text: &pbv2.TextBlock{}}},
+	startText := func(idx int32) *pbv1.StreamEvent {
+		return &pbv1.StreamEvent{Event: &pbv1.StreamEvent_ContentBlockStart{
+			ContentBlockStart: &pbv1.ContentBlockStart{Index: idx, Block: &pbv1.ContentBlockStart_Text{Text: &pbv1.TextBlock{}}},
 		}}
 	}
-	startThinking := func(idx int32) *pbv2.StreamEvent {
-		return &pbv2.StreamEvent{Event: &pbv2.StreamEvent_ContentBlockStart{
-			ContentBlockStart: &pbv2.ContentBlockStart{Index: idx, Block: &pbv2.ContentBlockStart_Thinking{Thinking: &pbv2.ThinkingBlock{}}},
+	startThinking := func(idx int32) *pbv1.StreamEvent {
+		return &pbv1.StreamEvent{Event: &pbv1.StreamEvent_ContentBlockStart{
+			ContentBlockStart: &pbv1.ContentBlockStart{Index: idx, Block: &pbv1.ContentBlockStart_Thinking{Thinking: &pbv1.ThinkingBlock{}}},
 		}}
 	}
 	if _, term := vs.acceptPluginOutput(pvs, startText(0), startText(0)); term != nil {
@@ -686,7 +686,7 @@ func TestEnforcePassOutputIsAtomicRegression(t *testing.T) {
 
 	// The first candidate child is valid, the second overlaps the text block.
 	// Pass mode must discard BOTH children and replay the accepted delta once.
-	got, term := vs.acceptPluginOutputs(pvs, textDelta("original"), []*pbv2.StreamEvent{textDelta("replacement"), startThinking(1)})
+	got, term := vs.acceptPluginOutputs(pvs, textDelta("original"), []*pbv1.StreamEvent{textDelta("replacement"), startThinking(1)})
 	if term != nil {
 		t.Fatalf("pass-mode candidate terminated: %v", term)
 	}
@@ -706,15 +706,15 @@ func TestEnforcePassOutputIsAtomicRegression(t *testing.T) {
 // is enforced only when the returned stream reaches MessageStop/end-of-stream.
 func TestEnforceParallelToolPrefixAllowsSiblingOpen(t *testing.T) {
 	vs, pvs := enforceState(t, "test-stream-mutator")
-	startTool := func(idx int32, id, name string) *pbv2.StreamEvent {
-		return &pbv2.StreamEvent{Event: &pbv2.StreamEvent_ContentBlockStart{
-			ContentBlockStart: &pbv2.ContentBlockStart{Index: idx, Block: &pbv2.ContentBlockStart_ToolCall{ToolCall: &pbv2.ToolCallRef{Id: id, Name: name}}},
+	startTool := func(idx int32, id, name string) *pbv1.StreamEvent {
+		return &pbv1.StreamEvent{Event: &pbv1.StreamEvent_ContentBlockStart{
+			ContentBlockStart: &pbv1.ContentBlockStart{Index: idx, Block: &pbv1.ContentBlockStart_ToolCall{ToolCall: &pbv1.ToolCallRef{Id: id, Name: name}}},
 		}}
 	}
-	arg := func(idx int32, fragment string) *pbv2.StreamEvent {
-		return &pbv2.StreamEvent{Event: &pbv2.StreamEvent_ToolCallDelta{ToolCallDelta: &pbv2.ToolCallDelta{Index: idx, ArgumentsDelta: fragment}}}
+	arg := func(idx int32, fragment string) *pbv1.StreamEvent {
+		return &pbv1.StreamEvent{Event: &pbv1.StreamEvent_ToolCallDelta{ToolCallDelta: &pbv1.ToolCallDelta{Index: idx, ArgumentsDelta: fragment}}}
 	}
-	accepted := []*pbv2.StreamEvent{
+	accepted := []*pbv1.StreamEvent{
 		startTool(0, "a", "one"), startTool(1, "b", "two"),
 		arg(0, `{`), arg(1, `{`), stopEvent(0),
 	}
@@ -783,8 +783,8 @@ func TestEnforceTransformedBoundariesUseDownstreamScope(t *testing.T) {
 // terminal after either shape must use the converged logical scope, never the
 // sum of each call's local max.
 func TestEnforceScopeWatermarksConvergeAcrossCalls(t *testing.T) {
-	usage := func(tokens int32) *pbv2.StreamEvent {
-		return &pbv2.StreamEvent{Event: &pbv2.StreamEvent_Usage{Usage: &pbv2.Usage{InputTokens: tokens}}}
+	usage := func(tokens int32) *pbv1.StreamEvent {
+		return &pbv1.StreamEvent{Event: &pbv1.StreamEvent_Usage{Usage: &pbv1.Usage{InputTokens: tokens}}}
 	}
 	for _, tc := range []struct {
 		name  string
@@ -820,8 +820,8 @@ func TestEnforceScopeWatermarksConvergeAcrossCalls(t *testing.T) {
 
 			// A real policy violation after the timing shape must preserve the
 			// converged ordinal in its operator-visible terminal.
-			pvs.accepted = []*pbv2.StreamEvent{usage(1)}
-			pvs.returned = []*pbv2.StreamEvent{usage(2)}
+			pvs.accepted = []*pbv1.StreamEvent{usage(1)}
+			pvs.returned = []*pbv1.StreamEvent{usage(2)}
 			err := vs.checkScope(pvs, pvs.scopeNum)
 			var term *StreamTerminalError
 			if !errors.As(err, &term) || term.Kind != streamTerminalPlugin || term.Scope != tc.want {
@@ -885,16 +885,16 @@ func TestEndStreamVerifiedUsesSeparateTrailingScope(t *testing.T) {
 	pp.mu.Unlock()
 	pvs := vs.plugins[0]
 	pvs.recordScopeCloses(1, 1)
-	accepted := &pbv2.StreamEvent{Event: &pbv2.StreamEvent_Usage{Usage: &pbv2.Usage{InputTokens: 1}}}
-	returned := &pbv2.StreamEvent{Event: &pbv2.StreamEvent_Usage{Usage: &pbv2.Usage{InputTokens: 2}}}
+	accepted := &pbv1.StreamEvent{Event: &pbv1.StreamEvent_Usage{Usage: &pbv1.Usage{InputTokens: 1}}}
+	returned := &pbv1.StreamEvent{Event: &pbv1.StreamEvent_Usage{Usage: &pbv1.Usage{InputTokens: 2}}}
 	if err := vs.host.walk(accepted); err != nil {
 		t.Fatalf("host setup: %v", err)
 	}
 	if err := pvs.walker.walk(returned); err != nil {
 		t.Fatalf("returned setup: %v", err)
 	}
-	pvs.accepted = []*pbv2.StreamEvent{accepted}
-	pvs.returned = []*pbv2.StreamEvent{returned}
+	pvs.accepted = []*pbv1.StreamEvent{accepted}
+	pvs.returned = []*pbv1.StreamEvent{returned}
 
 	err := pp.EndStreamVerified(reqID)
 	var term *StreamTerminalError
@@ -992,8 +992,8 @@ func TestEndStreamVerifiedRejectsReturnedMissingStop(t *testing.T) {
 	pp.streamVerify[reqID] = vs
 	pp.mu.Unlock()
 	pvs := vs.plugins[0]
-	start := &pbv2.StreamEvent{Event: &pbv2.StreamEvent_ContentBlockStart{
-		ContentBlockStart: &pbv2.ContentBlockStart{Index: 0, Block: &pbv2.ContentBlockStart_ToolCall{ToolCall: &pbv2.ToolCallRef{Id: "c", Name: "read"}}},
+	start := &pbv1.StreamEvent{Event: &pbv1.StreamEvent_ContentBlockStart{
+		ContentBlockStart: &pbv1.ContentBlockStart{Index: 0, Block: &pbv1.ContentBlockStart_ToolCall{ToolCall: &pbv1.ToolCallRef{Id: "c", Name: "read"}}},
 	}}
 	stop := stopEvent(0)
 	if err := vs.host.walk(start); err != nil {
@@ -1007,8 +1007,8 @@ func TestEndStreamVerifiedRejectsReturnedMissingStop(t *testing.T) {
 	}
 	// Simulate a prior completed policy transaction so only walker.end can
 	// catch the missing returned stop.
-	pvs.accepted = []*pbv2.StreamEvent{start, stop}
-	pvs.returned = []*pbv2.StreamEvent{start}
+	pvs.accepted = []*pbv1.StreamEvent{start, stop}
+	pvs.returned = []*pbv1.StreamEvent{start}
 	pvs.scopeStart = len(pvs.accepted)
 
 	err := pp.EndStreamVerified(reqID)

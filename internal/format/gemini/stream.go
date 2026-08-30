@@ -5,7 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	pbjsontext "github.com/torana-edge/torana-plugin-sdk/pb/v2/jsontext"
+	pbjsontext "github.com/torana-edge/torana-plugin-sdk/pb/v1/jsontext"
 	"io"
 	"log"
 	"strings"
@@ -188,7 +188,7 @@ func emitPart(ch chan<- engine.StreamEvent, part geminiPart, blockIndex *int) bo
 	case part.Thought:
 		// One thought part is one thinking block — ARM PRESENCE decides:
 		// thought:true opens a thinking block even when the text member is
-		// empty or absent (v2 permits zero-delta blocks, and an empty block
+		// empty or absent (current ABI permits zero-delta blocks, and an empty block
 		// still consumes an index). The signature rides INSIDE the open
 		// block (the provider's same-part signature binds the current
 		// block).
@@ -217,7 +217,7 @@ func emitPart(ch chan<- engine.StreamEvent, part geminiPart, blockIndex *int) bo
 		// explicit text member opens a text block even when empty (a
 		// zero-delta block consumes an index; dropping it would shift every
 		// later block's index). Every block (tool, text, thinking) consumes
-		// a sequential index from the shared per-stream counter: the v2
+		// a sequential index from the shared per-stream counter: the current ABI
 		// invariant requires unique indexes within one streamed message.
 		idx := *blockIndex
 		*blockIndex = idx + 1

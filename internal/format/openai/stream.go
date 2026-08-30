@@ -397,7 +397,7 @@ func (s *StreamAdapter) SerializeStream(ctx context.Context, w io.Writer, events
 }
 
 // blockTopology tracks the one content block open in the stream being
-// serialized, enforcing the v2 ABI's single-open-block + unique-index
+// serialized, enforcing the plugin ABI's single-open-block + unique-index
 // discipline on explicit block events BEFORE they are lowered to the wire. A
 // second start while a block is open (any index), a start whose index was
 // already used in this message, or a stop that does not name the open block is

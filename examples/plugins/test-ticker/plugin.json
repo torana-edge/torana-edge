@@ -3,7 +3,7 @@
   "id": "torana-test/test-ticker",
   "name": "test-ticker",
   "version": "0.1.0",
-  "abi_version": "v2",
+  "abi_version": "v1",
   "failure_mode": "pass",
   "description": "Test fixture: proves run_on_tick fires with no request in flight and that TickRequest carries the host's clock",
   "hooks": [

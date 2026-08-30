@@ -4,17 +4,16 @@
     "deepseek": {
       "url": "https://api.deepseek.com",
       "format": "openai",
-      "api_key_env": "DEEPSEEK_API_KEY"
+      "auth": {"mode": "caller"}
     },
     "deepseek-anthropic": {
       "url": "https://api.deepseek.com/anthropic",
       "format": "anthropic",
-      "api_key_env": "DEEPSEEK_API_KEY"
+      "auth": {"mode": "caller"}
     }
   },
   "plugins": {
     "dir": "./plugins",
-    "_comment": "No plugin is enabled implicitly. This seed is imported only on the first start into the managed store (~/.config/torana/config.json, or $TORANA_DATA_DIR/config.json). After that, inspect, approve, enable, configure, and order plugins in the control plane at http://127.0.0.1:8080/_torana/.",
     "order": []
   },
   "limits": {

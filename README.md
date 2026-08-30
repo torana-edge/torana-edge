@@ -18,7 +18,7 @@ CLI (`agy`)** — Torana also offers an optional TLS-terminating MITM ingress. S
 
 ## Key Features
 
-- **WASM Plugin Ecosystem:** Write ABI-v2 plugins in Go or Rust with the [torana-plugin-sdk](https://github.com/torana-edge/torana-plugin-sdk) and compile them to `.wasm`. Hot-loaded, no proxy restart. Both SDKs run through the host's executable conformance harness in CI.
+- **WASM Plugin Ecosystem:** Write ABI-v1 plugins in Go or Rust with the [torana-plugin-sdk](https://github.com/torana-edge/torana-plugin-sdk) and compile them to `.wasm`. Hot-loaded, no proxy restart. Both SDKs run through the host's executable conformance harness in CI.
 - **Operator-approved plugins:** A plugin declares the capabilities it wants; it does not receive them. You inspect and approve each bundle, and the approval is bound to that bundle's SHA-256 digest — rebuild or change permissions and it needs approving again. Sandboxed in `wazero`: a plugin gets the IR and nothing else, no filesystem, no sockets you did not grant.
 - **Tool-aware compaction:** Explicit policies keep source and failure evidence exact while allowing recoverable searches/listings to be reduced deterministically—even on first exposure when configured.
 - **Economic model delegation:** Historical results can be summarized through a cheaper model only when route-aware cache/offload economics estimate positive net savings.
@@ -28,6 +28,16 @@ CLI (`agy`)** — Torana also offers an optional TLS-terminating MITM ingress. S
 - **MITM ingress (optional):** For harnesses that ignore base-URL overrides (e.g. the Antigravity CLI), an opt-in TLS-terminating proxy routes their traffic through the pipeline. Disabled unless configured.
 
 ## Quick Start
+
+`config.example.json` is a seed read on the first start. Torana then owns the
+managed store at `$TORANA_DATA_DIR/config.json`; make later changes through the
+local control plane or CLI rather than editing the seed.
+
+The two limits in the example are per identity: `concurrency` bounds active
+upstream requests and `rpm` bounds starts per minute. A value of `0` disables
+that limit. JSON comments are intentionally unsupported so configuration has
+one strict, portable grammar; the Control Plane and
+[Quickstart](docs/QUICKSTART.md#configure) explain every first-run field.
 
 Torana is currently pre-release, so this walkthrough builds the reviewed
 `main` branch rather than pretending a stable release exists. You need Git, Go
@@ -48,10 +58,14 @@ Torana is currently pre-release, so this walkthrough builds the reviewed
 
    ```bash
    export TORANA_DATA_DIR="$PWD/.torana-data"
-   ./torana
+   ./torana --debug
    ```
 
-   Keep that terminal open. Torana imports `config.json` only on this first
+   Keep that terminal open and use another terminal for the remaining commands.
+   `--debug` logs one safe received/completed line per inference request (route,
+   provider, status, latency, plugins, and verdict; never bodies or credentials),
+   so you can tell immediately that your harness is reaching Torana. Torana
+   imports `config.json` only on this first
    start; `$TORANA_DATA_DIR/config.json` is authoritative afterward. To repeat a
    genuinely clean first run, use a new empty data directory. Do not edit the
    seed and expect a running installation to change.
@@ -62,13 +76,15 @@ Torana is currently pre-release, so this walkthrough builds the reviewed
    curl --fail-with-body http://127.0.0.1:8080/health
 
    curl --fail-with-body http://127.0.0.1:8080/provider/deepseek/v1/chat/completions \
+     -H "Authorization: Bearer ${DEEPSEEK_API_KEY}" \
      -H 'Content-Type: application/json' \
      -d '{"model":"deepseek-v4-flash","messages":[{"role":"user","content":"Reply with exactly: Torana works"}]}'
    ```
 
    The first command returns `{"status":"ok"}`. The second returns a normal
-   provider response through Torana. Your configured `api_key_env` supplies the
-   upstream credential; it is not written into `config.json`.
+   provider response through Torana. The example uses `auth.mode: caller`, so
+   Torana forwards the credential on this request to this provider only. You do
+   not have to store an API key in Torana for ordinary harness passthrough.
 
 4. Point your harness at the same provider route:
 
@@ -82,15 +98,23 @@ Torana is currently pre-release, so this walkthrough builds the reviewed
 5. Only after the proxy works, install one plugin from readable source:
 
    ```bash
-   ./torana plugin install github.com/torana-edge/torana-plugins/plugins/schema_translator
+   ./torana plugin install https://github.com/torana-edge/torana-plugins/tree/main/plugins/usage_logger
    ./torana plugin list
    ```
 
    Installation does **not** run the plugin. Open
    [http://127.0.0.1:8080/_torana/](http://127.0.0.1:8080/_torana/), inspect its
-   requested capabilities and digest, approve it, enable it, and place it in
-   the pipeline. Send the request again and confirm `schema_translator` appears
-   in the live request feed. A changed bundle must be approved again.
+   requested capability and private-file budget, approve it, enable it, and
+   place it in the pipeline. Send a few requests, then inspect the tangible
+   result without opening the plugin sandbox:
+
+   ```bash
+   ./torana plugin file tail usage_logger usage.jsonl
+   ```
+
+   Each line contains provider, model, latency, status, and input/output/cache
+   token counts—never prompts, responses, or headers. A changed bundle must be
+   approved again.
 
 6. When you are comfortable with that lifecycle, install the maintained set:
 
@@ -130,7 +154,7 @@ it as ordinary HTTP rather than attempting to decode it as an inference call.
 
 **Writing a plugin?** That lives with the SDK:
 [torana-plugin-sdk](https://github.com/torana-edge/torana-plugin-sdk) — the
-ABI-v2 Go and Rust SDKs, examples, conformance guests, and authoring guides.
+ABI-v1 Go and Rust SDKs, examples, conformance guests, and authoring guides.
 
 **Official plugins** live in [torana-plugins](https://github.com/torana-edge/torana-plugins).
 
@@ -176,7 +200,7 @@ None are bundled. They live in
 deliberately, either individually or as the maintained set:
 
 ```bash
-torana plugin install github.com/torana-edge/torana-plugins/plugins/pii
+torana plugin install https://github.com/torana-edge/torana-plugins/tree/main/plugins/usage_logger
 ```
 
 `install` fetches the source, builds it locally, and prints the SHA-256 digest of
@@ -186,6 +210,7 @@ the control plane first. See [docs/PLUGINS.md](docs/PLUGINS.md).
 
 | Plugin | Hooks | What it does |
 |---|---|---|
+| `usage_logger` | `run_after_response` | Writes content-free provider/model/status/latency/token records to a private rotating JSONL file |
 | `schema_translator` | `run_before_request`, `run_on_stream_chunk` | Converts open-map tool schemas to strict KV arrays and reverses them on responses |
 | `intent` | `run_before_request`, `run_on_stream_chunk` | Captures **why** each tool call is made: injects the required `"i"` field into tool schemas (plus a system-prompt example) and extracts it from the stream into the shared cache |
 | `keyword_compactor` | `run_before_request` | Policy-driven source markers, deterministic reductions, and extractive compaction with cached or locally derived guidance |
@@ -218,9 +243,7 @@ in [torana-plugins](https://github.com/torana-edge/torana-plugins).
 ```
 torana-edge/
 ├── cmd/
-│   ├── torana/main.go              # Proxy entry point
-│   └── torana-cli/main.go          # thin compatibility wrapper; the real
-│                                   # commands are `torana plugin ...`
+│   └── torana/main.go              # Proxy and CLI entry point
 ├── internal/
 │   ├── engine/
 │   │   ├── types.go                # Canonical IR: ChatRequest, StreamEvent, etc.

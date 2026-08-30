@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"bytes"
+	"context"
 	"io"
 	"log"
 	"net/http"
@@ -14,13 +15,10 @@ import (
 // failoverRoundTripper wraps the default transport and retries failed
 // requests against configured fallback providers (429 / 5xx).
 type failoverRoundTripper struct {
-	base http.RoundTripper
-	cfg  func() provider.Config
-	// resolveSecret authenticates to a fallback with that provider's own
-	// credential. Without it, failover forwarded the caller's key to a
-	// different vendor — see applyProviderCredential.
-	resolveSecret func(env, enc string) string
-	rateLimiter   *RateLimiter
+	base              http.RoundTripper
+	cfg               func() provider.Config
+	resolveCredential func(context.Context, string) ([]byte, error)
+	rateLimiter       *RateLimiter
 }
 
 // rateLimitBody wraps the response body to release the concurrency token on close.
@@ -152,16 +150,17 @@ func (t *failoverRoundTripper) RoundTrip(req *http.Request) (*http.Response, err
 
 		retryReq := cloneWithBody(req, bodyBytes)
 
-		// A fallback is a different vendor. The caller's credential must not
-		// travel there, and would not authenticate if it did — which is why
-		// failover returned the fallback's 401 to the caller rather than a
-		// working response.
-		// Unconditional. This was gated on a non-nil resolver, which meant a
-		// nil one skipped the whole call — including the strip — and forwarded
-		// the caller's credential, the exact bug being fixed. The resolver is
-		// always set in production, so the gate bought nothing and risked
-		// everything; applyProviderCredential handles nil itself.
-		applyProviderCredential(retryReq, fb, fbName, "failover", t.resolveSecret)
+		// Authentication is rebuilt from the fallback's explicit policy. The
+		// immutable ingress snapshot is used for caller mode; request headers
+		// may already hold the primary provider's managed credential.
+		caller := callerCredentials{}
+		if rs := reqStateFrom(req.Context()); rs != nil {
+			caller = rs.CallerCredentials
+		}
+		if err := applyProviderCredential(retryReq.Context(), retryReq, fb, caller, t.resolveCredential); err != nil {
+			log.Printf("[failover] skipping %s: configured credential is unavailable", fbName)
+			continue
+		}
 
 		// Reconstruct retry URL using the fallback base URL and original stripped path.
 		rc, _ := req.Context().Value(routeContextKey{}).(*RouteContext)

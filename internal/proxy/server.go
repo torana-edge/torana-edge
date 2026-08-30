@@ -31,10 +31,12 @@ import (
 	"golang.org/x/net/http/httpguts"
 	"google.golang.org/protobuf/proto"
 
+	credentialapi "github.com/torana-edge/torana-edge/credential"
 	"github.com/torana-edge/torana-edge/internal/auditlog"
 	"github.com/torana-edge/torana-edge/internal/cache"
 	"github.com/torana-edge/torana-edge/internal/controlplane"
 	"github.com/torana-edge/torana-edge/internal/conversation"
+	"github.com/torana-edge/torana-edge/internal/credentialstore"
 	"github.com/torana-edge/torana-edge/internal/economics"
 	"github.com/torana-edge/torana-edge/internal/engine"
 	"github.com/torana-edge/torana-edge/internal/engine/pbconv"
@@ -43,12 +45,14 @@ import (
 	"github.com/torana-edge/torana-edge/internal/metrics"
 	"github.com/torana-edge/torana-edge/internal/mitm"
 	"github.com/torana-edge/torana-edge/internal/plugin"
+	"github.com/torana-edge/torana-edge/internal/pluginfiles"
+	"github.com/torana-edge/torana-edge/internal/pluginhttp"
 	"github.com/torana-edge/torana-edge/internal/pluginstate"
 	"github.com/torana-edge/torana-edge/internal/provider"
 	"github.com/torana-edge/torana-edge/internal/secret"
 	"github.com/torana-edge/torana-edge/internal/wasm"
-	pb "github.com/torana-edge/torana-plugin-sdk/pb/v2"
-	pbjsontext "github.com/torana-edge/torana-plugin-sdk/pb/v2/jsontext"
+	pb "github.com/torana-edge/torana-plugin-sdk/pb/v1"
+	pbjsontext "github.com/torana-edge/torana-plugin-sdk/pb/v1/jsontext"
 )
 
 const maxBodySize = 10 * 1024 * 1024 // 10 MB
@@ -56,6 +60,10 @@ const secretSetSentinel = "__set__"
 const maxPluginResponseHeaders = 64
 const maxPluginResponseHeaderBytes = 16 * 1024
 const reverseProxyBufferBytes = 32 * 1024
+
+func debugEnabled() bool {
+	return strings.EqualFold(strings.TrimSpace(os.Getenv("TORANA_LOG_LEVEL")), "debug")
+}
 
 // reverseProxyBufferPool owns only httputil's transient response-copy buffers.
 // ReverseProxy otherwise allocates 32 KiB for every request. The standard
@@ -161,6 +169,11 @@ type Server struct {
 	configPath             string
 	config                 Config
 	secrets                *secret.Store
+	credentialMu           sync.RWMutex
+	credentials            *credentialapi.Registry
+	credentialStore        *credentialstore.Store
+	pluginFiles            *pluginfiles.Store
+	pluginHTTP             *pluginhttp.Client
 	proxy                  *httputil.ReverseProxy
 	httpServer             *http.Server
 	stats                  *metrics.StatsTracker
@@ -281,10 +294,10 @@ type reqState struct {
 	AuditUpstreamRequestBytes int64
 	AuditErrorCode            string
 	AuditToolCalls            []auditlog.ToolCall
-	// CallerAuth is the caller's Authorization header value, used as the
-	// fallback credential for offload completions. Host-side only — never
-	// exposed to plugins.
-	CallerAuth string
+	// CallerCredentials is an immutable ingress snapshot. Provider-managed
+	// credentials may replace request headers later, so retries and routing
+	// must never infer caller authentication from a mutated request.
+	CallerCredentials callerCredentials
 	// Pipeline is the plugin pipeline pinned for this request's entire
 	// lifetime (Acquire held until the handler's deferred Release). Every
 	// phase — Director, stream hooks, ModifyResponse, EndRequest — MUST
@@ -450,12 +463,14 @@ func (rs *reqState) chatResponse(model, id string, msg *engine.ResponseMessage, 
 		durationMS = time.Since(rs.Start).Milliseconds()
 	}
 	return &engine.ChatResponse{
-		Model:          model,
-		ID:             id,
-		Message:        msg,
-		FinishReason:   finishReason,
-		UpstreamStatus: rs.UpstreamStatus,
-		DurationMS:     durationMS,
+		Model:             model,
+		Provider:          rs.Provider,
+		CompletedAtUnixMS: time.Now().UnixMilli(),
+		ID:                id,
+		Message:           msg,
+		FinishReason:      finishReason,
+		UpstreamStatus:    rs.UpstreamStatus,
+		DurationMS:        durationMS,
 		Usage: &engine.StreamUsage{
 			InputTokens:      rs.UsageIn,
 			OutputTokens:     rs.UsageOut,
@@ -550,13 +565,13 @@ func (s *Server) evaluateCompaction(ctx context.Context, report economics.Compac
 	// Read the route verdict directly rather than a copy cached when a plugin
 	// happened to return a replacement.
 	//
-	// Routing is a host-call SIDE EFFECT in v2, so a route-only plugin
+	// Routing is a host-call SIDE EFFECT in current ABI, so a route-only plugin
 	// correctly returns PassRequest. The cached copy was only refreshed by
 	// RequestMutationFunc, which fires on ReplaceRequest — so such a plugin
 	// priced compaction against the ORIGINAL provider and model while the
 	// request went somewhere else. The old router fixture hid this by
 	// returning ReplaceRequest after routing, which is the v1
-	// "return the same request" footgun v2 exists to remove.
+	// "return the same request" footgun current ABI exists to remove.
 	pendingRoute := rs.PendingRoute
 	if rs.Pipeline != nil {
 		if v := rs.Pipeline.Verdicts(rs.ID).Route(); v != nil {
@@ -712,6 +727,18 @@ func New(cfg Config) (*Server, error) {
 	if err != nil {
 		return nil, fmt.Errorf("proxy: secret store: %w", err)
 	}
+	localCredentials, err := credentialstore.Open(filepath.Join(filepath.Dir(configPath), "credentials.json"), secStore)
+	if err != nil {
+		return nil, fmt.Errorf("proxy: credential store: %w", err)
+	}
+	credentialRegistry, err := buildCredentialRegistry(cfg.Providers.Credentials, localCredentials)
+	if err != nil {
+		return nil, fmt.Errorf("proxy: credentials: %w", err)
+	}
+	privateFiles, err := pluginfiles.New(filepath.Join(filepath.Dir(configPath), "plugin-data"))
+	if err != nil {
+		return nil, fmt.Errorf("proxy: plugin files: %w", err)
+	}
 	// Durable plugin state lives beside the managed config. A failure to load
 	// it is reported but not fatal: the store still works in memory, and
 	// refusing to start the proxy because one plugin's scratch file was
@@ -723,15 +750,19 @@ func New(cfg Config) (*Server, error) {
 		log.Printf("warning: %v", err)
 	}
 	s := &Server{
-		config:        cfg,
-		configPath:    configPath,
-		secrets:       secStore,
-		stats:         statsTracker,
-		feed:          metrics.NewRequestFeed(0), // default 200-event ring buffer
-		rateLimiter:   NewRateLimiter(cfg.Providers.Limits.RPM, cfg.Providers.Limits.Concurrency),
-		conversations: conversation.New(conversation.Options{}),
-		pluginState:   stateStore,
-		egress:        newEgressMeter(),
+		config:          cfg,
+		configPath:      configPath,
+		secrets:         secStore,
+		credentials:     credentialRegistry,
+		credentialStore: localCredentials,
+		pluginFiles:     privateFiles,
+		pluginHTTP:      pluginhttp.New(),
+		stats:           statsTracker,
+		feed:            metrics.NewRequestFeed(0), // default 200-event ring buffer
+		rateLimiter:     NewRateLimiter(cfg.Providers.Limits.RPM, cfg.Providers.Limits.Concurrency),
+		conversations:   conversation.New(conversation.Options{}),
+		pluginState:     stateStore,
+		egress:          newEgressMeter(),
 	}
 	cleanupConstruction := func() {
 		if raw := s.pluginPipeline.Load(); raw != nil {
@@ -769,15 +800,6 @@ func New(cfg Config) (*Server, error) {
 			return nil, fmt.Errorf("proxy: %w", err)
 		}
 	}
-	if off := cfg.Providers.Offload; off.Enabled {
-		switch {
-		case off.APIKeyEnv == "":
-			log.Printf("warning: offload enabled without offload.api_key_env — offload will reuse each caller's credential, which only authenticates when the offload provider %q shares the caller's auth. Set offload.api_key_env for cross-provider or local-model offload (e.g. a Claude/OpenAI caller summarizing on DeepSeek or a self-hosted SLM).", off.Provider)
-		case os.Getenv(off.APIKeyEnv) == "":
-			log.Printf("warning: offload.api_key_env %q is set but the env var is empty — falling back to caller credentials", off.APIKeyEnv)
-		}
-	}
-
 	// --- WASM plugin pipeline (optional) ---------------------------------
 	if cfg.Providers.Plugins.Dir != "" {
 		// One shared cross-request cache store for every runtime this server
@@ -906,6 +928,10 @@ func New(cfg Config) (*Server, error) {
 				// plugin pipeline. Provider account, status, telemetry, model-list,
 				// and unknown auxiliary endpoints remain ordinary reverse-proxy
 				// traffic even when they carry a non-empty JSON body.
+				if err := s.applyUpstreamCredential(req, currentCfg.Providers, req.Context().Value(routeContextKey{}).(*RouteContext)); err != nil {
+					markCredentialFailure(req, prov.Format, req.Context().Value(routeContextKey{}).(*RouteContext))
+					return
+				}
 				req.Body = io.NopCloser(bytes.NewReader(body))
 				req.ContentLength = int64(len(body))
 				return
@@ -1238,6 +1264,11 @@ func New(cfg Config) (*Server, error) {
 				})
 			}
 			rs.Path = rc.StrippedPath
+			if err := s.applyUpstreamCredential(req, currentCfg.Providers, rc); err != nil {
+				markCredentialFailure(req, prov.Format, rc)
+				discardCompactionReports(rs)
+				return
+			}
 
 			newBody := body
 			if wireChanged {
@@ -1784,21 +1815,13 @@ func New(cfg Config) (*Server, error) {
 			// rebuilds provider.Config. Omission means preserve; an explicit null
 			// remains the operator's way to disable and remove the configuration.
 			preserveAuditConfigIfOmitted(data, &cur, &incoming)
+			var topLevel map[string]json.RawMessage
+			_ = json.Unmarshal(data, &topLevel)
+			if _, supplied := topLevel["credentials"]; !supplied {
+				incoming.Credentials = cur.Credentials
+			}
 			// Never let the settings surface mutate the pipeline.
 			incoming.Plugins = cur.Plugins
-			// Preserve the redacted control-plane token when the client
-			// echoes back an empty one.
-			if incoming.ControlPlane.Token == "" {
-				incoming.ControlPlane.Token = cur.ControlPlane.Token
-			}
-			// Normalize encrypted secrets (*_enc fields)
-			offEnc, err := s.normalizeSecretField(incoming.Offload.APIKeyEnc, cur.Offload.APIKeyEnc)
-			if err != nil {
-				http.Error(w, "failed to encrypt secret", http.StatusInternalServerError)
-				return
-			}
-			incoming.Offload.APIKeyEnc = offEnc
-
 			cacheEnc, err := s.normalizeSecretField(incoming.Cache.Redis.PasswordEnc, cur.Cache.Redis.PasswordEnc)
 			if err != nil {
 				http.Error(w, "failed to encrypt secret", http.StatusInternalServerError)
@@ -1814,19 +1837,6 @@ func New(cfg Config) (*Server, error) {
 			// explicit null or empty value still clears, so the fields stay
 			// editable by any client that actually manages them.
 			preserveUnmanagedProviderFields(cur.Providers, incoming.Providers, providerFieldsSent(data))
-
-			if incoming.Providers != nil {
-				for name, incP := range incoming.Providers {
-					curP := cur.Providers[name]
-					pEnc, err := s.normalizeSecretField(incP.APIKeyEnc, curP.APIKeyEnc)
-					if err != nil {
-						http.Error(w, fmt.Sprintf("failed to encrypt secret for provider %s", name), http.StatusInternalServerError)
-						return
-					}
-					incP.APIKeyEnc = pEnc
-					incoming.Providers[name] = incP
-				}
-			}
 
 			incoming.Managed = true
 			if err := incoming.Validate(); err != nil {
@@ -1860,27 +1870,30 @@ func New(cfg Config) (*Server, error) {
 				orderIdx[n] = i
 			}
 			type pluginInfo struct {
-				ID               string                   `json:"id"`
-				Name             string                   `json:"name"`
-				Version          string                   `json:"version"`
-				Digest           string                   `json:"digest"`
-				FailureMode      string                   `json:"failure_mode"`
-				Description      string                   `json:"description"`
-				Hooks            []string                 `json:"hooks"`
-				Permissions      []string                 `json:"permissions"`
-				RequiresUpstream []string                 `json:"requires_upstream"`
-				ConflictsWith    []string                 `json:"conflicts_with"`
-				Enabled          bool                     `json:"enabled"`
-				Order            int                      `json:"order"`
-				State            string                   `json:"state"`
-				Loaded           bool                     `json:"loaded"`
-				LoadedDigest     string                   `json:"loaded_digest,omitempty"`
-				ServesHTTP       bool                     `json:"serves_http"`
-				Schema           *plugin.ConfigSchema     `json:"schema,omitempty"`
-				Agent            *plugin.AgentDescriptor  `json:"agent,omitempty"`
-				LoadedAgent      *plugin.AgentDescriptor  `json:"loaded_agent,omitempty"`
-				Config           json.RawMessage          `json:"config,omitempty"`
-				Approval         *provider.PluginApproval `json:"approval,omitempty"`
+				ID               string                           `json:"id"`
+				Name             string                           `json:"name"`
+				Version          string                           `json:"version"`
+				Digest           string                           `json:"digest"`
+				FailureMode      string                           `json:"failure_mode"`
+				Description      string                           `json:"description"`
+				Hooks            []string                         `json:"hooks"`
+				Permissions      []string                         `json:"permissions"`
+				Credentials      []plugin.CredentialDeclaration   `json:"credentials,omitempty"`
+				Files            []plugin.FileDeclaration         `json:"files,omitempty"`
+				HTTPEndpoints    []plugin.HTTPEndpointDeclaration `json:"http_endpoints,omitempty"`
+				RequiresUpstream []string                         `json:"requires_upstream"`
+				ConflictsWith    []string                         `json:"conflicts_with"`
+				Enabled          bool                             `json:"enabled"`
+				Order            int                              `json:"order"`
+				State            string                           `json:"state"`
+				Loaded           bool                             `json:"loaded"`
+				LoadedDigest     string                           `json:"loaded_digest,omitempty"`
+				ServesHTTP       bool                             `json:"serves_http"`
+				Schema           *plugin.ConfigSchema             `json:"schema,omitempty"`
+				Agent            *plugin.AgentDescriptor          `json:"agent,omitempty"`
+				LoadedAgent      *plugin.AgentDescriptor          `json:"loaded_agent,omitempty"`
+				Config           json.RawMessage                  `json:"config,omitempty"`
+				Approval         *provider.PluginApproval         `json:"approval,omitempty"`
 			}
 			loadedByName := make(map[string]plugin.LoadedPluginStatus)
 			if rawPipeline := s.pluginPipeline.Load(); rawPipeline != nil {
@@ -1940,6 +1953,9 @@ func New(cfg Config) (*Server, error) {
 					Description:      m.Description,
 					Hooks:            hooks,
 					Permissions:      perms,
+					Credentials:      append([]plugin.CredentialDeclaration(nil), m.Credentials...),
+					Files:            append([]plugin.FileDeclaration(nil), m.Files...),
+					HTTPEndpoints:    append([]plugin.HTTPEndpointDeclaration(nil), m.HTTPEndpoints...),
 					RequiresUpstream: append([]string{}, m.RequiresUpstream...),
 					ConflictsWith:    append([]string{}, m.ConflictsWith...),
 					Enabled:          enabled,
@@ -2494,9 +2510,9 @@ func New(cfg Config) (*Server, error) {
 		// hot-reload swap cannot drain-and-close the runtime that holds
 		// this request's state mid-flight.
 		rs := &reqState{
-			ID:         reqCounter.Add(1),
-			CallerAuth: strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "),
-			Start:      time.Now(),
+			ID:                reqCounter.Add(1),
+			Start:             time.Now(),
+			CallerCredentials: callerCredentialsFrom(r),
 		}
 		if pp := s.pluginPipeline.Load(); pp != nil {
 			candidate := pp.(*plugin.PluginPipeline)
@@ -2525,10 +2541,16 @@ func New(cfg Config) (*Server, error) {
 			rs.finalizeRequest()
 		}()
 		// If no provider matches and no default, reject.
-		prov, _, _ := provider.Resolve(r.URL.Path, currentCfg.Providers)
+		prov, receivedProvider, _ := provider.Resolve(r.URL.Path, currentCfg.Providers)
 		if prov == nil && currentCfg.DefaultProvider == "" {
 			http.Error(w, "no provider configured for this path", http.StatusBadGateway)
 			return
+		}
+		if receivedProvider == "" {
+			receivedProvider = currentCfg.DefaultProvider
+		}
+		if debugEnabled() {
+			log.Printf("[debug] request received id=%d method=%s provider=%s", rs.ID, r.Method, receivedProvider)
 		}
 
 		// Enforce request body limit before it reaches Director or failover
@@ -2612,6 +2634,10 @@ func New(cfg Config) (*Server, error) {
 			PluginFailure:    rs.PluginFailure,
 			Plugins:          invokedPlugins,
 		})
+		if debugEnabled() {
+			log.Printf("[debug] request completed id=%d intercepted=%t provider=%s format=%s model=%s upstream_contacted=%t status=%d latency_ms=%.3f plugins=%v verdict=%s",
+				rs.ID, rs.Intercepted, rs.Provider, rs.InitialFormat, rs.Model, rs.UpstreamStatus != 0, tw.status, latencyMS, invokedPlugins, rs.Verdict)
+		}
 		s.appendAudit(rs, tw.status, invokedPlugins)
 	})
 
@@ -2629,8 +2655,8 @@ func New(cfg Config) (*Server, error) {
 		cfg: func() provider.Config {
 			return s.GetConfig().Providers
 		},
-		resolveSecret: s.resolveSecret,
-		rateLimiter:   s.rateLimiter,
+		resolveCredential: s.resolveCredential,
+		rateLimiter:       s.rateLimiter,
 	}
 
 	s.proxy = proxy
@@ -2788,6 +2814,10 @@ func (s *Server) Handler() http.Handler {
 
 // SetProviders hot-reloads the provider configuration without restarting.
 func (s *Server) SetProviders(cfg provider.Config) {
+	if err := s.replaceCredentialRegistry(cfg.Credentials); err != nil {
+		log.Printf("config hot-reload rejected credential registry: %v", err)
+		return
+	}
 	s.configMu.Lock()
 	s.config.Providers = cfg
 	s.configMu.Unlock()
@@ -2812,10 +2842,20 @@ func pluginApprovals(src map[string]provider.PluginApproval) map[string]plugin.A
 	}
 	dst := make(map[string]plugin.Approval, len(src))
 	for key, approval := range src {
+		httpBindings := make(map[string]plugin.HTTPApproval, len(approval.HTTPEndpoints))
+		for name, binding := range approval.HTTPEndpoints {
+			httpBindings[name] = plugin.HTTPApproval{Origin: binding.Origin, Methods: append([]string(nil), binding.Methods...), TimeoutMS: binding.TimeoutMS, MaxRequestBytes: binding.MaxRequestBytes, MaxResponseBytes: binding.MaxResponseBytes, MaxCallsPerMinute: binding.MaxCallsPerMinute}
+		}
+		credentialBindings := make(map[string]string, len(approval.Credentials))
+		for slot, id := range approval.Credentials {
+			credentialBindings[slot] = id
+		}
 		dst[key] = plugin.Approval{
-			Digest:      approval.Digest,
-			Permissions: append([]string(nil), approval.Permissions...),
-			FailureMode: approval.FailureMode,
+			Digest:        approval.Digest,
+			Permissions:   append([]string(nil), approval.Permissions...),
+			FailureMode:   approval.FailureMode,
+			Credentials:   credentialBindings,
+			HTTPEndpoints: httpBindings,
 		}
 	}
 	return dst
@@ -2870,6 +2910,10 @@ func (s *Server) applyProviderConfigTransaction(current, incoming provider.Confi
 				_ = candidateAudit.Close()
 			}
 		}()
+	}
+	candidateCredentials, err := buildCredentialRegistry(incoming.Credentials, s.credentialStore)
+	if err != nil {
+		return fmt.Errorf("credential registry: %w", err)
 	}
 
 	rollbackLive := func() {
@@ -2929,6 +2973,9 @@ func (s *Server) applyProviderConfigTransaction(current, incoming provider.Confi
 		s.auditWriter = candidateAudit
 		candidateAudit = nil
 		s.config.Providers = incoming
+		s.credentialMu.Lock()
+		s.credentials = candidateCredentials
+		s.credentialMu.Unlock()
 		s.auditMu.Unlock()
 		s.configMu.Unlock()
 		s.rateLimiter.Update(incoming.Limits.RPM, incoming.Limits.Concurrency)
@@ -2961,6 +3008,37 @@ func (s *Server) resolveSecret(envName, encVal string) string {
 		return val
 	}
 	return ""
+}
+
+func buildCredentialRegistry(config provider.CredentialsConfig, local *credentialstore.Store) (*credentialapi.Registry, error) {
+	sources := make(map[string]credentialapi.Source, len(config.Sources))
+	for name, source := range config.Sources {
+		sources[name] = credentialapi.Source{Type: source.Type, Config: append(json.RawMessage(nil), source.Config...)}
+	}
+	return credentialapi.NewRegistryWithProviders(sources, map[string]credentialapi.Provider{"local": local})
+}
+
+func (s *Server) resolveCredential(ctx context.Context, id string) ([]byte, error) {
+	cfg := s.GetConfig().Providers.Credentials
+	entry, ok := cfg.Entries[id]
+	if !ok {
+		return nil, fmt.Errorf("credential %q is not configured", id)
+	}
+	s.credentialMu.RLock()
+	registry := s.credentials
+	s.credentialMu.RUnlock()
+	return registry.Resolve(ctx, entry.Source, entry.Key)
+}
+
+func (s *Server) replaceCredentialRegistry(config provider.CredentialsConfig) error {
+	registry, err := buildCredentialRegistry(config, s.credentialStore)
+	if err != nil {
+		return err
+	}
+	s.credentialMu.Lock()
+	s.credentials = registry
+	s.credentialMu.Unlock()
+	return nil
 }
 
 func (s *Server) normalizeSecretField(incomingEnc, storedEnc string) (string, error) {
@@ -3025,7 +3103,7 @@ func sameJSONConfig(stored, incoming json.RawMessage) bool {
 // unmanagedProviderFields are per-provider settings that no control-plane form
 // currently renders. A client that rebuilds a provider object from a form would
 // drop them, so they are carried forward unless explicitly written.
-var unmanagedProviderFields = []string{"pricing", "responses_compaction", "cache", "forward_caller_credential"}
+var unmanagedProviderFields = []string{"pricing", "responses_compaction", "cache"}
 
 // preserveUnmanagedProviderFields copies unmanaged fields from the stored config
 // into the incoming one wherever the caller left them out. It mutates incoming.
@@ -3046,8 +3124,8 @@ func preserveUnmanagedProviderFields(stored, incoming map[string]provider.Provid
 				incP.ResponsesCompaction = curP.ResponsesCompaction
 			case "cache":
 				incP.Cache = curP.Cache
-			case "forward_caller_credential":
-				incP.ForwardCallerCredential = curP.ForwardCallerCredential
+			case "auth":
+				incP.Auth = curP.Auth
 			}
 		}
 		incoming[name] = incP
@@ -3055,20 +3133,6 @@ func preserveUnmanagedProviderFields(stored, incoming map[string]provider.Provid
 }
 
 func redactConfigSecrets(cfg provider.Config) provider.Config {
-	cfg.ControlPlane.Token = ""
-	if cfg.Providers != nil {
-		provs := make(map[string]provider.Provider, len(cfg.Providers))
-		for name, p := range cfg.Providers {
-			if p.APIKeyEnc != "" {
-				p.APIKeyEnc = secretSetSentinel
-			}
-			provs[name] = p
-		}
-		cfg.Providers = provs
-	}
-	if cfg.Offload.APIKeyEnc != "" {
-		cfg.Offload.APIKeyEnc = secretSetSentinel
-	}
 	if cfg.Cache.Redis.PasswordEnc != "" {
 		cfg.Cache.Redis.PasswordEnc = secretSetSentinel
 	}
@@ -3162,6 +3226,19 @@ func (s *Server) newRuntime() *wasm.Runtime {
 	// (INVALID_ARGUMENT / NOT_CONFIGURED / UNAVAILABLE); the value arm carries
 	// provider outcomes only.
 	rt.SendRequestFunc = s.sendPluginRequest
+	rt.CredentialGetFunc = func(ctx context.Context, pluginName, credentialID string) ([]byte, error) {
+		return s.resolveCredential(ctx, credentialID)
+	}
+	if s.pluginFiles != nil {
+		rt.FileAppendFunc = s.pluginFiles.Append
+		rt.FileReadFunc = s.pluginFiles.Read
+		rt.FileWriteFunc = s.pluginFiles.Write
+		rt.FileListFunc = s.pluginFiles.List
+		rt.FileDeleteFunc = s.pluginFiles.Delete
+	}
+	if s.pluginHTTP != nil {
+		rt.HTTPRequestFunc = s.pluginHTTP.Do
+	}
 	// Virtual-key verification is an enterprise capability: the OSS proxy does
 	// not wire it, so an absent callback frames NOT_CONFIGURED at dispatch
 	// (never UNAVAILABLE — a declared permission that can never succeed in
@@ -3172,7 +3249,7 @@ func (s *Server) newRuntime() *wasm.Runtime {
 	// (bytes, captured). The callbacks are installed unconditionally, so
 	// "returned nil" cannot mean "unavailable" — on the streaming and
 	// upstream-error paths nothing is ever snapshotted, and framing that as a
-	// successful empty value is the NOT_FOUND-vs-empty ambiguity v2 removes.
+	// successful empty value is the NOT_FOUND-vs-empty ambiguity current ABI removes.
 	rt.OriginalRequestFunc = func(ctx context.Context) ([]byte, bool) {
 		rs := reqStateFrom(ctx)
 		if rs == nil {

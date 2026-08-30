@@ -6,14 +6,14 @@ import (
 	"sync"
 	"unsafe"
 
-	pb "github.com/torana-edge/torana-plugin-sdk/pb/v2"
+	pb "github.com/torana-edge/torana-plugin-sdk/pb/v1"
 	"google.golang.org/protobuf/proto"
 )
 
 func main() {}
 
 // A HANDWRITTEN guest: records verdicts through host calls and then returns a
-// malformed v2 frame.
+// malformed current ABI frame.
 //
 // It cannot use the SDK, because the SDK's typed results make a malformed frame
 // unrepresentable — which is the point of them. That leaves the host's

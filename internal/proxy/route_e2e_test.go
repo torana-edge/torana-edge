@@ -50,9 +50,13 @@ func routerEnv(t *testing.T) (func(msg string) (int, []byte), *sync.Map) {
 
 	srv, err := New(Config{
 		Providers: provider.Config{
+			Credentials: provider.CredentialsConfig{
+				Sources: map[string]provider.CredentialSource{"env": {Type: "env"}},
+				Entries: map[string]provider.CredentialEntry{"cheap": {Source: "env", Key: "TEST_CHEAP_KEY"}},
+			},
 			Providers: map[string]provider.Provider{
 				"main":     {URL: mainUp.URL, Format: "openai"},
-				"cheap":    {URL: cheapUp.URL, Format: "openai", APIKeyEnv: "TEST_CHEAP_KEY"},
+				"cheap":    {URL: cheapUp.URL, Format: "openai", Auth: provider.ProviderAuth{Mode: "credential", Credential: "cheap"}},
 				"wrongfmt": {URL: cheapUp.URL, Format: "anthropic"},
 			},
 			Plugins: provider.PluginsConfig{Dir: "../../examples/plugins", Order: []string{"test-router"}, AllowUnapproved: true},
@@ -118,7 +122,7 @@ func TestRouteToCheapProvider(t *testing.T) {
 	if r.Model != "small-model" {
 		t.Errorf("model = %q, want small-model", r.Model)
 	}
-	if r.Auth != "Bearer cheap-secret" || r.XKey != "cheap-secret" {
+	if r.Auth != "Bearer cheap-secret" || r.XKey != "" {
 		t.Errorf("target credentials wrong: auth=%q xkey=%q", r.Auth, r.XKey)
 	}
 	if strings.Contains(r.Auth, "caller-secret") || strings.Contains(r.XKey, "caller-secret") {

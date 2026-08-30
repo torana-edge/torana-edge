@@ -22,7 +22,7 @@ import (
 	"github.com/torana-edge/torana-edge/internal/metrics"
 	"github.com/torana-edge/torana-edge/internal/provider"
 	"github.com/torana-edge/torana-edge/internal/wasm"
-	pb "github.com/torana-edge/torana-plugin-sdk/pb/v2"
+	pb "github.com/torana-edge/torana-plugin-sdk/pb/v1"
 )
 
 // torana_send_request lets a plugin originate a provider request.
@@ -35,8 +35,8 @@ import (
 //     chooses among endpoints the operator already trusts; it cannot invent
 //     one. There is no SSRF surface here because there is no attacker-supplied
 //     address.
-//   - Credentials are injected host-side from that provider's own
-//     api_key_env/api_key_enc and are never visible to the guest. The caller's
+//   - Credentials are injected host-side from that provider's configured
+//     Torana credential and are never visible to the guest. The caller's
 //     credential is deliberately not reused: it is request-scoped, and a
 //     background call has no caller to borrow from.
 //   - Every call is metered against a per-plugin budget and recorded in the
@@ -250,14 +250,14 @@ func (s *Server) sendPluginRequest(ctx context.Context, pluginName, payloadJSON 
 	if err := proto.Unmarshal(raw, &pbReq); err != nil {
 		return wasm.ExtensionRefusal(pb.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "request_pb is not a ChatRequest: %v", err)
 	}
-	// Guest-controlled request_pb must satisfy the v2 replacement contract
+	// Guest-controlled request_pb must satisfy the current ABI replacement contract
 	// (SDK ValidateReplacement) BEFORE conversion: empty required tool
 	// arguments/schemas, nil nested values, and malformed JSON are refused
 	// here — provider-side omissions normalize at the provider parse
-	// boundary, never for a handwritten v2 guest.
+	// boundary, never for a handwritten plugin guest.
 	if err := pbReq.ValidateReplacement(); err != nil {
 		return wasm.ExtensionRefusal(pb.ErrorCode_ERROR_CODE_INVALID_ARGUMENT,
-			"request_pb does not satisfy the v2 replacement contract: %v", err)
+			"request_pb does not satisfy the replacement contract: %v", err)
 	}
 	chat, err := pbconv.FromPBChatRequest(&pbReq)
 	if err != nil {
@@ -344,13 +344,11 @@ func (s *Server) sendPluginRequest(ctx context.Context, pluginName, payloadJSON 
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("Accept-Encoding", "identity")
 
-	// Credentials come from the provider's own configuration. The caller's
-	// credential is request-scoped and a plugin-originated call may have no
-	// caller at all, so reusing it would work by accident during a request and
-	// fail as a silent 401 on a tick.
-	if key := s.resolveSecret(prov.APIKeyEnv, prov.APIKeyEnc); key != "" {
-		httpReq.Header.Set("Authorization", "Bearer "+key)
-		httpReq.Header.Set("X-Api-Key", key)
+	if prov.Auth.EffectiveMode() == "caller" {
+		return wasm.ExtensionRefusal(pb.ErrorCode_ERROR_CODE_NOT_CONFIGURED, "provider %q uses caller auth; plugin-originated calls require credential or none", req.Provider)
+	}
+	if err := applyProviderCredential(callCtx, httpReq, prov, callerCredentials{}, s.resolveCredential); err != nil {
+		return wasm.ExtensionRefusal(pb.ErrorCode_ERROR_CODE_NOT_CONFIGURED, "provider credential unavailable")
 	}
 
 	// Budget authorization happens AFTER all guest-input and request-build

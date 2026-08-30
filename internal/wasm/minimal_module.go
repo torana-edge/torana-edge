@@ -1,8 +1,8 @@
 package wasm
 
-import pb "github.com/torana-edge/torana-plugin-sdk/pb/v2"
+import pb "github.com/torana-edge/torana-plugin-sdk/pb/v1"
 
-// MinimalV2Module builds the smallest module the v2 host will load: alloc,
+// MinimalModule builds the smallest module the plugin host will load: alloc,
 // run_hook(ptr,size)->i64 and supported_hooks()->i64.
 //
 // It lives beside the runtime rather than in a _test.go file because other
@@ -12,17 +12,17 @@ import pb "github.com/torana-edge/torana-plugin-sdk/pb/v2"
 //
 // loopForever makes run_hook spin, for cancellation coverage. Otherwise it
 // returns 0, which is ABI pass-through.
-func MinimalV2Module(loopForever bool) []byte {
+func MinimalModule(loopForever bool) []byte {
 	return minimalModule(loopForever, true)
 }
 
-// MinimalV2ModuleTrapsAtInit builds a module that COMPILES successfully and
+// MinimalModuleTrapsAtInit builds a module that COMPILES successfully and
 // deterministically fails during instantiation: a start section runs
 // run_hook's body, which executes unreachable. The lifecycle construction-
 // failure test asserts the error is post-compile via the
 // compiled-acquired -> compiled-released -> construct-failed stream, without
 // any large-memory fixture.
-func MinimalV2ModuleTrapsAtInit() []byte {
+func MinimalModuleTrapsAtInit() []byte {
 	sec := func(id byte, body []byte) []byte {
 		return append([]byte{id, byte(len(body))}, body...)
 	}
@@ -57,11 +57,11 @@ func MinimalV2ModuleTrapsAtInit() []byte {
 	return append(out, code...)
 }
 
-// MinimalV2ModuleNoHooks builds the same shape as MinimalV2Module but omits
+// MinimalModuleNoHooks builds the same shape as MinimalModule but omits
 // the supported_hooks export: compilation and instantiation succeed, and the
 // hook-discovery step (supportedHooks) fails. Used to prove the post-compile
 // hook-discovery error path releases the compiled handle.
-func MinimalV2ModuleNoHooks() []byte {
+func MinimalModuleNoHooks() []byte {
 	return minimalModule(false, false)
 }
 
@@ -74,7 +74,7 @@ func minimalModule(loopForever, withHooks bool) []byte {
 	}
 
 	// Types: 0 = (i32)->i32 for alloc, 1 = (i32,i32)->i64 for run_hook,
-	// 2 = ()->i64 for supported_hooks. run_hook takes TWO arguments: v2 moved
+	// 2 = ()->i64 for supported_hooks. run_hook takes TWO arguments: current ABI moved
 	// the request id into HookInput.
 	types := sec(0x01, []byte{
 		0x03,
@@ -132,7 +132,7 @@ func minimalModule(loopForever, withHooks bool) []byte {
 }
 
 // ModuleImportingEnvFunc builds a guest that imports env.<name> as a
-// (i32,i32)->i64 function, plus the v2 exports.
+// (i32,i32)->i64 function, plus the current ABI exports.
 //
 // Used to prove a handwritten guest cannot reach a host function that no
 // longer exists. Asserting on the host module's export list is not possible —

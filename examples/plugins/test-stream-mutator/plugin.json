@@ -3,7 +3,7 @@
   "id": "torana-test/test-stream-mutator",
   "name": "test-stream-mutator",
   "version": "0.1.0",
-  "abi_version": "v2",
+  "abi_version": "v1",
   "failure_mode": "pass",
   "description": "Example plugin: redacts the word 'secret' from streamed text deltas",
   "hooks": [

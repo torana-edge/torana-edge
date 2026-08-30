@@ -4,31 +4,31 @@ import (
 	"context"
 	"testing"
 
-	pbv2 "github.com/torana-edge/torana-plugin-sdk/pb/v2"
+	pbv1 "github.com/torana-edge/torana-plugin-sdk/pb/v1"
 	"google.golang.org/protobuf/proto"
 )
 
-func cacheSetCall(t *testing.T, r *Runtime, p *Plugin, cmd, key, value string) *pbv2.HostCallResult {
+func cacheSetCall(t *testing.T, r *Runtime, p *Plugin, cmd, key, value string) *pbv1.HostCallResult {
 	t.Helper()
-	raw, err := proto.Marshal(&pbv2.CacheSetArgs{Key: key, Value: value})
+	raw, err := proto.Marshal(&pbv1.CacheSetArgs{Key: key, Value: value})
 	if err != nil {
 		t.Fatal(err)
 	}
 	return hostCallDirect(t, r, p, cmd, raw)
 }
 
-func cacheGetCall(t *testing.T, r *Runtime, p *Plugin, cmd, key string) *pbv2.HostCallResult {
+func cacheGetCall(t *testing.T, r *Runtime, p *Plugin, cmd, key string) *pbv1.HostCallResult {
 	t.Helper()
-	raw, err := proto.Marshal(&pbv2.CacheGetArgs{Key: key})
+	raw, err := proto.Marshal(&pbv1.CacheGetArgs{Key: key})
 	if err != nil {
 		t.Fatal(err)
 	}
 	return hostCallDirect(t, r, p, cmd, raw)
 }
 
-func cacheValue(t *testing.T, result *pbv2.HostCallResult) string {
+func cacheValue(t *testing.T, result *pbv1.HostCallResult) string {
 	t.Helper()
-	arm, ok := result.Result.(*pbv2.HostCallResult_Value)
+	arm, ok := result.Result.(*pbv1.HostCallResult_Value)
 	if !ok {
 		t.Fatalf("cache call failed: %+v", result.Result)
 	}
@@ -39,7 +39,7 @@ func TestPrivateAndSharedCacheDomainsAreEnforcedByTheHost(t *testing.T) {
 	r := NewRuntime(context.Background())
 	defer r.Close()
 	load := func(name string, grants ...string) *Plugin {
-		p, err := r.LoadPlugin(name, MinimalV2Module(false))
+		p, err := r.LoadPlugin(name, MinimalModule(false))
 		if err != nil {
 			t.Fatalf("load %s: %v", name, err)
 		}
@@ -50,7 +50,7 @@ func TestPrivateAndSharedCacheDomainsAreEnforcedByTheHost(t *testing.T) {
 	b := load("beta", "env.cache_get", "env.cache_set", "env.shared_cache_get", "env.shared_cache_set")
 
 	cacheValue(t, cacheSetCall(t, r, a, "env.cache_set", "same", "alpha-private"))
-	if _, ok := cacheGetCall(t, r, b, "env.cache_get", "same").Result.(*pbv2.HostCallResult_Error); !ok {
+	if _, ok := cacheGetCall(t, r, b, "env.cache_get", "same").Result.(*pbv1.HostCallResult_Error); !ok {
 		t.Fatal("beta read alpha's private cache entry")
 	}
 	cacheValue(t, cacheSetCall(t, r, b, "env.cache_set", "same", "beta-private"))
@@ -77,12 +77,12 @@ func TestPrivateAndSharedCacheDomainsAreEnforcedByTheHost(t *testing.T) {
 
 func TestSharedCacheRequiresItsOwnGrant(t *testing.T) {
 	r, p := newGrantedPlugin(t, "env.cache_get", "env.cache_set")
-	for _, call := range []*pbv2.HostCallResult{
+	for _, call := range []*pbv1.HostCallResult{
 		cacheSetCall(t, r, p, "env.shared_cache_set", "k", "v"),
 		cacheGetCall(t, r, p, "env.shared_cache_get", "k"),
 	} {
-		errArm, ok := call.Result.(*pbv2.HostCallResult_Error)
-		if !ok || errArm.Error.Code != pbv2.ErrorCode_ERROR_CODE_PERMISSION_DENIED {
+		errArm, ok := call.Result.(*pbv1.HostCallResult_Error)
+		if !ok || errArm.Error.Code != pbv1.ErrorCode_ERROR_CODE_PERMISSION_DENIED {
 			t.Fatalf("private cache grant opened shared cache: %+v", call.Result)
 		}
 	}

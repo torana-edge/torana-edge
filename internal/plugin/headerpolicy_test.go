@@ -15,7 +15,7 @@ import (
 	"github.com/torana-edge/torana-edge/internal/engine"
 	"github.com/torana-edge/torana-edge/internal/engine/pbconv"
 	"github.com/torana-edge/torana-edge/internal/wasm"
-	pbv2 "github.com/torana-edge/torana-plugin-sdk/pb/v2"
+	pbv1 "github.com/torana-edge/torana-plugin-sdk/pb/v1"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -310,7 +310,7 @@ func newApprovedMultiPipeline(t *testing.T, order []string, approvals map[string
 // assertNoCredentialMeta fails when the returned engine request carries
 // _request_headers in its ToranaMeta — the projection must never survive the
 // chain into the returned PB round-trip.
-func mustCheckedPB(t *testing.T, chat *engine.ChatRequest) *pbv2.ChatRequest {
+func mustCheckedPB(t *testing.T, chat *engine.ChatRequest) *pbv1.ChatRequest {
 	t.Helper()
 	pbReq, err := pbconv.ToPBChatRequestChecked(chat)
 	if err != nil {
@@ -547,7 +547,7 @@ func TestChatHeadersMutationObserverSeesNoProjection(t *testing.T) {
 	}
 	select {
 	case raw := <-observed:
-		var req pbv2.ChatRequest
+		var req pbv1.ChatRequest
 		if err := proto.Unmarshal(raw, &req); err != nil {
 			t.Fatalf("decode observed request: %v", err)
 		}

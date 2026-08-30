@@ -21,7 +21,7 @@ import (
 	"github.com/torana-edge/torana-edge/internal/engine"
 	"github.com/torana-edge/torana-edge/internal/engine/pbconv"
 	"github.com/torana-edge/torana-edge/internal/provider"
-	pb "github.com/torana-edge/torana-plugin-sdk/pb/v2"
+	pb "github.com/torana-edge/torana-plugin-sdk/pb/v1"
 	"github.com/torana-edge/torana-plugin-sdk/sdktest"
 )
 
@@ -88,8 +88,9 @@ func egressServer(t *testing.T, budget provider.EgressBudget) (*Server, *int) {
 	t.Setenv("EGRESS_TEST_KEY", "sk-provider")
 
 	cfg := provider.DefaultConfig()
+	cfg.Credentials.Entries["egress-test"] = provider.CredentialEntry{Source: "env", Key: "EGRESS_TEST_KEY"}
 	cfg.Providers = map[string]provider.Provider{
-		"oai": {URL: upstream.URL, Format: "openai", APIKeyEnv: "EGRESS_TEST_KEY"},
+		"oai": {URL: upstream.URL, Format: "openai", Auth: provider.ProviderAuth{Mode: "credential", Credential: "egress-test"}},
 	}
 	cfg.Plugins.Runtime.Egress = map[string]provider.EgressBudget{"warmer": budget}
 
@@ -371,7 +372,7 @@ func TestEgressMeterWindowsRoll(t *testing.T) {
 // TestEgressRejectsUnrenderableRequest — a guest-supplied ChatRequest that
 // the provider's format adapter cannot render is a CALLER bug, not a
 // transient host outage: retrying the same request cannot help. A protobuf
-// double field carries NaN bit-exactly; the v2 replacement contract now
+// double field carries NaN bit-exactly; the current ABI replacement contract now
 // refuses it at the send_request gate (temperature must be finite) BEFORE
 // conversion — the guest-controlled vector this pins, refused earlier and
 // with the same classified INVALID_ARGUMENT semantics.
@@ -715,8 +716,9 @@ func newEgressTestServer(t *testing.T, upstreamURL string, budget provider.Egres
 	t.Helper()
 	t.Setenv("EGRESS_TEST_KEY", "sk-provider")
 	cfg := provider.DefaultConfig()
+	cfg.Credentials.Entries["egress-test"] = provider.CredentialEntry{Source: "env", Key: "EGRESS_TEST_KEY"}
 	cfg.Providers = map[string]provider.Provider{
-		"oai": {URL: upstreamURL, Format: "openai", APIKeyEnv: "EGRESS_TEST_KEY"},
+		"oai": {URL: upstreamURL, Format: "openai", Auth: provider.ProviderAuth{Mode: "credential", Credential: "egress-test"}},
 	}
 	cfg.Plugins.Runtime.Egress = map[string]provider.EgressBudget{"warmer": budget}
 	srv, err := New(Config{Port: "0", Providers: cfg, ConfigPath: filepath.Join(t.TempDir(), "config.json")})
@@ -862,7 +864,7 @@ func TestEgressHostPathContract(t *testing.T) {
 }
 
 // TestEgressRejectsContractViolations: guest-controlled request_pb must
-// satisfy the v2 replacement contract BEFORE conversion — nil nested
+// satisfy the current ABI replacement contract BEFORE conversion — nil nested
 // values, empty required tool bytes, and malformed object bytes are
 // classified refusals with NO outbound send and no panic; a valid `{}`
 // control passes validation and reaches the provider.
@@ -895,7 +897,7 @@ func TestEgressRejectsContractViolations(t *testing.T) {
 	}
 
 	// Positive control: a valid {} arguments/schema request is accepted and
-	// reaches the provider (the guest met the v2 contract).
+	// reaches the provider (the guest met the current ABI contract).
 	got, herr := send(t, srv, "warmer", reqFor(func(*pb.ChatRequest) {}))
 	if herr != nil {
 		t.Fatalf("valid {} control refused: %v", herr)

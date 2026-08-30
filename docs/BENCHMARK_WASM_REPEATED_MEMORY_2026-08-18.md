@@ -7,7 +7,7 @@ count. It is a retention probe, not a throughput benchmark.
 
 ## Method
 
-The current-v2 Go and Rust logger guests, their source revision, SHA-256
+The current Go and Rust logger guests, their source revision, SHA-256
 digests, pool configuration, and 16 KiB coding-agent request are identical to
 the one-call profile. The bundle-gated
 `TestGuestLinearMemoryRepeatedProfile` deterministically drives every request

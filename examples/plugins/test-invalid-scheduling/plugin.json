@@ -3,7 +3,7 @@
   "id": "torana-test/test-invalid-scheduling",
   "name": "test-invalid-scheduling",
   "version": "0.1.0",
-  "abi_version": "v2",
+  "abi_version": "v1",
   "failure_mode": "block",
   "description": "Test fixture: injects an SDK-valid but adapter-unmarshalable scheduling value",
   "hooks": [

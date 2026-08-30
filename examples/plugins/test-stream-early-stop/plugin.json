@@ -3,7 +3,7 @@
   "id": "torana-test/test-stream-early-stop",
   "name": "test-stream-early-stop",
   "version": "0.1.0",
-  "abi_version": "v2",
+  "abi_version": "v1",
   "failure_mode": "pass",
   "description": "Regression fixture: emit a stop early and suppress the later accepted stop",
   "hooks": [

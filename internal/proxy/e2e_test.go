@@ -1023,8 +1023,8 @@ func TestObservationalStreamingHookIsOnTheClientCriticalPath(t *testing.T) {
 
 	cfg := Config{Port: "0", Providers: provider.Config{
 		Providers: map[string]provider.Provider{
-			"oai":   {URL: upstream.URL, Format: "openai"},
-			"latch": {URL: latch.URL, Format: "openai"},
+			"oai":   {URL: upstream.URL, Format: "openai", Auth: provider.ProviderAuth{Mode: "none"}},
+			"latch": {URL: latch.URL, Format: "openai", Auth: provider.ProviderAuth{Mode: "none"}},
 		},
 		Plugins: provider.PluginsConfig{
 			Dir: fixturesDir, Order: []string{"test-slow-after-stream"},

@@ -146,13 +146,13 @@ func (k BlockKind) String() string {
 
 // BlockStart opens an explicit text/thinking/provider content block at Index.
 // Tool-call blocks keep ToolCallStart, which already carries the block payload
-// (id/name/signature). The v2 ABI requires every content block to open with a
+// (id/name/signature). The plugin ABI requires every content block to open with a
 // start event so signatures can be bound to the right scope.
 type BlockStart struct {
 	Index int
 	Kind  BlockKind
 	// ProviderKind is the provider's verbatim kind string for a provider
-	// block (the v2 ABI passes ProviderBlock.kind through verbatim; the host
+	// block (the plugin ABI passes ProviderBlock.kind through verbatim; the host
 	// must not change it after verification). Meaningful only when Kind ==
 	// BlockKindProvider; empty for text/thinking blocks.
 	ProviderKind string
@@ -259,11 +259,15 @@ type ResponseToolCall struct {
 // the reply. A plugin reading the assistant's answer got the last user message
 // instead, depending on a path it could not observe.
 //
-// Mirrors torana.v2.ChatResponse field for field so the conversion cannot lose
+// Mirrors torana.v1.ChatResponse field for field so the conversion cannot lose
 // or invent anything.
 type ChatResponse struct {
 	Model string
-	ID    string
+	// Provider is the configured Torana provider that produced or attempted
+	// this response. It is host routing identity, not provider wire data.
+	Provider          string
+	CompletedAtUnixMS int64
+	ID                string
 	// Message is the assistant's reply: exactly one message, because a
 	// response IS one message. The v1 shape allowed a list and thereby allowed
 	// the ambiguity above.

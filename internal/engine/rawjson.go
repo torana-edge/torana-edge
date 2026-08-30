@@ -17,7 +17,7 @@ package engine
 //     copy, and views are read-only by contract and copies in fact;
 //   - every byte sequence is validated with the strict shared JSON-text
 //     rules (valid UTF-8, paired surrogates, unique decoded member names,
-//     exactly one top-level value — pb/v2/jsontext) before it can become
+//     exactly one top-level value — pb/v1/jsontext) before it can become
 //     or remain the authority; mutations re-validate and leave the
 //     receiver unchanged on error;
 //   - SHAPE IS TYPE-LEVEL: an OptionalJSONObject can only ever hold an
@@ -47,7 +47,7 @@ import (
 	"fmt"
 	"unicode/utf8"
 
-	pbjsontext "github.com/torana-edge/torana-plugin-sdk/pb/v2/jsontext"
+	pbjsontext "github.com/torana-edge/torana-plugin-sdk/pb/v1/jsontext"
 )
 
 // jsonBytes is the shared unexported validated byte/span authority. nil

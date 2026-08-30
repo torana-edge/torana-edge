@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	pb "github.com/torana-edge/torana-plugin-sdk/pb/v2"
+	pb "github.com/torana-edge/torana-plugin-sdk/pb/v1"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protoreflect"
 )
@@ -394,7 +394,7 @@ func TestManifestAcceptsTheGrant(t *testing.T) {
 		ID:            "torana-test/cc-fixture",
 		Name:          "cc-fixture",
 		Version:       "0.1.0",
-		ABIVersion:    "v2",
+		ABIVersion:    "v1",
 		FailureMode:   "pass",
 		Hooks:         []Hook{{Name: "run_before_request"}},
 		Permissions:   []Permission{{Name: ccGrant}},

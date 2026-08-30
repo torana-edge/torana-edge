@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 
-	pbv2 "github.com/torana-edge/torana-plugin-sdk/pb/v2"
+	pbv1 "github.com/torana-edge/torana-plugin-sdk/pb/v1"
 )
 
 // requestHeadersKey is the host-owned ToranaMeta key carrying the allowlisted
@@ -123,7 +123,7 @@ func projectChatHeaders(raw map[string][]string) map[string]any {
 // host-owned ToranaMetaJson. The caller restores the EXACT pre-injection
 // bytes afterwards (restoreRequestHeaders); this function never leaves the
 // field in a request that chains or returns.
-func injectRequestHeaders(current *pbv2.ChatRequest, headers map[string]any) {
+func injectRequestHeaders(current *pbv1.ChatRequest, headers map[string]any) {
 	meta := map[string]any{}
 	if len(current.ToranaMetaJson) > 0 {
 		if err := json.Unmarshal(current.ToranaMetaJson, &meta); err != nil {
@@ -146,7 +146,7 @@ func injectRequestHeaders(current *pbv2.ChatRequest, headers map[string]any) {
 // host metadata, and works because an accepted replacement must carry
 // byte-identical injected metadata (the host-owned torana_meta_json
 // invariant).
-func restoreRequestHeaders(target *pbv2.ChatRequest, saved []byte) {
+func restoreRequestHeaders(target *pbv1.ChatRequest, saved []byte) {
 	if target != nil {
 		target.ToranaMetaJson = saved
 	}

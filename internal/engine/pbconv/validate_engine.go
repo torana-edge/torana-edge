@@ -5,7 +5,7 @@ import (
 	"math"
 
 	"github.com/torana-edge/torana-edge/internal/engine"
-	pb "github.com/torana-edge/torana-plugin-sdk/pb/v2"
+	pb "github.com/torana-edge/torana-plugin-sdk/pb/v1"
 )
 
 // ValidateEngineRequest checks the ENGINE-side structural facts the

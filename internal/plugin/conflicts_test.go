@@ -22,7 +22,7 @@ func writeConflictBundle(t *testing.T, root, name, id string, conflicts []string
 		ID:            id,
 		Name:          name,
 		Version:       "0.1.0",
-		ABIVersion:    "v2",
+		ABIVersion:    "v1",
 		FailureMode:   "pass",
 		Repository:    "https://github.com/torana-edge/torana-plugins",
 		Description:   "conflict contract fixture",

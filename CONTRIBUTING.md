@@ -107,7 +107,7 @@ both repos:
 
 **In the SDK:**
 
-1. Add messages to `proto/torana/v2/torana.proto`. **Additive only** — CI runs
+1. Add messages to `proto/torana/v1/torana.proto`. **Additive only** — CI runs
    `buf breaking` against `main`, so changing a field number or removing a field
    fails.
 2. Regenerate with `./scripts/generate-go.sh` and **commit the result**. CI
@@ -120,7 +120,7 @@ both repos:
 3. Register the hook in `sdk.go` **and add a no-op stub to `sdk_other.go`**.
    `sdk.go` is `//go:build wasip1`; without the stub, every plugin fails to
    compile for host-side tests.
-4. Update the Go and Rust ABI-v2 SDK helpers and conformance tests. Keep both
+4. Update the Go and Rust ABI-v1 SDK helpers and conformance tests. Keep both
    compiled conformance guests in the Edge host test: language support is a
    host-boundary contract, not merely two libraries that compile.
 5. Update `ABI.md`, `docs/WRITING_A_PLUGIN.md`, and **`docs/WASM_PLUGIN_GUIDE.md`**.

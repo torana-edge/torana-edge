@@ -3,7 +3,7 @@
   "id": "torana-test/test-toolresult-helper-nogrant",
   "name": "test-toolresult-helper-nogrant",
   "version": "0.1.0",
-  "abi_version": "v2",
+  "abi_version": "v1",
   "failure_mode": "block",
   "description": "Same fixture WITHOUT the write grants (the authorization row)",
   "hooks": [

@@ -7,7 +7,7 @@ compiled/runtime state included in process RSS.
 
 ## Reproduction
 
-The current-v2 SDK logger examples were built from merged SDK main commit
+The current SDK logger examples were built from merged SDK main commit
 `692f4a0` with the release commands:
 
 ```sh

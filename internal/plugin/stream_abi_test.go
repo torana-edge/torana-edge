@@ -1051,7 +1051,7 @@ func TestIntentNativeIEnrichesDescriptionOnly(t *testing.T) {
 
 // TestStreamBlockTopologySurvivesPlugins: a text block passed through a plugin
 // (which only touches TextDelta) must come back with its block topology
-// intact — BlockStart stays BlockStart and BlockStop stays BlockStop. The v2
+// intact — BlockStart stays BlockStart and BlockStop stays BlockStop. The current ABI
 // wire's stop carries only an index; the host's per-request BlockKindTracker
 // is what keeps a plugin-passed text block's stop from being misread as a tool
 // call's end (which would leave the serializer with an open part it never

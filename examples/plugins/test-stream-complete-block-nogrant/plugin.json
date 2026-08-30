@@ -3,7 +3,7 @@
   "id": "torana-test/test-stream-complete-block-nogrant",
   "name": "test-stream-complete-block-nogrant",
   "version": "0.1.0",
-  "abi_version": "v2",
+  "abi_version": "v1",
   "failure_mode": "pass",
   "description": "Negative fixture: invent a complete text scope without stream grants",
   "hooks": [

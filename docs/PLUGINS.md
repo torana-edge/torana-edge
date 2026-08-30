@@ -8,7 +8,7 @@ runs.
 This page is for operating them. If you want to *write* one, that lives with
 the SDK: [torana-plugin-sdk](https://github.com/torana-edge/torana-plugin-sdk).
 
-The current host accepts ABI v2 plugins. The SDK repository supports ABI v2
+The current host accepts ABI v1 plugins. The SDK repository supports ABI v1
 guests in Go and Rust; the first-party plugins use Go, while the Rust crate and
 conformance guest demonstrate the same host boundary from a second language.
 
@@ -16,6 +16,7 @@ conformance guest demonstrate the same host boundary from a second language.
 
 ```bash
 torana plugin install --official                              # the maintained set
+torana plugin install https://github.com/you/your-plugins/tree/main/plugins/foo
 torana plugin install github.com/you/your-plugins/plugins/foo # anyone's repo
 torana plugin install github.com/you/your-plugins/plugins/foo@v1.2.0
 torana plugin install https://gitlab.example.com/group/subgroup/repo.git//plugins/foo@v1.2.0
@@ -24,11 +25,12 @@ torana plugin list
 torana plugin remove foo
 ```
 
-GitHub's `host/owner/repo/subdirectory@ref` shorthand remains supported. For
-arbitrary HTTPS hosts and nested GitLab groups, use the unambiguous
-`.git//subdirectory@ref` form shown above. A ref may be a branch, tag, or commit
-SHA. There is no central index; `--official` is a convenience alias, not a
-privileged channel.
+Pasteable GitHub `.../tree/<ref>/<directory>` and GitLab
+`.../-/tree/<ref>/<directory>` browser URLs are accepted directly. The shorter
+`host/owner/repo/subdirectory@ref` form and the portable
+`.git//subdirectory@ref` form remain supported. A ref may be a branch, tag, or
+commit SHA. There is no central index; `--official` is a convenience alias, not
+a privileged channel.
 
 Plugins are **compiled locally from source**, never downloaded prebuilt. Nested
 Go and Rust packages and embedded assets are supported; symlinks, special
@@ -95,8 +97,11 @@ The sandbox is real. A plugin runs in `wazero` with no filesystem, no network,
 and no environment. It sees the request as protobuf and nothing else. That is
 what makes it reasonable to run a plugin someone else wrote.
 
-Operator audit files are therefore a host feature, not a plugin capability. A
-plugin cannot select a local path or write the audit sink. The host records the
+Plugins may request narrowly declared private logical files. The operator sees
+the path, operations, size, and rotation budget at approval; Torana chooses the
+OS path, prevents cross-plugin access, and exposes it through `torana plugin
+file`. A plugin still cannot select an OS path or write the operator audit sink.
+The host records the
 ordered names of plugins it actually invoked and any attributed verdict; see
 [Structured audit log](AUDIT_LOG.md).
 
@@ -117,7 +122,10 @@ approve them.
 | `env.background_tick` | Runs plugin code on a timer with **no request in flight**. Everything else a plugin does appears in a trace of your own traffic; this does not. |
 | `env.host_call.torana_send_request` | Lets the plugin **send its own provider requests**, which costs you money. It cannot choose a destination — only providers you configured — and never sees your credentials, but it can spend within the budget you set. |
 | `env.shared_cache_get` / `env.shared_cache_set` | Crosses the normal plugin-private cache boundary. A granted plugin can read or replace keys intentionally published for other approved plugins. Ordinary `env.cache_*` never does this. |
-| `env.state_set` / `env.state_get` | Durable, **plugin-private** storage that survives restarts, written to disk beside your config. A plugin may keep prompt fragments there. |
+| `env.state_set` / `env.state_get` | Durable, **plugin-private** key/value storage that survives restarts. A plugin may keep prompt fragments there. |
+| `env.file_*` | Access only to manifest-declared logical files with operator-visible operations, size, and rotation bounds. No OS paths are visible to the guest. |
+| `env.credential_get` | Resolves only operator-bound credential slots. The plugin declares the purpose but never sees provider configuration or other credential IDs. |
+| `env.http_request` | Calls only operator-approved endpoint slots with exact origins, methods, timeouts, byte limits, rate limits, redirect blocking, and private-network protection. |
 
 None of the three does anything on its own. Ticks are off unless you set an
 interval, egress is refused unless you set a budget, and both are refused

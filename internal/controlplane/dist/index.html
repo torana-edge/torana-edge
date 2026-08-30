@@ -157,7 +157,7 @@
         <div class="table-container surface-flat">
           <table class="providers-table">
             <thead>
-              <tr><th>Name</th><th>Upstream URL</th><th>Format</th><th>API key</th><th>API key env</th><th>Fallback</th><th></th></tr>
+              <tr><th>Name</th><th>Upstream URL</th><th>Format</th><th>Auth mode</th><th>Credential</th><th>Fallback</th><th></th></tr>
             </thead>
             <tbody id="providersBody"></tbody>
           </table>
@@ -197,22 +197,15 @@
             <span class="hint">Must be an <code>openai</code>-format provider.</span>
           </div>
           <div class="field"><label for="offModel">Model</label><input class="input" id="offModel" placeholder="deepseek-v4-flash"></div>
-          <div class="field">
-            <label for="offKeyEnc">API key <span class="hint">(encrypted)</span></label>
-            <div class="secret-field">
-              <input type="password" class="input" id="offKeyEnc" data-set="" data-clear="" oninput="onSecretInput(this)">
-              <button type="button" class="btn btn-sm btn-secret-clear" onclick="toggleSecretClear(this)" title="Clear secret">Clear</button>
-            </div>
-          </div>
-          <div class="field"><label for="offKey">API key env <span class="hint">(optional)</span></label><input class="input" id="offKey" placeholder="OFFLOAD_API_KEY"></div>
+          <div class="field"><span class="hint">Authentication comes from the selected provider. Host-originated offload requires that provider to use <code>credential</code> or <code>none</code> mode.</span></div>
         </div>
       </div>
 
       <div class="card form-section">
         <div class="subhead space-block-start-none">Limits &amp; access</div>
         <div class="form-grid">
-          <div class="field"><label for="limConc">Concurrency</label><input class="input" id="limConc" type="number" min="0"></div>
-          <div class="field"><label for="limRpm">Requests / min</label><input class="input" id="limRpm" type="number" min="0"></div>
+          <div class="field"><label for="limConc">Concurrency</label><input class="input" id="limConc" type="number" min="0"><span class="hint">Per identity; 0 disables this limit.</span></div>
+          <div class="field"><label for="limRpm">Requests / min</label><input class="input" id="limRpm" type="number" min="0"><span class="hint">Per identity; 0 disables this limit.</span></div>
           <div class="field">
             <label for="cfgPort">Listen port</label><input class="input" id="cfgPort" type="number" min="1">
             <span class="hint">Applied live &mdash; no restart</span>
@@ -548,6 +541,36 @@
         .map(input => input.dataset.permission)
         .filter(permission => requested.includes(permission));
       const failureMode = failureModeMap[name] || p.failure_mode || 'pass';
+      const credentials = {};
+      document.querySelectorAll('#pluginResourceReview .credential-binding').forEach(input => {
+        const value = input.value.trim();
+        if (value) credentials[input.dataset.slot] = value;
+      });
+      for (const declaration of (p.credentials || [])) {
+        if (declaration.required && !credentials[declaration.slot]) {
+          showAlert(`Credential slot ${declaration.slot} is required before ${name} can be enabled.`);
+          return false;
+        }
+      }
+      const httpEndpoints = {};
+      document.querySelectorAll('#pluginResourceReview .http-binding-enabled:checked').forEach(enabled => {
+        const row = enabled.closest('[data-endpoint]');
+        const endpoint = enabled.dataset.endpoint;
+        httpEndpoints[endpoint] = {
+          origin: row.querySelector('.http-binding-origin').value.trim(),
+          methods: JSON.parse(row.dataset.methods || '[]'),
+          timeout_ms: Number(row.querySelector('.http-binding-timeout').value) || 0,
+          max_request_bytes: Number(row.querySelector('.http-binding-request').value) || 0,
+          max_response_bytes: Number(row.querySelector('.http-binding-response').value) || 0,
+          max_calls_per_minute: Number(row.querySelector('.http-binding-rpm').value) || 0
+        };
+      });
+      for (const declaration of (p.http_endpoints || [])) {
+        if (declaration.required && !httpEndpoints[declaration.name]) {
+          showAlert(`HTTP endpoint ${declaration.name} is required before ${name} can be enabled.`);
+          return false;
+        }
+      }
       const summary = selected.length ? selected.join('\n  • ') : 'none';
       const requirements = (p.requires_upstream || []).length
         ? `\nRequires earlier plugin IDs:\n  • ${(p.requires_upstream || []).join('\n  • ')}`
@@ -562,7 +585,9 @@
       approvalMap[approvalKey] = {
         digest: p.digest,
         permissions: selected,
-        failure_mode: failureMode
+        failure_mode: failureMode,
+        credentials: credentials,
+        http_endpoints: httpEndpoints
       };
       if (!pipelineOrder.includes(name)) pipelineOrder.push(name);
       if (!configMap[name]) configMap[name] = {};
@@ -640,6 +665,34 @@
           ${permissionOptions || '<div class="empty-state">This plugin requests no host capabilities.</div>'}
         </div>
       </fieldset>`;
+      const approvedCredentials = currentApproval && currentApproval.digest === p.digest ? (currentApproval.credentials || {}) : {};
+      const credentialRows = (p.credentials || []).map(declaration => `<label class="field">
+        <span><code>${escHtml(declaration.slot)}</code>${declaration.required ? ' (required)' : ''}</span>
+        <input class="input credential-binding" data-slot="${escAttr(declaration.slot)}" value="${escAttr(approvedCredentials[declaration.slot] || '')}" placeholder="Torana credential ID">
+        <span class="hint">${escHtml(declaration.description || '')}</span>
+      </label>`).join('');
+      const approvedHTTP = currentApproval && currentApproval.digest === p.digest ? (currentApproval.http_endpoints || {}) : {};
+      const httpRows = (p.http_endpoints || []).map(declaration => {
+        const existing = approvedHTTP[declaration.name] || {};
+        const enabled = Boolean(approvedHTTP[declaration.name]) || declaration.required;
+        return `<div class="info-note" data-endpoint="${escAttr(declaration.name)}" data-methods='${escAttr(JSON.stringify(declaration.methods || []))}'>
+          <label class="checkbox-row"><input type="checkbox" class="http-binding-enabled" data-endpoint="${escAttr(declaration.name)}" ${enabled ? 'checked' : ''}> <code>${escHtml(declaration.name)}</code>${declaration.required ? ' (required)' : ''}</label>
+          <div class="hint">${escHtml(declaration.description || '')}; methods: ${escHtml((declaration.methods || []).join(', '))}</div>
+          <div class="form-grid">
+            <label class="field"><span>Approved origin</span><input class="input http-binding-origin" value="${escAttr(existing.origin || declaration.origin || '')}" placeholder="https://api.example.com"></label>
+            <label class="field"><span>Timeout ms</span><input class="input http-binding-timeout" type="number" min="0" value="${escAttr(existing.timeout_ms || declaration.timeout_ms || 5000)}"></label>
+            <label class="field"><span>Request bytes</span><input class="input http-binding-request" type="number" min="0" value="${escAttr(existing.max_request_bytes || declaration.max_request_bytes || 1048576)}"></label>
+            <label class="field"><span>Response bytes</span><input class="input http-binding-response" type="number" min="0" value="${escAttr(existing.max_response_bytes || declaration.max_response_bytes || 4194304)}"></label>
+            <label class="field"><span>Calls / min</span><input class="input http-binding-rpm" type="number" min="1" value="${escAttr(existing.max_calls_per_minute || declaration.max_calls_per_minute || '')}"></label>
+          </div>
+        </div>`;
+      }).join('');
+      const fileRows = (p.files || []).map(file => `<div class="info-note"><code>${escHtml(file.path)}</code> — ${escHtml((file.operations || []).join(', '))}; ${escHtml(String(file.max_bytes || 'host default'))} bytes; ${escHtml(String(file.retained_files || 0))} retained rotations</div>`).join('');
+      const resourceReview = credentialRows || httpRows || fileRows ? `<fieldset class="permission-review" id="pluginResourceReview">
+        <legend>Private resources</legend>
+        <div class="section-desc">Bindings and budgets are operator-owned. The plugin sees only the slots and logical paths declared here.</div>
+        ${credentialRows}${httpRows}${fileRows}
+      </fieldset>` : '<div id="pluginResourceReview"></div>';
       const requirements = (p.requires_upstream || []).map(id => `<code>${escHtml(id)}</code>`).join(', ');
       const conflicts = (p.conflicts_with || []).map(id => `<code>${escHtml(id)}</code>`).join(', ');
       const compositionReview = requirements || conflicts ? `<div class="info-note">
@@ -772,6 +825,7 @@
         ${p.digest ? `<div class="section-desc"><strong>Installed bundle digest:</strong> <code>${escHtml(p.digest)}</code>${p.loaded_digest ? `<br><strong>Loaded bundle digest:</strong> <code>${escHtml(p.loaded_digest)}</code>` : ''}<br><strong>Recommended failure policy:</strong> ${escHtml(p.failure_mode || 'pass')}</div>` : ''}
         ${compositionReview}
         ${permissionReview}
+        ${resourceReview}
         <label class="field max-field space-block-start-sm space-block-end-sm">
           <span>On plugin runtime failure</span>
           <select class="plugin-failure-select" onchange="setPluginFailureMode(${escJS(name)}, this.value)">
@@ -1132,8 +1186,6 @@
       document.getElementById('offEnabled').checked = !!off.enabled;
       document.getElementById('offProvider').value = off.provider || '';
       document.getElementById('offModel').value = off.model || '';
-      document.getElementById('offKey').value = off.api_key_env || '';
-      setupSecretInput(document.getElementById('offKeyEnc'), off.api_key_enc);
 
       const lim = cfg.limits || {};
       document.getElementById('limConc').value = lim.concurrency || 0;
@@ -1180,21 +1232,17 @@
       // responses_compaction). New rows have no anchor and no fields to keep.
       if (name) tr.dataset.originalName = name;
       const opts = PROVIDER_FORMATS.map(f => `<option value="${f}" ${prov.format === f ? 'selected' : ''}>${f}</option>`).join('');
+      const auth = prov.auth || {mode: 'caller'};
+      const authOpts = ['caller', 'credential', 'none'].map(m => `<option value="${m}" ${auth.mode === m ? 'selected' : ''}>${m}</option>`).join('');
       tr.innerHTML = `
         <td><input class="input p-name" aria-label="Provider name" value="${escAttr(name || '')}" placeholder="name" oninput="refreshOffloadProviderOptions()"></td>
         <td><input class="input p-url" aria-label="Provider upstream URL" value="${escAttr(prov.url || '')}" placeholder="https://…"></td>
         <td><select class="input p-format" aria-label="Provider format">${opts}</select></td>
-        <td>
-          <div class="secret-field">
-            <input type="password" class="input p-keyenc" aria-label="Provider encrypted API key" data-set="" data-clear="" oninput="onSecretInput(this)">
-            <button type="button" class="btn btn-sm btn-secret-clear" onclick="toggleSecretClear(this)" title="Clear secret">Clear</button>
-          </div>
-        </td>
-        <td><input class="input p-key" aria-label="Provider API key environment variable" value="${escAttr(prov.api_key_env || '')}" placeholder="ENV_VAR"></td>
+        <td><select class="input p-auth-mode" aria-label="Provider authentication mode">${authOpts}</select></td>
+        <td><input class="input p-credential" aria-label="Torana credential ID" value="${escAttr(auth.credential || '')}" placeholder="provider-api-key"></td>
         <td><input class="input p-fallback" aria-label="Provider fallbacks" value="${escAttr((prov.fallback || []).join(', '))}" placeholder="name, name"></td>
         <td><button type="button" class="btn btn-sm btn-danger" aria-label="Remove provider" onclick="this.closest('tr').remove(); refreshOffloadProviderOptions()">Remove</button></td>`;
       body.appendChild(tr);
-      setupSecretInput(tr.querySelector('.p-keyenc'), prov.api_key_enc);
     }
     // Rates are stored as USD per million tokens. An empty cell means "not
     // configured", which is a different thing from zero: zero is an explicitly
@@ -1264,14 +1312,11 @@
         const prov = original ? JSON.parse(JSON.stringify(original)) : {};
         prov.url = tr.querySelector('.p-url').value.trim();
         prov.format = tr.querySelector('.p-format').value;
-        // A cleared field must clear, so drop the stored value up front and
-        // let the checks below re-add it only when the input is non-empty.
-        delete prov.api_key_env;
         delete prov.fallback;
-        const secretVal = getSecretFieldValue(tr.querySelector('.p-keyenc'));
-        if (secretVal !== undefined) prov.api_key_enc = secretVal;
-        const key = tr.querySelector('.p-key').value.trim();
-        if (key) prov.api_key_env = key;
+        const authMode = tr.querySelector('.p-auth-mode').value;
+        const credential = tr.querySelector('.p-credential').value.trim();
+        prov.auth = {mode: authMode};
+        if (authMode === 'credential' && credential) prov.auth.credential = credential;
         const fb = tr.querySelector('.p-fallback').value.trim();
         if (fb) prov.fallback = fb.split(',').map(s => s.trim()).filter(Boolean);
         providers[name] = prov;
@@ -1294,10 +1339,6 @@
         provider: document.getElementById('offProvider').value.trim(),
         model: document.getElementById('offModel').value.trim()
       };
-      const offSecretVal = getSecretFieldValue(document.getElementById('offKeyEnc'));
-      if (offSecretVal !== undefined) cfg.offload.api_key_enc = offSecretVal;
-      const offKey = document.getElementById('offKey').value.trim();
-      if (offKey) cfg.offload.api_key_env = offKey;
       cfg.limits = {
         concurrency: parseInt(document.getElementById('limConc').value, 10) || 0,
         rpm: parseInt(document.getElementById('limRpm').value, 10) || 0

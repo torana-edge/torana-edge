@@ -9,17 +9,17 @@ import "testing"
 // rather than from the first 429 in production.
 func TestUnauthenticatedFallbacksAreReported(t *testing.T) {
 	cfg := Config{Providers: map[string]Provider{
-		"primary":   {URL: "https://a.example", Format: "openai", APIKeyEnv: "A", Fallback: []string{"bare", "keyed", "optedin"}},
-		"bare":      {URL: "https://b.example", Format: "openai"},
-		"keyed":     {URL: "https://c.example", Format: "openai", APIKeyEnv: "C"},
-		"optedin":   {URL: "https://d.example", Format: "openai", ForwardCallerCredential: true},
-		"unrelated": {URL: "https://e.example", Format: "openai"},
+		"primary":   {URL: "https://a.example", Format: "openai", Auth: ProviderAuth{Mode: "caller"}, Fallback: []string{"bare", "keyed", "caller"}},
+		"bare":      {URL: "https://b.example", Format: "openai", Auth: ProviderAuth{Mode: "none"}},
+		"keyed":     {URL: "https://c.example", Format: "openai", Auth: ProviderAuth{Mode: "credential", Credential: "c"}},
+		"caller":    {URL: "https://d.example", Format: "openai", Auth: ProviderAuth{Mode: "caller"}},
+		"unrelated": {URL: "https://e.example", Format: "openai", Auth: ProviderAuth{Mode: "none"}},
 	}}
 
 	got := cfg.UnauthenticatedFallbacks()
 	if len(got) != 1 || got[0] != "bare" {
 		t.Errorf("got %v, want exactly [bare] — 'keyed' has its own credential, 'optedin' "+
-			"declared forwarding, and 'unrelated' is never used as a fallback", got)
+			"uses caller auth, and 'unrelated' is never used as a fallback", got)
 	}
 }
 
@@ -27,7 +27,7 @@ func TestUnauthenticatedFallbacksAreReported(t *testing.T) {
 // with no credential — plenty of providers legitimately need none.
 func TestUnauthenticatedFallbacksIgnoresNonFallbacks(t *testing.T) {
 	cfg := Config{Providers: map[string]Provider{
-		"local": {URL: "http://localhost:11434", Format: "openai"},
+		"local": {URL: "http://localhost:11434", Format: "openai", Auth: ProviderAuth{Mode: "none"}},
 	}}
 	if got := cfg.UnauthenticatedFallbacks(); len(got) != 0 {
 		t.Errorf("got %v, want none", got)

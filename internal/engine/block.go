@@ -4,7 +4,7 @@ package engine
 //
 // A Message's content is the ordered Block sequence — the SOLE authority for
 // every content fact, in provider wire order. There are no competing flat
-// fields. The block kinds mirror pb/v2 RequestBlock one-for-one:
+// fields. The block kinds mirror pb/v1 RequestBlock one-for-one:
 //
 //	Text              — plain text (explicit empty is a first-class arm)
 //	Thinking          — extended reasoning, with the current-block token

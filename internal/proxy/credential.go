@@ -1,67 +1,103 @@
 package proxy
 
 import (
-	"log"
+	"context"
+	"fmt"
 	"net/http"
 
 	"github.com/torana-edge/torana-edge/internal/provider"
 )
 
-// applyProviderCredential authenticates an outbound request to target, having
-// first removed whatever credential the caller sent.
-//
-// The rule this enforces: **a request that has been redirected to a different
-// provider must never carry the caller's credential.** The caller issued that
-// key to one vendor. Forwarding it to another leaks it, and it will not
-// authenticate there anyway — so the redirect cannot work either.
-//
-// Both auth conventions are set because providers disagree about which they
-// read, and each ignores the one it does not use.
-//
-// An empty credential is legitimate: local model servers take none. But a
-// provider that names an env var or a stored secret and still resolves to
-// nothing is a misconfiguration the operator wants to hear about, because the
-// symptom otherwise is an unexplained 401 from a provider they never called
-// directly.
-//
-// Every path that retargets a request must call this: content routing
-// (applyRoute), failover, and any future transport. The alternative is what
-// failover did for months — clone the headers, change the host, and silently
-// hand vendor A's key to vendor B.
-func applyProviderCredential(req *http.Request, target provider.Provider, targetName, reason string, resolve func(env, enc string) string) {
-	// Captured before the delete, so forwarding below is explicit rather than
-	// "whatever happened to still be on the request".
-	callerAuth := req.Header.Get("Authorization")
-	callerKey := req.Header.Get("X-Api-Key")
+// callerCredentials is captured once at the ingress boundary. Authentication
+// is never derived from a request after Torana has rewritten or retried it:
+// doing so can mistake provider A's managed credential for the caller's and
+// leak it to provider B during routing or failover.
+type callerCredentials struct {
+	Authorization string
+	APIKey        string
+	GoogleAPIKey  string
+}
 
-	// Unconditional, and first. Every early return below leaves the request
-	// with no caller credential on it, so no future edit to this function can
-	// reintroduce the leak by taking a branch that skips the strip.
+func callerCredentialsFrom(req *http.Request) callerCredentials {
+	if req == nil {
+		return callerCredentials{}
+	}
+	return callerCredentials{
+		Authorization: req.Header.Get("Authorization"),
+		APIKey:        req.Header.Get("X-Api-Key"),
+		GoogleAPIKey:  req.Header.Get("X-Goog-Api-Key"),
+	}
+}
+
+// applyProviderCredential enforces the target provider's explicit auth mode.
+// It strips credentials first, then either restores the intercepted caller
+// values, installs one host-resolved credential, or sends no credential.
+func applyProviderCredential(ctx context.Context, req *http.Request, target provider.Provider, caller callerCredentials, resolve func(context.Context, string) ([]byte, error)) error {
 	req.Header.Del("Authorization")
 	req.Header.Del("X-Api-Key")
-
-	if resolve != nil {
-		if key := resolve(target.APIKeyEnv, target.APIKeyEnc); key != "" {
-			req.Header.Set("Authorization", "Bearer "+key)
-			req.Header.Set("X-Api-Key", key)
-			return
+	req.Header.Del("X-Goog-Api-Key")
+	switch target.Auth.EffectiveMode() {
+	case "caller":
+		if caller.Authorization != "" {
+			req.Header.Set("Authorization", caller.Authorization)
 		}
-	}
-
-	if target.ForwardCallerCredential {
-		// The operator has stated this target may receive the caller's
-		// credential — a second endpoint of the same vendor, or a local model
-		// server that ignores it.
-		if callerAuth != "" {
-			req.Header.Set("Authorization", callerAuth)
+		if caller.APIKey != "" {
+			req.Header.Set("X-Api-Key", caller.APIKey)
 		}
-		if callerKey != "" {
-			req.Header.Set("X-Api-Key", callerKey)
+		if caller.GoogleAPIKey != "" {
+			req.Header.Set("X-Goog-Api-Key", caller.GoogleAPIKey)
 		}
-		return
+		return nil
+	case "credential":
+		if resolve == nil {
+			return fmt.Errorf("credential resolver is not configured")
+		}
+		secret, err := resolve(ctx, target.Auth.Credential)
+		if err != nil {
+			return err
+		}
+		if len(secret) == 0 {
+			return fmt.Errorf("credential is empty")
+		}
+		value := string(secret)
+		// Use the provider protocol's native credential header. Sending the
+		// same secret in several headers needlessly widens its exposure and
+		// breaks strict compatible endpoints.
+		switch target.Format {
+		case "anthropic":
+			req.Header.Set("X-Api-Key", value)
+		case "gemini":
+			req.Header.Set("X-Goog-Api-Key", value)
+		default:
+			req.Header.Set("Authorization", "Bearer "+value)
+		}
+		return nil
+	case "none":
+		return nil
+	default:
+		return fmt.Errorf("provider auth mode is invalid")
 	}
+}
 
-	if target.APIKeyEnv != "" || target.APIKeyEnc != "" {
-		log.Printf("[%s] provider %q key is empty — sending unauthenticated", reason, targetName)
+func (s *Server) applyUpstreamCredential(req *http.Request, cfg provider.Config, rc *RouteContext) error {
+	target, ok := cfg.Providers[rc.ProviderName]
+	if !ok {
+		return fmt.Errorf("provider is no longer configured")
 	}
+	caller := callerCredentialsFrom(req)
+	if rs := reqStateFrom(req.Context()); rs != nil {
+		caller = rs.CallerCredentials
+	}
+	return applyProviderCredential(req.Context(), req, target, caller, s.resolveCredential)
+}
+
+func markCredentialFailure(req *http.Request, format string, rc *RouteContext) {
+	rc.Block = renderCredentialUnavailable(format)
+	if rs := reqStateFrom(req.Context()); rs != nil {
+		rs.Synthetic = true
+		rs.Verdict = "host_error"
+		rs.AuditErrorCode = "credential_unavailable"
+	}
+	req.Body = http.NoBody
+	req.ContentLength = 0
 }

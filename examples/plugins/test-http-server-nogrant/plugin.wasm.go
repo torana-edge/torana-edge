@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 
 	sdk "github.com/torana-edge/torana-plugin-sdk"
-	pb "github.com/torana-edge/torana-plugin-sdk/pb/v2"
+	pb "github.com/torana-edge/torana-plugin-sdk/pb/v1"
 )
 
 func main() {}
@@ -23,7 +23,7 @@ func main() {}
 // host forwarded the request faithfully rather than merely that something
 // answered.
 func init() {
-	// v2 dropped HttpResponse.Handled: serving is an action, so returning a
+	// current ABI dropped HttpResponse.Handled: serving is an action, so returning a
 	// ServeHTTP result IS handling it and PassHTTP() is declining. v1 needed
 	// the flag because an all-defaults response marshals to zero bytes and was
 	// indistinguishable from not answering.

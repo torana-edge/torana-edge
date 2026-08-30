@@ -135,7 +135,7 @@ fails if any field belongs to no grant section, and
 `TestEveryGovernedFieldIsDetected` mutates every governed field through
 reflection — on `ChatRequest` **and** on the nested `Message`, `ToolCall` and
 `ToolDef` — requiring both methods to notice. Adding a field to the contract in
-v2 without deciding which grant governs it, or assigning one a section but
+the ABI without deciding which grant governs it, or assigning one a section but
 forgetting it in the fingerprint, will fail the suite.
 
 - **exact** — structural comparison against the previously accepted request.

@@ -3,7 +3,7 @@
   "id": "torana-test/test-mutator",
   "name": "test-mutator",
   "version": "0.1.0",
-  "abi_version": "v2",
+  "abi_version": "v1",
   "minimum_torana_version": "0.1.0",
   "failure_mode": "pass",
   "description": "Test fixture: deterministically rewrites user messages and tool definitions",

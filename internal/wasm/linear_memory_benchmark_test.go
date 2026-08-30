@@ -17,7 +17,7 @@ import (
 	"testing"
 	"time"
 
-	pbv2 "github.com/torana-edge/torana-plugin-sdk/pb/v2"
+	pbv1 "github.com/torana-edge/torana-plugin-sdk/pb/v1"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -85,7 +85,7 @@ type guestIdleRetirementRecord struct {
 
 // TestGuestLinearMemoryProfile measures the memory visible through the Wasm
 // linear-memory contract, independently of process RSS. It is intentionally
-// bundle-gated: the SDK builds the equivalent current-v2 Go and Rust logger
+// bundle-gated: the SDK builds the equivalent current Go and Rust logger
 // guests, then passes their paths here. Each pool instance is measured after
 // initialization and after exactly one real before-request hook call.
 //
@@ -458,7 +458,7 @@ func TestOfficialPluginLinearMemoryProfile(t *testing.T) {
 				t.Fatalf("load: %v", err)
 			}
 			p.SetGrants(bundle.permissions)
-			if !p.supports(pbv2.Hook_HOOK_BEFORE_REQUEST) {
+			if !p.supports(pbv1.Hook_HOOK_BEFORE_REQUEST) {
 				t.Fatal("official plugin has no before-request hook; memory call would be vacuous")
 			}
 
@@ -495,31 +495,31 @@ func TestOfficialPluginLinearMemoryProfile(t *testing.T) {
 
 func benchmarkBeforeRequestInput(t *testing.T) []byte {
 	t.Helper()
-	input, err := proto.Marshal(&pbv2.HookInput{
+	input, err := proto.Marshal(&pbv1.HookInput{
 		RequestId: 1,
-		Payload: &pbv2.HookInput_ChatRequest{ChatRequest: &pbv2.ChatRequest{
+		Payload: &pbv1.HookInput_ChatRequest{ChatRequest: &pbv1.ChatRequest{
 			Model: "benchmark-model",
-			Messages: []*pbv2.Message{
+			Messages: []*pbv1.Message{
 				{Role: "system", Blocks: benchmarkTextBlocks("You are a coding assistant.")},
 				{Role: "user", Blocks: benchmarkTextBlocks("Inspect the parser failure.")},
-				{Role: "assistant", Blocks: []*pbv2.RequestBlock{{Kind: &pbv2.RequestBlock_ToolUse{
-					ToolUse: &pbv2.RequestToolUseBlock{
+				{Role: "assistant", Blocks: []*pbv1.RequestBlock{{Kind: &pbv1.RequestBlock_ToolUse{
+					ToolUse: &pbv1.RequestToolUseBlock{
 						Id: "call_bench", Name: "read_file", ArgumentsJson: []byte(`{"path":"internal/parser.go"}`),
 					},
 				}}}},
-				{Role: "tool", Blocks: []*pbv2.RequestBlock{{Kind: &pbv2.RequestBlock_ToolResult{
-					ToolResult: &pbv2.RequestToolResultBlock{
+				{Role: "tool", Blocks: []*pbv1.RequestBlock{{Kind: &pbv1.RequestBlock_ToolResult{
+					ToolResult: &pbv1.RequestToolResultBlock{
 						ToolCallId: "call_bench",
 						ToolName:   "read_file",
-						Content: []*pbv2.ToolResultContentBlock{{Kind: &pbv2.ToolResultContentBlock_Text{
-							Text: &pbv2.ToolResultTextBlock{Text: strings.Repeat("p", 16<<10)},
+						Content: []*pbv1.ToolResultContentBlock{{Kind: &pbv1.ToolResultContentBlock_Text{
+							Text: &pbv1.ToolResultTextBlock{Text: strings.Repeat("p", 16<<10)},
 						}}},
 					},
 				}}}},
 				{Role: "assistant", Blocks: benchmarkTextBlocks("I inspected the tool output.")},
 				{Role: "user", Blocks: benchmarkTextBlocks("Continue with the fix.")},
 			},
-			Tools: []*pbv2.ToolDef{{
+			Tools: []*pbv1.ToolDef{{
 				Name:           "read_file",
 				Description:    "Read one workspace file",
 				ParametersJson: []byte(`{"type":"object","properties":{"path":{"type":"string"},"metadata":{"type":"object","additionalProperties":{"type":"string"}}},"required":["path"]}`),
@@ -532,9 +532,9 @@ func benchmarkBeforeRequestInput(t *testing.T) []byte {
 	return input
 }
 
-func benchmarkTextBlocks(text string) []*pbv2.RequestBlock {
-	return []*pbv2.RequestBlock{{Kind: &pbv2.RequestBlock_Text{
-		Text: &pbv2.RequestTextBlock{Text: text},
+func benchmarkTextBlocks(text string) []*pbv1.RequestBlock {
+	return []*pbv1.RequestBlock{{Kind: &pbv1.RequestBlock_Text{
+		Text: &pbv1.RequestTextBlock{Text: text},
 	}}}
 }
 
@@ -643,7 +643,7 @@ func exerciseEachInstance(t *testing.T, p *Plugin, instances []*pluginInstance, 
 		instances[i] = nil
 		p.release(inst)
 		var output []byte
-		if err := p.CallRequest(context.Background(), pbv2.Hook_HOOK_BEFORE_REQUEST, 1, input, &output); err != nil {
+		if err := p.CallRequest(context.Background(), pbv1.Hook_HOOK_BEFORE_REQUEST, 1, input, &output); err != nil {
 			t.Fatalf("instance %d call: %v", i, err)
 		}
 		if requirePass && len(output) != 0 {

@@ -145,7 +145,7 @@ func TestEvaluateCompactionRequiresEveryFallbackToBeEconomic(t *testing.T) {
 // only refreshed by RequestMutationFunc — which fires on ReplaceRequest — so B
 // priced the ORIGINAL provider and model while the request went elsewhere. The
 // router fixture hid it by returning ReplaceRequest after routing, which is the
-// v1 "return the same request" footgun v2 removes.
+// v1 "return the same request" footgun current ABI removes.
 func TestEvaluateCompactionReadsRouteRecordedWithoutAReplacement(t *testing.T) {
 	s := &Server{config: Config{Providers: provider.Config{Providers: map[string]provider.Provider{
 		"initial": {Format: "openai"},

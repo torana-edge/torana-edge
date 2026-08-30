@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -51,6 +52,7 @@ type officialPlugin struct {
 }
 
 var officialCatalog = []officialPlugin{
+	{name: "usage_logger", install: true},
 	{name: "cache_tier_selector", install: true},
 	{name: "cache_warmer", install: true},
 	{name: "compactor", install: true},
@@ -120,6 +122,36 @@ func parseSource(arg string) (source, error) {
 
 	spec, ref := arg, ""
 	spec = strings.TrimSuffix(spec, "/")
+
+	// Accept the URL people naturally copy from a repository browser. These
+	// forms have an unambiguous repository/ref/subdirectory boundary and are
+	// normalized to the same clone operation as the portable .git// syntax.
+	if parsed, err := url.Parse(spec); err == nil && parsed.Scheme == "https" && parsed.Host != "" {
+		parts := strings.Split(strings.Trim(parsed.Path, "/"), "/")
+		var repoPath, subPath string
+		switch {
+		case parsed.Host == "github.com" && len(parts) >= 5 && parts[2] == "tree":
+			repoPath = strings.Join(parts[:2], "/")
+			ref = parts[3]
+			subPath = strings.Join(parts[4:], "/")
+		case len(parts) >= 5:
+			for i := 1; i+2 < len(parts); i++ {
+				if parts[i] == "-" && parts[i+1] == "tree" {
+					repoPath = strings.Join(parts[:i], "/")
+					ref = parts[i+2]
+					subPath = strings.Join(parts[i+3:], "/")
+					break
+				}
+			}
+		}
+		if repoPath != "" && ref != "" && subPath != "" {
+			cleanSub := filepath.Clean(filepath.FromSlash(subPath))
+			if cleanSub == "." || filepath.IsAbs(cleanSub) || cleanSub == ".." || strings.HasPrefix(cleanSub, ".."+string(filepath.Separator)) {
+				return source{}, fmt.Errorf("%q is not a valid repository plugin URL", arg)
+			}
+			return source{repoURL: "https://" + parsed.Host + "/" + repoPath + ".git", subPath: filepath.ToSlash(cleanSub), ref: ref, name: filepath.Base(cleanSub)}, nil
+		}
+	}
 
 	// Canonical remote syntax makes the repository/subdirectory boundary
 	// explicit, including for GitLab groups of arbitrary depth:

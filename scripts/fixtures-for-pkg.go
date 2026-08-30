@@ -10,7 +10,7 @@
 // (TORANA_E2E=1) package run fails on any missing fixture.
 //
 // internal/wasm is special-cased: its all-fixture ABI inventory legitimately
-// requires every v2 fixture.
+// requires every ABI fixture.
 //
 // Usage: go run ./scripts/fixtures-for-pkg.go <internal/<pkg>> [<pkg>...]
 //
@@ -43,7 +43,7 @@ func main() {
 	for _, arg := range os.Args[1:] {
 		pkg := strings.TrimPrefix(arg, "./")
 		if pkg == "internal/wasm" {
-			// The all-fixture ABI inventory legitimately requires every v2
+			// The all-fixture ABI inventory legitimately requires every ABI
 			// fixture; a union with other packages is still the full set.
 			for _, n := range names {
 				referenced[n] = true

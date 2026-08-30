@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/torana-edge/torana-edge/internal/conversationcmd"
+	"github.com/torana-edge/torana-edge/internal/credentialcmd"
 	"github.com/torana-edge/torana-edge/internal/metrics"
 	"github.com/torana-edge/torana-edge/internal/plugincmd"
 	"github.com/torana-edge/torana-edge/internal/provider"
@@ -82,7 +83,9 @@ func usage(w io.Writer) {
 
 Usage:
   torana [serve]                 run the proxy (default)
+  torana --debug [serve]         run with safe per-request debug logs
   torana plugin <command>        author, build and install plugins
+  torana credential <command>    configure named credentials
   torana conversations <command> inspect recorded conversations
   torana version                 print the version
   torana help                    print this message
@@ -103,6 +106,7 @@ Environment:
                            authenticate /_torana/* itself.
   TORANA_DEFAULT_PROVIDER  provider for requests that match no /provider/ prefix
   TORANA_PLUGINS_DIR       plugin directory for the plugin subcommands
+  TORANA_LOG_LEVEL         set to debug for safe request lifecycle logs
 
 The control plane is at http://127.0.0.1:<port>/_torana/ and is reachable from
 loopback only. Plugins never load until you approve their digest there.
@@ -110,9 +114,20 @@ loopback only. Plugins never load until you approve their digest there.
 }
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "--debug" {
+		_ = os.Setenv("TORANA_LOG_LEVEL", "debug")
+		os.Args = append([]string{os.Args[0]}, os.Args[2:]...)
+	}
 	if len(os.Args) > 1 && os.Args[1] == "plugin" {
 		if err := plugincmd.Run(os.Args[1:], os.Stdout, os.Stderr); err != nil {
 			log.Printf("plugin command: %v", err)
+			os.Exit(2)
+		}
+		return
+	}
+	if len(os.Args) > 1 && os.Args[1] == "credential" {
+		if err := credentialcmd.Run(os.Args[1:], os.Stdout, os.Stderr); err != nil {
+			log.Printf("credential command: %v", err)
 			os.Exit(2)
 		}
 		return
@@ -179,15 +194,10 @@ func main() {
 			"pre-existing problem for the first time.\n\n"+
 			"Fix the reported field, or move %s aside to start from defaults.", err, storePath)
 	}
-	// A fallback with no credential of its own answers 401, which is not
-	// retryable — so failover turns a recoverable 429 into a hard failure for
-	// the caller. Say so now, not on the first 429.
+	// A fallback explicitly configured with no authentication will usually
+	// answer 401. Say so now, not on the first 429.
 	if unauth := provCfg.UnauthenticatedFallbacks(); len(unauth) > 0 {
-		log.Printf("Warning: fallback provider(s) %v declare no API key and have not set "+
-			"forward_caller_credential. Failover to them will send an unauthenticated request. "+
-			"Set an api_key_env, or set forward_caller_credential:true if they are meant to "+
-			"receive the caller's own credential (a second endpoint of the same vendor, or a "+
-			"local model server).", unauth)
+		log.Printf("Warning: fallback provider(s) %v use auth.mode=none; failover sends an unauthenticated request", unauth)
 	}
 
 	if differs, diffErr := provider.ManagedStoreShadowsSeed(seedPath, storePath); diffErr != nil {

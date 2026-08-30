@@ -205,6 +205,23 @@ func TestParseSourceLocalPath(t *testing.T) {
 	}
 }
 
+func TestParseSourceRepositoryBrowserURLs(t *testing.T) {
+	for _, tc := range []struct {
+		input, repo, ref, sub string
+	}{
+		{"https://github.com/torana-edge/torana-plugins/tree/main/plugins/usage_logger", "https://github.com/torana-edge/torana-plugins.git", "main", "plugins/usage_logger"},
+		{"https://gitlab.example.com/team/platform/plugins/-/tree/v1/plugins/logger", "https://gitlab.example.com/team/platform/plugins.git", "v1", "plugins/logger"},
+	} {
+		got, err := parseSource(tc.input)
+		if err != nil {
+			t.Fatalf("parseSource(%q): %v", tc.input, err)
+		}
+		if got.repoURL != tc.repo || got.ref != tc.ref || got.subPath != tc.sub {
+			t.Errorf("parseSource(%q) = %+v", tc.input, got)
+		}
+	}
+}
+
 func TestRemoveRejectsPathTraversal(t *testing.T) {
 	for _, bad := range []string{"../etc", "a/b", "..", ""} {
 		var out bytes.Buffer

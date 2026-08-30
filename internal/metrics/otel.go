@@ -20,7 +20,7 @@ import (
 	semconv "go.opentelemetry.io/otel/semconv/v1.24.0"
 
 	"github.com/torana-edge/torana-edge/internal/economics"
-	pbjsontext "github.com/torana-edge/torana-plugin-sdk/pb/v2/jsontext"
+	pbjsontext "github.com/torana-edge/torana-plugin-sdk/pb/v1/jsontext"
 )
 
 // InitOTel sets up OpenTelemetry metrics if OTEL_EXPORTER_OTLP_ENDPOINT is set.

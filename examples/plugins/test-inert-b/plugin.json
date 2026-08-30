@@ -3,7 +3,7 @@
   "id": "torana-test/test-inert-b",
   "name": "test-inert-b",
   "version": "0.1.0",
-  "abi_version": "v2",
+  "abi_version": "v1",
   "failure_mode": "pass",
   "description": "Benchmark fixture: returns pass-through immediately, adding no guest work",
   "hooks": [{"name": "run_before_request"}],

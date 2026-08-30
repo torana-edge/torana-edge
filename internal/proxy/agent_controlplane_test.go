@@ -12,7 +12,7 @@ import (
 
 	"github.com/torana-edge/torana-edge/internal/plugin"
 	"github.com/torana-edge/torana-edge/internal/provider"
-	pb "github.com/torana-edge/torana-plugin-sdk/pb/v2"
+	pb "github.com/torana-edge/torana-plugin-sdk/pb/v1"
 )
 
 type recordingPluginHTTPDispatcher struct {
@@ -22,7 +22,7 @@ type recordingPluginHTTPDispatcher struct {
 
 func (dispatcher *recordingPluginHTTPDispatcher) RunOnHTTPRequest(_ context.Context, requestID uint64, _ string, _ *pb.HttpRequest, _ map[string][]string) (*pb.HttpResponse, error) {
 	dispatcher.runID = requestID
-	// v2 dropped Handled: a non-nil response IS the plugin serving the
+	// current ABI dropped Handled: a non-nil response IS the plugin serving the
 	// request, and declining is a nil response.
 	return &pb.HttpResponse{Status: http.StatusOK, Body: []byte(`{}`)}, nil
 }

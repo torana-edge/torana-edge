@@ -3,7 +3,7 @@
   "id": "torana-test/test-block-then-trap",
   "name": "test-block-then-trap",
   "version": "0.1.0",
-  "abi_version": "v2",
+  "abi_version": "v1",
   "failure_mode": "pass",
   "description": "Records block+respond then traps; pins trap semantics and block short-circuit",
   "hooks": [{"name": "run_before_request"}],

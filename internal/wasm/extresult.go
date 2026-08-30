@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"log"
 
-	pbv2 "github.com/torana-edge/torana-plugin-sdk/pb/v2"
+	pbv1 "github.com/torana-edge/torana-plugin-sdk/pb/v1"
 )
 
 // ExtensionResult is the classified outcome of an extension host call
@@ -31,7 +31,7 @@ import (
 // to the guest.
 type ExtensionResult struct {
 	value   []byte
-	refusal *pbv2.HostError
+	refusal *pbv1.HostError
 }
 
 // Value returns the domain body. Nil with no refusal is a successful EMPTY
@@ -43,7 +43,7 @@ func (r ExtensionResult) Value() []byte {
 
 // Refusal returns the classified HostError, or nil when the result is not a
 // refusal.
-func (r ExtensionResult) Refusal() *pbv2.HostError {
+func (r ExtensionResult) Refusal() *pbv1.HostError {
 	return r.refusal
 }
 
@@ -57,8 +57,8 @@ func ExtensionValue(value []byte) ExtensionResult {
 // ExtensionRefusal builds a classified refusal. The code MUST be a real
 // classification; UNSPECIFIED and unknown numeric codes are rejected by
 // Validate.
-func ExtensionRefusal(code pbv2.ErrorCode, format string, args ...any) ExtensionResult {
-	return ExtensionResult{refusal: &pbv2.HostError{
+func ExtensionRefusal(code pbv1.ErrorCode, format string, args ...any) ExtensionResult {
+	return ExtensionResult{refusal: &pbv1.HostError{
 		Code:    code,
 		Message: fmt.Sprintf(format, args...),
 	}}
@@ -86,10 +86,10 @@ func (r ExtensionResult) Validate() error {
 // UNSPECIFIED refusal code, or an unknown numeric code — is a host-side bug,
 // not a guest input: it becomes a framed INTERNAL refusal and a loud log
 // line, so the guest never sees a malformed envelope it cannot branch on.
-func (r *Runtime) applyExtensionResult(cmd string, ext ExtensionResult) ([]byte, *pbv2.HostError) {
+func (r *Runtime) applyExtensionResult(cmd string, ext ExtensionResult) ([]byte, *pbv1.HostError) {
 	if err := ext.Validate(); err != nil {
 		log.Printf("extension %s: callback returned an invalid result: %v", cmd, err)
-		return nil, hostErr(pbv2.ErrorCode_ERROR_CODE_INTERNAL, "extension callback returned an invalid result")
+		return nil, hostErr(pbv1.ErrorCode_ERROR_CODE_INTERNAL, "extension callback returned an invalid result")
 	}
 	return ext.Value(), ext.Refusal()
 }

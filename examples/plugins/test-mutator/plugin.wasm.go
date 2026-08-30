@@ -6,7 +6,7 @@ import (
 
 	"github.com/torana-edge/torana-edge/examples/plugins/blockutil"
 	sdk "github.com/torana-edge/torana-plugin-sdk"
-	pb "github.com/torana-edge/torana-plugin-sdk/pb/v2"
+	pb "github.com/torana-edge/torana-plugin-sdk/pb/v1"
 )
 
 func main() {}
@@ -56,7 +56,7 @@ func init() {
 // depends on its own logic.
 func init() {
 	sdk.OnAfterResponse(func(ctx context.Context, resp *pb.ChatResponse, mutable bool) (sdk.ResponseResult, error) {
-		// A response carries exactly one message in v2, so there is no outer
+		// A response carries exactly one message in current ABI, so there is no outer
 		// loop and no question of which message the tool call belonged to.
 		if resp.Message == nil {
 			return sdk.PassResponse(), nil

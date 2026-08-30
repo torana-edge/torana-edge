@@ -8,10 +8,10 @@ import (
 	"testing"
 	"time"
 
-	pb "github.com/torana-edge/torana-plugin-sdk/pb/v2"
+	pb "github.com/torana-edge/torana-plugin-sdk/pb/v1"
 )
 
-// timeoutPluginWasm is a minimal v2 guest whose run_hook loops forever.
+// timeoutPluginWasm is a minimal plugin guest whose run_hook loops forever.
 //
 // Built programmatically rather than as a hex blob: the previous literal had
 // to be re-hand-assembled whenever an export or signature changed, and section
@@ -20,7 +20,7 @@ import (
 //
 // It is intentionally tiny so cancellation coverage never depends on a
 // compiler being installed in CI.
-var timeoutPluginWasm = MinimalV2Module(true)
+var timeoutPluginWasm = MinimalModule(true)
 
 func TestCallRequestTimeoutDiscardsInstance(t *testing.T) {
 	r := NewRuntimeWithOptions(context.Background(), RuntimeOptions{
@@ -201,7 +201,7 @@ func TestRuntimeRetiresBurstAndRegrowsOnDemand(t *testing.T) {
 		CallTimeout:         time.Second,
 		InstanceIdleTimeout: 20 * time.Millisecond,
 	})
-	p, err := r.LoadPlugin("retirement", MinimalV2Module(false))
+	p, err := r.LoadPlugin("retirement", MinimalModule(false))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -246,7 +246,7 @@ func TestIdleRetirementConcurrentTraffic(t *testing.T) {
 		InstanceIdleTimeout: 2 * time.Millisecond,
 	})
 	defer r.Close()
-	p, err := r.LoadPlugin("retirement-stress", MinimalV2Module(false))
+	p, err := r.LoadPlugin("retirement-stress", MinimalModule(false))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -353,7 +353,7 @@ func TestMetaRequestScoping(t *testing.T) {
 //
 // This test asserted the opposite, which was correct for v1. Under that rule a
 // plugin could not store an empty string and could not tell "nothing stored"
-// from "I stored nothing" — the ambiguity v2 removes, and the reason absence is
+// from "I stored nothing" — the ambiguity current ABI removes, and the reason absence is
 // now reported as NOT_FOUND.
 func TestMetaEmptyValueIsStoredNotDeleted(t *testing.T) {
 	r := NewRuntime(context.Background())

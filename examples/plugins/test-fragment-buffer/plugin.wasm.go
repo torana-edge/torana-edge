@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 
 	sdk "github.com/torana-edge/torana-plugin-sdk"
-	pb "github.com/torana-edge/torana-plugin-sdk/pb/v2"
+	pb "github.com/torana-edge/torana-plugin-sdk/pb/v1"
 )
 
 func main() {}
@@ -32,7 +32,7 @@ func main() {}
 // write silently drop one, and the corrupted tool call surfaces much later as
 // invalid JSON reaching the agent. MetaAppend is one atomic call, keyed by
 // block index — which also removes the hand-rolled key and the need to reset
-// it, since v2 block indexes are unique within a streamed message and never
+// it, since current ABI block indexes are unique within a streamed message and never
 // reused.
 
 func init() {

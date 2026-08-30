@@ -68,32 +68,15 @@ func TestResolveSecret(t *testing.T) {
 }
 
 func TestRedactConfigSecrets(t *testing.T) {
-	cfg := provider.Config{
-		Providers: map[string]provider.Provider{
-			"p": {APIKeyEnc: "enc:PROVIDER"},
-		},
-	}
-	cfg.Offload.APIKeyEnc = "enc:OFFLOAD"
+	cfg := provider.Config{}
 	cfg.Cache.Redis.PasswordEnc = "enc:REDIS"
-	cfg.ControlPlane.Token = "tok"
 
 	out := redactConfigSecrets(cfg)
 
-	if out.Providers["p"].APIKeyEnc != secretSetSentinel {
-		t.Fatalf("provider enc not redacted: %q", out.Providers["p"].APIKeyEnc)
-	}
-	if out.Offload.APIKeyEnc != secretSetSentinel {
-		t.Fatalf("offload enc not redacted: %q", out.Offload.APIKeyEnc)
-	}
 	if out.Cache.Redis.PasswordEnc != secretSetSentinel {
 		t.Fatalf("redis enc not redacted: %q", out.Cache.Redis.PasswordEnc)
 	}
-	if out.ControlPlane.Token != "" {
-		t.Fatalf("control-plane token not blanked")
-	}
-
-	// redaction must not mutate the caller's config (map is copied)
-	if cfg.Providers["p"].APIKeyEnc != "enc:PROVIDER" {
-		t.Fatalf("redaction mutated the source providers map")
+	if cfg.Cache.Redis.PasswordEnc != "enc:REDIS" {
+		t.Fatal("redaction mutated the source cache config")
 	}
 }
