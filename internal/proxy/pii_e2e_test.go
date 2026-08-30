@@ -138,7 +138,7 @@ func TestPIIModelBlock(t *testing.T) {
 
 	post, hits := piiEnv(t,
 		`{"provider":"local","model":"m1","tools":["*"],"on_error":"block"}`,
-		map[string]provider.Provider{"local": {URL: model.URL, Format: "openai"}})
+		map[string]provider.Provider{"local": {URL: model.URL, Format: "openai", Auth: provider.ProviderAuth{Mode: "none"}}})
 
 	status, body := post(toolConvo("employee dossier: Jonathan Q. Public, badge 4471, floor 3"))
 	if status != 422 {
@@ -172,7 +172,7 @@ func TestPIIFailClosed(t *testing.T) {
 
 	post, hits := piiEnv(t,
 		`{"provider":"local","model":"m1","tools":["*"],"on_error":"block"}`,
-		map[string]provider.Provider{"local": {URL: model.URL, Format: "openai"}})
+		map[string]provider.Provider{"local": {URL: model.URL, Format: "openai", Auth: provider.ProviderAuth{Mode: "none"}}})
 
 	status, body := post(toolConvo("ambiguous content the regex cannot judge"))
 	if status != 422 {
@@ -192,7 +192,7 @@ func TestPIIFailOpen(t *testing.T) {
 
 	post, hits := piiEnv(t,
 		`{"provider":"local","model":"m1","tools":["*"],"on_error":"allow"}`,
-		map[string]provider.Provider{"local": {URL: model.URL, Format: "openai"}})
+		map[string]provider.Provider{"local": {URL: model.URL, Format: "openai", Auth: provider.ProviderAuth{Mode: "none"}}})
 
 	status, _ := post(toolConvo("ambiguous content the regex cannot judge"))
 	if status != http.StatusOK {
