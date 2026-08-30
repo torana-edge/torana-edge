@@ -380,6 +380,12 @@ func TestOfficialPluginLinearMemoryProfile(t *testing.T) {
 		Permissions []struct {
 			Name string `json:"name"`
 		} `json:"permissions"`
+		Files []struct {
+			Path          string   `json:"path"`
+			Operations    []string `json:"operations"`
+			MaxBytes      int64    `json:"max_bytes"`
+			RetainedFiles int      `json:"retained_files"`
+		} `json:"files"`
 	}
 	type bundle struct {
 		name        string
@@ -432,6 +438,7 @@ func TestOfficialPluginLinearMemoryProfile(t *testing.T) {
 		"pii",
 		"schema_translator",
 		"tool_governor",
+		"usage_logger",
 	}
 	gotNames := make([]string, len(bundles))
 	for i := range bundles {
@@ -452,21 +459,40 @@ func TestOfficialPluginLinearMemoryProfile(t *testing.T) {
 				PoolSize:    poolSize,
 				CallTimeout: 10 * time.Second,
 			})
+			r.FileAppendFunc = func(string, string, []byte, FileResource) error { return nil }
 			defer r.Close()
 			p, err := r.LoadPlugin(bundle.name, bundle.wasmBytes)
 			if err != nil {
 				t.Fatalf("load: %v", err)
 			}
 			p.SetGrants(bundle.permissions)
-			if !p.supports(pbv1.Hook_HOOK_BEFORE_REQUEST) {
-				t.Fatal("official plugin has no before-request hook; memory call would be vacuous")
+			resources := PluginResources{Files: make(map[string]FileResource)}
+			for _, file := range bundle.manifest.Files {
+				operations := make(map[string]bool, len(file.Operations))
+				for _, operation := range file.Operations {
+					operations[operation] = true
+				}
+				resources.Files[file.Path] = FileResource{
+					Operations:    operations,
+					MaxBytes:      file.MaxBytes,
+					RetainedFiles: file.RetainedFiles,
+				}
+			}
+			p.SetResources(resources)
+			hook := pbv1.Hook_HOOK_BEFORE_REQUEST
+			input := benchmarkBeforeRequestInput(t)
+			if !p.supports(hook) {
+				hook = pbv1.Hook_HOOK_AFTER_RESPONSE
+				input = benchmarkAfterResponseInput(t)
+			}
+			if !p.supports(hook) {
+				t.Fatal("official plugin has neither a before-request nor after-response hook; memory call would be vacuous")
 			}
 
 			instances := acquireInstances(t, p, poolSize)
 			defer func() { releaseInstances(p, instances) }()
 			initialized := instanceMemoryBytes(t, instances)
-			input := benchmarkBeforeRequestInput(t)
-			exerciseEachInstance(t, p, instances, input, false)
+			exerciseEachInstanceHook(t, p, instances, hook, input, false)
 			after := instanceMemoryBytes(t, instances)
 			record := guestLinearMemoryRecord{
 				Guest:             bundle.name,
@@ -528,6 +554,28 @@ func benchmarkBeforeRequestInput(t *testing.T) []byte {
 	})
 	if err != nil {
 		t.Fatalf("marshal hook input: %v", err)
+	}
+	return input
+}
+
+func benchmarkAfterResponseInput(t *testing.T) []byte {
+	t.Helper()
+	input, err := proto.Marshal(&pbv1.HookInput{
+		RequestId: 1,
+		Payload: &pbv1.HookInput_AfterResponse{AfterResponse: &pbv1.AfterResponse{
+			Response: &pbv1.ChatResponse{
+				Provider:          "benchmark-provider",
+				Model:             "benchmark-model",
+				UpstreamStatus:    200,
+				DurationMs:        17,
+				CompletedAtUnixMs: 1_700_000_000_000,
+				Usage:             &pbv1.Usage{InputTokens: 10, OutputTokens: 3, CacheReadTokens: 7},
+			},
+			Mutable: false,
+		}},
+	})
+	if err != nil {
+		t.Fatalf("marshal after-response input: %v", err)
 	}
 	return input
 }
@@ -637,13 +685,17 @@ func acquireInstancesConcurrently(t *testing.T, p *Plugin, count int) []*pluginI
 // released instance. This makes the call target deterministic without adding
 // a production inspection or dispatch API solely for the benchmark.
 func exerciseEachInstance(t *testing.T, p *Plugin, instances []*pluginInstance, input []byte, requirePass bool) {
+	exerciseEachInstanceHook(t, p, instances, pbv1.Hook_HOOK_BEFORE_REQUEST, input, requirePass)
+}
+
+func exerciseEachInstanceHook(t *testing.T, p *Plugin, instances []*pluginInstance, hook pbv1.Hook, input []byte, requirePass bool) {
 	t.Helper()
 	for i := range instances {
 		inst := instances[i]
 		instances[i] = nil
 		p.release(inst)
 		var output []byte
-		if err := p.CallRequest(context.Background(), pbv1.Hook_HOOK_BEFORE_REQUEST, 1, input, &output); err != nil {
+		if err := p.CallRequest(context.Background(), hook, 1, input, &output); err != nil {
 			t.Fatalf("instance %d call: %v", i, err)
 		}
 		if requirePass && len(output) != 0 {

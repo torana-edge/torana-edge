@@ -35,6 +35,7 @@ func TestLoadRealPlugins(t *testing.T) {
 		"cache_warmer":        {"run_before_request", "run_on_tick"},
 		"cache_tier_selector": {"run_before_request"},
 		"tool_governor":       {"run_before_request"},
+		"usage_logger":        {"run_after_response"},
 	}
 
 	ctx := context.Background()
