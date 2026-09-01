@@ -160,7 +160,8 @@ func asInt(v any) int {
 // usageFrom reads token counts from a decoded usage object under the given
 // input/output key names. cacheReadKey/cacheWriteKey name the provider's
 // cached-token counts within the same object (empty = not reported by this
-// provider in flat form). Returns nil when absent or all-zero.
+// provider in flat form). Returns nil only when the usage object is absent;
+// an explicitly present all-zero object remains a report.
 func usageFrom(body map[string]any, objKey, inKey, outKey, cacheReadKey, cacheWriteKey string) *engine.StreamUsage {
 	obj, _ := body[objKey].(map[string]any)
 	if obj == nil {
@@ -172,9 +173,6 @@ func usageFrom(body map[string]any, objKey, inKey, outKey, cacheReadKey, cacheWr
 	}
 	if cacheWriteKey != "" {
 		u.CacheWriteTokens = asInt(obj[cacheWriteKey])
-	}
-	if u.InputTokens == 0 && u.OutputTokens == 0 && u.CacheReadTokens == 0 && u.CacheWriteTokens == 0 {
-		return nil
 	}
 	return u
 }

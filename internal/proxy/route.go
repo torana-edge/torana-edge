@@ -47,7 +47,7 @@ func (s *Server) applyRoute(req *http.Request, chat *engine.ChatRequest, origFor
 	}
 	authCandidate := req.Clone(req.Context())
 	authCandidate.Header = req.Header.Clone()
-	caller := callerCredentialsFrom(req)
+	caller := callerCredentials{}
 	if rs := reqStateFrom(req.Context()); rs != nil {
 		caller = rs.CallerCredentials
 	}

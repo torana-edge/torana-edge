@@ -499,7 +499,11 @@ func TestSeedKeepsPluginsWithoutDir(t *testing.T) {
 			"order": ["intent", "compactor"],
 			"hook_order": {"run_before_request": ["intent", "compactor"]},
 			"approvals": {
-				"torana/pii": {"digest": "abc123", "permissions": ["env.block_request"]}
+				"torana/pii": {
+					"digest": "abc123",
+					"permissions": ["env.block_request"],
+					"files": {"usage.jsonl": {"max_bytes": 4096, "retained_files": 2}}
+				}
 			}
 		}
 	}`)
@@ -516,6 +520,9 @@ func TestSeedKeepsPluginsWithoutDir(t *testing.T) {
 	}
 	if approval.Digest != "abc123" {
 		t.Errorf("approval digest = %q, want abc123", approval.Digest)
+	}
+	if file := approval.Files["usage.jsonl"]; file.MaxBytes != 4096 || file.RetainedFiles != 2 {
+		t.Errorf("file approval = %+v, want 4096 bytes and two rotations", file)
 	}
 }
 

@@ -2076,24 +2076,16 @@ func writeBytes(ctx context.Context, mod api.Module, b []byte) uint64 {
 	if len(b) == 0 {
 		return 0
 	}
-	return writeStr(ctx, mod, string(b))
-}
-
-func writeStr(ctx context.Context, mod api.Module, s string) uint64 {
-	b := []byte(s)
-	if len(b) == 0 {
-		return 0
-	}
 
 	allocFn := mod.ExportedFunction("alloc")
 	if allocFn == nil {
-		log.Printf("[wasm] writeStr: missing alloc function in module %s", mod.Name())
+		log.Printf("[wasm] writeBytes: missing alloc function in module %s", mod.Name())
 		return 0
 	}
 
 	res, err := allocFn.Call(ctx, uint64(len(b)))
 	if err != nil {
-		log.Printf("[wasm] writeStr: alloc failed: %v", err)
+		log.Printf("[wasm] writeBytes: alloc failed: %v", err)
 		return 0
 	}
 	if len(res) == 0 {
@@ -2101,12 +2093,12 @@ func writeStr(ctx context.Context, mod api.Module, s string) uint64 {
 	}
 
 	if res[0] > math.MaxUint32 {
-		log.Printf("[wasm] writeStr: alloc returned invalid pointer in module %s", mod.Name())
+		log.Printf("[wasm] writeBytes: alloc returned invalid pointer in module %s", mod.Name())
 		return 0
 	}
 	ptr := uint32(res[0])
 	if !writeMemory(mod.Memory(), ptr, b) {
-		log.Printf("[wasm] writeStr: alloc returned out-of-bounds pointer in module %s", mod.Name())
+		log.Printf("[wasm] writeBytes: alloc returned out-of-bounds pointer in module %s", mod.Name())
 		return 0
 	}
 	return uint64(ptr)<<32 | uint64(len(b))

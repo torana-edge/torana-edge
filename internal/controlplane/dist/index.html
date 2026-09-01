@@ -552,6 +552,15 @@
           return false;
         }
       }
+      const files = {};
+      document.querySelectorAll('#pluginResourceReview .file-binding-enabled:checked').forEach(enabled => {
+        const row = enabled.closest('[data-file]');
+        const path = enabled.dataset.file;
+        files[path] = {
+          max_bytes: Number(row.querySelector('.file-binding-bytes').value),
+          retained_files: Number(row.querySelector('.file-binding-retained').value)
+        };
+      });
       const httpEndpoints = {};
       document.querySelectorAll('#pluginResourceReview .http-binding-enabled:checked').forEach(enabled => {
         const row = enabled.closest('[data-endpoint]');
@@ -587,6 +596,7 @@
         permissions: selected,
         failure_mode: failureMode,
         credentials: credentials,
+        files: files,
         http_endpoints: httpEndpoints
       };
       if (!pipelineOrder.includes(name)) pipelineOrder.push(name);
@@ -687,7 +697,21 @@
           </div>
         </div>`;
       }).join('');
-      const fileRows = (p.files || []).map(file => `<div class="info-note"><code>${escHtml(file.path)}</code> — ${escHtml((file.operations || []).join(', '))}; ${escHtml(String(file.max_bytes || 'host default'))} bytes; ${escHtml(String(file.retained_files || 0))} retained rotations</div>`).join('');
+      const approvedFiles = currentApproval && currentApproval.digest === p.digest ? (currentApproval.files || {}) : {};
+      const fileRows = (p.files || []).map(file => {
+        const existing = approvedFiles[file.path] || {};
+        const enabled = Boolean(approvedFiles[file.path]);
+        const maxBytes = existing.max_bytes || file.max_bytes || 16777216;
+        const retained = existing.retained_files ?? file.retained_files ?? 5;
+        return `<div class="info-note" data-file="${escAttr(file.path)}">
+          <label class="checkbox-row"><input type="checkbox" class="file-binding-enabled" data-file="${escAttr(file.path)}" ${enabled ? 'checked' : ''}> <code>${escHtml(file.path)}</code></label>
+          <div class="hint">Private file; operations: ${escHtml((file.operations || []).join(', '))}. The approved budget may only reduce the manifest request.</div>
+          <div class="form-grid">
+            <label class="field"><span>Bytes per generation</span><input class="input file-binding-bytes" type="number" min="1" max="67108864" value="${escAttr(maxBytes)}"></label>
+            <label class="field"><span>Retained rotations</span><input class="input file-binding-retained" type="number" min="0" max="15" value="${escAttr(retained)}"></label>
+          </div>
+        </div>`;
+      }).join('');
       const resourceReview = credentialRows || httpRows || fileRows ? `<fieldset class="permission-review" id="pluginResourceReview">
         <legend>Private resources</legend>
         <div class="section-desc">Bindings and budgets are operator-owned. The plugin sees only the slots and logical paths declared here.</div>

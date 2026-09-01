@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -19,8 +20,15 @@ import (
 const maxHostCallPayload = 64 << 10
 
 type Store struct {
-	root string
-	mu   sync.Mutex
+	root     string
+	locksMu  sync.Mutex
+	locks    map[string]*pluginLocks
+	syncFile func(*os.File) error
+}
+
+type pluginLocks struct {
+	admin sync.RWMutex
+	files sync.Map // absolute path -> *sync.Mutex
 }
 
 func New(root string) (*Store, error) {
@@ -33,7 +41,46 @@ func New(root string) (*Store, error) {
 	if err := os.Chmod(root, 0o700); err != nil {
 		return nil, err
 	}
-	return &Store{root: root}, nil
+	return &Store{
+		root:     root,
+		locks:    make(map[string]*pluginLocks),
+		syncFile: func(file *os.File) error { return file.Sync() },
+	}, nil
+}
+
+func (s *Store) pluginLocks(plugin string) *pluginLocks {
+	s.locksMu.Lock()
+	defer s.locksMu.Unlock()
+	locks := s.locks[plugin]
+	if locks == nil {
+		locks = &pluginLocks{}
+		s.locks[plugin] = locks
+	}
+	return locks
+}
+
+func (l *pluginLocks) file(path string) *sync.Mutex {
+	// A rotation and its current generation are one mutation family. Operator
+	// reads may address retained generations directly, while append/delete move
+	// them under the base path; sharing the lock prevents those operations from
+	// racing. A legitimate filename ending in .N may contend conservatively
+	// with its apparent base, but never loses isolation or correctness.
+	lockPath := path
+	base := filepath.Base(path)
+	for {
+		dot := strings.LastIndexByte(base, '.')
+		if dot < 0 {
+			break
+		}
+		generation, err := strconv.Atoi(base[dot+1:])
+		if err != nil || generation <= 0 {
+			break
+		}
+		base = base[:dot]
+		lockPath = filepath.Join(filepath.Dir(path), base)
+	}
+	lock, _ := l.files.LoadOrStore(lockPath, &sync.Mutex{})
+	return lock.(*sync.Mutex)
 }
 
 func pluginDir(root, plugin string) string {
@@ -105,48 +152,69 @@ func (s *Store) Append(plugin, logical string, data []byte, resource wasm.FileRe
 	if len(data) > maxHostCallPayload {
 		return fmt.Errorf("append exceeds 64 KiB host-call limit")
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	path, err := s.target(plugin, logical)
 	if err != nil {
 		return err
 	}
+	locks := s.pluginLocks(plugin)
+	locks.admin.RLock()
+	defer locks.admin.RUnlock()
+	fileLock := locks.file(path)
+	fileLock.Lock()
+	f, err := s.appendLocked(plugin, path, data, resource)
+	fileLock.Unlock()
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	// The write and any rotation are ordered under the file-family lock. Sync
+	// happens afterwards: concurrent appends may group-commit on the same inode
+	// instead of every request waiting behind another request's storage flush.
+	// The call still returns only after its own descriptor has been synced.
+	return s.syncFile(f)
+}
+
+// appendLocked performs the ordered portion of Append. The caller owns the
+// file-family lock. On success it returns an open descriptor containing the
+// completed append; the caller owns Close and Sync.
+func (s *Store) appendLocked(plugin, path string, data []byte, resource wasm.FileResource) (*os.File, error) {
 	base := pluginDir(s.root, plugin)
 	if err := secureParent(path, base); err != nil {
-		return err
+		return nil, err
 	}
 	if err := regularSingleLink(path, true); err != nil {
-		return err
+		return nil, err
 	}
 	if resource.MaxBytes <= 0 {
-		return fmt.Errorf("file has no size budget")
+		return nil, fmt.Errorf("file has no size budget")
 	}
 	if int64(len(data)) > resource.MaxBytes {
-		return fmt.Errorf("append exceeds approved file size")
+		return nil, fmt.Errorf("append exceeds approved file size")
 	}
 	var size int64
 	if info, err := os.Stat(path); err == nil {
 		size = info.Size()
 	} else if !errors.Is(err, os.ErrNotExist) {
-		return err
+		return nil, err
 	}
 	if size+int64(len(data)) > resource.MaxBytes {
 		if err := rotate(path, resource.RetainedFiles); err != nil {
-			return err
+			return nil, err
 		}
 	}
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	defer f.Close()
 	if err := regularSingleLink(path, false); err != nil {
-		return err
+		_ = f.Close()
+		return nil, err
 	}
 	if _, err := f.Write(data); err != nil {
-		return err
+		_ = f.Close()
+		return nil, err
 	}
-	return f.Sync()
+	return f, nil
 }
 
 func rotate(path string, retained int) error {
@@ -168,12 +236,16 @@ func rotate(path string, retained int) error {
 }
 
 func (s *Store) Read(plugin, logical string, resource wasm.FileResource) ([]byte, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	path, err := s.target(plugin, logical)
 	if err != nil {
 		return nil, err
 	}
+	locks := s.pluginLocks(plugin)
+	locks.admin.RLock()
+	defer locks.admin.RUnlock()
+	fileLock := locks.file(path)
+	fileLock.Lock()
+	defer fileLock.Unlock()
 	if err := regularSingleLink(path, false); err != nil {
 		return nil, err
 	}
@@ -200,12 +272,16 @@ func (s *Store) Write(plugin, logical string, data []byte, resource wasm.FileRes
 	if resource.MaxBytes <= 0 || len(data) > maxHostCallPayload || int64(len(data)) > resource.MaxBytes {
 		return fmt.Errorf("write exceeds approved limit")
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	path, err := s.target(plugin, logical)
 	if err != nil {
 		return err
 	}
+	locks := s.pluginLocks(plugin)
+	locks.admin.RLock()
+	defer locks.admin.RUnlock()
+	fileLock := locks.file(path)
+	fileLock.Lock()
+	defer fileLock.Unlock()
 	base := pluginDir(s.root, plugin)
 	if err := secureParent(path, base); err != nil {
 		return err
@@ -238,25 +314,55 @@ func (s *Store) Write(plugin, logical string, data []byte, resource wasm.FileRes
 }
 
 func (s *Store) Delete(plugin, logical string, _ wasm.FileResource) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	path, err := s.target(plugin, logical)
 	if err != nil {
 		return err
 	}
-	if err := regularSingleLink(path, true); err != nil {
-		return err
-	}
-	err = os.Remove(path)
+	locks := s.pluginLocks(plugin)
+	locks.admin.RLock()
+	defer locks.admin.RUnlock()
+	fileLock := locks.file(path)
+	fileLock.Lock()
+	defer fileLock.Unlock()
+	targets := []string{path}
+	entries, err := os.ReadDir(filepath.Dir(path))
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
-	return err
+	if err != nil {
+		return err
+	}
+	prefix := filepath.Base(path) + "."
+	for _, entry := range entries {
+		if !strings.HasPrefix(entry.Name(), prefix) {
+			continue
+		}
+		generation, parseErr := strconv.Atoi(strings.TrimPrefix(entry.Name(), prefix))
+		if parseErr != nil || generation <= 0 {
+			continue
+		}
+		targets = append(targets, filepath.Join(filepath.Dir(path), entry.Name()))
+	}
+	// Validate the complete deletion set before removing anything. A hostile
+	// link masquerading as one retained generation must not cause the current
+	// generation to disappear before the operation fails closed.
+	for _, target := range targets {
+		if err := regularSingleLink(target, target == path); err != nil {
+			return err
+		}
+	}
+	for _, target := range targets {
+		if err := os.Remove(target); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *Store) List(plugin, prefix string, resources map[string]wasm.FileResource) ([]string, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	locks := s.pluginLocks(plugin)
+	locks.admin.RLock()
+	defer locks.admin.RUnlock()
 	var out []string
 	for logical := range resources {
 		if !strings.HasPrefix(logical, prefix) {
@@ -266,11 +372,15 @@ func (s *Store) List(plugin, prefix string, resources map[string]wasm.FileResour
 		if err != nil {
 			return nil, err
 		}
+		fileLock := locks.file(path)
+		fileLock.Lock()
 		if err := regularSingleLink(path, false); err == nil {
 			out = append(out, logical)
 		} else if !errors.Is(err, os.ErrNotExist) {
+			fileLock.Unlock()
 			return nil, err
 		}
+		fileLock.Unlock()
 	}
 	sort.Strings(out)
 	return out, nil
@@ -279,8 +389,9 @@ func (s *Store) List(plugin, prefix string, resources map[string]wasm.FileResour
 // OperatorList exposes only logical names for CLI inspection; OS paths remain
 // an implementation detail even to operators.
 func (s *Store) OperatorList(plugin string) ([]string, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	locks := s.pluginLocks(plugin)
+	locks.admin.Lock()
+	defer locks.admin.Unlock()
 	base := pluginDir(s.root, plugin)
 	var out []string
 	err := filepath.WalkDir(base, func(path string, entry os.DirEntry, err error) error {
@@ -317,12 +428,16 @@ func (s *Store) OperatorList(plugin string) ([]string, error) {
 }
 
 func (s *Store) OperatorRead(plugin, logical string) ([]byte, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	path, err := s.target(plugin, logical)
 	if err != nil {
 		return nil, err
 	}
+	locks := s.pluginLocks(plugin)
+	locks.admin.RLock()
+	defer locks.admin.RUnlock()
+	fileLock := locks.file(path)
+	fileLock.Lock()
+	defer fileLock.Unlock()
 	if err := regularSingleLink(path, false); err != nil {
 		return nil, err
 	}
@@ -330,8 +445,9 @@ func (s *Store) OperatorRead(plugin, logical string) ([]byte, error) {
 }
 
 func (s *Store) OperatorPurge(plugin string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	locks := s.pluginLocks(plugin)
+	locks.admin.Lock()
+	defer locks.admin.Unlock()
 	base := pluginDir(s.root, plugin)
 	info, err := os.Lstat(base)
 	if errors.Is(err, os.ErrNotExist) {

@@ -647,7 +647,13 @@ type PluginApproval struct {
 	Permissions   []string                      `json:"permissions"`
 	FailureMode   string                        `json:"failure_mode,omitempty"`
 	Credentials   map[string]string             `json:"credentials,omitempty"`
+	Files         map[string]PluginFileApproval `json:"files,omitempty"`
 	HTTPEndpoints map[string]PluginHTTPApproval `json:"http_endpoints,omitempty"`
+}
+
+type PluginFileApproval struct {
+	MaxBytes      int64 `json:"max_bytes"`
+	RetainedFiles int   `json:"retained_files"`
 }
 
 type PluginHTTPApproval struct {

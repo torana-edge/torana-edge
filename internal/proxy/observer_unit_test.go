@@ -33,7 +33,7 @@ func TestObserverJSONHooksDirect(t *testing.T) {
 		t.Fatalf("loaded %d plugins, want 1", pp.Len())
 	}
 
-	rs := &reqState{ID: 1, UpstreamStatus: 200, UsageIn: 7, UsageOut: 3}
+	rs := &reqState{ID: 1, UpstreamStatus: 200, UsageIn: 7, UsageOut: 3, UsageReported: true}
 	ctx := context.WithValue(context.Background(), reqStateKey{}, rs)
 	chat := &engine.ChatRequest{Model: "gpt-x", ToranaMeta: mustMetaObj()}
 	body := []byte(`{"id":"x","model":"gpt-x","choices":[{"message":{"role":"assistant","content":"hi"}}],"usage":{"prompt_tokens":7,"completion_tokens":3}}`)

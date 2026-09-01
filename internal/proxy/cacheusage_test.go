@@ -85,3 +85,39 @@ func TestMergeUsagePreservesAcrossFrames(t *testing.T) {
 			rs.UsageIn, rs.UsageOut, rs.UsageCacheRead, rs.UsageCacheWrite)
 	}
 }
+
+func TestUsagePresenceSurvivesExplicitZeroOnly(t *testing.T) {
+	rows := []struct {
+		format  string
+		missing map[string]any
+		present map[string]any
+	}{
+		{format: "openai", missing: map[string]any{}, present: map[string]any{"usage": map[string]any{}}},
+		{format: "anthropic", missing: map[string]any{}, present: map[string]any{"usage": map[string]any{}}},
+		{format: "bedrock", missing: map[string]any{}, present: map[string]any{"usage": map[string]any{}}},
+		{format: "gemini", missing: map[string]any{}, present: map[string]any{"usageMetadata": map[string]any{}}},
+		{format: "gemini-codeassist", missing: map[string]any{"response": map[string]any{}}, present: map[string]any{"response": map[string]any{"usageMetadata": map[string]any{}}}},
+	}
+	for _, row := range rows {
+		t.Run(row.format, func(t *testing.T) {
+			missing := extractResponse(row.format, row.missing).usage
+			present := extractResponse(row.format, row.present).usage
+			if missing != nil {
+				t.Fatalf("missing usage = %+v, want nil", missing)
+			}
+			if present == nil || *present != (engine.StreamUsage{}) {
+				t.Fatalf("present zero usage = %+v, want zero-valued report", present)
+			}
+		})
+	}
+
+	rs := &reqState{}
+	rs.mergeUsage(nil)
+	if response := rs.chatResponse("model", "", nil, ""); response.Usage != nil {
+		t.Fatalf("missing usage surfaced as reported: %+v", response.Usage)
+	}
+	rs.mergeUsage(&engine.StreamUsage{})
+	if response := rs.chatResponse("model", "", nil, ""); response.Usage == nil || *response.Usage != (engine.StreamUsage{}) {
+		t.Fatalf("explicit zero usage was lost: %+v", response.Usage)
+	}
+}

@@ -320,6 +320,9 @@ type reqState struct {
 	// didn't report.
 	UsageIn  int
 	UsageOut int
+	// UsageReported distinguishes a provider-reported all-zero usage object
+	// from a response that did not report usage at all.
+	UsageReported bool
 	// UsageCacheRead/UsageCacheWrite are the provider-reported prompt-cache
 	// token counts (read = served from cache, write = written to cache).
 	// Zero when the provider didn't report or nothing was cached.
@@ -462,7 +465,7 @@ func (rs *reqState) chatResponse(model, id string, msg *engine.ResponseMessage, 
 	if !rs.Start.IsZero() {
 		durationMS = time.Since(rs.Start).Milliseconds()
 	}
-	return &engine.ChatResponse{
+	response := &engine.ChatResponse{
 		Model:             model,
 		Provider:          rs.Provider,
 		CompletedAtUnixMS: time.Now().UnixMilli(),
@@ -471,19 +474,26 @@ func (rs *reqState) chatResponse(model, id string, msg *engine.ResponseMessage, 
 		FinishReason:      finishReason,
 		UpstreamStatus:    rs.UpstreamStatus,
 		DurationMS:        durationMS,
-		Usage: &engine.StreamUsage{
+	}
+	if rs.UsageReported {
+		response.Usage = &engine.StreamUsage{
 			InputTokens:      rs.UsageIn,
 			OutputTokens:     rs.UsageOut,
 			CacheReadTokens:  rs.UsageCacheRead,
 			CacheWriteTokens: rs.UsageCacheWrite,
-		},
+		}
 	}
+	return response
 }
 
 // mergeUsage folds a usage frame into the request state without zeroing
 // counts a previous frame already reported (Anthropic splits input and output
 // usage across message_start and message_delta).
 func (rs *reqState) mergeUsage(u *engine.StreamUsage) {
+	if u == nil {
+		return
+	}
+	rs.UsageReported = true
 	if u.InputTokens > 0 {
 		rs.UsageIn = u.InputTokens
 	}
@@ -2847,6 +2857,10 @@ func pluginApprovals(src map[string]provider.PluginApproval) map[string]plugin.A
 		for name, binding := range approval.HTTPEndpoints {
 			httpBindings[name] = plugin.HTTPApproval{Origin: binding.Origin, Methods: append([]string(nil), binding.Methods...), TimeoutMS: binding.TimeoutMS, MaxRequestBytes: binding.MaxRequestBytes, MaxResponseBytes: binding.MaxResponseBytes, MaxCallsPerMinute: binding.MaxCallsPerMinute}
 		}
+		fileBindings := make(map[string]plugin.FileApproval, len(approval.Files))
+		for path, binding := range approval.Files {
+			fileBindings[path] = plugin.FileApproval{MaxBytes: binding.MaxBytes, RetainedFiles: binding.RetainedFiles}
+		}
 		credentialBindings := make(map[string]string, len(approval.Credentials))
 		for slot, id := range approval.Credentials {
 			credentialBindings[slot] = id
@@ -2856,6 +2870,7 @@ func pluginApprovals(src map[string]provider.PluginApproval) map[string]plugin.A
 			Permissions:   append([]string(nil), approval.Permissions...),
 			FailureMode:   approval.FailureMode,
 			Credentials:   credentialBindings,
+			Files:         fileBindings,
 			HTTPEndpoints: httpBindings,
 		}
 	}
@@ -3572,6 +3587,9 @@ func (s *Server) Serve(ln net.Listener) error {
 }
 
 func (s *Server) Shutdown(ctx context.Context) error {
+	if s.pluginHTTP != nil {
+		defer s.pluginHTTP.CloseIdleConnections()
+	}
 	if s.watchCancel != nil {
 		s.watchCancel()
 	}

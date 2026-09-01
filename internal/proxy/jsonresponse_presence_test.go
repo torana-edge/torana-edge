@@ -243,7 +243,7 @@ func TestObserverNoCandidateGemini(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func observerRS() (*reqState, context.Context) {
-	rs := &reqState{ID: 1, UpstreamStatus: 200, UsageIn: 7, UsageOut: 3}
+	rs := &reqState{ID: 1, UpstreamStatus: 200, UsageIn: 7, UsageOut: 3, UsageReported: true}
 	return rs, context.WithValue(context.Background(), reqStateKey{}, rs)
 }
 
