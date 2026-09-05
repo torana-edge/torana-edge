@@ -50,7 +50,6 @@ Torana is currently pre-release, so this walkthrough builds the reviewed
    cd torana-edge
    go build -o ./torana ./cmd/torana
    cp config.example.json config.json
-   export DEEPSEEK_API_KEY='replace-with-your-deepseek-key'
    ```
 
 2. Start with **no plugins** so the first check proves the proxy itself works.
@@ -61,7 +60,8 @@ Torana is currently pre-release, so this walkthrough builds the reviewed
    ./torana --debug
    ```
 
-   Keep that terminal open and use another terminal for the remaining commands.
+   This Torana process receives no provider credential. Keep that terminal open
+   and use another terminal for the remaining commands.
    `--debug` logs one safe received/completed line per inference request (route,
    provider, status, latency, plugins, and verdict; never bodies or credentials),
    so you can tell immediately that your harness is reaching Torana. Torana
@@ -73,6 +73,9 @@ Torana is currently pre-release, so this walkthrough builds the reviewed
 3. In another terminal, verify health and send one real request:
 
    ```bash
+   # This credential belongs to the caller, not the Torana process.
+   export DEEPSEEK_API_KEY='replace-with-your-deepseek-key'
+
    curl --fail-with-body http://127.0.0.1:8080/health
 
    curl --fail-with-body http://127.0.0.1:8080/provider/deepseek/v1/chat/completions \
@@ -95,14 +98,22 @@ Torana is currently pre-release, so this walkthrough builds the reviewed
    Harness-specific examples, including Claude Code and OpenCode, are in the
    [Quickstart](docs/QUICKSTART.md#route-your-harness).
 
-5. Only after the proxy works, install one plugin from readable source:
+5. Leave Torana running. In the second terminal, install one plugin from
+   readable source; the plugin watcher discovers it without a restart:
 
    ```bash
    ./torana plugin install https://github.com/torana-edge/torana-plugins/tree/main/plugins/usage_logger
    ./torana plugin list
    ```
 
-   Installation does **not** run the plugin. Open
+   A local directory works too, including a private plugin repository you
+   cloned separately:
+
+   ```bash
+   ./torana plugin install ../my-private-plugins/usage_logger
+   ```
+
+   Installation does **not** approve, enable, or run the plugin. Open
    [http://127.0.0.1:8080/_torana/](http://127.0.0.1:8080/_torana/), inspect its
    requested capability and private-file budget, approve it, enable it, and
    place it in the pipeline. Send a few requests, then inspect the tangible

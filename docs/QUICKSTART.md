@@ -29,14 +29,16 @@ authentication, so the harness or curl supplies the provider credential on each
 request. For a disposable evaluation, keep managed state in the checkout:
 
 ```bash
-export DEEPSEEK_API_KEY='replace-with-your-deepseek-key'
 export TORANA_DATA_DIR="$PWD/.torana-data"
 ./torana --debug
 ```
 
-Keep that terminal open. In another terminal:
+This Torana process receives no provider credential. Keep that terminal open.
+In another terminal, configure the caller credential and send the request:
 
 ```bash
+export DEEPSEEK_API_KEY='replace-with-your-deepseek-key'
+
 curl --fail-with-body http://127.0.0.1:8080/health
 
 curl --fail-with-body http://127.0.0.1:8080/provider/deepseek/v1/chat/completions \
@@ -100,11 +102,20 @@ for each run. That avoids accidentally exercising an older managed
 configuration while believing you are testing a changed seed.
 
 The empty order is intentional: discovered plugins are not implicitly trusted
-or enabled. After the plugin-free request above succeeds, install one plugin:
+or enabled. After the plugin-free request above succeeds, leave Torana running
+and install one plugin from the second terminal. The watcher discovers the new
+bundle without a restart:
 
 ```bash
 ./torana plugin install https://github.com/torana-edge/torana-plugins/tree/main/plugins/usage_logger
 ./torana plugin list
+```
+
+The installer also accepts a local directory. This is useful for a private
+repository that you clone and review yourself:
+
+```bash
+./torana plugin install ../my-private-plugins/usage_logger
 ```
 
 Open the Control Plane, inspect and approve the exact bundle digest and requested
@@ -115,8 +126,8 @@ in the pipeline. Send a few requests and inspect its content-free output:
 ./torana plugin file tail usage_logger usage.jsonl
 ```
 
-Installation alone never grants or enables anything, and the plugin cannot pick
-an OS path: Torana owns the private rotating file.
+Installation alone never approves, enables, or runs anything, and the plugin
+cannot pick an OS path: Torana owns the private rotating file.
 
 Once that lifecycle is clear, the maintained set can be built locally with:
 
