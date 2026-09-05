@@ -760,12 +760,7 @@ func TestExternalBundlesConformToCurrentHost(t *testing.T) {
 		t.Run(entry.Name(), func(t *testing.T) {
 			runtime := wasm.NewRuntime(context.Background())
 			defer runtime.Close()
-			pipeline, err := NewPipeline(runtime, PluginConfig{
-				Dir:             root,
-				Order:           []string{entry.Name()},
-				AllowUnapproved: true,
-				Strict:          true,
-			})
+			pipeline, err := NewPipeline(runtime, officialPluginConfig(t, root, []string{entry.Name()}, nil))
 			if err != nil {
 				t.Fatalf("host conformance: %v", err)
 			}

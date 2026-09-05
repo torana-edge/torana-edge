@@ -1,6 +1,7 @@
 package plugin
 
 import (
+	"encoding/json"
 	"os"
 	"testing"
 )
@@ -57,4 +58,53 @@ func requireBundle(t *testing.T, dir, name string) {
 	if _, err := os.Stat(dir + "/" + name + "/plugin.wasm"); err != nil {
 		t.Skipf("bundle %q not present in %s", name, dir)
 	}
+}
+
+// officialPluginConfig builds explicit test-only approvals for real official
+// bundles. AllowUnapproved deliberately cannot invent operator bindings for a
+// required resource: doing so in production would erase the security boundary
+// these tests are meant to exercise.
+func officialPluginConfig(t testing.TB, dir string, order []string, config map[string]json.RawMessage) PluginConfig {
+	t.Helper()
+	approvals := make(map[string]Approval, len(order))
+	zero := 0.0
+	for _, name := range order {
+		manifest, err := ValidateManifestDir(dir + "/" + name)
+		if err != nil {
+			t.Fatalf("validate official bundle %s: %v", name, err)
+		}
+		digest, err := BundleDigestForDir(dir + "/" + name)
+		if err != nil {
+			t.Fatalf("digest official bundle %s: %v", name, err)
+		}
+		permissions := make([]string, 0, len(manifest.Permissions))
+		for _, permission := range manifest.Permissions {
+			permissions = append(permissions, permission.Name)
+		}
+		approval := Approval{
+			Digest: digest, Permissions: permissions, FailureMode: manifest.FailureMode,
+			Credentials: map[string]string{}, Files: defaultFileApprovals(manifest), HTTPEndpoints: defaultHTTPApprovals(manifest),
+			ModelServices: map[string]ModelServiceApproval{}, PricingResources: map[string]PricingApproval{},
+		}
+		for _, declaration := range manifest.Credentials {
+			approval.Credentials[declaration.Slot] = "test-" + declaration.Slot
+		}
+		for _, declaration := range manifest.ModelServices {
+			approval.ModelServices[declaration.Name] = ModelServiceApproval{
+				Provider: "test", Model: declaration.Name, Path: "/v1/chat/completions",
+				TimeoutMS: declaration.TimeoutMS, MaxTokens: declaration.MaxTokens, MaxInputBytes: declaration.MaxInputBytes,
+				MaxCallsPerMinute: declaration.MaxCallsPerMinute, MaxTokensPerHour: declaration.MaxTokensPerHour,
+			}
+		}
+		for _, declaration := range manifest.PricingResources {
+			model := PricingModelApproval{Provider: "test", Model: "target", InputUSDPerMTok: &zero, OutputUSDPerMTok: &zero, CacheReadUSDPerMTok: &zero, CacheWriteUSDPerMTok: &zero}
+			if declaration.ForModelService != "" {
+				model.Provider = ""
+				model.Model = ""
+			}
+			approval.PricingResources[declaration.Name] = PricingApproval{Models: []PricingModelApproval{model}}
+		}
+		approvals[name] = approval
+	}
+	return PluginConfig{Dir: dir, Order: order, Config: config, Approvals: approvals, Strict: true}
 }
