@@ -83,6 +83,14 @@ type FileDeclaration struct {
 	RetainedFiles int      `json:"retained_files,omitempty"`
 }
 
+const (
+	defaultPluginFileMaxBytes  int64 = 16 << 20
+	defaultPluginRetainedFiles       = 5
+	MaxPluginFileBytes         int64 = 64 << 20
+	MaxPluginRetainedFiles           = 15
+	MaxPluginFileTotalBytes    int64 = 256 << 20
+)
+
 type HTTPEndpointDeclaration struct {
 	Name              string   `json:"name"`
 	Description       string   `json:"description"`
@@ -376,6 +384,7 @@ func validateResourceDeclarations(manifest PluginManifest, permissions map[strin
 	}
 
 	filePaths := make(map[string]struct{}, len(manifest.Files))
+	var requestedFileBytes int64
 	for _, declaration := range manifest.Files {
 		if err := validateLogicalPluginPath(declaration.Path); err != nil {
 			return fmt.Errorf("file declaration %q: %w", declaration.Path, err)
@@ -386,6 +395,14 @@ func validateResourceDeclarations(manifest PluginManifest, permissions map[strin
 		filePaths[declaration.Path] = struct{}{}
 		if declaration.MaxBytes < 0 || declaration.RetainedFiles < 0 {
 			return fmt.Errorf("file %q limits must not be negative", declaration.Path)
+		}
+		maxBytes, retained, err := fileLimits(declaration.MaxBytes, declaration.RetainedFiles, true)
+		if err != nil {
+			return fmt.Errorf("file %q: %w", declaration.Path, err)
+		}
+		requestedFileBytes += maxBytes * int64(retained+1)
+		if requestedFileBytes > MaxPluginFileTotalBytes {
+			return fmt.Errorf("file declarations exceed the %d-byte per-plugin storage ceiling", MaxPluginFileTotalBytes)
 		}
 		seen := make(map[string]struct{}, len(declaration.Operations))
 		for _, operation := range declaration.Operations {
@@ -2100,7 +2117,13 @@ type Approval struct {
 	Permissions   []string                `json:"permissions"`
 	FailureMode   string                  `json:"failure_mode,omitempty"`
 	Credentials   map[string]string       `json:"credentials,omitempty"`
+	Files         map[string]FileApproval `json:"files,omitempty"`
 	HTTPEndpoints map[string]HTTPApproval `json:"http_endpoints,omitempty"`
+}
+
+type FileApproval struct {
+	MaxBytes      int64 `json:"max_bytes"`
+	RetainedFiles int   `json:"retained_files"`
 }
 
 type HTTPApproval struct {
@@ -2123,6 +2146,7 @@ func (c PluginConfig) approvalFor(bundle PluginBundle) (Approval, bool) {
 			Permissions:   permissions,
 			FailureMode:   bundle.Manifest.FailureMode,
 			Credentials:   map[string]string{},
+			Files:         defaultFileApprovals(bundle.Manifest),
 			HTTPEndpoints: defaultHTTPApprovals(bundle.Manifest),
 		}, true
 	}
@@ -2136,6 +2160,37 @@ func (c PluginConfig) approvalFor(bundle PluginBundle) (Approval, bool) {
 		}
 	}
 	return Approval{}, false
+}
+
+func fileLimits(maxBytes int64, retained int, defaults bool) (int64, int, error) {
+	if defaults && maxBytes == 0 {
+		maxBytes = defaultPluginFileMaxBytes
+	}
+	if defaults && retained == 0 {
+		retained = defaultPluginRetainedFiles
+	}
+	if maxBytes <= 0 || maxBytes > MaxPluginFileBytes {
+		return 0, 0, fmt.Errorf("max_bytes must be between 1 and %d", MaxPluginFileBytes)
+	}
+	if retained < 0 || retained > MaxPluginRetainedFiles {
+		return 0, 0, fmt.Errorf("retained_files must be between 0 and %d", MaxPluginRetainedFiles)
+	}
+	if maxBytes > MaxPluginFileTotalBytes/int64(retained+1) {
+		return 0, 0, fmt.Errorf("total retained storage exceeds %d bytes", MaxPluginFileTotalBytes)
+	}
+	return maxBytes, retained, nil
+}
+
+func defaultFileApprovals(manifest PluginManifest) map[string]FileApproval {
+	out := make(map[string]FileApproval, len(manifest.Files))
+	for _, declaration := range manifest.Files {
+		maxBytes, retained, err := fileLimits(declaration.MaxBytes, declaration.RetainedFiles, true)
+		if err != nil {
+			continue
+		}
+		out[declaration.Path] = FileApproval{MaxBytes: maxBytes, RetainedFiles: retained}
+	}
+	return out
 }
 
 func defaultHTTPApprovals(manifest PluginManifest) map[string]HTTPApproval {
@@ -2169,20 +2224,36 @@ func resolvePluginResources(manifest PluginManifest, approval Approval) (wasm.Pl
 			return resources, fmt.Errorf("required credential slot %q is not bound", slot)
 		}
 	}
+	declaredFiles := make(map[string]FileDeclaration, len(manifest.Files))
 	for _, declaration := range manifest.Files {
-		maxBytes := declaration.MaxBytes
-		if maxBytes == 0 {
-			maxBytes = 16 << 20
+		declaredFiles[declaration.Path] = declaration
+	}
+	var approvedFileBytes int64
+	for path, binding := range approval.Files {
+		declaration, ok := declaredFiles[path]
+		if !ok {
+			return resources, fmt.Errorf("file binding %q was not declared by manifest", path)
 		}
-		retained := declaration.RetainedFiles
-		if retained == 0 {
-			retained = 5
+		requestedMax, requestedRetained, err := fileLimits(declaration.MaxBytes, declaration.RetainedFiles, true)
+		if err != nil {
+			return resources, fmt.Errorf("file %q declaration: %w", path, err)
+		}
+		maxBytes, retained, err := fileLimits(binding.MaxBytes, binding.RetainedFiles, false)
+		if err != nil {
+			return resources, fmt.Errorf("file %q approval: %w", path, err)
+		}
+		if maxBytes > requestedMax || retained > requestedRetained {
+			return resources, fmt.Errorf("file %q approval exceeds the manifest request", path)
+		}
+		approvedFileBytes += maxBytes * int64(retained+1)
+		if approvedFileBytes > MaxPluginFileTotalBytes {
+			return resources, fmt.Errorf("file approvals exceed the %d-byte per-plugin storage ceiling", MaxPluginFileTotalBytes)
 		}
 		operations := make(map[string]bool, len(declaration.Operations))
 		for _, operation := range declaration.Operations {
 			operations[operation] = true
 		}
-		resources.Files[declaration.Path] = wasm.FileResource{Operations: operations, MaxBytes: maxBytes, RetainedFiles: retained}
+		resources.Files[path] = wasm.FileResource{Operations: operations, MaxBytes: maxBytes, RetainedFiles: retained}
 	}
 	declaredHTTP := make(map[string]HTTPEndpointDeclaration, len(manifest.HTTPEndpoints))
 	for _, declaration := range manifest.HTTPEndpoints {

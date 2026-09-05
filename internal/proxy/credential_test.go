@@ -5,7 +5,9 @@ import (
 	"net/http"
 	"testing"
 
+	"github.com/torana-edge/torana-edge/internal/engine"
 	"github.com/torana-edge/torana-edge/internal/provider"
+	"github.com/torana-edge/torana-edge/internal/wasm"
 )
 
 func TestApplyProviderCredentialUsesProtocolNativeHeader(t *testing.T) {
@@ -70,5 +72,46 @@ func TestApplyProviderCredentialCallerUsesIngressSnapshot(t *testing.T) {
 	}
 	if got := req.Header.Get("X-Goog-Api-Key"); got != caller.GoogleAPIKey {
 		t.Fatalf("X-Goog-Api-Key = %q, want %q", got, caller.GoogleAPIKey)
+	}
+}
+
+func TestApplyUpstreamCredentialNeverFallsBackToLiveHeaders(t *testing.T) {
+	req, _ := http.NewRequest(http.MethodPost, "https://provider.example/infer", nil)
+	req.Header.Set("Authorization", "Bearer mutable-live-secret")
+	req.Header.Set("X-Api-Key", "mutable-api-key")
+	cfg := provider.Config{Providers: map[string]provider.Provider{
+		"target": {Format: "openai", Auth: provider.ProviderAuth{Mode: "caller"}},
+	}}
+	if err := (&Server{}).applyUpstreamCredential(req, cfg, &RouteContext{ProviderName: "target"}); err != nil {
+		t.Fatal(err)
+	}
+	for _, header := range []string{"Authorization", "X-Api-Key", "X-Goog-Api-Key"} {
+		if got := req.Header.Get(header); got != "" {
+			t.Fatalf("%s leaked from mutable request headers: %q", header, got)
+		}
+	}
+}
+
+func TestApplyRouteNeverFallsBackToLiveHeaders(t *testing.T) {
+	rc := &RouteContext{ProviderName: "original", StrippedPath: "/v1/chat/completions"}
+	req, _ := http.NewRequestWithContext(
+		context.WithValue(context.Background(), routeContextKey{}, rc),
+		http.MethodPost,
+		"https://original.example/v1/chat/completions",
+		nil,
+	)
+	req.Header.Set("Authorization", "Bearer mutable-live-secret")
+	req.Header.Set("X-Api-Key", "mutable-api-key")
+	cfg := provider.Config{Providers: map[string]provider.Provider{
+		"target": {URL: "https://target.example", Format: "openai", Auth: provider.ProviderAuth{Mode: "caller"}},
+	}}
+	(&Server{}).applyRoute(req, &engine.ChatRequest{}, "openai", "original", &wasm.RouteVerdict{Provider: "target", Plugin: "test"}, cfg)
+	if rc.ProviderName != "target" {
+		t.Fatalf("route was not applied: %+v", rc)
+	}
+	for _, header := range []string{"Authorization", "X-Api-Key", "X-Goog-Api-Key"} {
+		if got := req.Header.Get(header); got != "" {
+			t.Fatalf("%s leaked from mutable request headers after routing: %q", header, got)
+		}
 	}
 }

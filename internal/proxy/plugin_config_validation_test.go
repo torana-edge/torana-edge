@@ -173,6 +173,28 @@ func TestSavePipelineDoesNotBlankConfigs(t *testing.T) {
 	}
 }
 
+func TestDashboardRequiresExplicitPrivateFileApproval(t *testing.T) {
+	spa, err := os.ReadFile("../controlplane/dist/index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := string(spa)
+	for _, required := range []string{
+		".file-binding-enabled:checked",
+		"max_bytes: Number(row.querySelector('.file-binding-bytes').value)",
+		"retained_files: Number(row.querySelector('.file-binding-retained').value)",
+		"files: files",
+		"const enabled = Boolean(approvedFiles[file.path])",
+	} {
+		if !strings.Contains(source, required) {
+			t.Fatalf("dashboard private-file approval seam is missing %q", required)
+		}
+	}
+	if strings.Contains(source, `class="file-binding-enabled" data-file="${escAttr(file.path)}" checked`) {
+		t.Fatal("a new plugin's private file is approved by default")
+	}
+}
+
 // TestUnchangedBadConfigDoesNotBlockPipelineEdits — the dashboard's Save &
 // apply resubmits every enabled plugin's current config on every reorder. If
 // validation ran over all of them, a single stored value predating a schema

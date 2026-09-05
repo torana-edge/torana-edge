@@ -100,7 +100,10 @@ what makes it reasonable to run a plugin someone else wrote.
 Plugins may request narrowly declared private logical files. The operator sees
 the path, operations, size, and rotation budget at approval; Torana chooses the
 OS path, prevents cross-plugin access, and exposes it through `torana plugin
-file`. A plugin still cannot select an OS path or write the operator audit sink.
+file`. The approved budget may only narrow the manifest request. The host caps
+each generation at 64 MiB, retained rotations at 15, and total private-file
+storage for one plugin at 256 MiB. A plugin still cannot select an OS path or write the
+operator audit sink.
 The host records the
 ordered names of plugins it actually invoked and any attributed verdict; see
 [Structured audit log](AUDIT_LOG.md).
@@ -127,7 +130,7 @@ approve them.
 | `env.credential_get` | Resolves only operator-bound credential slots. The plugin declares the purpose but never sees provider configuration or other credential IDs. |
 | `env.http_request` | Calls only operator-approved endpoint slots with exact origins, methods, timeouts, byte limits, rate limits, redirect blocking, and private-network protection. |
 
-None of the three does anything on its own. Ticks are off unless you set an
+None of these does anything on its own. Ticks are off unless you set an
 interval, egress is refused unless you set a budget, and both are refused
 outright without the grant. But an approved plugin holding all three can work,
 and spend, while you are not looking. Grant them to plugins whose source you have

@@ -57,18 +57,17 @@ func TestReadUsageBothVariants(t *testing.T) {
 	}
 }
 
-// TestReadUsageAbsentOrEmpty: an all-zero usage object carries no information,
-// and returning it would record a real response as a zero-token one — which is
-// worse than reporting nothing, because it looks like a measurement.
-func TestReadUsageAbsentOrEmpty(t *testing.T) {
+// TestReadUsagePreservesPresence distinguishes a missing report from a real
+// all-zero report. That distinction is surfaced to observational plugins.
+func TestReadUsagePreservesPresence(t *testing.T) {
 	if got := ReadUsage(nil); got != nil {
 		t.Errorf("nil usage should read as nil, got %+v", got)
 	}
-	if got := ReadUsage(map[string]any{}); got != nil {
-		t.Errorf("empty usage should read as nil, got %+v", got)
+	if got := ReadUsage(map[string]any{}); got == nil || *got != (engine.StreamUsage{}) {
+		t.Errorf("present empty usage should read as a zero report, got %+v", got)
 	}
-	if got := ReadUsage(map[string]any{"prompt_tokens": float64(0), "completion_tokens": float64(0)}); got != nil {
-		t.Errorf("all-zero usage should read as nil, got %+v", got)
+	if got := ReadUsage(map[string]any{"prompt_tokens": float64(0), "completion_tokens": float64(0)}); got == nil || *got != (engine.StreamUsage{}) {
+		t.Errorf("all-zero usage should remain present, got %+v", got)
 	}
 }
 

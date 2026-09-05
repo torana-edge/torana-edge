@@ -143,6 +143,7 @@ func TestResolvePluginResourcesUsesApprovalNotGuestInput(t *testing.T) {
 	}
 	resources, err := resolvePluginResources(manifest, Approval{
 		Credentials: map[string]string{"service": "operator-id"},
+		Files:       map[string]FileApproval{"usage.jsonl": {MaxBytes: 150, RetainedFiles: 2}},
 		HTTPEndpoints: map[string]HTTPApproval{"billing": {
 			Origin: "https://approved.example", Methods: []string{"POST"}, TimeoutMS: 900,
 			MaxRequestBytes: 100, MaxResponseBytes: 300, MaxCallsPerMinute: 4,
@@ -154,7 +155,7 @@ func TestResolvePluginResourcesUsesApprovalNotGuestInput(t *testing.T) {
 	if resources.Credentials["service"] != "operator-id" {
 		t.Fatalf("credentials = %+v", resources.Credentials)
 	}
-	if file := resources.Files["usage.jsonl"]; file.MaxBytes != 200 || file.RetainedFiles != 3 || !file.Operations["append"] {
+	if file := resources.Files["usage.jsonl"]; file.MaxBytes != 150 || file.RetainedFiles != 2 || !file.Operations["append"] {
 		t.Fatalf("file = %+v", file)
 	}
 	if endpoint := resources.HTTP["billing"]; endpoint.Origin != "https://approved.example" || !endpoint.Methods["POST"] || endpoint.Methods["GET"] || endpoint.MaxCallsPerMinute != 4 {
@@ -163,6 +164,66 @@ func TestResolvePluginResourcesUsesApprovalNotGuestInput(t *testing.T) {
 
 	if _, err := resolvePluginResources(manifest, Approval{Credentials: map[string]string{}, HTTPEndpoints: map[string]HTTPApproval{}}); err == nil || !strings.Contains(err.Error(), "required credential") {
 		t.Fatalf("missing required binding error = %v", err)
+	}
+}
+
+func TestFileApprovalsAreExplicitBoundedAndCannotExpandManifest(t *testing.T) {
+	manifest := PluginManifest{Files: []FileDeclaration{{Path: "usage.jsonl", Operations: []string{"append"}, MaxBytes: 200, RetainedFiles: 3}}}
+	rows := []struct {
+		name     string
+		approval map[string]FileApproval
+		want     string
+	}{
+		{name: "unbound is unavailable", approval: nil},
+		{name: "undeclared path", approval: map[string]FileApproval{"other": {MaxBytes: 1}}, want: "not declared"},
+		{name: "zero bytes", approval: map[string]FileApproval{"usage.jsonl": {MaxBytes: 0}}, want: "max_bytes"},
+		{name: "expands bytes", approval: map[string]FileApproval{"usage.jsonl": {MaxBytes: 201, RetainedFiles: 3}}, want: "exceeds"},
+		{name: "expands rotations", approval: map[string]FileApproval{"usage.jsonl": {MaxBytes: 200, RetainedFiles: 4}}, want: "exceeds"},
+		{name: "host byte ceiling", approval: map[string]FileApproval{"usage.jsonl": {MaxBytes: MaxPluginFileBytes + 1}}, want: "max_bytes"},
+		{name: "host rotation ceiling", approval: map[string]FileApproval{"usage.jsonl": {MaxBytes: 1, RetainedFiles: MaxPluginRetainedFiles + 1}}, want: "retained_files"},
+	}
+	for _, row := range rows {
+		t.Run(row.name, func(t *testing.T) {
+			resources, err := resolvePluginResources(manifest, Approval{Files: row.approval})
+			if row.want == "" {
+				if err != nil {
+					t.Fatal(err)
+				}
+				if len(resources.Files) != 0 {
+					t.Fatalf("unapproved files = %+v", resources.Files)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), row.want) {
+				t.Fatalf("error = %v, want %q", err, row.want)
+			}
+		})
+	}
+}
+
+func TestManifestFileRequestsRespectHostCeilings(t *testing.T) {
+	base := PluginManifest{SchemaVersion: 1, ID: "test/plugin", Name: "plugin", Version: "1.0.0", ABIVersion: "v1", FailureMode: "pass", Description: "test", Hooks: []Hook{{Name: "run_after_response"}}, Permissions: []Permission{{Name: "env.file_append"}}}
+	for _, row := range []struct {
+		file FileDeclaration
+		want string
+	}{
+		{file: FileDeclaration{Path: "x", Operations: []string{"append"}, MaxBytes: MaxPluginFileBytes + 1}, want: "max_bytes"},
+		{file: FileDeclaration{Path: "x", Operations: []string{"append"}, MaxBytes: MaxPluginFileBytes, RetainedFiles: 4}, want: "total retained storage"},
+		{file: FileDeclaration{Path: "x", Operations: []string{"append"}, MaxBytes: 1, RetainedFiles: MaxPluginRetainedFiles + 1}, want: "retained_files"},
+	} {
+		manifest := base
+		manifest.Files = []FileDeclaration{row.file}
+		if err := validateManifest(manifest); err == nil || !strings.Contains(err.Error(), row.want) {
+			t.Fatalf("oversized file request error = %v, want %q for %+v", err, row.want, row.file)
+		}
+	}
+	manifest := base
+	manifest.Files = []FileDeclaration{
+		{Path: "a", Operations: []string{"append"}, MaxBytes: MaxPluginFileBytes, RetainedFiles: 2},
+		{Path: "b", Operations: []string{"append"}, MaxBytes: MaxPluginFileBytes, RetainedFiles: 2},
+	}
+	if err := validateManifest(manifest); err == nil || !strings.Contains(err.Error(), "per-plugin storage ceiling") {
+		t.Fatalf("aggregate file request error = %v", err)
 	}
 }
 

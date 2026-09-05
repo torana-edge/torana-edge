@@ -20,6 +20,7 @@ import (
 type Client struct {
 	mu      sync.Mutex
 	windows map[string]*window
+	clients map[string]*http.Client
 }
 type window struct {
 	start  time.Time
@@ -27,7 +28,9 @@ type window struct {
 	active int
 }
 
-func New() *Client { return &Client{windows: map[string]*window{}} }
+func New() *Client {
+	return &Client{windows: map[string]*window{}, clients: map[string]*http.Client{}}
+}
 
 func (c *Client) Do(ctx context.Context, plugin string, resource wasm.HTTPResource, in *pbv1.OutboundHTTPRequestArgs) (*pbv1.OutboundHTTPResponse, error) {
 	if in == nil || !resource.Methods[in.Method] {
@@ -74,11 +77,10 @@ func (c *Client) Do(ctx context.Context, plugin string, resource wasm.HTTPResour
 			req.Header.Add(header.Name, value)
 		}
 	}
-	transport, err := transportFor(origin)
+	client, err := c.clientFor(origin)
 	if err != nil {
 		return nil, err
 	}
-	client := &http.Client{Transport: transport, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
@@ -99,6 +101,36 @@ func (c *Client) Do(ctx context.Context, plugin string, resource wasm.HTTPResour
 		out.Headers = append(out.Headers, &pbv1.HTTPHeader{Name: name, Values: append([]string(nil), values...)})
 	}
 	return out, nil
+}
+
+func (c *Client) clientFor(origin *url.URL) (*http.Client, error) {
+	key := origin.Scheme + "://" + origin.Host
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if client := c.clients[key]; client != nil {
+		return client, nil
+	}
+	transport, err := transportFor(origin)
+	if err != nil {
+		return nil, err
+	}
+	client := &http.Client{
+		Transport: transport,
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+	c.clients[key] = client
+	return client, nil
+}
+
+// CloseIdleConnections releases pooled sockets when the owning server stops.
+func (c *Client) CloseIdleConnections() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, client := range c.clients {
+		client.CloseIdleConnections()
+	}
 }
 
 func (c *Client) acquire(key string, rpm int) (func(), error) {
@@ -169,6 +201,7 @@ func transportFor(origin *url.URL) (*http.Transport, error) {
 			return nil, fmt.Errorf("approved origin resolved only to blocked addresses")
 		},
 		DisableCompression:     true,
+		ForceAttemptHTTP2:      true,
 		MaxIdleConnsPerHost:    4,
 		MaxResponseHeaderBytes: 64 << 10,
 		IdleConnTimeout:        30 * time.Second,

@@ -84,7 +84,7 @@ func (s *Server) applyUpstreamCredential(req *http.Request, cfg provider.Config,
 	if !ok {
 		return fmt.Errorf("provider is no longer configured")
 	}
-	caller := callerCredentialsFrom(req)
+	caller := callerCredentials{}
 	if rs := reqStateFrom(req.Context()); rs != nil {
 		caller = rs.CallerCredentials
 	}

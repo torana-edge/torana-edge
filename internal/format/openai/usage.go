@@ -6,8 +6,7 @@ import "github.com/torana-edge/torana-edge/internal/engine"
 // Torana reads it on two different code paths. That is how the non-streaming
 // path came to understand only one of them: it read prompt_tokens /
 // completion_tokens, so every non-streaming Responses API call was accounted
-// at zero tokens and zero cost — silently, because a missing usage object is
-// indistinguishable from a provider that did not report one.
+// at zero tokens and zero cost.
 //
 // The field names live here and nowhere else. Both paths call ReadUsage, so a
 // third shape (or a rename) is one edit, not a hunt for the callers that were
@@ -43,11 +42,9 @@ func ReadUsage(usage map[string]any) *engine.StreamUsage {
 		u.CacheReadTokens = intAt(usage, "prompt_cache_hit_tokens")
 	}
 
-	// An all-zero usage object carries no information, and returning it would
-	// record a real response as a zero-token one.
-	if u.InputTokens == 0 && u.OutputTokens == 0 && u.CacheReadTokens == 0 && u.CacheWriteTokens == 0 {
-		return nil
-	}
+	// Presence is information even when every count is zero. Observers must be
+	// able to distinguish an explicit zero-token report from a provider that
+	// omitted usage (for example on an error or truncated response).
 	return u
 }
 
