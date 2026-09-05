@@ -14,6 +14,10 @@ conformance guest demonstrate the same host boundary from a second language.
 
 ## Installing
 
+You do not need to stop Torana. Run installation commands from another terminal;
+the running process watches its plugin directory and discovers the new bundle
+without a restart. Discovery does not approve, enable, or execute the plugin.
+
 ```bash
 torana plugin install --official                              # the maintained set
 torana plugin install https://github.com/you/your-plugins/tree/main/plugins/foo
@@ -31,6 +35,11 @@ Pasteable GitHub `.../tree/<ref>/<directory>` and GitLab
 `.git//subdirectory@ref` form remain supported. A ref may be a branch, tag, or
 commit SHA. There is no central index; `--official` is a convenience alias, not
 a privileged channel.
+
+For a private repository, clone it with your normal Git credentials, review it,
+then pass the local plugin directory to `plugin install`. The command accepts
+one or more source arguments; prefer explicit directory paths over a broad shell
+glob, which may also expand to non-plugin files.
 
 Plugins are **compiled locally from source**, never downloaded prebuilt. Nested
 Go and Rust packages and embedded assets are supported; symlinks, special
