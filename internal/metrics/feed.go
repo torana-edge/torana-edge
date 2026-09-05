@@ -21,8 +21,12 @@ type RequestEvent struct {
 	Timestamp string `json:"timestamp"`
 	// Provider is the configured provider name (e.g. "anthropic", "openai").
 	Provider string `json:"provider"`
-	// Model is the model name sent to the provider (e.g. "claude-3-5-sonnet").
-	Model string `json:"model"`
+	// RequestedModel is the model name Torana sent to the provider.
+	RequestedModel string `json:"requested_model"`
+	// ReportedModel is the model identity returned by the provider when its
+	// response format carries one. Empty means it was not reported; Torana
+	// never guesses provider-side aliasing.
+	ReportedModel string `json:"reported_model,omitempty"`
 	// Status is the HTTP status code returned to the caller.
 	Status int `json:"status"`
 	// LatencyMS is the total handler latency in milliseconds (wall clock from

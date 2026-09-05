@@ -147,6 +147,19 @@ func extractResponse(formatName string, body map[string]any, raw ...[]byte) resp
 	return responseRefs{}
 }
 
+// reportedModelFromJSON returns only a model identity explicitly carried by a
+// provider response. It is independent of plugin loading: the control-plane
+// feed must not lose this observable fact merely because no response hook is
+// installed, and it must never infer a provider-side alias when the response
+// omits one.
+func reportedModelFromJSON(formatName string, bodyBytes []byte) string {
+	var body map[string]any
+	if err := json.Unmarshal(bodyBytes, &body); err != nil {
+		return ""
+	}
+	return extractResponse(formatName, body, bodyBytes).model
+}
+
 func asString(v any) string {
 	s, _ := v.(string)
 	return s
@@ -738,6 +751,7 @@ func runJSONResponseHooks(ctx context.Context, pl *plugin.PluginPipeline, reqID 
 
 	// The non-streaming path is the one where a replacement CAN be applied:
 	// the body has not been written yet.
+	rs.ReportedModel = respChat.Model
 	resp := rs.chatResponse(respChat.Model, refs.id, assistant, refs.finishReason)
 	after, err := pl.RunAfterResponse(ctx, reqID, resp, true)
 	if err != nil {

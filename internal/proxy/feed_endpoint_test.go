@@ -23,7 +23,7 @@ func TestFeedSnapshotEndpoint(t *testing.T) {
 	upstream := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(`{"choices":[]}`))
+		w.Write([]byte(`{"model":"provider-reported-model","choices":[]}`))
 	})
 	ups := &http.Server{Handler: upstream}
 	upsLn, _ := net.Listen("tcp", "127.0.0.1:0")
@@ -64,11 +64,12 @@ func TestFeedSnapshotEndpoint(t *testing.T) {
 
 	// Manually add an event and check it appears in the snapshot.
 	srv.feed.Add(metrics.RequestEvent{
-		Timestamp: time.Now().UTC().Format(time.RFC3339Nano),
-		Provider:  "test",
-		Model:     "gpt-4o",
-		Status:    200,
-		LatencyMS: 42.0,
+		Timestamp:      time.Now().UTC().Format(time.RFC3339Nano),
+		Provider:       "test",
+		RequestedModel: "gpt-4o",
+		ReportedModel:  "gpt-4o-2026-08-01",
+		Status:         200,
+		LatencyMS:      42.0,
 	})
 
 	resp2, err := client.Get(base + "/_torana/api/feed")
@@ -88,8 +89,45 @@ func TestFeedSnapshotEndpoint(t *testing.T) {
 	if events[0].Provider != "test" {
 		t.Errorf("events[0].Provider = %q, want test", events[0].Provider)
 	}
+	if events[0].RequestedModel != "gpt-4o" || events[0].ReportedModel != "gpt-4o-2026-08-01" {
+		t.Errorf("feed model identities = %q/%q, want requested/reported values", events[0].RequestedModel, events[0].ReportedModel)
+	}
 	if events[0].LatencyMS != 42.0 {
 		t.Errorf("events[0].LatencyMS = %f, want 42.0", events[0].LatencyMS)
+	}
+
+	// The real proxy path records both identities even with no plugin pipeline.
+	proxyReq, err := http.NewRequest(http.MethodPost, base+"/provider/test/v1/chat/completions",
+		strings.NewReader(`{"model":"caller-requested-model","messages":[{"role":"user","content":"hello"}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxyReq.Header.Set("Content-Type", "application/json")
+	proxyResp, err := client.Do(proxyReq)
+	if err != nil {
+		t.Fatalf("proxy request: %v", err)
+	}
+	io.Copy(io.Discard, proxyResp.Body)
+	proxyResp.Body.Close()
+	if proxyResp.StatusCode != http.StatusOK {
+		t.Fatalf("proxy status = %d, want 200", proxyResp.StatusCode)
+	}
+
+	respModels, err := client.Get(base + "/_torana/api/feed")
+	if err != nil {
+		t.Fatalf("GET /feed (after proxy request): %v", err)
+	}
+	modelsBody, _ := io.ReadAll(respModels.Body)
+	respModels.Body.Close()
+	var modelEvents []metrics.RequestEvent
+	if err := json.Unmarshal(modelsBody, &modelEvents); err != nil {
+		t.Fatalf("unmarshal model feed: %v", err)
+	}
+	if len(modelEvents) != 2 {
+		t.Fatalf("len(model events) = %d, want 2", len(modelEvents))
+	}
+	if modelEvents[0].RequestedModel != "caller-requested-model" || modelEvents[0].ReportedModel != "provider-reported-model" {
+		t.Fatalf("proxied feed model identities = %q/%q", modelEvents[0].RequestedModel, modelEvents[0].ReportedModel)
 	}
 
 	// Verify the feed route does NOT fall through to the provider catch-all:

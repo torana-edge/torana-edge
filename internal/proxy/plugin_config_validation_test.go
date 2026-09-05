@@ -152,13 +152,13 @@ func TestSavePipelineDoesNotBlankConfigs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Scoped to savePipeline: other functions use `configMap[name] || {}`
+	// Scoped to pipelinePayload: other functions use `configMap[name] || {}`
 	// legitimately, to render an empty form for an unconfigured plugin. Only
 	// the body that builds the request is a problem.
-	const start = "function savePipeline("
+	const start = "function pipelinePayload("
 	i := strings.Index(string(spa), start)
 	if i < 0 {
-		t.Fatal("savePipeline not found in the dashboard")
+		t.Fatal("pipelinePayload not found in the dashboard")
 	}
 	body := string(spa)[i:]
 	if j := strings.Index(body[len(start):], "\n    function "); j >= 0 {
@@ -166,14 +166,14 @@ func TestSavePipelineDoesNotBlankConfigs(t *testing.T) {
 	}
 
 	if strings.Contains(body, "configMap[name] || {}") {
-		t.Error("savePipeline still synthesises {} for a missing config, which overwrites stored settings")
+		t.Error("pipelinePayload still synthesises {} for a missing config, which overwrites stored settings")
 	}
 	if !strings.Contains(body, "configMap[name] !== undefined") {
-		t.Error("savePipeline no longer guards on a present config; the blanking bug can recur")
+		t.Error("pipelinePayload no longer guards on a present config; the blanking bug can recur")
 	}
 }
 
-func TestDashboardRequiresExplicitPrivateFileApproval(t *testing.T) {
+func TestDashboardExplainsAndEnforcesResourceApproval(t *testing.T) {
 	spa, err := os.ReadFile("../controlplane/dist/index.html")
 	if err != nil {
 		t.Fatal(err)
@@ -184,14 +184,54 @@ func TestDashboardRequiresExplicitPrivateFileApproval(t *testing.T) {
 		"max_bytes: Number(row.querySelector('.file-binding-bytes').value)",
 		"retained_files: Number(row.querySelector('.file-binding-retained').value)",
 		"files: files",
-		"const enabled = Boolean(approvedFiles[file.path])",
+		"const enabled = Boolean(approvedFiles[file.path]) || file.required",
+		"Resource bindings and limits",
+		"file.required ? 'disabled' : ''",
 	} {
 		if !strings.Contains(source, required) {
 			t.Fatalf("dashboard private-file approval seam is missing %q", required)
 		}
 	}
-	if strings.Contains(source, `class="file-binding-enabled" data-file="${escAttr(file.path)}" checked`) {
-		t.Fatal("a new plugin's private file is approved by default")
+	if strings.Contains(source, `pluginPermissionList.querySelectorAll('input`) {
+		t.Fatal("dashboard offers partial capability approval even though the host requires the complete set")
+	}
+	for _, required := range []string{
+		"const selected = [...requested]",
+		"approveAndEnable(${escJS(name)},this)",
+		"persistPipeline()",
+		"is approved, enabled, and loaded",
+	} {
+		if !strings.Contains(source, required) {
+			t.Fatalf("one-step activation seam is missing %q", required)
+		}
+	}
+}
+
+func TestDashboardKeepsDeploymentAndPluginConcernsOutOfGlobalSettings(t *testing.T) {
+	spa, err := os.ReadFile("../controlplane/dist/index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := string(spa)
+	for _, forbidden := range []string{
+		`id="pricingBody"`,
+		`id="offEnabled"`,
+		`id="cacheBackend"`,
+		`function addPricingRow(`,
+		`function collectPricing(`,
+		`function refreshOffloadProviderOptions(`,
+	} {
+		if strings.Contains(source, forbidden) {
+			t.Fatalf("global settings still exposes plugin/deployment concern %q", forbidden)
+		}
+	}
+	for _, required := range []string{
+		"const cfg = settingsCfg ? JSON.parse(JSON.stringify(settingsCfg)) : {};",
+		"const prov = original ? JSON.parse(JSON.stringify(original)) : {};",
+	} {
+		if !strings.Contains(source, required) {
+			t.Fatalf("settings no longer preserves hidden deployment configuration: missing %q", required)
+		}
 	}
 }
 
