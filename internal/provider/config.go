@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"net/url"
 	"os"
@@ -200,6 +201,49 @@ func (c Config) Validate() error {
 			}
 		}
 	}
+	for pluginName, approval := range c.Plugins.Approvals {
+		for resourceName, binding := range approval.ModelServices {
+			configured, ok := c.Providers[binding.Provider]
+			if !ok {
+				return fmt.Errorf("plugin %q model service %q references unknown provider %q", pluginName, resourceName, binding.Provider)
+			}
+			if configured.Format == "" {
+				return fmt.Errorf("plugin %q model service %q requires a provider with a configured format", pluginName, resourceName)
+			}
+			if configured.Auth.EffectiveMode() == "caller" {
+				return fmt.Errorf("plugin %q model service %q cannot use caller-auth provider %q", pluginName, resourceName, binding.Provider)
+			}
+			if strings.TrimSpace(binding.Model) == "" || !validBoundModelPath(binding.Path) || binding.TimeoutMS <= 0 || binding.TimeoutMS > 120000 || binding.MaxTokens == 0 || binding.MaxTokens > 1<<31-1 || binding.MaxInputBytes <= 0 || binding.MaxInputBytes > 8<<20 || binding.MaxCallsPerMinute <= 0 || binding.MaxTokensPerHour <= 0 {
+				return fmt.Errorf("plugin %q model service %q has an invalid binding or budget", pluginName, resourceName)
+			}
+		}
+		for resourceName, binding := range approval.PricingResources {
+			if len(binding.Models) == 0 {
+				return fmt.Errorf("plugin %q pricing resource %q must contain at least one model", pluginName, resourceName)
+			}
+			seen := make(map[[2]string]struct{}, len(binding.Models))
+			for index, model := range binding.Models {
+				if model.Provider != "" {
+					if _, ok := c.Providers[model.Provider]; !ok {
+						return fmt.Errorf("plugin %q pricing resource %q references unknown provider %q", pluginName, resourceName, model.Provider)
+					}
+				}
+				if (model.Provider == "") != (model.Model == "") {
+					return fmt.Errorf("plugin %q pricing resource %q model %d requires provider and model together", pluginName, resourceName, index)
+				}
+				key := [2]string{model.Provider, model.Model}
+				if _, duplicate := seen[key]; duplicate {
+					return fmt.Errorf("plugin %q pricing resource %q repeats a provider/model", pluginName, resourceName)
+				}
+				seen[key] = struct{}{}
+				for _, rate := range []*float64{model.InputUSDPerMTok, model.OutputUSDPerMTok, model.CacheReadUSDPerMTok, model.CacheWriteUSDPerMTok} {
+					if rate != nil && (*rate < 0 || math.IsNaN(*rate) || math.IsInf(*rate, 0)) {
+						return fmt.Errorf("plugin %q pricing resource %q has an invalid rate", pluginName, resourceName)
+					}
+				}
+			}
+		}
+	}
 	if err := c.Credentials.Validate(); err != nil {
 		return err
 	}
@@ -225,6 +269,14 @@ func (c Config) Validate() error {
 		}
 	}
 	return nil
+}
+
+func validBoundModelPath(path string) bool {
+	if !strings.HasPrefix(path, "/") || strings.HasPrefix(path, "//") || strings.Contains(path, "#") {
+		return false
+	}
+	u, err := url.ParseRequestURI(path)
+	return err == nil && !u.IsAbs() && u.Host == "" && u.User == nil
 }
 
 // UnauthenticatedFallbacks returns provider names that are used as a failover
@@ -643,12 +695,14 @@ func (p PluginRuntimeConfig) InstanceIdleTimeout() time.Duration {
 }
 
 type PluginApproval struct {
-	Digest        string                        `json:"digest"`
-	Permissions   []string                      `json:"permissions"`
-	FailureMode   string                        `json:"failure_mode,omitempty"`
-	Credentials   map[string]string             `json:"credentials,omitempty"`
-	Files         map[string]PluginFileApproval `json:"files,omitempty"`
-	HTTPEndpoints map[string]PluginHTTPApproval `json:"http_endpoints,omitempty"`
+	Digest           string                                `json:"digest"`
+	Permissions      []string                              `json:"permissions"`
+	FailureMode      string                                `json:"failure_mode,omitempty"`
+	Credentials      map[string]string                     `json:"credentials,omitempty"`
+	Files            map[string]PluginFileApproval         `json:"files,omitempty"`
+	HTTPEndpoints    map[string]PluginHTTPApproval         `json:"http_endpoints,omitempty"`
+	ModelServices    map[string]PluginModelServiceApproval `json:"model_services,omitempty"`
+	PricingResources map[string]PluginPricingApproval      `json:"pricing_resources,omitempty"`
 }
 
 type PluginFileApproval struct {
@@ -663,6 +717,30 @@ type PluginHTTPApproval struct {
 	MaxRequestBytes   int64    `json:"max_request_bytes,omitempty"`
 	MaxResponseBytes  int64    `json:"max_response_bytes,omitempty"`
 	MaxCallsPerMinute int      `json:"max_calls_per_minute,omitempty"`
+}
+
+type PluginModelServiceApproval struct {
+	Provider          string `json:"provider"`
+	Model             string `json:"model"`
+	Path              string `json:"path"`
+	TimeoutMS         int    `json:"timeout_ms,omitempty"`
+	MaxTokens         uint32 `json:"max_tokens,omitempty"`
+	MaxInputBytes     int64  `json:"max_input_bytes,omitempty"`
+	MaxCallsPerMinute int    `json:"max_calls_per_minute,omitempty"`
+	MaxTokensPerHour  int64  `json:"max_tokens_per_hour,omitempty"`
+}
+
+type PluginPricingApproval struct {
+	Models []PluginPricingModelApproval `json:"models"`
+}
+
+type PluginPricingModelApproval struct {
+	Provider             string   `json:"provider"`
+	Model                string   `json:"model"`
+	InputUSDPerMTok      *float64 `json:"input_usd_per_mtok,omitempty"`
+	OutputUSDPerMTok     *float64 `json:"output_usd_per_mtok,omitempty"`
+	CacheReadUSDPerMTok  *float64 `json:"cache_read_usd_per_mtok,omitempty"`
+	CacheWriteUSDPerMTok *float64 `json:"cache_write_usd_per_mtok,omitempty"`
 }
 
 // DefaultConfig returns the built-in configuration for common providers.

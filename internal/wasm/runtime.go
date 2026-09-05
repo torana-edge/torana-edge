@@ -2,6 +2,8 @@ package wasm
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -104,7 +106,15 @@ type Plugin struct {
 	hooks     pbv1.HookBitmap
 	config    string // per-plugin config JSON (plugins.config.<name>); "" if none
 	resources PluginResources
-	runtime   wazero.Runtime
+	// privateCacheIdentity scopes derived plugin cache entries to the exact
+	// approved resource snapshot. Rebinding a model, credential, endpoint,
+	// file budget, or pricing catalog must not reuse a decision made under the
+	// old authority. The plugin name remains the default for resource-free
+	// guests. cacheIdentityValid is false only for a host-constructed invalid
+	// resource graph; cache calls then fail closed.
+	privateCacheIdentity string
+	cacheIdentityValid   bool
+	runtime              wazero.Runtime
 
 	// compiled is the module compiled ONCE at load. Pool instances are
 	// created from it via InstantiateModule, which skips the expensive
@@ -152,9 +162,11 @@ type Plugin struct {
 // paths; they never select credentials, host filesystem locations, or network
 // origins directly.
 type PluginResources struct {
-	Credentials map[string]string
-	Files       map[string]FileResource
-	HTTP        map[string]HTTPResource
+	Credentials      map[string]string
+	Files            map[string]FileResource
+	HTTP             map[string]HTTPResource
+	ModelServices    map[string]ModelServiceResource
+	PricingResources map[string]PricingResource
 }
 
 type FileResource struct {
@@ -173,11 +185,44 @@ type HTTPResource struct {
 	MaxCallsPerMinute int
 }
 
+type ModelServiceResource struct {
+	Name              string
+	Provider          string
+	Model             string
+	Path              string
+	Timeout           time.Duration
+	MaxTokens         uint32
+	MaxInputBytes     int64
+	MaxCallsPerMinute int
+	MaxTokensPerHour  int64
+}
+
+type PricingResource struct {
+	Name            string
+	ForModelService string
+	Prices          map[string]*pbv1.ModelPricing
+}
+
+// PricingCoordinate returns the collision-free map key for one operator-owned
+// provider/model price. Provider and model are separately length-framed: a
+// delimiter is insufficient because both identifiers are external strings.
+func PricingCoordinate(provider, model string) string {
+	buf := make([]byte, 16+len(provider)+len(model))
+	binary.LittleEndian.PutUint64(buf[:8], uint64(len(provider)))
+	copy(buf[8:], provider)
+	offset := 8 + len(provider)
+	binary.LittleEndian.PutUint64(buf[offset:offset+8], uint64(len(model)))
+	copy(buf[offset+8:], model)
+	return string(buf)
+}
+
 func clonePluginResources(in PluginResources) PluginResources {
 	out := PluginResources{
-		Credentials: make(map[string]string, len(in.Credentials)),
-		Files:       make(map[string]FileResource, len(in.Files)),
-		HTTP:        make(map[string]HTTPResource, len(in.HTTP)),
+		Credentials:      make(map[string]string, len(in.Credentials)),
+		Files:            make(map[string]FileResource, len(in.Files)),
+		HTTP:             make(map[string]HTTPResource, len(in.HTTP)),
+		ModelServices:    make(map[string]ModelServiceResource, len(in.ModelServices)),
+		PricingResources: make(map[string]PricingResource, len(in.PricingResources)),
 	}
 	for k, v := range in.Credentials {
 		out.Credentials[k] = v
@@ -197,6 +242,21 @@ func clonePluginResources(in PluginResources) PluginResources {
 		}
 		v.Methods = methods
 		out.HTTP[k] = v
+	}
+	for k, v := range in.ModelServices {
+		out.ModelServices[k] = v
+	}
+	for k, v := range in.PricingResources {
+		prices := make(map[string]*pbv1.ModelPricing, len(v.Prices))
+		for key, pricing := range v.Prices {
+			if pricing != nil {
+				prices[key] = proto.Clone(pricing).(*pbv1.ModelPricing)
+			} else {
+				prices[key] = nil
+			}
+		}
+		v.Prices = prices
+		out.PricingResources[k] = v
 	}
 	return out
 }
@@ -244,8 +304,28 @@ func (p *Plugin) SetResources(resources PluginResources) {
 	p.callMu.Lock()
 	defer p.callMu.Unlock()
 	p.stateMu.Lock()
-	p.resources = clonePluginResources(resources)
+	cloned := clonePluginResources(resources)
+	p.resources = cloned
+	p.privateCacheIdentity, p.cacheIdentityValid = resourceCacheIdentity(p.name, cloned)
 	p.stateMu.Unlock()
+}
+
+func resourceCacheIdentity(plugin string, resources PluginResources) (string, bool) {
+	if len(resources.Credentials) == 0 && len(resources.Files) == 0 && len(resources.HTTP) == 0 && len(resources.ModelServices) == 0 && len(resources.PricingResources) == 0 {
+		return plugin, true
+	}
+	raw, err := json.Marshal(resources)
+	if err != nil {
+		return "", false
+	}
+	digest := sha256.Sum256(raw)
+	return plugin + "\x00resources\x00" + string(digest[:]), true
+}
+
+func (p *Plugin) cacheIdentity() (string, bool) {
+	p.stateMu.RLock()
+	defer p.stateMu.RUnlock()
+	return p.privateCacheIdentity, p.cacheIdentityValid
 }
 
 func (p *Plugin) resourceSnapshot() PluginResources {
@@ -806,6 +886,8 @@ type Runtime struct {
 	FileListFunc      func(plugin, prefix string, resources map[string]FileResource) ([]string, error)
 	FileDeleteFunc    func(plugin, path string, resource FileResource) error
 	HTTPRequestFunc   func(ctx context.Context, plugin string, resource HTTPResource, request *pbv1.OutboundHTTPRequestArgs) (*pbv1.OutboundHTTPResponse, error)
+	ModelCompleteFunc func(ctx context.Context, plugin string, resource ModelServiceResource, request *pbv1.ModelCompleteArgs) (*pbv1.ModelCompleteResult, *pbv1.HostError)
+	ModelPricingFunc  func(ctx context.Context, plugin string, resource PricingResource) (*pbv1.ModelPricing, *pbv1.HostError)
 }
 
 // ObserveRequestMutation forwards a defensive copy to the host callback.
@@ -1298,6 +1380,8 @@ func (r *Runtime) LoadPlugin(name string, wasmBytes []byte) (*Plugin, error) {
 		callTimeout: r.options.CallTimeout,
 		idleTimeout: r.options.InstanceIdleTimeout,
 	}
+	p.privateCacheIdentity = name
+	p.cacheIdentityValid = true
 
 	// Pre-warm the pool with one instance. Any failure after a successful
 	// compile must release the compiled handle: it owns a shared-cache
@@ -1606,7 +1690,12 @@ func (r *Runtime) dispatchHostCall(ctx context.Context, pluginName, cmd, args st
 				herr = hostErr(pbv1.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "%v", err)
 				break
 			}
-			r.cache.Set(privateCacheKey(pluginName, a.Key), a.Value)
+			cacheIdentity, valid := p.cacheIdentity()
+			if !valid {
+				herr = hostErr(pbv1.ErrorCode_ERROR_CODE_INTERNAL, "plugin resource cache scope is invalid")
+				break
+			}
+			r.cache.Set(privateCacheKey(cacheIdentity, a.Key), a.Value)
 		case "env.cache_get":
 			var a pbv1.CacheGetArgs
 			if err := proto.Unmarshal([]byte(args), &a); err != nil {
@@ -1619,7 +1708,12 @@ func (r *Runtime) dispatchHostCall(ctx context.Context, pluginName, cmd, args st
 			}
 			// The presence bool was previously discarded, so a miss and a
 			// stored empty string were the same answer.
-			v, present := r.cache.Get(privateCacheKey(pluginName, a.Key))
+			cacheIdentity, valid := p.cacheIdentity()
+			if !valid {
+				herr = hostErr(pbv1.ErrorCode_ERROR_CODE_INTERNAL, "plugin resource cache scope is invalid")
+				break
+			}
+			v, present := r.cache.Get(privateCacheKey(cacheIdentity, a.Key))
 			if !present {
 				herr = hostErr(pbv1.ErrorCode_ERROR_CODE_NOT_FOUND, "cache key not found")
 				break
@@ -1930,6 +2024,64 @@ func (r *Runtime) dispatchHostCall(ctx context.Context, pluginName, cmd, args st
 				break
 			}
 			value, _ = proto.Marshal(response)
+		case "env.model_complete":
+			var a pbv1.ModelCompleteArgs
+			if err := proto.Unmarshal([]byte(args), &a); err != nil {
+				herr = hostErr(pbv1.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "invalid ModelCompleteArgs")
+				break
+			}
+			if err := a.Validate(); err != nil {
+				herr = hostErr(pbv1.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "%v", err)
+				break
+			}
+			resource, approved := p.resourceSnapshot().ModelServices[a.Service]
+			if !approved {
+				herr = hostErr(pbv1.ErrorCode_ERROR_CODE_PERMISSION_DENIED, "model service %q is not approved", a.Service)
+				break
+			}
+			if r.ModelCompleteFunc == nil {
+				herr = hostErr(pbv1.ErrorCode_ERROR_CODE_NOT_CONFIGURED, "model services are not configured")
+				break
+			}
+			response, callErr := r.ModelCompleteFunc(ctx, pluginName, resource, &a)
+			if callErr != nil {
+				herr = callErr
+				break
+			}
+			if response == nil || response.Validate() != nil {
+				herr = hostErr(pbv1.ErrorCode_ERROR_CODE_INTERNAL, "model service returned an invalid response")
+				break
+			}
+			value, _ = proto.Marshal(response)
+		case "env.model_pricing":
+			var a pbv1.ModelPricingGetArgs
+			if err := proto.Unmarshal([]byte(args), &a); err != nil {
+				herr = hostErr(pbv1.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "invalid ModelPricingGetArgs")
+				break
+			}
+			if err := a.Validate(); err != nil {
+				herr = hostErr(pbv1.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "%v", err)
+				break
+			}
+			resource, approved := p.resourceSnapshot().PricingResources[a.Resource]
+			if !approved {
+				herr = hostErr(pbv1.ErrorCode_ERROR_CODE_PERMISSION_DENIED, "pricing resource %q is not approved", a.Resource)
+				break
+			}
+			if r.ModelPricingFunc == nil {
+				herr = hostErr(pbv1.ErrorCode_ERROR_CODE_NOT_CONFIGURED, "model pricing is not configured")
+				break
+			}
+			pricing, callErr := r.ModelPricingFunc(ctx, pluginName, resource)
+			if callErr != nil {
+				herr = callErr
+				break
+			}
+			if pricing == nil || pricing.Validate() != nil {
+				herr = hostErr(pbv1.ErrorCode_ERROR_CODE_INTERNAL, "pricing resource returned invalid data")
+				break
+			}
+			value, _ = proto.Marshal(pricing)
 		case "env.original_request":
 			// Pristine pre-pipeline request, pb-encoded. Absence is NOT_FOUND,
 			// not an empty value: an all-default ChatRequest legitimately

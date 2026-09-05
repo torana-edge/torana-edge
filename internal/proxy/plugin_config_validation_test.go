@@ -187,6 +187,11 @@ func TestDashboardExplainsAndEnforcesResourceApproval(t *testing.T) {
 		"const enabled = Boolean(approvedFiles[file.path]) || file.required",
 		"Resource bindings and limits",
 		"file.required ? 'disabled' : ''",
+		".model-binding-enabled:checked",
+		"model_services: modelServices",
+		".pricing-binding-enabled:checked",
+		"pricing_resources: pricingResources",
+		"The plugin sees only this logical name; Torana owns the provider, model, credential, path, and budgets.",
 	} {
 		if !strings.Contains(source, required) {
 			t.Fatalf("dashboard private-file approval seam is missing %q", required)

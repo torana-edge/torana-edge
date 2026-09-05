@@ -98,6 +98,20 @@ func TestManifestResourceDeclarationsAreCapabilityBound(t *testing.T) {
 			wantError: "env.http_request",
 		},
 		{
+			name: "model service needs capability",
+			mutate: func(m *PluginManifest) {
+				m.ModelServices = []ModelServiceDeclaration{{Name: "judge", Description: "classification model"}}
+			},
+			wantError: "env.model_complete",
+		},
+		{
+			name: "pricing resource needs capability",
+			mutate: func(m *PluginManifest) {
+				m.PricingResources = []PricingDeclaration{{Name: "request", Description: "current request pricing"}}
+			},
+			wantError: "env.model_pricing",
+		},
+		{
 			name: "HTTP plaintext public origin refused",
 			mutate: func(m *PluginManifest) {
 				m.Permissions = []Permission{{Name: "env.http_request"}}
@@ -108,10 +122,12 @@ func TestManifestResourceDeclarationsAreCapabilityBound(t *testing.T) {
 		{
 			name: "complete declaration accepted",
 			mutate: func(m *PluginManifest) {
-				m.Permissions = []Permission{{Name: "env.credential_get"}, {Name: "env.file_append"}, {Name: "env.http_request"}}
+				m.Permissions = []Permission{{Name: "env.credential_get"}, {Name: "env.file_append"}, {Name: "env.http_request"}, {Name: "env.model_complete"}, {Name: "env.model_pricing"}}
 				m.Credentials = []CredentialDeclaration{{Slot: "api", Description: "service key", Required: true}}
 				m.Files = []FileDeclaration{{Path: "usage.jsonl", Operations: []string{"append"}, MaxBytes: 100}}
 				m.HTTPEndpoints = []HTTPEndpointDeclaration{{Name: "api", Description: "service", Origin: "https://api.example", Methods: []string{"GET"}, MaxCallsPerMinute: 5}}
+				m.ModelServices = []ModelServiceDeclaration{{Name: "judge", Description: "classification model", TimeoutMS: 2000, MaxTokens: 100, MaxInputBytes: 10000, MaxCallsPerMinute: 5, MaxTokensPerHour: 1000}}
+				m.PricingResources = []PricingDeclaration{{Name: "judge-price", Description: "judge pricing", ForModelService: "judge"}}
 			},
 		},
 	}
@@ -140,6 +156,8 @@ func TestResolvePluginResourcesUsesApprovalNotGuestInput(t *testing.T) {
 		HTTPEndpoints: []HTTPEndpointDeclaration{{
 			Name: "billing", Description: "billing API", Origin: "https://suggested.example", Methods: []string{"GET", "POST"}, Required: true,
 		}},
+		ModelServices:    []ModelServiceDeclaration{{Name: "judge", Description: "judge", Required: true, TimeoutMS: 2000, MaxTokens: 100, MaxInputBytes: 10000, MaxCallsPerMinute: 5, MaxTokensPerHour: 1000}},
+		PricingResources: []PricingDeclaration{{Name: "judge-price", Description: "judge pricing", Required: true, ForModelService: "judge"}},
 	}
 	resources, err := resolvePluginResources(manifest, Approval{
 		Credentials: map[string]string{"service": "operator-id"},
@@ -148,6 +166,8 @@ func TestResolvePluginResourcesUsesApprovalNotGuestInput(t *testing.T) {
 			Origin: "https://approved.example", Methods: []string{"POST"}, TimeoutMS: 900,
 			MaxRequestBytes: 100, MaxResponseBytes: 300, MaxCallsPerMinute: 4,
 		}},
+		ModelServices:    map[string]ModelServiceApproval{"judge": {Provider: "operator-provider", Model: "operator-model", Path: "/v1/messages", TimeoutMS: 1000, MaxTokens: 50, MaxInputBytes: 5000, MaxCallsPerMinute: 4, MaxTokensPerHour: 500}},
+		PricingResources: map[string]PricingApproval{"judge-price": {Models: []PricingModelApproval{{InputUSDPerMTok: ptrForDiscoveryTest(2.5)}}}},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -161,9 +181,53 @@ func TestResolvePluginResourcesUsesApprovalNotGuestInput(t *testing.T) {
 	if endpoint := resources.HTTP["billing"]; endpoint.Origin != "https://approved.example" || !endpoint.Methods["POST"] || endpoint.Methods["GET"] || endpoint.MaxCallsPerMinute != 4 {
 		t.Fatalf("HTTP endpoint = %+v", endpoint)
 	}
+	if model := resources.ModelServices["judge"]; model.Provider != "operator-provider" || model.Model != "operator-model" || model.MaxTokens != 50 {
+		t.Fatalf("model service = %+v", model)
+	}
+	if priced := resources.PricingResources["judge-price"].Prices[wasm.PricingCoordinate("operator-provider", "operator-model")]; priced == nil || priced.InputUsdPerMtok == nil || *priced.InputUsdPerMtok != 2.5 {
+		t.Fatalf("pricing = %+v", priced)
+	}
 
 	if _, err := resolvePluginResources(manifest, Approval{Credentials: map[string]string{}, HTTPEndpoints: map[string]HTTPApproval{}}); err == nil || !strings.Contains(err.Error(), "required credential") {
 		t.Fatalf("missing required binding error = %v", err)
+	}
+}
+
+func ptrForDiscoveryTest[T any](value T) *T { return &value }
+
+func TestResolveBoundPricingDoesNotMutateOrAliasApproval(t *testing.T) {
+	rate := 1.25
+	approval := Approval{
+		ModelServices: map[string]ModelServiceApproval{"judge": {
+			Provider: "operator-provider", Model: "operator-model", Path: "/v1/messages",
+			TimeoutMS: 1000, MaxTokens: 50, MaxInputBytes: 5000,
+			MaxCallsPerMinute: 4, MaxTokensPerHour: 500,
+		}},
+		PricingResources: map[string]PricingApproval{"judge-price": {
+			Models: []PricingModelApproval{{InputUSDPerMTok: &rate}},
+		}},
+	}
+	manifest := PluginManifest{
+		ModelServices: []ModelServiceDeclaration{{
+			Name: "judge", Description: "judge", Required: true, TimeoutMS: 2000,
+			MaxTokens: 100, MaxInputBytes: 10000, MaxCallsPerMinute: 5, MaxTokensPerHour: 1000,
+		}},
+		PricingResources: []PricingDeclaration{{Name: "judge-price", Description: "pricing", Required: true, ForModelService: "judge"}},
+	}
+	resources, err := resolvePluginResources(manifest, approval)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := approval.PricingResources["judge-price"].Models[0]; got.Provider != "" || got.Model != "" {
+		t.Fatalf("resolver mutated approval coordinates: %+v", got)
+	}
+	priced := resources.PricingResources["judge-price"].Prices[wasm.PricingCoordinate("operator-provider", "operator-model")]
+	if priced == nil || priced.InputUsdPerMtok == nil || *priced.InputUsdPerMtok != rate {
+		t.Fatalf("resolved pricing = %+v", priced)
+	}
+	rate = 9
+	if *priced.InputUsdPerMtok != 1.25 {
+		t.Fatal("resolved pricing aliases mutable approval data")
 	}
 }
 
