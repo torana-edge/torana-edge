@@ -247,9 +247,6 @@ func (c Config) Validate() error {
 	if err := c.Credentials.Validate(); err != nil {
 		return err
 	}
-	if err := c.Offload.Validate(c.Providers); err != nil {
-		return err
-	}
 	switch c.Cache.Backend {
 	case "", "memory", "redis":
 	default:
@@ -325,7 +322,6 @@ type Config struct {
 	Credentials CredentialsConfig   `json:"credentials,omitempty"`
 	Plugins     PluginsConfig       `json:"plugins,omitempty"`
 	Limits      Limits              `json:"limits,omitempty"`
-	Offload     OffloadConfig       `json:"offload,omitempty"`
 	// Cache selects the cross-request plugin state backend: in-process
 	// memory (default) or Redis for distributed / restart-safe deployments.
 	Cache cache.Config `json:"cache,omitempty"`
@@ -423,17 +419,6 @@ func CanonicalMITMHostname(raw string) (string, error) {
 		}
 	}
 	return host, nil
-}
-
-// OffloadConfig controls cheap-model tool result summarization
-// (the torana_offload_completion host call used by the compactor plugin).
-type OffloadConfig struct {
-	Enabled bool `json:"enabled,omitempty"`
-	// Provider names the configured provider used for offload calls.
-	// Must exist in Providers and use the "openai" format.
-	Provider string `json:"provider,omitempty"`
-	// Model is the cheap model requested for summarization.
-	Model string `json:"model,omitempty"`
 }
 
 // ResponsesCompactionConfig enables provider-native compaction for OpenAI
@@ -570,28 +555,6 @@ func (p Provider) ValidateResponsesCompaction(name string) error {
 	}
 	if p.ResponsesCompaction.CompactThreshold <= 0 {
 		return fmt.Errorf("provider %q responses_compaction.compact_threshold must be positive", name)
-	}
-	return nil
-}
-
-// Validate checks an enabled offload config against the provider map.
-// A disabled config is always valid.
-func (o OffloadConfig) Validate(providers map[string]Provider) error {
-	if !o.Enabled {
-		return nil
-	}
-	p, ok := providers[o.Provider]
-	if !ok {
-		return fmt.Errorf("offload.provider %q not found in providers", o.Provider)
-	}
-	if p.Format != "openai" {
-		return fmt.Errorf("offload.provider %q must use the openai format, has %q", o.Provider, p.Format)
-	}
-	if p.Auth.EffectiveMode() == "caller" {
-		return fmt.Errorf("offload.provider %q uses caller auth; host-originated offload requires credential or none", o.Provider)
-	}
-	if o.Model == "" {
-		return fmt.Errorf("offload.model must be set when offload is enabled")
 	}
 	return nil
 }
@@ -851,9 +814,6 @@ func Load(path string) (Config, error) {
 	}
 	if has("limits") {
 		cfg.Limits = user.Limits
-	}
-	if has("offload") {
-		cfg.Offload = user.Offload
 	}
 	if has("cache") {
 		cfg.Cache = user.Cache

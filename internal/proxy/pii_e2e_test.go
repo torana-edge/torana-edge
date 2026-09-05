@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/torana-edge/torana-edge/internal/plugin"
 	"github.com/torana-edge/torana-edge/internal/provider"
 )
 
@@ -30,20 +31,39 @@ func piiEnv(t *testing.T, piiCfg string, extra map[string]provider.Provider) (fu
 		w.Write([]byte(`{"id":"x","choices":[{"message":{"role":"assistant","content":"ok"}}]}`))
 	}))
 	t.Cleanup(upstream.Close)
+	defaultScanner := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"choices":[{"message":{"content":"{\"pii\":false,\"findings\":[]}"}}]}`))
+	}))
+	t.Cleanup(defaultScanner.Close)
 
-	providers := map[string]provider.Provider{"oai": {URL: upstream.URL, Format: "openai"}}
+	providers := map[string]provider.Provider{
+		"oai":     {URL: upstream.URL, Format: "openai"},
+		"scanner": {URL: defaultScanner.URL, Format: "openai", Auth: provider.ProviderAuth{Mode: "none"}},
+	}
 	for k, v := range extra {
 		providers[k] = v
 	}
 
+	digest, err := plugin.BundleDigestForDir(bundles + "/pii")
+	if err != nil {
+		t.Fatalf("bundle digest: %v", err)
+	}
 	srv, err := New(Config{
 		Providers: provider.Config{
 			Providers: providers,
 			Plugins: provider.PluginsConfig{
-				Dir:             bundles,
-				Order:           []string{"pii"},
-				Config:          map[string]json.RawMessage{"pii": json.RawMessage(piiCfg)},
-				AllowUnapproved: true,
+				Dir:    bundles,
+				Order:  []string{"pii"},
+				Config: map[string]json.RawMessage{"pii": json.RawMessage(piiCfg)},
+				Approvals: map[string]provider.PluginApproval{
+					"pii": {
+						Digest: digest, Permissions: manifestPermissions(bundles + "/pii"), FailureMode: "block",
+						ModelServices: map[string]provider.PluginModelServiceApproval{
+							"scanner": {Provider: "scanner", Model: "pii-test", Path: "/v1/chat/completions", TimeoutMS: 30_000, MaxTokens: 512, MaxInputBytes: 1 << 20, MaxCallsPerMinute: 60, MaxTokensPerHour: 100_000},
+						},
+					},
+				},
 			},
 		},
 	})
@@ -137,8 +157,8 @@ func TestPIIModelBlock(t *testing.T) {
 	defer model.Close()
 
 	post, hits := piiEnv(t,
-		`{"provider":"local","model":"m1","tools":["*"],"on_error":"block"}`,
-		map[string]provider.Provider{"local": {URL: model.URL, Format: "openai", Auth: provider.ProviderAuth{Mode: "none"}}})
+		`{"tools":["*"],"on_error":"block"}`,
+		map[string]provider.Provider{"scanner": {URL: model.URL, Format: "openai", Auth: provider.ProviderAuth{Mode: "none"}}})
 
 	status, body := post(toolConvo("employee dossier: Jonathan Q. Public, badge 4471, floor 3"))
 	if status != 422 {
@@ -171,8 +191,8 @@ func TestPIIFailClosed(t *testing.T) {
 	defer model.Close()
 
 	post, hits := piiEnv(t,
-		`{"provider":"local","model":"m1","tools":["*"],"on_error":"block"}`,
-		map[string]provider.Provider{"local": {URL: model.URL, Format: "openai", Auth: provider.ProviderAuth{Mode: "none"}}})
+		`{"tools":["*"],"on_error":"block"}`,
+		map[string]provider.Provider{"scanner": {URL: model.URL, Format: "openai", Auth: provider.ProviderAuth{Mode: "none"}}})
 
 	status, body := post(toolConvo("ambiguous content the regex cannot judge"))
 	if status != 422 {
@@ -191,8 +211,8 @@ func TestPIIFailOpen(t *testing.T) {
 	defer model.Close()
 
 	post, hits := piiEnv(t,
-		`{"provider":"local","model":"m1","tools":["*"],"on_error":"allow"}`,
-		map[string]provider.Provider{"local": {URL: model.URL, Format: "openai", Auth: provider.ProviderAuth{Mode: "none"}}})
+		`{"tools":["*"],"on_error":"allow"}`,
+		map[string]provider.Provider{"scanner": {URL: model.URL, Format: "openai", Auth: provider.ProviderAuth{Mode: "none"}}})
 
 	status, _ := post(toolConvo("ambiguous content the regex cannot judge"))
 	if status != http.StatusOK {

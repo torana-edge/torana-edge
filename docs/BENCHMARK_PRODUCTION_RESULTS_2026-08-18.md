@@ -62,7 +62,7 @@ plugins.
 - The rewritten platform retains low single-digit-millisecond median overhead
   on provider-shaped traffic.
 - The proxy itself adds no model-token charge. Plugins that deliberately make
-  offload or cache-warming calls can spend model tokens, but those capabilities
+  model-service or cache-warming calls can spend model tokens, but those capabilities
   and budgets are explicit and were absent here.
 - Infrastructure cost should be calculated from the measured CPU-hours and
   memory using the operator's deployment price. A universal dollar figure

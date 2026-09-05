@@ -30,7 +30,7 @@ caller's credential rather than forwarding it to a different vendor. Give every
 authenticated fallback its own named credential; use `auth.mode: none` for a
 local server that needs no authentication.
 
-Typical use: use Ollama for offload compaction (mirrors the cheap model pattern)
+Typical use: bind Ollama as a compactor model service
 while keeping your primary provider (DeepSeek/OpenAI) for reasoning.
 
 ## vLLM
@@ -47,7 +47,7 @@ while keeping your primary provider (DeepSeek/OpenAI) for reasoning.
 }
 ```
 
-## Local offload (free compaction)
+## Local summarization (free compaction)
 
 Use the `compactor` plugin to route explicitly eligible historical results to
 a local model. Provider URLs are host roots because Torana appends
@@ -60,15 +60,7 @@ a local model. Provider URLs are host roots because Torana appends
     "ollama": {
       "url": "http://localhost:11434",
       "format": "openai",
-      "auth": {"mode": "none"},
-      "pricing": {
-        "qwen2.5:3b": {
-          "input_usd_per_mtok": 0,
-          "output_usd_per_mtok": 0,
-          "cache_read_usd_per_mtok": 0,
-          "cache_write_usd_per_mtok": 0
-        }
-      }
+      "auth": {"mode": "none"}
     }
   },
   "plugins": {
@@ -83,15 +75,16 @@ a local model. Provider URLs are host roots because Torana appends
         ]
       }
     }
-  },
-  "offload": {
-    "enabled": true,
-    "provider": "ollama",
-    "model": "qwen2.5:3b"
   }
 }
 ```
 
-The offload has zero marginal API cost, but the target provider still needs
-operator-supplied cache-read/write pricing for the positive-net economic gate.
+When approving `compactor`, bind its `summarizer` model-service slot to provider
+`ollama` and model `qwen2.5:3b`. Bind the associated `summarizer` pricing
+resource to explicit zero rates, and bind `target` to the models that may carry
+the original request. The plugin receives only the logical slot names; provider
+URLs, credentials, models, and budgets remain operator-owned.
+
+The local summarizer has zero marginal API cost, but the target resource still
+needs operator-supplied cache-read/write pricing for the positive-net gate.
 See [COMPACTION.md](COMPACTION.md) for the complete configuration.

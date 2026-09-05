@@ -15,7 +15,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/torana-edge/torana-edge/internal/economics"
 	"github.com/torana-edge/torana-edge/internal/format"
 	"github.com/torana-edge/torana-edge/internal/plugin"
 	"github.com/torana-edge/torana-edge/internal/provider"
@@ -117,7 +116,7 @@ func TestE2E(t *testing.T) {
 		}
 
 		// Non-streaming: tool call carrying "i" — intent gets cached for the
-		// offload turn.
+		// later summarizer turn.
 		w.Header().Set("Content-Type", "application/json")
 		w.Write([]byte(`{
 			"id": "chatcmpl-e2e", "model": "mock-1",
@@ -130,13 +129,13 @@ func TestE2E(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	// --- mock offload provider ---------------------------------------------
-	offload := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	// --- mock operator-bound summarizer service -----------------------------
+	summarizer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Host-originated plugin work has no caller whose credential it may
 		// borrow. This provider is explicitly unauthenticated; the caller's
-		// request credential must not cross into the offload request.
+		// request credential must not cross into the summarizer request.
 		if got := r.Header.Get("Authorization"); got != "" {
-			t.Errorf("caller Authorization leaked to offload: %q", got)
+			t.Errorf("caller Authorization leaked to summarizer: %q", got)
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.Write([]byte(`{
@@ -144,32 +143,53 @@ func TestE2E(t *testing.T) {
 			"usage":{"prompt_tokens":20,"completion_tokens":5}
 		}`))
 	}))
-	defer offload.Close()
-
-	// --- proxy with real plugins ---------------------------------------------
+	defer summarizer.Close()
 	cacheRate := 1.0
 	freeRate := 0.0
+
+	approve := func(name string, permissions []string) provider.PluginApproval {
+		digest, err := plugin.BundleDigestForDir(bundles + "/" + name)
+		if err != nil {
+			t.Fatalf("bundle digest for %s: %v", name, err)
+		}
+		return provider.PluginApproval{Digest: digest, Permissions: permissions, FailureMode: "pass"}
+	}
+	schemaApproval := approve("schema_translator", []string{
+		"env.meta_get", "env.meta_set", "ir.messages.write.assistant", "ir.stream.write", "ir.tools.write",
+	})
+	intentApproval := approve("intent", []string{
+		"env.cache_get", "env.cache_set", "env.shared_cache_set", "env.emit_metric", "env.log", "env.meta_get", "env.meta_set", "env.plugin_config",
+		"ir.cache_control.write", "ir.messages.write.assistant", "ir.messages.write.developer", "ir.messages.write.other", "ir.messages.write.system",
+		"ir.messages.write.tool", "ir.messages.write.user", "ir.stream.write", "ir.tool_results.write", "ir.tools.write",
+	})
+	compactorApproval := approve("compactor", []string{
+		"env.cache_get", "env.cache_set", "env.shared_cache_get", "env.emit_metric", "env.host_call.torana_evaluate_compaction",
+		"env.model_complete", "env.model_pricing", "env.host_call.torana_record_savings", "env.plugin_config", "ir.tool_results.write",
+	})
+	compactorApproval.ModelServices = map[string]provider.PluginModelServiceApproval{
+		"summarizer": {Provider: "cheap", Model: "cheap-1", Path: "/v1/chat/completions", TimeoutMS: 30_000, MaxTokens: 512, MaxInputBytes: 1 << 20, MaxCallsPerMinute: 60, MaxTokensPerHour: 200_000},
+	}
+	compactorApproval.PricingResources = map[string]provider.PluginPricingApproval{
+		"target":     {Models: []provider.PluginPricingModelApproval{{Provider: "oai", Model: "gpt-x", CacheReadUSDPerMTok: &cacheRate, CacheWriteUSDPerMTok: &cacheRate}}},
+		"summarizer": {Models: []provider.PluginPricingModelApproval{{InputUSDPerMTok: &freeRate, OutputUSDPerMTok: &freeRate, CacheReadUSDPerMTok: &freeRate, CacheWriteUSDPerMTok: &freeRate}}},
+	}
+
+	// --- proxy with real plugins ---------------------------------------------
 	cfg := Config{
 		Port: "0",
 		Providers: provider.Config{
 			Providers: map[string]provider.Provider{
-				"oai": {
-					URL: upstream.URL, Format: "openai",
-					Pricing: map[string]economics.ModelPricing{
-						"gpt-x": {CacheReadUSDPerMTok: &cacheRate, CacheWriteUSDPerMTok: &cacheRate},
-					},
-				},
-				"anth": {URL: upstream.URL + "/anthropic", Format: "anthropic"},
-				"cheap": {
-					URL: offload.URL, Format: "openai", Auth: provider.ProviderAuth{Mode: "none"},
-					Pricing: map[string]economics.ModelPricing{
-						"cheap-1": {InputUSDPerMTok: &freeRate, OutputUSDPerMTok: &freeRate},
-					},
-				},
+				"oai":   {URL: upstream.URL, Format: "openai"},
+				"anth":  {URL: upstream.URL + "/anthropic", Format: "anthropic"},
+				"cheap": {URL: summarizer.URL, Format: "openai", Auth: provider.ProviderAuth{Mode: "none"}},
 			},
 			Plugins: provider.PluginsConfig{
-				Dir:             bundles,
-				AllowUnapproved: true,
+				Dir: bundles,
+				Approvals: map[string]provider.PluginApproval{
+					"schema_translator": schemaApproval,
+					"intent":            intentApproval,
+					"compactor":         compactorApproval,
+				},
 				// intent captures "i" into the cache; compactor consumes it.
 				// keyword_compactor is its ALTERNATIVE (either/or) and is
 				// deliberately not in this pipeline.
@@ -180,11 +200,6 @@ func TestE2E(t *testing.T) {
 						"tool_policies": [{"match": "search", "mode": "model"}]
 					}`),
 				},
-			},
-			Offload: provider.OffloadConfig{
-				Enabled:  true,
-				Provider: "cheap",
-				Model:    "cheap-1",
 			},
 		},
 	}
@@ -294,7 +309,7 @@ func TestE2E(t *testing.T) {
 		assertReversedArgs(t, assembleToolArgs(t, "anthropic", resp.Body), "A", "1")
 	})
 
-	t.Run("OffloadFlow", func(t *testing.T) {
+	t.Run("SummarizerFlow", func(t *testing.T) {
 		// Turn 1 (non-streaming JSON path): tool call comes back with "i"
 		// stripped, and the intent is cached under call_off_1.
 		resp := post(t, "/provider/oai/v1/chat/completions", `{
@@ -341,7 +356,7 @@ func TestE2E(t *testing.T) {
 
 		// Turn 3: replay the now-consumed result with the assistant response
 		// from turn 2 followed by a new user request. The result is historical,
-		// so the compactor may offload it before it reaches the upstream.
+		// so the compactor may summarize it before it reaches the upstream.
 		turn3 := fmt.Sprintf(`{
 			"model": "gpt-x",
 			"messages": [

@@ -60,16 +60,6 @@ func TestRecordCompactionReportExplainsUnavailableDollars(t *testing.T) {
 	}
 }
 
-func TestRecordOffloadUsage(t *testing.T) {
-	s := NewStatsTracker()
-	s.RecordOffloadUsage(economics.Usage{Reported: true, InputTokens: 1200, OutputTokens: 80, CacheReadTokens: 900, CacheWriteTokens: 100})
-	s.RecordOffloadUsage(economics.Usage{})
-	got := s.Snapshot()
-	if got.OffloadInputTokens != 1200 || got.OffloadOutputTokens != 80 || got.OffloadCacheReadTokens != 900 || got.OffloadCacheWriteTokens != 100 {
-		t.Fatalf("offload totals wrong: %+v", got)
-	}
-}
-
 func TestRecordAuditWriteFailure(t *testing.T) {
 	s := NewStatsTracker()
 	s.RecordAuditWriteFailure()

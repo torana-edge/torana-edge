@@ -460,13 +460,21 @@ func TestOfficialPluginLinearMemoryProfile(t *testing.T) {
 				CallTimeout: 10 * time.Second,
 			})
 			r.FileAppendFunc = func(string, string, []byte, FileResource) error { return nil }
+			r.ModelCompleteFunc = func(context.Context, string, ModelServiceResource, *pbv1.ModelCompleteArgs) (*pbv1.ModelCompleteResult, *pbv1.HostError) {
+				return &pbv1.ModelCompleteResult{Content: `{"pii":false,"findings":[]}`, Usage: &pbv1.Usage{}}, nil
+			}
 			defer r.Close()
 			p, err := r.LoadPlugin(bundle.name, bundle.wasmBytes)
 			if err != nil {
 				t.Fatalf("load: %v", err)
 			}
 			p.SetGrants(bundle.permissions)
-			resources := PluginResources{Files: make(map[string]FileResource)}
+			resources := PluginResources{
+				Files: make(map[string]FileResource),
+				ModelServices: map[string]ModelServiceResource{
+					"scanner": {Name: "scanner"}, "summarizer": {Name: "summarizer"},
+				},
+			}
 			for _, file := range bundle.manifest.Files {
 				operations := make(map[string]bool, len(file.Operations))
 				for _, operation := range file.Operations {

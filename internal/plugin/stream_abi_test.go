@@ -47,7 +47,11 @@ func newTestPipelineWith(t testing.TB, dir string, order []string, store cache.S
 		rt.Close()
 		store.Close()
 	})
-	pp, err := NewPipeline(rt, PluginConfig{Dir: dir, Order: order, Config: cfg, AllowUnapproved: true})
+	pipelineConfig := PluginConfig{Dir: dir, Order: order, Config: cfg, AllowUnapproved: true}
+	if dir == os.Getenv("TORANA_PLUGIN_BUNDLES_DIR") {
+		pipelineConfig = officialPluginConfig(t, dir, order, cfg)
+	}
+	pp, err := NewPipeline(rt, pipelineConfig)
 	if err != nil {
 		t.Fatalf("NewPipeline: %v", err)
 	}

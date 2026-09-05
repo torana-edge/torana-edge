@@ -75,7 +75,7 @@ func TestExtensionGrantIsPerCommand(t *testing.T) {
 	}
 
 	// A different extension command must still be refused.
-	res = hostCallDirect(t, r, p, "torana_offload_completion", []byte(`{}`))
+	res = hostCallDirect(t, r, p, "torana_send_request", []byte(`{}`))
 	e, isErr := res.Result.(*pbv1.HostCallResult_Error)
 	if !isErr || e.Error.Code != pbv1.ErrorCode_ERROR_CODE_PERMISSION_DENIED {
 		t.Fatal("one extension grant opened a different extension command")

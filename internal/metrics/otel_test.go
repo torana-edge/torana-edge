@@ -89,12 +89,11 @@ func TestStatsObservablesBridge(t *testing.T) {
 	do := collect(t)
 	st := NewStatsTracker()
 	st.RecordCompaction("compactor", 1000, 200) // BytesSaved += 800
-	st.RecordOffloadFailure()
 	st.RecordAuditWriteFailure()
 	RegisterStatsObservables(st)
 
 	names := metricNames(do())
-	for _, want := range []string{"torana_compactions_total", "torana_offload_failures_total", "torana_audit_write_failures_total"} {
+	for _, want := range []string{"torana_compactions_total", "torana_audit_write_failures_total"} {
 		if !names[want] {
 			t.Fatalf("missing bridged stat %q: %v", want, names)
 		}

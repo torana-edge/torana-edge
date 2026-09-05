@@ -8,7 +8,7 @@ import (
 )
 
 // ExtensionResult is the classified outcome of an extension host call
-// (torana_send_request, torana_cache_pricing, torana_offload_completion,
+// (torana_send_request, torana_cache_pricing,
 // verify_virtual_key — every callback that can refuse).
 //
 // The two arms form a SUM: a result is either a value or a refusal, never

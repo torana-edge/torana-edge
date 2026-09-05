@@ -70,7 +70,7 @@ per-scenario heap measurements; allocation profiling remains owned by
 torana-edge issue #276.
 
 The proxy itself adds no model-token charge. Plugins that deliberately make
-provider calls—such as offload compaction or cache warming—can add model spend,
+provider calls—such as model-service compaction or cache warming—can add model spend,
 but those calls require explicit capabilities and operator budgets and are not
 present in this run. Infrastructure dollars should be calculated from the CPU
 hours and memory above using the deployment's own price, not from an invented

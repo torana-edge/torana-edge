@@ -429,7 +429,7 @@ func main() {}
 func init() {
 	sdk.OnBeforeRequest(func(ctx context.Context, req *pb.ChatRequest) (*pb.ChatRequest, error) {
 		sdk.Log("x", sdk.LogLevelInfo)
-		_, _ = sdk.HostCall("torana_offload_completion", "{}")
+		_, _ = sdk.HostCall("torana_custom_feature", "{}")
 		_, _ = sdk.HostCall("env.cache_get", "k")
 		return nil, nil
 	})
@@ -437,7 +437,7 @@ func init() {
 
 `)
 	msgs := lintMessages(t, dir)
-	assertContains(t, msgs, `"env.host_call.torana_offload_completion"`)
+	assertContains(t, msgs, `"env.host_call.torana_custom_feature"`)
 	assertContains(t, msgs, `"env.cache_get"`)
 }
 

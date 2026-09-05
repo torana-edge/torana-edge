@@ -460,11 +460,25 @@ func TestHostErrorDiscardsQueuedReportNonVacuous(t *testing.T) {
 		w.Write([]byte(`{"id":"x","choices":[{"message":{"role":"assistant","content":"ok"}}]}`))
 	}))
 	t.Cleanup(upstream.Close)
+	extensionDigest := mustDigest(t, "test-extension-contract")
+	redactedDigest := mustDigest(t, "test-redacted-thinking")
+	zero := 0.0
 
 	provCfg := provider.Config{
 		Providers: map[string]provider.Provider{"p": {URL: upstream.URL, Format: "openai"}},
 		Limits:    provider.Limits{Concurrency: 8},
-		Plugins:   provider.PluginsConfig{Dir: "../../examples/plugins", Order: []string{"test-extension-contract", "test-redacted-thinking"}, AllowUnapproved: true},
+		Plugins: provider.PluginsConfig{
+			Dir: "../../examples/plugins", Order: []string{"test-extension-contract", "test-redacted-thinking"},
+			Approvals: map[string]provider.PluginApproval{
+				"test-extension-contract": {
+					Digest: extensionDigest, Permissions: manifestPermissions("../../examples/plugins/test-extension-contract"), FailureMode: "pass",
+					PricingResources: map[string]provider.PluginPricingApproval{
+						"target": {Models: []provider.PluginPricingModelApproval{{Provider: "p", Model: "record-savings", InputUSDPerMTok: &zero}}},
+					},
+				},
+				"test-redacted-thinking": {Digest: redactedDigest, Permissions: manifestPermissions("../../examples/plugins/test-redacted-thinking"), FailureMode: "pass"},
+			},
+		},
 	}
 	srv, err := New(Config{Port: "0", Providers: provCfg})
 	if err != nil {

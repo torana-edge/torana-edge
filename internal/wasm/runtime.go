@@ -790,22 +790,14 @@ type Runtime struct {
 	// release; shared stores (NewRuntimeWithCache) outlive the runtime.
 	ownsCache bool
 
-	// OffloadResultFunc handles torana_offload_completion host calls. Set by
-	// the server during initialization. The callback returns a classified
-	// ExtensionResult: the value arm is the marshaled OffloadResult, refusals
-	// are framed classified HostErrors. This is the ONE offload callback — the
-	// legacy OffloadFunc form was removed (internal/wasm is host-internal, so
-	// there are no external embedders to preserve it for).
-	OffloadResultFunc func(ctx context.Context, payloadJSON string) ExtensionResult
-
 	// CompactionReportFunc handles torana_record_savings host calls
 	// (compaction byte savings reported by plugins), attributed to the
 	// calling plugin. Set by the server. This is the ONE savings callback —
 	// the legacy two-field SavingsFunc form was removed.
-	CompactionReportFunc func(ctx context.Context, plugin string, report economics.CompactionReport)
+	CompactionReportFunc func(ctx context.Context, plugin string, report economics.CompactionReport, target PricingResource, summarizer *PricingResource)
 	// EvaluateCompactionFunc performs the optional operator-priced economic
 	// gate before a plugin mutates history.
-	EvaluateCompactionFunc func(ctx context.Context, report economics.CompactionReport) economics.CompactionDecision
+	EvaluateCompactionFunc func(ctx context.Context, report economics.CompactionReport, target PricingResource, summarizer *PricingResource) economics.CompactionDecision
 	// RequestMutationFunc observes a plugin's returned canonical request. It is
 	// used by the host to make an earlier routing verdict visible to later
 	// plugins' economic-gate calls.
@@ -1528,6 +1520,22 @@ func (r *Runtime) installHostFunctions() {
 	env.Instantiate(r.ctx)
 }
 
+func compactionPricingResources(p *Plugin, report economics.CompactionReport) (PricingResource, *PricingResource, *pbv1.HostError) {
+	resources := p.resourceSnapshot().PricingResources
+	target, ok := resources[report.PricingResource]
+	if !ok {
+		return PricingResource{}, nil, hostErr(pbv1.ErrorCode_ERROR_CODE_PERMISSION_DENIED, "pricing resource %q is not approved", report.PricingResource)
+	}
+	if report.Summarizer == nil {
+		return target, nil, nil
+	}
+	summarizer, ok := resources[report.Summarizer.PricingResource]
+	if !ok {
+		return PricingResource{}, nil, hostErr(pbv1.ErrorCode_ERROR_CODE_PERMISSION_DENIED, "pricing resource %q is not approved", report.Summarizer.PricingResource)
+	}
+	return target, &summarizer, nil
+}
+
 // dispatchHostCall executes one host call and returns the framed reply.
 //
 // Extracted from the export closure so it is testable at all. The permission
@@ -2122,8 +2130,10 @@ func (r *Runtime) dispatchHostCall(ctx context.Context, pluginName, cmd, args st
 			report.Normalize()
 			if !report.Valid() {
 				herr = hostErr(pbv1.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "invalid payload")
+			} else if target, summarizer, resourceErr := compactionPricingResources(p, report); resourceErr != nil {
+				herr = resourceErr
 			} else if r.CompactionReportFunc != nil {
-				r.CompactionReportFunc(ctx, pluginName, report)
+				r.CompactionReportFunc(ctx, pluginName, report, target, summarizer)
 				// Success is an EMPTY value arm: the savings were recorded, and
 				// there is no domain body to acknowledge with.
 			} else {
@@ -2152,19 +2162,15 @@ func (r *Runtime) dispatchHostCall(ctx context.Context, pluginName, cmd, args st
 			report.Normalize()
 			if !report.Valid() {
 				herr = hostErr(pbv1.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "invalid payload")
+			} else if target, summarizer, resourceErr := compactionPricingResources(p, report); resourceErr != nil {
+				herr = resourceErr
 			} else if r.EvaluateCompactionFunc == nil {
 				herr = hostErr(pbv1.ErrorCode_ERROR_CODE_NOT_CONFIGURED, "compaction pricing is not configured")
 			} else {
-				decision := r.EvaluateCompactionFunc(ctx, report)
+				decision := r.EvaluateCompactionFunc(ctx, report, target, summarizer)
 				payload, _ := json.Marshal(decision)
 				res = string(payload)
 			}
-		case "torana_offload_completion":
-			if r.OffloadResultFunc == nil {
-				herr = hostErr(pbv1.ErrorCode_ERROR_CODE_NOT_CONFIGURED, "offload not configured")
-				break
-			}
-			value, herr = r.applyExtensionResult("torana_offload_completion", r.OffloadResultFunc(ctx, args))
 		case "verify_virtual_key":
 			if r.VerifyVirtualKeyFunc == nil {
 				herr = hostErr(pbv1.ErrorCode_ERROR_CODE_NOT_CONFIGURED, "virtual key verification is not configured")

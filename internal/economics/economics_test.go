@@ -9,14 +9,14 @@ func rate(v float64) *float64 { return &v }
 
 func TestCompactionReportRequiresExplicitCurrentSource(t *testing.T) {
 	for _, source := range []string{"transformation", "cache_reuse"} {
-		report := CompactionReport{Source: source}
+		report := CompactionReport{Source: source, PricingResource: "target"}
 		report.Normalize()
 		if !report.Valid() {
 			t.Fatalf("source %q rejected", source)
 		}
 	}
 	for _, source := range []string{"", "legacy", "other"} {
-		report := CompactionReport{Source: source}
+		report := CompactionReport{Source: source, PricingResource: "target"}
 		report.Normalize()
 		if report.Valid() {
 			t.Fatalf("source %q accepted", source)

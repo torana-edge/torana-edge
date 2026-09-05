@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/torana-edge/torana-edge/internal/plugin"
 	"github.com/torana-edge/torana-edge/internal/provider"
 )
 
@@ -38,16 +39,33 @@ func anthropicPIIEnv(t *testing.T, piiCfg string) (
 		w.Write([]byte(`{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"text","text":"done"}],"model":"claude-3-5-sonnet","stop_reason":"end_turn"}`))
 	}))
 	t.Cleanup(upstream.Close)
+	scanner := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"choices":[{"message":{"content":"{\"pii\":false,\"findings\":[]}"}}]}`))
+	}))
+	t.Cleanup(scanner.Close)
+	digest, err := plugin.BundleDigestForDir(bundles + "/pii")
+	if err != nil {
+		t.Fatalf("bundle digest: %v", err)
+	}
 
 	providers := provider.Config{
 		Providers: map[string]provider.Provider{
-			"ant": {URL: upstream.URL, Format: "anthropic"},
+			"ant":     {URL: upstream.URL, Format: "anthropic"},
+			"scanner": {URL: scanner.URL, Format: "openai", Auth: provider.ProviderAuth{Mode: "none"}},
 		},
 		Plugins: provider.PluginsConfig{
-			Dir:             bundles,
-			Order:           []string{"pii"},
-			Config:          map[string]json.RawMessage{"pii": json.RawMessage(piiCfg)},
-			AllowUnapproved: true,
+			Dir:    bundles,
+			Order:  []string{"pii"},
+			Config: map[string]json.RawMessage{"pii": json.RawMessage(piiCfg)},
+			Approvals: map[string]provider.PluginApproval{
+				"pii": {
+					Digest: digest, Permissions: manifestPermissions(bundles + "/pii"), FailureMode: "block",
+					ModelServices: map[string]provider.PluginModelServiceApproval{
+						"scanner": {Provider: "scanner", Model: "pii-test", Path: "/v1/chat/completions", TimeoutMS: 30_000, MaxTokens: 512, MaxInputBytes: 1 << 20, MaxCallsPerMinute: 60, MaxTokensPerHour: 100_000},
+					},
+				},
+			},
 		},
 	}
 	srv, err := New(Config{Port: "8080", Providers: providers})

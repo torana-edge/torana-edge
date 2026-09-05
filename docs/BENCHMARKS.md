@@ -290,8 +290,8 @@ proxy itself, and response-side hooks, none of which are benchmarked yet.
 ## What the numbers still do not cover
 
 - Format adapters, the HTTP proxy layer, and `run_after_response`.
-- Host calls made from inside a hook. `torana_offload_completion` reaches a
-  local model and takes hundreds of milliseconds — real plugin work dwarfs
+- Host calls made from inside a hook. `env.model_complete` reaches an
+  operator-bound model and can take hundreds of milliseconds — real plugin work dwarfs
   everything measured here.
 - Concurrency. The pool is 4 (`wasm.Runtime`), so a fifth concurrent request
   waits on a slot. Every benchmark here is serial and says nothing about that,

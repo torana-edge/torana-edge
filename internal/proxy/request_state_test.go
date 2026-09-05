@@ -11,6 +11,7 @@ import (
 
 	"github.com/torana-edge/torana-edge/internal/economics"
 	"github.com/torana-edge/torana-edge/internal/engine"
+	"github.com/torana-edge/torana-edge/internal/wasm"
 )
 
 type requestBodyProbe struct {
@@ -36,7 +37,7 @@ func TestMissingRequestStateIsExplicit(t *testing.T) {
 }
 
 func TestStateDependentOperationsFailClosedWithoutRequestState(t *testing.T) {
-	decision := (&Server{}).evaluateCompaction(context.Background(), economics.CompactionReport{})
+	decision := (&Server{}).evaluateCompaction(context.Background(), economics.CompactionReport{}, wasm.PricingResource{}, nil)
 	if decision.Reason != economics.UnavailableRouteUnresolved {
 		t.Fatalf("compaction reason = %q, want unavailable route", decision.Reason)
 	}
