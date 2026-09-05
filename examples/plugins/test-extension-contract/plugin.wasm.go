@@ -13,7 +13,7 @@ import (
 func main() {}
 
 // Test fixture for the production extension-callback composition: the REAL
-// proxy callbacks (egress, cache pricing, offload, record-savings), through
+// proxy callbacks (egress, cache pricing, record-savings), through
 // the REAL dispatcher frame, decoded by the REAL SDK helpers — the path a
 // production plugin runs, with none of it stubbed.
 //
@@ -36,7 +36,7 @@ type observation struct {
 	SendRefusalCode int32  `json:"send_refusal_code,omitempty"`
 	SendErrText     string `json:"send_err_text,omitempty"`
 
-	// Raw HostCallExtension outcomes (pricing-malformed, offload-*,
+	// Raw HostCallExtension outcomes (pricing-malformed,
 	// record-savings). RawArm is the explicit discriminator — "value",
 	// "refusal", or "goerror" — so a call that failed before producing an
 	// arm can never be mistaken for a zero-valued observation. RawSucceeded
@@ -59,7 +59,8 @@ type observation struct {
 
 // validReport is a current CompactionReport the host accepts.
 const validReport = `{"original_bytes":1000,"final_bytes":400,"estimated_tokens_removed":100,` +
-	`"estimated_rewrite_span_tokens":5000,"expected_applications":1,"source":"transformation"}`
+	`"estimated_rewrite_span_tokens":5000,"expected_applications":1,"source":"transformation",` +
+	`"pricing_resource":"target"}`
 
 // recordRaw captures the three-way outcome of a raw HostCallExtension call:
 // a Go error (the call failed before the host produced an arm), a framed
@@ -126,26 +127,6 @@ func init() {
 				obs.PricingStatus = p.Status
 				obs.PricingReason = p.Reason
 			}
-
-		case "offload-disabled":
-			// Offload not configured on this server: NOT_CONFIGURED, never
-			// UNAVAILABLE — a plugin must not retry a permanently absent
-			// feature as if it were a transient outage.
-			v, herr, err := sdk.HostCallExtension("torana_offload_completion", []byte(`{"user_prompt":"u"}`))
-			recordRaw(&obs, v, herr, err)
-
-		case "offload-bad-override":
-			// Unknown request members are rejected outright as caller bugs.
-			payload := `{"provider":"local","model":"local-1","user_prompt":"u",` +
-				`"unexpected":"value"}`
-			v, herr, err := sdk.HostCallExtension("torana_offload_completion", []byte(payload))
-			recordRaw(&obs, v, herr, err)
-
-		case "offload-transport-dead":
-			// A valid request to a dead endpoint: UNAVAILABLE.
-			payload := `{"provider":"dead","model":"m","user_prompt":"u"}`
-			v, herr, err := sdk.HostCallExtension("torana_offload_completion", []byte(payload))
-			recordRaw(&obs, v, herr, err)
 
 		case "record-savings":
 			// An acknowledgement: accepted with an EMPTY value arm and no

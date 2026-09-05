@@ -7,14 +7,14 @@ cost. This is a workload result, not a general savings claim.
 ## Method
 
 - Provider: DeepSeek V4 Pro through `https://api.deepseek.com/beta`.
-- Offload candidate: DeepSeek V4 Flash through the same beta endpoint.
+- Summarizer candidate: DeepSeek V4 Flash through the same beta endpoint.
 - Matrix: five repository tasks, five repetitions, and three randomized arms
   per repetition: control, deterministic, and model-gated (75 sessions).
 - Guardrails: 25-request cap, 150 seconds without progress, repeated semantic
   tool-intent detection, and a $15 calculated-spend ceiling.
 - Cost: calculated from provider-reported input, output, and cache-hit tokens
   using the prices active for the run. Cache misses, cache hits, outputs, and
-  any offload usage were charged separately.
+  any summarizer usage were charged separately.
 - Safety: mutation outputs, errors, diffs, and failed commands remained exact.
   Source reads were exact in the corrected matrix.
 
@@ -68,8 +68,8 @@ two important failures:
 
 The run also found that DeepSeek cache hits were not visible through the
 standard OpenAI cache-detail field. Torana now recognizes DeepSeek's cache
-usage fields in streaming, JSON, and offload responses, and `/stats` reports
-offload token usage.
+usage fields in streaming, JSON, and model-service responses, and `/stats`
+reports summarizer token usage.
 
 ## Conclusion
 
@@ -78,6 +78,6 @@ It demonstrates that Torana can remove large repeated payloads safely for
 explicitly recoverable tools, but bytes removed do not directly translate to
 bill savings when cached input is extremely cheap or when compaction changes
 agent behavior. Developers should validate with paired runs on their own tool
-mix and provider prices, using provider-reported tokens and including offload
+mix and provider prices, using provider-reported tokens and including summarizer
 cost. The economic gate's decision to do nothing is a successful outcome when
 compaction cannot prove positive savings.

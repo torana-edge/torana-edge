@@ -37,12 +37,7 @@ type Stats struct {
 	TotalCacheWriteTokens      int64                       `json:"total_cache_write_tokens"`
 	Compactions                int64                       `json:"compactions"`
 	BytesSaved                 int64                       `json:"bytes_saved"`
-	OffloadFailures            int64                       `json:"offload_failures"`
 	AuditWriteFailures         int64                       `json:"audit_write_failures"`
-	OffloadInputTokens         int64                       `json:"offload_input_tokens"`
-	OffloadOutputTokens        int64                       `json:"offload_output_tokens"`
-	OffloadCacheReadTokens     int64                       `json:"offload_cache_read_tokens"`
-	OffloadCacheWriteTokens    int64                       `json:"offload_cache_write_tokens"`
 	CompactionApplications     int64                       `json:"compaction_applications"`
 	CompactionTransformations  int64                       `json:"compaction_transformations"`
 	CompactionCacheReuses      int64                       `json:"compaction_cache_reuses"`
@@ -67,12 +62,7 @@ type StatsTracker struct {
 	totalCacheWriteTokens      int64
 	compactions                int64
 	bytesSaved                 int64
-	offloadFailures            int64
 	auditWriteFailures         int64
-	offloadInputTokens         int64
-	offloadOutputTokens        int64
-	offloadCacheReadTokens     int64
-	offloadCacheWriteTokens    int64
 	compactionApplications     int64
 	compactionTransformations  int64
 	compactionCacheReuses      int64
@@ -156,7 +146,7 @@ func (s *StatsTracker) RecordCompaction(plugin string, originalBytes, finalBytes
 // RecordCompactionReport records the canonical batch report. Pricing arguments are
 // optional; absent or incomplete prices preserve token/byte metrics and add an
 // explicit reason instead of inventing a dollar estimate.
-func (s *StatsTracker) RecordCompactionReport(plugin string, report economics.CompactionReport, targetPricing, offloadPricing *economics.ModelPricing) {
+func (s *StatsTracker) RecordCompactionReport(plugin string, report economics.CompactionReport, targetPricing, summarizerPricing *economics.ModelPricing) {
 	report.Normalize()
 	// Preserve the application-oriented aggregate counters. A batch is one
 	// application regardless of candidate count.
@@ -185,7 +175,7 @@ func (s *StatsTracker) RecordCompactionReport(plugin string, report economics.Co
 		s.savingsUnavailable[economics.UnavailablePricing]++
 		return
 	}
-	est := economics.EstimateApplicationSavings(report, *targetPricing, offloadPricing)
+	est := economics.EstimateApplicationSavings(report, *targetPricing, summarizerPricing)
 	if est.EstimatedGrossUSD != nil {
 		s.estimatedGrossUSD += *est.EstimatedGrossUSD
 		s.estimatedGrossCount++
@@ -205,28 +195,10 @@ func (s *StatsTracker) RecordCompactionReport(plugin string, report economics.Co
 	}
 }
 
-// RecordOffloadFailure counts a failed cheap-model offload call.
-func (s *StatsTracker) RecordOffloadFailure() {
-	atomic.AddInt64(&s.offloadFailures, 1)
-}
-
 // RecordAuditWriteFailure records a durable audit sink failure. The request is
 // never retried and the caller response is never rewritten after delivery.
 func (s *StatsTracker) RecordAuditWriteFailure() {
 	atomic.AddInt64(&s.auditWriteFailures, 1)
-}
-
-// RecordOffloadUsage records provider-reported usage for a successful
-// compaction offload. InputTokens includes cache reads for OpenAI-compatible
-// providers, matching Usage.InputIncludesCacheRead.
-func (s *StatsTracker) RecordOffloadUsage(usage economics.Usage) {
-	if !usage.Reported {
-		return
-	}
-	atomic.AddInt64(&s.offloadInputTokens, usage.InputTokens)
-	atomic.AddInt64(&s.offloadOutputTokens, usage.OutputTokens)
-	atomic.AddInt64(&s.offloadCacheReadTokens, usage.CacheReadTokens)
-	atomic.AddInt64(&s.offloadCacheWriteTokens, usage.CacheWriteTokens)
 }
 
 // RecordPluginCounter adds delta to a named counter scoped to the calling
@@ -271,12 +243,7 @@ func (s *StatsTracker) Snapshot() Stats {
 		TotalCacheWriteTokens:      atomic.LoadInt64(&s.totalCacheWriteTokens),
 		Compactions:                atomic.LoadInt64(&s.compactions),
 		BytesSaved:                 atomic.LoadInt64(&s.bytesSaved),
-		OffloadFailures:            atomic.LoadInt64(&s.offloadFailures),
 		AuditWriteFailures:         atomic.LoadInt64(&s.auditWriteFailures),
-		OffloadInputTokens:         atomic.LoadInt64(&s.offloadInputTokens),
-		OffloadOutputTokens:        atomic.LoadInt64(&s.offloadOutputTokens),
-		OffloadCacheReadTokens:     atomic.LoadInt64(&s.offloadCacheReadTokens),
-		OffloadCacheWriteTokens:    atomic.LoadInt64(&s.offloadCacheWriteTokens),
 		CompactionApplications:     atomic.LoadInt64(&s.compactionApplications),
 		CompactionTransformations:  atomic.LoadInt64(&s.compactionTransformations),
 		CompactionCacheReuses:      atomic.LoadInt64(&s.compactionCacheReuses),

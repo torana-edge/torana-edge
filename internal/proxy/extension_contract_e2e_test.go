@@ -14,13 +14,14 @@ import (
 	"testing"
 	"time"
 
+	"github.com/torana-edge/torana-edge/internal/plugin"
 	"github.com/torana-edge/torana-edge/internal/provider"
 	pb "github.com/torana-edge/torana-plugin-sdk/pb/v1"
 )
 
 // TestExtensionContractE2E is the F5 composition proof: a real WASM fixture
 // driven through the REAL server — real proxy callbacks (sendPluginRequest,
-// cachePricing, offloadCompletionResult, record-savings dispatch), the real
+// cachePricing and record-savings dispatch), the real
 // dispatcher frame, and the real SDK guest helpers. None of the path is
 // stubbed, which is what makes the observation a production-contract truth
 // rather than a harness truth.
@@ -29,8 +30,7 @@ import (
 // and records what the GUEST observed into the model of the returned request;
 // the e2e reads it from the captured upstream body and asserts it.
 func TestExtensionContractE2E(t *testing.T) {
-	enabled := provider.OffloadConfig{Enabled: true, Provider: "cheap", Model: "cheap-1"}
-	env := newContractServer(t, &enabled)
+	env := newContractServer(t)
 
 	for _, tc := range []struct {
 		scenario string
@@ -87,30 +87,6 @@ func TestExtensionContractE2E(t *testing.T) {
 			},
 		},
 		{
-			// An unknown offload payload member is a caller bug.
-			"offload-bad-override",
-			func(t *testing.T, obs contractObservation) {
-				if obs.RawArm != "refusal" || obs.RawCode != int32(pb.ErrorCode_ERROR_CODE_INVALID_ARGUMENT) {
-					t.Errorf("offload bad override: arm=%q code=%d, want refusal/INVALID_ARGUMENT", obs.RawArm, obs.RawCode)
-				}
-				if obs.RawSucceeded || obs.RawGoError != "" {
-					t.Errorf("offload bad override: succeeded=%v goerror=%q, want a clean refusal", obs.RawSucceeded, obs.RawGoError)
-				}
-			},
-		},
-		{
-			// A valid call to a dead endpoint is a transient outage.
-			"offload-transport-dead",
-			func(t *testing.T, obs contractObservation) {
-				if obs.RawArm != "refusal" || obs.RawCode != int32(pb.ErrorCode_ERROR_CODE_UNAVAILABLE) {
-					t.Errorf("offload dead endpoint: arm=%q code=%d, want refusal/UNAVAILABLE", obs.RawArm, obs.RawCode)
-				}
-				if obs.RawSucceeded || obs.RawGoError != "" {
-					t.Errorf("offload dead endpoint: succeeded=%v goerror=%q, want a clean refusal", obs.RawSucceeded, obs.RawGoError)
-				}
-			},
-		},
-		{
 			// record_savings is an acknowledgement: succeeded, value arm PRESENT
 			// and zero-length, no refusal (no {"status":"ok"} ceremony). The
 			// explicit discriminator means a transport/protocol failure (a
@@ -147,19 +123,6 @@ func TestExtensionContractE2E(t *testing.T) {
 		})
 	}
 
-	// Offload DISABLED needs a server whose offload is not configured: the
-	// refusal is NOT_CONFIGURED (a permanently absent feature), never
-	// UNAVAILABLE (which promises retries).
-	t.Run("offload-disabled", func(t *testing.T) {
-		env2 := newContractServer(t, nil)
-		obs := env2.post(t, "offload-disabled")
-		if obs.RawArm != "refusal" || obs.RawCode != int32(pb.ErrorCode_ERROR_CODE_NOT_CONFIGURED) {
-			t.Errorf("offload disabled: arm=%q code=%d, want refusal/NOT_CONFIGURED", obs.RawArm, obs.RawCode)
-		}
-		if obs.RawSucceeded || obs.RawGoError != "" {
-			t.Errorf("offload disabled: succeeded=%v goerror=%q, want a clean refusal", obs.RawSucceeded, obs.RawGoError)
-		}
-	})
 }
 
 // contractObservation mirrors the fixture's observation struct (guest-side
@@ -187,8 +150,8 @@ type contractObservation struct {
 
 // newContractServer stands up the REAL server with the test-extension-contract
 // fixture loaded and NO egress budget for it (the unbudgeted-send scenario
-// needs the refusal). offload configures the offload feature; nil disables it.
-func newContractServer(t *testing.T, offload *provider.OffloadConfig) *contractEnv {
+// needs the refusal).
+func newContractServer(t *testing.T) *contractEnv {
 	t.Helper()
 	requireWASM(t, fixturesDir+"/test-extension-contract/plugin.wasm")
 
@@ -208,19 +171,23 @@ func newContractServer(t *testing.T, offload *provider.OffloadConfig) *contractE
 	cfg := provider.DefaultConfig()
 	cfg.Providers = map[string]provider.Provider{
 		// oai is the provider the fixture's send/pricing scenarios name.
-		"oai":   {URL: upstream.URL, Format: "openai", Auth: provider.ProviderAuth{Mode: "none"}},
-		"cheap": {URL: upstream.URL, Format: "openai", Auth: provider.ProviderAuth{Mode: "none"}},
-		// The bad-override scenario carries an unknown payload member.
-		"local": {URL: upstream.URL, Format: "openai", Auth: provider.ProviderAuth{Mode: "none"}},
-		// dead cannot be reached: the transport scenario.
-		"dead": {URL: "http://127.0.0.1:1", Format: "openai", Auth: provider.ProviderAuth{Mode: "none"}},
-	}
-	if offload != nil {
-		cfg.Offload = *offload
+		"oai": {URL: upstream.URL, Format: "openai", Auth: provider.ProviderAuth{Mode: "none"}},
 	}
 	cfg.Plugins.Dir = fixturesDir
 	cfg.Plugins.Order = []string{"test-extension-contract"}
-	cfg.Plugins.AllowUnapproved = true
+	digest, err := plugin.BundleDigestForDir(fixturesDir + "/test-extension-contract")
+	if err != nil {
+		t.Fatalf("bundle digest: %v", err)
+	}
+	zero := 0.0
+	cfg.Plugins.Approvals = map[string]provider.PluginApproval{
+		"test-extension-contract": {
+			Digest: digest, Permissions: manifestPermissions(fixturesDir + "/test-extension-contract"), FailureMode: "pass",
+			PricingResources: map[string]provider.PluginPricingApproval{
+				"target": {Models: []provider.PluginPricingModelApproval{{Provider: "oai", Model: "record-savings", InputUSDPerMTok: &zero}}},
+			},
+		},
+	}
 	// Deliberately NO plugins.runtime.egress: the unbudgeted send must be
 	// refused NOT_CONFIGURED.
 

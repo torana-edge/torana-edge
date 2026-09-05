@@ -423,8 +423,10 @@ type reqState struct {
 }
 
 type attributedCompactionReport struct {
-	Plugin string
-	Report economics.CompactionReport
+	Plugin     string
+	Report     economics.CompactionReport
+	Target     wasm.PricingResource
+	Summarizer *wasm.PricingResource
 }
 
 // responseMeta builds the _response signal handed to run_after_response so
@@ -522,10 +524,14 @@ func (s *Server) recordCompactionReports(rs *reqState) {
 	}()
 	for _, attributed := range rs.CompactionReports {
 		report := attributed.Report
-		targetPricing, offloadPricing := s.compactionPricing(rs, report)
-		s.stats.RecordCompactionReport(attributed.Plugin, report, targetPricing, offloadPricing)
+		// Provider/model cross the guest envelope for observability only. The
+		// request that actually reached the upstream owns their values.
+		report.Provider = rs.Provider
+		report.Model = rs.Model
+		targetPricing, summarizerPricing := compactionPricing(rs.Provider, rs.Model, report, attributed.Target, attributed.Summarizer)
+		s.stats.RecordCompactionReport(attributed.Plugin, report, targetPricing, summarizerPricing)
 		metrics.RecordPluginSavings(context.Background(), attributed.Plugin, report.OriginalBytes-report.FinalBytes)
-		metrics.RecordCompactionEconomics(context.Background(), attributed.Plugin, report, targetPricing, offloadPricing)
+		metrics.RecordCompactionEconomics(context.Background(), attributed.Plugin, report, targetPricing, summarizerPricing)
 	}
 }
 
@@ -538,41 +544,37 @@ func discardCompactionReports(rs *reqState) {
 	rs.CompactionReportsCommitted = false
 }
 
-func (s *Server) compactionPricing(rs *reqState, report economics.CompactionReport) (*economics.ModelPricing, *economics.ModelPricing) {
-	cfg := s.GetConfig().Providers
-	providerName, model := report.Provider, report.Model
-	if providerName == "" && rs != nil {
-		providerName = rs.Provider
+func economicsPricing(price *pb.ModelPricing) *economics.ModelPricing {
+	if price == nil {
+		return nil
 	}
-	if model == "" && rs != nil {
-		model = rs.Model
+	return &economics.ModelPricing{
+		InputUSDPerMTok:      price.InputUsdPerMtok,
+		OutputUSDPerMTok:     price.OutputUsdPerMtok,
+		CacheReadUSDPerMTok:  price.CacheReadUsdPerMtok,
+		CacheWriteUSDPerMTok: price.CacheWriteUsdPerMtok,
 	}
-	var targetPricing *economics.ModelPricing
-	if prov, ok := cfg.Providers[providerName]; ok {
-		if price, ok := prov.PricingFor(model); ok {
-			targetPricing = &price
-		}
-	}
-	var offloadPricing *economics.ModelPricing
-	if report.Offload != nil {
-		if prov, ok := cfg.Providers[report.Offload.Provider]; ok {
-			if price, ok := prov.PricingFor(report.Offload.Model); ok {
-				offloadPricing = &price
-			}
-		}
-	}
-	return targetPricing, offloadPricing
 }
 
-func (s *Server) evaluateCompaction(ctx context.Context, report economics.CompactionReport) economics.CompactionDecision {
+func compactionPricing(providerName, model string, report economics.CompactionReport, targetResource wasm.PricingResource, summarizerResource *wasm.PricingResource) (*economics.ModelPricing, *economics.ModelPricing) {
+	targetPricing := economicsPricing(targetResource.Prices[wasm.PricingCoordinate(providerName, model)])
+	var summarizerPricing *economics.ModelPricing
+	if report.Summarizer != nil && summarizerResource != nil && len(summarizerResource.Prices) == 1 {
+		for _, price := range summarizerResource.Prices {
+			summarizerPricing = economicsPricing(price)
+		}
+	}
+	return targetPricing, summarizerPricing
+}
+
+func (s *Server) evaluateCompaction(ctx context.Context, report economics.CompactionReport, targetResource wasm.PricingResource, summarizerResource *wasm.PricingResource) economics.CompactionDecision {
 	rs := reqStateFrom(ctx)
 	if rs == nil {
 		return economics.CompactionDecision{Reason: economics.UnavailableRouteUnresolved}
 	}
-	targetName := report.Provider
-	if targetName == "" {
-		targetName = rs.Provider
-	}
+	targetName := rs.Provider
+	report.Provider = rs.Provider
+	report.Model = rs.Model
 	// Read the route verdict directly rather than a copy cached when a plugin
 	// happened to return a replacement.
 	//
@@ -600,12 +602,13 @@ func (s *Server) evaluateCompaction(ctx context.Context, report economics.Compac
 			return economics.CompactionDecision{Reason: economics.UnavailableRouteUnresolved}
 		}
 		report.Provider = targetName
-		if pendingRoute.Model != "" {
-			report.Model = pendingRoute.Model
+		report.Model = pendingRoute.Model
+		if report.Model == "" {
+			report.Model = rs.Model
 		}
 	}
-	target, offload := s.compactionPricing(rs, report)
-	decision := economics.DecideCompaction(report, target, offload)
+	target, summarizer := compactionPricing(report.Provider, report.Model, report, targetResource, summarizerResource)
+	decision := economics.DecideCompaction(report, target, summarizer)
 	if !decision.Apply {
 		return decision
 	}
@@ -624,15 +627,12 @@ func (s *Server) evaluateCompaction(ctx context.Context, report economics.Compac
 		if !ok || (primary.Format != "" && fallback.Format != "" && fallback.Format != primary.Format) {
 			return economics.CompactionDecision{Reason: economics.UnavailableFallbackUnpriced}
 		}
-		price, ok := fallback.PricingFor(report.Model)
-		if !ok {
-			model := report.Model
-			if model == "" {
-				model = rs.Model
-			}
-			price, ok = fallback.PricingFor(model)
+		model := report.Model
+		if model == "" {
+			model = rs.Model
 		}
-		if !ok || !economics.DecideCompaction(report, &price, offload).Apply {
+		price := economicsPricing(targetResource.Prices[wasm.PricingCoordinate(fallbackName, model)])
+		if price == nil || !economics.DecideCompaction(report, price, summarizer).Apply {
 			return economics.CompactionDecision{Reason: economics.UnavailableFallbackUnpriced}
 		}
 	}
@@ -796,11 +796,6 @@ func New(cfg Config) (*Server, error) {
 	}
 	s.auditWriter = auditWriter
 
-	// --- offload validation (fail fast on misconfiguration) ---------------
-	if err := cfg.Providers.Offload.Validate(cfg.Providers.Providers); err != nil {
-		cleanupConstruction()
-		return nil, fmt.Errorf("proxy: %w", err)
-	}
 	for name, p := range cfg.Providers.Providers {
 		if err := p.ValidateResponsesCompaction(name); err != nil {
 			cleanupConstruction()
@@ -1808,7 +1803,7 @@ func New(cfg Config) (*Server, error) {
 		case http.MethodPut, http.MethodPost:
 			s.controlPlaneMutationMu.Lock()
 			defer s.controlPlaneMutationMu.Unlock()
-			// Settings write-back: providers / offload / limits / control_plane.
+			// Settings write-back: providers / limits / control_plane.
 			// The plugin pipeline (order + per-plugin config) is owned by
 			// /_torana/api/plugins and is preserved verbatim here.
 			data, err := readControlPlaneBody(r.Body)
@@ -2526,7 +2521,7 @@ func New(cfg Config) (*Server, error) {
 		}()
 
 		// Assign a request ID scoping all plugin meta state, and stash
-		// per-request data for the Director/ModifyResponse/offload path.
+		// per-request data for the Director/ModifyResponse/summarizer path.
 		// The pipeline is pinned (Acquire) for the whole request so a
 		// hot-reload swap cannot drain-and-close the runtime that holds
 		// this request's state mid-flight.
@@ -3211,26 +3206,12 @@ func (s *Server) newRuntime() *wasm.Runtime {
 		MemoryLimitPages:    memoryPages,
 		InstanceIdleTimeout: runtimeCfg.InstanceIdleTimeout(),
 	})
-	// Offload completion handler (cheap-model tool result
-	// summarization), recording failures in /stats. The callback returns a
-	// classified ExtensionResult: the value arm is the marshaled OffloadResult
-	// (no constant status field), refusals are framed classified HostErrors.
-	rt.OffloadResultFunc = func(ctx context.Context, payloadJSON string) wasm.ExtensionResult {
-		out := s.offloadCompletionResult(ctx, payloadJSON)
-		if out.Refusal() != nil {
-			// Plugins degrade gracefully on offload errors, so this
-			// log line is the only host-side visibility.
-			log.Printf("[offload] %s", out.Refusal().Message)
-			s.stats.RecordOffloadFailure()
-		}
-		return out
-	}
-	rt.CompactionReportFunc = func(ctx context.Context, pluginName string, report economics.CompactionReport) {
+	rt.CompactionReportFunc = func(ctx context.Context, pluginName string, report economics.CompactionReport, target wasm.PricingResource, summarizer *wasm.PricingResource) {
 		rs := reqStateFrom(ctx)
 		if rs == nil {
 			return
 		}
-		rs.CompactionReports = append(rs.CompactionReports, attributedCompactionReport{Plugin: pluginName, Report: report})
+		rs.CompactionReports = append(rs.CompactionReports, attributedCompactionReport{Plugin: pluginName, Report: report, Target: target, Summarizer: summarizer})
 	}
 	rt.EvaluateCompactionFunc = s.evaluateCompaction
 	// Compaction savings are priced against the FINAL provider/model, so the
@@ -3288,7 +3269,7 @@ func (s *Server) newRuntime() *wasm.Runtime {
 	// this host is a configuration gap, not a transient outage).
 	// Pristine request/response snapshots (env.original_request /
 	// env.original_response), read from the request state the same
-	// way offload does.
+	// way summarizer does.
 	// (bytes, captured). The callbacks are installed unconditionally, so
 	// "returned nil" cannot mean "unavailable" — on the streaming and
 	// upstream-error paths nothing is ever snapshotted, and framing that as a

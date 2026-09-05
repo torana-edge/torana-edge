@@ -2589,7 +2589,7 @@ func hookNames(hooks []Hook) []string {
 //
 // configFn is consulted at reload time so config hot-reloads (plugin order,
 // per-plugin config) take effect without restarting the watcher. runtimeFn
-// builds each reload's runtime — the caller wires host callbacks (offload,
+// builds each reload's runtime — the caller wires host callbacks (model services,
 // savings) there; a bare runtime would silently lose them.
 func WatchPlugins(ctx context.Context, dir string, configFn func() PluginConfig, runtimeFn func() *wasm.Runtime, reloadFn func(pipeline *PluginPipeline), errorFn func(error), done func()) error {
 	if dir == "" {

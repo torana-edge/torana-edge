@@ -152,7 +152,8 @@ func wireExtension(t *testing.T, r *Runtime, row extensionMatrixRow) {
 	case "torana_record_savings":
 		// The canonical callback: the batch-aware report ABI. The legacy
 		// two-field SavingsFunc no longer exists.
-		r.CompactionReportFunc = func(_ context.Context, _ string, _ economics.CompactionReport) {}
+		r.CompactionReportFunc = func(_ context.Context, _ string, _ economics.CompactionReport, _ PricingResource, _ *PricingResource) {
+		}
 	case "torana_plugin_counter":
 		r.PluginCounterFunc = func(string, string, int64) {}
 	case "torana_evaluate_compaction":
@@ -165,24 +166,8 @@ func wireExtension(t *testing.T, r *Runtime, row extensionMatrixRow) {
 		if err := json.Unmarshal([]byte(row.want.body), &decision); err != nil {
 			t.Fatalf("%s: wired body is not a CompactionDecision: %v", row.name, err)
 		}
-		r.EvaluateCompactionFunc = func(_ context.Context, _ economics.CompactionReport) economics.CompactionDecision {
+		r.EvaluateCompactionFunc = func(_ context.Context, _ economics.CompactionReport, _ PricingResource, _ *PricingResource) economics.CompactionDecision {
 			return decision
-		}
-	case "torana_offload_completion":
-		if row.state == "refused" {
-			// The canonical OffloadResultFunc is the only callback: the legacy
-			// OffloadFunc fallback no longer exists.
-			r.OffloadResultFunc = func(_ context.Context, _ string) ExtensionResult {
-				// A classified refusal must pass through UNCHANGED: the old
-				// dispatcher collapsed every callback error into UNAVAILABLE,
-				// which hid caller bugs (INVALID_ARGUMENT) and config gaps
-				// (NOT_CONFIGURED) behind a transient-outage story.
-				return ExtensionRefusal(pbv1.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "upstream refused")
-			}
-			return
-		}
-		r.OffloadResultFunc = func(_ context.Context, _ string) ExtensionResult {
-			return ExtensionValue([]byte(`{"completion":"done"}`))
 		}
 	case "verify_virtual_key":
 		if row.state == "refused" {
@@ -203,7 +188,7 @@ func wireExtension(t *testing.T, r *Runtime, row extensionMatrixRow) {
 func TestExtensionCommandFramingMatrix(t *testing.T) {
 	// A CompactionReport that Normalize()/Valid() accept.
 	validReport := `{"original_bytes":1000,"final_bytes":400,"estimated_tokens_removed":100,` +
-		`"estimated_rewrite_span_tokens":5000,"expected_applications":1,"source":"transformation"}`
+		`"estimated_rewrite_span_tokens":5000,"expected_applications":1,"source":"transformation","pricing_resource":"target"}`
 
 	rows := []extensionMatrixRow{
 		// torana_send_request: value arm = provider outcome envelope; refusals
@@ -291,20 +276,6 @@ func TestExtensionCommandFramingMatrix(t *testing.T) {
 			args: `{"original_bytes":1000,"final_bytes":400,"source":"legacy"}`,
 			want: extensionMatrixWant{arm: "error", code: pbv1.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, message: "invalid payload"}},
 
-		// torana_offload_completion: the callback frames its own success value
-		// (no constant status field) and its own classified refusal — the
-		// dispatcher passes both through untouched instead of collapsing
-		// errors into UNAVAILABLE. Nothing installed is NOT_CONFIGURED.
-		{name: "offload_completion/wired", cmd: "torana_offload_completion", state: "wired",
-			args: `{}`,
-			want: extensionMatrixWant{arm: "value", body: `{"completion":"done"}`}},
-		{name: "offload_completion/refused", cmd: "torana_offload_completion", state: "refused",
-			args: `{}`,
-			want: extensionMatrixWant{arm: "error", code: pbv1.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, message: "upstream refused"}},
-		{name: "offload_completion/nil-func", cmd: "torana_offload_completion", state: "nil-func",
-			args: `{}`,
-			want: extensionMatrixWant{arm: "error", code: pbv1.ErrorCode_ERROR_CODE_NOT_CONFIGURED, message: "offload not configured"}},
-
 		// verify_virtual_key: absent callback is NOT_CONFIGURED — a declared
 		// permission that can never succeed in this host is a configuration
 		// gap, never UNAVAILABLE (which promises a retryable outage).
@@ -389,7 +360,6 @@ func TestExtensionCommandFramingMatrix(t *testing.T) {
 		"torana_record_savings",
 		"torana_plugin_counter",
 		"torana_evaluate_compaction",
-		"torana_offload_completion",
 		"verify_virtual_key",
 	} {
 		rows = append(rows, extensionMatrixRow{
@@ -406,6 +376,11 @@ func TestExtensionCommandFramingMatrix(t *testing.T) {
 				grants = []string{"env.host_call." + row.cmd}
 			}
 			r, p := newGrantedPlugin(t, grants...)
+			if row.cmd == "torana_record_savings" || row.cmd == "torana_evaluate_compaction" {
+				p.SetResources(PluginResources{PricingResources: map[string]PricingResource{
+					"target": {Name: "target", Prices: map[string]*pbv1.ModelPricing{}},
+				}})
+			}
 
 			switch row.state {
 			case "wired", "malformed", "refused", "invalid":

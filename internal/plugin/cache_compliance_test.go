@@ -126,11 +126,7 @@ func TestPluginPrefixDeterminism(t *testing.T) {
 			runtime := wasm.NewRuntime(ctx)
 			defer runtime.Close()
 
-			pipeline, err := NewPipeline(runtime, PluginConfig{
-				Dir:             bundles,
-				Order:           []string{name},
-				AllowUnapproved: true,
-			})
+			pipeline, err := NewPipeline(runtime, officialPluginConfig(t, bundles, []string{name}, nil))
 			if err != nil {
 				t.Fatalf("NewPipeline: %v", err)
 			}

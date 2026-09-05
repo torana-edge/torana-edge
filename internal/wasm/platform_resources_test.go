@@ -2,9 +2,11 @@ package wasm
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 	"time"
 
+	"github.com/torana-edge/torana-edge/internal/economics"
 	pbv1 "github.com/torana-edge/torana-plugin-sdk/pb/v1"
 	"google.golang.org/protobuf/proto"
 )
@@ -16,6 +18,49 @@ func marshalHostArgs(t *testing.T, message proto.Message) []byte {
 		t.Fatal(err)
 	}
 	return raw
+}
+
+func TestCompactionPricingIsResolvedFromTheCallingPluginsResources(t *testing.T) {
+	r, p := newGrantedPlugin(t, "env.host_call.torana_evaluate_compaction")
+	target := PricingResource{Name: "target", Prices: map[string]*pbv1.ModelPricing{PricingCoordinate("p", "m"): {}}}
+	summarizer := PricingResource{Name: "summarizer", ForModelService: "summarizer", Prices: map[string]*pbv1.ModelPricing{PricingCoordinate("cheap", "small"): {}}}
+	p.SetResources(PluginResources{PricingResources: map[string]PricingResource{"target": target, "summarizer": summarizer}})
+
+	called := false
+	r.EvaluateCompactionFunc = func(_ context.Context, report economics.CompactionReport, gotTarget PricingResource, gotOffload *PricingResource) economics.CompactionDecision {
+		called = true
+		if report.PricingResource != "target" || report.Summarizer == nil || report.Summarizer.PricingResource != "summarizer" {
+			t.Fatalf("report = %+v", report)
+		}
+		if gotTarget.Name != "target" || gotOffload == nil || gotOffload.Name != "summarizer" {
+			t.Fatalf("resources = target %+v summarizer %+v", gotTarget, gotOffload)
+		}
+		return economics.CompactionDecision{Apply: true, Reason: "estimated_net_positive"}
+	}
+	report := economics.CompactionReport{OriginalBytes: 10, FinalBytes: 1, CandidateCount: 1, ExpectedApplications: 1, Source: "transformation", PricingResource: "target", Summarizer: &economics.Summarizer{PricingResource: "summarizer", Usage: economics.Usage{Reported: true}}}
+	raw, err := json.Marshal(report)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := hostCallDirect(t, r, p, "torana_evaluate_compaction", raw)
+	if !called {
+		t.Fatal("economic callback was not called")
+	}
+	if _, ok := result.Result.(*pbv1.HostCallResult_Value); !ok {
+		t.Fatalf("result = %T, want value", result.Result)
+	}
+
+	for _, body := range []string{
+		`{"original_bytes":10,"final_bytes":1,"candidate_count":1,"expected_applications":1,"source":"transformation","pricing_resource":"missing"}`,
+		`{"original_bytes":10,"final_bytes":1,"candidate_count":1,"expected_applications":1,"source":"transformation","pricing_resource":"target","summarizer":{"pricing_resource":"missing","usage":{"reported":true}}}`,
+	} {
+		called = false
+		result := hostCallDirect(t, r, p, "torana_evaluate_compaction", []byte(body))
+		errArm, ok := result.Result.(*pbv1.HostCallResult_Error)
+		if !ok || errArm.Error.Code != pbv1.ErrorCode_ERROR_CODE_PERMISSION_DENIED || called {
+			t.Fatalf("unapproved resource returned %+v, called=%v", result.Result, called)
+		}
+	}
 }
 
 func hostCallValue(t *testing.T, result *pbv1.HostCallResult) []byte {

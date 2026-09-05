@@ -9,7 +9,7 @@ const (
 	UnavailablePricing              = "pricing_unconfigured"
 	UnavailableTokenEstimate        = "token_estimate_unavailable"
 	UnavailableExpectedApplications = "expected_applications_unavailable"
-	UnavailableOffloadUsage         = "offload_usage_unavailable"
+	UnavailableSummarizerUsage      = "summarizer_usage_unavailable"
 	UnavailableNonPositiveNet       = "non_positive_estimated_net"
 	UnavailableRouteUnresolved      = "route_unresolved"
 	UnavailableFallbackUnpriced     = "fallback_unpriced_or_non_positive"
@@ -114,20 +114,10 @@ func tokenCost(tokens int64, rate float64) (float64, bool) {
 	return cost, isFinite(cost)
 }
 
-// Offload records the summarizer call that produced a compaction.
-type Offload struct {
-	Provider string `json:"provider,omitempty"`
-	Model    string `json:"model,omitempty"`
-	Usage    Usage  `json:"usage,omitempty"`
-}
-
-// OffloadResult is returned by the richer offload host callback. Extra JSON
-// fields are backward-compatible with plugins that only decode completion.
-type OffloadResult struct {
-	Completion string `json:"completion"`
-	Provider   string `json:"provider"`
-	Model      string `json:"model"`
-	Usage      Usage  `json:"usage"`
+// Summarizer records the summarizer call that produced a compaction.
+type Summarizer struct {
+	PricingResource string `json:"pricing_resource"`
+	Usage           Usage  `json:"usage,omitempty"`
 }
 
 // CompactionReport is the canonical batch accepted by torana_record_savings.
@@ -145,9 +135,15 @@ type CompactionReport struct {
 
 	// Source distinguishes a newly generated canonical replacement from an
 	// application of a cached replacement. It is required.
-	Source  string   `json:"source"` // transformation, cache_reuse
-	Offload *Offload `json:"offload,omitempty"`
+	Source     string      `json:"source"` // transformation, cache_reuse
+	Summarizer *Summarizer `json:"summarizer,omitempty"`
+	// PricingResource is a logical, operator-approved slot. The guest never
+	// chooses provider/model coordinates or supplies monetary rates.
+	PricingResource string `json:"pricing_resource"`
 
+	// Provider and Model are host-attributed after routing. They are excluded
+	// from the guest's pricing authority and retained only in recorded
+	// observability reports.
 	Provider string `json:"provider,omitempty"`
 	Model    string `json:"model,omitempty"`
 }
@@ -162,12 +158,13 @@ func (r CompactionReport) Valid() bool {
 	return r.OriginalBytes >= 0 && r.FinalBytes >= 0 &&
 		r.EstimatedTokensRemoved >= 0 && r.EstimatedRewriteSpanTokens >= 0 &&
 		r.CandidateCount > 0 && r.ExpectedApplications >= 0 &&
-		(r.Source == "transformation" || r.Source == "cache_reuse")
+		(r.Source == "transformation" || r.Source == "cache_reuse") &&
+		r.PricingResource != "" && (r.Summarizer == nil || r.Summarizer.PricingResource != "")
 }
 
 // SavingsEstimate is intentionally explicit when dollars cannot be computed.
 // EstimatedGrossUSD is the repeated cached-input reduction before rewrite and
-// offload costs. EstimatedNetUSD subtracts those costs.
+// summarizer costs. EstimatedNetUSD subtracts those costs.
 type SavingsEstimate struct {
 	EstimatedGrossUSD *float64 `json:"estimated_gross_usd,omitempty"`
 	EstimatedNetUSD   *float64 `json:"estimated_net_usd,omitempty"`
@@ -181,11 +178,11 @@ type CompactionDecision struct {
 	EstimatedNetUSD   *float64 `json:"estimated_net_usd,omitempty"`
 }
 
-func DecideCompaction(r CompactionReport, target *ModelPricing, offloadPricing *ModelPricing) CompactionDecision {
+func DecideCompaction(r CompactionReport, target *ModelPricing, summarizerPricing *ModelPricing) CompactionDecision {
 	if target == nil {
 		return CompactionDecision{Reason: UnavailablePricing}
 	}
-	est := EstimateSavings(r, *target, offloadPricing)
+	est := EstimateSavings(r, *target, summarizerPricing)
 	decision := CompactionDecision{
 		Reason:            est.UnavailableReason,
 		EstimatedGrossUSD: est.EstimatedGrossUSD,
@@ -203,7 +200,7 @@ func DecideCompaction(r CompactionReport, target *ModelPricing, offloadPricing *
 // EstimateSavings applies the conservative cached-prefix formula. N includes
 // the first request carrying the rewritten prefix. Cache-write cost is charged
 // once for the whole batch rewrite span, never once per candidate.
-func EstimateSavings(r CompactionReport, target ModelPricing, offloadPricing *ModelPricing) SavingsEstimate {
+func EstimateSavings(r CompactionReport, target ModelPricing, summarizerPricing *ModelPricing) SavingsEstimate {
 	if r.EstimatedTokensRemoved <= 0 || r.EstimatedRewriteSpanTokens <= 0 {
 		return SavingsEstimate{UnavailableReason: UnavailableTokenEstimate}
 	}
@@ -235,21 +232,21 @@ func EstimateSavings(r CompactionReport, target ModelPricing, offloadPricing *Mo
 			return SavingsEstimate{EstimatedGrossUSD: &gross, UnavailableReason: UnavailableNonFiniteEstimate}
 		}
 	}
-	offloadCost := 0.0
-	if r.Offload != nil {
-		if !r.Offload.Usage.Reported {
-			return SavingsEstimate{EstimatedGrossUSD: &gross, UnavailableReason: UnavailableOffloadUsage}
+	summarizerCost := 0.0
+	if r.Summarizer != nil {
+		if !r.Summarizer.Usage.Reported {
+			return SavingsEstimate{EstimatedGrossUSD: &gross, UnavailableReason: UnavailableSummarizerUsage}
 		}
-		if offloadPricing == nil {
+		if summarizerPricing == nil {
 			return SavingsEstimate{EstimatedGrossUSD: &gross, UnavailableReason: UnavailablePricing}
 		}
 		var ok bool
-		offloadCost, ok = r.Offload.Usage.Cost(*offloadPricing)
+		summarizerCost, ok = r.Summarizer.Usage.Cost(*summarizerPricing)
 		if !ok {
-			return SavingsEstimate{EstimatedGrossUSD: &gross, UnavailableReason: UnavailableOffloadUsage}
+			return SavingsEstimate{EstimatedGrossUSD: &gross, UnavailableReason: UnavailableSummarizerUsage}
 		}
 	}
-	net := gross - rewritePremium - offloadCost
+	net := gross - rewritePremium - summarizerCost
 	if !isFinite(net) {
 		return SavingsEstimate{EstimatedGrossUSD: &gross, UnavailableReason: UnavailableNonFiniteEstimate}
 	}
@@ -259,9 +256,9 @@ func EstimateSavings(r CompactionReport, target ModelPricing, offloadPricing *Mo
 // EstimateApplicationSavings estimates the single request represented by a
 // recorded application. Unlike the decision projection, it never multiplies
 // by ExpectedApplications, so repeated cache-reuse reports cannot double-count
-// projected future savings. Rewrite and offload costs are charged only on a
+// projected future savings. Rewrite and summarizer costs are charged only on a
 // transformation report.
-func EstimateApplicationSavings(r CompactionReport, target ModelPricing, offloadPricing *ModelPricing) SavingsEstimate {
+func EstimateApplicationSavings(r CompactionReport, target ModelPricing, summarizerPricing *ModelPricing) SavingsEstimate {
 	if r.EstimatedTokensRemoved <= 0 {
 		return SavingsEstimate{UnavailableReason: UnavailableTokenEstimate}
 	}
@@ -284,16 +281,16 @@ func EstimateApplicationSavings(r CompactionReport, target ModelPricing, offload
 		return SavingsEstimate{EstimatedGrossUSD: &gross, UnavailableReason: UnavailableNonFiniteEstimate}
 	}
 	net := gross - rewritePremium
-	if r.Offload != nil {
-		if !r.Offload.Usage.Reported {
-			return SavingsEstimate{EstimatedGrossUSD: &gross, UnavailableReason: UnavailableOffloadUsage}
+	if r.Summarizer != nil {
+		if !r.Summarizer.Usage.Reported {
+			return SavingsEstimate{EstimatedGrossUSD: &gross, UnavailableReason: UnavailableSummarizerUsage}
 		}
-		if offloadPricing == nil {
+		if summarizerPricing == nil {
 			return SavingsEstimate{EstimatedGrossUSD: &gross, UnavailableReason: UnavailablePricing}
 		}
-		cost, ok := r.Offload.Usage.Cost(*offloadPricing)
+		cost, ok := r.Summarizer.Usage.Cost(*summarizerPricing)
 		if !ok {
-			return SavingsEstimate{EstimatedGrossUSD: &gross, UnavailableReason: UnavailableOffloadUsage}
+			return SavingsEstimate{EstimatedGrossUSD: &gross, UnavailableReason: UnavailableSummarizerUsage}
 		}
 		net -= cost
 	}

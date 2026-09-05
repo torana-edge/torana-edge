@@ -26,7 +26,7 @@ The supported modes are:
 | `source` | Reserved, but currently fails closed to `exact`. Live OMP dogfood showed that reread markers can make an agent repeatedly fetch different ranges of the same file. |
 | `deterministic` | Retain bounded head/tail evidence plus size, SHA-256, omitted-byte count, and a rerun instruction. Set `first_pass` to compact the first model exposure. |
 | `keyword` | `keyword_compactor` only: retain lines matching cached intent or bounded guidance derived from the historical user request and tool call, after at least one exact exposure. |
-| `model` | `compactor` only: create an offload summary guided by cached intent or the same bounded historical fallback, after at least one exact exposure, then apply it only when the economic gate passes. |
+| `model` | `compactor` only: create a summary through an operator-bound model service, guided by cached intent or the same bounded historical fallback, after at least one exact exposure, then apply it only when the economic gate passes. |
 
 Mutation tools, diffs, failed commands, errors, stack traces, and similar
 safety-sensitive outputs remain exact even if a broad rule matches them.
@@ -79,36 +79,24 @@ spelling is accepted for configuration compatibility, but currently behaves as
 
 ## Model compaction economics
 
-Model compaction is fail-closed. Configure both an expected number of
-applications and explicit prices for the target and offload models; Torana
-ships no price table because rates and cache semantics change.
+Model compaction is fail-closed. The plugin declares three logical resources:
+the `summarizer` model service, `target` pricing, and `summarizer` pricing.
+During approval, the operator binds those names to concrete providers, models,
+credentials, budgets, and rates. The guest never sees provider configuration or
+credentials. Torana ships no price table because rates and cache semantics
+change.
 
 ```json
 {
   "providers": {
     "primary": {
       "url": "https://api.example.com",
-      "format": "openai",
-      "pricing": {
-        "my-model": {
-          "input_usd_per_mtok": 1.0,
-          "output_usd_per_mtok": 4.0,
-          "cache_read_usd_per_mtok": 0.1,
-          "cache_write_usd_per_mtok": 1.25
-        }
-      }
+      "format": "openai"
     },
-    "local-offload": {
+    "local-summarizer": {
       "url": "http://localhost:11434",
       "format": "openai",
-      "pricing": {
-        "qwen2.5:3b": {
-          "input_usd_per_mtok": 0,
-          "output_usd_per_mtok": 0,
-          "cache_read_usd_per_mtok": 0,
-          "cache_write_usd_per_mtok": 0
-        }
-      }
+      "auth": {"mode": "none"}
     }
   },
   "plugins": {
@@ -122,28 +110,28 @@ ships no price table because rates and cache semantics change.
         ]
       }
     }
-  },
-  "offload": {
-    "enabled": true,
-    "provider": "local-offload",
-    "model": "qwen2.5:3b"
   }
 }
 ```
 
-The primary rates above are illustrative, not built-in defaults; replace them
-with the rates for the configured provider and model. An explicit zero is valid
-for a local model; an omitted rate is unknown.
+After installing `compactor`, its approval screen asks for the three declared
+bindings. Bind `summarizer` to `local-summarizer` / `qwen2.5:3b`; bind the
+same-named pricing resource to that service with explicit zero rates; and bind
+`target` to every provider/model combination the compactor may evaluate. For
+example, the target binding for `primary` / `my-model` might use input 1.0,
+output 4.0, cache read 0.1, and cache write 1.25 USD per million tokens. Those
+rates are illustrative, not built-in defaults. An explicit zero is valid for a
+local model; an omitted rate is unknown.
 
 The compactor first tests whether even a best-case reduction could repay the
-cache rewrite. Only then does it call the offload model. Generated candidates
+cache rewrite. Only then does it call the summarizer service. Generated candidates
 are evaluated as one batch using:
 
 - estimated tokens removed;
 - the prompt span rewritten from the earliest changed result;
 - expected future applications;
 - target cache-read and cache-write rates; and
-- reported offload input, output, and cache usage.
+- reported summarizer input, output, and cache usage.
 
 The batch is applied only when estimated net savings are positive. Token counts
 derived from bytes are labeled as estimates. Routing plugins must run before an
@@ -153,7 +141,7 @@ economically gated compactor so the decision uses the final provider and model.
 estimated removed tokens, cache rewrite tokens, gross savings, net savings, and
 reasons a dollar estimate was unavailable. These numbers support workload-
 specific A/B comparisons; they are not a universal percentage of the total API
-bill. It also exposes successful offload input, output, cache-read, and
+bill. It also exposes successful summarizer input, output, cache-read, and
 cache-write tokens so an A/B test can include the summarizer's actual cost.
 OpenAI-compatible DeepSeek responses are accounted using DeepSeek's
 `prompt_cache_hit_tokens` fields when standard OpenAI cache details are absent.

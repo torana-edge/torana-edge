@@ -200,7 +200,7 @@ func RecordPluginSavings(ctx context.Context, plugin string, savedBytes int64) {
 // RecordCompactionEconomics exports one applied batch. Dollar values are
 // emitted only when every required operator-supplied price and usage field is
 // available; otherwise a labeled unavailable counter explains why.
-func RecordCompactionEconomics(ctx context.Context, plugin string, report economics.CompactionReport, targetPricing, offloadPricing *economics.ModelPricing) {
+func RecordCompactionEconomics(ctx context.Context, plugin string, report economics.CompactionReport, targetPricing, summarizerPricing *economics.ModelPricing) {
 	if meter == nil {
 		return
 	}
@@ -219,7 +219,7 @@ func RecordCompactionEconomics(ctx context.Context, plugin string, report econom
 		compactionUnavailable.Add(ctx, 1, metric.WithAttributes(attrs...))
 		return
 	}
-	est := economics.EstimateApplicationSavings(report, *targetPricing, offloadPricing)
+	est := economics.EstimateApplicationSavings(report, *targetPricing, summarizerPricing)
 	if est.EstimatedGrossUSD != nil {
 		attrs := append(append([]attribute.KeyValue{}, base...), attribute.String("kind", "gross"))
 		compactionEstimatedUSD.Add(ctx, *est.EstimatedGrossUSD, metric.WithAttributes(attrs...))
@@ -250,7 +250,7 @@ func statusClass(status int) string {
 }
 
 // RegisterStatsObservables bridges the running StatsTracker to OTLP as
-// observable counters, so throughput and offload failures export without any
+// observable counters, so throughput and audit failures export without any
 // plugin. Savings bytes are NOT bridged here — they export as the labeled
 // sync counter torana_bytes_saved_total{plugin} (see RecordPluginSavings);
 // registering the same name as an observable would conflict.
@@ -260,19 +260,17 @@ func RegisterStatsObservables(st *StatsTracker) {
 		return
 	}
 	compactions, _ := meter.Int64ObservableCounter("torana_compactions_total")
-	offloadFails, _ := meter.Int64ObservableCounter("torana_offload_failures_total")
 	auditWriteFails, _ := meter.Int64ObservableCounter("torana_audit_write_failures_total")
 	bytesIn, _ := meter.Int64ObservableCounter("torana_bytes_in_total")
 	bytesOut, _ := meter.Int64ObservableCounter("torana_bytes_out_total")
 	_, _ = meter.RegisterCallback(func(_ context.Context, o metric.Observer) error {
 		s := st.Snapshot()
 		o.ObserveInt64(compactions, s.Compactions)
-		o.ObserveInt64(offloadFails, s.OffloadFailures)
 		o.ObserveInt64(auditWriteFails, s.AuditWriteFailures)
 		o.ObserveInt64(bytesIn, s.TotalBytesIn)
 		o.ObserveInt64(bytesOut, s.TotalBytesOut)
 		return nil
-	}, compactions, offloadFails, auditWriteFails, bytesIn, bytesOut)
+	}, compactions, auditWriteFails, bytesIn, bytesOut)
 }
 
 // EmitPluginMetric records a custom metric emitted by a WASM plugin, tagged
@@ -420,7 +418,6 @@ var hostMetricNames = map[string]bool{
 	"torana_compaction_savings_unavailable_total": true,
 	"torana_routed_requests_total":                true,
 	"torana_compactions_total":                    true,
-	"torana_offload_failures_total":               true,
 	"torana_audit_write_failures_total":           true,
 	"torana_bytes_in_total":                       true,
 	"torana_bytes_out_total":                      true,

@@ -5,7 +5,7 @@
   "version": "0.1.0",
   "abi_version": "v1",
   "failure_mode": "pass",
-  "description": "Test fixture: drives the REAL extension-callback surface (egress, cache pricing, offload, record-savings) through the production composition and records what the guest observed",
+  "description": "Test fixture: drives the real extension-callback surface (egress, cache pricing, record-savings) through the production composition and records what the guest observed",
   "hooks": [
     {
       "name": "run_before_request"
@@ -21,16 +21,22 @@
       "description": "Query cache pricing"
     },
     {
-      "name": "env.host_call.torana_offload_completion",
-      "description": "Offload a summarization to the configured cheap model"
-    },
-    {
       "name": "env.host_call.torana_record_savings",
       "description": "Report compaction byte savings"
     },
     {
+      "name": "env.model_pricing",
+      "description": "Resolve the explicitly approved test pricing resource"
+    },
+    {
       "name": "ir.model.write",
       "description": "Tag the request model with the observed host answers so the e2e can read them from the captured upstream body"
+    }
+  ],
+  "pricing_resources": [
+    {
+      "name": "target",
+      "description": "Test-only target pricing resource"
     }
   ]
 }
