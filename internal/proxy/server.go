@@ -524,7 +524,11 @@ func (s *Server) recordCompactionReports(rs *reqState) {
 	}()
 	for _, attributed := range rs.CompactionReports {
 		report := attributed.Report
-		targetPricing, summarizerPricing := s.compactionPricing(rs, report, attributed.Target, attributed.Summarizer)
+		// Provider/model cross the guest envelope for observability only. The
+		// request that actually reached the upstream owns their values.
+		report.Provider = rs.Provider
+		report.Model = rs.Model
+		targetPricing, summarizerPricing := compactionPricing(rs.Provider, rs.Model, report, attributed.Target, attributed.Summarizer)
 		s.stats.RecordCompactionReport(attributed.Plugin, report, targetPricing, summarizerPricing)
 		metrics.RecordPluginSavings(context.Background(), attributed.Plugin, report.OriginalBytes-report.FinalBytes)
 		metrics.RecordCompactionEconomics(context.Background(), attributed.Plugin, report, targetPricing, summarizerPricing)
@@ -552,14 +556,7 @@ func economicsPricing(price *pb.ModelPricing) *economics.ModelPricing {
 	}
 }
 
-func (s *Server) compactionPricing(rs *reqState, report economics.CompactionReport, targetResource wasm.PricingResource, summarizerResource *wasm.PricingResource) (*economics.ModelPricing, *economics.ModelPricing) {
-	providerName, model := report.Provider, report.Model
-	if providerName == "" && rs != nil {
-		providerName = rs.Provider
-	}
-	if model == "" && rs != nil {
-		model = rs.Model
-	}
+func compactionPricing(providerName, model string, report economics.CompactionReport, targetResource wasm.PricingResource, summarizerResource *wasm.PricingResource) (*economics.ModelPricing, *economics.ModelPricing) {
 	targetPricing := economicsPricing(targetResource.Prices[wasm.PricingCoordinate(providerName, model)])
 	var summarizerPricing *economics.ModelPricing
 	if report.Summarizer != nil && summarizerResource != nil && len(summarizerResource.Prices) == 1 {
@@ -575,10 +572,9 @@ func (s *Server) evaluateCompaction(ctx context.Context, report economics.Compac
 	if rs == nil {
 		return economics.CompactionDecision{Reason: economics.UnavailableRouteUnresolved}
 	}
-	targetName := report.Provider
-	if targetName == "" {
-		targetName = rs.Provider
-	}
+	targetName := rs.Provider
+	report.Provider = rs.Provider
+	report.Model = rs.Model
 	// Read the route verdict directly rather than a copy cached when a plugin
 	// happened to return a replacement.
 	//
@@ -606,11 +602,12 @@ func (s *Server) evaluateCompaction(ctx context.Context, report economics.Compac
 			return economics.CompactionDecision{Reason: economics.UnavailableRouteUnresolved}
 		}
 		report.Provider = targetName
-		if pendingRoute.Model != "" {
-			report.Model = pendingRoute.Model
+		report.Model = pendingRoute.Model
+		if report.Model == "" {
+			report.Model = rs.Model
 		}
 	}
-	target, summarizer := s.compactionPricing(rs, report, targetResource, summarizerResource)
+	target, summarizer := compactionPricing(report.Provider, report.Model, report, targetResource, summarizerResource)
 	decision := economics.DecideCompaction(report, target, summarizer)
 	if !decision.Apply {
 		return decision
@@ -1806,7 +1803,7 @@ func New(cfg Config) (*Server, error) {
 		case http.MethodPut, http.MethodPost:
 			s.controlPlaneMutationMu.Lock()
 			defer s.controlPlaneMutationMu.Unlock()
-			// Settings write-back: providers / summarizer / limits / control_plane.
+			// Settings write-back: providers / limits / control_plane.
 			// The plugin pipeline (order + per-plugin config) is owned by
 			// /_torana/api/plugins and is preserved verbatim here.
 			data, err := readControlPlaneBody(r.Body)

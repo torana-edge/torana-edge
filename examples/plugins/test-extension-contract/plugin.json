@@ -25,8 +25,18 @@
       "description": "Report compaction byte savings"
     },
     {
+      "name": "env.model_pricing",
+      "description": "Resolve the explicitly approved test pricing resource"
+    },
+    {
       "name": "ir.model.write",
       "description": "Tag the request model with the observed host answers so the e2e can read them from the captured upstream body"
+    }
+  ],
+  "pricing_resources": [
+    {
+      "name": "target",
+      "description": "Test-only target pricing resource"
     }
   ]
 }

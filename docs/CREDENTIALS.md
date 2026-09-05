@@ -28,7 +28,7 @@ Each provider selects one mode:
 
 Torana removes mutable credential headers before routing or failover and then
 applies the target provider's mode. A managed credential cannot leak from one
-provider to another, and host-originated plugin/offload calls cannot borrow a
+provider to another, and host-originated plugin model-service calls cannot borrow a
 caller's credential.
 
 ## Built-in sources

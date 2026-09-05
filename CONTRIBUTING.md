@@ -183,9 +183,9 @@ that touches requests, add it to that test.
 
 **Background hooks have no request.** Inside `run_on_tick` there is no request,
 so `env.original_request`, `env.original_response`, and `env.meta_*` return
-empty, and there is no caller credential — the offload path silently sends no
-`Authorization` header and gets a 401. Anything a tick needs must come from the
-plugin's own state or a host call that resolves its own config.
+empty, and there is no caller credential. Anything a tick needs must come from
+the plugin's own state or an operator-bound platform resource; it must never
+borrow credentials from unrelated caller traffic.
 
 ## Pull requests
 

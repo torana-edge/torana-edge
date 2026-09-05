@@ -59,7 +59,8 @@ type observation struct {
 
 // validReport is a current CompactionReport the host accepts.
 const validReport = `{"original_bytes":1000,"final_bytes":400,"estimated_tokens_removed":100,` +
-	`"estimated_rewrite_span_tokens":5000,"expected_applications":1,"source":"transformation"}`
+	`"estimated_rewrite_span_tokens":5000,"expected_applications":1,"source":"transformation",` +
+	`"pricing_resource":"target"}`
 
 // recordRaw captures the three-way outcome of a raw HostCallExtension call:
 // a Go error (the call failed before the host produced an arm), a framed

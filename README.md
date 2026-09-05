@@ -21,7 +21,7 @@ CLI (`agy`)** — Torana also offers an optional TLS-terminating MITM ingress. S
 - **WASM Plugin Ecosystem:** Write ABI-v1 plugins in Go or Rust with the [torana-plugin-sdk](https://github.com/torana-edge/torana-plugin-sdk) and compile them to `.wasm`. Hot-loaded, no proxy restart. Both SDKs run through the host's executable conformance harness in CI.
 - **Operator-approved plugins:** A plugin declares the capabilities it wants; it does not receive them. You inspect and approve each bundle, and the approval is bound to that bundle's SHA-256 digest — rebuild or change permissions and it needs approving again. Sandboxed in `wazero`: a plugin gets the IR and nothing else, no filesystem, no sockets you did not grant.
 - **Tool-aware compaction:** Explicit policies keep source and failure evidence exact while allowing recoverable searches/listings to be reduced deterministically—even on first exposure when configured.
-- **Economic model delegation:** Historical results can be summarized through a cheaper model only when route-aware cache/offload economics estimate positive net savings.
+- **Economic model delegation:** Historical results can be summarized through an operator-bound model service only when route-aware cache and summarizer economics estimate positive net savings.
 - **Responses-native compaction:** OpenAI Responses requests can opt into provider-side compaction without Torana storing a second conversation.
 - **Provider Failover:** Automatic retry with fallback providers on 429/5xx errors.
 - **Unified IR:** Format adapters translate OpenAI, Anthropic, Bedrock, and Gemini wire formats into a single canonical IR. Plugins work on the IR and never touch raw JSON.
@@ -244,7 +244,7 @@ in [torana-plugins](https://github.com/torana-edge/torana-plugins).
 > run: its cached signal improves relevance, but is no longer an availability
 > dependency. Both compactors derive bounded local guidance when it is absent.
 > `keyword_compactor` and
-> `compactor` are **alternatives** (deterministic/local vs. cheap-model offload),
+> `compactor` are **alternatives** (deterministic/local vs. model summarization),
 > not a pipeline: run **one**, not both, or whichever comes first starves the other.
 > Recommended order: `["schema_translator", "intent", "keyword_compactor"]`.
 > Unmatched tools remain exact. See [Tool-output and Responses compaction](docs/COMPACTION.md)

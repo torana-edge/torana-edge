@@ -138,6 +138,8 @@ approve them.
 | `env.file_*` | Access only to manifest-declared logical files with operator-visible operations, size, and rotation bounds. No OS paths are visible to the guest. |
 | `env.credential_get` | Resolves only operator-bound credential slots. The plugin declares the purpose but never sees provider configuration or other credential IDs. |
 | `env.http_request` | Calls only operator-approved endpoint slots with exact origins, methods, timeouts, byte limits, rate limits, redirect blocking, and private-network protection. |
+| `env.model_complete` | Sends bounded text completions through manifest-declared model-service slots. The operator chooses the provider, URL, model, credential, and budgets; the guest sees only the logical slot name. |
+| `env.model_pricing` | Reads only operator-bound pricing resources by logical name. Pricing is plugin input, not a global Torana setting or a table supplied by the guest. |
 
 None of these does anything on its own. Ticks are off unless you set an
 interval, egress is refused unless you set a budget, and both are refused
@@ -204,6 +206,20 @@ cost is not knowable before making it, so it can overshoot by one call.
 Every plugin-originated request appears in the live feed marked
 `plugin-egress` and attributed to the plugin, and `/stats` counts calls and
 refusals per plugin. If a plugin is spending, you can see it.
+
+### Binding model services and pricing
+
+A plugin that needs a model declares a stable purpose such as `scanner` or
+`summarizer`; it does not name a vendor. During approval, bind that slot to one
+configured provider, model, and root-relative inference path, then choose
+limits no larger than the manifest requested. The same plugin may declare
+multiple independent slots without learning any provider URL or credential.
+
+Pricing works the same way. A plugin declares a purpose such as `target`; the
+operator supplies the provider/model coordinates and their explicit rates.
+When a pricing resource is attached to a model-service slot, its single model
+must match that service. Missing bindings fail closed, and changing the bundle
+requires approval again.
 
 ### Plugin telemetry limits
 

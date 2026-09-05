@@ -21,14 +21,12 @@ func (f economicsRoundTripFunc) RoundTrip(r *http.Request) (*http.Response, erro
 
 func usd(v float64) *float64 { return &v }
 
-func testPricingResource(s *Server) wasm.PricingResource {
-	resource := wasm.PricingResource{Name: "target", Prices: map[string]*pbv1.ModelPricing{}}
-	for providerName, configured := range s.config.Providers.Providers {
-		for model, price := range configured.Pricing {
-			resource.Prices[wasm.PricingCoordinate(providerName, model)] = &pbv1.ModelPricing{
-				InputUsdPerMtok: price.InputUSDPerMTok, OutputUsdPerMtok: price.OutputUSDPerMTok,
-				CacheReadUsdPerMtok: price.CacheReadUSDPerMTok, CacheWriteUsdPerMtok: price.CacheWriteUSDPerMTok,
-			}
+func testPricingResource(prices map[string]economics.ModelPricing) wasm.PricingResource {
+	resource := wasm.PricingResource{Name: "target", Prices: make(map[string]*pbv1.ModelPricing, len(prices))}
+	for coordinate, price := range prices {
+		resource.Prices[coordinate] = &pbv1.ModelPricing{
+			InputUsdPerMtok: price.InputUSDPerMTok, OutputUsdPerMtok: price.OutputUSDPerMTok,
+			CacheReadUsdPerMtok: price.CacheReadUSDPerMTok, CacheWriteUsdPerMtok: price.CacheWriteUSDPerMTok,
 		}
 	}
 	return resource
@@ -36,17 +34,21 @@ func testPricingResource(s *Server) wasm.PricingResource {
 
 func TestEvaluateCompactionUsesRequestRoutePricing(t *testing.T) {
 	s := &Server{config: Config{Providers: provider.Config{Providers: map[string]provider.Provider{
-		"openai": {Pricing: map[string]economics.ModelPricing{
-			"gpt-test": {CacheReadUSDPerMTok: usd(0.5), CacheWriteUSDPerMTok: usd(1)},
-		}},
+		"openai": {},
 	}}}}
 	ctx := context.WithValue(context.Background(), reqStateKey{}, &reqState{Provider: "openai", Model: "gpt-test"})
 	report := economics.CompactionReport{
 		OriginalBytes: 100_000, FinalBytes: 5_000,
 		EstimatedTokensRemoved: 95_000, EstimatedRewriteSpanTokens: 15_000,
 		ExpectedApplications: 8, CandidateCount: 3, Source: "transformation",
+		// These observability fields are guest-controlled on ingress. They must
+		// never select the pricing coordinate.
+		Provider: "guest-provider", Model: "guest-model",
 	}
-	if got := s.evaluateCompaction(ctx, report, testPricingResource(s), nil); !got.Apply || got.EstimatedNetUSD == nil {
+	prices := testPricingResource(map[string]economics.ModelPricing{
+		wasm.PricingCoordinate("openai", "gpt-test"): {CacheReadUSDPerMTok: usd(0.5), CacheWriteUSDPerMTok: usd(1)},
+	})
+	if got := s.evaluateCompaction(ctx, report, prices, nil); !got.Apply || got.EstimatedNetUSD == nil {
 		t.Fatalf("expected profitable decision, got %+v", got)
 	}
 }
@@ -99,7 +101,7 @@ func TestEvaluateCompactionFailsClosedWithoutPricing(t *testing.T) {
 		OriginalBytes: 10, FinalBytes: 1, EstimatedTokensRemoved: 2,
 		EstimatedRewriteSpanTokens: 1, ExpectedApplications: 10, CandidateCount: 1, Source: "transformation",
 	}
-	if got := s.evaluateCompaction(ctx, report, testPricingResource(s), nil); got.Apply || got.Reason != economics.UnavailablePricing {
+	if got := s.evaluateCompaction(ctx, report, testPricingResource(nil), nil); got.Apply || got.Reason != economics.UnavailablePricing {
 		t.Fatalf("unpriced compaction must not apply: %+v", got)
 	}
 }
@@ -107,9 +109,7 @@ func TestEvaluateCompactionFailsClosedWithoutPricing(t *testing.T) {
 func TestEvaluateCompactionUsesEarlierRoutingVerdict(t *testing.T) {
 	s := &Server{config: Config{Providers: provider.Config{Providers: map[string]provider.Provider{
 		"initial": {Format: "openai"},
-		"routed": {Format: "openai", Pricing: map[string]economics.ModelPricing{
-			"cheap": {CacheReadUSDPerMTok: usd(0.5), CacheWriteUSDPerMTok: usd(1)},
-		}},
+		"routed":  {Format: "openai"},
 	}}}}
 	rs := &reqState{
 		Provider: "initial", Model: "expensive", InitialProvider: "initial", InitialFormat: "openai",
@@ -120,11 +120,14 @@ func TestEvaluateCompactionUsesEarlierRoutingVerdict(t *testing.T) {
 		OriginalBytes: 100_000, FinalBytes: 5_000, EstimatedTokensRemoved: 95_000,
 		EstimatedRewriteSpanTokens: 15_000, ExpectedApplications: 8, CandidateCount: 1, Source: "transformation",
 	}
-	if got := s.evaluateCompaction(ctx, report, testPricingResource(s), nil); !got.Apply {
+	prices := testPricingResource(map[string]economics.ModelPricing{
+		wasm.PricingCoordinate("routed", "cheap"): {CacheReadUSDPerMTok: usd(0.5), CacheWriteUSDPerMTok: usd(1)},
+	})
+	if got := s.evaluateCompaction(ctx, report, prices, nil); !got.Apply {
 		t.Fatalf("expected routed pricing to apply, got %+v", got)
 	}
 	rs.PendingRoute.Provider = "missing"
-	if got := s.evaluateCompaction(ctx, report, testPricingResource(s), nil); got.Apply || got.Reason != economics.UnavailableRouteUnresolved {
+	if got := s.evaluateCompaction(ctx, report, prices, nil); got.Apply || got.Reason != economics.UnavailableRouteUnresolved {
 		t.Fatalf("unresolved reroute must fail closed: %+v", got)
 	}
 }
@@ -132,7 +135,7 @@ func TestEvaluateCompactionUsesEarlierRoutingVerdict(t *testing.T) {
 func TestEvaluateCompactionRequiresEveryFallbackToBeEconomic(t *testing.T) {
 	winning := economics.ModelPricing{CacheReadUSDPerMTok: usd(0.5), CacheWriteUSDPerMTok: usd(1)}
 	s := &Server{config: Config{Providers: provider.Config{Providers: map[string]provider.Provider{
-		"primary":  {Format: "openai", Fallback: []string{"fallback"}, Pricing: map[string]economics.ModelPricing{"m": winning}},
+		"primary":  {Format: "openai", Fallback: []string{"fallback"}},
 		"fallback": {Format: "openai"},
 	}}}}
 	ctx := context.WithValue(context.Background(), reqStateKey{}, &reqState{Provider: "primary", Model: "m"})
@@ -140,13 +143,17 @@ func TestEvaluateCompactionRequiresEveryFallbackToBeEconomic(t *testing.T) {
 		OriginalBytes: 100_000, FinalBytes: 5_000, EstimatedTokensRemoved: 95_000,
 		EstimatedRewriteSpanTokens: 15_000, ExpectedApplications: 8, CandidateCount: 1, Source: "transformation",
 	}
-	if got := s.evaluateCompaction(ctx, report, testPricingResource(s), nil); got.Apply || got.Reason != economics.UnavailableFallbackUnpriced {
+	prices := testPricingResource(map[string]economics.ModelPricing{
+		wasm.PricingCoordinate("primary", "m"): winning,
+	})
+	if got := s.evaluateCompaction(ctx, report, prices, nil); got.Apply || got.Reason != economics.UnavailableFallbackUnpriced {
 		t.Fatalf("unpriced fallback must fail closed: %+v", got)
 	}
-	fallback := s.config.Providers.Providers["fallback"]
-	fallback.Pricing = map[string]economics.ModelPricing{"m": winning}
-	s.config.Providers.Providers["fallback"] = fallback
-	if got := s.evaluateCompaction(ctx, report, testPricingResource(s), nil); !got.Apply {
+	prices.Prices[wasm.PricingCoordinate("fallback", "m")] = &pbv1.ModelPricing{
+		CacheReadUsdPerMtok:  winning.CacheReadUSDPerMTok,
+		CacheWriteUsdPerMtok: winning.CacheWriteUSDPerMTok,
+	}
+	if got := s.evaluateCompaction(ctx, report, prices, nil); !got.Apply {
 		t.Fatalf("fully priced compatible fallbacks should apply: %+v", got)
 	}
 }
@@ -163,9 +170,7 @@ func TestEvaluateCompactionRequiresEveryFallbackToBeEconomic(t *testing.T) {
 func TestEvaluateCompactionReadsRouteRecordedWithoutAReplacement(t *testing.T) {
 	s := &Server{config: Config{Providers: provider.Config{Providers: map[string]provider.Provider{
 		"initial": {Format: "openai"},
-		"routed": {Format: "openai", Pricing: map[string]economics.ModelPricing{
-			"cheap": {CacheReadUSDPerMTok: usd(0.5), CacheWriteUSDPerMTok: usd(1)},
-		}},
+		"routed":  {Format: "openai"},
 	}}}}
 
 	rt := wasm.NewRuntime(context.Background())
@@ -192,7 +197,10 @@ func TestEvaluateCompactionReadsRouteRecordedWithoutAReplacement(t *testing.T) {
 		EstimatedRewriteSpanTokens: 15_000, ExpectedApplications: 8, CandidateCount: 1, Source: "transformation",
 	}
 
-	got := s.evaluateCompaction(ctx, report, testPricingResource(s), nil)
+	prices := testPricingResource(map[string]economics.ModelPricing{
+		wasm.PricingCoordinate("routed", "cheap"): {CacheReadUSDPerMTok: usd(0.5), CacheWriteUSDPerMTok: usd(1)},
+	})
+	got := s.evaluateCompaction(ctx, report, prices, nil)
 	if !got.Apply {
 		t.Fatalf("compaction was priced against the unrouted provider: %+v", got)
 	}

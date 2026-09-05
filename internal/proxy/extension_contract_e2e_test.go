@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/torana-edge/torana-edge/internal/plugin"
 	"github.com/torana-edge/torana-edge/internal/provider"
 	pb "github.com/torana-edge/torana-plugin-sdk/pb/v1"
 )
@@ -174,7 +175,19 @@ func newContractServer(t *testing.T) *contractEnv {
 	}
 	cfg.Plugins.Dir = fixturesDir
 	cfg.Plugins.Order = []string{"test-extension-contract"}
-	cfg.Plugins.AllowUnapproved = true
+	digest, err := plugin.BundleDigestForDir(fixturesDir + "/test-extension-contract")
+	if err != nil {
+		t.Fatalf("bundle digest: %v", err)
+	}
+	zero := 0.0
+	cfg.Plugins.Approvals = map[string]provider.PluginApproval{
+		"test-extension-contract": {
+			Digest: digest, Permissions: manifestPermissions(fixturesDir + "/test-extension-contract"), FailureMode: "pass",
+			PricingResources: map[string]provider.PluginPricingApproval{
+				"target": {Models: []provider.PluginPricingModelApproval{{Provider: "oai", Model: "record-savings", InputUSDPerMTok: &zero}}},
+			},
+		},
+	}
 	// Deliberately NO plugins.runtime.egress: the unbudgeted send must be
 	// refused NOT_CONFIGURED.
 
