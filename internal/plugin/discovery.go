@@ -62,6 +62,8 @@ type PluginManifest struct {
 	Credentials          []CredentialDeclaration   `json:"credentials,omitempty"`
 	Files                []FileDeclaration         `json:"files,omitempty"`
 	HTTPEndpoints        []HTTPEndpointDeclaration `json:"http_endpoints,omitempty"`
+	ModelServices        []ModelServiceDeclaration `json:"model_services,omitempty"`
+	PricingResources     []PricingDeclaration      `json:"pricing_resources,omitempty"`
 	// RequiresUpstream lists stable plugin IDs that must be approved and
 	// loaded earlier in the operator's configured order.
 	RequiresUpstream []string `json:"requires_upstream,omitempty"`
@@ -102,6 +104,30 @@ type HTTPEndpointDeclaration struct {
 	MaxRequestBytes   int64    `json:"max_request_bytes,omitempty"`
 	MaxResponseBytes  int64    `json:"max_response_bytes,omitempty"`
 	MaxCallsPerMinute int      `json:"max_calls_per_minute,omitempty"`
+}
+
+// ModelServiceDeclaration names a provider-neutral model dependency. The
+// manifest requests bounded capacity; the operator approval chooses the real
+// provider, model, path, and credential policy.
+type ModelServiceDeclaration struct {
+	Name              string `json:"name"`
+	Description       string `json:"description"`
+	Required          bool   `json:"required,omitempty"`
+	TimeoutMS         int    `json:"timeout_ms,omitempty"`
+	MaxTokens         uint32 `json:"max_tokens,omitempty"`
+	MaxInputBytes     int64  `json:"max_input_bytes,omitempty"`
+	MaxCallsPerMinute int    `json:"max_calls_per_minute,omitempty"`
+	MaxTokensPerHour  int64  `json:"max_tokens_per_hour,omitempty"`
+}
+
+// PricingDeclaration names pricing data a plugin needs. ForModelService binds
+// it to another declared resource; an empty value means the current request's
+// provider and model.
+type PricingDeclaration struct {
+	Name            string `json:"name"`
+	Description     string `json:"description"`
+	Required        bool   `json:"required,omitempty"`
+	ForModelService string `json:"for_model_service,omitempty"`
 }
 
 type ConfigField struct {
@@ -458,6 +484,41 @@ func validateResourceDeclarations(manifest PluginManifest, permissions map[strin
 		}
 		if declaration.TimeoutMS < 0 || declaration.MaxRequestBytes < 0 || declaration.MaxResponseBytes < 0 || declaration.MaxCallsPerMinute < 0 {
 			return fmt.Errorf("HTTP endpoint %q limits must not be negative", declaration.Name)
+		}
+	}
+
+	modelServices := make(map[string]struct{}, len(manifest.ModelServices))
+	for _, declaration := range manifest.ModelServices {
+		if strings.TrimSpace(declaration.Name) == "" || strings.TrimSpace(declaration.Description) == "" {
+			return fmt.Errorf("model service declarations require name and description")
+		}
+		if _, duplicate := modelServices[declaration.Name]; duplicate {
+			return fmt.Errorf("duplicate model service %q", declaration.Name)
+		}
+		modelServices[declaration.Name] = struct{}{}
+		if _, ok := permissions["env.model_complete"]; !ok {
+			return fmt.Errorf("model service %q requires env.model_complete", declaration.Name)
+		}
+		if declaration.TimeoutMS <= 0 || declaration.TimeoutMS > 120000 || declaration.MaxTokens == 0 || declaration.MaxTokens > 1<<31-1 || declaration.MaxInputBytes <= 0 || declaration.MaxInputBytes > 8<<20 || declaration.MaxCallsPerMinute <= 0 || declaration.MaxTokensPerHour <= 0 {
+			return fmt.Errorf("model service %q requires positive bounded timeout, token, and call limits", declaration.Name)
+		}
+	}
+	pricingResources := make(map[string]struct{}, len(manifest.PricingResources))
+	for _, declaration := range manifest.PricingResources {
+		if strings.TrimSpace(declaration.Name) == "" || strings.TrimSpace(declaration.Description) == "" {
+			return fmt.Errorf("pricing resource declarations require name and description")
+		}
+		if _, duplicate := pricingResources[declaration.Name]; duplicate {
+			return fmt.Errorf("duplicate pricing resource %q", declaration.Name)
+		}
+		pricingResources[declaration.Name] = struct{}{}
+		if _, ok := permissions["env.model_pricing"]; !ok {
+			return fmt.Errorf("pricing resource %q requires env.model_pricing", declaration.Name)
+		}
+		if declaration.ForModelService != "" {
+			if _, ok := modelServices[declaration.ForModelService]; !ok {
+				return fmt.Errorf("pricing resource %q references undeclared model service %q", declaration.Name, declaration.ForModelService)
+			}
 		}
 	}
 	return nil
@@ -2114,12 +2175,14 @@ type PluginConfig struct {
 // It binds granted capabilities and the effective failure mode to one exact
 // WASM digest. Updating the artifact therefore requires explicit reapproval.
 type Approval struct {
-	Digest        string                  `json:"digest"`
-	Permissions   []string                `json:"permissions"`
-	FailureMode   string                  `json:"failure_mode,omitempty"`
-	Credentials   map[string]string       `json:"credentials,omitempty"`
-	Files         map[string]FileApproval `json:"files,omitempty"`
-	HTTPEndpoints map[string]HTTPApproval `json:"http_endpoints,omitempty"`
+	Digest           string                          `json:"digest"`
+	Permissions      []string                        `json:"permissions"`
+	FailureMode      string                          `json:"failure_mode,omitempty"`
+	Credentials      map[string]string               `json:"credentials,omitempty"`
+	Files            map[string]FileApproval         `json:"files,omitempty"`
+	HTTPEndpoints    map[string]HTTPApproval         `json:"http_endpoints,omitempty"`
+	ModelServices    map[string]ModelServiceApproval `json:"model_services,omitempty"`
+	PricingResources map[string]PricingApproval      `json:"pricing_resources,omitempty"`
 }
 
 type FileApproval struct {
@@ -2134,6 +2197,30 @@ type HTTPApproval struct {
 	MaxRequestBytes   int64    `json:"max_request_bytes,omitempty"`
 	MaxResponseBytes  int64    `json:"max_response_bytes,omitempty"`
 	MaxCallsPerMinute int      `json:"max_calls_per_minute,omitempty"`
+}
+
+type ModelServiceApproval struct {
+	Provider          string `json:"provider"`
+	Model             string `json:"model"`
+	Path              string `json:"path"`
+	TimeoutMS         int    `json:"timeout_ms,omitempty"`
+	MaxTokens         uint32 `json:"max_tokens,omitempty"`
+	MaxInputBytes     int64  `json:"max_input_bytes,omitempty"`
+	MaxCallsPerMinute int    `json:"max_calls_per_minute,omitempty"`
+	MaxTokensPerHour  int64  `json:"max_tokens_per_hour,omitempty"`
+}
+
+type PricingApproval struct {
+	Models []PricingModelApproval `json:"models"`
+}
+
+type PricingModelApproval struct {
+	Provider             string   `json:"provider,omitempty"`
+	Model                string   `json:"model,omitempty"`
+	InputUSDPerMTok      *float64 `json:"input_usd_per_mtok,omitempty"`
+	OutputUSDPerMTok     *float64 `json:"output_usd_per_mtok,omitempty"`
+	CacheReadUSDPerMTok  *float64 `json:"cache_read_usd_per_mtok,omitempty"`
+	CacheWriteUSDPerMTok *float64 `json:"cache_write_usd_per_mtok,omitempty"`
 }
 
 func (c PluginConfig) approvalFor(bundle PluginBundle) (Approval, bool) {
@@ -2206,7 +2293,7 @@ func defaultHTTPApprovals(manifest PluginManifest) map[string]HTTPApproval {
 }
 
 func resolvePluginResources(manifest PluginManifest, approval Approval) (wasm.PluginResources, error) {
-	resources := wasm.PluginResources{Credentials: map[string]string{}, Files: map[string]wasm.FileResource{}, HTTP: map[string]wasm.HTTPResource{}}
+	resources := wasm.PluginResources{Credentials: map[string]string{}, Files: map[string]wasm.FileResource{}, HTTP: map[string]wasm.HTTPResource{}, ModelServices: map[string]wasm.ModelServiceResource{}, PricingResources: map[string]wasm.PricingResource{}}
 	declaredCredentials := make(map[string]CredentialDeclaration, len(manifest.Credentials))
 	for _, declaration := range manifest.Credentials {
 		declaredCredentials[declaration.Slot] = declaration
@@ -2332,7 +2419,100 @@ func resolvePluginResources(manifest PluginManifest, approval Approval) (wasm.Pl
 			}
 		}
 	}
+	declaredModels := make(map[string]ModelServiceDeclaration, len(manifest.ModelServices))
+	for _, declaration := range manifest.ModelServices {
+		declaredModels[declaration.Name] = declaration
+	}
+	for name, binding := range approval.ModelServices {
+		declaration, ok := declaredModels[name]
+		if !ok {
+			return resources, fmt.Errorf("model service binding %q was not declared by manifest", name)
+		}
+		if strings.TrimSpace(binding.Provider) == "" || strings.TrimSpace(binding.Model) == "" || validateModelServicePath(binding.Path) != nil {
+			return resources, fmt.Errorf("model service %q approval requires provider, model, and absolute path", name)
+		}
+		if binding.TimeoutMS <= 0 || binding.TimeoutMS > 120000 || binding.MaxTokens == 0 || binding.MaxTokens > 1<<31-1 || binding.MaxInputBytes <= 0 || binding.MaxInputBytes > 8<<20 || binding.MaxCallsPerMinute <= 0 || binding.MaxTokensPerHour <= 0 {
+			return resources, fmt.Errorf("model service %q approval requires positive limits", name)
+		}
+		if binding.TimeoutMS > declaration.TimeoutMS || binding.MaxTokens > declaration.MaxTokens || binding.MaxInputBytes > declaration.MaxInputBytes || binding.MaxCallsPerMinute > declaration.MaxCallsPerMinute || binding.MaxTokensPerHour > declaration.MaxTokensPerHour {
+			return resources, fmt.Errorf("model service %q approval exceeds the manifest request", name)
+		}
+		resources.ModelServices[name] = wasm.ModelServiceResource{Name: name, Provider: binding.Provider, Model: binding.Model, Path: binding.Path, Timeout: time.Duration(binding.TimeoutMS) * time.Millisecond, MaxTokens: binding.MaxTokens, MaxInputBytes: binding.MaxInputBytes, MaxCallsPerMinute: binding.MaxCallsPerMinute, MaxTokensPerHour: binding.MaxTokensPerHour}
+	}
+	for name, declaration := range declaredModels {
+		if declaration.Required {
+			if _, ok := resources.ModelServices[name]; !ok {
+				return resources, fmt.Errorf("required model service %q is not approved", name)
+			}
+		}
+	}
+	declaredPricing := make(map[string]PricingDeclaration, len(manifest.PricingResources))
+	for _, declaration := range manifest.PricingResources {
+		declaredPricing[declaration.Name] = declaration
+	}
+	for name, binding := range approval.PricingResources {
+		declaration, ok := declaredPricing[name]
+		if !ok {
+			return resources, fmt.Errorf("pricing resource binding %q was not declared by manifest", name)
+		}
+		if len(binding.Models) == 0 {
+			return resources, fmt.Errorf("pricing resource %q approval must contain at least one model", name)
+		}
+		prices := make(map[string]*pbv1.ModelPricing, len(binding.Models))
+		boundProvider, boundModel := "", ""
+		if declaration.ForModelService != "" {
+			service, ok := resources.ModelServices[declaration.ForModelService]
+			if !ok {
+				return resources, fmt.Errorf("pricing resource %q requires approved model service %q", name, declaration.ForModelService)
+			}
+			if len(binding.Models) != 1 {
+				return resources, fmt.Errorf("pricing resource %q bound to model service %q must contain exactly one model", name, declaration.ForModelService)
+			}
+			model := binding.Models[0]
+			if (model.Provider != "" && model.Provider != service.Provider) || (model.Model != "" && model.Model != service.Model) {
+				return resources, fmt.Errorf("pricing resource %q must match model service %q", name, declaration.ForModelService)
+			}
+			boundProvider, boundModel = service.Provider, service.Model
+		}
+		for index, model := range binding.Models {
+			providerName, modelName := model.Provider, model.Model
+			if declaration.ForModelService != "" {
+				providerName, modelName = boundProvider, boundModel
+			}
+			if strings.TrimSpace(providerName) == "" || strings.TrimSpace(modelName) == "" {
+				return resources, fmt.Errorf("pricing resource %q model %d requires provider and model", name, index)
+			}
+			pricing := &pbv1.ModelPricing{InputUsdPerMtok: model.InputUSDPerMTok, OutputUsdPerMtok: model.OutputUSDPerMTok, CacheReadUsdPerMtok: model.CacheReadUSDPerMTok, CacheWriteUsdPerMtok: model.CacheWriteUSDPerMTok}
+			if err := pricing.Validate(); err != nil {
+				return resources, fmt.Errorf("pricing resource %q model %d: %w", name, index, err)
+			}
+			key := wasm.PricingCoordinate(providerName, modelName)
+			if _, duplicate := prices[key]; duplicate {
+				return resources, fmt.Errorf("pricing resource %q repeats provider/model %q/%q", name, providerName, modelName)
+			}
+			prices[key] = proto.Clone(pricing).(*pbv1.ModelPricing)
+		}
+		resources.PricingResources[name] = wasm.PricingResource{Name: name, ForModelService: declaration.ForModelService, Prices: prices}
+	}
+	for name, declaration := range declaredPricing {
+		if declaration.Required {
+			if _, ok := resources.PricingResources[name]; !ok {
+				return resources, fmt.Errorf("required pricing resource %q is not approved", name)
+			}
+		}
+	}
 	return resources, nil
+}
+
+func validateModelServicePath(path string) error {
+	if !strings.HasPrefix(path, "/") || strings.HasPrefix(path, "//") || strings.Contains(path, "#") {
+		return fmt.Errorf("path must be root-relative")
+	}
+	u, err := url.ParseRequestURI(path)
+	if err != nil || u.IsAbs() || u.Host != "" || u.User != nil {
+		return fmt.Errorf("path must be root-relative")
+	}
+	return nil
 }
 
 func validateApproval(bundle PluginBundle, approval Approval) ([]string, string, error) {

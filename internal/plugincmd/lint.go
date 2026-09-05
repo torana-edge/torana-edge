@@ -65,6 +65,8 @@ var sdkPermission = map[string]string{
 	"ListFiles":             "env.file_list",
 	"DeleteFile":            "env.file_delete",
 	"HTTPRequest":           "env.http_request",
+	"ModelComplete":         "env.model_complete",
+	"GetModelPricing":       "env.model_pricing",
 	"GetCachePricing":       "env.host_call.torana_cache_pricing",
 	"SendRequest":           "env.host_call.torana_send_request",
 	"SetCacheBreakpoint":    "ir.cache_control.write",

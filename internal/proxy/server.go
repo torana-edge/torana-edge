@@ -1897,6 +1897,8 @@ func New(cfg Config) (*Server, error) {
 				Credentials       []plugin.CredentialDeclaration   `json:"credentials,omitempty"`
 				Files             []plugin.FileDeclaration         `json:"files,omitempty"`
 				HTTPEndpoints     []plugin.HTTPEndpointDeclaration `json:"http_endpoints,omitempty"`
+				ModelServices     []plugin.ModelServiceDeclaration `json:"model_services,omitempty"`
+				PricingResources  []plugin.PricingDeclaration      `json:"pricing_resources,omitempty"`
 				RequiresUpstream  []string                         `json:"requires_upstream"`
 				ConflictsWith     []string                         `json:"conflicts_with"`
 				Enabled           bool                             `json:"enabled"`
@@ -1973,6 +1975,8 @@ func New(cfg Config) (*Server, error) {
 					Credentials:       append([]plugin.CredentialDeclaration(nil), m.Credentials...),
 					Files:             append([]plugin.FileDeclaration(nil), m.Files...),
 					HTTPEndpoints:     append([]plugin.HTTPEndpointDeclaration(nil), m.HTTPEndpoints...),
+					ModelServices:     append([]plugin.ModelServiceDeclaration(nil), m.ModelServices...),
+					PricingResources:  append([]plugin.PricingDeclaration(nil), m.PricingResources...),
 					RequiresUpstream:  append([]string{}, m.RequiresUpstream...),
 					ConflictsWith:     append([]string{}, m.ConflictsWith...),
 					Enabled:           enabled,
@@ -2872,13 +2876,27 @@ func pluginApprovals(src map[string]provider.PluginApproval) map[string]plugin.A
 		for slot, id := range approval.Credentials {
 			credentialBindings[slot] = id
 		}
+		modelBindings := make(map[string]plugin.ModelServiceApproval, len(approval.ModelServices))
+		for name, binding := range approval.ModelServices {
+			modelBindings[name] = plugin.ModelServiceApproval{Provider: binding.Provider, Model: binding.Model, Path: binding.Path, TimeoutMS: binding.TimeoutMS, MaxTokens: binding.MaxTokens, MaxInputBytes: binding.MaxInputBytes, MaxCallsPerMinute: binding.MaxCallsPerMinute, MaxTokensPerHour: binding.MaxTokensPerHour}
+		}
+		pricingBindings := make(map[string]plugin.PricingApproval, len(approval.PricingResources))
+		for name, binding := range approval.PricingResources {
+			models := make([]plugin.PricingModelApproval, 0, len(binding.Models))
+			for _, model := range binding.Models {
+				models = append(models, plugin.PricingModelApproval{Provider: model.Provider, Model: model.Model, InputUSDPerMTok: model.InputUSDPerMTok, OutputUSDPerMTok: model.OutputUSDPerMTok, CacheReadUSDPerMTok: model.CacheReadUSDPerMTok, CacheWriteUSDPerMTok: model.CacheWriteUSDPerMTok})
+			}
+			pricingBindings[name] = plugin.PricingApproval{Models: models}
+		}
 		dst[key] = plugin.Approval{
-			Digest:        approval.Digest,
-			Permissions:   append([]string(nil), approval.Permissions...),
-			FailureMode:   approval.FailureMode,
-			Credentials:   credentialBindings,
-			Files:         fileBindings,
-			HTTPEndpoints: httpBindings,
+			Digest:           approval.Digest,
+			Permissions:      append([]string(nil), approval.Permissions...),
+			FailureMode:      approval.FailureMode,
+			Credentials:      credentialBindings,
+			Files:            fileBindings,
+			HTTPEndpoints:    httpBindings,
+			ModelServices:    modelBindings,
+			PricingResources: pricingBindings,
 		}
 	}
 	return dst
@@ -3249,6 +3267,8 @@ func (s *Server) newRuntime() *wasm.Runtime {
 	// (INVALID_ARGUMENT / NOT_CONFIGURED / UNAVAILABLE); the value arm carries
 	// provider outcomes only.
 	rt.SendRequestFunc = s.sendPluginRequest
+	rt.ModelCompleteFunc = s.completeModel
+	rt.ModelPricingFunc = s.modelPricing
 	rt.CredentialGetFunc = func(ctx context.Context, pluginName, credentialID string) ([]byte, error) {
 		return s.resolveCredential(ctx, credentialID)
 	}

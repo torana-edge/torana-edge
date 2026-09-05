@@ -2,6 +2,7 @@ package wasm
 
 import (
 	"context"
+	"math"
 	"testing"
 
 	pbv1 "github.com/torana-edge/torana-plugin-sdk/pb/v1"
@@ -72,6 +73,42 @@ func TestPrivateAndSharedCacheDomainsAreEnforcedByTheHost(t *testing.T) {
 	cacheValue(t, cacheSetCall(t, r, b, "env.cache_set", sharedCacheKey("intent:call"), "poison"))
 	if got := cacheValue(t, cacheGetCall(t, r, a, "env.shared_cache_get", "intent:call")); got != "shared" {
 		t.Fatalf("private key poisoned shared domain: %q", got)
+	}
+}
+
+func TestPrivateCacheIsScopedToApprovedResources(t *testing.T) {
+	r := NewRuntime(context.Background())
+	defer r.Close()
+	p, err := r.LoadPlugin("scanner", MinimalModule(false))
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.SetGrants([]string{"env.cache_get", "env.cache_set"})
+	resources := PluginResources{ModelServices: map[string]ModelServiceResource{
+		"scanner": {Name: "scanner", Provider: "local", Model: "model-a", Path: "/v1/chat"},
+	}}
+	p.SetResources(resources)
+	cacheValue(t, cacheSetCall(t, r, p, "env.cache_set", "clean", "model-a-verdict"))
+
+	resources.ModelServices["scanner"] = ModelServiceResource{Name: "scanner", Provider: "local", Model: "model-b", Path: "/v1/chat"}
+	p.SetResources(resources)
+	miss := cacheGetCall(t, r, p, "env.cache_get", "clean")
+	if arm, ok := miss.Result.(*pbv1.HostCallResult_Error); !ok || arm.Error.Code != pbv1.ErrorCode_ERROR_CODE_NOT_FOUND {
+		t.Fatalf("resource rebind reused old cache entry: %+v", miss.Result)
+	}
+	cacheValue(t, cacheSetCall(t, r, p, "env.cache_set", "clean", "model-b-verdict"))
+	p.SetResources(resources)
+	if got := cacheValue(t, cacheGetCall(t, r, p, "env.cache_get", "clean")); got != "model-b-verdict" {
+		t.Fatalf("unchanged resource snapshot lost cache entry: %q", got)
+	}
+
+	nan := math.NaN()
+	p.SetResources(PluginResources{PricingResources: map[string]PricingResource{
+		"invalid": {Name: "invalid", Prices: map[string]*pbv1.ModelPricing{PricingCoordinate("p", "m"): {InputUsdPerMtok: &nan}}},
+	}})
+	invalid := cacheGetCall(t, r, p, "env.cache_get", "clean")
+	if arm, ok := invalid.Result.(*pbv1.HostCallResult_Error); !ok || arm.Error.Code != pbv1.ErrorCode_ERROR_CODE_INTERNAL {
+		t.Fatalf("invalid resource graph did not fail cache access closed: %+v", invalid.Result)
 	}
 }
 

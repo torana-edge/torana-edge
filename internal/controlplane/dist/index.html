@@ -505,6 +505,56 @@
           return false;
         }
       }
+	  const modelServices = {};
+	  document.querySelectorAll('#pluginResourceReview .model-binding-enabled:checked').forEach(enabled => {
+		const row = enabled.closest('[data-model-service]');
+		modelServices[enabled.dataset.modelService] = {
+		  provider: row.querySelector('.model-binding-provider').value.trim(),
+		  model: row.querySelector('.model-binding-model').value.trim(),
+		  path: row.querySelector('.model-binding-path').value.trim(),
+		  timeout_ms: Number(row.querySelector('.model-binding-timeout').value),
+		  max_tokens: Number(row.querySelector('.model-binding-tokens').value),
+		  max_input_bytes: Number(row.querySelector('.model-binding-input-bytes').value),
+		  max_calls_per_minute: Number(row.querySelector('.model-binding-rpm').value),
+		  max_tokens_per_hour: Number(row.querySelector('.model-binding-tph').value)
+		};
+	  });
+	  for (const declaration of (p.model_services || [])) {
+		if (declaration.required && !modelServices[declaration.name]) {
+		  showAlert(`Model service ${declaration.name} is required before ${name} can be enabled.`);
+		  return false;
+		}
+	  }
+	  for (const [resource, binding] of Object.entries(modelServices)) {
+		if (!binding.provider || !binding.model || !binding.path.startsWith('/') ||
+			![binding.timeout_ms, binding.max_tokens, binding.max_input_bytes, binding.max_calls_per_minute, binding.max_tokens_per_hour].every(value => Number.isFinite(value) && value > 0)) {
+		  showAlert(`Model service ${resource} needs a provider, model, absolute inference path, and positive limits.`);
+		  return false;
+		}
+	  }
+	  const pricingResources = {};
+	  document.querySelectorAll('#pluginResourceReview .pricing-binding-enabled:checked').forEach(enabled => {
+		const row = enabled.closest('[data-pricing-resource]');
+		const models = [...row.querySelectorAll('.pricing-model-row')].map(modelRow => {
+		  const binding = {};
+		  const providerInput = modelRow.querySelector('.pricing-binding-provider');
+		  const modelInput = modelRow.querySelector('.pricing-binding-model');
+		  if (providerInput) binding.provider = providerInput.value.trim();
+		  if (modelInput) binding.model = modelInput.value.trim();
+		  for (const [selector, key] of [['input','input_usd_per_mtok'],['output','output_usd_per_mtok'],['cache-read','cache_read_usd_per_mtok'],['cache-write','cache_write_usd_per_mtok']]) {
+			const raw = modelRow.querySelector(`.pricing-binding-${selector}`).value;
+			if (raw !== '') binding[key] = Number(raw);
+		  }
+		  return binding;
+		});
+		pricingResources[enabled.dataset.pricingResource] = { models };
+	  });
+	  for (const declaration of (p.pricing_resources || [])) {
+		if (declaration.required && !pricingResources[declaration.name]) {
+		  showAlert(`Pricing resource ${declaration.name} is required before ${name} can be enabled.`);
+		  return false;
+		}
+	  }
       const summary = selected.length ? selected.join('\n  • ') : 'none';
       const requirements = (p.requires_upstream || []).length
         ? `\nRequires earlier plugin IDs:\n  • ${(p.requires_upstream || []).join('\n  • ')}`
@@ -522,7 +572,9 @@
         failure_mode: failureMode,
         credentials: credentials,
         files: files,
-        http_endpoints: httpEndpoints
+        http_endpoints: httpEndpoints,
+		model_services: modelServices,
+		pricing_resources: pricingResources
       };
       if (!pipelineOrder.includes(name)) pipelineOrder.push(name);
       if (!configMap[name]) configMap[name] = {};
@@ -616,6 +668,22 @@
     }
 
     // ---- Plugin detail ----
+    function pricingModelFields(model = {}, includeCoordinates = true) {
+      const rate = key => model[key] === undefined ? '' : model[key];
+      const coordinates = includeCoordinates ? `<label class="field"><span>Provider</span><input class="input pricing-binding-provider" value="${escAttr(model.provider || '')}" placeholder="configured provider name"></label>
+        <label class="field"><span>Model</span><input class="input pricing-binding-model" value="${escAttr(model.model || '')}" placeholder="exact model ID"></label>` : '';
+      return `<div class="pricing-model-row form-grid">
+        ${coordinates}
+        <label class="field"><span>Input</span><input class="input pricing-binding-input" type="number" min="0" step="any" value="${escAttr(rate('input_usd_per_mtok'))}"></label>
+        <label class="field"><span>Output</span><input class="input pricing-binding-output" type="number" min="0" step="any" value="${escAttr(rate('output_usd_per_mtok'))}"></label>
+        <label class="field"><span>Cache read</span><input class="input pricing-binding-cache-read" type="number" min="0" step="any" value="${escAttr(rate('cache_read_usd_per_mtok'))}"></label>
+        <label class="field"><span>Cache write</span><input class="input pricing-binding-cache-write" type="number" min="0" step="any" value="${escAttr(rate('cache_write_usd_per_mtok'))}"></label>
+        ${includeCoordinates ? '<button type="button" class="btn btn-sm" onclick="this.closest(\'.pricing-model-row\').remove()">Remove model</button>' : ''}
+      </div>`;
+    }
+    function addPricingModelRow(button) {
+      button.closest('[data-pricing-resource]').querySelector('.pricing-models').insertAdjacentHTML('beforeend', pricingModelFields({}, true));
+    }
     function renderPluginDetail(name) {
       const cont = document.getElementById('pluginDetail');
       const p = pluginByName[name];
@@ -677,10 +745,41 @@
           </div>
         </div>`;
       }).join('');
-      const resourceReview = credentialRows || httpRows || fileRows ? `<fieldset class="permission-review" id="pluginResourceReview">
+	  const approvedModels = currentApproval && currentApproval.digest === p.digest ? (currentApproval.model_services || {}) : {};
+	  const modelRows = (p.model_services || []).map(declaration => {
+		const existing = approvedModels[declaration.name] || {};
+		const enabled = Boolean(approvedModels[declaration.name]) || declaration.required;
+		return `<div class="info-note" data-model-service="${escAttr(declaration.name)}">
+		  <label class="checkbox-row"><input type="checkbox" class="model-binding-enabled" data-model-service="${escAttr(declaration.name)}" ${enabled ? 'checked' : ''} ${declaration.required ? 'disabled' : ''}> <code>${escHtml(declaration.name)}</code>${declaration.required ? ' (required)' : ''}</label>
+		  <div class="hint">${escHtml(declaration.description || '')}. The plugin sees only this logical name; Torana owns the provider, model, credential, path, and budgets.</div>
+		  <div class="form-grid">
+			<label class="field"><span>Provider</span><input class="input model-binding-provider" value="${escAttr(existing.provider || '')}" placeholder="configured provider name"></label>
+			<label class="field"><span>Model</span><input class="input model-binding-model" value="${escAttr(existing.model || '')}" placeholder="provider model ID"></label>
+			<label class="field"><span>Inference path</span><input class="input model-binding-path" value="${escAttr(existing.path || '')}" placeholder="/v1/chat/completions"></label>
+			<label class="field"><span>Timeout ms</span><input class="input model-binding-timeout" type="number" min="1" value="${escAttr(existing.timeout_ms || declaration.timeout_ms || 30000)}"></label>
+			<label class="field"><span>Max output tokens / call</span><input class="input model-binding-tokens" type="number" min="1" value="${escAttr(existing.max_tokens || declaration.max_tokens || '')}"></label>
+			<label class="field"><span>Max input bytes / call</span><input class="input model-binding-input-bytes" type="number" min="1" max="8388608" value="${escAttr(existing.max_input_bytes || declaration.max_input_bytes || '')}"></label>
+			<label class="field"><span>Calls / min</span><input class="input model-binding-rpm" type="number" min="1" value="${escAttr(existing.max_calls_per_minute || declaration.max_calls_per_minute || '')}"></label>
+			<label class="field"><span>Tokens / hour</span><input class="input model-binding-tph" type="number" min="1" value="${escAttr(existing.max_tokens_per_hour || declaration.max_tokens_per_hour || '')}"></label>
+		  </div>
+		</div>`;
+	  }).join('');
+	  const approvedPricing = currentApproval && currentApproval.digest === p.digest ? (currentApproval.pricing_resources || {}) : {};
+	  const pricingRows = (p.pricing_resources || []).map(declaration => {
+		const existing = approvedPricing[declaration.name] || {};
+		const enabled = Boolean(approvedPricing[declaration.name]) || declaration.required;
+		const models = existing.models && existing.models.length ? existing.models : [{}];
+		return `<div class="info-note" data-pricing-resource="${escAttr(declaration.name)}">
+		  <label class="checkbox-row"><input type="checkbox" class="pricing-binding-enabled" data-pricing-resource="${escAttr(declaration.name)}" ${enabled ? 'checked' : ''} ${declaration.required ? 'disabled' : ''}> <code>${escHtml(declaration.name)}</code>${declaration.required ? ' (required)' : ''}</label>
+		  <div class="hint">${escHtml(declaration.description || '')}${declaration.for_model_service ? `; bound to model service <code>${escHtml(declaration.for_model_service)}</code>` : '; bound to the routed request model'}. Rates are USD per million tokens; blank means that component is not priced.</div>
+		  <div class="pricing-models">${models.map(model => pricingModelFields(model, !declaration.for_model_service)).join('')}</div>
+		  ${declaration.for_model_service ? '' : '<button type="button" class="btn btn-sm" onclick="addPricingModelRow(this)">+ Add model price</button>'}
+		</div>`;
+	  }).join('');
+      const resourceReview = credentialRows || httpRows || fileRows || modelRows || pricingRows ? `<fieldset class="permission-review" id="pluginResourceReview">
         <legend>Resource bindings and limits</legend>
-        <div class="section-desc">Capabilities authorize kinds of operations. These bindings authorize the specific credentials, endpoints, and private logical files the plugin may use, within operator-owned budgets.</div>
-        ${credentialRows}${httpRows}${fileRows}
+        <div class="section-desc">Capabilities authorize kinds of operations. These bindings authorize the specific credentials, endpoints, files, model services, and pricing data the plugin may use, within operator-owned budgets.</div>
+        ${credentialRows}${httpRows}${fileRows}${modelRows}${pricingRows}
       </fieldset>` : '<div id="pluginResourceReview"></div>';
       const requirements = (p.requires_upstream || []).map(id => `<code>${escHtml(id)}</code>`).join(', ');
       const conflicts = (p.conflicts_with || []).map(id => `<code>${escHtml(id)}</code>`).join(', ');

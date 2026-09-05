@@ -41,6 +41,8 @@ github.com/tetratelabs/wazero v1.12.0 h1:DuWcpNu/FzgEXgGBDp8J1Spc+CWOvvtvVyjKlaZ
 github.com/tetratelabs/wazero v1.12.0/go.mod h1:LvKtzl2RqO4gyF27BiXU+nKAjcV8f38U+kP/q2vgxh0=
 github.com/torana-edge/torana-plugin-sdk v0.2.1-0.20260830212027-1c1e1dd734e9 h1:kaimri3CldhiyDJCHX6C6ZtNbwTgozDhVVnrKlMUq+w=
 github.com/torana-edge/torana-plugin-sdk v0.2.1-0.20260830212027-1c1e1dd734e9/go.mod h1:AQgCa3xORFCvKFibrhN2QYWYwXjx0aLUA64I5S9UMwk=
+github.com/torana-edge/torana-plugin-sdk v0.2.1-0.20260905175819-28931f500549 h1:alIb5BNZASEnbqoZDDyUAw6mQYRb312lKjUR4NRHZPk=
+github.com/torana-edge/torana-plugin-sdk v0.2.1-0.20260905175819-28931f500549/go.mod h1:AQgCa3xORFCvKFibrhN2QYWYwXjx0aLUA64I5S9UMwk=
 github.com/yuin/gopher-lua v1.1.1 h1:kYKnWBjvbNP4XLT3+bPEwAXJx262OhaHDWDVOPjL46M=
 github.com/yuin/gopher-lua v1.1.1/go.mod h1:GBR0iDaNXjAgGg9zfCvksxSRnQx76gclCIb7kdAd1Pw=
 github.com/zeebo/xxh3 v1.1.0 h1:s7DLGDK45Dyfg7++yxI0khrfwq9661w9EN78eP/UZVs=

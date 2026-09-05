@@ -255,6 +255,47 @@ func TestConfigValidateRejectsInvalidProviderGraph(t *testing.T) {
 	}
 }
 
+func TestConfigValidatesPluginModelAndPricingBindings(t *testing.T) {
+	rate := 1.5
+	valid := Config{Port: 8080, Providers: map[string]Provider{"managed": {URL: "https://api.example.test", Format: "openai", Auth: ProviderAuth{Mode: "none"}}}, Plugins: PluginsConfig{Approvals: map[string]PluginApproval{"pii": {ModelServices: map[string]PluginModelServiceApproval{"classifier": {Provider: "managed", Model: "small", Path: "/v1/chat/completions", TimeoutMS: 1000, MaxTokens: 32, MaxInputBytes: 1000, MaxCallsPerMinute: 2, MaxTokensPerHour: 100}}, PricingResources: map[string]PluginPricingApproval{"request": {Models: []PluginPricingModelApproval{{Provider: "managed", Model: "small", InputUSDPerMTok: &rate}}}}}}}}
+	if err := valid.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	for name, mutate := range map[string]func(*Config){
+		"unknown provider": func(c *Config) {
+			c.Plugins.Approvals["pii"].ModelServices["classifier"] = PluginModelServiceApproval{Provider: "missing", Model: "small", Path: "/v1", TimeoutMS: 1, MaxTokens: 1, MaxInputBytes: 1, MaxCallsPerMinute: 1, MaxTokensPerHour: 1}
+		},
+		"caller auth": func(c *Config) {
+			p := c.Providers["managed"]
+			p.Auth = ProviderAuth{Mode: "caller"}
+			c.Providers["managed"] = p
+		},
+		"unbounded": func(c *Config) {
+			binding := c.Plugins.Approvals["pii"].ModelServices["classifier"]
+			binding.MaxCallsPerMinute = 0
+			c.Plugins.Approvals["pii"].ModelServices["classifier"] = binding
+		},
+		"invalid pricing": func(c *Config) {
+			bad := -1.0
+			binding := c.Plugins.Approvals["pii"].PricingResources["request"]
+			binding.Models[0].InputUSDPerMTok = &bad
+			c.Plugins.Approvals["pii"].PricingResources["request"] = binding
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			raw, _ := json.Marshal(valid)
+			var candidate Config
+			if err := json.Unmarshal(raw, &candidate); err != nil {
+				t.Fatal(err)
+			}
+			mutate(&candidate)
+			if err := candidate.Validate(); err == nil {
+				t.Fatal("invalid binding was accepted")
+			}
+		})
+	}
+}
+
 func TestPluginRuntimeInstanceIdleTimeout(t *testing.T) {
 	zero := 0
 	custom := 17

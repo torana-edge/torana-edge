@@ -14,6 +14,8 @@ var (
 	_ = sdk.SuppressToolCall
 	_ = sdk.ReplaceText
 	_ = sdk.SuppressText
+	_ = sdk.ModelComplete
+	_ = sdk.GetModelPricing
 	_ = sdk.SetIdentity
 	_ = sdk.MetaGet
 	_ = sdk.MetaSet

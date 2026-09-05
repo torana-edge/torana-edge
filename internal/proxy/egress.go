@@ -223,6 +223,10 @@ type egressResponse struct {
 // encode failure. The value arm carries provider outcomes only, and no longer
 // carries a constant status field — the error arm is the status channel.
 func (s *Server) sendPluginRequest(ctx context.Context, pluginName, payloadJSON string) wasm.ExtensionResult {
+	return s.sendPluginRequestWithBudget(ctx, pluginName, payloadJSON, nil, pluginName)
+}
+
+func (s *Server) sendPluginRequestWithBudget(ctx context.Context, pluginName, payloadJSON string, boundBudget *provider.EgressBudget, budgetKey string) wasm.ExtensionResult {
 	var req egressRequest
 	if err := json.Unmarshal([]byte(payloadJSON), &req); err != nil {
 		return wasm.ExtensionRefusal(pb.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "invalid payload: %v", err)
@@ -358,7 +362,10 @@ func (s *Server) sendPluginRequest(ctx context.Context, pluginName, payloadJSON 
 	// TRANSPORT ATTEMPT does — the slot was authorized, and a refused request
 	// still needs the window to roll.
 	budget := cfg.Plugins.Runtime.EgressBudgetFor(pluginName)
-	if err := s.egress.authorize(pluginName, budget); err != nil {
+	if boundBudget != nil {
+		budget = *boundBudget
+	}
+	if err := s.egress.authorize(budgetKey, budget); err != nil {
 		s.stats.RecordPluginCounter(pluginName, "egress_refused", 1)
 		return wasm.ExtensionRefusal(classifyEgressRefusal(err), "%v", err)
 	}
@@ -419,7 +426,7 @@ func (s *Server) sendPluginRequest(ctx context.Context, pluginName, payloadJSON 
 			CacheWrite int64 `json:"cache_write"`
 		}{int64(usage.InputTokens), int64(usage.OutputTokens),
 			int64(usage.CacheReadTokens), int64(usage.CacheWriteTokens)}
-		s.egress.recordTokens(pluginName, int64(usage.InputTokens+usage.OutputTokens))
+		s.egress.recordTokens(budgetKey, int64(usage.InputTokens+usage.OutputTokens))
 	}
 
 	s.stats.RecordPluginCounter(pluginName, "egress_calls", 1)
