@@ -181,11 +181,6 @@ func TestE2E(t *testing.T) {
 					}`),
 				},
 			},
-			Offload: provider.OffloadConfig{
-				Enabled:  true,
-				Provider: "cheap",
-				Model:    "cheap-1",
-			},
 		},
 	}
 	srv, err := New(cfg)

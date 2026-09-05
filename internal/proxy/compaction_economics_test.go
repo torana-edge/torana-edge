@@ -12,6 +12,7 @@ import (
 	"github.com/torana-edge/torana-edge/internal/plugin"
 	"github.com/torana-edge/torana-edge/internal/provider"
 	"github.com/torana-edge/torana-edge/internal/wasm"
+	pbv1 "github.com/torana-edge/torana-plugin-sdk/pb/v1"
 )
 
 type economicsRoundTripFunc func(*http.Request) (*http.Response, error)
@@ -19,6 +20,19 @@ type economicsRoundTripFunc func(*http.Request) (*http.Response, error)
 func (f economicsRoundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 
 func usd(v float64) *float64 { return &v }
+
+func testPricingResource(s *Server) wasm.PricingResource {
+	resource := wasm.PricingResource{Name: "target", Prices: map[string]*pbv1.ModelPricing{}}
+	for providerName, configured := range s.config.Providers.Providers {
+		for model, price := range configured.Pricing {
+			resource.Prices[wasm.PricingCoordinate(providerName, model)] = &pbv1.ModelPricing{
+				InputUsdPerMtok: price.InputUSDPerMTok, OutputUsdPerMtok: price.OutputUSDPerMTok,
+				CacheReadUsdPerMtok: price.CacheReadUSDPerMTok, CacheWriteUsdPerMtok: price.CacheWriteUSDPerMTok,
+			}
+		}
+	}
+	return resource
+}
 
 func TestEvaluateCompactionUsesRequestRoutePricing(t *testing.T) {
 	s := &Server{config: Config{Providers: provider.Config{Providers: map[string]provider.Provider{
@@ -32,7 +46,7 @@ func TestEvaluateCompactionUsesRequestRoutePricing(t *testing.T) {
 		EstimatedTokensRemoved: 95_000, EstimatedRewriteSpanTokens: 15_000,
 		ExpectedApplications: 8, CandidateCount: 3, Source: "transformation",
 	}
-	if got := s.evaluateCompaction(ctx, report); !got.Apply || got.EstimatedNetUSD == nil {
+	if got := s.evaluateCompaction(ctx, report, testPricingResource(s), nil); !got.Apply || got.EstimatedNetUSD == nil {
 		t.Fatalf("expected profitable decision, got %+v", got)
 	}
 }
@@ -85,7 +99,7 @@ func TestEvaluateCompactionFailsClosedWithoutPricing(t *testing.T) {
 		OriginalBytes: 10, FinalBytes: 1, EstimatedTokensRemoved: 2,
 		EstimatedRewriteSpanTokens: 1, ExpectedApplications: 10, CandidateCount: 1, Source: "transformation",
 	}
-	if got := s.evaluateCompaction(ctx, report); got.Apply || got.Reason != economics.UnavailablePricing {
+	if got := s.evaluateCompaction(ctx, report, testPricingResource(s), nil); got.Apply || got.Reason != economics.UnavailablePricing {
 		t.Fatalf("unpriced compaction must not apply: %+v", got)
 	}
 }
@@ -106,11 +120,11 @@ func TestEvaluateCompactionUsesEarlierRoutingVerdict(t *testing.T) {
 		OriginalBytes: 100_000, FinalBytes: 5_000, EstimatedTokensRemoved: 95_000,
 		EstimatedRewriteSpanTokens: 15_000, ExpectedApplications: 8, CandidateCount: 1, Source: "transformation",
 	}
-	if got := s.evaluateCompaction(ctx, report); !got.Apply {
+	if got := s.evaluateCompaction(ctx, report, testPricingResource(s), nil); !got.Apply {
 		t.Fatalf("expected routed pricing to apply, got %+v", got)
 	}
 	rs.PendingRoute.Provider = "missing"
-	if got := s.evaluateCompaction(ctx, report); got.Apply || got.Reason != economics.UnavailableRouteUnresolved {
+	if got := s.evaluateCompaction(ctx, report, testPricingResource(s), nil); got.Apply || got.Reason != economics.UnavailableRouteUnresolved {
 		t.Fatalf("unresolved reroute must fail closed: %+v", got)
 	}
 }
@@ -126,13 +140,13 @@ func TestEvaluateCompactionRequiresEveryFallbackToBeEconomic(t *testing.T) {
 		OriginalBytes: 100_000, FinalBytes: 5_000, EstimatedTokensRemoved: 95_000,
 		EstimatedRewriteSpanTokens: 15_000, ExpectedApplications: 8, CandidateCount: 1, Source: "transformation",
 	}
-	if got := s.evaluateCompaction(ctx, report); got.Apply || got.Reason != economics.UnavailableFallbackUnpriced {
+	if got := s.evaluateCompaction(ctx, report, testPricingResource(s), nil); got.Apply || got.Reason != economics.UnavailableFallbackUnpriced {
 		t.Fatalf("unpriced fallback must fail closed: %+v", got)
 	}
 	fallback := s.config.Providers.Providers["fallback"]
 	fallback.Pricing = map[string]economics.ModelPricing{"m": winning}
 	s.config.Providers.Providers["fallback"] = fallback
-	if got := s.evaluateCompaction(ctx, report); !got.Apply {
+	if got := s.evaluateCompaction(ctx, report, testPricingResource(s), nil); !got.Apply {
 		t.Fatalf("fully priced compatible fallbacks should apply: %+v", got)
 	}
 }
@@ -178,7 +192,7 @@ func TestEvaluateCompactionReadsRouteRecordedWithoutAReplacement(t *testing.T) {
 		EstimatedRewriteSpanTokens: 15_000, ExpectedApplications: 8, CandidateCount: 1, Source: "transformation",
 	}
 
-	got := s.evaluateCompaction(ctx, report)
+	got := s.evaluateCompaction(ctx, report, testPricingResource(s), nil)
 	if !got.Apply {
 		t.Fatalf("compaction was priced against the unrouted provider: %+v", got)
 	}
