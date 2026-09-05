@@ -257,7 +257,8 @@ func TestConfigValidateRejectsInvalidProviderGraph(t *testing.T) {
 
 func TestConfigValidatesPluginModelAndPricingBindings(t *testing.T) {
 	rate := 1.5
-	valid := Config{Port: 8080, Providers: map[string]Provider{"managed": {URL: "https://api.example.test", Format: "openai", Auth: ProviderAuth{Mode: "none"}}}, Plugins: PluginsConfig{Approvals: map[string]PluginApproval{"pii": {ModelServices: map[string]PluginModelServiceApproval{"classifier": {Provider: "managed", Model: "small", Path: "/v1/chat/completions", TimeoutMS: 1000, MaxTokens: 32, MaxInputBytes: 1000, MaxCallsPerMinute: 2, MaxTokensPerHour: 100}}, PricingResources: map[string]PluginPricingApproval{"request": {Models: []PluginPricingModelApproval{{Provider: "managed", Model: "small", InputUSDPerMTok: &rate}}}}}}}}
+	cacheRate := 0.15
+	valid := Config{Port: 8080, Providers: map[string]Provider{"managed": {URL: "https://api.example.test", Format: "openai", Auth: ProviderAuth{Mode: "none"}}}, Plugins: PluginsConfig{Approvals: map[string]PluginApproval{"pii": {ModelServices: map[string]PluginModelServiceApproval{"classifier": {Provider: "managed", Model: "small", Path: "/v1/chat/completions", TimeoutMS: 1000, MaxTokens: 32, MaxInputBytes: 1000, MaxCallsPerMinute: 2, MaxTokensPerHour: 100}}, PricingResources: map[string]PluginPricingApproval{"request": {Models: []PluginPricingModelApproval{{Provider: "managed", Model: "small", InputUSDPerMTok: &rate}}}}, PromptCachePolicies: map[string]PluginPromptCacheApproval{"request-cache": {Models: []PluginPromptCacheModelApproval{{Provider: "managed", Model: "small", CacheReadUSDPerMTok: &cacheRate}}}}}}}}
 	if err := valid.Validate(); err != nil {
 		t.Fatal(err)
 	}
@@ -280,6 +281,21 @@ func TestConfigValidatesPluginModelAndPricingBindings(t *testing.T) {
 			binding := c.Plugins.Approvals["pii"].PricingResources["request"]
 			binding.Models[0].InputUSDPerMTok = &bad
 			c.Plugins.Approvals["pii"].PricingResources["request"] = binding
+		},
+		"cache policy unknown provider": func(c *Config) {
+			binding := c.Plugins.Approvals["pii"].PromptCachePolicies["request-cache"]
+			binding.Models[0].Provider = "missing"
+			c.Plugins.Approvals["pii"].PromptCachePolicies["request-cache"] = binding
+		},
+		"cache policy duplicate coordinate": func(c *Config) {
+			binding := c.Plugins.Approvals["pii"].PromptCachePolicies["request-cache"]
+			binding.Models = append(binding.Models, binding.Models[0])
+			c.Plugins.Approvals["pii"].PromptCachePolicies["request-cache"] = binding
+		},
+		"cache policy malformed marker": func(c *Config) {
+			binding := c.Plugins.Approvals["pii"].PromptCachePolicies["request-cache"]
+			binding.Models[0].Tiers = []PluginPromptCacheTierApproval{{TTLSeconds: 300, Marker: json.RawMessage(`[]`)}}
+			c.Plugins.Approvals["pii"].PromptCachePolicies["request-cache"] = binding
 		},
 	} {
 		t.Run(name, func(t *testing.T) {

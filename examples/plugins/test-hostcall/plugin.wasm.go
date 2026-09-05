@@ -11,7 +11,7 @@ import (
 func main() {}
 
 // Test fixture for the host-call surface a plugin uses to make decisions:
-// durable state, the clock, cache pricing, and named counters.
+// durable state, the clock, and named counters.
 //
 // It exercises each one and records the outcome in its own durable state under
 // a single key, so a test can read back exactly what the host answered without
@@ -25,8 +25,6 @@ func main() {}
 type observation struct {
 	ClockNonZero    bool   `json:"clock_nonzero"`
 	ClockErr        string `json:"clock_err,omitempty"`
-	PricingStatus   string `json:"pricing_status,omitempty"`
-	PricingErr      string `json:"pricing_err,omitempty"`
 	StateRoundTrip  bool   `json:"state_round_trip"`
 	StateErr        string `json:"state_err,omitempty"`
 	CounterAccepted bool   `json:"counter_accepted"`
@@ -42,16 +40,6 @@ func init() {
 		obs.ClockNonZero = now > 0
 		if err != nil {
 			obs.ClockErr = err.Error()
-		}
-
-		meta := struct {
-			Provider string `json:"_provider"`
-		}{}
-		_ = json.Unmarshal(req.ToranaMetaJson, &meta)
-		if pricing, perr := sdk.GetCachePricing(meta.Provider, req.Model); perr != nil {
-			obs.PricingErr = perr.Error()
-		} else {
-			obs.PricingStatus = pricing.Status
 		}
 
 		// Round-trip through durable state: write, read back, compare.

@@ -5,7 +5,7 @@
   "version": "0.1.0",
   "abi_version": "v1",
   "failure_mode": "pass",
-  "description": "Test fixture: drives the real extension-callback surface (egress, cache pricing, record-savings) through the production composition and records what the guest observed",
+  "description": "Test fixture: drives the real extension-callback surface (egress, prompt-cache policy, record-savings) through the production composition and records what the guest observed",
   "hooks": [
     {
       "name": "run_before_request"
@@ -17,8 +17,8 @@
       "description": "Originate a provider request (metred against the plugin's egress budget)"
     },
     {
-      "name": "env.host_call.torana_cache_pricing",
-      "description": "Query cache pricing"
+	  "name": "env.cache_policy",
+	  "description": "Resolve the approved prompt-cache policy"
     },
     {
       "name": "env.host_call.torana_record_savings",
@@ -38,5 +38,12 @@
       "name": "target",
       "description": "Test-only target pricing resource"
     }
-  ]
+	],
+	"prompt_cache_policies": [
+	  {
+		"name": "request-cache",
+		"description": "Test-only prompt-cache policy resource",
+		"required": true
+	  }
+	]
 }

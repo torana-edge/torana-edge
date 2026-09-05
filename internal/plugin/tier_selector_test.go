@@ -8,6 +8,8 @@ import (
 	"github.com/torana-edge/torana-edge/internal/engine"
 	"github.com/torana-edge/torana-edge/internal/pluginstate"
 	"github.com/torana-edge/torana-edge/internal/wasm"
+	pb "github.com/torana-edge/torana-plugin-sdk/pb/v1"
+	"google.golang.org/protobuf/proto"
 )
 
 // The tier selector is the riskiest plugin in the set despite being the
@@ -18,6 +20,48 @@ import (
 // The marker it writes lives inside the cache breakpoint, so changing the
 // marker changes the prefix bytes. These tests exist to pin the one property
 // that keeps it safe: once a tier is chosen for a prefix, it never changes.
+
+func cachePolicyForTest(refreshOnRead bool, readRate, writeRate float64) *pb.PromptCachePolicy {
+	shortMultiplier, longMultiplier, warm := 1.25, 2.0, uint32(240)
+	return &pb.PromptCachePolicy{
+		CacheReadUsdPerMtok: &readRate, CacheWriteUsdPerMtok: &writeRate,
+		RefreshOnRead: refreshOnRead, WarmIntervalSeconds: &warm,
+		Tiers: []*pb.PromptCacheTier{
+			{TtlSeconds: 300, WriteMultiplier: &shortMultiplier, MarkerJson: []byte(`{"type":"ephemeral"}`)},
+			{TtlSeconds: 3600, WriteMultiplier: &longMultiplier, MarkerJson: []byte(`{"type":"ephemeral","ttl":"1h"}`)},
+		},
+	}
+}
+
+func cachePluginApprovals(t *testing.T, dir, pluginName, resourceName string, policy *pb.PromptCachePolicy) map[string]Approval {
+	t.Helper()
+	bundle, err := ValidateBundleDir(dir + "/" + pluginName)
+	if err != nil {
+		t.Fatalf("load %s bundle: %v", pluginName, err)
+	}
+	permissions := make([]string, 0, len(bundle.Manifest.Permissions))
+	for _, permission := range bundle.Manifest.Permissions {
+		permissions = append(permissions, permission.Name)
+	}
+	model := PromptCacheModelApproval{
+		Provider: "anth", Model: "claude-sonnet-4-5", CacheReadUSDPerMTok: policy.CacheReadUsdPerMtok,
+		CacheWriteUSDPerMTok: policy.CacheWriteUsdPerMtok, RefreshOnRead: policy.RefreshOnRead,
+		WarmIntervalSeconds: policy.WarmIntervalSeconds,
+	}
+	for _, tier := range policy.Tiers {
+		model.Tiers = append(model.Tiers, PromptCacheTierApproval{TTLSeconds: tier.TtlSeconds, WriteMultiplier: tier.WriteMultiplier, Marker: append(json.RawMessage(nil), tier.MarkerJson...)})
+	}
+	return map[string]Approval{bundle.Manifest.ID: {
+		Digest: bundle.Digest, Permissions: permissions, FailureMode: bundle.Manifest.FailureMode,
+		PromptCachePolicies: map[string]PromptCacheApproval{resourceName: {Models: []PromptCacheModelApproval{model}}},
+	}}
+}
+
+func installCachePolicyCallback(rt *wasm.Runtime, policy *pb.PromptCachePolicy) {
+	rt.PromptCachePolicyFunc = func(_ context.Context, _ string, _ wasm.PromptCacheResource) (*pb.PromptCachePolicy, *pb.HostError) {
+		return proto.Clone(policy).(*pb.PromptCachePolicy), nil
+	}
+}
 
 // tierSelectorPipeline wires a pipeline with the durable state and pricing the
 // plugin needs, since without them it correctly declines to act at all.
@@ -36,30 +80,13 @@ func tierSelectorPipeline(t *testing.T, refreshOnRead bool, readRate, writeRate 
 	rt.StateGetFunc = state.Get
 	rt.StateSetFunc = state.Set
 	rt.StateKeysFunc = state.Keys
-	rt.CachePricingFunc = func(_ context.Context, _ string) wasm.ExtensionResult {
-		b, _ := json.Marshal(map[string]any{
-			"status":                   "ok",
-			"cache_read_usd_per_mtok":  readRate,
-			"cache_write_usd_per_mtok": writeRate,
-			"write_read_ratio":         writeRate / readRate,
-			"break_even_refreshes":     int(writeRate/readRate) - 1,
-			"refresh_on_read":          refreshOnRead,
-			"shortest_ttl_seconds":     300,
-			"warm_interval_seconds":    240,
-			"tiers": []any{
-				map[string]any{"ttl_seconds": 300, "write_multiplier": 1.25,
-					"marker": map[string]any{"type": "ephemeral"}},
-				map[string]any{"ttl_seconds": 3600, "write_multiplier": 2.0,
-					"marker": map[string]any{"type": "ephemeral", "ttl": "1h"}},
-			},
-		})
-		return wasm.ExtensionValue(b)
-	}
+	policy := cachePolicyForTest(refreshOnRead, readRate, writeRate)
+	installCachePolicyCallback(rt, policy)
 
 	pp, err := NewPipeline(rt, PluginConfig{
-		Dir:             dir,
-		Order:           []string{"cache_tier_selector"},
-		AllowUnapproved: true,
+		Dir:       dir,
+		Order:     []string{"cache_tier_selector"},
+		Approvals: cachePluginApprovals(t, dir, "cache_tier_selector", "request-cache", policy),
 		Config: map[string]json.RawMessage{
 			// A 1-second threshold so the test does not have to simulate a
 			// realistic pause to exercise the long-tier path.
@@ -91,15 +118,13 @@ func tierSelectorPipelineWithMode(t *testing.T, mode string) *PluginPipeline {
 	}
 	rt.StateGetFunc = state.Get
 	rt.StateSetFunc = state.Set
-	rt.CachePricingFunc = func(_ context.Context, _ string) wasm.ExtensionResult {
-		return wasm.ExtensionValue([]byte(`{"status":"ok","refresh_on_read":true,"shortest_ttl_seconds":300,` +
-			`"write_read_ratio":12.5,"break_even_refreshes":11,` + anthropicTiers + `}`))
-	}
+	policy := cachePolicyForTest(true, 0.3, 3.75)
+	installCachePolicyCallback(rt, policy)
 
 	pp, err := NewPipeline(rt, PluginConfig{
-		Dir:             dir,
-		Order:           []string{"cache_tier_selector"},
-		AllowUnapproved: true,
+		Dir:       dir,
+		Order:     []string{"cache_tier_selector"},
+		Approvals: cachePluginApprovals(t, dir, "cache_tier_selector", "request-cache", policy),
 		Config: map[string]json.RawMessage{
 			"cache_tier_selector": json.RawMessage(`{"mode":"` + mode + `"}`),
 		},
@@ -109,14 +134,6 @@ func tierSelectorPipelineWithMode(t *testing.T, mode string) *PluginPipeline {
 	}
 	return pp
 }
-
-// anthropicTiers is the two-lifetime menu the plugin chooses between. It has to
-// be present for the plugin to do anything: since it stopped hard-coding one
-// provider's markers it reads them from here, and a provider selling a single
-// lifetime correctly has no decision to make.
-const anthropicTiers = `"tiers":[` +
-	`{"ttl_seconds":300,"write_multiplier":1.25,"marker":{"type":"ephemeral"}},` +
-	`{"ttl_seconds":3600,"write_multiplier":2.0,"marker":{"type":"ephemeral","ttl":"1h"}}]`
 
 // tierRequest is a conversation with a breakpoint after the system prompt.
 func tierMeta(provider, convID string) engine.OptionalJSONObject {
@@ -252,14 +269,15 @@ func TestUnknownPricingLeavesRequestAlone(t *testing.T) {
 	state, _ := pluginstate.New(pluginstate.Options{})
 	rt.StateGetFunc = state.Get
 	rt.StateSetFunc = state.Set
-	rt.CachePricingFunc = func(_ context.Context, _ string) wasm.ExtensionResult {
-		return wasm.ExtensionValue([]byte(`{"status":"unavailable","reason":"no_pricing_configured"}`))
+	policy := cachePolicyForTest(true, 0.3, 3.75)
+	rt.PromptCachePolicyFunc = func(_ context.Context, _ string, _ wasm.PromptCacheResource) (*pb.PromptCachePolicy, *pb.HostError) {
+		return nil, &pb.HostError{Code: pb.ErrorCode_ERROR_CODE_NOT_CONFIGURED, Message: "no prompt cache policy"}
 	}
 
 	pp, err := NewPipeline(rt, PluginConfig{
-		Dir:             dir,
-		Order:           []string{"cache_tier_selector"},
-		AllowUnapproved: true,
+		Dir:       dir,
+		Order:     []string{"cache_tier_selector"},
+		Approvals: cachePluginApprovals(t, dir, "cache_tier_selector", "request-cache", policy),
 	})
 	if err != nil {
 		t.Fatalf("NewPipeline: %v", err)
@@ -309,14 +327,13 @@ func TestOffModeDoesNothing(t *testing.T) {
 	state, _ := pluginstate.New(pluginstate.Options{})
 	rt.StateGetFunc = state.Get
 	rt.StateSetFunc = state.Set
-	rt.CachePricingFunc = func(_ context.Context, _ string) wasm.ExtensionResult {
-		return wasm.ExtensionValue([]byte(`{"status":"ok","refresh_on_read":true,"shortest_ttl_seconds":300,"write_read_ratio":12.5,` + anthropicTiers + `}`))
-	}
+	policy := cachePolicyForTest(true, 0.3, 3.75)
+	installCachePolicyCallback(rt, policy)
 
 	pp, err := NewPipeline(rt, PluginConfig{
-		Dir:             dir,
-		Order:           []string{"cache_tier_selector"},
-		AllowUnapproved: true,
+		Dir:       dir,
+		Order:     []string{"cache_tier_selector"},
+		Approvals: cachePluginApprovals(t, dir, "cache_tier_selector", "request-cache", policy),
 		Config: map[string]json.RawMessage{
 			"cache_tier_selector": json.RawMessage(`{"mode":"off"}`),
 		},
@@ -352,13 +369,12 @@ func TestDecisionSurvivesRestart(t *testing.T) {
 		}
 		rt.StateGetFunc = state.Get
 		rt.StateSetFunc = state.Set
-		rt.CachePricingFunc = func(_ context.Context, _ string) wasm.ExtensionResult {
-			return wasm.ExtensionValue([]byte(`{"status":"ok","refresh_on_read":true,"shortest_ttl_seconds":300,"write_read_ratio":12.5,"break_even_refreshes":11,` + anthropicTiers + `}`))
-		}
+		policy := cachePolicyForTest(true, 0.3, 3.75)
+		installCachePolicyCallback(rt, policy)
 		pp, err := NewPipeline(rt, PluginConfig{
-			Dir:             bundles,
-			Order:           []string{"cache_tier_selector"},
-			AllowUnapproved: true,
+			Dir:       bundles,
+			Order:     []string{"cache_tier_selector"},
+			Approvals: cachePluginApprovals(t, bundles, "cache_tier_selector", "request-cache", policy),
 			Config: map[string]json.RawMessage{
 				"cache_tier_selector": json.RawMessage(`{"mode":"long"}`),
 			},

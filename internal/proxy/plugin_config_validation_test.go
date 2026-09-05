@@ -191,6 +191,9 @@ func TestDashboardExplainsAndEnforcesResourceApproval(t *testing.T) {
 		"model_services: modelServices",
 		".pricing-binding-enabled:checked",
 		"pricing_resources: pricingResources",
+		".cache-policy-binding-enabled:checked",
+		"prompt_cache_policies: promptCachePolicies",
+		"This policy belongs to this plugin; it is not a global Torana setting.",
 		"The plugin sees only this logical name; Torana owns the provider, model, credential, path, and budgets.",
 	} {
 		if !strings.Contains(source, required) {

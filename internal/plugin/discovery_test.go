@@ -112,6 +112,13 @@ func TestManifestResourceDeclarationsAreCapabilityBound(t *testing.T) {
 			wantError: "env.model_pricing",
 		},
 		{
+			name: "prompt cache policy needs capability",
+			mutate: func(m *PluginManifest) {
+				m.PromptCachePolicies = []PromptCacheDeclaration{{Name: "request-cache", Description: "request cache policy"}}
+			},
+			wantError: "env.cache_policy",
+		},
+		{
 			name: "HTTP plaintext public origin refused",
 			mutate: func(m *PluginManifest) {
 				m.Permissions = []Permission{{Name: "env.http_request"}}
@@ -122,12 +129,13 @@ func TestManifestResourceDeclarationsAreCapabilityBound(t *testing.T) {
 		{
 			name: "complete declaration accepted",
 			mutate: func(m *PluginManifest) {
-				m.Permissions = []Permission{{Name: "env.credential_get"}, {Name: "env.file_append"}, {Name: "env.http_request"}, {Name: "env.model_complete"}, {Name: "env.model_pricing"}}
+				m.Permissions = []Permission{{Name: "env.credential_get"}, {Name: "env.file_append"}, {Name: "env.http_request"}, {Name: "env.model_complete"}, {Name: "env.model_pricing"}, {Name: "env.cache_policy"}}
 				m.Credentials = []CredentialDeclaration{{Slot: "api", Description: "service key", Required: true}}
 				m.Files = []FileDeclaration{{Path: "usage.jsonl", Operations: []string{"append"}, MaxBytes: 100}}
 				m.HTTPEndpoints = []HTTPEndpointDeclaration{{Name: "api", Description: "service", Origin: "https://api.example", Methods: []string{"GET"}, MaxCallsPerMinute: 5}}
 				m.ModelServices = []ModelServiceDeclaration{{Name: "judge", Description: "classification model", TimeoutMS: 2000, MaxTokens: 100, MaxInputBytes: 10000, MaxCallsPerMinute: 5, MaxTokensPerHour: 1000}}
 				m.PricingResources = []PricingDeclaration{{Name: "judge-price", Description: "judge pricing", ForModelService: "judge"}}
+				m.PromptCachePolicies = []PromptCacheDeclaration{{Name: "request-cache", Description: "request cache policy"}}
 			},
 		},
 	}
@@ -156,8 +164,9 @@ func TestResolvePluginResourcesUsesApprovalNotGuestInput(t *testing.T) {
 		HTTPEndpoints: []HTTPEndpointDeclaration{{
 			Name: "billing", Description: "billing API", Origin: "https://suggested.example", Methods: []string{"GET", "POST"}, Required: true,
 		}},
-		ModelServices:    []ModelServiceDeclaration{{Name: "judge", Description: "judge", Required: true, TimeoutMS: 2000, MaxTokens: 100, MaxInputBytes: 10000, MaxCallsPerMinute: 5, MaxTokensPerHour: 1000}},
-		PricingResources: []PricingDeclaration{{Name: "judge-price", Description: "judge pricing", Required: true, ForModelService: "judge"}},
+		ModelServices:       []ModelServiceDeclaration{{Name: "judge", Description: "judge", Required: true, TimeoutMS: 2000, MaxTokens: 100, MaxInputBytes: 10000, MaxCallsPerMinute: 5, MaxTokensPerHour: 1000}},
+		PricingResources:    []PricingDeclaration{{Name: "judge-price", Description: "judge pricing", Required: true, ForModelService: "judge"}},
+		PromptCachePolicies: []PromptCacheDeclaration{{Name: "request-cache", Description: "request cache policy", Required: true}},
 	}
 	resources, err := resolvePluginResources(manifest, Approval{
 		Credentials: map[string]string{"service": "operator-id"},
@@ -168,6 +177,10 @@ func TestResolvePluginResourcesUsesApprovalNotGuestInput(t *testing.T) {
 		}},
 		ModelServices:    map[string]ModelServiceApproval{"judge": {Provider: "operator-provider", Model: "operator-model", Path: "/v1/messages", TimeoutMS: 1000, MaxTokens: 50, MaxInputBytes: 5000, MaxCallsPerMinute: 4, MaxTokensPerHour: 500}},
 		PricingResources: map[string]PricingApproval{"judge-price": {Models: []PricingModelApproval{{InputUSDPerMTok: ptrForDiscoveryTest(2.5)}}}},
+		PromptCachePolicies: map[string]PromptCacheApproval{"request-cache": {Models: []PromptCacheModelApproval{{
+			Provider: "operator-provider", Model: "operator-model", CacheReadUSDPerMTok: ptrForDiscoveryTest(0.1),
+			Tiers: []PromptCacheTierApproval{{TTLSeconds: 300, Marker: json.RawMessage(`{"type":"ephemeral"}`)}},
+		}}}},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -187,6 +200,9 @@ func TestResolvePluginResourcesUsesApprovalNotGuestInput(t *testing.T) {
 	if priced := resources.PricingResources["judge-price"].Prices[wasm.PricingCoordinate("operator-provider", "operator-model")]; priced == nil || priced.InputUsdPerMtok == nil || *priced.InputUsdPerMtok != 2.5 {
 		t.Fatalf("pricing = %+v", priced)
 	}
+	if policy := resources.PromptCachePolicies["request-cache"].Policies[wasm.PricingCoordinate("operator-provider", "operator-model")]; policy == nil || policy.CacheReadUsdPerMtok == nil || *policy.CacheReadUsdPerMtok != 0.1 || len(policy.Tiers) != 1 {
+		t.Fatalf("prompt cache policy = %+v", policy)
+	}
 
 	if _, err := resolvePluginResources(manifest, Approval{Credentials: map[string]string{}, HTTPEndpoints: map[string]HTTPApproval{}}); err == nil || !strings.Contains(err.Error(), "required credential") {
 		t.Fatalf("missing required binding error = %v", err)
@@ -194,6 +210,46 @@ func TestResolvePluginResourcesUsesApprovalNotGuestInput(t *testing.T) {
 }
 
 func ptrForDiscoveryTest[T any](value T) *T { return &value }
+
+func TestResolvePromptCachePolicyIsExactValidatedAndNonAliasing(t *testing.T) {
+	manifest := PluginManifest{PromptCachePolicies: []PromptCacheDeclaration{{Name: "request-cache", Description: "request cache", Required: true}}}
+	rate := 0.1
+	marker := json.RawMessage(`{"type":"ephemeral","ttl":"5m"}`)
+	approval := Approval{PromptCachePolicies: map[string]PromptCacheApproval{"request-cache": {Models: []PromptCacheModelApproval{{
+		Provider: "anthropic", Model: "claude", CacheReadUSDPerMTok: &rate,
+		Tiers: []PromptCacheTierApproval{{TTLSeconds: 300, Marker: marker}},
+	}}}}}
+	resources, err := resolvePluginResources(manifest, approval)
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy := resources.PromptCachePolicies["request-cache"].Policies[wasm.PricingCoordinate("anthropic", "claude")]
+	if policy == nil || policy.CacheReadUsdPerMtok == nil || *policy.CacheReadUsdPerMtok != rate || string(policy.Tiers[0].MarkerJson) != string(marker) {
+		t.Fatalf("resolved policy = %+v", policy)
+	}
+	rate = 9
+	marker[2] = 'X'
+	if *policy.CacheReadUsdPerMtok != 0.1 || string(policy.Tiers[0].MarkerJson) != `{"type":"ephemeral","ttl":"5m"}` {
+		t.Fatal("resolved policy aliases mutable approval data")
+	}
+
+	for name, candidate := range map[string]Approval{
+		"missing required": {},
+		"undeclared":       {PromptCachePolicies: map[string]PromptCacheApproval{"other": {Models: []PromptCacheModelApproval{{Provider: "p", Model: "m", CacheReadUSDPerMTok: ptrForDiscoveryTest(0.1)}}}}},
+		"empty binding":    {PromptCachePolicies: map[string]PromptCacheApproval{"request-cache": {}}},
+		"duplicate coordinate": {PromptCachePolicies: map[string]PromptCacheApproval{"request-cache": {Models: []PromptCacheModelApproval{
+			{Provider: "p", Model: "m", CacheReadUSDPerMTok: ptrForDiscoveryTest(0.1)},
+			{Provider: "p", Model: "m", CacheReadUSDPerMTok: ptrForDiscoveryTest(0.2)},
+		}}}},
+		"invalid policy": {PromptCachePolicies: map[string]PromptCacheApproval{"request-cache": {Models: []PromptCacheModelApproval{{Provider: "p", Model: "m"}}}}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := resolvePluginResources(manifest, candidate); err == nil {
+				t.Fatal("invalid prompt cache approval was accepted")
+			}
+		})
+	}
+}
 
 func TestResolveBoundPricingDoesNotMutateOrAliasApproval(t *testing.T) {
 	rate := 1.25

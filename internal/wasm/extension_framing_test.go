@@ -139,16 +139,6 @@ func wireExtension(t *testing.T, r *Runtime, row extensionMatrixRow) {
 			}
 			return ExtensionValue([]byte(row.want.body))
 		}
-	case "torana_cache_pricing":
-		if row.state == "refused" {
-			r.CachePricingFunc = func(_ context.Context, _ string) ExtensionResult {
-				return ExtensionRefusal(pbv1.ErrorCode_ERROR_CODE_NOT_CONFIGURED, "unknown provider")
-			}
-			return
-		}
-		r.CachePricingFunc = func(_ context.Context, _ string) ExtensionResult {
-			return ExtensionValue([]byte(row.want.body))
-		}
 	case "torana_record_savings":
 		// The canonical callback: the batch-aware report ABI. The legacy
 		// two-field SavingsFunc no longer exists.
@@ -205,19 +195,6 @@ func TestExtensionCommandFramingMatrix(t *testing.T) {
 		{name: "send_request/refused", cmd: "torana_send_request", state: "refused",
 			args: `{"provider":"oai","request_pb":"e30=","path":"/v1"}`,
 			want: extensionMatrixWant{arm: "error", code: pbv1.ErrorCode_ERROR_CODE_UNAVAILABLE, message: "request to oai failed"}},
-
-		// torana_cache_pricing: data in the value arm — a callback refusal
-		// (unknown provider) passes through classified; no callback is
-		// NOT_CONFIGURED.
-		{name: "cache_pricing/wired", cmd: "torana_cache_pricing", state: "wired",
-			args: `{"provider":"oai","model":"gpt-x"}`,
-			want: extensionMatrixWant{arm: "value", body: `{"status":"ok","cache_read_usd_per_mtok":1.25}`}},
-		{name: "cache_pricing/nil-func", cmd: "torana_cache_pricing", state: "nil-func",
-			args: `{"provider":"oai","model":"gpt-x"}`,
-			want: extensionMatrixWant{arm: "error", code: pbv1.ErrorCode_ERROR_CODE_NOT_CONFIGURED, message: "cache pricing is not configured"}},
-		{name: "cache_pricing/refused", cmd: "torana_cache_pricing", state: "refused",
-			args: `{"provider":"nope","model":"m"}`,
-			want: extensionMatrixWant{arm: "error", code: pbv1.ErrorCode_ERROR_CODE_NOT_CONFIGURED, message: "unknown provider"}},
 
 		// torana_db_query / torana_kms_decrypt: no callback exists; the
 		// command IS its refusal.
@@ -354,7 +331,6 @@ func TestExtensionCommandFramingMatrix(t *testing.T) {
 	// before the switch, so every command gets the same framed PERMISSION_DENIED.
 	for _, cmd := range []string{
 		"torana_send_request",
-		"torana_cache_pricing",
 		"torana_db_query",
 		"torana_kms_decrypt",
 		"torana_record_savings",

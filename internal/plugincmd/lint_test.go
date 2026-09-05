@@ -1055,6 +1055,31 @@ func init() {
 	assertContains(t, msgs, `uses "env.set_identity" but plugin.json does not request it`)
 }
 
+func TestLintAttributesPromptCachePolicy(t *testing.T) {
+	dir := writePlugin(t,
+		manifestWith(`{"name":"run_before_request"}`, ``),
+		`package main
+
+import (
+	"context"
+
+	sdk "github.com/torana-edge/torana-plugin-sdk"
+	pb "github.com/torana-edge/torana-plugin-sdk/pb/v1"
+)
+
+func main() {}
+
+func init() {
+	sdk.OnBeforeRequest(func(ctx context.Context, req *pb.ChatRequest) (*pb.ChatRequest, error) {
+		_, _ = sdk.GetPromptCachePolicy("request-cache")
+		return nil, nil
+	})
+}
+`)
+	msgs := lintMessages(t, dir)
+	assertContains(t, msgs, `uses "env.cache_policy" but plugin.json does not request it`)
+}
+
 // TestLintAttributesStreamMutationActions — every SDK stream mutation helper
 // maps to ir.stream.write in the used-but-undeclared direction; each helper
 // name gets an explicit decision.

@@ -75,7 +75,7 @@ func hostCallValue(t *testing.T, result *pbv1.HostCallResult) []byte {
 func TestPlatformResourcesAreBoundToLoadedPlugin(t *testing.T) {
 	r, p := newGrantedPlugin(t,
 		"env.credential_get", "env.file_append", "env.file_read", "env.file_write",
-		"env.file_list", "env.file_delete", "env.http_request", "env.model_complete", "env.model_pricing",
+		"env.file_list", "env.file_delete", "env.http_request", "env.model_complete", "env.model_pricing", "env.cache_policy",
 	)
 	p.SetResources(PluginResources{
 		Credentials: map[string]string{"service": "operator-credential-id"},
@@ -87,6 +87,13 @@ func TestPlatformResourcesAreBoundToLoadedPlugin(t *testing.T) {
 		},
 		ModelServices:    map[string]ModelServiceResource{"summarizer": {Name: "summarizer", Provider: "model-provider", Model: "small-model", Path: "/v1/chat", Timeout: time.Second, MaxTokens: 32, MaxInputBytes: 1000, MaxCallsPerMinute: 2, MaxTokensPerHour: 100}},
 		PricingResources: map[string]PricingResource{"request-price": {Name: "request-price", ForModelService: "summarizer", Prices: map[string]*pbv1.ModelPricing{PricingCoordinate("model-provider", "small-model"): {InputUsdPerMtok: ptrForTest(1.25)}}}},
+		PromptCachePolicies: map[string]PromptCacheResource{"request-cache": {
+			Name: "request-cache",
+			Policies: map[string]*pbv1.PromptCachePolicy{PricingCoordinate("model-provider", "small-model"): {
+				CacheReadUsdPerMtok: ptrForTest(0.1),
+				Tiers:               []*pbv1.PromptCacheTier{{TtlSeconds: 300, MarkerJson: []byte(`{"type":"ephemeral"}`)}},
+			}},
+		}},
 	})
 
 	r.CredentialGetFunc = func(_ context.Context, plugin, credentialID string) ([]byte, error) {
@@ -176,6 +183,17 @@ func TestPlatformResourcesAreBoundToLoadedPlugin(t *testing.T) {
 	if err := proto.Unmarshal(pricingRaw, &pricing); err != nil || pricing.InputUsdPerMtok == nil || *pricing.InputUsdPerMtok != 1.25 {
 		t.Fatalf("pricing input rate = %v, err %v", pricing.InputUsdPerMtok, err)
 	}
+	r.PromptCachePolicyFunc = func(_ context.Context, plugin string, resource PromptCacheResource) (*pbv1.PromptCachePolicy, *pbv1.HostError) {
+		if plugin != p.name || resource.Name != "request-cache" {
+			t.Fatalf("cache policy callback = %q %+v", plugin, resource)
+		}
+		return proto.Clone(resource.Policies[PricingCoordinate("model-provider", "small-model")]).(*pbv1.PromptCachePolicy), nil
+	}
+	policyRaw := hostCallValue(t, hostCallDirect(t, r, p, "env.cache_policy", marshalHostArgs(t, &pbv1.PromptCachePolicyGetArgs{Resource: "request-cache"})))
+	var policy pbv1.PromptCachePolicy
+	if err := proto.Unmarshal(policyRaw, &policy); err != nil || policy.CacheReadUsdPerMtok == nil || *policy.CacheReadUsdPerMtok != 0.1 || len(policy.Tiers) != 1 {
+		t.Fatalf("prompt cache policy = %+v, err %v", &policy, err)
+	}
 }
 
 func ptrForTest[T any](value T) *T { return &value }
@@ -191,14 +209,37 @@ func TestPricingCoordinateIsPositionFramed(t *testing.T) {
 	}
 }
 
+func TestPromptCachePolicyFramingFailsClosed(t *testing.T) {
+	r, p := newGrantedPlugin(t, "env.cache_policy")
+	p.SetResources(PluginResources{PromptCachePolicies: map[string]PromptCacheResource{"request-cache": {
+		Name: "request-cache", Policies: map[string]*pbv1.PromptCachePolicy{PricingCoordinate("p", "m"): {CacheReadUsdPerMtok: ptrForTest(0.1)}},
+	}}})
+	assertCode := func(result *pbv1.HostCallResult, want pbv1.ErrorCode) {
+		t.Helper()
+		arm, ok := result.Result.(*pbv1.HostCallResult_Error)
+		if !ok || arm.Error.Code != want {
+			t.Fatalf("result = %+v, want %s", result.Result, want)
+		}
+	}
+	assertCode(hostCallDirect(t, r, p, "env.cache_policy", []byte("not protobuf")), pbv1.ErrorCode_ERROR_CODE_INVALID_ARGUMENT)
+	assertCode(hostCallDirect(t, r, p, "env.cache_policy", marshalHostArgs(t, &pbv1.PromptCachePolicyGetArgs{Resource: "other"})), pbv1.ErrorCode_ERROR_CODE_PERMISSION_DENIED)
+	assertCode(hostCallDirect(t, r, p, "env.cache_policy", marshalHostArgs(t, &pbv1.PromptCachePolicyGetArgs{Resource: "request-cache"})), pbv1.ErrorCode_ERROR_CODE_NOT_CONFIGURED)
+
+	r.PromptCachePolicyFunc = func(context.Context, string, PromptCacheResource) (*pbv1.PromptCachePolicy, *pbv1.HostError) {
+		return &pbv1.PromptCachePolicy{}, nil
+	}
+	assertCode(hostCallDirect(t, r, p, "env.cache_policy", marshalHostArgs(t, &pbv1.PromptCachePolicyGetArgs{Resource: "request-cache"})), pbv1.ErrorCode_ERROR_CODE_INTERNAL)
+}
+
 func TestPlatformResourceNamesCannotEscapeApproval(t *testing.T) {
-	r, p := newGrantedPlugin(t, "env.credential_get", "env.file_append", "env.http_request", "env.model_complete", "env.model_pricing")
+	r, p := newGrantedPlugin(t, "env.credential_get", "env.file_append", "env.http_request", "env.model_complete", "env.model_pricing", "env.cache_policy")
 	p.SetResources(PluginResources{
-		Credentials:      map[string]string{"approved": "credential-id"},
-		Files:            map[string]FileResource{"approved.log": {Operations: map[string]bool{"append": true}, MaxBytes: 100}},
-		HTTP:             map[string]HTTPResource{"approved": {Methods: map[string]bool{"GET": true}}},
-		ModelServices:    map[string]ModelServiceResource{"approved": {Name: "approved"}},
-		PricingResources: map[string]PricingResource{"approved": {Name: "approved", Prices: map[string]*pbv1.ModelPricing{PricingCoordinate("p", "m"): {}}}},
+		Credentials:         map[string]string{"approved": "credential-id"},
+		Files:               map[string]FileResource{"approved.log": {Operations: map[string]bool{"append": true}, MaxBytes: 100}},
+		HTTP:                map[string]HTTPResource{"approved": {Methods: map[string]bool{"GET": true}}},
+		ModelServices:       map[string]ModelServiceResource{"approved": {Name: "approved"}},
+		PricingResources:    map[string]PricingResource{"approved": {Name: "approved", Prices: map[string]*pbv1.ModelPricing{PricingCoordinate("p", "m"): {}}}},
+		PromptCachePolicies: map[string]PromptCacheResource{"approved": {Name: "approved", Policies: map[string]*pbv1.PromptCachePolicy{PricingCoordinate("p", "m"): {CacheReadUsdPerMtok: ptrForTest(0.1)}}}},
 	})
 	for _, call := range []struct {
 		command string
@@ -210,6 +251,7 @@ func TestPlatformResourceNamesCannotEscapeApproval(t *testing.T) {
 		{command: "env.http_request", args: &pbv1.OutboundHTTPRequestArgs{Endpoint: "approved", Method: "POST", Path: "/"}},
 		{command: "env.model_complete", args: &pbv1.ModelCompleteArgs{Service: "other", Messages: []*pbv1.ModelMessage{{Role: "user", Content: "x"}}}},
 		{command: "env.model_pricing", args: &pbv1.ModelPricingGetArgs{Resource: "other"}},
+		{command: "env.cache_policy", args: &pbv1.PromptCachePolicyGetArgs{Resource: "other"}},
 	} {
 		result := hostCallDirect(t, r, p, call.command, marshalHostArgs(t, call.args))
 		errArm, ok := result.Result.(*pbv1.HostCallResult_Error)

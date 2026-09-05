@@ -90,25 +90,7 @@ func (s *Server) completeModel(ctx context.Context, pluginName string, resource 
 func (s *Server) modelPricing(ctx context.Context, _ string, resource wasm.PricingResource) (*pbv1.ModelPricing, *pbv1.HostError) {
 	var pricing *pbv1.ModelPricing
 	if resource.ForModelService == "" {
-		rs := reqStateFrom(ctx)
-		if rs != nil {
-			providerName, model := rs.Provider, rs.Model
-			route := rs.PendingRoute
-			if rs.Pipeline != nil {
-				if current := rs.Pipeline.Verdicts(rs.ID).Route(); current != nil {
-					route = current
-				}
-			}
-			if route != nil {
-				if route.Provider != "" {
-					providerName = route.Provider
-				} else if rs.InitialProvider != "" {
-					providerName = rs.InitialProvider
-				}
-				if route.Model != "" {
-					model = route.Model
-				}
-			}
+		if providerName, model, ok := currentRouteCoordinate(ctx); ok {
 			pricing = resource.Prices[wasm.PricingCoordinate(providerName, model)]
 		}
 	} else if len(resource.Prices) == 1 {
@@ -120,6 +102,51 @@ func (s *Server) modelPricing(ctx context.Context, _ string, resource wasm.Prici
 		return nil, modelHostError(pbv1.ErrorCode_ERROR_CODE_NOT_CONFIGURED, "pricing is not configured for this model")
 	}
 	return proto.Clone(pricing).(*pbv1.ModelPricing), nil
+}
+
+func (s *Server) promptCachePolicy(ctx context.Context, _ string, resource wasm.PromptCacheResource) (*pbv1.PromptCachePolicy, *pbv1.HostError) {
+	var policy *pbv1.PromptCachePolicy
+	if providerName, model, ok := currentRouteCoordinate(ctx); ok {
+		policy = resource.Policies[wasm.PricingCoordinate(providerName, model)]
+	} else if len(resource.Policies) == 1 {
+		// Background hooks have no routed request. A single binding is
+		// unambiguous; multiple bindings must never be selected by map order.
+		for _, bound := range resource.Policies {
+			policy = bound
+		}
+	}
+	if policy == nil {
+		return nil, modelHostError(pbv1.ErrorCode_ERROR_CODE_NOT_CONFIGURED, "prompt cache policy is not configured for this model")
+	}
+	return proto.Clone(policy).(*pbv1.PromptCachePolicy), nil
+}
+
+func currentRouteCoordinate(ctx context.Context) (string, string, bool) {
+	rs := reqStateFrom(ctx)
+	if rs == nil {
+		return "", "", false
+	}
+	providerName, model := rs.Provider, rs.Model
+	route := rs.PendingRoute
+	if rs.Pipeline != nil {
+		if current := rs.Pipeline.Verdicts(rs.ID).Route(); current != nil {
+			route = current
+		}
+	}
+	if route != nil {
+		if route.Provider != "" {
+			providerName = route.Provider
+		} else if rs.InitialProvider != "" {
+			providerName = rs.InitialProvider
+		}
+		if route.Model != "" {
+			model = route.Model
+		}
+	}
+	if providerName == "" || model == "" {
+		return "", "", false
+	}
+	return providerName, model, true
 }
 
 func modelHostError(code pbv1.ErrorCode, message string) *pbv1.HostError {

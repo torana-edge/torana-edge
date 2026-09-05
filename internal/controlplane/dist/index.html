@@ -555,6 +555,50 @@
 		  return false;
 		}
 	  }
+	  const promptCachePolicies = {};
+	  for (const enabled of document.querySelectorAll('#pluginResourceReview .cache-policy-binding-enabled:checked')) {
+		const row = enabled.closest('[data-cache-policy]');
+		const models = [];
+		for (const modelRow of row.querySelectorAll('.cache-policy-model-row')) {
+		  let tiers;
+		  try {
+			tiers = JSON.parse(modelRow.querySelector('.cache-policy-binding-tiers').value || '[]');
+		  } catch (_) {
+			showAlert(`Prompt cache policy ${enabled.dataset.cachePolicy} has invalid tier JSON.`);
+			return false;
+		  }
+		  if (!Array.isArray(tiers)) {
+			showAlert(`Prompt cache policy ${enabled.dataset.cachePolicy} tiers must be a JSON array.`);
+			return false;
+		  }
+		  const binding = {
+			provider: modelRow.querySelector('.cache-policy-binding-provider').value.trim(),
+			model: modelRow.querySelector('.cache-policy-binding-model').value.trim(),
+			refresh_on_read: modelRow.querySelector('.cache-policy-binding-refresh').checked,
+			tiers
+		  };
+		  for (const [selector, key] of [['read','cache_read_usd_per_mtok'],['write','cache_write_usd_per_mtok'],['warm','warm_interval_seconds']]) {
+			const raw = modelRow.querySelector(`.cache-policy-binding-${selector}`).value;
+			if (raw !== '') binding[key] = Number(raw);
+		  }
+		  if (!binding.provider || !binding.model || (!tiers.length && binding.cache_read_usd_per_mtok === undefined && binding.cache_write_usd_per_mtok === undefined)) {
+			showAlert(`Prompt cache policy ${enabled.dataset.cachePolicy} needs a provider, model, and at least one price or tier.`);
+			return false;
+		  }
+		  models.push(binding);
+		}
+		if (!models.length) {
+		  showAlert(`Prompt cache policy ${enabled.dataset.cachePolicy} needs at least one model binding.`);
+		  return false;
+		}
+		promptCachePolicies[enabled.dataset.cachePolicy] = { models };
+	  }
+	  for (const declaration of (p.prompt_cache_policies || [])) {
+		if (declaration.required && !promptCachePolicies[declaration.name]) {
+		  showAlert(`Prompt cache policy ${declaration.name} is required before ${name} can be enabled.`);
+		  return false;
+		}
+	  }
       const summary = selected.length ? selected.join('\n  • ') : 'none';
       const requirements = (p.requires_upstream || []).length
         ? `\nRequires earlier plugin IDs:\n  • ${(p.requires_upstream || []).join('\n  • ')}`
@@ -574,7 +618,8 @@
         files: files,
         http_endpoints: httpEndpoints,
 		model_services: modelServices,
-		pricing_resources: pricingResources
+		pricing_resources: pricingResources,
+		prompt_cache_policies: promptCachePolicies
       };
       if (!pipelineOrder.includes(name)) pipelineOrder.push(name);
       if (!configMap[name]) configMap[name] = {};
@@ -684,6 +729,22 @@
     function addPricingModelRow(button) {
       button.closest('[data-pricing-resource]').querySelector('.pricing-models').insertAdjacentHTML('beforeend', pricingModelFields({}, true));
     }
+	function cachePolicyModelFields(model = {}) {
+	  const value = key => model[key] === undefined ? '' : model[key];
+	  return `<div class="cache-policy-model-row form-grid">
+		<label class="field"><span>Provider</span><input class="input cache-policy-binding-provider" value="${escAttr(model.provider || '')}" placeholder="configured provider name"></label>
+		<label class="field"><span>Model</span><input class="input cache-policy-binding-model" value="${escAttr(model.model || '')}" placeholder="exact provider model ID"></label>
+		<label class="field"><span>Cache read USD / million tokens</span><input class="input cache-policy-binding-read" type="number" min="0" step="any" value="${escAttr(value('cache_read_usd_per_mtok'))}"></label>
+		<label class="field"><span>Cache write USD / million tokens</span><input class="input cache-policy-binding-write" type="number" min="0" step="any" value="${escAttr(value('cache_write_usd_per_mtok'))}"></label>
+		<label class="checkbox-row"><input type="checkbox" class="cache-policy-binding-refresh" ${model.refresh_on_read ? 'checked' : ''}> Refresh on cache read</label>
+		<label class="field"><span>Warm interval seconds</span><input class="input cache-policy-binding-warm" type="number" min="1" value="${escAttr(value('warm_interval_seconds'))}" placeholder="optional"></label>
+		<label class="field" style="grid-column:1/-1"><span>Cache tiers (JSON array)</span><textarea class="input cache-policy-binding-tiers" rows="4" spellcheck="false">${escHtml(JSON.stringify(model.tiers || [], null, 2))}</textarea><span class="hint">Each tier needs <code>ttl_seconds</code> and a provider cache marker object in <code>marker</code>; <code>write_multiplier</code> is optional.</span></label>
+		<button type="button" class="btn btn-sm" onclick="this.closest('.cache-policy-model-row').remove()">Remove model</button>
+	  </div>`;
+	}
+	function addCachePolicyModelRow(button) {
+	  button.closest('[data-cache-policy]').querySelector('.cache-policy-models').insertAdjacentHTML('beforeend', cachePolicyModelFields({}));
+	}
     function renderPluginDetail(name) {
       const cont = document.getElementById('pluginDetail');
       const p = pluginByName[name];
@@ -776,10 +837,22 @@
 		  ${declaration.for_model_service ? '' : '<button type="button" class="btn btn-sm" onclick="addPricingModelRow(this)">+ Add model price</button>'}
 		</div>`;
 	  }).join('');
-      const resourceReview = credentialRows || httpRows || fileRows || modelRows || pricingRows ? `<fieldset class="permission-review" id="pluginResourceReview">
+	  const approvedCachePolicies = currentApproval && currentApproval.digest === p.digest ? (currentApproval.prompt_cache_policies || {}) : {};
+	  const cachePolicyRows = (p.prompt_cache_policies || []).map(declaration => {
+		const existing = approvedCachePolicies[declaration.name] || {};
+		const enabled = Boolean(approvedCachePolicies[declaration.name]) || declaration.required;
+		const models = existing.models && existing.models.length ? existing.models : [{}];
+		return `<div class="info-note" data-cache-policy="${escAttr(declaration.name)}">
+		  <label class="checkbox-row"><input type="checkbox" class="cache-policy-binding-enabled" data-cache-policy="${escAttr(declaration.name)}" ${enabled ? 'checked' : ''} ${declaration.required ? 'disabled' : ''}> <code>${escHtml(declaration.name)}</code>${declaration.required ? ' (required)' : ''}</label>
+		  <div class="hint">${escHtml(declaration.description || '')}. This policy belongs to this plugin; it is not a global Torana setting.</div>
+		  <div class="cache-policy-models">${models.map(model => cachePolicyModelFields(model)).join('')}</div>
+		  <button type="button" class="btn btn-sm" onclick="addCachePolicyModelRow(this)">+ Add model policy</button>
+		</div>`;
+	  }).join('');
+	  const resourceReview = credentialRows || httpRows || fileRows || modelRows || pricingRows || cachePolicyRows ? `<fieldset class="permission-review" id="pluginResourceReview">
         <legend>Resource bindings and limits</legend>
-        <div class="section-desc">Capabilities authorize kinds of operations. These bindings authorize the specific credentials, endpoints, files, model services, and pricing data the plugin may use, within operator-owned budgets.</div>
-        ${credentialRows}${httpRows}${fileRows}${modelRows}${pricingRows}
+		<div class="section-desc">Capabilities authorize kinds of operations. These bindings authorize the specific credentials, endpoints, files, model services, pricing data, and prompt-cache policies the plugin may use, within operator-owned budgets.</div>
+		${credentialRows}${httpRows}${fileRows}${modelRows}${pricingRows}${cachePolicyRows}
       </fieldset>` : '<div id="pluginResourceReview"></div>';
       const requirements = (p.requires_upstream || []).map(id => `<code>${escHtml(id)}</code>`).join(', ');
       const conflicts = (p.conflicts_with || []).map(id => `<code>${escHtml(id)}</code>`).join(', ');

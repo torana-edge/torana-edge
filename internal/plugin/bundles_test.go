@@ -84,7 +84,7 @@ func officialPluginConfig(t testing.TB, dir string, order []string, config map[s
 		approval := Approval{
 			Digest: digest, Permissions: permissions, FailureMode: manifest.FailureMode,
 			Credentials: map[string]string{}, Files: defaultFileApprovals(manifest), HTTPEndpoints: defaultHTTPApprovals(manifest),
-			ModelServices: map[string]ModelServiceApproval{}, PricingResources: map[string]PricingApproval{},
+			ModelServices: map[string]ModelServiceApproval{}, PricingResources: map[string]PricingApproval{}, PromptCachePolicies: map[string]PromptCacheApproval{},
 		}
 		for _, declaration := range manifest.Credentials {
 			approval.Credentials[declaration.Slot] = "test-" + declaration.Slot
@@ -103,6 +103,17 @@ func officialPluginConfig(t testing.TB, dir string, order []string, config map[s
 				model.Model = ""
 			}
 			approval.PricingResources[declaration.Name] = PricingApproval{Models: []PricingModelApproval{model}}
+		}
+		for _, declaration := range manifest.PromptCachePolicies {
+			read, write, shortMultiplier, longMultiplier, warm := 0.1, 1.2, 1.25, 2.0, uint32(240)
+			approval.PromptCachePolicies[declaration.Name] = PromptCacheApproval{Models: []PromptCacheModelApproval{{
+				Provider: "test", Model: "target", CacheReadUSDPerMTok: &read, CacheWriteUSDPerMTok: &write,
+				RefreshOnRead: true, WarmIntervalSeconds: &warm,
+				Tiers: []PromptCacheTierApproval{
+					{TTLSeconds: 300, WriteMultiplier: &shortMultiplier, Marker: json.RawMessage(`{"type":"ephemeral"}`)},
+					{TTLSeconds: 3600, WriteMultiplier: &longMultiplier, Marker: json.RawMessage(`{"type":"ephemeral","ttl":"1h"}`)},
+				},
+			}}}
 		}
 		approvals[name] = approval
 	}

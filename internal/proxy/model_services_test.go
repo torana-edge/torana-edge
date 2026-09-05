@@ -139,6 +139,53 @@ func TestPricingResourceUsesThePendingRoute(t *testing.T) {
 	}
 }
 
+func TestPromptCachePolicySelectsRouteOrUnambiguousBackgroundBinding(t *testing.T) {
+	server := &Server{}
+	firstRate, secondRate := 0.1, 0.2
+	first := &pbv1.PromptCachePolicy{CacheReadUsdPerMtok: &firstRate}
+	second := &pbv1.PromptCachePolicy{CacheReadUsdPerMtok: &secondRate}
+	resource := wasm.PromptCacheResource{Name: "request-cache", Policies: map[string]*pbv1.PromptCachePolicy{
+		wasm.PricingCoordinate("anthropic", "claude"): first,
+		wasm.PricingCoordinate("openai", "gpt"):       second,
+	}}
+
+	ctx := context.WithValue(context.Background(), reqStateKey{}, &reqState{Provider: "anthropic", Model: "claude"})
+	got, refusal := server.promptCachePolicy(ctx, "cache_tier_selector", resource)
+	if refusal != nil || got == nil || got.CacheReadUsdPerMtok == nil || *got.CacheReadUsdPerMtok != firstRate {
+		t.Fatalf("routed policy = %+v, refusal %+v", got, refusal)
+	}
+	*got.CacheReadUsdPerMtok = 9
+	if *first.CacheReadUsdPerMtok != firstRate {
+		t.Fatal("returned policy aliases the approval-bound resource")
+	}
+
+	if value, hostErr := server.promptCachePolicy(context.Background(), "cache_warmer", resource); value != nil || hostErr == nil || hostErr.Code != pbv1.ErrorCode_ERROR_CODE_NOT_CONFIGURED {
+		t.Fatalf("ambiguous background policy = (%+v, %+v)", value, hostErr)
+	}
+	single := wasm.PromptCacheResource{Name: "warm-cache", Policies: map[string]*pbv1.PromptCachePolicy{wasm.PricingCoordinate("anthropic", "claude"): first}}
+	if value, hostErr := server.promptCachePolicy(context.Background(), "cache_warmer", single); hostErr != nil || value == nil || value.CacheReadUsdPerMtok == nil || *value.CacheReadUsdPerMtok != firstRate {
+		t.Fatalf("unambiguous background policy = (%+v, %+v)", value, hostErr)
+	}
+}
+
+func TestPromptCachePolicyUsesPendingRoute(t *testing.T) {
+	server := &Server{}
+	originalRate, routedRate := 0.1, 0.3
+	resource := wasm.PromptCacheResource{Name: "request-cache", Policies: map[string]*pbv1.PromptCachePolicy{
+		wasm.PricingCoordinate("original", "original-model"): {CacheReadUsdPerMtok: &originalRate},
+		wasm.PricingCoordinate("routed", "routed-model"):     {CacheReadUsdPerMtok: &routedRate},
+	}}
+	state := &reqState{
+		Provider: "original", Model: "original-model", InitialProvider: "original",
+		PendingRoute: &wasm.RouteVerdict{Plugin: "router", Provider: "routed", Model: "routed-model"},
+	}
+	ctx := context.WithValue(context.Background(), reqStateKey{}, state)
+	got, refusal := server.promptCachePolicy(ctx, "cache_tier_selector", resource)
+	if refusal != nil || got == nil || got.CacheReadUsdPerMtok == nil || *got.CacheReadUsdPerMtok != routedRate {
+		t.Fatalf("pending-route cache policy = %+v, refusal %+v", got, refusal)
+	}
+}
+
 func TestBoundModelServiceRejectsOversizedInputBeforeSpend(t *testing.T) {
 	server := &Server{}
 	result, refusal := server.completeModel(context.Background(), "pii", wasm.ModelServiceResource{MaxInputBytes: 3}, &pbv1.ModelCompleteArgs{Messages: []*pbv1.ModelMessage{{Role: "user", Content: "secret"}}})
