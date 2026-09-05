@@ -663,7 +663,7 @@ func TestHostErrorReplacesRouteVerdict(t *testing.T) {
 		t.Fatalf("plugin failure = %v, want false", last.PluginFailure)
 	}
 	// The routed model is retained as a diagnostic fact.
-	if last.Model != "tiny-model" {
-		t.Fatalf("feed model = %q, want the routed tiny-model", last.Model)
+	if last.RequestedModel != "tiny-model" {
+		t.Fatalf("feed requested model = %q, want the routed tiny-model", last.RequestedModel)
 	}
 }

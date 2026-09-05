@@ -218,16 +218,24 @@ func TestFormRenderedListRejectsAFieldTheDashboardDoesNotHave(t *testing.T) {
 	}
 }
 
-// TestSecretSentinelMatchesDashboard pins the sentinel the server sends in place
-// of a stored secret. The SPA must send it back unchanged to mean "unchanged";
-// if the two ever disagree the SPA writes the literal string as the new secret,
-// destroying the real one.
-func TestSecretSentinelMatchesDashboard(t *testing.T) {
-	if !strings.Contains(readDashboard(t), secretSetSentinel) {
-		t.Errorf("the dashboard does not mention the secret sentinel %q. The server sends it in "+
-			"place of a stored secret and expects it back verbatim to mean 'unchanged' — a "+
-			"dashboard that does not recognise it will overwrite the real secret with this string.",
-			secretSetSentinel)
+// TestHiddenSettingsArePreservedByTheDashboard pins the deployment-only
+// settings contract. The dashboard intentionally does not render cache or its
+// secret fields; saving visible settings must therefore begin with a deep copy
+// of the server response and override only fields owned by the form. That also
+// carries the server's secret sentinel back unchanged without teaching the UI
+// about a hidden implementation detail.
+func TestHiddenSettingsArePreservedByTheDashboard(t *testing.T) {
+	dashboard := readDashboard(t)
+	for _, marker := range []string{
+		"const cfg = settingsCfg ? JSON.parse(JSON.stringify(settingsCfg)) : {};",
+		"const prov = original ? JSON.parse(JSON.stringify(original)) : {};",
+	} {
+		if !strings.Contains(dashboard, marker) {
+			t.Errorf("dashboard no longer preserves hidden settings through %q", marker)
+		}
+	}
+	if strings.Contains(dashboard, secretSetSentinel) {
+		t.Errorf("deployment-only secret sentinel %q leaked back into the dashboard", secretSetSentinel)
 	}
 }
 

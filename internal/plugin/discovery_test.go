@@ -167,6 +167,21 @@ func TestResolvePluginResourcesUsesApprovalNotGuestInput(t *testing.T) {
 	}
 }
 
+func TestResolvePluginResourcesRequiresDeclaredFileBinding(t *testing.T) {
+	manifest := PluginManifest{Files: []FileDeclaration{{
+		Path: "usage.jsonl", Operations: []string{"append"}, Required: true,
+		MaxBytes: 200, RetainedFiles: 3,
+	}}}
+	if _, err := resolvePluginResources(manifest, Approval{}); err == nil || !strings.Contains(err.Error(), "required file") {
+		t.Fatalf("missing required file error = %v", err)
+	}
+	if _, err := resolvePluginResources(manifest, Approval{Files: map[string]FileApproval{
+		"usage.jsonl": {MaxBytes: 100, RetainedFiles: 2},
+	}}); err != nil {
+		t.Fatalf("bound required file: %v", err)
+	}
+}
+
 func TestFileApprovalsAreExplicitBoundedAndCannotExpandManifest(t *testing.T) {
 	manifest := PluginManifest{Files: []FileDeclaration{{Path: "usage.jsonl", Operations: []string{"append"}, MaxBytes: 200, RetainedFiles: 3}}}
 	rows := []struct {

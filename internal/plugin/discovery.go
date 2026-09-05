@@ -79,6 +79,7 @@ type CredentialDeclaration struct {
 type FileDeclaration struct {
 	Path          string   `json:"path"`
 	Operations    []string `json:"operations"`
+	Required      bool     `json:"required,omitempty"`
 	MaxBytes      int64    `json:"max_bytes,omitempty"`
 	RetainedFiles int      `json:"retained_files,omitempty"`
 }
@@ -2254,6 +2255,13 @@ func resolvePluginResources(manifest PluginManifest, approval Approval) (wasm.Pl
 			operations[operation] = true
 		}
 		resources.Files[path] = wasm.FileResource{Operations: operations, MaxBytes: maxBytes, RetainedFiles: retained}
+	}
+	for path, declaration := range declaredFiles {
+		if declaration.Required {
+			if _, ok := resources.Files[path]; !ok {
+				return resources, fmt.Errorf("required file %q is not approved", path)
+			}
+		}
 	}
 	declaredHTTP := make(map[string]HTTPEndpointDeclaration, len(manifest.HTTPEndpoints))
 	for _, declaration := range manifest.HTTPEndpoints {

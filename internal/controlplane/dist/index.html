@@ -78,7 +78,7 @@
       <div class="section-header">
         <div>
           <h2 id="trafficTitle" class="section-title">Traffic</h2>
-          <div class="section-desc">Live proxy throughput. Cost &amp; FinOps analytics are provided by plugins.</div>
+          <div class="section-desc">Process-local counters, cleared when Torana restarts. Prompts, responses, headers, and tool arguments are not stored here. Cost &amp; FinOps analytics are provided by plugins.</div>
         </div>
         <button class="btn btn-ghost" type="button" onclick="fetchStats()">↻ Refresh</button>
       </div>
@@ -124,19 +124,22 @@
     <!-- View: Live Feed -->
     <section id="view-feed" class="view" aria-labelledby="feedTitle">
       <div class="section-header">
-        <h2 id="feedTitle" class="section-title">Live Request Stream</h2>
+        <div>
+          <h2 id="feedTitle" class="section-title">Live Request Stream</h2>
+          <div class="section-desc">The latest 200 content-free events kept in memory and cleared on restart. Reported model is blank when the provider does not identify it.</div>
+        </div>
         <span id="eventCount" class="event-count">0 events</span>
       </div>
       <div class="table-container">
         <table>
           <thead>
             <tr>
-              <th>Time</th><th>Provider</th><th>Model</th><th>Status</th>
+              <th>Time</th><th>Provider</th><th>Requested model</th><th>Reported model</th><th>Status</th>
               <th>Latency</th><th>Tokens (In/Out)</th><th>Cache (R/W)</th><th>Verdict</th>
             </tr>
           </thead>
           <tbody id="feedTableBody">
-            <tr><td colspan="8" class="empty-state">Waiting for request events&hellip;</td></tr>
+            <tr><td colspan="9" class="empty-state">Waiting for request events&hellip;</td></tr>
           </tbody>
         </table>
       </div>
@@ -166,42 +169,6 @@
       </div>
 
       <div class="card form-section">
-        <div class="subhead space-block-start-none">Model pricing</div>
-        <div class="section-desc space-block-end-sm">
-          Rates in USD per million tokens, per exact model name (<code>*</code> as a provider-wide
-          default). Torana ships no built-in prices because they change and vary by account.
-          Anything that spends money &mdash; the compactor's economic gate, the cache plugins &mdash;
-          declines to act rather than guess when a rate is missing, so leaving this empty is safe
-          but disables those features.
-        </div>
-        <div class="table-container surface-flat">
-          <table class="providers-table">
-            <thead>
-              <tr><th>Provider</th><th>Model</th><th>Input</th><th>Output</th><th>Cache read</th><th>Cache write</th><th></th></tr>
-            </thead>
-            <tbody id="pricingBody"></tbody>
-          </table>
-        </div>
-        <button class="btn btn-sm space-block-start-xs" type="button" onclick="addPricingRow()">+ Add pricing</button>
-      </div>
-
-      <div class="card form-section">
-        <div class="subhead space-block-start-none">Offload (cheap-model summarization)</div>
-        <div class="checkbox-row space-block-end-sm">
-          <input type="checkbox" id="offEnabled"><label for="offEnabled">Enabled</label>
-        </div>
-        <div class="form-grid">
-          <div class="field">
-            <label for="offProvider">Provider</label>
-            <select class="input" id="offProvider"></select>
-            <span class="hint">Must be an <code>openai</code>-format provider.</span>
-          </div>
-          <div class="field"><label for="offModel">Model</label><input class="input" id="offModel" placeholder="deepseek-v4-flash"></div>
-          <div class="field"><span class="hint">Authentication comes from the selected provider. Host-originated offload requires that provider to use <code>credential</code> or <code>none</code> mode.</span></div>
-        </div>
-      </div>
-
-      <div class="card form-section">
         <div class="subhead space-block-start-none">Limits &amp; access</div>
         <div class="form-grid">
           <div class="field"><label for="limConc">Concurrency</label><input class="input" id="limConc" type="number" min="0"><span class="hint">Per identity; 0 disables this limit.</span></div>
@@ -215,49 +182,6 @@
           <div class="field">
             <span>Control-plane access</span>
             <span class="hint">Localhost only. Remote and multi-user administration are not supported in this release.</span>
-          </div>
-        </div>
-      </div>
-
-      <div class="card form-section">
-        <div class="subhead space-block-start-none">Cache</div>
-        <div class="form-grid">
-          <div class="field">
-            <label for="cacheBackend">Backend</label>
-            <select class="input" id="cacheBackend">
-              <option value="memory">Memory</option>
-              <option value="redis">Redis</option>
-            </select>
-          </div>
-          <div class="field">
-            <label for="cacheTtl">TTL seconds</label>
-            <input class="input" id="cacheTtl" type="number" min="0" placeholder="900">
-          </div>
-        </div>
-        <div class="subhead">Redis configuration</div>
-        <div class="form-grid">
-          <div class="field">
-            <label for="cacheRedisAddr">Address</label>
-            <input class="input" id="cacheRedisAddr" placeholder="127.0.0.1:6379">
-          </div>
-          <div class="field">
-            <label for="cacheRedisPasswordEnc">Password <span class="hint">(encrypted)</span></label>
-            <div class="secret-field">
-              <input type="password" class="input" id="cacheRedisPasswordEnc" data-set="" data-clear="" oninput="onSecretInput(this)">
-              <button type="button" class="btn btn-sm btn-secret-clear" onclick="toggleSecretClear(this)" title="Clear secret">Clear</button>
-            </div>
-          </div>
-          <div class="field">
-            <label for="cacheRedisPasswordEnv">Password env <span class="hint">(optional)</span></label>
-            <input class="input" id="cacheRedisPasswordEnv" placeholder="REDIS_PASSWORD">
-          </div>
-          <div class="field">
-            <label for="cacheRedisDb">DB</label>
-            <input class="input" id="cacheRedisDb" type="number" min="0" placeholder="0">
-          </div>
-          <div class="field">
-            <label for="cacheRedisPrefix">Prefix</label>
-            <input class="input" id="cacheRedisPrefix" placeholder="torana:">
           </div>
         </div>
       </div>
@@ -389,7 +313,7 @@
 
     // ---- Plugins / pipeline ----
     function loadPlugins() {
-      fetch('/_torana/api/v1/plugins')
+      return fetch('/_torana/api/v1/plugins')
         .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
         .then(data => {
           allPlugins = (data.plugins || []);
@@ -447,7 +371,7 @@
               <button type="button" class="btn btn-sm" onclick="movePlugin(${i},-1)" ${i === 0 ? 'disabled' : ''}>Move up</button>
               <button type="button" class="btn btn-sm" onclick="movePlugin(${i},1)" ${i === pipelineOrder.length - 1 ? 'disabled' : ''}>Move down</button>
               <button type="button" class="btn btn-sm" onclick="go('plugin',${escJS(name)})">Configure</button>
-              <button type="button" class="btn btn-sm btn-danger" onclick="disablePlugin(${escJS(name)})">Disable</button>
+              <button type="button" class="btn btn-sm btn-danger" onclick="disableAndApply(${escJS(name)},this)">Disable</button>
             </div>
           </div>`;
         }).join('');
@@ -531,15 +455,16 @@
       }
       const permissionList = document.getElementById('pluginPermissionList');
       if (!permissionList || permissionList.dataset.plugin !== name) {
-        showAlert(`Inspect ${name} and choose its capability grants before enabling.`);
+        showAlert(`Inspect ${name} and review its capability request before enabling.`);
         go('plugin', name);
         return false;
       }
       const approvalKey = p.id || p.name;
       const requested = p.permissions || [];
-      const selected = [...permissionList.querySelectorAll('input[type="checkbox"]:checked')]
-        .map(input => input.dataset.permission)
-        .filter(permission => requested.includes(permission));
+      // ABI v1 approvals are all-or-nothing. The detail page reviews the
+      // complete requested set; it must never manufacture a strict subset the
+      // host will reject.
+      const selected = [...requested];
       const failureMode = failureModeMap[name] || p.failure_mode || 'pass';
       const credentials = {};
       document.querySelectorAll('#pluginResourceReview .credential-binding').forEach(input => {
@@ -588,7 +513,7 @@
         ? `\nConflicts with plugin IDs:\n  • ${(p.conflicts_with || []).join('\n  • ')}`
         : '';
       const accepted = window.confirm(
-        `Approve ${approvalKey}?\n\nBundle: ${p.digest}\nSelected capability grants:\n  • ${summary}\nFailure policy: ${failureMode}${requirements}${conflicts}\n\nUnselected capabilities remain unavailable. Any bundle change requires approval again.`
+        `Approve ${approvalKey}?\n\nBundle: ${p.digest}\nCapability grants (approved together):\n  • ${summary}\nFailure policy: ${failureMode}${requirements}${conflicts}\n\nAny bundle change requires approval again.`
       );
       if (!accepted) return false;
       approvalMap[approvalKey] = {
@@ -611,6 +536,22 @@
       renderPipeline();
     }
 
+    function disableAndApply(name, button) {
+      disablePlugin(name);
+      setButtonBusy(button, true, 'Disabling…');
+      persistPipeline()
+        .then(() => loadPlugins())
+        .then(() => {
+          go('pipeline');
+          showAlert(`${name} is disabled.`, false);
+        })
+        .catch(err => {
+          loadPlugins();
+          showAlert(`Failed to disable ${name}: ${err.message}`);
+        })
+        .finally(() => setButtonBusy(button, false));
+    }
+
     function setPluginFailureMode(name, mode) {
       if (mode !== 'pass' && mode !== 'block') return;
       failureModeMap[name] = mode;
@@ -622,6 +563,43 @@
       setDirty(true);
     }
 
+    function pipelinePayload() {
+      const cfgOut = {};
+      for (const name of pipelineOrder) {
+        if (configMap[name] !== undefined) cfgOut[name] = configMap[name];
+      }
+      return { order: pipelineOrder, config: cfgOut, approvals: approvalMap };
+    }
+
+    function persistPipeline() {
+      return fetch('/_torana/api/v1/plugins', {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(pipelinePayload())
+      }).then(async r => {
+        const t = await r.text();
+        if (!r.ok) throw new Error(t || `HTTP ${r.status}`);
+        return t;
+      });
+    }
+
+    function approveAndEnable(name, button) {
+      if (!enablePlugin(name)) return;
+      setButtonBusy(button, true, 'Enabling…');
+      persistPipeline()
+        .then(() => loadPlugins())
+        .then(() => {
+          go('pipeline');
+          showAlert(`${name} is approved, enabled, and loaded.`, false);
+        })
+        .catch(err => {
+          // Discard staged browser state and restore the server-authoritative
+          // snapshot. Stay on the detail page so the operator can fix it.
+          loadPlugins().finally(() => go('plugin', name));
+          showAlert(`Failed to enable ${name}: ${err.message}`);
+        })
+        .finally(() => setButtonBusy(button, false));
+    }
+
     function savePipeline(button) {
       setButtonBusy(button, true, 'Applying…');
       // Only send configuration we actually have. loadPlugins populates
@@ -631,15 +609,7 @@
       // reachable. It matters because the server treats this map as a PATCH,
       // so any future path that leaves an entry unset would silently blank
       // that plugin's stored settings. Omitting a name preserves it.
-      const cfgOut = {};
-      for (const name of pipelineOrder) {
-        if (configMap[name] !== undefined) cfgOut[name] = configMap[name];
-      }
-      fetch('/_torana/api/v1/plugins', {
-        method: 'PUT', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ order: pipelineOrder, config: cfgOut, approvals: approvalMap })
-      })
-      .then(async r => { const t = await r.text(); if (!r.ok) throw new Error(t || `HTTP ${r.status}`); return t; })
+      persistPipeline()
       .then(() => { showAlert('Pipeline saved and applied.', false); loadPlugins(); })
       .catch(err => showAlert(`Failed to save pipeline: ${err.message}`))
       .finally(() => setButtonBusy(button, false));
@@ -659,18 +629,13 @@
       const cfgStr = JSON.stringify(configMap[name] || {}, null, 2);
       const approvalKey = p.id || p.name;
       const currentApproval = approvalMap[approvalKey];
-      const approvedPermissions = new Set(
-        currentApproval && currentApproval.digest === p.digest
-          ? (currentApproval.permissions || [])
-          : []
-      );
-      const permissionOptions = (p.permissions || []).map(permission => `<label class="permission-option">
-        <input type="checkbox" data-permission="${escAttr(permission)}" ${approvedPermissions.has(permission) ? 'checked' : ''}>
-        <span><code>${escHtml(permission)}</code></span>
-      </label>`).join('');
+      const permissionDetails = (p.permission_details || (p.permissions || []).map(name => ({ name, description: '' })));
+      const permissionOptions = permissionDetails.map(permission => `<div class="permission-option">
+        <span><code>${escHtml(permission.name)}</code>${permission.description ? `<span class="hint"> — ${escHtml(permission.description)}</span>` : ''}</span>
+      </div>`).join('');
       const permissionReview = `<fieldset class="permission-review">
         <legend>Capability approval</legend>
-        <div class="section-desc">Select only the capabilities this exact bundle should receive. Manifest capabilities are requests, not grants.</div>
+        <div class="section-desc">Review the complete capability set requested by this exact bundle. Torana approves this set as a whole; changing the bundle requires approval again.</div>
         <div id="pluginPermissionList" data-plugin="${escAttr(name)}">
           ${permissionOptions || '<div class="empty-state">This plugin requests no host capabilities.</div>'}
         </div>
@@ -700,12 +665,12 @@
       const approvedFiles = currentApproval && currentApproval.digest === p.digest ? (currentApproval.files || {}) : {};
       const fileRows = (p.files || []).map(file => {
         const existing = approvedFiles[file.path] || {};
-        const enabled = Boolean(approvedFiles[file.path]);
+        const enabled = Boolean(approvedFiles[file.path]) || file.required;
         const maxBytes = existing.max_bytes || file.max_bytes || 16777216;
         const retained = existing.retained_files ?? file.retained_files ?? 5;
         return `<div class="info-note" data-file="${escAttr(file.path)}">
-          <label class="checkbox-row"><input type="checkbox" class="file-binding-enabled" data-file="${escAttr(file.path)}" ${enabled ? 'checked' : ''}> <code>${escHtml(file.path)}</code></label>
-          <div class="hint">Private file; operations: ${escHtml((file.operations || []).join(', '))}. The approved budget may only reduce the manifest request.</div>
+          <label class="checkbox-row"><input type="checkbox" class="file-binding-enabled" data-file="${escAttr(file.path)}" ${enabled ? 'checked' : ''} ${file.required ? 'disabled' : ''}> <code>${escHtml(file.path)}</code>${file.required ? ' (required)' : ''}</label>
+          <div class="hint">The file binding names the object; <code>env.file_*</code> capabilities authorize operations on it. Operations: ${escHtml((file.operations || []).join(', '))}. The approved budget may only reduce the manifest request.</div>
           <div class="form-grid">
             <label class="field"><span>Bytes per generation</span><input class="input file-binding-bytes" type="number" min="1" max="67108864" value="${escAttr(maxBytes)}"></label>
             <label class="field"><span>Retained rotations</span><input class="input file-binding-retained" type="number" min="0" max="15" value="${escAttr(retained)}"></label>
@@ -713,8 +678,8 @@
         </div>`;
       }).join('');
       const resourceReview = credentialRows || httpRows || fileRows ? `<fieldset class="permission-review" id="pluginResourceReview">
-        <legend>Private resources</legend>
-        <div class="section-desc">Bindings and budgets are operator-owned. The plugin sees only the slots and logical paths declared here.</div>
+        <legend>Resource bindings and limits</legend>
+        <div class="section-desc">Capabilities authorize kinds of operations. These bindings authorize the specific credentials, endpoints, and private logical files the plugin may use, within operator-owned budgets.</div>
         ${credentialRows}${httpRows}${fileRows}
       </fieldset>` : '<div id="pluginResourceReview"></div>';
       const requirements = (p.requires_upstream || []).map(id => `<code>${escHtml(id)}</code>`).join(', ');
@@ -860,9 +825,9 @@
 
         <div class="inline-actions space-block-end-md">
           ${enabled
-            ? `<button type="button" class="btn btn-sm btn-primary" onclick="if (enablePlugin(${escJS(name)})) go('pipeline')">Update approval &amp; return</button>
-               <button type="button" class="btn btn-sm btn-danger" onclick="disablePlugin(${escJS(name)}); go('pipeline')">Disable &amp; return</button>`
-            : `<button type="button" class="btn btn-sm btn-primary" onclick="if (enablePlugin(${escJS(name)})) go('pipeline')">Approve, enable &amp; return</button>`}
+            ? `<button type="button" class="btn btn-sm btn-primary" onclick="approveAndEnable(${escJS(name)},this)">Update approval &amp; apply</button>
+               <button type="button" class="btn btn-sm btn-danger" onclick="disableAndApply(${escJS(name)},this)">Disable</button>`
+            : `<button type="button" class="btn btn-sm btn-primary" onclick="approveAndEnable(${escJS(name)},this)">Approve &amp; enable</button>`}
         </div>
 
         ${servedBlock}
@@ -1084,7 +1049,7 @@
       } catch (_) { setConnectionStatus(false, 'Connection error'); }
     }
     function addFeedEvent(ev) {
-      const key = `${ev.timestamp}_${ev.provider}_${ev.model}_${ev.status}_${ev.latency_ms}`;
+      const key = `${ev.timestamp}_${ev.provider}_${ev.requested_model}_${ev.reported_model || ''}_${ev.status}_${ev.latency_ms}`;
       if (seenEventKeys.has(key)) return;
       seenEventKeys.add(key);
       if (seenEventKeys.size > 500) seenEventKeys.delete(seenEventKeys.values().next().value);
@@ -1096,7 +1061,7 @@
       const tbody = document.getElementById('feedTableBody');
       document.getElementById('eventCount').textContent = `${feedEvents.length} event${feedEvents.length === 1 ? '' : 's'}`;
       if (feedEvents.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="8" class="empty-state">Waiting for request events…</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="9" class="empty-state">Waiting for request events…</td></tr>';
         return;
       }
       tbody.innerHTML = feedEvents.map(ev => {
@@ -1108,7 +1073,8 @@
         return `<tr>
           <td class="mono">${escHtml(t)}</td>
           <td><strong>${escHtml(ev.provider || '-')}</strong></td>
-          <td>${escHtml(ev.model || '-')}</td>
+          <td>${escHtml(ev.requested_model || '-')}</td>
+          <td>${escHtml(ev.reported_model || '-')}</td>
           <td><span class="badge ${sc}">${ev.status || 0}</span></td>
           <td>${lat}</td>
           <td>${(ev.tokens_in || 0).toLocaleString()} / ${(ev.tokens_out || 0).toLocaleString()}</td>
@@ -1120,69 +1086,6 @@
 
     // ---- Settings ----
     const PROVIDER_FORMATS = ['openai', 'anthropic', 'bedrock', 'gemini', 'gemini-codeassist'];
-    function setupSecretInput(el, secretVal) {
-      if (!el) return;
-      const isSet = secretVal === '__set__';
-      el.setAttribute('data-set', isSet ? '1' : '');
-      el.setAttribute('data-clear', '');
-      el.value = '';
-      updateSecretInputUI(el);
-    }
-    function updateSecretInputUI(input) {
-      if (!input) return;
-      const container = input.parentElement;
-      const btn = container ? container.querySelector('.btn-secret-clear') : null;
-      const isClear = input.getAttribute('data-clear') === '1';
-      const isSet = input.getAttribute('data-set') === '1';
-
-      if (isClear) {
-        input.placeholder = 'will be removed';
-        if (btn) {
-          btn.textContent = 'Undo';
-          btn.classList.add('btn-danger');
-        }
-      } else if (isSet) {
-        input.placeholder = '•••••••• set — type to replace';
-        if (btn) {
-          btn.textContent = 'Clear';
-          btn.classList.remove('btn-danger');
-        }
-      } else {
-        input.placeholder = 'sk-… (stored encrypted)';
-        if (btn) {
-          btn.textContent = 'Clear';
-          btn.classList.remove('btn-danger');
-        }
-      }
-    }
-    function onSecretInput(el) {
-      if (el.value !== '' && el.getAttribute('data-clear') === '1') {
-        el.setAttribute('data-clear', '');
-      }
-      updateSecretInputUI(el);
-    }
-    function toggleSecretClear(btn) {
-      const container = btn.parentElement;
-      if (!container) return;
-      const input = container.querySelector('.input');
-      if (!input) return;
-      const curClear = input.getAttribute('data-clear') === '1';
-      if (!curClear) {
-        input.setAttribute('data-clear', '1');
-        input.value = '';
-      } else {
-        input.setAttribute('data-clear', '');
-      }
-      updateSecretInputUI(input);
-    }
-    function getSecretFieldValue(inputEl) {
-      if (!inputEl) return undefined;
-      const val = inputEl.value.trim();
-      if (val !== '') return val;
-      if (inputEl.getAttribute('data-clear') === '1') return '';
-      if (inputEl.getAttribute('data-set') === '1') return '__set__';
-      return undefined;
-    }
     function loadSettings() {
       fetch('/_torana/api/v1/config').then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
         .then(cfg => { settingsCfg = cfg; renderSettings(cfg); })
@@ -1195,36 +1098,10 @@
       Object.keys(providers).forEach(name => addProviderRow(name, providers[name]));
       if (Object.keys(providers).length === 0) addProviderRow();
 
-      // Pricing is flattened to one row per provider/model pair. It nests two
-      // levels deep in config, which is unreadable as a table, and an operator
-      // thinks in terms of "what does this model cost" rather than in maps.
-      const pricingBody = document.getElementById('pricingBody');
-      pricingBody.innerHTML = '';
-      Object.keys(providers).forEach(provName => {
-        const rates = providers[provName].pricing || {};
-        Object.keys(rates).forEach(model => addPricingRow(provName, model, rates[model]));
-      });
-
-      refreshOffloadProviderOptions();
-      const off = cfg.offload || {};
-      document.getElementById('offEnabled').checked = !!off.enabled;
-      document.getElementById('offProvider').value = off.provider || '';
-      document.getElementById('offModel').value = off.model || '';
-
       const lim = cfg.limits || {};
       document.getElementById('limConc').value = lim.concurrency || 0;
       document.getElementById('limRpm').value = lim.rpm || 0;
       document.getElementById('cfgPort').value = cfg.port || 8080;
-
-      const cache = cfg.cache || {};
-      const redis = cache.redis || {};
-      document.getElementById('cacheBackend').value = cache.backend === 'redis' ? 'redis' : 'memory';
-      document.getElementById('cacheTtl').value = cache.ttl_seconds !== undefined && cache.ttl_seconds !== null ? cache.ttl_seconds : '';
-      document.getElementById('cacheRedisAddr').value = redis.addr || '';
-      setupSecretInput(document.getElementById('cacheRedisPasswordEnc'), redis.password_enc);
-      document.getElementById('cacheRedisPasswordEnv').value = redis.password_env || '';
-      document.getElementById('cacheRedisDb').value = redis.db !== undefined && redis.db !== null ? redis.db : '';
-      document.getElementById('cacheRedisPrefix').value = redis.prefix || '';
 
       const mitm = cfg.mitm || {};
       document.getElementById('mitmEnabled').checked = !!mitm.enabled;
@@ -1259,67 +1136,14 @@
       const auth = prov.auth || {mode: 'caller'};
       const authOpts = ['caller', 'credential', 'none'].map(m => `<option value="${m}" ${auth.mode === m ? 'selected' : ''}>${m}</option>`).join('');
       tr.innerHTML = `
-        <td><input class="input p-name" aria-label="Provider name" value="${escAttr(name || '')}" placeholder="name" oninput="refreshOffloadProviderOptions()"></td>
+        <td><input class="input p-name" aria-label="Provider name" value="${escAttr(name || '')}" placeholder="name"></td>
         <td><input class="input p-url" aria-label="Provider upstream URL" value="${escAttr(prov.url || '')}" placeholder="https://…"></td>
         <td><select class="input p-format" aria-label="Provider format">${opts}</select></td>
         <td><select class="input p-auth-mode" aria-label="Provider authentication mode">${authOpts}</select></td>
         <td><input class="input p-credential" aria-label="Torana credential ID" value="${escAttr(auth.credential || '')}" placeholder="provider-api-key"></td>
         <td><input class="input p-fallback" aria-label="Provider fallbacks" value="${escAttr((prov.fallback || []).join(', '))}" placeholder="name, name"></td>
-        <td><button type="button" class="btn btn-sm btn-danger" aria-label="Remove provider" onclick="this.closest('tr').remove(); refreshOffloadProviderOptions()">Remove</button></td>`;
+        <td><button type="button" class="btn btn-sm btn-danger" aria-label="Remove provider" onclick="this.closest('tr').remove()">Remove</button></td>`;
       body.appendChild(tr);
-    }
-    // Rates are stored as USD per million tokens. An empty cell means "not
-    // configured", which is a different thing from zero: zero is an explicitly
-    // free rate, and features that spend money treat the two differently.
-    function addPricingRow(provName, model, rates) {
-      rates = rates || {};
-      const body = document.getElementById('pricingBody');
-      const tr = document.createElement('tr');
-      const rate = k => (rates[k] === undefined || rates[k] === null) ? '' : rates[k];
-      tr.innerHTML = `
-        <td><input class="input pr-provider" aria-label="Pricing provider" value="${escAttr(provName || '')}" placeholder="provider"></td>
-        <td><input class="input pr-model" aria-label="Pricing model" value="${escAttr(model || '')}" placeholder="model or *"></td>
-        <td><input class="input pr-in" type="number" step="any" aria-label="Input rate" value="${escAttr(rate('input_usd_per_mtok'))}" placeholder="3.0"></td>
-        <td><input class="input pr-out" type="number" step="any" aria-label="Output rate" value="${escAttr(rate('output_usd_per_mtok'))}" placeholder="15.0"></td>
-        <td><input class="input pr-cread" type="number" step="any" aria-label="Cache read rate" value="${escAttr(rate('cache_read_usd_per_mtok'))}" placeholder="0.3"></td>
-        <td><input class="input pr-cwrite" type="number" step="any" aria-label="Cache write rate" value="${escAttr(rate('cache_write_usd_per_mtok'))}" placeholder="3.75"></td>
-        <td><button type="button" class="btn btn-sm btn-danger" aria-label="Remove pricing" onclick="this.closest('tr').remove()">Remove</button></td>`;
-      body.appendChild(tr);
-    }
-
-    // collectPricing folds the flat rows back into the nested shape config
-    // uses, keyed by provider then exact model name.
-    function collectPricing() {
-      const byProvider = {};
-      document.querySelectorAll('#pricingBody tr').forEach(tr => {
-        const provName = tr.querySelector('.pr-provider').value.trim();
-        const model = tr.querySelector('.pr-model').value.trim();
-        if (!provName || !model) return;
-        const entry = {};
-        const put = (sel, key) => {
-          const raw = tr.querySelector(sel).value.trim();
-          // Omit rather than zero: an absent rate means unknown, and a feature
-          // that cannot price its action must decline rather than treat it as
-          // free.
-          if (raw !== '' && !isNaN(Number(raw))) entry[key] = Number(raw);
-        };
-        put('.pr-in', 'input_usd_per_mtok');
-        put('.pr-out', 'output_usd_per_mtok');
-        put('.pr-cread', 'cache_read_usd_per_mtok');
-        put('.pr-cwrite', 'cache_write_usd_per_mtok');
-        if (Object.keys(entry).length === 0) return;
-        (byProvider[provName] = byProvider[provName] || {})[model] = entry;
-      });
-      return byProvider;
-    }
-
-    function refreshOffloadProviderOptions() {
-      const sel = document.getElementById('offProvider');
-      const cur = sel.value;
-      const names = Array.from(document.querySelectorAll('#providersBody .p-name'))
-        .map(i => i.value.trim()).filter(Boolean);
-      sel.innerHTML = '<option value=""></option>' + names.map(n => `<option value="${escAttr(n)}">${escHtml(n)}</option>`).join('');
-      if (names.includes(cur)) sel.value = cur;
     }
     function saveSettings(button) {
       setButtonBusy(button, true, 'Saving…');
@@ -1345,66 +1169,13 @@
         if (fb) prov.fallback = fb.split(',').map(s => s.trim()).filter(Boolean);
         providers[name] = prov;
       });
-      // Pricing is edited in its own table, so it is applied here rather than
-      // carried forward as an unmanaged field.
-      //
-      // An emptied table sends `pricing: null` rather than omitting the key.
-      // The server preserves per-provider fields the caller does not mention —
-      // that is what stops a form losing config it cannot render — so omitting
-      // it would silently restore the rates the operator just deleted. Sending
-      // null says "I manage this field and it is now empty".
-      const pricing = collectPricing();
-      Object.keys(providers).forEach(name => {
-        providers[name].pricing = pricing[name] || null;
-      });
       cfg.providers = providers;
-      cfg.offload = {
-        enabled: document.getElementById('offEnabled').checked,
-        provider: document.getElementById('offProvider').value.trim(),
-        model: document.getElementById('offModel').value.trim()
-      };
       cfg.limits = {
         concurrency: parseInt(document.getElementById('limConc').value, 10) || 0,
         rpm: parseInt(document.getElementById('limRpm').value, 10) || 0
       };
       const port = parseInt(document.getElementById('cfgPort').value, 10);
       if (!isNaN(port)) cfg.port = port;
-      const cacheBackend = document.getElementById('cacheBackend').value;
-      const cacheTtlVal = document.getElementById('cacheTtl').value.trim();
-      const cacheRedisAddr = document.getElementById('cacheRedisAddr').value.trim();
-      const cacheRedisPasswordEnv = document.getElementById('cacheRedisPasswordEnv').value.trim();
-      const cacheRedisDbVal = document.getElementById('cacheRedisDb').value.trim();
-      const cacheRedisPrefix = document.getElementById('cacheRedisPrefix').value.trim();
-      const cacheRedisSecretVal = getSecretFieldValue(document.getElementById('cacheRedisPasswordEnc'));
-
-      const cacheObj = {};
-      // "memory" is the default (empty backend) — omit it so it never spuriously
-      // differs from a default config and triggers a needless cache rebuild.
-      if (cacheBackend && cacheBackend !== 'memory') cacheObj.backend = cacheBackend;
-      if (cacheTtlVal !== '') {
-        const ttlNum = parseInt(cacheTtlVal, 10);
-        if (!isNaN(ttlNum)) cacheObj.ttl_seconds = ttlNum;
-      }
-      const redisObj = {};
-      if (cacheRedisAddr) redisObj.addr = cacheRedisAddr;
-      if (cacheRedisSecretVal !== undefined) redisObj.password_enc = cacheRedisSecretVal;
-      if (cacheRedisPasswordEnv) redisObj.password_env = cacheRedisPasswordEnv;
-      if (cacheRedisDbVal !== '') {
-        const dbNum = parseInt(cacheRedisDbVal, 10);
-        if (!isNaN(dbNum)) redisObj.db = dbNum;
-      }
-      if (cacheRedisPrefix) redisObj.prefix = cacheRedisPrefix;
-
-      if (Object.keys(redisObj).length > 0) {
-        cacheObj.redis = redisObj;
-      }
-
-      if (Object.keys(cacheObj).length > 0) {
-        cfg.cache = cacheObj;
-      } else {
-        delete cfg.cache;
-      }
-
       const mitmEnabled = document.getElementById('mitmEnabled').checked;
       const mitmListen = document.getElementById('mitmListen').value.trim();
       const mitmCaDir = document.getElementById('mitmCaDir').value.trim();

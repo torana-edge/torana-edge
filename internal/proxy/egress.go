@@ -438,13 +438,13 @@ func (s *Server) sendPluginRequest(ctx context.Context, pluginName, payloadJSON 
 // operator cannot tell where their spend went.
 func (s *Server) recordEgressEvent(pluginName, providerName, model string, status int, start time.Time, usage *engine.StreamUsage) {
 	ev := metrics.RequestEvent{
-		Timestamp: start.UTC().Format(time.RFC3339Nano),
-		Provider:  providerName,
-		Model:     model,
-		Status:    status,
-		LatencyMS: float64(time.Since(start).Microseconds()) / 1000,
-		Verdict:   "plugin-egress",
-		Plugins:   []string{pluginName},
+		Timestamp:      start.UTC().Format(time.RFC3339Nano),
+		Provider:       providerName,
+		RequestedModel: model,
+		Status:         status,
+		LatencyMS:      float64(time.Since(start).Microseconds()) / 1000,
+		Verdict:        "plugin-egress",
+		Plugins:        []string{pluginName},
 	}
 	if usage != nil {
 		ev.TokensIn = int64(usage.InputTokens)
