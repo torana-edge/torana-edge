@@ -3,8 +3,12 @@ name: Test
 on:
   push:
     branches: [main]
+  # No branch filter: a PR is gated wherever it is aimed. With `branches:
+  # [main]` only the bottom of a stack ran anything, so every PR above it
+  # merged on the strength of someone having run the suite by hand — and the
+  # one place a stacked change breaks is the interaction with the commit it
+  # sits on, which is exactly what nothing was checking.
   pull_request:
-    branches: [main]
 
 permissions:
   contents: read
