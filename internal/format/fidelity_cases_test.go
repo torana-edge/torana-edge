@@ -363,6 +363,43 @@ var fidelityCases = []fidelityCase{
 			"messages[0].content[0].content[0].cache_control": map[string]any{},
 		},
 	},
+	// A present cache_control must satisfy the required-object contract on
+	// EVERY carrier — the accepted domain cannot depend on which one the
+	// marker rode in on. The nested path tested the DECODED value for nil,
+	// which conflated a missing member with an explicit null: null was
+	// accepted there and silently dropped on the way out, while the other
+	// four carriers refused it. Missing is absence; present-null is a value,
+	// and not an object.
+	{
+		name:             "explicit null cache_control on a nested text element is refused",
+		format:           "anthropic",
+		body:             `{"model":"m","max_tokens":10,"messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":[{"type":"text","text":"r","cache_control":null}]}]}]}`,
+		wantUnmarshalErr: true,
+	},
+	{
+		name:             "explicit null cache_control on a nested image element is refused",
+		format:           "anthropic",
+		body:             `{"model":"m","max_tokens":10,"messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":[{"type":"image","source":{"type":"base64","data":"AA"},"cache_control":null}]}]}]}`,
+		wantUnmarshalErr: true,
+	},
+	{
+		name:             "explicit null cache_control on a content block is refused",
+		format:           "anthropic",
+		body:             `{"model":"m","max_tokens":10,"messages":[{"role":"user","content":[{"type":"text","text":"r","cache_control":null}]}]}`,
+		wantUnmarshalErr: true,
+	},
+	{
+		name:             "explicit null cache_control on a system block is refused",
+		format:           "anthropic",
+		body:             `{"model":"m","max_tokens":10,"system":[{"type":"text","text":"s","cache_control":null}],"messages":[{"role":"user","content":"u"}]}`,
+		wantUnmarshalErr: true,
+	},
+	{
+		name:             "explicit null cache_control on a tool definition is refused",
+		format:           "anthropic",
+		body:             `{"model":"m","max_tokens":10,"messages":[{"role":"user","content":"u"}],"tools":[{"name":"t","input_schema":{"type":"object"},"cache_control":null}]}`,
+		wantUnmarshalErr: true,
+	},
 
 	// ---------------------------------------------------------------------
 	// Gemini — no known losses; these pin the behaviour the others regressed.

@@ -557,8 +557,15 @@ func anthropicNestedContentToEngine(p any, rawNested []json.RawMessage, j int) (
 	if !ok {
 		return out, nil
 	}
+	// MISSING is absence; PRESENT is a value that must satisfy the
+	// required-object contract, including an explicit null. Testing the
+	// decoded value for nil conflated the two, so `"cache_control": null` was
+	// accepted here and silently dropped on the way out — while the system,
+	// top-level content and tool-definition paths all pass the raw bytes to
+	// ParseRequiredJSONObject and reject it. The accepted domain must not
+	// depend on which carrier the marker rode in on.
 	cc, present := m["cache_control"]
-	if !present || cc == nil {
+	if !present {
 		return out, nil
 	}
 	marker, err := engine.ParseRequiredJSONObject(nestedMarkerBytes(cc, rawNested, j))
