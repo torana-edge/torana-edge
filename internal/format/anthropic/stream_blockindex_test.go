@@ -144,6 +144,45 @@ func TestSerializeExplicitBlockEvents(t *testing.T) {
 	}
 }
 
+// TestThinkingSignatureRoundTrip pins the Anthropic extended-thinking wire
+// contract used by coding harnesses. The signature is opaque but must remain
+// inside the same thinking block; otherwise the harness replays invalid
+// assistant history on its next tool-result request.
+func TestThinkingSignatureRoundTrip(t *testing.T) {
+	const wire = "event: content_block_start\n" +
+		"data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"\"}}\n\n" +
+		"event: content_block_delta\n" +
+		"data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"reason\"}}\n\n" +
+		"event: content_block_delta\n" +
+		"data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"signature_delta\",\"signature\":\"opaque-sig\"}}\n\n" +
+		"event: content_block_stop\n" +
+		"data: {\"type\":\"content_block_stop\",\"index\":0}\n\n"
+
+	parsed := (&StreamAdapter{}).ParseStream(strings.NewReader(wire))
+	var events []engine.StreamEvent
+	for ev := range parsed {
+		events = append(events, ev)
+	}
+	if len(events) != 2 || events[0].ThinkingDelta == nil || *events[0].ThinkingDelta != "reason" ||
+		events[1].SignatureDelta == nil || *events[1].SignatureDelta != "opaque-sig" {
+		t.Fatalf("parsed events = %#v, want thinking then signature deltas", events)
+	}
+
+	outEvents := make(chan engine.StreamEvent, len(events))
+	for _, ev := range events {
+		outEvents <- ev
+	}
+	close(outEvents)
+	var out bytes.Buffer
+	if err := (&StreamAdapter{}).SerializeStream(context.Background(), &out, outEvents); err != nil {
+		t.Fatalf("SerializeStream: %v", err)
+	}
+	if !strings.Contains(out.String(),
+		`{"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"opaque-sig"}}`) {
+		t.Fatalf("serialized stream lost thinking signature:\n%s", out.String())
+	}
+}
+
 // TestSerializeProviderBlockErrors: provider blocks have no Anthropic wire
 // representation — the serializer must error explicitly rather than drop or
 // cast them.

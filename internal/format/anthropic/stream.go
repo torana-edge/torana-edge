@@ -142,7 +142,10 @@ func (s *StreamAdapter) ParseStream(body io.Reader) <-chan engine.StreamEvent {
 						ThinkingDelta: &thinking,
 					}
 				case "signature_delta":
-					// Accumulate signature, don't emit as event
+					signature := ev.Delta.Signature
+					ch <- engine.StreamEvent{
+						SignatureDelta: &signature,
+					}
 				}
 
 			case ev.Type == "content_block_stop":
@@ -367,6 +370,23 @@ func (s *StreamAdapter) SerializeStream(ctx context.Context, w io.Writer, events
 				`{"type":"content_block_delta","index":%d,"delta":{"type":"thinking_delta","thinking":%s}}`,
 				blockIndex,
 				jsonString(*ev.ThinkingDelta),
+			)); err != nil {
+				return err
+			}
+
+		case ev.SignatureDelta != nil:
+			// Anthropic binds a signature delta to the currently open thinking
+			// block. Dropping it makes coding harnesses replay an unsigned (and,
+			// for empty-thinking responses, invalid) thinking block on their next
+			// request. A signature outside a thinking block has no legal wire
+			// position, so fail closed instead of inventing one.
+			if !inThinking {
+				return fmt.Errorf("anthropic: signature delta with no open thinking block")
+			}
+			if err := emit("content_block_delta", fmt.Sprintf(
+				`{"type":"content_block_delta","index":%d,"delta":{"type":"signature_delta","signature":%s}}`,
+				blockIndex,
+				jsonString(*ev.SignatureDelta),
 			)); err != nil {
 				return err
 			}

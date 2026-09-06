@@ -710,17 +710,30 @@ func (a *Adapter) unmarshalResponses(rawBody []byte) (*engine.ChatRequest, error
 			// Try array of Responses API items: each item projects onto the
 			// ordered body in wire order — message boundaries and item order
 			// ARE the body (no layout sentinel needed).
-			var items []responsesInputItem
-			if err := json.Unmarshal(rr.Input, &items); err == nil && len(items) > 0 && items[0].Type != "" {
+			var rawItems []json.RawMessage
+			if err := json.Unmarshal(rr.Input, &rawItems); err == nil && len(rawItems) > 0 && responseItemType(rawItems[0]) != "" {
 				// Representable kinds project onto the ordered body; opaque
 				// kinds (reasoning, compaction, future types) are host-only
 				// topology captured raw in the layout ext and re-spliced on
-				// marshal — never dropped, never guessed.
-				for _, item := range items {
-					msg, merr := responsesItemToMessage(item)
-					if merr == nil {
-						req.Messages = append(req.Messages, msg)
+				// marshal — never dropped, never guessed. Decode each known
+				// item independently: an opaque item is allowed to use a field
+				// name with a different JSON type (Codex custom_tool_call_output,
+				// for example, has an array-valued output), which must not make
+				// decoding the entire heterogeneous array fail.
+				for i, rawItem := range rawItems {
+					typ := responseItemType(rawItem)
+					if typ != "message" && typ != "function_call" && typ != "function_call_output" {
+						continue
 					}
+					var item responsesInputItem
+					if err := json.Unmarshal(rawItem, &item); err != nil {
+						return nil, fmt.Errorf("openai responses input item %d: %w", i, err)
+					}
+					msg, merr := responsesItemToMessage(item)
+					if merr != nil {
+						return nil, fmt.Errorf("openai responses input item %d: %w", i, merr)
+					}
+					req.Messages = append(req.Messages, msg)
 				}
 				layout, lerr := engine.ParseOptionalJSONArray(rr.Input)
 				if lerr != nil {
@@ -762,6 +775,16 @@ func (a *Adapter) unmarshalResponses(rawBody []byte) (*engine.ChatRequest, error
 	}
 
 	return req, nil
+}
+
+func responseItemType(raw json.RawMessage) string {
+	var item struct {
+		Type string `json:"type"`
+	}
+	if json.Unmarshal(raw, &item) != nil {
+		return ""
+	}
+	return item.Type
 }
 
 // ---------------------------------------------------------------------------
