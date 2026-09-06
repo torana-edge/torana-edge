@@ -212,3 +212,61 @@ func TestOperatorPathIsAbsoluteSafeAndDoesNotRequireExistingFile(t *testing.T) {
 		t.Errorf("empty plugin resolved to %q", got)
 	}
 }
+
+// The hard-link guard is a security boundary: a plugin-private file with more
+// than one directory entry is a link the operator did not create, and writing
+// through it escapes the plugin's own directory.
+//
+// This is deliberately platform-agnostic. The guard used to read
+// syscall.Stat_t.Nlink directly, which does not exist on Windows — and the
+// first attempt at portability returned "link count unknown" there, which would
+// have silently dropped the boundary on a released platform while Unix kept
+// enforcing it. Both halves are pinned here so any platform that compiles must
+// also behave.
+func TestRegularSingleLinkRefusesMultipleLinks(t *testing.T) {
+	dir := t.TempDir()
+	single := filepath.Join(dir, "single.jsonl")
+	if err := os.WriteFile(single, []byte("one\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// One link: accepted.
+	if err := regularSingleLink(single, false); err != nil {
+		t.Fatalf("a file with exactly one link must be accepted: %v", err)
+	}
+	if n, err := hardLinkCount(single, mustStat(t, single)); err != nil || n != 1 {
+		t.Fatalf("hardLinkCount = %d, %v; want 1, nil", n, err)
+	}
+
+	// A second link: refused.
+	linked := filepath.Join(dir, "linked.jsonl")
+	if err := os.Link(single, linked); err != nil {
+		t.Skipf("this filesystem does not support hard links: %v", err)
+	}
+	if err := regularSingleLink(single, false); err == nil {
+		t.Error("a file with two directory entries must be refused; writing through it escapes the plugin directory")
+	}
+	if n, err := hardLinkCount(single, mustStat(t, single)); err != nil || n != 2 {
+		t.Errorf("hardLinkCount = %d, %v; want 2, nil", n, err)
+	}
+}
+
+// A count that cannot be obtained must be an error, never a pass.
+func TestRegularSingleLinkFailsClosedOnMissingFile(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "absent.jsonl")
+	if err := regularSingleLink(missing, true); err != nil {
+		t.Errorf("allowMissing must tolerate absence: %v", err)
+	}
+	if err := regularSingleLink(missing, false); err == nil {
+		t.Error("a missing file must be refused when it is required to exist")
+	}
+}
+
+func mustStat(t *testing.T, path string) os.FileInfo {
+	t.Helper()
+	info, err := os.Lstat(path)
+	if err != nil {
+		t.Fatalf("lstat %s: %v", path, err)
+	}
+	return info
+}

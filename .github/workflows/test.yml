@@ -143,6 +143,29 @@ jobs:
       - name: Vulnerability scan
         run: GOWORK=off go run golang.org/x/vuln/cmd/govulncheck@v1.6.0 ./...
 
+  # Platform-specific behaviour, actually executed rather than only compiled.
+  #
+  # The cross-compile step above proves Windows builds; it cannot prove the
+  # per-platform implementations AGREE. internal/pluginfiles has one — the
+  # hard-link guard reads Stat_t.Nlink on Unix and GetFileInformationByHandle on
+  # Windows — and that guard is a security boundary, so a platform where it
+  # silently answered "unknown" would drop the protection while others kept it.
+  #
+  # Only the packages with platform-specific code: the wazero-heavy suites are
+  # slow and add nothing here.
+  windows-behaviour:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: go.mod
+      - name: Platform-sensitive packages
+        run: go test ./internal/pluginfiles/... ./internal/secret/... ./internal/auditlog/...
+        env:
+          GOWORK: off
+
   # The release configuration itself, exercised on every PR rather than first on
   # a tag. The cross-compile step in `analysis` proves the code builds for each
   # platform; this proves .goreleaser.yaml agrees — that its platform matrix,

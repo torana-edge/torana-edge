@@ -3,20 +3,22 @@
 package pluginfiles
 
 import (
+	"fmt"
 	"io/fs"
 	"syscall"
 )
 
-// hardLinkCount reports the number of directory entries pointing at this
-// inode. A plugin-private file with more than one is a link an operator did
-// not create, so the caller refuses to write through it.
+// hardLinkCount reports how many directory entries point at this file.
 //
-// known is false when the platform does not expose a link count; the caller
-// then skips the check rather than inventing a value.
-func hardLinkCount(info fs.FileInfo) (links uint64, known bool) {
+// regularSingleLink is a security boundary: a plugin-private file with more
+// than one link is a link an operator did not create, and writing through it
+// would escape the plugin's own directory. So a count that cannot be obtained
+// is an error, never a pass — the caller refuses rather than proceeding on an
+// unknown.
+func hardLinkCount(_ string, info fs.FileInfo) (uint64, error) {
 	stat, ok := info.Sys().(*syscall.Stat_t)
 	if !ok {
-		return 0, false
+		return 0, fmt.Errorf("plugin file link count is unavailable on this platform")
 	}
-	return uint64(stat.Nlink), true
+	return uint64(stat.Nlink), nil
 }

@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 )
@@ -141,11 +142,24 @@ func validateExistingTarget(path string) error {
 	if !info.Mode().IsRegular() {
 		return errors.New("audit.path must name a regular file")
 	}
-	if info.Mode().Perm()&0o077 != 0 {
+	if ownerOnlyEnforced() && info.Mode().Perm()&0o077 != 0 {
 		return errors.New("audit.path must not be accessible by group or others")
 	}
 	return nil
 }
+
+// ownerOnlyEnforced reports whether Unix permission bits are meaningful here.
+//
+// Windows does not model them: os.FileMode.Perm() reports 0666 for an ordinary
+// readable/writable file whatever its ACL says, so the group/other check below
+// rejects EVERY path and the audit log could never be enabled at all. The same
+// guard already exists in internal/mitm/ca.go for its key material; this
+// surface simply never got it.
+//
+// The audit file is still created 0600, which the Go runtime maps to a
+// restrictive ACL on Windows; what cannot be done there is verifying an
+// existing file's mode through this API.
+func ownerOnlyEnforced() bool { return runtime.GOOS != "windows" }
 
 func (w *Writer) openActive() error {
 	f, err := os.OpenFile(w.config.Path, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600)
@@ -157,7 +171,7 @@ func (w *Writer) openActive() error {
 		_ = f.Close()
 		return fmt.Errorf("stat audit path: %w", err)
 	}
-	if !info.Mode().IsRegular() || info.Mode().Perm()&0o077 != 0 {
+	if !info.Mode().IsRegular() || (ownerOnlyEnforced() && info.Mode().Perm()&0o077 != 0) {
 		_ = f.Close()
 		return errors.New("audit.path must remain an owner-only regular file")
 	}
