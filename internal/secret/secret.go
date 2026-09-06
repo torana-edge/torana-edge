@@ -10,6 +10,8 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+
+	"github.com/torana-edge/torana-edge/internal/fileperm"
 	"strings"
 )
 
@@ -31,7 +33,7 @@ func Open(dataDir string) (*Store, error) {
 	if err := os.MkdirAll(dataDir, 0o700); err != nil {
 		return nil, fmt.Errorf("failed to create data directory: %w", err)
 	}
-	if err := os.Chmod(dataDir, 0o700); err != nil {
+	if err := fileperm.RestrictDir(dataDir); err != nil {
 		return nil, fmt.Errorf("securing data directory: %w", err)
 	}
 
@@ -42,7 +44,7 @@ func Open(dataDir string) (*Store, error) {
 		if _, err := io.ReadFull(rand.Reader, key); err != nil {
 			return nil, fmt.Errorf("failed to generate random key: %w", err)
 		}
-		if err := os.WriteFile(keyPath, key, 0600); err != nil {
+		if err := fileperm.WriteNew(keyPath, key); err != nil {
 			return nil, fmt.Errorf("failed to write secret key file: %w", err)
 		}
 	} else if err != nil {
@@ -50,8 +52,21 @@ func Open(dataDir string) (*Store, error) {
 	} else if len(key) != 32 {
 		return nil, fmt.Errorf("invalid key length in secret key file: expected 32 bytes, got %d", len(key))
 	} else {
-		// Enforce 0600 permissions on pre-existing key file.
-		_ = os.Chmod(keyPath, 0600)
+		// A pre-existing key file is repaired, then CHECKED. The repair alone
+		// was `_ = os.Chmod(...)`: its error was discarded, and on Windows the
+		// call cannot express the invariant at all, so a key file readable by
+		// anyone stayed readable by anyone and Torana said nothing. This key
+		// decrypts every stored provider credential.
+		if err := fileperm.Restrict(keyPath); err != nil {
+			return nil, fmt.Errorf("securing secret key file: %w", err)
+		}
+		info, err := os.Stat(keyPath)
+		if err != nil {
+			return nil, fmt.Errorf("failed to stat secret key file: %w", err)
+		}
+		if err := fileperm.Verify(keyPath, info); err != nil {
+			return nil, fmt.Errorf("secret key file: %w", err)
+		}
 	}
 
 	keyCopy := make([]byte, len(key))

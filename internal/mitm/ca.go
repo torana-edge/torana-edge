@@ -13,9 +13,10 @@ import (
 	"math/big"
 	"os"
 	"path/filepath"
-	"runtime"
 	"sync"
 	"time"
+
+	"github.com/torana-edge/torana-edge/internal/fileperm"
 )
 
 // CA is a locally-generated certificate authority that mints per-host leaf
@@ -43,10 +44,8 @@ func LoadOrCreateCA(dir string) (*CA, error) {
 	// freshly-created 0755 test/config directory). CADir is dedicated security
 	// material, so normalize it instead of making the operator repair the
 	// default umask by hand.
-	if runtime.GOOS != "windows" {
-		if err := os.Chmod(dir, 0o700); err != nil {
-			return nil, fmt.Errorf("secure MITM CA directory: %w", err)
-		}
+	if err := fileperm.RestrictDir(dir); err != nil {
+		return nil, fmt.Errorf("secure MITM CA directory: %w", err)
 	}
 	info, err := os.Stat(dir)
 	if err != nil {
@@ -55,8 +54,8 @@ func LoadOrCreateCA(dir string) (*CA, error) {
 	if !info.IsDir() {
 		return nil, fmt.Errorf("mitm CA path %q is not a directory", dir)
 	}
-	if runtime.GOOS != "windows" && info.Mode().Perm()&0o077 != 0 {
-		return nil, fmt.Errorf("mitm CA directory %q permissions are %04o after chmod; want 0700 or stricter", dir, info.Mode().Perm())
+	if err := fileperm.Verify(dir, info); err != nil {
+		return nil, fmt.Errorf("mitm CA directory: %w", err)
 	}
 	certPath := filepath.Join(dir, "ca-cert.pem")
 	keyPath := filepath.Join(dir, "ca-key.pem")
@@ -81,8 +80,12 @@ func LoadOrCreateCA(dir string) (*CA, error) {
 		if !certInfo.Mode().IsRegular() || !keyInfo.Mode().IsRegular() {
 			return nil, fmt.Errorf("MITM CA certificate and private key must be regular files")
 		}
-		if runtime.GOOS != "windows" && keyInfo.Mode().Perm()&0o077 != 0 {
-			return nil, fmt.Errorf("MITM CA private key permissions are %04o; want 0600 or stricter", keyInfo.Mode().Perm())
+		// This key mints certificates for every intercepted host, so it is
+		// owner-only on every platform. The runtime.GOOS guard that stood here
+		// SKIPPED the check on Windows rather than expressing it there, which
+		// is the same hole the audit log and the credential key had.
+		if err := fileperm.Verify(keyPath, keyInfo); err != nil {
+			return nil, fmt.Errorf("MITM CA private key: %w", err)
 		}
 		cert, key, err := loadCA(certPath, keyPath, time.Now())
 		if err != nil {

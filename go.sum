@@ -39,14 +39,6 @@ github.com/stretchr/testify v1.11.1 h1:7s2iGBzp5EwR7/aIZr8ao5+dra3wiQyKjjFuvgVKu
 github.com/stretchr/testify v1.11.1/go.mod h1:wZwfW3scLgRK+23gO65QZefKpKQRnfz6sD981Nm4B6U=
 github.com/tetratelabs/wazero v1.12.0 h1:DuWcpNu/FzgEXgGBDp8J1Spc+CWOvvtvVyjKlaZopYU=
 github.com/tetratelabs/wazero v1.12.0/go.mod h1:LvKtzl2RqO4gyF27BiXU+nKAjcV8f38U+kP/q2vgxh0=
-github.com/torana-edge/torana-plugin-sdk v0.2.1-0.20260830212027-1c1e1dd734e9 h1:kaimri3CldhiyDJCHX6C6ZtNbwTgozDhVVnrKlMUq+w=
-github.com/torana-edge/torana-plugin-sdk v0.2.1-0.20260830212027-1c1e1dd734e9/go.mod h1:AQgCa3xORFCvKFibrhN2QYWYwXjx0aLUA64I5S9UMwk=
-github.com/torana-edge/torana-plugin-sdk v0.2.1-0.20260905175819-28931f500549 h1:alIb5BNZASEnbqoZDDyUAw6mQYRb312lKjUR4NRHZPk=
-github.com/torana-edge/torana-plugin-sdk v0.2.1-0.20260905175819-28931f500549/go.mod h1:AQgCa3xORFCvKFibrhN2QYWYwXjx0aLUA64I5S9UMwk=
-github.com/torana-edge/torana-plugin-sdk v0.2.1-0.20260905190240-fc428c8f6c82 h1:FXJgndJ34jkP/HlxRiLCCudy6LktnhAktioQ6vNxu+g=
-github.com/torana-edge/torana-plugin-sdk v0.2.1-0.20260905190240-fc428c8f6c82/go.mod h1:AQgCa3xORFCvKFibrhN2QYWYwXjx0aLUA64I5S9UMwk=
-github.com/torana-edge/torana-plugin-sdk v0.2.1-0.20260905204756-e74cc4c6ee70 h1:hNwlaPVYdKSqCwqAYeYe9mHRNNPUhdVXeJBrSFy/Gv4=
-github.com/torana-edge/torana-plugin-sdk v0.2.1-0.20260905204756-e74cc4c6ee70/go.mod h1:AQgCa3xORFCvKFibrhN2QYWYwXjx0aLUA64I5S9UMwk=
 github.com/torana-edge/torana-plugin-sdk v0.2.1-0.20260906122445-1737b54dad06 h1:f/qAlKpQlj2gVbLjD26ZNaaK0KcD4xyIFFn/6MWj9eU=
 github.com/torana-edge/torana-plugin-sdk v0.2.1-0.20260906122445-1737b54dad06/go.mod h1:AQgCa3xORFCvKFibrhN2QYWYwXjx0aLUA64I5S9UMwk=
 github.com/yuin/gopher-lua v1.1.1 h1:kYKnWBjvbNP4XLT3+bPEwAXJx262OhaHDWDVOPjL46M=

@@ -286,16 +286,29 @@ func TestLeafForIsValidForHost(t *testing.T) {
 }
 
 func TestCALoadFailsClosed(t *testing.T) {
-	t.Run("private key permissions", func(t *testing.T) {
+	t.Run("private key is not owner-only", func(t *testing.T) {
 		dir := t.TempDir()
 		if _, err := LoadOrCreateCA(dir); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.Chmod(filepath.Join(dir, "ca-key.pem"), 0o644); err != nil {
+		keyPath := filepath.Join(dir, "ca-key.pem")
+		key, err := os.ReadFile(keyPath)
+		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := LoadOrCreateCA(dir); err == nil || !strings.Contains(err.Error(), "private key permissions") {
-			t.Fatalf("LoadOrCreateCA error = %v", err)
+		// Widen it the same way on both platforms. os.Chmod would only mean
+		// something on Unix; rewriting the file with no explicit protection
+		// leaves 0644 there and, on Windows, a DACL merely INHERITED from the
+		// directory — which a later change to the parent can widen without
+		// touching this file, and which fileperm therefore refuses.
+		if err := os.Remove(keyPath); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(keyPath, key, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := LoadOrCreateCA(dir); err == nil || !strings.Contains(err.Error(), "private key") {
+			t.Fatalf("LoadOrCreateCA accepted a CA private key that is not owner-only: %v", err)
 		}
 	})
 

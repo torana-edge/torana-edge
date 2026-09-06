@@ -10,9 +10,10 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"sync"
+
+	"github.com/torana-edge/torana-edge/internal/fileperm"
 )
 
 const (
@@ -142,27 +143,19 @@ func validateExistingTarget(path string) error {
 	if !info.Mode().IsRegular() {
 		return errors.New("audit.path must name a regular file")
 	}
-	if ownerOnlyEnforced() && info.Mode().Perm()&0o077 != 0 {
-		return errors.New("audit.path must not be accessible by group or others")
+	// The audit trail records who asked for what; it is owner-only on every
+	// platform Torana ships. An earlier version of this guard skipped the
+	// check on Windows because os.FileMode is meaningless there — which left
+	// the boundary enforced on Unix and absent on Windows. fileperm states the
+	// same invariant in each platform's own terms instead.
+	if err := fileperm.Verify(path, info); err != nil {
+		return fmt.Errorf("audit.path: %w", err)
 	}
 	return nil
 }
 
-// ownerOnlyEnforced reports whether Unix permission bits are meaningful here.
-//
-// Windows does not model them: os.FileMode.Perm() reports 0666 for an ordinary
-// readable/writable file whatever its ACL says, so the group/other check below
-// rejects EVERY path and the audit log could never be enabled at all. The same
-// guard already exists in internal/mitm/ca.go for its key material; this
-// surface simply never got it.
-//
-// The audit file is still created 0600, which the Go runtime maps to a
-// restrictive ACL on Windows; what cannot be done there is verifying an
-// existing file's mode through this API.
-func ownerOnlyEnforced() bool { return runtime.GOOS != "windows" }
-
 func (w *Writer) openActive() error {
-	f, err := os.OpenFile(w.config.Path, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600)
+	f, err := fileperm.OpenAppend(w.config.Path)
 	if err != nil {
 		return fmt.Errorf("open audit path: %w", err)
 	}
@@ -170,10 +163,6 @@ func (w *Writer) openActive() error {
 	if err != nil {
 		_ = f.Close()
 		return fmt.Errorf("stat audit path: %w", err)
-	}
-	if !info.Mode().IsRegular() || (ownerOnlyEnforced() && info.Mode().Perm()&0o077 != 0) {
-		_ = f.Close()
-		return errors.New("audit.path must remain an owner-only regular file")
 	}
 	w.file = f
 	w.size = info.Size()

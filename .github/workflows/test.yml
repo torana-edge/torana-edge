@@ -162,7 +162,7 @@ jobs:
         with:
           go-version-file: go.mod
       - name: Platform-sensitive packages
-        run: go test ./internal/pluginfiles/... ./internal/secret/... ./internal/auditlog/...
+        run: go test ./internal/fileperm/... ./internal/pluginfiles/... ./internal/secret/... ./internal/auditlog/... ./internal/mitm/...
         env:
           GOWORK: off
 
