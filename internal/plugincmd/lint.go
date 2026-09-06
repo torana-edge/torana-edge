@@ -67,7 +67,7 @@ var sdkPermission = map[string]string{
 	"HTTPRequest":           "env.http_request",
 	"ModelComplete":         "env.model_complete",
 	"GetModelPricing":       "env.model_pricing",
-	"GetCachePricing":       "env.host_call.torana_cache_pricing",
+	"GetPromptCachePolicy":  "env.cache_policy",
 	"SendRequest":           "env.host_call.torana_send_request",
 	"SetCacheBreakpoint":    "ir.cache_control.write",
 	"MoveCacheBreakpoint":   "ir.cache_control.write",

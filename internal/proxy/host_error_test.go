@@ -475,6 +475,11 @@ func TestHostErrorDiscardsQueuedReportNonVacuous(t *testing.T) {
 					PricingResources: map[string]provider.PluginPricingApproval{
 						"target": {Models: []provider.PluginPricingModelApproval{{Provider: "p", Model: "record-savings", InputUSDPerMTok: &zero}}},
 					},
+					PromptCachePolicies: map[string]provider.PluginPromptCacheApproval{
+						"request-cache": {Models: []provider.PluginPromptCacheModelApproval{{
+							Provider: "p", Model: "cache-policy", Tiers: []provider.PluginPromptCacheTierApproval{{TTLSeconds: 300, Marker: json.RawMessage(`{"type":"ephemeral"}`)}},
+						}}},
+					},
 				},
 				"test-redacted-thinking": {Digest: redactedDigest, Permissions: manifestPermissions("../../examples/plugins/test-redacted-thinking"), FailureMode: "pass"},
 			},

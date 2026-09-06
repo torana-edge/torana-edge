@@ -64,6 +64,7 @@ type PluginManifest struct {
 	HTTPEndpoints        []HTTPEndpointDeclaration `json:"http_endpoints,omitempty"`
 	ModelServices        []ModelServiceDeclaration `json:"model_services,omitempty"`
 	PricingResources     []PricingDeclaration      `json:"pricing_resources,omitempty"`
+	PromptCachePolicies  []PromptCacheDeclaration  `json:"prompt_cache_policies,omitempty"`
 	// RequiresUpstream lists stable plugin IDs that must be approved and
 	// loaded earlier in the operator's configured order.
 	RequiresUpstream []string `json:"requires_upstream,omitempty"`
@@ -128,6 +129,15 @@ type PricingDeclaration struct {
 	Description     string `json:"description"`
 	Required        bool   `json:"required,omitempty"`
 	ForModelService string `json:"for_model_service,omitempty"`
+}
+
+// PromptCacheDeclaration names cache economics and lifetime semantics a
+// plugin needs. The operator binds the logical name to provider/model policy;
+// the plugin never supplies those coordinates at call time.
+type PromptCacheDeclaration struct {
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	Required    bool   `json:"required,omitempty"`
 }
 
 type ConfigField struct {
@@ -519,6 +529,19 @@ func validateResourceDeclarations(manifest PluginManifest, permissions map[strin
 			if _, ok := modelServices[declaration.ForModelService]; !ok {
 				return fmt.Errorf("pricing resource %q references undeclared model service %q", declaration.Name, declaration.ForModelService)
 			}
+		}
+	}
+	promptCachePolicies := make(map[string]struct{}, len(manifest.PromptCachePolicies))
+	for _, declaration := range manifest.PromptCachePolicies {
+		if strings.TrimSpace(declaration.Name) == "" || strings.TrimSpace(declaration.Description) == "" {
+			return fmt.Errorf("prompt cache policy declarations require name and description")
+		}
+		if _, duplicate := promptCachePolicies[declaration.Name]; duplicate {
+			return fmt.Errorf("duplicate prompt cache policy %q", declaration.Name)
+		}
+		promptCachePolicies[declaration.Name] = struct{}{}
+		if _, ok := permissions["env.cache_policy"]; !ok {
+			return fmt.Errorf("prompt cache policy %q requires env.cache_policy", declaration.Name)
 		}
 	}
 	return nil
@@ -2175,14 +2198,15 @@ type PluginConfig struct {
 // It binds granted capabilities and the effective failure mode to one exact
 // WASM digest. Updating the artifact therefore requires explicit reapproval.
 type Approval struct {
-	Digest           string                          `json:"digest"`
-	Permissions      []string                        `json:"permissions"`
-	FailureMode      string                          `json:"failure_mode,omitempty"`
-	Credentials      map[string]string               `json:"credentials,omitempty"`
-	Files            map[string]FileApproval         `json:"files,omitempty"`
-	HTTPEndpoints    map[string]HTTPApproval         `json:"http_endpoints,omitempty"`
-	ModelServices    map[string]ModelServiceApproval `json:"model_services,omitempty"`
-	PricingResources map[string]PricingApproval      `json:"pricing_resources,omitempty"`
+	Digest              string                          `json:"digest"`
+	Permissions         []string                        `json:"permissions"`
+	FailureMode         string                          `json:"failure_mode,omitempty"`
+	Credentials         map[string]string               `json:"credentials,omitempty"`
+	Files               map[string]FileApproval         `json:"files,omitempty"`
+	HTTPEndpoints       map[string]HTTPApproval         `json:"http_endpoints,omitempty"`
+	ModelServices       map[string]ModelServiceApproval `json:"model_services,omitempty"`
+	PricingResources    map[string]PricingApproval      `json:"pricing_resources,omitempty"`
+	PromptCachePolicies map[string]PromptCacheApproval  `json:"prompt_cache_policies,omitempty"`
 }
 
 type FileApproval struct {
@@ -2221,6 +2245,26 @@ type PricingModelApproval struct {
 	OutputUSDPerMTok     *float64 `json:"output_usd_per_mtok,omitempty"`
 	CacheReadUSDPerMTok  *float64 `json:"cache_read_usd_per_mtok,omitempty"`
 	CacheWriteUSDPerMTok *float64 `json:"cache_write_usd_per_mtok,omitempty"`
+}
+
+type PromptCacheApproval struct {
+	Models []PromptCacheModelApproval `json:"models"`
+}
+
+type PromptCacheModelApproval struct {
+	Provider             string                    `json:"provider"`
+	Model                string                    `json:"model"`
+	CacheReadUSDPerMTok  *float64                  `json:"cache_read_usd_per_mtok,omitempty"`
+	CacheWriteUSDPerMTok *float64                  `json:"cache_write_usd_per_mtok,omitempty"`
+	RefreshOnRead        bool                      `json:"refresh_on_read,omitempty"`
+	WarmIntervalSeconds  *uint32                   `json:"warm_interval_seconds,omitempty"`
+	Tiers                []PromptCacheTierApproval `json:"tiers,omitempty"`
+}
+
+type PromptCacheTierApproval struct {
+	TTLSeconds      uint32          `json:"ttl_seconds"`
+	WriteMultiplier *float64        `json:"write_multiplier,omitempty"`
+	Marker          json.RawMessage `json:"marker"`
 }
 
 func (c PluginConfig) approvalFor(bundle PluginBundle) (Approval, bool) {
@@ -2293,7 +2337,7 @@ func defaultHTTPApprovals(manifest PluginManifest) map[string]HTTPApproval {
 }
 
 func resolvePluginResources(manifest PluginManifest, approval Approval) (wasm.PluginResources, error) {
-	resources := wasm.PluginResources{Credentials: map[string]string{}, Files: map[string]wasm.FileResource{}, HTTP: map[string]wasm.HTTPResource{}, ModelServices: map[string]wasm.ModelServiceResource{}, PricingResources: map[string]wasm.PricingResource{}}
+	resources := wasm.PluginResources{Credentials: map[string]string{}, Files: map[string]wasm.FileResource{}, HTTP: map[string]wasm.HTTPResource{}, ModelServices: map[string]wasm.ModelServiceResource{}, PricingResources: map[string]wasm.PricingResource{}, PromptCachePolicies: map[string]wasm.PromptCacheResource{}}
 	declaredCredentials := make(map[string]CredentialDeclaration, len(manifest.Credentials))
 	for _, declaration := range manifest.Credentials {
 		declaredCredentials[declaration.Slot] = declaration
@@ -2498,6 +2542,45 @@ func resolvePluginResources(manifest PluginManifest, approval Approval) (wasm.Pl
 		if declaration.Required {
 			if _, ok := resources.PricingResources[name]; !ok {
 				return resources, fmt.Errorf("required pricing resource %q is not approved", name)
+			}
+		}
+	}
+	declaredCachePolicies := make(map[string]PromptCacheDeclaration, len(manifest.PromptCachePolicies))
+	for _, declaration := range manifest.PromptCachePolicies {
+		declaredCachePolicies[declaration.Name] = declaration
+	}
+	for name, binding := range approval.PromptCachePolicies {
+		if _, ok := declaredCachePolicies[name]; !ok {
+			return resources, fmt.Errorf("prompt cache policy binding %q was not declared by manifest", name)
+		}
+		if len(binding.Models) == 0 {
+			return resources, fmt.Errorf("prompt cache policy %q approval must contain at least one model", name)
+		}
+		policies := make(map[string]*pbv1.PromptCachePolicy, len(binding.Models))
+		for index, model := range binding.Models {
+			if strings.TrimSpace(model.Provider) == "" || strings.TrimSpace(model.Model) == "" {
+				return resources, fmt.Errorf("prompt cache policy %q model %d requires provider and model", name, index)
+			}
+			tiers := make([]*pbv1.PromptCacheTier, 0, len(model.Tiers))
+			for _, tier := range model.Tiers {
+				tiers = append(tiers, &pbv1.PromptCacheTier{TtlSeconds: tier.TTLSeconds, WriteMultiplier: tier.WriteMultiplier, MarkerJson: append([]byte(nil), tier.Marker...)})
+			}
+			policy := &pbv1.PromptCachePolicy{CacheReadUsdPerMtok: model.CacheReadUSDPerMTok, CacheWriteUsdPerMtok: model.CacheWriteUSDPerMTok, RefreshOnRead: model.RefreshOnRead, Tiers: tiers, WarmIntervalSeconds: model.WarmIntervalSeconds}
+			if err := policy.Validate(); err != nil {
+				return resources, fmt.Errorf("prompt cache policy %q model %d: %w", name, index, err)
+			}
+			key := wasm.PricingCoordinate(model.Provider, model.Model)
+			if _, duplicate := policies[key]; duplicate {
+				return resources, fmt.Errorf("prompt cache policy %q repeats provider/model %q/%q", name, model.Provider, model.Model)
+			}
+			policies[key] = proto.Clone(policy).(*pbv1.PromptCachePolicy)
+		}
+		resources.PromptCachePolicies[name] = wasm.PromptCacheResource{Name: name, Policies: policies}
+	}
+	for name, declaration := range declaredCachePolicies {
+		if declaration.Required {
+			if _, ok := resources.PromptCachePolicies[name]; !ok {
+				return resources, fmt.Errorf("required prompt cache policy %q is not approved", name)
 			}
 		}
 	}

@@ -13,7 +13,7 @@ import (
 func main() {}
 
 // Test fixture for the production extension-callback composition: the REAL
-// proxy callbacks (egress, cache pricing, record-savings), through
+// proxy callbacks (egress, prompt-cache policy, record-savings), through
 // the REAL dispatcher frame, decoded by the REAL SDK helpers — the path a
 // production plugin runs, with none of it stubbed.
 //
@@ -51,10 +51,8 @@ type observation struct {
 	RawCode         int32  `json:"raw_code,omitempty"`
 	RawValue        string `json:"raw_value,omitempty"`
 
-	// GetCachePricing helper outcomes (pricing-unknown-provider,
-	// pricing-unpriced-model): the domain value the SDK decoded.
-	PricingStatus string `json:"pricing_status,omitempty"`
-	PricingReason string `json:"pricing_reason,omitempty"`
+	PolicyTTL         uint32 `json:"policy_ttl,omitempty"`
+	PolicyRefusalCode int32  `json:"policy_refusal_code,omitempty"`
 }
 
 // validReport is a current CompactionReport the host accepts.
@@ -103,29 +101,16 @@ func init() {
 				obs.SendErrText = err.Error()
 			}
 
-		case "pricing-malformed":
-			// Raw HostCallExtension with malformed JSON: the host must frame
-			// INVALID_ARGUMENT, never a status string in the value arm.
-			v, herr, err := sdk.HostCallExtension("torana_cache_pricing", []byte("not json"))
-			recordRaw(&obs, v, herr, err)
-
-		case "pricing-unknown-provider":
-			// The GetCachePricing helper maps a framed NOT_CONFIGURED refusal
-			// into the advisory shape: Status unavailable, Reason
-			// not_configured.
-			p, err := sdk.GetCachePricing("nope", "m")
-			if err == nil {
-				obs.PricingStatus = p.Status
-				obs.PricingReason = p.Reason
+		case "cache-policy":
+			policy, herr, err := sdk.GetPromptCachePolicy("request-cache")
+			if err == nil && herr == nil && len(policy.Tiers) == 1 {
+				obs.PolicyTTL = policy.Tiers[0].TtlSeconds
 			}
 
-		case "pricing-unpriced-model":
-			// A legitimate query result stays a domain value: unavailable with
-			// no_pricing_configured, not a refusal.
-			p, err := sdk.GetCachePricing("oai", "unpriced-model")
-			if err == nil {
-				obs.PricingStatus = p.Status
-				obs.PricingReason = p.Reason
+		case "cache-policy-unapproved":
+			_, herr, _ := sdk.GetPromptCachePolicy("other")
+			if herr != nil {
+				obs.PolicyRefusalCode = int32(herr.Code)
 			}
 
 		case "record-savings":

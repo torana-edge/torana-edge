@@ -6,7 +6,7 @@
   "abi_version": "v1",
   "minimum_torana_version": "0.1.0",
   "failure_mode": "pass",
-  "description": "Test fixture: exercises the clock, cache pricing, durable state and plugin counters, recording what the host answered",
+  "description": "Test fixture: exercises the clock, durable state and plugin counters, recording what the host answered",
   "hooks": [
     {
       "name": "run_before_request"
@@ -16,10 +16,6 @@
     {
       "name": "env.now",
       "description": "Read the host clock"
-    },
-    {
-      "name": "env.host_call.torana_cache_pricing",
-      "description": "Query cache pricing"
     },
     {
       "name": "env.host_call.torana_plugin_counter",

@@ -162,11 +162,12 @@ type Plugin struct {
 // paths; they never select credentials, host filesystem locations, or network
 // origins directly.
 type PluginResources struct {
-	Credentials      map[string]string
-	Files            map[string]FileResource
-	HTTP             map[string]HTTPResource
-	ModelServices    map[string]ModelServiceResource
-	PricingResources map[string]PricingResource
+	Credentials         map[string]string
+	Files               map[string]FileResource
+	HTTP                map[string]HTTPResource
+	ModelServices       map[string]ModelServiceResource
+	PricingResources    map[string]PricingResource
+	PromptCachePolicies map[string]PromptCacheResource
 }
 
 type FileResource struct {
@@ -203,6 +204,11 @@ type PricingResource struct {
 	Prices          map[string]*pbv1.ModelPricing
 }
 
+type PromptCacheResource struct {
+	Name     string
+	Policies map[string]*pbv1.PromptCachePolicy
+}
+
 // PricingCoordinate returns the collision-free map key for one operator-owned
 // provider/model price. Provider and model are separately length-framed: a
 // delimiter is insufficient because both identifiers are external strings.
@@ -218,11 +224,12 @@ func PricingCoordinate(provider, model string) string {
 
 func clonePluginResources(in PluginResources) PluginResources {
 	out := PluginResources{
-		Credentials:      make(map[string]string, len(in.Credentials)),
-		Files:            make(map[string]FileResource, len(in.Files)),
-		HTTP:             make(map[string]HTTPResource, len(in.HTTP)),
-		ModelServices:    make(map[string]ModelServiceResource, len(in.ModelServices)),
-		PricingResources: make(map[string]PricingResource, len(in.PricingResources)),
+		Credentials:         make(map[string]string, len(in.Credentials)),
+		Files:               make(map[string]FileResource, len(in.Files)),
+		HTTP:                make(map[string]HTTPResource, len(in.HTTP)),
+		ModelServices:       make(map[string]ModelServiceResource, len(in.ModelServices)),
+		PricingResources:    make(map[string]PricingResource, len(in.PricingResources)),
+		PromptCachePolicies: make(map[string]PromptCacheResource, len(in.PromptCachePolicies)),
 	}
 	for k, v := range in.Credentials {
 		out.Credentials[k] = v
@@ -257,6 +264,18 @@ func clonePluginResources(in PluginResources) PluginResources {
 		}
 		v.Prices = prices
 		out.PricingResources[k] = v
+	}
+	for k, v := range in.PromptCachePolicies {
+		policies := make(map[string]*pbv1.PromptCachePolicy, len(v.Policies))
+		for key, policy := range v.Policies {
+			if policy != nil {
+				policies[key] = proto.Clone(policy).(*pbv1.PromptCachePolicy)
+			} else {
+				policies[key] = nil
+			}
+		}
+		v.Policies = policies
+		out.PromptCachePolicies[k] = v
 	}
 	return out
 }
@@ -311,7 +330,7 @@ func (p *Plugin) SetResources(resources PluginResources) {
 }
 
 func resourceCacheIdentity(plugin string, resources PluginResources) (string, bool) {
-	if len(resources.Credentials) == 0 && len(resources.Files) == 0 && len(resources.HTTP) == 0 && len(resources.ModelServices) == 0 && len(resources.PricingResources) == 0 {
+	if len(resources.Credentials) == 0 && len(resources.Files) == 0 && len(resources.HTTP) == 0 && len(resources.ModelServices) == 0 && len(resources.PricingResources) == 0 && len(resources.PromptCachePolicies) == 0 {
 		return plugin, true
 	}
 	raw, err := json.Marshal(resources)
@@ -836,15 +855,6 @@ type Runtime struct {
 	// explicit and shares the env.state_set grant.
 	StateDeleteFunc func(plugin, key string) error
 
-	// CachePricingFunc answers torana_cache_pricing: given a provider and
-	// model, what the prompt cache costs and how long it lives. Data, not a
-	// decision — the host holds the prices, the plugin holds the policy.
-	// Returns the classified outcome: malformed input is a refused
-	// INVALID_ARGUMENT, an unknown provider a refused NOT_CONFIGURED, and a
-	// legitimate query result — priced, or explicitly unpriced/unconfigured —
-	// is a domain value whose status field the guest reads.
-	CachePricingFunc func(ctx context.Context, payloadJSON string) ExtensionResult
-
 	// SendRequestFunc backs torana_send_request: a plugin-originated provider
 	// request. The plugin name is passed so the host can meter it against that
 	// plugin's budget and attribute it in the feed — spend a plugin initiates
@@ -871,15 +881,16 @@ type Runtime struct {
 	// Resource callbacks receive only host-resolved, approval-bound resources.
 	// The guest can name a manifest slot/path, but cannot choose an operator
 	// credential ID, OS path, or origin.
-	CredentialGetFunc func(ctx context.Context, plugin, credentialID string) ([]byte, error)
-	FileAppendFunc    func(plugin, path string, data []byte, resource FileResource) error
-	FileReadFunc      func(plugin, path string, resource FileResource) ([]byte, error)
-	FileWriteFunc     func(plugin, path string, data []byte, resource FileResource) error
-	FileListFunc      func(plugin, prefix string, resources map[string]FileResource) ([]string, error)
-	FileDeleteFunc    func(plugin, path string, resource FileResource) error
-	HTTPRequestFunc   func(ctx context.Context, plugin string, resource HTTPResource, request *pbv1.OutboundHTTPRequestArgs) (*pbv1.OutboundHTTPResponse, error)
-	ModelCompleteFunc func(ctx context.Context, plugin string, resource ModelServiceResource, request *pbv1.ModelCompleteArgs) (*pbv1.ModelCompleteResult, *pbv1.HostError)
-	ModelPricingFunc  func(ctx context.Context, plugin string, resource PricingResource) (*pbv1.ModelPricing, *pbv1.HostError)
+	CredentialGetFunc     func(ctx context.Context, plugin, credentialID string) ([]byte, error)
+	FileAppendFunc        func(plugin, path string, data []byte, resource FileResource) error
+	FileReadFunc          func(plugin, path string, resource FileResource) ([]byte, error)
+	FileWriteFunc         func(plugin, path string, data []byte, resource FileResource) error
+	FileListFunc          func(plugin, prefix string, resources map[string]FileResource) ([]string, error)
+	FileDeleteFunc        func(plugin, path string, resource FileResource) error
+	HTTPRequestFunc       func(ctx context.Context, plugin string, resource HTTPResource, request *pbv1.OutboundHTTPRequestArgs) (*pbv1.OutboundHTTPResponse, error)
+	ModelCompleteFunc     func(ctx context.Context, plugin string, resource ModelServiceResource, request *pbv1.ModelCompleteArgs) (*pbv1.ModelCompleteResult, *pbv1.HostError)
+	ModelPricingFunc      func(ctx context.Context, plugin string, resource PricingResource) (*pbv1.ModelPricing, *pbv1.HostError)
+	PromptCachePolicyFunc func(ctx context.Context, plugin string, resource PromptCacheResource) (*pbv1.PromptCachePolicy, *pbv1.HostError)
 }
 
 // ObserveRequestMutation forwards a defensive copy to the host callback.
@@ -1839,12 +1850,6 @@ func (r *Runtime) dispatchHostCall(ctx context.Context, pluginName, cmd, args st
 				break
 			}
 			value, herr = r.applyExtensionResult("torana_send_request", r.SendRequestFunc(ctx, pluginName, args))
-		case "torana_cache_pricing":
-			if r.CachePricingFunc == nil {
-				herr = hostErr(pbv1.ErrorCode_ERROR_CODE_NOT_CONFIGURED, "cache pricing is not configured")
-				break
-			}
-			value, herr = r.applyExtensionResult("torana_cache_pricing", r.CachePricingFunc(ctx, args))
 		case "env.plugin_config":
 			// Return this plugin's config blob (plugins.config.<name>).
 			cfg := p.pluginConfig()
@@ -2090,6 +2095,35 @@ func (r *Runtime) dispatchHostCall(ctx context.Context, pluginName, cmd, args st
 				break
 			}
 			value, _ = proto.Marshal(pricing)
+		case "env.cache_policy":
+			var a pbv1.PromptCachePolicyGetArgs
+			if err := proto.Unmarshal([]byte(args), &a); err != nil {
+				herr = hostErr(pbv1.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "invalid PromptCachePolicyGetArgs")
+				break
+			}
+			if err := a.Validate(); err != nil {
+				herr = hostErr(pbv1.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "%v", err)
+				break
+			}
+			resource, approved := p.resourceSnapshot().PromptCachePolicies[a.Resource]
+			if !approved {
+				herr = hostErr(pbv1.ErrorCode_ERROR_CODE_PERMISSION_DENIED, "prompt cache policy %q is not approved", a.Resource)
+				break
+			}
+			if r.PromptCachePolicyFunc == nil {
+				herr = hostErr(pbv1.ErrorCode_ERROR_CODE_NOT_CONFIGURED, "prompt cache policies are not configured")
+				break
+			}
+			policy, callErr := r.PromptCachePolicyFunc(ctx, pluginName, resource)
+			if callErr != nil {
+				herr = callErr
+				break
+			}
+			if policy == nil || policy.Validate() != nil {
+				herr = hostErr(pbv1.ErrorCode_ERROR_CODE_INTERNAL, "prompt cache policy returned invalid data")
+				break
+			}
+			value, _ = proto.Marshal(policy)
 		case "env.original_request":
 			// Pristine pre-pipeline request, pb-encoded. Absence is NOT_FOUND,
 			// not an empty value: an all-default ChatRequest legitimately

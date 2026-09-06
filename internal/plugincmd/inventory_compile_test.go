@@ -16,6 +16,7 @@ var (
 	_ = sdk.SuppressText
 	_ = sdk.ModelComplete
 	_ = sdk.GetModelPricing
+	_ = sdk.GetPromptCachePolicy
 	_ = sdk.SetIdentity
 	_ = sdk.MetaGet
 	_ = sdk.MetaSet

@@ -102,6 +102,21 @@ func TestPrivateCacheIsScopedToApprovedResources(t *testing.T) {
 		t.Fatalf("unchanged resource snapshot lost cache entry: %q", got)
 	}
 
+	cacheRate := 0.1
+	policyResources := PluginResources{PromptCachePolicies: map[string]PromptCacheResource{
+		"request-cache": {Name: "request-cache", Policies: map[string]*pbv1.PromptCachePolicy{PricingCoordinate("p", "m"): {CacheReadUsdPerMtok: &cacheRate}}},
+	}}
+	p.SetResources(policyResources)
+	cacheValue(t, cacheSetCall(t, r, p, "env.cache_set", "policy", "rate-0.1"))
+	cacheRate = 0.2
+	if got := cacheValue(t, cacheGetCall(t, r, p, "env.cache_get", "policy")); got != "rate-0.1" {
+		t.Fatalf("caller mutation leaked through the immutable policy snapshot: %q", got)
+	}
+	p.SetResources(policyResources)
+	if arm, ok := cacheGetCall(t, r, p, "env.cache_get", "policy").Result.(*pbv1.HostCallResult_Error); !ok || arm.Error.Code != pbv1.ErrorCode_ERROR_CODE_NOT_FOUND {
+		t.Fatal("policy rebind reused a private-cache entry from different approved economics")
+	}
+
 	nan := math.NaN()
 	p.SetResources(PluginResources{PricingResources: map[string]PricingResource{
 		"invalid": {Name: "invalid", Prices: map[string]*pbv1.ModelPricing{PricingCoordinate("p", "m"): {InputUsdPerMtok: &nan}}},

@@ -21,7 +21,7 @@ import (
 
 // TestExtensionContractE2E is the F5 composition proof: a real WASM fixture
 // driven through the REAL server — real proxy callbacks (sendPluginRequest,
-// cachePricing and record-savings dispatch), the real
+// prompt-cache policy and record-savings dispatch), the real
 // dispatcher frame, and the real SDK guest helpers. None of the path is
 // stubbed, which is what makes the observation a production-contract truth
 // rather than a harness truth.
@@ -49,40 +49,22 @@ func TestExtensionContractE2E(t *testing.T) {
 			},
 		},
 		{
-			// Malformed pricing input must be framed INVALID_ARGUMENT — never a
-			// status string smuggled through the value arm, and never a Go
-			// error misread as a zero-valued observation.
-			"pricing-malformed",
+			// The SDK decodes the operator-bound protobuf value through the real
+			// dispatch callback, without accepting provider/model coordinates.
+			"cache-policy",
 			func(t *testing.T, obs contractObservation) {
-				if obs.RawArm != "refusal" || obs.RawCode != int32(pb.ErrorCode_ERROR_CODE_INVALID_ARGUMENT) {
-					t.Errorf("pricing malformed: arm=%q code=%d, want refusal/INVALID_ARGUMENT", obs.RawArm, obs.RawCode)
-				}
-				if obs.RawSucceeded {
-					t.Errorf("pricing malformed: recorded as succeeded")
-				}
-				if obs.RawGoError != "" {
-					t.Errorf("pricing malformed: goerror %q — a Go error must never masquerade as this refusal", obs.RawGoError)
+				if obs.PolicyTTL != 300 {
+					t.Errorf("cache policy ttl = %d, want 300", obs.PolicyTTL)
 				}
 			},
 		},
 		{
-			// The GetCachePricing helper maps a framed NOT_CONFIGURED refusal
-			// to the advisory unavailable/not_configured shape.
-			"pricing-unknown-provider",
+			// A logical name outside the exact approval is refused before the
+			// host callback, independent of any operator configuration.
+			"cache-policy-unapproved",
 			func(t *testing.T, obs contractObservation) {
-				if obs.PricingStatus != "unavailable" || obs.PricingReason != "not_configured" {
-					t.Errorf("pricing unknown provider: status=%q reason=%q, want unavailable/not_configured",
-						obs.PricingStatus, obs.PricingReason)
-				}
-			},
-		},
-		{
-			// A legitimate query result stays a domain value.
-			"pricing-unpriced-model",
-			func(t *testing.T, obs contractObservation) {
-				if obs.PricingStatus != "unavailable" || obs.PricingReason != "no_pricing_configured" {
-					t.Errorf("pricing unpriced model: status=%q reason=%q, want unavailable/no_pricing_configured",
-						obs.PricingStatus, obs.PricingReason)
+				if obs.PolicyRefusalCode != int32(pb.ErrorCode_ERROR_CODE_PERMISSION_DENIED) {
+					t.Errorf("cache policy refusal code = %d, want PERMISSION_DENIED", obs.PolicyRefusalCode)
 				}
 			},
 		},
@@ -144,8 +126,8 @@ type contractObservation struct {
 	RawCode         int32  `json:"raw_code,omitempty"`
 	RawValue        string `json:"raw_value,omitempty"`
 
-	PricingStatus string `json:"pricing_status,omitempty"`
-	PricingReason string `json:"pricing_reason,omitempty"`
+	PolicyTTL         uint32 `json:"policy_ttl,omitempty"`
+	PolicyRefusalCode int32  `json:"policy_refusal_code,omitempty"`
 }
 
 // newContractServer stands up the REAL server with the test-extension-contract
@@ -185,6 +167,11 @@ func newContractServer(t *testing.T) *contractEnv {
 			Digest: digest, Permissions: manifestPermissions(fixturesDir + "/test-extension-contract"), FailureMode: "pass",
 			PricingResources: map[string]provider.PluginPricingApproval{
 				"target": {Models: []provider.PluginPricingModelApproval{{Provider: "oai", Model: "record-savings", InputUSDPerMTok: &zero}}},
+			},
+			PromptCachePolicies: map[string]provider.PluginPromptCacheApproval{
+				"request-cache": {Models: []provider.PluginPromptCacheModelApproval{{
+					Provider: "oai", Model: "cache-policy", Tiers: []provider.PluginPromptCacheTierApproval{{TTLSeconds: 300, Marker: json.RawMessage(`{"type":"ephemeral"}`)}},
+				}}},
 			},
 		},
 	}

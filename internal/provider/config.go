@@ -22,6 +22,7 @@ import (
 	"github.com/torana-edge/torana-edge/internal/auditlog"
 	"github.com/torana-edge/torana-edge/internal/cache"
 	"github.com/torana-edge/torana-edge/internal/economics"
+	pbv1 "github.com/torana-edge/torana-plugin-sdk/pb/v1"
 )
 
 // Provider describes an upstream LLM API endpoint.
@@ -240,6 +241,33 @@ func (c Config) Validate() error {
 					if rate != nil && (*rate < 0 || math.IsNaN(*rate) || math.IsInf(*rate, 0)) {
 						return fmt.Errorf("plugin %q pricing resource %q has an invalid rate", pluginName, resourceName)
 					}
+				}
+			}
+		}
+		for resourceName, binding := range approval.PromptCachePolicies {
+			if len(binding.Models) == 0 {
+				return fmt.Errorf("plugin %q prompt cache policy %q must contain at least one model", pluginName, resourceName)
+			}
+			seen := make(map[[2]string]struct{}, len(binding.Models))
+			for index, model := range binding.Models {
+				if _, ok := c.Providers[model.Provider]; !ok {
+					return fmt.Errorf("plugin %q prompt cache policy %q references unknown provider %q", pluginName, resourceName, model.Provider)
+				}
+				if strings.TrimSpace(model.Model) == "" {
+					return fmt.Errorf("plugin %q prompt cache policy %q model %d requires a model", pluginName, resourceName, index)
+				}
+				key := [2]string{model.Provider, model.Model}
+				if _, duplicate := seen[key]; duplicate {
+					return fmt.Errorf("plugin %q prompt cache policy %q repeats a provider/model", pluginName, resourceName)
+				}
+				seen[key] = struct{}{}
+				tiers := make([]*pbv1.PromptCacheTier, 0, len(model.Tiers))
+				for _, tier := range model.Tiers {
+					tiers = append(tiers, &pbv1.PromptCacheTier{TtlSeconds: tier.TTLSeconds, WriteMultiplier: tier.WriteMultiplier, MarkerJson: append([]byte(nil), tier.Marker...)})
+				}
+				policy := &pbv1.PromptCachePolicy{CacheReadUsdPerMtok: model.CacheReadUSDPerMTok, CacheWriteUsdPerMtok: model.CacheWriteUSDPerMTok, RefreshOnRead: model.RefreshOnRead, Tiers: tiers, WarmIntervalSeconds: model.WarmIntervalSeconds}
+				if err := policy.Validate(); err != nil {
+					return fmt.Errorf("plugin %q prompt cache policy %q model %d: %w", pluginName, resourceName, index, err)
 				}
 			}
 		}
@@ -658,14 +686,15 @@ func (p PluginRuntimeConfig) InstanceIdleTimeout() time.Duration {
 }
 
 type PluginApproval struct {
-	Digest           string                                `json:"digest"`
-	Permissions      []string                              `json:"permissions"`
-	FailureMode      string                                `json:"failure_mode,omitempty"`
-	Credentials      map[string]string                     `json:"credentials,omitempty"`
-	Files            map[string]PluginFileApproval         `json:"files,omitempty"`
-	HTTPEndpoints    map[string]PluginHTTPApproval         `json:"http_endpoints,omitempty"`
-	ModelServices    map[string]PluginModelServiceApproval `json:"model_services,omitempty"`
-	PricingResources map[string]PluginPricingApproval      `json:"pricing_resources,omitempty"`
+	Digest              string                                `json:"digest"`
+	Permissions         []string                              `json:"permissions"`
+	FailureMode         string                                `json:"failure_mode,omitempty"`
+	Credentials         map[string]string                     `json:"credentials,omitempty"`
+	Files               map[string]PluginFileApproval         `json:"files,omitempty"`
+	HTTPEndpoints       map[string]PluginHTTPApproval         `json:"http_endpoints,omitempty"`
+	ModelServices       map[string]PluginModelServiceApproval `json:"model_services,omitempty"`
+	PricingResources    map[string]PluginPricingApproval      `json:"pricing_resources,omitempty"`
+	PromptCachePolicies map[string]PluginPromptCacheApproval  `json:"prompt_cache_policies,omitempty"`
 }
 
 type PluginFileApproval struct {
@@ -704,6 +733,26 @@ type PluginPricingModelApproval struct {
 	OutputUSDPerMTok     *float64 `json:"output_usd_per_mtok,omitempty"`
 	CacheReadUSDPerMTok  *float64 `json:"cache_read_usd_per_mtok,omitempty"`
 	CacheWriteUSDPerMTok *float64 `json:"cache_write_usd_per_mtok,omitempty"`
+}
+
+type PluginPromptCacheApproval struct {
+	Models []PluginPromptCacheModelApproval `json:"models"`
+}
+
+type PluginPromptCacheModelApproval struct {
+	Provider             string                          `json:"provider"`
+	Model                string                          `json:"model"`
+	CacheReadUSDPerMTok  *float64                        `json:"cache_read_usd_per_mtok,omitempty"`
+	CacheWriteUSDPerMTok *float64                        `json:"cache_write_usd_per_mtok,omitempty"`
+	RefreshOnRead        bool                            `json:"refresh_on_read,omitempty"`
+	WarmIntervalSeconds  *uint32                         `json:"warm_interval_seconds,omitempty"`
+	Tiers                []PluginPromptCacheTierApproval `json:"tiers,omitempty"`
+}
+
+type PluginPromptCacheTierApproval struct {
+	TTLSeconds      uint32          `json:"ttl_seconds"`
+	WriteMultiplier *float64        `json:"write_multiplier,omitempty"`
+	Marker          json.RawMessage `json:"marker"`
 }
 
 // DefaultConfig returns the built-in configuration for common providers.

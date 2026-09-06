@@ -1880,33 +1880,34 @@ func New(cfg Config) (*Server, error) {
 				orderIdx[n] = i
 			}
 			type pluginInfo struct {
-				ID                string                           `json:"id"`
-				Name              string                           `json:"name"`
-				Version           string                           `json:"version"`
-				Digest            string                           `json:"digest"`
-				FailureMode       string                           `json:"failure_mode"`
-				Description       string                           `json:"description"`
-				Hooks             []string                         `json:"hooks"`
-				Permissions       []string                         `json:"permissions"`
-				PermissionDetails []plugin.Permission              `json:"permission_details,omitempty"`
-				Credentials       []plugin.CredentialDeclaration   `json:"credentials,omitempty"`
-				Files             []plugin.FileDeclaration         `json:"files,omitempty"`
-				HTTPEndpoints     []plugin.HTTPEndpointDeclaration `json:"http_endpoints,omitempty"`
-				ModelServices     []plugin.ModelServiceDeclaration `json:"model_services,omitempty"`
-				PricingResources  []plugin.PricingDeclaration      `json:"pricing_resources,omitempty"`
-				RequiresUpstream  []string                         `json:"requires_upstream"`
-				ConflictsWith     []string                         `json:"conflicts_with"`
-				Enabled           bool                             `json:"enabled"`
-				Order             int                              `json:"order"`
-				State             string                           `json:"state"`
-				Loaded            bool                             `json:"loaded"`
-				LoadedDigest      string                           `json:"loaded_digest,omitempty"`
-				ServesHTTP        bool                             `json:"serves_http"`
-				Schema            *plugin.ConfigSchema             `json:"schema,omitempty"`
-				Agent             *plugin.AgentDescriptor          `json:"agent,omitempty"`
-				LoadedAgent       *plugin.AgentDescriptor          `json:"loaded_agent,omitempty"`
-				Config            json.RawMessage                  `json:"config,omitempty"`
-				Approval          *provider.PluginApproval         `json:"approval,omitempty"`
+				ID                  string                           `json:"id"`
+				Name                string                           `json:"name"`
+				Version             string                           `json:"version"`
+				Digest              string                           `json:"digest"`
+				FailureMode         string                           `json:"failure_mode"`
+				Description         string                           `json:"description"`
+				Hooks               []string                         `json:"hooks"`
+				Permissions         []string                         `json:"permissions"`
+				PermissionDetails   []plugin.Permission              `json:"permission_details,omitempty"`
+				Credentials         []plugin.CredentialDeclaration   `json:"credentials,omitempty"`
+				Files               []plugin.FileDeclaration         `json:"files,omitempty"`
+				HTTPEndpoints       []plugin.HTTPEndpointDeclaration `json:"http_endpoints,omitempty"`
+				ModelServices       []plugin.ModelServiceDeclaration `json:"model_services,omitempty"`
+				PricingResources    []plugin.PricingDeclaration      `json:"pricing_resources,omitempty"`
+				PromptCachePolicies []plugin.PromptCacheDeclaration  `json:"prompt_cache_policies,omitempty"`
+				RequiresUpstream    []string                         `json:"requires_upstream"`
+				ConflictsWith       []string                         `json:"conflicts_with"`
+				Enabled             bool                             `json:"enabled"`
+				Order               int                              `json:"order"`
+				State               string                           `json:"state"`
+				Loaded              bool                             `json:"loaded"`
+				LoadedDigest        string                           `json:"loaded_digest,omitempty"`
+				ServesHTTP          bool                             `json:"serves_http"`
+				Schema              *plugin.ConfigSchema             `json:"schema,omitempty"`
+				Agent               *plugin.AgentDescriptor          `json:"agent,omitempty"`
+				LoadedAgent         *plugin.AgentDescriptor          `json:"loaded_agent,omitempty"`
+				Config              json.RawMessage                  `json:"config,omitempty"`
+				Approval            *provider.PluginApproval         `json:"approval,omitempty"`
 			}
 			loadedByName := make(map[string]plugin.LoadedPluginStatus)
 			if rawPipeline := s.pluginPipeline.Load(); rawPipeline != nil {
@@ -1958,33 +1959,34 @@ func New(cfg Config) (*Server, error) {
 					}
 				}
 				infos = append(infos, pluginInfo{
-					ID:                m.ID,
-					Name:              m.Name,
-					Version:           m.Version,
-					Digest:            b.Digest,
-					FailureMode:       m.FailureMode,
-					Description:       m.Description,
-					Hooks:             hooks,
-					Permissions:       perms,
-					PermissionDetails: append([]plugin.Permission(nil), m.Permissions...),
-					Credentials:       append([]plugin.CredentialDeclaration(nil), m.Credentials...),
-					Files:             append([]plugin.FileDeclaration(nil), m.Files...),
-					HTTPEndpoints:     append([]plugin.HTTPEndpointDeclaration(nil), m.HTTPEndpoints...),
-					ModelServices:     append([]plugin.ModelServiceDeclaration(nil), m.ModelServices...),
-					PricingResources:  append([]plugin.PricingDeclaration(nil), m.PricingResources...),
-					RequiresUpstream:  append([]string{}, m.RequiresUpstream...),
-					ConflictsWith:     append([]string{}, m.ConflictsWith...),
-					Enabled:           enabled,
-					Order:             idx,
-					State:             state,
-					Loaded:            loaded,
-					LoadedDigest:      loadedStatus.Digest,
-					ServesHTTP:        loaded && loadedStatus.ServesHTTP,
-					Schema:            b.Schema,
-					Agent:             b.Agent,
-					LoadedAgent:       loadedStatus.Agent,
-					Config:            cur.Config[m.Name],
-					Approval:          approvalPtr,
+					ID:                  m.ID,
+					Name:                m.Name,
+					Version:             m.Version,
+					Digest:              b.Digest,
+					FailureMode:         m.FailureMode,
+					Description:         m.Description,
+					Hooks:               hooks,
+					Permissions:         perms,
+					PermissionDetails:   append([]plugin.Permission(nil), m.Permissions...),
+					Credentials:         append([]plugin.CredentialDeclaration(nil), m.Credentials...),
+					Files:               append([]plugin.FileDeclaration(nil), m.Files...),
+					HTTPEndpoints:       append([]plugin.HTTPEndpointDeclaration(nil), m.HTTPEndpoints...),
+					ModelServices:       append([]plugin.ModelServiceDeclaration(nil), m.ModelServices...),
+					PricingResources:    append([]plugin.PricingDeclaration(nil), m.PricingResources...),
+					PromptCachePolicies: append([]plugin.PromptCacheDeclaration(nil), m.PromptCachePolicies...),
+					RequiresUpstream:    append([]string{}, m.RequiresUpstream...),
+					ConflictsWith:       append([]string{}, m.ConflictsWith...),
+					Enabled:             enabled,
+					Order:               idx,
+					State:               state,
+					Loaded:              loaded,
+					LoadedDigest:        loadedStatus.Digest,
+					ServesHTTP:          loaded && loadedStatus.ServesHTTP,
+					Schema:              b.Schema,
+					Agent:               b.Agent,
+					LoadedAgent:         loadedStatus.Agent,
+					Config:              cur.Config[m.Name],
+					Approval:            approvalPtr,
 				})
 				seen[m.Name] = true
 			}
@@ -2883,15 +2885,28 @@ func pluginApprovals(src map[string]provider.PluginApproval) map[string]plugin.A
 			}
 			pricingBindings[name] = plugin.PricingApproval{Models: models}
 		}
+		cacheBindings := make(map[string]plugin.PromptCacheApproval, len(approval.PromptCachePolicies))
+		for name, binding := range approval.PromptCachePolicies {
+			models := make([]plugin.PromptCacheModelApproval, 0, len(binding.Models))
+			for _, model := range binding.Models {
+				tiers := make([]plugin.PromptCacheTierApproval, 0, len(model.Tiers))
+				for _, tier := range model.Tiers {
+					tiers = append(tiers, plugin.PromptCacheTierApproval{TTLSeconds: tier.TTLSeconds, WriteMultiplier: tier.WriteMultiplier, Marker: append(json.RawMessage(nil), tier.Marker...)})
+				}
+				models = append(models, plugin.PromptCacheModelApproval{Provider: model.Provider, Model: model.Model, CacheReadUSDPerMTok: model.CacheReadUSDPerMTok, CacheWriteUSDPerMTok: model.CacheWriteUSDPerMTok, RefreshOnRead: model.RefreshOnRead, WarmIntervalSeconds: model.WarmIntervalSeconds, Tiers: tiers})
+			}
+			cacheBindings[name] = plugin.PromptCacheApproval{Models: models}
+		}
 		dst[key] = plugin.Approval{
-			Digest:           approval.Digest,
-			Permissions:      append([]string(nil), approval.Permissions...),
-			FailureMode:      approval.FailureMode,
-			Credentials:      credentialBindings,
-			Files:            fileBindings,
-			HTTPEndpoints:    httpBindings,
-			ModelServices:    modelBindings,
-			PricingResources: pricingBindings,
+			Digest:              approval.Digest,
+			Permissions:         append([]string(nil), approval.Permissions...),
+			FailureMode:         approval.FailureMode,
+			Credentials:         credentialBindings,
+			Files:               fileBindings,
+			HTTPEndpoints:       httpBindings,
+			ModelServices:       modelBindings,
+			PricingResources:    pricingBindings,
+			PromptCachePolicies: cacheBindings,
 		}
 	}
 	return dst
@@ -3243,13 +3258,13 @@ func (s *Server) newRuntime() *wasm.Runtime {
 		rt.StateKeysFunc = s.pluginState.Keys
 		rt.StateDeleteFunc = s.pluginState.Delete
 	}
-	rt.CachePricingFunc = s.cachePricing
 	// Plugin-originated egress: refusals return framed in the HostError arm
 	// (INVALID_ARGUMENT / NOT_CONFIGURED / UNAVAILABLE); the value arm carries
 	// provider outcomes only.
 	rt.SendRequestFunc = s.sendPluginRequest
 	rt.ModelCompleteFunc = s.completeModel
 	rt.ModelPricingFunc = s.modelPricing
+	rt.PromptCachePolicyFunc = s.promptCachePolicy
 	rt.CredentialGetFunc = func(ctx context.Context, pluginName, credentialID string) ([]byte, error) {
 		return s.resolveCredential(ctx, credentialID)
 	}

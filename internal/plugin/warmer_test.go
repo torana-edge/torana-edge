@@ -32,7 +32,7 @@ type sentRequest struct {
 type warmerHarness struct {
 	mu       sync.Mutex
 	sent     []sentRequest
-	pricing  string
+	policy   *pb.PromptCachePolicy
 	cacheHit bool // whether a refresh reports a cache read (alive) or write (lapsed)
 	// httpStatus, when non-zero and not 200, simulates a provider that was
 	// reached and refused the request — the 401 an unconfigured provider
@@ -55,10 +55,10 @@ func (h *warmerHarness) lastSent() (sentRequest, bool) {
 	return h.sent[len(h.sent)-1], true
 }
 
-func okPricing() string {
-	return `{"status":"ok","cache_read_usd_per_mtok":0.3,"cache_write_usd_per_mtok":3.75,` +
-		`"write_read_ratio":12.5,"break_even_refreshes":11,"refresh_on_read":true,` +
-		`"shortest_ttl_seconds":300,"warm_interval_seconds":240}`
+func okPolicy() *pb.PromptCachePolicy {
+	policy := cachePolicyForTest(true, 0.3, 3.75)
+	policy.Tiers = policy.Tiers[:1]
+	return policy
 }
 
 func newWarmerPipeline(t *testing.T, h *warmerHarness, conversations string, state *pluginstate.Store) *PluginPipeline {
@@ -79,8 +79,11 @@ func newWarmerPipeline(t *testing.T, h *warmerHarness, conversations string, sta
 	rt.StateGetFunc = state.Get
 	rt.StateSetFunc = state.Set
 	rt.StateKeysFunc = state.Keys
-	rt.CachePricingFunc = func(_ context.Context, _ string) wasm.ExtensionResult {
-		return wasm.ExtensionValue([]byte(h.pricing))
+	rt.PromptCachePolicyFunc = func(_ context.Context, _ string, _ wasm.PromptCacheResource) (*pb.PromptCachePolicy, *pb.HostError) {
+		if h.policy == nil {
+			return nil, &pb.HostError{Code: pb.ErrorCode_ERROR_CODE_NOT_CONFIGURED, Message: "no prompt cache policy"}
+		}
+		return proto.Clone(h.policy).(*pb.PromptCachePolicy), nil
 	}
 	rt.SendRequestFunc = func(_ context.Context, _, payload string) wasm.ExtensionResult {
 		var req struct {
@@ -128,11 +131,15 @@ func newWarmerPipeline(t *testing.T, h *warmerHarness, conversations string, sta
 	cfg := map[string]any{"conversations": conversations, "warm_for_minutes": 45}
 	cfgJSON, _ := json.Marshal(cfg)
 
+	approvalPolicy := h.policy
+	if approvalPolicy == nil {
+		approvalPolicy = okPolicy()
+	}
 	pp, err := NewPipeline(rt, PluginConfig{
-		Dir:             dir,
-		Order:           []string{"cache_warmer"},
-		AllowUnapproved: true,
-		Config:          map[string]json.RawMessage{"cache_warmer": cfgJSON},
+		Dir:       dir,
+		Order:     []string{"cache_warmer"},
+		Approvals: cachePluginApprovals(t, dir, "cache_warmer", "warm-cache", approvalPolicy),
+		Config:    map[string]json.RawMessage{"cache_warmer": cfgJSON},
 	})
 	if err != nil {
 		t.Fatalf("NewPipeline: %v", err)
@@ -260,7 +267,7 @@ func tick(t *testing.T, pp *PluginPipeline, id uint64, offset time.Duration) []T
 // shape of what gets sent — the refresh must carry the cached prefix and ask
 // for essentially no output, since the point is to touch the entry.
 func TestWarmerRefreshesOptedInConversation(t *testing.T) {
-	h := &warmerHarness{pricing: okPricing(), cacheHit: true}
+	h := &warmerHarness{policy: okPolicy(), cacheHit: true}
 	pp := newWarmerPipeline(t, h, "conv-a3f9", nil)
 
 	if _, err := pp.RunBeforeRequest(context.Background(), 1, warmerRequest("conv-a3f9"), nil); err != nil {
@@ -297,7 +304,7 @@ func TestWarmerRefreshesOptedInConversation(t *testing.T) {
 // system message the appended turn still alternated, so the original test
 // passed while the plugin was broken for every realistic conversation.
 func TestWarmerRefreshIsAValidRequest(t *testing.T) {
-	h := &warmerHarness{pricing: okPricing(), cacheHit: true}
+	h := &warmerHarness{policy: okPolicy(), cacheHit: true}
 	pp := newWarmerPipeline(t, h, "conv-a3f9", nil)
 
 	if _, err := pp.RunBeforeRequest(context.Background(), 1, warmerRequestBreakpointOnUser("conv-a3f9"), nil); err != nil {
@@ -326,7 +333,7 @@ func TestWarmerRefreshIsAValidRequest(t *testing.T) {
 // tool call is not a request that can be sent at all, so warming should say so
 // once rather than failing on every tick.
 func TestWarmerSkipsPrefixEndingMidToolCall(t *testing.T) {
-	h := &warmerHarness{pricing: okPricing(), cacheHit: true}
+	h := &warmerHarness{policy: okPolicy(), cacheHit: true}
 	pp := newWarmerPipeline(t, h, "conv-a3f9", nil)
 
 	in := &engine.ChatRequest{
@@ -381,9 +388,8 @@ func TestWarmerWithoutClockGrantStoresNothing(t *testing.T) {
 		t.Fatal(err)
 	}
 	rt.StateGetFunc, rt.StateSetFunc, rt.StateKeysFunc = state.Get, state.Set, state.Keys
-	rt.CachePricingFunc = func(_ context.Context, _ string) wasm.ExtensionResult {
-		return wasm.ExtensionValue([]byte(okPricing()))
-	}
+	policy := okPolicy()
+	installCachePolicyCallback(rt, policy)
 	sent := 0
 	rt.SendRequestFunc = func(_ context.Context, _, _ string) wasm.ExtensionResult {
 		sent++
@@ -402,9 +408,10 @@ func TestWarmerWithoutClockGrantStoresNothing(t *testing.T) {
 			// (everything except one permission) would be rejected.
 			Permissions: []string{
 				"env.background_tick", "env.host_call.torana_send_request",
-				"env.host_call.torana_cache_pricing", "env.state_get",
+				"env.cache_policy", "env.state_get",
 				"env.state_set", "env.state_keys", "env.now", "env.plugin_config", "env.log",
 			},
+			PromptCachePolicies: cachePluginApprovals(t, dir, "cache_warmer", "warm-cache", policy)["torana/cache_warmer"].PromptCachePolicies,
 		}},
 		Config: map[string]json.RawMessage{
 			"cache_warmer": json.RawMessage(`{"conversations":"conv-a3f9","warm_for_minutes":45}`),
@@ -443,7 +450,7 @@ func TestWarmerWithoutClockGrantStoresNothing(t *testing.T) {
 // path Torana forwards the caller's credential, but a plugin-originated request
 // has no caller, so a provider configured the ordinary way has no key at all.
 func TestWarmerStopsOnProviderRefusal(t *testing.T) {
-	h := &warmerHarness{pricing: okPricing(), cacheHit: true, httpStatus: 401}
+	h := &warmerHarness{policy: okPolicy(), cacheHit: true, httpStatus: 401}
 	pp := newWarmerPipeline(t, h, "conv-a3f9", nil)
 
 	if _, err := pp.RunBeforeRequest(context.Background(), 1, warmerRequestBreakpointOnUser("conv-a3f9"), nil); err != nil {
@@ -473,7 +480,7 @@ func TestWarmerStopsOnProviderRefusal(t *testing.T) {
 // TestWarmerIgnoresUnlistedConversations — warming everything is how this
 // feature loses money, so opt-in must actually gate.
 func TestWarmerIgnoresUnlistedConversations(t *testing.T) {
-	h := &warmerHarness{pricing: okPricing(), cacheHit: true}
+	h := &warmerHarness{policy: okPolicy(), cacheHit: true}
 	pp := newWarmerPipeline(t, h, "conv-other", nil)
 
 	if _, err := pp.RunBeforeRequest(context.Background(), 1, warmerRequest("conv-a3f9"), nil); err != nil {
@@ -491,7 +498,7 @@ func TestWarmerIgnoresUnlistedConversations(t *testing.T) {
 // arrived too late and paid to rebuild — continuing would be paying to hold
 // something the user may never return to.
 func TestWarmerStopsWhenCacheAlreadyExpired(t *testing.T) {
-	h := &warmerHarness{pricing: okPricing(), cacheHit: false} // reports a write
+	h := &warmerHarness{policy: okPolicy(), cacheHit: false} // reports a write
 	pp := newWarmerPipeline(t, h, "conv-a3f9", nil)
 
 	if _, err := pp.RunBeforeRequest(context.Background(), 1, warmerRequest("conv-a3f9"), nil); err != nil {
@@ -517,9 +524,9 @@ func TestWarmerStopsWhenCacheAlreadyExpired(t *testing.T) {
 // continuing diverges rather than settling.
 func TestWarmerStopsAtBreakEven(t *testing.T) {
 	// A ratio of 3 gives a break-even of 2 refreshes, so the third must refuse.
-	h := &warmerHarness{cacheHit: true, pricing: `{"status":"ok","write_read_ratio":3,` +
-		`"break_even_refreshes":2,"refresh_on_read":true,"shortest_ttl_seconds":300,` +
-		`"warm_interval_seconds":240}`}
+	policy := cachePolicyForTest(true, 1, 3)
+	policy.Tiers = policy.Tiers[:1]
+	h := &warmerHarness{cacheHit: true, policy: policy}
 	pp := newWarmerPipeline(t, h, "conv-a3f9", nil)
 
 	if _, err := pp.RunBeforeRequest(context.Background(), 1, warmerRequest("conv-a3f9"), nil); err != nil {
@@ -537,7 +544,7 @@ func TestWarmerStopsAtBreakEven(t *testing.T) {
 // TestWarmerDeclinesUnknownPricing — unknown economics is exactly when guessing
 // is most expensive, so it must not send at all.
 func TestWarmerDeclinesUnknownPricing(t *testing.T) {
-	h := &warmerHarness{cacheHit: true, pricing: `{"status":"unavailable","reason":"no_pricing_configured"}`}
+	h := &warmerHarness{cacheHit: true}
 	pp := newWarmerPipeline(t, h, "conv-a3f9", nil)
 
 	if _, err := pp.RunBeforeRequest(context.Background(), 1, warmerRequest("conv-a3f9"), nil); err != nil {
@@ -554,8 +561,9 @@ func TestWarmerDeclinesUnknownPricing(t *testing.T) {
 // prefix caching has no lifetime the caller owns, so a refresh cannot keep
 // anything alive and is pure cost.
 func TestWarmerDeclinesNonRefreshableCache(t *testing.T) {
-	h := &warmerHarness{cacheHit: true, pricing: `{"status":"ok","write_read_ratio":12.5,` +
-		`"break_even_refreshes":11,"refresh_on_read":false,"shortest_ttl_seconds":300}`}
+	policy := cachePolicyForTest(false, 0.3, 3.75)
+	policy.WarmIntervalSeconds = nil
+	h := &warmerHarness{cacheHit: true, policy: policy}
 	pp := newWarmerPipeline(t, h, "conv-a3f9", nil)
 
 	if _, err := pp.RunBeforeRequest(context.Background(), 1, warmerRequest("conv-a3f9"), nil); err != nil {
@@ -575,7 +583,7 @@ func TestWarmerDeclinesNonRefreshableCache(t *testing.T) {
 // TestWarmerRespectsRefreshInterval — a refresh before the interval has elapsed
 // is money spent to touch an entry that was not close to expiring.
 func TestWarmerRespectsRefreshInterval(t *testing.T) {
-	h := &warmerHarness{pricing: okPricing(), cacheHit: true}
+	h := &warmerHarness{policy: okPolicy(), cacheHit: true}
 	pp := newWarmerPipeline(t, h, "conv-a3f9", nil)
 
 	if _, err := pp.RunBeforeRequest(context.Background(), 1, warmerRequest("conv-a3f9"), nil); err != nil {
@@ -596,7 +604,7 @@ func TestWarmerRespectsRefreshInterval(t *testing.T) {
 // observes and stores; if it ever wrote into a request it would change the very
 // prefix it exists to preserve.
 func TestWarmerDoesNotMutateRequests(t *testing.T) {
-	h := &warmerHarness{pricing: okPricing(), cacheHit: true}
+	h := &warmerHarness{policy: okPolicy(), cacheHit: true}
 	pp := newWarmerPipeline(t, h, "conv-a3f9", nil)
 
 	in := warmerRequest("conv-a3f9")
@@ -626,7 +634,7 @@ func TestWarmerStateSurvivesRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	h := &warmerHarness{pricing: okPricing(), cacheHit: true}
+	h := &warmerHarness{policy: okPolicy(), cacheHit: true}
 	first := newWarmerPipeline(t, h, "conv-a3f9", state)
 	if _, err := first.RunBeforeRequest(context.Background(), 1, warmerRequest("conv-a3f9"), nil); err != nil {
 		t.Fatal(err)
@@ -637,7 +645,7 @@ func TestWarmerStateSurvivesRestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	h2 := &warmerHarness{pricing: okPricing(), cacheHit: true}
+	h2 := &warmerHarness{policy: okPolicy(), cacheHit: true}
 	second := newWarmerPipeline(t, h2, "conv-a3f9", reloaded)
 
 	// No request this time — the tick must find the entry from disk alone.
