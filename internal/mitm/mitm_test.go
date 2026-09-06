@@ -2,6 +2,7 @@ package mitm
 
 import (
 	"bufio"
+	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/pem"
@@ -209,7 +210,7 @@ func TestDispatchStripsHopByHopHeadersBeforeTorana(t *testing.T) {
 		_, _ = io.Copy(io.Discard, peer)
 		close(done)
 	}()
-	if keepAlive := s.dispatch(owned, req, "api.example.com"); keepAlive {
+	if keepAlive := s.dispatch(context.Background(), owned, req, "api.example.com"); keepAlive {
 		t.Fatal("Torana-routed request was marked reusable")
 	}
 	_ = owned.Close()

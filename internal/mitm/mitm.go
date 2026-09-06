@@ -12,6 +12,7 @@ package mitm
 
 import (
 	"bufio"
+	"context"
 	"crypto/tls"
 	"fmt"
 	"io"
@@ -24,6 +25,11 @@ import (
 
 	"github.com/torana-edge/torana-edge/internal/provider"
 )
+
+// idleTimeout bounds how long a decrypted connection may sit without progress.
+// Generous enough for a slow model response on a live request, short enough
+// that an abandoned connection does not pin a goroutine forever.
+const idleTimeout = 10 * time.Minute
 
 // Server is the TLS-terminating CONNECT proxy.
 type Server struct {
@@ -190,6 +196,12 @@ func (s *Server) untrack(conn net.Conn) {
 
 // tunnel splices bytes to the real upstream without touching TLS (login,
 // telemetry, and any host not in the intercept map).
+//
+// The destination is whatever the CONNECT names, which makes this listener a
+// forward proxy for the local machine. That is inherent to being a CONNECT
+// proxy and the listener is loopback-only, but it is a real surface: see
+// docs/GEMINI_ANTIGRAVITY.md, which now says so rather than leaving a reader
+// to infer it.
 func (s *Server) tunnel(client net.Conn, hostport string) {
 	up, err := net.DialTimeout("tcp", hostport, 15*time.Second)
 	if err != nil {
@@ -232,10 +244,21 @@ func (s *Server) terminate(client net.Conn, hostname string) {
 	if err := tlsConn.Handshake(); err != nil {
 		return
 	}
-	if err := client.SetDeadline(time.Time{}); err != nil {
+	defer func() { _ = tlsConn.Close() }()
+
+	// An idle bound, not "no deadline at all". Clearing it left a connection
+	// that completed a handshake and then said nothing holding a goroutine and
+	// a TLS conn for the life of the process.
+	if err := client.SetDeadline(time.Now().Add(idleTimeout)); err != nil {
 		return
 	}
-	defer func() { _ = tlsConn.Close() }()
+
+	// Tie a context to this connection so that when the client goes away the
+	// request Torana is running on its behalf is cancelled too. Requests read
+	// off this connection carry context.Background() otherwise: the provider
+	// keeps generating — and billing — after the harness has quit.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
 	br := bufio.NewReader(tlsConn)
 	for {
@@ -243,8 +266,11 @@ func (s *Server) terminate(client net.Conn, hostname string) {
 		if err != nil {
 			return
 		}
-		keepAlive := s.dispatch(tlsConn, req, hostname)
-		if !keepAlive {
+		// Each request gets the full idle budget to arrive and be served.
+		if err := client.SetDeadline(time.Now().Add(idleTimeout)); err != nil {
+			return
+		}
+		if !s.dispatch(ctx, tlsConn, req, hostname) {
 			return
 		}
 	}
@@ -252,22 +278,29 @@ func (s *Server) terminate(client net.Conn, hostname string) {
 
 // dispatch handles one decrypted request. It returns true if the connection may
 // be reused for another request.
-func (s *Server) dispatch(conn net.Conn, req *http.Request, hostname string) bool {
+//
+// Both paths currently close: Torana streams its responses with Connection:
+// close framing, and forwardVerbatim does the same. The return value is kept
+// rather than inlined as `return` so adding keep-alive to either path is a
+// local change — but note that today the read loop above always exits after
+// one request.
+func (s *Server) dispatch(ctx context.Context, conn net.Conn, req *http.Request, hostname string) bool {
 	removeHopByHopHeaders(req.Header)
 	req.TransferEncoding = nil
 	req.Trailer = nil
 	provName := s.cfg.Hosts[hostname]
 	if isChatPath(req.URL.Path) && provName != "" {
-		s.routeThroughTorana(conn, req, hostname, provName)
+		s.routeThroughTorana(ctx, conn, req, hostname, provName)
 		return false // Torana writes Connection: close-style streamed responses
 	}
-	return s.forwardVerbatim(conn, req, hostname)
+	return s.forwardVerbatim(ctx, conn, req, hostname)
 }
 
 // routeThroughTorana rewrites the request into a /provider/<name>/… call and
 // runs it through the proxy handler, streaming the response back over conn.
-func (s *Server) routeThroughTorana(conn net.Conn, req *http.Request, hostname, provName string) {
+func (s *Server) routeThroughTorana(ctx context.Context, conn net.Conn, req *http.Request, hostname, provName string) {
 	rw := newConnResponseWriter(conn)
+	req = req.WithContext(ctx)
 
 	// Rewrite the path into the provider namespace; the resolver strips it and
 	// the Director rebuilds the upstream URL from the provider config.
@@ -284,10 +317,10 @@ func (s *Server) routeThroughTorana(conn net.Conn, req *http.Request, hostname, 
 }
 
 // forwardVerbatim proxies a non-chat request to the real host unchanged.
-func (s *Server) forwardVerbatim(conn net.Conn, req *http.Request, hostname string) bool {
+func (s *Server) forwardVerbatim(ctx context.Context, conn net.Conn, req *http.Request, hostname string) bool {
 	target := "https://" + hostname + req.URL.RequestURI()
 
-	out, err := http.NewRequest(req.Method, target, req.Body)
+	out, err := http.NewRequestWithContext(ctx, req.Method, target, req.Body)
 	if err != nil {
 		writeSimpleError(conn, 502)
 		return false
