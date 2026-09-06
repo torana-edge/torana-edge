@@ -8,6 +8,7 @@ import (
 	"math"
 	"os"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -24,13 +25,27 @@ import (
 )
 
 // InitOTel sets up OpenTelemetry metrics if OTEL_EXPORTER_OTLP_ENDPOINT is set.
+//
+// Transport security follows the endpoint, not a hardcoded choice. WithInsecure
+// was unconditional, so telemetry — provider names, model families, token
+// counts, spend — crossed the network in cleartext with no way to turn TLS on.
+// The rules match the OpenTelemetry specification, so an operator's existing
+// OTEL_* configuration means here what it means everywhere else:
+//
+//   - an "https://" endpoint is TLS;
+//   - an "http://" endpoint is plaintext;
+//   - a bare "host:port" is TLS unless OTEL_EXPORTER_OTLP_INSECURE=true.
 func InitOTel(ctx context.Context) (func(context.Context) error, error) {
 	endpoint := os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT")
 	if endpoint == "" {
 		return func(context.Context) error { return nil }, nil
 	}
 
-	exporter, err := otlpmetricgrpc.New(ctx, otlpmetricgrpc.WithEndpoint(endpoint), otlpmetricgrpc.WithInsecure())
+	opts := []otlpmetricgrpc.Option{otlpmetricgrpc.WithEndpoint(stripOTLPScheme(endpoint))}
+	if otlpInsecure(endpoint, os.Getenv("OTEL_EXPORTER_OTLP_INSECURE")) {
+		opts = append(opts, otlpmetricgrpc.WithInsecure())
+	}
+	exporter, err := otlpmetricgrpc.New(ctx, opts...)
 	if err != nil {
 		return nil, err
 	}
@@ -53,6 +68,28 @@ func InitOTel(ctx context.Context) (func(context.Context) error, error) {
 	log.Printf("[metrics] OpenTelemetry enabled, exporting to %s", endpoint)
 
 	return provider.Shutdown, nil
+}
+
+// otlpInsecure decides transport security for an endpoint. An explicit scheme
+// wins; otherwise OTEL_EXPORTER_OTLP_INSECURE decides, defaulting to TLS —
+// failing closed, so an endpoint that cannot do TLS reports an error rather
+// than quietly downgrading to cleartext.
+func otlpInsecure(endpoint, insecureEnv string) bool {
+	switch {
+	case strings.HasPrefix(endpoint, "https://"):
+		return false
+	case strings.HasPrefix(endpoint, "http://"):
+		return true
+	}
+	return strings.EqualFold(strings.TrimSpace(insecureEnv), "true")
+}
+
+// stripOTLPScheme trims a scheme the gRPC exporter does not want in its
+// endpoint, which takes host:port.
+func stripOTLPScheme(endpoint string) string {
+	endpoint = strings.TrimPrefix(endpoint, "https://")
+	endpoint = strings.TrimPrefix(endpoint, "http://")
+	return strings.TrimSuffix(endpoint, "/")
 }
 
 // initInstruments installs the meter and creates the host-owned request

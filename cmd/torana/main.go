@@ -107,6 +107,14 @@ Environment:
   TORANA_DEFAULT_PROVIDER  provider for requests that match no /provider/ prefix
   TORANA_PLUGINS_DIR       plugin directory for the plugin subcommands
   TORANA_LOG_LEVEL         set to debug for safe request lifecycle logs
+  OTEL_EXPORTER_OTLP_ENDPOINT
+                           OTLP gRPC collector; unset disables OTel export.
+                           An https:// endpoint uses TLS, http:// is plaintext,
+                           and a bare host:port uses TLS unless
+                           OTEL_EXPORTER_OTLP_INSECURE=true
+  OTEL_EXPORTER_OTLP_INSECURE
+                           set to true to allow plaintext to a scheme-less
+                           OTLP endpoint
 
 The control plane is at http://127.0.0.1:<port>/_torana/ and is reachable from
 loopback only. Plugins never load until you approve their digest there.

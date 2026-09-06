@@ -32,10 +32,30 @@ func callerCredentialsFrom(req *http.Request) callerCredentials {
 // applyProviderCredential enforces the target provider's explicit auth mode.
 // It strips credentials first, then either restores the intercepted caller
 // values, installs one host-resolved credential, or sends no credential.
+// callerCredentialHeaders are stripped before a provider-managed credential is
+// installed. It is an ALLOWLIST of what may cross a provider boundary,
+// expressed as the complement: anything here is removed, and the three modes
+// below decide what goes back.
+//
+// It was three entries, so a caller's Azure `api-key`, a Cookie, or a
+// Proxy-Authorization travelled to whatever upstream the operator had
+// configured — precisely what auth.mode=credential exists to prevent. The
+// point of that mode is that the caller's secrets do not leave the machine.
+var callerCredentialHeaders = []string{
+	"Authorization",
+	"X-Api-Key",
+	"X-Goog-Api-Key",
+	"Api-Key",              // Azure OpenAI
+	"X-Goog-Api-Client",    // Google client identity
+	"Cookie",               // session credentials
+	"Proxy-Authorization",  // proxy credentials, never an upstream's business
+	"X-Amz-Security-Token", // AWS session credentials
+}
+
 func applyProviderCredential(ctx context.Context, req *http.Request, target provider.Provider, caller callerCredentials, resolve func(context.Context, string) ([]byte, error)) error {
-	req.Header.Del("Authorization")
-	req.Header.Del("X-Api-Key")
-	req.Header.Del("X-Goog-Api-Key")
+	for _, name := range callerCredentialHeaders {
+		req.Header.Del(name)
+	}
 	switch target.Auth.EffectiveMode() {
 	case "caller":
 		if caller.Authorization != "" {

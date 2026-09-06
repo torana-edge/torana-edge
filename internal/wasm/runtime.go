@@ -587,7 +587,14 @@ func (p *Plugin) newInstance(ctx context.Context) (*pluginInstance, error) {
 	// output to plugins explicitly granted env.log; host env.log is gated too.
 	logEnabled := p.hasGrant("env.log")
 	if logEnabled {
-		config = config.WithStdout(os.Stdout).WithStderr(os.Stderr)
+		// Prefixed, never raw. Handing a guest os.Stdout let a granted plugin
+		// emit unattributed bytes into the operator's log — enough to forge
+		// lines that look like Torana's own ("[route] ...", "[plugin] ..."),
+		// which is the log an operator reads to find out what a plugin did.
+		// The host-side env.log host call has always prefixed; this path did
+		// not.
+		config = config.WithStdout(newPrefixWriter(os.Stdout, p.name)).
+			WithStderr(newPrefixWriter(os.Stderr, p.name))
 	} else {
 		config = config.WithStdout(io.Discard).WithStderr(io.Discard)
 	}
@@ -1440,7 +1447,15 @@ func pluginNameOf(mod api.Module) string {
 // (fragment buffers, tool-call tracking) — without namespacing, plugins
 // sharing key conventions (tool:0, frag:<id>) clobber each other.
 // Cross-plugin cache exchange is a separate, explicit capability.
-func metaKey(plugin, key string) string { return plugin + "\x00" + key }
+func metaKey(plugin, key string) string {
+	// Length-prefixed for the same reason PrivateCacheKey below is, which
+	// documents it: without the length, ("ab","c") and ("a","bc") produce the
+	// same key. The plugin name is host-supplied and the key is guest-supplied,
+	// so an unframed join let a guest address a namespace by embedding a NUL.
+	// Meta is request-scoped and in-memory, so changing the framing invalidates
+	// nothing on disk.
+	return "meta\x00" + strconv.Itoa(len(plugin)) + "\x00" + plugin + key
+}
 
 func privateCacheKey(plugin, key string) string { return PrivateCacheKey(plugin, key) }
 

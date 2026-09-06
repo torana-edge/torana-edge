@@ -40,12 +40,14 @@ func Open(dataDir string) (*Store, error) {
 	keyPath := filepath.Join(dataDir, "secret.key")
 	key, err := readExistingKey(keyPath)
 	if errors.Is(err, os.ErrNotExist) {
-		key = make([]byte, 32)
-		if _, err := io.ReadFull(rand.Reader, key); err != nil {
-			return nil, fmt.Errorf("failed to generate random key: %w", err)
-		}
-		if err := fileperm.WriteNew(keyPath, key); err != nil {
-			return nil, fmt.Errorf("failed to write secret key file: %w", err)
+		// O_EXCL, not WriteFile. The server and the `torana credential` CLI
+		// both call Open, so a first run that starts both at once had each
+		// generate a key and the loser's write clobber the winner's — after
+		// which anything already encrypted under the overwritten key can never
+		// be decrypted. Losing the race now means reading the key that won.
+		key, err = createOrReadKey(keyPath)
+		if err != nil {
+			return nil, err
 		}
 	} else if err != nil {
 		return nil, err
@@ -89,6 +91,28 @@ func readExistingKey(keyPath string) ([]byte, error) {
 	}
 	if len(key) != 32 {
 		return nil, fmt.Errorf("invalid key length in secret key file: expected 32 bytes, got %d", len(key))
+	}
+	return key, nil
+}
+
+// createOrReadKey writes a fresh 32-byte key exclusively, or reads the one that
+// another process created first.
+func createOrReadKey(keyPath string) ([]byte, error) {
+	key := make([]byte, 32)
+	if _, err := io.ReadFull(rand.Reader, key); err != nil {
+		return nil, fmt.Errorf("failed to generate random key: %w", err)
+	}
+	// WriteNew is the exclusive create: it fails rather than truncating, and
+	// it restricts the file to its owner BEFORE the key bytes go in, so the
+	// key is never briefly readable through an inherited ACL.
+	err := fileperm.WriteNew(keyPath, key)
+	if errors.Is(err, os.ErrExist) {
+		// The loser of the race reads the winner's key through the same
+		// handle-bound path as any other existing key.
+		return readExistingKey(keyPath)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("failed to create secret key file: %w", err)
 	}
 	return key, nil
 }

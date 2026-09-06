@@ -440,3 +440,33 @@ func TestMetricsDisabledNoop(t *testing.T) {
 	EmitPluginMetric(context.Background(), "x", "y", 0, 1, nil)
 	RegisterStatsObservables(NewStatsTracker())
 }
+
+// Transport security must follow the endpoint. WithInsecure was unconditional,
+// so telemetry crossed the network in cleartext with no way to enable TLS.
+func TestOTLPTransportSecurity(t *testing.T) {
+	tests := []struct {
+		endpoint     string
+		insecureEnv  string
+		wantInsecure bool
+		wantHostPort string
+	}{
+		{endpoint: "https://otel.example.com:4317", wantInsecure: false, wantHostPort: "otel.example.com:4317"},
+		{endpoint: "http://localhost:4317", wantInsecure: true, wantHostPort: "localhost:4317"},
+		// A bare host:port defaults to TLS — failing closed.
+		{endpoint: "otel.example.com:4317", wantInsecure: false, wantHostPort: "otel.example.com:4317"},
+		{endpoint: "otel.example.com:4317", insecureEnv: "true", wantInsecure: true, wantHostPort: "otel.example.com:4317"},
+		{endpoint: "otel.example.com:4317", insecureEnv: "TRUE", wantInsecure: true, wantHostPort: "otel.example.com:4317"},
+		{endpoint: "otel.example.com:4317", insecureEnv: "false", wantInsecure: false, wantHostPort: "otel.example.com:4317"},
+		// An explicit scheme wins over the variable.
+		{endpoint: "https://otel.example.com:4317", insecureEnv: "true", wantInsecure: false, wantHostPort: "otel.example.com:4317"},
+		{endpoint: "https://otel.example.com:4317/", wantInsecure: false, wantHostPort: "otel.example.com:4317"},
+	}
+	for _, tt := range tests {
+		if got := otlpInsecure(tt.endpoint, tt.insecureEnv); got != tt.wantInsecure {
+			t.Errorf("otlpInsecure(%q, %q) = %v, want %v", tt.endpoint, tt.insecureEnv, got, tt.wantInsecure)
+		}
+		if got := stripOTLPScheme(tt.endpoint); got != tt.wantHostPort {
+			t.Errorf("stripOTLPScheme(%q) = %q, want %q", tt.endpoint, got, tt.wantHostPort)
+		}
+	}
+}

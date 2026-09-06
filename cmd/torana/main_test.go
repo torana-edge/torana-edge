@@ -52,6 +52,9 @@ func TestUsageDocumentsEveryEnvironmentVariable(t *testing.T) {
 		"TORANA_BIND",
 		"TORANA_DEFAULT_PROVIDER",
 		"TORANA_PLUGINS_DIR",
+		"TORANA_LOG_LEVEL",
+		"OTEL_EXPORTER_OTLP_ENDPOINT",
+		"OTEL_EXPORTER_OTLP_INSECURE",
 	} {
 		if !strings.Contains(help, name) {
 			t.Errorf("%s is read by Torana but absent from the help text", name)
@@ -77,7 +80,7 @@ func TestUsageDocumentsEverySubcommand(t *testing.T) {
 	usage(&buf)
 	help := buf.String()
 
-	for _, cmd := range []string{"serve", "plugin", "conversations", "version", "help"} {
+	for _, cmd := range []string{"serve", "plugin", "credential", "conversations", "version", "help"} {
 		if !strings.Contains(help, cmd) {
 			t.Errorf("subcommand %q is dispatched but absent from the help text", cmd)
 		}
