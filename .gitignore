@@ -50,3 +50,8 @@ fix_lint.sh
 
 # Local test-cycle state (wazero compilation cache, fixture stamps)
 /.cache/
+
+# Release output. Both `make release` and `goreleaser release` write here;
+# without this a snapshot build leaves ~40MB of cross-compiled binaries that
+# `git add -A` will happily commit, and a tracked binary churns forever.
+/dist/

@@ -12,7 +12,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 
 	"github.com/torana-edge/torana-edge/internal/wasm"
 )
@@ -142,7 +141,7 @@ func regularSingleLink(path string, allowMissing bool) error {
 	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
 		return fmt.Errorf("plugin file is not a regular file")
 	}
-	if stat, ok := info.Sys().(*syscall.Stat_t); ok && stat.Nlink != 1 {
+	if links, known := hardLinkCount(info); known && links != 1 {
 		return fmt.Errorf("plugin file has multiple hard links")
 	}
 	return nil
@@ -166,7 +165,7 @@ func (s *Store) Append(plugin, logical string, data []byte, resource wasm.FileRe
 	if err != nil {
 		return err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	// The write and any rotation are ordered under the file-family lock. Sync
 	// happens afterwards: concurrent appends may group-commit on the same inode
 	// instead of every request waiting behind another request's storage flush.
@@ -253,7 +252,7 @@ func (s *Store) Read(plugin, logical string, resource wasm.FileResource) ([]byte
 	if err != nil {
 		return nil, err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	limit := resource.MaxBytes
 	if limit <= 0 || limit > 64<<20 {
 		limit = 64 << 20
@@ -296,15 +295,15 @@ func (s *Store) Write(plugin, logical string, data []byte, resource wasm.FileRes
 	name := tmp.Name()
 	defer func() { _ = os.Remove(name) }()
 	if err := tmp.Chmod(0o600); err != nil {
-		tmp.Close()
+		_ = tmp.Close()
 		return err
 	}
 	if _, err := tmp.Write(data); err != nil {
-		tmp.Close()
+		_ = tmp.Close()
 		return err
 	}
 	if err := tmp.Sync(); err != nil {
-		tmp.Close()
+		_ = tmp.Close()
 		return err
 	}
 	if err := tmp.Close(); err != nil {
