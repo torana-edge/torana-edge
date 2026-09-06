@@ -88,9 +88,9 @@ func (ar *anthropicRequest) UnmarshalJSON(data []byte) error {
 			return fmt.Errorf("system: element %d: expected a text block", i)
 		}
 		var el struct {
-			Type         string         `json:"type"`
-			Text         *string        `json:"text"`
-			CacheControl map[string]any `json:"cache_control"`
+			Type         string          `json:"type"`
+			Text         *string         `json:"text"`
+			CacheControl json.RawMessage `json:"cache_control"`
 		}
 		dec := json.NewDecoder(bytes.NewReader(rb))
 		dec.DisallowUnknownFields()
@@ -150,10 +150,15 @@ type contentBlock struct {
 	Thinking  string          `json:"thinking,omitempty"`
 	Signature string          `json:"signature,omitempty"`
 	Data      string          `json:"data,omitempty"`
-	// Cache breakpoint marker, e.g. {"type":"ephemeral"}. Preserved verbatim
-	// (opaque map) so TTL variants pass through. Dropping it disables the
-	// provider's prompt cache for the whole prefix.
-	CacheControl map[string]any `json:"cache_control,omitempty"`
+	// Cache breakpoint marker, e.g. {"type":"ephemeral"}. Held as raw bytes,
+	// not a decoded map, so TTL variants pass through with their members in
+	// the order the caller wrote them — and, more importantly, so PRESENCE
+	// survives independently of value: `"cache_control": {}` is a present
+	// marker Anthropic honours, and a map plus len() cannot tell it from an
+	// absent one. Dropping it disables the provider's prompt cache for the
+	// whole prefix. nil means absent; omitempty then omits it, while a
+	// two-byte `{}` is emitted.
+	CacheControl json.RawMessage `json:"cache_control,omitempty"`
 	// Also handle tool_result content as array of blocks (Anthropic supports both)
 
 	// raw, when set, is emitted verbatim instead of projecting these fields.
@@ -172,7 +177,7 @@ type anthropicToolDef struct {
 	Name         string          `json:"name"`
 	Description  string          `json:"description,omitempty"`
 	InputSchema  json.RawMessage `json:"input_schema"` // raw JSON Schema lexemes, verbatim
-	CacheControl map[string]any  `json:"cache_control,omitempty"`
+	CacheControl json.RawMessage `json:"cache_control,omitempty"`
 }
 
 // UnmarshalJSON handles the polymorphic tool_result content (string or array).
@@ -277,18 +282,17 @@ func (cb contentBlock) MarshalJSON() ([]byte, error) {
 		// preserved bytes rather than setting a struct field the raw path
 		// would ignore — dropping it disables the provider cache for the whole
 		// prefix.
-		if len(cb.CacheControl) == 0 {
+		//
+		// nil, not len()==0: a present-but-empty `{}` marker is a real
+		// breakpoint and must be spliced like any other.
+		if cb.CacheControl == nil {
 			return cb.raw, nil
 		}
 		var members map[string]json.RawMessage
 		if err := json.Unmarshal(cb.raw, &members); err != nil {
 			return nil, err
 		}
-		marker, err := json.Marshal(cb.CacheControl)
-		if err != nil {
-			return nil, err
-		}
-		members["cache_control"] = marker
+		members["cache_control"] = cb.CacheControl
 		return json.Marshal(members)
 	}
 	type alias contentBlock
@@ -380,7 +384,7 @@ func (a *Adapter) Unmarshal(rawBody []byte) (*engine.ChatRequest, error) {
 			}
 			blocks = append(blocks, engine.Block{Text: &engine.TextBlock{Text: b.Text}})
 			if b.CacheControl != nil {
-				marker, err := engine.ParseRequiredJSONObject(mustMarshalA(b.CacheControl))
+				marker, err := engine.ParseRequiredJSONObject(b.CacheControl)
 				if err != nil {
 					return nil, fmt.Errorf("system cache_control: %w", err)
 				}
@@ -413,7 +417,7 @@ func (a *Adapter) Unmarshal(rawBody []byte) (*engine.ChatRequest, error) {
 			// block-level fact, never folded into the payload (the
 			// projection invariant).
 			if block.CacheControl != nil {
-				marker, merr := engine.ParseRequiredJSONObject(mustMarshalA(block.CacheControl))
+				marker, merr := engine.ParseRequiredJSONObject(block.CacheControl)
 				if merr != nil {
 					return nil, fmt.Errorf("content cache_control: %w", merr)
 				}
@@ -435,7 +439,7 @@ func (a *Adapter) Unmarshal(rawBody []byte) (*engine.ChatRequest, error) {
 			Parameters:  params,
 		}
 		if t.CacheControl != nil {
-			cc, cerr := engine.ParseRequiredJSONObject(mustMarshalA(t.CacheControl))
+			cc, cerr := engine.ParseRequiredJSONObject(t.CacheControl)
 			if cerr != nil {
 				return nil, fmt.Errorf("tool %q cache_control: %w", t.Name, cerr)
 			}
@@ -499,11 +503,11 @@ func anthropicBlockToEngine(block contentBlock, i int, contentRaw json.RawMessag
 				}
 			}
 			for j, p := range arr {
-				elem, err := anthropicNestedContentToEngine(p, rawNested, j)
+				elems, err := anthropicNestedContentToEngine(p, rawNested, j)
 				if err != nil {
 					return engine.Block{}, err
 				}
-				tr.Content = append(tr.Content, elem)
+				tr.Content = append(tr.Content, elems...)
 			}
 			if len(tr.Content) == 0 {
 				tr.Content = []engine.ToolResultContentBlock{{Text: ""}}
@@ -529,25 +533,68 @@ func anthropicBlockToEngine(block contentBlock, i int, contentRaw json.RawMessag
 }
 
 // anthropicNestedContentToEngine projects one tool-result content element
-// onto the nested kinds (text / unknown / cache breakpoint). rawNested holds
-// the block's raw content array, aligned by index with the typed elements.
-func anthropicNestedContentToEngine(p any, rawNested []json.RawMessage, j int) (engine.ToolResultContentBlock, error) {
+// onto the nested kinds, returning the element itself followed by a cache
+// breakpoint when the wire element carried a cache_control member. rawNested
+// holds the block's raw content array, aligned by index with the typed
+// elements.
+//
+// A SLICE, because cache_control is a block-level fact that closes the prefix
+// at the element's position — the element, then the breakpoint after it,
+// exactly the rule the top level follows. Returning the breakpoint INSTEAD of
+// the element deleted whatever carried it: a nested image with a
+// cache_control lost its source entirely, and one in first position made the
+// request unmarshalable ("nested cache breakpoint at position 0 has no
+// preceding element to attach to"). A nested TEXT element's marker was lost
+// the other way, since the text arm returned before the marker was read.
+func anthropicNestedContentToEngine(p any, rawNested []json.RawMessage, j int) ([]engine.ToolResultContentBlock, error) {
+	elem, err := anthropicNestedElement(p, rawNested, j)
+	if err != nil {
+		return nil, err
+	}
+	out := []engine.ToolResultContentBlock{elem}
+
+	m, ok := p.(map[string]any)
+	if !ok {
+		return out, nil
+	}
+	cc, present := m["cache_control"]
+	if !present || cc == nil {
+		return out, nil
+	}
+	marker, err := engine.ParseRequiredJSONObject(nestedMarkerBytes(cc, rawNested, j))
+	if err != nil {
+		return nil, fmt.Errorf("nested cache_control: %w", err)
+	}
+	return append(out, engine.ToolResultContentBlock{
+		CacheBreakpoint: &engine.CacheBreakpointBlock{Marker: marker},
+	}), nil
+}
+
+// nestedMarkerBytes prefers the marker's VERBATIM wire bytes, so member order
+// survives for TTL variants; it falls back to re-encoding the decoded value
+// only when the raw array could not be aligned.
+func nestedMarkerBytes(cc any, rawNested []json.RawMessage, j int) []byte {
+	if j < len(rawNested) {
+		var members map[string]json.RawMessage
+		if json.Unmarshal(rawNested[j], &members) == nil {
+			if raw, ok := members["cache_control"]; ok {
+				return raw
+			}
+		}
+	}
+	return mustMarshalA(cc)
+}
+
+// anthropicNestedElement projects the element itself (text or unknown),
+// independent of any cache marker riding on it.
+func anthropicNestedElement(p any, rawNested []json.RawMessage, j int) (engine.ToolResultContentBlock, error) {
+	kind := "unknown"
 	if m, ok := p.(map[string]any); ok {
 		if t, _ := m["type"].(string); t == anthropicText || t == "" {
 			if txt, ok := m["text"].(string); ok {
 				return engine.ToolResultContentBlock{Text: txt}, nil
 			}
 		}
-		if cc, ok := m["cache_control"].(map[string]any); ok && cc != nil {
-			marker, err := engine.ParseRequiredJSONObject(mustMarshalA(cc))
-			if err != nil {
-				return engine.ToolResultContentBlock{}, fmt.Errorf("nested cache_control: %w", err)
-			}
-			return engine.ToolResultContentBlock{CacheBreakpoint: &engine.CacheBreakpointBlock{Marker: marker}}, nil
-		}
-	}
-	kind := "unknown"
-	if m, ok := p.(map[string]any); ok {
 		if t, ok := m["type"].(string); ok && t != "" {
 			kind = t
 		}
@@ -676,10 +723,7 @@ func (a *Adapter) Marshal(chat *engine.ChatRequest) ([]byte, error) {
 			Name:         t.Name,
 			Description:  t.Description,
 			InputSchema:  t.Parameters.Bytes(),
-			CacheControl: decodeMarker(t.CacheControl),
-		}
-		if len(td.CacheControl) == 0 {
-			td.CacheControl = nil
+			CacheControl: markerBytes(t.CacheControl),
 		}
 		ar.Tools = append(ar.Tools, td)
 	}
@@ -720,7 +764,7 @@ func marshalSystemBlocks(m engine.Message) ([]contentBlock, error) {
 					"has no preceding text block to attach to", i)
 			}
 			if out[len(out)-1].CacheControl == nil {
-				out[len(out)-1].CacheControl = decodeMarker(b.CacheBreakpoint.Marker)
+				out[len(out)-1].CacheControl = markerBytes(b.CacheBreakpoint.Marker)
 			}
 		default:
 			return nil, fmt.Errorf("anthropic: system block %d (%s) is not representable "+
@@ -783,7 +827,7 @@ func marshalContentBlocks(m engine.Message) ([]contentBlock, error) {
 					"has no preceding content block to attach to", i)
 			}
 			if out[len(out)-1].CacheControl == nil {
-				out[len(out)-1].CacheControl = decodeMarker(b.CacheBreakpoint.Marker)
+				out[len(out)-1].CacheControl = markerBytes(b.CacheBreakpoint.Marker)
 			}
 			continue
 		case b.Unknown != nil:
@@ -844,8 +888,10 @@ func marshalNestedContent(content []engine.ToolResultContentBlock) (any, error) 
 			if !ok {
 				return nil, fmt.Errorf("anthropic: nested cache breakpoint after a non-object element")
 			}
-			if _, exists := prev["cache_control"]; !exists {
-				prev["cache_control"] = decodeMarker(c.CacheBreakpoint.Marker)
+			if marker := markerBytes(c.CacheBreakpoint.Marker); marker != nil {
+				if _, exists := prev["cache_control"]; !exists {
+					prev["cache_control"] = marker
+				}
 			}
 		}
 	}
@@ -890,20 +936,24 @@ func marshalUnknownBlock(u *engine.UnknownBlock) (contentBlock, error) {
 	return contentBlock{Type: u.Kind, raw: b}, nil
 }
 
-// decodeMarker decodes a marker object for the wire map shape. Accepts the
-// required wrapper (block markers) and the optional wrapper (tool-def
-// markers); absent/zero yields nil.
-func decodeMarker(m interface {
+// markerBytes returns a cache marker's VERBATIM bytes for the wire, or nil
+// when there is no marker.
+//
+// Presence and value are separate facts. `"cache_control": {}` is a present
+// marker with an empty value, and Anthropic honours it as a breakpoint. The
+// previous decode-to-map-and-test-len collapsed the two, so a present empty
+// marker came back ABSENT and the provider cache went off for the whole
+// prefix — silently, on a request the caller had explicitly marked. Carrying
+// the bytes also keeps the marker's members in the order they arrived, which
+// matters for TTL variants.
+func markerBytes(m interface {
 	Bytes() []byte
-}) map[string]any {
-	var out map[string]any
-	if err := json.Unmarshal(m.Bytes(), &out); err != nil {
+}) json.RawMessage {
+	b := m.Bytes()
+	if len(b) == 0 {
 		return nil
 	}
-	if len(out) == 0 {
-		return nil
-	}
-	return out
+	return json.RawMessage(b)
 }
 
 // blockKind names a block for error messages.

@@ -282,6 +282,87 @@ var fidelityCases = []fidelityCase{
 		body:     `{"model":"m","max_tokens":10,"messages":[{"role":"user","content":"u"}],"tools":[{"name":"f","input_schema":{"type":"object"},"cache_control":{"type":"ephemeral"}}]}`,
 		survives: []string{"ephemeral"},
 	},
+	{
+		// Presence and value are separate facts: `{}` is a present marker
+		// Anthropic honours as a breakpoint. Decoding the marker to a map and
+		// testing len() reported it absent, so an explicitly cached prefix
+		// silently stopped being cached. Pinned on the RAW block path…
+		name:   "present-empty cache_control on an image survives",
+		format: "anthropic",
+		body: `{"model":"m","max_tokens":10,"messages":[{"role":"user","content":[
+			{"type":"image","source":{"type":"base64","media_type":"image/png","data":"` + marker + `"},"cache_control":{}}]}]}`,
+		paths: map[string]any{
+			"messages[0].content[0].type":          "image",
+			"messages[0].content[0].source.data":   marker,
+			"messages[0].content[0].cache_control": map[string]any{},
+		},
+	},
+	{
+		name:   "present-empty cache_control on a document survives",
+		format: "anthropic",
+		body: `{"model":"m","max_tokens":10,"messages":[{"role":"user","content":[
+			{"type":"document","source":{"type":"text","media_type":"text/plain","data":"` + marker + `"},"cache_control":{}}]}]}`,
+		paths: map[string]any{
+			"messages[0].content[0].source.data":   marker,
+			"messages[0].content[0].cache_control": map[string]any{},
+		},
+	},
+	{
+		// …and on the TYPED block path, where encoding/json's omitempty drops
+		// a non-nil empty map just as readily.
+		name:   "present-empty cache_control on a text block survives",
+		format: "anthropic",
+		body: `{"model":"m","max_tokens":10,"messages":[{"role":"user","content":[
+			{"type":"text","text":"` + marker + `","cache_control":{}}]}]}`,
+		paths: map[string]any{
+			"messages[0].content[0].text":          marker,
+			"messages[0].content[0].cache_control": map[string]any{},
+		},
+	},
+	{
+		name:   "present-empty cache_control on a tool definition survives",
+		format: "anthropic",
+		body:   `{"model":"m","max_tokens":10,"messages":[{"role":"user","content":"u"}],"tools":[{"name":"f","input_schema":{"type":"object"},"cache_control":{}}]}`,
+		paths:  map[string]any{"tools[0].cache_control": map[string]any{}},
+	},
+	{
+		name:   "present-empty cache_control on a system block survives",
+		format: "anthropic",
+		body:   `{"model":"m","max_tokens":10,"system":[{"type":"text","text":"s","cache_control":{}}],"messages":[{"role":"user","content":"u"}]}`,
+		paths:  map[string]any{"system[0].cache_control": map[string]any{}},
+	},
+	{
+		// The same deletion one level down: a nested element carrying a
+		// cache_control was REPLACED by the breakpoint instead of being
+		// followed by it, so the image vanished — and in first position the
+		// request became unmarshalable ("nested cache breakpoint at position
+		// 0 has no preceding element to attach to").
+		name:   "cached image in first tool-result position survives",
+		format: "anthropic",
+		body: `{"model":"m","max_tokens":10,"messages":[{"role":"user","content":[
+			{"type":"tool_result","tool_use_id":"t1","content":[
+				{"type":"image","source":{"type":"base64","data":"` + marker + `"},"cache_control":{"type":"ephemeral"}},
+				{"type":"text","text":"caption"}]}]}]}`,
+		paths: map[string]any{
+			"messages[0].content[0].content[0].type":               "image",
+			"messages[0].content[0].content[0].source.data":        marker,
+			"messages[0].content[0].content[0].cache_control.type": "ephemeral",
+			"messages[0].content[0].content[1].text":               "caption",
+		},
+	},
+	{
+		// A nested TEXT element lost its marker the other way: the text arm
+		// returned before the marker was ever read.
+		name:   "cache_control on a nested text element survives",
+		format: "anthropic",
+		body: `{"model":"m","max_tokens":10,"messages":[{"role":"user","content":[
+			{"type":"tool_result","tool_use_id":"t1","content":[
+				{"type":"text","text":"` + marker + `","cache_control":{}}]}]}]}`,
+		paths: map[string]any{
+			"messages[0].content[0].content[0].text":          marker,
+			"messages[0].content[0].content[0].cache_control": map[string]any{},
+		},
+	},
 
 	// ---------------------------------------------------------------------
 	// Gemini — no known losses; these pin the behaviour the others regressed.
