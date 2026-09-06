@@ -2138,6 +2138,35 @@ func New(cfg Config) (*Server, error) {
 		writePluginsWithWarnings(w, newPlugins, skipped)
 	}))
 
+	// GET /_torana/api/plugin-files/path — resolve the local path owned by the
+	// running instance. The CLI must ask the server rather than independently
+	// guessing TORANA_DATA_DIR from a different terminal's environment.
+	mux.HandleFunc("/_torana/api/plugin-files/path", s.controlPlaneGuard(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			w.Header().Set("Allow", http.MethodGet)
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		query := r.URL.Query()
+		if len(query) != 2 || len(query["plugin"]) != 1 || len(query["logical"]) != 1 {
+			http.Error(w, "plugin and logical must each be provided exactly once", http.StatusBadRequest)
+			return
+		}
+		if s.pluginFiles == nil {
+			http.Error(w, "plugin files are unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		path, err := s.pluginFiles.OperatorPath(query.Get("plugin"), query.Get("logical"))
+		if err != nil {
+			http.Error(w, "invalid plugin file path", http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(struct {
+			Path string `json:"path"`
+		}{Path: path})
+	}))
+
 	// POST /_torana/api/plugins/<name>/config — update single plugin config + rebuild + persist.
 	mux.HandleFunc("/_torana/api/plugins/", s.controlPlaneGuard(func(w http.ResponseWriter, r *http.Request) {
 		rest := strings.TrimPrefix(r.URL.Path, "/_torana/api/plugins/")
