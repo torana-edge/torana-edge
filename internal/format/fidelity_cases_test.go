@@ -217,6 +217,50 @@ var fidelityCases = []fidelityCase{
 	// Anthropic
 	// ---------------------------------------------------------------------
 	{
+		// marshalUnknownBlock rebuilt the block from the typed contentBlock,
+		// which has no source field — so every image and document reached the
+		// provider as a bare {"type":"image"}, its attachment gone, with no
+		// error to anybody.
+		name:   "image block keeps its source",
+		format: "anthropic",
+		body: `{"model":"m","max_tokens":10,"messages":[{"role":"user","content":[
+			{"type":"image","source":{"type":"base64","media_type":"image/png","data":"` + marker + `"}},
+			{"type":"text","text":"describe it"}]}]}`,
+		survives: []string{marker, "image/png", "base64"},
+	},
+	{
+		name:   "document block keeps its source",
+		format: "anthropic",
+		body: `{"model":"m","max_tokens":10,"messages":[{"role":"user","content":[
+			{"type":"document","source":{"type":"text","media_type":"text/plain","data":"` + marker + `"}}]}]}`,
+		survives: []string{marker, "text/plain"},
+	},
+	{
+		// A cache breakpoint closes the prefix at the block it follows, which
+		// may be an unmodelled arm. Emitting those verbatim must not lose the
+		// marker, or the provider cache is disabled for the whole prefix.
+		name:   "cache_control after an image block survives",
+		format: "anthropic",
+		body: `{"model":"m","max_tokens":10,"messages":[{"role":"user","content":[
+			{"type":"image","source":{"type":"base64","media_type":"image/png","data":"` + marker + `"},"cache_control":{"type":"ephemeral"}}]}]}`,
+		survives: []string{marker, "ephemeral"},
+	},
+	{
+		name:   "absent model is forwarded absent, not invented",
+		format: "anthropic",
+		body: `{"max_tokens":10,"messages":[{"role":"user","content":[
+			{"type":"text","text":"u"}]}]}`,
+		absentPaths: []string{"model"},
+	},
+	{
+		// Anthropic requires max_tokens; that is the provider's rule to
+		// enforce. Inventing 4096 caps a response the caller never capped.
+		name:        "absent max_tokens is not invented",
+		format:      "anthropic",
+		body:        `{"model":"m","messages":[{"role":"user","content":[{"type":"text","text":"u"}]}]}`,
+		absentPaths: []string{"max_tokens"},
+	},
+	{
 		// Anthropic tool_result has no name member, and this adapter's own arm
 		// table rejects one on the way in — so emitting it produced a body the
 		// parser would refuse and the provider would reject.

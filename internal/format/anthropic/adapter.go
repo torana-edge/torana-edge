@@ -15,7 +15,7 @@ import (
 // anthropicRequest mirrors the Anthropic Messages request JSON shape for
 // easy unmarshal/marshal.
 type anthropicRequest struct {
-	Model         string             `json:"model"`
+	Model         string             `json:"model,omitempty"`
 	MaxTokens     *int               `json:"max_tokens,omitempty"`
 	Temperature   *float64           `json:"temperature,omitempty"`
 	TopP          *float64           `json:"top_p,omitempty"`
@@ -155,6 +155,17 @@ type contentBlock struct {
 	// provider's prompt cache for the whole prefix.
 	CacheControl map[string]any `json:"cache_control,omitempty"`
 	// Also handle tool_result content as array of blocks (Anthropic supports both)
+
+	// raw, when set, is emitted verbatim instead of projecting these fields.
+	//
+	// Unmodelled provider arms — image, document, search_result, and whatever
+	// Anthropic adds next — carry members this struct has no field for.
+	// Rebuilding one from the struct dropped every such member, so an image
+	// block reached the provider as a bare {"type":"image"} with its source
+	// gone: a silent, total loss of the attachment on every multimodal
+	// request. The block kinds remain the authority for kind and cache
+	// membership; raw carries only what this struct cannot.
+	raw json.RawMessage
 }
 
 type anthropicToolDef struct {
@@ -260,6 +271,26 @@ func validateContentBlockMembers(arm string, data []byte, raw contentBlock) erro
 
 // MarshalJSON handles re-serializing content blocks.
 func (cb contentBlock) MarshalJSON() ([]byte, error) {
+	if len(cb.raw) > 0 {
+		// A cache breakpoint closes the prefix at the position of the block it
+		// follows, which may be an unmodelled arm. Splice the member into the
+		// preserved bytes rather than setting a struct field the raw path
+		// would ignore — dropping it disables the provider cache for the whole
+		// prefix.
+		if len(cb.CacheControl) == 0 {
+			return cb.raw, nil
+		}
+		var members map[string]json.RawMessage
+		if err := json.Unmarshal(cb.raw, &members); err != nil {
+			return nil, err
+		}
+		marker, err := json.Marshal(cb.CacheControl)
+		if err != nil {
+			return nil, err
+		}
+		members["cache_control"] = marker
+		return json.Marshal(members)
+	}
 	type alias contentBlock
 	a := alias(cb)
 	b, err := json.Marshal(a)
@@ -585,22 +616,22 @@ func (a *Adapter) Marshal(chat *engine.ChatRequest) ([]byte, error) {
 	if err := format.RejectFreeformTools(chat, "anthropic"); err != nil {
 		return nil, err
 	}
-	model := chat.Model
-	if model == "" {
-		model = "claude-sonnet-4-20250514"
-	}
+	// No default model: substituting one sends a different, differently-priced
+	// request than the caller wrote and misattributes every downstream cost and
+	// metric. anthropicRequest.Model omits an empty value, so an absent model
+	// stays absent and the provider applies its own rule.
 	ar := anthropicRequest{
-		Model:         model,
+		Model:         chat.Model,
 		MaxTokens:     chat.MaxTokens,
 		Temperature:   chat.Temperature,
 		TopP:          chat.TopP,
 		StopSequences: chat.StopSequences,
 		Stream:        chat.Stream,
 	}
-	if ar.MaxTokens == nil {
-		defaultMax := 4096
-		ar.MaxTokens = &defaultMax
-	}
+	// max_tokens is required by Anthropic, but that is the provider's rule to
+	// enforce against the caller. Inventing 4096 silently capped a response the
+	// caller never capped, and hid the misconfiguration behind a plausible
+	// answer.
 
 	// System: the first system message's blocks project onto the system
 	// array (text blocks; positional cache breakpoints become members on the
@@ -854,11 +885,9 @@ func marshalUnknownBlock(u *engine.UnknownBlock) (contentBlock, error) {
 	if err != nil {
 		return contentBlock{}, err
 	}
-	var cb contentBlock
-	if err := json.Unmarshal(b, &cb); err != nil {
-		return contentBlock{}, err
-	}
-	return cb, nil
+	// Keep the bytes. Decoding them back into contentBlock is what lost every
+	// member the struct has no field for — `source` above all.
+	return contentBlock{Type: u.Kind, raw: b}, nil
 }
 
 // decodeMarker decodes a marker object for the wire map shape. Accepts the
