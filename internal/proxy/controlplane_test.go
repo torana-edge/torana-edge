@@ -53,6 +53,41 @@ func TestControlPlaneConfigAPI(t *testing.T) {
 	client := &http.Client{Timeout: 5 * time.Second}
 	url := "http://" + ln.Addr().String()
 
+	// The running process, not a second terminal's environment, is the
+	// authority for the local plugin-file path.
+	wantPluginFile, err := srv.pluginFiles.OperatorPath("usage_logger", "usage.jsonl")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pathResp, err := client.Get(url + "/_torana/api/v1/plugin-files/path?plugin=usage_logger&logical=usage.jsonl")
+	if err != nil {
+		t.Fatalf("GET plugin file path: %v", err)
+	}
+	var pathResult struct {
+		Path string `json:"path"`
+	}
+	if pathResp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(pathResp.Body)
+		pathResp.Body.Close()
+		t.Fatalf("GET plugin file path status = %d: %s", pathResp.StatusCode, body)
+	}
+	if err := json.NewDecoder(pathResp.Body).Decode(&pathResult); err != nil {
+		pathResp.Body.Close()
+		t.Fatalf("decode plugin file path: %v", err)
+	}
+	pathResp.Body.Close()
+	if pathResult.Path != wantPluginFile {
+		t.Fatalf("plugin file path = %q, want running store path %q", pathResult.Path, wantPluginFile)
+	}
+	badPathResp, err := client.Get(url + "/_torana/api/v1/plugin-files/path?plugin=usage_logger&logical=../escape")
+	if err != nil {
+		t.Fatalf("GET unsafe plugin file path: %v", err)
+	}
+	badPathResp.Body.Close()
+	if badPathResp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("unsafe plugin file path status = %d, want 400", badPathResp.StatusCode)
+	}
+
 	// GET /_torana/api/config
 	resp, err := client.Get(url + "/_torana/api/config")
 	if err != nil {
