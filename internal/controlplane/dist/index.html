@@ -479,8 +479,8 @@
       }
       const files = {};
       document.querySelectorAll('#pluginResourceReview .file-binding-enabled:checked').forEach(enabled => {
-        const row = enabled.closest('[data-file]');
-        const path = enabled.dataset.file;
+        const row = enabled.closest('.info-note[data-file]');
+        const path = row.dataset.file;
         files[path] = {
           max_bytes: Number(row.querySelector('.file-binding-bytes').value),
           retained_files: Number(row.querySelector('.file-binding-retained').value)
@@ -488,8 +488,8 @@
       });
       const httpEndpoints = {};
       document.querySelectorAll('#pluginResourceReview .http-binding-enabled:checked').forEach(enabled => {
-        const row = enabled.closest('[data-endpoint]');
-        const endpoint = enabled.dataset.endpoint;
+        const row = enabled.closest('.info-note[data-endpoint]');
+        const endpoint = row.dataset.endpoint;
         httpEndpoints[endpoint] = {
           origin: row.querySelector('.http-binding-origin').value.trim(),
           methods: JSON.parse(row.dataset.methods || '[]'),
@@ -507,8 +507,8 @@
       }
 	  const modelServices = {};
 	  document.querySelectorAll('#pluginResourceReview .model-binding-enabled:checked').forEach(enabled => {
-		const row = enabled.closest('[data-model-service]');
-		modelServices[enabled.dataset.modelService] = {
+		const row = enabled.closest('.info-note[data-model-service]');
+		modelServices[row.dataset.modelService] = {
 		  provider: row.querySelector('.model-binding-provider').value.trim(),
 		  model: row.querySelector('.model-binding-model').value.trim(),
 		  path: row.querySelector('.model-binding-path').value.trim(),
@@ -534,7 +534,7 @@
 	  }
 	  const pricingResources = {};
 	  document.querySelectorAll('#pluginResourceReview .pricing-binding-enabled:checked').forEach(enabled => {
-		const row = enabled.closest('[data-pricing-resource]');
+		const row = enabled.closest('.info-note[data-pricing-resource]');
 		const models = [...row.querySelectorAll('.pricing-model-row')].map(modelRow => {
 		  const binding = {};
 		  const providerInput = modelRow.querySelector('.pricing-binding-provider');
@@ -547,7 +547,7 @@
 		  }
 		  return binding;
 		});
-		pricingResources[enabled.dataset.pricingResource] = { models };
+		pricingResources[row.dataset.pricingResource] = { models };
 	  });
 	  for (const declaration of (p.pricing_resources || [])) {
 		if (declaration.required && !pricingResources[declaration.name]) {
@@ -557,18 +557,18 @@
 	  }
 	  const promptCachePolicies = {};
 	  for (const enabled of document.querySelectorAll('#pluginResourceReview .cache-policy-binding-enabled:checked')) {
-		const row = enabled.closest('[data-cache-policy]');
+		const row = enabled.closest('.info-note[data-cache-policy]');
 		const models = [];
 		for (const modelRow of row.querySelectorAll('.cache-policy-model-row')) {
 		  let tiers;
 		  try {
 			tiers = JSON.parse(modelRow.querySelector('.cache-policy-binding-tiers').value || '[]');
 		  } catch (_) {
-			showAlert(`Prompt cache policy ${enabled.dataset.cachePolicy} has invalid tier JSON.`);
+			showAlert(`Prompt cache policy ${row.dataset.cachePolicy} has invalid tier JSON.`);
 			return false;
 		  }
 		  if (!Array.isArray(tiers)) {
-			showAlert(`Prompt cache policy ${enabled.dataset.cachePolicy} tiers must be a JSON array.`);
+			showAlert(`Prompt cache policy ${row.dataset.cachePolicy} tiers must be a JSON array.`);
 			return false;
 		  }
 		  const binding = {
@@ -582,16 +582,16 @@
 			if (raw !== '') binding[key] = Number(raw);
 		  }
 		  if (!binding.provider || !binding.model || (!tiers.length && binding.cache_read_usd_per_mtok === undefined && binding.cache_write_usd_per_mtok === undefined)) {
-			showAlert(`Prompt cache policy ${enabled.dataset.cachePolicy} needs a provider, model, and at least one price or tier.`);
+			showAlert(`Prompt cache policy ${row.dataset.cachePolicy} needs a provider, model, and at least one price or tier.`);
 			return false;
 		  }
 		  models.push(binding);
 		}
 		if (!models.length) {
-		  showAlert(`Prompt cache policy ${enabled.dataset.cachePolicy} needs at least one model binding.`);
+		  showAlert(`Prompt cache policy ${row.dataset.cachePolicy} needs at least one model binding.`);
 		  return false;
 		}
-		promptCachePolicies[enabled.dataset.cachePolicy] = { models };
+		promptCachePolicies[row.dataset.cachePolicy] = { models };
 	  }
 	  for (const declaration of (p.prompt_cache_policies || [])) {
 		if (declaration.required && !promptCachePolicies[declaration.name]) {
@@ -780,7 +780,7 @@
         const existing = approvedHTTP[declaration.name] || {};
         const enabled = Boolean(approvedHTTP[declaration.name]) || declaration.required;
         return `<div class="info-note" data-endpoint="${escAttr(declaration.name)}" data-methods='${escAttr(JSON.stringify(declaration.methods || []))}'>
-          <label class="checkbox-row"><input type="checkbox" class="http-binding-enabled" data-endpoint="${escAttr(declaration.name)}" ${enabled ? 'checked' : ''}> <code>${escHtml(declaration.name)}</code>${declaration.required ? ' (required)' : ''}</label>
+          <label class="checkbox-row"><input type="checkbox" class="http-binding-enabled" ${enabled ? 'checked' : ''}> <code>${escHtml(declaration.name)}</code>${declaration.required ? ' (required)' : ''}</label>
           <div class="hint">${escHtml(declaration.description || '')}; methods: ${escHtml((declaration.methods || []).join(', '))}</div>
           <div class="form-grid">
             <label class="field"><span>Approved origin</span><input class="input http-binding-origin" value="${escAttr(existing.origin || declaration.origin || '')}" placeholder="https://api.example.com"></label>
@@ -798,7 +798,7 @@
         const maxBytes = existing.max_bytes || file.max_bytes || 16777216;
         const retained = existing.retained_files ?? file.retained_files ?? 5;
         return `<div class="info-note" data-file="${escAttr(file.path)}">
-          <label class="checkbox-row"><input type="checkbox" class="file-binding-enabled" data-file="${escAttr(file.path)}" ${enabled ? 'checked' : ''} ${file.required ? 'disabled' : ''}> <code>${escHtml(file.path)}</code>${file.required ? ' (required)' : ''}</label>
+          <label class="checkbox-row"><input type="checkbox" class="file-binding-enabled" ${enabled ? 'checked' : ''} ${file.required ? 'disabled' : ''}> <code>${escHtml(file.path)}</code>${file.required ? ' (required)' : ''}</label>
           <div class="hint">The file binding names the object; <code>env.file_*</code> capabilities authorize operations on it. Operations: ${escHtml((file.operations || []).join(', '))}. The approved budget may only reduce the manifest request.</div>
           <div class="form-grid">
             <label class="field"><span>Bytes per generation</span><input class="input file-binding-bytes" type="number" min="1" max="67108864" value="${escAttr(maxBytes)}"></label>
@@ -811,7 +811,7 @@
 		const existing = approvedModels[declaration.name] || {};
 		const enabled = Boolean(approvedModels[declaration.name]) || declaration.required;
 		return `<div class="info-note" data-model-service="${escAttr(declaration.name)}">
-		  <label class="checkbox-row"><input type="checkbox" class="model-binding-enabled" data-model-service="${escAttr(declaration.name)}" ${enabled ? 'checked' : ''} ${declaration.required ? 'disabled' : ''}> <code>${escHtml(declaration.name)}</code>${declaration.required ? ' (required)' : ''}</label>
+		  <label class="checkbox-row"><input type="checkbox" class="model-binding-enabled" ${enabled ? 'checked' : ''} ${declaration.required ? 'disabled' : ''}> <code>${escHtml(declaration.name)}</code>${declaration.required ? ' (required)' : ''}</label>
 		  <div class="hint">${escHtml(declaration.description || '')}. The plugin sees only this logical name; Torana owns the provider, model, credential, path, and budgets.</div>
 		  <div class="form-grid">
 			<label class="field"><span>Provider</span><input class="input model-binding-provider" value="${escAttr(existing.provider || '')}" placeholder="configured provider name"></label>
@@ -831,7 +831,7 @@
 		const enabled = Boolean(approvedPricing[declaration.name]) || declaration.required;
 		const models = existing.models && existing.models.length ? existing.models : [{}];
 		return `<div class="info-note" data-pricing-resource="${escAttr(declaration.name)}">
-		  <label class="checkbox-row"><input type="checkbox" class="pricing-binding-enabled" data-pricing-resource="${escAttr(declaration.name)}" ${enabled ? 'checked' : ''} ${declaration.required ? 'disabled' : ''}> <code>${escHtml(declaration.name)}</code>${declaration.required ? ' (required)' : ''}</label>
+		  <label class="checkbox-row"><input type="checkbox" class="pricing-binding-enabled" ${enabled ? 'checked' : ''} ${declaration.required ? 'disabled' : ''}> <code>${escHtml(declaration.name)}</code>${declaration.required ? ' (required)' : ''}</label>
 		  <div class="hint">${escHtml(declaration.description || '')}${declaration.for_model_service ? `; bound to model service <code>${escHtml(declaration.for_model_service)}</code>` : '; bound to the routed request model'}. Rates are USD per million tokens; blank means that component is not priced.</div>
 		  <div class="pricing-models">${models.map(model => pricingModelFields(model, !declaration.for_model_service)).join('')}</div>
 		  ${declaration.for_model_service ? '' : '<button type="button" class="btn btn-sm" onclick="addPricingModelRow(this)">+ Add model price</button>'}
@@ -843,7 +843,7 @@
 		const enabled = Boolean(approvedCachePolicies[declaration.name]) || declaration.required;
 		const models = existing.models && existing.models.length ? existing.models : [{}];
 		return `<div class="info-note" data-cache-policy="${escAttr(declaration.name)}">
-		  <label class="checkbox-row"><input type="checkbox" class="cache-policy-binding-enabled" data-cache-policy="${escAttr(declaration.name)}" ${enabled ? 'checked' : ''} ${declaration.required ? 'disabled' : ''}> <code>${escHtml(declaration.name)}</code>${declaration.required ? ' (required)' : ''}</label>
+		  <label class="checkbox-row"><input type="checkbox" class="cache-policy-binding-enabled" ${enabled ? 'checked' : ''} ${declaration.required ? 'disabled' : ''}> <code>${escHtml(declaration.name)}</code>${declaration.required ? ' (required)' : ''}</label>
 		  <div class="hint">${escHtml(declaration.description || '')}. This policy belongs to this plugin; it is not a global Torana setting.</div>
 		  <div class="cache-policy-models">${models.map(model => cachePolicyModelFields(model)).join('')}</div>
 		  <button type="button" class="btn btn-sm" onclick="addCachePolicyModelRow(this)">+ Add model policy</button>

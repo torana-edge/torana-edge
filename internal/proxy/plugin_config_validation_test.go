@@ -181,23 +181,44 @@ func TestDashboardExplainsAndEnforcesResourceApproval(t *testing.T) {
 	source := string(spa)
 	for _, required := range []string{
 		".file-binding-enabled:checked",
+		"enabled.closest('.info-note[data-file]')",
+		"const path = row.dataset.file",
 		"max_bytes: Number(row.querySelector('.file-binding-bytes').value)",
 		"retained_files: Number(row.querySelector('.file-binding-retained').value)",
 		"files: files",
 		"const enabled = Boolean(approvedFiles[file.path]) || file.required",
 		"Resource bindings and limits",
 		"file.required ? 'disabled' : ''",
+		"enabled.closest('.info-note[data-endpoint]')",
+		"const endpoint = row.dataset.endpoint",
 		".model-binding-enabled:checked",
+		"enabled.closest('.info-note[data-model-service]')",
+		"modelServices[row.dataset.modelService]",
 		"model_services: modelServices",
 		".pricing-binding-enabled:checked",
+		"enabled.closest('.info-note[data-pricing-resource]')",
+		"pricingResources[row.dataset.pricingResource]",
 		"pricing_resources: pricingResources",
 		".cache-policy-binding-enabled:checked",
+		"enabled.closest('.info-note[data-cache-policy]')",
+		"promptCachePolicies[row.dataset.cachePolicy]",
 		"prompt_cache_policies: promptCachePolicies",
 		"This policy belongs to this plugin; it is not a global Torana setting.",
 		"The plugin sees only this logical name; Torana owns the provider, model, credential, path, and budgets.",
 	} {
 		if !strings.Contains(source, required) {
 			t.Fatalf("dashboard private-file approval seam is missing %q", required)
+		}
+	}
+	for _, forbidden := range []string{
+		"enabled.dataset.file",
+		"enabled.dataset.endpoint",
+		"enabled.dataset.modelService",
+		"enabled.dataset.pricingResource",
+		"enabled.dataset.cachePolicy",
+	} {
+		if strings.Contains(source, forbidden) {
+			t.Fatalf("resource checkbox still owns binding identity %q; closest() will select the checkbox instead of its row", forbidden)
 		}
 	}
 	if strings.Contains(source, `pluginPermissionList.querySelectorAll('input`) {
