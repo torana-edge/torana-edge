@@ -669,6 +669,8 @@ func mutateField(t *testing.T, m proto.Message, fd protoreflect.FieldDescriptor)
 		r.Set(fd, protoreflect.ValueOfInt32(int32(r.Get(fd).Int())+1))
 	case fd.Kind() == protoreflect.DoubleKind:
 		r.Set(fd, protoreflect.ValueOfFloat64(r.Get(fd).Float()+1))
+	case fd.Kind() == protoreflect.EnumKind:
+		r.Set(fd, protoreflect.ValueOfEnum(r.Get(fd).Enum()+1))
 	case fd.Kind() == protoreflect.MessageKind:
 		// Oneof block members (RequestBlock.text etc.) and nested message
 		// fields: replace with a fresh empty message of the same kind — a

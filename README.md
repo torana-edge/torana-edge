@@ -23,6 +23,7 @@ CLI (`agy`)** — Torana also offers an optional TLS-terminating MITM ingress. S
 - **Tool-aware compaction:** Explicit policies keep source and failure evidence exact while allowing recoverable searches/listings to be reduced deterministically—even on first exposure when configured.
 - **Economic model delegation:** Historical results can be summarized through an operator-bound model service only when route-aware cache and summarizer economics estimate positive net savings.
 - **Responses-native compaction:** OpenAI Responses requests can opt into provider-side compaction without Torana storing a second conversation.
+- **Harness-native custom tools:** OpenAI Responses free-form tool definitions, calls, streamed input, and structured results are represented explicitly in the IR. Plugins can inspect or safely rewrite them without pretending textual input is JSON function arguments; formats without an equivalent fail explicitly.
 - **Provider Failover:** Automatic retry with fallback providers on 429/5xx errors.
 - **Unified IR:** Format adapters translate OpenAI, Anthropic, Bedrock, and Gemini wire formats into a single canonical IR. Plugins work on the IR and never touch raw JSON.
 - **MITM ingress (optional):** For harnesses that ignore base-URL overrides (e.g. the Antigravity CLI), an opt-in TLS-terminating proxy routes their traffic through the pipeline. Disabled unless configured.

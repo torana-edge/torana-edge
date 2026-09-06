@@ -582,6 +582,9 @@ func (a *Adapter) Marshal(chat *engine.ChatRequest) ([]byte, error) {
 	if err := pbconv.ValidateFullRequest(chat); err != nil {
 		return nil, fmt.Errorf("anthropic: %w", err)
 	}
+	if err := format.RejectFreeformTools(chat, "anthropic"); err != nil {
+		return nil, err
+	}
 	model := chat.Model
 	if model == "" {
 		model = "claude-sonnet-4-20250514"

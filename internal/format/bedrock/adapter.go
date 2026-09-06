@@ -515,6 +515,9 @@ func (a *Adapter) Marshal(chat *engine.ChatRequest) ([]byte, error) {
 	if err := pbconv.ValidateFullRequest(chat); err != nil {
 		return nil, fmt.Errorf("bedrock: %w", err)
 	}
+	if err := format.RejectFreeformTools(chat, "bedrock"); err != nil {
+		return nil, err
+	}
 	modelID := "anthropic.claude-sonnet-4-20250514-v1:0"
 	if chat.Model != "" {
 		modelID = chat.Model

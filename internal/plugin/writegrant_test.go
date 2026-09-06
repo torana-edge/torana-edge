@@ -1125,8 +1125,8 @@ func TestRequestSignatureBindingsArePinned(t *testing.T) {
 	wantCovered := map[string][]string{
 		"torana.v1.RequestThinkingBlock":          {"text", "part_metadata_json"},
 		"torana.v1.RequestTextBlock":              {"text", "part_metadata_json"},
-		"torana.v1.RequestToolUseBlock":           {"id", "name", "arguments_json", "part_metadata_json"},
-		"torana.v1.RequestToolResultBlock":        {"tool_call_id", "tool_name", "part_metadata_json", "will_continue", "scheduling", "content"},
+		"torana.v1.RequestToolUseBlock":           {"id", "name", "arguments_json", "input_text", "invocation_kind", "part_metadata_json"},
+		"torana.v1.RequestToolResultBlock":        {"tool_call_id", "tool_name", "part_metadata_json", "will_continue", "scheduling", "content", "invocation_kind"},
 		"torana.v1.RequestUnknownBlock":           {"kind", "payload_json", "part_metadata_json"},
 		"torana.v1.RequestTrailingSignatureBlock": {"part_metadata_json", "torana.v1.RequestTextBlock.text", "torana.v1.RequestThinkingBlock.text"},
 	}

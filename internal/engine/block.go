@@ -72,6 +72,10 @@ type ToolUseBlock struct {
 	// Arguments is the REQUIRED authoritative JSON object (zero = canonical
 	// `{}`), raw validated lexemes.
 	Arguments RequiredJSONObject
+	// InputText is present for a free-form invocation. Explicit empty is a
+	// real input; ordinary function calls leave it nil and use Arguments.
+	InputText      *string
+	InvocationKind ToolInvocationKind
 	// Signature is the call-bound provenance token (e.g. Gemini
 	// thoughtSignature). Host-side provenance rules govern it.
 	Signature string
@@ -104,8 +108,16 @@ type ToolResultBlock struct {
 	// Signature is the opaque provider token bound to this result (gemini
 	// thoughtSignature on a functionResponse part). Provenance-governed
 	// exactly like the other request tokens.
-	Signature string
+	Signature      string
+	InvocationKind ToolInvocationKind
 }
+
+type ToolInvocationKind int
+
+const (
+	ToolInvocationFunction ToolInvocationKind = iota
+	ToolInvocationFreeform
+)
 
 // ToolResultContentBlock is one ordered element of a tool result's nested
 // content. Exactly one field is non-zero per element.

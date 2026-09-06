@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/torana-edge/torana-edge/internal/engine"
+	"github.com/torana-edge/torana-edge/internal/format"
 	"github.com/torana-edge/torana-edge/internal/format/streamio"
 )
 
@@ -87,6 +88,11 @@ type chatToolCallState struct {
 	pending []string
 }
 
+type responsesToolCallState struct {
+	index int
+	kind  engine.ToolInvocationKind
+}
+
 // ---------------------------------------------------------------------------
 // ParseStream
 // ---------------------------------------------------------------------------
@@ -124,11 +130,11 @@ func (s *StreamAdapter) parseStream(body io.Reader, ch chan<- engine.StreamEvent
 		}}
 	}
 
-	// Responses API argument events identify their function call by item_id,
-	// while the call_id and name are supplied by output_item.added. Keep that
-	// lifecycle state so interleaved calls remain associated with the right
-	// canonical tool-call index.
-	itemIDToIndex := make(map[string]int)
+	// Responses API payload events identify their function/custom call by
+	// item_id, while call_id, name, and invocation family are supplied by
+	// output_item.added. Keep that lifecycle state so interleaved calls remain
+	// associated with the right canonical tool-call index.
+	itemIDToIndex := make(map[string]responsesToolCallState)
 	nextIndex := 0
 
 	for scanner.Scan() {
@@ -185,7 +191,10 @@ func (s *StreamAdapter) parseStream(body io.Reader, ch chan<- engine.StreamEvent
 		}
 
 		if chunk.Type != "" {
-			s.parseResponsesEvent(chunk, ch, itemIDToIndex, &nextIndex)
+			if err := s.parseResponsesEvent(chunk, ch, itemIDToIndex, &nextIndex); err != nil {
+				ch <- engine.StreamEvent{Error: &engine.StreamError{Code: -1, Message: err.Error()}}
+				return
+			}
 			continue
 		}
 		if len(chunk.Choices) > 1 {
@@ -310,7 +319,7 @@ func (s *StreamAdapter) parseStream(body io.Reader, ch chan<- engine.StreamEvent
 	}
 }
 
-func (s *StreamAdapter) parseResponsesEvent(chunk sseChunk, ch chan<- engine.StreamEvent, itemIDToIndex map[string]int, nextIndex *int) {
+func (s *StreamAdapter) parseResponsesEvent(chunk sseChunk, ch chan<- engine.StreamEvent, itemIDToIndex map[string]responsesToolCallState, nextIndex *int) error {
 	switch chunk.Type {
 	case "response.output_text.delta":
 		if chunk.Delta != nil && *chunk.Delta != "" {
@@ -320,26 +329,34 @@ func (s *StreamAdapter) parseResponsesEvent(chunk sseChunk, ch chan<- engine.Str
 		}
 
 	case "response.output_item.added":
-		if chunk.Item != nil && chunk.Item.Type == "function_call" {
+		if chunk.Item != nil && (chunk.Item.Type == "function_call" || chunk.Item.Type == "custom_tool_call") {
 			idx := *nextIndex
-			itemIDToIndex[chunk.Item.ID] = idx
+			kind := engine.ToolInvocationFunction
+			if chunk.Item.Type == "custom_tool_call" {
+				kind = engine.ToolInvocationFreeform
+			}
+			itemIDToIndex[chunk.Item.ID] = responsesToolCallState{index: idx, kind: kind}
 			*nextIndex = idx + 1
 
 			ch <- engine.StreamEvent{
 				ToolCallStart: &engine.ToolCallStart{
-					Index: idx,
-					ID:    chunk.Item.CallID,
-					Name:  chunk.Item.Name,
+					Index:          idx,
+					ID:             chunk.Item.CallID,
+					Name:           chunk.Item.Name,
+					InvocationKind: kind,
 				},
 			}
 		}
 
 	case "response.function_call_arguments.delta":
 		if chunk.Delta != nil && *chunk.Delta != "" && chunk.ItemID != "" {
-			if idx, ok := itemIDToIndex[chunk.ItemID]; ok {
+			if state, ok := itemIDToIndex[chunk.ItemID]; ok {
+				if state.kind != engine.ToolInvocationFunction {
+					return fmt.Errorf("openai: function arguments delta targets a free-form tool call")
+				}
 				ch <- engine.StreamEvent{
 					ToolCallDelta: &engine.ToolCallDelta{
-						Index:          idx,
+						Index:          state.index,
 						ArgumentsDelta: *chunk.Delta,
 					},
 				}
@@ -348,12 +365,36 @@ func (s *StreamAdapter) parseResponsesEvent(chunk sseChunk, ch chan<- engine.Str
 
 	case "response.function_call_arguments.done":
 		if chunk.ItemID != "" {
-			if idx, ok := itemIDToIndex[chunk.ItemID]; ok {
+			if state, ok := itemIDToIndex[chunk.ItemID]; ok {
+				if state.kind != engine.ToolInvocationFunction {
+					return fmt.Errorf("openai: function arguments completion targets a free-form tool call")
+				}
 				ch <- engine.StreamEvent{
 					ToolCallEnd: &engine.ToolCallEnd{
-						Index: idx,
+						Index: state.index,
 					},
 				}
+			}
+		}
+
+	case "response.custom_tool_call_input.delta":
+		if chunk.Delta != nil && chunk.ItemID != "" {
+			if state, ok := itemIDToIndex[chunk.ItemID]; ok {
+				if state.kind != engine.ToolInvocationFreeform {
+					return fmt.Errorf("openai: free-form input delta targets a function tool call")
+				}
+				input := *chunk.Delta
+				ch <- engine.StreamEvent{ToolCallDelta: &engine.ToolCallDelta{Index: state.index, InputTextDelta: &input}}
+			}
+		}
+
+	case "response.custom_tool_call_input.done":
+		if chunk.ItemID != "" {
+			if state, ok := itemIDToIndex[chunk.ItemID]; ok {
+				if state.kind != engine.ToolInvocationFreeform {
+					return fmt.Errorf("openai: free-form input completion targets a function tool call")
+				}
+				ch <- engine.StreamEvent{ToolCallEnd: &engine.ToolCallEnd{Index: state.index}}
 			}
 		}
 
@@ -378,6 +419,7 @@ func (s *StreamAdapter) parseResponsesEvent(chunk sseChunk, ch chan<- engine.Str
 			}
 		}
 	}
+	return nil
 }
 
 // ---------------------------------------------------------------------------
@@ -484,8 +526,12 @@ func (s *StreamAdapter) serializeChatStream(ctx context.Context, w io.Writer, ev
 }
 
 func (s *StreamAdapter) serializeResponsesStream(ctx context.Context, w io.Writer, events <-chan engine.StreamEvent) error {
-	toolCallStarted := make(map[int]string)        // index -> ID
-	toolCallArgs := make(map[int]*strings.Builder) // index -> accumulated arguments
+	type responseToolState struct {
+		id, name string
+		kind     engine.ToolInvocationKind
+		payload  strings.Builder
+	}
+	toolCalls := make(map[int]*responseToolState)
 	blocks := &blockTopology{prefix: "openai"}
 
 	for {
@@ -554,14 +600,17 @@ func (s *StreamAdapter) serializeResponsesStream(ctx context.Context, w io.Write
 
 		case evt.ToolCallStart != nil:
 			tc := evt.ToolCallStart
-			toolCallStarted[tc.Index] = tc.ID
-			toolCallArgs[tc.Index] = &strings.Builder{}
+			toolType := "function_call"
+			if tc.InvocationKind == engine.ToolInvocationFreeform {
+				toolType = "custom_tool_call"
+			}
+			toolCalls[tc.Index] = &responseToolState{id: tc.ID, name: tc.Name, kind: tc.InvocationKind}
 
 			payload := map[string]any{
 				"type": "response.output_item.added",
 				"item": map[string]any{
 					"id":      "item_" + tc.ID,
-					"type":    "function_call",
+					"type":    toolType,
 					"name":    tc.Name,
 					"call_id": tc.ID,
 				},
@@ -573,51 +622,67 @@ func (s *StreamAdapter) serializeResponsesStream(ctx context.Context, w io.Write
 
 		case evt.ToolCallDelta != nil:
 			tcd := evt.ToolCallDelta
-			id, ok := toolCallStarted[tcd.Index]
+			state, ok := toolCalls[tcd.Index]
 			if !ok {
 				continue
 			}
-			if builder, ok := toolCallArgs[tcd.Index]; ok {
-				builder.WriteString(tcd.ArgumentsDelta)
+			fragment := tcd.ArgumentsDelta
+			eventType := "response.function_call_arguments.delta"
+			if state.kind == engine.ToolInvocationFreeform {
+				if tcd.InputTextDelta == nil || tcd.ArgumentsDelta != "" {
+					return fmt.Errorf("openai: free-form tool delta at index %d carries the wrong payload family", tcd.Index)
+				}
+				fragment = *tcd.InputTextDelta
+				eventType = "response.custom_tool_call_input.delta"
+			} else if tcd.InputTextDelta != nil {
+				return fmt.Errorf("openai: function tool delta at index %d carries free-form input", tcd.Index)
 			}
+			state.payload.WriteString(fragment)
 
 			payload := map[string]any{
-				"type":    "response.function_call_arguments.delta",
-				"item_id": "item_" + id,
-				"delta":   tcd.ArgumentsDelta,
+				"type":    eventType,
+				"item_id": "item_" + state.id,
+				"delta":   fragment,
 			}
 			b, _ := json.Marshal(payload)
-			if _, err := fmt.Fprintf(w, "event: response.function_call_arguments.delta\ndata: %s\n\n", string(b)); err != nil {
+			if _, err := fmt.Fprintf(w, "event: %s\ndata: %s\n\n", eventType, string(b)); err != nil {
 				return err
 			}
 
 		case evt.ToolCallEnd != nil:
 			tce := evt.ToolCallEnd
-			id, ok := toolCallStarted[tce.Index]
+			state, ok := toolCalls[tce.Index]
 			if !ok {
 				continue
 			}
-			args := ""
-			if builder, ok := toolCallArgs[tce.Index]; ok {
-				args = builder.String()
+			assembled := state.payload.String()
+			doneType := "response.function_call_arguments.done"
+			itemType := "function_call"
+			doneField := "arguments"
+			if state.kind == engine.ToolInvocationFreeform {
+				doneType = "response.custom_tool_call_input.done"
+				itemType = "custom_tool_call"
+				doneField = "input"
 			}
 
 			payloadDone := map[string]any{
-				"type":    "response.function_call_arguments.done",
-				"item_id": "item_" + id,
+				"type":    doneType,
+				"item_id": "item_" + state.id,
+				doneField: assembled,
 			}
 			bDone, _ := json.Marshal(payloadDone)
-			if _, err := fmt.Fprintf(w, "event: response.function_call_arguments.done\ndata: %s\n\n", string(bDone)); err != nil {
+			if _, err := fmt.Fprintf(w, "event: %s\ndata: %s\n\n", doneType, string(bDone)); err != nil {
 				return err
 			}
 
 			payloadItem := map[string]any{
 				"type": "response.output_item.done",
 				"item": map[string]any{
-					"id":        "item_" + id,
-					"type":      "function_call",
-					"call_id":   id,
-					"arguments": args,
+					"id":      "item_" + state.id,
+					"type":    itemType,
+					"call_id": state.id,
+					"name":    state.name,
+					doneField: assembled,
 				},
 			}
 			bItem, _ := json.Marshal(payloadItem)
@@ -667,6 +732,9 @@ func (s *StreamAdapter) serializeResponsesStream(ctx context.Context, w io.Write
 }
 
 func serializeEvent(evt engine.StreamEvent, blocks *blockTopology) (string, error) {
+	if err := format.RejectFreeformStreamEvent(evt, "openai chat"); err != nil {
+		return "", err
+	}
 	switch {
 	case evt.BlockStart != nil:
 		// Provider blocks have no representation on the chat wire: they

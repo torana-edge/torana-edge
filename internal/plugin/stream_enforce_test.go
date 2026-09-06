@@ -1110,6 +1110,36 @@ func TestStreamEnforcementStaleSignedBlockTerminates(t *testing.T) {
 	pp.EndRequest(reqID)
 }
 
+func TestStreamHandlerRewritesSignedFreeformToolThroughRealWASM(t *testing.T) {
+	requireWASM(t, fixturesDir+"/test-custom-tool-rewriter/plugin.wasm")
+	pp := newTestPipeline(t, fixturesDir, []string{"test-custom-tool-rewriter"})
+	const reqID = 7011
+	original := "echo original"
+	sequence := []engine.StreamEvent{
+		{ToolCallStart: &engine.ToolCallStart{Index: 0, ID: "call_custom", Name: "shell", Signature: streamSigA, InvocationKind: engine.ToolInvocationFreeform}},
+		{ToolCallDelta: &engine.ToolCallDelta{Index: 0, InputTextDelta: &original}},
+		{ToolCallEnd: &engine.ToolCallEnd{Index: 0}},
+	}
+	var emitted []engine.StreamEvent
+	for _, event := range sequence {
+		emitted = append(emitted, runVerified(t, pp, reqID, event)...)
+	}
+	if len(emitted) != 3 || emitted[0].ToolCallStart == nil || emitted[1].ToolCallDelta == nil || emitted[2].ToolCallEnd == nil {
+		t.Fatalf("emitted topology %+v", emitted)
+	}
+	start, delta := emitted[0].ToolCallStart, emitted[1].ToolCallDelta
+	if start.InvocationKind != engine.ToolInvocationFreeform || start.Signature != "" {
+		t.Fatalf("rewritten start %+v", start)
+	}
+	if delta.InputTextDelta == nil || *delta.InputTextDelta != "rewritten free-form input" || delta.ArgumentsDelta != "" {
+		t.Fatalf("rewritten delta %+v", delta)
+	}
+	if err := pp.EndStreamVerified(reqID); err != nil {
+		t.Fatalf("valid rewritten stream rejected: %v", err)
+	}
+	pp.EndRequest(reqID)
+}
+
 // TestStreamEnforcementValidSignedStreamPasses: the enforcement must not fire
 // on a valid signed stream — signed text block, signed tool block, message
 // stop — through the exact production path, including the end-of-stream

@@ -172,7 +172,7 @@ type openNonTool struct {
 
 func validateAcceptedStream(events []*pbv1.StreamEvent) error {
 	var nonTool *openNonTool
-	var openTools = make(map[int32]bool)
+	var openTools = make(map[int32]pbv1.ToolInvocationKind)
 	var seen = make(map[int32]bool) // every started index, tool or not
 	var sawError bool
 	var messageStopped bool
@@ -241,11 +241,11 @@ func validateAcceptedStream(events []*pbv1.StreamEvent) error {
 				if nonTool != nil {
 					return &acceptedStreamError{msg: fmt.Sprintf("tool call block start at position %d while a non-tool block is open", i)}
 				}
-				openTools[idx] = true
+				openTools[idx] = e.ContentBlockStart.GetToolCall().GetInvocationKind()
 			}
 		case *pbv1.StreamEvent_ContentBlockStop:
 			idx := e.ContentBlockStop.Index
-			if openTools[idx] {
+			if _, ok := openTools[idx]; ok {
 				delete(openTools, idx)
 				continue
 			}
@@ -284,8 +284,12 @@ func validateAcceptedStream(events []*pbv1.StreamEvent) error {
 				return &acceptedStreamError{msg: "signature_delta has no covered content (does not bind tool-call blocks)"}
 			}
 		case *pbv1.StreamEvent_ToolCallDelta:
-			if !openTools[e.ToolCallDelta.Index] {
+			kind, ok := openTools[e.ToolCallDelta.Index]
+			if !ok {
 				return &acceptedStreamError{msg: fmt.Sprintf("tool call delta at position %d names no open tool block (%d)", i, e.ToolCallDelta.Index)}
+			}
+			if err := validateStreamToolDeltaFamily(kind, e.ToolCallDelta); err != nil {
+				return &acceptedStreamError{msg: fmt.Sprintf("tool call delta at position %d: %v", i, err)}
 			}
 		}
 	}
@@ -348,7 +352,10 @@ type toolCallScope struct {
 	signature string
 	id        string
 	name      string
+	kind      pbv1.ToolInvocationKind
 	arguments string
+	input     string
+	inputSeen bool
 }
 
 // toolCallScopeOf computes the scope for the tool-call block at index by
@@ -375,9 +382,14 @@ func toolCallScopeOf(events []*pbv1.StreamEvent, index int32) toolCallScope {
 			s.signature = tc.ToolCall.Signature
 			s.id = tc.ToolCall.Id
 			s.name = tc.ToolCall.Name
+			s.kind = tc.ToolCall.InvocationKind
 		case *pbv1.StreamEvent_ToolCallDelta:
 			if e.ToolCallDelta.Index == index {
 				s.arguments += e.ToolCallDelta.ArgumentsDelta
+				if e.ToolCallDelta.InputTextDelta != nil {
+					s.inputSeen = true
+					s.input += *e.ToolCallDelta.InputTextDelta
+				}
 			}
 		}
 	}
@@ -388,7 +400,8 @@ func toolCallScopeOf(events []*pbv1.StreamEvent, index int32) toolCallScope {
 // binding covers differs: id, name and the assembled arguments. Not the
 // signature itself.
 func toolCallContentChanged(a, b toolCallScope) bool {
-	return a.id != b.id || a.name != b.name || a.arguments != b.arguments
+	return a.id != b.id || a.name != b.name || a.kind != b.kind ||
+		a.arguments != b.arguments || a.inputSeen != b.inputSeen || a.input != b.input
 }
 
 // toolScopeBuilder accumulates one OPEN tool block's scope during the single
@@ -399,7 +412,10 @@ type toolScopeBuilder struct {
 	signature string
 	id        string
 	name      string
+	kind      pbv1.ToolInvocationKind
 	args      strings.Builder
+	input     strings.Builder
+	inputSeen bool
 }
 
 func (b *toolScopeBuilder) scope() toolCallScope {
@@ -409,7 +425,10 @@ func (b *toolScopeBuilder) scope() toolCallScope {
 		signature: b.signature,
 		id:        b.id,
 		name:      b.name,
+		kind:      b.kind,
 		arguments: b.args.String(),
+		input:     b.input.String(),
+		inputSeen: b.inputSeen,
 	}
 }
 
@@ -600,7 +619,7 @@ func scanStreamSignatures(events []*pbv1.StreamEvent) streamSignatureView {
 				if _, ok := openTools[cbs.Index]; !ok {
 					b := &toolScopeBuilder{index: cbs.Index}
 					tc := cbs.Block.(*pbv1.ContentBlockStart_ToolCall).ToolCall
-					b.signature, b.id, b.name = tc.Signature, tc.Id, tc.Name
+					b.signature, b.id, b.name, b.kind = tc.Signature, tc.Id, tc.Name, tc.InvocationKind
 					openTools[cbs.Index] = b
 				}
 			case *pbv1.ContentBlockStart_Provider:
@@ -630,6 +649,10 @@ func scanStreamSignatures(events []*pbv1.StreamEvent) streamSignatureView {
 		case *pbv1.StreamEvent_ToolCallDelta:
 			if b, ok := openTools[e.ToolCallDelta.Index]; ok {
 				b.args.WriteString(e.ToolCallDelta.ArgumentsDelta)
+				if e.ToolCallDelta.InputTextDelta != nil {
+					b.inputSeen = true
+					b.input.WriteString(*e.ToolCallDelta.InputTextDelta)
+				}
 			}
 		case *pbv1.StreamEvent_TextDelta:
 			if (blockOpen && !blockText) || len(openTools) > 0 {
@@ -827,9 +850,7 @@ func verifyToolScopes(accepted, returned []toolCallScope, canWrite func(string) 
 		for i := range accepted {
 			if !consumed[i] &&
 				accepted[i].signature == returned[j].signature &&
-				accepted[i].id == returned[j].id &&
-				accepted[i].name == returned[j].name &&
-				accepted[i].arguments == returned[j].arguments {
+				toolCallCoveredContentEqual(accepted[i], returned[j]) {
 				consumed[i] = true
 				retConsumed[j] = true
 				break
@@ -864,9 +885,7 @@ func verifyToolScopes(accepted, returned []toolCallScope, canWrite func(string) 
 		matched := -1
 		for i := range accepted {
 			if !consumed[i] &&
-				accepted[i].id == r.id &&
-				accepted[i].name == r.name &&
-				accepted[i].arguments == r.arguments {
+				toolCallCoveredContentEqual(accepted[i], r) {
 				matched = i
 				break
 			}
@@ -900,6 +919,11 @@ func verifyToolScopes(accepted, returned []toolCallScope, canWrite func(string) 
 		}
 	}
 	return nil
+}
+
+func toolCallCoveredContentEqual(a, b toolCallScope) bool {
+	return a.id == b.id && a.name == b.name && a.kind == b.kind &&
+		a.arguments == b.arguments && a.inputSeen == b.inputSeen && a.input == b.input
 }
 
 // verifySignatureDeltaBindings applies the bound-signature rule to every

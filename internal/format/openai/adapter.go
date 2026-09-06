@@ -4,14 +4,19 @@
 package openai
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"math"
+	"reflect"
+	"slices"
 	"strings"
 
 	"github.com/torana-edge/torana-edge/internal/engine"
 	"github.com/torana-edge/torana-edge/internal/engine/pbconv"
 	"github.com/torana-edge/torana-edge/internal/format"
+	pb "github.com/torana-edge/torana-plugin-sdk/pb/v1"
 )
 
 func init() {
@@ -26,6 +31,36 @@ func init() {
 // Adapter implements format.RequestAdapter for OpenAI Chat Completions
 // and Responses API formats.
 type Adapter struct{}
+
+// VerifyResponsesToolTopologyPB keeps provider namespace membership bound to
+// the accepted Responses request. Plugins may rewrite a definition under
+// ir.tools.write, but namespace membership and the number/order of namespaced
+// leaves are provider topology, not a schema mutation. Top-level tools remain
+// freely addable/removable under the normal tools grant.
+func VerifyResponsesToolTopologyPB(current, replacement *pb.ChatRequest) error {
+	paths := func(req *pb.ChatRequest) [][]string {
+		var out [][]string
+		if req == nil {
+			return out
+		}
+		for _, tool := range req.Tools {
+			if tool != nil && len(tool.NamespacePath) != 0 {
+				out = append(out, append([]string(nil), tool.NamespacePath...))
+			}
+		}
+		return out
+	}
+	before, after := paths(current), paths(replacement)
+	if len(before) != len(after) {
+		return fmt.Errorf("openai responses: namespaced tool topology is host-owned")
+	}
+	for i := range before {
+		if !slices.Equal(before[i], after[i]) {
+			return fmt.Errorf("openai responses: namespaced tool %d moved between provider namespaces", i)
+		}
+	}
+	return nil
+}
 
 // --- wire types for unmarshal ------------------------------------------------
 
@@ -110,6 +145,8 @@ type responseTool struct {
 	Name        string          `json:"name"`
 	Description string          `json:"description,omitempty"`
 	Parameters  json.RawMessage `json:"parameters,omitempty"` // raw JSON Schema lexemes
+	Format      json.RawMessage `json:"format,omitempty"`
+	Strict      bool            `json:"strict,omitempty"`
 }
 
 type responsesInputItem struct {
@@ -119,7 +156,8 @@ type responsesInputItem struct {
 	Name      string          `json:"name,omitempty"`
 	Arguments string          `json:"arguments,omitempty"`
 	CallID    string          `json:"call_id,omitempty"`
-	Output    string          `json:"output,omitempty"`
+	Input     *string         `json:"input,omitempty"`
+	Output    json.RawMessage `json:"output,omitempty"`
 }
 
 // ---------------------------------------------------------------------------
@@ -149,6 +187,9 @@ func (a *Adapter) Marshal(chat *engine.ChatRequest) ([]byte, error) {
 	// can neither forge nor lose it.
 	if chat.OpenAIVariant == engine.OpenAIResponses {
 		return marshalResponses(chat)
+	}
+	if err := format.RejectFreeformTools(chat, "openai chat"); err != nil {
+		return nil, err
 	}
 	return marshalChat(chat)
 }
@@ -216,7 +257,7 @@ func marshalResponses(chat *engine.ChatRequest) ([]byte, error) {
 		return nil, err
 	}
 	if !chat.ResponsesInputLayout.IsAbsent() {
-		items, lerr := responsesItemsWithLayout(projected, chat.ResponsesInputLayout.Bytes())
+		items, lerr := responsesItemsWithLayout(projected, chat.ResponsesInputLayout.Bytes(), chat.Tools)
 		if lerr != nil {
 			return nil, lerr
 		}
@@ -234,12 +275,18 @@ func marshalResponses(chat *engine.ChatRequest) ([]byte, error) {
 	}
 
 	for _, t := range chat.Tools {
-		rr.Tools = append(rr.Tools, responseTool{
-			Type:        "function",
-			Name:        t.Name,
-			Description: t.Description,
-			Parameters:  t.Parameters.Bytes(),
-		})
+		if len(t.NamespacePath) != 0 {
+			continue
+		}
+		wt := responseTool{Name: t.Name, Description: t.Description, Strict: t.Strict}
+		if t.InvocationKind == engine.ToolInvocationFreeform {
+			wt.Type = "custom"
+			wt.Format = t.InputFormat.Bytes()
+		} else {
+			wt.Type = "function"
+			wt.Parameters = t.Parameters.Bytes()
+		}
+		rr.Tools = append(rr.Tools, wt)
 	}
 
 	b, err := json.Marshal(rr)
@@ -288,13 +335,20 @@ func rejectOpenAIProjection(u *engine.UnknownBlock) error {
 // function_call_output) take the projected items in order; opaque slots are
 // re-emitted verbatim. Any count mismatch is a refusal — a layout that no
 // longer matches the body would silently drop or duplicate items.
-func responsesItemsWithLayout(projected []any, layout []byte) ([]any, error) {
+func responsesItemsWithLayout(projected []any, layout []byte, tools []engine.ToolDef) ([]any, error) {
 	var rawItems []json.RawMessage
 	if err := json.Unmarshal(layout, &rawItems); err != nil {
 		return nil, fmt.Errorf("openai responses layout: %w", err)
 	}
 	items := make([]any, 0, len(rawItems))
 	mi := 0
+	namespaced := make([]engine.ToolDef, 0)
+	for _, tool := range tools {
+		if len(tool.NamespacePath) != 0 {
+			namespaced = append(namespaced, tool)
+		}
+	}
+	ni := 0
 	for _, ri := range rawItems {
 		var t struct {
 			Type string `json:"type"`
@@ -303,12 +357,23 @@ func responsesItemsWithLayout(projected []any, layout []byte) ([]any, error) {
 			return nil, fmt.Errorf("openai responses layout item: %w", err)
 		}
 		switch t.Type {
-		case "message", "function_call", "function_call_output":
+		case "message", "function_call", "function_call_output", "custom_tool_call", "custom_tool_call_output":
 			if mi >= len(projected) {
 				return nil, fmt.Errorf("openai responses: layout has more representable items than messages")
 			}
-			items = append(items, projected[mi])
+			merged, err := mergeProjectedResponseItem(ri, projected[mi])
+			if err != nil {
+				return nil, err
+			}
+			items = append(items, merged)
 			mi++
+		case "additional_tools":
+			rebuilt, consumed, err := rebuildAdditionalTools(ri, namespaced[ni:])
+			if err != nil {
+				return nil, err
+			}
+			items = append(items, rebuilt)
+			ni += consumed
 		default:
 			// Opaque item: verbatim (the host-only topology).
 			items = append(items, ri)
@@ -317,7 +382,69 @@ func responsesItemsWithLayout(projected []any, layout []byte) ([]any, error) {
 	if mi < len(projected) {
 		return nil, fmt.Errorf("openai responses: %d projected item(s) have no layout slot", len(projected)-mi)
 	}
+	if ni != len(namespaced) {
+		return nil, fmt.Errorf("openai responses: %d namespaced tool(s) have no additional_tools layout slot", len(namespaced)-ni)
+	}
 	return items, nil
+}
+
+func mergeProjectedResponseItem(original json.RawMessage, projected any) (json.RawMessage, error) {
+	var out map[string]json.RawMessage
+	if err := json.Unmarshal(original, &out); err != nil {
+		return nil, fmt.Errorf("openai responses layout item: %w", err)
+	}
+	canonicalKeys := []string{"type", "role", "content", "name", "arguments", "call_id", "output", "input"}
+	b, err := json.Marshal(projected)
+	if err != nil {
+		return nil, fmt.Errorf("openai responses projected item: %w", err)
+	}
+	var canonical map[string]json.RawMessage
+	if err := json.Unmarshal(b, &canonical); err != nil {
+		return nil, err
+	}
+	// The layout is the lossless authority for provider item details. If the
+	// canonical projection is unchanged, retain the original item rather than
+	// routing it through a map and changing member order or raw lexemes.
+	unchanged := true
+	for _, key := range canonicalKeys {
+		before, beforeOK := out[key]
+		after, afterOK := canonical[key]
+		if beforeOK != afterOK || (beforeOK && !sameJSONValue(before, after)) {
+			unchanged = false
+			break
+		}
+	}
+	if unchanged {
+		return append(json.RawMessage(nil), original...), nil
+	}
+	for _, key := range canonicalKeys {
+		delete(out, key)
+	}
+	for key, value := range canonical {
+		out[key] = value
+	}
+	return json.Marshal(out)
+}
+
+func sameJSONValue(a, b []byte) bool {
+	decode := func(raw []byte) (any, error) {
+		dec := json.NewDecoder(bytes.NewReader(raw))
+		dec.UseNumber()
+		var out any
+		if err := dec.Decode(&out); err != nil {
+			return nil, err
+		}
+		if err := dec.Decode(&struct{}{}); err != io.EOF {
+			return nil, fmt.Errorf("trailing JSON")
+		}
+		return out, nil
+	}
+	left, err := decode(a)
+	if err != nil {
+		return false
+	}
+	right, err := decode(b)
+	return err == nil && reflect.DeepEqual(left, right)
 }
 
 // responsesItemsFromMessages projects messages onto Responses input items in
@@ -333,6 +460,14 @@ func responsesItemsFromMessages(messages []engine.Message) ([]any, error) {
 				if b.ToolResult == nil {
 					return nil, fmt.Errorf("openai responses: tool-role message with a non-tool-result block")
 				}
+				if b.ToolResult.InvocationKind == engine.ToolInvocationFreeform {
+					output, err := customToolOutputFromEngine(b.ToolResult.Content)
+					if err != nil {
+						return nil, err
+					}
+					items = append(items, map[string]any{"type": "custom_tool_call_output", "call_id": b.ToolResult.ToolCallID, "output": output})
+					continue
+				}
 				var text string
 				for _, c := range b.ToolResult.Content {
 					if c.Unknown != nil || c.CacheBreakpoint != nil {
@@ -340,22 +475,23 @@ func responsesItemsFromMessages(messages []engine.Message) ([]any, error) {
 					}
 					text += c.Text
 				}
-				items = append(items, map[string]any{
-					"type":    "function_call_output",
-					"call_id": b.ToolResult.ToolCallID,
-					"output":  text,
-				})
+				items = append(items, map[string]any{"type": "function_call_output", "call_id": b.ToolResult.ToolCallID, "output": text})
 			}
 		case engine.RoleAssistant:
 			for _, b := range m.Blocks {
 				switch {
 				case b.ToolUse != nil:
-					items = append(items, map[string]any{
-						"type":      "function_call",
-						"call_id":   b.ToolUse.ID,
-						"name":      b.ToolUse.Name,
-						"arguments": b.ToolUse.Arguments.String(),
-					})
+					if b.ToolUse.InvocationKind == engine.ToolInvocationFreeform {
+						if b.ToolUse.InputText == nil {
+							return nil, fmt.Errorf("openai responses: free-form tool call has no input")
+						}
+						items = append(items, map[string]any{"type": "custom_tool_call", "call_id": b.ToolUse.ID, "name": b.ToolUse.Name, "input": *b.ToolUse.InputText})
+					} else {
+						items = append(items, map[string]any{
+							"type": "function_call", "call_id": b.ToolUse.ID,
+							"name": b.ToolUse.Name, "arguments": b.ToolUse.Arguments.String(),
+						})
+					}
 				case b.Text != nil:
 					items = append(items, messageItem(string(m.Role), b.Text.Text))
 				case b.Unknown != nil:
@@ -406,6 +542,33 @@ func responsesItemsFromMessages(messages []engine.Message) ([]any, error) {
 		}
 	}
 	return items, nil
+}
+
+func customToolOutputFromEngine(content []engine.ToolResultContentBlock) ([]any, error) {
+	out := make([]any, 0, len(content))
+	for i, c := range content {
+		switch {
+		case c.CacheBreakpoint != nil:
+			return nil, fmt.Errorf("openai responses: custom tool output[%d] cache marker is not representable", i)
+		case c.Unknown != nil:
+			if err := rejectOpenAIProjection(c.Unknown); err != nil {
+				return nil, err
+			}
+			payload, _, err := c.Unknown.Payload.DecodeObject()
+			if err != nil {
+				return nil, fmt.Errorf("custom tool output[%d]: %w", i, err)
+			}
+			item := make(map[string]any, len(payload)+1)
+			item["type"] = c.Unknown.Kind
+			for k, v := range payload {
+				item[k] = json.RawMessage(v)
+			}
+			out = append(out, item)
+		default:
+			out = append(out, map[string]any{"type": "input_text", "text": c.Text})
+		}
+	}
+	return out, nil
 }
 
 // messageItem builds a Responses message input item.
@@ -650,18 +813,80 @@ func responsesItemToMessage(item responsesInputItem) (engine.Message, error) {
 			}}},
 		}, nil
 	case "function_call_output":
+		var output string
+		if err := json.Unmarshal(item.Output, &output); err != nil {
+			return engine.Message{}, fmt.Errorf("function call output: %w", err)
+		}
 		return engine.Message{
 			Role: engine.RoleTool,
 			Blocks: []engine.Block{{ToolResult: &engine.ToolResultBlock{
 				ToolCallID: item.CallID,
-				Content:    []engine.ToolResultContentBlock{{Text: item.Output}},
+				Content:    []engine.ToolResultContentBlock{{Text: output}},
 			}}},
 		}, nil
+	case "custom_tool_call":
+		if item.CallID == "" || item.Name == "" || item.Input == nil {
+			return engine.Message{}, fmt.Errorf("custom tool call requires call_id, name, and input")
+		}
+		input := *item.Input
+		return engine.Message{Role: engine.RoleAssistant, Blocks: []engine.Block{{ToolUse: &engine.ToolUseBlock{
+			ID: item.CallID, Name: item.Name, InputText: &input, InvocationKind: engine.ToolInvocationFreeform,
+		}}}}, nil
+	case "custom_tool_call_output":
+		content, err := customToolOutputToEngine(item.Output)
+		if err != nil {
+			return engine.Message{}, err
+		}
+		return engine.Message{Role: engine.RoleTool, Blocks: []engine.Block{{ToolResult: &engine.ToolResultBlock{
+			ToolCallID: item.CallID, InvocationKind: engine.ToolInvocationFreeform, Content: content,
+		}}}}, nil
 	default:
 		// Unmodelled item kinds are refused: the wire item would be dropped
 		// or mis-rendered, and a plugin cannot see what it cannot represent.
 		return engine.Message{}, fmt.Errorf("responses input item %q is not representable", item.Type)
 	}
+}
+
+func customToolOutputToEngine(raw json.RawMessage) ([]engine.ToolResultContentBlock, error) {
+	var scalar string
+	if err := json.Unmarshal(raw, &scalar); err == nil {
+		return []engine.ToolResultContentBlock{{Text: scalar}}, nil
+	}
+	var items []json.RawMessage
+	if err := json.Unmarshal(raw, &items); err != nil || len(items) == 0 {
+		return nil, fmt.Errorf("custom tool output must be a string or non-empty array")
+	}
+	out := make([]engine.ToolResultContentBlock, 0, len(items))
+	for i, item := range items {
+		var textValue string
+		if err := json.Unmarshal(item, &textValue); err == nil {
+			out = append(out, engine.ToolResultContentBlock{Text: textValue})
+			continue
+		}
+		var probe struct {
+			Type string  `json:"type"`
+			Text *string `json:"text"`
+		}
+		if err := json.Unmarshal(item, &probe); err != nil {
+			return nil, fmt.Errorf("custom tool output[%d]: %w", i, err)
+		}
+		if probe.Type == "input_text" {
+			if probe.Text == nil {
+				return nil, fmt.Errorf("custom tool output[%d]: input_text requires text", i)
+			}
+			out = append(out, engine.ToolResultContentBlock{Text: *probe.Text})
+			continue
+		}
+		if probe.Type == "" {
+			return nil, fmt.Errorf("custom tool output[%d]: type is required", i)
+		}
+		payload, err := stripOpenAIPartFacts(item, "type")
+		if err != nil {
+			return nil, fmt.Errorf("custom tool output[%d]: %w", i, err)
+		}
+		out = append(out, engine.ToolResultContentBlock{Unknown: &engine.UnknownBlock{Kind: probe.Type, Payload: payload}})
+	}
+	return out, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -720,9 +945,23 @@ func (a *Adapter) unmarshalResponses(rawBody []byte) (*engine.ChatRequest, error
 				// name with a different JSON type (Codex custom_tool_call_output,
 				// for example, has an array-valued output), which must not make
 				// decoding the entire heterogeneous array fail.
+				sawNonToolItem := false
 				for i, rawItem := range rawItems {
 					typ := responseItemType(rawItem)
-					if typ != "message" && typ != "function_call" && typ != "function_call_output" {
+					if typ == "additional_tools" {
+						if sawNonToolItem {
+							return nil, fmt.Errorf("openai responses input item %d: additional_tools must precede conversation items", i)
+						}
+						defs, derr := additionalToolsToEngine(rawItem)
+						if derr != nil {
+							return nil, fmt.Errorf("openai responses input item %d: %w", i, derr)
+						}
+						req.Tools = append(req.Tools, defs...)
+						continue
+					}
+					sawNonToolItem = true
+					if typ != "message" && typ != "function_call" && typ != "function_call_output" &&
+						typ != "custom_tool_call" && typ != "custom_tool_call_output" {
 						continue
 					}
 					var item responsesInputItem
@@ -761,20 +1000,173 @@ func (a *Adapter) unmarshalResponses(rawBody []byte) (*engine.ChatRequest, error
 	req.ProviderExtensions = ext
 
 	// Tools (Responses API uses flat tool shape: {type, name, description, parameters}).
+	topLevelTools := make([]engine.ToolDef, 0, len(rr.Tools))
 	for _, t := range rr.Tools {
-		params, err := engine.ParseRequiredObjectOrEmpty(t.Parameters)
+		td, err := responseToolToEngine(t, nil)
 		if err != nil {
-			return nil, fmt.Errorf("tool %q parameters: %w", t.Name, err)
+			return nil, err
 		}
-		td := engine.ToolDef{
-			Name:        t.Name,
-			Description: t.Description,
-			Parameters:  params,
-		}
-		req.Tools = append(req.Tools, td)
+		topLevelTools = append(topLevelTools, td)
 	}
+	req.Tools = append(topLevelTools, req.Tools...)
 
 	return req, nil
+}
+
+func responseToolToEngine(t responseTool, namespace []string) (engine.ToolDef, error) {
+	td := engine.ToolDef{Name: t.Name, Description: t.Description, Strict: t.Strict, NamespacePath: append([]string(nil), namespace...)}
+	switch t.Type {
+	case "", "function":
+		params, err := engine.ParseRequiredObjectOrEmpty(t.Parameters)
+		if err != nil {
+			return td, fmt.Errorf("tool %q parameters: %w", t.Name, err)
+		}
+		td.Parameters = params
+	case "custom":
+		format, err := engine.ParseRequiredJSONObject(t.Format)
+		if err != nil {
+			return td, fmt.Errorf("tool %q format: %w", t.Name, err)
+		}
+		td.InvocationKind = engine.ToolInvocationFreeform
+		td.InputFormat = format
+	default:
+		return td, fmt.Errorf("tool %q has unsupported type %q", t.Name, t.Type)
+	}
+	return td, nil
+}
+
+func additionalToolsToEngine(raw json.RawMessage) ([]engine.ToolDef, error) {
+	var root struct {
+		Tools []json.RawMessage `json:"tools"`
+	}
+	if err := json.Unmarshal(raw, &root); err != nil {
+		return nil, fmt.Errorf("additional_tools: %w", err)
+	}
+	var out []engine.ToolDef
+	for i, child := range root.Tools {
+		if err := walkAdditionalTool(child, nil, &out); err != nil {
+			return nil, fmt.Errorf("additional_tools.tools[%d]: %w", i, err)
+		}
+	}
+	return out, nil
+}
+
+func walkAdditionalTool(raw json.RawMessage, path []string, out *[]engine.ToolDef) error {
+	var probe struct {
+		Type        string            `json:"type"`
+		Name        string            `json:"name"`
+		Description string            `json:"description"`
+		Parameters  json.RawMessage   `json:"parameters"`
+		Format      json.RawMessage   `json:"format"`
+		Strict      bool              `json:"strict"`
+		Tools       []json.RawMessage `json:"tools"`
+	}
+	if err := json.Unmarshal(raw, &probe); err != nil {
+		return err
+	}
+	if probe.Type == "namespace" {
+		if probe.Name == "" || len(probe.Tools) == 0 {
+			return fmt.Errorf("namespace requires a name and non-empty tools")
+		}
+		next := append(append([]string(nil), path...), probe.Name)
+		for i, child := range probe.Tools {
+			if err := walkAdditionalTool(child, next, out); err != nil {
+				return fmt.Errorf("namespace %q tools[%d]: %w", probe.Name, i, err)
+			}
+		}
+		return nil
+	}
+	td, err := responseToolToEngine(responseTool{
+		Type: probe.Type, Name: probe.Name, Description: probe.Description,
+		Parameters: probe.Parameters, Format: probe.Format, Strict: probe.Strict,
+	}, path)
+	if err != nil {
+		return err
+	}
+	*out = append(*out, td)
+	return nil
+}
+
+func rebuildAdditionalTools(raw json.RawMessage, tools []engine.ToolDef) (json.RawMessage, int, error) {
+	var root map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &root); err != nil {
+		return nil, 0, fmt.Errorf("openai responses additional_tools: %w", err)
+	}
+	var children []json.RawMessage
+	if err := json.Unmarshal(root["tools"], &children); err != nil {
+		return nil, 0, fmt.Errorf("openai responses additional_tools.tools: %w", err)
+	}
+	consumed := 0
+	for i, child := range children {
+		rebuilt, err := rebuildAdditionalTool(child, nil, tools, &consumed)
+		if err != nil {
+			return nil, 0, fmt.Errorf("openai responses additional_tools.tools[%d]: %w", i, err)
+		}
+		children[i] = rebuilt
+	}
+	b, err := json.Marshal(children)
+	if err != nil {
+		return nil, 0, err
+	}
+	root["tools"] = b
+	out, err := json.Marshal(root)
+	return out, consumed, err
+}
+
+func rebuildAdditionalTool(raw json.RawMessage, path []string, tools []engine.ToolDef, consumed *int) (json.RawMessage, error) {
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &obj); err != nil {
+		return nil, err
+	}
+	var typ, name string
+	if err := json.Unmarshal(obj["type"], &typ); err != nil {
+		return nil, fmt.Errorf("type: %w", err)
+	}
+	if err := json.Unmarshal(obj["name"], &name); err != nil {
+		return nil, fmt.Errorf("name: %w", err)
+	}
+	if typ == "namespace" {
+		var children []json.RawMessage
+		if err := json.Unmarshal(obj["tools"], &children); err != nil {
+			return nil, fmt.Errorf("namespace %q tools: %w", name, err)
+		}
+		next := append(append([]string(nil), path...), name)
+		for i, child := range children {
+			rebuilt, err := rebuildAdditionalTool(child, next, tools, consumed)
+			if err != nil {
+				return nil, err
+			}
+			children[i] = rebuilt
+		}
+		b, err := json.Marshal(children)
+		if err != nil {
+			return nil, err
+		}
+		obj["tools"] = b
+		return json.Marshal(obj)
+	}
+	if *consumed >= len(tools) {
+		return nil, fmt.Errorf("layout has more namespaced tool leaves than the canonical request")
+	}
+	td := tools[*consumed]
+	if !slices.Equal(td.NamespacePath, path) {
+		return nil, fmt.Errorf("tool %q namespace changed from %v to %v; additional_tools topology mutation is unsupported", td.Name, path, td.NamespacePath)
+	}
+	*consumed++
+	obj["name"], _ = json.Marshal(td.Name)
+	obj["description"], _ = json.Marshal(td.Description)
+	if td.InvocationKind == engine.ToolInvocationFreeform {
+		obj["type"] = json.RawMessage(`"custom"`)
+		obj["format"] = td.InputFormat.Bytes()
+		delete(obj, "parameters")
+		delete(obj, "strict")
+	} else {
+		obj["type"] = json.RawMessage(`"function"`)
+		obj["parameters"] = td.Parameters.Bytes()
+		obj["strict"], _ = json.Marshal(td.Strict)
+		delete(obj, "format")
+	}
+	return json.Marshal(obj)
 }
 
 func responseItemType(raw json.RawMessage) string {

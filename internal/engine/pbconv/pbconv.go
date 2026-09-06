@@ -9,6 +9,14 @@ import (
 	pb "github.com/torana-edge/torana-plugin-sdk/pb/v1"
 )
 
+func cloneStringPointer(v *string) *string {
+	if v == nil {
+		return nil
+	}
+	out := *v
+	return &out
+}
+
 func toPBChatRequest(c *engine.ChatRequest) *pb.ChatRequest {
 	if c == nil {
 		return nil
@@ -47,6 +55,12 @@ func toPBChatRequest(c *engine.ChatRequest) *pb.ChatRequest {
 			ParametersJson:   t.Parameters.Bytes(),
 			Strict:           t.Strict,
 			CacheControlJson: t.CacheControl.Bytes(),
+			InvocationKind:   pb.ToolInvocationKind(t.InvocationKind),
+			NamespacePath:    append([]string(nil), t.NamespacePath...),
+		}
+		if t.InvocationKind == engine.ToolInvocationFreeform {
+			td.ParametersJson = nil
+			td.InputFormatJson = t.InputFormat.Bytes()
 		}
 		out.Tools = append(out.Tools, td)
 	}
@@ -121,15 +135,27 @@ func FromPBChatRequest(c *pb.ChatRequest) (*engine.ChatRequest, error) {
 		if t == nil {
 			return nil, fmt.Errorf("pb tools[%d] is nil", i)
 		}
-		params, err := engine.ParseRequiredObjectOrEmpty(t.ParametersJson)
-		if err != nil {
-			return nil, fmt.Errorf("pb tool %q parameters_json: %w", t.Name, err)
+		var params, inputFormat engine.RequiredJSONObject
+		var err error
+		if t.InvocationKind == pb.ToolInvocationKind_TOOL_INVOCATION_KIND_FREEFORM {
+			inputFormat, err = engine.ParseRequiredJSONObject(t.InputFormatJson)
+			if err != nil {
+				return nil, fmt.Errorf("pb tool %q input_format_json: %w", t.Name, err)
+			}
+		} else {
+			params, err = engine.ParseRequiredObjectOrEmpty(t.ParametersJson)
+			if err != nil {
+				return nil, fmt.Errorf("pb tool %q parameters_json: %w", t.Name, err)
+			}
 		}
 		td := engine.ToolDef{
-			Name:        t.Name,
-			Description: t.Description,
-			Parameters:  params,
-			Strict:      t.Strict,
+			Name:           t.Name,
+			Description:    t.Description,
+			Parameters:     params,
+			Strict:         t.Strict,
+			InvocationKind: engine.ToolInvocationKind(t.InvocationKind),
+			InputFormat:    inputFormat,
+			NamespacePath:  append([]string(nil), t.NamespacePath...),
 		}
 		if len(t.CacheControlJson) > 0 {
 			cc, cerr := engine.ParseOptionalJSONObject(t.CacheControlJson)
@@ -158,9 +184,10 @@ func ToPBStreamEvent(e *engine.StreamEvent) *pb.StreamEvent {
 			ContentBlockStart: &pb.ContentBlockStart{
 				Index: int32(e.ToolCallStart.Index),
 				Block: &pb.ContentBlockStart_ToolCall{ToolCall: &pb.ToolCallRef{
-					Id:        e.ToolCallStart.ID,
-					Name:      e.ToolCallStart.Name,
-					Signature: e.ToolCallStart.Signature,
+					Id:             e.ToolCallStart.ID,
+					Name:           e.ToolCallStart.Name,
+					Signature:      e.ToolCallStart.Signature,
+					InvocationKind: pb.ToolInvocationKind(e.ToolCallStart.InvocationKind),
 				}},
 			},
 		}
@@ -203,10 +230,15 @@ func ToPBStreamEvent(e *engine.StreamEvent) *pb.StreamEvent {
 	} else if e.SignatureDelta != nil {
 		out.Event = &pb.StreamEvent_SignatureDelta{SignatureDelta: *e.SignatureDelta}
 	} else if e.ToolCallDelta != nil {
+		var input *string
+		if e.ToolCallDelta.InputTextDelta != nil {
+			input = proto.String(*e.ToolCallDelta.InputTextDelta)
+		}
 		out.Event = &pb.StreamEvent_ToolCallDelta{
 			ToolCallDelta: &pb.ToolCallDelta{
 				Index:          int32(e.ToolCallDelta.Index),
 				ArgumentsDelta: e.ToolCallDelta.ArgumentsDelta,
+				InputTextDelta: input,
 			},
 		}
 	} else if e.BlockStop != nil {
@@ -274,7 +306,7 @@ type BlockKindTracker struct {
 	// openTools records every tool block currently open, keyed by its block
 	// index. Multiple tool blocks may be open at once (parallel tool calls),
 	// each at a unique index; membership is what makes a stop a ToolCallEnd.
-	openTools map[int]struct{}
+	openTools map[int]engine.ToolInvocationKind
 	// seen records every index that has opened a block in this message.
 	// Indexes are unique per message: a start whose index was already used —
 	// even after its block closed — is invalid topology.
@@ -365,15 +397,16 @@ func (t *BlockKindTracker) FromPBStreamEvent(e *pb.StreamEvent) (*engine.StreamE
 				return nil, fmt.Errorf("pbconv: content block start at index %d while a %s block at index %d is still open", idx, t.openNonTool.kind, t.openNonTool.index)
 			}
 			if t.openTools == nil {
-				t.openTools = make(map[int]struct{})
+				t.openTools = make(map[int]engine.ToolInvocationKind)
 			}
 			out.ToolCallStart = &engine.ToolCallStart{
-				Index:     idx,
-				ID:        b.ToolCall.Id,
-				Name:      b.ToolCall.Name,
-				Signature: b.ToolCall.Signature,
+				Index:          idx,
+				ID:             b.ToolCall.Id,
+				Name:           b.ToolCall.Name,
+				Signature:      b.ToolCall.Signature,
+				InvocationKind: engine.ToolInvocationKind(b.ToolCall.InvocationKind),
 			}
-			t.openTools[idx] = struct{}{}
+			t.openTools[idx] = engine.ToolInvocationKind(b.ToolCall.InvocationKind)
 			t.seen[idx] = struct{}{}
 		case *pb.ContentBlockStart_Text:
 			if b.Text == nil {
@@ -408,9 +441,25 @@ func (t *BlockKindTracker) FromPBStreamEvent(e *pb.StreamEvent) (*engine.StreamE
 		sig := v.SignatureDelta
 		out.SignatureDelta = &sig
 	case *pb.StreamEvent_ToolCallDelta:
+		kind, open := t.openTools[int(v.ToolCallDelta.Index)]
+		if !open {
+			return nil, fmt.Errorf("pbconv: tool call delta at index %d has no open tool block", v.ToolCallDelta.Index)
+		}
+		if kind == engine.ToolInvocationFreeform {
+			if v.ToolCallDelta.InputTextDelta == nil || v.ToolCallDelta.ArgumentsDelta != "" {
+				return nil, fmt.Errorf("pbconv: free-form tool call delta at index %d carries the wrong payload family", v.ToolCallDelta.Index)
+			}
+		} else if v.ToolCallDelta.InputTextDelta != nil {
+			return nil, fmt.Errorf("pbconv: function tool call delta at index %d carries free-form input", v.ToolCallDelta.Index)
+		}
+		var input *string
+		if v.ToolCallDelta.InputTextDelta != nil {
+			input = proto.String(*v.ToolCallDelta.InputTextDelta)
+		}
 		out.ToolCallDelta = &engine.ToolCallDelta{
 			Index:          int(v.ToolCallDelta.Index),
 			ArgumentsDelta: v.ToolCallDelta.ArgumentsDelta,
+			InputTextDelta: input,
 		}
 	case *pb.StreamEvent_ContentBlockStop:
 		if v.ContentBlockStop == nil {
@@ -480,19 +529,26 @@ func toPBMessage(m engine.Message) *pb.Message {
 		case b.RedactedThinking != nil:
 			rb.Kind = &pb.RequestBlock_RedactedThinking{RedactedThinking: &pb.RequestRedactedThinkingBlock{Data: b.RedactedThinking.Data}}
 		case b.ToolUse != nil:
-			rb.Kind = &pb.RequestBlock_ToolUse{ToolUse: &pb.RequestToolUseBlock{
+			tu := &pb.RequestToolUseBlock{
 				Id:               b.ToolUse.ID,
 				Name:             b.ToolUse.Name,
 				ArgumentsJson:    b.ToolUse.Arguments.Bytes(),
 				Signature:        b.ToolUse.Signature,
 				PartMetadataJson: b.ToolUse.PartMetadataJson.Bytes(),
-			}}
+				InvocationKind:   pb.ToolInvocationKind(b.ToolUse.InvocationKind),
+			}
+			if b.ToolUse.InvocationKind == engine.ToolInvocationFreeform {
+				tu.ArgumentsJson = nil
+				tu.InputText = cloneStringPointer(b.ToolUse.InputText)
+			}
+			rb.Kind = &pb.RequestBlock_ToolUse{ToolUse: tu}
 		case b.ToolResult != nil:
 			tr := &pb.RequestToolResultBlock{
 				ToolCallId:       b.ToolResult.ToolCallID,
 				ToolName:         b.ToolResult.ToolName,
 				PartMetadataJson: b.ToolResult.PartMetadataJson.Bytes(),
 				Signature:        b.ToolResult.Signature,
+				InvocationKind:   pb.ToolInvocationKind(b.ToolResult.InvocationKind),
 			}
 			if b.ToolResult.WillContinue != nil {
 				tr.WillContinue = proto.Bool(*b.ToolResult.WillContinue)
@@ -591,9 +647,13 @@ func fromPBBlock(b *pb.RequestBlock, what string) (engine.Block, error) {
 		if k.ToolUse == nil {
 			return engine.Block{}, fmt.Errorf("%s tool_use arm is a typed nil", what)
 		}
-		args, err := engine.ParseRequiredObjectOrEmpty(k.ToolUse.ArgumentsJson)
-		if err != nil {
-			return engine.Block{}, fmt.Errorf("%s.tool_use arguments_json: %w", what, err)
+		var args engine.RequiredJSONObject
+		var err error
+		if k.ToolUse.InvocationKind != pb.ToolInvocationKind_TOOL_INVOCATION_KIND_FREEFORM {
+			args, err = engine.ParseRequiredObjectOrEmpty(k.ToolUse.ArgumentsJson)
+			if err != nil {
+				return engine.Block{}, fmt.Errorf("%s.tool_use arguments_json: %w", what, err)
+			}
 		}
 		pm, err := pbPartMetadata(k.ToolUse.PartMetadataJson, what+".tool_use")
 		if err != nil {
@@ -601,6 +661,7 @@ func fromPBBlock(b *pb.RequestBlock, what string) (engine.Block, error) {
 		}
 		return engine.Block{ToolUse: &engine.ToolUseBlock{
 			ID: k.ToolUse.Id, Name: k.ToolUse.Name, Arguments: args, Signature: k.ToolUse.Signature,
+			InputText: cloneStringPointer(k.ToolUse.InputText), InvocationKind: engine.ToolInvocationKind(k.ToolUse.InvocationKind),
 			PartMetadataJson: pm,
 		}}, nil
 	case *pb.RequestBlock_ToolResult:
@@ -616,6 +677,7 @@ func fromPBBlock(b *pb.RequestBlock, what string) (engine.Block, error) {
 			ToolName:         k.ToolResult.ToolName,
 			PartMetadataJson: pm,
 			Signature:        k.ToolResult.Signature,
+			InvocationKind:   engine.ToolInvocationKind(k.ToolResult.InvocationKind),
 		}
 		if k.ToolResult.WillContinue != nil {
 			v := k.ToolResult.GetWillContinue()

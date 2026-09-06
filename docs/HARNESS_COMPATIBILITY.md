@@ -59,8 +59,9 @@ Concrete examples are in the [quickstart](QUICKSTART.md).
 
 - Anthropic string and array system prompts, structured tool results,
   cache-control markers, signed content, and streaming topology.
-- OpenAI Chat Completions and Responses as distinct wire layouts, including
-  opaque Responses input items.
+- OpenAI Chat Completions and Responses as distinct wire layouts. Responses
+  function tools and provider-native free-form/custom tools are typed in the
+  IR; unmodelled Responses items remain opaque and retain their raw payload.
 - Gemini and Code Assist wrapper data, part metadata, thought signatures,
   cache facts, and stream framing.
 - Caller compression negotiation without allowing compressed inference

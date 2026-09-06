@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/torana-edge/torana-edge/internal/engine"
+	"github.com/torana-edge/torana-edge/internal/format"
 	"github.com/torana-edge/torana-edge/internal/format/streamio"
 )
 
@@ -298,6 +299,9 @@ func (s *StreamAdapter) SerializeStream(ctx context.Context, w io.Writer, events
 		}
 		if !ok {
 			break
+		}
+		if err := format.RejectFreeformStreamEvent(event, "gemini"); err != nil {
+			return err
 		}
 		switch {
 		case event.Error != nil:
