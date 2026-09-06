@@ -115,14 +115,14 @@ func LoadOrCreateCA(dir string) (*CA, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := writePEMAtomic(certPath, 0o644, "CERTIFICATE", der); err != nil {
+	if err := writePEMAtomic(certPath, false, "CERTIFICATE", der); err != nil {
 		return nil, err
 	}
 	kder, err := x509.MarshalECPrivateKey(key)
 	if err != nil {
 		return nil, err
 	}
-	if err := writePEMAtomic(keyPath, 0o600, "EC PRIVATE KEY", kder); err != nil {
+	if err := writePEMAtomic(keyPath, true, "EC PRIVATE KEY", kder); err != nil {
 		return nil, err
 	}
 	return &CA{cert: cert, key: key, cache: map[string]*tls.Certificate{}}, nil
@@ -218,11 +218,14 @@ func loadCA(certPath, keyPath string, now time.Time) (*x509.Certificate, *ecdsa.
 	return cert, key, nil
 }
 
-func writePEMAtomic(path string, mode os.FileMode, blockType string, der []byte) error {
-	return writeFileAtomic(path, mode, pem.EncodeToMemory(&pem.Block{Type: blockType, Bytes: der}))
+// writePEMAtomic writes a PEM block. ownerOnly marks material that must not
+// be readable by anyone else — the private key, not the certificate, which is
+// public by construction and has to be readable to be useful.
+func writePEMAtomic(path string, ownerOnly bool, blockType string, der []byte) error {
+	return writeFileAtomic(path, ownerOnly, pem.EncodeToMemory(&pem.Block{Type: blockType, Bytes: der}))
 }
 
-func writeFileAtomic(path string, mode os.FileMode, contents []byte) (retErr error) {
+func writeFileAtomic(path string, ownerOnly bool, contents []byte) (retErr error) {
 	f, err := os.CreateTemp(filepath.Dir(path), ".torana-ca-*")
 	if err != nil {
 		return err
@@ -233,7 +236,17 @@ func writeFileAtomic(path string, mode os.FileMode, contents []byte) (retErr err
 			_ = os.Remove(tmp)
 		}
 	}()
-	if err := f.Chmod(mode); err != nil {
+	// Before the contents, so the private key is never on disk under access
+	// this process did not choose. f.Chmod said nothing on Windows, where the
+	// file simply inherited the directory's ACL — which loadCA then correctly
+	// refused on the very next start, because inherited access can be widened
+	// later by a change to the parent.
+	if ownerOnly {
+		if err := fileperm.Restrict(tmp); err != nil {
+			_ = f.Close()
+			return err
+		}
+	} else if err := f.Chmod(0o644); err != nil {
 		_ = f.Close()
 		return err
 	}
@@ -250,6 +263,14 @@ func writeFileAtomic(path string, mode os.FileMode, contents []byte) (retErr err
 	}
 	if err := os.Rename(tmp, path); err != nil {
 		return err
+	}
+	if ownerOnly {
+		// Re-applied at the destination: what a rename does to a file's
+		// security descriptor is platform-defined, and this file is the one
+		// thing here that must not be readable by anyone else.
+		if err := fileperm.Restrict(path); err != nil {
+			return err
+		}
 	}
 	return nil
 }

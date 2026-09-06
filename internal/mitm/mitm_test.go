@@ -18,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/torana-edge/torana-edge/internal/fileperm"
 	"github.com/torana-edge/torana-edge/internal/provider"
 )
 
@@ -348,7 +349,15 @@ func TestCALoadFailsClosed(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := os.WriteFile(filepath.Join(first, "ca-key.pem"), otherKey, 0o600); err != nil {
+		// 0600 alone does not make a file owner-only on Windows, where a
+		// newly written file inherits the directory's ACL. Without the
+		// explicit restriction this fixture trips the key-permission check
+		// and never reaches the mismatch it exists to test.
+		firstKey := filepath.Join(first, "ca-key.pem")
+		if err := os.WriteFile(firstKey, otherKey, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := fileperm.Restrict(firstKey); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := LoadOrCreateCA(first); err == nil || !strings.Contains(err.Error(), "do not match") {
@@ -397,12 +406,15 @@ func TestCALoadFailsClosed(t *testing.T) {
 		if _, err := LoadOrCreateCA(dir); err != nil {
 			t.Fatal(err)
 		}
+		// The invariant is that nobody else can reach the CA material, which
+		// is mode bits on Unix and a DACL on Windows — where Perm() reports
+		// 0777 for any directory and asserting 0700 proves nothing.
 		info, err := os.Stat(dir)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if got := info.Mode().Perm(); got != 0o700 {
-			t.Fatalf("CA directory permissions = %04o, want 0700", got)
+		if err := fileperm.Verify(dir, info); err != nil {
+			t.Errorf("CA directory is not owner-only: %v", err)
 		}
 	})
 }
