@@ -230,22 +230,13 @@ func (c *CA) LeafFor(name string) (*tls.Certificate, error) {
 // client can validate both our MITM leaves and real upstream certs (for
 // tunneled hosts). Returns the bundle path.
 func (c *CA) WriteBundle(dir string) (string, error) {
-	var sys []byte
-	for _, p := range []string{"/etc/ssl/certs/ca-certificates.crt", "/etc/pki/tls/certs/ca-bundle.crt", "/etc/ssl/cert.pem"} {
-		if b, err := os.ReadFile(p); err == nil {
-			sys = b
-			break
-		}
-	}
+	sys, err := systemRootsPEM()
 	// Without system roots the bundle contains only this CA, so the client can
 	// validate intercepted hosts but not the REAL certificates of every
 	// tunneled one — which is precisely what the bundle exists to carry. That
 	// failed as a confusing per-host TLS error much later; say it here.
-	if len(sys) == 0 {
-		return "", fmt.Errorf("no system CA bundle found at any known path; " +
-			"SSL_CERT_FILE would then reject every tunneled host. Install the " +
-			"platform's ca-certificates package, or point mitm at a directory " +
-			"holding a bundle you trust")
+	if err != nil {
+		return "", fmt.Errorf("bundle: %w", err)
 	}
 	caPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: c.cert.Raw})
 	out := append(append(append([]byte{}, sys...), '\n'), caPEM...)
