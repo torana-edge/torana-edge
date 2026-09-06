@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/torana-edge/torana-edge/internal/engine"
+	"github.com/torana-edge/torana-edge/internal/format"
 	"github.com/torana-edge/torana-edge/internal/format/streamio"
 )
 
@@ -420,6 +421,9 @@ func (s *Stream) SerializeStream(ctx context.Context, w io.Writer, events <-chan
 		}
 		if !ok {
 			break
+		}
+		if err := format.RejectFreeformStreamEvent(evt, "bedrock"); err != nil {
+			return err
 		}
 		if evt.BlockStart != nil {
 			// Explicit block events (plugin-emitted or relayed). Provider

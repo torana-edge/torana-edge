@@ -1,11 +1,99 @@
 package openai
 
 import (
+	"bytes"
+	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 
 	"github.com/torana-edge/torana-edge/internal/engine"
 )
+
+func TestResponsesCustomToolStreamRoundTrip(t *testing.T) {
+	input := strings.Join([]string{
+		`data: {"type":"response.output_item.added","item":{"id":"ctc_item","type":"custom_tool_call","name":"shell","call_id":"call_7"}}`,
+		`data: {"type":"response.custom_tool_call_input.delta","item_id":"ctc_item","delta":"printf "}`,
+		`data: {"type":"response.custom_tool_call_input.delta","item_id":"ctc_item","delta":"hello"}`,
+		`data: {"type":"response.custom_tool_call_input.done","item_id":"ctc_item","input":"printf hello"}`,
+	}, "\n")
+	events := collectStreamEvents(input)
+	if len(events) != 4 {
+		t.Fatalf("events = %+v", events)
+	}
+	if start := events[0].ToolCallStart; start == nil || start.ID != "call_7" || start.Name != "shell" ||
+		start.InvocationKind != engine.ToolInvocationFreeform {
+		t.Fatalf("start %+v", start)
+	}
+	for i, want := range []string{"printf ", "hello"} {
+		delta := events[i+1].ToolCallDelta
+		if delta == nil || delta.ArgumentsDelta != "" || delta.InputTextDelta == nil || *delta.InputTextDelta != want {
+			t.Fatalf("delta %d: %+v", i, delta)
+		}
+	}
+	if events[3].ToolCallEnd == nil || events[3].ToolCallEnd.Index != 0 {
+		t.Fatalf("end %+v", events[3])
+	}
+
+	eventCh := make(chan engine.StreamEvent, len(events))
+	for _, event := range events {
+		eventCh <- event
+	}
+	close(eventCh)
+	ctx := context.WithValue(context.Background(), engine.ChatRequestKey, &engine.ChatRequest{OpenAIVariant: engine.OpenAIResponses})
+	var out bytes.Buffer
+	if err := (&StreamAdapter{}).SerializeStream(ctx, &out, eventCh); err != nil {
+		t.Fatal(err)
+	}
+	var types []string
+	for _, line := range strings.Split(out.String(), "\n") {
+		if !strings.HasPrefix(line, "data: {") {
+			continue
+		}
+		var object map[string]any
+		if err := json.Unmarshal([]byte(strings.TrimPrefix(line, "data: ")), &object); err != nil {
+			t.Fatal(err)
+		}
+		types = append(types, object["type"].(string))
+		if object["type"] == "response.output_item.done" {
+			item := object["item"].(map[string]any)
+			if item["type"] != "custom_tool_call" || item["call_id"] != "call_7" || item["name"] != "shell" || item["input"] != "printf hello" {
+				t.Fatalf("done item %#v", item)
+			}
+			if _, exists := item["arguments"]; exists {
+				t.Fatalf("custom call gained arguments: %#v", item)
+			}
+		}
+	}
+	wantTypes := []string{
+		"response.output_item.added",
+		"response.custom_tool_call_input.delta",
+		"response.custom_tool_call_input.delta",
+		"response.custom_tool_call_input.done",
+		"response.output_item.done",
+	}
+	if strings.Join(types, ",") != strings.Join(wantTypes, ",") {
+		t.Fatalf("types %v, want %v", types, wantTypes)
+	}
+}
+
+func TestResponsesStreamRejectsCrossFamilyDelta(t *testing.T) {
+	for _, input := range []string{
+		strings.Join([]string{
+			`data: {"type":"response.output_item.added","item":{"id":"i","type":"custom_tool_call","name":"shell","call_id":"c"}}`,
+			`data: {"type":"response.function_call_arguments.delta","item_id":"i","delta":"{}"}`,
+		}, "\n"),
+		strings.Join([]string{
+			`data: {"type":"response.output_item.added","item":{"id":"i","type":"function_call","name":"f","call_id":"c"}}`,
+			`data: {"type":"response.custom_tool_call_input.delta","item_id":"i","delta":"text"}`,
+		}, "\n"),
+	} {
+		events := collectStreamEvents(input)
+		if len(events) != 2 || events[1].Error == nil {
+			t.Fatalf("cross-family stream did not terminate: %+v", events)
+		}
+	}
+}
 
 func collectStreamEvents(input string) []engine.StreamEvent {
 	var events []engine.StreamEvent

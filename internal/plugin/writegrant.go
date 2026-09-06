@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"hash"
 	"math"
+	"slices"
 	"sort"
 
 	sdk "github.com/torana-edge/torana-plugin-sdk"
@@ -285,6 +286,8 @@ func fingerprintRequestSections(req *pb.ChatRequest) (requestSections, error) {
 	p.toolResults = fingerprintToolResultsSection(req)
 
 	h := sha256.New()
+	binary.LittleEndian.PutUint64(count[:], uint64(len(req.Tools)))
+	writeFramed(h, count[:])
 	for _, t := range req.Tools {
 		strict := byte(0)
 		if t.Strict {
@@ -293,7 +296,12 @@ func fingerprintRequestSections(req *pb.ChatRequest) (requestSections, error) {
 		// CacheControlJson is NOT part of the tools section: it is governed
 		// by ir.cache_control.write (see fingerprintCacheControlSection).
 		writeFramed(h, []byte(t.Name), []byte(t.Description), t.ParametersJson,
-			[]byte{strict})
+			[]byte{strict}, []byte(fmt.Sprint(t.InvocationKind)), t.InputFormatJson)
+		binary.LittleEndian.PutUint64(count[:], uint64(len(t.NamespacePath)))
+		writeFramed(h, count[:])
+		for _, segment := range t.NamespacePath {
+			writeFramed(h, []byte(segment))
+		}
 	}
 	copy(p.tools[:], h.Sum(nil))
 
@@ -514,7 +522,32 @@ func verifyUnconditionalInvariants(accepted, out *pb.ChatRequest) error {
 	if !bytes.Equal(accepted.ToranaMetaJson, out.ToranaMetaJson) {
 		return fmt.Errorf("plugin changed host-owned torana_meta_json")
 	}
+	if !sameNamespacedToolTopology(accepted.Tools, out.Tools) {
+		return fmt.Errorf("plugin changed host-owned tool namespace topology")
+	}
 	return verifyRequestSignatures(accepted, out)
+}
+
+func sameNamespacedToolTopology(before, after []*pb.ToolDef) bool {
+	paths := func(tools []*pb.ToolDef) [][]string {
+		var out [][]string
+		for _, tool := range tools {
+			if tool != nil && len(tool.NamespacePath) != 0 {
+				out = append(out, tool.NamespacePath)
+			}
+		}
+		return out
+	}
+	a, b := paths(before), paths(after)
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if !slices.Equal(a[i], b[i]) {
+			return false
+		}
+	}
+	return true
 }
 
 // verifyUnknownFields rejects ANY unknown protobuf bytes in the OUTPUT
@@ -745,6 +778,7 @@ const (
 	refPlainBytes
 	refOptionalBool
 	refOptionalString
+	refPlainEnum
 	refPinnedContent
 )
 
@@ -772,6 +806,8 @@ func classifyCoveredRef(fd protoreflect.FieldDescriptor, ref outboundpolicy.Sign
 		return refOptionalBool, true
 	case fd.Kind() == protoreflect.StringKind && fd.HasOptionalKeyword():
 		return refOptionalString, true
+	case fd.Kind() == protoreflect.EnumKind:
+		return refPlainEnum, true
 	case fd.Kind() == protoreflect.StringKind:
 		return refPlainString, true
 	case fd.Kind() == protoreflect.BytesKind:
@@ -983,7 +1019,7 @@ func digestBlockFields(pm protoreflect.Message, refs []resolvedRef) ([32]byte, e
 	h := sha256.New()
 	for _, ref := range refs {
 		switch ref.kind {
-		case refPlainString, refPlainBytes:
+		case refPlainString, refPlainBytes, refPlainEnum:
 			writeFramed(h, []byte(pm.Get(ref.fd).String()))
 		case refOptionalBool, refOptionalString:
 			// proto3 optional presence is part of the covered content:
@@ -1360,6 +1396,8 @@ var requestToolUseBlockFieldSections = map[string]string{
 	"arguments_json":     "ir.messages.write.<role>",
 	"signature":          hostOwnedField,
 	"part_metadata_json": "ir.messages.write.<role>",
+	"input_text":         "ir.messages.write.<role>",
+	"invocation_kind":    "ir.messages.write.<role>",
 }
 
 var requestToolResultBlockFieldSections = map[string]string{
@@ -1370,6 +1408,7 @@ var requestToolResultBlockFieldSections = map[string]string{
 	"will_continue":      "ir.messages.write.<role>",
 	"scheduling":         "ir.messages.write.<role>",
 	"signature":          hostOwnedField,
+	"invocation_kind":    "ir.messages.write.<role>",
 }
 
 var toolResultContentBlockFieldSections = map[string]string{
@@ -1427,4 +1466,7 @@ var toolDefFieldSections = map[string]string{
 	"parameters_json":    "ir.tools.write",
 	"strict":             "ir.tools.write",
 	"cache_control_json": "ir.cache_control.write",
+	"invocation_kind":    "ir.tools.write",
+	"input_format_json":  "ir.tools.write",
+	"namespace_path":     hostOwnedField,
 }

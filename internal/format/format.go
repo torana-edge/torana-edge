@@ -6,12 +6,48 @@ package format
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
 
 	"github.com/torana-edge/torana-edge/internal/engine"
 )
+
+// RejectFreeformTools reports provider-specific incompatibility before an
+// adapter can accidentally project a free-form invocation as an ordinary
+// JSON function call. Providers that implement free-form tools (currently
+// OpenAI Responses) do not call this guard.
+func RejectFreeformTools(chat *engine.ChatRequest, provider string) error {
+	for i, tool := range chat.Tools {
+		if tool.InvocationKind == engine.ToolInvocationFreeform {
+			return fmt.Errorf("%s: free-form tool definition %d (%q) is unsupported", provider, i, tool.Name)
+		}
+	}
+	for mi, msg := range chat.Messages {
+		for bi, block := range msg.Blocks {
+			if block.ToolUse != nil && block.ToolUse.InvocationKind == engine.ToolInvocationFreeform {
+				return fmt.Errorf("%s: free-form tool call at messages[%d].blocks[%d] is unsupported", provider, mi, bi)
+			}
+			if block.ToolResult != nil && block.ToolResult.InvocationKind == engine.ToolInvocationFreeform {
+				return fmt.Errorf("%s: free-form tool result at messages[%d].blocks[%d] is unsupported", provider, mi, bi)
+			}
+		}
+	}
+	return nil
+}
+
+// RejectFreeformStreamEvent prevents an adapter without a native free-form
+// stream arm from silently projecting text input as function arguments.
+func RejectFreeformStreamEvent(event engine.StreamEvent, provider string) error {
+	if event.ToolCallStart != nil && event.ToolCallStart.InvocationKind == engine.ToolInvocationFreeform {
+		return fmt.Errorf("%s: streamed free-form tool calls are unsupported", provider)
+	}
+	if event.ToolCallDelta != nil && event.ToolCallDelta.InputTextDelta != nil {
+		return fmt.Errorf("%s: streamed free-form tool input is unsupported", provider)
+	}
+	return nil
+}
 
 // RequestAdapter converts between raw JSON and canonical ChatRequest.
 type RequestAdapter interface {

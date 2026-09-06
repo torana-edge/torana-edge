@@ -42,6 +42,7 @@ import (
 	"github.com/torana-edge/torana-edge/internal/engine/pbconv"
 	"github.com/torana-edge/torana-edge/internal/format"
 	"github.com/torana-edge/torana-edge/internal/format/gemini"
+	"github.com/torana-edge/torana-edge/internal/format/openai"
 	"github.com/torana-edge/torana-edge/internal/metrics"
 	"github.com/torana-edge/torana-edge/internal/mitm"
 	"github.com/torana-edge/torana-edge/internal/plugin"
@@ -3373,7 +3374,14 @@ func (s *Server) pipelinePluginConfig(pcfg provider.PluginsConfig) plugin.Plugin
 		HostVersion:     s.config.HostVersion,
 		CandidateValidator: func(topo engine.TopologyFacts, current, replacement *pb.ChatRequest) error {
 			if topo.CodeAssist {
-				return gemini.VerifyCodeAssistEnvelopePB(replacement.ProviderExtensionsJson)
+				if err := gemini.VerifyCodeAssistEnvelopePB(replacement.ProviderExtensionsJson); err != nil {
+					return err
+				}
+			}
+			if topo.OpenAIVariant == engine.OpenAIResponses {
+				if err := openai.VerifyResponsesToolTopologyPB(current, replacement); err != nil {
+					return err
+				}
 			}
 			return nil
 		},

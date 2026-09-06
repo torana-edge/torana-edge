@@ -80,6 +80,7 @@ var sdkPermission = map[string]string{
 	"EmitEvents":            "ir.stream.write",
 	"EmitAssembledToolCall": "ir.stream.write",
 	"ReplaceToolArguments":  "ir.stream.write",
+	"ReplaceToolInput":      "ir.stream.write",
 	"SuppressToolCall":      "ir.stream.write",
 	"ReplaceText":           "ir.stream.write",
 	"SuppressText":          "ir.stream.write",

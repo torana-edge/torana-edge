@@ -664,6 +664,9 @@ func (a *Adapter) Marshal(chat *engine.ChatRequest) ([]byte, error) {
 	if err := pbconv.ValidateFullRequest(chat); err != nil {
 		return nil, fmt.Errorf("gemini: %w", err)
 	}
+	if err := format.RejectFreeformTools(chat, "gemini"); err != nil {
+		return nil, err
+	}
 	codeAssist := chat.CodeAssist
 
 	sys, err := buildSystemInstruction(chat.Messages)

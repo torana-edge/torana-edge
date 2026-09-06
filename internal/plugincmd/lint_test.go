@@ -1089,6 +1089,7 @@ func TestLintAttributesStreamMutationActions(t *testing.T) {
 		`sdk.EmitEvents()`,
 		`sdk.EmitAssembledToolCall(sdk.ToolCall{}, "{}")`,
 		`sdk.ReplaceToolArguments("{}")`,
+		`sdk.ReplaceToolInput("free form")`,
 		`sdk.SuppressToolCall()`,
 		`sdk.ReplaceText("x")`,
 		`sdk.SuppressText()`,

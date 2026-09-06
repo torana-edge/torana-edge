@@ -117,13 +117,32 @@ func (e *StreamTerminalError) Unwrap() error { return e.Err }
 // deliberately not a prefix rule because tool siblings may be concurrent.
 type streamDisciplineWalker struct {
 	nonTool        *openNonTool
-	openTools      map[int32]bool
+	openTools      map[int32]pbv1.ToolInvocationKind
 	seen           map[int32]bool
 	sawError       bool
 	messageStopped bool
 	spanOpen       bool
 	sawText        bool
 	pos            int
+}
+
+func validateStreamToolDeltaFamily(kind pbv1.ToolInvocationKind, delta *pbv1.ToolCallDelta) error {
+	if delta == nil {
+		return fmt.Errorf("missing tool-call delta")
+	}
+	switch kind {
+	case pbv1.ToolInvocationKind_TOOL_INVOCATION_KIND_FUNCTION:
+		if delta.InputTextDelta != nil {
+			return fmt.Errorf("function tool call carries free-form input")
+		}
+	case pbv1.ToolInvocationKind_TOOL_INVOCATION_KIND_FREEFORM:
+		if delta.InputTextDelta == nil || delta.ArgumentsDelta != "" {
+			return fmt.Errorf("free-form tool call carries the wrong payload family")
+		}
+	default:
+		return fmt.Errorf("tool call has unknown invocation kind %d", kind)
+	}
+	return nil
 }
 
 // walk validates one event and advances the walker state. The returned error
@@ -133,7 +152,7 @@ func (w *streamDisciplineWalker) walk(ev *pbv1.StreamEvent) error {
 		w.seen = make(map[int32]bool)
 	}
 	if w.openTools == nil {
-		w.openTools = make(map[int32]bool)
+		w.openTools = make(map[int32]pbv1.ToolInvocationKind)
 	}
 	pos := w.pos
 	w.pos++
@@ -199,7 +218,7 @@ func (w *streamDisciplineWalker) walk(ev *pbv1.StreamEvent) error {
 			if w.nonTool != nil {
 				return fmt.Errorf("tool call block start at position %d while a non-tool block is open", pos)
 			}
-			w.openTools[idx] = true
+			w.openTools[idx] = cbs.GetToolCall().GetInvocationKind()
 		}
 	case *pbv1.StreamEvent_ContentBlockStop:
 		cbs := e.ContentBlockStop
@@ -207,7 +226,7 @@ func (w *streamDisciplineWalker) walk(ev *pbv1.StreamEvent) error {
 			return nil
 		}
 		idx := cbs.Index
-		if w.openTools[idx] {
+		if _, ok := w.openTools[idx]; ok {
 			delete(w.openTools, idx)
 			return nil
 		}
@@ -248,8 +267,15 @@ func (w *streamDisciplineWalker) walk(ev *pbv1.StreamEvent) error {
 			return fmt.Errorf("signature_delta has no covered content (does not bind tool-call blocks)")
 		}
 	case *pbv1.StreamEvent_ToolCallDelta:
-		if e.ToolCallDelta == nil || !w.openTools[e.ToolCallDelta.Index] {
+		if e.ToolCallDelta == nil {
+			return fmt.Errorf("tool call delta at position %d carries no delta", pos)
+		}
+		kind, ok := w.openTools[e.ToolCallDelta.Index]
+		if !ok {
 			return fmt.Errorf("tool call delta at position %d names no open tool block (%d)", pos, eventIndex(ev))
+		}
+		if err := validateStreamToolDeltaFamily(kind, e.ToolCallDelta); err != nil {
+			return fmt.Errorf("tool call delta at position %d: %w", pos, err)
 		}
 	}
 	return nil
@@ -265,7 +291,7 @@ func (w *streamDisciplineWalker) clone() *streamDisciplineWalker {
 		out.nonTool = &nt
 	}
 	if w.openTools != nil {
-		out.openTools = make(map[int32]bool, len(w.openTools))
+		out.openTools = make(map[int32]pbv1.ToolInvocationKind, len(w.openTools))
 		for idx, open := range w.openTools {
 			out.openTools[idx] = open
 		}

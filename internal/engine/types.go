@@ -41,9 +41,11 @@ type ChatRequest struct {
 	// format (the wire shape changes reconstruction).
 	OpenAIVariant OpenAIVariant
 	// ResponsesInputLayout is the caller's typed Responses input array
-	// captured at parse: opaque items (reasoning, compaction, future
-	// types) are re-spliced at their recorded positions verbatim on
-	// marshal. Absent = the ordered body IS the layout.
+	// captured at parse: canonical message/function/free-form call/result
+	// slots are projected back into their positions, additional_tools slots
+	// carry namespace topology, and opaque items (reasoning, compaction,
+	// future types) are re-spliced verbatim. Absent = the ordered body IS
+	// the layout.
 	ResponsesInputLayout OptionalJSONArray
 }
 
@@ -92,7 +94,12 @@ type ToolDef struct {
 	// CacheControl marks a cache breakpoint after this tool definition
 	// (Anthropic allows cache_control on tool entries). Opaque raw marker
 	// object; absent when zero.
-	CacheControl OptionalJSONObject
+	CacheControl   OptionalJSONObject
+	InvocationKind ToolInvocationKind
+	// InputFormat is the required free-form input-format object. It is ignored
+	// for ordinary function definitions, which use Parameters.
+	InputFormat   RequiredJSONObject
+	NamespacePath []string
 }
 
 // --- Response streaming side ---
@@ -166,16 +173,20 @@ type BlockStop struct {
 
 // ToolCallStart signals the beginning of a tool call in the stream.
 type ToolCallStart struct {
-	Index     int // 0-based within this turn (OpenAI uses index for parallel calls)
-	ID        string
-	Name      string
-	Signature string // opaque provider token on the call (Gemini thoughtSignature); empty otherwise
+	Index          int // 0-based within this turn (OpenAI uses index for parallel calls)
+	ID             string
+	Name           string
+	Signature      string // opaque provider token on the call (Gemini thoughtSignature); empty otherwise
+	InvocationKind ToolInvocationKind
 }
 
-// ToolCallDelta carries a fragment of tool call arguments JSON.
+// ToolCallDelta carries exactly one invocation-family payload fragment.
 type ToolCallDelta struct {
 	Index          int
 	ArgumentsDelta string // raw JSON fragment; concatenate + parse at end
+	// InputTextDelta is present only for provider-native free-form calls. An
+	// explicit empty fragment is presence-distinct from a function delta.
+	InputTextDelta *string
 }
 
 // ToolCallEnd signals that a tool call's arguments are complete.

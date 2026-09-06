@@ -11,6 +11,7 @@ var (
 	_ = sdk.EmitEvents
 	_ = sdk.EmitAssembledToolCall
 	_ = sdk.ReplaceToolArguments
+	_ = sdk.ReplaceToolInput
 	_ = sdk.SuppressToolCall
 	_ = sdk.ReplaceText
 	_ = sdk.SuppressText
