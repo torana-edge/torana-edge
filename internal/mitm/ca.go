@@ -27,11 +27,23 @@ const leafLifetime = 24 * time.Hour
 // handshake never hands the client a certificate about to lapse mid-connection.
 const leafRenewBefore = time.Hour
 
+// leafMinLifetime is the least remaining CA life worth minting against. A leaf
+// can never outlive its signer, so near the CA's expiry the cap below would
+// produce certificates that expire almost immediately — and, once inside
+// leafRenewBefore, ones the cache re-mints on every single handshake. Twice
+// leafRenewBefore keeps a capped leaf cacheable for at least an hour and turns
+// the end of the CA's life into one actionable error instead of a slow
+// degradation nobody can read.
+const leafMinLifetime = 2 * leafRenewBefore
+
 // CA is a locally-generated certificate authority that mints per-host leaf
 // certificates on demand. The private key lives only in the configured dir.
 type CA struct {
-	cert  *x509.Certificate
-	key   *ecdsa.PrivateKey
+	cert *x509.Certificate
+	key  *ecdsa.PrivateKey
+	// dir holds the CA material, so an expiry error can name the exact files
+	// the operator has to delete rather than describing them.
+	dir   string
 	mu    sync.Mutex
 	cache map[string]cachedLeaf
 	// now is injectable so the expiry path can be tested without sleeping for
@@ -117,7 +129,7 @@ func LoadOrCreateCA(dir string) (*CA, error) {
 		if err != nil {
 			return nil, err
 		}
-		return &CA{cert: cert, key: key, cache: map[string]cachedLeaf{}}, nil
+		return &CA{cert: cert, key: key, dir: dir, cache: map[string]cachedLeaf{}}, nil
 	}
 
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
@@ -151,7 +163,7 @@ func LoadOrCreateCA(dir string) (*CA, error) {
 	if err := writePEMAtomic(keyPath, true, "EC PRIVATE KEY", kder); err != nil {
 		return nil, err
 	}
-	return &CA{cert: cert, key: key, cache: map[string]cachedLeaf{}}, nil
+	return &CA{cert: cert, key: key, dir: dir, cache: map[string]cachedLeaf{}}, nil
 }
 
 // LeafFor returns a leaf certificate for name, minting one when the cache has
@@ -172,7 +184,23 @@ func (c *CA) LeafFor(name string) (*tls.Certificate, error) {
 	if err != nil {
 		return nil, err
 	}
+	// A leaf can never outlive the CA that signed it: past c.cert.NotAfter the
+	// chain fails at the client no matter what the leaf claims. Cap it, and
+	// refuse outright once too little CA life remains to mint something usable
+	// — otherwise the ingress degrades into a per-host TLS error that points
+	// at the client, which is the same failure this expiry work exists to end.
 	notAfter := now.Add(leafLifetime)
+	if notAfter.After(c.cert.NotAfter) {
+		notAfter = c.cert.NotAfter
+	}
+	if !now.Add(leafMinLifetime).Before(c.cert.NotAfter) {
+		return nil, fmt.Errorf(
+			"MITM CA expires at %s, too soon to mint a usable leaf for %q; "+
+				"delete %s and %s to generate a new CA (clients trusting the "+
+				"old one must trust the new bundle)",
+			c.cert.NotAfter.UTC().Format(time.RFC3339), name,
+			filepath.Join(c.dir, "ca-cert.pem"), filepath.Join(c.dir, "ca-key.pem"))
+	}
 	serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
 	if err != nil {
 		return nil, err

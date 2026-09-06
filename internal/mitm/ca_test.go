@@ -2,6 +2,7 @@ package mitm
 
 import (
 	"crypto/x509"
+	"strings"
 	"testing"
 	"time"
 )
@@ -92,5 +93,57 @@ func TestLeafSerialsAreDistinct(t *testing.T) {
 			t.Errorf("serial %s reused across hosts", s)
 		}
 		seen[s] = true
+	}
+}
+
+// A leaf can never outlive the CA that signed it. Near the CA's one-year
+// expiry a nominal 24h leaf produced a chain that failed at the client long
+// before the leaf itself lapsed, and past the expiry LeafFor kept minting
+// unusable certificates forever — loadCA's expiry check runs at startup and is
+// never revisited by a long-running process.
+func TestLeafValidityIsCappedByTheCA(t *testing.T) {
+	dir := t.TempDir()
+	ca, err := LoadOrCreateCA(dir)
+	if err != nil {
+		t.Fatalf("LoadOrCreateCA: %v", err)
+	}
+	caExpiry := ca.cert.NotAfter
+
+	// Six hours of CA life left: the leaf's nominal 24h must be capped.
+	near := caExpiry.Add(-6 * time.Hour)
+	ca.now = func() time.Time { return near }
+	cert, err := ca.LeafFor("api.example.com")
+	if err != nil {
+		t.Fatalf("LeafFor near CA expiry: %v", err)
+	}
+	leaf, err := x509.ParseCertificate(cert.Certificate[0])
+	if err != nil {
+		t.Fatalf("parse leaf: %v", err)
+	}
+	if leaf.NotAfter.After(caExpiry) {
+		t.Errorf("leaf outlives its signer: leaf NotAfter=%s, CA NotAfter=%s — the chain "+
+			"fails at the client while the leaf still looks valid here",
+			leaf.NotAfter.UTC(), caExpiry.UTC())
+	}
+	if !leaf.NotAfter.Equal(caExpiry) {
+		t.Errorf("leaf NotAfter = %s, want the CA's %s", leaf.NotAfter.UTC(), caExpiry.UTC())
+	}
+
+	// Too little CA life to mint anything usable: refuse, and say what to do.
+	ca.now = func() time.Time { return caExpiry.Add(-leafMinLifetime / 2) }
+	if _, err := ca.LeafFor("api.example.com"); err == nil {
+		t.Fatal("minted a leaf with less than leafMinLifetime of CA life remaining")
+	} else {
+		for _, want := range []string{"ca-cert.pem", "ca-key.pem", "delete"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("expiry error does not tell the operator what to do (missing %q): %v", want, err)
+			}
+		}
+	}
+
+	// Past the CA's expiry the answer is the same error, not a certificate.
+	ca.now = func() time.Time { return caExpiry.Add(time.Hour) }
+	if _, err := ca.LeafFor("other.example.com"); err == nil {
+		t.Fatal("minted a leaf from an EXPIRED CA")
 	}
 }

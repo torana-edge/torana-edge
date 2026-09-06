@@ -12,6 +12,7 @@ package mitm
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/tls"
 	"fmt"
@@ -26,10 +27,14 @@ import (
 	"github.com/torana-edge/torana-edge/internal/provider"
 )
 
-// idleTimeout bounds how long a decrypted connection may sit without progress.
-// Generous enough for a slow model response on a live request, short enough
-// that an abandoned connection does not pin a goroutine forever.
+// idleTimeout bounds how long a decrypted connection may sit before its
+// request arrives. It is a READ bound on silence, not a cap on how long the
+// request may then take: a model that streams for half an hour is healthy, and
+// the connection is alive the whole time.
 const idleTimeout = 10 * time.Minute
+
+// handshakeTimeout bounds the TLS handshake itself.
+const handshakeTimeout = 15 * time.Second
 
 // Server is the TLS-terminating CONNECT proxy.
 type Server struct {
@@ -41,6 +46,10 @@ type Server struct {
 	// mu guards listener/closed. ListenAndServe (in its own goroutine) writes
 	// listener while Close, driven by live reconfiguration, may read it
 	// concurrently — the two must not race.
+	// idleTimeout is the pre-request read bound, a field so a test can prove
+	// it does NOT cap a healthy stream without waiting ten minutes for it.
+	idleTimeout time.Duration
+
 	mu       sync.Mutex
 	listener net.Listener
 	conns    map[net.Conn]struct{}
@@ -82,7 +91,8 @@ func New(cfg provider.MITMConfig, toranaHandler http.Handler) (*Server, error) {
 			TLSHandshakeTimeout:   10 * time.Second,
 			ResponseHeaderTimeout: 30 * time.Second,
 		},
-		conns: make(map[net.Conn]struct{}),
+		idleTimeout: idleTimeout,
+		conns:       make(map[net.Conn]struct{}),
 	}, nil
 }
 
@@ -220,7 +230,7 @@ func (s *Server) tunnel(client net.Conn, hostport string) {
 // through the Torana pipeline, everything else is forwarded verbatim.
 func (s *Server) terminate(client net.Conn, hostname string) {
 	defer func() { _ = client.Close() }()
-	if err := client.SetDeadline(time.Now().Add(15 * time.Second)); err != nil {
+	if err := client.SetDeadline(time.Now().Add(handshakeTimeout)); err != nil {
 		return
 	}
 	tlsConn := tls.Server(client, &tls.Config{
@@ -246,10 +256,15 @@ func (s *Server) terminate(client net.Conn, hostname string) {
 	}
 	defer func() { _ = tlsConn.Close() }()
 
-	// An idle bound, not "no deadline at all". Clearing it left a connection
-	// that completed a handshake and then said nothing holding a goroutine and
-	// a TLS conn for the life of the process.
-	if err := client.SetDeadline(time.Now().Add(idleTimeout)); err != nil {
+	// An idle bound on the REQUEST ARRIVING, not "no deadline at all" and not
+	// a cap on serving it. One absolute SetDeadline covered reads AND writes
+	// for the whole connection, so a healthy stream still delivering tokens
+	// ten minutes in was killed mid-response; writes carry their own per-write
+	// bound instead (see writeTimeout), refreshed by actual progress.
+	if err := client.SetWriteDeadline(time.Time{}); err != nil {
+		return
+	}
+	if err := client.SetReadDeadline(time.Now().Add(s.idleTimeout)); err != nil {
 		return
 	}
 
@@ -261,45 +276,101 @@ func (s *Server) terminate(client net.Conn, hostname string) {
 	defer cancel()
 
 	br := bufio.NewReader(tlsConn)
-	for {
-		req, err := http.ReadRequest(br)
-		if err != nil {
-			return
-		}
-		// Each request gets the full idle budget to arrive and be served.
-		if err := client.SetDeadline(time.Now().Add(idleTimeout)); err != nil {
-			return
-		}
-		if !s.dispatch(ctx, tlsConn, req, hostname) {
-			return
-		}
+	req, err := http.ReadRequest(br)
+	if err != nil {
+		return
 	}
+	// The request is in hand, so the idle bound has done its job. Leaving it
+	// armed would turn it into a total request lifetime.
+	if err := client.SetReadDeadline(time.Time{}); err != nil {
+		return
+	}
+	watchPeerGone(ctx, cancel, tlsConn, req)
+	s.dispatch(ctx, tlsConn, req, hostname)
 }
 
-// dispatch handles one decrypted request. It returns true if the connection may
-// be reused for another request.
+// requestBufferLimit caps how much of a request body watchPeerGone will buffer
+// in order to free the socket. Chat requests sit far below it; anything larger
+// keeps streaming off the connection and simply forgoes the watcher rather
+// than being truncated.
+const requestBufferLimit = 32 << 20
+
+// watchPeerGone cancels ctx when the client goes away while Torana is still
+// serving its request.
 //
-// Both paths currently close: Torana streams its responses with Connection:
-// close framing, and forwardVerbatim does the same. The return value is kept
-// rather than inlined as `return` so adding keep-alive to either path is a
-// local change — but note that today the read loop above always exits after
-// one request.
-func (s *Server) dispatch(ctx context.Context, conn net.Conn, req *http.Request, hostname string) bool {
+// terminate's deferred cancel cannot do this on its own: terminate is blocked
+// inside dispatch until the upstream finishes, and that is exactly the window
+// that matters — a harness killed mid-generation should stop the provider
+// generating, and billing, not have the cancel fire once the tokens are
+// already paid for. Only an independent reader notices the peer during it.
+//
+// The body is buffered first so the watcher cannot race the pipeline for its
+// bytes. Waiting for the body to be CONSUMED instead does not work: a handler
+// that never reads it — an early rejection, a plugin veto — would leave the
+// watcher disarmed for the whole request, which is the case that matters most.
+//
+// Once armed, anything arriving would belong to a pipelined request this
+// server does not serve, so bytes are discarded and only a read ERROR counts
+// as the peer being gone. The goroutine exits when the connection closes,
+// which terminate's defers do on every path.
+func watchPeerGone(ctx context.Context, cancel context.CancelFunc, conn net.Conn, req *http.Request) {
+	if req.Body != nil && req.Body != http.NoBody {
+		buf, err := io.ReadAll(io.LimitReader(req.Body, requestBufferLimit+1))
+		if err != nil || len(buf) > requestBufferLimit {
+			// Splice back what was consumed and let the body stream from the
+			// socket as before. The request still works; it just runs without
+			// a disconnect watcher, exactly as every request used to.
+			req.Body = spliced{Reader: io.MultiReader(bytes.NewReader(buf), req.Body), Closer: req.Body}
+			return
+		}
+		_ = req.Body.Close()
+		req.Body = io.NopCloser(bytes.NewReader(buf))
+		req.ContentLength = int64(len(buf))
+	}
+	go func() {
+		buf := make([]byte, 512)
+		for {
+			if _, err := conn.Read(buf); err != nil {
+				cancel()
+				return
+			}
+		}
+	}()
+}
+
+// spliced re-presents a partially consumed body as a single ReadCloser.
+type spliced struct {
+	io.Reader
+	io.Closer
+}
+
+// dispatch handles the one decrypted request this tunnel carries: chat calls
+// go through the Torana pipeline, everything else is forwarded verbatim.
+//
+// One request per tunnel, by construction. Both paths frame their response
+// with Connection: close, the caller closes the connection when dispatch
+// returns, and watchPeerGone is reading the socket by then — a second request
+// could not be parsed off it anyway. What stood here was a read loop and a
+// "the connection may be reused" return value describing keep-alive that
+// neither path implemented and both returned false for.
+func (s *Server) dispatch(ctx context.Context, conn net.Conn, req *http.Request, hostname string) {
 	removeHopByHopHeaders(req.Header)
 	req.TransferEncoding = nil
 	req.Trailer = nil
 	provName := s.cfg.Hosts[hostname]
 	if isChatPath(req.URL.Path) && provName != "" {
 		s.routeThroughTorana(ctx, conn, req, hostname, provName)
-		return false // Torana writes Connection: close-style streamed responses
+		return
 	}
-	return s.forwardVerbatim(ctx, conn, req, hostname)
+	s.forwardVerbatim(ctx, conn, req, hostname)
 }
 
 // routeThroughTorana rewrites the request into a /provider/<name>/… call and
 // runs it through the proxy handler, streaming the response back over conn.
 func (s *Server) routeThroughTorana(ctx context.Context, conn net.Conn, req *http.Request, hostname, provName string) {
-	rw := newConnResponseWriter(conn)
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	rw := newConnResponseWriter(conn, cancel)
 	req = req.WithContext(ctx)
 
 	// Rewrite the path into the provider namespace; the resolver strips it and
@@ -317,13 +388,13 @@ func (s *Server) routeThroughTorana(ctx context.Context, conn net.Conn, req *htt
 }
 
 // forwardVerbatim proxies a non-chat request to the real host unchanged.
-func (s *Server) forwardVerbatim(ctx context.Context, conn net.Conn, req *http.Request, hostname string) bool {
+func (s *Server) forwardVerbatim(ctx context.Context, conn net.Conn, req *http.Request, hostname string) {
 	target := "https://" + hostname + req.URL.RequestURI()
 
 	out, err := http.NewRequestWithContext(ctx, req.Method, target, req.Body)
 	if err != nil {
 		writeSimpleError(conn, 502)
-		return false
+		return
 	}
 	out.ContentLength = req.ContentLength
 	for k, vs := range req.Header {
@@ -336,7 +407,7 @@ func (s *Server) forwardVerbatim(ctx context.Context, conn net.Conn, req *http.R
 	resp, err := s.passthru.RoundTrip(out)
 	if err != nil {
 		writeSimpleError(conn, 502)
-		return false
+		return
 	}
 	defer resp.Body.Close()
 
@@ -351,11 +422,13 @@ func (s *Server) forwardVerbatim(ctx context.Context, conn net.Conn, req *http.R
 		}
 	}
 	hdr += "Connection: close\r\n\r\n"
-	if _, err := conn.Write([]byte(hdr)); err != nil {
-		return false
+	// Per-write deadlines, refreshed by progress: a client that has stopped
+	// reading is cut off without capping how long a healthy transfer may run.
+	cw := deadlineWriter{conn: conn}
+	if _, err := cw.Write([]byte(hdr)); err != nil {
+		return
 	}
-	io.Copy(conn, resp.Body)
-	return false
+	_, _ = io.Copy(cw, resp.Body)
 }
 
 func removeHopByHopHeaders(header http.Header) {
