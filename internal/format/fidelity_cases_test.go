@@ -138,6 +138,57 @@ var fidelityCases = []fidelityCase{
 		survives: []string{"https://x/y.png", "image_url"},
 	},
 	{
+		// Position IS content: an image the caller placed before its caption
+		// means something different after it. Text and unknown parts used to
+		// accumulate in separate buckets concatenated text-first, so every
+		// mixed content array came back reordered.
+		name:   "content array keeps caller order across part kinds",
+		format: "openai",
+		body: `{"model":"m","messages":[{"role":"user","content":[
+			{"type":"image_url","image_url":{"url":"https://x/one.png"}},
+			{"type":"text","text":"A"},
+			{"type":"image_url","image_url":{"url":"https://x/two.png"}},
+			{"type":"text","text":"B"}
+		]}]}`,
+		paths: map[string]any{
+			"messages[0].content[0].type":          "image_url",
+			"messages[0].content[0].image_url.url": "https://x/one.png",
+			"messages[0].content[1].type":          "text",
+			"messages[0].content[1].text":          "A",
+			"messages[0].content[2].type":          "image_url",
+			"messages[0].content[2].image_url.url": "https://x/two.png",
+			"messages[0].content[3].type":          "text",
+			"messages[0].content[3].text":          "B",
+		},
+	},
+	{
+		// The same reordering on the tool-result path: a screenshot followed
+		// by the text explaining it arrived at the model explanation-first.
+		name:   "tool result keeps caller order across part kinds",
+		format: "openai",
+		body: `{"model":"m","messages":[{"role":"tool","tool_call_id":"c1","content":[
+			{"type":"image_url","image_url":{"url":"https://x/shot.png"}},
+			{"type":"text","text":"after"}
+		]}]}`,
+		paths: map[string]any{
+			"messages[0].content[0].type":          "image_url",
+			"messages[0].content[0].image_url.url": "https://x/shot.png",
+			"messages[0].content[1].type":          "text",
+			"messages[0].content[1].text":          "after",
+		},
+	},
+	{
+		// The scalar-string shortcut applies only when the ordered projection
+		// is exactly ONE text part. A lone non-text part stays an array — it
+		// has no scalar spelling.
+		name:   "lone non-text part stays an array",
+		format: "openai",
+		body:   `{"model":"m","messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"https://x/y.png"}}]}]}`,
+		paths: map[string]any{
+			"messages[0].content[0].type": "image_url",
+		},
+	},
+	{
 		name:     "large tool-call integer arguments keep their lexeme",
 		format:   "openai",
 		body:     `{"model":"m","messages":[{"role":"assistant","tool_calls":[{"id":"c","type":"function","function":{"name":"f","arguments":"{\"n\":12345678901234567890}"}}]}]}`,

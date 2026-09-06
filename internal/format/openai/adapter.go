@@ -1382,14 +1382,37 @@ func marshalChat(chat *engine.ChatRequest) ([]byte, error) {
 // breakpoints, trailing signatures, and redacted thinking are
 // unrepresentable; tool_use is assistant-only; tool results ride the native
 // tool-role message shape.
+// chatContentPart is one item of an OpenAI chat message's content array, held
+// in the order its block was visited. isText/text are set only for parts this
+// adapter built from a text block, so the single-text scalar-string form can be
+// recognised without inspecting the marshalled value (an unknown block whose
+// discriminant happens to be "text" is NOT that form).
+type chatContentPart struct {
+	value  any
+	text   string
+	isText bool
+}
+
+func textContentPart(s string) chatContentPart {
+	return chatContentPart{
+		value:  map[string]any{"type": "text", "text": s},
+		text:   s,
+		isText: true,
+	}
+}
+
 func marshalChatMessage(m engine.Message) (marshalMsg, error) {
 	mm := marshalMsg{Role: string(m.Role)}
-	var textParts []string
-	var unknownParts []any
+	// ONE ordered projection, appended to as blocks are visited. Text and
+	// unknown parts used to accumulate in separate buckets that were
+	// concatenated text-first at the end, so every mixed message came back
+	// reordered — [image, text] marshalled as [text, image] — on both the
+	// tool-result path and the ordinary content array.
+	var parts []chatContentPart
 	for i, b := range m.Blocks {
 		switch {
 		case b.Text != nil:
-			textParts = append(textParts, b.Text.Text)
+			parts = append(parts, textContentPart(b.Text.Text))
 		case b.Thinking != nil:
 			// reasoning_content is a passthrough vendor member on this wire,
 			// not modeled thinking with provenance rules, so it mirrors the
@@ -1439,11 +1462,11 @@ func marshalChatMessage(m engine.Message) (marshalMsg, error) {
 					for k, v := range payload {
 						block[k] = json.RawMessage(v)
 					}
-					unknownParts = append(unknownParts, block)
+					parts = append(parts, chatContentPart{value: block})
 				case c.CacheBreakpoint != nil:
 					return mm, fmt.Errorf("openai chat: nested cache breakpoints are not representable")
 				default:
-					textParts = append(textParts, c.Text)
+					parts = append(parts, textContentPart(c.Text))
 				}
 			}
 		case b.CacheBreakpoint != nil:
@@ -1461,7 +1484,7 @@ func marshalChatMessage(m engine.Message) (marshalMsg, error) {
 			for k, v := range payload {
 				block[k] = json.RawMessage(v)
 			}
-			unknownParts = append(unknownParts, block)
+			parts = append(parts, chatContentPart{value: block})
 		case b.RedactedThinking != nil:
 			return mm, fmt.Errorf("openai chat: redacted_thinking block %d is not representable", i)
 		case b.TrailingSignature != nil:
@@ -1471,21 +1494,21 @@ func marshalChatMessage(m engine.Message) (marshalMsg, error) {
 		}
 	}
 
-	// Content: a single text part emits a string; multiple/empty text parts
-	// or unknown parts emit a content ARRAY preserving positions.
+	// Content: the scalar-string form applies ONLY when the ordered projection
+	// is exactly one text part. Everything else — a lone unknown part, any mix,
+	// any repetition — emits the content ARRAY in visit order.
 	switch {
-	case len(unknownParts) > 0 || len(textParts) > 1:
-		content := make([]any, 0, len(textParts)+len(unknownParts))
-		for _, t := range textParts {
-			content = append(content, map[string]any{"type": "text", "text": t})
+	case len(parts) > 1, len(parts) == 1 && !parts[0].isText:
+		content := make([]any, 0, len(parts))
+		for _, p := range parts {
+			content = append(content, p.value)
 		}
-		content = append(content, unknownParts...)
 		mm.Content = content
-	case len(textParts) == 1 && textParts[0] != "":
-		mm.Content = textParts[0]
+	case len(parts) == 1 && parts[0].text != "":
+		mm.Content = parts[0].text
 	case m.Role == engine.RoleAssistant && len(mm.ToolCalls) > 0:
 		mm.Content = json.RawMessage("null")
-	case len(textParts) == 1:
+	case len(parts) == 1:
 		mm.Content = ""
 	}
 	return mm, nil
