@@ -81,3 +81,58 @@ func TestResponsesOpaqueItemsSurviveKnownMessageMutation(t *testing.T) {
 		t.Fatalf("unexpected mutated round trip: %s", encoded)
 	}
 }
+
+func TestResponsesCodexCustomToolItemsRemainOpaque(t *testing.T) {
+	original := []byte(`{
+  "model":"gpt-5.6-sol",
+  "input":[
+    {"type":"message","role":"user","content":[{"type":"input_text","text":"run it"}]},
+    {"type":"custom_tool_call","call_id":"call_1","name":"exec","input":"sed -n '1p' marker.txt"},
+    {"type":"custom_tool_call_output","call_id":"call_1","output":[{"type":"input_text","text":"TORANA_TOOL_PATH_OK"}]}
+  ]
+}`)
+
+	chat, err := (&Adapter{}).Unmarshal(original)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(chat.Messages) != 1 {
+		t.Fatalf("projected messages = %d, want only the representable message", len(chat.Messages))
+	}
+	encoded, err := (&Adapter{}).Marshal(chat)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got struct {
+		Input []json.RawMessage `json:"input"`
+	}
+	if err := json.Unmarshal(encoded, &got); err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Input) != 3 {
+		t.Fatalf("input item count = %d, want 3: %s", len(got.Input), encoded)
+	}
+	for _, i := range []int{1, 2} {
+		var want, actual any
+		if err := json.Unmarshal(mustInputItem(t, original, i), &want); err != nil {
+			t.Fatal(err)
+		}
+		if err := json.Unmarshal(got.Input[i], &actual); err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(actual, want) {
+			t.Fatalf("opaque item %d changed:\n got %s\nwant %s", i, got.Input[i], mustInputItem(t, original, i))
+		}
+	}
+}
+
+func mustInputItem(t *testing.T, body []byte, index int) json.RawMessage {
+	t.Helper()
+	var envelope struct {
+		Input []json.RawMessage `json:"input"`
+	}
+	if err := json.Unmarshal(body, &envelope); err != nil {
+		t.Fatal(err)
+	}
+	return envelope.Input[index]
+}
