@@ -307,15 +307,15 @@ func (s *Store) flush() error {
 	// 0600: plugin state can hold prompt fragments and other things the
 	// operator would not want world-readable.
 	if err := tmp.Chmod(0o600); err != nil {
-		tmp.Close()
+		_ = tmp.Close()
 		return fmt.Errorf("plugin state: chmod: %w", err)
 	}
 	if _, err := tmp.Write(raw); err != nil {
-		tmp.Close()
+		_ = tmp.Close()
 		return fmt.Errorf("plugin state: write: %w", err)
 	}
 	if err := tmp.Sync(); err != nil {
-		tmp.Close()
+		_ = tmp.Close()
 		return fmt.Errorf("plugin state: sync: %w", err)
 	}
 	if err := tmp.Close(); err != nil {
@@ -332,7 +332,7 @@ func (s *Store) flush() error {
 		return fmt.Errorf("plugin state: open directory %s: %w", dir, err)
 	}
 	if err := dirHandle.Sync(); err != nil {
-		dirHandle.Close()
+		_ = dirHandle.Close()
 		return fmt.Errorf("plugin state: sync directory %s: %w", dir, err)
 	}
 	if err := dirHandle.Close(); err != nil {

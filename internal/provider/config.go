@@ -924,12 +924,12 @@ func Save(path string, cfg Config) error {
 	tmpName := tmpFile.Name()
 
 	if _, err := tmpFile.Write(data); err != nil {
-		tmpFile.Close()
+		_ = tmpFile.Close()
 		_ = os.Remove(tmpName)
 		return fmt.Errorf("writing temp config file: %w", err)
 	}
 	if err := tmpFile.Sync(); err != nil {
-		tmpFile.Close()
+		_ = tmpFile.Close()
 		_ = os.Remove(tmpName)
 		return fmt.Errorf("syncing temp config file: %w", err)
 	}

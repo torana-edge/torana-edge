@@ -240,7 +240,7 @@ func runMemorySummary(args []string) error {
 	if err != nil {
 		return err
 	}
-	defer results.Close()
+	defer func() { _ = results.Close() }()
 	return summarizeMemory(results, *profileDir, os.Stdout)
 }
 

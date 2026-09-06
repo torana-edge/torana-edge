@@ -257,6 +257,11 @@ func TestStreamDispatchUsesHookOrder(t *testing.T) {
 
 func TestTickDispatchUsesHookOrder(t *testing.T) {
 	const fixtures = "../../examples/plugins"
+	// Gate on the fixture like every other test in this package. Reading it
+	// directly made this the one test that FAILED on an unbuilt tree while its
+	// 58 siblings skipped — a single confusing failure in a run that was
+	// otherwise silently covering nothing.
+	requireWASM(t, fixtures+"/test-ticker/plugin.wasm")
 	manifest, err := os.ReadFile(fixtures + "/test-ticker/plugin.json")
 	if err != nil {
 		t.Fatal(err)

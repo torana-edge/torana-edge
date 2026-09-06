@@ -29,7 +29,7 @@ func NewRedisStore(addr, password string, db int, prefix string, ttl time.Durati
 	ctx, cancel := context.WithTimeout(context.Background(), redisOpTimeout)
 	defer cancel()
 	if err := client.Ping(ctx).Err(); err != nil {
-		client.Close()
+		_ = client.Close()
 		return nil, err
 	}
 	return &RedisStore{client: client, ttl: ttl, prefix: prefix}, nil

@@ -40,11 +40,11 @@ func TestEstimateSavingsChargesBatchRewriteOnce(t *testing.T) {
 	if est.UnavailableReason != "" || est.EstimatedGrossUSD == nil || est.EstimatedNetUSD == nil {
 		t.Fatalf("estimate unavailable: %+v", est)
 	}
-	if got, want := *est.EstimatedGrossUSD, 0.38; !close(got, want) {
+	if got, want := *est.EstimatedGrossUSD, 0.38; !nearlyEqual(got, want) {
 		t.Fatalf("gross=%f want %f", got, want)
 	}
 	// 0.38 - one 15k-token rewrite premium at (6.25 - 0.5)/MTok.
-	if got, want := *est.EstimatedNetUSD, 0.29375; !close(got, want) {
+	if got, want := *est.EstimatedNetUSD, 0.29375; !nearlyEqual(got, want) {
 		t.Fatalf("net=%f want %f", got, want)
 	}
 }
@@ -72,7 +72,7 @@ func TestUsageCostDoesNotDoubleChargeCacheReads(t *testing.T) {
 		t.Fatal("cost unexpectedly unavailable")
 	}
 	// 200 uncached * $2/M + 800 cached * $0.2/M + 100 output * $4/M.
-	if want := 0.00096; !close(got, want) {
+	if want := 0.00096; !nearlyEqual(got, want) {
 		t.Fatalf("cost=%f want %f", got, want)
 	}
 }
@@ -81,7 +81,7 @@ func TestApplicationSavingsDoesNotProjectCacheReuse(t *testing.T) {
 	p := ModelPricing{CacheReadUSDPerMTok: rate(0.5), CacheWriteUSDPerMTok: rate(1)}
 	r := CompactionReport{EstimatedTokensRemoved: 10_000, ExpectedApplications: 100, Source: "cache_reuse"}
 	est := EstimateApplicationSavings(r, p, nil)
-	if est.EstimatedNetUSD == nil || !close(*est.EstimatedNetUSD, 0.005) {
+	if est.EstimatedNetUSD == nil || !nearlyEqual(*est.EstimatedNetUSD, 0.005) {
 		t.Fatalf("cache reuse must count one realized application, got %+v", est)
 	}
 }
@@ -169,7 +169,7 @@ func TestSavingsEstimatorsRejectNonFiniteRatesAndResults(t *testing.T) {
 	}
 }
 
-func close(a, b float64) bool {
+func nearlyEqual(a, b float64) bool {
 	d := a - b
 	if d < 0 {
 		d = -d

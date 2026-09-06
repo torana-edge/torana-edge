@@ -5,21 +5,14 @@ import (
 	"os"
 	"testing"
 
+	"github.com/torana-edge/torana-edge/internal/testfixture"
 	sdk "github.com/torana-edge/torana-plugin-sdk"
 	pb "github.com/torana-edge/torana-plugin-sdk/pb/v1"
 )
 
 // requireWASM skips locally when the plugin binary is missing but fails in
 // CI (TORANA_E2E=1) so missing binaries can never silently disable coverage.
-func requireWASM(t *testing.T, path string) {
-	t.Helper()
-	if _, err := os.Stat(path); err != nil {
-		if os.Getenv("TORANA_E2E") != "" {
-			t.Fatalf("%s missing — run 'make testdata' (err: %v)", path, err)
-		}
-		t.Skipf("%s not built — run 'make testdata'", path)
-	}
-}
+func requireWASM(t *testing.T, path string) { testfixture.Require(t, path) }
 
 // TestLoadRealPlugins loads every in-repo plugin binary and validates that
 // each exports the hooks its manifest declares.

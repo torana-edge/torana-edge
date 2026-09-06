@@ -252,27 +252,27 @@ type capturedToolDef struct {
 func decodeCaptured(body string) (capturedAnthropicRequest, error) {
 	dec := json.NewDecoder(strings.NewReader(body))
 	dec.DisallowUnknownFields()
-	var cap capturedAnthropicRequest
-	if err := dec.Decode(&cap); err != nil {
-		return cap, err
+	var capturedReq capturedAnthropicRequest
+	if err := dec.Decode(&capturedReq); err != nil {
+		return capturedReq, err
 	}
 	// The normative trailing check: a real second Decode that must return
 	// io.EOF. A nil error means a second JSON value was present.
 	var extra any
 	if err := dec.Decode(&extra); err != io.EOF {
-		return cap, fmt.Errorf("trailing JSON after the captured request: %v", err)
+		return capturedReq, fmt.Errorf("trailing JSON after the captured request: %v", err)
 	}
-	return cap, nil
+	return capturedReq, nil
 }
 
 // mustDecodeCaptured is the test-asserting wrapper for decodeCaptured.
 func mustDecodeCaptured(t *testing.T, body string) capturedAnthropicRequest {
 	t.Helper()
-	cap, err := decodeCaptured(body)
+	capturedReq, err := decodeCaptured(body)
 	if err != nil {
 		t.Fatalf("decode captured request: %v", err)
 	}
-	return cap
+	return capturedReq
 }
 
 // decodeNested decodes ONE raw nested JSON value with the same strict
@@ -299,26 +299,26 @@ func decodeNested(raw json.RawMessage, v any) error {
 // content is exactly two typed text blocks in order with the exact strings.
 // It returns an error so weakened-form rows can assert failure without a
 // t.Fatal-based helper.
-func checkCleanTopology(cap capturedAnthropicRequest) error {
+func checkCleanTopology(capturedReq capturedAnthropicRequest) error {
 	const systemText = "You are a coding agent. Read files and report their contents."
 	switch {
-	case cap.System.String != nil:
-		if *cap.System.String != systemText || len(cap.System.Blocks) != 0 {
-			return fmt.Errorf("system string = %+v", cap.System)
+	case capturedReq.System.String != nil:
+		if *capturedReq.System.String != systemText || len(capturedReq.System.Blocks) != 0 {
+			return fmt.Errorf("system string = %+v", capturedReq.System)
 		}
-	case len(cap.System.Blocks) == 1:
-		if err := validateBlockArm(&cap.System.Blocks[0]); err != nil {
+	case len(capturedReq.System.Blocks) == 1:
+		if err := validateBlockArm(&capturedReq.System.Blocks[0]); err != nil {
 			return fmt.Errorf("system block: %v", err)
 		}
-		if cap.System.Blocks[0].Text == nil || *cap.System.Blocks[0].Text != systemText {
-			return fmt.Errorf("system block = %+v", cap.System.Blocks[0])
+		if capturedReq.System.Blocks[0].Text == nil || *capturedReq.System.Blocks[0].Text != systemText {
+			return fmt.Errorf("system block = %+v", capturedReq.System.Blocks[0])
 		}
 	default:
-		return fmt.Errorf("system value = %+v, want exact string or one text block", cap.System)
+		return fmt.Errorf("system value = %+v, want exact string or one text block", capturedReq.System)
 	}
 
-	if len(cap.Tools) != 1 || cap.Tools[0].Name != "read_file" || cap.Tools[0].Description != "Read a file from the repository" {
-		return fmt.Errorf("tools = %+v", cap.Tools)
+	if len(capturedReq.Tools) != 1 || capturedReq.Tools[0].Name != "read_file" || capturedReq.Tools[0].Description != "Read a file from the repository" {
+		return fmt.Errorf("tools = %+v", capturedReq.Tools)
 	}
 	// The input schema is exact: type object, exactly the path property whose
 	// own schema is exactly {type:"string"}, exactly the required list.
@@ -330,7 +330,7 @@ func checkCleanTopology(cap capturedAnthropicRequest) error {
 		Properties map[string]json.RawMessage `json:"properties"`
 		Required   []string                   `json:"required"`
 	}
-	if err := decodeNested(cap.Tools[0].InputSchema, &schema); err != nil {
+	if err := decodeNested(capturedReq.Tools[0].InputSchema, &schema); err != nil {
 		return fmt.Errorf("tool input_schema: %v", err)
 	}
 	if schema.Type != "object" || len(schema.Properties) != 1 || len(schema.Required) != 1 || schema.Required[0] != "path" {
@@ -347,10 +347,10 @@ func checkCleanTopology(cap capturedAnthropicRequest) error {
 		return fmt.Errorf("path property schema = %+v, want exactly {type:string}", pathSchema)
 	}
 
-	if len(cap.Messages) != 2 {
-		return fmt.Errorf("messages = %d, want 2", len(cap.Messages))
+	if len(capturedReq.Messages) != 2 {
+		return fmt.Errorf("messages = %d, want 2", len(capturedReq.Messages))
 	}
-	assistant := cap.Messages[0]
+	assistant := capturedReq.Messages[0]
 	if assistant.Role != "assistant" || len(assistant.Content) != 1 {
 		return fmt.Errorf("assistant message = %+v", assistant)
 	}
@@ -371,7 +371,7 @@ func checkCleanTopology(cap capturedAnthropicRequest) error {
 		return fmt.Errorf("tool_use input = %+v", input)
 	}
 
-	user := cap.Messages[1]
+	user := capturedReq.Messages[1]
 	if user.Role != "user" || len(user.Content) != 1 {
 		return fmt.Errorf("user message = %+v", user)
 	}
@@ -403,9 +403,9 @@ func checkCleanTopology(cap capturedAnthropicRequest) error {
 
 // assertCleanTopology is the thin test-asserting wrapper for the structural
 // check.
-func assertCleanTopology(t *testing.T, cap capturedAnthropicRequest) {
+func assertCleanTopology(t *testing.T, capturedReq capturedAnthropicRequest) {
 	t.Helper()
-	if err := checkCleanTopology(cap); err != nil {
+	if err := checkCleanTopology(capturedReq); err != nil {
 		t.Fatalf("%v", err)
 	}
 }
@@ -413,13 +413,13 @@ func assertCleanTopology(t *testing.T, cap capturedAnthropicRequest) {
 // assertCapturedHeader pins the unchanged request header: the requested model
 // and absence of max_tokens. Adapter defaults are internal semantics, not
 // provider-visible mutations; the zero-copy path must not invent the member.
-func assertCapturedHeader(t *testing.T, cap capturedAnthropicRequest) {
+func assertCapturedHeader(t *testing.T, capturedReq capturedAnthropicRequest) {
 	t.Helper()
-	if cap.Model != "claude-3-5-sonnet" {
-		t.Fatalf("model = %q, want claude-3-5-sonnet", cap.Model)
+	if capturedReq.Model != "claude-3-5-sonnet" {
+		t.Fatalf("model = %q, want claude-3-5-sonnet", capturedReq.Model)
 	}
-	if cap.MaxTokens != nil {
-		t.Fatalf("max_tokens = %v, want absent as supplied by the caller", cap.MaxTokens)
+	if capturedReq.MaxTokens != nil {
+		t.Fatalf("max_tokens = %v, want absent as supplied by the caller", capturedReq.MaxTokens)
 	}
 }
 
@@ -553,11 +553,11 @@ func TestPIIAnthropicToolResultArrayBlockStringSystem(t *testing.T) {
 	if got[0] != cleanBody {
 		t.Fatalf("unchanged string-system request was re-encoded:\n got: %s\nwant: %s", got[0], cleanBody)
 	}
-	cap := mustDecodeCaptured(t, got[0])
-	assertCapturedHeader(t, cap)
-	assertCleanTopology(t, cap)
-	if cap.System.String == nil || len(cap.System.Blocks) != 0 {
-		t.Fatalf("system arm = %+v, want the original string arm", cap.System)
+	capturedReq := mustDecodeCaptured(t, got[0])
+	assertCapturedHeader(t, capturedReq)
+	assertCleanTopology(t, capturedReq)
+	if capturedReq.System.String == nil || len(capturedReq.System.Blocks) != 0 {
+		t.Fatalf("system arm = %+v, want the original string arm", capturedReq.System)
 	}
 
 	// 2. Blocked twin with a STRING system and the PII-bearing array-valued
@@ -612,18 +612,18 @@ func TestPIIAnthropicToolResultArrayBlock(t *testing.T) {
 	if got[0] != cleanBody {
 		t.Fatalf("unchanged array-system request was re-encoded:\n got: %s\nwant: %s", got[0], cleanBody)
 	}
-	cap := mustDecodeCaptured(t, got[0])
-	assertCapturedHeader(t, cap)
-	assertCleanTopology(t, cap)
-	if cap.System.String != nil || len(cap.System.Blocks) != 1 {
-		t.Fatalf("system arm = %+v, want the original one-block array arm", cap.System)
+	capturedReq := mustDecodeCaptured(t, got[0])
+	assertCapturedHeader(t, capturedReq)
+	assertCleanTopology(t, capturedReq)
+	if capturedReq.System.String != nil || len(capturedReq.System.Blocks) != 1 {
+		t.Fatalf("system arm = %+v, want the original one-block array arm", capturedReq.System)
 	}
 
 	// Live weakened-form rows on the REAL captured bytes: a known-union field
 	// injected into the wrong arm must fail the structural check even though
 	// it is a valid JSON member of the shared struct. Each row re-decodes the
 	// immutable body so no row shares a slice backing array with another
-	// (spoofed := cap would let an earlier mutation leak into later rows),
+	// (spoofed := capturedReq would let an earlier mutation leak into later rows),
 	// and each row requires an error NAMING its intended arm so it cannot
 	// pass because some unrelated mutation happened to fail the check.
 	liveSpoofs := []struct {

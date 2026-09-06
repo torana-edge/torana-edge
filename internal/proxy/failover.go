@@ -211,7 +211,7 @@ func (t *failoverRoundTripper) RoundTrip(req *http.Request) (*http.Response, err
 }
 
 func shouldRetry(resp *http.Response) bool {
-	return resp.StatusCode == 429 || resp.StatusCode >= 500
+	return resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= http.StatusInternalServerError
 }
 
 func extractFallbacks(req *http.Request, cfg provider.Config) (string, []string) {

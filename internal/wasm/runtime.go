@@ -501,7 +501,7 @@ func (p *Plugin) release(inst *pluginInstance) {
 	case p.pool <- inst:
 	default:
 		// Pool full — close the extra instance.
-		inst.mod.Close(context.Background())
+		_ = inst.mod.Close(context.Background())
 	}
 }
 
@@ -1528,7 +1528,15 @@ func (r *Runtime) installHostFunctions() {
 		return writeBytes(ctx, mod, r.dispatchHostCall(ctx, pluginNameOf(mod), cmd, args))
 	}).Export("host_call")
 
-	env.Instantiate(r.ctx)
+	// A failure here can only come from a defect in the host module built
+	// immediately above — a duplicate export name or a signature wazero
+	// rejects — never from configuration or guest input. Swallowing it would
+	// hand every plugin a runtime with no host functions at all, which fails
+	// later as an inscrutable missing-import error against the guest. Panic
+	// for the same reason the WASI import above uses MustInstantiate.
+	if _, err := env.Instantiate(r.ctx); err != nil {
+		panic("wasm: install host functions: " + err.Error())
+	}
 }
 
 func compactionPricingResources(p *Plugin, report economics.CompactionReport) (PricingResource, *PricingResource, *pbv1.HostError) {

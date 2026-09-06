@@ -3,25 +3,17 @@ package proxy
 import (
 	"context"
 	"encoding/json"
-	"os"
 	"strings"
 	"testing"
 
 	"github.com/torana-edge/torana-edge/internal/plugin"
+	"github.com/torana-edge/torana-edge/internal/testfixture"
 	"github.com/torana-edge/torana-edge/internal/wasm"
 )
 
 // requireWASM skips locally when the plugin binary is missing but fails in
 // CI (TORANA_E2E=1) so missing binaries can never silently disable coverage.
-func requireWASM(t *testing.T, path string) {
-	t.Helper()
-	if _, err := os.Stat(path); err != nil {
-		if os.Getenv("TORANA_E2E") != "" {
-			t.Fatalf("%s missing — run 'make testdata' (err: %v)", path, err)
-		}
-		t.Skipf("%s not built — run 'make testdata'", path)
-	}
-}
+func requireWASM(t *testing.T, path string) { testfixture.Require(t, path) }
 
 func newPluginPipeline(t *testing.T, pluginDir string, order ...string) *plugin.PluginPipeline {
 	t.Helper()
