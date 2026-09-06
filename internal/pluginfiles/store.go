@@ -444,6 +444,29 @@ func (s *Store) OperatorRead(plugin, logical string) ([]byte, error) {
 	return os.ReadFile(path)
 }
 
+// OperatorPath returns the absolute local path backing a plugin's logical
+// file. It is an operator-only escape hatch for standard local tools such as
+// tail, jq, and grep; guests continue to see only logical resource names.
+//
+// The file need not exist yet. This lets `tail -F` start before the plugin
+// writes its first record. target performs the same traversal and absolute
+// path rejection used by every file operation, while the hashed plugin
+// directory prevents the caller-controlled plugin name becoming a path.
+func (s *Store) OperatorPath(plugin, logical string) (string, error) {
+	if plugin == "" {
+		return "", fmt.Errorf("plugin name is required")
+	}
+	path, err := s.target(plugin, logical)
+	if err != nil {
+		return "", err
+	}
+	path, err = filepath.Abs(path)
+	if err != nil {
+		return "", fmt.Errorf("resolve plugin file path: %w", err)
+	}
+	return filepath.Clean(path), nil
+}
+
 func (s *Store) OperatorPurge(plugin string) error {
 	locks := s.pluginLocks(plugin)
 	locks.admin.Lock()

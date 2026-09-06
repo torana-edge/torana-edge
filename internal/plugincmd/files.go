@@ -42,13 +42,23 @@ func listPluginFiles(args []string, stdout io.Writer) error {
 
 func pluginFile(args []string, stdout io.Writer) error {
 	if len(args) < 2 {
-		return errors.New("usage: torana plugin file <read|tail|purge> <name> [logical-path]")
+		return errors.New("usage: torana plugin file <path|read|tail|purge> <name> [logical-path]")
 	}
 	store, err := operatorFileStore()
 	if err != nil {
 		return err
 	}
 	switch args[0] {
+	case "path":
+		if len(args) != 3 {
+			return errors.New("usage: torana plugin file path <name> <logical-path>")
+		}
+		path, err := store.OperatorPath(args[1], args[2])
+		if err != nil {
+			return err
+		}
+		_, err = fmt.Fprintln(stdout, path)
+		return err
 	case "read":
 		if len(args) != 3 {
 			return errors.New("usage: torana plugin file read <name> <logical-path>")

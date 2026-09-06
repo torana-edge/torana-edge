@@ -123,11 +123,13 @@ capability subset and private-file budget, then enable `usage_logger` and put it
 in the pipeline. Send a few requests and inspect its content-free output:
 
 ```bash
-./torana plugin file tail usage_logger usage.jsonl
+tail -F "$(./torana plugin file path usage_logger usage.jsonl)"
 ```
 
 Installation alone never approves, enables, or runs anything, and the plugin
-cannot pick an OS path: Torana owns the private rotating file.
+cannot pick an OS path: Torana owns the private rotating file. The operator can
+resolve that local path for standard Unix tools; `tail -F` continues following
+it when Torana rotates the file.
 
 Once that lifecycle is clear, the maintained set can be built locally with:
 

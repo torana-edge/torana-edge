@@ -51,6 +51,7 @@ func Usage(w io.Writer) {
 	_, _ = fmt.Fprintln(w, "  torana plugin list [--dir plugins]")
 	_, _ = fmt.Fprintln(w, "  torana plugin remove <name>... [--dir plugins]")
 	_, _ = fmt.Fprintln(w, "  torana plugin files <name>")
+	_, _ = fmt.Fprintln(w, "  torana plugin file path <name> <logical-path>")
 	_, _ = fmt.Fprintln(w, "  torana plugin file read <name> <logical-path>")
 	_, _ = fmt.Fprintln(w, "  torana plugin file tail <name> <logical-path> [--follow]")
 	_, _ = fmt.Fprintln(w, "  torana plugin file purge <name>")

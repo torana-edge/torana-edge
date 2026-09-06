@@ -120,12 +120,15 @@ Torana is currently pre-release, so this walkthrough builds the reviewed
    result without opening the plugin sandbox:
 
    ```bash
-   ./torana plugin file tail usage_logger usage.jsonl
+   tail -F "$(./torana plugin file path usage_logger usage.jsonl)"
    ```
 
    Each line contains provider, model, latency, status, and input/output/cache
    token counts—never prompts, responses, or headers. A changed bundle must be
-   approved again.
+   approved again. The `path` command prints only the absolute local path, so
+   ordinary tools such as `tail`, `jq`, and `grep` work without teaching them
+   about Torana. `plugin file tail` remains available when a self-contained
+   Torana command is more convenient.
 
 6. When you are comfortable with that lifecycle, install the maintained set:
 

@@ -182,3 +182,33 @@ func TestStoreRejectsTraversalAndLinks(t *testing.T) {
 		t.Fatal("symlink target accepted")
 	}
 }
+
+func TestOperatorPathIsAbsoluteSafeAndDoesNotRequireExistingFile(t *testing.T) {
+	root := t.TempDir()
+	store, err := New(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path, err := store.OperatorPath("usage_logger", "nested/usage.jsonl")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !filepath.IsAbs(path) {
+		t.Fatalf("path is not absolute: %q", path)
+	}
+	want := filepath.Join(pluginDir(root, "usage_logger"), "nested", "usage.jsonl")
+	if path != want {
+		t.Fatalf("path = %q, want %q", path, want)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("path lookup created the file: %v", err)
+	}
+	for _, logical := range []string{"", "../usage.jsonl", "/tmp/usage.jsonl", `nested\usage.jsonl`} {
+		if got, err := store.OperatorPath("usage_logger", logical); err == nil {
+			t.Errorf("unsafe path %q resolved to %q", logical, got)
+		}
+	}
+	if got, err := store.OperatorPath("", "usage.jsonl"); err == nil {
+		t.Errorf("empty plugin resolved to %q", got)
+	}
+}
