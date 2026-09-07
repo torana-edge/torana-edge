@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/torana-edge/torana-edge/internal/fileperm"
 	"github.com/torana-edge/torana-edge/internal/secret"
 )
 
@@ -78,7 +79,7 @@ func TestPersistence(t *testing.T) {
 	}
 }
 
-func TestKeyFileMode(t *testing.T) {
+func TestKeyFileAndDataDirAreOwnerOnly(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.Chmod(dir, 0o755); err != nil {
 		t.Fatal(err)
@@ -94,16 +95,19 @@ func TestKeyFileMode(t *testing.T) {
 		t.Fatalf("Stat secret.key failed: %v", err)
 	}
 
-	mode := info.Mode().Perm()
-	if mode != 0600 {
-		t.Fatalf("secret.key mode got %o, want 0600", mode)
+	// The key that decrypts every stored provider credential must be readable
+	// only by its owner. That invariant is mode bits on Unix and a DACL on
+	// Windows, where Perm() reports 0666 for any readable file whatever its
+	// ACL says — asserting the bits there proved nothing and failed anyway.
+	if err := fileperm.Verify(keyPath, info); err != nil {
+		t.Errorf("secret.key is not owner-only: %v", err)
 	}
 	dirInfo, err := os.Stat(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := dirInfo.Mode().Perm(); got != 0o700 {
-		t.Fatalf("data directory mode got %o, want 700", got)
+	if err := fileperm.Verify(dir, dirInfo); err != nil {
+		t.Errorf("data directory is not owner-only: %v", err)
 	}
 }
 

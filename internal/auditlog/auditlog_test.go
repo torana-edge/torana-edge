@@ -5,8 +5,11 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"testing"
+
+	"github.com/torana-edge/torana-edge/internal/fileperm"
 )
 
 func TestDisabledWriterNeverTouchesFilesystemOrRecord(t *testing.T) {
@@ -62,28 +65,48 @@ func TestWriterProducesExactOwnerOnlyJSONLines(t *testing.T) {
 	if string(b) != "{\"provider\":\"anthropic\",\"schema_version\":1}\n" {
 		t.Fatalf("line = %q", b)
 	}
+	// The invariant is "only the owner can read the audit trail", not "the
+	// mode bits are 0600". Those are the same sentence on Unix and unrelated
+	// on Windows, where Perm() reports 0666 for any readable file whatever
+	// its ACL says — so asserting the bits there proved nothing and failed
+	// anyway. fileperm.Verify asks the platform the real question.
 	info, err := os.Stat(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := info.Mode().Perm(); got != 0o600 {
-		t.Fatalf("mode = %o, want 600", got)
+	if err := fileperm.Verify(path, info); err != nil {
+		t.Fatalf("audit file is not owner-only: %v", err)
 	}
 }
 
 func TestWriterRejectsUnsafeExistingTargets(t *testing.T) {
 	dir := t.TempDir()
+	// Widely accessible on both platforms: 0644 on Unix, and on Windows a
+	// file created without an explicit DACL inherits the directory's, which
+	// fileperm refuses because it is not protected.
 	worldReadable := filepath.Join(dir, "world.jsonl")
 	if err := os.WriteFile(worldReadable, nil, 0o644); err != nil {
 		t.Fatal(err)
 	}
+	unsafe := []string{dir, worldReadable}
+
+	// Windows only permits symlink creation with Developer Mode or elevation,
+	// so its absence is an environment fact, not a failure of this code.
 	symlink := filepath.Join(dir, "link.jsonl")
-	if err := os.Symlink(worldReadable, symlink); err != nil {
+	if err := os.Symlink(worldReadable, symlink); err == nil {
+		unsafe = append(unsafe, symlink)
+	} else if runtime.GOOS != "windows" {
 		t.Fatal(err)
 	}
-	for _, path := range []string{dir, worldReadable, symlink} {
-		if _, err := Open(Config{Enabled: true, Path: path}); err == nil {
-			t.Fatalf("unsafe target %q accepted", path)
+
+	for _, path := range unsafe {
+		w, err := Open(Config{Enabled: true, Path: path})
+		if err == nil {
+			// Close the writer we did not expect to get. Leaving the handle
+			// open makes t.TempDir's cleanup fail on Windows and buries the
+			// real failure under an unrelated one.
+			_ = w.Close()
+			t.Errorf("unsafe target %q accepted", path)
 		}
 	}
 }

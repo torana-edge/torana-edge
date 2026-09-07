@@ -10,6 +10,8 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+
+	"github.com/torana-edge/torana-edge/internal/fileperm"
 	"strings"
 )
 
@@ -31,33 +33,64 @@ func Open(dataDir string) (*Store, error) {
 	if err := os.MkdirAll(dataDir, 0o700); err != nil {
 		return nil, fmt.Errorf("failed to create data directory: %w", err)
 	}
-	if err := os.Chmod(dataDir, 0o700); err != nil {
+	if err := fileperm.RestrictDir(dataDir); err != nil {
 		return nil, fmt.Errorf("securing data directory: %w", err)
 	}
 
 	keyPath := filepath.Join(dataDir, "secret.key")
-	key, err := os.ReadFile(keyPath)
+	key, err := readExistingKey(keyPath)
 	if errors.Is(err, os.ErrNotExist) {
 		key = make([]byte, 32)
 		if _, err := io.ReadFull(rand.Reader, key); err != nil {
 			return nil, fmt.Errorf("failed to generate random key: %w", err)
 		}
-		if err := os.WriteFile(keyPath, key, 0600); err != nil {
+		if err := fileperm.WriteNew(keyPath, key); err != nil {
 			return nil, fmt.Errorf("failed to write secret key file: %w", err)
 		}
 	} else if err != nil {
-		return nil, fmt.Errorf("failed to read secret key file: %w", err)
-	} else if len(key) != 32 {
-		return nil, fmt.Errorf("invalid key length in secret key file: expected 32 bytes, got %d", len(key))
-	} else {
-		// Enforce 0600 permissions on pre-existing key file.
-		_ = os.Chmod(keyPath, 0600)
+		return nil, err
 	}
 
 	keyCopy := make([]byte, len(key))
 	copy(keyCopy, key)
 
 	return &Store{key: keyCopy}, nil
+}
+
+// readExistingKey reads the key through ONE handle: opened, restricted,
+// checked on that handle, and only then read.
+//
+// A pre-existing key file is repaired and then CHECKED. The repair alone used
+// to be `_ = os.Chmod(...)` with its error discarded, and on Windows that call
+// cannot express the invariant at all, so a key file readable by anyone stayed
+// readable by anyone and Torana said nothing. This key decrypts every stored
+// provider credential.
+//
+// The check is on the descriptor rather than the path because a name can be
+// made to resolve elsewhere between the two: checking the PATH and reading it
+// separately would let a safe replacement be verified while the original is
+// the one actually read.
+func readExistingKey(keyPath string) ([]byte, error) {
+	f, err := os.Open(keyPath)
+	if err != nil {
+		return nil, err // includes os.ErrNotExist, which the caller acts on
+	}
+	defer func() { _ = f.Close() }()
+
+	if err := fileperm.Restrict(keyPath); err != nil {
+		return nil, fmt.Errorf("securing secret key file: %w", err)
+	}
+	if err := fileperm.VerifyFile(f); err != nil {
+		return nil, fmt.Errorf("secret key file: %w", err)
+	}
+	key, err := io.ReadAll(f)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read secret key file: %w", err)
+	}
+	if len(key) != 32 {
+		return nil, fmt.Errorf("invalid key length in secret key file: expected 32 bytes, got %d", len(key))
+	}
+	return key, nil
 }
 
 // Encrypt returns a self-describing token "enc:" + base64(nonce||ciphertext).

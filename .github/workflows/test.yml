@@ -3,8 +3,12 @@ name: Test
 on:
   push:
     branches: [main]
+  # No branch filter: a PR is gated wherever it is aimed. With `branches:
+  # [main]` only the bottom of a stack ran anything, so every PR above it
+  # merged on the strength of someone having run the suite by hand — and the
+  # one place a stacked change breaks is the interaction with the commit it
+  # sits on, which is exactly what nothing was checking.
   pull_request:
-    branches: [main]
 
 permissions:
   contents: read
@@ -130,8 +134,61 @@ jobs:
         run: scripts/check-actions-pinned.sh
       - name: Vet
         run: GOWORK=off go vet ./...
+      # Every platform .goreleaser.yaml claims to ship. Nothing else here builds
+      # for anything but the runner's own GOOS, so a platform-specific break
+      # (a syscall type that does not exist on Windows, say) stayed invisible
+      # until release day, when goreleaser is the first thing to compile it.
+      - name: Cross-compile every released platform
+        run: |
+          for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64 windows/arm64; do
+            echo "==> $target"
+            GOWORK=off GOOS="${target%/*}" GOARCH="${target#*/}" go build ./...
+          done
       - name: Vulnerability scan
         run: GOWORK=off go run golang.org/x/vuln/cmd/govulncheck@v1.6.0 ./...
+
+  # Platform-specific behaviour, actually executed rather than only compiled.
+  #
+  # The cross-compile step above proves Windows builds; it cannot prove the
+  # per-platform implementations AGREE. internal/pluginfiles has one — the
+  # hard-link guard reads Stat_t.Nlink on Unix and GetFileInformationByHandle on
+  # Windows — and that guard is a security boundary, so a platform where it
+  # silently answered "unknown" would drop the protection while others kept it.
+  #
+  # Only the packages with platform-specific code: the wazero-heavy suites are
+  # slow and add nothing here.
+  windows-behaviour:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: go.mod
+      - name: Platform-sensitive packages
+        run: go test ./internal/fileperm/... ./internal/pluginfiles/... ./internal/secret/... ./internal/auditlog/... ./internal/mitm/...
+        env:
+          GOWORK: off
+
+  # The release configuration itself, exercised on every PR rather than first on
+  # a tag. The cross-compile step in `analysis` proves the code builds for each
+  # platform; this proves .goreleaser.yaml agrees — that its platform matrix,
+  # archive formats and ldflags actually produce artifacts. Run through `go run`
+  # like the other pinned tools here, so there is no third-party action to trust.
+  release-dryrun:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          fetch-depth: 0 # goreleaser derives the snapshot version from tags
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: go.mod
+      # sbom needs syft on PATH and publish/announce need a tag; none of that is
+      # what this job is checking, and skipping them keeps it hermetic.
+      - name: goreleaser snapshot
+        run: GOWORK=off go run github.com/goreleaser/goreleaser/v2@v2.15.4 release --snapshot --clean --skip=sbom,publish,announce
 
   lint:
     runs-on: ubuntu-latest

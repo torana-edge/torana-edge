@@ -18,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/torana-edge/torana-edge/internal/fileperm"
 	"github.com/torana-edge/torana-edge/internal/provider"
 )
 
@@ -286,16 +287,29 @@ func TestLeafForIsValidForHost(t *testing.T) {
 }
 
 func TestCALoadFailsClosed(t *testing.T) {
-	t.Run("private key permissions", func(t *testing.T) {
+	t.Run("private key is not owner-only", func(t *testing.T) {
 		dir := t.TempDir()
 		if _, err := LoadOrCreateCA(dir); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.Chmod(filepath.Join(dir, "ca-key.pem"), 0o644); err != nil {
+		keyPath := filepath.Join(dir, "ca-key.pem")
+		key, err := os.ReadFile(keyPath)
+		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := LoadOrCreateCA(dir); err == nil || !strings.Contains(err.Error(), "private key permissions") {
-			t.Fatalf("LoadOrCreateCA error = %v", err)
+		// Widen it the same way on both platforms. os.Chmod would only mean
+		// something on Unix; rewriting the file with no explicit protection
+		// leaves 0644 there and, on Windows, a DACL merely INHERITED from the
+		// directory — which a later change to the parent can widen without
+		// touching this file, and which fileperm therefore refuses.
+		if err := os.Remove(keyPath); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(keyPath, key, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := LoadOrCreateCA(dir); err == nil || !strings.Contains(err.Error(), "private key") {
+			t.Fatalf("LoadOrCreateCA accepted a CA private key that is not owner-only: %v", err)
 		}
 	})
 
@@ -335,7 +349,15 @@ func TestCALoadFailsClosed(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := os.WriteFile(filepath.Join(first, "ca-key.pem"), otherKey, 0o600); err != nil {
+		// 0600 alone does not make a file owner-only on Windows, where a
+		// newly written file inherits the directory's ACL. Without the
+		// explicit restriction this fixture trips the key-permission check
+		// and never reaches the mismatch it exists to test.
+		firstKey := filepath.Join(first, "ca-key.pem")
+		if err := os.WriteFile(firstKey, otherKey, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := fileperm.Restrict(firstKey); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := LoadOrCreateCA(first); err == nil || !strings.Contains(err.Error(), "do not match") {
@@ -384,12 +406,15 @@ func TestCALoadFailsClosed(t *testing.T) {
 		if _, err := LoadOrCreateCA(dir); err != nil {
 			t.Fatal(err)
 		}
+		// The invariant is that nobody else can reach the CA material, which
+		// is mode bits on Unix and a DACL on Windows — where Perm() reports
+		// 0777 for any directory and asserting 0700 proves nothing.
 		info, err := os.Stat(dir)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if got := info.Mode().Perm(); got != 0o700 {
-			t.Fatalf("CA directory permissions = %04o, want 0700", got)
+		if err := fileperm.Verify(dir, info); err != nil {
+			t.Errorf("CA directory is not owner-only: %v", err)
 		}
 	})
 }
