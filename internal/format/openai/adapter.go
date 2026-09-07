@@ -82,6 +82,10 @@ type chatMessage struct {
 	ReasoningContent *string        `json:"reasoning_content,omitempty"`
 	ToolCalls        []chatToolCall `json:"tool_calls,omitempty"`
 	ToolCallID       string         `json:"tool_call_id,omitempty"`
+	// Name is the tool name a tool-role message may carry beside its
+	// tool_call_id. The IR has always had a slot for it
+	// (ToolResultBlock.ToolName); this adapter simply never read it.
+	Name string `json:"name,omitempty"`
 }
 
 // chatContent decodes scalar content directly into its durable string. A
@@ -122,13 +126,18 @@ type chatToolFunc struct {
 type chatToolDef struct {
 	Type     string          `json:"type"`
 	Function chatToolFuncDef `json:"function"`
-	Strict   bool            `json:"strict,omitempty"`
 }
 
 type chatToolFuncDef struct {
 	Name        string          `json:"name"`
 	Description string          `json:"description,omitempty"`
 	Parameters  json.RawMessage `json:"parameters,omitempty"` // raw JSON Schema lexemes
+	// Strict lives INSIDE function on Chat Completions. It sat at the tool
+	// level here — copied from the Responses shape, where flat is correct — so
+	// a caller's strict schema was dropped on the way in and re-emitted where
+	// the provider ignores it. Structured outputs silently stopped being
+	// strict for anything routed through Torana.
+	Strict bool `json:"strict,omitempty"`
 }
 
 // responseRequest is the Responses API JSON shape.
@@ -602,15 +611,22 @@ func (a *Adapter) unmarshalChat(rawBody []byte) (*engine.ChatRequest, error) {
 	}
 
 	if cr.StopSequences != nil {
+		// Silently dropping an element rewrote the caller's stop sequences —
+		// the model then runs past a boundary the caller set. A shape this
+		// adapter cannot carry is refused, not quietly narrowed.
 		switch v := cr.StopSequences.(type) {
 		case string:
 			req.StopSequences = []string{v}
 		case []any:
-			for _, item := range v {
-				if s, ok := item.(string); ok {
-					req.StopSequences = append(req.StopSequences, s)
+			for i, item := range v {
+				text, ok := item.(string)
+				if !ok {
+					return nil, fmt.Errorf("openai chat: stop[%d] must be a string", i)
 				}
+				req.StopSequences = append(req.StopSequences, text)
 			}
+		default:
+			return nil, fmt.Errorf("openai chat: stop must be a string or an array of strings")
 		}
 	}
 
@@ -648,7 +664,7 @@ func (a *Adapter) unmarshalChat(rawBody []byte) (*engine.ChatRequest, error) {
 			Name:        t.Function.Name,
 			Description: t.Function.Description,
 			Parameters:  params,
-			Strict:      t.Strict,
+			Strict:      t.Function.Strict,
 		}
 		req.Tools = append(req.Tools, td)
 	}
@@ -697,19 +713,96 @@ func convertChatMessage(m chatMessage) (engine.Message, error) {
 		if m.ToolCallID == "" {
 			return msg, fmt.Errorf("tool message missing tool_call_id")
 		}
-		var text string
-		if m.Content.Text != nil {
-			text = *m.Content.Text
+		content, cerr := chatToolResultContent(m.Content)
+		if cerr != nil {
+			return msg, cerr
 		}
-		msg.Blocks = []engine.Block{{
-			ToolResult: &engine.ToolResultBlock{
-				ToolCallID: m.ToolCallID,
-				Content:    []engine.ToolResultContentBlock{{Text: text}},
-			},
+		result := engine.Block{ToolResult: &engine.ToolResultBlock{
+			ToolCallID: m.ToolCallID,
+			ToolName:   m.Name,
+			Content:    content,
 		}}
+		// The tool result replaces the CONTENT blocks, not the whole body.
+		// Assigning over msg.Blocks discarded two things silently: array-form
+		// content (only the scalar arm was read below, so the result reached
+		// the provider empty) and any reasoning block built above.
+		kept := make([]engine.Block, 0, len(msg.Blocks)+1)
+		for _, b := range msg.Blocks {
+			if b.Thinking != nil {
+				kept = append(kept, b)
+			}
+		}
+		msg.Blocks = append(kept, result)
+	}
+
+	// A message the wire carried but that projects to no block — `{"role":
+	// "assistant"}`, or content: [] — is a valid provider shape. The IR spells
+	// an empty message as one explicit empty text block; leaving the list empty
+	// instead tripped the SDK's "at least one block" rule as a 400 the caller
+	// could do nothing about.
+	if len(msg.Blocks) == 0 {
+		msg.Blocks = []engine.Block{{Text: &engine.TextBlock{Text: ""}}}
 	}
 
 	return msg, nil
+}
+
+// chatToolResultContent projects a tool message's content onto the ordered
+// nested content of a tool result, accepting both wire arms. A present-but-
+// empty array becomes the canonical one-empty-text-element spelling.
+func chatToolResultContent(c chatContent) ([]engine.ToolResultContentBlock, error) {
+	if !c.Present || c.Text != nil {
+		text := ""
+		if c.Text != nil {
+			text = *c.Text
+		}
+		return []engine.ToolResultContentBlock{{Text: text}}, nil
+	}
+	out := make([]engine.ToolResultContentBlock, 0, len(c.Parts))
+	for i, p := range c.Parts {
+		elem, err := openAIPartToToolResultContent(p)
+		if err != nil {
+			return nil, fmt.Errorf("tool result content[%d]: %w", i, err)
+		}
+		out = append(out, elem)
+	}
+	if len(out) == 0 {
+		return []engine.ToolResultContentBlock{{Text: ""}}, nil
+	}
+	return out, nil
+}
+
+// openAIPartToToolResultContent is openAIPartToBlock for the nested tool-result
+// kinds: text elements become text, anything else keeps its discriminant and
+// raw payload as an unknown element.
+func openAIPartToToolResultContent(p json.RawMessage) (engine.ToolResultContentBlock, error) {
+	var probe struct {
+		Type string `json:"type"`
+	}
+	if err := json.Unmarshal(p, &probe); err != nil {
+		return engine.ToolResultContentBlock{}, fmt.Errorf("content part: %w", err)
+	}
+	switch probe.Type {
+	case "text":
+		var t struct {
+			Text *string `json:"text"`
+		}
+		if err := json.Unmarshal(p, &t); err != nil {
+			return engine.ToolResultContentBlock{}, fmt.Errorf("content part: %w", err)
+		}
+		if t.Text == nil {
+			return engine.ToolResultContentBlock{}, fmt.Errorf("openai chat: text part without a text member")
+		}
+		return engine.ToolResultContentBlock{Text: *t.Text}, nil
+	case "":
+		return engine.ToolResultContentBlock{}, fmt.Errorf("openai chat: content part without a type member")
+	default:
+		payload, err := stripOpenAIPartFacts(p, "type")
+		if err != nil {
+			return engine.ToolResultContentBlock{}, fmt.Errorf("content part %q payload: %w", probe.Type, err)
+		}
+		return engine.ToolResultContentBlock{Unknown: &engine.UnknownBlock{Kind: probe.Type, Payload: payload}}, nil
+	}
 }
 
 // openAIPartToBlock projects one chat content-array part: text parts become
@@ -899,13 +992,13 @@ func (a *Adapter) unmarshalResponses(rawBody []byte) (*engine.ChatRequest, error
 		return nil, fmt.Errorf("openai responses unmarshal: %w", err)
 	}
 
-	model := rr.Model
-	if model == "" {
-		model = "gpt-4o"
-	}
-
+	// No default model. Substituting one sends a different, differently-priced
+	// request than the caller wrote and misattributes every downstream cost and
+	// metric; refusing would break the single-model local endpoints in
+	// docs/LOCAL_MODELS.md, which accept a request without one. Forward what
+	// the caller sent — marshalOutput omits an empty model.
 	req := &engine.ChatRequest{
-		Model:  model,
+		Model:  rr.Model,
 		Stream: rr.Stream,
 	}
 
@@ -980,16 +1073,20 @@ func (a *Adapter) unmarshalResponses(rawBody []byte) (*engine.ChatRequest, error
 				}
 				req.ResponsesInputLayout = layout
 			} else {
-				// Try legacy array of messages.
+				// Try legacy array of messages. A decode failure here used to
+				// be discarded, leaving zero messages and re-emitting the
+				// caller's input as null — the conversation destroyed with no
+				// error to anybody.
 				var msgs []chatMessage
-				if err := json.Unmarshal(rr.Input, &msgs); err == nil {
-					for _, m := range msgs {
-						msg, err := convertChatMessage(m)
-						if err != nil {
-							return nil, err
-						}
-						req.Messages = append(req.Messages, msg)
+				if err := json.Unmarshal(rr.Input, &msgs); err != nil {
+					return nil, fmt.Errorf("openai responses: input must be a string, an item array, or a message array: %w", err)
+				}
+				for _, m := range msgs {
+					msg, merr := convertChatMessage(m)
+					if merr != nil {
+						return nil, merr
 					}
+					req.Messages = append(req.Messages, msg)
 				}
 			}
 		}
@@ -1185,7 +1282,7 @@ func responseItemType(raw json.RawMessage) string {
 
 // marshalOutput is the Chat Completions JSON shape for marshal.
 type marshalOutput struct {
-	Model         string        `json:"model"`
+	Model         string        `json:"model,omitempty"`
 	Messages      []marshalMsg  `json:"messages"`
 	Tools         []marshalTool `json:"tools,omitempty"`
 	Stream        bool          `json:"stream"`
@@ -1201,6 +1298,7 @@ type marshalMsg struct {
 	ReasoningContent *string     `json:"reasoning_content,omitempty"`
 	ToolCalls        []marshalTC `json:"tool_calls,omitempty"`
 	ToolCallID       string      `json:"tool_call_id,omitempty"`
+	Name             string      `json:"name,omitempty"`
 }
 
 type marshalTC struct {
@@ -1217,25 +1315,19 @@ type marshalTCFn struct {
 type marshalTool struct {
 	Type     string        `json:"type"`
 	Function marshalToolFn `json:"function"`
-	Strict   bool          `json:"strict,omitempty"`
 }
 
 type marshalToolFn struct {
 	Name        string          `json:"name"`
 	Description string          `json:"description,omitempty"`
 	Parameters  json.RawMessage `json:"parameters,omitempty"` // raw JSON Schema lexemes
+	// Inside function, per the Chat Completions schema. See chatToolFuncDef.
+	Strict bool `json:"strict,omitempty"`
 }
 
-// modelOrDefault returns m if non-empty, otherwise d.
-func modelOrDefault(m, d string) string {
-	if m == "" {
-		return d
-	}
-	return m
-}
 func marshalChat(chat *engine.ChatRequest) ([]byte, error) {
 	out := marshalOutput{
-		Model:         modelOrDefault(chat.Model, "gpt-4o"),
+		Model:         chat.Model,
 		Messages:      make([]marshalMsg, 0, len(chat.Messages)),
 		Tools:         make([]marshalTool, 0, len(chat.Tools)),
 		Stream:        chat.Stream,
@@ -1256,12 +1348,12 @@ func marshalChat(chat *engine.ChatRequest) ([]byte, error) {
 	// Tools.
 	for _, t := range chat.Tools {
 		out.Tools = append(out.Tools, marshalTool{
-			Type:   "function",
-			Strict: t.Strict,
+			Type: "function",
 			Function: marshalToolFn{
 				Name:        t.Name,
 				Description: t.Description,
 				Parameters:  t.Parameters.Bytes(),
+				Strict:      t.Strict,
 			},
 		})
 	}
@@ -1290,18 +1382,47 @@ func marshalChat(chat *engine.ChatRequest) ([]byte, error) {
 // breakpoints, trailing signatures, and redacted thinking are
 // unrepresentable; tool_use is assistant-only; tool results ride the native
 // tool-role message shape.
+// chatContentPart is one item of an OpenAI chat message's content array, held
+// in the order its block was visited. isText/text are set only for parts this
+// adapter built from a text block, so the single-text scalar-string form can be
+// recognised without inspecting the marshalled value (an unknown block whose
+// discriminant happens to be "text" is NOT that form).
+type chatContentPart struct {
+	value  any
+	text   string
+	isText bool
+}
+
+func textContentPart(s string) chatContentPart {
+	return chatContentPart{
+		value:  map[string]any{"type": "text", "text": s},
+		text:   s,
+		isText: true,
+	}
+}
+
 func marshalChatMessage(m engine.Message) (marshalMsg, error) {
 	mm := marshalMsg{Role: string(m.Role)}
-	var textParts []string
-	var unknownParts []any
+	// ONE ordered projection, appended to as blocks are visited. Text and
+	// unknown parts used to accumulate in separate buckets that were
+	// concatenated text-first at the end, so every mixed message came back
+	// reordered — [image, text] marshalled as [text, image] — on both the
+	// tool-result path and the ordinary content array.
+	var parts []chatContentPart
 	for i, b := range m.Blocks {
 		switch {
 		case b.Text != nil:
-			textParts = append(textParts, b.Text.Text)
+			parts = append(parts, textContentPart(b.Text.Text))
 		case b.Thinking != nil:
-			if m.Role != engine.RoleAssistant {
-				return mm, fmt.Errorf("openai chat: thinking block %d on a %q message is unrepresentable", i, m.Role)
-			}
+			// reasoning_content is a passthrough vendor member on this wire,
+			// not modeled thinking with provenance rules, so it mirrors the
+			// message it arrived on rather than being assistant-only. The
+			// previous restriction was unreachable: the tool-role branch in
+			// convertChatMessage discarded the block before marshal ever saw
+			// it, which is exactly the silent loss being fixed here. Echoing
+			// back what the caller sent is what a transparent proxy owes them;
+			// if the provider rejects the member, it would have rejected the
+			// caller's original request too.
 			mm.ReasoningContent = &b.Thinking.Text
 		case b.ToolUse != nil:
 			if m.Role != engine.RoleAssistant {
@@ -1321,14 +1442,31 @@ func marshalChatMessage(m engine.Message) (marshalMsg, error) {
 					"(the native tool-role message is the only representable carrier)", i, m.Role)
 			}
 			mm.ToolCallID = b.ToolResult.ToolCallID
+			mm.Name = b.ToolResult.ToolName
 			for _, c := range b.ToolResult.Content {
 				switch {
 				case c.Unknown != nil:
-					return mm, fmt.Errorf("openai chat: structured tool-result content is not representable")
+					// Representable: the content-array branch below emits it
+					// with its discriminant restored, the same as any other
+					// unknown part. Refusing here meant a tool result the
+					// caller sent could not be sent back.
+					if err := rejectOpenAIProjection(c.Unknown); err != nil {
+						return mm, err
+					}
+					payload, _, err := c.Unknown.Payload.DecodeObject()
+					if err != nil {
+						return mm, fmt.Errorf("unknown tool-result payload: %w", err)
+					}
+					block := make(map[string]any, len(payload)+1)
+					block["type"] = c.Unknown.Kind
+					for k, v := range payload {
+						block[k] = json.RawMessage(v)
+					}
+					parts = append(parts, chatContentPart{value: block})
 				case c.CacheBreakpoint != nil:
 					return mm, fmt.Errorf("openai chat: nested cache breakpoints are not representable")
 				default:
-					textParts = append(textParts, c.Text)
+					parts = append(parts, textContentPart(c.Text))
 				}
 			}
 		case b.CacheBreakpoint != nil:
@@ -1346,7 +1484,7 @@ func marshalChatMessage(m engine.Message) (marshalMsg, error) {
 			for k, v := range payload {
 				block[k] = json.RawMessage(v)
 			}
-			unknownParts = append(unknownParts, block)
+			parts = append(parts, chatContentPart{value: block})
 		case b.RedactedThinking != nil:
 			return mm, fmt.Errorf("openai chat: redacted_thinking block %d is not representable", i)
 		case b.TrailingSignature != nil:
@@ -1356,21 +1494,21 @@ func marshalChatMessage(m engine.Message) (marshalMsg, error) {
 		}
 	}
 
-	// Content: a single text part emits a string; multiple/empty text parts
-	// or unknown parts emit a content ARRAY preserving positions.
+	// Content: the scalar-string form applies ONLY when the ordered projection
+	// is exactly one text part. Everything else — a lone unknown part, any mix,
+	// any repetition — emits the content ARRAY in visit order.
 	switch {
-	case len(unknownParts) > 0 || len(textParts) > 1:
-		content := make([]any, 0, len(textParts)+len(unknownParts))
-		for _, t := range textParts {
-			content = append(content, map[string]any{"type": "text", "text": t})
+	case len(parts) > 1, len(parts) == 1 && !parts[0].isText:
+		content := make([]any, 0, len(parts))
+		for _, p := range parts {
+			content = append(content, p.value)
 		}
-		content = append(content, unknownParts...)
 		mm.Content = content
-	case len(textParts) == 1 && textParts[0] != "":
-		mm.Content = textParts[0]
+	case len(parts) == 1 && parts[0].text != "":
+		mm.Content = parts[0].text
 	case m.Role == engine.RoleAssistant && len(mm.ToolCalls) > 0:
 		mm.Content = json.RawMessage("null")
-	case len(textParts) == 1:
+	case len(parts) == 1:
 		mm.Content = ""
 	}
 	return mm, nil
