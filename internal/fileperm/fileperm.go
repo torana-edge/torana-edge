@@ -89,26 +89,25 @@ func EnsureDir(path string) (changed bool, err error) {
 	return true, verify(path, info)
 }
 
-// restrictConfirmed applies owner-only access to a file this process just
-// created and CONFIRMS it stuck, retrying a bounded number of times.
+// Secure applies owner-only access to a file this process is creating and
+// CONFIRMS it on the open handle. Every confidential path goes through this
+// one function, so "protected" means the same thing for the credential key,
+// the audit trail and the CA private key.
 //
-// A concurrent protected-DACL application to the parent directory can
-// propagate over this file between the apply and the check. That is an
-// interfering neighbour, not a failed operation: the file must end up
-// owner-only, and one propagation pass must not turn a correct call into an
-// error. If it never sticks, the last verification error is returned rather
-// than a file that is not what it claims.
-func restrictConfirmed(path string, f *os.File) error {
-	var err error
-	for range 3 {
-		if err = restrict(path, false); err != nil {
-			return err
-		}
-		if err = verifyFile(f); err == nil {
-			return nil
-		}
+// One apply and one check, not a retry loop: retrying was an admission that
+// something else could still be writing over the file, and a bounded retry
+// cannot fix that — a competing write can land after the last check just as
+// easily as before it. The competing writer was an inheritable directory ACE
+// propagating over its children; that is gone (see the Windows restrict), so
+// there is nothing left to lose a race against.
+//
+// The check is on the HANDLE, so it describes the object that will actually be
+// written, not whatever the name resolves to by then.
+func Secure(path string, f *os.File) error {
+	if err := restrict(path, false); err != nil {
+		return err
 	}
-	return err
+	return verifyFile(f)
 }
 
 // WriteNew publishes path with owner-only access holding data, failing if path
@@ -136,11 +135,7 @@ func WriteNew(path string, data []byte) error {
 	// success one where it is now a second link to the published file.
 	defer func() { _ = os.Remove(tmpName) }()
 
-	// Decide on the HANDLE, not the name just applied to. If the name was made
-	// to resolve elsewhere between the two, the restriction landed on
-	// something else and this handle is not owner-only — refuse rather than
-	// write a secret through it.
-	if err := restrictConfirmed(tmpName, tmp); err != nil {
+	if err := Secure(tmpName, tmp); err != nil {
 		_ = tmp.Close()
 		return err
 	}
@@ -167,7 +162,7 @@ func WriteNew(path string, data []byte) error {
 func OpenAppend(path string) (*os.File, error) {
 	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL|os.O_APPEND, 0o600)
 	if err == nil {
-		if rerr := restrictConfirmed(path, f); rerr != nil {
+		if rerr := Secure(path, f); rerr != nil {
 			_ = f.Close()
 			return nil, rerr
 		}

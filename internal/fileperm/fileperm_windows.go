@@ -40,7 +40,7 @@ func restrict(path string, dir bool) error {
 	return nil
 }
 
-func ownerOnlyACL(dir bool) (*windows.ACL, error) {
+func ownerOnlyACL(_ bool) (*windows.ACL, error) {
 	sid, err := currentUserSID()
 	if err != nil {
 		return nil, err
@@ -51,17 +51,21 @@ func ownerOnlyACL(dir bool) (*windows.ACL, error) {
 	pinner.Pin(sid)
 	defer pinner.Unpin()
 
-	// A directory's entry is made inheritable so that everything created
-	// inside it starts owner-only too, rather than depending on each writer
-	// remembering to ask.
-	inheritance := uint32(windows.NO_INHERITANCE)
-	if dir {
-		inheritance = windows.SUB_CONTAINERS_AND_OBJECTS_INHERIT
-	}
+	// NOTHING is inheritable, directories included. An inheritable entry on a
+	// container makes every application of it a PROPAGATION PASS over the
+	// container's children, which overwrites a child another process is in the
+	// middle of protecting — a race with no upside here, because verify
+	// REFUSES a file whose protection is merely inherited (SE_DACL_PROTECTED
+	// must be set on the file itself). Every confidential file therefore
+	// carries its own protected DACL and always did; the inheritable entry
+	// satisfied nothing this package accepts and only created the window.
+	//
+	// The directory's own entry still does its job: it decides who may open,
+	// list or traverse the directory at all.
 	return windows.ACLFromEntries([]windows.EXPLICIT_ACCESS{{
 		AccessPermissions: windows.GENERIC_ALL,
 		AccessMode:        windows.SET_ACCESS,
-		Inheritance:       inheritance,
+		Inheritance:       windows.NO_INHERITANCE,
 		Trustee: windows.TRUSTEE{
 			TrusteeForm:  windows.TRUSTEE_IS_SID,
 			TrusteeType:  windows.TRUSTEE_IS_USER,
