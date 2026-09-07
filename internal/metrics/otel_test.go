@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"os"
 	"reflect"
 	"strings"
 	"sync"
@@ -439,4 +440,83 @@ func TestMetricsDisabledNoop(t *testing.T) {
 	RecordProxyRequest(context.Background(), "m", "p", 200, 1)
 	EmitPluginMetric(context.Background(), "x", "y", 0, 1, nil)
 	RegisterStatsObservables(NewStatsTracker())
+}
+
+// Whether telemetry is configured at all is the only OTLP decision this
+// package makes; where and how to connect belongs to the exporter, which
+// implements the specification's precedence for both.
+//
+// The gate used to read the generic variable only, so an operator who
+// configured just OTEL_EXPORTER_OTLP_METRICS_ENDPOINT got silence.
+func TestOTLPEndpointGateFollowsSignalPrecedence(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		generic string
+		metrics string
+		want    string
+	}{
+		{name: "neither configured", want: ""},
+		{name: "generic only", generic: "https://collector:4317", want: "https://collector:4317"},
+		{
+			name:    "metrics-specific only",
+			metrics: "https://metrics-collector:4317",
+			want:    "https://metrics-collector:4317",
+		},
+		{
+			name:    "metrics-specific wins over generic",
+			generic: "https://generic-collector:4317",
+			metrics: "https://metrics-collector:4317",
+			want:    "https://metrics-collector:4317",
+		},
+		{
+			name:    "empty metrics-specific falls back to generic",
+			generic: "https://generic-collector:4317",
+			metrics: "",
+			want:    "https://generic-collector:4317",
+		},
+		{name: "whitespace is not configuration", generic: "   ", want: ""},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", tt.generic)
+			t.Setenv("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT", tt.metrics)
+			if got := otlpMetricsEndpoint(); got != tt.want {
+				t.Errorf("otlpMetricsEndpoint() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// InitOTel must not install an endpoint or security option of its own: doing
+// so overrides the exporter's precedence, which is how the metrics-specific
+// endpoint and OTEL_EXPORTER_OTLP_METRICS_INSECURE came to be ignored.
+func TestInitOTelPassesNoTransportOptions(t *testing.T) {
+	src, err := os.ReadFile("otel.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, opt := range []string{"otlpmetricgrpc.WithEndpoint", "otlpmetricgrpc.WithEndpointURL", "otlpmetricgrpc.WithInsecure"} {
+		if strings.Contains(string(src), opt) {
+			t.Errorf("otel.go uses %s; the exporter reads OTEL_EXPORTER_OTLP_* itself, "+
+				"and an explicit option overrides the metrics-specific variable "+
+				"with the generic one", opt)
+		}
+	}
+}
+
+// Torana stays off unless asked. The exporter's own default endpoint is
+// localhost:4317, so without this gate every install would ship telemetry
+// somewhere nobody configured.
+func TestInitOTelIsANoopWhenNoEndpointIsConfigured(t *testing.T) {
+	t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "")
+	t.Setenv("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT", "")
+	shutdown, err := InitOTel(context.Background())
+	if err != nil {
+		t.Fatalf("InitOTel: %v", err)
+	}
+	if shutdown == nil {
+		t.Fatal("InitOTel returned a nil shutdown function")
+	}
+	if err := shutdown(context.Background()); err != nil {
+		t.Errorf("shutdown: %v", err)
+	}
 }

@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"path/filepath"
 )
 
 // Verify returns nil when path is accessible only by its owner. info must
@@ -50,42 +51,57 @@ func RestrictDir(path string) error {
 	return restrict(path, true)
 }
 
-// WriteNew creates path with owner-only access and writes data to it, failing
-// if path already exists.
+// WriteNew publishes path with owner-only access holding data, failing if path
+// already exists.
 //
-// The order matters: create, restrict, then write. The file is empty for the
-// moment it exists with whatever access it inherited, so no secret is ever
-// readable through the gap.
+// The destination name must never exist in an INCOMPLETE state. Creating it
+// with O_EXCL and filling it afterwards left an empty file at the final name
+// for the duration of the write, so a concurrent process that lost the race
+// saw the name, read nothing, and failed on a zero-length key — while the
+// promise was that it would read the key that won.
+//
+// So the file is built under a temporary name and published with a link, which
+// fails when the destination exists. The link decides the winner atomically,
+// and the file a loser then opens is already complete, restricted and synced.
+// (Hard links are the one portable exclusive-publish primitive: os.Rename
+// replaces silently on both platforms, which is the opposite of what is
+// wanted here.)
 func WriteNew(path string, data []byte) error {
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".torana-new-*")
 	if err != nil {
 		return err
 	}
-	if err := restrict(path, false); err != nil {
-		_ = f.Close()
-		_ = os.Remove(path)
+	tmpName := tmp.Name()
+	// Removes the temporary name on every path: the failure ones, and the
+	// success one where it is now a second link to the published file.
+	defer func() { _ = os.Remove(tmpName) }()
+
+	if err := restrict(tmpName, false); err != nil {
+		_ = tmp.Close()
 		return err
 	}
-	// Decide on the HANDLE, not the name we just applied to. If the name was
-	// made to resolve elsewhere between the two, the restriction landed on
+	// Decide on the HANDLE, not the name just applied to. If the name was made
+	// to resolve elsewhere between the two, the restriction landed on
 	// something else and this handle is not owner-only — refuse rather than
 	// write a secret through it.
-	if err := verifyFile(f); err != nil {
-		_ = f.Close()
-		_ = os.Remove(path)
+	if err := verifyFile(tmp); err != nil {
+		_ = tmp.Close()
 		return err
 	}
-	if _, err := f.Write(data); err != nil {
-		_ = f.Close()
-		_ = os.Remove(path)
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
 		return err
 	}
-	if err := f.Sync(); err != nil {
-		_ = f.Close()
-		_ = os.Remove(path)
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
 		return err
 	}
-	return f.Close()
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	// fs.ErrExist here means someone else published first; the caller reads
+	// theirs. Anything else is a real failure.
+	return os.Link(tmpName, path)
 }
 
 // OpenAppend opens path for appending. A file this call creates is made

@@ -113,7 +113,16 @@ func parseSource(arg string) (source, error) {
 		return source{}, errors.New("a plugin source is required")
 	}
 	if strings.HasPrefix(arg, ".") || strings.HasPrefix(arg, "/") || strings.HasPrefix(arg, "~") {
-		abs, err := filepath.Abs(os.ExpandEnv(strings.Replace(arg, "~", os.Getenv("HOME"), 1)))
+		// Only a LEADING "~/" is a home reference. Replacing the first "~"
+		// anywhere mangled an ordinary path like ./my~plugin, and ExpandEnv
+		// rewrote a literal $ inside a filename.
+		expanded := arg
+		if arg == "~" || strings.HasPrefix(arg, "~/") {
+			if home, herr := os.UserHomeDir(); herr == nil {
+				expanded = home + strings.TrimPrefix(arg, "~")
+			}
+		}
+		abs, err := filepath.Abs(expanded)
 		if err != nil {
 			return source{}, fmt.Errorf("resolve %q: %w", arg, err)
 		}
@@ -171,6 +180,14 @@ func parseSource(arg string) (source, error) {
 			cleanSub == ".." || strings.HasPrefix(cleanSub, ".."+string(filepath.Separator)) {
 			return source{}, fmt.Errorf("%q is not a valid repository plugin source", arg)
 		}
+		// This arm took the repository prefix VERBATIM and handed it to
+		// `git clone`. The URL form above is validated as https; this one was
+		// not, so a source could be an option rather than an address
+		// ("--upload-pack=...git//x") or a transport git executes as a shell
+		// command ("ext::sh -c ....git//x"). Hold it to the same rule.
+		if err := requireHTTPSRepo(repoURL); err != nil {
+			return source{}, fmt.Errorf("%q is not a valid repository plugin source: %w", arg, err)
+		}
 		return source{
 			repoURL: repoURL,
 			subPath: filepath.ToSlash(cleanSub),
@@ -195,12 +212,37 @@ func parseSource(arg string) (source, error) {
 		strings.HasPrefix(cleanSub, ".."+string(filepath.Separator)) {
 		return source{}, fmt.Errorf("%q names a repository but not a plugin directory inside it", arg)
 	}
+	built := "https://" + repo + ".git"
+	if err := requireHTTPSRepo(built); err != nil {
+		return source{}, fmt.Errorf("%q is not a valid repository plugin source: %w", arg, err)
+	}
 	return source{
-		repoURL: "https://" + repo + ".git",
+		repoURL: built,
 		subPath: filepath.ToSlash(cleanSub),
 		ref:     ref,
 		name:    filepath.Base(cleanSub),
 	}, nil
+}
+
+// requireHTTPSRepo holds every parsed repository to a plain https:// URL.
+//
+// The value reaches `git clone` as an argument, so anything that is not an
+// address is a way to make git do something else: a leading dash is an option,
+// and git's own "ext::" / "file::" transports run commands or read local
+// paths. Rejecting here — plus the `--` separator at the call site — keeps a
+// plugin source a source.
+func requireHTTPSRepo(repoURL string) error {
+	if !strings.HasPrefix(repoURL, "https://") {
+		return fmt.Errorf("repository must be an https:// URL, got %q", repoURL)
+	}
+	u, err := url.Parse(repoURL)
+	if err != nil {
+		return fmt.Errorf("repository is not a valid URL: %w", err)
+	}
+	if u.Scheme != "https" || u.Host == "" || u.User != nil {
+		return fmt.Errorf("repository must be https with a host and no userinfo, got %q", repoURL)
+	}
+	return nil
 }
 
 // fetch materializes the plugin's source directory and returns its path plus a
@@ -219,7 +261,7 @@ func fetch(src source, stdout, stderr io.Writer) (string, func(), error) {
 	}
 	cleanup := func() { _ = os.RemoveAll(tmp) }
 
-	args := []string{"clone", "--depth", "1", "--quiet", src.repoURL, tmp}
+	args := []string{"clone", "--depth", "1", "--quiet", "--", src.repoURL, tmp}
 	fmt.Fprintf(stdout, "Fetching %s", src.repoURL)
 	if src.ref != "" {
 		fmt.Fprintf(stdout, " @ %s", src.ref)
@@ -233,7 +275,7 @@ func fetch(src source, stdout, stderr io.Writer) (string, func(), error) {
 		return "", nil, fmt.Errorf("clone %s: %w", src.repoURL, err)
 	}
 	if src.ref != "" {
-		fetchCmd := exec.Command("git", "-C", tmp, "fetch", "--depth", "1", "origin", src.ref)
+		fetchCmd := exec.Command("git", "-C", tmp, "fetch", "--depth", "1", "origin", "--", src.ref)
 		fetchCmd.Stderr = stderr
 		if err := fetchCmd.Run(); err != nil {
 			cleanup()

@@ -8,6 +8,7 @@ import (
 	"math"
 	"os"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -23,14 +24,34 @@ import (
 	pbjsontext "github.com/torana-edge/torana-plugin-sdk/pb/v1/jsontext"
 )
 
-// InitOTel sets up OpenTelemetry metrics if OTEL_EXPORTER_OTLP_ENDPOINT is set.
+// InitOTel sets up OpenTelemetry metrics when an OTLP endpoint is configured.
+//
+// Transport security and endpoint selection are the exporter's own, read from
+// the standard OTEL_* variables. This function passes NO endpoint or security
+// option, which is the point: WithInsecure was once unconditional, so telemetry
+// — provider names, model families, token counts, spend — crossed the network
+// in cleartext with no way to turn TLS on; replacing that with a hand-rolled
+// WithEndpoint/WithInsecure pair then overrode the exporter's own precedence
+// with the GENERIC variable, so an operator who pointed
+// OTEL_EXPORTER_OTLP_METRICS_ENDPOINT at one collector and
+// OTEL_EXPORTER_OTLP_ENDPOINT at another silently got the second, and
+// OTEL_EXPORTER_OTLP_METRICS_INSECURE was ignored outright.
+//
+// otlpmetricgrpc already implements the specification exactly — the
+// metrics-specific variable wins over the generic one for both endpoint and
+// insecure, an explicit scheme wins over the insecure flag, and headers follow
+// the same rule. Reimplementing a subset of that could only ever diverge from
+// it. All this keeps is the decision the library cannot make for us: whether
+// telemetry is wanted at all, since the exporter's own default endpoint is
+// localhost:4317 and every install would otherwise start shipping metrics
+// somewhere nobody asked for.
 func InitOTel(ctx context.Context) (func(context.Context) error, error) {
-	endpoint := os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT")
+	endpoint := otlpMetricsEndpoint()
 	if endpoint == "" {
 		return func(context.Context) error { return nil }, nil
 	}
 
-	exporter, err := otlpmetricgrpc.New(ctx, otlpmetricgrpc.WithEndpoint(endpoint), otlpmetricgrpc.WithInsecure())
+	exporter, err := otlpmetricgrpc.New(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -53,6 +74,22 @@ func InitOTel(ctx context.Context) (func(context.Context) error, error) {
 	log.Printf("[metrics] OpenTelemetry enabled, exporting to %s", endpoint)
 
 	return provider.Shutdown, nil
+}
+
+// otlpMetricsEndpoint reports the endpoint OTLP metrics would use, or "" when
+// telemetry is not configured at all. It applies the specification's
+// precedence — the metrics-specific variable over the generic one — for the
+// single purpose of deciding whether to build an exporter; the exporter then
+// reads the same variables itself to decide where and how to connect.
+//
+// The signal-specific variable used to be ignored here, so an operator who
+// configured ONLY OTEL_EXPORTER_OTLP_METRICS_ENDPOINT got no telemetry and no
+// explanation.
+func otlpMetricsEndpoint() string {
+	if v := strings.TrimSpace(os.Getenv("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT")); v != "" {
+		return v
+	}
+	return strings.TrimSpace(os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"))
 }
 
 // initInstruments installs the meter and creates the host-owned request

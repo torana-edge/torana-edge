@@ -1,8 +1,11 @@
 package fileperm_test
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
+	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/torana-edge/torana-edge/internal/fileperm"
@@ -219,5 +222,63 @@ func TestVerifyFileRefusesAWidelyAccessibleHandle(t *testing.T) {
 	defer func() { _ = f.Close() }()
 	if err := fileperm.VerifyFile(f); err == nil {
 		t.Fatal("VerifyFile accepted a handle onto a widely accessible file")
+	}
+}
+
+// The destination name must never be observable in an incomplete state.
+// Creating it with O_EXCL and filling it afterwards published an EMPTY file
+// for the duration of the write, so a concurrent reader saw the name and read
+// nothing. Readers here run against writers and every successful read must see
+// a whole payload.
+func TestWriteNewNeverPublishesAnIncompleteFile(t *testing.T) {
+	payload := bytes.Repeat([]byte("k"), 32)
+
+	for round := range 200 {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "secret.key")
+
+		var wg sync.WaitGroup
+		start := make(chan struct{})
+		var partial atomic.Int64
+		var wrote atomic.Int64
+
+		for range 4 {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				<-start
+				if err := fileperm.WriteNew(path, payload); err == nil {
+					wrote.Add(1)
+				}
+			}()
+		}
+		for range 4 {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				<-start
+				for range 400 {
+					b, err := os.ReadFile(path)
+					if err != nil {
+						continue // not published yet
+					}
+					if len(b) != len(payload) {
+						partial.Add(1)
+						return
+					}
+				}
+			}()
+		}
+		close(start)
+		wg.Wait()
+
+		if got := partial.Load(); got != 0 {
+			t.Fatalf("round %d: a reader saw the destination name holding an incomplete "+
+				"file %d time(s); the name must appear only once the contents are whole",
+				round, got)
+		}
+		if got := wrote.Load(); got != 1 {
+			t.Fatalf("round %d: %d writers reported success, want exactly one", round, got)
+		}
 	}
 }

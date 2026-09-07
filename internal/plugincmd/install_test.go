@@ -240,3 +240,47 @@ func TestListEmptyDirGuidesTheUser(t *testing.T) {
 		t.Errorf("an empty plugins dir should point at the official set, got: %s", out.String())
 	}
 }
+
+// A plugin source reaches `git clone` as an argument, so anything that is not
+// an address is a way to make git do something else. These are the shapes that
+// used to pass straight through the ".git//" arm, which took the repository
+// prefix verbatim while the URL arm beside it was validated.
+func TestParseSourceRejectsNonHTTPSRepositories(t *testing.T) {
+	for _, arg := range []string{
+		// A leading dash is an option, not an address. git would read this as
+		// --upload-pack and run the named program.
+		"--upload-pack=touch /tmp/pwned.git//plugins/x",
+		// git's ext:: transport executes its argument as a shell command.
+		"ext::sh -c touch% /tmp/pwned.git//plugins/x",
+		// file:: and a bare local path read from disk rather than a remote.
+		"file:///etc.git//plugins/x",
+		// Plaintext and non-git schemes.
+		"http://example.com/o/r.git//plugins/x",
+		"git://example.com/o/r.git//plugins/x",
+		"ssh://git@example.com/o/r.git//plugins/x",
+		// Userinfo can smuggle credentials into a URL Torana would fetch.
+		"https://user:pass@example.com/o/r.git//plugins/x",
+	} {
+		if got, err := parseSource(arg); err == nil {
+			t.Errorf("parseSource(%q) was accepted as repo %q; it must be refused", arg, got.repoURL)
+		}
+	}
+}
+
+// The legitimate forms must keep working.
+func TestParseSourceAcceptsHTTPSRepositories(t *testing.T) {
+	for _, arg := range []string{
+		"github.com/torana-edge/torana-plugins/plugins/usage_logger",
+		"https://github.com/torana-edge/torana-plugins/tree/main/plugins/usage_logger",
+		"https://gitlab.example.com/group/subgroup/repo.git//plugins/foo@v1.2.0",
+	} {
+		src, err := parseSource(arg)
+		if err != nil {
+			t.Errorf("parseSource(%q): %v", arg, err)
+			continue
+		}
+		if !strings.HasPrefix(src.repoURL, "https://") {
+			t.Errorf("parseSource(%q) repoURL = %q, want https://", arg, src.repoURL)
+		}
+	}
+}

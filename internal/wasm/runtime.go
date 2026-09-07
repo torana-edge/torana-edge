@@ -284,6 +284,21 @@ type pluginInstance struct {
 	mod        api.Module
 	logEnabled bool
 	idleSince  time.Time
+	// stdio holds the guest's prefixed writers so a final line with no
+	// trailing newline is emitted when the instance goes away. They used to be
+	// constructed inline and dropped, so a guest's last line — often the one
+	// explaining why it stopped — was silently discarded.
+	stdio []*prefixWriter
+}
+
+// close releases the guest instance and flushes whatever its stdio was still
+// holding.
+func (i *pluginInstance) close(ctx context.Context) error {
+	err := i.mod.Close(ctx)
+	for _, w := range i.stdio {
+		w.Flush()
+	}
+	return err
 }
 
 func (p *Plugin) Name() string { return p.name }
@@ -373,7 +388,7 @@ func (p *Plugin) discardIdleInstances() {
 		select {
 		case inst := <-p.pool:
 			if inst != nil {
-				_ = inst.mod.Close(context.Background())
+				_ = inst.close(context.Background())
 			}
 		default:
 			return
@@ -489,11 +504,11 @@ func (p *Plugin) release(inst *pluginInstance) {
 		// The pool is dead: a closed instance must never be returned to it.
 		// This is the active-call-vs-close path — the in-flight call finishes
 		// and its instance is closed here instead of re-queued.
-		_ = inst.mod.Close(context.Background())
+		_ = inst.close(context.Background())
 		return
 	}
 	if inst.logEnabled != p.hasGrant("env.log") {
-		_ = inst.mod.Close(context.Background())
+		_ = inst.close(context.Background())
 		return
 	}
 	inst.idleSince = time.Now()
@@ -501,7 +516,7 @@ func (p *Plugin) release(inst *pluginInstance) {
 	case p.pool <- inst:
 	default:
 		// Pool full — close the extra instance.
-		_ = inst.mod.Close(context.Background())
+		_ = inst.close(context.Background())
 	}
 }
 
@@ -545,13 +560,13 @@ snapshot:
 	for i, inst := range idle {
 		stale := !inst.idleSince.IsZero() && now.Sub(inst.idleSince) >= p.idleTimeout
 		if i != newest && stale {
-			_ = inst.mod.Close(context.Background())
+			_ = inst.close(context.Background())
 			continue
 		}
 		select {
 		case p.pool <- inst:
 		default:
-			_ = inst.mod.Close(context.Background())
+			_ = inst.close(context.Background())
 		}
 	}
 }
@@ -559,7 +574,7 @@ snapshot:
 func (p *Plugin) discard(inst *pluginInstance) {
 	defer func() { <-p.slots }()
 	if inst != nil && inst.mod != nil {
-		_ = inst.mod.Close(context.Background())
+		_ = inst.close(context.Background())
 	}
 }
 
@@ -586,8 +601,17 @@ func (p *Plugin) newInstance(ctx context.Context) (*pluginInstance, error) {
 	// wazero defaults stdout/stderr to io.Discard. Only grant direct guest
 	// output to plugins explicitly granted env.log; host env.log is gated too.
 	logEnabled := p.hasGrant("env.log")
+	var stdout, stderr *prefixWriter
 	if logEnabled {
-		config = config.WithStdout(os.Stdout).WithStderr(os.Stderr)
+		// Prefixed, never raw. Handing a guest os.Stdout let a granted plugin
+		// emit unattributed bytes into the operator's log — enough to forge
+		// lines that look like Torana's own ("[route] ...", "[plugin] ..."),
+		// which is the log an operator reads to find out what a plugin did.
+		// The host-side env.log host call has always prefixed; this path did
+		// not.
+		stdout = newPrefixWriter(os.Stdout, p.name)
+		stderr = newPrefixWriter(os.Stderr, p.name)
+		config = config.WithStdout(stdout).WithStderr(stderr)
 	} else {
 		config = config.WithStdout(io.Discard).WithStderr(io.Discard)
 	}
@@ -595,14 +619,20 @@ func (p *Plugin) newInstance(ctx context.Context) (*pluginInstance, error) {
 	if err != nil {
 		return nil, err
 	}
+	inst := &pluginInstance{mod: mod, logEnabled: logEnabled}
+	if stdout != nil {
+		inst.stdio = []*prefixWriter{stdout, stderr}
+	}
 	init := mod.ExportedFunction("_initialize")
 	if init != nil {
 		if _, err := init.Call(instanceCtx); err != nil {
-			_ = mod.Close(context.Background())
+			// close, not mod.Close: whatever the guest printed before failing
+			// to initialize is exactly what the operator needs.
+			_ = inst.close(context.Background())
 			return nil, fmt.Errorf("wasm: %s initialize: %w", p.name, err)
 		}
 	}
-	return &pluginInstance{mod: mod, logEnabled: logEnabled}, nil
+	return inst, nil
 }
 
 // CallRequest dispatches one hook into the guest and returns its result bytes.
@@ -1189,7 +1219,7 @@ func (r *Runtime) closePluginResourcesLocked(p *Plugin) error {
 		select {
 		case inst := <-p.pool:
 			if inst != nil && inst.mod != nil {
-				if err := inst.mod.Close(r.ctx); err != nil {
+				if err := inst.close(r.ctx); err != nil {
 					instErrs = append(instErrs, err)
 				}
 			}
@@ -1407,7 +1437,7 @@ func (r *Runtime) LoadPlugin(name string, wasmBytes []byte) (*Plugin, error) {
 	// ValidateHooks then only compares it against the manifest.
 	bitmap, err := supportedHooks(r.ctx, inst.mod)
 	if err != nil {
-		instErr := inst.mod.Close(r.ctx)
+		instErr := inst.close(r.ctx)
 		compiledErr := compiled.Close(r.ctx)
 		r.fireCompiledReleased(name)
 		r.fireConstructFailed(name)
@@ -1440,7 +1470,15 @@ func pluginNameOf(mod api.Module) string {
 // (fragment buffers, tool-call tracking) — without namespacing, plugins
 // sharing key conventions (tool:0, frag:<id>) clobber each other.
 // Cross-plugin cache exchange is a separate, explicit capability.
-func metaKey(plugin, key string) string { return plugin + "\x00" + key }
+func metaKey(plugin, key string) string {
+	// Length-prefixed for the same reason PrivateCacheKey below is, which
+	// documents it: without the length, ("ab","c") and ("a","bc") produce the
+	// same key. The plugin name is host-supplied and the key is guest-supplied,
+	// so an unframed join let a guest address a namespace by embedding a NUL.
+	// Meta is request-scoped and in-memory, so changing the framing invalidates
+	// nothing on disk.
+	return "meta\x00" + strconv.Itoa(len(plugin)) + "\x00" + plugin + key
+}
 
 func privateCacheKey(plugin, key string) string { return PrivateCacheKey(plugin, key) }
 
