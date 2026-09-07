@@ -83,15 +83,27 @@ var supportedFormats = map[string]struct{}{
 	"openai":            {},
 }
 
-// supportedFormatNames lists the wire formats in a stable order, for error
-// messages that tell the operator what to write instead.
-func supportedFormatNames() string {
+// SupportedFormats lists the wire formats a provider may declare, in a stable
+// order.
+//
+// Exported because the control-plane UI offers the same vocabulary in its
+// provider form, and a second copy of a list is a copy that drifts: the UI went
+// on offering a format after its adapter was deleted, so an operator could pick
+// a value the server then rejects. The UI is checked against this rather than
+// restating it.
+func SupportedFormats() []string {
 	names := make([]string, 0, len(supportedFormats))
 	for name := range supportedFormats {
 		names = append(names, name)
 	}
 	sort.Strings(names)
-	return strings.Join(names, ", ")
+	return names
+}
+
+// supportedFormatNames renders SupportedFormats for error messages that tell
+// the operator what to write instead.
+func supportedFormatNames() string {
+	return strings.Join(SupportedFormats(), ", ")
 }
 
 func (a ProviderAuth) Validate(providerName string, credentials CredentialsConfig) error {
