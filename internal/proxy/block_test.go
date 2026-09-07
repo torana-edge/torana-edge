@@ -35,9 +35,6 @@ func TestRenderProviderError(t *testing.T) {
 			e, _ := m["error"].(map[string]any)
 			return e != nil && e["message"] == msg && e["code"].(float64) == 422
 		},
-		"bedrock": func(m map[string]any) bool {
-			return m["message"] == msg
-		},
 	}
 	for format, check := range cases {
 		t.Run(format, func(t *testing.T) {

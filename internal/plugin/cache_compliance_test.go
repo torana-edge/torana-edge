@@ -11,7 +11,6 @@ import (
 	"github.com/torana-edge/torana-edge/internal/wasm"
 
 	_ "github.com/torana-edge/torana-edge/internal/format/anthropic"
-	_ "github.com/torana-edge/torana-edge/internal/format/bedrock"
 	_ "github.com/torana-edge/torana-edge/internal/format/gemini"
 	_ "github.com/torana-edge/torana-edge/internal/format/openai"
 )
@@ -230,11 +229,6 @@ func TestProviderCacheFactsSurviveRealWASMToFinalWire(t *testing.T) {
 			name: "anthropic ordered breakpoints", format: "anthropic",
 			request:   `{"model":"claude","max_tokens":8,"system":[{"type":"text","text":"sys","cache_control":{"type":"ephemeral"}}],"messages":[{"role":"user","content":[{"type":"text","text":"hi","cache_control":{"type":"ephemeral","ttl":"1h"}}]}],"tools":[{"name":"read","description":"","input_schema":{},"cache_control":{"type":"ephemeral"}}]}`,
 			wireFacts: []wireFact{{`"cache_control"`, 3}, {`"ttl":"1h"`, 1}, {`"content":[{"type":"text","text":"hi [seen by test-mutator]"`, 1}},
-		},
-		{
-			name: "bedrock positional breakpoints", format: "bedrock",
-			request:   `{"modelId":"m","system":[{"text":"sys"},{"cachePoint":{"type":"default"}}],"messages":[{"role":"user","content":[{"text":"hi"},{"cachePoint":{"type":"default"}}]}],"toolConfig":{"tools":[{"toolSpec":{"name":"read","description":"","inputSchema":{"json":{}}}},{"cachePoint":{"type":"default"}}]}}`,
-			wireFacts: []wireFact{{`"cachePoint":{"type":"default"}`, 3}, {`"text":"hi [seen by test-mutator]"`, 1}},
 		},
 		{
 			name: "openai automatic cache controls", format: "openai",

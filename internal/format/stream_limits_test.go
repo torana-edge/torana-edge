@@ -8,7 +8,6 @@ import (
 	"github.com/torana-edge/torana-edge/internal/engine"
 	"github.com/torana-edge/torana-edge/internal/format"
 	"github.com/torana-edge/torana-edge/internal/format/anthropic"
-	"github.com/torana-edge/torana-edge/internal/format/bedrock"
 	"github.com/torana-edge/torana-edge/internal/format/gemini"
 	"github.com/torana-edge/torana-edge/internal/format/openai"
 	"github.com/torana-edge/torana-edge/internal/format/streamio"
@@ -23,7 +22,6 @@ func TestProviderStreamsReportOversizedFrames(t *testing.T) {
 	}{
 		{"anthropic", &anthropic.StreamAdapter{}, "data: "},
 		{"openai", &openai.StreamAdapter{}, "data: "},
-		{"bedrock", &bedrock.Stream{}, ""},
 		{"gemini", &gemini.StreamAdapter{}, "data: "},
 	}
 	for _, tc := range tests {

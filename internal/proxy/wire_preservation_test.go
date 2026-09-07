@@ -42,11 +42,6 @@ func TestUnchangedInferenceRequestPreservesProviderWire(t *testing.T) {
 			order:  []string{"test-observer"},
 		},
 		{
-			name:   "bedrock converse",
-			format: "bedrock",
-			body:   "{ \"messages\" : [ { \"role\" : \"user\", \"content\" : [ { \"text\" : \"hi\" } ] } ], \"inferenceConfig\" : { \"maxTokens\" : 16 }, \"vendor\" : {\"b\":2,\"a\":1} }",
-		},
-		{
 			name:   "gemini",
 			format: "gemini",
 			body:   "{\"contents\":[{\"role\":\"user\",\"parts\":[{\"text\":\"hi\"}]}], \"generationConfig\": {\"maxOutputTokens\":16, \"vendor\":1.0}}",

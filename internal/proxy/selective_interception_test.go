@@ -24,8 +24,6 @@ func inferenceTestPath(formatName string) string {
 	switch formatName {
 	case "anthropic":
 		return "/v1/messages"
-	case "bedrock":
-		return "/model/test/converse"
 	case "gemini":
 		return "/v1beta/models/test:generateContent"
 	case "gemini-codeassist":
@@ -169,7 +167,6 @@ func TestAuxiliaryEndpointsBypassIRAcrossFormats(t *testing.T) {
 	}{
 		{"openai models", "openai", "/v1/models"},
 		{"anthropic token count", "anthropic", "/v1/messages/count_tokens"},
-		{"bedrock invoke", "bedrock", "/model/example/invoke"},
 		{"gemini token count", "gemini", "/v1beta/models/example:countTokens"},
 		{"code assist settings", "gemini-codeassist", "/v1internal:getCodeAssistGlobalUserSetting"},
 	}

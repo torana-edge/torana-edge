@@ -54,16 +54,6 @@ func TestStreamUsageRoundTrip(t *testing.T) {
 			},
 		},
 		{
-			format: "bedrock",
-			input: `{"contentBlockDelta":{"contentBlockIndex":0,"delta":{"text":"hi"}}}` + "\n" +
-				`{"messageStop":{"stopReason":"end_turn"}}` + "\n" +
-				`{"metadata":{"usage":{"inputTokens":10,"outputTokens":5,"totalTokens":15}}}` + "\n",
-			usageBeforeFinish: false, // metadata trails messageStop
-			wireMarkers: []string{
-				`"metadata":{"usage":{"inputTokens":10,"outputTokens":5,"totalTokens":15}}`,
-			},
-		},
-		{
 			format: "gemini",
 			input: `{"candidates":[{"content":{"role":"model","parts":[{"text":"hi"}]}}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":3,"totalTokenCount":13}}` + "\n" +
 				`{"candidates":[{"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":5,"totalTokenCount":15}}` + "\n",

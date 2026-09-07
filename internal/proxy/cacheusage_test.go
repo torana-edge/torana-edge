@@ -39,11 +39,6 @@ func TestExtractResponseCacheUsage(t *testing.T) {
 			read:   1024, write: 0,
 		},
 		{
-			format: "bedrock",
-			body:   `{"output":{"message":{"content":[]}},"usage":{"inputTokens":10,"outputTokens":4,"cacheReadInputTokens":8000,"cacheWriteInputTokens":500}}`,
-			read:   8000, write: 500,
-		},
-		{
 			format: "gemini",
 			body:   `{"candidates":[],"usageMetadata":{"promptTokenCount":32179,"candidatesTokenCount":196,"cachedContentTokenCount":24430}}`,
 			read:   24430, write: 0,
@@ -94,7 +89,6 @@ func TestUsagePresenceSurvivesExplicitZeroOnly(t *testing.T) {
 	}{
 		{format: "openai", missing: map[string]any{}, present: map[string]any{"usage": map[string]any{}}},
 		{format: "anthropic", missing: map[string]any{}, present: map[string]any{"usage": map[string]any{}}},
-		{format: "bedrock", missing: map[string]any{}, present: map[string]any{"usage": map[string]any{}}},
 		{format: "gemini", missing: map[string]any{}, present: map[string]any{"usageMetadata": map[string]any{}}},
 		{format: "gemini-codeassist", missing: map[string]any{"response": map[string]any{}}, present: map[string]any{"response": map[string]any{"usageMetadata": map[string]any{}}}},
 	}

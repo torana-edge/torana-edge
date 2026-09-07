@@ -64,7 +64,6 @@ Support for either of the first two does not imply the third.
 | Provider format | Native behavior | What Torana does | Tier selector / warmer |
 |---|---|---|---|
 | **Anthropic Messages** | Explicit `cache_control` breakpoints; a 5-minute default and a 1-hour tier | Preserves ordered markers and observes cache creation/read tokens | Supported when configured. Reads refresh the default lifetime, so `refresh_on_read: true` is appropriate. |
-| **Amazon Bedrock Converse** | Explicit `cachePoint` elements on supported models and request arms | Preserves ordered markers and observes cache read/write tokens | Supported only when the configured model exposes refreshable inference-request breakpoints. |
 | **OpenAI Chat/Responses** | Automatic prefix caching, with optional `prompt_cache_key` and, on eligible models, `prompt_cache_retention` such as `24h` | Preserves these provider fields and observes cached tokens; never chooses retention for you | Not supported. A periodic inference request is not Torana-owned TTL management. |
 | **DeepSeek (OpenAI-compatible)** | Automatic disk prefix caching with hit/miss usage | Preserves compatible provider fields and observes hit tokens | Not supported. There is no Torana-managed breakpoint to select or refresh. |
 | **Gemini / Code Assist** | Implicit caching is automatic. Explicit caching creates a separate `cachedContents` resource with its own TTL, then generation requests reference it with `cachedContent`. | Preserves the reference and observes cached-content tokens; does not create or PATCH the resource | Not supported. Sending `generateContent` does not perform the cache resource's TTL update operation. |
@@ -76,7 +75,6 @@ inference-request marker really is refreshable by a read.
 Current provider references:
 
 - [Anthropic prompt caching](https://docs.anthropic.com/en/docs/build-with-claude/prompt-caching)
-- [Amazon Bedrock prompt caching](https://docs.aws.amazon.com/bedrock/latest/userguide/prompt-caching.html)
 - [OpenAI prompt caching](https://platform.openai.com/docs/guides/prompt-caching)
 - [DeepSeek context caching](https://api-docs.deepseek.com/guides/kv_cache)
 - [Gemini context caching](https://ai.google.dev/gemini-api/docs/caching)

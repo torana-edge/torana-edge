@@ -70,8 +70,6 @@ func renderProviderError(format string, status int, code, message string) []byte
 		payload = map[string]any{
 			"error": map[string]any{"code": status, "status": code, "message": message},
 		}
-	case "bedrock":
-		payload = map[string]any{"message": message}
 	default: // openai and openai-compatible
 		payload = map[string]any{
 			"error": map[string]any{"message": message, "type": code, "code": code},
@@ -95,8 +93,6 @@ func renderHostError(format string) *BlockResponse {
 		code = "api_error"
 	case "gemini", "gemini-codeassist":
 		code = "INTERNAL"
-	case "bedrock":
-		code = "InternalServerException"
 	}
 	message := "the request could not be encoded for the provider"
 	return &BlockResponse{
@@ -113,9 +109,6 @@ func renderCredentialUnavailable(format string) *BlockResponse {
 	}
 	if format == "gemini" || format == "gemini-codeassist" {
 		code = "UNAVAILABLE"
-	}
-	if format == "bedrock" {
-		code = "ServiceUnavailableException"
 	}
 	return &BlockResponse{Status: http.StatusBadGateway, ContentType: "application/json", Body: renderProviderError(format, http.StatusBadGateway, code, "the configured provider credential is unavailable")}
 }

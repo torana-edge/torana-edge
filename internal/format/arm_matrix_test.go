@@ -1,12 +1,9 @@
 package format_test
 
 import (
-	"strings"
 	"testing"
 
-	"github.com/torana-edge/torana-edge/internal/engine"
 	"github.com/torana-edge/torana-edge/internal/format/anthropic"
-	"github.com/torana-edge/torana-edge/internal/format/bedrock"
 	"github.com/torana-edge/torana-edge/internal/format/gemini"
 	"github.com/torana-edge/torana-edge/internal/format/openai"
 )
@@ -25,31 +22,6 @@ func expectParseError(t *testing.T, name, body string, unmarshal func([]byte) er
 		if err := unmarshal([]byte(body)); err == nil {
 			t.Fatalf("run %d: ambiguous body accepted", i)
 		}
-	}
-}
-
-func TestBedrockArmMatrix(t *testing.T) {
-	unmarshal := func(b []byte) error {
-		_, err := (&bedrock.Adapter{}).Unmarshal(b)
-		return err
-	}
-	cases := map[string]string{
-		"text+toolUse on one block":      `{"modelId":"m","messages":[{"role":"user","content":[{"text":"hi","toolUse":{"toolUseId":"c1","name":"r","input":{}}}]}]}`,
-		"text+thinking on one block":     `{"modelId":"m","messages":[{"role":"assistant","content":[{"text":"hi","thinking":{"thinking":"r"}}]}]}`,
-		"two unknown discriminants":      `{"modelId":"m","messages":[{"role":"user","content":[{"image":{"source":{"bytes":"x"}},"document":{"format":"pdf"}}]}]}`,
-		"known arm plus unknown member":  `{"modelId":"m","messages":[{"role":"user","content":[{"text":"hi","custom":1}]}]}`,
-		"nested two discriminants":       `{"modelId":"m","messages":[{"role":"user","content":[{"toolResult":{"toolUseId":"c1","content":[{"text":"a","json":{"x":1}}]}}]}]}`,
-		"unknown role":                   `{"modelId":"m","messages":[{"role":"developer","content":[{"text":"hi"}]}]}`,
-		"system role in messages":        `{"modelId":"m","messages":[{"role":"system","content":[{"text":"hi"}]}]}`,
-		"system entry text+cachePoint":   `{"modelId":"m","system":[{"text":"hi","cachePoint":{"type":"default"}}],"messages":[{"role":"user","content":[{"text":"hi"}]}]}`,
-		"system entry empty":             `{"modelId":"m","system":[{}],"messages":[{"role":"user","content":[{"text":"hi"}]}]}`,
-		"toolConfig toolSpec+cachePoint": `{"modelId":"m","toolConfig":{"tools":[{"toolSpec":{"name":"r","inputSchema":{"json":{"type":"object"}}},"cachePoint":{"type":"default"}}]},"messages":[{"role":"user","content":[{"text":"hi"}]}]}`,
-		"toolConfig entry empty":         `{"modelId":"m","toolConfig":{"tools":[{}]},"messages":[{"role":"user","content":[{"text":"hi"}]}]}`,
-	}
-	for name, body := range cases {
-		t.Run(name, func(t *testing.T) {
-			expectParseError(t, name, body, unmarshal)
-		})
 	}
 }
 
@@ -114,38 +86,5 @@ func TestAnthropicRequiredMemberMatrix(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			expectParseError(t, name, body, unmarshal)
 		})
-	}
-}
-
-// TestBedrockRolesPreserved — the normative two-role grammar is preserved
-// exactly: user and assistant survive to the engine verbatim (grant
-// classification falls to ir.messages.write.user/assistant).
-func TestBedrockRolesPreserved(t *testing.T) {
-	chat, err := (&bedrock.Adapter{}).Unmarshal([]byte(`{"modelId":"m","messages":[{"role":"user","content":[{"text":"u"}]},{"role":"assistant","content":[{"text":"a"}]}]}`))
-	if err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	if len(chat.Messages) != 2 {
-		t.Fatalf("messages = %d, want 2", len(chat.Messages))
-	}
-	if string(chat.Messages[0].Role) != "user" || string(chat.Messages[1].Role) != "assistant" {
-		t.Fatalf("roles not preserved: %+v", chat.Messages)
-	}
-	// The unmodelled-role case must be a parse error, never a silent relabel.
-	_, err = (&bedrock.Adapter{}).Unmarshal([]byte(`{"modelId":"m","messages":[{"role":"other","content":[{"text":"x"}]}]}`))
-	if err == nil {
-		t.Fatal("unmodelled bedrock role must be rejected")
-	}
-	if !strings.Contains(err.Error(), "role") {
-		t.Fatalf("error = %q, want the role condition named", err)
-	}
-
-	// The marshal side refuses unmodelled engine roles identically.
-	marshalChat := &engine.ChatRequest{
-		Model:    "m",
-		Messages: []engine.Message{{Role: "other", Blocks: []engine.Block{{Text: &engine.TextBlock{Text: "x"}}}}},
-	}
-	if _, err := (&bedrock.Adapter{}).Marshal(marshalChat); err == nil {
-		t.Fatal("unmodelled engine role must be rejected on marshal")
 	}
 }

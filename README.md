@@ -25,7 +25,7 @@ CLI (`agy`)** — Torana also offers an optional TLS-terminating MITM ingress. S
 - **Responses-native compaction:** OpenAI Responses requests can opt into provider-side compaction without Torana storing a second conversation.
 - **Harness-native custom tools:** OpenAI Responses free-form tool definitions, calls, streamed input, and structured results are represented explicitly in the IR. Plugins can inspect or safely rewrite them without pretending textual input is JSON function arguments; formats without an equivalent fail explicitly.
 - **Provider Failover:** Automatic retry with fallback providers on 429/5xx errors.
-- **Unified IR:** Format adapters translate OpenAI, Anthropic, Bedrock, and Gemini wire formats into a single canonical IR. Plugins work on the IR and never touch raw JSON.
+- **Unified IR:** Format adapters translate OpenAI, Anthropic, and Gemini wire formats into a single canonical IR. Plugins work on the IR and never touch raw JSON.
 - **MITM ingress (optional):** For harnesses that ignore base-URL overrides (e.g. the Antigravity CLI), an opt-in TLS-terminating proxy routes their traffic through the pipeline. Disabled unless configured.
 
 ## Quick Start
@@ -191,7 +191,6 @@ ABI-v1 Go and Rust SDKs, examples, conformance guests, and authoring guides.
 |---|---|---|
 | `openai` | OpenAI Chat Completions + Responses API | SSE |
 | `anthropic` | Anthropic Messages API | SSE |
-| `bedrock` | AWS Bedrock Converse | JSON lines |
 | `gemini` | Google Gemini API / Vertex AI (`generateContent`) | SSE |
 | `gemini-codeassist` | Google Code Assist (Antigravity CLI) | SSE |
 
@@ -204,7 +203,6 @@ The inference boundary is explicit and method-sensitive:
 |---|---|
 | `openai` | `/chat/completions`, `/responses` |
 | `anthropic` | `/messages` |
-| `bedrock` | `/converse`, `/converse-stream` |
 | `gemini`, `gemini-codeassist` | `:generateContent`, `:streamGenerateContent` |
 
 Version, deployment, and model path prefixes may precede those suffixes. Other
@@ -266,7 +264,7 @@ torana-edge/
 │   ├── engine/
 │   │   ├── types.go                # Canonical IR: ChatRequest, StreamEvent, etc.
 │   │   └── pbconv/                 # IR ↔ Protobuf converters
-│   ├── format/                     # Wire format adapters (OpenAI, Anthropic, Bedrock, Gemini)
+│   ├── format/                     # Wire format adapters (OpenAI, Anthropic, Gemini)
 │   ├── metrics/                    # Request stats tracking
 │   ├── mitm/                       # Optional TLS-terminating ingress (Antigravity CLI)
 │   ├── plugin/                     # WASM plugin discovery and pipeline orchestration

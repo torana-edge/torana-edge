@@ -17,15 +17,10 @@ Only these requests are decoded to Torana's IR and exposed to plugins:
 |---|---|
 | OpenAI | `POST .../chat/completions`, `POST .../responses` |
 | Anthropic | `POST .../messages` |
-| AWS Bedrock | `POST .../converse`, `POST .../converse-stream` |
 | Gemini / Code Assist | `POST ...:generateContent`, `POST ...:streamGenerateContent` |
 
 Method and endpoint position matter. A look-alike path, a `GET`, or a path
 where the token is not the final operation does not enter IR.
-
-Bedrock's model-specific Invoke API is deliberately pass-through. Torana owns
-the Bedrock Converse wire format; treating every endpoint whose name sounds
-like inference as Converse would corrupt valid model-specific traffic.
 
 ## What pass-through guarantees
 

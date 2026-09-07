@@ -1257,7 +1257,7 @@
     }
 
     // ---- Settings ----
-    const PROVIDER_FORMATS = ['openai', 'anthropic', 'bedrock', 'gemini', 'gemini-codeassist'];
+    const PROVIDER_FORMATS = ['openai', 'anthropic', 'gemini', 'gemini-codeassist'];
     function loadSettings() {
       fetch('/_torana/api/v1/config').then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
         .then(cfg => { settingsCfg = cfg; renderSettings(cfg); })

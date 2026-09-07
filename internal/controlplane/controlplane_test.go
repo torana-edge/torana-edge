@@ -1,9 +1,14 @@
 package controlplane_test
 
 import (
+	"github.com/torana-edge/torana-edge/internal/provider"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"regexp"
+	"slices"
+	"sort"
 	"strings"
 	"testing"
 
@@ -71,5 +76,38 @@ func TestHandler(t *testing.T) {
 		if !strings.Contains(string(assetBody), asset.marker) {
 			t.Errorf("GET %s body missing marker %q", asset.path, asset.marker)
 		}
+	}
+}
+
+// The Settings form offers a provider "format" dropdown built from a hardcoded
+// PROVIDER_FORMATS list in the shipped UI. That is a second copy of a
+// vocabulary the server owns, and it drifted exactly as a second copy does:
+// after the Bedrock adapter was deleted the UI went on offering `bedrock`, so
+// an operator could select a format the server then rejects — a broken
+// configuration produced by following the product's own interface.
+//
+// The list is checked against provider.SupportedFormats rather than restated,
+// so removing or adding a format cannot silently leave the UI behind.
+func TestUIProviderFormatsMatchTheServer(t *testing.T) {
+	raw, err := os.ReadFile("dist/index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := regexp.MustCompile(`const PROVIDER_FORMATS\s*=\s*\[([^\]]*)\]`).FindSubmatch(raw)
+	if m == nil {
+		t.Fatal("dist/index.html no longer declares PROVIDER_FORMATS; this check cannot " +
+			"see the vocabulary the UI offers, so update it rather than deleting it")
+	}
+	var ui []string
+	for _, q := range regexp.MustCompile(`'([^']*)'`).FindAllSubmatch(m[1], -1) {
+		ui = append(ui, string(q[1]))
+	}
+	sort.Strings(ui)
+
+	want := provider.SupportedFormats()
+	if !slices.Equal(ui, want) {
+		t.Errorf("the control-plane UI offers provider formats %v, the server accepts %v.\n"+
+			"An operator can select a value the server rejects, or cannot select one it accepts.",
+			ui, want)
 	}
 }

@@ -5,7 +5,7 @@
   "version": "0.1.0",
   "abi_version": "v1",
   "failure_mode": "block",
-  "description": "Test fixture: appends an SDK-valid redacted-thinking message the openai/bedrock adapters cannot marshal",
+  "description": "Test fixture: appends an SDK-valid redacted-thinking message the openai adapter cannot marshal",
   "hooks": [
     {
       "name": "run_before_request"

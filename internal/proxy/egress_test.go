@@ -262,7 +262,7 @@ func TestEgressRejectsUnknownProvider(t *testing.T) {
 
 // TestEgressRequiresPath — Torana forwards the caller's path rather than
 // synthesizing one, so a plugin must supply it. Guessing would work for
-// OpenAI-shaped providers and silently fail for Bedrock and Code Assist.
+// OpenAI-shaped providers and silently fail for Code Assist.
 func TestEgressRequiresPath(t *testing.T) {
 	srv, _ := egressServer(t, provider.EgressBudget{MaxCallsPerMinute: 10})
 
@@ -569,7 +569,7 @@ func TestEgressPathCannotEscapeProviderOrigin(t *testing.T) {
 	}
 
 	// Legitimate shapes still reach the configured upstream: query strings and
-	// Bedrock-style :invoke paths.
+	// colon-suffixed action paths.
 	srv, calls := egressServer(t, provider.EgressBudget{MaxCallsPerMinute: 10})
 	for _, path := range []string{"/v1/chat/completions?stream=true", "/model/amazon.titan-text-express-v1:invoke"} {
 		got, herr := send(t, srv, "warmer", egressPayload(t, "oai", path))

@@ -90,8 +90,6 @@ func TestExtractPresenceHasMessagePerFormat(t *testing.T) {
 		{"anthropic", `{"content":[{"type":"text","text":"hi"}]}`, true},
 		{"anthropic", `{"content":[]}`, false},
 		{"anthropic", `{"stop_reason":"end_turn"}`, false},
-		{"bedrock", `{"output":{"message":{"content":[{"text":"hi"}]}}}`, true},
-		{"bedrock", `{"output":{"message":null}}`, false},
 		{"gemini", `{"candidates":[{"content":{"parts":[{"text":"hi"}]}}]}`, true},
 		{"gemini", `{"candidates":[]}`, false},
 		{"gemini", `{"candidates":[{"finishReason":"STOP"}]}`, false},

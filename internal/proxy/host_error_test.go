@@ -177,10 +177,6 @@ func TestHostErrorGoldenShapes(t *testing.T) {
 			[]byte(`{"error":{"code":500,"message":"the request could not be encoded for the provider","status":"INTERNAL"}}`),
 			"application/json",
 		},
-		"bedrock": {
-			[]byte(`{"message":"the request could not be encoded for the provider"}`),
-			"application/json",
-		},
 	}
 	for format, want := range literal {
 		t.Run(format+"/unit", func(t *testing.T) {
@@ -221,7 +217,6 @@ func TestHostErrorPerFormatTerminal(t *testing.T) {
 		{"gemini-codeassist", "test-invalid-scheduling", codeAssistBody},
 		{"anthropic", "test-tool-role-message", `{"model":"m","max_tokens":64,"messages":[{"role":"user","content":"hi"}]}`},
 		{"openai", "test-redacted-thinking", `{"model":"m","messages":[{"role":"user","content":"redactme"}]}`},
-		{"bedrock", "test-redacted-thinking", `{"modelId":"m","messages":[{"role":"user","content":[{"text":"redactme"}]}]}`},
 	}
 	for _, row := range rows {
 		t.Run(row.format, func(t *testing.T) {
@@ -259,10 +254,8 @@ func literalHostError(format string) []byte {
 		return []byte(`{"error":{"message":"the request could not be encoded for the provider","type":"api_error"},"type":"error"}`)
 	case "openai":
 		return []byte(`{"error":{"code":"server_error","message":"the request could not be encoded for the provider","type":"server_error"}}`)
-	case "gemini", "gemini-codeassist":
+	default: // gemini and gemini-codeassist
 		return []byte(`{"error":{"code":500,"message":"the request could not be encoded for the provider","status":"INTERNAL"}}`)
-	default: // bedrock
-		return []byte(`{"message":"the request could not be encoded for the provider"}`)
 	}
 }
 
