@@ -2,6 +2,7 @@ package mitm
 
 import (
 	"bufio"
+	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/pem"
@@ -209,9 +210,7 @@ func TestDispatchStripsHopByHopHeadersBeforeTorana(t *testing.T) {
 		_, _ = io.Copy(io.Discard, peer)
 		close(done)
 	}()
-	if keepAlive := s.dispatch(owned, req, "api.example.com"); keepAlive {
-		t.Fatal("Torana-routed request was marked reusable")
-	}
+	s.dispatch(context.Background(), owned, req, "api.example.com")
 	_ = owned.Close()
 	_ = peer.Close()
 	<-done
@@ -433,4 +432,193 @@ func caPool(t *testing.T, dir string) *x509.CertPool {
 	}
 	pool.AddCert(cert)
 	return pool
+}
+
+// TestClientDisconnectCancelsUpstream is the property the previous fix did not
+// actually have: terminate's deferred cancel is unreachable while terminate is
+// blocked inside dispatch, which is the whole interval a disconnected harness
+// should stop paying for. The upstream here waits on req.Context().Done() and
+// nothing else, so the test can only pass if the closed client connection —
+// not the end of the request — is what cancels it.
+func TestClientDisconnectCancelsUpstream(t *testing.T) {
+	dir := t.TempDir()
+
+	reached := make(chan struct{})
+	cancelled := make(chan struct{})
+	stub := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		close(reached)
+		select {
+		case <-r.Context().Done():
+			close(cancelled)
+		case <-time.After(10 * time.Second):
+			// Falls through without closing cancelled; the assertion below
+			// reports the failure with a useful message.
+		}
+	})
+
+	s, err := New(provider.MITMConfig{
+		Enabled: true,
+		Listen:  "127.0.0.1:0",
+		CADir:   dir,
+		Hosts:   map[string]string{"cloudcode-pa.googleapis.com": "antigravity"},
+	}, stub)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.listener = ln
+	go func() {
+		srv := &http.Server{Handler: http.HandlerFunc(s.handleConnect)}
+		_ = srv.Serve(ln)
+	}()
+	defer s.Close()
+
+	// A raw connection, so the client side can be closed mid-request. An
+	// http.Client would hide the connection and only close it once the
+	// response completed — which is exactly the case that already worked.
+	raw, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer raw.Close()
+	if _, err := fmt.Fprintf(raw, "CONNECT cloudcode-pa.googleapis.com:443 HTTP/1.1\r\nHost: cloudcode-pa.googleapis.com:443\r\n\r\n"); err != nil {
+		t.Fatal(err)
+	}
+	br := bufio.NewReader(raw)
+	connectResp, err := http.ReadResponse(br, nil)
+	if err != nil {
+		t.Fatalf("CONNECT: %v", err)
+	}
+	if connectResp.StatusCode != http.StatusOK {
+		t.Fatalf("CONNECT status = %d", connectResp.StatusCode)
+	}
+
+	tlsConn := tls.Client(raw, &tls.Config{
+		ServerName: "cloudcode-pa.googleapis.com",
+		RootCAs:    caPool(t, dir),
+	})
+	if err := tlsConn.Handshake(); err != nil {
+		t.Fatalf("handshake: %v", err)
+	}
+
+	body := `{"request":{"contents":[]}}`
+	if _, err := fmt.Fprintf(tlsConn,
+		"POST /v1internal:streamGenerateContent?alt=sse HTTP/1.1\r\nHost: cloudcode-pa.googleapis.com\r\n"+
+			"Content-Type: application/json\r\nContent-Length: %d\r\n\r\n%s", len(body), body); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case <-reached:
+	case <-time.After(5 * time.Second):
+		t.Fatal("request never reached the Torana handler")
+	}
+
+	// The handler is now blocked with the request in flight. Drop the client.
+	_ = raw.Close()
+
+	select {
+	case <-cancelled:
+	case <-time.After(5 * time.Second):
+		t.Fatal("upstream was still running after the client disconnected: " +
+			"the provider keeps generating, and billing, for a harness that has quit")
+	}
+}
+
+// TestHealthyStreamOutlivesTheIdleBound: the idle bound exists to reap a
+// connection that says nothing, not to cap one that is working. A single
+// absolute SetDeadline covered reads AND writes for the whole connection and
+// was never refreshed by progress, so a stream still delivering tokens when it
+// elapsed was killed mid-response — the failure mode is a truncated model
+// answer, which looks like a provider problem.
+//
+// idleTimeout is shortened here so the property is provable in a second rather
+// than ten minutes.
+func TestHealthyStreamOutlivesTheIdleBound(t *testing.T) {
+	dir := t.TempDir()
+
+	const chunks = 10
+	const gap = 40 * time.Millisecond
+	var (
+		mu       sync.Mutex
+		ctxErrAt = -1 // chunk index at which the request context was cancelled
+	)
+	stub := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(200)
+		for i := range chunks {
+			if r.Context().Err() != nil {
+				mu.Lock()
+				if ctxErrAt < 0 {
+					ctxErrAt = i
+				}
+				mu.Unlock()
+				return
+			}
+			fmt.Fprintf(w, "data: chunk-%d\n\n", i)
+			w.(http.Flusher).Flush()
+			time.Sleep(gap)
+		}
+	})
+
+	s, err := New(provider.MITMConfig{
+		Enabled: true,
+		Listen:  "127.0.0.1:0",
+		CADir:   dir,
+		Hosts:   map[string]string{"cloudcode-pa.googleapis.com": "antigravity"},
+	}, stub)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	// Far shorter than the stream takes to finish. Under the old absolute
+	// deadline the connection dies around chunk 2.
+	s.idleTimeout = 3 * gap
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.listener = ln
+	go func() {
+		srv := &http.Server{Handler: http.HandlerFunc(s.handleConnect)}
+		_ = srv.Serve(ln)
+	}()
+	defer s.Close()
+
+	proxyURL, _ := url.Parse("http://" + ln.Addr().String())
+	client := &http.Client{
+		Timeout: 30 * time.Second,
+		Transport: &http.Transport{
+			Proxy:           http.ProxyURL(proxyURL),
+			TLSClientConfig: &tls.Config{RootCAs: caPool(t, dir)},
+		},
+	}
+	resp, err := client.Post(
+		"https://cloudcode-pa.googleapis.com/v1internal:streamGenerateContent?alt=sse",
+		"application/json", strings.NewReader(`{"request":{"contents":[]}}`))
+	if err != nil {
+		t.Fatalf("request through MITM failed: %v", err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("stream cut off after %d bytes: %v", len(body), err)
+	}
+	mu.Lock()
+	cancelledAt := ctxErrAt
+	mu.Unlock()
+	if cancelledAt >= 0 {
+		t.Errorf("the request context was cancelled at chunk %d of %d while the client was "+
+			"still connected and reading — the idle bound is being applied to a healthy "+
+			"request instead of to idleness", cancelledAt, chunks)
+	}
+	for i := range chunks {
+		if want := fmt.Sprintf("data: chunk-%d\n", i); !strings.Contains(string(body), want) {
+			t.Fatalf("stream truncated at chunk %d — the idle bound is capping a healthy "+
+				"response, not idleness\n  got: %q", i, body)
+		}
+	}
 }

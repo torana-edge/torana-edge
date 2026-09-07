@@ -19,13 +19,51 @@ import (
 	"github.com/torana-edge/torana-edge/internal/fileperm"
 )
 
+// leafLifetime bounds a minted leaf. Short on purpose: these are minted by a
+// local interception CA, and a short life limits the damage if one leaks.
+const leafLifetime = 24 * time.Hour
+
+// leafRenewBefore re-mints a cached leaf this long before it expires, so a
+// handshake never hands the client a certificate about to lapse mid-connection.
+const leafRenewBefore = time.Hour
+
+// leafMinLifetime is the least remaining CA life worth minting against. A leaf
+// can never outlive its signer, so near the CA's expiry the cap below would
+// produce certificates that expire almost immediately — and, once inside
+// leafRenewBefore, ones the cache re-mints on every single handshake. Twice
+// leafRenewBefore keeps a capped leaf cacheable for at least an hour and turns
+// the end of the CA's life into one actionable error instead of a slow
+// degradation nobody can read.
+const leafMinLifetime = 2 * leafRenewBefore
+
 // CA is a locally-generated certificate authority that mints per-host leaf
 // certificates on demand. The private key lives only in the configured dir.
 type CA struct {
-	cert  *x509.Certificate
-	key   *ecdsa.PrivateKey
+	cert *x509.Certificate
+	key  *ecdsa.PrivateKey
+	// dir holds the CA material, so an expiry error can name the exact files
+	// the operator has to delete rather than describing them.
+	dir   string
 	mu    sync.Mutex
-	cache map[string]*tls.Certificate
+	cache map[string]cachedLeaf
+	// now is injectable so the expiry path can be tested without sleeping for
+	// a day. Nil means time.Now.
+	now func() time.Time
+}
+
+// cachedLeaf pairs a minted certificate with the expiry the cache must respect.
+// tls.Certificate.Leaf is not guaranteed to be populated, so the deadline is
+// recorded at mint time rather than re-parsed on every handshake.
+type cachedLeaf struct {
+	cert     *tls.Certificate
+	notAfter time.Time
+}
+
+func (c *CA) clock() time.Time {
+	if c.now != nil {
+		return c.now()
+	}
+	return time.Now()
 }
 
 // LoadOrCreateCA loads the CA from dir, generating a new one if absent.
@@ -91,7 +129,7 @@ func LoadOrCreateCA(dir string) (*CA, error) {
 		if err != nil {
 			return nil, err
 		}
-		return &CA{cert: cert, key: key, cache: map[string]*tls.Certificate{}}, nil
+		return &CA{cert: cert, key: key, dir: dir, cache: map[string]cachedLeaf{}}, nil
 	}
 
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
@@ -125,26 +163,57 @@ func LoadOrCreateCA(dir string) (*CA, error) {
 	if err := writePEMAtomic(keyPath, true, "EC PRIVATE KEY", kder); err != nil {
 		return nil, err
 	}
-	return &CA{cert: cert, key: key, cache: map[string]*tls.Certificate{}}, nil
+	return &CA{cert: cert, key: key, dir: dir, cache: map[string]cachedLeaf{}}, nil
 }
 
-// LeafFor returns a leaf certificate for name, minting and caching it if new.
+// LeafFor returns a leaf certificate for name, minting one when the cache has
+// none or the cached one is about to expire.
+//
+// The expiry check is the point. Leaves live 24h and the cache never evicted,
+// so a proxy left running overnight served an EXPIRED certificate to every
+// subsequent handshake and the ingress simply stopped working — with a TLS
+// error that points at the client, not here.
 func (c *CA) LeafFor(name string) (*tls.Certificate, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if cert, ok := c.cache[name]; ok {
-		return cert, nil
+	now := c.clock()
+	if cached, ok := c.cache[name]; ok && now.Add(leafRenewBefore).Before(cached.notAfter) {
+		return cached.cert, nil
 	}
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		return nil, err
 	}
+	// A leaf can never outlive the CA that signed it: past c.cert.NotAfter the
+	// chain fails at the client no matter what the leaf claims. Cap it, and
+	// refuse outright once too little CA life remains to mint something usable
+	// — otherwise the ingress degrades into a per-host TLS error that points
+	// at the client, which is the same failure this expiry work exists to end.
+	notAfter := now.Add(leafLifetime)
+	if notAfter.After(c.cert.NotAfter) {
+		notAfter = c.cert.NotAfter
+	}
+	if !now.Add(leafMinLifetime).Before(c.cert.NotAfter) {
+		return nil, fmt.Errorf(
+			"MITM CA expires at %s, too soon to mint a usable leaf for %q; "+
+				"delete %s and %s to generate a new CA (clients trusting the "+
+				"old one must trust the new bundle)",
+			c.cert.NotAfter.UTC().Format(time.RFC3339), name,
+			filepath.Join(c.dir, "ca-cert.pem"), filepath.Join(c.dir, "ca-key.pem"))
+	}
+	serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
+	if err != nil {
+		return nil, err
+	}
 	tmpl := &x509.Certificate{
-		SerialNumber: big.NewInt(time.Now().UnixNano()),
+		// A random 128-bit serial. UnixNano() collides for two leaves minted
+		// in the same nanosecond and leaks mint time; neither is wanted in a
+		// certificate a client pins.
+		SerialNumber: serial,
 		Subject:      pkix.Name{CommonName: name},
 		DNSNames:     []string{name},
-		NotBefore:    time.Now().Add(-time.Hour),
-		NotAfter:     time.Now().Add(24 * time.Hour),
+		NotBefore:    now.Add(-time.Hour),
+		NotAfter:     notAfter,
 		KeyUsage:     x509.KeyUsageDigitalSignature,
 		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
 	}
@@ -153,7 +222,7 @@ func (c *CA) LeafFor(name string) (*tls.Certificate, error) {
 		return nil, err
 	}
 	cert := &tls.Certificate{Certificate: [][]byte{der, c.cert.Raw}, PrivateKey: key}
-	c.cache[name] = cert
+	c.cache[name] = cachedLeaf{cert: cert, notAfter: notAfter}
 	return cert, nil
 }
 
@@ -161,12 +230,13 @@ func (c *CA) LeafFor(name string) (*tls.Certificate, error) {
 // client can validate both our MITM leaves and real upstream certs (for
 // tunneled hosts). Returns the bundle path.
 func (c *CA) WriteBundle(dir string) (string, error) {
-	var sys []byte
-	for _, p := range []string{"/etc/ssl/certs/ca-certificates.crt", "/etc/pki/tls/certs/ca-bundle.crt", "/etc/ssl/cert.pem"} {
-		if b, err := os.ReadFile(p); err == nil {
-			sys = b
-			break
-		}
+	sys, err := systemRootsPEM()
+	// Without system roots the bundle contains only this CA, so the client can
+	// validate intercepted hosts but not the REAL certificates of every
+	// tunneled one — which is precisely what the bundle exists to carry. That
+	// failed as a confusing per-host TLS error much later; say it here.
+	if err != nil {
+		return "", fmt.Errorf("bundle: %w", err)
 	}
 	caPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: c.cert.Raw})
 	out := append(append(append([]byte{}, sys...), '\n'), caPEM...)
@@ -210,7 +280,13 @@ func loadCA(certPath, keyPath string, now time.Time) (*x509.Certificate, *ecdsa.
 		return nil, nil, fmt.Errorf("MITM CA certificate is not valid for certificate signing")
 	}
 	if now.Before(cert.NotBefore) || now.After(cert.NotAfter) {
-		return nil, nil, fmt.Errorf("MITM CA certificate is not currently valid")
+		// Name the files and the remedy. The CA has a fixed one-year life and
+		// no renewal path, so this is reached by simply leaving an install in
+		// place — and "not currently valid" alone leaves an operator guessing.
+		return nil, nil, fmt.Errorf(
+			"MITM CA certificate expired at %s; delete %s and %s to generate a new CA "+
+				"(clients trusting the old one must trust the new bundle)",
+			cert.NotAfter.UTC().Format(time.RFC3339), certPath, keyPath)
 	}
 	if err := cert.CheckSignatureFrom(cert); err != nil {
 		return nil, nil, fmt.Errorf("MITM CA certificate is not self-signed: %w", err)

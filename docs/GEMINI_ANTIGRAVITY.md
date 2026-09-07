@@ -129,6 +129,28 @@ Upstream returned 200
         other (loadCodeAssist, oauth2, telemetry, …)       → opaque TLS tunnel                        → real Google
 ```
 
+### What the listener is, stated plainly
+
+The MITM ingress is a **CONNECT forward proxy for the local machine**. Hosts in
+`mitm.hosts` are decrypted and routed through the pipeline; every other CONNECT
+is tunnelled to whatever address it names, which is how the non-decrypted
+traffic above reaches Google. That also means any local process pointed at
+`HTTPS_PROXY` can reach any host through it, not only Google's.
+
+It binds a literal loopback address and refuses anything else
+(`MITMConfig.ValidateIngress`), so this is reachable only from the machine it
+runs on — but it is a real surface and worth knowing before enabling the
+ingress. Leave `mitm.enabled` off unless you are actually using a harness that
+needs it; it is off by default.
+
+Two lifetimes to be aware of:
+
+- **Leaf certificates live 24 hours** and are re-minted automatically an hour
+  before expiry, so a long-running proxy keeps working.
+- **The generated CA lives one year** and has no automatic renewal. When it
+  expires, Torana refuses to start the ingress and names the two files to
+  delete; clients trusting the old CA must then trust the newly written bundle.
+
 ### Notes & gotchas (from dogfooding)
 
 - **Only the `cloudcode-pa` hosts are decrypted.** OAuth token exchange
