@@ -282,3 +282,46 @@ func TestWriteNewNeverPublishesAnIncompleteFile(t *testing.T) {
 		}
 	}
 }
+
+// EnsureDir must not rewrite a directory that is already owner-only.
+//
+// This is the fix for a real Windows failure, not a micro-optimization:
+// applying a protected DACL to a container starts a propagation pass over its
+// children, and a pass that lands between another process's restrict of a file
+// and its verify of that file overwrites a child which was already correct. A
+// startup path that re-asserts the directory on every run therefore breaks its
+// own concurrent callers. Six processes opening one data directory at once hit
+// it as `.torana-new-… inherits access from its parent directory`.
+func TestEnsureDirDoesNotRewriteAnAlreadyRestrictedDirectory(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "data")
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	changed, err := fileperm.EnsureDir(dir)
+	if err != nil {
+		t.Fatalf("EnsureDir on a wide-open directory: %v", err)
+	}
+	if !changed {
+		t.Fatal("EnsureDir reported no change for a directory that was not owner-only")
+	}
+
+	for attempt := range 3 {
+		changed, err := fileperm.EnsureDir(dir)
+		if err != nil {
+			t.Fatalf("EnsureDir attempt %d: %v", attempt, err)
+		}
+		if changed {
+			t.Fatalf("EnsureDir attempt %d rewrote a directory that was already owner-only; "+
+				"on Windows that propagates over files other callers are mid-creation of", attempt)
+		}
+	}
+
+	info, err := os.Stat(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := fileperm.Verify(dir, info); err != nil {
+		t.Errorf("directory is not owner-only after EnsureDir: %v", err)
+	}
+}

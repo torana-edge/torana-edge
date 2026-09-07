@@ -47,8 +47,68 @@ func Restrict(path string) error {
 // RestrictDir makes a DIRECTORY at path accessible only by its owner, and
 // makes that the default for entries created inside it. Verify applies to a
 // directory unchanged — the rule about who may reach it is the same rule.
+//
+// Prefer EnsureDir at a startup path. Applying this unconditionally is what
+// breaks concurrent callers; see there.
 func RestrictDir(path string) error {
 	return restrict(path, true)
+}
+
+// EnsureDir makes a directory owner-only if it is not already, and reports an
+// error when it cannot be made so.
+//
+// The "if it is not already" is the point, not an optimization. On Windows,
+// applying a protected DACL to a container starts a propagation pass over its
+// children, and a pass that lands between another process's restrict of a file
+// and that process's verify of it overwrites a child which was already
+// correct. Startup paths call this on every run, so re-asserting a state that
+// already holds is not free — it is precisely what breaks the neighbours. It
+// surfaced as a first-run flake when several processes opened the same data
+// directory at once:
+//
+//	failed to create secret key file: …\.torana-new-2613133976 inherits
+//	access from its parent directory; it must carry a protected owner-only ACL
+//
+// changed reports whether anything was written, so the no-rewrite property can
+// be asserted directly rather than inferred from a timestamp.
+func EnsureDir(path string) (changed bool, err error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return false, err
+	}
+	if verify(path, info) == nil {
+		return false, nil
+	}
+	if err := restrict(path, true); err != nil {
+		return true, err
+	}
+	info, err = os.Stat(path)
+	if err != nil {
+		return true, err
+	}
+	return true, verify(path, info)
+}
+
+// restrictConfirmed applies owner-only access to a file this process just
+// created and CONFIRMS it stuck, retrying a bounded number of times.
+//
+// A concurrent protected-DACL application to the parent directory can
+// propagate over this file between the apply and the check. That is an
+// interfering neighbour, not a failed operation: the file must end up
+// owner-only, and one propagation pass must not turn a correct call into an
+// error. If it never sticks, the last verification error is returned rather
+// than a file that is not what it claims.
+func restrictConfirmed(path string, f *os.File) error {
+	var err error
+	for range 3 {
+		if err = restrict(path, false); err != nil {
+			return err
+		}
+		if err = verifyFile(f); err == nil {
+			return nil
+		}
+	}
+	return err
 }
 
 // WriteNew publishes path with owner-only access holding data, failing if path
@@ -76,15 +136,11 @@ func WriteNew(path string, data []byte) error {
 	// success one where it is now a second link to the published file.
 	defer func() { _ = os.Remove(tmpName) }()
 
-	if err := restrict(tmpName, false); err != nil {
-		_ = tmp.Close()
-		return err
-	}
 	// Decide on the HANDLE, not the name just applied to. If the name was made
 	// to resolve elsewhere between the two, the restriction landed on
 	// something else and this handle is not owner-only — refuse rather than
 	// write a secret through it.
-	if err := verifyFile(tmp); err != nil {
+	if err := restrictConfirmed(tmpName, tmp); err != nil {
 		_ = tmp.Close()
 		return err
 	}
@@ -111,13 +167,9 @@ func WriteNew(path string, data []byte) error {
 func OpenAppend(path string) (*os.File, error) {
 	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL|os.O_APPEND, 0o600)
 	if err == nil {
-		if rerr := restrict(path, false); rerr != nil {
+		if rerr := restrictConfirmed(path, f); rerr != nil {
 			_ = f.Close()
 			return nil, rerr
-		}
-		if verr := verifyFile(f); verr != nil {
-			_ = f.Close()
-			return nil, verr
 		}
 		return f, nil
 	}

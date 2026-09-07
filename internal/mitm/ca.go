@@ -82,7 +82,7 @@ func LoadOrCreateCA(dir string) (*CA, error) {
 	// freshly-created 0755 test/config directory). CADir is dedicated security
 	// material, so normalize it instead of making the operator repair the
 	// default umask by hand.
-	if err := fileperm.RestrictDir(dir); err != nil {
+	if _, err := fileperm.EnsureDir(dir); err != nil {
 		return nil, fmt.Errorf("secure MITM CA directory: %w", err)
 	}
 	info, err := os.Stat(dir)
