@@ -1372,6 +1372,15 @@ var requestBlockFieldSections = map[string]string{
 	"cache_breakpoint":   "ir.cache_control.write",
 	"unknown":            "ir.messages.write.<role>",
 	"trailing_signature": "ir.messages.write.<role>",
+	// A refusal is assistant CONTENT in the ordered body, so it is governed
+	// exactly like the other content arms rather than being host provenance.
+	//
+	// The host neither produces nor accepts this arm yet: no adapter models a
+	// refusal, and pbconv rejects a block whose arm it does not recognise. The
+	// section is recorded now because a field with no section is
+	// indistinguishable from a field somebody forgot, and this gate exists to
+	// force the difference to be stated.
+	"refusal": "ir.messages.write.<role>",
 }
 
 var requestTextBlockFieldSections = map[string]string{
@@ -1409,6 +1418,14 @@ var requestToolResultBlockFieldSections = map[string]string{
 	"scheduling":         "ir.messages.write.<role>",
 	"signature":          hostOwnedField,
 	"invocation_kind":    "ir.messages.write.<role>",
+	// is_error is a block-level fact of the tool-result message, like
+	// will_continue and invocation_kind beside it — not the result's VALUE,
+	// which is the one thing ir.tool_results.write governs (see
+	// toolResultTextBlockFieldSections). Flipping it tells the model a failed
+	// call succeeded, so it takes the broader role grant deliberately: a
+	// plugin holding only ir.tool_results.write may rewrite what a tool said,
+	// not whether it failed.
+	"is_error": "ir.messages.write.<role>",
 }
 
 var toolResultContentBlockFieldSections = map[string]string{
