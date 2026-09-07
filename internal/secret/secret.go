@@ -33,10 +33,13 @@ func Open(dataDir string) (*Store, error) {
 	if err := os.MkdirAll(dataDir, 0o700); err != nil {
 		return nil, fmt.Errorf("failed to create data directory: %w", err)
 	}
-	// EnsureDir, not RestrictDir: this runs on every Open, and re-applying a
-	// directory's protected DACL when it already has one propagates over the
-	// files inside it — including a key file another process is in the middle
-	// of creating.
+	// This protects the DIRECTORY only. The key file inside it is secured
+	// explicitly, on its own handle, by readExistingKey and createOrReadKey —
+	// a restricted directory does not make its contents owner-only.
+	//
+	// EnsureDir, not RestrictDir, because this runs on every Open and there is
+	// no reason to rewrite an access-control list that already says what it
+	// should.
 	if _, err := fileperm.EnsureDir(dataDir); err != nil {
 		return nil, fmt.Errorf("securing data directory: %w", err)
 	}

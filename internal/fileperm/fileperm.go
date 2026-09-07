@@ -44,33 +44,47 @@ func Restrict(path string) error {
 	return restrict(path, false)
 }
 
-// RestrictDir makes a DIRECTORY at path accessible only by its owner, and
-// makes that the default for entries created inside it. Verify applies to a
-// directory unchanged — the rule about who may reach it is the same rule.
+// RestrictDir makes a DIRECTORY at path accessible only by its owner.
 //
-// Prefer EnsureDir at a startup path. Applying this unconditionally is what
-// breaks concurrent callers; see there.
+// It protects the DIRECTORY ITSELF and nothing else. It does not make
+// owner-only the default for entries created inside it, and no caller may
+// treat a restricted directory as securing what it contains: the access
+// granted is deliberately not inheritable, and Verify rejects a file whose
+// protection is merely inherited in any case. A confidential file must be
+// secured explicitly — through WriteNew, OpenAppend, or Secure on its open
+// handle.
+//
+// Verify applies to a directory unchanged: the rule about who may reach it is
+// the same rule.
+//
+// Prefer EnsureDir at a startup path, which skips the write when the directory
+// is already owner-only.
 func RestrictDir(path string) error {
 	return restrict(path, true)
 }
 
 // EnsureDir makes a directory owner-only if it is not already, and reports an
-// error when it cannot be made so.
+// error when it cannot be made so. Like RestrictDir, it protects only the
+// directory; see there.
 //
-// The "if it is not already" is the point, not an optimization. On Windows,
-// applying a protected DACL to a container starts a propagation pass over its
-// children, and a pass that lands between another process's restrict of a file
-// and that process's verify of it overwrites a child which was already
-// correct. Startup paths call this on every run, so re-asserting a state that
-// already holds is not free — it is precisely what breaks the neighbours. It
-// surfaced as a first-run flake when several processes opened the same data
-// directory at once:
+// It exists so a startup path, which runs on every start, does not rewrite an
+// access-control list that already says what it should. changed reports
+// whether anything was written, so that property can be asserted directly
+// rather than inferred from a timestamp.
+//
+// HISTORICAL, and no longer a hazard on this path: directory access used to be
+// granted inheritably, which made every application of it a propagation pass
+// over the directory's children. A pass landing between another process's
+// restrict of a file and that process's verify of it overwrote a child which
+// was already correct — a first-run flake when several processes opened one
+// data directory at once:
 //
 //	failed to create secret key file: …\.torana-new-2613133976 inherits
 //	access from its parent directory; it must carry a protected owner-only ACL
 //
-// changed reports whether anything was written, so the no-rewrite property can
-// be asserted directly rather than inferred from a timestamp.
+// Nothing is inheritable now, so a directory write cannot reach the files
+// inside it. Skipping the redundant write is worth doing on its own terms; it
+// is no longer what stands between correctness and that failure.
 func EnsureDir(path string) (changed bool, err error) {
 	info, err := os.Stat(path)
 	if err != nil {

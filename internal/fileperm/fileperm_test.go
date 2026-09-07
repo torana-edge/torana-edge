@@ -285,13 +285,11 @@ func TestWriteNewNeverPublishesAnIncompleteFile(t *testing.T) {
 
 // EnsureDir must not rewrite a directory that is already owner-only.
 //
-// This is the fix for a real Windows failure, not a micro-optimization:
-// applying a protected DACL to a container starts a propagation pass over its
-// children, and a pass that lands between another process's restrict of a file
-// and its verify of that file overwrites a child which was already correct. A
-// startup path that re-asserts the directory on every run therefore breaks its
-// own concurrent callers. Six processes opening one data directory at once hit
-// it as `.torana-new-… inherits access from its parent directory`.
+// A startup path runs on every start, so it should not keep writing an
+// access-control list that already says what it should. That is the whole
+// claim here — the correctness of concurrent callers rests on directory
+// access not being inheritable (see TestDirectoryRestrictionDoesNotDisturbFilesInside),
+// not on this.
 func TestEnsureDirDoesNotRewriteAnAlreadyRestrictedDirectory(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "data")
 	if err := os.Mkdir(dir, 0o755); err != nil {
@@ -312,8 +310,7 @@ func TestEnsureDirDoesNotRewriteAnAlreadyRestrictedDirectory(t *testing.T) {
 			t.Fatalf("EnsureDir attempt %d: %v", attempt, err)
 		}
 		if changed {
-			t.Fatalf("EnsureDir attempt %d rewrote a directory that was already owner-only; "+
-				"on Windows that propagates over files other callers are mid-creation of", attempt)
+			t.Fatalf("EnsureDir attempt %d rewrote a directory that was already owner-only", attempt)
 		}
 	}
 
