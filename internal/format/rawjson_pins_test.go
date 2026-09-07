@@ -17,7 +17,6 @@ import (
 	"github.com/torana-edge/torana-edge/internal/engine"
 	"github.com/torana-edge/torana-edge/internal/engine/pbconv"
 	"github.com/torana-edge/torana-edge/internal/format/anthropic"
-	"github.com/torana-edge/torana-edge/internal/format/bedrock"
 	"github.com/torana-edge/torana-edge/internal/format/gemini"
 	"github.com/torana-edge/torana-edge/internal/format/openai"
 	pb "github.com/torana-edge/torana-plugin-sdk/pb/v1"
@@ -141,34 +140,6 @@ func TestRawJSONArgumentsRoundTripGemini(t *testing.T) {
 	}
 }
 
-// TestRawJSONArgumentsRoundTripBedrock: toolUse input lexemes survive.
-func TestRawJSONArgumentsRoundTripBedrock(t *testing.T) {
-	for _, tc := range lexemeCases {
-		t.Run(tc.name, func(t *testing.T) {
-			body := `{"modelId":"m","messages":[{"role":"assistant","content":[{"toolUse":{"toolUseId":"t1","name":"read_file","input":` + tc.json + `}}]}]}`
-			chat, err := (&bedrock.Adapter{}).Unmarshal([]byte(body))
-			if err != nil {
-				t.Fatalf("unmarshal: %v", err)
-			}
-			got := toolCalls(chat.Messages[0])[0].Args.String()
-			for _, w := range tc.want {
-				if !strings.Contains(got, w) {
-					t.Fatalf("arguments lexeme %q lost: %s", w, got)
-				}
-			}
-			out, err := (&bedrock.Adapter{}).Marshal(chat)
-			if err != nil {
-				t.Fatalf("marshal: %v", err)
-			}
-			for _, w := range tc.want {
-				if !strings.Contains(string(out), w) {
-					t.Fatalf("wire lexeme %q lost: %s", w, out)
-				}
-			}
-		})
-	}
-}
-
 // TestRawJSONParametersRoundTrip: tool schemas with non-alphabetical key
 // order survive unmarshal -> wrapper -> marshal for every format that
 // carries them.
@@ -189,9 +160,6 @@ func TestRawJSONParametersRoundTrip(t *testing.T) {
 		{"gemini", func(b []byte) (*engine.ChatRequest, error) { return (&gemini.Adapter{}).Unmarshal(b) },
 			func(c *engine.ChatRequest) ([]byte, error) { return (&gemini.Adapter{}).Marshal(c) },
 			`{"contents":[],"tools":[{"functionDeclarations":[{"name":"read_file","parameters":` + schema + `}]}]}`},
-		{"bedrock", func(b []byte) (*engine.ChatRequest, error) { return (&bedrock.Adapter{}).Unmarshal(b) },
-			func(c *engine.ChatRequest) ([]byte, error) { return (&bedrock.Adapter{}).Marshal(c) },
-			`{"modelId":"m","toolConfig":{"tools":[{"toolSpec":{"name":"read_file","inputSchema":{"json":` + schema + `}}}]},"messages":[]}`},
 	}
 	for _, a := range adapters {
 		t.Run(a.name, func(t *testing.T) {
@@ -541,46 +509,6 @@ func TestRawJSONMatrixExact(t *testing.T) {
 					t.Fatalf("extract: %v", err)
 				}
 				return m.Tools[0].FunctionDeclarations[0].Parameters
-			},
-		},
-		{
-			name: "bedrock",
-			body: func(args, params string) string {
-				return `{"modelId":"m","toolConfig":{"tools":[{"toolSpec":{"name":"read_file","inputSchema":{"json":` + params + `}}}]},"messages":[{"role":"assistant","content":[{"toolUse":{"toolUseId":"t1","name":"read_file","input":` + args + `}}]}]}`
-			},
-			unmarshal: func(b []byte) (*engine.ChatRequest, error) { return (&bedrock.Adapter{}).Unmarshal(b) },
-			marshal:   func(c *engine.ChatRequest) ([]byte, error) { return (&bedrock.Adapter{}).Marshal(c) },
-			extractArgs: func(t *testing.T, out []byte) []byte {
-				var m struct {
-					Messages []struct {
-						Content []struct {
-							ToolUse struct {
-								Input json.RawMessage `json:"input"`
-							} `json:"toolUse"`
-						} `json:"content"`
-					} `json:"messages"`
-				}
-				if err := json.Unmarshal(out, &m); err != nil {
-					t.Fatalf("extract: %v", err)
-				}
-				return m.Messages[0].Content[0].ToolUse.Input
-			},
-			extractParams: func(t *testing.T, out []byte) []byte {
-				var m struct {
-					ToolConfig struct {
-						Tools []struct {
-							ToolSpec struct {
-								InputSchema struct {
-									JSON json.RawMessage `json:"json"`
-								} `json:"inputSchema"`
-							} `json:"toolSpec"`
-						} `json:"tools"`
-					} `json:"toolConfig"`
-				}
-				if err := json.Unmarshal(out, &m); err != nil {
-					t.Fatalf("extract: %v", err)
-				}
-				return m.ToolConfig.Tools[0].ToolSpec.InputSchema.JSON
 			},
 		},
 	}

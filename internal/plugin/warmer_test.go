@@ -108,8 +108,8 @@ func newWarmerPipeline(t *testing.T, h *warmerHarness, conversations string, sta
 		// Reject what a real provider would reject. A harness that says "ok" to
 		// anything cannot catch a malformed request, which is how an earlier
 		// version of this plugin shipped a refresh that appended a second
-		// consecutive user turn -- valid to this fake, rejected by Bedrock and
-		// fragile on Anthropic. The request was SENT, so the provider's refusal
+		// consecutive user turn -- valid to this fake, rejected outright by
+		// stricter providers and fragile on Anthropic. The request was SENT, so the provider's refusal
 		// is a REACHED-provider outcome: a value arm carrying the actual HTTP
 		// status, exactly what the host reports for a provider 4xx.
 		if why := providerWouldReject(&chat); why != "" {
@@ -159,8 +159,8 @@ func providerWouldReject(req *pb.ChatRequest) string {
 	prev := ""
 	for _, m := range req.Messages {
 		// system may repeat; user and assistant may not. Anthropic documents
-		// consecutive same-role turns as merged, but Bedrock rejects them and
-		// real 400s are common enough that emitting them is not worth it.
+		// consecutive same-role turns as merged, but stricter providers reject
+		// them and real 400s are common enough that emitting them is not worth it.
 		if (m.Role == "user" || m.Role == "assistant") && m.Role == prev {
 			return "roles must alternate between user and assistant, but found multiple " + m.Role + " roles in a row"
 		}
@@ -233,7 +233,8 @@ func warmerRequest(conversationID string) *engine.ChatRequest {
 // warmerRequestBreakpointOnUser is the shape a real coding harness sends: the
 // cache breakpoint sits on the last user turn, so the cached prefix ENDS with a
 // user message. Any refresh that appends another user turn produces two in a
-// row, which Bedrock rejects outright and Anthropic only tolerates by merging.
+// row, which stricter providers reject outright and Anthropic only tolerates
+// by merging.
 func warmerRequestBreakpointOnUser(conversationID string) *engine.ChatRequest {
 	return &engine.ChatRequest{
 		Model: "claude-sonnet-4-5",

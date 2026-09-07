@@ -28,7 +28,7 @@ import (
 // Provider describes an upstream LLM API endpoint.
 type Provider struct {
 	URL                 string                     `json:"url"`                            // upstream base URL
-	Format              string                     `json:"format"`                         // wire format: "openai", "anthropic", "bedrock", "gemini", "gemini-codeassist"
+	Format              string                     `json:"format"`                         // wire format: "openai", "anthropic", "gemini", "gemini-codeassist"
 	Fallback            []string                   `json:"fallback,omitempty"`             // provider names to try on 429/5xx
 	ResponsesCompaction *ResponsesCompactionConfig `json:"responses_compaction,omitempty"` // native OpenAI Responses context compaction; nil disables it
 	// Auth states where upstream authentication comes from. Caller uses the
@@ -78,7 +78,6 @@ type CredentialEntry struct {
 
 var supportedFormats = map[string]struct{}{
 	"anthropic":         {},
-	"bedrock":           {},
 	"gemini":            {},
 	"gemini-codeassist": {},
 	"openai":            {},

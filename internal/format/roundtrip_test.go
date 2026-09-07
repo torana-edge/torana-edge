@@ -12,7 +12,6 @@ import (
 	"github.com/torana-edge/torana-edge/internal/format"
 
 	_ "github.com/torana-edge/torana-edge/internal/format/anthropic"
-	_ "github.com/torana-edge/torana-edge/internal/format/bedrock"
 	_ "github.com/torana-edge/torana-edge/internal/format/gemini"
 	_ "github.com/torana-edge/torana-edge/internal/format/openai"
 )
@@ -29,7 +28,7 @@ func TestSerializeSingleCompleteDelta(t *testing.T) {
 		"path": "main.go",
 	}
 
-	for _, name := range []string{"openai", "anthropic", "bedrock", "gemini"} {
+	for _, name := range []string{"openai", "anthropic", "gemini"} {
 		t.Run(name, func(t *testing.T) {
 			f := format.Lookup(name)
 			if f == nil {

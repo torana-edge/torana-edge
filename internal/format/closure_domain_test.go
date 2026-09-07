@@ -6,7 +6,6 @@ import (
 	"testing"
 
 	"github.com/torana-edge/torana-edge/internal/format/anthropic"
-	"github.com/torana-edge/torana-edge/internal/format/bedrock"
 	"github.com/torana-edge/torana-edge/internal/format/gemini"
 	"github.com/torana-edge/torana-edge/internal/format/openai"
 )
@@ -52,15 +51,6 @@ func TestMaxTokensDomainClosure(t *testing.T) {
 			valid: `{"model":"m","generationConfig":{"maxOutputTokens":4096},"contents":[{"role":"user","parts":[{"text":"hi"}]}]}`,
 			over:  `{"model":"m","generationConfig":{"maxOutputTokens":2147483648},"contents":[{"role":"user","parts":[{"text":"hi"}]}]}`,
 			under: `{"model":"m","generationConfig":{"maxOutputTokens":0},"contents":[{"role":"user","parts":[{"text":"hi"}]}]}`,
-		},
-		{
-			name: "bedrock",
-			adapter: adaptFn(func(b []byte) (any, error) {
-				return (&bedrock.Adapter{}).Unmarshal(b)
-			}),
-			valid: `{"modelId":"m","inferenceConfig":{"maxTokens":4096},"messages":[{"role":"user","content":[{"text":"hi"}]}]}`,
-			over:  `{"modelId":"m","inferenceConfig":{"maxTokens":2147483648},"messages":[{"role":"user","content":[{"text":"hi"}]}]}`,
-			under: `{"modelId":"m","inferenceConfig":{"maxTokens":-5},"messages":[{"role":"user","content":[{"text":"hi"}]}]}`,
 		},
 	}
 	for _, tc := range cases {

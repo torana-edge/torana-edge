@@ -43,15 +43,9 @@ func renderCompletionStream(f *format.Format, content string) []byte {
 }
 
 // streamContentType matches what harnesses expect from each provider's
-// streaming endpoint. Bedrock streams JSON lines; Gemini/Code Assist and the
-// openai family stream SSE (text/event-stream).
-func streamContentType(formatName string) string {
-	switch formatName {
-	case "bedrock":
-		return "application/json"
-	default:
-		return "text/event-stream"
-	}
+// streaming endpoint: every format Torana speaks streams SSE.
+func streamContentType(string) string {
+	return "text/event-stream"
 }
 
 // renderCompletionJSON produces a minimal valid non-streaming completion
@@ -70,17 +64,6 @@ func renderCompletionJSON(formatName, model, content string) []byte {
 			"stop_reason":   "end_turn",
 			"stop_sequence": nil,
 			"usage":         map[string]any{"input_tokens": 0, "output_tokens": 0},
-		}
-	case "bedrock":
-		payload = map[string]any{
-			"output": map[string]any{
-				"message": map[string]any{
-					"role":    "assistant",
-					"content": []map[string]any{{"text": content}},
-				},
-			},
-			"stopReason": "end_turn",
-			"usage":      map[string]any{"inputTokens": 0, "outputTokens": 0, "totalTokens": 0},
 		}
 	case "gemini", "gemini-codeassist":
 		gen := map[string]any{

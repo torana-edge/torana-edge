@@ -180,8 +180,6 @@ func goldenInvalidRequest(format string) string {
 		return `{"error":{"code":400,"message":"the request body could not be parsed as a valid gemini request","status":"INVALID_ARGUMENT"}}`
 	case "gemini-codeassist":
 		return `{"error":{"code":400,"message":"the request body could not be parsed as a valid gemini-codeassist request","status":"INVALID_ARGUMENT"}}`
-	case "bedrock":
-		return `{"message":"the request body could not be parsed as a valid bedrock request"}`
 	}
 	panic("unknown format " + format)
 }
@@ -193,7 +191,7 @@ func goldenInvalidRequest(format string) string {
 // zero upstream calls, and no after-response hook execution (observer cache
 // stays empty).
 func TestParseFailClosedMatrix(t *testing.T) {
-	formats := []string{"anthropic", "openai", "gemini", "gemini-codeassist", "bedrock"}
+	formats := []string{"anthropic", "openai", "gemini", "gemini-codeassist"}
 	bodies := map[string][]string{
 		"anthropic": {
 			"not-json{",
@@ -219,12 +217,6 @@ func TestParseFailClosedMatrix(t *testing.T) {
 			`{"request":{"contents":[`,
 			`{"request":{"contents":5}}`,
 			`{"request":{"contents":"nope"}}`,
-		},
-		"bedrock": {
-			"not-json{",
-			`{"modelId":"m","messages":[`,
-			`{"modelId":"m","messages":[{"role":"user","content":5}]}`,
-			`{"modelId":"m","messages":"nope"}`,
 		},
 	}
 	for _, format := range formats {
@@ -432,7 +424,7 @@ func TestUnknownNonemptyFormatRejectedAtConfigTime(t *testing.T) {
 // names, invalid UTF-8, lone surrogates) are rejected BEFORE the adapter for
 // every configured format, with the same golden 400, zero limiter buckets,
 // and zero upstream calls. The validator is shared code; anthropic and openai
-// get the full set, gemini and bedrock one row each.
+// get the full set, gemini one row.
 func TestParseFailClosedParserDifferentialHazards(t *testing.T) {
 	hazards := []string{
 		`{"messages":[1],"messages":[2]}`,
@@ -446,7 +438,6 @@ func TestParseFailClosedParserDifferentialHazards(t *testing.T) {
 		"anthropic": hazards,
 		"openai":    hazards,
 		"gemini":    hazards[:1],
-		"bedrock":   hazards[:1],
 	}
 	for format, rows := range full {
 		for i, body := range rows {
@@ -576,9 +567,6 @@ func TestParseFailClosedAmbiguousArmRowsTransport(t *testing.T) {
 		format string
 		body   string
 	}{
-		{"bedrock", `{"modelId":"m","system":[{"text":"hi","cachePoint":{"type":"default"}}],"messages":[{"role":"user","content":[{"text":"hi"}]}]}`},
-		{"bedrock", `{"modelId":"m","toolConfig":{"tools":[{"toolSpec":{"name":"r","inputSchema":{"json":{"type":"object"}}},"cachePoint":{"type":"default"}}]},"messages":[{"role":"user","content":[{"text":"hi"}]}]}`},
-		{"bedrock", `{"modelId":"m","messages":[{"role":"developer","content":[{"text":"hi"}]}]}`},
 		{"gemini", `{"model":"m","contents":[{"role":"user","parts":[{"text":"x","inlineData":{"mimeType":"image/png"}}]}]}`},
 		{"gemini", `{"model":"m","contents":[{"role":"user","parts":[{"inlineData":{"mimeType":"image/png"},"fileData":{"fileUri":"gs://b/x"}}]}]}`},
 		{"gemini", `{"model":"m","systemInstruction":{"parts":[{"inlineData":{"mimeType":"image/png"}}]},"contents":[{"role":"user","parts":[{"text":"hi"}]}]}`},

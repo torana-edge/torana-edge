@@ -90,17 +90,6 @@ func TestJSONResponseHooksAllFormats(t *testing.T) {
 			},
 		},
 		{
-			format: "bedrock",
-			body: `{
-				"stopReason": "tool_use",
-				"output": {"message": {"role": "assistant", "content": [
-					{"toolUse": {"toolUseId": "tooluse_1", "name": "write", "input": ` + kvArgsObj + `}}
-				]}},
-				"usage": {"inputTokens": 10, "outputTokens": 5}
-			}`,
-			preserved: map[string]any{"stopReason": "tool_use"},
-		},
-		{
 			format: "gemini",
 			body: `{
 				"modelVersion": "gemini-x",

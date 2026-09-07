@@ -8,7 +8,6 @@ import (
 	"github.com/torana-edge/torana-edge/internal/engine"
 	"github.com/torana-edge/torana-edge/internal/engine/pbconv"
 	"github.com/torana-edge/torana-edge/internal/format/anthropic"
-	"github.com/torana-edge/torana-edge/internal/format/bedrock"
 	"github.com/torana-edge/torana-edge/internal/format/gemini"
 	"github.com/torana-edge/torana-edge/internal/format/openai"
 	pb "github.com/torana-edge/torana-plugin-sdk/pb/v1"
@@ -192,7 +191,6 @@ func TestCheckedProjectionAcceptsAdapterOutputs(t *testing.T) {
 		body string
 	}{
 		{"anthropic", `{"model":"m","max_tokens":1024,"system":[{"type":"text","text":"sys","cache_control":{"type":"ephemeral"}}],"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]},{"role":"assistant","content":[{"type":"tool_use","id":"c1","name":"read","input":{"p":1}}]},{"role":"user","content":[{"type":"tool_result","tool_use_id":"c1","content":"out"}]}]}`},
-		{"bedrock", `{"modelId":"m","system":[{"text":"sys"}],"messages":[{"role":"user","content":[{"text":"hi"}]},{"role":"assistant","content":[{"toolUse":{"toolUseId":"c1","name":"read","input":{"p":1}}}]},{"role":"user","content":[{"toolResult":{"toolUseId":"c1","content":[{"text":"out"}]}}]}]}`},
 		{"gemini", `{"model":"m","systemInstruction":{"parts":[{"text":"sys"}]},"contents":[{"role":"user","parts":[{"text":"hi"}]},{"role":"model","parts":[{"functionCall":{"name":"read","args":{"p":1},"id":"c1"}}]},{"role":"user","parts":[{"functionResponse":{"name":"read","response":{"output":"out"},"id":"c1"}}]}]}`},
 		{"openai chat", `{"model":"m","max_tokens":1024,"messages":[{"role":"system","content":"sys"},{"role":"user","content":"hi"},{"role":"assistant","tool_calls":[{"id":"c1","type":"function","function":{"name":"read","arguments":"{\"p\":1}"}}]},{"role":"tool","tool_call_id":"c1","content":"out"}]}`},
 	}
@@ -222,8 +220,6 @@ func adapterFor(name string) adapterAPI {
 	switch name {
 	case "anthropic":
 		return &anthropic.Adapter{}
-	case "bedrock":
-		return &bedrock.Adapter{}
 	case "gemini":
 		return &gemini.Adapter{}
 	default:
@@ -277,7 +273,7 @@ func TestAdapterMarshalEntryValidates(t *testing.T) {
 			{Text: &engine.TextBlock{Text: "a"}, ToolUse: &engine.ToolUseBlock{ID: "c1", Name: "r", Arguments: mustReqObj(`{}`)}},
 		}}},
 	}
-	for _, name := range []string{"anthropic", "bedrock", "gemini", "openai"} {
+	for _, name := range []string{"anthropic", "gemini", "openai"} {
 		t.Run(name, func(t *testing.T) {
 			if _, err := adapterFor(name).Marshal(multiArm); err == nil {
 				t.Fatalf("%s marshal accepted a multi-arm engine request", name)
@@ -289,7 +285,7 @@ func TestAdapterMarshalEntryValidates(t *testing.T) {
 		Model:    "m",
 		Messages: []engine.Message{{Role: engine.RoleUser, Blocks: []engine.Block{{Text: &engine.TextBlock{Text: "hi"}}}}},
 	}
-	for _, name := range []string{"anthropic", "bedrock", "gemini", "openai"} {
+	for _, name := range []string{"anthropic", "gemini", "openai"} {
 		ok, err := adapterFor(name).Marshal(simple)
 		if err != nil || len(ok) == 0 {
 			t.Fatalf("%s: valid request failed to marshal: %v", name, err)
@@ -341,7 +337,7 @@ func TestFullDomainRefusedByEveryAdapterMarshalEntry(t *testing.T) {
 		},
 	}
 	for name, chat := range invalid {
-		for _, aname := range []string{"anthropic", "bedrock", "gemini", "openai"} {
+		for _, aname := range []string{"anthropic", "gemini", "openai"} {
 			t.Run(name+"/"+aname, func(t *testing.T) {
 				if _, err := adapterFor(aname).Marshal(chat); err == nil {
 					t.Fatalf("%s marshal accepted an SDK-invalid request (%s)", aname, name)

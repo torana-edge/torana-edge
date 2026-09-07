@@ -30,7 +30,6 @@ import (
 
 	// Register format adapters so their init() calls wire the registry.
 	_ "github.com/torana-edge/torana-edge/internal/format/anthropic"
-	_ "github.com/torana-edge/torana-edge/internal/format/bedrock"
 	_ "github.com/torana-edge/torana-edge/internal/format/gemini"
 	_ "github.com/torana-edge/torana-edge/internal/format/openai"
 )

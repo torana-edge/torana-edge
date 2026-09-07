@@ -13,10 +13,10 @@ import (
 func main() {}
 
 // Test fixture: appends a CONTRACT-VALID redacted_thinking assistant
-// message when any message contains "redactme". The openai chat and
-// bedrock adapters refuse redacted thinking at marshal — so the accepted
-// replacement triggers the HOST MARSHAL FAILURE terminal (host_error
-// 500) for both formats; without the marker the request passes through.
+// message when any message contains "redactme". The openai chat adapter
+// refuses redacted thinking at marshal — so the accepted replacement
+// triggers the HOST MARSHAL FAILURE terminal (host_error 500); without
+// the marker the request passes through.
 func init() {
 	sdk.OnBeforeRequest(func(ctx context.Context, req *pb.ChatRequest) (sdk.RequestResult, error) {
 		poison := false

@@ -20,7 +20,6 @@ func TestApplyProviderCredentialUsesProtocolNativeHeader(t *testing.T) {
 		{format: "anthropic", header: "X-Api-Key", value: "managed-secret"},
 		{format: "gemini", header: "X-Goog-Api-Key", value: "managed-secret"},
 		{format: "gemini-codeassist", header: "Authorization", value: "Bearer managed-secret"},
-		{format: "bedrock", header: "Authorization", value: "Bearer managed-secret"},
 	} {
 		t.Run(test.format, func(t *testing.T) {
 			req, _ := http.NewRequest(http.MethodPost, "https://provider.example/infer", nil)

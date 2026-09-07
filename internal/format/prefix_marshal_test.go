@@ -7,7 +7,6 @@ import (
 	"github.com/torana-edge/torana-edge/internal/engine"
 	"github.com/torana-edge/torana-edge/internal/engine/pbconv"
 	"github.com/torana-edge/torana-edge/internal/format/anthropic"
-	"github.com/torana-edge/torana-edge/internal/format/bedrock"
 )
 
 // Review round 3 finding 1: after CachePrefixKey computes the key, every
@@ -44,10 +43,9 @@ func TestMarshalAfterCachePrefixKeyKeepsSuffix(t *testing.T) {
 		t.Fatalf("suffix blocks missing after key computation: %s", anth)
 	}
 
-	// Bedrock: nested markers are not representable on its wire (fail-closed
-	// adapter rule), so the bedrock leg uses a top-level marker — the suffix
-	// blocks after it must reach the wire after the key computation.
-	bedChat := &engine.ChatRequest{
+	// The same for a TOP-LEVEL marker rather than a nested one: the blocks
+	// after it must still reach the wire once the key has been computed.
+	topChat := &engine.ChatRequest{
 		Model: "m",
 		Messages: []engine.Message{{Role: engine.RoleUser, Blocks: []engine.Block{
 			{Text: &engine.TextBlock{Text: "prefix"}},
@@ -55,15 +53,15 @@ func TestMarshalAfterCachePrefixKeyKeepsSuffix(t *testing.T) {
 			{Text: &engine.TextBlock{Text: "outer-suffix"}},
 		}}},
 	}
-	if mustCacheKey(t, bedChat) == "" {
+	if mustCacheKey(t, topChat) == "" {
 		t.Fatal("key empty")
 	}
-	bed, err := (&bedrock.Adapter{}).Marshal(bedChat)
+	top, err := (&anthropic.Adapter{}).Marshal(topChat)
 	if err != nil {
-		t.Fatalf("bedrock marshal: %v", err)
+		t.Fatalf("top-level marker marshal: %v", err)
 	}
-	if !strings.Contains(string(bed), "outer-suffix") {
-		t.Fatalf("bedrock suffix block missing after key computation: %s", bed)
+	if !strings.Contains(string(top), "outer-suffix") {
+		t.Fatalf("suffix block missing after key computation: %s", top)
 	}
 }
 

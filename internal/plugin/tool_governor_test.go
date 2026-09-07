@@ -13,7 +13,6 @@ import (
 	"github.com/torana-edge/torana-edge/internal/engine/pbconv"
 	"github.com/torana-edge/torana-edge/internal/format"
 	_ "github.com/torana-edge/torana-edge/internal/format/anthropic"
-	_ "github.com/torana-edge/torana-edge/internal/format/bedrock"
 	_ "github.com/torana-edge/torana-edge/internal/format/gemini"
 	_ "github.com/torana-edge/torana-edge/internal/format/openai"
 	"google.golang.org/protobuf/proto"
@@ -193,13 +192,6 @@ func TestToolGovernorRealBundleFinalWireAcrossFormats(t *testing.T) {
 				`{"name":"shell","description":"remove","input_schema":{}}]}`,
 		},
 		{
-			name: "bedrock", format: "bedrock", cache: true,
-			body: `{"modelId":"m","messages":[{"role":"user","content":[{"text":"help"}]}],"toolConfig":{"tools":[` +
-				`{"toolSpec":{"name":"read","description":"old","inputSchema":{"json":{"old":1}}}},` +
-				`{"cachePoint":{"type":"default"}},` +
-				`{"toolSpec":{"name":"shell","description":"remove","inputSchema":{"json":{}}}}]}}`,
-		},
-		{
 			name: "gemini", format: "gemini",
 			body: `{"contents":[{"role":"user","parts":[{"text":"help"}]}],"tools":[{"functionDeclarations":[` +
 				`{"name":"read","description":"old","parameters":{"old":1}},` +
@@ -265,21 +257,6 @@ func assertGovernorWire(t *testing.T, formatName string, wire []byte, wantCache 
 		for _, raw := range asJSONArray(t, root["tools"], "tools") {
 			definitions = append(definitions, asJSONObject(t, raw, "tool"))
 		}
-	case "bedrock":
-		config := asJSONObject(t, root["toolConfig"], "toolConfig")
-		cachePoints := 0
-		for _, raw := range asJSONArray(t, config["tools"], "toolConfig.tools") {
-			entry := asJSONObject(t, raw, "tool entry")
-			if spec, ok := entry["toolSpec"]; ok {
-				definitions = append(definitions, asJSONObject(t, spec, "toolSpec"))
-			}
-			if _, ok := entry["cachePoint"]; ok {
-				cachePoints++
-			}
-		}
-		if (cachePoints == 1) != wantCache {
-			t.Fatalf("Bedrock cachePoint count = %d, want presence %v", cachePoints, wantCache)
-		}
 	case "gemini", "gemini-codeassist":
 		groups := asJSONArray(t, root["tools"], "tools")
 		if len(groups) != 1 {
@@ -303,8 +280,6 @@ func assertGovernorWire(t *testing.T, formatName string, wire []byte, wantCache 
 	switch formatName {
 	case "anthropic":
 		parameters = definition["input_schema"]
-	case "bedrock":
-		parameters = asJSONObject(t, definition["inputSchema"], "inputSchema")["json"]
 	default:
 		parameters = definition["parameters"]
 	}

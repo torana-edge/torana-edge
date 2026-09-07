@@ -68,7 +68,7 @@ type Record struct {
 	// proxy never synthesizes a chat path — it reuses whatever the caller sent —
 	// so anything replaying a request for this conversation needs the original.
 	// It also covers shapes a format-to-path table would get wrong, like
-	// Bedrock's :invoke and Code Assist's :generateContent.
+	// Code Assist's :generateContent.
 	Path string `json:"path"`
 
 	FirstSeen  time.Time `json:"first_seen"`

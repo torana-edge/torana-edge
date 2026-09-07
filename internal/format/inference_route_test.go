@@ -6,7 +6,6 @@ import (
 
 	"github.com/torana-edge/torana-edge/internal/format"
 	_ "github.com/torana-edge/torana-edge/internal/format/anthropic"
-	_ "github.com/torana-edge/torana-edge/internal/format/bedrock"
 	_ "github.com/torana-edge/torana-edge/internal/format/gemini"
 	_ "github.com/torana-edge/torana-edge/internal/format/openai"
 )
@@ -41,16 +40,6 @@ func TestInferenceEndpointClassification(t *testing.T) {
 		{"gemini", http.MethodGet, "/v1beta/models/gemini:generateContent", false},
 		{"gemini", http.MethodPost, "/v1beta/models", false},
 		{"gemini", http.MethodPost, "/status:generateContent/detail", false},
-
-		{"bedrock", http.MethodPost, "/model/claude/converse", true},
-		{"bedrock", http.MethodPost, "/model/claude/converse-stream", true},
-		// Invoke accepts model-specific native bodies rather than the Bedrock
-		// Converse wire that this adapter owns, so it must remain pass-through.
-		{"bedrock", http.MethodPost, "/model/claude/invoke", false},
-		{"bedrock", http.MethodPost, "/model/claude/invoke-with-response-stream", false},
-		{"bedrock", http.MethodGet, "/model/claude/converse", false},
-		{"bedrock", http.MethodPost, "/foundation-models", false},
-		{"bedrock", http.MethodPost, "/status/model/x/converse/detail", false},
 	}
 
 	for _, row := range rows {

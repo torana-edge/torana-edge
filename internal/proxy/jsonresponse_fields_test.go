@@ -37,11 +37,6 @@ func TestObservedResponseFactsAreExtractedPerFormat(t *testing.T) {
 			wantFinish: "tool_use",
 		},
 		{
-			format:     "bedrock",
-			body:       `{"stopReason":"end_turn","output":{"message":{"content":[{"text":"hi"}]}}}`,
-			wantFinish: "end_turn",
-		},
-		{
 			format:     "gemini",
 			body:       `{"candidates":[{"finishReason":"STOP","content":{"parts":[{"text":"hi"}]}}]}`,
 			wantFinish: "STOP",

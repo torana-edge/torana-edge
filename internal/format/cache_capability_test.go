@@ -7,7 +7,6 @@ import (
 	"github.com/torana-edge/torana-edge/internal/engine"
 	"github.com/torana-edge/torana-edge/internal/format"
 	_ "github.com/torana-edge/torana-edge/internal/format/anthropic"
-	_ "github.com/torana-edge/torana-edge/internal/format/bedrock"
 	_ "github.com/torana-edge/torana-edge/internal/format/gemini"
 	_ "github.com/torana-edge/torana-edge/internal/format/openai"
 )
@@ -35,12 +34,6 @@ func TestProviderCacheCapabilityInventory(t *testing.T) {
 			name: "anthropic explicit breakpoint", format: "anthropic",
 			request:  `{"model":"claude","max_tokens":1,"messages":[{"role":"user","content":[{"type":"text","text":"hi","cache_control":{"type":"ephemeral"}}]}]}`,
 			wireFact: `"cache_control":{"type":"ephemeral"}`,
-			kind:     cacheKindExplicitBreakpoint,
-		},
-		{
-			name: "bedrock explicit breakpoint", format: "bedrock",
-			request:  `{"modelId":"claude","messages":[{"role":"user","content":[{"text":"hi"},{"cachePoint":{"type":"default"}}]}]}`,
-			wireFact: `"cachePoint":{"type":"default"}`,
 			kind:     cacheKindExplicitBreakpoint,
 		},
 		{

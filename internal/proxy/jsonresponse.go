@@ -61,8 +61,8 @@ type rawArgSlot struct {
 	path []any
 	// rawArgs is the provider's VERBATIM bytes of the slot in the original
 	// body, straight out of the wire with no decode/re-encode: for object
-	// slots (anthropic input, bedrock toolUse.input, gemini
-	// functionCall.args) the raw object bytes; for string slots (openai
+	// slots (anthropic input, gemini functionCall.args) the raw object
+	// bytes; for string slots (openai
 	// function.arguments, Responses output item arguments) the full quoted
 	// JSON string including quotes. nil when the slot is absent in the raw
 	// body.
@@ -139,8 +139,6 @@ func extractResponse(formatName string, body map[string]any, raw ...[]byte) resp
 		return extractOpenAI(body, rb)
 	case "anthropic":
 		return extractAnthropic(body, rb)
-	case "bedrock":
-		return extractBedrock(body, rb)
 	case "gemini", "gemini-codeassist":
 		return extractGemini(body, rb)
 	}
@@ -444,58 +442,6 @@ func extractAnthropic(body map[string]any, raw []byte) responseRefs {
 				argsJSON: argsJSON,
 				setName:  func(s string) { blockRef["name"] = s },
 				setArgs:  objArgsSetter(blockRef, "input"),
-			})
-			refs.rawSlots = append(refs.rawSlots, rawArgSlot{
-				path:    path,
-				rawArgs: rawArgs,
-				objSlot: true,
-				call:    len(refs.toolCalls) - 1,
-			})
-		}
-	}
-	return refs
-}
-
-// --- bedrock: output.message.content[].{text | toolUse{toolUseId,name,input}} ---
-
-func extractBedrock(body map[string]any, raw []byte) responseRefs {
-	refs := responseRefs{
-		finishReason: asString(body["stopReason"]),
-		usage:        usageFrom(body, "usage", "inputTokens", "outputTokens", "cacheReadInputTokens", "cacheWriteInputTokens"),
-	}
-	output, _ := body["output"].(map[string]any)
-	msg, _ := output["message"].(map[string]any)
-	refs.hasMessage = msg != nil
-	parts, _ := msg["content"].([]any)
-	for pi, p := range parts {
-		part, _ := p.(map[string]any)
-		if part == nil {
-			continue
-		}
-		// Content slot = first part with a present string text key.
-		if s, isStr := part["text"].(string); isStr && refs.setContent == nil {
-			partRef := part
-			refs.content = s
-			refs.setContent = func(s string) { partRef["text"] = s }
-		}
-		if tu, ok := part["toolUse"].(map[string]any); ok {
-			tuRef := tu
-			path := []any{"output", "message", "content", pi, "toolUse", "input"}
-			rawArgs, _ := rawJSONSpan(raw, path...)
-			argsJSON := "{}"
-			if rawArgs != nil {
-				argsJSON = string(rawArgs) // object slot: verbatim provider bytes
-			} else if v, ok := tuRef["input"]; ok && v != nil {
-				if b, err := json.Marshal(v); err == nil {
-					argsJSON = string(b)
-				}
-			}
-			refs.toolCalls = append(refs.toolCalls, toolCallRef{
-				id:       asString(tu["toolUseId"]),
-				name:     asString(tu["name"]),
-				argsJSON: argsJSON,
-				setName:  func(s string) { tuRef["name"] = s },
-				setArgs:  objArgsSetter(tuRef, "input"),
 			})
 			refs.rawSlots = append(refs.rawSlots, rawArgSlot{
 				path:    path,

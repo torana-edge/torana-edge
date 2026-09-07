@@ -1,6 +1,6 @@
 // Package format defines the adapter interfaces that translate between
 // provider wire formats and the canonical IR types. Each supported format
-// (Anthropic Messages, OpenAI Chat Completions, AWS Bedrock Converse, etc.)
+// (Anthropic Messages, OpenAI Chat Completions, Gemini generateContent, etc.)
 // has its own sub-package implementing these interfaces.
 package format
 

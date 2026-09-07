@@ -203,7 +203,7 @@ type StreamError struct {
 // StreamUsage represents token usage data from a streaming response.
 // InputTokens excludes cached tokens for providers that report them
 // separately (Anthropic); for providers where the cached count is a subset
-// of the prompt total (OpenAI, Gemini, Bedrock) it is the full prompt count.
+// of the prompt total (OpenAI, Gemini) it is the full prompt count.
 type StreamUsage struct {
 	InputTokens  int
 	OutputTokens int
@@ -211,8 +211,8 @@ type StreamUsage struct {
 	// provider's prompt cache (billed at a fraction of full price).
 	CacheReadTokens int
 	// CacheWriteTokens is the number of input tokens written to the cache
-	// this turn (Anthropic cache_creation_input_tokens, Bedrock
-	// cacheWriteInputTokens); 0 for providers that don't report it.
+	// this turn (Anthropic cache_creation_input_tokens); 0 for providers
+	// that don't report it.
 	CacheWriteTokens int
 }
 

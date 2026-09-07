@@ -16,7 +16,6 @@ import (
 	"github.com/torana-edge/torana-edge/internal/provider"
 
 	_ "github.com/torana-edge/torana-edge/internal/format/anthropic"
-	_ "github.com/torana-edge/torana-edge/internal/format/bedrock"
 	_ "github.com/torana-edge/torana-edge/internal/format/gemini"
 )
 
@@ -78,8 +77,6 @@ func respondReq(formatName string, stream bool) string {
 			s += `,"stream":true`
 		}
 		return s + `}`
-	case "bedrock":
-		return `{"messages":[{"role":"user","content":[{"text":"respondme please"}]}]}`
 	case "gemini":
 		return `{"contents":[{"role":"user","parts":[{"text":"respondme please"}]}]}`
 	default:
@@ -95,7 +92,7 @@ func respondReq(formatName string, stream bool) string {
 // completion in each provider format — a valid envelope the format's own
 // adapter can parse back — and upstream is never called.
 func TestRespondDirectlyAllFormats(t *testing.T) {
-	for _, formatName := range []string{"openai", "anthropic", "bedrock", "gemini"} {
+	for _, formatName := range []string{"openai", "anthropic", "gemini"} {
 		t.Run(formatName, func(t *testing.T) {
 			post, hits := fixtureEnv(t, []string{"test-responder"}, formatName,
 				func(w http.ResponseWriter, r *http.Request) {
@@ -122,7 +119,6 @@ func TestRespondDirectlyAllFormats(t *testing.T) {
 			marker := map[string]string{
 				"openai":    "choices",
 				"anthropic": "content",
-				"bedrock":   "output",
 				"gemini":    "candidates",
 			}[formatName]
 			if _, ok := decoded[marker]; !ok {
