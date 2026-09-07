@@ -1585,7 +1585,7 @@ func New(cfg Config) (*Server, error) {
 						// body with no finish marker — never a clean completion.
 						pw.CloseWithError(terr)
 					} else {
-						pw.Close()
+						_ = pw.Close()
 					}
 					// On client disconnect the request context is cancelled, so
 					// the transport tears down the upstream connection and the
@@ -1683,7 +1683,7 @@ func New(cfg Config) (*Server, error) {
 				if resp.Header.Get("Content-Encoding") == "gzip" {
 					if zr, zerr := gzip.NewReader(bytes.NewReader(bodyBytes)); zerr == nil {
 						plain, rerr := io.ReadAll(io.LimitReader(zr, maxBodySize+1))
-						zr.Close()
+						_ = zr.Close()
 						if rerr == nil && len(plain) <= maxBodySize {
 							bodyBytes = plain
 							resp.Header.Del("Content-Encoding")
@@ -1944,9 +1944,9 @@ func New(cfg Config) (*Server, error) {
 				}
 				var approvalPtr *provider.PluginApproval
 				if approved {
-					copy := approval
-					copy.Permissions = append([]string(nil), approval.Permissions...)
-					approvalPtr = &copy
+					owned := approval
+					owned.Permissions = append([]string(nil), approval.Permissions...)
+					approvalPtr = &owned
 				}
 				loadedStatus, loaded := loadedByName[m.Name]
 				state := "disabled"
@@ -3540,7 +3540,7 @@ func (s *Server) applyMITM(cfg provider.MITMConfig) error {
 	defer s.mitmMu.Unlock()
 	if !cfg.Enabled {
 		if s.mitmSrv != nil {
-			s.mitmSrv.Close() // stops the old CONNECT listener; frees the addr
+			_ = s.mitmSrv.Close() // stops the old CONNECT listener; frees the addr
 			s.mitmSrv = nil
 		}
 		return nil
@@ -3555,7 +3555,7 @@ func (s *Server) applyMITM(cfg provider.MITMConfig) error {
 	// Only now that the new server is validated, stop the old one and free its
 	// CONNECT addr so the new bind (which may reuse the same addr) can succeed.
 	if s.mitmSrv != nil {
-		s.mitmSrv.Close()
+		_ = s.mitmSrv.Close()
 		s.mitmSrv = nil
 	}
 	go func() {
@@ -3663,7 +3663,7 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	s.ticker.Close()
 	s.mitmMu.Lock()
 	if s.mitmSrv != nil {
-		s.mitmSrv.Close()
+		_ = s.mitmSrv.Close()
 		s.mitmSrv = nil
 	}
 	s.mitmMu.Unlock()

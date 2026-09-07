@@ -251,6 +251,11 @@ func main() {
 	log.Println("Shutting down...")
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	srv.Shutdown(shutdownCtx)
+	// A shutdown error is almost always the 5s deadline expiring with requests
+	// still in flight. Say so: the alternative is a clean-looking exit that
+	// silently cut live streams.
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		log.Printf("Shutdown did not complete cleanly: %v", err)
+	}
 	log.Println("Torana Edge stopped.")
 }

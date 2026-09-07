@@ -13,25 +13,16 @@ import (
 	"github.com/torana-edge/torana-edge/internal/engine"
 	"github.com/torana-edge/torana-edge/internal/format/gemini"
 	"github.com/torana-edge/torana-edge/internal/format/openai"
+	"github.com/torana-edge/torana-edge/internal/testfixture"
 	"github.com/torana-edge/torana-edge/internal/wasm"
 )
 
 // requireWASM skips the test locally when the plugin binary hasn't been
 // built, but fails hard in CI (TORANA_E2E=1) so missing binaries can never
 // silently disable coverage again.
-// These take testing.TB rather than *testing.T so the benchmarks in
-// bench_test.go can build a pipeline through exactly the same path the tests
-// do — a benchmark measuring a differently-constructed pipeline would not be
-// measuring what ships.
-func requireWASM(t testing.TB, path string) {
-	t.Helper()
-	if _, err := os.Stat(path); err != nil {
-		if os.Getenv("TORANA_E2E") != "" {
-			t.Fatalf("%s missing — run 'make testdata' (err: %v)", path, err)
-		}
-		t.Skipf("%s not built — run 'make testdata'", path)
-	}
-}
+// It takes testing.TB so the benchmarks in bench_test.go build a pipeline
+// through exactly the same path the tests do.
+func requireWASM(t testing.TB, path string) { testfixture.Require(t, path) }
 
 func newTestPipeline(t testing.TB, dir string, order []string) *PluginPipeline {
 	t.Helper()

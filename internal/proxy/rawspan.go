@@ -165,7 +165,7 @@ func skipValue(doc []byte, i int) int {
 	}
 }
 
-func skipContainer(doc []byte, i int, close byte, n int) int {
+func skipContainer(doc []byte, i int, closer byte, n int) int {
 	depth := 1
 	j := i + 1
 	for j < n {
@@ -179,7 +179,7 @@ func skipContainer(doc []byte, i int, close byte, n int) int {
 			continue
 		case doc[i]: // opening brace/bracket of the same kind
 			depth++
-		case close:
+		case closer:
 			depth--
 			if depth == 0 {
 				return j + 1

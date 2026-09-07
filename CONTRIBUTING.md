@@ -17,6 +17,15 @@ make test-race    # slow pre-merge gate: fixtures + go test ./... -race (~15 min
 fixtures first. `TORANA_E2E=1` turns a missing fixture from a skip into a hard
 failure.
 
+> **Use `make test`, not `go test ./...`.** On a tree whose fixtures are not
+> built, a bare `go test ./...` skips every plugin-behaviour test and still
+> prints `ok` for each package — a green run that exercised none of the plugin
+> sandbox, the hook pipeline, or the capability boundary. `make test` sets
+> `TORANA_E2E=1`, which makes a missing fixture fail instead. The
+> fixture-dependent packages print a banner when you take the other path, but
+> the banner is a safety net, not the contract: **`make test` is the gate CI
+> runs.**
+
 `make test` is the everyday iteration command. `make test-race` is the slow
 gate run before merging — the proxy package alone takes ~13 minutes under
 `-race`, so it is a deliberate separate step rather than the default (CI runs

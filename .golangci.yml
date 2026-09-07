@@ -8,8 +8,10 @@ linters:
     - errcheck
     - govet
     - ineffassign
+    - predeclared
     - staticcheck
     - unused
+    - usestdlibvars
   settings:
     staticcheck:
       # v2 folds stylecheck (ST*) and quickfix (QF*) into staticcheck. v1 ran
@@ -46,14 +48,21 @@ linters:
         - github.com/tetratelabs/wazero.Runtime.Instantiate
   exclusions:
     generated: lax
+    # There is deliberately NO message-substring exclusion here. A rule matching
+    # text like "Call" or "Add" silences every finding whose message happens to
+    # contain those words, anywhere in the tree — including ones nobody chose to
+    # ignore. errcheck.exclude-functions above names the real exemptions by
+    # symbol, which is precise and reviewable; keep additions there.
     rules:
       - linters:
           - errcheck
         path: _test\.go
+      # Tests build request literals by hand and read better with the verb
+      # inline; the rule earns its keep on production code, where a bare status
+      # or method number is a magic constant.
       - linters:
-          - errcheck
-          - staticcheck
-        text: HostCall|Close|Shutdown|Serve|WatchPlugins|Call|Instantiate|Walk|otelShutdown|io\.Copy|Add
+          - usestdlibvars
+        path: _test\.go
     paths:
       - third_party$
       - builtin$

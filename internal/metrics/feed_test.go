@@ -20,39 +20,39 @@ func makeEvent(provider string) RequestEvent {
 // TestRingWrapAround verifies that Add correctly evicts the oldest entry when
 // the capacity is exceeded, and that Snapshot length never exceeds capacity.
 func TestRingWrapAround(t *testing.T) {
-	const cap = 5
-	f := NewRequestFeed(cap)
+	const capacity = 5
+	f := NewRequestFeed(capacity)
 
 	// Fill exactly to capacity.
-	for i := 0; i < cap; i++ {
+	for i := 0; i < capacity; i++ {
 		f.Add(makeEvent("p" + string(rune('a'+i))))
 	}
 	snap := f.Snapshot()
-	if len(snap) != cap {
-		t.Fatalf("Snapshot len = %d, want %d", len(snap), cap)
+	if len(snap) != capacity {
+		t.Fatalf("Snapshot len = %d, want %d", len(snap), capacity)
 	}
 	// Newest-first: last added is "pe" (index 4) → should be snap[0].
 	if snap[0].Provider != "pe" {
 		t.Errorf("snap[0].Provider = %q, want %q", snap[0].Provider, "pe")
 	}
-	if snap[cap-1].Provider != "pa" {
-		t.Errorf("snap[%d].Provider = %q, want %q", cap-1, snap[cap-1].Provider, "pa")
+	if snap[capacity-1].Provider != "pa" {
+		t.Errorf("snap[%d].Provider = %q, want %q", capacity-1, snap[capacity-1].Provider, "pa")
 	}
 
 	// Add two more entries — "pa" and "pb" should be evicted.
 	f.Add(makeEvent("pf"))
 	f.Add(makeEvent("pg"))
 	snap = f.Snapshot()
-	if len(snap) != cap {
-		t.Fatalf("Snapshot len after wrap = %d, want %d", len(snap), cap)
+	if len(snap) != capacity {
+		t.Fatalf("Snapshot len after wrap = %d, want %d", len(snap), capacity)
 	}
 	// Newest-first: "pg" is the most recent.
 	if snap[0].Provider != "pg" {
 		t.Errorf("after wrap snap[0].Provider = %q, want %q", snap[0].Provider, "pg")
 	}
 	// Oldest remaining: "pc" (pa, pb were evicted).
-	if snap[cap-1].Provider != "pc" {
-		t.Errorf("after wrap snap[%d].Provider = %q, want %q", cap-1, snap[cap-1].Provider, "pc")
+	if snap[capacity-1].Provider != "pc" {
+		t.Errorf("after wrap snap[%d].Provider = %q, want %q", capacity-1, snap[capacity-1].Provider, "pc")
 	}
 }
 

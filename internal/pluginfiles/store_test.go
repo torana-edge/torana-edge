@@ -10,8 +10,8 @@ import (
 	"github.com/torana-edge/torana-edge/internal/wasm"
 )
 
-func fileResource(max int64, retained int) wasm.FileResource {
-	return wasm.FileResource{MaxBytes: max, RetainedFiles: retained, Operations: map[string]bool{"append": true, "read": true}}
+func fileResource(maxBytes int64, retained int) wasm.FileResource {
+	return wasm.FileResource{MaxBytes: maxBytes, RetainedFiles: retained, Operations: map[string]bool{"append": true, "read": true}}
 }
 
 func TestRetainedGenerationsShareTheirMutationLock(t *testing.T) {

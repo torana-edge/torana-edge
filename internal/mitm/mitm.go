@@ -193,18 +193,21 @@ func (s *Server) untrack(conn net.Conn) {
 func (s *Server) tunnel(client net.Conn, hostport string) {
 	up, err := net.DialTimeout("tcp", hostport, 15*time.Second)
 	if err != nil {
-		client.Close()
+		_ = client.Close()
 		return
 	}
-	go func() { io.Copy(up, client); up.Close() }()
-	io.Copy(client, up)
-	client.Close()
+	go func() {
+		_, _ = io.Copy(up, client)
+		_ = up.Close()
+	}()
+	_, _ = io.Copy(client, up)
+	_ = client.Close()
 }
 
 // terminate decrypts the connection and dispatches each request: chat calls go
 // through the Torana pipeline, everything else is forwarded verbatim.
 func (s *Server) terminate(client net.Conn, hostname string) {
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 	if err := client.SetDeadline(time.Now().Add(15 * time.Second)); err != nil {
 		return
 	}
@@ -232,7 +235,7 @@ func (s *Server) terminate(client net.Conn, hostname string) {
 	if err := client.SetDeadline(time.Time{}); err != nil {
 		return
 	}
-	defer tlsConn.Close()
+	defer func() { _ = tlsConn.Close() }()
 
 	br := bufio.NewReader(tlsConn)
 	for {
