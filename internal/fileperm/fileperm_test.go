@@ -282,3 +282,136 @@ func TestWriteNewNeverPublishesAnIncompleteFile(t *testing.T) {
 		}
 	}
 }
+
+// EnsureDir must not rewrite a directory that is already owner-only.
+//
+// A startup path runs on every start, so it should not keep writing an
+// access-control list that already says what it should. That is the whole
+// claim here — the correctness of concurrent callers rests on directory
+// access not being inheritable (see TestDirectoryRestrictionDoesNotDisturbFilesInside),
+// not on this.
+func TestEnsureDirDoesNotRewriteAnAlreadyRestrictedDirectory(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "data")
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	changed, err := fileperm.EnsureDir(dir)
+	if err != nil {
+		t.Fatalf("EnsureDir on a wide-open directory: %v", err)
+	}
+	if !changed {
+		t.Fatal("EnsureDir reported no change for a directory that was not owner-only")
+	}
+
+	for attempt := range 3 {
+		changed, err := fileperm.EnsureDir(dir)
+		if err != nil {
+			t.Fatalf("EnsureDir attempt %d: %v", attempt, err)
+		}
+		if changed {
+			t.Fatalf("EnsureDir attempt %d rewrote a directory that was already owner-only", attempt)
+		}
+	}
+
+	info, err := os.Stat(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := fileperm.Verify(dir, info); err != nil {
+		t.Errorf("directory is not owner-only after EnsureDir: %v", err)
+	}
+}
+
+// A directory restriction must not disturb the files inside it — the exact
+// interleaving that produced the Windows flake, forced rather than raced for.
+//
+// The original failure was stochastic: several processes opened one data
+// directory, and one caller's directory ACL write propagated over a file
+// another caller had just protected. Reproducing that by running goroutines
+// and hoping is not a proof. Here the directory operation is performed
+// DELIBERATELY between the file operations, at each point where an interfering
+// caller could have performed it, and the file's protection must survive every
+// one.
+func TestDirectoryRestrictionDoesNotDisturbFilesInside(t *testing.T) {
+	dir := t.TempDir()
+	if _, err := fileperm.EnsureDir(dir); err != nil {
+		t.Fatalf("EnsureDir: %v", err)
+	}
+
+	key := filepath.Join(dir, "secret.key")
+	if err := fileperm.WriteNew(key, []byte("0123456789abcdef0123456789abcdef")); err != nil {
+		t.Fatalf("WriteNew: %v", err)
+	}
+
+	// Every way a concurrent caller could touch the directory, applied after
+	// the file is already protected. RestrictDir is the unconditional form
+	// EnsureDir avoids, so it stands in for the first-run case where several
+	// callers all observe a wide directory and all write.
+	for _, step := range []struct {
+		name string
+		do   func() error
+	}{
+		{"RestrictDir", func() error { return fileperm.RestrictDir(dir) }},
+		{"RestrictDir twice", func() error {
+			if err := fileperm.RestrictDir(dir); err != nil {
+				return err
+			}
+			return fileperm.RestrictDir(dir)
+		}},
+		{"EnsureDir", func() error { _, err := fileperm.EnsureDir(dir); return err }},
+	} {
+		t.Run(step.name, func(t *testing.T) {
+			if err := step.do(); err != nil {
+				t.Fatalf("%s: %v", step.name, err)
+			}
+			f, err := os.Open(key)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = f.Close() }()
+			if err := fileperm.VerifyFile(f); err != nil {
+				t.Errorf("a %s call invalidated a file that was already protected: %v\n"+
+					"a directory operation must never reach the files inside it", step.name, err)
+			}
+		})
+	}
+}
+
+// The losing side of a first-run race: another caller has already published
+// the file, and a directory restriction lands before this caller reads it.
+// Reading an existing protected file must still succeed, and must still be
+// checked on the handle.
+func TestOpenAppendSurvivesADirectoryRestriction(t *testing.T) {
+	dir := t.TempDir()
+	if _, err := fileperm.EnsureDir(dir); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "audit.jsonl")
+
+	winner, err := fileperm.OpenAppend(path)
+	if err != nil {
+		t.Fatalf("first OpenAppend: %v", err)
+	}
+	if _, err := winner.WriteString("one\n"); err != nil {
+		t.Fatal(err)
+	}
+	if err := winner.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// The interfering directory write, forced between create and re-open.
+	if err := fileperm.RestrictDir(dir); err != nil {
+		t.Fatal(err)
+	}
+
+	loser, err := fileperm.OpenAppend(path)
+	if err != nil {
+		t.Fatalf("re-opening a file another caller published, after a directory "+
+			"restriction, was refused: %v", err)
+	}
+	defer func() { _ = loser.Close() }()
+	if err := fileperm.VerifyFile(loser); err != nil {
+		t.Errorf("the published file is not owner-only after a directory restriction: %v", err)
+	}
+}

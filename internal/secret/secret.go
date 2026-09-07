@@ -33,7 +33,14 @@ func Open(dataDir string) (*Store, error) {
 	if err := os.MkdirAll(dataDir, 0o700); err != nil {
 		return nil, fmt.Errorf("failed to create data directory: %w", err)
 	}
-	if err := fileperm.RestrictDir(dataDir); err != nil {
+	// This protects the DIRECTORY only. The key file inside it is secured
+	// explicitly, on its own handle, by readExistingKey and createOrReadKey —
+	// a restricted directory does not make its contents owner-only.
+	//
+	// EnsureDir, not RestrictDir, because this runs on every Open and there is
+	// no reason to rewrite an access-control list that already says what it
+	// should.
+	if _, err := fileperm.EnsureDir(dataDir); err != nil {
 		return nil, fmt.Errorf("securing data directory: %w", err)
 	}
 
@@ -79,10 +86,9 @@ func readExistingKey(keyPath string) ([]byte, error) {
 	}
 	defer func() { _ = f.Close() }()
 
-	if err := fileperm.Restrict(keyPath); err != nil {
-		return nil, fmt.Errorf("securing secret key file: %w", err)
-	}
-	if err := fileperm.VerifyFile(f); err != nil {
+	// The same apply-and-confirm every other confidential path uses, on the
+	// handle the key is then read through.
+	if err := fileperm.Secure(keyPath, f); err != nil {
 		return nil, fmt.Errorf("secret key file: %w", err)
 	}
 	key, err := io.ReadAll(f)

@@ -257,3 +257,101 @@ func TestConcurrentOpenAgreesOnOneKey(t *testing.T) {
 		}
 	}
 }
+
+// The two sides of a first-run race, forced rather than raced for.
+//
+// TestConcurrentOpenAgreesOnOneKey runs goroutines and is stochastic: it found
+// the original Windows failure by luck, on round 19 of 50. This performs the
+// interfering directory operation DELIBERATELY at each point where a competing
+// caller could have performed it, so the property is proved rather than
+// sampled.
+//
+// The winner creates the key. The loser reads the key the winner published,
+// after a directory restriction has landed in between — the exact window where
+// a propagating directory ACL used to overwrite a file that was already
+// correct.
+func TestOpenSurvivesADirectoryRestrictionBetweenCreateAndRead(t *testing.T) {
+	dir := t.TempDir()
+
+	winner, err := secret.Open(dir)
+	if err != nil {
+		t.Fatalf("winning creator: %v", err)
+	}
+	token, err := winner.Encrypt("payload")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// A competing caller re-securing the data directory, unconditionally, in
+	// between. This is what several first-run callers all do when they each
+	// observe a directory that is not yet owner-only.
+	if err := fileperm.RestrictDir(dir); err != nil {
+		t.Fatal(err)
+	}
+
+	loser, err := secret.Open(dir)
+	if err != nil {
+		t.Fatalf("losing reader was refused after a directory restriction landed "+
+			"between the winner's create and this read: %v", err)
+	}
+	got, err := loser.Decrypt(token)
+	if err != nil {
+		t.Fatalf("the losing reader did not get the winner's key: %v", err)
+	}
+	if got != "payload" {
+		t.Fatalf("round-tripped %q, want %q", got, "payload")
+	}
+
+	// And again, so a second interfering write is no different from the first.
+	if err := fileperm.RestrictDir(dir); err != nil {
+		t.Fatal(err)
+	}
+	again, err := secret.Open(dir)
+	if err != nil {
+		t.Fatalf("second reader after a further directory restriction: %v", err)
+	}
+	if got, err := again.Decrypt(token); err != nil || got != "payload" {
+		t.Fatalf("second reader round-tripped %q (%v)", got, err)
+	}
+}
+
+// Fail-closed is unchanged by any of the above: a key file that is not
+// owner-only is refused, not repaired-and-accepted on someone else's say-so.
+func TestOpenRefusesAKeyItCannotSecure(t *testing.T) {
+	dir := t.TempDir()
+	if _, err := secret.Open(dir); err != nil {
+		t.Fatal(err)
+	}
+	keyPath := filepath.Join(dir, "secret.key")
+	key, err := os.ReadFile(keyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Republish it with no explicit protection: 0644 on Unix, and on Windows a
+	// DACL merely inherited from the directory, which fileperm refuses.
+	if err := os.Remove(keyPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(keyPath, key, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Open repairs what it can and must still end up with an owner-only key.
+	store, err := secret.Open(dir)
+	if err != nil {
+		t.Fatalf("Open could not secure a widened key file: %v", err)
+	}
+	f, err := os.Open(keyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = f.Close() }()
+	if err := fileperm.VerifyFile(f); err != nil {
+		t.Errorf("Open returned a store over a key that is not owner-only: %v", err)
+	}
+	if store == nil {
+		t.Error("nil store")
+	}
+}

@@ -44,11 +44,84 @@ func Restrict(path string) error {
 	return restrict(path, false)
 }
 
-// RestrictDir makes a DIRECTORY at path accessible only by its owner, and
-// makes that the default for entries created inside it. Verify applies to a
-// directory unchanged — the rule about who may reach it is the same rule.
+// RestrictDir makes a DIRECTORY at path accessible only by its owner.
+//
+// It protects the DIRECTORY ITSELF and nothing else. It does not make
+// owner-only the default for entries created inside it, and no caller may
+// treat a restricted directory as securing what it contains: the access
+// granted is deliberately not inheritable, and Verify rejects a file whose
+// protection is merely inherited in any case. A confidential file must be
+// secured explicitly — through WriteNew, OpenAppend, or Secure on its open
+// handle.
+//
+// Verify applies to a directory unchanged: the rule about who may reach it is
+// the same rule.
+//
+// Prefer EnsureDir at a startup path, which skips the write when the directory
+// is already owner-only.
 func RestrictDir(path string) error {
 	return restrict(path, true)
+}
+
+// EnsureDir makes a directory owner-only if it is not already, and reports an
+// error when it cannot be made so. Like RestrictDir, it protects only the
+// directory; see there.
+//
+// It exists so a startup path, which runs on every start, does not rewrite an
+// access-control list that already says what it should. changed reports
+// whether anything was written, so that property can be asserted directly
+// rather than inferred from a timestamp.
+//
+// HISTORICAL, and no longer a hazard on this path: directory access used to be
+// granted inheritably, which made every application of it a propagation pass
+// over the directory's children. A pass landing between another process's
+// restrict of a file and that process's verify of it overwrote a child which
+// was already correct — a first-run flake when several processes opened one
+// data directory at once:
+//
+//	failed to create secret key file: …\.torana-new-2613133976 inherits
+//	access from its parent directory; it must carry a protected owner-only ACL
+//
+// Nothing is inheritable now, so a directory write cannot reach the files
+// inside it. Skipping the redundant write is worth doing on its own terms; it
+// is no longer what stands between correctness and that failure.
+func EnsureDir(path string) (changed bool, err error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return false, err
+	}
+	if verify(path, info) == nil {
+		return false, nil
+	}
+	if err := restrict(path, true); err != nil {
+		return true, err
+	}
+	info, err = os.Stat(path)
+	if err != nil {
+		return true, err
+	}
+	return true, verify(path, info)
+}
+
+// Secure applies owner-only access to a file this process is creating and
+// CONFIRMS it on the open handle. Every confidential path goes through this
+// one function, so "protected" means the same thing for the credential key,
+// the audit trail and the CA private key.
+//
+// One apply and one check, not a retry loop: retrying was an admission that
+// something else could still be writing over the file, and a bounded retry
+// cannot fix that — a competing write can land after the last check just as
+// easily as before it. The competing writer was an inheritable directory ACE
+// propagating over its children; that is gone (see the Windows restrict), so
+// there is nothing left to lose a race against.
+//
+// The check is on the HANDLE, so it describes the object that will actually be
+// written, not whatever the name resolves to by then.
+func Secure(path string, f *os.File) error {
+	if err := restrict(path, false); err != nil {
+		return err
+	}
+	return verifyFile(f)
 }
 
 // WriteNew publishes path with owner-only access holding data, failing if path
@@ -76,15 +149,7 @@ func WriteNew(path string, data []byte) error {
 	// success one where it is now a second link to the published file.
 	defer func() { _ = os.Remove(tmpName) }()
 
-	if err := restrict(tmpName, false); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	// Decide on the HANDLE, not the name just applied to. If the name was made
-	// to resolve elsewhere between the two, the restriction landed on
-	// something else and this handle is not owner-only — refuse rather than
-	// write a secret through it.
-	if err := verifyFile(tmp); err != nil {
+	if err := Secure(tmpName, tmp); err != nil {
 		_ = tmp.Close()
 		return err
 	}
@@ -111,13 +176,9 @@ func WriteNew(path string, data []byte) error {
 func OpenAppend(path string) (*os.File, error) {
 	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL|os.O_APPEND, 0o600)
 	if err == nil {
-		if rerr := restrict(path, false); rerr != nil {
+		if rerr := Secure(path, f); rerr != nil {
 			_ = f.Close()
 			return nil, rerr
-		}
-		if verr := verifyFile(f); verr != nil {
-			_ = f.Close()
-			return nil, verr
 		}
 		return f, nil
 	}

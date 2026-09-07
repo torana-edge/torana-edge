@@ -82,7 +82,7 @@ func LoadOrCreateCA(dir string) (*CA, error) {
 	// freshly-created 0755 test/config directory). CADir is dedicated security
 	// material, so normalize it instead of making the operator repair the
 	// default umask by hand.
-	if err := fileperm.RestrictDir(dir); err != nil {
+	if _, err := fileperm.EnsureDir(dir); err != nil {
 		return nil, fmt.Errorf("secure MITM CA directory: %w", err)
 	}
 	info, err := os.Stat(dir)
@@ -313,12 +313,13 @@ func writeFileAtomic(path string, ownerOnly bool, contents []byte) (retErr error
 		}
 	}()
 	// Before the contents, so the private key is never on disk under access
-	// this process did not choose. f.Chmod said nothing on Windows, where the
-	// file simply inherited the directory's ACL — which loadCA then correctly
-	// refused on the very next start, because inherited access can be widened
-	// later by a change to the parent.
+	// this process did not choose, and CONFIRMED on the handle it is written
+	// through — the same fileperm.Secure invariant the credential key and the
+	// audit trail use. f.Chmod said nothing at all on Windows, where the file
+	// simply inherited the directory's ACL, which loadCA then correctly
+	// refused on the very next start.
 	if ownerOnly {
-		if err := fileperm.Restrict(tmp); err != nil {
+		if err := fileperm.Secure(tmp, f); err != nil {
 			_ = f.Close()
 			return err
 		}
@@ -341,11 +342,18 @@ func writeFileAtomic(path string, ownerOnly bool, contents []byte) (retErr error
 		return err
 	}
 	if ownerOnly {
-		// Re-applied at the destination: what a rename does to a file's
-		// security descriptor is platform-defined, and this file is the one
-		// thing here that must not be readable by anyone else.
-		if err := fileperm.Restrict(path); err != nil {
+		// CHECKED at the destination rather than re-applied: what a rename
+		// does to a file's security descriptor is platform-defined, so the
+		// question is whether the protection survived, and re-applying would
+		// answer a question nobody asked while hiding the answer to this one.
+		// Opening it also proves the name resolves to the file just written.
+		check, err := os.Open(path)
+		if err != nil {
 			return err
+		}
+		defer func() { _ = check.Close() }()
+		if err := fileperm.VerifyFile(check); err != nil {
+			return fmt.Errorf("MITM CA private key after publish: %w", err)
 		}
 	}
 	return nil
