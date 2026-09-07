@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"os"
 	"reflect"
 	"strings"
 	"sync"
@@ -441,32 +442,81 @@ func TestMetricsDisabledNoop(t *testing.T) {
 	RegisterStatsObservables(NewStatsTracker())
 }
 
-// Transport security must follow the endpoint. WithInsecure was unconditional,
-// so telemetry crossed the network in cleartext with no way to enable TLS.
-func TestOTLPTransportSecurity(t *testing.T) {
-	tests := []struct {
-		endpoint     string
-		insecureEnv  string
-		wantInsecure bool
-		wantHostPort string
+// Whether telemetry is configured at all is the only OTLP decision this
+// package makes; where and how to connect belongs to the exporter, which
+// implements the specification's precedence for both.
+//
+// The gate used to read the generic variable only, so an operator who
+// configured just OTEL_EXPORTER_OTLP_METRICS_ENDPOINT got silence.
+func TestOTLPEndpointGateFollowsSignalPrecedence(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		generic string
+		metrics string
+		want    string
 	}{
-		{endpoint: "https://otel.example.com:4317", wantInsecure: false, wantHostPort: "otel.example.com:4317"},
-		{endpoint: "http://localhost:4317", wantInsecure: true, wantHostPort: "localhost:4317"},
-		// A bare host:port defaults to TLS — failing closed.
-		{endpoint: "otel.example.com:4317", wantInsecure: false, wantHostPort: "otel.example.com:4317"},
-		{endpoint: "otel.example.com:4317", insecureEnv: "true", wantInsecure: true, wantHostPort: "otel.example.com:4317"},
-		{endpoint: "otel.example.com:4317", insecureEnv: "TRUE", wantInsecure: true, wantHostPort: "otel.example.com:4317"},
-		{endpoint: "otel.example.com:4317", insecureEnv: "false", wantInsecure: false, wantHostPort: "otel.example.com:4317"},
-		// An explicit scheme wins over the variable.
-		{endpoint: "https://otel.example.com:4317", insecureEnv: "true", wantInsecure: false, wantHostPort: "otel.example.com:4317"},
-		{endpoint: "https://otel.example.com:4317/", wantInsecure: false, wantHostPort: "otel.example.com:4317"},
+		{name: "neither configured", want: ""},
+		{name: "generic only", generic: "https://collector:4317", want: "https://collector:4317"},
+		{
+			name:    "metrics-specific only",
+			metrics: "https://metrics-collector:4317",
+			want:    "https://metrics-collector:4317",
+		},
+		{
+			name:    "metrics-specific wins over generic",
+			generic: "https://generic-collector:4317",
+			metrics: "https://metrics-collector:4317",
+			want:    "https://metrics-collector:4317",
+		},
+		{
+			name:    "empty metrics-specific falls back to generic",
+			generic: "https://generic-collector:4317",
+			metrics: "",
+			want:    "https://generic-collector:4317",
+		},
+		{name: "whitespace is not configuration", generic: "   ", want: ""},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", tt.generic)
+			t.Setenv("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT", tt.metrics)
+			if got := otlpMetricsEndpoint(); got != tt.want {
+				t.Errorf("otlpMetricsEndpoint() = %q, want %q", got, tt.want)
+			}
+		})
 	}
-	for _, tt := range tests {
-		if got := otlpInsecure(tt.endpoint, tt.insecureEnv); got != tt.wantInsecure {
-			t.Errorf("otlpInsecure(%q, %q) = %v, want %v", tt.endpoint, tt.insecureEnv, got, tt.wantInsecure)
+}
+
+// InitOTel must not install an endpoint or security option of its own: doing
+// so overrides the exporter's precedence, which is how the metrics-specific
+// endpoint and OTEL_EXPORTER_OTLP_METRICS_INSECURE came to be ignored.
+func TestInitOTelPassesNoTransportOptions(t *testing.T) {
+	src, err := os.ReadFile("otel.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, opt := range []string{"otlpmetricgrpc.WithEndpoint", "otlpmetricgrpc.WithEndpointURL", "otlpmetricgrpc.WithInsecure"} {
+		if strings.Contains(string(src), opt) {
+			t.Errorf("otel.go uses %s; the exporter reads OTEL_EXPORTER_OTLP_* itself, "+
+				"and an explicit option overrides the metrics-specific variable "+
+				"with the generic one", opt)
 		}
-		if got := stripOTLPScheme(tt.endpoint); got != tt.wantHostPort {
-			t.Errorf("stripOTLPScheme(%q) = %q, want %q", tt.endpoint, got, tt.wantHostPort)
-		}
+	}
+}
+
+// Torana stays off unless asked. The exporter's own default endpoint is
+// localhost:4317, so without this gate every install would ship telemetry
+// somewhere nobody configured.
+func TestInitOTelIsANoopWhenNoEndpointIsConfigured(t *testing.T) {
+	t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "")
+	t.Setenv("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT", "")
+	shutdown, err := InitOTel(context.Background())
+	if err != nil {
+		t.Fatalf("InitOTel: %v", err)
+	}
+	if shutdown == nil {
+		t.Fatal("InitOTel returned a nil shutdown function")
+	}
+	if err := shutdown(context.Background()); err != nil {
+		t.Errorf("shutdown: %v", err)
 	}
 }

@@ -50,28 +50,82 @@ func TestApplyProviderCredentialUsesProtocolNativeHeader(t *testing.T) {
 }
 
 func TestApplyProviderCredentialCallerUsesIngressSnapshot(t *testing.T) {
-	req, _ := http.NewRequest(http.MethodPost, "https://fallback.example/infer", nil)
-	// This is a managed credential already installed for the primary. It must
-	// not become the caller credential merely because failover clones req.
-	req.Header.Set("Authorization", "Bearer primary-managed-secret")
-	caller := callerCredentials{
-		Authorization: "Bearer original-caller-secret",
-		APIKey:        "original-api-key",
-		GoogleAPIKey:  "original-google-key",
+	// Every credential family caller mode is expected to forward. The strip
+	// list grew to close a leak in credential mode while the snapshot stayed
+	// at three fields, so an Azure api-key, an AWS session token and the
+	// Google client identity were removed on the way through and never put
+	// back — caller-mode authentication simply stopped working for them.
+	ingress, _ := http.NewRequest(http.MethodPost, "https://provider.example/infer", nil)
+	want := map[string]string{
+		"Authorization":        "Bearer original-caller-secret",
+		"X-Api-Key":            "original-api-key",
+		"X-Goog-Api-Key":       "original-google-key",
+		"Api-Key":              "original-azure-key",
+		"X-Amz-Security-Token": "original-aws-session-token",
+		"X-Goog-Api-Client":    "gl-go/1.26 gapic/1.0",
 	}
+	for name, value := range want {
+		ingress.Header.Set(name, value)
+	}
+	// Ambient credentials that are not the caller authenticating to a model
+	// provider. These are dropped in every mode, caller included.
+	ingress.Header.Set("Cookie", "session=secret")
+	ingress.Header.Set("Proxy-Authorization", "Basic proxy-secret")
+	caller := callerCredentialsFrom(ingress)
+
+	req, _ := http.NewRequest(http.MethodPost, "https://fallback.example/infer", nil)
+	// A managed credential already installed for the primary. It must not
+	// become the caller credential merely because failover clones req.
+	req.Header.Set("Authorization", "Bearer primary-managed-secret")
+
 	if err := applyProviderCredential(context.Background(), req, provider.Provider{
 		Auth: provider.ProviderAuth{Mode: "caller"},
 	}, caller, nil); err != nil {
 		t.Fatal(err)
 	}
-	if got := req.Header.Get("Authorization"); got != caller.Authorization {
-		t.Fatalf("Authorization = %q, want immutable ingress value %q", got, caller.Authorization)
+	for name, value := range want {
+		if got := req.Header.Get(name); got != value {
+			t.Errorf("%s = %q, want the immutable ingress value %q", name, got, value)
+		}
 	}
-	if got := req.Header.Get("X-Api-Key"); got != caller.APIKey {
-		t.Fatalf("X-Api-Key = %q, want %q", got, caller.APIKey)
+	for _, name := range []string{"Cookie", "Proxy-Authorization"} {
+		if got := req.Header.Get(name); got != "" {
+			t.Errorf("%s = %q; ambient credentials must not reach an upstream in any mode", name, got)
+		}
 	}
-	if got := req.Header.Get("X-Goog-Api-Key"); got != caller.GoogleAPIKey {
-		t.Fatalf("X-Goog-Api-Key = %q, want %q", got, caller.GoogleAPIKey)
+}
+
+// The complement: a provider-managed credential replaces the caller's, and
+// nothing the caller sent survives the boundary.
+func TestApplyProviderCredentialCredentialModeDropsEveryCallerHeader(t *testing.T) {
+	req, _ := http.NewRequest(http.MethodPost, "https://provider.example/infer", nil)
+	for _, name := range append(append([]string{}, callerForwardedHeaders...), neverForwardedHeaders...) {
+		req.Header.Set(name, "caller-secret-"+name)
+	}
+	err := applyProviderCredential(context.Background(), req, provider.Provider{
+		Auth: provider.ProviderAuth{Mode: "credential", Credential: "managed"},
+	}, callerCredentialsFrom(req), func(context.Context, string) ([]byte, error) {
+		return []byte("managed-secret"), nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := req.Header.Get("Authorization"); got != "Bearer managed-secret" {
+		t.Fatalf("Authorization = %q, want the managed credential", got)
+	}
+	for _, name := range callerForwardedHeaders {
+		if name == "Authorization" {
+			continue
+		}
+		if got := req.Header.Get(name); got != "" {
+			t.Errorf("%s = %q survived into credential mode; the caller's secrets "+
+				"must not leave the machine", name, got)
+		}
+	}
+	for _, name := range neverForwardedHeaders {
+		if got := req.Header.Get(name); got != "" {
+			t.Errorf("%s = %q survived into credential mode", name, got)
+		}
 	}
 }
 

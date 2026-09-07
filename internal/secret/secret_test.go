@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/torana-edge/torana-edge/internal/fileperm"
@@ -197,5 +198,62 @@ func TestInvalidKeyLength(t *testing.T) {
 	_, err := secret.Open(dir)
 	if err == nil {
 		t.Fatalf("Open expected error for invalid key length, got nil")
+	}
+}
+
+// The first-run race. The server and the `torana credential` CLI both call
+// Open, so a first run that starts both at once used to have each generate a
+// key and the loser's write clobber the winner's — after which anything
+// already encrypted under the overwritten key could never be decrypted.
+//
+// Every caller must come away with the SAME key, and none may fail: the losing
+// side reads the winner's file, which is only ever visible once complete.
+func TestConcurrentOpenAgreesOnOneKey(t *testing.T) {
+	for round := range 50 {
+		dir := t.TempDir()
+
+		const callers = 6
+		var wg sync.WaitGroup
+		start := make(chan struct{})
+		tokens := make([]string, callers)
+		errs := make([]error, callers)
+
+		for i := range callers {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				<-start
+				store, err := secret.Open(dir)
+				if err != nil {
+					errs[i] = err
+					return
+				}
+				// The key is not exported, so agreement is observed through
+				// what it produces: a token every other store can decrypt.
+				tokens[i], errs[i] = store.Encrypt("payload")
+			}()
+		}
+		close(start)
+		wg.Wait()
+
+		for i, err := range errs {
+			if err != nil {
+				t.Fatalf("round %d: caller %d failed: %v", round, i, err)
+			}
+		}
+		store, err := secret.Open(dir)
+		if err != nil {
+			t.Fatalf("round %d: reopen: %v", round, err)
+		}
+		for i, token := range tokens {
+			got, err := store.Decrypt(token)
+			if err != nil {
+				t.Fatalf("round %d: caller %d encrypted under a key the surviving file "+
+					"cannot decrypt — a concurrent Open clobbered it: %v", round, i, err)
+			}
+			if got != "payload" {
+				t.Fatalf("round %d: caller %d round-tripped %q", round, i, got)
+			}
+		}
 	}
 }
