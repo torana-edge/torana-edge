@@ -20,6 +20,17 @@ func verify(path string, info fs.FileInfo) error {
 	return nil
 }
 
+// verifyFile asks the same question of an open handle. f.Stat is fstat(2) on
+// the descriptor, so the answer describes the object the descriptor refers to
+// however the name has since been rebound.
+func verifyFile(f *os.File) error {
+	info, err := f.Stat()
+	if err != nil {
+		return fmt.Errorf("stat %s: %w", f.Name(), err)
+	}
+	return verify(f.Name(), info)
+}
+
 func restrict(path string, dir bool) error {
 	mode := fs.FileMode(0o600)
 	if dir {

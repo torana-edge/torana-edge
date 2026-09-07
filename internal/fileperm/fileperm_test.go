@@ -159,3 +159,65 @@ func TestOpenAppendCreatesOwnerOnlyAndRefusesAWidenedFile(t *testing.T) {
 		t.Fatal("OpenAppend accepted a widely accessible existing file")
 	}
 }
+
+// The security decision must describe the object that will actually be read
+// or written. Verify resolves a NAME and is a pre-check only; VerifyFile
+// resolves the open HANDLE. Rebinding the name after the open is what
+// separates them: a path-based check would answer for the replacement while
+// the writes still go to the original.
+func TestVerifyFileAnswersForTheHandleNotTheName(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "audit.jsonl")
+
+	f, err := fileperm.OpenAppend(path)
+	if err != nil {
+		t.Fatalf("OpenAppend: %v", err)
+	}
+	defer func() { _ = f.Close() }()
+	if err := fileperm.VerifyFile(f); err != nil {
+		t.Fatalf("a file OpenAppend just created is not owner-only: %v", err)
+	}
+
+	// Point the name at a widely accessible file, leaving the handle where it
+	// was. On Unix this is a rename over the path; the descriptor still refers
+	// to the original inode.
+	other := filepath.Join(dir, "other.jsonl")
+	if err := os.WriteFile(other, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(other, path); err != nil {
+		t.Skipf("cannot rebind the name on this platform: %v", err)
+	}
+
+	// The name now resolves to something unsafe...
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := fileperm.Verify(path, info); err == nil {
+		t.Error("Verify accepted the widely accessible file the name now resolves to")
+	}
+	// ...while the handle still refers to the file that was checked, and
+	// VerifyFile must keep answering for THAT one.
+	if err := fileperm.VerifyFile(f); err != nil {
+		t.Errorf("VerifyFile followed the name instead of the handle: %v", err)
+	}
+}
+
+// The mirror image: a handle onto a widely accessible file must be refused
+// however the name is later made to look.
+func TestVerifyFileRefusesAWidelyAccessibleHandle(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "open.jsonl")
+	if err := os.WriteFile(path, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = f.Close() }()
+	if err := fileperm.VerifyFile(f); err == nil {
+		t.Fatal("VerifyFile accepted a handle onto a widely accessible file")
+	}
+}
