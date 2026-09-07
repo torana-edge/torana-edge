@@ -92,9 +92,15 @@ cache-dir:
 # suite. TORANA_E2E=1 makes a missing required fixture an actionable FAILURE
 # instead of a silent skip; GOWORK=off matches the verified gate. No
 # testing.Short or build-tag omissions: this is the complete ./... suite.
+#
+# The timeout matches CI's because the suite needs it: internal/plugin and
+# internal/proxy compile dozens of Wasm fixtures and run for 10-11 minutes on
+# an ordinary machine. At 600s the documented gate reported
+# `panic: test timed out` on a tree where nothing was wrong — a contributor's
+# first run of `make test` accusing them of a failure that was the clock.
 test: testdata
 	@mkdir -p "$${TORANA_CI_CACHE:-$(CACHE_DIR)}"
-	GOWORK=off TORANA_E2E=1 go test ./... -timeout 600s
+	GOWORK=off TORANA_E2E=1 go test ./... -timeout 1800s
 
 # test-race is the slow pre-merge gate: the same complete suite under -race.
 # Packages are SERIALIZED (-p=1): under -race the wazero-heavy package test
@@ -123,7 +129,7 @@ test-pkg:
 	$(call check_pkg,test-pkg)
 	@mkdir -p "$${TORANA_CI_CACHE:-$(CACHE_DIR)}"
 	@$(MAKE) $(addsuffix /plugin.wasm,$(PKG_FIXTURES))
-	GOWORK=off TORANA_E2E=1 go test $(PKG) -timeout 600s
+	GOWORK=off TORANA_E2E=1 go test $(PKG) -timeout 1800s
 
 test-race-pkg:
 	$(call check_pkg,test-race-pkg)
