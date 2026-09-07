@@ -217,6 +217,50 @@ var fidelityCases = []fidelityCase{
 	// Anthropic
 	// ---------------------------------------------------------------------
 	{
+		// marshalUnknownBlock rebuilt the block from the typed contentBlock,
+		// which has no source field — so every image and document reached the
+		// provider as a bare {"type":"image"}, its attachment gone, with no
+		// error to anybody.
+		name:   "image block keeps its source",
+		format: "anthropic",
+		body: `{"model":"m","max_tokens":10,"messages":[{"role":"user","content":[
+			{"type":"image","source":{"type":"base64","media_type":"image/png","data":"` + marker + `"}},
+			{"type":"text","text":"describe it"}]}]}`,
+		survives: []string{marker, "image/png", "base64"},
+	},
+	{
+		name:   "document block keeps its source",
+		format: "anthropic",
+		body: `{"model":"m","max_tokens":10,"messages":[{"role":"user","content":[
+			{"type":"document","source":{"type":"text","media_type":"text/plain","data":"` + marker + `"}}]}]}`,
+		survives: []string{marker, "text/plain"},
+	},
+	{
+		// A cache breakpoint closes the prefix at the block it follows, which
+		// may be an unmodelled arm. Emitting those verbatim must not lose the
+		// marker, or the provider cache is disabled for the whole prefix.
+		name:   "cache_control after an image block survives",
+		format: "anthropic",
+		body: `{"model":"m","max_tokens":10,"messages":[{"role":"user","content":[
+			{"type":"image","source":{"type":"base64","media_type":"image/png","data":"` + marker + `"},"cache_control":{"type":"ephemeral"}}]}]}`,
+		survives: []string{marker, "ephemeral"},
+	},
+	{
+		name:   "absent model is forwarded absent, not invented",
+		format: "anthropic",
+		body: `{"max_tokens":10,"messages":[{"role":"user","content":[
+			{"type":"text","text":"u"}]}]}`,
+		absentPaths: []string{"model"},
+	},
+	{
+		// Anthropic requires max_tokens; that is the provider's rule to
+		// enforce. Inventing 4096 caps a response the caller never capped.
+		name:        "absent max_tokens is not invented",
+		format:      "anthropic",
+		body:        `{"model":"m","messages":[{"role":"user","content":[{"type":"text","text":"u"}]}]}`,
+		absentPaths: []string{"max_tokens"},
+	},
+	{
 		// Anthropic tool_result has no name member, and this adapter's own arm
 		// table rejects one on the way in — so emitting it produced a body the
 		// parser would refuse and the provider would reject.
@@ -237,6 +281,124 @@ var fidelityCases = []fidelityCase{
 		format:   "anthropic",
 		body:     `{"model":"m","max_tokens":10,"messages":[{"role":"user","content":"u"}],"tools":[{"name":"f","input_schema":{"type":"object"},"cache_control":{"type":"ephemeral"}}]}`,
 		survives: []string{"ephemeral"},
+	},
+	{
+		// Presence and value are separate facts: `{}` is a present marker
+		// Anthropic honours as a breakpoint. Decoding the marker to a map and
+		// testing len() reported it absent, so an explicitly cached prefix
+		// silently stopped being cached. Pinned on the RAW block path…
+		name:   "present-empty cache_control on an image survives",
+		format: "anthropic",
+		body: `{"model":"m","max_tokens":10,"messages":[{"role":"user","content":[
+			{"type":"image","source":{"type":"base64","media_type":"image/png","data":"` + marker + `"},"cache_control":{}}]}]}`,
+		paths: map[string]any{
+			"messages[0].content[0].type":          "image",
+			"messages[0].content[0].source.data":   marker,
+			"messages[0].content[0].cache_control": map[string]any{},
+		},
+	},
+	{
+		name:   "present-empty cache_control on a document survives",
+		format: "anthropic",
+		body: `{"model":"m","max_tokens":10,"messages":[{"role":"user","content":[
+			{"type":"document","source":{"type":"text","media_type":"text/plain","data":"` + marker + `"},"cache_control":{}}]}]}`,
+		paths: map[string]any{
+			"messages[0].content[0].source.data":   marker,
+			"messages[0].content[0].cache_control": map[string]any{},
+		},
+	},
+	{
+		// …and on the TYPED block path, where encoding/json's omitempty drops
+		// a non-nil empty map just as readily.
+		name:   "present-empty cache_control on a text block survives",
+		format: "anthropic",
+		body: `{"model":"m","max_tokens":10,"messages":[{"role":"user","content":[
+			{"type":"text","text":"` + marker + `","cache_control":{}}]}]}`,
+		paths: map[string]any{
+			"messages[0].content[0].text":          marker,
+			"messages[0].content[0].cache_control": map[string]any{},
+		},
+	},
+	{
+		name:   "present-empty cache_control on a tool definition survives",
+		format: "anthropic",
+		body:   `{"model":"m","max_tokens":10,"messages":[{"role":"user","content":"u"}],"tools":[{"name":"f","input_schema":{"type":"object"},"cache_control":{}}]}`,
+		paths:  map[string]any{"tools[0].cache_control": map[string]any{}},
+	},
+	{
+		name:   "present-empty cache_control on a system block survives",
+		format: "anthropic",
+		body:   `{"model":"m","max_tokens":10,"system":[{"type":"text","text":"s","cache_control":{}}],"messages":[{"role":"user","content":"u"}]}`,
+		paths:  map[string]any{"system[0].cache_control": map[string]any{}},
+	},
+	{
+		// The same deletion one level down: a nested element carrying a
+		// cache_control was REPLACED by the breakpoint instead of being
+		// followed by it, so the image vanished — and in first position the
+		// request became unmarshalable ("nested cache breakpoint at position
+		// 0 has no preceding element to attach to").
+		name:   "cached image in first tool-result position survives",
+		format: "anthropic",
+		body: `{"model":"m","max_tokens":10,"messages":[{"role":"user","content":[
+			{"type":"tool_result","tool_use_id":"t1","content":[
+				{"type":"image","source":{"type":"base64","data":"` + marker + `"},"cache_control":{"type":"ephemeral"}},
+				{"type":"text","text":"caption"}]}]}]}`,
+		paths: map[string]any{
+			"messages[0].content[0].content[0].type":               "image",
+			"messages[0].content[0].content[0].source.data":        marker,
+			"messages[0].content[0].content[0].cache_control.type": "ephemeral",
+			"messages[0].content[0].content[1].text":               "caption",
+		},
+	},
+	{
+		// A nested TEXT element lost its marker the other way: the text arm
+		// returned before the marker was ever read.
+		name:   "cache_control on a nested text element survives",
+		format: "anthropic",
+		body: `{"model":"m","max_tokens":10,"messages":[{"role":"user","content":[
+			{"type":"tool_result","tool_use_id":"t1","content":[
+				{"type":"text","text":"` + marker + `","cache_control":{}}]}]}]}`,
+		paths: map[string]any{
+			"messages[0].content[0].content[0].text":          marker,
+			"messages[0].content[0].content[0].cache_control": map[string]any{},
+		},
+	},
+	// A present cache_control must satisfy the required-object contract on
+	// EVERY carrier — the accepted domain cannot depend on which one the
+	// marker rode in on. The nested path tested the DECODED value for nil,
+	// which conflated a missing member with an explicit null: null was
+	// accepted there and silently dropped on the way out, while the other
+	// four carriers refused it. Missing is absence; present-null is a value,
+	// and not an object.
+	{
+		name:             "explicit null cache_control on a nested text element is refused",
+		format:           "anthropic",
+		body:             `{"model":"m","max_tokens":10,"messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":[{"type":"text","text":"r","cache_control":null}]}]}]}`,
+		wantUnmarshalErr: true,
+	},
+	{
+		name:             "explicit null cache_control on a nested image element is refused",
+		format:           "anthropic",
+		body:             `{"model":"m","max_tokens":10,"messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":[{"type":"image","source":{"type":"base64","data":"AA"},"cache_control":null}]}]}]}`,
+		wantUnmarshalErr: true,
+	},
+	{
+		name:             "explicit null cache_control on a content block is refused",
+		format:           "anthropic",
+		body:             `{"model":"m","max_tokens":10,"messages":[{"role":"user","content":[{"type":"text","text":"r","cache_control":null}]}]}`,
+		wantUnmarshalErr: true,
+	},
+	{
+		name:             "explicit null cache_control on a system block is refused",
+		format:           "anthropic",
+		body:             `{"model":"m","max_tokens":10,"system":[{"type":"text","text":"s","cache_control":null}],"messages":[{"role":"user","content":"u"}]}`,
+		wantUnmarshalErr: true,
+	},
+	{
+		name:             "explicit null cache_control on a tool definition is refused",
+		format:           "anthropic",
+		body:             `{"model":"m","max_tokens":10,"messages":[{"role":"user","content":"u"}],"tools":[{"name":"t","input_schema":{"type":"object"},"cache_control":null}]}`,
+		wantUnmarshalErr: true,
 	},
 
 	// ---------------------------------------------------------------------
