@@ -440,7 +440,7 @@ func TestCandidate0OnlyGemini(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Round 11 finding 1: the gemini CONTENT slot must come from candidate 0 —
+// The gemini CONTENT slot must come from candidate 0 —
 // the selected response — exactly like tool calls. A later candidate is an
 // alternative, so its text must be neither exposed as a ResponseMessage text block
 // nor mutated on the wire. rawSlots still cover every candidate (args byte

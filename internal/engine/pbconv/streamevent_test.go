@@ -547,10 +547,10 @@ func toolBlockStop(idx int) *pb.StreamEvent {
 	return &pb.StreamEvent{Event: &pb.StreamEvent_ContentBlockStop{ContentBlockStop: &pb.ContentBlockStop{Index: int32(idx)}}}
 }
 
-// The round-4 contract: MULTIPLE tool blocks may be open concurrently at
+// The contract: MULTIPLE tool blocks may be open concurrently at
 // unique indexes — parallel tool calls ride the native protocols. A second
 // tool start while a tool block is open is legal (this was rejected by the
-// round-3 single-open rule), and each stop resolves its own block by index,
+// an earlier single-open rule), and each stop resolves its own block by index,
 // kind-matched, regardless of the order stops arrive in.
 func TestConcurrentToolBlocksAccepted(t *testing.T) {
 	tracker := &BlockKindTracker{}

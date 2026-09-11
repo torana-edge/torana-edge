@@ -1,6 +1,6 @@
 package plugin
 
-// Tests for the stream-signature enforcement layer (Migration B part 2b):
+// Tests for the stream-signature enforcement layer:
 // the per-event pre-commit discipline, the scope-close (late) checks, the
 // accepted-side host-defect attribution, and the typed terminal error.
 //
@@ -664,7 +664,7 @@ func TestVerifyStreamPolicyCorrelatesExactEventsFirst(t *testing.T) {
 	}
 }
 
-// TestEnforcePassOutputIsAtomicRegression reproduces the pre-round-2 state
+// TestEnforcePassOutputIsAtomicRegression reproduces the earlier state
 // poison: an invalid start marked index 1 seen before pass-mode replay, so a
 // later legitimate start at that index was rejected. Both the walker and the
 // fan-out candidate now commit only after complete validation succeeds.

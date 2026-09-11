@@ -432,7 +432,7 @@ func TestValidateResponseReplacementMixedValidMutation(t *testing.T) {
 	}
 }
 
-// Round 10 finding 1: on a mutable NO-MESSAGE response (e.g. a no-candidate
+// On a mutable NO-MESSAGE response (e.g. a no-candidate
 // Gemini body) the message-relative checks have nothing to compare, but the
 // host-owned ChatResponse facts are still facts — a plugin must not forge
 // them just because there is no assistant turn to anchor the comparison.

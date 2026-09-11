@@ -29,8 +29,8 @@ import (
 // collision-resistant and reorder-sensitive. Each message is first hashed as
 // its own typed record (fingerprintMessage) — field tags + presence + an
 // explicit tool-call count and per-call records — so a tool call can never be
-// confused with a message or its neighbour's fields (the round-1 structural
-// ambiguity is reproduced below). The tests here exercise that production
+// confused with a message or its neighbour's fields (the superseded framing's
+// structural ambiguity is reproduced below). The tests here exercise that production
 // fingerprint. compareSections — exact structural comparison, no hashing,
 // which cannot collide because it never summarises — is kept below as the
 // mutation suite's oracle: a mutation must be caught by BOTH the exact
@@ -767,9 +767,9 @@ func TestNegativeZeroIsDetected(t *testing.T) {
 	}
 }
 
-// --- F1: per-message typed records (round-1 structural ambiguity) -----------
+// --- Per-message typed records, and the ambiguity they removed ------------
 
-// oldSchemeRoleDigest replicates the round-1 per-role framing — message
+// oldSchemeRoleDigest replicates the superseded per-role framing — message
 // fields and tool-call fields concatenated into ONE role stream — so the
 // tests below can demonstrate the structural ambiguity it had: a tool call's
 // four fields were byte-indistinguishable from the leading fields of the next
@@ -783,7 +783,7 @@ func oldSchemeRoleDigest(req *pb.ChatRequest, role string) [32]byte {
 		}
 		var idx [8]byte
 		binary.LittleEndian.PutUint64(idx[:], uint64(i))
-		// The round-1 framing, expressed over the block model: message
+		// The superseded framing, expressed over the block model: message
 		// fields and tool-call fields concatenated into ONE role stream.
 		// Ten message fields + index + role = TWELVE frames per message, so
 		// a moved call (four frames) keeps the whole stream at a multiple
@@ -807,14 +807,14 @@ func oldSchemeRoleDigest(req *pb.ChatRequest, role string) [32]byte {
 	return sum
 }
 
-// The round-1 field derivations from the block model. Each reads the FIRST
+// The superseded scheme's field derivations from the block model. Each reads the FIRST
 // occurrence of the corresponding block kind; the boundary-shift fixtures
 // place exactly one of each.
 func oldSchemeText(m *pb.Message) string { return firstText(m).GetText() }
 func oldSchemeContentParts(m *pb.Message) string {
-	// The round-1 content_parts slot, derived from the SECOND text block
+	// The superseded content_parts slot, derived from the SECOND text block
 	// (absent when there is none): the replica needs ten message fields to
-	// reproduce the twelve-frames-per-message round-1 layout.
+	// reproduce the twelve-frames-per-message layout it used.
 	var seen bool
 	for _, b := range m.Blocks {
 		if b.GetText() != nil {
@@ -894,26 +894,26 @@ func firstToolResult(m *pb.Message) *pb.RequestToolResultBlock {
 
 // boundaryShiftMessages builds the reviewer's reproduction: a same-role pair
 // where the second message is PERIODIC with the moved call's fields, so under
-// the round-1 framing the call's four fields are byte-identical to the next
+// the superseded framing the call's four fields are byte-identical to the next
 // message's leading fields. accepted has the call on message 0; out moves it
 // into message 1's tool-call list.
 //
 // The period is: idx1 (the 8-byte little-endian index of message 1) followed
 // by the call's fields (id=idx1, name="user", arguments="S", signature="T"),
 // cycling through the message's eleven fields. Moving the call then merely
-// rotates the boundary between the concatenated frames, leaving the round-1
+// rotates the boundary between the concatenated frames, leaving the superseded
 // preimage identical.
 func boundaryShiftMessages() (accepted, out *pb.ChatRequest) {
 	idx1 := string([]byte{1, 0, 0, 0, 0, 0, 0, 0})
 	jsonS, jsonT := `{"s":0}`, `{"t":0}`
-	// The round-1 framing concatenates each message's index, role, nine
+	// The superseded framing concatenates each message's index, role, nine
 	// message fields and its tool-call frames into ONE byte stream. The
 	// periodic message below is built so that stream is exactly four
 	// repetitions of (idx1, "user", "S", "T") whether the call sits on
 	// message 0 or message 1: the call's four frames (idx1, user, S, T)
 	// are byte-identical to the next message's leading frames, and the
 	// message fields cycle (S, T, idx1, user) — so moving the call between
-	// the messages leaves the round-1 preimage identical. S and T are JSON
+	// the messages leaves the superseded preimage identical. S and T are JSON
 	// objects so the current fingerprint's strict JSON checks still accept the
 	// historical collision fixture.
 	call := &pb.RequestToolUseBlock{Id: idx1, Name: "user", ArgumentsJson: []byte(jsonS), Signature: jsonT}
@@ -948,19 +948,19 @@ func boundaryShiftMessages() (accepted, out *pb.ChatRequest) {
 	return accepted, out
 }
 
-// The exact round-1 reviewer reproduction: two same-role messages with a
+// The reproduction that motivated the change: two same-role messages with a
 // periodic field pattern, where moving a tool call from message 0's tool-call
-// list into message 1's yields an IDENTICAL round-1 preimage — so the round-1
+// list into message 1's yields an IDENTICAL preimage under the superseded
 // fingerprint returned equal digests and verifyRequestMutation returned nil
 // with no grants. The per-message typed-record framing must make the shift
 // visible, and verification must reject it.
 func TestMessageFingerprintUnambiguousAcrossBoundaryShift(t *testing.T) {
 	accepted, out := boundaryShiftMessages()
 
-	// 1. Preserve the original regression proof: the ambiguous round-1
+	// 1. Preserve the original regression proof: the ambiguous superseded
 	// framing produces the same digest for both structurally different inputs.
 	if oldSchemeRoleDigest(accepted, "user") != oldSchemeRoleDigest(out, "user") {
-		t.Fatal("fixture no longer reproduces the round-1 boundary collision")
+		t.Fatal("fixture no longer reproduces the superseded framing's boundary collision")
 	}
 	// 2. The exact oracle sees the change.
 	if !compareSections(accepted, out).any() {
