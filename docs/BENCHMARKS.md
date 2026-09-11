@@ -64,7 +64,7 @@ idle Linux machine (`/proc` supplies RSS), retain every raw JSONL row, and state
 the machine and configuration beside any summary. Zero request errors and the
 stream-integrity checks are validity requirements, not performance results.
 
-The current post-rewrite run and its raw rows are in
+The retained 2026-08-18 post-rewrite run and its raw rows are in
 [the 2026-08-18 report](BENCHMARK_PRODUCTION_RESULTS_2026-08-18.md). Keep older
 runs as historical comparisons; do not splice their best rows into a newer
 result.
@@ -117,16 +117,17 @@ go test ./internal/plugin -run '^$' -bench . -benchmem
 These exist to answer design questions with numbers. The first one they were
 built to answer is recorded below.
 
-## Should the host verify what each plugin changed?
+## Historical design question: should the host verify plugin changes?
 
-**Yes, using exact structural comparison. It costs 2.6–10% of pipeline time,
-worst case 1.5 ms absolute, which is well under 0.1% of end-to-end request
-latency.**
+The 2026-08-18 experiment answered **yes, using exact structural comparison**.
+The numbers below describe that retained experiment, not the current pipeline;
+write-grant verification has since shipped and the request/stream contracts
+have continued to change.
 
-Today `RunBeforeRequest` converts once, marshals once, then chains raw bytes
-from plugin to plugin without looking inside (`discovery.go:942-967`). Enforcing
-write grants means, per plugin, decoding that plugin's output and establishing
-which grantable sections it changed.
+At the measured revision, `RunBeforeRequest` converted once, marshaled once,
+then chained raw bytes from plugin to plugin without inspecting them. The
+experiment measured the then-proposed work of decoding each plugin's output and
+establishing which grantable sections it changed.
 
 **This is enforcement, and the plugin author is the threat model.** A method that
 merely usually notices a change is not a candidate. Two safe methods are
@@ -151,7 +152,8 @@ forgetting it in the fingerprint, will fail the suite.
 | **exact comparison** | **11.7 µs** | **69 µs** | **299 µs** |
 | safe fingerprint | 11.1 µs | 78 µs | 376 µs |
 
-**Exact comparison wins on both axes** — safer *and* 20% cheaper at scale, with
+**Exact comparison won on both axes in that experiment** — safer *and* 20%
+cheaper at scale, with
 half the allocations. The trade it makes is memory: it needs the accepted
 request kept decoded, where fingerprints carry 32 bytes per section. At these
 sizes that is not worth paying anything for.
@@ -168,9 +170,9 @@ Measured on an AMD Ryzen 7 4800H, Go 1.26, `-benchtime=100x` (pipeline) and
 | 5 | 20 | 5.02 ms | 0.343 ms | 6.8% |
 | 5 | 100 | 16.55 ms | 1.494 ms | 9.0% |
 
-Worst case is 1.5 ms on a request whose upstream call takes 2–30 seconds.
-Fully-granted plugins skip the check via the fast path, so most pipelines pay
-less.
+The worst measured row added 1.5 ms on a request whose upstream call was
+expected to take 2–30 seconds. This is historical design evidence, not a bound
+for the current implementation or workload.
 
 > An earlier revision priced a cheaper prototype that folded a per-role
 > accumulator over unframed field concatenation. It was **not** enforcement-safe:
@@ -213,7 +215,12 @@ host-side conversion for that request — `pbconv` plus `proto.Marshal`, run onc
    plugins with no interest in a request, short-circuiting on a block verdict —
    is worth far more than encoding work.
 
-## Streaming is where the cost actually lives
+## Historical streaming-cost measurements
+
+These rows predate the current verified streaming path. They remain useful as
+measurements of the old per-event WASM boundary, but they do not measure
+`RunOnStreamChunkVerified`, scope-close verification, or current stream
+topology handling. Use `BenchmarkStreamEnforcement` for the production path.
 
 `run_on_stream_chunk` fires **once per SSE event**, so its cost is multiplied by
 the event count while the request hook is paid once.
@@ -262,14 +269,14 @@ which shows up under concurrency, and every benchmark here is serial.
 
 Two design consequences:
 
-1. **Do not extend write-grant verification to the stream path** without
-   measuring it there. On the request path it costs 2.6–10%; on the stream path
-   the same work is multiplied by the event count.
+1. **Measure current stream enforcement directly.** It now exists, so these
+   pre-enforcement rows cannot establish its cost; use
+   `BenchmarkStreamEnforcement` and report the exact revision.
 2. **The per-event allocation is the optimisation worth doing**, if any is. It is
    `pbconv` → `proto.Marshal` → guest memory copy → result copy, per event, per
    plugin.
 
-## Total added latency
+## Historical illustrative latency budget
 
 For one coding-agent turn — a 20-message conversation, three request plugins,
 one stream plugin, and a response of 1000 SSE events:
@@ -286,8 +293,11 @@ one stream plugin, and a response of 1000 SSE events:
 Scale the stream row by your own event count and stream-plugin count; the table
 above shows those do not combine linearly.
 
-This is the plugin pipeline only. It excludes format adapter parsing, the HTTP
-proxy itself, and response-side hooks, none of which are benchmarked yet.
+At the measured revision this covered only the plugin pipeline. It excluded
+format adapter parsing, the HTTP proxy itself, and response-side hooks. The
+whole-process benchmarks above now cover the proxy and format adapters, so this
+older exclusion must not be read as a statement about current benchmark
+coverage.
 
 ## What the numbers still do not cover
 

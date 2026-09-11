@@ -13,7 +13,7 @@ this reduced allocation by another **44.6%** over merged PR #311:
 | requests/second | 5.23 | 5.79 | +10.7% |
 | p50 latency | 193.93 ms | 172.93 ms | -10.8% |
 | p95 latency | 231.85 ms | 213.18 ms | -8.1% |
-| peak RSS | 103.31 MiB | 78.89 MiB | -23.6% |
+| peak RSS | 98.53 MiB | 75.23 MiB | -23.6% |
 | request errors | 0 | 0 | unchanged |
 
 Across the matched PR #308-through-this-unit train, the same row moved from
