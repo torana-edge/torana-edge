@@ -225,8 +225,13 @@ func (c Config) Validate() error {
 			if configured.Auth.EffectiveMode() == "caller" {
 				return fmt.Errorf("plugin %q model service %q cannot use caller-auth provider %q", pluginName, resourceName, binding.Provider)
 			}
-			if strings.TrimSpace(binding.Model) == "" || !validBoundModelPath(binding.Path) || binding.TimeoutMS <= 0 || binding.TimeoutMS > 120000 || binding.MaxTokens == 0 || binding.MaxTokens > 1<<31-1 || binding.MaxInputBytes <= 0 || binding.MaxInputBytes > 8<<20 || binding.MaxCallsPerMinute <= 0 || binding.MaxTokensPerHour <= 0 {
-				return fmt.Errorf("plugin %q model service %q has an invalid binding or budget", pluginName, resourceName)
+			// One check per field, each naming the field and the value it
+			// got. These were a single ten-condition `if` behind "has an
+			// invalid binding or budget", which told an operator that one of
+			// ten numbers was wrong without saying which — and this is
+			// startup-fatal, so they are locked out until they guess right.
+			if err := validateModelServiceBinding(pluginName, resourceName, binding); err != nil {
+				return err
 			}
 		}
 		for resourceName, binding := range approval.PricingResources {
@@ -303,6 +308,39 @@ func (c Config) Validate() error {
 				return fmt.Errorf("mitm host %q references unknown provider %q", host, providerName)
 			}
 		}
+	}
+	return nil
+}
+
+// validateModelServiceBinding checks each field of a plugin's model-service
+// binding on its own, so the error names the field that is wrong and the value
+// it was given.
+//
+// Startup fails on this, so an operator who cannot tell which of ten numbers
+// the config rejected is locked out of their own proxy until they guess.
+func validateModelServiceBinding(pluginName, resourceName string, b PluginModelServiceApproval) error {
+	where := fmt.Sprintf("plugin %q model service %q", pluginName, resourceName)
+	switch {
+	case strings.TrimSpace(b.Model) == "":
+		return fmt.Errorf("%s: model is required", where)
+	case !validBoundModelPath(b.Path):
+		return fmt.Errorf("%s: path %q is not a valid bound model path", where, b.Path)
+	case b.TimeoutMS <= 0:
+		return fmt.Errorf("%s: timeout_ms is %d; it must be greater than 0", where, b.TimeoutMS)
+	case b.TimeoutMS > 120000:
+		return fmt.Errorf("%s: timeout_ms is %d; the maximum is 120000 (2 minutes)", where, b.TimeoutMS)
+	case b.MaxTokens == 0:
+		return fmt.Errorf("%s: max_tokens is 0; it must be greater than 0", where)
+	case b.MaxTokens > 1<<31-1:
+		return fmt.Errorf("%s: max_tokens is %d; the maximum is %d", where, b.MaxTokens, 1<<31-1)
+	case b.MaxInputBytes <= 0:
+		return fmt.Errorf("%s: max_input_bytes is %d; it must be greater than 0", where, b.MaxInputBytes)
+	case b.MaxInputBytes > 8<<20:
+		return fmt.Errorf("%s: max_input_bytes is %d; the maximum is %d (8 MiB)", where, b.MaxInputBytes, 8<<20)
+	case b.MaxCallsPerMinute <= 0:
+		return fmt.Errorf("%s: max_calls_per_minute is %d; it must be greater than 0", where, b.MaxCallsPerMinute)
+	case b.MaxTokensPerHour <= 0:
+		return fmt.Errorf("%s: max_tokens_per_hour is %d; it must be greater than 0", where, b.MaxTokensPerHour)
 	}
 	return nil
 }
@@ -791,6 +829,15 @@ func DefaultConfig() Config {
 			"anthropic": {
 				URL:    "https://api.anthropic.com",
 				Format: "anthropic",
+				Auth:   ProviderAuth{Mode: "caller"},
+			},
+			// The README's routing diagram has always listed
+			// /provider/gemini/, and it 502'd on a fresh install because
+			// nothing here defined it. A default route the front page
+			// advertises has to exist.
+			"gemini": {
+				URL:    "https://generativelanguage.googleapis.com",
+				Format: "gemini",
 				Auth:   ProviderAuth{Mode: "caller"},
 			},
 		},

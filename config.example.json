@@ -4,12 +4,20 @@
     "deepseek": {
       "url": "https://api.deepseek.com",
       "format": "openai",
-      "auth": {"mode": "caller"}
+      "auth": {
+        "mode": "caller"
+      }
     },
     "deepseek-anthropic": {
       "url": "https://api.deepseek.com/anthropic",
       "format": "anthropic",
-      "auth": {"mode": "caller"}
+      "auth": {
+        "mode": "caller"
+      }
+    },
+    "gemini": {
+      "url": "https://generativelanguage.googleapis.com",
+      "format": "gemini"
     }
   },
   "plugins": {
