@@ -2126,6 +2126,14 @@ func New(cfg Config) (*Server, error) {
 
 		candidate := s.GetConfig().Providers
 		candidate.Plugins = newPlugins
+		// Before anything is written or published. A registry that cannot be
+		// built is the caller's mistake, and finding it here costs nothing to
+		// undo — finding it after the pipeline is live means the process is
+		// already running the rejected configuration.
+		if err := s.checkCredentialRegistry(candidate.Credentials); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
 		if err := s.persistProviders(candidate); err != nil {
 			log.Printf("failed to persist config: %v", err)
 			http.Error(w, "failed to persist config to disk", http.StatusInternalServerError)
@@ -2139,15 +2147,18 @@ func New(cfg Config) (*Server, error) {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		// The candidate is already on disk. A rejection here has to undo that
-		// and say so, or the operator is told their change took effect while
-		// the running proxy keeps the old one — and the next restart loads the
-		// configuration that was just rejected.
+		// checkCredentialRegistry already accepted this candidate, so a
+		// rejection here is not the caller's mistake — it is ours, and the new
+		// pipeline is already live. Say so as a host failure rather than
+		// dressing it as a 400 the operator could act on.
 		if err := s.SetProviders(candidate); err != nil {
+			log.Printf("provider update accepted validation then failed to apply: %v", err)
 			if rollbackErr := s.persistProviders(s.GetConfig().Providers); rollbackErr != nil {
-				log.Printf("failed to restore config after rejected provider update: %v", rollbackErr)
+				log.Printf("failed to restore config afterwards: %v", rollbackErr)
 			}
-			http.Error(w, err.Error(), http.StatusBadRequest)
+			http.Error(w, "the update passed validation but could not be applied; "+
+				"the running configuration may not match the file on disk",
+				http.StatusInternalServerError)
 			return
 		}
 
@@ -2279,6 +2290,14 @@ func New(cfg Config) (*Server, error) {
 
 		candidate := s.GetConfig().Providers
 		candidate.Plugins = newPlugins
+		// Before anything is written or published. A registry that cannot be
+		// built is the caller's mistake, and finding it here costs nothing to
+		// undo — finding it after the pipeline is live means the process is
+		// already running the rejected configuration.
+		if err := s.checkCredentialRegistry(candidate.Credentials); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
 		if err := s.persistProviders(candidate); err != nil {
 			log.Printf("failed to persist config: %v", err)
 			http.Error(w, "failed to persist config to disk", http.StatusInternalServerError)
@@ -2292,15 +2311,18 @@ func New(cfg Config) (*Server, error) {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		// The candidate is already on disk. A rejection here has to undo that
-		// and say so, or the operator is told their change took effect while
-		// the running proxy keeps the old one — and the next restart loads the
-		// configuration that was just rejected.
+		// checkCredentialRegistry already accepted this candidate, so a
+		// rejection here is not the caller's mistake — it is ours, and the new
+		// pipeline is already live. Say so as a host failure rather than
+		// dressing it as a 400 the operator could act on.
 		if err := s.SetProviders(candidate); err != nil {
+			log.Printf("provider update accepted validation then failed to apply: %v", err)
 			if rollbackErr := s.persistProviders(s.GetConfig().Providers); rollbackErr != nil {
-				log.Printf("failed to restore config after rejected provider update: %v", rollbackErr)
+				log.Printf("failed to restore config afterwards: %v", rollbackErr)
 			}
-			http.Error(w, err.Error(), http.StatusBadRequest)
+			http.Error(w, "the update passed validation but could not be applied; "+
+				"the running configuration may not match the file on disk",
+				http.StatusInternalServerError)
 			return
 		}
 
@@ -3151,6 +3173,22 @@ func (s *Server) resolveCredential(ctx context.Context, id string) ([]byte, erro
 	registry := s.credentials
 	s.credentialMu.RUnlock()
 	return registry.Resolve(ctx, entry.Source, entry.Key)
+}
+
+// checkCredentialRegistry reports whether a candidate's credential registry
+// can be built, WITHOUT installing it.
+//
+// This is what lets a rejection cost nothing. The control-plane handlers
+// publish a new plugin pipeline and write the candidate to disk before they
+// would otherwise learn the registry is bad, and rolling those back one by one
+// is a transaction nobody can keep correct — the first version of this fix
+// restored the file and left the process running the rejected pipeline.
+// Checking first means there is nothing to undo.
+func (s *Server) checkCredentialRegistry(config provider.CredentialsConfig) error {
+	if _, err := buildCredentialRegistry(config, s.credentialStore); err != nil {
+		return fmt.Errorf("credential registry rejected: %w", err)
+	}
+	return nil
 }
 
 func (s *Server) replaceCredentialRegistry(config provider.CredentialsConfig) error {
