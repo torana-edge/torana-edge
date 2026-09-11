@@ -40,6 +40,18 @@ var markdownRef = regexp.MustCompile(`(?:\.{1,2}/)*(?:[A-Za-z0-9_.-]+/)*[A-Za-z0
 // the branch it names, not by the working tree.
 var urlRef = regexp.MustCompile(`(?i)\bhttps?://\S+`)
 
+// markdownLink matches [label](target). Only the TARGET is a reference; the
+// label is text shown to a reader and is frequently the bare filename of the
+// thing being linked to — as in
+//
+//	[`docs/QUICKSTART.md`](docs/QUICKSTART.md)
+//
+// Scanning the label as well as the target turned a benchmark report that had
+// moved into benchmarks/ into a dead reference, because the label still spelled
+// the bare filename while the target resolved correctly. The file the line
+// pointed at existed; the line reported as broken anyway.
+var markdownLink = regexp.MustCompile(`\[[^\]]*\]\(([^)]*)\)`)
+
 // crossRepositoryRoots are the sibling repositories whose documents are
 // theirs to own. Matched as an exact first path segment: a substring test
 // would also exempt a local directory that merely contains the name.
@@ -112,10 +124,15 @@ func crossRepository(ref string) bool {
 	return ok && crossRepositoryRoots[first]
 }
 
-// referencesIn returns every Markdown reference in a file's text, with
-// absolute URLs removed first.
+// referencesIn returns every local Markdown reference in a file's text.
 func referencesIn(text string) []string {
-	return markdownRef.FindAllString(urlRef.ReplaceAllString(text, " "), -1)
+	// Reduce every markdown link to its target, so a label that happens to
+	// name a file is not mistaken for a second reference. This must happen
+	// before URL removal: stripping an external target first would leave an
+	// incomplete link whose file-like label could no longer be reduced.
+	targetsOnly := markdownLink.ReplaceAllString(text, " $1 ")
+	withoutURLs := urlRef.ReplaceAllString(targetsOnly, " ")
+	return markdownRef.FindAllString(withoutURLs, -1)
 }
 
 // imaginary builds a path to a document that does not exist. A table that
@@ -242,6 +259,21 @@ func TestReferenceExtractionContract(t *testing.T) {
 		{name: "a hyphenated name", text: "[x](" + imaginary("docs/some-guide") + ")", want: []string{imaginary("docs/some-guide")}},
 		{name: "a relative path", text: "[x](" + imaginary("../benchmarks/A_B") + ")", want: []string{imaginary("../benchmarks/A_B")}},
 		{name: "a dot-slash path", text: "[x](./README.md)", want: []string{"./README.md"}},
+		{
+			name: "a link label that names a file is not a second reference",
+			text: "in [`" + imaginary("BENCHMARK_X") + "`](../benchmarks/" + imaginary("BENCHMARK_X") + ").",
+			want: []string{"../benchmarks/" + imaginary("BENCHMARK_X")},
+		},
+		{
+			name: "a label naming one file and a target naming another yields only the target",
+			text: "[see " + imaginary("OLD_NAME") + "](docs/QUICKSTART.md)",
+			want: []string{"docs/QUICKSTART.md"},
+		},
+		{
+			name: "an external link with a file-like label is not local",
+			text: "[README.md](https://example.com/project)",
+			want: nil,
+		},
 		{
 			name: "an absolute URL is not a repository reference",
 			text: "https://github.com/torana-edge/torana-edge/blob/main/docs/QUICKSTART.md",
