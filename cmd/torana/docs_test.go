@@ -2,12 +2,15 @@ package main
 
 import (
 	"bytes"
+	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
 	"testing"
+	"time"
 )
 
 // The help text and the README both claim to list every environment variable
@@ -337,5 +340,100 @@ func TestEveryAdvertisedHarnessHasAQuickstartSection(t *testing.T) {
 			t.Errorf("README.md advertises %q but docs/QUICKSTART.md has no section for it, "+
 				"and the README sends the reader there for a worked example", name)
 		}
+	}
+}
+
+// The startup banner prints a control-plane URL for an operator to open, so
+// that URL has to actually answer. A wildcard bind is an address to LISTEN on,
+// not one to connect to; and a SPECIFIC non-loopback bind serves the control
+// plane nowhere at all — the bind address is refused by the guard as a
+// non-loopback source (403), and loopback is refused by the kernel because
+// nothing is listening there.
+//
+// An earlier version of this printed the bind address in every case and called
+// the result "always reachable", which advertised a URL that cannot work.
+func TestControlPlaneHostNamesSomethingThatAnswers(t *testing.T) {
+	for _, tc := range []struct {
+		bind      string
+		want      string
+		reachable bool
+	}{
+		{bind: "127.0.0.1", want: "127.0.0.1", reachable: true},
+		{bind: "127.0.0.2", want: "127.0.0.2", reachable: true},
+		{bind: "::1", want: "::1", reachable: true},
+		// Unbracketed: net.JoinHostPort does the bracketing, and returning
+		// "[::1]" here printed http://[[::1]]:8143/.
+		{bind: "[::1]", want: "::1", reachable: true},
+		{bind: "localhost", want: "localhost", reachable: true},
+		{bind: "", want: "127.0.0.1", reachable: true},
+		{bind: "0.0.0.0", want: "127.0.0.1", reachable: true},
+		// An IPv6 wildcard is covered by [::1], not by 127.0.0.1: the socket
+		// may be v6-only, and then nothing answers on IPv4 loopback.
+		{bind: "::", want: "::1", reachable: true},
+		{bind: "[::]", want: "::1", reachable: true},
+		// Serves the control plane nowhere.
+		{bind: "192.168.1.10", reachable: false},
+		{bind: "10.0.0.5", reachable: false},
+		{bind: "not-an-address", reachable: false},
+	} {
+		got, reachable := controlPlaneHost(tc.bind)
+		if reachable != tc.reachable {
+			t.Errorf("controlPlaneHost(%q) reachable = %v, want %v", tc.bind, reachable, tc.reachable)
+			continue
+		}
+		if tc.reachable && got != tc.want {
+			t.Errorf("controlPlaneHost(%q) = %q, want %q", tc.bind, got, tc.want)
+		}
+	}
+}
+
+// And the mapping must correspond to a socket that really answers. This binds
+// for real and asks the control plane, rather than trusting the string.
+//
+// Only the bind shapes a test can portably create are exercised: 127.0.0.1 and
+// the IPv4 wildcard. A specific non-loopback bind cannot be simulated here —
+// every 127.0.0.0/8 address is loopback — which is why the case above is
+// asserted as "advertise nothing" rather than as a live 403.
+func TestAdvertisedControlPlaneURLAnswers(t *testing.T) {
+	for _, bind := range []string{"127.0.0.1", "0.0.0.0"} {
+		t.Run(bind, func(t *testing.T) {
+			host, reachable := controlPlaneHost(bind)
+			if !reachable {
+				t.Fatalf("controlPlaneHost(%q) says unreachable; this test assumes it is", bind)
+			}
+			ln, err := net.Listen("tcp", net.JoinHostPort(bind, "0"))
+			if err != nil {
+				t.Skipf("cannot bind %s here: %v", bind, err)
+			}
+			defer ln.Close()
+			_, port, err := net.SplitHostPort(ln.Addr().String())
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			// A stand-in for the control plane with the same loopback rule the
+			// real guard applies to the remote address.
+			srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				ip, _, err := net.SplitHostPort(r.RemoteAddr)
+				if err != nil || !net.ParseIP(ip).IsLoopback() {
+					http.Error(w, "control plane is localhost-only", http.StatusForbidden)
+					return
+				}
+				w.WriteHeader(http.StatusOK)
+			})}
+			go srv.Serve(ln)
+			defer srv.Close()
+
+			url := "http://" + net.JoinHostPort(strings.Trim(host, "[]"), port) + "/_torana/"
+			resp, err := (&http.Client{Timeout: 5 * time.Second}).Get(url)
+			if err != nil {
+				t.Fatalf("the advertised control-plane URL %s does not answer: %v", url, err)
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != http.StatusOK {
+				t.Errorf("the advertised control-plane URL %s answered %d; an operator "+
+					"following the banner would be refused", url, resp.StatusCode)
+			}
+		})
 	}
 }
