@@ -15,9 +15,26 @@
         "mode": "caller"
       }
     },
+    "openai": {
+      "url": "https://api.openai.com",
+      "format": "openai",
+      "auth": {
+        "mode": "caller"
+      }
+    },
+    "anthropic": {
+      "url": "https://api.anthropic.com",
+      "format": "anthropic",
+      "auth": {
+        "mode": "caller"
+      }
+    },
     "gemini": {
       "url": "https://generativelanguage.googleapis.com",
-      "format": "gemini"
+      "format": "gemini",
+      "auth": {
+        "mode": "caller"
+      }
     }
   },
   "plugins": {
