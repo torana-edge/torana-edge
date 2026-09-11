@@ -73,10 +73,10 @@ func validateOutboundPolicy() error {
 
 // usage documents the commands and every environment variable Torana reads.
 //
-// Both `torana --help` and `torana version` used to exit as unknown commands,
-// which is the first thing anyone types. The environment table matters as much,
-// because until now the only way to learn that TORANA_BIND or TORANA_DATA_DIR
-// existed was to read main().
+// It is the whole discoverable surface of the binary: without the environment
+// table, the only way to learn that TORANA_BIND or TORANA_DATA_DIR exists is to
+// read main(). TestREADMEEnvironmentTableMatchesUsage and
+// TestUsageDocumentsEveryEnvironmentVariable keep it complete.
 func usage(w io.Writer) {
 	fmt.Fprint(w, `torana — a local-first LLM reverse proxy for AI coding agents
 

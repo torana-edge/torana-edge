@@ -82,8 +82,8 @@ func InitOTel(ctx context.Context) (func(context.Context) error, error) {
 // single purpose of deciding whether to build an exporter; the exporter then
 // reads the same variables itself to decide where and how to connect.
 //
-// The signal-specific variable used to be ignored here, so an operator who
-// configured ONLY OTEL_EXPORTER_OTLP_METRICS_ENDPOINT got no telemetry and no
+// Reading only the generic variable would leave an operator who configured
+// ONLY OTEL_EXPORTER_OTLP_METRICS_ENDPOINT with no telemetry and no
 // explanation.
 func otlpMetricsEndpoint() string {
 	if v := strings.TrimSpace(os.Getenv("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT")); v != "" {

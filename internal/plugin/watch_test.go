@@ -11,8 +11,8 @@ import (
 )
 
 // TestReloadPipeline_ReflectsDiskState deterministically covers the reload
-// machinery that #140 fixed but left untested — WITHOUT depending on fsnotify
-// event delivery (which is unreliable on CI filesystems). reloadPipeline is
+// machinery WITHOUT depending on fsnotify event delivery (which is unreliable
+// on CI filesystems). reloadPipeline is
 // exactly what WatchPlugins' debounced timer calls on every change, so driving
 // it directly with fresh config + a fresh runtime proves:
 //   - a reload reflects the CURRENT on-disk config (the "live config" fix), and

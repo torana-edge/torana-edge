@@ -74,8 +74,7 @@ prefix rewrite is required. Do not enable it for source reads or exact records.
 Keep source-reading tools `exact`: merely making their output recoverable does
 not bound the number or cost of recovery calls an agent may make. The `source`
 spelling is accepted for configuration compatibility, but currently behaves as
-`exact` while recovery economics and loop detection are investigated in issue
-#178.
+`exact` while recovery economics and loop detection remain unresolved.
 
 ## Model compaction economics
 

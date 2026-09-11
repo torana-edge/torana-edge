@@ -3,8 +3,8 @@
 // results). The local implementation combines TTL expiry with entry/byte-bounded
 // LRU eviction; Redis uses the same Store interface and server-side eviction.
 //
-// Resurrected from the pre-WASM-migration intent cache (a2ca3e3) that fixed
-// "intent cache grows forever" (torana-edge#6).
+// Both bounds matter: a cache that only expires by TTL grows without limit
+// under a workload that keeps writing new keys.
 package cache
 
 import (
