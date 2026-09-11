@@ -94,9 +94,10 @@ func validateMemberKey(key string) error {
 // it — so validating through validateObject re-validated the result AND
 // allocated a second copy of it that the caller immediately threw away.
 //
-// On a 1 MB object that copy was measurable, not theoretical: SetMember ran
-// 7.68 ms and allocated 4.4 MB for a 1 MB result. Coding-agent requests carry
-// hundreds of kilobytes routinely.
+// The copy scales with the object, and coding-agent requests carry hundreds of
+// kilobytes routinely, so a plugin rewriting one member paid for a full extra
+// copy of the whole body per call. BenchmarkSetMember measures it; a number
+// pinned here would be this machine's, and stale.
 func validateObjectShape(raw []byte) error {
 	if len(raw) == 0 {
 		return fmt.Errorf("raw JSON: empty bytes are not a JSON object")
