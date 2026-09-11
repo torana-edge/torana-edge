@@ -472,9 +472,14 @@ func (s *StreamAdapter) SerializeStream(ctx context.Context, w io.Writer, events
 			}
 
 		case ev.FinishReason != "":
-			stopReason := "end_turn"
-			if ev.FinishReason == "tool_calls" {
+			stopReason := ev.FinishReason
+			switch ev.FinishReason {
+			case "stop":
+				stopReason = "end_turn"
+			case "tool_calls":
 				stopReason = "tool_use"
+			case "length":
+				stopReason = "max_tokens"
 			}
 			usageField := ""
 			if pendingUsage != nil {

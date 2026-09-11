@@ -169,8 +169,11 @@ func (rl *RateLimiter) Release(identity string) {
 	// Always release a bucket, including after a live change disables limits:
 	// an in-flight request may still be represented by its active count.
 	rl.mu.Lock()
-	l := rl.getLimiterLocked(hashIdentity(identity))
+	l := rl.limits[hashIdentity(identity)]
 	rl.mu.Unlock()
+	if l == nil {
+		return
+	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.lastSeen = time.Now()

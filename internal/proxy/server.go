@@ -166,6 +166,7 @@ type Server struct {
 	mitmMu                 sync.Mutex
 	listener               net.Listener
 	mitmSrv                *mitm.Server
+	mitmCfg                provider.MITMConfig
 	bindHost               string
 	configPath             string
 	config                 Config
@@ -1160,7 +1161,7 @@ func New(cfg Config) (*Server, error) {
 				// tokens spent. Block wins over respond, checked above.
 				if respond := verdicts.Respond(); respond != nil {
 					if rc, ok := req.Context().Value(routeContextKey{}).(*RouteContext); ok {
-						rc.Block = renderRespond(fmt, chat.Model, respond, chat.Stream)
+						rc.Block = renderRespond(fmt, chat, respond)
 					}
 					rs := reqStateFrom(req.Context())
 					rs.Synthetic = true
@@ -1194,7 +1195,7 @@ func New(cfg Config) (*Server, error) {
 				}
 			}
 			if identity == "" {
-				identity = req.Header.Get("Authorization")
+				identity = reqStateFrom(req.Context()).CallerCredentials.rateIdentity()
 			}
 			rc := req.Context().Value(routeContextKey{}).(*RouteContext)
 			rc.Identity = identity
@@ -1327,7 +1328,8 @@ func New(cfg Config) (*Server, error) {
 		},
 
 		ModifyResponse: func(resp *http.Response) error {
-			if rs := reqStateFrom(resp.Request.Context()); rs != nil {
+			rs := reqStateFrom(resp.Request.Context())
+			if rs != nil {
 				// Complete host-local provider-shaped response (plugin
 				// respond, host input rejection): NOT an upstream response —
 				// record no upstream status and run no response hooks, so a
@@ -1337,6 +1339,12 @@ func New(cfg Config) (*Server, error) {
 					return nil
 				}
 				rs.UpstreamStatus = resp.StatusCode
+			}
+			// Auxiliary provider endpoints are transparent reverse-proxy traffic.
+			// They never entered the inference IR, so neither successful nor error
+			// responses may enter inference hooks or response accounting.
+			if rs == nil || !rs.Intercepted {
+				return nil
 			}
 			// Skip the mutation pipeline for error responses — don't try to
 			// reverse-translate a 4xx/5xx body that isn't a valid chat
@@ -1405,7 +1413,6 @@ func New(cfg Config) (*Server, error) {
 				// opt-in (openai), the frame is dropped here so the client's
 				// stream shape is exactly what it asked for; otherwise it
 				// passes through (and on to plugins) untouched.
-				rs := reqStateFrom(resp.Request.Context())
 				tapDone := make(chan struct{})
 				{
 					in := events
@@ -2700,29 +2707,31 @@ func New(cfg Config) (*Server, error) {
 		metrics.RecordProxyRequest(r.Context(), rs.Model, rs.Provider, tw.status, latencyMS)
 		metrics.RecordTokens(r.Context(), rs.Model, rs.Provider, rs.UsageIn, rs.UsageOut)
 		metrics.RecordCacheTokens(r.Context(), rs.Model, rs.Provider, rs.UsageCacheRead, rs.UsageCacheWrite)
-		// Record a per-request event in the live feed (control-plane dashboard).
-		// Add is O(1) and non-blocking — it never stalls the request goroutine.
+		// Record explicitly intercepted inference requests in the live feed.
+		// Auxiliary provider APIs are transparent and intentionally absent.
 		var invokedPlugins []string
 		if rs.Pipeline != nil {
 			invokedPlugins = rs.Pipeline.InvokedPlugins(rs.ID)
 		}
-		s.feed.Add(metrics.RequestEvent{
-			Timestamp:        rs.Start.UTC().Format(time.RFC3339Nano),
-			Provider:         rs.Provider,
-			RequestedModel:   rs.Model,
-			ReportedModel:    rs.ReportedModel,
-			Status:           tw.status,
-			LatencyMS:        latencyMS,
-			TokensIn:         int64(rs.UsageIn),
-			TokensOut:        int64(rs.UsageOut),
-			CacheReadTokens:  int64(rs.UsageCacheRead),
-			CacheWriteTokens: int64(rs.UsageCacheWrite),
-			BytesIn:          tr.bytesRead,
-			BytesOut:         tw.bytesWritten,
-			Verdict:          rs.Verdict,
-			PluginFailure:    rs.PluginFailure,
-			Plugins:          invokedPlugins,
-		})
+		if rs.Intercepted {
+			s.feed.Add(metrics.RequestEvent{
+				Timestamp:        rs.Start.UTC().Format(time.RFC3339Nano),
+				Provider:         rs.Provider,
+				RequestedModel:   rs.Model,
+				ReportedModel:    rs.ReportedModel,
+				Status:           tw.status,
+				LatencyMS:        latencyMS,
+				TokensIn:         int64(rs.UsageIn),
+				TokensOut:        int64(rs.UsageOut),
+				CacheReadTokens:  int64(rs.UsageCacheRead),
+				CacheWriteTokens: int64(rs.UsageCacheWrite),
+				BytesIn:          tr.bytesRead,
+				BytesOut:         tw.bytesWritten,
+				Verdict:          rs.Verdict,
+				PluginFailure:    rs.PluginFailure,
+				Plugins:          invokedPlugins,
+			})
+		}
 		if debugEnabled() {
 			log.Printf("[debug] request completed id=%d intercepted=%t provider=%s format=%s model=%s upstream_contacted=%t status=%d latency_ms=%.3f plugins=%v verdict=%s",
 				rs.ID, rs.Intercepted, rs.Provider, rs.InitialFormat, rs.Model, rs.UpstreamStatus != 0, tw.status, latencyMS, invokedPlugins, rs.Verdict)
@@ -3633,6 +3642,7 @@ func (s *Server) applyMITM(cfg provider.MITMConfig) error {
 			_ = s.mitmSrv.Close() // stops the old CONNECT listener; frees the addr
 			s.mitmSrv = nil
 		}
+		s.mitmCfg = provider.MITMConfig{}
 		return nil
 	}
 	// Build (and validate) the new ingress BEFORE tearing down the old one. A
@@ -3642,19 +3652,50 @@ func (s *Server) applyMITM(cfg provider.MITMConfig) error {
 	if err != nil {
 		return err
 	}
-	// Only now that the new server is validated, stop the old one and free its
-	// CONNECT addr so the new bind (which may reuse the same addr) can succeed.
-	if s.mitmSrv != nil {
-		_ = s.mitmSrv.Close()
-		s.mitmSrv = nil
-	}
-	go func() {
-		if err := m.ListenAndServe(); err != nil {
-			log.Printf("mitm ingress stopped: %v", err)
+	old, oldCfg := s.mitmSrv, s.mitmCfg
+	// A different address can be bound before the old listener is touched.
+	if old == nil || oldCfg.Listen != cfg.Listen {
+		ln, err := m.Listen()
+		if err != nil {
+			return err
 		}
-	}()
-	s.mitmSrv = m
+		s.mitmSrv, s.mitmCfg = m, cfg
+		go serveMITM(m, ln)
+		if old != nil {
+			_ = old.Close()
+		}
+		return nil
+	}
+
+	// Reusing the same address necessarily has a short handoff gap. Validate
+	// the candidate first, then close and bind. If the replacement bind fails,
+	// reconstruct the previous server and restore it before returning failure.
+	_ = old.Close()
+	ln, err := m.Listen()
+	if err != nil {
+		rollback, buildErr := mitm.New(oldCfg, s.Handler())
+		if buildErr != nil {
+			s.mitmSrv = nil
+			return errors.Join(err, fmt.Errorf("restore previous MITM config: %w", buildErr))
+		}
+		rollbackLn, bindErr := rollback.Listen()
+		if bindErr != nil {
+			s.mitmSrv = nil
+			return errors.Join(err, fmt.Errorf("restore previous MITM listener: %w", bindErr))
+		}
+		s.mitmSrv, s.mitmCfg = rollback, oldCfg
+		go serveMITM(rollback, rollbackLn)
+		return err
+	}
+	s.mitmSrv, s.mitmCfg = m, cfg
+	go serveMITM(m, ln)
 	return nil
+}
+
+func serveMITM(server *mitm.Server, ln net.Listener) {
+	if err := server.Serve(ln); err != nil && !errors.Is(err, net.ErrClosed) && !errors.Is(err, http.ErrServerClosed) {
+		log.Printf("mitm ingress stopped: %v", err)
+	}
 }
 
 // Start binds the initial listener on bindHost:<current port> and serves it in

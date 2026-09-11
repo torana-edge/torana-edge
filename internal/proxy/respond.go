@@ -14,31 +14,32 @@ import (
 // response shaped like the caller's provider — a complete chat completion
 // body, or an SSE stream when the client requested streaming. The transport
 // returns it verbatim; upstream is never called.
-func renderRespond(f *format.Format, model string, v *wasm.RespondVerdict, stream bool) *BlockResponse {
-	if stream {
+func renderRespond(f *format.Format, chat *engine.ChatRequest, v *wasm.RespondVerdict) *BlockResponse {
+	if chat.Stream {
 		return &BlockResponse{
 			Status:      200,
 			ContentType: streamContentType(f.Name),
-			Body:        renderCompletionStream(f, v.Content),
+			Body:        renderCompletionStream(f, chat, v.Content),
 		}
 	}
 	return &BlockResponse{
 		Status:      200,
 		ContentType: "application/json",
-		Body:        renderCompletionJSON(f.Name, model, v.Content),
+		Body:        renderCompletionJSON(f.Name, chat.Model, v.Content, chat.OpenAIVariant),
 	}
 }
 
 // renderCompletionStream synthesizes a minimal text completion as StreamEvents
 // and lets the format's own serializer produce the wire stream — the same code
 // path real upstream streams take through the proxy.
-func renderCompletionStream(f *format.Format, content string) []byte {
+func renderCompletionStream(f *format.Format, chat *engine.ChatRequest, content string) []byte {
 	ch := make(chan engine.StreamEvent, 2)
 	ch <- engine.StreamEvent{TextDelta: &content}
 	ch <- engine.StreamEvent{FinishReason: "stop"}
 	close(ch)
 	var buf bytes.Buffer
-	_ = f.Stream.SerializeStream(context.Background(), &buf, ch)
+	ctx := context.WithValue(context.Background(), engine.ChatRequestKey, chat)
+	_ = f.Stream.SerializeStream(ctx, &buf, ch)
 	return buf.Bytes()
 }
 
@@ -51,7 +52,7 @@ func streamContentType(string) string {
 // renderCompletionJSON produces a minimal valid non-streaming completion
 // envelope per provider format. Usage is reported as zero — no upstream
 // tokens were spent.
-func renderCompletionJSON(formatName, model, content string) []byte {
+func renderCompletionJSON(formatName, model, content string, openAIVariant engine.OpenAIVariant) []byte {
 	var payload any
 	switch formatName {
 	case "anthropic":
@@ -83,6 +84,20 @@ func renderCompletionJSON(formatName, model, content string) []byte {
 			payload = gen
 		}
 	default: // openai and openai-compatible
+		if openAIVariant == engine.OpenAIResponses {
+			payload = map[string]any{
+				"id":     "resp_torana_direct",
+				"object": "response",
+				"model":  model,
+				"status": "completed",
+				"output": []map[string]any{{
+					"id": "msg_torana_direct", "type": "message", "role": "assistant",
+					"content": []map[string]any{{"type": "output_text", "text": content, "annotations": []any{}}},
+				}},
+				"usage": map[string]any{"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
+			}
+			break
+		}
 		payload = map[string]any{
 			"id":     "chatcmpl-torana-direct",
 			"object": "chat.completion",

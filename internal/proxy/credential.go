@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"slices"
+	"strings"
 
 	"github.com/torana-edge/torana-edge/internal/provider"
 )
@@ -21,6 +22,18 @@ import (
 // on the way through and never put back.
 type callerCredentials struct {
 	headers http.Header
+}
+
+// rateIdentity returns a domain-separated caller credential identity. The
+// header name is part of the identity so equal text used in distinct provider
+// authentication schemes does not collapse into one limiter bucket.
+func (c callerCredentials) rateIdentity() string {
+	for _, name := range []string{"Authorization", "X-Api-Key", "X-Goog-Api-Key", "Api-Key"} {
+		if values := c.headers.Values(name); len(values) > 0 {
+			return http.CanonicalHeaderKey(name) + "\x00" + strings.Join(values, "\x00")
+		}
+	}
+	return ""
 }
 
 // callerForwardedHeaders are the caller's own credentials. They are stripped

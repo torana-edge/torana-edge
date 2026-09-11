@@ -1432,7 +1432,9 @@ func (r *Runtime) LoadPlugin(name string, wasmBytes []byte) (*Plugin, error) {
 	// a plugin that appears loaded and does nothing, with no error anywhere.
 	// Reading it at load means there is no unvalidated state to get wrong;
 	// ValidateHooks then only compares it against the manifest.
-	bitmap, err := supportedHooks(r.ctx, inst.mod)
+	hookCtx, cancelHookDiscovery := context.WithTimeout(r.ctx, r.options.CallTimeout)
+	bitmap, err := supportedHooks(hookCtx, inst.mod)
+	cancelHookDiscovery()
 	if err != nil {
 		instErr := inst.close(r.ctx)
 		compiledErr := compiled.Close(r.ctx)

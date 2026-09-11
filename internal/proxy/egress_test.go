@@ -7,12 +7,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"math"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -343,6 +345,100 @@ func TestEgressTokenBudget(t *testing.T) {
 	}
 	if *calls != 1 {
 		t.Errorf("upstream saw %d calls, want 1 before the token budget bound", *calls)
+	}
+}
+
+func TestEgressBillableTokensDoNotDoubleCountProviderCaches(t *testing.T) {
+	u := &engine.StreamUsage{InputTokens: 100, OutputTokens: 20, CacheReadTokens: 80, CacheWriteTokens: 15}
+	if got := egressBillableTokens("openai", u); got != 120 {
+		t.Fatalf("OpenAI billable tokens = %d, want 120 (cache is a subset of input)", got)
+	}
+	if got := egressBillableTokens("gemini", u); got != 120 {
+		t.Fatalf("Gemini billable tokens = %d, want 120 (cache is a subset of input)", got)
+	}
+	if got := egressBillableTokens("anthropic", u); got != 215 {
+		t.Fatalf("Anthropic billable tokens = %d, want 215 (cache counts are separate)", got)
+	}
+}
+
+func TestConcurrentEgressCannotMultiplyTokenBudgetOvershoot(t *testing.T) {
+	entered := make(chan struct{}, 2)
+	release := make(chan struct{})
+	var hits atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		entered <- struct{}{}
+		<-release
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, `{"choices":[],"usage":{"prompt_tokens":40,"completion_tokens":20}}`)
+	}))
+	defer upstream.Close()
+	srv := newEgressTestServer(t, upstream.URL, provider.EgressBudget{MaxCallsPerMinute: 10, MaxTokensPerHour: 50})
+	payload := egressPayload(t, "oai", "/v1/chat/completions")
+
+	type result struct{ herr *pb.HostError }
+	results := make(chan result, 2)
+	for range 2 {
+		go func() {
+			_, herr := send(t, srv, "warmer", payload)
+			results <- result{herr: herr}
+		}()
+	}
+	<-entered
+	close(release)
+	first, second := <-results, <-results
+	refused := 0
+	for _, got := range []result{first, second} {
+		if got.herr != nil {
+			if got.herr.Code != pb.ErrorCode_ERROR_CODE_UNAVAILABLE {
+				t.Fatalf("refusal = %v, want UNAVAILABLE", got.herr)
+			}
+			refused++
+		}
+	}
+	if refused != 1 || hits.Load() != 1 {
+		t.Fatalf("refused=%d upstream_hits=%d, want one admitted call and one refusal", refused, hits.Load())
+	}
+}
+
+func TestEgressResponsesPathSelectsResponsesWireShape(t *testing.T) {
+	var gotBody []byte
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotBody, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, `{"id":"resp_1","object":"response","output":[]}`)
+	}))
+	defer upstream.Close()
+	srv := newEgressTestServer(t, upstream.URL, provider.EgressBudget{MaxCallsPerMinute: 10})
+	if _, herr := send(t, srv, "warmer", egressPayload(t, "oai", "/v1/responses")); herr != nil {
+		t.Fatal(herr)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(gotBody, &body); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := body["input"]; !ok {
+		t.Fatalf("Responses request missing input: %s", gotBody)
+	}
+	if _, ok := body["messages"]; ok {
+		t.Fatalf("Responses request used Chat Completions shape: %s", gotBody)
+	}
+}
+
+func TestEgressPreservesConfiguredBasePath(t *testing.T) {
+	var gotPath string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, `{"choices":[]}`)
+	}))
+	defer upstream.Close()
+	srv := newEgressTestServer(t, upstream.URL+"/tenant/gateway", provider.EgressBudget{MaxCallsPerMinute: 10})
+	if _, herr := send(t, srv, "warmer", egressPayload(t, "oai", "/v1/chat/completions")); herr != nil {
+		t.Fatal(herr)
+	}
+	if gotPath != "/tenant/gateway/v1/chat/completions" {
+		t.Fatalf("upstream path = %q, want configured base path preserved", gotPath)
 	}
 }
 

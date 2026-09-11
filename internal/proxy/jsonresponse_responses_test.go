@@ -93,6 +93,32 @@ func TestExtractOpenAIResponsesContentIsMutable(t *testing.T) {
 	}
 }
 
+func TestExtractOpenAIResponsesPreservesOrderedWritableBlocks(t *testing.T) {
+	const raw = `{"object":"response","output":[
+      {"type":"message","content":[{"type":"output_text","text":"first"},{"type":"output_text","text":"second"}]},
+      {"type":"function_call","call_id":"c1","name":"read","arguments":"{}"},
+      {"type":"message","content":[{"type":"output_text","text":"third"}]}
+    ]}`
+	body := decode(t, raw)
+	refs := extractOpenAI(body, []byte(raw))
+	if len(refs.blocks) != 4 || refs.blocks[0].text == nil || refs.blocks[1].text == nil ||
+		refs.blocks[2].toolIndex != 0 || refs.blocks[3].text == nil {
+		t.Fatalf("ordered blocks = %+v, want text,text,tool,text", refs.blocks)
+	}
+	refs.blocks[1].text.set("SECOND")
+	refs.blocks[3].text.set("THIRD")
+	out, err := json.Marshal(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(out)
+	for _, want := range []string{`"text":"first"`, `"text":"SECOND"`, `"type":"function_call"`, `"text":"THIRD"`} {
+		if !strings.Contains(got, want) {
+			t.Errorf("writeback missing %s: %s", want, got)
+		}
+	}
+}
+
 // The Chat path must keep working — it is the overwhelmingly common shape, and
 // adding a branch for Responses is exactly the kind of change that quietly
 // reroutes it.

@@ -26,11 +26,13 @@ type sseChunk struct {
 	Error   *sseError      `json:"error,omitempty"`
 
 	// Responses API fields
-	Type     string           `json:"type,omitempty"`
-	ItemID   string           `json:"item_id,omitempty"`
-	Delta    *string          `json:"delta,omitempty"`
-	Item     *responsesItem   `json:"item,omitempty"`
-	Response *responsesObject `json:"response,omitempty"`
+	Type         string           `json:"type,omitempty"`
+	ItemID       string           `json:"item_id,omitempty"`
+	Delta        *string          `json:"delta,omitempty"`
+	Item         *responsesItem   `json:"item,omitempty"`
+	Response     *responsesObject `json:"response,omitempty"`
+	OutputIndex  int              `json:"output_index,omitempty"`
+	ContentIndex int              `json:"content_index,omitempty"`
 }
 
 type responsesItem struct {
@@ -41,6 +43,8 @@ type responsesItem struct {
 }
 
 type responsesObject struct {
+	ID     string         `json:"id,omitempty"`
+	Model  string         `json:"model,omitempty"`
 	Status string         `json:"status,omitempty"`
 	Usage  map[string]any `json:"usage,omitempty"`
 }
@@ -321,6 +325,12 @@ func (s *StreamAdapter) parseStream(body io.Reader, ch chan<- engine.StreamEvent
 
 func (s *StreamAdapter) parseResponsesEvent(chunk sseChunk, ch chan<- engine.StreamEvent, itemIDToIndex map[string]responsesToolCallState, nextIndex *int) error {
 	switch chunk.Type {
+	case "response.created":
+		if chunk.Response != nil {
+			ch <- engine.StreamEvent{MessageStart: &engine.StreamMessageStart{
+				Role: "assistant", ID: chunk.Response.ID, Model: chunk.Response.Model,
+			}}
+		}
 	case "response.output_text.delta":
 		if chunk.Delta != nil && *chunk.Delta != "" {
 			ch <- engine.StreamEvent{
@@ -398,13 +408,13 @@ func (s *StreamAdapter) parseResponsesEvent(chunk sseChunk, ch chan<- engine.Str
 			}
 		}
 
-	case "response.completed":
+	case "response.completed", "response.incomplete":
 		if chunk.Response != nil {
-			if chunk.Response.Status == "completed" {
-				ch <- engine.StreamEvent{
-					FinishReason: "stop",
-				}
+			finish := "stop"
+			if chunk.Type == "response.incomplete" || chunk.Response.Status == "incomplete" {
+				finish = "length"
 			}
+			ch <- engine.StreamEvent{FinishReason: finish}
 			if u := ReadUsage(chunk.Response.Usage); u != nil {
 				ch <- engine.StreamEvent{Usage: u}
 			}
@@ -527,12 +537,84 @@ func (s *StreamAdapter) serializeChatStream(ctx context.Context, w io.Writer, ev
 
 func (s *StreamAdapter) serializeResponsesStream(ctx context.Context, w io.Writer, events <-chan engine.StreamEvent) error {
 	type responseToolState struct {
-		id, name string
-		kind     engine.ToolInvocationKind
-		payload  strings.Builder
+		id, name    string
+		kind        engine.ToolInvocationKind
+		payload     strings.Builder
+		outputIndex int
+		item        map[string]any
 	}
 	toolCalls := make(map[int]*responseToolState)
 	blocks := &blockTopology{prefix: "openai"}
+	responseID := "resp_torana"
+	model := ""
+	started := false
+	finishReason := ""
+	var usage *engine.StreamUsage
+	var outputs []any
+	textStarted := false
+	textClosed := false
+	textIndex := -1
+	textID := ""
+	var text strings.Builder
+
+	emit := func(kind string, payload map[string]any) error {
+		payload["type"] = kind
+		b, err := json.Marshal(payload)
+		if err != nil {
+			return err
+		}
+		_, err = fmt.Fprintf(w, "event: %s\ndata: %s\n\n", kind, b)
+		return err
+	}
+	ensureStarted := func() error {
+		if started {
+			return nil
+		}
+		started = true
+		return emit("response.created", map[string]any{"response": map[string]any{
+			"id": responseID, "object": "response", "model": model,
+			"status": "in_progress", "output": []any{},
+		}})
+	}
+	ensureText := func() error {
+		if textStarted && !textClosed {
+			return nil
+		}
+		if err := ensureStarted(); err != nil {
+			return err
+		}
+		textStarted = true
+		textClosed = false
+		text.Reset()
+		textIndex = len(outputs)
+		textID = fmt.Sprintf("msg_%d", textIndex)
+		item := map[string]any{"id": textID, "type": "message", "role": "assistant", "content": []any{}}
+		outputs = append(outputs, item)
+		if err := emit("response.output_item.added", map[string]any{"output_index": textIndex, "item": item}); err != nil {
+			return err
+		}
+		return emit("response.content_part.added", map[string]any{
+			"output_index": textIndex, "content_index": 0, "item_id": textID,
+			"part": map[string]any{"type": "output_text", "text": "", "annotations": []any{}},
+		})
+	}
+	closeText := func() error {
+		if !textStarted || textClosed {
+			return nil
+		}
+		textClosed = true
+		value := text.String()
+		part := map[string]any{"type": "output_text", "text": value, "annotations": []any{}}
+		item := map[string]any{"id": textID, "type": "message", "role": "assistant", "content": []any{part}}
+		outputs[textIndex] = item
+		if err := emit("response.output_text.done", map[string]any{"output_index": textIndex, "content_index": 0, "item_id": textID, "text": value}); err != nil {
+			return err
+		}
+		if err := emit("response.content_part.done", map[string]any{"output_index": textIndex, "content_index": 0, "item_id": textID, "part": part}); err != nil {
+			return err
+		}
+		return emit("response.output_item.done", map[string]any{"output_index": textIndex, "item": item})
+	}
 
 	for {
 		var evt engine.StreamEvent
@@ -546,6 +628,14 @@ func (s *StreamAdapter) serializeResponsesStream(ctx context.Context, w io.Write
 			break
 		}
 		switch {
+		case evt.MessageStart != nil:
+			if evt.MessageStart.ID != "" {
+				responseID = evt.MessageStart.ID
+			}
+			model = evt.MessageStart.Model
+			if err := ensureStarted(); err != nil {
+				return err
+			}
 		case evt.BlockStart != nil:
 			// Provider blocks have no representation on the Responses wire:
 			// they error rather than vanish. Canonical text/thinking blocks
@@ -561,8 +651,14 @@ func (s *StreamAdapter) serializeResponsesStream(ctx context.Context, w io.Write
 			}
 
 		case evt.BlockStop != nil:
-			if _, err := blocks.stop(evt.BlockStop.Index); err != nil {
+			kind, err := blocks.stop(evt.BlockStop.Index)
+			if err != nil {
 				return err
+			}
+			if kind == engine.BlockKindText || kind == engine.BlockKindThinking {
+				if err := closeText(); err != nil {
+					return err
+				}
 			}
 
 		case evt.Error != nil:
@@ -579,44 +675,62 @@ func (s *StreamAdapter) serializeResponsesStream(ctx context.Context, w io.Write
 			return fmt.Errorf("openai responses stream error: %s", evt.Error.Message)
 
 		case evt.TextDelta != nil:
-			payload := map[string]any{
-				"type":  "response.output_text.delta",
-				"delta": *evt.TextDelta,
+			if err := ensureText(); err != nil {
+				return err
 			}
-			b, _ := json.Marshal(payload)
-			if _, err := fmt.Fprintf(w, "event: response.output_text.delta\ndata: %s\n\n", string(b)); err != nil {
+			text.WriteString(*evt.TextDelta)
+			if err := emit("response.output_text.delta", map[string]any{
+				"output_index": textIndex, "content_index": 0, "item_id": textID, "delta": *evt.TextDelta,
+			}); err != nil {
 				return err
 			}
 
 		case evt.ThinkingDelta != nil:
-			payload := map[string]any{
-				"type":  "response.output_text.delta",
-				"delta": *evt.ThinkingDelta,
+			// The Responses wire has no public thinking-content stream arm. Keep
+			// the established lowering to assistant output text so canonical
+			// thinking blocks remain serializable across protocol boundaries.
+			if err := ensureText(); err != nil {
+				return err
 			}
-			b, _ := json.Marshal(payload)
-			if _, err := fmt.Fprintf(w, "event: response.output_text.delta\ndata: %s\n\n", string(b)); err != nil {
+			text.WriteString(*evt.ThinkingDelta)
+			if err := emit("response.output_text.delta", map[string]any{
+				"output_index": textIndex, "content_index": 0, "item_id": textID, "delta": *evt.ThinkingDelta,
+			}); err != nil {
 				return err
 			}
 
 		case evt.ToolCallStart != nil:
+			if err := closeText(); err != nil {
+				return err
+			}
+			if err := ensureStarted(); err != nil {
+				return err
+			}
 			tc := evt.ToolCallStart
 			toolType := "function_call"
 			if tc.InvocationKind == engine.ToolInvocationFreeform {
 				toolType = "custom_tool_call"
 			}
-			toolCalls[tc.Index] = &responseToolState{id: tc.ID, name: tc.Name, kind: tc.InvocationKind}
+			outputIndex := len(outputs)
+			itemID := "item_" + tc.ID
+			if tc.ID == "" {
+				itemID = fmt.Sprintf("item_%d", outputIndex)
+			}
+			item := map[string]any{"id": itemID, "type": toolType, "name": tc.Name, "call_id": tc.ID}
+			toolCalls[tc.Index] = &responseToolState{id: tc.ID, name: tc.Name, kind: tc.InvocationKind, outputIndex: outputIndex, item: item}
+			outputs = append(outputs, item)
 
 			payload := map[string]any{
 				"type": "response.output_item.added",
 				"item": map[string]any{
-					"id":      "item_" + tc.ID,
+					"id":      itemID,
 					"type":    toolType,
 					"name":    tc.Name,
 					"call_id": tc.ID,
 				},
+				"output_index": outputIndex,
 			}
-			b, _ := json.Marshal(payload)
-			if _, err := fmt.Fprintf(w, "event: response.output_item.added\ndata: %s\n\n", string(b)); err != nil {
+			if err := emit("response.output_item.added", payload); err != nil {
 				return err
 			}
 
@@ -640,12 +754,11 @@ func (s *StreamAdapter) serializeResponsesStream(ctx context.Context, w io.Write
 			state.payload.WriteString(fragment)
 
 			payload := map[string]any{
-				"type":    eventType,
-				"item_id": "item_" + state.id,
-				"delta":   fragment,
+				"item_id":      state.item["id"],
+				"output_index": state.outputIndex,
+				"delta":        fragment,
 			}
-			b, _ := json.Marshal(payload)
-			if _, err := fmt.Fprintf(w, "event: %s\ndata: %s\n\n", eventType, string(b)); err != nil {
+			if err := emit(eventType, payload); err != nil {
 				return err
 			}
 
@@ -666,58 +779,28 @@ func (s *StreamAdapter) serializeResponsesStream(ctx context.Context, w io.Write
 			}
 
 			payloadDone := map[string]any{
-				"type":    doneType,
-				"item_id": "item_" + state.id,
-				doneField: assembled,
+				"item_id":      state.item["id"],
+				"output_index": state.outputIndex,
+				doneField:      assembled,
 			}
-			bDone, _ := json.Marshal(payloadDone)
-			if _, err := fmt.Fprintf(w, "event: %s\ndata: %s\n\n", doneType, string(bDone)); err != nil {
+			if err := emit(doneType, payloadDone); err != nil {
 				return err
 			}
 
-			payloadItem := map[string]any{
-				"type": "response.output_item.done",
-				"item": map[string]any{
-					"id":      "item_" + state.id,
-					"type":    itemType,
-					"call_id": state.id,
-					"name":    state.name,
-					doneField: assembled,
-				},
-			}
-			bItem, _ := json.Marshal(payloadItem)
-			if _, err := fmt.Fprintf(w, "event: response.output_item.done\ndata: %s\n\n", string(bItem)); err != nil {
+			state.item["type"], state.item["call_id"], state.item["name"] = itemType, state.id, state.name
+			state.item[doneField] = assembled
+			outputs[state.outputIndex] = state.item
+			if err := emit("response.output_item.done", map[string]any{"output_index": state.outputIndex, "item": state.item}); err != nil {
 				return err
 			}
+			delete(toolCalls, tce.Index)
 
 		case evt.FinishReason != "":
-			payload := map[string]any{
-				"type": "response.completed",
-				"response": map[string]any{
-					"status": "completed",
-				},
-			}
-			b, _ := json.Marshal(payload)
-			if _, err := fmt.Fprintf(w, "event: response.completed\ndata: %s\n\n", string(b)); err != nil {
-				return err
-			}
+			finishReason = evt.FinishReason
 
 		case evt.Usage != nil:
-			payload := map[string]any{
-				"type": "response.completed",
-				"response": map[string]any{
-					"status": "completed",
-					"usage": map[string]any{
-						"prompt_tokens":     evt.Usage.InputTokens,
-						"completion_tokens": evt.Usage.OutputTokens,
-						"total_tokens":      evt.Usage.InputTokens + evt.Usage.OutputTokens,
-					},
-				},
-			}
-			b, _ := json.Marshal(payload)
-			if _, err := fmt.Fprintf(w, "event: response.completed\ndata: %s\n\n", string(b)); err != nil {
-				return err
-			}
+			copyUsage := *evt.Usage
+			usage = &copyUsage
 		}
 	}
 	// See serializeChatStream: closure is not proof of normal completion when
@@ -725,10 +808,30 @@ func (s *StreamAdapter) serializeResponsesStream(ctx context.Context, w io.Write
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if _, err := fmt.Fprint(w, "data: [DONE]\n\n"); err != nil {
+	if len(toolCalls) != 0 {
+		return fmt.Errorf("openai responses: stream ended with an open tool call")
+	}
+	if err := closeText(); err != nil {
 		return err
 	}
-	return nil
+	if finishReason == "" {
+		return nil
+	}
+	if err := ensureStarted(); err != nil {
+		return err
+	}
+	status, eventType := "completed", "response.completed"
+	if finishReason == "length" {
+		status, eventType = "incomplete", "response.incomplete"
+	}
+	response := map[string]any{"id": responseID, "object": "response", "model": model, "status": status, "output": outputs}
+	if usage != nil {
+		response["usage"] = map[string]any{
+			"input_tokens": usage.InputTokens, "output_tokens": usage.OutputTokens,
+			"total_tokens": usage.InputTokens + usage.OutputTokens,
+		}
+	}
+	return emit(eventType, map[string]any{"response": response})
 }
 
 func serializeEvent(evt engine.StreamEvent, blocks *blockTopology) (string, error) {

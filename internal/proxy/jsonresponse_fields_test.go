@@ -58,13 +58,11 @@ func TestObservedResponseFactsAreExtractedPerFormat(t *testing.T) {
 	}
 }
 
-// A provider signature must not survive a change to the content it covers —
-// asserted THROUGH runJSONResponseHooks, with a real mutating plugin.
-//
-// The previous version of this test called setArgs and clearSignature itself,
-// so it would have passed even if the host never cleared anything. It tested
-// the helpers, not the behaviour.
-func TestPipelineClearsSignatureWhenAStreamHookRewritesArguments(t *testing.T) {
+// A stream hook cannot rewrite content covered by a provider signature and
+// leave the old signature attached. JSON responses use the same verified
+// stream transaction as live SSE, so the stale provenance is rejected before
+// the rewritten body is applied.
+func TestPipelineRejectsStaleSignatureWhenAStreamHookRewritesArguments(t *testing.T) {
 	requireWASM(t, fixturesDir+"/test-tool-rewriter/plugin.wasm")
 	pp := newProxyTestPipeline(t, []string{"test-tool-rewriter"})
 
@@ -74,15 +72,8 @@ func TestPipelineClearsSignatureWhenAStreamHookRewritesArguments(t *testing.T) {
 
 	out, err := runJSONResponseHooks(responseHookContext(1), pp, 1, "gemini",
 		&engine.ChatRequest{Model: "gemini-x"}, []byte(body))
-	if err != nil {
-		t.Fatalf("hooks: %v", err)
-	}
-	if !strings.Contains(string(out), "rewritten-by-plugin") {
-		t.Fatalf("the plugin did not rewrite the arguments, so this test proves "+
-			"nothing about signature clearing: %s", out)
-	}
-	if strings.Contains(string(out), "SIG_CALL_1") {
-		t.Fatalf("the provider signature survived a STREAM-hook rewrite: %s", out)
+	if err == nil || !strings.Contains(err.Error(), "signature stale") {
+		t.Fatalf("signed argument rewrite was not rejected as stale: out=%s err=%v", out, err)
 	}
 }
 

@@ -403,9 +403,17 @@ func (a *Adapter) Unmarshal(rawBody []byte) (*engine.ChatRequest, error) {
 	// stay intact (tool results ride their user message at their exact
 	// position; there is no synthetic RoleTool split).
 	for _, am := range ar.Messages {
+		rawBlocks, rerr := rawArrayElements(am.ContentRaw)
+		if rerr != nil {
+			return nil, fmt.Errorf("message content raw elements: %w", rerr)
+		}
 		msg := engine.Message{Role: mapRole(am.Role)}
 		for i, block := range am.Content {
-			blk, cerr := anthropicBlockToEngine(block, i, am.ContentRaw)
+			var blockRaw json.RawMessage
+			if i < len(rawBlocks) {
+				blockRaw = rawBlocks[i]
+			}
+			blk, cerr := anthropicBlockToEngine(block, blockRaw)
 			if cerr != nil {
 				return nil, cerr
 			}
@@ -467,7 +475,7 @@ const (
 // body. Tool-result content arrays become nested tool-result content; image
 // and unknown arms become Unknown blocks with the discriminant ("type") and
 // any cache member removed from the payload.
-func anthropicBlockToEngine(block contentBlock, i int, contentRaw json.RawMessage) (engine.Block, error) {
+func anthropicBlockToEngine(block contentBlock, blockRaw json.RawMessage) (engine.Block, error) {
 	switch block.Type {
 	case anthropicText:
 		return engine.Block{Text: &engine.TextBlock{Text: block.Text}}, nil
@@ -494,7 +502,7 @@ func anthropicBlockToEngine(block contentBlock, i int, contentRaw json.RawMessag
 			// block's raw "content" member so lexemes survive the
 			// projection (a map re-encode would lose them).
 			var rawNested []json.RawMessage
-			if blockRaw := rawElement(contentRaw, i); blockRaw != nil {
+			if blockRaw != nil {
 				var rawTR struct {
 					Content json.RawMessage `json:"content"`
 				}
@@ -523,8 +531,7 @@ func anthropicBlockToEngine(block contentBlock, i int, contentRaw json.RawMessag
 		if kind == "" {
 			kind = "unknown"
 		}
-		raw := rawElement(contentRaw, i)
-		payload, err := stripBlockFacts(raw, "type", "cache_control")
+		payload, err := stripBlockFacts(blockRaw, "type", "cache_control")
 		if err != nil {
 			return engine.Block{}, fmt.Errorf("block %q payload: %w", kind, err)
 		}
@@ -617,16 +624,18 @@ func anthropicNestedElement(p any, rawNested []json.RawMessage, j int) (engine.T
 	return engine.ToolResultContentBlock{Unknown: &engine.UnknownBlock{Kind: kind, Payload: payload}}, nil
 }
 
-// rawElement returns element i of a raw JSON array, or nil.
-func rawElement(raw json.RawMessage, i int) json.RawMessage {
+// rawArrayElements decodes an enclosing content array once. Callers then
+// index the raw elements alongside the already-decoded typed blocks instead
+// of reparsing the complete array for every structured block.
+func rawArrayElements(raw json.RawMessage) ([]json.RawMessage, error) {
 	if len(raw) == 0 || raw[0] != '[' {
-		return nil
+		return nil, nil
 	}
-	var els []json.RawMessage
-	if json.Unmarshal(raw, &els) != nil || i < 0 || i >= len(els) {
-		return nil
+	var elems []json.RawMessage
+	if err := json.Unmarshal(raw, &elems); err != nil {
+		return nil, err
 	}
-	return els[i]
+	return elems, nil
 }
 
 // stripBlockFacts removes the canonical discriminant and cache members from

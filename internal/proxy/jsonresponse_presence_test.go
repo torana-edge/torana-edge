@@ -442,7 +442,7 @@ func TestCandidate0OnlyGemini(t *testing.T) {
 // ---------------------------------------------------------------------------
 // Round 11 finding 1: the gemini CONTENT slot must come from candidate 0 —
 // the selected response — exactly like tool calls. A later candidate is an
-// alternative, so its text must be neither exposed as ResponseMessage.content
+// alternative, so its text must be neither exposed as a ResponseMessage text block
 // nor mutated on the wire. rawSlots still cover every candidate (args byte
 // preservation is unaffected).
 // ---------------------------------------------------------------------------
@@ -481,7 +481,7 @@ func TestGeminiContentSlotCandidateZeroOnly(t *testing.T) {
 }
 
 // Hook level: a content-mutating plugin must neither see candidate-1 text as
-// ResponseMessage.content nor change candidate 1 on the wire.
+// a ResponseMessage text block nor change candidate 1 on the wire.
 func TestGeminiAlternativeTextNotMutated(t *testing.T) {
 	requireWASM(t, fixturesDir+"/test-observer/plugin.wasm")
 	pp := newProxyTestPipeline(t, []string{"test-observer"})

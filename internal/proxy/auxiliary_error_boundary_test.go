@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -80,16 +81,42 @@ func TestAuxiliaryErrorResponsesStayOutOfThePluginPipeline(t *testing.T) {
 		t.Errorf("body = %q, want the upstream's %q", body, upstreamBody)
 	}
 
-	// And no plugin may have been invoked. This is the operator-visible
-	// signal: the control-plane feed names the plugins that fired, so a
-	// plugin listed here is a plugin the operator is told ran.
-	events := srv.feed.Snapshot()
-	if len(events) == 0 {
-		t.Fatal("no request reached the feed, so this check proves nothing")
+	// And it must not have entered inference accounting at all. Auxiliary
+	// traffic is transparent reverse-proxy traffic: it never reached the IR,
+	// so it has no place in the live feed an operator reads as the inference
+	// record. An earlier version of this check asserted the weaker shape — a
+	// feed entry listing no plugins — which a blank, unattributable row would
+	// have satisfied.
+	for _, ev := range srv.feed.Snapshot() {
+		t.Errorf("auxiliary %d produced a feed entry (provider=%q model=%q plugins=%v); "+
+			"docs/HARNESS_COMPATIBILITY.md promises non-inference traffic stays out "+
+			"of the pipeline", resp.StatusCode, ev.Provider, ev.RequestedModel, ev.Plugins)
 	}
-	if got := events[0].Plugins; len(got) != 0 {
-		t.Errorf("auxiliary %d ran plugins %v; docs/HARNESS_COMPATIBILITY.md promises "+
-			"neither request nor response WASM hooks run on non-inference traffic",
-			resp.StatusCode, got)
+
+	// Positive control, so an empty feed cannot pass this test vacuously: the
+	// SAME upstream, the SAME 401, on a path that IS inference. That one must
+	// be recorded, and must name the plugin that ran on it.
+	infReq, err := http.NewRequest(http.MethodPost,
+		"http://"+ln.Addr().String()+"/provider/test/v1/chat/completions",
+		strings.NewReader(`{"model":"m","messages":[{"role":"user","content":"hi"}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	infReq.Header.Set("Content-Type", "application/json")
+	infResp, err := client.Do(infReq)
+	if err != nil {
+		t.Fatalf("POST chat/completions: %v", err)
+	}
+	infResp.Body.Close()
+
+	events := srv.feed.Snapshot()
+	if len(events) != 1 {
+		t.Fatalf("the feed holds %d entries after one auxiliary and one inference "+
+			"request, want exactly the inference one; this check cannot tell a real "+
+			"bypass from a feed that never records anything", len(events))
+	}
+	if len(events[0].Plugins) == 0 {
+		t.Error("the inference request recorded no plugins, so the pipeline was not " +
+			"running and the auxiliary assertion above proves nothing")
 	}
 }

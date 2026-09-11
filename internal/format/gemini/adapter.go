@@ -329,11 +329,16 @@ func (a *Adapter) Unmarshal(rawBody []byte) (*engine.ChatRequest, error) {
 			}
 		}
 	} else {
-		// Bare Gemini: preserve unknown top-level fields deterministically
-		// (original body minus the canonical fields, fixed delete order).
+		// Bare Gemini: preserve unknown top-level fields and unknown
+		// generationConfig siblings. Canonical generation fields are projected
+		// into ChatRequest and removed from the extension copy so marshal can
+		// overlay the possibly-mutated canonical values without collisions.
 		ext, xerr := engine.ParseOptionalJSONObjectExcluding(rawBody,
-			"systemInstruction", "contents", "tools", "generationConfig", "safetySettings")
+			"systemInstruction", "contents", "tools", "safetySettings")
 		if xerr != nil {
+			return nil, fmt.Errorf("gemini provider extensions: %w", xerr)
+		}
+		if ext, xerr = stripGenerationCanonicalMembers(ext); xerr != nil {
 			return nil, fmt.Errorf("gemini provider extensions: %w", xerr)
 		}
 		if ext, xerr = format.NormalizeExtensionObject(ext); xerr != nil {
@@ -684,14 +689,6 @@ func (a *Adapter) Marshal(chat *engine.ChatRequest) ([]byte, error) {
 	}
 
 	gReq := geminiRequest{SystemInstruction: sys, Contents: contents, Tools: tools}
-	if chat.MaxTokens != nil || chat.Temperature != nil || chat.TopP != nil || len(chat.StopSequences) > 0 {
-		gReq.GenerationConfig = &geminiGenerationConfig{
-			MaxOutputTokens: chat.MaxTokens,
-			Temperature:     chat.Temperature,
-			TopP:            chat.TopP,
-			StopSequences:   chat.StopSequences,
-		}
-	}
 	if !chat.SafetySettings.IsAbsent() {
 		var ss []any
 		if err := json.Unmarshal(chat.SafetySettings.Bytes(), &ss); err != nil {
@@ -704,12 +701,16 @@ func (a *Adapter) Marshal(chat *engine.ChatRequest) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	if !chat.ProviderExtensions.IsAbsent() {
+	exts, err := rebuildGenerationConfig(chat, chat.ProviderExtensions)
+	if err != nil {
+		return nil, fmt.Errorf("gemini provider extensions: %w", err)
+	}
+	if !exts.IsAbsent() {
 		var outMap map[string]json.RawMessage
 		if err := json.Unmarshal(b, &outMap); err != nil {
 			return nil, err
 		}
-		if err := format.MergeRawMembers(outMap, chat.ProviderExtensions.Bytes()); err != nil {
+		if err := format.MergeRawMembers(outMap, exts.Bytes()); err != nil {
 			return nil, fmt.Errorf("gemini provider extensions merge: %w", err)
 		}
 		return json.Marshal(outMap)

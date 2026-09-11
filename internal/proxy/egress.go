@@ -62,6 +62,7 @@ type egressMeter struct {
 	mu     sync.Mutex
 	calls  map[string][]time.Time // plugin → call timestamps in the last minute
 	tokens map[string][]tokenSpend
+	serial map[string]*sync.Mutex // token-budgeted requests, keyed by plugin
 	now    func() time.Time
 }
 
@@ -74,6 +75,7 @@ func newEgressMeter() *egressMeter {
 	return &egressMeter{
 		calls:  make(map[string][]time.Time),
 		tokens: make(map[string][]tokenSpend),
+		serial: make(map[string]*sync.Mutex),
 		now:    time.Now,
 	}
 }
@@ -139,10 +141,31 @@ func (m *egressMeter) authorize(plugin string, budget provider.EgressBudget) err
 			return fmt.Errorf("%w: plugin %q has used its %d tokens/hour budget",
 				ErrEgressTokenExhausted, plugin, budget.MaxTokensPerHour)
 		}
+	} else {
+		// Unlimited token budgets need no rolling token history.
+		delete(m.tokens, plugin)
 	}
 
 	m.calls[plugin] = append(m.calls[plugin], now)
 	return nil
+}
+
+// lockTokenBudget serializes admission and post-response accounting when a
+// token ceiling is enabled. Without this, many concurrent calls can all pass
+// the same pre-spend check and collectively overshoot by many calls.
+func (m *egressMeter) lockTokenBudget(plugin string, budget provider.EgressBudget) func() {
+	if budget.MaxTokensPerHour <= 0 {
+		return func() {}
+	}
+	m.mu.Lock()
+	lock := m.serial[plugin]
+	if lock == nil {
+		lock = &sync.Mutex{}
+		m.serial[plugin] = lock
+	}
+	m.mu.Unlock()
+	lock.Lock()
+	return lock.Unlock
 }
 
 // classifyEgressRefusal maps an authorize failure to the ErrorCode a plugin
@@ -273,6 +296,15 @@ func (s *Server) sendPluginRequestWithBudget(ctx context.Context, pluginName, pa
 	// Proxy-internal metadata must not travel upstream, and a plugin has no
 	// business setting it on an outbound request anyway.
 	chat.ToranaMeta = engine.OptionalJSONObject{}
+	// OpenAIVariant is intentionally host-only and is not serialized in the
+	// plugin ABI. Recover the provider wire topology from the host-validated
+	// egress path before asking the OpenAI adapter to marshal it.
+	if prov.Format == "openai" {
+		pathOnly := strings.SplitN(req.Path, "?", 2)[0]
+		if strings.HasSuffix(pathOnly, "/responses") {
+			chat.OpenAIVariant = engine.OpenAIResponses
+		}
+	}
 
 	f := format.Lookup(prov.Format)
 	if f == nil || f.Request == nil {
@@ -317,7 +349,12 @@ func (s *Server) sendPluginRequestWithBudget(ctx context.Context, pluginName, pa
 	if strings.Contains(path, "#") || u.Scheme != "" || u.Host != "" || u.User != nil || u.Opaque != "" || strings.HasPrefix(u.Path, "//") {
 		return wasm.ExtensionRefusal(pb.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "path must stay on the configured provider origin, got %q", path)
 	}
-	target := base.ResolveReference(u)
+	targetCopy := *base
+	targetCopy.Path = joinURLPath(base.Path, u.Path)
+	targetCopy.RawPath = ""
+	targetCopy.RawQuery = u.RawQuery
+	targetCopy.Fragment = ""
+	target := &targetCopy
 	if target.Scheme != base.Scheme || target.Host != base.Host || target.Hostname() != base.Hostname() {
 		return wasm.ExtensionRefusal(pb.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "path escapes the configured provider origin, got %q", path)
 	}
@@ -365,6 +402,8 @@ func (s *Server) sendPluginRequestWithBudget(ctx context.Context, pluginName, pa
 	if boundBudget != nil {
 		budget = *boundBudget
 	}
+	unlockBudget := s.egress.lockTokenBudget(budgetKey, budget)
+	defer unlockBudget()
 	if err := s.egress.authorize(budgetKey, budget); err != nil {
 		s.stats.RecordPluginCounter(pluginName, "egress_refused", 1)
 		return wasm.ExtensionRefusal(classifyEgressRefusal(err), "%v", err)
@@ -426,7 +465,9 @@ func (s *Server) sendPluginRequestWithBudget(ctx context.Context, pluginName, pa
 			CacheWrite int64 `json:"cache_write"`
 		}{int64(usage.InputTokens), int64(usage.OutputTokens),
 			int64(usage.CacheReadTokens), int64(usage.CacheWriteTokens)}
-		s.egress.recordTokens(budgetKey, int64(usage.InputTokens+usage.OutputTokens))
+		if budget.MaxTokensPerHour > 0 {
+			s.egress.recordTokens(budgetKey, egressBillableTokens(f.Name, usage))
+		}
 	}
 
 	s.stats.RecordPluginCounter(pluginName, "egress_calls", 1)
@@ -438,6 +479,19 @@ func (s *Server) sendPluginRequestWithBudget(ctx context.Context, pluginName, pa
 		return wasm.ExtensionRefusal(pb.ErrorCode_ERROR_CODE_INTERNAL, "encode response: %v", err)
 	}
 	return wasm.ExtensionValue([]byte(env))
+}
+
+func egressBillableTokens(formatName string, usage *engine.StreamUsage) int64 {
+	if usage == nil {
+		return 0
+	}
+	total := int64(usage.InputTokens + usage.OutputTokens)
+	// Anthropic reports cache reads/creates separately from input_tokens.
+	// OpenAI-compatible and Gemini counters are subsets of their input total.
+	if formatName == "anthropic" {
+		total += int64(usage.CacheReadTokens + usage.CacheWriteTokens)
+	}
+	return total
 }
 
 // recordEgressEvent puts plugin-originated traffic in the same feed as user

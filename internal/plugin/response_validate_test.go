@@ -17,18 +17,55 @@ import (
 
 func strPtr(s string) *string { return &s }
 
-// pbMsg builds a ResponseMessage with the given content presence and the
+// pbMsg builds a ResponseMessage with the given text-block presence and the
 // requested number of structurally valid tool calls.
 func pbMsg(content *string, nCalls int) *pbv1.ResponseMessage {
-	m := &pbv1.ResponseMessage{Content: content}
+	m := &pbv1.ResponseMessage{}
+	if content != nil {
+		m.Blocks = append(m.Blocks, &pbv1.ResponseBlock{Kind: &pbv1.ResponseBlock_Text{Text: &pbv1.ResponseTextBlock{Text: *content}}})
+	}
 	for i := 0; i < nCalls; i++ {
-		m.ToolCalls = append(m.ToolCalls, &pbv1.ToolCall{
+		m.Blocks = append(m.Blocks, &pbv1.ResponseBlock{Kind: &pbv1.ResponseBlock_ToolCall{ToolCall: &pbv1.ToolCall{
 			Id:            "call_" + string(rune('a'+i)),
 			Name:          "t",
 			ArgumentsJson: []byte(`{}`),
-		})
+		}}})
 	}
 	return m
+}
+
+func pbResponseTool(resp *pbv1.ChatResponse, n int) *pbv1.ToolCall {
+	for _, block := range resp.Message.Blocks {
+		if call := block.GetToolCall(); call != nil {
+			if n == 0 {
+				return call
+			}
+			n--
+		}
+	}
+	return nil
+}
+
+func engineResponseMessage(content *string, calls ...engine.ResponseToolCall) *engine.ResponseMessage {
+	m := &engine.ResponseMessage{}
+	if content != nil {
+		m.Blocks = append(m.Blocks, engine.ResponseBlock{Text: &engine.ResponseTextBlock{Text: *content}})
+	}
+	for i := range calls {
+		call := calls[i]
+		m.Blocks = append(m.Blocks, engine.ResponseBlock{ToolCall: &call})
+	}
+	return m
+}
+
+func engineResponseTools(m *engine.ResponseMessage) []*engine.ResponseToolCall {
+	var out []*engine.ResponseToolCall
+	for i := range m.Blocks {
+		if m.Blocks[i].ToolCall != nil {
+			out = append(out, m.Blocks[i].ToolCall)
+		}
+	}
+	return out
 }
 
 func pbResp(content *string, nCalls int) *pbv1.ChatResponse {
@@ -96,7 +133,7 @@ func TestValidateResponseReplacementToolCallCardinality(t *testing.T) {
 			if err == nil {
 				t.Fatalf("cardinality change %d -> %d must be rejected", tc.currentCalls, tc.replacementCalls)
 			}
-			if !strings.Contains(err.Error(), "changed tool-call cardinality") {
+			if !strings.Contains(err.Error(), "changed response-block cardinality") {
 				t.Errorf("error %q does not name the cardinality change", err)
 			}
 		})
@@ -135,13 +172,29 @@ func TestValidateResponseReplacementContentPresence(t *testing.T) {
 				if err == nil {
 					t.Fatal("content-presence change must be rejected")
 				}
-				if !strings.Contains(err.Error(), "changed content presence") {
+				if !strings.Contains(err.Error(), "changed response-block cardinality") {
 					t.Errorf("error %q does not name the presence change", err)
 				}
 			} else if err != nil {
 				t.Errorf("must be accepted: %v", err)
 			}
 		})
+	}
+}
+
+func TestValidateResponseReplacementPreservesBlockArmAndOrder(t *testing.T) {
+	current := pbResp(strPtr("before"), 1)
+	replacement := proto.Clone(current).(*pbv1.ChatResponse)
+	replacement.Message.Blocks[0], replacement.Message.Blocks[1] = replacement.Message.Blocks[1], replacement.Message.Blocks[0]
+	if err := validateResponseReplacement(current, replacement); err == nil || !strings.Contains(err.Error(), "changed arm") {
+		t.Fatalf("text/tool reorder must be rejected, got %v", err)
+	}
+
+	replacement = proto.Clone(current).(*pbv1.ChatResponse)
+	replacement.Message.Blocks[0].GetText().Text = "after"
+	pbResponseTool(replacement, 0).Name = "write"
+	if err := validateResponseReplacement(current, replacement); err != nil {
+		t.Fatalf("in-place block mutations must be accepted: %v", err)
 	}
 }
 
@@ -156,7 +209,7 @@ func TestValidateResponseReplacementAtomicRejection(t *testing.T) {
 	if err == nil {
 		t.Fatal("a replacement that drops a tool call must be rejected even when its other changes are individually legal")
 	}
-	if !strings.Contains(err.Error(), "changed tool-call cardinality") {
+	if !strings.Contains(err.Error(), "changed response-block cardinality") {
 		t.Errorf("error %q does not report the cardinality violation", err)
 	}
 }
@@ -165,8 +218,7 @@ func TestValidateResponseReplacementAtomicRejection(t *testing.T) {
 // set, plus one tool call with a bound signature. Tests clone it and mutate a
 // single aspect, so a rejection can be attributed to exactly that change.
 func hostOwnedBase() *pbv1.ChatResponse {
-	content := "hi"
-	return &pbv1.ChatResponse{
+	resp := &pbv1.ChatResponse{
 		Model:                  "gpt-4o",
 		Id:                     "resp_42",
 		FinishReason:           "stop",
@@ -179,13 +231,12 @@ func hostOwnedBase() *pbv1.ChatResponse {
 			CacheReadTokens:  33,
 			CacheWriteTokens: 44,
 		},
-		Message: &pbv1.ResponseMessage{
-			Content: &content,
-			ToolCalls: []*pbv1.ToolCall{
-				{Id: "call_a", Name: "get_weather", ArgumentsJson: []byte(`{"city":"sf"}`), Signature: "tok_abc"},
-			},
-		},
+		Message: pbMsg(strPtr("hi"), 0),
 	}
+	resp.Message.Blocks = append(resp.Message.Blocks, &pbv1.ResponseBlock{Kind: &pbv1.ResponseBlock_ToolCall{ToolCall: &pbv1.ToolCall{
+		Id: "call_a", Name: "get_weather", ArgumentsJson: []byte(`{"city":"sf"}`), Signature: "tok_abc",
+	}}})
+	return resp
 }
 
 // CRITERION 2 (host-owned): every ChatResponse fact the host observed (model,
@@ -288,26 +339,27 @@ func TestValidateResponseReplacementToolCallId(t *testing.T) {
 	t.Run("single call", func(t *testing.T) {
 		base := hostOwnedBase()
 		replacement := proto.Clone(base).(*pbv1.ChatResponse)
-		replacement.Message.ToolCalls[0].Id = "forged_id"
+		pbResponseTool(replacement, 0).Id = "forged_id"
 		err := validateResponseReplacement(base, replacement)
 		if err == nil {
 			t.Fatal("changing a tool call id must be rejected")
 		}
-		if want := "tool call 0 changed host-owned id"; !strings.Contains(err.Error(), want) {
+		if want := "tool call at block 1 changed host-owned id"; !strings.Contains(err.Error(), want) {
 			t.Errorf("error %q does not name tool call 0's id", err)
 		}
 	})
 	t.Run("second call indexed", func(t *testing.T) {
 		current := hostOwnedBase()
-		current.Message.ToolCalls = append(current.Message.ToolCalls,
-			&pbv1.ToolCall{Id: "call_b", Name: "search", ArgumentsJson: []byte(`{}`)})
+		current.Message.Blocks = append(current.Message.Blocks, &pbv1.ResponseBlock{Kind: &pbv1.ResponseBlock_ToolCall{
+			ToolCall: &pbv1.ToolCall{Id: "call_b", Name: "search", ArgumentsJson: []byte(`{}`)},
+		}})
 		replacement := proto.Clone(current).(*pbv1.ChatResponse)
-		replacement.Message.ToolCalls[1].Id = "forged_b"
+		pbResponseTool(replacement, 1).Id = "forged_b"
 		err := validateResponseReplacement(current, replacement)
 		if err == nil {
 			t.Fatal("changing the second call's id must be rejected")
 		}
-		if want := "tool call 1 changed host-owned id"; !strings.Contains(err.Error(), want) {
+		if want := "tool call at block 2 changed host-owned id"; !strings.Contains(err.Error(), want) {
 			t.Errorf("error %q does not name tool call 1's id", err)
 		}
 	})
@@ -323,8 +375,8 @@ func TestValidateResponseReplacementToolCallId(t *testing.T) {
 func TestValidateResponseReplacementSignatureMatrix(t *testing.T) {
 	base := hostOwnedBase() // call 0: signature "tok_abc"
 	changeContent := func(r *pbv1.ChatResponse) {
-		r.Message.ToolCalls[0].Name = "get_forecast"
-		r.Message.ToolCalls[0].ArgumentsJson = []byte(`{"zip":94110}`)
+		pbResponseTool(r, 0).Name = "get_forecast"
+		pbResponseTool(r, 0).ArgumentsJson = []byte(`{"zip":94110}`)
 	}
 	cases := []struct {
 		name       string
@@ -344,9 +396,9 @@ func TestValidateResponseReplacementSignatureMatrix(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			current := proto.Clone(base).(*pbv1.ChatResponse)
-			current.Message.ToolCalls[0].Signature = tc.curSig
+			pbResponseTool(current, 0).Signature = tc.curSig
 			replacement := proto.Clone(current).(*pbv1.ChatResponse)
-			replacement.Message.ToolCalls[0].Signature = tc.repSig
+			pbResponseTool(replacement, 0).Signature = tc.repSig
 			if tc.contentChg {
 				changeContent(replacement)
 			}
@@ -355,7 +407,7 @@ func TestValidateResponseReplacementSignatureMatrix(t *testing.T) {
 				if err == nil {
 					t.Fatalf("%s must be rejected", tc.name)
 				}
-				if want := "tool call 0 signature " + tc.wantClass; !strings.Contains(err.Error(), want) {
+				if want := "tool call at block 1 signature " + tc.wantClass; !strings.Contains(err.Error(), want) {
 					t.Errorf("error %q does not name signature class %q", err, tc.wantClass)
 				}
 			} else if err != nil {
@@ -371,7 +423,7 @@ func TestValidateResponseReplacementSignatureMatrix(t *testing.T) {
 func TestValidateResponseReplacementMixedValidMutation(t *testing.T) {
 	current := hostOwnedBase()
 	replacement := proto.Clone(current).(*pbv1.ChatResponse)
-	tc := replacement.Message.ToolCalls[0]
+	tc := pbResponseTool(replacement, 0)
 	tc.Name = "get_forecast"
 	tc.ArgumentsJson = []byte(`{"zip":94110}`)
 	tc.Signature = "" // cleared because the covered content changed
@@ -433,20 +485,20 @@ func TestClearStaleSignatures(t *testing.T) {
 	// Stale: token left untouched while name/args changed -> cleared.
 	current := proto.Clone(base).(*pbv1.ChatResponse)
 	replacement := proto.Clone(current).(*pbv1.ChatResponse)
-	replacement.Message.ToolCalls[0].Name = "get_forecast"
-	replacement.Message.ToolCalls[0].ArgumentsJson = []byte(`{"zip":94110}`)
+	pbResponseTool(replacement, 0).Name = "get_forecast"
+	pbResponseTool(replacement, 0).ArgumentsJson = []byte(`{"zip":94110}`)
 	clearStaleSignatures(current, replacement)
-	if got := replacement.Message.ToolCalls[0].Signature; got != "" {
+	if got := pbResponseTool(replacement, 0).Signature; got != "" {
 		t.Errorf("stale token must be cleared, got %q", got)
 	}
 
 	// Already cleared after a covered mutation: untouched by normalization.
 	current = proto.Clone(base).(*pbv1.ChatResponse)
 	replacement = proto.Clone(current).(*pbv1.ChatResponse)
-	replacement.Message.ToolCalls[0].ArgumentsJson = []byte(`{"a":1}`)
-	replacement.Message.ToolCalls[0].Signature = ""
+	pbResponseTool(replacement, 0).ArgumentsJson = []byte(`{"a":1}`)
+	pbResponseTool(replacement, 0).Signature = ""
 	clearStaleSignatures(current, replacement)
-	if replacement.Message.ToolCalls[0].Signature != "" {
+	if pbResponseTool(replacement, 0).Signature != "" {
 		t.Errorf("already-cleared token must stay empty")
 	}
 
@@ -454,7 +506,7 @@ func TestClearStaleSignatures(t *testing.T) {
 	current = proto.Clone(base).(*pbv1.ChatResponse)
 	replacement = proto.Clone(current).(*pbv1.ChatResponse)
 	clearStaleSignatures(current, replacement)
-	if got := replacement.Message.ToolCalls[0].Signature; got != "tok_abc" {
+	if got := pbResponseTool(replacement, 0).Signature; got != "tok_abc" {
 		t.Errorf("intact token must survive normalization, got %q", got)
 	}
 
@@ -480,13 +532,10 @@ func TestRunAfterResponseInvalidReplacementAllowNoPoison(t *testing.T) {
 	const reqID = 77
 	original := "original-content"
 	resp := &engine.ChatResponse{
-		Message: &engine.ResponseMessage{
-			Content: &original,
-			ToolCalls: []engine.ResponseToolCall{
-				{ID: "call_1", Name: "alpha", ArgumentsJSON: []byte(`{"a":1}`)},
-				{ID: "call_2", Name: "beta", ArgumentsJSON: []byte(`{"b":2}`)},
-			},
-		},
+		Message: engineResponseMessage(&original,
+			engine.ResponseToolCall{ID: "call_1", Name: "alpha", ArgumentsJSON: []byte(`{"a":1}`)},
+			engine.ResponseToolCall{ID: "call_2", Name: "beta", ArgumentsJSON: []byte(`{"b":2}`)},
+		),
 	}
 	out, err := pp.RunAfterResponse(context.Background(), reqID, resp, true)
 	if err != nil {
@@ -497,17 +546,18 @@ func TestRunAfterResponseInvalidReplacementAllowNoPoison(t *testing.T) {
 	}
 	// CRITERION 6: the invented content and the call-drop were refused
 	// atomically — neither may appear in the output.
-	if got := *out.Message.Content; got != original {
+	if got := out.Message.Blocks[0].Text.Text; got != original {
 		t.Errorf("content = %q, want unchanged %q (poisoned replacement leaked)", got, original)
 	}
-	if len(out.Message.ToolCalls) != 2 {
-		t.Fatalf("tool-call count = %d, want 2 (the dropped call must still be present)", len(out.Message.ToolCalls))
+	tools := engineResponseTools(out.Message)
+	if len(tools) != 2 {
+		t.Fatalf("tool-call count = %d, want 2 (the dropped call must still be present)", len(tools))
 	}
 	// CRITERION 5a: the next plugin saw the ACCEPTED response, so its in-place
 	// rewrite reached both calls. If the invalid replacement had been chained
 	// downstream, only one call would have been rewritten.
 	wantArgs := `{"mutated_by":"test-mutator"}`
-	for i, tc := range out.Message.ToolCalls {
+	for i, tc := range tools {
 		if string(tc.ArgumentsJSON) != wantArgs {
 			t.Errorf("tool call %d arguments = %s, want %s", i, tc.ArgumentsJSON, wantArgs)
 		}
@@ -532,23 +582,20 @@ func TestRunAfterResponseStaleSignatureNormalized(t *testing.T) {
 	resp := &engine.ChatResponse{
 		Model:          "m",
 		UpstreamStatus: 200,
-		Message: &engine.ResponseMessage{
-			Content: &content,
-			ToolCalls: []engine.ResponseToolCall{{
-				ID: "call_a", Name: "t",
-				ArgumentsJSON: []byte(`{"path":"/a"}`),
-				Signature:     "tok_abc",
-			}},
-		},
+		Message: engineResponseMessage(&content, engine.ResponseToolCall{
+			ID: "call_a", Name: "t",
+			ArgumentsJSON: []byte(`{"path":"/a"}`),
+			Signature:     "tok_abc",
+		}),
 	}
 	out, err := pp.RunAfterResponse(context.Background(), 1, resp, true)
 	if err != nil {
 		t.Fatalf("mutator with untouched token must be accepted: %v", err)
 	}
-	if out == nil || out.Message == nil || len(out.Message.ToolCalls) != 1 {
+	if out == nil || out.Message == nil || len(engineResponseTools(out.Message)) != 1 {
 		t.Fatalf("result lost the tool call: %+v", out)
 	}
-	tc := out.Message.ToolCalls[0]
+	tc := *engineResponseTools(out.Message)[0]
 	if string(tc.ArgumentsJSON) != `{"mutated_by":"test-mutator"}` {
 		t.Errorf("mutation not applied: %q", tc.ArgumentsJSON)
 	}
@@ -585,13 +632,10 @@ func TestRunAfterResponseInvalidReplacementBlockAttributed(t *testing.T) {
 	const reqID = 78
 	original := "original-content"
 	resp := &engine.ChatResponse{
-		Message: &engine.ResponseMessage{
-			Content: &original,
-			ToolCalls: []engine.ResponseToolCall{
-				{ID: "call_1", Name: "alpha", ArgumentsJSON: []byte(`{"a":1}`)},
-				{ID: "call_2", Name: "beta", ArgumentsJSON: []byte(`{"b":2}`)},
-			},
-		},
+		Message: engineResponseMessage(&original,
+			engine.ResponseToolCall{ID: "call_1", Name: "alpha", ArgumentsJSON: []byte(`{"a":1}`)},
+			engine.ResponseToolCall{ID: "call_2", Name: "beta", ArgumentsJSON: []byte(`{"b":2}`)},
+		),
 	}
 	out, err := pp.RunAfterResponse(context.Background(), reqID, resp, true)
 	if err == nil {

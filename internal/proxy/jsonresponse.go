@@ -107,6 +107,10 @@ type responseRefs struct {
 	content    string
 	setContent func(string)
 	toolCalls  []toolCallRef
+	// blocks is the selected assistant response in exact provider order. It is
+	// the sole source for the response ABI; the flat fields above remain only
+	// as extractor conveniences for stream-tool replay and legacy unit probes.
+	blocks []responseBlockRef
 	// rawSlots lists every tool-argument slot in the body, selected or not,
 	// so the restore pass can splice provider-verbatim bytes back for
 	// everything the pipeline did not rewrite. Selected slots carry their
@@ -119,6 +123,27 @@ type responseRefs struct {
 	// exists to remove, just on the read side instead of the write side.
 	id           string
 	finishReason string
+}
+
+type responseTextRef struct {
+	text string
+	set  func(string)
+}
+
+type responseBlockRef struct {
+	text      *responseTextRef
+	toolIndex int // -1 for a text block
+}
+
+func (r *responseRefs) appendText(text string, set func(string)) {
+	r.blocks = append(r.blocks, responseBlockRef{text: &responseTextRef{text: text, set: set}, toolIndex: -1})
+}
+
+func (r *responseRefs) appendTool(call toolCallRef) int {
+	r.toolCalls = append(r.toolCalls, call)
+	idx := len(r.toolCalls) - 1
+	r.blocks = append(r.blocks, responseBlockRef{toolIndex: idx})
+	return idx
 }
 
 // extractResponse builds mutable references into a decoded response body for
@@ -250,6 +275,7 @@ func extractOpenAI(body map[string]any, raw []byte) responseRefs {
 				if s, isStr := v.(string); isStr {
 					refs.content = s
 					refs.setContent = func(s string) { msg["content"] = s }
+					refs.appendText(s, refs.setContent)
 				}
 			}
 			refs.finishReason = asString(choice["finish_reason"])
@@ -284,7 +310,7 @@ func extractOpenAI(body map[string]any, raw []byte) responseRefs {
 						argsJSON = inner
 					}
 				}
-				refs.toolCalls = append(refs.toolCalls, toolCallRef{
+				call = refs.appendTool(toolCallRef{
 					id:       asString(tc["id"]),
 					name:     asString(fn["name"]),
 					argsJSON: argsJSON,
@@ -294,7 +320,6 @@ func extractOpenAI(body map[string]any, raw []byte) responseRefs {
 						return nil
 					},
 				})
-				call = len(refs.toolCalls) - 1
 			}
 			refs.rawSlots = append(refs.rawSlots, rawArgSlot{
 				path:    path,
@@ -334,6 +359,8 @@ func extractResponsesOutput(refs *responseRefs, output []any, raw []byte) {
 					continue
 				}
 				textParts = append(textParts, part)
+				partRef := part
+				refs.appendText(asString(part["text"]), func(s string) { partRef["text"] = s })
 			}
 		case "function_call": //nolint:dupl // distinct wire shape from the Chat path
 			itRef := it
@@ -364,7 +391,7 @@ func extractResponsesOutput(refs *responseRefs, output []any, raw []byte) {
 				itRef["arguments"] = s
 				return nil
 			}
-			refs.toolCalls = append(refs.toolCalls, toolCallRef{
+			call := refs.appendTool(toolCallRef{
 				id:       asString(itRef["call_id"]),
 				name:     asString(itRef["name"]),
 				argsJSON: args,
@@ -375,7 +402,7 @@ func extractResponsesOutput(refs *responseRefs, output []any, raw []byte) {
 				path:    path,
 				rawArgs: rawArgs,
 				objSlot: false,
-				call:    len(refs.toolCalls) - 1,
+				call:    call,
 			})
 		}
 	}
@@ -416,10 +443,11 @@ func extractAnthropic(body map[string]any, raw []byte) responseRefs {
 		}
 		switch asString(block["type"]) {
 		case "text":
-			// Content slot = first text block with a present string text key.
-			if refs.setContent == nil {
-				if s, isStr := block["text"].(string); isStr {
-					blockRef := block
+			if s, isStr := block["text"].(string); isStr {
+				blockRef := block
+				refs.appendText(s, func(s string) { blockRef["text"] = s })
+				// Retain the first-slot convenience view for extraction callers.
+				if refs.setContent == nil {
 					refs.content = s
 					refs.setContent = func(s string) { blockRef["text"] = s }
 				}
@@ -436,7 +464,7 @@ func extractAnthropic(body map[string]any, raw []byte) responseRefs {
 					argsJSON = string(b)
 				}
 			}
-			refs.toolCalls = append(refs.toolCalls, toolCallRef{
+			call := refs.appendTool(toolCallRef{
 				id:       asString(block["id"]),
 				name:     asString(block["name"]),
 				argsJSON: argsJSON,
@@ -447,7 +475,7 @@ func extractAnthropic(body map[string]any, raw []byte) responseRefs {
 				path:    path,
 				rawArgs: rawArgs,
 				objSlot: true,
-				call:    len(refs.toolCalls) - 1,
+				call:    call,
 			})
 		}
 	}
@@ -500,12 +528,15 @@ func extractGemini(body map[string]any, raw []byte) responseRefs {
 			// Content slot = first part of CANDIDATE 0 with a present string
 			// text key. Candidate 0 is the selected response; a later
 			// candidate is an alternative, not another turn, so its text must
-			// be neither exposed as ResponseMessage.content nor mutated.
+			// be neither exposed as response blocks nor mutated.
 			if ci == 0 {
-				if s, isStr := part["text"].(string); isStr && refs.setContent == nil {
+				if s, isStr := part["text"].(string); isStr {
 					partRef := part
-					refs.content = s
-					refs.setContent = func(s string) { partRef["text"] = s }
+					refs.appendText(s, func(s string) { partRef["text"] = s })
+					if refs.setContent == nil {
+						refs.content = s
+						refs.setContent = func(s string) { partRef["text"] = s }
+					}
 				}
 			}
 			if fc, ok := part["functionCall"].(map[string]any); ok {
@@ -530,7 +561,7 @@ func extractGemini(body map[string]any, raw []byte) responseRefs {
 							argsJSON = string(b)
 						}
 					}
-					refs.toolCalls = append(refs.toolCalls, toolCallRef{
+					call = refs.appendTool(toolCallRef{
 						id:       asString(fc["id"]),
 						name:     asString(fc["name"]),
 						argsJSON: argsJSON,
@@ -540,7 +571,6 @@ func extractGemini(body map[string]any, raw []byte) responseRefs {
 						signature:      asString(sigPart["thoughtSignature"]),
 						clearSignature: func() { delete(sigPart, "thoughtSignature") },
 					})
-					call = len(refs.toolCalls) - 1
 				}
 				refs.rawSlots = append(refs.rawSlots, rawArgSlot{
 					path:    path,
@@ -646,7 +676,7 @@ func runJSONResponseHooks(ctx context.Context, pl *plugin.PluginPipeline, reqID 
 		events = append(events, engine.StreamEvent{ToolCallEnd: &engine.ToolCallEnd{Index: ti}})
 
 		for i := range events {
-			out, err := pl.RunOnStreamChunk(ctx, reqID, &events[i])
+			out, err := pl.RunOnStreamChunkVerified(ctx, reqID, &events[i])
 			if err != nil {
 				return bodyBytes, err
 			}
@@ -654,6 +684,9 @@ func runJSONResponseHooks(ctx context.Context, pl *plugin.PluginPipeline, reqID 
 				return bodyBytes, err
 			}
 		}
+	}
+	if err := pl.EndStreamVerified(reqID); err != nil {
+		return bodyBytes, err
 	}
 
 	// --- 2. run_after_response ---------------------------------------------
@@ -680,18 +713,15 @@ func runJSONResponseHooks(ctx context.Context, pl *plugin.PluginPipeline, reqID 
 	var assistant *engine.ResponseMessage
 	if refs.hasMessage {
 		assistant = &engine.ResponseMessage{}
-		if refs.setContent != nil {
-			content := refs.content
-			assistant.Content = &content
-		}
-		for i := range refs.toolCalls {
-			tc := &refs.toolCalls[i]
-			assistant.ToolCalls = append(assistant.ToolCalls, engine.ResponseToolCall{
-				ID:            tc.id,
-				Name:          tc.name,
-				ArgumentsJSON: []byte(tc.argsJSON),
-				Signature:     tc.signature,
-			})
+		for _, block := range refs.blocks {
+			if block.text != nil {
+				assistant.Blocks = append(assistant.Blocks, engine.ResponseBlock{Text: &engine.ResponseTextBlock{Text: block.text.text}})
+				continue
+			}
+			tc := &refs.toolCalls[block.toolIndex]
+			assistant.Blocks = append(assistant.Blocks, engine.ResponseBlock{ToolCall: &engine.ResponseToolCall{
+				ID: tc.id, Name: tc.name, ArgumentsJSON: []byte(tc.argsJSON), Signature: tc.signature,
+			}})
 		}
 	}
 
@@ -714,22 +744,28 @@ func runJSONResponseHooks(ctx context.Context, pl *plugin.PluginPipeline, reqID 
 		// replacement is accepted, so these cannot fire on the accepted path —
 		// but the apply boundary must fail loudly rather than half-apply, or
 		// silently skip as v1 did.
-		if (msg.Content != nil) != (refs.setContent != nil) {
-			return bodyBytes, fmt.Errorf("response replacement changed content presence")
+		if len(msg.Blocks) != len(refs.blocks) {
+			return bodyBytes, fmt.Errorf("response replacement changed block cardinality: %d != %d", len(msg.Blocks), len(refs.blocks))
 		}
-		if len(msg.ToolCalls) != len(refs.toolCalls) {
-			return bodyBytes, fmt.Errorf("response replacement changed tool-call cardinality: %d != %d",
-				len(msg.ToolCalls), len(refs.toolCalls))
-		}
-		if msg.Content != nil && *msg.Content != refs.content && refs.setContent != nil {
-			refs.setContent(*msg.Content)
-			modified = true
-		}
-		// Apply tool-call mutations back by position. ID and Signature are
-		// host-owned: the guest's values are never read.
-		for i := range msg.ToolCalls {
-			tc := &refs.toolCalls[i]
-			mut := msg.ToolCalls[i]
+		for i := range msg.Blocks {
+			ref := &refs.blocks[i]
+			mutBlock := msg.Blocks[i]
+			if ref.text != nil {
+				if mutBlock.Text == nil || mutBlock.ToolCall != nil {
+					return bodyBytes, fmt.Errorf("response replacement changed block %d arm", i)
+				}
+				if mutBlock.Text.Text != ref.text.text {
+					ref.text.set(mutBlock.Text.Text)
+					ref.text.text = mutBlock.Text.Text
+					modified = true
+				}
+				continue
+			}
+			if mutBlock.ToolCall == nil || mutBlock.Text != nil {
+				return bodyBytes, fmt.Errorf("response replacement changed block %d arm", i)
+			}
+			tc := &refs.toolCalls[ref.toolIndex]
+			mut := *mutBlock.ToolCall
 			// signedContentChanged drives clearing the provider token
 			// below. A signature covers this call's name and arguments, so
 			// leaving it in place after either changes ships a valid-looking
@@ -742,7 +778,7 @@ func runJSONResponseHooks(ctx context.Context, pl *plugin.PluginPipeline, reqID 
 			}
 			if !bytes.Equal(mut.ArgumentsJSON, []byte(tc.argsJSON)) {
 				if err := tc.setArgs(string(mut.ArgumentsJSON)); err != nil {
-					return bodyBytes, fmt.Errorf("response replacement tool call %d: %w", i, err)
+					return bodyBytes, fmt.Errorf("response replacement tool call at block %d: %w", i, err)
 				}
 				tc.argsJSON = string(mut.ArgumentsJSON)
 				tc.argsChanged = true

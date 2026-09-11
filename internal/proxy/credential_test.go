@@ -10,6 +10,22 @@ import (
 	"github.com/torana-edge/torana-edge/internal/wasm"
 )
 
+func TestCallerCredentialRateIdentityCoversSupportedSchemes(t *testing.T) {
+	for _, name := range []string{"Authorization", "X-Api-Key", "X-Goog-Api-Key", "Api-Key"} {
+		h := make(http.Header)
+		h.Add(name, "same-secret")
+		got := (callerCredentials{headers: h}).rateIdentity()
+		want := http.CanonicalHeaderKey(name) + "\x00same-secret"
+		if got != want {
+			t.Errorf("%s identity = %q, want %q", name, got, want)
+		}
+	}
+	if a, b := (callerCredentials{headers: http.Header{"Authorization": {"same"}}}).rateIdentity(),
+		(callerCredentials{headers: http.Header{"X-Api-Key": {"same"}}}).rateIdentity(); a == b {
+		t.Fatal("equal secrets in different credential schemes collapsed into one rate bucket")
+	}
+}
+
 func TestApplyProviderCredentialUsesProtocolNativeHeader(t *testing.T) {
 	for _, test := range []struct {
 		format string

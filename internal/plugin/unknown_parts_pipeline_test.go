@@ -434,8 +434,13 @@ func TestOpenAIResponsesReplacementLayout(t *testing.T) {
 	if !ok || slot0["type"] != "message" || slot0["role"] != "user" {
 		t.Fatalf("slot 0 is not the message item: %v", items[0])
 	}
-	ct, ok := slot0["content"].(string)
-	if !ok || ct == "hi" || !strings.Contains(ct, "seen by test-mutator") {
+	parts, ok := slot0["content"].([]any)
+	if !ok || len(parts) != 1 {
+		t.Fatalf("slot 0 does not carry one Responses input text part: %v", slot0["content"])
+	}
+	part, ok := parts[0].(map[string]any)
+	ct, textOK := part["text"].(string)
+	if !ok || part["type"] != "input_text" || !textOK || ct == "hi" || !strings.Contains(ct, "seen by test-mutator") {
 		t.Fatalf("slot 0 does not carry the MUTATED content: %v", slot0["content"])
 	}
 	slot1, ok := items[1].(map[string]any)

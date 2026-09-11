@@ -499,6 +499,12 @@
           max_calls_per_minute: Number(row.querySelector('.http-binding-rpm').value) || 0
         };
       });
+      for (const [endpoint, approval] of Object.entries(httpEndpoints)) {
+        if (!approval.methods.length) {
+          showAlert(`HTTP endpoint ${endpoint} must approve at least one method.`);
+          return false;
+        }
+      }
       for (const declaration of (p.http_endpoints || [])) {
         if (declaration.required && !httpEndpoints[declaration.name]) {
           showAlert(`HTTP endpoint ${declaration.name} is required before ${name} can be enabled.`);
@@ -1266,7 +1272,7 @@
     }
 
     // ---- Settings ----
-    const PROVIDER_FORMATS = ['openai', 'anthropic', 'gemini', 'gemini-codeassist'];
+    const PROVIDER_FORMATS = ['', 'openai', 'anthropic', 'gemini', 'gemini-codeassist'];
     function loadSettings() {
       fetch('/_torana/api/v1/config').then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
         .then(cfg => { settingsCfg = cfg; renderSettings(cfg); })
@@ -1313,7 +1319,7 @@
       // drop every field this form does not render (pricing, cache,
       // responses_compaction). New rows have no anchor and no fields to keep.
       if (name) tr.dataset.originalName = name;
-      const opts = PROVIDER_FORMATS.map(f => `<option value="${f}" ${prov.format === f ? 'selected' : ''}>${f}</option>`).join('');
+      const opts = PROVIDER_FORMATS.map(f => `<option value="${f}" ${String(prov.format || '') === f ? 'selected' : ''}>${f || 'transparent'}</option>`).join('');
       const auth = prov.auth || {mode: 'caller'};
       const authOpts = ['caller', 'credential', 'none'].map(m => `<option value="${m}" ${auth.mode === m ? 'selected' : ''}>${m}</option>`).join('');
       tr.innerHTML = `

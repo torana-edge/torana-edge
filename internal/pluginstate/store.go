@@ -64,11 +64,6 @@ type Store struct {
 	maxTotalBytes    int
 	maxKeysPerPlugin int
 	totalBytes       int
-
-	// dirty marks unflushed changes. Writes persist synchronously, so this
-	// only guards against redundant rewrites of an unchanged store.
-	dirty      bool
-	generation uint64
 }
 
 // Options configures a Store. Zero values select the defaults above.
@@ -139,32 +134,40 @@ func (s *Store) Set(plugin, key, value string) error {
 		return fmt.Errorf("value is %d bytes, limit is %d", len(value), s.maxValueBytes)
 	}
 
-	s.mu.Lock()
-	bucket, ok := s.data[plugin]
+	// Serialize the full candidate→durable-write→publish transaction. Readers
+	// keep seeing the previous committed generation while persistence runs.
+	s.flushMu.Lock()
+	defer s.flushMu.Unlock()
+	s.mu.RLock()
+	candidate := cloneData(s.data)
+	totalBytes := s.totalBytes
+	s.mu.RUnlock()
+	bucket, ok := candidate[plugin]
 	if !ok {
 		bucket = make(map[string]string)
-		s.data[plugin] = bucket
+		candidate[plugin] = bucket
 	}
 	old, existed := bucket[key]
 	if !existed && len(bucket) >= s.maxKeysPerPlugin {
-		s.mu.Unlock()
 		return fmt.Errorf("plugin %q already holds %d keys, the per-plugin limit", plugin, s.maxKeysPerPlugin)
 	}
 	delta := entrySize(key, value)
 	if existed {
 		delta -= entrySize(key, old)
 	}
-	if s.totalBytes+delta > s.maxTotalBytes {
-		s.mu.Unlock()
+	if totalBytes+delta > s.maxTotalBytes {
 		return fmt.Errorf("store would exceed its %d byte limit", s.maxTotalBytes)
 	}
 	bucket[key] = value
-	s.totalBytes += delta
-	s.dirty = true
-	s.generation++
+	totalBytes += delta
+	if err := s.persist(candidate); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	s.data = candidate
+	s.totalBytes = totalBytes
 	s.mu.Unlock()
-
-	return s.flush()
+	return nil
 }
 
 // Delete releases one key.
@@ -180,19 +183,32 @@ func (s *Store) Delete(plugin, key string) error {
 		return fmt.Errorf("plugin and key are required")
 	}
 
-	s.mu.Lock()
-	if old, ok := s.data[plugin][key]; ok {
-		s.totalBytes -= entrySize(key, old)
-		delete(s.data[plugin], key)
-		if len(s.data[plugin]) == 0 {
-			delete(s.data, plugin)
+	s.flushMu.Lock()
+	defer s.flushMu.Unlock()
+	s.mu.RLock()
+	candidate := cloneData(s.data)
+	totalBytes := s.totalBytes
+	s.mu.RUnlock()
+	changed := false
+	if old, ok := candidate[plugin][key]; ok {
+		totalBytes -= entrySize(key, old)
+		delete(candidate[plugin], key)
+		if len(candidate[plugin]) == 0 {
+			delete(candidate, plugin)
 		}
-		s.dirty = true
-		s.generation++
+		changed = true
 	}
+	if !changed {
+		return nil
+	}
+	if err := s.persist(candidate); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	s.data = candidate
+	s.totalBytes = totalBytes
 	s.mu.Unlock()
-
-	return s.flush()
+	return nil
 }
 
 // Keys lists one plugin's keys, sorted. Plugins need this to iterate state
@@ -240,6 +256,18 @@ func (s *Store) TotalBytes() int {
 // cap by storing everything in enormous key names.
 func entrySize(key, value string) int { return len(key) + len(value) }
 
+func cloneData(src map[string]map[string]string) map[string]map[string]string {
+	out := make(map[string]map[string]string, len(src))
+	for plugin, bucket := range src {
+		copyBucket := make(map[string]string, len(bucket))
+		for key, value := range bucket {
+			copyBucket[key] = value
+		}
+		out[plugin] = copyBucket
+	}
+	return out
+}
+
 func (s *Store) load() error {
 	raw, err := os.ReadFile(s.path)
 	if err != nil {
@@ -268,28 +296,20 @@ func (s *Store) load() error {
 	return nil
 }
 
-// flush writes the store to disk, replacing the file atomically so a crash
-// mid-write cannot leave a half-written file that fails to parse on restart.
-func (s *Store) flush() error {
+// persist writes a candidate state without changing the visible in-memory
+// state. The caller holds flushMu.
+func (s *Store) persist(candidate map[string]map[string]string) error {
 	if s.path == "" {
 		return nil
 	}
-	s.flushMu.Lock()
-	defer s.flushMu.Unlock()
-
-	s.mu.Lock()
-	if !s.dirty {
-		s.mu.Unlock()
-		return nil
-	}
-	raw, err := json.MarshalIndent(s.data, "", "  ")
+	raw, err := json.MarshalIndent(candidate, "", "  ")
 	if err != nil {
-		s.mu.Unlock()
 		return fmt.Errorf("plugin state: encode: %w", err)
 	}
-	generation := s.generation
-	s.mu.Unlock()
+	return s.persistBytes(raw)
+}
 
+func (s *Store) persistBytes(raw []byte) error {
 	dir := filepath.Dir(s.path)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("plugin state: create %s: %w", dir, err)
@@ -299,13 +319,7 @@ func (s *Store) flush() error {
 		return fmt.Errorf("plugin state: temp file: %w", err)
 	}
 	tmpName := tmp.Name()
-	defer func() {
-		if tmpName != "" {
-			_ = os.Remove(tmpName)
-		}
-	}()
-	// 0600: plugin state can hold prompt fragments and other things the
-	// operator would not want world-readable.
+	defer func() { _ = os.Remove(tmpName) }()
 	if err := tmp.Chmod(0o600); err != nil {
 		_ = tmp.Close()
 		return fmt.Errorf("plugin state: chmod: %w", err)
@@ -324,9 +338,6 @@ func (s *Store) flush() error {
 	if err := os.Rename(tmpName, s.path); err != nil {
 		return fmt.Errorf("plugin state: replace %s: %w", s.path, err)
 	}
-	tmpName = ""
-	// Make the rename durable as well as the file contents. Some filesystems
-	// can otherwise lose the directory entry after a crash.
 	dirHandle, err := os.Open(dir)
 	if err != nil {
 		return fmt.Errorf("plugin state: open directory %s: %w", dir, err)
@@ -338,14 +349,6 @@ func (s *Store) flush() error {
 	if err := dirHandle.Close(); err != nil {
 		return fmt.Errorf("plugin state: close directory %s: %w", dir, err)
 	}
-
-	s.mu.Lock()
-	// A write may have landed after this snapshot was encoded. Only clear
-	// dirty when the persisted generation is still the newest generation.
-	if s.generation == generation {
-		s.dirty = false
-	}
-	s.mu.Unlock()
 	return nil
 }
 

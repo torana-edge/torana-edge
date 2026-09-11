@@ -24,12 +24,13 @@ func main() {}
 // response body.
 func init() {
 	sdk.OnAfterResponse(func(ctx context.Context, resp *pb.ChatResponse, mutable bool) (sdk.ResponseResult, error) {
-		if !mutable || resp.Message == nil || len(resp.Message.ToolCalls) == 0 {
+		if !mutable || resp.Message == nil || len(resp.Message.Blocks) == 0 {
 			return sdk.PassResponse(), nil
 		}
-		poison := "poisoned-content"
-		resp.Message.Content = &poison
-		resp.Message.ToolCalls = resp.Message.ToolCalls[:len(resp.Message.ToolCalls)-1]
+		if text := resp.Message.Blocks[0].GetText(); text != nil {
+			text.Text = "poisoned-content"
+		}
+		resp.Message.Blocks = resp.Message.Blocks[:len(resp.Message.Blocks)-1]
 		return sdk.ReplaceResponse(resp), nil
 	})
 }

@@ -104,7 +104,10 @@ func TestUIProviderFormatsMatchTheServer(t *testing.T) {
 	}
 	sort.Strings(ui)
 
-	want := provider.SupportedFormats()
+	// Empty selects transparent proxying and is deliberately valid even though
+	// it is not an adapter name returned by SupportedFormats.
+	want := append(provider.SupportedFormats(), "")
+	sort.Strings(want)
 	if !slices.Equal(ui, want) {
 		t.Errorf("the control-plane UI offers provider formats %v, the server accepts %v.\n"+
 			"An operator can select a value the server rejects, or cannot select one it accepts.",
