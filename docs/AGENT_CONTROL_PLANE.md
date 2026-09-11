@@ -141,7 +141,7 @@ such as `/` separate from machine routes. Discovery operation IDs use the
 unambiguous reserved `plugin:<plugin-name>:<operation-id>` namespace; built-in IDs use
 `torana.*`, so community plugins cannot shadow host operations.
 
-The guest must return a handled `HttpResponse` with a valid JSON body. Torana
+The guest must return a `ServeHTTP` result containing a valid JSON body. Torana
 validates request and response values against the advertised schema and rejects
 schema violations, oversized or non-JSON bodies, invalid status codes, and
 unsafe response headers. Agent responses may only declare an
@@ -153,19 +153,18 @@ canonical `502 plugin_operation_failed` envelope.
 Example Go SDK handler:
 
 ```go
-sdk.OnHTTPRequest(func(ctx context.Context, req *pb.HttpRequest) (*pb.HttpResponse, error) {
+sdk.OnHTTPRequest(func(ctx context.Context, req *pb.HttpRequest) (sdk.HTTPResult, error) {
 	if req.Path != "/agent/status" {
-		return nil, nil
+		return sdk.PassHTTP(), nil
 	}
 	headers, _ := json.Marshal(map[string][]string{
 		"Content-Type": {"application/json"},
 	})
-	return &pb.HttpResponse{
+	return sdk.ServeHTTP(&pb.HttpResponse{
 		Status:      200,
 		HeadersJson: headers,
 		Body:        []byte(`{"status":"ready"}`),
-		Handled:     true,
-	}, nil
+	}), nil
 })
 ```
 
