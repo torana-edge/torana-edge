@@ -241,6 +241,20 @@ func okProfile(tenant, team, user string) wasm.ExtensionResult {
 	return wasm.ExtensionValue([]byte(`{"status":"ok"` + profile + `}`))
 }
 
+// callerIdentity is the identity the HOST derives when no plugin sets one:
+// the canonical header name, a NUL, then the header's value. The name is part
+// of it so the same text under two different authentication schemes does not
+// collapse into one rate-limit bucket.
+//
+// Spelled out here because the NUL is invisible in a failure message — these
+// expectations were literal header values until rateIdentity started
+// domain-separating them, and the diff read as "Authorization Bearer sk-..."
+// versus "Bearer sk-...", which looks like a stray word rather than a
+// separator.
+func callerIdentity(header, value string) string {
+	return http.CanonicalHeaderKey(header) + "\x00" + value
+}
+
 func assertIdentity(t *testing.T, got []string, want string) {
 	t.Helper()
 	if len(got) != 1 || got[0] != want {
@@ -476,7 +490,7 @@ func TestAuthIntegrationNoOverrideFallbacks(t *testing.T) {
 				return wasm.ExtensionRefusal(pbv1.ErrorCode_ERROR_CODE_NOT_CONFIGURED, "%s", "not wired")
 			}},
 			headers:     map[string]string{"Authorization": "Bearer sk-torana-nc"},
-			wantID:      "Bearer sk-torana-nc",
+			wantID:      callerIdentity("Authorization", "Bearer sk-torana-nc"),
 			wantVerify:  1,
 			wantPayload: `{"key":"sk-torana-nc"}`,
 		},
@@ -486,7 +500,7 @@ func TestAuthIntegrationNoOverrideFallbacks(t *testing.T) {
 			// NOT_CONFIGURED, and passes with the exact fallback.
 			opts:       authEnvOptions{wire: nil},
 			headers:    map[string]string{"Authorization": "Bearer sk-torana-unwired"},
-			wantID:     "Bearer sk-torana-unwired",
+			wantID:     callerIdentity("Authorization", "Bearer sk-torana-unwired"),
 			wantVerify: 0,
 		},
 		"advisory unavailable": {
@@ -494,7 +508,7 @@ func TestAuthIntegrationNoOverrideFallbacks(t *testing.T) {
 				return wasm.ExtensionRefusal(pbv1.ErrorCode_ERROR_CODE_UNAVAILABLE, "%s", "down")
 			}},
 			headers:     map[string]string{"Authorization": "Bearer sk-torana-down"},
-			wantID:      "Bearer sk-torana-down",
+			wantID:      callerIdentity("Authorization", "Bearer sk-torana-down"),
 			wantVerify:  1,
 			wantPayload: `{"key":"sk-torana-down"}`,
 		},
@@ -504,7 +518,7 @@ func TestAuthIntegrationNoOverrideFallbacks(t *testing.T) {
 				return okProfile("t1", "tm1", "u1")
 			}},
 			headers:    map[string]string{"Authorization": "Bearer sk-proj-provider-secret"},
-			wantID:     "Bearer sk-proj-provider-secret",
+			wantID:     callerIdentity("Authorization", "Bearer sk-proj-provider-secret"),
 			wantVerify: 0,
 		},
 		"jwt never verifies": {
@@ -512,7 +526,7 @@ func TestAuthIntegrationNoOverrideFallbacks(t *testing.T) {
 				return okProfile("t1", "tm1", "u1")
 			}},
 			headers:    map[string]string{"Authorization": "Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ1In0.sig"},
-			wantID:     "Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ1In0.sig",
+			wantID:     callerIdentity("Authorization", "Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ1In0.sig"),
 			wantVerify: 0,
 		},
 		"non-token x-api-key never verifies": {
@@ -520,7 +534,7 @@ func TestAuthIntegrationNoOverrideFallbacks(t *testing.T) {
 				return okProfile("t1", "tm1", "u1")
 			}},
 			headers:    map[string]string{"X-Api-Key": "plain-secret"},
-			wantID:     "", // host default identity (rc.Identity stays empty)
+			wantID:     callerIdentity("X-Api-Key", "plain-secret"), // no plugin identity, so the host derives one from the credential
 			wantVerify: 0,
 		},
 	} {
@@ -620,14 +634,14 @@ func TestAuthIntegrationMalformedResponses(t *testing.T) {
 			if status != 200 {
 				t.Fatalf("status = %d", status)
 			}
-			assertIdentity(t, identities(), "Bearer sk-torana-malformed")
+			assertIdentity(t, identities(), callerIdentity("Authorization", "Bearer sk-torana-malformed"))
 			assertNoVerdict(t, verdicts())
 			if atomic.LoadInt32(hits) != 1 {
 				t.Fatalf("upstream hits = %d, want 1", atomic.LoadInt32(hits))
 			}
 			n, payloads := verifier()
 			assertExactVerifyPayloads(t, n, payloads, `{"key":"sk-torana-malformed"}`)
-			assertBucketKeys(t, limiterKeys(), hashIdentity("Bearer sk-torana-malformed"))
+			assertBucketKeys(t, limiterKeys(), hashIdentity(callerIdentity("Authorization", "Bearer sk-torana-malformed")))
 		})
 		t.Run(name+"/block", func(t *testing.T) {
 			wire := body
@@ -687,11 +701,11 @@ func TestAuthIntegrationContractRefusalFailureModes(t *testing.T) {
 				if status != 200 {
 					t.Fatalf("status = %d", status)
 				}
-				assertIdentity(t, identities(), "Bearer sk-torana-denied")
+				assertIdentity(t, identities(), callerIdentity("Authorization", "Bearer sk-torana-denied"))
 				if atomic.LoadInt32(hits) != 1 {
 					t.Fatalf("upstream hits = %d, want 1", atomic.LoadInt32(hits))
 				}
-				assertBucketKeys(t, limiterKeys(), hashIdentity("Bearer sk-torana-denied"))
+				assertBucketKeys(t, limiterKeys(), hashIdentity(callerIdentity("Authorization", "Bearer sk-torana-denied")))
 			} else {
 				if status != 502 {
 					t.Fatalf("status = %d, want 502; body=%s", status, respBody)
