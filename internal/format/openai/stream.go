@@ -577,13 +577,15 @@ func (s *StreamAdapter) serializeResponsesStream(ctx context.Context, w io.Write
 		}})
 	}
 	ensureText := func() error {
-		if textStarted {
+		if textStarted && !textClosed {
 			return nil
 		}
 		if err := ensureStarted(); err != nil {
 			return err
 		}
 		textStarted = true
+		textClosed = false
+		text.Reset()
 		textIndex = len(outputs)
 		textID = fmt.Sprintf("msg_%d", textIndex)
 		item := map[string]any{"id": textID, "type": "message", "role": "assistant", "content": []any{}}
@@ -649,8 +651,14 @@ func (s *StreamAdapter) serializeResponsesStream(ctx context.Context, w io.Write
 			}
 
 		case evt.BlockStop != nil:
-			if _, err := blocks.stop(evt.BlockStop.Index); err != nil {
+			kind, err := blocks.stop(evt.BlockStop.Index)
+			if err != nil {
 				return err
+			}
+			if kind == engine.BlockKindText || kind == engine.BlockKindThinking {
+				if err := closeText(); err != nil {
+					return err
+				}
 			}
 
 		case evt.Error != nil:

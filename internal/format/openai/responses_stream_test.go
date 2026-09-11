@@ -107,6 +107,161 @@ func TestSerializeResponsesStreamEmitsCompleteLifecycleOnce(t *testing.T) {
 	}
 }
 
+func TestSerializeResponsesStreamPreservesInterleavedOutputOrder(t *testing.T) {
+	text := func(value string) engine.StreamEvent { return engine.StreamEvent{TextDelta: &value} }
+	tool := func(index int, id, name string) []engine.StreamEvent {
+		return []engine.StreamEvent{
+			{ToolCallStart: &engine.ToolCallStart{Index: index, ID: id, Name: name}},
+			{ToolCallDelta: &engine.ToolCallDelta{Index: index, ArgumentsDelta: `{}`}},
+			{ToolCallEnd: &engine.ToolCallEnd{Index: index}},
+		}
+	}
+
+	tests := []struct {
+		name       string
+		events     []engine.StreamEvent
+		wantTypes  []string
+		wantEvents []string
+		wantTexts  []string
+		wantStatus string
+		wantUsage  bool
+	}{
+		{
+			name: "text-tool-text",
+			events: append(append([]engine.StreamEvent{text("before")}, tool(0, "call_0", "first")...),
+				text("after"), engine.StreamEvent{FinishReason: "stop"}),
+			wantTypes: []string{"message", "function_call", "message"},
+			wantEvents: []string{
+				"response.created",
+				"response.output_item.added", "response.content_part.added", "response.output_text.delta",
+				"response.output_text.done", "response.content_part.done", "response.output_item.done",
+				"response.output_item.added", "response.function_call_arguments.delta",
+				"response.function_call_arguments.done", "response.output_item.done",
+				"response.output_item.added", "response.content_part.added", "response.output_text.delta",
+				"response.output_text.done", "response.content_part.done", "response.output_item.done",
+				"response.completed",
+			},
+			wantTexts:  []string{"before", "after"},
+			wantStatus: "completed",
+		},
+		{
+			name: "tool-text-tool-text-incomplete-with-usage",
+			events: append(append(append(append(tool(0, "call_0", "first"), text("middle")),
+				tool(1, "call_1", "second")...), text("last")),
+				engine.StreamEvent{Usage: &engine.StreamUsage{InputTokens: 7, OutputTokens: 5}},
+				engine.StreamEvent{FinishReason: "length"}),
+			wantTypes: []string{"function_call", "message", "function_call", "message"},
+			wantEvents: []string{
+				"response.created",
+				"response.output_item.added", "response.function_call_arguments.delta",
+				"response.function_call_arguments.done", "response.output_item.done",
+				"response.output_item.added", "response.content_part.added", "response.output_text.delta",
+				"response.output_text.done", "response.content_part.done", "response.output_item.done",
+				"response.output_item.added", "response.function_call_arguments.delta",
+				"response.function_call_arguments.done", "response.output_item.done",
+				"response.output_item.added", "response.content_part.added", "response.output_text.delta",
+				"response.output_text.done", "response.content_part.done", "response.output_item.done",
+				"response.incomplete",
+			},
+			wantTexts:  []string{"middle", "last"},
+			wantStatus: "incomplete",
+			wantUsage:  true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			objects := serializeResponsesObjects(t, tc.events)
+			gotEvents := make([]string, len(objects))
+			for i, object := range objects {
+				gotEvents[i] = object["type"].(string)
+			}
+			if strings.Join(gotEvents, "|") != strings.Join(tc.wantEvents, "|") {
+				t.Fatalf("event lifecycle = %v, want %v", gotEvents, tc.wantEvents)
+			}
+			terminal := objects[len(objects)-1]
+			response := terminal["response"].(map[string]any)
+			if response["status"] != tc.wantStatus {
+				t.Fatalf("status = %v, want %s", response["status"], tc.wantStatus)
+			}
+			output := response["output"].([]any)
+			if len(output) != len(tc.wantTypes) {
+				t.Fatalf("output = %#v, want %d items", output, len(tc.wantTypes))
+			}
+			var gotTexts []string
+			for i, raw := range output {
+				item := raw.(map[string]any)
+				if item["type"] != tc.wantTypes[i] {
+					t.Fatalf("output[%d].type = %v, want %s", i, item["type"], tc.wantTypes[i])
+				}
+				if item["type"] == "message" {
+					part := item["content"].([]any)[0].(map[string]any)
+					gotTexts = append(gotTexts, part["text"].(string))
+				}
+			}
+			if strings.Join(gotTexts, "|") != strings.Join(tc.wantTexts, "|") {
+				t.Fatalf("message texts = %v, want %v", gotTexts, tc.wantTexts)
+			}
+			_, hasUsage := response["usage"]
+			if hasUsage != tc.wantUsage {
+				t.Fatalf("usage presence = %v, want %v", hasUsage, tc.wantUsage)
+			}
+		})
+	}
+}
+
+func TestSerializeResponsesStreamKeepsSeparateTextBlocks(t *testing.T) {
+	first, second := "first", "second"
+	events := []engine.StreamEvent{
+		{BlockStart: &engine.BlockStart{Index: 0, Kind: engine.BlockKindText}},
+		{TextDelta: &first},
+		{BlockStop: &engine.BlockStop{Index: 0}},
+		{BlockStart: &engine.BlockStart{Index: 1, Kind: engine.BlockKindText}},
+		{TextDelta: &second},
+		{BlockStop: &engine.BlockStop{Index: 1}},
+		{FinishReason: "stop"},
+	}
+	objects := serializeResponsesObjects(t, events)
+	response := objects[len(objects)-1]["response"].(map[string]any)
+	output := response["output"].([]any)
+	if len(output) != 2 {
+		t.Fatalf("output = %#v, want two message items", output)
+	}
+	for i, want := range []string{first, second} {
+		item := output[i].(map[string]any)
+		part := item["content"].([]any)[0].(map[string]any)
+		if item["type"] != "message" || part["text"] != want {
+			t.Fatalf("output[%d] = %#v, want message %q", i, item, want)
+		}
+	}
+}
+
+func serializeResponsesObjects(t *testing.T, input []engine.StreamEvent) []map[string]any {
+	t.Helper()
+	events := make(chan engine.StreamEvent, len(input))
+	for _, event := range input {
+		events <- event
+	}
+	close(events)
+	ctx := context.WithValue(context.Background(), engine.ChatRequestKey, &engine.ChatRequest{OpenAIVariant: engine.OpenAIResponses})
+	var out bytes.Buffer
+	if err := (&StreamAdapter{}).SerializeStream(ctx, &out, events); err != nil {
+		t.Fatal(err)
+	}
+	var objects []map[string]any
+	for _, line := range strings.Split(out.String(), "\n") {
+		if !strings.HasPrefix(line, "data: {") {
+			continue
+		}
+		var object map[string]any
+		if err := json.Unmarshal([]byte(strings.TrimPrefix(line, "data: ")), &object); err != nil {
+			t.Fatal(err)
+		}
+		objects = append(objects, object)
+	}
+	return objects
+}
+
 func TestResponsesStreamRejectsCrossFamilyDelta(t *testing.T) {
 	for _, input := range []string{
 		strings.Join([]string{
