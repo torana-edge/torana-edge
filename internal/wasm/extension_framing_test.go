@@ -200,10 +200,10 @@ func TestExtensionCommandFramingMatrix(t *testing.T) {
 		// command IS its refusal.
 		{name: "db_query/nil-func", cmd: "torana_db_query", state: "nil-func",
 			args: `{}`,
-			want: extensionMatrixWant{arm: "error", code: pbv1.ErrorCode_ERROR_CODE_NOT_CONFIGURED, message: "database not configured"}},
+			want: extensionMatrixWant{arm: "error", code: pbv1.ErrorCode_ERROR_CODE_NOT_CONFIGURED, message: "database host extension is not implemented"}},
 		{name: "kms_decrypt/nil-func", cmd: "torana_kms_decrypt", state: "nil-func",
 			args: `{"ciphertext":"AA=="}`,
-			want: extensionMatrixWant{arm: "error", code: pbv1.ErrorCode_ERROR_CODE_NOT_CONFIGURED, message: "KMS not configured"}},
+			want: extensionMatrixWant{arm: "error", code: pbv1.ErrorCode_ERROR_CODE_NOT_CONFIGURED, message: "KMS host extension is not implemented"}},
 
 		// torana_record_savings: success is an EMPTY value arm — the savings
 		// were recorded and there is no domain body to acknowledge with.

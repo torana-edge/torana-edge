@@ -360,10 +360,9 @@ func TestControlPlanePluginsOrderingConstraintError(t *testing.T) {
 	// that can never be dispatched.
 	gateManifest := `{"name":"gate","version":"0.1.0","abi_version":"v1","hooks":[{"name":"run_before_request"}],"permissions":[{"name":"env.host_call.torana_evaluate_compaction"}]}`
 	routerManifest := `{"name":"router","version":"0.1.0","abi_version":"v1","hooks":[{"name":"run_before_request"}],"permissions":[{"name":"env.route_request"}]}`
-	// A bare module header is no longer loadable: the plugin host reads
-	// supported_hooks at load, so an empty module is correctly rejected as a
-	// v1 guest. This test is about ordering constraints, not module validity,
-	// so it needs a real minimal plugin guest.
+	// A bare module header is not loadable: the plugin host reads
+	// supported_hooks at load. This test is about ordering constraints, not
+	// module validity, so it needs a real minimal plugin guest.
 	wasmBytes := wasm.MinimalModule(false)
 
 	os.WriteFile(filepath.Join(pGateDir, "plugin.json"), []byte(gateManifest), 0644)
