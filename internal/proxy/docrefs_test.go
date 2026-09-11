@@ -124,14 +124,15 @@ func crossRepository(ref string) bool {
 	return ok && crossRepositoryRoots[first]
 }
 
-// referencesIn returns every Markdown reference in a file's text, with
-// absolute URLs removed first.
+// referencesIn returns every local Markdown reference in a file's text.
 func referencesIn(text string) []string {
-	withoutURLs := urlRef.ReplaceAllString(text, " ")
 	// Reduce every markdown link to its target, so a label that happens to
-	// name a file is not mistaken for a second reference.
-	targetsOnly := markdownLink.ReplaceAllString(withoutURLs, " $1 ")
-	return markdownRef.FindAllString(targetsOnly, -1)
+	// name a file is not mistaken for a second reference. This must happen
+	// before URL removal: stripping an external target first would leave an
+	// incomplete link whose file-like label could no longer be reduced.
+	targetsOnly := markdownLink.ReplaceAllString(text, " $1 ")
+	withoutURLs := urlRef.ReplaceAllString(targetsOnly, " ")
+	return markdownRef.FindAllString(withoutURLs, -1)
 }
 
 // imaginary builds a path to a document that does not exist. A table that
@@ -267,6 +268,11 @@ func TestReferenceExtractionContract(t *testing.T) {
 			name: "a label naming one file and a target naming another yields only the target",
 			text: "[see " + imaginary("OLD_NAME") + "](docs/QUICKSTART.md)",
 			want: []string{"docs/QUICKSTART.md"},
+		},
+		{
+			name: "an external link with a file-like label is not local",
+			text: "[README.md](https://example.com/project)",
+			want: nil,
 		},
 		{
 			name: "an absolute URL is not a repository reference",
