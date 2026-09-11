@@ -185,7 +185,7 @@ for the current implementation or workload.
 > collide. All are now regression tests, and the reflection inventory exists so
 > the next omission fails a test rather than shipping.
 
-## The WASM boundary dominates everything else
+## Historical WASM-boundary comparison
 
 `BenchmarkBoundaryCrossing` uses fixtures that do nothing but return
 pass-through, so the delta between 1, 2 and 3 plugins is crossing cost with no
@@ -203,17 +203,17 @@ converge across runs (deltas ranged from 60 µs to 240 µs), so **no per-crossin
 figure is claimed for small payloads** — it is somewhere in that range, and the
 benchmark as written cannot narrow it.
 
-What does hold: at 100 messages a crossing costs ~2.4 ms, while the entire
+At the measured revision, the 100-message crossing cost was ~2.4 ms, while the
 host-side conversion for that request — `pbconv` plus `proto.Marshal`, run once
-— is ~137 µs. Two consequences:
+— was ~137 µs. That experiment supported two local conclusions:
 
-1. **Optimising host-side encoding is not worth doing.** `pbconv` is the most
-   expensive host-side step (`json.Marshal` per message, per tool call and per
-   tool — `pbconv.go:33-84`), and at 100 messages it is 69 µs against a 16.5 ms
-   five-plugin pipeline: 0.4%.
-2. **Plugin count is what costs.** Anything that reduces crossings — skipping
-   plugins with no interest in a request, short-circuiting on a block verdict —
-   is worth far more than encoding work.
+1. Host-side encoding was not the useful optimization target in those rows:
+   `pbconv` measured 69 µs against a 16.5 ms five-plugin pipeline.
+2. Reducing crossings offered more leverage at that revision than optimizing
+   the measured encoding path.
+
+The representation and enforcement path have since changed. Re-run the current
+benchmarks before using either conclusion to prioritize work.
 
 ## Historical streaming-cost measurements
 
@@ -262,19 +262,19 @@ otherwise, and asserted **77 µs** on the strength of an unwarmed run.
 
 Where the two disagree, the sustained figure is the one to use.
 
-**Latency is fine; allocation is not.** 58 µs added to time-to-next-token is
-imperceptible. But 37 KB allocated to process a six-byte text delta is a ~6000×
-amplification, and ~34,000 allocations per thousand events is real GC pressure —
-which shows up under concurrency, and every benchmark here is serial.
+In those historical serial rows, 58 µs per event was small while 37 KB allocated
+for a six-byte text delta was a ~6000× amplification. The old run measured about
+34,000 allocations per thousand events; it did not establish current concurrent
+stream behavior.
 
-Two design consequences:
+Two follow-ups remain valid for interpreting that evidence:
 
 1. **Measure current stream enforcement directly.** It now exists, so these
    pre-enforcement rows cannot establish its cost; use
    `BenchmarkStreamEnforcement` and report the exact revision.
-2. **The per-event allocation is the optimisation worth doing**, if any is. It is
-   `pbconv` → `proto.Marshal` → guest memory copy → result copy, per event, per
-   plugin.
+2. Re-profile allocation ownership before optimizing it; the old path was
+   `pbconv` → `proto.Marshal` → guest memory copy → result copy per event and
+   plugin, but that attribution is not a current contract.
 
 ## Historical illustrative latency budget
 
@@ -299,15 +299,20 @@ whole-process benchmarks above now cover the proxy and format adapters, so this
 older exclusion must not be read as a statement about current benchmark
 coverage.
 
-## What the numbers still do not cover
+## What these historical plugin-pipeline numbers did not cover
 
-- Format adapters, the HTTP proxy layer, and `run_after_response`.
+- Format adapters or the HTTP proxy layer. The whole-process benchmarks above
+  now cover both.
+- An isolated `run_after_response` cost. The retained official plugin-chain run
+  invokes OTel's response hook, so it includes that work in the complete chain,
+  but does not attribute a separate response-hook number.
 - Host calls made from inside a hook. `env.model_complete` reaches an
   operator-bound model and can take hundreds of milliseconds — real plugin work dwarfs
   everything measured here.
-- Concurrency. The pool is 4 (`wasm.Runtime`), so a fifth concurrent request
-  waits on a slot. Every benchmark here is serial and says nothing about that,
-  which matters most for the allocation figures above.
+- Concurrency. These historical plugin microbenchmarks were serial. The
+  whole-process and official plugin-chain runs above include concurrent rows,
+  but do not turn the old per-event allocation figures into concurrent stream
+  evidence.
 
 ## Near-limit request bodies
 
