@@ -492,7 +492,7 @@
         const endpoint = row.dataset.endpoint;
         httpEndpoints[endpoint] = {
           origin: row.querySelector('.http-binding-origin').value.trim(),
-          methods: JSON.parse(row.dataset.methods || '[]'),
+          methods: [...row.querySelectorAll('.http-binding-method:checked')].map(input => input.value),
           timeout_ms: Number(row.querySelector('.http-binding-timeout').value) || 0,
           max_request_bytes: Number(row.querySelector('.http-binding-request').value) || 0,
           max_response_bytes: Number(row.querySelector('.http-binding-response').value) || 0,
@@ -502,6 +502,12 @@
       for (const declaration of (p.http_endpoints || [])) {
         if (declaration.required && !httpEndpoints[declaration.name]) {
           showAlert(`HTTP endpoint ${declaration.name} is required before ${name} can be enabled.`);
+          return false;
+        }
+      }
+      for (const [endpoint, binding] of Object.entries(httpEndpoints)) {
+        if (!binding.origin || binding.methods.length === 0) {
+          showAlert(`HTTP endpoint ${endpoint} needs an origin and at least one approved method.`);
           return false;
         }
       }
@@ -779,9 +785,12 @@
       const httpRows = (p.http_endpoints || []).map(declaration => {
         const existing = approvedHTTP[declaration.name] || {};
         const enabled = Boolean(approvedHTTP[declaration.name]) || declaration.required;
-        return `<div class="info-note" data-endpoint="${escAttr(declaration.name)}" data-methods='${escAttr(JSON.stringify(declaration.methods || []))}'>
+        const approvedMethods = Array.isArray(existing.methods) ? existing.methods : (declaration.methods || []);
+        const methodOptions = (declaration.methods || []).map(method => `<label class="checkbox-row"><input type="checkbox" class="http-binding-method" value="${escAttr(method)}" ${approvedMethods.includes(method) ? 'checked' : ''}> <code>${escHtml(method)}</code></label>`).join('');
+        return `<div class="info-note" data-endpoint="${escAttr(declaration.name)}">
           <label class="checkbox-row"><input type="checkbox" class="http-binding-enabled" ${enabled ? 'checked' : ''}> <code>${escHtml(declaration.name)}</code>${declaration.required ? ' (required)' : ''}</label>
-          <div class="hint">${escHtml(declaration.description || '')}; methods: ${escHtml((declaration.methods || []).join(', '))}</div>
+          <div class="hint">${escHtml(declaration.description || '')}. Approve only the methods this endpoint needs.</div>
+          <div class="form-grid">${methodOptions}</div>
           <div class="form-grid">
             <label class="field"><span>Approved origin</span><input class="input http-binding-origin" value="${escAttr(existing.origin || declaration.origin || '')}" placeholder="https://api.example.com"></label>
             <label class="field"><span>Timeout ms</span><input class="input http-binding-timeout" type="number" min="0" value="${escAttr(existing.timeout_ms || declaration.timeout_ms || 5000)}"></label>

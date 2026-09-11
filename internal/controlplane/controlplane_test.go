@@ -111,3 +111,24 @@ func TestUIProviderFormatsMatchTheServer(t *testing.T) {
 			ui, want)
 	}
 }
+
+func TestHTTPApprovalEditorPreservesMethodSubset(t *testing.T) {
+	raw, err := os.ReadFile("dist/index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	html := string(raw)
+	for _, marker := range []string{
+		"Array.isArray(existing.methods) ? existing.methods : (declaration.methods || [])",
+		"class=\"http-binding-method\"",
+		"querySelectorAll('.http-binding-method:checked')",
+		"binding.methods.length === 0",
+	} {
+		if !strings.Contains(html, marker) {
+			t.Errorf("HTTP approval editor lost method-subset behavior: missing %q", marker)
+		}
+	}
+	if strings.Contains(html, "methods: JSON.parse(row.dataset.methods") {
+		t.Fatal("HTTP approval save still restores every manifest method instead of the operator's subset")
+	}
+}
