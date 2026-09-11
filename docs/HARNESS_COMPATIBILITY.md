@@ -6,8 +6,8 @@ model-list, MCP, and unknown auxiliary requests remain ordinary reverse-proxy
 traffic and never enter the inference plugin pipeline.
 
 This is an endpoint contract, not a list of blessed clients. Claude Code,
-Codex, OpenCode, Aider, or a new client using the same provider endpoint gets
-the same behavior.
+Codex, OpenCode, Aider, oh-my-pi, or a new client using the same provider
+endpoint gets the same behavior.
 
 ## Inference boundary
 
@@ -43,8 +43,8 @@ Use the harness's supported base-URL setting whenever it has one:
 - Claude Code: set `ANTHROPIC_BASE_URL` to an Anthropic-format Torana provider.
 - Codex: configure an OpenAI Responses-compatible custom provider whose base
   URL points at Torana.
-- OpenCode and Aider: set the selected provider's OpenAI-compatible or
-  Anthropic base URL to Torana.
+- OpenCode, Aider and oh-my-pi: set the selected provider's OpenAI-compatible
+  or Anthropic base URL to Torana.
 - Code Assist clients without a base-URL setting: use Torana's optional MITM
   ingress as described in [Gemini / Antigravity](GEMINI_ANTIGRAVITY.md).
 

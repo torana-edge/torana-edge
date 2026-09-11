@@ -106,6 +106,9 @@ Environment:
   TORANA_DEFAULT_PROVIDER  provider for requests that match no /provider/ prefix
   TORANA_PLUGINS_DIR       plugin directory for the plugin subcommands
   TORANA_LOG_LEVEL         set to debug for safe request lifecycle logs
+  TORANA_CI_CACHE          directory for wazero's compiled-module cache; set it
+                           and each plugin compiles once per machine rather
+                           than once per start
   OTEL_EXPORTER_OTLP_ENDPOINT
                            OTLP gRPC collector. With neither endpoint set,
                            OTel export is off. An https:// endpoint uses TLS,
