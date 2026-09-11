@@ -1,3 +1,15 @@
+// Package wasm runs plugin guests in a wazero sandbox and implements the host
+// calls they are allowed to make.
+//
+// Every plugin is a WASI module with no ambient authority: no filesystem, no
+// network, no clock except through a host call this package brokers and the
+// operator approved. Resource bounds — memory, instance pool size, per-call
+// timeout, idle retirement — are enforced here, so a plugin cannot make the
+// proxy unavailable for the traffic it is not handling.
+//
+// What a plugin may ASK for is described by its manifest; what it is granted
+// is decided in internal/plugin. This package is where a granted call is
+// actually executed, and where an ungranted one is refused.
 package wasm
 
 import (

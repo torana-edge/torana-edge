@@ -1,3 +1,17 @@
+// Package pluginhttp is the only way a plugin reaches the network.
+//
+// A plugin declares the origins it needs, an operator approves each one with
+// its methods, timeout and request and response size caps, and this package
+// refuses everything else. A relative URL, or a method outside the approval,
+// is an error rather than a request.
+//
+// Redirects are never followed — not to an unapproved host, not to an approved
+// one. The 3xx is handed back to the plugin as the response. Following one
+// would let the far side choose an origin the operator never approved, which
+// is the whole thing the approval is for.
+//
+// Connections are pooled per origin so an approved endpoint does not pay a
+// fresh TLS handshake per call, and released when the owning server stops.
 package pluginhttp
 
 import (

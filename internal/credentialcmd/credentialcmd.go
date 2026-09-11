@@ -1,3 +1,10 @@
+// Package credentialcmd implements `torana credential`: the CLI for naming,
+// storing and removing the secrets providers and plugins resolve by name.
+//
+// It writes through the same encrypted store the server reads
+// (internal/credentialstore), so a credential added here is usable without
+// restarting anything, and a secret never has to be pasted into a config file
+// to be used.
 package credentialcmd
 
 import (

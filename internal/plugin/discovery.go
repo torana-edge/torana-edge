@@ -1,3 +1,15 @@
+// Package plugin discovers WASM plugins on disk, decides which may run, and
+// orchestrates the hook pipeline around every request.
+//
+// Discovery is only half of it, and the smaller half. A plugin does not run
+// because it exists: it runs because an operator approved its exact bundle
+// digest and the permissions its manifest asks for. This package holds that
+// gate, the per-request pipeline that pins one generation of loaded plugins
+// for a request's whole lifetime, and the verification that a plugin's
+// returned request or response only changed what it was granted.
+//
+// The sandbox itself lives in internal/wasm; this package decides what is
+// allowed to enter it.
 package plugin
 
 import (

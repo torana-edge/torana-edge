@@ -1,3 +1,16 @@
+// Package engine defines Torana's canonical intermediate representation: the
+// one shape every provider wire format is translated into, and the only shape
+// plugins ever see.
+//
+// A request arrives in some provider's format, an adapter in internal/format
+// converts it to a ChatRequest here, the plugin pipeline operates on that, and
+// an adapter converts it back on the way out. The IR is what makes a plugin
+// written once work behind OpenAI, Anthropic and Gemini alike.
+//
+// The message body is an ORDERED BLOCK LIST — text, thinking, tool use, tool
+// results, cache breakpoints, signatures and provider-specific arms in wire
+// order. There is no competing flat content field, because two spellings of
+// the same fact is how facts get lost in translation.
 package engine
 
 type chatRequestCtxKey struct{}

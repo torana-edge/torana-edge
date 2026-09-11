@@ -1,3 +1,14 @@
+// Package secret seals values Torana stores on disk so a leaked file is not a
+// leaked credential.
+//
+// One AES-GCM key per data directory, created on first use with O_EXCL so two
+// processes racing on a fresh install cannot each generate one and have the
+// loser's write orphan everything the winner already encrypted. The key file
+// is owner-only, enforced per platform by internal/fileperm.
+//
+// This is encryption at rest against a stolen file, not against a compromised
+// host: the key sits beside the data it protects, because Torana runs on the
+// developer's own machine and has nowhere else to put it.
 package secret
 
 import (
