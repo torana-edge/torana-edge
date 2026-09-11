@@ -537,7 +537,7 @@ func TestIntentBridgesToRequestSideID(t *testing.T) {
 	if _, err := pp.RunBeforeRequest(context.Background(), 2, chat, nil); err != nil {
 		t.Fatalf("RunBeforeRequest: %v", err)
 	}
-	got, ok := store.Get(wasm.SharedCacheKey("intent:call_req_42"))
+	got, ok := store.Get(context.Background(), wasm.SharedCacheKey("intent:call_req_42"))
 	if !ok || got != "where is the retry budget configured" {
 		t.Fatalf("intent not bridged to request-side ID: got %q (ok=%v)", got, ok)
 	}
@@ -1039,7 +1039,7 @@ func TestIntentNativeIEnrichesDescriptionOnly(t *testing.T) {
 	if args["i"] != "find the retry budget" {
 		t.Fatalf(`native "i" must NOT be stripped, got %v`, args)
 	}
-	if v, ok := store.Get(wasm.SharedCacheKey("intent:call_native")); !ok || v != "find the retry budget" {
+	if v, ok := store.Get(context.Background(), wasm.SharedCacheKey("intent:call_native")); !ok || v != "find the retry budget" {
 		t.Fatalf("native i not captured into cache: %q ok=%v", v, ok)
 	}
 }
