@@ -1345,7 +1345,14 @@ func New(cfg Config) (*Server, error) {
 			if resp.StatusCode >= 400 {
 				ctx := resp.Request.Context()
 				rs := reqStateFrom(ctx)
-				if pl := rs.Pipeline; pl != nil {
+				// Intercepted, exactly as the success path below requires a
+				// resolved format. Without it this branch ran response hooks
+				// on ANY failing response, including auxiliary provider
+				// traffic that never entered the IR — so an unauthenticated
+				// model-discovery call reached every response plugin, and the
+				// pass-through guarantee held only while the upstream
+				// happened to answer 2xx.
+				if pl := rs.Pipeline; pl != nil && rs.Intercepted {
 					// No assistant message: upstream failed, so there is no
 					// reply. UpstreamStatus carries the failure, and plugins
 					// must not assume Message is set. Immutable — there is no
