@@ -329,8 +329,9 @@ func TestE2E(t *testing.T) {
 		}
 
 		// Turn 2: send a huge fresh tool result. The model requested this
-		// evidence and has not consumed it yet, so #166 requires that it reach
-		// the upstream verbatim rather than being compacted on first exposure.
+		// evidence and has not consumed it yet, so the consumption boundary
+		// requires that it reach the upstream verbatim rather than being
+		// compacted on first exposure.
 		bigResult := strings.Repeat("zzzz zzz zz\n", 300) // >2000 chars, no intent keywords
 		turn2 := fmt.Sprintf(`{
 			"model": "gpt-x",

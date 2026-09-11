@@ -168,7 +168,7 @@ it as ordinary HTTP rather than attempting to decode it as an inference call.
 | [Antigravity CLI](docs/GEMINI_ANTIGRAVITY.md) | The optional TLS-terminating MITM ingress |
 | [Prompt caching](docs/PROMPT_CACHING.md) | Declaring cache prices and lifetimes, and the arithmetic that bounds cache warming |
 | [Context compaction](docs/COMPACTION.md) | Policies, the economic gate, and why it is off by default |
-| [Dogfood results](docs/DOGFOOD_166_RESULTS.md) | 75 paired sessions measuring whether compaction actually saves money |
+| [Dogfood results](docs/DOGFOOD_COMPACTION_RESULTS.md) | 75 paired sessions measuring whether compaction actually saves money |
 
 **Writing a plugin?** That lives with the SDK:
 [torana-plugin-sdk](https://github.com/torana-edge/torana-plugin-sdk) — the

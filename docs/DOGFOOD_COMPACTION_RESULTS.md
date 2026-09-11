@@ -1,4 +1,4 @@
-# Issue 166 DeepSeek dogfood results
+# DeepSeek dogfood results: does compaction save money?
 
 On 21 July 2026, Torana ran a paired OMP dogfood to test whether safe
 tool-output compaction reduces provider-reported input tokens and actual API
