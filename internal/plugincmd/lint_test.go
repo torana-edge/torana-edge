@@ -81,7 +81,7 @@ func assertClean(t *testing.T, msgs []string) {
 	}
 }
 
-// The bug PLUGIN_SEMANTICS.md §2 currently teaches. Under -buildmode=c-shared
+// The bug torana-plugin-sdk/docs/PLUGIN_SEMANTICS.md currently teaches. Under -buildmode=c-shared
 // the host calls _initialize, which runs init() — main() never runs, so the
 // handler is never registered and the plugin does nothing forever, with no
 // error anywhere. Nothing detected this before.

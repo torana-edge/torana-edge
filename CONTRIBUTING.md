@@ -132,10 +132,13 @@ both repos:
 4. Update the Go and Rust ABI-v1 SDK helpers and conformance tests. Keep both
    compiled conformance guests in the Edge host test: language support is a
    host-boundary contract, not merely two libraries that compile.
-5. Update `ABI.md`, `docs/WRITING_A_PLUGIN.md`, and **`docs/WASM_PLUGIN_GUIDE.md`**.
-   That last one is the document that lets less capable models write correct
-   plugins; a new capability that isn't in its host-function section and final
-   checklist silently stops the guide being sufficient.
+5. Update the plugin-author documentation, which lives in the **SDK
+   repository**, not here: `torana-plugin-sdk/docs/PLUGIN_SEMANTICS.md` (the
+   normative field table), `torana-plugin-sdk/docs/WRITING_A_PLUGIN.md`, and
+   **`torana-plugin-sdk/docs/WASM_PLUGIN_GUIDE.md`**. That last one is the
+   document that lets less capable models write correct plugins; a new
+   capability that isn't in its host-function section and final checklist
+   silently stops the guide being sufficient.
 
 **In torana-edge:**
 
