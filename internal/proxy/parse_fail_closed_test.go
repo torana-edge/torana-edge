@@ -639,10 +639,9 @@ func TestParseFailClosedAmbiguousArmRowsTransport(t *testing.T) {
 
 // TestSchedulingValueFree400Transport — the SCHEDULING_UNSPECIFIED and
 // unknown-scheduling rows at the REAL configured-format transport boundary
-// (fold-in acceptance contract; currently SKIPPED because the gemini
-// adapter has no scheduling grammar yet): the golden value-free 400 with
-// ZERO request hooks, zero response hooks, zero limiter buckets, zero
-// upstream — under BOTH failure modes.
+// exercise the adapter's invalid-scheduling grammar: the golden value-free
+// 400 with ZERO request hooks, zero response hooks, zero limiter buckets,
+// zero upstream — under BOTH failure modes.
 //
 // The request-hook proof is NON-VACUOUS: the allow-mode row runs
 // test-trapper (which traps EVERY before-request invocation) overridden to

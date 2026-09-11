@@ -33,11 +33,11 @@ func TestRunOnHTTPRequest_UnknownPlugin(t *testing.T) {
 	}
 }
 
-// TestRunOnHTTPRequest_ForbiddenWithoutGrant loads the otel plugin but
+// TestRunOnHTTPRequest_ForbiddenWithoutGrant loads the HTTP-server fixture but
 // temporarily strips the env.serve_http grant to verify RunOnHTTPRequest
 // returns ErrServeHTTPForbidden, which the proxy maps to 403.
 //
-// This test uses the real otel WASM binary. When the binary is absent it is
+// This test uses the test-http-server WASM binary. When the binary is absent it is
 // skipped locally (and fails loudly in CI with TORANA_E2E=1).
 func TestRunOnHTTPRequest_ForbiddenWithoutGrant(t *testing.T) {
 	requireWASM(t, fixturesDir+"/test-http-server/plugin.wasm")
@@ -45,7 +45,7 @@ func TestRunOnHTTPRequest_ForbiddenWithoutGrant(t *testing.T) {
 	rt := wasm.NewRuntime(context.Background())
 	defer rt.Close()
 
-	// Load the pipeline with otel but intentionally declare NO permissions
+	// Load the HTTP-server fixture but intentionally declare NO permissions
 	// so env.serve_http is absent.
 	bundles, err := DiscoverPlugins(fixturesDir)
 	if err != nil {
@@ -93,7 +93,7 @@ func TestRunOnHTTPRequest_ForbiddenWithoutGrant(t *testing.T) {
 	}
 }
 
-// TestRunOnHTTPRequest_ServingPlugin loads the otel plugin with full grants
+// TestRunOnHTTPRequest_ServingPlugin loads the HTTP-server fixture with full grants
 // and verifies RunOnHTTPRequest returns a 200 HTML response from the plugin's
 // run_on_http_request handler.
 func TestRunOnHTTPRequest_ServingPlugin(t *testing.T) {
@@ -109,7 +109,7 @@ func TestRunOnHTTPRequest_ServingPlugin(t *testing.T) {
 		t.Fatalf("RunOnHTTPRequest: %v", err)
 	}
 	if resp == nil {
-		t.Fatal("expected non-nil response from otel serve_http handler, got nil")
+		t.Fatal("expected non-nil response from test-http-server serve_http handler, got nil")
 	}
 	// current ABI dropped HttpResponse.Handled: a non-nil response IS the plugin
 	// serving the request, and declining is a nil response.

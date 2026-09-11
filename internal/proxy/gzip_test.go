@@ -15,14 +15,11 @@ import (
 	"github.com/torana-edge/torana-edge/internal/provider"
 )
 
-// TestCompressedJSONResponseStillProcessed: a compressed upstream body must
-// never bypass the response pipeline. Regression: Claude Code sends
-// Accept-Encoding: gzip; the transport forwarded it, DeepSeek returned
-// gzipped JSON, json.Unmarshal failed silently, and every response hook was
-// skipped — plugin-injected tool-call fields leaked back to the harness.
-// Two layers are pinned here: the Director forces Accept-Encoding: identity
-// upstream, and the JSON path decompresses gzip anyway if an upstream
-// ignores that.
+// TestCompressedJSONResponseStillProcessed pins two compression defenses:
+// the Director forces Accept-Encoding: identity upstream, and the JSON path
+// still decompresses gzip when an upstream ignores that negotiation. The
+// usage assertion proves that the decompressed body reached response parsing;
+// plugin-hook execution is covered by response-pipeline tests with fixtures.
 func TestCompressedJSONResponseStillProcessed(t *testing.T) {
 	sawEncoding := make(chan string, 1)
 	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

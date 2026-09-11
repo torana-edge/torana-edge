@@ -89,8 +89,8 @@ func respondReq(formatName string, stream bool) string {
 }
 
 // TestRespondDirectlyAllFormats: the responder fixture serves a canned
-// completion in each provider format — a valid envelope the format's own
-// adapter can parse back — and upstream is never called.
+// completion in each provider format. The test checks valid JSON and each
+// format's top-level completion marker; upstream is never called.
 func TestRespondDirectlyAllFormats(t *testing.T) {
 	for _, formatName := range []string{"openai", "anthropic", "gemini"} {
 		t.Run(formatName, func(t *testing.T) {
