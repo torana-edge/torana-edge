@@ -23,7 +23,6 @@ The supported modes are:
 | Mode | Behavior |
 | --- | --- |
 | `exact` | Never alter the output. This is also the default for unknown tools. |
-| `source` | Reserved, but currently fails closed to `exact`. Live OMP dogfood showed that reread markers can make an agent repeatedly fetch different ranges of the same file. |
 | `deterministic` | Retain bounded head/tail evidence plus size, SHA-256, omitted-byte count, and a rerun instruction. Set `first_pass` to compact the first model exposure. |
 | `keyword` | `keyword_compactor` only: retain lines matching cached intent or bounded guidance derived from the historical user request and tool call, after at least one exact exposure. |
 | `model` | `compactor` only: create a summary through an operator-bound model service, guided by cached intent or the same bounded historical fallback, after at least one exact exposure, then apply it only when the economic gate passes. |
@@ -70,11 +69,10 @@ in use.
 `first_pass` is intentionally honored only by `deterministic`. This is useful
 for large, reproducible listings, searches, and repetitive successful logs: the
 model sees the same compact representation on every turn, so no later prompt
-prefix rewrite is required. Do not enable it for source reads or exact records.
-Keep source-reading tools `exact`: merely making their output recoverable does
-not bound the number or cost of recovery calls an agent may make. The `source`
-spelling is accepted for configuration compatibility, but currently behaves as
-`exact` while recovery economics and loop detection remain unresolved.
+prefix rewrite is required. Do not enable it for reads that require exact
+fidelity or for exact records. Keep source-reading tools `exact`: merely making
+their output recoverable does not bound the number or cost of recovery calls an
+agent may make.
 
 ## Model compaction economics
 
