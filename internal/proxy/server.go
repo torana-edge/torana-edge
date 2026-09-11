@@ -1370,7 +1370,7 @@ func New(cfg Config) (*Server, error) {
 			contentType := resp.Header.Get("Content-Type")
 
 			// SSE streaming: parse → pipeline → serialize.
-			if strings.Contains(contentType, "text/event-stream") {
+			if isEventStreamMediaType(contentType) {
 				streamFormat, _ := resp.Request.Context().Value(formatCtxKey{}).(*format.Format)
 				if streamFormat == nil {
 					return nil
@@ -1665,7 +1665,7 @@ func New(cfg Config) (*Server, error) {
 			}
 
 			// Non-streaming JSON:
-			if strings.Contains(contentType, "application/json") {
+			if isJSONMediaType(contentType) {
 
 				lr := io.LimitReader(resp.Body, maxBodySize+1)
 				bodyBytes, err := io.ReadAll(lr)
@@ -1754,6 +1754,12 @@ func New(cfg Config) (*Server, error) {
 				return nil
 			}
 
+			// Neither streaming nor JSON: the response passes through with no
+			// hooks, no metering and no cost accounting. That is the right
+			// outcome for a body this pipeline cannot decode — but it must not
+			// be a SILENT one, or a provider quietly stops being governed and
+			// nobody finds out until the numbers are questioned.
+			s.warnUnpipelinedContentType(contentType)
 			return nil
 		},
 	}
