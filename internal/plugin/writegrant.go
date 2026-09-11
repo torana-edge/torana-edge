@@ -47,7 +47,7 @@ import (
 // length, then an explicit tool-call count, then one nested record per tool
 // call. The role hasher then receives (absolute index, message digest), so a
 // tool call's four fields can never be confused with a neighbouring message's
-// fields — the round-1 framing was structurally ambiguous and let a call move
+// fields — the superseded per-role framing was structurally ambiguous and let a call move
 // between two same-role messages with an identical preimage (reproduced in
 // TestMessageFingerprintUnambiguousAcrossBoundaryShift). It is
 // collision-resistant and reorder-sensitive, and carries only 32 bytes per

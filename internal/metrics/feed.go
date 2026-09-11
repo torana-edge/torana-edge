@@ -102,7 +102,15 @@ func NewRequestFeed(capacity int) *RequestFeed {
 
 // Add appends ev to the ring buffer, evicting the oldest entry when full,
 // and broadcasts ev to all current subscribers via non-blocking sends.
-// Add is O(1) and never blocks regardless of subscriber state.
+//
+// It never blocks regardless of subscriber state — every send is a select
+// with a default, so a subscriber that has stopped reading loses events
+// rather than stalling the request that produced them.
+//
+// The ring write is O(1). The broadcast is O(subscribers), under the mutex.
+// This said "Add is O(1)", which is the claim a caller would rely on before
+// putting it on a hot path: the control plane holds one subscriber per open
+// dashboard, and that is what the cost scales with.
 func (f *RequestFeed) Add(ev RequestEvent) {
 	f.mu.Lock()
 	// Write into the current head slot and advance.

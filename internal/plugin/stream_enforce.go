@@ -1,6 +1,6 @@
 package plugin
 
-// Stream-signature enforcement (Migration B part 2b).
+// Stream-signature enforcement.
 //
 // This file wires the pure stream verifier (streamverify.go — DONE, consumed
 // as-is) into the streaming hook as the enforcement layer, implementing the
