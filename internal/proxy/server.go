@@ -2139,7 +2139,17 @@ func New(cfg Config) (*Server, error) {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		s.SetProviders(candidate)
+		// The candidate is already on disk. A rejection here has to undo that
+		// and say so, or the operator is told their change took effect while
+		// the running proxy keeps the old one — and the next restart loads the
+		// configuration that was just rejected.
+		if err := s.SetProviders(candidate); err != nil {
+			if rollbackErr := s.persistProviders(s.GetConfig().Providers); rollbackErr != nil {
+				log.Printf("failed to restore config after rejected provider update: %v", rollbackErr)
+			}
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
 
 		w.Header().Set("Content-Type", "application/json")
 		writePluginsWithWarnings(w, newPlugins, skipped)
@@ -2282,7 +2292,17 @@ func New(cfg Config) (*Server, error) {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		s.SetProviders(candidate)
+		// The candidate is already on disk. A rejection here has to undo that
+		// and say so, or the operator is told their change took effect while
+		// the running proxy keeps the old one — and the next restart loads the
+		// configuration that was just rejected.
+		if err := s.SetProviders(candidate); err != nil {
+			if rollbackErr := s.persistProviders(s.GetConfig().Providers); rollbackErr != nil {
+				log.Printf("failed to restore config after rejected provider update: %v", rollbackErr)
+			}
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
 
 		w.Header().Set("Content-Type", "application/json")
 		writePluginsWithWarnings(w, newPlugins, skipped)
@@ -2868,16 +2888,26 @@ func (s *Server) Handler() http.Handler {
 }
 
 // SetProviders hot-reloads the provider configuration without restarting.
-func (s *Server) SetProviders(cfg provider.Config) {
+// SetProviders publishes a configuration to the live server, or reports why it
+// could not.
+//
+// It RETURNS the rejection rather than only logging it. Control-plane handlers
+// persist a candidate to disk before publishing it; when this swallowed a bad
+// credential registry, the write had already landed, the handler still
+// answered 200, and disk and memory disagreed from then on — the operator was
+// told their change took effect while the running proxy kept the old one, and
+// the next restart would load the config that had been rejected.
+func (s *Server) SetProviders(cfg provider.Config) error {
 	if err := s.replaceCredentialRegistry(cfg.Credentials); err != nil {
 		log.Printf("config hot-reload rejected credential registry: %v", err)
-		return
+		return fmt.Errorf("credential registry rejected: %w", err)
 	}
 	s.configMu.Lock()
 	s.config.Providers = cfg
 	s.configMu.Unlock()
 	s.rateLimiter.Update(cfg.Limits.RPM, cfg.Limits.Concurrency)
 	log.Printf("config hot-reload: %d providers loaded", len(cfg.Providers))
+	return nil
 }
 
 func clonePluginConfig(src map[string]json.RawMessage) map[string]json.RawMessage {
@@ -3019,7 +3049,9 @@ func (s *Server) applyProviderConfigTransaction(current, incoming provider.Confi
 				log.Printf("failed to roll back cache config: %v", err)
 			}
 		}
-		s.SetProviders(current)
+		if err := s.SetProviders(current); err != nil {
+			log.Printf("failed to restore providers during rollback: %v", err)
+		}
 	}
 
 	if cacheChanged {
@@ -3070,8 +3102,12 @@ func (s *Server) applyProviderConfigTransaction(current, incoming provider.Confi
 			_ = oldAudit.Close()
 		}
 		log.Printf("config hot-reload: %d providers loaded", len(incoming.Providers))
-	} else {
-		s.SetProviders(incoming)
+	} else if err := s.SetProviders(incoming); err != nil {
+		rollbackLive()
+		if rollbackErr := s.persistProviders(current); rollbackErr != nil {
+			log.Printf("failed to restore config after rejected provider update: %v", rollbackErr)
+		}
+		return err
 	}
 	return nil
 }
