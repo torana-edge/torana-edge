@@ -2,11 +2,13 @@ package proxy
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/torana-edge/torana-edge/internal/provider"
@@ -402,4 +404,77 @@ func TestProviderAuthModesAreExplicit(t *testing.T) {
 			t.Errorf("Authorization = %q, want the fallback's own key", got)
 		}
 	})
+}
+
+// failingBody yields some bytes and then fails, the way a client connection
+// that dies mid-upload does.
+type failingBody struct {
+	data []byte
+	n    int
+}
+
+func (b *failingBody) Read(p []byte) (int, error) {
+	if b.n < len(b.data) {
+		n := copy(p, b.data[b.n:])
+		b.n += n
+		return n, nil
+	}
+	return 0, errors.New("connection reset while reading the request body")
+}
+
+func (b *failingBody) Close() error { return nil }
+
+// A request body that cannot be read in full must not be forwarded.
+//
+// Buffering for retry discarded io.ReadAll's error, so whatever HAD been read
+// was sent upstream as though it were the whole request: a prompt truncated
+// mid-sentence, which the model answers as if the caller had stopped there.
+// The caller is billed for it and gets a confident answer to half a question.
+// There is no outcome here better than refusing.
+func TestFailoverRefusesATruncatedRequestBody(t *testing.T) {
+	var reached atomic.Int64
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reached.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	rl := NewRateLimiter(0, 1) // a single slot, so a leak is observable
+	defer rl.Close()
+
+	// Fallbacks configured, which is what makes RoundTrip buffer the body.
+	cfg := provider.Config{Providers: map[string]provider.Provider{
+		"primary": {URL: upstream.URL, Format: "openai", Fallback: []string{"backup"}},
+		"backup":  {URL: upstream.URL, Format: "openai"},
+	}}
+	frt := &failoverRoundTripper{
+		base:        http.DefaultTransport,
+		cfg:         func() provider.Config { return cfg },
+		rateLimiter: rl,
+	}
+
+	rc := &RouteContext{ProviderName: "primary", StrippedPath: "/v1/chat/completions"}
+	req, _ := http.NewRequestWithContext(
+		context.WithValue(context.Background(), routeContextKey{}, rc),
+		http.MethodPost, upstream.URL+"/v1/chat/completions",
+		&failingBody{data: []byte(`{"model":"m","messages":[{"role":"user","content":"the first half of a`)})
+
+	resp, err := frt.RoundTrip(req)
+	if err == nil {
+		if resp != nil && resp.Body != nil {
+			resp.Body.Close()
+		}
+		t.Fatal("a request body that could not be read was accepted; the upstream " +
+			"received a truncated prompt and answered it")
+	}
+	if got := reached.Load(); got != 0 {
+		t.Errorf("upstream was called %d times with a partial body", got)
+	}
+	// The token must not leak: the request never reached an upstream, so
+	// nothing downstream will close a body to release it.
+	if !rl.Acquire("default") {
+		t.Error("concurrency token leaked when the body read failed")
+	} else {
+		rl.Release("default")
+	}
 }
