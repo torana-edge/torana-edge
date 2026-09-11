@@ -26,6 +26,38 @@ var formRenderedProviderFields = []string{
 	"auth",
 }
 
+// TestFormRenderedFieldsAreNotPreserved is the inverse of the list above, and
+// the reason preserveUnmanagedProviderFields had a dead `case "auth"`.
+//
+// Preservation is only for fields the form does NOT render. A `case` for a
+// rendered field is unreachable, and reads as an intent the design rejects —
+// which is exactly how it was misread: as evidence that auth SHOULD be
+// preserved, when the form renders it and therefore always sends it.
+func TestFormRenderedFieldsHaveNoPreservationCase(t *testing.T) {
+	src, err := os.ReadFile("server.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := string(src)
+	start := strings.Index(body, "func preserveUnmanagedProviderFields(")
+	if start < 0 {
+		t.Fatal("preserveUnmanagedProviderFields not found; this check cannot see what it guards")
+	}
+	end := strings.Index(body[start:], "\n}\n")
+	if end < 0 {
+		t.Fatal("could not delimit preserveUnmanagedProviderFields")
+	}
+	fn := body[start : start+end]
+	for _, field := range formRenderedProviderFields {
+		if strings.Contains(fn, `case "`+field+`":`) {
+			t.Errorf("preserveUnmanagedProviderFields has a case for %q, which the settings "+
+				"form renders. The case is unreachable — the field is never in "+
+				"unmanagedProviderFields — and implies a preservation that does not happen.",
+				field)
+		}
+	}
+}
+
 // TestEveryProviderFieldIsRenderedOrPreserved is the highest-value test here.
 //
 // The dashboard rebuilds each provider object from its form and PUTs it. Any
@@ -164,6 +196,18 @@ func setNonZero(v reflect.Value) bool {
 		v.Set(m)
 	case reflect.Slice:
 		v.Set(reflect.Append(v, reflect.New(v.Type().Elem()).Elem()))
+	case reflect.Struct:
+		// Fill the first field this function can fill, which is enough to make
+		// the struct non-zero and therefore enough to observe preservation.
+		for i := 0; i < v.NumField(); i++ {
+			if !v.Field(i).CanSet() {
+				continue
+			}
+			if setNonZero(v.Field(i)) {
+				return true
+			}
+		}
+		return false
 	default:
 		return false
 	}

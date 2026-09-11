@@ -3205,8 +3205,6 @@ func preserveUnmanagedProviderFields(stored, incoming map[string]provider.Provid
 				incP.ResponsesCompaction = curP.ResponsesCompaction
 			case "cache":
 				incP.Cache = curP.Cache
-			case "auth":
-				incP.Auth = curP.Auth
 			}
 		}
 		incoming[name] = incP

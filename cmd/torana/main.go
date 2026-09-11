@@ -221,11 +221,20 @@ func main() {
 		log.Printf("Warning: managed config %q differs from and takes precedence over seed %q; edit the managed store through /_torana/ or remove it to re-import the seed", storePath, seedPath)
 	}
 
-	// Allow port override via env.
+	// Allow port override via env. A malformed value is fatal: this binary
+	// fails closed on every other configuration mistake, and silently ignoring
+	// TORANA_PORT=808O means listening on the config's port while the operator
+	// believes the override took — the kind of thing found much later, from
+	// the wrong end.
 	if v := os.Getenv("TORANA_PORT"); v != "" {
-		if p, err := strconv.Atoi(v); err == nil {
-			provCfg.Port = p
+		p, err := strconv.Atoi(v)
+		if err != nil {
+			log.Fatalf("TORANA_PORT=%q is not a number", v)
 		}
+		if p < 1 || p > 65535 {
+			log.Fatalf("TORANA_PORT=%d is outside the valid port range 1-65535", p)
+		}
+		provCfg.Port = p
 	}
 
 	cfg := proxy.Config{
