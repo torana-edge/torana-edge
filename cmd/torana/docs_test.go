@@ -1,0 +1,341 @@
+package main
+
+import (
+	"bytes"
+	"os"
+	"path/filepath"
+	"regexp"
+	"sort"
+	"strings"
+	"testing"
+)
+
+// The help text and the README both claim to list every environment variable
+// Torana reads. Both claims were false, and one of them said so in writing:
+// "torana help prints the same table, so it cannot drift out of the binary"
+// sat directly under a table missing six variables.
+//
+// A list restated in a test cannot catch that — it drifts alongside the thing
+// it checks. These three tests derive each list from the source that defines
+// it, so adding a variable to the product fails the build until it is
+// documented in both places.
+
+// envReadPattern finds a literal environment variable name being read.
+var envReadPattern = regexp.MustCompile(`os\.(?:Getenv|LookupEnv)\("([A-Z0-9_]+)"\)`)
+
+// envReadIndirect finds a read whose name this check cannot resolve, so an
+// indirected read is reported rather than silently passed over.
+var envReadIndirect = regexp.MustCompile(`os\.(?:Getenv|LookupEnv)\(([^")][^)]*)\)`)
+
+// documentedEnvPrefixes are the namespaces Torana is responsible for
+// documenting. PATH and the like are the operating system's, and the OTLP
+// exporter's own variables beyond the four we act on are OpenTelemetry's.
+var documentedEnvPrefixes = []string{"TORANA_", "OTEL_"}
+
+// operatorNamedEnvReads are the reads whose variable name is chosen by the
+// operator in configuration rather than fixed by Torana. There is no name to
+// document for these — the operator picks it — so they are exempt, by file
+// and by the expression that names them, and a new indirection anywhere else
+// still fails. Written down rather than skipped silently: an unexplained
+// hole here is how "documents every variable" stops being true.
+var operatorNamedEnvReads = map[string]string{
+	"credential/credential.go:key":                   "the env var a named credential reads its secret from",
+	"internal/cache/config.go:cfg.Redis.PasswordEnv": "the env var holding the Redis password",
+	"internal/proxy/server.go:envName":               "the env var a provider reads its API key from",
+}
+
+func ours(name string) bool {
+	for _, p := range documentedEnvPrefixes {
+		if strings.HasPrefix(name, p) {
+			return true
+		}
+	}
+	return false
+}
+
+// productionGoFiles lists the tracked Go files that end up in a release
+// binary: no tests, and no build-tagged file excluded from release builds.
+func productionGoFiles(t *testing.T, includeFixtures bool) map[string]string {
+	t.Helper()
+	root := filepath.Join("..", "..")
+	out := map[string]string{}
+	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			switch d.Name() {
+			case ".git", "node_modules", "dist", "testdata":
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+			return nil
+		}
+		body, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		// torana_benchmark_profile is excluded from release builds on
+		// purpose, so its variables are not part of the product's surface.
+		if bytes.Contains(body, []byte("//go:build torana_benchmark_profile")) {
+			return nil
+		}
+		// internal/testfixture is test scaffolding that happens not to live
+		// in _test.go files; TestFixtureHelperIsTestOnly below proves no
+		// production file imports it, so TORANA_E2E is not product surface.
+		if !includeFixtures && strings.HasPrefix(filepath.ToSlash(path), filepath.ToSlash(filepath.Join(root, "internal/testfixture"))) {
+			return nil
+		}
+		rel, _ := filepath.Rel(root, path)
+		out[rel] = string(body)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walking the tree: %v", err)
+	}
+	if len(out) == 0 {
+		t.Fatal("no production Go files found; this check has stopped seeing what it guards")
+	}
+	return out
+}
+
+// envVarsRead is every TORANA_/OTEL_ variable the shipped binary reads.
+func envVarsRead(t *testing.T) []string {
+	t.Helper()
+	seen := map[string]bool{}
+	for rel, body := range productionGoFiles(t, false) {
+		for _, m := range envReadPattern.FindAllStringSubmatch(body, -1) {
+			if ours(m[1]) {
+				seen[m[1]] = true
+			}
+		}
+		for _, m := range envReadIndirect.FindAllStringSubmatch(body, -1) {
+			expr := strings.TrimSpace(m[1])
+			if _, ok := operatorNamedEnvReads[rel+":"+expr]; ok {
+				continue
+			}
+			t.Errorf("%s reads an environment variable through %s, which this check cannot resolve. "+
+				"Use a literal name at the call site, or — if the operator names this variable in "+
+				"configuration — add it to operatorNamedEnvReads with the reason", rel, expr)
+		}
+	}
+	names := make([]string, 0, len(seen))
+	for n := range seen {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	return names
+}
+
+func TestUsageDocumentsEveryEnvironmentVariable(t *testing.T) {
+	var buf bytes.Buffer
+	usage(&buf)
+	help := buf.String()
+
+	read := envVarsRead(t)
+	if len(read) < 5 {
+		t.Fatalf("only %d environment variables found (%v); the pattern has stopped matching", len(read), read)
+	}
+	for _, name := range read {
+		if !strings.Contains(help, name) {
+			t.Errorf("%s is read by Torana but absent from the help text", name)
+		}
+	}
+}
+
+// usageEnvNames are the variables the help text's Environment section names.
+func usageEnvNames(t *testing.T) map[string]bool {
+	t.Helper()
+	var buf bytes.Buffer
+	usage(&buf)
+	help := buf.String()
+
+	start := strings.Index(help, "Environment:\n")
+	if start < 0 {
+		t.Fatal("the help text has no Environment section")
+	}
+	section := help[start:]
+	// The section ends at the first blank line followed by prose.
+	if end := strings.Index(section, "\n\nThe control plane"); end >= 0 {
+		section = section[:end]
+	}
+	names := map[string]bool{}
+	for _, line := range strings.Split(section, "\n") {
+		// A name starts a line at two spaces of indent; continuation lines
+		// are indented further and must not be mistaken for one.
+		if !strings.HasPrefix(line, "  ") || strings.HasPrefix(line, "   ") {
+			continue
+		}
+		f := strings.Fields(line)
+		if len(f) > 0 && ours(f[0]) {
+			names[f[0]] = true
+		}
+	}
+	return names
+}
+
+// readmeEnvNames are the variables the README's Environment Variables table
+// names in its first column.
+func readmeEnvNames(t *testing.T) map[string]bool {
+	t.Helper()
+	body, err := os.ReadFile(filepath.Join("..", "..", "README.md"))
+	if err != nil {
+		t.Fatalf("reading README.md: %v", err)
+	}
+	text := string(body)
+	start := strings.Index(text, "## Environment Variables")
+	if start < 0 {
+		t.Fatal("README.md has no Environment Variables section")
+	}
+	section := text[start:]
+	if end := strings.Index(section[1:], "\n## "); end >= 0 {
+		section = section[:end+1]
+	}
+	cell := regexp.MustCompile("(?m)^\\| `([A-Z0-9_]+)` \\|")
+	names := map[string]bool{}
+	for _, m := range cell.FindAllStringSubmatch(section, -1) {
+		names[m[1]] = true
+	}
+	return names
+}
+
+// The README table and the help text must name the same variables. This is
+// the check the README's own sentence claimed to be, and was not.
+func TestREADMEEnvironmentTableMatchesUsage(t *testing.T) {
+	inHelp := usageEnvNames(t)
+	inREADME := readmeEnvNames(t)
+
+	if len(inHelp) == 0 || len(inREADME) == 0 {
+		t.Fatalf("parsed %d names from the help text and %d from the README; one of the parsers has stopped working", len(inHelp), len(inREADME))
+	}
+	for name := range inHelp {
+		if !inREADME[name] {
+			t.Errorf("%s is in `torana help` but not in the README's Environment Variables table", name)
+		}
+	}
+	for name := range inREADME {
+		if !inHelp[name] {
+			t.Errorf("%s is in the README's Environment Variables table but not in `torana help`", name)
+		}
+	}
+}
+
+// subcommandPattern finds the string literals main() dispatches on. Both
+// dispatch shapes are here: the early `os.Args[1] == "x"` guards and the
+// switch that follows them.
+var (
+	argEquals  = regexp.MustCompile(`os\.Args\[1\] == "([a-z-]+)"`)
+	argCase    = regexp.MustCompile(`(?m)^\t\tcase "([a-z-]+)"(?:, "[^"]+")*:`)
+	caseAlt    = regexp.MustCompile(`"([a-z][a-z-]*)"`)
+	mainSwitch = regexp.MustCompile(`(?s)switch os\.Args\[1\] \{.*?\n\t\}`)
+)
+
+// Every subcommand main() dispatches must be in the help text, or a command
+// exists that nobody can discover. Derived from main.go rather than restated:
+// the previous version of this test listed the commands by hand.
+func TestUsageDocumentsEverySubcommand(t *testing.T) {
+	body, err := os.ReadFile("main.go")
+	if err != nil {
+		t.Fatalf("reading main.go: %v", err)
+	}
+	src := string(body)
+
+	cmds := map[string]bool{}
+	for _, m := range argEquals.FindAllStringSubmatch(src, -1) {
+		cmds[m[1]] = true
+	}
+	if sw := mainSwitch.FindString(src); sw != "" {
+		for _, line := range argCase.FindAllString(sw, -1) {
+			for _, m := range caseAlt.FindAllStringSubmatch(line, -1) {
+				cmds[m[1]] = true
+			}
+		}
+	} else {
+		t.Error("main.go no longer has a switch on os.Args[1]; this check has stopped seeing the dispatch")
+	}
+	// --debug is a flag, not a subcommand, and is documented as one line of
+	// the Usage block rather than as a command name.
+	delete(cmds, "--debug")
+
+	if len(cmds) < 4 {
+		t.Fatalf("found only %d dispatched subcommands (%v); the patterns have stopped matching", len(cmds), cmds)
+	}
+
+	var buf bytes.Buffer
+	usage(&buf)
+	help := buf.String()
+	for cmd := range cmds {
+		// serve is documented as the default, `torana [serve]`, so match the
+		// command word inside the usage line rather than an exact prefix.
+		if !strings.Contains(help, "torana "+cmd) && !strings.Contains(help, "torana ["+cmd+"]") {
+			t.Errorf("subcommand %q is dispatched but absent from the help text", cmd)
+		}
+	}
+}
+
+// The exclusion of internal/testfixture from the environment-variable scan is
+// only sound while the package really is test-only. If production code ever
+// imports it, TORANA_E2E becomes product surface and the exclusion has to go.
+func TestFixtureHelperIsTestOnly(t *testing.T) {
+	for rel, body := range productionGoFiles(t, true) {
+		if strings.HasPrefix(filepath.ToSlash(rel), "internal/testfixture/") {
+			continue
+		}
+		if strings.Contains(body, "internal/testfixture") {
+			t.Errorf("%s is a production file importing internal/testfixture; "+
+				"TORANA_E2E is now product surface and must be documented", rel)
+		}
+	}
+}
+
+// harnessList captures the harnesses the README's opening sentence promises.
+var harnessList = regexp.MustCompile(`your harness \(([^)]+)\)`)
+
+// The README names the harnesses Torana sits behind, and then sends the
+// reader to the quickstart for "a worked example for each of those". Those
+// two lists disagreed: the README advertised Codex, which the quickstart
+// never mentioned, while the quickstart led with oh-my-pi, which the README
+// never mentioned. A reader following the promise found nothing.
+func TestEveryAdvertisedHarnessHasAQuickstartSection(t *testing.T) {
+	readme, err := os.ReadFile(filepath.Join("..", "..", "README.md"))
+	if err != nil {
+		t.Fatalf("reading README.md: %v", err)
+	}
+	m := harnessList.FindSubmatch(readme)
+	if m == nil {
+		t.Fatal("README.md no longer names the harnesses in its opening sentence; this check has stopped seeing the promise")
+	}
+	quickstart, err := os.ReadFile(filepath.Join("..", "..", "docs", "QUICKSTART.md"))
+	if err != nil {
+		t.Fatalf("reading docs/QUICKSTART.md: %v", err)
+	}
+	var headings []string
+	for _, line := range strings.Split(string(quickstart), "\n") {
+		if strings.HasPrefix(line, "### ") {
+			headings = append(headings, line)
+		}
+	}
+	if len(headings) == 0 {
+		t.Fatal("docs/QUICKSTART.md has no harness sections")
+	}
+
+	for _, name := range strings.Split(string(m[1]), ",") {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+		found := false
+		for _, h := range headings {
+			if strings.Contains(strings.ToLower(h), strings.ToLower(name)) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("README.md advertises %q but docs/QUICKSTART.md has no section for it, "+
+				"and the README sends the reader there for a worked example", name)
+		}
+	}
+}

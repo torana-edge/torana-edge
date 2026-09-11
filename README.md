@@ -1,6 +1,6 @@
 # <img src="./assets/logo/torana-color.svg" width="40" align="absmiddle" /> Torana Edge
 
-Torana Edge is a **local-first, programmable reverse proxy for AI coding agents**. It sits between your harness (Claude Code, Codex, OpenCode, Aider) and your provider, and gives you a place to observe, redact, route, veto, or rewrite traffic — without replacing the agent or the model.
+Torana Edge is a **local-first, programmable reverse proxy for AI coding agents**. It sits between your harness (Claude Code, Codex, OpenCode, Aider, oh-my-pi) and your provider, and gives you a place to observe, redact, route, veto, or rewrite traffic — without replacing the agent or the model.
 
 All request/response mutations are handled by **WebAssembly (WASM) plugins** running in a sandboxed `wazero` runtime, communicating with the host via **Protobuf** serialization. This architecture enables hot-loadable, language-agnostic plugins with zero-downtime updates.
 
@@ -82,7 +82,7 @@ Torana is currently pre-release, so this walkthrough builds the reviewed
    curl --fail-with-body http://127.0.0.1:8080/provider/deepseek/v1/chat/completions \
      -H "Authorization: Bearer ${DEEPSEEK_API_KEY}" \
      -H 'Content-Type: application/json' \
-     -d '{"model":"deepseek-v4-flash","messages":[{"role":"user","content":"Reply with exactly: Torana works"}]}'
+     -d '{"model":"deepseek-flash","messages":[{"role":"user","content":"Reply with exactly: Torana works"}]}'
    ```
 
    The first command returns `{"status":"ok"}`. The second returns a normal
@@ -96,7 +96,7 @@ Torana is currently pre-release, so this walkthrough builds the reviewed
    export OPENAI_BASE_URL=http://127.0.0.1:8080/provider/deepseek/v1
    ```
 
-   Harness-specific examples, including Claude Code and OpenCode, are in the
+   A worked example for each of those harnesses is in the
    [Quickstart](docs/QUICKSTART.md#route-your-harness).
 
 5. Leave Torana running. In the second terminal, install one plugin from
@@ -265,23 +265,59 @@ torana-edge/
 │   │   ├── types.go                # Canonical IR: ChatRequest, StreamEvent, etc.
 │   │   └── pbconv/                 # IR ↔ Protobuf converters
 │   ├── format/                     # Wire format adapters (OpenAI, Anthropic, Gemini)
-│   ├── metrics/                    # Request stats tracking
-│   ├── mitm/                       # Optional TLS-terminating ingress (Antigravity CLI)
-│   ├── plugin/                     # WASM plugin discovery and pipeline orchestration
-│   ├── provider/                   # Config parsing, URI resolution
 │   ├── proxy/                      # Reverse proxy with format dispatch
-│   └── wasm/                       # Wazero runtime integration
+│   ├── plugin/                     # WASM plugin discovery and pipeline orchestration
+│   ├── wasm/                       # Wazero runtime integration
+│   ├── provider/                   # Config parsing, URI resolution
+│   ├── controlplane/               # Embedded Control Plane SPA handler
+│   ├── plugincmd/                  # `torana plugin` — author, build, install
+│   ├── credentialcmd/              # `torana credential`
+│   ├── conversationcmd/            # `torana conversations`
+│   ├── credentialstore/            # Named credentials, encrypted at rest
+│   ├── secret/                     # The AEAD those credentials are sealed with
+│   ├── fileperm/                   # Owner-only permissions on every file Torana trusts
+│   ├── pluginfiles/                # Plugin-owned files on disk
+│   ├── pluginstate/                # Durable per-plugin key/value storage
+│   ├── pluginhttp/                 # The egress client plugins reach the network through
+│   ├── cache/                      # TTL-evicting store behind the plugin cache host calls
+│   ├── conversation/               # Conversation identity and recent-turn tracking
+│   ├── economics/                  # Provider-neutral usage and compaction cost models
+│   ├── metrics/                    # Cost stats, the live feed, and OTel export
+│   ├── auditlog/                   # Operator-owned bounded JSONL audit sink
+│   ├── mitm/                       # Optional TLS-terminating ingress (Antigravity CLI)
+│   └── testfixture/                # Gates tests on the built WASM fixtures
 ├── config.example.json             # Example configuration
 └── go.mod
 ```
 
+Every package under `internal/` is listed. The previous version showed eight of
+twenty-three, which read as a complete map of a much smaller program.
+
 ## Endpoints
+
+**Data plane** — served on the configured bind address.
 
 | Path | Purpose |
 |---|---|
 | `/provider/<name>/<upstream-path>` | Proxied request to the named provider |
 | `/health` | Liveness check — `{"status":"ok"}` |
 | `/stats` | Requests/tokens plus separate compaction transformations, applications, cache reuse, and estimated gross/net savings |
+| `/` | Requests with no `/provider/` prefix, routed to `TORANA_DEFAULT_PROVIDER` |
+
+**Control plane** — the same listener, but every one of these refuses a
+non-loopback source address. This is where plugin digests are approved, so
+treat reachability as equivalent to configuration write access.
+
+| Path | Purpose |
+|---|---|
+| `/_torana/` | The embedded Control Plane SPA |
+| `/_torana/api/config` | Read and replace provider, plugin and ingress configuration |
+| `/_torana/api/plugins`, `/_torana/api/plugins/...` | List plugins; approve, reject or remove one by digest |
+| `/_torana/api/plugin-files/path` | Resolve a plugin's on-disk file path |
+| `/_torana/api/conversations` | Recorded conversations |
+| `/_torana/api/feed`, `/_torana/api/stream` | Live request feed (SSE) |
+| `/_torana/api/v1/agent/plugins/...` | Agent API — the same plugin operations, for a coding agent to drive |
+| `/_torana/plugin/...` | Plugin-served HTTP, namespaced per plugin |
 
 ## Environment Variables
 
@@ -293,8 +329,22 @@ torana-edge/
 | `TORANA_BIND` | `127.0.0.1` | Bind address — see the note below before changing it |
 | `TORANA_DEFAULT_PROVIDER` | (none) | Provider name for non-prefixed paths |
 | `TORANA_PLUGINS_DIR` | `./plugins` | Plugin directory for the `torana plugin` commands |
+| `TORANA_LOG_LEVEL` | (none) | Set to `debug` for safe request-lifecycle logs — the same thing `torana --debug` sets |
+| `TORANA_CI_CACHE` | (none) | Directory for wazero's compiled-module cache. Set it and each plugin compiles once per machine instead of once per start |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | (none) | OTLP gRPC collector. With neither endpoint set, OTel export is off |
+| `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` | (none) | As above, and takes precedence over it |
+| `OTEL_EXPORTER_OTLP_INSECURE` | `false` | Allow plaintext to a scheme-less OTLP endpoint. An explicit `https://` or `http://` in the endpoint wins over this |
+| `OTEL_EXPORTER_OTLP_METRICS_INSECURE` | `false` | As above, and takes precedence over it |
 
-`torana help` prints the same table, so it cannot drift out of the binary.
+`torana help` prints the same variables. That is enforced, not asserted:
+`TestREADMEEnvironmentTableMatchesUsage` compares this table against `usage()`
+in both directions, and `TestUsageDocumentsEveryEnvironmentVariable` derives
+the list from every `os.Getenv` in the tree rather than restating it. The
+table used to claim it could not drift while already missing six variables.
+
+The OTLP exporter reads the rest of the standard OpenTelemetry variables
+(`OTEL_EXPORTER_OTLP_HEADERS` and the others) and applies its own precedence
+rules; Torana reads the four above only to decide whether and how to export.
 
 **On `TORANA_BIND`.** Torana binds loopback by default. The control plane
 shares this listener, and it can rewrite configuration and approve plugins —

@@ -44,7 +44,7 @@ curl --fail-with-body http://127.0.0.1:8080/health
 curl --fail-with-body http://127.0.0.1:8080/provider/deepseek/v1/chat/completions \
   -H "Authorization: Bearer ${DEEPSEEK_API_KEY}" \
   -H 'Content-Type: application/json' \
-  -d '{"model":"deepseek-v4-flash","messages":[{"role":"user","content":"Reply with exactly: Torana works"}]}'
+  -d '{"model":"deepseek-flash","messages":[{"role":"user","content":"Reply with exactly: Torana works"}]}'
 ```
 
 The health endpoint returns `{"status":"ok"}` and the second command returns a
@@ -253,6 +253,37 @@ export SSL_CERT_FILE=/abs/path/to/local/mitm/bundle.pem
 }
 ```
 
+### Codex
+Codex reaches a custom provider through `~/.codex/config.toml`, and it speaks
+the OpenAI **Responses** API rather than Chat Completions — so point it at an
+`openai`-format Torana provider whose upstream serves `/responses`:
+
+```toml
+model = "gpt-5.2-codex"
+model_provider = "torana"
+
+[model_providers.torana]
+name = "Torana"
+base_url = "http://localhost:8080/provider/openai/v1"
+env_key = "OPENAI_API_KEY"
+wire_api = "responses"
+```
+
+`model_provider` cannot be named `openai`, `ollama` or `lmstudio` — those IDs
+are reserved — which is why the block above is called `torana`.
+
+### Aider
+```bash
+export OPENAI_API_BASE=http://localhost:8080/provider/deepseek/v1
+export OPENAI_API_KEY='replace-with-your-key'
+aider --model deepseek/deepseek-flash
+```
+
+### OpenHands / Continue.dev
+Configure the provider URL to `http://localhost:8080/provider/deepseek/v1`
+and API key in the respective settings UI. Torana is compatible with any
+tool that sends OpenAI-compatible chat completion requests.
+
 ## Verify
 
 ```bash
@@ -279,15 +310,3 @@ already sent. See [Prompt caching](PROMPT_CACHING.md).
 
 Torana records identifiers, timestamps and token counts here — never message
 content.
-
-### Aider
-```bash
-export OPENAI_API_BASE=http://localhost:8080/provider/deepseek/v1
-export OPENAI_API_KEY='replace-with-your-key'
-aider --model deepseek/deepseek-v4-flash
-```
-
-### OpenHands / Continue.dev
-Configure the provider URL to `http://localhost:8080/provider/deepseek/v1`
-and API key in the respective settings UI. Torana is compatible with any
-tool that sends OpenAI-compatible chat completion requests.
