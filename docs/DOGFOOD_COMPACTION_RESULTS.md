@@ -59,8 +59,9 @@ An earlier unsafe calibration was excluded from savings estimates. It exposed
 two important failures:
 
 1. Delayed source-read markers caused OMP to reread different ranges until a
-   request cap. A same-argument guard was insufficient. `source` therefore
-   fails closed to `exact` until the recovery economics are settled.
+   request cap. A same-argument guard was insufficient. The experimental
+   `source` mode was therefore removed before launch; source-reading tools
+   should use `exact` unless a bounded recovery policy is designed.
 2. An uncached optimistic model candidate was labeled as cache reuse, so its
    preflight omitted the prefix-rewrite charge. Torana paid for Flash summaries
    that the final gate rejected. Uncached candidates are now labeled as

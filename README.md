@@ -229,7 +229,7 @@ the control plane first. See [docs/PLUGINS.md](docs/PLUGINS.md).
 | `usage_logger` | `run_after_response` | Writes content-free provider/model/status/latency/token records to a private rotating JSONL file |
 | `schema_translator` | `run_before_request`, `run_on_stream_chunk` | Converts open-map tool schemas to strict KV arrays and reverses them on responses |
 | `intent` | `run_before_request`, `run_on_stream_chunk` | Captures **why** each tool call is made: injects the required `"i"` field into tool schemas (plus a system-prompt example) and extracts it from the stream into the shared cache |
-| `keyword_compactor` | `run_before_request` | Policy-driven source markers, deterministic reductions, and extractive compaction with cached or locally derived guidance |
+| `keyword_compactor` | `run_before_request` | Policy-driven deterministic reductions and extractive compaction with cached or locally derived guidance |
 | `compactor` | `run_before_request` | The same safety policy plus economically gated cheap-model summaries with cached or locally derived guidance |
 | `pii` | `run_before_request` | Scans tool results (local model + regex) and blocks the request if PII is found |
 | `otel` | `run_before_request`, `run_after_response` | Emits request/response OTel metrics |

@@ -726,16 +726,6 @@ func TestCompactorToolPolicies(t *testing.T) {
 				}
 			})
 
-			t.Run("source remains exact after aging", func(t *testing.T) {
-				messages := sourceHistory("source-exact", 5)
-				out := runToolPolicyRequest(t, pluginName,
-					`{"tool_policies":[{"match":"read_file","mode":"source","rerun":"Read the file again."}]}`,
-					messages)
-				if got := toolResultContent(t, out, "source-exact"); got != largeToolResult() {
-					t.Fatalf("source mode must fail closed to exact after loop-prone dogfood: %q", got)
-				}
-			})
-
 			t.Run("unknown and safety sensitive stay exact", func(t *testing.T) {
 				for _, toolName := range []string{"unknown_tool", "apply_patch", "git_diff"} {
 					config := `{"tool_policies":[{"match":"*","mode":"deterministic","first_pass":true}]}`
@@ -801,16 +791,6 @@ func runToolPolicyRequest(t *testing.T, pluginName, rawConfig string, messages [
 		t.Fatalf("RunBeforeRequest: %v", err)
 	}
 	return out
-}
-
-func sourceHistory(id string, laterAssistants int) []engine.Message {
-	messages := []engine.Message{toolCallNamedMessage(id, "read_file"), toolResultNamedMessage(id, "read_file")}
-	for i := 0; i < laterAssistants; i++ {
-		messages = append(messages,
-			engine.Message{Role: engine.RoleAssistant, Blocks: []engine.Block{{Text: &engine.TextBlock{Text: "consumed"}}}},
-			engine.Message{Role: engine.RoleUser, Blocks: []engine.Block{{Text: &engine.TextBlock{Text: "continue"}}}})
-	}
-	return messages
 }
 
 func toolUseBlocks(m engine.Message) []*engine.ToolUseBlock {
