@@ -408,10 +408,8 @@ func (p *Plugin) HasGrant(perm string) bool { return p.hasGrant(perm) }
 // this compares it against what the manifest declares. The ctx argument is
 // retained for callers and future host-side checks.
 //
-// This is stricter than the v1 check it replaces. v1 could only ask "does this
-// export exist", so a guest exporting MORE than it declared passed silently —
-// the manifest is what an operator approves, so undeclared behaviour was
-// invisible to the thing meant to authorise it. Exact equality closes that.
+// Exact equality matters because the manifest is what an operator approves: a
+// guest must neither omit a declared hook nor export undeclared behaviour.
 func (p *Plugin) ValidateHooks(ctx context.Context, declared []pbv1.Hook) error {
 	p.stateMu.RLock()
 	bitmap := p.hooks
@@ -431,14 +429,13 @@ func (p *Plugin) supports(h pbv1.Hook) bool {
 
 // supportedHooks reads the guest's declared hook set.
 //
-// A missing export is a v1 guest, or one built against an SDK predating the
-// single-export ABI. Saying so beats "hook not found" at the first dispatch,
-// which is where the same guest used to surface.
+// Every supported guest exports this bitmap alongside the single run_hook
+// entry point. Reject an incompatible module at load instead of deferring the
+// failure until its first dispatch.
 func supportedHooks(ctx context.Context, mod api.Module) (pbv1.HookBitmap, error) {
 	fn := mod.ExportedFunction("supported_hooks")
 	if fn == nil {
-		return 0, fmt.Errorf("module exports no supported_hooks: it is a v1 guest, " +
-			"and this host dispatches through a single run_hook export")
+		return 0, fmt.Errorf("module exports no supported_hooks; rebuild it with the current plugin SDK")
 	}
 	res, err := fn.Call(ctx)
 	if err != nil {
@@ -2198,9 +2195,9 @@ func (r *Runtime) dispatchHostCall(ctx context.Context, pluginName, cmd, args st
 			}
 			value = raw
 		case "torana_db_query":
-			herr = hostErr(pbv1.ErrorCode_ERROR_CODE_NOT_CONFIGURED, "database not configured — set plugins.config.compactor.dsn")
+			herr = hostErr(pbv1.ErrorCode_ERROR_CODE_NOT_CONFIGURED, "database host extension is not implemented")
 		case "torana_kms_decrypt":
-			herr = hostErr(pbv1.ErrorCode_ERROR_CODE_NOT_CONFIGURED, "KMS not configured — set TORANA_KMS_ENDPOINT")
+			herr = hostErr(pbv1.ErrorCode_ERROR_CODE_NOT_CONFIGURED, "KMS host extension is not implemented")
 		case "torana_record_savings":
 			var report economics.CompactionReport
 			if err := json.Unmarshal([]byte(args), &report); err != nil {

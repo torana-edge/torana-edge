@@ -589,7 +589,7 @@ func TestLifecycleHookDiscoveryFailureReleasesCompiled(t *testing.T) {
 	if err == nil {
 		t.Fatal("a guest without supported_hooks loaded")
 	}
-	if !strings.Contains(err.Error(), "supported_hooks") {
+	if !strings.Contains(err.Error(), "supported_hooks") || !strings.Contains(err.Error(), "current plugin SDK") || strings.Contains(err.Error(), "v1 guest") {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if rec.count("rt:compiled-released:nohooks") != 1 {
