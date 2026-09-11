@@ -1,6 +1,7 @@
 package pluginstate
 
 import (
+	"encoding/json"
 	"path/filepath"
 	"strconv"
 	"testing"
@@ -70,6 +71,42 @@ func BenchmarkSetDurableSmallStore(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		if err := s.Set("ratelimiter", "counter", strconv.Itoa(i)); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+// BenchmarkPersistMarshalOnly is the serialization half of a durable Set: the
+// exact json.MarshalIndent that persist performs over the whole candidate
+// store, with no file behind it.
+//
+// It exists because the difference between BenchmarkSetDurable and
+// BenchmarkSetMemoryOnly is NOT the filesystem alone — persist returns early
+// when there is no path, so the memory-only benchmark skips the marshal as
+// well. Attributing the whole delta to disk overstates what the other two
+// measure. This is the third point that lets the split be stated.
+func BenchmarkPersistMarshalOnly(b *testing.B) {
+	s, err := New(Options{})
+	if err != nil {
+		b.Fatal(err)
+	}
+	seedStore(b, s, 500)
+
+	s.mu.RLock()
+	candidate := make(map[string]map[string]string, len(s.data))
+	for plugin, keys := range s.data {
+		copied := make(map[string]string, len(keys))
+		for k, v := range keys {
+			copied[k] = v
+		}
+		candidate[plugin] = copied
+	}
+	s.mu.RUnlock()
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if _, err := json.MarshalIndent(candidate, "", "  "); err != nil {
 			b.Fatal(err)
 		}
 	}
