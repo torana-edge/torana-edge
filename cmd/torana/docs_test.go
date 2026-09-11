@@ -437,3 +437,62 @@ func TestAdvertisedControlPlaneURLAnswers(t *testing.T) {
 		})
 	}
 }
+
+// Every package under internal/ must say what it is.
+//
+// Nine of twenty-three did not, so `go doc ./internal/engine` opened on a
+// variable declaration and `go doc ./internal/wasm` on a helper — for the two
+// packages that define the IR and run the sandbox. A reader arriving at the
+// tree has no entry point when the packages do not introduce themselves, and
+// this is the repository a plugin author reads to understand the host.
+//
+// Derived from the directory listing rather than a list restated here, so a
+// new package is covered the day it is added.
+func TestEveryInternalPackageSaysWhatItIs(t *testing.T) {
+	root := filepath.Join("..", "..", "internal")
+	var undocumented []string
+	checked := 0
+
+	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err != nil || !d.IsDir() {
+			return err
+		}
+		entries, err := os.ReadDir(path)
+		if err != nil {
+			return err
+		}
+		var goFiles []string
+		for _, e := range entries {
+			if !e.IsDir() && strings.HasSuffix(e.Name(), ".go") && !strings.HasSuffix(e.Name(), "_test.go") {
+				goFiles = append(goFiles, filepath.Join(path, e.Name()))
+			}
+		}
+		if len(goFiles) == 0 {
+			return nil
+		}
+		checked++
+		want := "// Package " + filepath.Base(path)
+		for _, f := range goFiles {
+			body, err := os.ReadFile(f)
+			if err != nil {
+				return err
+			}
+			if strings.HasPrefix(string(body), want) {
+				return nil
+			}
+		}
+		rel, _ := filepath.Rel(root, path)
+		undocumented = append(undocumented, rel)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walking internal/: %v", err)
+	}
+	if checked == 0 {
+		t.Fatal("no packages found under internal/; this check has stopped seeing what it guards")
+	}
+	for _, pkg := range undocumented {
+		t.Errorf("internal/%s has no package comment, so `go doc` on it opens on whichever "+
+			"declaration happens to come first", pkg)
+	}
+}

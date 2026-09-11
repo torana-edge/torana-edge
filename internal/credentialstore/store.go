@@ -1,3 +1,14 @@
+// Package credentialstore is Torana's built-in machine-local credential
+// provider: named secrets, encrypted at rest through internal/secret.
+//
+// It is one implementation of the SDK's credential provider interface, not the
+// only one — an operator can point a credential source at a real secret
+// manager instead. This is the one that works with no external dependency,
+// which is what a first run needs.
+//
+// Plugins never enumerate credentials and never see provider configuration.
+// They ask for a slot by the name the operator approved, and get bytes or a
+// refusal.
 package credentialstore
 
 import (

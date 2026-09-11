@@ -1,3 +1,24 @@
+// Package wasm runs plugin guests in a wazero sandbox and implements the host
+// calls they are allowed to make.
+//
+// A plugin is a WASI module with no ambient filesystem, no ambient network,
+// and no output stream unless the operator granted env.log. Every file, every
+// outbound request and every stored secret is a host call this package brokers
+// against what was approved.
+//
+// System clocks are the deliberate exception: guests are configured with
+// WithSysWalltime and WithSysNanotime, so a plugin CAN read the time without
+// asking. env.now exists anyway, because a permission-gated clock is one a
+// test can control and one whose use is declared in the manifest — not because
+// it is the only clock available.
+//
+// Resource bounds — memory, instance pool size, per-call timeout, idle
+// retirement — are enforced here, so a plugin cannot make the proxy
+// unavailable for the traffic it is not handling.
+//
+// What a plugin may ASK for is described by its manifest; what it is granted
+// is decided in internal/plugin. This package is where a granted call is
+// actually executed, and where an ungranted one is refused.
 package wasm
 
 import (
@@ -1880,11 +1901,16 @@ func (r *Runtime) dispatchHostCall(ctx context.Context, pluginName, cmd, args st
 			b, _ := json.Marshal(r.StateKeysFunc(pluginName))
 			value = b
 		case "env.now":
-			// WASI preview1 gives the guest no clock, deliberately. Plugins
-			// that reason about elapsed time — cache lifetimes, deadlines,
-			// rate windows — otherwise have no way to ask.
+			// A brokered clock for plugins that reason about elapsed time —
+			// cache lifetimes, deadlines, rate windows.
 			//
-			// This is a capability, not a convenience: a plugin that writes the
+			// NOT the only clock: newInstance configures every guest with
+			// WithSysWalltime and WithSysNanotime, so a plugin can read the
+			// time without asking. What the grant buys is that a test can
+			// control this one, and that time-dependence is declared in the
+			// manifest where an operator sees it.
+			//
+			// It is a capability, not a convenience: a plugin that writes the
 			// result into a request makes its output non-deterministic, which
 			// busts the provider's prompt cache on every turn. See
 			// PLUGIN_SEMANTICS §6.

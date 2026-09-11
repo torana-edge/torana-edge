@@ -1,3 +1,15 @@
+// Package pbconv converts between Torana's internal IR (internal/engine) and
+// the Protobuf types plugins actually receive.
+//
+// This is the boundary where a host-side value becomes a guest-visible one, so
+// it is deliberately error-returning rather than lossy: a field the IR can
+// hold but the ABI cannot express is a failure here, not a silent drop. The
+// same applies coming back — a plugin's reply is converted with the same
+// strictness before the host will act on it.
+//
+// Raw JSON fields (tool arguments, provider extensions) cross as bytes and are
+// validated rather than reparsed, so a plugin that does not touch them hands
+// back exactly what the caller sent.
 package pbconv
 
 import (

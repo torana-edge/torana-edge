@@ -1,3 +1,13 @@
+// Package pluginfiles owns the private files plugins are allowed to write.
+//
+// A plugin names a logical file in its manifest ("usage.jsonl"); the operator
+// approves it with a byte budget and a retained-file count; this package maps
+// that name to a path the plugin never learns. A plugin cannot name an OS
+// path, escape its own directory, or read another plugin's files.
+//
+// Rotation and the byte budget are enforced here rather than trusted to the
+// guest, because a plugin that fills the disk is a plugin that takes the proxy
+// down with it.
 package pluginfiles
 
 import (
