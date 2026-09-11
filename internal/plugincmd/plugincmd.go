@@ -77,11 +77,12 @@ func Usage(w io.Writer) {
 // checking it. It named SDK v0.1.0 long after v0.1.3 shipped, and the test
 // passed the whole time.
 //
-// Bumping the SDK is now one edit here. Keep ScaffoldSDKVersion to a version
-// that is actually published: a scaffold naming an unreleased tag produces a
-// project that cannot build.
+// Bumping the SDK is now one edit here. Keep ScaffoldSDKVersion resolvable by
+// the Go tool: normally a release tag, or a pushed pseudo-version while a
+// coordinated SDK/host release PR pair is under review. Replace a temporary
+// pseudo-version with the release tag before merging the host PR.
 const (
-	ScaffoldSDKVersion = "v0.3.0"
+	ScaffoldSDKVersion = "v0.3.1-0.20260911102401-cff694b83d85"
 	// scaffoldGoVersion tracks the SDK's own go directive. A scaffolded module
 	// declaring an OLDER Go version than its dependency requires fails to build
 	// with "module requires go >= x", which is the same class of unbuildable
