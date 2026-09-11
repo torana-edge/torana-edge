@@ -2126,11 +2126,13 @@ func New(cfg Config) (*Server, error) {
 
 		candidate := s.GetConfig().Providers
 		candidate.Plugins = newPlugins
-		// Before anything is written or published. A registry that cannot be
-		// built is the caller's mistake, and finding it here costs nothing to
-		// undo — finding it after the pipeline is live means the process is
+		// Before anything is written or published, and the registry that is
+		// built here is the one that goes live below. A registry that cannot
+		// be built is the caller's mistake, and finding it here costs nothing
+		// to undo — finding it after the pipeline is live means the process is
 		// already running the rejected configuration.
-		if err := s.checkCredentialRegistry(candidate.Credentials); err != nil {
+		candidateRegistry, err := s.prepareCredentialRegistry(candidate.Credentials)
+		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
@@ -2147,20 +2149,10 @@ func New(cfg Config) (*Server, error) {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		// checkCredentialRegistry already accepted this candidate, so a
-		// rejection here is not the caller's mistake — it is ours, and the new
-		// pipeline is already live. Say so as a host failure rather than
-		// dressing it as a 400 the operator could act on.
-		if err := s.SetProviders(candidate); err != nil {
-			log.Printf("provider update accepted validation then failed to apply: %v", err)
-			if rollbackErr := s.persistProviders(s.GetConfig().Providers); rollbackErr != nil {
-				log.Printf("failed to restore config afterwards: %v", rollbackErr)
-			}
-			http.Error(w, "the update passed validation but could not be applied; "+
-				"the running configuration may not match the file on disk",
-				http.StatusInternalServerError)
-			return
-		}
+		// The registry prepared above, not a second one built from the same
+		// configuration. Nothing after the pipeline goes live can fail, so
+		// there is no state in which disk, config and pipeline disagree.
+		s.applyProviders(candidate, candidateRegistry)
 
 		w.Header().Set("Content-Type", "application/json")
 		writePluginsWithWarnings(w, newPlugins, skipped)
@@ -2290,11 +2282,13 @@ func New(cfg Config) (*Server, error) {
 
 		candidate := s.GetConfig().Providers
 		candidate.Plugins = newPlugins
-		// Before anything is written or published. A registry that cannot be
-		// built is the caller's mistake, and finding it here costs nothing to
-		// undo — finding it after the pipeline is live means the process is
+		// Before anything is written or published, and the registry that is
+		// built here is the one that goes live below. A registry that cannot
+		// be built is the caller's mistake, and finding it here costs nothing
+		// to undo — finding it after the pipeline is live means the process is
 		// already running the rejected configuration.
-		if err := s.checkCredentialRegistry(candidate.Credentials); err != nil {
+		candidateRegistry, err := s.prepareCredentialRegistry(candidate.Credentials)
+		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
@@ -2311,20 +2305,10 @@ func New(cfg Config) (*Server, error) {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		// checkCredentialRegistry already accepted this candidate, so a
-		// rejection here is not the caller's mistake — it is ours, and the new
-		// pipeline is already live. Say so as a host failure rather than
-		// dressing it as a 400 the operator could act on.
-		if err := s.SetProviders(candidate); err != nil {
-			log.Printf("provider update accepted validation then failed to apply: %v", err)
-			if rollbackErr := s.persistProviders(s.GetConfig().Providers); rollbackErr != nil {
-				log.Printf("failed to restore config afterwards: %v", rollbackErr)
-			}
-			http.Error(w, "the update passed validation but could not be applied; "+
-				"the running configuration may not match the file on disk",
-				http.StatusInternalServerError)
-			return
-		}
+		// The registry prepared above, not a second one built from the same
+		// configuration. Nothing after the pipeline goes live can fail, so
+		// there is no state in which disk, config and pipeline disagree.
+		s.applyProviders(candidate, candidateRegistry)
 
 		w.Header().Set("Content-Type", "application/json")
 		writePluginsWithWarnings(w, newPlugins, skipped)
@@ -2920,15 +2904,12 @@ func (s *Server) Handler() http.Handler {
 // told their change took effect while the running proxy kept the old one, and
 // the next restart would load the config that had been rejected.
 func (s *Server) SetProviders(cfg provider.Config) error {
-	if err := s.replaceCredentialRegistry(cfg.Credentials); err != nil {
+	registry, err := s.prepareCredentialRegistry(cfg.Credentials)
+	if err != nil {
 		log.Printf("config hot-reload rejected credential registry: %v", err)
-		return fmt.Errorf("credential registry rejected: %w", err)
+		return err
 	}
-	s.configMu.Lock()
-	s.config.Providers = cfg
-	s.configMu.Unlock()
-	s.rateLimiter.Update(cfg.Limits.RPM, cfg.Limits.Concurrency)
-	log.Printf("config hot-reload: %d providers loaded", len(cfg.Providers))
+	s.applyProviders(cfg, registry)
 	return nil
 }
 
@@ -3050,10 +3031,15 @@ func (s *Server) applyProviderConfigTransaction(current, incoming provider.Confi
 			}
 		}()
 	}
-	candidateCredentials, err := buildCredentialRegistry(incoming.Credentials, s.credentialStore)
+	candidateCredentials, err := s.prepareCredentialRegistry(incoming.Credentials)
 	if err != nil {
-		return fmt.Errorf("credential registry: %w", err)
+		return err
 	}
+	// The registry that is serving requests right now. A rollback restores the
+	// object that was already working rather than building a new one, which
+	// could itself fail — at the one moment the process has nothing else to
+	// fall back to.
+	liveCredentials := s.liveCredentialRegistry()
 
 	rollbackLive := func() {
 		if portChanged {
@@ -3071,9 +3057,7 @@ func (s *Server) applyProviderConfigTransaction(current, incoming provider.Confi
 				log.Printf("failed to roll back cache config: %v", err)
 			}
 		}
-		if err := s.SetProviders(current); err != nil {
-			log.Printf("failed to restore providers during rollback: %v", err)
-		}
+		s.applyProviders(current, liveCredentials)
 	}
 
 	if cacheChanged {
@@ -3124,12 +3108,9 @@ func (s *Server) applyProviderConfigTransaction(current, incoming provider.Confi
 			_ = oldAudit.Close()
 		}
 		log.Printf("config hot-reload: %d providers loaded", len(incoming.Providers))
-	} else if err := s.SetProviders(incoming); err != nil {
-		rollbackLive()
-		if rollbackErr := s.persistProviders(current); rollbackErr != nil {
-			log.Printf("failed to restore config after rejected provider update: %v", rollbackErr)
-		}
-		return err
+	} else {
+		// Same registry that was validated at the top of this function.
+		s.applyProviders(incoming, candidateCredentials)
 	}
 	return nil
 }
@@ -3175,31 +3156,51 @@ func (s *Server) resolveCredential(ctx context.Context, id string) ([]byte, erro
 	return registry.Resolve(ctx, entry.Source, entry.Key)
 }
 
-// checkCredentialRegistry reports whether a candidate's credential registry
-// can be built, WITHOUT installing it.
+// prepareCredentialRegistry builds the registry a candidate would run with,
+// WITHOUT installing it, and RETURNS IT so the same object can be published
+// later.
 //
-// This is what lets a rejection cost nothing. The control-plane handlers
-// publish a new plugin pipeline and write the candidate to disk before they
-// would otherwise learn the registry is bad, and rolling those back one by one
-// is a transaction nobody can keep correct — the first version of this fix
-// restored the file and left the process running the rejected pipeline.
-// Checking first means there is nothing to undo.
-func (s *Server) checkCredentialRegistry(config provider.CredentialsConfig) error {
-	if _, err := buildCredentialRegistry(config, s.credentialStore); err != nil {
-		return fmt.Errorf("credential registry rejected: %w", err)
-	}
-	return nil
-}
-
-func (s *Server) replaceCredentialRegistry(config provider.CredentialsConfig) error {
+// Returning it is the whole point. Checking that a registry *can* be built and
+// then building a second one at publication time is not a check: credential
+// providers are pluggable and their construction can be stateful, hold
+// resources, or fail transiently, so the object that was validated and the
+// object that goes live are not the same object. A factory that succeeded
+// during the check and failed afterwards reached exactly the state the check
+// existed to prevent — old config, old file, new pipeline, and a 500 admitting
+// the two no longer agree.
+//
+// So preparation happens once, before anything is written or published, and
+// what is published is what was prepared.
+func (s *Server) prepareCredentialRegistry(config provider.CredentialsConfig) (*credentialapi.Registry, error) {
 	registry, err := buildCredentialRegistry(config, s.credentialStore)
 	if err != nil {
-		return err
+		return nil, fmt.Errorf("credential registry rejected: %w", err)
 	}
+	return registry, nil
+}
+
+// applyProviders publishes a configuration together with the registry prepared
+// for it. It cannot fail — every fallible step happened before the caller
+// reached this point, which is what makes "validate before publishing" true
+// rather than merely intended.
+func (s *Server) applyProviders(cfg provider.Config, registry *credentialapi.Registry) {
 	s.credentialMu.Lock()
 	s.credentials = registry
 	s.credentialMu.Unlock()
-	return nil
+	s.configMu.Lock()
+	s.config.Providers = cfg
+	s.configMu.Unlock()
+	s.rateLimiter.Update(cfg.Limits.RPM, cfg.Limits.Concurrency)
+	log.Printf("config hot-reload: %d providers loaded", len(cfg.Providers))
+}
+
+// liveCredentialRegistry returns the registry currently serving requests, so a
+// rollback can restore the object that was already working instead of building
+// a new one that might not.
+func (s *Server) liveCredentialRegistry() *credentialapi.Registry {
+	s.credentialMu.RLock()
+	defer s.credentialMu.RUnlock()
+	return s.credentials
 }
 
 func (s *Server) normalizeSecretField(incomingEnc, storedEnc string) (string, error) {
