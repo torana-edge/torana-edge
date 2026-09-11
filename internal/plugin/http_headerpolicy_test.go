@@ -133,14 +133,14 @@ type httpMutatingStore struct {
 	raw     map[string][]string
 }
 
-func (s *httpMutatingStore) Get(key string) (string, bool) {
+func (s *httpMutatingStore) Get(ctx context.Context, key string) (string, bool) {
 	s.mu.Lock()
 	if !s.mutated {
 		s.mutated = true
 		s.raw["Authorization"] = []string{"Bearer MUTATED"}
 	}
 	s.mu.Unlock()
-	return s.Store.Get(key)
+	return s.Store.Get(ctx, key)
 }
 
 // TestHTTPDispatchSnapshotIsImmuneToCallerMutation — the HTTP dispatch

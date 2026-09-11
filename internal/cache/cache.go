@@ -9,20 +9,27 @@ package cache
 
 import (
 	"container/list"
+	"context"
 	"sync"
 	"time"
 )
 
 // Store is a TTL key-value store safe for concurrent use.
+//
+// Every operation takes the CALLER's context. A Store may be backed by a
+// network service, and a cache lookup on behalf of a request the client has
+// already abandoned should stop when that request does — without a context
+// there is nothing to stop it with, and the work is charged to a request
+// nobody is waiting for.
 type Store interface {
 	// Set saves a value under key, resetting its TTL.
-	Set(key, value string)
+	Set(ctx context.Context, key, value string)
 
 	// Get retrieves a value. Returns false if not found or expired.
-	Get(key string) (string, bool)
+	Get(ctx context.Context, key string) (string, bool)
 
 	// Delete removes an entry.
-	Delete(key string)
+	Delete(ctx context.Context, key string)
 
 	// Len returns the number of entries (including not-yet-evicted expired ones).
 	Len() int
@@ -81,15 +88,21 @@ func NewLocalCacheWithLimits(ttl time.Duration, maxEntries, maxBytes int) *Local
 	return l
 }
 
-func (l *LocalCache) Set(key, value string) {
+// The context is accepted to satisfy Store and deliberately ignored: these
+// operations are a map lookup under a mutex, with nothing to cancel.
+func (l *LocalCache) Set(_ context.Context, key, value string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	if old := l.entries[key]; old != nil {
-		l.removeLocked(old)
-	}
+	// Size FIRST. Removing the old entry and then rejecting the new value
+	// deleted a perfectly good cached value because its replacement happened
+	// to be too large — a write that cannot be admitted must leave the store
+	// as it found it, not empty the slot it was aiming at.
 	size := len(key) + len(value)
 	if l.maxBytes > 0 && size > l.maxBytes {
 		return
+	}
+	if old := l.entries[key]; old != nil {
+		l.removeLocked(old)
 	}
 	e := &cacheEntry{
 		key:       key,
@@ -103,7 +116,7 @@ func (l *LocalCache) Set(key, value string) {
 	l.evictBoundsLocked()
 }
 
-func (l *LocalCache) Get(key string) (string, bool) {
+func (l *LocalCache) Get(_ context.Context, key string) (string, bool) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	e, ok := l.entries[key]
@@ -118,7 +131,7 @@ func (l *LocalCache) Get(key string) (string, bool) {
 	return e.value, true
 }
 
-func (l *LocalCache) Delete(key string) {
+func (l *LocalCache) Delete(_ context.Context, key string) {
 	l.mu.Lock()
 	if e := l.entries[key]; e != nil {
 		l.removeLocked(e)

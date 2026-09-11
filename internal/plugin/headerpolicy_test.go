@@ -451,14 +451,14 @@ type mutatingStore struct {
 	raw     map[string][]string
 }
 
-func (s *mutatingStore) Get(key string) (string, bool) {
+func (s *mutatingStore) Get(ctx context.Context, key string) (string, bool) {
 	s.mu.Lock()
 	if !s.mutated {
 		s.mutated = true
 		s.raw["Authorization"] = []string{"Bearer MUTATED"}
 	}
 	s.mu.Unlock()
-	return s.Store.Get(key)
+	return s.Store.Get(ctx, key)
 }
 
 // TestChatHeadersSnapshotIsImmuneToCallerMutation — the raw map is snapshotted

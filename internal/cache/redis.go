@@ -7,9 +7,26 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
-// redisOpTimeout bounds each Redis operation so a slow/unreachable server
-// degrades a cache call, never a request.
+// redisOpTimeout CAPS each Redis operation. It is a ceiling on top of the
+// caller's own deadline, not a replacement for it.
+//
+// The previous comment claimed this bounded a cache call "never a request",
+// which was the opposite of what the code did: every operation built its
+// context from context.Background(), so a slow server added up to two seconds
+// to a LIVE request, and a request the client had already abandoned still
+// waited the full two seconds for a cache lookup nobody would read. The
+// caller's context now governs; this only stops a hung server from holding a
+// request open indefinitely when the caller has no deadline of its own.
 const redisOpTimeout = 2 * time.Second
+
+// opContext derives this operation's deadline from the caller's, capped at
+// redisOpTimeout. Cancelling the request cancels the cache call with it.
+func opContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithTimeout(ctx, redisOpTimeout)
+}
 
 // RedisStore is a Redis-backed Store: cross-request plugin state survives
 // proxy restarts and is shared across instances in a distributed deployment.
@@ -35,14 +52,14 @@ func NewRedisStore(addr, password string, db int, prefix string, ttl time.Durati
 	return &RedisStore{client: client, ttl: ttl, prefix: prefix}, nil
 }
 
-func (r *RedisStore) Set(key, value string) {
-	ctx, cancel := context.WithTimeout(context.Background(), redisOpTimeout)
+func (r *RedisStore) Set(ctx context.Context, key, value string) {
+	ctx, cancel := opContext(ctx)
 	defer cancel()
 	_ = r.client.Set(ctx, r.prefix+key, value, r.ttl).Err()
 }
 
-func (r *RedisStore) Get(key string) (string, bool) {
-	ctx, cancel := context.WithTimeout(context.Background(), redisOpTimeout)
+func (r *RedisStore) Get(ctx context.Context, key string) (string, bool) {
+	ctx, cancel := opContext(ctx)
 	defer cancel()
 	v, err := r.client.Get(ctx, r.prefix+key).Result()
 	if err != nil {
@@ -51,8 +68,8 @@ func (r *RedisStore) Get(key string) (string, bool) {
 	return v, true
 }
 
-func (r *RedisStore) Delete(key string) {
-	ctx, cancel := context.WithTimeout(context.Background(), redisOpTimeout)
+func (r *RedisStore) Delete(ctx context.Context, key string) {
+	ctx, cancel := opContext(ctx)
 	defer cancel()
 	_ = r.client.Del(ctx, r.prefix+key).Err()
 }
