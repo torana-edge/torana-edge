@@ -339,3 +339,27 @@ func TestEveryAdvertisedHarnessHasAQuickstartSection(t *testing.T) {
 		}
 	}
 }
+
+// The startup banner prints a control-plane URL for an operator to open. A
+// wildcard bind is an address to LISTEN on, not one to connect to: pasting
+// http://0.0.0.0:8080/_torana/ into a browser reaches nothing on some
+// platforms and the wrong thing on others. The control plane refuses every
+// non-loopback source anyway, so the URL printed for it is always loopback.
+func TestControlPlaneHostIsAlwaysReachable(t *testing.T) {
+	for _, tc := range []struct {
+		bind string
+		want string
+	}{
+		{bind: "127.0.0.1", want: "127.0.0.1"},
+		{bind: "::1", want: "::1"},
+		{bind: "192.168.1.10", want: "192.168.1.10"},
+		{bind: "0.0.0.0", want: "127.0.0.1"},
+		{bind: "::", want: "127.0.0.1"},
+		{bind: "[::]", want: "127.0.0.1"},
+		{bind: "", want: "127.0.0.1"},
+	} {
+		if got := controlPlaneHost(tc.bind); got != tc.want {
+			t.Errorf("controlPlaneHost(%q) = %q, want %q", tc.bind, got, tc.want)
+		}
+	}
+}

@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"os"
 	"os/signal"
 	"runtime/debug"
@@ -129,6 +130,18 @@ Environment:
 The control plane is at http://127.0.0.1:<port>/_torana/ and is reachable from
 loopback only. Plugins never load until you approve their digest there.
 `)
+}
+
+// controlPlaneHost names a host an operator can actually paste into a browser.
+// A wildcard bind (0.0.0.0, ::, or empty) is an address to listen on, not one
+// to connect to, and the control plane refuses every non-loopback source
+// anyway — so the URL printed for it is always a loopback one.
+func controlPlaneHost(bindHost string) string {
+	switch bindHost {
+	case "", "0.0.0.0", "::", "[::]":
+		return "127.0.0.1"
+	}
+	return bindHost
 }
 
 // parsePortOverride reads TORANA_PORT. A malformed or out-of-range value is an
@@ -286,6 +299,15 @@ func main() {
 	if err := srv.Start(bindHost); err != nil {
 		log.Fatalf("Failed to start server: %v", err)
 	}
+	// Say where it is. Starting Torana printed one line about the plugin
+	// pipeline and nothing else, so the quickstart's "keep that terminal
+	// open" asked an operator to trust a process that had told them neither
+	// that it was listening nor where — and the control plane, which is where
+	// plugins are approved, was discoverable only by reading the README.
+	log.Printf("Torana Edge %s listening on http://%s", version,
+		net.JoinHostPort(bindHost, strconv.Itoa(provCfg.Port)))
+	log.Printf("Control plane: http://%s/_torana/ (loopback only)",
+		net.JoinHostPort(controlPlaneHost(bindHost), strconv.Itoa(provCfg.Port)))
 	<-ctx.Done()
 	log.Println("Shutting down...")
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
