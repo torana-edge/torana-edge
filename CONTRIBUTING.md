@@ -170,11 +170,13 @@ that disagrees produces values that simply never match, and nothing errors.
 
 ## Things that are easy to get wrong
 
-**`schema.json` is a UI manifest, not a config contract.** It lists the fields
-the control plane renders. Plugins routinely accept settings they don't declare —
-the compactor reads `expected_applications` and `tool_policies` while declaring
-neither. Config writes are type-checked against declared fields only; undeclared
-keys are deliberately allowed.
+**`schema.json` has two supported shapes with different contracts.** A JSON
+Schema document validates the complete stored configuration, including nested
+objects, arrays, required values, and `additionalProperties`; the control plane
+derives scalar form controls from it and leaves structured values to the raw
+editor. The original `{"fields":[...]}` format remains supported as a UI
+manifest: declared fields are type-checked, but undeclared keys are allowed. With
+no schema, the host stores the plugin configuration opaquely.
 
 **Adding a per-provider config field?** Add it to `unmanagedProviderFields` in
 `internal/proxy/server.go` unless you also add it to the settings form. The form
@@ -183,8 +185,10 @@ about is dropped on save. This bug ate `pricing` and `responses_compaction` in
 production for a while.
 
 **Plugin state scoping.** `env.meta_*` is per-request and namespaced per plugin.
-`env.cache_*` is cross-request and **deliberately a shared flat keyspace**, so
-prefix your keys. Neither survives a restart with the memory backend.
+`env.cache_*` is a plugin-private, cross-request TTL cache.
+`env.shared_cache_*` is the separately granted shared flat keyspace, so prefix
+keys used in a documented producer/consumer protocol. Neither cache survives a
+restart with the memory backend; durable `env.state_*` is private per plugin.
 
 **Determinism is enforced.** `internal/plugin/cache_compliance_test.go` asserts
 every request-mutating plugin produces byte-identical output across two runs with
@@ -194,10 +198,11 @@ provider's prompt cache and costs real money on every turn. If you add a plugin
 that touches requests, add it to that test.
 
 **Background hooks have no request.** Inside `run_on_tick` there is no request,
-so `env.original_request`, `env.original_response`, and `env.meta_*` return
-empty, and there is no caller credential. Anything a tick needs must come from
-the plugin's own state or an operator-bound platform resource; it must never
-borrow credentials from unrelated caller traffic.
+so unavailable `env.original_request`, `env.original_response`, and `env.meta_*`
+reads return classified `NOT_FOUND` results, not ambiguous empty values. There
+is no caller identity or credential context. Anything a tick needs must come
+from the plugin's own state or an operator-bound platform resource; it must
+never borrow credentials from unrelated caller traffic.
 
 ## Pull requests
 
