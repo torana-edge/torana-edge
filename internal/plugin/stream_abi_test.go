@@ -1140,10 +1140,10 @@ func pipeStream(t *testing.T, pp *PluginPipeline, reqID uint64, events []engine.
 // two parallel tool calls — interleaved starts and argument deltas, then both
 // stops — parsed into engine events and pushed through the real plugin
 // pipeline must come back with every start/delta/stop intact at its own
-// index, and must NOT error. The round-4 tracker allows multiple tool blocks
+// index, and must NOT error. The tracker allows multiple tool blocks
 // open at once (the Chat adapter emits ToolCallEnd for both calls only at
 // finish_reason="tool_calls", so both are open simultaneously), which the
-// round-3 single-open rule would have rejected at the plugin boundary.
+// a single-open rule would have rejected at the plugin boundary.
 func TestOpenAIParallelChatSurvivesPlugins(t *testing.T) {
 	requireWASM(t, fixturesDir+"/test-inert-a/plugin.wasm")
 	pp := newTestPipeline(t, fixturesDir, []string{"test-inert-a"})
@@ -1191,7 +1191,7 @@ func TestOpenAIParallelChatSurvivesPlugins(t *testing.T) {
 // deltas alternating by item, and each call completed at its own time — must
 // survive parse → pb → plugin → engine without error. The second call's stop
 // arrives while the first is still open (non-ascending stop order), which is
-// exactly the concurrency the round-4 tracker permits.
+// exactly the concurrency the tracker permits.
 func TestOpenAIResponsesParallelSurvivesPlugins(t *testing.T) {
 	requireWASM(t, fixturesDir+"/test-inert-a/plugin.wasm")
 	pp := newTestPipeline(t, fixturesDir, []string{"test-inert-a"})

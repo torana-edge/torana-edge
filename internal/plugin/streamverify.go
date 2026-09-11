@@ -13,20 +13,20 @@ import (
 // verifyStream checks a plugin's returned StreamEvents against the accepted
 // stream it was handed, on TWO axes only:
 //
-//  1. Bound provider signatures — the outbound `signature_delta` bindings
-//     (SignatureScopeCurrentContentBlock and SignatureScopeTrailingStandalone)
-//     and ToolCallRef.signature (SignatureScopeToolCallBlockByIndex), classified
-//     transactionally over each binding's scope via
-//     outboundpolicy.ClassifySignatureMutation. On the STREAM path there is no
-//     apply block to invalidate a wire token before it ships, so SignatureStale
-//     is a violation here (unlike the response path, which tolerates a stale
-//     token because clearStaleSignatures normalizes it before it escapes).
+// 1. Bound provider signatures — the outbound `signature_delta` bindings
+// (SignatureScopeCurrentContentBlock and SignatureScopeTrailingStandalone)
+// and ToolCallRef.signature (SignatureScopeToolCallBlockByIndex), classified
+// transactionally over each binding's scope via
+// outboundpolicy.ClassifySignatureMutation. On the STREAM path there is no
+// apply block to invalidate a wire token before it ships, so SignatureStale
+// is a violation here (unlike the response path, which tolerates a stale
+// token because clearStaleSignatures normalizes it before it escapes).
 //
-//  2. The signed-block topology axis: suppressing a signed tool block or a
-//     signed text/thinking block, or inventing a tool block, changes stream
-//     cardinality and requires the topology grant ir.stream.write — with the
-//     one hard exception that an INVENTED SIGNED tool block is a minted
-//     signature (added) and is rejected even with every grant.
+// 2. The signed-block topology axis: suppressing a signed tool block or a
+// signed text/thinking block, or inventing a tool block, changes stream
+// cardinality and requires the topology grant ir.stream.write — with the
+// one hard exception that an INVENTED SIGNED tool block is a minted
+// signature (added) and is rejected even with every grant.
 //
 // EVERYTHING ELSE is deliberately out of scope for this PR: index uniqueness,
 // open-block discipline on the plugin's OUTPUT, event-kind switches in the
@@ -36,7 +36,7 @@ import (
 // numbers that gate turning that enforcement on, so it verifies signatures
 // and the signed-block topology axis only, and says so.
 //
-// The accepted/plugin split (round-1 decision 1): a malformed ACCEPTED stream
+// The accepted/plugin split: a malformed ACCEPTED stream
 // is a host/adaptor defect, NOT a plugin failure — the plugin's output can
 // only be judged against a valid baseline. validateAcceptedStream checks the
 // host side (unbound signature_delta, incompatible deltas, missing stops,
@@ -52,13 +52,13 @@ import (
 // buffering assembler that suppresses fragments and replays them
 // byte-identically (StreamHandler's pass path) is intact, not forged.
 //
-// Scope representation (round-1 finding): a text/thinking scope is a TYPED
+// Scope representation: a text/thinking scope is a TYPED
 // record — separate text and thinking accumulators — so identical bytes in
 // different kinds differ. A signature over text "A" is NOT the same scope as
 // a signature over thinking "A"; carrying a token across the kind boundary is
 // stale.
 //
-// Correlation (round-1 findings): exact matches are found and consumed FIRST
+// Correlation: exact matches are found and consumed FIRST
 // — a returned occurrence pairs with an unconsumed accepted occurrence of the
 // same scope with the same token value AND identical typed content — and
 // ambiguity/stale are only diagnosed once no exact match remains. Two signed
@@ -69,18 +69,18 @@ import (
 // together is NOT forged at this layer — the index movement is a topology
 // change whose charge belongs to 2b's full walk. A token that did NOT move
 // with its block's facts (token-detached reindex) is stale and IS caught.
-// (Round-2 F1) Reindexing is topology, but it must not erase signature
+// Reindexing is topology, but it must not erase signature
 // correlation: a returned scope whose covered facts (id, name, assembled
 // arguments) reproduce an accepted scope one-to-one at a DIFFERENT index is
 // still that block, and its token is classified over the unchanged content —
 // stripped is dropped, replaced is forged, and both are rejected regardless
 // of grants.
 //
-// (Round-2 F3) An explicit text/thinking block opened and closed with zero
+// An explicit text/thinking block opened and closed with zero
 // deltas is a span with EMPTY typed content: the block exists even without
 // content, so an empty signed block whose token disappears is a dropped
 // signature — never a suppressed block, which is what absence from the span
-// list would otherwise claim. (Round-3 F1) The empty span is materialized AT
+// list would otherwise claim. The empty span is materialized AT
 // THE SIGNATURE EVENT when a current-block signature is emitted in an
 // explicit text/thinking block with no deltas yet, so later deltas become
 // the next ordinal instead of rewriting over the empty signed scope.
@@ -104,28 +104,28 @@ func (e *acceptedStreamError) Error() string { return "accepted stream: " + e.ms
 // an adapter defect, not a plugin failure — so the checks deliberately live
 // apart from verifyStream's plugin-violation checks:
 //
-//   - unbound signature_delta: a signature_delta with no covered content (no
-//     open text/thinking span, no open text/thinking block, and no preceding
-//     closed text/thinking content). The ABI requires a compatible open block
-//     and the binding does not cover tool-call blocks; a floating token the
-//     plugin is then free to mirror is a host-owned fact with no definition.
-//   - incompatible deltas: a text/thinking delta inside a block of the other
-//     kind or inside an open tool/provider block, or a tool-call delta / stop
-//     naming no open block of the matching kind. (A text delta inside a
-//     thinking block is the pinned case.)
-//   - the FULL ABI topology (round-2 F4): the state is openNonTool{index,
-//     kind} + openTools[index] + seen[index] — every stop/delta must name an
-//     open block of the matching kind (a non-tool stop binds the open
-//     non-tool block BY INDEX), non-tool blocks are exclusive and never
-//     overlap tool blocks, indexes are never reused, MessageStop with ANY
-//     open block is rejected immediately, and after MessageStop only Usage
-//     (and a terminal StreamError) may follow — never a content/block event.
-//   - missing stop at successful completion: the stream ends with an explicit
-//     content block still open and no StreamError to abandon it. Implicit
-//     bare-delta spans are the boundary-less host representation and need no
-//     stop.
-//   - events after StreamError: StreamError is terminal; anything after it is
-//     malformed.
+// - unbound signature_delta: a signature_delta with no covered content (no
+// open text/thinking span, no open text/thinking block, and no preceding
+// closed text/thinking content). The ABI requires a compatible open block
+// and the binding does not cover tool-call blocks; a floating token the
+// plugin is then free to mirror is a host-owned fact with no definition.
+// - incompatible deltas: a text/thinking delta inside a block of the other
+// kind or inside an open tool/provider block, or a tool-call delta / stop
+// naming no open block of the matching kind. (A text delta inside a
+// thinking block is the pinned case.)
+// - the FULL ABI topology: the state is openNonTool{index,
+// kind} + openTools[index] + seen[index] — every stop/delta must name an
+// open block of the matching kind (a non-tool stop binds the open
+// non-tool block BY INDEX), non-tool blocks are exclusive and never
+// overlap tool blocks, indexes are never reused, MessageStop with ANY
+// open block is rejected immediately, and after MessageStop only Usage
+// (and a terminal StreamError) may follow — never a content/block event.
+// - missing stop at successful completion: the stream ends with an explicit
+// content block still open and no StreamError to abandon it. Implicit
+// bare-delta spans are the boundary-less host representation and need no
+// stop.
+// - events after StreamError: StreamError is terminal; anything after it is
+// malformed.
 //
 // StreamError remains the ONLY terminal path that abandons open blocks: a
 // missing stop is invalid unless the stream already ended at a StreamError.
@@ -162,8 +162,8 @@ func (k openBlockKind) String() string {
 // validation, with its index AND kind. Non-tool blocks are exclusive (only
 // TOOL blocks may be concurrent), so one slot suffices — but the slot must
 // carry the index: a non-tool stop names the open non-tool block BY INDEX, and
-// accepting a stop at any other index would validate a wrong close (round-2
-// F4: StartText(3) + Stop(9) must not pass).
+// accepting a stop at any other index would validate a wrong close
+// (StartText(3) + Stop(9) must not pass).
 type openNonTool struct {
 	index int32
 	kind  openBlockKind
@@ -303,10 +303,10 @@ func validateAcceptedStream(events []*pbv1.StreamEvent) error {
 
 // typedContent is the content of a text/thinking span as a TYPED record:
 // separate text and thinking accumulators, so identical bytes in different
-// kinds differ (round-1 finding: a scope is a typed record — a signature over
-// text "A" must not match a signature over thinking "A").
+// kinds differ: a scope is a typed record, so a signature over text "A" must
+// not match a signature over thinking "A".
 //
-// (Round-4 F1) textSeen/thinkingSeen carry arm PRESENCE independently of
+// textSeen/thinkingSeen carry arm PRESENCE independently of
 // bytes: an explicit block of the kind, or a delta of the kind — including an
 // EMPTY delta — marks the arm even when it holds no bytes. Without presence,
 // an empty TEXT scope and an empty THINKING scope collapsed into the same
@@ -331,8 +331,8 @@ func (t typedContent) isEmpty() bool { return t.text == "" && t.thinking == "" }
 
 // sameKind reports whether two records carry the same arm presence, ignoring
 // bytes. An empty TEXT scope and an empty THINKING scope are distinct records
-// (round-4 F1), so a different-kind span at a binding's ordinal means the
-// signed block itself was suppressed, not rewritten (round-5).
+// , so a different-kind span at a binding's ordinal means the
+// signed block itself was suppressed, not rewritten.
 func (t typedContent) sameKind(o typedContent) bool {
 	return t.textSeen == o.textSeen && t.thinkingSeen == o.thinkingSeen
 }
@@ -489,10 +489,10 @@ type streamSignatureView struct {
 	// ContentBlockStart that is not a continuation, at a signature_delta
 	// (the signature ends the span it covers), and at end of stream. An
 	// explicit text/thinking block closed with zero deltas contributes an
-	// EMPTY span (round-2 F3): the block is present even without content,
+	// EMPTY span: the block is present even without content,
 	// so a missing span still means the block itself was suppressed. A
 	// signature in an explicit text/thinking block with no deltas yet
-	// contributes its empty span AT THE SIGNATURE EVENT (round-3 F1), so
+	// contributes its empty span AT THE SIGNATURE EVENT, so
 	// later deltas become the next ordinal.
 	spans []typedContent
 	// closed is the concatenated typed content of every span closed so far —
@@ -515,30 +515,30 @@ type streamSignatureView struct {
 // The typed text/thinking span state machine:
 //
 //	ContentBlockStart{text|thinking}: any implicit run of bare deltas is
-//	  closed; an explicit text/thinking block opens (its span starts on the
-//	  first delta).
+//	 closed; an explicit text/thinking block opens (its span starts on the
+//	 first delta).
 //	ContentBlockStart{tool_call}: a per-index tool builder opens; the
-//	  non-tool state is untouched (tool blocks may be concurrent).
+//	 non-tool state is untouched (tool blocks may be concurrent).
 //	ContentBlockStart{provider}: any implicit run is closed; a non-text
-//	  block opens.
+//	 block opens.
 //	ContentBlockStop: a stop naming an open tool block materializes and
-//	  closes that tool scope; otherwise the open span (explicit text block or
-//	  implicit run) is closed.
+//	 closes that tool scope; otherwise the open span (explicit text block or
+//	 implicit run) is closed.
 //	TextDelta/ThinkingDelta with no open non-text block and no open tool
-//	  block: appends to the span's typed accumulator (text or thinking),
-//	  opening an implicit span when none is open. (A delta inside an open
-//	  tool/provider block, or of the wrong kind for an open text/thinking
-//	  block, violates the ABI; it is ignored here — that discipline is
-//	  validateAcceptedStream's on the accepted side and the full walk's on
-//	  the plugin-output side, not this PR's.)
+//	 block: appends to the span's typed accumulator (text or thinking),
+//	 opening an implicit span when none is open. (A delta inside an open
+//	 tool/provider block, or of the wrong kind for an open text/thinking
+//	 block, violates the ABI; it is ignored here — that discipline is
+//	 validateAcceptedStream's on the accepted side and the full walk's on
+//	 the plugin-output side, not this PR's.)
 //	SignatureDelta: if a text/thinking span is open (explicit or implicit)
-//	  → CurrentContentBlock binding over the span's typed deltas so far, then
-//	  the span closes (the signature ends the provider part it came with). A
-//	  signature in an explicit text/thinking block with NO deltas yet
-//	  materializes its EMPTY span at the signature event (round-3 F1). If
-//	  a non-text block or any tool block is open → unbound (malformed).
-//	  Otherwise → trailing binding over the accumulated closed content, or
-//	  unbound when no text/thinking content ever preceded it.
+//	 → CurrentContentBlock binding over the span's typed deltas so far, then
+//	 the span closes (the signature ends the provider part it came with). A
+//	 signature in an explicit text/thinking block with NO deltas yet
+//	 materializes its EMPTY span at the signature event. If
+//	 a non-text block or any tool block is open → unbound (malformed).
+//	 Otherwise → trailing binding over the accumulated closed content, or
+//	 unbound when no text/thinking content ever preceded it.
 //
 // A signature ending its span means a later TextDelta in the same explicit
 // block opens a fresh span: each provider part's text is scoped separately,
@@ -547,10 +547,10 @@ type streamSignatureView struct {
 func scanStreamSignatures(events []*pbv1.StreamEvent) streamSignatureView {
 	var v streamSignatureView
 	var blockOpen, blockText bool
-	var blockSawSpan bool // the open explicit text/thinking block already closed a span (round-2 F3)
+	var blockSawSpan bool // the open explicit text/thinking block already closed a span
 	var spanOpen bool
 	var spanText, spanThink strings.Builder
-	var spanTextSeen, spanThinkSeen bool // arm presence of the OPEN span (round-4 F1)
+	var spanTextSeen, spanThinkSeen bool // arm presence of the OPEN span
 	var closedText, closedThink strings.Builder
 	var closedTextSeen, closedThinkSeen bool // OR'd arm presence over every span closed so far
 	var sawText bool
@@ -558,8 +558,8 @@ func scanStreamSignatures(events []*pbv1.StreamEvent) streamSignatureView {
 
 	// resetSpanState UNCONDITIONALLY clears the span accumulators, both
 	// presence flags, and spanOpen. The presence flags are also armed by the
-	// explicit block's KIND (round-4 F1), so a closed empty block that kept
-	// them would leak them into the next block (round-5): a consumed span —
+	// explicit block's KIND, so a closed empty block that kept
+	// them would leak them into the next block: a consumed span —
 	// or an explicit block that never opened one — must leave no state
 	// behind.
 	resetSpanState := func() {
@@ -590,7 +590,7 @@ func scanStreamSignatures(events []*pbv1.StreamEvent) streamSignatureView {
 
 	// closeSpan closes an in-flight span: with deltas it materializes the
 	// span; with none there is nothing to record, but the reset is STILL
-	// unconditional (round-5) — a block's kind-presence must not survive
+	// unconditional — a block's kind-presence must not survive
 	// into the next block.
 	closeSpan := func() {
 		if spanOpen {
@@ -603,13 +603,13 @@ func scanStreamSignatures(events []*pbv1.StreamEvent) streamSignatureView {
 	for _, ev := range events {
 		switch e := ev.Event.(type) {
 		case *pbv1.StreamEvent_ContentBlockStart:
-			closeSpan() // any start closes an implicit run AND clears residual span state (round-5)
+			closeSpan() // any start closes an implicit run AND clears residual span state
 			cbs := e.ContentBlockStart
 			switch cbs.Block.(type) {
 			case *pbv1.ContentBlockStart_Text:
 				blockOpen, blockText = true, true
 				blockSawSpan = false
-				spanTextSeen = true // the explicit block's kind marks the empty scope (round-4 F1)
+				spanTextSeen = true // the explicit block's kind marks the empty scope
 			case *pbv1.ContentBlockStart_Thinking:
 				blockOpen, blockText = true, true
 				blockSawSpan = false
@@ -632,15 +632,15 @@ func scanStreamSignatures(events []*pbv1.StreamEvent) streamSignatureView {
 			}
 			if blockOpen && blockText && !blockSawSpan && !spanOpen {
 				// An explicit text/thinking block closed with zero deltas is
-				// still a span with EMPTY typed content (round-2 F3): the
+				// still a span with EMPTY typed content: the
 				// block exists even without content, so an empty signed block
 				// whose token disappears is a dropped signature — not a
 				// suppressed block, which is what absence from the span list
 				// would otherwise claim. The span carries the BLOCK KIND's
-				// presence (round-4 F1), so an empty text block's span can
+				// presence, so an empty text block's span can
 				// never be mistaken for an empty thinking block's. The helper
 				// CONSUMES the block kind's presence, so it cannot leak into
-				// the next block (round-5).
+				// the next block.
 				materializeSpan()
 			}
 			closeSpan()
@@ -658,7 +658,7 @@ func scanStreamSignatures(events []*pbv1.StreamEvent) streamSignatureView {
 				continue // ABI-violating text; charged by the strict walk
 			}
 			sawText = true
-			spanTextSeen = true // even an EMPTY delta marks the arm (round-4 F1)
+			spanTextSeen = true // even an EMPTY delta marks the arm
 			spanText.WriteString(e.TextDelta)
 			spanOpen = true
 		case *pbv1.StreamEvent_ThinkingDelta:
@@ -666,7 +666,7 @@ func scanStreamSignatures(events []*pbv1.StreamEvent) streamSignatureView {
 				continue // ABI-violating thinking; charged by the strict walk
 			}
 			sawText = true
-			spanThinkSeen = true // even an EMPTY delta marks the arm (round-4 F1)
+			spanThinkSeen = true // even an EMPTY delta marks the arm
 			spanThink.WriteString(e.ThinkingDelta)
 			spanOpen = true
 		case *pbv1.StreamEvent_SignatureDelta:
@@ -675,15 +675,15 @@ func scanStreamSignatures(events []*pbv1.StreamEvent) streamSignatureView {
 				// Open text/thinking span: current-block binding over the
 				// span's typed deltas up to this signature. A signature in an
 				// explicit text/thinking block with NO deltas yet covers an
-				// EMPTY span (round-3 F1): materialize that span AT THE
+				// EMPTY span: materialize that span AT THE
 				// SIGNATURE EVENT, mark the block as having closed a span, and
 				// leave later deltas to become the next ordinal — otherwise
 				// the empty signed scope would vanish into a later span's
 				// "rewritten" verdict when its token dropped. The materialized
 				// span and the binding carry the BLOCK KIND's presence
-				// (round-4 F1), so an empty text scope and an empty thinking
+				//, so an empty text scope and an empty thinking
 				// scope are distinct records. The materialization goes through
-				// the consuming helper (round-5), so the block kind's presence
+				// the consuming helper, so the block kind's presence
 				// is reset before the next block can arm its own.
 				span := len(v.spans)
 				content := typedContent{text: spanText.String(), thinking: spanThink.String(), textSeen: spanTextSeen, thinkingSeen: spanThinkSeen}
@@ -765,12 +765,12 @@ func verifyStream(accepted, returned []*pbv1.StreamEvent, canWrite func(string) 
 	return verifySignatureDeltaBindings(av, rv, canWrite)
 }
 
-// verifyStreamPrefix is verifyStream for a still-live message prefix.  The
+// verifyStreamPrefix is verifyStream for a still-live message prefix. The
 // incremental accepted walker has already established every per-event rule;
 // unlike verifyStream it deliberately does NOT require all sibling tool blocks
-// to be closed yet.  Open concurrent tools are valid after another tool's
+// to be closed yet. Open concurrent tools are valid after another tool's
 // stop, and applying the end-of-stream rule here would turn that valid prefix
-// into a host defect.  Strict completeness remains mandatory at MessageStop
+// into a host defect. Strict completeness remains mandatory at MessageStop
 // and EndStreamVerified.
 func verifyStreamPrefix(accepted, returned []*pbv1.StreamEvent, canWrite func(string) bool) error {
 	if canWrite == nil {
@@ -794,12 +794,12 @@ func verifyStreamPrefix(accepted, returned []*pbv1.StreamEvent, canWrite func(st
 //
 // Scopes are assembled by index WITHIN each side (the walk does this); the
 // ACROSS-sides alignment is one-to-one by the complete signed facts, not by
-// index (round-1 reindex finding):
+// index:
 //
 // Phase 1 — a returned scope that reproduces an accepted scope's complete
 // facts (signature, id, name, arguments) at ANY index is intact and consumes
 // it. This is a TRUE GLOBAL pass over ALL returned scopes with a consumed
-// set (round-3 F2): every exact full-fact occurrence is consumed before any
+// set: every exact full-fact occurrence is consumed before any
 // correlation runs, so a modified block's same-index correlation can never
 // steal an accepted occurrence that a later exact match owns. Pass-through
 // AND a coherent block reindex (all facts moving together across indexes)
@@ -812,7 +812,7 @@ func verifyStreamPrefix(accepted, returned []*pbv1.StreamEvent, canWrite func(st
 // from the token change and the scope diff. A token that did NOT move with
 // its block's facts (token-detached reindex) is caught here as stale.
 //
-// Phase 2b — (round-2 F1) cross-index correlation by IDENTICAL covered facts.
+// Phase 2b — cross-index correlation by IDENTICAL covered facts.
 // A returned scope whose (id, name, assembled arguments) — not the index, not
 // the token — reproduce an unconsumed accepted scope one-to-one at ANY index
 // is the SAME block reindexed; ClassifySignatureMutation decides the token
@@ -824,8 +824,8 @@ func verifyStreamPrefix(accepted, returned []*pbv1.StreamEvent, canWrite func(st
 //
 // Phase 3 — a returned scope with no accepted counterpart is invented: a
 // SIGNED invented block is a minted signature (added) and is rejected
-// regardless of grants (round-1 decision 2: the signature verifier is the
-// single implementation of bound-signature semantics); an UNSIGNED invented
+// regardless of grants (the signature verifier is the single implementation
+// of bound-signature semantics); an UNSIGNED invented
 // block is a cardinality change and needs ir.stream.write.
 //
 // Phase 4 — accepted scopes no returned scope consumed are suppressed: a
@@ -836,7 +836,7 @@ func verifyToolScopes(accepted, returned []toolCallScope, canWrite func(string) 
 	consumed := make([]bool, len(accepted))
 	retConsumed := make([]bool, len(returned))
 
-	// Phase 1 — a TRUE GLOBAL exact-first pass (round-3 F2): every returned
+	// Phase 1 — a TRUE GLOBAL exact-first pass: every returned
 	// scope that reproduces an accepted scope's complete facts (signature,
 	// id, name, arguments) at ANY index consumes it, and NO correlation runs
 	// until every exact full-fact occurrence is consumed. Scanning exact
@@ -927,10 +927,10 @@ func toolCallCoveredContentEqual(a, b toolCallScope) bool {
 
 // verifySignatureDeltaBindings applies the bound-signature rule to every
 // signature_delta occurrence, per scope, correlating the accepted and
-// returned occurrences by exact (token, typed-content) matches FIRST (round-1
-// finding: ambiguity and stale are only diagnosed once no exact unconsumed
-// occurrence exists — repeated token values over different content pass
-// through unchanged instead of being misread as ambiguous):
+// returned occurrences by exact (token, typed-content) matches FIRST —
+// ambiguity and stale are only diagnosed once no exact unconsumed occurrence
+// exists, so repeated token values over different content pass through
+// unchanged instead of being misread as ambiguous:
 //
 // Phase 1 — every returned occurrence with a non-empty token consumes one
 // unconsumed accepted occurrence of the same scope with the SAME token value
@@ -947,22 +947,22 @@ func toolCallCoveredContentEqual(a, b toolCallScope) bool {
 // Phase 3 — accepted occurrences no returned token covers. An explicit empty
 // returned occurrence is a clear marker belonging to the returned SPAN it was
 // emitted in — never a pool of interchangeable markers to be consumed
-// positionally (round-2 F2): an unchanged accepted signed occurrence surviving
+// positionally: an unchanged accepted signed occurrence surviving
 // anywhere without its token is rejected as dropped BEFORE any clear marker
 // is assigned, so a marker attached to a DIFFERENT (rewritten) span cannot
 // hide a dropped token. The unchanged-content precheck is OCCURRENCE-AWARE
-// (round-3 F3): returned spans are consumed one-to-one, matching accepted
+// : returned spans are consumed one-to-one, matching accepted
 // UNSIGNED twins before they can prove a signed occurrence dropped, so a
 // surplus occurrence condemns (dropped) while a twin-only survival is a
 // suppressed signed span (topology-gated). The returned spans owned by the
 // EXACT matches Phase 1 consumed are reserved from that multiset first
-// (round-4 F2): a surviving exact signed occurrence is its match's own span,
+// : a surviving exact signed occurrence is its match's own span,
 // never surplus evidence against a second identical signed occurrence. After
 // that gate, a marker whose typed content exactly matches an accepted
 // occurrence is that occurrence's token stripped over unchanged content
 // (dropped, rejected); a marker otherwise clears the accepted signed
 // occurrence at ITS OWN span ordinal (that span's content was rewritten) —
-// except that an EMPTY accepted scope is never rewritten (round-6): its
+// except that an EMPTY accepted scope is never rewritten: its
 // marker is classified by the same empty-binding rule verifyUnpairedBinding
 // applies without one, so a same-kind empty span stays dropped and a
 // DIFFERENT-kind empty span at the ordinal is suppression, topology-gated on
@@ -970,7 +970,7 @@ func toolCallCoveredContentEqual(a, b toolCallScope) bool {
 // What remains is decided from the returned span structure by
 // verifyUnpairedBinding: a missing span at the binding's position means the
 // signed block itself was suppressed (topology-gated), an EMPTY signed scope
-// with no surviving empty span is a dropped span (round-3 F1), and different
+// with no surviving empty span is a dropped span, and different
 // content at the position is clearing (allowed).
 //
 // An UNBOUND signature_delta in the plugin's OUTPUT is a violation (a
@@ -1057,23 +1057,23 @@ func verifySignatureDeltaBindings(av, rv streamSignatureView, canWrite func(stri
 			}
 			return -1
 		}
-		// (a) Occurrence-aware multiset precheck (round-3 F3): the old check
-		// asked whether the accepted signed content appears ANYWHERE in the
-		// returned spans, ignoring multiplicity and unsigned twins — a
-		// surviving identical UNSIGNED twin was misread as proof the signed
+		// (a) Occurrence-aware multiset precheck. Asking whether the accepted
+		// signed content appears ANYWHERE in the returned spans would ignore
+		// multiplicity and unsigned twins — a surviving identical UNSIGNED
+		// twin would be misread as proof the signed
 		// token was stripped, so an allowed signed suppression looked like a
 		// dropped token. Consumption is now one-to-one, the same cardinality
 		// discipline the request verifier applies to section fingerprints:
 		//
-		//   (b) surviving unchanged returned spans are matched against
-		//       accepted UNSIGNED twins FIRST (an accepted span that no
-		//       accepted signed binding covers), so a twin can never prove a
-		//       signed occurrence dropped;
-		//   (c) any SURPLUS unchanged returned occurrence after that is the
-		//       signed content surviving without its token → dropped;
-		//   (d) an accepted signed occurrence whose content survived only as
-		//       a consumed twin was SUPPRESSED while the twin lived on →
-		//       topology-gated on ir.stream.write.
+		// (b) surviving unchanged returned spans are matched against
+		// accepted UNSIGNED twins FIRST (an accepted span that no
+		// accepted signed binding covers), so a twin can never prove a
+		// signed occurrence dropped;
+		// (c) any SURPLUS unchanged returned occurrence after that is the
+		// signed content surviving without its token → dropped;
+		// (d) an accepted signed occurrence whose content survived only as
+		// a consumed twin was SUPPRESSED while the twin lived on →
+		// topology-gated on ir.stream.write.
 		var remaining map[typedContent]int
 		var twinSurvived map[typedContent]bool
 		if kind == sigBindingCurrent {
@@ -1081,7 +1081,7 @@ func verifySignatureDeltaBindings(av, rv streamSignatureView, canWrite func(stri
 			for _, s := range rv.spans {
 				remaining[s]++
 			}
-			// (round-4 F2) Reserve the returned span ordinals owned by the
+			// Reserve the returned span ordinals owned by the
 			// exact matches Phase 1 consumed: the multiset was rebuilt from
 			// ALL returned spans, so a surviving exact signed occurrence was
 			// left available to prove a SECOND identical signed occurrence
@@ -1130,7 +1130,7 @@ func verifySignatureDeltaBindings(av, rv streamSignatureView, canWrite func(stri
 				return fmt.Errorf("%s signature_delta dropped", kind)
 			}
 			// Clear markers correlate by their OWN returned span identity
-			// (round-2 F2): the marker emitted in returned span j is the
+			//: the marker emitted in returned span j is the
 			// prescribed clearing response for the accepted signed occurrence
 			// at span j — that span's content was rewritten, so (a) did not
 			// reject it. A marker is never consumed for a DIFFERENT accepted
@@ -1144,7 +1144,7 @@ func verifySignatureDeltaBindings(av, rv streamSignatureView, canWrite func(stri
 			}
 			if cleared >= 0 {
 				if acc[i].content.isEmpty() {
-					// Round-6: an explicit empty marker beside an EMPTY
+					// An explicit empty marker beside an EMPTY
 					// accepted scope must not bypass the kind check. The
 					// marker is the prescribed way to clear a token during a
 					// legitimate in-kind rewrite, but a different-kind span at
@@ -1193,13 +1193,13 @@ func verifySignatureDeltaBindings(av, rv streamSignatureView, canWrite func(stri
 // structure alone (the unchanged-content survival cases were already decided
 // by the occurrence-aware precheck in verifySignatureDeltaBindings):
 //
-//   - nothing occupies the position (current-block) or the turn has no text
-//     left at all (trailing) → the signed block itself was suppressed →
-//     topology-gated on ir.stream.write;
-//   - the signed scope is EMPTY (round-3 F1) → its empty span was dropped:
-//     there is no content to rewrite, so "cleared" cannot apply;
-//   - different content occupies the position → cleared (the prescribed
-//     response to a legitimate rewrite) → allowed.
+// - nothing occupies the position (current-block) or the turn has no text
+// left at all (trailing) → the signed block itself was suppressed →
+// topology-gated on ir.stream.write;
+// - the signed scope is EMPTY → its empty span was dropped:
+// there is no content to rewrite, so "cleared" cannot apply;
+// - different content occupies the position → cleared (the prescribed
+// response to a legitimate rewrite) → allowed.
 func verifyUnpairedBinding(kind sigBindingKind, ab sigBinding, rv streamSignatureView, canWrite func(string) bool) error {
 	if kind == sigBindingTrailing {
 		if rv.closed.equals(ab.content) {
@@ -1217,7 +1217,7 @@ func verifyUnpairedBinding(kind sigBindingKind, ab sigBinding, rv streamSignatur
 	// occurrence was already condemned by the occurrence-aware precheck
 	// ((c)/(d) in verifySignatureDeltaBindings), so here only the span
 	// STRUCTURE decides: nothing at the binding's ordinal is a suppressed
-	// block, an EMPTY signed scope cannot be rewritten (round-3 F1) and is a
+	// block, an EMPTY signed scope cannot be rewritten and is a
 	// dropped span, and anything else is a cleared token over rewritten
 	// content.
 	if ab.span >= 0 && ab.span >= len(rv.spans) {
@@ -1228,7 +1228,7 @@ func verifyUnpairedBinding(kind sigBindingKind, ab sigBinding, rv streamSignatur
 	}
 	if ab.content.isEmpty() {
 		if ab.span >= 0 && ab.span < len(rv.spans) && !rv.spans[ab.span].sameKind(ab.content) {
-			// Round-5: the span at the ordinal is of a DIFFERENT kind — an
+			// The span at the ordinal is of a DIFFERENT kind — an
 			// empty signed TEXT scope and an empty signed THINKING scope are
 			// distinct records, so a text block can never be "rewritten" into
 			// a thinking block (or vice versa). The signed block itself was
@@ -1239,7 +1239,7 @@ func verifyUnpairedBinding(kind sigBindingKind, ab sigBinding, rv streamSignatur
 			}
 			return nil
 		}
-		// round-3 F1: a signature over ZERO deltas is either intact
+		// A signature over ZERO deltas is either intact
 		// (consumed by an exact match in phase 1) or its empty span was
 		// dropped — there is no content to rewrite, so "cleared" cannot
 		// apply, and the block still exists (a span sits at the ordinal), so

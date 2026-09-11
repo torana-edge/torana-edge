@@ -6,7 +6,7 @@ import (
 	pb "github.com/torana-edge/torana-plugin-sdk/pb/v1"
 )
 
-// The ordered-prefix cache identity (review round 2 finding 1): the prefix
+// The ordered-prefix cache identity: the prefix
 // closes at the LAST marker in provider-visible serialization order — tools
 // first, then messages, outer blocks, nested tool-result content.
 // CachePrefixKey takes the validated PB request and is self-gated by the

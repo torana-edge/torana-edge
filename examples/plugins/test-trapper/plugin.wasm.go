@@ -18,7 +18,7 @@ func main() {}
 // pipeline tests reported it blocked.
 //
 // A panic is the honest way to trap: it is what a real plugin's unhandled
-// error does, and Migration A deliberately converts constructor and validation
+// error does, and the host deliberately converts constructor and validation
 // failures into traps so the host's failure_mode can act on them.
 func init() {
 	sdk.OnBeforeRequest(func(ctx context.Context, req *pb.ChatRequest) (sdk.RequestResult, error) {

@@ -10,7 +10,7 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
-// Review round 3 finding 1 reproductions (PB-based API): computing a cache
+// Computing a cache
 // key must never mutate the live request (the truncation is pure PB
 // construction now), and the key must equal an INDEPENDENT reference model.
 

@@ -214,7 +214,7 @@ func mustRaw(t *testing.T, part map[string]any) []byte {
 	return b
 }
 
-// The executable Part grammar (review round 2 finding 3): exactly one arm
+// The executable Part grammar: exactly one arm
 // member per part, only documented modifier combinations, deliberate
 // future-arm policy. Every ambiguous row must be the value-free parse
 // error; every legal combination must parse and round-trip.
@@ -266,7 +266,7 @@ func TestGeminiPartGrammar(t *testing.T) {
 	}
 }
 
-// Review round 3 finding 3 reproductions — the Gemini Part grammar is not
+// The Gemini Part grammar is not
 // Google's actual grammar, and the ABI has no signature carriers for
 // media/future arms or tool results. These rows are RED pending the SDK
 // signed-Part contract correction (design checkpoint submitted for

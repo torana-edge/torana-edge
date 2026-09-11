@@ -9,7 +9,7 @@ import (
 	"github.com/torana-edge/torana-edge/internal/format/anthropic"
 )
 
-// Review round 3 finding 1: after CachePrefixKey computes the key, every
+// After CachePrefixKey computes the key, every
 // suffix block must still reach the provider wire — the key computation
 // must never truncate the live request.
 func TestMarshalAfterCachePrefixKeyKeepsSuffix(t *testing.T) {

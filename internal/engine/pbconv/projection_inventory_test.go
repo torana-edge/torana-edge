@@ -10,7 +10,7 @@ import (
 	"testing"
 )
 
-// Review round 3 finding 2: the repository inventory proves the only raw
+// The repository inventory proves the only raw
 // first-arm-wins converter is private to the checked implementation. This
 // scans every PRODUCTION (non-test) Go file under internal/ and cmd/:
 //
