@@ -1,6 +1,6 @@
 package format_test
 
-// Representation pins for the required-fields migration (PR A commit 3):
+// Representation pins for the required-fields contract:
 // tool-call arguments and tool schemas travel as authoritative raw lexemes
 // through every format adapter, PB conversion, and the cache prefix. These
 // tests pin the per-format round trips (1e999, large integers, 1.0,

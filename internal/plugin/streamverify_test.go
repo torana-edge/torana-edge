@@ -164,7 +164,7 @@ func usageEvent() *pbv1.StreamEvent {
 // fixture, an Allowed Want means verifyStream must return nil, and a rejected
 // Want means it must return an error naming the class. This includes BOTH
 // concurrent-tool twins (index 0 and index 1 of the interleaved shape), which
-// the round-1 verdict pinned: a verifier that tracks a single open tool block
+// the rule pinned here: a verifier that tracks a single open tool block
 // fails one of them.
 func TestVerifyStreamConformsToSDKStreamFixtures(t *testing.T) {
 	fx := outboundpolicy.SignatureStreamFixtures()
@@ -289,7 +289,7 @@ func TestStreamVerifyWrongScopesFailTheFixtures(t *testing.T) {
 // semantics: which signature_delta lands in which scope, with which TYPED
 // covered content, in both the boundary-less host representation and the
 // ABI-conformant explicit-block representation. The typed record is the
-// round-1 finding: identical bytes in the text and thinking kinds must differ.
+// Identical bytes in the text and thinking kinds must differ.
 func TestScanStreamSignaturesPinsTheScopeWalk(t *testing.T) {
 	// Boundary-less host representation: a bare run of text deltas closed by
 	// a signature is one current binding over the typed text.
@@ -394,7 +394,7 @@ func TestScanStreamSignaturesPinsTheScopeWalk(t *testing.T) {
 	}
 }
 
-// TestStreamVerifyTypedScopes pins the round-1 typed-scope finding: a scope
+// TestStreamVerifyTypedScopes pins the typed-scope rule: a scope
 // is a typed record, so identical bytes in different kinds MUST differ.
 // Carrying a token from text "A" to thinking "A" (or vice versa) is stale.
 func TestStreamVerifyTypedScopes(t *testing.T) {
@@ -449,13 +449,13 @@ func TestStreamVerifyTypedScopes(t *testing.T) {
 	})
 }
 
-// TestStreamVerifyExactMatchFirst pins the round-1 correlation finding: exact
+// TestStreamVerifyExactMatchFirst pins the correlation rule: exact
 // (token, typed-content) matches are found and consumed BEFORE ambiguity or
 // stale is diagnosed. Two signed spans sharing one token value pass through
 // unchanged (the old verifier misread this as ambiguous), and the
 // deletion/duplication/reuse/reorder cardinality is judged correctly.
 func TestStreamVerifyExactMatchFirst(t *testing.T) {
-	// The round-1 reproduction: the SAME token over two different contents.
+	// The failing case: the SAME token over two different contents.
 	accepted := []*pbv1.StreamEvent{
 		textDelta("first"), signatureDelta(streamSigA),
 		textDelta("second"), signatureDelta(streamSigA),
@@ -534,7 +534,7 @@ func TestStreamVerifyExactMatchFirst(t *testing.T) {
 	})
 }
 
-// TestStreamVerifyReindex pins the round-1 reindex finding: tool blocks are
+// TestStreamVerifyReindex pins the reindex rule: tool blocks are
 // assembled by index WITHIN each side and aligned one-to-one by their complete
 // signed facts ACROSS sides. A coherent reindex — both blocks' (id, name,
 // arguments, token) facts moving 0↔1 together — is NOT a signature violation
@@ -572,7 +572,7 @@ func TestStreamVerifyReindex(t *testing.T) {
 	})
 }
 
-// TestStreamVerifyInventedToolBlock pins round-1 decision 2: the signature
+// TestStreamVerifyInventedToolBlock pins the ownership rule: the signature
 // verifier is the single implementation of bound-signature semantics, so an
 // invented SIGNED tool block is a minted signature (added) and is rejected
 // even with every grant; an invented UNSIGNED tool block changes cardinality
@@ -604,7 +604,7 @@ func TestStreamVerifyInventedToolBlock(t *testing.T) {
 	})
 }
 
-// TestValidateAcceptedStream pins the accepted-side split (round-1 decision
+// TestValidateAcceptedStream pins the accepted-side split (decision
 // 1): malformed ACCEPTED input is a host/adaptor defect, not a plugin
 // failure. Every check here returns an *acceptedStreamError: unbound
 // signature_delta, missing stop at successful completion, incompatible
@@ -1023,7 +1023,7 @@ func TestStreamVerifyMultiSpanCorrelation(t *testing.T) {
 	})
 }
 
-// TestStreamVerifyCrossIndexIdenticalFacts pins round-2 F1: after exact
+// TestStreamVerifyCrossIndexIdenticalFacts pins the rule that after exact
 // full-fact matching, tool blocks are correlated one-to-one ACROSS indexes by
 // their IDENTICAL covered facts (id, name, assembled arguments), and the
 // token is classified over the unchanged content. A coherent reindex (facts
@@ -1036,7 +1036,7 @@ func TestStreamVerifyCrossIndexIdenticalFacts(t *testing.T) {
 	accepted := toolBlock(0, "call_1", "read_file", streamSigA, `{"path":"/a"}`)
 
 	t.Run("reindex with the token stripped is dropped, even with every grant", func(t *testing.T) {
-		// The exact round-2 F1 reproduction: the same unchanged signed call
+		// The failing case: the same unchanged signed call
 		// at a different index, token gone. The accepted block would be
 		// read as invented-unsigned and suppressed-signed (both grantable);
 		// identical facts must instead identify the block and classify the
@@ -1072,7 +1072,7 @@ func TestStreamVerifyCrossIndexIdenticalFacts(t *testing.T) {
 	})
 }
 
-// TestStreamVerifyEmptyMarkerOwnIdentity pins round-2 F2: an explicit empty
+// TestStreamVerifyEmptyMarkerOwnIdentity pins the rule that an explicit empty
 // returned signature_delta is a clear marker belonging to the returned SPAN
 // it was emitted in — never a pool of interchangeable markers consumed
 // positionally. Every UNCHANGED accepted signed content occurrence surviving
@@ -1128,7 +1128,7 @@ func TestStreamVerifyEmptyMarkerOwnIdentity(t *testing.T) {
 	})
 }
 
-// TestStreamVerifyExplicitEmptySignedBlock pins round-2 F3: an explicit
+// TestStreamVerifyExplicitEmptySignedBlock pins the rule that an explicit
 // text/thinking block opened and closed with ZERO deltas is still a span with
 // empty typed content — the block exists even without content. An empty
 // signed block whose token disappears while the block survives is a dropped
@@ -1204,7 +1204,7 @@ func TestStreamVerifyExplicitEmptySignedBlock(t *testing.T) {
 	})
 }
 
-// TestStreamVerifyEmptySignedSpanThenContent pins round-3 F1: a
+// TestStreamVerifyEmptySignedSpanThenContent pins the rule that a
 // signature_delta emitted in an explicit text/thinking block with NO deltas
 // yet covers an EMPTY span, and that span is materialized AT THE SIGNATURE
 // EVENT — the empty signed scope owns its ordinal, and later deltas become
@@ -1300,7 +1300,7 @@ func TestStreamVerifyEmptySignedSpanThenContent(t *testing.T) {
 	}
 }
 
-// TestStreamVerifyToolGlobalExactFirst pins round-3 F2: tool Phase 1 is a
+// TestStreamVerifyToolGlobalExactFirst pins the rule that tool Phase 1 is a
 // TRUE GLOBAL exact-full-fact pass over ALL returned scopes with a consumed
 // set, and only AFTER every exact occurrence is consumed do the same-index
 // and cross-index fallback correlations run. The finding: accepted A/Ta@0 and
@@ -1344,9 +1344,9 @@ func TestStreamVerifyToolGlobalExactFirst(t *testing.T) {
 	}
 }
 
-// TestStreamVerifyUnsignedTwinSuppression pins round-3 F3: the
+// TestStreamVerifyUnsignedTwinSuppression pins the rule that the
 // unchanged-content precheck is occurrence-aware multiset consumption. The
-// finding: accepted signed block A/T + unsigned block A; returned unsigned
+// failing case: accepted signed block A/T + unsigned block A; returned unsigned
 // block A (grant ir.stream.write) — the signed occurrence was suppressed
 // (allowed with the topology grant) while the identical unsigned occurrence
 // survived, but the old "survives ANYWHERE" check treated the surviving
@@ -1417,7 +1417,7 @@ func TestStreamVerifyUnsignedTwinSuppression(t *testing.T) {
 	})
 }
 
-// TestStreamVerifyEmptyKindScopesDiffer pins round-4 F1: typedContent
+// TestStreamVerifyEmptyKindScopesDiffer pins the rule that typedContent
 // carries arm PRESENCE independently of bytes, so an empty TEXT scope and an
 // empty THINKING scope are different records and can never match each other
 // exactly. The finding: the explicit EMPTY kinds both produced the identical
@@ -1514,9 +1514,9 @@ func TestStreamVerifyEmptyKindScopesDiffer(t *testing.T) {
 	}
 }
 
-// TestStreamVerifyEmptyKindClearMarkerIsTopology pins round-6: the
+// TestStreamVerifyEmptyKindClearMarkerIsTopology pins the rule that the
 // same-ordinal explicit empty clear marker must not bypass the kind check.
-// Round-5 taught verifyUnpairedBinding that a DIFFERENT-kind empty span at a
+// verifyUnpairedBinding treats a DIFFERENT-kind empty span at a
 // binding's ordinal is suppression (the signed block itself was suppressed;
 // topology, gated on ir.stream.write), but Phase 3 consumed a same-ordinal
 // empty SignatureDelta("") marker FIRST and never reached that
@@ -1609,7 +1609,7 @@ func TestStreamVerifyEmptyKindClearMarkerIsTopology(t *testing.T) {
 	}
 }
 
-// TestStreamVerifyExactMatchesReserveReturnedSpans pins round-4 F2: Phase 1
+// TestStreamVerifyExactMatchesReserveReturnedSpans pins the rule that Phase 1
 // consumes exact (token, typed-content) matches in consumed/retConsumed, but
 // the Phase-3 remaining multiset was rebuilt from ALL returned spans and
 // never subtracted the returned spans owned by those exact matches. The
@@ -1666,7 +1666,7 @@ func TestStreamVerifyExactMatchesReserveReturnedSpans(t *testing.T) {
 	})
 }
 
-// TestStreamVerifyEmptySpanPresenceDoesNotLeak pins round-5: span lifecycle
+// TestStreamVerifyEmptySpanPresenceDoesNotLeak pins the rule that span lifecycle
 // consumption/reset is UNCONDITIONAL for every materialization path, so an
 // empty span's kind-presence can never leak into the next block. The
 // finding: closeSpan reset spanTextSeen/spanThinkSeen only when spanOpen was
@@ -1776,7 +1776,7 @@ func TestStreamVerifyEmptySpanPresenceDoesNotLeak(t *testing.T) {
 	})
 }
 
-// TestValidateAcceptedStreamABITopology pins round-2 F4: validateAcceptedStream
+// TestValidateAcceptedStreamABITopology pins the rule that validateAcceptedStream
 // implements the FULL ABI topology, not a kind-only approximation. Every
 // stop/delta must match its open block BY INDEX, indexes are never reused,
 // non-tool blocks are exclusive and never overlap tool blocks, MessageStop
@@ -1968,7 +1968,7 @@ func BenchmarkVerifyStreamPassThrough(b *testing.B) {
 }
 
 // BenchmarkVerifyStreamManyTools measures the walk over MANY concurrently open
-// tool blocks (20, the round-1 benchmark shape): per-open-tool builders keep
+// tool blocks (20): per-open-tool builders keep
 // the scopes apart in one pass, so the cost must stay near-linear in events.
 func BenchmarkVerifyStreamManyTools(b *testing.B) {
 	accepted := benchConcurrentTools(20)
@@ -1984,7 +1984,7 @@ func BenchmarkVerifyStreamManyTools(b *testing.B) {
 }
 
 // BenchmarkVerifyStreamFragmented measures the walk over ONE tool call whose
-// arguments arrive as 100 fragments (the round-1 benchmark shape): the
+// arguments arrive as 100 fragments: the
 // builder accumulates into a single buffer and materializes once, so the cost
 // must not depend on fragment-count squared.
 func BenchmarkVerifyStreamFragmented(b *testing.B) {

@@ -1,11 +1,10 @@
 package engine
 
-// Adversarial matrix for the three durable JSON wrappers (PR A commit 2,
-// reassessment revision). Carried from round 1: strict construction
+// Adversarial matrix for the three durable JSON wrappers: strict construction
 // (duplicates, surrogates, bad UTF-8, malformed, wrong shape), absence
 // semantics, defensive copies, span-splicing mutation discipline (untouched
 // lexemes/order/whitespace survive; set-then-delete byte-exact), UTF-8
-// member keys, escape-equivalent lookup. New reference proofs: absent
+// member keys, escape-equivalent lookup. Reference proofs: absent
 // optional wrappers retain their type-level shape; requiredness is durable
 // (zero = canonical `{}`); whitespace-only empty objects round-trip via the
 // structural closing-brace path.

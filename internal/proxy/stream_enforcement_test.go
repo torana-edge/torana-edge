@@ -1,7 +1,7 @@
 package proxy
 
 // End-to-end tests for the stream-signature enforcement's transport-level
-// contract (Migration B part 2b): a typed terminal error must abort the
+// contract: a typed terminal error must abort the
 // client's response — truncated body, no finish marker, connection closed
 // without the chunked terminator — and a valid signed stream must complete
 // cleanly.

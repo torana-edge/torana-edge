@@ -86,7 +86,7 @@ func TestCodeAssistRoundTrip(t *testing.T) {
 		t.Errorf("tool result id not matched to call: %+v", toolResult)
 	}
 	// contents[3] is a text part carrying a thoughtSignature beside non-thought
-	// text — the SameMessage content-bound shape. Round 4 routes it to
+	// text — the SameMessage content-bound shape. It routes to
 	// ContentSignature, never the thinking slot.
 	if textMsg == nil {
 		t.Fatal("no assistant text message parsed")
@@ -1062,8 +1062,8 @@ func TestCodeAssistRejectedBareSignaturePart(t *testing.T) {
 }
 
 // TestCodeAssistThinkingOnlyNoInventedTextPart: a thinking-only turn must
-// marshal to EXACTLY ONE part (the thought part) — round 3 invented an empty
-// {} text part for Content-less turns, which Code Assist rejects.
+// marshal to EXACTLY ONE part (the thought part). Emitting an additional
+// empty {} text part for a Content-less turn is what Code Assist rejects.
 func TestCodeAssistThinkingOnlyNoInventedTextPart(t *testing.T) {
 	body := `{"contents":[{"role":"model","parts":[
 		{"thought":true,"text":"r","thoughtSignature":"S"}

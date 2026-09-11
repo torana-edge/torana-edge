@@ -293,7 +293,7 @@ func TestAdapterMarshalEntryValidates(t *testing.T) {
 	}
 }
 
-// Review round 3 finding 2: the owning boundaries must be closed over the
+// The owning boundaries must be closed over the
 // FULL SDK domain, not just the structural engine facts. These rows were
 // written BEFORE the canonical full-domain validation existed: adapter
 // marshal entries and the cache projection accepted SDK-invalid requests.

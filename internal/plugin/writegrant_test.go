@@ -739,7 +739,7 @@ func TestVerifyUnconditionalInvariantsUnchangedPasses(t *testing.T) {
 	}
 }
 
-// --- F2 round-3: unknown protobuf fields are never grantable ---------------
+// --- Unknown protobuf fields are never grantable -------------------------
 
 // appendUnknownField100 marshals src and appends an unknown field (number
 // 100, varint 1 — the a0 06 01 shape a handwritten guest can emit) so the
@@ -756,9 +756,9 @@ func appendUnknownField100(t testing.TB, src, into proto.Message) {
 	}
 }
 
-// Unknown fields nested inside ChatRequest/Message/ToolCall/ToolDef bypassed
-// every grant in round 2 (only the envelope was checked). They are now an
+// Unknown fields nested inside ChatRequest/Message/ToolCall/ToolDef are an
 // unconditional invariant: rejected at every nesting level, naming the path.
+// Checking only the envelope would let them bypass every grant.
 func TestVerifyUnknownFieldsRejectedAtEveryNestingLevel(t *testing.T) {
 	cases := []struct {
 		name string
@@ -849,10 +849,10 @@ func TestVerifyUnknownFieldsNamedBeforeHostOwnedMeta(t *testing.T) {
 
 // --- F3: identity-based signature alignment ---------------------------------
 
-// The reviewer's exact reproduction: a granted deletion BEFORE a signed
-// message shifts its index. Round-1 positional pairing compared the unchanged
-// token against an unrelated message and classified it as forged; identity
-// alignment pairs by (role, token value) and sees the token intact.
+// A granted deletion BEFORE a signed message shifts its index. Positional
+// pairing would compare the unchanged token against an unrelated message and
+// classify it as forged; identity alignment pairs by (role, token value) and
+// sees the token intact.
 func TestVerifyRequestSignaturesDeletionBeforeSignedMessage(t *testing.T) {
 	accepted := &pb.ChatRequest{Messages: []*pb.Message{
 		{Role: "user", Blocks: []*pb.RequestBlock{{Kind: &pb.RequestBlock_Text{Text: &pb.RequestTextBlock{Text: "discard me"}}}}},
@@ -985,9 +985,9 @@ func TestVerifyRequestSignaturesAcceptedTokenWithoutCounterpartAllowed(t *testin
 	}
 }
 
-// --- Round-3: one-to-one multiset alignment --------------------------------
+// --- One-to-one multiset alignment -----------------------------------------
 
-// Reviewer reproduction (a): one accepted token authorising TWO output copies
+// Case (a): one accepted token authorising TWO output copies
 // of the same signed message. The first copy consumes the occurrence; the
 // second has no unconsumed occurrence left — the token was reused to mint
 // provenance, and must be rejected. (Same shape as the output-token
@@ -1013,7 +1013,7 @@ func TestVerifyRequestSignaturesDuplicatedSignedMessageRejected(t *testing.T) {
 // Reviewer reproduction (b): an unchanged clone must pass with NO grants. The
 // signed copy consumes the accepted signed occurrence in phase 1, so the
 // unsigned copy's content has no REMAINING signed counterpart in phase 2 —
-// the round-2 false positive ("signature dropped") must not fire.
+// the false positive ("signature dropped") must not fire.
 func TestVerifyRequestSignaturesUnchangedCloneWithUnsignedCopyPasses(t *testing.T) {
 	accepted := &pb.ChatRequest{Messages: []*pb.Message{
 		{Role: "assistant", Blocks: []*pb.RequestBlock{{Kind: &pb.RequestBlock_Text{Text: &pb.RequestTextBlock{Text: "A", Signature: "token"}}}}},
@@ -1511,7 +1511,7 @@ func BenchmarkVerifyRequestMutationFastPath(b *testing.B) {
 	}
 }
 
-// --- Round-4: phase-2 unsigned-occurrence consumption ----------------------
+// --- Phase-2 unsigned-occurrence consumption -------------------------------
 
 // accepted signed A + accepted unsigned A -> output unsigned A: the unsigned
 // output is spoken for by its unchanged unsigned twin; deleting the signed

@@ -7,7 +7,7 @@ import (
 )
 
 // ---------------------------------------------------------------------------
-// Round-10 finding 2 [high]: unselected alternatives' raw args corrupted.
+// Unselected alternatives' raw args must not be corrupted.
 //
 // Mutable/exposed tool calls are the SELECTED response only (choice 0 /
 // candidate 0). But the byte-restore pass must cover EVERY provider-body
@@ -94,7 +94,7 @@ func TestRawPreservationUnselectedChoiceOpenai(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Round-10 finding 3 [medium]: absent args slot + unrelated mutation errors.
+// An absent args slot plus an unrelated mutation must error.
 //
 // A gemini functionCall with NO args key plus a content-only mutation used to
 // fail with "args slot not found": the restore pass looked the slot up before
@@ -156,7 +156,7 @@ func TestNoArgsSlotPluginCreatedArgs(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Round-10 finding 4 [medium]: duplicate keys — raw takes first, decoder
+// Duplicate keys — raw takes first, decoder
 // takes last.
 //
 // encoding/json keeps the LAST duplicate key, so the raw view (rawJSONSpan
