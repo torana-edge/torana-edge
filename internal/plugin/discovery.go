@@ -778,10 +778,6 @@ func decodeManifest(raw []byte, manifest *PluginManifest) error {
 	return nil
 }
 
-// bundleDigest covers every executable or policy-bearing file consumed by the
-// runtime. Length-prefixing keeps the digest unambiguous. A change to code,
-// requested permissions, failure behavior, hooks, configuration schema, or
-// advertised agent contract therefore invalidates the operator's approval.
 // BundleDigestForDir computes the approval digest for an on-disk bundle. It is
 // the single source of truth shared with `torana plugin install`, which must
 // print exactly the digest an operator will later approve. Reimplementing this
@@ -814,6 +810,10 @@ func BundleDigestForDir(dir string) (string, error) {
 	return bundleDigest(manifestBytes, wasmBytes, schemaBytes, agentBytes), nil
 }
 
+// bundleDigest covers every executable or policy-bearing file consumed by the
+// runtime. Length-prefixing keeps the digest unambiguous. A change to code,
+// requested permissions, failure behavior, hooks, configuration schema, or
+// advertised agent contract therefore invalidates the operator's approval.
 func bundleDigest(manifestBytes, wasmBytes, schemaBytes, agentBytes []byte) string {
 	h := sha256.New()
 	parts := [][]byte{manifestBytes, wasmBytes, schemaBytes}

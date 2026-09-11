@@ -1,6 +1,3 @@
-// Package metrics provides tracking for Torana Edge cost savings.
-// All counters are safe for concurrent use via sync/atomic; the per-plugin
-// savings map is mutex-guarded.
 package metrics
 
 import "sync"
