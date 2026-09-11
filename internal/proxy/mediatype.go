@@ -41,22 +41,70 @@ func isEventStreamMediaType(contentType string) bool {
 	return mediaTypeOf(contentType) == "text/event-stream"
 }
 
-// unpipelinedContentTypes remembers which content types have already been
-// reported, so an upstream that emits one on every request logs once rather
-// than once per call.
-var unpipelinedContentTypes sync.Map
+// maxReportedContentTypes bounds how many distinct unrecognised media types
+// are remembered for de-duplication.
+//
+// The set is keyed by a string the UPSTREAM chooses, so without a cap its
+// cardinality is the upstream's to decide: a misbehaving or hostile provider
+// answering application/x-1, application/x-2, … grows the proxy's memory for
+// the life of the process, and does it purely to suppress a diagnostic.
+// Stripping parameters stops churn within one base type; it does not bound how
+// many base types exist.
+//
+// Sixteen is enough to name the handful a real deployment could produce while
+// making the memory a constant.
+const maxReportedContentTypes = 16
 
-// warnUnpipelinedContentType reports, once per content type, that a response
-// passed through ungoverned.
+// reportedContentTypes tracks which unrecognised media types have already been
+// logged, up to maxReportedContentTypes, after which the set is SATURATED and
+// stops growing.
+var reportedContentTypes = struct {
+	mu        sync.Mutex
+	seen      map[string]struct{}
+	saturated bool
+}{seen: make(map[string]struct{}, maxReportedContentTypes)}
+
+// warnUnpipelinedContentType reports, at most once per media type and for at
+// most maxReportedContentTypes of them, that a response passed through
+// ungoverned. Beyond the cap it says so once and then stays silent, because a
+// diagnostic must not become a way to grow the process.
 func (s *Server) warnUnpipelinedContentType(contentType string) {
 	mt := mediaTypeOf(contentType)
 	if mt == "" {
 		mt = "(absent)"
 	}
-	if _, seen := unpipelinedContentTypes.LoadOrStore(mt, struct{}{}); seen {
+
+	reportedContentTypes.mu.Lock()
+	if _, seen := reportedContentTypes.seen[mt]; seen {
+		reportedContentTypes.mu.Unlock()
 		return
 	}
+	if reportedContentTypes.saturated {
+		reportedContentTypes.mu.Unlock()
+		return
+	}
+	if len(reportedContentTypes.seen) >= maxReportedContentTypes {
+		reportedContentTypes.saturated = true
+		reportedContentTypes.mu.Unlock()
+		log.Printf("[proxy] more than %d distinct unrecognised response Content-Types have "+
+			"been seen; further ones will not be reported individually. Responses the "+
+			"pipeline cannot decode still pass through unchanged, with no plugins and no "+
+			"usage or cost recorded.", maxReportedContentTypes)
+		return
+	}
+	reportedContentTypes.seen[mt] = struct{}{}
+	reportedContentTypes.mu.Unlock()
+
 	log.Printf("[proxy] responses with Content-Type %q are passed through unchanged: "+
 		"no response plugins run, and no usage or cost is recorded for them. "+
 		"If this provider returns JSON, it should say so with a JSON media type.", mt)
+}
+
+// resetReportedContentTypesForTest clears the bounded set so a test can observe
+// its growth from a known state.
+func resetReportedContentTypesForTest() {
+	reportedContentTypes.mu.Lock()
+	defer reportedContentTypes.mu.Unlock()
+	reportedContentTypes.seen = make(map[string]struct{}, maxReportedContentTypes)
+	reportedContentTypes.saturated = false
 }

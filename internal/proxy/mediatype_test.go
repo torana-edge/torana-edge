@@ -1,6 +1,9 @@
 package proxy
 
-import "testing"
+import (
+	"fmt"
+	"testing"
+)
 
 // Which content types reach the response pipeline decides whether a plugin
 // runs at all. The predicate was strings.Contains(ct, "application/json"),
@@ -76,5 +79,75 @@ func TestMalformedContentTypeStillClassifies(t *testing.T) {
 			t.Errorf("isJSONMediaType(%q) = false; a malformed parameter list must not "+
 				"decide that a JSON body is not JSON", in)
 		}
+	}
+}
+
+// The de-duplication set is keyed by a string the UPSTREAM chooses, so its
+// size must be the proxy's decision and not the provider's.
+//
+// Without a cap, an upstream answering application/x-1, application/x-2, …
+// grows the process for its lifetime — purely to suppress a diagnostic. That
+// is a memory-exhaustion vector introduced by a log line.
+func TestUnrecognisedContentTypeSetIsBounded(t *testing.T) {
+	resetReportedContentTypesForTest()
+	t.Cleanup(resetReportedContentTypesForTest)
+
+	srv := &Server{}
+	for i := range 10_000 {
+		srv.warnUnpipelinedContentType(fmt.Sprintf("application/x-%d", i))
+	}
+
+	reportedContentTypes.mu.Lock()
+	n := len(reportedContentTypes.seen)
+	saturated := reportedContentTypes.saturated
+	reportedContentTypes.mu.Unlock()
+
+	if n > maxReportedContentTypes {
+		t.Errorf("retained %d distinct media types after 10000 distinct responses; the bound "+
+			"is %d and it is the proxy's to choose, not the upstream's", n, maxReportedContentTypes)
+	}
+	if !saturated {
+		t.Error("the set never reported itself saturated, so nothing tells an operator that " +
+			"further types are going unreported")
+	}
+}
+
+// Saturation must not change what the pipeline DOES: classification and
+// pass-through are unaffected by how many diagnostics have been emitted.
+func TestSaturationDoesNotChangeClassification(t *testing.T) {
+	resetReportedContentTypesForTest()
+	t.Cleanup(resetReportedContentTypesForTest)
+
+	srv := &Server{}
+	for i := range 10_000 {
+		srv.warnUnpipelinedContentType(fmt.Sprintf("application/x-%d", i))
+	}
+
+	if !isJSONMediaType("application/vnd.api+json") {
+		t.Error("a +json type stopped being classified as JSON after saturation")
+	}
+	if !isEventStreamMediaType("text/event-stream") {
+		t.Error("SSE stopped being classified after saturation")
+	}
+	if isJSONMediaType("application/octet-stream") {
+		t.Error("a non-JSON type started being classified as JSON after saturation")
+	}
+}
+
+// Repeating one type logs once and retains one entry, which is the behaviour
+// the cap must not cost us.
+func TestRepeatedContentTypeIsRememberedOnce(t *testing.T) {
+	resetReportedContentTypesForTest()
+	t.Cleanup(resetReportedContentTypesForTest)
+
+	srv := &Server{}
+	for range 100 {
+		srv.warnUnpipelinedContentType("application/octet-stream; charset=binary")
+	}
+	reportedContentTypes.mu.Lock()
+	n := len(reportedContentTypes.seen)
+	reportedContentTypes.mu.Unlock()
+	if n != 1 {
+		t.Errorf("retained %d entries for one repeated media type, want 1", n)
 	}
 }
