@@ -50,23 +50,34 @@ else
 	exit 2
 fi
 
-# Relative source list (excluding the output itself and any stamps).
-sources=$(cd "$dir" && find . -type f ! -name "$(basename "$out")" | sort)
+# Extract the digest without a pipeline whose final formatter could hide a
+# failed hash command under POSIX sh (which has no portable pipefail option).
+hash_one() {
+	hash_output=$(hash_cmd "$@")
+	printf '%s\n' "${hash_output%% *}"
+}
 
-fp=$({
+# Relative source list (excluding the output itself and any stamps). Keep it in
+# a file so whitespace in a fixture path is not split by the shell.
+sources_file=$(mktemp "${TMPDIR:-/tmp}/torana-testdata-sources.XXXXXX")
+fingerprint_file=$(mktemp "${TMPDIR:-/tmp}/torana-testdata-fingerprint.XXXXXX")
+trap 'rm -f "$sources_file" "$fingerprint_file"' 0 1 2 3 15
+(cd "$dir" && find . -type f ! -name "$(basename "$out")" | sort) > "$sources_file"
+{
 	printf 'dir=%s\n' "$dir"
-	for f in $sources; do
+	while IFS= read -r f; do
 		printf 'f %s ' "$f"
-		hash_cmd "$dir/$f" | cut -d' ' -f1
-	done
+		hash_one "$dir/$f"
+	done < "$sources_file"
 	printf 'gomod '
-	hash_cmd go.mod 2>/dev/null | cut -d' ' -f1 || true
+	if [ -f go.mod ]; then hash_one go.mod; else printf '\n'; fi
 	printf 'gosum '
-	hash_cmd go.sum 2>/dev/null | cut -d' ' -f1 || true
+	if [ -f go.sum ]; then hash_one go.sum; else printf '\n'; fi
 	printf 'cmd %s\n' "$*"
 	printf 'go '
 	go version
-} | sha256sum | cut -d' ' -f1)
+} > "$fingerprint_file"
+fp=$(hash_one "$fingerprint_file")
 
 mkdir -p "$(dirname "$stamp")"
 if [ ! -f "$out" ] || [ ! -s "$stamp" ] || [ "$(cat "$stamp" 2>/dev/null || true)" != "$fp" ]; then

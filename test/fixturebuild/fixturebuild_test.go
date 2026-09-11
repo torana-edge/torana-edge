@@ -130,14 +130,14 @@ func TestStampEngine(t *testing.T) {
 		}
 	})
 	t.Run("addition builds one", func(t *testing.T) {
-		writeFile(t, filepath.Join(fixtureDir, "extra.go"), "package main\n")
+		writeFile(t, filepath.Join(fixtureDir, "extra file.go"), "package main\n")
 		run(t, "")
 		if got := buildCount(t, buildLog); got != 3 {
-			t.Fatalf("addition ran %d builds, want 3", got)
+			t.Fatalf("addition with whitespace in its path ran %d builds, want 3", got)
 		}
 	})
 	t.Run("deletion builds one", func(t *testing.T) {
-		if err := os.Remove(filepath.Join(fixtureDir, "extra.go")); err != nil {
+		if err := os.Remove(filepath.Join(fixtureDir, "extra file.go")); err != nil {
 			t.Fatal(err)
 		}
 		run(t, "")
@@ -226,15 +226,23 @@ if [ "$1" = version ]; then echo 'go version go9.9.9 fake'; else exec /usr/bin/e
 }
 
 // TestShasumFallback — the portable hash helper must work when sha256sum is
-// unavailable (macOS): TESTDATA_HASH_TOOL=shasum forces the fallback, with a
-// fake shasum standing in for the macOS tool.
+// unavailable (macOS): TESTDATA_HASH_TOOL=shasum forces the fallback, and a
+// failing sha256sum shim ensures no hidden invocation can be masked by a
+// downstream formatter.
 func TestShasumFallback(t *testing.T) {
 	root, fixtureDir, buildLog := newFixtureRoot(t)
 	writeFile(t, filepath.Join(fixtureDir, "plugin.wasm.go"), "package main\n")
 
 	fakeDir := t.TempDir()
-	fakeShasum := "#!/bin/sh\nif [ \"$1\" = -a ] && [ \"$2\" = 256 ]; then shift 2; fi\nexec /usr/bin/env sha256sum \"$@\"\n"
+	realShasum, err := exec.LookPath("shasum")
+	if err != nil {
+		t.Skip("shasum is unavailable")
+	}
+	fakeShasum := fmt.Sprintf("#!/bin/sh\nexec %q \"$@\"\n", realShasum)
 	if err := os.WriteFile(filepath.Join(fakeDir, "shasum"), []byte(fakeShasum), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(fakeDir, "sha256sum"), []byte("#!/bin/sh\nexit 97\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 
@@ -258,6 +266,37 @@ func TestShasumFallback(t *testing.T) {
 	runWith(t)
 	if got := buildCount(t, buildLog); got != 1 {
 		t.Fatalf("shasum fallback rerun built %d times, want still 1", got)
+	}
+	writeFile(t, filepath.Join(fixtureDir, "plugin.wasm.go"), "package main\n\n// changed\n")
+	runWith(t)
+	if got := buildCount(t, buildLog); got != 2 {
+		t.Fatalf("shasum fallback missed a source change: build count = %d, want 2", got)
+	}
+}
+
+func TestHashFailureStopsBuild(t *testing.T) {
+	root, fixtureDir, buildLog := newFixtureRoot(t)
+	writeFile(t, filepath.Join(fixtureDir, "plugin.wasm.go"), "package main\n")
+
+	fakeDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(fakeDir, "shasum"), []byte("#!/bin/sh\nexit 97\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	stamp := filepath.Join(root, ".cache", "fixtures", "test-fake.stamp")
+	out := filepath.Join(fixtureDir, "plugin.wasm")
+	cmd := exec.Command("sh", filepath.Join(repoRoot(t), "scripts", "testdata.sh"),
+		fixtureDir, stamp, out, "--", filepath.Join(root, "fake-builder.sh"))
+	cmd.Dir = root
+	cmd.Env = append(os.Environ(), "BUILD_LOG="+buildLog,
+		"TESTDATA_HASH_TOOL=shasum", "PATH="+fakeDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	if outB, err := cmd.CombinedOutput(); err == nil {
+		t.Fatalf("testdata.sh accepted a failed hash command; output:\n%s", outB)
+	}
+	if got := buildCount(t, buildLog); got != 0 {
+		t.Fatalf("builder ran %d times after hash failure, want 0", got)
+	}
+	if _, err := os.Stat(stamp); !os.IsNotExist(err) {
+		t.Fatalf("stamp exists after hash failure: %v", err)
 	}
 }
 
