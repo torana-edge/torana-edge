@@ -86,3 +86,47 @@ func TestUsageDocumentsEverySubcommand(t *testing.T) {
 		}
 	}
 }
+
+// TORANA_PORT is a first-hour failure mode: a typo used to be swallowed, so
+// the proxy listened on the config's port while the operator believed the
+// override had taken. The decision lives in parsePortOverride precisely so it
+// can be pinned here rather than depending on main staying the way it is.
+func TestParsePortOverride(t *testing.T) {
+	for _, tc := range []struct {
+		in      string
+		want    int
+		wantErr bool
+	}{
+		{in: "8080", want: 8080},
+		{in: "1", want: 1},         // lowest valid port
+		{in: "65535", want: 65535}, // highest valid port
+		{in: "0", wantErr: true},
+		{in: "65536", wantErr: true},
+		{in: "-1", wantErr: true},
+		{in: "808O", wantErr: true}, // letter O, the typo that started this
+		{in: "", wantErr: true},
+		{in: "8080 ", wantErr: true},
+		{in: "80.80", wantErr: true},
+		{in: "0x1f90", wantErr: true},
+	} {
+		t.Run(tc.in, func(t *testing.T) {
+			got, err := parsePortOverride(tc.in)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("TORANA_PORT=%q was accepted as port %d; a malformed or "+
+						"out-of-range override must be refused, not ignored", tc.in, got)
+				}
+				if !strings.Contains(err.Error(), "TORANA_PORT") {
+					t.Errorf("error %q does not name the variable the operator set", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("TORANA_PORT=%q was rejected: %v", tc.in, err)
+			}
+			if got != tc.want {
+				t.Errorf("port = %d, want %d", got, tc.want)
+			}
+		})
+	}
+}

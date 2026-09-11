@@ -128,6 +128,25 @@ loopback only. Plugins never load until you approve their digest there.
 `)
 }
 
+// parsePortOverride reads TORANA_PORT. A malformed or out-of-range value is an
+// error, not something to ignore: this binary fails closed on every other
+// configuration mistake, and silently dropping TORANA_PORT=808O means
+// listening on the config's port while the operator believes the override took
+// — found much later, from the wrong end.
+//
+// Separated from main so the decision can be tested. A first-hour failure mode
+// living inside an untestable function is one cleanup away from returning.
+func parsePortOverride(v string) (int, error) {
+	p, err := strconv.Atoi(v)
+	if err != nil {
+		return 0, fmt.Errorf("TORANA_PORT=%q is not a number", v)
+	}
+	if p < 1 || p > 65535 {
+		return 0, fmt.Errorf("TORANA_PORT=%d is outside the valid port range 1-65535", p)
+	}
+	return p, nil
+}
+
 func main() {
 	if len(os.Args) > 1 && os.Args[1] == "--debug" {
 		_ = os.Setenv("TORANA_LOG_LEVEL", "debug")
@@ -221,18 +240,11 @@ func main() {
 		log.Printf("Warning: managed config %q differs from and takes precedence over seed %q; edit the managed store through /_torana/ or remove it to re-import the seed", storePath, seedPath)
 	}
 
-	// Allow port override via env. A malformed value is fatal: this binary
-	// fails closed on every other configuration mistake, and silently ignoring
-	// TORANA_PORT=808O means listening on the config's port while the operator
-	// believes the override took — the kind of thing found much later, from
-	// the wrong end.
+	// Allow port override via env.
 	if v := os.Getenv("TORANA_PORT"); v != "" {
-		p, err := strconv.Atoi(v)
+		p, err := parsePortOverride(v)
 		if err != nil {
-			log.Fatalf("TORANA_PORT=%q is not a number", v)
-		}
-		if p < 1 || p > 65535 {
-			log.Fatalf("TORANA_PORT=%d is outside the valid port range 1-65535", p)
+			log.Fatalf("%v", err)
 		}
 		provCfg.Port = p
 	}
