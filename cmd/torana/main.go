@@ -15,6 +15,7 @@ import (
 	"os/signal"
 	"runtime/debug"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -132,16 +133,53 @@ loopback only. Plugins never load until you approve their digest there.
 `)
 }
 
-// controlPlaneHost names a host an operator can actually paste into a browser.
-// A wildcard bind (0.0.0.0, ::, or empty) is an address to listen on, not one
-// to connect to, and the control plane refuses every non-loopback source
-// anyway — so the URL printed for it is always a loopback one.
-func controlPlaneHost(bindHost string) string {
-	switch bindHost {
-	case "", "0.0.0.0", "::", "[::]":
-		return "127.0.0.1"
+// controlPlaneHost names a host an operator can actually paste into a browser,
+// and reports whether the control plane is reachable on this listener at all.
+// The host is returned UNBRACKETED; net.JoinHostPort adds brackets for IPv6,
+// and returning "[::1]" here produced "http://[[::1]]:8143/".
+//
+// The control plane requires a loopback REMOTE ADDRESS and a loopback Host, so
+// the only URL worth printing is a loopback one — and that URL only works if
+// the listening socket is bound somewhere loopback traffic can reach it.
+//
+//   - a loopback bind serves it at that address;
+//   - a wildcard bind covers loopback, so name the loopback address of the
+//     matching family: 127.0.0.1 for 0.0.0.0, ::1 for ::. An IPv6 socket may
+//     be v6-only, in which case 127.0.0.1 is not listening;
+//   - a SPECIFIC non-loopback bind (TORANA_BIND=192.168.1.10) serves the
+//     control plane nowhere. Connecting to the bind address is refused by the
+//     guard as a non-loopback source; connecting to 127.0.0.1 is refused by
+//     the kernel, because nothing is listening there. Verified: 403 and
+//     connection-refused respectively.
+//
+// The last case is why this returns a bool. Printing the bind address there
+// advertises a URL that cannot work.
+func controlPlaneHost(bindHost string) (string, bool) {
+	host := strings.TrimSuffix(strings.TrimPrefix(bindHost, "["), "]")
+	if host == "" {
+		// net.Listen treats an empty host as every interface.
+		return "127.0.0.1", true
 	}
-	return bindHost
+	if strings.EqualFold(host, "localhost") {
+		return host, true
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		// A name this binary cannot classify. Saying nothing is better than
+		// naming a URL that may not answer.
+		return "", false
+	}
+	switch {
+	case ip.IsUnspecified():
+		if ip.To4() != nil {
+			return "127.0.0.1", true
+		}
+		return "::1", true
+	case ip.IsLoopback():
+		return host, true
+	default:
+		return "", false
+	}
 }
 
 // parsePortOverride reads TORANA_PORT. A malformed or out-of-range value is an
@@ -306,8 +344,15 @@ func main() {
 	// plugins are approved, was discoverable only by reading the README.
 	log.Printf("Torana Edge %s listening on http://%s", version,
 		net.JoinHostPort(bindHost, strconv.Itoa(provCfg.Port)))
-	log.Printf("Control plane: http://%s/_torana/ (loopback only)",
-		net.JoinHostPort(controlPlaneHost(bindHost), strconv.Itoa(provCfg.Port)))
+	if cpHost, reachable := controlPlaneHost(bindHost); reachable {
+		log.Printf("Control plane: http://%s/_torana/ (loopback only)",
+			net.JoinHostPort(cpHost, strconv.Itoa(provCfg.Port)))
+	} else {
+		log.Printf("Control plane: UNREACHABLE with TORANA_BIND=%s. It requires a "+
+			"loopback source address, and nothing is listening on loopback. "+
+			"Bind a wildcard address (0.0.0.0 or ::) to serve both, or 127.0.0.1 "+
+			"for loopback only. Plugins cannot be approved until then.", bindHost)
+	}
 	<-ctx.Done()
 	log.Println("Shutting down...")
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
