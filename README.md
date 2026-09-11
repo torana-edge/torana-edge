@@ -61,8 +61,12 @@ Torana is currently pre-release, so this walkthrough builds the reviewed
    ./torana --debug
    ```
 
-   This Torana process receives no provider credential. Keep that terminal open
-   and use another terminal for the remaining commands.
+   The repository ignores this disposable directory. It still contains the
+   authoritative managed config, encrypted credentials, durable plugin state,
+   and private plugin files, so delete it when the evaluation is over and do
+   not copy it into source control elsewhere. This Torana process receives no
+   provider credential. Keep that terminal open and use another terminal for
+   the remaining commands.
    `--debug` logs one safe received/completed line per inference request (route,
    provider, status, latency, plugins, and verdict; never bodies or credentials),
    so you can tell immediately that your harness is reaching Torana. Torana

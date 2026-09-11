@@ -33,8 +33,12 @@ export TORANA_DATA_DIR="$PWD/.torana-data"
 ./torana --debug
 ```
 
-This Torana process receives no provider credential. Keep that terminal open.
-In another terminal, configure the caller credential and send the request:
+The repository ignores this disposable directory. It still contains the
+authoritative managed config, encrypted credentials, durable plugin state, and
+private plugin files, so delete it when the evaluation is over and do not copy
+it into source control elsewhere. This Torana process receives no provider
+credential. Keep that terminal open. In another terminal, configure the caller
+credential and send the request:
 
 ```bash
 export DEEPSEEK_API_KEY='replace-with-your-deepseek-key'
