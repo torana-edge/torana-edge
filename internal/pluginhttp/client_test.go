@@ -5,6 +5,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -75,17 +76,40 @@ func TestScopedRequestsReuseOneTransportConnection(t *testing.T) {
 }
 
 func TestScopedRequestRejectsUnapprovedInputs(t *testing.T) {
-	resource := wasm.HTTPResource{Name: "service", Origin: "http://127.0.0.1:1", Methods: map[string]bool{"GET": true}, Timeout: time.Second, MaxRequestBytes: 1, MaxResponseBytes: 1, MaxCallsPerMinute: 100}
-	cases := []*pbv1.OutboundHTTPRequestArgs{
-		{Method: "POST", Path: "/"},
-		{Method: "GET", Path: "https://example.com/"},
-		{Method: "GET", Path: "/", Body: []byte("xx")},
-		{Method: "GET", Path: "/", Headers: []*pbv1.HTTPHeader{{Name: "Host", Values: []string{"example.com"}}}},
+	var hits atomic.Int32
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		hits.Add(1)
+	}))
+	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
 	}
-	for i, in := range cases {
-		if _, err := New().Do(context.Background(), "plugin", resource, in); err == nil {
-			t.Errorf("case %d accepted", i)
-		}
+	server.Listener = listener
+	server.Start()
+	defer server.Close()
+
+	resource := wasm.HTTPResource{Name: "service", Origin: server.URL, Methods: map[string]bool{"GET": true}, Timeout: time.Second, MaxRequestBytes: 1, MaxResponseBytes: 1, MaxCallsPerMinute: 100}
+	cases := []struct {
+		name string
+		in   *pbv1.OutboundHTTPRequestArgs
+		want string
+	}{
+		{"method", &pbv1.OutboundHTTPRequestArgs{Method: "POST", Path: "/"}, "method is not approved"},
+		{"absolute path", &pbv1.OutboundHTTPRequestArgs{Method: "GET", Path: "https://example.com/"}, "path must be relative"},
+		{"request size", &pbv1.OutboundHTTPRequestArgs{Method: "GET", Path: "/", Body: []byte("xx")}, "request exceeds approved size"},
+		{"host header", &pbv1.OutboundHTTPRequestArgs{Method: "GET", Path: "/", Headers: []*pbv1.HTTPHeader{{Name: "Host", Values: []string{"example.com"}}}}, `header "Host" is not allowed`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			client := New()
+			defer client.CloseIdleConnections()
+			if _, err := client.Do(context.Background(), "plugin", resource, tc.in); err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("error = %v, want %q", err, tc.want)
+			}
+		})
+	}
+	if got := hits.Load(); got != 0 {
+		t.Fatalf("rejected requests reached the endpoint %d times", got)
 	}
 }
 

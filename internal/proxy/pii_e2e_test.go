@@ -82,6 +82,9 @@ func piiEnv(t *testing.T, piiCfg string, extra map[string]provider.Provider) (fu
 	post := func(body string) (int, []byte) {
 		req, _ := http.NewRequest("POST", base+"/provider/oai/v1/chat/completions", strings.NewReader(body))
 		req.Header.Set("Content-Type", "application/json")
+		// A distinctive caller credential makes the model-service isolation
+		// assertions prove absence rather than merely observe an empty input.
+		req.Header.Set("Authorization", "Bearer caller-must-not-reach-scanner")
 		resp, err := client.Do(req)
 		if err != nil {
 			t.Fatalf("POST: %v", err)

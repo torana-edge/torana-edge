@@ -287,9 +287,10 @@ func TestProxyNoProviderRejects(t *testing.T) {
 	}
 }
 
-// TestJSONResponseRunsAfterResponseHook verifies that a non-streaming JSON
-// response with tool calls is routed through the WASM pipeline.
-func TestJSONResponseRunsWASMHooks(t *testing.T) {
+// TestJSONToolResponsePassesThroughWithoutPlugins verifies that a
+// non-streaming JSON response with tool calls remains intact when no plugin
+// pipeline is loaded. The with-plugins response-hook path is covered by E2E.
+func TestJSONToolResponsePassesThroughWithoutPlugins(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)

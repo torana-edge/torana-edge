@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/torana-edge/torana-edge/internal/wasm"
@@ -45,19 +46,40 @@ func TestPipelineRejectionUnloadsPlugin(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(pluginDir, "plugin.wasm"), srcWasm, 0o644); err != nil {
 		t.Fatal(err)
 	}
+	digest, err := BundleDigestForDir(pluginDir)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	// Non-strict: the pipeline succeeds and skips the rejected plugin.
-	pp, err := NewPipeline(rt, PluginConfig{Dir: dir, Order: []string{"test-inert-a"}, Strict: false})
+	pp, err := NewPipeline(rt, PluginConfig{
+		Dir: dir, Order: []string{"test-inert-a"}, Strict: false,
+		Approvals: map[string]Approval{
+			"torana-test/test-inert-a": {Digest: digest},
+		},
+	})
 	if err != nil {
 		t.Fatalf("non-strict pipeline with a rejected plugin: %v", err)
 	}
-	if len(pp.Skipped()) == 0 {
-		t.Fatal("expected the hook-mismatched plugin to be skipped")
+	if pp.Len() != 0 {
+		t.Fatalf("loaded %d plugins, want hook-mismatched plugin rejected", pp.Len())
+	}
+	if len(pp.Skipped()) != 0 {
+		t.Fatalf("plugin was rejected before post-load hook validation: %+v", pp.Skipped())
 	}
 
 	// Reachability was removed: the same name loads cleanly again.
-	if _, err := rt.LoadPlugin("test-inert-a", srcWasm); err != nil {
+	reloaded, err := rt.LoadPlugin("test-inert-a", srcWasm)
+	if err != nil {
 		t.Fatalf("reload after non-strict rejection failed — the plugin was not unloaded: %v", err)
+	}
+	declared, err := manifestHooks([]Hook{{Name: "run_before_request"}, {Name: "run_on_tick"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := reloaded.ValidateHooks(context.Background(), declared); err == nil ||
+		!strings.Contains(err.Error(), "missing") || !strings.Contains(err.Error(), "HOOK_ON_TICK") {
+		t.Fatalf("hook validation error = %v, want missing HOOK_ON_TICK", err)
 	}
 	if err := rt.Close(); err != nil {
 		t.Fatal(err)
