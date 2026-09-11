@@ -13,18 +13,16 @@ import (
 	pb "github.com/torana-edge/torana-plugin-sdk/pb/v1"
 )
 
-// These benchmarks exist to answer one question with numbers instead of
-// intuition: what would it cost to verify, between every pair of plugins, that
-// a plugin only changed what its grants allow?
+// These benchmarks were introduced to answer one question with numbers instead
+// of intuition: what would it cost to verify, between every pair of plugins,
+// that a plugin only changed what its grants allow? Production now performs
+// that verification; the prototype comparison remains historical evidence.
 //
-// Today RunBeforeRequest converts once, marshals once, and then chains raw
-// bytes from plugin to plugin without ever looking inside (discovery.go:942-967).
-// Verification means unmarshalling each plugin's output AND fingerprinting its
-// sections, so BenchmarkWriteGrantVerification measures both halves against a
-// prototype verifier — the decode alone is under half the real cost.
-// BenchmarkRunBeforeRequest measures what it would be added to, and
-// BenchmarkBoundaryCrossing isolates one WASM crossing using fixtures that do
-// no guest work at all.
+// BenchmarkWriteGrantVerification isolates decoding plus the retained
+// comparison strategies. BenchmarkRunBeforeRequest measures the current
+// request pipeline, and BenchmarkBoundaryCrossing isolates one WASM crossing
+// using fixtures that do no guest work at all. Do not subtract the prototype
+// rows from the current pipeline and call the result production overhead.
 //
 // Run:
 //
