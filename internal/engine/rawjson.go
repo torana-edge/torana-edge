@@ -85,6 +85,31 @@ func validateMemberKey(key string) error {
 
 // validateObject validates raw as a strict JSON object. Empty bytes are an
 // error unless allowAbsent (optional wrappers treat them as absent).
+// validateObjectShape checks that raw is a well-formed JSON object and returns
+// only whether it is. No copy.
+//
+// validateObject's copy is the right thing when the bytes become an authority
+// someone else holds: the caller must not be able to mutate what the authority
+// owns. The mutation helpers below already own their output — they just built
+// it — so validating through validateObject re-validated the result AND
+// allocated a second copy of it that the caller immediately threw away.
+//
+// On a 1 MB object that copy was measurable, not theoretical: SetMember ran
+// 7.68 ms and allocated 4.4 MB for a 1 MB result. Coding-agent requests carry
+// hundreds of kilobytes routinely.
+func validateObjectShape(raw []byte) error {
+	if len(raw) == 0 {
+		return fmt.Errorf("raw JSON: empty bytes are not a JSON object")
+	}
+	if err := pbjsontext.Validate(raw); err != nil {
+		return fmt.Errorf("raw JSON: %w", err)
+	}
+	if topLevelJSONByte(raw) != '{' {
+		return fmt.Errorf("raw JSON must be a JSON object")
+	}
+	return nil
+}
+
 func validateObject(raw []byte, allowAbsent bool) ([]byte, error) {
 	if len(raw) == 0 {
 		if allowAbsent {
@@ -92,11 +117,8 @@ func validateObject(raw []byte, allowAbsent bool) ([]byte, error) {
 		}
 		return nil, fmt.Errorf("raw JSON: empty bytes are not a JSON object")
 	}
-	if err := pbjsontext.Validate(raw); err != nil {
-		return nil, fmt.Errorf("raw JSON: %w", err)
-	}
-	if topLevelJSONByte(raw) != '{' {
-		return nil, fmt.Errorf("raw JSON must be a JSON object")
+	if err := validateObjectShape(raw); err != nil {
+		return nil, err
 	}
 	out := make([]byte, len(raw))
 	copy(out, raw)
@@ -648,7 +670,7 @@ func setMember(raw []byte, key string, value json.RawMessage) ([]byte, error) {
 		out = append(out, '}')
 		out = append(out, raw[closeBrace+1:]...)
 	}
-	if _, err := validateObject(out, false); err != nil {
+	if err := validateObjectShape(out); err != nil {
 		return nil, fmt.Errorf("raw JSON SetMember produced invalid bytes: %w", err)
 	}
 	return out, nil
@@ -692,7 +714,7 @@ func deleteMember(raw []byte, key string) ([]byte, error) {
 		suffix = raw[sp.valEnd:]
 	}
 	joined := append(append([]byte{}, prefix...), suffix...)
-	if _, err := validateObject(joined, false); err != nil {
+	if err := validateObjectShape(joined); err != nil {
 		return nil, fmt.Errorf("raw JSON DeleteMember produced invalid bytes: %w", err)
 	}
 	return joined, nil
@@ -737,7 +759,7 @@ func deleteMembers(raw []byte, keys []string) ([]byte, error) {
 		out = append(out, raw[sp.keyStart:sp.valEnd]...)
 	}
 	out = append(out, raw[lastOriginal.valEnd:]...)
-	if _, err := validateObject(out, false); err != nil {
+	if err := validateObjectShape(out); err != nil {
 		return nil, fmt.Errorf("raw JSON WithoutMembers produced invalid bytes: %w", err)
 	}
 	return out, nil
