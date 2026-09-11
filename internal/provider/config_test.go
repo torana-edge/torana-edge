@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -768,5 +769,45 @@ func TestAuditConfigIsDefaultOffAndValidated(t *testing.T) {
 	good.Audit = &auditlog.Config{Enabled: true, Path: filepath.Join(t.TempDir(), "audit.jsonl")}
 	if err := good.Validate(); err != nil {
 		t.Fatalf("valid audit config: %v", err)
+	}
+}
+
+// The shipped example must DESCRIBE every provider route the README's routing
+// diagram advertises, so an operator can understand the effective system from
+// the seed they copied.
+//
+// This does not protect the routes from 502ing. It cannot: built-in defaults
+// are always present and a seed's providers are added to them, so removing
+// anthropic from the example leaves /provider/anthropic/ serving anyway —
+// verified against a running binary, which answered 401 from Anthropic rather
+// than 502. What breaks is the operator's understanding: their file would
+// name four providers while the process ran five, and nothing in the file
+// would say so.
+func TestShippedExampleDocumentsAdvertisedProviders(t *testing.T) {
+	raw, err := os.ReadFile("../../config.example.json")
+	if err != nil {
+		t.Skipf("config.example.json not readable: %v", err)
+	}
+	readme, err := os.ReadFile("../../README.md")
+	if err != nil {
+		t.Skipf("README.md not readable: %v", err)
+	}
+
+	var example Config
+	if err := json.Unmarshal(raw, &example); err != nil {
+		t.Fatalf("config.example.json does not parse: %v", err)
+	}
+
+	advertised := regexp.MustCompile(`/provider/([a-z0-9-]+)/\.\.\.`).FindAllSubmatch(readme, -1)
+	if len(advertised) == 0 {
+		t.Fatal("the README no longer advertises any /provider/ routes; this check has stopped seeing them")
+	}
+	for _, m := range advertised {
+		name := string(m[1])
+		if _, ok := example.Providers[name]; !ok {
+			t.Errorf("README.md advertises /provider/%s/ but config.example.json does not "+
+				"name it, so an operator who copied the example cannot tell from their own "+
+				"configuration that the route exists or where it goes", name)
+		}
 	}
 }
