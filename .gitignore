@@ -41,6 +41,11 @@ bundle.pem
 # Local encrypted-secret store key (internal/secret). Never commit.
 secret.key
 
+# Disposable in-checkout data directory used by README.md and QUICKSTART.md.
+# It can contain the authoritative config, encrypted credentials, durable
+# plugin state, and request-derived private plugin output.
+/.torana-data/
+
 # Vendored JS deps — restore with `npm install` (see examples/plugins/*/package.json)
 node_modules/
 

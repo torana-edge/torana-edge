@@ -76,6 +76,21 @@ func TestNoStrayBuildArtifactsAreTracked(t *testing.T) {
 	}
 }
 
+func TestQuickstartRuntimeDataIsIgnored(t *testing.T) {
+	for _, path := range []string{
+		".torana-data/config.json",
+		".torana-data/secret.key",
+		".torana-data/credentials.json",
+		".torana-data/plugin-state.json",
+		".torana-data/plugin-data/example/usage.jsonl",
+	} {
+		cmd := exec.Command("git", "check-ignore", "--quiet", "--", path)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Errorf("quickstart runtime path %q is not ignored: %v\n%s", path, err, out)
+		}
+	}
+}
+
 // isBinary reports whether the file starts with a known executable magic
 // number. Cheap and specific — matching on "contains NUL bytes" would flag
 // legitimate test fixtures.
