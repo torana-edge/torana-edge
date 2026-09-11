@@ -1,5 +1,7 @@
 package engine
 
+import "strings"
+
 // Ordered message body (the SDK ordered-body ABI, Edge side).
 //
 // A Message's content is the ordered Block sequence — the SOLE authority for
@@ -180,9 +182,29 @@ func (m *Message) TextBlocks() []string {
 
 // Text returns the concatenation of every text block's text in wire order.
 func (m *Message) Text() string {
-	var out string
-	for _, t := range m.TextBlocks() {
-		out += t
+	if m == nil {
+		return ""
 	}
-	return out
+	capacity := 0
+	maxInt := int(^uint(0) >> 1)
+	for _, block := range m.Blocks {
+		if block.Text == nil {
+			continue
+		}
+		if len(block.Text.Text) > maxInt-capacity {
+			capacity = 0
+			break
+		}
+		capacity += len(block.Text.Text)
+	}
+	var out strings.Builder
+	if capacity > 0 {
+		out.Grow(capacity)
+	}
+	for _, block := range m.Blocks {
+		if block.Text != nil {
+			out.WriteString(block.Text.Text)
+		}
+	}
+	return out.String()
 }
