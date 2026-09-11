@@ -295,3 +295,44 @@ func TestCloseIsIdempotent(t *testing.T) {
 	r.Close()
 	r.Close()
 }
+
+// boundedMetadata must honour its bound for EVERY limit, including ones too
+// small to hold the ellipsis it appends.
+//
+// `end := limit - len("…")` goes negative below three bytes, and value[:end]
+// panics — taking down the request that happened to carry a long string. No
+// caller passes such a limit today; nothing stopped one tomorrow, and a helper
+// that crashes on a legal-looking argument is a trap for whoever adds the next
+// bounded field.
+func TestBoundedMetadataHonoursEverySmallLimit(t *testing.T) {
+	const long = "a string comfortably longer than any of these limits"
+	for limit := -2; limit <= 8; limit++ {
+		got := boundedMetadata(long, limit)
+		if limit <= 0 {
+			if got != "" {
+				t.Errorf("limit %d: got %q, want empty", limit, got)
+			}
+			continue
+		}
+		if len(got) > limit {
+			t.Errorf("limit %d: got %q (%d bytes), which exceeds the bound", limit, got, len(got))
+		}
+		if !utf8.ValidString(got) {
+			t.Errorf("limit %d: got invalid UTF-8 %q", limit, got)
+		}
+	}
+}
+
+// Multi-byte input must not be cut mid-rune at a small limit either.
+func TestBoundedMetadataNeverSplitsARuneAtASmallLimit(t *testing.T) {
+	const wide = "界界界界界" // three bytes per rune
+	for limit := 1; limit <= 9; limit++ {
+		got := boundedMetadata(wide, limit)
+		if len(got) > limit {
+			t.Errorf("limit %d: %q exceeds the bound", limit, got)
+		}
+		if !utf8.ValidString(got) {
+			t.Errorf("limit %d: %q is not valid UTF-8", limit, got)
+		}
+	}
+}

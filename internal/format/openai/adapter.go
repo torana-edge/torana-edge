@@ -20,7 +20,7 @@ import (
 )
 
 func init() {
-	format.Register("/openai", format.Format{
+	format.Register(format.Format{
 		Name:             "openai",
 		Request:          &Adapter{},
 		Stream:           &StreamAdapter{},

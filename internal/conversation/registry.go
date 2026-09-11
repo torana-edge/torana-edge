@@ -185,6 +185,22 @@ func boundedMetadata(value string, limit int) string {
 		return value
 	}
 	const omitted = "…"
+	// A limit too small to hold the ellipsis cannot carry one. end would go
+	// NEGATIVE and value[:end] panics — reachable the moment any caller passes
+	// a limit below three bytes, which nothing does today and nothing stops
+	// tomorrow. A bound is a promise about the OUTPUT, so honour it by
+	// truncating to the limit itself rather than crashing the request that
+	// happened to carry a long string.
+	if limit < len(omitted) {
+		if limit <= 0 {
+			return ""
+		}
+		end := limit
+		for end > 0 && !utf8.RuneStart(value[end]) {
+			end--
+		}
+		return value[:end]
+	}
 	end := limit - len(omitted)
 	for end > 0 && !utf8.RuneStart(value[end]) {
 		end--
