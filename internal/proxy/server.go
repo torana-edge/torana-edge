@@ -394,7 +394,7 @@ type reqState struct {
 	// over latency, while there are no users. Making observational
 	// post-processing genuinely off the response path needs a non-cancelled
 	// bounded context and moves cleanup and final metrics ownership to the
-	// finalizer — recorded as a follow-up in HANDOFF_TO_AGENT.md.
+	// finalizer. Not done; no issue tracks it.
 	//
 	// Set in ModifyResponse, which runs inside ServeHTTP on the handler's own
 	// goroutine, so the handler's later read is ordered after the write.
@@ -1182,10 +1182,11 @@ func New(cfg Config) (*Server, error) {
 				rs.Provider = provName
 			}
 
-			// Identity override is an attributed, granted verdict now. v1 read
-			// it from an unprefixed ToranaMeta["identity"] key with NO
-			// permission check at all — it did not appear in sdk.Permissions
-			// or ABI.md, so any plugin could rewrite the rate-limit key.
+			// Identity override is an attributed, granted verdict now. An
+			// earlier design read it from an unprefixed ToranaMeta["identity"]
+			// key with NO permission check at all — it appeared in no
+			// permission list and no published contract, so any plugin could
+			// rewrite the rate-limit key.
 			identity := ""
 			if pl := reqStateFrom(req.Context()).Pipeline; pl != nil {
 				if v := pl.Verdicts(reqStateFrom(req.Context()).ID).Identity(); v != nil {
@@ -1283,8 +1284,8 @@ func New(cfg Config) (*Server, error) {
 				newBody, err = fmt.Request.Marshal(chat)
 			}
 			if err != nil {
-				// HOST MARSHAL FAILURE — the terminal host_error path (PR B,
-				// MARSHAL_FAILURE_CHECKPOINT §5): the accepted IR passed the
+				// HOST MARSHAL FAILURE — the terminal host_error path: the
+				// accepted IR passed the
 				// SDK replacement contract (every plugin replacement is
 				// ValidateReplacement-gated) but the provider adapter cannot
 				// project it onto the wire. This is HOST-LOCAL and

@@ -1,18 +1,17 @@
 package proxy
 
-// PR B proofs: the terminal host_error 500 for a HOST MARSHAL FAILURE
-// after a contract-valid accepted replacement (MARSHAL_FAILURE_CHECKPOINT
-// §5 + the authorization matrix):
+// The terminal host_error 500 for a HOST MARSHAL FAILURE after a
+// contract-valid accepted replacement, proved three ways:
 //
-//   - C1: real E2E — the invalid-scheduling plugin produces an
+//   - real end to end — the invalid-scheduling plugin produces an
 //     SDK-valid replacement the gemini adapter cannot marshal; the
 //     response is the exact provider-native value-free 500 with zero
 //     upstream, zero limiter buckets, no response hooks / upstream
 //     status, no compaction credit, and the feed verdict host_error with
 //     PluginFailure=false.
-//   - C2: the per-format golden 500 shapes (renderHostError unit rows).
-//   - C3: block/respond precedence — a block verdict short-circuits
-//     BEFORE marshal and never enters the host_error path.
+//   - the per-format golden 500 shapes (renderHostError unit rows).
+//   - block/respond precedence — a block verdict short-circuits BEFORE
+//     marshal and never enters the host_error path.
 
 import (
 	"bytes"

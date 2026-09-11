@@ -114,7 +114,7 @@ func renderCredentialUnavailable(format string) *BlockResponse {
 }
 
 // applyHostError is the construction-bound terminal for a HOST MARSHAL
-// FAILURE (PR B, MARSHAL_FAILURE_CHECKPOINT §5): the accepted IR was
+// FAILURE: the accepted IR was
 // contract-valid but the provider adapter cannot project it onto the
 // wire. It is HOST-LOCAL and independent of plugin failure mode (the
 // replacement was contract-valid, so failure_mode pass/block do not
