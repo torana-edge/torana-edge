@@ -1,5 +1,7 @@
 # Plugin pipeline benchmarks
 
+Raw run data and the per-scenario reports live in [`benchmarks/`](../benchmarks/README.md).
+
 ## Full HTTP data plane
 
 `internal/proxy/bench_test.go` measures the complete local non-streaming HTTP
@@ -94,11 +96,11 @@ plugins under test operate on tools or conversation history; the default
 `plain` shape remains byte-compatible with earlier runs.
 
 The first retained saturation run is in
-[the 2026-08-18 saturation report](BENCHMARK_SATURATION_RESULTS_2026-08-18.md),
+[the 2026-08-18 saturation report](../benchmarks/BENCHMARK_SATURATION_RESULTS_2026-08-18.md),
 with every raw row kept alongside it.
 
 The first retained official-plugin chain run is in
-[the 2026-08-18 plugin-chain report](BENCHMARK_PLUGIN_CHAIN_RESULTS_2026-08-18.md).
+[the 2026-08-18 plugin-chain report](../benchmarks/BENCHMARK_PLUGIN_CHAIN_RESULTS_2026-08-18.md).
 It uses the `agent` shape with `schema_translator`, `intent`,
 `keyword_compactor`, and `otel`, and includes a five-minute stability run plus
 pool-size and memory-limit comparisons.
@@ -315,7 +317,7 @@ later row's starting point. Use separate invocations when an experiment needs a
 fresh process per row.
 
 The retained first run is documented in
-[`BENCHMARK_LARGE_REQUEST_RESULTS_2026-08-18.md`](BENCHMARK_LARGE_REQUEST_RESULTS_2026-08-18.md).
+[`BENCHMARK_LARGE_REQUEST_RESULTS_2026-08-18.md`](../benchmarks/BENCHMARK_LARGE_REQUEST_RESULTS_2026-08-18.md).
 
 ### Heap and GC attribution
 
@@ -345,4 +347,4 @@ address. It is absent from release binaries; do not add a production pprof
 listener merely to collect benchmark evidence.
 
 The retained first heap/GC run and its allocation-owner findings are documented
-in [`BENCHMARK_LARGE_HEAP_RESULTS_2026-08-18.md`](BENCHMARK_LARGE_HEAP_RESULTS_2026-08-18.md).
+in [`BENCHMARK_LARGE_HEAP_RESULTS_2026-08-18.md`](../benchmarks/BENCHMARK_LARGE_HEAP_RESULTS_2026-08-18.md).

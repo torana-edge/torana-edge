@@ -18,7 +18,7 @@ universal capacity claim. The complete raw output is
 - Streaming response: 100 ms to first byte, then 100 text events at 10 ms
   intervals, a finish event, and `[DONE]`
 - Plugins: none. Plugin boundary costs remain isolated in
-  [`BENCHMARKS.md`](BENCHMARKS.md).
+  [`BENCHMARKS.md`](../docs/BENCHMARKS.md).
 - Each row: 2-second warmup, then at least 10 measured seconds
 
 Every row completed with zero errors. Every successful direct and Torana stream

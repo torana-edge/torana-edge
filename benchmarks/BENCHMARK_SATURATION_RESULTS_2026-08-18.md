@@ -60,4 +60,4 @@ TORANA_BENCH_PROFILE=saturation \
 The complete machine-readable output is retained in
 [`benchmark-saturation-2026-08-18.jsonl`](benchmark-saturation-2026-08-18.jsonl).
 The provider-shaped latency run remains the appropriate evidence for normal
-traffic: [`BENCHMARK_PRODUCTION_RESULTS_2026-08-18.md`](BENCHMARK_PRODUCTION_RESULTS_2026-08-18.md).
+traffic: [`BENCHMARK_PRODUCTION_RESULTS_2026-08-18.md`](../docs/BENCHMARK_PRODUCTION_RESULTS_2026-08-18.md).

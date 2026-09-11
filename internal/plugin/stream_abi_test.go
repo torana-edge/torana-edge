@@ -606,8 +606,9 @@ func TestIntentBridgeFeedsKeywordCompactor(t *testing.T) {
 }
 
 // TestCompactorsRespectToolResultConsumptionBoundary pins the structural
-// safety rule from #166 through the real WASM request path. Fresh results,
-// including every result in a parallel batch, must reach the model verbatim.
+// safety rule for tool-result consumption through the real WASM request path.
+// Fresh results, including every result in a parallel batch, must reach the
+// model verbatim.
 // Once a later assistant message exists, historical results may be compacted,
 // including old results in a request that also contains a fresh round.
 func TestCompactorsRespectToolResultConsumptionBoundary(t *testing.T) {
