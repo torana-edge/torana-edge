@@ -102,6 +102,17 @@ func ConversationID(c *ChatRequest) string {
 	return shortHex(h)
 }
 
+// TopologyFacts are the host-only wire facts a cache key must include: the
+// same IR reconstructs to different provider wires depending on them, so a key
+// that ignored them could alias two requests that are not interchangeable. A
+// plugin cannot reproduce them, which is the entire divergence between the
+// Edge key and the SDK's observable prefix.
+type TopologyFacts struct {
+	CodeAssist           bool
+	OpenAIVariant        OpenAIVariant
+	ResponsesInputLayout OptionalJSONArray
+}
+
 // CachePrefixKey returns a key identifying the provider-side cache entry
 // this request would hit, or "" when there is nothing cacheable.
 //
@@ -137,14 +148,9 @@ func ConversationID(c *ChatRequest) string {
 // (the projection is now framed raw instead of re-fingerprinted
 // field-by-field) while the approved sensitivity contract is preserved —
 // acceptable pre-release; no legacy-key compatibility branch is wanted.
-type TopologyFacts struct {
-	CodeAssist           bool
-	OpenAIVariant        OpenAIVariant
-	ResponsesInputLayout OptionalJSONArray
-}
-
-// CachePrefixKey is the PB-only form with no topology facts (mirror
-// stable; host call sites pass the facts via CachePrefixKeyTopology).
+//
+// This is the PB-only form with no topology facts (mirror stable; host call
+// sites pass the facts via CachePrefixKeyTopology).
 func CachePrefixKey(pbReq *pb.ChatRequest) string {
 	return CachePrefixKeyTopology(pbReq, TopologyFacts{})
 }

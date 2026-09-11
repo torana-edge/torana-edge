@@ -68,10 +68,6 @@ const (
 )
 
 // Message represents a single turn in a chat conversation.
-// For simple text messages, Content holds the text body and tool fields are zero.
-// For assistant tool-call messages, Content is empty and ToolCalls is populated.
-// For tool-result messages, ToolCallID identifies the call and ToolName names the tool.
-// Message represents a single turn in a chat conversation.
 //
 // The message BODY is the ordered Block sequence — the SOLE authority for
 // every content fact (text, thinking, tool use, tool results, cache

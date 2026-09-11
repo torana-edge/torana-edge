@@ -3500,9 +3500,12 @@ func (s *Server) ReconfigureCache(newCache cache.Config) error {
 }
 
 // PersistConfig saves the current in-memory provider configuration to disk.
-// The 5s modtime poller (provider.WatchConfig) will observe Save()'s write
-// and call SetProviders again (benign; it does not rebuild the pipeline).
 // Atomic rename prevents a half-written read.
+//
+// Nothing reads the file back on its own: this comment used to describe a 5s
+// modtime poller (provider.WatchConfig) re-applying the write, and that poller
+// was never started by anything. Editing config.json by hand takes effect on
+// the next start, not while the proxy is running.
 func (s *Server) PersistConfig() error {
 	path := s.configPath
 	if path == "" {

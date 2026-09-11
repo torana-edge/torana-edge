@@ -1,6 +1,13 @@
-// Package metrics provides tracking for Torana Edge cost savings.
+// Package metrics owns Torana Edge's observability: token and cost accounting
+// for proxied requests, the live control-plane feed those numbers are streamed
+// to, and the OpenTelemetry exporter that publishes them.
+//
 // All counters are safe for concurrent use via sync/atomic; the per-plugin
 // savings map is mutex-guarded.
+//
+// The doc was declared twice, here and in feed.go, and described only the cost
+// tracking — so `go doc` printed one of two identical half-truths depending on
+// which file was read first.
 package metrics
 
 import (
