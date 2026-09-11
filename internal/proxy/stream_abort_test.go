@@ -65,7 +65,6 @@ func TestStreamAbortWaitsForUsageTap(t *testing.T) {
 	}
 	go srv.Serve(ln)
 	defer srv.Shutdown(context.Background())
-
 	resp, err := http.Post("http://"+ln.Addr().String()+"/provider/gem/v1beta/models/gemini-x:streamGenerateContent",
 		"application/json", strings.NewReader(`{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}`))
 	if err != nil {
@@ -73,7 +72,14 @@ func TestStreamAbortWaitsForUsageTap(t *testing.T) {
 	}
 	body, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
-	t.Logf("body=%q", body)
-	// Give the detached drainer time to run inside the test's lifetime.
-	time.Sleep(500 * time.Millisecond)
+	// ReadAll reaches EOF only after the handler's deferred finalizer has joined
+	// streamDone; streamDone closes only after tapDone. Pin the semantic result
+	// of that completed path: the pre-violation text is delivered, while the
+	// rejected tool call, buffered usage frames, and clean finish marker are not.
+	// TestRequestCleanupWaitsForStreamingGoroutineOnExceptionalExit separately
+	// pins the finalizer's ordering without relying on scheduler timing.
+	want := "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"hello\",\"thoughtSignature\":\"SIG_TEXT\"}]}}]}\n\n"
+	if string(body) != want {
+		t.Fatalf("aborted stream body:\n got: %q\nwant: %q", body, want)
+	}
 }

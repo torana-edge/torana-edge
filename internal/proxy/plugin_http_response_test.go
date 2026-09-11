@@ -33,8 +33,8 @@ func TestApplyPluginResponseHeadersRejectsInvalidAndOversizedValues(t *testing.T
 	if err := applyPluginResponseHeaders(make(http.Header), []byte(`{"Bad Header":["x"]}`)); err == nil {
 		t.Fatal("invalid header name was accepted")
 	}
-	oversized := `{"X-Plugin":["` + strings.Repeat("x", maxPluginResponseHeaderBytes+1) + `"]}`
-	if err := applyPluginResponseHeaders(make(http.Header), []byte(oversized)); err == nil {
-		t.Fatal("oversized headers were accepted")
+	oversized := `{"Content-Language":["` + strings.Repeat("x", maxPluginResponseHeaderBytes+1) + `"]}`
+	if err := applyPluginResponseHeaders(make(http.Header), []byte(oversized)); err == nil || !strings.Contains(err.Error(), "too large") {
+		t.Fatalf("oversized allowed header error = %v, want size rejection", err)
 	}
 }

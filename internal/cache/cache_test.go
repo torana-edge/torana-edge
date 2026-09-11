@@ -98,10 +98,12 @@ func TestLocalCache_EvictCleanup(t *testing.T) {
 	for i := 0; i < 10; i++ {
 		l.Set(context.Background(), "call_"+string(rune('0'+i)), "test")
 	}
-	time.Sleep(100 * time.Millisecond)
-	// Background eviction should have cleaned up.
-	if l.Len() > 0 {
-		t.Logf("eviction may not have completed yet, len=%d", l.Len())
+	deadline := time.Now().Add(2 * time.Second)
+	for l.Len() != 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if got := l.Len(); got != 0 {
+		t.Fatalf("background eviction left %d expired entries", got)
 	}
 }
 

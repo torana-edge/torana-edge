@@ -413,6 +413,7 @@ func TestHTTPHeaderPolicySamePipelineIsolation(t *testing.T) {
 	for name, tc := range map[string]struct {
 		target string
 		want   map[string][]string
+		absent []string
 	}{
 		"granted target": {
 			target: "test-http-server",
@@ -426,6 +427,7 @@ func TestHTTPHeaderPolicySamePipelineIsolation(t *testing.T) {
 			want: map[string][]string{
 				"Accept": {"text/html"},
 			},
+			absent: []string{"Authorization"},
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -439,7 +441,7 @@ func TestHTTPHeaderPolicySamePipelineIsolation(t *testing.T) {
 				t.Fatalf("status = %d: %s", rec.Code, rec.Body.String())
 			}
 			got := headerEcho(t, decodeEcho(t, rec.Body.Bytes()))
-			assertHeaders(t, got, tc.want, "X-Customer-Secret")
+			assertHeaders(t, got, tc.want, append(tc.absent, "X-Customer-Secret")...)
 		})
 	}
 }
