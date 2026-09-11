@@ -8,8 +8,8 @@
 //     env.shared_cache_* is the deliberate shared flat keyspace.
 //
 // Nothing existed for state a plugin must still have after the proxy restarts:
-// a cache-warming plugin's stored prefixes, a rate-limiter's counters, an
-// index's last-sync marker. This is that.
+// a cache-warming plugin's stored prefixes, an index's last-sync marker, a
+// digest of the last configuration a plugin acted on. This is that.
 //
 // Two differences from both cache families are deliberate:
 //
@@ -23,7 +23,30 @@
 // State is written to a single JSON file, replaced atomically. This suits the
 // expected shape — tens to hundreds of keys, written occasionally, read on
 // startup — and keeps the whole store recoverable by hand with a text editor.
-// It is explicitly not built for high write rates.
+//
+// It is explicitly not built for high write rates, and the cost is worth
+// knowing before you design around it. EVERY Set re-marshals the whole store,
+// writes a temp file, fsyncs it, renames it, and fsyncs the directory. So the
+// cost of one write scales with the size of the store, not with the value
+// written, and a plugin that stores a lot makes every other plugin's writes
+// slower. Measured with 500 keys resident (BenchmarkSet* in this package):
+//
+//	Set, durable            ~500 µs   99 KB   537 allocs
+//	  of which, serializing ~280 µs   53 KB   507 allocs
+//	Set, memory-only         ~42 µs   42 KB     8 allocs
+//
+// Serializing the whole store is the dominant term — about half the time and
+// nearly all of the allocations — with the filesystem transaction behind it.
+// A per-request Set is therefore the wrong shape for this package. That is not
+// a tuning gap: it is what "one JSON file, replaced atomically" costs.
+//
+// Which is why this doc no longer offers a rate-limiter's counters as an
+// example. Note that env.cache_* is not the answer for counters either: it
+// exposes Get and Set and no atomic increment, so a read-modify-write counter
+// loses updates whenever two requests overlap. Nothing here provides safe
+// concurrent counters today. Use this package for state that must survive a
+// restart and is written occasionally, and keep genuinely per-request data in
+// request-scoped env.meta_*.
 package pluginstate
 
 import (
