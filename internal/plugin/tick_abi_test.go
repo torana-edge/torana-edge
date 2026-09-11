@@ -128,10 +128,10 @@ func TestRunOnTick_FiresWithGrant(t *testing.T) {
 	}
 }
 
-// TestRunOnTick_DeliversHostClock — plugins have no clock of their own (WASI
-// preview1 exposes none), so TickRequest is their only time source. If the host
-// stopped populating it, a warming plugin would silently lose the ability to
-// tell how long a cache had been idle.
+// TestRunOnTick_DeliversHostClock verifies that the scheduled tick timestamp
+// and interval cross the ABI without requiring an additional host call.
+// Plugins granted env.now may query the current host clock separately; this
+// request still carries the time associated with this particular tick.
 func TestRunOnTick_DeliversHostClock(t *testing.T) {
 	requireWASM(t, "../../examples/plugins/test-ticker/plugin.wasm")
 

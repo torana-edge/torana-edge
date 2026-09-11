@@ -62,16 +62,35 @@ func TestUnapprovedPluginSkippedNotFatal(t *testing.T) {
 // not swallow plugins that are correctly approved.
 func TestApprovedPluginStillLoads(t *testing.T) {
 	requireWASM(t, fixturesDir+"/test-mutator/plugin.wasm")
+	digest, err := BundleDigestForDir(fixturesDir + "/test-mutator")
+	if err != nil {
+		t.Fatalf("BundleDigestForDir: %v", err)
+	}
+	permissions := []string{
+		"env.log",
+		"ir.messages.write.user",
+		"ir.messages.write.assistant",
+		"ir.messages.write.system",
+		"ir.messages.write.tool",
+		"ir.messages.write.developer",
+		"ir.messages.write.other",
+		"ir.tools.write",
+		"ir.model.write",
+		"ir.params.write",
+		"ir.cache_control.write",
+	}
 
 	ctx := context.Background()
 	runtime := wasm.NewRuntime(ctx)
 	defer runtime.Close()
 
 	pipeline, err := NewPipeline(runtime, PluginConfig{
-		Dir:             fixturesDir,
-		Order:           []string{"test-mutator"},
-		AllowUnapproved: true,
-		Strict:          true,
+		Dir:   fixturesDir,
+		Order: []string{"test-mutator"},
+		Approvals: map[string]Approval{
+			"test-mutator": {Digest: digest, Permissions: permissions, FailureMode: "pass"},
+		},
+		Strict: true,
 	})
 	if err != nil {
 		t.Fatalf("NewPipeline: %v", err)

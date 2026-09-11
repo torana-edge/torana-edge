@@ -84,11 +84,20 @@ func TestToolResultSeamVerifierGrantBoundary(t *testing.T) {
 	if ts := out.Blocks[4].GetTrailingSignature(); ts == nil || ts.Signature != "trailing-sig" {
 		t.Fatalf("the trailing carrier must be preserved byte-for-byte, got %+v", ts)
 	}
-	if got := accepted.Blocks[2].GetToolResult().Content[0].GetText().Text; got != "sibling" {
+	if got := out.Blocks[2].GetToolResult().Content[0].GetText().Text; got != "sibling" {
 		t.Fatalf("sibling result disturbed: %q", got)
 	}
-	if got := accepted.Blocks[1].GetToolResult().Content[0].GetCacheBreakpoint().MarkerJson; string(got) != `{"type":"ephemeral"}` {
+	if got := out.Blocks[1].GetToolResult().Content[0].GetCacheBreakpoint().MarkerJson; string(got) != `{"type":"ephemeral"}` {
 		t.Fatalf("marker disturbed: %s", got)
+	}
+	if got := out.Blocks[1].GetToolResult().Content[2].GetCacheBreakpoint().MarkerJson; string(got) != `{"type":"standard"}` {
+		t.Fatalf("second marker disturbed: %s", got)
+	}
+	if got := out.Blocks[0].GetText().Text; got != "leading" {
+		t.Fatalf("leading text disturbed: %q", got)
+	}
+	if got := out.Blocks[3].GetText().Text; got != "trailing" {
+		t.Fatalf("trailing text disturbed: %q", got)
 	}
 	req := trReq(accepted)
 	outReq := trReq(out)
