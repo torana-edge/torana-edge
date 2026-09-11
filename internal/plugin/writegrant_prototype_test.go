@@ -905,6 +905,7 @@ func firstToolResult(m *pb.Message) *pb.RequestToolResultBlock {
 // preimage identical.
 func boundaryShiftMessages() (accepted, out *pb.ChatRequest) {
 	idx1 := string([]byte{1, 0, 0, 0, 0, 0, 0, 0})
+	jsonS, jsonT := `{"s":0}`, `{"t":0}`
 	// The round-1 framing concatenates each message's index, role, nine
 	// message fields and its tool-call frames into ONE byte stream. The
 	// periodic message below is built so that stream is exactly four
@@ -912,22 +913,23 @@ func boundaryShiftMessages() (accepted, out *pb.ChatRequest) {
 	// message 0 or message 1: the call's four frames (idx1, user, S, T)
 	// are byte-identical to the next message's leading frames, and the
 	// message fields cycle (S, T, idx1, user) — so moving the call between
-	// the messages leaves the round-1 preimage identical. The fixture is
-	// deliberately NOT a validated request (raw fixture bytes).
-	call := &pb.RequestToolUseBlock{Id: idx1, Name: "user", ArgumentsJson: []byte(`{"S":"T"}`), Signature: "T"}
+	// the messages leaves the round-1 preimage identical. S and T are JSON
+	// objects so the current fingerprint's strict JSON checks still accept the
+	// historical collision fixture.
+	call := &pb.RequestToolUseBlock{Id: idx1, Name: "user", ArgumentsJson: []byte(jsonS), Signature: jsonT}
 	// Message fields cycle (S, T, idx1, user) — text, contentParts (second
 	// text block), thinking, thinkingSig, contentSig, trailingSig, redacted,
 	// toolResultID, toolResultName, cacheMarker — so the twelve frames of
 	// index+role+fields are exactly three periods, and the whole stream
 	// (plus the moved four-frame call) stays at a multiple of four.
 	periodic := &pb.Message{Role: "user", Blocks: []*pb.RequestBlock{
-		{Kind: &pb.RequestBlock_Text{Text: &pb.RequestTextBlock{Text: "S", Signature: "S"}}},
-		{Kind: &pb.RequestBlock_Text{Text: &pb.RequestTextBlock{Text: "T"}}},
+		{Kind: &pb.RequestBlock_Text{Text: &pb.RequestTextBlock{Text: jsonS, Signature: jsonS}}},
+		{Kind: &pb.RequestBlock_Text{Text: &pb.RequestTextBlock{Text: jsonT}}},
 		{Kind: &pb.RequestBlock_Thinking{Thinking: &pb.RequestThinkingBlock{Text: idx1, Signature: "user"}}},
-		{Kind: &pb.RequestBlock_TrailingSignature{TrailingSignature: &pb.RequestTrailingSignatureBlock{Signature: "T"}}},
+		{Kind: &pb.RequestBlock_TrailingSignature{TrailingSignature: &pb.RequestTrailingSignatureBlock{Signature: jsonT}}},
 		{Kind: &pb.RequestBlock_RedactedThinking{RedactedThinking: &pb.RequestRedactedThinkingBlock{Data: idx1}}},
-		{Kind: &pb.RequestBlock_ToolResult{ToolResult: &pb.RequestToolResultBlock{ToolCallId: "user", ToolName: "S", Content: []*pb.ToolResultContentBlock{{Kind: &pb.ToolResultContentBlock_Text{Text: &pb.ToolResultTextBlock{Text: "T"}}}}}}},
-		{Kind: &pb.RequestBlock_CacheBreakpoint{CacheBreakpoint: &pb.RequestCacheBreakpoint{MarkerJson: []byte(`{"T":"S"}`)}}},
+		{Kind: &pb.RequestBlock_ToolResult{ToolResult: &pb.RequestToolResultBlock{ToolCallId: "user", ToolName: jsonS, Content: []*pb.ToolResultContentBlock{{Kind: &pb.ToolResultContentBlock_Text{Text: &pb.ToolResultTextBlock{Text: jsonT}}}}}}},
+		{Kind: &pb.RequestBlock_CacheBreakpoint{CacheBreakpoint: &pb.RequestCacheBreakpoint{MarkerJson: []byte(jsonT)}}},
 	}}
 
 	accepted = &pb.ChatRequest{Messages: []*pb.Message{
@@ -955,11 +957,16 @@ func boundaryShiftMessages() (accepted, out *pb.ChatRequest) {
 func TestMessageFingerprintUnambiguousAcrossBoundaryShift(t *testing.T) {
 	accepted, out := boundaryShiftMessages()
 
-	// 1. The exact oracle sees the change.
+	// 1. Preserve the original regression proof: the ambiguous round-1
+	// framing produces the same digest for both structurally different inputs.
+	if oldSchemeRoleDigest(accepted, "user") != oldSchemeRoleDigest(out, "user") {
+		t.Fatal("fixture no longer reproduces the round-1 boundary collision")
+	}
+	// 2. The exact oracle sees the change.
 	if !compareSections(accepted, out).any() {
 		t.Fatal("exact comparison missed the boundary shift")
 	}
-	// 2. The production fingerprint must NOT collide.
+	// 3. The production fingerprint must NOT collide.
 	fpA, err := fingerprintRequestSections(accepted)
 	if err != nil {
 		t.Fatal(err)
@@ -971,7 +978,7 @@ func TestMessageFingerprintUnambiguousAcrossBoundaryShift(t *testing.T) {
 	if fpA.equal(fpB) {
 		t.Fatal("message fingerprint still ambiguous across a tool-call boundary shift")
 	}
-	// 3. verifyRequestMutation must reject with NO grants.
+	// 4. verifyRequestMutation must reject with NO grants.
 	err = verifyRequestMutation(accepted, out, grant())
 	if err == nil {
 		t.Fatal("the boundary shift must be rejected without any grant")
@@ -989,15 +996,16 @@ func TestMessageFingerprintUnambiguousAcrossBoundaryShift(t *testing.T) {
 // and the index pins every digest to its position.
 func TestMessageFingerprintBoundaryShiftAcrossThreeMessages(t *testing.T) {
 	idx1 := string([]byte{1, 0, 0, 0, 0, 0, 0, 0})
-	call := &pb.RequestToolUseBlock{Id: idx1, Name: "user", ArgumentsJson: []byte(`{"S":"T"}`), Signature: "T"}
+	jsonS, jsonT := `{"s":0}`, `{"t":0}`
+	call := &pb.RequestToolUseBlock{Id: idx1, Name: "user", ArgumentsJson: []byte(jsonS), Signature: jsonT}
 	periodic := &pb.Message{Role: "user", Blocks: []*pb.RequestBlock{
-		{Kind: &pb.RequestBlock_Text{Text: &pb.RequestTextBlock{Text: "S", Signature: "S"}}},
-		{Kind: &pb.RequestBlock_Text{Text: &pb.RequestTextBlock{Text: "T"}}},
+		{Kind: &pb.RequestBlock_Text{Text: &pb.RequestTextBlock{Text: jsonS, Signature: jsonS}}},
+		{Kind: &pb.RequestBlock_Text{Text: &pb.RequestTextBlock{Text: jsonT}}},
 		{Kind: &pb.RequestBlock_Thinking{Thinking: &pb.RequestThinkingBlock{Text: idx1, Signature: "user"}}},
-		{Kind: &pb.RequestBlock_TrailingSignature{TrailingSignature: &pb.RequestTrailingSignatureBlock{Signature: "T"}}},
+		{Kind: &pb.RequestBlock_TrailingSignature{TrailingSignature: &pb.RequestTrailingSignatureBlock{Signature: jsonT}}},
 		{Kind: &pb.RequestBlock_RedactedThinking{RedactedThinking: &pb.RequestRedactedThinkingBlock{Data: idx1}}},
-		{Kind: &pb.RequestBlock_ToolResult{ToolResult: &pb.RequestToolResultBlock{ToolCallId: "user", ToolName: "S", Content: []*pb.ToolResultContentBlock{{Kind: &pb.ToolResultContentBlock_Text{Text: &pb.ToolResultTextBlock{Text: "T"}}}}}}},
-		{Kind: &pb.RequestBlock_CacheBreakpoint{CacheBreakpoint: &pb.RequestCacheBreakpoint{MarkerJson: []byte(`{"T":"S"}`)}}},
+		{Kind: &pb.RequestBlock_ToolResult{ToolResult: &pb.RequestToolResultBlock{ToolCallId: "user", ToolName: jsonS, Content: []*pb.ToolResultContentBlock{{Kind: &pb.ToolResultContentBlock_Text{Text: &pb.ToolResultTextBlock{Text: jsonT}}}}}}},
+		{Kind: &pb.RequestBlock_CacheBreakpoint{CacheBreakpoint: &pb.RequestCacheBreakpoint{MarkerJson: []byte(jsonT)}}},
 	}}
 
 	accepted := &pb.ChatRequest{Messages: []*pb.Message{
