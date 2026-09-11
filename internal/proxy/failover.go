@@ -3,6 +3,7 @@ package proxy
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -88,8 +89,19 @@ func (t *failoverRoundTripper) RoundTrip(req *http.Request) (*http.Response, err
 	var bodyBytes []byte
 	if len(fallbacks) > 0 && req.Body != nil {
 		lr := io.LimitReader(req.Body, maxBodySize+1)
-		bodyBytes, _ = io.ReadAll(lr)
+		var readErr error
+		bodyBytes, readErr = io.ReadAll(lr)
 		req.Body.Close()
+		if readErr != nil {
+			// The body is partially consumed by now and cannot be put back.
+			// Discarding this error sent whatever HAD been read as though it
+			// were the whole request: a prompt truncated mid-sentence, which
+			// the model answers as if the caller had stopped there. No outcome
+			// here is better than refusing.
+			t.rateLimiter.Release(identity)
+			discardCompactionReports(reqStateFrom(req.Context()))
+			return nil, fmt.Errorf("failover: reading the request body for retry: %w", readErr)
+		}
 		if len(bodyBytes) > maxBodySize {
 			// Cannot retry safely if body is oversized. We will let the first attempt fail or pass,
 			// but we won't have the body for fallbacks.
