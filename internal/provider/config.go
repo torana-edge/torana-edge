@@ -875,10 +875,10 @@ func Load(path string) (Config, error) {
 		if user.Providers == nil {
 			user.Providers = make(map[string]Provider)
 		}
-		// Managed configs used to return here, before any validation. That
-		// made the managed store — the config every running Torana actually
-		// uses after first start — the LEAST checked path, while the seed it
-		// was imported from was the most. Validate it like anything else.
+		// The managed store is the config every running Torana actually uses
+		// after first start, so it is validated like any other input. Trusting
+		// it because Torana wrote it would make the most-used path the least
+		// checked one.
 		return user, validate(user)
 	}
 

@@ -8,8 +8,7 @@ import (
 	pbv1 "github.com/torana-edge/torana-plugin-sdk/pb/v1"
 )
 
-// Stream signature verification (Migration B, part 2a; reworked per the
-// #243 round-1 findings).
+// Stream signature verification.
 //
 // verifyStream checks a plugin's returned StreamEvents against the accepted
 // stream it was handed, on TWO axes only:

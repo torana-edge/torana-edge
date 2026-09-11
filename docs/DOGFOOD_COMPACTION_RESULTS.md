@@ -60,7 +60,7 @@ two important failures:
 
 1. Delayed source-read markers caused OMP to reread different ranges until a
    request cap. A same-argument guard was insufficient. `source` therefore
-   fails closed to `exact` pending the recovery/economics work in issue #178.
+   fails closed to `exact` until the recovery economics are settled.
 2. An uncached optimistic model candidate was labeled as cache reuse, so its
    preflight omitted the prefix-rewrite charge. Torana paid for Flash summaries
    that the final gate rejected. Uncached candidates are now labeled as

@@ -477,8 +477,8 @@ func TestE2E(t *testing.T) {
 	})
 }
 
-// TestHotReloadDuringInflightRequest reproduces the review finding on #140:
-// a pipeline swap while a request is streaming must not drain-and-close the
+// TestHotReloadDuringInflightRequest pins the rule that a pipeline swap while
+// a request is streaming must not drain-and-close the
 // runtime holding that request's state. The request pins its pipeline for
 // its whole lifetime, so the old runtime's meta (fragment buffers, mutation
 // registry) stays alive until the response completes.

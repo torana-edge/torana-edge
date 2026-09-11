@@ -10,8 +10,7 @@ import (
 	pbv1 "github.com/torana-edge/torana-plugin-sdk/pb/v1"
 )
 
-// Tests for the stream signature verifier (Migration B part 2a, reworked per
-// the #243 round-1 findings).
+// Tests for the stream signature verifier.
 //
 // The scope definitions — typed CurrentContentBlock and TrailingStandalone
 // over the single-pass event walk in scanStreamSignatures — are pinned here
@@ -1948,10 +1947,8 @@ func TestValidateAcceptedStreamABITopology(t *testing.T) {
 
 // BenchmarkVerifyStreamPassThrough measures the whole stream verification on
 // a realistic signed accepted/returned stream (pass-through), at the repo's
-// standard event sizes. This is the O(n) single-pass walk from round 1, and
-// the shape is the same as the closed #243 branch's BenchmarkVerifyStream so
-// the numbers are comparable. The follow-up (2b) production benchmark adds the
-// state bookkeeping and boundary cadence of the per-event enforcement loop
+// standard event sizes. This is the O(n) single-pass walk. The production
+// benchmark adds the state bookkeeping and boundary cadence of the per-event enforcement loop
 // (grant lookup, full-walk field diff, rejection wiring — measured through
 // the pipeline, as BenchmarkRunOnStreamChunk does); the pure verifier cost
 // measured here is its inner core.
@@ -2005,8 +2002,7 @@ func BenchmarkVerifyStreamFragmented(b *testing.B) {
 
 // benchStream builds a realistic signed stream of n events: message framing,
 // text chunks, one signed tool block, and Code Assist's trailing signature.
-// Pass-through verification of it is the common-case cost. (Same shape as the
-// closed #243 branch's helper, for comparable numbers.)
+// Pass-through verification of it is the common-case cost.
 func benchStream(n int) []*pbv1.StreamEvent {
 	messageStart := func() *pbv1.StreamEvent {
 		return &pbv1.StreamEvent{Event: &pbv1.StreamEvent_MessageStart{

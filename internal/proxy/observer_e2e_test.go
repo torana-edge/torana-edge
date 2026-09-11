@@ -115,8 +115,8 @@ func TestObserverSeesErrorResponses(t *testing.T) {
 	}
 }
 
-// TestObserverStreamingMutationIsObservational pins the #141 semantics: on a
-// STREAMING response, run_after_response mutations are observational — the
+// TestObserverStreamingMutationIsObservational pins the streaming-mutation
+// rule: on a STREAMING response, run_after_response mutations are observational — the
 // stream has already been written, so the plugin's content rewrite must NOT
 // appear in what the client receives. (Contrast TestObserverSeesResponseSignal,
 // where the identical plugin's rewrite IS applied on the non-streaming path.)
@@ -144,7 +144,7 @@ func TestObserverStreamingMutationIsObservational(t *testing.T) {
 	// JSON path. On the streaming path that mutation is dropped, so the client
 	// gets the original content and never the observed-status string.
 	if strings.Contains(string(body), "observed status=") {
-		t.Fatalf("#141: run_after_response mutation leaked into the streamed response (should be observational): %s", body)
+		t.Fatalf("run_after_response mutation leaked into the streamed response (should be observational): %s", body)
 	}
 	if !strings.Contains(string(body), `"content":"hi"`) {
 		t.Fatalf("original streamed content missing; body=%s", body)
