@@ -13,15 +13,21 @@ import (
 // it sends a reader looking for an authority, and the one they cannot find is
 // assumed to hold the answer they need.
 //
-// CONTRIBUTING.md step 5 told every contributor to update `ABI.md`,
-// `docs/WRITING_A_PLUGIN.md` and `docs/WASM_PLUGIN_GUIDE.md`. None of the three
-// exists in this repository — they live in the SDK — so the documented step
-// could not be performed at all. Comments cited HANDOFF_TO_AGENT.md,
-// MARSHAL_FAILURE_CHECKPOINT and GUIDE.md, none of which were ever here.
+// CONTRIBUTING.md step 5 told every contributor to update an ABI document and
+// two plugin guides. The guides are real but belong to the SDK
+// (torana-plugin-sdk/docs/WRITING_A_PLUGIN.md,
+// torana-plugin-sdk/docs/WASM_PLUGIN_GUIDE.md); the ABI document exists in no
+// repository at all, so the documented step could not be performed. Comments
+// cited three more Markdown files — a handoff note, a marshal-failure
+// checkpoint and a guide — that were never here either.
 //
 // This checks every repository-relative Markdown path named by tracked Go and
 // Markdown files. Cross-repository references (torana-plugin-sdk/...) are
 // allowed and deliberately not resolved here.
+//
+// This file is scanned like any other, and is not exempt: a dead reference
+// named here would be a dead reference. That is why the three files that exist
+// nowhere are described above rather than spelled as paths.
 func TestReferencedDocumentsExist(t *testing.T) {
 	root := filepath.Join("..", "..")
 	out, err := exec.Command("git", "-C", root, "ls-files", "*.go", "*.md").Output()
