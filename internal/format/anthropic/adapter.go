@@ -323,7 +323,7 @@ func (cb contentBlock) MarshalJSON() ([]byte, error) {
 type Adapter struct{}
 
 func init() {
-	format.Register("/anthropic", format.Format{
+	format.Register(format.Format{
 		Name:             "anthropic",
 		Request:          &Adapter{},
 		Stream:           &StreamAdapter{},
