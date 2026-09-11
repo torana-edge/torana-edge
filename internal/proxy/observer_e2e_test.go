@@ -150,3 +150,65 @@ func TestObserverStreamingMutationIsObservational(t *testing.T) {
 		t.Fatalf("original streamed content missing; body=%s", body)
 	}
 }
+
+// A provider answering with a `+json` media type must still reach the response
+// pipeline.
+//
+// Which content types reach it was decided by
+// strings.Contains(contentType, "application/json"), which misses the entire
+// suffix family RFC 6839 defines for JSON. A provider using
+// application/vnd.api+json — or any vendor type ending +json — had EVERY
+// response hook skipped and its usage never recorded, with nothing logged. A
+// redaction plugin simply did not run, and the spend report simply lost the
+// request.
+//
+// This asserts through the observer fixture rather than through the predicate,
+// because the predicate being right is not the claim: the claim is that hooks
+// actually fire for these bodies.
+func TestJSONSuffixMediaTypesReachTheResponsePipeline(t *testing.T) {
+	for _, contentType := range []string{
+		"application/json",
+		"application/json; charset=utf-8",
+		"application/vnd.api+json",
+		"application/vnd.anthropic.v1+json; charset=utf-8",
+		"text/json",
+	} {
+		t.Run(contentType, func(t *testing.T) {
+			post := observerEnv(t, func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", contentType)
+				w.WriteHeader(http.StatusOK)
+				io.WriteString(w, `{"id":"x","model":"gpt-x","choices":[{"message":{"role":"assistant","content":"hi"}}],"usage":{"prompt_tokens":7,"completion_tokens":3,"total_tokens":10}}`)
+			})
+
+			status, body := post(observerReq)
+			if status != http.StatusOK {
+				t.Fatalf("status = %d, want 200; body=%s", status, body)
+			}
+			if !strings.Contains(string(body), "observed status=200 in=7 out=3") {
+				t.Fatalf("the response hook did not run for Content-Type %q, so this "+
+					"response passed through ungoverned: no plugins, no usage, no cost.\nbody=%s",
+					contentType, body)
+			}
+		})
+	}
+}
+
+// The complement: a body the pipeline genuinely cannot decode still passes
+// through untouched. Bypassing is the right outcome there — it just must not
+// be silent, which the one-time log covers.
+func TestNonJSONResponsesStillPassThroughUnchanged(t *testing.T) {
+	const payload = "\x00\x01binary-not-json"
+	post := observerEnv(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/octet-stream")
+		w.WriteHeader(http.StatusOK)
+		io.WriteString(w, payload)
+	})
+
+	status, body := post(observerReq)
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, want 200", status)
+	}
+	if string(body) != payload {
+		t.Fatalf("an undecodable body was altered: %q", body)
+	}
+}
