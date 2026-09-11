@@ -27,8 +27,15 @@ func init() {
 		if !mutable || resp.Message == nil {
 			return sdk.PassResponse(), nil
 		}
-		s := "invented"
-		resp.Message.Content = &s
+		for _, block := range resp.Message.Blocks {
+			if text := block.GetText(); text != nil {
+				text.Text = "invented"
+				return sdk.ReplaceResponse(resp), nil
+			}
+		}
+		resp.Message.Blocks = append([]*pb.ResponseBlock{{Kind: &pb.ResponseBlock_Text{
+			Text: &pb.ResponseTextBlock{Text: "invented"},
+		}}}, resp.Message.Blocks...)
 		return sdk.ReplaceResponse(resp), nil
 	})
 }

@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"net"
 	"testing"
 
 	"github.com/torana-edge/torana-edge/internal/provider"
@@ -48,5 +49,38 @@ func TestApplyMITMBadConfigKeepsRunningIngress(t *testing.T) {
 	}
 	if after != running {
 		t.Fatal("running ingress was replaced by a failed reconfiguration")
+	}
+}
+
+func TestApplyMITMBindFailureKeepsRunningIngress(t *testing.T) {
+	srv, err := New(Config{Port: "0", Providers: testProviderConfig("http://127.0.0.1:1", "test", "openai")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = srv.applyMITM(provider.MITMConfig{Enabled: false}) })
+	good := provider.MITMConfig{Enabled: true, Listen: "127.0.0.1:0", CADir: t.TempDir(), Hosts: map[string]string{"api.example.com": "test"}}
+	if err := srv.applyMITM(good); err != nil {
+		t.Fatal(err)
+	}
+	srv.mitmMu.Lock()
+	running := srv.mitmSrv
+	srv.mitmMu.Unlock()
+
+	occupied, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer occupied.Close()
+	bad := good
+	bad.Listen = occupied.Addr().String()
+	bad.CADir = t.TempDir()
+	if err := srv.applyMITM(bad); err == nil {
+		t.Fatal("occupied replacement address was accepted")
+	}
+	srv.mitmMu.Lock()
+	after := srv.mitmSrv
+	srv.mitmMu.Unlock()
+	if after != running {
+		t.Fatal("bind failure replaced or tore down the running MITM ingress")
 	}
 }

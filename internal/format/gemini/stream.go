@@ -251,7 +251,7 @@ func mapGeminiFinishReason(r string) string {
 	case "SAFETY", "RECITATION", "OTHER":
 		return "error"
 	default:
-		return "stop"
+		return strings.ToLower(r)
 	}
 }
 
@@ -478,12 +478,14 @@ func chunkFinish(reason string, usage *geminiUsageMetadata) geminiStreamChunk {
 // mapCanonicalToGeminiFinishReason maps canonical finish reasons back to Gemini.
 func mapCanonicalToGeminiFinishReason(r string) string {
 	switch r {
-	case "stop", "tool_calls", "length":
+	case "stop", "tool_calls":
 		return "STOP"
+	case "length":
+		return "MAX_TOKENS"
 	case "error":
 		return "OTHER"
 	default:
-		return "STOP"
+		return strings.ToUpper(r)
 	}
 }
 

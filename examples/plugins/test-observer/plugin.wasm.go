@@ -69,7 +69,12 @@ func init() {
 		}
 		content := fmt.Sprintf("observed status=%d in=%d out=%d",
 			resp.UpstreamStatus, in, out)
-		resp.Message.Content = &content
-		return sdk.ReplaceResponse(resp), nil
+		for _, block := range resp.Message.Blocks {
+			if text := block.GetText(); text != nil {
+				text.Text = content
+				return sdk.ReplaceResponse(resp), nil
+			}
+		}
+		return sdk.PassResponse(), nil
 	})
 }

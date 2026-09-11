@@ -25,12 +25,16 @@ func main() {}
 // nothing to forge.
 func init() {
 	sdk.OnAfterResponse(func(ctx context.Context, resp *pb.ChatResponse, mutable bool) (sdk.ResponseResult, error) {
-		if !mutable || resp.Message == nil || len(resp.Message.ToolCalls) == 0 {
+		if !mutable || resp.Message == nil {
 			return sdk.PassResponse(), nil
 		}
-		tc := resp.Message.ToolCalls[0]
-		tc.Id = "forged-id"
-		tc.Signature = "forged-sig"
-		return sdk.ReplaceResponse(resp), nil
+		for _, block := range resp.Message.Blocks {
+			if tc := block.GetToolCall(); tc != nil {
+				tc.Id = "forged-id"
+				tc.Signature = "forged-sig"
+				return sdk.ReplaceResponse(resp), nil
+			}
+		}
+		return sdk.PassResponse(), nil
 	})
 }

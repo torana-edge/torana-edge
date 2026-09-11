@@ -270,13 +270,8 @@ func fingerprintRequestSections(req *pb.ChatRequest) (requestSections, error) {
 		binary.LittleEndian.PutUint64(idx[:], uint64(i))
 		writeFramed(h, idx[:], d[:])
 	}
-	// The message count is folded into every role, so appending or removing a
-	// message of one role is visible to all of them — otherwise a deletion that
-	// shifts later indices could be attributed to the wrong role alone.
 	var count [8]byte
-	binary.LittleEndian.PutUint64(count[:], uint64(len(req.Messages)))
 	for role, h := range hashers {
-		writeFramed(h, count[:])
 		var sum [32]byte
 		copy(sum[:], h.Sum(nil))
 		p.messages[role] = sum

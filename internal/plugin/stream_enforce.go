@@ -544,9 +544,8 @@ func toolBlockIndexFrom(err error) int32 {
 // Once the request's state is terminal, every subsequent call returns the
 // terminal error without dispatching to any plugin.
 //
-// The non-streaming JSON replay (jsonresponse.go) keeps calling
-// RunOnStreamChunk — enforcement belongs to the live streaming path, where
-// the host cannot otherwise clear a stale token before it escapes.
+// Non-streaming JSON replay also uses this entry point and buffers the result
+// until EndStreamVerified succeeds, so it cannot bypass the same contract.
 func (pp *PluginPipeline) RunOnStreamChunkVerified(ctx context.Context, reqID uint64, chunk *engine.StreamEvent) ([]engine.StreamEvent, error) {
 	pp.Acquire()
 	defer pp.Release()
@@ -736,6 +735,24 @@ func (pp *PluginPipeline) runOnStreamChunk(ctx context.Context, reqID uint64, ch
 				// the ENTIRE action atomically: a later bad child cannot leave
 				// an earlier child forwarded under failure_mode=pass.
 				if vs != nil && pvs != nil {
+					// Same-shape, one-for-one mutations are fully decidable at
+					// this event boundary. Enforce them before returning bytes;
+					// whole-scope buffering remains only for transformations whose
+					// correlation genuinely depends on later events.
+					if len(emit.Events) == 1 && eventArm(ev) == eventArm(emit.Events[0]) {
+						if policyErr := (streamPolicyDiff{canWrite: lp.plugin.HasGrant}).event(ev, emit.Events[0], "event"); policyErr != nil {
+							if lp.failureMode == "block" {
+								return nil, vs.terminate(streamTerminalPlugin, lp.manifest.Name, eventIndex(ev), 0, policyErr)
+							}
+							accepted, term := vs.acceptPassThrough(pvs, ev)
+							if term != nil {
+								return nil, term
+							}
+							next = append(next, accepted)
+							pvs.returned = append(pvs.returned, accepted)
+							continue
+						}
+					}
 					accepted, term := vs.acceptPluginOutputs(pvs, ev, emit.Events)
 					if term != nil {
 						return nil, term

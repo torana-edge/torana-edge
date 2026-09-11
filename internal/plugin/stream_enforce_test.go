@@ -759,20 +759,23 @@ func TestEnforceScopeOrdinalAdvancesOnceAcrossPlugins(t *testing.T) {
 // TestEnforceTransformedBoundariesUseDownstreamScope exercises the exact
 // transformed-stream case: one non-close host text delta fans out into TWO
 // completed boundaries before a downstream plugin sees it. The downstream
-// no-grant reindex is a late policy terminal at scope 2, never scope 0.
+// pass-mode plugin has no topology grant, so each one-for-one reindex is
+// discarded before release and the upstream topology is replayed unchanged.
 func TestEnforceTransformedBoundariesUseDownstreamScope(t *testing.T) {
 	requireWASM(t, fixturesDir+"/test-stream-fanout-boundaries/plugin.wasm")
 	requireWASM(t, fixturesDir+"/test-stream-reindex-nogrant/plugin.wasm")
 	pp := newTestPipeline(t, fixturesDir, []string{"test-stream-fanout-boundaries", "test-stream-reindex-nogrant"})
 	const reqID = 7021
 
-	_, err := pp.RunOnStreamChunkVerified(context.Background(), reqID, &engine.StreamEvent{TextDelta: strPtr("source")})
-	var term *StreamTerminalError
-	if !errors.As(err, &term) || term.Kind != streamTerminalPlugin || term.Plugin != "test-stream-reindex-nogrant" {
-		t.Fatalf("expected downstream topology terminal, got %T: %v", err, err)
+	out, err := pp.RunOnStreamChunkVerified(context.Background(), reqID, &engine.StreamEvent{TextDelta: strPtr("source")})
+	if err != nil {
+		t.Fatalf("pass-mode topology rewrite should replay the accepted events: %v", err)
 	}
-	if term.Scope != 2 {
-		t.Fatalf("two downstream boundaries reported scope %d, want 2: %v", term.Scope, term)
+	if len(out) != 4 || out[0].BlockStart == nil || out[0].BlockStart.Index != 0 ||
+		out[1].BlockStop == nil || out[1].BlockStop.Index != 0 ||
+		out[2].BlockStart == nil || out[2].BlockStart.Index != 1 ||
+		out[3].BlockStop == nil || out[3].BlockStop.Index != 1 {
+		t.Fatalf("ungranted downstream reindex escaped: %#v", out)
 	}
 	pp.EndRequest(reqID)
 }
@@ -1171,8 +1174,8 @@ func TestStreamEnforcementValidSignedStreamPasses(t *testing.T) {
 // TestStreamEnforcementRejectsUngrantedTextMutation is the production-path
 // regression for the review finding that prompted 2b round 2. The fixture
 // deliberately declares only env.log yet rewrites a streamed assistant delta;
-// the scope transaction must reject it rather than silently letting a plugin
-// mutate content outside its declared capability.
+// failure_mode=pass must reject the mutation before it escapes and replay the
+// accepted delta unchanged.
 func TestStreamEnforcementRejectsUngrantedTextMutation(t *testing.T) {
 	requireWASM(t, fixturesDir+"/test-stream-mutator-nogrant/plugin.wasm")
 	pp := newTestPipeline(t, fixturesDir, []string{"test-stream-mutator-nogrant"})
@@ -1183,19 +1186,18 @@ func TestStreamEnforcementRejectsUngrantedTextMutation(t *testing.T) {
 		t.Fatalf("block start: %v", err)
 	}
 	secret := "the secret plan"
-	if _, err := pp.RunOnStreamChunkVerified(context.Background(), reqID, &engine.StreamEvent{TextDelta: &secret}); err != nil {
-		t.Fatalf("delta before scope close: %v", err)
+	out, err := pp.RunOnStreamChunkVerified(context.Background(), reqID, &engine.StreamEvent{TextDelta: &secret})
+	if err != nil {
+		t.Fatalf("pass-mode mutation should replay the accepted delta: %v", err)
 	}
-	_, err := pp.RunOnStreamChunkVerified(context.Background(), reqID, &engine.StreamEvent{BlockStop: &engine.BlockStop{Index: 0}})
-	if err == nil {
-		t.Fatal("ungranted text rewrite must terminate at its completed scope")
+	if len(out) != 1 || out[0].TextDelta == nil || *out[0].TextDelta != secret {
+		t.Fatalf("ungranted mutation escaped instead of replaying %q: %#v", secret, out)
 	}
-	var term *StreamTerminalError
-	if !errors.As(err, &term) || term.Kind != streamTerminalPlugin || term.Plugin != "test-stream-mutator-nogrant" {
-		t.Fatalf("wrong terminal attribution: %T: %v", err, err)
+	if _, err := pp.RunOnStreamChunkVerified(context.Background(), reqID, &engine.StreamEvent{BlockStop: &engine.BlockStop{Index: 0}}); err != nil {
+		t.Fatalf("scope close after replay: %v", err)
 	}
-	if !strings.Contains(term.Error(), "ir.messages.write.assistant") {
-		t.Fatalf("missing required grant in terminal: %v", term)
+	if err := pp.EndStreamVerified(reqID); err != nil {
+		t.Fatalf("verified replayed stream: %v", err)
 	}
 	pp.EndRequest(reqID)
 }

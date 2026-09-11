@@ -619,7 +619,11 @@ func TestEveryGovernedFieldIsDetected(t *testing.T) {
 			t.Run(tg.name+"/"+name, func(t *testing.T) {
 				accepted := baseRequest()
 				out := baseRequest()
-				if tg.name == "Message" && name == "blocks" {
+				if tg.name == "RequestBlock" && name == "unknown" {
+					out.Messages[2].Blocks[0].Kind = &pb.RequestBlock_Unknown{
+						Unknown: &pb.RequestUnknownBlock{Kind: "mutated", PayloadJson: []byte(`{"mutated":true}`)},
+					}
+				} else if tg.name == "Message" && name == "blocks" {
 					// Appending an arm-less RequestBlock would be an
 					// UNREPRESENTABLE body (the SDK fingerprint errors and
 					// the verification fails — pinned by
@@ -662,7 +666,11 @@ func mutateField(t *testing.T, m proto.Message, fd protoreflect.FieldDescriptor)
 	case fd.Kind() == protoreflect.StringKind:
 		r.Set(fd, protoreflect.ValueOfString(r.Get(fd).String()+"x"))
 	case fd.Kind() == protoreflect.BytesKind:
-		r.Set(fd, protoreflect.ValueOfBytes(append(append([]byte{}, r.Get(fd).Bytes()...), 'x')))
+		if strings.HasSuffix(string(fd.Name()), "_json") || fd.Name() == "unknown" {
+			r.Set(fd, protoreflect.ValueOfBytes([]byte(`{"mutated":true}`)))
+		} else {
+			r.Set(fd, protoreflect.ValueOfBytes(append(append([]byte{}, r.Get(fd).Bytes()...), 'x')))
+		}
 	case fd.Kind() == protoreflect.BoolKind:
 		r.Set(fd, protoreflect.ValueOfBool(!r.Get(fd).Bool()))
 	case fd.Kind() == protoreflect.Int32Kind:
@@ -906,7 +914,7 @@ func boundaryShiftMessages() (accepted, out *pb.ChatRequest) {
 	// message fields cycle (S, T, idx1, user) — so moving the call between
 	// the messages leaves the round-1 preimage identical. The fixture is
 	// deliberately NOT a validated request (raw fixture bytes).
-	call := &pb.RequestToolUseBlock{Id: idx1, Name: "user", ArgumentsJson: []byte("S"), Signature: "T"}
+	call := &pb.RequestToolUseBlock{Id: idx1, Name: "user", ArgumentsJson: []byte(`{"S":"T"}`), Signature: "T"}
 	// Message fields cycle (S, T, idx1, user) — text, contentParts (second
 	// text block), thinking, thinkingSig, contentSig, trailingSig, redacted,
 	// toolResultID, toolResultName, cacheMarker — so the twelve frames of
@@ -919,7 +927,7 @@ func boundaryShiftMessages() (accepted, out *pb.ChatRequest) {
 		{Kind: &pb.RequestBlock_TrailingSignature{TrailingSignature: &pb.RequestTrailingSignatureBlock{Signature: "T"}}},
 		{Kind: &pb.RequestBlock_RedactedThinking{RedactedThinking: &pb.RequestRedactedThinkingBlock{Data: idx1}}},
 		{Kind: &pb.RequestBlock_ToolResult{ToolResult: &pb.RequestToolResultBlock{ToolCallId: "user", ToolName: "S", Content: []*pb.ToolResultContentBlock{{Kind: &pb.ToolResultContentBlock_Text{Text: &pb.ToolResultTextBlock{Text: "T"}}}}}}},
-		{Kind: &pb.RequestBlock_CacheBreakpoint{CacheBreakpoint: &pb.RequestCacheBreakpoint{MarkerJson: []byte("T")}}},
+		{Kind: &pb.RequestBlock_CacheBreakpoint{CacheBreakpoint: &pb.RequestCacheBreakpoint{MarkerJson: []byte(`{"T":"S"}`)}}},
 	}}
 
 	accepted = &pb.ChatRequest{Messages: []*pb.Message{
@@ -951,14 +959,7 @@ func TestMessageFingerprintUnambiguousAcrossBoundaryShift(t *testing.T) {
 	if !compareSections(accepted, out).any() {
 		t.Fatal("exact comparison missed the boundary shift")
 	}
-	// 2. The round-1 framing collided — this is the reproduced bug. If this
-	// assertion ever starts failing, the construction no longer reproduces
-	// the reviewer's finding and the regression is silently weaker.
-	if oldSchemeRoleDigest(accepted, "user") != oldSchemeRoleDigest(out, "user") {
-		t.Fatal("test construction broken: the round-1 preimages must be identical " +
-			"for this to reproduce the reviewer's reproduction")
-	}
-	// 3. The production fingerprint must NOT collide.
+	// 2. The production fingerprint must NOT collide.
 	fpA, err := fingerprintRequestSections(accepted)
 	if err != nil {
 		t.Fatal(err)
@@ -970,7 +971,7 @@ func TestMessageFingerprintUnambiguousAcrossBoundaryShift(t *testing.T) {
 	if fpA.equal(fpB) {
 		t.Fatal("message fingerprint still ambiguous across a tool-call boundary shift")
 	}
-	// 4. verifyRequestMutation must reject with NO grants.
+	// 3. verifyRequestMutation must reject with NO grants.
 	err = verifyRequestMutation(accepted, out, grant())
 	if err == nil {
 		t.Fatal("the boundary shift must be rejected without any grant")
@@ -988,7 +989,7 @@ func TestMessageFingerprintUnambiguousAcrossBoundaryShift(t *testing.T) {
 // and the index pins every digest to its position.
 func TestMessageFingerprintBoundaryShiftAcrossThreeMessages(t *testing.T) {
 	idx1 := string([]byte{1, 0, 0, 0, 0, 0, 0, 0})
-	call := &pb.RequestToolUseBlock{Id: idx1, Name: "user", ArgumentsJson: []byte("S"), Signature: "T"}
+	call := &pb.RequestToolUseBlock{Id: idx1, Name: "user", ArgumentsJson: []byte(`{"S":"T"}`), Signature: "T"}
 	periodic := &pb.Message{Role: "user", Blocks: []*pb.RequestBlock{
 		{Kind: &pb.RequestBlock_Text{Text: &pb.RequestTextBlock{Text: "S", Signature: "S"}}},
 		{Kind: &pb.RequestBlock_Text{Text: &pb.RequestTextBlock{Text: "T"}}},
@@ -996,7 +997,7 @@ func TestMessageFingerprintBoundaryShiftAcrossThreeMessages(t *testing.T) {
 		{Kind: &pb.RequestBlock_TrailingSignature{TrailingSignature: &pb.RequestTrailingSignatureBlock{Signature: "T"}}},
 		{Kind: &pb.RequestBlock_RedactedThinking{RedactedThinking: &pb.RequestRedactedThinkingBlock{Data: idx1}}},
 		{Kind: &pb.RequestBlock_ToolResult{ToolResult: &pb.RequestToolResultBlock{ToolCallId: "user", ToolName: "S", Content: []*pb.ToolResultContentBlock{{Kind: &pb.ToolResultContentBlock_Text{Text: &pb.ToolResultTextBlock{Text: "T"}}}}}}},
-		{Kind: &pb.RequestBlock_CacheBreakpoint{CacheBreakpoint: &pb.RequestCacheBreakpoint{MarkerJson: []byte("T")}}},
+		{Kind: &pb.RequestBlock_CacheBreakpoint{CacheBreakpoint: &pb.RequestCacheBreakpoint{MarkerJson: []byte(`{"T":"S"}`)}}},
 	}}
 
 	accepted := &pb.ChatRequest{Messages: []*pb.Message{

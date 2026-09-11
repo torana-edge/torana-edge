@@ -283,24 +283,28 @@ func TestConcurrentAccess(t *testing.T) {
 	}
 }
 
-func TestFailedFlushRemainsDirtyAndCanBeRetried(t *testing.T) {
+func TestFailedFlushDoesNotPublishCandidate(t *testing.T) {
 	root := t.TempDir()
+	goodPath := filepath.Join(root, "state.json")
+	s := newStore(t, Options{Path: goodPath})
+	if err := s.Set("plugin", "key", "committed"); err != nil {
+		t.Fatal(err)
+	}
 	blockedPath := filepath.Join(root, "existing-directory")
 	if err := os.Mkdir(blockedPath, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	s := newStore(t, Options{Path: ""})
 	s.path = blockedPath
 	if err := s.Set("plugin", "key", "newest"); err == nil {
 		t.Fatal("flush over an existing directory unexpectedly succeeded")
 	}
-	if !s.dirty {
-		t.Fatal("failed flush cleared dirty state")
+	if got, ok := s.Get("plugin", "key"); !ok || got != "committed" {
+		t.Fatalf("failed candidate became visible: %q (ok=%v)", got, ok)
 	}
 
-	s.path = filepath.Join(root, "state.json")
-	if err := s.flush(); err != nil {
-		t.Fatalf("retry flush: %v", err)
+	s.path = goodPath
+	if err := s.Set("plugin", "key", "newest"); err != nil {
+		t.Fatalf("new transaction after recovery: %v", err)
 	}
 	reloaded := newStore(t, Options{Path: s.path})
 	if got, ok := reloaded.Get("plugin", "key"); !ok || got != "newest" {

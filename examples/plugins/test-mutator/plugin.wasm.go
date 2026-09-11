@@ -62,7 +62,8 @@ func init() {
 			return sdk.PassResponse(), nil
 		}
 		var changed bool
-		for _, tc := range resp.Message.ToolCalls {
+		for _, block := range resp.Message.Blocks {
+			tc := block.GetToolCall()
 			if tc == nil {
 				continue
 			}

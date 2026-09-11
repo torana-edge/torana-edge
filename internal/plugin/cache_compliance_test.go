@@ -238,7 +238,7 @@ func TestProviderCacheFactsSurviveRealWASMToFinalWire(t *testing.T) {
 		{
 			name: "openai responses automatic cache controls", format: "openai",
 			request:   `{"model":"gpt","input":[{"role":"user","content":"hi"}],"prompt_cache_key":"session","prompt_cache_retention":"24h"}`,
-			wireFacts: []wireFact{{`"prompt_cache_key":"session"`, 1}, {`"prompt_cache_retention":"24h"`, 1}, {`"content":"hi [seen by test-mutator]"`, 1}},
+			wireFacts: []wireFact{{`"prompt_cache_key":"session"`, 1}, {`"prompt_cache_retention":"24h"`, 1}, {`"text":"hi [seen by test-mutator]"`, 1}, {`"type":"input_text"`, 1}},
 		},
 		{
 			name: "gemini external cache reference", format: "gemini",

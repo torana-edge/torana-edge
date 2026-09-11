@@ -66,6 +66,7 @@ func TestResponsesCustomToolStreamRoundTrip(t *testing.T) {
 		}
 	}
 	wantTypes := []string{
+		"response.created",
 		"response.output_item.added",
 		"response.custom_tool_call_input.delta",
 		"response.custom_tool_call_input.delta",
@@ -74,6 +75,35 @@ func TestResponsesCustomToolStreamRoundTrip(t *testing.T) {
 	}
 	if strings.Join(types, ",") != strings.Join(wantTypes, ",") {
 		t.Fatalf("types %v, want %v", types, wantTypes)
+	}
+}
+
+func TestSerializeResponsesStreamEmitsCompleteLifecycleOnce(t *testing.T) {
+	text := "hello"
+	events := make(chan engine.StreamEvent, 4)
+	events <- engine.StreamEvent{MessageStart: &engine.StreamMessageStart{Role: "assistant", ID: "resp_1", Model: "gpt-x"}}
+	events <- engine.StreamEvent{TextDelta: &text}
+	events <- engine.StreamEvent{Usage: &engine.StreamUsage{InputTokens: 3, OutputTokens: 2}}
+	events <- engine.StreamEvent{FinishReason: "stop"}
+	close(events)
+	ctx := context.WithValue(context.Background(), engine.ChatRequestKey, &engine.ChatRequest{OpenAIVariant: engine.OpenAIResponses})
+	var out bytes.Buffer
+	if err := (&StreamAdapter{}).SerializeStream(ctx, &out, events); err != nil {
+		t.Fatal(err)
+	}
+	wire := out.String()
+	for _, want := range []string{
+		"response.created", "response.output_item.added", "response.content_part.added",
+		"response.output_text.delta", "response.output_text.done", "response.content_part.done",
+		"response.output_item.done", `"id":"resp_1"`, `"model":"gpt-x"`,
+		`"output_index":0`, `"input_tokens":3`, `"output_tokens":2`,
+	} {
+		if !strings.Contains(wire, want) {
+			t.Errorf("wire missing %q:\n%s", want, wire)
+		}
+	}
+	if got := strings.Count(wire, "event: response.completed"); got != 1 {
+		t.Fatalf("response.completed count = %d, want 1:\n%s", got, wire)
 	}
 }
 

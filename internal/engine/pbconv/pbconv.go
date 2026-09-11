@@ -191,6 +191,10 @@ func ToPBStreamEvent(e *engine.StreamEvent) *pb.StreamEvent {
 				}},
 			},
 		}
+	} else if e.MessageStart != nil {
+		out.Event = &pb.StreamEvent_MessageStart{MessageStart: &pb.MessageStart{
+			Role: e.MessageStart.Role, Id: e.MessageStart.ID, Model: e.MessageStart.Model,
+		}}
 	} else if e.BlockStart != nil {
 		// Explicit non-tool content blocks map to their matching current ABI arm so the
 		// wire carries the full block topology: every content block opens with
@@ -368,6 +372,10 @@ func (t *BlockKindTracker) startNonTool(idx int, kind blockKind) error {
 func (t *BlockKindTracker) FromPBStreamEvent(e *pb.StreamEvent) (*engine.StreamEvent, error) {
 	out := &engine.StreamEvent{}
 	switch v := e.Event.(type) {
+	case *pb.StreamEvent_MessageStart:
+		if v.MessageStart != nil {
+			out.MessageStart = &engine.StreamMessageStart{Role: v.MessageStart.Role, ID: v.MessageStart.Id, Model: v.MessageStart.Model}
+		}
 	case *pb.StreamEvent_TextDelta:
 		out.TextDelta = &v.TextDelta
 	case *pb.StreamEvent_ThinkingDelta:
@@ -830,19 +838,22 @@ func FromPBChatResponse(r *pb.ChatResponse) *engine.ChatResponse {
 
 // toPBResponseMessage maps the canonical response message onto the wire.
 // ArgumentsJSON is copied, never decoded: the pb message outlives the engine
-// value the caller may keep mutating (the apply path rewrites argsJSON in
-// place), and aliasing would let that mutation change the accepted baseline.
-// Content is a *string, which Go strings make safe to alias — nothing can
-// mutate through it.
+// value the caller may keep mutating, and aliasing would let that mutation
+// change the accepted baseline.
 func toPBResponseMessage(m *engine.ResponseMessage) *pb.ResponseMessage {
-	out := &pb.ResponseMessage{Content: m.Content}
-	for _, tc := range m.ToolCalls {
-		out.ToolCalls = append(out.ToolCalls, &pb.ToolCall{
-			Id:            tc.ID,
-			Name:          tc.Name,
-			ArgumentsJson: cloneBytes(tc.ArgumentsJSON),
-			Signature:     tc.Signature,
-		})
+	out := &pb.ResponseMessage{}
+	for _, block := range m.Blocks {
+		switch {
+		case block.Text != nil:
+			out.Blocks = append(out.Blocks, &pb.ResponseBlock{Kind: &pb.ResponseBlock_Text{
+				Text: &pb.ResponseTextBlock{Text: block.Text.Text},
+			}})
+		case block.ToolCall != nil:
+			tc := block.ToolCall
+			out.Blocks = append(out.Blocks, &pb.ResponseBlock{Kind: &pb.ResponseBlock_ToolCall{ToolCall: &pb.ToolCall{
+				Id: tc.ID, Name: tc.Name, ArgumentsJson: cloneBytes(tc.ArgumentsJSON), Signature: tc.Signature,
+			}}})
+		}
 	}
 	return out
 }
@@ -852,20 +863,24 @@ func toPBResponseMessage(m *engine.ResponseMessage) *pb.ResponseMessage {
 // bytes a guest produced, and the returned engine value outlives the pb
 // message's ownership.
 func fromPBResponseMessage(m *pb.ResponseMessage) *engine.ResponseMessage {
-	out := &engine.ResponseMessage{Content: m.Content}
-	for _, tc := range m.ToolCalls {
-		if tc == nil {
-			// Defensive: the SDK refuses nil tool calls in validated results,
-			// but this conversion also runs on host-built inputs. A nil entry
-			// would panic downstream; skip it rather than crash the process.
+	out := &engine.ResponseMessage{}
+	for _, block := range m.Blocks {
+		if block == nil {
 			continue
 		}
-		out.ToolCalls = append(out.ToolCalls, engine.ResponseToolCall{
-			ID:            tc.Id,
-			Name:          tc.Name,
-			ArgumentsJSON: cloneBytes(tc.ArgumentsJson),
-			Signature:     tc.Signature,
-		})
+		switch kind := block.Kind.(type) {
+		case *pb.ResponseBlock_Text:
+			if kind.Text != nil {
+				out.Blocks = append(out.Blocks, engine.ResponseBlock{Text: &engine.ResponseTextBlock{Text: kind.Text.Text}})
+			}
+		case *pb.ResponseBlock_ToolCall:
+			if kind.ToolCall != nil {
+				tc := kind.ToolCall
+				out.Blocks = append(out.Blocks, engine.ResponseBlock{ToolCall: &engine.ResponseToolCall{
+					ID: tc.Id, Name: tc.Name, ArgumentsJSON: cloneBytes(tc.ArgumentsJson), Signature: tc.Signature,
+				}})
+			}
+		}
 	}
 	return out
 }

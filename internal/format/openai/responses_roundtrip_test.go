@@ -83,7 +83,12 @@ func TestResponsesOpaqueItemsSurviveKnownMessageMutation(t *testing.T) {
 	if err := json.Unmarshal(encoded, &got); err != nil {
 		t.Fatal(err)
 	}
-	if got.Input[0]["content"] != "changed" || got.Input[1]["type"] != "compaction" || got.Input[1]["encrypted_content"] != "opaque" || got.Input[2]["content"] != "after" {
+	firstContent, firstOK := got.Input[0]["content"].([]any)
+	lastContent, lastOK := got.Input[2]["content"].([]any)
+	if !firstOK || !lastOK || len(firstContent) != 1 || len(lastContent) != 1 ||
+		firstContent[0].(map[string]any)["text"] != "changed" ||
+		lastContent[0].(map[string]any)["text"] != "after" ||
+		got.Input[1]["type"] != "compaction" || got.Input[1]["encrypted_content"] != "opaque" {
 		t.Fatalf("unexpected mutated round trip: %s", encoded)
 	}
 }

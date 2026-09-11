@@ -154,6 +154,41 @@ func TestNonInferenceEndpointBypassesIRAndPlugins(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("empty auxiliary request never reached upstream")
 	}
+	if events := srv.feed.Snapshot(); len(events) != 0 {
+		t.Fatalf("auxiliary requests entered the inference feed: %+v", events)
+	}
+}
+
+func TestAuxiliaryErrorBypassesResponseHooksAndFeed(t *testing.T) {
+	requireWASM(t, "../../examples/plugins/test-trapper-response/plugin.wasm")
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = io.WriteString(w, `{"error":"not found"}`)
+	}))
+	defer upstream.Close()
+
+	providers := testProviderConfig(upstream.URL, "test", "openai")
+	providers.Plugins = provider.PluginsConfig{
+		Dir:             "../../examples/plugins",
+		Order:           []string{"test-trapper-response"},
+		AllowUnapproved: true,
+	}
+	srv, err := New(Config{Port: "0", Providers: providers})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer srv.Shutdown(context.Background())
+
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet,
+		"http://localhost/provider/test/v1/models", nil))
+	if rec.Code != http.StatusNotFound || rec.Body.String() != `{"error":"not found"}` {
+		t.Fatalf("auxiliary error response changed: status=%d body=%q", rec.Code, rec.Body.String())
+	}
+	if events := srv.feed.Snapshot(); len(events) != 0 {
+		t.Fatalf("auxiliary error invoked inference accounting: %+v", events)
+	}
 }
 
 func TestAuxiliaryEndpointsBypassIRAcrossFormats(t *testing.T) {

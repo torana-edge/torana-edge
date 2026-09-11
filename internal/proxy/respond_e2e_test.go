@@ -12,8 +12,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/torana-edge/torana-edge/internal/engine"
 	"github.com/torana-edge/torana-edge/internal/format"
 	"github.com/torana-edge/torana-edge/internal/provider"
+	"github.com/torana-edge/torana-edge/internal/wasm"
 
 	_ "github.com/torana-edge/torana-edge/internal/format/anthropic"
 	_ "github.com/torana-edge/torana-edge/internal/format/gemini"
@@ -85,6 +87,29 @@ func respondReq(formatName string, stream bool) string {
 			s += `,"stream":true`
 		}
 		return s + `}`
+	}
+}
+
+func TestRenderRespondUsesResponsesEnvelope(t *testing.T) {
+	f := format.Lookup("openai")
+	chat := &engine.ChatRequest{Model: "gpt-x", OpenAIVariant: engine.OpenAIResponses}
+	got := renderRespond(f, chat, &wasm.RespondVerdict{Content: "direct"})
+	var body map[string]any
+	if err := json.Unmarshal(got.Body, &body); err != nil {
+		t.Fatal(err)
+	}
+	if body["object"] != "response" || body["status"] != "completed" || body["output"] == nil {
+		t.Fatalf("not a Responses envelope: %s", got.Body)
+	}
+	if _, exists := body["choices"]; exists {
+		t.Fatalf("Responses endpoint received Chat Completions envelope: %s", got.Body)
+	}
+
+	chat.Stream = true
+	stream := renderRespond(f, chat, &wasm.RespondVerdict{Content: "direct"})
+	wire := string(stream.Body)
+	if !strings.Contains(wire, "event: response.created") || !strings.Contains(wire, "event: response.completed") || strings.Contains(wire, "chat.completion.chunk") {
+		t.Fatalf("not a Responses stream:\n%s", wire)
 	}
 }
 

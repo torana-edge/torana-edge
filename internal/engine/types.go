@@ -106,15 +106,16 @@ type ToolDef struct {
 // Consumers switch on the non-nil field.
 type StreamEvent struct {
 	// Exactly one field is non-nil per event.
-	TextDelta     *string        // text content fragment
-	ThinkingDelta *string        // thinking/reasoning text fragment
-	BlockStart    *BlockStart    // opens an explicit text/thinking/provider content block
-	BlockStop     *BlockStop     // closes the text/thinking/provider block opened at the same index
-	ToolCallStart *ToolCallStart // new tool call beginning
-	ToolCallDelta *ToolCallDelta // arguments JSON fragment (string)
-	ToolCallEnd   *ToolCallEnd   // tool call arguments complete
-	FinishReason  string         // "stop", "tool_calls", "length", "error"
-	Usage         *StreamUsage   // token usage from stream (OpenAI final chunk, Anthropic usage event)
+	TextDelta     *string             // text content fragment
+	ThinkingDelta *string             // thinking/reasoning text fragment
+	BlockStart    *BlockStart         // opens an explicit text/thinking/provider content block
+	BlockStop     *BlockStop          // closes the text/thinking/provider block opened at the same index
+	MessageStart  *StreamMessageStart // provider response identity and assistant message start
+	ToolCallStart *ToolCallStart      // new tool call beginning
+	ToolCallDelta *ToolCallDelta      // arguments JSON fragment (string)
+	ToolCallEnd   *ToolCallEnd        // tool call arguments complete
+	FinishReason  string              // "stop", "tool_calls", "length", "error"
+	Usage         *StreamUsage        // token usage from stream (OpenAI final chunk, Anthropic usage event)
 	Error         *StreamError
 
 	// SignatureDelta carries an opaque provider signature (e.g. Gemini
@@ -123,6 +124,12 @@ type StreamEvent struct {
 	// an "exactly one field" content event; adapters that don't understand it
 	// ignore it.
 	SignatureDelta *string
+}
+
+type StreamMessageStart struct {
+	Role  string
+	ID    string
+	Model string
 }
 
 // BlockKind classifies an explicit non-tool content block.
@@ -214,27 +221,21 @@ type StreamUsage struct {
 
 // --- Response side ---
 
-// ResponseMessage is the assistant's reply in a completed response, in the
-// narrow shape the host can actually apply: presence-preserving content and
-// in-place tool-call mutations only. It deliberately is not Message — request
-// semantics (role, thinking, content parts, cache control) have no writable
-// response counterpart, and reusing Message would claim a writable surface
-// the host does not deliver.
-//
-// The relative constraints (content presence identical to the accepted
-// response, fixed tool-call cardinality and positional order) are enforced by
-// the host pipeline per plugin before any replacement is accepted, and
-// re-verified at the apply boundary.
+// ResponseMessage is the assistant's ordered body in a completed response.
+// It deliberately exposes only response facts the host can write back.
 type ResponseMessage struct {
-	// Content is the assistant's text with proto presence preserved: nil
-	// means the provider body has no writable text slot, a non-nil pointer
-	// (possibly to "") means a present text part. Present-empty is not
-	// absent, and a plugin cannot change presence — only the value.
-	Content *string
-	// ToolCalls carries the response's tool invocations in provider order.
-	// Fixed cardinality: a plugin may mutate element N in place but cannot
-	// add, remove, or reorder calls. ID and Signature are host-owned.
-	ToolCalls []ResponseToolCall
+	Blocks []ResponseBlock
+}
+
+// ResponseBlock is one provider-visible response position. Exactly one arm is
+// present. Cardinality, order and arm selection are host-owned.
+type ResponseBlock struct {
+	Text     *ResponseTextBlock
+	ToolCall *ResponseToolCall
+}
+
+type ResponseTextBlock struct {
+	Text string
 }
 
 // ResponseToolCall is one tool invocation in a completed response.

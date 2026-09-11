@@ -333,7 +333,7 @@ func rejectOpenAIProjection(u *engine.UnknownBlock) error {
 		return fmt.Errorf("openai: unknown payload duplicates canonical member %q (projection invariant)", "type")
 	}
 	switch u.Kind {
-	case "text", "tool_calls", "tool_call":
+	case "text", "input_text", "output_text", "tool_calls", "tool_call":
 		return fmt.Errorf("openai: unknown block kind %q names a modeled arm (projection invariant)", u.Kind)
 	}
 	return nil
@@ -487,9 +487,14 @@ func responsesItemsFromMessages(messages []engine.Message) ([]any, error) {
 				items = append(items, map[string]any{"type": "function_call_output", "call_id": b.ToolResult.ToolCallID, "output": text})
 			}
 		case engine.RoleAssistant:
+			var content []any
 			for _, b := range m.Blocks {
 				switch {
 				case b.ToolUse != nil:
+					if len(content) != 0 {
+						items = append(items, messageItem(string(m.Role), content))
+						content = nil
+					}
 					if b.ToolUse.InvocationKind == engine.ToolInvocationFreeform {
 						if b.ToolUse.InputText == nil {
 							return nil, fmt.Errorf("openai responses: free-form tool call has no input")
@@ -502,7 +507,7 @@ func responsesItemsFromMessages(messages []engine.Message) ([]any, error) {
 						})
 					}
 				case b.Text != nil:
-					items = append(items, messageItem(string(m.Role), b.Text.Text))
+					content = append(content, map[string]any{"type": "output_text", "text": b.Text.Text})
 				case b.Unknown != nil:
 					if err := rejectOpenAIProjection(b.Unknown); err != nil {
 						return nil, err
@@ -516,7 +521,7 @@ func responsesItemsFromMessages(messages []engine.Message) ([]any, error) {
 					for k, v := range payload {
 						block[k] = json.RawMessage(v)
 					}
-					items = append(items, messageItem(string(m.Role), block))
+					content = append(content, block)
 				case b.Thinking != nil:
 					// Responses has no reasoning item in the request input;
 					// fail closed rather than drop.
@@ -525,11 +530,15 @@ func responsesItemsFromMessages(messages []engine.Message) ([]any, error) {
 					return nil, fmt.Errorf("openai responses: block kind not representable in input items")
 				}
 			}
+			if len(content) != 0 {
+				items = append(items, messageItem(string(m.Role), content))
+			}
 		default:
+			var content []any
 			for _, b := range m.Blocks {
 				switch {
 				case b.Text != nil:
-					items = append(items, messageItem(string(m.Role), b.Text.Text))
+					content = append(content, map[string]any{"type": "input_text", "text": b.Text.Text})
 				case b.Unknown != nil:
 					if err := rejectOpenAIProjection(b.Unknown); err != nil {
 						return nil, err
@@ -543,10 +552,13 @@ func responsesItemsFromMessages(messages []engine.Message) ([]any, error) {
 					for k, v := range payload {
 						block[k] = json.RawMessage(v)
 					}
-					items = append(items, messageItem(string(m.Role), block))
+					content = append(content, block)
 				default:
 					return nil, fmt.Errorf("openai responses: %s message with a non-text/non-unknown block", m.Role)
 				}
+			}
+			if len(content) != 0 {
+				items = append(items, messageItem(string(m.Role), content))
 			}
 		}
 	}
@@ -815,7 +827,7 @@ func openAIPartToBlock(p json.RawMessage) (engine.Block, error) {
 	if err := json.Unmarshal(p, &probe); err != nil {
 		return engine.Block{}, fmt.Errorf("content part: %w", err)
 	}
-	if probe.Type == "text" {
+	if probe.Type == "text" || probe.Type == "input_text" || probe.Type == "output_text" {
 		// The provider-arm matrix: a DECLARED text arm must actually carry
 		// its required member — {"type":"text"} with no text member is
 		// malformed, not an implicit empty text (the explicit empty text is
@@ -829,7 +841,7 @@ func openAIPartToBlock(p json.RawMessage) (engine.Block, error) {
 			return engine.Block{}, fmt.Errorf("content part: %w", err)
 		}
 		if t.Text == nil {
-			return engine.Block{}, fmt.Errorf("openai chat: text part without a text member")
+			return engine.Block{}, fmt.Errorf("openai: %s part without a text member", probe.Type)
 		}
 		return engine.Block{Text: &engine.TextBlock{Text: *t.Text}}, nil
 	}

@@ -39,7 +39,7 @@ func TestMetricFixtureEmitMetricABI(t *testing.T) {
 	content := "hi"
 	resp := &engine.ChatResponse{
 		Model:          chat.Model,
-		Message:        &engine.ResponseMessage{Content: &content},
+		Message:        engineResponseMessage(&content),
 		UpstreamStatus: 200,
 	}
 	if _, err := pp.RunAfterResponse(context.Background(), 1, resp, true); err != nil {

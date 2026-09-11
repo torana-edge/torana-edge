@@ -35,7 +35,12 @@ func init() {
 			rawMarker = "raw=pristine"
 		}
 		content := fmt.Sprintf("orig-model=%s %s", origModel, rawMarker)
-		resp.Message.Content = &content
-		return sdk.ReplaceResponse(resp), nil
+		for _, block := range resp.Message.Blocks {
+			if text := block.GetText(); text != nil {
+				text.Text = content
+				return sdk.ReplaceResponse(resp), nil
+			}
+		}
+		return sdk.PassResponse(), nil
 	})
 }

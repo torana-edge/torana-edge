@@ -10,9 +10,8 @@ import (
 
 // validateResponseReplacement reports whether a plugin's replace_response output
 // is a valid mutation of the accepted response. These are RELATIVE constraints
-// the SDK cannot check (it sees the replacement alone): content presence is
-// host-owned (fixed across accepted->output), tool_calls has fixed cardinality
-// with positional correspondence, and the observed provider/host facts (model,
+// the SDK cannot check (it sees the replacement alone): blocks have fixed
+// cardinality, arm topology, and positional correspondence, and the observed provider/host facts (model,
 // id, usage, signatures) are immutable under plugin mutation.
 func validateResponseReplacement(current, replacement *pbv1.ChatResponse) error {
 	// A nil replacement is pass-through, not a mutation to judge.
@@ -63,18 +62,10 @@ func validateResponseReplacement(current, replacement *pbv1.ChatResponse) error 
 	if current.Message == nil { // both messages absent: message-relative checks below have nothing to compare
 		return nil
 	}
-	// Content presence is host-owned: the provider body either has a writable
-	// text slot or it does not, and no plugin changes that. Only the value may
-	// change (present-empty and present-nonempty are the same presence).
-	if (replacement.Message.Content != nil) != (current.Message.Content != nil) {
-		return fmt.Errorf("changed content presence")
+	if len(replacement.Message.Blocks) != len(current.Message.Blocks) {
+		return fmt.Errorf("changed response-block cardinality")
 	}
-	// Tool calls have fixed cardinality with positional correspondence: output
-	// element N mutates accepted element N, so the counts must agree.
-	if len(replacement.Message.ToolCalls) != len(current.Message.ToolCalls) {
-		return fmt.Errorf("changed tool-call cardinality")
-	}
-	// Positional tool calls: id is the provider's identity for the call and is
+	// Positional blocks cannot change arm. For tool calls, id is the provider's identity for the call and is
 	// host-owned; name and arguments are assistant-writable in place. The bound
 	// signature is host-owned with TWO exceptions — clearing it is the prescribed
 	// response to changing the content it covers, and leaving it UNCHANGED over
@@ -84,15 +75,31 @@ func validateResponseReplacement(current, replacement *pbv1.ChatResponse) error 
 	// outright provenance fraud: dropping the token over unchanged content,
 	// replacing it with another non-empty token, or minting one where the
 	// provider sent none.
-	for i, cur := range current.Message.ToolCalls {
-		rep := replacement.Message.ToolCalls[i]
-		if rep.Id != cur.Id {
-			return fmt.Errorf("tool call %d changed host-owned id", i)
+	for i, curBlock := range current.Message.Blocks {
+		repBlock := replacement.Message.Blocks[i]
+		if curBlock == nil || repBlock == nil {
+			return fmt.Errorf("response block %d is nil", i)
 		}
-		nameOrArgsChanged := rep.Name != cur.Name || !bytes.Equal(rep.ArgumentsJson, cur.ArgumentsJson)
-		class := outboundpolicy.ClassifySignatureMutation(cur.Signature, rep.Signature, nameOrArgsChanged)
-		if !class.Allowed() && class != outboundpolicy.SignatureStale {
-			return fmt.Errorf("tool call %d signature %s", i, class)
+		switch cur := curBlock.Kind.(type) {
+		case *pbv1.ResponseBlock_Text:
+			if _, ok := repBlock.Kind.(*pbv1.ResponseBlock_Text); !ok {
+				return fmt.Errorf("response block %d changed arm", i)
+			}
+		case *pbv1.ResponseBlock_ToolCall:
+			rep, ok := repBlock.Kind.(*pbv1.ResponseBlock_ToolCall)
+			if !ok || cur.ToolCall == nil || rep.ToolCall == nil {
+				return fmt.Errorf("response block %d changed arm", i)
+			}
+			if rep.ToolCall.Id != cur.ToolCall.Id {
+				return fmt.Errorf("tool call at block %d changed host-owned id", i)
+			}
+			nameOrArgsChanged := rep.ToolCall.Name != cur.ToolCall.Name || !bytes.Equal(rep.ToolCall.ArgumentsJson, cur.ToolCall.ArgumentsJson)
+			class := outboundpolicy.ClassifySignatureMutation(cur.ToolCall.Signature, rep.ToolCall.Signature, nameOrArgsChanged)
+			if !class.Allowed() && class != outboundpolicy.SignatureStale {
+				return fmt.Errorf("tool call at block %d signature %s", i, class)
+			}
+		default:
+			return fmt.Errorf("response block %d has unknown arm %T", i, cur)
 		}
 	}
 	return nil
@@ -113,11 +120,16 @@ func clearStaleSignatures(current, replacement *pbv1.ChatResponse) {
 	if current.Message == nil || replacement.Message == nil {
 		return
 	}
-	for i := range replacement.Message.ToolCalls {
-		if i >= len(current.Message.ToolCalls) {
+	for i := range replacement.Message.Blocks {
+		if i >= len(current.Message.Blocks) {
 			return // unreachable post-validation; defensive
 		}
-		cur, rep := current.Message.ToolCalls[i], replacement.Message.ToolCalls[i]
+		curBlock, curOK := current.Message.Blocks[i].Kind.(*pbv1.ResponseBlock_ToolCall)
+		repBlock, repOK := replacement.Message.Blocks[i].Kind.(*pbv1.ResponseBlock_ToolCall)
+		if !curOK || !repOK {
+			continue
+		}
+		cur, rep := curBlock.ToolCall, repBlock.ToolCall
 		if cur == nil || rep == nil || rep.Signature == "" {
 			continue
 		}

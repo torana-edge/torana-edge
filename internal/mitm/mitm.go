@@ -98,9 +98,23 @@ func New(cfg provider.MITMConfig, toranaHandler http.Handler) (*Server, error) {
 
 // ListenAndServe starts the CONNECT proxy and blocks until it stops.
 func (s *Server) ListenAndServe() error {
+	ln, err := s.Listen()
+	if err != nil {
+		return err
+	}
+	if ln == nil {
+		return nil
+	}
+	return s.Serve(ln)
+}
+
+// Listen binds the configured address synchronously. Separating binding from
+// serving lets live reconfiguration prove a replacement is usable before it
+// publishes success or tears down a listener on a different address.
+func (s *Server) Listen() (net.Listener, error) {
 	ln, err := net.Listen("tcp", s.cfg.Listen)
 	if err != nil {
-		return fmt.Errorf("mitm: listen %s: %w", s.cfg.Listen, err)
+		return nil, fmt.Errorf("mitm: listen %s: %w", s.cfg.Listen, err)
 	}
 	s.mu.Lock()
 	if s.closed {
@@ -108,10 +122,15 @@ func (s *Server) ListenAndServe() error {
 		// nobody can stop, so drop it and exit cleanly instead.
 		s.mu.Unlock()
 		ln.Close()
-		return nil
+		return nil, nil
 	}
 	s.listener = ln
 	s.mu.Unlock()
+	return ln, nil
+}
+
+// Serve serves a listener previously returned by Listen.
+func (s *Server) Serve(ln net.Listener) error {
 	log.Printf("mitm: CONNECT proxy on %s; intercepting %d host(s)", s.cfg.Listen, len(s.cfg.Hosts))
 	srv := &http.Server{
 		Handler:      http.HandlerFunc(s.handleConnect),

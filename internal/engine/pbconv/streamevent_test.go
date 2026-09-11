@@ -687,18 +687,19 @@ func TestProviderKindPassesThroughVerbatim(t *testing.T) {
 // response type at all, so this mapping is new surface rather than a port, and
 // a field silently dropped here reproduces the v1 failure it exists to fix.
 func TestChatResponseRoundTrips(t *testing.T) {
-	content := "here you go"
 	in := &engine.ChatResponse{
 		Model:        "claude-opus-5",
 		ID:           "msg_1",
 		FinishReason: "tool_use",
 		Message: &engine.ResponseMessage{
-			Content: &content,
-			ToolCalls: []engine.ResponseToolCall{{
-				ID: "call_1", Name: "read_file",
-				ArgumentsJSON: []byte(`{"path":"/a"}`),
-				Signature:     "sig",
-			}},
+			Blocks: []engine.ResponseBlock{
+				{Text: &engine.ResponseTextBlock{Text: "here you go"}},
+				{ToolCall: &engine.ResponseToolCall{
+					ID: "call_1", Name: "read_file",
+					ArgumentsJSON: []byte(`{"path":"/a"}`),
+					Signature:     "sig",
+				}},
+			},
 		},
 		Usage:              &engine.StreamUsage{InputTokens: 10, OutputTokens: 20, CacheReadTokens: 3, CacheWriteTokens: 4},
 		UpstreamStatus:     200,
@@ -718,13 +719,13 @@ func TestChatResponseRoundTrips(t *testing.T) {
 	if got.Message == nil {
 		t.Fatal("the assistant reply was dropped — this is the v1 bug")
 	}
-	if got.Message.Content == nil || *got.Message.Content != "here you go" {
-		t.Errorf("message content lost: %+v", got.Message.Content)
+	if len(got.Message.Blocks) != 2 || got.Message.Blocks[0].Text == nil || got.Message.Blocks[0].Text.Text != "here you go" {
+		t.Errorf("message text block lost: %+v", got.Message.Blocks)
 	}
-	if len(got.Message.ToolCalls) != 1 {
-		t.Fatalf("tool calls lost: %+v", got.Message.ToolCalls)
+	if got.Message.Blocks[1].ToolCall == nil {
+		t.Fatalf("tool call lost: %+v", got.Message.Blocks)
 	}
-	tc := got.Message.ToolCalls[0]
+	tc := *got.Message.Blocks[1].ToolCall
 	if tc.ID != "call_1" || tc.Name != "read_file" || tc.Signature != "sig" {
 		t.Errorf("tool call fields lost: %+v", tc)
 	}
@@ -747,16 +748,16 @@ func TestPBChatResponsePreservesRawArgumentsBytes(t *testing.T) {
 	raw := []byte(`{"zzz":1,"aaa":9007199254740993}`)
 	in := &engine.ChatResponse{
 		Message: &engine.ResponseMessage{
-			ToolCalls: []engine.ResponseToolCall{{
+			Blocks: []engine.ResponseBlock{{ToolCall: &engine.ResponseToolCall{
 				ID: "call_9", Name: "t", ArgumentsJSON: raw, Signature: "sig-9",
-			}},
+			}}},
 		},
 	}
 	got := FromPBChatResponse(ToPBChatResponse(in))
-	if got == nil || got.Message == nil || len(got.Message.ToolCalls) != 1 {
+	if got == nil || got.Message == nil || len(got.Message.Blocks) != 1 || got.Message.Blocks[0].ToolCall == nil {
 		t.Fatalf("round trip lost the tool call: %+v", got)
 	}
-	tc := got.Message.ToolCalls[0]
+	tc := *got.Message.Blocks[0].ToolCall
 	if !bytes.Equal(tc.ArgumentsJSON, raw) {
 		t.Errorf("arguments re-encoded: got %q want %q", tc.ArgumentsJSON, raw)
 	}
@@ -765,23 +766,20 @@ func TestPBChatResponsePreservesRawArgumentsBytes(t *testing.T) {
 	}
 }
 
-// Absence and present-empty are different facts: absent means the provider
-// body has no writable text slot, present-empty means an empty text part. A
-// plugin cannot change presence, so the conversion must preserve it exactly.
-func TestPBChatResponseContentPresence(t *testing.T) {
+// No text block and an explicit empty text block are different facts.
+func TestPBChatResponseTextBlockPresence(t *testing.T) {
 	got := FromPBChatResponse(ToPBChatResponse(&engine.ChatResponse{
 		Message: &engine.ResponseMessage{},
 	}))
-	if got.Message == nil || got.Message.Content != nil {
-		t.Fatalf("absent content became present: %+v", got.Message)
+	if got.Message == nil || len(got.Message.Blocks) != 0 {
+		t.Fatalf("absent text block became present: %+v", got.Message)
 	}
 
-	empty := ""
 	got = FromPBChatResponse(ToPBChatResponse(&engine.ChatResponse{
-		Message: &engine.ResponseMessage{Content: &empty},
+		Message: &engine.ResponseMessage{Blocks: []engine.ResponseBlock{{Text: &engine.ResponseTextBlock{}}}},
 	}))
-	if got.Message == nil || got.Message.Content == nil || *got.Message.Content != "" {
-		t.Fatalf("present-empty content lost: %+v", got.Message)
+	if got.Message == nil || len(got.Message.Blocks) != 1 || got.Message.Blocks[0].Text == nil || got.Message.Blocks[0].Text.Text != "" {
+		t.Fatalf("present-empty text block lost: %+v", got.Message)
 	}
 }
 

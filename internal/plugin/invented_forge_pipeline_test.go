@@ -27,7 +27,7 @@ func TestRunAfterResponseInventedContentAccepted(t *testing.T) {
 
 	original := "hi"
 	resp := &engine.ChatResponse{
-		Message: &engine.ResponseMessage{Content: &original},
+		Message: engineResponseMessage(&original),
 	}
 	out, err := pp.RunAfterResponse(context.Background(), 80, resp, true)
 	if err != nil {
@@ -36,7 +36,7 @@ func TestRunAfterResponseInventedContentAccepted(t *testing.T) {
 	if out == nil || out.Message == nil {
 		t.Fatal("result lost the assistant message")
 	}
-	if got := *out.Message.Content; got != "invented" {
+	if got := out.Message.Blocks[0].Text.Text; got != "invented" {
 		t.Errorf("content = %q, want %q (fixture's replacement was not applied)", got, "invented")
 	}
 }
@@ -50,7 +50,7 @@ func TestRunAfterResponseInventedContentPresenceRejected(t *testing.T) {
 	// Message present but Content absent: the provider body has no writable
 	// text slot, so "invented" would fabricate one.
 	resp := &engine.ChatResponse{
-		Message: &engine.ResponseMessage{Content: nil},
+		Message: engineResponseMessage(nil),
 	}
 	out, err := pp.RunAfterResponse(context.Background(), 81, resp, true)
 	if err != nil {
@@ -59,8 +59,8 @@ func TestRunAfterResponseInventedContentPresenceRejected(t *testing.T) {
 	if out == nil || out.Message == nil {
 		t.Fatal("result lost the assistant message")
 	}
-	if out.Message.Content != nil {
-		t.Errorf("content was invented where the provider had none: %q", *out.Message.Content)
+	if len(out.Message.Blocks) != 0 {
+		t.Errorf("content was invented where the provider had none: %+v", out.Message.Blocks)
 	}
 }
 
@@ -94,7 +94,7 @@ func TestRunAfterResponseInventedContentBlockAttributed(t *testing.T) {
 	// Content absent: the fixture's invented slot is a violation, which is
 	// what block mode must surface.
 	resp := &engine.ChatResponse{
-		Message: &engine.ResponseMessage{Content: nil},
+		Message: engineResponseMessage(nil),
 	}
 	out, err := pp.RunAfterResponse(context.Background(), 82, resp, true)
 	if err == nil {
@@ -132,13 +132,10 @@ func TestRunAfterResponseForgeRejectedNoPoison(t *testing.T) {
 
 	original := "hi"
 	resp := &engine.ChatResponse{
-		Message: &engine.ResponseMessage{
-			Content: &original,
-			ToolCalls: []engine.ResponseToolCall{
-				{ID: "call_a", Name: "alpha", ArgumentsJSON: []byte(`{"a":1}`)},
-				{ID: "call_b", Name: "beta", ArgumentsJSON: []byte(`{"b":2}`)},
-			},
-		},
+		Message: engineResponseMessage(&original,
+			engine.ResponseToolCall{ID: "call_a", Name: "alpha", ArgumentsJSON: []byte(`{"a":1}`)},
+			engine.ResponseToolCall{ID: "call_b", Name: "beta", ArgumentsJSON: []byte(`{"b":2}`)},
+		),
 	}
 	out, err := pp.RunAfterResponse(context.Background(), 83, resp, true)
 	if err != nil {
@@ -147,13 +144,14 @@ func TestRunAfterResponseForgeRejectedNoPoison(t *testing.T) {
 	if out == nil || out.Message == nil {
 		t.Fatal("result lost the assistant message")
 	}
-	if len(out.Message.ToolCalls) != 2 {
-		t.Fatalf("tool-call count = %d, want 2", len(out.Message.ToolCalls))
+	tools := engineResponseTools(out.Message)
+	if len(tools) != 2 {
+		t.Fatalf("tool-call count = %d, want 2", len(tools))
 	}
 	// The mutator rewrote BOTH calls, which proves the chain ran normally —
 	// the poison check is the host-owned fields below.
 	wantArgs := `{"mutated_by":"test-mutator"}`
-	for i, tc := range out.Message.ToolCalls {
+	for i, tc := range tools {
 		if string(tc.ArgumentsJSON) != wantArgs {
 			t.Errorf("tool call %d arguments = %s, want %s", i, tc.ArgumentsJSON, wantArgs)
 		}
@@ -162,10 +160,10 @@ func TestRunAfterResponseForgeRejectedNoPoison(t *testing.T) {
 	// forged-id / forged-sig were refused, not applied.
 	wantIDs := []string{"call_a", "call_b"}
 	for i, wantID := range wantIDs {
-		if got := out.Message.ToolCalls[i].ID; got != wantID {
+		if got := tools[i].ID; got != wantID {
 			t.Errorf("tool call %d id = %q, want %q (forged id leaked)", i, got, wantID)
 		}
-		if got := out.Message.ToolCalls[i].Signature; got != "" {
+		if got := tools[i].Signature; got != "" {
 			t.Errorf("tool call %d signature = %q, want empty (forged signature leaked)", i, got)
 		}
 	}
@@ -198,12 +196,9 @@ func TestRunAfterResponseForgeBlockAttributed(t *testing.T) {
 
 	original := "hi"
 	resp := &engine.ChatResponse{
-		Message: &engine.ResponseMessage{
-			Content: &original,
-			ToolCalls: []engine.ResponseToolCall{
-				{ID: "call_a", Name: "alpha", ArgumentsJSON: []byte(`{"a":1}`)},
-			},
-		},
+		Message: engineResponseMessage(&original,
+			engine.ResponseToolCall{ID: "call_a", Name: "alpha", ArgumentsJSON: []byte(`{"a":1}`)},
+		),
 	}
 	out, err := pp.RunAfterResponse(context.Background(), 84, resp, true)
 	if err == nil {
