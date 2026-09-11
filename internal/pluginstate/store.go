@@ -8,8 +8,8 @@
 //     env.shared_cache_* is the deliberate shared flat keyspace.
 //
 // Nothing existed for state a plugin must still have after the proxy restarts:
-// a cache-warming plugin's stored prefixes, a rate-limiter's counters, an
-// index's last-sync marker. This is that.
+// a cache-warming plugin's stored prefixes, an index's last-sync marker, a
+// digest of the last configuration a plugin acted on. This is that.
 //
 // Two differences from both cache families are deliberate:
 //
@@ -23,7 +23,23 @@
 // State is written to a single JSON file, replaced atomically. This suits the
 // expected shape — tens to hundreds of keys, written occasionally, read on
 // startup — and keeps the whole store recoverable by hand with a text editor.
-// It is explicitly not built for high write rates.
+//
+// It is explicitly not built for high write rates, and the cost is worth
+// knowing before you design around it. EVERY Set re-marshals the whole store,
+// writes a temp file, fsyncs it, renames it, and fsyncs the directory. So the
+// cost of one write scales with the size of the store, not with the value
+// written, and a plugin that stores a lot makes every other plugin's writes
+// slower. Measured with 500 keys resident:
+//
+//	Set, durable      ~340 µs   97 KB   537 allocs
+//	Set, memory-only   ~25 µs   42 KB     8 allocs
+//
+// The disk transaction is roughly nine tenths of that. A per-request Set is
+// therefore the wrong shape for this package — that is not a tuning gap, it is
+// what "replaced atomically" costs — so this doc no longer offers a
+// rate-limiter's counters as an example. Keep per-request counters in
+// env.cache_*, which is what that is for, and use this for the state that has
+// to survive a restart.
 package pluginstate
 
 import (
