@@ -472,10 +472,20 @@ func TestAuthIntegrationEscapedEnvelopeByteExact(t *testing.T) {
 }
 
 // TestAuthIntegrationNoOverrideFallbacks — unwired and advisory outcomes
-// produce NO identity verdict; the host fallback is the EXACT Authorization
-// header. Provider keys, JWT-shaped bearers, and non-token credentials never
-// call the verifier. Callback bodies never call t.Fatal; zero-call rows assert
-// count==0 from the test goroutine. Authoritative domain rejection is covered
+// produce NO identity verdict, so the host derives one itself: the canonical
+// credential header NAME, a NUL, then the header's value. The name is part of
+// it so the same text under two different authentication schemes cannot share
+// a rate-limit bucket, which is why the fallback is not simply the header
+// value (see callerCredentials.rateIdentity).
+//
+// It is not Authorization-only either. The header list is ordered, and the
+// X-Api-Key row below covers the case where a caller presents a credential the
+// plugin does not recognise: there is still no identity verdict, and the host
+// still derives an identity — from that header instead.
+//
+// Provider keys, JWT-shaped bearers, and non-token credentials never call the
+// verifier. Callback bodies never call t.Fatal; zero-call rows assert count==0
+// from the test goroutine. Authoritative domain rejection is covered
 // separately below: it must never enter this fallback path.
 func TestAuthIntegrationNoOverrideFallbacks(t *testing.T) {
 	for name, tc := range map[string]struct {
@@ -537,6 +547,18 @@ func TestAuthIntegrationNoOverrideFallbacks(t *testing.T) {
 			wantID:     callerIdentity("X-Api-Key", "plain-secret"), // no plugin identity, so the host derives one from the credential
 			wantVerify: 0,
 		},
+		// No credential at all, which is the only way to reach an empty
+		// identity now that every recognised credential header derives one.
+		// The row below it used to cover this, before X-Api-Key started
+		// deriving an identity of its own.
+		"no credential falls back to the default bucket": {
+			opts: authEnvOptions{wire: func() wasm.ExtensionResult {
+				return okProfile("t1", "tm1", "u1")
+			}},
+			headers:    map[string]string{},
+			wantID:     "",
+			wantVerify: 0,
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			post, identities, verdicts, verifier, limiterKeys, _ := authEnv(t, tc.opts)
@@ -557,8 +579,9 @@ func TestAuthIntegrationNoOverrideFallbacks(t *testing.T) {
 			}
 			wantBucket := hashIdentity(tc.wantID)
 			if tc.wantID == "" {
-				// The host's default identity when no verdict applies and no
-				// Authorization header is present is the literal "default".
+				// With no verdict and no recognised credential header at all,
+				// rateIdentity returns "" and the limiter keys on the literal
+				// "default" — every anonymous caller shares one bucket.
 				wantBucket = hashIdentity("default")
 			}
 			assertBucketKeys(t, limiterKeys(), wantBucket)
