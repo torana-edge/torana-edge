@@ -3,29 +3,29 @@
  * Website-aligned day/night palette; local variable fonts.
  */
 :root {
-  color-scheme: dark;
+  color-scheme: light dark;
 
-  --color-paper: oklch(13% 0.018 220);
-  --color-paper-2: oklch(17% 0.02 220);
-  --color-paper-3: oklch(22% 0.022 220);
-  --color-paper-raised: oklch(26% 0.022 220);
-  --color-ink: oklch(95% 0.01 205);
-  --color-ink-2: oklch(76% 0.015 210);
-  --color-muted: oklch(70% 0.016 215);
-  --color-faint: oklch(70% 0.016 215);
-  --color-rule: oklch(29% 0.022 215);
-  --color-rule-strong: oklch(48% 0.03 210);
-  --color-accent: oklch(78% 0.14 195);
-  --color-accent-soft: oklch(25% 0.035 195);
-  --color-accent-ink: oklch(14% 0.025 220);
-  --color-focus: oklch(14% 0.03 250);
-  --color-focus-outer: oklch(94% 0.025 95);
-  --color-success: oklch(76% 0.13 150);
-  --color-success-soft: oklch(28% 0.06 155);
-  --color-warning: oklch(84% 0.15 85);
-  --color-warning-soft: oklch(28% 0.055 85);
-  --color-danger: oklch(70% 0.17 28);
-  --color-danger-soft: oklch(28% 0.065 25);
+  --color-paper: light-dark(oklch(98% 0.008 205), oklch(13% 0.018 220));
+  --color-paper-2: light-dark(oklch(95% 0.012 205), oklch(17% 0.02 220));
+  --color-paper-3: light-dark(oklch(91% 0.014 205), oklch(22% 0.022 220));
+  --color-paper-raised: light-dark(oklch(88% 0.017 205), oklch(26% 0.022 220));
+  --color-ink: light-dark(oklch(21% 0.022 220), oklch(95% 0.01 205));
+  --color-ink-2: light-dark(oklch(36% 0.02 220), oklch(76% 0.015 210));
+  --color-muted: light-dark(oklch(44% 0.022 215), oklch(70% 0.016 215));
+  --color-faint: light-dark(oklch(44% 0.022 215), oklch(70% 0.016 215));
+  --color-rule: light-dark(oklch(82% 0.018 215), oklch(29% 0.022 215));
+  --color-rule-strong: light-dark(oklch(55% 0.025 210), oklch(48% 0.03 210));
+  --color-accent: light-dark(oklch(43% 0.075 195), oklch(78% 0.14 195));
+  --color-accent-soft: light-dark(oklch(92% 0.025 195), oklch(25% 0.035 195));
+  --color-accent-ink: light-dark(oklch(98% 0.008 205), oklch(14% 0.025 220));
+  --color-focus: light-dark(oklch(98% 0.008 205), oklch(14% 0.03 250));
+  --color-focus-outer: light-dark(oklch(28% 0.035 220), oklch(94% 0.025 95));
+  --color-success: light-dark(oklch(38% 0.1 150), oklch(76% 0.13 150));
+  --color-success-soft: light-dark(oklch(93% 0.025 150), oklch(28% 0.06 155));
+  --color-warning: light-dark(oklch(40% 0.08 75), oklch(84% 0.15 85));
+  --color-warning-soft: light-dark(oklch(94% 0.03 85), oklch(28% 0.055 85));
+  --color-danger: light-dark(oklch(44% 0.15 28), oklch(70% 0.17 28));
+  --color-danger-soft: light-dark(oklch(95% 0.02 28), oklch(28% 0.065 25));
   --color-brand-start: oklch(86% 0.16 180);
   --color-brand-end: oklch(66% 0.17 240);
   --color-overlay: oklch(10% 0.02 250 / 72%);
@@ -69,53 +69,5 @@
   --content-max: 78rem;
 }
 
-@media (prefers-color-scheme: light) {
-  :root:not([data-theme="dark"]) {
-  color-scheme: light;
-  --color-paper: oklch(98% 0.008 205);
-  --color-paper-2: oklch(95% 0.012 205);
-  --color-paper-3: oklch(91% 0.014 205);
-  --color-paper-raised: oklch(88% 0.017 205);
-  --color-ink: oklch(21% 0.022 220);
-  --color-ink-2: oklch(36% 0.02 220);
-  --color-muted: oklch(44% 0.022 215);
-  --color-faint: oklch(44% 0.022 215);
-  --color-rule: oklch(82% 0.018 215);
-  --color-rule-strong: oklch(55% 0.025 210);
-  --color-accent: oklch(43% 0.075 195);
-  --color-accent-soft: oklch(92% 0.025 195);
-  --color-accent-ink: oklch(98% 0.008 205);
-  --color-focus: oklch(98% 0.008 205);
-  --color-focus-outer: oklch(28% 0.035 220);
-  --color-success: oklch(38% 0.1 150);
-  --color-success-soft: oklch(93% 0.025 150);
-  --color-warning: oklch(40% 0.08 75);
-  --color-warning-soft: oklch(94% 0.03 85);
-  --color-danger: oklch(44% 0.15 28);
-  --color-danger-soft: oklch(95% 0.02 28);
-  }
-}
-:root[data-theme="light"] {
-  color-scheme: light;
-  --color-paper: oklch(98% 0.008 205);
-  --color-paper-2: oklch(95% 0.012 205);
-  --color-paper-3: oklch(91% 0.014 205);
-  --color-paper-raised: oklch(88% 0.017 205);
-  --color-ink: oklch(21% 0.022 220);
-  --color-ink-2: oklch(36% 0.02 220);
-  --color-muted: oklch(44% 0.022 215);
-  --color-faint: oklch(44% 0.022 215);
-  --color-rule: oklch(82% 0.018 215);
-  --color-rule-strong: oklch(55% 0.025 210);
-  --color-accent: oklch(43% 0.075 195);
-  --color-accent-soft: oklch(92% 0.025 195);
-  --color-accent-ink: oklch(98% 0.008 205);
-  --color-focus: oklch(98% 0.008 205);
-  --color-focus-outer: oklch(28% 0.035 220);
-  --color-success: oklch(38% 0.1 150);
-  --color-success-soft: oklch(93% 0.025 150);
-  --color-warning: oklch(40% 0.08 75);
-  --color-warning-soft: oklch(94% 0.03 85);
-  --color-danger: oklch(44% 0.15 28);
-  --color-danger-soft: oklch(95% 0.02 28);
-}
+:root[data-theme="light"] { color-scheme: light; }
+:root[data-theme="dark"] { color-scheme: dark; }

@@ -1,11 +1,14 @@
 package controlplane_test
 
 import (
+	"fmt"
 	"github.com/torana-edge/torana-edge/internal/provider"
 	"io"
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"regexp"
 	"slices"
 	"sort"
@@ -167,11 +170,42 @@ func TestThemeAndFontsAreEmbedded(t *testing.T) {
 	if !strings.Contains(string(raw), `<script src="theme.js"></script>`) {
 		t.Fatal("missing early theme initializer")
 	}
-	fonts, err := os.ReadFile("dist/fonts.css")
+	// Scan resource-bearing HTML/CSS syntax, not prose/URL input placeholders.
+	external := regexp.MustCompile(`(?i)(?:url\(\s*["']?|@import\s+["']|(?:src|href)\s*=\s*["'])(?:https?:)?//`)
+	err = filepathWalkAssets(external)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(fonts), "https://") {
-		t.Fatal("fonts must be served locally")
+	if !strings.Contains(string(header), `class="status-badge pending"`) {
+		t.Fatal("initial connection status must be neutral until SSE opens")
+	}
+}
+
+func filepathWalkAssets(external *regexp.Regexp) error {
+	return fs.WalkDir(os.DirFS("dist"), ".", func(path string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() || !(strings.HasSuffix(path, ".css") || strings.HasSuffix(path, ".html")) {
+			return nil
+		}
+		raw, err := os.ReadFile("dist/" + path)
+		if err != nil {
+			return err
+		}
+		if external.Match(raw) {
+			return fmt.Errorf("external resource in embedded asset %s", path)
+		}
+		return nil
+	})
+}
+
+func TestThemeBootstrap(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("Node is required for theme bootstrap tests; run node --test theme_test.mjs")
+	}
+	if output, err := exec.Command(node, "--test", "theme_test.mjs").CombinedOutput(); err != nil {
+		t.Fatalf("theme bootstrap tests: %v\n%s", err, output)
 	}
 }

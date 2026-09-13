@@ -21,8 +21,11 @@ Modern-minimal, with the density and directness of an operator workbench.
 The website in `torana-site` is the visual reference. The app uses its teal
 day/night palette and typography at an operational density, not marketing scale.
 System / Light / Dark lives in the header and persists per control-plane origin.
-The tokens below describe the default dark variant; light values live alongside
-them in `internal/controlplane/dist/tokens.css`.
+The tokens below describe the dark variant; each theme-dependent token has one
+`light-dark(light, dark)` definition in `internal/controlplane/dist/tokens.css`.
+The browser selects its system scheme without JavaScript; an explicit choice
+sets `color-scheme` without duplicating the palette. Header and page gutters
+share spacing and respect the device's left/right safe-area insets.
 
 - `--color-paper` oklch(13% 0.018 220)
 - `--color-paper-2` oklch(17% 0.020 220)

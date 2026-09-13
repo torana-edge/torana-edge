@@ -91,8 +91,7 @@ h3,
   align-items: center;
   gap: var(--space-xs);
   min-height: var(--banner-height);
-  padding: var(--space-xs) max(var(--space-sm), env(safe-area-inset-right))
-    var(--space-xs) max(var(--space-sm), env(safe-area-inset-left));
+  padding-block: var(--space-xs);
   background: var(--color-paper-2);
   color: var(--color-ink);
   border-block-end: var(--rule-thin) solid var(--color-rule);
@@ -258,9 +257,7 @@ select:focus-visible,
 main {
   width: min(100%, var(--content-max));
   margin-inline: auto;
-  padding: var(--space-lg) max(var(--space-sm), env(safe-area-inset-right))
-    max(var(--space-xl), env(safe-area-inset-bottom))
-    max(var(--space-sm), env(safe-area-inset-left));
+  padding-block: var(--space-lg) max(var(--space-xl), env(safe-area-inset-bottom));
 }
 
 .view {
@@ -1123,7 +1120,10 @@ select:disabled,
 /* Website family, app density: keep operational controls and state ownership. */
 body { font-size: var(--text-md); line-height: 1.6; }
 ::selection { background: var(--color-accent); color: var(--color-accent-ink); }
-.app-header { background: var(--color-paper); grid-template-areas: "brand tools" "nav nav"; padding-inline: max(var(--space-sm), calc((100% - var(--content-max)) / 2 + var(--space-lg))); }
+:root { --page-gutter: var(--space-sm); --safe-left: env(safe-area-inset-left, 0px); --safe-right: env(safe-area-inset-right, 0px); }
+.app-header { background: var(--color-paper); grid-template-areas: "brand tools" "nav nav"; padding-left: max(var(--safe-left), calc(max(0px, (100% - var(--content-max)) / 2) + var(--page-gutter))); padding-right: max(var(--safe-right), calc(max(0px, (100% - var(--content-max)) / 2) + var(--page-gutter))); }
+main { padding-left: max(var(--page-gutter), calc(var(--safe-left) - max(0px, (100vw - var(--content-max)) / 2))); padding-right: max(var(--page-gutter), calc(var(--safe-right) - max(0px, (100vw - var(--content-max)) / 2))); }
+.status-badge.pending { background: var(--color-paper-2); color: var(--color-muted); }
 .header-tools { grid-area: tools; display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: var(--space-2xs); min-width: 0; }
 .theme-control { display: flex; align-items: center; }
 .theme-control[hidden] { display: none; }
@@ -1167,7 +1167,7 @@ th { text-transform: none; letter-spacing: 0; font-size: var(--text-xs); }
 }
 @media (min-width: 40rem) {
   .app-header { grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: "brand tools" "nav nav"; }
-  main { padding-inline: var(--space-lg); }
+  :root { --page-gutter: var(--space-lg); }
 }
 @media (min-width: 64rem) {
   .app-header { grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); grid-template-areas: "brand nav tools"; }
