@@ -165,6 +165,17 @@ JSON error envelopes, mutation guidance, and plugin-contributed operations.
 
 ### Provider authentication and fallbacks
 
+Provider `url` values contain an HTTP(S) origin and optional path only. Query
+strings, fragments, and embedded userinfo are rejected rather than silently
+ignored. Supply required query parameters (such as an API version) on each
+request path; provider-level query defaults are not supported. Use `auth` for
+credentials. Fallbacks must have the same format, including transparent mode:
+an empty format cannot fall back to a named adapter, or vice versa.
+
+Bodies larger than the retry buffer are sent intact to the primary once, with
+fallback disabled and a diagnostic log entry. This is not an additional
+outbound body-size rejection.
+
 Every provider has one authentication mode:
 
 - `caller` (the default when omitted) forwards the immutable credential

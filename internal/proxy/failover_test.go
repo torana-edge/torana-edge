@@ -158,14 +158,14 @@ func TestFailoverReleasesTokenOnRetryableStatus(t *testing.T) {
 func TestRateLimitBodyReleasesOnlyOnce(t *testing.T) {
 	rl := NewRateLimiter(0, 1)
 	defer rl.Close()
-	if !rl.Acquire("caller") {
+	release, ok := rl.acquireLease("caller")
+	if !ok {
 		t.Fatal("failed to acquire initial slot")
 	}
 
 	body := &rateLimitBody{
-		ReadCloser:  io.NopCloser(strings.NewReader("ok")),
-		identity:    "caller",
-		rateLimiter: rl,
+		ReadCloser: io.NopCloser(strings.NewReader("ok")),
+		release:    release,
 	}
 	if err := body.Close(); err != nil {
 		t.Fatalf("first close: %v", err)

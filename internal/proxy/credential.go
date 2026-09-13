@@ -42,6 +42,8 @@ func (c callerCredentials) rateIdentity() string {
 		if err == nil && len(values) > 0 {
 			return "query\x00" + values.Encode()
 		}
+		// Keep malformed values separate from anonymous and normalized keys.
+		return "query-raw\x00" + strings.Join(c.query, "&")
 	}
 	return ""
 }

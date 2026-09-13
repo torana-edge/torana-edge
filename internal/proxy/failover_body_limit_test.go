@@ -32,6 +32,7 @@ func TestFailoverPreservesOversizedOutgoingBody(t *testing.T) {
 		for _, fallback := range []bool{false, true} {
 			for _, unknownLength := range []bool{false, true} {
 				t.Run(fmt.Sprintf("size=%d/fallback=%t/unknown=%t", size, fallback, unknownLength), func(t *testing.T) {
+					logs := captureLogs(t)
 					limiter := NewRateLimiter(0, 1)
 					defer limiter.Close()
 					payload := strings.Repeat("x", size)
@@ -77,6 +78,9 @@ func TestFailoverPreservesOversizedOutgoingBody(t *testing.T) {
 					resp, err := tr.RoundTrip(req)
 					if err != nil {
 						t.Fatal(err)
+					}
+					if fallback && size > maxBodySize && !strings.Contains(logs.String(), "outgoing body exceeds retry buffer limit") {
+						t.Fatal("missing fallback-disabled diagnostic")
 					}
 					_ = resp.Body.Close()
 					wantCalls, wantStatus := 1, http.StatusTooManyRequests

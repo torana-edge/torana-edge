@@ -25,9 +25,8 @@ type failoverRoundTripper struct {
 // rateLimitBody wraps the response body to release the concurrency token on close.
 type rateLimitBody struct {
 	io.ReadCloser
-	identity    string
-	rateLimiter *RateLimiter
-	once        sync.Once
+	release func()
+	once    sync.Once
 }
 
 // retryPrefixBody replays the buffered prefix, then streams the unread tail.
@@ -40,7 +39,7 @@ type retryPrefixBody struct {
 func (r *rateLimitBody) Close() error {
 	var err error
 	r.once.Do(func() {
-		r.rateLimiter.Release(r.identity)
+		r.release()
 		err = r.ReadCloser.Close()
 	})
 	return err
@@ -76,7 +75,8 @@ func (t *failoverRoundTripper) RoundTrip(req *http.Request) (*http.Response, err
 		identity = rc.Identity
 	}
 
-	if !t.rateLimiter.Acquire(identity) {
+	release, admitted := t.rateLimiter.acquireLease(identity)
+	if !admitted {
 		discardCompactionReports(reqStateFrom(req.Context()))
 		return &http.Response{
 			StatusCode:    http.StatusTooManyRequests,
@@ -105,7 +105,7 @@ func (t *failoverRoundTripper) RoundTrip(req *http.Request) (*http.Response, err
 			// were the whole request: a prompt truncated mid-sentence, which
 			// the model answers as if the caller had stopped there. No outcome
 			// here is better than refusing.
-			t.rateLimiter.Release(identity)
+			release()
 			discardCompactionReports(reqStateFrom(req.Context()))
 			if rs := reqStateFrom(req.Context()); rs != nil {
 				rs.AuditUpstreamRequestBytes = 0
@@ -115,6 +115,7 @@ func (t *failoverRoundTripper) RoundTrip(req *http.Request) (*http.Response, err
 			return nil, fmt.Errorf("failover: reading the request body for retry: %w", readErr)
 		}
 		if len(bodyBytes) > maxBodySize {
+			log.Printf("[failover] disabled: outgoing body exceeds retry buffer limit of %d bytes (read at least %d)", maxBodySize, len(bodyBytes))
 			// This is a retry-buffer limit, not a new outbound size policy.
 			// Preserve the original request for one attempt without buffering
 			// the remaining bytes or trying to replay them after a failure.
@@ -136,7 +137,7 @@ func (t *failoverRoundTripper) RoundTrip(req *http.Request) (*http.Response, err
 	}
 	resp, err := t.base.RoundTrip(req)
 	if err == nil && !shouldRetry(resp) {
-		resp.Body = &rateLimitBody{ReadCloser: resp.Body, identity: identity, rateLimiter: t.rateLimiter}
+		resp.Body = &rateLimitBody{ReadCloser: resp.Body, release: release}
 		return resp, nil
 	}
 
@@ -145,9 +146,9 @@ func (t *failoverRoundTripper) RoundTrip(req *http.Request) (*http.Response, err
 		// is no body whose Close would release it, and a retryable status
 		// returned unwrapped would leak it the same way.
 		if resp != nil && resp.Body != nil {
-			resp.Body = &rateLimitBody{ReadCloser: resp.Body, identity: identity, rateLimiter: t.rateLimiter}
+			resp.Body = &rateLimitBody{ReadCloser: resp.Body, release: release}
 		} else {
-			t.rateLimiter.Release(identity)
+			release()
 		}
 		return resp, err
 	}
@@ -165,7 +166,7 @@ func (t *failoverRoundTripper) RoundTrip(req *http.Request) (*http.Response, err
 			continue
 		}
 		primary := liveCfg.Providers[provName]
-		if primary.Format != "" && fb.Format != "" && primary.Format != fb.Format {
+		if primary.Format != fb.Format {
 			log.Printf("[failover] skipping %s: format %q is incompatible with %s format %q", fbName, fb.Format, provName, primary.Format)
 			continue
 		}
@@ -223,15 +224,15 @@ func (t *failoverRoundTripper) RoundTrip(req *http.Request) (*http.Response, err
 		if rs := reqStateFrom(req.Context()); rs != nil {
 			rs.Provider = fbName
 		}
-		retryResp.Body = &rateLimitBody{ReadCloser: retryResp.Body, identity: identity, rateLimiter: t.rateLimiter}
+		retryResp.Body = &rateLimitBody{ReadCloser: retryResp.Body, release: release}
 		return retryResp, nil
 	}
 
 	if lastResp != nil && lastResp.Body != nil {
-		lastResp.Body = &rateLimitBody{ReadCloser: lastResp.Body, identity: identity, rateLimiter: t.rateLimiter}
+		lastResp.Body = &rateLimitBody{ReadCloser: lastResp.Body, release: release}
 	} else {
 		// If lastResp is nil (only error returned), we need to release token
-		t.rateLimiter.Release(identity)
+		release()
 	}
 
 	return lastResp, lastErr

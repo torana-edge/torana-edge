@@ -14,7 +14,7 @@ import (
 func newTestRedis(t *testing.T, ttl time.Duration) (*RedisStore, *miniredis.Miniredis) {
 	t.Helper()
 	mr := miniredis.RunT(t)
-	store, err := NewRedisStore(mr.Addr(), "", 0, "torana:", ttl)
+	store, err := newRedisStore(mr.Addr(), "", 0, "torana:", ttl, nil)
 	if err != nil {
 		t.Fatalf("NewRedisStore: %v", err)
 	}
