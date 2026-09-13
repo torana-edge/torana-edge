@@ -103,13 +103,14 @@ func (t *failoverRoundTripper) RoundTrip(req *http.Request) (*http.Response, err
 			return nil, fmt.Errorf("failover: reading the request body for retry: %w", readErr)
 		}
 		if len(bodyBytes) > maxBodySize {
-			// Cannot retry safely if body is oversized. We will let the first attempt fail or pass,
-			// but we won't have the body for fallbacks.
-			bodyBytes = nil
-			fallbacks = nil
-		} else {
-			req.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+			// The body has been consumed and closed. Sending the first
+			// attempt now would forward only its unread tail (or fail on
+			// the closed reader), so refuse before reaching any provider.
+			t.rateLimiter.Release(identity)
+			discardCompactionReports(reqStateFrom(req.Context()))
+			return nil, fmt.Errorf("failover: outgoing request body exceeds %d bytes", maxBodySize)
 		}
+		req.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 	}
 
 	// First attempt.
