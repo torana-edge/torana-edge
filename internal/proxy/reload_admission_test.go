@@ -29,9 +29,9 @@ func TestDrainingPipelineRefusesRequestAdmission(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = srv.Shutdown(context.Background()) })
 	rt := wasm.NewRuntime(context.Background())
-	t.Cleanup(func() { _ = rt.Close() })
 	pp, err := plugin.NewPipeline(rt, plugin.PluginConfig{Dir: t.TempDir()})
 	if err != nil {
+		_ = rt.Close()
 		t.Fatal(err)
 	}
 	srv.pluginPipeline.Store(pp)
@@ -40,11 +40,45 @@ func TestDrainingPipelineRefusesRequestAdmission(t *testing.T) {
 	request := httptest.NewRequest(http.MethodPost, "/provider/test/v1/chat/completions",
 		strings.NewReader(`{"model":"test","messages":[{"role":"user","content":"private"}]}`))
 	response := httptest.NewRecorder()
+	logs := captureLogs(t)
 	srv.Handler().ServeHTTP(response, request)
 	if response.Code != http.StatusServiceUnavailable {
 		t.Fatalf("status = %d, want 503; body = %s", response.Code, response.Body.String())
 	}
 	if calls.Load() != 0 {
 		t.Fatal("request bypassed the draining pipeline and reached upstream")
+	}
+	if response.Header().Get("Retry-After") != "1" {
+		t.Fatal("refusal omitted retry backoff")
+	}
+	if !strings.Contains(logs.String(), "plugin request admission refused") {
+		t.Fatal("refusal was not logged")
+	}
+}
+
+// Model the exact swap-before-drain interleaving without timing a goroutine:
+// admission starts with the stale pointer while the atomic slot holds its replacement.
+func TestRequestAdmissionAcquiresReplacementPipeline(t *testing.T) {
+	newPipeline := func() *plugin.PluginPipeline {
+		rt := wasm.NewRuntime(context.Background())
+		pp, err := plugin.NewPipeline(rt, plugin.PluginConfig{Dir: t.TempDir()})
+		if err != nil {
+			_ = rt.Close()
+			t.Fatal(err)
+		}
+		t.Cleanup(pp.DrainAndClose)
+		return pp
+	}
+	old, replacement := newPipeline(), newPipeline()
+	srv := &Server{}
+	srv.pluginPipeline.Store(replacement)
+	old.DrainAndClose()
+	got := srv.acquireRequestPipeline(old)
+	if got == nil {
+		t.Fatal("servable replacement was refused")
+	}
+	defer got.Release()
+	if got != replacement {
+		t.Fatal("wrong generation acquired")
 	}
 }

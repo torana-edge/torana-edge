@@ -2610,14 +2610,13 @@ func New(cfg Config) (*Server, error) {
 			CallerCredentials: callerCredentialsFrom(r),
 		}
 		if pp := s.pluginPipeline.Load(); pp != nil {
-			candidate := pp.(*plugin.PluginPipeline)
-			if !candidate.TryAcquire() {
-				// A reload can drain the generation we just loaded. Refuse
-				// admission rather than forwarding without its policy hooks.
+			rs.Pipeline = s.acquireRequestPipeline(pp.(*plugin.PluginPipeline))
+			if rs.Pipeline == nil {
+				log.Printf("plugin request admission refused id=%d: pipeline unavailable after reload retries", rs.ID)
+				w.Header().Set("Retry-After", "1")
 				http.Error(w, "plugin pipeline unavailable; retry request", http.StatusServiceUnavailable)
 				return
 			}
-			rs.Pipeline = candidate
 		}
 		r = r.WithContext(context.WithValue(r.Context(), reqStateKey{}, rs))
 		// Drop request-scoped plugin state when the request completes, then
@@ -2771,6 +2770,19 @@ func New(cfg Config) (*Server, error) {
 }
 
 // --- Lifecycle --------------------------------------------------------------
+
+// Reload publishes its replacement before draining the old generation. Retry
+// admission against that replacement, but bound retries so sustained reloads
+// or shutdown cannot spin forever. A nil result must never bypass policy.
+func (s *Server) acquireRequestPipeline(candidate *plugin.PluginPipeline) *plugin.PluginPipeline {
+	for attempt := 0; attempt < 3; attempt++ {
+		if candidate != nil && candidate.TryAcquire() {
+			return candidate
+		}
+		candidate, _ = s.pluginPipeline.Load().(*plugin.PluginPipeline)
+	}
+	return nil
+}
 
 func (s *Server) controlPlaneGuard(next http.HandlerFunc) http.HandlerFunc {
 	return s.controlPlaneGuardWithHeaders(next, false, false)
