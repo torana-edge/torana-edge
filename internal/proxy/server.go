@@ -2611,9 +2611,13 @@ func New(cfg Config) (*Server, error) {
 		}
 		if pp := s.pluginPipeline.Load(); pp != nil {
 			candidate := pp.(*plugin.PluginPipeline)
-			if candidate.TryAcquire() {
-				rs.Pipeline = candidate
+			if !candidate.TryAcquire() {
+				// A reload can drain the generation we just loaded. Refuse
+				// admission rather than forwarding without its policy hooks.
+				http.Error(w, "plugin pipeline unavailable; retry request", http.StatusServiceUnavailable)
+				return
 			}
+			rs.Pipeline = candidate
 		}
 		r = r.WithContext(context.WithValue(r.Context(), reqStateKey{}, rs))
 		// Drop request-scoped plugin state when the request completes, then
