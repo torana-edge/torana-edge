@@ -18,13 +18,22 @@ Modern-minimal, with the density and directness of an operator workbench.
 
 ## Theme
 
-- `--color-paper` oklch(17% 0.025 250)
-- `--color-paper-2` oklch(21% 0.030 250)
-- `--color-paper-3` oklch(25% 0.032 250)
-- `--color-ink` oklch(95% 0.012 230)
-- `--color-ink-2` oklch(79% 0.025 240)
-- `--color-rule` oklch(37% 0.035 245)
-- `--color-accent` oklch(82% 0.145 190)
+The website in `torana-site` is the visual reference. The app uses its teal
+day/night palette and typography at an operational density, not marketing scale.
+System / Light / Dark lives in the header and persists per control-plane origin.
+The tokens below describe the dark variant; each theme-dependent token has one
+`light-dark(light, dark)` definition in `internal/controlplane/dist/tokens.css`.
+The browser selects its system scheme without JavaScript; an explicit choice
+sets `color-scheme` without duplicating the palette. Header and page gutters
+share spacing and respect the device's left/right safe-area insets.
+
+- `--color-paper` oklch(13% 0.018 220)
+- `--color-paper-2` oklch(17% 0.020 220)
+- `--color-paper-3` oklch(22% 0.022 220)
+- `--color-ink` oklch(95% 0.010 205)
+- `--color-ink-2` oklch(76% 0.015 210)
+- `--color-rule` oklch(29% 0.022 215)
+- `--color-accent` oklch(78% 0.140 195)
 - `--color-focus` oklch(14% 0.030 250), paired with a light outer ring so
   focus remains visible on both dark surfaces and the bright primary action.
 
@@ -34,15 +43,18 @@ viewport.
 
 ## Typography
 
-- Display: Bahnschrift SemiCondensed / DIN Condensed / Aptos Display, weight
-  650, roman.
-- Body: ui-sans-serif native stack, weight 400–650.
-- Mono: ui-monospace native stack, used only for digests, timestamps, and raw
+- Display: Bricolage Grotesque, weight 800, roman.
+- Body: Geist, weight 400–650.
+- Mono: JetBrains Mono, used only for digests, timestamps, and raw
   configuration.
-- Display tracking: `-0.025em`.
-- Type scale anchor: `--text-display = clamp(1.5rem, 1.1rem + 1.2vw, 2.25rem)`.
+- Display tracking: `-0.04em`.
+- Type scale anchor: `--text-display = clamp(2rem, 1.5rem + 1.5vw, 3.25rem)`.
 
-The app remains self-contained and makes no network font requests.
+The app loads variable Latin font subsets from Google Fonts' public gstatic
+host, with `font-display: swap`. Arial and native monospace fallbacks keep the
+interface usable offline or when that host is blocked. Font requests reach
+Google; no font binaries are embedded in Torana. The host UI's CSP permits
+that font origin without relaxing script, connection, or plugin sandbox rules.
 
 ## Spacing
 
@@ -59,13 +71,13 @@ styles consume named spacing tokens rather than raw spacing values.
 
 - Quiet in-place success; errors use the persistent alert region.
 - Focus rings are immediate and always visible.
-- Reversible enable/disable changes remain staged until Save, preserving the
-  existing Discard path.
+- Reorder/configuration changes retain their Save and Discard paths. Existing
+  explicit approve-and-enable and disable-and-apply actions remain immediate.
 - Drag reorder has keyboard Move up / Move down equivalents.
 
 ## CTA voice
 
-- Primary: solid Torana teal, dark text, compact rectangular shape.
+- Primary: solid Torana teal with theme-specific contrasting text, compact rectangular shape.
 - Secondary: quiet ink surface with a one-pixel rule.
 - Destructive: tinted text and rule, never a saturated filled button.
 
