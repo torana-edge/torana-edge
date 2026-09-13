@@ -33,14 +33,58 @@ func TestLimiterAccountsDuringDisabledWindow(t *testing.T) {
 	}
 	rl.Release("same")
 	rl.Update(0, 0)
-	if !rl.Acquire("new") {
+	releaseOld, ok := rl.acquireLease("new")
+	if !ok {
 		t.Fatal("disabled admission refused")
 	}
 	rl.Update(0, 1)
-	if rl.Acquire("new") {
-		t.Fatal("request admitted while disabled was not counted")
+	releaseNew, ok := rl.acquireLease("new")
+	if !ok {
+		t.Fatal("disabled request unexpectedly created a counted bucket")
 	}
-	rl.Release("new")
+	releaseOld()
+	if rl.Acquire("new") {
+		t.Fatal("uncounted old request stole the new request's slot")
+	}
+	releaseNew()
+	releaseNewest, ok := rl.acquireLease("new")
+	if !ok {
+		t.Fatal("released slot not reusable")
+	}
+	releaseNew()
+	if rl.Acquire("new") {
+		t.Fatal("double lease release stole the newest slot")
+	}
+	releaseNewest()
+}
+
+func TestLimiterEnablingRPMAndDisabledCardinality(t *testing.T) {
+	rl := NewRateLimiter(0, 0)
+	defer rl.Close()
+	for _, id := range []string{"a", "b", "c", "d", "e"} {
+		release, ok := rl.acquireLease(id)
+		if !ok {
+			t.Fatal("disabled admission refused")
+		}
+		release()
+	}
+	if len(rl.limits) != 0 {
+		t.Fatal("disabled traffic allocated buckets")
+	}
+	for _, rpm := range []int{1, 6, 60} {
+		rl.Update(rpm, 0)
+		for i := 0; i < rpm; i++ {
+			release, ok := rl.acquireLease("a")
+			if !ok {
+				t.Fatalf("rpm %d did not start full at request %d", rpm, i)
+			}
+			release()
+		}
+		if rl.Acquire("a") {
+			t.Fatal("exhausted bucket admitted request")
+		}
+		rl.Update(0, 0)
+	}
 }
 
 func TestMalformedQueryIdentityRemainsDistinct(t *testing.T) {

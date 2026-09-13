@@ -44,12 +44,13 @@ func NewRateLimiter(rpm, maxConn int) *RateLimiter {
 
 // Update replaces the live limits without dropping in-flight concurrency
 // accounting. Existing buckets retain their active count; their token balance
-// is clamped to the new bucket capacity.
+// is clamped to the new bucket capacity. Enabling RPM starts a full bucket.
 func (rl *RateLimiter) Update(rpm, maxConn int) {
 	if rl == nil {
 		return
 	}
 	rl.mu.Lock()
+	previousRPM := rl.rpm
 	rl.rpm = rpm
 	rl.maxConn = maxConn
 	now := time.Now()
@@ -57,7 +58,7 @@ func (rl *RateLimiter) Update(rpm, maxConn int) {
 		l.mu.Lock()
 		if rpm == 0 {
 			l.tokens = 0
-		} else if l.tokens > float64(rpm) {
+		} else if previousRPM <= 0 || l.tokens > float64(rpm) {
 			l.tokens = float64(rpm)
 		}
 		l.lastRefill = now
@@ -120,23 +121,42 @@ func (rl *RateLimiter) getLimiterLocked(key string) *Limiter {
 	return l
 }
 
-func (rl *RateLimiter) Acquire(identity string) bool {
+// acquireLease binds release to this admission, not a later bucket for the
+// same identity. In particular, an uncounted disabled admission must not
+// release a request admitted after enforcement is enabled.
+func (rl *RateLimiter) acquireLease(identity string) (func(), bool) {
+	l, ok := rl.acquire(identity)
+	if l == nil {
+		return func() {}, ok
+	}
+	return sync.OnceFunc(func() { releaseLimiter(l) }), ok
+}
+
+func (rl *RateLimiter) acquire(identity string) (*Limiter, bool) {
 	if rl == nil {
-		return true
+		return nil, true
 	}
 	rl.mu.Lock()
 	rpm, maxConn := rl.rpm, rl.maxConn
-	l := rl.getLimiterLocked(hashIdentity(identity))
+	key := hashIdentity(identity)
+	l := rl.limits[key]
+	if rpm > 0 || maxConn > 0 {
+		l = rl.getLimiterLocked(key)
+	}
+	if l == nil {
+		rl.mu.Unlock()
+		return nil, true
+	}
 	l.mu.Lock()
 	rl.mu.Unlock()
 	defer l.mu.Unlock()
-	// Track every admitted request even while enforcement is disabled.
-	// Release cannot otherwise distinguish it from an older counted request.
+	// Existing buckets continue tracking while enforcement is disabled;
+	// brand-new identities do not allocate buckets on that path.
 	l.lastSeen = time.Now()
 
 	// Concurrency check
 	if maxConn > 0 && l.active >= maxConn {
-		return false
+		return nil, false
 	}
 
 	// RPM check
@@ -151,24 +171,16 @@ func (rl *RateLimiter) Acquire(identity string) bool {
 		l.lastRefill = now
 
 		if l.tokens < 1.0 {
-			return false
+			return nil, false
 		}
 		l.tokens -= 1.0
 	}
 
 	l.active++
-	return true
+	return l, true
 }
 
-func (rl *RateLimiter) Release(identity string) {
-	if rl == nil {
-		return
-	}
-	// Always release a bucket, including after a live change disables limits:
-	// an in-flight request may still be represented by its active count.
-	rl.mu.Lock()
-	l := rl.limits[hashIdentity(identity)]
-	rl.mu.Unlock()
+func releaseLimiter(l *Limiter) {
 	if l == nil {
 		return
 	}

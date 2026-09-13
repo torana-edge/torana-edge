@@ -39,13 +39,9 @@ type RedisStore struct {
 	prefix string
 }
 
-// NewRedisStore connects to Redis and verifies the connection. prefix
+// newRedisStore connects to Redis and verifies the connection. prefix
 // namespaces every key (so one Redis can serve several torana deployments);
 // ttl applies per key on Set, matching LocalCache semantics.
-func NewRedisStore(addr, password string, db int, prefix string, ttl time.Duration) (*RedisStore, error) {
-	return newRedisStore(addr, password, db, prefix, ttl, nil)
-}
-
 func newRedisStore(addr, password string, db int, prefix string, ttl time.Duration, tlsConfig *tls.Config) (*RedisStore, error) {
 	client := redis.NewClient(&redis.Options{Addr: addr, Password: password, DB: db, TLSConfig: tlsConfig})
 	ctx, cancel := context.WithTimeout(context.Background(), redisOpTimeout)

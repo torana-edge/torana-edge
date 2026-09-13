@@ -168,6 +168,7 @@ it as ordinary HTTP rather than attempting to decode it as an inference call.
 | [Running plugins](docs/PLUGINS.md) | Install, inspect, approve, order, and what the sandbox does |
 | [Credentials](docs/CREDENTIALS.md) | Caller passthrough, encrypted/environment sources, plugin slots, and custom secret managers |
 | [Cache backends](docs/CACHE.md) | Memory limits, Redis capacity, and verified Redis TLS |
+| [Upgrade notes](docs/UPGRADE_NOTES.md) | Configuration changes and migration steps |
 | [Agent control plane](docs/AGENT_CONTROL_PLANE.md) | The versioned JSON API and `agent.json` operation contracts |
 | [Local models](docs/LOCAL_MODELS.md) | Point a coding harness at Ollama or vLLM through Torana |
 | [Antigravity CLI](docs/GEMINI_ANTIGRAVITY.md) | The optional TLS-terminating MITM ingress |

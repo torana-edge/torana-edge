@@ -150,7 +150,7 @@ func (m *egressMeter) authorize(plugin string, budget provider.EgressBudget) err
 	return nil
 }
 
-// lockTokenBudget serializes admission and post-response accounting when a
+// lockTokenBudget serializes admission, the network call, and post-response accounting when a
 // token ceiling is enabled. Without this, many concurrent calls can all pass
 // the same pre-spend check and collectively overshoot by many calls.
 func (m *egressMeter) lockTokenBudget(ctx context.Context, plugin string, budget provider.EgressBudget) (func(), error) {
@@ -415,7 +415,7 @@ func (s *Server) sendPluginRequestWithBudget(ctx context.Context, pluginName, pa
 	unlockBudget, err := s.egress.lockTokenBudget(callCtx, budgetKey, budget)
 	if err != nil {
 		s.stats.RecordPluginCounter(pluginName, "egress_refused", 1)
-		return wasm.ExtensionRefusal(pb.ErrorCode_ERROR_CODE_UNAVAILABLE, "token budget admission canceled: %v", err)
+		return wasm.ExtensionRefusal(pb.ErrorCode_ERROR_CODE_UNAVAILABLE, "model call admission canceled: %v", err)
 	}
 	defer unlockBudget()
 	if err := s.egress.authorize(budgetKey, budget); err != nil {
