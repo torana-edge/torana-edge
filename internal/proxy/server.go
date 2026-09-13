@@ -2900,6 +2900,11 @@ func setControlPlaneSecurityHeaders(w http.ResponseWriter, allowSameOriginFrame,
 	// unsafe-inline is constrained to same-origin content rather than opening
 	// the page to third-party script or frame sources.
 	policy := "default-src 'self'; base-uri 'none'; object-src 'none'; frame-ancestors " + frameAncestors + "; form-action 'self'; connect-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'"
+	if !sandboxDocument {
+		// Only the host UI loads public fonts. Plugin documents retain their
+		// existing sandbox and same-origin-only resource policy.
+		policy += "; font-src 'self' https://fonts.gstatic.com"
+	}
 	if sandboxDocument {
 		// Plugin-served HTML shares the control-plane listener, but it must never
 		// share the control-plane ORIGIN. CSP sandbox without allow-same-origin

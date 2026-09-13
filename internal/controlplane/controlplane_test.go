@@ -139,17 +139,14 @@ func TestHTTPApprovalEditorPreservesMethodSubset(t *testing.T) {
 	}
 }
 
-func TestThemeAndFontsAreEmbedded(t *testing.T) {
+func TestThemeAssetsAndHostedFonts(t *testing.T) {
+	if _, err := os.Stat("dist/fonts"); !os.IsNotExist(err) {
+		t.Fatal("font binaries must not be bundled")
+	}
 	handler := controlplane.Handler()
 	for _, asset := range []struct{ path, marker string }{
 		{"/theme.js", "torana-controlplane-theme"},
 		{"/fonts.css", "font-display: swap"},
-		{"/fonts/bricolage-grotesque-latin.woff2", "wOF2"},
-		{"/fonts/geist-latin.woff2", "wOF2"},
-		{"/fonts/jetbrains-mono-latin.woff2", "wOF2"},
-		{"/fonts/Bricolage-OFL.txt", "SIL OPEN FONT LICENSE"},
-		{"/fonts/Geist-OFL.txt", "SIL OPEN FONT LICENSE"},
-		{"/fonts/JetBrainsMono-OFL.txt", "SIL OPEN FONT LICENSE"},
 	} {
 		t.Run(asset.path, func(t *testing.T) {
 			rec := httptest.NewRecorder()
@@ -192,6 +189,9 @@ func filepathWalkAssets(external *regexp.Regexp) error {
 		raw, err := os.ReadFile("dist/" + path)
 		if err != nil {
 			return err
+		}
+		if path == "fonts.css" {
+			raw = regexp.MustCompile(`https://fonts\.gstatic\.com/s/[a-zA-Z0-9_./-]+\.woff2`).ReplaceAll(raw, []byte("approved-font.woff2"))
 		}
 		if external.Match(raw) {
 			return fmt.Errorf("external resource in embedded asset %s", path)

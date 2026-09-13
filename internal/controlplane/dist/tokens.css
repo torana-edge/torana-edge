@@ -1,6 +1,6 @@
 /* Hallmark · genre: modern-minimal · tone: precise/quiet · anchor: teal 190 · fingerprint: compact workbench rail + trust-first detail · design-system: design.md · designed-as-app
  * Hallmark · pre-emit critique: P4 H4 E4 S5 R4 V4
- * Website-aligned day/night palette; local variable fonts.
+ * Website-aligned day/night palette; hosted fonts with native fallbacks.
  */
 :root {
   color-scheme: light dark;
@@ -31,8 +31,8 @@
   --color-overlay: oklch(10% 0.02 250 / 72%);
   --color-transparent: oklch(0% 0 0 / 0%);
 
-  --font-display: "Bricolage Grotesque", "Arial Narrow", sans-serif;
-  --font-body: "Geist", "Avenir Next", sans-serif;
+  --font-display: "Bricolage Grotesque", Arial, sans-serif;
+  --font-body: "Geist", Arial, sans-serif;
   --font-mono: "JetBrains Mono", "SFMono-Regular", Consolas, monospace;
 
   --space-3xs: 0.25rem;

@@ -50,8 +50,11 @@ viewport.
 - Display tracking: `-0.04em`.
 - Type scale anchor: `--text-display = clamp(2rem, 1.5rem + 1.5vw, 3.25rem)`.
 
-The app bundles variable Latin font subsets and licenses in `dist/fonts`, with
-native fallback for other scripts. It makes no external font requests.
+The app loads variable Latin font subsets from Google Fonts' public gstatic
+host, with `font-display: swap`. Arial and native monospace fallbacks keep the
+interface usable offline or when that host is blocked. Font requests reach
+Google; no font binaries are embedded in Torana. The host UI's CSP permits
+that font origin without relaxing script, connection, or plugin sandbox rules.
 
 ## Spacing
 
