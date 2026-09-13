@@ -570,6 +570,9 @@ func toPBMessage(m engine.Message) *pb.Message {
 				Signature:        b.ToolResult.Signature,
 				InvocationKind:   pb.ToolInvocationKind(b.ToolResult.InvocationKind),
 			}
+			if b.ToolResult.IsError != nil {
+				tr.IsError = proto.Bool(*b.ToolResult.IsError)
+			}
 			if b.ToolResult.WillContinue != nil {
 				tr.WillContinue = proto.Bool(*b.ToolResult.WillContinue)
 			}
@@ -698,6 +701,10 @@ func fromPBBlock(b *pb.RequestBlock, what string) (engine.Block, error) {
 			PartMetadataJson: pm,
 			Signature:        k.ToolResult.Signature,
 			InvocationKind:   engine.ToolInvocationKind(k.ToolResult.InvocationKind),
+		}
+		if k.ToolResult.IsError != nil {
+			v := *k.ToolResult.IsError
+			tr.IsError = &v
 		}
 		if k.ToolResult.WillContinue != nil {
 			v := k.ToolResult.GetWillContinue()

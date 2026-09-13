@@ -90,6 +90,8 @@ type ToolUseBlock struct {
 type ToolResultBlock struct {
 	ToolCallID string
 	ToolName   string
+	// IsError is the presence-sensitive tool failure flag (Anthropic is_error).
+	IsError *bool
 	// Content is the ordered NESTED content of the result. Dedicated kinds
 	// only (text/unknown/cache): nested tool use/result/thinking/signature
 	// is unrepresentable. Non-empty: one explicit empty text element is the

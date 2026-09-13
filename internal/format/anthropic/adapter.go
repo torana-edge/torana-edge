@@ -146,6 +146,7 @@ type contentBlock struct {
 	Name      string          `json:"name,omitempty"`
 	Input     json.RawMessage `json:"input,omitempty"` // raw lexemes, verbatim
 	ToolUseID string          `json:"tool_use_id,omitempty"`
+	IsError   *bool           `json:"is_error,omitempty"`
 	Content   any             `json:"content,omitempty"` // string or array of blocks
 	Thinking  string          `json:"thinking,omitempty"`
 	Signature string          `json:"signature,omitempty"`
@@ -232,7 +233,7 @@ var anthropicArmAllowedMembers = map[string]map[string]bool{
 		"type": true, "id": true, "name": true, "input": true, "cache_control": true,
 	},
 	anthropicToolResult: {
-		"type": true, "tool_use_id": true, "content": true, "cache_control": true,
+		"type": true, "tool_use_id": true, "content": true, "cache_control": true, "is_error": true,
 	},
 }
 
@@ -267,6 +268,9 @@ func validateContentBlockMembers(arm string, data []byte, raw contentBlock) erro
 			return fmt.Errorf("anthropic: tool_use block requires id and name")
 		}
 	case anthropicToolResult:
+		if _, present := members["is_error"]; present && raw.IsError == nil {
+			return fmt.Errorf("anthropic: tool_result is_error must be a boolean")
+		}
 		if raw.ToolUseID == "" {
 			return fmt.Errorf("anthropic: tool_result block requires tool_use_id")
 		}
@@ -492,7 +496,7 @@ func anthropicBlockToEngine(block contentBlock, blockRaw json.RawMessage) (engin
 			ID: block.ID, Name: block.Name, Arguments: args,
 		}}, nil
 	case anthropicToolResult:
-		tr := &engine.ToolResultBlock{ToolCallID: block.ToolUseID, ToolName: block.Name}
+		tr := &engine.ToolResultBlock{ToolCallID: block.ToolUseID, ToolName: block.Name, IsError: block.IsError}
 		if s, ok := block.Content.(string); ok {
 			tr.Content = []engine.ToolResultContentBlock{{Text: s}}
 			return engine.Block{ToolResult: tr}, nil
@@ -830,6 +834,7 @@ func marshalContentBlocks(m engine.Message) ([]contentBlock, error) {
 			cb = contentBlock{
 				Type:      "tool_result",
 				ToolUseID: b.ToolResult.ToolCallID,
+				IsError:   b.ToolResult.IsError,
 				Name:      b.ToolResult.ToolName,
 			}
 			content, cerr := marshalNestedContent(b.ToolResult.Content)

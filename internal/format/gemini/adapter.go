@@ -669,6 +669,13 @@ func (a *Adapter) Marshal(chat *engine.ChatRequest) ([]byte, error) {
 	if err := pbconv.ValidateFullRequest(chat); err != nil {
 		return nil, fmt.Errorf("gemini: %w", err)
 	}
+	for _, message := range chat.Messages {
+		for _, block := range message.Blocks {
+			if block.ToolResult != nil && block.ToolResult.IsError != nil {
+				return nil, fmt.Errorf("gemini: explicit tool-result error flag is unrepresentable")
+			}
+		}
+	}
 	if err := format.RejectFreeformTools(chat, "gemini"); err != nil {
 		return nil, err
 	}
