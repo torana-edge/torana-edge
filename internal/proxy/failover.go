@@ -115,6 +115,7 @@ func (t *failoverRoundTripper) RoundTrip(req *http.Request) (*http.Response, err
 			return nil, fmt.Errorf("failover: reading the request body for retry: %w", readErr)
 		}
 		if len(bodyBytes) > maxBodySize {
+			log.Printf("[failover] disabled: outgoing body exceeds retry buffer limit of %d bytes (read at least %d)", maxBodySize, len(bodyBytes))
 			// This is a retry-buffer limit, not a new outbound size policy.
 			// Preserve the original request for one attempt without buffering
 			// the remaining bytes or trying to replay them after a failure.
@@ -165,7 +166,7 @@ func (t *failoverRoundTripper) RoundTrip(req *http.Request) (*http.Response, err
 			continue
 		}
 		primary := liveCfg.Providers[provName]
-		if primary.Format != "" && fb.Format != "" && primary.Format != fb.Format {
+		if primary.Format != fb.Format {
 			log.Printf("[failover] skipping %s: format %q is incompatible with %s format %q", fbName, fb.Format, provName, primary.Format)
 			continue
 		}

@@ -176,6 +176,9 @@ func (c Config) Validate() error {
 		if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
 			return fmt.Errorf("provider %q has invalid http(s) url %q", name, configured.URL)
 		}
+		if u.RawQuery != "" || u.ForceQuery || u.Fragment != "" || u.User != nil {
+			return fmt.Errorf("provider %q url must contain only an origin and path; query, fragment, and userinfo are unsupported (supply query parameters on requests and credentials through auth)", name)
+		}
 		// An empty format is a supported mode, not a missing value: it selects
 		// transparent pass-through, which the proxy implements deliberately
 		// ("No format adapter... Just forward", server.go). Routing, failover,

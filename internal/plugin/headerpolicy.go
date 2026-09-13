@@ -124,7 +124,7 @@ func projectChatHeaders(raw map[string][]string) map[string]any {
 // bytes afterwards (restoreRequestHeaders); this function never leaves the
 // field in a request that chains or returns.
 func injectRequestHeaders(current *pbv1.ChatRequest, headers map[string]any) {
-	meta := map[string]any{}
+	meta := map[string]json.RawMessage{}
 	if len(current.ToranaMetaJson) > 0 {
 		if err := json.Unmarshal(current.ToranaMetaJson, &meta); err != nil {
 			// Malformed host meta is a protocol defect; leave the request
@@ -132,7 +132,14 @@ func injectRequestHeaders(current *pbv1.ChatRequest, headers map[string]any) {
 			return
 		}
 	}
-	meta[requestHeadersKey] = headers
+	if meta == nil {
+		meta = make(map[string]json.RawMessage)
+	}
+	encoded, err := json.Marshal(headers)
+	if err != nil {
+		return
+	}
+	meta[requestHeadersKey] = encoded
 	b, err := json.Marshal(meta)
 	if err != nil {
 		return

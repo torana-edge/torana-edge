@@ -2776,10 +2776,12 @@ func New(cfg Config) (*Server, error) {
 // or shutdown cannot spin forever. A nil result must never bypass policy.
 func (s *Server) acquireRequestPipeline(candidate *plugin.PluginPipeline) *plugin.PluginPipeline {
 	for attempt := 0; attempt < 3; attempt++ {
+		if attempt > 0 {
+			candidate, _ = s.pluginPipeline.Load().(*plugin.PluginPipeline)
+		}
 		if candidate != nil && candidate.TryAcquire() {
 			return candidate
 		}
-		candidate, _ = s.pluginPipeline.Load().(*plugin.PluginPipeline)
 	}
 	return nil
 }

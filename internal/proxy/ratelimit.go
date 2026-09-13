@@ -126,14 +126,12 @@ func (rl *RateLimiter) Acquire(identity string) bool {
 	}
 	rl.mu.Lock()
 	rpm, maxConn := rl.rpm, rl.maxConn
-	if rpm <= 0 && maxConn <= 0 {
-		rl.mu.Unlock()
-		return true // limits disabled
-	}
 	l := rl.getLimiterLocked(hashIdentity(identity))
-	rl.mu.Unlock()
 	l.mu.Lock()
+	rl.mu.Unlock()
 	defer l.mu.Unlock()
+	// Track every admitted request even while enforcement is disabled.
+	// Release cannot otherwise distinguish it from an older counted request.
 	l.lastSeen = time.Now()
 
 	// Concurrency check

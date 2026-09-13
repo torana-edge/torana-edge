@@ -62,7 +62,7 @@ type egressMeter struct {
 	mu     sync.Mutex
 	calls  map[string][]time.Time // plugin → call timestamps in the last minute
 	tokens map[string][]tokenSpend
-	serial map[string]*sync.Mutex // token-budgeted requests, keyed by plugin
+	serial map[string]chan struct{} // cancellable token-budget admission, keyed by plugin
 	now    func() time.Time
 }
 
@@ -75,7 +75,7 @@ func newEgressMeter() *egressMeter {
 	return &egressMeter{
 		calls:  make(map[string][]time.Time),
 		tokens: make(map[string][]tokenSpend),
-		serial: make(map[string]*sync.Mutex),
+		serial: make(map[string]chan struct{}),
 		now:    time.Now,
 	}
 }
@@ -153,19 +153,27 @@ func (m *egressMeter) authorize(plugin string, budget provider.EgressBudget) err
 // lockTokenBudget serializes admission and post-response accounting when a
 // token ceiling is enabled. Without this, many concurrent calls can all pass
 // the same pre-spend check and collectively overshoot by many calls.
-func (m *egressMeter) lockTokenBudget(plugin string, budget provider.EgressBudget) func() {
+func (m *egressMeter) lockTokenBudget(ctx context.Context, plugin string, budget provider.EgressBudget) (func(), error) {
 	if budget.MaxTokensPerHour <= 0 {
-		return func() {}
+		return func() {}, ctx.Err()
 	}
 	m.mu.Lock()
 	lock := m.serial[plugin]
 	if lock == nil {
-		lock = &sync.Mutex{}
+		lock = make(chan struct{}, 1)
 		m.serial[plugin] = lock
 	}
 	m.mu.Unlock()
-	lock.Lock()
-	return lock.Unlock
+	select {
+	case lock <- struct{}{}:
+		if err := ctx.Err(); err != nil {
+			<-lock
+			return nil, err
+		}
+		return func() { <-lock }, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
 }
 
 // classifyEgressRefusal maps an authorize failure to the ErrorCode a plugin
@@ -355,6 +363,8 @@ func (s *Server) sendPluginRequestWithBudget(ctx context.Context, pluginName, pa
 	targetCopy.RawQuery = u.RawQuery
 	targetCopy.Fragment = ""
 	target := &targetCopy
+	// Defense-in-depth invariant for future edits: today's copy only changes
+	// path/query fields; the guest-authority rejection above is the primary guard.
 	if target.Scheme != base.Scheme || target.Host != base.Host || target.Hostname() != base.Hostname() {
 		return wasm.ExtensionRefusal(pb.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "path escapes the configured provider origin, got %q", path)
 	}
@@ -402,7 +412,11 @@ func (s *Server) sendPluginRequestWithBudget(ctx context.Context, pluginName, pa
 	if boundBudget != nil {
 		budget = *boundBudget
 	}
-	unlockBudget := s.egress.lockTokenBudget(budgetKey, budget)
+	unlockBudget, err := s.egress.lockTokenBudget(callCtx, budgetKey, budget)
+	if err != nil {
+		s.stats.RecordPluginCounter(pluginName, "egress_refused", 1)
+		return wasm.ExtensionRefusal(pb.ErrorCode_ERROR_CODE_UNAVAILABLE, "token budget admission canceled: %v", err)
+	}
 	defer unlockBudget()
 	if err := s.egress.authorize(budgetKey, budget); err != nil {
 		s.stats.RecordPluginCounter(pluginName, "egress_refused", 1)

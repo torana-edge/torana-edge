@@ -1,6 +1,8 @@
 package cache
 
 import (
+	"crypto/tls"
+	"crypto/x509"
 	"fmt"
 	"os"
 	"time"
@@ -23,7 +25,8 @@ type Config struct {
 	TTLSeconds int `json:"ttl_seconds,omitempty"`
 	// MaxEntries and MaxBytes bound the in-process LRU cache. Zero selects the
 	// defaults. Redis deployments should configure their server-side eviction
-	// policy separately.
+	// policy separately. MaxBytes also limits individual key+value admission
+	// only in memory; it is not a cross-backend per-value quota.
 	MaxEntries int `json:"max_entries,omitempty"`
 	MaxBytes   int `json:"max_bytes,omitempty"`
 	// Redis configures the redis backend.
@@ -41,6 +44,36 @@ type RedisConfig struct {
 	DB          int    `json:"db,omitempty"`
 	// Prefix namespaces this deployment's keys. Default "torana:".
 	Prefix string `json:"prefix,omitempty"`
+	// TLS enables verified transport encryption (TLS 1.2 or newer).
+	TLS bool `json:"tls,omitempty"`
+	// ServerName overrides the certificate DNS name; CAFile adds trusted PEM CAs.
+	ServerName string `json:"server_name,omitempty"`
+	CAFile     string `json:"ca_file,omitempty"`
+}
+
+func (c RedisConfig) tlsConfig() (*tls.Config, error) {
+	if !c.TLS {
+		if c.ServerName != "" || c.CAFile != "" {
+			return nil, fmt.Errorf("redis server_name and ca_file require tls=true")
+		}
+		return nil, nil
+	}
+	result := &tls.Config{MinVersion: tls.VersionTLS12, ServerName: c.ServerName}
+	if c.CAFile != "" {
+		pem, err := os.ReadFile(c.CAFile)
+		if err != nil {
+			return nil, fmt.Errorf("read redis CA: %w", err)
+		}
+		roots, err := x509.SystemCertPool()
+		if err != nil {
+			roots = x509.NewCertPool()
+		}
+		if !roots.AppendCertsFromPEM(pem) {
+			return nil, fmt.Errorf("redis ca_file contains no certificates")
+		}
+		result.RootCAs = roots
+	}
+	return result, nil
 }
 
 // New builds the configured Store. An empty config yields the in-memory
@@ -76,7 +109,11 @@ func New(cfg Config) (Store, error) {
 		if prefix == "" {
 			prefix = "torana:"
 		}
-		store, err := NewRedisStore(addr, password, cfg.Redis.DB, prefix, ttl)
+		tlsConfig, err := cfg.Redis.tlsConfig()
+		if err != nil {
+			return nil, err
+		}
+		store, err := newRedisStore(addr, password, cfg.Redis.DB, prefix, ttl, tlsConfig)
 		if err != nil {
 			return nil, fmt.Errorf("cache: redis backend %q: %w", addr, err)
 		}

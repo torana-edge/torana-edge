@@ -203,6 +203,14 @@ rather than being locked out. `max_calls_per_minute` is the hard ceiling.
 collectively large; it is checked against tokens already spent, since a call's
 cost is not knowable before making it, so it can overshoot by one call.
 
+To preserve that bound, token-budgeted calls for the same plugin/resource are
+serialized through provider completion and accounting. Waiting consumes the
+caller's timeout and is cancellable; a canceled wait consumes no call slot.
+Different resource keys can proceed independently. Concurrent reservations
+would require a defensible per-call token upper bound, which this API does not
+currently provide; enabling parallelism by simply dropping the lock would
+weaken the spending guarantee.
+
 Every plugin-originated request appears in the live feed marked
 `plugin-egress` and attributed to the plugin, and `/stats` counts calls and
 refusals per plugin. If a plugin is spending, you can see it.
