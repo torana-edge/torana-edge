@@ -135,3 +135,43 @@ func TestHTTPApprovalEditorPreservesMethodSubset(t *testing.T) {
 		t.Fatal("HTTP approval save still restores every manifest method instead of the operator's subset")
 	}
 }
+
+func TestThemeAndFontsAreEmbedded(t *testing.T) {
+	handler := controlplane.Handler()
+	for _, asset := range []struct{ path, marker string }{
+		{"/theme.js", "torana-controlplane-theme"},
+		{"/fonts.css", "font-display: swap"},
+		{"/fonts/bricolage-grotesque-latin.woff2", "wOF2"},
+		{"/fonts/geist-latin.woff2", "wOF2"},
+		{"/fonts/jetbrains-mono-latin.woff2", "wOF2"},
+		{"/fonts/Bricolage-OFL.txt", "SIL OPEN FONT LICENSE"},
+		{"/fonts/Geist-OFL.txt", "SIL OPEN FONT LICENSE"},
+		{"/fonts/JetBrainsMono-OFL.txt", "SIL OPEN FONT LICENSE"},
+	} {
+		t.Run(asset.path, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, asset.path, nil))
+			if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), asset.marker) {
+				t.Fatalf("embedded asset %s missing or invalid: status %d", asset.path, rec.Code)
+			}
+		})
+	}
+	raw, err := os.ReadFile("dist/index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	header := regexp.MustCompile(`(?s)<header.*?</header>`).Find(raw)
+	if !strings.Contains(string(header), `id="themeChoice"`) {
+		t.Fatal("theme control must stay in the header")
+	}
+	if !strings.Contains(string(raw), `<script src="theme.js"></script>`) {
+		t.Fatal("missing early theme initializer")
+	}
+	fonts, err := os.ReadFile("dist/fonts.css")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(fonts), "https://") {
+		t.Fatal("fonts must be served locally")
+	}
+}
