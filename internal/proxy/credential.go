@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"net/url"
 	"slices"
 	"strings"
 
@@ -22,6 +23,7 @@ import (
 // on the way through and never put back.
 type callerCredentials struct {
 	headers http.Header
+	query   []string
 }
 
 // rateIdentity returns a domain-separated caller credential identity. The
@@ -31,6 +33,14 @@ func (c callerCredentials) rateIdentity() string {
 	for _, name := range []string{"Authorization", "X-Api-Key", "X-Goog-Api-Key", "Api-Key"} {
 		if values := c.headers.Values(name); len(values) > 0 {
 			return http.CanonicalHeaderKey(name) + "\x00" + strings.Join(values, "\x00")
+		}
+	}
+	// Normalize URL escaping and parameter order while retaining repeated
+	// values. Query and header authentication occupy separate identity domains.
+	if len(c.query) > 0 {
+		values, err := url.ParseQuery(strings.Join(c.query, "&"))
+		if err == nil && len(values) > 0 {
+			return "query\x00" + values.Encode()
 		}
 	}
 	return ""
@@ -56,6 +66,29 @@ var neverForwardedHeaders = []string{
 	"Proxy-Authorization",
 }
 
+// These query names are reserved for provider authentication in every format:
+// a route or fallback may change vendors. Keep unrelated parameters verbatim
+// (including ordering and escaping) instead of re-encoding the entire query.
+func splitCredentialQuery(raw string) (ordinary string, credentials []string) {
+	var kept []string
+	for _, part := range strings.Split(raw, "&") {
+		// Go rejects semicolons in a query component, while some providers
+		// still parse them as separators. Drop ambiguous components rather
+		// than letting credentials hide inside an apparently ordinary value.
+		if strings.Contains(part, ";") {
+			continue
+		}
+		name, _, _ := strings.Cut(part, "=")
+		name, err := url.QueryUnescape(name)
+		if err == nil && (name == "key" || name == "api_key" || name == "api-key" || name == "access_token") {
+			credentials = append(credentials, part)
+		} else {
+			kept = append(kept, part)
+		}
+	}
+	return strings.Join(kept, "&"), credentials
+}
+
 func callerCredentialsFrom(req *http.Request) callerCredentials {
 	snapshot := make(http.Header, len(callerForwardedHeaders))
 	if req == nil {
@@ -66,7 +99,11 @@ func callerCredentialsFrom(req *http.Request) callerCredentials {
 			snapshot[http.CanonicalHeaderKey(name)] = slices.Clone(values)
 		}
 	}
-	return callerCredentials{headers: snapshot}
+	var query []string
+	if req.URL != nil {
+		_, query = splitCredentialQuery(req.URL.RawQuery)
+	}
+	return callerCredentials{headers: snapshot, query: query}
 }
 
 // applyProviderCredential enforces the target provider's explicit auth mode.
@@ -79,6 +116,27 @@ func callerCredentialsFrom(req *http.Request) callerCredentials {
 // point of that mode is that the caller's secrets do not leave the machine.
 
 func applyProviderCredential(ctx context.Context, req *http.Request, target provider.Provider, caller callerCredentials, resolve func(context.Context, string) ([]byte, error)) error {
+	ordinary, currentQueryCredentials := splitCredentialQuery(req.URL.RawQuery)
+	if target.Auth.EffectiveMode() == "caller" {
+		if !slices.Equal(currentQueryCredentials, caller.query) || strings.Contains(req.URL.RawQuery, ";") {
+			req.URL.RawQuery = ordinary
+			if len(caller.query) > 0 {
+				if ordinary != "" {
+					req.URL.RawQuery += "&"
+				}
+				req.URL.RawQuery += strings.Join(caller.query, "&")
+			}
+		}
+	} else {
+		req.URL.RawQuery = ordinary
+	}
+	return applyProviderCredentialHeaders(ctx, req, target, caller, resolve)
+}
+
+// Plugin egress has no inherited caller URL: its query is explicitly supplied
+// by the plugin within its approved origin. Apply managed header auth without
+// interpreting functional query fields as intercepted caller credentials.
+func applyProviderCredentialHeaders(ctx context.Context, req *http.Request, target provider.Provider, caller callerCredentials, resolve func(context.Context, string) ([]byte, error)) error {
 	for _, name := range callerForwardedHeaders {
 		req.Header.Del(name)
 	}
