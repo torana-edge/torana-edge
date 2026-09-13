@@ -58,6 +58,7 @@ func (s *Server) applyRoute(req *http.Request, chat *engine.ChatRequest, origFor
 		return
 	}
 	req.Header = authCandidate.Header
+	req.URL.RawQuery = authCandidate.URL.RawQuery
 
 	// Only now, with every check passed. A verdict is ONE decision: "send this
 	// to provider X as model Y". Applying the model up front meant a verdict

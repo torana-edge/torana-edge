@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"net/url"
 	"slices"
 	"strings"
 
@@ -22,6 +23,7 @@ import (
 // on the way through and never put back.
 type callerCredentials struct {
 	headers http.Header
+	query   []string
 }
 
 // rateIdentity returns a domain-separated caller credential identity. The
@@ -56,6 +58,23 @@ var neverForwardedHeaders = []string{
 	"Proxy-Authorization",
 }
 
+// These query names are reserved for provider authentication in every format:
+// a route or fallback may change vendors. Keep unrelated parameters verbatim
+// (including ordering and escaping) instead of re-encoding the entire query.
+func splitCredentialQuery(raw string) (ordinary string, credentials []string) {
+	var kept []string
+	for _, part := range strings.Split(raw, "&") {
+		name, _, _ := strings.Cut(part, "=")
+		name, err := url.QueryUnescape(name)
+		if err == nil && (name == "key" || name == "api_key" || name == "api-key" || name == "access_token") {
+			credentials = append(credentials, part)
+		} else {
+			kept = append(kept, part)
+		}
+	}
+	return strings.Join(kept, "&"), credentials
+}
+
 func callerCredentialsFrom(req *http.Request) callerCredentials {
 	snapshot := make(http.Header, len(callerForwardedHeaders))
 	if req == nil {
@@ -66,7 +85,11 @@ func callerCredentialsFrom(req *http.Request) callerCredentials {
 			snapshot[http.CanonicalHeaderKey(name)] = slices.Clone(values)
 		}
 	}
-	return callerCredentials{headers: snapshot}
+	var query []string
+	if req.URL != nil {
+		_, query = splitCredentialQuery(req.URL.RawQuery)
+	}
+	return callerCredentials{headers: snapshot, query: query}
 }
 
 // applyProviderCredential enforces the target provider's explicit auth mode.
@@ -79,6 +102,20 @@ func callerCredentialsFrom(req *http.Request) callerCredentials {
 // point of that mode is that the caller's secrets do not leave the machine.
 
 func applyProviderCredential(ctx context.Context, req *http.Request, target provider.Provider, caller callerCredentials, resolve func(context.Context, string) ([]byte, error)) error {
+	ordinary, currentQueryCredentials := splitCredentialQuery(req.URL.RawQuery)
+	if target.Auth.EffectiveMode() == "caller" {
+		if !slices.Equal(currentQueryCredentials, caller.query) {
+			req.URL.RawQuery = ordinary
+			if len(caller.query) > 0 {
+				if ordinary != "" {
+					req.URL.RawQuery += "&"
+				}
+				req.URL.RawQuery += strings.Join(caller.query, "&")
+			}
+		}
+	} else {
+		req.URL.RawQuery = ordinary
+	}
 	for _, name := range callerForwardedHeaders {
 		req.Header.Del(name)
 	}

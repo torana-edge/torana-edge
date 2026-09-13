@@ -172,6 +172,12 @@ Every provider has one authentication mode:
 - `credential` resolves a named Torana credential and injects it host-side;
 - `none` sends no credential, useful for a local model.
 
+Query parameters named `key`, `api_key`, `api-key`, and `access_token` are
+reserved for authentication. Torana strips them in `credential` and `none`
+mode, including during routing and failover. In `caller` mode it restores
+them from the ingress snapshot. Other query parameters keep their original
+ordering and encoding.
+
 The full source, slot, refresh, and custom-provider model is documented in
 [Credentials](CREDENTIALS.md).
 
