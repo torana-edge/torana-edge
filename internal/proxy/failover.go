@@ -30,6 +30,13 @@ type rateLimitBody struct {
 	once        sync.Once
 }
 
+// retryPrefixBody replays the buffered prefix, then streams the unread tail.
+// Closing it still closes the original request body owned by the transport.
+type retryPrefixBody struct {
+	io.Reader
+	io.Closer
+}
+
 func (r *rateLimitBody) Close() error {
 	var err error
 	r.once.Do(func() {
@@ -91,8 +98,8 @@ func (t *failoverRoundTripper) RoundTrip(req *http.Request) (*http.Response, err
 		lr := io.LimitReader(req.Body, maxBodySize+1)
 		var readErr error
 		bodyBytes, readErr = io.ReadAll(lr)
-		req.Body.Close()
 		if readErr != nil {
+			req.Body.Close()
 			// The body is partially consumed by now and cannot be put back.
 			// Discarding this error sent whatever HAD been read as though it
 			// were the whole request: a prompt truncated mid-sentence, which
@@ -100,17 +107,24 @@ func (t *failoverRoundTripper) RoundTrip(req *http.Request) (*http.Response, err
 			// here is better than refusing.
 			t.rateLimiter.Release(identity)
 			discardCompactionReports(reqStateFrom(req.Context()))
+			if rs := reqStateFrom(req.Context()); rs != nil {
+				rs.AuditUpstreamRequestBytes = 0
+				rs.AuditErrorCode = "request_body_read_failed"
+				rs.Verdict = "host_error"
+			}
 			return nil, fmt.Errorf("failover: reading the request body for retry: %w", readErr)
 		}
 		if len(bodyBytes) > maxBodySize {
-			// The body has been consumed and closed. Sending the first
-			// attempt now would forward only its unread tail (or fail on
-			// the closed reader), so refuse before reaching any provider.
-			t.rateLimiter.Release(identity)
-			discardCompactionReports(reqStateFrom(req.Context()))
-			return nil, fmt.Errorf("failover: outgoing request body exceeds %d bytes", maxBodySize)
+			// This is a retry-buffer limit, not a new outbound size policy.
+			// Preserve the original request for one attempt without buffering
+			// the remaining bytes or trying to replay them after a failure.
+			req.Body = &retryPrefixBody{Reader: io.MultiReader(bytes.NewReader(bodyBytes), req.Body), Closer: req.Body}
+			bodyBytes = nil
+			fallbacks = nil
+		} else {
+			req.Body.Close()
+			req.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 		}
-		req.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 	}
 
 	// First attempt.
