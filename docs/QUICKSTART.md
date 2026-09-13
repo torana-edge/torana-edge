@@ -177,6 +177,11 @@ reserved for authentication. Torana strips them in `credential` and `none`
 mode, including during routing and failover. In `caller` mode it restores
 them from the ingress snapshot. Other query parameters keep their original
 ordering and encoding.
+This policy applies to intercepted caller traffic. Plugin-originated provider
+requests retain their explicitly supplied query fields and use managed header
+authentication (or no authentication). Raw semicolon-containing components in
+intercepted queries are discarded because providers disagree on their parsing;
+encode a literal semicolon in a parameter value as `%3B`.
 
 The full source, slot, refresh, and custom-provider model is documented in
 [Credentials](CREDENTIALS.md).

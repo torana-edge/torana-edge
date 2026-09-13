@@ -35,6 +35,14 @@ func (c callerCredentials) rateIdentity() string {
 			return http.CanonicalHeaderKey(name) + "\x00" + strings.Join(values, "\x00")
 		}
 	}
+	// Normalize URL escaping and parameter order while retaining repeated
+	// values. Query and header authentication occupy separate identity domains.
+	if len(c.query) > 0 {
+		values, err := url.ParseQuery(strings.Join(c.query, "&"))
+		if err == nil && len(values) > 0 {
+			return "query\x00" + values.Encode()
+		}
+	}
 	return ""
 }
 
@@ -64,6 +72,12 @@ var neverForwardedHeaders = []string{
 func splitCredentialQuery(raw string) (ordinary string, credentials []string) {
 	var kept []string
 	for _, part := range strings.Split(raw, "&") {
+		// Go rejects semicolons in a query component, while some providers
+		// still parse them as separators. Drop ambiguous components rather
+		// than letting credentials hide inside an apparently ordinary value.
+		if strings.Contains(part, ";") {
+			continue
+		}
 		name, _, _ := strings.Cut(part, "=")
 		name, err := url.QueryUnescape(name)
 		if err == nil && (name == "key" || name == "api_key" || name == "api-key" || name == "access_token") {
@@ -104,7 +118,7 @@ func callerCredentialsFrom(req *http.Request) callerCredentials {
 func applyProviderCredential(ctx context.Context, req *http.Request, target provider.Provider, caller callerCredentials, resolve func(context.Context, string) ([]byte, error)) error {
 	ordinary, currentQueryCredentials := splitCredentialQuery(req.URL.RawQuery)
 	if target.Auth.EffectiveMode() == "caller" {
-		if !slices.Equal(currentQueryCredentials, caller.query) {
+		if !slices.Equal(currentQueryCredentials, caller.query) || strings.Contains(req.URL.RawQuery, ";") {
 			req.URL.RawQuery = ordinary
 			if len(caller.query) > 0 {
 				if ordinary != "" {
@@ -116,6 +130,13 @@ func applyProviderCredential(ctx context.Context, req *http.Request, target prov
 	} else {
 		req.URL.RawQuery = ordinary
 	}
+	return applyProviderCredentialHeaders(ctx, req, target, caller, resolve)
+}
+
+// Plugin egress has no inherited caller URL: its query is explicitly supplied
+// by the plugin within its approved origin. Apply managed header auth without
+// interpreting functional query fields as intercepted caller credentials.
+func applyProviderCredentialHeaders(ctx context.Context, req *http.Request, target provider.Provider, caller callerCredentials, resolve func(context.Context, string) ([]byte, error)) error {
 	for _, name := range callerForwardedHeaders {
 		req.Header.Del(name)
 	}

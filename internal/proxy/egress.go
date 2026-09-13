@@ -388,7 +388,7 @@ func (s *Server) sendPluginRequestWithBudget(ctx context.Context, pluginName, pa
 	if prov.Auth.EffectiveMode() == "caller" {
 		return wasm.ExtensionRefusal(pb.ErrorCode_ERROR_CODE_NOT_CONFIGURED, "provider %q uses caller auth; plugin-originated calls require credential or none", req.Provider)
 	}
-	if err := applyProviderCredential(callCtx, httpReq, prov, callerCredentials{}, s.resolveCredential); err != nil {
+	if err := applyProviderCredentialHeaders(callCtx, httpReq, prov, callerCredentials{}, s.resolveCredential); err != nil {
 		return wasm.ExtensionRefusal(pb.ErrorCode_ERROR_CODE_NOT_CONFIGURED, "provider credential unavailable")
 	}
 

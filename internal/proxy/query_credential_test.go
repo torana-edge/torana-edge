@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -11,6 +12,87 @@ import (
 	"github.com/torana-edge/torana-edge/internal/provider"
 	"github.com/torana-edge/torana-edge/internal/wasm"
 )
+
+func TestQueryCredentialRateIdentity(t *testing.T) {
+	identity := func(query string) string {
+		r, _ := http.NewRequest(http.MethodPost, "https://provider.invalid/?"+query, nil)
+		return callerCredentialsFrom(r).rateIdentity()
+	}
+	a := identity("key=alice")
+	b := identity("key=bob")
+	if a == "" || b == "" || a == b {
+		t.Fatal("query callers share an identity")
+	}
+	if a != identity("alt=sse&k%65y=%61lice") {
+		t.Fatal("escaping or ordinary parameters changed identity")
+	}
+	if a == identity("api_key=alice") {
+		t.Fatal("query schemes are not domain-separated")
+	}
+	if identity("key=alice&key=second") == a {
+		t.Fatal("repeated credentials were discarded")
+	}
+	rl := NewRateLimiter(0, 1)
+	defer rl.Close()
+	if !rl.Acquire(a) {
+		t.Fatal("first caller refused")
+	}
+	defer rl.Release(a)
+	if !rl.Acquire(b) {
+		t.Fatal("second caller shared the first caller's concurrency bucket")
+	}
+	defer rl.Release(b)
+	if rl.Acquire(a) {
+		rl.Release(a)
+		t.Fatal("same caller escaped its concurrency limit")
+	}
+}
+
+func TestQueryCredentialsDiscardAmbiguousSemicolonComponents(t *testing.T) {
+	for _, mode := range []string{"caller", "credential", "none"} {
+		r, _ := http.NewRequest(http.MethodPost, "https://provider.invalid/?alt=sse;key=secret&key=other;alt=json&keep=a%3Bb", nil)
+		caller := callerCredentialsFrom(r)
+		err := applyProviderCredential(context.Background(), r, provider.Provider{Auth: provider.ProviderAuth{Mode: mode}}, caller,
+			func(context.Context, string) ([]byte, error) { return []byte("managed"), nil })
+		if err != nil {
+			t.Fatal(err)
+		}
+		if r.URL.RawQuery != "keep=a%3Bb" {
+			t.Errorf("%s: ambiguous query survived: %q", mode, r.URL.RawQuery)
+		}
+	}
+}
+
+func TestPluginEgressPreservesFunctionalQueryFields(t *testing.T) {
+	const query = "key=document-id&api_key=field-name&access_token=field&keep=a%3Bb"
+	seen := make(chan string, 1)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen <- r.URL.RawQuery
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"ok"}}]}`))
+	}))
+	defer upstream.Close()
+	cfg := provider.DefaultConfig()
+	cfg.Providers = map[string]provider.Provider{"test": {URL: upstream.URL, Format: "openai", Auth: provider.ProviderAuth{Mode: "none"}}}
+	cfg.Plugins.Runtime.Egress = map[string]provider.EgressBudget{"test-plugin": {MaxCallsPerMinute: 10}}
+	srv, err := New(Config{Providers: cfg})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer srv.Shutdown(context.Background())
+	_, refusal := send(t, srv, "test-plugin", egressPayload(t, "test", "/v1/chat/completions?"+query))
+	if refusal != nil {
+		t.Fatalf("egress refused: %v", refusal)
+	}
+	select {
+	case got := <-seen:
+		if got != query {
+			t.Fatalf("plugin query changed to %q", got)
+		}
+	default:
+		t.Fatal("plugin request never reached upstream")
+	}
+}
 
 // Authentication in a URL must obey the same policy as authentication headers,
 // including escaped names and repeated keys. Unrelated query bytes stay exact.
