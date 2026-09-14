@@ -94,7 +94,9 @@ you export it, apply fails with `stale_revision` / HTTP 412. Export a fresh
 snapshot and reapply your intended edits after reviewing the changes. Do not
 copy a new revision onto an old configuration to bypass the check.
 
-All mutations require `--yes`. They are not retried automatically. If a request
+The live administration mutations in this guide require `--yes`; existing
+disk-based credential and plugin-file commands retain their own interfaces.
+Live mutations are not retried automatically. If a request
 times out or the connection drops, inspect the live state before retrying:
 the server may already have applied it. After changing the listening port,
 the managed instance record points subsequent commands to the new port.
@@ -232,7 +234,7 @@ should expose its automatable actions through `agent.json`, as described in
 | Digest approval, permissions, bindings, failure mode | `plugin approve NAME --file … --yes`, or pipeline snapshot |
 | Enable, disable, revoke | `plugin enable`, `plugin disable`, `plugin revoke` |
 | Pipeline/per-hook order and combined edits | `pipeline get`, `pipeline apply`, `pipeline order` |
-| Plugin schema/settings | `plugin config get`, `plugin config apply` |
+| Plugin schema/settings | `plugin inspect NAME`, `plugin config get`, `plugin config apply` |
 | Advertised plugin agent operations | `agent discover`, `agent call` |
 | Private plugin output files | Existing `plugin files` / `plugin file` commands |
 
