@@ -50,11 +50,14 @@
 package pluginstate
 
 import (
+	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 )
@@ -79,8 +82,10 @@ type Store struct {
 	mu sync.RWMutex
 	// flushMu serializes durable snapshots. Without it, two Set calls could
 	// write snapshots concurrently and an older snapshot could rename last.
-	flushMu sync.Mutex
-	data    map[string]map[string]string // plugin → key → value
+	flushMu  sync.Mutex
+	data     map[string]map[string]string // plugin → key → value
+	versions map[string]map[string]string
+	counter  uint64
 
 	path             string
 	maxValueBytes    int
@@ -116,6 +121,7 @@ func New(opts Options) (*Store, error) {
 	}
 	s := &Store{
 		data:             make(map[string]map[string]string),
+		versions:         make(map[string]map[string]string),
 		path:             opts.Path,
 		maxValueBytes:    opts.MaxValueBytes,
 		maxTotalBytes:    opts.MaxTotalBytes,
@@ -139,6 +145,181 @@ func (s *Store) Get(plugin, key string) (string, bool) {
 	defer s.mu.RUnlock()
 	v, ok := s.data[plugin][key]
 	return v, ok
+}
+
+// PageEntry is one durable state entry including its opaque version token.
+type PageEntry struct{ Key, Value, Version string }
+
+type stateEnvelope struct {
+	Format  int                             `json:"format"`
+	Counter uint64                          `json:"counter"`
+	Data    map[string]map[string]PageEntry `json:"data"`
+}
+type cursorToken struct{ Plugin, Prefix, Last string }
+
+func (s *Store) GetVersioned(plugin, key string) (string, string, bool) {
+	if s == nil || plugin == "" || key == "" {
+		return "", "", false
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	v, ok := s.data[plugin][key]
+	if !ok {
+		return "", "", false
+	}
+	return v, s.versions[plugin][key], true
+}
+
+func (s *Store) nextVersion() (string, error) {
+	if s.counter == ^uint64(0) {
+		return "", ErrVersionExhausted
+	}
+	s.counter++
+	return strconv.FormatUint(s.counter, 10), nil
+}
+
+var ErrVersionExhausted = errors.New("plugin state version counter exhausted")
+
+func (s *Store) CompareAndSet(plugin, key, value string, expected *string) (bool, string, error) {
+	if s == nil {
+		return false, "", errors.New("state store not configured")
+	}
+	if plugin == "" || key == "" {
+		return false, "", errors.New("plugin and key are required")
+	}
+	if len(value) > s.maxValueBytes {
+		return false, "", fmt.Errorf("value is %d bytes, limit is %d", len(value), s.maxValueBytes)
+	}
+	s.flushMu.Lock()
+	defer s.flushMu.Unlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	cur, exists := s.versions[plugin][key]
+	if (expected == nil && exists) || (expected != nil && (!exists || *expected != cur)) {
+		return false, cur, nil
+	}
+	if !exists && len(s.data[plugin]) >= s.maxKeysPerPlugin {
+		return false, "", fmt.Errorf("plugin %q already holds %d keys, the per-plugin limit", plugin, s.maxKeysPerPlugin)
+	}
+	if s.counter == ^uint64(0) {
+		return false, "", ErrVersionExhausted
+	}
+	candidate := cloneData(s.data)
+	vers := cloneData(s.versions)
+	total := s.totalBytes
+	if candidate[plugin] == nil {
+		candidate[plugin] = map[string]string{}
+	}
+	if vers[plugin] == nil {
+		vers[plugin] = map[string]string{}
+	}
+	if exists {
+		total -= entrySize(key, curValue(s.data, plugin, key))
+	}
+	if total+entrySize(key, value) > s.maxTotalBytes {
+		return false, "", fmt.Errorf("store would exceed its %d byte limit", s.maxTotalBytes)
+	}
+	version, _ := s.nextVersion()
+	candidate[plugin][key] = value
+	vers[plugin][key] = version
+	if err := s.persistVersioned(candidate, vers, s.counter); err != nil {
+		// The rename may already have happened before a later fsync error;
+		// consume the token permanently to prevent ABA on retry.
+		return false, "", err
+	}
+	s.data, s.versions, s.totalBytes = candidate, vers, total+entrySize(key, value)
+	return true, version, nil
+}
+
+func curValue(d map[string]map[string]string, p, k string) string { return d[p][k] }
+
+func (s *Store) CompareAndDelete(plugin, key, expected string) (bool, error) {
+	if s == nil {
+		return false, errors.New("state store not configured")
+	}
+	s.flushMu.Lock()
+	defer s.flushMu.Unlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.versions[plugin][key] != expected {
+		return false, nil
+	}
+	candidate := cloneData(s.data)
+	vers := cloneData(s.versions)
+	total := s.totalBytes - totalEntry(candidate, plugin, key)
+	delete(candidate[plugin], key)
+	delete(vers[plugin], key)
+	if len(candidate[plugin]) == 0 {
+		delete(candidate, plugin)
+		delete(vers, plugin)
+	}
+	if err := s.persistVersioned(candidate, vers, s.counter); err != nil {
+		return false, err
+	}
+	s.data, s.versions, s.totalBytes = candidate, vers, total
+	return true, nil
+}
+
+func totalEntry(d map[string]map[string]string, p, k string) int {
+	if v, ok := d[p][k]; ok {
+		return entrySize(k, v)
+	}
+	return 0
+}
+
+func (s *Store) Scan(plugin, prefix, cursor string, limit, maxBytes int) ([]PageEntry, string, error) {
+	if s == nil || plugin == "" {
+		return nil, "", errors.New("plugin is required")
+	}
+	if limit < 1 || limit > 256 || maxBytes < 1 {
+		return nil, "", errors.New("invalid scan bounds")
+	}
+	last := ""
+	if cursor != "" {
+		raw, e := base64.RawURLEncoding.DecodeString(cursor)
+		if e != nil {
+			return nil, "", errors.New("invalid cursor")
+		}
+		var c cursorToken
+		if json.Unmarshal(raw, &c) != nil || c.Plugin != plugin || c.Prefix != prefix {
+			return nil, "", errors.New("invalid cursor")
+		}
+		last = c.Last
+	}
+	s.mu.RLock()
+	keys := make([]string, 0)
+	for k := range s.data[plugin] {
+		if strings.HasPrefix(k, prefix) && k > last {
+			keys = append(keys, k)
+		}
+	}
+	sort.Strings(keys)
+	out := make([]PageEntry, 0, limit)
+	bytes := 0
+	for _, k := range keys {
+		v := s.data[plugin][k]
+		e := PageEntry{k, v, s.versions[plugin][k]}
+		n := len(k) + len(v) + len(e.Version)
+		if len(out) == 0 && n > maxBytes {
+			return nil, "", errors.New("first scan entry exceeds byte budget")
+		}
+		if len(out) >= limit || bytes+n > maxBytes {
+			break
+		}
+		out = append(out, e)
+		bytes += n
+		last = k
+	}
+	s.mu.RUnlock()
+	if len(out) == 0 || last == "" {
+		return out, "", nil
+	}
+	more := len(keys) > 0 && last < keys[len(keys)-1]
+	if !more {
+		return out, "", nil
+	}
+	raw, _ := json.Marshal(cursorToken{plugin, prefix, last})
+	return out, base64.RawURLEncoding.EncodeToString(raw), nil
 }
 
 // Set stores a value, replacing any previous one.
@@ -183,11 +364,24 @@ func (s *Store) Set(plugin, key, value string) error {
 	}
 	bucket[key] = value
 	totalBytes += delta
-	if err := s.persist(candidate); err != nil {
+	s.mu.Lock()
+	version, verr := s.nextVersion()
+	s.mu.Unlock()
+	if verr != nil {
+		return verr
+	}
+	versions := cloneData(s.versions)
+	if versions[plugin] == nil {
+		versions[plugin] = map[string]string{}
+	}
+	versions[plugin][key] = version
+	if err := s.persistVersioned(candidate, versions, s.counter); err != nil {
+		// Never reuse a token after an ambiguous filesystem failure.
 		return err
 	}
 	s.mu.Lock()
 	s.data = candidate
+	s.versions = versions
 	s.totalBytes = totalBytes
 	s.mu.Unlock()
 	return nil
@@ -224,7 +418,7 @@ func (s *Store) Delete(plugin, key string) error {
 	if !changed {
 		return nil
 	}
-	if err := s.persist(candidate); err != nil {
+	if err := s.persistVersioned(candidate, s.versions, s.counter); err != nil {
 		return err
 	}
 	s.mu.Lock()
@@ -299,16 +493,44 @@ func (s *Store) load() error {
 		}
 		return fmt.Errorf("read %s: %w", s.path, err)
 	}
-	var data map[string]map[string]string
-	if err := json.Unmarshal(raw, &data); err != nil {
+	var env stateEnvelope
+	if err := json.Unmarshal(raw, &env); err != nil {
 		// Keep going with an empty store rather than failing startup.
 		return fmt.Errorf("parse %s (starting with empty state): %w", s.path, err)
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.data = data
-	if s.data == nil {
-		s.data = make(map[string]map[string]string)
+	if env.Format == 1 && env.Data != nil {
+		s.counter = env.Counter
+		for p, b := range env.Data {
+			for k, e := range b {
+				if s.data[p] == nil {
+					s.data[p] = map[string]string{}
+				}
+				if s.versions[p] == nil {
+					s.versions[p] = map[string]string{}
+				}
+				s.data[p][k] = e.Value
+				s.versions[p][k] = e.Version
+			}
+		}
+	} else {
+		var data map[string]map[string]string
+		if err := json.Unmarshal(raw, &data); err != nil {
+			return fmt.Errorf("parse %s (starting with empty state): %w", s.path, err)
+		}
+		s.data = data
+		if s.data == nil {
+			s.data = map[string]map[string]string{}
+		}
+		s.versions = make(map[string]map[string]string)
+		for p, b := range s.data {
+			s.versions[p] = map[string]string{}
+			for k := range b {
+				s.counter++
+				s.versions[p][k] = strconv.FormatUint(s.counter, 10)
+			}
+		}
 	}
 	s.totalBytes = 0
 	for _, bucket := range s.data {
@@ -322,10 +544,21 @@ func (s *Store) load() error {
 // persist writes a candidate state without changing the visible in-memory
 // state. The caller holds flushMu.
 func (s *Store) persist(candidate map[string]map[string]string) error {
+	return s.persistVersioned(candidate, s.versions, s.counter)
+}
+
+func (s *Store) persistVersioned(candidate map[string]map[string]string, versions map[string]map[string]string, counter uint64) error {
 	if s.path == "" {
 		return nil
 	}
-	raw, err := json.MarshalIndent(candidate, "", "  ")
+	env := stateEnvelope{Format: 1, Counter: counter, Data: make(map[string]map[string]PageEntry)}
+	for p, b := range candidate {
+		env.Data[p] = map[string]PageEntry{}
+		for k, v := range b {
+			env.Data[p][k] = PageEntry{k, v, versions[p][k]}
+		}
+	}
+	raw, err := json.MarshalIndent(env, "", "  ")
 	if err != nil {
 		return fmt.Errorf("plugin state: encode: %w", err)
 	}
