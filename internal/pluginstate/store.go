@@ -60,6 +60,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 )
 
 const (
@@ -92,7 +93,9 @@ type Store struct {
 	maxTotalBytes    int
 	maxKeysPerPlugin int
 	totalBytes       int
-	readOnly         bool
+	readOnly         atomic.Bool
+	// afterRename is a test fault hook; set before sharing the store.
+	afterRename func() error
 }
 
 // Options configures a Store. Zero values select the defaults above.
@@ -132,7 +135,10 @@ func New(opts Options) (*Store, error) {
 		return s, nil
 	}
 	if err := s.load(); err != nil {
-		s.readOnly = true
+		s.readOnly.Store(true)
+		s.data = make(map[string]map[string]string)
+		s.versions = make(map[string]map[string]string)
+		s.totalBytes = 0
 		return s, fmt.Errorf("plugin state: %w", err)
 	}
 	return s, nil
@@ -186,7 +192,7 @@ func (s *Store) CompareAndSet(plugin, key, value string, expected *string) (bool
 	if s == nil {
 		return false, "", errors.New("state store not configured")
 	}
-	if s.readOnly {
+	if s.readOnly.Load() {
 		return false, "", errors.New("plugin state is read-only after corrupt load")
 	}
 	if plugin == "" || key == "" {
@@ -197,6 +203,9 @@ func (s *Store) CompareAndSet(plugin, key, value string, expected *string) (bool
 	}
 	s.flushMu.Lock()
 	defer s.flushMu.Unlock()
+	if s.readOnly.Load() {
+		return false, "", errors.New("state store requires reopen after a persistence failure")
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	cur, exists := s.versions[plugin][key]
@@ -247,6 +256,9 @@ func (s *Store) CompareAndDelete(plugin, key, expected string) (bool, error) {
 	}
 	s.flushMu.Lock()
 	defer s.flushMu.Unlock()
+	if s.readOnly.Load() {
+		return false, errors.New("state store requires reopen after a persistence failure")
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if _, ok := s.data[plugin][key]; !ok || s.versions[plugin][key] != expected {
@@ -339,7 +351,7 @@ func (s *Store) Set(plugin, key, value string) error {
 	if s == nil {
 		return fmt.Errorf("state store not configured")
 	}
-	if s.readOnly {
+	if s.readOnly.Load() {
 		return errors.New("plugin state is read-only after corrupt load")
 	}
 	if plugin == "" || key == "" {
@@ -353,6 +365,9 @@ func (s *Store) Set(plugin, key, value string) error {
 	// keep seeing the previous committed generation while persistence runs.
 	s.flushMu.Lock()
 	defer s.flushMu.Unlock()
+	if s.readOnly.Load() {
+		return errors.New("state store requires reopen after a persistence failure")
+	}
 	s.mu.RLock()
 	candidate := cloneData(s.data)
 	totalBytes := s.totalBytes
@@ -407,7 +422,7 @@ func (s *Store) Delete(plugin, key string) error {
 	if s == nil {
 		return fmt.Errorf("state store not configured")
 	}
-	if s.readOnly {
+	if s.readOnly.Load() {
 		return errors.New("plugin state is read-only after corrupt load")
 	}
 	if plugin == "" || key == "" {
@@ -416,6 +431,9 @@ func (s *Store) Delete(plugin, key string) error {
 
 	s.flushMu.Lock()
 	defer s.flushMu.Unlock()
+	if s.readOnly.Load() {
+		return errors.New("state store requires reopen after a persistence failure")
+	}
 	s.mu.RLock()
 	candidate := cloneData(s.data)
 	versions := cloneData(s.versions)
@@ -596,7 +614,17 @@ func (s *Store) persistVersioned(candidate map[string]map[string]string, version
 	return s.persistBytes(raw)
 }
 
-func (s *Store) persistBytes(raw []byte) error {
+func (s *Store) persistBytes(raw []byte) (result error) {
+	published := false
+	defer func() {
+		// Once rename succeeds, disk may contain the candidate even if directory
+		// sync fails. Refuse all further writes until reopen reconciles that state;
+		// stale in-memory values must never authorize a subsequent CAS.
+		if published && result != nil {
+			s.readOnly.Store(true)
+		}
+	}()
+
 	dir := filepath.Dir(s.path)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("plugin state: create %s: %w", dir, err)
@@ -624,6 +652,12 @@ func (s *Store) persistBytes(raw []byte) error {
 	}
 	if err := os.Rename(tmpName, s.path); err != nil {
 		return fmt.Errorf("plugin state: replace %s: %w", s.path, err)
+	}
+	published = true
+	if s.afterRename != nil {
+		if err := s.afterRename(); err != nil {
+			return err
+		}
 	}
 	dirHandle, err := os.Open(dir)
 	if err != nil {
