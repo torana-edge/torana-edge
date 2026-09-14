@@ -3399,9 +3399,9 @@ func (s *Server) newRuntime() *wasm.Runtime {
 		rt.StateCompareAndDeleteFunc = s.pluginState.CompareAndDelete
 		rt.StateScanFunc = s.pluginState.Scan
 	}
-	rt.ExecutionInfoFunc = func(ctx context.Context) *pbv1.ExecutionInfo {
+	rt.ExecutionInfoFunc = func(ctx context.Context) *pb.ExecutionInfo {
 		rs := reqStateFrom(ctx)
-		info := &pbv1.ExecutionInfo{MaxMemoryBytes: 64 << 20, MaxHostResponseBytes: 1 << 20, MaxStreamBufferBytes: 4 << 20}
+		info := &pb.ExecutionInfo{MaxMemoryBytes: 64 << 20, MaxHostResponseBytes: 1 << 20, MaxStreamBufferBytes: 4 << 20}
 		if rs == nil {
 			return info
 		}
