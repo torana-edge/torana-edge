@@ -148,8 +148,11 @@ without assuming they overlap input totals. If a reported count is negative,
 exceeds the result's `int32` range, or cached reads exceed an inclusive input
 total, the completion is returned with usage absent. Cost-sensitive guests can
 decline work with unknown cost without failing the hook; counts are never
-clamped or guessed. Ordinary provider responses and the plugin-egress feed
-retain their provider-native usage semantics.
+clamped or guessed. The host applies the same validity check before charging
+the hourly token budget, so an invalid report cannot exhaust it. These calls
+still consume the per-minute call budget; later valid usage still charges the
+token budget. Ordinary provider responses and the plugin-egress feed retain
+their provider-native usage semantics.
 Every model-service response is recorded in that feed before the guest decides
 whether its content is useful, including empty completions.
 

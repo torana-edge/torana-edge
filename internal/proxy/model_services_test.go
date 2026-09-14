@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -249,15 +251,21 @@ func TestModelServiceInvalidUsagePreservesCompletion(t *testing.T) {
 	}{
 		{"inconsistent_cache_read", 10, 2, 80},
 		{"negative_input", -1, 2, 0},
+		{"input_exceeds_int32", 2147483648, 2, 0},
 		{"output_exceeds_int32", 100, 2147483648, 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			var calls atomic.Int32
 			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 				w.Header().Set("Content-Type", "application/json")
+				input, output, read := tc.input, tc.output, tc.read
+				if calls.Add(1) > 1 {
+					input, output, read = 1, 1, 0
+				}
 				if err := json.NewEncoder(w).Encode(map[string]any{
 					"model":   "reported-model",
 					"choices": []any{map[string]any{"message": map[string]any{"content": "useful summary"}, "finish_reason": "stop"}},
-					"usage":   map[string]any{"prompt_tokens": tc.input, "completion_tokens": tc.output, "prompt_tokens_details": map[string]any{"cached_tokens": tc.read}},
+					"usage":   map[string]any{"prompt_tokens": input, "completion_tokens": output, "prompt_tokens_details": map[string]any{"cached_tokens": read}},
 				}); err != nil {
 					t.Error(err)
 				}
@@ -270,7 +278,9 @@ func TestModelServiceInvalidUsagePreservesCompletion(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer s.Shutdown(context.Background())
-			result, herr := s.completeModel(context.Background(), "compactor", wasm.ModelServiceResource{Name: "summarizer", Provider: "bound", Model: "m", Path: "/v1/chat/completions", Timeout: time.Second, MaxTokens: 40, MaxInputBytes: 1000, MaxCallsPerMinute: 10, MaxTokensPerHour: 1000}, &pbv1.ModelCompleteArgs{Service: "summarizer", Messages: []*pbv1.ModelMessage{{Role: "user", Content: "summarize"}}})
+			resource := wasm.ModelServiceResource{Name: "summarizer", Provider: "bound", Model: "m", Path: "/v1/chat/completions", Timeout: time.Second, MaxTokens: 40, MaxInputBytes: 1000, MaxCallsPerMinute: 10, MaxTokensPerHour: 1}
+			args := &pbv1.ModelCompleteArgs{Service: "summarizer", Messages: []*pbv1.ModelMessage{{Role: "user", Content: "summarize"}}}
+			result, herr := s.completeModel(context.Background(), "compactor", resource, args)
 			if herr != nil || result == nil {
 				t.Fatalf("successful completion lost: result=%v refusal=%v", result, herr)
 			}
@@ -280,6 +290,16 @@ func TestModelServiceInvalidUsagePreservesCompletion(t *testing.T) {
 			events := s.feed.Snapshot()
 			if len(events) != 1 || events[0].Verdict != "plugin-egress" || events[0].TokensIn != tc.input || events[0].TokensOut != tc.output || events[0].CacheReadTokens != tc.read {
 				t.Fatalf("original provider metering missing from feed: %+v", events)
+			}
+			// Invalid metering must not exhaust the hourly budget. A later valid
+			// report must still charge it and stop further provider requests.
+			result, herr = s.completeModel(context.Background(), "compactor", resource, args)
+			if herr != nil || result == nil || result.Usage == nil || result.Usage.InputTokens != 1 || result.Usage.OutputTokens != 1 {
+				t.Fatalf("invalid report poisoned later completion: result=%v refusal=%v", result, herr)
+			}
+			result, herr = s.completeModel(context.Background(), "compactor", resource, args)
+			if result != nil || herr == nil || herr.Code != pbv1.ErrorCode_ERROR_CODE_UNAVAILABLE || !strings.Contains(herr.Message, "tokens/hour") || calls.Load() != 2 {
+				t.Fatalf("valid report did not bind the token budget: result=%v refusal=%v calls=%d", result, herr, calls.Load())
 			}
 		})
 	}

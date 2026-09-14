@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/url"
 	"strings"
@@ -479,8 +480,8 @@ func (s *Server) sendPluginRequestWithBudget(ctx context.Context, pluginName, pa
 			CacheWrite int64 `json:"cache_write"`
 		}{int64(usage.InputTokens), int64(usage.OutputTokens),
 			int64(usage.CacheReadTokens), int64(usage.CacheWriteTokens)}
-		if budget.MaxTokensPerHour > 0 {
-			s.egress.recordTokens(budgetKey, egressBillableTokens(f.Name, usage))
+		if tokens, reported := egressBillableTokens(f.Name, usage); budget.MaxTokensPerHour > 0 && reported {
+			s.egress.recordTokens(budgetKey, tokens)
 		}
 	}
 
@@ -495,17 +496,33 @@ func (s *Server) sendPluginRequestWithBudget(ctx context.Context, pluginName, pa
 	return wasm.ExtensionValue([]byte(env))
 }
 
-func egressBillableTokens(formatName string, usage *engine.StreamUsage) int64 {
+// validProviderUsage is shared by budget accounting and model-service results.
+// Invalid counts are unknown usage in both paths: they must not exhaust a
+// plugin's hourly budget while being withheld from the guest as untrustworthy.
+func validProviderUsage(formatName string, usage *engine.StreamUsage) bool {
 	if usage == nil {
-		return 0
+		return false
 	}
-	total := int64(usage.InputTokens + usage.OutputTokens)
+	for _, count := range []int{usage.InputTokens, usage.OutputTokens, usage.CacheReadTokens, usage.CacheWriteTokens} {
+		if count < 0 || int64(count) > math.MaxInt32 {
+			return false
+		}
+	}
+	return formatName == "anthropic" || usage.CacheReadTokens <= usage.InputTokens
+}
+
+func egressBillableTokens(formatName string, usage *engine.StreamUsage) (int64, bool) {
+	if !validProviderUsage(formatName, usage) {
+		return 0, false
+	}
+	total := int64(usage.InputTokens) + int64(usage.OutputTokens)
 	// Anthropic reports cache reads/creates separately from input_tokens.
-	// OpenAI-compatible and Gemini counters are subsets of their input total.
+	// Other formats use the provider's input total for token-budget accounting;
+	// their cache-read counts are subsets and must not be counted twice.
 	if formatName == "anthropic" {
-		total += int64(usage.CacheReadTokens + usage.CacheWriteTokens)
+		total += int64(usage.CacheReadTokens) + int64(usage.CacheWriteTokens)
 	}
-	return total
+	return total, true
 }
 
 // recordEgressEvent puts plugin-originated traffic in the same feed as user
