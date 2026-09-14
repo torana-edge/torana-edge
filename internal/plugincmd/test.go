@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 
 	"github.com/torana-edge/torana-edge/internal/engine"
@@ -28,6 +29,10 @@ type pluginTestScenario struct {
 	ExpectedResponse json.RawMessage   `json:"expected_response"`
 	Stream           []json.RawMessage `json:"stream"`
 	ExpectedStream   []json.RawMessage `json:"expected_stream"`
+	HTTP             json.RawMessage   `json:"http"`
+	ExpectedHTTP     json.RawMessage   `json:"expected_http"`
+	HTTPPlugin       string            `json:"http_plugin,omitempty"`
+	Tick             json.RawMessage   `json:"tick"`
 	ExpectedError    string            `json:"expected_error,omitempty"`
 }
 
@@ -56,6 +61,10 @@ func decodeScenarioResponse(raw []byte) (*engine.ChatResponse, error) {
 		return nil, err
 	}
 	return pbconv.FromPBChatResponse(&wire), nil
+}
+
+func decodeScenarioProto(raw []byte, message proto.Message) error {
+	return (protojson.UnmarshalOptions{DiscardUnknown: false}).Unmarshal(raw, message)
 }
 
 func testPlugin(args []string, stdout, stderr io.Writer) error {
@@ -192,6 +201,40 @@ func testPlugin(args []string, stdout, stderr io.Writer) error {
 			}
 			if !proto.Equal(pbconv.ToPBChatResponse(actual), pbconv.ToPBChatResponse(expected)) {
 				return fmt.Errorf("response mismatch: got %s, want %s", compactJSON(actual), compactJSON(expected))
+			}
+		}
+	}
+	if runErr == nil && scenario.HTTP != nil {
+		request := &pbv1.HttpRequest{}
+		if err := decodeScenarioProto(scenario.HTTP, request); err != nil {
+			return fmt.Errorf("decode scenario HTTP request: %w", err)
+		}
+		actual, err := pp.RunOnHTTPRequest(ctx, 1, scenario.HTTPPlugin, request, nil)
+		if err != nil {
+			runErr = err
+		} else if scenario.ExpectedHTTP != nil {
+			expected := &pbv1.HttpResponse{}
+			if err := decodeScenarioProto(scenario.ExpectedHTTP, expected); err != nil {
+				return fmt.Errorf("decode expected HTTP response: %w", err)
+			}
+			if !proto.Equal(actual, expected) {
+				return fmt.Errorf("HTTP response mismatch: got %s, want %s", compactJSON(actual), compactJSON(expected))
+			}
+		}
+	}
+	if runErr == nil && scenario.Tick != nil {
+		tick := &pbv1.TickRequest{}
+		if err := decodeScenarioProto(scenario.Tick, tick); err != nil {
+			return fmt.Errorf("decode scenario tick: %w", err)
+		}
+		actual := pp.RunOnTick(ctx, 1, tick)
+		if scenario.ExpectedRequest != nil {
+			var expected []plugin.TickOutcome
+			if err := json.Unmarshal(scenario.ExpectedRequest, &expected); err != nil {
+				return fmt.Errorf("decode expected tick outcomes: %w", err)
+			}
+			if !reflect.DeepEqual(actual, expected) {
+				return fmt.Errorf("tick outcome mismatch: got %s, want %s", compactJSON(actual), compactJSON(expected))
 			}
 		}
 	}
