@@ -57,13 +57,15 @@ jobs:
           echo "directory=$directory" >> "$GITHUB_OUTPUT"
           echo "revision=$revision" >> "$GITHUB_OUTPUT"
       - name: Build the exact Rust all-hooks guest
+        env:
+          SDK_SOURCE_DIR: ${{ steps.sdk.outputs.directory }}
         run: |
           cargo +1.85.1 build --locked --target wasm32-wasip1 \
             --target-dir /tmp/torana-rust-allhooks-target \
-            --manifest-path "${{ steps.sdk.outputs.directory }}/conformance/guests/rust-allhooks/Cargo.toml"
+            --manifest-path "$SDK_SOURCE_DIR/conformance/guests/rust-allhooks/Cargo.toml"
       - name: Exercise Rust authoring and production Edge contracts
         env:
-          GOWORK: off
+          GOWORK: "off"
           RUSTUP_TOOLCHAIN: 1.85.1
           TORANA_RUST_CONFORMANCE: "1"
           TORANA_RUST_GUEST: /tmp/torana-rust-allhooks-target/wasm32-wasip1/debug/torana-rust-allhooks.wasm
@@ -223,7 +225,7 @@ jobs:
       - name: Platform-sensitive packages
         run: go test ./internal/fileperm/... ./internal/pluginfiles/... ./internal/secret/... ./internal/auditlog/... ./internal/mitm/...
         env:
-          GOWORK: off
+          GOWORK: "off"
 
   # The release configuration itself, exercised on every PR rather than first on
   # a tag. The cross-compile step in `analysis` proves the code builds for each
