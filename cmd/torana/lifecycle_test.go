@@ -69,7 +69,9 @@ func TestBinaryBackgroundLifecycle(t *testing.T) {
 	}
 	started, err := run(true, "start", "--timeout", "20s")
 	if err != nil {
-		t.Fatalf("start: %v\n%s", err, started)
+		// This is an isolated fixture, never the user's daemon/log or secrets.
+		log, _ := os.ReadFile(filepath.Join(data, "torana.log"))
+		t.Fatalf("start: %v\n%s\nfixture log:\n%s", err, started, log)
 	}
 	t.Cleanup(func() { _, _ = run(false, "stop", "--yes", "--timeout", "10s") })
 	var initial map[string]any

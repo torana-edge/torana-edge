@@ -295,6 +295,7 @@ func startExecutable(ctx context.Context, executable string) (Status, error) {
 }
 
 func waitReady(ctx context.Context, store string, pid int, done <-chan error) (Status, error) {
+	var lastProbeError error
 	for {
 		select {
 		case err := <-done:
@@ -305,6 +306,9 @@ func waitReady(ctx context.Context, store string, pid int, done <-chan error) (S
 		if err == nil {
 			s, probeErr := Inspect(ctx, c)
 			c.Close()
+			if probeErr != nil && ctx.Err() == nil {
+				lastProbeError = probeErr
+			}
 			if probeErr == nil {
 				if filepath.Clean(s.ConfigPath) != filepath.Clean(store) || pid != 0 && s.PID != pid {
 					return Status{}, fmt.Errorf("endpoint belongs to a different instance")
@@ -316,8 +320,13 @@ func waitReady(ctx context.Context, store string, pid int, done <-chan error) (S
 					return Status{}, fmt.Errorf("instance is running but degraded; inspect plugin status and logs")
 				}
 			}
+		} else if ctx.Err() == nil {
+			lastProbeError = err
 		}
 		if err := pause(ctx); err != nil {
+			if lastProbeError != nil {
+				return Status{}, fmt.Errorf("%w (last status check: %v)", err, lastProbeError)
+			}
 			return Status{}, err
 		}
 	}
