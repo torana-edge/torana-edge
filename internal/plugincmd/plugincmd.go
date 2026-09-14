@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 )
 
 // Run executes a `torana plugin ...` command.
@@ -16,7 +18,7 @@ func Run(args []string, stdout, stderr io.Writer) error {
 		return errors.New("plugin subcommand required")
 	}
 	switch args[1] {
-	case "init":
+	case "init", "new":
 		return initPlugin(args[2:], stdout)
 	case "build":
 		return buildPlugin(args[2:], stdout, stderr)
@@ -44,6 +46,7 @@ func Run(args []string, stdout, stderr io.Writer) error {
 // Usage prints the authoring command summary.
 func Usage(w io.Writer) {
 	_, _ = fmt.Fprintln(w, "Usage:")
+	_, _ = fmt.Fprintln(w, "  torana plugin new <name>")
 	_, _ = fmt.Fprintln(w, "  torana plugin init <name>")
 	_, _ = fmt.Fprintln(w, "  torana plugin build [plugin-directory] [-o plugin.wasm]")
 	_, _ = fmt.Fprintln(w, "  torana plugin lint [plugin-directory]")
@@ -138,6 +141,30 @@ func init() {
 	})
 }
 `,
+		"plugin.wasm_test.go": `//go:build !wasip1
+
+package main
+
+import (
+	"testing"
+
+	pb "github.com/torana-edge/torana-plugin-sdk/pb/v1"
+	"github.com/torana-edge/torana-plugin-sdk/sdktest"
+)
+
+// TestBeforeRequest exercises the registered hook through the SDK's native
+// harness. This catches a scaffold whose init registration or checked result
+// handling differs from the WASI entry point.
+func TestBeforeRequest(t *testing.T) {
+	result := sdktest.New(t).BeforeRequest(&pb.ChatRequest{})
+	if result.Err != nil {
+		t.Fatalf("before request: %v", result.Err)
+	}
+	if !result.PassedThrough {
+		t.Fatalf("default hook did not pass the request through: %#v", result)
+	}
+}
+`,
 		"plugin.json": fmt.Sprintf(`{
   "schema_version": 1,
   "id": "local/%s",
@@ -164,6 +191,15 @@ func init() {
 		if err := os.WriteFile(filepath.Join(absDir, name), []byte(content), 0o644); err != nil {
 			return fmt.Errorf("write %s: %w", name, err)
 		}
+	}
+	// Resolve the complete native test dependency graph while the project is
+	// created. Without go.sum, the first `go test ./...` asks the author to run
+	// `go mod tidy` manually, even though the scaffold is otherwise complete.
+	tidy := exec.Command("go", "mod", "tidy")
+	tidy.Dir = absDir
+	tidy.Env = append(os.Environ(), "GOWORK=off", "GO111MODULE=on")
+	if output, tidyErr := tidy.CombinedOutput(); tidyErr != nil {
+		return fmt.Errorf("resolve scaffold dependencies: %w\n%s", tidyErr, strings.TrimSpace(string(output)))
 	}
 	fmt.Fprintf(stdout, "Initialized %s in %s\n", pluginName, absDir)
 	fmt.Fprintf(stdout, "Next: torana plugin build %s\n", pluginDir)

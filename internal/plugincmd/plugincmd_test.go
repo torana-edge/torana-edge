@@ -3,6 +3,7 @@ package plugincmd
 import (
 	"bytes"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -61,8 +62,10 @@ func TestScaffoldBuildsFromCleanSourceWithoutMutatingModuleFiles(t *testing.T) {
 	if info, err := os.Stat(filepath.Join(dir, "plugin.wasm")); err != nil || info.Size() == 0 {
 		t.Fatalf("plugin.wasm was not built: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(dir, "go.sum")); !os.IsNotExist(err) {
-		t.Fatalf("clean-room build unexpectedly modified source go.sum: %v", err)
+	sumPath := filepath.Join(dir, "go.sum")
+	sum, err := os.ReadFile(sumPath)
+	if err != nil {
+		t.Fatalf("init did not create go.sum: %v", err)
 	}
 	after, err := os.ReadFile(goModPath)
 	if err != nil {
@@ -70,6 +73,44 @@ func TestScaffoldBuildsFromCleanSourceWithoutMutatingModuleFiles(t *testing.T) {
 	}
 	if string(after) != string(goMod) {
 		t.Fatal("clean-room build modified source go.mod")
+	}
+	afterSum, err := os.ReadFile(sumPath)
+	if err != nil || string(afterSum) != string(sum) {
+		t.Fatalf("clean-room build modified source go.sum: %v", err)
+	}
+}
+
+// TestScaffoldFirstRunAgainstStagedSDK executes the generated project's real
+// native test and WASI build. The replacement is installed only in this temp
+// project; no unreleased local path can leak into the scaffold a user creates.
+func TestScaffoldFirstRunAgainstStagedSDK(t *testing.T) {
+	staged := os.Getenv("TORANA_SDK_STAGING")
+	if staged == "" {
+		staged = "/private/tmp/torana-foundation-20260914/sdk"
+	}
+	if _, err := os.Stat(filepath.Join(staged, "go.mod")); err != nil {
+		t.Skipf("staged SDK unavailable: %v", err)
+	}
+	dir := filepath.Join(t.TempDir(), "first-plugin")
+	var stdout, stderr bytes.Buffer
+	if err := Run([]string{"plugin", "new", dir}, &stdout, &stderr); err != nil {
+		t.Fatalf("new: %v\nstderr: %s", err, stderr.String())
+	}
+	edit := exec.Command("go", "mod", "edit", "-replace", "github.com/torana-edge/torana-plugin-sdk="+staged)
+	edit.Dir = dir
+	if output, err := edit.CombinedOutput(); err != nil {
+		t.Fatalf("stage SDK replacement: %v\n%s", err, output)
+	}
+	goTest := exec.Command("go", "test", "./...")
+	goTest.Dir = dir
+	if output, err := goTest.CombinedOutput(); err != nil {
+		t.Fatalf("generated native test: %v\n%s", err, output)
+	}
+	wasm := exec.Command("go", "build", "-o", filepath.Join(dir, "plugin.wasm"), ".")
+	wasm.Dir = dir
+	wasm.Env = append(os.Environ(), "GOOS=wasip1", "GOARCH=wasm", "CGO_ENABLED=0", "GOWORK=off")
+	if output, err := wasm.CombinedOutput(); err != nil {
+		t.Fatalf("generated WASI build: %v\n%s", err, output)
 	}
 }
 
