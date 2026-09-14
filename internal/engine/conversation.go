@@ -108,9 +108,10 @@ func ConversationID(c *ChatRequest) string {
 // plugin cannot reproduce them, which is the entire divergence between the
 // Edge key and the SDK's observable prefix.
 type TopologyFacts struct {
-	CodeAssist           bool
-	OpenAIVariant        OpenAIVariant
-	ResponsesInputLayout OptionalJSONArray
+	CodeAssist            bool
+	OpenAIVariant         OpenAIVariant
+	ResponsesInstructions bool
+	ResponsesInputLayout  OptionalJSONArray
 }
 
 // CachePrefixKey returns a key identifying the provider-side cache entry
@@ -138,7 +139,8 @@ type TopologyFacts struct {
 // The Edge cache key frames that projection under its own domain and adds
 // ONLY the host-only topology facts (raw-JSON checkpoint section 4): the
 // wire reconstruction depends on the Code Assist variant, the OpenAI
-// variant, and the Responses input layout, so a key that ignored them
+// variant, the Responses instructions location, and the Responses input
+// layout, so a key that ignored them
 // could alias two different provider wires. The plugin mirror cannot
 // reproduce these host-only facts (S1 obligation: cache_tier_selector
 // reconciliation); the topology layer is the ENTIRE divergence between
@@ -186,6 +188,11 @@ func CachePrefixKeyTopology(pbReq *pb.ChatRequest, topo TopologyFacts) string {
 	}
 	writeHashField(h, "variant")
 	writeHashField(h, strconv.Itoa(int(topo.OpenAIVariant)))
+	if topo.ResponsesInstructions {
+		writeHashField(h, "responses-instructions")
+	} else {
+		writeHashField(h, "responses-input-only")
+	}
 	writeHashFieldBytes(h, topo.ResponsesInputLayout.Bytes())
 
 	return shortHex(h)

@@ -20,6 +20,7 @@ import (
 
 	"google.golang.org/protobuf/proto"
 
+	"github.com/torana-edge/torana-edge/internal/bridge"
 	"github.com/torana-edge/torana-edge/internal/engine"
 	"github.com/torana-edge/torana-edge/internal/engine/pbconv"
 	"github.com/torana-edge/torana-edge/internal/provider"
@@ -144,6 +145,57 @@ func TestEgressSendsAndMeters(t *testing.T) {
 	}
 	if got.Usage == nil || got.Usage.CacheRead != 95 {
 		t.Errorf("usage = %+v, want cache_read 95 — the signal that says whether a refresh worked", got.Usage)
+	}
+}
+
+func TestBridgeEgressUsesExposedContractAndSourceUsage(t *testing.T) {
+	var calls atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		raw, _ := io.ReadAll(r.Body)
+		chat, err := bridge.ParseRequest(bridge.Anthropic, raw, r.URL.Path)
+		if err != nil {
+			t.Errorf("parse upstream request: %v; %s", err, raw)
+		} else if r.URL.Path != "/v1/messages" || chat.Model != "bridge-model" {
+			t.Errorf("upstream path/model=%q/%q", r.URL.Path, chat.Model)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"id":"a1","type":"message","model":"reported-model","role":"assistant","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","usage":{"input_tokens":7,"output_tokens":2,"cache_read_input_tokens":3,"cache_creation_input_tokens":1}}`)
+	}))
+	t.Cleanup(upstream.Close)
+
+	cfg := provider.DefaultConfig()
+	cfg.Providers = map[string]provider.Provider{
+		"bridge": {
+			URL: upstream.URL, Format: "anthropic", Auth: provider.ProviderAuth{Mode: "none"},
+			Bridge: &provider.BridgeConfig{Client: bridge.OpenAIResponses, Upstream: bridge.Anthropic, Model: "bridge-model", MaxTokens: 64},
+		},
+	}
+	cfg.Plugins.Runtime.Egress = map[string]provider.EgressBudget{"plugin": {MaxCallsPerMinute: 3, MaxTokensPerHour: 12}}
+	srv, err := New(Config{Port: "0", Providers: cfg, ConfigPath: filepath.Join(t.TempDir(), "config.json")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = srv.Shutdown(context.Background()) })
+
+	_, refusal := send(t, srv, "plugin", egressPayload(t, "bridge", "/v1/messages"))
+	if refusal == nil || refusal.Code != pb.ErrorCode_ERROR_CODE_INVALID_ARGUMENT || calls.Load() != 0 {
+		t.Fatalf("mismatched client path refusal=%v calls=%d", refusal, calls.Load())
+	}
+	got, refusal := send(t, srv, "plugin", egressPayload(t, "bridge", "/v1/responses"))
+	if refusal != nil {
+		t.Fatalf("bridge egress refusal: %v", refusal)
+	}
+	clientBody, err := base64.StdEncoding.DecodeString(got.Body)
+	if err != nil || !bytes.Contains(clientBody, []byte(`"output"`)) || bytes.Contains(clientBody, []byte(`"content":[{"type":"text"`)) {
+		t.Fatalf("client response is not Responses JSON: err=%v body=%s", err, clientBody)
+	}
+	if got.Usage == nil || got.Usage.Input != 7 || got.Usage.Output != 2 || got.Usage.CacheRead != 3 || got.Usage.CacheWrite != 1 {
+		t.Fatalf("source usage changed during response translation: %+v", got.Usage)
+	}
+	_, refusal = send(t, srv, "plugin", egressPayload(t, "bridge", "/v1/responses"))
+	if refusal == nil || refusal.Code != pb.ErrorCode_ERROR_CODE_UNAVAILABLE || calls.Load() != 1 {
+		t.Fatalf("source token budget refusal=%v calls=%d", refusal, calls.Load())
 	}
 }
 

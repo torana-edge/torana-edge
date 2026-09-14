@@ -120,6 +120,11 @@ func referencePrefixKey(c *pb.ChatRequest, topo TopologyFacts) string {
 	}
 	frameStr("variant")
 	frameStr(string(rune('0' + topo.OpenAIVariant)))
+	if topo.ResponsesInstructions {
+		frameStr("responses-instructions")
+	} else {
+		frameStr("responses-input-only")
+	}
 	frameBytes(topo.ResponsesInputLayout.Bytes())
 
 	return hex.EncodeToString(h.Sum(nil)[:keyBytes])
@@ -199,6 +204,10 @@ func TestCachePrefixKeyTopologySensitive(t *testing.T) {
 	responses := key(TopologyFacts{OpenAIVariant: OpenAIResponses})
 	if responses == plain || responses != ref(TopologyFacts{OpenAIVariant: OpenAIResponses}) {
 		t.Fatal("openai variant must flip the key and match the reference")
+	}
+	instructions := key(TopologyFacts{ResponsesInstructions: true})
+	if instructions == plain || instructions != ref(TopologyFacts{ResponsesInstructions: true}) {
+		t.Fatal("responses instructions topology must flip the key and match the reference")
 	}
 	layout, err := ParseOptionalJSONArray([]byte(`[{"type":"message","content":"x"},{"type":"reasoning"}]`))
 	if err != nil {

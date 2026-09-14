@@ -387,26 +387,34 @@ func TestCodeAssistReplacementCanonicalOverlay(t *testing.T) {
 }
 
 // TestOpenAIResponsesReplacementLayout — a REAL replacement on a Responses
-// request: the typed variant and the exact input layout survive and
-// re-splice opaque items on the final Responses wire.
+// request: the typed variant, top-level instructions location, and exact input
+// layout survive. Canonical instruction and user text replacements reach their
+// original wire locations while opaque items are re-spliced exactly.
 func TestOpenAIResponsesReplacementLayout(t *testing.T) {
 	requireWASM(t, fixturesDir+"/test-mutator/plugin.wasm")
 	pp := newTestPipeline(t, fixturesDir, []string{"test-mutator"})
 
 	layout, _ := engine.ParseOptionalJSONArray([]byte(`[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]},{"type":"reasoning","encrypted_content":"opaque-reasoning"}]`))
 	chat := &engine.ChatRequest{
-		Model: "gpt-5.4", OpenAIVariant: engine.OpenAIResponses, ResponsesInputLayout: layout,
-		Messages: []engine.Message{{Role: engine.RoleUser, Blocks: []engine.Block{{Text: &engine.TextBlock{Text: "hi"}}}}},
+		Model: "gpt-5.4", OpenAIVariant: engine.OpenAIResponses,
+		ResponsesInstructions: true, ResponsesInputLayout: layout,
+		Messages: []engine.Message{
+			{Role: engine.RoleSystem, Blocks: []engine.Block{{Text: &engine.TextBlock{Text: "original instructions"}}}},
+			{Role: engine.RoleUser, Blocks: []engine.Block{{Text: &engine.TextBlock{Text: "hi"}}}},
+		},
 	}
 	out, err := pp.RunBeforeRequest(context.Background(), 15, chat, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if out.Messages[0].Blocks[0].Text.Text == "hi" {
-		t.Fatal("test-mutator did not replace (the pin is vacuous)")
+	if out.Messages[0].Blocks[0].Text.Text != "replacement instructions" || out.Messages[1].Blocks[0].Text.Text == "hi" {
+		t.Fatal("test-mutator did not replace instructions and input text (the pin is vacuous)")
 	}
 	if out.OpenAIVariant != engine.OpenAIResponses {
 		t.Fatal("variant lost through the replacement")
+	}
+	if !out.ResponsesInstructions {
+		t.Fatal("instructions topology lost through the replacement")
 	}
 	if out.ResponsesInputLayout.IsAbsent() || string(out.ResponsesInputLayout.Bytes()) != string(layout.Bytes()) {
 		t.Fatalf("layout lost through the replacement: %q", out.ResponsesInputLayout.Bytes())
@@ -425,6 +433,9 @@ func TestOpenAIResponsesReplacementLayout(t *testing.T) {
 	}
 	if doc["model"] != "gpt-5.4" {
 		t.Fatalf("responses variant lost on the wire: %s", wire)
+	}
+	if doc["instructions"] != "replacement instructions" {
+		t.Fatalf("canonical instruction replacement did not reach the top-level member: %s", wire)
 	}
 	items, ok := doc["input"].([]any)
 	if !ok || len(items) != 2 {

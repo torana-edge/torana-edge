@@ -49,7 +49,13 @@ func (s *Server) completeModel(ctx context.Context, pluginName string, resource 
 		return nil, modelHostError(pbv1.ErrorCode_ERROR_CODE_INTERNAL, "model request envelope could not be encoded")
 	}
 	budget := provider.EgressBudget{MaxCallsPerMinute: resource.MaxCallsPerMinute, MaxTokensPerHour: resource.MaxTokensPerHour}
-	result := s.sendPluginRequestWithBudget(ctx, pluginName, string(payload), &budget, pluginName+"\x00model-service\x00"+resource.Name)
+	var sourceResult pluginEgressSourceResult
+	result := s.sendPluginRequestWithBudget(ctx, pluginName, string(payload), pluginEgressOptions{
+		boundBudget:   &budget,
+		budgetKey:     pluginName + "\x00model-service\x00" + resource.Name,
+		modelOverride: &resource.Model,
+		sourceResult:  &sourceResult,
+	})
 	if result.Refusal() != nil {
 		return nil, proto.Clone(result.Refusal()).(*pbv1.HostError)
 	}
@@ -67,6 +73,11 @@ func (s *Server) completeModel(ctx context.Context, pluginName string, resource 
 	if err != nil {
 		return nil, modelHostError(pbv1.ErrorCode_ERROR_CODE_INTERNAL, "model service returned an invalid body")
 	}
+	resultFormat := ""
+	if sourceResult.set {
+		body = sourceResult.body
+		resultFormat = sourceResult.formatName
+	}
 	// Provider model results become a new typed value rather than being
 	// forwarded byte-for-byte. Reject duplicate keys and parser differentials
 	// before encoding/json can collapse them into an apparently valid result.
@@ -77,14 +88,17 @@ func (s *Server) completeModel(ctx context.Context, pluginName string, resource 
 	if err := json.Unmarshal(body, &decoded); err != nil {
 		return nil, modelHostError(pbv1.ErrorCode_ERROR_CODE_UNAVAILABLE, "model service provider returned an unreadable response")
 	}
-	prov, ok := s.GetConfig().Providers.Providers[resource.Provider]
-	if !ok {
-		return nil, modelHostError(pbv1.ErrorCode_ERROR_CODE_NOT_CONFIGURED, "model service provider is unavailable")
+	if resultFormat == "" {
+		prov, ok := s.GetConfig().Providers.Providers[resource.Provider]
+		if !ok {
+			return nil, modelHostError(pbv1.ErrorCode_ERROR_CODE_NOT_CONFIGURED, "model service provider is unavailable")
+		}
+		resultFormat = prov.Format
 	}
-	if err := validateModelServiceResultDomain(prov.Format, decoded); err != nil {
+	if err := validateModelServiceResultDomain(resultFormat, decoded); err != nil {
 		return nil, modelHostError(pbv1.ErrorCode_ERROR_CODE_UNAVAILABLE, "model service provider returned an unsupported response")
 	}
-	refs := extractResponse(prov.Format, decoded, body)
+	refs := extractResponse(resultFormat, decoded, body)
 	if !refs.hasMessage {
 		return nil, modelHostError(pbv1.ErrorCode_ERROR_CODE_UNAVAILABLE, "model service returned no assistant message")
 	}
@@ -96,19 +110,42 @@ func (s *Server) completeModel(ctx context.Context, pluginName string, resource 
 	if err := out.Validate(); err != nil {
 		return nil, modelHostError(pbv1.ErrorCode_ERROR_CODE_UNAVAILABLE, "model service provider returned an invalid result")
 	}
-	// Provider metering defects do not invalidate the completion. Use the same
-	// validity rule as the token budget and leave unreliable usage unknown.
-	if validProviderUsage(prov.Format, refs.usage) {
+	// The egress envelope owns source-provider usage. The response body may be
+	// translated into another client contract whose input total has different
+	// cache semantics, so parsing usage back out of it would double-adjust it.
+	if sourceUsage := modelServiceSourceUsage(envelope.Usage); validProviderUsage(resultFormat, sourceUsage) {
 		// OpenAI/Gemini include cache reads in their input total; Anthropic
 		// reports them separately. Normalize only this known overlap. Cache
 		// writes have no established overlap on the non-Anthropic formats.
-		input := int64(refs.usage.InputTokens)
-		if prov.Format != "anthropic" {
-			input -= int64(refs.usage.CacheReadTokens)
+		input := int64(sourceUsage.InputTokens)
+		if resultFormat != "anthropic" {
+			input -= int64(sourceUsage.CacheReadTokens)
 		}
-		out.Usage = &pbv1.Usage{InputTokens: int32(input), OutputTokens: int32(refs.usage.OutputTokens), CacheReadTokens: int32(refs.usage.CacheReadTokens), CacheWriteTokens: int32(refs.usage.CacheWriteTokens)}
+		out.Usage = &pbv1.Usage{InputTokens: int32(input), OutputTokens: int32(sourceUsage.OutputTokens), CacheReadTokens: int32(sourceUsage.CacheReadTokens), CacheWriteTokens: int32(sourceUsage.CacheWriteTokens)}
 	}
 	return out, nil
+}
+
+func modelServiceSourceUsage(usage *struct {
+	Input      int64 `json:"input"`
+	Output     int64 `json:"output"`
+	CacheRead  int64 `json:"cache_read"`
+	CacheWrite int64 `json:"cache_write"`
+}) *engine.StreamUsage {
+	if usage == nil {
+		return nil
+	}
+	for _, count := range []int64{usage.Input, usage.Output, usage.CacheRead, usage.CacheWrite} {
+		if count < 0 || count > math.MaxInt32 {
+			return nil
+		}
+	}
+	return &engine.StreamUsage{
+		InputTokens:      int(usage.Input),
+		OutputTokens:     int(usage.Output),
+		CacheReadTokens:  int(usage.CacheRead),
+		CacheWriteTokens: int(usage.CacheWrite),
+	}
 }
 
 func (s *Server) modelPricing(ctx context.Context, _ string, resource wasm.PricingResource) (*pbv1.ModelPricing, *pbv1.HostError) {

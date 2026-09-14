@@ -29,6 +29,7 @@ import (
 type Provider struct {
 	URL                 string                     `json:"url"`                            // upstream base URL
 	Format              string                     `json:"format"`                         // wire format: "openai", "anthropic", "gemini", "gemini-codeassist"
+	Bridge              *BridgeConfig              `json:"bridge,omitempty"`               // explicit client/upstream inference protocol translation
 	Fallback            []string                   `json:"fallback,omitempty"`             // provider names to try on 429/5xx
 	ResponsesCompaction *ResponsesCompactionConfig `json:"responses_compaction,omitempty"` // native OpenAI Responses context compaction; nil disables it
 	// Auth states where upstream authentication comes from. Caller uses the
@@ -194,6 +195,9 @@ func (c Config) Validate() error {
 			}
 		}
 		if err := configured.Auth.Validate(name, c.Credentials); err != nil {
+			return err
+		}
+		if err := configured.ValidateBridge(name); err != nil {
 			return err
 		}
 		for _, fallback := range configured.Fallback {

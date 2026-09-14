@@ -205,3 +205,25 @@ func TestEvaluateCompactionReadsRouteRecordedWithoutAReplacement(t *testing.T) {
 		t.Fatalf("compaction was priced against the unrouted provider: %+v", got)
 	}
 }
+
+func TestBridgeCompactionPricesFallbackModelAlias(t *testing.T) {
+	winning := economics.ModelPricing{CacheReadUSDPerMTok: usd(0.5), CacheWriteUSDPerMTok: usd(1)}
+	s := &Server{config: Config{Providers: provider.Config{Providers: map[string]provider.Provider{
+		"primary":  {Format: "openai", Fallback: []string{"fallback"}},
+		"fallback": {Format: "openai", Bridge: &provider.BridgeConfig{Model: "other-model"}},
+	}}}}
+	ctx := context.WithValue(context.Background(), reqStateKey{}, &reqState{Provider: "primary", Model: "m"})
+	ctx = context.WithValue(ctx, bridgeContextKey{}, &bridgeExchange{})
+	report := economics.CompactionReport{OriginalBytes: 100_000, FinalBytes: 5_000, EstimatedTokensRemoved: 95_000, EstimatedRewriteSpanTokens: 15_000, ExpectedApplications: 8, CandidateCount: 1, Source: "transformation"}
+	prices := testPricingResource(map[string]economics.ModelPricing{
+		wasm.PricingCoordinate("primary", "m"):  winning,
+		wasm.PricingCoordinate("fallback", "m"): winning,
+	})
+	if got := s.evaluateCompaction(ctx, report, prices, nil); got.Apply || got.Reason != economics.UnavailableFallbackUnpriced {
+		t.Fatalf("unpriced fallback alias was approved: %+v", got)
+	}
+	prices.Prices[wasm.PricingCoordinate("fallback", "other-model")] = &pbv1.ModelPricing{CacheReadUsdPerMtok: winning.CacheReadUSDPerMTok, CacheWriteUsdPerMtok: winning.CacheWriteUSDPerMTok}
+	if got := s.evaluateCompaction(ctx, report, prices, nil); !got.Apply {
+		t.Fatalf("priced fallback alias refused: %+v", got)
+	}
+}

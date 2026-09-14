@@ -472,6 +472,7 @@ func TestCachePrefixKeyTopologyOnlyDivergence(t *testing.T) {
 		{"bare/chat", TopologyFacts{CodeAssist: false, OpenAIVariant: OpenAIChat, ResponsesInputLayout: OptionalJSONArray{}}},
 		{"codeassist", TopologyFacts{CodeAssist: true, OpenAIVariant: OpenAIChat, ResponsesInputLayout: OptionalJSONArray{}}},
 		{"responses-variant", TopologyFacts{CodeAssist: false, OpenAIVariant: OpenAIResponses, ResponsesInputLayout: OptionalJSONArray{}}},
+		{"responses-instructions", TopologyFacts{CodeAssist: false, OpenAIVariant: OpenAIResponses, ResponsesInstructions: true, ResponsesInputLayout: OptionalJSONArray{}}},
 		{"responses-layout", TopologyFacts{CodeAssist: false, OpenAIVariant: OpenAIChat, ResponsesInputLayout: mustArray(`[{"type":"message"}]`)}},
 	}
 	seen := map[string]string{}

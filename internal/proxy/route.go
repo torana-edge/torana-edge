@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/url"
 
+	"github.com/torana-edge/torana-edge/internal/bridge"
 	"github.com/torana-edge/torana-edge/internal/engine"
 	"github.com/torana-edge/torana-edge/internal/metrics"
 	"github.com/torana-edge/torana-edge/internal/provider"
@@ -17,35 +18,57 @@ import (
 // — a bad verdict must not take the request down.
 //
 // The target provider's explicit auth policy is applied after routing.
-func (s *Server) applyRoute(req *http.Request, chat *engine.ChatRequest, origFormat, origName string, v *wasm.RouteVerdict, cfg provider.Config) {
+func (s *Server) applyRoute(req *http.Request, chat *engine.ChatRequest, origFormat, origName string, v *wasm.RouteVerdict, cfg provider.Config) bool {
 	if v.Provider == "" || v.Provider == origName {
 		// Model-only override (or no-op): there is no provider to validate,
 		// so the model stands on its own.
 		if v.Model != "" {
 			chat.Model = v.Model
+			return true
 		}
-		return
+		return false
 	}
 
 	target, ok := cfg.Providers[v.Provider]
 	if !ok {
 		log.Printf("[route] %s routed to unknown provider %q — keeping %q", v.Plugin, v.Provider, origName)
-		return
+		return false
 	}
-	if target.Format != origFormat {
+	exchange := exchangeFrom(req.Context())
+	var upstreamProtocol bridge.Protocol
+	routedModel := v.Model
+	if exchange != nil {
+		var supported bool
+		upstreamProtocol, supported = bridgeTargetProtocol(target, exchange.Client, exchange.Upstream)
+		if !supported || (exchange.Client.Format() != target.Format && target.Auth.EffectiveMode() == "caller") {
+			log.Printf("[route] keeping original bridge: target protocol or credential policy is incompatible")
+			return false
+		}
+		candidate := *chat
+		if routedModel == "" && target.Bridge != nil {
+			routedModel = target.Bridge.Model
+		}
+		if routedModel != "" {
+			candidate.Model = routedModel
+		}
+		if _, err := bridge.ProjectRequest(&candidate, exchange.Client, upstreamProtocol, bridgeOptions(target)); err != nil {
+			log.Printf("[route] keeping original bridge: target cannot represent request features")
+			return false
+		}
+	} else if target.Format != origFormat || target.Bridge != nil {
 		log.Printf("[route] provider %q format %q != %q — cross-format routing unsupported, keeping %q",
 			v.Provider, target.Format, origFormat, origName)
-		return
+		return false
 	}
 	turl, err := url.Parse(target.URL)
 	if err != nil {
 		log.Printf("[route] provider %q has invalid URL: %v — keeping %q", v.Provider, err, origName)
-		return
+		return false
 	}
 
 	rc, _ := req.Context().Value(routeContextKey{}).(*RouteContext)
 	if rc == nil {
-		return
+		return false
 	}
 	authCandidate := req.Clone(req.Context())
 	authCandidate.Header = req.Header.Clone()
@@ -55,7 +78,7 @@ func (s *Server) applyRoute(req *http.Request, chat *engine.ChatRequest, origFor
 	}
 	if err := applyProviderCredential(req.Context(), authCandidate, target, caller, s.resolveCredential); err != nil {
 		log.Printf("[route] provider %q credential unavailable — keeping %q", v.Provider, origName)
-		return
+		return false
 	}
 	req.Header = authCandidate.Header
 	req.URL.RawQuery = authCandidate.URL.RawQuery
@@ -67,8 +90,11 @@ func (s *Server) applyRoute(req *http.Request, chat *engine.ChatRequest, origFor
 	// ORIGINAL provider carrying a model chosen for a different one, which
 	// that provider does not serve. Failing open has to mean the original
 	// route, not half of a route nobody asked for.
-	if v.Model != "" {
-		chat.Model = v.Model
+	if routedModel != "" {
+		chat.Model = routedModel
+	}
+	if exchange != nil {
+		exchange.Upstream = upstreamProtocol
 	}
 
 	req.URL.Scheme = turl.Scheme
@@ -84,4 +110,5 @@ func (s *Server) applyRoute(req *http.Request, chat *engine.ChatRequest, origFor
 
 	metrics.RecordRoutedRequest(req.Context(), origName, v.Provider)
 	log.Printf("[route] %s → %s (model %q)", origName, v.Provider, chat.Model)
+	return true
 }

@@ -11,9 +11,10 @@ import (
 
 func main() {}
 
-// Test fixture for the request-mutation path: it rewrites both messages and
-// tool definitions, which is the combination the host's cache-control
-// round-trip and dispatch tests need.
+// Test fixture for the request-mutation path: it rewrites user messages, one
+// designated system-instructions message, and tool definitions. This is the
+// combination the host's cache-control and Responses topology round-trip tests
+// need.
 //
 // Every mutation is a pure function of the input. That is not incidental — a
 // mutation that varied between two identical requests would change the cached
@@ -26,6 +27,17 @@ func init() {
 	sdk.OnBeforeRequest(func(ctx context.Context, req *pb.ChatRequest) (sdk.RequestResult, error) {
 		changed := false
 		for _, m := range req.Messages {
+			// Dedicated trigger for stream-mode replacement regressions. The
+			// fixture has ir.params.write, which includes the Stream ABI field.
+			if m.Role == "user" && blockutil.TextOf(m) == "toggle stream mode" {
+				req.Stream = !req.Stream
+				changed = true
+			}
+			if m.Role == "system" && blockutil.TextOf(m) == "original instructions" {
+				blockutil.SetText(m, "replacement instructions")
+				changed = true
+				continue
+			}
 			if m.Role == "user" && blockutil.TextOf(m) != "" && !strings.HasSuffix(blockutil.TextOf(m), marker) {
 				blockutil.SetText(m, blockutil.TextOf(m)+marker)
 				changed = true

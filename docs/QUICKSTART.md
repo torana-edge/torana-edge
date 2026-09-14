@@ -54,7 +54,8 @@ curl --fail-with-body http://127.0.0.1:8080/provider/deepseek/v1/chat/completion
 The health endpoint returns `{"status":"ok"}` and the second command returns a
 normal provider response. The debug terminal prints safe request-received and
 request-completed lines, so you can verify the traffic really crossed Torana;
-it never logs headers or bodies.
+by default it never logs headers or bodies. Bridge error-body diagnostics have a
+separate [explicit opt-in](PROTOCOL_BRIDGES.md#diagnose-an-upstream-rejection).
 
 ## Configure
 
@@ -169,8 +170,10 @@ Provider `url` values contain an HTTP(S) origin and optional path only. Query
 strings, fragments, and embedded userinfo are rejected rather than silently
 ignored. Supply required query parameters (such as an API version) on each
 request path; provider-level query defaults are not supported. Use `auth` for
-credentials. Fallbacks must have the same format, including transparent mode:
-an empty format cannot fall back to a named adapter, or vice versa.
+credentials. Native routes require fallbacks with the same format, including
+transparent mode: an empty format cannot fall back to a named adapter, or vice
+versa. Explicit [protocol bridges](PROTOCOL_BRIDGES.md) can translate to
+configured fallback contracts; incompatible features are refused.
 
 Bodies larger than the retry buffer are sent intact to the primary once, with
 fallback disabled and a diagnostic log entry. This is not an additional

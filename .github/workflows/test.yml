@@ -18,6 +18,31 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  # Generated bridge output is consumed by real client SDKs as well as our own
+  # adapters. This catches required fields and stream accumulator contracts
+  # that an internal round-trip can accidentally omit on both sides.
+  bridge-client-sdks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: go.mod
+      - name: Install pinned client SDKs
+        run: |
+          python3 -m venv "$RUNNER_TEMP/bridge-sdk-venv"
+          "$RUNNER_TEMP/bridge-sdk-venv/bin/pip" install --require-hashes --only-binary=:all: -r scripts/bridge-sdk-validation-requirements.txt
+      - name: Generate bridge contract fixtures
+        env:
+          GOWORK: "off"
+          TORANA_BRIDGE_SDK_FIXTURE_DIR: ${{ runner.temp }}/bridge-sdk-fixtures
+        run: go test ./internal/bridge -run '^TestExportSDKValidation.*Fixtures$' -count=1
+      - name: Validate JSON and streaming clients without provider calls
+        run: |
+          "$RUNNER_TEMP/bridge-sdk-venv/bin/python" scripts/validate-bridge-sdk.py \
+            --fixtures "$RUNNER_TEMP/bridge-sdk-fixtures"
+
   # The Rust SDK is distributed from its exact Git revision. Build its
   # all-hooks guest from the same Go-module revision Edge is pinned to, then
   # exercise RespondRequest through Edge's production loader and host calls.

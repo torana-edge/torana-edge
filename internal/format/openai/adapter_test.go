@@ -364,11 +364,11 @@ data: [DONE]
 
 func TestResponsesFieldPreservation(t *testing.T) {
 	raw := []byte(`{
-		"model": "gpt-4o",
-		"instructions": "Be helpful.",
-		"temperature": 0.5,
-		"input": "Hello"
-	}`)
+			"model": "gpt-4o",
+			"instructions": "Be helpful.",
+			"future_temperature": 0.5,
+			"input": "Hello"
+		}`)
 
 	a := &Adapter{}
 	req, err := a.Unmarshal(raw)
@@ -378,13 +378,14 @@ func TestResponsesFieldPreservation(t *testing.T) {
 
 	var extMap map[string]json.RawMessage
 	json.Unmarshal(req.ProviderExtensions.Bytes(), &extMap)
-	var extInstr string
-	json.Unmarshal(extMap["instructions"], &extInstr)
-	if extInstr != "Be helpful." {
-		t.Errorf("expected instructions to be preserved, got %v", extInstr)
+	if _, exists := extMap["instructions"]; exists {
+		t.Fatal("canonical instructions remained in provider extensions")
+	}
+	if !req.ResponsesInstructions || len(req.Messages) < 1 || req.Messages[0].Blocks[0].Text == nil || req.Messages[0].Blocks[0].Text.Text != "Be helpful." {
+		t.Errorf("expected canonical instructions message, got %#v", req.Messages)
 	}
 	var extTemp json.Number
-	json.Unmarshal(extMap["temperature"], &extTemp)
+	json.Unmarshal(extMap["future_temperature"], &extTemp)
 	if extTemp.String() != "0.5" {
 		t.Errorf("expected temperature to be preserved, got %v", extTemp)
 	}
@@ -401,8 +402,8 @@ func TestResponsesFieldPreservation(t *testing.T) {
 	if outMap["instructions"] != "Be helpful." {
 		t.Errorf("expected marshaled instructions to be preserved, got %v", outMap["instructions"])
 	}
-	if outMap["temperature"] != 0.5 {
-		t.Errorf("expected marshaled temperature to be preserved, got %v", outMap["temperature"])
+	if outMap["future_temperature"] != 0.5 {
+		t.Errorf("expected marshaled future_temperature to be preserved, got %v", outMap["future_temperature"])
 	}
 }
 
