@@ -31,60 +31,25 @@ const sdkModulePath = "github.com/torana-edge/torana-plugin-sdk"
 // sdk.HostCall is handled separately: its capability comes from the command
 // string, which is only knowable when that argument is a literal.
 //
-// ATTRIBUTION SCOPE: this table pins an intentional positive or negative
-// decision for every helper in the CURRENT pinned SDK inventory. A static
-// table cannot discover a newly added exported function by itself — a future
-// helper addition is caught by the compile-time tests that reference the
-// reviewed names, and by the explicit stream-handler table in lint_test.go —
-// so the honest claim is "every current helper has a decision", never "every
-// future helper is covered". Adding a helper to the SDK means adding its
-// decision here in the same change.
-var sdkPermission = map[string]string{
-	"Log":                   "env.log",
-	"EmitMetric":            "env.emit_metric",
-	"PluginConfig":          "env.plugin_config",
-	"MetaGet":               "env.meta_get",
-	"MetaSet":               "env.meta_set",
-	"CacheGet":              "env.cache_get",
-	"CacheSet":              "env.cache_set",
-	"SharedCacheGet":        "env.shared_cache_get",
-	"SharedCacheSet":        "env.shared_cache_set",
-	"StateGet":              "env.state_get",
-	"StateGetJSON":          "env.state_get",
-	"StateSet":              "env.state_set",
-	"StateSetJSON":          "env.state_set",
-	"StateDelete":           "env.state_set",
-	"StateKeys":             "env.state_keys",
-	"Now":                   "env.now",
-	"OriginalRequest":       "env.original_request",
-	"OriginalResponse":      "env.original_response",
-	"GetCredential":         "env.credential_get",
-	"AppendFile":            "env.file_append",
-	"ReadFile":              "env.file_read",
-	"WriteFile":             "env.file_write",
-	"ListFiles":             "env.file_list",
-	"DeleteFile":            "env.file_delete",
-	"HTTPRequest":           "env.http_request",
-	"ModelComplete":         "env.model_complete",
-	"GetModelPricing":       "env.model_pricing",
-	"GetPromptCachePolicy":  "env.cache_policy",
-	"SendRequest":           "env.host_call.torana_send_request",
-	"SetCacheBreakpoint":    "ir.cache_control.write",
-	"MoveCacheBreakpoint":   "ir.cache_control.write",
-	"ReplaceToolResultText": "ir.tool_results.write",
-	"BlockRequest":          "env.block_request",
-	"RespondRequest":        "env.respond_request",
-	"RouteRequest":          "env.route_request",
-	"SetIdentity":           "env.set_identity",
-	"SuppressEvent":         "ir.stream.write",
-	"EmitEvents":            "ir.stream.write",
-	"EmitAssembledToolCall": "ir.stream.write",
-	"ReplaceToolArguments":  "ir.stream.write",
-	"ReplaceToolInput":      "ir.stream.write",
-	"SuppressToolCall":      "ir.stream.write",
-	"ReplaceText":           "ir.stream.write",
-	"SuppressText":          "ir.stream.write",
-}
+// Host helpers come from the SDK capability catalog. IR-only constructors
+// carry local attribution because their grant depends on the mutation.
+var sdkPermission = func() map[string]string {
+	permissions := sdk.HelperPermissions()
+	// IR constructors have no host command. Their grant follows the actual
+	// mutation; changing only assistant text does not require topology writes.
+	for helper, grant := range map[string]string{
+		"SetCacheBreakpoint": "ir.cache_control.write", "MoveCacheBreakpoint": "ir.cache_control.write",
+		"AddCacheBreakpoint": "ir.cache_control.write", "DeleteCacheBreakpoint": "ir.cache_control.write",
+		"ReplaceToolResultText": "ir.tool_results.write",
+		"SuppressEvent":         "ir.stream.write", "EmitEvents": "ir.stream.write",
+		"EmitAssembledToolCall": "ir.stream.write", "ReplaceToolArguments": "ir.stream.write",
+		"ReplaceToolInput": "ir.stream.write", "SuppressToolCall": "ir.stream.write",
+		"ReplaceText": "ir.messages.write.assistant", "SuppressText": "ir.messages.write.assistant",
+	} {
+		permissions[helper] = grant
+	}
+	return permissions
+}()
 
 // sdkHook maps a registration call to the hook it implements.
 var sdkHook = map[string]string{
@@ -98,10 +63,7 @@ var sdkHook = map[string]string{
 // hookGatePermission lists capabilities that are not host calls at all: the
 // host checks them before dispatching a hook (discovery.go:1130, :1198), so
 // declaring the hook is what uses them. Nothing appears in the plugin's source.
-var hookGatePermission = map[string]string{
-	"env.serve_http":      "run_on_http_request",
-	"env.background_tick": "run_on_tick",
-}
+var hookGatePermission = sdk.HookGrants()
 
 // unattributable lists capabilities static analysis cannot see. The host
 // injects _request_headers into ToranaMeta when the grant is held
@@ -124,6 +86,33 @@ var unattributable = map[string]bool{
 // the used-but-undeclared direction.)
 func writeGrantsAreUnattributable(perm string) bool {
 	return sdk.IsWritePermission(perm)
+}
+
+// declarationUsesPermission reports capabilities exercised by manifest-bound
+// resources. The host refuses these declarations unless their capability is
+// granted, even when plugin source reaches the resource through an extension
+// whose implementation performs the eventual lookup.
+func declarationUsesPermission(manifest plugin.PluginManifest, perm string) bool {
+	switch perm {
+	case "env.credential_get":
+		return len(manifest.Credentials) > 0
+	case "env.http_request":
+		return len(manifest.HTTPEndpoints) > 0
+	case "env.model_complete":
+		return len(manifest.ModelServices) > 0
+	case "env.model_pricing":
+		return len(manifest.PricingResources) > 0
+	case "env.cache_policy":
+		return len(manifest.PromptCachePolicies) > 0
+	}
+	for _, declaration := range manifest.Files {
+		for _, operation := range declaration.Operations {
+			if perm == "env.file_"+operation {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 type severity int
@@ -150,6 +139,7 @@ type usage struct {
 	// the linter cannot attribute a capability to it and must not claim the
 	// declared set is unused.
 	dynamicHostCall []token.Position
+	discardedErrors []token.Position
 }
 
 func lintPlugin(args []string, stdout, stderr io.Writer) error {
@@ -200,6 +190,9 @@ func lintDir(dir string) ([]finding, error) {
 
 	findings = append(findings, lintHooks(manifest, u)...)
 	findings = append(findings, lintPermissions(manifest, u, declaredHooks(manifest))...)
+	for _, pos := range u.discardedErrors {
+		findings = append(findings, finding{sevError, fmt.Sprintf("checked SDK call discards its error result at %s", pos)})
+	}
 	findings = append(findings, lintSchema(dir)...)
 
 	sort.SliceStable(findings, func(i, j int) bool { return findings[i].sev < findings[j].sev })
@@ -309,6 +302,9 @@ func lintPermissions(manifest plugin.PluginManifest, u *usage, hooks map[string]
 			if _, used := u.permissions[perm]; used {
 				continue
 			}
+			if declarationUsesPermission(manifest, perm) {
+				continue
+			}
 			if unattributable[perm] || writeGrantsAreUnattributable(perm) {
 				continue
 			}
@@ -355,6 +351,7 @@ func scanSource(dir string) (*usage, error) {
 		permissions:      map[string]token.Position{},
 		hooks:            map[string]token.Position{},
 		registeredInMain: map[string]token.Position{},
+		discardedErrors:  []token.Position{},
 	}
 
 	// Follow the plugin's own import graph, starting at its root package.
@@ -567,6 +564,16 @@ func scanScope(fset *token.FileSet, node ast.Node, alias, enclosing string, u *u
 			scanScope(fset, t.Body, alias, enclosing, u, handlerProvenance{})
 			return false
 		case *ast.AssignStmt:
+			if len(t.Rhs) == 1 {
+				if c, ok := t.Rhs[0].(*ast.CallExpr); ok && isCheckedSDKCall(c, alias) {
+					index, _ := sdk.HelperErrorResult(c.Fun.(*ast.SelectorExpr).Sel.Name)
+					if index < len(t.Lhs) {
+						if id, ok := t.Lhs[index].(*ast.Ident); ok && id.Name == "_" {
+							u.discardedErrors = append(u.discardedErrors, fset.Position(t.Pos()))
+						}
+					}
+				}
+			}
 			// Bounded stream-handler provenance: an identifier assigned from
 			// sdk.NewStreamHandler() — directly or through a fluent chain —
 			// carries the receiver identity, so a later h.OnToolCall(...)
@@ -590,9 +597,29 @@ func scanScope(fset *token.FileSet, node ast.Node, alias, enclosing string, u *u
 			return true
 		case *ast.CallExpr:
 			return scanCall(fset, t, alias, enclosing, u, env)
+		case *ast.ExprStmt:
+			if c, ok := t.X.(*ast.CallExpr); ok && isCheckedSDKCall(c, alias) {
+				u.discardedErrors = append(u.discardedErrors, fset.Position(t.Pos()))
+			}
 		}
 		return true
 	})
+}
+
+func isCheckedSDKCall(call *ast.CallExpr, alias string) bool {
+	sel, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok {
+		return false
+	}
+	id, ok := sel.X.(*ast.Ident)
+	if !ok || id.Name != alias {
+		return false
+	}
+	if sel.Sel.Name == "MustLog" || strings.HasPrefix(sel.Sel.Name, "Must") {
+		return false
+	}
+	_, ok = sdk.HelperErrorResult(sel.Sel.Name)
+	return ok
 }
 
 // scanCall attributes one call expression: alias-qualified sdk helpers, hook
@@ -611,6 +638,16 @@ func scanCall(fset *token.FileSet, call *ast.CallExpr, alias, enclosing string, 
 		// OnToolCall on a NewStreamHandler-rooted value in this scope.
 		// OnTextDelta and Register alone never infer the grant; text-only
 		// observers stay grant-free.
+		if sel.Sel.Name == "Register" && streamHandlerValue(sel.X, alias, env) {
+			pos := fset.Position(sel.Pos())
+			u.hooks["run_on_stream_chunk"] = pos
+			if _, seen := u.permissions["env.meta_get"]; !seen {
+				u.permissions["env.meta_get"] = pos
+			}
+			if _, seen := u.permissions["env.meta_set"]; !seen {
+				u.permissions["env.meta_set"] = pos
+			}
+		}
 		if sel.Sel.Name == "OnToolCall" && streamHandlerValue(sel.X, alias, env) {
 			pos := fset.Position(sel.Pos())
 			if _, seen := u.permissions["ir.stream.write"]; !seen {
@@ -639,7 +676,7 @@ func scanCall(fset *token.FileSet, call *ast.CallExpr, alias, enclosing string, 
 		return true
 	}
 
-	if fn == "HostCall" {
+	if fn == "HostCall" || fn == "HostCallExtension" {
 		cmd, ok := literalString(call, 0)
 		if !ok {
 			u.dynamicHostCall = append(u.dynamicHostCall, pos)
@@ -677,6 +714,12 @@ func streamHandlerValue(expr ast.Expr, alias string, env handlerProvenance) bool
 			return true
 		}
 		return streamHandlerValue(sel.X, alias, env)
+	case *ast.CompositeLit:
+		if t, ok := e.Type.(*ast.SelectorExpr); ok {
+			if id, ok := t.X.(*ast.Ident); ok && id.Name == alias && t.Sel.Name == "StreamHandler" {
+				return true
+			}
+		}
 	case *ast.SelectorExpr:
 		// A package-qualified selector (sdk.StreamHandler and friends) is a
 		// type or package member, never a constructed value; the alias ident
@@ -702,10 +745,10 @@ func isStreamHandlerRoot(sel *ast.SelectorExpr, alias string) bool {
 // anything else is namespaced under env.host_call. The two names are not
 // derivable from each other, which is exactly why a linter is worth having.
 func permissionForCommand(cmd string) string {
-	if strings.HasPrefix(cmd, "env.") {
-		return cmd
+	if perm, ok := sdk.CommandPermission(cmd); ok {
+		return perm
 	}
-	return "env.host_call." + cmd
+	return "<unknown command: " + cmd + ">"
 }
 
 func sdkAlias(file *ast.File) string {

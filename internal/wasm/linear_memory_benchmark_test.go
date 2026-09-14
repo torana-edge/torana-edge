@@ -3,6 +3,7 @@ package wasm
 import (
 	"context"
 	"encoding/json"
+	sdk "github.com/torana-edge/torana-plugin-sdk"
 	"io"
 	"log"
 	"os"
@@ -461,7 +462,7 @@ func TestOfficialPluginLinearMemoryProfile(t *testing.T) {
 			})
 			r.FileAppendFunc = func(string, string, []byte, FileResource) error { return nil }
 			r.ModelCompleteFunc = func(context.Context, string, ModelServiceResource, *pbv1.ModelCompleteArgs) (*pbv1.ModelCompleteResult, *pbv1.HostError) {
-				return &pbv1.ModelCompleteResult{Content: `{"pii":false,"findings":[]}`, Usage: &pbv1.Usage{}}, nil
+				return &pbv1.ModelCompleteResult{Message: &pbv1.ResponseMessage{}, Usage: &pbv1.Usage{}}, nil
 			}
 			defer r.Close()
 			p, err := r.LoadPlugin(bundle.name, bundle.wasmBytes)
@@ -530,7 +531,8 @@ func TestOfficialPluginLinearMemoryProfile(t *testing.T) {
 func benchmarkBeforeRequestInput(t *testing.T) []byte {
 	t.Helper()
 	input, err := proto.Marshal(&pbv1.HookInput{
-		RequestId: 1,
+		ContractRevision: sdk.ContractRevision,
+		RequestId:        1,
 		Payload: &pbv1.HookInput_ChatRequest{ChatRequest: &pbv1.ChatRequest{
 			Model: "benchmark-model",
 			Messages: []*pbv1.Message{
@@ -569,7 +571,8 @@ func benchmarkBeforeRequestInput(t *testing.T) []byte {
 func benchmarkAfterResponseInput(t *testing.T) []byte {
 	t.Helper()
 	input, err := proto.Marshal(&pbv1.HookInput{
-		RequestId: 1,
+		ContractRevision: sdk.ContractRevision,
+		RequestId:        1,
 		Payload: &pbv1.HookInput_AfterResponse{AfterResponse: &pbv1.AfterResponse{
 			Response: &pbv1.ChatResponse{
 				Provider:          "benchmark-provider",

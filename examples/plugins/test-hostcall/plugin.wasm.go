@@ -42,32 +42,26 @@ func init() {
 			obs.ClockErr = err.Error()
 		}
 
-		// Round-trip through durable state: write, read back, compare.
-		//
-		// Both channels are recorded. A refusal is a *HostError and a broken
-		// boundary is an error, and a fixture that collapsed them would let a
-		// test assert "state works" against a host that refused every call.
-		if sherr, serr := sdk.StateSet("probe", "written"); serr != nil {
-			obs.StateErr = serr.Error()
-		} else if sherr != nil {
-			obs.StateErr = sherr.Message
-		} else if got, gherr, gerr := sdk.StateGet("probe"); gerr != nil {
-			obs.StateErr = gerr.Error()
-		} else if gherr != nil {
-			obs.StateErr = gherr.Message
+		// Writes and reads surface host refusals as typed errors; absence is separate.
+		if err := sdk.StateSet("probe", "written"); err != nil {
+			obs.StateErr = err.Error()
+		} else if got, found, err := sdk.StateGet("probe"); err != nil {
+			obs.StateErr = err.Error()
 		} else {
-			obs.StateRoundTrip = got == "written"
+			obs.StateRoundTrip = found && got == "written"
 		}
 
 		// A host FEATURE command, so it goes through HostCallExtension with an
 		// opaque body. Acceptance is now the framed success arm rather than a
 		// {"status":"ok"} string — v1's reply convention is gone.
 		payload, _ := json.Marshal(map[string]any{"counter": "fixture_calls", "delta": 1})
-		if _, cherr, cerr := sdk.HostCallExtension("torana_plugin_counter", payload); cerr == nil && cherr == nil {
+		if _, err := sdk.HostCallExtension("torana_plugin_counter", payload); err == nil {
 			obs.CounterAccepted = true
 		}
 
-		_ = sdk.StateSetJSON(observationKey, obs)
+		if err := sdk.StateSetJSON(observationKey, obs); err != nil {
+			return sdk.PassRequest(), err
+		}
 		return sdk.PassRequest(), nil
 	})
 }

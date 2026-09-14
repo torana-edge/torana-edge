@@ -52,6 +52,13 @@ func toPBChatRequest(c *engine.ChatRequest) *pb.ChatRequest {
 		*out.TopP = *c.TopP
 	}
 
+	if f := c.OutputFormat; f != nil {
+		out.OutputFormat = &pb.OutputFormat{Mode: pb.OutputFormat_Mode(f.Mode), Name: f.Name, SchemaJson: f.Schema.Bytes()}
+		if f.Strict != nil {
+			v := *f.Strict
+			out.OutputFormat.Strict = &v
+		}
+	}
 	out.ProviderExtensionsJson = c.ProviderExtensions.Bytes()
 	out.SafetySettingsJson = c.SafetySettings.Bytes()
 	out.ToranaMetaJson = c.ToranaMeta.Bytes()
@@ -110,6 +117,20 @@ func FromPBChatRequest(c *pb.ChatRequest) (*engine.ChatRequest, error) {
 		out.TopP = &val
 	}
 
+	if f := c.OutputFormat; f != nil {
+		if err := f.Validate(); err != nil {
+			return nil, fmt.Errorf("pb output format: %w", err)
+		}
+		schema, err := engine.ParseOptionalJSONObject(f.SchemaJson)
+		if err != nil {
+			return nil, err
+		}
+		out.OutputFormat = &engine.OutputFormat{Mode: int32(f.Mode), Name: f.Name, Schema: schema}
+		if f.Strict != nil {
+			v := *f.Strict
+			out.OutputFormat.Strict = &v
+		}
+	}
 	if len(c.ProviderExtensionsJson) > 0 {
 		v, err := engine.ParseOptionalJSONObject(c.ProviderExtensionsJson)
 		if err != nil {

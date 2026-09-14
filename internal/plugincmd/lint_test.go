@@ -437,7 +437,7 @@ func init() {
 
 `)
 	msgs := lintMessages(t, dir)
-	assertContains(t, msgs, `"env.host_call.torana_custom_feature"`)
+	assertContains(t, msgs, `uses "<unknown command: torana_custom_feature>"`)
 	assertContains(t, msgs, `"env.cache_get"`)
 }
 
@@ -575,6 +575,36 @@ func init() {
 	assertClean(t, lintMessages(t, dir))
 }
 
+func TestLintCountsManifestResourceDeclarationsAsCapabilityUse(t *testing.T) {
+	manifest := `{
+  "schema_version": 1,
+  "id": "test/resources",
+  "name": "resources",
+  "version": "0.1.0",
+  "abi_version": "v1",
+  "failure_mode": "pass",
+  "description": "resource fixture",
+  "hooks": [{"name":"run_before_request"}],
+  "permissions": [
+    {"name":"env.model_complete","description":"model"},
+    {"name":"env.model_pricing","description":"pricing"}
+  ],
+  "model_services": [{"name":"summarizer","description":"summary model","required":true,"timeout_ms":1000,"max_tokens":64,"max_input_bytes":4096,"max_calls_per_minute":10,"max_tokens_per_hour":1000}],
+  "pricing_resources": [{"name":"target","description":"target pricing"},{"name":"summarizer","description":"summary pricing","for_model_service":"summarizer"}]
+}`
+	dir := writePlugin(t, manifest, `package main
+
+import (
+	"context"
+	sdk "github.com/torana-edge/torana-plugin-sdk"
+	pb "github.com/torana-edge/torana-plugin-sdk/pb/v1"
+)
+func main() {}
+func init() { sdk.OnBeforeRequest(func(context.Context, *pb.ChatRequest) (sdk.RequestResult, error) { return sdk.PassRequest(), nil }) }
+`)
+	assertClean(t, lintMessages(t, dir))
+}
+
 // A HostCall whose command is computed cannot be attributed, so the linter
 // must not claim the declared capabilities are unused — it can no longer see
 // everything the plugin reaches for.
@@ -597,7 +627,7 @@ var cmd = "env.now"
 
 func init() {
 	sdk.OnBeforeRequest(func(ctx context.Context, req *pb.ChatRequest) (*pb.ChatRequest, error) {
-		_, _ = sdk.HostCall(cmd, "")
+		if _, err := sdk.HostCall(cmd, nil); err != nil { return nil, err }
 		return nil, nil
 	})
 }
@@ -687,7 +717,7 @@ import (
 func Register() {
 	sdk.OnBeforeRequest(func(ctx context.Context, req *pb.ChatRequest) (*pb.ChatRequest, error) {
 		sdk.Log("hello", sdk.LogLevelInfo)
-		_ = sdk.StateSet("k", "v")
+		if err := sdk.StateSet("k", "v"); err != nil { return nil, err }
 		return nil, nil
 	})
 }
@@ -743,7 +773,7 @@ func init() {
 }
 `)
 	if err := os.WriteFile(filepath.Join(dir, "go.mod"),
-		[]byte("module example.com/plug\n\ngo 1.25.0\n"), 0o600); err != nil {
+		[]byte("module example.com/plug\n\ngo 1.25.0\n\nrequire github.com/torana-edge/torana-plugin-sdk v0.4.2\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	// A code generator or scratch helper: present on disk, imported by nothing.
@@ -771,11 +801,11 @@ func Scratch() { _ = sdk.StateSet("k", "v") }
 		t.Fatal(err)
 	}
 	withImport := strings.Replace(string(raw),
-		`pb "github.com/torana-edge/torana-plugin-sdk/pb/v1"`,
-		"\"github.com/torana-edge/torana-plugin-sdk/pb\"\n\n\t\"example.com/plug/tools/unused\"", 1)
+		"import (\n",
+		"import (\n\t\"example.com/plug/tools/unused\"\n", 1)
 	withImport = strings.Replace(withImport,
-		`sdk.Log("hi", sdk.LogLevelInfo)`,
-		"sdk.Log(\"hi\", sdk.LogLevelInfo)\n\t\tunused.Scratch()", 1)
+		"return nil, nil\n\t})",
+		"unused.Scratch()\n\t\treturn nil, nil\n\t})", 1)
 	if err := os.WriteFile(main, []byte(withImport), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -844,7 +874,7 @@ func main() {}
 
 func init() {
 	sdk.OnBeforeRequest(func(ctx context.Context, req *pb.ChatRequest) (*pb.ChatRequest, error) {
-		sdk.SetCacheBreakpoint(req.Messages[0], map[string]any{"type": "ephemeral"})
+		if err := sdk.SetCacheBreakpoint(req.Messages[0], 0, []byte("{\"type\":\"ephemeral\"}")); err != nil { return nil, err }
 		return nil, nil
 	})
 }
@@ -1081,7 +1111,7 @@ func init() {
 }
 
 // TestLintAttributesStreamMutationActions — every SDK stream mutation helper
-// maps to ir.stream.write in the used-but-undeclared direction; each helper
+// maps to its narrow grant in the used-but-undeclared direction; each helper
 // name gets an explicit decision.
 func TestLintAttributesStreamMutationActions(t *testing.T) {
 	actions := []string{
@@ -1117,7 +1147,11 @@ func init() {
 }
 `)
 			msgs := lintMessages(t, dir)
-			assertContains(t, msgs, `uses "ir.stream.write" but plugin.json does not request it`)
+			grant := "ir.stream.write"
+			if strings.Contains(action, "Text") {
+				grant = "ir.messages.write.assistant"
+			}
+			assertContains(t, msgs, `uses "`+grant+`" but plugin.json does not request it`)
 		})
 	}
 }
@@ -1184,7 +1218,6 @@ func TestLintNegativeHelpersNeverInferStreamWrite(t *testing.T) {
 		"NewStreamAssembler": `sdk.NewStreamAssembler()`,
 		"WithToolAssembly":   `sdk.NewStreamAssembler().WithToolAssembly()`,
 		"Feed":               `sdk.NewStreamAssembler().Feed(nil)`,
-		"Register":           `sdk.NewStreamHandler().Register()`,
 		"OnTextDelta": `sdk.NewStreamHandler().OnTextDelta(func(ctx context.Context, text string) (sdk.TextAction, error) {
 		return sdk.PassText(), nil
 	})`,
@@ -1212,6 +1245,7 @@ func main() {}
 func init() {
 	`+body+`
 }
+
 `)
 			msgs := lintMessages(t, dir)
 			for _, m := range msgs {
@@ -1220,6 +1254,22 @@ func init() {
 				}
 			}
 		})
+	}
+}
+
+func TestLintRegisteredStreamHandlerRequiresHookAndMetaGrants(t *testing.T) {
+	source := `package main
+import ("context"; sdk "github.com/torana-edge/torana-plugin-sdk")
+func main() {}
+func init() { h := sdk.NewStreamHandler(); h.OnTextDelta(func(context.Context,string)(sdk.TextAction,error){ return sdk.PassText(),nil }); h.Register() }`
+	missing := lintMessages(t, writePlugin(t, manifestWith(``, ``), source))
+	assertContains(t, missing, `run_on_stream_chunk`)
+	assertContains(t, missing, `env.meta_get`)
+	valid := lintMessages(t, writePlugin(t, manifestWith(`{"name":"run_on_stream_chunk"}`, `{"name":"env.meta_get","description":"read"},{"name":"env.meta_set","description":"write"}`), source))
+	for _, m := range valid {
+		if strings.Contains(m, "run_on_stream_chunk") || strings.Contains(m, "env.meta_") {
+			t.Fatalf("valid registration diagnostic: %s", m)
+		}
 	}
 }
 

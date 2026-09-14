@@ -21,8 +21,8 @@ func main() {}
 // for its own reason and the short-circuit would not be what stopped the run.
 func init() {
 	sdk.OnBeforeRequest(func(ctx context.Context, req *pb.ChatRequest) (sdk.RequestResult, error) {
-		sdk.BlockRequest(422, "blocked_then_trapped", "refused before trapping")
-		sdk.RespondRequest("this respond must be discarded")
+		sdk.MustBlockRequest(422, "blocked_then_trapped", "refused before trapping")
+		sdk.MustRespondText("this respond must be discarded")
 		panic("trap after recording verdicts")
 	})
 }

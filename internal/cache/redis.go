@@ -3,6 +3,7 @@ package cache
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -53,27 +54,38 @@ func newRedisStore(addr, password string, db int, prefix string, ttl time.Durati
 	return &RedisStore{client: client, ttl: ttl, prefix: prefix}, nil
 }
 
-func (r *RedisStore) Set(ctx context.Context, key, value string) {
+func (r *RedisStore) Set(ctx context.Context, key, value string, ttl time.Duration) error {
 	ctx, cancel := opContext(ctx)
 	defer cancel()
-	_ = r.client.Set(ctx, r.prefix+key, value, r.ttl).Err()
+	if ttl < 0 {
+		return errors.New("cache ttl must not be negative")
+	}
+	if ttl == 0 {
+		ttl = r.ttl
+	}
+	return r.client.Set(ctx, r.prefix+key, value, ttl).Err()
 }
 
-func (r *RedisStore) Get(ctx context.Context, key string) (string, bool) {
+func (r *RedisStore) Get(ctx context.Context, key string) (string, bool, error) {
 	ctx, cancel := opContext(ctx)
 	defer cancel()
 	v, err := r.client.Get(ctx, r.prefix+key).Result()
 	if err != nil {
-		return "", false // miss, expired, or Redis unavailable — all misses
+		if errors.Is(err, redis.Nil) {
+			return "", false, nil
+		}
+		return "", false, err
 	}
-	return v, true
+	return v, true, nil
 }
 
-func (r *RedisStore) Delete(ctx context.Context, key string) {
+func (r *RedisStore) Delete(ctx context.Context, key string) error {
 	ctx, cancel := opContext(ctx)
 	defer cancel()
-	_ = r.client.Del(ctx, r.prefix+key).Err()
+	return r.client.Del(ctx, r.prefix+key).Err()
 }
+
+func (r *RedisStore) DefaultTTL() time.Duration { return r.ttl }
 
 // Len counts this deployment's keys via SCAN. It exists for tests and
 // diagnostics — not a hot path.

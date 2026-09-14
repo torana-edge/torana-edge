@@ -18,6 +18,63 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  # The Rust SDK is distributed from its exact Git revision. Build its
+  # all-hooks guest from the same Go-module revision Edge is pinned to, then
+  # exercise RespondRequest through Edge's production loader and host calls.
+  rust-production-conformance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: go.mod
+      - name: Install the supported Rust and protobuf toolchains
+        run: |
+          rustup toolchain install 1.85.1 --profile minimal --target wasm32-wasip1
+          sudo apt-get update
+          sudo apt-get install --yes protobuf-compiler
+      - name: Resolve and verify Edge's exact SDK source
+        id: sdk
+        shell: bash
+        run: |
+          set -euo pipefail
+          module=github.com/torana-edge/torana-plugin-sdk
+          version=$(go list -m -f '{{.Version}}' "$module")
+          metadata=$(go mod download -json "$module@$version")
+          directory=$(jq -r '.Dir // empty' <<<"$metadata")
+          revision=$(jq -r '.Origin.Hash // empty' <<<"$metadata")
+          if [[ -z "$directory" || -z "$revision" ]]; then
+            echo "SDK module metadata lacks its extracted directory or VCS revision" >&2
+            exit 1
+          fi
+          pseudo_suffix=${version##*-}
+          if [[ "$pseudo_suffix" =~ ^[0-9a-f]{12}$ && "$pseudo_suffix" != "${revision:0:12}" ]]; then
+            echo "SDK pseudo-version $version does not resolve to Origin.Hash $revision" >&2
+            exit 1
+          fi
+          test -f "$directory/conformance/guests/rust-allhooks/Cargo.toml"
+          echo "directory=$directory" >> "$GITHUB_OUTPUT"
+          echo "revision=$revision" >> "$GITHUB_OUTPUT"
+      - name: Build the exact Rust all-hooks guest
+        env:
+          SDK_SOURCE_DIR: ${{ steps.sdk.outputs.directory }}
+        run: |
+          cargo +1.85.1 build --locked --target wasm32-wasip1 \
+            --target-dir /tmp/torana-rust-allhooks-target \
+            --manifest-path "$SDK_SOURCE_DIR/conformance/guests/rust-allhooks/Cargo.toml"
+      - name: Exercise Rust authoring and production Edge contracts
+        env:
+          GOWORK: "off"
+          RUSTUP_TOOLCHAIN: 1.85.1
+          TORANA_RUST_CONFORMANCE: "1"
+          TORANA_RUST_GUEST: /tmp/torana-rust-allhooks-target/wasm32-wasip1/debug/torana-rust-allhooks.wasm
+        run: |
+          go test ./internal/plugincmd \
+            -run '^(TestRustScaffoldFirstRunAgainstPinnedSDK|TestScaffoldRustRevisionMatchesHostModule)$' -count=1
+          go test ./internal/plugin \
+            -run '^TestCompiledRustRespondRequestThroughProductionRuntime$' -count=1
+
   # The race suite is the pre-merge gate, sharded across four workers with
   # FULL coverage: internal/wasm, internal/plugin, internal/proxy, and an
   # auto-inventoried remainder. The partition is defined ONCE in
@@ -168,7 +225,7 @@ jobs:
       - name: Platform-sensitive packages
         run: go test ./internal/fileperm/... ./internal/pluginfiles/... ./internal/secret/... ./internal/auditlog/... ./internal/mitm/...
         env:
-          GOWORK: off
+          GOWORK: "off"
 
   # The release configuration itself, exercised on every PR rather than first on
   # a tag. The cross-compile step in `analysis` proves the code builds for each

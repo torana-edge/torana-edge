@@ -50,6 +50,9 @@ func deallocExport(ptr, size uint32) {
 	pinMu.Unlock()
 }
 
+//go:wasmexport abi_version
+func abiVersion() uint64 { return 1<<32 | 1 }
+
 //go:wasmexport supported_hooks
 func supportedHooks() uint32 {
 	return uint32(pb.Hook_HOOK_BEFORE_REQUEST.Bit())
@@ -78,7 +81,7 @@ func runHook(ptr, size uint32) uint64 {
 	})
 	call("env.block_request", blockArgs)
 
-	respondArgs, _ := proto.Marshal(&pb.RespondRequestArgs{Content: "must be discarded"})
+	respondArgs, _ := proto.Marshal(&pb.RespondRequestArgs{Response: &pb.SyntheticResponse{Message: &pb.ResponseMessage{Blocks: []*pb.ResponseBlock{{Kind: &pb.ResponseBlock_Text{Text: &pb.ResponseTextBlock{Text: "must be discarded"}}}}}, FinishReason: "stop"}})
 	call("env.respond_request", respondArgs)
 
 	// Not a HookResult: a length-delimited field whose payload is truncated.

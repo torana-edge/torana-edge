@@ -18,7 +18,7 @@ func init() {
 	sdk.OnBeforeRequest(func(ctx context.Context, req *pb.ChatRequest) (sdk.RequestResult, error) {
 		for _, m := range req.Messages {
 			if strings.Contains(blockutil.TextOf(m), "respondme") {
-				sdk.RespondRequest("canned response from test-responder")
+				sdk.MustRespondText("canned response from test-responder")
 				return sdk.ReplaceRequest(req), nil
 			}
 		}

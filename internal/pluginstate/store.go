@@ -50,13 +50,17 @@
 package pluginstate
 
 import (
+	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 )
 
 const (
@@ -79,14 +83,19 @@ type Store struct {
 	mu sync.RWMutex
 	// flushMu serializes durable snapshots. Without it, two Set calls could
 	// write snapshots concurrently and an older snapshot could rename last.
-	flushMu sync.Mutex
-	data    map[string]map[string]string // plugin → key → value
+	flushMu  sync.Mutex
+	data     map[string]map[string]string // plugin → key → value
+	versions map[string]map[string]string
+	counter  uint64
 
 	path             string
 	maxValueBytes    int
 	maxTotalBytes    int
 	maxKeysPerPlugin int
 	totalBytes       int
+	readOnly         atomic.Bool
+	// afterRename is a test fault hook; set before sharing the store.
+	afterRename func() error
 }
 
 // Options configures a Store. Zero values select the defaults above.
@@ -116,6 +125,7 @@ func New(opts Options) (*Store, error) {
 	}
 	s := &Store{
 		data:             make(map[string]map[string]string),
+		versions:         make(map[string]map[string]string),
 		path:             opts.Path,
 		maxValueBytes:    opts.MaxValueBytes,
 		maxTotalBytes:    opts.MaxTotalBytes,
@@ -125,6 +135,10 @@ func New(opts Options) (*Store, error) {
 		return s, nil
 	}
 	if err := s.load(); err != nil {
+		s.readOnly.Store(true)
+		s.data = make(map[string]map[string]string)
+		s.versions = make(map[string]map[string]string)
+		s.totalBytes = 0
 		return s, fmt.Errorf("plugin state: %w", err)
 	}
 	return s, nil
@@ -141,6 +155,208 @@ func (s *Store) Get(plugin, key string) (string, bool) {
 	return v, ok
 }
 
+// ReadOnly reports whether persistence is degraded. A read-only store keeps
+// serving its last unambiguous in-memory generation but refuses every write
+// until the backing file is repaired and the process reopens it.
+func (s *Store) ReadOnly() bool { return s != nil && s.readOnly.Load() }
+
+// PageEntry is one durable state entry including its opaque version token.
+type PageEntry struct{ Key, Value, Version string }
+
+type stateEnvelope struct {
+	Format  int                             `json:"format"`
+	Counter uint64                          `json:"counter"`
+	Data    map[string]map[string]PageEntry `json:"data"`
+}
+type cursorToken struct{ Plugin, Prefix, Last string }
+
+func (s *Store) GetVersioned(plugin, key string) (string, string, bool) {
+	if s == nil || plugin == "" || key == "" {
+		return "", "", false
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	v, ok := s.data[plugin][key]
+	if !ok {
+		return "", "", false
+	}
+	return v, s.versions[plugin][key], true
+}
+
+func (s *Store) nextVersion() (string, error) {
+	if s.counter == ^uint64(0) {
+		return "", ErrVersionExhausted
+	}
+	s.counter++
+	return strconv.FormatUint(s.counter, 10), nil
+}
+
+var ErrVersionExhausted = errors.New("plugin state version counter exhausted")
+
+func (s *Store) CompareAndSet(plugin, key, value string, expected *string) (bool, string, error) {
+	if s == nil {
+		return false, "", errors.New("state store not configured")
+	}
+	if s.readOnly.Load() {
+		return false, "", errors.New("plugin state is read-only after corrupt load")
+	}
+	if plugin == "" || key == "" {
+		return false, "", errors.New("plugin and key are required")
+	}
+	if len(value) > s.maxValueBytes {
+		return false, "", fmt.Errorf("value is %d bytes, limit is %d", len(value), s.maxValueBytes)
+	}
+	s.flushMu.Lock()
+	defer s.flushMu.Unlock()
+	if s.readOnly.Load() {
+		return false, "", errors.New("state store requires reopen after a persistence failure")
+	}
+	s.mu.RLock()
+	cur, exists := s.versions[plugin][key]
+	if (expected == nil && exists) || (expected != nil && (!exists || *expected != cur)) {
+		s.mu.RUnlock()
+		return false, "", nil
+	}
+	if !exists && len(s.data[plugin]) >= s.maxKeysPerPlugin {
+		s.mu.RUnlock()
+		return false, "", fmt.Errorf("plugin %q already holds %d keys, the per-plugin limit", plugin, s.maxKeysPerPlugin)
+	}
+	if s.counter == ^uint64(0) {
+		s.mu.RUnlock()
+		return false, "", ErrVersionExhausted
+	}
+	candidate := cloneData(s.data)
+	vers := cloneData(s.versions)
+	total := s.totalBytes
+	counter := s.counter + 1
+	s.mu.RUnlock()
+	if candidate[plugin] == nil {
+		candidate[plugin] = map[string]string{}
+	}
+	if vers[plugin] == nil {
+		vers[plugin] = map[string]string{}
+	}
+	if exists {
+		total -= entrySize(key, curValue(s.data, plugin, key))
+	}
+	if total+entrySize(key, value) > s.maxTotalBytes {
+		return false, "", fmt.Errorf("store would exceed its %d byte limit", s.maxTotalBytes)
+	}
+	version := strconv.FormatUint(counter, 10)
+	candidate[plugin][key] = value
+	vers[plugin][key] = version
+	if err := s.persistVersioned(candidate, vers, counter); err != nil {
+		// The rename may already have happened before a later fsync error;
+		// persistence latches read-only until reopen, preventing ABA on retry.
+		return false, "", err
+	}
+	s.mu.Lock()
+	s.data, s.versions, s.totalBytes, s.counter = candidate, vers, total+entrySize(key, value), counter
+	s.mu.Unlock()
+	return true, version, nil
+}
+
+func curValue(d map[string]map[string]string, p, k string) string { return d[p][k] }
+
+func (s *Store) CompareAndDelete(plugin, key, expected string) (bool, error) {
+	if s == nil {
+		return false, errors.New("state store not configured")
+	}
+	if plugin == "" || key == "" || expected == "" {
+		return false, errors.New("plugin, key, and expected version are required")
+	}
+	s.flushMu.Lock()
+	defer s.flushMu.Unlock()
+	if s.readOnly.Load() {
+		return false, errors.New("state store requires reopen after a persistence failure")
+	}
+	s.mu.RLock()
+	if _, ok := s.data[plugin][key]; !ok || s.versions[plugin][key] != expected {
+		s.mu.RUnlock()
+		return false, nil
+	}
+	candidate := cloneData(s.data)
+	vers := cloneData(s.versions)
+	total := s.totalBytes - totalEntry(candidate, plugin, key)
+	counter := s.counter
+	s.mu.RUnlock()
+	delete(candidate[plugin], key)
+	delete(vers[plugin], key)
+	if len(candidate[plugin]) == 0 {
+		delete(candidate, plugin)
+		delete(vers, plugin)
+	}
+	if err := s.persistVersioned(candidate, vers, counter); err != nil {
+		return false, err
+	}
+	s.mu.Lock()
+	s.data, s.versions, s.totalBytes = candidate, vers, total
+	s.mu.Unlock()
+	return true, nil
+}
+
+func totalEntry(d map[string]map[string]string, p, k string) int {
+	if v, ok := d[p][k]; ok {
+		return entrySize(k, v)
+	}
+	return 0
+}
+
+func (s *Store) Scan(plugin, prefix, cursor string, limit, maxBytes int) ([]PageEntry, string, error) {
+	if s == nil || plugin == "" {
+		return nil, "", errors.New("plugin is required")
+	}
+	if limit < 1 || limit > 256 || maxBytes < 1 {
+		return nil, "", errors.New("invalid scan bounds")
+	}
+	last := ""
+	if cursor != "" {
+		raw, e := base64.RawURLEncoding.DecodeString(cursor)
+		if e != nil {
+			return nil, "", errors.New("invalid cursor")
+		}
+		var c cursorToken
+		if json.Unmarshal(raw, &c) != nil || c.Plugin != plugin || c.Prefix != prefix {
+			return nil, "", errors.New("invalid cursor")
+		}
+		last = c.Last
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	keys := make([]string, 0)
+	for k := range s.data[plugin] {
+		if strings.HasPrefix(k, prefix) && k > last {
+			keys = append(keys, k)
+		}
+	}
+	sort.Strings(keys)
+	out := make([]PageEntry, 0, limit)
+	bytes := 0
+	for _, k := range keys {
+		v := s.data[plugin][k]
+		e := PageEntry{k, v, s.versions[plugin][k]}
+		n := len(k) + len(v) + len(e.Version)
+		if len(out) == 0 && n > maxBytes {
+			return nil, "", errors.New("first scan entry exceeds byte budget")
+		}
+		if len(out) >= limit || bytes+n > maxBytes {
+			break
+		}
+		out = append(out, e)
+		bytes += n
+		last = k
+	}
+	if len(out) == 0 || last == "" {
+		return out, "", nil
+	}
+	more := len(keys) > 0 && last < keys[len(keys)-1]
+	if !more {
+		return out, "", nil
+	}
+	raw, _ := json.Marshal(cursorToken{plugin, prefix, last})
+	return out, base64.RawURLEncoding.EncodeToString(raw), nil
+}
+
 // Set stores a value, replacing any previous one.
 //
 // An empty value STORES an empty value. It used to delete the key, which made
@@ -149,6 +365,9 @@ func (s *Store) Get(plugin, key string) (string, bool) {
 func (s *Store) Set(plugin, key, value string) error {
 	if s == nil {
 		return fmt.Errorf("state store not configured")
+	}
+	if s.readOnly.Load() {
+		return errors.New("plugin state is read-only after corrupt load")
 	}
 	if plugin == "" || key == "" {
 		return fmt.Errorf("plugin and key are required")
@@ -161,6 +380,9 @@ func (s *Store) Set(plugin, key, value string) error {
 	// keep seeing the previous committed generation while persistence runs.
 	s.flushMu.Lock()
 	defer s.flushMu.Unlock()
+	if s.readOnly.Load() {
+		return errors.New("state store requires reopen after a persistence failure")
+	}
 	s.mu.RLock()
 	candidate := cloneData(s.data)
 	totalBytes := s.totalBytes
@@ -183,11 +405,24 @@ func (s *Store) Set(plugin, key, value string) error {
 	}
 	bucket[key] = value
 	totalBytes += delta
-	if err := s.persist(candidate); err != nil {
+	s.mu.Lock()
+	version, verr := s.nextVersion()
+	s.mu.Unlock()
+	if verr != nil {
+		return verr
+	}
+	versions := cloneData(s.versions)
+	if versions[plugin] == nil {
+		versions[plugin] = map[string]string{}
+	}
+	versions[plugin][key] = version
+	if err := s.persistVersioned(candidate, versions, s.counter); err != nil {
+		// Never reuse a token after an ambiguous filesystem failure.
 		return err
 	}
 	s.mu.Lock()
 	s.data = candidate
+	s.versions = versions
 	s.totalBytes = totalBytes
 	s.mu.Unlock()
 	return nil
@@ -202,33 +437,43 @@ func (s *Store) Delete(plugin, key string) error {
 	if s == nil {
 		return fmt.Errorf("state store not configured")
 	}
+	if s.readOnly.Load() {
+		return errors.New("plugin state is read-only after corrupt load")
+	}
 	if plugin == "" || key == "" {
 		return fmt.Errorf("plugin and key are required")
 	}
 
 	s.flushMu.Lock()
 	defer s.flushMu.Unlock()
+	if s.readOnly.Load() {
+		return errors.New("state store requires reopen after a persistence failure")
+	}
 	s.mu.RLock()
 	candidate := cloneData(s.data)
+	versions := cloneData(s.versions)
 	totalBytes := s.totalBytes
 	s.mu.RUnlock()
 	changed := false
 	if old, ok := candidate[plugin][key]; ok {
 		totalBytes -= entrySize(key, old)
 		delete(candidate[plugin], key)
+		delete(versions[plugin], key)
 		if len(candidate[plugin]) == 0 {
 			delete(candidate, plugin)
+			delete(versions, plugin)
 		}
 		changed = true
 	}
 	if !changed {
 		return nil
 	}
-	if err := s.persist(candidate); err != nil {
+	if err := s.persistVersioned(candidate, versions, s.counter); err != nil {
 		return err
 	}
 	s.mu.Lock()
 	s.data = candidate
+	s.versions = versions
 	s.totalBytes = totalBytes
 	s.mu.Unlock()
 	return nil
@@ -299,16 +544,52 @@ func (s *Store) load() error {
 		}
 		return fmt.Errorf("read %s: %w", s.path, err)
 	}
-	var data map[string]map[string]string
-	if err := json.Unmarshal(raw, &data); err != nil {
+	var env stateEnvelope
+	if err := json.Unmarshal(raw, &env); err != nil {
 		// Keep going with an empty store rather than failing startup.
 		return fmt.Errorf("parse %s (starting with empty state): %w", s.path, err)
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.data = data
-	if s.data == nil {
-		s.data = make(map[string]map[string]string)
+	legacy := false
+	if env.Format == 1 && env.Data != nil {
+		s.counter = env.Counter
+		seen := map[string]bool{}
+		for p, b := range env.Data {
+			for k, e := range b {
+				n, err := strconv.ParseUint(e.Version, 10, 64)
+				if err != nil || e.Version == "" || n == 0 || n > s.counter || seen[e.Version] {
+					return fmt.Errorf("invalid version envelope")
+				}
+				seen[e.Version] = true
+				if s.data[p] == nil {
+					s.data[p] = map[string]string{}
+				}
+				if s.versions[p] == nil {
+					s.versions[p] = map[string]string{}
+				}
+				s.data[p][k] = e.Value
+				s.versions[p][k] = e.Version
+			}
+		}
+	} else {
+		legacy = true
+		var data map[string]map[string]string
+		if err := json.Unmarshal(raw, &data); err != nil {
+			return fmt.Errorf("parse %s (starting with empty state): %w", s.path, err)
+		}
+		s.data = data
+		if s.data == nil {
+			s.data = map[string]map[string]string{}
+		}
+		s.versions = make(map[string]map[string]string)
+		for p, b := range s.data {
+			s.versions[p] = map[string]string{}
+			for k := range b {
+				s.counter++
+				s.versions[p][k] = strconv.FormatUint(s.counter, 10)
+			}
+		}
 	}
 	s.totalBytes = 0
 	for _, bucket := range s.data {
@@ -316,23 +597,43 @@ func (s *Store) load() error {
 			s.totalBytes += entrySize(k, v)
 		}
 	}
+	if legacy {
+		if err := s.persistVersioned(s.data, s.versions, s.counter); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
-// persist writes a candidate state without changing the visible in-memory
-// state. The caller holds flushMu.
-func (s *Store) persist(candidate map[string]map[string]string) error {
+func (s *Store) persistVersioned(candidate map[string]map[string]string, versions map[string]map[string]string, counter uint64) error {
 	if s.path == "" {
 		return nil
 	}
-	raw, err := json.MarshalIndent(candidate, "", "  ")
+	env := stateEnvelope{Format: 1, Counter: counter, Data: make(map[string]map[string]PageEntry)}
+	for p, b := range candidate {
+		env.Data[p] = map[string]PageEntry{}
+		for k, v := range b {
+			env.Data[p][k] = PageEntry{k, v, versions[p][k]}
+		}
+	}
+	raw, err := json.MarshalIndent(env, "", "  ")
 	if err != nil {
 		return fmt.Errorf("plugin state: encode: %w", err)
 	}
 	return s.persistBytes(raw)
 }
 
-func (s *Store) persistBytes(raw []byte) error {
+func (s *Store) persistBytes(raw []byte) (result error) {
+	published := false
+	defer func() {
+		// Once rename succeeds, disk may contain the candidate even if directory
+		// sync fails. Refuse all further writes until reopen reconciles that state;
+		// stale in-memory values must never authorize a subsequent CAS.
+		if published && result != nil {
+			s.readOnly.Store(true)
+		}
+	}()
+
 	dir := filepath.Dir(s.path)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("plugin state: create %s: %w", dir, err)
@@ -360,6 +661,12 @@ func (s *Store) persistBytes(raw []byte) error {
 	}
 	if err := os.Rename(tmpName, s.path); err != nil {
 		return fmt.Errorf("plugin state: replace %s: %w", s.path, err)
+	}
+	published = true
+	if s.afterRename != nil {
+		if err := s.afterRename(); err != nil {
+			return err
+		}
 	}
 	dirHandle, err := os.Open(dir)
 	if err != nil {

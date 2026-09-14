@@ -554,7 +554,10 @@ func TestIntentDoesNotGuessRemappedCallIdentity(t *testing.T) {
 	if _, err := pp.RunBeforeRequest(context.Background(), 2, chat, nil); err != nil {
 		t.Fatalf("RunBeforeRequest: %v", err)
 	}
-	got, ok := store.Get(context.Background(), wasm.SharedCacheKey("intent:call_req_42"))
+	got, ok, cacheErr := store.Get(context.Background(), wasm.SharedCacheKey("intent:call_req_42"))
+	if cacheErr != nil {
+		t.Fatal(cacheErr)
+	}
 	if ok {
 		t.Fatalf("unidentified occurrence borrowed captured intent: %q", got)
 	}
@@ -606,7 +609,7 @@ func TestCapturedIntentOccurrenceFeedsKeywordCompactor(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RunBeforeRequest: %v", err)
 	}
-	if got, ok := store.Get(context.Background(), wasm.SharedCacheKey("intent:call_resp_9")); !ok || got != "where is the retry budget configured" {
+	if got, ok, err := store.Get(context.Background(), wasm.SharedCacheKey("intent:call_resp_9")); err != nil || !ok || got != "where is the retry budget configured" {
 		t.Fatalf("captured occurrence did not feed compactor: %q (present=%v)", got, ok)
 	}
 	var result string
@@ -1041,7 +1044,7 @@ func TestIntentNativeIEnrichesDescriptionOnly(t *testing.T) {
 	if args["i"] != "find the retry budget" {
 		t.Fatalf(`native "i" must NOT be stripped, got %v`, args)
 	}
-	if v, ok := store.Get(context.Background(), wasm.SharedCacheKey("intent:call_native")); !ok || v != "find the retry budget" {
+	if v, ok, err := store.Get(context.Background(), wasm.SharedCacheKey("intent:call_native")); err != nil || !ok || v != "find the retry budget" {
 		t.Fatalf("native i not captured into cache: %q ok=%v", v, ok)
 	}
 }

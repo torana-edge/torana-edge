@@ -174,7 +174,7 @@ type responsesInputItem struct {
 // ---------------------------------------------------------------------------
 
 // Unmarshal detects the API variant and parses rawBody into a ChatRequest.
-func (a *Adapter) Unmarshal(rawBody []byte) (*engine.ChatRequest, error) {
+func (a *Adapter) unmarshalBody(rawBody []byte) (*engine.ChatRequest, error) {
 	variant := detectVariant(rawBody)
 	switch variant {
 	case variantResponses:
@@ -185,7 +185,7 @@ func (a *Adapter) Unmarshal(rawBody []byte) (*engine.ChatRequest, error) {
 }
 
 // Marshal converts a ChatRequest back to Chat Completions or Responses wire format.
-func (a *Adapter) Marshal(chat *engine.ChatRequest) ([]byte, error) {
+func (a *Adapter) marshalBody(chat *engine.ChatRequest) ([]byte, error) {
 	// The owning validation at EVERY marshal entry: the engine pointer sum
 	// must be in the closed domain before any arm is projected — a future
 	// call site cannot bypass the checked boundary by accident.
@@ -1531,4 +1531,26 @@ func marshalChatMessage(m engine.Message) (marshalMsg, error) {
 		mm.Content = ""
 	}
 	return mm, nil
+}
+
+// Unmarshal projects portable output constraints out of provider extras.
+func (a *Adapter) Unmarshal(raw []byte) (*engine.ChatRequest, error) {
+	chat, err := a.unmarshalBody(raw)
+	if err != nil {
+		return nil, err
+	}
+	if err := format.ExtractOutputFormat(chat, "openai"); err != nil {
+		return nil, err
+	}
+	return chat, nil
+}
+func (a *Adapter) Marshal(chat *engine.ChatRequest) ([]byte, error) {
+	if err := format.ValidateOutputFormatExtras(chat, "openai"); err != nil {
+		return nil, err
+	}
+	raw, err := a.marshalBody(chat)
+	if err != nil {
+		return nil, err
+	}
+	return format.ApplyOutputFormat(raw, chat, "openai")
 }

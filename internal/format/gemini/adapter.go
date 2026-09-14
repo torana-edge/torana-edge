@@ -243,7 +243,7 @@ type geminiFuncDecl struct {
 // --- Unmarshal ---
 
 // Unmarshal parses a Gemini or Code Assist request body into a ChatRequest.
-func (a *Adapter) Unmarshal(rawBody []byte) (*engine.ChatRequest, error) {
+func (a *Adapter) unmarshalBody(rawBody []byte) (*engine.ChatRequest, error) {
 	// Detect the Code Assist wrapper: a top-level object with a "request" member.
 	var top map[string]json.RawMessage
 	if err := json.Unmarshal(rawBody, &top); err != nil {
@@ -662,7 +662,7 @@ func mapRoleG(role string) engine.Role {
 // --- Marshal ---
 
 // Marshal converts a ChatRequest back into Gemini or Code Assist JSON.
-func (a *Adapter) Marshal(chat *engine.ChatRequest) ([]byte, error) {
+func (a *Adapter) marshalBody(chat *engine.ChatRequest) ([]byte, error) {
 	// The owning validation at EVERY marshal entry: the engine pointer sum
 	// must be in the closed domain before any arm is projected — a future
 	// call site cannot bypass the checked boundary by accident.
@@ -1685,4 +1685,26 @@ func VerifyCodeAssistEnvelopePB(providerExtensionsJson []byte) error {
 		return fmt.Errorf("code assist envelope: %w", err)
 	}
 	return verifyCodeAssistEnvelope(env)
+}
+
+// Unmarshal projects portable output constraints out of provider extras.
+func (a *Adapter) Unmarshal(raw []byte) (*engine.ChatRequest, error) {
+	chat, err := a.unmarshalBody(raw)
+	if err != nil {
+		return nil, err
+	}
+	if err := format.ExtractOutputFormat(chat, "gemini"); err != nil {
+		return nil, err
+	}
+	return chat, nil
+}
+func (a *Adapter) Marshal(chat *engine.ChatRequest) ([]byte, error) {
+	if err := format.ValidateOutputFormatExtras(chat, "gemini"); err != nil {
+		return nil, err
+	}
+	raw, err := a.marshalBody(chat)
+	if err != nil {
+		return nil, err
+	}
+	return format.ApplyOutputFormat(raw, chat, "gemini")
 }

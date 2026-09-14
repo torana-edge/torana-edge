@@ -35,7 +35,7 @@ func TestCallRequestTimeoutDiscardsInstance(t *testing.T) {
 	}
 	started := time.Now()
 	var output []byte
-	err = p.CallRequest(context.Background(), pb.Hook_HOOK_BEFORE_REQUEST, 1, []byte("x"), &output)
+	err = p.CallRequest(context.Background(), pb.Hook_HOOK_BEFORE_REQUEST, 1, lifecycleInput(1), &output)
 	if err == nil {
 		t.Fatal("expected timed-out guest call to fail")
 	}
@@ -261,7 +261,7 @@ func TestIdleRetirementConcurrentTraffic(t *testing.T) {
 			<-start
 			for range 100 {
 				var output []byte
-				if err := p.CallRequest(context.Background(), pb.Hook_HOOK_BEFORE_REQUEST, 1, nil, &output); err != nil {
+				if err := p.CallRequest(context.Background(), pb.Hook_HOOK_BEFORE_REQUEST, 1, lifecycleInput(1), &output); err != nil {
 					errs <- err
 					return
 				}

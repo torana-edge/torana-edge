@@ -451,7 +451,7 @@ type mutatingStore struct {
 	raw     map[string][]string
 }
 
-func (s *mutatingStore) Get(ctx context.Context, key string) (string, bool) {
+func (s *mutatingStore) Get(ctx context.Context, key string) (string, bool, error) {
 	s.mu.Lock()
 	if !s.mutated {
 		s.mutated = true

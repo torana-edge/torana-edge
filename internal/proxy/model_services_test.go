@@ -40,11 +40,11 @@ func TestBoundModelServiceUsesOperatorDestinationAndReturnsNeutralResult(t *test
 	}
 	defer server.Shutdown(context.Background())
 	requestedMax := uint32(80)
-	result, hostErr := server.completeModel(context.Background(), "pii", wasm.ModelServiceResource{Name: "classifier", Provider: "bound", Model: "operator-model", Path: "/v1/chat/completions", Timeout: time.Second, MaxTokens: 40, MaxInputBytes: 1000, MaxCallsPerMinute: 2, MaxTokensPerHour: 100}, &pbv1.ModelCompleteArgs{Service: "classifier", Messages: []*pbv1.ModelMessage{{Role: "system", Content: "classify"}, {Role: "user", Content: "payload"}}, MaxTokens: &requestedMax})
+	result, hostErr := server.completeModel(context.Background(), "pii", wasm.ModelServiceResource{Name: "classifier", Provider: "bound", Model: "operator-model", Path: "/v1/chat/completions", Timeout: time.Second, MaxTokens: 40, MaxInputBytes: 1000, MaxCallsPerMinute: 2, MaxTokensPerHour: 100}, &pbv1.ModelCompleteArgs{Service: "classifier", Messages: []*pbv1.Message{{Role: "system", Blocks: modelTextBlocks("classify")}, {Role: "user", Blocks: modelTextBlocks("payload")}}, MaxTokens: &requestedMax})
 	if hostErr != nil {
 		t.Fatalf("host error = %+v", hostErr)
 	}
-	if result.Content != "safe" || result.ReportedModel != "provider-reported" || result.FinishReason != "stop" || result.Usage == nil || result.Usage.InputTokens != 7 || result.Usage.OutputTokens != 2 {
+	if result.GetMessage().GetBlocks()[0].GetText().GetText() != "safe" || result.ReportedModel != "provider-reported" || result.FinishReason != "stop" || result.Usage == nil || result.Usage.InputTokens != 7 || result.Usage.OutputTokens != 2 {
 		t.Fatalf("result = %+v", result)
 	}
 	if captured["model"] != "operator-model" || captured["max_tokens"] != float64(40) {
@@ -69,7 +69,7 @@ func TestBoundModelServiceProviderRefusalIsValueFree(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer server.Shutdown(context.Background())
-	_, hostErr := server.completeModel(context.Background(), "pii", wasm.ModelServiceResource{Name: "classifier", Provider: "bound", Model: "operator-model", Path: "/v1/chat/completions", Timeout: time.Second, MaxTokens: 40, MaxInputBytes: 1000, MaxCallsPerMinute: 2, MaxTokensPerHour: 100}, &pbv1.ModelCompleteArgs{Service: "classifier", Messages: []*pbv1.ModelMessage{{Role: "user", Content: "SECRET-request"}}})
+	_, hostErr := server.completeModel(context.Background(), "pii", wasm.ModelServiceResource{Name: "classifier", Provider: "bound", Model: "operator-model", Path: "/v1/chat/completions", Timeout: time.Second, MaxTokens: 40, MaxInputBytes: 1000, MaxCallsPerMinute: 2, MaxTokensPerHour: 100}, &pbv1.ModelCompleteArgs{Service: "classifier", Messages: []*pbv1.Message{{Role: "user", Blocks: modelTextBlocks("SECRET-request")}}})
 	if hostErr == nil || hostErr.Code != pbv1.ErrorCode_ERROR_CODE_UNAVAILABLE || hostErr.Message != "model service provider refused the request" {
 		t.Fatalf("host error = %+v", hostErr)
 	}
@@ -190,7 +190,7 @@ func TestPromptCachePolicyUsesPendingRoute(t *testing.T) {
 
 func TestBoundModelServiceRejectsOversizedInputBeforeSpend(t *testing.T) {
 	server := &Server{}
-	result, refusal := server.completeModel(context.Background(), "pii", wasm.ModelServiceResource{MaxInputBytes: 3}, &pbv1.ModelCompleteArgs{Messages: []*pbv1.ModelMessage{{Role: "user", Content: "secret"}}})
+	result, refusal := server.completeModel(context.Background(), "pii", wasm.ModelServiceResource{MaxInputBytes: 3}, &pbv1.ModelCompleteArgs{Service: "classifier", Messages: []*pbv1.Message{{Role: "user", Blocks: modelTextBlocks("secret")}}})
 	if result != nil || refusal == nil || refusal.Code != pbv1.ErrorCode_ERROR_CODE_INVALID_ARGUMENT || refusal.Message != "model request exceeds the approved input limit" {
 		t.Fatalf("result/refusal = %+v / %+v", result, refusal)
 	}
@@ -225,7 +225,7 @@ func TestModelServiceUsageNormalizesCacheReads(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer s.Shutdown(context.Background())
-			result, herr := s.completeModel(context.Background(), "compactor", wasm.ModelServiceResource{Name: "summarizer", Provider: "bound", Model: "m", Path: inferenceTestPath(tc.format), Timeout: time.Second, MaxTokens: 40, MaxInputBytes: 1000, MaxCallsPerMinute: 10, MaxTokensPerHour: 1000}, &pbv1.ModelCompleteArgs{Service: "summarizer", Messages: []*pbv1.ModelMessage{{Role: "user", Content: "summarize"}}})
+			result, herr := s.completeModel(context.Background(), "compactor", wasm.ModelServiceResource{Name: "summarizer", Provider: "bound", Model: "m", Path: inferenceTestPath(tc.format), Timeout: time.Second, MaxTokens: 40, MaxInputBytes: 1000, MaxCallsPerMinute: 10, MaxTokensPerHour: 1000}, &pbv1.ModelCompleteArgs{Service: "summarizer", Messages: []*pbv1.Message{{Role: "user", Blocks: modelTextBlocks("summarize")}}})
 			if herr != nil || result == nil || result.Usage == nil {
 				t.Fatalf("result=%v refusal=%v", result, herr)
 			}
@@ -279,12 +279,12 @@ func TestModelServiceInvalidUsagePreservesCompletion(t *testing.T) {
 			}
 			defer s.Shutdown(context.Background())
 			resource := wasm.ModelServiceResource{Name: "summarizer", Provider: "bound", Model: "m", Path: "/v1/chat/completions", Timeout: time.Second, MaxTokens: 40, MaxInputBytes: 1000, MaxCallsPerMinute: 10, MaxTokensPerHour: 1}
-			args := &pbv1.ModelCompleteArgs{Service: "summarizer", Messages: []*pbv1.ModelMessage{{Role: "user", Content: "summarize"}}}
+			args := &pbv1.ModelCompleteArgs{Service: "summarizer", Messages: []*pbv1.Message{{Role: "user", Blocks: modelTextBlocks("summarize")}}}
 			result, herr := s.completeModel(context.Background(), "compactor", resource, args)
 			if herr != nil || result == nil {
 				t.Fatalf("successful completion lost: result=%v refusal=%v", result, herr)
 			}
-			if result.Content != "useful summary" || result.ReportedModel != "reported-model" || result.FinishReason != "stop" || result.Usage != nil {
+			if result.GetMessage().GetBlocks()[0].GetText().GetText() != "useful summary" || result.ReportedModel != "reported-model" || result.FinishReason != "stop" || result.Usage != nil {
 				t.Fatalf("want preserved completion with unknown usage, got %v", result)
 			}
 			events := s.feed.Snapshot()
@@ -300,6 +300,57 @@ func TestModelServiceInvalidUsagePreservesCompletion(t *testing.T) {
 			result, herr = s.completeModel(context.Background(), "compactor", resource, args)
 			if result != nil || herr == nil || herr.Code != pbv1.ErrorCode_ERROR_CODE_UNAVAILABLE || !strings.Contains(herr.Message, "tokens/hour") || calls.Load() != 2 {
 				t.Fatalf("valid report did not bind the token budget: result=%v refusal=%v calls=%d", result, herr, calls.Load())
+			}
+		})
+	}
+}
+
+func modelTextBlocks(text string) []*pbv1.RequestBlock {
+	return []*pbv1.RequestBlock{{Kind: &pbv1.RequestBlock_Text{Text: &pbv1.RequestTextBlock{Text: text}}}}
+}
+
+func TestBoundModelServicePreservesToolsAndOutputConstraints(t *testing.T) {
+	cases := []struct{ name, format, path, reply, outputKey string }{
+		{"chat", "openai", "/v1/chat/completions", `{"model":"reported","choices":[{"message":{"role":"assistant","content":"before","tool_calls":[{"id":"provider-call","type":"function","function":{"name":"lookup","arguments":"{\"n\":9007199254740993}"}}]},"finish_reason":"tool_calls"}]}`, "response_format"},
+		{"responses", "openai", "/v1/responses", `{"model":"reported","status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"before"}]},{"type":"function_call","call_id":"provider-call","name":"lookup","arguments":"{\"n\":9007199254740993}"}]}`, "text"},
+		{"anthropic", "anthropic", "/v1/messages", `{"model":"reported","type":"message","role":"assistant","content":[{"type":"text","text":"before"},{"type":"tool_use","id":"provider-call","name":"lookup","input":{"n":9007199254740993}}],"stop_reason":"tool_use"}`, "output_config"},
+		{"gemini", "gemini", "/v1beta/models/operator-model:generateContent", `{"modelVersion":"reported","candidates":[{"content":{"role":"model","parts":[{"text":"before"},{"functionCall":{"id":"provider-call","name":"lookup","args":{"n":9007199254740993}}}]},"finishReason":"STOP"}]}`, "generationConfig"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var captured map[string]any
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+				if request.URL.Path != tc.path {
+					t.Errorf("operator endpoint changed: %s", request.URL.Path)
+				}
+				if err := json.NewDecoder(request.Body).Decode(&captured); err != nil {
+					t.Error(err)
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(tc.reply))
+			}))
+			defer upstream.Close()
+			providers := testProviderConfig(upstream.URL, "bound", tc.format)
+			providers.Providers["bound"] = provider.Provider{URL: upstream.URL, Format: tc.format, Auth: provider.ProviderAuth{Mode: "none"}}
+			server, err := New(Config{Port: "0", Providers: providers})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer server.Shutdown(context.Background())
+			args := &pbv1.ModelCompleteArgs{Service: "classifier", Messages: []*pbv1.Message{{Role: "user", Blocks: modelTextBlocks("question")}}, Tools: []*pbv1.ToolDef{{Name: "lookup", ParametersJson: []byte(`{"type":"object","properties":{"n":{"type":"integer"}}}`)}}, OutputFormat: &pbv1.OutputFormat{Mode: pbv1.OutputFormat_MODE_JSON_SCHEMA, Name: "answer", SchemaJson: []byte(`{"type":"object"}`)}}
+			result, refusal := server.completeModel(context.Background(), "fixture", wasm.ModelServiceResource{Name: "classifier", Provider: "bound", Model: "operator-model", Path: tc.path, Timeout: time.Second, MaxTokens: 40, MaxInputBytes: 2000, MaxCallsPerMinute: 10, MaxTokensPerHour: 1000}, args)
+			if refusal != nil || result == nil {
+				t.Fatalf("model service failed: %v", refusal)
+			}
+			if captured["tools"] == nil || captured[tc.outputKey] == nil {
+				t.Fatalf("canonical tools/schema omitted: %v", captured)
+			}
+			if result.Message == nil || len(result.Message.Blocks) != 2 || result.Message.Blocks[0].GetText().GetText() != "before" {
+				t.Fatalf("ordered assistant result lost: %v", result)
+			}
+			call := result.Message.Blocks[1].GetToolCall()
+			if call == nil || call.Name != "lookup" || string(call.ArgumentsJson) != `{"n":9007199254740993}` {
+				t.Fatalf("tool result or number lexeme lost: %v", call)
 			}
 		})
 	}

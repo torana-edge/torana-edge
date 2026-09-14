@@ -756,9 +756,9 @@ func New(cfg Config) (*Server, error) {
 		return nil, fmt.Errorf("proxy: plugin files: %w", err)
 	}
 	// Durable plugin state lives beside the managed config. A failure to load
-	// it is reported but not fatal: the store still works in memory, and
-	// refusing to start the proxy because one plugin's scratch file was
-	// truncated would be a poor trade.
+	// is not fatal, but the store serves only its last unambiguous generation
+	// and refuses writes. Repair or remove plugin-state.json and restart Torana
+	// to reopen it; /health reports the degraded state until then.
 	stateStore, err := pluginstate.New(pluginstate.Options{
 		Path: filepath.Join(filepath.Dir(configPath), "plugin-state.json"),
 	})
@@ -1068,7 +1068,8 @@ func New(cfg Config) (*Server, error) {
 				// holds the approved env.request_headers grant. The raw
 				// header map is untrusted caller input; the pipeline
 				// snapshots and allowlists it. No pipeline-wide injection.
-				modified, pluginChanged, err := pl.RunBeforeRequestTracked(req.Context(), reqStateFrom(req.Context()).ID, chat, req.Header)
+				pluginCtx := context.WithValue(req.Context(), syntheticResponseScopeKey{}, syntheticResponseScope{format: fmt, request: chat})
+				modified, pluginChanged, err := pl.RunBeforeRequestTracked(pluginCtx, reqStateFrom(req.Context()).ID, chat, req.Header)
 				if err != nil {
 					// failure_mode: block, applied at the TRANSPORT boundary.
 					//
@@ -1143,14 +1144,25 @@ func New(cfg Config) (*Server, error) {
 				// the transport returns it without calling upstream: zero
 				// tokens spent. Block wins over respond, checked above.
 				if respond := verdicts.Respond(); respond != nil {
+					renderFailed := false
 					if rc, ok := req.Context().Value(routeContextKey{}).(*RouteContext); ok {
-						rc.Block = renderRespond(fmt, chat, respond)
+						rendered, err := renderRespond(req.Context(), fmt, chat, respond)
+						if err != nil {
+							rc.Block = renderHostError(fmt.Name)
+							renderFailed = true
+						} else {
+							rc.Block = rendered
+						}
 					}
 					rs := reqStateFrom(req.Context())
 					rs.Synthetic = true
 					rs.Model = chat.Model
 					rs.Provider = provName
 					rs.Verdict = "respond"
+					if renderFailed {
+						rs.Verdict = "host-error"
+						rs.PluginFailure = true
+					}
 					rs.VerdictPlugin = respond.Plugin
 					req.Body = io.NopCloser(bytes.NewReader(nil))
 					req.ContentLength = 0
@@ -1268,6 +1280,17 @@ func New(cfg Config) (*Server, error) {
 				newBody, err = fmt.Request.Marshal(chat)
 			}
 			if err != nil {
+				var unsupported *format.UnsupportedOutputFormatError
+				if errors.As(err, &unsupported) {
+					rc.Block = renderUnsupportedOutputFormat(prov.Format)
+					rs.Synthetic = true
+					rs.Verdict = "invalid_request"
+					rs.AuditErrorCode = "unsupported_output_format"
+					discardCompactionReports(rs)
+					req.Body = io.NopCloser(bytes.NewReader(nil))
+					req.ContentLength = 0
+					return
+				}
 				// HOST MARSHAL FAILURE — the terminal host_error path: the
 				// accepted IR passed the
 				// SDK replacement contract (every plugin replacement is
@@ -1766,6 +1789,11 @@ func New(cfg Config) (*Server, error) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
+		if s.pluginState != nil && s.pluginState.ReadOnly() {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			w.Write([]byte(`{"status":"degraded","component":"plugin_state","serving":"read_only","recovery":"repair_or_remove_plugin-state.json_and_restart"}`))
+			return
+		}
 		if s.pluginReloadDegraded.Load() {
 			w.WriteHeader(http.StatusServiceUnavailable)
 			w.Write([]byte(`{"status":"degraded","component":"plugin_pipeline","serving":"last_known_good"}`))
@@ -3389,6 +3417,37 @@ func (s *Server) newRuntime() *wasm.Runtime {
 		rt.StateSetFunc = s.pluginState.Set
 		rt.StateKeysFunc = s.pluginState.Keys
 		rt.StateDeleteFunc = s.pluginState.Delete
+		rt.StateGetVersionedFunc = s.pluginState.GetVersioned
+		rt.StateCompareAndSetFunc = s.pluginState.CompareAndSet
+		rt.StateCompareAndDeleteFunc = s.pluginState.CompareAndDelete
+		rt.StateScanFunc = s.pluginState.Scan
+	}
+	rt.ValidateSyntheticResponseFunc = func(ctx context.Context, response *pb.SyntheticResponse) *pb.HostError {
+		scope, ok := ctx.Value(syntheticResponseScopeKey{}).(syntheticResponseScope)
+		if !ok {
+			return &pb.HostError{Code: pb.ErrorCode_ERROR_CODE_UNAVAILABLE, Message: "synthetic response context is unavailable"}
+		}
+		if err := validateSyntheticForFormat(scope.format, scope.request, response); err != nil {
+			return &pb.HostError{Code: pb.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, Message: err.Error()}
+		}
+		return nil
+	}
+	rt.ExecutionInfoFunc = func(ctx context.Context) *pb.ExecutionInfo {
+		rs := reqStateFrom(ctx)
+		info := &pb.ExecutionInfo{}
+		if rs == nil {
+			return info
+		}
+		info.Provider, info.Model, info.SyntheticResponse = rs.Provider, rs.Model, rs.Synthetic
+		if rs.ConversationID != "" {
+			v := rs.ConversationID
+			info.ConversationId = &v
+		}
+		if d, ok := ctx.Deadline(); ok {
+			v := d.UnixMilli()
+			info.DeadlineUnixMs = &v
+		}
+		return info
 	}
 	// Plugin-originated egress: refusals return framed in the HostError arm
 	// (INVALID_ARGUMENT / NOT_CONFIGURED / UNAVAILABLE); the value arm carries

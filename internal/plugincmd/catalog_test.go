@@ -57,9 +57,16 @@ func TestCatalogEntriesAreWellFormed(t *testing.T) {
 // torana-plugins CI, whose behaviour-suite step includes this package for
 // exactly that reason — it is the only place both repositories exist.
 func TestCatalogMatchesThePluginRepository(t *testing.T) {
-	const pluginsRoot = "../../../torana-plugins/plugins"
+	pluginsRoot := os.Getenv("TORANA_PLUGIN_SOURCE_DIR")
+	explicit := pluginsRoot != ""
+	if pluginsRoot == "" {
+		pluginsRoot = "../../../torana-plugins/plugins"
+	}
 	entries, err := os.ReadDir(pluginsRoot)
 	if err != nil {
+		if explicit {
+			t.Fatalf("read TORANA_PLUGIN_SOURCE_DIR %q: %v", pluginsRoot, err)
+		}
 		t.Skip("torana-plugins not checked out beside this repo")
 	}
 

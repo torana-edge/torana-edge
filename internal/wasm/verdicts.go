@@ -2,6 +2,7 @@ package wasm
 
 import (
 	"fmt"
+	"google.golang.org/protobuf/proto"
 	"sync"
 
 	pbv1 "github.com/torana-edge/torana-plugin-sdk/pb/v1"
@@ -33,8 +34,8 @@ type BlockVerdict struct {
 
 // RespondVerdict serves a canned completion without calling upstream.
 type RespondVerdict struct {
-	Plugin  string
-	Content string
+	Plugin   string
+	Response *pbv1.SyntheticResponse
 }
 
 // RouteVerdict overrides the provider and/or model for this request.
@@ -61,13 +62,13 @@ func (v *RequestVerdicts) setBlock(plugin string, a *pbv1.BlockRequestArgs) {
 	v.block = &BlockVerdict{Plugin: plugin, Status: a.Status, Code: a.Code, Message: a.Message}
 }
 
-func (v *RequestVerdicts) setRespond(plugin, content string) {
+func (v *RequestVerdicts) setRespond(plugin string, response *pbv1.SyntheticResponse) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	if v.respond != nil {
 		return
 	}
-	v.respond = &RespondVerdict{Plugin: plugin, Content: content}
+	v.respond = &RespondVerdict{Plugin: plugin, Response: proto.Clone(response).(*pbv1.SyntheticResponse)}
 }
 
 func (v *RequestVerdicts) setRoute(plugin, provider, model string) {

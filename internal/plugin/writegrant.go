@@ -339,6 +339,15 @@ func fingerprintRequestSections(req *pb.ChatRequest) (requestSections, error) {
 	}
 	binary.LittleEndian.PutUint64(scratch[:], uint64(len(req.StopSequences)))
 	writeFramed(h, scratch[:])
+	if f := req.OutputFormat; f != nil {
+		encoded, err := proto.MarshalOptions{Deterministic: true}.Marshal(f)
+		if err != nil {
+			return p, err
+		}
+		writeField(h, 8, true, encoded)
+	} else {
+		writeField(h, 8, false, nil)
+	}
 	copy(p.params[:], h.Sum(nil))
 
 	return p, nil
@@ -1346,7 +1355,15 @@ var chatRequestFieldSections = map[string]string{
 	"stop_sequences":           "ir.params.write",
 	"provider_extensions_json": "ir.params.write",
 	"safety_settings_json":     "ir.params.write",
+	"output_format":            "ir.params.write",
 	"torana_meta_json":         hostOwnedField,
+}
+
+var outputFormatFieldSections = map[string]string{
+	"mode":        "ir.params.write",
+	"name":        "ir.params.write",
+	"schema_json": "ir.params.write",
+	"strict":      "ir.params.write",
 }
 
 var messageFieldSections = map[string]string{

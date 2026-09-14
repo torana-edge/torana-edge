@@ -27,11 +27,11 @@ func init() {
 		for _, m := range req.Messages {
 			switch {
 			case strings.Contains(blockutil.TextOf(m), "blockme"):
-				sdk.BlockRequest(422, "blocked_then_invalid",
+				sdk.MustBlockRequest(422, "blocked_then_invalid",
 					"blocked before returning an invalid replacement")
-				sdk.RespondRequest("this respond must be discarded")
+				sdk.MustRespondText("this respond must be discarded")
 			case strings.Contains(blockutil.TextOf(m), "respondme"):
-				sdk.RespondRequest("this respond must be discarded")
+				sdk.MustRespondText("this respond must be discarded")
 			}
 		}
 		blockutil.SetText(req.Messages[0], blockutil.TextOf(req.Messages[0])+" [mutated without a write grant]")

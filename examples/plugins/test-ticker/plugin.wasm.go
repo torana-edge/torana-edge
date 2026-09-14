@@ -20,8 +20,10 @@ func init() {
 	sdk.OnTick(func(ctx context.Context, tick *pb.TickRequest) (sdk.TickResult, error) {
 		// Echo the whole TickRequest back so tests can assert the host
 		// populated every field, not just that something arrived.
-		_, _ = sdk.CacheSet("last_tick", fmt.Sprintf("id=%d millis=%d interval=%d",
-			tick.TickId, tick.UnixMillis, tick.IntervalMs))
+		if err := sdk.CacheSet("last_tick", fmt.Sprintf("id=%d millis=%d interval=%d",
+			tick.TickId, tick.UnixMillis, tick.IntervalMs)); err != nil {
+			return sdk.TickIdle(), err
+		}
 
 		// Tick 1 reports nothing to do, so the idle path is exercised by a real
 		// guest rather than only in unit tests. current ABI spells it TickIdle: v1
@@ -34,8 +36,11 @@ func init() {
 	})
 
 	sdk.OnBeforeRequest(func(ctx context.Context, req *pb.ChatRequest) (sdk.RequestResult, error) {
-		v, herr, err := sdk.CacheGet("last_tick")
-		if err != nil || herr != nil || v == "" {
+		v, found, err := sdk.CacheGet("last_tick")
+		if err != nil {
+			return sdk.PassRequest(), err
+		}
+		if !found || v == "" {
 			// A miss means no tick has fired yet, which is the state this
 			// fixture exists to observe changing.
 			return sdk.PassRequest(), nil

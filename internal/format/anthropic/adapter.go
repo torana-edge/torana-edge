@@ -336,7 +336,7 @@ func init() {
 }
 
 // Unmarshal parses an Anthropic Messages request into a canonical ChatRequest.
-func (a *Adapter) Unmarshal(rawBody []byte) (*engine.ChatRequest, error) {
+func (a *Adapter) unmarshalBody(rawBody []byte) (*engine.ChatRequest, error) {
 	var ar anthropicRequest
 	if err := json.Unmarshal(rawBody, &ar); err != nil {
 		return nil, fmt.Errorf("anthropic unmarshal: %w", err)
@@ -673,7 +673,7 @@ func mustMarshalA(v any) []byte {
 }
 
 // Marshal converts a canonical ChatRequest into Anthropic Messages JSON.
-func (a *Adapter) Marshal(chat *engine.ChatRequest) ([]byte, error) {
+func (a *Adapter) marshalBody(chat *engine.ChatRequest) ([]byte, error) {
 	// The owning validation at EVERY marshal entry: the engine pointer sum
 	// must be in the closed domain before any arm is projected — a future
 	// call site cannot bypass the checked boundary by accident.
@@ -1022,4 +1022,26 @@ func unmapRole(r engine.Role) string {
 	default:
 		return string(r)
 	}
+}
+
+// Unmarshal projects portable output constraints out of provider extras.
+func (a *Adapter) Unmarshal(raw []byte) (*engine.ChatRequest, error) {
+	chat, err := a.unmarshalBody(raw)
+	if err != nil {
+		return nil, err
+	}
+	if err := format.ExtractOutputFormat(chat, "anthropic"); err != nil {
+		return nil, err
+	}
+	return chat, nil
+}
+func (a *Adapter) Marshal(chat *engine.ChatRequest) ([]byte, error) {
+	if err := format.ValidateOutputFormatExtras(chat, "anthropic"); err != nil {
+		return nil, err
+	}
+	raw, err := a.marshalBody(chat)
+	if err != nil {
+		return nil, err
+	}
+	return format.ApplyOutputFormat(raw, chat, "anthropic")
 }

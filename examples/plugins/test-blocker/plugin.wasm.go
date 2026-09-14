@@ -17,7 +17,7 @@ func init() {
 	sdk.OnBeforeRequest(func(ctx context.Context, req *pb.ChatRequest) (sdk.RequestResult, error) {
 		for _, m := range req.Messages {
 			if strings.Contains(blockutil.TextOf(m), "blockme") {
-				sdk.BlockRequest(422, "blocked_by_test",
+				sdk.MustBlockRequest(422, "blocked_by_test",
 					"Blocked by test-blocker: request contained the trigger word.")
 				return sdk.ReplaceRequest(req), nil
 			}

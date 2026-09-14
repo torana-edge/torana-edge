@@ -16,6 +16,7 @@ import (
 	"github.com/torana-edge/torana-edge/internal/format"
 	"github.com/torana-edge/torana-edge/internal/provider"
 	"github.com/torana-edge/torana-edge/internal/wasm"
+	pbv1 "github.com/torana-edge/torana-plugin-sdk/pb/v1"
 
 	_ "github.com/torana-edge/torana-edge/internal/format/anthropic"
 	_ "github.com/torana-edge/torana-edge/internal/format/gemini"
@@ -93,7 +94,10 @@ func respondReq(formatName string, stream bool) string {
 func TestRenderRespondUsesResponsesEnvelope(t *testing.T) {
 	f := format.Lookup("openai")
 	chat := &engine.ChatRequest{Model: "gpt-x", OpenAIVariant: engine.OpenAIResponses}
-	got := renderRespond(f, chat, &wasm.RespondVerdict{Content: "direct"})
+	got, err := renderRespond(context.Background(), f, chat, &wasm.RespondVerdict{Response: &pbv1.SyntheticResponse{Message: &pbv1.ResponseMessage{Blocks: []*pbv1.ResponseBlock{{Kind: &pbv1.ResponseBlock_Text{Text: &pbv1.ResponseTextBlock{Text: "direct"}}}}}, FinishReason: "stop"}})
+	if err != nil {
+		t.Fatal(err)
+	}
 	var body map[string]any
 	if err := json.Unmarshal(got.Body, &body); err != nil {
 		t.Fatal(err)
@@ -106,7 +110,10 @@ func TestRenderRespondUsesResponsesEnvelope(t *testing.T) {
 	}
 
 	chat.Stream = true
-	stream := renderRespond(f, chat, &wasm.RespondVerdict{Content: "direct"})
+	stream, err := renderRespond(context.Background(), f, chat, &wasm.RespondVerdict{Response: &pbv1.SyntheticResponse{Message: &pbv1.ResponseMessage{Blocks: []*pbv1.ResponseBlock{{Kind: &pbv1.ResponseBlock_Text{Text: &pbv1.ResponseTextBlock{Text: "direct"}}}}}, FinishReason: "stop"}})
+	if err != nil {
+		t.Fatal(err)
+	}
 	wire := string(stream.Body)
 	if !strings.Contains(wire, "event: response.created") || !strings.Contains(wire, "event: response.completed") || strings.Contains(wire, "chat.completion.chunk") {
 		t.Fatalf("not a Responses stream:\n%s", wire)

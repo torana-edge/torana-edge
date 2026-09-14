@@ -31,6 +31,7 @@ type ChatRequest struct {
 	Temperature   *float64
 	TopP          *float64
 	StopSequences []string
+	OutputFormat  *OutputFormat
 	// SafetySettings is the authoritative raw safety-config array (Gemini
 	// shape); absent vs present-empty are distinct.
 	SafetySettings OptionalJSONArray
@@ -308,4 +309,13 @@ type ChatResponse struct {
 	// ProviderExtensions carries unparsed provider fields passed through
 	// transparently, as on the request side.
 	ProviderExtensions map[string]any
+}
+
+// OutputFormat is the portable constraint on newly generated assistant text.
+// Schema remains verbatim JSON; canonicalizing it would alter request identity.
+type OutputFormat struct {
+	Mode   int32 // 0 text, 1 JSON object, 2 JSON schema (ABI OutputFormat.Mode)
+	Name   string
+	Schema OptionalJSONObject
+	Strict *bool
 }

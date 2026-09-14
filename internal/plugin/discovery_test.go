@@ -168,7 +168,7 @@ func TestResolvePluginResourcesUsesApprovalNotGuestInput(t *testing.T) {
 		PricingResources:    []PricingDeclaration{{Name: "judge-price", Description: "judge pricing", Required: true, ForModelService: "judge"}},
 		PromptCachePolicies: []PromptCacheDeclaration{{Name: "request-cache", Description: "request cache policy", Required: true}},
 	}
-	resources, err := resolvePluginResources(manifest, Approval{
+	resources, err := ResolvePluginResources(manifest, Approval{
 		Credentials: map[string]string{"service": "operator-id"},
 		Files:       map[string]FileApproval{"usage.jsonl": {MaxBytes: 150, RetainedFiles: 2}},
 		HTTPEndpoints: map[string]HTTPApproval{"billing": {
@@ -204,7 +204,7 @@ func TestResolvePluginResourcesUsesApprovalNotGuestInput(t *testing.T) {
 		t.Fatalf("prompt cache policy = %+v", policy)
 	}
 
-	if _, err := resolvePluginResources(manifest, Approval{Credentials: map[string]string{}, HTTPEndpoints: map[string]HTTPApproval{}}); err == nil || !strings.Contains(err.Error(), "required credential") {
+	if _, err := ResolvePluginResources(manifest, Approval{Credentials: map[string]string{}, HTTPEndpoints: map[string]HTTPApproval{}}); err == nil || !strings.Contains(err.Error(), "required credential") {
 		t.Fatalf("missing required binding error = %v", err)
 	}
 }
@@ -219,7 +219,7 @@ func TestResolvePromptCachePolicyIsExactValidatedAndNonAliasing(t *testing.T) {
 		Provider: "anthropic", Model: "claude", CacheReadUSDPerMTok: &rate,
 		Tiers: []PromptCacheTierApproval{{TTLSeconds: 300, Marker: marker}},
 	}}}}}
-	resources, err := resolvePluginResources(manifest, approval)
+	resources, err := ResolvePluginResources(manifest, approval)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -244,7 +244,7 @@ func TestResolvePromptCachePolicyIsExactValidatedAndNonAliasing(t *testing.T) {
 		"invalid policy": {PromptCachePolicies: map[string]PromptCacheApproval{"request-cache": {Models: []PromptCacheModelApproval{{Provider: "p", Model: "m"}}}}},
 	} {
 		t.Run(name, func(t *testing.T) {
-			if _, err := resolvePluginResources(manifest, candidate); err == nil {
+			if _, err := ResolvePluginResources(manifest, candidate); err == nil {
 				t.Fatal("invalid prompt cache approval was accepted")
 			}
 		})
@@ -270,7 +270,7 @@ func TestResolveBoundPricingDoesNotMutateOrAliasApproval(t *testing.T) {
 		}},
 		PricingResources: []PricingDeclaration{{Name: "judge-price", Description: "pricing", Required: true, ForModelService: "judge"}},
 	}
-	resources, err := resolvePluginResources(manifest, approval)
+	resources, err := ResolvePluginResources(manifest, approval)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -292,10 +292,10 @@ func TestResolvePluginResourcesRequiresDeclaredFileBinding(t *testing.T) {
 		Path: "usage.jsonl", Operations: []string{"append"}, Required: true,
 		MaxBytes: 200, RetainedFiles: 3,
 	}}}
-	if _, err := resolvePluginResources(manifest, Approval{}); err == nil || !strings.Contains(err.Error(), "required file") {
+	if _, err := ResolvePluginResources(manifest, Approval{}); err == nil || !strings.Contains(err.Error(), "required file") {
 		t.Fatalf("missing required file error = %v", err)
 	}
-	if _, err := resolvePluginResources(manifest, Approval{Files: map[string]FileApproval{
+	if _, err := ResolvePluginResources(manifest, Approval{Files: map[string]FileApproval{
 		"usage.jsonl": {MaxBytes: 100, RetainedFiles: 2},
 	}}); err != nil {
 		t.Fatalf("bound required file: %v", err)
@@ -319,7 +319,7 @@ func TestFileApprovalsAreExplicitBoundedAndCannotExpandManifest(t *testing.T) {
 	}
 	for _, row := range rows {
 		t.Run(row.name, func(t *testing.T) {
-			resources, err := resolvePluginResources(manifest, Approval{Files: row.approval})
+			resources, err := ResolvePluginResources(manifest, Approval{Files: row.approval})
 			if row.want == "" {
 				if err != nil {
 					t.Fatal(err)

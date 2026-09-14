@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"strings"
 
 	"github.com/torana-edge/torana-edge/examples/plugins/blockutil"
@@ -17,7 +19,11 @@ func init() {
 	sdk.OnBeforeRequest(func(ctx context.Context, req *pb.ChatRequest) (sdk.RequestResult, error) {
 		for _, m := range req.Messages {
 			if strings.Contains(blockutil.TextOf(m), "blockme") {
-				sdk.BlockRequest(422, "blocked_by_test", "should be ignored — no grant")
+				err := sdk.BlockRequest(422, "blocked_by_test", "should be ignored — no grant")
+				var refusal *sdk.HostCallRefusalError
+				if !errors.As(err, &refusal) || refusal.Code != pb.ErrorCode_ERROR_CODE_PERMISSION_DENIED {
+					return sdk.PassRequest(), fmt.Errorf("expected permission refusal, got %v", err)
+				}
 				return sdk.ReplaceRequest(req), nil
 			}
 		}

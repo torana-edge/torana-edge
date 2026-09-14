@@ -20,13 +20,8 @@ import (
 // their own marshal/unmarshal is how the v1 conventions drifted into eight
 // different reply shapes.
 
-// hostABIMinor is the minor version of the current ABI contract this host speaks.
-//
-// Bump it when the host starts SENDING a field added to HookInput, never for
-// host-internal changes. Guests read it to decide whether an additive field can
-// be relied on; claiming a version whose fields are not populated is worse than
-// claiming none.
-const hostABIMinor uint32 = 0
+// The host and guest speak one exact unreleased ABI v1 contract revision.
+const hostContractRevision = sdk.ContractRevision
 
 // encodeHookInput builds the envelope for one dispatch.
 //
@@ -36,8 +31,8 @@ const hostABIMinor uint32 = 0
 // responsePayload{mutable: …}.
 func encodeHookInput(reqID uint64, payload isHookPayload) ([]byte, error) {
 	in := &pbv1.HookInput{
-		AbiMinor:  hostABIMinor,
-		RequestId: reqID,
+		ContractRevision: hostContractRevision,
+		RequestId:        reqID,
 	}
 	payload.applyTo(in)
 	if err := in.Validate(); err != nil {

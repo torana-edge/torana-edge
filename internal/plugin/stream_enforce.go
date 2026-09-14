@@ -18,8 +18,9 @@ package plugin
 //     MessageStop, or end-of-stream — after the block's earlier output has
 //     already been forwarded) TERMINATE under BOTH failure modes with the
 //     typed terminal error. Nothing is replayed and no rollback is pretended:
-//     per-event forwarding is the implementation default (no whole-block
-//     buffering), so a violation found at block close is late by construction.
+//     per-event forwarding is the default. Deferred tool decisions are held in
+//     a bounded journal and can recover only while all affected bytes remain
+//     unpublished; earlier published content is never rolled back.
 //   - ACCEPTED-side defects (validateAcceptedStream / the incremental walker
 //     on the host's own events) are HOST defects, never plugin verdicts:
 //     they terminate as a typed host terminal regardless of any plugin's
@@ -47,6 +48,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"google.golang.org/protobuf/proto"
 	"log"
 	"regexp"
 	"strconv"
@@ -319,7 +321,21 @@ func (w *streamDisciplineWalker) end() error {
 // pluginStreamState is the per-plugin half of the per-request enforcement
 // state: the accepted and returned event buffers (scope-verification input)
 // and the returned-side discipline walker.
+type streamJournal struct {
+	originals     []*pbv1.StreamEvent
+	outputs       []*pbv1.StreamEvent
+	pending       map[int32]bool
+	walker        *streamDisciplineWalker
+	returnedStart int
+	bytes         uint64
+}
+
 type pluginStreamState struct {
+	// Deferred tool decisions form a transaction. Until it resolves, subsequent
+	// outputs are held too, so pass-mode replay preserves original interleaving.
+	journal  *streamJournal
+	disabled bool // A rolled-back assembler cannot safely resume mid-stream.
+
 	lp *loadedPlugin
 	// accepted is every event this plugin saw as input, in call order.
 	accepted []*pbv1.StreamEvent
@@ -427,25 +443,13 @@ func (vs *streamVerifierState) acceptPluginOutput(pvs *pluginStreamState, accept
 	return got[0], nil
 }
 
-// acceptPassThrough commits an accepted event through the same snapshotting
-// path as a HookResult. This keeps encode/decode/trap pass-mode recovery from
-// having a different (and potentially state-poisoning) transition path.
-func (vs *streamVerifierState) acceptPassThrough(pvs *pluginStreamState, ev *pbv1.StreamEvent) (*pbv1.StreamEvent, *StreamTerminalError) {
-	got, term := vs.acceptPluginOutputs(pvs, ev, []*pbv1.StreamEvent{ev})
-	if term != nil {
-		return nil, term
-	}
-	if len(got) != 1 { // unreachable; defensive against future refactors.
-		return nil, vs.terminate(streamTerminalPlugin, pvs.lp.manifest.Name, eventIndex(ev), 0, errors.New("stream pass-through produced no event"))
-	}
-	return got[0], nil
-}
-
 // isScopeCloseEvent reports whether an accepted-side event closes a scope:
-// a content-block stop (tool or non-tool) or the message stop.
+// a content-block stop (tool or non-tool), the message stop, or a terminal
+// provider error. A StreamError abandons every open block, so it must also
+// close any deferred journal transaction before the event can be released.
 func isScopeCloseEvent(ev *pbv1.StreamEvent) bool {
 	switch ev.Event.(type) {
-	case *pbv1.StreamEvent_ContentBlockStop, *pbv1.StreamEvent_MessageStop:
+	case *pbv1.StreamEvent_ContentBlockStop, *pbv1.StreamEvent_MessageStop, *pbv1.StreamEvent_Error:
 		return true
 	}
 	return false
@@ -651,132 +655,104 @@ func (pp *PluginPipeline) runOnStreamChunk(ctx context.Context, reqID uint64, ch
 			pvs = vs.plugins[pi]
 			callAcceptedStart = len(pvs.accepted)
 			callReturnedStart = len(pvs.returned)
-			pvs.accepted = append(pvs.accepted, current...)
 		}
 		next := make([]*pbv1.StreamEvent, 0, len(current))
 		for _, ev := range current {
-			evBytes, err := encodeHookInput(reqID, streamPayload{ev: ev})
-			if err != nil {
-				log.Printf("[plugin] %s run_on_stream_chunk encode: %v", lp.manifest.Name, err)
-				if lp.failureMode == "block" {
-					return nil, fmt.Errorf("plugin %s blocked stream after encode failure: %w", lp.manifest.Name, err)
-				}
-				if vs != nil && pvs != nil {
-					accepted, term := vs.acceptPassThrough(pvs, ev)
-					if term != nil {
-						return nil, term
-					}
-					next = append(next, accepted)
-					pvs.returned = append(pvs.returned, accepted)
-				} else {
-					next = append(next, ev)
-				}
-				continue
+			if pvs != nil {
+				pvs.accepted = append(pvs.accepted, ev)
 			}
-			var outBytes []byte
-			pp.recordInvocation(reqID, lp.manifest.Name)
-			if err := lp.plugin.CallRequest(ctx, pbv1.Hook_HOOK_ON_STREAM_CHUNK, reqID, evBytes, &outBytes); err != nil {
-				log.Printf("[plugin] %s run_on_stream_chunk: %v", lp.manifest.Name, err)
-				if lp.failureMode == "block" {
-					return nil, fmt.Errorf("plugin %s blocked stream after failure: %w", lp.manifest.Name, err)
-				}
-				if vs != nil && pvs != nil {
-					accepted, term := vs.acceptPassThrough(pvs, ev)
-					if term != nil {
-						return nil, term
-					}
-					next = append(next, accepted)
-					pvs.returned = append(pvs.returned, accepted)
-				} else {
-					next = append(next, ev)
-				}
-				continue
+			if pvs != nil && pvs.journal != nil {
+				pvs.journal.originals = append(pvs.journal.originals, ev)
+				pvs.journal.bytes += streamEventCost(ev)
 			}
-			res, err := decodeHookResult(outBytes, pbv1.Hook_HOOK_ON_STREAM_CHUNK)
-			if err != nil {
-				log.Printf("[plugin] %s run_on_stream_chunk: invalid result: %v", lp.manifest.Name, err)
-				if lp.failureMode == "block" {
-					return nil, fmt.Errorf("plugin %s blocked stream after invalid output: %w", lp.manifest.Name, err)
-				}
-				if vs != nil && pvs != nil {
-					accepted, term := vs.acceptPassThrough(pvs, ev)
-					if term != nil {
-						return nil, term
-					}
-					next = append(next, accepted)
-					pvs.returned = append(pvs.returned, accepted)
-				} else {
-					next = append(next, ev)
-				}
-				continue
+			var emitted []*pbv1.StreamEvent
+			var callErr error
+			if pvs != nil && pvs.disabled {
+				emitted = []*pbv1.StreamEvent{ev}
+			} else {
+				emitted, callErr = pp.invokeStreamEvent(ctx, reqID, lp, ev)
 			}
-			if res == nil {
-				// Pass-through: the event is the plugin's own output, so it
-				// must satisfy the returned-side discipline too.
-				if vs != nil && pvs != nil {
-					accepted, term := vs.acceptPassThrough(pvs, ev)
-					if term != nil {
-						return nil, term
-					}
-					next = append(next, accepted)
-					pvs.returned = append(pvs.returned, accepted)
-				} else {
-					next = append(next, ev)
+			if callErr == nil && pvs != nil {
+				if len(emitted) == 1 && eventArm(ev) == eventArm(emitted[0]) {
+					callErr = (streamPolicyDiff{canWrite: lp.plugin.HasGrant}).event(ev, emitted[0], "event")
 				}
-				continue
-			}
-			if res.GetSuppress() != nil {
-				// Deliberately emit nothing; distinct from pass-through.
-				continue
-			}
-			if emit := res.GetEmitEvents(); emit != nil {
-				// Validation already refused an empty or malformed list, so
-				// this is a real replacement or fan-out. Validate and commit
-				// the ENTIRE action atomically: a later bad child cannot leave
-				// an earlier child forwarded under failure_mode=pass.
-				if vs != nil && pvs != nil {
-					// Same-shape, one-for-one mutations are fully decidable at
-					// this event boundary. Enforce them before returning bytes;
-					// whole-scope buffering remains only for transformations whose
-					// correlation genuinely depends on later events.
-					if len(emit.Events) == 1 && eventArm(ev) == eventArm(emit.Events[0]) {
-						if policyErr := (streamPolicyDiff{canWrite: lp.plugin.HasGrant}).event(ev, emit.Events[0], "event"); policyErr != nil {
-							if lp.failureMode == "block" {
-								return nil, vs.terminate(streamTerminalPlugin, lp.manifest.Name, eventIndex(ev), 0, policyErr)
-							}
-							accepted, term := vs.acceptPassThrough(pvs, ev)
-							if term != nil {
-								return nil, term
-							}
-							next = append(next, accepted)
-							pvs.returned = append(pvs.returned, accepted)
-							continue
+				if callErr == nil {
+					candidate := pvs.walker.clone()
+					for _, out := range emitted {
+						if callErr = candidate.walk(out); callErr != nil {
+							break
 						}
 					}
-					accepted, term := vs.acceptPluginOutputs(pvs, ev, emit.Events)
-					if term != nil {
-						return nil, term
+					if callErr == nil {
+						pvs.walker = candidate
 					}
-					next = append(next, accepted...)
-					pvs.returned = append(pvs.returned, accepted...)
-				} else {
-					next = append(next, emit.Events...)
 				}
-				continue
 			}
-			// Fallback pass-through (a result with no action): same discipline
-			// as the explicit pass-through.
-			if vs != nil && pvs != nil {
-				accepted, term := vs.acceptPassThrough(pvs, ev)
-				if term != nil {
-					return nil, term
+			// Suppressing a tool start defers a whole block decision. It may later be
+			// re-emitted or deliberately suppressed at its stop. Do not guess that the
+			// absent start was already forwarded when a later guest invocation fails.
+			if callErr == nil && pvs != nil && len(emitted) == 0 {
+				if start := ev.GetContentBlockStart(); start != nil && start.GetToolCall() != nil {
+					if pvs.journal == nil {
+						pvs.journal = &streamJournal{originals: []*pbv1.StreamEvent{ev}, pending: map[int32]bool{}, walker: pvs.walker.clone(), returnedStart: len(pvs.returned), bytes: streamEventCost(ev)}
+					}
+					pvs.journal.pending[start.Index] = true
 				}
-				next = append(next, accepted)
-				pvs.returned = append(pvs.returned, accepted)
+			}
+			if pvs != nil && pvs.journal != nil {
+				for _, out := range emitted {
+					pvs.journal.bytes += streamEventCost(out)
+				}
+				if pvs.journal.bytes > lp.plugin.StreamBufferLimit() {
+					callErr = fmt.Errorf("deferred stream transaction exceeds its byte limit")
+				}
+			}
+			if callErr != nil {
+				log.Printf("[plugin] %s run_on_stream_chunk: %v", lp.manifest.Name, callErr)
+				if lp.failureMode == "block" {
+					if vs != nil {
+						pvs.journal = nil
+						return nil, vs.terminate(streamTerminalPlugin, lp.manifest.Name, eventIndex(ev), pvs.scopeNum, callErr)
+					}
+					return nil, fmt.Errorf("plugin %s blocked stream: %w", lp.manifest.Name, callErr)
+				}
+				if pvs != nil && pvs.journal != nil {
+					replay, replayErr := rollbackStreamJournal(pvs)
+					if replayErr != nil {
+						return nil, vs.terminate(streamTerminalPlugin, lp.manifest.Name, eventIndex(ev), pvs.scopeNum, replayErr)
+					}
+					next = append(next, replay...)
+					continue
+				}
+				emitted = []*pbv1.StreamEvent{ev}
+				if pvs != nil {
+					candidate := pvs.walker.clone()
+					if err := candidate.walk(ev); err != nil {
+						return nil, vs.terminate(streamTerminalPlugin, lp.manifest.Name, eventIndex(ev), pvs.scopeNum, err)
+					}
+					pvs.walker = candidate
+				}
+			}
+			if pvs != nil {
+				pvs.returned = append(pvs.returned, emitted...)
+			}
+			if pvs != nil && pvs.journal != nil {
+				pvs.journal.outputs = append(pvs.journal.outputs, emitted...)
+				if stop := ev.GetContentBlockStop(); stop != nil {
+					delete(pvs.journal.pending, stop.Index)
+				}
+				if ev.GetError() != nil {
+					// StreamError is terminal and legally abandons every open
+					// content block. Resolve the corresponding deferred decisions;
+					// the scope verifier below still runs before journal output is
+					// allowed to leave this plugin stage.
+					clear(pvs.journal.pending)
+				}
 			} else {
-				next = append(next, ev)
+				next = append(next, emitted...)
 			}
 		}
+
 		current = next
 
 		// A completed scope on EITHER side is enough to verify the current
@@ -790,38 +766,63 @@ func (pp *PluginPipeline) runOnStreamChunk(ctx context.Context, reqID uint64, ch
 		// last real ordinal in this single atomic HookResult batch.
 		if vs != nil && pvs != nil {
 			acceptedCloses, returnedCloses := 0, 0
-			acceptedMessageStop, returnedMessageStop := false, false
+			acceptedTerminal, returnedTerminal := false, false
 			for i := callAcceptedStart; i < len(pvs.accepted); i++ {
 				if isScopeCloseEvent(pvs.accepted[i]) {
 					acceptedCloses++
 				}
-				if _, ok := pvs.accepted[i].Event.(*pbv1.StreamEvent_MessageStop); ok {
-					acceptedMessageStop = true
+				switch pvs.accepted[i].Event.(type) {
+				case *pbv1.StreamEvent_MessageStop, *pbv1.StreamEvent_Error:
+					acceptedTerminal = true
 				}
 			}
 			for i := callReturnedStart; i < len(pvs.returned); i++ {
 				if isScopeCloseEvent(pvs.returned[i]) {
 					returnedCloses++
 				}
-				if _, ok := pvs.returned[i].Event.(*pbv1.StreamEvent_MessageStop); ok {
-					returnedMessageStop = true
+				switch pvs.returned[i].Event.(type) {
+				case *pbv1.StreamEvent_MessageStop, *pbv1.StreamEvent_Error:
+					returnedTerminal = true
 				}
 			}
 			if acceptedCloses != 0 || returnedCloses != 0 {
-				// All accepted events in this HookResult are one atomic policy
-				// transaction. Cumulative paired watermarks make delayed/early
-				// matching stops converge while a multi-scope fan-out reports its
-				// last real boundary.
-				scope := pvs.recordScopeCloses(acceptedCloses, returnedCloses)
-				if acceptedMessageStop || returnedMessageStop {
-					if err := pvs.walker.end(); err != nil {
-						return nil, vs.terminate(streamTerminalPlugin, pvs.lp.manifest.Name, -1, scope, err)
+				scope := pvs.recountCloses()
+				// A pending tool block can still produce a complete replacement. Check
+				// its policy transaction only when all deferred decisions have resolved.
+				if pvs.journal == nil || len(pvs.journal.pending) == 0 {
+					var verifyErr error
+					if acceptedTerminal || returnedTerminal {
+						verifyErr = pvs.walker.end()
+					}
+					if verifyErr == nil {
+						verifyErr = vs.checkScope(pvs, scope)
+					}
+					if verifyErr != nil {
+						if pvs.journal != nil && lp.failureMode == "pass" {
+							replay, replayErr := rollbackStreamJournal(pvs)
+							if replayErr == nil {
+								vs.terminal = nil
+								replayErr = vs.checkScope(pvs, pvs.recountCloses())
+							}
+							if replayErr != nil {
+								return nil, vs.terminate(streamTerminalPlugin, lp.manifest.Name, -1, scope, replayErr)
+							}
+							next = append(next, replay...)
+						} else {
+							if vs.terminal != nil {
+								return nil, vs.terminal
+							}
+							return nil, vs.terminate(streamTerminalPlugin, lp.manifest.Name, -1, scope, verifyErr)
+						}
 					}
 				}
-				if err := vs.checkScope(pvs, scope); err != nil {
-					return nil, err
-				}
 			}
+			if pvs.journal != nil && len(pvs.journal.pending) == 0 {
+				next = append(next, pvs.journal.outputs...)
+				pvs.journal = nil
+			}
+			current = next
+
 		}
 	}
 
@@ -841,4 +842,76 @@ func (pp *PluginPipeline) runOnStreamChunk(ctx context.Context, reqID uint64, ch
 		out = append(out, *converted)
 	}
 	return out, nil
+}
+
+// invokeStreamEvent only proposes an action; verification and publication are
+// owned by the caller's transaction, including every emitted child event.
+func (pp *PluginPipeline) invokeStreamEvent(ctx context.Context, reqID uint64, lp *loadedPlugin, ev *pbv1.StreamEvent) ([]*pbv1.StreamEvent, error) {
+	input, err := encodeHookInput(reqID, streamPayload{ev: ev})
+	if err != nil {
+		return nil, err
+	}
+	var output []byte
+	pp.recordInvocation(reqID, lp.manifest.Name)
+	if err = lp.plugin.CallRequest(ctx, pbv1.Hook_HOOK_ON_STREAM_CHUNK, reqID, input, &output); err != nil {
+		return nil, err
+	}
+	result, err := decodeHookResult(output, pbv1.Hook_HOOK_ON_STREAM_CHUNK)
+	if err != nil {
+		return nil, err
+	}
+	if result == nil {
+		return []*pbv1.StreamEvent{ev}, nil
+	}
+	if result.GetSuppress() != nil {
+		return nil, nil
+	}
+	if emit := result.GetEmitEvents(); emit != nil {
+		return emit.Events, nil
+	}
+	return []*pbv1.StreamEvent{ev}, nil
+}
+
+func streamEventCost(ev *pbv1.StreamEvent) uint64 { return uint64(proto.Size(ev)) + 64 }
+
+func rollbackStreamJournal(pvs *pluginStreamState) ([]*pbv1.StreamEvent, error) {
+	journal := pvs.journal
+	replay := journal.walker.clone()
+	for _, ev := range journal.originals {
+		if err := replay.walk(ev); err != nil {
+			return nil, err
+		}
+	}
+	pvs.walker = replay
+	pvs.returned = append(pvs.returned[:journal.returnedStart], journal.originals...)
+	// Replaying only this transaction must also restore the full relational
+	// policy. A later signature can bind content emitted before the journal;
+	// those already-published changes cannot be rolled back safely.
+	if err := verifyStreamPrefix(pvs.accepted, pvs.returned, pvs.lp.plugin.HasGrant); err != nil {
+		return nil, err
+	}
+	if err := verifyStreamPolicy(pvs.accepted, pvs.returned, pvs.lp.plugin.HasGrant); err != nil {
+		return nil, err
+	}
+	pvs.journal = nil
+	pvs.disabled = true
+	pvs.recountCloses()
+	return journal.originals, nil
+}
+
+func (pvs *pluginStreamState) recountCloses() int {
+	pvs.acceptedCloseCount = 0
+	pvs.returnedCloseCount = 0
+	for _, ev := range pvs.accepted {
+		if isScopeCloseEvent(ev) {
+			pvs.acceptedCloseCount++
+		}
+	}
+	for _, ev := range pvs.returned {
+		if isScopeCloseEvent(ev) {
+			pvs.returnedCloseCount++
+		}
+	}
+	pvs.scopeNum = max(pvs.acceptedCloseCount, pvs.returnedCloseCount)
+	return pvs.scopeNum
 }

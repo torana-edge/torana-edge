@@ -27,11 +27,15 @@ func init() {
 			return sdk.PassResponse(), nil
 		}
 		origModel := "unavailable"
-		if orig, ok := sdk.OriginalRequest(); ok {
+		if orig, ok, err := sdk.OriginalRequest(); err != nil {
+			return sdk.PassResponse(), err
+		} else if ok {
 			origModel = orig.Model
 		}
 		rawMarker := "raw=missing"
-		if raw, ok := sdk.OriginalResponse(); ok && strings.Contains(string(raw), "pristine-upstream-marker") {
+		if raw, ok, err := sdk.OriginalResponse(); err != nil {
+			return sdk.PassResponse(), err
+		} else if ok && strings.Contains(string(raw), "pristine-upstream-marker") {
 			rawMarker = "raw=pristine"
 		}
 		content := fmt.Sprintf("orig-model=%s %s", origModel, rawMarker)

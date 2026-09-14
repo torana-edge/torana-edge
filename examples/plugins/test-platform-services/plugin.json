@@ -1,0 +1,8 @@
+{
+ "schema_version":1,"id":"torana-test/test-platform-services","name":"test-platform-services","version":"0.1.0","abi_version":"v1","failure_mode":"block",
+ "description":"Test fixture for deterministic SDK platform services",
+ "hooks":[{"name":"run_before_request"}],
+ "permissions":[{"name":"env.state_get","description":"Read state seed"},{"name":"env.cache_get","description":"Read private seed"},{"name":"env.shared_cache_get","description":"Read shared seed"},{"name":"env.model_complete","description":"Call bound summarizer"},{"name":"env.http_request","description":"Call bound lookup"},{"name":"ir.model.write","description":"Echo service results"}],
+ "http_endpoints":[{"name":"lookup","description":"Lookup fixture","methods":["POST"],"required":true}],
+ "model_services":[{"name":"summarizer","description":"Summarizer fixture","required":true,"timeout_ms":5000,"max_tokens":100,"max_input_bytes":65536,"max_calls_per_minute":10,"max_tokens_per_hour":1000}]
+}

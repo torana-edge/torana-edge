@@ -1286,7 +1286,7 @@ func reloadPipeline(runtime *wasm.Runtime, config PluginConfig) (*PluginPipeline
 			log.Printf("[plugin] %s: invalid approval: %v — skipping", name, err)
 			continue
 		}
-		resources, err := resolvePluginResources(bundle.Manifest, approval)
+		resources, err := ResolvePluginResources(bundle.Manifest, approval)
 		if err != nil {
 			if config.Strict {
 				return nil, fmt.Errorf("enabled plugin %q has invalid resource approval: %w", name, err)
@@ -2009,16 +2009,24 @@ type TickOutcome struct {
 // implicate anyone else's. Errors are logged and iteration continues, so one
 // broken plugin cannot silently stop every other plugin's timer.
 func (pp *PluginPipeline) RunOnTick(ctx context.Context, reqID uint64, tick *pbv1.TickRequest) []TickOutcome {
+	outcomes, _ := pp.RunOnTickTracked(ctx, reqID, tick)
+	return outcomes
+}
+
+// RunOnTickTracked returns background failures for development and diagnostic
+// callers. Successful plugins still run and report completed work.
+func (pp *PluginPipeline) RunOnTickTracked(ctx context.Context, reqID uint64, tick *pbv1.TickRequest) ([]TickOutcome, error) {
 	pp.Acquire()
 	defer pp.Release()
 
 	inBytes, err := encodeHookInput(reqID, tickPayload{tick: tick})
 	if err != nil {
 		log.Printf("[plugin] tick: %v", err)
-		return nil
+		return nil, err
 	}
 
 	var outcomes []TickOutcome
+	var failures []error
 	for _, lp := range pp.tickPlugins {
 		if !lp.plugin.HasGrant("env.background_tick") {
 			// Not an error worth logging every tick: an unapproved capability
@@ -2029,11 +2037,13 @@ func (pp *PluginPipeline) RunOnTick(ctx context.Context, reqID uint64, tick *pbv
 		var outBytes []byte
 		if err := lp.plugin.CallRequest(ctx, pbv1.Hook_HOOK_ON_TICK, reqID, inBytes, &outBytes); err != nil {
 			log.Printf("[plugin] %s run_on_tick: %v", lp.manifest.Name, err)
+			failures = append(failures, fmt.Errorf("%s: %w", lp.manifest.Name, err))
 			continue
 		}
 		res, err := decodeHookResult(outBytes, pbv1.Hook_HOOK_ON_TICK)
 		if err != nil {
 			log.Printf("[plugin] %s run_on_tick: invalid result: %v", lp.manifest.Name, err)
+			failures = append(failures, fmt.Errorf("%s: invalid tick result: %w", lp.manifest.Name, err))
 			continue
 		}
 		// Pass-through means an idle tick: nothing was done, so there is
@@ -2052,7 +2062,7 @@ func (pp *PluginPipeline) RunOnTick(ctx context.Context, reqID uint64, tick *pbv
 			Note:    outcome.Note,
 		})
 	}
-	return outcomes
+	return outcomes, errors.Join(failures...)
 }
 
 // TicksEnabled reports whether any loaded plugin both declares run_on_tick and
@@ -2248,7 +2258,8 @@ func defaultHTTPApprovals(manifest PluginManifest) map[string]HTTPApproval {
 	return out
 }
 
-func resolvePluginResources(manifest PluginManifest, approval Approval) (wasm.PluginResources, error) {
+// ResolvePluginResources validates an approval and builds the exact runtime snapshot.
+func ResolvePluginResources(manifest PluginManifest, approval Approval) (wasm.PluginResources, error) {
 	resources := wasm.PluginResources{Credentials: map[string]string{}, Files: map[string]wasm.FileResource{}, HTTP: map[string]wasm.HTTPResource{}, ModelServices: map[string]wasm.ModelServiceResource{}, PricingResources: map[string]wasm.PricingResource{}, PromptCachePolicies: map[string]wasm.PromptCacheResource{}}
 	declaredCredentials := make(map[string]CredentialDeclaration, len(manifest.Credentials))
 	for _, declaration := range manifest.Credentials {

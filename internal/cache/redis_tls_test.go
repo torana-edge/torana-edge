@@ -39,8 +39,8 @@ func TestRedisTLSVerifiedTransport(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer s.Close()
-	s.Set(context.Background(), "key", "value")
-	if got, ok := s.Get(context.Background(), "key"); !ok || got != "value" {
+	s.Set(context.Background(), "key", "value", 0)
+	if got, ok, _ := s.Get(context.Background(), "key"); !ok || got != "value" {
 		t.Fatalf("got %q %t", got, ok)
 	}
 	if s, err := New(Config{Backend: "redis", Redis: RedisConfig{Addr: mr.Addr(), TLS: true, CAFile: caPath, ServerName: "wrong.invalid"}}); err == nil {

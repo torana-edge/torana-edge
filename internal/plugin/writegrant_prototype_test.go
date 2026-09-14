@@ -326,7 +326,8 @@ func sameParams(a, b *pb.ChatRequest) bool {
 		!sameFloatPtr(a.TopP, b.TopP) ||
 		len(a.StopSequences) != len(b.StopSequences) ||
 		!bytes.Equal(a.ProviderExtensionsJson, b.ProviderExtensionsJson) ||
-		!bytes.Equal(a.SafetySettingsJson, b.SafetySettingsJson) {
+		!bytes.Equal(a.SafetySettingsJson, b.SafetySettingsJson) ||
+		!proto.Equal(a.OutputFormat, b.OutputFormat) {
 		return false
 	}
 	for i := range a.StopSequences {
@@ -558,6 +559,7 @@ func TestEveryProtoFieldHasAGrantSection(t *testing.T) {
 		{"ToolResultCacheBreakpoint", &pb.ToolResultCacheBreakpoint{}, toolResultCacheBreakpointFieldSections},
 		{"ToolCall", &pb.ToolCall{}, toolCallFieldSections},
 		{"ToolDef", &pb.ToolDef{}, toolDefFieldSections},
+		{"OutputFormat", &pb.OutputFormat{}, outputFormatFieldSections},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			fields := tc.msg.ProtoReflect().Descriptor().Fields()
