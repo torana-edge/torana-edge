@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"sync"
 
+	"github.com/torana-edge/torana-edge/internal/engine"
 	"github.com/torana-edge/torana-edge/internal/provider"
 )
 
@@ -77,8 +78,14 @@ func (t *failoverRoundTripper) RoundTrip(req *http.Request) (*http.Response, err
 
 	release, admitted := t.rateLimiter.acquireLease(identity)
 	if !admitted {
-		discardCompactionReports(reqStateFrom(req.Context()))
-		return &http.Response{
+		if rs := reqStateFrom(req.Context()); rs != nil {
+			discardCompactionReports(rs)
+			rs.Synthetic = true
+			rs.Verdict = "rate_limit"
+			rs.AuditErrorCode = "local_rate_limit"
+			rs.AuditUpstreamRequestBytes = 0
+		}
+		response := &http.Response{
 			StatusCode:    http.StatusTooManyRequests,
 			Status:        "429 Too Many Requests",
 			Proto:         "HTTP/1.1",
@@ -88,7 +95,11 @@ func (t *failoverRoundTripper) RoundTrip(req *http.Request) (*http.Response, err
 			ContentLength: -1,
 			Request:       req,
 			Header:        make(http.Header),
-		}, nil
+		}
+		if e := exchangeFrom(req.Context()); e != nil {
+			setBridgeResponse(response, bridgeLocalError(e.Client, http.StatusTooManyRequests, "Torana request rate limit exceeded"))
+		}
+		return response, nil
 	}
 
 	// If there are fallbacks, we MUST buffer the body before the first attempt
@@ -166,7 +177,7 @@ func (t *failoverRoundTripper) RoundTrip(req *http.Request) (*http.Response, err
 			continue
 		}
 		primary := liveCfg.Providers[provName]
-		if primary.Format != fb.Format {
+		if exchangeFrom(req.Context()) == nil && (primary.Format != fb.Format || fb.Bridge != nil) {
 			log.Printf("[failover] skipping %s: format %q is incompatible with %s format %q", fbName, fb.Format, provName, primary.Format)
 			continue
 		}
@@ -177,6 +188,11 @@ func (t *failoverRoundTripper) RoundTrip(req *http.Request) (*http.Response, err
 		}
 
 		retryReq := cloneWithBody(req, bodyBytes)
+		bridged, bridgeErr := prepareBridgeRetry(retryReq, fb)
+		if bridgeErr != nil {
+			log.Printf("[failover] skipping %s: bridge target cannot represent the request", fbName)
+			continue
+		}
 
 		// Authentication is rebuilt from the fallback's explicit policy. The
 		// immutable ingress snapshot is used for caller mode; request headers
@@ -192,16 +208,30 @@ func (t *failoverRoundTripper) RoundTrip(req *http.Request) (*http.Response, err
 
 		// Reconstruct retry URL using the fallback base URL and original stripped path.
 		rc, _ := req.Context().Value(routeContextKey{}).(*RouteContext)
-		retryReq.URL.Scheme = fbURL.Scheme
-		retryReq.URL.Host = fbURL.Host
-		retryReq.Host = fbURL.Host // Finding 3: update Host header
-		if rc != nil {
-			retryReq.URL.Path = joinURLPath(fbURL.Path, rc.StrippedPath)
-		} else {
-			retryReq.URL.Path = fbURL.Path
+		if !bridged {
+			retryReq.URL.Scheme = fbURL.Scheme
+			retryReq.URL.Host = fbURL.Host
+			retryReq.Host = fbURL.Host
+			if rc != nil {
+				retryReq.URL.Path = joinURLPath(fbURL.Path, rc.StrippedPath)
+			} else {
+				retryReq.URL.Path = fbURL.Path
+			}
+			retryReq.URL.RawPath = ""
 		}
-		retryReq.URL.RawPath = ""
 
+		if rs := reqStateFrom(req.Context()); rs != nil {
+			rs.Provider = fbName
+			rs.ActualFormat = fb.Format
+			rs.ActualPath = retryReq.URL.Path
+			if bridged {
+				if chat, ok := retryReq.Context().Value(engine.ChatRequestKey).(*engine.ChatRequest); ok {
+					rs.Model = chat.Model
+					recordAttemptState(rs, fb.Format, retryReq.URL.Path, chat)
+				}
+				rs.AuditUpstreamRequestBytes = retryReq.ContentLength
+			}
+		}
 		retryResp, retryErr := t.base.RoundTrip(retryReq)
 
 		// Close previous response since we are going to try the next one or we got a new one

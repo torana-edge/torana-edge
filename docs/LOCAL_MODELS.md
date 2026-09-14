@@ -3,6 +3,10 @@
 Torana Edge can route to locally hosted models via Ollama, vLLM,
 or any OpenAI-compatible local server.
 
+To connect a client that speaks a different API from the local server, configure
+a [protocol bridge](PROTOCOL_BRIDGES.md). For example, Anthropic Messages or
+OpenAI Responses can target a Chat Completions backend for supported features.
+
 ## Ollama
 
 ```json

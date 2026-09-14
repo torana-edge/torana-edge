@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"testing"
 
+	"github.com/torana-edge/torana-edge/internal/bridge"
 	"github.com/torana-edge/torana-edge/internal/engine"
 	"github.com/torana-edge/torana-edge/internal/provider"
 	"github.com/torana-edge/torana-edge/internal/wasm"
@@ -44,8 +45,11 @@ func TestRejectedRouteLeavesTheModelAlone(t *testing.T) {
 				http.MethodPost, "https://original.example/v1/chat/completions", nil)
 
 			chat := &engine.ChatRequest{Model: "original-model"}
-			(&Server{}).applyRoute(req, chat, "openai", "original",
+			applied := (&Server{}).applyRoute(req, chat, "openai", "original",
 				&wasm.RouteVerdict{Provider: tc.target, Model: "model-only-on-the-target", Plugin: "p"}, cfg)
+			if applied {
+				t.Errorf("rejected route reported itself as applied")
+			}
 
 			if chat.Model != "original-model" {
 				t.Errorf("model = %q, want it untouched at %q — the route was rejected because %s, "+
@@ -74,8 +78,11 @@ func TestAcceptedRouteAppliesProviderAndModel(t *testing.T) {
 		http.MethodPost, "https://original.example/v1/chat/completions", nil)
 
 	chat := &engine.ChatRequest{Model: "original-model"}
-	(&Server{}).applyRoute(req, chat, "openai", "original",
+	applied := (&Server{}).applyRoute(req, chat, "openai", "original",
 		&wasm.RouteVerdict{Provider: "target", Model: "target-model", Plugin: "p"}, cfg)
+	if !applied {
+		t.Error("accepted route reported itself as rejected")
+	}
 
 	if chat.Model != "target-model" {
 		t.Errorf("model = %q, want the verdict's", chat.Model)
@@ -95,11 +102,38 @@ func TestModelOnlyVerdictStillApplies(t *testing.T) {
 			context.WithValue(context.Background(), routeContextKey{}, rc),
 			http.MethodPost, "https://original.example/v1/chat/completions", nil)
 		chat := &engine.ChatRequest{Model: "original-model"}
-		(&Server{}).applyRoute(req, chat, "openai", "original",
+		applied := (&Server{}).applyRoute(req, chat, "openai", "original",
 			&wasm.RouteVerdict{Provider: target, Model: "cheaper-model", Plugin: "p"}, cfg)
+		if !applied {
+			t.Errorf("provider %q: model-only route reported itself as rejected", target)
+		}
 		if chat.Model != "cheaper-model" {
 			t.Errorf("provider %q: model = %q, want the override to apply with no provider change",
 				target, chat.Model)
 		}
+	}
+}
+
+func TestBridgeRouteRequiresMatchingClientContract(t *testing.T) {
+	cfg := provider.Config{Providers: map[string]provider.Provider{
+		"target": {
+			URL: "https://target.example", Format: "anthropic", Auth: provider.ProviderAuth{Mode: "none"},
+			Bridge: &provider.BridgeConfig{Client: bridge.Anthropic, Upstream: bridge.Anthropic},
+		},
+	}}
+	rc := &RouteContext{ProviderName: "original", StrippedPath: "/v1/responses"}
+	exchange := &bridgeExchange{Client: bridge.OpenAIResponses, Upstream: bridge.OpenAIChat}
+	ctx := context.WithValue(context.Background(), routeContextKey{}, rc)
+	ctx = context.WithValue(ctx, bridgeContextKey{}, exchange)
+	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://original.example/v1/responses", nil)
+	chat := &engine.ChatRequest{Model: "original-model", OpenAIVariant: engine.OpenAIResponses}
+
+	applied := (&Server{}).applyRoute(req, chat, "openai", "original",
+		&wasm.RouteVerdict{Provider: "target", Model: "target-model", Plugin: "p"}, cfg)
+	if applied {
+		t.Fatal("route using another exposed client contract was applied")
+	}
+	if rc.ProviderName != "original" || req.URL.Host != "original.example" || chat.Model != "original-model" {
+		t.Fatalf("rejected route changed provider=%q host=%q model=%q", rc.ProviderName, req.URL.Host, chat.Model)
 	}
 }

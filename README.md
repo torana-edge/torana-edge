@@ -2,7 +2,7 @@
 
 Torana Edge is a **local-first, programmable reverse proxy for AI coding agents**. It sits between your harness (Claude Code, Codex, OpenCode, Aider, oh-my-pi) and your provider, and gives you a place to observe, redact, route, veto, or rewrite traffic — without replacing the agent or the model.
 
-All request/response mutations are handled by **WebAssembly (WASM) plugins** running in a sandboxed `wazero` runtime, communicating with the host via **Protobuf** serialization. This architecture enables hot-loadable, language-agnostic plugins with zero-downtime updates.
+Request/response policy edits are handled by **WebAssembly (WASM) plugins** running in a sandboxed `wazero` runtime, communicating with the host via **Protobuf** serialization. This architecture enables hot-loadable, language-agnostic plugins with zero-downtime updates.
 
 ```
 [harness] ←→ [Torana Edge :8080] ←→ [LLM Providers]
@@ -24,6 +24,7 @@ CLI (`agy`)** — Torana also offers an optional TLS-terminating MITM ingress. S
 - **Economic model delegation:** Historical results can be summarized through an operator-bound model service only when route-aware cache and summarizer economics estimate positive net savings.
 - **Responses-native compaction:** OpenAI Responses requests can opt into provider-side compaction without Torana storing a second conversation.
 - **Harness-native custom tools:** OpenAI Responses free-form tool definitions, calls, streamed input, and structured results are represented explicitly in the IR. Plugins can inspect or safely rewrite them without pretending textual input is JSON function arguments; formats without an equivalent fail explicitly.
+- **Protocol bridges:** Accept one inference API and call a backend serving another, with JSON and streaming responses translated through the IR. See [supported features and setup](docs/PROTOCOL_BRIDGES.md). No plugin required.
 - **Provider Failover:** Automatic retry with fallback providers on 429/5xx errors.
 - **Unified IR:** Format adapters translate OpenAI, Anthropic, and Gemini wire formats into a single canonical IR. Plugins work on the IR and never touch raw JSON.
 - **MITM ingress (optional):** For harnesses that ignore base-URL overrides (e.g. the Antigravity CLI), an opt-in TLS-terminating proxy routes their traffic through the pipeline. Disabled unless configured.
@@ -215,7 +216,8 @@ See the [CLI guide](docs/CLI.md) for the full UI-to-command map.
 3. **Canonical IR** — Format adapters (`internal/format/`) translate inference requests into shared Go types (`ChatRequest`, `Message`, `ToolDef`, `StreamEvent`).
 4. **Protobuf Serialization** — The IR is serialized to Protobuf via `internal/engine/pbconv` and handed to the WASM runtime.
 5. **WASM Plugin Pipeline** — Loaded plugins execute sequentially (in `config.json` order). Each plugin receives the Protobuf bytes, mutates them via the SDK ([torana-plugin-sdk](https://github.com/torana-edge/torana-plugin-sdk)), and writes back.
-6. **No route guessing** — Requests without a matching provider (and no configured default provider) return 502.
+6. **Optional protocol bridge** — An explicit `bridge` chooses independent client and upstream contracts, validates feature compatibility, and translates the response back. Auxiliary APIs on a bridge return an explicit unsupported-operation error.
+7. **No route guessing** — Requests without a matching provider (and no configured default provider) return 502.
 
 ## Supported Formats
 

@@ -34,6 +34,7 @@ import (
 
 	credentialapi "github.com/torana-edge/torana-edge/credential"
 	"github.com/torana-edge/torana-edge/internal/auditlog"
+	"github.com/torana-edge/torana-edge/internal/bridge"
 	"github.com/torana-edge/torana-edge/internal/cache"
 	"github.com/torana-edge/torana-edge/internal/controlplane"
 	"github.com/torana-edge/torana-edge/internal/conversation"
@@ -427,9 +428,15 @@ type reqState struct {
 	OriginalRespSet bool
 	// CompactionReports are queued by request-side WASM host calls and priced
 	// only after routing has selected the final provider/model.
-	CompactionReports          []attributedCompactionReport
-	InitialProvider            string
-	InitialFormat              string
+	CompactionReports []attributedCompactionReport
+	InitialProvider   string
+	InitialFormat     string
+	// ActualFormat and ActualPath describe the most recent upstream attempt.
+	// InitialFormat and Path remain the caller contract used by audit and the
+	// conversation registry, even when a bridge synthesizes another endpoint.
+	ActualFormat               string
+	ActualPath                 string
+	BridgeClient               bridge.Protocol
 	PendingRoute               *wasm.RouteVerdict
 	CompactionRequestPrepared  bool
 	CompactionReportsCommitted bool
@@ -616,6 +623,9 @@ func (s *Server) evaluateCompaction(ctx context.Context, report economics.Compac
 		}
 		report.Provider = targetName
 		report.Model = pendingRoute.Model
+		if report.Model == "" && exchangeFrom(ctx) != nil && targetProvider.Bridge != nil {
+			report.Model = targetProvider.Bridge.Model
+		}
 		if report.Model == "" {
 			report.Model = rs.Model
 		}
@@ -641,6 +651,9 @@ func (s *Server) evaluateCompaction(ctx context.Context, report economics.Compac
 			return economics.CompactionDecision{Reason: economics.UnavailableFallbackUnpriced}
 		}
 		model := report.Model
+		if exchangeFrom(ctx) != nil && fallback.Bridge != nil && fallback.Bridge.Model != "" {
+			model = fallback.Bridge.Model
+		}
 		if model == "" {
 			model = rs.Model
 		}
@@ -812,6 +825,10 @@ func New(cfg Config) (*Server, error) {
 	s.auditWriter = auditWriter
 
 	for name, p := range cfg.Providers.Providers {
+		if err := p.ValidateBridge(name); err != nil {
+			cleanupConstruction()
+			return nil, fmt.Errorf("proxy: %w", err)
+		}
 		if err := p.ValidateResponsesCompaction(name); err != nil {
 			cleanupConstruction()
 			return nil, fmt.Errorf("proxy: %w", err)
@@ -868,6 +885,17 @@ func New(cfg Config) (*Server, error) {
 
 	proxy := &httputil.ReverseProxy{
 		BufferPool: &reverseProxyBufferPool{},
+		ErrorHandler: func(w http.ResponseWriter, req *http.Request, err error) {
+			if rs := reqStateFrom(req.Context()); rs != nil && rs.BridgeClient.Valid() {
+				result := bridgeResponseError(rs.BridgeClient, http.StatusBadGateway, nil)
+				w.Header().Set("Content-Type", result.ContentType)
+				w.WriteHeader(result.Status)
+				_, _ = w.Write(result.Body)
+				return
+			}
+			log.Printf("http: proxy error: %v", err)
+			w.WriteHeader(http.StatusBadGateway)
+		},
 		// Rewrite, not Director: Director is deprecated as of Go 1.26. The body
 		// below is unchanged — req is pr.Out, the clone ReverseProxy builds for
 		// the upstream, which is exactly what Director received. Two behavioural
@@ -907,8 +935,27 @@ func New(cfg Config) (*Server, error) {
 			})
 			*req = *req.WithContext(ctx)
 
-			// Look up the format adapter.
-			fmt := format.Lookup(prov.Format)
+			// The incoming contract belongs to the client. The provider's
+			// configured family continues to own upstream transport and auth.
+			var exchange *bridgeExchange
+			clientFormat := prov.Format
+			if prov.Bridge != nil {
+				exchange = &bridgeExchange{Client: prov.Bridge.Client, Upstream: prov.Bridge.Upstream}
+				clientFormat = exchange.Client.Format()
+				ctx = context.WithValue(req.Context(), bridgeContextKey{}, exchange)
+				*req = *req.WithContext(ctx)
+				reqStateFrom(req.Context()).BridgeClient = exchange.Client
+				if !exchange.Client.MatchesPath(req.Method, strippedPath) {
+					rejectBridgeRequest(req, exchange.Client, &bridge.UnsupportedError{Feature: "auxiliary APIs on an inference bridge"})
+					return
+				}
+			}
+			fmt := format.Lookup(clientFormat)
+			// Existing local errors use prov.Format as their client envelope.
+			// Keep that convention without changing the configured provider.
+			clientProvider := *prov
+			clientProvider.Format = clientFormat
+			prov = &clientProvider
 
 			// Rewrite the URL to point at the provider's upstream.
 			target, err := url.Parse(prov.URL)
@@ -990,9 +1037,18 @@ func New(cfg Config) (*Server, error) {
 				rejectMalformed()
 				return
 			}
-			chat, err := fmt.Request.Unmarshal(body)
+			var chat *engine.ChatRequest
+			if exchange != nil {
+				chat, err = bridge.ParseRequest(exchange.Client, body, strippedPath)
+			} else {
+				chat, err = fmt.Request.Unmarshal(body)
+			}
 			if err != nil {
-				rejectMalformed()
+				if exchange != nil {
+					rejectBridgeRequest(req, exchange.Client, err)
+				} else {
+					rejectMalformed()
+				}
 				return
 			}
 			// The accepted-input closure, at the transport: an engine state
@@ -1004,6 +1060,16 @@ func New(cfg Config) (*Server, error) {
 			if _, cerr := pbconv.ToPBChatRequestChecked(chat); cerr != nil {
 				rejectMalformed()
 				return
+			}
+			if exchange != nil {
+				clientCopy := *chat
+				exchange.ClientRequest = &clientCopy
+				rs.captureAuditRequest(chat)
+				// A configured model alias is visible to all plugins and host
+				// economics. OriginalReq below still captures the client model.
+				if configured := currentCfg.Providers.Providers[provName].Bridge; configured.Model != "" {
+					chat.Model = configured.Model
+				}
 			}
 			rs.captureAuditRequest(chat)
 			// Preserve the caller's validated provider wire bytes unless a
@@ -1063,7 +1129,11 @@ func New(cfg Config) (*Server, error) {
 					// after the entry validation, so a failure here is
 					// unreachable in practice; skipping keeps the snapshot
 					// from ever being a first-arm-wins path.
-					if pbReq, cerr := pbconv.ToPBChatRequestChecked(chat); cerr == nil {
+					original := chat
+					if exchange != nil {
+						original = exchange.ClientRequest
+					}
+					if pbReq, cerr := pbconv.ToPBChatRequestChecked(original); cerr == nil {
 						if b, err := proto.Marshal(pbReq); err == nil {
 							rsOrig := reqStateFrom(req.Context())
 							rsOrig.OriginalReq = b
@@ -1103,6 +1173,7 @@ func New(cfg Config) (*Server, error) {
 						})
 					}
 					rsFail := reqStateFrom(req.Context())
+					rsFail.Synthetic = true
 					rsFail.Verdict = "block"
 					rsFail.AuditErrorCode = "plugin_failure"
 					req.Body = io.NopCloser(bytes.NewReader(nil))
@@ -1136,6 +1207,7 @@ func New(cfg Config) (*Server, error) {
 						rc.Block = renderBlock(prov.Format, block)
 					}
 					rs := reqStateFrom(req.Context())
+					rs.Synthetic = true
 					rs.Verdict = "block"
 					rs.VerdictPlugin = block.Plugin
 					// The guest-controlled code may itself contain request-derived
@@ -1218,14 +1290,48 @@ func New(cfg Config) (*Server, error) {
 			if pl := reqStateFrom(req.Context()).Pipeline; pl != nil {
 				if route := pl.Verdicts(reqStateFrom(req.Context()).ID).Route(); route != nil {
 					modelBeforeRoute := chat.Model
-					s.applyRoute(req, chat, prov.Format, provName, route, currentCfg.Providers)
+					routeApplied := s.applyRoute(req, chat, prov.Format, provName, route, currentCfg.Providers)
 					wireChanged = wireChanged || chat.Model != modelBeforeRoute
 					// Model may have been overridden; refresh the metrics fact.
 					rstate := reqStateFrom(req.Context())
 					rstate.Model = chat.Model
-					rstate.Verdict = "route"
-					rstate.VerdictPlugin = route.Plugin
+					if routeApplied {
+						rstate.Verdict = "route"
+						rstate.VerdictPlugin = route.Plugin
+					}
 				}
+			}
+
+			if exchange != nil {
+				routedProvider := currentCfg.Providers.Providers[rc.ProviderName]
+				upstream, ok := bridgeTargetProtocol(routedProvider, exchange.Client, exchange.Upstream)
+				if !ok {
+					rejectBridgeRequest(req, exchange.Client, &bridge.UnsupportedError{Feature: "unconfigured upstream protocol"})
+					return
+				}
+				accepted, snapshotErr := bridge.ProjectRequest(chat, exchange.Client, exchange.Client, bridge.RequestOptions{})
+				if snapshotErr != nil {
+					rejectBridgeRequest(req, exchange.Client, snapshotErr)
+					return
+				}
+				exchange.AcceptedRequest = accepted
+				projected, projectionErr := bridge.ProjectRequest(accepted, exchange.Client, upstream, bridgeOptions(routedProvider))
+				if projectionErr != nil {
+					rejectBridgeRequest(req, exchange.Client, projectionErr)
+					return
+				}
+				chat = projected
+				if usageErr := prepareBridgeUsage(chat, upstream); usageErr != nil {
+					rejectBridgeRequest(req, exchange.Client, usageErr)
+					return
+				}
+				exchange.Upstream = upstream
+				fmt = format.Lookup(upstream.Format())
+				if transportErr := prepareBridgeTransport(req, routedProvider, upstream, chat); transportErr != nil {
+					rejectBridgeRequest(req, exchange.Client, transportErr)
+					return
+				}
+				wireChanged = true
 			}
 
 			// OpenAI can compact server-managed Responses history without Torana
@@ -1255,7 +1361,7 @@ func New(cfg Config) (*Server, error) {
 						chat.ProviderExtensions, _ = engine.ParseOptionalJSONObject([]byte(`{}`))
 					}
 					chat.ProviderExtensions, _ = chat.ProviderExtensions.SetMember("stream_options", so)
-					reqStateFrom(req.Context()).UsageInjected = true
+					reqStateFrom(req.Context()).UsageInjected = exchange == nil
 					wireChanged = true
 				}
 			}
@@ -1271,14 +1377,7 @@ func New(cfg Config) (*Server, error) {
 			// ValidateReplacement), and the key operation re-runs the
 			// SDK's full-domain validator on the PB itself — the fail-safe
 			// "" is the only outcome for an out-of-domain request.
-			if pbReq, cerr := pbconv.ToPBChatRequestChecked(chat); cerr == nil {
-				rs.CachePrefixKey = engine.CachePrefixKeyTopology(pbReq, engine.TopologyFacts{
-					CodeAssist:           chat.CodeAssist,
-					OpenAIVariant:        chat.OpenAIVariant,
-					ResponsesInputLayout: chat.ResponsesInputLayout,
-				})
-			}
-			rs.Path = rc.StrippedPath
+			recordAttemptState(rs, fmt.Name, req.URL.Path, chat)
 			if err := s.applyUpstreamCredential(req, currentCfg.Providers, rc); err != nil {
 				markCredentialFailure(req, prov.Format, rc)
 				discardCompactionReports(rs)
@@ -1286,7 +1385,9 @@ func New(cfg Config) (*Server, error) {
 			}
 
 			newBody := body
-			if wireChanged {
+			if exchange != nil {
+				newBody, err = bridge.MarshalRequest(exchange.Upstream, chat)
+			} else if wireChanged {
 				newBody, err = fmt.Request.Marshal(chat)
 			}
 			if err != nil {
@@ -1368,6 +1469,9 @@ func New(cfg Config) (*Server, error) {
 			// outcome through an observe-only hook carrying _response.
 			if resp.StatusCode >= 400 {
 				ctx := resp.Request.Context()
+				if e := exchangeFrom(ctx); e != nil {
+					bridgeUpstreamError(resp, e)
+				}
 				rs := reqStateFrom(ctx)
 				// Intercepted, exactly as the success path below requires a
 				// resolved format. Without it this branch ran response hooks
@@ -1400,10 +1504,21 @@ func New(cfg Config) (*Server, error) {
 			}
 
 			contentType := resp.Header.Get("Content-Type")
+			if e := exchangeFrom(resp.Request.Context()); e != nil {
+				// A translated stream cannot be mistaken for a complete JSON
+				// response, nor can an HTML/gzip error escape under another API.
+				isStream := isEventStreamMediaType(contentType)
+				if isStream != e.ClientRequest.Stream || (!isStream && !isJSONMediaType(contentType)) ||
+					(isStream && resp.Header.Get("Content-Encoding") != "" && resp.Header.Get("Content-Encoding") != "identity") {
+					setBridgeResponse(resp, bridgeResponseError(e.Client, http.StatusBadGateway, nil))
+					return nil
+				}
+			}
 
 			// SSE streaming: parse → pipeline → serialize.
 			if isEventStreamMediaType(contentType) {
 				streamFormat, _ := resp.Request.Context().Value(formatCtxKey{}).(*format.Format)
+				streamFormat = actualResponseFormat(resp.Request.Context(), streamFormat)
 				if streamFormat == nil {
 					return nil
 				}
@@ -1422,7 +1537,12 @@ func New(cfg Config) (*Server, error) {
 				// client response is being aborted.
 				streamCtx, cancelStream := context.WithCancel(resp.Request.Context())
 
-				events := streamFormat.Stream.ParseStream(upstreamBody)
+				var events <-chan engine.StreamEvent
+				if e := exchangeFrom(resp.Request.Context()); e != nil {
+					events = bridge.ParseStream(e.Upstream, upstreamBody)
+				} else {
+					events = streamFormat.Stream.ParseStream(upstreamBody)
+				}
 
 				// Host usage tap: record provider-reported tokens for metrics
 				// and the _response signal. When the host injected the usage
@@ -1600,7 +1720,12 @@ func New(cfg Config) (*Server, error) {
 					if streamPl != nil {
 						defer streamPl.Release()
 					}
-					serErr := streamFormat.Stream.SerializeStream(streamCtx, pw, events)
+					var serErr error
+					if e := exchangeFrom(resp.Request.Context()); e != nil {
+						serErr = bridge.SerializeStream(streamCtx, pw, events, e.Upstream, e.Client, e.ClientRequest)
+					} else {
+						serErr = streamFormat.Stream.SerializeStream(streamCtx, pw, events)
+					}
 					if serErr != nil && term.Err() == nil {
 						// A serializer failure is abnormal too. Trigger immediately
 						// so the input pipeline exits and the pipe is never closed as
@@ -1691,6 +1816,10 @@ func New(cfg Config) (*Server, error) {
 					}
 				}()
 				resp.Body = &abortingReader{r: pr}
+				if exchangeFrom(resp.Request.Context()) != nil {
+					clearBridgeRepresentationHeaders(resp.Header)
+					resp.ContentLength = -1
+				}
 				resp.Header.Del("Content-Length")
 				return nil
 			}
@@ -1729,6 +1858,7 @@ func New(cfg Config) (*Server, error) {
 				ctx := resp.Request.Context()
 				rs := reqStateFrom(ctx)
 				f, _ := ctx.Value(formatCtxKey{}).(*format.Format)
+				f = actualResponseFormat(ctx, f)
 				if f != nil {
 					rs.ReportedModel = reportedModelFromJSON(f.Name, bodyBytes)
 				}
@@ -1752,7 +1882,7 @@ func New(cfg Config) (*Server, error) {
 						rs.Verdict = "block"
 						rs.PluginFailure = true
 						rs.AuditErrorCode = "plugin_failure"
-						blocked := renderBlock(f.Name, &wasm.BlockVerdict{
+						blocked := renderBlock(clientErrorFormat(ctx, f.Name), &wasm.BlockVerdict{
 							Status:  502,
 							Code:    "plugin_failure",
 							Message: "a plugin required for this response failed",
@@ -1776,6 +1906,17 @@ func New(cfg Config) (*Server, error) {
 					}
 				}
 
+				if e := exchangeFrom(ctx); e != nil {
+					translated, translationErr := bridge.TranslateResponseWithRequest(e.Upstream, e.Client, bodyBytes, rs.Model, e.ClientRequest)
+					if translationErr != nil {
+						setBridgeResponse(resp, bridgeResponseError(e.Client, http.StatusBadGateway, translationErr))
+						rs.AuditErrorCode = "untranslatable_upstream_response"
+						return nil
+					}
+					bodyBytes = translated
+					clearBridgeRepresentationHeaders(resp.Header)
+					resp.Header.Set("Content-Type", "application/json")
+				}
 				resp.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 				resp.ContentLength = int64(len(bodyBytes))
 				// ReverseProxy copies resp.Header verbatim — a stale
@@ -2715,6 +2856,14 @@ func New(cfg Config) (*Server, error) {
 		if receivedProvider == "" {
 			receivedProvider = currentCfg.DefaultProvider
 		}
+		if prov == nil {
+			if fallback, ok := currentCfg.Providers.Providers[receivedProvider]; ok {
+				prov = &fallback
+			}
+		}
+		if prov != nil && prov.Bridge != nil {
+			rs.BridgeClient = prov.Bridge.Client
+		}
 		if debugEnabled() {
 			log.Printf("[debug] request received id=%d method=%s provider=%s", rs.ID, r.Method, receivedProvider)
 		}
@@ -2725,11 +2874,20 @@ func New(cfg Config) (*Server, error) {
 			// Read the whole body now to trigger the limit before dispatch.
 			bodyBytes, err := readRequestBody(r.Body, r.ContentLength)
 			if err != nil {
+				_ = r.Body.Close()
 				var maxErr *http.MaxBytesError
 				if errors.As(err, &maxErr) {
-					http.Error(w, "Request Entity Too Large", http.StatusRequestEntityTooLarge)
+					if rs.BridgeClient.Valid() {
+						writeBridgeLocalError(w, rs.BridgeClient, http.StatusRequestEntityTooLarge, "request body too large")
+					} else {
+						http.Error(w, "Request Entity Too Large", http.StatusRequestEntityTooLarge)
+					}
 				} else {
-					http.Error(w, "Bad Request", http.StatusBadRequest)
+					if rs.BridgeClient.Valid() {
+						writeBridgeLocalError(w, rs.BridgeClient, http.StatusBadRequest, "request body could not be read")
+					} else {
+						http.Error(w, "Bad Request", http.StatusBadRequest)
+					}
 				}
 				return
 			}
@@ -3377,7 +3535,7 @@ func sameJSONConfig(stored, incoming json.RawMessage) bool {
 // unmanagedProviderFields are per-provider settings that no control-plane form
 // currently renders. A client that rebuilds a provider object from a form would
 // drop them, so they are carried forward unless explicitly written.
-var unmanagedProviderFields = []string{"pricing", "responses_compaction", "cache"}
+var unmanagedProviderFields = []string{"pricing", "responses_compaction", "cache", "bridge"}
 
 // preserveUnmanagedProviderFields copies unmanaged fields from the stored config
 // into the incoming one wherever the caller left them out. It mutates incoming.
@@ -3398,6 +3556,8 @@ func preserveUnmanagedProviderFields(stored, incoming map[string]provider.Provid
 				incP.ResponsesCompaction = curP.ResponsesCompaction
 			case "cache":
 				incP.Cache = curP.Cache
+			case "bridge":
+				incP.Bridge = curP.Bridge
 			}
 		}
 		incoming[name] = incP
@@ -3601,6 +3761,9 @@ func (s *Server) pipelinePluginConfig(pcfg provider.PluginsConfig) plugin.Plugin
 				}
 			}
 			if topo.OpenAIVariant == engine.OpenAIResponses {
+				if err := openai.VerifyResponsesInstructionsTopologyPB(topo.ResponsesInstructions, replacement); err != nil {
+					return err
+				}
 				if err := openai.VerifyResponsesToolTopologyPB(current, replacement); err != nil {
 					return err
 				}

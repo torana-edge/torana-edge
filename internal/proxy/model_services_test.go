@@ -3,6 +3,7 @@ package proxy
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -10,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/torana-edge/torana-edge/internal/bridge"
 	"github.com/torana-edge/torana-edge/internal/provider"
 	"github.com/torana-edge/torana-edge/internal/wasm"
 	pbv1 "github.com/torana-edge/torana-plugin-sdk/pb/v1"
@@ -53,6 +55,44 @@ func TestBoundModelServiceUsesOperatorDestinationAndReturnsNeutralResult(t *test
 	messages, ok := captured["messages"].([]any)
 	if !ok || len(messages) != 2 {
 		t.Fatalf("messages = %#v", captured["messages"])
+	}
+}
+
+func TestBoundModelServiceUsesBridgeClientContractAndResourceModel(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		chat, err := bridge.ParseRequest(bridge.Anthropic, raw, r.URL.Path)
+		if err != nil {
+			t.Errorf("parse upstream request: %v; %s", err, raw)
+		} else if r.URL.Path != "/v1/messages" || chat.Model != "resource-model" {
+			t.Errorf("path/model=%q/%q, want resource model rather than bridge alias", r.URL.Path, chat.Model)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"id":"a1","type":"message","model":"reported-model","role":"assistant","content":[{"type":"text","text":"safe"}],"stop_reason":"end_turn","usage":{"input_tokens":7,"output_tokens":2,"cache_read_input_tokens":3,"cache_creation_input_tokens":1}}`)
+	}))
+	t.Cleanup(upstream.Close)
+	providers := testProviderConfig(upstream.URL, "bound", "anthropic")
+	providers.Providers["bound"] = provider.Provider{
+		URL: upstream.URL, Format: "anthropic", Auth: provider.ProviderAuth{Mode: "none"},
+		Bridge: &provider.BridgeConfig{Client: bridge.OpenAIChat, Upstream: bridge.Anthropic, Model: "bridge-alias", MaxTokens: 64},
+	}
+	server, err := New(Config{Port: "0", Providers: providers})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = server.Shutdown(context.Background()) })
+	result, hostErr := server.completeModel(context.Background(), "pii", wasm.ModelServiceResource{
+		Name: "classifier", Provider: "bound", Model: "resource-model", Path: "/v1/chat/completions",
+		Timeout: time.Second, MaxTokens: 40, MaxInputBytes: 1000, MaxCallsPerMinute: 2, MaxTokensPerHour: 100,
+	}, &pbv1.ModelCompleteArgs{Service: "classifier", Messages: []*pbv1.Message{{Role: "user", Blocks: modelTextBlocks("payload")}}})
+	if hostErr != nil {
+		t.Fatalf("host error=%+v", hostErr)
+	}
+	if result.GetMessage().GetBlocks()[0].GetText().GetText() != "safe" || result.ReportedModel != "reported-model" || result.FinishReason != "end_turn" {
+		t.Fatalf("result=%+v", result)
+	}
+	if result.Usage == nil || result.Usage.InputTokens != 7 || result.Usage.OutputTokens != 2 || result.Usage.CacheReadTokens != 3 || result.Usage.CacheWriteTokens != 1 {
+		t.Fatalf("source-normalized usage=%+v", result.Usage)
 	}
 }
 

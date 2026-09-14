@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/torana-edge/torana-edge/internal/bridge"
 	"github.com/torana-edge/torana-edge/internal/engine"
 	"github.com/torana-edge/torana-edge/internal/format"
 	"github.com/torana-edge/torana-edge/internal/wasm"
@@ -40,6 +41,9 @@ func renderRespond(ctx context.Context, f *format.Format, chat *engine.ChatReque
 		body, err = renderSyntheticStream(ctx, f, chat, v.Response, id)
 	} else {
 		body, err = renderSyntheticJSON(f.Name, chat, v.Response, id)
+		if exchange := exchangeFrom(ctx); err == nil && exchange != nil {
+			body, err = bridge.CompleteClientResponseEnvelope(exchange.Client, body, exchange.ClientRequest)
+		}
 	}
 	if err != nil {
 		return nil, err
@@ -73,7 +77,13 @@ func renderSyntheticStream(ctx context.Context, f *format.Format, chat *engine.C
 	close(events)
 	var out bytes.Buffer
 	ctx = context.WithValue(ctx, engine.ChatRequestKey, chat)
-	if err := f.Stream.SerializeStream(ctx, &out, events); err != nil {
+	var err error
+	if exchange := exchangeFrom(ctx); exchange != nil {
+		err = bridge.SerializeStream(ctx, &out, events, exchange.Client, exchange.Client, exchange.ClientRequest)
+	} else {
+		err = f.Stream.SerializeStream(ctx, &out, events)
+	}
+	if err != nil {
 		return nil, err
 	}
 	return out.Bytes(), nil

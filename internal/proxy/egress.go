@@ -17,6 +17,7 @@ import (
 
 	"google.golang.org/protobuf/proto"
 
+	"github.com/torana-edge/torana-edge/internal/bridge"
 	"github.com/torana-edge/torana-edge/internal/engine"
 	"github.com/torana-edge/torana-edge/internal/engine/pbconv"
 	"github.com/torana-edge/torana-edge/internal/format"
@@ -224,9 +225,9 @@ type egressRequest struct {
 	// protobuf: an explicitly present all-default message encodes to zero
 	// bytes and is a valid request, while a missing field is a caller bug.
 	RequestPB *string `json:"request_pb"`
-	// Path overrides the upstream path. Torana never synthesizes a chat path —
-	// it reuses whatever the caller sent — so a plugin replaying a conversation
-	// must supply the path that conversation used.
+	// Path selects the provider's exposed client endpoint. Native providers
+	// forward it; bridged providers validate it as the client contract and
+	// synthesize their configured upstream endpoint.
 	Path      string `json:"path,omitempty"`
 	TimeoutMS int    `json:"timeout_ms,omitempty"`
 }
@@ -236,9 +237,12 @@ type egressRequest struct {
 // field — the error arm is the status channel, and a reached-but-refused
 // provider is reported by its HTTPStatus.
 type egressResponse struct {
-	HTTPStatus int    `json:"http_status,omitempty"`
-	Body       string `json:"body,omitempty"` // base64, provider-format
-	Usage      *struct {
+	HTTPStatus int `json:"http_status,omitempty"`
+	// Body is base64 in the provider's exposed client contract for the public
+	// send_request host call. The private model-service path consumes a source
+	// snapshot and never exposes this envelope to a guest.
+	Body  string `json:"body,omitempty"`
+	Usage *struct {
 		Input      int64 `json:"input"`
 		Output     int64 `json:"output"`
 		CacheRead  int64 `json:"cache_read"`
@@ -255,10 +259,28 @@ type egressResponse struct {
 // encode failure. The value arm carries provider outcomes only, and no longer
 // carries a constant status field — the error arm is the status channel.
 func (s *Server) sendPluginRequest(ctx context.Context, pluginName, payloadJSON string) wasm.ExtensionResult {
-	return s.sendPluginRequestWithBudget(ctx, pluginName, payloadJSON, nil, pluginName)
+	return s.sendPluginRequestWithBudget(ctx, pluginName, payloadJSON, pluginEgressOptions{budgetKey: pluginName})
 }
 
-func (s *Server) sendPluginRequestWithBudget(ctx context.Context, pluginName, payloadJSON string, boundBudget *provider.EgressBudget, budgetKey string) wasm.ExtensionResult {
+type pluginEgressOptions struct {
+	boundBudget *provider.EgressBudget
+	budgetKey   string
+	// modelOverride pins an operator-bound model service to its resource
+	// model. Nil lets an ordinary send_request use the provider bridge alias.
+	modelOverride *string
+	// sourceResult is an internal-only snapshot for model services. Guests get
+	// the exposed client body; typed model results still need source-only facts
+	// such as Anthropic stop_reason that have no Responses wire equivalent.
+	sourceResult *pluginEgressSourceResult
+}
+
+type pluginEgressSourceResult struct {
+	body       []byte
+	formatName string
+	set        bool
+}
+
+func (s *Server) sendPluginRequestWithBudget(ctx context.Context, pluginName, payloadJSON string, options pluginEgressOptions) wasm.ExtensionResult {
 	var req egressRequest
 	if err := json.Unmarshal([]byte(payloadJSON), &req); err != nil {
 		return wasm.ExtensionRefusal(pb.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "invalid payload: %v", err)
@@ -305,28 +327,6 @@ func (s *Server) sendPluginRequestWithBudget(ctx context.Context, pluginName, pa
 	// Proxy-internal metadata must not travel upstream, and a plugin has no
 	// business setting it on an outbound request anyway.
 	chat.ToranaMeta = engine.OptionalJSONObject{}
-	// OpenAIVariant is intentionally host-only and is not serialized in the
-	// plugin ABI. Recover the provider wire topology from the host-validated
-	// egress path before asking the OpenAI adapter to marshal it.
-	if prov.Format == "openai" {
-		pathOnly := strings.SplitN(req.Path, "?", 2)[0]
-		if strings.HasSuffix(pathOnly, "/responses") {
-			chat.OpenAIVariant = engine.OpenAIResponses
-		}
-	}
-
-	f := format.Lookup(prov.Format)
-	if f == nil || f.Request == nil {
-		return wasm.ExtensionRefusal(pb.ErrorCode_ERROR_CODE_NOT_CONFIGURED, "provider %q has no usable format adapter (%q)", req.Provider, prov.Format)
-	}
-	body, err := f.Request.Marshal(chat)
-	if err != nil {
-		// The request the GUEST supplied cannot be rendered by the provider's
-		// format adapter (e.g. a NaN sampling parameter the adapter refuses to
-		// serialize). Retrying cannot help — the guest must fix the request.
-		return wasm.ExtensionRefusal(pb.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "encode request for %s: %v", prov.Format, err)
-	}
-
 	path := req.Path
 	if path == "" {
 		return wasm.ExtensionRefusal(pb.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "path is required — Torana does not synthesize provider paths")
@@ -370,6 +370,60 @@ func (s *Server) sendPluginRequestWithBudget(ctx context.Context, pluginName, pa
 		return wasm.ExtensionRefusal(pb.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "path escapes the configured provider origin, got %q", path)
 	}
 
+	// A bridged provider exposes its client contract consistently to callers
+	// and plugins. The guest path selects and validates that client contract;
+	// Torana owns the upstream endpoint, body topology, and provider defaults.
+	var clientProtocol bridge.Protocol
+	var clientRequest *engine.ChatRequest
+	f := format.Lookup(prov.Format)
+	if f == nil || f.Request == nil {
+		return wasm.ExtensionRefusal(pb.ErrorCode_ERROR_CODE_NOT_CONFIGURED, "provider %q has no usable format adapter (%q)", req.Provider, prov.Format)
+	}
+	var body []byte
+	if prov.Bridge != nil {
+		clientProtocol = prov.Bridge.Client
+		if !clientProtocol.MatchesPath(http.MethodPost, u.Path) {
+			return wasm.ExtensionRefusal(pb.ErrorCode_ERROR_CODE_INVALID_ARGUMENT,
+				"path does not match provider %q client protocol", req.Provider)
+		}
+		if chat.Stream {
+			return wasm.ExtensionRefusal(pb.ErrorCode_ERROR_CODE_INVALID_ARGUMENT,
+				"plugin egress does not support bridged streaming requests")
+		}
+		clientProtocol.ApplyTopology(chat)
+		accepted, projectionErr := bridge.ProjectRequest(chat, clientProtocol, clientProtocol, bridge.RequestOptions{})
+		if projectionErr != nil {
+			return wasm.ExtensionRefusal(pb.ErrorCode_ERROR_CODE_INVALID_ARGUMENT,
+				"request_pb cannot represent the configured client protocol")
+		}
+		clientRequest = accepted
+		candidate := *accepted
+		if options.modelOverride != nil {
+			candidate.Model = *options.modelOverride
+		} else if prov.Bridge.Model != "" {
+			candidate.Model = prov.Bridge.Model
+		}
+		chat, projectionErr = bridge.ProjectRequest(&candidate, clientProtocol, prov.Bridge.Upstream, bridgeOptions(prov))
+		if projectionErr != nil {
+			return wasm.ExtensionRefusal(pb.ErrorCode_ERROR_CODE_INVALID_ARGUMENT,
+				"request_pb cannot represent the configured upstream protocol")
+		}
+		if prov.Bridge.Upstream == bridge.OpenAIResponses {
+			applyOpenAIResponsesCompaction(chat, prov)
+		}
+		body, err = bridge.MarshalRequest(prov.Bridge.Upstream, chat)
+	} else {
+		// OpenAIVariant is intentionally host-only and is not serialized in the
+		// plugin ABI. Recover native wire topology from the validated path.
+		if prov.Format == "openai" && strings.HasSuffix(u.Path, "/responses") {
+			chat.OpenAIVariant = engine.OpenAIResponses
+		}
+		body, err = f.Request.Marshal(chat)
+	}
+	if err != nil {
+		return wasm.ExtensionRefusal(pb.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "encode request for %s: %v", prov.Format, err)
+	}
+
 	if req.TimeoutMS < 0 {
 		return wasm.ExtensionRefusal(pb.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "timeout_ms must not be negative")
 	}
@@ -395,6 +449,12 @@ func (s *Server) sendPluginRequestWithBudget(ctx context.Context, pluginName, pa
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("Accept-Encoding", "identity")
+	if prov.Bridge != nil {
+		if err := prepareBridgeTransport(httpReq, prov, prov.Bridge.Upstream, chat); err != nil {
+			return wasm.ExtensionRefusal(pb.ErrorCode_ERROR_CODE_NOT_CONFIGURED,
+				"provider %q bridge transport is unavailable", req.Provider)
+		}
+	}
 
 	if prov.Auth.EffectiveMode() == "caller" {
 		return wasm.ExtensionRefusal(pb.ErrorCode_ERROR_CODE_NOT_CONFIGURED, "provider %q uses caller auth; plugin-originated calls require credential or none", req.Provider)
@@ -410,16 +470,16 @@ func (s *Server) sendPluginRequestWithBudget(ctx context.Context, pluginName, pa
 	// TRANSPORT ATTEMPT does — the slot was authorized, and a refused request
 	// still needs the window to roll.
 	budget := cfg.Plugins.Runtime.EgressBudgetFor(pluginName)
-	if boundBudget != nil {
-		budget = *boundBudget
+	if options.boundBudget != nil {
+		budget = *options.boundBudget
 	}
-	unlockBudget, err := s.egress.lockTokenBudget(callCtx, budgetKey, budget)
+	unlockBudget, err := s.egress.lockTokenBudget(callCtx, options.budgetKey, budget)
 	if err != nil {
 		s.stats.RecordPluginCounter(pluginName, "egress_refused", 1)
 		return wasm.ExtensionRefusal(pb.ErrorCode_ERROR_CODE_UNAVAILABLE, "model call admission canceled: %v", err)
 	}
 	defer unlockBudget()
-	if err := s.egress.authorize(budgetKey, budget); err != nil {
+	if err := s.egress.authorize(options.budgetKey, budget); err != nil {
 		s.stats.RecordPluginCounter(pluginName, "egress_refused", 1)
 		return wasm.ExtensionRefusal(classifyEgressRefusal(err), "%v", err)
 	}
@@ -462,16 +522,54 @@ func (s *Server) sendPluginRequestWithBudget(ctx context.Context, pluginName, pa
 		s.stats.RecordPluginCounter(pluginName, "egress_failed", 1)
 		return wasm.ExtensionRefusal(pb.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "egress response exceeds %d bytes — reduce the request (e.g. max_tokens) or raise the limit", maxEgressResponseBytes)
 	}
+	if options.sourceResult != nil {
+		options.sourceResult.body = append(options.sourceResult.body[:0], respBody...)
+		options.sourceResult.formatName = f.Name
+		options.sourceResult.set = true
+	}
 
-	out := egressResponse{HTTPStatus: resp.StatusCode, Body: base64.StdEncoding.EncodeToString(respBody)}
-
-	// Usage is best-effort: a provider that reports none, or a body that is
-	// not the JSON shape this format expects, simply means no metering data.
+	// Usage and spend are always read in the upstream provider's native domain.
+	// A translated client body may normalize token totals differently, but it
+	// must never rewrite the budget fact after the provider has been called.
 	var usage *engine.StreamUsage
 	var decoded map[string]any
 	if json.Unmarshal(respBody, &decoded) == nil {
 		usage = extractResponse(f.Name, decoded).usage
 	}
+	if usage != nil {
+		if tokens, reported := egressBillableTokens(f.Name, usage); budget.MaxTokensPerHour > 0 && reported {
+			s.egress.recordTokens(options.budgetKey, tokens)
+		}
+	}
+
+	clientBody := respBody
+	// Model services consume the typed source snapshot above. Requiring an
+	// otherwise unnecessary client-wire projection would reject source output
+	// the model ABI can represent (for example Anthropic cache writes when the
+	// exposed contract is Chat Completions). Public send_request remains strict:
+	// its body always belongs to the exposed client contract.
+	if clientProtocol.Valid() && options.sourceResult == nil {
+		if resp.StatusCode >= http.StatusBadRequest {
+			mapped := &http.Response{StatusCode: resp.StatusCode, Header: make(http.Header), Body: io.NopCloser(bytes.NewReader(respBody))}
+			bridgeUpstreamError(mapped, &bridgeExchange{Client: clientProtocol, Upstream: prov.Bridge.Upstream})
+			clientBody, _ = io.ReadAll(mapped.Body)
+			_ = mapped.Body.Close()
+		} else {
+			clientBody, err = bridge.TranslateResponseWithRequest(prov.Bridge.Upstream, clientProtocol, respBody, chat.Model, clientRequest)
+			if err != nil {
+				s.stats.RecordPluginCounter(pluginName, "egress_calls", 1)
+				s.stats.RecordPluginCounter(pluginName, "egress_failed", 1)
+				s.recordEgressEvent(pluginName, req.Provider, chat.Model, resp.StatusCode, start, usage)
+				return wasm.ExtensionRefusal(pb.ErrorCode_ERROR_CODE_UNAVAILABLE,
+					"provider returned a response that cannot be represented by its client protocol")
+			}
+		}
+	}
+
+	out := egressResponse{HTTPStatus: resp.StatusCode, Body: base64.StdEncoding.EncodeToString(clientBody)}
+
+	// Usage is best-effort: a provider that reports none, or a body that is
+	// not the JSON shape this format expects, simply means no metering data.
 	if usage != nil {
 		out.Usage = &struct {
 			Input      int64 `json:"input"`
@@ -480,9 +578,6 @@ func (s *Server) sendPluginRequestWithBudget(ctx context.Context, pluginName, pa
 			CacheWrite int64 `json:"cache_write"`
 		}{int64(usage.InputTokens), int64(usage.OutputTokens),
 			int64(usage.CacheReadTokens), int64(usage.CacheWriteTokens)}
-		if tokens, reported := egressBillableTokens(f.Name, usage); budget.MaxTokensPerHour > 0 && reported {
-			s.egress.recordTokens(budgetKey, tokens)
-		}
 	}
 
 	s.stats.RecordPluginCounter(pluginName, "egress_calls", 1)
