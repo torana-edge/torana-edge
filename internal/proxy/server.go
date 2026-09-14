@@ -3401,7 +3401,7 @@ func (s *Server) newRuntime() *wasm.Runtime {
 	}
 	rt.ExecutionInfoFunc = func(ctx context.Context) *pb.ExecutionInfo {
 		rs := reqStateFrom(ctx)
-		info := &pb.ExecutionInfo{MaxMemoryBytes: 64 << 20, MaxHostResponseBytes: 1 << 20, MaxStreamBufferBytes: 4 << 20}
+		info := &pb.ExecutionInfo{}
 		if rs == nil {
 			return info
 		}

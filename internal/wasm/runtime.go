@@ -70,9 +70,10 @@ const (
 	// defaultMemoryLimitPages caps a plugin at 64 MiB of Wasm linear memory.
 	// A page is 64 KiB. This is high enough for the current Go/WASI plugins while
 	// preventing an absent module maximum from becoming wazero's 4 GiB default.
-	defaultMemoryLimitPages  uint32 = 1024
-	defaultStreamBufferBytes uint64 = 4 << 20
-	defaultMaxCacheTTL              = 15 * time.Minute
+	defaultMemoryLimitPages     uint32 = 1024
+	defaultStreamBufferBytes    uint64 = 4 << 20
+	defaultMaxCacheTTL                 = 15 * time.Minute
+	defaultMaxHostResponseBytes uint64 = 1 << 20
 )
 
 // RuntimeOptions bounds resources used by every plugin loaded in a Runtime.
@@ -91,6 +92,7 @@ type RuntimeOptions struct {
 	InstanceIdleTimeout  time.Duration
 	MaxStreamBufferBytes uint64
 	MaxCacheTTL          time.Duration
+	MaxHostResponseBytes uint64
 }
 
 func defaultRuntimeOptions() RuntimeOptions {
@@ -101,6 +103,7 @@ func defaultRuntimeOptions() RuntimeOptions {
 		InstanceIdleTimeout:  defaultInstanceIdleTimeout,
 		MaxStreamBufferBytes: defaultStreamBufferBytes,
 		MaxCacheTTL:          defaultMaxCacheTTL,
+		MaxHostResponseBytes: defaultMaxHostResponseBytes,
 	}
 }
 
@@ -122,6 +125,9 @@ func normalizeRuntimeOptions(options RuntimeOptions) RuntimeOptions {
 	}
 	if options.MaxStreamBufferBytes == 0 {
 		options.MaxStreamBufferBytes = defaults.MaxStreamBufferBytes
+	}
+	if options.MaxHostResponseBytes == 0 {
+		options.MaxHostResponseBytes = defaults.MaxHostResponseBytes
 	}
 	if options.MaxCacheTTL == 0 {
 		options.MaxCacheTTL = defaults.MaxCacheTTL
@@ -187,12 +193,14 @@ type Plugin struct {
 	// when close and unload race or repeat.
 	compiledCloseOnce sync.Once
 
-	poolSize          int
-	callTimeout       time.Duration
-	idleTimeout       time.Duration
-	streamBufferBytes uint64
-	maxCacheTTL       time.Duration
-	executionInfoFunc func(context.Context) *pbv1.ExecutionInfo
+	poolSize             int
+	callTimeout          time.Duration
+	idleTimeout          time.Duration
+	streamBufferBytes    uint64
+	maxCacheTTL          time.Duration
+	maxHostResponseBytes uint64
+	maxMemoryBytes       uint64
+	executionInfoFunc    func(context.Context) *pbv1.ExecutionInfo
 
 	instanceCount uint64
 }
@@ -825,6 +833,9 @@ func (p *Plugin) CallRequest(ctx context.Context, hook pbv1.Hook, reqID uint64, 
 	if uint64(len(inBytes)) > math.MaxUint32 {
 		return fmt.Errorf("wasm: %s input exceeds 32-bit Wasm memory", p.name)
 	}
+	ctx = context.WithValue(ctx, reqIDKey{}, reqID)
+	callCtx, cancel := p.callContext(ctx)
+	defer cancel()
 	// Host owns execution metadata and injects it into the validated envelope.
 	var envelope pbv1.HookInput
 	if err := proto.Unmarshal(inBytes, &envelope); err != nil {
@@ -841,12 +852,21 @@ func (p *Plugin) CallRequest(ctx context.Context, hook pbv1.Hook, reqID uint64, 
 			envelope.Execution = proto.Clone(info).(*pbv1.ExecutionInfo)
 		}
 	}
-	inBytes, _ = proto.Marshal(&envelope)
-	// Carry the request ID into host functions (wazero propagates the
-	// fn.Call context) so meta state is scoped per request.
-	ctx = context.WithValue(ctx, reqIDKey{}, reqID)
-	callCtx, cancel := p.callContext(ctx)
-	defer cancel()
+	if envelope.Execution == nil {
+		envelope.Execution = &pbv1.ExecutionInfo{}
+	}
+	envelope.Execution.MaxMemoryBytes = p.maxMemoryBytes
+	envelope.Execution.MaxHostResponseBytes = p.maxHostResponseBytes
+	envelope.Execution.MaxStreamBufferBytes = p.streamBufferBytes
+	if d, ok := callCtx.Deadline(); ok {
+		v := d.UnixMilli()
+		envelope.Execution.DeadlineUnixMs = &v
+	}
+	var marshalErr error
+	inBytes, marshalErr = proto.Marshal(&envelope)
+	if marshalErr != nil {
+		return fmt.Errorf("wasm: %s encode hook input: %w", p.name, marshalErr)
+	}
 
 	// Acquire an instance from the pool.
 	inst, err := p.acquire(callCtx)
@@ -1603,18 +1623,20 @@ func (r *Runtime) LoadPlugin(name string, wasmBytes []byte) (*Plugin, error) {
 	}
 
 	p := &Plugin{
-		name:              name,
-		compiled:          compiled,
-		lifecycle:         r.testHooks,
-		runtime:           r.runtime,
-		pool:              make(chan *pluginInstance, r.options.PoolSize),
-		slots:             make(chan struct{}, r.options.PoolSize),
-		poolSize:          r.options.PoolSize,
-		callTimeout:       r.options.CallTimeout,
-		idleTimeout:       r.options.InstanceIdleTimeout,
-		streamBufferBytes: r.options.MaxStreamBufferBytes,
-		executionInfoFunc: r.ExecutionInfoFunc,
-		maxCacheTTL:       r.options.MaxCacheTTL,
+		name:                 name,
+		compiled:             compiled,
+		lifecycle:            r.testHooks,
+		runtime:              r.runtime,
+		pool:                 make(chan *pluginInstance, r.options.PoolSize),
+		slots:                make(chan struct{}, r.options.PoolSize),
+		poolSize:             r.options.PoolSize,
+		callTimeout:          r.options.CallTimeout,
+		idleTimeout:          r.options.InstanceIdleTimeout,
+		streamBufferBytes:    r.options.MaxStreamBufferBytes,
+		executionInfoFunc:    r.ExecutionInfoFunc,
+		maxCacheTTL:          r.options.MaxCacheTTL,
+		maxHostResponseBytes: r.options.MaxHostResponseBytes,
+		maxMemoryBytes:       uint64(r.options.MemoryLimitPages) * 65536,
 	}
 	p.privateCacheIdentity = name
 	p.cacheIdentityValid = true
