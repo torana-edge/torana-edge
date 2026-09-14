@@ -1,6 +1,7 @@
 package installertest
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -125,8 +126,10 @@ func TestReleaseWorkflowSafetyContract(t *testing.T) {
 	var workflow struct {
 		On          map[string]any    `yaml:"on"`
 		Permissions map[string]string `yaml:"permissions"`
+		Env         map[string]string `yaml:"env"`
 		Jobs        map[string]struct {
 			Permissions map[string]string `yaml:"permissions"`
+			Env         map[string]string `yaml:"env"`
 			Steps       []struct {
 				Name, Uses, Run string
 				With, Env       map[string]string
@@ -163,6 +166,7 @@ func TestReleaseWorkflowSafetyContract(t *testing.T) {
 		previous = i
 	}
 	build := job.Steps[steps[ordered[1]]]
+	must(t, validateReleaseBuildEnv(workflow.Env, job.Env, build.Env))
 	if !strings.Contains(build.Run, "@v2.15.4 release --clean --skip=publish,announce") || strings.Contains(build.Run, "--snapshot") {
 		t.Fatal("real release must build tagged assets without early publishing or skipping SBOMs")
 	}
@@ -188,5 +192,29 @@ func TestReleaseWorkflowSafetyContract(t *testing.T) {
 	}
 	if strings.Contains(publish, "--clobber") || strings.Contains(publish, "gh release delete") {
 		t.Fatal("release must never overwrite existing artifacts")
+	}
+}
+
+// A release job needs a write-capable token later, but the downloaded build
+// tool and any future build hooks must not inherit it through env scopes.
+func validateReleaseBuildEnv(workflowEnv, jobEnv, buildEnv map[string]string) error {
+	if len(workflowEnv) != 0 || len(buildEnv) != 0 || len(jobEnv) != 1 || jobEnv["GOWORK"] != "off" {
+		return fmt.Errorf("release builder environment must contain only GOWORK=off; scope write tokens to API/publication steps")
+	}
+	return nil
+}
+
+func TestReleaseBuilderRejectsInheritedCredentials(t *testing.T) {
+	must(t, validateReleaseBuildEnv(nil, map[string]string{"GOWORK": "off"}, nil))
+	for _, scope := range []string{"workflow", "job", "build"} {
+		for _, name := range []string{"GITHUB_TOKEN", "GH_TOKEN", "CUSTOM_WRITE_CREDENTIAL"} {
+			t.Run(scope+"/"+name, func(t *testing.T) {
+				envs := map[string]map[string]string{"workflow": {}, "job": {"GOWORK": "off"}, "build": {}}
+				envs[scope][name] = "${{ github.token }}"
+				if err := validateReleaseBuildEnv(envs["workflow"], envs["job"], envs["build"]); err == nil {
+					t.Fatal("builder inherited a write credential")
+				}
+			})
+		}
 	}
 }

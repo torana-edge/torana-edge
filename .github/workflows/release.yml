@@ -56,8 +56,6 @@ jobs:
           syft-version: v1.51.1
       - name: Build release assets without publishing
         run: go run github.com/goreleaser/goreleaser/v2@v2.15.4 release --clean --skip=publish,announce
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
       - name: Validate all six generated installer assets
         run: go test ./scripts/installertest -run '^TestGeneratedReleaseArtifacts$' -count=1 -v
         env:
