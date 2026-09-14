@@ -53,6 +53,8 @@ import (
 // ============================================================================
 
 const (
+	// currentABI is packed as (major << 32) | minor in the guest's i64 export.
+	currentABIVersion uint64 = (uint64(1) << 32) | 1
 	// defaultPoolSize is deliberately small. A Go/WASI plugin can consume several
 	// MiB per instance, so the previous 100-slot pool made a single plugin able to
 	// reserve far more memory than a personal proxy should spend.
@@ -465,7 +467,73 @@ func supportedHooks(ctx context.Context, mod api.Module) (pbv1.HookBitmap, error
 	if len(res) != 1 {
 		return 0, fmt.Errorf("supported_hooks returned %d values, want 1", len(res))
 	}
-	return pbv1.HookBitmap(res[0]), nil
+	b := pbv1.HookBitmap(res[0])
+	if bad := b &^ pbv1.KnownHooksMask(); bad != 0 {
+		return 0, fmt.Errorf("supported_hooks returned unknown bits %#x", uint32(bad))
+	}
+	if b == 0 {
+		return 0, errors.New("supported_hooks returned an empty bitmap")
+	}
+	return b, nil
+}
+
+// validateABI checks the complete v1 export surface from the compiled module,
+// before an instance can be published. Checking only names defers malformed
+// signatures until the first request and allowed old guests to load silently.
+// ValidateABI validates the static export contract of a compiled guest. Tooling
+// can call this before installation; LoadPlugin calls it before any instance
+// is created or published.
+func ValidateABI(compiled wazero.CompiledModule) error {
+	want := map[string]struct{ p, r []api.ValueType }{
+		"alloc":           {[]api.ValueType{api.ValueTypeI32}, []api.ValueType{api.ValueTypeI32}},
+		"dealloc":         {[]api.ValueType{api.ValueTypeI32, api.ValueTypeI32}, nil},
+		"supported_hooks": {nil, []api.ValueType{api.ValueTypeI32}},
+		"run_hook":        {[]api.ValueType{api.ValueTypeI32, api.ValueTypeI32}, []api.ValueType{api.ValueTypeI64}},
+		"abi_version":     {nil, []api.ValueType{api.ValueTypeI64}},
+	}
+	defs := compiled.ExportedFunctions()
+	for name, sig := range want {
+		fn, ok := defs[name]
+		if !ok {
+			if name == "supported_hooks" {
+				return fmt.Errorf("module exports no supported_hooks; rebuild it with the current plugin SDK")
+			}
+			return fmt.Errorf("module missing required export %q", name)
+		}
+		if !equalValueTypes(fn.ParamTypes(), sig.p) || !equalValueTypes(fn.ResultTypes(), sig.r) {
+			return fmt.Errorf("export %q has wrong signature (want %s)", name, formatSignature(sig.p, sig.r))
+		}
+	}
+	if _, ok := compiled.ExportedMemories()["memory"]; !ok {
+		return errors.New("module missing exported memory")
+	}
+	return nil
+}
+
+func validateABI(compiled wazero.CompiledModule) error { return ValidateABI(compiled) }
+
+func equalValueTypes(a, b []api.ValueType) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func formatSignature(p, r []api.ValueType) string {
+	parts := make([]string, len(p))
+	for i, t := range p {
+		parts[i] = api.ValueTypeName(t)
+	}
+	outs := make([]string, len(r))
+	for i, t := range r {
+		outs[i] = api.ValueTypeName(t)
+	}
+	return fmt.Sprintf("(%s)->(%s)", strings.Join(parts, ","), strings.Join(outs, ","))
 }
 
 // acquire returns a plugin instance from the pool.
@@ -650,6 +718,33 @@ func (p *Plugin) newInstance(ctx context.Context) (*pluginInstance, error) {
 			return nil, fmt.Errorf("wasm: %s initialize: %w", p.name, err)
 		}
 	}
+	// Validate every fresh instance too: a poisoned or inconsistent guest must
+	// never enter the pool. This also checks the runtime ABI value after init.
+	version := mod.ExportedFunction("abi_version")
+	res, err := version.Call(instanceCtx)
+	if err != nil || len(res) != 1 || res[0] != currentABIVersion {
+		if err == nil {
+			if len(res) == 1 {
+				err = fmt.Errorf("returned %#x, want %#x", res[0], currentABIVersion)
+			} else {
+				err = fmt.Errorf("returned %d values, want 1", len(res))
+			}
+		}
+		_ = inst.close(context.Background())
+		return nil, fmt.Errorf("wasm: %s abi_version: %w", p.name, err)
+	}
+	bitmap, err := supportedHooks(instanceCtx, mod)
+	if err != nil {
+		_ = inst.close(context.Background())
+		return nil, fmt.Errorf("wasm: %s supported_hooks: %w", p.name, err)
+	}
+	p.stateMu.RLock()
+	wantBitmap := p.hooks
+	p.stateMu.RUnlock()
+	if wantBitmap != 0 && bitmap != wantBitmap {
+		_ = inst.close(context.Background())
+		return nil, fmt.Errorf("wasm: %s supported_hooks changed from %#x to %#x", p.name, uint32(wantBitmap), uint32(bitmap))
+	}
 	return inst, nil
 }
 
@@ -729,6 +824,10 @@ func (p *Plugin) CallRequest(ctx context.Context, hook pbv1.Hook, reqID uint64, 
 	}
 	inPtr := uint32(r[0])
 	if !writeMemory(mod.Memory(), inPtr, inBytes) {
+		_, deallocErr := deallocFn.Call(callCtx, uint64(inPtr), uint64(len(inBytes)))
+		if deallocErr != nil {
+			return errors.Join(fmt.Errorf("wasm: %s alloc returned out-of-bounds input pointer", p.name), fmt.Errorf("wasm: %s dealloc input: %w", p.name, deallocErr))
+		}
 		return fmt.Errorf("wasm: %s alloc returned out-of-bounds input pointer", p.name)
 	}
 
@@ -1419,6 +1518,12 @@ func (r *Runtime) LoadPlugin(name string, wasmBytes []byte) (*Plugin, error) {
 		return nil, fmt.Errorf("wasm: %s: compile: %w", name, err)
 	}
 	r.fireCompiledAcquired(name)
+	if err := validateABI(compiled); err != nil {
+		closeErr := compiled.Close(r.ctx)
+		r.fireCompiledReleased(name)
+		r.fireConstructFailed(name)
+		return nil, errors.Join(fmt.Errorf("wasm: %s: ABI: %w", name, err), wrapCloseErr("compiled", closeErr))
+	}
 
 	p := &Plugin{
 		name:        name,
@@ -1462,6 +1567,25 @@ func (r *Runtime) LoadPlugin(name string, wasmBytes []byte) (*Plugin, error) {
 		r.fireCompiledReleased(name)
 		r.fireConstructFailed(name)
 		return nil, errors.Join(fmt.Errorf("wasm: %s: %w", name, err),
+			wrapCloseErr("instance", instErr), wrapCloseErr("compiled", compiledErr))
+	}
+	versionFn := inst.mod.ExportedFunction("abi_version")
+	versionCtx, cancelVersion := context.WithTimeout(r.ctx, r.options.CallTimeout)
+	version, versionErr := versionFn.Call(versionCtx)
+	cancelVersion()
+	if versionErr != nil || len(version) != 1 || version[0] != currentABIVersion {
+		instErr := inst.close(r.ctx)
+		compiledErr := compiled.Close(r.ctx)
+		r.fireCompiledReleased(name)
+		r.fireConstructFailed(name)
+		if versionErr == nil {
+			if len(version) == 1 {
+				versionErr = fmt.Errorf("returned %#x, want %#x", version[0], currentABIVersion)
+			} else {
+				versionErr = fmt.Errorf("returned %d values, want 1", len(version))
+			}
+		}
+		return nil, errors.Join(fmt.Errorf("wasm: %s: abi_version: %w", name, versionErr),
 			wrapCloseErr("instance", instErr), wrapCloseErr("compiled", compiledErr))
 	}
 	p.hooks = bitmap
