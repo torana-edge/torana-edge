@@ -70,9 +70,9 @@ func run(t *testing.T, pp *PluginPipeline, ev engine.StreamEvent) []engine.Strea
 
 func runAs(t *testing.T, pp *PluginPipeline, reqID uint64, ev engine.StreamEvent) []engine.StreamEvent {
 	t.Helper()
-	out, err := pp.RunOnStreamChunk(context.Background(), reqID, &ev)
+	out, err := pp.RunOnStreamChunkVerified(context.Background(), reqID, &ev)
 	if err != nil {
-		t.Fatalf("RunOnStreamChunk: %v", err)
+		t.Fatalf("RunOnStreamChunkVerified: %v", err)
 	}
 	return out
 }
@@ -1107,11 +1107,14 @@ func pipeStream(t *testing.T, pp *PluginPipeline, reqID uint64, events []engine.
 	t.Helper()
 	var got []engine.StreamEvent
 	for _, ev := range events {
-		out, err := pp.RunOnStreamChunk(context.Background(), reqID, &ev)
+		out, err := pp.RunOnStreamChunkVerified(context.Background(), reqID, &ev)
 		if err != nil {
-			t.Fatalf("RunOnStreamChunk: %v", err)
+			t.Fatalf("RunOnStreamChunkVerified: %v", err)
 		}
 		got = append(got, out...)
+	}
+	if err := pp.EndStreamVerified(reqID); err != nil {
+		t.Fatalf("EndStreamVerified: %v", err)
 	}
 	return got
 }
@@ -1255,13 +1258,16 @@ func TestStreamLosslessThroughPipeline(t *testing.T) {
 
 			var piped []engine.StreamEvent
 			for _, ev := range events {
-				out, err := pp.RunOnStreamChunk(context.Background(), reqID, &ev)
+				out, err := pp.RunOnStreamChunkVerified(context.Background(), reqID, &ev)
 				if err != nil {
-					t.Fatalf("RunOnStreamChunk: %v", err)
+					t.Fatalf("RunOnStreamChunkVerified: %v", err)
 				}
 				piped = append(piped, out...)
 			}
 
+			if err := pp.EndStreamVerified(reqID); err != nil {
+				t.Fatalf("EndStreamVerified: %v", err)
+			}
 			var buf strings.Builder
 			if err := sa.SerializeStream(context.Background(), &buf, replayEngine(piped)); err != nil {
 				t.Fatalf("SerializeStream: %v", err)

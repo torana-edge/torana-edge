@@ -395,7 +395,7 @@ func runSequence(b *testing.B, pp *PluginPipeline, ctx context.Context, reqID ui
 	b.Helper()
 	for _, ev := range seq {
 		e := ev
-		if _, err := pp.RunOnStreamChunk(ctx, reqID, &e); err != nil {
+		if _, err := pp.RunOnStreamChunkVerified(ctx, reqID, &e); err != nil {
 			b.Fatal(err)
 		}
 	}
@@ -424,7 +424,7 @@ func BenchmarkStreamedResponse(b *testing.B) {
 				reqID := uint64(i + 1)
 				for t := 0; t < events; t++ {
 					ev := engine.StreamEvent{TextDelta: &text}
-					if _, err := pp.RunOnStreamChunk(ctx, reqID, &ev); err != nil {
+					if _, err := pp.RunOnStreamChunkVerified(ctx, reqID, &ev); err != nil {
 						b.Fatal(err)
 					}
 				}
