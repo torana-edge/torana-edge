@@ -192,6 +192,13 @@ func (a *Adapter) Marshal(chat *engine.ChatRequest) ([]byte, error) {
 	if err := pbconv.ValidateFullRequest(chat); err != nil {
 		return nil, fmt.Errorf("openai: %w", err)
 	}
+	for _, message := range chat.Messages {
+		for _, block := range message.Blocks {
+			if block.ToolResult != nil && block.ToolResult.IsError != nil && *block.ToolResult.IsError {
+				return nil, fmt.Errorf("openai: explicit tool-result error flag is unrepresentable")
+			}
+		}
+	}
 	// The typed host-only topology fact decides the wire variant; a plugin
 	// can neither forge nor lose it.
 	if chat.OpenAIVariant == engine.OpenAIResponses {
