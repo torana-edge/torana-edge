@@ -8,12 +8,15 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"reflect"
 	"strings"
 
 	"github.com/torana-edge/torana-edge/internal/engine"
+	"github.com/torana-edge/torana-edge/internal/engine/pbconv"
 	"github.com/torana-edge/torana-edge/internal/plugin"
 	"github.com/torana-edge/torana-edge/internal/wasm"
+	pbv1 "github.com/torana-edge/torana-plugin-sdk/pb/v1"
+	"google.golang.org/protobuf/encoding/protojson"
+	"google.golang.org/protobuf/proto"
 )
 
 // pluginTestScenario is deliberately canonical: provider wire formats belong
@@ -23,28 +26,26 @@ type pluginTestScenario struct {
 	ExpectedRequest json.RawMessage   `json:"expected_request"`
 	Stream          []json.RawMessage `json:"stream"`
 	ExpectedStream  []json.RawMessage `json:"expected_stream"`
-	FailureMode     string            `json:"failure_mode,omitempty"`
 	ExpectedError   string            `json:"expected_error,omitempty"`
 }
 
-type canonicalScenarioRequest struct {
-	Model    string `json:"model"`
-	Messages []struct {
-		Role string `json:"role"`
-		Text string `json:"text"`
-	} `json:"messages"`
-}
-
 func decodeScenarioRequest(raw []byte) (*engine.ChatRequest, error) {
-	var wire canonicalScenarioRequest
-	if err := json.Unmarshal(raw, &wire); err != nil {
+	var wire pbv1.ChatRequest
+	if err := (protojson.UnmarshalOptions{DiscardUnknown: false}).Unmarshal(raw, &wire); err != nil {
 		return nil, err
 	}
-	request := &engine.ChatRequest{Model: wire.Model}
-	for _, message := range wire.Messages {
-		request.Messages = append(request.Messages, engine.Message{Role: engine.Role(message.Role), Blocks: []engine.Block{{Text: &engine.TextBlock{Text: message.Text}}}})
+	if err := wire.ValidateReplacement(); err != nil {
+		return nil, err
 	}
-	return request, nil
+	return pbconv.FromPBChatRequest(&wire)
+}
+
+func decodeScenarioEvent(raw []byte) (*engine.StreamEvent, error) {
+	var wire pbv1.StreamEvent
+	if err := (protojson.UnmarshalOptions{DiscardUnknown: false}).Unmarshal(raw, &wire); err != nil {
+		return nil, err
+	}
+	return (&pbconv.BlockKindTracker{}).FromPBStreamEvent(&wire)
 }
 
 func testPlugin(args []string, stdout, stderr io.Writer) error {
@@ -110,19 +111,27 @@ func testPlugin(args []string, stdout, stderr io.Writer) error {
 			if err != nil {
 				return fmt.Errorf("decode expected request: %w", err)
 			}
-			if !reflect.DeepEqual(actual, expected) {
-				return fmt.Errorf("request mismatch: got %s, want %s", compactJSON(actual), compactJSON(expected))
+			actualPB, err := pbconv.ToPBChatRequestChecked(actual)
+			if err != nil {
+				return fmt.Errorf("encode actual request: %w", err)
+			}
+			expectedPB, err := pbconv.ToPBChatRequestChecked(expected)
+			if err != nil {
+				return fmt.Errorf("encode expected request: %w", err)
+			}
+			if !proto.Equal(actualPB, expectedPB) {
+				return fmt.Errorf("request mismatch: got %s, want %s", compactJSON(actualPB), compactJSON(expectedPB))
 			}
 		}
 	}
-	if runErr == nil && len(scenario.Stream) != 0 {
+	if runErr == nil && scenario.Stream != nil {
 		var actual []engine.StreamEvent
 		for i, raw := range scenario.Stream {
-			var event engine.StreamEvent
-			if err := json.Unmarshal(raw, &event); err != nil {
+			event, err := decodeScenarioEvent(raw)
+			if err != nil {
 				return fmt.Errorf("decode stream event %d: %w", i, err)
 			}
-			out, err := pp.RunOnStreamChunkVerified(ctx, 1, &event)
+			out, err := pp.RunOnStreamChunkVerified(ctx, 1, event)
 			if err != nil {
 				runErr = err
 				break
@@ -139,13 +148,21 @@ func testPlugin(args []string, stdout, stderr io.Writer) error {
 		if runErr == nil && len(scenario.ExpectedStream) != 0 {
 			var expected []engine.StreamEvent
 			for i, raw := range scenario.ExpectedStream {
-				var event engine.StreamEvent
-				if err := json.Unmarshal(raw, &event); err != nil {
+				event, err := decodeScenarioEvent(raw)
+				if err != nil {
 					return fmt.Errorf("decode expected stream event %d: %w", i, err)
 				}
-				expected = append(expected, event)
+				expected = append(expected, *event)
 			}
-			if !reflect.DeepEqual(actual, expected) {
+			actualPB := make([]*pbv1.StreamEvent, 0, len(actual))
+			for i := range actual {
+				actualPB = append(actualPB, pbconv.ToPBStreamEvent(&actual[i]))
+			}
+			expectedPB := make([]*pbv1.StreamEvent, 0, len(expected))
+			for i := range expected {
+				expectedPB = append(expectedPB, pbconv.ToPBStreamEvent(&expected[i]))
+			}
+			if !proto.Equal(&pbv1.StreamEvents{Events: actualPB}, &pbv1.StreamEvents{Events: expectedPB}) {
 				return fmt.Errorf("stream mismatch: got %s, want %s", compactJSON(actual), compactJSON(expected))
 			}
 		}
@@ -168,8 +185,13 @@ func readPluginScenario(path string) (pluginTestScenario, error) {
 		return pluginTestScenario{}, fmt.Errorf("read scenario: %w", err)
 	}
 	var scenario pluginTestScenario
-	if err := json.Unmarshal(raw, &scenario); err != nil {
+	decoder := json.NewDecoder(strings.NewReader(string(raw)))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&scenario); err != nil {
 		return pluginTestScenario{}, fmt.Errorf("parse scenario: %w", err)
+	}
+	if scenario.Request == nil && scenario.Stream == nil && scenario.ExpectedError == "" {
+		return pluginTestScenario{}, errors.New("scenario has no request or stream events")
 	}
 	return scenario, nil
 }

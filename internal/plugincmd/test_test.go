@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/torana-edge/torana-edge/internal/testfixture"
 )
 
 func TestPluginTestRequiresCompiledBundle(t *testing.T) {
@@ -13,7 +15,7 @@ func TestPluginTestRequiresCompiledBundle(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "plugin.json"), []byte(`{"schema_version":1,"id":"test/x","name":"x","version":"0.1.0","abi_version":"v1","failure_mode":"pass","hooks":[],"permissions":[]}`), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "scenario.json"), []byte(`{}`), 0600); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "scenario.json"), []byte(`{"expected_error":"missing"}`), 0600); err != nil {
 		t.Fatal(err)
 	}
 	var out, stderr bytes.Buffer
@@ -37,10 +39,8 @@ func TestPluginTestRejectsMalformedScenario(t *testing.T) {
 }
 
 func TestPluginTestRunsCompiledMutator(t *testing.T) {
-	src := "/private/tmp/torana-foundation-20260914/edge/examples/plugins/test-mutator"
-	if _, err := os.Stat(filepath.Join(src, "plugin.wasm")); err != nil {
-		t.Skipf("compiled fixture unavailable: %v", err)
-	}
+	src := filepath.Join("..", "..", "examples", "plugins", "test-mutator")
+	testfixture.Require(t, filepath.Join(src, "plugin.wasm"))
 	dir := filepath.Join(t.TempDir(), "mutator")
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		t.Fatal(err)
@@ -49,7 +49,7 @@ func TestPluginTestRunsCompiledMutator(t *testing.T) {
 		t.Fatal(err)
 	}
 	scenario := filepath.Join(dir, "scenario.json")
-	raw := `{"request":{"model":"test","messages":[{"role":"user","text":"hello"}]},"expected_request":{"model":"test","messages":[{"role":"user","text":"hello [seen by test-mutator]"}]}}`
+	raw := `{"request":{"model":"user","messages":[{"role":"user","blocks":[{"text":{"text":"hello"}}]}]},"expected_request":{"model":"user","messages":[{"role":"user","blocks":[{"text":{"text":"hello [seen by test-mutator]"}}]}]}}`
 	if err := os.WriteFile(scenario, []byte(raw), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -60,10 +60,8 @@ func TestPluginTestRunsCompiledMutator(t *testing.T) {
 }
 
 func TestPluginTestRunsCompiledStreamJournal(t *testing.T) {
-	src := "/private/tmp/torana-foundation-20260914/edge/examples/plugins/test-stream-journal"
-	if _, err := os.Stat(filepath.Join(src, "plugin.wasm")); err != nil {
-		t.Skipf("compiled fixture unavailable: %v", err)
-	}
+	src := filepath.Join("..", "..", "examples", "plugins", "test-stream-journal")
+	testfixture.Require(t, filepath.Join(src, "plugin.wasm"))
 	dir := filepath.Join(t.TempDir(), "stream-journal")
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		t.Fatal(err)
@@ -72,7 +70,7 @@ func TestPluginTestRunsCompiledStreamJournal(t *testing.T) {
 		t.Fatal(err)
 	}
 	scenario := filepath.Join(dir, "scenario.json")
-	raw := `{"stream":[{"TextDelta":"hello"}],"expected_stream":[{"TextDelta":"SHOULD-NOT-RUN"}]}`
+	raw := `{"stream":[{"textDelta":"hello"}],"expected_stream":[{"textDelta":"SHOULD-NOT-RUN"}]}`
 	if err := os.WriteFile(scenario, []byte(raw), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -83,10 +81,8 @@ func TestPluginTestRunsCompiledStreamJournal(t *testing.T) {
 }
 
 func TestPluginTestReportsStreamCallbackFailure(t *testing.T) {
-	src := "/private/tmp/torana-foundation-20260914/edge/examples/plugins/test-stream-journal"
-	if _, err := os.Stat(filepath.Join(src, "plugin.wasm")); err != nil {
-		t.Skipf("compiled fixture unavailable: %v", err)
-	}
+	src := filepath.Join("..", "..", "examples", "plugins", "test-stream-journal")
+	testfixture.Require(t, filepath.Join(src, "plugin.wasm"))
 	dir := filepath.Join(t.TempDir(), "stream-failure")
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		t.Fatal(err)
@@ -94,7 +90,7 @@ func TestPluginTestReportsStreamCallbackFailure(t *testing.T) {
 	if err := copyTree(src, dir); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "scenario.json"), []byte(`{"stream":[{"ToolCallStart":{"Index":0,"ID":"c","Name":"tool"}},{"ToolCallDelta":{"Index":0,"ArgumentsDelta":"FAIL"}}],"expected_error":"stream plugin violation"}`), 0600); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "scenario.json"), []byte(`{"stream":[{"toolCallDelta":{"index":0,"argumentsDelta":"FAIL"}}],"expected_error":"no open tool block"}`), 0600); err != nil {
 		t.Fatal(err)
 	}
 	var out, stderr bytes.Buffer
