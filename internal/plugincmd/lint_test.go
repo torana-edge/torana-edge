@@ -597,7 +597,7 @@ var cmd = "env.now"
 
 func init() {
 	sdk.OnBeforeRequest(func(ctx context.Context, req *pb.ChatRequest) (*pb.ChatRequest, error) {
-		_, _ = sdk.HostCall(cmd, "")
+		if _, err := sdk.HostCall(cmd, nil); err != nil { return nil, err }
 		return nil, nil
 	})
 }
@@ -1081,7 +1081,7 @@ func init() {
 }
 
 // TestLintAttributesStreamMutationActions — every SDK stream mutation helper
-// maps to ir.stream.write in the used-but-undeclared direction; each helper
+// maps to its narrow grant in the used-but-undeclared direction; each helper
 // name gets an explicit decision.
 func TestLintAttributesStreamMutationActions(t *testing.T) {
 	actions := []string{
@@ -1117,7 +1117,11 @@ func init() {
 }
 `)
 			msgs := lintMessages(t, dir)
-			assertContains(t, msgs, `uses "ir.stream.write" but plugin.json does not request it`)
+			grant := "ir.stream.write"
+			if strings.Contains(action, "Text") {
+				grant = "ir.messages.write.assistant"
+			}
+			assertContains(t, msgs, `uses "`+grant+`" but plugin.json does not request it`)
 		})
 	}
 }

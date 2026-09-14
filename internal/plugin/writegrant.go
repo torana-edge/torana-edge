@@ -1355,7 +1355,15 @@ var chatRequestFieldSections = map[string]string{
 	"stop_sequences":           "ir.params.write",
 	"provider_extensions_json": "ir.params.write",
 	"safety_settings_json":     "ir.params.write",
+	"output_format":            "ir.params.write",
 	"torana_meta_json":         hostOwnedField,
+}
+
+var outputFormatFieldSections = map[string]string{
+	"mode":        "ir.params.write",
+	"name":        "ir.params.write",
+	"schema_json": "ir.params.write",
+	"strict":      "ir.params.write",
 }
 
 var messageFieldSections = map[string]string{

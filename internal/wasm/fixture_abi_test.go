@@ -3,6 +3,7 @@ package wasm
 import (
 	"context"
 	"encoding/json"
+	sdk "github.com/torana-edge/torana-plugin-sdk"
 	"os"
 	"path/filepath"
 	"testing"
@@ -118,7 +119,8 @@ func TestFixturesAnswerARealDispatch(t *testing.T) {
 // encodeInput wraps a request in the current ABI envelope, the way the pipeline does.
 func encodeInput(req *pbv1.ChatRequest) ([]byte, error) {
 	return proto.Marshal(&pbv1.HookInput{
-		RequestId: 1,
-		Payload:   &pbv1.HookInput_ChatRequest{ChatRequest: req},
+		ContractRevision: sdk.ContractRevision,
+		RequestId:        1,
+		Payload:          &pbv1.HookInput_ChatRequest{ChatRequest: req},
 	})
 }

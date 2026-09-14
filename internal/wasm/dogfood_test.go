@@ -2,6 +2,7 @@ package wasm
 
 import (
 	"context"
+	sdk "github.com/torana-edge/torana-plugin-sdk"
 	"os"
 	"strings"
 	"testing"
@@ -48,8 +49,9 @@ func TestIntentRawABI(t *testing.T) {
 	}
 	// current ABI wraps the payload in a HookInput and the reply in a HookResult.
 	input, _ := proto.Marshal(&pb.HookInput{
-		RequestId: 1,
-		Payload:   &pb.HookInput_ChatRequest{ChatRequest: req},
+		ContractRevision: sdk.ContractRevision,
+		RequestId:        1,
+		Payload:          &pb.HookInput_ChatRequest{ChatRequest: req},
 	})
 
 	var outBytes []byte

@@ -3,6 +3,7 @@ package wasm
 import (
 	"context"
 	"encoding/json"
+	sdk "github.com/torana-edge/torana-plugin-sdk"
 	"io"
 	"log"
 	"os"
@@ -530,7 +531,8 @@ func TestOfficialPluginLinearMemoryProfile(t *testing.T) {
 func benchmarkBeforeRequestInput(t *testing.T) []byte {
 	t.Helper()
 	input, err := proto.Marshal(&pbv1.HookInput{
-		RequestId: 1,
+		ContractRevision: sdk.ContractRevision,
+		RequestId:        1,
 		Payload: &pbv1.HookInput_ChatRequest{ChatRequest: &pbv1.ChatRequest{
 			Model: "benchmark-model",
 			Messages: []*pbv1.Message{
@@ -569,7 +571,8 @@ func benchmarkBeforeRequestInput(t *testing.T) []byte {
 func benchmarkAfterResponseInput(t *testing.T) []byte {
 	t.Helper()
 	input, err := proto.Marshal(&pbv1.HookInput{
-		RequestId: 1,
+		ContractRevision: sdk.ContractRevision,
+		RequestId:        1,
 		Payload: &pbv1.HookInput_AfterResponse{AfterResponse: &pbv1.AfterResponse{
 			Response: &pbv1.ChatResponse{
 				Provider:          "benchmark-provider",
