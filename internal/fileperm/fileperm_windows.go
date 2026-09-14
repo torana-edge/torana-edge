@@ -21,11 +21,12 @@ import (
 // this call adds sits alongside whatever the parent directory inherits down,
 // so a file in a world-readable directory stays world-readable.
 //
-// The apply is by NAME because SetSecurityInfo needs a handle opened for
-// WRITE_DAC, which os.OpenFile never requests. That is sound only because
-// nothing acts on the result: every caller re-checks the OPEN HANDLE
-// afterwards (verifyFile), so a name that was swapped between the apply and
-// the check is caught rather than trusted.
+// For files, the apply is by NAME because SetSecurityInfo needs a handle
+// opened for WRITE_DAC, which os.OpenFile never requests. That is sound only
+// because every file caller re-checks the OPEN HANDLE afterwards (verifyFile),
+// so a name swapped between the apply and check is caught rather than trusted.
+// Directories use a separate security handle to avoid propagating ACL changes
+// to existing children, and verify that same handle before returning.
 func restrict(path string, dir bool) error {
 	acl, err := ownerOnlyACL(dir)
 	if err != nil {
