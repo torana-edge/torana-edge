@@ -9,6 +9,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+
+	"github.com/torana-edge/torana-edge/internal/controlcmd"
 )
 
 // Run executes a `torana plugin ...` command.
@@ -72,6 +74,8 @@ func Usage(w io.Writer) {
 	_, _ = fmt.Fprintln(w, "and are not loaded until you approve their digest in the control plane.")
 	_, _ = fmt.Fprintln(w, "Remote Rust sources must be cloned and reviewed before installing a local path,")
 	_, _ = fmt.Fprintln(w, "because Cargo build scripts execute native code before digest approval.")
+	_, _ = fmt.Fprintln(w, "")
+	controlcmd.Usage(w)
 }
 
 // ScaffoldSDKVersion is the exact module version used by the host and Go

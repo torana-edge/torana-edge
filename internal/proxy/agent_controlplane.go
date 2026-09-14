@@ -118,6 +118,8 @@ func flushAgentResponse(w http.ResponseWriter, captured *bufferedAgentResponse) 
 			code = "method_not_allowed"
 		case http.StatusConflict:
 			code = "conflict"
+		case http.StatusPreconditionFailed:
+			code = "stale_revision"
 		case http.StatusRequestEntityTooLarge:
 			code = "body_too_large"
 		case http.StatusServiceUnavailable:
@@ -197,6 +199,18 @@ func validateAgentResponseHeaders(encoded []byte) error {
 func builtInAgentOperations() []agentAPIOperation {
 	return []agentAPIOperation{
 		{
+			ID: "torana.system.status", Method: http.MethodGet, Path: "/_torana/api/v1/system",
+			Description: "Inspect process identity, health, version, and managed-store location.",
+			Risk: "read", Idempotent: true, ContentType: "application/json", OutputSchema: arbitraryObjectSchema,
+		},
+		{
+			ID: "torana.system.stop", Method: http.MethodPost, Path: "/_torana/api/v1/system/stop",
+			Description: "Request graceful shutdown of the exact inspected process instance.",
+			Risk: "destructive", Idempotent: true, ContentType: "application/json",
+			InputSchema: json.RawMessage(`{"type":"object","required":["instance_id"],"properties":{"instance_id":{"type":"string"}},"additionalProperties":false}`),
+			OutputSchema: arbitraryObjectSchema,
+		},
+		{
 			ID: "torana.control_plane.discover", Method: http.MethodGet,
 			Path: "/_torana/api/v1/", Description: "Discover built-in and enabled plugin-contributed operations.",
 			Risk: "read", Idempotent: true, ContentType: "application/json",
@@ -224,7 +238,7 @@ func builtInAgentOperations() []agentAPIOperation {
 			ID: "torana.plugins.update", Method: http.MethodPut,
 			Path: "/_torana/api/v1/plugins", Description: "Atomically update plugin order, configuration, and digest-bound approvals.",
 			Risk: "write", Idempotent: true, ContentType: "application/json",
-			InputSchema:  json.RawMessage(`{"type":"object","properties":{"order":{"type":"array","items":{"type":"string"}},"config":{"type":"object"},"approvals":{"type":"object"}},"additionalProperties":false}`),
+			InputSchema:  json.RawMessage(`{"type":"object","properties":{"order":{"type":"array","items":{"type":"string"}},"hook_order":{"type":"object"},"config":{"type":"object"},"approvals":{"type":"object"}},"additionalProperties":false}`),
 			OutputSchema: arbitraryObjectSchema,
 		},
 		{
@@ -320,6 +334,19 @@ func (s *Server) handlePluginAgentOperation(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	defer pipeline.Release()
+	if expected := r.Header.Get("X-Torana-Plugin-Digest"); expected != "" {
+		matches := false
+		for _, loaded := range pipeline.AgentPlugins() {
+			if loaded.Manifest.Name == pluginName && loaded.Digest == expected {
+				matches = true
+				break
+			}
+		}
+		if !matches {
+			writeAgentError(w, http.StatusPreconditionFailed, "stale_plugin_digest", "plugin changed; discover and review its current operation before retrying")
+			return
+		}
+	}
 
 	operation, allowed, found := pipeline.FindAgentOperation(pluginName, r.Method, operationPath)
 	if !found {

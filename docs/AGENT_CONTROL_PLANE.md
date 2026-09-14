@@ -4,6 +4,22 @@ Torana exposes the same local control plane used by its Web UI as a versioned,
 JSON-first HTTP API. It is intended for shell scripts and software agents that
 need to inspect or administer a personal Torana instance without scraping HTML.
 
+For terminal and harness workflows, start with the [CLI guide](CLI.md).
+`torana agent discover` reads this discovery document; dedicated commands cover
+settings, plugin approval and ordering, configuration, statistics, and events.
+
+Configuration and plugin-list GETs return an `ETag`. Send it as `If-Match`
+on settings, pipeline, or per-plugin configuration mutations to reject stale
+read/edit/write cycles with HTTP 412 and `stale_revision`. The CLI and Web UI
+do this automatically. Existing API clients that omit it retain their prior
+behavior. The token is opaque, process-specific, and covers the whole managed
+configuration, so changes across endpoints invalidate older snapshots.
+
+For a discovered plugin operation, `X-Torana-Plugin-Digest` optionally binds
+the call to its loaded bundle digest. The CLI supplies it automatically.
+A different loaded digest returns HTTP 412 and `stale_plugin_digest` before
+the guest executes; rediscover and review instead of retrying blindly.
+
 ## Discover capabilities
 
 The discovery document is the starting point:

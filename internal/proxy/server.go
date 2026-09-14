@@ -10,6 +10,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -150,12 +151,19 @@ type Config struct {
 
 	// ConfigPath is the path to the config file on disk for persistence.
 	ConfigPath string
+	// InstanceRecordPath is set only by the binary while it owns instance.lock.
+	InstanceRecordPath string
 }
 
 // Server wraps the HTTP listener, the reverse proxy, and the WASM plugin
 // pipeline that runs on every request/response cycle.
 type Server struct {
-	configMu sync.RWMutex
+	configMu                sync.RWMutex
+	controlPlaneRevisionKey string
+	instanceID              string
+	startedAt               time.Time
+	stopRequested           chan struct{}
+	stopOnce                sync.Once
 	// controlPlaneMutationMu serializes the complete read-modify-persist-apply
 	// transaction across every administrative write endpoint. Per-resource
 	// locks are too narrow here: a settings save and a plugin save both replace
@@ -766,6 +774,8 @@ func New(cfg Config) (*Server, error) {
 		log.Printf("warning: %v", err)
 	}
 	s := &Server{
+		controlPlaneRevisionKey: rand.Text(),
+		instanceID:              rand.Text(), startedAt: time.Now().UTC(), stopRequested: make(chan struct{}),
 		config:          cfg,
 		configPath:      configPath,
 		secrets:         secStore,
@@ -1824,8 +1834,12 @@ func New(cfg Config) (*Server, error) {
 	mux.HandleFunc("/_torana/api/config", s.controlPlaneGuard(func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodGet:
+			s.controlPlaneMutationMu.Lock()
+			defer s.controlPlaneMutationMu.Unlock()
 			w.Header().Set("Content-Type", "application/json")
-			cfg := redactConfigSecrets(s.GetConfig().Providers)
+			current := s.GetConfig().Providers
+			w.Header().Set("ETag", s.configRevision(current))
+			cfg := redactConfigSecrets(current)
 			b, err := json.Marshal(cfg)
 			if err != nil {
 				http.Error(w, "error marshalling config", http.StatusInternalServerError)
@@ -1836,6 +1850,9 @@ func New(cfg Config) (*Server, error) {
 		case http.MethodPut, http.MethodPost:
 			s.controlPlaneMutationMu.Lock()
 			defer s.controlPlaneMutationMu.Unlock()
+			if !s.checkConfigRevision(w, r) {
+				return
+			}
 			// Settings write-back: providers / limits / control_plane.
 			// The plugin pipeline (order + per-plugin config) is owned by
 			// /_torana/api/plugins and is preserved verbatim here.
@@ -1894,6 +1911,7 @@ func New(cfg Config) (*Server, error) {
 			}
 			w.Header().Set("Content-Type", "application/json")
 			out := redactConfigSecrets(incoming)
+			w.Header().Set("ETag", s.configRevision(incoming))
 			b, _ := json.Marshal(out)
 			w.Write(b)
 
@@ -1907,7 +1925,11 @@ func New(cfg Config) (*Server, error) {
 		// GET — enumerate every plugin discovered on disk, marking which are
 		// enabled (present in plugins.order) and which serve their own HTTP UI.
 		if r.Method == http.MethodGet {
-			cur := s.GetConfig().Providers.Plugins
+			s.controlPlaneMutationMu.Lock()
+			defer s.controlPlaneMutationMu.Unlock()
+			current := s.GetConfig().Providers
+			w.Header().Set("ETag", s.configRevision(current))
+			cur := current.Plugins
 			orderIdx := make(map[string]int, len(cur.Order))
 			for i, n := range cur.Order {
 				orderIdx[n] = i
@@ -2065,6 +2087,9 @@ func New(cfg Config) (*Server, error) {
 			Config    map[string]json.RawMessage          `json:"config,omitempty"`
 			Approvals *map[string]provider.PluginApproval `json:"approvals,omitempty"`
 		}
+		if !s.checkConfigRevision(w, r) {
+			return
+		}
 		if r.Body != nil {
 			data, err := readControlPlaneBody(r.Body)
 			if errors.Is(err, errControlPlaneBodyTooLarge) {
@@ -2143,6 +2168,31 @@ func New(cfg Config) (*Server, error) {
 			}
 		}
 		if req.Approvals != nil {
+			bundles, err := plugin.DiscoverPlugins(oldPlugins.Dir)
+			if err != nil {
+				http.Error(w, "plugin discovery failed", http.StatusInternalServerError)
+				return
+			}
+			byID := make(map[string]plugin.PluginBundle, len(bundles)*2)
+			for _, bundle := range bundles {
+				byID[bundle.Manifest.ID] = bundle
+				byID[bundle.Manifest.Name] = bundle
+			}
+			converted := pluginApprovals(*req.Approvals)
+			for id, approval := range *req.Approvals {
+				if old, ok := oldPlugins.Approvals[id]; ok && reflect.DeepEqual(old, approval) {
+					continue
+				}
+				bundle, ok := byID[id]
+				if !ok {
+					http.Error(w, fmt.Sprintf("cannot approve unknown plugin %q", id), http.StatusBadRequest)
+					return
+				}
+				if err := plugin.ValidateBundleApproval(bundle, converted[id]); err != nil {
+					http.Error(w, fmt.Sprintf("plugin %q approval: %v", bundle.Manifest.Name, err), http.StatusBadRequest)
+					return
+				}
+			}
 			newPlugins.Approvals = make(map[string]provider.PluginApproval, len(*req.Approvals))
 			for id, approval := range *req.Approvals {
 				approval.Permissions = append([]string(nil), approval.Permissions...)
@@ -2235,6 +2285,9 @@ func New(cfg Config) (*Server, error) {
 
 		cur := s.GetConfig().Providers.Plugins
 		bundles, _ := plugin.DiscoverPlugins(cur.Dir)
+		if !s.checkConfigRevision(w, r) {
+			return
+		}
 		known := false
 		for _, b := range bundles {
 			if b.Manifest.Name == name {
@@ -2414,6 +2467,8 @@ func New(cfg Config) (*Server, error) {
 			}
 			flusher.Flush()
 		}
+		// A quiet proxy must still complete the SSE handshake immediately.
+		flusher.Flush()
 
 		ctx := r.Context()
 		for {
@@ -2555,6 +2610,8 @@ func New(cfg Config) (*Server, error) {
 	// through agent.json. Dispatch still uses the existing isolated
 	// run_on_http_request hook and env.serve_http approval.
 	mux.HandleFunc("/_torana/api/v1/agent/plugins/", s.controlPlaneGuard(s.handlePluginAgentOperation))
+	mux.HandleFunc("/_torana/api/v1/system", s.controlPlaneGuard(s.systemStatus))
+	mux.HandleFunc("/_torana/api/v1/system/stop", s.controlPlaneGuard(s.requestStop))
 	mux.HandleFunc("/_torana/api/v1/", s.controlPlaneGuard(func(w http.ResponseWriter, r *http.Request) {
 		legacyPath := strings.TrimPrefix(r.URL.Path, "/_torana/api/v1")
 		if legacyPath == "/" || legacyPath == "/agent" {
@@ -2820,6 +2877,10 @@ func (s *Server) controlPlaneGuardWithHeaders(next http.HandlerFunc, allowSameOr
 			return
 		}
 		setControlPlaneSecurityHeaders(w, allowSameOriginFrame, sandboxDocument)
+		if expected := r.Header.Get("X-Torana-Instance-ID"); expected != "" && expected != s.instanceID {
+			writeAgentError(w, http.StatusPreconditionFailed, "stale_instance", "the requested instance no longer owns this endpoint; inspect status and retry")
+			return
+		}
 		next(w, r)
 	}
 }
@@ -3827,10 +3888,17 @@ func (s *Server) Start(bindHost string) error {
 		return err
 	}
 	s.setListener(ln)
-	s.serveOnListener(ln)
+	if err := s.recordListener(ln.Addr()); err != nil {
+		_ = ln.Close()
+		return err
+	}
 	if err := s.applyMITM(s.config.Providers.MITM); err != nil {
+		_ = ln.Close()
 		return fmt.Errorf("mitm: %w", err)
 	}
+	// Do not publish a ready control API before fallible startup work finishes.
+	// Otherwise `torana start` can succeed immediately before this process exits.
+	s.serveOnListener(ln)
 	return nil
 }
 
@@ -3855,6 +3923,10 @@ func (s *Server) SetPort(newPort int) error {
 
 	ln, err := net.Listen("tcp", net.JoinHostPort(bindHost, strconv.Itoa(newPort)))
 	if err != nil {
+		return err
+	}
+	if err := s.recordListener(ln.Addr()); err != nil {
+		_ = ln.Close()
 		return err
 	}
 	s.serveOnListener(ln)

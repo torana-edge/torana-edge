@@ -16,7 +16,7 @@ import (
 func fakeControlPlane(t *testing.T, records []conversation.Record) string {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/_torana/api/conversations" {
+		if r.URL.Path != "/_torana/api/v1/conversations" {
 			http.NotFound(w, r)
 			return
 		}
