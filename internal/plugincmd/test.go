@@ -311,8 +311,17 @@ func readPluginScenario(path string) (pluginTestScenario, error) {
 	if err != nil {
 		return pluginTestScenario{}, fmt.Errorf("read scenario: %w", err)
 	}
-	if object, err := strictjson.DecodeObject(raw); err != nil || object == nil {
+	object, err := strictjson.DecodeObject(raw)
+	if err != nil || object == nil {
 		return pluginTestScenario{}, fmt.Errorf("parse scenario: expected one non-null JSON object: %v", err)
+	}
+	// These optional fields lose explicit-null presence when decoded into Go
+	// slices, pointers, or strings. Refuse null rather than silently turning a
+	// supplied assertion or input into an omitted one.
+	for _, name := range []string{"stream", "expected_stream", "services", "response_mutable", "expected_error"} {
+		if value, present := object[name]; present && value == nil {
+			return pluginTestScenario{}, fmt.Errorf("%s must not be null", name)
+		}
 	}
 	var scenario pluginTestScenario
 	decoder := json.NewDecoder(strings.NewReader(string(raw)))
@@ -322,6 +331,9 @@ func readPluginScenario(path string) (pluginTestScenario, error) {
 	}
 	if scenario.Request == nil && scenario.Stream == nil && scenario.Response == nil && scenario.HTTP == nil && scenario.Tick == nil {
 		return scenario, errors.New("scenario has no hook inputs")
+	}
+	if scenario.Stream != nil && len(scenario.Stream) == 0 {
+		return scenario, errors.New("stream requires at least one input event")
 	}
 	for _, pair := range []struct {
 		name            string

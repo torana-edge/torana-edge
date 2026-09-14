@@ -135,7 +135,7 @@ func TestPluginTestChecksAllCanonicalHooks(t *testing.T) {
 }
 
 func TestPluginTestRejectsUnusedAndAmbiguousExpectations(t *testing.T) {
-	for _, raw := range []string{`{}`, `{"expected_error":"anything"}`, `{"request":{},"request":{}}`, `{"request":{},"typo":true}`, `{"request":{},"config":null}`, `{"request":{},"config":{"nested":{"x":1,"x":2}}}`, `{"tick":{},"expected_request":{}}`, `{"response":null}`, `{"request":{},"expected_request":null}`, `{"response":{},"expected_response":null}`, `{"request":{},"expected_verdicts":null}`, `{"tick":{},"expected_verdicts":{}}`, `{"request":{},"expected_verdicts":{"block":null}}`, `{"request":{},"expected_verdicts":{"unknown":{}}}`, `{"request":{}} {}`} {
+	for _, raw := range []string{`{}`, `{"stream":[]}`, `{"request":{},"stream":null}`, `{"stream":[{"textDelta":"x"}],"expected_stream":null}`, `{"request":{},"services":null}`, `{"response":{},"response_mutable":null}`, `{"request":{},"expected_error":null}`, `{"expected_error":"anything"}`, `{"request":{},"request":{}}`, `{"request":{},"typo":true}`, `{"request":{},"config":null}`, `{"request":{},"config":{"nested":{"x":1,"x":2}}}`, `{"tick":{},"expected_request":{}}`, `{"response":null}`, `{"request":{},"expected_request":null}`, `{"response":{},"expected_response":null}`, `{"request":{},"expected_verdicts":null}`, `{"tick":{},"expected_verdicts":{}}`, `{"request":{},"expected_verdicts":{"block":null}}`, `{"request":{},"expected_verdicts":{"unknown":{}}}`, `{"request":{}} {}`} {
 		dir := t.TempDir()
 		name := filepath.Join(dir, "scenario.json")
 		if err := os.WriteFile(name, []byte(raw), 0600); err != nil {
