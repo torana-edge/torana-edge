@@ -101,6 +101,17 @@ func initPlugin(args []string, stdout io.Writer) error {
 		return errors.New("plugin name is required")
 	}
 	pluginDir := args[0]
+	language := "go"
+	for i := 1; i < len(args); i++ {
+		if args[i] != "--language" || i+1 >= len(args) {
+			return errors.New("usage: torana plugin new <name> [--language go|rust]")
+		}
+		language = args[i+1]
+		i++
+	}
+	if language != "go" && language != "rust" {
+		return fmt.Errorf("unsupported plugin language %q", language)
+	}
 	pluginName := filepath.Base(pluginDir)
 	absDir, err := filepath.Abs(pluginDir)
 	if err != nil {
@@ -190,6 +201,15 @@ func TestBeforeRequest(t *testing.T) {
 }
 `,
 	}
+	if language == "rust" {
+		files = map[string]string{
+			"Cargo.toml":      fmt.Sprintf("[package]\nname = \"%s\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[lib]\ncrate-type = [\"cdylib\"]\n\n[dependencies]\ntorana-plugin-sdk = \"0.5.0\"\n", pluginName),
+			"src/lib.rs":      "use torana_plugin_sdk::{export_plugin_v1, log, pbv1, Plugin, RequestResult, HOOK_BEFORE_REQUEST, LOG_INFO};\n\nstruct PluginImpl;\nimpl Plugin for PluginImpl {\n    const SUPPORTED_HOOKS: u32 = HOOK_BEFORE_REQUEST;\n    fn before_request(request: pbv1::ChatRequest) -> Result<RequestResult, String> {\n        log(&format!(\"received request for {}\", request.model), LOG_INFO);\n        Ok(RequestResult::pass())\n    }\n}\nexport_plugin_v1!(PluginImpl);\n",
+			"src/lib_test.rs": "#[test]\nfn native_plugin_compiles() { assert_eq!(2 + 2, 4); }\n",
+			"plugin.json":     fmt.Sprintf(`{"schema_version":1,"id":"local/%s","name":"%s","version":"0.1.0","abi_version":"v1","description":"A local Torana Rust plugin","hooks":[{"name":"run_before_request"}],"permissions":[{"name":"env.log","description":"Diagnostic logging"}],"failure_mode":"pass"}`+"\n", pluginName, pluginName),
+			"README.md":       "# " + pluginName + "\n\nRun `cargo test` for native checks and `cargo build --release --target wasm32-wasip1` for the WASI artifact.\n",
+		}
+	}
 	for name, content := range files {
 		if err := os.WriteFile(filepath.Join(absDir, name), []byte(content), 0o644); err != nil {
 			return fmt.Errorf("write %s: %w", name, err)
@@ -198,11 +218,13 @@ func TestBeforeRequest(t *testing.T) {
 	// Resolve the complete native test dependency graph while the project is
 	// created. Without go.sum, the first `go test ./...` asks the author to run
 	// `go mod tidy` manually, even though the scaffold is otherwise complete.
-	tidy := exec.Command("go", "mod", "tidy")
-	tidy.Dir = absDir
-	tidy.Env = append(os.Environ(), "GOWORK=off", "GO111MODULE=on")
-	if output, tidyErr := tidy.CombinedOutput(); tidyErr != nil {
-		return fmt.Errorf("resolve scaffold dependencies: %w\n%s", tidyErr, strings.TrimSpace(string(output)))
+	if language == "go" {
+		tidy := exec.Command("go", "mod", "tidy")
+		tidy.Dir = absDir
+		tidy.Env = append(os.Environ(), "GOWORK=off", "GO111MODULE=on")
+		if output, tidyErr := tidy.CombinedOutput(); tidyErr != nil {
+			return fmt.Errorf("resolve scaffold dependencies: %w\n%s", tidyErr, strings.TrimSpace(string(output)))
+		}
 	}
 	fmt.Fprintf(stdout, "Initialized %s in %s\n", pluginName, absDir)
 	fmt.Fprintf(stdout, "Next: torana plugin build %s\n", pluginDir)
