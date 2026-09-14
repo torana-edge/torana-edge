@@ -87,6 +87,7 @@ func TestRejectedPluginUpdateChangesNothing(t *testing.T) {
 	req, _ := http.NewRequest(http.MethodPut, url+"/_torana/api/plugins", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Origin", url)
+	req.Header.Set("If-Match", readControlPlaneRevision(t, srv))
 	resp, err := client.Do(req)
 	if err != nil {
 		t.Fatalf("PUT plugins: %v", err)

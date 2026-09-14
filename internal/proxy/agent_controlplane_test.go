@@ -100,6 +100,7 @@ func TestAgentControlPlaneDiscoveryAndJSONErrors(t *testing.T) {
 	}
 
 	request = localControlPlaneRequest(http.MethodPut, "/_torana/api/v1/config", strings.NewReader("{"))
+	request.Header.Set("If-Match", readControlPlaneRevision(t, server))
 	request.RemoteAddr = "127.0.0.1:12345"
 	request.Header.Set("X-Torana-Local-Request", "1")
 	recorder = httptest.NewRecorder()

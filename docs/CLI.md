@@ -93,6 +93,9 @@ If another CLI command, the UI, or a restart changes the configuration after
 you export it, apply fails with `stale_revision` / HTTP 412. Export a fresh
 snapshot and reapply your intended edits after reviewing the changes. Do not
 copy a new revision onto an old configuration to bypass the check.
+The server also rejects direct API writes without a revision (`revision_required`
+/ HTTP 428), so scripts and older browser tabs cannot silently overwrite newer
+settings. The CLI includes the revision automatically.
 
 The live administration mutations in this guide require `--yes`; existing
 disk-based credential and plugin-file commands retain their own interfaces.

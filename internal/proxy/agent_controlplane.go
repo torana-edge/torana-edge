@@ -18,17 +18,23 @@ import (
 )
 
 type agentAPIOperation struct {
-	ID           string          `json:"id"`
-	Method       string          `json:"method"`
-	Path         string          `json:"path"`
-	Description  string          `json:"description"`
-	Risk         string          `json:"risk"`
-	Idempotent   bool            `json:"idempotent"`
-	ContentType  string          `json:"content_type"`
-	InputSchema  json.RawMessage `json:"input_schema,omitempty"`
-	OutputSchema json.RawMessage `json:"output_schema"`
-	Plugin       string          `json:"plugin,omitempty"`
-	PluginDigest string          `json:"plugin_digest,omitempty"`
+	ID                   string                        `json:"id"`
+	Method               string                        `json:"method"`
+	Path                 string                        `json:"path"`
+	Description          string                        `json:"description"`
+	Risk                 string                        `json:"risk"`
+	Idempotent           bool                          `json:"idempotent"`
+	ContentType          string                        `json:"content_type"`
+	InputSchema          json.RawMessage               `json:"input_schema,omitempty"`
+	OutputSchema         json.RawMessage               `json:"output_schema"`
+	Plugin               string                        `json:"plugin,omitempty"`
+	PluginDigest         string                        `json:"plugin_digest,omitempty"`
+	RevisionPrecondition *agentAPIRevisionPrecondition `json:"revision_precondition,omitempty"`
+}
+
+type agentAPIRevisionPrecondition struct {
+	Header   string `json:"header"`
+	ReadPath string `json:"read_path"`
 }
 
 type agentAPIDocument struct {
@@ -120,6 +126,8 @@ func flushAgentResponse(w http.ResponseWriter, captured *bufferedAgentResponse) 
 			code = "conflict"
 		case http.StatusPreconditionFailed:
 			code = "stale_revision"
+		case http.StatusPreconditionRequired:
+			code = "revision_required"
 		case http.StatusRequestEntityTooLarge:
 			code = "body_too_large"
 		case http.StatusServiceUnavailable:
@@ -201,13 +209,13 @@ func builtInAgentOperations() []agentAPIOperation {
 		{
 			ID: "torana.system.status", Method: http.MethodGet, Path: "/_torana/api/v1/system",
 			Description: "Inspect process identity, health, version, and managed-store location.",
-			Risk: "read", Idempotent: true, ContentType: "application/json", OutputSchema: arbitraryObjectSchema,
+			Risk:        "read", Idempotent: true, ContentType: "application/json", OutputSchema: arbitraryObjectSchema,
 		},
 		{
 			ID: "torana.system.stop", Method: http.MethodPost, Path: "/_torana/api/v1/system/stop",
 			Description: "Request graceful shutdown of the exact inspected process instance.",
-			Risk: "destructive", Idempotent: true, ContentType: "application/json",
-			InputSchema: json.RawMessage(`{"type":"object","required":["instance_id"],"properties":{"instance_id":{"type":"string"}},"additionalProperties":false}`),
+			Risk:        "destructive", Idempotent: true, ContentType: "application/json",
+			InputSchema:  json.RawMessage(`{"type":"object","required":["instance_id"],"properties":{"instance_id":{"type":"string"}},"additionalProperties":false}`),
 			OutputSchema: arbitraryObjectSchema,
 		},
 		{
@@ -227,6 +235,7 @@ func builtInAgentOperations() []agentAPIOperation {
 			Path: "/_torana/api/v1/config", Description: "Validate, apply, and persist provider, cache, limit, and ingress settings.",
 			Risk: "write", Idempotent: true, ContentType: "application/json",
 			InputSchema: arbitraryObjectSchema, OutputSchema: arbitraryObjectSchema,
+			RevisionPrecondition: &agentAPIRevisionPrecondition{Header: "If-Match", ReadPath: "/_torana/api/v1/config"},
 		},
 		{
 			ID: "torana.plugins.list", Method: http.MethodGet,
@@ -238,14 +247,16 @@ func builtInAgentOperations() []agentAPIOperation {
 			ID: "torana.plugins.update", Method: http.MethodPut,
 			Path: "/_torana/api/v1/plugins", Description: "Atomically update plugin order, configuration, and digest-bound approvals.",
 			Risk: "write", Idempotent: true, ContentType: "application/json",
-			InputSchema:  json.RawMessage(`{"type":"object","properties":{"order":{"type":"array","items":{"type":"string"}},"hook_order":{"type":"object"},"config":{"type":"object"},"approvals":{"type":"object"}},"additionalProperties":false}`),
-			OutputSchema: arbitraryObjectSchema,
+			InputSchema:          json.RawMessage(`{"type":"object","properties":{"order":{"type":"array","items":{"type":"string"}},"hook_order":{"type":"object"},"config":{"type":"object"},"approvals":{"type":"object"}},"additionalProperties":false}`),
+			OutputSchema:         arbitraryObjectSchema,
+			RevisionPrecondition: &agentAPIRevisionPrecondition{Header: "If-Match", ReadPath: "/_torana/api/v1/plugins"},
 		},
 		{
 			ID: "torana.plugin.config.update", Method: http.MethodPost,
 			Path: "/_torana/api/v1/plugins/{name}/config", Description: "Update one installed plugin's JSON configuration and rebuild the pipeline.",
 			Risk: "write", Idempotent: true, ContentType: "application/json",
 			InputSchema: arbitraryObjectSchema, OutputSchema: arbitraryObjectSchema,
+			RevisionPrecondition: &agentAPIRevisionPrecondition{Header: "If-Match", ReadPath: "/_torana/api/v1/plugins"},
 		},
 		{
 			ID: "torana.stats.get", Method: http.MethodGet,
@@ -303,7 +314,7 @@ func (s *Server) agentAPIDiscovery() agentAPIDocument {
 			Scope:               "loopback-only",
 			MutationHeader:      "X-Torana-Local-Request",
 			MutationHeaderValue: "1",
-			Note:                "Non-browser mutations must send X-Torana-Local-Request: 1; browsers use a matching loopback Origin.",
+			Note:                "Non-browser mutations must send X-Torana-Local-Request: 1; browsers use a matching loopback Origin. Operations with revision_precondition require the exact ETag from a GET of read_path as If-Match; missing or stale tokens fail without applying changes.",
 		},
 		Operations: operations,
 	}
