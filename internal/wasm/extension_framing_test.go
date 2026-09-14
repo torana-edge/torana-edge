@@ -196,15 +196,6 @@ func TestExtensionCommandFramingMatrix(t *testing.T) {
 			args: `{"provider":"oai","request_pb":"e30=","path":"/v1"}`,
 			want: extensionMatrixWant{arm: "error", code: pbv1.ErrorCode_ERROR_CODE_UNAVAILABLE, message: "request to oai failed"}},
 
-		// torana_db_query / torana_kms_decrypt: no callback exists; the
-		// command IS its refusal.
-		{name: "db_query/nil-func", cmd: "torana_db_query", state: "nil-func",
-			args: `{}`,
-			want: extensionMatrixWant{arm: "error", code: pbv1.ErrorCode_ERROR_CODE_NOT_CONFIGURED, message: "database host extension is not implemented"}},
-		{name: "kms_decrypt/nil-func", cmd: "torana_kms_decrypt", state: "nil-func",
-			args: `{"ciphertext":"AA=="}`,
-			want: extensionMatrixWant{arm: "error", code: pbv1.ErrorCode_ERROR_CODE_NOT_CONFIGURED, message: "KMS host extension is not implemented"}},
-
 		// torana_record_savings: success is an EMPTY value arm — the savings
 		// were recorded and there is no domain body to acknowledge with.
 		{name: "record_savings/wired", cmd: "torana_record_savings", state: "wired",
@@ -331,8 +322,6 @@ func TestExtensionCommandFramingMatrix(t *testing.T) {
 	// before the switch, so every command gets the same framed PERMISSION_DENIED.
 	for _, cmd := range []string{
 		"torana_send_request",
-		"torana_db_query",
-		"torana_kms_decrypt",
 		"torana_record_savings",
 		"torana_plugin_counter",
 		"torana_evaluate_compaction",

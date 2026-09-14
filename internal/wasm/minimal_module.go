@@ -182,8 +182,8 @@ func moduleImporting(name string, params, results int) []byte {
 	}
 	str := func(s string) []byte { return append([]byte{byte(len(s))}, s...) }
 
-	// Types: 0 (i32)->i32 alloc, 1 (i32,i32)->i64 run_hook,
-	// 2 ()->i64 supported_hooks, 3 the import's real signature.
+	// Types: 0 alloc, 1 run_hook, 2 supported_hooks, 3 import,
+	// 4 dealloc, 5 abi_version.
 	importType := []byte{0x60, byte(params)}
 	for i := 0; i < params; i++ {
 		importType = append(importType, 0x7f) // i32
@@ -192,9 +192,11 @@ func moduleImporting(name string, params, results int) []byte {
 	for i := 0; i < results; i++ {
 		importType = append(importType, 0x7e) // i64
 	}
-	typeBody := []byte{0x04,
+	typeBody := []byte{0x06,
 		0x60, 0x01, 0x7f, 0x01, 0x7f,
 		0x60, 0x02, 0x7f, 0x7f, 0x01, 0x7e,
+		0x60, 0x00, 0x01, 0x7f,
+		0x60, 0x02, 0x7f, 0x7f, 0x00,
 		0x60, 0x00, 0x01, 0x7e,
 	}
 	types := sec(0x01, append(typeBody, importType...))
@@ -202,24 +204,28 @@ func moduleImporting(name string, params, results int) []byte {
 	imp := []byte{0x01}
 	imp = append(imp, str("env")...)
 	imp = append(imp, str(name)...)
-	imp = append(imp, 0x00, 0x03) // func, the import's own type
+	imp = append(imp, 0x00, 0x05) // func, the import's own type
 	imports := sec(0x02, imp)
 
 	// Local funcs come after the imported one, so indexes shift by 1.
-	funcs := sec(0x03, []byte{0x03, 0x00, 0x01, 0x02})
+	funcs := sec(0x03, []byte{0x05, 0x00, 0x01, 0x02, 0x03, 0x04})
 	mem := sec(0x05, []byte{0x01, 0x00, 0x01})
 
-	exports := []byte{0x04}
+	exports := []byte{0x06}
 	exports = append(exports, append(str("memory"), 0x02, 0x00)...)
 	exports = append(exports, append(str("alloc"), 0x00, 0x01)...)
 	exports = append(exports, append(str("run_hook"), 0x00, 0x02)...)
 	exports = append(exports, append(str("supported_hooks"), 0x00, 0x03)...)
+	exports = append(exports, append(str("dealloc"), 0x00, 0x04)...)
+	exports = append(exports, append(str("abi_version"), 0x00, 0x05)...)
 
 	code := sec(0x0a, []byte{
-		0x03,
+		0x05,
 		0x04, 0x00, 0x41, 0x00, 0x0b,
 		0x04, 0x00, 0x42, 0x00, 0x0b,
-		0x04, 0x00, 0x42, byte(pb.Hook_HOOK_BEFORE_REQUEST.Bit()), 0x0b,
+		0x04, 0x00, 0x41, byte(pb.Hook_HOOK_BEFORE_REQUEST.Bit()), 0x0b,
+		0x02, 0x00, 0x0b,
+		0x08, 0x00, 0x42, 0x81, 0x80, 0x80, 0x80, 0x10, 0x0b,
 	})
 
 	out := []byte{0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00}

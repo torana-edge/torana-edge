@@ -131,7 +131,11 @@ func TestOriginalsDistinguishAbsenceFromCapturedEmpty(t *testing.T) {
 		t.Run(tc.name+"/absent is NOT_FOUND", func(t *testing.T) {
 			r, p := newGrantedPlugin(t, tc.cmd)
 			tc.set(r, false, nil)
-			res := hostCallDirect(t, r, p, tc.cmd, nil)
+			hook := pbv1.Hook_HOOK_BEFORE_REQUEST
+			if tc.name == "response" {
+				hook = pbv1.Hook_HOOK_AFTER_RESPONSE
+			}
+			res := hostCallDirectHook(t, r, p, tc.cmd, nil, hook)
 			e, isErr := res.Result.(*pbv1.HostCallResult_Error)
 			if !isErr {
 				t.Fatal("an uncaptured original reported success")
@@ -144,7 +148,11 @@ func TestOriginalsDistinguishAbsenceFromCapturedEmpty(t *testing.T) {
 		t.Run(tc.name+"/captured empty is a successful empty value", func(t *testing.T) {
 			r, p := newGrantedPlugin(t, tc.cmd)
 			tc.set(r, true, nil)
-			res := hostCallDirect(t, r, p, tc.cmd, nil)
+			hook := pbv1.Hook_HOOK_BEFORE_REQUEST
+			if tc.name == "response" {
+				hook = pbv1.Hook_HOOK_AFTER_RESPONSE
+			}
+			res := hostCallDirectHook(t, r, p, tc.cmd, nil, hook)
 			v, isVal := res.Result.(*pbv1.HostCallResult_Value)
 			if !isVal {
 				t.Fatalf("a captured empty original was reported as an error: %+v", res.Result)
@@ -157,7 +165,11 @@ func TestOriginalsDistinguishAbsenceFromCapturedEmpty(t *testing.T) {
 		t.Run(tc.name+"/captured non-empty round trips", func(t *testing.T) {
 			r, p := newGrantedPlugin(t, tc.cmd)
 			tc.set(r, true, []byte("pristine"))
-			res := hostCallDirect(t, r, p, tc.cmd, nil)
+			hook := pbv1.Hook_HOOK_BEFORE_REQUEST
+			if tc.name == "response" {
+				hook = pbv1.Hook_HOOK_AFTER_RESPONSE
+			}
+			res := hostCallDirectHook(t, r, p, tc.cmd, nil, hook)
 			v, isVal := res.Result.(*pbv1.HostCallResult_Value)
 			if !isVal || string(v.Value) != "pristine" {
 				t.Fatalf("got %+v, want the captured bytes", res.Result)

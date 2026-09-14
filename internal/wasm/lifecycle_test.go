@@ -13,8 +13,27 @@ import (
 
 	"github.com/tetratelabs/wazero"
 	"github.com/tetratelabs/wazero/api"
+	sdk "github.com/torana-edge/torana-plugin-sdk"
 	pb "github.com/torana-edge/torana-plugin-sdk/pb/v1"
+	"google.golang.org/protobuf/proto"
 )
+
+func lifecycleInput(reqID uint64) []byte {
+	b, _ := proto.Marshal(&pb.HookInput{ContractRevision: sdk.ContractRevision, RequestId: reqID,
+		Payload: &pb.HookInput_ChatRequest{ChatRequest: &pb.ChatRequest{}}})
+	return b
+}
+
+func waitLifecycleBarrier(t *testing.T, barrier <-chan struct{}, done <-chan error) {
+	t.Helper()
+	select {
+	case <-barrier:
+	case err := <-done:
+		t.Fatalf("call completed before acquisition barrier: %v", err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("call did not reach acquisition barrier")
+	}
+}
 
 func loadFixtureBytes(t *testing.T, name string) []byte {
 	t.Helper()
@@ -727,9 +746,9 @@ func TestLifecycleActiveCallBlocksCompiledRelease(t *testing.T) {
 	out := []byte{}
 	done := make(chan error, 1)
 	go func() {
-		done <- p.CallRequest(context.Background(), pb.Hook_HOOK_BEFORE_REQUEST, 1, []byte{}, &out)
+		done <- p.CallRequest(context.Background(), pb.Hook_HOOK_BEFORE_REQUEST, 1, lifecycleInput(1), &out)
 	}()
-	<-acquired // deterministic: the call holds an instance under callMu.RLock
+	waitLifecycleBarrier(t, acquired, done) // call holds an instance under callMu.RLock
 
 	closed := make(chan struct{})
 	go func() {
@@ -793,9 +812,9 @@ func TestLifecycleUnloadBlocksUntilCallsQuiesce(t *testing.T) {
 	out := []byte{}
 	done := make(chan error, 1)
 	go func() {
-		done <- p.CallRequest(context.Background(), pb.Hook_HOOK_BEFORE_REQUEST, 1, []byte{}, &out)
+		done <- p.CallRequest(context.Background(), pb.Hook_HOOK_BEFORE_REQUEST, 1, lifecycleInput(1), &out)
 	}()
-	<-acquired
+	waitLifecycleBarrier(t, acquired, done)
 
 	unloaded := make(chan error, 1)
 	go func() {
@@ -1167,9 +1186,9 @@ func TestLifecycleCloseKeepsReachabilityUntilQuiescence(t *testing.T) {
 	out := []byte{}
 	done := make(chan error, 1)
 	go func() {
-		done <- p.CallRequest(context.Background(), pb.Hook_HOOK_BEFORE_REQUEST, 1, []byte{}, &out)
+		done <- p.CallRequest(context.Background(), pb.Hook_HOOK_BEFORE_REQUEST, 1, lifecycleInput(1), &out)
 	}()
-	<-acquired
+	waitLifecycleBarrier(t, acquired, done)
 
 	closed := make(chan struct{})
 	go func() {
@@ -1228,7 +1247,7 @@ func TestLifecycleCloseKeepsReachabilityUntilQuiescence(t *testing.T) {
 	}
 
 	close(releaseQuiesce)
-	if err := p.CallRequest(context.Background(), pb.Hook_HOOK_BEFORE_REQUEST, 1, []byte{}, &out); err == nil || !strings.Contains(err.Error(), "plugin is closed") {
+	if err := p.CallRequest(context.Background(), pb.Hook_HOOK_BEFORE_REQUEST, 1, lifecycleInput(1), &out); err == nil || !strings.Contains(err.Error(), "plugin is closed") {
 		t.Fatalf("a stale-pointer call after Close returned %v, want a plugin-is-closed error", err)
 	}
 	<-closed
@@ -1271,9 +1290,9 @@ func TestLifecycleCloseAllowsWinningAdmissionUntilQuiesced(t *testing.T) {
 	outA := []byte{}
 	doneA := make(chan error, 1)
 	go func() {
-		doneA <- r.plugins["a"].CallRequest(context.Background(), pb.Hook_HOOK_BEFORE_REQUEST, 1, []byte{}, &outA)
+		doneA <- r.plugins["a"].CallRequest(context.Background(), pb.Hook_HOOK_BEFORE_REQUEST, 1, lifecycleInput(1), &outA)
 	}()
-	<-acquiredA
+	waitLifecycleBarrier(t, acquiredA, doneA)
 
 	closed := make(chan struct{})
 	go func() {
@@ -1287,7 +1306,7 @@ func TestLifecycleCloseAllowsWinningAdmissionUntilQuiesced(t *testing.T) {
 	// b wins admission AFTER close-begin but BEFORE its own write lock:
 	// the runtime produces this legal trace, and the model must accept it.
 	outB := []byte{}
-	if err := r.plugins["b"].CallRequest(context.Background(), pb.Hook_HOOK_BEFORE_REQUEST, 1, []byte{}, &outB); err != nil {
+	if err := r.plugins["b"].CallRequest(context.Background(), pb.Hook_HOOK_BEFORE_REQUEST, 1, lifecycleInput(1), &outB); err != nil {
 		t.Fatalf("b could not win admission after close-begin: %v", err)
 	}
 

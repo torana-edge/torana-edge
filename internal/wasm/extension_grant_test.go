@@ -17,8 +17,12 @@ import (
 // hostCallDirect invokes the dispatcher the way a guest would and decodes the
 // framed reply.
 func hostCallDirect(t *testing.T, r *Runtime, p *Plugin, cmd string, args []byte) *pbv1.HostCallResult {
+	return hostCallDirectHook(t, r, p, cmd, args, pbv1.Hook_HOOK_BEFORE_REQUEST)
+}
+
+func hostCallDirectHook(t *testing.T, r *Runtime, p *Plugin, cmd string, args []byte, hook pbv1.Hook) *pbv1.HostCallResult {
 	t.Helper()
-	raw := r.dispatchHostCallForTest(context.WithValue(context.Background(), invocationHookKey{}, pbv1.Hook_HOOK_BEFORE_REQUEST), p.name, cmd, string(args))
+	raw := r.dispatchHostCallForTest(context.WithValue(context.Background(), invocationHookKey{}, hook), p.name, cmd, string(args))
 	if len(raw) == 0 {
 		t.Fatalf("%s returned no reply; HostCallResult requires a result arm", cmd)
 	}
@@ -113,8 +117,8 @@ func TestUnknownCommandIsFramed(t *testing.T) {
 	if !isErr {
 		t.Fatal("an unknown command succeeded")
 	}
-	if e.Error.Code != pbv1.ErrorCode_ERROR_CODE_NOT_FOUND {
-		t.Fatalf("got %v, want NOT_FOUND", e.Error.Code)
+	if e.Error.Code != pbv1.ErrorCode_ERROR_CODE_PERMISSION_DENIED {
+		t.Fatalf("got %v, want PERMISSION_DENIED for a command outside the closed catalog", e.Error.Code)
 	}
 }
 

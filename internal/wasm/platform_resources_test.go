@@ -162,12 +162,12 @@ func TestPlatformResourcesAreBoundToLoadedPlugin(t *testing.T) {
 	}
 
 	r.ModelCompleteFunc = func(_ context.Context, plugin string, resource ModelServiceResource, request *pbv1.ModelCompleteArgs) (*pbv1.ModelCompleteResult, *pbv1.HostError) {
-		if plugin != p.name || resource.Provider != "model-provider" || resource.Model != "small-model" || request.Service != "summarizer" {
+		if plugin != p.name || resource.Provider != "model-provider" || resource.Model != "small-model" || request.Service != "summarizer" || len(request.Messages) != 1 || request.Messages[0].Role != "user" {
 			t.Fatalf("model callback = plugin %q resource %+v request %+v", plugin, resource, request)
 		}
 		return &pbv1.ModelCompleteResult{Message: &pbv1.ResponseMessage{Blocks: []*pbv1.ResponseBlock{{Kind: &pbv1.ResponseBlock_Text{Text: &pbv1.ResponseTextBlock{Text: "summary"}}}}}}, nil
 	}
-	modelRaw := hostCallValue(t, hostCallDirect(t, r, p, "env.model_complete", marshalHostArgs(t, &pbv1.ModelCompleteArgs{Service: "summarizer"})))
+	modelRaw := hostCallValue(t, hostCallDirect(t, r, p, "env.model_complete", marshalHostArgs(t, &pbv1.ModelCompleteArgs{Service: "summarizer", Messages: []*pbv1.Message{{Role: "user", Blocks: []*pbv1.RequestBlock{{Kind: &pbv1.RequestBlock_Text{Text: &pbv1.RequestTextBlock{Text: "summarize"}}}}}}})))
 	var modelResult pbv1.ModelCompleteResult
 	if err := proto.Unmarshal(modelRaw, &modelResult); err != nil || modelResult.GetMessage().GetBlocks()[0].GetText().GetText() != "summary" {
 		t.Fatalf("model result content, err %v", err)
@@ -249,7 +249,7 @@ func TestPlatformResourceNamesCannotEscapeApproval(t *testing.T) {
 		{command: "env.file_append", args: &pbv1.FileAppendArgs{Path: "other.log", Data: []byte("x")}},
 		{command: "env.http_request", args: &pbv1.OutboundHTTPRequestArgs{Endpoint: "other", Method: "GET", Path: "/"}},
 		{command: "env.http_request", args: &pbv1.OutboundHTTPRequestArgs{Endpoint: "approved", Method: "POST", Path: "/"}},
-		{command: "env.model_complete", args: &pbv1.ModelCompleteArgs{Service: "other"}},
+		{command: "env.model_complete", args: &pbv1.ModelCompleteArgs{Service: "other", Messages: []*pbv1.Message{{Role: "user", Blocks: []*pbv1.RequestBlock{{Kind: &pbv1.RequestBlock_Text{Text: &pbv1.RequestTextBlock{Text: "probe"}}}}}}}},
 		{command: "env.model_pricing", args: &pbv1.ModelPricingGetArgs{Resource: "other"}},
 		{command: "env.cache_policy", args: &pbv1.PromptCachePolicyGetArgs{Resource: "other"}},
 	} {
