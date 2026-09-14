@@ -174,7 +174,11 @@ upstream call.
 
 Bridges own inference endpoints only. Model discovery, token-count endpoints,
 files, batch APIs, response retrieval and other auxiliary APIs are not emulated
-or forwarded under a mismatched contract. Such calls return an explicit 400.
+or forwarded under any configured bridge. Such calls return an explicit 400,
+including when `bridge.client` equals `bridge.upstream` (for example, when using
+`bridge.model` to alias a model without changing APIs). Matching contracts avoids
+cross-API content conversion, not the inference-only endpoint boundary. Only a
+native route without `bridge` retains ordinary auxiliary pass-through.
 A harness that requires one of those APIs or provider-native tools needs
 additional contract support; configuring its base URL alone is not proof of
 full harness compatibility.

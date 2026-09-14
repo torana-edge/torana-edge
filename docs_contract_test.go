@@ -6,6 +6,48 @@ import (
 	"testing"
 )
 
+func TestHarnessGuideSeparatesNativePassThroughFromBridges(t *testing.T) {
+	body, err := os.ReadFile("docs/HARNESS_COMPATIBILITY.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := strings.Join(strings.Fields(string(body)), " ")
+	for _, required := range []string{
+		"On a native route (no `bridge` configured)",
+		"For a native provider route, non-inference traffic",
+		"## Protocol bridges",
+		"[bridge guide](PROTOCOL_BRIDGES.md)",
+		"[CLI workflow](CLI.md#protocol-bridges)",
+		"Under any configured bridge",
+		"not emulated or forwarded; they return 400",
+		"This includes bridges whose client and upstream contracts match",
+		"These preservation guarantees describe native routes",
+		"not a claim that every live harness/backend combination has been tested",
+		"A required endpoint returning the documented 400 is not a successful harness smoke test",
+	} {
+		if !strings.Contains(text, required) {
+			t.Errorf("harness guide is missing native/bridge boundary %q", required)
+		}
+	}
+}
+
+func TestBridgeGuideScopesAuxiliaryRefusalToAllConfiguredBridges(t *testing.T) {
+	body, err := os.ReadFile("docs/PROTOCOL_BRIDGES.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := strings.Join(strings.Fields(string(body)), " ")
+	for _, required := range []string{
+		"not emulated or forwarded under any configured bridge",
+		"including when `bridge.client` equals `bridge.upstream`",
+		"Only a native route without `bridge` retains ordinary auxiliary pass-through",
+	} {
+		if !strings.Contains(text, required) {
+			t.Errorf("bridge guide is missing endpoint boundary %q", required)
+		}
+	}
+}
+
 // The agent-operation guide publishes a complete SDK handler. Keep the fenced
 // example on the typed result API: the removed pointer-return/Handled API still
 // looks plausible enough that a first-time author would copy it verbatim.

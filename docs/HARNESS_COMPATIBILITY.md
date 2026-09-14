@@ -1,9 +1,11 @@
 # Coding-harness compatibility
 
 Pointing a coding harness at Torana changes only the provider inference traffic
-that Torana explicitly understands. Account, quota, status, telemetry, update,
-model-list, MCP, and unknown auxiliary requests remain ordinary reverse-proxy
-traffic and never enter the inference plugin pipeline.
+that Torana explicitly understands. On a native route (no `bridge` configured),
+account, quota, status, telemetry, update, model-list, MCP, and unknown auxiliary
+requests remain ordinary reverse-proxy traffic and never enter the inference
+plugin pipeline. Any configured protocol bridge instead refuses auxiliary APIs;
+see [Protocol bridges](#protocol-bridges).
 
 This is an endpoint contract, not a list of blessed clients. Claude Code,
 Codex, OpenCode, Aider, oh-my-pi, or a new client using the same provider
@@ -24,7 +26,7 @@ where the token is not the final operation does not enter IR.
 
 ## What pass-through guarantees
 
-For a configured provider, non-inference traffic keeps its method, upstream
+For a native provider route, non-inference traffic keeps its method, upstream
 path, query, body, and upstream response. Neither request nor response WASM
 hooks run. Transport security policy can still remove credentials that must
 not cross a provider boundary; Torana does not promise to relay arbitrary
@@ -38,7 +40,9 @@ closed with the provider's invalid-request response.
 
 ## Harness configuration
 
-Use the harness's supported base-URL setting whenever it has one:
+Use the harness's supported base-URL setting whenever it has one. These are
+native integration paths; for a bridge, select the explicit client contract
+and verify the additional boundaries below:
 
 - Claude Code: set `ANTHROPIC_BASE_URL` to an Anthropic-format Torana provider.
 - Codex: configure an OpenAI Responses-compatible custom provider whose base
@@ -50,7 +54,44 @@ Use the harness's supported base-URL setting whenever it has one:
 
 Concrete examples are in the [quickstart](QUICKSTART.md).
 
+## Protocol bridges
+
+A provider can explicitly accept one inference contract and call an upstream
+that serves another. The contracts are `openai-chat`, `openai-responses`,
+`anthropic`, `gemini`, and `gemini-codeassist`. `bridge.client` names what the
+harness sends; `bridge.upstream` names what the backend accepts. Provider
+`format` describes the upstream family, not the client API. No plugin is needed.
+See the [bridge guide](PROTOCOL_BRIDGES.md) for the supported translation surface
+and the [CLI workflow](CLI.md#protocol-bridges) for live configuration.
+
+For example, an Anthropic Messages client can send requests through a bridge
+to a local OpenAI Chat Completions backend. Cross-family bridges require
+explicit upstream authentication (`credential` or `none`); caller credentials
+are not forwarded across families. The backend model still needs to support
+the requested tools, images, and output constraints. The harness executes tools.
+
+The mock-HTTP suite covers all 20 cross-contract directions for common text and
+function-tool loops, JSON responses, and SSE streams. This is not a claim that
+every live harness/backend combination has been tested. Clients must supply
+complete history; provider-native server tools, signed reasoning, cache
+breakpoints, opaque continuation items, and `previous_response_id` are not
+portable. Unsupported request semantics return 400 before an upstream call;
+non-portable response content produces a 502 or terminates an already-started
+stream without a success marker.
+
+Under any configured bridge, model discovery, token-counting, files,
+batch APIs, response retrieval, and other auxiliary APIs are not emulated or
+forwarded; they return 400. This includes bridges whose client and upstream
+contracts match, such as a same-API route using `bridge.model` for aliasing.
+Matching contracts avoids cross-API content conversion, not the inference-only
+endpoint boundary. A harness requiring one of these APIs needs a
+compatible route or additional contract support. Do not infer complete harness
+compatibility from a successful inference request or base-URL configuration.
+
 ## Provider behavior Torana preserves
+
+These preservation guarantees describe native routes. Do not apply them to
+cross-contract translation; use the bridge surface above instead.
 
 - Anthropic string and array system prompts, structured tool results,
   cache-control markers, signed content, and streaming topology.
@@ -70,10 +111,17 @@ The endpoint and wire-shape contracts above are covered in CI. They do not
 claim that every release of every third-party harness has been manually tested.
 Before an Edge release, the owner still runs credentialed smoke tests for the
 clients being advertised: a normal turn, a streamed tool turn, resume, model
-discovery, and representative account/status traffic. Harness-local features
-such as file editing, MCP execution, approvals, login refresh, telemetry
-preferences, and updates must remain local or pass through unchanged.
+discovery, and representative account/status traffic. For a bridge, record the
+client contract, upstream contract, model, and harness version separately. Check
+a complete tool-result follow-up and the auxiliary APIs that client actually
+requires. A required endpoint returning the documented 400 is not a successful
+harness smoke test.
 
-If a harness adds a new inference endpoint, Torana initially passes it through.
-Support should be added only with an explicit format adapter and positive and
-negative endpoint tests—never by broad substring matching.
+Harness-local features such as file editing, MCP execution, and approvals remain
+the harness's responsibility. Verify login refresh, telemetry preferences, and
+updates separately; native pass-through is not a bridge guarantee.
+
+If a harness adds a new inference endpoint, a native route initially passes it
+through without inference hooks; any configured bridge refuses it. Support should
+be added only with an explicit format adapter and positive and negative endpoint
+tests—never by broad substring matching.
