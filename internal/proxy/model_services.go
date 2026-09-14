@@ -82,7 +82,17 @@ func (s *Server) completeModel(ctx context.Context, pluginName string, resource 
 				return nil, modelHostError(pbv1.ErrorCode_ERROR_CODE_INTERNAL, "model service provider returned invalid usage")
 			}
 		}
-		out.Usage = &pbv1.Usage{InputTokens: int32(refs.usage.InputTokens), OutputTokens: int32(refs.usage.OutputTokens), CacheReadTokens: int32(refs.usage.CacheReadTokens), CacheWriteTokens: int32(refs.usage.CacheWriteTokens)}
+		// Model-service callers price independent token buckets without knowing
+		// the operator-selected provider. OpenAI/Gemini input totals include
+		// cached tokens; Anthropic's input count already excludes them.
+		input := int64(refs.usage.InputTokens)
+		if prov.Format != "anthropic" {
+			input -= int64(refs.usage.CacheReadTokens) + int64(refs.usage.CacheWriteTokens)
+			if input < 0 {
+				return nil, modelHostError(pbv1.ErrorCode_ERROR_CODE_INTERNAL, "model service provider returned inconsistent cached usage")
+			}
+		}
+		out.Usage = &pbv1.Usage{InputTokens: int32(input), OutputTokens: int32(refs.usage.OutputTokens), CacheReadTokens: int32(refs.usage.CacheReadTokens), CacheWriteTokens: int32(refs.usage.CacheWriteTokens)}
 	}
 	return out, nil
 }

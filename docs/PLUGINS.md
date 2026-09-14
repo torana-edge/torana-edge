@@ -141,6 +141,15 @@ approve them.
 | `env.model_complete` | Sends bounded text completions through manifest-declared model-service slots. The operator chooses the provider, URL, model, credential, and budgets; the guest sees only the logical slot name. |
 | `env.model_pricing` | Reads only operator-bound pricing resources by logical name. Pricing is plugin input, not a global Torana setting or a table supplied by the guest. |
 
+`env.model_complete` returns provider-neutral **disjoint billable usage**:
+`input_tokens` excludes cache-read and cache-write tokens. The host subtracts
+those subsets from OpenAI/Gemini totals; Anthropic already reports them
+separately. Invalid negative residuals are refused. Ordinary provider responses
+and the plugin-egress feed retain their provider-native usage semantics.
+Every model-service response is recorded in that feed before the guest decides
+whether its content is useful, including empty completions.
+
+
 None of these does anything on its own. Ticks are off unless you set an
 interval, egress is refused unless you set a budget, and both are refused
 outright without the grant. But an approved plugin holding all three can work,

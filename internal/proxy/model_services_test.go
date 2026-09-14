@@ -193,3 +193,49 @@ func TestBoundModelServiceRejectsOversizedInputBeforeSpend(t *testing.T) {
 		t.Fatalf("result/refusal = %+v / %+v", result, refusal)
 	}
 }
+
+func TestModelServiceUsageHasDisjointBillableBuckets(t *testing.T) {
+	for _, tc := range []struct {
+		name, format, body string
+		wantInput          int32
+		invalid            bool
+	}{
+		{"openai", "openai", `{"choices":[{"message":{"content":""}}],"usage":{"prompt_tokens":100,"completion_tokens":2,"prompt_tokens_details":{"cached_tokens":80}}}`, 20, false},
+		{"gemini", "gemini", `{"candidates":[{"content":{"parts":[{"text":""}]}}],"usageMetadata":{"promptTokenCount":100,"candidatesTokenCount":2,"cachedContentTokenCount":80}}`, 20, false},
+		{"anthropic", "anthropic", `{"content":[{"type":"text","text":""}],"usage":{"input_tokens":20,"output_tokens":2,"cache_read_input_tokens":80}}`, 20, false},
+		{"inconsistent", "openai", `{"choices":[{"message":{"content":""}}],"usage":{"prompt_tokens":10,"completion_tokens":2,"prompt_tokens_details":{"cached_tokens":80}}}`, 0, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			defer upstream.Close()
+			providers := testProviderConfig(upstream.URL, "bound", tc.format)
+			providers.Providers["bound"] = provider.Provider{URL: upstream.URL, Format: tc.format, Auth: provider.ProviderAuth{Mode: "none"}}
+			s, err := New(Config{Port: "0", Providers: providers})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer s.Shutdown(context.Background())
+			result, herr := s.completeModel(context.Background(), "compactor", wasm.ModelServiceResource{Name: "summarizer", Provider: "bound", Model: "m", Path: inferenceTestPath(tc.format), Timeout: time.Second, MaxTokens: 40, MaxInputBytes: 1000, MaxCallsPerMinute: 10, MaxTokensPerHour: 1000}, &pbv1.ModelCompleteArgs{Service: "summarizer", Messages: []*pbv1.ModelMessage{{Role: "user", Content: "summarize"}}})
+			if tc.invalid {
+				if herr == nil || herr.Code != pbv1.ErrorCode_ERROR_CODE_INTERNAL {
+					t.Fatalf("inconsistent usage accepted: %v %v", result, herr)
+				}
+				return
+			}
+			if herr != nil || result == nil || result.Usage == nil {
+				t.Fatalf("result=%v refusal=%v", result, herr)
+			}
+			if result.Usage.InputTokens != tc.wantInput || result.Usage.CacheReadTokens != 80 || result.Usage.OutputTokens != 2 {
+				t.Fatalf("usage=%v", result.Usage)
+			}
+			// Empty/unusable content must still be visible as a paid model-service call.
+			events := s.feed.Snapshot()
+			if len(events) != 1 || events[0].Verdict != "plugin-egress" || events[0].TokensOut != 2 || events[0].CacheReadTokens != 80 {
+				t.Fatalf("paid empty response missing from feed: %+v", events)
+			}
+		})
+	}
+}
