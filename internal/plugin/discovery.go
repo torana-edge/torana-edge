@@ -655,7 +655,7 @@ func DiscoverPlugins(pluginsDir string) ([]PluginBundle, error) {
 	seenNames := make(map[string]string)
 	seenIDs := make(map[string]string)
 	for _, e := range entries {
-		if !e.IsDir() {
+		if !e.IsDir() || strings.HasPrefix(e.Name(), ".") {
 			continue
 		}
 		pluginDir := filepath.Join(pluginsDir, e.Name())
@@ -2676,16 +2676,11 @@ func hookNames(hooks []Hook) []string {
 // Hot-Reload (fsnotify)
 // ============================================================================
 
-// WatchPlugins starts a file watcher on the plugins directory. When a
-// .wasm or plugin.json file changes (or is removed), it calls reloadFn with
-// a freshly built pipeline. The reloadFn should atomically swap the active
-// pipeline.
-//
-// configFn is consulted at reload time so config hot-reloads (plugin order,
-// per-plugin config) take effect without restarting the watcher. runtimeFn
-// builds each reload's runtime — the caller wires host callbacks (model services,
-// savings) there; a bare runtime would silently lose them.
-func WatchPlugins(ctx context.Context, dir string, configFn func() PluginConfig, runtimeFn func() *wasm.Runtime, reloadFn func(pipeline *PluginPipeline), errorFn func(error), done func()) error {
+// WatchPlugins debounces visible bundle changes and asks the owner to reload.
+// The owner must serialize the entire configuration capture, build, publication,
+// and resource retirement transaction with administrative changes. The watcher
+// owns only filesystem events; it never builds or publishes a candidate itself.
+func WatchPlugins(ctx context.Context, dir string, reloadFn func(context.Context) error, errorFn func(error), done func()) error {
 	if dir == "" {
 		dir = "./plugins"
 	}
@@ -2708,15 +2703,20 @@ func WatchPlugins(ctx context.Context, dir string, configFn func() PluginConfig,
 	// Watch the plugins directory and all subdirectories recursively. Initial
 	// registration errors are fatal: returning success with no active watches
 	// would make later installs or updates silently invisible.
+	watchedDirs := make(map[string]bool)
 	addRecursive := func(root string) error {
 		return filepath.Walk(root, func(path string, info os.FileInfo, walkErr error) error {
 			if walkErr != nil {
 				return walkErr
 			}
 			if info.IsDir() {
+				if path != dir && strings.HasPrefix(info.Name(), ".") {
+					return filepath.SkipDir
+				}
 				if err := w.Add(path); err != nil {
 					return err
 				}
+				watchedDirs[path] = true
 			}
 			return nil
 		})
@@ -2752,43 +2752,43 @@ func WatchPlugins(ctx context.Context, dir string, configFn func() PluginConfig,
 				if ctx.Err() != nil {
 					return
 				}
-				newRT := runtimeFn()
-				pp, err := reloadPipeline(newRT, configFn())
-				if err != nil {
+				if err := reloadFn(ctx); err != nil {
 					log.Printf("[plugin] reload failed: %v", err)
 					if errorFn != nil {
 						errorFn(err)
 					}
-					newRT.Close()
-					continue
 				}
-				if ctx.Err() != nil {
-					newRT.Close()
-					return
-				}
-				log.Printf("[plugin] hot-reload complete: %d plugins", len(pp.plugins))
-				reloadFn(pp)
 
 			case event, ok := <-w.Events:
 				if !ok {
 					return
 				}
-				// Handle newly created directories for recursive watching.
-				if event.Op&fsnotify.Create == fsnotify.Create {
+				// Hidden installer stages and backups are never a live inventory.
+				rel, err := filepath.Rel(dir, event.Name)
+				if err != nil || (rel != "." && strings.HasPrefix(strings.Split(rel, string(filepath.Separator))[0], ".")) {
+					continue
+				}
+				isDir := watchedDirs[event.Name]
+				if event.Op&fsnotify.Create != 0 {
 					if fi, err := os.Stat(event.Name); err == nil && fi.IsDir() {
-						if err := addRecursive(event.Name); err != nil {
-							log.Printf("[plugin] watch new directory failed: %v", err)
-							if errorFn != nil {
-								errorFn(err)
-							}
+						isDir = true
+						if err := addRecursive(event.Name); err != nil && errorFn != nil {
+							errorFn(err)
 						}
-						continue
 					}
 				}
-
-				// Only reload on executable or consumed bundle metadata changes.
+				if event.Op&(fsnotify.Remove|fsnotify.Rename) != 0 {
+					// A rapid directory arrival/removal may precede watch registration.
+					isDir = isDir || filepath.Dir(event.Name) == filepath.Clean(dir)
+					for path := range watchedDirs {
+						if path == event.Name || strings.HasPrefix(path, event.Name+string(filepath.Separator)) {
+							_ = w.Remove(path)
+							delete(watchedDirs, path)
+						}
+					}
+				}
 				name := filepath.Base(event.Name)
-				if name != "plugin.wasm" && name != "plugin.json" &&
+				if !isDir && name != "plugin.wasm" && name != "plugin.json" &&
 					name != "schema.json" && name != "agent.json" {
 					continue
 				}

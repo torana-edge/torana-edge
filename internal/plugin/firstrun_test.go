@@ -6,8 +6,6 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
-
-	"github.com/torana-edge/torana-edge/internal/wasm"
 )
 
 // A fresh install has no ./plugins directory: nothing creates it but
@@ -24,14 +22,9 @@ func TestWatchPluginsCreatesMissingDirectory(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	rt := wasm.NewRuntime(ctx)
-	t.Cleanup(func() { _ = rt.Close() })
-
 	done := make(chan struct{})
 	err := WatchPlugins(ctx, dir,
-		func() PluginConfig { return PluginConfig{Dir: dir} },
-		func() *wasm.Runtime { return rt },
-		func(*PluginPipeline) {},
+		func(context.Context) error { return nil },
 		func(error) {},
 		func() { close(done) },
 	)
