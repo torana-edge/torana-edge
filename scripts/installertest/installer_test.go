@@ -134,6 +134,7 @@ type installer struct {
 	bin        string
 	archive    string
 	version    string
+	contract   releaseContract
 	env        map[string]string
 	args       []string
 }
@@ -144,14 +145,14 @@ func newInstaller(t *testing.T, goos, arch string) *installer {
 	f := &installer{
 		t: t, root: root, assets: filepath.Join(root, "release assets"),
 		temp: filepath.Join(root, "temporary files"), home: filepath.Join(root, "user home"),
-		installDir: filepath.Join(root, "install path with spaces"), version: "1.2.3", bin: "torana",
-		env: map[string]string{},
+		installDir: filepath.Join(root, "install path with spaces"), version: "1.2.3",
+		contract: readReleaseContract(t),
+		env:      map[string]string{},
 	}
-	extension := "tar.gz"
-	if goos == "windows" {
-		extension, f.bin = "zip", "torana.exe"
-	}
-	f.archive = fmt.Sprintf("torana_%s_%s_%s.%s", f.version, goos, arch, extension)
+	f.bin = f.contract.binaryName(goos)
+	var err error
+	f.archive, err = f.contract.archiveName(f.version, goos, arch)
+	must(t, err)
 	mockbin := filepath.Join(root, "mock bin")
 	for _, dir := range []string{f.assets, f.temp, f.home, f.installDir, mockbin} {
 		must(t, os.MkdirAll(dir, 0o700))
@@ -249,7 +250,7 @@ func (f *installer) release(binary []byte, kind string) {
 
 func (f *installer) checksum(content string) {
 	f.t.Helper()
-	must(f.t, os.WriteFile(filepath.Join(f.assets, "checksums.txt"), []byte(content), 0o600))
+	must(f.t, os.WriteFile(filepath.Join(f.assets, f.contract.Checksum.NameTemplate), []byte(content), 0o600))
 }
 
 func (f *installer) run() (string, error) {
@@ -343,11 +344,13 @@ func TestInstallerPlatforms(t *testing.T) {
 
 func TestInstallerPinnedVersionAndUpgrade(t *testing.T) {
 	goos, arch := nativeTarget()
-	for _, version := range []string{"v1.2.3", "1.2.3", "v1.2.3-rc.1", "1.2.3+build.1"} {
+	for _, version := range []string{"v1.2.3", "1.2.3", "v1.2.3-rc.1", "1.2.3+build.1", "v1.2.3+build.1", "v1.2.3-rc.1+build.1"} {
 		t.Run(version, func(t *testing.T) {
 			f := newInstaller(t, goos, arch)
 			f.version = strings.TrimPrefix(version, "v")
-			f.archive = strings.Replace(f.archive, "1.2.3", f.version, 1)
+			var err error
+			f.archive, err = f.contract.archiveName(f.version, goos, arch)
+			must(t, err)
 			f.env["TORANA_VERSION"] = version
 			f.env["TORANA_TEST_VERSION"] = f.version
 			f.release([]byte("synthetic release binary\n"), "regular")
@@ -355,8 +358,10 @@ func TestInstallerPinnedVersionAndUpgrade(t *testing.T) {
 			f.wantSuccess()
 			log, err := os.ReadFile(f.env["TORANA_TEST_LOG"])
 			must(t, err)
-			if strings.Contains(string(log), "/latest") {
-				t.Fatal("pinned install looked up latest")
+			prefix := releaseURL + "/download/v" + f.version + "/"
+			want := prefix + f.archive + "\n" + prefix + f.contract.Checksum.NameTemplate + "\n"
+			if string(log) != want {
+				t.Fatalf("pinned install must preserve full version and avoid latest:\n%s", log)
 			}
 		})
 	}
@@ -559,7 +564,10 @@ func TestInstallerNativeBinary(t *testing.T) {
 	goos, arch := nativeTarget()
 	f := newInstaller(t, goos, arch)
 	compiled := filepath.Join(f.root, f.bin)
-	build := exec.Command("go", "build", "-trimpath", "-ldflags=-X main.version=1.2.3", "-o", compiled, "../../cmd/torana")
+	flags, err := f.contract.ldflags(f.version)
+	must(t, err)
+	build := exec.Command("go", "build", "-trimpath", "-ldflags="+flags, "-o", compiled, filepath.Join("../..", f.contract.Builds[0].Main))
+	build.Env = overrideEnv(os.Environ(), map[string]string{"CGO_ENABLED": "0"})
 	if output, err := build.CombinedOutput(); err != nil {
 		t.Fatalf("build native binary: %v\n%s", err, output)
 	}

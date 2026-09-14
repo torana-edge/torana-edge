@@ -230,8 +230,8 @@ jobs:
   # The release configuration itself, exercised on every PR rather than first on
   # a tag. The cross-compile step in `analysis` proves the code builds for each
   # platform; this proves .goreleaser.yaml agrees — that its platform matrix,
-  # archive formats and ldflags actually produce artifacts. Run through `go run`
-  # like the other pinned tools here, so there is no third-party action to trust.
+  # archive formats and ldflags actually produce artifacts. Install the pinned
+  # Go module directly, so there is no third-party release action to trust.
   release-dryrun:
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -244,8 +244,17 @@ jobs:
           go-version-file: go.mod
       # sbom needs syft on PATH and publish/announce need a tag; none of that is
       # what this job is checking, and skipping them keeps it hermetic.
+      - name: Install pinned GoReleaser
+        run: GOWORK=off go install github.com/goreleaser/goreleaser/v2@v2.15.4
       - name: goreleaser snapshot
-        run: GOWORK=off go run github.com/goreleaser/goreleaser/v2@v2.15.4 release --snapshot --clean --skip=sbom,publish,announce
+        run: GOWORK=off goreleaser release --snapshot --clean --skip=sbom,publish,announce
+      - name: Validate generated installer assets
+        run: go test ./scripts/installertest -run '^TestGeneratedReleaseArtifacts$' -count=1 -v
+        env:
+          GOWORK: "off"
+          TORANA_RELEASE_DIST: ../../dist
+      - name: Verify real tag parsing with build metadata (isolated fixture, no publishing)
+        run: TORANA_TEST_GORELEASER="$(command -v goreleaser)" GOWORK=off go test ./scripts/installertest -run '^TestGoReleaserBuildMetadata$' -count=1 -v
 
   lint:
     runs-on: ubuntu-latest

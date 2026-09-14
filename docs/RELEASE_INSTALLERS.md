@@ -26,8 +26,9 @@ Architecture detection also handles a 32-bit Windows process under WOW64;
 unsupported 32-bit operating systems fail with an explanation.
 
 The default version resolves GitHub's latest published release. A pinned
-version accepts either `v1.2.3` or `1.2.3`, including a prerelease such as
-`v1.2.3-rc.1`. The tag must use a leading `v`; the archive version does not:
+version accepts either `v1.2.3` or `1.2.3`, including prerelease and build
+metadata such as `v1.2.3-rc.1+build.1`. The tag must use a leading `v`; the
+archive version does not. The full prerelease/build suffix is preserved:
 
 ```text
 https://github.com/torana-edge/torana-edge/releases/download/v1.2.3/
@@ -46,7 +47,10 @@ or duplicate checksum entries, mismatched hashes, and missing/duplicate/empty
 binary entries fail before the installed executable changes. Downloads and
 redirects require HTTPS. SHA-256 checks validate bytes against the checksum
 file from the same official release; they are not independent publisher
-signatures.
+signatures. **The installers check checksums, not signer identity.** They do
+not install/download a verifier or require GitHub CLI. The operator provenance
+gate below is required before website activation; it is not automatic
+per-install signature verification.
 
 The scripts stream only the exact root binary entry from an archive into a
 file they create. Other archive paths cannot write files. Verified bytes are
@@ -92,17 +96,22 @@ your user Environment Variables on Windows, then open a new terminal.
    dry-run and installer checks. `.github/workflows/installers.yml` exercises
    the actual shell on Linux/macOS and both PowerShell 5.1 and PowerShell 7 on
    Windows, using synthetic downloads and a built native `torana` executable.
-   Architecture-selection tests cover every advertised asset name. These
-   checks do not contact GitHub releases or prove a public asset exists.
+   Fixtures read `.goreleaser.yaml`; contract regressions reject incompatible
+   asset/checksum/root-binary/version/platform changes. The dry run checks the
+   actual six archives, hashes, root members, binary targets, and linker
+   versions. A disposable fixture repository also exercises real GoReleaser
+   tag parsing with prerelease/build metadata and executes its native binary.
+   These checks do not prove a public release or valid attestation exists.
 2. In a separately authorized release operation, tag the reviewed Edge commit
-   with the chosen `vMAJOR.MINOR.PATCH` version and publish the artifacts from
-   `.goreleaser.yaml`. The existing CI dry run uses GoReleaser `v2.15.4` with
-   `--snapshot --skip=sbom,publish,announce`; that dry run is **not a release**.
-   A real release must use the tag version, retain the configured SBOMs (with
-   Syft available), and upload all six archives plus `checksums.txt`. This PR
-   adds no automatic publishing workflow.
-3. Download the actual published assets and checksum file. Verify all six
-   hashes and root binary names. Confirm `torana version` reports the chosen
+   with the chosen `vMAJOR.MINOR.PATCH` version. The prepared tag-only
+   `.github/workflows/release.yml` will then build, attest, verify, and publish
+   a new release. Merging this PR alone does not run it; there is no manual
+   dispatch. It requires the tag's exact commit to be on the default branch
+   and refuses any preexisting release, including drafts. The existing CI
+   snapshot is **not a release** and skips publishing/announcements/SBOMs.
+3. Run the explicit provenance verification below on all six published
+   archives and their SBOMs. Verify root binary names and confirm
+   `torana version` reports the chosen
    tag version, using each native OS/architecture available. Record remaining
    hardware coverage honestly; selecting an arm64 archive in a mocked test
    does not execute an arm64 binary.
@@ -122,6 +131,78 @@ your user Environment Variables on Windows, then open a new terminal.
 6. After that website deployment, verify both route bodies exactly match the
    tagged scripts and run the public commands in clean test accounts. Only
    then update the source-build quickstarts to advertise binary installation.
+
+## Prepared release workflow and provenance gate
+
+The workflow uses pinned GoReleaser `v2.15.4`, Syft `v1.51.1`, GitHub CLI
+`v2.100.0` (with a checked-in download digest), and commit-pinned actions.
+It builds without publishing, validates exactly six archive names plus their
+configured SBOMs and strict SHA-256 manifest, then uses
+[`actions/attest`](https://github.com/actions/attest/tree/v4.2.2) to generate
+signed SLSA build provenance. This is the current successor to
+`actions/attest-build-provenance`. It uploads the attestation to GitHub and
+includes `provenance.sigstore.json` in the future release.
+
+Before publication, every archive and SBOM is verified against that bundle,
+the exact repository, signer workflow, tag ref, and source commit; self-hosted
+runner attestations are rejected. Only then does it recheck the source and
+create a new release containing those same verified files, the checksum
+manifest, and bundle. Signing uses GitHub's OIDC identity, not a stored private
+key. Job permissions are limited to contents, attestations, and OIDC writes;
+no website, package registry, or repository settings are changed.
+
+Default-branch ancestry is not review approval. This PR does not configure a
+protected-environment approval gate, branch protection, or tag protection.
+Maintainers remain responsible for those policies and deliberate release-tag
+sign-off; do not assume repository settings enforce them.
+
+After the separately authorized tag release, an operator must repeat
+[GitHub CLI attestation verification](https://cli.github.com/manual/gh_attestation_verify)
+on the downloaded assets before website activation. Use a trusted current
+GitHub CLI installation, the approved tag and its independently recorded full
+commit SHA; do not derive the expected identity from the downloaded manifest:
+
+```bash
+set -euo pipefail
+tag=v1.2.3 # Replace with the separately approved Edge tag.
+commit=REPLACE_WITH_APPROVED_40_CHARACTER_COMMIT_SHA
+[[ $commit =~ ^[0-9a-f]{40}$ ]]
+version=${tag#v}
+verify_dir=$(mktemp -d)
+gh release download "$tag" --repo torana-edge/torana-edge \
+  --pattern provenance.sigstore.json --pattern checksums.txt --dir "$verify_dir"
+for os in darwin linux windows; do
+  format=tar.gz
+  if [[ $os == windows ]]; then format=zip; fi
+  for arch in amd64 arm64; do
+    archive="torana_${version}_${os}_${arch}.${format}"
+    for asset in "$archive" "$archive.sbom.json"; do
+      gh release download "$tag" --repo torana-edge/torana-edge \
+        --pattern "$asset" --dir "$verify_dir"
+      gh attestation verify "$verify_dir/$asset" \
+        --bundle "$verify_dir/provenance.sigstore.json" \
+        --repo torana-edge/torana-edge \
+        --signer-workflow torana-edge/torana-edge/.github/workflows/release.yml \
+        --source-ref "refs/tags/$tag" --source-digest "$commit" \
+        --deny-self-hosted-runners
+    done
+  done
+done
+```
+
+Record all twelve verification results, workflow run URL, tag/SHA, and native
+smoke-test coverage in the activation PR. An attestation establishes the build
+workflow/source identity and artifact digest; it does not prove the program is
+safe. The checksum manifest alone is never signer proof.
+
+If signing or verification fails, no release-creation step runs. If release
+creation/upload fails partway, inspect GitHub's state before any recovery:
+the guard deliberately refuses an existing release and a blind rerun will
+not repair it. Do not delete/recreate releases, move tags, overwrite assets,
+or activate the website. Preserve the workflow evidence and require an
+explicitly reviewed recovery decision (which may require a new version).
+Local/mock tests cannot exercise GitHub OIDC signing or real release uploads;
+those remain part of the separately authorized first-release validation.
 
 ## Future website commands — not live until activation
 
@@ -148,8 +229,13 @@ the public command does not weaken machine policy.
 ```sh
 sh -n scripts/install.sh
 shellcheck scripts/install.sh
+shellcheck scripts/check-release-source.sh
 go test ./scripts/installertest -count=1 -v
 TORANA_INSTALLER_SMOKE=1 go test ./scripts/installertest -run NativeBinary -count=1 -v
+GOWORK=off go install github.com/goreleaser/goreleaser/v2@v2.15.4
+GOWORK=off goreleaser release --snapshot --clean --skip=sbom,publish,announce
+TORANA_RELEASE_DIST=../../dist go test ./scripts/installertest -run GeneratedReleaseArtifacts -count=1 -v
+TORANA_TEST_GORELEASER="$(command -v goreleaser)" go test ./scripts/installertest -run GoReleaserBuildMetadata -count=1 -v
 ```
 
 On Windows, run `go test ./scripts/installertest -count=1 -v` with
