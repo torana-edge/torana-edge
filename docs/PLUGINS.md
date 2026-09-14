@@ -38,7 +38,6 @@ file deliberately resets plugin state; do that only when losing that state is
 acceptable. A write failure before replacement leaves the committed state
 intact and can be retried without restarting.
 
-
 ## Installing
 
 You do not need to stop Torana. Run installation commands from another terminal;

@@ -74,21 +74,13 @@ func Usage(w io.Writer) {
 	_, _ = fmt.Fprintln(w, "because Cargo build scripts execute native code before digest approval.")
 }
 
-// ScaffoldSDKVersion is the SDK release `torana plugin new` writes into a new
-// Go plugin's go.mod and a Rust plugin's exact Git tag/package version;
-// scaffoldGoVersion is the Go directive it writes.
-//
-// They are constants because the test used to assert the scaffolded string
-// literally — so the scaffold and the assertion were two copies of the same
-// value, and the test locked in whatever the scaffold said rather than
-// checking it. It named SDK v0.1.0 long after v0.1.3 shipped, and the test
-// passed the whole time.
-//
-// Bumping the SDK is now one edit here. A merged scaffold version must be a
-// release tag because Cargo resolves it directly from the SDK Git repository.
+// ScaffoldSDKVersion is the exact module version used by the host and Go
+// scaffolds. Rust resolves the same source through ScaffoldSDKRevision; a Git
+// revision works before a package release and does not depend on crates.io.
 const (
-	ScaffoldSDKVersion = "v0.5.0"
-	scaffoldSDKGitURL  = "https://github.com/torana-edge/torana-plugin-sdk"
+	ScaffoldSDKVersion  = "v0.4.3-0.20260914113223-3eed3394e409"
+	ScaffoldSDKRevision = "3eed3394e4096ffd9e3afc3c75270353afd5120b"
+	scaffoldSDKGitURL   = "https://github.com/torana-edge/torana-plugin-sdk"
 	// scaffoldGoVersion tracks the SDK's own go directive. A scaffolded module
 	// declaring an OLDER Go version than its dependency requires fails to build
 	// with "module requires go >= x", which is the same class of unbuildable
@@ -97,8 +89,7 @@ const (
 )
 
 func scaffoldRustSDKDependency() string {
-	version := strings.TrimPrefix(ScaffoldSDKVersion, "v")
-	return fmt.Sprintf(`torana-plugin-sdk = { git = %q, tag = %q, version = "=%s" }`, scaffoldSDKGitURL, ScaffoldSDKVersion, version)
+	return fmt.Sprintf(`torana-plugin-sdk = { git = %q, rev = %q }`, scaffoldSDKGitURL, ScaffoldSDKRevision)
 }
 
 func initPlugin(args []string, stdout io.Writer) error {
@@ -253,7 +244,7 @@ mod tests {
 }
 `,
 			"plugin.json": fmt.Sprintf(`{"schema_version":1,"id":"local/%s","name":"%s","version":"0.1.0","abi_version":"v1","description":"A local Torana Rust plugin","hooks":[{"name":"run_before_request"}],"permissions":[{"name":"env.log","description":"Diagnostic logging"}],"failure_mode":"pass"}`+"\n", pluginName, pluginName),
-			"README.md":   "# " + pluginName + "\n\nThe Torana Rust SDK is pinned to its exact Git release tag and package version in `Cargo.toml`. Run `cargo test` for native checks and `cargo build --release --target wasm32-wasip1` for the WASI artifact.\n",
+			"README.md":   "# " + pluginName + "\n\nThe Torana Rust SDK is pinned to the host SDK's exact Git revision in `Cargo.toml`. Run `cargo test` for native checks and `cargo build --release --target wasm32-wasip1` for the WASI artifact.\n",
 		}
 	}
 	for name, content := range files {
