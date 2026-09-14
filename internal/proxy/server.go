@@ -3495,6 +3495,9 @@ func (s *Server) pipelinePluginConfig(pcfg provider.PluginsConfig) plugin.Plugin
 // publication. In particular it cannot observe the gap between an admin pipeline
 // swap and applyProviders, or retain a cache while ReconfigureCache retires it.
 func (s *Server) reloadPluginsFromFilesystem(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	s.controlPlaneMutationMu.Lock()
 	defer s.controlPlaneMutationMu.Unlock()
 	s.rebuildMu.Lock()
@@ -3838,7 +3841,11 @@ func (s *Server) Shutdown(ctx context.Context) error {
 		s.watchCancel()
 	}
 	if s.watchDone != nil {
-		<-s.watchDone
+		select {
+		case <-s.watchDone:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
 	}
 	// Stop background ticks before the pipeline drains below: a tick in flight
 	// holds the pipeline and may be mid-way through an outbound request, and
@@ -3858,23 +3865,33 @@ func (s *Server) Shutdown(ctx context.Context) error {
 			return err
 		}
 	}
+	// Retire the active generation through the same bounded wait as older
+	// generations. Hijacked connections can outlive http.Server.Shutdown.
+	s.rebuildMu.Lock()
 	if pp := s.pluginPipeline.Load(); pp != nil {
-		pp.(*plugin.PluginPipeline).DrainAndClose()
+		s.retireAsyncLocked(pp.(*plugin.PluginPipeline).DrainAndClose)
+	}
+	s.rebuildMu.Unlock()
+	s.rebuildMu.Lock()
+	defer s.rebuildMu.Unlock()
+	for _, done := range s.retirements {
+		select {
+		case <-done:
+		case <-ctx.Done():
+			// Keep the cache owned by the server while a generation can still
+			// use it. A subsequent Shutdown can finish draining and close it.
+			return ctx.Err()
+		}
 	}
 	s.rateLimiter.Close()
 	s.conversations.Close()
 	s.swapAuditWriter(nil)
-	s.rebuildMu.Lock()
-	for _, done := range s.retirements {
-		<-done
-	}
 	s.cacheMu.Lock()
 	if s.sharedCache != nil {
 		s.sharedCache.Close()
 		s.sharedCache = nil
 	}
 	s.cacheMu.Unlock()
-	s.rebuildMu.Unlock()
 	return nil
 }
 

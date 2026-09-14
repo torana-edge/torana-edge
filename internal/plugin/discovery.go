@@ -2753,6 +2753,9 @@ func WatchPlugins(ctx context.Context, dir string, reloadFn func(context.Context
 					return
 				}
 				if err := reloadFn(ctx); err != nil {
+					if ctx.Err() != nil {
+						return
+					}
 					log.Printf("[plugin] reload failed: %v", err)
 					if errorFn != nil {
 						errorFn(err)
@@ -2778,8 +2781,9 @@ func WatchPlugins(ctx context.Context, dir string, reloadFn func(context.Context
 					}
 				}
 				if event.Op&(fsnotify.Remove|fsnotify.Rename) != 0 {
-					// A rapid directory arrival/removal may precede watch registration.
-					isDir = isDir || filepath.Dir(event.Name) == filepath.Clean(dir)
+					// Only registered directories affect inventory. A directory that
+					// disappears before discovery was never a loaded bundle; unrelated
+					// root files must not masquerade as removed directories.
 					for path := range watchedDirs {
 						if path == event.Name || strings.HasPrefix(path, event.Name+string(filepath.Separator)) {
 							_ = w.Remove(path)

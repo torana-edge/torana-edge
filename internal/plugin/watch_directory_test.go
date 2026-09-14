@@ -82,3 +82,61 @@ func TestWatchAtomicBundleInstallReplaceRemove(t *testing.T) {
 	}
 	await("")
 }
+
+func TestWatchIgnoresUnrelatedRootFileRemovals(t *testing.T) {
+	dir := t.TempDir()
+	original := filepath.Join(dir, "README.md")
+	if err := os.WriteFile(original, []byte("notes"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	reloads := make(chan struct{}, 10)
+	if err := WatchPlugins(ctx, dir, func(context.Context) error { reloads <- struct{}{}; return nil }, nil, func() { close(done) }); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { cancel(); <-done }()
+	renamed := filepath.Join(dir, "notes.tmp")
+	if err := os.Rename(original, renamed); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(renamed); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-reloads:
+		t.Fatal("unrelated file triggered reload")
+	case <-time.After(time.Second):
+	}
+}
+
+func TestWatchCancelledReloadDoesNotReportFailure(t *testing.T) {
+	dir := t.TempDir()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	started := make(chan struct{})
+	failures := make(chan error, 1)
+	if err := WatchPlugins(ctx, dir, func(ctx context.Context) error { close(started); <-ctx.Done(); return ctx.Err() }, func(err error) { failures <- err }, func() { close(done) }); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { cancel(); <-done }()
+	if err := os.WriteFile(filepath.Join(dir, "plugin.json"), []byte("{}"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("reload not started")
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("watcher did not stop")
+	}
+	select {
+	case err := <-failures:
+		t.Fatalf("shutdown marked reload failed: %v", err)
+	default:
+	}
+}

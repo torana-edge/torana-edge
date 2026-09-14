@@ -2,6 +2,8 @@ package proxy
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -99,5 +101,58 @@ func TestCacheRetirementWaitsForEveryPipelineGeneration(t *testing.T) {
 	case <-oldStore.closed:
 	case <-time.After(5 * time.Second):
 		t.Fatal("cache did not close after the final user drained")
+	}
+}
+
+func TestShutdownDeadlinePreservesCacheForPinnedGeneration(t *testing.T) {
+	for _, retired := range []bool{false, true} {
+		t.Run(fmt.Sprint("retired=", retired), func(t *testing.T) {
+			s := &Server{config: Config{Providers: provider.Config{Plugins: provider.PluginsConfig{Dir: t.TempDir()}}}}
+			store := &observedCacheClose{Store: cache.NewLocalCache(time.Minute), closed: make(chan struct{})}
+			s.setCache(store)
+			defer store.Close()
+			if err := s.RebuildPipeline(s.config.Providers.Plugins); err != nil {
+				t.Fatal(err)
+			}
+			pinned := s.pluginPipeline.Load().(*plugin.PluginPipeline)
+			if !pinned.TryAcquire() {
+				t.Fatal("could not pin")
+			}
+			var release sync.Once
+			defer release.Do(pinned.Release)
+			if retired {
+				if err := s.reloadPluginsFromFilesystem(context.Background()); err != nil {
+					t.Fatal(err)
+				}
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+			defer cancel()
+			done := make(chan error, 1)
+			go func() { done <- s.Shutdown(ctx) }()
+			select {
+			case err := <-done:
+				if !errors.Is(err, context.DeadlineExceeded) {
+					t.Fatalf("Shutdown: %v", err)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("Shutdown ignored deadline")
+			}
+			select {
+			case <-store.closed:
+				t.Fatal("cache closed while in use")
+			default:
+			}
+			release.Do(pinned.Release)
+			ctx2, cancel2 := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel2()
+			if err := s.Shutdown(ctx2); err != nil {
+				t.Fatal(err)
+			}
+			select {
+			case <-store.closed:
+			default:
+				t.Fatal("retry did not close cache")
+			}
+		})
 	}
 }
