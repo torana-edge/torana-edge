@@ -1068,7 +1068,8 @@ func New(cfg Config) (*Server, error) {
 				// holds the approved env.request_headers grant. The raw
 				// header map is untrusted caller input; the pipeline
 				// snapshots and allowlists it. No pipeline-wide injection.
-				modified, pluginChanged, err := pl.RunBeforeRequestTracked(req.Context(), reqStateFrom(req.Context()).ID, chat, req.Header)
+				pluginCtx := context.WithValue(req.Context(), syntheticResponseScopeKey{}, syntheticResponseScope{format: fmt, request: chat})
+				modified, pluginChanged, err := pl.RunBeforeRequestTracked(pluginCtx, reqStateFrom(req.Context()).ID, chat, req.Header)
 				if err != nil {
 					// failure_mode: block, applied at the TRANSPORT boundary.
 					//
@@ -1143,10 +1144,12 @@ func New(cfg Config) (*Server, error) {
 				// the transport returns it without calling upstream: zero
 				// tokens spent. Block wins over respond, checked above.
 				if respond := verdicts.Respond(); respond != nil {
+					renderFailed := false
 					if rc, ok := req.Context().Value(routeContextKey{}).(*RouteContext); ok {
-						rendered, err := renderRespond(fmt, chat, respond)
+						rendered, err := renderRespond(req.Context(), fmt, chat, respond)
 						if err != nil {
 							rc.Block = renderHostError(fmt.Name)
+							renderFailed = true
 						} else {
 							rc.Block = rendered
 						}
@@ -1156,6 +1159,10 @@ func New(cfg Config) (*Server, error) {
 					rs.Model = chat.Model
 					rs.Provider = provName
 					rs.Verdict = "respond"
+					if renderFailed {
+						rs.Verdict = "host-error"
+						rs.PluginFailure = true
+					}
 					rs.VerdictPlugin = respond.Plugin
 					req.Body = io.NopCloser(bytes.NewReader(nil))
 					req.ContentLength = 0
@@ -3398,6 +3405,16 @@ func (s *Server) newRuntime() *wasm.Runtime {
 		rt.StateCompareAndSetFunc = s.pluginState.CompareAndSet
 		rt.StateCompareAndDeleteFunc = s.pluginState.CompareAndDelete
 		rt.StateScanFunc = s.pluginState.Scan
+	}
+	rt.ValidateSyntheticResponseFunc = func(ctx context.Context, response *pb.SyntheticResponse) *pb.HostError {
+		scope, ok := ctx.Value(syntheticResponseScopeKey{}).(syntheticResponseScope)
+		if !ok {
+			return &pb.HostError{Code: pb.ErrorCode_ERROR_CODE_UNAVAILABLE, Message: "synthetic response context is unavailable"}
+		}
+		if err := validateSyntheticForFormat(scope.format, scope.request, response); err != nil {
+			return &pb.HostError{Code: pb.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, Message: err.Error()}
+		}
+		return nil
 	}
 	rt.ExecutionInfoFunc = func(ctx context.Context) *pb.ExecutionInfo {
 		rs := reqStateFrom(ctx)

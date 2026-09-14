@@ -187,3 +187,28 @@ func TestFoundationCommandHookRestriction(t *testing.T) {
 		foundationRefusal(t, res, pb.ErrorCode_ERROR_CODE_PERMISSION_DENIED)
 	}
 }
+
+func TestFoundationSyntheticRefusalDoesNotRecordVerdict(t *testing.T) {
+	r, p := newGrantedPlugin(t, "env.respond_request")
+	r.ValidateSyntheticResponseFunc = func(context.Context, *pb.SyntheticResponse) *pb.HostError {
+		return &pb.HostError{Code: pb.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, Message: "unrepresentable response"}
+	}
+	response := &pb.SyntheticResponse{Message: &pb.ResponseMessage{Blocks: []*pb.ResponseBlock{{Kind: &pb.ResponseBlock_Text{Text: &pb.ResponseTextBlock{Text: "text"}}}}}, FinishReason: "stop"}
+	result := hostCallDirect(t, r, p, "env.respond_request", marshalHostArgs(t, &pb.RespondRequestArgs{Response: response}))
+	foundationRefusal(t, result, pb.ErrorCode_ERROR_CODE_INVALID_ARGUMENT)
+	if r.verdictsBucket(0).Respond() != nil {
+		t.Fatal("refused response recorded as accepted verdict")
+	}
+}
+
+func TestFoundationHostResponseByteLimit(t *testing.T) {
+	r, p := newGrantedPlugin(t, "env.original_response")
+	r.options.MaxHostResponseBytes = 3
+	r.OriginalResponseFunc = func(context.Context) ([]byte, bool) { return []byte("oversized"), true }
+	raw := r.dispatchHostCall(context.WithValue(context.Background(), invocationHookKey{}, pb.Hook_HOOK_AFTER_RESPONSE), p.name, "env.original_response", "")
+	result, err := pb.DecodeHostCallResult(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	foundationRefusal(t, result, pb.ErrorCode_ERROR_CODE_UNAVAILABLE)
+}

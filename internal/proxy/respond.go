@@ -17,11 +17,14 @@ import (
 
 // renderRespond creates a complete host-local response. Identity and accounting
 // are host-owned; guest arguments cannot forge an observed provider completion.
-func renderRespond(f *format.Format, chat *engine.ChatRequest, v *wasm.RespondVerdict) (*BlockResponse, error) {
+func renderRespond(ctx context.Context, f *format.Format, chat *engine.ChatRequest, v *wasm.RespondVerdict) (*BlockResponse, error) {
 	if f == nil || chat == nil || v == nil {
 		return nil, fmt.Errorf("synthetic response context is missing")
 	}
-	if err := v.Response.Validate(); err != nil {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if err := validateSyntheticForFormat(f, chat, v.Response); err != nil {
 		return nil, err
 	}
 	var entropy [16]byte
@@ -34,7 +37,7 @@ func renderRespond(f *format.Format, chat *engine.ChatRequest, v *wasm.RespondVe
 	contentType := "application/json"
 	if chat.Stream {
 		contentType = "text/event-stream"
-		body, err = renderSyntheticStream(f, chat, v.Response, id)
+		body, err = renderSyntheticStream(ctx, f, chat, v.Response, id)
 	} else {
 		body, err = renderSyntheticJSON(f.Name, chat, v.Response, id)
 	}
@@ -44,7 +47,7 @@ func renderRespond(f *format.Format, chat *engine.ChatRequest, v *wasm.RespondVe
 	return &BlockResponse{Status: 200, ContentType: contentType, Body: body}, nil
 }
 
-func renderSyntheticStream(f *format.Format, chat *engine.ChatRequest, response *pb.SyntheticResponse, id string) ([]byte, error) {
+func renderSyntheticStream(ctx context.Context, f *format.Format, chat *engine.ChatRequest, response *pb.SyntheticResponse, id string) ([]byte, error) {
 	if f.Stream == nil {
 		return nil, fmt.Errorf("format has no streaming response renderer")
 	}
@@ -66,7 +69,7 @@ func renderSyntheticStream(f *format.Format, chat *engine.ChatRequest, response 
 	events <- engine.StreamEvent{FinishReason: response.FinishReason}
 	close(events)
 	var out bytes.Buffer
-	ctx := context.WithValue(context.Background(), engine.ChatRequestKey, chat)
+	ctx = context.WithValue(ctx, engine.ChatRequestKey, chat)
 	if err := f.Stream.SerializeStream(ctx, &out, events); err != nil {
 		return nil, err
 	}
@@ -104,7 +107,7 @@ func renderSyntheticJSON(provider string, chat *engine.ChatRequest, response *pb
 		}
 		generated := map[string]any{"responseId": id, "modelVersion": chat.Model, "candidates": []any{map[string]any{"content": map[string]any{"role": "model", "parts": parts}, "finishReason": "STOP"}}, "usageMetadata": map[string]int{"promptTokenCount": 0, "candidatesTokenCount": 0, "totalTokenCount": 0}}
 		payload = generated
-		if provider == "gemini-codeassist" {
+		if provider == "gemini-codeassist" || chat.CodeAssist {
 			payload = map[string]any{"response": generated}
 		}
 	case "openai":
@@ -145,4 +148,38 @@ func renderSyntheticJSON(provider string, chat *engine.ChatRequest, response *pb
 		return nil, fmt.Errorf("format has no synthetic response renderer")
 	}
 	return json.Marshal(payload)
+}
+
+type syntheticResponseScopeKey struct{}
+type syntheticResponseScope struct {
+	format  *format.Format
+	request *engine.ChatRequest
+}
+
+func validateSyntheticForFormat(f *format.Format, chat *engine.ChatRequest, response *pb.SyntheticResponse) error {
+	if err := response.Validate(); err != nil {
+		return err
+	}
+	if f == nil || chat == nil {
+		return fmt.Errorf("synthetic response format context is missing")
+	}
+	switch f.Name {
+	case "openai", "anthropic", "gemini", "gemini-codeassist":
+	default:
+		return fmt.Errorf("format has no synthetic response renderer")
+	}
+	if chat.Stream && f.Stream == nil {
+		return fmt.Errorf("format has no streaming response renderer")
+	}
+	if f.Name == "openai" && chat.OpenAIVariant != engine.OpenAIResponses {
+		seenTool := false
+		for _, block := range response.Message.Blocks {
+			if block.GetToolCall() != nil {
+				seenTool = true
+			} else if seenTool {
+				return fmt.Errorf("chat completions cannot represent text after a tool-call block")
+			}
+		}
+	}
+	return nil
 }

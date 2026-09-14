@@ -94,7 +94,7 @@ func respondReq(formatName string, stream bool) string {
 func TestRenderRespondUsesResponsesEnvelope(t *testing.T) {
 	f := format.Lookup("openai")
 	chat := &engine.ChatRequest{Model: "gpt-x", OpenAIVariant: engine.OpenAIResponses}
-	got, err := renderRespond(f, chat, &wasm.RespondVerdict{Response: &pbv1.SyntheticResponse{Message: &pbv1.ResponseMessage{Blocks: []*pbv1.ResponseBlock{{Kind: &pbv1.ResponseBlock_Text{Text: &pbv1.ResponseTextBlock{Text: "direct"}}}}}, FinishReason: "stop"}})
+	got, err := renderRespond(context.Background(), f, chat, &wasm.RespondVerdict{Response: &pbv1.SyntheticResponse{Message: &pbv1.ResponseMessage{Blocks: []*pbv1.ResponseBlock{{Kind: &pbv1.ResponseBlock_Text{Text: &pbv1.ResponseTextBlock{Text: "direct"}}}}}, FinishReason: "stop"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -110,7 +110,7 @@ func TestRenderRespondUsesResponsesEnvelope(t *testing.T) {
 	}
 
 	chat.Stream = true
-	stream, err := renderRespond(f, chat, &wasm.RespondVerdict{Response: &pbv1.SyntheticResponse{Message: &pbv1.ResponseMessage{Blocks: []*pbv1.ResponseBlock{{Kind: &pbv1.ResponseBlock_Text{Text: &pbv1.ResponseTextBlock{Text: "direct"}}}}}, FinishReason: "stop"}})
+	stream, err := renderRespond(context.Background(), f, chat, &wasm.RespondVerdict{Response: &pbv1.SyntheticResponse{Message: &pbv1.ResponseMessage{Blocks: []*pbv1.ResponseBlock{{Kind: &pbv1.ResponseBlock_Text{Text: &pbv1.ResponseTextBlock{Text: "direct"}}}}}, FinishReason: "stop"}})
 	if err != nil {
 		t.Fatal(err)
 	}

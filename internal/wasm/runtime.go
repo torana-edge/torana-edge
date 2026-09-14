@@ -848,6 +848,7 @@ func (p *Plugin) CallRequest(ctx context.Context, hook pbv1.Hook, reqID uint64, 
 	if envelope.RequestId != reqID {
 		return fmt.Errorf("wasm: %s hook input request id mismatch", p.name)
 	}
+	envelope.Execution = nil
 	if p.executionInfoFunc != nil {
 		if info := p.executionInfoFunc(ctx); info != nil {
 			envelope.Execution = proto.Clone(info).(*pbv1.ExecutionInfo)
@@ -1093,12 +1094,13 @@ type Runtime struct {
 	// StateDeleteFunc backs env.state_delete. v1 deleted by setting an empty
 	// value, which made storing an empty string impossible; current ABI makes deletion
 	// explicit and shares the env.state_set grant.
-	StateDeleteFunc           func(plugin, key string) error
-	StateGetVersionedFunc     func(plugin, key string) (string, string, bool)
-	StateCompareAndSetFunc    func(plugin, key, value string, expected *string) (bool, string, error)
-	StateCompareAndDeleteFunc func(plugin, key, expected string) (bool, error)
-	StateScanFunc             func(plugin, prefix, cursor string, limit, maxBytes int) ([]pluginstate.PageEntry, string, error)
-	ExecutionInfoFunc         func(context.Context) *pbv1.ExecutionInfo
+	StateDeleteFunc               func(plugin, key string) error
+	StateGetVersionedFunc         func(plugin, key string) (string, string, bool)
+	StateCompareAndSetFunc        func(plugin, key, value string, expected *string) (bool, string, error)
+	StateCompareAndDeleteFunc     func(plugin, key, expected string) (bool, error)
+	StateScanFunc                 func(plugin, prefix, cursor string, limit, maxBytes int) ([]pluginstate.PageEntry, string, error)
+	ExecutionInfoFunc             func(context.Context) *pbv1.ExecutionInfo
+	ValidateSyntheticResponseFunc func(context.Context, *pbv1.SyntheticResponse) *pbv1.HostError
 
 	// SendRequestFunc backs torana_send_request: a plugin-originated provider
 	// request. The plugin name is passed so the host can meter it against that
@@ -1909,6 +1911,15 @@ func (r *Runtime) dispatchHostCall(ctx context.Context, pluginName, cmd, args st
 			if err := a.Validate(); err != nil {
 				herr = hostErr(pbv1.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "%v", err)
 				break
+			}
+			if uint64(proto.Size(a.Response)) > r.options.MaxHostResponseBytes {
+				herr = hostErr(pbv1.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "synthetic response exceeds configured byte limit")
+				break
+			}
+			if r.ValidateSyntheticResponseFunc != nil {
+				if herr = r.ValidateSyntheticResponseFunc(ctx, a.Response); herr != nil {
+					break
+				}
 			}
 			r.verdictsBucket(reqIDFrom(ctx)).setRespond(pluginName, a.Response)
 		case "env.route_request":
