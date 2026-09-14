@@ -1904,7 +1904,10 @@ func (r *Runtime) dispatchHostCall(ctx context.Context, pluginName, cmd, args st
 				herr = hostErr(pbv1.ErrorCode_ERROR_CODE_INTERNAL, "plugin resource cache scope is invalid")
 				break
 			}
-			r.cache.Set(ctx, privateCacheKey(cacheIdentity, a.Key), a.Value)
+			if err := r.cache.Set(ctx, privateCacheKey(cacheIdentity, a.Key), a.Value, 0); err != nil {
+				herr = hostErr(pbv1.ErrorCode_ERROR_CODE_INTERNAL, "cache unavailable: %v", err)
+				break
+			}
 		case "env.cache_get":
 			var a pbv1.CacheGetArgs
 			if err := proto.Unmarshal([]byte(args), &a); err != nil {
@@ -1922,7 +1925,11 @@ func (r *Runtime) dispatchHostCall(ctx context.Context, pluginName, cmd, args st
 				herr = hostErr(pbv1.ErrorCode_ERROR_CODE_INTERNAL, "plugin resource cache scope is invalid")
 				break
 			}
-			v, present := r.cache.Get(ctx, privateCacheKey(cacheIdentity, a.Key))
+			v, present, cacheErr := r.cache.Get(ctx, privateCacheKey(cacheIdentity, a.Key))
+			if cacheErr != nil {
+				herr = hostErr(pbv1.ErrorCode_ERROR_CODE_INTERNAL, "cache unavailable: %v", cacheErr)
+				break
+			}
 			if !present {
 				herr = hostErr(pbv1.ErrorCode_ERROR_CODE_NOT_FOUND, "cache key not found")
 				break
@@ -1938,7 +1945,10 @@ func (r *Runtime) dispatchHostCall(ctx context.Context, pluginName, cmd, args st
 				herr = hostErr(pbv1.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "%v", err)
 				break
 			}
-			r.cache.Set(ctx, sharedCacheKey(a.Key), a.Value)
+			if err := r.cache.Set(ctx, sharedCacheKey(a.Key), a.Value, 0); err != nil {
+				herr = hostErr(pbv1.ErrorCode_ERROR_CODE_INTERNAL, "cache unavailable: %v", err)
+				break
+			}
 		case "env.shared_cache_get":
 			var a pbv1.CacheGetArgs
 			if err := proto.Unmarshal([]byte(args), &a); err != nil {
@@ -1949,7 +1959,11 @@ func (r *Runtime) dispatchHostCall(ctx context.Context, pluginName, cmd, args st
 				herr = hostErr(pbv1.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "%v", err)
 				break
 			}
-			v, present := r.cache.Get(ctx, sharedCacheKey(a.Key))
+			v, present, cacheErr := r.cache.Get(ctx, sharedCacheKey(a.Key))
+			if cacheErr != nil {
+				herr = hostErr(pbv1.ErrorCode_ERROR_CODE_INTERNAL, "cache unavailable: %v", cacheErr)
+				break
+			}
 			if !present {
 				herr = hostErr(pbv1.ErrorCode_ERROR_CODE_NOT_FOUND, "shared cache key not found")
 				break
