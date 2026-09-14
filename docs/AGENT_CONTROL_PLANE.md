@@ -4,6 +4,29 @@ Torana exposes the same local control plane used by its Web UI as a versioned,
 JSON-first HTTP API. It is intended for shell scripts and software agents that
 need to inspect or administer a personal Torana instance without scraping HTML.
 
+For terminal and harness workflows, start with the [CLI guide](CLI.md).
+`torana agent discover` reads this discovery document; dedicated commands cover
+settings, plugin approval and ordering, configuration, statistics, and events.
+
+Configuration and plugin-list GETs return an `ETag`. Every settings, pipeline,
+or per-plugin configuration mutation **requires** that exact token as
+`If-Match`, including on the unversioned routes. Missing or empty tokens return
+HTTP 428 (`revision_required`); stale tokens return HTTP 412 (`stale_revision`).
+Wildcards, weak tags, tag lists, and multiple `If-Match` headers are not snapshot
+tokens and are rejected. Neither failure applies or persists changes.
+
+The CLI and Web UI send revisions automatically. Other clients must retain the
+ETag from the snapshot they actually inspected, not fetch a new token immediately
+before submitting old edits. The token is opaque, process-specific, and covers
+the whole managed configuration, so changes across endpoints and server restarts
+invalidate older snapshots. Read a fresh snapshot, review it, and reapply the
+intended edits after a conflict; do not retry automatically.
+
+For a discovered plugin operation, `X-Torana-Plugin-Digest` optionally binds
+the call to its loaded bundle digest. The CLI supplies it automatically.
+A different loaded digest returns HTTP 412 and `stale_plugin_digest` before
+the guest executes; rediscover and review instead of retrying blindly.
+
 ## Discover capabilities
 
 The discovery document is the starting point:
@@ -23,6 +46,8 @@ It reports:
 - `read`, `write`, or `destructive` risk classification;
 - idempotency;
 - JSON input and output schemas;
+- `revision_precondition` on snapshot mutations, naming the required header
+  (`If-Match`) and `read_path` whose GET supplies the snapshot's ETag;
 - operations contributed by enabled plugins, with the loaded bundle digest.
 
 Only currently enabled plugin operations appear. A disabled plugin cannot
@@ -67,19 +92,35 @@ Callers must still check the HTTP status. Error codes are stable machine
 categories; the message provides operator-readable detail.
 
 Non-browser `POST`, `PUT`, `PATCH`, and `DELETE` calls must identify themselves
-explicitly:
+with `X-Torana-Local-Request: 1`. For a settings update, first save the snapshot
+and its headers together:
 
 ```bash
+curl --fail-with-body --silent --show-error \
+  --dump-header config.headers --output config.json \
+  "$TORANA_URL/_torana/api/v1/config"
+```
+
+Edit and review `config.json`, keeping `config.headers` from that read. Then
+submit the edited snapshot with its original revision:
+
+```bash
+TORANA_REVISION=$(awk 'tolower($1) == "etag:" {sub(/\r$/, "", $2); print $2}' config.headers)
+: "${TORANA_REVISION:?Missing ETag; read the snapshot again before editing}"
 curl --fail-with-body --silent \
   -H 'X-Torana-Local-Request: 1' \
   -H 'Content-Type: application/json' \
+  -H "If-Match: $TORANA_REVISION" \
   -X PUT \
   --data-binary @config.json \
   "$TORANA_URL/_torana/api/v1/config" | jq
 ```
 
-This header does not bypass localhost enforcement. It distinguishes deliberate
+The local-request header does not bypass localhost enforcement. It distinguishes deliberate
 local automation from a browser request that omitted same-origin metadata.
+Configuration revisions are separate from this caller check. Plugin-contributed
+operations and identity-bound process shutdown do not require a configuration
+revision; use each operation's advertised contract.
 
 ## Security boundary
 

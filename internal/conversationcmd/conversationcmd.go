@@ -8,18 +8,19 @@
 package conversationcmd
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"net/http"
-	"os"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/torana-edge/torana-edge/internal/controlclient"
 	"github.com/torana-edge/torana-edge/internal/conversation"
-	"github.com/torana-edge/torana-edge/internal/provider"
 )
 
 const requestTimeout = 5 * time.Second
@@ -41,11 +42,13 @@ func Run(args []string, stdout, stderr io.Writer) error {
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(args[1:]); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return nil
+		}
 		return err
 	}
-
-	if addr == "" {
-		addr = defaultAddr()
+	if fs.NArg() != 0 {
+		return fmt.Errorf("conversations accepts options, not positional arguments")
 	}
 
 	records, err := fetch(addr)
@@ -62,49 +65,15 @@ func Run(args []string, stdout, stderr io.Writer) error {
 	return nil
 }
 
-// defaultAddr resolves the port the proxy is configured to listen on, using the
-// same precedence as the server: TORANA_PORT overrides the managed store, which
-// overrides the seed file.
-func defaultAddr() string {
-	if v := os.Getenv("TORANA_PORT"); v != "" {
-		if _, err := strconv.Atoi(v); err == nil {
-			return "127.0.0.1:" + v
-		}
-	}
-	seedPath := "config.json"
-	if v := os.Getenv("TORANA_CONFIG"); v != "" {
-		seedPath = v
-	}
-	if storePath, err := provider.ManagedStorePath(); err == nil {
-		if cfg, err := provider.ResolveConfig(seedPath, storePath); err == nil && cfg.Port > 0 {
-			return "127.0.0.1:" + strconv.Itoa(cfg.Port)
-		}
-	}
-	return "127.0.0.1:8080"
-}
-
 func fetch(addr string) ([]conversation.Record, error) {
-	url := "http://" + addr + "/_torana/api/conversations"
-	req, err := http.NewRequest(http.MethodGet, url, nil)
+	client, err := controlclient.New(addr, requestTimeout)
 	if err != nil {
 		return nil, err
 	}
-	// The control plane refuses cross-origin mutations; this is a read, but the
-	// header also marks the request as deliberately local.
-	req.Header.Set("X-Torana-Local-Request", "1")
-
-	resp, err := (&http.Client{Timeout: requestTimeout}).Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("could not reach the proxy at %s — is it running? (%w)", addr, err)
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
+	defer client.Close()
+	body, _, err := client.JSON(context.Background(), http.MethodGet, controlclient.BasePath+"/conversations", nil, "")
 	if err != nil {
 		return nil, err
-	}
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("proxy returned %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
 	}
 
 	var payload struct {

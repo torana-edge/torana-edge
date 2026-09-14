@@ -21,15 +21,44 @@ import (
 // this call adds sits alongside whatever the parent directory inherits down,
 // so a file in a world-readable directory stays world-readable.
 //
-// The apply is by NAME because SetSecurityInfo needs a handle opened for
-// WRITE_DAC, which os.OpenFile never requests. That is sound only because
-// nothing acts on the result: every caller re-checks the OPEN HANDLE
-// afterwards (verifyFile), so a name that was swapped between the apply and
-// the check is caught rather than trusted.
+// For files, the apply is by NAME because SetSecurityInfo needs a handle
+// opened for WRITE_DAC, which os.OpenFile never requests. That is sound only
+// because every file caller re-checks the OPEN HANDLE afterwards (verifyFile),
+// so a name swapped between the apply and check is caught rather than trusted.
+// Directories use a separate security handle to avoid propagating ACL changes
+// to existing children, and verify that same handle before returning.
 func restrict(path string, dir bool) error {
 	acl, err := ownerOnlyACL(dir)
 	if err != nil {
 		return fmt.Errorf("build owner-only ACL for %s: %w", path, err)
+	}
+	if dir {
+		// SetNamedSecurityInfo propagates even the REMOVAL of inherited ACEs
+		// to existing children. That can erase their only access entries and
+		// strand a running instance's config, lock, and log. MAXIMUM_ALLOWED
+		// is the documented SetSecurityInfo mode that suppresses propagation:
+		// https://learn.microsoft.com/en-us/windows/win32/api/aclapi/nf-aclapi-setsecurityinfo
+		name, err := windows.UTF16PtrFromString(path)
+		if err != nil {
+			return err
+		}
+		handle, err := windows.CreateFile(name, windows.MAXIMUM_ALLOWED,
+			windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
+			nil, windows.OPEN_EXISTING, windows.FILE_FLAG_BACKUP_SEMANTICS, 0)
+		if err != nil {
+			return fmt.Errorf("open directory security handle for %s: %w", path, err)
+		}
+		defer func() { _ = windows.CloseHandle(handle) }()
+		if err := windows.SetSecurityInfo(handle, windows.SE_FILE_OBJECT,
+			windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
+			nil, nil, acl, nil); err != nil {
+			return fmt.Errorf("apply directory-only ACL to %s: %w", path, err)
+		}
+		sd, err := windows.GetSecurityInfo(handle, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
+		if err != nil {
+			return err
+		}
+		return verifyDescriptor(sd, path)
 	}
 	err = windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT,
 		windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
@@ -51,7 +80,7 @@ func ownerOnlyACL(_ bool) (*windows.ACL, error) {
 	pinner.Pin(sid)
 	defer pinner.Unpin()
 
-	// NOTHING is inheritable, directories included. An inheritable entry on a
+	// New grants are not inheritable, directories included. An inheritable entry on a
 	// container makes every application of it a PROPAGATION PASS over the
 	// container's children, which overwrites a child another process is in the
 	// middle of protecting — a race with no upside here, because verify
@@ -59,6 +88,8 @@ func ownerOnlyACL(_ bool) (*windows.ACL, error) {
 	// must be set on the file itself). Every confidential file therefore
 	// carries its own protected DACL and always did; the inheritable entry
 	// satisfied nothing this package accepts and only created the window.
+	// Noninheritability ALONE does not suppress propagation of removed ACEs;
+	// the directory handle's MAXIMUM_ALLOWED mode in restrict does that.
 	//
 	// The directory's own entry still does its job: it decides who may open,
 	// list or traverse the directory at all.

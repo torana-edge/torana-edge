@@ -116,6 +116,7 @@ func TestControlPlaneConfigAPI(t *testing.T) {
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Origin", url)
+	req.Header.Set("If-Match", readControlPlaneRevision(t, srv))
 
 	resp2, err := client.Do(req)
 	if err != nil {
@@ -157,6 +158,20 @@ func localControlPlaneRequest(method, target string, body io.Reader) *http.Reque
 	req := httptest.NewRequest(method, target, body)
 	req.Host = "127.0.0.1"
 	return req
+}
+
+// Read through the public endpoint so mutation tests exercise the same snapshot
+// contract as clients, without synthesizing a revision from server internals.
+func readControlPlaneRevision(t *testing.T, srv *Server) string {
+	t.Helper()
+	req := localControlPlaneRequest(http.MethodGet, "/_torana/api/v1/config", nil)
+	req.RemoteAddr = "127.0.0.1:12345"
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK || rec.Header().Get("ETag") == "" {
+		t.Fatalf("read configuration revision: status=%d headers=%v", rec.Code, rec.Header())
+	}
+	return rec.Header().Get("ETag")
 }
 
 type blockingMutationBody struct {
@@ -222,9 +237,12 @@ func TestControlPlaneMutationsAreOneTransactionDomain(t *testing.T) {
 		reader: strings.NewReader(string(settingsJSON)), started: firstStarted, release: releaseFirst,
 	}
 	firstDone := make(chan int, 1)
+	revision := readControlPlaneRevision(t, srv)
+	firstRequest := authorizedControlPlaneMutation(http.MethodPut, "/_torana/api/config", firstBody)
+	firstRequest.Header.Set("If-Match", revision)
 	go func() {
 		recorder := httptest.NewRecorder()
-		srv.Handler().ServeHTTP(recorder, authorizedControlPlaneMutation(http.MethodPut, "/_torana/api/config", firstBody))
+		srv.Handler().ServeHTTP(recorder, firstRequest)
 		firstDone <- recorder.Code
 	}()
 	select {
@@ -238,9 +256,11 @@ func TestControlPlaneMutationsAreOneTransactionDomain(t *testing.T) {
 		reader: strings.NewReader(`{"config":{"future":{"enabled":true}}}`), started: secondStarted,
 	}
 	secondDone := make(chan int, 1)
+	secondRequest := authorizedControlPlaneMutation(http.MethodPut, "/_torana/api/plugins", secondBody)
+	secondRequest.Header.Set("If-Match", revision)
 	go func() {
 		recorder := httptest.NewRecorder()
-		srv.Handler().ServeHTTP(recorder, authorizedControlPlaneMutation(http.MethodPut, "/_torana/api/plugins", secondBody))
+		srv.Handler().ServeHTTP(recorder, secondRequest)
 		secondDone <- recorder.Code
 	}()
 
@@ -255,13 +275,24 @@ func TestControlPlaneMutationsAreOneTransactionDomain(t *testing.T) {
 	if status := <-firstDone; status != http.StatusOK {
 		t.Fatalf("settings status = %d, want 200", status)
 	}
+	if status := <-secondDone; status != http.StatusPreconditionFailed {
+		t.Fatalf("concurrent plugins status = %d, want 412", status)
+	}
 	select {
 	case <-secondStarted:
-	case <-time.After(5 * time.Second):
-		t.Fatal("plugin mutation did not resume after the settings transaction completed")
+		t.Fatal("stale plugin mutation consumed its body")
+	default:
 	}
-	if status := <-secondDone; status != http.StatusOK {
-		t.Fatalf("plugins status = %d, want 200", status)
+	if got := srv.GetConfig().Providers; got.Limits.RPM != 17 || len(got.Plugins.Config["future"]) != 0 {
+		t.Fatalf("stale mutation changed live config: rpm=%d plugin=%s", got.Limits.RPM, got.Plugins.Config["future"])
+	}
+	// After inspecting the new snapshot, an intentional retry can apply.
+	secondRequest = authorizedControlPlaneMutation(http.MethodPut, "/_torana/api/plugins", strings.NewReader(`{"config":{"future":{"enabled":true}}}`))
+	secondRequest.Header.Set("If-Match", readControlPlaneRevision(t, srv))
+	retry := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(retry, secondRequest)
+	if retry.Code != http.StatusOK {
+		t.Fatalf("fresh plugins status = %d: %s", retry.Code, retry.Body)
 	}
 	got := srv.GetConfig().Providers
 	if got.Limits.RPM != 17 || string(got.Plugins.Config["future"]) != `{"enabled":true}` {
@@ -304,6 +335,7 @@ func TestControlPlaneMutationBodyLimitIsExact(t *testing.T) {
 	} {
 		recorder := httptest.NewRecorder()
 		req := authorizedControlPlaneMutation(row.method, row.path, strings.NewReader(jsonObjectOfSize(maxBodySize+1)))
+		req.Header.Set("If-Match", readControlPlaneRevision(t, srv))
 		srv.Handler().ServeHTTP(recorder, req)
 		if recorder.Code != http.StatusRequestEntityTooLarge {
 			t.Errorf("%s %s status = %d, want 413", row.method, row.path, recorder.Code)
@@ -314,6 +346,7 @@ func TestControlPlaneMutationBodyLimitIsExact(t *testing.T) {
 	// it may be semantically rejected in the future, but never as too large.
 	recorder := httptest.NewRecorder()
 	req := authorizedControlPlaneMutation(http.MethodPut, "/_torana/api/plugins", strings.NewReader(jsonObjectOfSize(maxBodySize)))
+	req.Header.Set("If-Match", readControlPlaneRevision(t, srv))
 	srv.Handler().ServeHTTP(recorder, req)
 	if recorder.Code == http.StatusRequestEntityTooLarge {
 		t.Fatal("exactly maxBodySize bytes were rejected")
@@ -341,6 +374,7 @@ func TestControlPlaneMutationBodyReadFailuresStayBadRequests(t *testing.T) {
 	} {
 		recorder := httptest.NewRecorder()
 		req := authorizedControlPlaneMutation(row.method, row.path, failingRequestBody{err: io.ErrUnexpectedEOF})
+		req.Header.Set("If-Match", readControlPlaneRevision(t, srv))
 		srv.Handler().ServeHTTP(recorder, req)
 		if recorder.Code != http.StatusBadRequest {
 			t.Errorf("%s %s status = %d, want 400", row.method, row.path, recorder.Code)
@@ -405,6 +439,7 @@ func TestControlPlanePluginsOrderingConstraintError(t *testing.T) {
 	// Try setting an invalid order: gate before router -> must return HTTP 400
 	invalidBody := `{"order":["gate","router"]}`
 	req, _ := http.NewRequest(http.MethodPost, url+"/_torana/api/plugins", bytes.NewBufferString(invalidBody))
+	req.Header.Set("If-Match", readControlPlaneRevision(t, srv))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Origin", url)
 
@@ -434,6 +469,7 @@ func TestControlPlanePluginsOrderingConstraintError(t *testing.T) {
 	// order, and a rejected override is rolled back atomically.
 	invalidHookBody := `{"hook_order":{"run_before_request":["gate","router"]}}`
 	req, _ = http.NewRequest(http.MethodPost, url+"/_torana/api/plugins", bytes.NewBufferString(invalidHookBody))
+	req.Header.Set("If-Match", readControlPlaneRevision(t, srv))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Origin", url)
 	resp, err = client.Do(req)
@@ -454,6 +490,7 @@ func TestControlPlanePluginsOrderingConstraintError(t *testing.T) {
 
 	validHookBody := `{"hook_order":{"run_before_request":["router","gate"]}}`
 	req, _ = http.NewRequest(http.MethodPost, url+"/_torana/api/plugins", bytes.NewBufferString(validHookBody))
+	req.Header.Set("If-Match", readControlPlaneRevision(t, srv))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Origin", url)
 	resp, err = client.Do(req)
@@ -683,6 +720,7 @@ func TestControlPlanePortRebind(t *testing.T) {
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Origin", fmt.Sprintf("http://127.0.0.1:%d", port1))
+	req.Header.Set("If-Match", readControlPlaneRevision(t, srv))
 
 	resp, err := client.Do(req)
 	if err != nil {

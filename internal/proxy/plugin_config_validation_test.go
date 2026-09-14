@@ -80,6 +80,7 @@ func (e *pluginConfigEnv) put(t *testing.T, body string) (int, string) {
 	req, _ := http.NewRequest(http.MethodPut, e.url+"/_torana/api/plugins", bytes.NewBufferString(body))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Origin", e.url)
+	req.Header.Set("If-Match", readControlPlaneRevision(t, e.srv))
 
 	resp, err := (&http.Client{Timeout: 5 * time.Second}).Do(req)
 	if err != nil {

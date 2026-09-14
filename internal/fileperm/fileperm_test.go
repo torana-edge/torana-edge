@@ -378,6 +378,35 @@ func TestDirectoryRestrictionDoesNotDisturbFilesInside(t *testing.T) {
 	}
 }
 
+// A managed directory can already contain ordinary files when secret.Open
+// secures it. Removing inherited parent grants must not rewrite these files'
+// ACLs or make the next config read / log open fail with access denied.
+func TestDirectoryRestrictionPreservesOrdinaryExistingFiles(t *testing.T) {
+	dir := t.TempDir()
+	for _, name := range []string{"config.json", "torana.log", "instance.lock"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("fixture"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i := 0; i < 3; i++ {
+		if err := fileperm.RestrictDir(dir); err != nil {
+			t.Fatal(err)
+		}
+		for _, name := range []string{"config.json", "torana.log", "instance.lock"} {
+			path := filepath.Join(dir, name)
+			raw, err := os.ReadFile(path)
+			if err != nil || string(raw) != "fixture" {
+				t.Fatalf("%s lost access/content: %q %v", name, raw, err)
+			}
+			f, err := os.OpenFile(path, os.O_RDWR, 0)
+			if err != nil {
+				t.Fatalf("%s no longer writable: %v", name, err)
+			}
+			_ = f.Close()
+		}
+	}
+}
+
 // The losing side of a first-run race: another caller has already published
 // the file, and a directory restriction lands before this caller reads it.
 // Reading an existing protected file must still succeed, and must still be
