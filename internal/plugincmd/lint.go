@@ -150,6 +150,7 @@ type usage struct {
 	// the linter cannot attribute a capability to it and must not claim the
 	// declared set is unused.
 	dynamicHostCall []token.Position
+	discardedErrors []token.Position
 }
 
 func lintPlugin(args []string, stdout, stderr io.Writer) error {
@@ -200,6 +201,9 @@ func lintDir(dir string) ([]finding, error) {
 
 	findings = append(findings, lintHooks(manifest, u)...)
 	findings = append(findings, lintPermissions(manifest, u, declaredHooks(manifest))...)
+	for _, pos := range u.discardedErrors {
+		findings = append(findings, finding{sevError, fmt.Sprintf("checked SDK call discards its error result at %s", pos)})
+	}
 	findings = append(findings, lintSchema(dir)...)
 
 	sort.SliceStable(findings, func(i, j int) bool { return findings[i].sev < findings[j].sev })
@@ -355,6 +359,7 @@ func scanSource(dir string) (*usage, error) {
 		permissions:      map[string]token.Position{},
 		hooks:            map[string]token.Position{},
 		registeredInMain: map[string]token.Position{},
+		discardedErrors:  []token.Position{},
 	}
 
 	// Follow the plugin's own import graph, starting at its root package.
@@ -567,6 +572,13 @@ func scanScope(fset *token.FileSet, node ast.Node, alias, enclosing string, u *u
 			scanScope(fset, t.Body, alias, enclosing, u, handlerProvenance{})
 			return false
 		case *ast.AssignStmt:
+			if len(t.Rhs) == 1 {
+				if c, ok := t.Rhs[0].(*ast.CallExpr); ok && isCheckedSDKCall(c, alias) && len(t.Lhs) == 1 {
+					if id, ok := t.Lhs[0].(*ast.Ident); ok && id.Name == "_" {
+						u.discardedErrors = append(u.discardedErrors, fset.Position(t.Pos()))
+					}
+				}
+			}
 			// Bounded stream-handler provenance: an identifier assigned from
 			// sdk.NewStreamHandler() — directly or through a fluent chain —
 			// carries the receiver identity, so a later h.OnToolCall(...)
@@ -590,9 +602,29 @@ func scanScope(fset *token.FileSet, node ast.Node, alias, enclosing string, u *u
 			return true
 		case *ast.CallExpr:
 			return scanCall(fset, t, alias, enclosing, u, env)
+		case *ast.ExprStmt:
+			if c, ok := t.X.(*ast.CallExpr); ok && isCheckedSDKCall(c, alias) {
+				u.discardedErrors = append(u.discardedErrors, fset.Position(t.Pos()))
+			}
 		}
 		return true
 	})
+}
+
+func isCheckedSDKCall(call *ast.CallExpr, alias string) bool {
+	sel, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok {
+		return false
+	}
+	id, ok := sel.X.(*ast.Ident)
+	if !ok || id.Name != alias {
+		return false
+	}
+	if sel.Sel.Name == "MustLog" || strings.HasPrefix(sel.Sel.Name, "Must") {
+		return false
+	}
+	_, ok = sdkPermission[sel.Sel.Name]
+	return ok
 }
 
 // scanCall attributes one call expression: alias-qualified sdk helpers, hook
