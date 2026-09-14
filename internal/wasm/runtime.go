@@ -44,6 +44,7 @@ import (
 	"github.com/torana-edge/torana-edge/internal/cache"
 	"github.com/torana-edge/torana-edge/internal/economics"
 	"github.com/torana-edge/torana-edge/internal/metrics"
+	"github.com/torana-edge/torana-edge/internal/pluginstate"
 	pbv1 "github.com/torana-edge/torana-plugin-sdk/pb/v1"
 	"google.golang.org/protobuf/proto"
 )
@@ -1019,7 +1020,11 @@ type Runtime struct {
 	// StateDeleteFunc backs env.state_delete. v1 deleted by setting an empty
 	// value, which made storing an empty string impossible; current ABI makes deletion
 	// explicit and shares the env.state_set grant.
-	StateDeleteFunc func(plugin, key string) error
+	StateDeleteFunc           func(plugin, key string) error
+	StateGetVersionedFunc     func(plugin, key string) (string, string, bool)
+	StateCompareAndSetFunc    func(plugin, key, value string, expected *string) (bool, string, error)
+	StateCompareAndDeleteFunc func(plugin, key, expected string) (bool, error)
+	StateScanFunc             func(plugin, prefix, cursor string, limit, maxBytes int) ([]pluginstate.PageEntry, string, error)
 
 	// SendRequestFunc backs torana_send_request: a plugin-originated provider
 	// request. The plugin name is passed so the host can meter it against that
@@ -1782,6 +1787,12 @@ func (r *Runtime) dispatchHostCall(ctx context.Context, pluginName, cmd, args st
 		// already write, so they share that namespace's grant rather than
 		// adding approval ceremony for no new security line.
 		switch cmd {
+		case "env.state_get_versioned":
+			perm = "env.state_get"
+		case "env.state_compare_and_set", "env.state_compare_and_delete":
+			perm = "env.state_set"
+		case "env.state_scan":
+			perm = "env.state_keys"
 		case pbv1.MetaAppendCommand:
 			perm = pbv1.MetaAppendPermission
 		case pbv1.StateDeleteCommand:
@@ -2011,6 +2022,98 @@ func (r *Runtime) dispatchHostCall(ctx context.Context, pluginName, cmd, args st
 			if err := r.StateSetFunc(pluginName, a.Key, a.Value); err != nil {
 				herr = hostErr(pbv1.ErrorCode_ERROR_CODE_INTERNAL, "%v", err)
 			}
+		case "env.state_get_versioned":
+			var a pbv1.StateGetArgs
+			if err := proto.Unmarshal([]byte(args), &a); err != nil {
+				herr = hostErr(pbv1.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "invalid StateGetArgs: %v", err)
+				break
+			}
+			if err := a.Validate(); err != nil {
+				herr = hostErr(pbv1.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "%v", err)
+				break
+			}
+			if r.StateGetVersionedFunc == nil {
+				herr = hostErr(pbv1.ErrorCode_ERROR_CODE_NOT_CONFIGURED, "durable plugin state is not configured")
+				break
+			}
+			v, ver, ok := r.StateGetVersionedFunc(pluginName, a.Key)
+			if !ok {
+				herr = hostErr(pbv1.ErrorCode_ERROR_CODE_NOT_FOUND, "state key not found")
+				break
+			}
+			value, _ = proto.Marshal(&pbv1.StateValue{Value: v, Version: ver})
+		case "env.state_compare_and_set":
+			var a pbv1.StateCompareAndSetArgs
+			if err := proto.Unmarshal([]byte(args), &a); err != nil {
+				herr = hostErr(pbv1.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "invalid StateCompareAndSetArgs: %v", err)
+				break
+			}
+			if err := a.Validate(); err != nil {
+				herr = hostErr(pbv1.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "%v", err)
+				break
+			}
+			if r.StateCompareAndSetFunc == nil {
+				herr = hostErr(pbv1.ErrorCode_ERROR_CODE_NOT_CONFIGURED, "durable plugin state is not configured")
+				break
+			}
+			applied, ver, err := r.StateCompareAndSetFunc(pluginName, a.Key, a.Value, a.ExpectedVersion)
+			if err != nil {
+				herr = hostErr(pbv1.ErrorCode_ERROR_CODE_INTERNAL, "%v", err)
+				break
+			}
+			res := &pbv1.StateMutationResult{Applied: applied}
+			if applied {
+				res.Version = &ver
+			}
+			value, _ = proto.Marshal(res)
+		case "env.state_compare_and_delete":
+			var a pbv1.StateCompareAndDeleteArgs
+			if err := proto.Unmarshal([]byte(args), &a); err != nil {
+				herr = hostErr(pbv1.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "invalid StateCompareAndDeleteArgs: %v", err)
+				break
+			}
+			if err := a.Validate(); err != nil {
+				herr = hostErr(pbv1.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "%v", err)
+				break
+			}
+			if r.StateCompareAndDeleteFunc == nil {
+				herr = hostErr(pbv1.ErrorCode_ERROR_CODE_NOT_CONFIGURED, "durable plugin state is not configured")
+				break
+			}
+			applied, err := r.StateCompareAndDeleteFunc(pluginName, a.Key, a.ExpectedVersion)
+			if err != nil {
+				herr = hostErr(pbv1.ErrorCode_ERROR_CODE_INTERNAL, "%v", err)
+				break
+			}
+			value, _ = proto.Marshal(&pbv1.StateMutationResult{Applied: applied})
+		case "env.state_scan":
+			var a pbv1.StateScanArgs
+			if err := proto.Unmarshal([]byte(args), &a); err != nil {
+				herr = hostErr(pbv1.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "invalid StateScanArgs: %v", err)
+				break
+			}
+			if err := a.Validate(); err != nil {
+				herr = hostErr(pbv1.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "%v", err)
+				break
+			}
+			if r.StateScanFunc == nil {
+				herr = hostErr(pbv1.ErrorCode_ERROR_CODE_NOT_CONFIGURED, "durable plugin state is not configured")
+				break
+			}
+			limit := int(a.Limit)
+			if limit > 256 {
+				limit = 256
+			}
+			entries, next, err := r.StateScanFunc(pluginName, a.Prefix, a.Cursor, limit, 1<<20)
+			if err != nil {
+				herr = hostErr(pbv1.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "%v", err)
+				break
+			}
+			out := &pbv1.StateScanResult{NextCursor: next}
+			for _, e := range entries {
+				out.Entries = append(out.Entries, &pbv1.StateEntry{Key: e.Key, Value: &pbv1.StateValue{Value: e.Value, Version: e.Version}})
+			}
+			value, _ = proto.Marshal(out)
 		case pbv1.StateDeleteCommand:
 			var a pbv1.StateDeleteArgs
 			if err := proto.Unmarshal([]byte(args), &a); err != nil {

@@ -3394,6 +3394,10 @@ func (s *Server) newRuntime() *wasm.Runtime {
 		rt.StateSetFunc = s.pluginState.Set
 		rt.StateKeysFunc = s.pluginState.Keys
 		rt.StateDeleteFunc = s.pluginState.Delete
+		rt.StateGetVersionedFunc = s.pluginState.GetVersioned
+		rt.StateCompareAndSetFunc = s.pluginState.CompareAndSet
+		rt.StateCompareAndDeleteFunc = s.pluginState.CompareAndDelete
+		rt.StateScanFunc = s.pluginState.Scan
 	}
 	// Plugin-originated egress: refusals return framed in the HostError arm
 	// (INVALID_ARGUMENT / NOT_CONFIGURED / UNAVAILABLE); the value arm carries
