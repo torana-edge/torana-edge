@@ -68,7 +68,8 @@ const (
 	// defaultMemoryLimitPages caps a plugin at 64 MiB of Wasm linear memory.
 	// A page is 64 KiB. This is high enough for the current Go/WASI plugins while
 	// preventing an absent module maximum from becoming wazero's 4 GiB default.
-	defaultMemoryLimitPages uint32 = 1024
+	defaultMemoryLimitPages  uint32 = 1024
+	defaultStreamBufferBytes uint64 = 4 << 20
 )
 
 // RuntimeOptions bounds resources used by every plugin loaded in a Runtime.
@@ -84,15 +85,17 @@ type RuntimeOptions struct {
 	// InstanceIdleTimeout retires burst-created idle instances while retaining
 	// one ready instance per plugin. Zero selects the default; a negative value
 	// disables retirement for controlled comparisons.
-	InstanceIdleTimeout time.Duration
+	InstanceIdleTimeout  time.Duration
+	MaxStreamBufferBytes uint64
 }
 
 func defaultRuntimeOptions() RuntimeOptions {
 	return RuntimeOptions{
-		PoolSize:            defaultPoolSize,
-		CallTimeout:         defaultCallTimeout,
-		MemoryLimitPages:    defaultMemoryLimitPages,
-		InstanceIdleTimeout: defaultInstanceIdleTimeout,
+		PoolSize:             defaultPoolSize,
+		CallTimeout:          defaultCallTimeout,
+		MemoryLimitPages:     defaultMemoryLimitPages,
+		InstanceIdleTimeout:  defaultInstanceIdleTimeout,
+		MaxStreamBufferBytes: defaultStreamBufferBytes,
 	}
 }
 
@@ -111,6 +114,9 @@ func normalizeRuntimeOptions(options RuntimeOptions) RuntimeOptions {
 		options.InstanceIdleTimeout = defaults.InstanceIdleTimeout
 	} else if options.InstanceIdleTimeout < 0 {
 		options.InstanceIdleTimeout = 0
+	}
+	if options.MaxStreamBufferBytes == 0 {
+		options.MaxStreamBufferBytes = defaults.MaxStreamBufferBytes
 	}
 	// Wazero panics for a value above the WebAssembly maximum. Clamp here so a
 	// configuration mistake cannot crash the proxy at startup.
@@ -173,11 +179,24 @@ type Plugin struct {
 	// when close and unload race or repeat.
 	compiledCloseOnce sync.Once
 
-	poolSize    int
-	callTimeout time.Duration
-	idleTimeout time.Duration
+	poolSize          int
+	callTimeout       time.Duration
+	idleTimeout       time.Duration
+	streamBufferBytes uint64
 
 	instanceCount uint64
+}
+
+func (p *Plugin) StreamBufferLimit() uint64 {
+	if p == nil {
+		return 0
+	}
+	p.stateMu.RLock()
+	defer p.stateMu.RUnlock()
+	if p.streamBufferBytes != 0 {
+		return p.streamBufferBytes
+	}
+	return defaultStreamBufferBytes
 }
 
 // PluginResources is the immutable, approval-bound resource view installed on
@@ -1526,15 +1545,16 @@ func (r *Runtime) LoadPlugin(name string, wasmBytes []byte) (*Plugin, error) {
 	}
 
 	p := &Plugin{
-		name:        name,
-		compiled:    compiled,
-		lifecycle:   r.testHooks,
-		runtime:     r.runtime,
-		pool:        make(chan *pluginInstance, r.options.PoolSize),
-		slots:       make(chan struct{}, r.options.PoolSize),
-		poolSize:    r.options.PoolSize,
-		callTimeout: r.options.CallTimeout,
-		idleTimeout: r.options.InstanceIdleTimeout,
+		name:              name,
+		compiled:          compiled,
+		lifecycle:         r.testHooks,
+		runtime:           r.runtime,
+		pool:              make(chan *pluginInstance, r.options.PoolSize),
+		slots:             make(chan struct{}, r.options.PoolSize),
+		poolSize:          r.options.PoolSize,
+		callTimeout:       r.options.CallTimeout,
+		idleTimeout:       r.options.InstanceIdleTimeout,
+		streamBufferBytes: r.options.MaxStreamBufferBytes,
 	}
 	p.privateCacheIdentity = name
 	p.cacheIdentityValid = true
