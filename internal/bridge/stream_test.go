@@ -483,6 +483,23 @@ func TestSerializeStreamValidatesToolIdentityForDestination(t *testing.T) {
 	}
 }
 
+func TestSerializeStreamUsesConfiguredUpstreamModelWhenSourceOmitsIt(t *testing.T) {
+	text := "x"
+	events := []engine.StreamEvent{
+		{MessageStart: &engine.StreamMessageStart{ID: "r", Role: "assistant"}},
+		{TextDelta: &text},
+		{FinishReason: "stop"},
+	}
+	ctx := context.WithValue(context.Background(), engine.ChatRequestKey, &engine.ChatRequest{Model: "configured-upstream"})
+	var wire bytes.Buffer
+	if err := SerializeStream(ctx, &wire, replayEvents(events), Gemini, OpenAIChat, &engine.ChatRequest{Model: "client-alias"}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(wire.String(), `"model":"configured-upstream"`) || strings.Contains(wire.String(), `"model":"client-alias"`) {
+		t.Fatalf("wrong stream model fallback: %s", wire.String())
+	}
+}
+
 func TestExportSDKValidationStreamFixtures(t *testing.T) {
 	dir := os.Getenv("TORANA_BRIDGE_SDK_FIXTURE_DIR")
 	if dir == "" {
