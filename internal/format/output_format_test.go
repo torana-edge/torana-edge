@@ -2,6 +2,8 @@ package format_test
 
 import (
 	"encoding/json"
+	"errors"
+	"strings"
 	"testing"
 
 	"github.com/torana-edge/torana-edge/internal/engine"
@@ -71,6 +73,25 @@ func TestPortableOutputFormatRoundTrip(t *testing.T) {
 	}
 }
 
+func TestOutputFormatWithoutTypeRemainsOpaque(t *testing.T) {
+	body := `{"model":"m","messages":[],"response_format":{"future_mode":"json","spacing":[1,2]}}`
+	adapter := format.Lookup("openai").Request
+	request, err := adapter.Unmarshal([]byte(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if request.OutputFormat != nil {
+		t.Fatal("typeless provider object became a portable constraint")
+	}
+	raw, err := adapter.Marshal(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), `"response_format":{"future_mode":"json","spacing":[1,2]}`) {
+		t.Fatalf("opaque provider bytes changed: %s", raw)
+	}
+}
+
 func TestPortableOutputFormatRefusesUnsupportedMode(t *testing.T) {
 	for _, provider := range []string{"anthropic", "gemini"} {
 		t.Run(provider, func(t *testing.T) {
@@ -79,6 +100,11 @@ func TestPortableOutputFormatRefusesUnsupportedMode(t *testing.T) {
 			request.OutputFormat.Schema, _ = engine.ParseOptionalJSONObject([]byte(`{"type":"object"}`))
 			if _, err := format.Lookup(provider).Request.Marshal(request); err == nil {
 				t.Fatal("silently dropped explicit strict option")
+			} else {
+				var unsupported *format.UnsupportedOutputFormatError
+				if !errors.As(err, &unsupported) {
+					t.Fatalf("error is not classified: %v", err)
+				}
 			}
 		})
 	}

@@ -8,6 +8,17 @@ import (
 	pb "github.com/torana-edge/torana-plugin-sdk/pb/v1"
 )
 
+// UnsupportedOutputFormatError means a valid portable constraint cannot be
+// represented by the selected provider without weakening its guarantees.
+// The proxy maps it to a client 400 rather than treating it as a host fault.
+type UnsupportedOutputFormatError struct{ Reason string }
+
+func (e *UnsupportedOutputFormatError) Error() string { return "output format: " + e.Reason }
+
+func unsupportedOutputFormat(reason string) error {
+	return &UnsupportedOutputFormatError{Reason: reason}
+}
+
 // Provider mappings follow the respective structured-output APIs:
 // https://platform.openai.com/docs/guides/structured-outputs
 // https://platform.claude.com/docs/en/build-with-claude/structured-outputs
@@ -128,8 +139,12 @@ func ExtractOutputFormat(chat *engine.ChatRequest, provider string) error {
 		}
 		remaining = obj.Bytes()
 	} else {
+		typeRaw, ok := fields["type"]
+		if !ok {
+			return nil // An unrecognized provider object remains byte-for-byte opaque.
+		}
 		var kind string
-		if err = json.Unmarshal(fields["type"], &kind); err != nil {
+		if err = json.Unmarshal(typeRaw, &kind); err != nil {
 			return fmt.Errorf("output format type must be a string")
 		}
 		// Canonicalization must not erase provider options absent from the IR.
@@ -236,13 +251,13 @@ func ApplyOutputFormat(raw []byte, chat *engine.ChatRequest, provider string) ([
 	}
 	keys := outputPath(chat, provider)
 	if len(keys) == 0 {
-		return nil, fmt.Errorf("provider does not support portable output constraints")
+		return nil, unsupportedOutputFormat("provider does not support portable output constraints")
 	}
 	var encoded []byte
 	switch provider {
 	case "gemini":
 		if f.Strict != nil {
-			return nil, fmt.Errorf("Gemini does not support the explicit strict option")
+			return nil, unsupportedOutputFormat("Gemini does not support the explicit strict option")
 		}
 		existing, err := rawAt(obj, keys)
 		if err != nil {
@@ -273,7 +288,7 @@ func ApplyOutputFormat(raw []byte, chat *engine.ChatRequest, provider string) ([
 			return raw, nil
 		}
 		if f.Mode != int32(pb.OutputFormat_MODE_JSON_SCHEMA) || f.Strict != nil {
-			return nil, fmt.Errorf("Anthropic supports schema output without an explicit strict option")
+			return nil, unsupportedOutputFormat("Anthropic supports schema output without an explicit strict option")
 		}
 		encoded, err = json.Marshal(map[string]any{"type": "json_schema", "schema": json.RawMessage(f.Schema.Bytes())})
 	case "openai":

@@ -1280,6 +1280,17 @@ func New(cfg Config) (*Server, error) {
 				newBody, err = fmt.Request.Marshal(chat)
 			}
 			if err != nil {
+				var unsupported *format.UnsupportedOutputFormatError
+				if errors.As(err, &unsupported) {
+					rc.Block = renderUnsupportedOutputFormat(prov.Format)
+					rs.Synthetic = true
+					rs.Verdict = "invalid_request"
+					rs.AuditErrorCode = "unsupported_output_format"
+					discardCompactionReports(rs)
+					req.Body = io.NopCloser(bytes.NewReader(nil))
+					req.ContentLength = 0
+					return
+				}
 				// HOST MARSHAL FAILURE — the terminal host_error path: the
 				// accepted IR passed the
 				// SDK replacement contract (every plugin replacement is

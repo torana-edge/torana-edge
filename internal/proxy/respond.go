@@ -51,6 +51,9 @@ func renderSyntheticStream(ctx context.Context, f *format.Format, chat *engine.C
 	if f.Stream == nil {
 		return nil, fmt.Errorf("format has no streaming response renderer")
 	}
+	if err := validateSyntheticBlocks(response); err != nil {
+		return nil, err
+	}
 	events := make(chan engine.StreamEvent, 3*len(response.Message.Blocks)+3)
 	events <- engine.StreamEvent{MessageStart: &engine.StreamMessageStart{Role: "assistant", ID: id, Model: chat.Model}}
 	for index, block := range response.Message.Blocks {
@@ -77,6 +80,9 @@ func renderSyntheticStream(ctx context.Context, f *format.Format, chat *engine.C
 }
 
 func renderSyntheticJSON(provider string, chat *engine.ChatRequest, response *pb.SyntheticResponse, id string) ([]byte, error) {
+	if err := validateSyntheticBlocks(response); err != nil {
+		return nil, err
+	}
 	blocks := response.Message.Blocks
 	var payload any
 	switch provider {
@@ -148,6 +154,18 @@ func renderSyntheticJSON(provider string, chat *engine.ChatRequest, response *pb
 		return nil, fmt.Errorf("format has no synthetic response renderer")
 	}
 	return json.Marshal(payload)
+}
+
+func validateSyntheticBlocks(response *pb.SyntheticResponse) error {
+	if response == nil || response.Message == nil {
+		return fmt.Errorf("synthetic response message is missing")
+	}
+	for i, block := range response.Message.Blocks {
+		if block == nil || (block.GetText() == nil && block.GetToolCall() == nil) {
+			return fmt.Errorf("synthetic response block %d has no supported arm", i)
+		}
+	}
+	return nil
 }
 
 type syntheticResponseScopeKey struct{}

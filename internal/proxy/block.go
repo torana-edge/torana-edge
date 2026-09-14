@@ -55,6 +55,14 @@ func renderInvalidRequest(format string) *BlockResponse {
 	}
 }
 
+func renderUnsupportedOutputFormat(format string) *BlockResponse {
+	code := "invalid_request_error"
+	if format == "gemini" || format == "gemini-codeassist" {
+		code = "INVALID_ARGUMENT"
+	}
+	return &BlockResponse{Status: http.StatusBadRequest, ContentType: "application/json", Body: renderProviderError(format, http.StatusBadRequest, code, "the requested output format cannot be represented by the selected provider")}
+}
+
 // renderProviderError produces an error body shaped like the caller's provider
 // so the agent harness parses it the same as any upstream API error.
 func renderProviderError(format string, status int, code, message string) []byte {
