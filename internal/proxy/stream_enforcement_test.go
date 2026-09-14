@@ -139,6 +139,74 @@ func TestStreamEnforcementTerminalAbortsClientBody(t *testing.T) {
 	probe.Body.Close()
 }
 
+// TestSuppressedJournalOpenToolAbortsClientBody covers the case where a plugin
+// suppresses a tool-call start and its deltas while the provider then ends the
+// stream without a matching stop. Although the plugin-facing walker has no
+// open block, the host walker has already accepted the original events. Its
+// end check must terminate the response and the journal must remain private.
+func TestSuppressedJournalOpenToolAbortsClientBody(t *testing.T) {
+	requireWASM(t, fixturesDir+"/test-stream-journal/plugin.wasm")
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fl, _ := w.(http.Flusher)
+		frame := func(event, data string) {
+			fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event, data)
+			if fl != nil {
+				fl.Flush()
+			}
+		}
+		frame("message_start", `{"type":"message_start","message":{"role":"assistant","usage":{"input_tokens":1,"output_tokens":0}}}`)
+		frame("content_block_start", `{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`)
+		frame("content_block_delta", `{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"visible before truncation"}}`)
+		frame("content_block_stop", `{"type":"content_block_stop","index":0}`)
+		time.Sleep(300 * time.Millisecond)
+		frame("content_block_start", `{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_1","name":"read","input":{}}}`)
+		frame("content_block_delta", `{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"path\":\"x\"}"}}`)
+		// EOF deliberately omits content_block_stop and message_stop.
+	}))
+	defer upstream.Close()
+
+	cfg := Config{Port: "0", Providers: provider.Config{
+		Providers: map[string]provider.Provider{"ant": {URL: upstream.URL, Format: "anthropic"}},
+		Plugins: provider.PluginsConfig{
+			Dir: fixturesDir, Order: []string{"test-stream-journal"}, AllowUnapproved: true,
+		},
+	}}
+	srv, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	go srv.Serve(ln)
+	defer srv.Shutdown(context.Background())
+
+	resp, err := http.Post("http://"+ln.Addr().String()+"/provider/ant/v1/messages",
+		"application/json", strings.NewReader(`{"model":"claude-test","max_tokens":32,"stream":true,"messages":[{"role":"user","content":"hi"}]}`))
+	if err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	body, readErr := io.ReadAll(resp.Body)
+	resp.Body.Close()
+
+	if !errors.Is(readErr, io.ErrUnexpectedEOF) {
+		t.Fatalf("expected terminal host validation to abort with unexpected EOF, got %v (body=%q)", readErr, body)
+	}
+	// The fixture rewrites ordinary text, proving that output preceding the
+	// terminal journal was actually delivered through the plugin stage.
+	if !strings.Contains(string(body), "SHOULD-NOT-RUN") {
+		t.Fatalf("expected pre-terminal text on the wire, got %q", body)
+	}
+	for _, forbidden := range []string{"toolu_1", "input_json_delta", `\"path\"`, "message_stop"} {
+		if strings.Contains(string(body), forbidden) {
+			t.Fatalf("suppressed journal or completion marker reached the client (%q): %q", forbidden, body)
+		}
+	}
+}
+
 // syncLogBuffer is a mutex-guarded bytes.Buffer for log.SetOutput: the server
 // goroutines log concurrently with the test reading the captured output.
 type syncLogBuffer struct {

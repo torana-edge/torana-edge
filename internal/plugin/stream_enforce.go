@@ -444,10 +444,12 @@ func (vs *streamVerifierState) acceptPluginOutput(pvs *pluginStreamState, accept
 }
 
 // isScopeCloseEvent reports whether an accepted-side event closes a scope:
-// a content-block stop (tool or non-tool) or the message stop.
+// a content-block stop (tool or non-tool), the message stop, or a terminal
+// provider error. A StreamError abandons every open block, so it must also
+// close any deferred journal transaction before the event can be released.
 func isScopeCloseEvent(ev *pbv1.StreamEvent) bool {
 	switch ev.Event.(type) {
-	case *pbv1.StreamEvent_ContentBlockStop, *pbv1.StreamEvent_MessageStop:
+	case *pbv1.StreamEvent_ContentBlockStop, *pbv1.StreamEvent_MessageStop, *pbv1.StreamEvent_Error:
 		return true
 	}
 	return false
@@ -738,6 +740,13 @@ func (pp *PluginPipeline) runOnStreamChunk(ctx context.Context, reqID uint64, ch
 				pvs.journal.outputs = append(pvs.journal.outputs, emitted...)
 				if stop := ev.GetContentBlockStop(); stop != nil {
 					delete(pvs.journal.pending, stop.Index)
+				}
+				if ev.GetError() != nil {
+					// StreamError is terminal and legally abandons every open
+					// content block. Resolve the corresponding deferred decisions;
+					// the scope verifier below still runs before journal output is
+					// allowed to leave this plugin stage.
+					clear(pvs.journal.pending)
 				}
 			} else {
 				next = append(next, emitted...)

@@ -62,6 +62,41 @@ func TestStreamJournalEndRejectsOpenToolWithoutReleasingJournal(t *testing.T) {
 	}
 }
 
+// A provider StreamError legally abandons open blocks. It is also a terminal
+// transaction boundary: the journal may retain deliberately suppressed tool
+// events, but it must verify and forward the provider error instead of ending
+// successfully with that error still trapped in the journal.
+func TestStreamJournalErrorAbandonsOpenToolAndReleasesError(t *testing.T) {
+	for _, mode := range []string{"pass", "block"} {
+		t.Run(mode, func(t *testing.T) {
+			pp := journalPipeline(t, mode, 0)
+			const reqID = 42
+			for _, ev := range []engine.StreamEvent{toolStart(0, "call", "read"), toolDelta(0, `{"path":"open.go"}`)} {
+				event := ev
+				out, err := pp.RunOnStreamChunkVerified(context.Background(), reqID, &event)
+				if err != nil || len(out) != 0 {
+					t.Fatalf("pending journal event escaped: out=%#v err=%v", out, err)
+				}
+			}
+			providerErr := engine.StreamEvent{Error: &engine.StreamError{Code: 503, Message: "upstream failed"}}
+			out, err := pp.RunOnStreamChunkVerified(context.Background(), reqID, &providerErr)
+			if err != nil {
+				t.Fatalf("provider error rejected: %v", err)
+			}
+			if !reflect.DeepEqual(out, []engine.StreamEvent{providerErr}) {
+				t.Fatalf("provider error was lost or deferred: out=%#v", out)
+			}
+			if err := pp.EndStreamVerified(reqID); err != nil {
+				t.Fatalf("error-terminated stream failed finalization: %v", err)
+			}
+			if state := pp.streamVerify[reqID]; state == nil || state.plugins[0].journal != nil {
+				t.Fatalf("terminal journal was not resolved: %#v", state)
+			}
+			pp.EndRequest(reqID)
+		})
+	}
+}
+
 func multiJournalPipeline(t *testing.T, downstream string) *PluginPipeline {
 	t.Helper()
 	requireWASM(t, fixturesDir+"/test-stream-journal/plugin.wasm")
