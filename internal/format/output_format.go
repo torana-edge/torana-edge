@@ -132,6 +132,19 @@ func ExtractOutputFormat(chat *engine.ChatRequest, provider string) error {
 		if err = json.Unmarshal(fields["type"], &kind); err != nil {
 			return fmt.Errorf("output format type must be a string")
 		}
+		// Canonicalization must not erase provider options absent from the IR.
+		// Keep the whole constraint opaque if any unmodeled member is present.
+		allowed := []string{"type"}
+		if kind == "json_schema" {
+			if provider == "openai" && chat.OpenAIVariant != engine.OpenAIResponses {
+				allowed = append(allowed, "json_schema")
+			} else {
+				allowed = append(allowed, "name", "schema", "strict")
+			}
+		}
+		if hasUnmodeledOutputFields(fields, allowed...) {
+			return nil
+		}
 		switch kind {
 		case "text":
 			f.Mode = pb.OutputFormat_TEXT
@@ -141,9 +154,13 @@ func ExtractOutputFormat(chat *engine.ChatRequest, provider string) error {
 			f.Mode = pb.OutputFormat_JSON_SCHEMA
 			schemaFields := fields
 			if provider == "openai" && chat.OpenAIVariant != engine.OpenAIResponses {
+				schemaFields = nil
 				if err = json.Unmarshal(fields["json_schema"], &schemaFields); err != nil || schemaFields == nil {
 					return fmt.Errorf("json_schema must be an object")
 				}
+			}
+			if hasUnmodeledOutputFields(schemaFields, "type", "name", "schema", "strict") {
+				return nil
 			}
 			f.Name = "response"
 			if name, ok := schemaFields["name"]; ok {
@@ -285,4 +302,20 @@ func ApplyOutputFormat(raw []byte, chat *engine.ChatRequest, provider string) ([
 		return nil, err
 	}
 	return obj.Bytes(), nil
+}
+
+func hasUnmodeledOutputFields(fields map[string]json.RawMessage, allowed ...string) bool {
+	for name := range fields {
+		known := false
+		for _, key := range allowed {
+			if key == name {
+				known = true
+				break
+			}
+		}
+		if !known {
+			return true
+		}
+	}
+	return false
 }

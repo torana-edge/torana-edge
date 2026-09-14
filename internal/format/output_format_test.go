@@ -93,3 +93,47 @@ func TestOutputFormatIsPartOfObservablePrefix(t *testing.T) {
 		t.Fatalf("output constraint missing from cache identity: %s -> %s", before, after)
 	}
 }
+
+func TestOutputFormatPreservesUnmodeledProviderFields(t *testing.T) {
+	cases := []struct{ provider, body string }{
+		{"openai", `{"model":"m","messages":[],"response_format":{"type":"json_schema","json_schema":{"name":"answer","description":"keep me","schema":{"type":"object"}}}}`},
+		{"openai", `{"model":"m","input":"question","text":{"format":{"type":"json_schema","name":"answer","description":"keep me","schema":{"type":"object"}}}}`},
+		{"anthropic", `{"model":"m","max_tokens":10,"messages":[],"output_config":{"format":{"type":"json_schema","schema":{"type":"object"},"future_option":"keep me"}}}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.provider+tc.body, func(t *testing.T) {
+			adapter := format.Lookup(tc.provider).Request
+			request, err := adapter.Unmarshal([]byte(tc.body))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if request.OutputFormat != nil {
+				t.Fatal("partially modeled constraint was removed from provider extras")
+			}
+			raw, err := adapter.Marshal(request)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var original, actual map[string]any
+			if err = json.Unmarshal([]byte(tc.body), &original); err != nil {
+				t.Fatal(err)
+			}
+			if err = json.Unmarshal(raw, &actual); err != nil {
+				t.Fatal(err)
+			}
+			for _, key := range []string{"response_format", "text", "output_config"} {
+				if want, ok := original[key]; ok {
+					wb, _ := json.Marshal(want)
+					gb, _ := json.Marshal(actual[key])
+					if string(wb) != string(gb) {
+						t.Fatalf("lost provider options: %s want %s", gb, wb)
+					}
+				}
+			}
+			request.OutputFormat = &engine.OutputFormat{Mode: 1}
+			if _, err = adapter.Marshal(request); err == nil {
+				t.Fatal("typed output options silently overwrote opaque constraint")
+			}
+		})
+	}
+}
