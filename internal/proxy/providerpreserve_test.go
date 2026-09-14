@@ -55,6 +55,7 @@ func putConfig(t *testing.T, srv *Server, body any) *httptest.ResponseRecorder {
 	req.RemoteAddr = "127.0.0.1:12345"
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Torana-Local-Request", "1")
+	req.Header.Set("If-Match", readControlPlaneRevision(t, srv))
 	rec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, req)
 	return rec

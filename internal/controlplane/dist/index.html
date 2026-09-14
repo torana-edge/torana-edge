@@ -241,6 +241,8 @@
     let failureModeMap = {};     // name -> operator-selected pass/block behavior
     let pipelineDirty = false;
     let settingsCfg = null;      // full provider.Config from GET /_torana/api/config
+    let pipelineRevision = '';
+    let settingsRevision = '';
     let feedEvents = [];
     let seenEventKeys = new Set();
     let eventSource = null;
@@ -325,7 +327,7 @@
     // ---- Plugins / pipeline ----
     function loadPlugins() {
       return fetch('/_torana/api/v1/plugins')
-        .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
+        .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); pipelineRevision = r.headers.get('ETag') || ''; return r.json(); })
         .then(data => {
           allPlugins = (data.plugins || []);
           pluginByName = {};
@@ -693,7 +695,7 @@
 
     function persistPipeline() {
       return fetch('/_torana/api/v1/plugins', {
-        method: 'PUT', headers: { 'Content-Type': 'application/json' },
+        method: 'PUT', headers: { 'Content-Type': 'application/json', 'If-Match': pipelineRevision },
         body: JSON.stringify(pipelinePayload())
       }).then(async r => {
         const t = await r.text();
@@ -1152,7 +1154,7 @@
       });
       fetch(`/_torana/api/v1/plugins/${encodeURIComponent(name)}/config`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', 'If-Match': pipelineRevision },
         body: JSON.stringify(cfg)
       })
       .then(async r => { const t = await r.text(); if (!r.ok) throw new Error(t || `HTTP ${r.status}`); return t; })
@@ -1175,7 +1177,7 @@
       setButtonBusy(button, true, 'Saving…');
       fetch(`/_torana/api/v1/plugins/${encodeURIComponent(name)}/config`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', 'If-Match': pipelineRevision },
         body: JSON.stringify(parsed)
       })
       .then(async r => { const t = await r.text(); if (!r.ok) throw new Error(t || `HTTP ${r.status}`); return t; })
@@ -1285,7 +1287,7 @@
     // ---- Settings ----
     const PROVIDER_FORMATS = ['', 'openai', 'anthropic', 'gemini', 'gemini-codeassist'];
     function loadSettings() {
-      fetch('/_torana/api/v1/config').then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
+      fetch('/_torana/api/v1/config').then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); settingsRevision = r.headers.get('ETag') || ''; return r.json(); })
         .then(cfg => { settingsCfg = cfg; renderSettings(cfg); })
         .catch(err => showAlert(`Failed to load settings: ${err.message}`));
     }
@@ -1394,9 +1396,9 @@
       cfg.mitm = mitmObj;
 
       fetch('/_torana/api/v1/config', {
-        method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(cfg)
+        method: 'PUT', headers: { 'Content-Type': 'application/json', 'If-Match': settingsRevision }, body: JSON.stringify(cfg)
       })
-      .then(async r => { const t = await r.text(); if (!r.ok) throw new Error(t || `HTTP ${r.status}`); return t ? JSON.parse(t) : {}; })
+      .then(async r => { const t = await r.text(); if (!r.ok) throw new Error(t || `HTTP ${r.status}`); settingsRevision = r.headers.get('ETag') || ''; return t ? JSON.parse(t) : {}; })
       .then(saved => { settingsCfg = saved; showAlert('Settings saved and applied.', false); })
       .catch(err => showAlert(`Failed to save settings: ${err.message}`))
       .finally(() => setButtonBusy(button, false));

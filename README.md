@@ -176,6 +176,7 @@ it as ordinary HTTP rather than attempting to decode it as an inference call.
 | [Cache backends](docs/CACHE.md) | Memory limits, Redis capacity, and verified Redis TLS |
 | [Upgrade notes](docs/UPGRADE_NOTES.md) | Configuration changes and migration steps |
 | [Agent control plane](docs/AGENT_CONTROL_PLANE.md) | The versioned JSON API and `agent.json` operation contracts |
+| [Terminal and agent CLI](docs/CLI.md) | Live settings, approval/enable/disable, pipeline edits, request events, and plugin operations |
 | [Local models](docs/LOCAL_MODELS.md) | Point a coding harness at Ollama or vLLM through Torana |
 | [Antigravity CLI](docs/GEMINI_ANTIGRAVITY.md) | The optional TLS-terminating MITM ingress |
 | [Prompt caching](docs/PROMPT_CACHING.md) | Declaring cache prices and lifetimes, and the arithmetic that bounds cache warming |
@@ -187,6 +188,25 @@ it as ordinary HTTP rather than attempting to decode it as an inference call.
 ABI-v1 Go and Rust SDKs, examples, conformance guests, and authoring guides.
 
 **Official plugins** live in [torana-plugins](https://github.com/torana-edge/torana-plugins).
+
+### Administer without opening the UI
+
+```bash
+./torana start
+./torana status
+./torana plugin status
+./torana stats
+./torana feed --follow
+./torana config get > settings.json
+# Review/edit settings.json, preserving its revision, then:
+./torana config apply --file settings.json --yes
+./torana stop --yes
+```
+
+The CLI talks to the running control plane and uses the same validation and
+live updates as the UI. Stale edits are rejected, plugin approval stays bound
+to an exact digest, and enabling a plugin never grants permissions implicitly.
+See the [CLI guide](docs/CLI.md) for the full UI-to-command map.
 
 ## How It Works
 

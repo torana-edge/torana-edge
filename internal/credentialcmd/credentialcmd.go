@@ -2,9 +2,9 @@
 // storing and removing the secrets providers and plugins resolve by name.
 //
 // It writes through the same encrypted store the server reads
-// (internal/credentialstore), so a credential added here is usable without
-// restarting anything, and a secret never has to be pasted into a config file
-// to be used.
+// (internal/credentialstore), so a secret need not be pasted into a config file.
+// The running server keeps an in-memory store; stop it before these disk-based
+// changes and restart it afterward to load the new values.
 package credentialcmd
 
 import (

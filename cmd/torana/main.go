@@ -7,20 +7,25 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log"
 	"net"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"runtime/debug"
 	"strconv"
 	"strings"
 	"syscall"
 	"time"
 
+	"github.com/torana-edge/torana-edge/internal/controlcmd"
 	"github.com/torana-edge/torana-edge/internal/conversationcmd"
 	"github.com/torana-edge/torana-edge/internal/credentialcmd"
+	"github.com/torana-edge/torana-edge/internal/instance"
+	"github.com/torana-edge/torana-edge/internal/lifecyclecmd"
 	"github.com/torana-edge/torana-edge/internal/metrics"
 	"github.com/torana-edge/torana-edge/internal/plugincmd"
 	"github.com/torana-edge/torana-edge/internal/provider"
@@ -85,9 +90,17 @@ func usage(w io.Writer) {
 Usage:
   torana [serve]                 run the proxy (default)
   torana --debug [serve]         run with safe per-request debug logs
+  torana start                   run the proxy in the background
+  torana status                  inspect the running instance
+  torana stop --yes              stop it gracefully
   torana plugin <command>        author, build and install plugins
   torana credential <command>    configure named credentials
   torana conversations <command> inspect recorded conversations
+  torana config <command>        inspect or apply live settings
+  torana pipeline <command>      configure plugin order and approvals
+  torana stats                   inspect aggregate request statistics
+  torana feed [--follow]         inspect recent or live request events
+  torana agent <command>         discover and call plugin agent operations
   torana version                 print the version
   torana help                    print this message
 
@@ -129,8 +142,10 @@ Environment:
                            as above, and takes precedence over it
 
 The control plane is at http://127.0.0.1:<port>/_torana/ and is reachable from
-loopback only. Plugins never load until you approve their digest there.
+loopback only. Plugins never load until you approve their digest in the UI or CLI.
 `)
+	controlcmd.Usage(w)
+	lifecyclecmd.Usage(w)
 }
 
 // controlPlaneHost names a host an operator can actually paste into a browser,
@@ -206,6 +221,26 @@ func main() {
 		_ = os.Setenv("TORANA_LOG_LEVEL", "debug")
 		os.Args = append([]string{os.Args[0]}, os.Args[2:]...)
 	}
+	if lifecyclecmd.Handles(os.Args[1:]) {
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		err := lifecyclecmd.Run(ctx, os.Args[1:], os.Stdout, os.Stderr)
+		stop()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "%v\n", err)
+			os.Exit(2)
+		}
+		return
+	}
+	if controlcmd.Handles(os.Args[1:]) {
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		err := controlcmd.Run(ctx, os.Args[1:], os.Stdin, os.Stdout, os.Stderr)
+		stop()
+		if err != nil && !errors.Is(err, context.Canceled) {
+			fmt.Fprintf(os.Stderr, "%v\n", err)
+			os.Exit(2)
+		}
+		return
+	}
 	if len(os.Args) > 1 && os.Args[1] == "plugin" {
 		if err := plugincmd.Run(os.Args[1:], os.Stdout, os.Stderr); err != nil {
 			log.Printf("plugin command: %v", err)
@@ -262,6 +297,11 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to resolve managed store path: %v", err)
 	}
+	owner, err := instance.Acquire(filepath.Join(filepath.Dir(storePath), "instance.lock"))
+	if err != nil {
+		log.Fatalf("Cannot start Torana: %v", err)
+	}
+	defer func() { _ = owner.Close() }()
 
 	// Fail closed. Downgrading to defaults here left PII blocking, compaction
 	// and cost accounting silently off behind a single warning line — in a
@@ -304,11 +344,12 @@ func main() {
 	}
 
 	cfg := proxy.Config{
-		Port:            strconv.Itoa(provCfg.Port),
-		HostVersion:     version,
-		Providers:       provCfg,
-		DefaultProvider: os.Getenv("TORANA_DEFAULT_PROVIDER"),
-		ConfigPath:      storePath,
+		Port:               strconv.Itoa(provCfg.Port),
+		HostVersion:        version,
+		Providers:          provCfg,
+		DefaultProvider:    os.Getenv("TORANA_DEFAULT_PROVIDER"),
+		ConfigPath:         storePath,
+		InstanceRecordPath: filepath.Join(filepath.Dir(storePath), "instance.json"),
 	}
 
 	// Initialize OTel BEFORE the server so New can bridge its StatsTracker to
@@ -353,7 +394,10 @@ func main() {
 			"Bind a wildcard address (0.0.0.0 or ::) to serve both, or 127.0.0.1 "+
 			"for loopback only. Plugins cannot be approved until then.", bindHost)
 	}
-	<-ctx.Done()
+	select {
+	case <-ctx.Done():
+	case <-srv.StopRequested():
+	}
 	log.Println("Shutting down...")
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

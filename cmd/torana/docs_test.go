@@ -92,7 +92,7 @@ func productionGoFiles(t *testing.T, includeFixtures bool) map[string]string {
 			return nil
 		}
 		rel, _ := filepath.Rel(root, path)
-		out[rel] = string(body)
+		out[filepath.ToSlash(rel)] = string(body)
 		return nil
 	})
 	if err != nil {

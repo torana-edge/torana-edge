@@ -2521,6 +2521,17 @@ func validateModelServicePath(path string) error {
 	return nil
 }
 
+// ValidateBundleApproval checks the exact digest, grants, failure mode, and
+// resource bindings without executing guest code. Administration uses the same
+// rules as loading, including when approving a currently disabled plugin.
+func ValidateBundleApproval(bundle PluginBundle, approval Approval) error {
+	if _, _, err := validateApproval(bundle, approval); err != nil {
+		return err
+	}
+	_, err := ResolvePluginResources(bundle.Manifest, approval)
+	return err
+}
+
 func validateApproval(bundle PluginBundle, approval Approval) ([]string, string, error) {
 	if approval.Digest == "" || approval.Digest != bundle.Digest {
 		return nil, "", fmt.Errorf("digest mismatch: approved %q, installed %q", approval.Digest, bundle.Digest)

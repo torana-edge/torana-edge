@@ -82,10 +82,11 @@ cargo generate-lockfile      # review and keep the exact dependency graph
 torana plugin install ./my-rust-plugin
 ```
 
-`torana plugin new --language rust` pins `torana-plugin-sdk` to the exact SDK
-Git release tag and package version. The Rust SDK is distributed from its
-GitHub release rather than crates.io, so keep both the `git`/`tag` source and
-the exact `version` requirement when editing the generated `Cargo.toml`.
+`torana plugin new my-plugin --language rust` pins `torana-plugin-sdk` using
+`git` and an exact `rev` in the generated `Cargo.toml`. The current host uses
+SDK v0.5.0, revision `ad98c6d3467f628dd2f630c054715f8b347daa29`. This source
+dependency does not depend on crates.io publication. Keep the immutable
+revision and the generated `Cargo.lock` when editing the project.
 
 Cargo may execute native `build.rs` programs while compiling—before a WASM
 digest exists to approve. Torana therefore refuses one-step installation of a
