@@ -33,6 +33,7 @@ type pluginTestScenario struct {
 	ExpectedHTTP     json.RawMessage   `json:"expected_http"`
 	HTTPPlugin       string            `json:"http_plugin,omitempty"`
 	Tick             json.RawMessage   `json:"tick"`
+	Config           json.RawMessage   `json:"config"`
 	ExpectedError    string            `json:"expected_error,omitempty"`
 }
 
@@ -91,6 +92,14 @@ func testPlugin(args []string, stdout, stderr io.Writer) error {
 	if len(bundle.WASMBytes) == 0 {
 		return errors.New("plugin.wasm is required")
 	}
+	var pluginConfig map[string]json.RawMessage
+	if scenario.Config != nil {
+		decoder := json.NewDecoder(strings.NewReader(string(scenario.Config)))
+		decoder.DisallowUnknownFields()
+		if err := decoder.Decode(&pluginConfig); err != nil {
+			return fmt.Errorf("decode scenario config: %w", err)
+		}
+	}
 	// Discovery consumes a directory of named bundles. Stage exactly the
 	// supplied bundle so this command cannot accidentally run a neighbouring
 	// plugin or use a stale pipeline generation.
@@ -109,7 +118,7 @@ func testPlugin(args []string, stdout, stderr io.Writer) error {
 	rt := wasm.NewRuntime(context.Background())
 	defer rt.Close()
 	pp, err := plugin.NewPipeline(rt, plugin.PluginConfig{
-		Dir: root, Order: []string{bundle.Manifest.Name}, AllowUnapproved: true, Strict: true,
+		Dir: root, Order: []string{bundle.Manifest.Name}, Config: map[string]json.RawMessage{bundle.Manifest.Name: scenario.Config}, AllowUnapproved: true, Strict: true,
 	})
 	if err != nil {
 		return fmt.Errorf("load plugin pipeline: %w", err)
