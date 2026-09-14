@@ -1184,7 +1184,6 @@ func TestLintNegativeHelpersNeverInferStreamWrite(t *testing.T) {
 		"NewStreamAssembler": `sdk.NewStreamAssembler()`,
 		"WithToolAssembly":   `sdk.NewStreamAssembler().WithToolAssembly()`,
 		"Feed":               `sdk.NewStreamAssembler().Feed(nil)`,
-		"Register":           `sdk.NewStreamHandler().Register()`,
 		"OnTextDelta": `sdk.NewStreamHandler().OnTextDelta(func(ctx context.Context, text string) (sdk.TextAction, error) {
 		return sdk.PassText(), nil
 	})`,
@@ -1212,6 +1211,7 @@ func main() {}
 func init() {
 	`+body+`
 }
+
 `)
 			msgs := lintMessages(t, dir)
 			for _, m := range msgs {
@@ -1220,6 +1220,22 @@ func init() {
 				}
 			}
 		})
+	}
+}
+
+func TestLintRegisteredStreamHandlerRequiresHookAndMetaGrants(t *testing.T) {
+	source := `package main
+import ("context"; sdk "github.com/torana-edge/torana-plugin-sdk")
+func main() {}
+func init() { h := sdk.NewStreamHandler(); h.OnTextDelta(func(context.Context,string)(sdk.TextAction,error){ return sdk.PassText(),nil }); h.Register() }`
+	missing := lintMessages(t, writePlugin(t, manifestWith(``, ``), source))
+	assertContains(t, missing, `run_on_stream_chunk`)
+	assertContains(t, missing, `env.meta_get`)
+	valid := lintMessages(t, writePlugin(t, manifestWith(`{"name":"run_on_stream_chunk"}`, `{"name":"env.meta_get","description":"read"},{"name":"env.meta_set","description":"write"}`), source))
+	for _, m := range valid {
+		if strings.Contains(m, "run_on_stream_chunk") || strings.Contains(m, "env.meta_") {
+			t.Fatalf("valid registration diagnostic: %s", m)
+		}
 	}
 }
 
