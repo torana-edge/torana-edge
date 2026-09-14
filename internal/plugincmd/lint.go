@@ -611,6 +611,16 @@ func scanCall(fset *token.FileSet, call *ast.CallExpr, alias, enclosing string, 
 		// OnToolCall on a NewStreamHandler-rooted value in this scope.
 		// OnTextDelta and Register alone never infer the grant; text-only
 		// observers stay grant-free.
+		if sel.Sel.Name == "Register" && streamHandlerValue(sel.X, alias, env) {
+			pos := fset.Position(sel.Pos())
+			u.hooks["run_on_stream_chunk"] = pos
+			if _, seen := u.permissions["env.meta_get"]; !seen {
+				u.permissions["env.meta_get"] = pos
+			}
+			if _, seen := u.permissions["env.meta_set"]; !seen {
+				u.permissions["env.meta_set"] = pos
+			}
+		}
 		if sel.Sel.Name == "OnToolCall" && streamHandlerValue(sel.X, alias, env) {
 			pos := fset.Position(sel.Pos())
 			if _, seen := u.permissions["ir.stream.write"]; !seen {
@@ -677,6 +687,12 @@ func streamHandlerValue(expr ast.Expr, alias string, env handlerProvenance) bool
 			return true
 		}
 		return streamHandlerValue(sel.X, alias, env)
+	case *ast.CompositeLit:
+		if t, ok := e.Type.(*ast.SelectorExpr); ok {
+			if id, ok := t.X.(*ast.Ident); ok && id.Name == alias && t.Sel.Name == "StreamHandler" {
+				return true
+			}
+		}
 	case *ast.SelectorExpr:
 		// A package-qualified selector (sdk.StreamHandler and friends) is a
 		// type or package member, never a constructed value; the alias ident
