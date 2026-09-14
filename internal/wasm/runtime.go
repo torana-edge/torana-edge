@@ -400,11 +400,12 @@ func (p *Plugin) SetResources(resources PluginResources) {
 	p.stateMu.Lock()
 	cloned := clonePluginResources(resources)
 	p.resources = cloned
-	p.privateCacheIdentity, p.cacheIdentityValid = resourceCacheIdentity(p.name, cloned)
+	p.privateCacheIdentity, p.cacheIdentityValid = ResourceCacheIdentity(p.name, cloned)
 	p.stateMu.Unlock()
 }
 
-func resourceCacheIdentity(plugin string, resources PluginResources) (string, bool) {
+// ResourceCacheIdentity scopes cached values to the same immutable bindings as a loaded plugin.
+func ResourceCacheIdentity(plugin string, resources PluginResources) (string, bool) {
 	if len(resources.Credentials) == 0 && len(resources.Files) == 0 && len(resources.HTTP) == 0 && len(resources.ModelServices) == 0 && len(resources.PricingResources) == 0 && len(resources.PromptCachePolicies) == 0 {
 		return plugin, true
 	}
@@ -2563,7 +2564,16 @@ func (r *Runtime) dispatchHostCall(ctx context.Context, pluginName, cmd, args st
 			}
 			response, err := r.HTTPRequestFunc(ctx, pluginName, resource, &a)
 			if err != nil {
-				herr = hostErr(pbv1.ErrorCode_ERROR_CODE_UNAVAILABLE, "HTTP request failed")
+				var classified interface{ HostError() *pbv1.HostError }
+				if errors.As(err, &classified) {
+					if reported := classified.HostError(); reported != nil && reported.Validate() == nil {
+						herr = proto.Clone(reported).(*pbv1.HostError)
+					} else {
+						herr = hostErr(pbv1.ErrorCode_ERROR_CODE_INTERNAL, "HTTP callback returned an invalid refusal")
+					}
+				} else {
+					herr = hostErr(pbv1.ErrorCode_ERROR_CODE_UNAVAILABLE, "HTTP request failed")
+				}
 				break
 			}
 			if response == nil {

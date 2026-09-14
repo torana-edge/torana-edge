@@ -8,14 +8,13 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"reflect"
 	"strings"
 
 	"github.com/torana-edge/torana-edge/internal/engine"
 	"github.com/torana-edge/torana-edge/internal/engine/pbconv"
 	"github.com/torana-edge/torana-edge/internal/plugin"
-	"github.com/torana-edge/torana-edge/internal/wasm"
 	pbv1 "github.com/torana-edge/torana-plugin-sdk/pb/v1"
+	"github.com/torana-edge/torana-plugin-sdk/strictjson"
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
 )
@@ -31,9 +30,11 @@ type pluginTestScenario struct {
 	ExpectedStream   []json.RawMessage `json:"expected_stream"`
 	HTTP             json.RawMessage   `json:"http"`
 	ExpectedHTTP     json.RawMessage   `json:"expected_http"`
-	HTTPPlugin       string            `json:"http_plugin,omitempty"`
 	Tick             json.RawMessage   `json:"tick"`
+	ExpectedTick     json.RawMessage   `json:"expected_tick"`
+	ResponseMutable  *bool             `json:"response_mutable"`
 	Config           json.RawMessage   `json:"config"`
+	Services         *scenarioServices `json:"services"`
 	ExpectedError    string            `json:"expected_error,omitempty"`
 }
 
@@ -48,17 +49,23 @@ func decodeScenarioRequest(raw []byte) (*engine.ChatRequest, error) {
 	return pbconv.FromPBChatRequest(&wire)
 }
 
-func decodeScenarioEvent(raw []byte) (*engine.StreamEvent, error) {
+func decodeScenarioEvent(raw []byte, tracker *pbconv.BlockKindTracker) (*engine.StreamEvent, error) {
 	var wire pbv1.StreamEvent
 	if err := (protojson.UnmarshalOptions{DiscardUnknown: false}).Unmarshal(raw, &wire); err != nil {
 		return nil, err
 	}
-	return (&pbconv.BlockKindTracker{}).FromPBStreamEvent(&wire)
+	if err := wire.Validate(); err != nil {
+		return nil, err
+	}
+	return tracker.FromPBStreamEvent(&wire)
 }
 
 func decodeScenarioResponse(raw []byte) (*engine.ChatResponse, error) {
 	var wire pbv1.ChatResponse
 	if err := (protojson.UnmarshalOptions{DiscardUnknown: false}).Unmarshal(raw, &wire); err != nil {
+		return nil, err
+	}
+	if err := wire.Validate(); err != nil {
 		return nil, err
 	}
 	return pbconv.FromPBChatResponse(&wire), nil
@@ -68,7 +75,7 @@ func decodeScenarioProto(raw []byte, message proto.Message) error {
 	return (protojson.UnmarshalOptions{DiscardUnknown: false}).Unmarshal(raw, message)
 }
 
-func testPlugin(args []string, stdout, stderr io.Writer) error {
+func testPlugin(args []string, stdout, stderr io.Writer) (resultErr error) {
 	if len(args) < 1 || args[0] == "" {
 		return errors.New("plugin directory is required")
 	}
@@ -92,14 +99,6 @@ func testPlugin(args []string, stdout, stderr io.Writer) error {
 	if len(bundle.WASMBytes) == 0 {
 		return errors.New("plugin.wasm is required")
 	}
-	var pluginConfig map[string]json.RawMessage
-	if scenario.Config != nil {
-		decoder := json.NewDecoder(strings.NewReader(string(scenario.Config)))
-		decoder.DisallowUnknownFields()
-		if err := decoder.Decode(&pluginConfig); err != nil {
-			return fmt.Errorf("decode scenario config: %w", err)
-		}
-	}
 	// Discovery consumes a directory of named bundles. Stage exactly the
 	// supplied bundle so this command cannot accidentally run a neighbouring
 	// plugin or use a stale pipeline generation.
@@ -115,15 +114,18 @@ func testPlugin(args []string, stdout, stderr io.Writer) error {
 	if err := copyTree(dir, staged); err != nil {
 		return fmt.Errorf("stage plugin bundle: %w", err)
 	}
-	rt := wasm.NewRuntime(context.Background())
-	defer rt.Close()
-	pp, err := plugin.NewPipeline(rt, plugin.PluginConfig{
-		Dir: root, Order: []string{bundle.Manifest.Name}, Config: map[string]json.RawMessage{bundle.Manifest.Name: scenario.Config}, AllowUnapproved: true, Strict: true,
-	})
+	rt, config, finish, err := buildScenarioRuntime(context.Background(), bundle, scenario.Services, root)
+	if err != nil {
+		return fmt.Errorf("configure scenario services: %w", err)
+	}
+	defer func() { resultErr = errors.Join(resultErr, finish()) }()
+	config.Config = map[string]json.RawMessage{bundle.Manifest.Name: scenario.Config}
+	pp, err := plugin.NewPipeline(rt, config)
 	if err != nil {
 		return fmt.Errorf("load plugin pipeline: %w", err)
 	}
 	defer pp.DrainAndClose()
+	defer pp.EndRequest(1)
 	ctx := context.Background()
 	var runErr error
 	if len(scenario.Request) != 0 {
@@ -154,8 +156,9 @@ func testPlugin(args []string, stdout, stderr io.Writer) error {
 	}
 	if runErr == nil && scenario.Stream != nil {
 		var actual []engine.StreamEvent
+		tracker := &pbconv.BlockKindTracker{}
 		for i, raw := range scenario.Stream {
-			event, err := decodeScenarioEvent(raw)
+			event, err := decodeScenarioEvent(raw, tracker)
 			if err != nil {
 				return fmt.Errorf("decode stream event %d: %w", i, err)
 			}
@@ -173,10 +176,11 @@ func testPlugin(args []string, stdout, stderr io.Writer) error {
 		if runErr == nil {
 			runErr = endErr
 		}
-		if runErr == nil && len(scenario.ExpectedStream) != 0 {
+		if runErr == nil && scenario.ExpectedStream != nil {
+			tracker := &pbconv.BlockKindTracker{}
 			var expected []engine.StreamEvent
 			for i, raw := range scenario.ExpectedStream {
-				event, err := decodeScenarioEvent(raw)
+				event, err := decodeScenarioEvent(raw, tracker)
 				if err != nil {
 					return fmt.Errorf("decode expected stream event %d: %w", i, err)
 				}
@@ -200,7 +204,11 @@ func testPlugin(args []string, stdout, stderr io.Writer) error {
 		if err != nil {
 			return fmt.Errorf("decode scenario response: %w", err)
 		}
-		actual, err := pp.RunAfterResponse(ctx, 1, response, true)
+		mutable := scenario.Stream == nil
+		if scenario.ResponseMutable != nil {
+			mutable = *scenario.ResponseMutable
+		}
+		actual, err := pp.RunAfterResponse(ctx, 1, response, mutable)
 		if err != nil {
 			runErr = err
 		} else if scenario.ExpectedResponse != nil {
@@ -218,7 +226,7 @@ func testPlugin(args []string, stdout, stderr io.Writer) error {
 		if err := decodeScenarioProto(scenario.HTTP, request); err != nil {
 			return fmt.Errorf("decode scenario HTTP request: %w", err)
 		}
-		actual, err := pp.RunOnHTTPRequest(ctx, 1, scenario.HTTPPlugin, request, nil)
+		actual, err := pp.RunOnHTTPRequest(ctx, 1, bundle.Manifest.Name, request, nil)
 		if err != nil {
 			runErr = err
 		} else if scenario.ExpectedHTTP != nil {
@@ -236,24 +244,39 @@ func testPlugin(args []string, stdout, stderr io.Writer) error {
 		if err := decodeScenarioProto(scenario.Tick, tick); err != nil {
 			return fmt.Errorf("decode scenario tick: %w", err)
 		}
-		actual := pp.RunOnTick(ctx, 1, tick)
-		if scenario.ExpectedRequest != nil {
-			var expected []plugin.TickOutcome
-			if err := json.Unmarshal(scenario.ExpectedRequest, &expected); err != nil {
-				return fmt.Errorf("decode expected tick outcomes: %w", err)
+		actual, err := pp.RunOnTickTracked(ctx, 1, tick)
+		if err != nil {
+			runErr = err
+		} else if scenario.ExpectedTick != nil {
+			var expected *pbv1.TickOutcome
+			if string(scenario.ExpectedTick) != "null" {
+				expected = &pbv1.TickOutcome{}
+				if err := decodeScenarioProto(scenario.ExpectedTick, expected); err != nil {
+					return fmt.Errorf("decode expected tick: %w", err)
+				}
 			}
-			if !reflect.DeepEqual(actual, expected) {
-				return fmt.Errorf("tick outcome mismatch: got %s, want %s", compactJSON(actual), compactJSON(expected))
+			var got *pbv1.TickOutcome
+			if len(actual) > 1 {
+				return errors.New("tick returned multiple outcomes for one plugin")
+			}
+			if len(actual) == 1 {
+				got = &pbv1.TickOutcome{Actions: int32(actual[0].Actions), Note: actual[0].Note}
+			}
+			if !proto.Equal(got, expected) {
+				return fmt.Errorf("tick outcome mismatch: got %s, want %s", compactJSON(got), compactJSON(expected))
 			}
 		}
 	}
-	pp.EndRequest(1)
+
 	if scenario.ExpectedError != "" {
 		if runErr == nil || !strings.Contains(runErr.Error(), scenario.ExpectedError) {
 			return fmt.Errorf("expected error %q, got %v", scenario.ExpectedError, runErr)
 		}
 	} else if runErr != nil {
 		return runErr
+	}
+	if err := finish(); err != nil {
+		return err
 	}
 	fmt.Fprintf(stdout, "Plugin test passed: %s\n", bundle.Manifest.Name)
 	return nil
@@ -264,15 +287,46 @@ func readPluginScenario(path string) (pluginTestScenario, error) {
 	if err != nil {
 		return pluginTestScenario{}, fmt.Errorf("read scenario: %w", err)
 	}
+	if object, err := strictjson.DecodeObject(raw); err != nil || object == nil {
+		return pluginTestScenario{}, fmt.Errorf("parse scenario: expected one non-null JSON object: %v", err)
+	}
 	var scenario pluginTestScenario
 	decoder := json.NewDecoder(strings.NewReader(string(raw)))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&scenario); err != nil {
-		return pluginTestScenario{}, fmt.Errorf("parse scenario: %w", err)
+		return scenario, fmt.Errorf("parse scenario: %w", err)
 	}
-	if scenario.Request == nil && scenario.Stream == nil && scenario.ExpectedError == "" {
-		return pluginTestScenario{}, errors.New("scenario has no request or stream events")
+	if scenario.Request == nil && scenario.Stream == nil && scenario.Response == nil && scenario.HTTP == nil && scenario.Tick == nil {
+		return scenario, errors.New("scenario has no hook inputs")
 	}
+	for _, pair := range []struct {
+		name            string
+		input, expected json.RawMessage
+	}{
+		{"request", scenario.Request, scenario.ExpectedRequest}, {"response", scenario.Response, scenario.ExpectedResponse},
+		{"http", scenario.HTTP, scenario.ExpectedHTTP}, {"tick", scenario.Tick, scenario.ExpectedTick},
+	} {
+		if pair.expected != nil && pair.input == nil {
+			return scenario, fmt.Errorf("expected_%s requires %s", pair.name, pair.name)
+		}
+		if pair.input != nil {
+			if object, err := strictjson.DecodeObject(pair.input); err != nil || object == nil {
+				return scenario, fmt.Errorf("%s must be a non-null JSON object: %v", pair.name, err)
+			}
+		}
+	}
+	if scenario.ExpectedStream != nil && scenario.Stream == nil {
+		return scenario, errors.New("expected_stream requires stream")
+	}
+	if scenario.ResponseMutable != nil && scenario.Response == nil {
+		return scenario, errors.New("response_mutable requires response")
+	}
+	if scenario.Config != nil {
+		if object, err := strictjson.DecodeObject(scenario.Config); err != nil || object == nil {
+			return scenario, fmt.Errorf("config must be a non-null JSON object: %v", err)
+		}
+	}
+
 	return scenario, nil
 }
 

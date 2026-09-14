@@ -2,7 +2,6 @@ package plugincmd
 
 import (
 	"context"
-	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -200,37 +199,17 @@ func buildScenarioRuntime(ctx context.Context, bundle *plugin.PluginBundle, serv
 		}
 	}
 
-	resources := wasm.PluginResources{Credentials: map[string]string{}, Files: map[string]wasm.FileResource{}, HTTP: map[string]wasm.HTTPResource{}, ModelServices: map[string]wasm.ModelServiceResource{}, PricingResources: map[string]wasm.PricingResource{}, PromptCachePolicies: map[string]wasm.PromptCacheResource{}}
-	for slot, a := range approval.HTTPEndpoints {
-		timeout, maxRequest, maxResponse := a.TimeoutMS, a.MaxRequestBytes, a.MaxResponseBytes
-		if timeout == 0 {
-			timeout = 5000
-		}
-		if maxRequest == 0 {
-			maxRequest = 1 << 20
-		}
-		if maxResponse == 0 {
-			maxResponse = 4 << 20
-		}
-		methods := map[string]bool{}
-		for _, method := range a.Methods {
-			methods[method] = true
-		}
-		resources.HTTP[slot] = wasm.HTTPResource{Name: slot, Origin: a.Origin, Methods: methods, Timeout: time.Duration(timeout) * time.Millisecond, MaxRequestBytes: maxRequest, MaxResponseBytes: maxResponse, MaxCallsPerMinute: a.MaxCallsPerMinute}
+	resources, err := plugin.ResolvePluginResources(bundle.Manifest, approval)
+	if err != nil {
+		store.Close()
+		_ = os.RemoveAll(stateDir)
+		return nil, plugin.PluginConfig{}, nil, err
 	}
-	for slot, a := range approval.ModelServices {
-		resources.ModelServices[slot] = wasm.ModelServiceResource{Name: slot, Provider: a.Provider, Model: a.Model, Path: a.Path, Timeout: time.Duration(a.TimeoutMS) * time.Millisecond, MaxTokens: a.MaxTokens, MaxInputBytes: a.MaxInputBytes, MaxCallsPerMinute: a.MaxCallsPerMinute, MaxTokensPerHour: a.MaxTokensPerHour}
-	}
-	identity := bundle.Manifest.Name
-	if len(resources.HTTP) != 0 || len(resources.ModelServices) != 0 {
-		raw, marshalErr := json.Marshal(resources)
-		if marshalErr != nil {
-			store.Close()
-			_ = os.RemoveAll(stateDir)
-			return nil, plugin.PluginConfig{}, nil, marshalErr
-		}
-		digest := sha256.Sum256(raw)
-		identity += "\x00resources\x00" + string(digest[:])
+	identity, valid := wasm.ResourceCacheIdentity(bundle.Manifest.Name, resources)
+	if !valid {
+		store.Close()
+		_ = os.RemoveAll(stateDir)
+		return nil, plugin.PluginConfig{}, nil, errors.New("invalid scenario resource identity")
 	}
 	for key, value := range services.Cache.Private {
 		if err := store.Set(ctx, wasm.PrivateCacheKey(identity, key), value, time.Hour); err != nil {

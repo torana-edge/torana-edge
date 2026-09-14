@@ -80,3 +80,34 @@ func TestScenarioServicesReportsUnusedFixture(t *testing.T) {
 		t.Fatalf("finish error = %v", err)
 	}
 }
+
+func TestPluginTestRunsCompiledPlatformServices(t *testing.T) {
+	request := &pbv1.ChatRequest{Model: "m", Messages: []*pbv1.Message{{Role: "user", Blocks: []*pbv1.RequestBlock{{Kind: &pbv1.RequestBlock_Text{Text: &pbv1.RequestTextBlock{Text: "summarize"}}}}}}}
+	modelRequest := &pbv1.ModelCompleteArgs{Service: "summarizer", Messages: request.Messages}
+	modelResponse := &pbv1.ModelCompleteResult{Message: &pbv1.ResponseMessage{Blocks: []*pbv1.ResponseBlock{{Kind: &pbv1.ResponseBlock_Text{Text: &pbv1.ResponseTextBlock{Text: "summary"}}}}}}
+	httpRequest := &pbv1.OutboundHTTPRequestArgs{Endpoint: "lookup", Method: "POST", Path: "/lookup", Body: []byte("summary")}
+	for _, refused := range []bool{false, true} {
+		t.Run(map[bool]string{false: "success", true: "classified_refusal"}[refused], func(t *testing.T) {
+			httpFixture := scenarioHTTPFixture{Request: serviceJSON(t, httpRequest)}
+			expected := proto.Clone(request).(*pbv1.ChatRequest)
+			if refused {
+				httpFixture.Error = serviceJSON(t, &pbv1.HostError{Code: pbv1.ErrorCode_ERROR_CODE_PERMISSION_DENIED, Message: "fixture refusal"})
+				expected.Model = "refused:ERROR_CODE_PERMISSION_DENIED"
+			} else {
+				httpFixture.Response = serviceJSON(t, &pbv1.OutboundHTTPResponse{Status: 200, Body: []byte("looked-up")})
+				expected.Model = "durable:private:shared:summary:looked-up"
+			}
+			scenario := pluginTestScenario{Request: serviceJSON(t, request), ExpectedRequest: serviceJSON(t, expected), Services: &scenarioServices{
+				Cache: scenarioCacheServices{Private: map[string]string{"seed": "private"}, Shared: map[string]string{"seed": "shared"}}, State: map[string]string{"seed": "durable"},
+				HTTP: map[string][]scenarioHTTPFixture{"lookup": {httpFixture}}, Model: map[string][]scenarioModelFixture{"summarizer": {{Request: serviceJSON(t, modelRequest), Response: serviceJSON(t, modelResponse)}}},
+			}}
+			raw, err := json.Marshal(map[string]any{"request": scenario.Request, "expected_request": scenario.ExpectedRequest, "services": scenario.Services})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := runCompiledScenario(t, "test-platform-services", string(raw)); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
