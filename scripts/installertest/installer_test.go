@@ -434,7 +434,10 @@ func TestInstallerFailsClosed(t *testing.T) {
 			must(t, os.WriteFile(filepath.Join(f.installDir, f.bin), previous, 0o700))
 			tc.edit(f)
 			output, err := f.run()
-			if err == nil || !strings.Contains(strings.ToLower(output), strings.ToLower(tc.want)) {
+			// Windows PowerShell wraps error messages to the host's console
+			// width, even with redirected output. Compare message words.
+			normalized := strings.ToLower(strings.Join(strings.Fields(output), " "))
+			if err == nil || !strings.Contains(normalized, strings.ToLower(tc.want)) {
 				// Unix's message is plural; Windows includes the exact unsupported architecture.
 				if tc.name != "unsupported architecture" || err == nil || !strings.Contains(output, "Unsupported architecture") {
 					t.Fatalf("wanted failure containing %q, got %v:\n%s", tc.want, err, output)

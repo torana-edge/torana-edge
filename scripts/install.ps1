@@ -120,7 +120,9 @@ try {
     # Same-volume replacement preserves the previous executable if replacement
     # fails (e.g. an instance is running); never delete the old file first.
     if (Test-Path -LiteralPath $destination) {
-        [IO.File]::Replace($staged, $destination, $null)
+        # PowerShell converts $null to an empty string for this .NET string
+        # parameter. NullString passes the actual null required for no backup.
+        [IO.File]::Replace($staged, $destination, [NullString]::Value)
     } else {
         [IO.File]::Move($staged, $destination)
     }
