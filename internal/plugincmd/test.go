@@ -27,6 +27,26 @@ type pluginTestScenario struct {
 	ExpectedError   string            `json:"expected_error,omitempty"`
 }
 
+type canonicalScenarioRequest struct {
+	Model    string `json:"model"`
+	Messages []struct {
+		Role string `json:"role"`
+		Text string `json:"text"`
+	} `json:"messages"`
+}
+
+func decodeScenarioRequest(raw []byte) (*engine.ChatRequest, error) {
+	var wire canonicalScenarioRequest
+	if err := json.Unmarshal(raw, &wire); err != nil {
+		return nil, err
+	}
+	request := &engine.ChatRequest{Model: wire.Model}
+	for _, message := range wire.Messages {
+		request.Messages = append(request.Messages, engine.Message{Role: engine.Role(message.Role), Blocks: []engine.Block{{Text: &engine.TextBlock{Text: message.Text}}}})
+	}
+	return request, nil
+}
+
 func testPlugin(args []string, stdout, stderr io.Writer) error {
 	if len(args) < 1 || args[0] == "" {
 		return errors.New("plugin directory is required")
@@ -60,6 +80,9 @@ func testPlugin(args []string, stdout, stderr io.Writer) error {
 	}
 	defer os.RemoveAll(root)
 	staged := filepath.Join(root, bundle.Manifest.Name)
+	if err := os.MkdirAll(staged, 0o755); err != nil {
+		return fmt.Errorf("create plugin staging directory: %w", err)
+	}
 	if err := copyTree(dir, staged); err != nil {
 		return fmt.Errorf("stage plugin bundle: %w", err)
 	}
@@ -75,20 +98,20 @@ func testPlugin(args []string, stdout, stderr io.Writer) error {
 	ctx := context.Background()
 	var runErr error
 	if len(scenario.Request) != 0 {
-		var request engine.ChatRequest
-		if err := json.Unmarshal(scenario.Request, &request); err != nil {
+		request, err := decodeScenarioRequest(scenario.Request)
+		if err != nil {
 			return fmt.Errorf("decode scenario request: %w", err)
 		}
-		actual, _, err := pp.RunBeforeRequestTracked(ctx, 1, &request, nil)
+		actual, _, err := pp.RunBeforeRequestTracked(ctx, 1, request, nil)
 		if err != nil {
 			runErr = err
 		} else if len(scenario.ExpectedRequest) != 0 {
-			var expected engine.ChatRequest
-			if err := json.Unmarshal(scenario.ExpectedRequest, &expected); err != nil {
+			expected, err := decodeScenarioRequest(scenario.ExpectedRequest)
+			if err != nil {
 				return fmt.Errorf("decode expected request: %w", err)
 			}
-			if !reflect.DeepEqual(actual, &expected) {
-				return fmt.Errorf("request mismatch: got %s, want %s", compactJSON(actual), compactJSON(&expected))
+			if !reflect.DeepEqual(actual, expected) {
+				return fmt.Errorf("request mismatch: got %s, want %s", compactJSON(actual), compactJSON(expected))
 			}
 		}
 	}
@@ -106,8 +129,12 @@ func testPlugin(args []string, stdout, stderr io.Writer) error {
 			}
 			actual = append(actual, out...)
 		}
+		// Finalization is mandatory even after a callback or verifier failure:
+		// it releases the stream journal and validates that no buffered prefix
+		// can be silently discarded.
+		endErr := pp.EndStreamVerified(1)
 		if runErr == nil {
-			runErr = pp.EndStreamVerified(1)
+			runErr = endErr
 		}
 		if runErr == nil && len(scenario.ExpectedStream) != 0 {
 			var expected []engine.StreamEvent
