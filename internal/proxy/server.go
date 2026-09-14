@@ -3868,12 +3868,10 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	// Retire the active generation through the same bounded wait as older
 	// generations. Hijacked connections can outlive http.Server.Shutdown.
 	s.rebuildMu.Lock()
+	defer s.rebuildMu.Unlock()
 	if pp := s.pluginPipeline.Load(); pp != nil {
 		s.retireAsyncLocked(pp.(*plugin.PluginPipeline).DrainAndClose)
 	}
-	s.rebuildMu.Unlock()
-	s.rebuildMu.Lock()
-	defer s.rebuildMu.Unlock()
 	for _, done := range s.retirements {
 		select {
 		case <-done:
