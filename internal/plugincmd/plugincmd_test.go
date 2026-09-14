@@ -221,7 +221,11 @@ func TestScaffoldSDKVersionMatchesTheHost(t *testing.T) {
 // module declaring an older Go version than the SDK requires does not build,
 // and nothing previously asserted it at all.
 func TestScaffoldGoVersionSatisfiesTheSDK(t *testing.T) {
-	const sdkGoMod = "../../../torana-plugin-sdk/go.mod"
+	sdkRoot := os.Getenv("TORANA_SDK_DIR")
+	if sdkRoot == "" {
+		sdkRoot = "../../../torana-plugin-sdk"
+	}
+	sdkGoMod := filepath.Join(sdkRoot, "go.mod")
 	raw, err := os.ReadFile(sdkGoMod)
 	if err != nil {
 		t.Skip("torana-plugin-sdk not checked out beside this repo")

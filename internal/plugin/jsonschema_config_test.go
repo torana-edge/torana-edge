@@ -156,7 +156,10 @@ func countScalarProperties(raw []byte) int {
 // official repo is checked out alongside, every one of its plugins should now
 // render a form.
 func TestRealOfficialPluginSchemas(t *testing.T) {
-	const dir = "../../../torana-plugins/plugins"
+	dir := os.Getenv("TORANA_PLUGIN_SOURCE_DIR")
+	if dir == "" {
+		dir = "../../../torana-plugins/plugins"
+	}
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		t.Skip("official plugins repo not checked out alongside")
