@@ -702,10 +702,10 @@ func isStreamHandlerRoot(sel *ast.SelectorExpr, alias string) bool {
 // anything else is namespaced under env.host_call. The two names are not
 // derivable from each other, which is exactly why a linter is worth having.
 func permissionForCommand(cmd string) string {
-	if strings.HasPrefix(cmd, "env.") {
-		return cmd
+	if perm, ok := sdk.CommandPermission(cmd); ok {
+		return perm
 	}
-	return "env.host_call." + cmd
+	return "<unknown command: " + cmd + ">"
 }
 
 func sdkAlias(file *ast.File) string {
