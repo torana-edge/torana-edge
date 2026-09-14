@@ -87,7 +87,7 @@ func TestPortableOutputFormatRefusesUnsupportedMode(t *testing.T) {
 func TestOutputFormatIsPartOfObservablePrefix(t *testing.T) {
 	req := &pb.ChatRequest{Model: "m", Messages: []*pb.Message{{Role: "user", Blocks: []*pb.RequestBlock{{Kind: &pb.RequestBlock_Text{Text: &pb.RequestTextBlock{Text: "question"}}}, {Kind: &pb.RequestBlock_CacheBreakpoint{CacheBreakpoint: &pb.RequestCacheBreakpoint{MarkerJson: []byte(`{"type":"ephemeral"}`)}}}}}}}
 	before := engine.CachePrefixKey(req)
-	req.OutputFormat = &pb.OutputFormat{Mode: pb.OutputFormat_JSON_SCHEMA, Name: "answer", SchemaJson: []byte(`{"type":"object"}`)}
+	req.OutputFormat = &pb.OutputFormat{Mode: pb.OutputFormat_MODE_JSON_SCHEMA, Name: "answer", SchemaJson: []byte(`{"type":"object"}`)}
 	after := engine.CachePrefixKey(req)
 	if before == "" || after == "" || before == after {
 		t.Fatalf("output constraint missing from cache identity: %s -> %s", before, after)

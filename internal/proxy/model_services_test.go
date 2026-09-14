@@ -337,7 +337,7 @@ func TestBoundModelServicePreservesToolsAndOutputConstraints(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer server.Shutdown(context.Background())
-			args := &pbv1.ModelCompleteArgs{Service: "classifier", Messages: []*pbv1.Message{{Role: "user", Blocks: modelTextBlocks("question")}}, Tools: []*pbv1.ToolDef{{Name: "lookup", ParametersJson: []byte(`{"type":"object","properties":{"n":{"type":"integer"}}}`)}}, OutputFormat: &pbv1.OutputFormat{Mode: pbv1.OutputFormat_JSON_SCHEMA, Name: "answer", SchemaJson: []byte(`{"type":"object"}`)}}
+			args := &pbv1.ModelCompleteArgs{Service: "classifier", Messages: []*pbv1.Message{{Role: "user", Blocks: modelTextBlocks("question")}}, Tools: []*pbv1.ToolDef{{Name: "lookup", ParametersJson: []byte(`{"type":"object","properties":{"n":{"type":"integer"}}}`)}}, OutputFormat: &pbv1.OutputFormat{Mode: pbv1.OutputFormat_MODE_JSON_SCHEMA, Name: "answer", SchemaJson: []byte(`{"type":"object"}`)}}
 			result, refusal := server.completeModel(context.Background(), "fixture", wasm.ModelServiceResource{Name: "classifier", Provider: "bound", Model: "operator-model", Path: tc.path, Timeout: time.Second, MaxTokens: 40, MaxInputBytes: 2000, MaxCallsPerMinute: 10, MaxTokensPerHour: 1000}, args)
 			if refusal != nil || result == nil {
 				t.Fatalf("model service failed: %v", refusal)

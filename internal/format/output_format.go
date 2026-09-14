@@ -112,9 +112,9 @@ func ExtractOutputFormat(chat *engine.ChatRequest, provider string) error {
 		if mime != "application/json" {
 			return nil
 		}
-		f.Mode = pb.OutputFormat_JSON_OBJECT
+		f.Mode = pb.OutputFormat_MODE_JSON_OBJECT
 		if schema, ok := fields["responseJsonSchema"]; ok {
-			f.Mode = pb.OutputFormat_JSON_SCHEMA
+			f.Mode = pb.OutputFormat_MODE_JSON_SCHEMA
 			f.Name = "response"
 			f.SchemaJson = append([]byte(nil), schema...)
 		}
@@ -147,11 +147,11 @@ func ExtractOutputFormat(chat *engine.ChatRequest, provider string) error {
 		}
 		switch kind {
 		case "text":
-			f.Mode = pb.OutputFormat_TEXT
+			f.Mode = pb.OutputFormat_MODE_TEXT
 		case "json_object":
-			f.Mode = pb.OutputFormat_JSON_OBJECT
+			f.Mode = pb.OutputFormat_MODE_JSON_OBJECT
 		case "json_schema":
-			f.Mode = pb.OutputFormat_JSON_SCHEMA
+			f.Mode = pb.OutputFormat_MODE_JSON_SCHEMA
 			schemaFields := fields
 			if provider == "openai" && chat.OpenAIVariant != engine.OpenAIResponses {
 				schemaFields = nil
@@ -252,13 +252,13 @@ func ApplyOutputFormat(raw []byte, chat *engine.ChatRequest, provider string) ([
 		if err != nil {
 			return nil, err
 		}
-		if f.Mode != int32(pb.OutputFormat_TEXT) {
+		if f.Mode != int32(pb.OutputFormat_MODE_TEXT) {
 			gc, err = gc.SetMember("responseMimeType", []byte(`"application/json"`))
 			if err != nil {
 				return nil, err
 			}
 		}
-		if f.Mode == int32(pb.OutputFormat_JSON_SCHEMA) {
+		if f.Mode == int32(pb.OutputFormat_MODE_JSON_SCHEMA) {
 			gc, err = gc.SetMember("responseJsonSchema", f.Schema.Bytes())
 			if err != nil {
 				return nil, err
@@ -269,17 +269,17 @@ func ApplyOutputFormat(raw []byte, chat *engine.ChatRequest, provider string) ([
 		}
 		encoded = gc.Bytes()
 	case "anthropic":
-		if f.Mode == int32(pb.OutputFormat_TEXT) {
+		if f.Mode == int32(pb.OutputFormat_MODE_TEXT) {
 			return raw, nil
 		}
-		if f.Mode != int32(pb.OutputFormat_JSON_SCHEMA) || f.Strict != nil {
+		if f.Mode != int32(pb.OutputFormat_MODE_JSON_SCHEMA) || f.Strict != nil {
 			return nil, fmt.Errorf("Anthropic supports schema output without an explicit strict option")
 		}
 		encoded, err = json.Marshal(map[string]any{"type": "json_schema", "schema": json.RawMessage(f.Schema.Bytes())})
 	case "openai":
 		mode := []string{"text", "json_object", "json_schema"}[f.Mode]
 		fields := map[string]any{"type": mode}
-		if f.Mode == int32(pb.OutputFormat_JSON_SCHEMA) {
+		if f.Mode == int32(pb.OutputFormat_MODE_JSON_SCHEMA) {
 			schema := map[string]any{"name": f.Name, "schema": json.RawMessage(f.Schema.Bytes())}
 			if f.Strict != nil {
 				schema["strict"] = *f.Strict
