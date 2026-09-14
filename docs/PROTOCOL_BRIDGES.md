@@ -134,6 +134,9 @@ alias. The original-request host call retains the client's original model and
 content. Responses instructions and generation parameters are canonical fields,
 so the same plugin helpers can inspect or modify them across APIs. Responses
 instruction placement remains host-owned topology.
+An approved request plugin with `ir.params.write` may change `Stream`; the
+upstream endpoint and client response mode follow that accepted value, as on
+native routes. The original-request snapshot still retains the caller's mode.
 
 Response hooks operate on the actual upstream's canonical response before
 client serialization. Native source usage drives host accounting. Client usage
@@ -174,6 +177,27 @@ A harness that requires one of those APIs or provider-native tools needs
 additional contract support; configuring its base URL alone is not proof of
 full harness compatibility.
 
+## Diagnose an upstream rejection
+
+Client error responses retain the upstream HTTP status and a generic,
+client-shaped message. Audit records identify these as `bridge_upstream_error`.
+With `--debug`, a diagnostic records the request ID, provider, source and client
+protocols, and status without logging response bodies.
+
+For details such as an upstream model-name or token-limit rejection, explicitly
+enable error-body diagnostics:
+
+```sh
+TORANA_DEBUG_UPSTREAM_ERRORS=1 ./torana --debug
+```
+
+This logs up to 8 KiB of each bridged upstream error body, with control characters
+escaped and truncation/read-failure flags. It also covers translated plugin
+`send_request` errors. Upstream errors can echo prompts or credentials, so this
+opt-in produces sensitive local logs; disable it after diagnosis. Bodies remain
+absent from client errors and audit records. Torana does not log response headers
+or upstream URLs in these diagnostics.
+
 ## Implementation and verification
 
 `internal/bridge` separates protocol identity, request projection, complete
@@ -190,6 +214,13 @@ CI also exports JSON and text/tool SSE fixtures for the pinned OpenAI and
 Anthropic SDKs. The [client validation script](../scripts/validate-bridge-sdk.py)
 checks required wire fields and exercises the SDK stream accumulators with
 mock transports, including interleaved tool arguments and terminal usage.
+CI installs the complete transitive dependency lock with `--require-hashes` and
+`--only-binary=:all:`. To update it, edit
+`scripts/bridge-sdk-validation-requirements.in` and run the `uv pip compile`
+command recorded at the top of the generated `.txt` file (Python 3.10 or later).
+
+See [upgrade notes](UPGRADE_NOTES.md) for the canonical Responses plugin fields
+and the one-time cache-prefix identity change.
 
 The [research notes](design/PROTOCOL_BRIDGE_RESEARCH.md) record pinned source
 and tests from Bifrost, CLIProxyAPI and LiteLLM. They informed stream state,

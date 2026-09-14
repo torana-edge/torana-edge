@@ -1,0 +1,4 @@
+# Direct SDK versions. Regenerate the full hash lock with the command recorded
+# in bridge-sdk-validation-requirements.txt.
+openai==2.45.0
+anthropic==0.125.0

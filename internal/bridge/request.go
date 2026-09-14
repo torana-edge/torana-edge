@@ -3,7 +3,6 @@ package bridge
 import (
 	"encoding/json"
 	"math"
-	"net/url"
 	"strings"
 
 	"github.com/torana-edge/torana-edge/internal/engine"
@@ -159,7 +158,8 @@ func geminiPair(a, b Protocol) bool {
 	return (a == Gemini || a == GeminiCodeAssist) && (b == Gemini || b == GeminiCodeAssist)
 }
 
-// Endpoint is relative to the configured provider base path. A base ending in
+// Endpoint returns a decoded URL.Path relative to the configured provider base
+// path; net/url escapes it when writing the request. A base ending in
 // /v1 should use an origin instead: protocol endpoints already include a version.
 func Endpoint(p Protocol, model string, stream bool) (string, string, error) {
 	switch p {
@@ -177,7 +177,7 @@ func Endpoint(p Protocol, model string, stream bool) (string, string, error) {
 		if stream {
 			suffix, query = ":streamGenerateContent", "alt=sse"
 		}
-		return "/v1beta/models/" + url.PathEscape(model) + suffix, query, nil
+		return "/v1beta/models/" + model + suffix, query, nil
 	case GeminiCodeAssist:
 		if stream {
 			return "/v1internal:streamGenerateContent", "alt=sse", nil

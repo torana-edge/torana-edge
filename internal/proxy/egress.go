@@ -551,7 +551,7 @@ func (s *Server) sendPluginRequestWithBudget(ctx context.Context, pluginName, pa
 	if clientProtocol.Valid() && options.sourceResult == nil {
 		if resp.StatusCode >= http.StatusBadRequest {
 			mapped := &http.Response{StatusCode: resp.StatusCode, Header: make(http.Header), Body: io.NopCloser(bytes.NewReader(respBody))}
-			bridgeUpstreamError(mapped, &bridgeExchange{Client: clientProtocol, Upstream: prov.Bridge.Upstream})
+			bridgeUpstreamError(callCtx, mapped, &bridgeExchange{Client: clientProtocol, Upstream: prov.Bridge.Upstream}, req.Provider)
 			clientBody, _ = io.ReadAll(mapped.Body)
 			_ = mapped.Body.Close()
 		} else {

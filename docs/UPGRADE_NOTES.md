@@ -1,5 +1,24 @@
 # Upgrade notes
 
+## Responses fields in plugins
+
+Responses `instructions`, `max_output_tokens`, `temperature`, and `top_p` now
+populate canonical IR fields. Plugins must use the system message and canonical
+generation-parameter fields to inspect or change them. Responses replacements
+that put canonical wire members (`model`, `instructions`, `input`, `tools`,
+`stream`, `max_output_tokens`, `temperature`, or `top_p`) in
+`provider_extensions_json` are rejected instead of overriding the checked IR.
+ABI remains v1 and official plugins need no release or pin change; custom
+plugins that used those extension members must update their field access.
+
+## Prompt-cache prefix identity
+
+Cache-prefix fingerprints now include Responses instruction placement. This
+rotates existing prefix keys once for **all request formats**, including native
+routes without a bridge. Existing entries under old keys will miss until the
+cache warms again; operators may see a temporary reduction in cache hit rates.
+The change prevents distinct Responses request layouts from sharing a key.
+
 ## Provider base URLs
 
 Provider base URLs containing a query string, fragment, or userinfo now fail

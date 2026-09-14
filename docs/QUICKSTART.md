@@ -54,7 +54,8 @@ curl --fail-with-body http://127.0.0.1:8080/provider/deepseek/v1/chat/completion
 The health endpoint returns `{"status":"ok"}` and the second command returns a
 normal provider response. The debug terminal prints safe request-received and
 request-completed lines, so you can verify the traffic really crossed Torana;
-it never logs headers or bodies.
+by default it never logs headers or bodies. Bridge error-body diagnostics have a
+separate [explicit opt-in](PROTOCOL_BRIDGES.md#diagnose-an-upstream-rejection).
 
 ## Configure
 

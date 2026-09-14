@@ -1470,7 +1470,8 @@ func New(cfg Config) (*Server, error) {
 			if resp.StatusCode >= 400 {
 				ctx := resp.Request.Context()
 				if e := exchangeFrom(ctx); e != nil {
-					bridgeUpstreamError(resp, e)
+					rs.AuditErrorCode = "bridge_upstream_error"
+					bridgeUpstreamError(ctx, resp, e, rs.Provider)
 				}
 				rs := reqStateFrom(ctx)
 				// Intercepted, exactly as the success path below requires a
@@ -1508,7 +1509,7 @@ func New(cfg Config) (*Server, error) {
 				// A translated stream cannot be mistaken for a complete JSON
 				// response, nor can an HTML/gzip error escape under another API.
 				isStream := isEventStreamMediaType(contentType)
-				if isStream != e.ClientRequest.Stream || (!isStream && !isJSONMediaType(contentType)) ||
+				if e.AcceptedRequest == nil || isStream != e.AcceptedRequest.Stream || (!isStream && !isJSONMediaType(contentType)) ||
 					(isStream && resp.Header.Get("Content-Encoding") != "" && resp.Header.Get("Content-Encoding") != "identity") {
 					setBridgeResponse(resp, bridgeResponseError(e.Client, http.StatusBadGateway, nil))
 					return nil

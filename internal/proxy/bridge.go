@@ -6,8 +6,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
+	"os"
 
 	"github.com/torana-edge/torana-edge/internal/bridge"
 	"github.com/torana-edge/torana-edge/internal/engine"
@@ -133,7 +135,40 @@ func clientErrorFormat(ctx context.Context, fallback string) string {
 	return fallback
 }
 
-func bridgeUpstreamError(resp *http.Response, e *bridgeExchange) {
+// Body diagnostics are separately opt-in: ordinary --debug promises to keep
+// headers and bodies out of logs. Upstream error bodies may echo client data.
+const maxBridgeErrorDiagnosticBytes = 8 * 1024
+
+func logBridgeUpstreamError(ctx context.Context, resp *http.Response, e *bridgeExchange, providerName string) {
+	if !debugEnabled() {
+		return
+	}
+	var id uint64
+	if rs := reqStateFrom(ctx); rs != nil {
+		id = rs.ID
+	}
+	if os.Getenv("TORANA_DEBUG_UPSTREAM_ERRORS") != "1" {
+		log.Printf("[debug] bridge upstream error id=%d provider=%q client=%s upstream=%s status=%d body_logged=false",
+			id, providerName, e.Client, e.Upstream, resp.StatusCode)
+		return
+	}
+	var body []byte
+	var err error
+	if resp.Body != nil {
+		body, err = io.ReadAll(io.LimitReader(resp.Body, maxBridgeErrorDiagnosticBytes+1))
+	}
+	truncated := len(body) > maxBridgeErrorDiagnosticBytes
+	if truncated {
+		body = body[:maxBridgeErrorDiagnosticBytes]
+	}
+	// %q escapes control characters, keeping one bounded diagnostic record even
+	// when the upstream returns arbitrary text. Never log response headers/URLs.
+	log.Printf("[debug] bridge upstream error id=%d provider=%q client=%s upstream=%s status=%d body_logged=true body_truncated=%t body_read_failed=%t body=%q",
+		id, providerName, e.Client, e.Upstream, resp.StatusCode, truncated, err != nil, body)
+}
+
+func bridgeUpstreamError(ctx context.Context, resp *http.Response, e *bridgeExchange, providerName string) {
+	logBridgeUpstreamError(ctx, resp, e, providerName)
 	status := resp.StatusCode
 	code := "api_error"
 	switch {

@@ -32,7 +32,7 @@ jobs:
       - name: Install pinned client SDKs
         run: |
           python3 -m venv "$RUNNER_TEMP/bridge-sdk-venv"
-          "$RUNNER_TEMP/bridge-sdk-venv/bin/pip" install -r scripts/bridge-sdk-validation-requirements.txt
+          "$RUNNER_TEMP/bridge-sdk-venv/bin/pip" install --require-hashes --only-binary=:all: -r scripts/bridge-sdk-validation-requirements.txt
       - name: Generate bridge contract fixtures
         env:
           GOWORK: "off"

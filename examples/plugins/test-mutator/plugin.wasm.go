@@ -27,6 +27,12 @@ func init() {
 	sdk.OnBeforeRequest(func(ctx context.Context, req *pb.ChatRequest) (sdk.RequestResult, error) {
 		changed := false
 		for _, m := range req.Messages {
+			// Dedicated trigger for stream-mode replacement regressions. The
+			// fixture has ir.params.write, which includes the Stream ABI field.
+			if m.Role == "user" && blockutil.TextOf(m) == "toggle stream mode" {
+				req.Stream = !req.Stream
+				changed = true
+			}
 			if m.Role == "system" && blockutil.TextOf(m) == "original instructions" {
 				blockutil.SetText(m, "replacement instructions")
 				changed = true
