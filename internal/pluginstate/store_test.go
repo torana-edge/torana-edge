@@ -190,8 +190,12 @@ func TestCorruptFileDoesNotBlockStartup(t *testing.T) {
 	if s == nil {
 		t.Fatal("a corrupt file must still yield a usable store")
 	}
-	if err := s.Set("warmer", "k", "v"); err != nil {
-		t.Errorf("store unusable after a corrupt load: %v", err)
+	if err := s.Set("warmer", "k", "v"); err == nil {
+		t.Error("corrupt store accepted a write")
+	}
+	got, readErr := os.ReadFile(path)
+	if readErr != nil || string(got) != "{not json" {
+		t.Errorf("corrupt file changed after rejected write: %q (%v)", got, readErr)
 	}
 }
 
