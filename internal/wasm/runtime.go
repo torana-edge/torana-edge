@@ -191,6 +191,7 @@ type Plugin struct {
 	idleTimeout       time.Duration
 	streamBufferBytes uint64
 	maxCacheTTL       time.Duration
+	executionInfoFunc func(context.Context) *pbv1.ExecutionInfo
 
 	instanceCount uint64
 }
@@ -823,6 +824,23 @@ func (p *Plugin) CallRequest(ctx context.Context, hook pbv1.Hook, reqID uint64, 
 	if uint64(len(inBytes)) > math.MaxUint32 {
 		return fmt.Errorf("wasm: %s input exceeds 32-bit Wasm memory", p.name)
 	}
+	// Host owns execution metadata and injects it into the validated envelope.
+	var envelope pbv1.HookInput
+	if err := proto.Unmarshal(inBytes, &envelope); err != nil {
+		return fmt.Errorf("wasm: %s invalid hook input: %w", p.name, err)
+	}
+	if err := envelope.ValidateFor(hook); err != nil {
+		return fmt.Errorf("wasm: %s invalid hook input: %w", p.name, err)
+	}
+	if envelope.RequestId != reqID {
+		return fmt.Errorf("wasm: %s hook input request id mismatch", p.name)
+	}
+	if p.executionInfoFunc != nil {
+		if info := p.executionInfoFunc(ctx); info != nil {
+			envelope.Execution = proto.Clone(info).(*pbv1.ExecutionInfo)
+		}
+	}
+	inBytes, _ = proto.Marshal(&envelope)
 	// Carry the request ID into host functions (wazero propagates the
 	// fn.Call context) so meta state is scoped per request.
 	ctx = context.WithValue(ctx, reqIDKey{}, reqID)
@@ -1058,6 +1076,7 @@ type Runtime struct {
 	StateCompareAndSetFunc    func(plugin, key, value string, expected *string) (bool, string, error)
 	StateCompareAndDeleteFunc func(plugin, key, expected string) (bool, error)
 	StateScanFunc             func(plugin, prefix, cursor string, limit, maxBytes int) ([]pluginstate.PageEntry, string, error)
+	ExecutionInfoFunc         func(context.Context) *pbv1.ExecutionInfo
 
 	// SendRequestFunc backs torana_send_request: a plugin-originated provider
 	// request. The plugin name is passed so the host can meter it against that
@@ -1593,6 +1612,7 @@ func (r *Runtime) LoadPlugin(name string, wasmBytes []byte) (*Plugin, error) {
 		callTimeout:       r.options.CallTimeout,
 		idleTimeout:       r.options.InstanceIdleTimeout,
 		streamBufferBytes: r.options.MaxStreamBufferBytes,
+		executionInfoFunc: r.ExecutionInfoFunc,
 		maxCacheTTL:       r.options.MaxCacheTTL,
 	}
 	p.privateCacheIdentity = name

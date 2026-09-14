@@ -3399,6 +3399,23 @@ func (s *Server) newRuntime() *wasm.Runtime {
 		rt.StateCompareAndDeleteFunc = s.pluginState.CompareAndDelete
 		rt.StateScanFunc = s.pluginState.Scan
 	}
+	rt.ExecutionInfoFunc = func(ctx context.Context) *pbv1.ExecutionInfo {
+		rs := reqStateFrom(ctx)
+		info := &pbv1.ExecutionInfo{MaxMemoryBytes: 64 << 20, MaxHostResponseBytes: 1 << 20, MaxStreamBufferBytes: 4 << 20}
+		if rs == nil {
+			return info
+		}
+		info.Provider, info.Model, info.SyntheticResponse = rs.Provider, rs.Model, rs.Synthetic
+		if rs.ConversationID != "" {
+			v := rs.ConversationID
+			info.ConversationId = &v
+		}
+		if d, ok := ctx.Deadline(); ok {
+			v := d.UnixMilli()
+			info.DeadlineUnixMs = &v
+		}
+		return info
+	}
 	// Plugin-originated egress: refusals return framed in the HostError arm
 	// (INVALID_ARGUMENT / NOT_CONFIGURED / UNAVAILABLE); the value arm carries
 	// provider outcomes only.
