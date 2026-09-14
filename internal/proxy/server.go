@@ -3834,6 +3834,10 @@ func (s *Server) Serve(ln net.Listener) error {
 }
 
 func (s *Server) Shutdown(ctx context.Context) error {
+	// Close only stops these background janitors; in-flight users can still
+	// access their state. Stop them on every return, including deadline paths.
+	defer s.rateLimiter.Close()
+	defer s.conversations.Close()
 	if s.pluginHTTP != nil {
 		defer s.pluginHTTP.CloseIdleConnections()
 	}
@@ -3876,13 +3880,12 @@ func (s *Server) Shutdown(ctx context.Context) error {
 		select {
 		case <-done:
 		case <-ctx.Done():
-			// Keep the cache owned by the server while a generation can still
-			// use it. A subsequent Shutdown can finish draining and close it.
+			// Retain the cache and audit writer for in-flight work: request
+			// completion still appends audit records. A subsequent Shutdown
+			// drains and closes both. The independent janitors stop via defer.
 			return ctx.Err()
 		}
 	}
-	s.rateLimiter.Close()
-	s.conversations.Close()
 	s.swapAuditWriter(nil)
 	s.cacheMu.Lock()
 	if s.sharedCache != nil {

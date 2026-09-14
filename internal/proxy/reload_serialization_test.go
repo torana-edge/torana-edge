@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/torana-edge/torana-edge/internal/auditlog"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -108,6 +110,14 @@ func TestShutdownDeadlinePreservesCacheForPinnedGeneration(t *testing.T) {
 	for _, retired := range []bool{false, true} {
 		t.Run(fmt.Sprint("retired=", retired), func(t *testing.T) {
 			s := &Server{config: Config{Providers: provider.Config{Plugins: provider.PluginsConfig{Dir: t.TempDir()}}}}
+			s.rateLimiter = NewRateLimiter(0, 0)
+			defer s.rateLimiter.Close()
+			writer, err := auditlog.Open(auditlog.Config{Enabled: true, Path: filepath.Join(t.TempDir(), "audit.jsonl")})
+			if err != nil {
+				t.Fatal(err)
+			}
+			s.auditWriter = writer
+			defer writer.Close()
 			store := &observedCacheClose{Store: cache.NewLocalCache(time.Minute), closed: make(chan struct{})}
 			s.setCache(store)
 			defer store.Close()
@@ -138,9 +148,20 @@ func TestShutdownDeadlinePreservesCacheForPinnedGeneration(t *testing.T) {
 				t.Fatal("Shutdown ignored deadline")
 			}
 			select {
+			case <-s.rateLimiter.stopJanitor:
+			default:
+				t.Fatal("shutdown deadline left limiter janitor running")
+			}
+			select {
 			case <-store.closed:
 				t.Fatal("cache closed while in use")
 			default:
+			}
+			if s.auditWriter != writer {
+				t.Fatal("timeout detached audit writer before request completion")
+			}
+			if err := writer.Append(auditlog.Record{RequestID: 1}); err != nil {
+				t.Fatalf("in-flight request cannot finish its audit record: %v", err)
 			}
 			release.Do(pinned.Release)
 			ctx2, cancel2 := context.WithTimeout(context.Background(), 5*time.Second)
@@ -148,11 +169,29 @@ func TestShutdownDeadlinePreservesCacheForPinnedGeneration(t *testing.T) {
 			if err := s.Shutdown(ctx2); err != nil {
 				t.Fatal(err)
 			}
+			if s.auditWriter != nil {
+				t.Fatal("retry did not close audit writer")
+			}
 			select {
 			case <-store.closed:
 			default:
 				t.Fatal("retry did not close cache")
 			}
 		})
+	}
+}
+
+func TestShutdownStopsJanitorsWhenWatcherMissesDeadline(t *testing.T) {
+	s := &Server{rateLimiter: NewRateLimiter(0, 0), watchDone: make(chan struct{})}
+	defer s.rateLimiter.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := s.Shutdown(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Shutdown: %v", err)
+	}
+	select {
+	case <-s.rateLimiter.stopJanitor:
+	default:
+		t.Fatal("watcher timeout left limiter janitor running")
 	}
 }
