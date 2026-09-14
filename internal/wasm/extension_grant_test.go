@@ -18,7 +18,7 @@ import (
 // framed reply.
 func hostCallDirect(t *testing.T, r *Runtime, p *Plugin, cmd string, args []byte) *pbv1.HostCallResult {
 	t.Helper()
-	raw := r.dispatchHostCallForTest(context.Background(), p.name, cmd, string(args))
+	raw := r.dispatchHostCallForTest(context.WithValue(context.Background(), invocationHookKey{}, pbv1.Hook_HOOK_BEFORE_REQUEST), p.name, cmd, string(args))
 	if len(raw) == 0 {
 		t.Fatalf("%s returned no reply; HostCallResult requires a result arm", cmd)
 	}

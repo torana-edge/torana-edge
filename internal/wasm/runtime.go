@@ -55,8 +55,8 @@ import (
 // ============================================================================
 
 const (
-	// currentABI is packed as (major << 32) | minor in the guest's i64 export.
-	currentABIVersion uint64 = (uint64(1) << 32) | 1
+	// currentABI is packed as (major << 32) | contract revision in the guest's i64 export.
+	currentABIVersion uint64 = sdk.ABIVersion
 	// defaultPoolSize is deliberately small. A Go/WASI plugin can consume several
 	// MiB per instance, so the previous 100-slot pool made a single plugin able to
 	// reserve far more memory than a personal proxy should spend.
@@ -834,12 +834,13 @@ func (p *Plugin) CallRequest(ctx context.Context, hook pbv1.Hook, reqID uint64, 
 		return fmt.Errorf("wasm: %s input exceeds 32-bit Wasm memory", p.name)
 	}
 	ctx = context.WithValue(ctx, reqIDKey{}, reqID)
+	ctx = context.WithValue(ctx, invocationHookKey{}, hook)
 	callCtx, cancel := p.callContext(ctx)
 	defer cancel()
 	// Host owns execution metadata and injects it into the validated envelope.
-	var envelope pbv1.HookInput
-	if err := proto.Unmarshal(inBytes, &envelope); err != nil {
-		return fmt.Errorf("wasm: %s invalid hook input: %w", p.name, err)
+	envelope, decodeErr := pbv1.DecodeHookInput(inBytes)
+	if decodeErr != nil {
+		return fmt.Errorf("wasm: %s invalid hook input: %w", p.name, decodeErr)
 	}
 	if err := envelope.ValidateFor(hook); err != nil {
 		return fmt.Errorf("wasm: %s invalid hook input: %w", p.name, err)
@@ -863,7 +864,7 @@ func (p *Plugin) CallRequest(ctx context.Context, hook pbv1.Hook, reqID uint64, 
 		envelope.Execution.DeadlineUnixMs = &v
 	}
 	var marshalErr error
-	inBytes, marshalErr = proto.Marshal(&envelope)
+	inBytes, marshalErr = proto.Marshal(envelope)
 	if marshalErr != nil {
 		return fmt.Errorf("wasm: %s encode hook input: %w", p.name, marshalErr)
 	}
@@ -1854,27 +1855,6 @@ func (r *Runtime) dispatchHostCall(ctx context.Context, pluginName, cmd, args st
 		if !known {
 			perm = "env.host_call"
 		}
-		// Two commands are NOT operator-facing capabilities, so deriving their
-		// permission from the command string looks for a grant that cannot
-		// exist and refuses every call. Both mutate a namespace the plugin can
-		// already write, so they share that namespace's grant rather than
-		// adding approval ceremony for no new security line.
-		switch cmd {
-		case "env.state_get_versioned":
-			perm = "env.state_get"
-		case "env.state_compare_and_set", "env.state_compare_and_delete":
-			perm = "env.state_set"
-		case "env.state_scan":
-			perm = "env.state_keys"
-		case "env.cache_delete":
-			perm = "env.cache_set"
-		case "env.shared_cache_delete":
-			perm = "env.shared_cache_set"
-		case pbv1.MetaAppendCommand:
-			perm = pbv1.MetaAppendPermission
-		case pbv1.StateDeleteCommand:
-			perm = pbv1.StateDeletePermission
-		}
 		if p == nil || !p.hasGrant(perm) {
 			log.Printf("[wasm] permission denied: %s tried %s", pluginName, perm)
 			// A framed refusal, not the v1 string. Guests decode
@@ -1883,6 +1863,20 @@ func (r *Runtime) dispatchHostCall(ctx context.Context, pluginName, cmd, args st
 			// a broken boundary.
 			return frameHostCall(nil,
 				hostErr(pbv1.ErrorCode_ERROR_CODE_PERMISSION_DENIED, "permission denied: %s", perm))
+		}
+
+		if spec, ok := sdk.Command(cmd); ok && len(spec.Hooks) < len(sdk.Hooks) {
+			hook, _ := ctx.Value(invocationHookKey{}).(pbv1.Hook)
+			allowed := false
+			for _, name := range spec.Hooks {
+				if name == hookExportName(hook) {
+					allowed = true
+					break
+				}
+			}
+			if !allowed {
+				return frameHostCall(nil, hostErr(pbv1.ErrorCode_ERROR_CODE_PERMISSION_DENIED, "%s is unavailable in this hook", cmd))
+			}
 		}
 
 		// current ABI: every reply is a framed HostCallResult. Cases set value/herr; the
@@ -1897,7 +1891,7 @@ func (r *Runtime) dispatchHostCall(ctx context.Context, pluginName, cmd, args st
 		switch cmd {
 		case "env.block_request":
 			var a pbv1.BlockRequestArgs
-			if err := proto.Unmarshal([]byte(args), &a); err != nil {
+			if err := unmarshalClosed([]byte(args), &a); err != nil {
 				herr = hostErr(pbv1.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "invalid BlockRequestArgs: %v", err)
 				break
 			}
@@ -1908,7 +1902,7 @@ func (r *Runtime) dispatchHostCall(ctx context.Context, pluginName, cmd, args st
 			r.verdictsBucket(reqIDFrom(ctx)).setBlock(pluginName, &a)
 		case "env.respond_request":
 			var a pbv1.RespondRequestArgs
-			if err := proto.Unmarshal([]byte(args), &a); err != nil {
+			if err := unmarshalClosed([]byte(args), &a); err != nil {
 				herr = hostErr(pbv1.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "invalid RespondRequestArgs: %v", err)
 				break
 			}
@@ -1919,7 +1913,7 @@ func (r *Runtime) dispatchHostCall(ctx context.Context, pluginName, cmd, args st
 			r.verdictsBucket(reqIDFrom(ctx)).setRespond(pluginName, a.Response)
 		case "env.route_request":
 			var a pbv1.RouteRequestArgs
-			if err := proto.Unmarshal([]byte(args), &a); err != nil {
+			if err := unmarshalClosed([]byte(args), &a); err != nil {
 				herr = hostErr(pbv1.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "invalid RouteRequestArgs: %v", err)
 				break
 			}
@@ -1930,7 +1924,7 @@ func (r *Runtime) dispatchHostCall(ctx context.Context, pluginName, cmd, args st
 			r.verdictsBucket(reqIDFrom(ctx)).setRoute(pluginName, a.Provider, a.Model)
 		case "env.set_identity":
 			var a pbv1.SetIdentityArgs
-			if err := proto.Unmarshal([]byte(args), &a); err != nil {
+			if err := unmarshalClosed([]byte(args), &a); err != nil {
 				herr = hostErr(pbv1.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "invalid SetIdentityArgs: %v", err)
 				break
 			}
@@ -1941,7 +1935,7 @@ func (r *Runtime) dispatchHostCall(ctx context.Context, pluginName, cmd, args st
 			r.verdictsBucket(reqIDFrom(ctx)).setIdentity(pluginName, a.Identity)
 		case pbv1.MetaAppendCommand:
 			var a pbv1.MetaAppendArgs
-			if err := proto.Unmarshal([]byte(args), &a); err != nil {
+			if err := unmarshalClosed([]byte(args), &a); err != nil {
 				herr = hostErr(pbv1.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "invalid MetaAppendArgs: %v", err)
 				break
 			}
@@ -1969,7 +1963,7 @@ func (r *Runtime) dispatchHostCall(ctx context.Context, pluginName, cmd, args st
 			// A decode failure used to be swallowed by `if err == nil`, so the
 			// write silently did not happen. It is now a classified refusal.
 			var a pbv1.MetaSetArgs
-			if err := proto.Unmarshal([]byte(args), &a); err != nil {
+			if err := unmarshalClosed([]byte(args), &a); err != nil {
 				herr = hostErr(pbv1.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "invalid MetaSetArgs: %v", err)
 				break
 			}
@@ -1983,7 +1977,7 @@ func (r *Runtime) dispatchHostCall(ctx context.Context, pluginName, cmd, args st
 			}
 		case "env.meta_get":
 			var a pbv1.MetaGetArgs
-			if err := proto.Unmarshal([]byte(args), &a); err != nil {
+			if err := unmarshalClosed([]byte(args), &a); err != nil {
 				herr = hostErr(pbv1.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "invalid MetaGetArgs: %v", err)
 				break
 			}
@@ -1999,7 +1993,7 @@ func (r *Runtime) dispatchHostCall(ctx context.Context, pluginName, cmd, args st
 			value = []byte(v)
 		case "env.cache_set":
 			var a pbv1.CacheSetArgs
-			if err := proto.Unmarshal([]byte(args), &a); err != nil {
+			if err := unmarshalClosed([]byte(args), &a); err != nil {
 				herr = hostErr(pbv1.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "invalid CacheSetArgs: %v", err)
 				break
 			}
@@ -2026,7 +2020,7 @@ func (r *Runtime) dispatchHostCall(ctx context.Context, pluginName, cmd, args st
 			}
 		case "env.cache_get":
 			var a pbv1.CacheGetArgs
-			if err := proto.Unmarshal([]byte(args), &a); err != nil {
+			if err := unmarshalClosed([]byte(args), &a); err != nil {
 				herr = hostErr(pbv1.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "invalid CacheGetArgs: %v", err)
 				break
 			}
@@ -2053,7 +2047,7 @@ func (r *Runtime) dispatchHostCall(ctx context.Context, pluginName, cmd, args st
 			value = []byte(v)
 		case "env.shared_cache_set":
 			var a pbv1.CacheSetArgs
-			if err := proto.Unmarshal([]byte(args), &a); err != nil {
+			if err := unmarshalClosed([]byte(args), &a); err != nil {
 				herr = hostErr(pbv1.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "invalid CacheSetArgs: %v", err)
 				break
 			}
@@ -2075,7 +2069,7 @@ func (r *Runtime) dispatchHostCall(ctx context.Context, pluginName, cmd, args st
 			}
 		case "env.shared_cache_get":
 			var a pbv1.CacheGetArgs
-			if err := proto.Unmarshal([]byte(args), &a); err != nil {
+			if err := unmarshalClosed([]byte(args), &a); err != nil {
 				herr = hostErr(pbv1.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "invalid CacheGetArgs: %v", err)
 				break
 			}
@@ -2095,7 +2089,7 @@ func (r *Runtime) dispatchHostCall(ctx context.Context, pluginName, cmd, args st
 			value = []byte(v)
 		case "env.cache_delete", "env.shared_cache_delete":
 			var a pbv1.CacheGetArgs
-			if err := proto.Unmarshal([]byte(args), &a); err != nil {
+			if err := unmarshalClosed([]byte(args), &a); err != nil {
 				herr = hostErr(pbv1.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "invalid CacheGetArgs: %v", err)
 				break
 			}
@@ -2120,7 +2114,7 @@ func (r *Runtime) dispatchHostCall(ctx context.Context, pluginName, cmd, args st
 			// comes from the module, never the payload, so one plugin cannot
 			// write into another's namespace.
 			var a pbv1.StateSetArgs
-			if err := proto.Unmarshal([]byte(args), &a); err != nil {
+			if err := unmarshalClosed([]byte(args), &a); err != nil {
 				herr = hostErr(pbv1.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "invalid StateSetArgs: %v", err)
 				break
 			}
@@ -2139,7 +2133,7 @@ func (r *Runtime) dispatchHostCall(ctx context.Context, pluginName, cmd, args st
 			}
 		case "env.state_get_versioned":
 			var a pbv1.StateGetArgs
-			if err := proto.Unmarshal([]byte(args), &a); err != nil {
+			if err := unmarshalClosed([]byte(args), &a); err != nil {
 				herr = hostErr(pbv1.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "invalid StateGetArgs: %v", err)
 				break
 			}
@@ -2159,7 +2153,7 @@ func (r *Runtime) dispatchHostCall(ctx context.Context, pluginName, cmd, args st
 			value, _ = proto.Marshal(&pbv1.StateValue{Value: v, Version: ver})
 		case "env.state_compare_and_set":
 			var a pbv1.StateCompareAndSetArgs
-			if err := proto.Unmarshal([]byte(args), &a); err != nil {
+			if err := unmarshalClosed([]byte(args), &a); err != nil {
 				herr = hostErr(pbv1.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "invalid StateCompareAndSetArgs: %v", err)
 				break
 			}
@@ -2183,7 +2177,7 @@ func (r *Runtime) dispatchHostCall(ctx context.Context, pluginName, cmd, args st
 			value, _ = proto.Marshal(res)
 		case "env.state_compare_and_delete":
 			var a pbv1.StateCompareAndDeleteArgs
-			if err := proto.Unmarshal([]byte(args), &a); err != nil {
+			if err := unmarshalClosed([]byte(args), &a); err != nil {
 				herr = hostErr(pbv1.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "invalid StateCompareAndDeleteArgs: %v", err)
 				break
 			}
@@ -2203,7 +2197,7 @@ func (r *Runtime) dispatchHostCall(ctx context.Context, pluginName, cmd, args st
 			value, _ = proto.Marshal(&pbv1.StateMutationResult{Applied: applied})
 		case "env.state_scan":
 			var a pbv1.StateScanArgs
-			if err := proto.Unmarshal([]byte(args), &a); err != nil {
+			if err := unmarshalClosed([]byte(args), &a); err != nil {
 				herr = hostErr(pbv1.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "invalid StateScanArgs: %v", err)
 				break
 			}
@@ -2215,11 +2209,7 @@ func (r *Runtime) dispatchHostCall(ctx context.Context, pluginName, cmd, args st
 				herr = hostErr(pbv1.ErrorCode_ERROR_CODE_NOT_CONFIGURED, "durable plugin state is not configured")
 				break
 			}
-			limit := int(a.Limit)
-			if limit > 256 {
-				limit = 256
-			}
-			entries, next, err := r.StateScanFunc(pluginName, a.Prefix, a.Cursor, limit, 1<<20)
+			entries, next, err := r.StateScanFunc(pluginName, a.Prefix, a.Cursor, int(a.Limit), int(r.options.MaxHostResponseBytes))
 			if err != nil {
 				herr = hostErr(pbv1.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "%v", err)
 				break
@@ -2231,7 +2221,7 @@ func (r *Runtime) dispatchHostCall(ctx context.Context, pluginName, cmd, args st
 			value, _ = proto.Marshal(out)
 		case pbv1.StateDeleteCommand:
 			var a pbv1.StateDeleteArgs
-			if err := proto.Unmarshal([]byte(args), &a); err != nil {
+			if err := unmarshalClosed([]byte(args), &a); err != nil {
 				herr = hostErr(pbv1.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "invalid StateDeleteArgs: %v", err)
 				break
 			}
@@ -2249,7 +2239,7 @@ func (r *Runtime) dispatchHostCall(ctx context.Context, pluginName, cmd, args st
 			}
 		case "env.state_get":
 			var a pbv1.StateGetArgs
-			if err := proto.Unmarshal([]byte(args), &a); err != nil {
+			if err := unmarshalClosed([]byte(args), &a); err != nil {
 				herr = hostErr(pbv1.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "invalid StateGetArgs: %v", err)
 				break
 			}
@@ -2306,7 +2296,7 @@ func (r *Runtime) dispatchHostCall(ctx context.Context, pluginName, cmd, args st
 			value = []byte(cfg)
 		case "env.resource_info":
 			var a pbv1.ResourceInfoArgs
-			if err := proto.Unmarshal([]byte(args), &a); err != nil {
+			if err := unmarshalClosed([]byte(args), &a); err != nil {
 				herr = hostErr(pbv1.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "invalid ResourceInfoArgs: %v", err)
 				break
 			}
@@ -2323,54 +2313,70 @@ func (r *Runtime) dispatchHostCall(ctx context.Context, pluginName, cmd, args st
 					herr = hostErr(pbv1.ErrorCode_ERROR_CODE_PERMISSION_DENIED, "resource %q is not approved", a.Name)
 					break
 				}
-				info.Available = v != ""
+				info.Available = v != "" && r.CredentialGetFunc != nil
 			case "file":
-				r, ok := resources.Files[a.Name]
+				resource, ok := resources.Files[a.Name]
 				if !ok {
 					herr = hostErr(pbv1.ErrorCode_ERROR_CODE_PERMISSION_DENIED, "resource %q is not approved", a.Name)
 					break
 				}
 				info.Available = true
-				info.MaxInputBytes = int64Ptr(r.MaxBytes)
-				info.Operations = sortedTrueKeys(r.Operations)
+				for op, enabled := range resource.Operations {
+					if enabled {
+						switch op {
+						case "read":
+							info.Available = info.Available && r.FileReadFunc != nil
+						case "write":
+							info.Available = info.Available && r.FileWriteFunc != nil
+						case "append":
+							info.Available = info.Available && r.FileAppendFunc != nil
+						case "delete":
+							info.Available = info.Available && r.FileDeleteFunc != nil
+						case "list":
+							info.Available = info.Available && r.FileListFunc != nil
+						}
+					}
+				}
+				info.MaxInputBytes = int64Ptr(resource.MaxBytes)
+				info.Operations = sortedTrueKeys(resource.Operations)
 			case "http":
-				r, ok := resources.HTTP[a.Name]
+				resource, ok := resources.HTTP[a.Name]
 				if !ok {
 					herr = hostErr(pbv1.ErrorCode_ERROR_CODE_PERMISSION_DENIED, "resource %q is not approved", a.Name)
 					break
 				}
-				info.Available = r.Origin != ""
-				info.TimeoutMs = durationPtr(r.Timeout)
-				info.MaxInputBytes = int64Ptr(r.MaxRequestBytes)
-				info.MaxOutputBytes = int64Ptr(r.MaxResponseBytes)
-				info.MaxCallsPerMinute = uint64Ptr(uint64(r.MaxCallsPerMinute))
-				info.Operations = sortedTrueKeys(r.Methods)
+				info.Available = resource.Origin != "" && r.HTTPRequestFunc != nil
+				info.TimeoutMs = durationPtr(resource.Timeout)
+				info.MaxInputBytes = int64Ptr(resource.MaxRequestBytes)
+				info.MaxOutputBytes = int64Ptr(resource.MaxResponseBytes)
+				info.MaxCallsPerMinute = uint64Ptr(uint64(resource.MaxCallsPerMinute))
+				info.Operations = sortedTrueKeys(resource.Methods)
 			case "model":
-				r, ok := resources.ModelServices[a.Name]
+				resource, ok := resources.ModelServices[a.Name]
 				if !ok {
 					herr = hostErr(pbv1.ErrorCode_ERROR_CODE_PERMISSION_DENIED, "resource %q is not approved", a.Name)
 					break
 				}
-				info.Available = r.Path != ""
-				info.TimeoutMs = durationPtr(r.Timeout)
-				info.MaxInputBytes = int64Ptr(r.MaxInputBytes)
-				info.MaxTokens = uint64Ptr(uint64(r.MaxTokens))
-				info.MaxCallsPerMinute = uint64Ptr(uint64(r.MaxCallsPerMinute))
-				info.MaxTokensPerHour = uint64Ptr(uint64(r.MaxTokensPerHour))
+				info.Available = resource.Path != "" && r.ModelCompleteFunc != nil
+				info.TimeoutMs = durationPtr(resource.Timeout)
+				info.MaxInputBytes = int64Ptr(resource.MaxInputBytes)
+				info.MaxTokens = uint64Ptr(uint64(resource.MaxTokens))
+				info.MaxCallsPerMinute = uint64Ptr(uint64(resource.MaxCallsPerMinute))
+				info.MaxTokensPerHour = uint64Ptr(uint64(resource.MaxTokensPerHour))
 			case "pricing":
-				r, ok := resources.PricingResources[a.Name]
+				resource, ok := resources.PricingResources[a.Name]
 				if !ok {
 					herr = hostErr(pbv1.ErrorCode_ERROR_CODE_PERMISSION_DENIED, "resource %q is not approved", a.Name)
 					break
 				}
-				info.Available = r.Prices != nil
+				info.Available = resource.Prices != nil && r.ModelPricingFunc != nil
 			case "cache_policy":
-				r, ok := resources.PromptCachePolicies[a.Name]
+				resource, ok := resources.PromptCachePolicies[a.Name]
 				if !ok {
 					herr = hostErr(pbv1.ErrorCode_ERROR_CODE_PERMISSION_DENIED, "resource %q is not approved", a.Name)
 					break
 				}
-				info.Available = r.Policies != nil
+				info.Available = resource.Policies != nil && r.PromptCachePolicyFunc != nil
 			default:
 				herr = hostErr(pbv1.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "unknown resource kind %q", a.Kind)
 				break
@@ -2380,7 +2386,7 @@ func (r *Runtime) dispatchHostCall(ctx context.Context, pluginName, cmd, args st
 			}
 		case "env.credential_get":
 			var a pbv1.CredentialGetArgs
-			if err := proto.Unmarshal([]byte(args), &a); err != nil {
+			if err := unmarshalClosed([]byte(args), &a); err != nil {
 				herr = hostErr(pbv1.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "invalid CredentialGetArgs: %v", err)
 				break
 			}
@@ -2405,7 +2411,7 @@ func (r *Runtime) dispatchHostCall(ctx context.Context, pluginName, cmd, args st
 			value = append([]byte(nil), resolved...)
 		case "env.file_append":
 			var a pbv1.FileAppendArgs
-			if err := proto.Unmarshal([]byte(args), &a); err != nil {
+			if err := unmarshalClosed([]byte(args), &a); err != nil {
 				herr = hostErr(pbv1.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "invalid FileAppendArgs: %v", err)
 				break
 			}
@@ -2427,7 +2433,7 @@ func (r *Runtime) dispatchHostCall(ctx context.Context, pluginName, cmd, args st
 			}
 		case "env.file_read":
 			var a pbv1.FileReadArgs
-			if err := proto.Unmarshal([]byte(args), &a); err != nil {
+			if err := unmarshalClosed([]byte(args), &a); err != nil {
 				herr = hostErr(pbv1.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "invalid FileReadArgs: %v", err)
 				break
 			}
@@ -2452,7 +2458,7 @@ func (r *Runtime) dispatchHostCall(ctx context.Context, pluginName, cmd, args st
 			value = read
 		case "env.file_write":
 			var a pbv1.FileWriteArgs
-			if err := proto.Unmarshal([]byte(args), &a); err != nil {
+			if err := unmarshalClosed([]byte(args), &a); err != nil {
 				herr = hostErr(pbv1.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "invalid FileWriteArgs: %v", err)
 				break
 			}
@@ -2474,7 +2480,7 @@ func (r *Runtime) dispatchHostCall(ctx context.Context, pluginName, cmd, args st
 			}
 		case "env.file_delete":
 			var a pbv1.FileDeleteArgs
-			if err := proto.Unmarshal([]byte(args), &a); err != nil {
+			if err := unmarshalClosed([]byte(args), &a); err != nil {
 				herr = hostErr(pbv1.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "invalid FileDeleteArgs: %v", err)
 				break
 			}
@@ -2496,7 +2502,7 @@ func (r *Runtime) dispatchHostCall(ctx context.Context, pluginName, cmd, args st
 			}
 		case "env.file_list":
 			var a pbv1.FileListArgs
-			if err := proto.Unmarshal([]byte(args), &a); err != nil {
+			if err := unmarshalClosed([]byte(args), &a); err != nil {
 				herr = hostErr(pbv1.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "invalid FileListArgs: %v", err)
 				break
 			}
@@ -2527,7 +2533,7 @@ func (r *Runtime) dispatchHostCall(ctx context.Context, pluginName, cmd, args st
 			value, _ = proto.Marshal(&pbv1.FileListResult{Paths: paths})
 		case "env.http_request":
 			var a pbv1.OutboundHTTPRequestArgs
-			if err := proto.Unmarshal([]byte(args), &a); err != nil {
+			if err := unmarshalClosed([]byte(args), &a); err != nil {
 				herr = hostErr(pbv1.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "invalid OutboundHTTPRequestArgs: %v", err)
 				break
 			}
@@ -2560,7 +2566,7 @@ func (r *Runtime) dispatchHostCall(ctx context.Context, pluginName, cmd, args st
 			value, _ = proto.Marshal(response)
 		case "env.model_complete":
 			var a pbv1.ModelCompleteArgs
-			if err := proto.Unmarshal([]byte(args), &a); err != nil {
+			if err := unmarshalClosed([]byte(args), &a); err != nil {
 				herr = hostErr(pbv1.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "invalid ModelCompleteArgs")
 				break
 			}
@@ -2589,7 +2595,7 @@ func (r *Runtime) dispatchHostCall(ctx context.Context, pluginName, cmd, args st
 			value, _ = proto.Marshal(response)
 		case "env.model_pricing":
 			var a pbv1.ModelPricingGetArgs
-			if err := proto.Unmarshal([]byte(args), &a); err != nil {
+			if err := unmarshalClosed([]byte(args), &a); err != nil {
 				herr = hostErr(pbv1.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "invalid ModelPricingGetArgs")
 				break
 			}
@@ -2618,7 +2624,7 @@ func (r *Runtime) dispatchHostCall(ctx context.Context, pluginName, cmd, args st
 			value, _ = proto.Marshal(pricing)
 		case "env.cache_policy":
 			var a pbv1.PromptCachePolicyGetArgs
-			if err := proto.Unmarshal([]byte(args), &a); err != nil {
+			if err := unmarshalClosed([]byte(args), &a); err != nil {
 				herr = hostErr(pbv1.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "invalid PromptCachePolicyGetArgs")
 				break
 			}
@@ -2735,6 +2741,9 @@ func (r *Runtime) dispatchHostCall(ctx context.Context, pluginName, cmd, args st
 		if herr == nil && value == nil && res != "" {
 			value = []byte(res)
 		}
+		if herr == nil && uint64(len(value)) > r.options.MaxHostResponseBytes {
+			return frameHostCall(nil, hostErr(pbv1.ErrorCode_ERROR_CODE_UNAVAILABLE, "host response exceeds the configured byte limit"))
+		}
 		return frameHostCall(value, herr)
 	}
 }
@@ -2811,4 +2820,28 @@ func writeBytes(ctx context.Context, mod api.Module, b []byte) uint64 {
 		return 0
 	}
 	return uint64(ptr)<<32 | uint64(len(b))
+}
+
+type invocationHookKey struct{}
+
+func hookExportName(hook pbv1.Hook) string {
+	switch hook {
+	case pbv1.Hook_HOOK_BEFORE_REQUEST:
+		return "run_before_request"
+	case pbv1.Hook_HOOK_AFTER_RESPONSE:
+		return "run_after_response"
+	case pbv1.Hook_HOOK_ON_STREAM_CHUNK:
+		return "run_on_stream_chunk"
+	case pbv1.Hook_HOOK_ON_HTTP_REQUEST:
+		return "run_on_http_request"
+	case pbv1.Hook_HOOK_ON_TICK:
+		return "run_on_tick"
+	}
+	return ""
+}
+func unmarshalClosed(raw []byte, message proto.Message) error {
+	if err := pbv1.ValidateWire(raw, message.ProtoReflect().Descriptor()); err != nil {
+		return err
+	}
+	return proto.Unmarshal(raw, message)
 }
