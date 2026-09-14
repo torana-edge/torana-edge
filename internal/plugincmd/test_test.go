@@ -135,7 +135,7 @@ func TestPluginTestChecksAllCanonicalHooks(t *testing.T) {
 }
 
 func TestPluginTestRejectsUnusedAndAmbiguousExpectations(t *testing.T) {
-	for _, raw := range []string{`{}`, `{"expected_error":"anything"}`, `{"request":{},"request":{}}`, `{"request":{},"typo":true}`, `{"request":{},"config":null}`, `{"request":{},"config":{"nested":{"x":1,"x":2}}}`, `{"tick":{},"expected_request":{}}`, `{"response":null}`, `{"request":{}} {}`} {
+	for _, raw := range []string{`{}`, `{"expected_error":"anything"}`, `{"request":{},"request":{}}`, `{"request":{},"typo":true}`, `{"request":{},"config":null}`, `{"request":{},"config":{"nested":{"x":1,"x":2}}}`, `{"tick":{},"expected_request":{}}`, `{"response":null}`, `{"request":{},"expected_request":null}`, `{"response":{},"expected_response":null}`, `{"request":{},"expected_verdicts":null}`, `{"tick":{},"expected_verdicts":{}}`, `{"request":{},"expected_verdicts":{"block":null}}`, `{"request":{},"expected_verdicts":{"unknown":{}}}`, `{"request":{}} {}`} {
 		dir := t.TempDir()
 		name := filepath.Join(dir, "scenario.json")
 		if err := os.WriteFile(name, []byte(raw), 0600); err != nil {
@@ -150,5 +150,24 @@ func TestPluginTestRejectsUnusedAndAmbiguousExpectations(t *testing.T) {
 	}
 	if err := runCompiledScenario(t, "test-ticker", `{"tick":{"tickId":"2"},"expected_tick":null}`); err == nil || !strings.Contains(err.Error(), "tick outcome mismatch") {
 		t.Fatalf("idle tick expectation ignored: %v", err)
+	}
+}
+
+func TestPluginTestChecksCompiledVerdicts(t *testing.T) {
+	request := func(text string) string {
+		return `{"model":"m","messages":[{"role":"user","blocks":[{"text":{"text":"` + text + `"}}]}]}`
+	}
+	for _, tc := range []struct{ name, fixture, scenario string }{
+		{"none", "test-blocker", `{"request":` + request("ordinary") + `,"expected_verdicts":{}}`},
+		{"block", "test-blocker", `{"request":` + request("blockme") + `,"expected_verdicts":{"block":{"status":422,"code":"blocked_by_test","message":"Blocked by test-blocker: request contained the trigger word."}}}`},
+		{"respond", "test-responder", `{"request":` + request("respondme") + `,"expected_verdicts":{"respond":{"message":{"blocks":[{"text":{"text":"canned response from test-responder"}}]},"finishReason":"stop"}}}`},
+		{"route", "test-router", `{"request":` + request("routecheap") + `,"expected_verdicts":{"route":{"provider":"cheap","model":"small-model"}}}`},
+		{"identity", "test-identity", `{"request":` + request("ordinary") + `,"expected_verdicts":{"identity":{"identity":"fixture-tenant"}}}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := runCompiledScenario(t, tc.fixture, tc.scenario); err != nil {
+				t.Fatal(err)
+			}
+		})
 	}
 }

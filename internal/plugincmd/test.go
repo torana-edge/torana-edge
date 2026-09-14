@@ -13,6 +13,7 @@ import (
 	"github.com/torana-edge/torana-edge/internal/engine"
 	"github.com/torana-edge/torana-edge/internal/engine/pbconv"
 	"github.com/torana-edge/torana-edge/internal/plugin"
+	"github.com/torana-edge/torana-edge/internal/wasm"
 	pbv1 "github.com/torana-edge/torana-plugin-sdk/pb/v1"
 	"github.com/torana-edge/torana-plugin-sdk/strictjson"
 	"google.golang.org/protobuf/encoding/protojson"
@@ -35,7 +36,15 @@ type pluginTestScenario struct {
 	ResponseMutable  *bool             `json:"response_mutable"`
 	Config           json.RawMessage   `json:"config"`
 	Services         *scenarioServices `json:"services"`
+	ExpectedVerdicts json.RawMessage   `json:"expected_verdicts"`
 	ExpectedError    string            `json:"expected_error,omitempty"`
+}
+
+type scenarioExpectedVerdicts struct {
+	Block    *pbv1.BlockRequestArgs  `json:"-"`
+	Respond  *pbv1.SyntheticResponse `json:"-"`
+	Route    *pbv1.RouteRequestArgs  `json:"-"`
+	Identity *pbv1.SetIdentityArgs   `json:"-"`
 }
 
 func decodeScenarioRequest(raw []byte) (*engine.ChatRequest, error) {
@@ -230,9 +239,15 @@ func testPlugin(args []string, stdout, stderr io.Writer) (resultErr error) {
 		if err != nil {
 			runErr = err
 		} else if scenario.ExpectedHTTP != nil {
-			expected := &pbv1.HttpResponse{}
-			if err := decodeScenarioProto(scenario.ExpectedHTTP, expected); err != nil {
-				return fmt.Errorf("decode expected HTTP response: %w", err)
+			var expected *pbv1.HttpResponse
+			if string(scenario.ExpectedHTTP) != "null" {
+				expected = &pbv1.HttpResponse{}
+				if err := decodeScenarioProto(scenario.ExpectedHTTP, expected); err != nil {
+					return fmt.Errorf("decode expected HTTP response: %w", err)
+				}
+				if err := expected.Validate(); err != nil {
+					return fmt.Errorf("validate expected HTTP response: %w", err)
+				}
 			}
 			if !proto.Equal(actual, expected) {
 				return fmt.Errorf("HTTP response mismatch: got %s, want %s", compactJSON(actual), compactJSON(expected))
@@ -265,6 +280,15 @@ func testPlugin(args []string, stdout, stderr io.Writer) (resultErr error) {
 			if !proto.Equal(got, expected) {
 				return fmt.Errorf("tick outcome mismatch: got %s, want %s", compactJSON(got), compactJSON(expected))
 			}
+		}
+	}
+	if scenario.ExpectedVerdicts != nil {
+		expected, err := decodeExpectedVerdicts(scenario.ExpectedVerdicts)
+		if err != nil {
+			return err
+		}
+		if err := compareScenarioVerdicts(pp.Verdicts(1), expected, bundle.Manifest.Name); err != nil {
+			return err
 		}
 	}
 
@@ -315,6 +339,16 @@ func readPluginScenario(path string) (pluginTestScenario, error) {
 			}
 		}
 	}
+	for _, pair := range []struct {
+		name string
+		raw  json.RawMessage
+	}{{"expected_request", scenario.ExpectedRequest}, {"expected_response", scenario.ExpectedResponse}} {
+		if pair.raw != nil {
+			if object, err := strictjson.DecodeObject(pair.raw); err != nil || object == nil {
+				return scenario, fmt.Errorf("%s must be a non-null JSON object: %v", pair.name, err)
+			}
+		}
+	}
 	if scenario.ExpectedStream != nil && scenario.Stream == nil {
 		return scenario, errors.New("expected_stream requires stream")
 	}
@@ -326,8 +360,101 @@ func readPluginScenario(path string) (pluginTestScenario, error) {
 			return scenario, fmt.Errorf("config must be a non-null JSON object: %v", err)
 		}
 	}
+	if scenario.ExpectedVerdicts != nil {
+		if scenario.Request == nil {
+			return scenario, errors.New("expected_verdicts requires request")
+		}
+		if object, err := strictjson.DecodeObject(scenario.ExpectedVerdicts); err != nil || object == nil {
+			return scenario, fmt.Errorf("expected_verdicts must be a non-null JSON object: %v", err)
+		}
+		if _, err := decodeExpectedVerdicts(scenario.ExpectedVerdicts); err != nil {
+			return scenario, err
+		}
+	}
 
 	return scenario, nil
+}
+
+func decodeExpectedVerdicts(raw json.RawMessage) (scenarioExpectedVerdicts, error) {
+	var fields struct {
+		Block, Respond, Route, Identity json.RawMessage
+	}
+	decoder := json.NewDecoder(strings.NewReader(string(raw)))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&fields); err != nil {
+		return scenarioExpectedVerdicts{}, fmt.Errorf("decode expected_verdicts: %w", err)
+	}
+	out := scenarioExpectedVerdicts{}
+	for _, item := range []struct {
+		name string
+		raw  json.RawMessage
+		dst  proto.Message
+		set  func(proto.Message)
+	}{
+		{"block", fields.Block, &pbv1.BlockRequestArgs{}, func(v proto.Message) { out.Block = v.(*pbv1.BlockRequestArgs) }},
+		{"respond", fields.Respond, &pbv1.SyntheticResponse{}, func(v proto.Message) { out.Respond = v.(*pbv1.SyntheticResponse) }},
+		{"route", fields.Route, &pbv1.RouteRequestArgs{}, func(v proto.Message) { out.Route = v.(*pbv1.RouteRequestArgs) }},
+		{"identity", fields.Identity, &pbv1.SetIdentityArgs{}, func(v proto.Message) { out.Identity = v.(*pbv1.SetIdentityArgs) }},
+	} {
+		if item.raw == nil {
+			continue
+		}
+		if string(item.raw) == "null" {
+			return out, fmt.Errorf("expected_verdicts.%s must be a non-null JSON object", item.name)
+		}
+		if err := decodeScenarioProto(item.raw, item.dst); err != nil {
+			return out, fmt.Errorf("decode expected_verdicts.%s: %w", item.name, err)
+		}
+		if validator, ok := item.dst.(interface{ Validate() error }); ok {
+			if err := validator.Validate(); err != nil {
+				return out, fmt.Errorf("validate expected_verdicts.%s: %w", item.name, err)
+			}
+		}
+		item.set(item.dst)
+	}
+	return out, nil
+}
+
+func compareScenarioVerdicts(actual *wasm.RequestVerdicts, expected scenarioExpectedVerdicts, pluginName string) error {
+	var gotBlock *pbv1.BlockRequestArgs
+	var gotRespond *pbv1.SyntheticResponse
+	var gotRoute *pbv1.RouteRequestArgs
+	var gotIdentity *pbv1.SetIdentityArgs
+	if actual != nil {
+		if value := actual.Block(); value != nil {
+			if value.Plugin != pluginName {
+				return fmt.Errorf("block verdict attribution mismatch: got %q, want %q", value.Plugin, pluginName)
+			}
+			gotBlock = &pbv1.BlockRequestArgs{Status: value.Status, Code: value.Code, Message: value.Message}
+		}
+		if value := actual.Respond(); value != nil {
+			if value.Plugin != pluginName {
+				return fmt.Errorf("respond verdict attribution mismatch: got %q, want %q", value.Plugin, pluginName)
+			}
+			gotRespond = value.Response
+		}
+		if value := actual.Route(); value != nil {
+			if value.Plugin != pluginName {
+				return fmt.Errorf("route verdict attribution mismatch: got %q, want %q", value.Plugin, pluginName)
+			}
+			gotRoute = &pbv1.RouteRequestArgs{Provider: value.Provider, Model: value.Model}
+		}
+		if value := actual.Identity(); value != nil {
+			if value.Plugin != pluginName {
+				return fmt.Errorf("identity verdict attribution mismatch: got %q, want %q", value.Plugin, pluginName)
+			}
+			gotIdentity = &pbv1.SetIdentityArgs{Identity: value.Identity}
+		}
+	}
+	for _, item := range []struct {
+		name      string
+		got, want proto.Message
+	}{{"block", gotBlock, expected.Block}, {"respond", gotRespond, expected.Respond}, {"route", gotRoute, expected.Route}, {"identity", gotIdentity, expected.Identity}} {
+		if !proto.Equal(item.got, item.want) {
+			return fmt.Errorf("%s verdict mismatch: got %s, want %s", item.name, compactJSON(item.got), compactJSON(item.want))
+		}
+	}
+	return nil
 }
 
 func compactJSON(value any) string {

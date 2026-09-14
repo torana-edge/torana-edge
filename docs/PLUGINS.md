@@ -7,6 +7,8 @@ runs.
 
 This page is for operating them. If you want to *write* one, that lives with
 the SDK: [torana-plugin-sdk](https://github.com/torana-edge/torana-plugin-sdk).
+For repeatable local scenarios against a compiled bundle, see
+[Testing a plugin](PLUGIN_TESTING.md).
 
 The current host accepts ABI v1 plugins. The SDK repository supports ABI v1
 guests in Go and Rust; the first-party plugins use Go, while the Rust crate and

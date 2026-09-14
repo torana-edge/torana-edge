@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "id": "torana-test/test-identity",
+  "name": "test-identity",
+  "version": "0.1.0",
+  "abi_version": "v1",
+  "failure_mode": "pass",
+  "description": "Test fixture: records a deterministic request identity verdict",
+  "hooks": [{"name": "run_before_request"}],
+  "permissions": [{"name": "env.set_identity", "description": "Set the test request identity"}]
+}
