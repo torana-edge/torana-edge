@@ -79,17 +79,19 @@ func (s *Server) completeModel(ctx context.Context, pluginName string, resource 
 	if refs.usage != nil {
 		for _, count := range []int{refs.usage.InputTokens, refs.usage.OutputTokens, refs.usage.CacheReadTokens, refs.usage.CacheWriteTokens} {
 			if count < 0 || int64(count) > math.MaxInt32 {
-				return nil, modelHostError(pbv1.ErrorCode_ERROR_CODE_INTERNAL, "model service provider returned invalid usage")
+				// Provider metering defects do not invalidate the completion.
+				// Leave usage unknown so cost-sensitive guests can decline it.
+				return out, nil
 			}
 		}
-		// Model-service callers price independent token buckets without knowing
-		// the operator-selected provider. OpenAI/Gemini input totals include
-		// cached tokens; Anthropic's input count already excludes them.
+		// OpenAI/Gemini include cache reads in their input total; Anthropic
+		// reports them separately. Normalize only this known overlap. Cache
+		// writes have no established overlap on the non-Anthropic formats.
 		input := int64(refs.usage.InputTokens)
 		if prov.Format != "anthropic" {
-			input -= int64(refs.usage.CacheReadTokens) + int64(refs.usage.CacheWriteTokens)
+			input -= int64(refs.usage.CacheReadTokens)
 			if input < 0 {
-				return nil, modelHostError(pbv1.ErrorCode_ERROR_CODE_INTERNAL, "model service provider returned inconsistent cached usage")
+				return out, nil
 			}
 		}
 		out.Usage = &pbv1.Usage{InputTokens: int32(input), OutputTokens: int32(refs.usage.OutputTokens), CacheReadTokens: int32(refs.usage.CacheReadTokens), CacheWriteTokens: int32(refs.usage.CacheWriteTokens)}

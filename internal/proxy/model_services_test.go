@@ -194,16 +194,21 @@ func TestBoundModelServiceRejectsOversizedInputBeforeSpend(t *testing.T) {
 	}
 }
 
-func TestModelServiceUsageHasDisjointBillableBuckets(t *testing.T) {
+// Guests must not double-charge cache reads or infer that cache writes overlap
+// input totals. The feed must keep the original usage, even for empty content.
+func TestModelServiceUsageNormalizesCacheReads(t *testing.T) {
 	for _, tc := range []struct {
 		name, format, body string
 		wantInput          int32
-		invalid            bool
+		wantCacheWrite     int32
+		providerInput      int64
 	}{
-		{"openai", "openai", `{"choices":[{"message":{"content":""}}],"usage":{"prompt_tokens":100,"completion_tokens":2,"prompt_tokens_details":{"cached_tokens":80}}}`, 20, false},
-		{"gemini", "gemini", `{"candidates":[{"content":{"parts":[{"text":""}]}}],"usageMetadata":{"promptTokenCount":100,"candidatesTokenCount":2,"cachedContentTokenCount":80}}`, 20, false},
-		{"anthropic", "anthropic", `{"content":[{"type":"text","text":""}],"usage":{"input_tokens":20,"output_tokens":2,"cache_read_input_tokens":80}}`, 20, false},
-		{"inconsistent", "openai", `{"choices":[{"message":{"content":""}}],"usage":{"prompt_tokens":10,"completion_tokens":2,"prompt_tokens_details":{"cached_tokens":80}}}`, 0, true},
+		{"openai", "openai", `{"choices":[{"message":{"content":""}}],"usage":{"prompt_tokens":100,"completion_tokens":2,"prompt_tokens_details":{"cached_tokens":80}}}`, 20, 0, 100},
+		{"deepseek", "openai", `{"choices":[{"message":{"content":""}}],"usage":{"prompt_tokens":100,"completion_tokens":2,"prompt_cache_hit_tokens":80}}`, 20, 0, 100},
+		{"responses_with_cache_writes", "openai", `{"output":[{"type":"message","content":[{"type":"output_text","text":""}]}],"usage":{"input_tokens":100,"output_tokens":2,"input_tokens_details":{"cached_tokens":80,"cache_write_tokens":150}}}`, 20, 150, 100},
+		{"gemini", "gemini", `{"candidates":[{"content":{"parts":[{"text":""}]}}],"usageMetadata":{"promptTokenCount":100,"candidatesTokenCount":2,"cachedContentTokenCount":80}}`, 20, 0, 100},
+		{"gemini-codeassist", "gemini-codeassist", `{"response":{"candidates":[{"content":{"parts":[{"text":""}]}}],"usageMetadata":{"promptTokenCount":100,"candidatesTokenCount":2,"cachedContentTokenCount":80}}}`, 20, 0, 100},
+		{"anthropic", "anthropic", `{"content":[{"type":"text","text":""}],"usage":{"input_tokens":20,"output_tokens":2,"cache_read_input_tokens":80,"cache_creation_input_tokens":15}}`, 20, 15, 20},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -219,22 +224,62 @@ func TestModelServiceUsageHasDisjointBillableBuckets(t *testing.T) {
 			}
 			defer s.Shutdown(context.Background())
 			result, herr := s.completeModel(context.Background(), "compactor", wasm.ModelServiceResource{Name: "summarizer", Provider: "bound", Model: "m", Path: inferenceTestPath(tc.format), Timeout: time.Second, MaxTokens: 40, MaxInputBytes: 1000, MaxCallsPerMinute: 10, MaxTokensPerHour: 1000}, &pbv1.ModelCompleteArgs{Service: "summarizer", Messages: []*pbv1.ModelMessage{{Role: "user", Content: "summarize"}}})
-			if tc.invalid {
-				if herr == nil || herr.Code != pbv1.ErrorCode_ERROR_CODE_INTERNAL {
-					t.Fatalf("inconsistent usage accepted: %v %v", result, herr)
-				}
-				return
-			}
 			if herr != nil || result == nil || result.Usage == nil {
 				t.Fatalf("result=%v refusal=%v", result, herr)
 			}
-			if result.Usage.InputTokens != tc.wantInput || result.Usage.CacheReadTokens != 80 || result.Usage.OutputTokens != 2 {
+			if result.Usage.InputTokens != tc.wantInput || result.Usage.CacheReadTokens != 80 || result.Usage.CacheWriteTokens != tc.wantCacheWrite || result.Usage.OutputTokens != 2 {
 				t.Fatalf("usage=%v", result.Usage)
 			}
 			// Empty/unusable content must still be visible as a paid model-service call.
 			events := s.feed.Snapshot()
-			if len(events) != 1 || events[0].Verdict != "plugin-egress" || events[0].TokensOut != 2 || events[0].CacheReadTokens != 80 {
+			if len(events) != 1 || events[0].Verdict != "plugin-egress" || events[0].TokensIn != tc.providerInput || events[0].TokensOut != 2 || events[0].CacheReadTokens != 80 || events[0].CacheWriteTokens != int64(tc.wantCacheWrite) {
 				t.Fatalf("paid empty response missing from feed: %+v", events)
+			}
+		})
+	}
+}
+
+// A successful completion with unreliable metering is usable by callers that
+// do not need cost data. Cost-sensitive callers can decline on absent Usage
+// instead of turning a provider reporting defect into a plugin hook error.
+func TestModelServiceInvalidUsagePreservesCompletion(t *testing.T) {
+	for _, tc := range []struct {
+		name                string
+		input, output, read int64
+	}{
+		{"inconsistent_cache_read", 10, 2, 80},
+		{"negative_input", -1, 2, 0},
+		{"output_exceeds_int32", 100, 2147483648, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				if err := json.NewEncoder(w).Encode(map[string]any{
+					"model":   "reported-model",
+					"choices": []any{map[string]any{"message": map[string]any{"content": "useful summary"}, "finish_reason": "stop"}},
+					"usage":   map[string]any{"prompt_tokens": tc.input, "completion_tokens": tc.output, "prompt_tokens_details": map[string]any{"cached_tokens": tc.read}},
+				}); err != nil {
+					t.Error(err)
+				}
+			}))
+			defer upstream.Close()
+			providers := testProviderConfig(upstream.URL, "bound", "openai")
+			providers.Providers["bound"] = provider.Provider{URL: upstream.URL, Format: "openai", Auth: provider.ProviderAuth{Mode: "none"}}
+			s, err := New(Config{Port: "0", Providers: providers})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer s.Shutdown(context.Background())
+			result, herr := s.completeModel(context.Background(), "compactor", wasm.ModelServiceResource{Name: "summarizer", Provider: "bound", Model: "m", Path: "/v1/chat/completions", Timeout: time.Second, MaxTokens: 40, MaxInputBytes: 1000, MaxCallsPerMinute: 10, MaxTokensPerHour: 1000}, &pbv1.ModelCompleteArgs{Service: "summarizer", Messages: []*pbv1.ModelMessage{{Role: "user", Content: "summarize"}}})
+			if herr != nil || result == nil {
+				t.Fatalf("successful completion lost: result=%v refusal=%v", result, herr)
+			}
+			if result.Content != "useful summary" || result.ReportedModel != "reported-model" || result.FinishReason != "stop" || result.Usage != nil {
+				t.Fatalf("want preserved completion with unknown usage, got %v", result)
+			}
+			events := s.feed.Snapshot()
+			if len(events) != 1 || events[0].Verdict != "plugin-egress" || events[0].TokensIn != tc.input || events[0].TokensOut != tc.output || events[0].CacheReadTokens != tc.read {
+				t.Fatalf("original provider metering missing from feed: %+v", events)
 			}
 		})
 	}
