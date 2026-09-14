@@ -175,6 +175,21 @@ func TestReleaseConfigInstallerContract(t *testing.T) {
 func TestReleaseConfigRejectsInstallerBreakage(t *testing.T) {
 	raw, err := os.ReadFile("../../.goreleaser.yaml")
 	must(t, err)
+	lf := strings.ReplaceAll(string(raw), "\r\n", "\n")
+	for _, newline := range []struct{ name, value string }{{"LF", "\n"}, {"CRLF", "\r\n"}} {
+		t.Run(newline.name, func(t *testing.T) {
+			assertReleaseConfigRejectsInstallerBreakage(t, strings.ReplaceAll(lf, "\n", newline.value))
+		})
+	}
+}
+
+func assertReleaseConfigRejectsInstallerBreakage(t *testing.T, source string) {
+	t.Helper()
+	// Git's Windows checkout may use CRLF. Normalize only the in-memory
+	// mutation fixture; the YAML reader itself must accept either form.
+	_, err := parseReleaseContract([]byte(source))
+	must(t, err)
+	raw := strings.ReplaceAll(source, "\r\n", "\n")
 	for _, change := range []struct{ name, from, to string }{
 		{"archive-name", "torana_{{.Version}}_{{.Os}}_{{.Arch}}", "edge_{{.Version}}_{{.Os}}_{{.Arch}}"},
 		{"prefixed-version", "torana_{{.Version}}_", "torana_{{.Tag}}_"},
@@ -190,8 +205,8 @@ func TestReleaseConfigRejectsInstallerBreakage(t *testing.T) {
 		{"disabled-sboms", "  - artifacts: archive", "  - artifacts: archive\n    disable: true"},
 	} {
 		t.Run(change.name, func(t *testing.T) {
-			modified := strings.Replace(string(raw), change.from, change.to, 1)
-			if modified == string(raw) {
+			modified := strings.Replace(raw, change.from, change.to, 1)
+			if modified == raw {
 				t.Fatal("mutation did not change release config")
 			}
 			if _, err := parseReleaseContract([]byte(modified)); err == nil {
