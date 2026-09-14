@@ -352,6 +352,21 @@ func TestStreamChaining(t *testing.T) {
 	}
 }
 
+// registerIntentConversation mirrors the host's request-before-response flow:
+// stream capture must see the conversation metadata of the originating request.
+func registerIntentConversation(t *testing.T, pp *PluginPipeline, reqID uint64, conversation string) {
+	t.Helper()
+	meta, _ := json.Marshal(map[string]string{"_conversation_id": conversation})
+	chat := &engine.ChatRequest{
+		ToranaMeta: mustOptReqForTest(string(meta)),
+		Tools:      []engine.ToolDef{{Name: "read", Parameters: mustReq(`{"type":"object","properties":{"path":{"type":"string"}}}`)}},
+		Messages:   []engine.Message{{Role: engine.RoleUser, Blocks: []engine.Block{{Text: &engine.TextBlock{Text: "trace the retry logic"}}}}},
+	}
+	if _, err := pp.RunBeforeRequest(context.Background(), reqID, chat, nil); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // TestIntentRehydratesHistory: the response side strips "i" and caches it;
 // on a later request the intent plugin must restore "i" onto that same tool
 // call in history (from the cache) so the model sees consistent usage. This
@@ -361,6 +376,8 @@ func TestIntentRehydratesHistory(t *testing.T) {
 	bundles := officialBundlesDir(t)
 	requireBundle(t, bundles, "intent")
 	pp := newTestPipeline(t, bundles, []string{"intent"})
+
+	registerIntentConversation(t, pp, 1, "conv-1")
 
 	// Turn 1 response: model emits a tool call carrying "i"; the plugin caches
 	// the intent under the tool_call_id and strips it from the emitted args.
@@ -383,7 +400,8 @@ func TestIntentRehydratesHistory(t *testing.T) {
 	// Turn 2 request: the harness replays the (stripped) tool call in history.
 	// The intent plugin must re-hydrate "i" from the cache.
 	chat := &engine.ChatRequest{
-		Tools: []engine.ToolDef{{Name: "read", Parameters: mustReq(`{"type":"object","properties":{"path":{"type":"string"}}}`)}},
+		ToranaMeta: mustOptReqForTest(`{"_conversation_id":"conv-1"}`),
+		Tools:      []engine.ToolDef{{Name: "read", Parameters: mustReq(`{"type":"object","properties":{"path":{"type":"string"}}}`)}},
 		Messages: []engine.Message{
 			{Role: engine.RoleUser, Blocks: []engine.Block{{Text: &engine.TextBlock{Text: "trace the retry logic"}}}},
 			{Role: engine.RoleAssistant, Blocks: []engine.Block{{ToolUse: &engine.ToolUseBlock{ID: "call_hist", Name: "read", Arguments: mustReq(`{"path":"failover.go"}`)}}}},
@@ -507,18 +525,16 @@ func TestIntentFillOff(t *testing.T) {
 	}
 }
 
-// TestIntentBridgesToRequestSideID: harnesses like Claude Code do NOT
-// round-trip tool_call_ids — the ID the response side cached under never
-// reappears in later request history. Rehydration resolves the intent by
-// content key and must BRIDGE it to the request's own tool_call_id, because
-// that request-side ID is what the compactors use to look up intents from
-// the tool RESULT message (and it stays stable across the session's
-// requests; verified in dogfood).
-func TestIntentBridgesToRequestSideID(t *testing.T) {
+// A remapped ID cannot identify the captured occurrence. The old arguments-
+// only bridge borrowed another call's purpose; decline that bridge and keep
+// heuristic fill request-local.
+func TestIntentDoesNotGuessRemappedCallIdentity(t *testing.T) {
 	bundles := officialBundlesDir(t)
 	requireBundle(t, bundles, "intent")
 	store := cache.NewLocalCache(time.Minute)
 	pp := newTestPipelineWith(t, bundles, []string{"intent"}, store, nil)
+
+	registerIntentConversation(t, pp, 1, "conv-1")
 
 	// Turn 1 response: model emits the call under the response-stream ID.
 	run(t, pp, toolStart(0, "call_resp_7", "read"))
@@ -527,7 +543,8 @@ func TestIntentBridgesToRequestSideID(t *testing.T) {
 
 	// Turn 2 request: the harness replays the same call under ITS OWN ID.
 	chat := &engine.ChatRequest{
-		Tools: []engine.ToolDef{{Name: "read", Parameters: mustReq(`{"type":"object","properties":{"path":{"type":"string"}}}`)}},
+		ToranaMeta: mustOptReqForTest(`{"_conversation_id":"conv-1"}`),
+		Tools:      []engine.ToolDef{{Name: "read", Parameters: mustReq(`{"type":"object","properties":{"path":{"type":"string"}}}`)}},
 		Messages: []engine.Message{
 			{Role: engine.RoleUser, Blocks: []engine.Block{{Text: &engine.TextBlock{Text: "trace the retry logic"}}}},
 			{Role: engine.RoleAssistant, Blocks: []engine.Block{{ToolUse: &engine.ToolUseBlock{ID: "call_req_42", Name: "read", Arguments: mustReq(`{"path":"failover.go"}`)}}}},
@@ -538,16 +555,14 @@ func TestIntentBridgesToRequestSideID(t *testing.T) {
 		t.Fatalf("RunBeforeRequest: %v", err)
 	}
 	got, ok := store.Get(context.Background(), wasm.SharedCacheKey("intent:call_req_42"))
-	if !ok || got != "where is the retry budget configured" {
-		t.Fatalf("intent not bridged to request-side ID: got %q (ok=%v)", got, ok)
+	if ok {
+		t.Fatalf("unidentified occurrence borrowed captured intent: %q", got)
 	}
 }
 
-// TestIntentBridgeFeedsKeywordCompactor: the end-to-end #5 regression — with
-// reassigned tool_call_ids (the Claude Code path), the keyword compactor's
-// unchanged intent:<tool_call_id> lookup must work because the intent plugin
-// (running first in the chain) bridges the content-key hit to the request's
-// ID before the compactor sees the request.
+// A captured occurrence feeds keyword compaction after history restoration.
+// Assert the shared value as well as output content: derived guidance can also
+// compact this fixture and must not make a broken intent bridge look green.
 func TestIntentBridgeFeedsKeywordCompactor(t *testing.T) {
 	bundles := officialBundlesDir(t)
 	requireBundle(t, bundles, "intent")
@@ -555,6 +570,8 @@ func TestIntentBridgeFeedsKeywordCompactor(t *testing.T) {
 	store := cache.NewLocalCache(time.Minute)
 	pp := newTestPipelineWith(t, bundles, []string{"intent", "keyword_compactor"}, store,
 		map[string]json.RawMessage{"keyword_compactor": json.RawMessage(`{"tool_policies":[{"match":"read","mode":"keyword"}]}`)})
+
+	registerIntentConversation(t, pp, 1, "conv-1")
 
 	// Turn 1 response: intent captured under the response-stream ID.
 	run(t, pp, toolStart(0, "call_resp_9", "read"))
@@ -575,11 +592,12 @@ func TestIntentBridgeFeedsKeywordCompactor(t *testing.T) {
 	big := strings.Join(lines, "\n")
 
 	chat := &engine.ChatRequest{
-		Tools: []engine.ToolDef{{Name: "read", Parameters: mustReq(`{"type":"object","properties":{"path":{"type":"string"}}}`)}},
+		ToranaMeta: mustOptReqForTest(`{"_conversation_id":"conv-1"}`),
+		Tools:      []engine.ToolDef{{Name: "read", Parameters: mustReq(`{"type":"object","properties":{"path":{"type":"string"}}}`)}},
 		Messages: []engine.Message{
 			{Role: engine.RoleUser, Blocks: []engine.Block{{Text: &engine.TextBlock{Text: "trace the retry logic"}}}},
-			{Role: engine.RoleAssistant, Blocks: []engine.Block{{ToolUse: &engine.ToolUseBlock{ID: "call_req_77", Name: "read", Arguments: mustReq(`{"path":"failover.go"}`)}}}},
-			{Role: engine.RoleTool, Blocks: []engine.Block{{ToolResult: &engine.ToolResultBlock{ToolCallID: "call_req_77", Content: []engine.ToolResultContentBlock{{Text: big}}}}}},
+			{Role: engine.RoleAssistant, Blocks: []engine.Block{{ToolUse: &engine.ToolUseBlock{ID: "call_resp_9", Name: "read", Arguments: mustReq(`{"path":"failover.go"}`)}}}},
+			{Role: engine.RoleTool, Blocks: []engine.Block{{ToolResult: &engine.ToolResultBlock{ToolCallID: "call_resp_9", Content: []engine.ToolResultContentBlock{{Text: big}}}}}},
 			{Role: engine.RoleAssistant, Blocks: []engine.Block{{Text: &engine.TextBlock{Text: "I have read the file."}}}},
 			{Role: engine.RoleUser, Blocks: []engine.Block{{Text: &engine.TextBlock{Text: "Great, now fix it."}}}},
 		},
@@ -588,9 +606,12 @@ func TestIntentBridgeFeedsKeywordCompactor(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RunBeforeRequest: %v", err)
 	}
+	if got, ok := store.Get(context.Background(), wasm.SharedCacheKey("intent:call_resp_9")); !ok || got != "where is the retry budget configured" {
+		t.Fatalf("captured occurrence did not feed compactor: %q (present=%v)", got, ok)
+	}
 	var result string
 	for _, m := range out.Messages {
-		if m.Role == engine.RoleTool && toolResultID(m) == "call_req_77" {
+		if m.Role == engine.RoleTool && toolResultID(m) == "call_resp_9" {
 			result = toolResultText(m)
 		}
 	}
