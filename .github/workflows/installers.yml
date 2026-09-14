@@ -1,0 +1,46 @@
+name: Installers
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  installer:
+    name: ${{ matrix.os }} / ${{ matrix.powershell || 'sh' }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+          - os: macos-latest
+          - os: windows-latest
+            powershell: pwsh
+          - os: windows-latest
+            powershell: powershell
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: go.mod
+      - name: Installer contracts and native binary smoke test
+        run: go test ./scripts/installertest -count=1 -v
+        env:
+          GOWORK: "off"
+          TORANA_INSTALLER_SMOKE: "1"
+          TORANA_TEST_POWERSHELL: ${{ matrix.powershell }}
+      - name: POSIX shell syntax and lint
+        if: runner.os == 'Linux'
+        run: |
+          dash -n scripts/install.sh
+          shellcheck scripts/install.sh
+          scripts/check-actions-pinned.sh

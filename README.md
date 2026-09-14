@@ -44,6 +44,12 @@ Torana is currently pre-release, so this walkthrough builds the reviewed
 `main` branch rather than pretending a stable release exists. You need Git, Go
 1.26.6 or newer, and a DeepSeek API key.
 
+Cross-platform release installers are prepared in this repository, but binary
+installation must wait for the first published **Edge** release and the
+[installer activation checks](docs/RELEASE_INSTALLERS.md#checks-before-website-activation).
+Only after those checks pass should `/install.sh` and `/install.ps1` be served
+from torana.sh and advertised here. Until then, use the source build below.
+
 1. Clone, build, and create a minimal configuration:
 
    ```bash
