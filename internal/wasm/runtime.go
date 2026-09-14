@@ -563,6 +563,32 @@ func formatSignature(p, r []api.ValueType) string {
 	return fmt.Sprintf("(%s)->(%s)", strings.Join(parts, ","), strings.Join(outs, ","))
 }
 
+func uint64Ptr(v uint64) *uint64 { return &v }
+func int64Ptr(v int64) *uint64 {
+	if v < 0 {
+		return nil
+	}
+	u := uint64(v)
+	return &u
+}
+func durationPtr(v time.Duration) *uint64 {
+	if v <= 0 {
+		return nil
+	}
+	u := uint64(v / time.Millisecond)
+	return &u
+}
+func sortedTrueKeys(m map[string]bool) []string {
+	out := make([]string, 0, len(m))
+	for k, v := range m {
+		if v {
+			out = append(out, k)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
 // acquire returns a plugin instance from the pool.
 func (p *Plugin) acquire(ctx context.Context) (*pluginInstance, error) {
 	select {
@@ -2239,6 +2265,80 @@ func (r *Runtime) dispatchHostCall(ctx context.Context, pluginName, cmd, args st
 				cfg = "{}"
 			}
 			value = []byte(cfg)
+		case "env.resource_info":
+			var a pbv1.ResourceInfoArgs
+			if err := proto.Unmarshal([]byte(args), &a); err != nil {
+				herr = hostErr(pbv1.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "invalid ResourceInfoArgs: %v", err)
+				break
+			}
+			if err := a.Validate(); err != nil {
+				herr = hostErr(pbv1.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "%v", err)
+				break
+			}
+			resources := p.resourceSnapshot()
+			info := &pbv1.ResourceInfo{Kind: a.Kind, Name: a.Name}
+			switch a.Kind {
+			case "credential":
+				v, ok := resources.Credentials[a.Name]
+				if !ok {
+					herr = hostErr(pbv1.ErrorCode_ERROR_CODE_PERMISSION_DENIED, "resource %q is not approved", a.Name)
+					break
+				}
+				info.Available = v != ""
+			case "file":
+				r, ok := resources.Files[a.Name]
+				if !ok {
+					herr = hostErr(pbv1.ErrorCode_ERROR_CODE_PERMISSION_DENIED, "resource %q is not approved", a.Name)
+					break
+				}
+				info.Available = true
+				info.MaxInputBytes = int64Ptr(r.MaxBytes)
+				info.Operations = sortedTrueKeys(r.Operations)
+			case "http":
+				r, ok := resources.HTTP[a.Name]
+				if !ok {
+					herr = hostErr(pbv1.ErrorCode_ERROR_CODE_PERMISSION_DENIED, "resource %q is not approved", a.Name)
+					break
+				}
+				info.Available = r.Origin != ""
+				info.TimeoutMs = durationPtr(r.Timeout)
+				info.MaxInputBytes = int64Ptr(r.MaxRequestBytes)
+				info.MaxOutputBytes = int64Ptr(r.MaxResponseBytes)
+				info.MaxCallsPerMinute = uint64Ptr(uint64(r.MaxCallsPerMinute))
+				info.Operations = sortedTrueKeys(r.Methods)
+			case "model":
+				r, ok := resources.ModelServices[a.Name]
+				if !ok {
+					herr = hostErr(pbv1.ErrorCode_ERROR_CODE_PERMISSION_DENIED, "resource %q is not approved", a.Name)
+					break
+				}
+				info.Available = r.Path != ""
+				info.TimeoutMs = durationPtr(r.Timeout)
+				info.MaxInputBytes = int64Ptr(r.MaxInputBytes)
+				info.MaxTokens = uint64Ptr(uint64(r.MaxTokens))
+				info.MaxCallsPerMinute = uint64Ptr(uint64(r.MaxCallsPerMinute))
+				info.MaxTokensPerHour = uint64Ptr(uint64(r.MaxTokensPerHour))
+			case "pricing":
+				r, ok := resources.PricingResources[a.Name]
+				if !ok {
+					herr = hostErr(pbv1.ErrorCode_ERROR_CODE_PERMISSION_DENIED, "resource %q is not approved", a.Name)
+					break
+				}
+				info.Available = r.Prices != nil
+			case "cache_policy":
+				r, ok := resources.PromptCachePolicies[a.Name]
+				if !ok {
+					herr = hostErr(pbv1.ErrorCode_ERROR_CODE_PERMISSION_DENIED, "resource %q is not approved", a.Name)
+					break
+				}
+				info.Available = r.Policies != nil
+			default:
+				herr = hostErr(pbv1.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "unknown resource kind %q", a.Kind)
+				break
+			}
+			if herr == nil {
+				value, _ = proto.Marshal(info)
+			}
 		case "env.credential_get":
 			var a pbv1.CredentialGetArgs
 			if err := proto.Unmarshal([]byte(args), &a); err != nil {
