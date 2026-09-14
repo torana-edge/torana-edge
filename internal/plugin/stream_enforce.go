@@ -766,21 +766,23 @@ func (pp *PluginPipeline) runOnStreamChunk(ctx context.Context, reqID uint64, ch
 		// last real ordinal in this single atomic HookResult batch.
 		if vs != nil && pvs != nil {
 			acceptedCloses, returnedCloses := 0, 0
-			acceptedMessageStop, returnedMessageStop := false, false
+			acceptedTerminal, returnedTerminal := false, false
 			for i := callAcceptedStart; i < len(pvs.accepted); i++ {
 				if isScopeCloseEvent(pvs.accepted[i]) {
 					acceptedCloses++
 				}
-				if _, ok := pvs.accepted[i].Event.(*pbv1.StreamEvent_MessageStop); ok {
-					acceptedMessageStop = true
+				switch pvs.accepted[i].Event.(type) {
+				case *pbv1.StreamEvent_MessageStop, *pbv1.StreamEvent_Error:
+					acceptedTerminal = true
 				}
 			}
 			for i := callReturnedStart; i < len(pvs.returned); i++ {
 				if isScopeCloseEvent(pvs.returned[i]) {
 					returnedCloses++
 				}
-				if _, ok := pvs.returned[i].Event.(*pbv1.StreamEvent_MessageStop); ok {
-					returnedMessageStop = true
+				switch pvs.returned[i].Event.(type) {
+				case *pbv1.StreamEvent_MessageStop, *pbv1.StreamEvent_Error:
+					returnedTerminal = true
 				}
 			}
 			if acceptedCloses != 0 || returnedCloses != 0 {
@@ -789,7 +791,7 @@ func (pp *PluginPipeline) runOnStreamChunk(ctx context.Context, reqID uint64, ch
 				// its policy transaction only when all deferred decisions have resolved.
 				if pvs.journal == nil || len(pvs.journal.pending) == 0 {
 					var verifyErr error
-					if acceptedMessageStop || returnedMessageStop {
+					if acceptedTerminal || returnedTerminal {
 						verifyErr = pvs.walker.end()
 					}
 					if verifyErr == nil {

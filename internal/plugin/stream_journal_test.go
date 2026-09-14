@@ -97,6 +97,42 @@ func TestStreamJournalErrorAbandonsOpenToolAndReleasesError(t *testing.T) {
 	}
 }
 
+func TestStreamJournalErrorChecksReturnedCompletenessBeforeRelease(t *testing.T) {
+	for _, mode := range []string{"pass", "block"} {
+		t.Run(mode, func(t *testing.T) {
+			pp := journalPipeline(t, mode, 0)
+			const reqID = 43
+			input := []engine.StreamEvent{toolStart(0, "call", "read"), toolDelta(0, `{"path":"open.go"}`)}
+			for _, ev := range input {
+				event := ev
+				if out, err := pp.RunOnStreamChunkVerified(context.Background(), reqID, &event); err != nil || len(out) != 0 {
+					t.Fatalf("pending journal event escaped: out=%#v err=%v", out, err)
+				}
+			}
+			providerErr := engine.StreamEvent{Error: &engine.StreamError{Code: 499, Message: "trigger malformed return"}}
+			out, err := pp.RunOnStreamChunkVerified(context.Background(), reqID, &providerErr)
+			if mode == "block" {
+				var terminal *StreamTerminalError
+				if !errors.As(err, &terminal) || terminal.Kind != streamTerminalPlugin || len(out) != 0 {
+					t.Fatalf("block mode = out %#v, err %T %v; want plugin terminal without output", out, err, err)
+				}
+			} else {
+				if err != nil {
+					t.Fatalf("pass rollback failed: %v", err)
+				}
+				want := append(append([]engine.StreamEvent{}, input...), providerErr)
+				if !reflect.DeepEqual(out, want) {
+					t.Fatalf("pass rollback did not replay originals exactly once: out=%#v want=%#v", out, want)
+				}
+				if err := pp.EndStreamVerified(reqID); err != nil {
+					t.Fatalf("rolled-back stream did not finalize: %v", err)
+				}
+			}
+			pp.EndRequest(reqID)
+		})
+	}
+}
+
 func multiJournalPipeline(t *testing.T, downstream string) *PluginPipeline {
 	t.Helper()
 	requireWASM(t, fixturesDir+"/test-stream-journal/plugin.wasm")

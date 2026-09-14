@@ -10,6 +10,16 @@ import (
 func main() {}
 func init() {
 	sdk.OnStreamChunk(func(ctx context.Context, ev *pb.StreamEvent) (sdk.StreamResult, error) {
+		if streamErr := ev.GetError(); streamErr != nil && streamErr.Code == 499 {
+			// Test-only malformed return: a provider error is a terminal scope
+			// boundary, so this unterminated invented block must be caught before
+			// any deferred journal output is released.
+			return sdk.EmitEvents(&pb.StreamEvent{Event: &pb.StreamEvent_ContentBlockStart{
+				ContentBlockStart: &pb.ContentBlockStart{Index: 9, Block: &pb.ContentBlockStart_ToolCall{
+					ToolCall: &pb.ToolCallRef{Id: "invented", Name: "run"},
+				}},
+			}}), nil
+		}
 		if ev.GetContentBlockStart().GetToolCall() != nil {
 			return sdk.SuppressEvent(), nil
 		}
