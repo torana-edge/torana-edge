@@ -17,6 +17,9 @@ func TestConditionalPersistenceDoesNotBlockReadersAndSerializesWriters(t *testin
 			}
 			_, oldVersion, _ := s.GetVersioned("p", "k")
 			entered, release := make(chan struct{}), make(chan struct{})
+			var releaseOnce sync.Once
+			unblock := func() { releaseOnce.Do(func() { close(release) }) }
+			defer unblock()
 			var once sync.Once
 			s.afterRename = func() error {
 				once.Do(func() { close(entered); <-release })
@@ -32,9 +35,23 @@ func TestConditionalPersistenceDoesNotBlockReadersAndSerializesWriters(t *testin
 					firstDone <- err
 				}
 			}()
-			<-entered
-			if got, version, ok := s.GetVersioned("p", "k"); !ok || got != "old" || version != oldVersion {
-				t.Fatalf("reader observed uncommitted generation: %q %q %v", got, version, ok)
+			select {
+			case <-entered:
+			case <-time.After(5 * time.Second):
+				t.Fatal("writer did not reach persistence")
+			}
+			readDone := make(chan bool, 1)
+			go func() {
+				got, version, ok := s.GetVersioned("p", "k")
+				readDone <- ok && got == "old" && version == oldVersion
+			}()
+			select {
+			case oldGeneration := <-readDone:
+				if !oldGeneration {
+					t.Fatal("reader observed uncommitted generation")
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("reader blocked behind disk persistence")
 			}
 			secondDone := make(chan error, 1)
 			go func() { secondDone <- s.Set("p", "k", "second") }()
@@ -43,7 +60,7 @@ func TestConditionalPersistenceDoesNotBlockReadersAndSerializesWriters(t *testin
 				t.Fatalf("second writer bypassed in-flight persistence: %v", err)
 			case <-time.After(50 * time.Millisecond):
 			}
-			close(release)
+			unblock()
 			if err := <-firstDone; err != nil {
 				t.Fatal(err)
 			}

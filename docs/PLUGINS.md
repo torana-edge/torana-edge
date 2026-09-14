@@ -14,6 +14,31 @@ The current host accepts ABI v1 plugins. The SDK repository supports ABI v1
 guests in Go and Rust; the first-party plugins use Go, while the Rust crate and
 conformance guest demonstrate the same host boundary from a second language.
 
+### Updating the host and SDK
+
+The ABI major is v1. `abi_version()` also carries an exact contract revision;
+the host checks that value and the exported function signatures at load time.
+An SDK package version is separate from this revision. Helper fixes and docs
+can keep the same contract, while a contract change requires rebuilding plugins.
+
+For this foundation upgrade, rebuild **every** plugin with the SDK revision
+used by the target Edge build, including all official bundles. Use
+`torana plugin new` for a starter pinned to the host's SDK; existing projects
+must update their Go module or Rust Git revision and rebuild. Inspect each
+rebuilt bundle and approve its new digest before routing traffic through the
+new pipeline. Incompatible bundles are rejected during loading; they are not
+partially interpreted. Keep the previous host and its approved bundles together
+when preparing a rollback.
+
+Plugin state is durable. A corrupt `plugin-state.json` load or an ambiguous
+failure after file replacement makes the store read-only, and `/health` returns
+503 with `component: plugin_state`. Preserve the file for diagnosis, stop the
+process, repair or restore it from a known good copy, and restart. Removing the
+file deliberately resets plugin state; do that only when losing that state is
+acceptable. A write failure before replacement leaves the committed state
+intact and can be retried without restarting.
+
+
 ## Installing
 
 You do not need to stop Torana. Run installation commands from another terminal;

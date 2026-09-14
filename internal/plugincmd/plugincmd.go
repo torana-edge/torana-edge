@@ -122,13 +122,32 @@ func initPlugin(args []string, stdout io.Writer) error {
 	if err != nil {
 		return fmt.Errorf("resolve plugin directory: %w", err)
 	}
-	if err := os.MkdirAll(absDir, 0o755); err != nil {
-		return fmt.Errorf("create plugin directory: %w", err)
+	// Build off to the side so dependency failures leave no partial project.
+	// Existing files are never overwritten, including files unrelated to Go.
+	existed := false
+	if info, statErr := os.Lstat(absDir); statErr == nil {
+		if !info.IsDir() {
+			return fmt.Errorf("%s is not a directory", absDir)
+		}
+		entries, readErr := os.ReadDir(absDir)
+		if readErr != nil {
+			return readErr
+		}
+		if len(entries) != 0 {
+			return fmt.Errorf("%s is not empty", absDir)
+		}
+		existed = true
+	} else if !os.IsNotExist(statErr) {
+		return statErr
 	}
-	goModPath := filepath.Join(absDir, "go.mod")
-	if _, err := os.Stat(goModPath); err == nil {
-		return fmt.Errorf("%s already contains a go.mod file", absDir)
+	if err := os.MkdirAll(filepath.Dir(absDir), 0o755); err != nil {
+		return err
 	}
+	stage, err := os.MkdirTemp(filepath.Dir(absDir), ".torana-plugin-new-")
+	if err != nil {
+		return fmt.Errorf("stage plugin directory: %w", err)
+	}
+	defer os.RemoveAll(stage)
 
 	files := map[string]string{
 		"go.mod": fmt.Sprintf(`module %s
@@ -238,10 +257,10 @@ mod tests {
 		}
 	}
 	for name, content := range files {
-		if err := os.MkdirAll(filepath.Dir(filepath.Join(absDir, name)), 0o755); err != nil {
+		if err := os.MkdirAll(filepath.Dir(filepath.Join(stage, name)), 0o755); err != nil {
 			return fmt.Errorf("create directory for %s: %w", name, err)
 		}
-		if err := os.WriteFile(filepath.Join(absDir, name), []byte(content), 0o644); err != nil {
+		if err := os.WriteFile(filepath.Join(stage, name), []byte(content), 0o644); err != nil {
 			return fmt.Errorf("write %s: %w", name, err)
 		}
 	}
@@ -250,11 +269,28 @@ mod tests {
 	// `go mod tidy` manually, even though the scaffold is otherwise complete.
 	if language == "go" {
 		tidy := exec.Command("go", "mod", "tidy")
-		tidy.Dir = absDir
+		tidy.Dir = stage
 		tidy.Env = append(os.Environ(), "GOWORK=off", "GO111MODULE=on")
 		if output, tidyErr := tidy.CombinedOutput(); tidyErr != nil {
 			return fmt.Errorf("resolve scaffold dependencies: %w\n%s", tidyErr, strings.TrimSpace(string(output)))
 		}
+	}
+	if err := os.Chmod(stage, 0o755); err != nil {
+		return err
+	}
+	if existed {
+		// Remove only an empty directory; a concurrent user write aborts safely.
+		if err := os.Remove(absDir); err != nil {
+			return fmt.Errorf("publish plugin directory: %w", err)
+		}
+	} else if _, err := os.Lstat(absDir); err == nil || !os.IsNotExist(err) {
+		return fmt.Errorf("plugin directory appeared during creation: %s", absDir)
+	}
+	if err := os.Rename(stage, absDir); err != nil {
+		if existed {
+			_ = os.Mkdir(absDir, 0o755)
+		}
+		return fmt.Errorf("publish plugin directory: %w", err)
 	}
 	fmt.Fprintf(stdout, "Initialized %s in %s\n", pluginName, absDir)
 	fmt.Fprintf(stdout, "Next: torana plugin build %s\n", pluginDir)

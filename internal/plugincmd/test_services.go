@@ -295,10 +295,10 @@ func buildScenarioRuntime(ctx context.Context, bundle *plugin.PluginBundle, serv
 					errs = append(errs, fmt.Errorf("model slot %q has %d unused fixture(s)", slot, remaining))
 				}
 			}
-			finishErr = errors.Join(errs...)
-			_ = rt.Close()
+			errs = append(errs, rt.Close())
 			store.Close()
-			_ = os.RemoveAll(stateDir)
+			errs = append(errs, os.RemoveAll(stateDir))
+			finishErr = errors.Join(errs...)
 		})
 		return finishErr
 	}

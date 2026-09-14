@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/torana-edge/torana-edge/internal/engine"
 	"github.com/torana-edge/torana-edge/internal/engine/pbconv"
@@ -127,14 +128,29 @@ func testPlugin(args []string, stdout, stderr io.Writer) (resultErr error) {
 	if err != nil {
 		return fmt.Errorf("configure scenario services: %w", err)
 	}
-	defer func() { resultErr = errors.Join(resultErr, finish()) }()
+	// One cleanup path handles success and every early return. Pipeline shutdown
+	// may still call host services, so it must precede runtime closure.
+	var endRequest, drain func()
+	var cleanupOnce sync.Once
+	cleanup := func() {
+		cleanupOnce.Do(func() {
+			if endRequest != nil {
+				endRequest()
+			}
+			if drain != nil {
+				drain()
+			}
+			resultErr = errors.Join(resultErr, finish())
+		})
+	}
+	defer cleanup()
 	config.Config = map[string]json.RawMessage{bundle.Manifest.Name: scenario.Config}
 	pp, err := plugin.NewPipeline(rt, config)
 	if err != nil {
 		return fmt.Errorf("load plugin pipeline: %w", err)
 	}
-	defer pp.DrainAndClose()
-	defer pp.EndRequest(1)
+	drain = pp.DrainAndClose
+	endRequest = func() { pp.EndRequest(1) }
 	ctx := context.Background()
 	var runErr error
 	if len(scenario.Request) != 0 {
@@ -299,8 +315,9 @@ func testPlugin(args []string, stdout, stderr io.Writer) (resultErr error) {
 	} else if runErr != nil {
 		return runErr
 	}
-	if err := finish(); err != nil {
-		return err
+	cleanup()
+	if resultErr != nil {
+		return resultErr
 	}
 	fmt.Fprintf(stdout, "Plugin test passed: %s\n", bundle.Manifest.Name)
 	return nil

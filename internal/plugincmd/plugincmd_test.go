@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -279,4 +280,70 @@ func requireVersionFromGoMod(t *testing.T, path, module string) string {
 	}
 	t.Fatalf("%s does not require %s", path, module)
 	return ""
+}
+
+func TestInitDependencyFailureLeavesDestinationUntouched(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell stub")
+	}
+	bin := t.TempDir()
+	if err := os.WriteFile(filepath.Join(bin, "go"), []byte("#!/bin/sh\necho unavailable >&2\nexit 1\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	for _, existed := range []bool{false, true} {
+		parent := t.TempDir()
+		dir := filepath.Join(parent, "plugin")
+		if existed {
+			if err := os.Mkdir(dir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}
+		var out bytes.Buffer
+		err := initPlugin([]string{dir}, &out)
+		if err == nil || !strings.Contains(err.Error(), "resolve scaffold dependencies") {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if out.Len() != 0 {
+			t.Fatalf("reported success: %s", out.String())
+		}
+		if existed {
+			files, err := os.ReadDir(dir)
+			if err != nil || len(files) != 0 {
+				t.Fatalf("changed empty target: %v %v", files, err)
+			}
+		} else if _, err := os.Stat(dir); !os.IsNotExist(err) {
+			t.Fatalf("left partial destination: %v", err)
+		}
+		entries, err := os.ReadDir(parent)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := 0
+		if existed {
+			want = 1
+		}
+		if len(entries) != want {
+			t.Fatalf("left staging files: %v", entries)
+		}
+	}
+}
+
+func TestInitPreservesExistingFiles(t *testing.T) {
+	for _, language := range []string{"go", "rust"} {
+		dir := t.TempDir()
+		original := []byte("user-owned content")
+		path := filepath.Join(dir, "plugin.json")
+		if err := os.WriteFile(path, original, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		err := initPlugin([]string{dir, "--language", language}, &bytes.Buffer{})
+		if err == nil || !strings.Contains(err.Error(), "not empty") {
+			t.Fatalf("accepted nonempty project: %v", err)
+		}
+		actual, err := os.ReadFile(path)
+		if err != nil || !bytes.Equal(actual, original) {
+			t.Fatalf("overwrote user data: %s %v", actual, err)
+		}
+	}
 }

@@ -247,7 +247,7 @@ func (s *Store) CompareAndSet(plugin, key, value string, expected *string) (bool
 	vers[plugin][key] = version
 	if err := s.persistVersioned(candidate, vers, counter); err != nil {
 		// The rename may already have happened before a later fsync error;
-		// consume the token permanently to prevent ABA on retry.
+		// persistence latches read-only until reopen, preventing ABA on retry.
 		return false, "", err
 	}
 	s.mu.Lock()
