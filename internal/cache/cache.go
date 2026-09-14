@@ -207,10 +207,10 @@ func (l *LocalCache) evictLoop() {
 }
 
 func (l *LocalCache) evict() {
-	now := time.Now()
+	now := l.now()
 	l.mu.Lock()
 	for _, e := range l.entries {
-		if now.After(e.expiresAt) {
+		if !now.Before(e.expiresAt) {
 			l.removeLocked(e)
 		}
 	}

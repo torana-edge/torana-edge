@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -62,6 +63,22 @@ func TestHealthReportsFailedPluginReload(t *testing.T) {
 	}
 	if !strings.Contains(rec.Body.String(), "last_known_good") {
 		t.Fatalf("health body = %s", rec.Body.String())
+	}
+}
+
+func TestHealthReportsReadOnlyPluginStateWithRecovery(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "plugin-state.json"), []byte("{corrupt"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	srv, err := New(Config{Providers: provider.DefaultConfig(), ConfigPath: filepath.Join(dir, "config.json")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/health", nil))
+	if rec.Code != http.StatusServiceUnavailable || !strings.Contains(rec.Body.String(), `"component":"plugin_state"`) || !strings.Contains(rec.Body.String(), `"recovery":`) {
+		t.Fatalf("health = %d %s", rec.Code, rec.Body.String())
 	}
 }
 

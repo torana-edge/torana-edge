@@ -199,3 +199,21 @@ func TestSetRejectingAnOversizedValueInsertsNothing(t *testing.T) {
 		t.Fatalf("Len = %d after a rejected write, want 0", n)
 	}
 }
+
+func TestEvictUsesInjectedClockAndExpiresAtEquality(t *testing.T) {
+	now := time.Unix(100, 0)
+	l := NewLocalCacheWithClock(time.Hour, 0, 0, func() time.Time { return now })
+	defer l.Close()
+	if err := l.Set(context.Background(), "k", "v", time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	l.evict()
+	if l.Len() != 1 {
+		t.Fatal("evict used wall clock instead of injected clock")
+	}
+	now = now.Add(time.Minute)
+	l.evict()
+	if l.Len() != 0 {
+		t.Fatal("entry remained at its exact expiry instant")
+	}
+}

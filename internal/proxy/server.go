@@ -756,9 +756,9 @@ func New(cfg Config) (*Server, error) {
 		return nil, fmt.Errorf("proxy: plugin files: %w", err)
 	}
 	// Durable plugin state lives beside the managed config. A failure to load
-	// it is reported but not fatal: the store still works in memory, and
-	// refusing to start the proxy because one plugin's scratch file was
-	// truncated would be a poor trade.
+	// is not fatal, but the store serves only its last unambiguous generation
+	// and refuses writes. Repair or remove plugin-state.json and restart Torana
+	// to reopen it; /health reports the degraded state until then.
 	stateStore, err := pluginstate.New(pluginstate.Options{
 		Path: filepath.Join(filepath.Dir(configPath), "plugin-state.json"),
 	})
@@ -1778,6 +1778,11 @@ func New(cfg Config) (*Server, error) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
+		if s.pluginState != nil && s.pluginState.ReadOnly() {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			w.Write([]byte(`{"status":"degraded","component":"plugin_state","serving":"read_only","recovery":"repair_or_remove_plugin-state.json_and_restart"}`))
+			return
+		}
 		if s.pluginReloadDegraded.Load() {
 			w.WriteHeader(http.StatusServiceUnavailable)
 			w.Write([]byte(`{"status":"degraded","component":"plugin_pipeline","serving":"last_known_good"}`))

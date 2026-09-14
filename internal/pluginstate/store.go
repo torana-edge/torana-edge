@@ -155,6 +155,11 @@ func (s *Store) Get(plugin, key string) (string, bool) {
 	return v, ok
 }
 
+// ReadOnly reports whether persistence is degraded. A read-only store keeps
+// serving its last unambiguous in-memory generation but refuses every write
+// until the backing file is repaired and the process reopens it.
+func (s *Store) ReadOnly() bool { return s != nil && s.readOnly.Load() }
+
 // PageEntry is one durable state entry including its opaque version token.
 type PageEntry struct{ Key, Value, Version string }
 
@@ -206,21 +211,25 @@ func (s *Store) CompareAndSet(plugin, key, value string, expected *string) (bool
 	if s.readOnly.Load() {
 		return false, "", errors.New("state store requires reopen after a persistence failure")
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.mu.RLock()
 	cur, exists := s.versions[plugin][key]
 	if (expected == nil && exists) || (expected != nil && (!exists || *expected != cur)) {
+		s.mu.RUnlock()
 		return false, "", nil
 	}
 	if !exists && len(s.data[plugin]) >= s.maxKeysPerPlugin {
+		s.mu.RUnlock()
 		return false, "", fmt.Errorf("plugin %q already holds %d keys, the per-plugin limit", plugin, s.maxKeysPerPlugin)
 	}
 	if s.counter == ^uint64(0) {
+		s.mu.RUnlock()
 		return false, "", ErrVersionExhausted
 	}
 	candidate := cloneData(s.data)
 	vers := cloneData(s.versions)
 	total := s.totalBytes
+	counter := s.counter + 1
+	s.mu.RUnlock()
 	if candidate[plugin] == nil {
 		candidate[plugin] = map[string]string{}
 	}
@@ -233,15 +242,17 @@ func (s *Store) CompareAndSet(plugin, key, value string, expected *string) (bool
 	if total+entrySize(key, value) > s.maxTotalBytes {
 		return false, "", fmt.Errorf("store would exceed its %d byte limit", s.maxTotalBytes)
 	}
-	version, _ := s.nextVersion()
+	version := strconv.FormatUint(counter, 10)
 	candidate[plugin][key] = value
 	vers[plugin][key] = version
-	if err := s.persistVersioned(candidate, vers, s.counter); err != nil {
+	if err := s.persistVersioned(candidate, vers, counter); err != nil {
 		// The rename may already have happened before a later fsync error;
 		// consume the token permanently to prevent ABA on retry.
 		return false, "", err
 	}
-	s.data, s.versions, s.totalBytes = candidate, vers, total+entrySize(key, value)
+	s.mu.Lock()
+	s.data, s.versions, s.totalBytes, s.counter = candidate, vers, total+entrySize(key, value), counter
+	s.mu.Unlock()
 	return true, version, nil
 }
 
@@ -259,24 +270,28 @@ func (s *Store) CompareAndDelete(plugin, key, expected string) (bool, error) {
 	if s.readOnly.Load() {
 		return false, errors.New("state store requires reopen after a persistence failure")
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.mu.RLock()
 	if _, ok := s.data[plugin][key]; !ok || s.versions[plugin][key] != expected {
+		s.mu.RUnlock()
 		return false, nil
 	}
 	candidate := cloneData(s.data)
 	vers := cloneData(s.versions)
 	total := s.totalBytes - totalEntry(candidate, plugin, key)
+	counter := s.counter
+	s.mu.RUnlock()
 	delete(candidate[plugin], key)
 	delete(vers[plugin], key)
 	if len(candidate[plugin]) == 0 {
 		delete(candidate, plugin)
 		delete(vers, plugin)
 	}
-	if err := s.persistVersioned(candidate, vers, s.counter); err != nil {
+	if err := s.persistVersioned(candidate, vers, counter); err != nil {
 		return false, err
 	}
+	s.mu.Lock()
 	s.data, s.versions, s.totalBytes = candidate, vers, total
+	s.mu.Unlock()
 	return true, nil
 }
 
