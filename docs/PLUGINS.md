@@ -141,6 +141,29 @@ approve them.
 | `env.model_complete` | Sends bounded text completions through manifest-declared model-service slots. The operator chooses the provider, URL, model, credential, and budgets; the guest sees only the logical slot name. |
 | `env.model_pricing` | Reads only operator-bound pricing resources by logical name. Pricing is plugin input, not a global Torana setting or a table supplied by the guest. |
 
+`env.model_complete` excludes cache-read tokens from `input_tokens`: the host
+subtracts that known subset from OpenAI-compatible and Gemini totals, while
+Anthropic already reports it separately. Cache-write counts are passed through
+without assuming they overlap input totals. If a reported count is negative,
+exceeds the result's `int32` range, or cached reads exceed an inclusive input
+total, the completion is returned with usage absent. Cost-sensitive guests can
+decline work with unknown cost without failing the hook; counts are never
+clamped or guessed. The host applies the same validity check before charging
+the hourly token budget, so an invalid report cannot exhaust it. These calls
+still consume the per-minute call budget; later valid usage still charges the
+token budget. Ordinary provider responses and the plugin-egress feed retain
+their provider-native usage semantics.
+Every model-service response is recorded in that feed before the guest decides
+whether its content is useful, including empty completions.
+
+The feed can therefore contain counts the host rejected. It has no usage
+validity or presence flag: check `tokens_in`, `tokens_out`, `cache_read_tokens`,
+and `cache_write_tokens` against the range and cache-read rules above, using the
+provider format active when the call ran. All-zero counters cannot distinguish
+missing usage from an explicit zero report. For workload-cost reconciliation,
+treat invalid or unverifiable usage as unknown cost; an omitted token-budget
+charge is not evidence that the provider billed nothing.
+
 None of these does anything on its own. Ticks are off unless you set an
 interval, egress is refused unless you set a budget, and both are refused
 outright without the grant. But an approved plugin holding all three can work,

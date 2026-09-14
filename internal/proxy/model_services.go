@@ -76,13 +76,17 @@ func (s *Server) completeModel(ctx context.Context, pluginName string, resource 
 	}
 	refs := extractResponse(prov.Format, decoded, body)
 	out := &pbv1.ModelCompleteResult{Content: refs.content, ReportedModel: refs.model, FinishReason: refs.finishReason}
-	if refs.usage != nil {
-		for _, count := range []int{refs.usage.InputTokens, refs.usage.OutputTokens, refs.usage.CacheReadTokens, refs.usage.CacheWriteTokens} {
-			if count < 0 || int64(count) > math.MaxInt32 {
-				return nil, modelHostError(pbv1.ErrorCode_ERROR_CODE_INTERNAL, "model service provider returned invalid usage")
-			}
+	// Provider metering defects do not invalidate the completion. Use the same
+	// validity rule as the token budget and leave unreliable usage unknown.
+	if validProviderUsage(prov.Format, refs.usage) {
+		// OpenAI/Gemini include cache reads in their input total; Anthropic
+		// reports them separately. Normalize only this known overlap. Cache
+		// writes have no established overlap on the non-Anthropic formats.
+		input := int64(refs.usage.InputTokens)
+		if prov.Format != "anthropic" {
+			input -= int64(refs.usage.CacheReadTokens)
 		}
-		out.Usage = &pbv1.Usage{InputTokens: int32(refs.usage.InputTokens), OutputTokens: int32(refs.usage.OutputTokens), CacheReadTokens: int32(refs.usage.CacheReadTokens), CacheWriteTokens: int32(refs.usage.CacheWriteTokens)}
+		out.Usage = &pbv1.Usage{InputTokens: int32(input), OutputTokens: int32(refs.usage.OutputTokens), CacheReadTokens: int32(refs.usage.CacheReadTokens), CacheWriteTokens: int32(refs.usage.CacheWriteTokens)}
 	}
 	return out, nil
 }

@@ -348,16 +348,54 @@ func TestEgressTokenBudget(t *testing.T) {
 	}
 }
 
+// Unknown token usage must not lock out the plugin for an hour, but actual
+// requests still consume the call-rate budget even when every report is bad.
+func TestEgressInvalidUsageStillConsumesCallBudget(t *testing.T) {
+	var calls atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"choices":[],"usage":{"prompt_tokens":2147483648,"completion_tokens":2}}`)
+	}))
+	defer upstream.Close()
+	srv := newEgressTestServer(t, upstream.URL, provider.EgressBudget{MaxCallsPerMinute: 2, MaxTokensPerHour: 1})
+	payload := egressPayload(t, "oai", "/v1/chat/completions")
+	for i := 0; i < 2; i++ {
+		got, herr := send(t, srv, "warmer", payload)
+		if herr != nil || got.HTTPStatus != http.StatusOK || got.Usage == nil || got.Usage.Input != 2147483648 {
+			t.Fatalf("call %d lost original provider response: %+v refusal=%v", i+1, got, herr)
+		}
+	}
+	_, herr := send(t, srv, "warmer", payload)
+	if herr == nil || herr.Code != pb.ErrorCode_ERROR_CODE_UNAVAILABLE || !strings.Contains(herr.Message, "calls/minute") || calls.Load() != 2 {
+		t.Fatalf("invalid usage bypassed call-rate budget: refusal=%v calls=%d", herr, calls.Load())
+	}
+}
+
 func TestEgressBillableTokensDoNotDoubleCountProviderCaches(t *testing.T) {
 	u := &engine.StreamUsage{InputTokens: 100, OutputTokens: 20, CacheReadTokens: 80, CacheWriteTokens: 15}
-	if got := egressBillableTokens("openai", u); got != 120 {
-		t.Fatalf("OpenAI billable tokens = %d, want 120 (cache is a subset of input)", got)
+	if got, reported := egressBillableTokens("openai", u); !reported || got != 120 {
+		t.Fatalf("OpenAI billable tokens = %d, reported=%v, want 120 (cache reads are a subset of input)", got, reported)
 	}
-	if got := egressBillableTokens("gemini", u); got != 120 {
-		t.Fatalf("Gemini billable tokens = %d, want 120 (cache is a subset of input)", got)
+	if got, reported := egressBillableTokens("gemini", u); !reported || got != 120 {
+		t.Fatalf("Gemini billable tokens = %d, reported=%v, want 120 (cache reads are a subset of input)", got, reported)
 	}
-	if got := egressBillableTokens("anthropic", u); got != 215 {
-		t.Fatalf("Anthropic billable tokens = %d, want 215 (cache counts are separate)", got)
+	if got, reported := egressBillableTokens("anthropic", u); !reported || got != 215 {
+		t.Fatalf("Anthropic billable tokens = %d, reported=%v, want 215 (cache counts are separate)", got, reported)
+	}
+}
+
+func TestEgressBillableTokensDistinguishUnknownFromZero(t *testing.T) {
+	if got, reported := egressBillableTokens("openai", nil); got != 0 || reported {
+		t.Fatalf("absent usage reported as known: %d, %v", got, reported)
+	}
+	if got, reported := egressBillableTokens("openai", &engine.StreamUsage{}); got != 0 || !reported {
+		t.Fatalf("explicit zero usage lost: %d, %v", got, reported)
+	}
+	// The int32 bound is per counter. A valid aggregate can exceed that bound.
+	usage := &engine.StreamUsage{InputTokens: math.MaxInt32, OutputTokens: math.MaxInt32, CacheReadTokens: math.MaxInt32, CacheWriteTokens: math.MaxInt32}
+	if got, reported := egressBillableTokens("anthropic", usage); got != 4*int64(math.MaxInt32) || !reported {
+		t.Fatalf("valid large token total lost: %d, %v", got, reported)
 	}
 }
 
