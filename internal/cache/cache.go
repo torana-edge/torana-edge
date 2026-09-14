@@ -10,9 +10,12 @@ package cache
 import (
 	"container/list"
 	"context"
+	"errors"
 	"sync"
 	"time"
 )
+
+var ErrTooLarge = errors.New("cache entry too large")
 
 // Store is a TTL key-value store safe for concurrent use.
 //
@@ -23,13 +26,13 @@ import (
 // nobody is waiting for.
 type Store interface {
 	// Set saves a value under key, resetting its TTL.
-	Set(ctx context.Context, key, value string)
+	Set(ctx context.Context, key, value string, ttl time.Duration) error
 
 	// Get retrieves a value. Returns false if not found or expired.
-	Get(ctx context.Context, key string) (string, bool)
+	Get(ctx context.Context, key string) (string, bool, error)
 
 	// Delete removes an entry.
-	Delete(ctx context.Context, key string)
+	Delete(ctx context.Context, key string) error
 
 	// Len returns the number of entries (including not-yet-evicted expired ones).
 	Len() int
@@ -50,6 +53,7 @@ type LocalCache struct {
 	maxEntries int
 	maxBytes   int
 	bytes      int
+	now        func() time.Time
 
 	// Eviction control.
 	stopCh    chan struct{}
@@ -75,6 +79,17 @@ func NewLocalCache(ttl time.Duration) *LocalCache {
 // NewLocalCacheWithLimits creates a TTL cache with LRU admission bounds.
 // Values larger than maxBytes are not admitted.
 func NewLocalCacheWithLimits(ttl time.Duration, maxEntries, maxBytes int) *LocalCache {
+	return newLocalCache(ttl, maxEntries, maxBytes, time.Now)
+}
+
+func NewLocalCacheWithClock(ttl time.Duration, maxEntries, maxBytes int, now func() time.Time) *LocalCache {
+	if now == nil {
+		now = time.Now
+	}
+	return newLocalCache(ttl, maxEntries, maxBytes, now)
+}
+
+func newLocalCache(ttl time.Duration, maxEntries, maxBytes int, now func() time.Time) *LocalCache {
 	l := &LocalCache{
 		entries:    make(map[string]*cacheEntry),
 		lru:        list.New(),
@@ -83,6 +98,7 @@ func NewLocalCacheWithLimits(ttl time.Duration, maxEntries, maxBytes int) *Local
 		maxBytes:   maxBytes,
 		stopCh:     make(chan struct{}),
 		doneCh:     make(chan struct{}),
+		now:        now,
 	}
 	go l.evictLoop()
 	return l
@@ -90,7 +106,16 @@ func NewLocalCacheWithLimits(ttl time.Duration, maxEntries, maxBytes int) *Local
 
 // The context is accepted to satisfy Store and deliberately ignored: these
 // operations are a map lookup under a mutex, with nothing to cancel.
-func (l *LocalCache) Set(_ context.Context, key, value string) {
+func (l *LocalCache) Set(ctx context.Context, key, value string, ttl time.Duration) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if ttl < 0 {
+		return errors.New("cache ttl must not be negative")
+	}
+	if ttl == 0 {
+		ttl = l.ttl
+	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	// Size FIRST. Removing the old entry and then rejecting the new value
@@ -99,7 +124,7 @@ func (l *LocalCache) Set(_ context.Context, key, value string) {
 	// as it found it, not empty the slot it was aiming at.
 	size := len(key) + len(value)
 	if l.maxBytes > 0 && size > l.maxBytes {
-		return
+		return ErrTooLarge
 	}
 	if old := l.entries[key]; old != nil {
 		l.removeLocked(old)
@@ -107,36 +132,44 @@ func (l *LocalCache) Set(_ context.Context, key, value string) {
 	e := &cacheEntry{
 		key:       key,
 		value:     value,
-		expiresAt: time.Now().Add(l.ttl),
+		expiresAt: l.now().Add(ttl),
 		size:      size,
 	}
 	e.element = l.lru.PushFront(e)
 	l.entries[key] = e
 	l.bytes += size
 	l.evictBoundsLocked()
+	return nil
 }
 
-func (l *LocalCache) Get(_ context.Context, key string) (string, bool) {
+func (l *LocalCache) Get(ctx context.Context, key string) (string, bool, error) {
+	if err := ctx.Err(); err != nil {
+		return "", false, err
+	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	e, ok := l.entries[key]
 	if !ok {
-		return "", false
+		return "", false, nil
 	}
-	if time.Now().After(e.expiresAt) {
+	if !l.now().Before(e.expiresAt) {
 		l.removeLocked(e)
-		return "", false
+		return "", false, nil
 	}
 	l.lru.MoveToFront(e.element)
-	return e.value, true
+	return e.value, true, nil
 }
 
-func (l *LocalCache) Delete(_ context.Context, key string) {
+func (l *LocalCache) Delete(ctx context.Context, key string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	l.mu.Lock()
 	if e := l.entries[key]; e != nil {
 		l.removeLocked(e)
 	}
 	l.mu.Unlock()
+	return nil
 }
 
 func (l *LocalCache) Len() int {

@@ -44,23 +44,23 @@ func TestStoreContract(t *testing.T) {
 		t.Run(b.name, func(t *testing.T) {
 			s := b.make(t)
 
-			if _, ok := s.Get(context.Background(), "missing"); ok {
+			if _, ok, _ := s.Get(context.Background(), "missing"); ok {
 				t.Error("Get(missing) should miss")
 			}
-			s.Set(context.Background(), "k1", "v1")
-			s.Set(context.Background(), "k2", "v2")
-			if v, ok := s.Get(context.Background(), "k1"); !ok || v != "v1" {
+			s.Set(context.Background(), "k1", "v1", 0)
+			s.Set(context.Background(), "k2", "v2", 0)
+			if v, ok, _ := s.Get(context.Background(), "k1"); !ok || v != "v1" {
 				t.Errorf("Get(k1) = %q,%v", v, ok)
 			}
 			if n := s.Len(); n != 2 {
 				t.Errorf("Len = %d, want 2", n)
 			}
-			s.Set(context.Background(), "k1", "v1b") // overwrite
-			if v, _ := s.Get(context.Background(), "k1"); v != "v1b" {
+			s.Set(context.Background(), "k1", "v1b", 0) // overwrite
+			if v, _, _ := s.Get(context.Background(), "k1"); v != "v1b" {
 				t.Errorf("overwrite: got %q", v)
 			}
 			s.Delete(context.Background(), "k2")
-			if _, ok := s.Get(context.Background(), "k2"); ok {
+			if _, ok, _ := s.Get(context.Background(), "k2"); ok {
 				t.Error("Get after Delete should miss")
 			}
 
@@ -72,7 +72,7 @@ func TestStoreContract(t *testing.T) {
 					defer wg.Done()
 					for j := 0; j < 50; j++ {
 						key := fmt.Sprintf("c%d-%d", i, j)
-						s.Set(context.Background(), key, "x")
+						s.Set(context.Background(), key, "x", 0)
 						s.Get(context.Background(), key)
 					}
 				}(i)
@@ -86,12 +86,12 @@ func TestStoreContract(t *testing.T) {
 // clock is advanced manually).
 func TestRedisTTLExpiry(t *testing.T) {
 	store, mr := newTestRedis(t, 100*time.Millisecond)
-	store.Set(context.Background(), "k", "v")
-	if _, ok := store.Get(context.Background(), "k"); !ok {
+	store.Set(context.Background(), "k", "v", 0)
+	if _, ok, _ := store.Get(context.Background(), "k"); !ok {
 		t.Fatal("entry should exist before TTL")
 	}
 	mr.FastForward(200 * time.Millisecond)
-	if _, ok := store.Get(context.Background(), "k"); ok {
+	if _, ok, _ := store.Get(context.Background(), "k"); ok {
 		t.Fatal("entry should have expired")
 	}
 }
@@ -100,13 +100,13 @@ func TestRedisTTLExpiry(t *testing.T) {
 // miss — it must never error a request.
 func TestRedisDownDegradesToMiss(t *testing.T) {
 	store, mr := newTestRedis(t, time.Minute)
-	store.Set(context.Background(), "k", "v")
+	store.Set(context.Background(), "k", "v", 0)
 	mr.Close()
-	if _, ok := store.Get(context.Background(), "k"); ok {
+	if _, ok, _ := store.Get(context.Background(), "k"); ok {
 		t.Fatal("Get against a dead Redis should miss, not hang or panic")
 	}
-	store.Set(context.Background(), "k2", "v2") // must not panic
-	store.Delete(context.Background(), "k")     // must not panic
+	store.Set(context.Background(), "k2", "v2", 0) // must not panic
+	store.Delete(context.Background(), "k")        // must not panic
 }
 
 // TestNewFromConfig: backend selection, defaults, and unknown-backend error.
@@ -130,8 +130,8 @@ func TestNewFromConfig(t *testing.T) {
 		t.Fatalf("redis config: %v", err)
 	}
 	defer s.Close()
-	s.Set(context.Background(), "k", "v")
-	if v, ok := s.Get(context.Background(), "k"); !ok || v != "v" {
+	s.Set(context.Background(), "k", "v", 0)
+	if v, ok, _ := s.Get(context.Background(), "k"); !ok || v != "v" {
 		t.Fatalf("redis store roundtrip failed: %q %v", v, ok)
 	}
 
@@ -152,20 +152,20 @@ func TestRedisHonoursTheCallersCancellation(t *testing.T) {
 	store, _ := newTestRedis(t, time.Minute)
 	defer store.Close()
 
-	store.Set(context.Background(), "k", "v")
-	if _, ok := store.Get(context.Background(), "k"); !ok {
+	store.Set(context.Background(), "k", "v", 0)
+	if _, ok, _ := store.Get(context.Background(), "k"); !ok {
 		t.Fatal("setup: value not stored")
 	}
 
 	cancelled, cancel := context.WithCancel(context.Background())
 	cancel() // the client has gone
 
-	if _, ok := store.Get(cancelled, "k"); ok {
+	if _, ok, _ := store.Get(cancelled, "k"); ok {
 		t.Error("Get served a request whose context was already cancelled; the caller's " +
 			"cancellation is not reaching the store")
 	}
-	store.Set(cancelled, "k2", "v2")
-	if _, ok := store.Get(context.Background(), "k2"); ok {
+	store.Set(cancelled, "k2", "v2", 0)
+	if _, ok, _ := store.Get(context.Background(), "k2"); ok {
 		t.Error("Set ran for a context that was already cancelled")
 	}
 }

@@ -11,8 +11,8 @@ func TestLocalCache_StoreAndGet(t *testing.T) {
 	l := NewLocalCache(5 * time.Minute)
 	defer l.Close()
 
-	l.Set(context.Background(), "call_123", "find the bug")
-	got, ok := l.Get(context.Background(), "call_123")
+	l.Set(context.Background(), "call_123", "find the bug", 0)
+	got, ok, _ := l.Get(context.Background(), "call_123")
 	if !ok {
 		t.Fatal("expected intent to be found")
 	}
@@ -25,7 +25,7 @@ func TestLocalCache_Missing(t *testing.T) {
 	l := NewLocalCache(5 * time.Minute)
 	defer l.Close()
 
-	_, ok := l.Get(context.Background(), "nonexistent")
+	_, ok, _ := l.Get(context.Background(), "nonexistent")
 	if ok {
 		t.Error("expected false for missing key")
 	}
@@ -35,9 +35,9 @@ func TestLocalCache_Delete(t *testing.T) {
 	l := NewLocalCache(5 * time.Minute)
 	defer l.Close()
 
-	l.Set(context.Background(), "call_123", "test")
+	l.Set(context.Background(), "call_123", "test", 0)
 	l.Delete(context.Background(), "call_123")
-	_, ok := l.Get(context.Background(), "call_123")
+	_, ok, _ := l.Get(context.Background(), "call_123")
 	if ok {
 		t.Error("expected false after delete")
 	}
@@ -47,10 +47,10 @@ func TestLocalCache_Expiry(t *testing.T) {
 	l := NewLocalCache(50 * time.Millisecond)
 	defer l.Close()
 
-	l.Set(context.Background(), "call_123", "test")
+	l.Set(context.Background(), "call_123", "test", 0)
 	time.Sleep(100 * time.Millisecond)
 
-	_, ok := l.Get(context.Background(), "call_123")
+	_, ok, _ := l.Get(context.Background(), "call_123")
 	if ok {
 		t.Error("expected expiry after TTL")
 	}
@@ -63,8 +63,8 @@ func TestLocalCache_Len(t *testing.T) {
 	if l.Len() != 0 {
 		t.Errorf("initial len = %d, want 0", l.Len())
 	}
-	l.Set(context.Background(), "a", "1")
-	l.Set(context.Background(), "b", "2")
+	l.Set(context.Background(), "a", "1", 0)
+	l.Set(context.Background(), "b", "2", 0)
 	if l.Len() != 2 {
 		t.Errorf("len = %d, want 2", l.Len())
 	}
@@ -79,7 +79,7 @@ func TestLocalCache_Concurrent(t *testing.T) {
 		go func(id int) {
 			for j := 0; j < 100; j++ {
 				key := "call_" + string(rune('0'+id))
-				l.Set(context.Background(), key, "intent")
+				l.Set(context.Background(), key, "intent", 0)
 				l.Get(context.Background(), key)
 				l.Len()
 			}
@@ -96,7 +96,7 @@ func TestLocalCache_EvictCleanup(t *testing.T) {
 	defer l.Close()
 
 	for i := 0; i < 10; i++ {
-		l.Set(context.Background(), "call_"+string(rune('0'+i)), "test")
+		l.Set(context.Background(), "call_"+string(rune('0'+i)), "test", 0)
 	}
 	deadline := time.Now().Add(2 * time.Second)
 	for l.Len() != 0 && time.Now().Before(deadline) {
@@ -117,9 +117,9 @@ func TestLocalCache_Override(t *testing.T) {
 	l := NewLocalCache(5 * time.Minute)
 	defer l.Close()
 
-	l.Set(context.Background(), "call_1", "old")
-	l.Set(context.Background(), "call_1", "new")
-	got, _ := l.Get(context.Background(), "call_1")
+	l.Set(context.Background(), "call_1", "old", 0)
+	l.Set(context.Background(), "call_1", "new", 0)
+	got, _, _ := l.Get(context.Background(), "call_1")
 	if got != "new" {
 		t.Errorf("intent = %q, want 'new' (override)", got)
 	}
@@ -128,16 +128,16 @@ func TestLocalCache_Override(t *testing.T) {
 func TestLocalCache_EvictsLeastRecentlyUsedByEntryCount(t *testing.T) {
 	l := NewLocalCacheWithLimits(5*time.Minute, 2, 1<<20)
 	defer l.Close()
-	l.Set(context.Background(), "a", "1")
-	l.Set(context.Background(), "b", "2")
-	if _, ok := l.Get(context.Background(), "a"); !ok {
+	l.Set(context.Background(), "a", "1", 0)
+	l.Set(context.Background(), "b", "2", 0)
+	if _, ok, _ := l.Get(context.Background(), "a"); !ok {
 		t.Fatal("expected a before eviction")
 	}
-	l.Set(context.Background(), "c", "3")
-	if _, ok := l.Get(context.Background(), "b"); ok {
+	l.Set(context.Background(), "c", "3", 0)
+	if _, ok, _ := l.Get(context.Background(), "b"); ok {
 		t.Fatal("least recently used entry b was not evicted")
 	}
-	if _, ok := l.Get(context.Background(), "a"); !ok {
+	if _, ok, _ := l.Get(context.Background(), "a"); !ok {
 		t.Fatal("recently used entry a was evicted")
 	}
 }
@@ -145,13 +145,13 @@ func TestLocalCache_EvictsLeastRecentlyUsedByEntryCount(t *testing.T) {
 func TestLocalCache_BoundsBytesAndRejectsOversizedValues(t *testing.T) {
 	l := NewLocalCacheWithLimits(5*time.Minute, 100, 8)
 	defer l.Close()
-	l.Set(context.Background(), "a", "1234") // 5 bytes including key
-	l.Set(context.Background(), "b", "5678") // evicts a to remain under 8
-	if _, ok := l.Get(context.Background(), "a"); ok {
+	l.Set(context.Background(), "a", "1234", 0) // 5 bytes including key
+	l.Set(context.Background(), "b", "5678", 0) // evicts a to remain under 8
+	if _, ok, _ := l.Get(context.Background(), "a"); ok {
 		t.Fatal("byte bound did not evict oldest entry")
 	}
-	l.Set(context.Background(), "huge", "12345678")
-	if _, ok := l.Get(context.Background(), "huge"); ok {
+	l.Set(context.Background(), "huge", "12345678", 0)
+	if _, ok, _ := l.Get(context.Background(), "huge"); ok {
 		t.Fatal("oversized value should not be admitted")
 	}
 }
@@ -167,14 +167,14 @@ func TestSetRejectingAnOversizedValueKeepsTheExistingOne(t *testing.T) {
 	l := NewLocalCacheWithLimits(time.Minute, 0, 64) // 64-byte ceiling
 	defer l.Close()
 
-	l.Set(ctx, "k", "small")
-	if got, ok := l.Get(ctx, "k"); !ok || got != "small" {
+	l.Set(ctx, "k", "small", 0)
+	if got, ok, _ := l.Get(ctx, "k"); !ok || got != "small" {
 		t.Fatalf("setup: Get = %q,%v", got, ok)
 	}
 
-	l.Set(ctx, "k", strings.Repeat("x", 200)) // far past the ceiling
+	l.Set(ctx, "k", strings.Repeat("x", 200), 0) // far past the ceiling
 
-	got, ok := l.Get(ctx, "k")
+	got, ok, _ := l.Get(ctx, "k")
 	if !ok {
 		t.Fatal("the existing value was deleted by a write that was then rejected; " +
 			"a rejected write must not empty the slot it was aiming at")
@@ -191,8 +191,8 @@ func TestSetRejectingAnOversizedValueInsertsNothing(t *testing.T) {
 	l := NewLocalCacheWithLimits(time.Minute, 0, 64)
 	defer l.Close()
 
-	l.Set(ctx, "absent", strings.Repeat("x", 200))
-	if _, ok := l.Get(ctx, "absent"); ok {
+	l.Set(ctx, "absent", strings.Repeat("x", 200), 0)
+	if _, ok, _ := l.Get(ctx, "absent"); ok {
 		t.Fatal("an oversized value was admitted")
 	}
 	if n := l.Len(); n != 0 {
