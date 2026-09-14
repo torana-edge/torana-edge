@@ -22,6 +22,8 @@ func Run(args []string, stdout, stderr io.Writer) error {
 		return initPlugin(args[2:], stdout)
 	case "build":
 		return buildPlugin(args[2:], stdout, stderr)
+	case "test":
+		return testPlugin(args[2:], stdout, stderr)
 	case "lint":
 		return lintPlugin(args[2:], stdout, stderr)
 	case "install":
@@ -49,6 +51,7 @@ func Usage(w io.Writer) {
 	_, _ = fmt.Fprintln(w, "  torana plugin new <name>")
 	_, _ = fmt.Fprintln(w, "  torana plugin init <name>")
 	_, _ = fmt.Fprintln(w, "  torana plugin build [plugin-directory] [-o plugin.wasm]")
+	_, _ = fmt.Fprintln(w, "  torana plugin test <plugin-directory> [--scenario file]")
 	_, _ = fmt.Fprintln(w, "  torana plugin lint [plugin-directory]")
 	_, _ = fmt.Fprintln(w, "  torana plugin install <source>... [--official] [--dir plugins]")
 	_, _ = fmt.Fprintln(w, "  torana plugin list [--dir plugins]")
