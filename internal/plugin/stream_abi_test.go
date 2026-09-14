@@ -563,7 +563,7 @@ func TestIntentDoesNotGuessRemappedCallIdentity(t *testing.T) {
 // A captured occurrence feeds keyword compaction after history restoration.
 // Assert the shared value as well as output content: derived guidance can also
 // compact this fixture and must not make a broken intent bridge look green.
-func TestIntentBridgeFeedsKeywordCompactor(t *testing.T) {
+func TestCapturedIntentOccurrenceFeedsKeywordCompactor(t *testing.T) {
 	bundles := officialBundlesDir(t)
 	requireBundle(t, bundles, "intent")
 	requireBundle(t, bundles, "keyword_compactor")
