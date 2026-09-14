@@ -40,11 +40,11 @@ func TestBoundModelServiceUsesOperatorDestinationAndReturnsNeutralResult(t *test
 	}
 	defer server.Shutdown(context.Background())
 	requestedMax := uint32(80)
-	result, hostErr := server.completeModel(context.Background(), "pii", wasm.ModelServiceResource{Name: "classifier", Provider: "bound", Model: "operator-model", Path: "/v1/chat/completions", Timeout: time.Second, MaxTokens: 40, MaxInputBytes: 1000, MaxCallsPerMinute: 2, MaxTokensPerHour: 100}, &pbv1.ModelCompleteArgs{Service: "classifier", Messages: []*pbv1.ModelMessage{{Role: "system", Content: "classify"}, {Role: "user", Content: "payload"}}, MaxTokens: &requestedMax})
+	result, hostErr := server.completeModel(context.Background(), "pii", wasm.ModelServiceResource{Name: "classifier", Provider: "bound", Model: "operator-model", Path: "/v1/chat/completions", Timeout: time.Second, MaxTokens: 40, MaxInputBytes: 1000, MaxCallsPerMinute: 2, MaxTokensPerHour: 100}, &pbv1.ModelCompleteArgs{Service: "classifier", Messages: []*pbv1.Message{{Role: "system", Blocks: modelTextBlocks("classify")}, {Role: "user", Blocks: modelTextBlocks("payload")}}, MaxTokens: &requestedMax})
 	if hostErr != nil {
 		t.Fatalf("host error = %+v", hostErr)
 	}
-	if result.Content != "safe" || result.ReportedModel != "provider-reported" || result.FinishReason != "stop" || result.Usage == nil || result.Usage.InputTokens != 7 || result.Usage.OutputTokens != 2 {
+	if result.GetMessage().GetBlocks()[0].GetText().GetText() != "safe" || result.ReportedModel != "provider-reported" || result.FinishReason != "stop" || result.Usage == nil || result.Usage.InputTokens != 7 || result.Usage.OutputTokens != 2 {
 		t.Fatalf("result = %+v", result)
 	}
 	if captured["model"] != "operator-model" || captured["max_tokens"] != float64(40) {
@@ -69,7 +69,7 @@ func TestBoundModelServiceProviderRefusalIsValueFree(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer server.Shutdown(context.Background())
-	_, hostErr := server.completeModel(context.Background(), "pii", wasm.ModelServiceResource{Name: "classifier", Provider: "bound", Model: "operator-model", Path: "/v1/chat/completions", Timeout: time.Second, MaxTokens: 40, MaxInputBytes: 1000, MaxCallsPerMinute: 2, MaxTokensPerHour: 100}, &pbv1.ModelCompleteArgs{Service: "classifier", Messages: []*pbv1.ModelMessage{{Role: "user", Content: "SECRET-request"}}})
+	_, hostErr := server.completeModel(context.Background(), "pii", wasm.ModelServiceResource{Name: "classifier", Provider: "bound", Model: "operator-model", Path: "/v1/chat/completions", Timeout: time.Second, MaxTokens: 40, MaxInputBytes: 1000, MaxCallsPerMinute: 2, MaxTokensPerHour: 100}, &pbv1.ModelCompleteArgs{Service: "classifier", Messages: []*pbv1.Message{{Role: "user", Blocks: modelTextBlocks("SECRET-request")}}})
 	if hostErr == nil || hostErr.Code != pbv1.ErrorCode_ERROR_CODE_UNAVAILABLE || hostErr.Message != "model service provider refused the request" {
 		t.Fatalf("host error = %+v", hostErr)
 	}
@@ -190,7 +190,7 @@ func TestPromptCachePolicyUsesPendingRoute(t *testing.T) {
 
 func TestBoundModelServiceRejectsOversizedInputBeforeSpend(t *testing.T) {
 	server := &Server{}
-	result, refusal := server.completeModel(context.Background(), "pii", wasm.ModelServiceResource{MaxInputBytes: 3}, &pbv1.ModelCompleteArgs{Messages: []*pbv1.ModelMessage{{Role: "user", Content: "secret"}}})
+	result, refusal := server.completeModel(context.Background(), "pii", wasm.ModelServiceResource{MaxInputBytes: 3}, &pbv1.ModelCompleteArgs{Messages: []*pbv1.Message{{Role: "user", Blocks: modelTextBlocks("secret")}}})
 	if result != nil || refusal == nil || refusal.Code != pbv1.ErrorCode_ERROR_CODE_INVALID_ARGUMENT || refusal.Message != "model request exceeds the approved input limit" {
 		t.Fatalf("result/refusal = %+v / %+v", result, refusal)
 	}
@@ -225,7 +225,7 @@ func TestModelServiceUsageNormalizesCacheReads(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer s.Shutdown(context.Background())
-			result, herr := s.completeModel(context.Background(), "compactor", wasm.ModelServiceResource{Name: "summarizer", Provider: "bound", Model: "m", Path: inferenceTestPath(tc.format), Timeout: time.Second, MaxTokens: 40, MaxInputBytes: 1000, MaxCallsPerMinute: 10, MaxTokensPerHour: 1000}, &pbv1.ModelCompleteArgs{Service: "summarizer", Messages: []*pbv1.ModelMessage{{Role: "user", Content: "summarize"}}})
+			result, herr := s.completeModel(context.Background(), "compactor", wasm.ModelServiceResource{Name: "summarizer", Provider: "bound", Model: "m", Path: inferenceTestPath(tc.format), Timeout: time.Second, MaxTokens: 40, MaxInputBytes: 1000, MaxCallsPerMinute: 10, MaxTokensPerHour: 1000}, &pbv1.ModelCompleteArgs{Service: "summarizer", Messages: []*pbv1.Message{{Role: "user", Blocks: modelTextBlocks("summarize")}}})
 			if herr != nil || result == nil || result.Usage == nil {
 				t.Fatalf("result=%v refusal=%v", result, herr)
 			}
@@ -279,12 +279,12 @@ func TestModelServiceInvalidUsagePreservesCompletion(t *testing.T) {
 			}
 			defer s.Shutdown(context.Background())
 			resource := wasm.ModelServiceResource{Name: "summarizer", Provider: "bound", Model: "m", Path: "/v1/chat/completions", Timeout: time.Second, MaxTokens: 40, MaxInputBytes: 1000, MaxCallsPerMinute: 10, MaxTokensPerHour: 1}
-			args := &pbv1.ModelCompleteArgs{Service: "summarizer", Messages: []*pbv1.ModelMessage{{Role: "user", Content: "summarize"}}}
+			args := &pbv1.ModelCompleteArgs{Service: "summarizer", Messages: []*pbv1.Message{{Role: "user", Blocks: modelTextBlocks("summarize")}}}
 			result, herr := s.completeModel(context.Background(), "compactor", resource, args)
 			if herr != nil || result == nil {
 				t.Fatalf("successful completion lost: result=%v refusal=%v", result, herr)
 			}
-			if result.Content != "useful summary" || result.ReportedModel != "reported-model" || result.FinishReason != "stop" || result.Usage != nil {
+			if result.GetMessage().GetBlocks()[0].GetText().GetText() != "useful summary" || result.ReportedModel != "reported-model" || result.FinishReason != "stop" || result.Usage != nil {
 				t.Fatalf("want preserved completion with unknown usage, got %v", result)
 			}
 			events := s.feed.Snapshot()
@@ -303,4 +303,8 @@ func TestModelServiceInvalidUsagePreservesCompletion(t *testing.T) {
 			}
 		})
 	}
+}
+
+func modelTextBlocks(text string) []*pbv1.RequestBlock {
+	return []*pbv1.RequestBlock{{Kind: &pbv1.RequestBlock_Text{Text: &pbv1.RequestTextBlock{Text: text}}}}
 }

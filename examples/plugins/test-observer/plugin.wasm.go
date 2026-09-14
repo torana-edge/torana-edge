@@ -25,16 +25,13 @@ func main() {}
 // the shape of a side-channel JSON object any more.
 func init() {
 	sdk.OnBeforeRequest(func(ctx context.Context, req *pb.ChatRequest) (sdk.RequestResult, error) {
-		v, herr, err := sdk.CacheGet("observed_error_status")
+		v, found, err := sdk.CacheGet("observed_error_status")
 		if err != nil {
 			return sdk.PassRequest(), err
 		}
 		// A miss is ordinary: the error path may not have run yet.
-		if sdk.IsNotFound(herr) {
+		if !found {
 			return sdk.PassRequest(), nil
-		}
-		if herr != nil {
-			return sdk.PassRequest(), fmt.Errorf("cache_get refused: %s", herr.Message)
 		}
 		if v == "" {
 			return sdk.PassRequest(), nil
@@ -48,11 +45,9 @@ func init() {
 		// observe only, there is nothing to rewrite. v1 could not express this
 		// — it received the outbound request and saw its message history.
 		if resp.Message == nil {
-			if herr, err := sdk.CacheSet("observed_error_status",
+			if err := sdk.CacheSet("observed_error_status",
 				fmt.Sprintf("%d", resp.UpstreamStatus)); err != nil {
 				return sdk.PassResponse(), err
-			} else if herr != nil {
-				return sdk.PassResponse(), fmt.Errorf("cache_set refused: %s", herr.Message)
 			}
 			return sdk.PassResponse(), nil
 		}

@@ -133,7 +133,7 @@ type httpMutatingStore struct {
 	raw     map[string][]string
 }
 
-func (s *httpMutatingStore) Get(ctx context.Context, key string) (string, bool) {
+func (s *httpMutatingStore) Get(ctx context.Context, key string) (string, bool, error) {
 	s.mu.Lock()
 	if !s.mutated {
 		s.mutated = true

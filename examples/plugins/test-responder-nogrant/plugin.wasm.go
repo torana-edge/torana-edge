@@ -19,7 +19,7 @@ func init() {
 	sdk.OnBeforeRequest(func(ctx context.Context, req *pb.ChatRequest) (sdk.RequestResult, error) {
 		for _, m := range req.Messages {
 			if strings.Contains(blockutil.TextOf(m), "respondme") {
-				sdk.RespondRequest("this must never reach a client")
+				sdk.RespondText("this must never reach a client")
 				return sdk.ReplaceRequest(req), nil
 			}
 		}

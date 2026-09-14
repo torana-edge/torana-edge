@@ -22,7 +22,7 @@ func main() {}
 func init() {
 	sdk.OnBeforeRequest(func(ctx context.Context, req *pb.ChatRequest) (sdk.RequestResult, error) {
 		sdk.BlockRequest(422, "blocked_then_trapped", "refused before trapping")
-		sdk.RespondRequest("this respond must be discarded")
+		sdk.RespondText("this respond must be discarded")
 		panic("trap after recording verdicts")
 	})
 }

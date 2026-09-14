@@ -45,21 +45,12 @@ func init() {
 
 		// Persist BEFORE suppressing. An error between the two would lose the
 		// fragment with no way to recover it.
-		if _, herr, err := sdk.MetaAppend(td.Index, []byte(td.ArgumentsDelta)); err != nil {
+		if _, err := sdk.MetaAppend(td.Index, []byte(td.ArgumentsDelta)); err != nil {
 			return sdk.PassEvent(), err
-		} else if herr != nil {
-			// The buffer is unreliable, so suppressing would truncate the tool
-			// call. Passing the fragment through leaves it intact.
-			return sdk.PassEvent(), nil
 		}
-
-		// An empty fragment reads back the complete buffer without appending.
-		accumulated, herr, err := sdk.MetaAppend(td.Index, nil)
+		accumulated, err := sdk.MetaAppend(td.Index, nil)
 		if err != nil {
 			return sdk.PassEvent(), err
-		}
-		if herr != nil {
-			return sdk.PassEvent(), nil
 		}
 
 		// Incomplete: swallow the fragment and keep waiting. The host must

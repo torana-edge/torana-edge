@@ -65,14 +65,15 @@ const validReport = `{"original_bytes":1000,"final_bytes":400,"estimated_tokens_
 // refusal, or a value arm. Recording WHICH arm arrived — plus the arm's
 // presence bit — is what makes a later assertion unable to read "the call
 // failed" as a zero-valued success.
-func recordRaw(obs *observation, v []byte, herr *pb.HostError, err error) {
+func recordRaw(obs *observation, v []byte, err error) {
+	var refusal *sdk.HostCallRefusalError
 	switch {
+	case errors.As(err, &refusal):
+		obs.RawArm = "refusal"
+		obs.RawCode = int32(refusal.Code)
 	case err != nil:
 		obs.RawArm = "goerror"
 		obs.RawGoError = err.Error()
-	case herr != nil:
-		obs.RawArm = "refusal"
-		obs.RawCode = int32(herr.Code)
 	default:
 		obs.RawArm = "value"
 		obs.RawSucceeded = true
@@ -102,15 +103,16 @@ func init() {
 			}
 
 		case "cache-policy":
-			policy, herr, err := sdk.GetPromptCachePolicy("request-cache")
-			if err == nil && herr == nil && len(policy.Tiers) == 1 {
+			policy, err := sdk.GetPromptCachePolicy("request-cache")
+			if err == nil && len(policy.Tiers) == 1 {
 				obs.PolicyTTL = policy.Tiers[0].TtlSeconds
 			}
 
 		case "cache-policy-unapproved":
-			_, herr, _ := sdk.GetPromptCachePolicy("other")
-			if herr != nil {
-				obs.PolicyRefusalCode = int32(herr.Code)
+			_, err := sdk.GetPromptCachePolicy("other")
+			var refusal *sdk.HostCallRefusalError
+			if errors.As(err, &refusal) {
+				obs.PolicyRefusalCode = int32(refusal.Code)
 			}
 
 		case "record-savings":
@@ -119,8 +121,8 @@ func init() {
 			// discriminator records the value arm as PRESENT and zero-length,
 			// so a transport/protocol failure (which would record a goerror)
 			// can never be read as this ack.
-			v, herr, err := sdk.HostCallExtension("torana_record_savings", []byte(validReport))
-			recordRaw(&obs, v, herr, err)
+			v, err := sdk.HostCallExtension("torana_record_savings", []byte(validReport))
+			recordRaw(&obs, v, err)
 		}
 
 		obsJSON, _ := json.Marshal(obs)
