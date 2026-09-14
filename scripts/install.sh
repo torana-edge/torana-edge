@@ -21,7 +21,9 @@ while [ "$#" -gt 0 ]; do
     case "$1" in
         --version|--install-dir)
             option=$1
-            [ "$#" -ge 2 ] && [ -n "$2" ] || fail "$option requires a value"
+            if [ "$#" -lt 2 ] || [ -z "${2:-}" ]; then
+                fail "$option requires a value"
+            fi
             case "$option" in
                 --version) version=$2 ;;
                 --install-dir) install_dir=$2 ;;

@@ -178,6 +178,13 @@ func newInstaller(t *testing.T, goos, arch string) *installer {
 		"TORANA_TEST_UNAME_ARCH": map[string]string{"amd64": "x86_64", "arm64": "aarch64"}[arch],
 		"PROCESSOR_ARCHITECTURE": strings.ToUpper(arch), "PROCESSOR_ARCHITEW6432": "",
 	}
+	if runtime.GOOS == "windows" {
+		// The workflow starts Go from pwsh. Inheriting its module path into
+		// Windows PowerShell makes 5.1 resolve incompatible PowerShell 7
+		// modules (notably Get-FileHash). Let each child build its own path.
+		// https://learn.microsoft.com/powershell/module/microsoft.powershell.core/about/about_psmodulepath
+		f.env["PSModulePath"] = ""
+	}
 	f.release([]byte("synthetic release binary\n"), "regular")
 	return f
 }
@@ -581,6 +588,11 @@ func overrideEnv(base []string, overrides map[string]string) []string {
 		}
 	}
 	for key, value := range overrides {
+		// Windows PowerShell cannot represent an empty environment variable
+		// consistently across versions. Empty fixture overrides mean unset.
+		if runtime.GOOS == "windows" && value == "" {
+			continue
+		}
 		result = append(result, key+"="+value)
 	}
 	return result
