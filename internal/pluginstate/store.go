@@ -92,6 +92,7 @@ type Store struct {
 	maxTotalBytes    int
 	maxKeysPerPlugin int
 	totalBytes       int
+	readOnly         bool
 }
 
 // Options configures a Store. Zero values select the defaults above.
@@ -131,6 +132,7 @@ func New(opts Options) (*Store, error) {
 		return s, nil
 	}
 	if err := s.load(); err != nil {
+		s.readOnly = true
 		return s, fmt.Errorf("plugin state: %w", err)
 	}
 	return s, nil
@@ -184,6 +186,9 @@ func (s *Store) CompareAndSet(plugin, key, value string, expected *string) (bool
 	if s == nil {
 		return false, "", errors.New("state store not configured")
 	}
+	if s.readOnly {
+		return false, "", errors.New("plugin state is read-only after corrupt load")
+	}
 	if plugin == "" || key == "" {
 		return false, "", errors.New("plugin and key are required")
 	}
@@ -196,7 +201,7 @@ func (s *Store) CompareAndSet(plugin, key, value string, expected *string) (bool
 	defer s.mu.Unlock()
 	cur, exists := s.versions[plugin][key]
 	if (expected == nil && exists) || (expected != nil && (!exists || *expected != cur)) {
-		return false, cur, nil
+		return false, "", nil
 	}
 	if !exists && len(s.data[plugin]) >= s.maxKeysPerPlugin {
 		return false, "", fmt.Errorf("plugin %q already holds %d keys, the per-plugin limit", plugin, s.maxKeysPerPlugin)
@@ -237,11 +242,14 @@ func (s *Store) CompareAndDelete(plugin, key, expected string) (bool, error) {
 	if s == nil {
 		return false, errors.New("state store not configured")
 	}
+	if plugin == "" || key == "" || expected == "" {
+		return false, errors.New("plugin, key, and expected version are required")
+	}
 	s.flushMu.Lock()
 	defer s.flushMu.Unlock()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.versions[plugin][key] != expected {
+	if _, ok := s.data[plugin][key]; !ok || s.versions[plugin][key] != expected {
 		return false, nil
 	}
 	candidate := cloneData(s.data)
@@ -287,6 +295,7 @@ func (s *Store) Scan(plugin, prefix, cursor string, limit, maxBytes int) ([]Page
 		last = c.Last
 	}
 	s.mu.RLock()
+	defer s.mu.RUnlock()
 	keys := make([]string, 0)
 	for k := range s.data[plugin] {
 		if strings.HasPrefix(k, prefix) && k > last {
@@ -310,7 +319,6 @@ func (s *Store) Scan(plugin, prefix, cursor string, limit, maxBytes int) ([]Page
 		bytes += n
 		last = k
 	}
-	s.mu.RUnlock()
 	if len(out) == 0 || last == "" {
 		return out, "", nil
 	}
@@ -330,6 +338,9 @@ func (s *Store) Scan(plugin, prefix, cursor string, limit, maxBytes int) ([]Page
 func (s *Store) Set(plugin, key, value string) error {
 	if s == nil {
 		return fmt.Errorf("state store not configured")
+	}
+	if s.readOnly {
+		return errors.New("plugin state is read-only after corrupt load")
 	}
 	if plugin == "" || key == "" {
 		return fmt.Errorf("plugin and key are required")
@@ -396,6 +407,9 @@ func (s *Store) Delete(plugin, key string) error {
 	if s == nil {
 		return fmt.Errorf("state store not configured")
 	}
+	if s.readOnly {
+		return errors.New("plugin state is read-only after corrupt load")
+	}
 	if plugin == "" || key == "" {
 		return fmt.Errorf("plugin and key are required")
 	}
@@ -404,25 +418,29 @@ func (s *Store) Delete(plugin, key string) error {
 	defer s.flushMu.Unlock()
 	s.mu.RLock()
 	candidate := cloneData(s.data)
+	versions := cloneData(s.versions)
 	totalBytes := s.totalBytes
 	s.mu.RUnlock()
 	changed := false
 	if old, ok := candidate[plugin][key]; ok {
 		totalBytes -= entrySize(key, old)
 		delete(candidate[plugin], key)
+		delete(versions[plugin], key)
 		if len(candidate[plugin]) == 0 {
 			delete(candidate, plugin)
+			delete(versions, plugin)
 		}
 		changed = true
 	}
 	if !changed {
 		return nil
 	}
-	if err := s.persistVersioned(candidate, s.versions, s.counter); err != nil {
+	if err := s.persistVersioned(candidate, versions, s.counter); err != nil {
 		return err
 	}
 	s.mu.Lock()
 	s.data = candidate
+	s.versions = versions
 	s.totalBytes = totalBytes
 	s.mu.Unlock()
 	return nil
@@ -500,10 +518,17 @@ func (s *Store) load() error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	legacy := false
 	if env.Format == 1 && env.Data != nil {
 		s.counter = env.Counter
+		seen := map[string]bool{}
 		for p, b := range env.Data {
 			for k, e := range b {
+				n, err := strconv.ParseUint(e.Version, 10, 64)
+				if err != nil || e.Version == "" || n == 0 || n > s.counter || seen[e.Version] {
+					return fmt.Errorf("invalid version envelope")
+				}
+				seen[e.Version] = true
 				if s.data[p] == nil {
 					s.data[p] = map[string]string{}
 				}
@@ -515,6 +540,7 @@ func (s *Store) load() error {
 			}
 		}
 	} else {
+		legacy = true
 		var data map[string]map[string]string
 		if err := json.Unmarshal(raw, &data); err != nil {
 			return fmt.Errorf("parse %s (starting with empty state): %w", s.path, err)
@@ -536,6 +562,11 @@ func (s *Store) load() error {
 	for _, bucket := range s.data {
 		for k, v := range bucket {
 			s.totalBytes += entrySize(k, v)
+		}
+	}
+	if legacy {
+		if err := s.persistVersioned(s.data, s.versions, s.counter); err != nil {
+			return err
 		}
 	}
 	return nil
