@@ -46,12 +46,12 @@ func TestOfficialCompactorsPreserveWireToolFailures(t *testing.T) {
 			}
 			approval := provider.PluginApproval{Digest: digest, Permissions: manifestPermissions(bundles + "/" + name), FailureMode: "block"}
 			zero, one := 0.0, 1.0
+			approval.PricingResources = map[string]provider.PluginPricingApproval{
+				"target": {Models: []provider.PluginPricingModelApproval{{Provider: "p", Model: "m", CacheReadUSDPerMTok: &one, CacheWriteUSDPerMTok: &one}}},
+			}
 			if name == "compactor" {
 				approval.ModelServices = map[string]provider.PluginModelServiceApproval{"summarizer": {Provider: "cheap", Model: "cheap", Path: "/v1/chat/completions", TimeoutMS: 1000, MaxTokens: 512, MaxInputBytes: 1 << 20, MaxCallsPerMinute: 10, MaxTokensPerHour: 10000}}
-				approval.PricingResources = map[string]provider.PluginPricingApproval{
-					"target":     {Models: []provider.PluginPricingModelApproval{{Provider: "p", Model: "m", CacheReadUSDPerMTok: &one, CacheWriteUSDPerMTok: &one}}},
-					"summarizer": {Models: []provider.PluginPricingModelApproval{{InputUSDPerMTok: &zero, OutputUSDPerMTok: &zero, CacheReadUSDPerMTok: &zero, CacheWriteUSDPerMTok: &zero}}},
-				}
+				approval.PricingResources["summarizer"] = provider.PluginPricingApproval{Models: []provider.PluginPricingModelApproval{{InputUSDPerMTok: &zero, OutputUSDPerMTok: &zero, CacheReadUSDPerMTok: &zero, CacheWriteUSDPerMTok: &zero}}}
 			}
 			srv, err := New(Config{Port: "0", Providers: provider.Config{
 				Providers: map[string]provider.Provider{"p": {URL: upstream.URL, Format: "anthropic"}, "cheap": {URL: upstream.URL, Format: "openai", Auth: provider.ProviderAuth{Mode: "none"}}},
