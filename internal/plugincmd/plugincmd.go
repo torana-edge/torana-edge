@@ -82,7 +82,7 @@ func Usage(w io.Writer) {
 // coordinated SDK/host release PR pair is under review. Replace a temporary
 // pseudo-version with the release tag before merging the host PR.
 const (
-	ScaffoldSDKVersion = "v0.4.0"
+	ScaffoldSDKVersion = "v0.4.2"
 	// scaffoldGoVersion tracks the SDK's own go directive. A scaffolded module
 	// declaring an OLDER Go version than its dependency requires fails to build
 	// with "module requires go >= x", which is the same class of unbuildable
