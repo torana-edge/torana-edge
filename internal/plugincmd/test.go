@@ -22,11 +22,13 @@ import (
 // pluginTestScenario is deliberately canonical: provider wire formats belong
 // to the adapters, while plugin tests exercise the same IR as the pipeline.
 type pluginTestScenario struct {
-	Request         json.RawMessage   `json:"request"`
-	ExpectedRequest json.RawMessage   `json:"expected_request"`
-	Stream          []json.RawMessage `json:"stream"`
-	ExpectedStream  []json.RawMessage `json:"expected_stream"`
-	ExpectedError   string            `json:"expected_error,omitempty"`
+	Request          json.RawMessage   `json:"request"`
+	ExpectedRequest  json.RawMessage   `json:"expected_request"`
+	Response         json.RawMessage   `json:"response"`
+	ExpectedResponse json.RawMessage   `json:"expected_response"`
+	Stream           []json.RawMessage `json:"stream"`
+	ExpectedStream   []json.RawMessage `json:"expected_stream"`
+	ExpectedError    string            `json:"expected_error,omitempty"`
 }
 
 func decodeScenarioRequest(raw []byte) (*engine.ChatRequest, error) {
@@ -46,6 +48,14 @@ func decodeScenarioEvent(raw []byte) (*engine.StreamEvent, error) {
 		return nil, err
 	}
 	return (&pbconv.BlockKindTracker{}).FromPBStreamEvent(&wire)
+}
+
+func decodeScenarioResponse(raw []byte) (*engine.ChatResponse, error) {
+	var wire pbv1.ChatResponse
+	if err := (protojson.UnmarshalOptions{DiscardUnknown: false}).Unmarshal(raw, &wire); err != nil {
+		return nil, err
+	}
+	return pbconv.FromPBChatResponse(&wire), nil
 }
 
 func testPlugin(args []string, stdout, stderr io.Writer) error {
@@ -164,6 +174,24 @@ func testPlugin(args []string, stdout, stderr io.Writer) error {
 			}
 			if !proto.Equal(&pbv1.StreamEvents{Events: actualPB}, &pbv1.StreamEvents{Events: expectedPB}) {
 				return fmt.Errorf("stream mismatch: got %s, want %s", compactJSON(actual), compactJSON(expected))
+			}
+		}
+	}
+	if runErr == nil && scenario.Response != nil {
+		response, err := decodeScenarioResponse(scenario.Response)
+		if err != nil {
+			return fmt.Errorf("decode scenario response: %w", err)
+		}
+		actual, err := pp.RunAfterResponse(ctx, 1, response, true)
+		if err != nil {
+			runErr = err
+		} else if scenario.ExpectedResponse != nil {
+			expected, err := decodeScenarioResponse(scenario.ExpectedResponse)
+			if err != nil {
+				return fmt.Errorf("decode expected response: %w", err)
+			}
+			if !proto.Equal(pbconv.ToPBChatResponse(actual), pbconv.ToPBChatResponse(expected)) {
+				return fmt.Errorf("response mismatch: got %s, want %s", compactJSON(actual), compactJSON(expected))
 			}
 		}
 	}
