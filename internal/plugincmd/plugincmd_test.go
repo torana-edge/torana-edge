@@ -137,6 +137,13 @@ func TestRustScaffoldUsesTypedHookInNativeUnitTest(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(dir, "tests", "native.rs")); !os.IsNotExist(err) {
 		t.Fatalf("placeholder integration test still exists: %v", err)
 	}
+	cargo, err := os.ReadFile(filepath.Join(dir, "Cargo.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(cargo), scaffoldRustSDKDependency()) {
+		t.Fatalf("generated Cargo dependency is not the exact SDK Git release:\n%s", cargo)
+	}
 }
 
 func TestRustScaffoldFirstRunAgainstStagedSDK(t *testing.T) {
@@ -158,8 +165,12 @@ func TestRustScaffoldFirstRunAgainstStagedSDK(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	localDependency := fmt.Sprintf("torana-plugin-sdk = { path = %q }", staged)
-	cargo = []byte(strings.Replace(string(cargo), `torana-plugin-sdk = "`+strings.TrimPrefix(ScaffoldSDKVersion, "v")+`"`, localDependency, 1))
+	localDependency := fmt.Sprintf("torana-plugin-sdk = { path = %q, version = \"=%s\" }", staged, strings.TrimPrefix(ScaffoldSDKVersion, "v"))
+	replaced := strings.Replace(string(cargo), scaffoldRustSDKDependency(), localDependency, 1)
+	if replaced == string(cargo) {
+		t.Fatalf("generated Cargo manifest lacks dependency to override:\n%s", cargo)
+	}
+	cargo = []byte(replaced)
 	if err := os.WriteFile(cargoPath, cargo, 0o600); err != nil {
 		t.Fatal(err)
 	}

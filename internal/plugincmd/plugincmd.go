@@ -75,7 +75,8 @@ func Usage(w io.Writer) {
 }
 
 // ScaffoldSDKVersion is the SDK release `torana plugin new` writes into a new
-// plugin's go.mod, and scaffoldGoVersion the Go directive it writes.
+// Go plugin's go.mod and a Rust plugin's exact Git tag/package version;
+// scaffoldGoVersion is the Go directive it writes.
 //
 // They are constants because the test used to assert the scaffolded string
 // literally — so the scaffold and the assertion were two copies of the same
@@ -83,18 +84,22 @@ func Usage(w io.Writer) {
 // checking it. It named SDK v0.1.0 long after v0.1.3 shipped, and the test
 // passed the whole time.
 //
-// Bumping the SDK is now one edit here. Keep ScaffoldSDKVersion resolvable by
-// the Go tool: normally a release tag, or a pushed pseudo-version while a
-// coordinated SDK/host release PR pair is under review. Replace a temporary
-// pseudo-version with the release tag before merging the host PR.
+// Bumping the SDK is now one edit here. A merged scaffold version must be a
+// release tag because Cargo resolves it directly from the SDK Git repository.
 const (
 	ScaffoldSDKVersion = "v0.5.0"
+	scaffoldSDKGitURL  = "https://github.com/torana-edge/torana-plugin-sdk"
 	// scaffoldGoVersion tracks the SDK's own go directive. A scaffolded module
 	// declaring an OLDER Go version than its dependency requires fails to build
 	// with "module requires go >= x", which is the same class of unbuildable
 	// first project this constant pair exists to prevent.
 	scaffoldGoVersion = "1.25.0"
 )
+
+func scaffoldRustSDKDependency() string {
+	version := strings.TrimPrefix(ScaffoldSDKVersion, "v")
+	return fmt.Sprintf(`torana-plugin-sdk = { git = %q, tag = %q, version = "=%s" }`, scaffoldSDKGitURL, ScaffoldSDKVersion, version)
+}
 
 func initPlugin(args []string, stdout io.Writer) error {
 	if len(args) < 1 || args[0] == "" {
@@ -203,7 +208,7 @@ func TestBeforeRequest(t *testing.T) {
 	}
 	if language == "rust" {
 		files = map[string]string{
-			"Cargo.toml": fmt.Sprintf("[package]\nname = \"%s\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[lib]\ncrate-type = [\"cdylib\"]\n\n[dependencies]\ntorana-plugin-sdk = \"%s\"\n", pluginName, strings.TrimPrefix(ScaffoldSDKVersion, "v")),
+			"Cargo.toml": fmt.Sprintf("[package]\nname = \"%s\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[lib]\ncrate-type = [\"cdylib\"]\n\n[dependencies]\n%s\n", pluginName, scaffoldRustSDKDependency()),
 			"src/lib.rs": `use torana_plugin_sdk::{export_plugin_v1, info, pbv1, Plugin, RequestResult, HOOK_BEFORE_REQUEST};
 
 struct PluginImpl;
@@ -229,7 +234,7 @@ mod tests {
 }
 `,
 			"plugin.json": fmt.Sprintf(`{"schema_version":1,"id":"local/%s","name":"%s","version":"0.1.0","abi_version":"v1","description":"A local Torana Rust plugin","hooks":[{"name":"run_before_request"}],"permissions":[{"name":"env.log","description":"Diagnostic logging"}],"failure_mode":"pass"}`+"\n", pluginName, pluginName),
-			"README.md":   "# " + pluginName + "\n\nRun `cargo test` for native checks and `cargo build --release --target wasm32-wasip1` for the WASI artifact.\n",
+			"README.md":   "# " + pluginName + "\n\nThe Torana Rust SDK is pinned to its exact Git release tag and package version in `Cargo.toml`. Run `cargo test` for native checks and `cargo build --release --target wasm32-wasip1` for the WASI artifact.\n",
 		}
 	}
 	for name, content := range files {
