@@ -327,7 +327,7 @@ func BenchmarkRunBeforeRequest(b *testing.B) {
 	}
 }
 
-// BenchmarkRunOnStreamChunk measures the per-event cost of the streaming hook,
+// BenchmarkRunOnStreamChunkVerified measures the per-event cost of the streaming hook,
 // which is where the pipeline's time actually goes: run_on_stream_chunk fires
 // once per SSE event, while the request hook is paid once per request.
 //
@@ -337,7 +337,7 @@ func BenchmarkRunBeforeRequest(b *testing.B) {
 // forever measures unbounded buffer growth, and one that invents a fresh ID per
 // event without calling EndRequest leaks a buffer per event. Neither is a
 // per-event cost.
-func BenchmarkRunOnStreamChunk(b *testing.B) {
+func BenchmarkRunOnStreamChunkVerified(b *testing.B) {
 	streamPlugins := []string{"test-stream-mutator", "test-fragment-buffer"}
 
 	text := "the quick brown fox jumps over the lazy dog"

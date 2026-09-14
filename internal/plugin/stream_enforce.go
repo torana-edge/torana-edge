@@ -39,7 +39,7 @@ package plugin
 //
 // Enforcement is request-scoped: a streamVerifierState lives per reqID in
 // PluginPipeline.streamVerify and is dropped by EndRequest, in the same place
-// as the streamKinds tracker. RunOnStreamChunk (used by the non-streaming
+// as the streamKinds tracker. RunOnStreamChunkVerified (used by the non-streaming
 // JSON replay in jsonresponse.go) is untouched; the streaming path uses
 // RunOnStreamChunkVerified + EndStreamVerified.
 

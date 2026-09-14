@@ -909,7 +909,7 @@ type PluginPipeline struct {
 	drainOnce sync.Once
 
 	// streamKinds tracks, per request, which content block is ACTUALLY open at
-	// each index across RunOnStreamChunk calls, so a plugin-passed
+	// each index across RunOnStreamChunkVerified calls, so a plugin-passed
 	// ContentBlockStop converts back to the engine event matching the block
 	// it closes (ToolCallEnd for tool blocks, BlockStop for text/thinking/,
 	// provider) and unknown/mismatched/duplicate/reused topology errors

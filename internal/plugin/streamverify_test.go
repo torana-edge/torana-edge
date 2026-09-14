@@ -1950,7 +1950,7 @@ func TestValidateAcceptedStreamABITopology(t *testing.T) {
 // standard event sizes. This is the O(n) single-pass walk. The production
 // benchmark adds the state bookkeeping and boundary cadence of the per-event enforcement loop
 // (grant lookup, full-walk field diff, rejection wiring — measured through
-// the pipeline, as BenchmarkRunOnStreamChunk does); the pure verifier cost
+// the pipeline, as BenchmarkRunOnStreamChunkVerified does); the pure verifier cost
 // measured here is its inner core.
 func BenchmarkVerifyStreamPassThrough(b *testing.B) {
 	for _, n := range benchSizes {
