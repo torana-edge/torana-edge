@@ -71,6 +71,7 @@ const (
 	// preventing an absent module maximum from becoming wazero's 4 GiB default.
 	defaultMemoryLimitPages  uint32 = 1024
 	defaultStreamBufferBytes uint64 = 4 << 20
+	defaultMaxCacheTTL              = 15 * time.Minute
 )
 
 // RuntimeOptions bounds resources used by every plugin loaded in a Runtime.
@@ -88,6 +89,7 @@ type RuntimeOptions struct {
 	// disables retirement for controlled comparisons.
 	InstanceIdleTimeout  time.Duration
 	MaxStreamBufferBytes uint64
+	MaxCacheTTL          time.Duration
 }
 
 func defaultRuntimeOptions() RuntimeOptions {
@@ -97,6 +99,7 @@ func defaultRuntimeOptions() RuntimeOptions {
 		MemoryLimitPages:     defaultMemoryLimitPages,
 		InstanceIdleTimeout:  defaultInstanceIdleTimeout,
 		MaxStreamBufferBytes: defaultStreamBufferBytes,
+		MaxCacheTTL:          defaultMaxCacheTTL,
 	}
 }
 
@@ -118,6 +121,9 @@ func normalizeRuntimeOptions(options RuntimeOptions) RuntimeOptions {
 	}
 	if options.MaxStreamBufferBytes == 0 {
 		options.MaxStreamBufferBytes = defaults.MaxStreamBufferBytes
+	}
+	if options.MaxCacheTTL == 0 {
+		options.MaxCacheTTL = defaults.MaxCacheTTL
 	}
 	// Wazero panics for a value above the WebAssembly maximum. Clamp here so a
 	// configuration mistake cannot crash the proxy at startup.
@@ -184,6 +190,7 @@ type Plugin struct {
 	callTimeout       time.Duration
 	idleTimeout       time.Duration
 	streamBufferBytes uint64
+	maxCacheTTL       time.Duration
 
 	instanceCount uint64
 }
@@ -1560,6 +1567,7 @@ func (r *Runtime) LoadPlugin(name string, wasmBytes []byte) (*Plugin, error) {
 		callTimeout:       r.options.CallTimeout,
 		idleTimeout:       r.options.InstanceIdleTimeout,
 		streamBufferBytes: r.options.MaxStreamBufferBytes,
+		maxCacheTTL:       r.options.MaxCacheTTL,
 	}
 	p.privateCacheIdentity = name
 	p.cacheIdentityValid = true
@@ -1793,6 +1801,10 @@ func (r *Runtime) dispatchHostCall(ctx context.Context, pluginName, cmd, args st
 			perm = "env.state_set"
 		case "env.state_scan":
 			perm = "env.state_keys"
+		case "env.cache_delete":
+			perm = "env.cache_set"
+		case "env.shared_cache_delete":
+			perm = "env.shared_cache_set"
 		case pbv1.MetaAppendCommand:
 			perm = pbv1.MetaAppendPermission
 		case pbv1.StateDeleteCommand:
@@ -1935,7 +1947,15 @@ func (r *Runtime) dispatchHostCall(ctx context.Context, pluginName, cmd, args st
 				herr = hostErr(pbv1.ErrorCode_ERROR_CODE_INTERNAL, "plugin resource cache scope is invalid")
 				break
 			}
-			if err := r.cache.Set(ctx, privateCacheKey(cacheIdentity, a.Key), a.Value, 0); err != nil {
+			ttl := time.Duration(0)
+			if a.TtlMs != nil {
+				ttl = time.Duration(*a.TtlMs) * time.Millisecond
+				if ttl <= 0 || ttl > p.maxCacheTTL {
+					herr = hostErr(pbv1.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "invalid cache TTL")
+					break
+				}
+			}
+			if err := r.cache.Set(ctx, privateCacheKey(cacheIdentity, a.Key), a.Value, ttl); err != nil {
 				herr = hostErr(pbv1.ErrorCode_ERROR_CODE_INTERNAL, "cache unavailable: %v", err)
 				break
 			}
@@ -1976,7 +1996,15 @@ func (r *Runtime) dispatchHostCall(ctx context.Context, pluginName, cmd, args st
 				herr = hostErr(pbv1.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "%v", err)
 				break
 			}
-			if err := r.cache.Set(ctx, sharedCacheKey(a.Key), a.Value, 0); err != nil {
+			ttl := time.Duration(0)
+			if a.TtlMs != nil {
+				ttl = time.Duration(*a.TtlMs) * time.Millisecond
+				if ttl <= 0 || ttl > p.maxCacheTTL {
+					herr = hostErr(pbv1.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "invalid cache TTL")
+					break
+				}
+			}
+			if err := r.cache.Set(ctx, sharedCacheKey(a.Key), a.Value, ttl); err != nil {
 				herr = hostErr(pbv1.ErrorCode_ERROR_CODE_INTERNAL, "cache unavailable: %v", err)
 				break
 			}
@@ -2000,6 +2028,28 @@ func (r *Runtime) dispatchHostCall(ctx context.Context, pluginName, cmd, args st
 				break
 			}
 			value = []byte(v)
+		case "env.cache_delete", "env.shared_cache_delete":
+			var a pbv1.CacheGetArgs
+			if err := proto.Unmarshal([]byte(args), &a); err != nil {
+				herr = hostErr(pbv1.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "invalid CacheGetArgs: %v", err)
+				break
+			}
+			if err := a.Validate(); err != nil {
+				herr = hostErr(pbv1.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "%v", err)
+				break
+			}
+			key := sharedCacheKey(a.Key)
+			if cmd == "env.cache_delete" {
+				ci, valid := p.cacheIdentity()
+				if !valid {
+					herr = hostErr(pbv1.ErrorCode_ERROR_CODE_INTERNAL, "invalid cache scope")
+					break
+				}
+				key = privateCacheKey(ci, a.Key)
+			}
+			if err := r.cache.Delete(ctx, key); err != nil {
+				herr = hostErr(pbv1.ErrorCode_ERROR_CODE_INTERNAL, "cache unavailable: %v", err)
+			}
 		case "env.state_set":
 			// Durable, plugin-private, survives a restart. The plugin name
 			// comes from the module, never the payload, so one plugin cannot
