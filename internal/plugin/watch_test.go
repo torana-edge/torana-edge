@@ -12,8 +12,7 @@ import (
 
 // TestReloadPipeline_ReflectsDiskState deterministically covers the reload
 // machinery WITHOUT depending on fsnotify event delivery (which is unreliable
-// on CI filesystems). reloadPipeline is
-// exactly what WatchPlugins' debounced timer calls on every change, so driving
+// on CI filesystems). the owner invokes reloadPipeline after a debounced change, so driving
 // it directly with fresh config + a fresh runtime proves:
 //   - a reload reflects the CURRENT on-disk config (the "live config" fix), and
 //   - removing a plugin unloads it (the fsnotify.Remove → unload fix).
@@ -70,8 +69,7 @@ func TestReloadPipeline_ReflectsDiskState(t *testing.T) {
 }
 
 // TestWatchPlugins_FiresReloadAndExitsOnCancel covers the fsnotify wiring of
-// WatchPlugins: a file change triggers a reload (via a live configFn + a fresh
-// runtimeFn), and cancelling the context exits the watcher goroutine.
+// WatchPlugins: a file change triggers the owner reload callback, and cancelling the context exits the watcher goroutine.
 //
 // fsnotify delivery is flaky on CI filesystems (events coalesce/drop), so the
 // reload half re-writes the plugin on an interval until a reload lands — a plain
@@ -114,12 +112,21 @@ func TestWatchPlugins_FiresReloadAndExitsOnCancel(t *testing.T) {
 	reloads := make(chan *PluginPipeline, 16)
 	ctx, cancel := context.WithCancel(context.Background())
 	watchDone := make(chan struct{})
-	go func() {
-		defer close(watchDone)
-		if err := WatchPlugins(ctx, dir, configFn, runtimeFn, func(pp *PluginPipeline) { reloads <- pp }, nil, nil); err != nil {
-			t.Errorf("WatchPlugins: %v", err)
+	if err := WatchPlugins(ctx, dir, func(ctx context.Context) error {
+		rt := runtimeFn()
+		pp, err := reloadPipeline(rt, configFn())
+		if err != nil {
+			return err
 		}
-	}()
+		select {
+		case reloads <- pp:
+		case <-ctx.Done():
+		}
+		return nil
+	}, nil, func() { close(watchDone) }); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { cancel(); <-watchDone })
 
 	// Edit → wait for a reload, re-writing on an interval to survive dropped
 	// fsnotify events. A plain re-write always emits a Write event.
@@ -147,9 +154,6 @@ wait:
 	if !hasLoaded(got, "test-metrics") {
 		t.Errorf("reload didn't reflect the edit: got %v", loadedNames(got))
 	}
-	if configCalls < 1 || runtimeCalls < 1 {
-		t.Errorf("reload didn't use fresh configFn/runtimeFn (config=%d runtime=%d)", configCalls, runtimeCalls)
-	}
 
 	// Cancel → the watcher goroutine must exit (deterministic).
 	cancel()
@@ -157,6 +161,9 @@ wait:
 	case <-watchDone:
 	case <-time.After(10 * time.Second):
 		t.Fatal("WatchPlugins goroutine did not exit after ctx cancel (watcher leak)")
+	}
+	if configCalls < 1 || runtimeCalls < 1 {
+		t.Errorf("reload didn't use fresh configFn/runtimeFn (config=%d runtime=%d)", configCalls, runtimeCalls)
 	}
 }
 
@@ -184,9 +191,7 @@ func TestWatchPluginsRejectsUnwatchableDirectory(t *testing.T) {
 	err := WatchPlugins(
 		ctx,
 		notADir,
-		func() PluginConfig { return PluginConfig{} },
-		func() *wasm.Runtime { return wasm.NewRuntime(context.Background()) },
-		func(*PluginPipeline) {},
+		func(context.Context) error { return nil },
 		nil,
 		nil,
 	)

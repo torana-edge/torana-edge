@@ -162,23 +162,26 @@ type Server struct {
 	// the same provider.Config file and in-memory snapshot.
 	controlPlaneMutationMu sync.Mutex
 	rebuildMu              sync.Mutex
-	listenerMu             sync.Mutex
-	mitmMu                 sync.Mutex
-	listener               net.Listener
-	mitmSrv                *mitm.Server
-	mitmCfg                provider.MITMConfig
-	bindHost               string
-	configPath             string
-	config                 Config
-	secrets                *secret.Store
-	credentialMu           sync.RWMutex
-	credentials            *credentialapi.Registry
-	credentialStore        *credentialstore.Store
-	pluginFiles            *pluginfiles.Store
-	pluginHTTP             *pluginhttp.Client
-	proxy                  *httputil.ReverseProxy
-	httpServer             *http.Server
-	stats                  *metrics.StatsTracker
+	// retirement tracks every displaced generation, not just the last active
+	// pipeline. Guarded by rebuildMu; cache closure joins a snapshot of these.
+	retirements     []<-chan struct{}
+	listenerMu      sync.Mutex
+	mitmMu          sync.Mutex
+	listener        net.Listener
+	mitmSrv         *mitm.Server
+	mitmCfg         provider.MITMConfig
+	bindHost        string
+	configPath      string
+	config          Config
+	secrets         *secret.Store
+	credentialMu    sync.RWMutex
+	credentials     *credentialapi.Registry
+	credentialStore *credentialstore.Store
+	pluginFiles     *pluginfiles.Store
+	pluginHTTP      *pluginhttp.Client
+	proxy           *httputil.ReverseProxy
+	httpServer      *http.Server
+	stats           *metrics.StatsTracker
 	// feed is the bounded in-memory ring buffer of recent per-request events,
 	// exposed via /_torana/api/feed (snapshot) and /_torana/api/stream (SSE).
 	feed *metrics.RequestFeed
@@ -198,7 +201,7 @@ type Server struct {
 	// survives restarts). Closed on Shutdown, after the pipeline drains.
 	sharedCache cache.Store
 	// cacheMu guards sharedCache: ReconfigureCache may swap it at runtime while
-	// the plugin-watcher goroutine reads it via newRuntime (off rebuildMu).
+	// other readers inspect it outside the pipeline rebuild transaction.
 	cacheMu     sync.RWMutex
 	rateLimiter *RateLimiter
 	// conversations tracks recently seen conversations (metadata only, never
@@ -835,29 +838,9 @@ func New(cfg Config) (*Server, error) {
 			}
 			watchCtx, watchCancel := context.WithCancel(context.Background())
 			s.watchCancel = watchCancel
-			// configFn reads the live config so plugin-config hot-reloads
-			// apply on the next plugin reload.
-			configFn := func() plugin.PluginConfig {
-				p := s.GetConfig().Providers.Plugins
-				return s.pipelinePluginConfig(p)
-			}
 			watchDone := make(chan struct{})
 			s.watchDone = watchDone
-			runtimeFn := func() *wasm.Runtime {
-				s.rebuildMu.Lock()
-				defer s.rebuildMu.Unlock()
-				return s.newRuntime()
-			}
-			if err := plugin.WatchPlugins(watchCtx, cfg.Providers.Plugins.Dir, configFn, runtimeFn, func(newPP *plugin.PluginPipeline) {
-				// WatchPlugins has already built newPP from the live config
-				// (configFn) using s.newRuntime — swap it in and drain the old
-				// one. Rebuilding here would compile the whole pipeline twice.
-				old := s.pluginPipeline.Swap(newPP)
-				if old != nil {
-					go old.(*plugin.PluginPipeline).DrainAndClose()
-				}
-				s.pluginReloadDegraded.Store(false)
-			}, func(err error) {
+			if err := plugin.WatchPlugins(watchCtx, cfg.Providers.Plugins.Dir, s.reloadPluginsFromFilesystem, func(err error) {
 				s.pluginReloadDegraded.Store(true)
 				log.Printf("plugin reload degraded: %v", err)
 			}, func() { close(watchDone) }); err != nil {
@@ -3507,6 +3490,32 @@ func (s *Server) pipelinePluginConfig(pcfg provider.PluginsConfig) plugin.Plugin
 	}
 }
 
+// reloadPluginsFromFilesystem joins the complete administrative transaction
+// before capturing config, then holds rebuildMu through runtime construction and
+// publication. In particular it cannot observe the gap between an admin pipeline
+// swap and applyProviders, or retain a cache while ReconfigureCache retires it.
+func (s *Server) reloadPluginsFromFilesystem(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	s.controlPlaneMutationMu.Lock()
+	defer s.controlPlaneMutationMu.Unlock()
+	s.rebuildMu.Lock()
+	defer s.rebuildMu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	old, err := s.rebuildPipelineLocked(s.GetConfig().Providers.Plugins)
+	if err != nil {
+		return err
+	}
+	if old != nil {
+		s.retireAsyncLocked(old.DrainAndClose)
+	}
+	s.pluginReloadDegraded.Store(false)
+	return nil
+}
+
 // RebuildPipeline builds a fresh runtime + plugin pipeline using pcfg,
 // then atomically swaps the active pipeline and drains the old one.
 // If reloading fails (e.g. ordering constraint violation), returns the error
@@ -3566,7 +3575,7 @@ func (s *Server) rebuildPipelineReportingSkips(pcfg provider.PluginsConfig) ([]p
 		return nil, err
 	}
 	if old != nil {
-		go old.DrainAndClose()
+		s.retireAsyncLocked(old.DrainAndClose)
 	}
 	var skipped []plugin.SkippedPlugin
 	if pp, ok := s.pluginPipeline.Load().(*plugin.PluginPipeline); ok {
@@ -3598,20 +3607,44 @@ func (s *Server) ReconfigureCache(newCache cache.Config) error {
 		return err
 	}
 
-	go func() {
-		if old != nil {
-			old.DrainAndClose()
+	if old != nil {
+		s.retireAsyncLocked(old.DrainAndClose)
+	}
+	retiring := append([]<-chan struct{}(nil), s.retirements...)
+	s.retireAsyncLocked(func() {
+		for _, done := range retiring {
+			<-done
 		}
 		if oldStore != nil {
 			oldStore.Close()
 		}
-	}()
+	})
 
 	s.configMu.Lock()
 	s.config.Providers.Cache = newCache
 	s.configMu.Unlock()
 
 	return nil
+}
+
+// retireAsyncLocked registers retirement before releasing rebuildMu. Completed
+// generations are pruned; a later cache replacement can wait on every remaining
+// user without delaying new requests or holding the rebuild lock while draining.
+func (s *Server) retireAsyncLocked(retire func()) {
+	pending := s.retirements[:0]
+	for _, done := range s.retirements {
+		select {
+		case <-done:
+		default:
+			pending = append(pending, done)
+		}
+	}
+	done := make(chan struct{})
+	s.retirements = append(pending, done)
+	go func() {
+		defer close(done)
+		retire()
+	}()
 }
 
 // PersistConfig saves the current in-memory provider configuration to disk.
@@ -3801,6 +3834,10 @@ func (s *Server) Serve(ln net.Listener) error {
 }
 
 func (s *Server) Shutdown(ctx context.Context) error {
+	// Close only stops these background janitors; in-flight users can still
+	// access their state. Stop them on every return, including deadline paths.
+	defer s.rateLimiter.Close()
+	defer s.conversations.Close()
 	if s.pluginHTTP != nil {
 		defer s.pluginHTTP.CloseIdleConnections()
 	}
@@ -3808,7 +3845,11 @@ func (s *Server) Shutdown(ctx context.Context) error {
 		s.watchCancel()
 	}
 	if s.watchDone != nil {
-		<-s.watchDone
+		select {
+		case <-s.watchDone:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
 	}
 	// Stop background ticks before the pipeline drains below: a tick in flight
 	// holds the pipeline and may be mid-way through an outbound request, and
@@ -3828,20 +3869,30 @@ func (s *Server) Shutdown(ctx context.Context) error {
 			return err
 		}
 	}
-	if pp := s.pluginPipeline.Load(); pp != nil {
-		pp.(*plugin.PluginPipeline).DrainAndClose()
-	}
-	s.rateLimiter.Close()
-	s.conversations.Close()
-	s.swapAuditWriter(nil)
+	// Retire the active generation through the same bounded wait as older
+	// generations. Hijacked connections can outlive http.Server.Shutdown.
 	s.rebuildMu.Lock()
+	defer s.rebuildMu.Unlock()
+	if pp := s.pluginPipeline.Load(); pp != nil {
+		s.retireAsyncLocked(pp.(*plugin.PluginPipeline).DrainAndClose)
+	}
+	for _, done := range s.retirements {
+		select {
+		case <-done:
+		case <-ctx.Done():
+			// Retain the cache and audit writer for in-flight work: request
+			// completion still appends audit records. A subsequent Shutdown
+			// drains and closes both. The independent janitors stop via defer.
+			return ctx.Err()
+		}
+	}
+	s.swapAuditWriter(nil)
 	s.cacheMu.Lock()
 	if s.sharedCache != nil {
 		s.sharedCache.Close()
 		s.sharedCache = nil
 	}
 	s.cacheMu.Unlock()
-	s.rebuildMu.Unlock()
 	return nil
 }
 
