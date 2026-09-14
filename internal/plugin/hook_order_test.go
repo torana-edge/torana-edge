@@ -247,7 +247,7 @@ func TestStreamDispatchUsesHookOrder(t *testing.T) {
 	}
 	const reqID = 993
 	text := "hello"
-	if _, err := pp.RunOnStreamChunk(context.Background(), reqID, &engine.StreamEvent{TextDelta: &text}); err != nil {
+	if _, err := pp.RunOnStreamChunkVerified(context.Background(), reqID, &engine.StreamEvent{TextDelta: &text}); err != nil {
 		t.Fatal(err)
 	}
 	if got := pp.InvokedPlugins(reqID); !slices.Equal(got, []string{"test-stream-fanout", "test-stream-delay-stop", "test-stream-mutator"}) {

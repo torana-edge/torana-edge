@@ -327,7 +327,7 @@ func BenchmarkRunBeforeRequest(b *testing.B) {
 	}
 }
 
-// BenchmarkRunOnStreamChunk measures the per-event cost of the streaming hook,
+// BenchmarkRunOnStreamChunkVerified measures the per-event cost of the streaming hook,
 // which is where the pipeline's time actually goes: run_on_stream_chunk fires
 // once per SSE event, while the request hook is paid once per request.
 //
@@ -337,7 +337,7 @@ func BenchmarkRunBeforeRequest(b *testing.B) {
 // forever measures unbounded buffer growth, and one that invents a fresh ID per
 // event without calling EndRequest leaks a buffer per event. Neither is a
 // per-event cost.
-func BenchmarkRunOnStreamChunk(b *testing.B) {
+func BenchmarkRunOnStreamChunkVerified(b *testing.B) {
 	streamPlugins := []string{"test-stream-mutator", "test-fragment-buffer"}
 
 	text := "the quick brown fox jumps over the lazy dog"
@@ -395,7 +395,7 @@ func runSequence(b *testing.B, pp *PluginPipeline, ctx context.Context, reqID ui
 	b.Helper()
 	for _, ev := range seq {
 		e := ev
-		if _, err := pp.RunOnStreamChunk(ctx, reqID, &e); err != nil {
+		if _, err := pp.RunOnStreamChunkVerified(ctx, reqID, &e); err != nil {
 			b.Fatal(err)
 		}
 	}
@@ -424,7 +424,7 @@ func BenchmarkStreamedResponse(b *testing.B) {
 				reqID := uint64(i + 1)
 				for t := 0; t < events; t++ {
 					ev := engine.StreamEvent{TextDelta: &text}
-					if _, err := pp.RunOnStreamChunk(ctx, reqID, &ev); err != nil {
+					if _, err := pp.RunOnStreamChunkVerified(ctx, reqID, &ev); err != nil {
 						b.Fatal(err)
 					}
 				}

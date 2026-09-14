@@ -39,7 +39,7 @@ package plugin
 //
 // Enforcement is request-scoped: a streamVerifierState lives per reqID in
 // PluginPipeline.streamVerify and is dropped by EndRequest, in the same place
-// as the streamKinds tracker. RunOnStreamChunk (used by the non-streaming
+// as the streamKinds tracker. RunOnStreamChunkVerified (used by the non-streaming
 // JSON replay in jsonresponse.go) is untouched; the streaming path uses
 // RunOnStreamChunkVerified + EndStreamVerified.
 
@@ -538,8 +538,8 @@ func toolBlockIndexFrom(err error) int32 {
 
 // RunOnStreamChunkVerified processes one stream event through the plugin
 // pipeline WITH stream-signature enforcement, for the STREAMING path only.
-// It behaves like RunOnStreamChunk and additionally applies the pre-commit
-// and scope-close rules above; a violation returns a typed *StreamTerminalError
+// It is the sole stream dispatch entry and applies the pre-commit and
+// scope-close rules above; a violation returns a typed *StreamTerminalError
 // (never a plain error) and no event from the violating call is forwarded.
 // Once the request's state is terminal, every subsequent call returns the
 // terminal error without dispatching to any plugin.
@@ -622,8 +622,8 @@ func (pp *PluginPipeline) EndStreamVerified(reqID uint64) error {
 	return nil
 }
 
-// runOnStreamChunk is the shared traversal behind both entry points. vs is
-// nil on the legacy (non-enforced) path; non-nil on the verified path.
+// runOnStreamChunk is the traversal owned by RunOnStreamChunkVerified. vs is
+// nil when this pipeline generation has no verification work.
 func (pp *PluginPipeline) runOnStreamChunk(ctx context.Context, reqID uint64, chunk *engine.StreamEvent, vs *streamVerifierState) ([]engine.StreamEvent, error) {
 	pp.mu.Lock()
 	tracker := pp.streamKinds[reqID]

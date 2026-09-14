@@ -909,7 +909,7 @@ type PluginPipeline struct {
 	drainOnce sync.Once
 
 	// streamKinds tracks, per request, which content block is ACTUALLY open at
-	// each index across RunOnStreamChunk calls, so a plugin-passed
+	// each index across RunOnStreamChunkVerified calls, so a plugin-passed
 	// ContentBlockStop converts back to the engine event matching the block
 	// it closes (ToolCallEnd for tool blocks, BlockStop for text/thinking/,
 	// provider) and unknown/mismatched/duplicate/reused topology errors
@@ -1898,105 +1898,6 @@ func (pp *PluginPipeline) RunAfterResponse(ctx context.Context, reqID uint64, re
 		return resp, nil
 	}
 	return pbconv.FromPBChatResponse(current), nil
-}
-
-// RunOnStreamChunk calls every plugin that implements run_on_stream_chunk.
-//
-// Each plugin sees every event produced by the previous plugin in the chain.
-// A zero-byte return passes the event through unchanged. Otherwise the action
-// is either Suppress (drop it) or EmitEvents (replace it, or fan out to many).
-//
-// current ABI removed the `handled` flag: suppression is an action rather than
-// "handled=true with an empty list", so emitting nothing and passing through
-// are no longer the same bytes on the wire.
-func (pp *PluginPipeline) RunOnStreamChunk(ctx context.Context, reqID uint64, chunk *engine.StreamEvent) ([]engine.StreamEvent, error) {
-	pp.Acquire()
-	defer pp.Release()
-
-	pp.mu.Lock()
-	tracker := pp.streamKinds[reqID]
-	if tracker == nil {
-		tracker = &pbconv.BlockKindTracker{}
-		pp.streamKinds[reqID] = tracker
-	}
-	pp.mu.Unlock()
-
-	current := []*pbv1.StreamEvent{pbconv.ToPBStreamEvent(chunk)}
-
-	for _, lp := range pp.streamPlugins {
-		next := make([]*pbv1.StreamEvent, 0, len(current))
-		for _, ev := range current {
-			evBytes, err := encodeHookInput(reqID, streamPayload{ev: ev})
-			if err != nil {
-				log.Printf("[plugin] %s run_on_stream_chunk encode: %v", lp.manifest.Name, err)
-				if lp.failureMode == "block" {
-					return nil, fmt.Errorf("plugin %s blocked stream after encode failure: %w", lp.manifest.Name, err)
-				}
-				next = append(next, ev)
-				continue
-			}
-			var outBytes []byte
-			pp.recordInvocation(reqID, lp.manifest.Name)
-			if err := lp.plugin.CallRequest(ctx, pbv1.Hook_HOOK_ON_STREAM_CHUNK, reqID, evBytes, &outBytes); err != nil {
-				log.Printf("[plugin] %s run_on_stream_chunk: %v", lp.manifest.Name, err)
-				if lp.failureMode == "block" {
-					return nil, fmt.Errorf("plugin %s blocked stream after failure: %w", lp.manifest.Name, err)
-				}
-				next = append(next, ev)
-				continue
-			}
-			res, err := decodeHookResult(outBytes, pbv1.Hook_HOOK_ON_STREAM_CHUNK)
-			if err != nil {
-				log.Printf("[plugin] %s run_on_stream_chunk: invalid result: %v", lp.manifest.Name, err)
-				if lp.failureMode == "block" {
-					return nil, fmt.Errorf("plugin %s blocked stream after invalid output: %w", lp.manifest.Name, err)
-				}
-				next = append(next, ev)
-				continue
-			}
-			if res == nil {
-				next = append(next, ev) // pass-through
-				continue
-			}
-			if res.GetSuppress() != nil {
-				// Deliberately emit nothing. Distinct on the wire from
-				// pass-through, so an assembler buffering fragments can say
-				// "not yet" without the host replaying the fragment.
-				continue
-			}
-			if emit := res.GetEmitEvents(); emit != nil {
-				// Validation already refused an empty or malformed list, so
-				// this is a real replacement or fan-out.
-				next = append(next, emit.Events...)
-				continue
-			}
-			next = append(next, ev)
-		}
-		current = next
-	}
-
-	out := make([]engine.StreamEvent, 0, len(current))
-	for _, ev := range current {
-		// Kind-aware conversion: the tracker remembers which content block is
-		// ACTUALLY open at each index (recorded from the converted starts,
-		// which are what the rest of the host consumes), so a
-		// ContentBlockStop becomes ToolCallEnd or BlockStop to match the
-		// block it closes. A pass-through stream therefore survives plugins
-		// with its block topology intact.
-		converted, err := tracker.FromPBStreamEvent(ev)
-		if err != nil {
-			// The plugin ABI declares unknown/mismatched/duplicate/reused
-			// topology invalid: a plugin emitted a stop with no open block at
-			// its index, or a start at an index that is already open. The
-			// conversion must never guess a kind, so this is a hard error —
-			// on the streaming path the caller terminates the stream rather
-			// than deliver a silently reclassified event.
-			log.Printf("[plugin] stream topology error: %v", err)
-			return nil, fmt.Errorf("plugin stream topology: %w", err)
-		}
-		out = append(out, *converted)
-	}
-	return out, nil
 }
 
 // ErrServeHTTPForbidden is returned by RunOnHTTPRequest when the named plugin
