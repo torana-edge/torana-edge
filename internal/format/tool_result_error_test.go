@@ -1,11 +1,13 @@
 package format_test
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"github.com/torana-edge/torana-edge/internal/engine"
+	"google.golang.org/protobuf/proto"
 	"testing"
 
-	"github.com/torana-edge/torana-edge/internal/engine"
 	"github.com/torana-edge/torana-edge/internal/engine/pbconv"
 	"github.com/torana-edge/torana-edge/internal/format/anthropic"
 	"github.com/torana-edge/torana-edge/internal/format/gemini"
@@ -49,18 +51,6 @@ func TestToolResultErrorAcrossAdapterAndGuestBridge(t *testing.T) {
 			if got != want {
 				t.Fatalf("is_error = %q, want %q", got, want)
 			}
-			if flag == "" {
-				return
-			}
-			for _, variant := range []engine.OpenAIVariant{engine.OpenAIChat, engine.OpenAIResponses} {
-				restored.OpenAIVariant = variant
-				if _, err := (&openai.Adapter{}).Marshal(restored); err == nil {
-					t.Fatal("OpenAI silently discarded is_error")
-				}
-			}
-			if _, err := (&gemini.Adapter{}).Marshal(restored); err == nil {
-				t.Fatal("Gemini silently discarded is_error")
-			}
 		})
 	}
 }
@@ -71,5 +61,55 @@ func TestAnthropicToolResultErrorRequiresBoolean(t *testing.T) {
 		if _, err := (&anthropic.Adapter{}).Unmarshal([]byte(body)); err == nil {
 			t.Fatalf("accepted is_error=%s", flag)
 		}
+	}
+}
+
+// Start with each provider's valid topology so a different marshal refusal
+// cannot accidentally make the failure-flag assertion pass.
+func TestCrossFormatToolErrorProjection(t *testing.T) {
+	for _, tc := range []struct {
+		name, wire string
+		adapter    interface {
+			Unmarshal([]byte) (*engine.ChatRequest, error)
+			Marshal(*engine.ChatRequest) ([]byte, error)
+		}
+	}{
+		{"openai-chat", `{"model":"m","messages":[{"role":"assistant","tool_calls":[{"id":"c","type":"function","function":{"name":"read","arguments":"{}"}}]},{"role":"tool","tool_call_id":"c","content":"diagnostic"}]}`, &openai.Adapter{}},
+		{"openai-responses", `{"model":"m","input":[{"type":"function_call","call_id":"c","name":"read","arguments":"{}"},{"type":"function_call_output","call_id":"c","output":"diagnostic"}]}`, &openai.Adapter{}},
+		{"gemini", `{"contents":[{"role":"model","parts":[{"functionCall":{"name":"read","args":{}}}]},{"role":"user","parts":[{"functionResponse":{"name":"read","response":{"output":"diagnostic"}}}]}]}`, &gemini.Adapter{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req, err := tc.adapter.Unmarshal([]byte(tc.wire))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var tr *engine.ToolResultBlock
+			for _, m := range req.Messages {
+				for _, b := range m.Blocks {
+					if b.ToolResult != nil {
+						tr = b.ToolResult
+					}
+				}
+			}
+			if tr == nil {
+				t.Fatal("fixture contains no tool result")
+			}
+			for _, flag := range []*bool{nil, proto.Bool(false), proto.Bool(true)} {
+				tr.IsError = flag
+				out, err := tc.adapter.Marshal(req)
+				if flag != nil && *flag {
+					if err == nil {
+						t.Fatal("true was silently dropped")
+					}
+					continue
+				}
+				if err != nil {
+					t.Fatalf("successful tool result refused: %v", err)
+				}
+				if bytes.Contains(out, []byte(`"is_error"`)) {
+					t.Fatal("unsupported flag leaked onto wire")
+				}
+			}
+		})
 	}
 }

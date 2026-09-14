@@ -671,7 +671,7 @@ func (a *Adapter) Marshal(chat *engine.ChatRequest) ([]byte, error) {
 	}
 	for _, message := range chat.Messages {
 		for _, block := range message.Blocks {
-			if block.ToolResult != nil && block.ToolResult.IsError != nil {
+			if block.ToolResult != nil && block.ToolResult.IsError != nil && *block.ToolResult.IsError {
 				return nil, fmt.Errorf("gemini: explicit tool-result error flag is unrepresentable")
 			}
 		}
