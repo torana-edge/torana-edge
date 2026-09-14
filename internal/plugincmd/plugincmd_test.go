@@ -2,6 +2,7 @@ package plugincmd
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -84,9 +85,9 @@ func TestScaffoldBuildsFromCleanSourceWithoutMutatingModuleFiles(t *testing.T) {
 // native test and WASI build. The replacement is installed only in this temp
 // project; no unreleased local path can leak into the scaffold a user creates.
 func TestScaffoldFirstRunAgainstStagedSDK(t *testing.T) {
-	staged := os.Getenv("TORANA_SDK_STAGING")
+	staged := os.Getenv("TORANA_SDK_DIR")
 	if staged == "" {
-		staged = "/private/tmp/torana-foundation-20260914/sdk"
+		t.Skip("TORANA_SDK_DIR is not set")
 	}
 	if _, err := os.Stat(filepath.Join(staged, "go.mod")); err != nil {
 		t.Skipf("staged SDK unavailable: %v", err)
@@ -111,6 +112,65 @@ func TestScaffoldFirstRunAgainstStagedSDK(t *testing.T) {
 	wasm.Env = append(os.Environ(), "GOOS=wasip1", "GOARCH=wasm", "CGO_ENABLED=0", "GOWORK=off")
 	if output, err := wasm.CombinedOutput(); err != nil {
 		t.Fatalf("generated WASI build: %v\n%s", err, output)
+	}
+}
+
+func TestRustScaffoldUsesTypedHookInNativeUnitTest(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "rust-plugin")
+	var stdout, stderr bytes.Buffer
+	if err := Run([]string{"plugin", "new", dir, "--language", "rust"}, &stdout, &stderr); err != nil {
+		t.Fatalf("new rust plugin: %v\nstderr: %s", err, stderr.String())
+	}
+	source, err := os.ReadFile(filepath.Join(dir, "src", "lib.rs"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"<PluginImpl as Plugin>::before_request",
+		"result.into_hook_result().is_none()",
+		"info(&format!",
+	} {
+		if !strings.Contains(string(source), want) {
+			t.Fatalf("generated Rust unit test lacks %q:\n%s", want, source)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(dir, "tests", "native.rs")); !os.IsNotExist(err) {
+		t.Fatalf("placeholder integration test still exists: %v", err)
+	}
+}
+
+func TestRustScaffoldFirstRunAgainstStagedSDK(t *testing.T) {
+	sdkRoot := os.Getenv("TORANA_SDK_DIR")
+	if sdkRoot == "" {
+		t.Skip("TORANA_SDK_DIR is not set")
+	}
+	staged := filepath.Join(sdkRoot, "rust", "torana-plugin-sdk")
+	if _, err := os.Stat(filepath.Join(staged, "Cargo.toml")); err != nil {
+		t.Skipf("staged Rust SDK unavailable: %v", err)
+	}
+	dir := filepath.Join(t.TempDir(), "first-rust-plugin")
+	var stdout, stderr bytes.Buffer
+	if err := Run([]string{"plugin", "new", dir, "--language", "rust"}, &stdout, &stderr); err != nil {
+		t.Fatalf("new rust plugin: %v\nstderr: %s", err, stderr.String())
+	}
+	cargoPath := filepath.Join(dir, "Cargo.toml")
+	cargo, err := os.ReadFile(cargoPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	localDependency := fmt.Sprintf("torana-plugin-sdk = { path = %q }", staged)
+	cargo = []byte(strings.Replace(string(cargo), `torana-plugin-sdk = "0.5.0"`, localDependency, 1))
+	if err := os.WriteFile(cargoPath, cargo, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	targetDir := filepath.Join(t.TempDir(), "cargo-target")
+	for _, args := range [][]string{{"test"}, {"build", "--release", "--target", "wasm32-wasip1"}} {
+		cmd := exec.Command("cargo", args...)
+		cmd.Dir = dir
+		cmd.Env = append(os.Environ(), "CARGO_TARGET_DIR="+targetDir)
+		if output, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("generated Rust cargo %s: %v\n%s", strings.Join(args, " "), err, output)
+		}
 	}
 }
 

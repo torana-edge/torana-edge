@@ -88,6 +88,33 @@ func writeGrantsAreUnattributable(perm string) bool {
 	return sdk.IsWritePermission(perm)
 }
 
+// declarationUsesPermission reports capabilities exercised by manifest-bound
+// resources. The host refuses these declarations unless their capability is
+// granted, even when plugin source reaches the resource through an extension
+// whose implementation performs the eventual lookup.
+func declarationUsesPermission(manifest plugin.PluginManifest, perm string) bool {
+	switch perm {
+	case "env.credential_get":
+		return len(manifest.Credentials) > 0
+	case "env.http_request":
+		return len(manifest.HTTPEndpoints) > 0
+	case "env.model_complete":
+		return len(manifest.ModelServices) > 0
+	case "env.model_pricing":
+		return len(manifest.PricingResources) > 0
+	case "env.cache_policy":
+		return len(manifest.PromptCachePolicies) > 0
+	}
+	for _, declaration := range manifest.Files {
+		for _, operation := range declaration.Operations {
+			if perm == "env.file_"+operation {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 type severity int
 
 const (
@@ -273,6 +300,9 @@ func lintPermissions(manifest plugin.PluginManifest, u *usage, hooks map[string]
 		var unused []string
 		for perm := range declared {
 			if _, used := u.permissions[perm]; used {
+				continue
+			}
+			if declarationUsesPermission(manifest, perm) {
 				continue
 			}
 			if unattributable[perm] || writeGrantsAreUnattributable(perm) {

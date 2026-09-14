@@ -203,11 +203,33 @@ func TestBeforeRequest(t *testing.T) {
 	}
 	if language == "rust" {
 		files = map[string]string{
-			"Cargo.toml":      fmt.Sprintf("[package]\nname = \"%s\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[lib]\ncrate-type = [\"cdylib\"]\n\n[dependencies]\ntorana-plugin-sdk = \"0.5.0\"\n", pluginName),
-			"src/lib.rs":      "use torana_plugin_sdk::{export_plugin_v1, log, pbv1, Plugin, RequestResult, HOOK_BEFORE_REQUEST, LOG_INFO};\n\nstruct PluginImpl;\nimpl Plugin for PluginImpl {\n    const SUPPORTED_HOOKS: u32 = HOOK_BEFORE_REQUEST;\n    fn before_request(request: pbv1::ChatRequest) -> Result<RequestResult, String> {\n        log(&format!(\"received request for {}\", request.model), LOG_INFO);\n        Ok(RequestResult::pass())\n    }\n}\nexport_plugin_v1!(PluginImpl);\n",
-			"tests/native.rs": "#[test]\nfn native_plugin_compiles() { assert_eq!(2 + 2, 4); }\n",
-			"plugin.json":     fmt.Sprintf(`{"schema_version":1,"id":"local/%s","name":"%s","version":"0.1.0","abi_version":"v1","description":"A local Torana Rust plugin","hooks":[{"name":"run_before_request"}],"permissions":[{"name":"env.log","description":"Diagnostic logging"}],"failure_mode":"pass"}`+"\n", pluginName, pluginName),
-			"README.md":       "# " + pluginName + "\n\nRun `cargo test` for native checks and `cargo build --release --target wasm32-wasip1` for the WASI artifact.\n",
+			"Cargo.toml": fmt.Sprintf("[package]\nname = \"%s\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[lib]\ncrate-type = [\"cdylib\"]\n\n[dependencies]\ntorana-plugin-sdk = \"0.5.0\"\n", pluginName),
+			"src/lib.rs": `use torana_plugin_sdk::{export_plugin_v1, info, pbv1, Plugin, RequestResult, HOOK_BEFORE_REQUEST};
+
+struct PluginImpl;
+impl Plugin for PluginImpl {
+    const SUPPORTED_HOOKS: u32 = HOOK_BEFORE_REQUEST;
+    fn before_request(request: pbv1::ChatRequest) -> Result<RequestResult, String> {
+        info(&format!("received request for {}", request.model));
+        Ok(RequestResult::pass())
+    }
+}
+export_plugin_v1!(PluginImpl);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn before_request_passes_through() {
+        let result = <PluginImpl as Plugin>::before_request(pbv1::ChatRequest::default())
+            .expect("default hook succeeds");
+        assert!(result.into_hook_result().is_none());
+    }
+}
+`,
+			"plugin.json": fmt.Sprintf(`{"schema_version":1,"id":"local/%s","name":"%s","version":"0.1.0","abi_version":"v1","description":"A local Torana Rust plugin","hooks":[{"name":"run_before_request"}],"permissions":[{"name":"env.log","description":"Diagnostic logging"}],"failure_mode":"pass"}`+"\n", pluginName, pluginName),
+			"README.md":   "# " + pluginName + "\n\nRun `cargo test` for native checks and `cargo build --release --target wasm32-wasip1` for the WASI artifact.\n",
 		}
 	}
 	for name, content := range files {

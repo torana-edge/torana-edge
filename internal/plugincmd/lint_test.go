@@ -575,6 +575,36 @@ func init() {
 	assertClean(t, lintMessages(t, dir))
 }
 
+func TestLintCountsManifestResourceDeclarationsAsCapabilityUse(t *testing.T) {
+	manifest := `{
+  "schema_version": 1,
+  "id": "test/resources",
+  "name": "resources",
+  "version": "0.1.0",
+  "abi_version": "v1",
+  "failure_mode": "pass",
+  "description": "resource fixture",
+  "hooks": [{"name":"run_before_request"}],
+  "permissions": [
+    {"name":"env.model_complete","description":"model"},
+    {"name":"env.model_pricing","description":"pricing"}
+  ],
+  "model_services": [{"name":"summarizer","description":"summary model","required":true,"timeout_ms":1000,"max_tokens":64,"max_input_bytes":4096,"max_calls_per_minute":10,"max_tokens_per_hour":1000}],
+  "pricing_resources": [{"name":"target","description":"target pricing"},{"name":"summarizer","description":"summary pricing","for_model_service":"summarizer"}]
+}`
+	dir := writePlugin(t, manifest, `package main
+
+import (
+	"context"
+	sdk "github.com/torana-edge/torana-plugin-sdk"
+	pb "github.com/torana-edge/torana-plugin-sdk/pb/v1"
+)
+func main() {}
+func init() { sdk.OnBeforeRequest(func(context.Context, *pb.ChatRequest) (sdk.RequestResult, error) { return sdk.PassRequest(), nil }) }
+`)
+	assertClean(t, lintMessages(t, dir))
+}
+
 // A HostCall whose command is computed cannot be attributed, so the linter
 // must not claim the declared capabilities are unused — it can no longer see
 // everything the plugin reaches for.
