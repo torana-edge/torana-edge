@@ -45,6 +45,7 @@ import (
 	"github.com/torana-edge/torana-edge/internal/economics"
 	"github.com/torana-edge/torana-edge/internal/metrics"
 	"github.com/torana-edge/torana-edge/internal/pluginstate"
+	sdk "github.com/torana-edge/torana-plugin-sdk"
 	pbv1 "github.com/torana-edge/torana-plugin-sdk/pb/v1"
 	"google.golang.org/protobuf/proto"
 )
@@ -1827,13 +1828,9 @@ func (r *Runtime) dispatchHostCall(ctx context.Context, pluginName, cmd, args st
 		r.mu.RLock()
 		p := r.plugins[pluginName]
 		r.mu.RUnlock()
-		perm := "env.host_call"
-		if cmd != "" {
-			if strings.HasPrefix(cmd, "env.") {
-				perm = cmd
-			} else {
-				perm = "env.host_call." + cmd
-			}
+		perm, known := sdk.CommandPermission(cmd)
+		if !known {
+			perm = "env.host_call"
 		}
 		// Two commands are NOT operator-facing capabilities, so deriving their
 		// permission from the command string looks for a grant that cannot
@@ -2653,10 +2650,6 @@ func (r *Runtime) dispatchHostCall(ctx context.Context, pluginName, cmd, args st
 				break
 			}
 			value = raw
-		case "torana_db_query":
-			herr = hostErr(pbv1.ErrorCode_ERROR_CODE_NOT_CONFIGURED, "database host extension is not implemented")
-		case "torana_kms_decrypt":
-			herr = hostErr(pbv1.ErrorCode_ERROR_CODE_NOT_CONFIGURED, "KMS host extension is not implemented")
 		case "torana_record_savings":
 			var report economics.CompactionReport
 			if err := json.Unmarshal([]byte(args), &report); err != nil {

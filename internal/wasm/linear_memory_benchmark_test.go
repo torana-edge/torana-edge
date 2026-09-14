@@ -461,7 +461,7 @@ func TestOfficialPluginLinearMemoryProfile(t *testing.T) {
 			})
 			r.FileAppendFunc = func(string, string, []byte, FileResource) error { return nil }
 			r.ModelCompleteFunc = func(context.Context, string, ModelServiceResource, *pbv1.ModelCompleteArgs) (*pbv1.ModelCompleteResult, *pbv1.HostError) {
-				return &pbv1.ModelCompleteResult{Content: `{"pii":false,"findings":[]}`, Usage: &pbv1.Usage{}}, nil
+				return &pbv1.ModelCompleteResult{Message: &pbv1.ResponseMessage{}, Usage: &pbv1.Usage{}}, nil
 			}
 			defer r.Close()
 			p, err := r.LoadPlugin(bundle.name, bundle.wasmBytes)
