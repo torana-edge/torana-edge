@@ -63,6 +63,8 @@ Writes require --yes; an agent should obtain operator consent for approvals.
 config/pipeline/plugin-config apply require the revision from their get command.
 Edit the snapshot's config or pipeline, not its revision. Stale edits fail safely.
 Settings apply does not change plugins; use pipeline or plugin commands for those.
+Provider bridge settings are included in config get/apply. Set bridge to null to
+remove a bridge; omitting it preserves the existing bridge configuration.
 An approval file is a PluginApproval object with the reviewed digest, permissions,
 failure_mode, and any resource bindings. Approval does not enable a disabled plugin.
 plugin list/install/remove work on disk; plugin status inspects the running host.

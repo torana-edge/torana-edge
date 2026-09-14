@@ -55,7 +55,9 @@ emulated.
 
 The managed store is authoritative after first start. Editing a seed file does
 not change a running installation. See [Quickstart](QUICKSTART.md#configure)
-and [the configuration API](AGENT_CONTROL_PLANE.md).
+and [the configuration API](AGENT_CONTROL_PLANE.md). From the terminal, use
+`torana config get` and `torana config apply`; the [CLI bridge workflow](CLI.md#protocol-bridges)
+covers creation, updates, removal, and background diagnostics.
 
 ## Configuration
 

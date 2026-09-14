@@ -74,8 +74,8 @@ torana config apply --file settings.json --yes
 ```
 
 The snapshot is `{ "revision": "…", "config": { … } }`. It covers the settings
-managed by the UI: providers/auth references/fallbacks, provider prices and
-cache policies, cache backend, limits, port, optional MITM ingress, and other
+managed by the host: providers/auth references/fallbacks, protocol bridges,
+provider prices and cache policies, cache backend, limits, port, optional MITM ingress, and other
 host settings. Secrets have the same redaction as the UI. Preserve a redacted
 secret's `__set__` marker to keep its existing value; never treat that marker
 as a credential. Named credentials remain available through `torana credential`.
@@ -104,6 +104,49 @@ times out or the connection drops, inspect the live state before retrying:
 the server may already have applied it. After changing the listening port,
 the managed instance record points subsequent commands to the new port.
 Explicit `--addr` users must specify the new port themselves.
+
+## Protocol bridges
+
+Every [bridge setting](PROTOCOL_BRIDGES.md#configuration) is available through
+`config get` and `config apply`: `client`, `upstream`, `model`, `max_tokens`, and
+`project`, together with the provider's `format`, URL, auth policy, and fallbacks.
+The host applies the same validation and persistence as other configuration
+updates; a bridge edit takes effect on subsequent requests without restarting.
+
+Export a fresh settings snapshot, then add this provider entry inside its
+`config.providers` object, preserving the other entries and the revision:
+
+```json
+"local-messages": {
+  "url": "http://127.0.0.1:8000",
+  "format": "openai",
+  "auth": {"mode": "none"},
+  "bridge": {
+    "client": "anthropic",
+    "upstream": "openai-chat",
+    "model": "your-loaded-model"
+  }
+}
+```
+
+Apply it with `torana config apply --file settings.json --yes`. Clients can now
+send Anthropic Messages to `/provider/local-messages/v1/messages`, and the local
+backend receives Chat Completions. Export a new snapshot before each subsequent
+edit. To remove translation while keeping the provider, set its `bridge` member
+to `null`; omitting the member preserves the existing bridge. Removing the whole
+provider entry removes that route. Use `stats` and `feed` to inspect its traffic.
+
+For sensitive upstream-error details, the diagnostic opt-in works with both
+foreground serving and a newly started background instance:
+
+```bash
+TORANA_DEBUG_UPSTREAM_ERRORS=1 torana --debug start
+```
+
+`torana status` reports the log path. Starting an already running instance does
+not change its environment; stop it before restarting with different diagnostic
+settings. See [diagnostics](PROTOCOL_BRIDGES.md#diagnose-an-upstream-rejection)
+for the 8 KiB limit and what these logs may contain.
 
 ## Plugins: install is not approval, and approval is not enablement
 
@@ -233,6 +276,7 @@ should expose its automatable actions through `agent.json`, as described in
 | Recent/live requests | `feed`, `feed --follow` |
 | Conversation metadata | `conversations --json` |
 | Provider/cache/limits/ingress settings | `config get`, `config apply` |
+| Protocol bridge configuration and removal | `config get`, `config apply` (explicit `bridge: null` to remove) |
 | Installed vs loaded bundle details | `plugin status`, `plugin inspect NAME` |
 | Digest approval, permissions, bindings, failure mode | `plugin approve NAME --file … --yes`, or pipeline snapshot |
 | Enable, disable, revoke | `plugin enable`, `plugin disable`, `plugin revoke` |
