@@ -26,6 +26,22 @@ func journalPipeline(t *testing.T, mode string, limit uint64) *PluginPipeline {
 	return pp
 }
 
+func multiJournalPipeline(t *testing.T, downstream string) *PluginPipeline {
+	t.Helper()
+	requireWASM(t, fixturesDir+"/test-stream-journal/plugin.wasm")
+	requireWASM(t, fixturesDir+"/"+downstream+"/plugin.wasm")
+	rt := wasm.NewRuntimeWithOptions(context.Background(), wasm.RuntimeOptions{})
+	t.Cleanup(func() { rt.Close() })
+	pp, err := NewPipeline(rt, PluginConfig{Dir: fixturesDir, Order: []string{"test-stream-journal", downstream}, AllowUnapproved: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pp.Len() != 2 || len(pp.streamPlugins) != 2 {
+		t.Fatalf("loaded pipeline = %d/%d, want two stream plugins", pp.Len(), len(pp.streamPlugins))
+	}
+	return pp
+}
+
 func TestStreamJournalPassReplaysInterleavedCallsExactlyOnce(t *testing.T) {
 	pp := journalPipeline(t, "pass", 0)
 	input := []engine.StreamEvent{toolStart(0, "call_0", "one"), toolDelta(0, `{"a":`), toolStart(1, "call_1", "two"), toolDelta(1, `{}`)}
@@ -111,4 +127,53 @@ func TestStreamJournalDeliberateSuppressionCommits(t *testing.T) {
 	if pp.streamVerify[1].plugins[0].journal != nil {
 		t.Fatal("completed journal retained")
 	}
+}
+
+// A pass-mode rollback is the upstream plugin's output, not a shortcut around
+// the remaining pipeline. The restored events must traverse the downstream
+// plugin exactly once, and any downstream signature violation must retain its
+// normal terminal semantics. Only the journal guest is disabled by rollback.
+func TestStreamJournalRollbackTraversesDownstreamOnceAndPreservesTerminalPolicy(t *testing.T) {
+	pp := multiJournalPipeline(t, "test-tool-rewriter")
+	pp.streamPlugins[0].failureMode = "pass"
+	pp.streamPlugins[1].failureMode = "block"
+
+	start := engine.StreamEvent{ToolCallStart: &engine.ToolCallStart{Index: 0, ID: "call", Name: "lookup", Signature: "provider-signature"}}
+	if out := run(t, pp, start); len(out) != 0 {
+		t.Fatalf("journal start escaped before rollback: %#v", out)
+	}
+	fail := toolDelta(0, "FAIL")
+	out := run(t, pp, fail)
+	if len(out) != 2 || out[0].ToolCallStart == nil || out[1].ToolCallDelta == nil {
+		t.Fatalf("rollback did not traverse downstream as one ordered replay: %#v", out)
+	}
+	const rewritten = `{"q":"rewritten-by-plugin"}`
+	if out[1].ToolCallDelta.ArgumentsDelta != rewritten {
+		t.Fatalf("downstream rewriter did not see rollback delta: %#v", out[1])
+	}
+	// One start and one rewritten delta proves the rollback was not forwarded
+	// both directly and through the downstream stage.
+	if out[0].ToolCallStart.ID != "call" || out[0].ToolCallStart.Signature != "provider-signature" {
+		t.Fatalf("original signed start was not restored exactly: %#v", out[0])
+	}
+
+	end := toolEnd(0)
+	if emitted, err := pp.RunOnStreamChunkVerified(context.Background(), 1, &end); err == nil || len(emitted) != 0 {
+		t.Fatalf("downstream signed mutation must terminate without output: emitted=%#v err=%v", emitted, err)
+	} else if terminal, ok := err.(*StreamTerminalError); !ok || terminal.Plugin != "test-tool-rewriter" {
+		t.Fatalf("terminal attribution = %#v, want downstream plugin", err)
+	}
+	// Terminal state short-circuits the request after the downstream block.
+	if emitted, err := pp.RunOnStreamChunkVerified(context.Background(), 1, &end); err == nil || len(emitted) != 0 {
+		t.Fatalf("terminal request resumed: emitted=%#v err=%v", emitted, err)
+	}
+	if state := pp.streamVerify[1]; state == nil || !state.plugins[0].disabled || state.plugins[1].disabled {
+		t.Fatalf("rollback disabled wrong guests: %#v", state)
+	}
+
+	pp.EndRequest(1)
+	if out := runAs(t, pp, 2, toolStart(0, "fresh", "lookup")); len(out) != 0 {
+		t.Fatalf("request-scoped rollback disabled journal globally: %#v", out)
+	}
+	pp.EndRequest(2)
 }
