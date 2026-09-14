@@ -4,7 +4,7 @@ Pointing a coding harness at Torana changes only the provider inference traffic
 that Torana explicitly understands. On a native route (no `bridge` configured),
 account, quota, status, telemetry, update, model-list, MCP, and unknown auxiliary
 requests remain ordinary reverse-proxy traffic and never enter the inference
-plugin pipeline. A mismatched protocol bridge instead refuses auxiliary APIs;
+plugin pipeline. Any configured protocol bridge instead refuses auxiliary APIs;
 see [Protocol bridges](#protocol-bridges).
 
 This is an endpoint contract, not a list of blessed clients. Claude Code,
@@ -79,9 +79,12 @@ portable. Unsupported request semantics return 400 before an upstream call;
 non-portable response content produces a 502 or terminates an already-started
 stream without a success marker.
 
-Under a mismatched bridge contract, model discovery, token-counting, files,
+Under any configured bridge, model discovery, token-counting, files,
 batch APIs, response retrieval, and other auxiliary APIs are not emulated or
-forwarded; they return 400. A harness requiring one of these APIs needs a
+forwarded; they return 400. This includes bridges whose client and upstream
+contracts match, such as a same-API route using `bridge.model` for aliasing.
+Matching contracts avoids cross-API content conversion, not the inference-only
+endpoint boundary. A harness requiring one of these APIs needs a
 compatible route or additional contract support. Do not infer complete harness
 compatibility from a successful inference request or base-URL configuration.
 
@@ -119,6 +122,6 @@ the harness's responsibility. Verify login refresh, telemetry preferences, and
 updates separately; native pass-through is not a bridge guarantee.
 
 If a harness adds a new inference endpoint, a native route initially passes it
-through without inference hooks; a mismatched bridge refuses it. Support should
+through without inference hooks; any configured bridge refuses it. Support should
 be added only with an explicit format adapter and positive and negative endpoint
 tests—never by broad substring matching.
