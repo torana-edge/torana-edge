@@ -156,6 +156,13 @@ their provider-native usage semantics.
 Every model-service response is recorded in that feed before the guest decides
 whether its content is useful, including empty completions.
 
+The feed can therefore contain counts the host rejected. It has no usage
+validity or presence flag: check `tokens_in`, `tokens_out`, `cache_read_tokens`,
+and `cache_write_tokens` against the range and cache-read rules above, using the
+provider format active when the call ran. All-zero counters cannot distinguish
+missing usage from an explicit zero report. For workload-cost reconciliation,
+treat invalid or unverifiable usage as unknown cost; an omitted token-budget
+charge is not evidence that the provider billed nothing.
 
 None of these does anything on its own. Ticks are off unless you set an
 interval, egress is refused unless you set a budget, and both are refused
