@@ -222,12 +222,16 @@ func TestScaffoldSDKVersionMatchesTheHost(t *testing.T) {
 // and nothing previously asserted it at all.
 func TestScaffoldGoVersionSatisfiesTheSDK(t *testing.T) {
 	sdkRoot := os.Getenv("TORANA_SDK_DIR")
+	explicit := sdkRoot != ""
 	if sdkRoot == "" {
 		sdkRoot = "../../../torana-plugin-sdk"
 	}
 	sdkGoMod := filepath.Join(sdkRoot, "go.mod")
 	raw, err := os.ReadFile(sdkGoMod)
 	if err != nil {
+		if explicit {
+			t.Fatalf("read TORANA_SDK_DIR go.mod %q: %v", sdkGoMod, err)
+		}
 		t.Skip("torana-plugin-sdk not checked out beside this repo")
 	}
 	m := regexp.MustCompile(`(?m)^go\s+(\S+)`).FindStringSubmatch(string(raw))

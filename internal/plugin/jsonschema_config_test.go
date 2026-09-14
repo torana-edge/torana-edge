@@ -157,11 +157,15 @@ func countScalarProperties(raw []byte) int {
 // render a form.
 func TestRealOfficialPluginSchemas(t *testing.T) {
 	dir := os.Getenv("TORANA_PLUGIN_SOURCE_DIR")
+	explicit := dir != ""
 	if dir == "" {
 		dir = "../../../torana-plugins/plugins"
 	}
 	entries, err := os.ReadDir(dir)
 	if err != nil {
+		if explicit {
+			t.Fatalf("read TORANA_PLUGIN_SOURCE_DIR %q: %v", dir, err)
+		}
 		t.Skip("official plugins repo not checked out alongside")
 	}
 	checked := 0
@@ -187,6 +191,9 @@ func TestRealOfficialPluginSchemas(t *testing.T) {
 		checked++
 	}
 	if checked == 0 {
+		if explicit {
+			t.Fatalf("TORANA_PLUGIN_SOURCE_DIR %q contains no plugin schemas", dir)
+		}
 		t.Skip("no schemas found")
 	}
 	t.Logf("checked %d official plugin schemas", checked)
