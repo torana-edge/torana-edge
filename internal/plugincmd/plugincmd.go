@@ -138,7 +138,7 @@ func initPlugin(args []string, stdout io.Writer) error {
 	if err != nil {
 		return fmt.Errorf("stage plugin directory: %w", err)
 	}
-	defer os.RemoveAll(stage)
+	defer func() { _ = os.RemoveAll(stage) }()
 
 	files := map[string]string{
 		"go.mod": fmt.Sprintf(`module %s
