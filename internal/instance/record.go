@@ -6,6 +6,8 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+
+	"github.com/torana-edge/torana-edge/internal/fileperm"
 )
 
 // Record is a routing hint, not authority to terminate a PID. Callers verify
@@ -48,6 +50,9 @@ func WriteRecord(path string, r Record) error {
 		return err
 	}
 	defer func() { _ = f.Close(); _ = os.Remove(f.Name()) }()
+	if err := fileperm.Secure(f.Name(), f); err != nil {
+		return err
+	}
 	if _, err := f.Write(raw); err != nil {
 		return err
 	}

@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/torana-edge/torana-edge/internal/fileperm"
 )
 
 func TestLifetimeLockAndReadOnlyProbe(t *testing.T) {
@@ -20,6 +22,9 @@ func TestLifetimeLockAndReadOnlyProbe(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = owner.Close() })
+	if _, err := fileperm.EnsureDir(filepath.Dir(path)); err != nil {
+		t.Fatal(err)
+	}
 	if active, err := Running(path); err != nil || !active {
 		t.Fatalf("held probe = %v, %v", active, err)
 	}

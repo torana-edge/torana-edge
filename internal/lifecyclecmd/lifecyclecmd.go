@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/torana-edge/torana-edge/internal/controlclient"
+	"github.com/torana-edge/torana-edge/internal/fileperm"
 	"github.com/torana-edge/torana-edge/internal/instance"
 	"github.com/torana-edge/torana-edge/internal/provider"
 )
@@ -268,7 +269,7 @@ func startExecutable(ctx context.Context, executable string) (Status, error) {
 		return zero, err
 	}
 	defer func() { _ = logFile.Close() }()
-	if err := logFile.Chmod(0o600); err != nil {
+	if err := fileperm.Secure(logPath, logFile); err != nil {
 		return zero, err
 	}
 	cmd := exec.Command(executable, "serve")

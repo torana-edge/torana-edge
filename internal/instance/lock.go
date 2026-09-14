@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+
+	"github.com/torana-edge/torana-edge/internal/fileperm"
 )
 
 var ErrLocked = errors.New("another Torana process owns this managed store")
@@ -30,6 +32,10 @@ func Acquire(path string) (*Lock, error) {
 		if lockBusy(err) {
 			return nil, fmt.Errorf("%w (%s)", ErrLocked, path)
 		}
+		return nil, err
+	}
+	if err := fileperm.Secure(path, f); err != nil {
+		_ = f.Close()
 		return nil, err
 	}
 	return &Lock{file: f}, nil

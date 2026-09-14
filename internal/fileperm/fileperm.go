@@ -82,9 +82,10 @@ func RestrictDir(path string) error {
 //	failed to create secret key file: …\.torana-new-2613133976 inherits
 //	access from its parent directory; it must carry a protected owner-only ACL
 //
-// Nothing is inheritable now, so a directory write cannot reach the files
-// inside it. Skipping the redundant write is worth doing on its own terms; it
-// is no longer what stands between correctness and that failure.
+// Merely making the new ACL noninheritable is insufficient on Windows: removing
+// inherited grants can erase existing children's access entries. The directory
+// implementation uses SetSecurityInfo's documented non-propagating handle mode
+// as well. Skipping redundant writes remains worthwhile independently.
 func EnsureDir(path string) (changed bool, err error) {
 	info, err := os.Stat(path)
 	if err != nil {
@@ -112,7 +113,8 @@ func EnsureDir(path string) (changed bool, err error) {
 // something else could still be writing over the file, and a bounded retry
 // cannot fix that — a competing write can land after the last check just as
 // easily as before it. The competing writer was an inheritable directory ACE
-// propagating over its children; that is gone (see the Windows restrict), so
+// propagating over its children; the directory-only operation prevents that
+// (see the Windows restrict), so
 // there is nothing left to lose a race against.
 //
 // The check is on the HANDLE, so it describes the object that will actually be

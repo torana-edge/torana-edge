@@ -25,7 +25,8 @@ same store, even on different ports. No OS service or login-startup entry is add
 
 The startup response includes the instance ID, PID, version, address, managed
 configuration path, and log path. Logs live in `torana.log` beside the managed
-configuration, with owner-only file permissions on Unix. Use `--timeout 90s`
+configuration, with owner-only permissions (mode bits on Unix, a protected ACL
+on Windows). Use `--timeout 90s`
 when a larger plugin pipeline needs longer to become ready.
 
 `status` is read-only. It reports `stopped` only on connection refusal with no

@@ -70,8 +70,8 @@ func TestBinaryBackgroundLifecycle(t *testing.T) {
 	started, err := run(true, "start", "--timeout", "20s")
 	if err != nil {
 		// This is an isolated fixture, never the user's daemon/log or secrets.
-		log, _ := os.ReadFile(filepath.Join(data, "torana.log"))
-		t.Fatalf("start: %v\n%s\nfixture log:\n%s", err, started, log)
+		log, logErr := os.ReadFile(filepath.Join(data, "torana.log"))
+		t.Fatalf("start: %v\n%s\nfixture log (read error: %v):\n%s", err, started, logErr, log)
 	}
 	t.Cleanup(func() { _, _ = run(false, "stop", "--yes", "--timeout", "10s") })
 	var initial map[string]any
@@ -99,5 +99,13 @@ func TestBinaryBackgroundLifecycle(t *testing.T) {
 	}
 	if out, err := run(true, "status"); err != nil || !strings.Contains(string(out), `"status":"stopped"`) {
 		t.Fatalf("after stop: %v %s", err, out)
+	}
+	// Restart must still be able to read the existing managed config after
+	// the first startup secured its parent directory (Windows ACL regression).
+	if out, err := run(true, "start"); err != nil {
+		t.Fatalf("restart: %v %s", err, out)
+	}
+	if out, err := run(false, "stop", "--yes"); err != nil {
+		t.Fatalf("stop restarted instance: %v %s", err, out)
 	}
 }
