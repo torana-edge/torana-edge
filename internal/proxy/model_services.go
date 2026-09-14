@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"math"
 
+	"github.com/torana-edge/torana-edge/internal/engine"
+	"github.com/torana-edge/torana-edge/internal/engine/pbconv"
 	"github.com/torana-edge/torana-edge/internal/provider"
 	"github.com/torana-edge/torana-edge/internal/wasm"
 	pbv1 "github.com/torana-edge/torana-plugin-sdk/pb/v1"
@@ -17,12 +19,13 @@ import (
 // credentials, path, timeout, and spend ceilings come from the immutable
 // resource snapshot installed on that exact plugin generation.
 func (s *Server) completeModel(ctx context.Context, pluginName string, resource wasm.ModelServiceResource, args *pbv1.ModelCompleteArgs) (*pbv1.ModelCompleteResult, *pbv1.HostError) {
-	var inputBytes int64
-	for _, message := range args.Messages {
-		inputBytes += int64(len(message.Role) + len(message.Content))
-		if inputBytes > resource.MaxInputBytes {
-			return nil, modelHostError(pbv1.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "model request exceeds the approved input limit")
-		}
+	if args == nil || args.Validate() != nil {
+		return nil, modelHostError(pbv1.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "model request is outside the supported domain")
+	}
+	// Bound the complete canonical payload, including tool schemas and output
+	// constraints. Text-only accounting would leave the new surfaces unbounded.
+	if int64(proto.Size(args)) > resource.MaxInputBytes {
+		return nil, modelHostError(pbv1.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "model request exceeds the approved input limit")
 	}
 	maxTokens := resource.MaxTokens
 	if args.MaxTokens != nil && *args.MaxTokens < maxTokens {
@@ -32,10 +35,7 @@ func (s *Server) completeModel(ctx context.Context, pluginName string, resource 
 		return nil, modelHostError(pbv1.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "model service has an invalid token limit")
 	}
 	maxTokens32 := int32(maxTokens)
-	request := &pbv1.ChatRequest{Model: resource.Model, MaxTokens: &maxTokens32, Temperature: args.Temperature}
-	for _, message := range args.Messages {
-		request.Messages = append(request.Messages, &pbv1.Message{Role: message.Role, Blocks: []*pbv1.RequestBlock{{Kind: &pbv1.RequestBlock_Text{Text: &pbv1.RequestTextBlock{Text: message.Content}}}}})
-	}
+	request := proto.Clone(&pbv1.ChatRequest{Model: resource.Model, MaxTokens: &maxTokens32, Temperature: args.Temperature, Messages: args.Messages, Tools: args.Tools, OutputFormat: args.OutputFormat}).(*pbv1.ChatRequest)
 	if err := request.ValidateReplacement(); err != nil {
 		return nil, modelHostError(pbv1.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "model request is outside the supported domain")
 	}
@@ -75,7 +75,11 @@ func (s *Server) completeModel(ctx context.Context, pluginName string, resource 
 		return nil, modelHostError(pbv1.ErrorCode_ERROR_CODE_NOT_CONFIGURED, "model service provider is unavailable")
 	}
 	refs := extractResponse(prov.Format, decoded, body)
-	out := &pbv1.ModelCompleteResult{Content: refs.content, ReportedModel: refs.model, FinishReason: refs.finishReason}
+	if !refs.hasMessage {
+		return nil, modelHostError(pbv1.ErrorCode_ERROR_CODE_UNAVAILABLE, "model service returned no assistant message")
+	}
+	response := pbconv.ToPBChatResponse(&engine.ChatResponse{Message: refs.assistantMessage()})
+	out := &pbv1.ModelCompleteResult{Message: response.Message, ReportedModel: refs.model, FinishReason: refs.finishReason}
 	// Provider metering defects do not invalidate the completion. Use the same
 	// validity rule as the token budget and leave unreliable usage unknown.
 	if validProviderUsage(prov.Format, refs.usage) {

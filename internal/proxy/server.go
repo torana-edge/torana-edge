@@ -1144,7 +1144,12 @@ func New(cfg Config) (*Server, error) {
 				// tokens spent. Block wins over respond, checked above.
 				if respond := verdicts.Respond(); respond != nil {
 					if rc, ok := req.Context().Value(routeContextKey{}).(*RouteContext); ok {
-						rc.Block = renderRespond(fmt, chat, respond)
+						rendered, err := renderRespond(fmt, chat, respond)
+						if err != nil {
+							rc.Block = renderHostError(fmt.Name)
+						} else {
+							rc.Block = rendered
+						}
 					}
 					rs := reqStateFrom(req.Context())
 					rs.Synthetic = true

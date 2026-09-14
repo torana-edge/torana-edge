@@ -710,20 +710,7 @@ func runJSONResponseHooks(ctx context.Context, pl *plugin.PluginPipeline, reqID 
 	// map[string]any round-trip between responseRefs and the wire. With no
 	// message the hook receives ChatResponse{Message: nil} — never a
 	// fabricated empty assistant turn.
-	var assistant *engine.ResponseMessage
-	if refs.hasMessage {
-		assistant = &engine.ResponseMessage{}
-		for _, block := range refs.blocks {
-			if block.text != nil {
-				assistant.Blocks = append(assistant.Blocks, engine.ResponseBlock{Text: &engine.ResponseTextBlock{Text: block.text.text}})
-				continue
-			}
-			tc := &refs.toolCalls[block.toolIndex]
-			assistant.Blocks = append(assistant.Blocks, engine.ResponseBlock{ToolCall: &engine.ResponseToolCall{
-				ID: tc.id, Name: tc.name, ArgumentsJSON: []byte(tc.argsJSON), Signature: tc.signature,
-			}})
-		}
-	}
+	assistant := refs.assistantMessage()
 
 	// The non-streaming path is the one where a replacement CAN be applied:
 	// the body has not been written yet.
@@ -863,4 +850,22 @@ func spliceBytes(doc []byte, start, end int, repl []byte) []byte {
 	out = append(out, repl...)
 	out = append(out, doc[end:]...)
 	return out
+}
+
+// assistantMessage is the one ordered projection used for observed responses
+// and plugin-owned model-service results. Arguments remain provider-verbatim.
+func (refs *responseRefs) assistantMessage() *engine.ResponseMessage {
+	if !refs.hasMessage {
+		return nil
+	}
+	assistant := &engine.ResponseMessage{}
+	for _, block := range refs.blocks {
+		if block.text != nil {
+			assistant.Blocks = append(assistant.Blocks, engine.ResponseBlock{Text: &engine.ResponseTextBlock{Text: block.text.text}})
+			continue
+		}
+		tc := &refs.toolCalls[block.toolIndex]
+		assistant.Blocks = append(assistant.Blocks, engine.ResponseBlock{ToolCall: &engine.ResponseToolCall{ID: tc.id, Name: tc.name, ArgumentsJSON: []byte(tc.argsJSON), Signature: tc.signature}})
+	}
+	return assistant
 }

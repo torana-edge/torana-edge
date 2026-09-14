@@ -339,6 +339,15 @@ func fingerprintRequestSections(req *pb.ChatRequest) (requestSections, error) {
 	}
 	binary.LittleEndian.PutUint64(scratch[:], uint64(len(req.StopSequences)))
 	writeFramed(h, scratch[:])
+	if f := req.OutputFormat; f != nil {
+		encoded, err := proto.MarshalOptions{Deterministic: true}.Marshal(f)
+		if err != nil {
+			return p, err
+		}
+		writeField(h, 8, true, encoded)
+	} else {
+		writeField(h, 8, false, nil)
+	}
 	copy(p.params[:], h.Sum(nil))
 
 	return p, nil

@@ -3,113 +3,146 @@ package proxy
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
+	"fmt"
+	"strings"
 
 	"github.com/torana-edge/torana-edge/internal/engine"
 	"github.com/torana-edge/torana-edge/internal/format"
 	"github.com/torana-edge/torana-edge/internal/wasm"
+	pb "github.com/torana-edge/torana-plugin-sdk/pb/v1"
 )
 
-// renderRespond turns a recorded respond verdict into a synthetic 200
-// response shaped like the caller's provider — a complete chat completion
-// body, or an SSE stream when the client requested streaming. The transport
-// returns it verbatim; upstream is never called.
-func renderRespond(f *format.Format, chat *engine.ChatRequest, v *wasm.RespondVerdict) *BlockResponse {
+// renderRespond creates a complete host-local response. Identity and accounting
+// are host-owned; guest arguments cannot forge an observed provider completion.
+func renderRespond(f *format.Format, chat *engine.ChatRequest, v *wasm.RespondVerdict) (*BlockResponse, error) {
+	if f == nil || chat == nil || v == nil {
+		return nil, fmt.Errorf("synthetic response context is missing")
+	}
+	if err := v.Response.Validate(); err != nil {
+		return nil, err
+	}
+	var entropy [16]byte
+	if _, err := rand.Read(entropy[:]); err != nil {
+		return nil, err
+	}
+	id := "torana_" + hex.EncodeToString(entropy[:])
+	var body []byte
+	var err error
+	contentType := "application/json"
 	if chat.Stream {
-		return &BlockResponse{
-			Status:      200,
-			ContentType: streamContentType(f.Name),
-			Body:        renderCompletionStream(f, chat, v.Content),
-		}
+		contentType = "text/event-stream"
+		body, err = renderSyntheticStream(f, chat, v.Response, id)
+	} else {
+		body, err = renderSyntheticJSON(f.Name, chat, v.Response, id)
 	}
-	return &BlockResponse{
-		Status:      200,
-		ContentType: "application/json",
-		Body:        renderCompletionJSON(f.Name, chat.Model, v.Content, chat.OpenAIVariant),
+	if err != nil {
+		return nil, err
 	}
+	return &BlockResponse{Status: 200, ContentType: contentType, Body: body}, nil
 }
 
-// renderCompletionStream synthesizes a minimal text completion as StreamEvents
-// and lets the format's own serializer produce the wire stream — the same code
-// path real upstream streams take through the proxy.
-func renderCompletionStream(f *format.Format, chat *engine.ChatRequest, content string) []byte {
-	ch := make(chan engine.StreamEvent, 2)
-	ch <- engine.StreamEvent{TextDelta: &content}
-	ch <- engine.StreamEvent{FinishReason: "stop"}
-	close(ch)
-	var buf bytes.Buffer
+func renderSyntheticStream(f *format.Format, chat *engine.ChatRequest, response *pb.SyntheticResponse, id string) ([]byte, error) {
+	if f.Stream == nil {
+		return nil, fmt.Errorf("format has no streaming response renderer")
+	}
+	events := make(chan engine.StreamEvent, 3*len(response.Message.Blocks)+3)
+	events <- engine.StreamEvent{MessageStart: &engine.StreamMessageStart{Role: "assistant", ID: id, Model: chat.Model}}
+	for index, block := range response.Message.Blocks {
+		if text := block.GetText(); text != nil {
+			events <- engine.StreamEvent{BlockStart: &engine.BlockStart{Index: index, Kind: engine.BlockKindText}}
+			value := text.Text
+			events <- engine.StreamEvent{TextDelta: &value}
+			events <- engine.StreamEvent{BlockStop: &engine.BlockStop{Index: index}}
+		} else if tool := block.GetToolCall(); tool != nil {
+			events <- engine.StreamEvent{ToolCallStart: &engine.ToolCallStart{Index: index, ID: fmt.Sprintf("%s_call_%d", id, index), Name: tool.Name, InvocationKind: engine.ToolInvocationFunction}}
+			events <- engine.StreamEvent{ToolCallDelta: &engine.ToolCallDelta{Index: index, ArgumentsDelta: string(tool.ArgumentsJson)}}
+			events <- engine.StreamEvent{ToolCallEnd: &engine.ToolCallEnd{Index: index}}
+		}
+	}
+	events <- engine.StreamEvent{Usage: &engine.StreamUsage{}}
+	events <- engine.StreamEvent{FinishReason: response.FinishReason}
+	close(events)
+	var out bytes.Buffer
 	ctx := context.WithValue(context.Background(), engine.ChatRequestKey, chat)
-	_ = f.Stream.SerializeStream(ctx, &buf, ch)
-	return buf.Bytes()
-}
-
-// streamContentType matches what harnesses expect from each provider's
-// streaming endpoint: every format Torana speaks streams SSE.
-func streamContentType(string) string {
-	return "text/event-stream"
-}
-
-// renderCompletionJSON produces a minimal valid non-streaming completion
-// envelope per provider format. Usage is reported as zero — no upstream
-// tokens were spent.
-func renderCompletionJSON(formatName, model, content string, openAIVariant engine.OpenAIVariant) []byte {
-	var payload any
-	switch formatName {
-	case "anthropic":
-		payload = map[string]any{
-			"id":            "msg_torana_direct",
-			"type":          "message",
-			"role":          "assistant",
-			"model":         model,
-			"content":       []map[string]any{{"type": "text", "text": content}},
-			"stop_reason":   "end_turn",
-			"stop_sequence": nil,
-			"usage":         map[string]any{"input_tokens": 0, "output_tokens": 0},
-		}
-	case "gemini", "gemini-codeassist":
-		gen := map[string]any{
-			"candidates": []map[string]any{{
-				"content": map[string]any{
-					"role":  "model",
-					"parts": []map[string]any{{"text": content}},
-				},
-				"finishReason": "STOP",
-			}},
-			"usageMetadata": map[string]any{"promptTokenCount": 0, "candidatesTokenCount": 0, "totalTokenCount": 0},
-		}
-		// Code Assist nests the GenerateContentResponse under "response".
-		if formatName == "gemini-codeassist" {
-			payload = map[string]any{"response": gen}
-		} else {
-			payload = gen
-		}
-	default: // openai and openai-compatible
-		if openAIVariant == engine.OpenAIResponses {
-			payload = map[string]any{
-				"id":     "resp_torana_direct",
-				"object": "response",
-				"model":  model,
-				"status": "completed",
-				"output": []map[string]any{{
-					"id": "msg_torana_direct", "type": "message", "role": "assistant",
-					"content": []map[string]any{{"type": "output_text", "text": content, "annotations": []any{}}},
-				}},
-				"usage": map[string]any{"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
-			}
-			break
-		}
-		payload = map[string]any{
-			"id":     "chatcmpl-torana-direct",
-			"object": "chat.completion",
-			"model":  model,
-			"choices": []map[string]any{{
-				"index":         0,
-				"message":       map[string]any{"role": "assistant", "content": content},
-				"finish_reason": "stop",
-			}},
-			"usage": map[string]any{"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
-		}
+	if err := f.Stream.SerializeStream(ctx, &out, events); err != nil {
+		return nil, err
 	}
-	out, _ := json.Marshal(payload)
-	return out
+	return out.Bytes(), nil
+}
+
+func renderSyntheticJSON(provider string, chat *engine.ChatRequest, response *pb.SyntheticResponse, id string) ([]byte, error) {
+	blocks := response.Message.Blocks
+	var payload any
+	switch provider {
+	case "anthropic":
+		content := make([]any, 0, len(blocks))
+		for i, b := range blocks {
+			if text := b.GetText(); text != nil {
+				content = append(content, map[string]any{"type": "text", "text": text.Text})
+			} else {
+				tool := b.GetToolCall()
+				content = append(content, map[string]any{"type": "tool_use", "id": fmt.Sprintf("%s_call_%d", id, i), "name": tool.Name, "input": json.RawMessage(tool.ArgumentsJson)})
+			}
+		}
+		reason := "end_turn"
+		if response.FinishReason == "tool_calls" {
+			reason = "tool_use"
+		}
+		payload = map[string]any{"id": id, "type": "message", "role": "assistant", "model": chat.Model, "content": content, "stop_reason": reason, "stop_sequence": nil, "usage": map[string]int{"input_tokens": 0, "output_tokens": 0}}
+	case "gemini", "gemini-codeassist":
+		parts := make([]any, 0, len(blocks))
+		for i, b := range blocks {
+			if text := b.GetText(); text != nil {
+				parts = append(parts, map[string]any{"text": text.Text})
+			} else {
+				tool := b.GetToolCall()
+				parts = append(parts, map[string]any{"functionCall": map[string]any{"id": fmt.Sprintf("%s_call_%d", id, i), "name": tool.Name, "args": json.RawMessage(tool.ArgumentsJson)}})
+			}
+		}
+		generated := map[string]any{"responseId": id, "modelVersion": chat.Model, "candidates": []any{map[string]any{"content": map[string]any{"role": "model", "parts": parts}, "finishReason": "STOP"}}, "usageMetadata": map[string]int{"promptTokenCount": 0, "candidatesTokenCount": 0, "totalTokenCount": 0}}
+		payload = generated
+		if provider == "gemini-codeassist" {
+			payload = map[string]any{"response": generated}
+		}
+	case "openai":
+		if chat.OpenAIVariant == engine.OpenAIResponses {
+			output := make([]any, 0, len(blocks))
+			for i, b := range blocks {
+				if text := b.GetText(); text != nil {
+					output = append(output, map[string]any{"id": fmt.Sprintf("%s_msg_%d", id, i), "type": "message", "status": "completed", "role": "assistant", "content": []any{map[string]any{"type": "output_text", "text": text.Text, "annotations": []any{}}}})
+				} else {
+					tool := b.GetToolCall()
+					output = append(output, map[string]any{"id": fmt.Sprintf("%s_item_%d", id, i), "type": "function_call", "status": "completed", "call_id": fmt.Sprintf("%s_call_%d", id, i), "name": tool.Name, "arguments": string(tool.ArgumentsJson)})
+				}
+			}
+			payload = map[string]any{"id": id, "object": "response", "model": chat.Model, "status": "completed", "output": output, "usage": map[string]int{"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}}
+		} else {
+			var text strings.Builder
+			tools := []any{}
+			seenTool := false
+			for i, b := range blocks {
+				if content := b.GetText(); content != nil {
+					if seenTool {
+						return nil, fmt.Errorf("chat completions cannot represent text after a tool-call block")
+					}
+					text.WriteString(content.Text)
+				} else {
+					seenTool = true
+					tool := b.GetToolCall()
+					tools = append(tools, map[string]any{"id": fmt.Sprintf("%s_call_%d", id, i), "type": "function", "function": map[string]any{"name": tool.Name, "arguments": string(tool.ArgumentsJson)}})
+				}
+			}
+			message := map[string]any{"role": "assistant", "content": text.String()}
+			if len(tools) > 0 {
+				message["tool_calls"] = tools
+			}
+			payload = map[string]any{"id": id, "object": "chat.completion", "model": chat.Model, "choices": []any{map[string]any{"index": 0, "message": message, "finish_reason": response.FinishReason}}, "usage": map[string]int{"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}}
+		}
+	default:
+		return nil, fmt.Errorf("format has no synthetic response renderer")
+	}
+	return json.Marshal(payload)
 }

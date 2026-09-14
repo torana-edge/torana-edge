@@ -1808,7 +1808,7 @@ func (r *Runtime) dispatchHostCall(ctx context.Context, pluginName, cmd, args st
 				herr = hostErr(pbv1.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "%v", err)
 				break
 			}
-			r.verdictsBucket(reqIDFrom(ctx)).setRespond(pluginName, a.Content)
+			r.verdictsBucket(reqIDFrom(ctx)).setRespond(pluginName, a.Response)
 		case "env.route_request":
 			var a pbv1.RouteRequestArgs
 			if err := proto.Unmarshal([]byte(args), &a); err != nil {
