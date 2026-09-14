@@ -97,7 +97,7 @@ import (
 
 func main() {
 	sdk.OnBeforeRequest(func(ctx context.Context, req *pb.ChatRequest) (*pb.ChatRequest, error) {
-		sdk.Log("hi", sdk.LogLevelInfo)
+		if err := sdk.Log("hi", sdk.LogLevelInfo); err != nil { return nil, err }
 		return nil, nil
 	})
 }
@@ -121,7 +121,7 @@ func main() {}
 
 func init() {
 	sdk.OnBeforeRequest(func(ctx context.Context, req *pb.ChatRequest) (*pb.ChatRequest, error) {
-		sdk.Log("hi", sdk.LogLevelInfo)
+		if err := sdk.Log("hi", sdk.LogLevelInfo); err != nil { return nil, err }
 		return nil, nil
 	})
 }
@@ -151,7 +151,7 @@ func main() {}
 
 var _ = func() bool {
 	sdk.OnBeforeRequest(func(ctx context.Context, req *pb.ChatRequest) (*pb.ChatRequest, error) {
-		sdk.Log("hi", sdk.LogLevelInfo)
+		if err := sdk.Log("hi", sdk.LogLevelInfo); err != nil { return nil, err }
 		return nil, nil
 	})
 	return true
@@ -213,7 +213,7 @@ import (
 
 func init() {
 	sdk.OnTick(func(ctx context.Context, req *pb.TickRequest) (*pb.TickResult, error) {
-		sdk.Log("tick", sdk.LogLevelInfo)
+		if err := sdk.Log("tick", sdk.LogLevelInfo); err != nil { return nil, err }
 		return nil, nil
 	})
 }
@@ -281,7 +281,7 @@ import (
 
 func init() {
 	sdk.OnTick(func(ctx context.Context, req *pb.TickRequest) (*pb.TickResult, error) {
-		sdk.Log("tick", sdk.LogLevelInfo)
+		if err := sdk.Log("tick", sdk.LogLevelInfo); err != nil { return nil, err }
 		return nil, nil
 	})
 }
@@ -316,7 +316,7 @@ import (
 
 func init() {
 	sdk.OnTick(func(ctx context.Context, req *pb.TickRequest) (*pb.TickResult, error) {
-		sdk.Log("tick", sdk.LogLevelInfo)
+		if err := sdk.Log("tick", sdk.LogLevelInfo); err != nil { return nil, err }
 		return nil, nil
 	})
 }
@@ -370,7 +370,7 @@ func main() {}
 
 func init() {
 	sdk.OnBeforeRequest(func(ctx context.Context, req *pb.ChatRequest) (*pb.ChatRequest, error) {
-		sdk.Log("hi", sdk.LogLevelInfo)
+		if err := sdk.Log("hi", sdk.LogLevelInfo); err != nil { return nil, err }
 		return nil, nil
 	})
 	sdk.OnStreamChunk(func(ctx context.Context, ev *pb.StreamEvent) (*pb.StreamEventResult, error) {
@@ -398,7 +398,7 @@ func main() {}
 
 func init() {
 	sdk.OnBeforeRequest(func(ctx context.Context, req *pb.ChatRequest) (*pb.ChatRequest, error) {
-		sdk.Log("hi", sdk.LogLevelInfo)
+		if err := sdk.Log("hi", sdk.LogLevelInfo); err != nil { return nil, err }
 		_ = sdk.StateSet("k", "v")
 		return nil, nil
 	})
@@ -428,7 +428,7 @@ func main() {}
 
 func init() {
 	sdk.OnBeforeRequest(func(ctx context.Context, req *pb.ChatRequest) (*pb.ChatRequest, error) {
-		sdk.Log("x", sdk.LogLevelInfo)
+		if err := sdk.Log("x", sdk.LogLevelInfo); err != nil { return nil, err }
 		_, _ = sdk.HostCall("torana_custom_feature", "{}")
 		_, _ = sdk.HostCall("env.cache_get", "k")
 		return nil, nil
@@ -437,7 +437,7 @@ func init() {
 
 `)
 	msgs := lintMessages(t, dir)
-	assertContains(t, msgs, `"env.host_call.torana_custom_feature"`)
+	assertContains(t, msgs, `uses "<unknown command: torana_custom_feature>"`)
 	assertContains(t, msgs, `"env.cache_get"`)
 }
 
@@ -484,7 +484,7 @@ func main() {}
 
 func init() {
 	sdk.OnBeforeRequest(func(ctx context.Context, req *pb.ChatRequest) (*pb.ChatRequest, error) {
-		sdk.Log("hi", sdk.LogLevelInfo)
+		if err := sdk.Log("hi", sdk.LogLevelInfo); err != nil { return nil, err }
 		return nil, nil
 	})
 }
@@ -686,8 +686,8 @@ import (
 
 func Register() {
 	sdk.OnBeforeRequest(func(ctx context.Context, req *pb.ChatRequest) (*pb.ChatRequest, error) {
-		sdk.Log("hello", sdk.LogLevelInfo)
-		_ = sdk.StateSet("k", "v")
+		if err := sdk.Log("hello", sdk.LogLevelInfo); err != nil { return nil, err }
+		if err := sdk.StateSet("k", "v"); err != nil { return nil, err }
 		return nil, nil
 	})
 }
@@ -737,13 +737,13 @@ func main() {}
 
 func init() {
 	sdk.OnBeforeRequest(func(ctx context.Context, req *pb.ChatRequest) (*pb.ChatRequest, error) {
-		sdk.Log("hi", sdk.LogLevelInfo)
+		if err := sdk.Log("hi", sdk.LogLevelInfo); err != nil { return nil, err }
 		return nil, nil
 	})
 }
 `)
 	if err := os.WriteFile(filepath.Join(dir, "go.mod"),
-		[]byte("module example.com/plug\n\ngo 1.25.0\n"), 0o600); err != nil {
+		[]byte("module example.com/plug\n\ngo 1.25.0\n\nrequire github.com/torana-edge/torana-plugin-sdk v0.4.2\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	// A code generator or scratch helper: present on disk, imported by nothing.
@@ -771,11 +771,11 @@ func Scratch() { _ = sdk.StateSet("k", "v") }
 		t.Fatal(err)
 	}
 	withImport := strings.Replace(string(raw),
-		`pb "github.com/torana-edge/torana-plugin-sdk/pb/v1"`,
-		"\"github.com/torana-edge/torana-plugin-sdk/pb\"\n\n\t\"example.com/plug/tools/unused\"", 1)
+		"import (\n",
+		"import (\n\t\"example.com/plug/tools/unused\"\n", 1)
 	withImport = strings.Replace(withImport,
-		`sdk.Log("hi", sdk.LogLevelInfo)`,
-		"sdk.Log(\"hi\", sdk.LogLevelInfo)\n\t\tunused.Scratch()", 1)
+		"return nil, nil\n\t})",
+		"unused.Scratch()\n\t\treturn nil, nil\n\t})", 1)
 	if err := os.WriteFile(main, []byte(withImport), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -799,7 +799,7 @@ func main() {}
 
 func init() {
 	sdk.OnBeforeRequest(func(ctx context.Context, req *pb.ChatRequest) (*pb.ChatRequest, error) {
-		sdk.Log("hi", sdk.LogLevelInfo)
+		if err := sdk.Log("hi", sdk.LogLevelInfo); err != nil { return nil, err }
 		return nil, nil
 	})
 }
@@ -844,7 +844,7 @@ func main() {}
 
 func init() {
 	sdk.OnBeforeRequest(func(ctx context.Context, req *pb.ChatRequest) (*pb.ChatRequest, error) {
-		sdk.SetCacheBreakpoint(req.Messages[0], map[string]any{"type": "ephemeral"})
+		if err := sdk.SetCacheBreakpoint(req.Messages[0], 0, []byte("{\"type\":\"ephemeral\"}")); err != nil { return nil, err }
 		return nil, nil
 	})
 }
