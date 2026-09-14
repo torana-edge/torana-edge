@@ -2,6 +2,7 @@ package plugin
 
 import (
 	"context"
+	"errors"
 	"reflect"
 	"strings"
 	"testing"
@@ -24,6 +25,41 @@ func journalPipeline(t *testing.T, mode string, limit uint64) *PluginPipeline {
 	}
 	pp.streamPlugins[0].failureMode = mode
 	return pp
+}
+
+// An upstream stream that ends with an open tool block is a host-side
+// terminal error. The journal guest may have buffered every accepted event,
+// but neither pass nor block failure mode may turn those unverified events
+// into output during finalization.
+func TestStreamJournalEndRejectsOpenToolWithoutReleasingJournal(t *testing.T) {
+	for _, mode := range []string{"pass", "block"} {
+		t.Run(mode, func(t *testing.T) {
+			pp := journalPipeline(t, mode, 0)
+			const reqID = 41
+			for _, ev := range []engine.StreamEvent{toolStart(0, "call", "read"), toolDelta(0, `{"path":"open.go"}`)} {
+				event := ev
+				out, err := pp.RunOnStreamChunkVerified(context.Background(), reqID, &event)
+				if err != nil || len(out) != 0 {
+					t.Fatalf("pending journal event escaped: out=%#v err=%v", out, err)
+				}
+			}
+			err := pp.EndStreamVerified(reqID)
+			var terminal *StreamTerminalError
+			if !errors.As(err, &terminal) || terminal.Kind != streamTerminalHost || terminal.Plugin != "host" {
+				t.Fatalf("end terminal = %T: %v, want typed host terminal", err, err)
+			}
+			if !strings.Contains(terminal.Error(), "missing ContentBlockStop") {
+				t.Fatalf("terminal lacks open-block reason: %v", terminal)
+			}
+			if state := pp.streamVerify[reqID]; state == nil || state.plugins[0].journal == nil || len(state.plugins[0].journal.originals) != 2 {
+				t.Fatalf("journal was released or discarded before terminal: %#v", state)
+			}
+			if err2 := pp.EndStreamVerified(reqID); err2 != err {
+				t.Fatalf("terminal finalization was not sticky: first=%v second=%v", err, err2)
+			}
+			pp.EndRequest(reqID)
+		})
+	}
 }
 
 func multiJournalPipeline(t *testing.T, downstream string) *PluginPipeline {
