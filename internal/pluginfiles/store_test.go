@@ -4,8 +4,8 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
-	"time"
 
 	"github.com/torana-edge/torana-edge/internal/wasm"
 )
@@ -33,6 +33,13 @@ func TestAppendOrdersWritesWithoutSerializingStorageFlushes(t *testing.T) {
 	}
 	entered := make(chan string, 4)
 	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseAll := func() { releaseOnce.Do(func() { close(release) }) }
+	var appends sync.WaitGroup
+	t.Cleanup(func() {
+		releaseAll()
+		appends.Wait()
+	})
 	store.syncFile = func(file *os.File) error {
 		entered <- file.Name()
 		<-release
@@ -40,27 +47,44 @@ func TestAppendOrdersWritesWithoutSerializingStorageFlushes(t *testing.T) {
 	}
 	resource := fileResource(1024, 1)
 	errCh := make(chan error, 4)
-	go func() { errCh <- store.Append("plugin-a", "one.log", []byte("a"), resource) }()
-	first := <-entered
-	go func() { errCh <- store.Append("plugin-a", "one.log", []byte("b"), resource) }()
-	go func() { errCh <- store.Append("plugin-a", "two.log", []byte("c"), resource) }()
-	go func() { errCh <- store.Append("plugin-b", "two.log", []byte("d"), resource) }()
+	appendAsync := func(plugin, logical, data string) {
+		appends.Add(1)
+		go func() {
+			defer appends.Done()
+			errCh <- store.Append(plugin, logical, []byte(data), resource)
+		}()
+	}
+	nextSync := func() string {
+		t.Helper()
+		select {
+		case name := <-entered:
+			return name
+		case err := <-errCh:
+			t.Fatalf("append failed before storage sync: %v", err)
+			return ""
+		}
+	}
+	appendAsync("plugin-a", "one.log", "a")
+	first := nextSync()
+	fileLock := store.pluginLocks("plugin-a").file(first)
+	if !fileLock.TryLock() {
+		t.Fatal("append retained its mutation lock during storage sync")
+	}
+	fileLock.Unlock()
+	appendAsync("plugin-a", "one.log", "b")
+	appendAsync("plugin-a", "two.log", "c")
+	appendAsync("plugin-b", "two.log", "d")
 
 	sameFileSyncs := 0
 	for range 3 {
-		select {
-		case concurrent := <-entered:
-			if concurrent == first {
-				sameFileSyncs++
-			}
-		case <-time.After(time.Second):
-			t.Fatal("an append was blocked behind another append's storage sync")
+		if concurrent := nextSync(); concurrent == first {
+			sameFileSyncs++
 		}
 	}
 	if sameFileSyncs != 1 {
 		t.Fatalf("same-file concurrent syncs = %d, want one follow-up append", sameFileSyncs)
 	}
-	close(release)
+	releaseAll()
 	for range 4 {
 		if err := <-errCh; err != nil {
 			t.Fatal(err)
