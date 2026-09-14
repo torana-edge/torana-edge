@@ -27,16 +27,16 @@ func init() {
 				// "return the same request" footgun, and it hid a real bug:
 				// compaction priced the original provider when a plugin
 				// routed without replacing.
-				sdk.RouteRequest("cheap", "small-model")
+				sdk.MustRouteRequest("cheap", "small-model")
 				return sdk.PassRequest(), nil
 			case strings.Contains(blockutil.TextOf(m), "routemodel"):
-				sdk.RouteRequest("", "tiny-model")
+				sdk.MustRouteRequest("", "tiny-model")
 				return sdk.PassRequest(), nil
 			case strings.Contains(blockutil.TextOf(m), "routebroken"):
-				sdk.RouteRequest("no-such-provider", "small-model")
+				sdk.MustRouteRequest("no-such-provider", "small-model")
 				return sdk.PassRequest(), nil
 			case strings.Contains(blockutil.TextOf(m), "routewrongfmt"):
-				sdk.RouteRequest("wrongfmt", "small-model")
+				sdk.MustRouteRequest("wrongfmt", "small-model")
 				return sdk.PassRequest(), nil
 			}
 		}

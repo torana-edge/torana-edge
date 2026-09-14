@@ -11,7 +11,7 @@ func main() {}
 
 func init() {
 	sdk.OnBeforeRequest(func(context.Context, *pb.ChatRequest) (sdk.RequestResult, error) {
-		sdk.SetIdentity("fixture-tenant")
+		sdk.MustSetIdentity("fixture-tenant")
 		return sdk.PassRequest(), nil
 	})
 }

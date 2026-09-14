@@ -2391,7 +2391,6 @@ func (r *Runtime) dispatchHostCall(ctx context.Context, pluginName, cmd, args st
 				info.Available = resource.Policies != nil && r.PromptCachePolicyFunc != nil
 			default:
 				herr = hostErr(pbv1.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "unknown resource kind %q", a.Kind)
-				break
 			}
 			if herr == nil {
 				value, _ = proto.Marshal(info)

@@ -590,12 +590,6 @@ func (s *Store) load() error {
 	return nil
 }
 
-// persist writes a candidate state without changing the visible in-memory
-// state. The caller holds flushMu.
-func (s *Store) persist(candidate map[string]map[string]string) error {
-	return s.persistVersioned(candidate, s.versions, s.counter)
-}
-
 func (s *Store) persistVersioned(candidate map[string]map[string]string, versions map[string]map[string]string, counter uint64) error {
 	if s.path == "" {
 		return nil

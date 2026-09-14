@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"strings"
 
 	sdk "github.com/torana-edge/torana-plugin-sdk"
@@ -19,7 +21,11 @@ func init() {
 	sdk.OnBeforeRequest(func(ctx context.Context, req *pb.ChatRequest) (sdk.RequestResult, error) {
 		for _, m := range req.Messages {
 			if strings.Contains(blockutil.TextOf(m), "respondme") {
-				sdk.RespondText("this must never reach a client")
+				err := sdk.RespondText("this must never reach a client")
+				var refusal *sdk.HostCallRefusalError
+				if !errors.As(err, &refusal) || refusal.Code != pb.ErrorCode_ERROR_CODE_PERMISSION_DENIED {
+					return sdk.PassRequest(), fmt.Errorf("expected permission refusal, got %v", err)
+				}
 				return sdk.ReplaceRequest(req), nil
 			}
 		}

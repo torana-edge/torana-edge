@@ -443,20 +443,6 @@ func (vs *streamVerifierState) acceptPluginOutput(pvs *pluginStreamState, accept
 	return got[0], nil
 }
 
-// acceptPassThrough commits an accepted event through the same snapshotting
-// path as a HookResult. This keeps encode/decode/trap pass-mode recovery from
-// having a different (and potentially state-poisoning) transition path.
-func (vs *streamVerifierState) acceptPassThrough(pvs *pluginStreamState, ev *pbv1.StreamEvent) (*pbv1.StreamEvent, *StreamTerminalError) {
-	got, term := vs.acceptPluginOutputs(pvs, ev, []*pbv1.StreamEvent{ev})
-	if term != nil {
-		return nil, term
-	}
-	if len(got) != 1 { // unreachable; defensive against future refactors.
-		return nil, vs.terminate(streamTerminalPlugin, pvs.lp.manifest.Name, eventIndex(ev), 0, errors.New("stream pass-through produced no event"))
-	}
-	return got[0], nil
-}
-
 // isScopeCloseEvent reports whether an accepted-side event closes a scope:
 // a content-block stop (tool or non-tool) or the message stop.
 func isScopeCloseEvent(ev *pbv1.StreamEvent) bool {

@@ -115,7 +115,7 @@ func testPlugin(args []string, stdout, stderr io.Writer) (resultErr error) {
 	if err != nil {
 		return fmt.Errorf("create test staging directory: %w", err)
 	}
-	defer os.RemoveAll(root)
+	defer func() { resultErr = errors.Join(resultErr, os.RemoveAll(root)) }()
 	staged := filepath.Join(root, bundle.Manifest.Name)
 	if err := os.MkdirAll(staged, 0o755); err != nil {
 		return fmt.Errorf("create plugin staging directory: %w", err)
