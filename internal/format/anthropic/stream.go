@@ -50,6 +50,9 @@ type deltaEv struct {
 }
 
 type messageEv struct {
+	ID         string   `json:"id,omitempty"`
+	Role       string   `json:"role,omitempty"`
+	Model      string   `json:"model,omitempty"`
 	StopReason string   `json:"stop_reason"`
 	Usage      *usageEv `json:"usage,omitempty"` // message_start carries input tokens here
 }
@@ -60,7 +63,12 @@ type errorEv struct {
 }
 
 // StreamAdapter implements format.StreamAdapter for Anthropic SSE streams.
-type StreamAdapter struct{}
+type StreamAdapter struct {
+	// Strict bridge paths opt into identity and explicit non-tool block events.
+	// Defaults preserve the native adapter's established event sequence.
+	EmitMessageStart bool
+	ExplicitBlocks   bool
+}
 
 // ParseStream reads an Anthropic SSE stream and emits canonical StreamEvents.
 func (s *StreamAdapter) ParseStream(body io.Reader) <-chan engine.StreamEvent {
@@ -68,7 +76,10 @@ func (s *StreamAdapter) ParseStream(body io.Reader) <-chan engine.StreamEvent {
 	go func() {
 		defer close(ch)
 		scanner := streamio.NewScanner(body)
-		var blockType string // tracks current content block type: "", "text", "tool_use", "thinking"
+		// Anthropic identifies every content block by index. Keeping per-index
+		// state preserves interleaved tool calls instead of letting the most
+		// recently opened block decide how an earlier block closes.
+		blockTypes := make(map[int]string)
 		// From message_start, reported with output at message_delta.
 		var inputTokens, cacheRead, cacheWrite int
 		for scanner.Scan() {
@@ -95,17 +106,24 @@ func (s *StreamAdapter) ParseStream(body io.Reader) <-chan engine.StreamEvent {
 
 			switch {
 			case ev.Type == "message_start":
-				if ev.Message != nil && ev.Message.Usage != nil {
-					inputTokens = ev.Message.Usage.InputTokens
-					cacheRead = ev.Message.Usage.CacheReadInputTokens
-					cacheWrite = ev.Message.Usage.CacheCreationInputTokens
+				if ev.Message != nil {
+					if s.EmitMessageStart {
+						ch <- engine.StreamEvent{MessageStart: &engine.StreamMessageStart{
+							Role: ev.Message.Role, ID: ev.Message.ID, Model: ev.Message.Model,
+						}}
+					}
+					if ev.Message.Usage != nil {
+						inputTokens = ev.Message.Usage.InputTokens
+						cacheRead = ev.Message.Usage.CacheReadInputTokens
+						cacheWrite = ev.Message.Usage.CacheCreationInputTokens
+					}
 				}
 
 			case ev.Type == "content_block_start":
 				if ev.ContentBlock != nil {
+					blockTypes[ev.Index] = ev.ContentBlock.Type
 					switch ev.ContentBlock.Type {
 					case "tool_use":
-						blockType = "tool_use"
 						ch <- engine.StreamEvent{
 							ToolCallStart: &engine.ToolCallStart{
 								Index: ev.Index,
@@ -114,9 +132,19 @@ func (s *StreamAdapter) ParseStream(body io.Reader) <-chan engine.StreamEvent {
 							},
 						}
 					case "thinking":
-						blockType = "thinking"
+						if s.ExplicitBlocks {
+							ch <- engine.StreamEvent{BlockStart: &engine.BlockStart{Index: ev.Index, Kind: engine.BlockKindThinking}}
+						}
 					case "text":
-						blockType = "text"
+						if s.ExplicitBlocks {
+							ch <- engine.StreamEvent{BlockStart: &engine.BlockStart{Index: ev.Index, Kind: engine.BlockKindText}}
+						}
+					default:
+						if s.ExplicitBlocks {
+							ch <- engine.StreamEvent{BlockStart: &engine.BlockStart{
+								Index: ev.Index, Kind: engine.BlockKindProvider, ProviderKind: ev.ContentBlock.Type,
+							}}
+						}
 					}
 				}
 
@@ -150,18 +178,26 @@ func (s *StreamAdapter) ParseStream(body io.Reader) <-chan engine.StreamEvent {
 				}
 
 			case ev.Type == "content_block_stop":
-				if blockType == "tool_use" {
+				if blockTypes[ev.Index] == "tool_use" {
 					ch <- engine.StreamEvent{
 						ToolCallEnd: &engine.ToolCallEnd{Index: ev.Index},
 					}
+				} else if _, ok := blockTypes[ev.Index]; ok && s.ExplicitBlocks {
+					ch <- engine.StreamEvent{BlockStop: &engine.BlockStop{Index: ev.Index}}
 				}
-				blockType = ""
+				delete(blockTypes, ev.Index)
 
 			case ev.Type == "message_delta":
 				// Usage precedes FinishReason so serializers can embed it in
 				// their final frame (message_delta carries output tokens;
 				// input tokens were captured at message_start).
-				if ev.Usage != nil && (inputTokens > 0 || ev.Usage.OutputTokens > 0 || cacheRead > 0 || cacheWrite > 0) {
+				if ev.Usage != nil {
+					// Torana's serializer may carry the complete usage object on
+					// message_delta because canonical usage is terminal. Prefer an
+					// explicit non-zero input count there over message_start's seed.
+					if ev.Usage.InputTokens != 0 {
+						inputTokens = ev.Usage.InputTokens
+					}
 					// message_delta may re-report the cache counts; prefer them
 					// when present, else use the message_start capture.
 					cr, cw := ev.Usage.CacheReadInputTokens, ev.Usage.CacheCreationInputTokens
@@ -261,17 +297,22 @@ func (s *StreamAdapter) SerializeStream(ctx context.Context, w io.Writer, events
 	}
 	// Anthropic streams MUST open with message_start (the SDK's message
 	// accumulator is seeded by it). The upstream envelope was consumed by
-	// ParseStream, so synthesize one; input tokens ride the closing
-	// message_delta's usage instead.
+	// ParseStream, so synthesize one while preserving any canonical response
+	// identity; input tokens ride the closing message_delta's usage instead.
 	started := false
+	messageID := "msg_torana_stream"
+	messageRole := "assistant"
+	messageModel := ""
 	ensureStarted := func() error {
 		if started {
 			return nil
 		}
 		started = true
-		if err := emit("message_start",
-			`{"type":"message_start","message":{"id":"msg_torana_stream","type":"message","role":"assistant","model":"","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":0,"output_tokens":0}}}`,
-		); err != nil {
+		payload := fmt.Sprintf(
+			`{"type":"message_start","message":{"id":%s,"type":"message","role":%s,"model":%s,"content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":0,"output_tokens":0}}}`,
+			jsonString(messageID), jsonString(messageRole), jsonString(messageModel),
+		)
+		if err := emit("message_start", payload); err != nil {
 			return err
 		}
 		return emit("ping", `{"type":"ping"}`)
@@ -303,6 +344,19 @@ func (s *StreamAdapter) SerializeStream(ctx context.Context, w io.Writer, events
 		}
 		if !ok {
 			break
+		}
+		if ev.MessageStart != nil {
+			if started {
+				return fmt.Errorf("anthropic: message start arrived after stream content")
+			}
+			if ev.MessageStart.ID != "" {
+				messageID = ev.MessageStart.ID
+			}
+			if ev.MessageStart.Role != "" {
+				messageRole = ev.MessageStart.Role
+			}
+			messageModel = ev.MessageStart.Model
+			continue
 		}
 		if err := format.RejectFreeformStreamEvent(ev, "anthropic"); err != nil {
 			return err
@@ -472,6 +526,14 @@ func (s *StreamAdapter) SerializeStream(ctx context.Context, w io.Writer, events
 			}
 
 		case ev.FinishReason != "":
+			// Anthropic requires all content blocks to close before the
+			// message_delta that supplies stop_reason.
+			if err := closeThinking(); err != nil {
+				return err
+			}
+			if err := closeText(); err != nil {
+				return err
+			}
 			stopReason := ev.FinishReason
 			switch ev.FinishReason {
 			case "stop":
@@ -502,6 +564,7 @@ func (s *StreamAdapter) SerializeStream(ctx context.Context, w io.Writer, events
 			)); err != nil {
 				return err
 			}
+			return fmt.Errorf("anthropic: stream error: %s", ev.Error.Message)
 		}
 	}
 	// A closed event channel can win a select at the same time cancellation is

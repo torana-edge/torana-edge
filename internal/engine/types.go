@@ -54,6 +54,11 @@ type ChatRequest struct {
 	// OpenAIVariant records Chat Completions vs Responses for the OpenAI
 	// format (the wire shape changes reconstruction).
 	OpenAIVariant OpenAIVariant
+	// ResponsesInstructions records that the first canonical system-text
+	// message came from the Responses API's top-level instructions member.
+	// The message text is the sole content authority; this bit only preserves
+	// its wire location, including a present empty string.
+	ResponsesInstructions bool
 	// ResponsesInputLayout is the caller's typed Responses input array
 	// captured at parse: canonical message/function/free-form call/result
 	// slots are projected back into their positions, additional_tools slots

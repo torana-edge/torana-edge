@@ -1607,13 +1607,14 @@ func (pp *PluginPipeline) RunBeforeRequestTracked(ctx context.Context, reqID uin
 	defer pp.Release()
 
 	// The accepted request: its typed host-only TOPOLOGY facts (variant,
-	// Code Assist flag, Responses layout) are restored onto the plugin
+	// Code Assist flag, Responses instructions location/layout) are restored onto the plugin
 	// replacement below — they are never in the ABI.
 	accepted := chat
 	acceptedTopo := engine.TopologyFacts{
-		CodeAssist:           accepted.CodeAssist,
-		OpenAIVariant:        accepted.OpenAIVariant,
-		ResponsesInputLayout: accepted.ResponsesInputLayout,
+		CodeAssist:            accepted.CodeAssist,
+		OpenAIVariant:         accepted.OpenAIVariant,
+		ResponsesInstructions: accepted.ResponsesInstructions,
+		ResponsesInputLayout:  accepted.ResponsesInputLayout,
 	}
 
 	headers := snapshotHeaders(rawHeaders)
@@ -1656,11 +1657,12 @@ func (pp *PluginPipeline) RunBeforeRequestTracked(ctx context.Context, reqID uin
 	// The typed host-only TOPOLOGY facts survive the replacement: they are
 	// never in the ABI, so the plugin round-trip cannot carry them — the
 	// host restores them from the accepted request. A plugin can neither
-	// forge nor lose the variant/layout facts.
+	// forge nor lose the variant/instructions/layout facts.
 	// EXACT restoration: the accepted request is the sole authority for
 	// the host-only topology facts.
 	chat.CodeAssist = accepted.CodeAssist
 	chat.OpenAIVariant = accepted.OpenAIVariant
+	chat.ResponsesInstructions = accepted.ResponsesInstructions
 	chat.ResponsesInputLayout = accepted.ResponsesInputLayout
 	return chat, true, nil
 }

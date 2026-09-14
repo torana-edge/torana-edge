@@ -24,6 +24,12 @@ import (
 // Vertex AI (Wrapped=false) emit bare `data: {<chunk>}`.
 type StreamAdapter struct {
 	Wrapped bool
+	// EmitMessageStart preserves response identity for strict bridge paths.
+	// The native adapter keeps its historical event sequence by default.
+	EmitMessageStart bool
+	// PreserveMissingToolID lets strict bridge paths synthesize an ID scoped to
+	// the response. Native parsing retains its historical name fallback.
+	PreserveMissingToolID bool
 }
 
 // --- Stream wire types ---
@@ -72,6 +78,7 @@ func (s *StreamAdapter) ParseStream(body io.Reader) <-chan engine.StreamEvent {
 		defer close(ch)
 		scanner := streamio.NewScanner(body)
 		var lastUsage *geminiUsageMetadata
+		messageStarted := false
 		// Per-stream content-block counter. The ABI invariant requires block
 		// indexes unique within one streamed message: every part that opens a
 		// block — tool, text, or thinking — must receive a distinct sequential
@@ -93,7 +100,7 @@ func (s *StreamAdapter) ParseStream(body io.Reader) <-chan engine.StreamEvent {
 					payload = nil
 				}
 				if len(payload) > 0 {
-					if aborted := emitChunk(ch, payload, &lastUsage, &blockIndex); aborted {
+					if aborted := emitChunk(ch, payload, &lastUsage, &blockIndex, &messageStarted, s.EmitMessageStart, s.PreserveMissingToolID); aborted {
 						return
 					}
 				}
@@ -109,7 +116,7 @@ func (s *StreamAdapter) ParseStream(body io.Reader) <-chan engine.StreamEvent {
 
 // emitChunk parses one SSE payload and pushes its events. Returns true if the
 // stream should abort (unrecoverable error already sent).
-func emitChunk(ch chan<- engine.StreamEvent, payload []byte, lastUsage **geminiUsageMetadata, blockIndex *int) bool {
+func emitChunk(ch chan<- engine.StreamEvent, payload []byte, lastUsage **geminiUsageMetadata, blockIndex *int, messageStarted *bool, emitMessageStart, preserveMissingToolID bool) bool {
 	var frame streamFrame
 	if err := json.Unmarshal(payload, &frame); err != nil {
 		ch <- engine.StreamEvent{Error: &engine.StreamError{Code: -1, Message: fmt.Sprintf("gemini: parse frame: %v", err)}}
@@ -128,6 +135,12 @@ func emitChunk(ch chan<- engine.StreamEvent, payload []byte, lastUsage **geminiU
 	if chunk.UsageMetadata != nil {
 		*lastUsage = chunk.UsageMetadata
 	}
+	if emitMessageStart && !*messageStarted && (chunk.ResponseID != "" || chunk.ModelVersion != "") {
+		*messageStarted = true
+		ch <- engine.StreamEvent{MessageStart: &engine.StreamMessageStart{
+			Role: "assistant", ID: chunk.ResponseID, Model: chunk.ModelVersion,
+		}}
+	}
 	if len(chunk.Candidates) == 0 {
 		return false
 	}
@@ -142,7 +155,7 @@ func emitChunk(ch chan<- engine.StreamEvent, payload []byte, lastUsage **geminiU
 
 	if candidate.Content != nil {
 		for _, part := range candidate.Content.Parts {
-			if aborted := emitPart(ch, part, blockIndex); aborted {
+			if aborted := emitPart(ch, part, blockIndex, preserveMissingToolID); aborted {
 				return true
 			}
 		}
@@ -151,7 +164,7 @@ func emitChunk(ch chan<- engine.StreamEvent, payload []byte, lastUsage **geminiU
 	if candidate.FinishReason != "" {
 		reason := mapGeminiFinishReason(candidate.FinishReason)
 		if reason != "" {
-			if lu := *lastUsage; lu != nil && (lu.PromptTokenCount > 0 || lu.CandidatesTokenCount > 0) {
+			if lu := *lastUsage; lu != nil {
 				ch <- engine.StreamEvent{Usage: &engine.StreamUsage{
 					InputTokens:     lu.PromptTokenCount,
 					OutputTokens:    lu.CandidatesTokenCount,
@@ -165,7 +178,7 @@ func emitChunk(ch chan<- engine.StreamEvent, payload []byte, lastUsage **geminiU
 	return false
 }
 
-func emitPart(ch chan<- engine.StreamEvent, part geminiPart, blockIndex *int) bool {
+func emitPart(ch chan<- engine.StreamEvent, part geminiPart, blockIndex *int, preserveMissingToolID bool) bool {
 	switch {
 	case part.FunctionCall != nil:
 		// One functionCall part is one tool-call block: assign the block's
@@ -174,7 +187,7 @@ func emitPart(ch chan<- engine.StreamEvent, part geminiPart, blockIndex *int) bo
 		idx := *blockIndex
 		*blockIndex = idx + 1
 		id := part.FunctionCall.ID
-		if id == "" {
+		if id == "" && !preserveMissingToolID {
 			id = part.FunctionCall.Name
 		}
 		ch <- engine.StreamEvent{ToolCallStart: &engine.ToolCallStart{Index: idx, ID: id, Name: part.FunctionCall.Name, Signature: part.ThoughtSignature}}
@@ -288,6 +301,14 @@ func (s *StreamAdapter) SerializeStream(ctx context.Context, w io.Writer, events
 	toolStates := make(map[int]*serializeState)
 	var openPart *serializePart
 	var pendingUsage *engine.StreamUsage
+	responseID := ""
+	model := ""
+	contentStarted := false
+	writeChunk := func(chunk geminiStreamChunk) error {
+		chunk.ResponseID = responseID
+		chunk.ModelVersion = model
+		return writeFrame(w, chunk, s.Wrapped)
+	}
 
 	for {
 		var event engine.StreamEvent
@@ -304,8 +325,16 @@ func (s *StreamAdapter) SerializeStream(ctx context.Context, w io.Writer, events
 			return err
 		}
 		switch {
+		case event.MessageStart != nil:
+			if contentStarted {
+				return fmt.Errorf("gemini: message start arrived after stream content")
+			}
+			if event.MessageStart.ID != "" {
+				responseID = event.MessageStart.ID
+			}
+			model = event.MessageStart.Model
+
 		case event.Error != nil:
-			_ = writeFrame(w, chunkFinish("OTHER", nil), s.Wrapped)
 			return fmt.Errorf("gemini: stream error: %s", event.Error.Message)
 
 		case event.FinishReason != "":
@@ -318,12 +347,13 @@ func (s *StreamAdapter) SerializeStream(ctx context.Context, w io.Writer, events
 					CachedContentTokenCount: pendingUsage.CacheReadTokens,
 				}
 			}
-			return writeFrame(w, chunkFinish(mapCanonicalToGeminiFinishReason(event.FinishReason), usage), s.Wrapped)
+			return writeChunk(chunkFinish(mapCanonicalToGeminiFinishReason(event.FinishReason), usage))
 
 		case event.Usage != nil:
 			pendingUsage = event.Usage
 
 		case event.BlockStart != nil:
+			contentStarted = true
 			// Provider blocks cannot be rendered on the Gemini wire: the part
 			// model has text/thought/functionCall arms but no provider slot,
 			// and casting a provider block to a text part would silently
@@ -338,7 +368,7 @@ func (s *StreamAdapter) SerializeStream(ctx context.Context, w io.Writer, events
 			// stream-verifier rework polices — flush defensively rather than
 			// lose the buffered content.
 			if openPart != nil {
-				if err := flushPart(w, openPart, s.Wrapped); err != nil {
+				if err := flushPart(openPart, writeChunk); err != nil {
 					return err
 				}
 			}
@@ -346,7 +376,7 @@ func (s *StreamAdapter) SerializeStream(ctx context.Context, w io.Writer, events
 
 		case event.BlockStop != nil:
 			if openPart != nil {
-				if err := flushPart(w, openPart, s.Wrapped); err != nil {
+				if err := flushPart(openPart, writeChunk); err != nil {
 					return err
 				}
 				openPart = nil
@@ -355,6 +385,7 @@ func (s *StreamAdapter) SerializeStream(ctx context.Context, w io.Writer, events
 			// BlockStop from a hand-built stream) has nothing to flush.
 
 		case event.TextDelta != nil:
+			contentStarted = true
 			if openPart != nil {
 				// Delta inside the open part: accumulate — the provider part
 				// model splits one part's text over many deltas.
@@ -363,21 +394,23 @@ func (s *StreamAdapter) SerializeStream(ctx context.Context, w io.Writer, events
 				// Bare delta with no open block (legacy paths/tests that emit
 				// deltas without block events): emit a per-delta part, as
 				// before blocks existed. Compat, kept for those callers.
-				if err := writeFrame(w, chunkPart(geminiPart{Text: new(*event.TextDelta)}), s.Wrapped); err != nil {
+				if err := writeChunk(chunkPart(geminiPart{Text: new(*event.TextDelta)})); err != nil {
 					return err
 				}
 			}
 
 		case event.ThinkingDelta != nil:
+			contentStarted = true
 			if openPart != nil {
 				openPart.text.WriteString(*event.ThinkingDelta)
 			} else {
-				if err := writeFrame(w, chunkPart(geminiPart{Thought: true, Text: new(*event.ThinkingDelta)}), s.Wrapped); err != nil {
+				if err := writeChunk(chunkPart(geminiPart{Thought: true, Text: new(*event.ThinkingDelta)})); err != nil {
 					return err
 				}
 			}
 
 		case event.SignatureDelta != nil:
+			contentStarted = true
 			if openPart != nil {
 				// Mid-block signature: attach to the open part — the
 				// provider's same-part thoughtSignature binds the current
@@ -389,7 +422,7 @@ func (s *StreamAdapter) SerializeStream(ctx context.Context, w io.Writer, events
 				// The standalone signature part keeps the provider's EXPLICIT
 				// empty text member ({"text":"","thoughtSignature":…}): a bare
 				// {"thoughtSignature":…} would not round-trip the text arm.
-				if err := writeFrame(w, chunkPart(geminiPart{Text: new(""), ThoughtSignature: *event.SignatureDelta}), s.Wrapped); err != nil {
+				if err := writeChunk(chunkPart(geminiPart{Text: new(""), ThoughtSignature: *event.SignatureDelta})); err != nil {
 					return err
 				}
 			}
@@ -398,6 +431,7 @@ func (s *StreamAdapter) SerializeStream(ctx context.Context, w io.Writer, events
 			// part for an empty token.
 
 		case event.ToolCallStart != nil:
+			contentStarted = true
 			if _, dup := toolStates[event.ToolCallStart.Index]; dup {
 				return fmt.Errorf("gemini: duplicate tool call start at index %d", event.ToolCallStart.Index)
 			}
@@ -419,7 +453,7 @@ func (s *StreamAdapter) SerializeStream(ctx context.Context, w io.Writer, events
 			if !ok {
 				return fmt.Errorf("gemini: tool call end for unknown index %d", event.ToolCallEnd.Index)
 			}
-			if err := emitFunctionCall(w, st, s.Wrapped); err != nil {
+			if err := emitFunctionCall(st, writeChunk); err != nil {
 				return err
 			}
 			delete(toolStates, event.ToolCallEnd.Index)
@@ -436,7 +470,7 @@ func (s *StreamAdapter) SerializeStream(ctx context.Context, w io.Writer, events
 // flushPart emits the buffered open part as ONE wire part, carrying the
 // provider part's explicit text member (even when empty) and its mid-block
 // signature when one is set.
-func flushPart(w io.Writer, p *serializePart, wrapped bool) error {
+func flushPart(p *serializePart, write func(geminiStreamChunk) error) error {
 	part := geminiPart{
 		Text:    new(p.text.String()),
 		Thought: p.isThinking,
@@ -444,22 +478,22 @@ func flushPart(w io.Writer, p *serializePart, wrapped bool) error {
 	if p.sig != "" {
 		part.ThoughtSignature = p.sig
 	}
-	return writeFrame(w, chunkPart(part), wrapped)
+	return write(chunkPart(part))
 }
 
-func emitFunctionCall(w io.Writer, st *serializeState, wrapped bool) error {
+func emitFunctionCall(st *serializeState, write func(geminiStreamChunk) error) error {
 	// The accumulated args are raw JSON lexemes; the function-call part
 	// carries them verbatim (the response path never re-encodes them).
 	if err := pbjsontext.Validate([]byte(st.ArgsJSON.String())); err != nil {
 		log.Printf("[gemini] function call %q: accumulated args are not valid JSON: %.200s", st.Name, st.ArgsJSON.String())
-		_ = writeFrame(w, chunkFinish("OTHER", nil), wrapped)
+		_ = write(chunkFinish("OTHER", nil))
 		return fmt.Errorf("gemini: function call %q args invalid", st.Name)
 	}
 	part := geminiPart{
 		ThoughtSignature: st.Signature,
 		FunctionCall:     &geminiFuncCall{Name: st.Name, Args: []byte(st.ArgsJSON.String()), ID: st.ID},
 	}
-	return writeFrame(w, chunkPart(part), wrapped)
+	return write(chunkPart(part))
 }
 
 func chunkPart(part geminiPart) geminiStreamChunk {

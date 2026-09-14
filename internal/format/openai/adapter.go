@@ -62,6 +62,50 @@ func VerifyResponsesToolTopologyPB(current, replacement *pb.ChatRequest) error {
 	return nil
 }
 
+// VerifyResponsesInstructionsTopologyPB ensures a replacement cannot smuggle
+// canonical Responses members through provider extensions and can still be
+// projected into the accepted request's top-level instructions member. The
+// instruction text itself remains plugin-writable canonical message content;
+// only its wire location is host-owned topology.
+func VerifyResponsesInstructionsTopologyPB(present bool, replacement *pb.ChatRequest) error {
+	if replacement != nil {
+		if err := rejectResponsesCanonicalExtensions(replacement.ProviderExtensionsJson); err != nil {
+			return err
+		}
+	}
+	if !present {
+		return nil
+	}
+	if replacement == nil || len(replacement.Messages) == 0 || replacement.Messages[0] == nil {
+		return fmt.Errorf("openai responses: top-level instructions message was removed")
+	}
+	message := replacement.Messages[0]
+	if message.Role != string(engine.RoleSystem) || len(message.Blocks) != 1 || message.Blocks[0] == nil {
+		return fmt.Errorf("openai responses: top-level instructions must remain one system text block")
+	}
+	text := message.Blocks[0].GetText()
+	if text == nil || text.Signature != "" || len(text.PartMetadataJson) != 0 {
+		return fmt.Errorf("openai responses: top-level instructions must remain one plain system text block")
+	}
+	return nil
+}
+
+func rejectResponsesCanonicalExtensions(raw []byte) error {
+	if len(raw) == 0 {
+		return nil
+	}
+	var extensions map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &extensions); err != nil {
+		return fmt.Errorf("openai responses provider extensions: %w", err)
+	}
+	for _, key := range []string{"model", "instructions", "input", "tools", "stream", "max_output_tokens", "temperature", "top_p"} {
+		if _, exists := extensions[key]; exists {
+			return fmt.Errorf("openai responses: provider extensions contain canonical member %q", key)
+		}
+	}
+	return nil
+}
+
 // --- wire types for unmarshal ------------------------------------------------
 
 // chatRequest is the Chat Completions JSON shape.
@@ -142,11 +186,15 @@ type chatToolFuncDef struct {
 
 // responseRequest is the Responses API JSON shape.
 type responseRequest struct {
-	Object string          `json:"object,omitempty"`
-	Model  string          `json:"model,omitempty"`
-	Input  json.RawMessage `json:"input"`
-	Tools  []responseTool  `json:"tools,omitempty"`
-	Stream bool            `json:"stream"`
+	Object          string          `json:"object,omitempty"`
+	Model           string          `json:"model,omitempty"`
+	Instructions    *string         `json:"instructions,omitempty"`
+	Input           json.RawMessage `json:"input"`
+	Tools           []responseTool  `json:"tools,omitempty"`
+	Stream          bool            `json:"stream"`
+	MaxOutputTokens *int            `json:"max_output_tokens,omitempty"`
+	Temperature     *float64        `json:"temperature,omitempty"`
+	TopP            *float64        `json:"top_p,omitempty"`
 }
 
 type responseTool struct {
@@ -259,16 +307,36 @@ func detectVariant(raw []byte) variant {
 }
 
 func marshalResponses(chat *engine.ChatRequest) ([]byte, error) {
+	if err := rejectResponsesCanonicalExtensions(chat.ProviderExtensions.Bytes()); err != nil {
+		return nil, err
+	}
 	var rr responseRequest
 	rr.Stream = chat.Stream
 	rr.Model = chat.Model
+	rr.MaxOutputTokens = chat.MaxTokens
+	rr.Temperature = chat.Temperature
+	rr.TopP = chat.TopP
+
+	messages := chat.Messages
+	if chat.ResponsesInstructions {
+		if len(messages) == 0 || messages[0].Role != engine.RoleSystem || len(messages[0].Blocks) != 1 {
+			return nil, fmt.Errorf("openai responses: top-level instructions must remain one system text block")
+		}
+		block := messages[0].Blocks[0]
+		if block.Text == nil || block.Text.Signature != "" || !block.Text.PartMetadataJson.IsAbsent() {
+			return nil, fmt.Errorf("openai responses: top-level instructions must remain one plain system text block")
+		}
+		instructions := block.Text.Text
+		rr.Instructions = &instructions
+		messages = messages[1:]
+	}
 
 	// Convert messages back to input items in wire order. When the caller's
 	// layout was captured (unmarshal), opaque items (reasoning, compaction,
 	// future types) are re-spliced at their recorded positions verbatim;
 	// representable slots take the projected (possibly plugin-mutated)
 	// items. Without a captured layout the ordered body IS the layout.
-	projected, err := responsesItemsFromMessages(chat.Messages)
+	projected, err := responsesItemsFromMessages(messages)
 	if err != nil {
 		return nil, err
 	}
@@ -1010,6 +1078,9 @@ func (a *Adapter) unmarshalResponses(rawBody []byte) (*engine.ChatRequest, error
 	if err := json.Unmarshal(rawBody, &rr); err != nil {
 		return nil, fmt.Errorf("openai responses unmarshal: %w", err)
 	}
+	if rr.MaxOutputTokens != nil && (*rr.MaxOutputTokens < 1 || *rr.MaxOutputTokens > math.MaxInt32) {
+		return nil, fmt.Errorf("openai responses: max_output_tokens %d is outside 1..%d", *rr.MaxOutputTokens, math.MaxInt32)
+	}
 
 	// No default model. Substituting one sends a different, differently-priced
 	// request than the caller wrote and misattributes every downstream cost and
@@ -1017,8 +1088,18 @@ func (a *Adapter) unmarshalResponses(rawBody []byte) (*engine.ChatRequest, error
 	// docs/LOCAL_MODELS.md, which accept a request without one. Forward what
 	// the caller sent — marshalOutput omits an empty model.
 	req := &engine.ChatRequest{
-		Model:  rr.Model,
-		Stream: rr.Stream,
+		Model:       rr.Model,
+		Stream:      rr.Stream,
+		MaxTokens:   rr.MaxOutputTokens,
+		Temperature: rr.Temperature,
+		TopP:        rr.TopP,
+	}
+	if rr.Instructions != nil {
+		req.ResponsesInstructions = true
+		req.Messages = append(req.Messages, engine.Message{
+			Role:   engine.RoleSystem,
+			Blocks: []engine.Block{{Text: &engine.TextBlock{Text: *rr.Instructions}}},
+		})
 	}
 
 	// Host-only topology: the variant + original model sentinels stay in the
@@ -1026,7 +1107,8 @@ func (a *Adapter) unmarshalResponses(rawBody []byte) (*engine.ChatRequest, error
 	// input LAYOUT is the ordered body itself — item order is block order,
 	// so the old layout sentinel is gone.
 	ext, xerr := engine.ParseOptionalJSONObjectExcluding(rawBody,
-		"model", "input", "tools", "stream")
+		"model", "instructions", "input", "tools", "stream",
+		"max_output_tokens", "temperature", "top_p")
 	if xerr != nil {
 		return nil, fmt.Errorf("openai responses provider extensions: %w", xerr)
 	}
