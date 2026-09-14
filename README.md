@@ -364,6 +364,7 @@ treat reachability as equivalent to configuration write access.
 | `TORANA_DEFAULT_PROVIDER` | (none) | Provider name for non-prefixed paths |
 | `TORANA_PLUGINS_DIR` | `./plugins` | Plugin directory for the `torana plugin` commands |
 | `TORANA_LOG_LEVEL` | (none) | Set to `debug` for safe request-lifecycle logs — the same thing `torana --debug` sets |
+| `TORANA_DEBUG_UPSTREAM_ERRORS` | (disabled) | Set to `1` with debug logging to log up to 8 KiB of bridged upstream error bodies. May expose prompts or credentials; see [diagnostics](docs/PROTOCOL_BRIDGES.md#diagnose-an-upstream-rejection) |
 | `TORANA_CI_CACHE` | (none) | Directory for wazero's compiled-module cache. Set it and each plugin compiles once per machine instead of once per start |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | (none) | OTLP gRPC collector. With neither endpoint set, OTel export is off |
 | `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` | (none) | As above, and takes precedence over it |

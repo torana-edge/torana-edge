@@ -121,6 +121,10 @@ Environment:
   TORANA_DEFAULT_PROVIDER  provider for requests that match no /provider/ prefix
   TORANA_PLUGINS_DIR       plugin directory for the plugin subcommands
   TORANA_LOG_LEVEL         set to debug for safe request lifecycle logs
+  TORANA_DEBUG_UPSTREAM_ERRORS
+                           set to 1 with debug logging to log up to 8 KiB of
+                           bridged upstream error bodies; may expose prompts
+                           or credentials. Disabled by default.
   TORANA_CI_CACHE          directory for wazero's compiled-module cache; set it
                            and each plugin compiles once per machine rather
                            than once per start
