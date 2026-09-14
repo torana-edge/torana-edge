@@ -159,7 +159,7 @@ func TestRustScaffoldFirstRunAgainstStagedSDK(t *testing.T) {
 		t.Fatal(err)
 	}
 	localDependency := fmt.Sprintf("torana-plugin-sdk = { path = %q }", staged)
-	cargo = []byte(strings.Replace(string(cargo), `torana-plugin-sdk = "0.5.0"`, localDependency, 1))
+	cargo = []byte(strings.Replace(string(cargo), `torana-plugin-sdk = "`+strings.TrimPrefix(ScaffoldSDKVersion, "v")+`"`, localDependency, 1))
 	if err := os.WriteFile(cargoPath, cargo, 0o600); err != nil {
 		t.Fatal(err)
 	}

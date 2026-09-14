@@ -88,7 +88,7 @@ func Usage(w io.Writer) {
 // coordinated SDK/host release PR pair is under review. Replace a temporary
 // pseudo-version with the release tag before merging the host PR.
 const (
-	ScaffoldSDKVersion = "v0.4.2"
+	ScaffoldSDKVersion = "v0.5.0"
 	// scaffoldGoVersion tracks the SDK's own go directive. A scaffolded module
 	// declaring an OLDER Go version than its dependency requires fails to build
 	// with "module requires go >= x", which is the same class of unbuildable
@@ -203,7 +203,7 @@ func TestBeforeRequest(t *testing.T) {
 	}
 	if language == "rust" {
 		files = map[string]string{
-			"Cargo.toml": fmt.Sprintf("[package]\nname = \"%s\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[lib]\ncrate-type = [\"cdylib\"]\n\n[dependencies]\ntorana-plugin-sdk = \"0.5.0\"\n", pluginName),
+			"Cargo.toml": fmt.Sprintf("[package]\nname = \"%s\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[lib]\ncrate-type = [\"cdylib\"]\n\n[dependencies]\ntorana-plugin-sdk = \"%s\"\n", pluginName, strings.TrimPrefix(ScaffoldSDKVersion, "v")),
 			"src/lib.rs": `use torana_plugin_sdk::{export_plugin_v1, info, pbv1, Plugin, RequestResult, HOOK_BEFORE_REQUEST};
 
 struct PluginImpl;
