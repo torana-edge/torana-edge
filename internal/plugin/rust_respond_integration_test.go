@@ -17,6 +17,9 @@ import (
 func TestCompiledRustRespondRequestThroughProductionRuntime(t *testing.T) {
 	guest := os.Getenv("TORANA_RUST_GUEST")
 	if guest == "" {
+		if os.Getenv("TORANA_RUST_CONFORMANCE") == "1" {
+			t.Fatal("TORANA_RUST_GUEST is required when TORANA_RUST_CONFORMANCE=1")
+		}
 		t.Skip("TORANA_RUST_GUEST unset; set it to the compiled SDK rust-allhooks guest")
 	}
 	wasmBytes, err := os.ReadFile(guest)
