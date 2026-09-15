@@ -82,6 +82,28 @@ func TestMalformedContentTypeStillClassifies(t *testing.T) {
 	}
 }
 
+func TestInferenceResponseMediaTypeOnlyFillsAbsentKnownInferenceType(t *testing.T) {
+	rows := []struct {
+		name                string
+		contentType         string
+		intercepted, stream bool
+		want                string
+	}{
+		{"known JSON inference", "", true, false, "application/json"},
+		{"known streaming inference", "", true, true, "text/event-stream"},
+		{"auxiliary remains unknown", "", false, false, ""},
+		{"explicit unknown wins", "application/octet-stream", true, false, "application/octet-stream"},
+		{"explicit JSON wins", "application/problem+json", true, true, "application/problem+json"},
+	}
+	for _, row := range rows {
+		t.Run(row.name, func(t *testing.T) {
+			if got := inferenceResponseMediaType(row.contentType, row.intercepted, row.stream); got != row.want {
+				t.Fatalf("got %q, want %q", got, row.want)
+			}
+		})
+	}
+}
+
 // The de-duplication set is keyed by a string the UPSTREAM chooses, so its
 // size must be the proxy's decision and not the provider's.
 //

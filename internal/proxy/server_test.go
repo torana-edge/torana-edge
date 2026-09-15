@@ -1,8 +1,10 @@
 package proxy
 
 import (
+	"bufio"
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -19,6 +21,23 @@ import (
 	_ "github.com/torana-edge/torana-edge/internal/format/openai"
 	"github.com/torana-edge/torana-edge/internal/provider"
 )
+
+type hijackableRecorder struct{ *httptest.ResponseRecorder }
+
+func (h *hijackableRecorder) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	return nil, nil, http.ErrNotSupported
+}
+
+func TestTrackingWriterPreservesHijacker(t *testing.T) {
+	underlying := &hijackableRecorder{httptest.NewRecorder()}
+	tw := &trackingWriter{ResponseWriter: underlying}
+	if _, ok := any(tw).(http.Hijacker); !ok {
+		t.Fatal("tracking writer hid http.Hijacker")
+	}
+	if _, _, err := tw.Hijack(); !errors.Is(err, http.ErrNotSupported) {
+		t.Fatalf("Hijack did not delegate: %v", err)
+	}
+}
 
 // testProviderConfig builds a provider.Config with a single provider
 // pointing at the given upstream URL.
