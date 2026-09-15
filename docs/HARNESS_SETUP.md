@@ -68,6 +68,19 @@ Codex request compression remained enabled. The upstream HTTP 200 omitted
 request, ran the response pipeline, recorded feed usage, and `usage_logger`
 wrote a content-free record with `usage_reported: true`.
 
+Add a separate Torana provider named `chatgpt` with URL
+`https://chatgpt.com/backend-api/codex`, format `openai`, and auth mode `caller`.
+Then run this command-scoped Codex provider without changing saved Codex config:
+
+```bash
+codex exec --ignore-user-config --ephemeral --skip-git-repo-check -s read-only \
+  -m gpt-5.6-luna \
+  -c 'model_provider="torana"' \
+  -c 'model_providers.torana={name="Torana",base_url="http://127.0.0.1:8080/provider/chatgpt",wire_api="responses",requires_openai_auth=true,supports_websockets=false,request_max_retries=0,stream_max_retries=0}' \
+  -c check_for_update_on_startup=false \
+  'Reply with exactly: 42'
+```
+
 Keep `supports_websockets = false` for response-plugin workflows. A separate
 bounded check confirmed that WebSocket transport connects through Torana, but
 an upgraded connection is an opaque byte stream and does not enter the HTTP/SSE

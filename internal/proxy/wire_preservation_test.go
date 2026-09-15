@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/torana-edge/torana-edge/internal/provider"
 )
@@ -117,17 +118,20 @@ func TestUnchangedInferenceRequestPreservesProviderWire(t *testing.T) {
 }
 
 func TestGzipInferenceRequestIsBoundedlyDecodedForAllNativeFormats(t *testing.T) {
-	rows := []struct{ name, format, body string }{
-		{"openai-chat", "openai", `{"model":"gpt-x","messages":[{"role":"user","content":"hi"}]}`},
-		{"openai-responses", "openai", `{"model":"gpt-x","input":"hi"}`},
-		{"anthropic", "anthropic", `{"model":"claude-x","max_tokens":8,"messages":[{"role":"user","content":"hi"}]}`},
-		{"gemini", "gemini", `{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}`},
-		{"gemini-codeassist", "gemini-codeassist", `{"model":"gemini-x","request":{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}}`},
+	rows := []struct{ name, format, path, body string }{
+		{"openai-chat", "openai", "/v1/chat/completions", `{"model":"gpt-x","messages":[{"role":"user","content":"hi"}]}`},
+		{"openai-responses", "openai", "/v1/responses", `{"model":"gpt-x","input":"hi"}`},
+		{"anthropic", "anthropic", "/v1/messages", `{"model":"claude-x","max_tokens":8,"messages":[{"role":"user","content":"hi"}]}`},
+		{"gemini", "gemini", "/v1beta/models/gemini-x:generateContent", `{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}`},
+		{"gemini-codeassist", "gemini-codeassist", "/v1internal:generateContent", `{"model":"gemini-x","request":{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}}`},
 	}
 	for _, row := range rows {
 		t.Run(row.name, func(t *testing.T) {
 			seen := make(chan []byte, 1)
 			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != row.path {
+					t.Errorf("upstream path = %q, want %q", r.URL.Path, row.path)
+				}
 				if got := r.Header.Get("Content-Encoding"); got != "" {
 					t.Errorf("upstream Content-Encoding = %q", got)
 				}
@@ -150,16 +154,21 @@ func TestGzipInferenceRequestIsBoundedlyDecodedForAllNativeFormats(t *testing.T)
 			zw := gzip.NewWriter(&compressed)
 			_, _ = zw.Write([]byte(row.body))
 			_ = zw.Close()
-			req, _ := http.NewRequest(http.MethodPost, proxy.URL+"/provider/p"+inferenceTestPath(row.format), bytes.NewReader(compressed.Bytes()))
+			req, _ := http.NewRequest(http.MethodPost, proxy.URL+"/provider/p"+row.path, bytes.NewReader(compressed.Bytes()))
 			req.Header.Set("Content-Type", "application/json")
 			req.Header.Set("Content-Encoding", "gzip")
-			resp, err := http.DefaultClient.Do(req)
+			resp, err := (&http.Client{Timeout: 5 * time.Second}).Do(req)
 			if err != nil {
 				t.Fatal(err)
 			}
 			_ = resp.Body.Close()
-			if got := <-seen; !bytes.Equal(got, []byte(row.body)) {
-				t.Fatalf("upstream got %q, want decoded %q", got, row.body)
+			select {
+			case got := <-seen:
+				if !bytes.Equal(got, []byte(row.body)) {
+					t.Fatalf("upstream got %q, want decoded %q", got, row.body)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("timed out waiting for decoded request to reach upstream")
 			}
 		})
 	}

@@ -1527,6 +1527,7 @@ func New(cfg Config) (*Server, error) {
 			}
 
 			contentType := resp.Header.Get("Content-Type")
+			missingContentType := strings.TrimSpace(contentType) == ""
 			chat, _ := resp.Request.Context().Value(engine.ChatRequestKey).(*engine.ChatRequest)
 			contentType = inferenceResponseMediaType(contentType, rs.Intercepted, chat != nil && chat.Stream)
 			if e := exchangeFrom(resp.Request.Context()); e != nil {
@@ -1542,6 +1543,9 @@ func New(cfg Config) (*Server, error) {
 
 			// SSE streaming: parse → pipeline → serialize.
 			if isEventStreamMediaType(contentType) {
+				if missingContentType {
+					resp.Header.Set("Content-Type", "text/event-stream")
+				}
 				streamFormat, _ := resp.Request.Context().Value(formatCtxKey{}).(*format.Format)
 				streamFormat = actualResponseFormat(resp.Request.Context(), streamFormat)
 				if streamFormat == nil {
@@ -1820,7 +1824,6 @@ func New(cfg Config) (*Server, error) {
 						// be rewritten: Message is nil and mutable is false.
 						// A plugin that needs the streamed content observes it
 						// through run_on_stream_chunk, which sees every event.
-						streamResp := rs.chatResponse(rs.Model, "", nil, "")
 						// Observational only. Every stream event has been
 						// written, so there is nothing left to withhold and
 						// failure_mode has nothing to act on. "Observational"
@@ -1838,8 +1841,7 @@ func New(cfg Config) (*Server, error) {
 						// pipeline's own bounded hook timeout govern this final
 						// observational call, or usage/audit plugins lose successful
 						// streaming requests nondeterministically.
-						hookCtx := context.WithoutCancel(ctx)
-						if _, err := pl.RunAfterResponse(hookCtx, reqStateFrom(ctx).ID, streamResp, false); err != nil {
+						if err := runStreamingAfterResponse(ctx, pl); err != nil {
 							log.Printf("plugin run_after_response (stream, observational — "+
 								"failure_mode cannot apply, body already sent): %v", err)
 							if rsObs := reqStateFrom(ctx); rsObs != nil {
@@ -1849,9 +1851,9 @@ func New(cfg Config) (*Server, error) {
 					}
 				}()
 				resp.Body = &abortingReader{r: pr}
+				resp.ContentLength = -1
 				if exchangeFrom(resp.Request.Context()) != nil {
 					clearBridgeRepresentationHeaders(resp.Header)
-					resp.ContentLength = -1
 				}
 				resp.Header.Del("Content-Length")
 				return nil
@@ -3025,6 +3027,17 @@ func New(cfg Config) (*Server, error) {
 	// both declares run_on_tick and holds env.background_tick.
 	s.ticker = s.startTicker(cfg.Providers.Plugins.Runtime.TickInterval())
 	return s, nil
+}
+
+func runStreamingAfterResponse(ctx context.Context, pl *plugin.PluginPipeline) error {
+	hookCtx := context.WithoutCancel(ctx)
+	rs := reqStateFrom(hookCtx)
+	if rs == nil {
+		return errors.New("stream completion missing request state")
+	}
+	resp := rs.chatResponse(rs.Model, "", nil, "")
+	_, err := pl.RunAfterResponse(hookCtx, rs.ID, resp, false)
+	return err
 }
 
 // --- Lifecycle --------------------------------------------------------------
