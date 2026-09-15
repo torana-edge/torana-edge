@@ -12,14 +12,12 @@ configured provider.
 
 ## Install from source
 
-<!-- torana:source-install:start -->
 ```bash
 git clone https://github.com/torana-edge/torana-edge.git
 cd torana-edge
 go build -o ./torana ./cmd/torana
 cp config.example.json config.json
 ```
-<!-- torana:source-install:end -->
 
 The available install path is a source build. For a reproducible deployment,
 check out a reviewed commit SHA before building. No WASM plugins are bundled;
@@ -99,7 +97,8 @@ descriptions and the hints in the local Control Plane are the annotated
 reference.
 
 On the first run, Torana imports this seed into its managed store at
-`~/.config/torana/config.json` (or `$TORANA_DATA_DIR/config.json`). After that,
+`$TORANA_DATA_DIR/config.json`, or the platform's
+[user-config directory](CLI.md#environment-variables) when unset. After that,
 the managed store is authoritative so Control Plane edits survive restarts.
 Changing the original seed does not overwrite managed state; Torana logs a
 warning when both files exist and differ. Edit the managed configuration through
@@ -169,6 +168,18 @@ when you want to change traffic. No plugin transformation is enabled by default.
 
 
 ### Provider authentication and fallbacks
+
+The shipped seed names these native routes. Replace or add providers through
+the CLI or UI after the first import; the route name is your local identifier,
+not a claim that every feature of that provider is supported.
+
+| Route prefix | Upstream URL | Format |
+| --- | --- | --- |
+| `/provider/deepseek/...` | `https://api.deepseek.com` | `openai` |
+| `/provider/deepseek-anthropic/...` | `https://api.deepseek.com/anthropic` | `anthropic` |
+| `/provider/openai/...` | `https://api.openai.com` | `openai` |
+| `/provider/anthropic/...` | `https://api.anthropic.com` | `anthropic` |
+| `/provider/gemini/...` | `https://generativelanguage.googleapis.com` | `gemini` |
 
 Provider `url` values contain an HTTP(S) origin and optional path only. Query
 strings, fragments, and embedded userinfo are rejected rather than silently

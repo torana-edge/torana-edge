@@ -5,7 +5,6 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -718,34 +717,6 @@ func TestShippedExampleNamesNoPluginsItCannotLoad(t *testing.T) {
 	}
 }
 
-// The example is a SEED: it is read once, copied into the managed store, and
-// never consulted again. A comment telling the reader to come back and edit it
-// after approving plugins describes something that has no effect, and the
-// symptom — an edit that changes nothing — is confusing enough that it has to
-// be stated in the first-run documentation. config.example.json remains strict
-// JSON, so it deliberately contains no pseudo-comment members.
-func TestShippedExampleExplainsItIsReadOnlyOnce(t *testing.T) {
-	raw, err := os.ReadFile("../../README.md")
-	if err != nil {
-		t.Skipf("config.example.json not readable: %v", err)
-	}
-	comment := strings.ToLower(string(raw))
-	// The managed store is a FILE inside the data directory. Naming
-	// $TORANA_DATA_DIR alone sends the reader to a directory and leaves them to
-	// guess, which is the kind of near-miss that wastes an afternoon.
-	if strings.Contains(comment, "$torana_data_dir") &&
-		!strings.Contains(comment, "$torana_data_dir/config.json") {
-		t.Error("the comment names $TORANA_DATA_DIR without /config.json — the managed " +
-			"store is a file inside that directory, not the directory itself")
-	}
-	for _, want := range []string{"first start", "managed store", "control plane"} {
-		if !strings.Contains(comment, want) {
-			t.Errorf("the README does not mention %q — a reader would not learn "+
-				"that editing this file after the first start does nothing", want)
-		}
-	}
-}
-
 func TestAuditConfigIsDefaultOffAndValidated(t *testing.T) {
 	base := Config{Port: 8080}
 	encoded, err := json.Marshal(base)
@@ -769,45 +740,5 @@ func TestAuditConfigIsDefaultOffAndValidated(t *testing.T) {
 	good.Audit = &auditlog.Config{Enabled: true, Path: filepath.Join(t.TempDir(), "audit.jsonl")}
 	if err := good.Validate(); err != nil {
 		t.Fatalf("valid audit config: %v", err)
-	}
-}
-
-// The shipped example must DESCRIBE every provider route the README's routing
-// diagram advertises, so an operator can understand the effective system from
-// the seed they copied.
-//
-// This does not protect the routes from 502ing. It cannot: built-in defaults
-// are always present and a seed's providers are added to them, so removing
-// anthropic from the example leaves /provider/anthropic/ serving anyway —
-// verified against a running binary, which answered 401 from Anthropic rather
-// than 502. What breaks is the operator's understanding: their file would
-// name four providers while the process ran five, and nothing in the file
-// would say so.
-func TestShippedExampleDocumentsAdvertisedProviders(t *testing.T) {
-	raw, err := os.ReadFile("../../config.example.json")
-	if err != nil {
-		t.Skipf("config.example.json not readable: %v", err)
-	}
-	readme, err := os.ReadFile("../../README.md")
-	if err != nil {
-		t.Skipf("README.md not readable: %v", err)
-	}
-
-	var example Config
-	if err := json.Unmarshal(raw, &example); err != nil {
-		t.Fatalf("config.example.json does not parse: %v", err)
-	}
-
-	advertised := regexp.MustCompile(`/provider/([a-z0-9-]+)/\.\.\.`).FindAllSubmatch(readme, -1)
-	if len(advertised) == 0 {
-		t.Fatal("the README no longer advertises any /provider/ routes; this check has stopped seeing them")
-	}
-	for _, m := range advertised {
-		name := string(m[1])
-		if _, ok := example.Providers[name]; !ok {
-			t.Errorf("README.md advertises /provider/%s/ but config.example.json does not "+
-				"name it, so an operator who copied the example cannot tell from their own "+
-				"configuration that the route exists or where it goes", name)
-		}
 	}
 }

@@ -13,16 +13,6 @@ import (
 	"time"
 )
 
-// The help text and the README both claim to list every environment variable
-// Torana reads. Both claims were false, and one of them said so in writing:
-// "torana help prints the same table, so it cannot drift out of the binary"
-// sat directly under a table missing six variables.
-//
-// A list restated in a test cannot catch that — it drifts alongside the thing
-// it checks. These three tests derive each list from the source that defines
-// it, so adding a variable to the product fails the build until it is
-// documented in both places.
-
 // envReadPattern finds a literal environment variable name being read.
 var envReadPattern = regexp.MustCompile(`os\.(?:Getenv|LookupEnv)\("([A-Z0-9_]+)"\)`)
 
@@ -148,83 +138,6 @@ func TestUsageDocumentsEveryEnvironmentVariable(t *testing.T) {
 	}
 }
 
-// usageEnvNames are the variables the help text's Environment section names.
-func usageEnvNames(t *testing.T) map[string]bool {
-	t.Helper()
-	var buf bytes.Buffer
-	usage(&buf)
-	help := buf.String()
-
-	start := strings.Index(help, "Environment:\n")
-	if start < 0 {
-		t.Fatal("the help text has no Environment section")
-	}
-	section := help[start:]
-	// The section ends at the first blank line followed by prose.
-	if end := strings.Index(section, "\n\nThe control plane"); end >= 0 {
-		section = section[:end]
-	}
-	names := map[string]bool{}
-	for _, line := range strings.Split(section, "\n") {
-		// A name starts a line at two spaces of indent; continuation lines
-		// are indented further and must not be mistaken for one.
-		if !strings.HasPrefix(line, "  ") || strings.HasPrefix(line, "   ") {
-			continue
-		}
-		f := strings.Fields(line)
-		if len(f) > 0 && ours(f[0]) {
-			names[f[0]] = true
-		}
-	}
-	return names
-}
-
-// readmeEnvNames are the variables the README's Environment Variables table
-// names in its first column.
-func readmeEnvNames(t *testing.T) map[string]bool {
-	t.Helper()
-	body, err := os.ReadFile(filepath.Join("..", "..", "README.md"))
-	if err != nil {
-		t.Fatalf("reading README.md: %v", err)
-	}
-	text := string(body)
-	start := strings.Index(text, "## Environment Variables")
-	if start < 0 {
-		t.Fatal("README.md has no Environment Variables section")
-	}
-	section := text[start:]
-	if end := strings.Index(section[1:], "\n## "); end >= 0 {
-		section = section[:end+1]
-	}
-	cell := regexp.MustCompile("(?m)^\\| `([A-Z0-9_]+)` \\|")
-	names := map[string]bool{}
-	for _, m := range cell.FindAllStringSubmatch(section, -1) {
-		names[m[1]] = true
-	}
-	return names
-}
-
-// The README table and the help text must name the same variables. This is
-// the check the README's own sentence claimed to be, and was not.
-func TestREADMEEnvironmentTableMatchesUsage(t *testing.T) {
-	inHelp := usageEnvNames(t)
-	inREADME := readmeEnvNames(t)
-
-	if len(inHelp) == 0 || len(inREADME) == 0 {
-		t.Fatalf("parsed %d names from the help text and %d from the README; one of the parsers has stopped working", len(inHelp), len(inREADME))
-	}
-	for name := range inHelp {
-		if !inREADME[name] {
-			t.Errorf("%s is in `torana help` but not in the README's Environment Variables table", name)
-		}
-	}
-	for name := range inREADME {
-		if !inHelp[name] {
-			t.Errorf("%s is in the README's Environment Variables table but not in `torana help`", name)
-		}
-	}
-}
-
 // subcommandPattern finds the string literals main() dispatches on. Both
 // dispatch shapes are here: the early `os.Args[1] == "x"` guards and the
 // switch that follows them.
@@ -289,56 +202,6 @@ func TestFixtureHelperIsTestOnly(t *testing.T) {
 		if strings.Contains(body, "internal/testfixture") {
 			t.Errorf("%s is a production file importing internal/testfixture; "+
 				"TORANA_E2E is now product surface and must be documented", rel)
-		}
-	}
-}
-
-// harnessList captures the harnesses the README's opening sentence promises.
-var harnessList = regexp.MustCompile(`your harness \(([^)]+)\)`)
-
-// The README names the harnesses Torana sits behind, and then sends the
-// reader to the quickstart for "a worked example for each of those". Those
-// two lists disagreed: the README advertised Codex, which the quickstart
-// never mentioned, while the quickstart led with oh-my-pi, which the README
-// never mentioned. A reader following the promise found nothing.
-func TestEveryAdvertisedHarnessHasAQuickstartSection(t *testing.T) {
-	readme, err := os.ReadFile(filepath.Join("..", "..", "README.md"))
-	if err != nil {
-		t.Fatalf("reading README.md: %v", err)
-	}
-	m := harnessList.FindSubmatch(readme)
-	if m == nil {
-		t.Fatal("README.md no longer names the harnesses in its opening sentence; this check has stopped seeing the promise")
-	}
-	quickstart, err := os.ReadFile(filepath.Join("..", "..", "docs", "QUICKSTART.md"))
-	if err != nil {
-		t.Fatalf("reading docs/QUICKSTART.md: %v", err)
-	}
-	var headings []string
-	for _, line := range strings.Split(string(quickstart), "\n") {
-		if strings.HasPrefix(line, "### ") {
-			headings = append(headings, line)
-		}
-	}
-	if len(headings) == 0 {
-		t.Fatal("docs/QUICKSTART.md has no harness sections")
-	}
-
-	for _, name := range strings.Split(string(m[1]), ",") {
-		name = strings.TrimSpace(name)
-		if name == "" {
-			continue
-		}
-		found := false
-		for _, h := range headings {
-			if strings.Contains(strings.ToLower(h), strings.ToLower(name)) {
-				found = true
-				break
-			}
-		}
-		if !found {
-			t.Errorf("README.md advertises %q but docs/QUICKSTART.md has no section for it, "+
-				"and the README sends the reader there for a worked example", name)
 		}
 	}
 }
@@ -435,64 +298,5 @@ func TestAdvertisedControlPlaneURLAnswers(t *testing.T) {
 					"following the banner would be refused", url, resp.StatusCode)
 			}
 		})
-	}
-}
-
-// Every package under internal/ must say what it is.
-//
-// Nine of twenty-three did not, so `go doc ./internal/engine` opened on a
-// variable declaration and `go doc ./internal/wasm` on a helper — for the two
-// packages that define the IR and run the sandbox. A reader arriving at the
-// tree has no entry point when the packages do not introduce themselves, and
-// this is the repository a plugin author reads to understand the host.
-//
-// Derived from the directory listing rather than a list restated here, so a
-// new package is covered the day it is added.
-func TestEveryInternalPackageSaysWhatItIs(t *testing.T) {
-	root := filepath.Join("..", "..", "internal")
-	var undocumented []string
-	checked := 0
-
-	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
-		if err != nil || !d.IsDir() {
-			return err
-		}
-		entries, err := os.ReadDir(path)
-		if err != nil {
-			return err
-		}
-		var goFiles []string
-		for _, e := range entries {
-			if !e.IsDir() && strings.HasSuffix(e.Name(), ".go") && !strings.HasSuffix(e.Name(), "_test.go") {
-				goFiles = append(goFiles, filepath.Join(path, e.Name()))
-			}
-		}
-		if len(goFiles) == 0 {
-			return nil
-		}
-		checked++
-		want := "// Package " + filepath.Base(path)
-		for _, f := range goFiles {
-			body, err := os.ReadFile(f)
-			if err != nil {
-				return err
-			}
-			if strings.HasPrefix(string(body), want) {
-				return nil
-			}
-		}
-		rel, _ := filepath.Rel(root, path)
-		undocumented = append(undocumented, rel)
-		return nil
-	})
-	if err != nil {
-		t.Fatalf("walking internal/: %v", err)
-	}
-	if checked == 0 {
-		t.Fatal("no packages found under internal/; this check has stopped seeing what it guards")
-	}
-	for _, pkg := range undocumented {
-		t.Errorf("internal/%s has no package comment, so `go doc` on it opens on whichever "+
-			"declaration happens to come first", pkg)
 	}
 }

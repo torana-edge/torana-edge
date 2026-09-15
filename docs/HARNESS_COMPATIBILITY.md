@@ -44,15 +44,18 @@ Use the harness's supported base-URL setting whenever it has one. These are
 native integration paths; for a bridge, select the explicit client contract
 and verify the additional boundaries below:
 
-- Claude Code: set `ANTHROPIC_BASE_URL` to an Anthropic-format Torana provider.
-- Codex: configure an OpenAI Responses-compatible custom provider whose base
-  URL points at Torana.
-- OpenCode, Aider and oh-my-pi: set the selected provider's OpenAI-compatible
-  or Anthropic base URL to Torana.
-- Code Assist clients without a base-URL setting: use Torana's optional MITM
-  ingress as described in [Gemini / Antigravity](GEMINI_ANTIGRAVITY.md).
+| Harness | Setup example | Connection |
+| --- | --- | --- |
+| Claude Code | [Quickstart](QUICKSTART.md#claude-code) | `ANTHROPIC_BASE_URL` with an Anthropic-format route |
+| Codex | [Quickstart](QUICKSTART.md#codex) | Custom OpenAI Responses provider |
+| OpenCode | [Quickstart](QUICKSTART.md#opencode) | Selected provider's base URL |
+| Aider | [Quickstart](QUICKSTART.md#aider) | OpenAI-compatible base URL |
+| oh-my-pi | [Quickstart](QUICKSTART.md#omp-oh-my-pi) | Selected provider's base URL |
+| Antigravity | [Quickstart](QUICKSTART.md#antigravity-cli-agy) | Optional TLS ingress for Code Assist |
+| OpenHands / Continue.dev | [Quickstart](QUICKSTART.md#openhands--continuedev) | Selected provider's base URL |
 
-Concrete examples are in the [quickstart](QUICKSTART.md).
+These are configuration examples, not proof that every live client/backend
+combination works. Verify your own endpoint and workflow as described below.
 
 ## Protocol bridges
 

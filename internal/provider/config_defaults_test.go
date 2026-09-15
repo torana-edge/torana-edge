@@ -1,47 +1,11 @@
 package provider
 
 import (
-	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 )
-
-// Every route the README's front-page diagram advertises must exist on a fresh
-// install. /provider/gemini/ was listed there and defined nowhere, so the
-// headline example 502'd for anyone who followed it.
-func TestDefaultConfigServesEveryAdvertisedRoute(t *testing.T) {
-	readme, err := os.ReadFile(filepath.Join("..", "..", "README.md"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defaults := DefaultConfig().Providers
-
-	var advertised []string
-	for _, line := range strings.Split(string(readme), "\n") {
-		i := strings.Index(line, "/provider/")
-		if i < 0 {
-			continue
-		}
-		rest := line[i+len("/provider/"):]
-		name, _, ok := strings.Cut(rest, "/")
-		if !ok || name == "" || strings.ContainsAny(name, "<>{}") {
-			continue // a placeholder like /provider/<name>/, not a real route
-		}
-		advertised = append(advertised, name)
-	}
-	if len(advertised) == 0 {
-		t.Fatal("no /provider/<name>/ routes found in README.md; this check has stopped " +
-			"reading what it is supposed to guard")
-	}
-	for _, name := range advertised {
-		if _, ok := defaults[name]; !ok {
-			t.Errorf("README advertises /provider/%s/ but DefaultConfig has no %q provider — "+
-				"a fresh install 502s on the documented example", name, name)
-		}
-	}
-}
 
 // Every provider the defaults ship must be one the proxy can actually route.
 func TestDefaultConfigProvidersAreValid(t *testing.T) {

@@ -86,8 +86,10 @@ use case, not a promise of savings:
 
 ## Configuration
 
-Torana imports `config.json` once, then uses its managed store. Change a running
-instance through the CLI or UI, not by editing the original seed:
+On first start, Torana imports `config.json` into its managed store at
+`$TORANA_DATA_DIR/config.json` (or the platform's user-config directory when
+that variable is unset). Change a running instance through the CLI or UI,
+not by editing the original seed:
 
 ```bash
 ./torana config get > settings.json
@@ -99,6 +101,9 @@ The host validates changes and rejects stale snapshots. Plugin configuration
 and order have [separate pipeline commands](docs/CLI.md#plugin-configuration-and-pipeline-order).
 [Credential changes](docs/CREDENTIALS.md) require stopping the instance before
 writing its on-disk credential store.
+
+For startup overrides and telemetry settings, see the complete
+[environment-variable reference](docs/CLI.md#environment-variables).
 
 ## How routing works
 

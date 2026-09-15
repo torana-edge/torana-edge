@@ -22,6 +22,11 @@ runs, remain public here so comparisons can be reproduced. Some historical
 reports are available in Git history at their original revision; raw evidence
 has not been removed.
 
+For example, `benchmark-large-heap-2026-08-18.jsonl` remains here while its
+optimization narrative is available at [the pre-refresh revision](https://github.com/torana-edge/torana-edge/blob/60e9fb9362bff7c1635395c7f44ee417aa7440f6/benchmarks/BENCHMARK_LARGE_HEAP_RESULTS_2026-08-18.md).
+Use that revision for context when reading an older raw run without a current
+companion report; do not treat it as a measurement of today's build.
+
 Retain every row, report errors and stream-integrity results, and distinguish
 linear memory, live heap and process RSS. Do not select the best rows from
 different runs and present them as one measurement.

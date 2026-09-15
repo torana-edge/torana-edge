@@ -58,6 +58,10 @@ You can also use a local model as a plugin-bound scanner or summarizer.
 ## Use a local model from a plugin
 
 Declaring a provider does not authorize plugin access. Bind a declared model-service
-resource and approve its budget separately. The plugin owns the request it sends.
+resource and approve its budget separately. The provider URL selects the origin
+and optional base path; the model-service approval separately names the root-relative
+inference path. For an OpenAI-compatible local Chat Completions service, bind
+that path to `/v1/chat/completions`. Torana does not append a guessed inference
+path to the provider URL. The plugin owns the request it sends.
 See the [local compactor setup](https://github.com/torana-edge/torana-plugins/blob/main/plugins/compactor/LOCAL_SUMMARIZER.md)
 or [PII scanner setup](https://github.com/torana-edge/torana-plugins/blob/main/plugins/pii/README.md).

@@ -82,8 +82,7 @@ func validateOutboundPolicy() error {
 //
 // It is the whole discoverable surface of the binary: without the environment
 // table, the only way to learn that TORANA_BIND or TORANA_DATA_DIR exists is to
-// read main(). TestREADMEEnvironmentTableMatchesUsage and
-// TestUsageDocumentsEveryEnvironmentVariable keep it complete.
+// read main(). TestUsageDocumentsEveryEnvironmentVariable keeps it complete.
 func usage(w io.Writer) {
 	fmt.Fprint(w, `torana — a local-first LLM reverse proxy for AI coding agents
 

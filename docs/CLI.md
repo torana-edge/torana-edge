@@ -70,6 +70,44 @@ deliberate local automation. It does not bypass the server's security checks.
 For another machine, use an operator-controlled local tunnel—not a publicly
 exposed control plane.
 
+## Environment variables
+
+Set startup options before launching Torana. Starting an already running
+instance does not change its environment; stop and restart it to apply new
+values. `torana help` lists the same Torana-owned variables.
+
+| Variable | Default | What it controls |
+| --- | --- | --- |
+| `TORANA_CONFIG` | `config.json` | Seed path; an existing managed store still takes precedence |
+| `TORANA_DATA_DIR` | `os.UserConfigDir()/torana` | Directory containing the managed store, `$TORANA_DATA_DIR/config.json` |
+| `TORANA_PORT` | Configured port; the example uses `8080` | Override the listener port |
+| `TORANA_BIND` | `127.0.0.1` | Listener address; see the access boundary below |
+| `TORANA_DEFAULT_PROVIDER` | Unset | Provider for paths without a `/provider/` prefix |
+| `TORANA_PLUGINS_DIR` | `./plugins` | Directory for local plugin-file commands; live administration follows the running host |
+| `TORANA_LOG_LEVEL` | Unset | Set `debug` for request-lifecycle logs, also enabled by `--debug` |
+| `TORANA_DEBUG_UPSTREAM_ERRORS` | Disabled | Set `1` together with debug logging to log up to 8 KiB of bridged upstream error bodies; these may expose prompts or credentials |
+| `TORANA_CI_CACHE` | Unset | Directory for reusing wazero compiled modules across starts |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | Unset | OTLP gRPC collector; export is off when neither endpoint is set |
+| `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` | Unset | Metrics-specific endpoint, taking precedence over the general endpoint |
+| `OTEL_EXPORTER_OTLP_INSECURE` | `false` | Allow plaintext for a scheme-less endpoint; an explicit `https://` or `http://` scheme wins |
+| `OTEL_EXPORTER_OTLP_METRICS_INSECURE` | `false` | Metrics-specific plaintext setting, taking precedence over the general setting |
+
+`os.UserConfigDir()` follows the platform: usually `$XDG_CONFIG_HOME` or
+`$HOME/.config` on Linux, `$HOME/Library/Application Support` on macOS, and
+`%AppData%` on Windows. `torana status` reports the selected configuration path.
+
+The OTLP exporter applies the other standard OpenTelemetry settings, including
+`OTEL_EXPORTER_OTLP_HEADERS`. Torana reads the four variables above when
+deciding whether and how to export. Only enable sensitive upstream-error
+[diagnostics](PROTOCOL_BRIDGES.md#diagnose-an-upstream-rejection) deliberately.
+
+Widening `TORANA_BIND` exposes the proxy listener, not a multi-user gateway.
+The local UI/API still requires a loopback source and host. A reverse proxy
+forwarding remote traffic to loopback makes it look local, so that proxy must
+block or authenticate `/_torana/*` itself. Conversation state, plugin caches
+and control permissions are not tenant-partitioned; keep Torana scoped to your
+own workstation and tools.
+
 ## Settings: read, edit, apply
 
 ```bash

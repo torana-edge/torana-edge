@@ -74,18 +74,6 @@ go work init . ../torana-plugin-sdk
 `go.work` is gitignored, so this stays local. Without it you will see confusing
 `undefined: pb.Something` errors for types you just added.
 
-### Check documentation examples
-
-From an Edge checkout with the Plugins repository beside it:
-
-```bash
-go run ./scripts/check-plugin-guides ../torana-plugins/plugins
-```
-
-This reads the guides' actual JSON examples and checks their settings schemas,
-exact approvals and required resources with the production host validators.
-It neither executes guests nor contacts providers.
-
 ## Formatting and linting
 
 CI runs `golangci-lint`. It does **not** run `gofmt`, so a handful of files have
