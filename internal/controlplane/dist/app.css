@@ -7,6 +7,33 @@
   box-sizing: border-box;
 }
 
+/* Provider editor: existing workbench theme; connection first, optional translation next. */
+.provider-list { display: grid; gap: var(--space-xs); margin-block-start: var(--space-sm); }
+.provider-editor { min-width: 0; border-block-start: var(--rule-thin) solid var(--color-rule); }
+.provider-summary { padding-block: var(--space-sm); min-height: var(--control-height); cursor: pointer; overflow-wrap: anywhere; font-weight: 650; }
+.provider-content { display: grid; gap: var(--space-sm); padding-block-end: var(--space-sm); }
+.provider-content > .btn { justify-self: start; }
+.provider-translation { display: grid; gap: var(--space-sm); min-width: 0; margin: 0; padding: var(--space-sm) 0; border: 0; }
+.provider-translation legend { font-weight: 650; }
+.provider-content [hidden] { display: none; }
+
+.approval-dialog {
+  position: fixed; inset: 0; margin: auto; height: fit-content;
+  width: min(38rem, calc(100% - var(--space-lg)));
+  max-height: min(85dvh, 46rem); overflow-y: auto;
+  padding: var(--space-md); border: var(--rule-thin) solid var(--color-rule-strong);
+  border-radius: var(--radius-card); background: var(--color-paper-2); color: var(--color-ink);
+}
+.approval-dialog::backdrop { background: var(--color-overlay); }
+.approval-dialog > * + * { margin-block-start: var(--space-sm); }
+.approval-dialog h2 { font-size: var(--text-xl); }
+.approval-dialog pre { white-space: pre-wrap; overflow-wrap: anywhere; font-size: var(--text-sm); }
+.approval-access { padding-inline-start: var(--space-md); }
+.approval-details summary { min-height: var(--control-height); cursor: pointer; }
+.approval-details pre { margin-block-start: var(--space-xs); }
+.approval-actions { justify-content: flex-end; }
+.approval-actions .btn { white-space: nowrap; min-height: var(--control-height); }
+
 html,
 body {
   margin: 0;

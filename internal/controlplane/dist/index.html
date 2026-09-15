@@ -9,6 +9,8 @@
   <link rel="stylesheet" href="fonts.css">
   <link rel="stylesheet" href="app.css">
   <script src="theme.js"></script>
+  <script src="providers.js"></script>
+  <script src="approval.js"></script>
 </head>
 <body>
   <header class="app-header">
@@ -168,14 +170,8 @@
 
       <div class="card form-section">
         <div class="subhead space-block-start-none">Providers</div>
-        <div class="table-container surface-flat">
-          <table class="providers-table">
-            <thead>
-              <tr><th>Name</th><th>Upstream URL</th><th>Format</th><th>Auth mode</th><th>Credential</th><th>Fallback</th><th></th></tr>
-            </thead>
-            <tbody id="providersBody"></tbody>
-          </table>
-        </div>
+        <p class="section-desc">Choose where requests go, how they authenticate, and whether Torana translates between APIs.</p>
+        <div id="providersBody" class="provider-list"></div>
         <button class="btn btn-sm space-block-start-xs" type="button" onclick="addProviderRow()">+ Add provider</button>
       </div>
 
@@ -449,7 +445,7 @@
       if (movedCard) movedCard.focus({ preventScroll: true });
     }
 
-    function enablePlugin(name) {
+    async function enablePlugin(name) {
       const p = pluginByName[name];
       if (!p || !p.digest) {
         showAlert(`Cannot enable ${name}: bundle digest is unavailable.`);
@@ -624,16 +620,16 @@
 		  return false;
 		}
 	  }
-      const summary = selected.length ? selected.join('\n  • ') : 'none';
       const requirements = (p.requires_upstream || []).length
         ? `\nRequires earlier plugin IDs:\n  • ${(p.requires_upstream || []).join('\n  • ')}`
         : '';
       const conflicts = (p.conflicts_with || []).length
         ? `\nConflicts with plugin IDs:\n  • ${(p.conflicts_with || []).join('\n  • ')}`
         : '';
-      const accepted = window.confirm(
-        `Approve ${approvalKey}?\n\nBundle: ${p.digest}\nCapability grants (approved together):\n  • ${summary}\nFailure policy: ${failureMode}${requirements}${conflicts}\n\nAny bundle change requires approval again.`
-      );
+      const accepted = await ToranaApproval.confirm({name: approvalKey, digest: p.digest,
+        permissions: selected, permissionDetails: p.permission_details, failureMode, requirements, conflicts,
+        resources: {credentials, files, http_endpoints: httpEndpoints, model_services: modelServices,
+          pricing_resources: pricingResources, prompt_cache_policies: promptCachePolicies}});
       if (!accepted) return false;
       approvalMap[approvalKey] = {
         digest: p.digest,
@@ -704,8 +700,8 @@
       });
     }
 
-    function approveAndEnable(name, button) {
-      if (!enablePlugin(name)) return;
+    async function approveAndEnable(name, button) {
+      if (!await enablePlugin(name)) return;
       setButtonBusy(button, true, 'Enabling…');
       persistPipeline()
         .then(() => loadPlugins())
@@ -1324,51 +1320,24 @@
       body.appendChild(tr);
     }
     function addProviderRow(name, prov) {
-      prov = prov || {};
-      const body = document.getElementById('providersBody');
-      const tr = document.createElement('tr');
-      // Anchor the row to the config key it came from. saveSettings rebuilds
-      // each provider from the visible inputs only, so without this it would
-      // drop every field this form does not render (pricing, cache,
-      // responses_compaction). New rows have no anchor and no fields to keep.
-      if (name) tr.dataset.originalName = name;
-      const opts = PROVIDER_FORMATS.map(f => `<option value="${f}" ${String(prov.format || '') === f ? 'selected' : ''}>${f || 'transparent'}</option>`).join('');
-      const auth = prov.auth || {mode: 'caller'};
-      const authOpts = ['caller', 'credential', 'none'].map(m => `<option value="${m}" ${auth.mode === m ? 'selected' : ''}>${m}</option>`).join('');
-      tr.innerHTML = `
-        <td><input class="input p-name" aria-label="Provider name" value="${escAttr(name || '')}" placeholder="name"></td>
-        <td><input class="input p-url" aria-label="Provider upstream URL" value="${escAttr(prov.url || '')}" placeholder="https://…"></td>
-        <td><select class="input p-format" aria-label="Provider format">${opts}</select></td>
-        <td><select class="input p-auth-mode" aria-label="Provider authentication mode">${authOpts}</select></td>
-        <td><input class="input p-credential" aria-label="Torana credential ID" value="${escAttr(auth.credential || '')}" placeholder="provider-api-key"></td>
-        <td><input class="input p-fallback" aria-label="Provider fallbacks" value="${escAttr((prov.fallback || []).join(', '))}" placeholder="name, name"></td>
-        <td><button type="button" class="btn btn-sm btn-danger" aria-label="Remove provider" onclick="this.closest('tr').remove()">Remove</button></td>`;
-      body.appendChild(tr);
+      document.getElementById('providersBody').appendChild(ToranaProviders.create(name, prov || {}, PROVIDER_FORMATS));
     }
     function saveSettings(button) {
       setButtonBusy(button, true, 'Saving…');
       const cfg = settingsCfg ? JSON.parse(JSON.stringify(settingsCfg)) : {};
-      const providers = {};
-      document.querySelectorAll('#providersBody tr').forEach(tr => {
-        const name = tr.querySelector('.p-name').value.trim();
-        if (!name) return;
-        // Start from the stored provider so fields this form does not render
-        // survive a save, then override only what the form owns. Renaming a
-        // provider carries its unmanaged fields across with it.
-        const original = (settingsCfg && settingsCfg.providers && tr.dataset.originalName)
-          ? settingsCfg.providers[tr.dataset.originalName] : null;
-        const prov = original ? JSON.parse(JSON.stringify(original)) : {};
-        prov.url = tr.querySelector('.p-url').value.trim();
-        prov.format = tr.querySelector('.p-format').value;
-        delete prov.fallback;
-        const authMode = tr.querySelector('.p-auth-mode').value;
-        const credential = tr.querySelector('.p-credential').value.trim();
-        prov.auth = {mode: authMode};
-        if (authMode === 'credential' && credential) prov.auth.credential = credential;
-        const fb = tr.querySelector('.p-fallback').value.trim();
-        if (fb) prov.fallback = fb.split(',').map(s => s.trim()).filter(Boolean);
-        providers[name] = prov;
-      });
+      const providers = Object.create(null);
+      try {
+        for (const row of document.querySelectorAll('#providersBody .provider-editor')) {
+          const {name, provider} = ToranaProviders.read(row);
+          if (Object.hasOwn(providers, name)) throw new Error(`Provider name ${name} is used twice. Choose a unique name.`);
+          providers[name] = provider;
+        }
+        ToranaProviders.validateFallbacks(providers);
+      } catch (err) {
+        showAlert(err.message);
+        setButtonBusy(button, false);
+        return;
+      }
       cfg.providers = providers;
       cfg.limits = {
         concurrency: parseInt(document.getElementById('limConc').value, 10) || 0,

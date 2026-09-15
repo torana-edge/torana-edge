@@ -23,7 +23,8 @@ instance instead of spawning a duplicate. `serve` still runs in the foreground.
 The process holds an OS lock for its lifetime, so two processes cannot own the
 same store, even on different ports. No OS service or login-startup entry is added.
 
-The startup response includes the instance ID, PID, version, address, managed
+`start`, `status`, and `stop` print readable summaries. Add `--json` for
+structured output, including the instance ID. The startup summary includes PID, version, address, managed
 configuration path, and log path. Logs live in `torana.log` beside the managed
 configuration, with owner-only permissions (mode bits on Unix, a protected ACL
 on Windows). Use `--timeout 90s`
@@ -45,14 +46,23 @@ torana conversations --json
 torana agent discover
 ```
 
-New live-administration commands print JSON by default (`--json` is also
+Live configuration, plugin, statistics, and feed commands print JSON by default (`--json` is also
 accepted). Diagnostics go to stderr; failures exit nonzero. `conversations`
 retains its human-readable table unless passed `--json`.
 
-The instance discovery described here applies to the new live-administration
-commands. Legacy `plugin file path` uses `TORANA_PORT` (default 8080) to
-ask the live server for a path; `plugin file read/tail` use the selected local
-data directory. Set those explicitly when working outside the default instance.
+`plugin file path` uses the same instance discovery and prints only the absolute
+path returned by the running host. Use your shell to read or follow that file:
+
+```bash
+tail -F "$(torana plugin file path usage_logger usage.jsonl)"
+```
+
+In PowerShell: `Get-Content -Wait (torana plugin file path usage_logger usage.jsonl)`.
+To choose a different local instance, put `--addr` before the plugin name:
+`torana plugin file path --addr 127.0.0.1:9090 usage_logger usage.jsonl`.
+Torana does not implement `cat`, `tail`, directory listing, or file deletion in
+its CLI. The old `plugin files` and `plugin file read/tail/purge` wrappers are
+removed. Existing plugin output stays on disk; this change deletes no data.
 
 Use `--addr 127.0.0.1:8080` to select an instance explicitly. Otherwise the CLI
 follows the running store owner's recorded listener, including runtime port
@@ -140,7 +150,7 @@ The server also rejects direct API writes without a revision (`revision_required
 settings. The CLI includes the revision automatically.
 
 The live administration mutations in this guide require `--yes`; existing
-disk-based credential and plugin-file commands retain their own interfaces.
+disk-based credential commands retain their own interfaces.
 Live mutations are not retried automatically. If a request
 times out or the connection drops, inspect the live state before retrying:
 the server may already have applied it. After changing the listening port,
@@ -325,6 +335,6 @@ should expose its automatable actions through `agent.json`, as described in
 | Pipeline/per-hook order and combined edits | `pipeline get`, `pipeline apply`, `pipeline order` |
 | Plugin schema/settings | `plugin inspect NAME`, `plugin config get`, `plugin config apply` |
 | Advertised plugin agent operations | `agent discover`, `agent call` |
-| Private plugin output files | Existing `plugin files` / `plugin file` commands |
+| Private plugin output files | `plugin file path`, composed with shell tools |
 
 Theme selection is a browser preference, not a server configuration change.

@@ -238,11 +238,7 @@ func TestDashboardExplainsAndEnforcesResourceApproval(t *testing.T) {
 }
 
 func TestDashboardKeepsDeploymentAndPluginConcernsOutOfGlobalSettings(t *testing.T) {
-	spa, err := os.ReadFile("../controlplane/dist/index.html")
-	if err != nil {
-		t.Fatal(err)
-	}
-	source := string(spa)
+	source := readDashboard(t)
 	for _, forbidden := range []string{
 		`id="pricingBody"`,
 		`id="offEnabled"`,
@@ -255,14 +251,7 @@ func TestDashboardKeepsDeploymentAndPluginConcernsOutOfGlobalSettings(t *testing
 			t.Fatalf("global settings still exposes plugin/deployment concern %q", forbidden)
 		}
 	}
-	for _, required := range []string{
-		"const cfg = settingsCfg ? JSON.parse(JSON.stringify(settingsCfg)) : {};",
-		"const prov = original ? JSON.parse(JSON.stringify(original)) : {};",
-	} {
-		if !strings.Contains(source, required) {
-			t.Fatalf("settings no longer preserves hidden deployment configuration: missing %q", required)
-		}
-	}
+	assertDashboardPreservesHiddenSettings(t, source)
 }
 
 // TestUnchangedBadConfigDoesNotBlockPipelineEdits — the dashboard's Save &

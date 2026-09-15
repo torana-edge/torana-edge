@@ -62,11 +62,11 @@ setting or deleting credentials**, using the same `TORANA_DATA_DIR` as the
 instance. Do not write these files while the host owns its in-memory store.
 
 ```bash
-torana status
+torana status --json
 torana stop --yes
 torana credential set openai-production --env OPENAI_API_KEY
 torana start
-torana status
+torana status --json
 ```
 
 For an environment-backed value, export the variable before starting Torana;

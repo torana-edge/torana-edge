@@ -115,11 +115,11 @@ func TestDeleteRemovesEveryRotationOnly(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, logical := range []string{"usage.jsonl", "usage.jsonl.1", "usage.jsonl.2"} {
-		if _, err := store.OperatorRead("plugin", logical); !os.IsNotExist(err) {
+		if _, err := os.ReadFile(filepath.Join(base, logical)); !os.IsNotExist(err) {
 			t.Fatalf("%s remains readable after delete: %v", logical, err)
 		}
 	}
-	data, err := store.OperatorRead("plugin", "usage.jsonl.notes")
+	data, err := os.ReadFile(filepath.Join(base, "usage.jsonl.notes"))
 	if err != nil || string(data) != "keep" {
 		t.Fatalf("non-generation sibling = %q, %v", data, err)
 	}
@@ -145,7 +145,7 @@ func TestDeleteValidatesEveryGenerationBeforeRemovingAny(t *testing.T) {
 	if err := store.Delete("plugin", "usage.jsonl", resource); err == nil {
 		t.Fatal("delete accepted a linked retained generation")
 	}
-	data, err := store.OperatorRead("plugin", "usage.jsonl")
+	data, err := store.Read("plugin", "usage.jsonl", resource)
 	if err != nil || string(data) != "current" {
 		t.Fatalf("current generation changed after refused delete: %q, %v", data, err)
 	}
@@ -167,11 +167,15 @@ func TestAppendRotatesAndIsolatesPlugins(t *testing.T) {
 	if err != nil || string(got) != "def" {
 		t.Fatalf("active = %q, %v", got, err)
 	}
-	rotated, err := store.OperatorRead("a", "usage.jsonl.1")
+	rotatedPath, err := store.OperatorPath("a", "usage.jsonl.1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rotated, err := os.ReadFile(rotatedPath)
 	if err != nil || string(rotated) != "abc" {
 		t.Fatalf("rotated = %q, %v", rotated, err)
 	}
-	if _, err := store.OperatorRead("b", "usage.jsonl"); !os.IsNotExist(err) {
+	if _, err := store.Read("b", "usage.jsonl", resource); !os.IsNotExist(err) {
 		t.Fatalf("plugin b read plugin a data: %v", err)
 	}
 	if err := store.Append("a", "usage.jsonl", bytes.Repeat([]byte("x"), 6), resource); err == nil {

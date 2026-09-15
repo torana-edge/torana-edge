@@ -519,8 +519,8 @@ func installPlugin(args []string, stdout, stderr io.Writer) error {
 	}
 
 	fmt.Fprintf(stdout, "\n%d plugin(s) installed. They are NOT running yet.\n", len(installed))
-	_, _ = fmt.Fprintln(stdout, "Torana never loads a plugin you have not approved. Open the control plane")
-	_, _ = fmt.Fprintln(stdout, "at http://127.0.0.1:8080/_torana/, review what each one requests, and approve")
+	_, _ = fmt.Fprintln(stdout, "Run torana status to find your instance's control-plane address.")
+	_, _ = fmt.Fprintln(stdout, "Open it, review what each installed plugin requests, and approve")
 	_, _ = fmt.Fprintln(stdout, "its digest. Approval is bound to that digest — rebuild it and you approve again.")
 	return nil
 }

@@ -106,7 +106,7 @@ agy --mode=plan --print "Summarize this repo's architecture"   # headless
 ### 4. Verify
 
 ```bash
-./torana status
+./torana status --json
 ./torana feed
 ```
 

@@ -10,7 +10,40 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/torana-edge/torana-edge/internal/controlclient"
+	"github.com/torana-edge/torana-edge/internal/instance"
 )
+
+func TestPluginFilePathFollowsLiveInstance(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("TORANA_DATA_DIR", dir)
+	t.Setenv("TORANA_PORT", "1") // The live record takes precedence over this shell.
+	want := filepath.Join(dir, "plugin-data", "usage.jsonl")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("X-Torana-Instance-ID") != "owned" || r.Header.Get("X-Torana-Local-Request") != "1" {
+			t.Error("missing instance binding")
+		}
+		_, _ = io.WriteString(w, `{"path":`+strconv.Quote(want)+`}`)
+	}))
+	defer srv.Close()
+	if err := instance.WriteRecord(filepath.Join(dir, "instance.json"), instance.Record{Address: srv.URL, InstanceID: "owned"}); err != nil {
+		t.Fatal(err)
+	}
+	owner, err := instance.Acquire(filepath.Join(dir, "instance.lock"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer owner.Close()
+	var out bytes.Buffer
+	if err := pluginFile([]string{"path", "usage_logger", "usage.jsonl"}, &out); err != nil {
+		t.Fatal(err)
+	}
+	if out.String() != want+"\n" {
+		t.Fatal(out.String())
+	}
+}
 
 func TestPluginFilePathPrintsOnlyServerResolvedPath(t *testing.T) {
 	want := filepath.Join(t.TempDir(), "plugin-data", "digest", "usage.jsonl")
@@ -69,7 +102,12 @@ func TestPluginFilePathAtUsesRunningControlPlane(t *testing.T) {
 		_, _ = io.WriteString(w, `{"path":`+strconv.Quote(want)+`}`)
 	}))
 	defer server.Close()
-	got, err := pluginFilePathAt(server.Client(), server.URL, "usage logger", "nested/usage.jsonl")
+	client, err := controlclient.New(server.URL, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	got, err := pluginFilePathAt(client, "usage logger", "nested/usage.jsonl")
 	if err != nil || got != want {
 		t.Fatalf("path = %q, %v; want %q", got, err, want)
 	}
@@ -90,10 +128,29 @@ func TestPluginFilePathAtRejectsBadServerResponses(t *testing.T) {
 			w.WriteHeader(response.status)
 			_, _ = io.WriteString(w, response.body)
 		}))
-		_, err := pluginFilePathAt(server.Client(), server.URL, "usage_logger", "usage.jsonl")
+		client, err := controlclient.New(server.URL, time.Second)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = pluginFilePathAt(client, "usage_logger", "usage.jsonl")
+		client.Close()
 		server.Close()
 		if err == nil {
 			t.Errorf("response %d %q was accepted", response.status, response.body)
+		}
+	}
+}
+
+func TestRemovedFileCommandsDoNotTouchFiles(t *testing.T) {
+	for _, args := range [][]string{
+		{"plugin", "files", "usage_logger"},
+		{"plugin", "file", "read", "usage_logger", "usage.jsonl"},
+		{"plugin", "file", "tail", "usage_logger", "usage.jsonl", "--follow"},
+		{"plugin", "file", "purge", "usage_logger"},
+	} {
+		var out, diag bytes.Buffer
+		if err := Run(args, &out, &diag); err == nil || !strings.Contains(err.Error(), "plugin file path") || out.Len() != 0 {
+			t.Fatalf("%v: err=%v stdout=%q", args, err, out.String())
 		}
 	}
 }

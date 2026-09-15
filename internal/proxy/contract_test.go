@@ -270,14 +270,7 @@ func TestFormRenderedListRejectsAFieldTheDashboardDoesNotHave(t *testing.T) {
 // about a hidden implementation detail.
 func TestHiddenSettingsArePreservedByTheDashboard(t *testing.T) {
 	dashboard := readDashboard(t)
-	for _, marker := range []string{
-		"const cfg = settingsCfg ? JSON.parse(JSON.stringify(settingsCfg)) : {};",
-		"const prov = original ? JSON.parse(JSON.stringify(original)) : {};",
-	} {
-		if !strings.Contains(dashboard, marker) {
-			t.Errorf("dashboard no longer preserves hidden settings through %q", marker)
-		}
-	}
+	assertDashboardPreservesHiddenSettings(t, dashboard)
 	if strings.Contains(dashboard, secretSetSentinel) {
 		t.Errorf("deployment-only secret sentinel %q leaked back into the dashboard", secretSetSentinel)
 	}
@@ -300,11 +293,31 @@ func TestDashboardSurfacesPluginCompositionContracts(t *testing.T) {
 
 func readDashboard(t *testing.T) string {
 	t.Helper()
-	b, err := os.ReadFile("../controlplane/dist/index.html")
-	if err != nil {
-		t.Fatal(err)
+	var source strings.Builder
+	for _, name := range []string{"index.html", "providers.js"} {
+		b, err := os.ReadFile("../controlplane/dist/" + name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		source.Write(b)
+		source.WriteByte('\n')
 	}
-	return string(b)
+	return source.String()
+}
+
+func assertDashboardPreservesHiddenSettings(t *testing.T, source string) {
+	t.Helper()
+	if !strings.Contains(source, "const cfg = settingsCfg ? JSON.parse(JSON.stringify(settingsCfg)) : {};") {
+		t.Error("dashboard must rebuild settings from a deep copy of the stored configuration")
+	}
+	legacyClone := strings.Contains(source, "const prov = original ? JSON.parse(JSON.stringify(original)) : {};")
+	extractedClone := strings.Contains(source, "row.originalProvider = structuredClone(original);") &&
+		strings.Contains(source, "const provider = structuredClone(row.originalProvider);") &&
+		strings.Contains(source, "ToranaProviders.read(row)") &&
+		strings.Contains(source, "providers[name] = provider;")
+	if !legacyClone && !extractedClone {
+		t.Error("dashboard must deep-copy the original provider before applying visible edits; hidden provider fields would otherwise be lost")
+	}
 }
 
 func jsonFieldName(f reflect.StructField) string {
