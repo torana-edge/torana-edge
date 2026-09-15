@@ -1,4 +1,4 @@
-# Prompt caching
+# Provider prompt caching
 
 Torana can see conversations, preserve provider cache fields, and use your
 configured prices. It does not infer the economic contract behind those fields:
@@ -54,8 +54,8 @@ verify your actual provider/model before using them.
 | `warm_interval_seconds` | Optional. How often to send a refresh. Defaults to 80% of the shortest tier's TTL. |
 
 Omitting `cache` entirely is valid and means "unknown". Under unknown semantics,
-anything that would spend money must decline to act rather than guess — the same
-rule the compactor follows when pricing is missing.
+do not authorize plugin spending until the required policy resources have
+explicit rates and semantics.
 
 **Verify these numbers against your provider's current pricing page.** Torana
 ships no built-in rates, and a stale `write_multiplier` will produce confidently
@@ -89,39 +89,6 @@ OpenAI extended retention can have different data-retention characteristics
 from in-memory caching. Treat `prompt_cache_retention` as an explicit provider
 choice and review the provider's current data controls before enabling it.
 
-## The arithmetic that limits warming
-
-A refresh costs one cache read over the prefix. Letting the entry lapse costs the
-difference between a write and a read on the next turn. So refreshing is cheaper
-than lapsing only while:
-
-```
-refreshes_spent  <  (write_rate / read_rate) - 1
-```
-
-**The prefix size cancels out.** This is a pure price ratio, independent of how
-large the conversation is. With Anthropic's 5-minute tier at a 12.5x
-write-to-read ratio, that is about **11 refreshes — roughly 45 minutes** at the
-default interval. Past that, warming has cost more than the cache miss it was
-avoiding.
-
-The consequence is worth stating plainly: **keeping a conversation warm
-indefinitely does not converge on break-even, it diverges.** Warming must be
-opt-in per conversation and bounded by a deadline or a refresh budget, never left
-on as a global default.
-
-For gaps longer than roughly half an hour, buying a longer tier once is cheaper
-than holding a short one open. With Anthropic's numbers, the 1-hour tier costs
-`(2.0 - 1.25) = 0.75x` base extra to write, while refreshing the 5-minute tier
-for that same hour costs about `1.5x` base — around twice as much.
-
-| Idle gap | Cheapest move |
-|---|---|
-| under 5 min | nothing — the native TTL covers it |
-| 5–30 min | refresh the short tier |
-| 30–60 min | buy the 1-hour tier once |
-| over 60 min | accept the miss |
-
 ## Validation
 
 `warm_interval_seconds` must be **less than** the shortest tier's `ttl_seconds`.
@@ -131,91 +98,18 @@ on a bill.
 
 Duplicate TTLs, non-positive TTLs, and negative multipliers are also rejected.
 
-## The two cache plugins
+## Optional plugins
 
-Both are optional, both are off unless you configure them, and both decline to
-act when they cannot price what they are about to do. Like every official
-plugin they are distributed from
-[torana-plugins](https://github.com/torana-edge/torana-plugins) and installed
-with `torana plugin install`; nothing is bundled into the proxy.
+The proxy preserves supported cache fields and reports usage without cache
+plugins. To change or refresh an explicit marker, configure and approve the
+separate [tier selector](https://github.com/torana-edge/torana-plugins/blob/main/plugins/cache_tier_selector/README.md)
+or [cache warmer](https://github.com/torana-edge/torana-plugins/blob/main/plugins/cache_warmer/README.md).
+Their guides own resource bindings, lifecycle, failure behavior and
+[warming economics](https://github.com/torana-edge/torana-plugins/blob/main/plugins/cache_warmer/ECONOMICS.md).
 
-Required approval slots:
+## Inspect cache usage
 
-| Plugin | Resource to bind | Complete CLI setup |
-| --- | --- | --- |
-| `cache_tier_selector` | `prompt_cache_policies.request-cache` | [Tier selector guide](https://github.com/torana-edge/torana-plugins/blob/main/plugins/cache_tier_selector/README.md) |
-| `cache_warmer` | `prompt_cache_policies.warm-cache` | [Warmer guide](https://github.com/torana-edge/torana-plugins/blob/main/plugins/cache_warmer/README.md) |
-
-Install and inspect each plugin, bind its declared resource to explicit
-provider/model prices and lifetimes, approve the exact digest/permissions,
-then enable it. A provider's `cache` block alone does not satisfy these
-required bindings.
-
-### cache_tier_selector
-
-Chooses which lifetime to buy for a conversation. It watches how long a
-conversation actually goes idle and, once it has seen a pause long enough to
-lose the short tier, switches that conversation to the longer one.
-
-```json
-{ "plugins": { "config": { "cache_tier_selector": { "mode": "auto" } } } }
-```
-
-`auto` decides per conversation; `long` and `short` force it; `off` disables it.
-
-It needs no budget and sends no requests — it only changes an existing,
-representable cache marker on requests you were already making. If the request
-has no explicit breakpoint carrier, it declines without reading state or
-changing the request. The decision is made once per cached prefix and never
-revisited, because changing the marker changes the prefix and would invalidate
-the entry it is protecting.
-
-### cache_warmer
-
-Refreshes a chosen conversation's explicit, refresh-on-read breakpoint so an
-idle gap does not cost you a rebuild. It is not a generic request repeater and
-does not manage external cache resources such as Gemini `cachedContents`.
-Requires `plugins.runtime.tick_interval_seconds` and an egress budget (see
-[Running plugins](PLUGINS.md)).
-
-```json
-{
-  "plugins": {
-    "runtime": {
-      "tick_interval_seconds": 60,
-      "egress": { "cache_warmer": { "max_calls_per_minute": 4 } }
-    },
-    "config": {
-      "cache_warmer": { "conversations": "a3f9c2e1", "warm_for_minutes": 45 }
-    }
-  }
-}
-```
-
-Pick conversation IDs from `torana conversations`, or from the picker on the
-plugin's page in the control plane, which shows each conversation's model, age
-and cache state and greys out ones whose cache is long gone.
-
-**It is opt-in per conversation on purpose.** Warming everything would lose
-money on every conversation you never return to — see the arithmetic above. It
-stops on whichever comes first: the deadline, the break-even refresh count, or a
-refresh that reports a cache *write*, which means the entry had already lapsed
-and holding it open is no longer preserving anything.
-
-## Seeing what actually happened
-
-Providers report cache token counts per request, and those are the ground truth:
-
-```
-torana conversations
-
-ID            LAST ACTIVE  TURNS  MODEL              CACHE
-a3f9c2e1      2m ago       12     claude-sonnet-4-5  118k read
-7b1e04aa      41m ago      3      gemini-2.5-pro     62k read
-```
-
-**Read** tokens mean the prefix was served from cache. **Written** tokens mean it
-had to be rebuilt — the entry had lapsed. Reads show reuse; writes show creation of a cache entry. These counters alone
-do not prove that Torana warmed it or identify why an entry was created.
-
-Add `--json` for the full record, including the cache prefix key.
+Run `torana conversations` and inspect the request feed or provider usage
+records. Read tokens show reuse; write tokens show creation of a cache entry.
+Those counters alone do not prove that Torana warmed an entry or explain why
+it was created. Keep plugin-egress costs separate from the original request.

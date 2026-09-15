@@ -328,17 +328,9 @@ names or values are never copied into those overflow signals.
 
 ## Ordering
 
-Order matters and Torana enforces the constraints it can:
-
-- When enabled, `intent` must precede a compactor. Its cache improves relevance,
-  but both compactors derive bounded local guidance when it is absent.
-- Run **one** of `compactor` or `keyword_compactor`, not both. Their manifests
-  declare the conflict, so Torana rejects an approved generation containing
-  both before either guest is loaded.
-- Put `tool_governor` before `intent` and `schema_translator`. Governance is
-  defined over the harness's original tool definitions; the later plugins may
-  then add intent fields or translate an approved schema for the provider.
-- Route-capable plugins must precede compaction economic-gate plugins.
+The pipeline runs approved plugins in the configured order. Plugin-specific
+ordering, compatibility and conflicts belong in the
+[individual setup guides](https://github.com/torana-edge/torana-plugins#choose-a-plugin).
 
 Review the suggested order in each plugin's guide; not every semantic
 dependency can be inferred by the host. Manifests can declare `requires_upstream`

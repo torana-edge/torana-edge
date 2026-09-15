@@ -40,8 +40,9 @@ The caller's API key is forwarded upstream; no MITM is involved.
 traffic is plain HTTPS + SSE to `cloudcode-pa.googleapis.com`. The stripped Go
 binary ignores endpoint env vars but **honors `HTTPS_PROXY` and a custom CA via
 `SSL_CERT_FILE`**, with no cert pinning. So Torana terminates TLS for the Code
-Assist hosts, routes chat calls through the plugin pipeline, and tunnels
-everything else (login, telemetry) untouched. `agy`'s own Google OAuth bearer is
+Assist hosts and routes recognized inference calls through the plugin pipeline.
+Other paths on those same hosts are decrypted and forwarded as ordinary HTTP;
+only unmapped hosts remain opaque tunnels. `agy`'s own Google OAuth bearer is
 forwarded upstream — **Torana injects no auth**.
 
 ### 1. Configure
@@ -49,28 +50,22 @@ forwarded upstream — **Torana injects no auth**.
 ```json
 {
   "providers": {
-    "antigravity":       { "url": "https://cloudcode-pa.googleapis.com",       "format": "gemini-codeassist" },
-    "antigravity-daily": { "url": "https://daily-cloudcode-pa.googleapis.com", "format": "gemini-codeassist" }
+    "antigravity": {
+      "url": "https://cloudcode-pa.googleapis.com",
+      "format": "gemini-codeassist"
+    },
+    "antigravity-daily": {
+      "url": "https://daily-cloudcode-pa.googleapis.com",
+      "format": "gemini-codeassist"
+    }
   },
   "mitm": {
     "enabled": true,
     "listen": "127.0.0.1:8099",
     "ca_dir": "./local/mitm",
     "hosts": {
-      "cloudcode-pa.googleapis.com":       "antigravity",
+      "cloudcode-pa.googleapis.com": "antigravity",
       "daily-cloudcode-pa.googleapis.com": "antigravity-daily"
-    }
-  },
-  "plugins": {
-    "dir": "./plugins",
-    "order": ["intent", "keyword_compactor"],
-    "config": {
-      "keyword_compactor": {
-        "tool_policies": [
-          {"match": "read*", "mode": "exact"},
-          {"match": "grep*", "mode": "keyword"}
-        ]
-      }
     }
   }
 }
@@ -111,7 +106,8 @@ agy --mode=plan --print "Summarize this repo's architecture"   # headless
 ### 4. Verify
 
 ```bash
-curl -s localhost:8080/stats   # { compactions, bytes_saved, total_tokens_in, … }
+./torana status
+./torana feed
 ```
 
 The proxy log shows the routing and clean upstream status:
@@ -173,12 +169,9 @@ Two lifetimes to be aware of:
   ingress decrypts caller traffic, so Torana refuses wildcard, LAN, and
   hostname-based listeners. Configured host matching is DNS-case-insensitive;
   the TLS server name must match the CONNECT authority.
-- **Intent + compaction:** `agy`'s tool calls already carry a goal-tied intent.
-  If you enable `intent`, keep it before one compactor for higher-quality
-  guidance; compactors can also derive bounded local guidance when it is
-  absent. Configure explicit policies: keep source reads under `exact` rules.
-  There is no automatic three-turn source window. Unmatched tools remain exact. See
-  [COMPACTION.md](COMPACTION.md).
+- **Plugins are optional.** Verify routing first. Then follow an individual
+  [plugin setup guide](https://github.com/torana-edge/torana-plugins#choose-a-plugin)
+  to configure, approve and enable a transformation.
 
 ## Code Assist provider-extension envelope (mandatory grammar)
 

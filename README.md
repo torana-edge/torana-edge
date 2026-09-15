@@ -82,7 +82,7 @@ does not run code in the proxy. Rebuilding a bundle requires a new approval.
 The [catalogue](https://torana.sh/plugins/) includes tool policy, telemetry,
 PII checks, schema adaptation and optional compaction. Compaction is a plugin
 use case, not a promise of savings:
-[read the measured results](docs/DOGFOOD_COMPACTION_RESULTS.md).
+[read the measured results](https://github.com/torana-edge/torana-plugins/blob/main/plugins/compactor/DEEPSEEK_RESULTS.md).
 
 ## Configuration
 

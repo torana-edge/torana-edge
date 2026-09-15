@@ -10,7 +10,7 @@ Start small: route one request, see it in the feed, then add one plugin.
 - [Credentials](CREDENTIALS.md): caller keys, named secrets and safe updates.
 - [Harness compatibility](HARNESS_COMPATIBILITY.md) and [protocol bridges](PROTOCOL_BRIDGES.md).
 - [Local models](LOCAL_MODELS.md) and [optional TLS ingress](GEMINI_ANTIGRAVITY.md).
-- [Cache backends](CACHE.md), [prompt caching](PROMPT_CACHING.md), [compaction](COMPACTION.md).
+- [Cache backends](CACHE.md), [provider prompt caching](PROMPT_CACHING.md), [Responses compaction](RESPONSES_COMPACTION.md).
 - [Audit logging](AUDIT_LOG.md) and [upgrades](UPGRADE_NOTES.md).
 
 ## Extend and contribute
@@ -23,7 +23,7 @@ Start small: route one request, see it in the feed, then add one plugin.
 ## Evaluate the evidence
 
 - [Performance reports](../benchmarks/README.md): measured revisions, workloads and limits.
-- [Compaction experiment](DOGFOOD_COMPACTION_RESULTS.md): methodology and negative result.
+- [Compaction experiment](https://github.com/torana-edge/torana-plugins/blob/main/plugins/compactor/DEEPSEEK_RESULTS.md): methodology and negative result, maintained with the plugin.
 - [Run benchmarks](BENCHMARKS.md) against your own workload.
 
 Edge owns operator instructions, the SDK owns authoring contracts, and Plugins

@@ -120,4 +120,4 @@ Later [idle-retirement raw records](benchmark-wasm-idle-retirement-2026-08-18.js
 measure retirement of burst-created instances. The current runtime policy is
 explained in [Running plugins](../docs/PLUGINS.md#instance-concurrency-and-idle-memory),
 not inferred from these historical measurements. The PII prefilter follow-up
-and its retained measurements are [documented with the plugin](https://github.com/torana-edge/torana-plugins/blob/main/docs/PERFORMANCE.md).
+and its retained measurements are [documented with the plugin](https://github.com/torana-edge/torana-plugins/blob/main/plugins/pii/PERFORMANCE.md).
