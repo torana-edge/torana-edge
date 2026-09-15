@@ -35,7 +35,7 @@ func Run(args []string, stdout, stderr io.Writer) error {
 	case "remove", "rm":
 		return removePlugin(args[2:], stdout)
 	case "files":
-		return listPluginFiles(args[2:], stdout)
+		return errors.New("use torana plugin file path <name> <logical-path> to locate output; use your shell to list or read files")
 	case "file":
 		return pluginFile(args[2:], stdout)
 	case "help", "-h", "--help":
@@ -58,11 +58,7 @@ func Usage(w io.Writer) {
 	_, _ = fmt.Fprintln(w, "  torana plugin install <source>... [--official] [--dir plugins]")
 	_, _ = fmt.Fprintln(w, "  torana plugin list [--dir plugins]")
 	_, _ = fmt.Fprintln(w, "  torana plugin remove <name>... [--dir plugins]")
-	_, _ = fmt.Fprintln(w, "  torana plugin files <name>")
-	_, _ = fmt.Fprintln(w, "  torana plugin file path <name> <logical-path>")
-	_, _ = fmt.Fprintln(w, "  torana plugin file read <name> <logical-path>")
-	_, _ = fmt.Fprintln(w, "  torana plugin file tail <name> <logical-path> [--follow]")
-	_, _ = fmt.Fprintln(w, "  torana plugin file purge <name>")
+	_, _ = fmt.Fprintln(w, "  torana plugin file path [--addr origin] <name> <logical-path>")
 	_, _ = fmt.Fprintln(w, "")
 	_, _ = fmt.Fprintln(w, "A source is a local path or a repository path:")
 	_, _ = fmt.Fprintln(w, "  torana plugin install ./my-plugin")

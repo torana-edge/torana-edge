@@ -42,24 +42,14 @@ func TestHandler(t *testing.T) {
 		t.Errorf("body missing expected title string")
 	}
 
-	// The settings form renders six fields per provider but saves a whole
-	// provider object, so it must start from the stored one or it deletes
-	// everything it does not render (pricing, cache semantics). The server
-	// enforces this too — see TestSettingsSaveKeepsPricing, which is the real
-	// guarantee — but losing it here means every save makes a pointless
-	// round-trip through the preservation path, so pin the anchor.
-	for _, marker := range []string{"dataset.originalName", "tr.dataset.originalName"} {
-		if !strings.Contains(string(body), marker) {
-			t.Errorf("settings form lost its stored-provider anchor: missing %q", marker)
-		}
-	}
-
 	for _, asset := range []struct {
 		path   string
 		marker string
 	}{
 		{path: "/tokens.css", marker: "--color-accent"},
 		{path: "/app.css", marker: "designed-as-app"},
+		{path: "/providers.js", marker: "ToranaProviders"},
+		{path: "/approval.js", marker: "ToranaApproval"},
 	} {
 		resp, err := http.Get(srv.URL + asset.path)
 		if err != nil {
@@ -73,8 +63,12 @@ func TestHandler(t *testing.T) {
 		if resp.StatusCode != http.StatusOK {
 			t.Errorf("GET %s status = %d, want 200", asset.path, resp.StatusCode)
 		}
-		if got := resp.Header.Get("Content-Type"); !strings.HasPrefix(got, "text/css") {
-			t.Errorf("GET %s Content-Type = %q, want text/css", asset.path, got)
+		mimeType := "text/css"
+		if strings.HasSuffix(asset.path, ".js") {
+			mimeType = "text/javascript"
+		}
+		if got := resp.Header.Get("Content-Type"); !strings.HasPrefix(got, mimeType) {
+			t.Errorf("GET %s Content-Type = %q, want %s", asset.path, got, mimeType)
 		}
 		if !strings.Contains(string(assetBody), asset.marker) {
 			t.Errorf("GET %s body missing marker %q", asset.path, asset.marker)

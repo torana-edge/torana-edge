@@ -1,5 +1,8 @@
 # Coding-harness compatibility
 
+Start with the [harness setup guide](HARNESS_SETUP.md) for existing-login paths
+and recent live results, including the Codex ChatGPT-login response-hook limitation.
+
 Pointing a coding harness at Torana changes only the provider inference traffic
 that Torana explicitly understands. On a native route (no `bridge` configured),
 account, quota, status, telemetry, update, model-list, MCP, and unknown auxiliary

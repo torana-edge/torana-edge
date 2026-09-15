@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"text/tabwriter"
 	"time"
 
 	"github.com/torana-edge/torana-edge/internal/controlclient"
@@ -26,7 +27,7 @@ func Handles(args []string) bool {
 }
 
 func Usage(w io.Writer) {
-	fmt.Fprint(w, `Local process management (JSON output):
+	fmt.Fprint(w, `Local process management:
   torana start [--timeout 60s]    start a background instance, or report the existing one
   torana status [--addr origin]  inspect this managed store's running instance
   torana stop --yes [--addr origin] [--timeout 15s]
@@ -36,7 +37,7 @@ as serve. It starts this binary directly, waits for readiness, and records logs
 in TORANA_DATA_DIR/torana.log (the default data directory applies when unset).
 It does not install an OS service or change shell configuration. stop requests
 graceful shutdown of the inspected instance; it never kills a PID from a file.
---json is accepted; JSON is already the default. Connection errors other than
+Add --json for machine-readable output. Connection errors other than
 connection-refused are not treated as proof that a process is stopped.
 `)
 }
@@ -88,7 +89,7 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	} else {
 		fs.StringVar(&addr, "addr", "", "loopback control-plane origin")
 	}
-	fs.Bool("json", false, "JSON output (default)")
+	jsonOutput := fs.Bool("json", false, "machine-readable JSON output")
 	if command == "stop" {
 		fs.BoolVar(&yes, "yes", false, "confirm shutdown")
 	}
@@ -160,7 +161,32 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
-	return json.NewEncoder(stdout).Encode(s)
+	return printStatus(stdout, s, *jsonOutput)
+}
+
+func printStatus(w io.Writer, s Status, jsonOutput bool) error {
+	if jsonOutput {
+		encoder := json.NewEncoder(w)
+		encoder.SetIndent("", "  ")
+		return encoder.Encode(s)
+	}
+	table := tabwriter.NewWriter(w, 0, 4, 2, ' ', 0)
+	fmt.Fprintf(table, "Torana\t%s\n", s.Status)
+	if s.Status != "stopped" {
+		fmt.Fprintf(table, "Control plane\t%s/_torana/\n", s.Address)
+		if s.PID > 0 {
+			fmt.Fprintf(table, "PID\t%d\n", s.PID)
+		}
+		if s.UptimeSeconds > 0 {
+			fmt.Fprintf(table, "Uptime\t%s\n", time.Duration(s.UptimeSeconds)*time.Second)
+		}
+	}
+	for _, row := range [][2]string{{"Address", s.Address}, {"Version", s.Version}, {"Config", s.ConfigPath}, {"Plugins", s.PluginDirectory}, {"Logs", s.LogPath}} {
+		if row[1] != "" {
+			fmt.Fprintf(table, "%s\t%s\n", row[0], row[1])
+		}
+	}
+	return table.Flush()
 }
 
 func stop(ctx context.Context, c *controlclient.Client, s Status) (Status, error) {

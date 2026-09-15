@@ -76,6 +76,10 @@ go work init . ../torana-plugin-sdk
 
 ## Formatting and linting
 
+For embedded control-plane JavaScript changes, run
+`node --test internal/controlplane/*_test.mjs` with Node 22 or newer.
+These exercise UI behavior; the Go tests also verify embedded asset serving.
+
 CI runs `golangci-lint`. It does **not** run `gofmt`, so a handful of files have
 drifted and `gofmt -l` is currently noisy. Format what you touch; don't reformat
 files you didn't otherwise change, since that buries your diff.

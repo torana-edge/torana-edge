@@ -6,9 +6,9 @@ work across supported APIs.
 
 ## Prerequisites
 
-You need Git, Go 1.26.6 or newer, and a credential for at least one provider.
-The commands below use DeepSeek, but the routing model is the same for every
-configured provider.
+You need Git and Go 1.26.6 or newer. Which coding harness do you already use?
+Start with its existing provider/login using the [harness setup guide](HARNESS_SETUP.md).
+A separate API key is only needed if you choose the direct API-key example.
 
 ## Install from source
 
@@ -37,8 +37,28 @@ The repository ignores this disposable directory. It still contains the
 authoritative managed config, encrypted credentials, durable plugin state, and
 private plugin files, so delete it when the evaluation is over and do not copy
 it into source control elsewhere. This Torana process receives no provider
-credential. The process runs in the background. In the same shell, configure
-the caller credential and send the request:
+credential at startup. The process runs in the background.
+
+## Connect your harness
+
+For an already signed-in Claude Code installation:
+
+```bash
+ANTHROPIC_BASE_URL=http://127.0.0.1:8080/provider/anthropic claude
+```
+
+Ask it to read a small non-sensitive file, then open the local control plane’s
+Feed at `http://127.0.0.1:8080/_torana/`. Keep the `anthropic` provider’s
+authentication set to **Use harness credentials**; no DeepSeek key is needed.
+For Codex, Antigravity, pi, or oh-my-pi, use the
+[harness-specific settings and verification results](HARNESS_SETUP.md).
+
+## Optional: use an API key directly
+
+Already have an API key and want to make a request without a harness?
+Here is a DeepSeek example. For another provider, modify its URL, format and
+authentication in Settings, then adapt the request endpoint, model, and payload
+to that provider’s API. Choose a model available to your account.
 
 ```bash
 export DEEPSEEK_API_KEY='replace-with-your-deepseek-key'
@@ -127,11 +147,10 @@ repository that you clone and review yourself:
 ./torana plugin install ../my-private-plugins/usage_logger
 ```
 
-Run `./torana plugin inspect usage_logger`, then follow its
-[complete CLI approval example](https://github.com/torana-edge/torana-plugins/blob/main/plugins/usage_logger/README.md).
-Approve the exact bundle digest, full requested permission set and private-file
-budget, then enable it. The local UI offers the same steps. Send a few requests
-and inspect its content-free output:
+Open the local control plane, select **usage_logger**, review its requested file
+access and retention budget, then choose **Approve and enable**. For terminal or
+agent automation, use its [CLI setup guide](https://github.com/torana-edge/torana-plugins/blob/main/plugins/usage_logger/README.md#configure).
+Send another request from your harness and inspect its content-free output:
 
 ```bash
 tail -F "$(./torana plugin file path usage_logger usage.jsonl)"
@@ -141,7 +160,9 @@ Installation alone never approves, enables, or runs anything, and the plugin
 cannot pick an OS path: Torana owns the private rotating file. The operator can
 resolve that local path for standard Unix tools; `tail -F` continues following
 it when Torana rotates the file. The running instance is authoritative for its
-data directory, so a fresh second terminal needs no repeated environment setup.
+data directory. In another terminal, select the same `TORANA_DATA_DIR`, or use
+`plugin file path --addr 127.0.0.1:8080 usage_logger usage.jsonl` to target the
+instance explicitly.
 
 Once that lifecycle is clear, the maintained set can be built locally with:
 
@@ -275,9 +296,11 @@ providers:
 
 ### Claude Code
 ```bash
-export ANTHROPIC_BASE_URL=http://localhost:8080/provider/deepseek-anthropic
-export ANTHROPIC_AUTH_TOKEN='replace-with-your-deepseek-key'
+ANTHROPIC_BASE_URL=http://localhost:8080/provider/anthropic claude
 ```
+
+This uses the existing Claude login, unless an explicit key/token or key helper
+takes precedence. See [Claude Code setup](HARNESS_SETUP.md#claude-code).
 
 ### Antigravity CLI (agy)
 `agy` can't take a base URL, so route it through Torana's MITM ingress — see
@@ -307,6 +330,8 @@ to connect your credential and select a model. The compatible adapter's base URL
 includes `/v1`; verify the resulting request in Torana's feed.
 
 ### Codex
+See [Codex setup and the ChatGPT-login verification result](HARNESS_SETUP.md#codex)
+before choosing a route. The API-key example below is different from a ChatGPT login.
 Codex reaches a custom provider through `~/.codex/config.toml`, and it speaks
 the OpenAI **Responses** API rather than Chat Completions — so point it at an
 `openai`-format Torana provider whose upstream serves `/responses`:
@@ -320,6 +345,7 @@ name = "Torana"
 base_url = "http://localhost:8080/provider/openai/v1"
 env_key = "OPENAI_API_KEY"
 wire_api = "responses"
+supports_websockets = false
 ```
 
 This example uses a dedicated `torana` provider entry so its base URL is

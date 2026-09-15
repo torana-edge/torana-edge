@@ -67,7 +67,7 @@ func TestBinaryBackgroundLifecycle(t *testing.T) {
 		}
 		return cmd.CombinedOutput()
 	}
-	started, err := run(true, "start", "--timeout", "20s")
+	started, err := run(true, "start", "--json", "--timeout", "20s")
 	if err != nil {
 		// This is an isolated fixture, never the user's daemon/log or secrets.
 		log, logErr := os.ReadFile(filepath.Join(data, "torana.log"))
@@ -79,7 +79,7 @@ func TestBinaryBackgroundLifecycle(t *testing.T) {
 		t.Fatalf("start not JSON: %s", started)
 	}
 	for _, command := range []string{"status", "start"} {
-		out, err := run(false, command)
+		out, err := run(false, command, "--json")
 		if err != nil {
 			t.Fatalf("%s: %v\n%s", command, err, out)
 		}
@@ -94,15 +94,15 @@ func TestBinaryBackgroundLifecycle(t *testing.T) {
 	if out, err := run(true, "serve"); err == nil || !strings.Contains(string(out), "another Torana process") {
 		t.Fatalf("duplicate serve: %v %s", err, out)
 	}
-	if out, err := run(false, "stop", "--yes"); err != nil || !strings.Contains(string(out), `"status":"stopped"`) {
+	if out, err := run(false, "stop", "--yes"); err != nil || !strings.Contains(string(out), "stopped") || json.Valid(out) {
 		t.Fatalf("stop: %v %s", err, out)
 	}
-	if out, err := run(true, "status"); err != nil || !strings.Contains(string(out), `"status":"stopped"`) {
+	if out, err := run(true, "status"); err != nil || !strings.Contains(string(out), "stopped") || json.Valid(out) {
 		t.Fatalf("after stop: %v %s", err, out)
 	}
 	// Restart must still be able to read the existing managed config after
 	// the first startup secured its parent directory (Windows ACL regression).
-	if out, err := run(true, "start"); err != nil {
+	if out, err := run(true, "start"); err != nil || !strings.Contains(string(out), "Control plane") || json.Valid(out) {
 		t.Fatalf("restart: %v %s", err, out)
 	}
 	if out, err := run(false, "stop", "--yes"); err != nil {
