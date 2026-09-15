@@ -1,4 +1,4 @@
-// Run from Edge: go run scripts/check-plugin-guides.go ../torana-plugins/plugins
+// Run from Edge: go run ./scripts/check-plugin-guides ../torana-plugins/plugins
 // Uses the running host's schema and approval rules without executing guests.
 package main
 

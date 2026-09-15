@@ -79,7 +79,7 @@ go work init . ../torana-plugin-sdk
 From an Edge checkout with the Plugins repository beside it:
 
 ```bash
-go run scripts/check-plugin-guides.go ../torana-plugins/plugins
+go run ./scripts/check-plugin-guides ../torana-plugins/plugins
 ```
 
 This reads the guides' actual JSON examples and checks their settings schemas,
