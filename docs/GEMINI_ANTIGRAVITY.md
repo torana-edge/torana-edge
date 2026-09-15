@@ -123,16 +123,17 @@ Upstream returned 200
 
 ### How it works
 
-```
-[agy] --HTTPS_PROXY--> [Torana MITM :8099] --TLS terminate--> classify path:
-        chat  (:streamGenerateContent / :generateContent) → /provider/antigravity* → plugin pipeline → real Google
-        other (loadCodeAssist, oauth2, telemetry, …)       → opaque TLS tunnel                        → real Google
-```
+1. The CONNECT host selects interception: an unmapped host uses an opaque TLS
+   tunnel; a host listed in `mitm.hosts` is decrypted with the local CA.
+2. On a mapped host, recognized inference paths enter the plugin pipeline.
+3. Other paths on that mapped host are decrypted and forwarded as ordinary
+   HTTP. They are **not** opaque tunnels merely because they are non-chat calls.
 
 ### What the listener is, stated plainly
 
 The MITM ingress is a **CONNECT forward proxy for the local machine**. Hosts in
-`mitm.hosts` are decrypted and routed through the pipeline; every other CONNECT
+`mitm.hosts` are decrypted, with inference paths routed through the pipeline;
+every other CONNECT
 is tunnelled to whatever address it names, which is how the non-decrypted
 traffic above reaches Google. That also means any local process pointed at
 `HTTPS_PROXY` can reach any host through it, not only Google's.
@@ -151,11 +152,11 @@ Two lifetimes to be aware of:
   expires, Torana refuses to start the ingress and names the two files to
   delete; clients trusting the old CA must then trust the newly written bundle.
 
-### Notes & gotchas (from dogfooding)
+### Client setup and privacy boundaries
 
-- **Only the `cloudcode-pa` hosts are decrypted.** OAuth token exchange
-  (`oauth2.googleapis.com`), login, and telemetry are opaquely tunneled — Torana
-  never sees your credential exchange.
+- **Only configured hosts are decrypted.** With the example host map,
+  `oauth2.googleapis.com` is not intercepted. Adding a host to `mitm.hosts`
+  makes all its HTTPS paths visible to Torana, not only inference calls.
 - **The CA private key stays in `ca_dir`** (gitignored). Torana sets that
   directory to `0700` and the key to `0600` on Unix, refusing over-permissive
   key files there. On every platform it refuses partial, malformed, mismatched,
@@ -175,8 +176,8 @@ Two lifetimes to be aware of:
 - **Intent + compaction:** `agy`'s tool calls already carry a goal-tied intent.
   If you enable `intent`, keep it before one compactor for higher-quality
   guidance; compactors can also derive bounded local guidance when it is
-  absent. Configure explicit policies; source reads remain exact for three
-  later assistant turns and unmatched tools remain exact. See
+  absent. Configure explicit policies: keep source reads under `exact` rules.
+  There is no automatic three-turn source window. Unmatched tools remain exact. See
   [COMPACTION.md](COMPACTION.md).
 
 ## Code Assist provider-extension envelope (mandatory grammar)

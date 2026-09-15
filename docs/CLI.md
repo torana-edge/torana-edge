@@ -49,6 +49,11 @@ New live-administration commands print JSON by default (`--json` is also
 accepted). Diagnostics go to stderr; failures exit nonzero. `conversations`
 retains its human-readable table unless passed `--json`.
 
+The instance discovery described here applies to the new live-administration
+commands. Legacy `plugin file path` uses `TORANA_PORT` (default 8080) to
+ask the live server for a path; `plugin file read/tail` use the selected local
+data directory. Set those explicitly when working outside the default instance.
+
 Use `--addr 127.0.0.1:8080` to select an instance explicitly. Otherwise the CLI
 follows the running store owner's recorded listener, including runtime port
 changes and overrides from another shell. Requests using this record are bound
@@ -81,9 +86,8 @@ secret's `__set__` marker to keep its existing value; never treat that marker
 as a credential. Named credentials remain available through `torana credential`.
 
 The existing `credential set/delete` commands write the on-disk store, not this
-live API. Stop Torana before using them and start it afterward. Live credential
-value updates are a separate follow-up; changing an auth reference through
-`config apply` does not refresh values written by another process.
+live API. Stop Torana before using them and start it afterward. Changing an auth reference through `config apply` does not refresh values
+written by another process.
 
 Plugin configuration is intentionally excluded from this snapshot: settings
 apply cannot change the pipeline. An input containing `config.plugins` is

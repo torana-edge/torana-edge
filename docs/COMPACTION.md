@@ -31,7 +31,7 @@ Mutation tools, diffs, failed commands, errors, stack traces, and similar
 safety-sensitive outputs remain exact even if a broad rule matches them.
 Model-generated compaction can never run on a fresh output.
 
-Example deterministic coding-agent policy:
+Example deterministic coding-agent policy (settings only; approvals are separate):
 
 ```json
 {
@@ -73,6 +73,18 @@ prefix rewrite is required. Do not enable it for reads that require exact
 fidelity or for exact records. Keep source-reading tools `exact`: merely making
 their output recoverable does not bound the number or cost of recovery calls an
 agent may make.
+
+### Install and approve the resources
+
+Even deterministic `keyword_compactor` requires the `target` pricing slot for
+attribution. It does not call a model service. Install and inspect the bundle,
+bind that slot to the routed provider/models, approve the exact permission set,
+then enable it. Missing required bindings prevent activation.
+
+Use the complete [keyword compactor setup](https://github.com/torana-edge/torana-plugins/blob/main/plugins/keyword_compactor/README.md)
+or [model compactor setup](https://github.com/torana-edge/torana-plugins/blob/main/plugins/compactor/README.md)
+for CLI approval examples. Run only one compactor. Plugin settings above are
+not a complete approval and cannot grant resources.
 
 ## Model compaction economics
 

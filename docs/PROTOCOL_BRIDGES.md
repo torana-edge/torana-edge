@@ -228,8 +228,7 @@ command recorded at the top of the generated `.txt` file (Python 3.10 or later).
 See [upgrade notes](UPGRADE_NOTES.md) for the canonical Responses plugin fields
 and the one-time cache-prefix identity change.
 
-The [research notes](design/PROTOCOL_BRIDGE_RESEARCH.md) record pinned source
-and tests from Bifrost, CLIProxyAPI and LiteLLM. They informed stream state,
-identity and usage handling, and also exposed behavior we deliberately reject:
-dropped tools, orphan results converted to user text, and failed streams mapped
-to successful completion. No third-party runtime dependency was added.
+Bridge validation rejects dropped tools, orphan results rewritten as user
+text, and failed streams represented as successful completion. The implementation
+and client-validation tests above define this contract; no third-party proxy
+runtime is required.

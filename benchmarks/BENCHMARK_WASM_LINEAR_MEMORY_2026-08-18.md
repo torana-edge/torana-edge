@@ -1,5 +1,9 @@
 # WASM guest linear-memory profile — 2026-08-18
 
+> Historical measurement: 18 August 2026, at the revisions recorded below.
+> Not a benchmark of the current release. Retained raw data and limitations
+> are part of the result.
+
 This report follows up the process-level plugin-chain evidence in
 [`BENCHMARK_PLUGIN_CHAIN_RESULTS_2026-08-18.md`](./BENCHMARK_PLUGIN_CHAIN_RESULTS_2026-08-18.md).
 It separates the guest's directly observable WASM linear memory from the
@@ -94,3 +98,26 @@ not materially reduce RSS. The evidence instead supports:
 
 This is a single-machine engineering measurement, not a universal capacity or
 language-performance claim.
+
+## Repeated calls and host overhead
+
+Follow-up measurements used the same guests, source revisions and digests above,
+in separate fresh processes with four retained instances and the same 16 KiB
+request. Standard Go linear memory grew to 11 MiB at 100 calls and 12 MiB at
+1,000 calls per instance, remaining 12 MiB through 10,000. Rust remained
+1.0625 MiB at every checkpoint. This observed plateau is not a proof that every
+plugin or workload is bounded.
+
+[Repeated-call raw records](benchmark-wasm-repeated-memory-2026-08-18.jsonl)
+retain each checkpoint. The [host-attribution records](benchmark-wasm-host-memory-2026-08-18.jsonl)
+separate compiled module, one/four instances, forced-GC live heap and Linux RSS.
+The compiled Go module added about 45.1 MiB RSS but 6.78 MiB live heap;
+individual Go instances added about 9.72 MiB live heap, beyond their 7 MiB initial
+linear memory. Rust's corresponding compiled-module RSS delta was 1.64 MiB.
+Linear pages alone are not the process footprint.
+
+Later [idle-retirement raw records](benchmark-wasm-idle-retirement-2026-08-18.jsonl)
+measure retirement of burst-created instances. The current runtime policy is
+explained in [Running plugins](../docs/PLUGINS.md#instance-concurrency-and-idle-memory),
+not inferred from these historical measurements. The PII prefilter follow-up
+and its retained measurements are [documented with the plugin](https://github.com/torana-edge/torana-plugins/blob/main/docs/PERFORMANCE.md).

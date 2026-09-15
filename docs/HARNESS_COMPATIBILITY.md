@@ -105,12 +105,11 @@ cross-contract translation; use the bridge surface above instead.
 - Provider-native prompt-cache semantics documented in
   [Prompt caching](PROMPT_CACHING.md).
 
-## Honest release boundary
+## Verify your harness
 
 The endpoint and wire-shape contracts above are covered in CI. They do not
 claim that every release of every third-party harness has been manually tested.
-Before an Edge release, the owner still runs credentialed smoke tests for the
-clients being advertised: a normal turn, a streamed tool turn, resume, model
+For your setup, check a normal turn, a streamed tool turn, resume, model
 discovery, and representative account/status traffic. For a bridge, record the
 client contract, upstream contract, model, and harness version separately. Check
 a complete tool-result follow-up and the auxiliary APIs that client actually

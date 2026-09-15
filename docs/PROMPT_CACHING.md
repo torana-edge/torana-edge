@@ -3,14 +3,20 @@
 Torana can see conversations, preserve provider cache fields, and use your
 configured prices. It does not infer the economic contract behind those fields:
 how long a provider keeps a prefix, whether a read restarts that lifetime, and
-what the read or write costs. You declare those facts once per provider, and
-anything that would spend money on the cache reads them.
+what the read or write costs. Declare those facts explicitly. Cache plugins
+use their own operator-approved policy resources; provider configuration alone
+does not bind or authorize those resources.
 
 This is configuration rather than a built-in table on purpose. A provider that
 speaks the OpenAI wire format while pricing and caching like Anthropic is handled
 by the same code path as Anthropic — nothing branches on a provider name.
 
 ## Configuration
+
+There are three layers: provider pricing/cache settings, plugin settings, and
+digest-bound plugin resource approvals. Setting the first two does not grant
+the third. Numbers below illustrate a cache contract, not current price advice;
+verify your actual provider/model before using them.
 
 ```json
 {
@@ -133,6 +139,18 @@ plugin they are distributed from
 [torana-plugins](https://github.com/torana-edge/torana-plugins) and installed
 with `torana plugin install`; nothing is bundled into the proxy.
 
+Required approval slots:
+
+| Plugin | Resource to bind | Complete CLI setup |
+| --- | --- | --- |
+| `cache_tier_selector` | `prompt_cache_policies.request-cache` | [Tier selector guide](https://github.com/torana-edge/torana-plugins/blob/main/plugins/cache_tier_selector/README.md) |
+| `cache_warmer` | `prompt_cache_policies.warm-cache` | [Warmer guide](https://github.com/torana-edge/torana-plugins/blob/main/plugins/cache_warmer/README.md) |
+
+Install and inspect each plugin, bind its declared resource to explicit
+provider/model prices and lifetimes, approve the exact digest/permissions,
+then enable it. A provider's `cache` block alone does not satisfy these
+required bindings.
+
 ### cache_tier_selector
 
 Chooses which lifetime to buy for a conversation. It watches how long a
@@ -197,7 +215,7 @@ a3f9c2e1      2m ago       12     claude-sonnet-4-5  118k read
 ```
 
 **Read** tokens mean the prefix was served from cache. **Written** tokens mean it
-had to be rebuilt — the entry had lapsed. A conversation resuming after an idle
-gap that shows reads was kept warm; one that shows writes was not.
+had to be rebuilt — the entry had lapsed. Reads show reuse; writes show creation of a cache entry. These counters alone
+do not prove that Torana warmed it or identify why an entry was created.
 
 Add `--json` for the full record, including the cache prefix key.

@@ -27,15 +27,19 @@ OpenAI Responses can target a Chat Completions backend for supported features.
 }
 ```
 
-Route your harness to `http://localhost:8080/provider/ollama`.
+For an OpenAI Chat Completions client that appends `/chat/completions`, set
+its base URL to `http://localhost:8080/provider/ollama/v1`. A raw request uses
+`http://localhost:8080/provider/ollama/v1/chat/completions`. A Responses client
+needs an upstream that implements Responses or an explicit protocol bridge.
 
 The fallback declares its own Torana credential: on failover Torana removes the
 caller's credential rather than forwarding it to a different vendor. Give every
 authenticated fallback its own named credential; use `auth.mode: none` for a
 local server that needs no authentication.
 
-Typical use: bind Ollama as a compactor model service
-while keeping your primary provider (DeepSeek/OpenAI) for reasoning.
+To keep routing local, omit the remote fallback shown above. If it is enabled,
+eligible failures send the request to DeepSeek using its named credential.
+You can also use a local model as a plugin-bound scanner or summarizer.
 
 ## vLLM
 
@@ -51,7 +55,7 @@ while keeping your primary provider (DeepSeek/OpenAI) for reasoning.
 }
 ```
 
-## Local summarization (free compaction)
+## Optional local summarization
 
 Use the `compactor` plugin to route explicitly eligible historical results to
 a local model. The provider URL is the server origin or configured base path;
@@ -96,6 +100,7 @@ models that may carry the original request. The plugin receives only the
 logical slot names; provider URLs, credentials, models, paths, and budgets
 remain operator-owned.
 
-The local summarizer has zero marginal API cost, but the target resource still
+A local summarizer may have no per-token API charge, but uses your machine's
+compute and adds latency. The target resource still
 needs operator-supplied cache-read/write pricing for the positive-net gate.
 See [COMPACTION.md](COMPACTION.md) for the complete configuration.
