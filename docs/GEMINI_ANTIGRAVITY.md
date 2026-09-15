@@ -40,8 +40,9 @@ The caller's API key is forwarded upstream; no MITM is involved.
 traffic is plain HTTPS + SSE to `cloudcode-pa.googleapis.com`. The stripped Go
 binary ignores endpoint env vars but **honors `HTTPS_PROXY` and a custom CA via
 `SSL_CERT_FILE`**, with no cert pinning. So Torana terminates TLS for the Code
-Assist hosts, routes chat calls through the plugin pipeline, and tunnels
-everything else (login, telemetry) untouched. `agy`'s own Google OAuth bearer is
+Assist hosts and routes recognized inference calls through the plugin pipeline.
+Other paths on those same hosts are decrypted and forwarded as ordinary HTTP;
+only unmapped hosts remain opaque tunnels. `agy`'s own Google OAuth bearer is
 forwarded upstream — **Torana injects no auth**.
 
 ### 1. Configure
@@ -49,28 +50,22 @@ forwarded upstream — **Torana injects no auth**.
 ```json
 {
   "providers": {
-    "antigravity":       { "url": "https://cloudcode-pa.googleapis.com",       "format": "gemini-codeassist" },
-    "antigravity-daily": { "url": "https://daily-cloudcode-pa.googleapis.com", "format": "gemini-codeassist" }
+    "antigravity": {
+      "url": "https://cloudcode-pa.googleapis.com",
+      "format": "gemini-codeassist"
+    },
+    "antigravity-daily": {
+      "url": "https://daily-cloudcode-pa.googleapis.com",
+      "format": "gemini-codeassist"
+    }
   },
   "mitm": {
     "enabled": true,
     "listen": "127.0.0.1:8099",
     "ca_dir": "./local/mitm",
     "hosts": {
-      "cloudcode-pa.googleapis.com":       "antigravity",
+      "cloudcode-pa.googleapis.com": "antigravity",
       "daily-cloudcode-pa.googleapis.com": "antigravity-daily"
-    }
-  },
-  "plugins": {
-    "dir": "./plugins",
-    "order": ["intent", "keyword_compactor"],
-    "config": {
-      "keyword_compactor": {
-        "tool_policies": [
-          {"match": "read*", "mode": "exact"},
-          {"match": "grep*", "mode": "keyword"}
-        ]
-      }
     }
   }
 }
@@ -111,7 +106,8 @@ agy --mode=plan --print "Summarize this repo's architecture"   # headless
 ### 4. Verify
 
 ```bash
-curl -s localhost:8080/stats   # { compactions, bytes_saved, total_tokens_in, … }
+./torana status
+./torana feed
 ```
 
 The proxy log shows the routing and clean upstream status:
@@ -123,16 +119,17 @@ Upstream returned 200
 
 ### How it works
 
-```
-[agy] --HTTPS_PROXY--> [Torana MITM :8099] --TLS terminate--> classify path:
-        chat  (:streamGenerateContent / :generateContent) → /provider/antigravity* → plugin pipeline → real Google
-        other (loadCodeAssist, oauth2, telemetry, …)       → opaque TLS tunnel                        → real Google
-```
+1. The CONNECT host selects interception: an unmapped host uses an opaque TLS
+   tunnel; a host listed in `mitm.hosts` is decrypted with the local CA.
+2. On a mapped host, recognized inference paths enter the plugin pipeline.
+3. Other paths on that mapped host are decrypted and forwarded as ordinary
+   HTTP. They are **not** opaque tunnels merely because they are non-chat calls.
 
 ### What the listener is, stated plainly
 
 The MITM ingress is a **CONNECT forward proxy for the local machine**. Hosts in
-`mitm.hosts` are decrypted and routed through the pipeline; every other CONNECT
+`mitm.hosts` are decrypted, with inference paths routed through the pipeline;
+every other CONNECT
 is tunnelled to whatever address it names, which is how the non-decrypted
 traffic above reaches Google. That also means any local process pointed at
 `HTTPS_PROXY` can reach any host through it, not only Google's.
@@ -151,11 +148,11 @@ Two lifetimes to be aware of:
   expires, Torana refuses to start the ingress and names the two files to
   delete; clients trusting the old CA must then trust the newly written bundle.
 
-### Notes & gotchas (from dogfooding)
+### Client setup and privacy boundaries
 
-- **Only the `cloudcode-pa` hosts are decrypted.** OAuth token exchange
-  (`oauth2.googleapis.com`), login, and telemetry are opaquely tunneled — Torana
-  never sees your credential exchange.
+- **Only configured hosts are decrypted.** With the example host map,
+  `oauth2.googleapis.com` is not intercepted. Adding a host to `mitm.hosts`
+  makes all its HTTPS paths visible to Torana, not only inference calls.
 - **The CA private key stays in `ca_dir`** (gitignored). Torana sets that
   directory to `0700` and the key to `0600` on Unix, refusing over-permissive
   key files there. On every platform it refuses partial, malformed, mismatched,
@@ -172,12 +169,9 @@ Two lifetimes to be aware of:
   ingress decrypts caller traffic, so Torana refuses wildcard, LAN, and
   hostname-based listeners. Configured host matching is DNS-case-insensitive;
   the TLS server name must match the CONNECT authority.
-- **Intent + compaction:** `agy`'s tool calls already carry a goal-tied intent.
-  If you enable `intent`, keep it before one compactor for higher-quality
-  guidance; compactors can also derive bounded local guidance when it is
-  absent. Configure explicit policies; source reads remain exact for three
-  later assistant turns and unmatched tools remain exact. See
-  [COMPACTION.md](COMPACTION.md).
+- **Plugins are optional.** Verify routing first. Then follow an individual
+  [plugin setup guide](https://github.com/torana-edge/torana-plugins#choose-a-plugin)
+  to configure, approve and enable a transformation.
 
 ## Code Assist provider-extension envelope (mandatory grammar)
 

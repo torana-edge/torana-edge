@@ -1,5 +1,9 @@
 # Official plugin-chain benchmark — 2026-08-18
 
+> Historical measurement: 18 August 2026, at the revisions recorded below.
+> Not a benchmark of the current release. Retained raw data and limitations
+> are part of the result.
+
 This run measures a real four-plugin WASM chain under a coding-agent-shaped
 request, not an empty guest or host-only microbenchmark. It is capacity evidence
 for this machine and configuration—not a universal Torana throughput claim.

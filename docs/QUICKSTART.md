@@ -1,9 +1,8 @@
 # Torana Edge — Quickstart
 
-Torana Edge sits between your AI coding harness and your LLM provider. It
-normalizes provider formats and runs an ordered WASM plugin pipeline. Optional
-tool-aware and provider-native compaction can reduce repeated context while
-preserving exact evidence according to explicit policies.
+Get a request flowing through Torana, see it in the feed, then add one plugin.
+Torana sits between your coding harness and model provider so your plugins can
+work across supported APIs.
 
 ## Prerequisites
 
@@ -11,7 +10,7 @@ You need Git, Go 1.26.6 or newer, and a credential for at least one provider.
 The commands below use DeepSeek, but the routing model is the same for every
 configured provider.
 
-## Install the current pre-release
+## Install from source
 
 ```bash
 git clone https://github.com/torana-edge/torana-edge.git
@@ -20,9 +19,9 @@ go build -o ./torana ./cmd/torana
 cp config.example.json config.json
 ```
 
-Torana Edge is intentionally unversioned. For a reproducible deployment, replace
-`main` with a reviewed commit SHA before building. No WASM plugins are bundled.
-The supplied configuration is deliberately minimal and enables none.
+The available install path is a source build. For a reproducible deployment,
+check out a reviewed commit SHA before building. No WASM plugins are bundled;
+the supplied configuration enables none.
 
 First prove the proxy works without plugins. The example providers use caller
 authentication, so the harness or curl supplies the provider credential on each
@@ -30,15 +29,16 @@ request. For a disposable evaluation, keep managed state in the checkout:
 
 ```bash
 export TORANA_DATA_DIR="$PWD/.torana-data"
-./torana --debug
+./torana --debug start
+./torana status
 ```
 
 The repository ignores this disposable directory. It still contains the
 authoritative managed config, encrypted credentials, durable plugin state, and
 private plugin files, so delete it when the evaluation is over and do not copy
 it into source control elsewhere. This Torana process receives no provider
-credential. Keep that terminal open. In another terminal, configure the caller
-credential and send the request:
+credential. The process runs in the background. In the same shell, configure
+the caller credential and send the request:
 
 ```bash
 export DEEPSEEK_API_KEY='replace-with-your-deepseek-key'
@@ -52,10 +52,13 @@ curl --fail-with-body http://127.0.0.1:8080/provider/deepseek/v1/chat/completion
 ```
 
 The health endpoint returns `{"status":"ok"}` and the second command returns a
-normal provider response. The debug terminal prints safe request-received and
-request-completed lines, so you can verify the traffic really crossed Torana;
-by default it never logs headers or bodies. Bridge error-body diagnostics have a
-separate [explicit opt-in](PROTOCOL_BRIDGES.md#diagnose-an-upstream-rejection).
+normal provider response. Run `./torana feed` to find the matching request;
+`./torana status` reports the log path. Debug logging records safe
+request-received/completed lines, not headers or bodies. Bridge error-body
+diagnostics have a separate [explicit opt-in](PROTOCOL_BRIDGES.md#diagnose-an-upstream-rejection).
+
+Use `./torana stop --yes` when finished. `./torana serve` is available if
+you prefer a foreground process.
 
 ## Configure
 
@@ -94,7 +97,8 @@ descriptions and the hints in the local Control Plane are the annotated
 reference.
 
 On the first run, Torana imports this seed into its managed store at
-`~/.config/torana/config.json` (or `$TORANA_DATA_DIR/config.json`). After that,
+`$TORANA_DATA_DIR/config.json`, or the platform's
+[user-config directory](CLI.md#environment-variables) when unset. After that,
 the managed store is authoritative so Control Plane edits survive restarts.
 Changing the original seed does not overwrite managed state; Torana logs a
 warning when both files exist and differ. Edit the managed configuration through
@@ -108,7 +112,7 @@ configuration while believing you are testing a changed seed.
 
 The empty order is intentional: discovered plugins are not implicitly trusted
 or enabled. After the plugin-free request above succeeds, leave Torana running
-and install one plugin from the second terminal. The watcher discovers the new
+and install one plugin from the same checkout. The watcher discovers the new
 bundle without a restart:
 
 ```bash
@@ -123,9 +127,11 @@ repository that you clone and review yourself:
 ./torana plugin install ../my-private-plugins/usage_logger
 ```
 
-Open the Control Plane, inspect and approve the exact bundle digest and requested
-capability subset and private-file budget, then enable `usage_logger` and put it
-in the pipeline. Send a few requests and inspect its content-free output:
+Run `./torana plugin inspect usage_logger`, then follow its
+[complete CLI approval example](https://github.com/torana-edge/torana-plugins/blob/main/plugins/usage_logger/README.md).
+Approve the exact bundle digest, full requested permission set and private-file
+budget, then enable it. The local UI offers the same steps. Send a few requests
+and inspect its content-free output:
 
 ```bash
 tail -F "$(./torana plugin file path usage_logger usage.jsonl)"
@@ -157,14 +163,23 @@ curl --fail-with-body --silent \
 See [AGENT_CONTROL_PLANE.md](AGENT_CONTROL_PLANE.md) for stable operation IDs,
 JSON error envelopes, mutation guidance, and plugin-contributed operations.
 
-> The baseline leaves all tool output exact. To enable compaction, approve one
-> compactor and configure explicit tool policies. `intent` is optional; placing
-> it before the compactor improves relevance, while a bounded local signal is
-> used when it is absent. Unknown tools, mutations, and failures remain exact.
-> See [COMPACTION.md](COMPACTION.md).
+Browse the [plugin setup guides](https://github.com/torana-edge/torana-plugins#choose-a-plugin)
+when you want to change traffic. No plugin transformation is enabled by default.
 
 
 ### Provider authentication and fallbacks
+
+The shipped seed names these native routes. Replace or add providers through
+the CLI or UI after the first import; the route name is your local identifier,
+not a claim that every feature of that provider is supported.
+
+| Route prefix | Upstream URL | Format |
+| --- | --- | --- |
+| `/provider/deepseek/...` | `https://api.deepseek.com` | `openai` |
+| `/provider/deepseek-anthropic/...` | `https://api.deepseek.com/anthropic` | `anthropic` |
+| `/provider/openai/...` | `https://api.openai.com` | `openai` |
+| `/provider/anthropic/...` | `https://api.anthropic.com` | `anthropic` |
+| `/provider/gemini/...` | `https://generativelanguage.googleapis.com` | `gemini` |
 
 Provider `url` values contain an HTTP(S) origin and optional path only. Query
 strings, fragments, and embedded userinfo are rejected rather than silently
@@ -201,15 +216,18 @@ The full source, slot, refresh, and custom-provider model is documented in
 [Credentials](CREDENTIALS.md).
 
 Configure a reusable environment-backed credential without putting its value in
-JSON:
+JSON. In the same data-directory environment, stop before changing disk state:
 
 ```bash
+./torana stop --yes
 ./torana credential set fallback-api-key --env FALLBACK_API_KEY
+# Export FALLBACK_API_KEY in this shell before starting the host.
+./torana start
+./torana status
 ```
 
-Credential commands update durable configuration. If Torana is already
-running, restart it after adding, changing, or deleting a credential so the
-new provider registry and local encrypted store are loaded together.
+Credential commands are disk-based; they do not refresh a running instance.
+See [Credentials](CREDENTIALS.md) for the stop-before-write lifecycle.
 
 Then set the fallback provider's auth to
 `{"mode":"credential","credential":"fallback-api-key"}`.
@@ -230,10 +248,12 @@ otherwise is a 401 from a provider you never called directly.
 
 ## Route your harness
 
-Torana only sends explicitly supported inference endpoints through its IR and
-plugins. Model-list, account, quota, status, telemetry, update, MCP, and unknown
-auxiliary requests pass through normally. See the precise per-format contract
-in [Coding-harness compatibility](HARNESS_COMPATIBILITY.md).
+Torana sends supported inference endpoints through its shared format and
+plugins. Native routes forward auxiliary calls as ordinary HTTP; an explicit
+bridge rejects them with HTTP 400, even when both bridge contracts are the
+same. See [Coding-harness compatibility](HARNESS_COMPATIBILITY.md) and
+[Protocol bridges](PROTOCOL_BRIDGES.md). The following auxiliary check uses the
+native DeepSeek route from this guide.
 
 You can verify the auxiliary-path half of that contract directly:
 
@@ -275,12 +295,16 @@ export SSL_CERT_FILE=/abs/path/to/local/mitm/bundle.pem
     "deepseek": {
       "npm": "@ai-sdk/openai-compatible",
       "options": {
-        "baseURL": "http://localhost:8080/provider/deepseek"
+        "baseURL": "http://localhost:8080/provider/deepseek/v1"
       }
     }
   }
 }
 ```
+
+Follow [OpenCode's provider configuration](https://opencode.ai/docs/providers/)
+to connect your credential and select a model. The compatible adapter's base URL
+includes `/v1`; verify the resulting request in Torana's feed.
 
 ### Codex
 Codex reaches a custom provider through `~/.codex/config.toml`, and it speaks
@@ -298,15 +322,19 @@ env_key = "OPENAI_API_KEY"
 wire_api = "responses"
 ```
 
-`model_provider` cannot be named `openai`, `ollama` or `lmstudio` — those IDs
-are reserved — which is why the block above is called `torana`.
+This example uses a dedicated `torana` provider entry so its base URL is
+separate from your other provider settings.
 
 ### Aider
 ```bash
 export OPENAI_API_BASE=http://localhost:8080/provider/deepseek/v1
 export OPENAI_API_KEY='replace-with-your-key'
-aider --model deepseek/deepseek-flash
+aider --model openai/deepseek-flash
 ```
+
+This follows Aider's [OpenAI-compatible configuration](https://aider.chat/docs/llms/openai-compat.html):
+the `openai/` model prefix selects the adapter that uses these variables.
+Confirm the request appears in `./torana feed`.
 
 ### OpenHands / Continue.dev
 Configure the provider URL to `http://localhost:8080/provider/deepseek/v1`

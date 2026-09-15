@@ -1,5 +1,9 @@
 # Near-limit request-body benchmark — 2026-08-18
 
+> Historical measurement: 18 August 2026, at the revisions recorded below.
+> Not a benchmark of the current release. Retained raw data and limitations
+> are part of the result.
+
 This run measures whole-process scaling as coding-agent-shaped request bodies
 approach Torana's configured 10 MiB limit. It is evidence for issue #199, not a
 universal capacity claim and not a plugin-runtime benchmark.

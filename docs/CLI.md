@@ -49,6 +49,11 @@ New live-administration commands print JSON by default (`--json` is also
 accepted). Diagnostics go to stderr; failures exit nonzero. `conversations`
 retains its human-readable table unless passed `--json`.
 
+The instance discovery described here applies to the new live-administration
+commands. Legacy `plugin file path` uses `TORANA_PORT` (default 8080) to
+ask the live server for a path; `plugin file read/tail` use the selected local
+data directory. Set those explicitly when working outside the default instance.
+
 Use `--addr 127.0.0.1:8080` to select an instance explicitly. Otherwise the CLI
 follows the running store owner's recorded listener, including runtime port
 changes and overrides from another shell. Requests using this record are bound
@@ -64,6 +69,44 @@ HTTP proxies, refuses redirects, and sends `X-Torana-Local-Request: 1` for
 deliberate local automation. It does not bypass the server's security checks.
 For another machine, use an operator-controlled local tunnel—not a publicly
 exposed control plane.
+
+## Environment variables
+
+Set startup options before launching Torana. Starting an already running
+instance does not change its environment; stop and restart it to apply new
+values. `torana help` lists the same Torana-owned variables.
+
+| Variable | Default | What it controls |
+| --- | --- | --- |
+| `TORANA_CONFIG` | `config.json` | Seed path; an existing managed store still takes precedence |
+| `TORANA_DATA_DIR` | `os.UserConfigDir()/torana` | Directory containing the managed store, `$TORANA_DATA_DIR/config.json` |
+| `TORANA_PORT` | Configured port; the example uses `8080` | Override the listener port |
+| `TORANA_BIND` | `127.0.0.1` | Listener address; see the access boundary below |
+| `TORANA_DEFAULT_PROVIDER` | Unset | Provider for paths without a `/provider/` prefix |
+| `TORANA_PLUGINS_DIR` | `./plugins` | Directory for local plugin-file commands; live administration follows the running host |
+| `TORANA_LOG_LEVEL` | Unset | Set `debug` for request-lifecycle logs, also enabled by `--debug` |
+| `TORANA_DEBUG_UPSTREAM_ERRORS` | Disabled | Set `1` together with debug logging to log up to 8 KiB of bridged upstream error bodies; these may expose prompts or credentials |
+| `TORANA_CI_CACHE` | Unset | Directory for reusing wazero compiled modules across starts |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | Unset | OTLP gRPC collector; export is off when neither endpoint is set |
+| `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` | Unset | Metrics-specific endpoint, taking precedence over the general endpoint |
+| `OTEL_EXPORTER_OTLP_INSECURE` | `false` | Allow plaintext for a scheme-less endpoint; an explicit `https://` or `http://` scheme wins |
+| `OTEL_EXPORTER_OTLP_METRICS_INSECURE` | `false` | Metrics-specific plaintext setting, taking precedence over the general setting |
+
+`os.UserConfigDir()` follows the platform: usually `$XDG_CONFIG_HOME` or
+`$HOME/.config` on Linux, `$HOME/Library/Application Support` on macOS, and
+`%AppData%` on Windows. `torana status` reports the selected configuration path.
+
+The OTLP exporter applies the other standard OpenTelemetry settings, including
+`OTEL_EXPORTER_OTLP_HEADERS`. Torana reads the four variables above when
+deciding whether and how to export. Only enable sensitive upstream-error
+[diagnostics](PROTOCOL_BRIDGES.md#diagnose-an-upstream-rejection) deliberately.
+
+Widening `TORANA_BIND` exposes the proxy listener, not a multi-user gateway.
+The local UI/API still requires a loopback source and host. A reverse proxy
+forwarding remote traffic to loopback makes it look local, so that proxy must
+block or authenticate `/_torana/*` itself. Conversation state, plugin caches
+and control permissions are not tenant-partitioned; keep Torana scoped to your
+own workstation and tools.
 
 ## Settings: read, edit, apply
 
@@ -81,9 +124,8 @@ secret's `__set__` marker to keep its existing value; never treat that marker
 as a credential. Named credentials remain available through `torana credential`.
 
 The existing `credential set/delete` commands write the on-disk store, not this
-live API. Stop Torana before using them and start it afterward. Live credential
-value updates are a separate follow-up; changing an auth reference through
-`config apply` does not refresh values written by another process.
+live API. Stop Torana before using them and start it afterward. Changing an auth reference through `config apply` does not refresh values
+written by another process.
 
 Plugin configuration is intentionally excluded from this snapshot: settings
 apply cannot change the pipeline. An input containing `config.plugins` is

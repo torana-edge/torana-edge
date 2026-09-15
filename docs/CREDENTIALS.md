@@ -33,6 +33,9 @@ caller's credential.
 
 ## Built-in sources
 
+Before any `credential set` or `delete` example below, stop the instance.
+The complete lifecycle is shown after the examples.
+
 The environment source resolves the variable each time the credential is used:
 
 ```bash
@@ -54,9 +57,21 @@ torana credential list
 torana credential delete openai-production
 ```
 
-Credential commands update durable configuration. Restart a running Torana
-process afterward so its immutable provider generation and credential registry
-are rebuilt together.
+Credential mutations write disk state, not the live API. **Stop before
+setting or deleting credentials**, using the same `TORANA_DATA_DIR` as the
+instance. Do not write these files while the host owns its in-memory store.
+
+```bash
+torana status
+torana stop --yes
+torana credential set openai-production --env OPENAI_API_KEY
+torana start
+torana status
+```
+
+For an environment-backed value, export the variable before starting Torana;
+a running process does not inherit later changes made in your shell. Then
+configure the route's auth reference through the live settings API.
 
 ## Plugin slots
 
@@ -97,8 +112,9 @@ intentionally outside Torana's plugin sandbox.
 - configuration contains credential IDs and source keys, never local secret
   plaintext;
 - local values are encrypted and written atomically with owner-only modes;
-- debug logs, API errors, plugin manifests, and the Control Plane never return
-  credential values;
+- normal host logs and control-plane responses redact credential values.
+  Opt-in [upstream error-body diagnostics](PROTOCOL_BRIDGES.md#diagnose-an-upstream-rejection)
+  can contain provider-echoed prompts or secrets; treat those logs as sensitive;
 - plugins receive only approved slots and cannot access provider authentication
   configuration;
 - scoped HTTP has no ambient proxy, follows no redirects, and enforces the

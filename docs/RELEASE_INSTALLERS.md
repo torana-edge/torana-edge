@@ -1,10 +1,8 @@
-# Release installers: preparation and activation
+# Release and installer reference
 
-The installer implementation is ready for review in this repository. **Do not
-serve it from torana.sh or advertise binary installation until the first Torana
-Edge tag has a published GitHub release with verified assets.** This change
-does not create a tag, publish a release, deploy the website, or change the
-current source-build quickstart. An SDK tag is not an Edge release.
+This is the maintainer procedure for building, verifying and distributing an
+Edge release. Users should follow the [quickstart](QUICKSTART.md), which names
+the available install channel. An SDK tag is not an Edge binary release.
 
 Both scripts install the existing `torana` binary built from `cmd/torana` in
 this repository. They do not introduce a separate CLI distribution, start a
@@ -92,7 +90,7 @@ your user Environment Variables on Windows, then open a new terminal.
 
 ## Checks before website activation
 
-1. Merge the reviewed installer and CLI changes and require green release
+1. Require reviewed source and green release
    dry-run and installer checks. `.github/workflows/installers.yml` exercises
    the actual shell on Linux/macOS and both PowerShell 5.1 and PowerShell 7 on
    Windows, using synthetic downloads and a built native `torana` executable.
@@ -103,9 +101,9 @@ your user Environment Variables on Windows, then open a new terminal.
    tag parsing with prerelease/build metadata and executes its native binary.
    These checks do not prove a public release or valid attestation exists.
 2. In a separately authorized release operation, tag the reviewed Edge commit
-   with the chosen `vMAJOR.MINOR.PATCH` version. The prepared tag-only
+   with the chosen `vMAJOR.MINOR.PATCH` version. The tag-only
    `.github/workflows/release.yml` will then build, attest, verify, and publish
-   a new release. Merging this PR alone does not run it; there is no manual
+   a new release. A branch merge does not run it; there is no manual
    dispatch. It requires the tag's exact commit to be on the default branch
    and refuses any preexisting release, including drafts. The existing CI
    snapshot is **not a release** and skips publishing/announcements/SBOMs.
@@ -127,12 +125,12 @@ your user Environment Variables on Windows, then open a new terminal.
    static routes `/install.sh` and `/install.ps1` on torana.sh. Record the Edge
    tag/commit in that PR. Serve script content directly over HTTPS (not the
    site's HTML fallback), and add the commands below to the site's install
-   UI. Website deployment is a separate action from this preparation PR.
+   UI. Website deployment is a separate operation from an Edge release.
 6. After that website deployment, verify both route bodies exactly match the
    tagged scripts and run the public commands in clean test accounts. Only
    then update the source-build quickstarts to advertise binary installation.
 
-## Prepared release workflow and provenance gate
+## Release workflow and provenance gate
 
 The workflow uses pinned GoReleaser `v2.15.4`, Syft `v1.51.1`, GitHub CLI
 `v2.100.0` (with a checked-in download digest), and commit-pinned actions.
@@ -141,7 +139,7 @@ configured SBOMs and strict SHA-256 manifest, then uses
 [`actions/attest`](https://github.com/actions/attest/tree/v4.2.2) to generate
 signed SLSA build provenance. This is the current successor to
 `actions/attest-build-provenance`. It uploads the attestation to GitHub and
-includes `provenance.sigstore.json` in the future release.
+includes `provenance.sigstore.json` in the release.
 
 Before publication, every archive and SBOM is verified against that bundle,
 the exact repository, signer workflow, tag ref, and source commit; self-hosted
@@ -151,7 +149,7 @@ manifest, and bundle. Signing uses GitHub's OIDC identity, not a stored private
 key. Job permissions are limited to contents, attestations, and OIDC writes;
 no website, package registry, or repository settings are changed.
 
-Default-branch ancestry is not review approval. This PR does not configure a
+Default-branch ancestry is not review approval. The workflow does not configure a
 protected-environment approval gate, branch protection, or tag protection.
 Maintainers remain responsible for those policies and deliberate release-tag
 sign-off; do not assume repository settings enforce them.
@@ -202,9 +200,9 @@ not repair it. Do not delete/recreate releases, move tags, overwrite assets,
 or activate the website. Preserve the workflow evidence and require an
 explicitly reviewed recovery decision (which may require a new version).
 Local/mock tests cannot exercise GitHub OIDC signing or real release uploads;
-those remain part of the separately authorized first-release validation.
+those remain part of live release validation.
 
-## Future website commands — not live until activation
+## Website installer commands
 
 macOS/Linux (download the complete script, then execute it):
 

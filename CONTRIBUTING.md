@@ -1,8 +1,7 @@
 # Contributing to Torana
 
-Thanks for wanting to help. This document is the set of things that are not
-obvious from reading the code — the traps that cost someone an afternoon, so they
-don't cost you one.
+Help improve the proxy, a test, or a confusing first step. Start with the
+build below, then choose the guide for the part you want to change.
 
 ## Getting a build
 
@@ -34,8 +33,8 @@ it with the same 1800s timeout).
 ### The official plugins are not in this repository
 
 They live in [torana-plugins](https://github.com/torana-edge/torana-plugins),
-and this repo has no copy. It used to, and the copy silently drifted — the
-`pii` plugin here shipped an unsound cache key for long enough to matter.
+and are not copied into this repository. Test bundles built from their owning
+source so the tests exercise the same implementation users install.
 
 So the tests split by what they assert:
 
@@ -56,8 +55,7 @@ TORANA_PLUGIN_BUNDLES_DIR=$(pwd)/../torana-plugins/dist go test ./...
 
 **If you are adding a test, ask which kind it is.** A test that needs a real
 plugin to state its assertion is testing that plugin, and belongs behind the
-gate. Reaching for a real plugin because it happens to be convenient is how the
-copy got here in the first place.
+gate. Host-only tests should use purpose-built fixtures.
 
 ### Working across the four repositories
 
@@ -136,25 +134,19 @@ both repos:
    repository**, not here: `torana-plugin-sdk/docs/PLUGIN_SEMANTICS.md` (the
    normative field table), `torana-plugin-sdk/docs/WRITING_A_PLUGIN.md`, and
    **`torana-plugin-sdk/docs/WASM_PLUGIN_GUIDE.md`**. That last one is the
-   document that lets less capable models write correct plugins; a new
-   capability that isn't in its host-function section and final checklist
-   silently stops the guide being sufficient.
+   low-level contract reference for SDK implementers. Keep its host-function
+   section and checklist aligned with the implementation.
 
 **In torana-edge:**
 
-6. **Nothing.** `supportedHooks` and `supportedPermissions` in
-   `internal/plugin/discovery.go` are `setOf(sdk.Hooks)` and
-   `setOf(sdk.Permissions)` — derived from the SDK's published vocabulary, not
-   restated here. Adding the name in the SDK (step 1) is what makes the host
-   accept it, and the SDK bump is what delivers it.
-
-   They are still strict allowlists: an unlisted name is rejected at load. The
-   list just has one source now. Maintaining a second copy is precisely how the
-   official plugin repository's validator ended up rejecting capabilities this
-   host accepts.
-7. Note that `CallRequest` treats a **missing export as silent success**. That is
-   why `ValidateHooks` exists: a manifest declaring a hook the binary doesn't
-   export fails at load rather than doing nothing forever.
+6. Bump the SDK dependency. Hook and permission names are imported from
+   `sdk.Hooks` and `sdk.Permissions`; do not maintain a second vocabulary.
+   A recognized name alone does not implement a feature: add or update host
+   dispatch, enforcement, resource plumbing and integration tests as needed.
+7. ABI v1 exports one `run_hook` dispatcher and a `supported_hooks` bitmap,
+   not one WASM function per hook. The loader checks the ABI revision, function
+   signatures and exact equality between the manifest hooks and bitmap.
+   Test both a valid guest and each invalid declaration.
 
 ### Everything an ABI change breaks
 
@@ -181,8 +173,7 @@ no schema, the host stores the plugin configuration opaquely.
 **Adding a per-provider config field?** Add it to `unmanagedProviderFields` in
 `internal/proxy/server.go` unless you also add it to the settings form. The form
 rebuilds each provider from the fields it renders, so anything it doesn't know
-about is dropped on save. This bug ate `pricing` and `responses_compaction` in
-production for a while.
+about can be dropped on save. Add a round-trip test for the new field.
 
 **Plugin state scoping.** `env.meta_*` is per-request and namespaced per plugin.
 `env.cache_*` is a plugin-private, cross-request TTL cache.

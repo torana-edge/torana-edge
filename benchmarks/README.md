@@ -1,33 +1,32 @@
-# Benchmark archive
+# Performance evidence
 
-Raw measurement data and the per-scenario reports it backs. This is evidence,
-not documentation — it is kept so a published number can be traced to the run
-that produced it, and so a later run can be compared against an earlier one.
+These reports describe measured revisions and workloads, not a guarantee for
+today's build or your machine. Start with proxy-only overhead, then include the
+plugins and payload sizes you actually use.
 
-Nothing here is written for a first-time reader. Two files are, and they stayed
-in `docs/`:
+| Report | What it tells you |
+| --- | --- |
+| [Proxy-only process benchmark](../docs/BENCHMARK_PRODUCTION_RESULTS_2026-08-18.md) | Direct vs Torana latency, CPU and RSS with a controlled provider; no plugins |
+| [Official plugin chain](BENCHMARK_PLUGIN_CHAIN_RESULTS_2026-08-18.md) | End-to-end cost with four plugins, including memory and stability |
+| [Saturation](BENCHMARK_SATURATION_RESULTS_2026-08-18.md) | Payload and concurrency scaling on one machine |
+| [Large requests](BENCHMARK_LARGE_REQUEST_RESULTS_2026-08-18.md) | Near-limit request memory costs |
+| [WASM memory](BENCHMARK_WASM_LINEAR_MEMORY_2026-08-18.md) | Go/Rust guest footprint, repeated-call growth and host overhead |
 
-- [How to run the benchmarks](../docs/BENCHMARKS.md) — the harness, the
-  scenarios, and how to read the output.
-- [Production results, 2026-08-18](../docs/BENCHMARK_PRODUCTION_RESULTS_2026-08-18.md)
-  — the current headline result, the one the README links.
+All reports are dated 18 August 2026 and name their source revisions.
+The plugin-chain result is an important counterbalance to the proxy-only
+headline; do not quote one as if it measured the other.
 
-## What is here
+[Run the benchmarks](../docs/BENCHMARKS.md) to evaluate another revision.
+Raw `benchmark-*.jsonl` records, including older baseline and optimization
+runs, remain public here so comparisons can be reproduced. Some historical
+reports are available in Git history at their original revision; raw evidence
+has not been removed.
 
-| Kind | Files |
-|---|---|
-| Raw runs | `benchmark-*.jsonl` — one JSON object per request |
-| Run summaries | `benchmark-*-summary.jsonl` — cumulative counters for a run |
-| Scenario reports | `BENCHMARK_*_RESULTS_*.md`, `BENCHMARK_WASM_*.md` |
+For example, `benchmark-large-heap-2026-08-18.jsonl` remains here while its
+optimization narrative is available at [the pre-refresh revision](https://github.com/torana-edge/torana-edge/blob/60e9fb9362bff7c1635395c7f44ee417aa7440f6/benchmarks/BENCHMARK_LARGE_HEAP_RESULTS_2026-08-18.md).
+Use that revision for context when reading an older raw run without a current
+companion report; do not treat it as a measurement of today's build.
 
-Every file is dated in its name. A report and its data share the same date and
-scenario, so `BENCHMARK_SATURATION_RESULTS_2026-08-18.md` reads
-`benchmark-saturation-2026-08-18.jsonl`.
-
-Superseded runs are kept rather than deleted: `BENCHMARK_PRODUCTION_RESULTS_2026-08-08.md`
-is what the 08-18 production run is an improvement over, and deleting it would
-leave the improvement unverifiable.
-
-New runs belong here, not in `docs/`. `docs/` held 31 raw `.jsonl` files and 13
-dated reports against 13 actual user documents, which made the documentation
-directory mostly an archive that happened to also contain the quickstart.
+Retain every row, report errors and stream-integrity results, and distinguish
+linear memory, live heap and process RSS. Do not select the best rows from
+different runs and present them as one measurement.

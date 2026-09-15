@@ -1,5 +1,9 @@
 # Post-rewrite production-shaped benchmark — 2026-08-18
 
+> Historical measurement: 18 August 2026, at the revisions recorded below.
+> Not a benchmark of the current release. Retained raw data and limitations
+> are part of the result.
+
 This is a repeatable single-machine comparison, not a production SLA or a
 universal capacity claim. It reruns the existing production harness after the
 ABI-v1 migration and security hardening. The complete raw output is

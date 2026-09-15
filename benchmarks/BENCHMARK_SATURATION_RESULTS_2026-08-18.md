@@ -1,5 +1,9 @@
 # Saturation and payload-scaling benchmark — 2026-08-18
 
+> Historical measurement: 18 August 2026, at the revisions recorded below.
+> Not a benchmark of the current release. Retained raw data and limitations
+> are part of the result.
+
 This run locates scaling knees for one local Torana process. It is not a
 universal capacity claim and it is not a provider-latency benchmark.
 

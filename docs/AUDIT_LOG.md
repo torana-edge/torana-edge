@@ -61,8 +61,9 @@ files.
 
 Only a method and path recognized as an inference endpoint by the configured
 provider format enters this log. Account, model-list, status, telemetry,
-update, authentication, and unknown auxiliary calls pass through without an
-audit record. A malformed body on a recognized inference endpoint is recorded
+update, authentication, and unknown auxiliary calls do not enter this inference
+audit log. Native routes forward them as ordinary HTTP; an explicit bridge
+rejects them with HTTP 400 rather than forwarding them. A malformed body on a recognized inference endpoint is recorded
 as `invalid_request`; it is still inside the inference boundary even though no
 valid IR or plugin invocation exists.
 
