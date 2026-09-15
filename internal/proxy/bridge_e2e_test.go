@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -226,6 +227,41 @@ func TestBridgeJSONToolLoopMatrix(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestBridgeClientsAcceptGzipRequests(t *testing.T) {
+	for _, clientProtocol := range bridgeProtocols {
+		t.Run(string(clientProtocol), func(t *testing.T) {
+			proxy, _ := newBridgeProxy(t, clientProtocol, bridge.OpenAIChat, func(w http.ResponseWriter, r *http.Request) {
+				if got := r.Header.Get("Content-Encoding"); got != "" {
+					t.Errorf("translated upstream retained Content-Encoding %q", got)
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, bridgeUpstreamJSON(bridge.OpenAIChat, false))
+			})
+			body := bridgeClientBody(clientProtocol, false, false)
+			var compressed bytes.Buffer
+			zw := gzip.NewWriter(&compressed)
+			_, _ = zw.Write([]byte(body))
+			_ = zw.Close()
+			path, _, err := bridge.Endpoint(clientProtocol, "client-model", false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			req, _ := http.NewRequest(http.MethodPost, proxy.URL+"/provider/p"+path, bytes.NewReader(compressed.Bytes()))
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("Content-Encoding", "gzip")
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			raw, _ := io.ReadAll(resp.Body)
+			_ = resp.Body.Close()
+			if resp.StatusCode != http.StatusOK {
+				t.Fatalf("status=%d body=%s", resp.StatusCode, raw)
+			}
+		})
 	}
 }
 

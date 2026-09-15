@@ -1,17 +1,34 @@
 package proxy
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 )
+
+func writeRawResponseWithoutContentType(t *testing.T, w http.ResponseWriter, body string) {
+	t.Helper()
+	hj, ok := w.(http.Hijacker)
+	if !ok {
+		t.Fatal("response writer cannot hijack")
+	}
+	conn, rw, err := hj.Hijack()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	_, _ = rw.WriteString("HTTP/1.1 200 OK\r\nContent-Length: " + strconv.Itoa(len(body)) + "\r\nConnection: close\r\n\r\n" + body)
+	_ = rw.Flush()
+}
 
 // startUsageProxy boots a proxy against the given upstream and returns its
 // base URL plus a shutdown func.
@@ -168,5 +185,29 @@ func TestJSONResponseUsageRecorded(t *testing.T) {
 	stats := statsSnapshot(t, proxyURL)
 	if stats["total_tokens_in"].(float64) != 7 || stats["total_tokens_out"].(float64) != 3 {
 		t.Errorf("tokens not metered: in=%v out=%v", stats["total_tokens_in"], stats["total_tokens_out"])
+	}
+}
+
+func TestRecognisedResponsesRequestMetersJSONWithoutContentType(t *testing.T) {
+	responseBody := `{"id":"x","object":"response","model":"gpt-x","status":"completed","output":[{"id":"m","type":"message","status":"completed","role":"assistant","content":[{"type":"output_text","text":"hi","annotations":[]}]}],"usage":{"input_tokens":7,"output_tokens":3,"total_tokens":10}}`
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		writeRawResponseWithoutContentType(t, w, responseBody)
+	}))
+	defer upstream.Close()
+
+	proxyURL := startUsageProxy(t, upstream.URL)
+	resp, err := http.Post(proxyURL+"/provider/test/v1/responses", "application/json",
+		strings.NewReader(`{"model":"gpt-x","input":"hello"}`))
+	if err != nil {
+		t.Fatalf("POST: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if !bytes.Equal(body, []byte(responseBody)) {
+		t.Fatalf("response changed: %s", body)
+	}
+	stats := statsSnapshot(t, proxyURL)
+	if stats["total_tokens_in"].(float64) != 7 || stats["total_tokens_out"].(float64) != 3 {
+		t.Fatalf("tokens not metered: in=%v out=%v", stats["total_tokens_in"], stats["total_tokens_out"])
 	}
 }

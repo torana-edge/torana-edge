@@ -1,7 +1,7 @@
 # Coding-harness compatibility
 
 Start with the [harness setup guide](HARNESS_SETUP.md) for existing-login paths
-and recent live results, including the Codex ChatGPT-login response-hook limitation.
+and recent live results, including the Codex HTTP/SSE requirement for response plugins.
 
 Pointing a coding harness at Torana changes only the provider inference traffic
 that Torana explicitly understands. On a native route (no `bridge` configured),
@@ -108,6 +108,10 @@ cross-contract translation; use the bridge surface above instead.
   cache facts, and stream framing.
 - Caller compression negotiation without allowing compressed inference
   responses to bypass response hooks.
+- Bounded decoding of gzip-compressed inference requests before validation and
+  translation; recognized successful inference responses that omit
+  `Content-Type` use the parsed request's JSON-versus-stream contract. Explicit
+  media types and auxiliary endpoints are never guessed.
 - Provider-native prompt-cache semantics documented in
   [Prompt caching](PROMPT_CACHING.md).
 

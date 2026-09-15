@@ -2,11 +2,13 @@ package proxy
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 
 	"github.com/torana-edge/torana-edge/internal/provider"
@@ -111,6 +113,135 @@ func TestUnchangedInferenceRequestPreservesProviderWire(t *testing.T) {
 				t.Fatalf("upstream body changed\n got: %q\nwant: %q", got, row.body)
 			}
 		})
+	}
+}
+
+func TestGzipInferenceRequestIsBoundedlyDecodedForAllNativeFormats(t *testing.T) {
+	rows := []struct{ name, format, body string }{
+		{"openai-chat", "openai", `{"model":"gpt-x","messages":[{"role":"user","content":"hi"}]}`},
+		{"openai-responses", "openai", `{"model":"gpt-x","input":"hi"}`},
+		{"anthropic", "anthropic", `{"model":"claude-x","max_tokens":8,"messages":[{"role":"user","content":"hi"}]}`},
+		{"gemini", "gemini", `{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}`},
+		{"gemini-codeassist", "gemini-codeassist", `{"model":"gemini-x","request":{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}}`},
+	}
+	for _, row := range rows {
+		t.Run(row.name, func(t *testing.T) {
+			seen := make(chan []byte, 1)
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if got := r.Header.Get("Content-Encoding"); got != "" {
+					t.Errorf("upstream Content-Encoding = %q", got)
+				}
+				got, _ := io.ReadAll(r.Body)
+				seen <- got
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusBadRequest)
+			}))
+			defer upstream.Close()
+			srv, err := New(Config{Providers: provider.Config{Providers: map[string]provider.Provider{
+				"p": {URL: upstream.URL, Format: row.format},
+			}}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			proxy := httptest.NewServer(srv.Handler())
+			defer func() { proxy.Close(); _ = srv.Shutdown(context.Background()) }()
+
+			var compressed bytes.Buffer
+			zw := gzip.NewWriter(&compressed)
+			_, _ = zw.Write([]byte(row.body))
+			_ = zw.Close()
+			req, _ := http.NewRequest(http.MethodPost, proxy.URL+"/provider/p"+inferenceTestPath(row.format), bytes.NewReader(compressed.Bytes()))
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("Content-Encoding", "gzip")
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_ = resp.Body.Close()
+			if got := <-seen; !bytes.Equal(got, []byte(row.body)) {
+				t.Fatalf("upstream got %q, want decoded %q", got, row.body)
+			}
+		})
+	}
+}
+
+func TestGzipAuxiliaryRequestRemainsOpaque(t *testing.T) {
+	original := []byte("opaque compressed account payload")
+	var compressed bytes.Buffer
+	zw := gzip.NewWriter(&compressed)
+	_, _ = zw.Write(original)
+	_ = zw.Close()
+	encoded := append([]byte(nil), compressed.Bytes()...)
+	seen := make(chan []byte, 1)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Content-Encoding"); got != "gzip" {
+			t.Errorf("Content-Encoding = %q, want gzip", got)
+		}
+		got, _ := io.ReadAll(r.Body)
+		seen <- got
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer upstream.Close()
+	srv, err := New(Config{Providers: provider.Config{Providers: map[string]provider.Provider{
+		"p": {URL: upstream.URL, Format: "openai"},
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxy := httptest.NewServer(srv.Handler())
+	defer func() { proxy.Close(); _ = srv.Shutdown(context.Background()) }()
+	req, _ := http.NewRequest(http.MethodPost, proxy.URL+"/provider/p/v1/account", bytes.NewReader(encoded))
+	req.Header.Set("Content-Encoding", "gzip")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	if got := <-seen; !bytes.Equal(got, encoded) {
+		t.Fatal("auxiliary compressed body changed")
+	}
+}
+
+func TestInvalidOrOversizedGzipInferenceRequestNeverReachesUpstream(t *testing.T) {
+	var calls atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		calls.Add(1)
+	}))
+	defer upstream.Close()
+	srv, err := New(Config{Providers: provider.Config{Providers: map[string]provider.Provider{
+		"p": {URL: upstream.URL, Format: "openai"},
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxy := httptest.NewServer(srv.Handler())
+	defer func() { proxy.Close(); _ = srv.Shutdown(context.Background()) }()
+
+	var oversized bytes.Buffer
+	zw := gzip.NewWriter(&oversized)
+	_, _ = zw.Write(bytes.Repeat([]byte("x"), maxBodySize+1))
+	_ = zw.Close()
+	for name, encoded := range map[string][]byte{
+		"invalid":   []byte("not-gzip"),
+		"oversized": oversized.Bytes(),
+	} {
+		t.Run(name, func(t *testing.T) {
+			req, _ := http.NewRequest(http.MethodPost, proxy.URL+"/provider/p/v1/responses", bytes.NewReader(encoded))
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("Content-Encoding", "gzip")
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, _ = io.Copy(io.Discard, resp.Body)
+			_ = resp.Body.Close()
+			if resp.StatusCode != http.StatusBadRequest {
+				t.Fatalf("status=%d, want 400", resp.StatusCode)
+			}
+		})
+	}
+	if calls.Load() != 0 {
+		t.Fatalf("malformed compressed requests reached upstream %d times", calls.Load())
 	}
 }
 

@@ -3,6 +3,7 @@ package proxy
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -44,6 +45,18 @@ func (r *rateLimitBody) Close() error {
 		err = r.ReadCloser.Close()
 	})
 	return err
+}
+
+// Write preserves the full-duplex contract of an HTTP upgrade body. The
+// standard transport returns a body that is also an io.Writer for 101
+// responses; hiding that method makes ReverseProxy reject an otherwise valid
+// WebSocket upgrade as a non-writable response body.
+func (r *rateLimitBody) Write(p []byte) (int, error) {
+	w, ok := r.ReadCloser.(io.Writer)
+	if !ok {
+		return 0, errors.New("response body is not writable")
+	}
+	return w.Write(p)
 }
 
 func (t *failoverRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {

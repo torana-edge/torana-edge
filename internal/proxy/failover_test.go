@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -182,6 +183,25 @@ func TestRateLimitBodyReleasesOnlyOnce(t *testing.T) {
 		t.Fatal("duplicate body close released the replacement request's slot")
 	}
 	rl.Release("caller")
+}
+
+type upgradeTestBody struct {
+	bytes.Buffer
+	closed bool
+}
+
+func (b *upgradeTestBody) Close() error { b.closed = true; return nil }
+
+func TestRateLimitBodyPreservesUpgradeWriter(t *testing.T) {
+	underlying := &upgradeTestBody{}
+	body := &rateLimitBody{ReadCloser: underlying, release: func() {}}
+	var writer io.Writer = body
+	if _, err := writer.Write([]byte("websocket-frame")); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if got := underlying.String(); got != "websocket-frame" {
+		t.Fatalf("underlying body got %q", got)
+	}
 }
 
 func TestRateLimiterUpdateAppliesWithoutDroppingActiveRequests(t *testing.T) {

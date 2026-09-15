@@ -7,6 +7,7 @@
 package proxy
 
 import (
+	"bufio"
 	"bytes"
 	"compress/gzip"
 	"context"
@@ -1023,6 +1024,27 @@ func New(cfg Config) (*Server, error) {
 				req.ContentLength = 0
 			}
 
+			// Decode only a positively recognised inference request. Auxiliary
+			// endpoints remain byte-for-byte pass-through, including their content
+			// codings. Bound the decoded form independently so a small compressed
+			// request cannot expand past the normal inference-body limit.
+			if strings.EqualFold(strings.TrimSpace(req.Header.Get("Content-Encoding")), "gzip") {
+				zr, zerr := gzip.NewReader(bytes.NewReader(body))
+				if zerr == nil {
+					body, zerr = io.ReadAll(io.LimitReader(zr, maxBodySize+1))
+					_ = zr.Close()
+					if zerr == nil && len(body) > maxBodySize {
+						zerr = &http.MaxBytesError{Limit: maxBodySize}
+					}
+				}
+				if zerr != nil {
+					rejectMalformed()
+					return
+				}
+				req.Header.Del("Content-Encoding")
+				req.ContentLength = int64(len(body))
+			}
+
 			// JSON-text validation first: the format adapters decode with
 			// encoding/json, which silently replaces invalid UTF-8 and lone
 			// surrogates, accepts duplicate member names (last wins), and lets
@@ -1505,6 +1527,8 @@ func New(cfg Config) (*Server, error) {
 			}
 
 			contentType := resp.Header.Get("Content-Type")
+			chat, _ := resp.Request.Context().Value(engine.ChatRequestKey).(*engine.ChatRequest)
+			contentType = inferenceResponseMediaType(contentType, rs.Intercepted, chat != nil && chat.Stream)
 			if e := exchangeFrom(resp.Request.Context()); e != nil {
 				// A translated stream cannot be mistaken for a complete JSON
 				// response, nor can an HTML/gzip error escape under another API.
@@ -1807,7 +1831,15 @@ func New(cfg Config) (*Server, error) {
 						// run_on_stream_chunk, which CAN terminate — see the
 						// stream hook above. Recorded so the failure is
 						// visible rather than claimed as a block.
-						if _, err := pl.RunAfterResponse(ctx, reqStateFrom(ctx).ID, streamResp, false); err != nil {
+						// The client may close its response body immediately after the
+						// terminal frame. That cancels the HTTP request context even
+						// though this completion hook is deliberately part of handler
+						// finalisation. Preserve request-scoped values but let the
+						// pipeline's own bounded hook timeout govern this final
+						// observational call, or usage/audit plugins lose successful
+						// streaming requests nondeterministically.
+						hookCtx := context.WithoutCancel(ctx)
+						if _, err := pl.RunAfterResponse(hookCtx, reqStateFrom(ctx).ID, streamResp, false); err != nil {
 							log.Printf("plugin run_after_response (stream, observational — "+
 								"failure_mode cannot apply, body already sent): %v", err)
 							if rsObs := reqStateFrom(ctx); rsObs != nil {
@@ -1870,7 +1902,6 @@ func New(cfg Config) (*Server, error) {
 						rs.OriginalResp = bodyBytes
 						rs.OriginalRespSet = true
 					}
-					chat, _ := ctx.Value(engine.ChatRequestKey).(*engine.ChatRequest)
 					// Records provider usage into rs as a side effect.
 					modified, modErr := runJSONResponseHooks(ctx, pl, rs.ID, f.Name, chat, bodyBytes)
 					if modErr != nil {
@@ -4229,6 +4260,18 @@ func (tw *trackingWriter) Flush() {
 		f.Flush()
 	}
 }
+
+// Hijack preserves the optional ResponseWriter capability required by
+// httputil.ReverseProxy for WebSocket and other HTTP upgrades.
+func (tw *trackingWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	h, ok := tw.ResponseWriter.(http.Hijacker)
+	if !ok {
+		return nil, nil, errors.New("response writer does not support hijacking")
+	}
+	return h.Hijack()
+}
+
+func (tw *trackingWriter) Unwrap() http.ResponseWriter { return tw.ResponseWriter }
 
 type trackingReader struct {
 	io.ReadCloser
