@@ -36,7 +36,6 @@ type Store struct {
 }
 
 type pluginLocks struct {
-	admin sync.RWMutex
 	files sync.Map // absolute path -> *sync.Mutex
 }
 
@@ -174,8 +173,6 @@ func (s *Store) Append(plugin, logical string, data []byte, resource wasm.FileRe
 		return err
 	}
 	locks := s.pluginLocks(plugin)
-	locks.admin.RLock()
-	defer locks.admin.RUnlock()
 	fileLock := locks.file(path)
 	fileLock.Lock()
 	f, err := s.appendLocked(plugin, path, data, resource)
@@ -258,8 +255,6 @@ func (s *Store) Read(plugin, logical string, resource wasm.FileResource) ([]byte
 		return nil, err
 	}
 	locks := s.pluginLocks(plugin)
-	locks.admin.RLock()
-	defer locks.admin.RUnlock()
 	fileLock := locks.file(path)
 	fileLock.Lock()
 	defer fileLock.Unlock()
@@ -294,8 +289,6 @@ func (s *Store) Write(plugin, logical string, data []byte, resource wasm.FileRes
 		return err
 	}
 	locks := s.pluginLocks(plugin)
-	locks.admin.RLock()
-	defer locks.admin.RUnlock()
 	fileLock := locks.file(path)
 	fileLock.Lock()
 	defer fileLock.Unlock()
@@ -336,8 +329,6 @@ func (s *Store) Delete(plugin, logical string, _ wasm.FileResource) error {
 		return err
 	}
 	locks := s.pluginLocks(plugin)
-	locks.admin.RLock()
-	defer locks.admin.RUnlock()
 	fileLock := locks.file(path)
 	fileLock.Lock()
 	defer fileLock.Unlock()
@@ -378,8 +369,6 @@ func (s *Store) Delete(plugin, logical string, _ wasm.FileResource) error {
 
 func (s *Store) List(plugin, prefix string, resources map[string]wasm.FileResource) ([]string, error) {
 	locks := s.pluginLocks(plugin)
-	locks.admin.RLock()
-	defer locks.admin.RUnlock()
 	var out []string
 	for logical := range resources {
 		if !strings.HasPrefix(logical, prefix) {
@@ -403,64 +392,6 @@ func (s *Store) List(plugin, prefix string, resources map[string]wasm.FileResour
 	return out, nil
 }
 
-// OperatorList exposes only logical names for CLI inspection; OS paths remain
-// an implementation detail even to operators.
-func (s *Store) OperatorList(plugin string) ([]string, error) {
-	locks := s.pluginLocks(plugin)
-	locks.admin.Lock()
-	defer locks.admin.Unlock()
-	base := pluginDir(s.root, plugin)
-	var out []string
-	err := filepath.WalkDir(base, func(path string, entry os.DirEntry, err error) error {
-		if errors.Is(err, os.ErrNotExist) {
-			return nil
-		}
-		if err != nil {
-			return err
-		}
-		if path == base {
-			return nil
-		}
-		if entry.Type()&os.ModeSymlink != 0 {
-			return fmt.Errorf("unsafe plugin file entry")
-		}
-		if entry.IsDir() {
-			return nil
-		}
-		if err := regularSingleLink(path, false); err != nil {
-			return err
-		}
-		relative, err := filepath.Rel(base, path)
-		if err != nil {
-			return err
-		}
-		out = append(out, filepath.ToSlash(relative))
-		return nil
-	})
-	if errors.Is(err, os.ErrNotExist) {
-		return nil, nil
-	}
-	sort.Strings(out)
-	return out, err
-}
-
-func (s *Store) OperatorRead(plugin, logical string) ([]byte, error) {
-	path, err := s.target(plugin, logical)
-	if err != nil {
-		return nil, err
-	}
-	locks := s.pluginLocks(plugin)
-	locks.admin.RLock()
-	defer locks.admin.RUnlock()
-	fileLock := locks.file(path)
-	fileLock.Lock()
-	defer fileLock.Unlock()
-	if err := regularSingleLink(path, false); err != nil {
-		return nil, err
-	}
-	return os.ReadFile(path)
-}
-
 // OperatorPath returns the absolute local path backing a plugin's logical
 // file. It is an operator-only escape hatch for standard local tools such as
 // tail, jq, and grep; guests continue to see only logical resource names.
@@ -482,22 +413,4 @@ func (s *Store) OperatorPath(plugin, logical string) (string, error) {
 		return "", fmt.Errorf("resolve plugin file path: %w", err)
 	}
 	return filepath.Clean(path), nil
-}
-
-func (s *Store) OperatorPurge(plugin string) error {
-	locks := s.pluginLocks(plugin)
-	locks.admin.Lock()
-	defer locks.admin.Unlock()
-	base := pluginDir(s.root, plugin)
-	info, err := os.Lstat(base)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
-		return fmt.Errorf("unsafe plugin directory")
-	}
-	return os.RemoveAll(base)
 }

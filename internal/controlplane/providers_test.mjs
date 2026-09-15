@@ -21,14 +21,18 @@ test('fallback editor rejects silent protocol skips and accepts explicit cross-A
   assert.doesNotThrow(() => validate({p:{format:'openai',bridge:{client:'openai-chat',upstream:'openai-chat'},fallback:['backup']},backup:{format:'anthropic',bridge:{client:'openai-chat',upstream:'anthropic'}}}));
 });
 test('provider edits preserve unrelated config and remove a bridge explicitly', () => {
-  const original = {pricing: {'model': {input_usd_per_mtok: 1}}, responses_compaction: {enabled: true}, bridge: {client: 'anthropic', upstream: 'openai-chat'}};
+  const original = {pricing: {'model': {input_usd_per_mtok: 1}}, cache: {enabled: true, nested: {value: 'preserve'}}, responses_compaction: {enabled: true}, bridge: {client: 'anthropic', upstream: 'openai-chat'}};
   const output = read(form({name: 'renamed', 'auth-mode': 'caller'}, original));
   assert.equal(output.name, 'renamed');
   assert.deepEqual(output.provider.pricing, original.pricing);
+  assert.deepEqual(output.provider.cache, original.cache);
   assert.deepEqual(output.provider.responses_compaction, original.responses_compaction);
   assert.equal(output.provider.bridge, null);
   assert.deepEqual(output.provider.auth, {mode: 'caller'});
   assert.ok(original.bridge);
+  const direct = context.ToranaProviders.read(form({}, original));
+  direct.provider.cache.nested.value = 'edited';
+  assert.equal(original.cache.nested.value, 'preserve');
 });
 test('bridge fields set the upstream family and retain ordered fallback targets', () => {
   const output = read(form({translation: 'bridge', client: 'openai-responses', upstream: 'anthropic', model: 'claude-haiku-4-5', 'max-tokens': '2048', 'auth-mode': 'credential', credential: 'anthropic-key', fallback: 'local, backup'})).provider;

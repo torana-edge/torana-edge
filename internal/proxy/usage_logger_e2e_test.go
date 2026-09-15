@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -80,7 +81,11 @@ func TestUsageLoggerWritesRealPrivateFile(t *testing.T) {
 		}
 	}
 
-	data, err := srv.pluginFiles.OperatorRead("usage_logger", "usage.jsonl")
+	logPath, err := srv.pluginFiles.OperatorPath("usage_logger", "usage.jsonl")
+	if err != nil {
+		t.Fatalf("resolve usage log: %v", err)
+	}
+	data, err := os.ReadFile(logPath)
 	if err != nil {
 		t.Fatalf("read usage log: %v", err)
 	}
