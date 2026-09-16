@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -125,5 +126,49 @@ func TestInspectAndShutdownBindExactInstance(t *testing.T) {
 	}
 	if _, err := stop(context.Background(), c, s); err == nil || !strings.Contains(err.Error(), "another instance") {
 		t.Fatalf("replacement not protected: %v", err)
+	}
+}
+
+// start must hand the listener settings to the instance it launches. Accepting
+// them and dropping them would report a healthy instance on the wrong port.
+func TestServeFlagsForwardedToTheLaunchedInstance(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		flags ServeFlags
+		want  []string
+	}{
+		{"none", ServeFlags{}, []string{"serve"}},
+		{"port", ServeFlags{Port: "9090"}, []string{"serve", "--port", "9090"}},
+		{"bind", ServeFlags{Bind: "0.0.0.0"}, []string{"serve", "--bind", "0.0.0.0"}},
+		{"both", ServeFlags{Port: "8143", Bind: "::1"}, []string{"serve", "--port", "8143", "--bind", "::1"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := tc.flags.args()
+			if len(got) != len(tc.want) {
+				t.Fatalf("got %q, want %q", got, tc.want)
+			}
+			for i := range got {
+				if got[i] != tc.want[i] {
+					t.Fatalf("got %q, want %q", got, tc.want)
+				}
+			}
+		})
+	}
+}
+
+// status and stop inspect an instance rather than launching one, so listener
+// flags there would silently do nothing.
+func TestListenerFlagsAreRejectedOnInspectionCommands(t *testing.T) {
+	for _, command := range []string{"status", "stop"} {
+		for _, flag := range []string{"--port", "--bind"} {
+			args := []string{command, flag, "9090"}
+			if command == "stop" {
+				args = append(args, "--yes")
+			}
+			err := Run(context.Background(), args, io.Discard, io.Discard)
+			if err == nil || !strings.Contains(err.Error(), "not defined") {
+				t.Errorf("%s %s: want an unknown-flag error, got %v", command, flag, err)
+			}
+		}
 	}
 }

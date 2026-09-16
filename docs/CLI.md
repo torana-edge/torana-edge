@@ -20,6 +20,33 @@ torana stop --yes
 `start` runs this binary in the background and waits for its API to report
 ready. It is idempotent for the same managed store: it returns the existing
 instance instead of spawning a duplicate. `serve` still runs in the foreground.
+
+Both accept `--port` and `--bind` when 8080 is taken or the listener belongs
+somewhere else:
+
+```bash
+torana serve --port 8143
+torana start --port 8143 --bind 127.0.0.1
+```
+
+The listener is resolved as `--port`, then `TORANA_PORT`, then the configured
+port, then `8080`; `--bind` and `TORANA_BIND` follow the same order over the
+`127.0.0.1` default. A flag is the most local statement of intent, so it wins
+over an exported environment variable the operator may have forgotten.
+
+An unusable value stops startup rather than falling back — listening on a port
+nobody asked for is discovered late and from the wrong end:
+
+```
+$ torana serve --port 70000
+--port=70000 is outside the valid port range 1-65535
+```
+
+On `start`, these apply only when it actually launches an instance. `start`
+returns an already-running instance unchanged, and never re-binds it; `status`
+and `stop` inspect a running instance and reject both flags. To move a running
+listener, change the port in the control plane, which re-binds without a
+restart and republishes the address the CLI follows.
 The process holds an OS lock for its lifetime, so two processes cannot own the
 same store, even on different ports. No OS service or login-startup entry is added.
 
@@ -90,8 +117,8 @@ values. `torana help` lists the same Torana-owned variables.
 | --- | --- | --- |
 | `TORANA_CONFIG` | `config.json` | Seed path; an existing managed store still takes precedence |
 | `TORANA_DATA_DIR` | `os.UserConfigDir()/torana` | Directory containing the managed store, `$TORANA_DATA_DIR/config.json` |
-| `TORANA_PORT` | Configured port; the example uses `8080` | Override the listener port |
-| `TORANA_BIND` | `127.0.0.1` | Listener address; see the access boundary below |
+| `TORANA_PORT` | Configured port; the example uses `8080` | Override the listener port; `serve --port` and `start --port` win over it |
+| `TORANA_BIND` | `127.0.0.1` | Listener address; `serve --bind` and `start --bind` win over it. See the access boundary below |
 | `TORANA_DEFAULT_PROVIDER` | Unset | Provider for paths without a `/provider/` prefix |
 | `TORANA_PLUGINS_DIR` | `./plugins` | Directory for local plugin-file commands; live administration follows the running host |
 | `TORANA_LOG_LEVEL` | Unset | Set `debug` for request-lifecycle logs, also enabled by `--debug` |

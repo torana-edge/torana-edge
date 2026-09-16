@@ -8,6 +8,7 @@ package main
 import (
 	"context"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"log"
@@ -108,8 +109,8 @@ Environment:
   TORANA_DATA_DIR          directory holding the managed store, which lives at
                            $TORANA_DATA_DIR/config.json
                            (default: os.UserConfigDir()/torana)
-  TORANA_PORT              listen port, overriding the config
-  TORANA_BIND              bind address (default: 127.0.0.1)
+  TORANA_PORT              listen port, overriding the config (serve --port wins)
+  TORANA_BIND              bind address (default: 127.0.0.1; serve --bind wins)
                            Binding wider exposes the DATA PLANE only: the
                            control plane separately requires a loopback source
                            address and refuses remote requests. But a reverse
@@ -143,6 +144,9 @@ Environment:
                            OTLP endpoint
   OTEL_EXPORTER_OTLP_METRICS_INSECURE
                            as above, and takes precedence over it
+
+serve accepts --port and --bind, which override the environment variables below
+and the configured port. torana start forwards both to the instance it launches.
 
 The control plane is at http://127.0.0.1:<port>/_torana/ and is reachable from
 loopback only. Plugins never load until you approve their digest in the UI or CLI.
@@ -198,6 +202,50 @@ func controlPlaneHost(bindHost string) (string, bool) {
 	default:
 		return "", false
 	}
+}
+
+// serveOptions are the listener settings `serve` accepts on the command line.
+// Zero values mean "not given", which is what lets the environment and then the
+// configuration supply them in turn.
+type serveOptions struct {
+	port int
+	bind string
+}
+
+// parseServeFlags reads `serve`'s flags. Before these existed the only way to
+// move off 8080 was an environment variable or a config edit, and `serve`
+// silently ignored anything typed after it — so `torana serve --port 9090`
+// listened on 8080 and reported success.
+//
+// --bind accepts the same values as TORANA_BIND, deliberately including
+// non-loopback ones: this is the documented way to serve the data plane wider,
+// and rejecting here while accepting the environment would just move the
+// footgun rather than remove it. The control plane keeps its own loopback
+// requirement regardless of how the socket is bound.
+func parseServeFlags(args []string, stderr io.Writer) (serveOptions, error) {
+	var opts serveOptions
+	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	fs.Usage = func() { usage(stderr) }
+	port := fs.String("port", "", "listen port, overriding TORANA_PORT and the configured port")
+	fs.StringVar(&opts.bind, "bind", "", "bind address (default: 127.0.0.1)")
+	if err := fs.Parse(args); err != nil {
+		return serveOptions{}, err
+	}
+	if fs.NArg() != 0 {
+		return serveOptions{}, fmt.Errorf("serve takes no positional arguments, got %q", fs.Arg(0))
+	}
+	if *port != "" {
+		p, err := strconv.Atoi(*port)
+		if err != nil {
+			return serveOptions{}, fmt.Errorf("--port=%q is not a number", *port)
+		}
+		if p < 1 || p > 65535 {
+			return serveOptions{}, fmt.Errorf("--port=%d is outside the valid port range 1-65535", p)
+		}
+		opts.port = p
+	}
+	return opts, nil
 }
 
 // parsePortOverride reads TORANA_PORT. A malformed or out-of-range value is an
@@ -265,6 +313,7 @@ func main() {
 		}
 		return
 	}
+	var serveFlags serveOptions
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
 		case "version", "--version", "-v":
@@ -274,6 +323,16 @@ func main() {
 			usage(os.Stdout)
 			return
 		case "serve":
+			var err error
+			serveFlags, err = parseServeFlags(os.Args[2:], os.Stderr)
+			if err != nil {
+				if errors.Is(err, flag.ErrHelp) {
+					return
+				}
+				fmt.Fprintf(os.Stderr, "%v\n\n", err)
+				usage(os.Stderr)
+				os.Exit(2)
+			}
 		default:
 			fmt.Fprintf(os.Stderr, "unknown command %q\n\n", os.Args[1])
 			usage(os.Stderr)
@@ -337,8 +396,13 @@ func main() {
 		log.Printf("Warning: managed config %q differs from and takes precedence over seed %q; edit the managed store through /_torana/ or remove it to re-import the seed", storePath, seedPath)
 	}
 
-	// Allow port override via env.
-	if v := os.Getenv("TORANA_PORT"); v != "" {
+	// Precedence: --port, then TORANA_PORT, then the configured port. A flag is
+	// the most local statement of intent, so it wins over an inherited
+	// environment — otherwise an exported TORANA_PORT in the shell would
+	// silently beat the port the operator just typed.
+	if serveFlags.port != 0 {
+		provCfg.Port = serveFlags.port
+	} else if v := os.Getenv("TORANA_PORT"); v != "" {
 		p, err := parsePortOverride(v)
 		if err != nil {
 			log.Fatalf("%v", err)
@@ -374,7 +438,10 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	bindHost := os.Getenv("TORANA_BIND")
+	bindHost := serveFlags.bind
+	if bindHost == "" {
+		bindHost = os.Getenv("TORANA_BIND")
+	}
 	if bindHost == "" {
 		bindHost = "127.0.0.1"
 	}
