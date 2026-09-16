@@ -81,12 +81,13 @@ proxy below separately uses port 8099. Do not overwrite an existing config.
 ### 2. Start Torana
 
 ```bash
-export TORANA_DATA_DIR="$PWD/.torana-agy-data"
+export TORANA_DATA_DIR="$PWD/local/agy-data"
 TORANA_BIND=127.0.0.1 TORANA_CONFIG=config.json ./torana start
 ./torana status
 ```
 
-Use a fresh directory name if `.torana-agy-data` already exists. The seed is
+Use a fresh name under the gitignored `local/` directory if `local/agy-data`
+already exists. The seed is
 imported on first start; editing it later does not update managed settings.
 Keep the same `TORANA_DATA_DIR` for subsequent status, feed, and stop commands.
 
