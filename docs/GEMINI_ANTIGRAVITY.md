@@ -36,10 +36,9 @@ The caller's API key is forwarded upstream; no MITM is involved.
 
 ## B. Antigravity CLI (`agy`) — via the MITM ingress
 
-`agy`'s gRPC is local-only (CLI ⇄ an internal language server); its Google-facing
-traffic is plain HTTPS + SSE to `cloudcode-pa.googleapis.com`. The stripped Go
-binary ignores endpoint env vars but **honors `HTTPS_PROXY` and a custom CA via
-`SSL_CERT_FILE`**, with no cert pinning. So Torana terminates TLS for the Code
+In the tested CLI, `agy`'s gRPC is local-only (CLI ⇄ an internal language server);
+its Google-facing traffic is HTTPS + SSE to the Code Assist hosts below.
+It **honors `HTTPS_PROXY` and a custom CA via `SSL_CERT_FILE`**. Torana terminates TLS for the Code
 Assist hosts and routes recognized inference calls through the plugin pipeline.
 Other paths on those same hosts are decrypted and forwarded as ordinary HTTP;
 only unmapped hosts remain opaque tunnels. `agy`'s own Google OAuth bearer is
@@ -47,16 +46,24 @@ forwarded upstream — **Torana injects no auth**.
 
 ### 1. Configure
 
+Already signed into `agy`? Keep that login. This example starts a separate
+Torana evaluation instance from a new data directory. Save the following as
+`config.json` in your Torana checkout. If you already run Torana on port 8080,
+stop that instance first or choose a different main listener port; the TLS
+proxy below separately uses port 8099. Do not overwrite an existing config.
+
 ```json
 {
   "providers": {
     "antigravity": {
       "url": "https://cloudcode-pa.googleapis.com",
-      "format": "gemini-codeassist"
+      "format": "gemini-codeassist",
+      "auth": {"mode": "caller"}
     },
     "antigravity-daily": {
       "url": "https://daily-cloudcode-pa.googleapis.com",
-      "format": "gemini-codeassist"
+      "format": "gemini-codeassist",
+      "auth": {"mode": "caller"}
     }
   },
   "mitm": {
@@ -74,10 +81,17 @@ forwarded upstream — **Torana injects no auth**.
 ### 2. Start Torana
 
 ```bash
-TORANA_BIND=127.0.0.1 TORANA_CONFIG=config.json ./torana
+export TORANA_DATA_DIR="$PWD/.torana-agy-data"
+TORANA_BIND=127.0.0.1 TORANA_CONFIG=config.json ./torana start
+./torana status
 ```
 
-On first boot it generates the CA and prints exactly how to point the client:
+Use a fresh directory name if `.torana-agy-data` already exists. The seed is
+imported on first start; editing it later does not update managed settings.
+Keep the same `TORANA_DATA_DIR` for subsequent status, feed, and stop commands.
+
+On first boot Torana generates the CA. The server log (path shown by `status`)
+reports the bundle location and listener:
 
 ```
 mitm: CA ready at ./local/mitm — point the client at HTTPS_PROXY=http://127.0.0.1:8099 SSL_CERT_FILE=./local/mitm/bundle.pem
@@ -90,18 +104,39 @@ tunneled ones.
 
 ### 3. Point `agy` at it
 
-```bash
-export HTTPS_PROXY=http://127.0.0.1:8099
-export SSL_CERT_FILE=/abs/path/to/local/mitm/bundle.pem
-# some builds also read: export NODE_EXTRA_CA_CERTS=$SSL_CERT_FILE
+For interactive use, apply routing only to this launch:
 
-agy                                                   # interactive
-agy --mode=plan --print "Summarize this repo's architecture"   # headless
+```bash
+HTTPS_PROXY=http://127.0.0.1:8099 \
+SSL_CERT_FILE=/absolute/path/to/local/mitm/bundle.pem \
+agy
 ```
 
-> `--print` takes the prompt as its **value** — put the prompt immediately after
-> it (`agy --mode=plan --print "…"`), not `agy --print --mode …` (that consumes
-> `--mode` as the prompt).
+Replace the certificate path with the actual bundle reported by Torana. There
+is no system trust-store change; a later plain `agy` launch uses its normal route.
+
+For a single headless task, run from a directory containing a small,
+non-sensitive `hello.txt`:
+
+```bash
+HTTPS_PROXY=http://127.0.0.1:8099 \
+SSL_CERT_FILE=/absolute/path/to/local/mitm/bundle.pem \
+agy -p 'Read ./hello.txt and reply with its contents.' \
+  --model gemini-3.8-flash-high \
+  --output-format stream-json --print-timeout=120s
+```
+
+Choose a model available to your account. `-p` takes the prompt immediately
+after it; no plan mode is needed. Headless tools still need permission. Use an
+interactive session to approve actions, or configure narrowly scoped tool
+permissions for automation; see the [headless guide](https://antigravity.google/docs/cli/headless/).
+If a tool is denied, inspect the tool events and final answer before treating
+the run as successful. Exit code 0 and terminal `SUCCESS` alone are insufficient.
+
+The verified isolated run used `--dangerously-skip-permissions` to match its
+direct baseline. That flag auto-approves tools, including shell commands; it
+is not part of the everyday command above and is not needed just to route
+traffic through Torana.
 
 ### 4. Verify
 
@@ -116,6 +151,22 @@ The proxy log shows the routing and clean upstream status:
 mitm: routed daily-cloudcode-pa.googleapis.com/v1internal:streamGenerateContent via /provider/antigravity-daily
 Upstream returned 200
 ```
+
+Confirm the expected file contents in the final answer and completed file-read
+tool events. Then install, approve, and enable
+[usage_logger](https://github.com/torana-edge/torana-plugins/blob/main/plugins/usage_logger/README.md)
+through the local UI, repeat the task, and inspect its local records. The
+plugin's guide includes the CLI alternative and shell-native file reading.
+
+On September 16, 2026, Antigravity CLI 1.2.4 with Gemini 3.8 Flash High completed
+this small native Code Assist workflow: a file read, tool-result follow-up, and
+the expected final answer. Six HTTP 200 feed entries matched six usage-logger
+records with reported input/output tokens. This checks the specific workflow,
+not every tool, resume, login refresh, or long conversation. The tested run used
+the auto-approval flag described above.
+
+When finished, exit the harness and run `./torana stop --yes` from the shell
+with the same `TORANA_DATA_DIR`. Keep the evaluation state and CA private.
 
 ### How it works
 

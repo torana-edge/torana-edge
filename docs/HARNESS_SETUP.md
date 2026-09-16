@@ -103,6 +103,12 @@ Use the actual bundle path reported by your instance. Do not install this CA
 into system trust. The environment settings above apply only to this process;
 your next normal `agy` launch does not use them.
 
+For a single non-interactive request, use `agy -p "your prompt"`. The
+[Antigravity guide](GEMINI_ANTIGRAVITY.md#3-point-agy-at-it) includes a streamed
+file-read example and explains tool permissions. Check the actual answer and
+completed tool events: a headless run can exit successfully even when a tool
+was denied.
+
 ## pi and oh-my-pi
 
 Choose and sign into a provider in the harness first. Both support provider
@@ -130,7 +136,7 @@ Small checks on September 16, 2026, using native routes (initially without plugi
 | --- | --- | --- |
 | Claude Code 2.1.271 | Haiku 4.5 | Read-tool call and follow-up succeeded; matching HTTP 200 entries and usage appeared in Torana’s feed. A later request wrote usage records after enabling usage_logger through the UI |
 | Codex 0.154.0 | GPT-5.6 Luna | Compressed HTTP/SSE text and read-tool turns succeeded through ChatGPT login; feed usage and a `usage_logger` record were verified. WebSocket connectivity was checked separately and is intentionally not the response-plugin path |
-| Antigravity language server 1.2.2 | Gemini 3.8 Flash High | Text response succeeded through the mapped Code Assist host; HTTP 200 and usage appeared in the feed |
+| Antigravity CLI 1.2.4 | Gemini 3.8 Flash High | Signed-in headless file read and tool-result follow-up completed through the local TLS ingress. Six HTTP 200 feed entries matched six `usage_logger` records with reported usage. This isolated check explicitly used auto-approved tool permissions; see the guide before choosing permissions for your own session |
 
 These are narrow checks, not claims about resume, every tool, login refresh,
 or every provider account. For plugin verification, enable `usage_logger` in
