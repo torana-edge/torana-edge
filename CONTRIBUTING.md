@@ -201,6 +201,13 @@ never borrow credentials from unrelated caller traffic.
 
 ## Pull requests
 
+For an opt-in check against a real provider, see
+`scripts/live-harness-regression.sh`. It uses isolated Torana state, requires
+credentials through environment-backed credential sources, and is deliberately
+not part of CI. Run `scripts/live-harness-regression-test.sh` first to verify
+its lifecycle and semantic-response guards without network access or a real
+credential.
+
 - Explain **why** in the description. The what is in the diff.
 - Say what you verified and how. "Tests pass" is less useful than "disabled the
   fix, watched `TestX` fail, restored it".
