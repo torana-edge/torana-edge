@@ -129,9 +129,29 @@ func defaultTarget() (string, string, error) {
 	return addr, "", err
 }
 
-func configuredAddress() (string, error) {
+// Listener names an explicitly requested listener, as `serve --port/--bind`
+// does. Empty fields fall back to the environment and then the configuration.
+//
+// It exists so the process that LAUNCHES an instance and the clients that later
+// TALK to one resolve the endpoint through the same code. Preflight resolving
+// separately is how `start --port` came to probe the old port while launching a
+// child on the new one.
+type Listener struct {
+	Port string
+	Bind string
+}
+
+// ResolveAddress returns the loopback control-plane address for a listener,
+// applying explicit values over TORANA_PORT/TORANA_BIND over the configuration.
+func ResolveAddress(requested Listener) (string, error) {
 	port := 0
-	if value := os.Getenv("TORANA_PORT"); value != "" {
+	if requested.Port != "" {
+		var err error
+		port, err = validPort(requested.Port)
+		if err != nil {
+			return "", fmt.Errorf("--port: %w", err)
+		}
+	} else if value := os.Getenv("TORANA_PORT"); value != "" {
 		var err error
 		port, err = validPort(value)
 		if err != nil {
@@ -160,7 +180,11 @@ func configuredAddress() (string, error) {
 		}
 	}
 	host := "127.0.0.1"
-	if bind := os.Getenv("TORANA_BIND"); bind != "" {
+	bind, source := requested.Bind, "--bind"
+	if bind == "" {
+		bind, source = os.Getenv("TORANA_BIND"), "TORANA_BIND"
+	}
+	if bind != "" {
 		bind = strings.Trim(bind, "[]")
 		ip := net.ParseIP(bind)
 		switch {
@@ -173,11 +197,13 @@ func configuredAddress() (string, error) {
 				host = "::1"
 			}
 		default:
-			return "", fmt.Errorf("TORANA_BIND does not expose a loopback control plane; specify --addr for a local tunnel")
+			return "", fmt.Errorf("%s does not expose a loopback control plane; specify --addr for a local tunnel", source)
 		}
 	}
 	return net.JoinHostPort(host, strconv.Itoa(port)), nil
 }
+
+func configuredAddress() (string, error) { return ResolveAddress(Listener{}) }
 
 func validPort(value string) (int, error) {
 	p, err := strconv.Atoi(value)
