@@ -39,9 +39,15 @@ intact and can be retried without restarting.
 
 ## Installing
 
+Examples use `torana` on PATH; use `./torana` from a source checkout.
+For your first plugin, follow the [usage-logger walkthrough](QUICKSTART.md#add-one-plugin).
+
 You do not need to stop Torana. Run installation commands from another terminal;
 the running process watches its plugin directory and discovers the new bundle
 without a restart. Discovery does not approve, enable, or execute the plugin.
+With the quickstart setup, run from the Torana checkout so installation targets
+`./plugins`. For a different configured directory, pass its absolute path with
+`--dir`; `TORANA_DATA_DIR` alone does not select the plugin directory.
 
 ```bash
 torana plugin install --official                              # the maintained set
@@ -120,8 +126,20 @@ plugin pipeline: enabled plugin "schema_translator" was not loaded —
 no operator approval for digest sha256:574d412d…
 ```
 
-The [per-plugin guides](https://github.com/torana-edge/torana-plugins#choose-a-plugin)
-include complete approval examples and required resources. From the CLI:
+For the simplest path, open the local control plane at `/_torana/`:
+
+1. Select the installed plugin and review its requested permissions.
+2. Configure required resource bindings and budgets. For `usage_logger`, review
+   the private file and retention budget shown in the form.
+3. Choose **Approve and enable** and confirm the review dialog. Torana applies
+   the approval and pipeline change together.
+
+Send another request and check the plugin's result. The
+[per-plugin guides](https://github.com/torana-edge/torana-plugins#choose-a-plugin)
+explain settings, resources, and expected output.
+
+Prefer the CLI or an agent-driven workflow? Use the plugin's guide to prepare
+the approval, then:
 
 ```bash
 torana plugin inspect usage_logger
@@ -135,13 +153,6 @@ Permissions must equal the manifest's requested set. Bind every required
 resource, narrowing budgets where appropriate. Use `plugin status` to confirm
 what is loaded, not just installed.
 
-Alternatively, in the control plane at `/_torana/`:
-
-1. Open the plugin and read what it requests. A manifest permission is a
-   *request*, not a grant.
-2. Approve the bundle digest and pick a failure policy.
-3. Enable it and set its position in the pipeline.
-
 **Approval binds to the digest.** Rebuild the plugin, change a permission, or add
 an `agent.json`, and it must be approved again. That is the point: you approved
 one exact artifact, not a name.
@@ -154,8 +165,9 @@ what makes it reasonable to run a plugin someone else wrote.
 
 Plugins may request narrowly declared private logical files. The operator sees
 the path, operations, size, and rotation budget at approval; Torana chooses the
-OS path, prevents cross-plugin access, and exposes it through `torana plugin
-file`. The approved budget may only narrow the manifest request. The host caps
+OS path, prevents cross-plugin access, and resolves it through `torana plugin
+file path`. Read that path using your shell's `cat`, `tail`, or PowerShell
+`Get-Content`. The approved budget may only narrow the manifest request. The host caps
 each generation at 64 MiB, retained rotations at 15, and total private-file
 storage for one plugin at 256 MiB. A plugin still cannot select an OS path or write the
 operator audit sink.
