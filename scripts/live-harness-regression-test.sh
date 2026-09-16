@@ -25,6 +25,10 @@ case "$command_name" in
   stop)
     : >"$FAKE_STOP_CALLED"
     [ "${FAKE_STOP_FAIL:-0}" = 0 ] || exit 1
+    if [ "${FAKE_STOP_UNCONFIRMED:-0}" = 1 ]; then
+      printf '{"status":"running"}\n'
+      exit 0
+    fi
     : >"$TORANA_DATA_DIR/stopped"
     : >"$FAKE_MARKER"
     printf '{"status":"stopped"}\n'
@@ -117,6 +121,16 @@ if run_case stop_failure env FAKE_STOP_FAIL=1; then
 fi
 grep -q 'isolated state retained at:' "$test_dir/stop_failure/err"
 retained=$(sed -n 's/^Torana shutdown could not be confirmed; isolated state retained at: //p' "$test_dir/stop_failure/err")
+[ -n "$retained" ] && [ -d "$retained" ]
+rm -rf "$retained"
+
+if run_case stop_unconfirmed env FAKE_STOP_UNCONFIRMED=1; then
+  echo "unconfirmed shutdown was accepted" >&2
+  exit 1
+fi
+[ -f "$test_dir/stop_unconfirmed/stop-called" ]
+grep -q 'isolated state retained at:' "$test_dir/stop_unconfirmed/err"
+retained=$(sed -n 's/^Torana shutdown could not be confirmed; isolated state retained at: //p' "$test_dir/stop_unconfirmed/err")
 [ -n "$retained" ] && [ -d "$retained" ]
 rm -rf "$retained"
 
