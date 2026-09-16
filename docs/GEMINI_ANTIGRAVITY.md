@@ -49,7 +49,7 @@ forwarded upstream — **Torana injects no auth**.
 Already signed into `agy`? Keep that login. This example starts a separate
 Torana evaluation instance from a new data directory. Save the following as
 `config.json` in your Torana checkout. If you already run Torana on port 8080,
-stop that instance first or choose a different main listener port; the TLS
+stop that instance first or choose another main port with `start --port 8081`; the TLS
 proxy below separately uses port 8099. Do not overwrite an existing config.
 
 ```json
@@ -82,7 +82,7 @@ proxy below separately uses port 8099. Do not overwrite an existing config.
 
 ```bash
 export TORANA_DATA_DIR="$PWD/local/agy-data"
-TORANA_BIND=127.0.0.1 TORANA_CONFIG=config.json ./torana start
+TORANA_CONFIG=config.json ./torana start --bind 127.0.0.1
 ./torana status
 ```
 
@@ -128,16 +128,21 @@ agy -p 'Read ./hello.txt and reply with its contents.' \
 ```
 
 Choose a model available to your account. `-p` takes the prompt immediately
-after it; no plan mode is needed. Headless tools still need permission. Use an
-interactive session to approve actions, or configure narrowly scoped tool
-permissions for automation; see the [headless guide](https://antigravity.google/docs/cli/headless/).
-If a tool is denied, inspect the tool events and final answer before treating
-the run as successful. Exit code 0 and terminal `SUCCESS` alone are insufficient.
+after it. Start interactively to approve tool actions, or configure scoped
+permissions for automation using the [headless guide](https://antigravity.google/docs/cli/headless/).
 
-The verified isolated run used `--dangerously-skip-permissions` to match its
-direct baseline. That flag auto-approves tools, including shell commands; it
-is not part of the everyday command above and is not needed just to route
-traffic through Torana.
+<details>
+<summary>The headless task finishes without reading the file?</summary>
+
+Check the streamed tool events for a permission denial. Antigravity can report
+`SUCCESS` after explaining that it couldn't run a tool, so check the answer too.
+Approve the needed action interactively or adjust the scoped permissions and retry.
+
+Our isolated verification used `--dangerously-skip-permissions`. That flag
+auto-approves tools, including shell commands; use it only when you intend
+that access. Routing through Torana itself does not require it.
+
+</details>
 
 ### 4. Verify
 
@@ -159,12 +164,13 @@ tool events. Then install, approve, and enable
 through the local UI, repeat the task, and inspect its local records. The
 plugin's guide includes the CLI alternative and shell-native file reading.
 
-On September 16, 2026, Antigravity CLI 1.2.4 with Gemini 3.8 Flash High completed
-this small native Code Assist workflow: a file read, tool-result follow-up, and
-the expected final answer. Six HTTP 200 feed entries matched six usage-logger
-records with reported input/output tokens. This checks the specific workflow,
-not every tool, resume, login refresh, or long conversation. The tested run used
-the auto-approval flag described above.
+This workflow was verified with Antigravity CLI 1.2.4 and Gemini 3.8 Flash High
+on September 16, 2026: file read, tool-result follow-up, final answer, and local
+usage records. Tool actions were explicitly auto-approved for that isolated run.
+
+Try it with your own workflow. If you hit a rough edge,
+[share the steps](https://github.com/torana-edge/torana-edge/issues) so we can
+improve the integration. Keep credentials and private prompts out of reports.
 
 When finished, exit the harness and run `./torana stop --yes` from the shell
 with the same `TORANA_DATA_DIR`. Keep the evaluation state and CA private.

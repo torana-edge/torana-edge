@@ -105,9 +105,8 @@ your next normal `agy` launch does not use them.
 
 For a single non-interactive request, use `agy -p "your prompt"`. The
 [Antigravity guide](GEMINI_ANTIGRAVITY.md#3-point-agy-at-it) includes a streamed
-file-read example and explains tool permissions. Check the actual answer and
-completed tool events: a headless run can exit successfully even when a tool
-was denied.
+file-read example and explains how to approve tools for interactive or
+automated use.
 
 ## pi and oh-my-pi
 
@@ -126,27 +125,29 @@ the selected provider rather than assuming every login uses the same URL.
 
 See [pi’s model configuration](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/models.md)
 and [oh-my-pi’s provider guide](https://github.com/can1357/oh-my-pi/blob/main/docs/providers.md).
-The local CLIs were inspected; credentialed pi/omp runs have not been performed.
+Trying either with Torana? Share your provider and setup in an
+[issue](https://github.com/torana-edge/torana-edge/issues)—working recipes and
+rough edges are both useful.
 
 ## Live checks and what they prove
 
-Small checks on September 16, 2026, using native routes (initially without plugins):
+Here are working setups from September 16, 2026. Each used a native route:
 
 | Harness | Model | Observed result |
 | --- | --- | --- |
 | Claude Code 2.1.271 | Haiku 4.5 | Read-tool call and follow-up succeeded; matching HTTP 200 entries and usage appeared in Torana’s feed. A later request wrote usage records after enabling usage_logger through the UI |
-| Codex 0.154.0 | GPT-5.6 Luna | Compressed HTTP/SSE text and read-tool turns succeeded through ChatGPT login; feed usage and a `usage_logger` record were verified. WebSocket connectivity was checked separately and is intentionally not the response-plugin path |
-| Antigravity CLI 1.2.4 | Gemini 3.8 Flash High | Signed-in headless file read and tool-result follow-up completed through the local TLS ingress. Six HTTP 200 feed entries matched six `usage_logger` records with reported usage. This isolated check explicitly used auto-approved tool permissions; see the guide before choosing permissions for your own session |
+| Codex 0.154.0 | GPT-5.6 Luna | ChatGPT login over HTTP/SSE: text and read-tool turns, Feed usage, and a local `usage_logger` record |
+| Antigravity CLI 1.2.4 | Gemini 3.8 Flash High | Signed-in headless file read and follow-up through the local TLS ingress, with six matching Feed and usage-logger records; tools were explicitly auto-approved for this isolated run |
 
-These are narrow checks, not claims about resume, every tool, login refresh,
-or every provider account. For plugin verification, enable `usage_logger` in
-the UI and confirm that another request creates a log record. Its
+Try the same with your workflow: enable `usage_logger` in the UI, send another
+request, and open the local record. Its
 [own guide](https://github.com/torana-edge/torana-plugins/blob/main/plugins/usage_logger/README.md)
 covers configuration and shell-native output reading.
 
 ## Other harnesses
 
-These are documented integration paths to test, not additional live results:
+Use your harness's provider settings to point it at Torana. These are starting
+points for more integrations:
 
 - [OpenCode](https://opencode.ai/docs/providers/#base-url): provider-specific
   `options.baseURL`. Select the adapter matching the route’s API.
@@ -162,3 +163,11 @@ These are documented integration paths to test, not additional live results:
 For an API-key-only test without a harness, use the
 [optional DeepSeek example](QUICKSTART.md#optional-use-an-api-key-directly),
 adapting configuration and the request to your own provider.
+
+## Help shape the next integration
+
+Got a favorite harness, a plugin idea, or a workflow that needs a little more
+support? [Tell us what you're trying to do](https://github.com/torana-edge/torana-edge/issues).
+Include the harness version, provider, and the step you got to—keep credentials
+and private prompts out of the report. You don't need a fix or a finished plugin
+to join in.
