@@ -9,7 +9,7 @@ case_name=${TORANA_LIVE_CASE:-}
 torana_bin=${TORANA_LIVE_BIN:-./torana}
 port=${TORANA_LIVE_PORT:-18082}
 timeout_seconds=${TORANA_LIVE_TIMEOUT_SECONDS:-45}
-started=false
+launch_attempted=false
 cleaned=false
 
 if [ "$case_name" != "deepseek-chat-bridges" ]; then
@@ -27,6 +27,10 @@ fi
 case "$timeout_seconds" in
   ''|*[!0-9]*) echo "TORANA_LIVE_TIMEOUT_SECONDS must be an integer from 1 to 300" >&2; exit 2 ;;
 esac
+if [ "${#timeout_seconds}" -gt 3 ]; then
+  echo "TORANA_LIVE_TIMEOUT_SECONDS must be an integer from 1 to 300" >&2
+  exit 2
+fi
 if [ "$timeout_seconds" -lt 1 ] || [ "$timeout_seconds" -gt 300 ]; then
   echo "TORANA_LIVE_TIMEOUT_SECONDS must be an integer from 1 to 300" >&2
   exit 2
@@ -34,6 +38,10 @@ fi
 case "$port" in
   ''|*[!0-9]*) echo "TORANA_LIVE_PORT must be an integer from 1 to 65535" >&2; exit 2 ;;
 esac
+if [ "${#port}" -gt 5 ]; then
+  echo "TORANA_LIVE_PORT must be an integer from 1 to 65535" >&2
+  exit 2
+fi
 if [ "$port" -lt 1 ] || [ "$port" -gt 65535 ]; then
   echo "TORANA_LIVE_PORT must be an integer from 1 to 65535" >&2
   exit 2
@@ -55,24 +63,13 @@ cleanup() {
   trap - EXIT HUP INT TERM
   [ "$cleaned" = false ] || exit "$original_status"
   cleaned=true
-  if [ "$started" = true ]; then
-    stop_ok=false
-    if TORANA_DATA_DIR=$data_dir "$torana_bin" stop --yes >/dev/null 2>&1; then
-      attempt=0
-      while [ "$attempt" -lt 50 ]; do
-        if ! TORANA_DATA_DIR=$data_dir "$torana_bin" status --json 2>/dev/null |
-          jq -e '.status == "running"' >/dev/null 2>&1 &&
-          ! curl --silent --fail --max-time 1 "http://127.0.0.1:$port/health" >/dev/null 2>&1; then
-          stop_ok=true
-          break
-        fi
-        attempt=$((attempt + 1))
-        sleep 0.1
-      done
-    fi
-    if [ "$stop_ok" != true ]; then
+  if [ "$launch_attempted" = true ]; then
+    stop_result=$live_dir/stop.json
+    if ! TORANA_CONFIG=$seed TORANA_DATA_DIR=$data_dir TORANA_BIND=127.0.0.1 TORANA_PORT=$port \
+      "$torana_bin" stop --yes --timeout "${timeout_seconds}s" --json >"$stop_result" 2>/dev/null ||
+      ! jq -e '.status == "stopped"' "$stop_result" >/dev/null 2>&1; then
       echo "Torana shutdown could not be confirmed; isolated state retained at: $live_dir" >&2
-      echo "Retry with: TORANA_DATA_DIR=$data_dir $torana_bin stop --yes" >&2
+      echo "Retry with: TORANA_CONFIG=$seed TORANA_DATA_DIR=$data_dir TORANA_PORT=$port $torana_bin stop --yes" >&2
       exit 1
     fi
   fi
@@ -132,12 +129,13 @@ cat >"$seed" <<EOF
 }
 EOF
 
+launch_attempted=true
 TORANA_CONFIG=$seed TORANA_DATA_DIR=$data_dir TORANA_BIND=127.0.0.1 TORANA_PORT=$port \
   "$torana_bin" start >"$server_log" 2>&1
-started=true
 
 attempt=0
-while ! TORANA_DATA_DIR=$data_dir "$torana_bin" status --json 2>/dev/null |
+while ! TORANA_CONFIG=$seed TORANA_DATA_DIR=$data_dir TORANA_BIND=127.0.0.1 TORANA_PORT=$port \
+  "$torana_bin" status --json 2>/dev/null |
   jq -e '.status == "running"' >/dev/null 2>&1 ||
   ! curl --silent --fail --max-time 1 "http://127.0.0.1:$port/health" >/dev/null 2>&1; do
   attempt=$((attempt + 1))
@@ -185,43 +183,43 @@ require_json() {
 post_json /provider/deepseek-native/v1/chat/completions \
   '{"model":"deepseek-flash","max_tokens":8,"reasoning_effort":"none","messages":[{"role":"user","content":"Reply with exactly 42"}]}' \
   "$live_dir/native.json"
-require_json "native OpenAI Chat" '.choices[0].finish_reason == "stop" and (.choices[0].message.content | strings | contains("42"))' "$live_dir/native.json"
+require_json "native OpenAI Chat" '.choices[0].finish_reason == "stop" and (.choices[0].message.content | strings | gsub("^\\s+|\\s+$"; "") == "42")' "$live_dir/native.json"
 echo "PASS native OpenAI Chat"
 
 post_json /provider/deepseek-native/v1/responses \
   '{"model":"deepseek-flash","max_output_tokens":8,"reasoning":{"effort":"none"},"input":"Reply with exactly 42"}' \
   "$live_dir/native-responses.json"
-require_json "native OpenAI Responses" '.object == "response" and .status == "completed" and any(.output[]?; .type == "message" and any(.content[]?; .type == "output_text" and (.text | strings | contains("42"))))' "$live_dir/native-responses.json"
+require_json "native OpenAI Responses" '.object == "response" and .status == "completed" and any(.output[]?; .type == "message" and any(.content[]?; .type == "output_text" and (.text | strings | gsub("^\\s+|\\s+$"; "") == "42")))' "$live_dir/native-responses.json"
 echo "PASS native OpenAI Responses"
 
 post_json /provider/deepseek-native-anthropic/v1/messages \
   '{"model":"deepseek-flash","max_tokens":8,"thinking":{"type":"disabled"},"messages":[{"role":"user","content":"Reply with exactly 42"}]}' \
   "$live_dir/native-anthropic.json"
-require_json "native Anthropic" '.type == "message" and .stop_reason == "end_turn" and any(.content[]?; .type == "text" and (.text | strings | contains("42")))' "$live_dir/native-anthropic.json"
+require_json "native Anthropic" '.type == "message" and .stop_reason == "end_turn" and any(.content[]?; .type == "text" and (.text | strings | gsub("^\\s+|\\s+$"; "") == "42"))' "$live_dir/native-anthropic.json"
 echo "PASS native Anthropic"
 
 post_json /provider/deepseek-responses/v1/responses \
   '{"model":"client-model","max_output_tokens":8,"input":"Reply with exactly 42"}' \
   "$live_dir/responses.json"
-require_json "translated Responses" '.object == "response" and .status == "completed" and any(.output[]?; .type == "message" and any(.content[]?; .type == "output_text" and (.text | strings | contains("42"))))' "$live_dir/responses.json"
+require_json "translated Responses" '.object == "response" and .status == "completed" and any(.output[]?; .type == "message" and any(.content[]?; .type == "output_text" and (.text | strings | gsub("^\\s+|\\s+$"; "") == "42")))' "$live_dir/responses.json"
 echo "PASS Responses client translated to Chat upstream"
 
 post_json /provider/deepseek-anthropic/v1/messages \
   '{"model":"client-model","max_tokens":8,"messages":[{"role":"user","content":"Reply with exactly 42"}]}' \
   "$live_dir/anthropic.json"
-require_json "translated Anthropic" '.type == "message" and .stop_reason == "end_turn" and any(.content[]?; .type == "text" and (.text | strings | contains("42")))' "$live_dir/anthropic.json"
+require_json "translated Anthropic" '.type == "message" and .stop_reason == "end_turn" and any(.content[]?; .type == "text" and (.text | strings | gsub("^\\s+|\\s+$"; "") == "42"))' "$live_dir/anthropic.json"
 echo "PASS Anthropic client translated to Chat upstream"
 
 post_json /provider/deepseek-gemini/v1beta/models/client-model:generateContent \
   '{"contents":[{"role":"user","parts":[{"text":"Reply with exactly 42"}]}],"generationConfig":{"maxOutputTokens":8}}' \
   "$live_dir/gemini.json"
-require_json "translated Gemini" 'any(.candidates[]?; .finishReason == "STOP" and any(.content.parts[]?; (.text | strings | contains("42"))))' "$live_dir/gemini.json"
+require_json "translated Gemini" 'any(.candidates[]?; .finishReason == "STOP" and any(.content.parts[]?; (.text | strings | gsub("^\\s+|\\s+$"; "") == "42")))' "$live_dir/gemini.json"
 echo "PASS Gemini client translated to Chat upstream"
 
 post_json /provider/deepseek-codeassist/v1internal:generateContent \
   '{"model":"client-model","request":{"contents":[{"role":"user","parts":[{"text":"Reply with exactly 42"}]}],"generationConfig":{"maxOutputTokens":8}}}' \
   "$live_dir/codeassist.json"
-require_json "translated Code Assist" 'any(.response.candidates[]?; .finishReason == "STOP" and any(.content.parts[]?; (.text | strings | contains("42"))))' "$live_dir/codeassist.json"
+require_json "translated Code Assist" 'any(.response.candidates[]?; .finishReason == "STOP" and any(.content.parts[]?; (.text | strings | gsub("^\\s+|\\s+$"; "") == "42")))' "$live_dir/codeassist.json"
 echo "PASS Code Assist client translated to Chat upstream"
 
 TORANA_DATA_DIR=$data_dir "$torana_bin" feed >"$live_dir/feed.json"

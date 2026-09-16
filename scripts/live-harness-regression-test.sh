@@ -11,14 +11,23 @@ cat >"$test_dir/bin/torana" <<'EOF'
 set -eu
 command_name=${1:-}
 case "$command_name" in
-  start) mkdir -p "$TORANA_DATA_DIR" ;;
+  start)
+    mkdir -p "$TORANA_DATA_DIR"
+    if [ "${FAKE_START_SIGNAL:-0}" = 1 ]; then
+      kill -TERM "$PPID"
+      sleep 0.1
+    fi
+    [ "${FAKE_START_FAIL:-0}" = 0 ] || exit 1
+    ;;
   status)
     if [ -f "$TORANA_DATA_DIR/stopped" ]; then printf '{"status":"stopped"}\n'; else printf '{"status":"running"}\n'; fi
     ;;
   stop)
+    : >"$FAKE_STOP_CALLED"
     [ "${FAKE_STOP_FAIL:-0}" = 0 ] || exit 1
     : >"$TORANA_DATA_DIR/stopped"
     : >"$FAKE_MARKER"
+    printf '{"status":"stopped"}\n'
     ;;
   feed)
     printf '[%s]\n' '{"status":200,"tokens_in":1,"tokens_out":1},{"status":200,"tokens_in":1,"tokens_out":1},{"status":200,"tokens_in":1,"tokens_out":1},{"status":200,"tokens_in":1,"tokens_out":1},{"status":200,"tokens_in":1,"tokens_out":1},{"status":200,"tokens_in":1,"tokens_out":1},{"status":200,"tokens_in":1,"tokens_out":1}'
@@ -47,7 +56,10 @@ if [ -z "$output" ]; then
   exit $?
 fi
 case "$url" in
-  */v1/chat/completions) body='{"choices":[{"finish_reason":"stop","message":{"content":"42"}}]}' ;;
+  */v1/chat/completions)
+    if [ "${FAKE_UNRELATED:-0}" = 1 ]; then body='{"choices":[{"finish_reason":"stop","message":{"content":"142"}}]}'
+    else body='{"choices":[{"finish_reason":"stop","message":{"content":"42"}}]}' ; fi
+    ;;
   */v1/responses)
     if [ "${FAKE_INCOMPLETE:-0}" = 1 ]; then body='{"object":"response","status":"incomplete","output":[]}'
     else body='{"object":"response","status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":"42"}]}]}' ; fi
@@ -69,7 +81,8 @@ run_case() {
   set +e
   env PATH="$test_dir/bin:$PATH" TORANA_LIVE_CASE=deepseek-chat-bridges \
     TORANA_LIVE_DEEPSEEK_TOKEN=fixture TORANA_LIVE_BIN="$test_dir/bin/torana" \
-    TORANA_LIVE_PORT=18082 TORANA_LIVE_TIMEOUT_SECONDS=2 FAKE_MARKER="$case_dir/stopped" "$@" \
+    TORANA_LIVE_PORT=18082 TORANA_LIVE_TIMEOUT_SECONDS=2 FAKE_MARKER="$case_dir/stopped" \
+    FAKE_STOP_CALLED="$case_dir/stop-called" "$@" \
     "$repo_dir/scripts/live-harness-regression.sh" >"$case_dir/out" 2>"$case_dir/err"
   case_status=$?
   set -e
@@ -84,6 +97,20 @@ if run_case incomplete env FAKE_INCOMPLETE=1; then
   echo "incomplete response was accepted" >&2
   exit 1
 fi
+if run_case unrelated env FAKE_UNRELATED=1; then
+  echo "unrelated text containing 42 was accepted" >&2
+  exit 1
+fi
+if run_case partial_start env FAKE_START_FAIL=1; then
+  echo "partial start failure was accepted" >&2
+  exit 1
+fi
+[ -f "$test_dir/partial_start/stop-called" ]
+if run_case signal_start env FAKE_START_SIGNAL=1; then
+  echo "signal during start was accepted" >&2
+  exit 1
+fi
+[ -f "$test_dir/signal_start/stop-called" ]
 if run_case stop_failure env FAKE_STOP_FAIL=1; then
   echo "failed shutdown was accepted" >&2
   exit 1
@@ -97,6 +124,12 @@ if TORANA_LIVE_CASE=deepseek-chat-bridges TORANA_LIVE_DEEPSEEK_TOKEN=fixture \
   TORANA_LIVE_BIN="$test_dir/bin/torana" TORANA_LIVE_TIMEOUT_SECONDS=0 \
   "$repo_dir/scripts/live-harness-regression.sh" >/dev/null 2>&1; then
   echo "zero timeout was accepted" >&2
+  exit 1
+fi
+if TORANA_LIVE_CASE=deepseek-chat-bridges TORANA_LIVE_DEEPSEEK_TOKEN=fixture \
+  TORANA_LIVE_BIN="$test_dir/bin/torana" TORANA_LIVE_TIMEOUT_SECONDS=999999999999999999999999 \
+  "$repo_dir/scripts/live-harness-regression.sh" >/dev/null 2>&1; then
+  echo "oversized timeout integer was accepted" >&2
   exit 1
 fi
 if TORANA_LIVE_CASE=deepseek-chat-bridges TORANA_LIVE_DEEPSEEK_TOKEN=fixture \
