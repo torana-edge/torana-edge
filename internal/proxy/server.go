@@ -7,6 +7,7 @@
 package proxy
 
 import (
+	"bufio"
 	"bytes"
 	"compress/gzip"
 	"context"
@@ -1023,6 +1024,27 @@ func New(cfg Config) (*Server, error) {
 				req.ContentLength = 0
 			}
 
+			// Decode only a positively recognised inference request. Auxiliary
+			// endpoints remain byte-for-byte pass-through, including their content
+			// codings. Bound the decoded form independently so a small compressed
+			// request cannot expand past the normal inference-body limit.
+			if strings.EqualFold(strings.TrimSpace(req.Header.Get("Content-Encoding")), "gzip") {
+				zr, zerr := gzip.NewReader(bytes.NewReader(body))
+				if zerr == nil {
+					body, zerr = io.ReadAll(io.LimitReader(zr, maxBodySize+1))
+					_ = zr.Close()
+					if zerr == nil && len(body) > maxBodySize {
+						zerr = &http.MaxBytesError{Limit: maxBodySize}
+					}
+				}
+				if zerr != nil {
+					rejectMalformed()
+					return
+				}
+				req.Header.Del("Content-Encoding")
+				req.ContentLength = int64(len(body))
+			}
+
 			// JSON-text validation first: the format adapters decode with
 			// encoding/json, which silently replaces invalid UTF-8 and lone
 			// surrogates, accepts duplicate member names (last wins), and lets
@@ -1505,6 +1527,9 @@ func New(cfg Config) (*Server, error) {
 			}
 
 			contentType := resp.Header.Get("Content-Type")
+			missingContentType := strings.TrimSpace(contentType) == ""
+			chat, _ := resp.Request.Context().Value(engine.ChatRequestKey).(*engine.ChatRequest)
+			contentType = inferenceResponseMediaType(contentType, rs.Intercepted, chat != nil && chat.Stream)
 			if e := exchangeFrom(resp.Request.Context()); e != nil {
 				// A translated stream cannot be mistaken for a complete JSON
 				// response, nor can an HTML/gzip error escape under another API.
@@ -1518,6 +1543,9 @@ func New(cfg Config) (*Server, error) {
 
 			// SSE streaming: parse → pipeline → serialize.
 			if isEventStreamMediaType(contentType) {
+				if missingContentType {
+					resp.Header.Set("Content-Type", "text/event-stream")
+				}
 				streamFormat, _ := resp.Request.Context().Value(formatCtxKey{}).(*format.Format)
 				streamFormat = actualResponseFormat(resp.Request.Context(), streamFormat)
 				if streamFormat == nil {
@@ -1777,6 +1805,9 @@ func New(cfg Config) (*Server, error) {
 					// closed.
 					<-tapDone
 					if serErr != nil {
+						if rs.AuditErrorCode == "" {
+							rs.AuditErrorCode = "stream_serialization_error"
+						}
 						log.Printf("format %s serialize error: %v", streamFormat.Name, serErr)
 					}
 					// Observational run_after_response for streaming
@@ -1796,7 +1827,6 @@ func New(cfg Config) (*Server, error) {
 						// be rewritten: Message is nil and mutable is false.
 						// A plugin that needs the streamed content observes it
 						// through run_on_stream_chunk, which sees every event.
-						streamResp := rs.chatResponse(rs.Model, "", nil, "")
 						// Observational only. Every stream event has been
 						// written, so there is nothing left to withhold and
 						// failure_mode has nothing to act on. "Observational"
@@ -1807,7 +1837,14 @@ func New(cfg Config) (*Server, error) {
 						// run_on_stream_chunk, which CAN terminate — see the
 						// stream hook above. Recorded so the failure is
 						// visible rather than claimed as a block.
-						if _, err := pl.RunAfterResponse(ctx, reqStateFrom(ctx).ID, streamResp, false); err != nil {
+						// The client may close its response body immediately after the
+						// terminal frame. That cancels the HTTP request context even
+						// though this completion hook is deliberately part of handler
+						// finalisation. Preserve request-scoped values but let the
+						// pipeline's own bounded hook timeout govern this final
+						// observational call, or usage/audit plugins lose successful
+						// streaming requests nondeterministically.
+						if err := runStreamingAfterResponse(ctx, pl); err != nil {
 							log.Printf("plugin run_after_response (stream, observational — "+
 								"failure_mode cannot apply, body already sent): %v", err)
 							if rsObs := reqStateFrom(ctx); rsObs != nil {
@@ -1817,9 +1854,9 @@ func New(cfg Config) (*Server, error) {
 					}
 				}()
 				resp.Body = &abortingReader{r: pr}
+				resp.ContentLength = -1
 				if exchangeFrom(resp.Request.Context()) != nil {
 					clearBridgeRepresentationHeaders(resp.Header)
-					resp.ContentLength = -1
 				}
 				resp.Header.Del("Content-Length")
 				return nil
@@ -1870,7 +1907,6 @@ func New(cfg Config) (*Server, error) {
 						rs.OriginalResp = bodyBytes
 						rs.OriginalRespSet = true
 					}
-					chat, _ := ctx.Value(engine.ChatRequestKey).(*engine.ChatRequest)
 					// Records provider usage into rs as a side effect.
 					modified, modErr := runJSONResponseHooks(ctx, pl, rs.ID, f.Name, chat, bodyBytes)
 					if modErr != nil {
@@ -2904,7 +2940,24 @@ func New(cfg Config) (*Server, error) {
 		tw := &trackingWriter{ResponseWriter: w}
 		r.Body = tr
 
-		proxy.ServeHTTP(tw, r)
+		// ReverseProxy uses ErrAbortHandler to terminate a response whose body
+		// failed after headers were written. Capture only that sentinel long
+		// enough to finalize usage/feed/audit below, then re-panic it so net/http
+		// still performs the sanctioned connection abort. Other panics retain
+		// the ordinary outer recovery path.
+		var responseAbort any
+		func() {
+			defer func() {
+				if rec := recover(); rec != nil {
+					if err, ok := rec.(error); ok && err == http.ErrAbortHandler {
+						responseAbort = rec
+						return
+					}
+					panic(rec)
+				}
+			}()
+			proxy.ServeHTTP(tw, r)
+		}()
 
 		// Wait for the streaming goroutine's observational hook before reading
 		// rs for stats and the feed. The deferred cleanup waits too; this one
@@ -2959,6 +3012,7 @@ func New(cfg Config) (*Server, error) {
 				BytesOut:         tw.bytesWritten,
 				Verdict:          rs.Verdict,
 				PluginFailure:    rs.PluginFailure,
+				ErrorCode:        rs.AuditErrorCode,
 				Plugins:          invokedPlugins,
 			})
 		}
@@ -2967,6 +3021,9 @@ func New(cfg Config) (*Server, error) {
 				rs.ID, rs.Intercepted, rs.Provider, rs.InitialFormat, rs.Model, rs.UpstreamStatus != 0, tw.status, latencyMS, invokedPlugins, rs.Verdict)
 		}
 		s.appendAudit(rs, tw.status, invokedPlugins)
+		if responseAbort != nil {
+			panic(responseAbort)
+		}
 	})
 
 	srv := &http.Server{
@@ -2994,6 +3051,17 @@ func New(cfg Config) (*Server, error) {
 	// both declares run_on_tick and holds env.background_tick.
 	s.ticker = s.startTicker(cfg.Providers.Plugins.Runtime.TickInterval())
 	return s, nil
+}
+
+func runStreamingAfterResponse(ctx context.Context, pl *plugin.PluginPipeline) error {
+	hookCtx := context.WithoutCancel(ctx)
+	rs := reqStateFrom(hookCtx)
+	if rs == nil {
+		return errors.New("stream completion missing request state")
+	}
+	resp := rs.chatResponse(rs.Model, "", nil, "")
+	_, err := pl.RunAfterResponse(hookCtx, rs.ID, resp, false)
+	return err
 }
 
 // --- Lifecycle --------------------------------------------------------------
@@ -4229,6 +4297,18 @@ func (tw *trackingWriter) Flush() {
 		f.Flush()
 	}
 }
+
+// Hijack preserves the optional ResponseWriter capability required by
+// httputil.ReverseProxy for WebSocket and other HTTP upgrades.
+func (tw *trackingWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	h, ok := tw.ResponseWriter.(http.Hijacker)
+	if !ok {
+		return nil, nil, errors.New("response writer does not support hijacking")
+	}
+	return h.Hijack()
+}
+
+func (tw *trackingWriter) Unwrap() http.ResponseWriter { return tw.ResponseWriter }
 
 type trackingReader struct {
 	io.ReadCloser

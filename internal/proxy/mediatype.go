@@ -41,6 +41,21 @@ func isEventStreamMediaType(contentType string) bool {
 	return mediaTypeOf(contentType) == "text/event-stream"
 }
 
+// inferenceResponseMediaType returns the response media type Torana may
+// safely decode. An upstream's explicit type always wins. When (and only
+// when) a positively recognised inference request receives no Content-Type,
+// its already parsed request contract supplies the expected response shape.
+// Auxiliary endpoints never reach this helper with intercepted=true.
+func inferenceResponseMediaType(contentType string, intercepted, stream bool) string {
+	if mediaTypeOf(contentType) != "" || !intercepted {
+		return contentType
+	}
+	if stream {
+		return "text/event-stream"
+	}
+	return "application/json"
+}
+
 // maxReportedContentTypes bounds how many distinct unrecognised media types
 // are remembered for de-duplication.
 //

@@ -397,6 +397,24 @@ func TestTranslateResponseUsageOverflowAndDetailPolicy(t *testing.T) {
 	}
 }
 
+func TestTranslateResponseAcceptsConsistentDeepSeekCacheCounters(t *testing.T) {
+	body := []byte(`{"id":"chat_1","object":"chat.completion","model":"deepseek-chat","choices":[{"index":0,"message":{"role":"assistant","content":"42"},"finish_reason":"stop","logprobs":null}],"usage":{"prompt_tokens":9,"completion_tokens":1,"total_tokens":10,"prompt_tokens_details":{"cached_tokens":2},"prompt_cache_hit_tokens":2,"prompt_cache_miss_tokens":7}}`)
+	if _, err := translateResponseForTest(OpenAIChat, OpenAIResponses, body, "fallback"); err != nil {
+		t.Fatalf("consistent DeepSeek cache counters rejected: %v", err)
+	}
+
+	for _, usage := range []string{
+		`"prompt_tokens":9,"completion_tokens":1,"total_tokens":10,"prompt_tokens_details":{"cached_tokens":2},"prompt_cache_hit_tokens":2`,
+		`"prompt_tokens":9,"completion_tokens":1,"total_tokens":10,"prompt_tokens_details":{"cached_tokens":2},"prompt_cache_hit_tokens":3,"prompt_cache_miss_tokens":6`,
+		`"prompt_tokens":9,"completion_tokens":1,"total_tokens":10,"prompt_tokens_details":{"cached_tokens":2},"prompt_cache_hit_tokens":2,"prompt_cache_miss_tokens":6`,
+	} {
+		bad := []byte(`{"id":"chat_1","object":"chat.completion","model":"deepseek-chat","choices":[{"index":0,"message":{"role":"assistant","content":"42"},"finish_reason":"stop"}],"usage":{` + usage + `}}`)
+		if _, err := translateResponseForTest(OpenAIChat, OpenAIResponses, bad, "fallback"); err == nil {
+			t.Fatalf("inconsistent DeepSeek cache counters accepted: %s", usage)
+		}
+	}
+}
+
 func TestTranslateResponseSynthesizesUniqueResponseIDs(t *testing.T) {
 	anthropic := []byte(`{"type":"message","role":"assistant","model":"m","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn"}`)
 	chat := []byte(`{"object":"chat.completion","model":"m","choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`)

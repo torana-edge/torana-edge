@@ -56,6 +56,9 @@ type RequestEvent struct {
 	// so an operator can see a plugin is failing on a path the host cannot
 	// protect.
 	PluginFailure bool `json:"plugin_failure,omitempty"`
+	// ErrorCode records a host-observed failure even when response headers were
+	// already 200, as with an upstream stream that resets before completion.
+	ErrorCode string `json:"error_code,omitempty"`
 }
 
 // subscriber holds one SSE client's channel and its unique ID used for

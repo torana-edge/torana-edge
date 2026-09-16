@@ -1,17 +1,37 @@
 package proxy
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/torana-edge/torana-edge/internal/metrics"
+	"github.com/torana-edge/torana-edge/internal/provider"
 )
+
+func writeRawResponseWithoutContentType(t *testing.T, w http.ResponseWriter, body string) {
+	t.Helper()
+	hj, ok := w.(http.Hijacker)
+	if !ok {
+		t.Fatal("response writer cannot hijack")
+	}
+	conn, rw, err := hj.Hijack()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	_, _ = rw.WriteString("HTTP/1.1 200 OK\r\nContent-Length: " + strconv.Itoa(len(body)) + "\r\nConnection: close\r\n\r\n" + body)
+	_ = rw.Flush()
+}
 
 // startUsageProxy boots a proxy against the given upstream and returns its
 // base URL plus a shutdown func.
@@ -168,5 +188,135 @@ func TestJSONResponseUsageRecorded(t *testing.T) {
 	stats := statsSnapshot(t, proxyURL)
 	if stats["total_tokens_in"].(float64) != 7 || stats["total_tokens_out"].(float64) != 3 {
 		t.Errorf("tokens not metered: in=%v out=%v", stats["total_tokens_in"], stats["total_tokens_out"])
+	}
+}
+
+func TestRecognisedResponsesRequestMetersJSONWithoutContentType(t *testing.T) {
+	responseBody := `{"id":"x","object":"response","model":"gpt-x","status":"completed","output":[{"id":"m","type":"message","status":"completed","role":"assistant","content":[{"type":"output_text","text":"hi","annotations":[]}]}],"usage":{"input_tokens":7,"output_tokens":3,"total_tokens":10}}`
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		writeRawResponseWithoutContentType(t, w, responseBody)
+	}))
+	defer upstream.Close()
+
+	proxyURL := startUsageProxy(t, upstream.URL)
+	resp, err := http.Post(proxyURL+"/provider/test/v1/responses", "application/json",
+		strings.NewReader(`{"model":"gpt-x","input":"hello"}`))
+	if err != nil {
+		t.Fatalf("POST: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if !bytes.Equal(body, []byte(responseBody)) {
+		t.Fatalf("response changed: %s", body)
+	}
+	stats := statsSnapshot(t, proxyURL)
+	if stats["total_tokens_in"].(float64) != 7 || stats["total_tokens_out"].(float64) != 3 {
+		t.Fatalf("tokens not metered: in=%v out=%v", stats["total_tokens_in"], stats["total_tokens_out"])
+	}
+}
+
+func TestRecognisedStreamWithoutContentTypeGetsSSERepresentationAndHooks(t *testing.T) {
+	requireWASM(t, "../../examples/plugins/test-observer/plugin.wasm")
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		writeRawResponseWithoutContentType(t, w, openaiUsageSSE)
+	}))
+	defer upstream.Close()
+
+	cfg := testProviderConfig(upstream.URL, "test", "openai")
+	cfg.Plugins = provider.PluginsConfig{
+		Dir: "../../examples/plugins", Order: []string{"test-observer"}, AllowUnapproved: true,
+	}
+	srv, err := New(Config{Providers: cfg})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	proxy := httptest.NewServer(srv.Handler())
+	t.Cleanup(func() {
+		proxy.Close()
+		_ = srv.Shutdown(context.Background())
+	})
+
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Post(proxy.URL+"/provider/test/v1/chat/completions", "application/json",
+		strings.NewReader(`{"model":"gpt-x","stream":true,"stream_options":{"include_usage":true},"messages":[{"role":"user","content":"hello"}]}`))
+	if err != nil {
+		t.Fatalf("POST: %v", err)
+	}
+	body, readErr := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if readErr != nil {
+		t.Fatalf("read stream: %v", readErr)
+	}
+	if got := resp.Header.Get("Content-Type"); got != "text/event-stream" {
+		t.Fatalf("Content-Type = %q, want text/event-stream", got)
+	}
+	if got := resp.Header.Get("Content-Length"); got != "" || resp.ContentLength != -1 {
+		t.Fatalf("stale response length: header=%q ContentLength=%d", got, resp.ContentLength)
+	}
+	if !strings.Contains(string(body), "hi") || !strings.Contains(string(body), `"prompt_tokens":10`) ||
+		!strings.Contains(string(body), "data: [DONE]") {
+		t.Fatalf("stream was incomplete: %s", body)
+	}
+	stats := statsSnapshot(t, proxy.URL)
+	if stats["total_tokens_in"].(float64) != 10 || stats["total_tokens_out"].(float64) != 5 {
+		t.Fatalf("tokens not metered: in=%v out=%v", stats["total_tokens_in"], stats["total_tokens_out"])
+	}
+	v, ok, cacheErr := srv.sharedCache.Get(context.Background(), observerCacheKey("observed_error_status"))
+	if cacheErr != nil || !ok || v != "200" {
+		t.Fatalf("stream completion hook not observed: value=%q ok=%v err=%v", v, ok, cacheErr)
+	}
+}
+
+func TestUpstreamResetDoesNotLookLikeCleanStreamingSuccess(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		hj := w.(http.Hijacker)
+		conn, rw, err := hj.Hijack()
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		defer conn.Close()
+		_, _ = rw.WriteString("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: 10000\r\n\r\n" +
+			`data: {"choices":[{"index":0,"delta":{"content":"partial"}}]}` + "\n\n")
+		_ = rw.Flush()
+	}))
+	defer upstream.Close()
+
+	srv, err := New(Config{Providers: testProviderConfig(upstream.URL, "test", "openai")})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	proxy := httptest.NewServer(srv.Handler())
+	t.Cleanup(func() {
+		proxy.Close()
+		_ = srv.Shutdown(context.Background())
+	})
+	feedEvents, unsubscribe := srv.feed.Subscribe()
+	defer unsubscribe()
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Post(proxy.URL+"/provider/test/v1/chat/completions", "application/json",
+		strings.NewReader(`{"model":"gpt-x","stream":true,"messages":[{"role":"user","content":"hello"}]}`))
+	if err != nil {
+		t.Fatalf("POST: %v", err)
+	}
+	body, readErr := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if readErr == nil {
+		t.Fatalf("reset stream ended cleanly: %s", body)
+	}
+	if strings.Contains(string(body), "data: [DONE]") {
+		t.Fatalf("reset stream emitted a clean terminal marker: %s", body)
+	}
+	var event metrics.RequestEvent
+	select {
+	case event = <-feedEvents:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for reset stream feed event")
+	}
+	if event.ErrorCode != "stream_serialization_error" {
+		t.Fatalf("feed did not preserve stream failure: %+v", event)
+	}
+	if event.Status != http.StatusOK {
+		t.Fatalf("upstream status = %d, want factual 200 headers", event.Status)
 	}
 }

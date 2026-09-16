@@ -61,17 +61,31 @@ with a live API key in the session below.
 
 **ChatGPT-login verification:** a dedicated native Torana provider pointing at
 `https://chatgpt.com/backend-api/codex`, with caller auth, returned a Luna
-read-tool round trip in Codex 0.154.0. That check used a custom Codex provider
-with `requires_openai_auth = true`, `supports_websockets = false`, and
-`--disable enable_request_compression`.
+read-tool round trip in Codex 0.154.0. The final check used a custom Codex
+provider with `requires_openai_auth = true` and `supports_websockets = false`.
+Codex request compression remained enabled. The upstream HTTP 200 omitted
+`Content-Type`; Torana classified it from the already-recognized Responses
+request, ran the response pipeline, recorded feed usage, and `usage_logger`
+wrote a content-free record with `usage_reported: true`.
 
-However, the upstream returned HTTP 200 without `Content-Type`. Torana passed
-the response through without response hooks, feed completion, or usage
-recording. The default transport also hit a WebSocket-upgrade failure and an
-HTTP request-parse failure with request compression enabled. **A successful Codex reply does not yet establish a working
-usage-logger experience for this ChatGPT-login route.** Check these boundaries
-before choosing it for a plugin workflow; do not substitute an API key without
-choosing API billing explicitly.
+Add a separate Torana provider named `chatgpt` with URL
+`https://chatgpt.com/backend-api/codex`, format `openai`, and auth mode `caller`.
+Then run this command-scoped Codex provider without changing saved Codex config:
+
+```bash
+codex exec --ignore-user-config --ephemeral --skip-git-repo-check -s read-only \
+  -m gpt-5.6-luna \
+  -c 'model_provider="torana"' \
+  -c 'model_providers.torana={name="Torana",base_url="http://127.0.0.1:8080/provider/chatgpt",wire_api="responses",requires_openai_auth=true,supports_websockets=false,request_max_retries=0,stream_max_retries=0}' \
+  -c check_for_update_on_startup=false \
+  'Reply with exactly: 42'
+```
+
+Keep `supports_websockets = false` for response-plugin workflows. A separate
+bounded check confirmed that WebSocket transport connects through Torana, but
+an upgraded connection is an opaque byte stream and does not enter the HTTP/SSE
+response-plugin or usage pipeline. Do not substitute an API key for a ChatGPT
+login without choosing API billing explicitly.
 
 ## Antigravity CLI (`agy`)
 
@@ -115,7 +129,7 @@ Small checks on September 16, 2026, using native routes (initially without plugi
 | Harness | Model | Observed result |
 | --- | --- | --- |
 | Claude Code 2.1.271 | Haiku 4.5 | Read-tool call and follow-up succeeded; matching HTTP 200 entries and usage appeared in Torana’s feed. A later request wrote usage records after enabling usage_logger through the UI |
-| Codex 0.154.0 | GPT-5.6 Luna | Tool round trip returned; missing response media type prevented response hooks and usage recording, as explained above |
+| Codex 0.154.0 | GPT-5.6 Luna | Compressed HTTP/SSE text and read-tool turns succeeded through ChatGPT login; feed usage and a `usage_logger` record were verified. WebSocket connectivity was checked separately and is intentionally not the response-plugin path |
 | Antigravity language server 1.2.2 | Gemini 3.8 Flash High | Text response succeeded through the mapped Code Assist host; HTTP 200 and usage appeared in the feed |
 
 These are narrow checks, not claims about resume, every tool, login refresh,
