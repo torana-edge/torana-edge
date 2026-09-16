@@ -50,6 +50,11 @@ cat >"$seed" <<EOF
       "format": "openai",
       "auth": {"mode": "credential", "credential": "deepseek-live"}
     },
+    "deepseek-native-anthropic": {
+      "url": "https://api.deepseek.com/anthropic",
+      "format": "anthropic",
+      "auth": {"mode": "credential", "credential": "deepseek-live"}
+    },
     "deepseek-responses": {
       "url": "https://api.deepseek.com",
       "format": "openai",
@@ -123,32 +128,52 @@ post_json() {
 }
 
 post_json /provider/deepseek-native/v1/chat/completions \
-  '{"model":"deepseek-chat","max_tokens":8,"messages":[{"role":"user","content":"Reply with exactly 42"}]}' \
+  '{"model":"deepseek-flash","max_tokens":8,"reasoning_effort":"none","messages":[{"role":"user","content":"Reply with exactly 42"}]}' \
   "$live_dir/native.json"
-jq -e '.choices[0].message.content | strings | contains("42")' "$live_dir/native.json" >/dev/null
+if ! jq -e '.choices[0].message.content | strings | contains("42")' "$live_dir/native.json" >/dev/null; then
+  jq -c '{keys:(keys|sort),choice:(.choices[0] // null)}' "$live_dir/native.json" >&2
+  exit 1
+fi
+echo "PASS native OpenAI Chat"
+
+post_json /provider/deepseek-native/v1/responses \
+  '{"model":"deepseek-flash","max_output_tokens":8,"reasoning":{"effort":"none"},"input":"Reply with exactly 42"}' \
+  "$live_dir/native-responses.json"
+jq -e '.object == "response" and (.output | type == "array")' "$live_dir/native-responses.json" >/dev/null
+echo "PASS native OpenAI Responses"
+
+post_json /provider/deepseek-native-anthropic/v1/messages \
+  '{"model":"deepseek-flash","max_tokens":8,"messages":[{"role":"user","content":"Reply with exactly 42"}]}' \
+  "$live_dir/native-anthropic.json"
+jq -e '.type == "message" and (.content | type == "array")' "$live_dir/native-anthropic.json" >/dev/null
+echo "PASS native Anthropic"
 
 post_json /provider/deepseek-responses/v1/responses \
   '{"model":"client-model","max_output_tokens":8,"input":"Reply with exactly 42"}' \
   "$live_dir/responses.json"
 jq -e '.object == "response" and (.output | type == "array")' "$live_dir/responses.json" >/dev/null
+echo "PASS Responses client translated to Chat upstream"
 
 post_json /provider/deepseek-anthropic/v1/messages \
   '{"model":"client-model","max_tokens":8,"messages":[{"role":"user","content":"Reply with exactly 42"}]}' \
   "$live_dir/anthropic.json"
 jq -e '.type == "message" and (.content | type == "array")' "$live_dir/anthropic.json" >/dev/null
+echo "PASS Anthropic client translated to Chat upstream"
 
 post_json /provider/deepseek-gemini/v1beta/models/client-model:generateContent \
   '{"contents":[{"role":"user","parts":[{"text":"Reply with exactly 42"}]}],"generationConfig":{"maxOutputTokens":8}}' \
   "$live_dir/gemini.json"
 jq -e '.candidates | type == "array"' "$live_dir/gemini.json" >/dev/null
+echo "PASS Gemini client translated to Chat upstream"
 
 post_json /provider/deepseek-codeassist/v1internal:generateContent \
   '{"model":"client-model","request":{"contents":[{"role":"user","parts":[{"text":"Reply with exactly 42"}]}],"generationConfig":{"maxOutputTokens":8}}}' \
   "$live_dir/codeassist.json"
 jq -e '.response.candidates | type == "array"' "$live_dir/codeassist.json" >/dev/null
+echo "PASS Code Assist client translated to Chat upstream"
 
 TORANA_DATA_DIR=$data_dir "$torana_bin" feed >"$live_dir/feed.json"
-jq -e 'length == 5 and all(.[]; .status == 200 and .tokens_in > 0 and .tokens_out > 0)' \
+jq -e 'length == 7 and all(.[]; .status == 200 and .tokens_in > 0 and .tokens_out > 0)' \
   "$live_dir/feed.json" >/dev/null
 
-echo "PASS deepseek-chat-bridges: native OpenAI Chat plus Responses, Anthropic, Gemini, and Code Assist clients; feed usage present"
+echo "PASS deepseek-chat-bridges: native Chat, Responses, and Anthropic plus four translated client shapes; feed usage present"
