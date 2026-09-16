@@ -15,13 +15,7 @@ OpenAI Responses can target a Chat Completions backend for supported features.
     "ollama": {
       "url": "http://localhost:11434",
       "format": "openai",
-      "auth": {"mode": "none"},
-      "fallback": ["deepseek"]
-    },
-    "deepseek": {
-      "url": "https://api.deepseek.com",
-      "format": "openai",
-      "auth": {"mode": "credential", "credential": "deepseek-api-key"}
+      "auth": {"mode": "none"}
     }
   }
 }
@@ -32,14 +26,9 @@ its base URL to `http://localhost:8080/provider/ollama/v1`. A raw request uses
 `http://localhost:8080/provider/ollama/v1/chat/completions`. A Responses client
 needs an upstream that implements Responses or an explicit protocol bridge.
 
-The fallback declares its own Torana credential: on failover Torana removes the
-caller's credential rather than forwarding it to a different vendor. Give every
-authenticated fallback its own named credential; use `auth.mode: none` for a
-local server that needs no authentication.
-
-To keep routing local, omit the remote fallback shown above. If it is enabled,
-eligible failures send the request to DeepSeek using its named credential.
-You can also use a local model as a plugin-bound scanner or summarizer.
+This route calls only your local Ollama server; no hosted-provider account is
+needed. Add it through Torana Settings or the [CLI configuration workflow](CLI.md#settings-read-edit-apply).
+The snippet shows the provider entry, not a replacement for your other settings.
 
 ## vLLM
 
@@ -65,3 +54,12 @@ that path to `/v1/chat/completions`. Torana does not append a guessed inference
 path to the provider URL. The plugin owns the request it sends.
 See the [local compactor setup](https://github.com/torana-edge/torana-plugins/blob/main/plugins/compactor/LOCAL_SUMMARIZER.md)
 or [PII scanner setup](https://github.com/torana-edge/torana-plugins/blob/main/plugins/pii/README.md).
+
+## Optional: add a fallback
+
+If you want a second endpoint for eligible failures, configure it explicitly
+using the [fallback guide](QUICKSTART.md#provider-authentication-and-fallbacks).
+Give an authenticated fallback its own named credential; use `auth.mode: none`
+for a local server that needs no authentication. A remote fallback sends the
+request to that provider and uses its billing, so add one only when you want
+that behavior.

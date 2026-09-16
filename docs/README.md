@@ -4,7 +4,8 @@ Start small: route one request, see it in the feed, then add one plugin.
 
 ## Start and operate
 
-- [Quickstart](QUICKSTART.md): build, send a request, install a plugin, connect a harness.
+- [Quickstart](QUICKSTART.md): build, connect your existing harness, see a request, add a plugin.
+- [Harness setup](HARNESS_SETUP.md): recipes for your existing login or API key.
 - [CLI](CLI.md): lifecycle, settings, pipeline, plugin approval and agent operations.
 - [Running plugins](PLUGINS.md): installation, resources, ordering and failure policy.
 - [Credentials](CREDENTIALS.md): caller keys, named secrets and safe updates.

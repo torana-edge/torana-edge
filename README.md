@@ -42,28 +42,38 @@ export TORANA_DATA_DIR="$PWD/.torana-data"
 ./torana status
 ```
 
-The example config enables no plugins and uses caller-supplied credentials.
-Send a request through its DeepSeek route:
+### Use the harness you already have
+
+Which coding harness do you use? Keep your existing provider and login. Pick
+the [setup recipe for your harness](docs/HARNESS_SETUP.md)—including Claude Code,
+Codex, Antigravity, pi, and oh-my-pi.
+
+For an already signed-in Claude Code session, launch it through the example's
+Anthropic route:
 
 ```bash
-export DEEPSEEK_API_KEY='replace-with-your-deepseek-key'
-curl --fail-with-body http://127.0.0.1:8080/provider/deepseek/v1/chat/completions \
-  -H "Authorization: Bearer ${DEEPSEEK_API_KEY}" \
-  -H 'Content-Type: application/json' \
-  -d '{"model":"deepseek-flash","messages":[{"role":"user","content":"Reply with exactly: Torana works"}]}'
-./torana feed
+ANTHROPIC_BASE_URL=http://127.0.0.1:8080/provider/anthropic claude
 ```
 
-Expect a normal provider response and a matching request in the feed.
-The call uses your provider account. For a local endpoint, see
-[Local models](docs/LOCAL_MODELS.md).
+Ask it to read a small, non-sensitive file, then find the request in Torana's
+Feed. The [Claude setup notes](docs/HARNESS_SETUP.md#claude-code) explain how
+existing API-key or token settings can take precedence over your login. Your
+provider's normal billing and usage limits still apply.
+
+Prefer a direct API request? The [optional API-key example](docs/QUICKSTART.md#optional-use-an-api-key-directly)
+uses DeepSeek and explains what to change for your own provider. For a local
+model server, follow [Local models](docs/LOCAL_MODELS.md).
 
 Open [the local UI](http://127.0.0.1:8080/_torana/), or keep using the CLI:
 
 ```bash
+./torana feed
 ./torana stats
 ./torana plugin status
 ```
+
+`start`, `status`, and `stop` print readable summaries; add `--json` when
+driving them from scripts or an agent.
 
 ## Add one plugin
 
@@ -72,12 +82,23 @@ in a rotating private file.
 
 ```bash
 ./torana plugin install https://github.com/torana-edge/torana-plugins/tree/main/plugins/usage_logger
-./torana plugin inspect usage_logger
 ```
 
-Follow its [setup guide](https://github.com/torana-edge/torana-plugins/blob/main/plugins/usage_logger/README.md)
-to approve the file budget, enable it and inspect a record. Installation alone
-does not run code in the proxy. Rebuilding a bundle requires a new approval.
+Run that command from the same Torana checkout. Open [the local UI](http://127.0.0.1:8080/_torana/),
+select **usage_logger**, review its requested file access and retention budget,
+then choose **Approve and enable**. Prefer terminal or agent automation? Use the
+plugin's [CLI setup guide](https://github.com/torana-edge/torana-plugins/blob/main/plugins/usage_logger/README.md#configure).
+
+Send another request from your harness and follow its local usage record:
+
+```bash
+tail -F "$(./torana plugin file path usage_logger usage.jsonl)"
+```
+
+Torana resolves the path; your shell reads the file. A new record confirms the
+plugin ran. The [plugin guide](https://github.com/torana-edge/torana-plugins/blob/main/plugins/usage_logger/README.md#try-it-and-check-the-result)
+includes PowerShell and instance-selection examples. Installation alone does
+not enable a plugin; rebuilding a bundle requires a new approval.
 
 The [catalogue](https://torana.sh/plugins/) includes tool policy, telemetry,
 PII checks, schema adaptation and optional compaction. Compaction is a plugin

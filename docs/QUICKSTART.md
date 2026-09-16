@@ -53,6 +53,12 @@ authentication set to **Use harness credentials**; no DeepSeek key is needed.
 For Codex, Antigravity, pi, or oh-my-pi, use the
 [harness-specific settings and verification results](HARNESS_SETUP.md).
 
+You can also inspect activity from the terminal:
+
+```bash
+./torana feed
+```
+
 ## Optional: use an API key directly
 
 Already have an API key and want to make a request without a harness?
@@ -77,37 +83,13 @@ normal provider response. Run `./torana feed` to find the matching request;
 request-received/completed lines, not headers or bodies. Bridge error-body
 diagnostics have a separate [explicit opt-in](PROTOCOL_BRIDGES.md#diagnose-an-upstream-rejection).
 
-Use `./torana stop --yes` when finished. `./torana serve` is available if
-you prefer a foreground process.
-
 ## Configure
 
-The copied `config.example.json` is equivalent to this minimal seed:
-```json
-{
-  "port": 8080,
-  "providers": {
-    "deepseek": {
-      "url": "https://api.deepseek.com",
-      "format": "openai",
-      "auth": {"mode": "caller"}
-    },
-    "deepseek-anthropic": {
-      "url": "https://api.deepseek.com/anthropic",
-      "format": "anthropic",
-      "auth": {"mode": "caller"}
-    }
-  },
-  "plugins": {
-    "dir": "./plugins",
-    "order": []
-  },
-  "limits": {
-    "concurrency": 10,
-    "rpm": 100
-  }
-}
-```
+The copied [config.example.json](../config.example.json) is the complete seed:
+it includes native Anthropic, OpenAI, Gemini, and DeepSeek routes, with no
+plugins enabled. Choose the route for your harness; you do not need an account
+with every listed provider. For a ChatGPT login or Antigravity, follow the
+[harness guide](HARNESS_SETUP.md) for the appropriate endpoint and setup.
 
 `limits.concurrency` is the maximum number of simultaneous upstream requests
 per identity; `limits.rpm` is a per-identity token bucket refilled over one
@@ -130,7 +112,9 @@ For repeated first-run testing, point `TORANA_DATA_DIR` at a new empty directory
 for each run. That avoids accidentally exercising an older managed
 configuration while believing you are testing a changed seed.
 
-The empty order is intentional: discovered plugins are not implicitly trusted
+## Add one plugin
+
+The empty plugin order is intentional: discovered plugins are not implicitly trusted
 or enabled. After the plugin-free request above succeeds, leave Torana running
 and install one plugin from the same checkout. The watcher discovers the new
 bundle without a restart:
@@ -188,7 +172,7 @@ Browse the [plugin setup guides](https://github.com/torana-edge/torana-plugins#c
 when you want to change traffic. No plugin transformation is enabled by default.
 
 
-### Provider authentication and fallbacks
+## Provider authentication and fallbacks
 
 The shipped seed names these native routes. Replace or add providers through
 the CLI or UI after the first import; the route name is your local identifier,
@@ -270,108 +254,48 @@ otherwise is a 401 from a provider you never called directly.
 ## Route your harness
 
 Torana sends supported inference endpoints through its shared format and
-plugins. Native routes forward auxiliary calls as ordinary HTTP; an explicit
-bridge rejects them with HTTP 400, even when both bridge contracts are the
-same. See [Coding-harness compatibility](HARNESS_COMPATIBILITY.md) and
-[Protocol bridges](PROTOCOL_BRIDGES.md). The following auxiliary check uses the
-native DeepSeek route from this guide.
-
-You can verify the auxiliary-path half of that contract directly:
-
-```bash
-curl -i http://127.0.0.1:8080/provider/deepseek/models
-```
-
-The provider may return success or its own error for that endpoint. The important
-property is that it is forwarded as ordinary HTTP and does not appear in
-Torana's live inference feed.
+plugins. Start with the [harness setup guide](HARNESS_SETUP.md), which owns the
+connection recipes and their verification details. For a backend with a
+different API, use a [protocol bridge](PROTOCOL_BRIDGES.md). The
+[compatibility reference](HARNESS_COMPATIBILITY.md) explains inference and
+auxiliary routing.
 
 ### omp (oh-my-pi)
-```yaml
-# ~/.omp/agent/models.yml
-providers:
-  deepseek:
-    baseUrl: http://localhost:8080/provider/deepseek/v1
-```
+Keep the provider you already use and change its base URL to the matching
+Torana route. See [pi and oh-my-pi setup](HARNESS_SETUP.md#pi-and-oh-my-pi).
 
 ### Claude Code
-```bash
-ANTHROPIC_BASE_URL=http://localhost:8080/provider/anthropic claude
-```
-
-This uses the existing Claude login, unless an explicit key/token or key helper
-takes precedence. See [Claude Code setup](HARNESS_SETUP.md#claude-code).
+Use your existing login through the native Anthropic route. See
+[Claude Code setup](HARNESS_SETUP.md#claude-code).
 
 ### Antigravity CLI (agy)
-`agy` can't take a base URL, so route it through Torana's MITM ingress — see
-[GEMINI_ANTIGRAVITY.md](GEMINI_ANTIGRAVITY.md):
-```bash
-export HTTPS_PROXY=http://127.0.0.1:8099
-export SSL_CERT_FILE=/abs/path/to/local/mitm/bundle.pem
-```
+Use the [local TLS-ingress guide](GEMINI_ANTIGRAVITY.md) for your existing Google
+login, with routing scoped to the `agy` process and interactive or headless use.
 
 ### OpenCode
-```jsonc
-// ~/.config/opencode/opencode.jsonc
-{
-  "provider": {
-    "deepseek": {
-      "npm": "@ai-sdk/openai-compatible",
-      "options": {
-        "baseURL": "http://localhost:8080/provider/deepseek/v1"
-      }
-    }
-  }
-}
-```
-
-Follow [OpenCode's provider configuration](https://opencode.ai/docs/providers/)
-to connect your credential and select a model. The compatible adapter's base URL
-includes `/v1`; verify the resulting request in Torana's feed.
+Set the base URL for your selected provider and keep its model/auth settings.
+See [other harness integrations](HARNESS_SETUP.md#other-harnesses).
 
 ### Codex
-See [Codex setup and the ChatGPT-login verification result](HARNESS_SETUP.md#codex)
-before choosing a route. The API-key example below is different from a ChatGPT login.
-Codex reaches a custom provider through `~/.codex/config.toml`, and it speaks
-the OpenAI **Responses** API rather than Chat Completions — so point it at an
-`openai`-format Torana provider whose upstream serves `/responses`:
-
-```toml
-model = "gpt-5.2-codex"
-model_provider = "torana"
-
-[model_providers.torana]
-name = "Torana"
-base_url = "http://localhost:8080/provider/openai/v1"
-env_key = "OPENAI_API_KEY"
-wire_api = "responses"
-supports_websockets = false
-```
-
-This example uses a dedicated `torana` provider entry so its base URL is
-separate from your other provider settings.
+Choose the [Codex recipe](HARNESS_SETUP.md#codex) for your ChatGPT login or
+OpenAI API key. Use its HTTP/SSE settings for response plugins and usage logging.
 
 ### Aider
-```bash
-export OPENAI_API_BASE=http://localhost:8080/provider/deepseek/v1
-export OPENAI_API_KEY='replace-with-your-key'
-aider --model openai/deepseek-flash
-```
-
-This follows Aider's [OpenAI-compatible configuration](https://aider.chat/docs/llms/openai-compat.html):
-the `openai/` model prefix selects the adapter that uses these variables.
-Confirm the request appears in `./torana feed`.
+Use the compatible provider adapter with your chosen model and matching Torana
+route. See [other harness integrations](HARNESS_SETUP.md#other-harnesses).
 
 ### OpenHands / Continue.dev
-Configure the provider URL to `http://localhost:8080/provider/deepseek/v1`
-and API key in the respective settings UI. Torana is compatible with any
-tool that sends OpenAI-compatible chat completion requests.
+In the harness's provider settings, point the selected provider at its matching
+Torana route and keep the model and authentication you normally use. An
+OpenAI Chat Completions base URL uses `/provider/<name>/v1`; select a route
+whose upstream serves that API. Check the resulting request in Torana's Feed.
 
 ## Verify
 
 ```bash
-curl http://localhost:8080/health   # {"status":"ok"}
-curl http://localhost:8080/stats    # compaction counters
+curl --fail-with-body http://127.0.0.1:8080/health
+./torana stats
+./torana status
 ```
 
 A failed plugin hot reload keeps the last known-good pipeline serving and makes
@@ -393,3 +317,10 @@ already sent. See [Prompt caching](PROMPT_CACHING.md).
 
 Torana records identifiers, timestamps and token counts here — never message
 content.
+
+## Switch back
+
+Exit the harness and launch it normally if you used command-scoped routing.
+If you edited a saved harness configuration, restore its previous provider
+settings. Then run `./torana stop --yes` in the shell with the same
+`TORANA_DATA_DIR`. Use `./torana serve` if you prefer foreground serving.
