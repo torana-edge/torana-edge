@@ -131,13 +131,29 @@ rough edges are both useful.
 
 ## Live checks and what they prove
 
-Here are working setups from September 16, 2026. Each used a native route:
+These file-read and tool-follow-up checks passed on September 16, 2026,
+using native routes:
 
 | Harness | Model | Observed result |
 | --- | --- | --- |
 | Claude Code 2.1.271 | Haiku 4.5 | Read-tool call and follow-up succeeded; matching HTTP 200 entries and usage appeared in Torana’s feed. A later request wrote usage records after enabling usage_logger through the UI |
 | Codex 0.154.0 | GPT-5.6 Luna | ChatGPT login over HTTP/SSE: text and read-tool turns, Feed usage, and a local `usage_logger` record |
 | Antigravity CLI 1.2.4 | Gemini 3.8 Flash High | Signed-in headless file read and follow-up through the local TLS ingress, with six matching Feed and usage-logger records; tools were explicitly auto-approved for this isolated run |
+
+<details>
+<summary>What these checks covered</summary>
+
+Each result covers the workflow, version, model, and authentication route
+listed above. Resume, login refresh, long conversations, every tool, and other
+provider accounts were outside these checks. Automated API fixtures separately
+exercise protocol behavior; they are not live harness runs.
+
+For headless Antigravity, check completed tool events and the actual answer.
+A run can finish with `SUCCESS` after a tool was denied; the
+[headless troubleshooting section](GEMINI_ANTIGRAVITY.md#3-point-agy-at-it)
+shows how to handle tool permissions.
+
+</details>
 
 Try the same with your workflow: enable `usage_logger` in the UI, send another
 request, and open the local record. Its
