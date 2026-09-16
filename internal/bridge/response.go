@@ -1247,7 +1247,7 @@ func parseOpenAIUsage(raw json.RawMessage, responses bool) (*completionUsage, er
 	if responses {
 		allowed = append(allowed, "output_tokens_details")
 	} else {
-		allowed = append(allowed, "completion_tokens_details")
+		allowed = append(allowed, "completion_tokens_details", "prompt_cache_hit_tokens", "prompt_cache_miss_tokens")
 	}
 	if err := rejectUnknown(obj, "openai usage", allowed...); err != nil {
 		return nil, err
@@ -1294,6 +1294,25 @@ func parseOpenAIUsage(raw json.RawMessage, responses bool) (*completionUsage, er
 		if !responses {
 			if err := requireZeroCounts(details, "openai input token modality details", "audio_tokens", "image_tokens", "text_tokens"); err != nil {
 				return nil, err
+			}
+		}
+	}
+	if !responses {
+		hit, hitOK, err := optionalInt(obj, "prompt_cache_hit_tokens", "openai usage")
+		if err != nil {
+			return nil, err
+		}
+		miss, missOK, err := optionalInt(obj, "prompt_cache_miss_tokens", "openai usage")
+		if err != nil {
+			return nil, err
+		}
+		if hitOK != missOK {
+			return nil, fmt.Errorf("protocol translation: openai cache hit and miss counts must be reported together")
+		}
+		if hitOK {
+			cacheTotal, ok := checkedAdd(hit, miss)
+			if !ok || cacheTotal != in || hit != u.CacheReadTokens {
+				return nil, fmt.Errorf("protocol translation: openai cache hit and miss counts are inconsistent")
 			}
 		}
 	}
