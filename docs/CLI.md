@@ -42,6 +42,11 @@ $ torana serve --port 70000
 --port=70000 is outside the valid port range 1-65535
 ```
 
+`start` checks the endpoint it is about to use before launching, so a port
+already serving something else is refused by name rather than producing a child
+that dies in the log. That check follows the same precedence, which is what lets
+`torana start --port <free>` work while the previously configured port is busy.
+
 On `start`, these apply only when it actually launches an instance. `start`
 returns an already-running instance unchanged, and never re-binds it; `status`
 and `stop` inspect a running instance and reject both flags. To move a running

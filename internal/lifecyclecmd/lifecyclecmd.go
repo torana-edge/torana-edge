@@ -297,19 +297,30 @@ func startExecutable(ctx context.Context, executable string, flags ServeFlags) (
 	if active {
 		return waitReady(ctx, store, 0, nil)
 	}
-	// Resolve/validate the intended control address before spawning. A daemon
-	// with no loopback API cannot be managed by these commands.
-	c, err := controlclient.New("", 2*time.Second)
+	// Resolve/validate the endpoint the CHILD will actually listen on, then
+	// preflight that one. Resolving without the flags probed the old port while
+	// launching on the new one, so `start --port <free>` failed whenever the
+	// previously configured port was occupied — exactly the case the flag
+	// exists for. Both sides now share controlclient's resolver, so the
+	// precedence cannot drift apart again.
+	//
+	// An explicit but unusable flag still fails here: bypassing preflight would
+	// trade a clear refusal for an instance nobody can administer.
+	target, err := controlclient.ResolveAddress(controlclient.Listener{Port: flags.Port, Bind: flags.Bind})
+	if err != nil {
+		return zero, err
+	}
+	c, err := controlclient.New(target, 2*time.Second)
 	if err != nil {
 		return zero, err
 	}
 	_, inspectErr := Inspect(ctx, c)
 	c.Close()
 	if inspectErr == nil {
-		return zero, fmt.Errorf("the requested port already serves another Torana instance; choose TORANA_PORT or inspect --addr")
+		return zero, fmt.Errorf("%s already serves another Torana instance; choose a free --port or inspect it with --addr", target)
 	}
 	if !connectionRefused(inspectErr) {
-		return zero, fmt.Errorf("cannot safely start on the requested endpoint: %w", inspectErr)
+		return zero, fmt.Errorf("cannot safely start on %s: %w", target, inspectErr)
 	}
 	logPath := filepath.Join(dir, "torana.log")
 	if info, err := os.Lstat(logPath); err == nil && !info.Mode().IsRegular() {

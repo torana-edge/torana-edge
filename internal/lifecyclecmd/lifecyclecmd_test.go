@@ -6,8 +6,12 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -171,4 +175,100 @@ func TestListenerFlagsAreRejectedOnInspectionCommands(t *testing.T) {
 			}
 		}
 	}
+}
+
+// startExecutable preflights the endpoint the child will use. Resolving that
+// target without the requested listener meant `start --port <free>` probed the
+// previously configured port instead: an occupied old port refused the very
+// command that exists to move off it. args() alone cannot catch this, because
+// the arguments were always correct — only the endpoint under test was wrong.
+func TestStartPreflightsTheRequestedListenerNotTheInheritedOne(t *testing.T) {
+	occupied := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.NotFound(w, r)
+	}))
+	defer occupied.Close()
+	busy := occupied.Listener.Addr().(*net.TCPAddr).Port
+	free := freePort(t)
+
+	for _, tc := range []struct {
+		name       string
+		env        map[string]string
+		flags      ServeFlags
+		wantErr    string
+		notWantErr string
+	}{
+		{
+			name:       "occupied inherited port is not probed when a free one is requested",
+			env:        map[string]string{"TORANA_PORT": strconv.Itoa(busy)},
+			flags:      ServeFlags{Port: strconv.Itoa(free), Bind: "127.0.0.1"},
+			notWantErr: "cannot safely start",
+		},
+		{
+			name:       "unusable inherited port is overridden by an explicit one",
+			env:        map[string]string{"TORANA_PORT": "not-a-port"},
+			flags:      ServeFlags{Port: strconv.Itoa(free)},
+			notWantErr: "TORANA_PORT",
+		},
+		{
+			name:       "non-loopback inherited bind is overridden by an explicit one",
+			env:        map[string]string{"TORANA_BIND": "192.0.2.1"},
+			flags:      ServeFlags{Port: strconv.Itoa(free), Bind: "127.0.0.1"},
+			notWantErr: "TORANA_BIND",
+		},
+		{
+			name:    "an explicitly requested endpoint that is occupied still refuses",
+			flags:   ServeFlags{Port: strconv.Itoa(busy), Bind: "127.0.0.1"},
+			wantErr: "cannot safely start on 127.0.0.1:" + strconv.Itoa(busy),
+		},
+		{
+			name:    "an explicitly requested port that cannot work still refuses",
+			flags:   ServeFlags{Port: "70000"},
+			wantErr: "--port",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("TORANA_DATA_DIR", t.TempDir())
+			for k, v := range tc.env {
+				t.Setenv(k, v)
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+			defer cancel()
+			// A no-op executable: preflight runs before the child is launched,
+			// so reaching the launch at all proves preflight was satisfied.
+			_, err := startExecutable(ctx, noopExecutable(t), tc.flags)
+			got := ""
+			if err != nil {
+				got = err.Error()
+			}
+			if tc.wantErr != "" && !strings.Contains(got, tc.wantErr) {
+				t.Fatalf("want an error containing %q, got %q", tc.wantErr, got)
+			}
+			if tc.notWantErr != "" && strings.Contains(got, tc.notWantErr) {
+				t.Fatalf("error must not come from the inherited setting %q, got %q", tc.notWantErr, got)
+			}
+		})
+	}
+}
+
+func freePort(t *testing.T) int {
+	t.Helper()
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := l.Addr().(*net.TCPAddr).Port
+	_ = l.Close()
+	return port
+}
+
+// An executable that exits immediately, so the test exercises preflight and the
+// launch attempt without starting a real proxy.
+func noopExecutable(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "noop")
+	script := "#!/bin/sh\nexit 0\n"
+	if err := os.WriteFile(path, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return path
 }
