@@ -16,9 +16,9 @@ import (
 // observational after-response — even when the handler unwinds through
 // http.ErrAbortHandler and skips the normal-path wait.
 //
-// This does NOT claim run_after_response succeeds after disconnect (the
-// request context is cancelled, so that call may fail). It claims EndRequest
-// cannot run until streamDone closes.
+// Completion hooks detach cancellation while retaining request values (pinned
+// separately below). This test claims only that EndRequest cannot run until
+// streamDone closes.
 func TestRequestCleanupWaitsForStreamingGoroutineOnExceptionalExit(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		streamDone := make(chan struct{})

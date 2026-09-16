@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/torana-edge/torana-edge/internal/metrics"
 	"github.com/torana-edge/torana-edge/internal/provider"
 )
 
@@ -263,5 +264,59 @@ func TestRecognisedStreamWithoutContentTypeGetsSSERepresentationAndHooks(t *test
 	v, ok, cacheErr := srv.sharedCache.Get(context.Background(), observerCacheKey("observed_error_status"))
 	if cacheErr != nil || !ok || v != "200" {
 		t.Fatalf("stream completion hook not observed: value=%q ok=%v err=%v", v, ok, cacheErr)
+	}
+}
+
+func TestUpstreamResetDoesNotLookLikeCleanStreamingSuccess(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		hj := w.(http.Hijacker)
+		conn, rw, err := hj.Hijack()
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		defer conn.Close()
+		_, _ = rw.WriteString("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: 10000\r\n\r\n" +
+			`data: {"choices":[{"index":0,"delta":{"content":"partial"}}]}` + "\n\n")
+		_ = rw.Flush()
+	}))
+	defer upstream.Close()
+
+	srv, err := New(Config{Providers: testProviderConfig(upstream.URL, "test", "openai")})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	proxy := httptest.NewServer(srv.Handler())
+	t.Cleanup(func() {
+		proxy.Close()
+		_ = srv.Shutdown(context.Background())
+	})
+	feedEvents, unsubscribe := srv.feed.Subscribe()
+	defer unsubscribe()
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Post(proxy.URL+"/provider/test/v1/chat/completions", "application/json",
+		strings.NewReader(`{"model":"gpt-x","stream":true,"messages":[{"role":"user","content":"hello"}]}`))
+	if err != nil {
+		t.Fatalf("POST: %v", err)
+	}
+	body, readErr := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if readErr == nil {
+		t.Fatalf("reset stream ended cleanly: %s", body)
+	}
+	if strings.Contains(string(body), "data: [DONE]") {
+		t.Fatalf("reset stream emitted a clean terminal marker: %s", body)
+	}
+	var event metrics.RequestEvent
+	select {
+	case event = <-feedEvents:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for reset stream feed event")
+	}
+	if event.ErrorCode != "stream_serialization_error" {
+		t.Fatalf("feed did not preserve stream failure: %+v", event)
+	}
+	if event.Status != http.StatusOK {
+		t.Fatalf("upstream status = %d, want factual 200 headers", event.Status)
 	}
 }

@@ -1805,6 +1805,9 @@ func New(cfg Config) (*Server, error) {
 					// closed.
 					<-tapDone
 					if serErr != nil {
+						if rs.AuditErrorCode == "" {
+							rs.AuditErrorCode = "stream_serialization_error"
+						}
 						log.Printf("format %s serialize error: %v", streamFormat.Name, serErr)
 					}
 					// Observational run_after_response for streaming
@@ -2937,7 +2940,24 @@ func New(cfg Config) (*Server, error) {
 		tw := &trackingWriter{ResponseWriter: w}
 		r.Body = tr
 
-		proxy.ServeHTTP(tw, r)
+		// ReverseProxy uses ErrAbortHandler to terminate a response whose body
+		// failed after headers were written. Capture only that sentinel long
+		// enough to finalize usage/feed/audit below, then re-panic it so net/http
+		// still performs the sanctioned connection abort. Other panics retain
+		// the ordinary outer recovery path.
+		var responseAbort any
+		func() {
+			defer func() {
+				if rec := recover(); rec != nil {
+					if err, ok := rec.(error); ok && err == http.ErrAbortHandler {
+						responseAbort = rec
+						return
+					}
+					panic(rec)
+				}
+			}()
+			proxy.ServeHTTP(tw, r)
+		}()
 
 		// Wait for the streaming goroutine's observational hook before reading
 		// rs for stats and the feed. The deferred cleanup waits too; this one
@@ -2992,6 +3012,7 @@ func New(cfg Config) (*Server, error) {
 				BytesOut:         tw.bytesWritten,
 				Verdict:          rs.Verdict,
 				PluginFailure:    rs.PluginFailure,
+				ErrorCode:        rs.AuditErrorCode,
 				Plugins:          invokedPlugins,
 			})
 		}
@@ -3000,6 +3021,9 @@ func New(cfg Config) (*Server, error) {
 				rs.ID, rs.Intercepted, rs.Provider, rs.InitialFormat, rs.Model, rs.UpstreamStatus != 0, tw.status, latencyMS, invokedPlugins, rs.Verdict)
 		}
 		s.appendAudit(rs, tw.status, invokedPlugins)
+		if responseAbort != nil {
+			panic(responseAbort)
+		}
 	})
 
 	srv := &http.Server{
