@@ -195,7 +195,7 @@ require_json "native OpenAI Responses" '.object == "response" and .status == "co
 echo "PASS native OpenAI Responses"
 
 post_json /provider/deepseek-native-anthropic/v1/messages \
-  '{"model":"deepseek-flash","max_tokens":8,"messages":[{"role":"user","content":"Reply with exactly 42"}]}' \
+  '{"model":"deepseek-flash","max_tokens":8,"thinking":{"type":"disabled"},"messages":[{"role":"user","content":"Reply with exactly 42"}]}' \
   "$live_dir/native-anthropic.json"
 require_json "native Anthropic" '.type == "message" and .stop_reason == "end_turn" and any(.content[]?; .type == "text" and (.text | strings | contains("42")))' "$live_dir/native-anthropic.json"
 echo "PASS native Anthropic"
