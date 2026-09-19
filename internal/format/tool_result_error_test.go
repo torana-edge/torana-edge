@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"github.com/torana-edge/torana-edge/internal/engine"
+	sdk "github.com/torana-edge/torana-plugin-sdk"
 	"google.golang.org/protobuf/proto"
 	"testing"
 
@@ -55,6 +56,59 @@ func TestToolResultErrorAcrossAdapterAndGuestBridge(t *testing.T) {
 	}
 }
 
+func TestGeminiStructuredResultBecomesRecoverableError(t *testing.T) {
+	a := &gemini.Adapter{}
+	req, err := a.Unmarshal([]byte(`{"contents":[{"role":"model","parts":[{"functionCall":{"name":"read","args":{}}}]},{"role":"user","parts":[{"functionResponse":{"name":"read","response":{"output":"secret"},"parts":[{"inlineData":{"mimeType":"text/plain","data":"c2VjcmV0"}}]}}]}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	wire, err := pbconv.ToPBChatRequestChecked(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if changed, err := sdk.ReplaceToolResultWithError(wire.Messages[1], 0, "Sensitive output withheld."); err != nil || !changed {
+		t.Fatalf("replace structured result: changed=%v err=%v", changed, err)
+	}
+	restored, err := pbconv.FromPBChatRequest(wire)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := a.Marshal(restored)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(out, []byte(`"error":"Sensitive output withheld."`)) || bytes.Contains(out, []byte("c2VjcmV0")) {
+		t.Fatalf("Gemini error projection leaked or omitted content: %s", out)
+	}
+}
+
+func TestAnthropicRecoverableErrorPreservesMultipleCacheBoundaries(t *testing.T) {
+	a := &anthropic.Adapter{}
+	req, err := a.Unmarshal([]byte(`{"model":"m","max_tokens":10,"messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"c","content":[{"type":"text","text":"secret one","cache_control":{"type":"ephemeral","ttl":"5m"}},{"type":"text","text":"secret two","cache_control":{"type":"ephemeral","ttl":"1h"}}]}]}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	wire, err := pbconv.ToPBChatRequestChecked(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if changed, err := sdk.ReplaceToolResultWithError(wire.Messages[0], 0, "withheld"); err != nil || !changed {
+		t.Fatalf("replace segmented result: changed=%v err=%v", changed, err)
+	}
+	restored, err := pbconv.FromPBChatRequest(wire)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := a.Marshal(restored)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(out, []byte("secret")) || bytes.Count(out, []byte(`"text":"withheld"`)) != 2 ||
+		!bytes.Contains(out, []byte(`"ttl":"5m"`)) || !bytes.Contains(out, []byte(`"ttl":"1h"`)) {
+		t.Fatalf("cache-delimited sanitized result was not representable: %s", out)
+	}
+}
+
 func TestAnthropicToolResultErrorRequiresBoolean(t *testing.T) {
 	for _, flag := range []string{"null", `"true"`, "1", "{}"} {
 		body := fmt.Sprintf(`{"model":"m","messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"c","content":"diagnostic","is_error":%s}]}]}`, flag)
@@ -64,8 +118,9 @@ func TestAnthropicToolResultErrorRequiresBoolean(t *testing.T) {
 	}
 }
 
-// Start with each provider's valid topology so a different marshal refusal
-// cannot accidentally make the failure-flag assertion pass.
+// Formats without a boolean error flag still deliver the recoverable
+// diagnostic in their native tool-result representation. Gemini has a native
+// response.error convention; OpenAI carries the replacement text as output.
 func TestCrossFormatToolErrorProjection(t *testing.T) {
 	for _, tc := range []struct {
 		name, wire string
@@ -97,17 +152,14 @@ func TestCrossFormatToolErrorProjection(t *testing.T) {
 			for _, flag := range []*bool{nil, proto.Bool(false), proto.Bool(true)} {
 				tr.IsError = flag
 				out, err := tc.adapter.Marshal(req)
-				if flag != nil && *flag {
-					if err == nil {
-						t.Fatal("true was silently dropped")
-					}
-					continue
-				}
 				if err != nil {
-					t.Fatalf("successful tool result refused: %v", err)
+					t.Fatalf("tool result refused: %v", err)
 				}
 				if bytes.Contains(out, []byte(`"is_error"`)) {
-					t.Fatal("unsupported flag leaked onto wire")
+					t.Fatal("canonical-only flag leaked onto wire")
+				}
+				if flag != nil && *flag && tc.name == "gemini" && !bytes.Contains(out, []byte(`"error"`)) {
+					t.Fatalf("Gemini error convention missing: %s", out)
 				}
 			}
 		})

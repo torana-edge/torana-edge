@@ -1119,13 +1119,18 @@ func validateBeforeHookEconomicOrder(config PluginConfig, byName map[string]Plug
 			continue // the ordinary approval pass owns this diagnostic.
 		}
 		hasRoute := false
+		hasToolResultWrite := false
 		hasCompactionGate := false
 		for _, grant := range grants {
 			hasRoute = hasRoute || grant == "env.route_request"
+			hasToolResultWrite = hasToolResultWrite || grant == "ir.tool_results.write"
 			hasCompactionGate = hasCompactionGate || grant == "env.host_call.torana_evaluate_compaction"
 		}
 		if hasRoute && seenCompactionGate {
 			return fmt.Errorf("ordering constraint violation: route-capable plugin %q must precede compaction economic-gate plugins in plugins.hook_order.run_before_request", name)
+		}
+		if hasToolResultWrite && !hasCompactionGate && seenCompactionGate {
+			return fmt.Errorf("ordering constraint violation: tool-result-writing plugin %q must precede compaction economic-gate plugins in plugins.hook_order.run_before_request", name)
 		}
 		seenCompactionGate = seenCompactionGate || hasCompactionGate
 	}
@@ -1183,6 +1188,7 @@ func reloadPipeline(runtime *wasm.Runtime, config PluginConfig) (*PluginPipeline
 	// Enforce ordering constraint: route-capable plugins (env.route_request)
 	// must precede compaction economic-gate plugins (env.host_call.torana_evaluate_compaction).
 	var seenCompactionGate bool
+	var economicOrderErr error
 	approvedUpstream := make(map[string]struct{})
 	loadedUpstream := make(map[string]struct{})
 	activeBundles := make([]PluginBundle, 0, len(order))
@@ -1221,7 +1227,7 @@ func reloadPipeline(runtime *wasm.Runtime, config PluginConfig) (*PluginPipeline
 				}
 			}
 		}
-		var hasRoute, hasCompactionGate bool
+		var hasRoute, hasToolResultWrite, hasCompactionGate bool
 		for _, grant := range grants {
 			if grant == "env.route_request" {
 				hasRoute = true
@@ -1229,9 +1235,15 @@ func reloadPipeline(runtime *wasm.Runtime, config PluginConfig) (*PluginPipeline
 			if grant == "env.host_call.torana_evaluate_compaction" {
 				hasCompactionGate = true
 			}
+			if grant == "ir.tool_results.write" {
+				hasToolResultWrite = true
+			}
 		}
-		if hasRoute && seenCompactionGate {
-			return nil, fmt.Errorf("ordering constraint violation: route-capable plugin %q (grant env.route_request) must precede compaction economic-gate plugins (grant env.host_call.torana_evaluate_compaction)", name)
+		if hasRoute && seenCompactionGate && economicOrderErr == nil {
+			economicOrderErr = fmt.Errorf("ordering constraint violation: route-capable plugin %q (grant env.route_request) must precede compaction economic-gate plugins (grant env.host_call.torana_evaluate_compaction)", name)
+		}
+		if hasToolResultWrite && !hasCompactionGate && seenCompactionGate && economicOrderErr == nil {
+			economicOrderErr = fmt.Errorf("ordering constraint violation: tool-result-writing plugin %q (grant ir.tool_results.write) must precede compaction economic-gate plugins (grant env.host_call.torana_evaluate_compaction)", name)
 		}
 		if hasCompactionGate {
 			seenCompactionGate = true
@@ -1243,6 +1255,9 @@ func reloadPipeline(runtime *wasm.Runtime, config PluginConfig) (*PluginPipeline
 	}
 	if err := validateActivePluginConflicts(activeBundles); err != nil {
 		return nil, err
+	}
+	if economicOrderErr != nil {
+		return nil, economicOrderErr
 	}
 	if err := validateHookOrders(config, byName); err != nil {
 		return nil, err

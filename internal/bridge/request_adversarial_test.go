@@ -136,7 +136,7 @@ func TestAdversarialRequestPreservesTwoSequentialToolRounds(t *testing.T) {
 	}
 }
 
-func TestAdversarialRequestRejectsToolResultErrorLoss(t *testing.T) {
+func TestAdversarialRequestCarriesRecoverableToolResultErrors(t *testing.T) {
 	const body = `{
   "model":"claude","max_tokens":16,
   "messages":[
@@ -146,8 +146,16 @@ func TestAdversarialRequestRejectsToolResultErrorLoss(t *testing.T) {
 }`
 	for _, to := range []Protocol{OpenAIChat, OpenAIResponses, Gemini, GeminiCodeAssist} {
 		t.Run(string(to), func(t *testing.T) {
-			_, err := projectAdversarialRequest(t, Anthropic, to, body)
-			requireAdversarialUnsupported(t, err)
+			wire, err := projectAdversarialRequest(t, Anthropic, to, body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Contains(wire, []byte("sensitive failure")) {
+				t.Fatalf("recoverable diagnostic was dropped: %s", wire)
+			}
+			if (to == Gemini || to == GeminiCodeAssist) && !bytes.Contains(wire, []byte(`"error"`)) {
+				t.Fatalf("Gemini error object missing: %s", wire)
+			}
 		})
 	}
 }

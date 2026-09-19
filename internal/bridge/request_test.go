@@ -87,6 +87,69 @@ func TestRequestTranslationToolConversationMatrix(t *testing.T) {
 	}
 }
 
+func TestRequestTranslationCarriesRecoverableToolErrorToEveryProtocol(t *testing.T) {
+	chat, err := ParseRequest(Anthropic, []byte(requestFixtures[Anthropic]), requestPath(Anthropic))
+	if err != nil {
+		t.Fatal(err)
+	}
+	const diagnostic = "Sensitive output withheld by pii_guard."
+	for i := range chat.Messages {
+		for j := range chat.Messages[i].Blocks {
+			if result := chat.Messages[i].Blocks[j].ToolResult; result != nil {
+				isError := true
+				result.IsError = &isError
+				result.Content = []engine.ToolResultContentBlock{{Text: diagnostic}}
+			}
+		}
+	}
+
+	for _, to := range []Protocol{OpenAIChat, OpenAIResponses, Anthropic, Gemini, GeminiCodeAssist} {
+		t.Run(string(to), func(t *testing.T) {
+			projected, err := ProjectRequest(chat, Anthropic, to, RequestOptions{MaxTokens: 256, Project: "destination-project"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			encoded, err := format.Lookup(to.Format()).Request.Marshal(projected)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Contains(encoded, []byte(diagnostic)) {
+				t.Fatalf("recoverable diagnostic missing: %s", encoded)
+			}
+			if (to == Gemini || to == GeminiCodeAssist) && !bytes.Contains(encoded, []byte(`"error"`)) {
+				t.Fatalf("Gemini error object missing: %s", encoded)
+			}
+		})
+	}
+}
+
+func TestRepeatedIdenticalIdlessGeminiCallsRemainDistinct(t *testing.T) {
+	raw := `{"contents":[
+		{"role":"model","parts":[{"functionCall":{"name":"read","args":{"path":"a"}}}]},
+		{"role":"user","parts":[{"functionResponse":{"name":"read","response":{"value":"first"}}}]},
+		{"role":"model","parts":[{"functionCall":{"name":"read","args":{"path":"a"}}}]},
+		{"role":"user","parts":[{"functionResponse":{"name":"read","response":{"value":"second"}}}]}
+	]}`
+	chat, err := ParseRequest(Gemini, []byte(raw), "/models/source:generateContent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ids []string
+	for _, message := range chat.Messages {
+		for _, block := range message.Blocks {
+			if block.ToolUse != nil {
+				ids = append(ids, block.ToolUse.ID)
+			}
+		}
+	}
+	if len(ids) != 2 || ids[0] == ids[1] {
+		t.Fatalf("synthesized call IDs = %v", ids)
+	}
+	if _, err := ProjectRequest(chat, Gemini, OpenAIChat, RequestOptions{MaxTokens: 32}); err != nil {
+		t.Fatalf("bridge rejected distinct repeated calls: %v", err)
+	}
+}
+
 func TestRequestBridgeRejectsSemanticLoss(t *testing.T) {
 	rows := []struct {
 		name     string

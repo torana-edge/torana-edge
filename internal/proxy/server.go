@@ -777,15 +777,18 @@ func New(cfg Config) (*Server, error) {
 	if err != nil {
 		return nil, fmt.Errorf("proxy: plugin files: %w", err)
 	}
-	// Durable plugin state lives beside the managed config. A failure to load
-	// is not fatal, but the store serves only its last unambiguous generation
-	// and refuses writes. Repair or remove plugin-state.json and restart Torana
-	// to reopen it; /health reports the degraded state until then.
+	// Durable plugin state lives beside the explicitly managed config in bbolt.
+	// An embedding that supplies no ConfigPath gets an in-memory store; the CLI
+	// always passes its resolved managed-config path.
+	statePath := ""
+	if cfg.ConfigPath != "" {
+		statePath = filepath.Join(filepath.Dir(configPath), "plugin-state.db")
+	}
 	stateStore, err := pluginstate.New(pluginstate.Options{
-		Path: filepath.Join(filepath.Dir(configPath), "plugin-state.json"),
+		Path: statePath,
 	})
 	if err != nil {
-		log.Printf("warning: %v", err)
+		return nil, fmt.Errorf("proxy: durable plugin state: %w", err)
 	}
 	s := &Server{
 		controlPlaneRevisionKey: rand.Text(),
@@ -816,6 +819,7 @@ func New(cfg Config) (*Server, error) {
 		s.cacheMu.Unlock()
 		s.rateLimiter.Close()
 		s.conversations.Close()
+		_ = s.pluginState.Close()
 		s.swapAuditWriter(nil)
 	}
 	auditWriter, err := openAuditWriter(cfg.Providers.Audit)
@@ -1112,12 +1116,11 @@ func New(cfg Config) (*Server, error) {
 			rs.InitialProvider = provName
 			rs.InitialFormat = prov.Format
 
-			// Label the conversation from the canonical IR, before any plugin
-			// can rewrite the messages it is derived from. Deriving it after
-			// RunBeforeRequest would let a compactor rename the conversation it
-			// just compacted, which is precisely the case the label exists to
-			// survive. The cache-prefix key is deliberately computed later.
-			rs.ConversationID = engine.ConversationID(chat)
+			// Prefer a stable harness/provider identity when one is present, then
+			// fall back to Torana's format-independent content-root label. Resolve
+			// before plugins run: a guard or compactor must not rename the durable
+			// namespace by rewriting the request it is protecting.
+			rs.ConversationID = conversation.ResolveIdentity(req.Header, chat).ID
 
 			// Publish the routing decision so plugins can ask the host about
 			// this provider — pricing and cache semantics are keyed by provider
@@ -1979,7 +1982,7 @@ func New(cfg Config) (*Server, error) {
 		w.Header().Set("Content-Type", "application/json")
 		if s.pluginState != nil && s.pluginState.ReadOnly() {
 			w.WriteHeader(http.StatusServiceUnavailable)
-			w.Write([]byte(`{"status":"degraded","component":"plugin_state","serving":"read_only","recovery":"repair_or_remove_plugin-state.json_and_restart"}`))
+			w.Write([]byte(`{"status":"degraded","component":"plugin_state","serving":"read_only","recovery":"repair_or_remove_plugin-state.db_and_restart"}`))
 			return
 		}
 		if s.pluginReloadDegraded.Load() {
@@ -4256,6 +4259,11 @@ func (s *Server) Shutdown(ctx context.Context) error {
 		s.sharedCache = nil
 	}
 	s.cacheMu.Unlock()
+	if s.pluginState != nil {
+		if err := s.pluginState.Close(); err != nil {
+			return fmt.Errorf("close plugin state: %w", err)
+		}
+	}
 	return nil
 }
 

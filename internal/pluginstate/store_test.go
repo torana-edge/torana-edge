@@ -15,6 +15,9 @@ func newStore(t *testing.T, opts Options) *Store {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
+	if opts.Path != "" {
+		t.Cleanup(func() { _ = s.Close() })
+	}
 	return s
 }
 
@@ -23,7 +26,10 @@ func TestSetGetRoundTrip(t *testing.T) {
 	if err := s.Set("warmer", "conv-a3f9", `{"deadline":123}`); err != nil {
 		t.Fatalf("Set: %v", err)
 	}
-	got, ok := s.Get("warmer", "conv-a3f9")
+	got, ok, err := s.Get("warmer", "conv-a3f9")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if !ok || got != `{"deadline":123}` {
 		t.Errorf("Get = %q (ok=%v), want the stored value", got, ok)
 	}
@@ -41,10 +47,10 @@ func TestNamespacedPerPlugin(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if got, _ := s.Get("warmer", "shared-key"); got != "warmer's value" {
+	if got, _, _ := s.Get("warmer", "shared-key"); got != "warmer's value" {
 		t.Errorf("warmer read %q — namespaces merged", got)
 	}
-	if got, _ := s.Get("evil", "shared-key"); got != "evil's value" {
+	if got, _, _ := s.Get("evil", "shared-key"); got != "evil's value" {
 		t.Errorf("evil read %q — namespaces merged", got)
 	}
 }
@@ -53,20 +59,28 @@ func TestNamespacedPerPlugin(t *testing.T) {
 // lost on restart; a warming plugin that forgot its prefixes would silently
 // stop working after every deploy.
 func TestSurvivesRestart(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "state.json")
+	path := filepath.Join(t.TempDir(), "state.db")
 
 	first := newStore(t, Options{Path: path})
 	if err := first.Set("warmer", "conv-a3f9", "prefix-bytes"); err != nil {
 		t.Fatal(err)
 	}
+	wantBytes := first.TotalBytes()
+	if err := first.Close(); err != nil {
+		t.Fatal(err)
+	}
 
 	second := newStore(t, Options{Path: path})
-	got, ok := second.Get("warmer", "conv-a3f9")
+	defer second.Close()
+	got, ok, err := second.Get("warmer", "conv-a3f9")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if !ok || got != "prefix-bytes" {
 		t.Errorf("after restart Get = %q (ok=%v), want the persisted value", got, ok)
 	}
-	if second.TotalBytes() != first.TotalBytes() {
-		t.Errorf("byte accounting did not survive reload: %d vs %d", second.TotalBytes(), first.TotalBytes())
+	if second.TotalBytes() != wantBytes {
+		t.Errorf("byte accounting did not survive reload: %d vs %d", second.TotalBytes(), wantBytes)
 	}
 }
 
@@ -83,7 +97,10 @@ func TestEmptyValueIsStoredAndDeleteRemoves(t *testing.T) {
 	if err := s.Set("warmer", "k", ""); err != nil {
 		t.Fatal(err)
 	}
-	got, ok := s.Get("warmer", "k")
+	got, ok, err := s.Get("warmer", "k")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if !ok {
 		t.Fatal("writing an empty value deleted the key")
 	}
@@ -94,7 +111,7 @@ func TestEmptyValueIsStoredAndDeleteRemoves(t *testing.T) {
 	if err := s.Delete("warmer", "k"); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := s.Get("warmer", "k"); ok {
+	if _, ok, err := s.Get("warmer", "k"); err != nil || ok {
 		t.Error("Delete did not remove the key")
 	}
 	if s.TotalBytes() != 0 {
@@ -179,7 +196,7 @@ func TestKeysAreSorted(t *testing.T) {
 // refusing to boot the proxy because one plugin's scratch file was truncated
 // would be a bad trade.
 func TestCorruptFileDoesNotBlockStartup(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "state.json")
+	path := filepath.Join(t.TempDir(), "state.db")
 	if err := os.WriteFile(path, []byte("{not json"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -202,8 +219,9 @@ func TestCorruptFileDoesNotBlockStartup(t *testing.T) {
 // TestFilePermissions — state can hold prompt fragments, so it must not be
 // world-readable.
 func TestFilePermissions(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "state.json")
+	path := filepath.Join(t.TempDir(), "state.db")
 	s := newStore(t, Options{Path: path})
+	defer s.Close()
 	if err := s.Set("warmer", "k", "v"); err != nil {
 		t.Fatal(err)
 	}
@@ -222,21 +240,34 @@ func TestNoPathIsMemoryOnly(t *testing.T) {
 	if err := s.Set("warmer", "k", "v"); err != nil {
 		t.Fatalf("memory-only Set failed: %v", err)
 	}
-	if got, ok := s.Get("warmer", "k"); !ok || got != "v" {
+	if got, ok, err := s.Get("warmer", "k"); err != nil || !ok || got != "v" {
 		t.Error("memory-only store did not retain the value")
 	}
 }
 
-func TestNilStoreIsInert(t *testing.T) {
+func TestNilStoreReadsFailClosed(t *testing.T) {
 	var s *Store
-	if _, ok := s.Get("p", "k"); ok {
-		t.Error("nil store returned a value")
+	if _, ok, err := s.Get("p", "k"); err == nil || ok {
+		t.Error("nil store read did not report unavailability")
 	}
 	if err := s.Set("p", "k", "v"); err == nil {
 		t.Error("nil store accepted a write")
 	}
 	if s.Keys("p") != nil || s.Len("p") != 0 || s.TotalBytes() != 0 {
 		t.Error("nil store reported data")
+	}
+}
+
+func TestClosedPersistentStoreReadFailsClosed(t *testing.T) {
+	s := newStore(t, Options{Path: filepath.Join(t.TempDir(), "state.db")})
+	if err := s.Set("pii_guard", "replay/content/key", "record"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, found, err := s.Get("pii_guard", "replay/content/key"); err == nil || found {
+		t.Fatalf("closed database read = found %v, err %v; want unavailable", found, err)
 	}
 }
 
@@ -253,7 +284,8 @@ func TestRejectsEmptyPluginOrKey(t *testing.T) {
 // TestConcurrentAccess runs under -race. Ticks and requests both write state,
 // so concurrency is the normal case rather than an edge one.
 func TestConcurrentAccess(t *testing.T) {
-	s := newStore(t, Options{Path: filepath.Join(t.TempDir(), "state.json")})
+	s := newStore(t, Options{Path: filepath.Join(t.TempDir(), "state.db")})
+	defer s.Close()
 
 	var wg sync.WaitGroup
 	for i := 0; i < 40; i++ {
@@ -264,7 +296,7 @@ func TestConcurrentAccess(t *testing.T) {
 			if err := s.Set(plugin, fmt.Sprintf("key-%d", i), "value"); err != nil {
 				t.Errorf("Set: %v", err)
 			}
-			_, _ = s.Get(plugin, "key-0")
+			_, _, _ = s.Get(plugin, "key-0")
 			_ = s.Keys(plugin)
 		}(i)
 	}
@@ -277,7 +309,11 @@ func TestConcurrentAccess(t *testing.T) {
 	if total != 40 {
 		t.Errorf("stored %d keys, want 40 — a write was lost", total)
 	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
 	reloaded := newStore(t, Options{Path: s.path})
+	defer reloaded.Close()
 	reloadedTotal := 0
 	for i := 0; i < 4; i++ {
 		reloadedTotal += reloaded.Len(fmt.Sprintf("plugin-%d", i))
@@ -287,31 +323,15 @@ func TestConcurrentAccess(t *testing.T) {
 	}
 }
 
-func TestFailedFlushDoesNotPublishCandidate(t *testing.T) {
-	root := t.TempDir()
-	goodPath := filepath.Join(root, "state.json")
-	s := newStore(t, Options{Path: goodPath})
+func TestClosedPersistentStoreRefusesWrites(t *testing.T) {
+	s := newStore(t, Options{Path: filepath.Join(t.TempDir(), "state.db")})
 	if err := s.Set("plugin", "key", "committed"); err != nil {
 		t.Fatal(err)
 	}
-	blockedPath := filepath.Join(root, "existing-directory")
-	if err := os.Mkdir(blockedPath, 0o700); err != nil {
+	if err := s.Close(); err != nil {
 		t.Fatal(err)
 	}
-	s.path = blockedPath
 	if err := s.Set("plugin", "key", "newest"); err == nil {
-		t.Fatal("flush over an existing directory unexpectedly succeeded")
-	}
-	if got, ok := s.Get("plugin", "key"); !ok || got != "committed" {
-		t.Fatalf("failed candidate became visible: %q (ok=%v)", got, ok)
-	}
-
-	s.path = goodPath
-	if err := s.Set("plugin", "key", "newest"); err != nil {
-		t.Fatalf("new transaction after recovery: %v", err)
-	}
-	reloaded := newStore(t, Options{Path: s.path})
-	if got, ok := reloaded.Get("plugin", "key"); !ok || got != "newest" {
-		t.Fatalf("retried snapshot = %q (ok=%v), want newest", got, ok)
+		t.Fatal("closed store accepted a write")
 	}
 }

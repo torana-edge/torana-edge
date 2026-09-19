@@ -1089,14 +1089,14 @@ type Runtime struct {
 	// durable, plugin-namespaced storage that survives a restart. Unlike the
 	// cache these are private per plugin, and unlike meta they outlive the
 	// request. Nil when no data directory is configured.
-	StateGetFunc  func(plugin, key string) (string, bool)
+	StateGetFunc  func(plugin, key string) (string, bool, error)
 	StateSetFunc  func(plugin, key, value string) error
 	StateKeysFunc func(plugin string) []string
 	// StateDeleteFunc backs env.state_delete. v1 deleted by setting an empty
 	// value, which made storing an empty string impossible; current ABI makes deletion
 	// explicit and shares the env.state_set grant.
 	StateDeleteFunc               func(plugin, key string) error
-	StateGetVersionedFunc         func(plugin, key string) (string, string, bool)
+	StateGetVersionedFunc         func(plugin, key string) (string, string, bool, error)
 	StateCompareAndSetFunc        func(plugin, key, value string, expected *string) (bool, string, error)
 	StateCompareAndDeleteFunc     func(plugin, key, expected string) (bool, error)
 	StateScanFunc                 func(plugin, prefix, cursor string, limit, maxBytes int) ([]pluginstate.PageEntry, string, error)
@@ -2157,7 +2157,11 @@ func (r *Runtime) dispatchHostCall(ctx context.Context, pluginName, cmd, args st
 				herr = hostErr(pbv1.ErrorCode_ERROR_CODE_NOT_CONFIGURED, "durable plugin state is not configured")
 				break
 			}
-			v, ver, ok := r.StateGetVersionedFunc(pluginName, a.Key)
+			v, ver, ok, err := r.StateGetVersionedFunc(pluginName, a.Key)
+			if err != nil {
+				herr = hostErr(pbv1.ErrorCode_ERROR_CODE_UNAVAILABLE, "durable plugin state read failed: %v", err)
+				break
+			}
 			if !ok {
 				herr = hostErr(pbv1.ErrorCode_ERROR_CODE_NOT_FOUND, "state key not found")
 				break
@@ -2263,7 +2267,11 @@ func (r *Runtime) dispatchHostCall(ctx context.Context, pluginName, cmd, args st
 				herr = hostErr(pbv1.ErrorCode_ERROR_CODE_NOT_CONFIGURED, "durable plugin state is not configured")
 				break
 			}
-			v, present := r.StateGetFunc(pluginName, a.Key)
+			v, present, err := r.StateGetFunc(pluginName, a.Key)
+			if err != nil {
+				herr = hostErr(pbv1.ErrorCode_ERROR_CODE_UNAVAILABLE, "durable plugin state read failed: %v", err)
+				break
+			}
 			if !present {
 				herr = hostErr(pbv1.ErrorCode_ERROR_CODE_NOT_FOUND, "state key not found")
 				break

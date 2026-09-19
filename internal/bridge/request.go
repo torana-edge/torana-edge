@@ -244,9 +244,6 @@ func projectMessages(chat *engine.ChatRequest, from, to Protocol) error {
 				if r.InvocationKind != engine.ToolInvocationFunction {
 					return unsupported("free-form tool results")
 				}
-				if r.IsError != nil && *r.IsError && to != Anthropic {
-					return unsupported("tool-result error flags on the upstream protocol")
-				}
 				name, exists := calls[r.ToolCallID]
 				if !exists || resultIDs[r.ToolCallID] || (r.ToolName != "" && r.ToolName != name) {
 					return unsupported("unmatched or ambiguous tool results")

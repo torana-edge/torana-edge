@@ -192,6 +192,7 @@ type capturedBlock struct {
 	Input     json.RawMessage `json:"input,omitempty"`
 	ToolUseID string          `json:"tool_use_id,omitempty"`
 	Content   json.RawMessage `json:"content,omitempty"`
+	IsError   *bool           `json:"is_error,omitempty"`
 }
 
 // capturedMessage mirrors one Anthropic message.
@@ -410,6 +411,29 @@ func assertCleanTopology(t *testing.T, capturedReq capturedAnthropicRequest) {
 	}
 }
 
+func assertRecoverableToolError(t *testing.T, body, secret string) {
+	t.Helper()
+	capturedReq := mustDecodeCaptured(t, body)
+	if len(capturedReq.Messages) != 2 || len(capturedReq.Messages[1].Content) != 1 {
+		t.Fatalf("recoverable request topology = %+v", capturedReq.Messages)
+	}
+	result := capturedReq.Messages[1].Content[0]
+	if result.Type != "tool_result" || result.IsError == nil || !*result.IsError {
+		t.Fatalf("tool result was not marked as an error: %+v", result)
+	}
+	var diagnostic string
+	if err := decodeNested(result.Content, &diagnostic); err != nil {
+		var blocks []capturedBlock
+		if arrayErr := decodeNested(result.Content, &blocks); arrayErr != nil || len(blocks) != 1 || blocks[0].Type != "text" || blocks[0].Text == nil {
+			t.Fatalf("tool error content is not one text value: scalar=%v array=%v (%s)", err, arrayErr, result.Content)
+		}
+		diagnostic = *blocks[0].Text
+	}
+	if !strings.Contains(diagnostic, "Sensitive output withheld") || strings.Contains(diagnostic, secret) || strings.Contains(body, secret) {
+		t.Fatalf("unsafe or missing diagnostic: %q", diagnostic)
+	}
+}
+
 // assertCapturedHeader pins the unchanged request header: the requested model
 // and absence of max_tokens. Adapter defaults are internal semantics, not
 // provider-visible mutations; the zero-copy path must not invent the member.
@@ -526,7 +550,7 @@ func TestCapturedBlockArmExactness(t *testing.T) {
 // with the system sent as the VALID STRING form, the exact historical parse
 // bypass. The adapter must accept the string while the unchanged-wire path
 // preserves that exact arm, the pipeline must run, and the
-// blocked twin must get the byte-exact 422 with zero additional upstream
+// protected twin must reach upstream with a recoverable tool error
 // calls, exactly like the array-form test.
 func TestPIIAnthropicToolResultArrayBlockStringSystem(t *testing.T) {
 	post, hits, captured := anthropicPIIEnv(t, `{"tools":["*"],"on_error":"block"}`)
@@ -560,34 +584,32 @@ func TestPIIAnthropicToolResultArrayBlockStringSystem(t *testing.T) {
 		t.Fatalf("system arm = %+v, want the original string arm", capturedReq.System)
 	}
 
-	// 2. Blocked twin with a STRING system and the PII-bearing array-valued
-	// tool_result: the pipeline runs (the string parses now) and the refusal
-	// is the byte-exact 422; the upstream is never called again.
+	// 2. Protected twin with a STRING system and PII-bearing array-valued
+	// tool_result: the pipeline runs and forwards only a safe tool error.
 	blockedBody := anthropicToolResultConvoWithSystem(sysText, []map[string]any{
 		{"type": "text", "text": ""},
 		{"type": "text", "text": "contact: someone@example.com"},
 	})
 	status, body = post(blockedBody)
-	if status != 422 {
-		t.Fatalf("blocked status = %d, want 422; body=%s", status, body)
+	if status != http.StatusOK {
+		t.Fatalf("protected status = %d, want 200; body=%s", status, body)
 	}
-	if n := atomic.LoadInt32(hits); n != 1 {
-		t.Fatalf("upstream hits = %d after the blocked request, want 1 (never called again)", n)
+	if n := atomic.LoadInt32(hits); n != 2 {
+		t.Fatalf("upstream hits = %d after protected request, want 2", n)
 	}
-	const wantMessage = "Blocked: PII detected in `read_file` output and NOT sent upstream. Found: email (line 2). Do not resend this content; reformulate to exclude or redact these values before returning the tool result."
-	wantBody := renderProviderError("anthropic", 422, "pii_detected", wantMessage)
-	if !bytes.Equal(body, wantBody) {
-		t.Fatalf("block body is not byte-exactly the renderer envelope:\n  got  %s\n  want %s", body, wantBody)
+	got = captured()
+	if len(got) != 2 {
+		t.Fatalf("captured requests = %d, want 2", len(got))
 	}
+	assertRecoverableToolError(t, got[1], "someone@example.com")
 }
 
 // TestPIIAnthropicToolResultArrayBlock — the structured-tool-result regression:
 // PII inside an ARRAY-valued Anthropic tool_result is extracted (the empty
-// first element makes the email land on line 2), the request is blocked with
-// the EXACT provider-shaped, value-free 422, and upstream is never reached.
+// first element makes the email land on line 2) and replaced by an exact,
+// provider-valid recoverable error before upstream receives the request.
 // The clean twin uses the same topology and reaches upstream exactly once;
-// the blocked request leaves the cumulative count unchanged (one loaded
-// environment for both).
+// the protected request becomes the second upstream call in one environment.
 func TestPIIAnthropicToolResultArrayBlock(t *testing.T) {
 	post, hits, captured := anthropicPIIEnv(t, `{"tools":["*"],"on_error":"block"}`)
 
@@ -671,22 +693,15 @@ func TestPIIAnthropicToolResultArrayBlock(t *testing.T) {
 		{"type": "text", "text": "contact: someone@example.com"},
 	})
 	status, body = post(blockedBody)
-	if status != 422 {
-		t.Fatalf("blocked status = %d, want 422; body=%s", status, body)
+	if status != http.StatusOK {
+		t.Fatalf("protected status = %d, want 200; body=%s", status, body)
 	}
-	if n := atomic.LoadInt32(hits); n != 1 {
-		t.Fatalf("upstream hits = %d after the blocked request, want the cumulative count unchanged (1)", n)
+	if n := atomic.LoadInt32(hits); n != 2 {
+		t.Fatalf("upstream hits = %d after protected request, want 2", n)
 	}
-
-	// The refusal is BYTE-EXACTLY the deterministic Anthropic envelope
-	// renderProviderError produces: no extra members at either level are
-	// tolerated, and the raw email is absent from the complete bytes.
-	const wantMessage = "Blocked: PII detected in `read_file` output and NOT sent upstream. Found: email (line 2). Do not resend this content; reformulate to exclude or redact these values before returning the tool result."
-	wantBody := renderProviderError("anthropic", 422, "pii_detected", wantMessage)
-	if !bytes.Equal(body, wantBody) {
-		t.Fatalf("block body is not byte-exactly the renderer envelope:\n  got  %s\n  want %s", body, wantBody)
+	got = captured()
+	if len(got) != 2 {
+		t.Fatalf("captured requests = %d, want 2", len(got))
 	}
-	if strings.Contains(string(body), "someone@example.com") {
-		t.Fatalf("the raw PII value leaked into the block response: %s", body)
-	}
+	assertRecoverableToolError(t, got[1], "someone@example.com")
 }

@@ -54,6 +54,14 @@
       "description": "position-keyed tool-result text (full request write set)"
     },
     {
+      "name": "ir.tool_result_content.write",
+      "description": "Rewrite nested tool-result content topology"
+    },
+    {
+      "name": "ir.tool_result_errors.write",
+      "description": "Rewrite tool-result error status"
+    },
+    {
       "name": "ir.tools.write",
       "description": "Rewrite tool definitions"
     }

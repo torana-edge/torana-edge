@@ -24,7 +24,9 @@ import (
 // granted it: messages by role (ir.messages.write.<role>), tool definitions
 // (ir.tools.write), the model (ir.model.write), sampling params
 // (ir.params.write), cache breakpoints (ir.cache_control.write) and
-// position-keyed tool-result text values (ir.tool_results.write). Everything
+// position-keyed tool-result text values (ir.tool_results.write), nested result
+// content/topology (ir.tool_result_content.write), and explicit tool failure
+// status (ir.tool_result_errors.write). Everything
 // else is host-owned and immutable under plugin
 // mutation — torana_meta_json is host state (the host writes _provider and
 // friends into it, and under current ABI verdicts are host calls rather than keys in
@@ -79,6 +81,8 @@ type requestSections struct {
 	params       [32]byte
 	cacheControl [32]byte
 	toolResults  [32]byte
+	toolContent  [32]byte
+	toolErrors   [32]byte
 }
 
 func (p requestSections) equal(q requestSections) bool {
@@ -90,7 +94,7 @@ func (p requestSections) equal(q requestSections) bool {
 			return false
 		}
 	}
-	return p.tools == q.tools && p.model == q.model && p.params == q.params && p.cacheControl == q.cacheControl && p.toolResults == q.toolResults
+	return p.tools == q.tools && p.model == q.model && p.params == q.params && p.cacheControl == q.cacheControl && p.toolResults == q.toolResults && p.toolContent == q.toolContent && p.toolErrors == q.toolErrors
 }
 
 // writeFramed length-prefixes every field, so field boundaries cannot be moved
@@ -128,14 +132,14 @@ func writeField(h hash.Hash, field byte, present bool, value []byte) {
 // kind, presence, order, identities, exact raw bytes, signatures, nested
 // tool-result content) computed over the role view (roleViewMessage) — the
 // body with the cache-breakpoint carriers and the trailing-signature block
-// REMOVED, the five embedded provider signature tokens CLEARED, and every
-// tool-result text VALUE replaced by a constant placeholder. Cache facts
+// REMOVED, the five embedded provider signature tokens CLEARED, and each
+// tool result's provider-visible content collapsed to a constant placeholder. Cache facts
 // are governed by ir.cache_control.write, a section of its own
 // (fingerprintCacheControlSection), never by the message-role grants; role
 // sections must not see marker changes, or a cache-economics plugin would
 // need every role grant. Provider signature tokens and the entire trailing
 // carrier are unconditional provenance (verifyRequestSignatures), never
-// role-grantable, and tool-result text VALUES are governed by
+// role-grantable, and provider-visible tool-result content is governed by
 // ir.tool_results.write (fingerprintToolResultsSection) — none of them may
 // move a role section. The cache section covers marker values AND
 // positions, so a content/topology change that shifts a cache block changes
@@ -167,9 +171,8 @@ func fingerprintMessage(m *pb.Message) ([32]byte, error) {
 //     facts are governed by ir.cache_control.write alone
 //     (fingerprintCacheControlSection), never by the message-role grants, so
 //     a cache-economics plugin must not need every role grant. This is
-//     RECURSIVE: a ToolResult block is deep-copied with its nested
-//     ToolResultContentBlock.cache_breakpoint elements dropped while every
-//     other nested element AND its order survive;
+//     RECURSIVE: nested ToolResultContentBlock.cache_breakpoint elements are
+//     dropped from the role view;
 //   - the ENTIRE trailing-signature block is REMOVED — the trailing carrier
 //     (presence, value, part_metadata_json) is unconditional provenance,
 //     adjudicated by verifyRequestSignatures alone, never by a role grant;
@@ -177,11 +180,10 @@ func fingerprintMessage(m *pb.Message) ([32]byte, error) {
 //     signatures are unconditional provenance (verifyRequestSignatures), and
 //     a plugin's prescribed response (clearing the token over changed
 //     covered content) must not move a role section;
-//   - tool-result TEXT VALUES are replaced by a constant placeholder — text
-//     value changes at the exact (message, block, content) position are
+//   - each tool result's provider-visible content is collapsed to one constant
+//     placeholder — value, kind, count, and nested topology changes are
 //     governed by ir.tool_results.write (fingerprintToolResultsSection),
-//     never by the role grants; the role view keeps the arm's kind, presence
-//     and order (topology stays role-governed) but must not see its value.
+//     never by the role grants.
 //
 // Everything else — role, block kinds, presence, order, identities,
 // arguments, payloads, part metadata, will_continue/scheduling
@@ -210,6 +212,7 @@ func roleViewMessage(m *pb.Message) *pb.Message {
 			k.Unknown.Signature = ""
 		case *pb.RequestBlock_ToolResult:
 			k.ToolResult.Signature = ""
+			k.ToolResult.IsError = nil
 			k.ToolResult.Content = roleNestedContent(k.ToolResult.Content)
 		}
 		out.Blocks = append(out.Blocks, cloned)
@@ -229,18 +232,17 @@ const roleTextPlaceholder = "\x00torana-role-view-text"
 // value replaced by the placeholder, all other elements and their order
 // preserved. The input is not mutated.
 func roleNestedContent(content []*pb.ToolResultContentBlock) []*pb.ToolResultContentBlock {
-	out := make([]*pb.ToolResultContentBlock, 0, len(content))
+	visible := false
 	for _, c := range content {
 		if c.GetCacheBreakpoint() != nil {
 			continue
 		}
-		cloned := proto.Clone(c).(*pb.ToolResultContentBlock)
-		if t := cloned.GetText(); t != nil {
-			t.Text = roleTextPlaceholder
-		}
-		out = append(out, cloned)
+		visible = true
 	}
-	return out
+	if !visible {
+		return nil
+	}
+	return []*pb.ToolResultContentBlock{{Kind: &pb.ToolResultContentBlock_Text{Text: &pb.ToolResultTextBlock{Text: roleTextPlaceholder}}}}
 }
 
 // fingerprintRequestSections digests the grantable sections of a request.
@@ -279,6 +281,12 @@ func fingerprintRequestSections(req *pb.ChatRequest) (requestSections, error) {
 
 	p.cacheControl = fingerprintCacheControlSection(req)
 	p.toolResults = fingerprintToolResultsSection(req)
+	toolContent, err := fingerprintToolResultContentSection(req)
+	if err != nil {
+		return p, err
+	}
+	p.toolContent = toolContent
+	p.toolErrors = fingerprintToolResultErrorsSection(req)
 
 	h := sha256.New()
 	binary.LittleEndian.PutUint64(count[:], uint64(len(req.Tools)))
@@ -420,24 +428,9 @@ func fingerprintCacheControlSection(req *pb.ChatRequest) [32]byte {
 	return sum
 }
 
-// fingerprintToolResultsSection digests the tool-result TEXT VALUES of a
-// request, position-keyed: every text arm's value framed with its ABSOLUTE
-// message index, its block index, and its ORIGINAL content index (over the
-// FULL content list, cache arms included — a marker inserted before a text
-// arm moves the arm's content position, so the union obligation with
-// ir.cache_control.write fires). The position pins the value to its exact
-// (message, block, content) slot: a value change at the slot moves this
-// section alone; a value that MOVED to another slot moves it too (with the
-// role section, whose view keeps arm presence/order). The role view
-// placeholders these values, so this section is the ONLY projection that
-// sees them — a text-only change requires exactly ir.tool_results.write
-// and nothing else.
-//
-// This is the ONE section whose changes are governed by
-// ir.tool_results.write. Marker facts stay in fingerprintCacheControlSection,
-// and everything else (identity, metadata, scalars, topology, prompt text)
-// stays in the role sections — the union of the changed projections is the
-// required grant set, never more.
+// fingerprintToolResultsSection digests only tool-result text values at their
+// exact positions. Provider-visible arm topology and unknown payloads live in
+// fingerprintToolResultContentSection; cache markers have their own section.
 func fingerprintToolResultsSection(req *pb.ChatRequest) [32]byte {
 	h := sha256.New()
 	var idx [8]byte
@@ -448,9 +441,9 @@ func fingerprintToolResultsSection(req *pb.ChatRequest) [32]byte {
 			if tr == nil {
 				continue
 			}
-			for ci, c := range tr.Content {
-				t := c.GetText()
-				if t == nil {
+			for ci, item := range tr.Content {
+				text := item.GetText()
+				if text == nil {
 					continue
 				}
 				binary.LittleEndian.PutUint64(idx[:], uint64(i))
@@ -459,7 +452,80 @@ func fingerprintToolResultsSection(req *pb.ChatRequest) [32]byte {
 				writeFramed(h, pos[:])
 				binary.LittleEndian.PutUint64(pos[:], uint64(ci))
 				writeFramed(h, pos[:])
-				writeField(h, 1, true, []byte(t.Text))
+				writeField(h, 1, true, []byte(text.Text))
+			}
+		}
+	}
+	var sum [32]byte
+	copy(sum[:], h.Sum(nil))
+	return sum
+}
+
+// fingerprintToolResultContentSection digests provider-visible arm
+// kinds/count/order and unknown payloads. Text values are replaced with a
+// constant and cache-marker arms are removed: their dedicated grants remain
+// narrow, so moving or adding a cache marker does not also require authority
+// to rewrite provider-visible content. Results are pinned to their encounter
+// ordinal rather than absolute message/block positions; a role-authorised
+// prepend must not look like a content rewrite of every historical result.
+func fingerprintToolResultContentSection(req *pb.ChatRequest) ([32]byte, error) {
+	h := sha256.New()
+	var idx [8]byte
+	var occurrence uint64
+	for _, message := range req.Messages {
+		for _, block := range message.Blocks {
+			result := block.GetToolResult()
+			if result == nil {
+				continue
+			}
+			content := make([]*pb.ToolResultContentBlock, 0, len(result.Content))
+			for _, item := range result.Content {
+				if item == nil {
+					return [32]byte{}, fmt.Errorf("writegrant: nil tool-result content")
+				}
+				cloned := proto.Clone(item).(*pb.ToolResultContentBlock)
+				if text := cloned.GetText(); text != nil {
+					text.Text = roleTextPlaceholder
+				}
+				if cloned.GetCacheBreakpoint() != nil {
+					continue
+				}
+				content = append(content, cloned)
+			}
+			digest, err := sdk.ToolResultContentFingerprint(content)
+			if err != nil {
+				return [32]byte{}, fmt.Errorf("writegrant: tool-result content fingerprint: %w", err)
+			}
+			binary.LittleEndian.PutUint64(idx[:], occurrence)
+			writeFramed(h, idx[:], digest[:])
+			occurrence++
+		}
+	}
+	var sum [32]byte
+	copy(sum[:], h.Sum(nil))
+	return sum, nil
+}
+
+// fingerprintToolResultErrorsSection digests only the presence-aware is_error
+// value of each existing tool result in encounter order. Absolute message
+// positions are role-governed; pinning to them here would make a harmless
+// system-message prepend require permission to rewrite historical errors.
+func fingerprintToolResultErrorsSection(req *pb.ChatRequest) [32]byte {
+	h := sha256.New()
+	for _, message := range req.Messages {
+		for _, block := range message.Blocks {
+			result := block.GetToolResult()
+			if result == nil {
+				continue
+			}
+			if result.IsError == nil {
+				writeField(h, 1, false, nil)
+			} else {
+				value := byte(0)
+				if *result.IsError {
+					value = 1
+				}
+				writeField(h, 1, true, []byte{value})
 			}
 		}
 	}
@@ -645,6 +711,16 @@ func verifyGrantedSections(accepted, out *pb.ChatRequest, canWrite func(section 
 	if acc.toolResults != res.toolResults {
 		if !canWrite(string(sdk.SectionToolResultsWrite)) {
 			return fmt.Errorf("plugin changed tool result text without %s", sdk.SectionToolResultsWrite)
+		}
+	}
+	if acc.toolContent != res.toolContent {
+		if !canWrite(string(sdk.SectionToolResultContentWrite)) {
+			return fmt.Errorf("plugin changed tool result content topology without %s", sdk.SectionToolResultContentWrite)
+		}
+	}
+	if acc.toolErrors != res.toolErrors {
+		if !canWrite(string(sdk.SectionToolResultErrorsWrite)) {
+			return fmt.Errorf("plugin changed tool result error status without %s", sdk.SectionToolResultErrorsWrite)
 		}
 	}
 	if acc.model != res.model {
@@ -1304,6 +1380,8 @@ var allRequestGrants = []string{
 	"ir.messages.write.tool",
 	"ir.messages.write.developer",
 	"ir.messages.write.other",
+	"ir.tool_result_content.write",
+	"ir.tool_result_errors.write",
 	"ir.tool_results.write",
 	"ir.tools.write",
 	"ir.model.write",
@@ -1424,25 +1502,21 @@ var requestToolUseBlockFieldSections = map[string]string{
 var requestToolResultBlockFieldSections = map[string]string{
 	"tool_call_id":       "ir.messages.write.<role>",
 	"tool_name":          "ir.messages.write.<role>",
-	"content":            "ir.messages.write.<role>",
+	"content":            "ir.tool_result_content.write",
 	"part_metadata_json": "ir.messages.write.<role>",
 	"will_continue":      "ir.messages.write.<role>",
 	"scheduling":         "ir.messages.write.<role>",
 	"signature":          hostOwnedField,
 	"invocation_kind":    "ir.messages.write.<role>",
-	// is_error is a block-level fact of the tool-result message, like
-	// will_continue and invocation_kind beside it — not the result's VALUE,
-	// which is the one thing ir.tool_results.write governs (see
-	// toolResultTextBlockFieldSections). Flipping it tells the model a failed
-	// call succeeded, so it takes the broader role grant deliberately: a
-	// plugin holding only ir.tool_results.write may rewrite what a tool said,
-	// not whether it failed.
-	"is_error": "ir.messages.write.<role>",
+	// Error status has a dedicated grant: guards may turn replaced sensitive
+	// output into a recoverable failure without gaining authority over the
+	// surrounding role, while text-only compactors retain their narrower grant.
+	"is_error": "ir.tool_result_errors.write",
 }
 
 var toolResultContentBlockFieldSections = map[string]string{
-	"text":             "ir.messages.write.<role>",
-	"unknown":          "ir.messages.write.<role>",
+	"text":             "ir.tool_result_content.write",
+	"unknown":          "ir.tool_result_content.write",
 	"cache_breakpoint": "ir.cache_control.write",
 }
 
@@ -1455,8 +1529,8 @@ var toolResultTextBlockFieldSections = map[string]string{
 }
 
 var toolResultUnknownBlockFieldSections = map[string]string{
-	"kind":         "ir.messages.write.<role>",
-	"payload_json": "ir.messages.write.<role>",
+	"kind":         "ir.tool_result_content.write",
+	"payload_json": "ir.tool_result_content.write",
 }
 
 var requestUnknownBlockFieldSections = map[string]string{

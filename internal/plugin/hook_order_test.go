@@ -133,6 +133,29 @@ func TestHookOrderRouteMustPrecedeCompaction(t *testing.T) {
 	}
 }
 
+func TestHookOrderToolResultWriterMustPrecedeCompaction(t *testing.T) {
+	guard := hookOrderBundle("guard", "run_before_request")
+	guard.Manifest.Permissions = []Permission{{Name: "ir.tool_results.write"}}
+	guard.Digest = "guard-digest"
+	gate := hookOrderBundle("gate", "run_before_request")
+	gate.Manifest.Permissions = []Permission{{Name: "env.host_call.torana_evaluate_compaction"}, {Name: "ir.tool_results.write"}}
+	gate.Digest = "gate-digest"
+	bundles := hookOrderBundles(guard, gate)
+
+	cfg := PluginConfig{
+		Order:           []string{"guard", "gate"},
+		HookOrder:       map[string][]string{"run_before_request": {"gate", "guard"}},
+		AllowUnapproved: true,
+	}
+	if err := validateBeforeHookEconomicOrder(cfg, bundles); err == nil || !strings.Contains(err.Error(), "tool-result-writing") {
+		t.Fatalf("tool-result/compaction inversion error = %v", err)
+	}
+	cfg.HookOrder["run_before_request"] = []string{"guard", "gate"}
+	if err := validateBeforeHookEconomicOrder(cfg, bundles); err != nil {
+		t.Fatalf("valid tool-result/compaction order: %v", err)
+	}
+}
+
 func TestLoadedHookOrdersAreImmutableAndPerHook(t *testing.T) {
 	a := &loadedPlugin{manifest: hookOrderBundle("a", "run_before_request", "run_after_response").Manifest}
 	b := &loadedPlugin{manifest: hookOrderBundle("b", "run_before_request").Manifest}

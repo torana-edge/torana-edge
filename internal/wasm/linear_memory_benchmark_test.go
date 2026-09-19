@@ -3,7 +3,6 @@ package wasm
 import (
 	"context"
 	"encoding/json"
-	sdk "github.com/torana-edge/torana-plugin-sdk"
 	"io"
 	"log"
 	"os"
@@ -17,6 +16,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/torana-edge/torana-edge/internal/pluginstate"
+	sdk "github.com/torana-edge/torana-plugin-sdk"
 	pbv1 "github.com/torana-edge/torana-plugin-sdk/pb/v1"
 	"google.golang.org/protobuf/proto"
 )
@@ -439,6 +440,19 @@ func TestPluginBundleLinearMemoryProfile(t *testing.T) {
 				PoolSize:    poolSize,
 				CallTimeout: 10 * time.Second,
 			})
+			state, err := pluginstate.New(pluginstate.Options{})
+			if err != nil {
+				t.Fatalf("plugin state: %v", err)
+			}
+			r.StateGetFunc = state.Get
+			r.StateSetFunc = state.Set
+			r.StateGetVersionedFunc = state.GetVersioned
+			r.StateCompareAndSetFunc = state.CompareAndSet
+			r.StateCompareAndDeleteFunc = state.CompareAndDelete
+			conversationID := "linear-memory-profile"
+			r.ExecutionInfoFunc = func(context.Context) *pbv1.ExecutionInfo {
+				return &pbv1.ExecutionInfo{ConversationId: &conversationID}
+			}
 			r.FileAppendFunc = func(string, string, []byte, FileResource) error { return nil }
 			r.ModelCompleteFunc = func(context.Context, string, ModelServiceResource, *pbv1.ModelCompleteArgs) (*pbv1.ModelCompleteResult, *pbv1.HostError) {
 				return &pbv1.ModelCompleteResult{Message: &pbv1.ResponseMessage{}, Usage: &pbv1.Usage{}}, nil

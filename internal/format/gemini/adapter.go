@@ -24,6 +24,7 @@ package gemini
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"math"
@@ -374,12 +375,15 @@ func (a *Adapter) unmarshalBody(rawBody []byte) (*engine.ChatRequest, error) {
 		}
 	}
 
-	// Track synthesized IDs for tool results that lack an explicit id (bare Gemini).
-	prevCallIdx := map[string]int{}
+	// Track synthesized IDs for tool calls/results that lack an explicit id
+	// (bare Gemini). A semantic hash keeps unrelated calls from renumbering one
+	// another across compaction; a per-hash ordinal keeps repeated identical
+	// calls unique on the canonical wire.
 	callIDs := map[string]string{}
+	syntheticCounts := map[string]int{}
 
 	for _, content := range gReq.Contents {
-		msg, err := geminiContentToMessage(content, prevCallIdx, callIDs)
+		msg, err := geminiContentToMessage(content, callIDs, syntheticCounts)
 		if err != nil {
 			return nil, err
 		}
@@ -416,7 +420,7 @@ func (a *Adapter) unmarshalBody(rawBody []byte) (*engine.ChatRequest, error) {
 //   - a signature-only part with the EXPLICIT empty-text arm is the trailing
 //     standalone (final; rejected without preceding covered content, or bare
 //     without the text arm, or duplicated).
-func geminiContentToMessage(content geminiContent, prevCallIdx map[string]int, callIDs map[string]string) (engine.Message, error) {
+func geminiContentToMessage(content geminiContent, callIDs map[string]string, syntheticCounts map[string]int) (engine.Message, error) {
 	msg := engine.Message{Role: mapRoleG(content.Role)}
 
 	// Pre-pass: the trailing-standalone reject rules (leading / stranded /
@@ -457,7 +461,7 @@ func geminiContentToMessage(content geminiContent, prevCallIdx map[string]int, c
 		p := pAny.(geminiWirePart).part
 		switch {
 		case p.FunctionResponse != nil:
-			tr, err := geminiToolResultBlock(p.FunctionResponse, callIDs)
+			tr, err := geminiToolResultBlock(p.FunctionResponse, callIDs, syntheticCounts)
 			if err != nil {
 				return msg, err
 			}
@@ -472,8 +476,7 @@ func geminiContentToMessage(content geminiContent, prevCallIdx map[string]int, c
 			name := p.FunctionCall.Name
 			id := p.FunctionCall.ID
 			if id == "" {
-				prevCallIdx[name]++
-				id = fmt.Sprintf("%s_%d", name, prevCallIdx[name])
+				id = nextSyntheticGeminiID("call", name, p.FunctionCall.Args, syntheticCounts)
 			}
 			callIDs[name] = id
 			args, err := engine.ParseRequiredObjectOrEmpty(p.FunctionCall.Args)
@@ -569,13 +572,13 @@ func geminiContentToMessage(content geminiContent, prevCallIdx map[string]int, c
 // FunctionResponsePart union, preserved verbatim); willContinue/scheduling
 // are typed presence-aware carriers; thoughtSignature is the block token.
 // Marshal failure of the raw response is an error, never {}.
-func geminiToolResultBlock(fr *geminiFuncResp, callIDs map[string]string) (*engine.ToolResultBlock, error) {
+func geminiToolResultBlock(fr *geminiFuncResp, callIDs map[string]string, syntheticCounts map[string]int) (*engine.ToolResultBlock, error) {
 	id := fr.ID
 	if id == "" {
 		if cid, ok := callIDs[fr.Name]; ok {
 			id = cid
 		} else {
-			id = fr.Name + "_0"
+			id = nextSyntheticGeminiID("orphan-response", fr.Name, fr.Response, syntheticCounts)
 		}
 	}
 	content := []engine.ToolResultContentBlock{{
@@ -593,6 +596,10 @@ func geminiToolResultBlock(fr *geminiFuncResp, callIDs map[string]string) (*engi
 		ToolName:   fr.Name,
 		Content:    content,
 	}
+	if geminiResponseIsError(fr.Response) {
+		isError := true
+		tr.IsError = &isError
+	}
 	if fr.WillContinue != nil {
 		v := *fr.WillContinue
 		tr.WillContinue = &v
@@ -602,6 +609,15 @@ func geminiToolResultBlock(fr *geminiFuncResp, callIDs map[string]string) (*engi
 		tr.Scheduling = &v
 	}
 	return tr, nil
+}
+
+func nextSyntheticGeminiID(kind, name string, payload []byte, counts map[string]int) string {
+	h := sha256.New()
+	h.Write([]byte("torana/gemini/" + kind + "\x00" + name + "\x00"))
+	h.Write(payload)
+	base := fmt.Sprintf("torana_gemini_%x", h.Sum(nil)[:16])
+	counts[base]++
+	return fmt.Sprintf("%s_%d", base, counts[base])
 }
 
 // geminiFuncRespPartPayload preserves a sealed FunctionResponsePart element
@@ -668,13 +684,6 @@ func (a *Adapter) marshalBody(chat *engine.ChatRequest) ([]byte, error) {
 	// call site cannot bypass the checked boundary by accident.
 	if err := pbconv.ValidateFullRequest(chat); err != nil {
 		return nil, fmt.Errorf("gemini: %w", err)
-	}
-	for _, message := range chat.Messages {
-		for _, block := range message.Blocks {
-			if block.ToolResult != nil && block.ToolResult.IsError != nil && *block.ToolResult.IsError {
-				return nil, fmt.Errorf("gemini: explicit tool-result error flag is unrepresentable")
-			}
-		}
 	}
 	if err := format.RejectFreeformTools(chat, "gemini"); err != nil {
 		return nil, err
@@ -1489,7 +1498,7 @@ func geminiToolResultWire(tr *engine.ToolResultBlock, codeAssist bool) (*geminiF
 	if first.Unknown != nil || first.CacheBreakpoint != nil {
 		return nil, fmt.Errorf("gemini: the FIRST tool-result element must be the response text")
 	}
-	fr.Response = geminiResponseObject(first.Text, codeAssist)
+	fr.Response = geminiResponseObject(first.Text, codeAssist, tr.IsError != nil && *tr.IsError)
 	for _, c := range tr.Content[1:] {
 		if c.Unknown == nil {
 			return nil, fmt.Errorf("gemini: only the first element may be text; subsequent elements must be media parts")
@@ -1509,12 +1518,18 @@ func geminiToolResultWire(tr *engine.ToolResultBlock, codeAssist bool) (*geminiF
 // validation the platform applies elsewhere rejects duplicate decoded
 // keys, escape-equivalent duplicates, lone surrogates, invalid UTF-8, and
 // trailing values); any other text gets the documented semantic wrap.
-func geminiResponseObject(text string, codeAssist bool) json.RawMessage {
+func geminiResponseObject(text string, codeAssist, isError bool) json.RawMessage {
 	// The REQUIRED strict-object constructor: empty or whitespace-only
 	// text is NOT an absent object (the optional constructor would accept
 	// it and emit an empty response) — it gets the semantic wrap.
-	if _, err := engine.ParseRequiredJSONObject([]byte(text)); err == nil {
-		return json.RawMessage(text) // verbatim, lexeme-exact strict object
+	if object, err := engine.ParseRequiredJSONObject([]byte(text)); err == nil {
+		if !isError || geminiResponseIsError(object.Bytes()) {
+			return json.RawMessage(text) // verbatim, lexeme-exact strict object
+		}
+	}
+	if isError {
+		raw, _ := json.Marshal(map[string]any{"error": text})
+		return raw
 	}
 	// The documented semantic wrap for a rewritten (non-object) text.
 	if codeAssist {
@@ -1523,6 +1538,15 @@ func geminiResponseObject(text string, codeAssist bool) json.RawMessage {
 	}
 	raw, _ := json.Marshal(map[string]any{"content": text})
 	return raw
+}
+
+func geminiResponseIsError(raw []byte) bool {
+	var object map[string]json.RawMessage
+	if json.Unmarshal(raw, &object) != nil {
+		return false
+	}
+	_, present := object["error"]
+	return present
 }
 
 // geminiFuncRespPartFromUnknown projects a nested Unknown media element

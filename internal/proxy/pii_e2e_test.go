@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -19,14 +20,20 @@ import (
 // piiEnv starts a proxy with the pii plugin and the given config, an upstream
 // that counts hits, and (optionally) extra providers (e.g. a mock local model).
 // Returns a post helper and the upstream hit counter.
-func piiEnv(t *testing.T, piiCfg string, extra map[string]provider.Provider) (func(body string) (int, []byte), *int32) {
+func piiEnv(t *testing.T, piiCfg string, extra map[string]provider.Provider) (func(body string) (int, []byte), *int32, func() []string) {
 	t.Helper()
 	bundles := officialBundlesDir(t)
 	requireBundle(t, bundles, "pii")
 
 	var hits int32
+	var capturedMu sync.Mutex
+	var captured []string
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt32(&hits, 1)
+		body, _ := io.ReadAll(r.Body)
+		capturedMu.Lock()
+		captured = append(captured, string(body))
+		capturedMu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
 		w.Write([]byte(`{"id":"x","choices":[{"message":{"role":"assistant","content":"ok"}}]}`))
 	}))
@@ -93,7 +100,11 @@ func piiEnv(t *testing.T, piiCfg string, extra map[string]provider.Provider) (fu
 		b, _ := io.ReadAll(resp.Body)
 		return resp.StatusCode, b
 	}
-	return post, &hits
+	return post, &hits, func() []string {
+		capturedMu.Lock()
+		defer capturedMu.Unlock()
+		return append([]string(nil), captured...)
+	}
 }
 
 // toolConvo builds an OpenAI request whose history contains one tool result.
@@ -112,16 +123,20 @@ func toolConvo(toolContent string) string {
 }
 
 // TestPIIRegexBlock: an email in a tool result is caught by the deterministic
-// regex pre-filter (no model needed) → request blocked, error names the type +
-// line + tool but NOT the raw value, upstream never called.
+// regex pre-filter (no model needed) → the tool result becomes a recoverable,
+// value-free error naming the type, line, and tool before upstream sees it.
 func TestPIIRegexBlock(t *testing.T) {
-	post, hits := piiEnv(t, `{"tools":["*"],"on_error":"block"}`, nil)
+	post, hits, captured := piiEnv(t, `{"tools":["*"],"on_error":"block"}`, nil)
 	status, body := post(toolConvo("some notes\ncontact: john.doe@acme.com here"))
 
-	if status != 422 {
-		t.Fatalf("status = %d, want 422; body=%s", status, body)
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", status, body)
 	}
-	s := string(body)
+	wires := captured()
+	if len(wires) != 1 {
+		t.Fatalf("captured requests = %d, want 1", len(wires))
+	}
+	s := wires[0]
 	if !strings.Contains(s, "email") || !strings.Contains(s, "line 2") {
 		t.Fatalf("error should name type+line: %s", s)
 	}
@@ -131,14 +146,14 @@ func TestPIIRegexBlock(t *testing.T) {
 	if strings.Contains(s, "john.doe@acme.com") {
 		t.Fatalf("error LEAKED the raw PII value: %s", s)
 	}
-	if n := atomic.LoadInt32(hits); n != 0 {
-		t.Fatalf("upstream called %d times; blocked request must not reach upstream", n)
+	if n := atomic.LoadInt32(hits); n != 1 {
+		t.Fatalf("upstream called %d times, want the recoverable error forwarded", n)
 	}
 }
 
 // TestPIICleanForwards: a clean tool result is forwarded upstream.
 func TestPIICleanForwards(t *testing.T) {
-	post, hits := piiEnv(t, `{"tools":["*"],"on_error":"block"}`, nil)
+	post, hits, _ := piiEnv(t, `{"tools":["*"],"on_error":"block"}`, nil)
 	status, body := post(toolConvo("all files compiled successfully, 0 errors"))
 	if status != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body=%s", status, body)
@@ -159,27 +174,31 @@ func TestPIIModelBlock(t *testing.T) {
 	}))
 	defer model.Close()
 
-	post, hits := piiEnv(t,
+	post, hits, captured := piiEnv(t,
 		`{"tools":["*"],"on_error":"block"}`,
 		map[string]provider.Provider{"scanner": {URL: model.URL, Format: "openai", Auth: provider.ProviderAuth{Mode: "none"}}})
 
 	status, body := post(toolConvo("employee dossier: Jonathan Q. Public, badge 4471, floor 3"))
-	if status != 422 {
-		t.Fatalf("status = %d, want 422; body=%s", status, body)
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", status, body)
+	}
+	wires := captured()
+	if len(wires) != 1 || strings.Contains(wires[0], "Jonathan Q. Public") || !strings.Contains(wires[0], "Sensitive output withheld") {
+		t.Fatalf("upstream request did not contain only the recoverable diagnostic: %v", wires)
 	}
 	// The approved normalization never echoes a model-controlled category
 	// verbatim: "person_name" is not a documented category and maps to the
 	// safe "unspecified" — the message still names the finding.
-	if !strings.Contains(string(body), "unspecified") {
-		t.Fatalf("error should name the normalized finding: %s", body)
+	if !strings.Contains(wires[0], "unspecified") {
+		t.Fatalf("diagnostic should name the normalized finding: %s", wires[0])
 	}
 	// The approved rule is never-echoed-verbatim: the raw model-controlled
 	// category must be ABSENT from the complete response bytes.
-	if strings.Contains(string(body), "person_name") {
-		t.Fatalf("the raw model category was echoed verbatim: %s", body)
+	if strings.Contains(wires[0], "person_name") {
+		t.Fatalf("the raw model category was echoed verbatim: %s", wires[0])
 	}
-	if n := atomic.LoadInt32(hits); n != 0 {
-		t.Fatalf("upstream called %d times; must be 0", n)
+	if n := atomic.LoadInt32(hits); n != 1 {
+		t.Fatalf("upstream called %d times; want 1", n)
 	}
 	if gotAuth != "" {
 		t.Fatalf("caller credential leaked to local PII model: %q", gotAuth)
@@ -193,16 +212,19 @@ func TestPIIFailClosed(t *testing.T) {
 	}))
 	defer model.Close()
 
-	post, hits := piiEnv(t,
+	post, hits, captured := piiEnv(t,
 		`{"tools":["*"],"on_error":"block"}`,
 		map[string]provider.Provider{"scanner": {URL: model.URL, Format: "openai", Auth: provider.ProviderAuth{Mode: "none"}}})
 
 	status, body := post(toolConvo("ambiguous content the regex cannot judge"))
-	if status != 422 {
-		t.Fatalf("fail-closed: status = %d, want 422; body=%s", status, body)
+	if status != http.StatusOK {
+		t.Fatalf("fail-closed recovery: status = %d, want 200; body=%s", status, body)
 	}
-	if n := atomic.LoadInt32(hits); n != 0 {
-		t.Fatalf("upstream called %d times; fail-closed must block", n)
+	if wires := captured(); len(wires) != 1 || !strings.Contains(wires[0], "could not complete the safety scan") {
+		t.Fatalf("fail-closed diagnostic missing from upstream request: %v", wires)
+	}
+	if n := atomic.LoadInt32(hits); n != 1 {
+		t.Fatalf("upstream called %d times; want recoverable error forwarded", n)
 	}
 }
 
@@ -213,7 +235,7 @@ func TestPIIFailOpen(t *testing.T) {
 	}))
 	defer model.Close()
 
-	post, hits := piiEnv(t,
+	post, hits, _ := piiEnv(t,
 		`{"tools":["*"],"on_error":"allow"}`,
 		map[string]provider.Provider{"scanner": {URL: model.URL, Format: "openai", Auth: provider.ProviderAuth{Mode: "none"}}})
 
