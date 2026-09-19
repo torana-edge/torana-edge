@@ -77,8 +77,18 @@ driving them from scripts or an agent.
 
 ## Add one plugin
 
-Start with a PII guard. If you already run an OpenAI-compatible local model,
-use the contextual `pii` plugin and bind its scanner to that local endpoint:
+Torana plugins run in the request and response path. With permissions you
+approve, they can inspect or change a request or response, block it, or call
+another endpoint before the workflow continues. That endpoint can be a local
+model: your coding agent can keep using its hosted model while a focused local
+model handles a narrow job. Combining the two unlocks useful workflows without
+moving the whole session to a local model.
+
+### **Already have a local model running?**
+
+Try the contextual `pii` plugin first. It catches recognizable sensitive values
+directly, then asks your OpenAI-compatible local model about ambiguous tool
+output before it reaches the hosted model:
 
 ```bash
 ./torana plugin install https://github.com/torana-edge/torana-plugins/tree/main/plugins/pii
@@ -90,7 +100,10 @@ then review and enable it. The
 [PII guide](https://github.com/torana-edge/torana-plugins/blob/main/plugins/pii/README.md)
 has the complete binding and CLI examples.
 
-No local model yet? Use the deterministic guard instead:
+### **Don't have a local model running?**
+
+Use the deterministic guard instead. It catches high-confidence PII and common
+secret shapes without a model:
 
 ```bash
 ./torana plugin install https://github.com/torana-edge/torana-plugins/tree/main/plugins/pii_guard
