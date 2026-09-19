@@ -60,6 +60,11 @@ var officialCatalog = []officialPlugin{
 	{name: "keyword_compactor", install: true},
 	{name: "otel", install: true},
 	{name: "pii", install: true},
+	{
+		name:            "pii_guard",
+		install:         false,
+		excludedBecause: "staged until the reviewed deterministic guard source lands in torana-plugins; keeping it out of --official prevents an install target that does not exist yet",
+	},
 	{name: "schema_translator", install: true},
 	{name: "tool_governor", install: true},
 	{
