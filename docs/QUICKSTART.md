@@ -119,7 +119,12 @@ trusted or enabled. After the plugin-free request above succeeds, leave Torana
 running and choose one PII guard. The watcher discovers the new bundle without
 a restart.
 
-### Recommended: use your local model
+Plugins run in the request and response path. With permissions you approve,
+they can inspect or change a request or response, block it, or call another
+endpoint. That lets your harness keep using its hosted model while a focused
+local model handles a narrow job.
+
+### **Already have a local model running?**
 
 If you already run Ollama or another OpenAI-compatible local model endpoint,
 install the contextual guard:
@@ -140,7 +145,7 @@ using a remote scanner would send it to that remote endpoint.
 The [model-backed PII guide](https://github.com/torana-edge/torana-plugins/blob/main/plugins/pii/README.md)
 includes the exact CLI configuration and approval document.
 
-### No local model? Use deterministic checks
+### **Don't have a local model running?**
 
 Install the zero-model guard instead:
 
@@ -151,20 +156,36 @@ Install the zero-model guard instead:
 Select **pii_guard** in the control plane, review its two permissions, then
 choose **Approve and enable**. It makes no model or network calls. The
 [deterministic guard guide](https://github.com/torana-edge/torana-plugins/blob/main/plugins/pii_guard/README.md)
-also covers configuration through the CLI.
+also covers configuration through the CLI. Install only one guard; their
+manifests declare the pair as conflicting.
 
-Install only one guard; their manifests declare the pair as conflicting. Now
-create an obviously synthetic credential:
+### Test either choice
+
+Both paths rejoin here. Create a file containing an obviously synthetic
+credential. Do not use a real key:
 
 ```bash
-printf '%s\n' 'PAYMENT_API_KEY=sk_test_torana_demo_not_a_real_key_123' > .keys
+echo 'PAYMENT_API_KEY=sk_test_torana_demo_not_a_real_key_123' > .keys
 ```
 
-Ask your routed harness to read `.keys`. Either guard should return a
-value-free `sensitive_data_detected` block before the tool result reaches the
-primary provider. Obvious patterns take the deterministic fast path in both
-plugins; the model-backed option also checks eligible ambiguous content with
-your bound local scanner. Remove `.keys` after the walkthrough.
+In the coding harness you routed through Torana, enter:
+
+```text
+Read the .keys file in this directory and tell me what it contains.
+```
+
+The harness will read the file locally and try to send the tool result in its
+next model request. Either guard should stop that request and return a
+value-free `sensitive_data_detected` block before the synthetic value reaches
+the primary provider. You can also see the blocked request in Torana's Feed.
+
+This obvious value takes the deterministic fast path in both plugins. The
+model-backed `pii` plugin additionally sends eligible ambiguous content to the
+local scanner you bound earlier. After the check, remove the test file:
+
+```bash
+rm .keys
+```
 
 Installation alone never approves, enables, or runs anything. The installer
 also accepts a reviewed local plugin directory or another repository URL.
