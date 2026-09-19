@@ -77,8 +77,18 @@ driving them from scripts or an agent.
 
 ## Add one plugin
 
-Start with a PII guard. If you already run an OpenAI-compatible local model,
-use the contextual `pii` plugin and bind its scanner to that local endpoint:
+Torana plugins run in the request and response path. With permissions you
+approve, they can inspect or change a request or response, block it, or call
+another endpoint before the workflow continues. That endpoint can be a local
+model: your coding agent can keep using its hosted model while a focused local
+model handles a narrow job. Combining the two unlocks useful workflows without
+moving the whole session to a local model.
+
+### **Already have a local model running?**
+
+Try the contextual `pii` plugin first. It catches recognizable sensitive values
+directly, then asks your OpenAI-compatible local model about ambiguous tool
+output before it reaches the hosted model:
 
 ```bash
 ./torana plugin install https://github.com/torana-edge/torana-plugins/tree/main/plugins/pii
@@ -86,21 +96,60 @@ use the contextual `pii` plugin and bind its scanner to that local endpoint:
 
 Open [the local UI](http://127.0.0.1:8080/_torana/), configure its required
 `scanner` model service with the local provider and model you already loaded,
-then review and enable it. The
+then return to the installed plugin. The
 [PII guide](https://github.com/torana-edge/torana-plugins/blob/main/plugins/pii/README.md)
 has the complete binding and CLI examples.
 
-No local model yet? Use the deterministic guard instead:
+### **Don't have a local model running?**
+
+Use the deterministic guard instead. It catches high-confidence PII and common
+secret shapes without a model:
 
 ```bash
 ./torana plugin install https://github.com/torana-edge/torana-plugins/tree/main/plugins/pii_guard
 ```
 
 `pii_guard` needs only permission to read its tool allowlist and block a
-request. Install only one of the two guards. The
-[quickstart](docs/QUICKSTART.md#add-one-plugin) walks through both choices and a
-synthetic credential check. Installation alone does not enable a plugin;
-rebuilding a bundle requires a new approval.
+request. It does not need a model or network binding.
+
+### Enable the plugin
+
+Open [the local UI](http://127.0.0.1:8080/_torana/) and select the plugin you
+installed. Review its digest and requested permissions. For `pii`, also confirm
+the `scanner` binding and model-call limits. Then choose **Approve and enable**.
+The install command alone does not enable a plugin, and a rebuilt bundle needs
+a new approval.
+
+### Test either choice
+
+Install only one of the two guards; their manifests declare the pair as
+conflicting. Both paths now rejoin. Create a file with an obviously synthetic
+credential—never use a real key for this check:
+
+```bash
+echo 'PAYMENT_API_KEY=sk_test_torana_demo_not_a_real_key_123' > .keys
+```
+
+In the coding harness you routed through Torana, enter:
+
+```text
+Read the .keys file in this directory and tell me what it contains.
+```
+
+The harness reads the file locally and tries to send the tool result in its
+next model request. Either guard should stop that request and return a
+value-free `sensitive_data_detected` block before the synthetic value reaches
+the primary provider. Confirm the blocked request in Torana's **Feed**, then
+remove the test file:
+
+```bash
+rm .keys
+```
+
+This obvious value takes the deterministic fast path in both plugins. The
+model-backed `pii` plugin also sends eligible ambiguous content to the local
+scanner you configured. The [full quickstart](docs/QUICKSTART.md#add-one-plugin)
+includes the CLI alternatives and troubleshooting detail.
 
 The [plugin listings](https://torana.sh/plugins/) include tool policy, telemetry,
 PII checks, schema adaptation and optional compaction. Compaction is a plugin
