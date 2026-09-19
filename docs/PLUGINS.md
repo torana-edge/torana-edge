@@ -40,7 +40,7 @@ intact and can be retried without restarting.
 ## Installing
 
 Examples use `torana` on PATH; use `./torana` from a source checkout.
-For your first plugin, follow the [usage-logger walkthrough](QUICKSTART.md#add-one-plugin).
+For your first plugin, follow the [PII guard walkthrough](QUICKSTART.md#add-one-plugin).
 
 You do not need to stop Torana. Run installation commands from another terminal;
 the running process watches its plugin directory and discovers the new bundle
@@ -128,8 +128,9 @@ no operator approval for digest sha256:574d412d…
 For the simplest path, open the local control plane at `/_torana/`:
 
 1. Select the installed plugin and review its requested permissions.
-2. Configure required resource bindings and budgets. For `usage_logger`, review
-   the private file and retention budget shown in the form.
+2. Configure required resource bindings and budgets. For `pii`, bind its
+   scanner to the local provider and model you intend to use. `pii_guard` has
+   no model or network resource.
 3. Choose **Approve and enable** and confirm the review dialog. Torana applies
    the approval and pipeline change together.
 
@@ -141,10 +142,10 @@ Prefer the CLI or an agent-driven workflow? Use the plugin's guide to prepare
 the approval, then:
 
 ```bash
-torana plugin inspect usage_logger
+torana plugin inspect pii
 # Review the digest and prepare approval.json using its guide.
-torana plugin approve usage_logger --file approval.json --yes
-torana plugin enable usage_logger --yes
+torana plugin approve pii --file approval.json --yes
+torana plugin enable pii --yes
 torana plugin status
 ```
 

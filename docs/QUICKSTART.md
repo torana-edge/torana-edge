@@ -114,39 +114,60 @@ configuration while believing you are testing a changed seed.
 
 ## Add one plugin
 
-The empty plugin order is intentional: discovered plugins are not implicitly trusted
-or enabled. After the plugin-free request above succeeds, leave Torana running
-and install one plugin from the same checkout. The watcher discovers the new
-bundle without a restart:
+The empty plugin order is intentional: discovered plugins are not implicitly
+trusted or enabled. After the plugin-free request above succeeds, leave Torana
+running and choose one PII guard. The watcher discovers the new bundle without
+a restart.
+
+### Recommended: use your local model
+
+If you already run Ollama or another OpenAI-compatible local model endpoint,
+install the contextual guard:
 
 ```bash
-./torana plugin install https://github.com/torana-edge/torana-plugins/tree/main/plugins/usage_logger
+./torana plugin install https://github.com/torana-edge/torana-plugins/tree/main/plugins/pii
 ./torana plugin list
 ```
 
-The installer also accepts a local directory. This is useful for a private
-repository that you clone and review yourself:
+In the local control plane, add a provider such as `local-scanner` with the URL
+of your existing local server, format **OpenAI**, and authentication **None**.
+Select **pii**, keep its default fail-closed settings, and bind the required
+`scanner` service to `local-scanner`, the model you loaded, and
+`/v1/chat/completions`. Review the digest, permissions and model-call limits,
+then choose **Approve and enable**. Eligible tool output goes to that scanner;
+using a remote scanner would send it to that remote endpoint.
+
+The [model-backed PII guide](https://github.com/torana-edge/torana-plugins/blob/main/plugins/pii/README.md)
+includes the exact CLI configuration and approval document.
+
+### No local model? Use deterministic checks
+
+Install the zero-model guard instead:
 
 ```bash
-./torana plugin install ../my-private-plugins/usage_logger
+./torana plugin install https://github.com/torana-edge/torana-plugins/tree/main/plugins/pii_guard
 ```
 
-Open the local control plane, select **usage_logger**, review its requested file
-access and retention budget, then choose **Approve and enable**. For terminal or
-agent automation, use its [CLI setup guide](https://github.com/torana-edge/torana-plugins/blob/main/plugins/usage_logger/README.md#configure).
-Send another request from your harness and inspect its content-free output:
+Select **pii_guard** in the control plane, review its two permissions, then
+choose **Approve and enable**. It makes no model or network calls. The
+[deterministic guard guide](https://github.com/torana-edge/torana-plugins/blob/main/plugins/pii_guard/README.md)
+also covers configuration through the CLI.
+
+Install only one guard; their manifests declare the pair as conflicting. Now
+create an obviously synthetic credential:
 
 ```bash
-tail -F "$(./torana plugin file path usage_logger usage.jsonl)"
+printf '%s\n' 'PAYMENT_API_KEY=sk_test_torana_demo_not_a_real_key_123' > .keys
 ```
 
-Installation alone never approves, enables, or runs anything, and the plugin
-cannot pick an OS path: Torana owns the private rotating file. The operator can
-resolve that local path for standard Unix tools; `tail -F` continues following
-it when Torana rotates the file. The running instance is authoritative for its
-data directory. In another terminal, select the same `TORANA_DATA_DIR`, or use
-`plugin file path --addr 127.0.0.1:8080 usage_logger usage.jsonl` to target the
-instance explicitly.
+Ask your routed harness to read `.keys`. Either guard should return a
+value-free `sensitive_data_detected` block before the tool result reaches the
+primary provider. Obvious patterns take the deterministic fast path in both
+plugins; the model-backed option also checks eligible ambiguous content with
+your bound local scanner. Remove `.keys` after the walkthrough.
+
+Installation alone never approves, enables, or runs anything. The installer
+also accepts a reviewed local plugin directory or another repository URL.
 
 Software agents and shell scripts can discover the same guarded control-plane
 capabilities as JSON:

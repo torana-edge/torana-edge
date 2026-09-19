@@ -77,30 +77,32 @@ driving them from scripts or an agent.
 
 ## Add one plugin
 
-Start with `usage_logger`: content-free request, latency and token records
-in a rotating private file.
+Start with a PII guard. If you already run an OpenAI-compatible local model,
+use the contextual `pii` plugin and bind its scanner to that local endpoint:
 
 ```bash
-./torana plugin install https://github.com/torana-edge/torana-plugins/tree/main/plugins/usage_logger
+./torana plugin install https://github.com/torana-edge/torana-plugins/tree/main/plugins/pii
 ```
 
-Run that command from the same Torana checkout. Open [the local UI](http://127.0.0.1:8080/_torana/),
-select **usage_logger**, review its requested file access and retention budget,
-then choose **Approve and enable**. Prefer terminal or agent automation? Use the
-plugin's [CLI setup guide](https://github.com/torana-edge/torana-plugins/blob/main/plugins/usage_logger/README.md#configure).
+Open [the local UI](http://127.0.0.1:8080/_torana/), configure its required
+`scanner` model service with the local provider and model you already loaded,
+then review and enable it. The
+[PII guide](https://github.com/torana-edge/torana-plugins/blob/main/plugins/pii/README.md)
+has the complete binding and CLI examples.
 
-Send another request from your harness and follow its local usage record:
+No local model yet? Use the deterministic guard instead:
 
 ```bash
-tail -F "$(./torana plugin file path usage_logger usage.jsonl)"
+./torana plugin install https://github.com/torana-edge/torana-plugins/tree/main/plugins/pii_guard
 ```
 
-Torana resolves the path; your shell reads the file. A new record confirms the
-plugin ran. The [plugin guide](https://github.com/torana-edge/torana-plugins/blob/main/plugins/usage_logger/README.md#try-it-and-check-the-result)
-includes PowerShell and instance-selection examples. Installation alone does
-not enable a plugin; rebuilding a bundle requires a new approval.
+`pii_guard` needs only permission to read its tool allowlist and block a
+request. Install only one of the two guards. The
+[quickstart](docs/QUICKSTART.md#add-one-plugin) walks through both choices and a
+synthetic credential check. Installation alone does not enable a plugin;
+rebuilding a bundle requires a new approval.
 
-The [catalogue](https://torana.sh/plugins/) includes tool policy, telemetry,
+The [plugin listings](https://torana.sh/plugins/) include tool policy, telemetry,
 PII checks, schema adaptation and optional compaction. Compaction is a plugin
 use case, not a promise of savings:
 [read the measured results](https://github.com/torana-edge/torana-plugins/blob/main/plugins/compactor/DEEPSEEK_RESULTS.md).
