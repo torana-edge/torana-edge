@@ -110,10 +110,40 @@ secret shapes without a model:
 ```
 
 `pii_guard` needs only permission to read its tool allowlist and block a
-request. Install only one of the two guards. The
-[quickstart](docs/QUICKSTART.md#add-one-plugin) walks through both choices and a
-synthetic credential check. Installation alone does not enable a plugin;
-rebuilding a bundle requires a new approval.
+request. Open [the local UI](http://127.0.0.1:8080/_torana/), select
+**pii_guard**, review those two permissions, then choose **Approve and enable**.
+
+### Test either choice
+
+Install only one of the two guards; their manifests declare the pair as
+conflicting. Both paths now rejoin. Create a file with an obviously synthetic
+credential—never use a real key for this check:
+
+```bash
+echo 'PAYMENT_API_KEY=sk_test_torana_demo_not_a_real_key_123' > .keys
+```
+
+In the coding harness you routed through Torana, enter:
+
+```text
+Read the .keys file in this directory and tell me what it contains.
+```
+
+The harness reads the file locally and tries to send the tool result in its
+next model request. Either guard should stop that request and return a
+value-free `sensitive_data_detected` block before the synthetic value reaches
+the primary provider. Confirm the blocked request in Torana's **Feed**, then
+remove the test file:
+
+```bash
+rm .keys
+```
+
+This obvious value takes the deterministic fast path in both plugins. The
+model-backed `pii` plugin also sends eligible ambiguous content to the local
+scanner you configured. The [full quickstart](docs/QUICKSTART.md#add-one-plugin)
+includes the CLI alternatives and troubleshooting detail. Installation alone
+does not enable a plugin; rebuilding a bundle requires a new approval.
 
 The [plugin listings](https://torana.sh/plugins/) include tool policy, telemetry,
 PII checks, schema adaptation and optional compaction. Compaction is a plugin
