@@ -86,6 +86,15 @@ func TestFoundationStateCommands(t *testing.T) {
 	foundationRefusal(t, call("env.state_compare_and_set", &pb.StateCompareAndSetArgs{Key: "denied"}), pb.ErrorCode_ERROR_CODE_PERMISSION_DENIED)
 }
 
+func TestFoundationStateReadFailureIsUnavailable(t *testing.T) {
+	r, p := newGrantedPlugin(t, "env.state_get")
+	r.StateGetFunc = func(string, string) (string, bool, error) {
+		return "", false, errors.New("database unavailable")
+	}
+	result := hostCallDirect(t, r, p, "env.state_get", marshalHostArgs(t, &pb.StateGetArgs{Key: "replay/content/key"}))
+	foundationRefusal(t, result, pb.ErrorCode_ERROR_CODE_UNAVAILABLE)
+}
+
 type foundationCache struct {
 	cache.Store
 	failure error

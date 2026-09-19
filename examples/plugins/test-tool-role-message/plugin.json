@@ -23,6 +23,14 @@
     {
       "name": "ir.tool_results.write",
       "description": "appended tool-result text value (union with the role grant)"
+    },
+    {
+      "name": "ir.tool_result_content.write",
+      "description": "Append the tool result's provider-visible content arm"
+    },
+    {
+      "name": "ir.tool_result_errors.write",
+      "description": "Append the tool result's explicit non-error status"
     }
   ]
 }

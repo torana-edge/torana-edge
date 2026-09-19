@@ -11,6 +11,7 @@ import (
 	"github.com/torana-edge/torana-edge/internal/engine"
 	"github.com/torana-edge/torana-edge/internal/engine/pbconv"
 	"github.com/torana-edge/torana-edge/internal/wasm"
+	sdk "github.com/torana-edge/torana-plugin-sdk"
 	"github.com/torana-edge/torana-plugin-sdk/outboundpolicy"
 	pb "github.com/torana-edge/torana-plugin-sdk/pb/v1"
 	"google.golang.org/protobuf/proto"
@@ -122,6 +123,20 @@ func TestVerifyRequestMutationGrantedChangeAccepted(t *testing.T) {
 			mutate: func(r *pb.ChatRequest) {
 				r.Messages[3].Blocks[0].GetToolResult().Content[0].GetText().Text = "B'"
 			}},
+		{name: "tool result error", perm: "ir.tool_result_errors.write",
+			mutate: func(r *pb.ChatRequest) {
+				value := true
+				r.Messages[3].Blocks[0].GetToolResult().IsError = &value
+			}},
+		{name: "tool result provider content", perm: "ir.tool_result_content.write",
+			base: func() *pb.ChatRequest {
+				r := baseRequest()
+				r.Messages[3].Blocks[0].GetToolResult().Content[0] = &pb.ToolResultContentBlock{Kind: &pb.ToolResultContentBlock_Unknown{Unknown: &pb.ToolResultUnknownBlock{Kind: "provider", PayloadJson: []byte(`{"value":1}`)}}}
+				return r
+			},
+			mutate: func(r *pb.ChatRequest) {
+				r.Messages[3].Blocks[0].GetToolResult().Content[0].GetUnknown().PayloadJson = []byte(`{"value":2}`)
+			}},
 		// The role is part of the message section: changing it marks the role
 		// that left the slot AND the role that took it, so the developer case
 		// starts from a request whose message is already developer.
@@ -180,6 +195,20 @@ func TestVerifyRequestMutationUngrantedRejected(t *testing.T) {
 			mutate: func(r *pb.ChatRequest) {
 				r.Messages[3].Blocks[0].GetToolResult().Content[0].GetText().Text = "B'"
 			}},
+		{name: "tool result error", want: "plugin changed tool result error status without ir.tool_result_errors.write",
+			mutate: func(r *pb.ChatRequest) {
+				value := true
+				r.Messages[3].Blocks[0].GetToolResult().IsError = &value
+			}},
+		{name: "tool result provider content", want: "plugin changed tool result content topology without ir.tool_result_content.write",
+			base: func() *pb.ChatRequest {
+				r := baseRequest()
+				r.Messages[3].Blocks[0].GetToolResult().Content[0] = &pb.ToolResultContentBlock{Kind: &pb.ToolResultContentBlock_Unknown{Unknown: &pb.ToolResultUnknownBlock{Kind: "provider", PayloadJson: []byte(`{"value":1}`)}}}
+				return r
+			},
+			mutate: func(r *pb.ChatRequest) {
+				r.Messages[3].Blocks[0].GetToolResult().Content[0].GetUnknown().PayloadJson = []byte(`{"value":2}`)
+			}},
 		// The only changed role is the unmodelled one, so the sorted union
 		// names it and proves an unmodelled role maps to the catch-all
 		// "other" grant. (Appending the message would mark every role, since
@@ -211,6 +240,32 @@ func TestVerifyRequestMutationUngrantedRejected(t *testing.T) {
 				t.Errorf("error = %q, want %q", err, tc.want)
 			}
 		})
+	}
+}
+
+func TestRecoverableToolErrorRequiresFourNarrowGrants(t *testing.T) {
+	accepted := baseRequest()
+	result := accepted.Messages[3].Blocks[0].GetToolResult()
+	result.Content = append(result.Content, &pb.ToolResultContentBlock{Kind: &pb.ToolResultContentBlock_Unknown{Unknown: &pb.ToolResultUnknownBlock{Kind: "provider", PayloadJson: []byte(`{"value":1}`)}}})
+	result.Content = append(result.Content, &pb.ToolResultContentBlock{Kind: &pb.ToolResultContentBlock_CacheBreakpoint{CacheBreakpoint: &pb.ToolResultCacheBreakpoint{MarkerJson: []byte(`{"type":"ephemeral"}`)}}})
+	out := proto.Clone(accepted).(*pb.ChatRequest)
+	if _, err := sdk.ReplaceToolResultWithError(out.Messages[3], 0, "withheld"); err != nil {
+		t.Fatal(err)
+	}
+	all := grant("ir.tool_results.write", "ir.tool_result_content.write", "ir.tool_result_errors.write", "ir.cache_control.write")
+	if err := verifyRequestMutation(accepted, out, all); err != nil {
+		t.Fatalf("four narrow grants rejected: %v", err)
+	}
+	for _, missing := range []string{"ir.tool_results.write", "ir.tool_result_content.write", "ir.tool_result_errors.write", "ir.cache_control.write"} {
+		var grants []string
+		for _, permission := range []string{"ir.tool_results.write", "ir.tool_result_content.write", "ir.tool_result_errors.write", "ir.cache_control.write"} {
+			if permission != missing {
+				grants = append(grants, permission)
+			}
+		}
+		if err := verifyRequestMutation(accepted, out, grant(grants...)); err == nil {
+			t.Fatalf("conversion accepted without %s", missing)
+		}
 	}
 }
 

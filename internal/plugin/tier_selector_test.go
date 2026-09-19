@@ -360,10 +360,10 @@ func TestDecisionSurvivesRestart(t *testing.T) {
 	requireBundle(t, bundles, "cache_tier_selector")
 
 	stateDir := t.TempDir()
-	build := func() *PluginPipeline {
+	statePath := stateDir + "/state.db"
+	build := func() (*PluginPipeline, *wasm.Runtime, *pluginstate.Store) {
 		rt := wasm.NewRuntime(context.Background())
-		t.Cleanup(func() { rt.Close() })
-		state, err := pluginstate.New(pluginstate.Options{Path: stateDir + "/state.json"})
+		state, err := pluginstate.New(pluginstate.Options{Path: statePath})
 		if err != nil {
 			t.Fatalf("pluginstate.New: %v", err)
 		}
@@ -382,14 +382,23 @@ func TestDecisionSurvivesRestart(t *testing.T) {
 		if err != nil {
 			t.Fatalf("NewPipeline: %v", err)
 		}
-		return pp
+		return pp, rt, state
 	}
 
-	first, err := build().RunBeforeRequest(context.Background(), 1, tierRequest("anth"), nil)
+	firstPipeline, firstRuntime, firstState := build()
+	first, err := firstPipeline.RunBeforeRequest(context.Background(), 1, tierRequest("anth"), nil)
 	if err != nil {
 		t.Fatalf("first run: %v", err)
 	}
-	second, err := build().RunBeforeRequest(context.Background(), 2, tierRequest("anth"), nil)
+	firstRuntime.Close()
+	if err := firstState.Close(); err != nil {
+		t.Fatalf("close pre-restart plugin state: %v", err)
+	}
+
+	secondPipeline, secondRuntime, secondState := build()
+	defer secondRuntime.Close()
+	defer secondState.Close()
+	second, err := secondPipeline.RunBeforeRequest(context.Background(), 2, tierRequest("anth"), nil)
 	if err != nil {
 		t.Fatalf("after restart: %v", err)
 	}

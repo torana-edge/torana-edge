@@ -1,8 +1,6 @@
 package pluginstate
 
 import (
-	"encoding/json"
-	"os"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -35,14 +33,21 @@ func TestConcurrentCASOnlyOneWinner(t *testing.T) {
 }
 
 func TestVersionsSurviveRestartAndABA(t *testing.T) {
-	p := filepath.Join(t.TempDir(), "state.json")
+	p := filepath.Join(t.TempDir(), "state.db")
 	s := newStore(t, Options{Path: p})
 	ok, v1, e := s.CompareAndSet("p", "k", "a", nil)
 	if e != nil || !ok {
 		t.Fatal(e)
 	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
 	s2 := newStore(t, Options{Path: p})
-	_, v, ok := s2.GetVersioned("p", "k")
+	defer s2.Close()
+	_, v, ok, err := s2.GetVersioned("p", "k")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if !ok || v != v1 {
 		t.Fatalf("version %q want %q", v, v1)
 	}
@@ -73,37 +78,6 @@ func TestScanBudgetAndCursorValidation(t *testing.T) {
 	}
 	if _, _, e = s.Scan("q", "", cur, 1, 100); e == nil {
 		t.Fatal("invalid namespace cursor accepted")
-	}
-}
-
-func TestLegacyUpgradeStable(t *testing.T) {
-	p := filepath.Join(t.TempDir(), "state.json")
-	if e := os.WriteFile(p, []byte(`{"p":{"k":"v"}}`), 0600); e != nil {
-		t.Fatal(e)
-	}
-	s := newStore(t, Options{Path: p})
-	_, v1, ok := s.GetVersioned("p", "k")
-	if !ok || v1 == "" {
-		t.Fatal("missing migrated version")
-	}
-	s2 := newStore(t, Options{Path: p})
-	_, v2, _ := s2.GetVersioned("p", "k")
-	if v1 != v2 {
-		t.Fatalf("version changed %q %q", v1, v2)
-	}
-}
-
-func TestInvalidEnvelopeRejected(t *testing.T) {
-	p := filepath.Join(t.TempDir(), "state.json")
-	env := stateEnvelope{Format: 1, Counter: 1, Data: map[string]map[string]PageEntry{"p": {"k": {Key: "k", Value: "v", Version: "2"}}}}
-	raw, _ := json.Marshal(env)
-	_ = os.WriteFile(p, raw, 0600)
-	s, e := New(Options{Path: p})
-	if e == nil || s == nil {
-		t.Fatal("invalid envelope not rejected")
-	}
-	if e := s.Set("p", "x", "y"); e == nil {
-		t.Fatal("invalid store writable")
 	}
 }
 

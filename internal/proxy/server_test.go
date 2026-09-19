@@ -85,19 +85,13 @@ func TestHealthReportsFailedPluginReload(t *testing.T) {
 	}
 }
 
-func TestHealthReportsReadOnlyPluginStateWithRecovery(t *testing.T) {
+func TestStartupFailsWhenDurablePluginStateCannotOpen(t *testing.T) {
 	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "plugin-state.json"), []byte("{corrupt"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "plugin-state.db"), []byte("corrupt database"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	srv, err := New(Config{Providers: provider.DefaultConfig(), ConfigPath: filepath.Join(dir, "config.json")})
-	if err != nil {
-		t.Fatal(err)
-	}
-	rec := httptest.NewRecorder()
-	srv.httpServer.Handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/health", nil))
-	if rec.Code != http.StatusServiceUnavailable || !strings.Contains(rec.Body.String(), `"component":"plugin_state"`) || !strings.Contains(rec.Body.String(), `"recovery":`) {
-		t.Fatalf("health = %d %s", rec.Code, rec.Body.String())
+	if _, err := New(Config{Providers: provider.DefaultConfig(), ConfigPath: filepath.Join(dir, "config.json")}); err == nil || !strings.Contains(err.Error(), "durable plugin state") {
+		t.Fatalf("startup error = %v, want durable plugin state failure", err)
 	}
 }
 

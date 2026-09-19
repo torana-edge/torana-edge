@@ -15,11 +15,15 @@ func TestOrderingConstraintViolation(t *testing.T) {
 	dir := t.TempDir()
 	pGateDir := filepath.Join(dir, "gate_plugin")
 	pRouterDir := filepath.Join(dir, "router_plugin")
+	pGuardDir := filepath.Join(dir, "guard_plugin")
 
 	if err := os.MkdirAll(pGateDir, 0755); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.MkdirAll(pRouterDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(pGuardDir, 0755); err != nil {
 		t.Fatal(err)
 	}
 
@@ -39,9 +43,16 @@ func TestOrderingConstraintViolation(t *testing.T) {
 			{Name: "env.route_request"},
 		},
 	}
+	guardManifest := PluginManifest{
+		Name:        "guard_plugin",
+		Version:     "0.1.0",
+		Description: "tool result guard plugin",
+		Permissions: []Permission{{Name: "ir.tool_results.write"}},
+	}
 
 	gateJSON, _ := json.Marshal(gateManifest)
 	routerJSON, _ := json.Marshal(routerManifest)
+	guardJSON, _ := json.Marshal(guardManifest)
 
 	wasmBytes := []byte{0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00}
 
@@ -49,6 +60,8 @@ func TestOrderingConstraintViolation(t *testing.T) {
 	os.WriteFile(filepath.Join(pGateDir, "plugin.wasm"), wasmBytes, 0644)
 	os.WriteFile(filepath.Join(pRouterDir, "plugin.json"), routerJSON, 0644)
 	os.WriteFile(filepath.Join(pRouterDir, "plugin.wasm"), wasmBytes, 0644)
+	os.WriteFile(filepath.Join(pGuardDir, "plugin.json"), guardJSON, 0644)
+	os.WriteFile(filepath.Join(pGuardDir, "plugin.wasm"), wasmBytes, 0644)
 
 	rt := wasm.NewRuntime(context.Background())
 	defer rt.Close()
@@ -66,6 +79,15 @@ func TestOrderingConstraintViolation(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "ordering constraint violation") {
 		t.Errorf("unexpected error message: %v", err)
+	}
+
+	_, err = reloadPipeline(rt, PluginConfig{
+		Dir:             dir,
+		Order:           []string{"gate_plugin", "guard_plugin"},
+		AllowUnapproved: true,
+	})
+	if err == nil || !strings.Contains(err.Error(), "tool-result-writing") {
+		t.Fatalf("expected tool-result writer ordering error, got %v", err)
 	}
 
 	// Valid order: router_plugin before gate_plugin -> should pass ordering validation

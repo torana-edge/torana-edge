@@ -77,8 +77,8 @@ func Usage(w io.Writer) {
 // scaffolds. Rust resolves the same source through ScaffoldSDKRevision; a Git
 // revision works before a package release and does not depend on crates.io.
 const (
-	ScaffoldSDKVersion  = "v0.5.0"
-	ScaffoldSDKRevision = "ad98c6d3467f628dd2f630c054715f8b347daa29"
+	ScaffoldSDKVersion  = "v0.5.1-0.20260919153754-fe5465bb8ad4"
+	ScaffoldSDKRevision = "fe5465bb8ad49c93870a0369b61690a2244b6b80"
 	scaffoldSDKGitURL   = "https://github.com/torana-edge/torana-plugin-sdk"
 	// scaffoldGoVersion tracks the SDK's own go directive. A scaffolded module
 	// declaring an OLDER Go version than its dependency requires fails to build

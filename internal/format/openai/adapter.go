@@ -240,13 +240,9 @@ func (a *Adapter) marshalBody(chat *engine.ChatRequest) ([]byte, error) {
 	if err := pbconv.ValidateFullRequest(chat); err != nil {
 		return nil, fmt.Errorf("openai: %w", err)
 	}
-	for _, message := range chat.Messages {
-		for _, block := range message.Blocks {
-			if block.ToolResult != nil && block.ToolResult.IsError != nil && *block.ToolResult.IsError {
-				return nil, fmt.Errorf("openai: explicit tool-result error flag is unrepresentable")
-			}
-		}
-	}
+	// OpenAI's tool-result wire shapes have no explicit error boolean. The
+	// replacement text still carries the recoverable diagnostic to the model;
+	// formats with a native status encode the canonical IsError separately.
 	// The typed host-only topology fact decides the wire variant; a plugin
 	// can neither forge nor lose it.
 	if chat.OpenAIVariant == engine.OpenAIResponses {

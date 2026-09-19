@@ -120,6 +120,36 @@ func TestRoundTrip(t *testing.T) {
 	}
 }
 
+func TestSynthesizedToolIDsSurviveHistoryCompaction(t *testing.T) {
+	a := &Adapter{}
+	full := `{"contents":[
+		{"role":"model","parts":[{"functionCall":{"name":"read","args":{"path":"dropped"}}}]},
+		{"role":"user","parts":[{"functionResponse":{"name":"read","response":{"ok":true}}}]},
+		{"role":"model","parts":[{"functionCall":{"name":"read","args":{"path":"kept"}}}]},
+		{"role":"user","parts":[{"functionResponse":{"name":"read","response":{"value":"kept"}}}]}
+	]}`
+	compacted := `{"contents":[
+		{"role":"model","parts":[{"functionCall":{"name":"read","args":{"path":"kept"}}}]},
+		{"role":"user","parts":[{"functionResponse":{"name":"read","response":{"value":"kept"}}}]}
+	]}`
+
+	before, err := a.Unmarshal([]byte(full))
+	if err != nil {
+		t.Fatal(err)
+	}
+	after, err := a.Unmarshal([]byte(compacted))
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantCall := toolCalls(before.Messages[2])[0].ID
+	wantResult := toolResults(before.Messages[3])[0].ToolCallID
+	gotCall := toolCalls(after.Messages[0])[0].ID
+	gotResult := toolResults(after.Messages[1])[0].ToolCallID
+	if wantCall == "" || wantCall != wantResult || gotCall != wantCall || gotResult != wantCall {
+		t.Fatalf("synthesized IDs changed across compaction: before call/result=%q/%q after=%q/%q", wantCall, wantResult, gotCall, gotResult)
+	}
+}
+
 func TestUnmarshalNoSystem(t *testing.T) {
 	a := &Adapter{}
 	input := `{"contents": [{"role": "user", "parts": [{"text": "Hello"}]}]}`
@@ -663,7 +693,7 @@ func TestResponseObjectStrictDetection(t *testing.T) {
 	}
 	for name, text := range wrapped {
 		t.Run(name, func(t *testing.T) {
-			got := geminiResponseObject(text, false)
+			got := geminiResponseObject(text, false, false)
 			var m map[string]any
 			if err := json.Unmarshal(got, &m); err != nil {
 				t.Fatalf("wrap output not an object: %s", got)

@@ -248,18 +248,18 @@ func independentRoleView(m *pb.Message) []byte {
 			k.Unknown.Signature = ""
 		case *pb.RequestBlock_ToolResult:
 			k.ToolResult.Signature = ""
-			var content []*pb.ToolResultContentBlock
+			visible := false
 			for _, c := range k.ToolResult.Content {
 				if c.GetCacheBreakpoint() != nil {
 					continue
 				}
-				cc := proto.Clone(c).(*pb.ToolResultContentBlock)
-				if t := cc.GetText(); t != nil {
-					t.Text = independentRolePlaceholder
-				}
-				content = append(content, cc)
+				visible = true
 			}
-			k.ToolResult.Content = content
+			if visible {
+				k.ToolResult.Content = []*pb.ToolResultContentBlock{{Kind: &pb.ToolResultContentBlock_Text{Text: &pb.ToolResultTextBlock{Text: independentRolePlaceholder}}}}
+			} else {
+				k.ToolResult.Content = nil
+			}
 		}
 		out.Blocks = append(out.Blocks, cloned)
 	}
@@ -1144,6 +1144,9 @@ func TestRoleViewOracleAgreement(t *testing.T) {
 		{"unknown signature cleared", func(m *pb.Message) { m.Blocks[3].GetUnknown().Signature = "" }},
 		{"result signature cleared", func(m *pb.Message) { m.Blocks[4].GetToolResult().Signature = "" }},
 		{"result text value changed", func(m *pb.Message) { m.Blocks[4].GetToolResult().Content[0].GetText().Text = "changed" }},
+		{"arm topology changed", func(m *pb.Message) {
+			m.Blocks[4].GetToolResult().Content[0].Kind = &pb.ToolResultContentBlock_Unknown{Unknown: &pb.ToolResultUnknownBlock{Kind: "x", PayloadJson: []byte(`{}`)}}
+		}},
 	}
 	// RETAINED families: visible to the role section (role-governed).
 	retained := []struct {
@@ -1157,9 +1160,6 @@ func TestRoleViewOracleAgreement(t *testing.T) {
 		{"result metadata changed", func(m *pb.Message) { m.Blocks[4].GetToolResult().PartMetadataJson = []byte(`{"m":2}`) }},
 		{"will_continue changed", func(m *pb.Message) { w := true; m.Blocks[4].GetToolResult().WillContinue = &w }},
 		{"scheduling presence added", func(m *pb.Message) { v := "SILENT"; m.Blocks[4].GetToolResult().Scheduling = &v }},
-		{"arm topology changed", func(m *pb.Message) {
-			m.Blocks[4].GetToolResult().Content[0].Kind = &pb.ToolResultContentBlock_Unknown{Unknown: &pb.ToolResultUnknownBlock{Kind: "x", PayloadJson: []byte(`{}`)}}
-		}},
 		{"block order changed", func(m *pb.Message) { m.Blocks[0], m.Blocks[1] = m.Blocks[1], m.Blocks[0] }},
 	}
 

@@ -8,7 +8,9 @@ import (
 
 	"github.com/torana-edge/torana-edge/internal/engine"
 	"github.com/torana-edge/torana-edge/internal/format"
+	"github.com/torana-edge/torana-edge/internal/pluginstate"
 	"github.com/torana-edge/torana-edge/internal/wasm"
+	pbv1 "github.com/torana-edge/torana-plugin-sdk/pb/v1"
 
 	_ "github.com/torana-edge/torana-edge/internal/format/anthropic"
 	_ "github.com/torana-edge/torana-edge/internal/format/gemini"
@@ -124,6 +126,19 @@ func TestPluginPrefixDeterminism(t *testing.T) {
 			ctx := context.Background()
 			runtime := wasm.NewRuntime(ctx)
 			defer runtime.Close()
+			state, err := pluginstate.New(pluginstate.Options{})
+			if err != nil {
+				t.Fatalf("plugin state: %v", err)
+			}
+			runtime.StateGetFunc = state.Get
+			runtime.StateSetFunc = state.Set
+			runtime.StateGetVersionedFunc = state.GetVersioned
+			runtime.StateCompareAndSetFunc = state.CompareAndSet
+			runtime.StateCompareAndDeleteFunc = state.CompareAndDelete
+			conversationID := "cache-compliance"
+			runtime.ExecutionInfoFunc = func(context.Context) *pbv1.ExecutionInfo {
+				return &pbv1.ExecutionInfo{ConversationId: &conversationID}
+			}
 
 			pipeline, err := NewPipeline(runtime, officialPluginConfig(t, bundles, []string{name}, nil))
 			if err != nil {

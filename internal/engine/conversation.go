@@ -20,15 +20,13 @@ import (
 // Anthropic itself, because by the time these functions see it, the wire shape
 // is gone.
 //
-// # Why not session IDs from the client
+// # Stable session IDs and the fallback
 //
-// Harnesses and observability proxies have conventions for this — Claude Code
-// emits a session-ID header, Helicone and Langfuse define their own, and the
-// Code Assist envelope carries an inner sessionId. All were rejected as inputs.
-// Torana cannot know what harness someone runs, a feature that works only behind
-// one of them is not a platform feature, and header names are a compatibility
-// treadmill. Identity must hold with zero cooperation from the client, so it is
-// derived from content the client cannot avoid sending.
+// The conversation package recognizes a small, explicit set of harness and
+// provider session identifiers before calling this fallback. This derivation
+// remains necessary for ordinary API clients that supply none. It is stable as
+// turns append, but a harness that replaces the conversation roots during
+// compaction must supply a stable identifier if state must follow that rewrite.
 //
 // # The two keys are not interchangeable
 //
@@ -54,9 +52,26 @@ const keyBytes = 6
 // Domain tags keep the two derivations in separate spaces, so a conversation
 // label can never be mistaken for a cache key or collide with one.
 const (
-	domainConversation = "torana/conversation/v1"
-	domainCachePrefix  = "torana/cache-prefix/v1"
+	domainConversation         = "torana/conversation/v1"
+	domainExternalConversation = "torana/conversation/external/v1"
+	domainCachePrefix          = "torana/cache-prefix/v1"
 )
+
+// ExternalConversationID turns one recognized harness/provider identity into the
+// same opaque, bounded label shape used by ConversationID. Source is part of
+// the hash domain: identical text from two unrelated identity namespaces must
+// not share plugin state. Callers select supported sources; an empty component
+// is not an identity.
+func ExternalConversationID(source, value string) string {
+	if source == "" || value == "" {
+		return ""
+	}
+	h := sha256.New()
+	writeHashField(h, domainExternalConversation)
+	writeHashField(h, source)
+	writeHashField(h, value)
+	return shortHex(h)
+}
 
 // ConversationID returns a stable short label for the conversation this request
 // belongs to, derived from the parts that do not change turn to turn: the system

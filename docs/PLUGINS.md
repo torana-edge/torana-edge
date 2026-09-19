@@ -29,13 +29,12 @@ new pipeline. Incompatible bundles are rejected during loading; they are not
 partially interpreted. Keep the previous host and its approved bundles together
 when preparing a rollback.
 
-Plugin state is durable. A corrupt `plugin-state.json` load or an ambiguous
-failure after file replacement makes the store read-only, and `/health` returns
-503 with `component: plugin_state`. Preserve the file for diagnosis, stop the
-process, repair or restore it from a known good copy, and restart. Removing the
-file deliberately resets plugin state; do that only when losing that state is
-acceptable. A write failure before replacement leaves the committed state
-intact and can be retried without restarting.
+Plugin state is durable and stored transactionally in `plugin-state.db`. If the
+database cannot be opened or validated, Torana refuses to start rather than
+silently run stateful plugins without their safety history. Preserve the
+database for diagnosis, repair or restore it from a known good copy, and then
+start Torana again. Removing it deliberately resets plugin state; do that
+only when losing that state is acceptable.
 
 ## Installing
 

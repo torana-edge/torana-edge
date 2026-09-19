@@ -431,7 +431,7 @@ func TestWarmerWithoutClockGrantStoresNothing(t *testing.T) {
 		t.Errorf("sent %d refreshes with no clock to schedule them by", sent)
 	}
 	if len(state.Keys("cache_warmer")) != 0 {
-		v, _ := state.Get("cache_warmer", state.Keys("cache_warmer")[0])
+		v, _, _ := state.Get("cache_warmer", state.Keys("cache_warmer")[0])
 		t.Errorf("stored an entry built from a zero clock: %s", v)
 	}
 	for _, o := range outcomes {
@@ -630,7 +630,8 @@ func TestWarmerDoesNotMutateRequests(t *testing.T) {
 // redeploy does not silently stop warming what the operator asked for.
 func TestWarmerStateSurvivesRestart(t *testing.T) {
 	dir := t.TempDir()
-	state, err := pluginstate.New(pluginstate.Options{Path: dir + "/state.json"})
+	statePath := dir + "/state.db"
+	state, err := pluginstate.New(pluginstate.Options{Path: statePath})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -640,12 +641,16 @@ func TestWarmerStateSurvivesRestart(t *testing.T) {
 	if _, err := first.RunBeforeRequest(context.Background(), 1, warmerRequest("conv-a3f9"), nil); err != nil {
 		t.Fatal(err)
 	}
+	if err := state.Close(); err != nil {
+		t.Fatalf("close pre-restart plugin state: %v", err)
+	}
 
 	// A fresh store reading the same file stands in for a restart.
-	reloaded, err := pluginstate.New(pluginstate.Options{Path: dir + "/state.json"})
+	reloaded, err := pluginstate.New(pluginstate.Options{Path: statePath})
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer reloaded.Close()
 	h2 := &warmerHarness{policy: okPolicy(), cacheHit: true}
 	second := newWarmerPipeline(t, h2, "conv-a3f9", reloaded)
 

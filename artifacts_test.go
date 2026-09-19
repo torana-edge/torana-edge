@@ -81,7 +81,7 @@ func TestQuickstartRuntimeDataIsIgnored(t *testing.T) {
 		".torana-data/config.json",
 		".torana-data/secret.key",
 		".torana-data/credentials.json",
-		".torana-data/plugin-state.json",
+		".torana-data/plugin-state.db",
 		".torana-data/plugin-data/example/usage.jsonl",
 	} {
 		cmd := exec.Command("git", "check-ignore", "--quiet", "--", path)
