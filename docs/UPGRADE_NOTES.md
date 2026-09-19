@@ -1,5 +1,18 @@
 # Upgrade notes
 
+## Plugin installation
+
+`torana plugin install --official` has been removed. Install each plugin from
+the source you chose, for example:
+
+```bash
+torana plugin install https://github.com/torana-edge/torana-plugins/tree/main/plugins/usage_logger
+```
+
+This does not remove installed plugins or change their approvals. It removes
+the host-owned install-all list; plugin discovery remains separate from the
+explicit source, local build, digest review, and approval flow.
+
 ## Responses fields in plugins
 
 Responses `instructions`, `max_output_tokens`, `temperature`, and `top_p` now
@@ -8,7 +21,7 @@ generation-parameter fields to inspect or change them. Responses replacements
 that put canonical wire members (`model`, `instructions`, `input`, `tools`,
 `stream`, `max_output_tokens`, `temperature`, or `top_p`) in
 `provider_extensions_json` are rejected instead of overriding the checked IR.
-ABI remains v1 and official plugins need no release or pin change; custom
+ABI remains v1 and existing plugins need no release or pin change; custom
 plugins that used those extension members must update their field access.
 
 ## Prompt-cache prefix identity

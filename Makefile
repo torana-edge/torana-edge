@@ -1,4 +1,4 @@
-.PHONY: build install clean test test-race test-pkg test-race-pkg testdata-pkg release official-plugins testdata lint force-fixtures
+.PHONY: build install clean test test-race test-pkg test-race-pkg testdata-pkg release plugin-bundles testdata lint force-fixtures
 
 BINARY := torana
 VERSION ?= $(shell git describe --tags --exact-match 2>/dev/null || git rev-parse --short HEAD 2>/dev/null || echo "dev")
@@ -6,9 +6,9 @@ LDFLAGS := -s -w -X main.version=$(VERSION)
 
 # WASM fixtures are build artifacts — never committed (*.wasm is gitignored).
 #
-# The official plugins are NOT built here. They live in torana-plugins, which is
+# The maintained plugin examples are NOT built here. They live in torana-plugins, which is
 # the only tree that has them; this repo tests the host against the fixtures
-# below. `make official-plugins` builds them from a sibling checkout when you
+# below. `make plugin-bundles` builds them from a sibling checkout when you
 # want the plugin-behaviour suite to run locally.
 TESTDATA_DIRS := examples/plugins/test-platform-services examples/plugins/test-stream-journal examples/plugins/test-invalid-scheduling examples/plugins/test-tool-role-message examples/plugins/test-redacted-thinking examples/plugins/test-envelope-smuggler examples/plugins/test-extension-contract examples/plugins/test-stream-mutator examples/plugins/test-stream-mutator-nogrant examples/plugins/test-stream-fanout examples/plugins/test-stream-fanout-boundaries examples/plugins/test-stream-reindex-nogrant examples/plugins/test-stream-complete-block-nogrant examples/plugins/test-stream-complete-block-granted examples/plugins/test-stream-complete-signed-tool examples/plugins/test-stream-delay-stop examples/plugins/test-stream-early-stop examples/plugins/test-blocker examples/plugins/test-blocker-nogrant examples/plugins/test-toolresult-helper examples/plugins/test-toolresult-helper-nogrant examples/plugins/test-observer examples/plugins/test-responder examples/plugins/test-responder-nogrant examples/plugins/test-original examples/plugins/test-router examples/plugins/test-identity examples/plugins/test-ticker examples/plugins/test-http-server examples/plugins/test-metrics examples/plugins/test-mutator examples/plugins/test-hostcall examples/plugins/test-fragment-buffer examples/plugins/test-inert-a examples/plugins/test-inert-b examples/plugins/test-inert-c examples/plugins/test-trapper examples/plugins/test-block-then-trap examples/plugins/test-invalid-replacement examples/plugins/test-forge-response-fields examples/plugins/test-invented-content examples/plugins/test-forge-host-meta examples/plugins/test-stale-bind examples/plugins/test-verdict-then-invalid examples/plugins/test-records-invocation examples/plugins/test-trapper-response examples/plugins/test-trapper-stream examples/plugins/test-tool-rewriter examples/plugins/test-malformed-result examples/plugins/test-trapper-after-stream examples/plugins/test-slow-after-stream examples/plugins/test-header-observer examples/plugins/test-header-observer-b examples/plugins/test-header-observer-nogrant examples/plugins/test-http-server-nogrant examples/plugins/test-custom-tool-rewriter
 WASM_BUILD = GOWORK=off GOOS=wasip1 GOARCH=wasm go build -trimpath -buildvcs=false -buildmode=c-shared
@@ -16,10 +16,10 @@ WASM_BUILD = GOWORK=off GOOS=wasip1 GOARCH=wasm go build -trimpath -buildvcs=fal
 build:
 	go build -buildvcs=false -ldflags "$(LDFLAGS)" -o $(BINARY) ./cmd/torana/
 
-# Build the official plugins from a sibling torana-plugins checkout, and print
+# Build the plugin examples from a sibling torana-plugins checkout, and print
 # the directory to hand to the plugin-behaviour suite:
 #   TORANA_PLUGIN_BUNDLES_DIR=$(shell pwd)/../torana-plugins/dist go test ./...
-official-plugins:
+plugin-bundles:
 	@test -d ../torana-plugins || { echo "clone torana-plugins alongside this repo first" >&2; exit 1; }
 	@for dir in ../torana-plugins/plugins/*/; do \
 		../torana-plugins/scripts/build.sh "$$(basename $$dir)" >/dev/null || exit 1; \

@@ -212,7 +212,7 @@ type PluginBundle struct {
 
 // supportedHooks and supportedPermissions are derived from the SDK's published
 // v1 vocabulary rather than restated here. Which capability strings exist is an
-// ABI concern, and a second copy is how the official plugin repository's
+// ABI concern, and a second copy is how the maintained plugin repository's
 // validator ended up rejecting capabilities this host accepts.
 //
 // A host may expose fewer than the ABI defines; it must not invent names
@@ -358,7 +358,7 @@ func validateManifest(manifest PluginManifest) error {
 		return fmt.Errorf("failure_mode must be pass or block")
 	}
 	if strings.HasPrefix(manifest.ID, "torana/") && manifest.Repository == "" {
-		return fmt.Errorf("official plugin repository is required")
+		return fmt.Errorf("repository is required for plugin IDs in the torana/ namespace")
 	}
 	seenHooks := make(map[string]struct{}, len(manifest.Hooks))
 	for _, hook := range manifest.Hooks {

@@ -151,7 +151,7 @@ Try Torana with a request you already make. Hack together a small plugin,
 or move a harness-specific tool policy into one you can reuse.
 
 [Plugin SDK](https://github.com/torana-edge/torana-plugin-sdk) ·
-[Official plugin sources](https://github.com/torana-edge/torana-plugins) ·
+[Plugin examples](https://github.com/torana-edge/torana-plugins) ·
 [Contributing](CONTRIBUTING.md) · [Report an issue](https://github.com/torana-edge/torana-edge/issues)
 
 For evaluation, see the [public performance reports](benchmarks/README.md):
