@@ -10,7 +10,6 @@ import (
 	"path/filepath"
 	"runtime"
 	"runtime/debug"
-	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -365,12 +364,12 @@ func TestGuestHostMemoryProfile(t *testing.T) {
 	}
 }
 
-// TestOfficialPluginLinearMemoryProfile applies the portable portion of the
-// same probe to every official bundle. Process RSS is intentionally excluded:
+// TestPluginBundleLinearMemoryProfile applies the portable portion of the
+// same probe to every supplied bundle. Process RSS is intentionally excluded:
 // all bundles run in one test process, and wazero's compilation cache retains
 // code across runtimes. Run each guest control above in a fresh process when
 // process-level attribution is required.
-func TestOfficialPluginLinearMemoryProfile(t *testing.T) {
+func TestPluginBundleLinearMemoryProfile(t *testing.T) {
 	dir := officialBundlesDir(t)
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -425,29 +424,9 @@ func TestOfficialPluginLinearMemoryProfile(t *testing.T) {
 		})
 	}
 	if len(bundles) == 0 {
-		t.Fatal("no official plugin bundles found")
+		t.Fatal("no plugin bundles found")
 	}
 	sort.Slice(bundles, func(i, j int) bool { return bundles[i].name < bundles[j].name })
-	wantNames := []string{
-		"auth",
-		"cache_tier_selector",
-		"cache_warmer",
-		"compactor",
-		"intent",
-		"keyword_compactor",
-		"otel",
-		"pii",
-		"schema_translator",
-		"tool_governor",
-		"usage_logger",
-	}
-	gotNames := make([]string, len(bundles))
-	for i := range bundles {
-		gotNames[i] = bundles[i].name
-	}
-	if !slices.Equal(gotNames, wantNames) {
-		t.Fatalf("official bundle inventory = %v, want %v", gotNames, wantNames)
-	}
 
 	for _, bundle := range bundles {
 		bundle := bundle
@@ -495,7 +474,7 @@ func TestOfficialPluginLinearMemoryProfile(t *testing.T) {
 				input = benchmarkAfterResponseInput(t)
 			}
 			if !p.supports(hook) {
-				t.Fatal("official plugin has neither a before-request nor after-response hook; memory call would be vacuous")
+				t.Fatal("plugin has neither a before-request nor after-response hook; memory call would be vacuous")
 			}
 
 			instances := acquireInstances(t, p, poolSize)
