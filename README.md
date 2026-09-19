@@ -96,7 +96,7 @@ output before it reaches the hosted model:
 
 Open [the local UI](http://127.0.0.1:8080/_torana/), configure its required
 `scanner` model service with the local provider and model you already loaded,
-then review and enable it. The
+then return to the installed plugin. The
 [PII guide](https://github.com/torana-edge/torana-plugins/blob/main/plugins/pii/README.md)
 has the complete binding and CLI examples.
 
@@ -110,8 +110,15 @@ secret shapes without a model:
 ```
 
 `pii_guard` needs only permission to read its tool allowlist and block a
-request. Open [the local UI](http://127.0.0.1:8080/_torana/), select
-**pii_guard**, review those two permissions, then choose **Approve and enable**.
+request. It does not need a model or network binding.
+
+### Enable the plugin
+
+Open [the local UI](http://127.0.0.1:8080/_torana/) and select the plugin you
+installed. Review its digest and requested permissions. For `pii`, also confirm
+the `scanner` binding and model-call limits. Then choose **Approve and enable**.
+The install command alone does not enable a plugin, and a rebuilt bundle needs
+a new approval.
 
 ### Test either choice
 
@@ -142,8 +149,7 @@ rm .keys
 This obvious value takes the deterministic fast path in both plugins. The
 model-backed `pii` plugin also sends eligible ambiguous content to the local
 scanner you configured. The [full quickstart](docs/QUICKSTART.md#add-one-plugin)
-includes the CLI alternatives and troubleshooting detail. Installation alone
-does not enable a plugin; rebuilding a bundle requires a new approval.
+includes the CLI alternatives and troubleshooting detail.
 
 The [plugin listings](https://torana.sh/plugins/) include tool policy, telemetry,
 PII checks, schema adaptation and optional compaction. Compaction is a plugin
