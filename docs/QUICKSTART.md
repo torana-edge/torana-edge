@@ -148,15 +148,6 @@ data directory. In another terminal, select the same `TORANA_DATA_DIR`, or use
 `plugin file path --addr 127.0.0.1:8080 usage_logger usage.jsonl` to target the
 instance explicitly.
 
-Once that lifecycle is clear, the maintained set can be built locally with:
-
-```bash
-./torana plugin install --official
-```
-
-It clones the official source repository and builds each selected plugin. The
-additional bundles also remain disabled until individually approved and ordered.
-
 Software agents and shell scripts can discover the same guarded control-plane
 capabilities as JSON:
 

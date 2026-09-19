@@ -22,65 +22,10 @@ import (
 // digest-compatible with installs that predate agent contracts.
 var bundleFiles = []string{"plugin.wasm", "plugin.json", "schema.json", "agent.json"}
 
-// officialPluginsRepo is a convenience source, not a privileged one. Installing
-// from it goes through exactly the same path as any other repository: fetch,
-// build locally, digest what was built, hand it to the operator for approval.
-const officialPluginsRepo = "github.com/torana-edge/torana-plugins"
-
 const (
 	maxSourceFiles = 10_000
 	maxSourceBytes = 100 << 20
 )
-
-// officialCatalog lists every plugin in the official repository and says, for
-// each, whether `--official` installs it.
-//
-// It was a bare list of names, and two plugins were simply missing from it:
-// cache_tier_selector and cache_warmer shipped, and `--official` quietly did
-// not install them. Nothing was wrong in the list — the entries just were not
-// there, which is the failure mode a list of names cannot show you.
-//
-// Naming every plugin and requiring a reason to exclude one makes an omission
-// visible. A new plugin has to be added here to be installable, and leaving it
-// out is a decision someone wrote down rather than an oversight.
-type officialPlugin struct {
-	name string
-	// install is false for plugins that exist but must not be installed by
-	// default; excludedBecause must then say why.
-	install         bool
-	excludedBecause string
-}
-
-var officialCatalog = []officialPlugin{
-	{name: "usage_logger", install: true},
-	{name: "cache_tier_selector", install: true},
-	{name: "cache_warmer", install: true},
-	{name: "compactor", install: true},
-	{name: "intent", install: true},
-	{name: "keyword_compactor", install: true},
-	{name: "otel", install: true},
-	{name: "pii", install: true},
-	{name: "schema_translator", install: true},
-	{name: "tool_governor", install: true},
-	{
-		name:    "auth",
-		install: false,
-		excludedBecause: "its own plugin.json says it is not published to the public registry and " +
-			"is a reference for the capability surface only — installing it by default would put " +
-			"something explicitly not built as an access control into an access-control position",
-	},
-}
-
-// officialPlugins returns the names `--official` installs.
-func officialPlugins() []string {
-	names := make([]string, 0, len(officialCatalog))
-	for _, p := range officialCatalog {
-		if p.install {
-			names = append(names, p.name)
-		}
-	}
-	return names
-}
 
 // pluginsDir resolves where bundles are installed. Mirrors the server's
 // plugins.dir default so a plugin installed by the CLI is the one the proxy
@@ -354,12 +299,9 @@ func copyTree(src, dst string) error {
 
 func installPlugin(args []string, stdout, stderr io.Writer) error {
 	var sources []string
-	official := false
 	dest := pluginsDir()
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
-		case "--official":
-			official = true
 		case "--dir":
 			if i+1 >= len(args) {
 				return errors.New("--dir requires a path")
@@ -373,13 +315,8 @@ func installPlugin(args []string, stdout, stderr io.Writer) error {
 			sources = append(sources, args[i])
 		}
 	}
-	if official {
-		for _, name := range officialPlugins() {
-			sources = append(sources, officialPluginsRepo+"/plugins/"+name)
-		}
-	}
 	if len(sources) == 0 {
-		return errors.New("nothing to install — pass a plugin source or --official")
+		return errors.New("nothing to install — pass at least one plugin source")
 	}
 	if err := os.MkdirAll(dest, 0o755); err != nil {
 		return fmt.Errorf("create plugins dir: %w", err)
@@ -598,7 +535,7 @@ func listPlugins(args []string, stdout io.Writer) error {
 	entries, err := os.ReadDir(dest)
 	if errors.Is(err, os.ErrNotExist) {
 		fmt.Fprintf(stdout, "No plugins directory at %s.\n", dest)
-		_, _ = fmt.Fprintln(stdout, "Install the official set with: torana plugin install --official")
+		_, _ = fmt.Fprintln(stdout, "Install one from source with: torana plugin install <source>")
 		return nil
 	}
 	if err != nil {
@@ -634,7 +571,7 @@ func listPlugins(args []string, stdout io.Writer) error {
 	}
 	if len(rows) == 0 {
 		fmt.Fprintf(stdout, "No plugins installed in %s.\n", dest)
-		_, _ = fmt.Fprintln(stdout, "Install the official set with: torana plugin install --official")
+		_, _ = fmt.Fprintln(stdout, "Install one from source with: torana plugin install <source>")
 		return nil
 	}
 	sort.Slice(rows, func(i, j int) bool { return rows[i].name < rows[j].name })

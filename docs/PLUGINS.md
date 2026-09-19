@@ -10,7 +10,7 @@ For repeatable local scenarios against a compiled bundle, see
 [Testing a plugin](PLUGIN_TESTING.md).
 
 The current host accepts ABI v1 plugins. The SDK repository supports ABI v1
-guests in Go and Rust; the first-party plugins use Go, while the Rust crate and
+guests in Go and Rust; Torana's example plugins use Go, while the Rust crate and
 conformance guest demonstrate the same host boundary from a second language.
 
 ### Updating the host and SDK
@@ -21,7 +21,7 @@ An SDK package version is separate from this revision. Helper fixes and docs
 can keep the same contract, while a contract change requires rebuilding plugins.
 
 When changing ABI contract revisions, rebuild every plugin with the SDK revision
-used by the target Edge build, including all official bundles. Use
+used by the target Edge build, including all deployed bundles. Use
 `torana plugin new` for a starter pinned to the host's SDK; existing projects
 must update their Go module or Rust Git revision and rebuild. Inspect each
 rebuilt bundle and approve its new digest before routing traffic through the
@@ -50,7 +50,6 @@ With the quickstart setup, run from the Torana checkout so installation targets
 `--dir`; `TORANA_DATA_DIR` alone does not select the plugin directory.
 
 ```bash
-torana plugin install --official                              # the maintained set
 torana plugin install https://github.com/you/your-plugins/tree/main/plugins/foo
 torana plugin install github.com/you/your-plugins/plugins/foo # anyone's repo
 torana plugin install github.com/you/your-plugins/plugins/foo@v1.2.0
@@ -64,8 +63,8 @@ Pasteable GitHub `.../tree/<ref>/<directory>` and GitLab
 `.../-/tree/<ref>/<directory>` browser URLs are accepted directly. The shorter
 `host/owner/repo/subdirectory@ref` form and the portable
 `.git//subdirectory@ref` form remain supported. A ref may be a branch, tag, or
-commit SHA. There is no central index; `--official` is a convenience alias, not
-a privileged channel.
+commit SHA. There is no privileged plugin channel: every plugin is installed
+from an explicit source chosen by the operator.
 
 For a private repository, clone it with your normal Git credentials, review it,
 then pass the local plugin directory to `plugin install`. The command accepts

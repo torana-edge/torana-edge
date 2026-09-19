@@ -23,13 +23,13 @@ func isJSONSchema(raw []byte) bool {
 // Two shapes of schema.json exist in the wild, and the host must read both.
 //
 // Torana's own shape is a UI manifest: {"fields":[{key,type,label,...}]}. The
-// official plugins repository instead ships JSON Schema (draft 2020-12) and
+// maintained plugin repository instead ships JSON Schema (draft 2020-12) and
 // validates it in CI, because JSON Schema is the standard way to describe a
 // config object and it carries constraints this host does not model.
 //
 // The two drifted apart without anyone noticing, and the symptom was silent:
 // unmarshalling a JSON Schema document into ConfigSchema succeeds and yields
-// zero fields, so every official plugin rendered no configuration form at all
+// zero fields, so every maintained plugin rendered no configuration form at all
 // and fell back to the raw JSON editor. Nothing errored, so nothing was
 // reported.
 //

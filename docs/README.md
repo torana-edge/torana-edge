@@ -17,7 +17,7 @@ Start small: route one request, see it in the feed, then add one plugin.
 ## Extend and contribute
 
 - [First plugin](https://github.com/torana-edge/torana-plugin-sdk/blob/main/docs/FIRST_PLUGIN.md).
-- [Official plugin guides](https://github.com/torana-edge/torana-plugins).
+- [Plugin guides and examples](https://github.com/torana-edge/torana-plugins).
 - [Plugin testing](PLUGIN_TESTING.md) and [agent operations](AGENT_CONTROL_PLANE.md).
 - [Contributing](../CONTRIBUTING.md), [UI design](contributing/design.md), [release process](RELEASE_INSTALLERS.md).
 

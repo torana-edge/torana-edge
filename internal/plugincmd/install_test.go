@@ -236,8 +236,15 @@ func TestListEmptyDirGuidesTheUser(t *testing.T) {
 	if err := listPlugins([]string{"--dir", t.TempDir()}, &out); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(out.String(), "--official") {
-		t.Errorf("an empty plugins dir should point at the official set, got: %s", out.String())
+	if !strings.Contains(out.String(), "plugin install <source>") {
+		t.Errorf("an empty plugins dir should explain how to install a source, got: %s", out.String())
+	}
+}
+
+func TestInstallRejectsRemovedOfficialShortcut(t *testing.T) {
+	err := installPlugin([]string{"--official"}, &bytes.Buffer{}, &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), `unknown flag "--official"`) {
+		t.Fatalf("installPlugin(--official) error = %v", err)
 	}
 }
 

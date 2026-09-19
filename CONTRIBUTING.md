@@ -30,7 +30,7 @@ gate run before merging — the proxy package alone takes ~13 minutes under
 `-race`, so it is a deliberate separate step rather than the default (CI runs
 it with the same 1800s timeout).
 
-### The official plugins are not in this repository
+### The plugin implementations are not in this repository
 
 They live in [torana-plugins](https://github.com/torana-edge/torana-plugins),
 and are not copied into this repository. Test bundles built from their owning
@@ -49,7 +49,7 @@ To run the second set locally:
 
 ```bash
 git clone https://github.com/torana-edge/torana-plugins ../torana-plugins
-make official-plugins
+make plugin-bundles
 TORANA_PLUGIN_BUNDLES_DIR=$(pwd)/../torana-plugins/dist go test ./...
 ```
 
@@ -60,7 +60,7 @@ gate. Host-only tests should use purpose-built fixtures.
 ### Working across the four repositories
 
 Torana is split across `torana-edge` (the proxy), `torana-plugin-sdk` (the ABI
-and SDKs), `torana-plugins` (the official plugins), and `torana-site`.
+and SDKs), `torana-plugins` (maintained examples), and `torana-site`.
 
 If you are changing the SDK and the proxy together, `go.mod` will still point at
 the published SDK version and your local changes will be invisible. Link them
