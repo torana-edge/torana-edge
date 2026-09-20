@@ -669,7 +669,7 @@ type PluginsConfig struct {
 const DefaultPluginsDir = "./plugins"
 
 // PluginRuntimeConfig bounds untrusted WASM execution. Omitted values select
-// the runtime's conservative defaults (4 concurrent instances, 5 second call
+// the runtime's conservative defaults (4 concurrent instances, 90 second call
 // timeout, 64 MiB per instance, and one-minute burst-instance retirement).
 type PluginRuntimeConfig struct {
 	PoolSize       int    `json:"pool_size,omitempty"`

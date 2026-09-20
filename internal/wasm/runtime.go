@@ -62,7 +62,10 @@ const (
 	// reserve far more memory than a personal proxy should spend.
 	defaultPoolSize = 4
 	// defaultCallTimeout bounds every untrusted guest call, including _initialize.
-	defaultCallTimeout = 5 * time.Second
+	// Model-backed plugins execute their approved model service inside this
+	// outer deadline. Local inference commonly takes tens of seconds, so the
+	// default must leave room for the service's own timeout and guest cleanup.
+	defaultCallTimeout = 90 * time.Second
 	// defaultInstanceIdleTimeout retires burst-created instances after a quiet
 	// period while retaining one ready instance per plugin. PoolSize remains the
 	// concurrency ceiling; it no longer implies permanent burst retention.

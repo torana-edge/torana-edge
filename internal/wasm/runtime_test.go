@@ -70,6 +70,12 @@ func TestRuntimeOptionsAreNormalized(t *testing.T) {
 	}
 }
 
+func TestDefaultCallTimeoutAllowsLocalModelPlugins(t *testing.T) {
+	if got := defaultRuntimeOptions().CallTimeout; got != 90*time.Second {
+		t.Fatalf("default call timeout = %s, want 90s", got)
+	}
+}
+
 func TestRetireIdleInstancesKeepsOneReady(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0)
 	var closed []string

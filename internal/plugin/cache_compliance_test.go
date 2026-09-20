@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/torana-edge/torana-edge/internal/engine"
+	"github.com/torana-edge/torana-edge/internal/engine/pbconv"
 	"github.com/torana-edge/torana-edge/internal/format"
 	"github.com/torana-edge/torana-edge/internal/pluginstate"
 	"github.com/torana-edge/torana-edge/internal/wasm"
@@ -119,7 +120,7 @@ func stableBytes(t *testing.T, chat *engine.ChatRequest) []byte {
 // guardrail that keeps plugins from busting turn-over-turn prompt caching.
 func TestPluginPrefixDeterminism(t *testing.T) {
 	bundles := officialBundlesDir(t)
-	for _, name := range []string{"schema_translator", "intent", "keyword_compactor", "compactor", "pii", "otel", "cache_tier_selector", "cache_warmer", "tool_governor"} {
+	for _, name := range []string{"schema_translator", "intent", "keyword_compactor", "compactor", "pii", "pii_guard", "otel", "cache_tier_selector", "cache_warmer", "tool_governor"} {
 		t.Run(name, func(t *testing.T) {
 			requireBundle(t, bundles, name)
 
@@ -161,6 +162,58 @@ func TestPluginPrefixDeterminism(t *testing.T) {
 			if string(first) != string(second) {
 				t.Errorf("%s is not deterministic over an identical request — this busts provider prompt caching.\nrun1: %s\nrun2: %s",
 					name, first, second)
+			}
+		})
+	}
+}
+
+// TestOfficialPluginsPreserveCacheControls proves that an official plugin
+// does not silently delete, move, or rewrite provider cache breakpoints. Prefix
+// determinism alone is insufficient: a plugin could strip the same markers on
+// every run and still produce stable bytes while destroying prompt-cache hits.
+func TestOfficialPluginsPreserveCacheControls(t *testing.T) {
+	bundles := officialBundlesDir(t)
+	for _, name := range []string{"schema_translator", "intent", "keyword_compactor", "compactor", "pii", "pii_guard", "otel", "cache_tier_selector", "cache_warmer", "tool_governor"} {
+		t.Run(name, func(t *testing.T) {
+			requireBundle(t, bundles, name)
+
+			ctx := context.Background()
+			runtime := wasm.NewRuntime(ctx)
+			defer runtime.Close()
+			state, err := pluginstate.New(pluginstate.Options{})
+			if err != nil {
+				t.Fatalf("plugin state: %v", err)
+			}
+			runtime.StateGetFunc = state.Get
+			runtime.StateSetFunc = state.Set
+			runtime.StateGetVersionedFunc = state.GetVersioned
+			runtime.StateCompareAndSetFunc = state.CompareAndSet
+			runtime.StateCompareAndDeleteFunc = state.CompareAndDelete
+			conversationID := "cache-control-compliance"
+			runtime.ExecutionInfoFunc = func(context.Context) *pbv1.ExecutionInfo {
+				return &pbv1.ExecutionInfo{ConversationId: &conversationID}
+			}
+
+			pipeline, err := NewPipeline(runtime, officialPluginConfig(t, bundles, []string{name}, nil))
+			if err != nil {
+				t.Fatalf("NewPipeline: %v", err)
+			}
+			input := cacheComplianceRequest()
+			before, err := pbconv.ToPBChatRequestChecked(input)
+			if err != nil {
+				t.Fatalf("convert input: %v", err)
+			}
+			want := fingerprintCacheControlSection(before)
+			out, err := pipeline.RunBeforeRequest(ctx, 1, input, nil)
+			if err != nil {
+				t.Fatalf("RunBeforeRequest: %v", err)
+			}
+			after, err := pbconv.ToPBChatRequestChecked(out)
+			if err != nil {
+				t.Fatalf("convert output: %v", err)
+			}
+			if got := fingerprintCacheControlSection(after); got != want {
+				t.Fatal("plugin changed cache-control marker values or positions; this can break provider prompt caching")
 			}
 		})
 	}
