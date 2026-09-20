@@ -43,8 +43,8 @@ jobs:
           "$RUNNER_TEMP/bridge-sdk-venv/bin/python" scripts/validate-bridge-sdk.py \
             --fixtures "$RUNNER_TEMP/bridge-sdk-fixtures"
 
-  # The Rust SDK is distributed from its exact Git revision. Build its
-  # all-hooks guest from the same Go-module revision Edge is pinned to, then
+  # The Rust crate and Go module share one release tag. Build the all-hooks
+  # guest from the exact source revision resolved by Edge's Go module, then
   # exercise RespondRequest through Edge's production loader and host calls.
   rust-production-conformance:
     runs-on: ubuntu-latest
@@ -96,7 +96,7 @@ jobs:
           TORANA_RUST_GUEST: /tmp/torana-rust-allhooks-target/wasm32-wasip1/debug/torana-rust-allhooks.wasm
         run: |
           go test ./internal/plugincmd \
-            -run '^(TestRustScaffoldFirstRunAgainstPinnedSDK|TestScaffoldRustRevisionMatchesHostModule)$' -count=1
+            -run '^TestRustScaffoldFirstRunAgainstPinnedSDK$' -count=1
           go test ./internal/plugin \
             -run '^TestCompiledRustRespondRequestThroughProductionRuntime$' -count=1
 

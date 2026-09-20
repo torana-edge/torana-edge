@@ -73,13 +73,10 @@ func Usage(w io.Writer) {
 	controlcmd.Usage(w)
 }
 
-// ScaffoldSDKVersion is the exact module version used by the host and Go
-// scaffolds. Rust resolves the same source through ScaffoldSDKRevision; a Git
-// revision works before a package release and does not depend on crates.io.
+// ScaffoldSDKVersion is the exact released SDK version used by the host and
+// generated Go and Rust projects.
 const (
-	ScaffoldSDKVersion  = "v0.5.1-0.20260919153754-fe5465bb8ad4"
-	ScaffoldSDKRevision = "fe5465bb8ad49c93870a0369b61690a2244b6b80"
-	scaffoldSDKGitURL   = "https://github.com/torana-edge/torana-plugin-sdk"
+	ScaffoldSDKVersion = "v0.5.1"
 	// scaffoldGoVersion tracks the SDK's own go directive. A scaffolded module
 	// declaring an OLDER Go version than its dependency requires fails to build
 	// with "module requires go >= x", which is the same class of unbuildable
@@ -88,7 +85,7 @@ const (
 )
 
 func scaffoldRustSDKDependency() string {
-	return fmt.Sprintf(`torana-plugin-sdk = { git = %q, rev = %q }`, scaffoldSDKGitURL, ScaffoldSDKRevision)
+	return fmt.Sprintf(`torana-plugin-sdk = "=%s"`, strings.TrimPrefix(ScaffoldSDKVersion, "v"))
 }
 
 func initPlugin(args []string, stdout io.Writer) error {
@@ -243,7 +240,7 @@ mod tests {
 }
 `,
 			"plugin.json": fmt.Sprintf(`{"schema_version":1,"id":"local/%s","name":"%s","version":"0.1.0","abi_version":"v1","description":"A local Torana Rust plugin","hooks":[{"name":"run_before_request"}],"permissions":[{"name":"env.log","description":"Diagnostic logging"}],"failure_mode":"pass"}`+"\n", pluginName, pluginName),
-			"README.md":   "# " + pluginName + "\n\nThe Torana Rust SDK is pinned to the host SDK's exact Git revision in `Cargo.toml`. Run `cargo test` for native checks and `cargo build --release --target wasm32-wasip1` for the WASI artifact.\n",
+			"README.md":   "# " + pluginName + "\n\nThe Torana Rust SDK is pinned to the host SDK's exact crate version in `Cargo.toml`. Keep the generated `Cargo.lock`, run `cargo test` for native checks, and run `cargo build --release --target wasm32-wasip1` for the WASI artifact.\n",
 		}
 	}
 	for name, content := range files {
