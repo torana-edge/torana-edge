@@ -88,7 +88,7 @@ torana plugin install ./my-rust-plugin
 `torana plugin new my-plugin --language rust` pins the exact
 `torana-plugin-sdk = "=0.5.1"` crate release in the generated `Cargo.toml`.
 The Go scaffold and current host use the matching `v0.5.1` module tag. Keep the
-exact version and generated `Cargo.lock` when editing the project.
+exact version, and commit the `Cargo.lock` produced by the first Cargo build.
 
 Cargo may execute native `build.rs` programs while compiling—before a WASM
 digest exists to approve. Torana therefore refuses one-step installation of a

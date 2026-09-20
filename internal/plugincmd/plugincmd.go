@@ -240,7 +240,7 @@ mod tests {
 }
 `,
 			"plugin.json": fmt.Sprintf(`{"schema_version":1,"id":"local/%s","name":"%s","version":"0.1.0","abi_version":"v1","description":"A local Torana Rust plugin","hooks":[{"name":"run_before_request"}],"permissions":[{"name":"env.log","description":"Diagnostic logging"}],"failure_mode":"pass"}`+"\n", pluginName, pluginName),
-			"README.md":   "# " + pluginName + "\n\nThe Torana Rust SDK is pinned to the host SDK's exact crate version in `Cargo.toml`. Keep the generated `Cargo.lock`, run `cargo test` for native checks, and run `cargo build --release --target wasm32-wasip1` for the WASI artifact.\n",
+			"README.md":   "# " + pluginName + "\n\nThe Torana Rust SDK is pinned to the host SDK's exact crate version in `Cargo.toml`. Commit the `Cargo.lock` produced by your first Cargo build. Run `cargo test` for native checks and `cargo build --release --target wasm32-wasip1` for the WASI artifact.\n",
 		}
 	}
 	for name, content := range files {
