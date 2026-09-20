@@ -33,7 +33,7 @@ replace subscription credentials with a different provider’s key.
 explains subscription and API-key behavior.
 
 Try asking it to read a small non-sensitive file. Check the request and
-tool-result follow-up in Torana’s Feed. Exit and run `claude` normally to return
+tool-result follow-up in Torana’s **Live Feed**. Exit and run `claude` normally to return
 to your usual route.
 
 ## Codex
