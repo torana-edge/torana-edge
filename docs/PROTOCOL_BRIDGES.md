@@ -209,7 +209,7 @@ or upstream URLs in these diagnostics.
 `internal/bridge` separates protocol identity, request projection, complete
 response conversion, and guarded streaming. Existing format adapters supply
 native parsing and serialization; provider transport builds paths and
-credentials separately. The bridge uses the existing ABI v1 and SDK v0.5.0.
+credentials separately. The bridge uses the existing ABI v1 and SDK v0.5.1.
 
 Tests exercise every cross-protocol pair through mock HTTP upstreams, tool
 follow-up turns, unsupported semantics, errors, routing/fallbacks, and native

@@ -23,7 +23,7 @@ can keep the same contract, while a contract change requires rebuilding plugins.
 When changing ABI contract revisions, rebuild every plugin with the SDK revision
 used by the target Edge build, including all deployed bundles. Use
 `torana plugin new` for a starter pinned to the host's SDK; existing projects
-must update their Go module or Rust Git revision and rebuild. Inspect each
+must update their Go module or Rust crate version and rebuild. Inspect each
 rebuilt bundle and approve its new digest before routing traffic through the
 new pipeline. Incompatible bundles are rejected during loading; they are not
 partially interpreted. Keep the previous host and its approved bundles together
@@ -85,11 +85,10 @@ torana plugin build ./my-rust-plugin
 torana plugin install ./my-rust-plugin
 ```
 
-`torana plugin new my-plugin --language rust` pins `torana-plugin-sdk` using
-`git` and an exact `rev` in the generated `Cargo.toml`. The current host uses
-SDK v0.5.0, revision `ad98c6d3467f628dd2f630c054715f8b347daa29`. This source
-dependency does not depend on crates.io publication. Keep the immutable
-revision and the generated `Cargo.lock` when editing the project.
+`torana plugin new my-plugin --language rust` pins the exact
+`torana-plugin-sdk = "=0.5.1"` crate release in the generated `Cargo.toml`.
+The Go scaffold and current host use the matching `v0.5.1` module tag. Keep the
+exact version, and commit the `Cargo.lock` produced by the first Cargo build.
 
 Cargo may execute native `build.rs` programs while compiling—before a WASM
 digest exists to approve. Torana therefore refuses one-step installation of a

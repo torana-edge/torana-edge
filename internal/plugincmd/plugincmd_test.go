@@ -2,7 +2,6 @@ package plugincmd
 
 import (
 	"bytes"
-	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -144,7 +143,7 @@ func TestRustScaffoldUsesTypedHookInNativeUnitTest(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !strings.Contains(string(cargo), scaffoldRustSDKDependency()) {
-		t.Fatalf("generated Cargo dependency is not the exact SDK Git revision:\n%s", cargo)
+		t.Fatalf("generated Cargo dependency is not the exact SDK release:\n%s", cargo)
 	}
 }
 
@@ -357,24 +356,8 @@ func TestInitPreservesExistingFiles(t *testing.T) {
 	}
 }
 
-func TestScaffoldRustRevisionMatchesHostModule(t *testing.T) {
-	cmd := exec.Command("go", "mod", "download", "-json", sdkModulePath+"@"+requireVersionFromGoMod(t, "../../go.mod", sdkModulePath))
-	cmd.Env = append(os.Environ(), "GOWORK=off")
-	output, err := cmd.Output()
-	if err != nil {
-		t.Fatalf("resolve host SDK source: %v", err)
-	}
-	var downloaded struct{ Origin struct{ Hash string } }
-	if err := json.Unmarshal(output, &downloaded); err != nil {
-		t.Fatal(err)
-	}
-	if downloaded.Origin.Hash != ScaffoldSDKRevision {
-		t.Fatalf("Rust scaffold revision %s differs from host module source %s", ScaffoldSDKRevision, downloaded.Origin.Hash)
-	}
-}
-
 // This gate runs in the dedicated Rust conformance CI job. It proves the
-// generated Git pin can be resolved without a local SDK or registry release.
+// generated exact crate version resolves and builds without a local SDK.
 func TestRustScaffoldFirstRunAgainstPinnedSDK(t *testing.T) {
 	if os.Getenv("TORANA_RUST_CONFORMANCE") != "1" {
 		t.Skip("requires Rust conformance toolchain")
