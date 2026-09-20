@@ -48,7 +48,7 @@ ANTHROPIC_BASE_URL=http://127.0.0.1:8080/provider/anthropic claude
 ```
 
 Ask it to read a small non-sensitive file, then open the local control plane’s
-Feed at `http://127.0.0.1:8080/_torana/`. Keep the `anthropic` provider’s
+**Live Feed** at `http://127.0.0.1:8080/_torana/`. Keep the `anthropic` provider’s
 authentication set to **Use harness credentials**; no DeepSeek key is needed.
 For Codex, Antigravity, pi, or oh-my-pi, use the
 [harness-specific settings and verification results](HARNESS_SETUP.md).
@@ -124,7 +124,7 @@ they can inspect or change a request or response, block it, or call another
 endpoint. That lets your harness keep using its hosted model while a focused
 local model handles a narrow job.
 
-### **Already have a local model running?**
+### Already have a local model running?
 
 If you already run Ollama or another OpenAI-compatible local model endpoint,
 install the contextual guard:
@@ -145,7 +145,7 @@ using a remote scanner would send it to that remote endpoint.
 The [model-backed PII guide](https://github.com/torana-edge/torana-plugins/blob/main/plugins/pii/README.md)
 includes the exact CLI configuration and approval document.
 
-### **Don't have a local model running?**
+### Don't have a local model running?
 
 Install the zero-model guard instead:
 
@@ -153,7 +153,7 @@ Install the zero-model guard instead:
 ./torana plugin install https://github.com/torana-edge/torana-plugins/tree/main/plugins/pii_guard
 ```
 
-Select **pii_guard** in the control plane, review its two permissions, then
+Select **pii_guard** in the control plane, review its requested permissions, then
 choose **Approve and enable**. It makes no model or network calls. The
 [deterministic guard guide](https://github.com/torana-edge/torana-plugins/blob/main/plugins/pii_guard/README.md)
 also covers configuration through the CLI. Install only one guard; their
@@ -174,10 +174,11 @@ In the coding harness you routed through Torana, enter:
 Read the demo-sensitive.txt file in this directory and tell me what it contains.
 ```
 
-The harness will read the file locally and try to send the tool result in its
-next model request. Either guard should stop that request and return a
-value-free `sensitive_data_detected` block before the synthetic value reaches
-the primary provider. You can also see the blocked request in Torana's Feed.
+The harness will read the file locally and include the tool result in its next
+model request. Either guard should replace the sensitive result with a
+recoverable error beginning **Sensitive output withheld**. The safe request
+continues to the primary provider without the synthetic value, so the agent can
+acknowledge it and move on. You can inspect the request in Torana's **Live Feed**.
 
 This obvious value takes the deterministic fast path in both plugins. The
 model-backed `pii` plugin additionally sends eligible ambiguous content to the
@@ -321,7 +322,7 @@ route. See [other harness integrations](HARNESS_SETUP.md#other-harnesses).
 In the harness's provider settings, point the selected provider at its matching
 Torana route and keep the model and authentication you normally use. An
 OpenAI Chat Completions base URL uses `/provider/<name>/v1`; select a route
-whose upstream serves that API. Check the resulting request in Torana's Feed.
+whose upstream serves that API. Check the resulting request in Torana's **Live Feed**.
 
 ## Verify
 

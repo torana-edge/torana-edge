@@ -56,7 +56,7 @@ ANTHROPIC_BASE_URL=http://127.0.0.1:8080/provider/anthropic claude
 ```
 
 Ask it to read a small, non-sensitive file, then find the request in Torana's
-Feed. The [Claude setup notes](docs/HARNESS_SETUP.md#claude-code) explain how
+**Live Feed**. The [Claude setup notes](docs/HARNESS_SETUP.md#claude-code) explain how
 existing API-key or token settings can take precedence over your login. Your
 provider's normal billing and usage limits still apply.
 
@@ -84,7 +84,7 @@ model: your coding agent can keep using its hosted model while a focused local
 model handles a narrow job. Combining the two unlocks useful workflows without
 moving the whole session to a local model.
 
-### **Already have a local model running?**
+### Already have a local model running?
 
 Try the contextual `pii` plugin first. It catches recognizable sensitive values
 directly, then asks your OpenAI-compatible local model about ambiguous tool
@@ -100,7 +100,7 @@ then return to the installed plugin. The
 [PII guide](https://github.com/torana-edge/torana-plugins/blob/main/plugins/pii/README.md)
 has the complete binding and CLI examples.
 
-### **Don't have a local model running?**
+### Don't have a local model running?
 
 Use the deterministic guard instead. It catches high-confidence PII and common
 secret shapes without a model:
@@ -109,8 +109,8 @@ secret shapes without a model:
 ./torana plugin install https://github.com/torana-edge/torana-plugins/tree/main/plugins/pii_guard
 ```
 
-`pii_guard` needs only permission to read its tool allowlist and block a
-request. It does not need a model or network binding.
+`pii_guard` makes no model or network calls. Review its requested tool-result
+and state permissions in the local UI before enabling it.
 
 ### Enable the plugin
 
@@ -136,10 +136,11 @@ In the coding harness you routed through Torana, enter:
 Read the demo-sensitive.txt file in this directory and tell me what it contains.
 ```
 
-The harness reads the file locally and tries to send the tool result in its
-next model request. Either guard should stop that request and return a
-value-free `sensitive_data_detected` block before the synthetic value reaches
-the primary provider. Confirm the blocked request in Torana's **Feed**, then
+The harness reads the file locally and includes the tool result in its next
+model request. Either guard should replace the sensitive result with a
+recoverable error beginning **Sensitive output withheld**. The safe request
+continues to the primary provider without the synthetic value, so the agent can
+acknowledge it and move on. Confirm the request in Torana's **Live Feed**, then
 remove the test file:
 
 ```bash
