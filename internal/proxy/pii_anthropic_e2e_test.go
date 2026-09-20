@@ -588,7 +588,7 @@ func TestPIIAnthropicToolResultArrayBlockStringSystem(t *testing.T) {
 	// tool_result: the pipeline runs and forwards only a safe tool error.
 	blockedBody := anthropicToolResultConvoWithSystem(sysText, []map[string]any{
 		{"type": "text", "text": ""},
-		{"type": "text", "text": "contact: someone@example.com"},
+		{"type": "text", "text": "PAYMENT_API_KEY=sk_test_fixture_secret_123456"},
 	})
 	status, body = post(blockedBody)
 	if status != http.StatusOK {
@@ -601,12 +601,12 @@ func TestPIIAnthropicToolResultArrayBlockStringSystem(t *testing.T) {
 	if len(got) != 2 {
 		t.Fatalf("captured requests = %d, want 2", len(got))
 	}
-	assertRecoverableToolError(t, got[1], "someone@example.com")
+	assertRecoverableToolError(t, got[1], "sk_test_fixture_secret_123456")
 }
 
 // TestPIIAnthropicToolResultArrayBlock — the structured-tool-result regression:
 // PII inside an ARRAY-valued Anthropic tool_result is extracted (the empty
-// first element makes the email land on line 2) and replaced by an exact,
+// first element makes the secret land on line 2) and replaced by an exact,
 // provider-valid recoverable error before upstream receives the request.
 // The clean twin uses the same topology and reaches upstream exactly once;
 // the protected request becomes the second upstream call in one environment.
@@ -686,11 +686,11 @@ func TestPIIAnthropicToolResultArrayBlock(t *testing.T) {
 		})
 	}
 
-	// 2. Blocked twin: the email sits in the SECOND text element; the empty
+	// 2. Blocked twin: the secret sits in the SECOND text element; the empty
 	// first element keeps the line numbering at line 2.
 	blockedBody := anthropicToolResultConvo([]map[string]any{
 		{"type": "text", "text": ""},
-		{"type": "text", "text": "contact: someone@example.com"},
+		{"type": "text", "text": "PAYMENT_API_KEY=sk_test_fixture_secret_123456"},
 	})
 	status, body = post(blockedBody)
 	if status != http.StatusOK {
@@ -703,5 +703,5 @@ func TestPIIAnthropicToolResultArrayBlock(t *testing.T) {
 	if len(got) != 2 {
 		t.Fatalf("captured requests = %d, want 2", len(got))
 	}
-	assertRecoverableToolError(t, got[1], "someone@example.com")
+	assertRecoverableToolError(t, got[1], "sk_test_fixture_secret_123456")
 }

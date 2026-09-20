@@ -122,12 +122,13 @@ func toolConvo(toolContent string) string {
 	return string(b)
 }
 
-// TestPIIRegexBlock: an email in a tool result is caught by the deterministic
-// regex pre-filter (no model needed) → the tool result becomes a recoverable,
-// value-free error naming the type, line, and tool before upstream sees it.
+// TestPIIRegexBlock: a high-confidence secret in a tool result is caught by
+// the deterministic regex pre-filter (no model needed) → the tool result
+// becomes a recoverable, value-free error naming the type, line, and tool
+// before upstream sees it.
 func TestPIIRegexBlock(t *testing.T) {
 	post, hits, captured := piiEnv(t, `{"tools":["*"],"on_error":"block"}`, nil)
-	status, body := post(toolConvo("some notes\ncontact: john.doe@acme.com here"))
+	status, body := post(toolConvo("some notes\nPAYMENT_API_KEY=sk_test_fixture_secret_123456"))
 
 	if status != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body=%s", status, body)
@@ -137,13 +138,13 @@ func TestPIIRegexBlock(t *testing.T) {
 		t.Fatalf("captured requests = %d, want 1", len(wires))
 	}
 	s := wires[0]
-	if !strings.Contains(s, "email") || !strings.Contains(s, "line 2") {
+	if !strings.Contains(s, "api_key") || !strings.Contains(s, "line 2") {
 		t.Fatalf("error should name type+line: %s", s)
 	}
 	if !strings.Contains(s, "bash") {
 		t.Fatalf("error should name the tool: %s", s)
 	}
-	if strings.Contains(s, "john.doe@acme.com") {
+	if strings.Contains(s, "sk_test_fixture_secret_123456") {
 		t.Fatalf("error LEAKED the raw PII value: %s", s)
 	}
 	if n := atomic.LoadInt32(hits); n != 1 {
