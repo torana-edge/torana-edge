@@ -57,7 +57,7 @@ func TestPIIGuardCompiledGuestForwardsRecoverableToolError(t *testing.T) {
 	}
 	go srv.Serve(listener)
 
-	const secret = "contact: e2e@example.com"
+	const secret = "key: sk_test_torana_e2e_not_a_real_key_123"
 	client := &http.Client{Timeout: 30 * time.Second}
 	response, err := client.Post("http://"+listener.Addr().String()+"/provider/oai/v1/chat/completions", "application/json", strings.NewReader(toolConvo(secret)))
 	if err != nil {
@@ -115,7 +115,7 @@ func TestPIIGuardCompiledGuestCrossProtocolForwardsRecoverableToolError(t *testi
 	body := `{"model":"client-model","max_tokens":64,"messages":[
 		{"role":"user","content":"read the file"},
 		{"role":"assistant","content":[{"type":"tool_use","id":"call-1","name":"read","input":{}}]},
-		{"role":"user","content":[{"type":"tool_result","tool_use_id":"call-1","content":"contact: bridge@example.com"}]}
+		{"role":"user","content":[{"type":"tool_result","tool_use_id":"call-1","content":"key: sk_test_torana_bridge_not_a_real_key_123"}]}
 	]}`
 	response, err := http.Post(proxy.URL+"/provider/p/v1/messages", "application/json", strings.NewReader(body))
 	if err != nil {
@@ -128,7 +128,7 @@ func TestPIIGuardCompiledGuestCrossProtocolForwardsRecoverableToolError(t *testi
 	}
 	select {
 	case wire := <-received:
-		if strings.Contains(wire, "bridge@example.com") || !strings.Contains(wire, "Sensitive output withheld") {
+		if strings.Contains(wire, "sk_test_torana_bridge_not_a_real_key_123") || !strings.Contains(wire, "Sensitive output withheld") {
 			t.Fatalf("cross-protocol guard leaked or lost diagnostic: %s", wire)
 		}
 	case <-time.After(5 * time.Second):

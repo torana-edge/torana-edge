@@ -399,7 +399,7 @@ type reqState struct {
 	// in the same way as the deferred-cleanup comment it replaced.
 	//
 	// So an observational streaming hook can add up to the per-plugin call
-	// timeout (5s), times the number of plugins declaring it, to transport
+	// timeout (90s by default), times the number of plugins declaring it, to transport
 	// completion. Clients that stop on the protocol sentinel ([DONE], or the
 	// provider's stop event) do not notice, because those bytes are already
 	// written; clients that wait for HTTP completion do.

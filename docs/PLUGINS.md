@@ -252,6 +252,19 @@ Pool size, idle retirement, ticks and plugin-egress budgets are startup settings
 The live CLI pipeline snapshot manages order, hook order, configuration and
 approvals; it does not expose `plugins.runtime`.
 
+Each plugin call has a 90-second deadline by default. That leaves room for
+approved local-model calls, which execute inside the plugin call's outer
+deadline. Override it when your model or latency budget needs a different
+bound:
+
+```json
+{ "plugins": { "runtime": { "call_timeout_ms": 120000 } } }
+```
+
+This is a wall-clock limit for one plugin hook, not just its model request. A
+smaller value can fail a model-backed plugin before its separately approved
+model-service timeout expires.
+
 For an existing instance, run `torana status` and note its managed configuration
 path, then `torana stop --yes`. Edit the existing `plugins.runtime` object in
 that file while the process is stopped, preserving all other settings and
