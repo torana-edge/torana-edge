@@ -1,7 +1,8 @@
 # Security policy
 
-Torana is pre-release. Until the first stable release, only the current `main`
-branch receives security fixes.
+Security fixes target the latest published release and the current `main`
+branch. If a report affects an older version, please confirm it against one of
+those supported revisions when possible.
 
 ## Report a vulnerability privately
 

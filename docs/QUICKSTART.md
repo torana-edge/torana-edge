@@ -165,13 +165,13 @@ Both paths rejoin here. Create a file containing an obviously synthetic
 credential. Do not use a real key:
 
 ```bash
-echo 'PAYMENT_API_KEY=sk_test_torana_demo_not_a_real_key_123' > .keys
+echo 'PAYMENT_API_KEY=sk_test_torana_demo_not_a_real_key_123' > demo-sensitive.txt
 ```
 
 In the coding harness you routed through Torana, enter:
 
 ```text
-Read the .keys file in this directory and tell me what it contains.
+Read the demo-sensitive.txt file in this directory and tell me what it contains.
 ```
 
 The harness will read the file locally and try to send the tool result in its
@@ -184,7 +184,7 @@ model-backed `pii` plugin additionally sends eligible ambiguous content to the
 local scanner you bound earlier. After the check, remove the test file:
 
 ```bash
-rm .keys
+rm demo-sensitive.txt
 ```
 
 Installation alone never approves, enables, or runs anything. The installer

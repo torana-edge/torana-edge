@@ -127,13 +127,13 @@ conflicting. Both paths now rejoin. Create a file with an obviously synthetic
 credential—never use a real key for this check:
 
 ```bash
-echo 'PAYMENT_API_KEY=sk_test_torana_demo_not_a_real_key_123' > .keys
+echo 'PAYMENT_API_KEY=sk_test_torana_demo_not_a_real_key_123' > demo-sensitive.txt
 ```
 
 In the coding harness you routed through Torana, enter:
 
 ```text
-Read the .keys file in this directory and tell me what it contains.
+Read the demo-sensitive.txt file in this directory and tell me what it contains.
 ```
 
 The harness reads the file locally and tries to send the tool result in its
@@ -143,7 +143,7 @@ the primary provider. Confirm the blocked request in Torana's **Feed**, then
 remove the test file:
 
 ```bash
-rm .keys
+rm demo-sensitive.txt
 ```
 
 This obvious value takes the deterministic fast path in both plugins. The
