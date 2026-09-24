@@ -54,6 +54,86 @@ func TestRouteOutcomeReachesResponseHookMetadata(t *testing.T) {
 	}
 }
 
+func TestRouteOutcomeSeparatesPluginRouteFromFailover(t *testing.T) {
+	rs := &reqState{Provider: "original", Model: "original-model"}
+	rc := &RouteContext{ProviderName: "original", StrippedPath: "/v1/chat/completions"}
+	ctx := context.WithValue(context.Background(), reqStateKey{}, rs)
+	ctx = context.WithValue(ctx, routeContextKey{}, rc)
+	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://original.example/v1/chat/completions", nil)
+	chat := &engine.ChatRequest{Model: "original-model"}
+	cfg := provider.Config{Providers: map[string]provider.Provider{
+		"target": {URL: "https://target.example", Format: "openai", Auth: provider.ProviderAuth{Mode: "none"}},
+	}}
+	if !(&Server{}).applyRoute(req, chat, "openai", "original", &wasm.RouteVerdict{Provider: "target", Model: "target-model", Plugin: "router"}, cfg) {
+		t.Fatal("route refused")
+	}
+	// A fallback changes the upstream attempt, not the plugin's verdict.
+	rs.Provider = "fallback"
+	rs.Model = chat.Model
+	var meta struct {
+		Route struct {
+			Provider string `json:"provider"`
+			Model    string `json:"model"`
+			ServedBy string `json:"served_by"`
+			Failover bool   `json:"failover"`
+		} `json:"_route_applied"`
+	}
+	if err := json.Unmarshal(rs.chatResponse(chat.Model, "", nil, "").ToranaMetaJSON, &meta); err != nil {
+		t.Fatal(err)
+	}
+	if meta.Route.Provider != "target" || meta.Route.Model != "target-model" || meta.Route.ServedBy != "fallback" || !meta.Route.Failover {
+		t.Fatalf("route outcome = %+v", meta.Route)
+	}
+}
+
+func TestRouteRefusalCodes(t *testing.T) {
+	base := provider.Config{Providers: map[string]provider.Provider{
+		"different_format": {URL: "https://other.example", Format: "anthropic"},
+		"invalid_url":      {URL: "://bad", Format: "openai"},
+		"credential":       {URL: "https://cred.example", Format: "openai", Auth: provider.ProviderAuth{Mode: "credential", Credential: "missing"}},
+		"valid":            {URL: "https://valid.example", Format: "openai", Auth: provider.ProviderAuth{Mode: "none"}},
+	}}
+	for _, tc := range []struct {
+		name, provider, want string
+		noRouteContext       bool
+	}{
+		{"unknown", "unknown", "unknown_provider", false},
+		{"format", "different_format", "format_mismatch", false},
+		{"url", "invalid_url", "invalid_target_url", false},
+		{"credential", "credential", "credential_policy", false},
+		{"route_context", "valid", "missing_route_context", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rs := &reqState{Provider: "original", Model: "original-model"}
+			ctx := context.WithValue(context.Background(), reqStateKey{}, rs)
+			if !tc.noRouteContext {
+				ctx = context.WithValue(ctx, routeContextKey{}, &RouteContext{ProviderName: "original", StrippedPath: "/v1/chat/completions"})
+			}
+			req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://original.example/v1/chat/completions", nil)
+			chat := &engine.ChatRequest{Model: "original-model"}
+			if (&Server{}).applyRoute(req, chat, "openai", "original", &wasm.RouteVerdict{Provider: tc.provider, Model: "new-model", Plugin: "router"}, base) {
+				t.Fatal("route unexpectedly applied")
+			}
+			if rs.RouteRefused != tc.want || rs.RouteProvider != "original" || rs.RouteModel != "original-model" {
+				t.Fatalf("route state = %+v", rs)
+			}
+		})
+	}
+}
+
+func TestNoopRouteIsNotReportedAsRefused(t *testing.T) {
+	rs := &reqState{Provider: "original", Model: "original-model"}
+	ctx := context.WithValue(context.Background(), reqStateKey{}, rs)
+	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://original.example/v1/chat/completions", nil)
+	chat := &engine.ChatRequest{Model: "original-model"}
+	if (&Server{}).applyRoute(req, chat, "openai", "original", &wasm.RouteVerdict{Provider: "original", Plugin: "router"}, provider.Config{}) {
+		t.Fatal("no-op route reported as applied")
+	}
+	if rs.RouteAttempted || rs.RouteRefused != "" || len(rs.chatResponse(chat.Model, "", nil, "").ToranaMetaJSON) != 0 {
+		t.Fatalf("no-op route state = %+v", rs)
+	}
+}
+
 // A routing verdict is ONE decision: "send this to provider X as model Y".
 // When the provider half is rejected, the model half must not be applied on
 // its own — the request would go to the ORIGINAL provider carrying a model

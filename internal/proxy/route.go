@@ -22,6 +22,8 @@ func (s *Server) applyRoute(req *http.Request, chat *engine.ChatRequest, origFor
 	refuse := func(reason string) bool {
 		if rs := reqStateFrom(req.Context()); rs != nil {
 			rs.RouteRefused = reason
+			rs.RouteProvider = rs.Provider
+			rs.RouteModel = chat.Model
 		}
 		return false
 	}
@@ -35,9 +37,16 @@ func (s *Server) applyRoute(req *http.Request, chat *engine.ChatRequest, origFor
 		// so the model stands on its own.
 		if v.Model != "" {
 			chat.Model = v.Model
+			if rs := reqStateFrom(req.Context()); rs != nil {
+				rs.RouteProvider = rs.Provider
+				rs.RouteModel = chat.Model
+			}
 			return true
 		}
-		return refuse("no_change")
+		if rs := reqStateFrom(req.Context()); rs != nil {
+			rs.RouteAttempted = false
+		}
+		return false
 	}
 
 	target, ok := cfg.Providers[v.Provider]
@@ -51,7 +60,11 @@ func (s *Server) applyRoute(req *http.Request, chat *engine.ChatRequest, origFor
 	if exchange != nil {
 		var supported bool
 		upstreamProtocol, supported = bridgeTargetProtocol(target, exchange.Client, exchange.Upstream)
-		if !supported || (exchange.Client.Format() != target.Format && target.Auth.EffectiveMode() == "caller") {
+		if !supported {
+			log.Printf("[route] keeping original bridge: target protocol is unsupported")
+			return refuse("bridge_unrepresentable")
+		}
+		if exchange.Client.Format() != target.Format && target.Auth.EffectiveMode() == "caller" {
 			log.Printf("[route] keeping original bridge: target protocol or credential policy is incompatible")
 			return refuse("credential_policy")
 		}
@@ -117,6 +130,8 @@ func (s *Server) applyRoute(req *http.Request, chat *engine.ChatRequest, origFor
 	rc.ProviderName = v.Provider
 	if rs := reqStateFrom(req.Context()); rs != nil {
 		rs.Provider = v.Provider
+		rs.RouteProvider = v.Provider
+		rs.RouteModel = chat.Model
 	}
 
 	metrics.RecordRoutedRequest(req.Context(), origName, v.Provider)

@@ -381,6 +381,10 @@ type reqState struct {
 	RouteAttempted bool
 	RoutePlugin    string
 	RouteRefused   string
+	// RouteProvider/RouteModel describe the plugin verdict at application time.
+	// Provider/Model can subsequently change when an upstream fails over.
+	RouteProvider string
+	RouteModel    string
 	// PluginFailure marks a plugin failure on an OBSERVATIONAL path, where
 	// failure_mode cannot be applied because the response has already gone to
 	// the caller. Recorded so the failure is visible to an operator rather than
@@ -511,8 +515,10 @@ func (rs *reqState) chatResponse(model, id string, msg *engine.ResponseMessage, 
 		}
 		response.ToranaMetaJSON, _ = json.Marshal(map[string]any{
 			"_route_applied": map[string]any{
-				"provider": rs.Provider, "model": rs.Model,
+				"provider": rs.RouteProvider, "model": rs.RouteModel,
 				"verdict_plugin": rs.RoutePlugin, "refused": refused,
+				"served_by": rs.Provider, "served_model": rs.Model,
+				"failover": rs.Provider != rs.RouteProvider,
 			},
 		})
 	}
