@@ -705,6 +705,7 @@ func TestChatResponseRoundTrips(t *testing.T) {
 		UpstreamStatus:     200,
 		DurationMS:         1234,
 		ProviderExtensions: map[string]any{"x": "y"},
+		ToranaMetaJSON:     []byte(`{"_route_applied":{"model":"m"}}`),
 	}
 	got := FromPBChatResponse(ToPBChatResponse(in))
 	if got == nil {
@@ -715,6 +716,9 @@ func TestChatResponseRoundTrips(t *testing.T) {
 	}
 	if got.UpstreamStatus != 200 || got.DurationMS != 1234 {
 		t.Errorf("upstream status/duration lost: %d %d", got.UpstreamStatus, got.DurationMS)
+	}
+	if !bytes.Equal(got.ToranaMetaJSON, in.ToranaMetaJSON) {
+		t.Errorf("host-owned response metadata lost: %s", got.ToranaMetaJSON)
 	}
 	if got.Message == nil {
 		t.Fatal("the assistant reply was dropped — this is the v1 bug")

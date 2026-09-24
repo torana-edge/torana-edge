@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"testing"
 
@@ -10,6 +11,48 @@ import (
 	"github.com/torana-edge/torana-edge/internal/provider"
 	"github.com/torana-edge/torana-edge/internal/wasm"
 )
+
+func TestRouteOutcomeReachesResponseHookMetadata(t *testing.T) {
+	cfg := provider.Config{Providers: map[string]provider.Provider{
+		"original": {URL: "https://original.example", Format: "openai"},
+		"target":   {URL: "https://target.example", Format: "openai", Auth: provider.ProviderAuth{Mode: "none"}},
+	}}
+	for _, tc := range []struct {
+		name, provider, refusal, finalProvider, finalModel string
+	}{
+		{"accepted", "target", "", "target", "target-model"},
+		{"refused", "missing", "unknown_provider", "original", "original-model"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rs := &reqState{Provider: "original", Model: "original-model"}
+			rc := &RouteContext{ProviderName: "original", StrippedPath: "/v1/chat/completions"}
+			ctx := context.WithValue(context.Background(), reqStateKey{}, rs)
+			ctx = context.WithValue(ctx, routeContextKey{}, rc)
+			req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://original.example/v1/chat/completions", nil)
+			chat := &engine.ChatRequest{Model: "original-model"}
+			(&Server{}).applyRoute(req, chat, "openai", "original",
+				&wasm.RouteVerdict{Provider: tc.provider, Model: "target-model", Plugin: "router"}, cfg)
+			rs.Model = chat.Model
+			var meta struct {
+				Route struct {
+					Provider string  `json:"provider"`
+					Model    string  `json:"model"`
+					Plugin   string  `json:"verdict_plugin"`
+					Refused  *string `json:"refused"`
+				} `json:"_route_applied"`
+			}
+			if err := json.Unmarshal(rs.chatResponse(chat.Model, "", nil, "").ToranaMetaJSON, &meta); err != nil {
+				t.Fatal(err)
+			}
+			if meta.Route.Provider != tc.finalProvider || meta.Route.Model != tc.finalModel || meta.Route.Plugin != "router" {
+				t.Fatalf("route outcome = %+v", meta.Route)
+			}
+			if tc.refusal == "" && meta.Route.Refused != nil || tc.refusal != "" && (meta.Route.Refused == nil || *meta.Route.Refused != tc.refusal) {
+				t.Fatalf("refusal = %v, want %q", meta.Route.Refused, tc.refusal)
+			}
+		})
+	}
+}
 
 // A routing verdict is ONE decision: "send this to provider X as model Y".
 // When the provider half is rejected, the model half must not be applied on

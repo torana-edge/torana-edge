@@ -72,6 +72,18 @@ func pbResp(content *string, nCalls int) *pbv1.ChatResponse {
 	return &pbv1.ChatResponse{Message: pbMsg(content, nCalls)}
 }
 
+func TestResponseMetadataIsHostOwned(t *testing.T) {
+	current := &pbv1.ChatResponse{ToranaMetaJson: []byte(`{"_route_applied":{"model":"m"}}`)}
+	replacement := proto.Clone(current).(*pbv1.ChatResponse)
+	if err := validateResponseReplacement(current, replacement); err != nil {
+		t.Fatalf("identical metadata rejected: %v", err)
+	}
+	replacement.ToranaMetaJson = []byte(`{"_route_applied":{"model":"other"}}`)
+	if err := validateResponseReplacement(current, replacement); err == nil || !strings.Contains(err.Error(), "torana_meta_json") {
+		t.Fatalf("metadata forgery accepted: %v", err)
+	}
+}
+
 func TestValidateResponseReplacementNilReplacement(t *testing.T) {
 	current := pbResp(strPtr("hi"), 1)
 	if err := validateResponseReplacement(current, nil); err != nil {

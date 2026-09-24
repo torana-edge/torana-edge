@@ -59,6 +59,9 @@ func validateResponseReplacement(current, replacement *pbv1.ChatResponse) error 
 	if !bytes.Equal(replacement.ProviderExtensionsJson, current.ProviderExtensionsJson) {
 		return fmt.Errorf("changed host-owned field provider_extensions_json")
 	}
+	if !bytes.Equal(replacement.ToranaMetaJson, current.ToranaMetaJson) {
+		return fmt.Errorf("changed host-owned field torana_meta_json")
+	}
 	if current.Message == nil { // both messages absent: message-relative checks below have nothing to compare
 		return nil
 	}

@@ -19,6 +19,17 @@ import (
 //
 // The target provider's explicit auth policy is applied after routing.
 func (s *Server) applyRoute(req *http.Request, chat *engine.ChatRequest, origFormat, origName string, v *wasm.RouteVerdict, cfg provider.Config) bool {
+	refuse := func(reason string) bool {
+		if rs := reqStateFrom(req.Context()); rs != nil {
+			rs.RouteRefused = reason
+		}
+		return false
+	}
+	if rs := reqStateFrom(req.Context()); rs != nil {
+		rs.RouteAttempted = true
+		rs.RoutePlugin = v.Plugin
+		rs.RouteRefused = ""
+	}
 	if v.Provider == "" || v.Provider == origName {
 		// Model-only override (or no-op): there is no provider to validate,
 		// so the model stands on its own.
@@ -26,13 +37,13 @@ func (s *Server) applyRoute(req *http.Request, chat *engine.ChatRequest, origFor
 			chat.Model = v.Model
 			return true
 		}
-		return false
+		return refuse("no_change")
 	}
 
 	target, ok := cfg.Providers[v.Provider]
 	if !ok {
 		log.Printf("[route] %s routed to unknown provider %q — keeping %q", v.Plugin, v.Provider, origName)
-		return false
+		return refuse("unknown_provider")
 	}
 	exchange := exchangeFrom(req.Context())
 	var upstreamProtocol bridge.Protocol
@@ -42,7 +53,7 @@ func (s *Server) applyRoute(req *http.Request, chat *engine.ChatRequest, origFor
 		upstreamProtocol, supported = bridgeTargetProtocol(target, exchange.Client, exchange.Upstream)
 		if !supported || (exchange.Client.Format() != target.Format && target.Auth.EffectiveMode() == "caller") {
 			log.Printf("[route] keeping original bridge: target protocol or credential policy is incompatible")
-			return false
+			return refuse("credential_policy")
 		}
 		candidate := *chat
 		if routedModel == "" && target.Bridge != nil {
@@ -53,22 +64,22 @@ func (s *Server) applyRoute(req *http.Request, chat *engine.ChatRequest, origFor
 		}
 		if _, err := bridge.ProjectRequest(&candidate, exchange.Client, upstreamProtocol, bridgeOptions(target)); err != nil {
 			log.Printf("[route] keeping original bridge: target cannot represent request features")
-			return false
+			return refuse("bridge_unrepresentable")
 		}
 	} else if target.Format != origFormat || target.Bridge != nil {
 		log.Printf("[route] provider %q format %q != %q — cross-format routing unsupported, keeping %q",
 			v.Provider, target.Format, origFormat, origName)
-		return false
+		return refuse("format_mismatch")
 	}
 	turl, err := url.Parse(target.URL)
 	if err != nil {
 		log.Printf("[route] provider %q has invalid URL: %v — keeping %q", v.Provider, err, origName)
-		return false
+		return refuse("invalid_target_url")
 	}
 
 	rc, _ := req.Context().Value(routeContextKey{}).(*RouteContext)
 	if rc == nil {
-		return false
+		return refuse("missing_route_context")
 	}
 	authCandidate := req.Clone(req.Context())
 	authCandidate.Header = req.Header.Clone()
@@ -78,7 +89,7 @@ func (s *Server) applyRoute(req *http.Request, chat *engine.ChatRequest, origFor
 	}
 	if err := applyProviderCredential(req.Context(), authCandidate, target, caller, s.resolveCredential); err != nil {
 		log.Printf("[route] provider %q credential unavailable — keeping %q", v.Provider, origName)
-		return false
+		return refuse("credential_policy")
 	}
 	req.Header = authCandidate.Header
 	req.URL.RawQuery = authCandidate.URL.RawQuery
