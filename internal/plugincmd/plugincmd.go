@@ -76,7 +76,7 @@ func Usage(w io.Writer) {
 // ScaffoldSDKVersion is the exact released SDK version used by the host and
 // generated Go and Rust projects.
 const (
-	ScaffoldSDKVersion = "v0.5.1"
+	ScaffoldSDKVersion = "v0.6.0"
 	// scaffoldGoVersion tracks the SDK's own go directive. A scaffolded module
 	// declaring an OLDER Go version than its dependency requires fails to build
 	// with "module requires go >= x", which is the same class of unbuildable
