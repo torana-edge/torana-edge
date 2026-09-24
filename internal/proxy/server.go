@@ -376,6 +376,15 @@ type reqState struct {
 	// as anonymous ToranaMeta keys, so an operator seeing a blocked request
 	// could not tell which plugin blocked it — the first question anyone asks.
 	VerdictPlugin string
+	// RouteAttempted includes refused plugin route verdicts, which otherwise
+	// disappear behind the fail-open behavior of applyRoute.
+	RouteAttempted bool
+	RoutePlugin    string
+	RouteRefused   string
+	// RouteProvider/RouteModel describe the plugin verdict at application time.
+	// Provider/Model can subsequently change when an upstream fails over.
+	RouteProvider string
+	RouteModel    string
 	// PluginFailure marks a plugin failure on an OBSERVATIONAL path, where
 	// failure_mode cannot be applied because the response has already gone to
 	// the caller. Recorded so the failure is visible to an operator rather than
@@ -498,6 +507,20 @@ func (rs *reqState) chatResponse(model, id string, msg *engine.ResponseMessage, 
 		FinishReason:      finishReason,
 		UpstreamStatus:    rs.UpstreamStatus,
 		DurationMS:        durationMS,
+	}
+	if rs.RouteAttempted {
+		var refused *string
+		if rs.RouteRefused != "" {
+			refused = &rs.RouteRefused
+		}
+		response.ToranaMetaJSON, _ = json.Marshal(map[string]any{
+			"_route_applied": map[string]any{
+				"provider": rs.RouteProvider, "model": rs.RouteModel,
+				"verdict_plugin": rs.RoutePlugin, "refused": refused,
+				"served_by": rs.Provider, "served_model": rs.Model,
+				"failover": rs.Provider != rs.RouteProvider,
+			},
+		})
 	}
 	if rs.UsageReported {
 		response.Usage = &engine.StreamUsage{

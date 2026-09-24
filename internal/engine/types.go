@@ -314,6 +314,9 @@ type ChatResponse struct {
 	// ProviderExtensions carries unparsed provider fields passed through
 	// transparently, as on the request side.
 	ProviderExtensions map[string]any
+	// ToranaMetaJSON carries host-owned observational facts to response hooks.
+	// It is never part of the provider or harness wire response.
+	ToranaMetaJSON []byte
 }
 
 // OutputFormat is the portable constraint on newly generated assistant text.

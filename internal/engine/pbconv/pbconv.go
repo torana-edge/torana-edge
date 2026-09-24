@@ -828,6 +828,7 @@ func ToPBChatResponse(r *engine.ChatResponse) *pb.ChatResponse {
 		FinishReason:      r.FinishReason,
 		UpstreamStatus:    int32(r.UpstreamStatus),
 		DurationMs:        r.DurationMS,
+		ToranaMetaJson:    append([]byte(nil), r.ToranaMetaJSON...),
 	}
 	if r.Message != nil {
 		out.Message = toPBResponseMessage(r.Message)
@@ -858,6 +859,7 @@ func FromPBChatResponse(r *pb.ChatResponse) *engine.ChatResponse {
 		FinishReason:      r.FinishReason,
 		UpstreamStatus:    int(r.UpstreamStatus),
 		DurationMS:        r.DurationMs,
+		ToranaMetaJSON:    append([]byte(nil), r.ToranaMetaJson...),
 	}
 	if r.Message != nil {
 		out.Message = fromPBResponseMessage(r.Message)
