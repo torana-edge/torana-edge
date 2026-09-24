@@ -246,8 +246,10 @@ func TestBridgeRouteRequiresMatchingClientContract(t *testing.T) {
 	}}
 	rc := &RouteContext{ProviderName: "original", StrippedPath: "/v1/responses"}
 	exchange := &bridgeExchange{Client: bridge.OpenAIResponses, Upstream: bridge.OpenAIChat}
+	rs := &reqState{Provider: "original", Model: "original-model"}
 	ctx := context.WithValue(context.Background(), routeContextKey{}, rc)
 	ctx = context.WithValue(ctx, bridgeContextKey{}, exchange)
+	ctx = context.WithValue(ctx, reqStateKey{}, rs)
 	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://original.example/v1/responses", nil)
 	chat := &engine.ChatRequest{Model: "original-model", OpenAIVariant: engine.OpenAIResponses}
 
@@ -258,5 +260,8 @@ func TestBridgeRouteRequiresMatchingClientContract(t *testing.T) {
 	}
 	if rc.ProviderName != "original" || req.URL.Host != "original.example" || chat.Model != "original-model" {
 		t.Fatalf("rejected route changed provider=%q host=%q model=%q", rc.ProviderName, req.URL.Host, chat.Model)
+	}
+	if rs.RouteRefused != "bridge_unrepresentable" {
+		t.Fatalf("bridge refusal = %q", rs.RouteRefused)
 	}
 }
