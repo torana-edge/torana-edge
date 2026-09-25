@@ -616,6 +616,7 @@ func runJSONResponseHooks(ctx context.Context, pl *plugin.PluginPipeline, reqID 
 	if rs == nil {
 		return nil, fmt.Errorf("json response: request state unavailable")
 	}
+	rs.UsageFormat = formatName
 	if refs.usage != nil {
 		rs.mergeUsage(refs.usage)
 	}

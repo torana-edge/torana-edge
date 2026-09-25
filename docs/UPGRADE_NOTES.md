@@ -1,5 +1,16 @@
 # Upgrade notes
 
+## Plugin-visible input token totals
+
+For intercepted responses, `response.usage.input_tokens` now means total
+prompt input across supported API formats. It includes cache-read and
+cache-write tokens when the provider reports those separately (notably
+Anthropic). `cache_read_tokens` and `cache_write_tokens` are subsets of the
+total; do not add them again. Plugins such as usage_logger and otel may now
+report larger input totals for cached requests. This corrects the
+cross-provider meaning of plugin-visible usage; it does not change the
+provider-native usage shown by Torana's dashboard or returned on the wire.
+
 ## Plugin installation
 
 `torana plugin install --official` has been removed. Install each plugin from
