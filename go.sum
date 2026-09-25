@@ -57,6 +57,8 @@ github.com/torana-edge/torana-plugin-sdk v0.6.2-0.20260925012804-2835d60283d2 h1
 github.com/torana-edge/torana-plugin-sdk v0.6.2-0.20260925012804-2835d60283d2/go.mod h1:AQgCa3xORFCvKFibrhN2QYWYwXjx0aLUA64I5S9UMwk=
 github.com/torana-edge/torana-plugin-sdk v0.6.2-0.20260925013235-5a2685131e0a h1:W34HHDf5op4s2B3OW1O9gDWwBcZv8QOKVo60WYN/9IU=
 github.com/torana-edge/torana-plugin-sdk v0.6.2-0.20260925013235-5a2685131e0a/go.mod h1:AQgCa3xORFCvKFibrhN2QYWYwXjx0aLUA64I5S9UMwk=
+github.com/torana-edge/torana-plugin-sdk v0.7.0 h1:iA1U8b3MqyWc5EdPiTdV3TVZzxp5qy7URS4Maf5XbYA=
+github.com/torana-edge/torana-plugin-sdk v0.7.0/go.mod h1:AQgCa3xORFCvKFibrhN2QYWYwXjx0aLUA64I5S9UMwk=
 github.com/yuin/gopher-lua v1.1.1 h1:kYKnWBjvbNP4XLT3+bPEwAXJx262OhaHDWDVOPjL46M=
 github.com/yuin/gopher-lua v1.1.1/go.mod h1:GBR0iDaNXjAgGg9zfCvksxSRnQx76gclCIb7kdAd1Pw=
 github.com/zeebo/xxh3 v1.1.0 h1:s7DLGDK45Dyfg7++yxI0khrfwq9661w9EN78eP/UZVs=
