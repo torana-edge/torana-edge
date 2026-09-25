@@ -1123,7 +1123,12 @@ func New(cfg Config) (*Server, error) {
 				rejectMalformed()
 				return
 			}
-			if clientFormat == "openai" && strings.HasSuffix(strings.TrimSuffix(strippedPath, "/"), "/responses") && s.secrets != nil {
+			isResponsesPath := clientFormat == "openai" && strings.HasSuffix(strings.TrimSuffix(strippedPath, "/"), "/responses")
+			responsesParent := ""
+			if isResponsesPath {
+				responsesParent = responsesTurnParent(body)
+			}
+			if isResponsesPath && s.secrets != nil {
 				clean, _, localIDErr := rewriteLocalPreviousResponseID(body, s.secrets)
 				if localIDErr != nil {
 					rejectMalformed()
@@ -1160,6 +1165,9 @@ func New(cfg Config) (*Server, error) {
 			// command exchanges from provider history. Retries keep the same
 			// signature, but the next local command is still a new user turn.
 			admittedTurnSignature := userTurnSignature(chat)
+			if isOpenAIResponsesRequest(chat) {
+				admittedTurnSignature = userTurnSignatureWithParent(chat, responsesParent)
+			}
 			// Signed notices are a client-side display channel, never provider
 			// history. Strip them before plugins, audit and bridge projection while
 			// retaining every unrelated raw wire byte for prompt-cache stability.

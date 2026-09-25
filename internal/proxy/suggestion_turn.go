@@ -41,3 +41,15 @@ func userTurnSignature(chat *engine.ChatRequest) string {
 	}
 	return fmt.Sprintf("%x", sha256.Sum256([]byte(fmt.Sprintf("%d\x00%s", count, latest))))
 }
+
+// Responses can send only the latest user input plus a provider-side parent.
+// A signed Torana-local reply uses a fresh parent ID for each local turn. Bind
+// that parent to the digest so identical commands in successive local turns
+// do not collapse, while an exact retry remains the same turn.
+func userTurnSignatureWithParent(chat *engine.ChatRequest, parent string) string {
+	signature := userTurnSignature(chat)
+	if signature == "" || parent == "" {
+		return signature
+	}
+	return fmt.Sprintf("%x", sha256.Sum256([]byte(signature+"\x00"+parent)))
+}

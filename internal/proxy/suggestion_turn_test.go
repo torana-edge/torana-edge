@@ -1,11 +1,14 @@
 package proxy
 
 import (
+	"encoding/json"
 	"testing"
 
+	"github.com/torana-edge/torana-edge/internal/annotate"
 	"github.com/torana-edge/torana-edge/internal/engine"
 	"github.com/torana-edge/torana-edge/internal/format"
 	"github.com/torana-edge/torana-edge/internal/pluginstate"
+	"github.com/torana-edge/torana-edge/internal/secret"
 	"github.com/torana-edge/torana-edge/internal/suggest"
 )
 
@@ -73,5 +76,41 @@ func TestConsecutiveLocalCommandsRemainDistinctUserTurns(t *testing.T) {
 		if err != nil || turn != tc.want {
 			t.Fatalf("turn = %d, want %d; error %v", turn, tc.want, err)
 		}
+	}
+}
+
+func TestResponsesLocalParentDistinguishesIdenticalCommandTurns(t *testing.T) {
+	signer, err := secret.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	chat := &engine.ChatRequest{Messages: []engine.Message{{
+		Role: engine.RoleUser, Blocks: []engine.Block{{Text: &engine.TextBlock{Text: "torana> status"}}},
+	}}}
+	var signatures []string
+	for i := 0; i < 2; i++ {
+		localID, err := annotate.EncodeLocalResponseID(signer, "resp_real")
+		if err != nil {
+			t.Fatal(err)
+		}
+		quoted, _ := json.Marshal(localID)
+		body := append([]byte(`{"previous_response_id":`), quoted...)
+		body = append(body, '}')
+		parent := responsesTurnParent(body)
+		if parent != localID {
+			t.Fatal("local parent was not captured before rewrite")
+		}
+		clean, changed, err := rewriteLocalPreviousResponseID(body, signer)
+		if err != nil || !changed || responsesTurnParent(clean) != "resp_real" {
+			t.Fatalf("parent rewrite = %s, %v, %v", clean, changed, err)
+		}
+		signature := userTurnSignatureWithParent(chat, parent)
+		if signature == "" || signature != userTurnSignatureWithParent(chat, responsesTurnParent(body)) {
+			t.Fatal("retry did not keep the same turn signature")
+		}
+		signatures = append(signatures, signature)
+	}
+	if signatures[0] == signatures[1] {
+		t.Fatal("successive local Responses parents collapsed identical commands")
 	}
 }
