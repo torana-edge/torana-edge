@@ -8,6 +8,7 @@ import (
 
 	"github.com/torana-edge/torana-edge/internal/bridge"
 	"github.com/torana-edge/torana-edge/internal/engine"
+	"github.com/torana-edge/torana-edge/internal/format"
 	"github.com/torana-edge/torana-edge/internal/provider"
 	"github.com/torana-edge/torana-edge/internal/wasm"
 	pb "github.com/torana-edge/torana-plugin-sdk/pb/v1"
@@ -250,6 +251,70 @@ func TestEffortOnlyVerdictKeepsProviderAndModel(t *testing.T) {
 	}
 	if chat.Model != "original-model" || rs.RouteProvider != "original" || rs.RouteModel != "original-model" {
 		t.Fatalf("effort-only verdict changed route: model %q, state %+v", chat.Model, rs)
+	}
+}
+
+func TestResponsesProviderSideHistoryRefusesCrossProviderRoute(t *testing.T) {
+	rs := &reqState{Provider: "original", Model: "original-model"}
+	ctx := context.WithValue(context.Background(), reqStateKey{}, rs)
+	ctx = context.WithValue(ctx, routeContextKey{}, &RouteContext{ProviderName: "original", StrippedPath: "/v1/responses"})
+	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://original.example/v1/responses", nil)
+	extensions, err := engine.ParseOptionalJSONObject([]byte(`{"previous_response_id":"resp_123"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	chat := &engine.ChatRequest{Model: "original-model", OpenAIVariant: engine.OpenAIResponses, ProviderExtensions: extensions}
+	cfg := provider.Config{Providers: map[string]provider.Provider{"target": {URL: "https://target.example", Format: "openai"}}}
+	if (&Server{}).applyRoute(req, chat, "openai", "original", &wasm.RouteVerdict{Provider: "target", Model: "target-model", Plugin: "router"}, cfg) {
+		t.Fatal("provider-side history moved to another provider")
+	}
+	if rs.RouteRefused != "server_state" || chat.Model != "original-model" {
+		t.Fatalf("route refusal = %q, model %q", rs.RouteRefused, chat.Model)
+	}
+}
+
+func TestGeminiRouteRewritesModelPath(t *testing.T) {
+	rs := &reqState{Provider: "original", Model: "old"}
+	ctx := context.WithValue(context.Background(), reqStateKey{}, rs)
+	ctx = context.WithValue(ctx, routeContextKey{}, &RouteContext{ProviderName: "original", StrippedPath: "/v1beta/models/old:generateContent"})
+	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://original.example/v1beta/models/old:generateContent", nil)
+	chat := &engine.ChatRequest{Model: "old"}
+	cfg := provider.Config{Providers: map[string]provider.Provider{"target": {URL: "https://target.example", Format: "gemini", Auth: provider.ProviderAuth{Mode: "none"}}}}
+	if !(&Server{}).applyRoute(req, chat, "gemini", "original", &wasm.RouteVerdict{Provider: "target", Model: "new", Plugin: "router"}, cfg) {
+		t.Fatal("Gemini route refused")
+	}
+	if req.URL.Path != "/v1beta/models/new:generateContent" || chat.Model != "new" {
+		t.Fatalf("Gemini route path %q, model %q", req.URL.Path, chat.Model)
+	}
+}
+
+func TestRouteHostCallValidatesKnownTargets(t *testing.T) {
+	cfg := provider.Config{Providers: map[string]provider.Provider{
+		"original": {URL: "https://original.example", Format: "openai"},
+		"same":     {URL: "https://same.example", Format: "openai"},
+		"other":    {URL: "https://other.example", Format: "anthropic"},
+	}}
+	s := &Server{config: Config{Providers: cfg}}
+	chat := &engine.ChatRequest{Model: "m"}
+	ctx := context.WithValue(context.Background(), reqStateKey{}, &reqState{Provider: "original", InitialFormat: "openai"})
+	ctx = context.WithValue(ctx, syntheticResponseScopeKey{}, syntheticResponseScope{format: format.Lookup("openai"), request: chat})
+	for _, tc := range []struct {
+		provider string
+		code     pb.ErrorCode
+	}{
+		{"missing", pb.ErrorCode_ERROR_CODE_NOT_FOUND},
+		{"other", pb.ErrorCode_ERROR_CODE_UNSUPPORTED},
+		{"same", pb.ErrorCode_ERROR_CODE_UNSPECIFIED},
+	} {
+		got := s.validateRouteHost(ctx, &pb.RouteRequestArgs{Provider: tc.provider, Model: "m"})
+		if tc.code == pb.ErrorCode_ERROR_CODE_UNSPECIFIED && got != nil || tc.code != pb.ErrorCode_ERROR_CODE_UNSPECIFIED && (got == nil || got.Code != tc.code) {
+			t.Fatalf("provider %q: validation = %+v, want %v", tc.provider, got, tc.code)
+		}
+	}
+	extensions, _ := engine.ParseOptionalJSONObject([]byte(`{"previous_response_id":"resp_123"}`))
+	chat.OpenAIVariant, chat.ProviderExtensions = engine.OpenAIResponses, extensions
+	if got := s.validateRouteHost(ctx, &pb.RouteRequestArgs{Provider: "same"}); got == nil || got.Code != pb.ErrorCode_ERROR_CODE_UNSUPPORTED {
+		t.Fatalf("provider-side history validation = %+v", got)
 	}
 }
 

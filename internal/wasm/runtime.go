@@ -1108,6 +1108,7 @@ type Runtime struct {
 	SuggestFunc                   func(context.Context, string, *pbv1.SuggestArgs) (string, *pbv1.HostError)
 	SuggestionOutcomesFunc        func(context.Context, string) ([]byte, error)
 	RouteEffortEnabledFunc        func(context.Context) bool
+	ValidateRouteFunc             func(context.Context, *pbv1.RouteRequestArgs) *pbv1.HostError
 	ValidateSyntheticResponseFunc func(context.Context, *pbv1.SyntheticResponse) *pbv1.HostError
 
 	// SendRequestFunc backs torana_send_request: a plugin-originated provider
@@ -1947,6 +1948,11 @@ func (r *Runtime) dispatchHostCall(ctx context.Context, pluginName, cmd, args st
 					herr = hostErr(pbv1.ErrorCode_ERROR_CODE_UNSUPPORTED, "effort routing is not supported by this host version")
 				}
 				if herr != nil {
+					break
+				}
+			}
+			if r.ValidateRouteFunc != nil {
+				if herr = r.ValidateRouteFunc(ctx, &a); herr != nil {
 					break
 				}
 			}
