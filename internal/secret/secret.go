@@ -14,7 +14,9 @@ package secret
 import (
 	"crypto/aes"
 	"crypto/cipher"
+	"crypto/hmac"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -31,6 +33,19 @@ const tokenPrefix = "enc:"
 // Store holds a machine-local AES-256 key loaded from disk.
 type Store struct {
 	key []byte
+}
+
+// MAC signs host-owned, non-secret markers with a domain-separated purpose.
+// It does not expose the persistent key to callers.
+func (s *Store) MAC(purpose, value string) ([]byte, error) {
+	if s == nil || len(s.key) != 32 || purpose == "" {
+		return nil, fmt.Errorf("store or MAC purpose is not initialized")
+	}
+	mac := hmac.New(sha256.New, s.key)
+	_, _ = mac.Write([]byte(purpose))
+	_, _ = mac.Write([]byte{0})
+	_, _ = mac.Write([]byte(value))
+	return mac.Sum(nil), nil
 }
 
 // Open loads the key file at <dataDir>/secret.key, creating it (0600) with a
