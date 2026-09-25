@@ -2130,6 +2130,9 @@ func New(cfg Config) (*Server, error) {
 			if _, supplied := topLevel["credentials"]; !supplied {
 				incoming.Credentials = cur.Credentials
 			}
+			if _, supplied := topLevel["suggestions"]; !supplied {
+				incoming.Suggestions = cur.Suggestions
+			}
 			// Never let the settings surface mutate the pipeline.
 			incoming.Plugins = cur.Plugins
 			cacheEnc, err := s.normalizeSecretField(incoming.Cache.Redis.PasswordEnc, cur.Cache.Redis.PasswordEnc)
@@ -2860,6 +2863,8 @@ func New(cfg Config) (*Server, error) {
 	// through agent.json. Dispatch still uses the existing isolated
 	// run_on_http_request hook and env.serve_http approval.
 	mux.HandleFunc("/_torana/api/v1/agent/plugins/", s.controlPlaneGuard(s.handlePluginAgentOperation))
+	mux.HandleFunc(suggestionsAPIPath, s.controlPlaneGuard(s.handleAgentSuggestions))
+	mux.HandleFunc(suggestionsAPIPath+"/", s.controlPlaneGuard(s.handleAgentSuggestions))
 	mux.HandleFunc("/_torana/api/v1/system", s.controlPlaneGuard(s.systemStatus))
 	mux.HandleFunc("/_torana/api/v1/system/stop", s.controlPlaneGuard(s.requestStop))
 	mux.HandleFunc("/_torana/api/v1/", s.controlPlaneGuard(func(w http.ResponseWriter, r *http.Request) {

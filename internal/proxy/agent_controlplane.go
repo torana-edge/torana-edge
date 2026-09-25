@@ -276,6 +276,28 @@ func builtInAgentOperations() []agentAPIOperation {
 			Risk: "read", Idempotent: true, ContentType: "application/json",
 			OutputSchema: conversationsSchema,
 		},
+		{
+			ID: "torana.suggestions.list", Method: http.MethodGet,
+			Path:        suggestionsAPIPath + "?conversation_id={conversation_id}",
+			Description: "List suggestions for one conversation, including pending confirmation codes and outcomes.",
+			Risk:        "read", Idempotent: true, ContentType: "application/json", OutputSchema: arbitraryObjectSchema,
+		},
+		{
+			ID: "torana.suggestions.accept", Method: http.MethodPost,
+			Path:        suggestionsAPIPath + "/{id}/accept",
+			Description: "Accept one pending suggestion in a specified conversation.",
+			Risk:        "write", Idempotent: false, ContentType: "application/json",
+			InputSchema:  json.RawMessage(`{"type":"object","required":["conversation_id"],"properties":{"conversation_id":{"type":"string"}},"additionalProperties":false}`),
+			OutputSchema: arbitraryObjectSchema,
+		},
+		{
+			ID: "torana.suggestions.dismiss", Method: http.MethodPost,
+			Path:        suggestionsAPIPath + "/{id}/dismiss",
+			Description: "Dismiss one pending suggestion in a specified conversation.",
+			Risk:        "write", Idempotent: false, ContentType: "application/json",
+			InputSchema:  json.RawMessage(`{"type":"object","required":["conversation_id"],"properties":{"conversation_id":{"type":"string"}},"additionalProperties":false}`),
+			OutputSchema: arbitraryObjectSchema,
+		},
 	}
 }
 
