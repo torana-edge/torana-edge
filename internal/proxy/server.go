@@ -1156,6 +1156,10 @@ func New(cfg Config) (*Server, error) {
 				rejectMalformed()
 				return
 			}
+			// Count the caller's actual user turns before removing Torana-only
+			// command exchanges from provider history. Retries keep the same
+			// signature, but the next local command is still a new user turn.
+			admittedTurnSignature := userTurnSignature(chat)
 			// Signed notices are a client-side display channel, never provider
 			// history. Strip them before plugins, audit and bridge projection while
 			// retaining every unrelated raw wire byte for prompt-cache stability.
@@ -1257,7 +1261,7 @@ func New(cfg Config) (*Server, error) {
 				rs.NoticeEnabled = err == nil && !disabled
 			}
 			if currentCfg.Providers.Suggestions.Enabled && rs.ConversationID != "" {
-				turn, turnErr := s.suggestions.ObserveUserTurn(rs.ConversationID, userTurnSignature(chat))
+				turn, turnErr := s.suggestions.ObserveUserTurn(rs.ConversationID, admittedTurnSignature)
 				if turnErr != nil {
 					log.Printf("[suggest] could not record user turn: %v", turnErr)
 				} else {
