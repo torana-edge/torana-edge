@@ -1827,6 +1827,12 @@ func New(cfg Config) (*Server, error) {
 					}()
 					events = out
 				}
+				// Notice text is introduced after plugin stream verification and
+				// after the provider/client bridge boundary. The final serializer
+				// emits it in the client's API shape, only on a clean end-of-turn.
+				if notice, _ := s.pendingNotice(rs); notice != "" {
+					events = appendNoticeEvents(streamCtx, events, notice)
+				}
 
 				// Pin the pipeline for the background goroutine's entire
 				// lifetime. The goroutine outlives this handler (it keeps

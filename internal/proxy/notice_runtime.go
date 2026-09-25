@@ -10,13 +10,29 @@ import (
 // repeated notice on every later assistant reply. UI and CLI retain the full
 // durable list, including suggestions a harness cannot safely display.
 func (s *Server) appendPendingNotice(body []byte, rs *reqState, shape string) []byte {
-	if rs == nil || !rs.NoticeEnabled || rs.ConversationID == "" || rs.UserTurn == 0 || s.suggestions == nil {
+	notice, id := s.pendingNotice(rs)
+	if notice == "" {
 		return body
+	}
+	updated, changed, err := appendNoticeJSON(body, shape, notice, id)
+	if err != nil {
+		log.Printf("[suggest] could not place notice: %v", err)
+		return body
+	}
+	if changed {
+		return updated
+	}
+	return body // tool-calling or incomplete turn: never attach a notice
+}
+
+func (s *Server) pendingNotice(rs *reqState) (string, string) {
+	if rs == nil || !rs.NoticeEnabled || rs.ConversationID == "" || rs.UserTurn == 0 || s.suggestions == nil {
+		return "", ""
 	}
 	items, err := s.suggestions.List(rs.ConversationID, "", rs.UserTurn)
 	if err != nil {
 		log.Printf("[suggest] could not list notice candidates: %v", err)
-		return body
+		return "", ""
 	}
 	for i := len(items) - 1; i >= 0; i-- {
 		item := items[i]
@@ -26,17 +42,9 @@ func (s *Server) appendPendingNotice(body []byte, rs *reqState, shape string) []
 		notice, err := annotate.Render(s.secrets, rs.ConversationID, item)
 		if err != nil {
 			log.Printf("[suggest] could not sign notice: %v", err)
-			return body
+			return "", ""
 		}
-		updated, changed, err := appendNoticeJSON(body, shape, notice, item.ID)
-		if err != nil {
-			log.Printf("[suggest] could not place notice: %v", err)
-			return body
-		}
-		if changed {
-			return updated
-		}
-		return body // tool-calling or incomplete turn: never attach a notice
+		return notice, item.ID
 	}
-	return body
+	return "", ""
 }
