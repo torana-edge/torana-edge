@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -40,10 +41,23 @@ type Provider struct {
 	// "*" may be used as a provider default. Torana intentionally ships no
 	// built-in rates because provider prices and cache semantics change.
 	Pricing map[string]economics.ModelPricing `json:"pricing,omitempty"`
+	// Models are exact, operator-declared capabilities available to adaptive
+	// plugins. An unlisted model is unknown, not presumed to support effort.
+	Models map[string]ModelCapabilitiesConfig `json:"models,omitempty"`
 	// Cache declares how this provider's prompt cache behaves — lifetimes and
 	// whether reads refresh them. Neither is discoverable from the wire, and
 	// nil means unknown. See CacheConfig.
 	Cache *CacheConfig `json:"cache,omitempty"`
+}
+
+type ModelCapabilitiesConfig struct {
+	Effort              *ModelEffortConfig      `json:"effort,omitempty"`
+	ContextWindowTokens *uint32                 `json:"context_window_tokens,omitempty"`
+	Pricing             *economics.ModelPricing `json:"pricing,omitempty"`
+}
+
+type ModelEffortConfig struct {
+	Levels []string `json:"levels"`
 }
 
 type ProviderAuth struct {
@@ -194,6 +208,9 @@ func (c Config) Validate() error {
 					name, configured.Format, supportedFormatNames())
 			}
 		}
+		if len(configured.Models) > 0 && configured.Format == "" {
+			return fmt.Errorf("provider %q must declare a format before model capabilities", name)
+		}
 		if err := configured.Auth.Validate(name, c.Credentials); err != nil {
 			return err
 		}
@@ -217,6 +234,26 @@ func (c Config) Validate() error {
 		for model, pricing := range configured.Pricing {
 			if !pricing.Valid() {
 				return fmt.Errorf("provider %q pricing for model %q must contain only finite, non-negative rates", name, model)
+			}
+		}
+		for model, capability := range configured.Models {
+			if strings.TrimSpace(model) == "" || model == "*" {
+				return fmt.Errorf("provider %q models require exact, non-empty names", name)
+			}
+			if capability.ContextWindowTokens != nil && *capability.ContextWindowTokens == 0 {
+				return fmt.Errorf("provider %q model %q context window must be positive", name, model)
+			}
+			if capability.Pricing != nil && !capability.Pricing.Valid() {
+				return fmt.Errorf("provider %q model %q pricing must contain finite, non-negative rates", name, model)
+			}
+			if capability.Effort != nil {
+				seen := map[string]bool{}
+				for _, level := range capability.Effort.Levels {
+					if !slices.Contains([]string{"minimal", "low", "medium", "high", "xhigh", "max"}, level) || seen[level] {
+						return fmt.Errorf("provider %q model %q has invalid or duplicate effort level %q", name, model, level)
+					}
+					seen[level] = true
+				}
 			}
 		}
 	}
