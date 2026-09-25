@@ -1106,6 +1106,7 @@ type Runtime struct {
 	ExecutionInfoFunc             func(context.Context) *pbv1.ExecutionInfo
 	ModelCapabilitiesFunc         func(context.Context, *pbv1.ModelCapabilitiesArgs) (*pbv1.ModelCapabilities, *pbv1.HostError)
 	SuggestFunc                   func(context.Context, string, *pbv1.SuggestArgs) (string, *pbv1.HostError)
+	SuggestionOutcomesFunc        func(context.Context, string) ([]byte, error)
 	ValidateSyntheticResponseFunc func(context.Context, *pbv1.SyntheticResponse) *pbv1.HostError
 
 	// SendRequestFunc backs torana_send_request: a plugin-originated provider

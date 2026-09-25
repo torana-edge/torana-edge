@@ -1183,6 +1183,9 @@ func New(cfg Config) (*Server, error) {
 					log.Printf("[suggest] could not record user turn: %v", turnErr)
 				} else {
 					rs.UserTurn = turn
+					if _, acceptErr := s.suggestions.AcceptHarnessSwitch(rs.ConversationID, chat.Model, turn); acceptErr != nil {
+						log.Printf("[suggest] could not record harness model switch: %v", acceptErr)
+					}
 				}
 			}
 
@@ -3806,6 +3809,26 @@ func (s *Server) newRuntime() *wasm.Runtime {
 			return "", &pb.HostError{Code: pb.ErrorCode_ERROR_CODE_UNAVAILABLE, Message: "suggestion could not be saved"}
 		}
 		return id, nil
+	}
+	rt.SuggestionOutcomesFunc = func(ctx context.Context, pluginName string) ([]byte, error) {
+		if !s.GetConfig().Providers.Suggestions.Enabled {
+			return nil, nil
+		}
+		rs := reqStateFrom(ctx)
+		if rs == nil || rs.ConversationID == "" {
+			return nil, nil
+		}
+		items, err := s.suggestions.List(rs.ConversationID, pluginName, rs.UserTurn)
+		if err != nil {
+			return nil, err
+		}
+		outcomes := make([]map[string]string, 0, len(items))
+		for _, item := range items {
+			outcomes = append(outcomes, map[string]string{
+				"id": item.ID, "status": item.Status, "action": item.Action, "via": item.Via,
+			})
+		}
+		return json.Marshal(outcomes)
 	}
 	rt.ValidateSyntheticResponseFunc = func(ctx context.Context, response *pb.SyntheticResponse) *pb.HostError {
 		scope, ok := ctx.Value(syntheticResponseScopeKey{}).(syntheticResponseScope)
