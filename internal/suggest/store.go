@@ -64,8 +64,32 @@ type Suggestion struct {
 }
 
 type record struct {
-	Conversation string       `json:"conversation"`
-	Suggestions  []Suggestion `json:"suggestions"`
+	Conversation      string       `json:"conversation"`
+	UserTurns         uint64       `json:"user_turns"`
+	LastUserSignature string       `json:"last_user_signature,omitempty"`
+	Suggestions       []Suggestion `json:"suggestions"`
+}
+
+// ObserveUserTurn advances only when the latest genuine user message changes.
+// Continuation requests pass the same signature; an empty signature means no
+// user message could be identified and leaves the counter unchanged.
+func (s *Store) ObserveUserTurn(conversation, signature string) (uint64, error) {
+	if signature == "" {
+		current, _, _, err := s.read(conversation)
+		return current.UserTurns, err
+	}
+	var turn uint64
+	err := s.update(conversation, func(current *record) (bool, error) {
+		if current.LastUserSignature == signature {
+			turn = current.UserTurns
+			return false, nil
+		}
+		current.UserTurns++
+		current.LastUserSignature = signature
+		turn = current.UserTurns
+		return true, nil
+	})
+	return turn, err
 }
 
 func conversationKey(conversation string) string {

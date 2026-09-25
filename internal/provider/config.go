@@ -445,6 +445,7 @@ type Config struct {
 	Providers   map[string]Provider `json:"providers"`
 	Credentials CredentialsConfig   `json:"credentials,omitempty"`
 	Plugins     PluginsConfig       `json:"plugins,omitempty"`
+	Suggestions SuggestionsConfig   `json:"suggestions,omitempty"`
 	Limits      Limits              `json:"limits,omitempty"`
 	// Cache selects the cross-request plugin state backend: in-process
 	// memory (default) or Redis for distributed / restart-safe deployments.
@@ -457,6 +458,12 @@ type Config struct {
 	// inference requests. It is disabled by default and never applies to
 	// transparent auxiliary traffic.
 	Audit *auditlog.Config `json:"audit,omitempty"`
+}
+
+// Suggestions are opt-in because a plugin may otherwise surface advice to a
+// caller without the operator deliberately enabling that channel.
+type SuggestionsConfig struct {
+	Enabled bool `json:"enabled,omitempty"`
 }
 
 // MITMConfig configures the TLS-terminating ingress. When enabled, agy (or any

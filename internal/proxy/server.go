@@ -55,6 +55,7 @@ import (
 	"github.com/torana-edge/torana-edge/internal/pluginstate"
 	"github.com/torana-edge/torana-edge/internal/provider"
 	"github.com/torana-edge/torana-edge/internal/secret"
+	"github.com/torana-edge/torana-edge/internal/suggest"
 	"github.com/torana-edge/torana-edge/internal/wasm"
 	pb "github.com/torana-edge/torana-plugin-sdk/pb/v1"
 	pbjsontext "github.com/torana-edge/torana-plugin-sdk/pb/v1/jsontext"
@@ -227,6 +228,7 @@ type Server struct {
 	// pluginState is durable per-plugin storage (env.state_*), kept beside the
 	// managed config. Nil when there is no config path to anchor it to.
 	pluginState *pluginstate.Store
+	suggestions *suggest.Store
 	// egress meters plugin-originated provider requests against per-plugin
 	// budgets, so a plugin cannot spend without a ceiling an operator set.
 	egress *egressMeter
@@ -356,6 +358,9 @@ type reqState struct {
 	// belongs to, derived from the canonical IR before any plugin runs.
 	// Empty when the request could not be identified.
 	ConversationID string
+	// UserTurn is the durable suggestion-lifecycle counter. A tool-result
+	// continuation retains the preceding user's ordinal.
+	UserTurn uint64
 	// CachePrefixKey fingerprints the provider-side cache entry this request
 	// will hit, computed after routing and plugin mutation so it describes what
 	// actually goes on the wire. Unlike ConversationID it moves whenever the
@@ -855,6 +860,7 @@ func New(cfg Config) (*Server, error) {
 		rateLimiter:     NewRateLimiter(cfg.Providers.Limits.RPM, cfg.Providers.Limits.Concurrency),
 		conversations:   conversation.New(conversation.Options{}),
 		pluginState:     stateStore,
+		suggestions:     suggest.New(stateStore),
 		egress:          newEgressMeter(),
 	}
 	cleanupConstruction := func() {
@@ -1171,6 +1177,14 @@ func New(cfg Config) (*Server, error) {
 			// before plugins run: a guard or compactor must not rename the durable
 			// namespace by rewriting the request it is protecting.
 			rs.ConversationID = conversation.ResolveIdentity(req.Header, chat).ID
+			if currentCfg.Providers.Suggestions.Enabled && rs.ConversationID != "" {
+				turn, turnErr := s.suggestions.ObserveUserTurn(rs.ConversationID, userTurnSignature(chat))
+				if turnErr != nil {
+					log.Printf("[suggest] could not record user turn: %v", turnErr)
+				} else {
+					rs.UserTurn = turn
+				}
+			}
 
 			// Publish the routing decision so plugins can ask the host about
 			// this provider — pricing and cache semantics are keyed by provider
@@ -3775,6 +3789,23 @@ func (s *Server) newRuntime() *wasm.Runtime {
 			return nil, &pb.HostError{Code: pb.ErrorCode_ERROR_CODE_NOT_FOUND, Message: "model is not declared"}
 		}
 		return capabilities, nil
+	}
+	rt.SuggestFunc = func(ctx context.Context, pluginName string, args *pb.SuggestArgs) (string, *pb.HostError) {
+		if !s.GetConfig().Providers.Suggestions.Enabled {
+			return "", &pb.HostError{Code: pb.ErrorCode_ERROR_CODE_NOT_CONFIGURED, Message: "suggestions are disabled"}
+		}
+		rs := reqStateFrom(ctx)
+		if rs == nil || rs.ConversationID == "" {
+			return "", &pb.HostError{Code: pb.ErrorCode_ERROR_CODE_UNAVAILABLE, Message: "conversation identity is unavailable"}
+		}
+		if rs.UserTurn == 0 {
+			return "", &pb.HostError{Code: pb.ErrorCode_ERROR_CODE_UNAVAILABLE, Message: "user turn is unavailable"}
+		}
+		id, err := s.suggestions.Create(rs.ConversationID, pluginName, rs.UserTurn, args)
+		if err != nil {
+			return "", &pb.HostError{Code: pb.ErrorCode_ERROR_CODE_UNAVAILABLE, Message: "suggestion could not be saved"}
+		}
+		return id, nil
 	}
 	rt.ValidateSyntheticResponseFunc = func(ctx context.Context, response *pb.SyntheticResponse) *pb.HostError {
 		scope, ok := ctx.Value(syntheticResponseScopeKey{}).(syntheticResponseScope)

@@ -63,6 +63,29 @@ func TestAdaptiveHostCallsRefuseUntilConfigured(t *testing.T) {
 	adaptiveError(t, hostCallDirect(t, r, p, "env.model_capabilities", nil), pbv1.ErrorCode_ERROR_CODE_INVALID_ARGUMENT)
 }
 
+func TestSuggestHostCallReturnsOnlyHostOwnedID(t *testing.T) {
+	r, p := newGrantedPlugin(t, "env.suggest")
+	r.SuggestFunc = func(_ context.Context, plugin string, args *pbv1.SuggestArgs) (string, *pbv1.HostError) {
+		if plugin != p.name || args.Title != "Try another model?" {
+			t.Fatalf("unexpected suggestion call: plugin %q, args %+v", plugin, args)
+		}
+		return "sg_test", nil
+	}
+	args, err := proto.Marshal(&pbv1.SuggestArgs{Kind: "model_switch", DedupeKey: "up", Title: "Try another model?", Body: "This might help."})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := hostCallDirect(t, r, p, "env.suggest", args)
+	value, ok := result.Result.(*pbv1.HostCallResult_Value)
+	if !ok {
+		t.Fatalf("suggest result: %v", result.Result)
+	}
+	var got pbv1.SuggestResult
+	if err := proto.Unmarshal(value.Value, &got); err != nil || got.SuggestionId != "sg_test" {
+		t.Fatalf("suggest response: %+v, %v", got, err)
+	}
+}
+
 func TestEffortRouteRequiresSeparateGrantAndHostSupport(t *testing.T) {
 	r, p := newGrantedPlugin(t, "env.route_request")
 	args, err := proto.Marshal(&pbv1.RouteRequestArgs{Model: "m", Effort: pbv1.Effort_EFFORT_HIGH})
