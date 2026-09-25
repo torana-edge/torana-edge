@@ -3,6 +3,9 @@ package proxy
 import (
 	"bytes"
 	"testing"
+
+	"github.com/torana-edge/torana-edge/internal/bridge"
+	"github.com/torana-edge/torana-edge/internal/format"
 )
 
 func TestStripDirectiveTextPreservesUntouchedJSONForFiveShapes(t *testing.T) {
@@ -43,6 +46,23 @@ func TestStripDirectiveTextPreservesUntouchedJSONForFiveShapes(t *testing.T) {
 			}
 		})
 	}
+	for _, tc := range []struct {
+		shape, path, body string
+		protocol          bridge.Protocol
+	}{
+		{"openai-responses", "/v1/responses", `{"model":"m","input":"torana> status"}`, bridge.OpenAIResponses},
+		{"gemini-codeassist", "/v1/models/m:generateContent", `{"request":{"contents":[{"role":"user","parts":[{"text":"torana> status"}]}]},"model":"m"}`, bridge.GeminiCodeAssist},
+	} {
+		t.Run(tc.shape, func(t *testing.T) {
+			body, commands, _, err := stripDirectiveText([]byte(tc.body), tc.shape, nil)
+			if err != nil || len(commands) != 1 {
+				t.Fatalf("strip commands=%+v err=%v", commands, err)
+			}
+			if _, err := bridge.ParseRequest(tc.protocol, body, tc.path); err != nil {
+				t.Fatalf("current local turn became unparseable: %v", err)
+			}
+		})
+	}
 }
 
 func TestStripDirectiveTextDoesNotTouchToolResultsOrPlainRequests(t *testing.T) {
@@ -60,5 +80,45 @@ func TestStripDirectiveTextDoesNotTouchToolResultsOrPlainRequests(t *testing.T) 
 	_, commands, changed, err = stripDirectiveText(replayed, "openai", nil)
 	if err != nil || !changed || len(commands) != 0 {
 		t.Fatalf("replayed command executed on tool continuation: %+v, %v, %v", commands, changed, err)
+	}
+}
+
+func TestStripDirectiveOnlyHistoricalUserItem(t *testing.T) {
+	cases := []struct {
+		shape, body, want string
+	}{
+		{"openai-chat", `{"messages":[{"role":"user","content":"torana> status"},{"role":"assistant","content":"local"},{"role":"user","content":"next"}]}`, `{"messages":[{"role":"assistant","content":"local"},{"role":"user","content":"next"}]}`},
+		{"openai-chat", `{"messages":[{"role":"user","content":"torana> status"},{"role":"assistant","content":"local"},{"role":"user","content":"next"}],"opaque":1e999}`, `{"messages":[{"role":"assistant","content":"local"},{"role":"user","content":"next"}],"opaque":1e999}`},
+		{"anthropic", `{"messages":[{"role":"user","content":[{"type":"text","text":"torana> status"}]},{"role":"assistant","content":"local"},{"role":"user","content":"next"}]}`, `{"messages":[{"role":"assistant","content":"local"},{"role":"user","content":"next"}]}`},
+		{"openai-responses", `{"input":[{"role":"user","content":[{"type":"input_text","text":"torana> status"}]},{"role":"assistant","content":"local"},{"role":"user","content":"next"}]}`, `{"input":[{"role":"assistant","content":"local"},{"role":"user","content":"next"}]}`},
+		{"gemini", `{"contents":[{"role":"user","parts":[{"text":"torana> status"}]},{"role":"model","parts":[{"text":"local"}]},{"role":"user","parts":[{"text":"next"}]}]}`, `{"contents":[{"role":"model","parts":[{"text":"local"}]},{"role":"user","parts":[{"text":"next"}]}]}`},
+		{"gemini-codeassist", `{"request":{"contents":[{"role":"user","parts":[{"text":"torana> status"}]},{"role":"model","parts":[{"text":"local"}]},{"role":"user","parts":[{"text":"next"}]}]}}`, `{"request":{"contents":[{"role":"model","parts":[{"text":"local"}]},{"role":"user","parts":[{"text":"next"}]}]}}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.shape, func(t *testing.T) {
+			got, commands, changed, err := stripDirectiveText([]byte(tc.body), tc.shape, nil)
+			if err != nil || !changed || len(commands) != 0 || string(got) != tc.want {
+				t.Fatalf("strip=%s, commands=%+v, changed=%v, err=%v; want=%s", got, commands, changed, err, tc.want)
+			}
+		})
+	}
+}
+
+func TestDirectiveOnlyCurrentTurnRemainsParseable(t *testing.T) {
+	cases := []struct{ shape, body string }{
+		{"openai", `{"model":"m","messages":[{"role":"user","content":"torana> status"}]}`},
+		{"anthropic", `{"model":"m","max_tokens":64,"messages":[{"role":"user","content":"torana> status"}]}`},
+		{"gemini", `{"contents":[{"role":"user","parts":[{"text":"torana> status"}]}]}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.shape, func(t *testing.T) {
+			body, commands, _, err := stripDirectiveText([]byte(tc.body), tc.shape, nil)
+			if err != nil || len(commands) != 1 {
+				t.Fatalf("strip commands=%+v err=%v", commands, err)
+			}
+			if _, err := format.Lookup(tc.shape).Request.Unmarshal(body); err != nil {
+				t.Fatalf("current local turn became unparseable: %v", err)
+			}
+		})
 	}
 }
