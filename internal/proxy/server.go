@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"net"
 	"net/http"
 	"net/http/httputil"
@@ -336,6 +337,9 @@ type reqState struct {
 	// didn't report.
 	UsageIn  int
 	UsageOut int
+	// UsageFormat is the actual upstream response format, not the inbound
+	// harness format. Anthropic reports cache tokens outside input_tokens.
+	UsageFormat string
 	// UsageReported distinguishes a provider-reported all-zero usage object
 	// from a response that did not report usage at all.
 	UsageReported bool
@@ -466,11 +470,15 @@ func (rs *reqState) responseMeta() map[string]any {
 	if !rs.Start.IsZero() {
 		durationMs = float64(time.Since(rs.Start).Microseconds()) / 1000
 	}
+	inputTotal, validInput := rs.canonicalInputTokens()
+	if !validInput {
+		inputTotal = 0
+	}
 	return map[string]any{
 		"duration_ms":     durationMs,
 		"upstream_status": rs.UpstreamStatus,
 		"usage": map[string]any{
-			"input_tokens":       rs.UsageIn,
+			"input_tokens":       inputTotal,
 			"output_tokens":      rs.UsageOut,
 			"cache_read_tokens":  rs.UsageCacheRead,
 			"cache_write_tokens": rs.UsageCacheWrite,
@@ -522,15 +530,34 @@ func (rs *reqState) chatResponse(model, id string, msg *engine.ResponseMessage, 
 			},
 		})
 	}
-	if rs.UsageReported {
+	if inputTotal, ok := rs.canonicalInputTokens(); rs.UsageReported && ok {
 		response.Usage = &engine.StreamUsage{
-			InputTokens:      rs.UsageIn,
+			InputTokens:      inputTotal,
 			OutputTokens:     rs.UsageOut,
 			CacheReadTokens:  rs.UsageCacheRead,
 			CacheWriteTokens: rs.UsageCacheWrite,
 		}
 	}
 	return response
+}
+
+// Plugin-visible input_tokens always means the full prompt size. Provider
+// accounting in reqState stays in the native shape so billing and client wire
+// serialization retain their existing semantics.
+func (rs *reqState) canonicalInputTokens() (int, bool) {
+	for _, count := range []int{rs.UsageIn, rs.UsageOut, rs.UsageCacheRead, rs.UsageCacheWrite} {
+		if count < 0 || int64(count) > math.MaxInt32 {
+			return 0, false
+		}
+	}
+	total := int64(rs.UsageIn)
+	if rs.UsageFormat == "anthropic" {
+		total += int64(rs.UsageCacheRead) + int64(rs.UsageCacheWrite)
+	}
+	if total > math.MaxInt32 {
+		return 0, false
+	}
+	return int(total), true
 }
 
 // mergeUsage folds a usage frame into the request state without zeroing
@@ -1577,6 +1604,7 @@ func New(cfg Config) (*Server, error) {
 				if streamFormat == nil {
 					return nil
 				}
+				rs.UsageFormat = streamFormat.Name
 
 				// resp.Body is replaced with the serializer pipe below, so
 				// nothing downstream ever closes the ORIGINAL upstream body
@@ -1961,6 +1989,7 @@ func New(cfg Config) (*Server, error) {
 					bodyBytes = modified
 				} else if f != nil {
 					// No pipeline — still meter provider-reported usage.
+					rs.UsageFormat = f.Name
 					var body map[string]any
 					if json.Unmarshal(bodyBytes, &body) == nil {
 						if u := extractResponse(f.Name, body).usage; u != nil {
