@@ -1,4 +1,4 @@
-package main
+package sdkpin_test
 
 import (
 	"os"

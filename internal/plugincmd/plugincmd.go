@@ -12,10 +12,8 @@ import (
 	"runtime/debug"
 	"strings"
 
+	sdkpin "github.com/torana-edge/torana-edge"
 	"github.com/torana-edge/torana-edge/internal/controlcmd"
-	// Keep the SDK in this command's build graph: its selected module version
-	// is the scaffold's source of truth, including in plugincmd package tests.
-	_ "github.com/torana-edge/torana-plugin-sdk/pb/v1"
 )
 
 // Run executes a `torana plugin ...` command.
@@ -87,15 +85,33 @@ const (
 )
 
 var releasedSDKVersion = regexp.MustCompile(`^v[0-9]+\.[0-9]+\.[0-9]+$`)
+var errSDKMissingFromBuild = errors.New("SDK dependency missing from Go build information")
 
 // The version already selected for this binary is the default for new Go and
 // Rust plugins. This is a scaffold default, not a plugin-load equality rule.
 func scaffoldSDKVersion() (string, error) {
 	info, ok := debug.ReadBuildInfo()
-	if !ok {
-		return "", errors.New("cannot identify the SDK in this Torana build")
+	return scaffoldSDKVersionFromBuildInfo(info, ok)
+}
+
+func scaffoldSDKVersionFromBuildInfo(info *debug.BuildInfo, ok bool) (string, error) {
+	if ok {
+		version, err := sdkVersionFromBuildInfo(info)
+		if err == nil || !errors.Is(err, errSDKMissingFromBuild) {
+			return version, err
+		}
 	}
-	return sdkVersionFromBuildInfo(info)
+	// Go can omit a dependency from an isolated package-test binary even when
+	// the full Torana executable links it. The go.mod embedded at build time is
+	// still a single source of truth; never fall back to another literal pin.
+	version, err := sdkpin.SDKVersion()
+	if err != nil {
+		return "", fmt.Errorf("read Torana's embedded SDK pin: %w", err)
+	}
+	if !releasedSDKVersion.MatchString(version) {
+		return "", fmt.Errorf("Torana declares SDK %q, not a published release", version)
+	}
+	return version, nil
 }
 
 func sdkVersionFromBuildInfo(info *debug.BuildInfo) (string, error) {
@@ -113,7 +129,7 @@ func sdkVersionFromBuildInfo(info *debug.BuildInfo) (string, error) {
 			return "", fmt.Errorf("this Torana build uses SDK %q, not a published release; build Torana with a tagged SDK before creating a plugin", dep.Version)
 		}
 	}
-	return "", errors.New("this Torana build does not include the SDK version; build Torana with a tagged SDK before creating a plugin")
+	return "", errSDKMissingFromBuild
 }
 
 func scaffoldRustSDKDependency(version string) string {

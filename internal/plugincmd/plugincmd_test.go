@@ -242,6 +242,25 @@ func TestSDKVersionFromBuildInfoRejectsUnpublishedOrMissingSDK(t *testing.T) {
 	}
 }
 
+func TestScaffoldSDKVersionFallsBackToEmbeddedModulePin(t *testing.T) {
+	want := requireVersionFromGoMod(t, "../../go.mod", sdkModulePath)
+	for _, tc := range []struct {
+		name string
+		info *debug.BuildInfo
+		ok   bool
+	}{
+		{"no build information", nil, false},
+		{"isolated package test", &debug.BuildInfo{}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := scaffoldSDKVersionFromBuildInfo(tc.info, tc.ok)
+			if err != nil || got != want {
+				t.Fatalf("scaffold SDK=%q err=%v, want %q", got, err, want)
+			}
+		})
+	}
+}
+
 // TestScaffoldGoVersionSatisfiesTheSDK anchors the other constant. A scaffolded
 // module declaring an older Go version than the SDK requires does not build,
 // and nothing previously asserted it at all.
