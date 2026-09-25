@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"runtime/debug"
 	"strings"
 	"testing"
 )
@@ -27,10 +28,11 @@ func TestInitCreatesStandaloneSDKPlugin(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Asserted against the constant the scaffold uses, not a copy of the
-	// string. The copy meant this test locked in whatever the scaffold said:
-	// it named v0.1.0 long after v0.1.3 shipped, and stayed green.
-	wantSDK := "github.com/torana-edge/torana-plugin-sdk " + ScaffoldSDKVersion
+	version, err := scaffoldSDKVersion()
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantSDK := "github.com/torana-edge/torana-plugin-sdk " + version
 	if !strings.Contains(string(goMod), wantSDK) {
 		t.Fatalf("standalone SDK dependency missing %q:\n%s", wantSDK, goMod)
 	}
@@ -142,7 +144,11 @@ func TestRustScaffoldUsesTypedHookInNativeUnitTest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(cargo), scaffoldRustSDKDependency()) {
+	version, err := scaffoldSDKVersion()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(cargo), scaffoldRustSDKDependency(version)) {
 		t.Fatalf("generated Cargo dependency is not the exact SDK release:\n%s", cargo)
 	}
 }
@@ -167,7 +173,11 @@ func TestRustScaffoldFirstRunAgainstStagedSDK(t *testing.T) {
 		t.Fatal(err)
 	}
 	localDependency := fmt.Sprintf("torana-plugin-sdk = { path = %q }", staged)
-	replaced := strings.Replace(string(cargo), scaffoldRustSDKDependency(), localDependency, 1)
+	version, err := scaffoldSDKVersion()
+	if err != nil {
+		t.Fatal(err)
+	}
+	replaced := strings.Replace(string(cargo), scaffoldRustSDKDependency(version), localDependency, 1)
 	if replaced == string(cargo) {
 		t.Fatalf("generated Cargo manifest lacks dependency to override:\n%s", cargo)
 	}
@@ -197,22 +207,38 @@ func TestRunRejectsUnknownPluginCommand(t *testing.T) {
 	}
 }
 
-// TestScaffoldSDKVersionMatchesTheHost anchors the scaffold to something other
-// than itself.
-//
-// Asserting the scaffold against its own constant is circular: change the
-// constant and the test follows. What makes the version WRONG is disagreeing
-// with reality — so this compares it to the SDK version torana-edge is built
-// against, read from go.mod. A plugin scaffolded against a different SDK than
-// the host implements is the exact drift that produced "v0.1.0" surviving three
-// SDK releases.
+// TestScaffoldSDKVersionMatchesTheHost checks the binary's selected SDK
+// against the module declaration. The scaffold reads the former directly.
 func TestScaffoldSDKVersionMatchesTheHost(t *testing.T) {
 	hostVersion := requireVersionFromGoMod(t, "../../go.mod", sdkModulePath)
-	if ScaffoldSDKVersion != hostVersion {
-		t.Errorf("torana plugin new scaffolds SDK %s, but torana-edge is built against %s.\n"+
-			"A plugin scaffolded against a different SDK than the host implements can fail in "+
-			"ways the author cannot debug. Update ScaffoldSDKVersion when bumping the SDK.",
-			ScaffoldSDKVersion, hostVersion)
+	version, err := scaffoldSDKVersion()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if version != hostVersion {
+		t.Errorf("Torana declares SDK %s but the build selected %s", hostVersion, version)
+	}
+}
+
+func TestSDKVersionFromBuildInfoRejectsUnpublishedOrMissingSDK(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		info    *debug.BuildInfo
+		want    string
+		wantErr bool
+	}{
+		{"published", &debug.BuildInfo{Deps: []*debug.Module{{Path: sdkModulePath, Version: "v0.7.0"}}}, "v0.7.0", false},
+		{"local replacement", &debug.BuildInfo{Deps: []*debug.Module{{Path: sdkModulePath, Version: "v0.7.0", Replace: &debug.Module{Path: "../torana-plugin-sdk"}}}}, "", true},
+		{"pseudo version", &debug.BuildInfo{Deps: []*debug.Module{{Path: sdkModulePath, Version: "v0.8.0-20260925000000-abcdef012345"}}}, "", true},
+		{"missing", &debug.BuildInfo{}, "", true},
+		{"no build info", nil, "", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := sdkVersionFromBuildInfo(tc.info)
+			if got != tc.want || (err != nil) != tc.wantErr {
+				t.Fatalf("version=%q err=%v, want %q error=%v", got, err, tc.want, tc.wantErr)
+			}
+		})
 	}
 }
 

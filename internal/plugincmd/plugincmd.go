@@ -8,9 +8,14 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
+	"runtime/debug"
 	"strings"
 
 	"github.com/torana-edge/torana-edge/internal/controlcmd"
+	// Keep the SDK in this command's build graph: its selected module version
+	// is the scaffold's source of truth, including in plugincmd package tests.
+	_ "github.com/torana-edge/torana-plugin-sdk/pb/v1"
 )
 
 // Run executes a `torana plugin ...` command.
@@ -73,10 +78,7 @@ func Usage(w io.Writer) {
 	controlcmd.Usage(w)
 }
 
-// ScaffoldSDKVersion is the exact released SDK version used by the host and
-// generated Go and Rust projects.
 const (
-	ScaffoldSDKVersion = "v0.7.0"
 	// scaffoldGoVersion tracks the SDK's own go directive. A scaffolded module
 	// declaring an OLDER Go version than its dependency requires fails to build
 	// with "module requires go >= x", which is the same class of unbuildable
@@ -84,8 +86,38 @@ const (
 	scaffoldGoVersion = "1.25.0"
 )
 
-func scaffoldRustSDKDependency() string {
-	return fmt.Sprintf(`torana-plugin-sdk = "=%s"`, strings.TrimPrefix(ScaffoldSDKVersion, "v"))
+var releasedSDKVersion = regexp.MustCompile(`^v[0-9]+\.[0-9]+\.[0-9]+$`)
+
+// The version already selected for this binary is the default for new Go and
+// Rust plugins. This is a scaffold default, not a plugin-load equality rule.
+func scaffoldSDKVersion() (string, error) {
+	info, ok := debug.ReadBuildInfo()
+	if !ok {
+		return "", errors.New("cannot identify the SDK in this Torana build")
+	}
+	return sdkVersionFromBuildInfo(info)
+}
+
+func sdkVersionFromBuildInfo(info *debug.BuildInfo) (string, error) {
+	if info != nil {
+		for _, dep := range info.Deps {
+			if dep == nil || dep.Path != "github.com/torana-edge/torana-plugin-sdk" {
+				continue
+			}
+			if dep.Replace != nil {
+				return "", errors.New("this Torana build uses a locally replaced SDK; rebuild with GOWORK=off against a published SDK release before creating a portable plugin")
+			}
+			if releasedSDKVersion.MatchString(dep.Version) {
+				return dep.Version, nil
+			}
+			return "", fmt.Errorf("this Torana build uses SDK %q, not a published release; build Torana with a tagged SDK before creating a plugin", dep.Version)
+		}
+	}
+	return "", errors.New("this Torana build does not include the SDK version; build Torana with a tagged SDK before creating a plugin")
+}
+
+func scaffoldRustSDKDependency(version string) string {
+	return fmt.Sprintf(`torana-plugin-sdk = "=%s"`, strings.TrimPrefix(version, "v"))
 }
 
 func initPlugin(args []string, stdout io.Writer) error {
@@ -103,6 +135,10 @@ func initPlugin(args []string, stdout io.Writer) error {
 	}
 	if language != "go" && language != "rust" {
 		return fmt.Errorf("unsupported plugin language %q", language)
+	}
+	sdkVersion, err := scaffoldSDKVersion()
+	if err != nil {
+		return err
 	}
 	pluginName := filepath.Base(pluginDir)
 	absDir, err := filepath.Abs(pluginDir)
@@ -142,7 +178,7 @@ func initPlugin(args []string, stdout io.Writer) error {
 go %s
 
 require github.com/torana-edge/torana-plugin-sdk %s
-`, pluginName, scaffoldGoVersion, ScaffoldSDKVersion),
+`, pluginName, scaffoldGoVersion, sdkVersion),
 		"plugin.wasm.go": `package main
 
 import (
@@ -214,7 +250,7 @@ func TestBeforeRequest(t *testing.T) {
 	}
 	if language == "rust" {
 		files = map[string]string{
-			"Cargo.toml": fmt.Sprintf("[package]\nname = \"%s\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[lib]\ncrate-type = [\"cdylib\"]\n\n[dependencies]\n%s\n", pluginName, scaffoldRustSDKDependency()),
+			"Cargo.toml": fmt.Sprintf("[package]\nname = \"%s\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[lib]\ncrate-type = [\"cdylib\"]\n\n[dependencies]\n%s\n", pluginName, scaffoldRustSDKDependency(sdkVersion)),
 			"src/lib.rs": `use torana_plugin_sdk::{export_plugin_v1, info, pbv1, Plugin, RequestResult, HOOK_BEFORE_REQUEST};
 
 struct PluginImpl;

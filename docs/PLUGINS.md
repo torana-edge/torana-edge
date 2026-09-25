@@ -85,10 +85,12 @@ torana plugin build ./my-rust-plugin
 torana plugin install ./my-rust-plugin
 ```
 
-`torana plugin new my-plugin --language rust` pins the exact
-`torana-plugin-sdk = "=0.5.1"` crate release in the generated `Cargo.toml`.
-The Go scaffold and current host use the matching `v0.5.1` module tag. Keep the
-exact version, and commit the `Cargo.lock` produced by the first Cargo build.
+`torana plugin new my-plugin --language rust` pins a published SDK crate in
+the generated `Cargo.toml`; the Go scaffold uses the same SDK release. Torana
+selects that starting version from the SDK dependency in its own build, so the
+example does not go stale when Torana upgrades. Commit the `Cargo.lock`
+produced by the first Cargo build. Existing plugins do not need to match that
+scaffold version exactly; the host checks their ABI and requested capabilities.
 
 Cargo may execute native `build.rs` programs while compiling—before a WASM
 digest exists to approve. Torana therefore refuses one-step installation of a
@@ -195,6 +197,10 @@ Review their data and spending boundaries before approving them.
 | `env.http_request` | Calls only operator-approved endpoint slots with exact origins, methods, timeouts, byte limits, rate limits, redirect blocking, and private-network protection. |
 | `env.model_complete` | Sends bounded text completions through manifest-declared model-service slots. The operator chooses the provider, URL, model, credential, and budgets; the guest sees only the logical slot name. |
 | `env.model_pricing` | Reads only operator-bound pricing resources by logical name. Pricing is plugin input, not a global Torana setting or a table supplied by the guest. |
+| `env.route_request` | Lets the plugin choose a configured provider or model for the current request. Review its routing policy because that choice can change cost and response behavior. |
+| `env.route_request.effort` | Separately permits the plugin to request an effort change along with a route. That can change cost and prompt-cache behavior; granting it does not override the harness's effort unless a plugin actually requests a change and the host supports it. |
+| `env.suggest` | Lets the plugin propose a conversation-scoped action for you to review. A suggestion is not an automatic route or configuration change. |
+| `env.model_capabilities` | Lets the plugin read only the model capabilities and pricing you explicitly declared in Torana's provider configuration. |
 
 `env.model_complete` excludes cache-read tokens from `input_tokens`: the host
 subtracts that known subset from OpenAI-compatible and Gemini totals, while
