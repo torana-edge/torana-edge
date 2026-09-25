@@ -72,21 +72,14 @@ func stripDirectiveText(body []byte, shape string, knownNamespace func(string) b
 	for _, splice := range splices {
 		updated = spliceBytes(updated, splice.start, splice.end, splice.value)
 	}
-	// A directive-only LOCAL exchange never reached the provider. When a
-	// harness later replays it, remove the old user item as well as the signed
-	// local assistant reply; leaving an empty user turn would corrupt history.
+	// A LOCAL directive exchange never reached the provider. When a harness
+	// later replays it, remove the whole old user item as well as the signed
+	// local assistant reply. This also covers a mixed message whose ordinary
+	// text was explicitly not forwarded.
 	if len(historicalDirectiveUsers) > 0 {
-		var clean any
-		decoder := json.NewDecoder(bytes.NewReader(updated))
-		decoder.UseNumber()
-		if err := decoder.Decode(&clean); err != nil {
-			return nil, nil, false, err
-		}
 		indices := make([]int, 0, len(historicalDirectiveUsers))
 		for index := range historicalDirectiveUsers {
-			if directiveUserItemEmpty(clean, shape, index) {
-				indices = append(indices, index)
-			}
+			indices = append(indices, index)
 		}
 		sort.Sort(sort.Reverse(sort.IntSlice(indices)))
 		for _, index := range indices {
@@ -112,46 +105,6 @@ func directiveItemsPath(shape string, index int) []any {
 		return []any{"request", field, index}
 	}
 	return []any{field, index}
-}
-
-func directiveUserItemEmpty(document any, shape string, index int) bool {
-	root := object(document)
-	if shape == "gemini-codeassist" {
-		root = object(root["request"])
-	}
-	field := "messages"
-	contentField := "content"
-	if shape == "openai-responses" {
-		field = "input"
-	} else if strings.HasPrefix(shape, "gemini") {
-		field, contentField = "contents", "parts"
-	}
-	items := array(root[field])
-	if index < 0 || index >= len(items) {
-		return false
-	}
-	item := object(items[index])
-	if item["role"] != "user" {
-		return false
-	}
-	if value, ok := item[contentField].(string); ok {
-		return strings.TrimSpace(value) == ""
-	}
-	parts := array(item[contentField])
-	if len(parts) == 0 {
-		return false
-	}
-	for _, raw := range parts {
-		part := object(raw)
-		if len(part) == 0 || part["functionResponse"] != nil || part["type"] == "tool_result" {
-			return false
-		}
-		value, ok := part["text"].(string)
-		if !ok || strings.TrimSpace(value) != "" {
-			return false
-		}
-	}
-	return true
 }
 
 // A command is new only when the final input item is a genuine human turn.
