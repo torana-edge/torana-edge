@@ -1269,7 +1269,7 @@ func New(cfg Config) (*Server, error) {
 			}
 			if len(latestDirectives) > 0 {
 				message := "Torana commands are disabled in this configuration."
-				if currentCfg.Providers.Suggestions.Enabled {
+				if currentCfg.Providers.Directives.Enabled {
 					if latestUserHasOtherContent(chat) {
 						message = "Torana saw a command alongside other text. Nothing was sent or changed. Send the command alone, then resend your other text."
 					} else {

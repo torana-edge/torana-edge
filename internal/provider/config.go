@@ -446,6 +446,7 @@ type Config struct {
 	Credentials CredentialsConfig   `json:"credentials,omitempty"`
 	Plugins     PluginsConfig       `json:"plugins,omitempty"`
 	Suggestions SuggestionsConfig   `json:"suggestions,omitempty"`
+	Directives  DirectivesConfig    `json:"directives,omitempty"`
 	Limits      Limits              `json:"limits,omitempty"`
 	// Cache selects the cross-request plugin state backend: in-process
 	// memory (default) or Redis for distributed / restart-safe deployments.
@@ -468,6 +469,12 @@ type SuggestionsConfig struct {
 	// have been verified to replay assistant text without changing signed markers.
 	// Unknown harnesses receive suggestions through Torana's UI and CLI only.
 	NoticeSources map[string]bool `json:"notice_sources,omitempty"`
+}
+
+// Directives are an opt-in, host-local command channel in user messages.
+// Command lines are stripped from provider history even when this is off.
+type DirectivesConfig struct {
+	Enabled bool `json:"enabled,omitempty"`
 }
 
 // MITMConfig configures the TLS-terminating ingress. When enabled, agy (or any
