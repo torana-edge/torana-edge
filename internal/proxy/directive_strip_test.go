@@ -53,7 +53,12 @@ func TestStripDirectiveTextDoesNotTouchToolResultsOrPlainRequests(t *testing.T) 
 	}
 	mixed := []byte(`{"messages":[{"role":"user","content":"torana> status"},{"role":"user","content":[{"type":"tool_result","tool_use_id":"x","content":"result"},{"type":"text","text":"torana> help"}]}]}`)
 	got, commands, changed, err = stripDirectiveText(mixed, "anthropic", nil)
-	if err != nil || !changed || len(commands) != 1 || commands[0].Verb != "status" || bytes.Contains(got, []byte(`torana> help`)) {
+	if err != nil || !changed || len(commands) != 0 || bytes.Contains(got, []byte(`torana> help`)) {
 		t.Fatalf("mixed tool continuation: %s, %+v, %v, %v", got, commands, changed, err)
+	}
+	replayed := []byte(`{"messages":[{"role":"user","content":"torana> accept 7f3k"},{"role":"assistant","content":"calling"},{"role":"tool","content":"done"}]}`)
+	_, commands, changed, err = stripDirectiveText(replayed, "openai", nil)
+	if err != nil || !changed || len(commands) != 0 {
+		t.Fatalf("replayed command executed on tool continuation: %+v, %v, %v", commands, changed, err)
 	}
 }
