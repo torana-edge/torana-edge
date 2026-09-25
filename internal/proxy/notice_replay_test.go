@@ -51,3 +51,43 @@ func TestStripSignedNoticesJSON(t *testing.T) {
 		})
 	}
 }
+
+func TestStripNoticeOnlyAppendedElements(t *testing.T) {
+	signer, err := secret.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	notice, err := annotate.Render(signer, "conversation", suggest.Suggestion{ID: "sg_abc", Code: "7f3k", Title: "Try Opus"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tests := []struct {
+		shape, original string
+		makeBody        func(string) string
+	}{
+		{"anthropic", `{"messages":[{"role":"assistant","content":[{"type":"text","text":"answer"}]}]}`, func(n string) string {
+			return `{"messages":[{"role":"assistant","content":[{"type":"text","text":"answer"},{"type":"text","text":` + n + `}]}]}`
+		}},
+		{"openai-responses", `{"input":[{"role":"assistant","content":[{"type":"output_text","text":"answer"}]}]}`, func(n string) string {
+			return `{"input":[{"role":"assistant","content":[{"type":"output_text","text":"answer"}]},{"role":"assistant","content":[{"type":"output_text","text":` + n + `}]}]}`
+		}},
+		{"gemini", `{"contents":[{"role":"model","parts":[{"text":"answer"}]}]}`, func(n string) string {
+			return `{"contents":[{"role":"model","parts":[{"text":"answer"},{"text":` + n + `}]}]}`
+		}},
+		{"gemini-codeassist", `{"request":{"contents":[{"role":"model","parts":[{"text":"answer"}]}]}}`, func(n string) string {
+			return `{"request":{"contents":[{"role":"model","parts":[{"text":"answer"},{"text":` + n + `}]}]}}`
+		}},
+	}
+	noticeJSON, _ := json.Marshal(notice)
+	for _, tc := range tests {
+		t.Run(tc.shape, func(t *testing.T) {
+			got, changed, err := stripSignedNoticesJSON([]byte(tc.makeBody(string(noticeJSON))), tc.shape, signer, "conversation")
+			if err != nil || !changed {
+				t.Fatalf("changed=%v err=%v", changed, err)
+			}
+			if string(got) != tc.original {
+				t.Fatalf("cache prefix drift:\ngot  %s\nwant %s", got, tc.original)
+			}
+		})
+	}
+}
