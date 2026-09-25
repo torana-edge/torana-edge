@@ -105,3 +105,19 @@ func TestEffortRouteRequiresSeparateGrantAndHostSupport(t *testing.T) {
 		t.Fatalf("unspecified effort changed existing route behavior: %v", result.Result)
 	}
 }
+
+func TestEffortRouteRecordsVerdictWhenOperatorEnablesIt(t *testing.T) {
+	r, p := newGrantedPlugin(t, "env.route_request", "env.route_request.effort")
+	r.RouteEffortEnabledFunc = func(context.Context) bool { return true }
+	args, err := proto.Marshal(&pbv1.RouteRequestArgs{Model: "m", Effort: pbv1.Effort_EFFORT_HIGH})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := hostCallDirect(t, r, p, "env.route_request", args)
+	if _, refused := result.Result.(*pbv1.HostCallResult_Error); refused {
+		t.Fatalf("effort route refused: %v", result.Result)
+	}
+	if got := r.VerdictsFor(0).Route(); got == nil || got.Effort != pbv1.Effort_EFFORT_HIGH {
+		t.Fatalf("effort route verdict = %+v", got)
+	}
+}

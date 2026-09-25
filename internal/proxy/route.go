@@ -10,6 +10,7 @@ import (
 	"github.com/torana-edge/torana-edge/internal/metrics"
 	"github.com/torana-edge/torana-edge/internal/provider"
 	"github.com/torana-edge/torana-edge/internal/wasm"
+	pb "github.com/torana-edge/torana-plugin-sdk/pb/v1"
 )
 
 // applyRoute validates and applies a plugin routing verdict: rewrite the
@@ -35,8 +36,10 @@ func (s *Server) applyRoute(req *http.Request, chat *engine.ChatRequest, origFor
 	if v.Provider == "" || v.Provider == origName {
 		// Model-only override (or no-op): there is no provider to validate,
 		// so the model stands on its own.
-		if v.Model != "" {
-			chat.Model = v.Model
+		if v.Model != "" || v.Effort != pb.Effort_EFFORT_UNSPECIFIED {
+			if v.Model != "" {
+				chat.Model = v.Model
+			}
 			if rs := reqStateFrom(req.Context()); rs != nil {
 				rs.RouteProvider = rs.Provider
 				rs.RouteModel = chat.Model

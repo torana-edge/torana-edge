@@ -57,7 +57,15 @@ type ModelCapabilitiesConfig struct {
 }
 
 type ModelEffortConfig struct {
-	Levels []string `json:"levels"`
+	Levels []string                        `json:"levels"`
+	Gemini map[string]GeminiThinkingConfig `json:"gemini,omitempty"`
+}
+
+// GeminiThinkingConfig maps a portable level to one model's native setting.
+// Gemini generations differ: some take thinkingLevel, others thinkingBudget.
+type GeminiThinkingConfig struct {
+	ThinkingLevel  string `json:"thinking_level,omitempty"`
+	ThinkingBudget *int   `json:"thinking_budget,omitempty"`
 }
 
 type ProviderAuth struct {
@@ -257,6 +265,20 @@ func (c Config) Validate() error {
 					}
 					seen[level] = true
 				}
+				if configured.Format == "gemini" || configured.Format == "gemini-codeassist" {
+					for _, level := range capability.Effort.Levels {
+						mapping, ok := capability.Effort.Gemini[level]
+						if !ok || (mapping.ThinkingLevel == "") == (mapping.ThinkingBudget == nil) {
+							return fmt.Errorf("provider %q model %q needs exactly one Gemini mapping for effort %q", name, model, level)
+						}
+						if mapping.ThinkingLevel != "" && !slices.Contains([]string{"MINIMAL", "LOW", "MEDIUM", "HIGH"}, mapping.ThinkingLevel) {
+							return fmt.Errorf("provider %q model %q has invalid Gemini thinking level %q", name, model, mapping.ThinkingLevel)
+						}
+						if mapping.ThinkingBudget != nil && *mapping.ThinkingBudget < -1 {
+							return fmt.Errorf("provider %q model %q has invalid Gemini thinking budget", name, model)
+						}
+					}
+				}
 			}
 		}
 	}
@@ -447,6 +469,7 @@ type Config struct {
 	Plugins     PluginsConfig       `json:"plugins,omitempty"`
 	Suggestions SuggestionsConfig   `json:"suggestions,omitempty"`
 	Directives  DirectivesConfig    `json:"directives,omitempty"`
+	Effort      EffortConfig        `json:"effort,omitempty"`
 	Limits      Limits              `json:"limits,omitempty"`
 	// Cache selects the cross-request plugin state backend: in-process
 	// memory (default) or Redis for distributed / restart-safe deployments.
@@ -479,6 +502,10 @@ type NoticeConfig struct {
 // Directives are an opt-in, host-local command channel in user messages.
 // Command lines are stripped from provider history even when this is off.
 type DirectivesConfig struct {
+	Enabled bool `json:"enabled,omitempty"`
+}
+
+type EffortConfig struct {
 	Enabled bool `json:"enabled,omitempty"`
 }
 
