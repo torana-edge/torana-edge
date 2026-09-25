@@ -1164,6 +1164,11 @@ func New(cfg Config) (*Server, error) {
 				shape := noticeShape(clientFormat, chat)
 				clean, changed, stripErr := stripSignedNoticesJSON(body, shape, s.secrets, convIdentity.ID)
 				if stripErr != nil {
+					if s.suggestions != nil {
+						if err := s.suggestions.DisableNotices(convIdentity.ID); err != nil {
+							log.Printf("[suggest] could not persist unsafe notice conversation: %v", err)
+						}
+					}
 					rejectMalformed()
 					rs.AuditErrorCode = "notice_strip_failed"
 					return
@@ -1243,7 +1248,14 @@ func New(cfg Config) (*Server, error) {
 			// namespace by rewriting the request it is protecting.
 			rs.ConversationID = convIdentity.ID
 			rs.NoticeEnabled = currentCfg.Providers.Suggestions.Enabled &&
-				currentCfg.Providers.Suggestions.NoticeSources[convIdentity.Source] && s.secrets != nil
+				currentCfg.Providers.Suggestions.NoticeSources[convIdentity.Source] && s.secrets != nil && s.suggestions != nil
+			if rs.NoticeEnabled {
+				disabled, err := s.suggestions.NoticesDisabled(rs.ConversationID)
+				if err != nil {
+					log.Printf("[suggest] could not read notice safety state: %v", err)
+				}
+				rs.NoticeEnabled = err == nil && !disabled
+			}
 			if currentCfg.Providers.Suggestions.Enabled && rs.ConversationID != "" {
 				turn, turnErr := s.suggestions.ObserveUserTurn(rs.ConversationID, userTurnSignature(chat))
 				if turnErr != nil {
