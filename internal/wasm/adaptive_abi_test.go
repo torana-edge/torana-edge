@@ -40,7 +40,7 @@ func TestModelCapabilitiesHostCallReturnsTypedDeclaration(t *testing.T) {
 	}
 	var capabilities pbv1.ModelCapabilities
 	if err := proto.Unmarshal(value.Value, &capabilities); err != nil || capabilities.Format != "anthropic" || len(capabilities.EffortLevels) != 1 {
-		t.Fatalf("capability body: %+v, %v", capabilities, err)
+		t.Fatalf("capability body: %+v, %v", &capabilities, err)
 	}
 }
 

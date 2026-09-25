@@ -16,8 +16,10 @@ func TestDeclaredModelCapabilitiesRoundTripAndUnknownRefusal(t *testing.T) {
 	upstream.Models = map[string]ModelCapabilitiesConfig{
 		"declared": {Effort: &ModelEffortConfig{Levels: []string{"low", "high"}},
 			ContextWindowTokens: &window, Pricing: &economics.ModelPricing{InputUSDPerMTok: &price}},
-		"unpriced": {},
+		"unpriced":    {},
+		"exact-price": {},
 	}
+	upstream.Pricing = map[string]economics.ModelPricing{"exact-price": {InputUSDPerMTok: &price}}
 	cfg.Providers["anthropic"] = upstream
 	if err := cfg.Validate(); err != nil {
 		t.Fatal(err)
@@ -37,10 +39,34 @@ func TestDeclaredModelCapabilitiesRoundTripAndUnknownRefusal(t *testing.T) {
 	if got, ok := decoded.ModelCapabilities("anthropic", "unpriced"); !ok || got.Pricing != nil || len(got.EffortLevels) != 0 {
 		t.Fatalf("unpriced capability: %+v, found %v", got, ok)
 	}
+	if got, ok := decoded.ModelCapabilities("anthropic", "exact-price"); !ok || got.Pricing == nil || got.Pricing.GetInputUsdPerMtok() != price {
+		t.Fatalf("exact price was not reused: %+v, found %v", got, ok)
+	}
 	for _, key := range [][2]string{{"anthropic", "missing"}, {"missing", "declared"}} {
 		if got, ok := decoded.ModelCapabilities(key[0], key[1]); ok || got != nil {
 			t.Fatalf("undeclared capability leaked: %+v", got)
 		}
+	}
+}
+
+func TestModelCapabilitiesRejectConflictingPriceAndWhitespaceKey(t *testing.T) {
+	first, second := 1.0, 2.0
+	for _, model := range []string{" model", "model "} {
+		cfg := DefaultConfig()
+		upstream := cfg.Providers["anthropic"]
+		upstream.Models = map[string]ModelCapabilitiesConfig{model: {}}
+		cfg.Providers["anthropic"] = upstream
+		if err := cfg.Validate(); err == nil {
+			t.Fatalf("accepted whitespace model key %q", model)
+		}
+	}
+	cfg := DefaultConfig()
+	upstream := cfg.Providers["anthropic"]
+	upstream.Pricing = map[string]economics.ModelPricing{"model": {InputUSDPerMTok: &first}}
+	upstream.Models = map[string]ModelCapabilitiesConfig{"model": {Pricing: &economics.ModelPricing{InputUSDPerMTok: &second}}}
+	cfg.Providers["anthropic"] = upstream
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("conflicting price declarations accepted")
 	}
 }
 

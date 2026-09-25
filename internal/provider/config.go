@@ -237,7 +237,7 @@ func (c Config) Validate() error {
 			}
 		}
 		for model, capability := range configured.Models {
-			if strings.TrimSpace(model) == "" || model == "*" {
+			if strings.TrimSpace(model) == "" || model == "*" || model != strings.TrimSpace(model) {
 				return fmt.Errorf("provider %q models require exact, non-empty names", name)
 			}
 			if capability.ContextWindowTokens != nil && *capability.ContextWindowTokens == 0 {
@@ -245,6 +245,9 @@ func (c Config) Validate() error {
 			}
 			if capability.Pricing != nil && !capability.Pricing.Valid() {
 				return fmt.Errorf("provider %q model %q pricing must contain finite, non-negative rates", name, model)
+			}
+			if existing, ok := configured.Pricing[model]; ok && capability.Pricing != nil && !reflect.DeepEqual(existing, *capability.Pricing) {
+				return fmt.Errorf("provider %q model %q has conflicting pricing declarations", name, model)
 			}
 			if capability.Effort != nil {
 				seen := map[string]bool{}

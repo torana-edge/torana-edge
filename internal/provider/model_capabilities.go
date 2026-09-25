@@ -28,7 +28,15 @@ func (c Config) ModelCapabilities(providerName, model string) (*pb.ModelCapabili
 			answer.EffortLevels = append(answer.EffortLevels, portableEffort[level])
 		}
 	}
-	if price := declaration.Pricing; price != nil {
+	price := declaration.Pricing
+	if price == nil {
+		// Reuse the exact model's existing price sheet, but never the "*"
+		// fallback: capabilities are an explicit per-model declaration.
+		if exact, ok := upstream.Pricing[model]; ok {
+			price = &exact
+		}
+	}
+	if price != nil {
 		answer.Pricing = &pb.ModelPricing{
 			InputUsdPerMtok: price.InputUSDPerMTok, OutputUsdPerMtok: price.OutputUSDPerMTok,
 			CacheReadUsdPerMtok: price.CacheReadUSDPerMTok, CacheWriteUsdPerMtok: price.CacheWriteUSDPerMTok,
