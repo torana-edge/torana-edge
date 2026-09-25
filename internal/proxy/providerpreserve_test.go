@@ -70,6 +70,34 @@ func pricingOf(t *testing.T, srv *Server, provName, model string) (economics.Mod
 	return p.PricingFor(model)
 }
 
+func TestSettingsSavePreservesDirectiveOptInUntilExplicitlyChanged(t *testing.T) {
+	srv := pricedServer(t)
+	settings := map[string]any{
+		"port": 8080,
+		"providers": map[string]any{
+			"primary": map[string]any{"url": "https://api.example.com", "format": "openai"},
+		},
+	}
+	settings["directives"] = map[string]any{"enabled": true}
+	if rec := putConfig(t, srv, settings); rec.Code != http.StatusOK {
+		t.Fatalf("enable directives: %d %s", rec.Code, rec.Body)
+	}
+	delete(settings, "directives")
+	if rec := putConfig(t, srv, settings); rec.Code != http.StatusOK {
+		t.Fatalf("save unrelated settings: %d %s", rec.Code, rec.Body)
+	}
+	if !srv.GetConfig().Providers.Directives.Enabled {
+		t.Fatal("settings save silently disabled directives")
+	}
+	settings["directives"] = map[string]any{"enabled": false}
+	if rec := putConfig(t, srv, settings); rec.Code != http.StatusOK {
+		t.Fatalf("disable directives: %d %s", rec.Code, rec.Body)
+	}
+	if srv.GetConfig().Providers.Directives.Enabled {
+		t.Fatal("explicit settings change did not disable directives")
+	}
+}
+
 // TestSettingsSaveKeepsPricing is the regression test for the bug that shipped:
 // the settings form rebuilds each provider from the six fields it renders and
 // replaces the whole providers map, so an ordinary Save silently deleted the

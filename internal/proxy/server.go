@@ -2253,6 +2253,9 @@ func New(cfg Config) (*Server, error) {
 			if _, supplied := topLevel["suggestions"]; !supplied {
 				incoming.Suggestions = cur.Suggestions
 			}
+			if _, supplied := topLevel["directives"]; !supplied {
+				incoming.Directives = cur.Directives
+			}
 			// Never let the settings surface mutate the pipeline.
 			incoming.Plugins = cur.Plugins
 			cacheEnc, err := s.normalizeSecretField(incoming.Cache.Redis.PasswordEnc, cur.Cache.Redis.PasswordEnc)
