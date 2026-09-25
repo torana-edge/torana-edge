@@ -267,6 +267,35 @@ func (s *Store) ResolveCode(conversation, code, action, via string, turn uint64)
 	return resolved, err
 }
 
+// ResolveID is for authenticated, conversation-bound control-plane actions.
+// Unlike ResolveCode it does not accept a short confirmation code, so callers
+// must provide both the conversation scope and the full suggestion ID.
+func (s *Store) ResolveID(conversation, id, action, via string, turn uint64) (Suggestion, error) {
+	if action != "accepted" && action != "dismissed" {
+		return Suggestion{}, errors.New("invalid suggestion action")
+	}
+	if id == "" {
+		return Suggestion{}, ErrNotFound
+	}
+	var resolved Suggestion
+	err := s.update(conversation, func(current *record) (bool, error) {
+		expired := expire(current, turn)
+		for i := range current.Suggestions {
+			item := &current.Suggestions[i]
+			if item.ID == id && item.Status == "pending" {
+				item.Status, item.Action, item.Via = action, action, via
+				resolved = *item
+				return true, nil
+			}
+		}
+		return expired, nil
+	})
+	if err == nil && resolved.ID == "" {
+		return Suggestion{}, ErrNotFound
+	}
+	return resolved, err
+}
+
 func (s *Store) AcceptHarnessSwitch(conversation, model string, turn uint64) ([]Suggestion, error) {
 	var accepted []Suggestion
 	err := s.update(conversation, func(current *record) (bool, error) {

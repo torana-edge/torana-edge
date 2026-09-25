@@ -59,6 +59,29 @@ func TestSuggestionLifecycleAndConversationScope(t *testing.T) {
 	}
 }
 
+func TestResolveIDRequiresConversationAndIsSingleUse(t *testing.T) {
+	state, err := pluginstate.New(pluginstate.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer state.Close()
+	store := New(state)
+	id, err := store.Create("bound", "router", 1, sample("strong"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.ResolveID("another", id, "accepted", "agent_api", 1); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("cross-conversation ID resolved: %v", err)
+	}
+	got, err := store.ResolveID("bound", id, "dismissed", "agent_api", 1)
+	if err != nil || got.Status != "dismissed" || got.Via != "agent_api" {
+		t.Fatalf("resolve ID: %+v, %v", got, err)
+	}
+	if _, err := store.ResolveID("bound", id, "accepted", "agent_api", 1); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("resolved ID reused: %v", err)
+	}
+}
+
 func TestSuggestionExpiryAndHarnessSwitch(t *testing.T) {
 	state, err := pluginstate.New(pluginstate.Options{})
 	if err != nil {
