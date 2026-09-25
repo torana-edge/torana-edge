@@ -15,12 +15,13 @@ func TestAppendNoticeEventsTerminalDiscipline(t *testing.T) {
 		name, finish string
 		tool, failed bool
 		wantNotice   bool
+		wantOutcome  string
 	}{
-		{"complete", "stop", false, false, true},
-		{"tool", "tool_calls", true, false, false},
-		{"length", "length", false, false, false},
-		{"truncated", "", false, false, false},
-		{"error after finish", "stop", false, true, false},
+		{"complete", "stop", false, false, true, "delivered"},
+		{"tool", "tool_calls", true, false, false, "not_completed"},
+		{"length", "length", false, false, false, "not_completed"},
+		{"truncated", "", false, false, false, "truncated"},
+		{"error after finish", "stop", false, true, false, "stream_error"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -40,8 +41,12 @@ func TestAppendNoticeEventsTerminalDiscipline(t *testing.T) {
 			}
 			close(input)
 			var events []engine.StreamEvent
-			for event := range appendNoticeEvents(context.Background(), input, "notice") {
+			outcomes := []string{}
+			for event := range appendNoticeEvents(context.Background(), input, "notice", func(outcome string) { outcomes = append(outcomes, outcome) }) {
 				events = append(events, event)
+			}
+			if len(outcomes) != 1 || outcomes[0] != tc.wantOutcome {
+				t.Fatalf("outcomes=%v, want %q", outcomes, tc.wantOutcome)
 			}
 			noticed := false
 			for _, event := range events {
