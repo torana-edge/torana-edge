@@ -207,7 +207,12 @@ clamped or guessed. The host applies the same validity check before charging
 the hourly token budget, so an invalid report cannot exhaust it. These calls
 still consume the per-minute call budget; later valid usage still charges the
 token budget. Ordinary provider responses and the plugin-egress feed retain
-their provider-native usage semantics.
+their provider-native usage semantics on the wire. For intercepted responses,
+the plugin-visible `response.usage.input_tokens` is the **total prompt input**,
+including cache reads and writes when the provider reports them separately.
+`cache_read_tokens` and `cache_write_tokens` are subsets of that total, not
+extra tokens to add. This differs from the model-service completion usage
+described above. Torana's dashboard continues to show provider-native counts.
 Every model-service response is recorded in that feed before the guest decides
 whether its content is useful, including empty completions.
 
