@@ -464,6 +464,10 @@ type Config struct {
 // caller without the operator deliberately enabling that channel.
 type SuggestionsConfig struct {
 	Enabled bool `json:"enabled,omitempty"`
+	// NoticeSources is an explicit allowlist of identity sources whose harnesses
+	// have been verified to replay assistant text without changing signed markers.
+	// Unknown harnesses receive suggestions through Torana's UI and CLI only.
+	NoticeSources map[string]bool `json:"notice_sources,omitempty"`
 }
 
 // MITMConfig configures the TLS-terminating ingress. When enabled, agy (or any

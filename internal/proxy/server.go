@@ -358,6 +358,9 @@ type reqState struct {
 	// belongs to, derived from the canonical IR before any plugin runs.
 	// Empty when the request could not be identified.
 	ConversationID string
+	// NoticeEnabled is pinned at request admission. Unknown harnesses and
+	// sources not explicitly approved for byte-stable replay stay UI/CLI only.
+	NoticeEnabled bool
 	// UserTurn is the durable suggestion-lifecycle counter. A tool-result
 	// continuation retains the preceding user's ordinal.
 	UserTurn uint64
@@ -1143,6 +1146,35 @@ func New(cfg Config) (*Server, error) {
 				rejectMalformed()
 				return
 			}
+			// Signed notices are a client-side display channel, never provider
+			// history. Strip them before plugins, audit and bridge projection while
+			// retaining every unrelated raw wire byte for prompt-cache stability.
+			convIdentity := conversation.ResolveIdentity(req.Header, chat)
+			if s.secrets != nil && convIdentity.ID != "" {
+				shape := noticeShape(clientFormat, chat)
+				clean, changed, stripErr := stripSignedNoticesJSON(body, shape, s.secrets, convIdentity.ID)
+				if stripErr != nil {
+					rejectMalformed()
+					rs.AuditErrorCode = "notice_strip_failed"
+					return
+				}
+				if changed {
+					body = clean
+					if exchange != nil {
+						chat, err = bridge.ParseRequest(exchange.Client, body, strippedPath)
+					} else {
+						chat, err = fmt.Request.Unmarshal(body)
+					}
+					if err != nil {
+						rejectMalformed()
+						return
+					}
+					if _, cerr := pbconv.ToPBChatRequestChecked(chat); cerr != nil {
+						rejectMalformed()
+						return
+					}
+				}
+			}
 			if exchange != nil {
 				clientCopy := *chat
 				exchange.ClientRequest = &clientCopy
@@ -1176,7 +1208,9 @@ func New(cfg Config) (*Server, error) {
 			// fall back to Torana's format-independent content-root label. Resolve
 			// before plugins run: a guard or compactor must not rename the durable
 			// namespace by rewriting the request it is protecting.
-			rs.ConversationID = conversation.ResolveIdentity(req.Header, chat).ID
+			rs.ConversationID = convIdentity.ID
+			rs.NoticeEnabled = currentCfg.Providers.Suggestions.Enabled &&
+				currentCfg.Providers.Suggestions.NoticeSources[convIdentity.Source] && s.secrets != nil
 			if currentCfg.Providers.Suggestions.Enabled && rs.ConversationID != "" {
 				turn, turnErr := s.suggestions.ObserveUserTurn(rs.ConversationID, userTurnSignature(chat))
 				if turnErr != nil {
@@ -2025,6 +2059,16 @@ func New(cfg Config) (*Server, error) {
 					bodyBytes = translated
 					clearBridgeRepresentationHeaders(resp.Header)
 					resp.Header.Set("Content-Type", "application/json")
+				}
+				// This is the final CLIENT wire shape, after any bridge translation.
+				// Unknown harnesses never enter this path. Streaming notices are
+				// handled separately so a partial/tool-calling stream stays clean.
+				if rs.NoticeEnabled && f != nil {
+					shape := noticeShape(f.Name, chat)
+					if e := exchangeFrom(ctx); e != nil {
+						shape = string(e.Client)
+					}
+					bodyBytes = s.appendPendingNotice(bodyBytes, rs, shape)
 				}
 				resp.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 				resp.ContentLength = int64(len(bodyBytes))
