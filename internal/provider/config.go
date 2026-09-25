@@ -464,11 +464,16 @@ type Config struct {
 // Suggestions are opt-in because a plugin may otherwise surface advice to a
 // caller without the operator deliberately enabling that channel.
 type SuggestionsConfig struct {
-	Enabled bool `json:"enabled,omitempty"`
-	// NoticeSources is an explicit allowlist of identity sources whose harnesses
-	// have been verified to replay assistant text without changing signed markers.
-	// Unknown harnesses receive suggestions through Torana's UI and CLI only.
-	NoticeSources map[string]bool `json:"notice_sources,omitempty"`
+	Enabled bool         `json:"enabled,omitempty"`
+	Notice  NoticeConfig `json:"notice,omitempty"`
+}
+
+type NoticeConfig struct {
+	// Harnesses is an explicit allowlist of stable identity sources whose
+	// harnesses have been verified to replay signed text unchanged.
+	Harnesses map[string]bool `json:"harnesses,omitempty"`
+	// Probe appends a fixed signed test notice on completed turns. Debug only.
+	Probe bool `json:"probe,omitempty"`
 }
 
 // Directives are an opt-in, host-local command channel in user messages.

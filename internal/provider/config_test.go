@@ -58,6 +58,23 @@ func TestDirectivesDefaultOffAndConfigRoundTrip(t *testing.T) {
 	}
 }
 
+func TestNoticeProbeAndHarnessAllowlistRoundTrip(t *testing.T) {
+	var cfg Config
+	if err := json.Unmarshal([]byte(`{"suggestions":{"enabled":true,"notice":{"harnesses":{"claude-code-session":true},"probe":true}}}`), &cfg); err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.Suggestions.Enabled || !cfg.Suggestions.Notice.Harnesses["claude-code-session"] || !cfg.Suggestions.Notice.Probe {
+		t.Fatalf("notice settings were not decoded: %+v", cfg.Suggestions)
+	}
+	encoded, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(encoded), `"notice":{"harnesses":{"claude-code-session":true},"probe":true}`) {
+		t.Fatalf("notice settings lost: %s", encoded)
+	}
+}
+
 func TestMITMHostCanonicalizationAndCollision(t *testing.T) {
 	got, err := CanonicalMITMHostname(" CloudCode-PA.GoogleAPIs.COM. ")
 	if err != nil {
