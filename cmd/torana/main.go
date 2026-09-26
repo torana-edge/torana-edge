@@ -101,6 +101,7 @@ Usage:
   torana stats                   inspect aggregate request statistics
   torana feed [--follow]         inspect recent or live request events
   torana agent <command>         discover and call plugin agent operations
+  torana mcp <command>           enable MCP, inspect it, or manage its token
   torana version                 print the version
   torana help                    print this message
 

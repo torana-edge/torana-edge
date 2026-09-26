@@ -68,6 +68,35 @@ live store owner; a failed or starting process is not silently called stopped.
 waits for completion (`--timeout 15s` by default). It never kills a cached PID.
 An API timeout leaves the outcome uncertain; inspect status before retrying.
 
+## Connect MCP tools
+
+Torana's MCP interface lets a client discover plugin operations and inspect the
+proxy through four fixed tools. Turn it on explicitly:
+
+```bash
+torana mcp enable --yes
+torana mcp status
+```
+
+For a Streamable HTTP client, use `http://127.0.0.1:8080/_torana/mcp`
+(substitute your port) and configure its Bearer authentication with the token
+from `torana mcp token`. That command prints the secret token; keep it in your
+client's credential settings, not in a shared chat, screenshot, or repository.
+Add `--json` if you need a structured token envelope.
+
+```bash
+torana mcp rotate --yes     # prints the replacement token; update your client
+torana mcp disable --yes    # closes MCP sessions, retaining the token
+```
+
+Enable sets up the token once and prints only enabled status. Repeated token
+retrieval keeps the same credential; rotation invalidates the old one. These
+commands use the running instance and accept `--addr` like other live commands.
+
+MCP applies the model-facing operation policy. It is separate from the operator
+API and is not a sandbox for a harness with unrestricted shell/network access;
+see [security boundaries](../SECURITY.md).
+
 ## Inspect first
 
 ```bash
