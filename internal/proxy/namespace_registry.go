@@ -26,6 +26,7 @@ type namespaceOperation struct {
 type namespaceEntry struct {
 	Name       string               `json:"name"`
 	Alias      string               `json:"alias,omitempty"`
+	AliasError string               `json:"alias_error,omitempty"`
 	Title      string               `json:"title"`
 	Summary    string               `json:"summary"`
 	Categories []string             `json:"categories,omitempty"`
@@ -42,9 +43,6 @@ type namespaceRegistry struct {
 // Installed bundles provide status metadata. Guest callability is granted only
 // from the exact digest in the pinned, approved pipeline snapshot.
 func buildNamespaceRegistry(installed []plugin.PluginBundle, loaded []plugin.LoadedPluginStatus, enabled []string, skipped []plugin.SkippedPlugin) (*namespaceRegistry, error) {
-	if err := plugin.ValidateNamespaceAliases(installed); err != nil {
-		return nil, err
-	}
 	r := &namespaceRegistry{entries: map[string]namespaceEntry{}, aliases: map[string]string{}}
 	core := namespaceEntry{Name: "torana", Title: "Torana", Summary: "Inspect and manage the local proxy and this conversation", Status: "enabled"}
 	for _, op := range builtInAgentOperations() {
@@ -66,7 +64,11 @@ func buildNamespaceRegistry(installed []plugin.PluginBundle, loaded []plugin.Loa
 		default:
 			continue // No config, shutdown, discovery or cross-session access.
 		}
-		core.Operations = append(core.Operations, namespaceOperation{ID: id, Description: op.Description, Risk: "read", ModelAccess: "read", ConversationBinding: binding, Callable: true, Source: "core", CoreID: op.ID})
+		access, callable := "read", true
+		if binding == "required" {
+			access, callable = "never", false // Operator handlers are not conversation-scoped dispatchers.
+		}
+		core.Operations = append(core.Operations, namespaceOperation{ID: id, Description: op.Description, Risk: "read", ModelAccess: access, ConversationBinding: binding, Callable: callable, Source: "core", CoreID: op.ID})
 	}
 	for _, op := range []namespaceOperation{
 		{ID: "session.usage", Description: "Usage for this conversation", Risk: "read", ModelAccess: "read"},
@@ -115,27 +117,52 @@ func buildNamespaceRegistry(installed []plugin.PluginBundle, loaded []plugin.Loa
 			ns := descriptor.Namespace
 			entry.Title, entry.Summary, entry.Alias = ns.Title, ns.Summary, ns.Alias
 			entry.Categories = append([]string(nil), ns.Categories...)
-			if entry.Alias != "" {
-				r.aliases[strings.ToLower(entry.Alias)] = name
-			}
 		}
 		for _, standard := range []struct{ id, description, risk, access string }{
 			{"_info", "Plugin information", "read", "read"}, {"_status", "Plugin status", "read", "read"}, {"_config.schema", "Configuration schema", "read", "read"}, {"_config.get", "Current configuration", "read", "never"}, {"_config.set", "Update configuration", "write", "confirm"}, {"_enable", "Enable plugin", "write", "confirm"}, {"_disable", "Disable plugin", "write", "confirm"},
 		} {
 			anyStatus := standard.id == "_info" || standard.id == "_status" || standard.id == "_enable"
-			entry.Operations = append(entry.Operations, namespaceOperation{ID: standard.id, Description: standard.description, Risk: standard.risk, ModelAccess: standard.access, ConversationBinding: "none", Callable: entry.Status == "enabled" || anyStatus, Source: "standard"})
+			callable := entry.Status == "enabled" || anyStatus
+			if standard.id == "_enable" && entry.Status == "unapproved" {
+				callable = false
+			}
+			entry.Operations = append(entry.Operations, namespaceOperation{ID: standard.id, Description: standard.description, Risk: standard.risk, ModelAccess: standard.access, ConversationBinding: "none", Callable: callable, Source: "standard"})
 		}
 		if descriptor != nil {
 			for _, op := range descriptor.Operations {
-				copy := op
+				guestOperation := op
 				binding := op.ConversationBinding
 				if binding == "" {
 					binding = "none"
 				}
-				entry.Operations = append(entry.Operations, namespaceOperation{ID: op.ID, Description: op.Description, Risk: op.Risk, ModelAccess: op.EffectiveModelAccess(), ConversationBinding: binding, Callable: entry.Status == "enabled", Source: "plugin", Guest: &copy})
+				entry.Operations = append(entry.Operations, namespaceOperation{ID: op.ID, Description: op.Description, Risk: op.Risk, ModelAccess: op.EffectiveModelAccess(), ConversationBinding: binding, Callable: entry.Status == "enabled", Source: "plugin", Guest: &guestOperation})
 			}
 		}
 		r.entries[name] = entry
+	}
+	// Resolve aliases after collecting every canonical name. A collision disables
+	// only the alias, independent of discovery order or plugin enablement.
+	claims := map[string]int{}
+	for _, bundle := range installed {
+		claims[strings.ToLower(bundle.Manifest.Name)]++
+	}
+	claims["torana"]++
+	for _, entry := range r.entries {
+		if entry.Alias != "" {
+			claims[strings.ToLower(entry.Alias)]++
+		}
+	}
+	for name, entry := range r.entries {
+		if entry.Alias == "" {
+			continue
+		}
+		alias := strings.ToLower(entry.Alias)
+		if claims[alias] > 1 || plugin.ReservedNamespace(alias) {
+			entry.AliasError = "Alias conflicts with another namespace; use the canonical plugin name"
+			r.entries[name] = entry
+			continue
+		}
+		r.aliases[alias] = name
 	}
 	return r, nil
 }
