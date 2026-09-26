@@ -161,11 +161,7 @@ func (s *Server) applyConfirmedStandardOperation(ctx context.Context, conversati
 	if err != nil {
 		return mcpserver.Result{}, err
 	}
-	undo, err := json.Marshal(struct {
-		Namespace string                 `json:"namespace"`
-		Digest    string                 `json:"digest"`
-		Plugins   provider.PluginsConfig `json:"plugins"`
-	}{Namespace: entry.Name, Digest: entry.Digest, Plugins: current.Plugins})
+	undo, err := json.Marshal(pluginUndoSnapshot{Namespace: entry.Name, Digest: entry.Digest, Plugins: current.Plugins})
 	if err != nil {
 		return mcpserver.Result{}, err
 	}

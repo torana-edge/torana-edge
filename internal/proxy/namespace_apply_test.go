@@ -75,6 +75,31 @@ func TestConfirmedPluginMutationRechecksSnapshotAndPolicy(t *testing.T) {
 	if err != nil || result.Error == nil || result.Error.Code != "not_found" {
 		t.Fatalf("replayed execution=%+v %v", result, err)
 	}
+	server.configMu.Lock()
+	server.config.Providers.Port++
+	server.configMu.Unlock()
+	result, err = server.undoConfirmedPluginChange(context.Background(), binding.ConversationID, items[0].Code, nil)
+	if err != nil || result.Error == nil || result.Error.Code != "conflict" {
+		t.Fatalf("stale undo=%+v %v", result, err)
+	}
+	server.configMu.Lock()
+	server.config.Providers.Port--
+	server.configMu.Unlock()
+	result, err = server.undoConfirmedPluginChange(context.Background(), "other-session", items[0].Code, nil)
+	if err != nil || result.Error == nil || result.Error.Code != "not_found" {
+		t.Fatalf("cross-session undo=%+v %v", result, err)
+	}
+	result, err = server.undoConfirmedPluginChange(context.Background(), binding.ConversationID, items[0].Code, nil)
+	if err != nil || !result.OK || result.Status != "undone" {
+		t.Fatalf("undo=%+v %v", result, err)
+	}
+	if len(server.GetConfig().Providers.Plugins.Order) != 1 {
+		t.Fatal("undo did not restore the enabled plugin")
+	}
+	result, err = server.undoConfirmedPluginChange(context.Background(), binding.ConversationID, items[0].Code, nil)
+	if err != nil || result.Error == nil || result.Error.Code != "not_found" {
+		t.Fatalf("duplicate undo=%+v %v", result, err)
+	}
 }
 
 func TestOperationRevisionSurvivesSecretStoreReopen(t *testing.T) {
