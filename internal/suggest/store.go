@@ -71,6 +71,7 @@ type record struct {
 	NoticeDisabled    bool                       `json:"notice_disabled,omitempty"`
 	Suggestions       []Suggestion               `json:"suggestions"`
 	Operations        map[string]operationRecord `json:"operations,omitempty"`
+	Changes           map[string]changeRecord    `json:"changes,omitempty"`
 }
 
 // DisableNotices is durable and one-way for a conversation. If signed-marker
@@ -259,6 +260,9 @@ func (s *Store) create(conversation, plugin string, turn uint64, args *pb.Sugges
 			return true, nil
 		}
 		used := make(map[string]bool, len(current.Suggestions))
+		for _, change := range current.Changes {
+			used[change.Code] = true
+		}
 		for i := range current.Suggestions {
 			item := &current.Suggestions[i]
 			used[item.Code] = true
