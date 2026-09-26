@@ -8,6 +8,24 @@ Enable MCP and set `suggestions.claude_code.enabled` to `true` in your Torana
 configuration. The adapter is off by default. It uses the same local MCP token;
 token rotation immediately invalidates old hook credentials.
 
+Preview and install the two nonblocking hooks without replacing your other
+hooks or settings:
+
+```bash
+torana harness hooks setup claude-code --dry-run
+torana harness hooks setup claude-code
+```
+
+User settings are the default. Choose `--scope project` for per-user project
+settings (`.claude/settings.local.json`), never the shared `settings.json`,
+or `--addr http://127.0.0.1:PORT` to pin a different Torana instance. Private
+recovery backups and ownership records stay in Torana's data directory.
+Teardown removes only exact groups Torana installed and refuses edited ones:
+
+```bash
+torana harness hooks teardown claude-code
+```
+
 Set the token in the shell launching Claude Code without copying it into a file:
 
 ```bash
@@ -18,7 +36,7 @@ This environment variable is also visible to Claude's Bash tool. It is not
 private from an agent with local shell access; see the boundary in
 [SECURITY.md](../SECURITY.md).
 
-Add these entries alongside any existing hooks in a Claude settings file, using
+For manual setup, add these entries alongside existing hooks in a settings file, using
 your Torana port. Do not replace unrelated settings or hooks.
 
 ```json
@@ -71,6 +89,11 @@ Also set `suggestions.claude_code.pre_model_switch` to `true` and add a
 using `http://127.0.0.1:8080/_torana/hooks/claude-code/pre-model-switch`.
 This is a separate opt-in, not installed by default.
 
+To install it through the CLI instead, use
+`torana harness hooks setup claude-code --pre-model-switch`. Running setup
+without that flag removes a previously owned PreModelSwitch group while keeping
+Stop and PostModelSwitch. The preview and prompt call out the timeout risk.
+
 The warning uses Claude's supplied context size and estimated cache-write cost,
 without loading suggestions, reading transcripts or calling another model.
 Authentication still checks the current durable MCP token. It returns only an
@@ -80,12 +103,25 @@ confirmation and noninteractive switch behavior remain unchanged.
 Disabled flags, stale tokens, rate limits and malformed or unsupported payloads
 silently return `200 {}` for this endpoint. Only authenticated, valid events
 show the warning; Stop and PostModelSwitch retain strict errors. Loopback and
-origin protections still apply.
+origin protections still apply. Manual hook entries must include
+`X-Torana-Local-Request: 1` and use a loopback URL/Host. Missing the header or
+failing the loopback/origin guard can still fail the hook before this handler,
+and may block a switch. The CLI-generated settings include the required header.
 
 **Claude blocks a switch if a PreModelSwitch hook times out**, even though
 Torana's response never blocks it. Leave this hook out if you don't want Torana
 availability to affect switching. Remove the settings entry to disable the
 dependency; turning off the Torana flag alone leaves Claude calling the URL.
 
-Automatic hook setup and the real Claude session walkthrough remain pending.
+An opt-in code check exercises real Haiku Stop and resume callbacks:
+
+```bash
+TORANA_LIVE_CLAUDE_HOOKS=1 go test ./internal/proxy -run TestLiveClaudeHookStopAndResume -count=1
+```
+
+It uses the locally logged-in Claude CLI, a temporary project and private hook
+fixture, with tools disabled. Resume must use the saved model: an explicit
+`--model` override can prevent the model-restore event. Interactive `/model`
+switch acceptance and visibility of the hint in the terminal UI remain separate
+walkthrough checks.
 See [Claude's hook reference](https://code.claude.com/docs/en/hooks).

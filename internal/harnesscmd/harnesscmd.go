@@ -23,6 +23,7 @@ func Usage(w io.Writer) {
   torana harness list
   torana harness setup <claude-code|codex> [--scope project|user] [--dry-run] [--yes]
   torana harness teardown <claude-code|codex> [--scope project|user] [--dry-run] [--yes]
+  torana harness hooks <setup|teardown> claude-code [--scope user|project] [--addr origin] [--pre-model-switch] [--dry-run] [--yes]
   --addr <loopback origin> pins the MCP connection to a specific Torana instance.
 User scope is the default. Installed harness CLIs own user-config writes.
 Project-file fallback keeps private recovery backups outside your repository.
@@ -71,6 +72,9 @@ func Run(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 		}
 		_, err := fmt.Fprintln(stdout, "claude-code  project/user  stdio MCP\ncodex        project/user  stdio MCP")
 		return err
+	}
+	if args[0] == "hooks" {
+		return runHooks(args[1:], stdin, stdout, stderr)
 	}
 	if args[0] != "setup" && args[0] != "teardown" {
 		return fmt.Errorf("unknown harness command %q", args[0])
