@@ -61,6 +61,9 @@ func (s *Server) executeNamespaceOperation(ctx context.Context, call operationCa
 		}
 	}
 	if call.Operation.Source == "core" {
+		if call.Operation.ConversationBinding == "required" {
+			return s.executeScopedCoreOperation(call)
+		}
 		switch call.Operation.ID {
 		case "system.status":
 			status := "running"

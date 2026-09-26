@@ -14,6 +14,8 @@ const subscriberBufSize = 64
 // every proxied call. All fields are safe to read concurrently; the struct
 // is copied by value into Snapshot and subscriber channels.
 type RequestEvent struct {
+	// ConversationID is host-only scope evidence, never a global feed field.
+	ConversationID string `json:"-"`
 	// Timestamp is the wall-clock time the request completed (RFC3339Nano).
 	Timestamp string `json:"timestamp"`
 	// Provider is the configured provider name (e.g. "anthropic", "openai").
@@ -59,6 +61,22 @@ type RequestEvent struct {
 	// ErrorCode records a host-observed failure even when response headers were
 	// already 200, as with an upstream stream that resets before completion.
 	ErrorCode string `json:"error_code,omitempty"`
+}
+
+// SnapshotForConversation never treats an empty scope as all conversations.
+func (f *RequestFeed) SnapshotForConversation(id string) []RequestEvent {
+	if id == "" {
+		return []RequestEvent{}
+	}
+	events := f.Snapshot()
+	out := make([]RequestEvent, 0)
+	for _, event := range events {
+		if event.ConversationID == id {
+			event.Plugins = append([]string(nil), event.Plugins...)
+			out = append(out, event)
+		}
+	}
+	return out
 }
 
 // subscriber holds one SSE client's channel and its unique ID used for

@@ -78,20 +78,25 @@ type Record struct {
 	// Cache token counts from the most recent turn, as reported by the
 	// provider. These are the ground truth for whether a cache was warm: a
 	// resume showing reads hit the cache, one showing writes had to rebuild it.
-	LastCacheRead  int `json:"last_cache_read"`
-	LastCacheWrite int `json:"last_cache_write"`
+	LastCacheRead    int   `json:"last_cache_read"`
+	LastCacheWrite   int   `json:"last_cache_write"`
+	TokensIn         int64 `json:"tokens_in"`
+	TokensOut        int64 `json:"tokens_out"`
+	CacheReadTokens  int64 `json:"cache_read_tokens"`
+	CacheWriteTokens int64 `json:"cache_write_tokens"`
 }
 
 // Observation is one turn's worth of facts, as the request path sees them.
 type Observation struct {
-	ID             string
-	CachePrefixKey string
-	Provider       string
-	Model          string
-	Format         string
-	Path           string
-	CacheRead      int
-	CacheWrite     int
+	TokensIn, TokensOut int
+	ID                  string
+	CachePrefixKey      string
+	Provider            string
+	Model               string
+	Format              string
+	Path                string
+	CacheRead           int
+	CacheWrite          int
 }
 
 // Registry is a bounded, mutex-guarded set of recent conversations.
@@ -169,6 +174,10 @@ func (r *Registry) Observe(obs Observation) {
 	rec.Turns++
 	rec.LastCacheRead = obs.CacheRead
 	rec.LastCacheWrite = obs.CacheWrite
+	rec.TokensIn += int64(max(obs.TokensIn, 0))
+	rec.TokensOut += int64(max(obs.TokensOut, 0))
+	rec.CacheReadTokens += int64(max(obs.CacheRead, 0))
+	rec.CacheWriteTokens += int64(max(obs.CacheWrite, 0))
 
 	r.evictLocked()
 }

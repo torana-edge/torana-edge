@@ -3244,6 +3244,8 @@ func New(cfg Config) (*Server, error) {
 			Path:           rs.Path,
 			CacheRead:      rs.UsageCacheRead,
 			CacheWrite:     rs.UsageCacheWrite,
+			TokensIn:       rs.UsageIn,
+			TokensOut:      rs.UsageOut,
 		})
 		// Host request metrics: latency + outcome, labeled by model/provider.
 		// The host sees every response (including errors and vetoes), so this
@@ -3260,6 +3262,7 @@ func New(cfg Config) (*Server, error) {
 		}
 		if rs.Intercepted {
 			s.feed.Add(metrics.RequestEvent{
+				ConversationID:   rs.ConversationID,
 				Timestamp:        rs.Start.UTC().Format(time.RFC3339Nano),
 				Provider:         rs.Provider,
 				RequestedModel:   rs.Model,
