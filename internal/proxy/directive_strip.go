@@ -33,7 +33,7 @@ func stripDirectiveText(body []byte, shape string, knownNamespace func(string) b
 	}
 	slots := directiveTextSlots(document, shape)
 	var splices []directiveSplice
-	latestUser := -1
+	latestUser := latestDirectiveUserIndex(document, shape)
 	var latest []directive.Command
 	for _, slot := range slots {
 		start, end, ok := rawJSONSpanAt(body, slot.path...)
@@ -45,9 +45,6 @@ func stripDirectiveText(body []byte, shape string, knownNamespace func(string) b
 			return nil, nil, false, err
 		}
 		parsed := directive.ParseText(original, knownNamespace)
-		if slot.user > latestUser {
-			latestUser, latest = slot.user, nil
-		}
 		if slot.user >= 0 && slot.user == latestUser {
 			latest = append(latest, parsed.Commands...)
 		}
@@ -72,6 +69,46 @@ func stripDirectiveText(body []byte, shape string, knownNamespace func(string) b
 		updated = spliceBytes(updated, splice.start, splice.end, splice.value)
 	}
 	return updated, latest, true, nil
+}
+
+// A command is new only when the final input item is a genuine human turn.
+// A tool-result continuation can replay old user messages verbatim, but must
+// not execute their directives again.
+func latestDirectiveUserIndex(document any, shape string) int {
+	root := object(document)
+	if shape == "gemini-codeassist" {
+		root = object(root["request"])
+	}
+	field := "messages"
+	if shape == "openai-responses" {
+		field = "input"
+	} else if strings.HasPrefix(shape, "gemini") {
+		field = "contents"
+	}
+	if shape == "openai-responses" {
+		if _, ok := root[field].(string); ok {
+			return 0
+		}
+	}
+	items := array(root[field])
+	if len(items) == 0 {
+		return -1
+	}
+	last := object(items[len(items)-1])
+	if last["role"] != "user" {
+		return -1
+	}
+	parts := array(last["content"])
+	if field == "contents" {
+		parts = array(last["parts"])
+	}
+	for _, raw := range parts {
+		part := object(raw)
+		if part["type"] == "tool_result" || part["functionResponse"] != nil {
+			return -1
+		}
+	}
+	return len(items) - 1
 }
 
 func directiveTextSlots(document any, shape string) []directiveTextSlot {
