@@ -13,6 +13,17 @@ type countedSetupState struct {
 	reads int
 }
 
+func TestSetupSeenCacheRotatesAtCapacity(t *testing.T) {
+	store := &Store{setupSeen: make(map[string]bool)}
+	for i := range 4096 {
+		store.setupSeen[time.Unix(int64(i), 0).String()] = true
+	}
+	store.rememberSetupSeen("new-conversation")
+	if len(store.setupSeen) != 1 || !store.setupSeen["new-conversation"] {
+		t.Fatal("full cache did not rotate to remember the new conversation")
+	}
+}
+
 func (s *countedSetupState) GetVersioned(plugin, key string) (string, string, bool, error) {
 	s.reads++
 	return s.State.GetVersioned(plugin, key)

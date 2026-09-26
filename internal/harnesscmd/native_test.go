@@ -5,10 +5,31 @@ import (
 	"errors"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/torana-edge/torana-edge/internal/harness"
 )
+
+func TestClaudeServerInspectionStreamsLargeHistory(t *testing.T) {
+	entry := `{"command":"torana","args":["mcp","stdio"]}`
+	config := `{"history":["` + strings.Repeat("x", 2<<20) + `"],"mcpServers":{"other":{"args":[]},"torana":` + entry + `},"projects":{}}`
+	got, err := readClaudeServer(strings.NewReader(config))
+	if err != nil || string(got) != entry {
+		t.Fatalf("entry=%s error=%v", got, err)
+	}
+	for _, invalid := range []string{
+		`{"mcpServers":{},"mcpServers":{}}`,
+		`{"mcpServers":{"torana":{},"torana":{}}}`,
+		`{"mcpServers":null}`,
+		`{"mcpServers":{"torana":{}}} {}`,
+		`{"history":[1,`,
+	} {
+		if _, err := readClaudeServer(strings.NewReader(invalid)); err == nil {
+			t.Fatalf("accepted invalid configuration: %s", invalid)
+		}
+	}
+}
 
 func TestNativeCodexPreviewInstallRepeatAndOwnedRemoval(t *testing.T) {
 	t.Setenv("TORANA_DATA_DIR", t.TempDir())

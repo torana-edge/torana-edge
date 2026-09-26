@@ -3068,6 +3068,7 @@ func New(cfg Config) (*Server, error) {
 	mux.HandleFunc(mcpTokenAPIPath+"/setup", s.controlPlaneGuard(s.handleMCPToken))
 	mux.HandleFunc(mcpTokenAPIPath+"/rotate", s.controlPlaneGuard(s.handleMCPToken))
 	mux.HandleFunc("/_torana/mcp", s.handleMCP)
+	mux.HandleFunc(claudeHooksPath, s.controlPlaneGuard(s.handleClaudeHook))
 	mux.HandleFunc("/_torana/api/v1/", s.controlPlaneGuard(func(w http.ResponseWriter, r *http.Request) {
 		legacyPath := strings.TrimPrefix(r.URL.Path, "/_torana/api/v1")
 		if legacyPath == "/" || legacyPath == "/agent" {
@@ -3286,7 +3287,7 @@ func New(cfg Config) (*Server, error) {
 				ReportedModel:    rs.ReportedModel,
 				Status:           tw.status,
 				LatencyMS:        latencyMS,
-				TokensIn:         int64(rs.UsageIn),
+				TokensIn:         int64(canonicalInput),
 				TokensOut:        int64(rs.UsageOut),
 				CacheReadTokens:  int64(rs.UsageCacheRead),
 				CacheWriteTokens: int64(rs.UsageCacheWrite),
