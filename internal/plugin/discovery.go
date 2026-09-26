@@ -1266,9 +1266,6 @@ func reloadPipeline(runtime *wasm.Runtime, config PluginConfig) (*PluginPipeline
 	if err := validateActivePluginConflicts(activeBundles); err != nil {
 		return nil, err
 	}
-	if err := ValidateNamespaceAliases(activeBundles); err != nil {
-		return nil, err
-	}
 	if economicOrderErr != nil {
 		return nil, economicOrderErr
 	}

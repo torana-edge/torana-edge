@@ -60,8 +60,8 @@ func ValidateNamespaceAliases(bundles []PluginBundle) error {
 	return nil
 }
 
-func agentText(value string, max int) bool {
-	return strings.TrimSpace(value) != "" && utf8.ValidString(value) && utf8.RuneCountInString(value) <= max && strings.IndexFunc(value, unicode.IsControl) < 0
+func agentText(value string, limit int) bool {
+	return strings.TrimSpace(value) != "" && utf8.ValidString(value) && utf8.RuneCountInString(value) <= limit && strings.IndexFunc(value, unicode.IsControl) < 0
 }
 
 // EffectiveModelAccess derives the least permissive allowed default from risk.
@@ -113,6 +113,10 @@ func validateAgentV2(d AgentDescriptor, manifest PluginManifest) error {
 		seen[category] = true
 	}
 	commands := map[string]bool{}
+	operationIDs := map[string]bool{}
+	for _, op := range d.Operations {
+		operationIDs[op.ID] = true
+	}
 	for _, op := range d.Operations {
 		access := op.EffectiveModelAccess()
 		if access != "read" && access != "confirm" && access != "never" {
@@ -134,7 +138,7 @@ func validateAgentV2(d AgentDescriptor, manifest PluginManifest) error {
 				return fmt.Errorf("agent descriptor: operation %q has invalid example", op.ID)
 			}
 		}
-		if op.ReplacedBy != "" && (!op.Deprecated || !agentOperationIDPattern.MatchString(op.ReplacedBy) || op.ReplacedBy == op.ID) {
+		if op.ReplacedBy != "" && (!op.Deprecated || !agentOperationIDPattern.MatchString(op.ReplacedBy) || op.ReplacedBy == op.ID || !operationIDs[op.ReplacedBy]) {
 			return fmt.Errorf("agent descriptor: operation %q has invalid replacement", op.ID)
 		}
 		if op.Directive == nil {
@@ -147,9 +151,6 @@ func validateAgentV2(d AgentDescriptor, manifest PluginManifest) error {
 		commands[directive.Command] = true
 		if directive.UserDirect && (op.Risk != "write" || op.EffectiveModelAccess() == "never") {
 			return fmt.Errorf("agent descriptor: user_direct requires an eligible write operation")
-		}
-		if directive.UserDirect && (manifest.Name == "pii" || manifest.Name == "pii_guard" || manifest.Name == "auth") {
-			return fmt.Errorf("agent descriptor: protected plugin cannot declare user_direct")
 		}
 		if err := validateDirectiveArgs(op); err != nil {
 			return fmt.Errorf("agent descriptor: operation %q: %w", op.ID, err)

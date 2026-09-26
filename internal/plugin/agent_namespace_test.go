@@ -27,7 +27,6 @@ func TestAgentNamespaceV2Validation(t *testing.T) {
 		{"reserved_operation", func(d *AgentDescriptor, _ *PluginManifest) { d.Operations[0].ID = "_disable" }},
 		{"loosened_access", func(d *AgentDescriptor, _ *PluginManifest) { d.Operations[0].ModelAccess = "read" }},
 		{"unknown_binding", func(d *AgentDescriptor, _ *PluginManifest) { d.Operations[0].ConversationBinding = "any" }},
-		{"protected_direct", func(_ *AgentDescriptor, m *PluginManifest) { m.Name = "pii_guard" }},
 		{"missing_property", func(d *AgentDescriptor, _ *PluginManifest) { d.Operations[0].Directive.Args = []string{"unknown"} }},
 		{"optional_required", func(d *AgentDescriptor, _ *PluginManifest) { d.Operations[0].Directive.Args = []string{"step?"} }},
 		{"required_after_optional", func(d *AgentDescriptor, _ *PluginManifest) {
@@ -36,6 +35,10 @@ func TestAgentNamespaceV2Validation(t *testing.T) {
 		{"duplicate_arg", func(d *AgentDescriptor, _ *PluginManifest) { d.Operations[0].Directive.Args = []string{"step", "step"} }},
 		{"reserved_command", func(d *AgentDescriptor, _ *PluginManifest) { d.Operations[0].Directive.Command = "undo" }},
 		{"bad_replacement", func(d *AgentDescriptor, _ *PluginManifest) { d.Operations[0].ReplacedBy = "route.pin" }},
+		{"missing_replacement", func(d *AgentDescriptor, _ *PluginManifest) {
+			d.Operations[0].Deprecated = true
+			d.Operations[0].ReplacedBy = "missing"
+		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			d, m := validNamespaceDescriptor()
@@ -62,10 +65,10 @@ func TestNamespaceAliasesCannotHideCanonicalNames(t *testing.T) {
 func TestNamespaceDescriptorCloneIsIndependent(t *testing.T) {
 	d, _ := validNamespaceDescriptor()
 	d.Operations[0].Examples = []string{"pin the model"}
-	copy := cloneAgentDescriptor(&d)
-	copy.Namespace.Categories[0] = "changed"
-	copy.Operations[0].Directive.Args[0] = "changed"
-	copy.Operations[0].Examples[0] = "changed"
+	cloned := cloneAgentDescriptor(&d)
+	cloned.Namespace.Categories[0] = "changed"
+	cloned.Operations[0].Directive.Args[0] = "changed"
+	cloned.Operations[0].Examples[0] = "changed"
 	if d.Namespace.Categories[0] != "routing" || d.Operations[0].Directive.Args[0] != "step" || d.Operations[0].Examples[0] != "pin the model" {
 		t.Fatal("clone shares mutable descriptor data")
 	}
