@@ -1308,6 +1308,11 @@ func New(cfg Config) (*Server, error) {
 					chat.ToranaMeta, _ = chat.ToranaMeta.SetMember("_torana_mcp", v)
 				}
 				metrics.RecordMCPConnection(req.Context(), convIdentity.Source, presence)
+				if presence == "absent" && rs.ConversationID != "" && s.suggestions != nil {
+					if _, err := s.suggestions.SetupHint(rs.ConversationID, convIdentity.Source, rs.UserTurn, time.Now()); err != nil {
+						log.Printf("[mcp] could not record setup hint: %v", err)
+					}
+				}
 			}
 			// The path too: Torana forwards whatever the caller sent rather
 			// than synthesizing one, so a plugin replaying this conversation

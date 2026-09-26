@@ -180,8 +180,6 @@ For an API-key-only test without a harness, use the
 [optional DeepSeek example](QUICKSTART.md#optional-use-an-api-key-directly),
 adapting configuration and the request to your own provider.
 
-## Help shape the next integration
-
 ## Connect Torana's MCP tools
 
 Routing model traffic through Torana and connecting its MCP tools are separate
@@ -213,7 +211,7 @@ Changes proposed by the model need your approval: in the harness's MCP dialog
 where supported, otherwise in Torana's **Review** screen or through
 `torana suggestions accept`. Undo lives in Torana's UI or CLI, not in chat.
 
-### Help shape the next integration
+## Help shape the next integration
 
 Got a favorite harness, a plugin idea, or a workflow that needs a little more
 support? [Tell us what you're trying to do](https://github.com/torana-edge/torana-edge/issues).
