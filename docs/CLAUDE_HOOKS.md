@@ -8,6 +8,23 @@ Enable MCP and set `suggestions.claude_code.enabled` to `true` in your Torana
 configuration. The adapter is off by default. It uses the same local MCP token;
 token rotation immediately invalidates old hook credentials.
 
+Preview and install the two nonblocking hooks without replacing your other
+hooks or settings:
+
+```bash
+torana harness hooks setup claude-code --dry-run
+torana harness hooks setup claude-code
+```
+
+User settings are the default. Choose `--scope project` for project settings,
+or `--addr http://127.0.0.1:PORT` to pin a different Torana instance. Private
+recovery backups and ownership records stay in Torana's data directory.
+Teardown removes only exact groups Torana installed and refuses edited ones:
+
+```bash
+torana harness hooks teardown claude-code
+```
+
 Set the token in the shell launching Claude Code without copying it into a file:
 
 ```bash
@@ -18,7 +35,7 @@ This environment variable is also visible to Claude's Bash tool. It is not
 private from an agent with local shell access; see the boundary in
 [SECURITY.md](../SECURITY.md).
 
-Add these entries alongside any existing hooks in a Claude settings file, using
+For manual setup, add these entries alongside existing hooks in a settings file, using
 your Torana port. Do not replace unrelated settings or hooks.
 
 ```json
@@ -71,6 +88,11 @@ Also set `suggestions.claude_code.pre_model_switch` to `true` and add a
 using `http://127.0.0.1:8080/_torana/hooks/claude-code/pre-model-switch`.
 This is a separate opt-in, not installed by default.
 
+To install it through the CLI instead, use
+`torana harness hooks setup claude-code --pre-model-switch`. Running setup
+without that flag removes a previously owned PreModelSwitch group while keeping
+Stop and PostModelSwitch. The preview and prompt call out the timeout risk.
+
 The warning uses Claude's supplied context size and estimated cache-write cost,
 without loading suggestions, reading transcripts or calling another model.
 Authentication still checks the current durable MCP token. It returns only an
@@ -87,5 +109,5 @@ Torana's response never blocks it. Leave this hook out if you don't want Torana
 availability to affect switching. Remove the settings entry to disable the
 dependency; turning off the Torana flag alone leaves Claude calling the URL.
 
-Automatic hook setup and the real Claude session walkthrough remain pending.
+The real Claude session walkthrough remains pending.
 See [Claude's hook reference](https://code.claude.com/docs/en/hooks).

@@ -29,6 +29,35 @@ func PlanFile(path, harness string, server Server, teardown bool) (*FilePlan, er
 	if harness != "claude-code" && harness != "codex" {
 		return nil, fmt.Errorf("use the generic MCP instructions for %q", harness)
 	}
+	plan, err := planSnapshot(path)
+	if err != nil {
+		return nil, err
+	}
+	plan.Server, plan.Teardown, plan.claude = server, teardown, harness == "claude-code"
+	if plan.claude {
+		plan.edit, err = EditClaude(plan.before, plan.ownership, server, teardown)
+	} else {
+		if teardown && bytes.Contains(plan.before, []byte(begin)) {
+			var installed Server
+			if !plan.ownedExisted || json.Unmarshal(plan.ownership, &installed) != nil || installed.Command == "" {
+				return nil, fmt.Errorf("Torana ownership record is missing or invalid; review the Codex entry manually")
+			}
+			server = installed
+			plan.Server = installed
+		}
+		plan.edit, err = EditCodex(plan.before, server, teardown)
+		if err == nil && plan.edit.Changed && !teardown {
+			plan.edit.Ownership, err = json.Marshal(server)
+		}
+	}
+	if err != nil {
+		return nil, err
+	}
+	plan.Changed = plan.edit.Changed
+	return plan, nil
+}
+
+func planSnapshot(path string) (*FilePlan, error) {
 	abs, err := filepath.Abs(path)
 	if err != nil {
 		return nil, err
@@ -37,7 +66,7 @@ func PlanFile(path, harness string, server Server, teardown bool) (*FilePlan, er
 	if err != nil {
 		return nil, err
 	}
-	plan := &FilePlan{Path: abs, Server: server, Teardown: teardown, before: before, existed: exists, claude: harness == "claude-code"}
+	plan := &FilePlan{Path: abs, before: before, existed: exists}
 	store, err := provider.ManagedStorePath()
 	if err != nil {
 		return nil, err
@@ -57,26 +86,6 @@ func PlanFile(path, harness string, server Server, teardown bool) (*FilePlan, er
 	if err != nil {
 		return nil, err
 	}
-	if plan.claude {
-		plan.edit, err = EditClaude(before, plan.ownership, server, teardown)
-	} else {
-		if teardown && bytes.Contains(before, []byte(begin)) {
-			var installed Server
-			if !plan.ownedExisted || json.Unmarshal(plan.ownership, &installed) != nil || installed.Command == "" {
-				return nil, fmt.Errorf("Torana ownership record is missing or invalid; review the Codex entry manually")
-			}
-			server = installed
-			plan.Server = installed
-		}
-		plan.edit, err = EditCodex(before, server, teardown)
-		if err == nil && plan.edit.Changed && !teardown {
-			plan.edit.Ownership, err = json.Marshal(server)
-		}
-	}
-	if err != nil {
-		return nil, err
-	}
-	plan.Changed = plan.edit.Changed
 	return plan, nil
 }
 
