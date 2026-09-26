@@ -78,8 +78,8 @@ func TestCoreNamespaceOmitsOperatorOnlySurfaces(t *testing.T) {
 	seen := map[string]bool{}
 	for _, op := range core.Operations {
 		seen[op.ID] = true
-		if (op.ID == "feed.recent" || op.ID == "suggestions.list") && (op.Callable || op.ModelAccess != "never") {
-			t.Fatal("unscoped operator handler exposed")
+		if (op.ID == "feed.recent" || op.ID == "suggestions.list") && (!op.Callable || op.ModelAccess != "read" || op.ConversationBinding != "required") {
+			t.Fatal("scoped read missing binding or callability")
 		}
 		if op.ID == "feed.recent" && op.ConversationBinding != "required" {
 			t.Fatal("feed not conversation bound")

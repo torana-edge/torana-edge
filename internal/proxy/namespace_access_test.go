@@ -71,7 +71,7 @@ func TestNamespacePolicyCoreFloorCannotBeReached(t *testing.T) {
 	}
 }
 
-func TestNamespacePolicyUnscopedCoreHandlersStayUnavailable(t *testing.T) {
+func TestNamespacePolicyScopedReadsAndOperatorOnlyUndo(t *testing.T) {
 	r, err := buildNamespaceRegistry(nil, nil, nil, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -80,10 +80,13 @@ func TestNamespacePolicyUnscopedCoreHandlersStayUnavailable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, id := range []string{"feed.recent", "suggestions.list", "session.usage", "changes.list", "changes.undo"} {
-		if p.ModelReachable("torana", id) != "never" {
-			t.Fatalf("unscoped operation reachable: %s", id)
+	for _, id := range []string{"feed.recent", "suggestions.list", "session.usage", "changes.list"} {
+		if p.ModelReachable("torana", id) != "read" {
+			t.Fatalf("scoped read unavailable: %s", id)
 		}
+	}
+	if p.ModelReachable("torana", "changes.undo") != "never" {
+		t.Fatal("model can undo without operator consent")
 	}
 }
 
@@ -131,6 +134,22 @@ func TestModelReachableCoreContractsDoNotExposeCodesOrConversationSelection(t *t
 		}
 		for _, op := range entry.Operations {
 			if p.ModelReachable(entry.Name, op.ID) == "never" {
+				continue
+			}
+			if op.ConversationBinding == "required" {
+				output, domainErr, err := server.executeNamespaceOperation(context.Background(), operationCall{Entry: entry, Operation: op, Binding: plugin.MCPBinding{Bound: true, ConversationID: "bound"}})
+				if err != nil || domainErr != nil {
+					t.Fatalf("%s: %v %v", op.ID, domainErr, err)
+				}
+				encoded, err := json.Marshal(output)
+				if err != nil || strings.Contains(string(encoded), code) {
+					t.Fatalf("code leaked by %s", op.ID)
+				}
+				var value any
+				if err := json.Unmarshal(encoded, &value); err != nil {
+					t.Fatal(err)
+				}
+				assertNoConfirmationCode(t, op.ID, value)
 				continue
 			}
 			contract, exists := contracts[op.CoreID]

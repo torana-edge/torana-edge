@@ -64,9 +64,6 @@ func buildNamespaceRegistry(installed []plugin.PluginBundle, loaded []plugin.Loa
 			continue // No config, shutdown, discovery or cross-session access.
 		}
 		access, callable := "read", true
-		if binding == "required" {
-			access, callable = "never", false // Operator handlers are not conversation-scoped dispatchers.
-		}
 		core.Operations = append(core.Operations, namespaceOperation{ID: id, Description: op.Description, Risk: "read", ModelAccess: access, ConversationBinding: binding, Callable: callable, Source: "core", CoreID: op.ID})
 	}
 	for _, op := range []namespaceOperation{
@@ -76,7 +73,7 @@ func buildNamespaceRegistry(installed []plugin.PluginBundle, loaded []plugin.Loa
 	} {
 		op.Source = "core"
 		op.ConversationBinding = "required"
-		op.Callable = false // Activated only when the dedicated scoped dispatcher ships.
+		op.Callable = op.Risk == "read" // Undo is available only to operators.
 		core.Operations = append(core.Operations, op)
 	}
 	r.entries["torana"] = core
