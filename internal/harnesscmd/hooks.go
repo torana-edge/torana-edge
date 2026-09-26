@@ -101,7 +101,8 @@ func runHooks(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 	}
 	if args[0] == "setup" {
 		if *scope == "project" && projectHooksNeedIgnoreWarning(dir) {
-			fmt.Fprintln(stderr, "Warning: .claude/settings.local.json is not ignored by Git. Add it to .gitignore; it contains your per-user Torana hooks.")
+			// A diagnostic write failure must not misreport a completed install.
+			_, _ = fmt.Fprintln(stderr, "Warning: .claude/settings.local.json is not ignored by Git. Add it to .gitignore; it contains your per-user Torana hooks.")
 		}
 		_, err = fmt.Fprintln(stdout, "Hooks installed. Enable suggestions.claude_code.enabled in Torana and export TORANA_MCP_TOKEN before starting Claude. Optional PreModelSwitch also needs suggestions.claude_code.pre_model_switch.")
 	} else {
