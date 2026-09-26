@@ -122,7 +122,10 @@ func Run(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(stdout, "%s Torana MCP in %s\nCommand: %q\nArgs: %q\n", args[0], plan.Path, binary, serverArgs)
+	fmt.Fprintf(stdout, "%s Torana MCP in %s\n", args[0], plan.Path)
+	if !plan.Teardown {
+		fmt.Fprintf(stdout, "Command: %q\nArgs: %q\n", plan.Server.Command, plan.Server.Args)
+	}
 	if !plan.Changed {
 		_, err := fmt.Fprintln(stdout, "No change needed.")
 		return err
