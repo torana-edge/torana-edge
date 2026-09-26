@@ -7,7 +7,7 @@ Start small: route one request, see it in the feed, then add one plugin.
 - [Quickstart](QUICKSTART.md): build, connect your existing harness, see a request, add a plugin.
 - [Harness setup](HARNESS_SETUP.md): recipes for your existing login or API key.
 - [CLI](CLI.md): lifecycle, settings, pipeline, plugin approval and agent operations.
-- [Suggestions](SUGGESTIONS.md) and [Torana commands](DIRECTIVES.md): review plugin advice and choose what to do from the CLI or a conversation.
+- [Suggestions](SUGGESTIONS.md): review plugin advice and confirm changes through Torana's UI or CLI. Connect Torana's MCP server for model-driven discovery and requests.
 - [Running plugins](PLUGINS.md): installation, resources, ordering and failure policy.
 - [Credentials](CREDENTIALS.md): caller keys, named secrets and safe updates.
 - [Harness compatibility](HARNESS_COMPATIBILITY.md) and [protocol bridges](PROTOCOL_BRIDGES.md).

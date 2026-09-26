@@ -5,15 +5,18 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
-	"strings"
 
 	"github.com/torana-edge/torana-edge/internal/annotate"
 )
 
 type noticeTextSlot struct {
-	path            []any
-	removePath      []any // a notice-only appended block/part/item
-	localRemovePath []any // a complete host-local assistant reply
+	path       []any
+	removePath []any // a notice-only appended block/part/item
+}
+
+type noticeSplice struct {
+	start, end int
+	value      []byte
 }
 
 type noticeRemoval struct {
@@ -34,7 +37,7 @@ func stripSignedNoticesJSON(body []byte, shape string, signer annotate.Signer, c
 	if err := decoder.Decode(&document); err != nil {
 		return nil, false, err
 	}
-	var splices []directiveSplice
+	var splices []noticeSplice
 	var removals []noticeRemoval
 	for _, slot := range assistantTextPaths(document, shape) {
 		start, end, ok := rawJSONSpanAt(body, slot.path...)
@@ -50,14 +53,6 @@ func stripSignedNoticesJSON(body []byte, shape string, signer annotate.Signer, c
 			return nil, false, err
 		}
 		if changed {
-			if stripped == "" && strings.Contains(original, "[torana:begin:local_") && len(slot.localRemovePath) > 0 {
-				deleteStart, _, derr := jsonArrayElementDeletion(body, slot.localRemovePath)
-				if derr != nil {
-					return nil, false, derr
-				}
-				removals = append(removals, noticeRemoval{slot.localRemovePath, deleteStart})
-				continue
-			}
 			if stripped == "" && len(slot.removePath) > 0 {
 				deleteStart, _, derr := jsonArrayElementDeletion(body, slot.removePath)
 				if derr != nil {
@@ -67,7 +62,7 @@ func stripSignedNoticesJSON(body []byte, shape string, signer annotate.Signer, c
 				continue
 			}
 			replacement, _ := json.Marshal(stripped)
-			splices = append(splices, directiveSplice{start, end, replacement})
+			splices = append(splices, noticeSplice{start, end, replacement})
 		}
 	}
 	if len(splices) == 0 && len(removals) == 0 {
@@ -117,7 +112,7 @@ func assistantTextPaths(document any, shape string) []noticeTextSlot {
 			contentField = "parts"
 		}
 		if _, ok := item[contentField].(string); ok {
-			paths = append(paths, noticeTextSlot{path: append(base, contentField), localRemovePath: base})
+			paths = append(paths, noticeTextSlot{path: append(base, contentField)})
 			continue
 		}
 		for partIndex, rawPart := range array(item[contentField]) {
@@ -130,11 +125,7 @@ func assistantTextPaths(document any, shape string) []noticeTextSlot {
 			if shape == "openai-responses" && len(array(item[contentField])) == 1 {
 				remove = base // notices are appended as separate response output items
 			}
-			localRemove := []any(nil)
-			if len(array(item[contentField])) == 1 {
-				localRemove = base
-			}
-			paths = append(paths, noticeTextSlot{path: path, removePath: remove, localRemovePath: localRemove})
+			paths = append(paths, noticeTextSlot{path: path, removePath: remove})
 		}
 	}
 	return paths

@@ -16,15 +16,14 @@ const operationConsentTTL = 10 * time.Minute
 // This record is encrypted before persistence. Before/after values belong only
 // in the operator's confirmation view, never a model response or plugin header.
 type sealedOperationIntent struct {
-	Namespace     string            `json:"namespace"`
-	Operation     string            `json:"operation"`
-	Digest        string            `json:"digest"`
-	Revision      string            `json:"revision"`
-	Input         json.RawMessage   `json:"input,omitempty"`
-	Before        json.RawMessage   `json:"before,omitempty"`
-	After         json.RawMessage   `json:"after,omitempty"`
-	Binding       plugin.MCPBinding `json:"binding"`
-	UserDirective bool              `json:"user_directive,omitempty"`
+	Namespace string            `json:"namespace"`
+	Operation string            `json:"operation"`
+	Digest    string            `json:"digest"`
+	Revision  string            `json:"revision"`
+	Input     json.RawMessage   `json:"input,omitempty"`
+	Before    json.RawMessage   `json:"before,omitempty"`
+	After     json.RawMessage   `json:"after,omitempty"`
+	Binding   plugin.MCPBinding `json:"binding"`
 }
 
 func (s *Server) proposeNamespaceOperation(ctx context.Context, call operationCall) (mcpserver.Result, error) {
@@ -60,7 +59,7 @@ func (s *Server) proposeNamespaceOperation(ctx context.Context, call operationCa
 		return operationError("namespace_unavailable", "This operation is not currently available."), nil
 	}
 	cfg := s.GetConfig().Providers
-	intent := sealedOperationIntent{Namespace: entry.Name, Operation: operation.ID, Digest: entry.Digest, Revision: s.configRevision(cfg), Input: append(json.RawMessage(nil), call.Input...), Binding: call.Binding, UserDirective: call.UserDirective}
+	intent := sealedOperationIntent{Namespace: entry.Name, Operation: operation.ID, Digest: entry.Digest, Revision: s.configRevision(cfg), Input: append(json.RawMessage(nil), call.Input...), Binding: call.Binding}
 	if operation.Source == "standard" {
 		switch operation.ID {
 		case "_config.set":

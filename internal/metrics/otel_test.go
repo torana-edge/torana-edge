@@ -30,7 +30,7 @@ func collect(t *testing.T) func() metricdata.ResourceMetrics {
 		compactionEstimatedUSD, compactionUnavailable = nil, nil
 		pluginMetricRejected = nil
 		noticeTotal = nil
-		suggestionTotal, directiveTotal = nil, nil
+		suggestionTotal = nil
 		pluginMetrics = newPluginMetricRegistry()
 	})
 	return func() metricdata.ResourceMetrics {
@@ -45,12 +45,11 @@ func collect(t *testing.T) func() metricdata.ResourceMetrics {
 func TestAdaptiveEventMetricsBoundLabels(t *testing.T) {
 	do := collect(t)
 	RecordSuggestion(context.Background(), "custom-kind", "pending", "plugin")
-	RecordDirective(context.Background(), "custom-verb", "user-controlled-outcome")
 	series := map[string]bool{}
 	for _, scope := range do().ScopeMetrics {
 		for _, instrument := range scope.Metrics {
 			switch instrument.Name {
-			case "torana_suggestions_total", "torana_directives_total":
+			case "torana_suggestions_total":
 				for _, point := range instrument.Data.(metricdata.Sum[int64]).DataPoints {
 					if instrument.Name == "torana_suggestions_total" {
 						kind, _ := point.Attributes.Value("kind")
@@ -66,7 +65,7 @@ func TestAdaptiveEventMetricsBoundLabels(t *testing.T) {
 			}
 		}
 	}
-	if len(series) != 2 || !series["torana_suggestions_total/other/pending/plugin"] || !series["torana_directives_total/other/other"] {
+	if len(series) != 1 || !series["torana_suggestions_total/other/pending/plugin"] {
 		t.Fatalf("unexpected adaptive metric series: %v", series)
 	}
 }

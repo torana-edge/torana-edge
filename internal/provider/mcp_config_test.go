@@ -9,7 +9,7 @@ import (
 
 func TestMCPConfigurationDefaultsAndExplicitProtection(t *testing.T) {
 	cfg := DefaultConfig()
-	if cfg.MCP.Enabled || !cfg.Harness.DirectiveSetupEnabled() || len(cfg.Plugins.ProtectedNamespaces()) != 3 {
+	if cfg.MCP.Enabled || len(cfg.Plugins.ProtectedNamespaces()) != 3 {
 		t.Fatal("unexpected opt-in/default policy")
 	}
 	cfg.Plugins.Protected = []string{}
@@ -35,7 +35,7 @@ func TestUnmanagedLoadPreservesFeatureConfiguration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !cfg.Suggestions.Enabled || !cfg.Directives.Enabled || !cfg.MCP.Enabled || cfg.MCP.Access["logger._disable"] != "never" || cfg.Harness.DirectiveSetupEnabled() {
+	if !cfg.Suggestions.Enabled || !cfg.MCP.Enabled || cfg.MCP.Access["logger._disable"] != "never" {
 		t.Fatalf("configuration discarded: %+v", cfg)
 	}
 }
@@ -48,8 +48,6 @@ func TestMCPConfigurationRejectsInvalidOperatorPolicy(t *testing.T) {
 		func(c *Config) { c.MCP.ServerNames = []string{"bad name"} },
 		func(c *Config) { c.Plugins.Protected = []string{"pii", "pii"} },
 		func(c *Config) { c.Plugins.Protected = []string{"bad name"} },
-		func(c *Config) { c.Assistant = AssistantConfig{Provider: "absent", Model: "small"} },
-		func(c *Config) { c.Assistant = AssistantConfig{Model: "small"} },
 	} {
 		cfg := DefaultConfig()
 		mutate(&cfg)

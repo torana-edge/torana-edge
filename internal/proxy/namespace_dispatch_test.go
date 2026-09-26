@@ -61,38 +61,6 @@ func TestOperationDispatchRejectsInputAndFloorsBeforeSideEffects(t *testing.T) {
 	}
 }
 
-func TestOperationDispatchRequiresVerifiedBindingAndRechecksDirective(t *testing.T) {
-	p := catalogTestPolicy(t, 1)
-	entry := p.registry.entries["logger"]
-	op := plugin.AgentOperation{ID: "pin", Risk: "write", ModelAccess: "never", Directive: &plugin.AgentDirective{Command: "pin", UserDirect: true}, InputSchema: json.RawMessage(`{"type":"object","additionalProperties":false}`)}
-	entry.Operations = append(entry.Operations, namespaceOperation{ID: op.ID, Risk: op.Risk, ModelAccess: "never", ConversationBinding: "required", Source: "plugin", Callable: true, Guest: &op})
-	p.registry.entries["logger"] = entry
-	count := 0
-	d := operationDispatch{policy: p, execute: func(_ context.Context, call operationCall) (any, *mcpserver.DomainError, error) {
-		count++
-		if call.Binding.ConversationID != "host-conversation" {
-			t.Fatal("wrong bound conversation")
-		}
-		return nil, nil, nil
-	}}
-	call := namespaceDirectiveCall{Namespace: "logger", Operation: "pin", Input: json.RawMessage(`{}`), Confirm: false}
-	result, _ := d.invokeDirective(context.Background(), call, plugin.MCPBinding{})
-	if result.Error == nil || result.Error.Code != "unbound_conversation" || count != 0 {
-		t.Fatalf("unbound write executed: %+v", result)
-	}
-	bound := plugin.MCPBinding{Bound: true, ConversationID: "host-conversation", CallID: "host-call"}
-	result, err := d.invokeDirective(context.Background(), call, bound)
-	if err != nil || !result.OK || count != 1 {
-		t.Fatalf("explicit directive not executed: %+v %v", result, err)
-	}
-	// A caller cannot set Confirm=false to bypass a changed protection policy.
-	p.protected["logger"] = true
-	result, _ = d.invokeDirective(context.Background(), call, bound)
-	if result.Error == nil || result.Error.Code != "access_denied" || count != 1 {
-		t.Fatal("directive bypassed execution-time policy")
-	}
-}
-
 func TestOperationDispatchDoesNotEchoSchemaOrFailedOutput(t *testing.T) {
 	p := catalogTestPolicy(t, 1)
 	entry := p.registry.entries["logger"]

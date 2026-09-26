@@ -31,10 +31,14 @@ torana suggestions accept <suggestion-id> --conversation <conversation-id> --yes
 torana suggestions dismiss <suggestion-id> --conversation <conversation-id> --yes
 ```
 
-Accepting records your choice. It does not automatically change your harness's model. If the suggestion names another model, switch models in the harness yourself; Torana can then recognize that switch for the conversation. Codes and IDs are single-use for accepting or dismissing a pending suggestion.
+For a confirmed built-in plugin change, accepting applies the change and returns its execution result. A model-switch suggestion does not automatically change your harness's model: switch models in the harness yourself, and Torana can recognize that switch. Suggestion IDs are single-use for accepting or dismissing a pending suggestion.
 
 Some harnesses can also show a short, signed Torana notice at the end of a completed assistant reply. This display channel is opt-in for specific verified harness identity sources. It is never added to tool-calling or incomplete replies, and Torana removes its own notice from later requests before a plugin or model sees the history. If your harness is not allowlisted, use the CLI to see suggestions; the suggestion itself is still available there.
 
 The display settings live under `config.suggestions.notice.harnesses`, keyed by the named harness identity source Torana recognized (for example, `claude-code-session` or `codex-thread`). A generic thread header or content-derived identity cannot enable notices. Leave the map empty unless you have checked that the harness preserves and replays the signed markers. For that check, `config.suggestions.notice.probe: true` appends a fixed, non-actionable test notice on completed replies for allowlisted sources. Turn the probe off after testing; it does not create a suggestion or accept code. A strip failure disables later notices for that conversation, while the CLI remains available.
 
-See [Torana commands](DIRECTIVES.md) if you want to accept or dismiss a suggestion from inside a supported conversation.
+Connect Torana's MCP server to let your harness discover and request operations. Pending confirmations remain available in Torana's UI and CLI. Notices are informational: they never contain confirmation codes or chat commands.
+
+## Upgrading older settings
+
+The former in-chat command channel has been removed; use MCP or the CLI. Legacy `directives`, `assistant`, and `harness.setup_from_directive` settings are ignored when loading an older configuration. Existing signed Responses reply IDs are decoded for one release so resumed conversations can continue.
