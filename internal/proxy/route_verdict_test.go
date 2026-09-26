@@ -88,6 +88,43 @@ func TestRouteOutcomeSeparatesPluginRouteFromFailover(t *testing.T) {
 	}
 }
 
+func TestRouteEffortOutcomeOnObservationOnlyResponses(t *testing.T) {
+	// Streaming completions and upstream errors both use chatResponse with no
+	// mutable assistant message before dispatching the after-response hook.
+	for _, tc := range []struct {
+		name, effort, status string
+		upstreamStatus       int
+	}{
+		{"stream completion", "high", "applied", http.StatusOK},
+		{"upstream error", "", "omitted", http.StatusBadGateway},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rs := &reqState{
+				Provider: "target", Model: "target-model", UpstreamStatus: tc.upstreamStatus,
+				RouteAttempted: true, RoutePlugin: "router", RouteProvider: "target", RouteModel: "target-model",
+				EffortLevel: tc.effort, EffortStatus: tc.status,
+			}
+			response := rs.chatResponse(rs.Model, "", nil, "")
+			if response.Message != nil || response.UpstreamStatus != tc.upstreamStatus {
+				t.Fatalf("observation-only response = %+v", response)
+			}
+			var meta struct {
+				Route struct {
+					Effort string `json:"effort"`
+					Status string `json:"effort_status"`
+					Plugin string `json:"verdict_plugin"`
+				} `json:"_route_applied"`
+			}
+			if err := json.Unmarshal(response.ToranaMetaJSON, &meta); err != nil {
+				t.Fatal(err)
+			}
+			if meta.Route.Effort != tc.effort || meta.Route.Status != tc.status || meta.Route.Plugin != "router" {
+				t.Fatalf("route effort outcome = %+v", meta.Route)
+			}
+		})
+	}
+}
+
 func TestRouteRefusalCodes(t *testing.T) {
 	base := provider.Config{Providers: map[string]provider.Provider{
 		"different_format": {URL: "https://other.example", Format: "anthropic"},

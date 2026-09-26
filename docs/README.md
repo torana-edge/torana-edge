@@ -11,6 +11,7 @@ Start small: route one request, see it in the feed, then add one plugin.
 - [Running plugins](PLUGINS.md): installation, resources, ordering and failure policy.
 - [Credentials](CREDENTIALS.md): caller keys, named secrets and safe updates.
 - [Harness compatibility](HARNESS_COMPATIBILITY.md) and [protocol bridges](PROTOCOL_BRIDGES.md).
+- [Reasoning effort](EFFORT.md): optional, operator-declared effort choices across model API shapes.
 - [Local models](LOCAL_MODELS.md) and [optional TLS ingress](GEMINI_ANTIGRAVITY.md).
 - [Cache backends](CACHE.md), [provider prompt caching](PROMPT_CACHING.md), [Responses compaction](RESPONSES_COMPACTION.md).
 - [Audit logging](AUDIT_LOG.md) and [upgrades](UPGRADE_NOTES.md).
