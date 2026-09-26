@@ -13,36 +13,49 @@ const observedArgumentLimit = 64 << 10
 const observedCallLimit = 64
 
 type observedCall struct {
-	id, tool  string
-	arguments strings.Builder
-	complete  bool
+	id, tool, name string
+	arguments      strings.Builder
+	complete       bool
 }
 
 // ObserveStream is a transparent event tee. Evidence is committed only after
 // a clean, completed stream closes; errors, cancellation and unfinished tool
 // calls never grant bindings. The caller passes the client-facing event stream.
-func (c *Correlator) ObserveStream(ctx context.Context, input <-chan engine.StreamEvent, shape, conversation string, servers []string) <-chan engine.StreamEvent {
+// stopSource must unblock the producer and cause input to close on cancellation
+// (usually by closing the upstream HTTP body). It may be nil only when input is
+// already closed or its producer independently observes this same context.
+func (c *Correlator) ObserveStream(ctx context.Context, input <-chan engine.StreamEvent, shape, conversation, requestID string, servers []string, stopSource func()) <-chan engine.StreamEvent {
 	output := make(chan engine.StreamEvent)
 	servers = append([]string(nil), servers...)
 	go func() {
 		defer close(output)
 		calls := map[int]*observedCall{}
-		responseID, finish := "", ""
-		failed, overflow := false, false
-		argumentBytes := 0
+		finish := ""
+		failed := false
+		overflow := map[string]bool{}
+		cancelInput := func() {
+			// The caller must close the upstream reader (or stop its producer)
+			// here. Parsers use unbuffered sends without context selects: drain
+			// their real input after closing the reader to release in-flight sends.
+			if stopSource != nil {
+				stopSource()
+			}
+			go func() {
+				for range input {
+				}
+			}()
+		}
 		for {
 			var event engine.StreamEvent
 			var open bool
 			select {
 			case <-ctx.Done():
+				cancelInput()
 				return
 			case event, open = <-input:
 			}
 			if !open {
 				break
-			}
-			if event.MessageStart != nil {
-				responseID = event.MessageStart.ID
 			}
 			if event.Error != nil {
 				failed = true
@@ -59,9 +72,9 @@ func (c *Correlator) ObserveStream(ctx context.Context, input <-chan engine.Stre
 						failed = true
 					}
 					if len(calls) >= observedCallLimit {
-						overflow = true
+						overflow[tool] = true
 					} else {
-						calls[start.Index] = &observedCall{id: start.ID, tool: tool}
+						calls[start.Index] = &observedCall{id: start.ID, tool: tool, name: start.Name}
 					}
 				}
 			}
@@ -70,10 +83,9 @@ func (c *Correlator) ObserveStream(ctx context.Context, input <-chan engine.Stre
 					if call.complete || delta.InputTextDelta != nil {
 						failed = true
 					}
-					if len(delta.ArgumentsDelta) > observedArgumentLimit-argumentBytes {
-						overflow = true
-					} else if !overflow {
-						argumentBytes += len(delta.ArgumentsDelta)
+					if len(delta.ArgumentsDelta) > observedArgumentLimit-call.arguments.Len() {
+						overflow[call.tool] = true
+					} else if !overflow[call.tool] {
 						call.arguments.WriteString(delta.ArgumentsDelta)
 					}
 				}
@@ -85,6 +97,7 @@ func (c *Correlator) ObserveStream(ctx context.Context, input <-chan engine.Stre
 			}
 			select {
 			case <-ctx.Done():
+				cancelInput()
 				return
 			case output <- event:
 			}
@@ -93,12 +106,18 @@ func (c *Correlator) ObserveStream(ctx context.Context, input <-chan engine.Stre
 			return
 		}
 		now := time.Now()
-		if overflow {
-			// Dropping evidence could hide an ambiguity with another stream.
+		if len(overflow) > 0 {
+			// Scope saturation to affected tools, not all MCP discovery/calls.
+			// Even oversized raw arguments can normalize to a small request
+			// (e.g. whitespace); simply dropping them could hide an ambiguity.
 			c.mu.Lock()
-			c.saturatedUntil = now.Add(correlationTTL)
+			if c.saturatedTools == nil {
+				c.saturatedTools = map[string]time.Time{}
+			}
+			for tool := range overflow {
+				c.saturatedTools[tool] = now.Add(correlationTTL)
+			}
 			c.mu.Unlock()
-			return
 		}
 		switch finish {
 		case "stop", "tool_calls", "tool_use", "end_turn", "STOP":
@@ -116,9 +135,15 @@ func (c *Correlator) ObserveStream(ctx context.Context, input <-chan engine.Stre
 			}
 		}
 		for index, call := range calls {
+			if overflow[call.tool] {
+				continue
+			}
 			id := call.id
-			if id == "" && strings.HasPrefix(shape, "gemini") && responseID != "" {
-				id = fmt.Sprintf("gemini:%s:%d", responseID, index)
+			if strings.HasPrefix(shape, "gemini") && (id == "" || id == call.name) {
+				id = ""
+				if requestID != "" {
+					id = fmt.Sprintf("gemini:%s:%d", requestID, index)
+				}
 			}
 			c.Record(call.tool, []byte(call.arguments.String()), Binding{ConversationID: conversation, CallID: id}, now)
 		}
