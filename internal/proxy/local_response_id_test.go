@@ -1,6 +1,8 @@
 package proxy
 
 import (
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -23,7 +25,7 @@ func TestRewriteLocalPreviousResponseIDPreservesOtherBytes(t *testing.T) {
 		{"only member", "", `{"previous_response_id":%s}`, `{}`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			id, err := annotate.EncodeLocalResponseID(signer, tc.real)
+			id, err := legacyResponseIDFixture(signer, tc.real)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -35,4 +37,13 @@ func TestRewriteLocalPreviousResponseIDPreservesOtherBytes(t *testing.T) {
 			}
 		})
 	}
+}
+
+func legacyResponseIDFixture(signer annotate.Signer, providerID string) (string, error) {
+	const nonce = "0123456789abcdef"
+	mac, err := signer.MAC("torana/local-response/v1", providerID+"\x00"+nonce)
+	if err != nil {
+		return "", err
+	}
+	return "resp_torana_" + base64.RawURLEncoding.EncodeToString([]byte(providerID)) + "." + nonce + "." + hex.EncodeToString(mac[:12]), nil
 }

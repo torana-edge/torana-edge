@@ -21,12 +21,11 @@ type namespaceInvokeInput struct {
 // conversation ID. Keep it intact when passing to execution or consent so
 // neither path can silently resolve a newer plugin than the one reviewed.
 type operationCall struct {
-	Entry         namespaceEntry
-	Operation     namespaceOperation
-	Input         json.RawMessage
-	Binding       plugin.MCPBinding
-	Catalog       []catalogNamespace
-	UserDirective bool
+	Entry     namespaceEntry
+	Operation namespaceOperation
+	Input     json.RawMessage
+	Binding   plugin.MCPBinding
+	Catalog   []catalogNamespace
 }
 
 type operationDispatch struct {
@@ -47,16 +46,10 @@ func (d *operationDispatch) invoke(ctx context.Context, raw json.RawMessage, bin
 	if len(raw) > 64<<10 || !strings.HasPrefix(strings.TrimSpace(string(raw)), "{") || decoder.Decode(&input) != nil || decoder.Decode(&trailing) != io.EOF || input.Namespace == "" || input.Operation == "" {
 		return operationError("invalid_input", "Choose a namespace and operation, with an optional input object."), nil
 	}
-	return d.dispatch(ctx, input, binding, false)
+	return d.dispatch(ctx, input, binding)
 }
 
-// invokeDirective receives the resolver's typed input, not raw command text.
-// Recheck policy here too: command resolution is not an execution grant.
-func (d *operationDispatch) invokeDirective(ctx context.Context, call namespaceDirectiveCall, binding plugin.MCPBinding) (mcpserver.Result, error) {
-	return d.dispatch(ctx, namespaceInvokeInput{Namespace: call.Namespace, Operation: call.Operation, Input: call.Input}, binding, true)
-}
-
-func (d *operationDispatch) dispatch(ctx context.Context, input namespaceInvokeInput, binding plugin.MCPBinding, userDirective bool) (mcpserver.Result, error) {
+func (d *operationDispatch) dispatch(ctx context.Context, input namespaceInvokeInput, binding plugin.MCPBinding) (mcpserver.Result, error) {
 	if d == nil || d.policy == nil || d.policy.registry == nil {
 		return operationError("not_configured", "Torana operations are unavailable."), nil
 	}
@@ -72,27 +65,19 @@ func (d *operationDispatch) dispatch(ctx context.Context, input namespaceInvokeI
 	// The explicit user undo handlers call the host executor directly. A future
 	// model change-ID proposal needs its own consent path, not this code path.
 	if op.Source == "core" && op.ID == "changes.undo" {
-		return operationError("access_denied", "Undo a change through Torana's UI, CLI, or a user-authored undo directive."), nil
+		return operationError("access_denied", "Undo a change through Torana's UI or CLI."), nil
 	}
 	confirm := false
-	if userDirective {
-		access := d.policy.DirectiveAllowed(entry.Name, op.ID)
-		if !access.Allowed {
-			return operationError("access_denied", "Use Torana's UI or CLI for this operation."), nil
-		}
-		confirm = access.Confirm
-	} else {
-		if !op.Callable && !d.policy.floor(entry, op) {
-			result := operationError("namespace_unavailable", "This operation is not currently available.")
-			result.Error.Details = &mcpserver.ErrorDetails{Status: entry.Status}
-			return result, nil
-		}
-		access := d.policy.ModelReachable(entry.Name, op.ID)
-		if access == "never" {
-			return operationError("access_denied", "Use Torana's UI or CLI for this operation."), nil
-		}
-		confirm = access == "confirm"
+	if !op.Callable && !d.policy.floor(entry, op) {
+		result := operationError("namespace_unavailable", "This operation is not currently available.")
+		result.Error.Details = &mcpserver.ErrorDetails{Status: entry.Status}
+		return result, nil
 	}
+	access := d.policy.ModelReachable(entry.Name, op.ID)
+	if access == "never" {
+		return operationError("access_denied", "Use Torana's UI or CLI for this operation."), nil
+	}
+	confirm = access == "confirm"
 	var object map[string]json.RawMessage
 	if len(input.Input) == 0 {
 		input.Input = json.RawMessage(`{}`)
@@ -126,7 +111,7 @@ func (d *operationDispatch) dispatch(ctx context.Context, input namespaceInvokeI
 		result.Error.Retryable = true
 		return result, nil
 	}
-	call := operationCall{Entry: entry, Operation: op, Input: append(json.RawMessage(nil), input.Input...), Binding: binding, UserDirective: userDirective}
+	call := operationCall{Entry: entry, Operation: op, Input: append(json.RawMessage(nil), input.Input...), Binding: binding}
 	if op.Source == "core" && op.ID == "plugins.list" {
 		call.Catalog = []catalogNamespace{}
 		for _, item := range d.policy.registry.list() {

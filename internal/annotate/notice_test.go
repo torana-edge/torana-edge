@@ -20,6 +20,9 @@ func TestSignedNoticeStripsAcrossRestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if strings.Contains(notice, item.Code) {
+		t.Fatal("notice exposed a confirmation code")
+	}
 	second, err := secret.Open(directory)
 	if err != nil {
 		t.Fatal(err)

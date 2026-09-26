@@ -2,6 +2,7 @@ package annotate
 
 import (
 	"encoding/base64"
+	"encoding/hex"
 	"strings"
 	"testing"
 
@@ -14,7 +15,7 @@ func TestLocalResponseIDSurvivesRestartAndRejectsTampering(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	id, err := EncodeLocalResponseID(first, "resp_real_123")
+	id, err := legacyResponseIDFixture(first, "resp_real_123")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -47,4 +48,13 @@ func TestLocalResponseIDSurvivesRestartAndRejectsTampering(t *testing.T) {
 	if _, recognized, err := DecodeLocalResponseID(second, substituted); !recognized || err == nil {
 		t.Fatalf("substituted provider ID accepted: recognized %v, err %v", recognized, err)
 	}
+}
+
+func legacyResponseIDFixture(signer Signer, providerID string) (string, error) {
+	const nonce = "0123456789abcdef"
+	mac, err := signer.MAC(localResponsePurpose, providerID+"\x00"+nonce)
+	if err != nil {
+		return "", err
+	}
+	return localResponsePrefix + base64.RawURLEncoding.EncodeToString([]byte(providerID)) + "." + nonce + "." + hex.EncodeToString(mac[:12]), nil
 }

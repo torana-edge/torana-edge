@@ -3,7 +3,6 @@ package provider
 import (
 	"fmt"
 	"regexp"
-	"strings"
 )
 
 // MCP is opt-in. Access entries may tighten model access; they cannot relax
@@ -21,19 +20,6 @@ func (c MCPConfig) ResponseServerNames() []string {
 		return []string{"torana"}
 	}
 	return append([]string{}, c.ServerNames...)
-}
-
-type AssistantConfig struct {
-	Provider string `json:"provider,omitempty"`
-	Model    string `json:"model,omitempty"`
-}
-
-type HarnessConfig struct {
-	SetupFromDirective *bool `json:"setup_from_directive,omitempty"`
-}
-
-func (h HarnessConfig) DirectiveSetupEnabled() bool {
-	return h.SetupFromDirective == nil || *h.SetupFromDirective
 }
 
 func (p PluginsConfig) ProtectedNamespaces() []string {
@@ -65,15 +51,6 @@ func (c Config) validateMCPConfiguration() error {
 			return fmt.Errorf("plugins.protected requires distinct plugin namespace names")
 		}
 		seen[name] = true
-	}
-	if c.Assistant.Provider == "" && c.Assistant.Model == "" {
-		return nil
-	}
-	if c.Assistant.Provider == "" || strings.TrimSpace(c.Assistant.Model) == "" || len(c.Assistant.Model) > 256 || strings.ContainsAny(c.Assistant.Model, "\r\n\x00") {
-		return fmt.Errorf("assistant requires both provider and a bounded model name")
-	}
-	if _, exists := c.Providers[c.Assistant.Provider]; !exists {
-		return fmt.Errorf("assistant.provider must name a configured provider")
 	}
 	return nil
 }

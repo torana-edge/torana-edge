@@ -146,10 +146,6 @@ func (s *Server) applyConfirmedStandardOperation(ctx context.Context, conversati
 		return operationError("stale_digest", "The plugin changed; request and review a fresh operation."), nil
 	}
 	allowed := policy.ModelReachable(entry.Name, operation.ID) == "confirm"
-	if intent.UserDirective {
-		access := policy.DirectiveAllowed(entry.Name, operation.ID)
-		allowed = access.Allowed && access.Confirm
-	}
 	if !allowed {
 		return operationError("access_denied", "This operation is no longer available for confirmation."), nil
 	}

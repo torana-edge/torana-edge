@@ -117,33 +117,3 @@ func TestStripNoticeOnlyAppendedElements(t *testing.T) {
 		})
 	}
 }
-
-func TestStripWholeLocalReplyFromReplayedHistory(t *testing.T) {
-	signer, err := secret.Open(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	reply, err := annotate.RenderLocalReply(signer, "conversation", "local_1", "Suggestion accepted")
-	if err != nil {
-		t.Fatal(err)
-	}
-	encoded, _ := json.Marshal(reply)
-	tests := []struct {
-		shape, prefix, suffix, want string
-	}{
-		{"openai-chat", `{"messages":[{"role":"user","content":"hello"},{"role":"assistant","content":`, `}]}`, `{"messages":[{"role":"user","content":"hello"}]}`},
-		{"anthropic", `{"messages":[{"role":"user","content":"hello"},{"role":"assistant","content":[{"type":"text","text":`, `}]}]}`, `{"messages":[{"role":"user","content":"hello"}]}`},
-		{"openai-responses", `{"input":[{"role":"user","content":"hello"},{"role":"assistant","content":[{"type":"output_text","text":`, `}]}]}`, `{"input":[{"role":"user","content":"hello"}]}`},
-		{"gemini", `{"contents":[{"role":"user","parts":[{"text":"hello"}]},{"role":"model","parts":[{"text":`, `}]}]}`, `{"contents":[{"role":"user","parts":[{"text":"hello"}]}]}`},
-		{"gemini-codeassist", `{"request":{"contents":[{"role":"user","parts":[{"text":"hello"}]},{"role":"model","parts":[{"text":`, `}]}]}}`, `{"request":{"contents":[{"role":"user","parts":[{"text":"hello"}]}]}}`},
-	}
-	for _, tc := range tests {
-		t.Run(tc.shape, func(t *testing.T) {
-			body := []byte(tc.prefix + string(encoded) + tc.suffix)
-			got, changed, err := stripSignedNoticesJSON(body, tc.shape, signer, "conversation")
-			if err != nil || !changed || string(got) != tc.want {
-				t.Fatalf("strip = %s, changed %v, err %v; want %s", got, changed, err, tc.want)
-			}
-		})
-	}
-}

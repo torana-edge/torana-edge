@@ -41,7 +41,6 @@ import (
 	"github.com/torana-edge/torana-edge/internal/controlplane"
 	"github.com/torana-edge/torana-edge/internal/conversation"
 	"github.com/torana-edge/torana-edge/internal/credentialstore"
-	"github.com/torana-edge/torana-edge/internal/directive"
 	"github.com/torana-edge/torana-edge/internal/economics"
 	"github.com/torana-edge/torana-edge/internal/effort"
 	"github.com/torana-edge/torana-edge/internal/engine"
@@ -1228,29 +1227,6 @@ func New(cfg Config) (*Server, error) {
 					}
 				}
 			}
-			var latestDirectives []directive.Command
-			if clean, commands, changed, stripErr := stripDirectiveText(body, noticeShape(clientFormat, chat), nil); stripErr != nil {
-				rejectMalformed()
-				return
-			} else {
-				latestDirectives = commands
-				if changed {
-					body = clean
-					if exchange != nil {
-						chat, err = bridge.ParseRequest(exchange.Client, body, strippedPath)
-					} else {
-						chat, err = fmt.Request.Unmarshal(body)
-					}
-					if err != nil {
-						rejectMalformed()
-						return
-					}
-					if _, cerr := pbconv.ToPBChatRequestChecked(chat); cerr != nil {
-						rejectMalformed()
-						return
-					}
-				}
-			}
 			if exchange != nil {
 				clientCopy := *chat
 				exchange.ClientRequest = &clientCopy
@@ -1314,39 +1290,6 @@ func New(cfg Config) (*Server, error) {
 					}
 				}
 			}
-			if len(latestDirectives) > 0 {
-				message := "Torana commands are disabled in this configuration."
-				if currentCfg.Providers.Directives.Enabled {
-					if latestUserHasOtherContent(chat) {
-						for _, command := range latestDirectives {
-							metrics.RecordDirective(req.Context(), command.Verb, "mixed")
-						}
-						message = "Torana saw a command alongside other text. Nothing was sent or changed. Send the command alone, then resend your other text."
-					} else {
-						message = dispatchCoreDirectives(s.suggestions, rs.ConversationID, rs.UserTurn, latestDirectives)
-					}
-				} else {
-					for _, command := range latestDirectives {
-						metrics.RecordDirective(req.Context(), command.Verb, "disabled")
-					}
-				}
-				rc := req.Context().Value(routeContextKey{}).(*RouteContext)
-				rendered, renderErr := s.renderDirectiveReply(req.Context(), fmt, chat, rs.ConversationID, body, message)
-				if renderErr != nil {
-					rc.Block = renderHostError(prov.Format)
-					rs.Verdict = "host-error"
-					rs.AuditErrorCode = "directive_reply_error"
-				} else {
-					rc.Block = rendered
-					rs.Verdict = "respond"
-					rs.AuditErrorCode = "directive_reply"
-				}
-				rs.Synthetic = true
-				req.Body = io.NopCloser(bytes.NewReader(nil))
-				req.ContentLength = 0
-				return
-			}
-
 			// Publish the routing decision so plugins can ask the host about
 			// this provider — pricing and cache semantics are keyed by provider
 			// name, and a plugin that cannot name its own provider cannot look
@@ -2355,20 +2298,11 @@ func New(cfg Config) (*Server, error) {
 			if _, supplied := topLevel["suggestions"]; !supplied {
 				incoming.Suggestions = cur.Suggestions
 			}
-			if _, supplied := topLevel["directives"]; !supplied {
-				incoming.Directives = cur.Directives
-			}
 			if _, supplied := topLevel["effort"]; !supplied {
 				incoming.Effort = cur.Effort
 			}
 			if _, supplied := topLevel["mcp"]; !supplied {
 				incoming.MCP = cur.MCP
-			}
-			if _, supplied := topLevel["assistant"]; !supplied {
-				incoming.Assistant = cur.Assistant
-			}
-			if _, supplied := topLevel["harness"]; !supplied {
-				incoming.Harness = cur.Harness
 			}
 			// Never let the settings surface mutate the pipeline.
 			incoming.Plugins = cur.Plugins

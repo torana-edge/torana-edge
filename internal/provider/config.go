@@ -471,11 +471,8 @@ type Config struct {
 	Credentials CredentialsConfig   `json:"credentials,omitempty"`
 	Plugins     PluginsConfig       `json:"plugins,omitempty"`
 	Suggestions SuggestionsConfig   `json:"suggestions,omitempty"`
-	Directives  DirectivesConfig    `json:"directives,omitempty"`
 	Effort      EffortConfig        `json:"effort,omitempty"`
 	MCP         MCPConfig           `json:"mcp,omitempty"`
-	Assistant   AssistantConfig     `json:"assistant,omitempty"`
-	Harness     HarnessConfig       `json:"harness,omitempty"`
 	Limits      Limits              `json:"limits,omitempty"`
 	// Cache selects the cross-request plugin state backend: in-process
 	// memory (default) or Redis for distributed / restart-safe deployments.
@@ -503,12 +500,6 @@ type NoticeConfig struct {
 	Harnesses map[string]bool `json:"harnesses,omitempty"`
 	// Probe appends a fixed signed test notice on completed turns. Debug only.
 	Probe bool `json:"probe,omitempty"`
-}
-
-// Directives are an opt-in, host-local command channel in user messages.
-// Command lines are stripped from provider history even when this is off.
-type DirectivesConfig struct {
-	Enabled bool `json:"enabled,omitempty"`
 }
 
 type EffortConfig struct {
@@ -963,6 +954,10 @@ func Load(path string) (Config, error) {
 	}
 
 	var user Config
+	raw, err = discardObsoleteChatSettings(raw)
+	if err != nil {
+		return cfg, fmt.Errorf("parsing config %q: %w", path, err)
+	}
 	decoder := json.NewDecoder(bytes.NewReader(raw))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&user); err != nil {
@@ -1026,17 +1021,8 @@ func Load(path string) (Config, error) {
 	if has("suggestions") {
 		cfg.Suggestions = user.Suggestions
 	}
-	if has("directives") {
-		cfg.Directives = user.Directives
-	}
 	if has("mcp") {
 		cfg.MCP = user.MCP
-	}
-	if has("assistant") {
-		cfg.Assistant = user.Assistant
-	}
-	if has("harness") {
-		cfg.Harness = user.Harness
 	}
 	if has("limits") {
 		cfg.Limits = user.Limits

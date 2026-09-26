@@ -47,7 +47,7 @@ func Render(signer Signer, conversation string, item suggest.Suggestion) (string
 	}
 	var body strings.Builder
 	fmt.Fprintf(&body, "\n\n%s%s:%s]\n", beginPrefix, item.ID, sig)
-	fmt.Fprintf(&body, "[torana] Suggestion %s: %s\n", item.Code, item.Title)
+	fmt.Fprintf(&body, "[torana] Suggestion: %s\n", item.Title)
 	if item.Body != "" {
 		fmt.Fprintf(&body, "Why: %s\n", item.Body)
 	}
@@ -55,27 +55,12 @@ func Render(signer Signer, conversation string, item suggest.Suggestion) (string
 		fmt.Fprintf(&body, "One-time cost estimate: $%.2f\n", *item.CostUSD)
 	}
 	if item.HarnessTargetModel != "" {
-		fmt.Fprintf(&body, "To accept, switch your harness to %s, or reply with:\n", item.HarnessTargetModel)
+		fmt.Fprintf(&body, "Switch your harness to %s, or review this suggestion in Torana (torana suggestions list).\n", item.HarnessTargetModel)
 	} else {
-		body.WriteString("To accept, reply with:\n")
+		body.WriteString("Review this suggestion in Torana (torana suggestions list).\n")
 	}
-	fmt.Fprintf(&body, "torana> accept %s\nTo dismiss: torana> dismiss %s\n", item.Code, item.Code)
 	fmt.Fprintf(&body, "%s%s:%s]\n", endPrefix, item.ID, sig)
 	return body.String(), nil
-}
-
-// RenderLocalReply marks a host-only assistant reply for removal from later
-// client-supplied history. Its ID begins with local_, distinguishing it from
-// a suggestion appended to an actual provider reply.
-func RenderLocalReply(signer Signer, conversation, id, message string) (string, error) {
-	if !strings.HasPrefix(id, "local_") {
-		return "", errors.New("local reply ID must use local_ prefix")
-	}
-	sig, err := signature(signer, conversation, id)
-	if err != nil {
-		return "", err
-	}
-	return fmt.Sprintf("%s%s:%s]\n[torana] %s\n%s%s:%s]", beginPrefix, id, sig, message, endPrefix, id, sig), nil
 }
 
 // RenderProbe uses the normal signed notice grammar without creating a real
