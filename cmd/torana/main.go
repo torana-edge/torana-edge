@@ -25,6 +25,7 @@ import (
 	"github.com/torana-edge/torana-edge/internal/controlcmd"
 	"github.com/torana-edge/torana-edge/internal/conversationcmd"
 	"github.com/torana-edge/torana-edge/internal/credentialcmd"
+	"github.com/torana-edge/torana-edge/internal/harnesscmd"
 	"github.com/torana-edge/torana-edge/internal/instance"
 	"github.com/torana-edge/torana-edge/internal/lifecyclecmd"
 	"github.com/torana-edge/torana-edge/internal/metrics"
@@ -103,6 +104,7 @@ Usage:
   torana agent <command>         discover and call plugin agent operations
   torana mcp <command>           enable MCP, inspect it, or manage its token
   torana changes <command>       list or undo confirmed plugin changes
+  torana harness <command>       connect MCP to Claude Code or Codex
   torana version                 print the version
   torana help                    print this message
 
@@ -270,6 +272,13 @@ func parsePortOverride(v string) (int, error) {
 }
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "harness" {
+		if err := harnesscmd.Run(os.Args[1:], os.Stdin, os.Stdout, os.Stderr); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(2)
+		}
+		return
+	}
 	if len(os.Args) > 1 && os.Args[1] == "--debug" {
 		_ = os.Setenv("TORANA_LOG_LEVEL", "debug")
 		os.Args = append([]string{os.Args[0]}, os.Args[2:]...)
