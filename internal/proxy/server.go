@@ -1302,6 +1302,13 @@ func New(cfg Config) (*Server, error) {
 			if v, err := json.Marshal(rs.ConversationID); err == nil {
 				chat.ToranaMeta, _ = chat.ToranaMeta.SetMember("_conversation_id", v)
 			}
+			if currentCfg.Providers.MCP.Enabled {
+				presence := mcpserver.ToolPresence(chat, currentCfg.Providers.MCP.ResponseServerNames())
+				if v, err := json.Marshal(presence); err == nil {
+					chat.ToranaMeta, _ = chat.ToranaMeta.SetMember("_torana_mcp", v)
+				}
+				metrics.RecordMCPConnection(req.Context(), convIdentity.Source, presence)
+			}
 			// The path too: Torana forwards whatever the caller sent rather
 			// than synthesizing one, so a plugin replaying this conversation
 			// has no other way to know where it goes.
