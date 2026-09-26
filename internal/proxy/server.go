@@ -4027,6 +4027,7 @@ func (s *Server) newRuntime() *wasm.Runtime {
 	rt.RouteEffortEnabledFunc = func(context.Context) bool {
 		return s.GetConfig().Providers.Effort.Enabled
 	}
+	rt.ValidateRouteFunc = s.validateRouteHost
 	rt.ValidateSyntheticResponseFunc = func(ctx context.Context, response *pb.SyntheticResponse) *pb.HostError {
 		scope, ok := ctx.Value(syntheticResponseScopeKey{}).(syntheticResponseScope)
 		if !ok {

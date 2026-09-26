@@ -1,9 +1,12 @@
 package proxy
 
 import (
+	"context"
+	"encoding/json"
 	"log"
 	"net/http"
 	"net/url"
+	"strings"
 
 	"github.com/torana-edge/torana-edge/internal/bridge"
 	"github.com/torana-edge/torana-edge/internal/engine"
@@ -12,6 +15,56 @@ import (
 	"github.com/torana-edge/torana-edge/internal/wasm"
 	pb "github.com/torana-edge/torana-plugin-sdk/pb/v1"
 )
+
+// validateRouteHost refuses mistakes that can be checked when the plugin
+// issues its verdict. The final transport still rechecks mutable credentials
+// and projection after every plugin has finished.
+func (s *Server) validateRouteHost(ctx context.Context, args *pb.RouteRequestArgs) *pb.HostError {
+	rs := reqStateFrom(ctx)
+	if rs == nil || args == nil {
+		return &pb.HostError{Code: pb.ErrorCode_ERROR_CODE_UNAVAILABLE, Message: "route context is unavailable"}
+	}
+	if args.Provider == "" || args.Provider == rs.Provider {
+		return nil
+	}
+	config := s.GetConfig().Providers
+	target, found := config.Providers[args.Provider]
+	if !found {
+		return &pb.HostError{Code: pb.ErrorCode_ERROR_CODE_NOT_FOUND, Message: "unknown provider"}
+	}
+	scope, ok := ctx.Value(syntheticResponseScopeKey{}).(syntheticResponseScope)
+	if !ok || scope.request == nil || scope.format == nil {
+		return &pb.HostError{Code: pb.ErrorCode_ERROR_CODE_UNAVAILABLE, Message: "route request is unavailable"}
+	}
+	if isOpenAIResponsesRequest(scope.request) && hasProviderSideResponsesHistory(scope.request) {
+		return &pb.HostError{Code: pb.ErrorCode_ERROR_CODE_UNSUPPORTED, Message: "server_state: provider-side Responses history cannot move providers"}
+	}
+	if exchange := exchangeFrom(ctx); exchange != nil {
+		upstream, supported := bridgeTargetProtocol(target, exchange.Client, exchange.Upstream)
+		if !supported {
+			return &pb.HostError{Code: pb.ErrorCode_ERROR_CODE_UNSUPPORTED, Message: "bridge_unrepresentable: target protocol unavailable"}
+		}
+		if exchange.Client.Format() != target.Format && target.Auth.EffectiveMode() == "caller" {
+			return &pb.HostError{Code: pb.ErrorCode_ERROR_CODE_PERMISSION_DENIED, Message: "credential_policy: target requires a credential policy"}
+		}
+		candidate := *scope.request
+		if args.Model != "" {
+			candidate.Model = args.Model
+		} else if target.Bridge != nil && target.Bridge.Model != "" {
+			candidate.Model = target.Bridge.Model
+		}
+		if _, err := bridge.ProjectRequest(&candidate, exchange.Client, upstream, bridgeOptions(target)); err != nil {
+			return &pb.HostError{Code: pb.ErrorCode_ERROR_CODE_UNSUPPORTED, Message: "bridge_unrepresentable: request cannot be projected"}
+		}
+	} else if target.Format != rs.InitialFormat || target.Bridge != nil {
+		return &pb.HostError{Code: pb.ErrorCode_ERROR_CODE_UNSUPPORTED, Message: "format_mismatch: target needs an explicit bridge"}
+	}
+	targetURL, err := url.Parse(target.URL)
+	if err != nil || targetURL.Host == "" {
+		return &pb.HostError{Code: pb.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, Message: "invalid_target_url: provider URL is invalid"}
+	}
+	return nil
+}
 
 // applyRoute validates and applies a plugin routing verdict: rewrite the
 // upstream URL to the target provider, swap credentials, and override the
@@ -39,6 +92,10 @@ func (s *Server) applyRoute(req *http.Request, chat *engine.ChatRequest, origFor
 		if v.Model != "" || v.Effort != pb.Effort_EFFORT_UNSPECIFIED {
 			if v.Model != "" {
 				chat.Model = v.Model
+				if origFormat == "gemini" {
+					req.URL.Path = rewriteGeminiModelPath(req.URL.Path, chat.Model)
+					req.URL.RawPath = ""
+				}
 			}
 			if rs := reqStateFrom(req.Context()); rs != nil {
 				rs.RouteProvider = rs.Provider
@@ -56,6 +113,9 @@ func (s *Server) applyRoute(req *http.Request, chat *engine.ChatRequest, origFor
 	if !ok {
 		log.Printf("[route] %s routed to unknown provider %q — keeping %q", v.Plugin, v.Provider, origName)
 		return refuse("unknown_provider")
+	}
+	if isOpenAIResponsesRequest(chat) && hasProviderSideResponsesHistory(chat) {
+		return refuse("server_state")
 	}
 	exchange := exchangeFrom(req.Context())
 	var upstreamProtocol bridge.Protocol
@@ -127,7 +187,11 @@ func (s *Server) applyRoute(req *http.Request, chat *engine.ChatRequest, origFor
 	req.URL.Scheme = turl.Scheme
 	req.URL.Host = turl.Host
 	req.Host = turl.Host
-	req.URL.Path = joinURLPath(turl.Path, rc.StrippedPath)
+	path := rc.StrippedPath
+	if target.Format == "gemini" && routedModel != "" {
+		path = rewriteGeminiModelPath(path, routedModel)
+	}
+	req.URL.Path = joinURLPath(turl.Path, path)
 	req.URL.RawPath = ""
 	// Failover fallbacks and metrics now follow the target.
 	rc.ProviderName = v.Provider
@@ -140,4 +204,29 @@ func (s *Server) applyRoute(req *http.Request, chat *engine.ChatRequest, origFor
 	metrics.RecordRoutedRequest(req.Context(), origName, v.Provider)
 	log.Printf("[route] %s → %s (model %q)", origName, v.Provider, chat.Model)
 	return true
+}
+
+func hasProviderSideResponsesHistory(chat *engine.ChatRequest) bool {
+	if chat == nil || chat.ProviderExtensions.IsAbsent() {
+		return false
+	}
+	fields, _, err := chat.ProviderExtensions.DecodeObject()
+	if err != nil {
+		return false
+	}
+	var id string
+	return json.Unmarshal(fields["previous_response_id"], &id) == nil && id != ""
+}
+
+func rewriteGeminiModelPath(path, model string) string {
+	start := strings.Index(path, "/models/")
+	if start < 0 {
+		return path
+	}
+	start += len("/models/")
+	end := strings.IndexAny(path[start:], "/:")
+	if end < 0 {
+		return path
+	}
+	return path[:start] + strings.TrimPrefix(model, "models/") + path[start+end:]
 }
