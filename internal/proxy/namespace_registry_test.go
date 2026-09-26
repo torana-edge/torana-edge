@@ -120,3 +120,18 @@ func TestNamespaceAliasCollisionDoesNotBreakDiscovery(t *testing.T) {
 		}
 	}
 }
+
+func TestNamespaceSelfAliasIsNotAConflict(t *testing.T) {
+	r, err := buildNamespaceRegistry([]plugin.PluginBundle{{Manifest: plugin.PluginManifest{Name: "logger"}, Agent: &plugin.AgentDescriptor{Namespace: &plugin.AgentNamespace{Alias: "LOGGER"}}}}, nil, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entries := r.list()
+	if len(entries) != 2 {
+		t.Fatalf("entries=%d", len(entries))
+	}
+	entry, ok := r.resolve("LOGGER", true)
+	if !ok || entry.Name != "logger" || entry.AliasError != "" {
+		t.Fatalf("entry=%+v", entry)
+	}
+}

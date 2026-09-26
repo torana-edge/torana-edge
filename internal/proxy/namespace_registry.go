@@ -148,7 +148,7 @@ func buildNamespaceRegistry(installed []plugin.PluginBundle, loaded []plugin.Loa
 	}
 	claims["torana"]++
 	for _, entry := range r.entries {
-		if entry.Alias != "" {
+		if entry.Alias != "" && !strings.EqualFold(entry.Alias, entry.Name) {
 			claims[strings.ToLower(entry.Alias)]++
 		}
 	}
