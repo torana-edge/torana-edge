@@ -39,6 +39,17 @@ The display settings live under `config.suggestions.notice.harnesses`, keyed by 
 
 Connect Torana's MCP server to let your harness discover and request operations. Pending confirmations remain available in Torana's UI and CLI. Notices are informational: they never contain confirmation codes or chat commands.
 
+## Undo a confirmed plugin change
+
+List the conversation's change history, then use the change ID to restore the prior plugin setup:
+
+```bash
+torana changes list --conversation <conversation-id>
+torana changes undo <change-id> --conversation <conversation-id> --yes
+```
+
+Undo checks that the configuration and installed plugin still match the recorded change. If either has changed, review the current setup instead of overwriting newer work. A change can only be undone once.
+
 ## Upgrading older settings
 
 The former in-chat command channel has been removed; use MCP or the CLI. Legacy `directives`, `assistant`, and `harness.setup_from_directive` settings are ignored when loading an older configuration. Existing signed Responses reply IDs are decoded for one release so resumed conversations can continue.

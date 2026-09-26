@@ -21,6 +21,7 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/torana-edge/torana-edge/internal/controlclient"
+	"github.com/torana-edge/torana-edge/internal/mcpserver"
 	"github.com/torana-edge/torana-edge/internal/mcpshim"
 	"github.com/torana-edge/torana-edge/internal/provider"
 )
@@ -30,7 +31,7 @@ func Handles(args []string) bool {
 		return false
 	}
 	switch args[0] {
-	case "config", "pipeline", "stats", "feed", "agent", "suggestions", "conversations", "mcp":
+	case "config", "pipeline", "stats", "feed", "agent", "suggestions", "conversations", "mcp", "changes":
 		return true
 	case "plugin":
 		return len(args) > 1 && slices.Contains([]string{"status", "inspect", "approve", "revoke", "enable", "disable", "config"}, args[1])
@@ -64,6 +65,8 @@ func Usage(w io.Writer) {
   torana suggestions show <id> --conversation <id>
   torana suggestions accept <id> --conversation <id> --yes
   torana suggestions dismiss <id> --conversation <id> --yes
+  torana changes list --conversation <id>
+  torana changes undo <change-id> --conversation <id> --yes
   torana mcp status                         inspect whether MCP is enabled
   torana mcp enable --yes                    set up its token and enable MCP
   torana mcp disable --yes                   close MCP sessions; retain the token
@@ -165,7 +168,7 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 		return fmt.Errorf("command required")
 	}
 	command, rest := args[0], args[1:]
-	if command == "config" || command == "pipeline" || command == "agent" || command == "plugin" || command == "suggestions" || command == "mcp" {
+	if command == "config" || command == "pipeline" || command == "agent" || command == "plugin" || command == "suggestions" || command == "mcp" || command == "changes" {
 		if len(rest) == 0 || rest[0] == "help" || rest[0] == "--help" || rest[0] == "-h" {
 			Usage(stdout)
 			return nil
@@ -192,9 +195,9 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 		allowed = "yes empty"
 	case "feed":
 		allowed = "follow"
-	case "suggestions list", "suggestions show":
+	case "suggestions list", "suggestions show", "changes list":
 		allowed = "conversation"
-	case "suggestions accept", "suggestions dismiss":
+	case "suggestions accept", "suggestions dismiss", "changes undo":
 		allowed = "conversation yes"
 	case "mcp status", "mcp token", "mcp stdio":
 	case "mcp enable", "mcp disable", "mcp rotate":
@@ -213,7 +216,7 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 		return fmt.Errorf("mcp stdio already uses MCP protocol output; omit --json")
 	}
 	wantArgs := 0
-	if strings.HasPrefix(command, "plugin ") && command != "plugin status" || command == "agent call" || command == "suggestions show" || command == "suggestions accept" || command == "suggestions dismiss" {
+	if strings.HasPrefix(command, "plugin ") && command != "plugin status" || command == "agent call" || command == "suggestions show" || command == "suggestions accept" || command == "suggestions dismiss" || command == "changes undo" {
 		wantArgs = 1
 	}
 	if command != "pipeline order" && len(o.args) != wantArgs {
@@ -222,7 +225,7 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 	if strings.Contains(allowed, "yes") && command != "agent call" && !o.yes {
 		return fmt.Errorf("%s changes the running proxy; review the input and pass --yes", command)
 	}
-	if strings.HasPrefix(command, "suggestions ") && o.conversation == "" {
+	if (strings.HasPrefix(command, "suggestions ") || strings.HasPrefix(command, "changes ")) && o.conversation == "" {
 		return fmt.Errorf("%s requires --conversation <id>; run torana conversations to find it", command)
 	}
 	if command == "pipeline order" && ((len(o.args) == 0 && !o.empty) || (len(o.args) > 0 && o.empty)) {
@@ -271,6 +274,28 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 		return c.call(o)
 	case "suggestions list", "suggestions show", "suggestions accept", "suggestions dismiss":
 		return c.suggestions(command, o)
+	case "changes list":
+		return c.read("/agent/changes?conversation_id=" + url.QueryEscape(o.conversation))
+	case "changes undo":
+		body, _ := json.Marshal(map[string]string{"conversation_id": o.conversation})
+		raw, _, err := c.client.JSON(c.ctx, http.MethodPost, controlclient.BasePath+"/agent/changes/"+url.PathEscape(o.args[0])+"/undo", body, "")
+		if err != nil {
+			return err
+		}
+		var result mcpserver.Result
+		if err := json.Unmarshal(raw, &result); err != nil {
+			return fmt.Errorf("Torana returned an invalid undo result")
+		}
+		if err := output(c.stdout, raw); err != nil {
+			return err
+		}
+		if result.Error != nil {
+			return fmt.Errorf("undo refused (%s): %s", result.Error.Code, result.Error.Message)
+		}
+		if !result.OK {
+			return fmt.Errorf("undo did not complete; check current configuration and change history")
+		}
+		return nil
 	case "mcp status", "mcp enable", "mcp disable", "mcp token", "mcp rotate":
 		return c.mcp(command, o)
 	case "mcp stdio":

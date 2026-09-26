@@ -3042,6 +3042,8 @@ func New(cfg Config) (*Server, error) {
 	// through agent.json. Dispatch still uses the existing isolated
 	// run_on_http_request hook and env.serve_http approval.
 	mux.HandleFunc("/_torana/api/v1/agent/plugins/", s.controlPlaneGuard(s.handlePluginAgentOperation))
+	mux.HandleFunc(changesAPIPath, s.controlPlaneGuard(s.handleOperatorChanges))
+	mux.HandleFunc(changesAPIPath+"/", s.controlPlaneGuard(s.handleOperatorChanges))
 	mux.HandleFunc(suggestionsAPIPath, s.controlPlaneGuard(s.handleAgentSuggestions))
 	mux.HandleFunc(suggestionsAPIPath+"/", s.controlPlaneGuard(s.handleAgentSuggestions))
 	mux.HandleFunc("/_torana/api/v1/system", s.controlPlaneGuard(s.systemStatus))

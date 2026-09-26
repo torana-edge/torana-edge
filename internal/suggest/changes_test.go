@@ -43,7 +43,7 @@ func TestOperationChangeHistoryAndUndoSurviveRestart(t *testing.T) {
 	if _, err := store.PrepareOperationChange("c", id, "enc:prior-config", "candidate-revision"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("replayed prepare: %v", err)
 	}
-	if _, _, err := store.ClaimUndo("c", code, "candidate-revision"); !errors.Is(err, ErrNotFound) {
+	if _, _, err := store.ClaimUndo("c", id, "candidate-revision"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("undo before apply: %v", err)
 	}
 	if err := store.FinishOperation("c", id, "applied"); err != nil {
@@ -68,17 +68,17 @@ func TestOperationChangeHistoryAndUndoSurviveRestart(t *testing.T) {
 			t.Fatalf("model history leaked %q: %s", private, encoded)
 		}
 	}
-	if _, _, err := store.ClaimUndo("other", code, "candidate-revision"); !errors.Is(err, ErrNotFound) {
+	if _, _, err := store.ClaimUndo("other", id, "candidate-revision"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("cross-conversation undo: %v", err)
 	}
-	if _, _, err := store.ClaimUndo("c", code, "newer-revision"); !errors.Is(err, ErrConflict) {
+	if _, _, err := store.ClaimUndo("c", id, "newer-revision"); !errors.Is(err, ErrConflict) {
 		t.Fatalf("stale undo: %v", err)
 	}
-	undoID, snapshot, err := store.ClaimUndo("c", code, "candidate-revision")
+	undoID, snapshot, err := store.ClaimUndo("c", id, "candidate-revision")
 	if err != nil || undoID != id || snapshot != "enc:prior-config" {
 		t.Fatalf("undo=%q %q %v", undoID, snapshot, err)
 	}
-	if _, _, err := store.ClaimUndo("c", code, "candidate-revision"); !errors.Is(err, ErrNotFound) {
+	if _, _, err := store.ClaimUndo("c", id, "candidate-revision"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("duplicate undo: %v", err)
 	}
 	if err := store.FinishUndo("c", id, "undone"); err != nil {
