@@ -2,8 +2,10 @@ package harness
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"github.com/torana-edge/torana-edge/internal/provider"
 	"os"
 	"path/filepath"
 )
@@ -11,14 +13,16 @@ import (
 // FilePlan contains a reviewed snapshot. File contents remain private so
 // previews cannot accidentally print unrelated credentials from the file.
 type FilePlan struct {
-	Path                  string
-	Server                Server
-	Changed               bool
-	Teardown              bool
-	before, ownership     []byte
-	existed, ownedExisted bool
-	edit                  Edit
-	claude                bool
+	Path                       string
+	Server                     Server
+	Changed                    bool
+	Teardown                   bool
+	before, ownership          []byte
+	existed, ownedExisted      bool
+	edit                       Edit
+	claude                     bool
+	ownershipPath, recoveryDir string
+	mode                       os.FileMode
 }
 
 func PlanFile(path, harness string, server Server, teardown bool) (*FilePlan, error) {
@@ -34,7 +38,22 @@ func PlanFile(path, harness string, server Server, teardown bool) (*FilePlan, er
 		return nil, err
 	}
 	plan := &FilePlan{Path: abs, Server: server, Teardown: teardown, before: before, existed: exists, claude: harness == "claude-code"}
-	plan.ownership, plan.ownedExisted, err = readConfig(abs + ".torana-managed.json")
+	store, err := provider.ManagedStorePath()
+	if err != nil {
+		return nil, err
+	}
+	plan.recoveryDir = filepath.Join(filepath.Dir(store), "harness")
+	hash := sha256.Sum256([]byte(abs))
+	plan.ownershipPath = filepath.Join(plan.recoveryDir, fmt.Sprintf("%x.json", hash))
+	plan.mode = 0o600
+	if exists {
+		info, statErr := os.Stat(abs)
+		if statErr != nil {
+			return nil, statErr
+		}
+		plan.mode = info.Mode().Perm()
+	}
+	plan.ownership, plan.ownedExisted, err = readConfig(plan.ownershipPath)
 	if err != nil {
 		return nil, err
 	}
@@ -95,7 +114,7 @@ func (p *FilePlan) Apply() (backup string, err error) {
 		return "", fmt.Errorf("configuration changed since preview; review a fresh plan")
 	}
 	{
-		owned, exists, err := readConfig(p.Path + ".torana-managed.json")
+		owned, exists, err := readConfig(p.ownershipPath)
 		if err != nil {
 			return "", err
 		}
@@ -106,8 +125,11 @@ func (p *FilePlan) Apply() (backup string, err error) {
 	if err := os.MkdirAll(filepath.Dir(p.Path), 0o700); err != nil {
 		return "", err
 	}
+	if err := os.MkdirAll(p.recoveryDir, 0o700); err != nil {
+		return "", err
+	}
 	if p.existed {
-		file, err := os.CreateTemp(filepath.Dir(p.Path), ".torana-backup-*")
+		file, err := os.CreateTemp(p.recoveryDir, "backup-*")
 		if err != nil {
 			return "", err
 		}
@@ -117,16 +139,16 @@ func (p *FilePlan) Apply() (backup string, err error) {
 		}
 	}
 	if !p.Teardown {
-		if err := atomicConfig(p.Path+".torana-managed.json", p.edit.Ownership); err != nil {
+		if err := atomicConfig(p.ownershipPath, p.edit.Ownership); err != nil {
 			return backup, err
 		}
 	}
-	if err := atomicConfig(p.Path, p.edit.Content); err != nil {
+	if err := atomicConfigMode(p.Path, p.edit.Content, p.mode); err != nil {
 		return backup, err
 	}
 	if p.Teardown {
 		// Keep an empty, harmless ownership record instead of deleting files.
-		if err := atomicConfig(p.Path+".torana-managed.json", []byte("{}\n")); err != nil {
+		if err := atomicConfig(p.ownershipPath, []byte("{}\n")); err != nil {
 			return backup, fmt.Errorf("configuration was removed, but ownership cleanup failed: %w", err)
 		}
 	}
@@ -146,11 +168,23 @@ func writeAndClose(file *os.File, data []byte) error {
 }
 
 func atomicConfig(path string, data []byte) error {
+	return atomicConfigMode(path, data, 0o600)
+}
+
+func atomicConfigMode(path string, data []byte, mode os.FileMode) error {
 	file, err := os.CreateTemp(filepath.Dir(path), ".torana-mcp-*")
 	if err != nil {
 		return err
 	}
 	defer func() { _ = os.Remove(file.Name()) }()
+	if err := preserveGroup(file, path); err != nil {
+		_ = file.Close()
+		return err
+	}
+	if err := file.Chmod(mode); err != nil {
+		_ = file.Close()
+		return err
+	}
 	if err := writeAndClose(file, data); err != nil {
 		return err
 	}

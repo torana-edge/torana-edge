@@ -186,7 +186,7 @@ Routing model traffic through Torana and connecting its MCP tools are separate
 steps. MCP lets your harness inspect Torana and propose plugin changes; it does
 not change your provider login or model selection.
 
-With Torana running, enable the local endpoint and preview your project's entry:
+With Torana running, enable the local endpoint and preview your user entry:
 
 ```bash
 torana mcp enable --yes
@@ -194,15 +194,18 @@ torana harness setup claude-code --dry-run
 torana harness setup claude-code
 ```
 
-Use `codex` instead of `claude-code` for Codex. Project scope writes `.mcp.json`
-for Claude Code or `.codex/config.toml` for Codex. Use `--scope user` to connect
-across projects. Restart the harness, then follow its normal MCP approval and
+Use `codex` instead of `claude-code` for Codex. Setup uses the installed harness's
+own MCP command for user scope. Choose `--scope project` deliberately for a
+shared team connection; put `torana` on PATH first. Project scope writes `.mcp.json`
+for Claude Code or `.codex/config.toml` for Codex. Restart the harness, then follow its normal MCP approval and
 workspace-trust prompts. [Claude MCP scopes](https://code.claude.com/docs/en/mcp)
 and [Codex MCP configuration](https://learn.chatgpt.com/docs/extend/mcp?surface=cli)
 describe those harness-owned settings.
 
 The preview displays only Torana's server entry, never your other settings or
-credentials. Applying an edit keeps a private recovery backup. Repeating setup
+credentials. Project-file edits keep private recovery backups in Torana's data
+directory, not your repository. User configuration is managed by the harness CLI.
+Repeating setup
 does nothing when the entry already matches. To remove only the entry Torana
 added, run `torana harness teardown claude-code` (with the same scope). Edited
 or conflicting entries are left for you to review, not overwritten.

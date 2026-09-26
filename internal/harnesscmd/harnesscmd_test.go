@@ -24,6 +24,16 @@ func TestPaths(t *testing.T) {
 }
 
 func TestProjectPreviewDeclineApplyAndTeardown(t *testing.T) {
+	t.Setenv("TORANA_DATA_DIR", t.TempDir())
+	bin := t.TempDir()
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(executable, filepath.Join(bin, "torana")); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin)
 	// Run is intentionally offline: setup does not enable MCP or grant trust.
 	t.Chdir(t.TempDir())
 	for _, name := range []string{"claude-code", "codex"} {
@@ -31,7 +41,7 @@ func TestProjectPreviewDeclineApplyAndTeardown(t *testing.T) {
 		invoke := func(command string, flags ...string) {
 			t.Helper()
 			out.Reset()
-			args := append([]string{"harness", command, name}, flags...)
+			args := append([]string{"harness", command, name, "--scope", "project"}, flags...)
 			if err := Run(args, strings.NewReader("n\n"), &out, &out); err != nil {
 				t.Fatal(err)
 			}
@@ -63,7 +73,7 @@ func TestProjectPreviewDeclineApplyAndTeardown(t *testing.T) {
 		if err != nil || bytes.Contains(data, []byte("mcp_servers.torana")) || bytes.Contains(data, []byte(`"torana"`)) {
 			t.Fatalf("teardown: %s %v", data, err)
 		}
-		backups, _ := filepath.Glob(filepath.Join(filepath.Dir(path), ".torana-backup-*"))
+		backups, _ := filepath.Glob(filepath.Join(os.Getenv("TORANA_DATA_DIR"), "harness", "backup-*"))
 		if len(backups) == 0 {
 			t.Fatal("teardown lacked recovery backup")
 		}
