@@ -35,6 +35,24 @@ func TestSignedNoticeStripsAcrossRestart(t *testing.T) {
 	}
 }
 
+func TestSignedProbeStripsWithoutBecomingALocalReply(t *testing.T) {
+	signer, err := secret.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	probe, err := RenderProbe(signer, "conversation")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(probe, "local_") || strings.Contains(probe, "accept") {
+		t.Fatalf("probe looks actionable or like a local reply: %q", probe)
+	}
+	got, changed, err := Strip(signer, "conversation", "answer"+probe)
+	if err != nil || !changed || got != "answer" {
+		t.Fatalf("probe strip = %q, %v, %v", got, changed, err)
+	}
+}
+
 func TestSignedNoticeAllowsInteriorReflowButRefusesBrokenEnd(t *testing.T) {
 	signer, err := secret.Open(t.TempDir())
 	if err != nil {

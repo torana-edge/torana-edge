@@ -78,6 +78,17 @@ func RenderLocalReply(signer Signer, conversation, id, message string) (string, 
 	return fmt.Sprintf("%s%s:%s]\n[torana] %s\n%s%s:%s]", beginPrefix, id, sig, message, endPrefix, id, sig), nil
 }
 
+// RenderProbe uses the normal signed notice grammar without creating a real
+// suggestion or a confirmation code. The host strips it from later history.
+func RenderProbe(signer Signer, conversation string) (string, error) {
+	const id = "probe_v1"
+	sig, err := signature(signer, conversation, id)
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("\n\n%s%s:%s]\n[torana] Notice probe: this is a local display test.\n%s%s:%s]\n", beginPrefix, id, sig, endPrefix, id, sig), nil
+}
+
 // Strip removes every valid, conversation-bound notice span. It tolerates
 // reflow inside the span, but not changed delimiters. A valid start with no
 // matching end is a strip failure; the caller must suppress future notices

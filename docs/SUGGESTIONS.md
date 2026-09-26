@@ -35,4 +35,6 @@ Accepting records your choice. It does not automatically change your harness's m
 
 Some harnesses can also show a short, signed Torana notice at the end of a completed assistant reply. This display channel is opt-in for specific verified harness identity sources. It is never added to tool-calling or incomplete replies, and Torana removes its own notice from later requests before a plugin or model sees the history. If your harness is not allowlisted, use the CLI to see suggestions; the suggestion itself is still available there.
 
+The display settings live under `config.suggestions.notice.harnesses`, keyed by the named harness identity source Torana recognized (for example, `claude-code-session` or `codex-thread`). A generic thread header or content-derived identity cannot enable notices. Leave the map empty unless you have checked that the harness preserves and replays the signed markers. For that check, `config.suggestions.notice.probe: true` appends a fixed, non-actionable test notice on completed replies for allowlisted sources. Turn the probe off after testing; it does not create a suggestion or accept code. A strip failure disables later notices for that conversation, while the CLI remains available.
+
 See [Torana commands](DIRECTIVES.md) if you want to accept or dismiss a suggestion from inside a supported conversation.

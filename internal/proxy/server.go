@@ -362,6 +362,7 @@ type reqState struct {
 	// NoticeEnabled is pinned at request admission. Unknown harnesses and
 	// sources not explicitly approved for byte-stable replay stay UI/CLI only.
 	NoticeEnabled bool
+	NoticeProbe   bool
 	// UserTurn is the durable suggestion-lifecycle counter. A tool-result
 	// continuation retains the preceding user's ordinal.
 	UserTurn uint64
@@ -1260,7 +1261,8 @@ func New(cfg Config) (*Server, error) {
 			// namespace by rewriting the request it is protecting.
 			rs.ConversationID = convIdentity.ID
 			rs.NoticeEnabled = currentCfg.Providers.Suggestions.Enabled &&
-				currentCfg.Providers.Suggestions.NoticeSources[convIdentity.Source] && s.secrets != nil && s.suggestions != nil
+				knownNoticeHarnessSource(convIdentity.Source) && currentCfg.Providers.Suggestions.Notice.Harnesses[convIdentity.Source] &&
+				s.secrets != nil && s.suggestions != nil
 			if rs.NoticeEnabled {
 				disabled, err := s.suggestions.NoticesDisabled(rs.ConversationID)
 				if err != nil {
@@ -1268,6 +1270,7 @@ func New(cfg Config) (*Server, error) {
 				}
 				rs.NoticeEnabled = err == nil && !disabled
 			}
+			rs.NoticeProbe = rs.NoticeEnabled && currentCfg.Providers.Suggestions.Notice.Probe
 			if currentCfg.Providers.Suggestions.Enabled && rs.ConversationID != "" {
 				turn, turnErr := s.suggestions.ObserveUserTurn(rs.ConversationID, admittedTurnSignature)
 				if turnErr != nil {
