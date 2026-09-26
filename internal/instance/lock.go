@@ -35,13 +35,16 @@ func Acquire(path string) (*Lock, error) {
 		return nil, err
 	}
 	if err := fileperm.Secure(path, f); err != nil {
+		_ = unlockFile(f)
 		_ = f.Close()
 		return nil, err
 	}
 	return &Lock{file: f}, nil
 }
 
-func (l *Lock) Close() error { return l.file.Close() }
+func (l *Lock) Close() error {
+	return errors.Join(unlockFile(l.file), l.file.Close())
+}
 
 // Running is read-only: it never creates the directory or lock file.
 func Running(path string) (bool, error) {
@@ -56,6 +59,9 @@ func Running(path string) (bool, error) {
 	err = lockFile(f)
 	if lockBusy(err) {
 		return true, nil
+	}
+	if err == nil {
+		return false, unlockFile(f)
 	}
 	return false, err
 }

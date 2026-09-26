@@ -54,6 +54,33 @@ func TestStatusReadableByDefaultAndJSONOnRequest(t *testing.T) {
 	}
 }
 
+func TestLaunchedChildReadinessUsesExplicitTarget(t *testing.T) {
+	data := t.TempDir()
+	t.Setenv("TORANA_DATA_DIR", data)
+	store := filepath.Join(data, "config.json")
+	// Default-target discovery would try to parse this invalid configuration.
+	// The launched child's known endpoint must not use discovery or lock probes.
+	if err := os.WriteFile(store, []byte("invalid"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(Status{Service: "torana-edge", InstanceID: "child", PID: 123, Status: "running", ConfigPath: store})
+	}))
+	defer srv.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	got, err := waitReady(ctx, store, srv.URL, 123, nil)
+	if err != nil || got.InstanceID != "child" {
+		t.Fatalf("readiness=%+v %v", got, err)
+	}
+	if _, err := waitReady(ctx, store, srv.URL, 456, nil); err == nil {
+		t.Fatal("different child PID accepted")
+	}
+	if _, err := os.Stat(filepath.Join(data, "instance.lock")); !os.IsNotExist(err) {
+		t.Fatal("readiness touched the lifetime lock")
+	}
+}
+
 type failedWriter struct{}
 
 func (failedWriter) Write([]byte) (int, error) { return 0, errors.New("closed output") }
