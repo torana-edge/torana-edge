@@ -85,6 +85,10 @@ func (s *Server) proposeNamespaceOperation(ctx context.Context, call operationCa
 			return operationError("unknown_operation", "This operation has no confirmation handler."), nil
 		}
 	}
+	body, err := operationConsentSummary(entry, *operation, intent)
+	if err != nil {
+		return operationError("invalid_input", "Review this larger change in Torana's UI or CLI."), nil
+	}
 	plaintext, err := json.Marshal(intent)
 	if err != nil {
 		return mcpserver.Result{}, err
@@ -103,8 +107,10 @@ func (s *Server) proposeNamespaceOperation(ctx context.Context, call operationCa
 	}
 	// The model gets neither the code, internal ID, input, config diff nor the
 	// guest-authored title. Those stay in the trusted operator confirmation UI.
+	// CallID is intentional consent provenance: a different tool call gets a
+	// fresh code even if it proposes the same configuration change.
 	_, err = s.suggestions.CreateOperation(call.Binding.ConversationID, turn, suggest.OperationProposal{
-		IntentKey: entry.Name + "." + operation.ID, IntentDigest: hex.EncodeToString(mac), Title: "Confirm Torana operation", Body: "Review the requested operation in Torana before applying it.",
+		IntentKey: entry.Name + "." + operation.ID, IntentDigest: hex.EncodeToString(mac), Title: "Confirm " + entry.Name + " change", Body: body,
 		SealedIntent: sealed, ExpiresAt: time.Now().Add(operationConsentTTL),
 	})
 	if err != nil {
