@@ -77,15 +77,15 @@ func Strip(signer Signer, conversation, text string) (string, bool, error) {
 			break
 		}
 		start := search + relative
-		close := strings.IndexByte(text[start:], ']')
-		if close < 0 {
+		markerEnd := strings.IndexByte(text[start:], ']')
+		if markerEnd < 0 {
 			break
 		}
-		close += start
-		marker := text[start+len(beginPrefix) : close]
+		markerEnd += start
+		marker := text[start+len(beginPrefix) : markerEnd]
 		id, supplied, ok := strings.Cut(marker, ":")
 		if !ok || len(supplied) != 12 {
-			search = close + 1
+			search = markerEnd + 1
 			continue
 		}
 		expected, err := signature(signer, conversation, id)
@@ -93,15 +93,15 @@ func Strip(signer Signer, conversation, text string) (string, bool, error) {
 			return text, changed, err
 		}
 		if subtle.ConstantTimeCompare([]byte(supplied), []byte(expected)) != 1 {
-			search = close + 1
+			search = markerEnd + 1
 			continue
 		}
 		endMarker := endPrefix + id + ":" + supplied + "]"
-		endRelative := strings.Index(text[close+1:], endMarker)
+		endRelative := strings.Index(text[markerEnd+1:], endMarker)
 		if endRelative < 0 {
 			return text, changed, ErrStripFailed
 		}
-		end := close + 1 + endRelative + len(endMarker)
+		end := markerEnd + 1 + endRelative + len(endMarker)
 		if end < len(text) && text[end] == '\n' {
 			end++
 		}
