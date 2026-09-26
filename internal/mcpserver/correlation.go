@@ -51,6 +51,8 @@ func canonicalTool(name string) string {
 }
 
 func argumentHash(input json.RawMessage) ([32]byte, bool) {
+	// Preserve numeric literals rather than round through float64. A harness
+	// rewriting 1.0 to 1 fails closed; transcript binding handles that later.
 	decoder := json.NewDecoder(bytes.NewReader(input))
 	decoder.UseNumber()
 	var value map[string]any

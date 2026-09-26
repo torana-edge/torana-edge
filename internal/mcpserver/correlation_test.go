@@ -65,3 +65,25 @@ func TestCorrelationCapacityFailsClosed(t *testing.T) {
 		t.Fatal("overflow hid ambiguity")
 	}
 }
+
+func TestCorrelationNumericReserializationFailsClosed(t *testing.T) {
+	c := NewCorrelator()
+	now := time.Now()
+	c.Record("torana_invoke", json.RawMessage(`{"input":{"amount":1.0}}`), Binding{"c", "call"}, now)
+	if _, ok := c.Consume("torana_invoke", json.RawMessage(`{"input":{"amount":1}}`), now); ok {
+		t.Fatal("numeric rewrite unexpectedly bound")
+	}
+}
+
+func TestCorrelationContradictoryCallEvidenceNeverBinds(t *testing.T) {
+	c := NewCorrelator()
+	now := time.Now()
+	binding := Binding{"c", "call"}
+	c.Record("torana_search", json.RawMessage(`{"query":"first"}`), binding, now)
+	c.Record("torana_search", json.RawMessage(`{"query":"second"}`), binding, now)
+	for _, input := range []string{`{"query":"first"}`, `{"query":"second"}`} {
+		if _, ok := c.Consume("torana_search", json.RawMessage(input), now); ok {
+			t.Fatal("contradictory evidence bound")
+		}
+	}
+}
