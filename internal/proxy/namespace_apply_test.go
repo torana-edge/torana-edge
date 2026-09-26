@@ -40,7 +40,7 @@ func TestConfirmedPluginMutationRechecksSnapshotAndPolicy(t *testing.T) {
 		t.Fatalf("items=%+v %v", items, err)
 	}
 	id := items[0].ID
-	result, err = server.applyConfirmedStandardOperation(context.Background(), binding.ConversationID, id, nil, nil)
+	result, err = server.applyConfirmedStandardOperation(context.Background(), binding.ConversationID, id, nil)
 	if err != nil || result.Error == nil || result.Error.Code != "not_found" {
 		t.Fatalf("unaccepted executed: %+v %v", result, err)
 	}
@@ -50,18 +50,18 @@ func TestConfirmedPluginMutationRechecksSnapshotAndPolicy(t *testing.T) {
 	server.configMu.Lock()
 	server.config.Providers.Port++
 	server.configMu.Unlock()
-	result, err = server.applyConfirmedStandardOperation(context.Background(), binding.ConversationID, id, nil, nil)
+	result, err = server.applyConfirmedStandardOperation(context.Background(), binding.ConversationID, id, nil)
 	if err != nil || result.Error == nil || result.Error.Code != "conflict" {
 		t.Fatalf("stale accepted: %+v %v", result, err)
 	}
 	server.configMu.Lock()
 	server.config.Providers.Port--
 	server.configMu.Unlock()
-	result, err = server.applyConfirmedStandardOperation(context.Background(), binding.ConversationID, id, []string{"test-http-server"}, nil)
+	result, err = server.applyConfirmedStandardOperation(context.Background(), binding.ConversationID, id, []string{"test-http-server"})
 	if err != nil || result.Error == nil || result.Error.Code != "access_denied" {
 		t.Fatalf("changed floor ignored: %+v %v", result, err)
 	}
-	result, err = server.applyConfirmedStandardOperation(context.Background(), binding.ConversationID, id, nil, nil)
+	result, err = server.applyConfirmedStandardOperation(context.Background(), binding.ConversationID, id, nil)
 	if err != nil || !result.OK || result.Status != "applied" {
 		t.Fatalf("apply=%+v %v", result, err)
 	}
@@ -72,7 +72,7 @@ func TestConfirmedPluginMutationRechecksSnapshotAndPolicy(t *testing.T) {
 	if err != nil || len(changes) != 1 || changes[0].Status != "applied" {
 		t.Fatalf("history=%+v %v", changes, err)
 	}
-	result, err = server.applyConfirmedStandardOperation(context.Background(), binding.ConversationID, id, nil, nil)
+	result, err = server.applyConfirmedStandardOperation(context.Background(), binding.ConversationID, id, nil)
 	if err != nil || result.Error == nil || result.Error.Code != "not_found" {
 		t.Fatalf("replayed execution=%+v %v", result, err)
 	}

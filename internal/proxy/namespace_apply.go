@@ -100,7 +100,7 @@ func (s *Server) applyPluginConfigurationLocked(ctx context.Context, candidate p
 // has already resolved explicit user acceptance. Policy is reconstructed from
 // the latest snapshot and operator settings, not a caller-held stale registry.
 // Guest mutations and undo mounting follow in separate wiring changes.
-func (s *Server) applyConfirmedStandardOperation(ctx context.Context, conversation, id string, protected []string, overrides map[string]string) (mcpserver.Result, error) {
+func (s *Server) applyConfirmedStandardOperation(ctx context.Context, conversation, id string, protected []string) (mcpserver.Result, error) {
 	if err := ctx.Err(); err != nil {
 		return mcpserver.Result{}, err
 	}
@@ -125,6 +125,11 @@ func (s *Server) applyConfirmedStandardOperation(ctx context.Context, conversati
 		return operationError("unbound_conversation", "This operation belongs to another conversation."), nil
 	}
 	current := s.GetConfig().Providers
+	// Operator acceptance must enforce the current protected floor, even when
+	// a caller did not supply a policy snapshot. A stale override cannot grant
+	// access removed since the proposal was created.
+	protected = append(append([]string(nil), protected...), current.Plugins.ProtectedNamespaces()...)
+	overrides := current.MCP.Access
 	if intent.Revision != s.configRevision(current) {
 		return operationError("conflict", "Configuration changed; request and review a fresh operation."), nil
 	}
@@ -145,8 +150,11 @@ func (s *Server) applyConfirmedStandardOperation(ctx context.Context, conversati
 		access := policy.DirectiveAllowed(entry.Name, operation.ID)
 		allowed = access.Allowed && access.Confirm
 	}
-	if operation.Source != "standard" || !allowed {
+	if !allowed {
 		return operationError("access_denied", "This operation is no longer available for confirmation."), nil
+	}
+	if operation.Source != "standard" {
+		return operationError("confirmation_unavailable", "Confirming plugin-defined operations is unavailable here; use the plugin's CLI guide for this operation."), nil
 	}
 	if operation.ID == "_config.set" && (len(entry.ConfigSchema) == 0 || plugin.ValidateConfigAgainstSchema(&plugin.ConfigSchema{Raw: entry.ConfigSchema}, intent.Input) != nil) {
 		return operationError("invalid_input", "Configuration does not match the plugin schema."), nil
