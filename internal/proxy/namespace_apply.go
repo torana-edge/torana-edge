@@ -150,8 +150,11 @@ func (s *Server) applyConfirmedStandardOperation(ctx context.Context, conversati
 		access := policy.DirectiveAllowed(entry.Name, operation.ID)
 		allowed = access.Allowed && access.Confirm
 	}
-	if operation.Source != "standard" || !allowed {
+	if !allowed {
 		return operationError("access_denied", "This operation is no longer available for confirmation."), nil
+	}
+	if operation.Source != "standard" {
+		return operationError("confirmation_unavailable", "Confirming plugin-defined operations is unavailable here; use the plugin's CLI guide for this operation."), nil
 	}
 	if operation.ID == "_config.set" && (len(entry.ConfigSchema) == 0 || plugin.ValidateConfigAgainstSchema(&plugin.ConfigSchema{Raw: entry.ConfigSchema}, intent.Input) != nil) {
 		return operationError("invalid_input", "Configuration does not match the plugin schema."), nil

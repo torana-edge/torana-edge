@@ -100,7 +100,7 @@ func (s *Server) handleAgentSuggestions(w http.ResponseWriter, r *http.Request) 
 		result, applyErr := s.applyConfirmedStandardOperation(r.Context(), input.ConversationID, item.ID, nil)
 		if applyErr != nil {
 			// Never echo encrypted intent, plugin input or underlying storage errors.
-			writeAgentError(w, http.StatusServiceUnavailable, "state_unavailable", "Confirmation was recorded, but execution could not be completed. Check current configuration and change history before retrying.")
+			writeAgentError(w, http.StatusServiceUnavailable, "state_unavailable", "Confirmation was recorded, but execution could not be completed. Check current configuration and change history; request a fresh change if needed.")
 			return
 		}
 		item.Outcome = result.Status
