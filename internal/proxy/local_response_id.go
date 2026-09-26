@@ -34,6 +34,18 @@ func rewriteLocalPreviousResponseID(body []byte, signer annotate.Signer) ([]byte
 	return spliceBytes(body, start, end, replacement), true, nil
 }
 
+func responsesTurnParent(body []byte) string {
+	start, end, ok := rawJSONSpanAt(body, "previous_response_id")
+	if !ok {
+		return ""
+	}
+	var parent string
+	if json.Unmarshal(body[start:end], &parent) != nil {
+		return ""
+	}
+	return parent
+}
+
 func topLevelMemberDeletion(body []byte, name string) (int, int, error) {
 	i := 0
 	skipWS(body, &i)
