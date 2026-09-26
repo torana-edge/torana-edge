@@ -1,0 +1,181 @@
+package proxy
+
+import (
+	"context"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+
+	"github.com/torana-edge/torana-edge/internal/mcpserver"
+	"github.com/torana-edge/torana-edge/internal/plugin"
+	"github.com/torana-edge/torana-edge/internal/provider"
+)
+
+// Undo uses a persistent keyed revision, unlike an operator's process-local
+// ETag. Restart must not invalidate an already-applied change's undo guard.
+func (s *Server) operationRevision(cfg provider.Config) (string, error) {
+	raw, err := json.Marshal(cfg)
+	if err != nil {
+		return "", err
+	}
+	mac, err := s.secrets.MAC("operation-config-revision", string(raw))
+	return hex.EncodeToString(mac), err
+}
+
+func candidatePluginConfiguration(current provider.PluginsConfig, name, operation string, input json.RawMessage) (provider.PluginsConfig, error) {
+	candidate := current
+	candidate.Order = append([]string(nil), current.Order...)
+	candidate.Config = make(map[string]json.RawMessage, len(current.Config))
+	for key, value := range current.Config {
+		candidate.Config[key] = append(json.RawMessage(nil), value...)
+	}
+	switch operation {
+	case "_config.set":
+		candidate.Config[name] = append(json.RawMessage(nil), input...)
+	case "_enable":
+		for _, existing := range candidate.Order {
+			if existing == name {
+				return candidate, nil
+			}
+		}
+		candidate.Order = append(candidate.Order, name)
+	case "_disable":
+		kept := candidate.Order[:0]
+		for _, existing := range candidate.Order {
+			if existing != name {
+				kept = append(kept, existing)
+			}
+		}
+		candidate.Order = kept
+	default:
+		return provider.PluginsConfig{}, errors.New("not a standard plugin mutation")
+	}
+	return candidate, nil
+}
+
+// applyPluginConfigurationLocked validates the complete candidate pipeline
+// before persistence or publication. The caller holds controlPlaneMutationMu.
+func (s *Server) applyPluginConfigurationLocked(ctx context.Context, candidate provider.Config) error {
+	s.rebuildMu.Lock()
+	defer s.rebuildMu.Unlock()
+	credentials, err := s.prepareCredentialRegistry(candidate.Credentials)
+	if err != nil {
+		return err
+	}
+	runtime := s.newRuntime()
+	pipeline, err := plugin.NewPipeline(runtime, s.pipelinePluginConfig(candidate.Plugins))
+	if err != nil {
+		runtime.Close()
+		return err
+	}
+	if len(pipeline.Skipped()) > 0 {
+		pipeline.DrainAndClose()
+		return errors.New("candidate plugin pipeline contains unavailable plugins")
+	}
+	if err := ctx.Err(); err != nil {
+		pipeline.DrainAndClose()
+		return err
+	}
+	if err := s.persistProviders(candidate); err != nil {
+		pipeline.DrainAndClose()
+		return err
+	}
+	old := s.pluginPipeline.Swap(pipeline)
+	s.applyProviders(candidate, credentials)
+	if old != nil {
+		s.retireAsyncLocked(old.(*plugin.PluginPipeline).DrainAndClose)
+	}
+	return nil
+}
+
+// applyConfirmedStandardOperation is a host-only execution seam. The caller
+// has already resolved explicit user acceptance. Policy is reconstructed from
+// the latest snapshot and operator settings, not a caller-held stale registry.
+// Guest mutations and undo mounting follow in separate wiring changes.
+func (s *Server) applyConfirmedStandardOperation(ctx context.Context, conversation, id string, protected []string, overrides map[string]string) (mcpserver.Result, error) {
+	if err := ctx.Err(); err != nil {
+		return mcpserver.Result{}, err
+	}
+	if s.suggestions == nil || s.secrets == nil {
+		return operationError("not_configured", "User confirmation is unavailable."), nil
+	}
+	s.controlPlaneMutationMu.Lock()
+	defer s.controlPlaneMutationMu.Unlock()
+	sealed, err := s.suggestions.AcceptedOperationIntent(conversation, id)
+	if err != nil {
+		return operationError("not_found", "Accepted operation is unavailable."), nil
+	}
+	plaintext, err := s.secrets.Decrypt(sealed)
+	if err != nil {
+		return mcpserver.Result{}, err
+	}
+	var intent sealedOperationIntent
+	if err := json.Unmarshal([]byte(plaintext), &intent); err != nil {
+		return mcpserver.Result{}, err
+	}
+	if intent.Binding.ConversationID != conversation || !intent.Binding.Bound {
+		return operationError("unbound_conversation", "This operation belongs to another conversation."), nil
+	}
+	current := s.GetConfig().Providers
+	if intent.Revision != s.configRevision(current) {
+		return operationError("conflict", "Configuration changed; request and review a fresh operation."), nil
+	}
+	registry, err := s.currentNamespaceRegistryLocked()
+	if err != nil {
+		return mcpserver.Result{}, err
+	}
+	policy, err := newNamespaceAccessPolicy(registry, protected, overrides)
+	if err != nil {
+		return mcpserver.Result{}, err
+	}
+	entry, operation, exists := policy.lookup(intent.Namespace, intent.Operation, false)
+	if !exists || entry.Digest != intent.Digest {
+		return operationError("stale_digest", "The plugin changed; request and review a fresh operation."), nil
+	}
+	allowed := policy.ModelReachable(entry.Name, operation.ID) == "confirm"
+	if intent.UserDirective {
+		access := policy.DirectiveAllowed(entry.Name, operation.ID)
+		allowed = access.Allowed && access.Confirm
+	}
+	if operation.Source != "standard" || !allowed {
+		return operationError("access_denied", "This operation is no longer available for confirmation."), nil
+	}
+	if operation.ID == "_config.set" && (len(entry.ConfigSchema) == 0 || plugin.ValidateConfigAgainstSchema(&plugin.ConfigSchema{Raw: entry.ConfigSchema}, intent.Input) != nil) {
+		return operationError("invalid_input", "Configuration does not match the plugin schema."), nil
+	}
+	plugins, err := candidatePluginConfiguration(current.Plugins, entry.Name, operation.ID, intent.Input)
+	if err != nil {
+		return operationError("unknown_operation", "This mutation has no execution handler."), nil
+	}
+	candidate := current
+	candidate.Plugins = plugins
+	postRevision, err := s.operationRevision(candidate)
+	if err != nil {
+		return mcpserver.Result{}, err
+	}
+	undo, err := json.Marshal(struct {
+		Namespace string                 `json:"namespace"`
+		Digest    string                 `json:"digest"`
+		Plugins   provider.PluginsConfig `json:"plugins"`
+	}{Namespace: entry.Name, Digest: entry.Digest, Plugins: current.Plugins})
+	if err != nil {
+		return mcpserver.Result{}, err
+	}
+	sealedUndo, err := s.secrets.Encrypt(string(undo))
+	if err != nil {
+		return mcpserver.Result{}, err
+	}
+	if _, err := s.suggestions.PrepareOperationChange(conversation, id, sealedUndo, postRevision); err != nil {
+		return mcpserver.Result{}, err
+	}
+	if err := s.applyPluginConfigurationLocked(ctx, candidate); err != nil {
+		if finishErr := s.suggestions.FinishOperation(conversation, id, "failed"); finishErr != nil {
+			return mcpserver.Result{}, finishErr
+		}
+		return operationError("plugin_failed", "The change could not be applied; configuration is unchanged."), nil
+	}
+	if err := s.suggestions.FinishOperation(conversation, id, "applied"); err != nil {
+		return mcpserver.Result{}, err
+	}
+	return mcpserver.Result{OK: true, Status: "applied", Namespace: entry.Name, Operation: operation.ID, Summary: "The confirmed change was applied."}, nil
+}

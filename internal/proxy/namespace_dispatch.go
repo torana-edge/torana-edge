@@ -21,11 +21,12 @@ type namespaceInvokeInput struct {
 // conversation ID. Keep it intact when passing to execution or consent so
 // neither path can silently resolve a newer plugin than the one reviewed.
 type operationCall struct {
-	Entry     namespaceEntry
-	Operation namespaceOperation
-	Input     json.RawMessage
-	Binding   plugin.MCPBinding
-	Catalog   []catalogNamespace
+	Entry         namespaceEntry
+	Operation     namespaceOperation
+	Input         json.RawMessage
+	Binding       plugin.MCPBinding
+	Catalog       []catalogNamespace
+	UserDirective bool
 }
 
 type operationDispatch struct {
@@ -119,7 +120,7 @@ func (d *operationDispatch) dispatch(ctx context.Context, input namespaceInvokeI
 		result.Error.Retryable = true
 		return result, nil
 	}
-	call := operationCall{Entry: entry, Operation: op, Input: append(json.RawMessage(nil), input.Input...), Binding: binding}
+	call := operationCall{Entry: entry, Operation: op, Input: append(json.RawMessage(nil), input.Input...), Binding: binding, UserDirective: userDirective}
 	if op.Source == "core" && op.ID == "plugins.list" {
 		call.Catalog = []catalogNamespace{}
 		for _, item := range d.policy.registry.list() {

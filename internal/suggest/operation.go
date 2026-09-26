@@ -47,6 +47,26 @@ func pruneOperationPayloads(current *record) {
 	}
 }
 
+// AcceptedOperationIntent is host-only inspection before reserving execution.
+// Claim/PrepareOperationChange still rechecks this state atomically; reading it
+// never authorizes mutation. Do not expose its result through model APIs.
+func (s *Store) AcceptedOperationIntent(conversation, id string) (string, error) {
+	current, _, _, err := s.read(conversation)
+	if err != nil {
+		return "", err
+	}
+	operation, exists := current.Operations[id]
+	if !exists || operation.Execution != "" || !time.Now().Before(operation.ExpiresAt) {
+		return "", ErrNotFound
+	}
+	for _, item := range current.Suggestions {
+		if item.ID == id && item.Status == "accepted" {
+			return operation.SealedIntent, nil
+		}
+	}
+	return "", ErrNotFound
+}
+
 // ClaimOperation is called only after explicit user acceptance. Its CAS-backed
 // claim precedes execution, preventing concurrent/replayed confirmation from
 // running a guest mutation twice. An interrupted claim is not silently retried:
