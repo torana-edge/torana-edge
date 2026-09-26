@@ -37,7 +37,10 @@ func (s *Server) sealMCPConsent(ctx context.Context, name string, raw json.RawMe
 	return s.secrets.Encrypt(string(encoded))
 }
 
-func (s *Server) resolveMCPConsent(ctx context.Context, name string, raw json.RawMessage, sealed, action string) (mcpserver.Result, error) {
+func (s *Server) resolveMCPConsent(ctx context.Context, name string, raw json.RawMessage, sealed, action string) (result mcpserver.Result, err error) {
+	start := time.Now()
+	bound := false
+	defer func() { s.appendMCPAudit(name, bound, result, err, start) }()
 	if err := ctx.Err(); err != nil {
 		return mcpserver.Result{}, err
 	}
@@ -47,6 +50,22 @@ func (s *Server) resolveMCPConsent(ctx context.Context, name string, raw json.Ra
 	if s.secrets == nil || s.suggestions == nil || !s.GetConfig().Providers.MCP.Enabled {
 		return invalid()
 	}
+	s.mcpMu.Lock()
+	stopping := s.mcpStopping
+	s.mcpMu.Unlock()
+	if stopping {
+		return operationError("not_configured", "Torana MCP is stopping."), nil
+	}
+	switch name {
+	case "torana_invoke":
+	default:
+		return invalid()
+	}
+	releaseTool, allowed := s.mcpLimits.acquireLease("tool:" + name)
+	if !allowed {
+		return mcpRateLimited(), nil
+	}
+	defer releaseTool()
 	plaintext, err := s.secrets.Decrypt(sealed)
 	if err != nil {
 		return invalid()
@@ -55,6 +74,12 @@ func (s *Server) resolveMCPConsent(ctx context.Context, name string, raw json.Ra
 	if json.Unmarshal([]byte(plaintext), &state) != nil || state.Kind != "mcp-consent-v1" || state.Tool != name || state.Hash != consentArgumentHash(raw) || state.ID == "" || state.Conversation == "" || time.Now().Unix() >= state.Expires {
 		return invalid()
 	}
+	bound = true
+	releaseConversation, allowed := s.mcpLimits.acquireLease("conversation:" + state.Conversation)
+	if !allowed {
+		return mcpRateLimited(), nil
+	}
+	defer releaseConversation()
 	if action == "cancel" {
 		return mcpserver.Result{OK: true, Status: "pending_confirmation", Summary: "No change was applied. Review the pending change in Torana."}, nil
 	}
