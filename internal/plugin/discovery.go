@@ -2003,6 +2003,9 @@ func (pp *PluginPipeline) RunOnHTTPRequest(ctx context.Context, reqID uint64, pl
 	// env.request_headers grant, everything else never.
 	cloned := proto.Clone(httpReq).(*pbv1.HttpRequest)
 	filtered := filterHTTPHeaders(headers, target.plugin.HasGrant("env.request_headers"))
+	// Incoming binding headers were stripped by the allowlist. Only verified
+	// host context may add them, after the caller's raw header map is filtered.
+	injectMCPBindingHeaders(ctx, filtered)
 	encoded, err := json.Marshal(filtered)
 	if err != nil {
 		return nil, fmt.Errorf("plugin %s: encode filtered headers: %w", pluginName, err)
