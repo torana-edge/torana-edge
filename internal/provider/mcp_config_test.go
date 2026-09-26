@@ -44,6 +44,8 @@ func TestMCPConfigurationRejectsInvalidOperatorPolicy(t *testing.T) {
 	for _, mutate := range []func(*Config){
 		func(c *Config) { c.MCP.Access = map[string]string{"logger": "allow"} },
 		func(c *Config) { c.MCP.Access = map[string]string{"logger\n": "read"} },
+		func(c *Config) { c.MCP.ServerNames = []string{"torana", "torana"} },
+		func(c *Config) { c.MCP.ServerNames = []string{"bad name"} },
 		func(c *Config) { c.Plugins.Protected = []string{"pii", "pii"} },
 		func(c *Config) { c.Plugins.Protected = []string{"bad name"} },
 		func(c *Config) { c.Assistant = AssistantConfig{Provider: "absent", Model: "small"} },

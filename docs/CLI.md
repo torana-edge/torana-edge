@@ -99,6 +99,9 @@ operations and confirmation requests need a provider tool call observed by
 Torana. With no verified match, `unbound_conversation` asks the client to retry;
 it does not apply a change. Route the harness's model requests through Torana as
 well as connecting its MCP tools.
+Name the harness's MCP server `torana`. If you choose a different name, set
+`mcp.server_names` to that name in a revisioned `torana config get/apply` snapshot
+so Torana recognizes its prefixed tool calls. Native unprefixed names also work.
 
 ```bash
 torana mcp rotate --yes     # prints the replacement token; update your client
