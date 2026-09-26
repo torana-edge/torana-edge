@@ -51,11 +51,11 @@ func stripSignedNoticesJSON(body []byte, shape string, signer annotate.Signer, c
 		}
 		if changed {
 			if stripped == "" && strings.Contains(original, "[torana:begin:local_") && len(slot.localRemovePath) > 0 {
-				deleteStart, deleteEnd, derr := jsonArrayElementDeletion(body, slot.localRemovePath)
+				deleteStart, _, derr := jsonArrayElementDeletion(body, slot.localRemovePath)
 				if derr != nil {
 					return nil, false, derr
 				}
-				splices = append(splices, directiveSplice{deleteStart, deleteEnd, nil})
+				removals = append(removals, noticeRemoval{slot.localRemovePath, deleteStart})
 				continue
 			}
 			if stripped == "" && len(slot.removePath) > 0 {
