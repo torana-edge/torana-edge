@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
@@ -24,15 +25,17 @@ type namespaceOperation struct {
 }
 
 type namespaceEntry struct {
-	Name       string               `json:"name"`
-	Alias      string               `json:"alias,omitempty"`
-	AliasError string               `json:"alias_error,omitempty"`
-	Title      string               `json:"title"`
-	Summary    string               `json:"summary"`
-	Categories []string             `json:"categories,omitempty"`
-	Status     string               `json:"status"`
-	Digest     string               `json:"digest,omitempty"`
-	Operations []namespaceOperation `json:"operations"`
+	Name         string               `json:"name"`
+	Alias        string               `json:"alias,omitempty"`
+	AliasError   string               `json:"alias_error,omitempty"`
+	Title        string               `json:"title"`
+	Summary      string               `json:"summary"`
+	Categories   []string             `json:"categories,omitempty"`
+	Status       string               `json:"status"`
+	Digest       string               `json:"digest,omitempty"`
+	Version      string               `json:"version,omitempty"`
+	ConfigSchema json.RawMessage      `json:"-"`
+	Operations   []namespaceOperation `json:"operations"`
 }
 
 type namespaceRegistry struct {
@@ -101,7 +104,10 @@ func buildNamespaceRegistry(installed []plugin.PluginBundle, loaded []plugin.Loa
 		if plugin.ReservedNamespace(name) {
 			continue
 		} // Operator aliases for reserved names follow in setup.
-		entry := namespaceEntry{Name: name, Title: name, Summary: bundle.Manifest.Description, Status: "disabled", Digest: bundle.Digest}
+		entry := namespaceEntry{Name: name, Title: name, Summary: bundle.Manifest.Description, Status: "disabled", Digest: bundle.Digest, Version: bundle.Manifest.Version}
+		if bundle.Schema != nil {
+			entry.ConfigSchema = append(json.RawMessage(nil), bundle.Schema.Raw...)
+		}
 		descriptor := bundle.Agent
 		loadedBundle, live := active[name]
 		if live && loadedBundle.Digest == bundle.Digest {
