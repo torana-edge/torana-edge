@@ -23,7 +23,35 @@ var toolDefinitions []byte
 //go:embed instructions.txt
 var instructions string
 
-type Dispatch func(context.Context, string, json.RawMessage) (any, error)
+// Result is a model-safe domain outcome. A Go error is an internal failure,
+// never a validation or consent outcome, and is not forwarded to clients.
+type Result struct {
+	OK               bool                 `json:"ok"`
+	Namespace        string               `json:"namespace,omitempty"`
+	Operation        string               `json:"operation,omitempty"`
+	Result           any                  `json:"result,omitempty"`
+	Status           string               `json:"status,omitempty"`
+	Summary          string               `json:"summary,omitempty"`
+	ExpiresInSeconds int                  `json:"expires_in_seconds,omitempty"`
+	Conversation     *ConversationBinding `json:"conversation,omitempty"`
+	Error            *DomainError         `json:"error,omitempty"`
+	InterfaceVersion int                  `json:"interface_version"`
+}
+
+type ConversationBinding struct {
+	Binding string `json:"binding"`
+}
+
+// DomainError contains only deliberately model-visible host-generated details.
+// Raw provider errors, configuration and confirmation codes do not belong here.
+type DomainError struct {
+	Code      string         `json:"code"`
+	Message   string         `json:"message"`
+	Retryable bool           `json:"retryable"`
+	Details   map[string]any `json:"details,omitempty"`
+}
+
+type Dispatch func(context.Context, string, json.RawMessage) (Result, error)
 
 type Options struct {
 	Version string
@@ -50,15 +78,22 @@ func NewHandler(options Options) (http.Handler, error) {
 				return nil, nil, err
 			}
 			output, err := options.Dispatch(ctx, name, raw)
-			if err != nil {
+			if err != nil || output.OK == (output.Error != nil) {
 				// Do not forward transport/internal errors, which may contain
 				// credentials or raw provider/configuration data, to the model.
 				return &mcp.CallToolResult{IsError: true, Content: []mcp.Content{&mcp.TextContent{Text: "Torana could not complete this operation."}}}, nil, nil
 			}
-			return nil, output, nil
+			output.InterfaceVersion = 1
+			encoded, err := json.Marshal(output)
+			if err != nil {
+				return &mcp.CallToolResult{IsError: true, Content: []mcp.Content{&mcp.TextContent{Text: "Torana could not complete this operation."}}}, nil, nil
+			}
+			return &mcp.CallToolResult{IsError: !output.OK, StructuredContent: output, Content: []mcp.Content{&mcp.TextContent{Text: string(encoded)}}}, nil, nil
 		})
 	}
-	transport := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return server }, &mcp.StreamableHTTPOptions{SessionTimeout: 2 * time.Minute})
+	// Correlation evidence expires after 120 seconds; MCP sessions do not.
+	// Coding clients commonly remain idle while users inspect or edit code.
+	transport := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return server }, &mcp.StreamableHTTPOptions{SessionTimeout: 24 * time.Hour})
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !localRequest(r) {
 			http.Error(w, "MCP is available only on loopback", http.StatusForbidden)

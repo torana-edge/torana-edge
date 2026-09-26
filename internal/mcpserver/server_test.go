@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -16,15 +17,15 @@ import (
 type tokenTransport struct{ token string }
 
 func (t tokenTransport) RoundTrip(r *http.Request) (*http.Response, error) {
-	copy := r.Clone(r.Context())
-	copy.Header = r.Header.Clone()
-	copy.Header.Set("Authorization", "Bearer "+t.token)
-	return http.DefaultTransport.RoundTrip(copy)
+	cloned := r.Clone(r.Context())
+	cloned.Header = r.Header.Clone()
+	cloned.Header.Set("Authorization", "Bearer "+t.token)
+	return http.DefaultTransport.RoundTrip(cloned)
 }
 
 func TestFixedToolsAndOfficialSDKClient(t *testing.T) {
-	handler, err := NewHandler(Options{Version: "test", Token: func() string { return "test-token" }, Dispatch: func(_ context.Context, name string, input json.RawMessage) (any, error) {
-		return map[string]any{"tool": name, "interface_version": 1}, nil
+	handler, err := NewHandler(Options{Version: "test", Token: func() string { return "test-token" }, Dispatch: func(_ context.Context, name string, input json.RawMessage) (Result, error) {
+		return Result{OK: true, Result: map[string]any{"tool": name}}, nil
 	}})
 	if err != nil {
 		t.Fatal(err)
@@ -77,7 +78,7 @@ func TestFixedToolsAndOfficialSDKClient(t *testing.T) {
 
 func TestTransportGuardsAndRotation(t *testing.T) {
 	token := "old-token"
-	handler, err := NewHandler(Options{Token: func() string { return token }, Dispatch: func(context.Context, string, json.RawMessage) (any, error) { return nil, nil }})
+	handler, err := NewHandler(Options{Token: func() string { return token }, Dispatch: func(context.Context, string, json.RawMessage) (Result, error) { return Result{OK: true}, nil }})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -120,8 +121,8 @@ func TestTransportGuardsAndRotation(t *testing.T) {
 }
 
 func TestInternalErrorsAreNotSentToModel(t *testing.T) {
-	handler, err := NewHandler(Options{Token: func() string { return "test-token" }, Dispatch: func(context.Context, string, json.RawMessage) (any, error) {
-		return nil, errors.New("secret-canary-123")
+	handler, err := NewHandler(Options{Token: func() string { return "test-token" }, Dispatch: func(context.Context, string, json.RawMessage) (Result, error) {
+		return Result{}, errors.New("secret-canary-123")
 	}})
 	if err != nil {
 		t.Fatal(err)
@@ -143,5 +144,56 @@ func TestInternalErrorsAreNotSentToModel(t *testing.T) {
 	raw, _ := json.Marshal(result)
 	if strings.Contains(string(raw), "secret-canary") {
 		t.Fatal("internal error leaked to model")
+	}
+}
+
+func TestDomainOutcomesHaveStructuredAndTextEnvelope(t *testing.T) {
+	for _, failure := range []bool{false, true} {
+		t.Run(map[bool]string{false: "pending", true: "invalid_input"}[failure], func(t *testing.T) {
+			output := Result{OK: true, Namespace: "logger", Operation: "_disable", Status: "pending_confirmation", Summary: "Disable logger"}
+			if failure {
+				output = Result{Error: &DomainError{Code: "invalid_input", Message: "must be an integer", Details: map[string]any{"path": "/threshold"}}}
+			}
+			handler, err := NewHandler(Options{Token: func() string { return "test-token" }, Dispatch: func(context.Context, string, json.RawMessage) (Result, error) { return output, nil }})
+			if err != nil {
+				t.Fatal(err)
+			}
+			server := httptest.NewServer(handler)
+			defer server.Close()
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			client := mcp.NewClient(&mcp.Implementation{Name: "test", Version: "test"}, nil)
+			session, err := client.Connect(ctx, &mcp.StreamableClientTransport{Endpoint: server.URL, HTTPClient: &http.Client{Transport: tokenTransport{token: "test-token"}}}, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer session.Close()
+			got, err := session.CallTool(ctx, &mcp.CallToolParams{Name: "torana_namespaces", Arguments: map[string]any{}})
+			if err != nil || got.IsError != failure {
+				t.Fatalf("result=%+v err=%v", got, err)
+			}
+			structured, err := json.Marshal(got.StructuredContent)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var decoded Result
+			if err := json.Unmarshal(structured, &decoded); err != nil {
+				t.Fatal(err)
+			}
+			if decoded.InterfaceVersion != 1 || decoded.OK == failure {
+				t.Fatalf("envelope=%s", structured)
+			}
+			if failure && (decoded.Error == nil || decoded.Error.Code != "invalid_input" || decoded.Error.Details["path"] != "/threshold") {
+				t.Fatalf("domain error lost: %s", structured)
+			}
+			if len(got.Content) != 1 {
+				t.Fatal("missing text copy")
+			}
+			textContent, ok := got.Content[0].(*mcp.TextContent)
+			var textValue, structuredValue any
+			if !ok || json.Unmarshal([]byte(textContent.Text), &textValue) != nil || json.Unmarshal(structured, &structuredValue) != nil || !reflect.DeepEqual(textValue, structuredValue) {
+				t.Fatal("text and structured envelopes differ")
+			}
+		})
 	}
 }
