@@ -50,6 +50,18 @@ func TestAgentNamespaceV2Validation(t *testing.T) {
 	}
 }
 
+func TestUserDirectWriteMayBeHiddenFromModels(t *testing.T) {
+	d, m := validNamespaceDescriptor()
+	d.Operations[0].ModelAccess = "never"
+	if err := validateAgentDescriptor(d, m); err != nil {
+		t.Fatalf("model-only restriction blocked explicit user directive: %v", err)
+	}
+	d.Operations[0].Risk = "destructive"
+	if err := validateAgentDescriptor(d, m); err == nil {
+		t.Fatal("destructive directive bypasses confirmation")
+	}
+}
+
 func TestNamespaceAliasesCannotHideCanonicalNames(t *testing.T) {
 	d, m := validNamespaceDescriptor()
 	for _, name := range []string{"router", "ROUTER"} {

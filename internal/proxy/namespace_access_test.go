@@ -75,7 +75,7 @@ func TestNamespacePolicyCoreFloorCannotBeReached(t *testing.T) {
 }
 
 func TestDirectiveUserDirectIndependentOfModelAccess(t *testing.T) {
-	op := plugin.AgentOperation{ID: "route.pin", Risk: "write", Directive: &plugin.AgentDirective{Command: "pin", UserDirect: true}}
+	op := plugin.AgentOperation{ID: "route.pin", Risk: "write", ModelAccess: "never", Directive: &plugin.AgentDirective{Command: "pin", UserDirect: true}}
 	d := &plugin.AgentDescriptor{Namespace: &plugin.AgentNamespace{Alias: "router"}, Operations: []plugin.AgentOperation{op}}
 	b := plugin.PluginBundle{Manifest: plugin.PluginManifest{Name: "decision_router"}, Digest: "digest", Agent: d}
 	r, err := buildNamespaceRegistry([]plugin.PluginBundle{b}, []plugin.LoadedPluginStatus{{Name: b.Manifest.Name, Digest: b.Digest, Agent: d}}, []string{b.Manifest.Name}, nil)
@@ -95,6 +95,9 @@ func TestDirectiveUserDirectIndependentOfModelAccess(t *testing.T) {
 			t.Fatal(err)
 		}
 		got := p.DirectiveAllowed("router", "route.pin")
+		if p.ModelReachable("decision_router", "route.pin") != "never" {
+			t.Fatal("model-only restriction was loosened")
+		}
 		if got.Allowed != tc.allowed || got.Confirm != tc.confirm {
 			t.Fatalf("override=%s policy=%+v", tc.override, got)
 		}
