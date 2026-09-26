@@ -108,6 +108,7 @@ func initInstruments(m metric.Meter) {
 	compactionEstimatedUSD, _ = m.Float64Counter("torana_compaction_estimated_usd_total")
 	compactionUnavailable, _ = m.Int64Counter("torana_compaction_savings_unavailable_total")
 	routedTotal, _ = m.Int64Counter("torana_routed_requests_total")
+	noticeTotal, _ = m.Int64Counter("torana_notice_total")
 	pluginMetricRejected, _ = m.Int64Counter("torana_plugin_metric_rejections_total")
 }
 
@@ -122,9 +123,29 @@ var (
 	compactionEstimatedUSD    metric.Float64Counter
 	compactionUnavailable     metric.Int64Counter
 	routedTotal               metric.Int64Counter
+	noticeTotal               metric.Int64Counter
 	pluginMetricRejected      metric.Int64Counter
 	pluginMetrics             = newPluginMetricRegistry()
 )
+
+// RecordNotice reports a notice delivery attempt. Both dimensions use fixed
+// vocabularies so caller-controlled headers cannot create unbounded series.
+func RecordNotice(ctx context.Context, harness, outcome string) {
+	if meter == nil {
+		return
+	}
+	switch harness {
+	case "claude-code-session", "codex-thread", "codex-session", "codex-client-thread", "gemini-code-assist-session":
+	default:
+		harness = "other"
+	}
+	switch outcome {
+	case "delivered", "not_completed", "truncated", "stream_error", "interrupted", "placement_error", "strip_failed":
+	default:
+		outcome = "other"
+	}
+	noticeTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("harness", harness), attribute.String("outcome", outcome)))
+}
 
 type pluginMetricKey struct {
 	plugin string

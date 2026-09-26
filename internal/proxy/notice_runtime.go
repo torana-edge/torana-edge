@@ -1,9 +1,11 @@
 package proxy
 
 import (
+	"context"
 	"log"
 
 	"github.com/torana-edge/torana-edge/internal/annotate"
+	"github.com/torana-edge/torana-edge/internal/metrics"
 )
 
 // A generic thread/session header or content-derived root identifies a
@@ -29,11 +31,14 @@ func (s *Server) appendPendingNotice(body []byte, rs *reqState, shape string) []
 	updated, changed, err := appendNoticeJSON(body, shape, notice, id)
 	if err != nil {
 		log.Printf("[suggest] could not place notice: %v", err)
+		metrics.RecordNotice(context.Background(), rs.NoticeSource, "placement_error")
 		return body
 	}
 	if changed {
+		metrics.RecordNotice(context.Background(), rs.NoticeSource, "delivered")
 		return updated
 	}
+	metrics.RecordNotice(context.Background(), rs.NoticeSource, "not_completed")
 	return body // tool-calling or incomplete turn: never attach a notice
 }
 

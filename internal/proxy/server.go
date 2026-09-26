@@ -363,6 +363,7 @@ type reqState struct {
 	// sources not explicitly approved for byte-stable replay stay UI/CLI only.
 	NoticeEnabled bool
 	NoticeProbe   bool
+	NoticeSource  string
 	// UserTurn is the durable suggestion-lifecycle counter. A tool-result
 	// continuation retains the preceding user's ordinal.
 	UserTurn uint64
@@ -1177,6 +1178,7 @@ func New(cfg Config) (*Server, error) {
 				shape := noticeShape(clientFormat, chat)
 				clean, changed, stripErr := stripSignedNoticesJSON(body, shape, s.secrets, convIdentity.ID)
 				if stripErr != nil {
+					metrics.RecordNotice(req.Context(), convIdentity.Source, "strip_failed")
 					if s.suggestions != nil {
 						if err := s.suggestions.DisableNotices(convIdentity.ID); err != nil {
 							log.Printf("[suggest] could not persist unsafe notice conversation: %v", err)
@@ -1271,6 +1273,9 @@ func New(cfg Config) (*Server, error) {
 				rs.NoticeEnabled = err == nil && !disabled
 			}
 			rs.NoticeProbe = rs.NoticeEnabled && currentCfg.Providers.Suggestions.Notice.Probe
+			if rs.NoticeEnabled {
+				rs.NoticeSource = convIdentity.Source
+			}
 			if currentCfg.Providers.Suggestions.Enabled && rs.ConversationID != "" {
 				turn, turnErr := s.suggestions.ObserveUserTurn(rs.ConversationID, admittedTurnSignature)
 				if turnErr != nil {
@@ -1916,7 +1921,9 @@ func New(cfg Config) (*Server, error) {
 				// after the provider/client bridge boundary. The final serializer
 				// emits it in the client's API shape, only on a clean end-of-turn.
 				if notice, _ := s.pendingNotice(rs); notice != "" {
-					events = appendNoticeEvents(streamCtx, events, notice)
+					events = appendNoticeEvents(streamCtx, events, notice, func(outcome string) {
+						metrics.RecordNotice(context.Background(), rs.NoticeSource, outcome)
+					})
 				}
 
 				// Pin the pipeline for the background goroutine's entire

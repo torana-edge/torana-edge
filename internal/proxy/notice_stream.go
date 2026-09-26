@@ -10,13 +10,19 @@ import (
 // provider error or truncated stream cannot receive a notice or a clean
 // completion marker. The inserted text block is serialized in the client's
 // wire shape by the existing native/bridge serializer.
-func appendNoticeEvents(ctx context.Context, input <-chan engine.StreamEvent, notice string) <-chan engine.StreamEvent {
+func appendNoticeEvents(ctx context.Context, input <-chan engine.StreamEvent, notice string, report ...func(string)) <-chan engine.StreamEvent {
 	if notice == "" {
 		return input
 	}
 	output := make(chan engine.StreamEvent)
 	go func() {
 		defer close(output)
+		outcome := "interrupted"
+		defer func() {
+			if len(report) > 0 && report[0] != nil {
+				report[0](outcome)
+			}
+		}()
 		var finish engine.StreamEvent
 		maxIndex := -1
 		hadTool, failed := false, false
@@ -51,7 +57,15 @@ func appendNoticeEvents(ctx context.Context, input <-chan engine.StreamEvent, no
 				return
 			}
 		}
-		if ctx.Err() != nil || failed {
+		if ctx.Err() != nil {
+			return
+		}
+		if failed {
+			outcome = "stream_error"
+			return
+		}
+		if finish.FinishReason == "" {
+			outcome = "truncated"
 			return
 		}
 		if finish.FinishReason == "stop" && !hadTool {
@@ -61,9 +75,12 @@ func appendNoticeEvents(ctx context.Context, input <-chan engine.StreamEvent, no
 				!send(engine.StreamEvent{BlockStop: &engine.BlockStop{Index: index}}) {
 				return
 			}
+			outcome = "delivered"
+		} else {
+			outcome = "not_completed"
 		}
-		if finish.FinishReason != "" {
-			_ = send(finish)
+		if !send(finish) {
+			outcome = "interrupted"
 		}
 	}()
 	return output

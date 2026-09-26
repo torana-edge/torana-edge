@@ -29,6 +29,7 @@ func collect(t *testing.T) func() metricdata.ResourceMetrics {
 		compactionApplications, compactionEstimatedTokens = nil, nil
 		compactionEstimatedUSD, compactionUnavailable = nil, nil
 		pluginMetricRejected = nil
+		noticeTotal = nil
 		pluginMetrics = newPluginMetricRegistry()
 	})
 	return func() metricdata.ResourceMetrics {
@@ -37,6 +38,28 @@ func collect(t *testing.T) func() metricdata.ResourceMetrics {
 			t.Fatalf("collect: %v", err)
 		}
 		return rm
+	}
+}
+
+func TestRecordNoticeBoundsLabels(t *testing.T) {
+	do := collect(t)
+	RecordNotice(context.Background(), "codex-thread", "delivered")
+	RecordNotice(context.Background(), "user-controlled-harness", "user-controlled-outcome")
+	got := map[string]int64{}
+	for _, scope := range do().ScopeMetrics {
+		for _, instrument := range scope.Metrics {
+			if instrument.Name != "torana_notice_total" {
+				continue
+			}
+			for _, point := range instrument.Data.(metricdata.Sum[int64]).DataPoints {
+				harness, _ := point.Attributes.Value("harness")
+				outcome, _ := point.Attributes.Value("outcome")
+				got[harness.AsString()+"/"+outcome.AsString()] = point.Value
+			}
+		}
+	}
+	if got["codex-thread/delivered"] != 1 || got["other/other"] != 1 || len(got) != 2 {
+		t.Fatalf("unexpected notice series: %v", got)
 	}
 }
 
