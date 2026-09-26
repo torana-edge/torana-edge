@@ -69,6 +69,7 @@ type record struct {
 	UserTurns         uint64                     `json:"user_turns"`
 	LastUserSignature string                     `json:"last_user_signature,omitempty"`
 	NoticeDisabled    bool                       `json:"notice_disabled,omitempty"`
+	SetupHintSeen     bool                       `json:"setup_hint_seen,omitempty"`
 	Suggestions       []Suggestion               `json:"suggestions"`
 	Operations        map[string]operationRecord `json:"operations,omitempty"`
 	Changes           map[string]changeRecord    `json:"changes,omitempty"`
