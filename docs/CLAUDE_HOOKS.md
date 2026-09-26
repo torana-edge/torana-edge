@@ -51,6 +51,11 @@ only `command`, `picker` and `sdk` accept matching model advice through the
 adapter. Automatic fallback and resume are observations, not acceptance. It
 cannot accept a Torana operation or mutate configuration.
 
+Until a conversation receives its first `PostModelSwitch` event, Torana keeps
+the request-model fallback for recording accepted advice. Enabling the flag
+alone, or installing only Stop, does not disable that fallback. After a real
+switch event, the adapter owns provenance for that conversation.
+
 Matching is exact: use the model name Claude reports as the first alias of each
 decision-router ladder step. A different alias or full model ID will not count
 as accepting the advice. Torana does not guess equivalence between custom models.
@@ -71,6 +76,11 @@ without loading suggestions, reading transcripts or calling another model.
 Authentication still checks the current durable MCP token. It returns only an
 informational `systemMessage`: no allow/deny/ask decision, so Claude's normal
 confirmation and noninteractive switch behavior remain unchanged.
+
+Disabled flags, stale tokens, rate limits and malformed or unsupported payloads
+silently return `200 {}` for this endpoint. Only authenticated, valid events
+show the warning; Stop and PostModelSwitch retain strict errors. Loopback and
+origin protections still apply.
 
 **Claude blocks a switch if a PreModelSwitch hook times out**, even though
 Torana's response never blocks it. Leave this hook out if you don't want Torana

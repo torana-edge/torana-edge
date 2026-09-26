@@ -476,6 +476,11 @@ func (s *Store) AcceptHarnessSwitchVia(conversation, model, via string, turn uin
 	err := s.update(conversation, func(current *record) (bool, error) {
 		changed := expire(current, turn)
 		accepted = nil
+		// A real adapter event, not its configuration flag, owns provenance.
+		// Before the first event, request-model inference still works normally.
+		if via == "harness_switch" && current.LastHarnessSwitchSource != "" {
+			return changed, nil
+		}
 		accepted = acceptHarnessSwitch(current, model, via)
 		return changed || len(accepted) > 0, nil
 	})

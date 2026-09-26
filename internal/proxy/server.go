@@ -1281,16 +1281,11 @@ func New(cfg Config) (*Server, error) {
 					log.Printf("[suggest] could not record user turn: %v", turnErr)
 				} else {
 					rs.UserTurn = turn
-					// With the Claude adapter enabled, explicit hook provenance owns
-					// acceptance. A subsequent request cannot turn auto/resume into
-					// user acceptance merely by carrying the suggested model.
-					if inferHarnessSwitch(convIdentity.Source, currentCfg.Providers.Suggestions.ClaudeCode.Enabled) {
-						if accepted, acceptErr := s.suggestions.AcceptHarnessSwitch(rs.ConversationID, chat.Model, turn); acceptErr != nil {
-							log.Printf("[suggest] could not record harness model switch: %v", acceptErr)
-						} else {
-							for _, item := range accepted {
-								metrics.RecordSuggestion(req.Context(), item.Kind, item.Status, item.Via)
-							}
+					if accepted, acceptErr := s.suggestions.AcceptHarnessSwitch(rs.ConversationID, chat.Model, turn); acceptErr != nil {
+						log.Printf("[suggest] could not record harness model switch: %v", acceptErr)
+					} else {
+						for _, item := range accepted {
+							metrics.RecordSuggestion(req.Context(), item.Kind, item.Status, item.Via)
 						}
 					}
 				}

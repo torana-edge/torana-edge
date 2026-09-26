@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"math"
 	"net/http"
 	"strings"
@@ -15,31 +16,38 @@ import (
 
 const claudeHooksPath = "/_torana/hooks/claude-code/"
 
-func inferHarnessSwitch(source string, claudeAdapter bool) bool {
-	return source != "claude-code-session" || !claudeAdapter
-}
-
 // No callback can authorize a Torana mutation, block stopping, inject model
 // context or force a switch. The optional pre-switch warning only informs.
 func (s *Server) handleClaudeHook(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
+	path := strings.TrimPrefix(r.URL.Path, claudeHooksPath)
+	pre := path == "pre-model-switch"
+	// This informational endpoint must never fail a valid local switch due
+	// to disabled settings, stale credentials, limits or payload versions.
+	fail := func(status int, message string) {
+		if pre {
+			log.Printf("[claude-hook] pre-switch warning skipped: %s", message)
+			writeAgentJSON(w, http.StatusOK, map[string]any{})
+		} else {
+			http.Error(w, message, status)
+		}
+	}
 	cfg := s.GetConfig().Providers
 	if !cfg.MCP.Enabled || !cfg.Suggestions.ClaudeCode.Enabled {
-		http.NotFound(w, r)
+		fail(http.StatusNotFound, "hook disabled")
 		return
 	}
 	if r.Method != http.MethodPost {
 		w.Header().Set("Allow", http.MethodPost)
-		http.Error(w, "POST required", http.StatusMethodNotAllowed)
+		fail(http.StatusMethodNotAllowed, "POST required")
 		return
 	}
 	token, err := s.mcpTokens.Current()
 	headers := r.Header.Values("Authorization")
 	if err != nil || token == "" || len(headers) != 1 || subtle.ConstantTimeCompare([]byte(headers[0]), []byte("Bearer "+token)) != 1 {
-		http.Error(w, "invalid hook token", http.StatusUnauthorized)
+		fail(http.StatusUnauthorized, "invalid hook token")
 		return
 	}
-	path := strings.TrimPrefix(r.URL.Path, claudeHooksPath)
 	event := ""
 	switch path {
 	case "stop":
@@ -48,7 +56,7 @@ func (s *Server) handleClaudeHook(w http.ResponseWriter, r *http.Request) {
 		event = "PostModelSwitch"
 	case "pre-model-switch":
 		if !cfg.Suggestions.ClaudeCode.PreModelSwitch {
-			http.NotFound(w, r)
+			fail(http.StatusNotFound, "pre-switch warning disabled")
 			return
 		}
 		event = "PreModelSwitch"
@@ -58,7 +66,7 @@ func (s *Server) handleClaudeHook(w http.ResponseWriter, r *http.Request) {
 	}
 	release, allowed := s.mcpLimits.acquireLease("hook:claude-code:" + path)
 	if !allowed {
-		http.Error(w, "retry later", http.StatusTooManyRequests)
+		fail(http.StatusTooManyRequests, "retry later")
 		return
 	}
 	defer release()
@@ -74,18 +82,18 @@ func (s *Server) handleClaudeHook(w http.ResponseWriter, r *http.Request) {
 	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 32<<10))
 	var trailing any
 	if decoder.Decode(&input) != nil || decoder.Decode(&trailing) != io.EOF || input.Event != event || strings.TrimSpace(input.Session) == "" || len(input.Session) > 1024 {
-		http.Error(w, "invalid hook event", http.StatusBadRequest)
+		fail(http.StatusBadRequest, "invalid hook event")
 		return
 	}
 	if event == "PreModelSwitch" {
 		if input.Model == "" || len(input.Model) > 256 || input.ContextTokens < 0 || input.ContextTokens > 1<<53 || input.EstimatedCacheWrite != nil && (math.IsNaN(*input.EstimatedCacheWrite) || math.IsInf(*input.EstimatedCacheWrite, 0) || *input.EstimatedCacheWrite < 0) {
-			http.Error(w, "invalid switch estimate", http.StatusBadRequest)
+			fail(http.StatusBadRequest, "invalid switch estimate")
 			return
 		}
 		switch input.Source {
 		case "command", "picker", "sdk":
 		default:
-			http.Error(w, "invalid switch source", http.StatusBadRequest)
+			fail(http.StatusBadRequest, "invalid switch source")
 			return
 		}
 		// After authentication, no suggestion storage, transcript, model call or

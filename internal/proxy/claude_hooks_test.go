@@ -17,9 +17,6 @@ import (
 )
 
 func TestClaudeHooksGuardIdentityAndNonBlockingSwitchObservation(t *testing.T) {
-	if inferHarnessSwitch("claude-code-session", true) || !inferHarnessSwitch("claude-code-session", false) || !inferHarnessSwitch("codex-thread", true) {
-		t.Fatal("request model inference would bypass adapter provenance")
-	}
 	state, err := pluginstate.New(pluginstate.Options{})
 	if err != nil {
 		t.Fatal(err)
@@ -33,6 +30,7 @@ func TestClaudeHooksGuardIdentityAndNonBlockingSwitchObservation(t *testing.T) {
 	cfg.MCP.Enabled = true
 	cfg.Suggestions.ClaudeCode.Enabled = true
 	s := &Server{config: Config{Providers: cfg}, mcpTokens: mcpauth.New(state, sealer), suggestions: suggest.New(state), mcpLimits: NewRateLimiter(120, 8)}
+	defer s.mcpLimits.Close()
 	token, err := s.mcpTokens.Ensure()
 	if err != nil {
 		t.Fatal(err)
@@ -91,9 +89,13 @@ func TestClaudeHooksGuardIdentityAndNonBlockingSwitchObservation(t *testing.T) {
 		t.Fatal("trailing hook payload accepted")
 	}
 	pre := `{"session_id":"session","hook_event_name":"PreModelSwitch","to_model":"strong","source":"command","context_tokens":12345,"prompt_cache_warm":true,"estimated_cache_write_usd":0.1234}`
-	if request("pre-model-switch", pre, token).Code != http.StatusNotFound {
-		t.Fatal("pre-switch warning was enabled by default")
+	assertSilent := func(response *httptest.ResponseRecorder) {
+		t.Helper()
+		if response.Code != http.StatusOK || strings.TrimSpace(response.Body.String()) != "{}" {
+			t.Fatalf("pre-switch error did not fail open: %d %s", response.Code, response.Body.String())
+		}
 	}
+	assertSilent(request("pre-model-switch", pre, token))
 	s.config.Providers.Suggestions.ClaudeCode.PreModelSwitch = true
 	// No conversation reads or writes are needed to report the supplied estimate.
 	s.suggestions = nil
@@ -110,16 +112,25 @@ func TestClaudeHooksGuardIdentityAndNonBlockingSwitchObservation(t *testing.T) {
 	if got := request("pre-model-switch", strings.ReplaceAll(pre, `"prompt_cache_warm":true`, `"prompt_cache_warm":false`), token); strings.TrimSpace(got.Body.String()) != "{}" {
 		t.Fatal("cold cache produced a warning")
 	}
-	if request("pre-model-switch", strings.ReplaceAll(pre, "0.1234", "-1"), token).Code != http.StatusBadRequest {
-		t.Fatal("negative cost accepted")
+	assertSilent(request("pre-model-switch", strings.ReplaceAll(pre, "0.1234", "-1"), token))
+	assertSilent(request("pre-model-switch", strings.ReplaceAll(pre, `"command"`, `"auto"`), token))
+	assertSilent(request("pre-model-switch", "{", token))
+	assertSilent(request("pre-model-switch", pre, "wrong"))
+	s.config.Providers.MCP.Enabled = false
+	assertSilent(request("pre-model-switch", pre, token))
+	s.config.Providers.MCP.Enabled = true
+	s.mcpLimits.Update(120, 1)
+	release, allowed := s.mcpLimits.acquireLease("hook:claude-code:pre-model-switch")
+	if !allowed {
+		t.Fatal("could not occupy the hook lease")
 	}
-	if request("pre-model-switch", strings.ReplaceAll(pre, `"command"`, `"auto"`), token).Code != http.StatusBadRequest {
-		t.Fatal("automatic switch accepted as a pre-switch request")
-	}
+	assertSilent(request("pre-model-switch", pre, token))
+	release()
 	if _, err := s.mcpTokens.Rotate(); err != nil {
 		t.Fatal(err)
 	}
 	if request("stop", body, token).Code != http.StatusUnauthorized {
 		t.Fatal("rotated token remained valid")
 	}
+	assertSilent(request("pre-model-switch", pre, token))
 }

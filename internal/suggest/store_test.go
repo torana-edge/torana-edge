@@ -24,6 +24,12 @@ func TestHookAnnouncementPersistsAndAutomaticSwitchOnlyObserves(t *testing.T) {
 	}
 	defer state.Close()
 	store := New(state)
+	if _, err := store.Create("no-hook-events", "router", 0, sample("strong")); err != nil {
+		t.Fatal(err)
+	}
+	if accepted, err := store.AcceptHarnessSwitch("no-hook-events", "strong", 0); err != nil || len(accepted) != 1 || accepted[0].Via != "harness_switch" {
+		t.Fatalf("missing-hook fallback=%+v %v", accepted, err)
+	}
 	id, err := store.Create("c", "router", 0, sample("strong"))
 	if err != nil {
 		t.Fatal(err)
@@ -43,6 +49,9 @@ func TestHookAnnouncementPersistsAndAutomaticSwitchOnlyObserves(t *testing.T) {
 		current, _, _, err := store.read("c")
 		if err != nil || current.LastHarnessModel != "strong" || current.LastHarnessSwitchSource != source || current.Suggestions[0].Status != "pending" {
 			t.Fatalf("observation=%+v %v", current, err)
+		}
+		if accepted, err := store.AcceptHarnessSwitch("c", "strong", 0); err != nil || len(accepted) != 0 {
+			t.Fatalf("request overrode automatic provenance: %+v %v", accepted, err)
 		}
 	}
 	if accepted, err := store.ObserveAdapterSwitch("c", "strong", "command", 0); err != nil || len(accepted) != 1 || accepted[0].Via != "adapter" {
