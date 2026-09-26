@@ -31,6 +31,8 @@ func TestUsageAndInvalidInputDoNotContactServer(t *testing.T) {
 		{"stats", "--file", "foo"}, {"feed", "--follow", "--follow"},
 		{"stats", "--typo"},
 		{"suggestions", "list"}, {"suggestions", "accept", "sg_1", "--conversation", "c"},
+		{"changes", "list"}, {"changes", "undo", "sg_1", "--conversation", "c"},
+		{"changes", "undo", "sg_1", "--yes"},
 	} {
 		_, _, err := invoke("127.0.0.1:1", "", args...)
 		if err == nil || strings.Contains(err.Error(), "could not reach") {
@@ -43,6 +45,49 @@ func TestUsageAndInvalidInputDoNotContactServer(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "approve") {
 		t.Fatal("missing help")
+	}
+}
+
+func TestChangeHistoryCLIUsesScopedOperatorEndpoints(t *testing.T) {
+	if !Handles([]string{"changes", "list"}) {
+		t.Fatal("changes CLI not recognized")
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case controlclient.BasePath + "/agent/changes":
+			if r.Method != http.MethodGet || r.URL.Query().Get("conversation_id") != "session" {
+				t.Error("unscoped history read")
+			}
+			_, _ = io.WriteString(w, `{"changes":[{"id":"sg_change","status":"applied"}]}`)
+		case controlclient.BasePath + "/agent/changes/sg_change/undo":
+			var input map[string]string
+			if r.Method != http.MethodPost || json.NewDecoder(r.Body).Decode(&input) != nil || input["conversation_id"] != "session" {
+				t.Error("invalid undo request")
+			}
+			if r.Header.Get("X-Torana-Local-Request") == "" {
+				t.Error("missing local mutation marker")
+			}
+			_, _ = io.WriteString(w, `{"ok":true,"status":"undone"}`)
+		default:
+			t.Errorf("unexpected endpoint: %s", r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	if out, _, err := invoke(server.URL, "", "changes", "list", "--conversation", "session"); err != nil || !strings.Contains(out, "sg_change") {
+		t.Fatalf("list=%s %v", out, err)
+	}
+	if out, _, err := invoke(server.URL, "", "changes", "undo", "sg_change", "--conversation", "session", "--yes"); err != nil || !strings.Contains(out, "undone") {
+		t.Fatalf("undo=%s %v", out, err)
+	}
+	refused := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"ok":false,"error":{"code":"conflict","message":"Configuration changed."}}`)
+	}))
+	defer refused.Close()
+	if out, _, err := invoke(refused.URL, "", "changes", "undo", "sg_change", "--conversation", "session", "--yes"); err == nil || !strings.Contains(out, "conflict") {
+		t.Fatalf("refusal appeared successful: %s %v", out, err)
 	}
 }
 

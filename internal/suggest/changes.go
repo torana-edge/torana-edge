@@ -98,21 +98,19 @@ func (s *Store) ListChanges(conversation string) ([]Change, error) {
 
 // ClaimUndo must run while the caller holds the configuration mutation lock.
 // The supplied revision is host-derived, never accepted from model input.
-func (s *Store) ClaimUndo(conversation, code, actualRevision string) (id, sealedUndo string, err error) {
+func (s *Store) ClaimUndo(conversation, changeID, actualRevision string) (id, sealedUndo string, err error) {
 	err = s.update(conversation, func(current *record) (bool, error) {
-		for key, change := range current.Changes {
-			if change.Code != code || change.Status != "applied" {
-				continue
-			}
-			if actualRevision != change.Revision {
-				return false, ErrConflict
-			}
-			change.Status = "undoing"
-			current.Changes[key] = change
-			id, sealedUndo = key, change.SealedUndo
-			return true, nil
+		change, exists := current.Changes[changeID]
+		if !exists || change.Status != "applied" {
+			return false, ErrNotFound
 		}
-		return false, ErrNotFound
+		if actualRevision != change.Revision {
+			return false, ErrConflict
+		}
+		change.Status = "undoing"
+		current.Changes[changeID] = change
+		id, sealedUndo = changeID, change.SealedUndo
+		return true, nil
 	})
 	if err != nil {
 		return "", "", err

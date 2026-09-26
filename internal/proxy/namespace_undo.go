@@ -16,9 +16,9 @@ type pluginUndoSnapshot struct {
 	Plugins   provider.PluginsConfig `json:"plugins"`
 }
 
-// undoConfirmedPluginChange is for an explicitly user-supplied undo code, not
-// model input. Mounting CLI/directive handlers must preserve that distinction.
-func (s *Server) undoConfirmedPluginChange(ctx context.Context, conversation, code string, protected []string) (mcpserver.Result, error) {
+// undoConfirmedPluginChange is for an explicitly user-supplied change ID, not
+// model input. Mounting operator handlers must preserve that distinction.
+func (s *Server) undoConfirmedPluginChange(ctx context.Context, conversation, changeID string, protected []string) (mcpserver.Result, error) {
 	if err := ctx.Err(); err != nil {
 		return mcpserver.Result{}, err
 	}
@@ -28,16 +28,17 @@ func (s *Server) undoConfirmedPluginChange(ctx context.Context, conversation, co
 	s.controlPlaneMutationMu.Lock()
 	defer s.controlPlaneMutationMu.Unlock()
 	current := s.GetConfig().Providers
+	protected = append(append([]string(nil), protected...), current.Plugins.ProtectedNamespaces()...)
 	revision, err := s.operationRevision(current)
 	if err != nil {
 		return mcpserver.Result{}, err
 	}
-	id, sealed, err := s.suggestions.ClaimUndo(conversation, code, revision)
+	id, sealed, err := s.suggestions.ClaimUndo(conversation, changeID, revision)
 	if errors.Is(err, suggest.ErrConflict) {
 		return operationError("conflict", "Configuration changed after this operation; review the current configuration instead of undoing it."), nil
 	}
 	if errors.Is(err, suggest.ErrNotFound) {
-		return operationError("not_found", "No undoable change matches this code in the current conversation."), nil
+		return operationError("not_found", "No undoable change matches this ID in the current conversation."), nil
 	}
 	if err != nil {
 		return mcpserver.Result{}, err

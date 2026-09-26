@@ -70,6 +70,26 @@ func TestOperatorAcceptanceAppliesConfirmedPluginChange(t *testing.T) {
 	if err != nil || len(changes) != 1 || changes[0].Status != "applied" {
 		t.Fatalf("history=%+v %v", changes, err)
 	}
+	undo := func(id, conversation string) *httptest.ResponseRecorder {
+		recorder := httptest.NewRecorder()
+		s.handleOperatorChanges(recorder, httptest.NewRequest(http.MethodPost, changesAPIPath+"/"+id+"/undo", strings.NewReader(`{"conversation_id":"`+conversation+`"}`)))
+		return recorder
+	}
+	if got := undo(items[0].Code, "operator-session"); !strings.Contains(got.Body.String(), `"code":"not_found"`) {
+		t.Fatalf("code used as ID: %s", got.Body.String())
+	}
+	if got := undo(changes[0].ID, "other"); !strings.Contains(got.Body.String(), `"code":"not_found"`) {
+		t.Fatalf("cross-conversation undo: %s", got.Body.String())
+	}
+	if got := undo(changes[0].ID, "operator-session"); !strings.Contains(got.Body.String(), `"status":"undone"`) {
+		t.Fatalf("undo: %s", got.Body.String())
+	}
+	if len(s.GetConfig().Providers.Plugins.Order) != 1 {
+		t.Fatal("undo did not restore plugin")
+	}
+	if got := undo(changes[0].ID, "operator-session"); !strings.Contains(got.Body.String(), `"code":"not_found"`) {
+		t.Fatalf("undo replay: %s", got.Body.String())
+	}
 }
 
 func TestAgentSuggestionsRequireConversationAndResolveOnce(t *testing.T) {

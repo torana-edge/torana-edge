@@ -102,6 +102,7 @@ Usage:
   torana feed [--follow]         inspect recent or live request events
   torana agent <command>         discover and call plugin agent operations
   torana mcp <command>           enable MCP, inspect it, or manage its token
+  torana changes <command>       list or undo confirmed plugin changes
   torana version                 print the version
   torana help                    print this message
 
