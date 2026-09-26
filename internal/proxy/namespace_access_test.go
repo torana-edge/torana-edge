@@ -65,7 +65,7 @@ func TestNamespacePolicyCoreFloorCannotBeReached(t *testing.T) {
 	}
 }
 
-func TestDirectiveUserDirectCannotBypassTightening(t *testing.T) {
+func TestDirectiveUserDirectIndependentOfModelAccess(t *testing.T) {
 	op := plugin.AgentOperation{ID: "route.pin", Risk: "write", Directive: &plugin.AgentDirective{Command: "pin", UserDirect: true}}
 	d := &plugin.AgentDescriptor{Namespace: &plugin.AgentNamespace{Alias: "router"}, Operations: []plugin.AgentOperation{op}}
 	b := plugin.PluginBundle{Manifest: plugin.PluginManifest{Name: "decision_router"}, Digest: "digest", Agent: d}
@@ -76,7 +76,7 @@ func TestDirectiveUserDirectCannotBypassTightening(t *testing.T) {
 	for _, tc := range []struct {
 		override         string
 		allowed, confirm bool
-	}{{"", true, false}, {"confirm", true, true}, {"never", false, false}} {
+	}{{"", true, false}, {"confirm", true, false}, {"never", true, false}} {
 		overrides := map[string]string{}
 		if tc.override != "" {
 			overrides[b.Manifest.Name+".route.pin"] = tc.override
@@ -91,6 +91,22 @@ func TestDirectiveUserDirectCannotBypassTightening(t *testing.T) {
 		}
 		if p.ModelReachable("router", "route.pin") != "never" {
 			t.Fatal("model accepted alias instead of canonical namespace")
+		}
+	}
+}
+
+func TestNamespacePolicyUnscopedCoreHandlersStayUnavailable(t *testing.T) {
+	r, err := buildNamespaceRegistry(nil, nil, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := newNamespaceAccessPolicy(r, nil, map[string]string{"torana": "read"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{"feed.recent", "suggestions.list", "session.usage", "changes.list", "changes.undo"} {
+		if p.ModelReachable("torana", id) != "never" || p.DirectiveAllowed("torana", id).Allowed {
+			t.Fatalf("unscoped operation reachable: %s", id)
 		}
 	}
 }

@@ -100,22 +100,16 @@ type directiveAccess struct {
 
 // DirectiveAllowed is the equivalent choke point for user-authored directives.
 // user_direct is limited to eligible plugin writes, never protected/floor ops.
+// Model-access declarations and overrides govern models, not explicit user
+// commands. Destructive user commands still require confirmation.
 func (p *namespaceAccessPolicy) DirectiveAllowed(namespace, operation string) directiveAccess {
 	entry, op, ok := p.lookup(namespace, operation, true)
 	if !ok || !op.Callable || p.floor(entry, op) {
 		return directiveAccess{}
 	}
-	access := p.ModelReachable(entry.Name, op.ID)
-	if access == "never" {
-		return directiveAccess{}
-	}
-	confirm := access == "confirm" || op.Risk != "read"
+	confirm := op.Risk != "read"
 	if op.Source == "plugin" && op.Guest != nil && op.Guest.Directive != nil && op.Guest.Directive.UserDirect && op.Risk == "write" && !p.protected[entry.Name] {
-		// Tightening overrides still require confirmation even if the guest
-		// opted into direct execution for its ordinary write default.
-		if p.overrides[entry.Name] != "confirm" && p.overrides[entry.Name+"."+op.ID] != "confirm" {
-			confirm = false
-		}
+		confirm = false
 	}
 	return directiveAccess{Allowed: true, Confirm: confirm, ConversationBinding: op.ConversationBinding}
 }
