@@ -84,6 +84,13 @@ from `torana mcp token`. That command prints the secret token; keep it in your
 client's credential settings, not in a shared chat, screenshot, or repository.
 Add `--json` if you need a structured token envelope.
 
+For a stdio client, configure **command** `torana` and **args** `["mcp", "stdio"]`.
+Torana resolves the running instance and adds authentication itself: no token
+belongs in your harness configuration or command arguments. The adapter keeps
+stdout exclusively for MCP messages and loads the host's tool descriptions and
+instructions directly. Use `["mcp", "stdio", "--addr", "127.0.0.1:8143"]` for
+an explicit local address. Torana must be running with MCP enabled.
+
 ```bash
 torana mcp rotate --yes     # prints the replacement token; update your client
 torana mcp disable --yes    # closes MCP sessions, retaining the token
@@ -92,6 +99,7 @@ torana mcp disable --yes    # closes MCP sessions, retaining the token
 Enable sets up the token once and prints only enabled status. Repeated token
 retrieval keeps the same credential; rotation invalidates the old one. These
 commands use the running instance and accept `--addr` like other live commands.
+After rotating, restart a stdio client's connection so it loads the new token.
 
 MCP applies the model-facing operation policy. It is separate from the operator
 API and is not a sandbox for a harness with unrestricted shell/network access;

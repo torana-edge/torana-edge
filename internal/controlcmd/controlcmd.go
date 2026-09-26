@@ -19,7 +19,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/torana-edge/torana-edge/internal/controlclient"
+	"github.com/torana-edge/torana-edge/internal/mcpshim"
 	"github.com/torana-edge/torana-edge/internal/provider"
 )
 
@@ -67,6 +69,7 @@ func Usage(w io.Writer) {
   torana mcp disable --yes                   close MCP sessions; retain the token
   torana mcp token                           print the instance token (sets up once)
   torana mcp rotate --yes                    rotate and print the instance token
+  torana mcp stdio                           serve MCP on stdin/stdout; token stays private
 
 All commands accept --addr host:port (or a loopback HTTP(S) origin).
 --file - reads stdin. --json is accepted; JSON is already the default.
@@ -191,7 +194,7 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 		allowed = "conversation"
 	case "suggestions accept", "suggestions dismiss":
 		allowed = "conversation yes"
-	case "mcp status", "mcp token":
+	case "mcp status", "mcp token", "mcp stdio":
 	case "mcp enable", "mcp disable", "mcp rotate":
 		allowed = "yes"
 	default:
@@ -203,6 +206,9 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 	}
 	if err != nil {
 		return err
+	}
+	if command == "mcp stdio" && o.json {
+		return fmt.Errorf("mcp stdio already uses MCP protocol output; omit --json")
 	}
 	wantArgs := 0
 	if strings.HasPrefix(command, "plugin ") && command != "plugin status" || command == "agent call" || command == "suggestions show" || command == "suggestions accept" || command == "suggestions dismiss" {
@@ -224,7 +230,7 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 		return fmt.Errorf("invalid plugin name")
 	}
 	timeout := 60 * time.Second
-	if o.follow {
+	if o.follow || command == "mcp stdio" {
 		timeout = 0
 	}
 	client, err := controlclient.New(o.addr, timeout)
@@ -265,9 +271,30 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 		return c.suggestions(command, o)
 	case "mcp status", "mcp enable", "mcp disable", "mcp token", "mcp rotate":
 		return c.mcp(command, o)
+	case "mcp stdio":
+		cfg, _, err := c.config()
+		if err != nil {
+			return err
+		}
+		if !cfg.MCP.Enabled {
+			return fmt.Errorf("enable Torana MCP first with torana mcp enable --yes")
+		}
+		token, err := c.mcpToken(false)
+		if err != nil {
+			return err
+		}
+		input, ok := stdin.(io.ReadCloser)
+		if !ok {
+			input = io.NopCloser(stdin)
+		}
+		return mcpshim.Run(ctx, client, token, &mcp.IOTransport{Reader: input, Writer: stdioWriter{stdout}, MaxLineLength: 64 << 10})
 	}
 	return fmt.Errorf("unhandled command %q", command)
 }
+
+type stdioWriter struct{ io.Writer }
+
+func (stdioWriter) Close() error { return nil }
 
 type runner struct {
 	ctx            context.Context
