@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -69,7 +70,65 @@ type Options struct {
 	Dispatch Dispatch
 }
 
-func NewHandler(options Options) (http.Handler, error) {
+// Handler owns transport sessions and active requests. Shutdown stops admission,
+// cancels streams, and closes sessions before host resources are released.
+type Handler struct {
+	http.Handler
+	server *mcp.Server
+	ctx    context.Context
+	cancel context.CancelFunc
+	mu     sync.Mutex
+	closed bool
+	active sync.WaitGroup
+	once   sync.Once
+	done   chan struct{}
+}
+
+func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	h.mu.Lock()
+	if h.closed {
+		h.mu.Unlock()
+		http.Error(w, "MCP is stopping", http.StatusServiceUnavailable)
+		return
+	}
+	h.active.Add(1)
+	h.mu.Unlock()
+	defer h.active.Done()
+	ctx, cancel := context.WithCancel(r.Context())
+	stop := context.AfterFunc(h.ctx, cancel)
+	defer stop()
+	defer cancel()
+	h.Handler.ServeHTTP(w, r.WithContext(ctx))
+}
+
+func (h *Handler) Shutdown(ctx context.Context) error {
+	h.once.Do(func() {
+		h.mu.Lock()
+		h.closed = true
+		h.mu.Unlock()
+		h.cancel()
+		go func() {
+			for session := range h.server.Sessions() {
+				_ = session.Close()
+			}
+			h.active.Wait()
+			// Initialization admitted just before shutdown can create a session
+			// after the first snapshot. No new request can start at this point.
+			for session := range h.server.Sessions() {
+				_ = session.Close()
+			}
+			close(h.done)
+		}()
+	})
+	select {
+	case <-h.done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func NewHandler(options Options) (*Handler, error) {
 	if options.Token == nil || options.Dispatch == nil {
 		return nil, errors.New("MCP token provider and dispatcher are required")
 	}
@@ -102,7 +161,9 @@ func NewHandler(options Options) (http.Handler, error) {
 	// Correlation evidence expires after 120 seconds; MCP sessions do not.
 	// Coding clients commonly remain idle while users inspect or edit code.
 	transport := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return server }, &mcp.StreamableHTTPOptions{SessionTimeout: 24 * time.Hour})
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithCancel(context.Background())
+	handler := &Handler{server: server, ctx: ctx, cancel: cancel, done: make(chan struct{})}
+	handler.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !localRequest(r) {
 			http.Error(w, "MCP is available only on loopback", http.StatusForbidden)
 			return
@@ -116,7 +177,8 @@ func NewHandler(options Options) (http.Handler, error) {
 		}
 		r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
 		transport.ServeHTTP(w, r)
-	}), nil
+	})
+	return handler, nil
 }
 
 func loopbackHost(host string) bool {
