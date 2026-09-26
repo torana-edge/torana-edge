@@ -116,5 +116,9 @@ func (s *Server) proposeNamespaceOperation(ctx context.Context, call operationCa
 	if err != nil {
 		return mcpserver.Result{}, err
 	}
-	return mcpserver.Result{OK: true, Status: "pending_confirmation", Summary: "Review and confirm this operation in Torana.", ExpiresInSeconds: int(operationConsentTTL.Seconds()), Conversation: &mcpserver.ConversationBinding{Binding: "bound"}, Consent: &mcpserver.Consent{ID: id, Conversation: call.Binding.ConversationID, Message: body}}, nil
+	result := mcpserver.Result{OK: true, Status: "pending_confirmation", Summary: "Review and confirm this operation in Torana.", ExpiresInSeconds: int(operationConsentTTL.Seconds()), Conversation: &mcpserver.ConversationBinding{Binding: "bound"}}
+	if cfg.MCP.Consent != "operator_only" {
+		result.Consent = &mcpserver.Consent{ID: id, Conversation: call.Binding.ConversationID, Message: body}
+	}
+	return result, nil
 }

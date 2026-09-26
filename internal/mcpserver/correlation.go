@@ -36,10 +36,45 @@ type Correlator struct {
 	records        map[Binding]correlationRecord
 	saturatedUntil time.Time
 	saturatedTools map[string]time.Time
+	connected      map[string]time.Time
 }
 
 func NewCorrelator() *Correlator {
 	return &Correlator{records: make(map[Binding]correlationRecord)}
+}
+
+// MarkConnected accepts only a conversation bound by host evidence after an
+// authenticated MCP call. It is informational, never authority for dispatch.
+func (c *Correlator) MarkConnected(conversation string, now time.Time) {
+	if conversation == "" {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.connected == nil {
+		c.connected = make(map[string]time.Time)
+	}
+	if len(c.connected) >= correlationLimit {
+		for key, expiry := range c.connected {
+			if !now.Before(expiry) {
+				delete(c.connected, key)
+			}
+		}
+	}
+	if _, exists := c.connected[conversation]; exists || len(c.connected) < correlationLimit {
+		c.connected[conversation] = now.Add(24 * time.Hour)
+	}
+}
+
+func (c *Correlator) RecentlyConnected(conversation string, now time.Time) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	expiry := c.connected[conversation]
+	if !now.Before(expiry) {
+		delete(c.connected, conversation)
+		return false
+	}
+	return true
 }
 
 func canonicalTool(name string) string {

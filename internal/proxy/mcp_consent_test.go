@@ -85,6 +85,52 @@ func TestMCPConsentStateBindingAndSingleUse(t *testing.T) {
 	}
 }
 
+func TestOperatorOnlyConsentRetainsProposalWithoutHarnessApproval(t *testing.T) {
+	requireWASM(t, fixturesDir+"/test-http-server/plugin.wasm")
+	t.Setenv("TORANA_DATA_DIR", t.TempDir())
+	cfg := provider.DefaultConfig()
+	cfg.MCP.Enabled = true
+	cfg.MCP.Consent = "operator_only"
+	cfg.Plugins = provider.PluginsConfig{Dir: fixturesDir, Order: []string{"test-http-server"}, AllowUnapproved: true}
+	s, err := New(Config{Port: "8080", Providers: cfg})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Shutdown(context.Background())
+	registry, err := s.currentNamespaceRegistry()
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy, err := newNamespaceAccessPolicy(registry, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dispatch := operationDispatch{policy: policy, propose: s.proposeNamespaceOperation}
+	raw := json.RawMessage(`{"namespace":"test-http-server","operation":"_disable"}`)
+	result, err := dispatch.invoke(context.Background(), raw, plugin.MCPBinding{Bound: true, ConversationID: "session", CallID: "call"})
+	if err != nil || result.Status != "pending_confirmation" || result.Consent != nil {
+		t.Fatalf("proposal=%+v %v", result, err)
+	}
+	items, err := s.suggestions.List("session", "torana", 0)
+	if err != nil || len(items) != 1 {
+		t.Fatalf("items=%+v %v", items, err)
+	}
+	if _, err := s.sealMCPConsent(context.Background(), "torana_invoke", raw, &mcpserver.Consent{ID: items[0].ID, Conversation: "session"}); err == nil {
+		t.Fatal("operator-only state sealed")
+	}
+	blocked, err := s.resolveMCPConsent(context.Background(), "torana_invoke", raw, "invalid", "accept")
+	if err != nil || blocked.Error == nil || len(s.GetConfig().Providers.Plugins.Order) != 1 {
+		t.Fatalf("accepted harness approval: %+v %v", blocked, err)
+	}
+	if _, err := s.suggestions.ResolveID("session", items[0].ID, "accepted", "agent_api", 0); err != nil {
+		t.Fatal(err)
+	}
+	applied, err := s.applyConfirmedStandardOperation(context.Background(), "session", items[0].ID, nil)
+	if err != nil || applied.Status != "applied" {
+		t.Fatalf("operator refused: %+v %v", applied, err)
+	}
+}
+
 func TestOfficialMCPConfirmationAppliesHostChange(t *testing.T) {
 	for _, version := range []string{"2025-11-25", "2026-07-28"} {
 		t.Run(version, func(t *testing.T) {

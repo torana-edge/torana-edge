@@ -8,6 +8,39 @@ import (
 	"github.com/torana-edge/torana-edge/internal/pluginstate"
 )
 
+type countedSetupState struct {
+	State
+	reads int
+}
+
+func (s *countedSetupState) GetVersioned(plugin, key string) (string, string, bool, error) {
+	s.reads++
+	return s.State.GetVersioned(plugin, key)
+}
+
+func TestSetupHintSteadyStateDoesNotReadStorage(t *testing.T) {
+	state, err := pluginstate.New(pluginstate.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer state.Close()
+	counted := &countedSetupState{State: state}
+	store := New(counted)
+	now := time.Now()
+	if _, err := store.SetupHint("one", "codex-thread", 1, now); err != nil {
+		t.Fatal(err)
+	}
+	reads := counted.reads
+	for range 100 {
+		if _, err := store.SetupHint("two", "codex-thread", 1, now.Add(time.Minute)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if counted.reads != reads {
+		t.Fatalf("steady state made %d reads", counted.reads-reads)
+	}
+}
+
 func TestSetupHintCooldownAndDismissal(t *testing.T) {
 	state, err := pluginstate.New(pluginstate.Options{})
 	if err != nil {

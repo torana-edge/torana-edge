@@ -11,6 +11,7 @@ import (
 // model-readable).
 type MCPConfig struct {
 	Enabled     bool              `json:"enabled,omitempty"`
+	Consent     string            `json:"consent,omitempty"`
 	Access      map[string]string `json:"access,omitempty"`
 	ServerNames []string          `json:"server_names,omitempty"`
 }
@@ -33,6 +34,9 @@ var mcpAccessKeyPattern = regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9_.-]{0,255}$`)
 var protectedNamespacePattern = regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9_-]{0,127}$`)
 
 func (c Config) validateMCPConfiguration() error {
+	if c.MCP.Consent != "" && c.MCP.Consent != "elicitation" && c.MCP.Consent != "operator_only" {
+		return fmt.Errorf("mcp.consent must be elicitation or operator_only")
+	}
 	serverNames := map[string]bool{}
 	for _, name := range c.MCP.ServerNames {
 		if !protectedNamespacePattern.MatchString(name) || len(name) > 64 || serverNames[name] {
