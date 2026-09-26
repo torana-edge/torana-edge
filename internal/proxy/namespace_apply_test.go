@@ -135,8 +135,22 @@ func TestModelDispatcherCannotSubmitUserUndoCode(t *testing.T) {
 		return mcpserver.Result{}, nil
 	}}
 	result, err := dispatch.invoke(context.Background(), json.RawMessage(`{"namespace":"torana","operation":"changes.undo","input":{"code":"abcd"}}`), plugin.MCPBinding{Bound: true, ConversationID: "host", CallID: "call"})
-	if err != nil || called || result.Error == nil || result.Error.Code != "invalid_input" {
+	if err != nil || called || result.Error == nil || result.Error.Code != "access_denied" {
 		t.Fatalf("model undo code reached handler: %+v %v", result, err)
+	}
+	// Even a relaxed input schema or model access cannot turn the generic
+	// dispatcher into a user undo-code executor.
+	for _, access := range []string{"read", "confirm", "never"} {
+		for i := range entry.Operations {
+			if entry.Operations[i].ID == "changes.undo" {
+				entry.Operations[i].ModelAccess = access
+			}
+		}
+		registry.entries[entry.Name] = entry
+		result, err := dispatch.invoke(context.Background(), json.RawMessage(`{"namespace":"torana","operation":"changes.undo","input":{}}`), plugin.MCPBinding{Bound: true, ConversationID: "host", CallID: "call"})
+		if err != nil || called || result.Error == nil || result.Error.Code != "access_denied" {
+			t.Fatalf("undo dispatcher bypass via %s: %+v %v", access, result, err)
+		}
 	}
 }
 

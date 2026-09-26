@@ -27,3 +27,17 @@ func TestConsentSummaryDoesNotTruncateLargeApproval(t *testing.T) {
 		t.Fatal("truncated approval accepted")
 	}
 }
+
+func TestConsentSummaryNestedLeavesAndIdentifiers(t *testing.T) {
+	entry := namespaceEntry{Name: "router", ConfigSchema: json.RawMessage(`{"properties":{"private":{"writeOnly":true}}}`)}
+	body, err := operationConsentSummary(entry, namespaceOperation{Source: "standard", ID: "_config.set"}, sealedOperationIntent{
+		Before: json.RawMessage(`{"triggers":{"threshold":3},"ladders":[{"step":"small"}],"private":{"step":"old-private"}}`),
+		After:  json.RawMessage(`{"triggers":{"threshold":5},"ladders":[{"step":"opus"}],"private":{"step":"new-private"}}`),
+	})
+	if err != nil || !strings.Contains(body, `"/triggers/threshold": 3 -> 5`) || !strings.Contains(body, `"/ladders/0/step": "small" -> "opus"`) || strings.Contains(body, "new-private") || strings.Contains(body, "old-private") {
+		t.Fatalf("nested summary=%q %v", body, err)
+	}
+	if consentScalar("sk-should-not-display", nil, "step") != "[redacted]" {
+		t.Fatal("credential-shaped identifier printed")
+	}
+}

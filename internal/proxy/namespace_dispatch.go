@@ -68,6 +68,12 @@ func (d *operationDispatch) dispatch(ctx context.Context, input namespaceInvokeI
 	if !exists {
 		return operationError("unknown_operation", "Describe this namespace to find an available operation."), nil
 	}
+	// Undo codes are user-only, regardless of future schema or access changes.
+	// The explicit user undo handlers call the host executor directly. A future
+	// model change-ID proposal needs its own consent path, not this code path.
+	if op.Source == "core" && op.ID == "changes.undo" {
+		return operationError("access_denied", "Undo a change through Torana's UI, CLI, or a user-authored undo directive."), nil
+	}
 	confirm := false
 	if userDirective {
 		access := d.policy.DirectiveAllowed(entry.Name, op.ID)

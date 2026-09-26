@@ -16,6 +16,10 @@ func TestCandidateAllowsOnlyPreexistingUnrelatedSkippedPlugins(t *testing.T) {
 		t.Fatal("target skipped plugin accepted")
 	}
 	changed := broken
+	changed.Reason = "same approval failure with a different path"
+	if introducesSkippedPlugins([]plugin.SkippedPlugin{broken}, []plugin.SkippedPlugin{changed}, "logger") {
+		t.Fatal("varying diagnostic text changed skipped plugin identity")
+	}
 	changed.Digest = "sha256:new"
 	if !introducesSkippedPlugins([]plugin.SkippedPlugin{broken}, []plugin.SkippedPlugin{changed}, "logger") {
 		t.Fatal("new skipped digest accepted")
