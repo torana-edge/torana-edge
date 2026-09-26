@@ -89,6 +89,13 @@ func (s *Store) FinishOperation(conversation, id, outcome string) error {
 		for i := range current.Suggestions {
 			if current.Suggestions[i].ID == id && current.Suggestions[i].Status == "accepted" {
 				current.Suggestions[i].Outcome = outcome
+				if change, exists := current.Changes[id]; exists {
+					change.Status = outcome
+					if outcome != "applied" {
+						change.SealedUndo = ""
+					}
+					current.Changes[id] = change
+				}
 				delete(current.Operations, id)
 				return true, nil
 			}
