@@ -1,5 +1,11 @@
 # Security boundaries
 
+## Reporting a vulnerability
+
+Please [report vulnerabilities privately through GitHub](https://github.com/torana-edge/torana-edge/security/advisories/new).
+Include the affected version, reproduction steps, and expected impact. Do not
+post credentials or exploit details in a public issue.
+
 Torana runs on your machine. Its local control plane lets you and your tools
 manage providers, approve plugins, and change the pipeline.
 
