@@ -57,7 +57,11 @@ func runHooks(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 	}
 	origin := client.Address()
 	client.Close()
-	plan, err := harness.PlanClaudeHooks(filepath.Join(dir, ".claude", "settings.json"), origin, *pre, args[0] == "teardown")
+	settings := "settings.json"
+	if *scope == "project" {
+		settings = "settings.local.json"
+	}
+	plan, err := harness.PlanClaudeHooks(filepath.Join(dir, ".claude", settings), origin, *pre, args[0] == "teardown")
 	if err != nil {
 		return err
 	}

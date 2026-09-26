@@ -16,7 +16,8 @@ torana harness hooks setup claude-code --dry-run
 torana harness hooks setup claude-code
 ```
 
-User settings are the default. Choose `--scope project` for project settings,
+User settings are the default. Choose `--scope project` for per-user project
+settings (`.claude/settings.local.json`), never the shared `settings.json`,
 or `--addr http://127.0.0.1:PORT` to pin a different Torana instance. Private
 recovery backups and ownership records stay in Torana's data directory.
 Teardown removes only exact groups Torana installed and refuses edited ones:
@@ -102,12 +103,25 @@ confirmation and noninteractive switch behavior remain unchanged.
 Disabled flags, stale tokens, rate limits and malformed or unsupported payloads
 silently return `200 {}` for this endpoint. Only authenticated, valid events
 show the warning; Stop and PostModelSwitch retain strict errors. Loopback and
-origin protections still apply.
+origin protections still apply. Manual hook entries must include
+`X-Torana-Local-Request: 1` and use a loopback URL/Host. Missing the header or
+failing the loopback/origin guard can still fail the hook before this handler,
+and may block a switch. The CLI-generated settings include the required header.
 
 **Claude blocks a switch if a PreModelSwitch hook times out**, even though
 Torana's response never blocks it. Leave this hook out if you don't want Torana
 availability to affect switching. Remove the settings entry to disable the
 dependency; turning off the Torana flag alone leaves Claude calling the URL.
 
-The real Claude session walkthrough remains pending.
+An opt-in code check exercises real Haiku Stop and resume callbacks:
+
+```bash
+TORANA_LIVE_CLAUDE_HOOKS=1 go test ./internal/proxy -run TestLiveClaudeHookStopAndResume -count=1
+```
+
+It uses the locally logged-in Claude CLI, a temporary project and private hook
+fixture, with tools disabled. Resume must use the saved model: an explicit
+`--model` override can prevent the model-restore event. Interactive `/model`
+switch acceptance and visibility of the hint in the terminal UI remain separate
+walkthrough checks.
 See [Claude's hook reference](https://code.claude.com/docs/en/hooks).
