@@ -61,14 +61,16 @@ type Suggestion struct {
 	Status                string    `json:"status"`
 	Via                   string    `json:"via,omitempty"`
 	Action                string    `json:"action,omitempty"`
+	Outcome               string    `json:"outcome,omitempty"`
 }
 
 type record struct {
-	Conversation      string       `json:"conversation"`
-	UserTurns         uint64       `json:"user_turns"`
-	LastUserSignature string       `json:"last_user_signature,omitempty"`
-	NoticeDisabled    bool         `json:"notice_disabled,omitempty"`
-	Suggestions       []Suggestion `json:"suggestions"`
+	Conversation      string                     `json:"conversation"`
+	UserTurns         uint64                     `json:"user_turns"`
+	LastUserSignature string                     `json:"last_user_signature,omitempty"`
+	NoticeDisabled    bool                       `json:"notice_disabled,omitempty"`
+	Suggestions       []Suggestion               `json:"suggestions"`
+	Operations        map[string]operationRecord `json:"operations,omitempty"`
 }
 
 // DisableNotices is durable and one-way for a conversation. If signed-marker
@@ -186,8 +188,12 @@ func expire(current *record, turn uint64) bool {
 	changed := false
 	for i := range current.Suggestions {
 		item := &current.Suggestions[i]
-		if item.Status == "pending" && turn >= item.CreatedTurn && turn-item.CreatedTurn >= uint64(item.ExpiresAfterUserTurns) {
+		operation, hostOperation := current.Operations[item.ID]
+		timedOut := hostOperation && !time.Now().Before(operation.ExpiresAt)
+		turnExpired := !hostOperation && turn >= item.CreatedTurn && turn-item.CreatedTurn >= uint64(item.ExpiresAfterUserTurns)
+		if (item.Status == "pending" || hostOperation && item.Status == "accepted" && operation.Execution == "") && (timedOut || turnExpired) {
 			item.Status = "expired"
+			delete(current.Operations, item.ID)
 			changed = true
 		}
 	}
@@ -198,6 +204,13 @@ func expire(current *record, turn uint64) bool {
 // intent supersedes the plugin's previous live suggestion in this conversation.
 // Only the ID returns to the plugin; the host retains the code.
 func (s *Store) Create(conversation, plugin string, turn uint64, args *pb.SuggestArgs) (string, error) {
+	if plugin == "torana" || args != nil && strings.HasPrefix(args.Kind, "torana_") {
+		return "", errors.New("host suggestion kinds are reserved")
+	}
+	return s.create(conversation, plugin, turn, args, nil)
+}
+
+func (s *Store) create(conversation, plugin string, turn uint64, args *pb.SuggestArgs, operation *operationRecord) (string, error) {
 	if plugin == "" || args == nil {
 		return "", errors.New("plugin and suggestion are required")
 	}
@@ -211,9 +224,13 @@ func (s *Store) Create(conversation, plugin string, turn uint64, args *pb.Sugges
 	var created string
 	err = s.update(conversation, func(current *record) (bool, error) {
 		expire(current, turn)
+		pruneOperationPayloads(current)
 		refresh := -1
 		for i := range current.Suggestions {
 			item := &current.Suggestions[i]
+			if operation != nil && current.Operations[item.ID].IntentDigest != operation.IntentDigest {
+				continue
+			}
 			if item.Status == "pending" && item.Plugin == plugin && item.DedupeKey == args.DedupeKey && sameSuggestionIntent(*item, args) {
 				refresh = i
 				break
@@ -221,7 +238,7 @@ func (s *Store) Create(conversation, plugin string, turn uint64, args *pb.Sugges
 		}
 		if refresh >= 0 {
 			for i := range current.Suggestions {
-				if i != refresh && current.Suggestions[i].Plugin == plugin && current.Suggestions[i].Status == "pending" {
+				if i != refresh && current.Suggestions[i].Plugin == plugin && current.Suggestions[i].Status == "pending" && (operation == nil || current.Suggestions[i].DedupeKey == args.DedupeKey) {
 					current.Suggestions[i].Status = "superseded"
 				}
 			}
@@ -233,20 +250,27 @@ func (s *Store) Create(conversation, plugin string, turn uint64, args *pb.Sugges
 				item.ExpiresAfterUserTurns = defaultExpiry
 			}
 			created = item.ID
+			if operation != nil {
+				if current.Operations == nil {
+					current.Operations = map[string]operationRecord{}
+				}
+				current.Operations[item.ID] = *operation
+			}
 			return true, nil
 		}
 		used := make(map[string]bool, len(current.Suggestions))
 		for i := range current.Suggestions {
 			item := &current.Suggestions[i]
 			used[item.Code] = true
-			if item.Status == "pending" && item.Plugin == plugin {
+			if item.Status == "pending" && item.Plugin == plugin && (operation == nil || item.DedupeKey == args.DedupeKey) {
 				item.Status = "superseded"
 			}
 		}
 		if len(current.Suggestions) >= maxRecords {
 			kept := current.Suggestions[:0]
 			for _, item := range current.Suggestions {
-				if item.Status == "pending" {
+				_, hostOperation := current.Operations[item.ID]
+				if item.Status == "pending" || hostOperation && item.Status == "accepted" {
 					kept = append(kept, item)
 				}
 			}
@@ -286,6 +310,13 @@ func (s *Store) Create(conversation, plugin string, turn uint64, args *pb.Sugges
 			item.Actions = append(item.Actions, Action{ID: action.Id, Label: action.Label})
 		}
 		current.Suggestions = append(current.Suggestions, item)
+		if operation != nil {
+			if current.Operations == nil {
+				current.Operations = map[string]operationRecord{}
+			}
+			current.Operations[id] = *operation
+		}
+		pruneOperationPayloads(current)
 		created = id
 		return true, nil
 	})
