@@ -82,7 +82,7 @@ func TestSuggestHostCallReturnsOnlyHostOwnedID(t *testing.T) {
 	}
 	var got pbv1.SuggestResult
 	if err := proto.Unmarshal(value.Value, &got); err != nil || got.SuggestionId != "sg_test" {
-		t.Fatalf("suggest response: %+v, %v", got, err)
+		t.Fatalf("suggest response: %+v, %v", &got, err)
 	}
 }
 
