@@ -84,6 +84,9 @@ type Handler struct {
 	done   chan struct{}
 }
 
+// Done closes after all admitted requests and sessions have drained.
+func (h *Handler) Done() <-chan struct{} { return h.done }
+
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	h.mu.Lock()
 	if h.closed {
