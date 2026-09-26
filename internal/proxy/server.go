@@ -1282,8 +1282,12 @@ func New(cfg Config) (*Server, error) {
 					log.Printf("[suggest] could not record user turn: %v", turnErr)
 				} else {
 					rs.UserTurn = turn
-					if _, acceptErr := s.suggestions.AcceptHarnessSwitch(rs.ConversationID, chat.Model, turn); acceptErr != nil {
+					if accepted, acceptErr := s.suggestions.AcceptHarnessSwitch(rs.ConversationID, chat.Model, turn); acceptErr != nil {
 						log.Printf("[suggest] could not record harness model switch: %v", acceptErr)
+					} else {
+						for _, item := range accepted {
+							metrics.RecordSuggestion(req.Context(), item.Kind, item.Status, item.Via)
+						}
 					}
 				}
 			}
@@ -1291,9 +1295,16 @@ func New(cfg Config) (*Server, error) {
 				message := "Torana commands are disabled in this configuration."
 				if currentCfg.Providers.Directives.Enabled {
 					if latestUserHasOtherContent(chat) {
+						for _, command := range latestDirectives {
+							metrics.RecordDirective(req.Context(), command.Verb, "mixed")
+						}
 						message = "Torana saw a command alongside other text. Nothing was sent or changed. Send the command alone, then resend your other text."
 					} else {
 						message = dispatchCoreDirectives(s.suggestions, rs.ConversationID, rs.UserTurn, latestDirectives)
+					}
+				} else {
+					for _, command := range latestDirectives {
+						metrics.RecordDirective(req.Context(), command.Verb, "disabled")
 					}
 				}
 				rc := req.Context().Value(routeContextKey{}).(*RouteContext)
@@ -3958,6 +3969,7 @@ func (s *Server) newRuntime() *wasm.Runtime {
 		if err != nil {
 			return "", &pb.HostError{Code: pb.ErrorCode_ERROR_CODE_UNAVAILABLE, Message: "suggestion could not be saved"}
 		}
+		metrics.RecordSuggestion(ctx, args.Kind, "pending", "plugin")
 		return id, nil
 	}
 	rt.SuggestionOutcomesFunc = func(ctx context.Context, pluginName string) ([]byte, error) {

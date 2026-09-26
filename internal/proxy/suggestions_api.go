@@ -8,6 +8,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/torana-edge/torana-edge/internal/metrics"
 	"github.com/torana-edge/torana-edge/internal/suggest"
 )
 
@@ -92,5 +93,6 @@ func (s *Server) handleAgentSuggestions(w http.ResponseWriter, r *http.Request) 
 		writeAgentError(w, http.StatusServiceUnavailable, "state_unavailable", "suggestion state is unavailable")
 		return
 	}
+	metrics.RecordSuggestion(r.Context(), item.Kind, item.Status, item.Via)
 	writeAgentJSON(w, http.StatusOK, item)
 }

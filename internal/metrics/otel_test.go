@@ -30,6 +30,7 @@ func collect(t *testing.T) func() metricdata.ResourceMetrics {
 		compactionEstimatedUSD, compactionUnavailable = nil, nil
 		pluginMetricRejected = nil
 		noticeTotal = nil
+		suggestionTotal, directiveTotal = nil, nil
 		pluginMetrics = newPluginMetricRegistry()
 	})
 	return func() metricdata.ResourceMetrics {
@@ -38,6 +39,35 @@ func collect(t *testing.T) func() metricdata.ResourceMetrics {
 			t.Fatalf("collect: %v", err)
 		}
 		return rm
+	}
+}
+
+func TestAdaptiveEventMetricsBoundLabels(t *testing.T) {
+	do := collect(t)
+	RecordSuggestion(context.Background(), "custom-kind", "pending", "plugin")
+	RecordDirective(context.Background(), "custom-verb", "user-controlled-outcome")
+	series := map[string]bool{}
+	for _, scope := range do().ScopeMetrics {
+		for _, instrument := range scope.Metrics {
+			switch instrument.Name {
+			case "torana_suggestions_total", "torana_directives_total":
+				for _, point := range instrument.Data.(metricdata.Sum[int64]).DataPoints {
+					if instrument.Name == "torana_suggestions_total" {
+						kind, _ := point.Attributes.Value("kind")
+						status, _ := point.Attributes.Value("status")
+						via, _ := point.Attributes.Value("via")
+						series[instrument.Name+"/"+kind.AsString()+"/"+status.AsString()+"/"+via.AsString()] = true
+					} else {
+						verb, _ := point.Attributes.Value("verb")
+						outcome, _ := point.Attributes.Value("outcome")
+						series[instrument.Name+"/"+verb.AsString()+"/"+outcome.AsString()] = true
+					}
+				}
+			}
+		}
+	}
+	if len(series) != 2 || !series["torana_suggestions_total/other/pending/plugin"] || !series["torana_directives_total/other/other"] {
+		t.Fatalf("unexpected adaptive metric series: %v", series)
 	}
 }
 

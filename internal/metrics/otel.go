@@ -109,6 +109,8 @@ func initInstruments(m metric.Meter) {
 	compactionUnavailable, _ = m.Int64Counter("torana_compaction_savings_unavailable_total")
 	routedTotal, _ = m.Int64Counter("torana_routed_requests_total")
 	noticeTotal, _ = m.Int64Counter("torana_notice_total")
+	suggestionTotal, _ = m.Int64Counter("torana_suggestions_total")
+	directiveTotal, _ = m.Int64Counter("torana_directives_total")
 	pluginMetricRejected, _ = m.Int64Counter("torana_plugin_metric_rejections_total")
 }
 
@@ -124,6 +126,8 @@ var (
 	compactionUnavailable     metric.Int64Counter
 	routedTotal               metric.Int64Counter
 	noticeTotal               metric.Int64Counter
+	suggestionTotal           metric.Int64Counter
+	directiveTotal            metric.Int64Counter
 	pluginMetricRejected      metric.Int64Counter
 	pluginMetrics             = newPluginMetricRegistry()
 )
@@ -145,6 +149,47 @@ func RecordNotice(ctx context.Context, harness, outcome string) {
 		outcome = "other"
 	}
 	noticeTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("harness", harness), attribute.String("outcome", outcome)))
+}
+
+// RecordSuggestion counts persisted suggestions and explicit resolutions.
+// Plugin-defined kinds are folded into "other" to bound OTel cardinality.
+func RecordSuggestion(ctx context.Context, kind, status, via string) {
+	if meter == nil {
+		return
+	}
+	if kind != "model_switch" {
+		kind = "other"
+	}
+	switch status {
+	case "pending", "accepted", "dismissed":
+	default:
+		status = "other"
+	}
+	switch via {
+	case "plugin", "agent_api", "directive", "harness_switch":
+	default:
+		via = "other"
+	}
+	suggestionTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("kind", kind), attribute.String("status", status), attribute.String("via", via)))
+}
+
+// RecordDirective counts locally handled commands. Unknown verbs and
+// outcomes cannot create unbounded series from user message text.
+func RecordDirective(ctx context.Context, verb, outcome string) {
+	if meter == nil {
+		return
+	}
+	switch verb {
+	case "accept", "dismiss", "status", "help":
+	default:
+		verb = "other"
+	}
+	switch outcome {
+	case "accepted", "dismissed", "shown", "invalid", "not_found", "unavailable", "disabled", "mixed":
+	default:
+		outcome = "other"
+	}
+	directiveTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("verb", verb), attribute.String("outcome", outcome)))
 }
 
 type pluginMetricKey struct {
