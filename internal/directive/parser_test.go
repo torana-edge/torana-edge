@@ -85,3 +85,11 @@ func TestParseTextDirectiveOnly(t *testing.T) {
 		t.Fatalf("ordinary text changed: %+v", got)
 	}
 }
+
+func TestFenceWithTrailingTextDoesNotExposeDirective(t *testing.T) {
+	input := "```text\n```not-a-closing-fence\ntorana> accept abcd\n```\ntorana> status"
+	got := ParseText(input, namespace)
+	if len(got.Commands) != 1 || got.Commands[0].Verb != "status" || !strings.Contains(got.Text, "torana> accept abcd") {
+		t.Fatalf("code-fenced command was exposed: %+v", got)
+	}
+}

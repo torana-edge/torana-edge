@@ -53,7 +53,7 @@ func ParseText(input string, knownNamespace func(string) bool) Result {
 		if marker, width := fenceMarker(trimmed); marker != 0 {
 			if fence == 0 {
 				fence, fenceWidth = marker, width
-			} else if marker == fence && width >= fenceWidth {
+			} else if marker == fence && width >= fenceWidth && strings.TrimSpace(trimmed[width:]) == "" {
 				fence, fenceWidth = 0, 0
 			}
 			output.WriteString(line)
