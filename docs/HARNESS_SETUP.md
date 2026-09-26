@@ -182,6 +182,39 @@ adapting configuration and the request to your own provider.
 
 ## Help shape the next integration
 
+## Connect Torana's MCP tools
+
+Routing model traffic through Torana and connecting its MCP tools are separate
+steps. MCP lets your harness inspect Torana and propose plugin changes; it does
+not change your provider login or model selection.
+
+With Torana running, enable the local endpoint and preview your project's entry:
+
+```bash
+torana mcp enable --yes
+torana harness setup claude-code --dry-run
+torana harness setup claude-code
+```
+
+Use `codex` instead of `claude-code` for Codex. Project scope writes `.mcp.json`
+for Claude Code or `.codex/config.toml` for Codex. Use `--scope user` to connect
+across projects. Restart the harness, then follow its normal MCP approval and
+workspace-trust prompts. [Claude MCP scopes](https://code.claude.com/docs/en/mcp)
+and [Codex MCP configuration](https://learn.chatgpt.com/docs/extend/mcp?surface=cli)
+describe those harness-owned settings.
+
+The preview displays only Torana's server entry, never your other settings or
+credentials. Applying an edit keeps a private recovery backup. Repeating setup
+does nothing when the entry already matches. To remove only the entry Torana
+added, run `torana harness teardown claude-code` (with the same scope). Edited
+or conflicting entries are left for you to review, not overwritten.
+
+Changes proposed by the model need your approval: in the harness's MCP dialog
+where supported, otherwise in Torana's **Review** screen or through
+`torana suggestions accept`. Undo lives in Torana's UI or CLI, not in chat.
+
+### Help shape the next integration
+
 Got a favorite harness, a plugin idea, or a workflow that needs a little more
 support? [Tell us what you're trying to do](https://github.com/torana-edge/torana-edge/issues).
 Include the harness version, provider, and the step you got to—keep credentials
