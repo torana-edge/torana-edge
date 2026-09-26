@@ -2321,6 +2321,15 @@ func New(cfg Config) (*Server, error) {
 			if _, supplied := topLevel["effort"]; !supplied {
 				incoming.Effort = cur.Effort
 			}
+			if _, supplied := topLevel["mcp"]; !supplied {
+				incoming.MCP = cur.MCP
+			}
+			if _, supplied := topLevel["assistant"]; !supplied {
+				incoming.Assistant = cur.Assistant
+			}
+			if _, supplied := topLevel["harness"]; !supplied {
+				incoming.Harness = cur.Harness
+			}
 			// Never let the settings surface mutate the pipeline.
 			incoming.Plugins = cur.Plugins
 			cacheEnc, err := s.normalizeSecretField(incoming.Cache.Redis.PasswordEnc, cur.Cache.Redis.PasswordEnc)
@@ -2523,6 +2532,7 @@ func New(cfg Config) (*Server, error) {
 		defer s.controlPlaneMutationMu.Unlock()
 
 		var req struct {
+			Protected *[]string                           `json:"protected,omitempty"`
 			Order     *[]string                           `json:"order,omitempty"`
 			HookOrder *map[string][]string                `json:"hook_order,omitempty"`
 			Config    map[string]json.RawMessage          `json:"config,omitempty"`
@@ -2551,6 +2561,9 @@ func New(cfg Config) (*Server, error) {
 
 		oldPlugins := s.GetConfig().Providers.Plugins
 		newPlugins := oldPlugins
+		if req.Protected != nil {
+			newPlugins.Protected = append([]string{}, (*req.Protected)...)
+		}
 		if req.Order != nil {
 			newPlugins.Order = *req.Order
 		}
@@ -2643,6 +2656,10 @@ func New(cfg Config) (*Server, error) {
 
 		candidate := s.GetConfig().Providers
 		candidate.Plugins = newPlugins
+		if err := candidate.Validate(); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
 		// Before anything is written or published, and the registry that is
 		// built here is the one that goes live below. A registry that cannot
 		// be built is the caller's mistake, and finding it here costs nothing

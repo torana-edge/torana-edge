@@ -168,6 +168,9 @@ func (c CredentialsConfig) Validate() error {
 
 // Validate rejects configuration that cannot be routed deterministically.
 func (c Config) Validate() error {
+	if err := c.validateMCPConfiguration(); err != nil {
+		return err
+	}
 	if c.Port <= 0 || c.Port > 65535 {
 		return fmt.Errorf("port must be between 1 and 65535")
 	}
@@ -470,6 +473,9 @@ type Config struct {
 	Suggestions SuggestionsConfig   `json:"suggestions,omitempty"`
 	Directives  DirectivesConfig    `json:"directives,omitempty"`
 	Effort      EffortConfig        `json:"effort,omitempty"`
+	MCP         MCPConfig           `json:"mcp,omitempty"`
+	Assistant   AssistantConfig     `json:"assistant,omitempty"`
+	Harness     HarnessConfig       `json:"harness,omitempty"`
 	Limits      Limits              `json:"limits,omitempty"`
 	// Cache selects the cross-request plugin state backend: in-process
 	// memory (default) or Redis for distributed / restart-safe deployments.
@@ -741,6 +747,7 @@ type Limits struct {
 
 // PluginsConfig controls WASM plugin loading and execution.
 type PluginsConfig struct {
+	Protected []string                   `json:"protected"`
 	Dir       string                     `json:"dir"`                  // plugins directory; empty uses DefaultPluginsDir when plugins are configured
 	Order     []string                   `json:"order"`                // load/lifecycle order and default execution order
 	HookOrder map[string][]string        `json:"hook_order,omitempty"` // exact per-hook execution overrides
@@ -1015,6 +1022,21 @@ func Load(path string) (Config, error) {
 	}
 	if has("plugins") {
 		cfg.Plugins = user.Plugins
+	}
+	if has("suggestions") {
+		cfg.Suggestions = user.Suggestions
+	}
+	if has("directives") {
+		cfg.Directives = user.Directives
+	}
+	if has("mcp") {
+		cfg.MCP = user.MCP
+	}
+	if has("assistant") {
+		cfg.Assistant = user.Assistant
+	}
+	if has("harness") {
+		cfg.Harness = user.Harness
 	}
 	if has("limits") {
 		cfg.Limits = user.Limits
