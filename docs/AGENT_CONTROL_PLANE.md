@@ -8,6 +8,13 @@ For terminal and harness workflows, start with the [CLI guide](CLI.md).
 `torana agent discover` reads this discovery document; dedicated commands cover
 settings, plugin approval and ordering, configuration, statistics, and events.
 
+This is an **operator API**, not the narrower MCP tool interface. Its loopback
+and browser-origin checks prevent cross-site requests and DNS rebinding; they
+do not authenticate or isolate programs running as your user. A harness with
+local shell/network access can administer Torana here. Use its permission
+prompts and sandbox restrictions to control that access. See
+[security boundaries](../SECURITY.md).
+
 Configuration and plugin-list GETs return an `ETag`. Every settings, pipeline,
 or per-plugin configuration mutation **requires** that exact token as
 `If-Match`, including on the unversioned routes. Missing or empty tokens return

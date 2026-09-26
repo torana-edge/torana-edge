@@ -76,6 +76,75 @@ func TestFixedToolsAndOfficialSDKClient(t *testing.T) {
 	}
 }
 
+func TestHandlerShutdownCancelsRequestsAndStopsAdmission(t *testing.T) {
+	handler, err := NewHandler(Options{Token: func() string { return "test" }, Dispatch: func(context.Context, string, json.RawMessage) (Result, error) {
+		return Result{OK: true}, nil
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	entered := make(chan struct{})
+	exited := make(chan struct{})
+	handler.Handler = http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		close(entered)
+		<-r.Context().Done()
+	})
+	go func() {
+		handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", "http://localhost/", nil))
+		close(exited)
+	}()
+	<-entered
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := handler.Shutdown(ctx); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-exited:
+	case <-ctx.Done():
+		t.Fatal("shutdown left a request running")
+	}
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, httptest.NewRequest("GET", "http://localhost/", nil))
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("closed status=%d", w.Code)
+	}
+	if err := handler.Shutdown(ctx); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestHandlerShutdownClosesOfficialClientSession(t *testing.T) {
+	handler, err := NewHandler(Options{Token: func() string { return "test-token" }, Dispatch: func(context.Context, string, json.RawMessage) (Result, error) {
+		return Result{OK: true}, nil
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(handler)
+	defer server.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	client := mcp.NewClient(&mcp.Implementation{Name: "shutdown-test", Version: "test"}, nil)
+	session, err := client.Connect(ctx, &mcp.StreamableClientTransport{Endpoint: server.URL, HTTPClient: &http.Client{Transport: tokenTransport{token: "test-token"}}}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.Close()
+	if _, err := session.ListTools(ctx, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := handler.Shutdown(ctx); err != nil {
+		t.Fatal(err)
+	}
+	for range handler.server.Sessions() {
+		t.Fatal("shutdown retained a session")
+	}
+	if _, err := session.ListTools(ctx, nil); err == nil {
+		t.Fatal("closed endpoint still served a session")
+	}
+}
+
 func TestTransportGuardsAndRotation(t *testing.T) {
 	token := "old-token"
 	handler, err := NewHandler(Options{Token: func() string { return token }, Dispatch: func(context.Context, string, json.RawMessage) (Result, error) { return Result{OK: true}, nil }})

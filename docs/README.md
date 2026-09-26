@@ -15,6 +15,7 @@ Start small: route one request, see it in the feed, then add one plugin.
 - [Local models](LOCAL_MODELS.md) and [optional TLS ingress](GEMINI_ANTIGRAVITY.md).
 - [Cache backends](CACHE.md), [provider prompt caching](PROMPT_CACHING.md), [Responses compaction](RESPONSES_COMPACTION.md).
 - [Audit logging](AUDIT_LOG.md) and [upgrades](UPGRADE_NOTES.md).
+- [Security boundaries](../SECURITY.md): local administration, model-facing tools, and harness permissions.
 
 ## Extend and contribute
 
