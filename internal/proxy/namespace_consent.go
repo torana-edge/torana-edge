@@ -109,12 +109,12 @@ func (s *Server) proposeNamespaceOperation(ctx context.Context, call operationCa
 	// guest-authored title. Those stay in the trusted operator confirmation UI.
 	// CallID is intentional consent provenance: a different tool call gets a
 	// fresh code even if it proposes the same configuration change.
-	_, err = s.suggestions.CreateOperation(call.Binding.ConversationID, turn, suggest.OperationProposal{
+	id, err := s.suggestions.CreateOperation(call.Binding.ConversationID, turn, suggest.OperationProposal{
 		IntentKey: entry.Name + "." + operation.ID, IntentDigest: hex.EncodeToString(mac), Title: "Confirm " + entry.Name + " change", Body: body,
 		SealedIntent: sealed, ExpiresAt: time.Now().Add(operationConsentTTL),
 	})
 	if err != nil {
 		return mcpserver.Result{}, err
 	}
-	return mcpserver.Result{OK: true, Status: "pending_confirmation", Summary: "Review and confirm this operation in Torana.", ExpiresInSeconds: int(operationConsentTTL.Seconds()), Conversation: &mcpserver.ConversationBinding{Binding: "bound"}}, nil
+	return mcpserver.Result{OK: true, Status: "pending_confirmation", Summary: "Review and confirm this operation in Torana.", ExpiresInSeconds: int(operationConsentTTL.Seconds()), Conversation: &mcpserver.ConversationBinding{Binding: "bound"}, Consent: &mcpserver.Consent{ID: id, Conversation: call.Binding.ConversationID, Message: body}}, nil
 }

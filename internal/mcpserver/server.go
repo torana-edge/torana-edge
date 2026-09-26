@@ -27,6 +27,7 @@ var instructions string
 // Result is a model-safe domain outcome. A Go error is an internal failure,
 // never a validation or consent outcome, and is not forwarded to clients.
 type Result struct {
+	Consent          *Consent             `json:"-"` // Host-only; never serialize confirmation material.
 	OK               bool                 `json:"ok"`
 	Namespace        string               `json:"namespace,omitempty"`
 	Operation        string               `json:"operation,omitempty"`
@@ -38,6 +39,8 @@ type Result struct {
 	Error            *DomainError         `json:"error,omitempty"`
 	InterfaceVersion int                  `json:"interface_version"`
 }
+
+type Consent struct{ ID, Conversation, Message string }
 
 type ConversationBinding struct {
 	Binding string `json:"binding"`
@@ -66,8 +69,10 @@ type Options struct {
 	Version string
 	// Token is evaluated for every HTTP request so rotation invalidates old
 	// sessions too. The caller loads the token through Torana's secret store.
-	Token    func() string
-	Dispatch Dispatch
+	Token          func() string
+	Dispatch       Dispatch
+	SealConsent    func(context.Context, string, json.RawMessage, *Consent) (string, error)
+	ResolveConsent func(context.Context, string, json.RawMessage, string, string) (Result, error)
 }
 
 // Handler owns transport sessions and active requests. Shutdown stops admission,
@@ -142,12 +147,19 @@ func NewHandler(options Options) (*Handler, error) {
 	}
 	for _, tool := range tools {
 		name := tool.Name
-		mcp.AddTool(server, tool, func(ctx context.Context, _ *mcp.CallToolRequest, input map[string]any) (*mcp.CallToolResult, any, error) {
+		mcp.AddTool(server, tool, func(ctx context.Context, req *mcp.CallToolRequest, input map[string]any) (*mcp.CallToolResult, any, error) {
 			raw, err := json.Marshal(input)
 			if err != nil {
 				return nil, nil, err
 			}
-			output, err := options.Dispatch(ctx, name, raw)
+			output, err := dispatchWithConsent(ctx, options, req, name, raw)
+			if err == nil && output.OK && output.Status == "pending_confirmation" {
+				var required *mcp.CallToolResult
+				required, output, err = elicitConsent(ctx, options, req, name, raw, output)
+				if required != nil && err == nil {
+					return required, nil, nil
+				}
+			}
 			if err != nil || output.OK == (output.Error != nil) {
 				// Do not forward transport/internal errors, which may contain
 				// credentials or raw provider/configuration data, to the model.
@@ -164,6 +176,9 @@ func NewHandler(options Options) (*Handler, error) {
 	// Correlation evidence expires after 120 seconds; MCP sessions do not.
 	// Coding clients commonly remain idle while users inspect or edit code.
 	transport := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return server }, &mcp.StreamableHTTPOptions{SessionTimeout: 24 * time.Hour})
+	// Modern MCP is stateless and returns inline input requests. Keep the
+	// stateful transport for older clients that use server-initiated dialogs.
+	modernTransport := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return server }, &mcp.StreamableHTTPOptions{Stateless: true})
 	ctx, cancel := context.WithCancel(context.Background())
 	handler := &Handler{server: server, ctx: ctx, cancel: cancel, done: make(chan struct{})}
 	handler.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -179,6 +194,10 @@ func NewHandler(options Options) (*Handler, error) {
 			return
 		}
 		r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
+		if r.Header.Get("MCP-Protocol-Version") >= "2026-07-28" {
+			modernTransport.ServeHTTP(w, r)
+			return
+		}
 		transport.ServeHTTP(w, r)
 	})
 	return handler, nil

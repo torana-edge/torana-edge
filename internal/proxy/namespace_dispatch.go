@@ -61,7 +61,7 @@ func (d *operationDispatch) dispatch(ctx context.Context, input namespaceInvokeI
 	if !exists {
 		return operationError("unknown_operation", "Describe this namespace to find an available operation."), nil
 	}
-	// Undo codes are user-only, regardless of future schema or access changes.
+	// Undo by change ID is operator-only, regardless of access changes.
 	// The explicit user undo handlers call the host executor directly. A future
 	// model change-ID proposal needs its own consent path, not this code path.
 	if op.Source == "core" && op.ID == "changes.undo" {
@@ -98,7 +98,7 @@ func (d *operationDispatch) dispatch(ctx context.Context, input namespaceInvokeI
 	}
 	if err := plugin.ValidateAgentPayload(schema, input.Input); err != nil {
 		// Descriptor-authored schema text can contain arbitrary content. Do
-		// not echo its error to a model or reuse directive-local diagnostics.
+		// not echo its error to a model.
 		result := operationError("invalid_input", "Input does not match the operation's declared schema; describe it and try again.")
 		return result, nil
 	}
