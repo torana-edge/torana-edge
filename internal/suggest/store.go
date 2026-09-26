@@ -418,6 +418,13 @@ func (s *Store) ResolveID(conversation, id, action, via string, turn uint64) (Su
 }
 
 func (s *Store) AcceptHarnessSwitch(conversation, model string, turn uint64) ([]Suggestion, error) {
+	return s.AcceptHarnessSwitchVia(conversation, model, "harness_switch", turn)
+}
+
+func (s *Store) AcceptHarnessSwitchVia(conversation, model, via string, turn uint64) ([]Suggestion, error) {
+	if via != "harness_switch" && via != "adapter" {
+		return nil, errors.New("invalid harness switch source")
+	}
 	var accepted []Suggestion
 	err := s.update(conversation, func(current *record) (bool, error) {
 		changed := expire(current, turn)
@@ -425,7 +432,7 @@ func (s *Store) AcceptHarnessSwitch(conversation, model string, turn uint64) ([]
 		for i := range current.Suggestions {
 			item := &current.Suggestions[i]
 			if item.Status == "pending" && item.HarnessTargetModel == model && model != "" {
-				item.Status, item.Action, item.Via = "accepted", "accepted", "harness_switch"
+				item.Status, item.Action, item.Via = "accepted", "accepted", via
 				accepted = append(accepted, *item)
 				changed = true
 			}

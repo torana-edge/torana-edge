@@ -490,8 +490,15 @@ type Config struct {
 // Suggestions are opt-in because a plugin may otherwise surface advice to a
 // caller without the operator deliberately enabling that channel.
 type SuggestionsConfig struct {
-	Enabled bool         `json:"enabled,omitempty"`
-	Notice  NoticeConfig `json:"notice,omitempty"`
+	Enabled    bool                  `json:"enabled,omitempty"`
+	Notice     NoticeConfig          `json:"notice,omitempty"`
+	ClaudeCode ClaudeCodeHooksConfig `json:"claude_code,omitempty"`
+}
+
+// Hooks are a separate opt-in display/observation channel. They never grant
+// model access or authorize a Torana configuration change.
+type ClaudeCodeHooksConfig struct {
+	Enabled bool `json:"enabled,omitempty"`
 }
 
 type NoticeConfig struct {

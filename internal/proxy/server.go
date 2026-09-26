@@ -3068,6 +3068,7 @@ func New(cfg Config) (*Server, error) {
 	mux.HandleFunc(mcpTokenAPIPath+"/setup", s.controlPlaneGuard(s.handleMCPToken))
 	mux.HandleFunc(mcpTokenAPIPath+"/rotate", s.controlPlaneGuard(s.handleMCPToken))
 	mux.HandleFunc("/_torana/mcp", s.handleMCP)
+	mux.HandleFunc(claudeHooksPath, s.controlPlaneGuard(s.handleClaudeHook))
 	mux.HandleFunc("/_torana/api/v1/", s.controlPlaneGuard(func(w http.ResponseWriter, r *http.Request) {
 		legacyPath := strings.TrimPrefix(r.URL.Path, "/_torana/api/v1")
 		if legacyPath == "/" || legacyPath == "/agent" {
