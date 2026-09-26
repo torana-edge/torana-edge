@@ -17,6 +17,9 @@ import (
 )
 
 func TestClaudeHooksGuardIdentityAndNonBlockingSwitchObservation(t *testing.T) {
+	if inferHarnessSwitch("claude-code-session", true) || !inferHarnessSwitch("claude-code-session", false) || !inferHarnessSwitch("codex-thread", true) {
+		t.Fatal("request model inference would bypass adapter provenance")
+	}
 	state, err := pluginstate.New(pluginstate.Options{})
 	if err != nil {
 		t.Fatal(err)
@@ -60,12 +63,24 @@ func TestClaudeHooksGuardIdentityAndNonBlockingSwitchObservation(t *testing.T) {
 	if strings.Contains(response.Body.String(), "private-secret") {
 		t.Fatal("guest text leaked")
 	}
+	if got := request("stop", body, token); strings.TrimSpace(got.Body.String()) != "{}" {
+		t.Fatal("repeated Stop announced the same suggestion")
+	}
 	other := request("stop", strings.ReplaceAll(body, `"session"`, `"other"`), token)
 	if strings.TrimSpace(other.Body.String()) != "{}" {
 		t.Fatalf("cross-session suggestion: %s", other.Body.String())
 	}
 	switchBody := `{"session_id":"session","hook_event_name":"PostModelSwitch","to_model":"strong","source":"resume"}`
-	if got := request("post-model-switch", switchBody, token); got.Code != http.StatusOK {
+	for _, source := range []string{"auto", "resume"} {
+		if got := request("post-model-switch", strings.ReplaceAll(switchBody, `"resume"`, `"`+source+`"`), token); got.Code != http.StatusOK {
+			t.Fatal(got.Body.String())
+		}
+		items, err := s.suggestions.List(conversation, "router", 0)
+		if err != nil || len(items) != 1 || items[0].Status != "pending" {
+			t.Fatalf("automatic observation accepted advice: %+v %v", items, err)
+		}
+	}
+	if got := request("post-model-switch", strings.ReplaceAll(switchBody, `"resume"`, `"command"`), token); got.Code != http.StatusOK {
 		t.Fatal(got.Body.String())
 	}
 	items, err := s.suggestions.List(conversation, "router", 0)

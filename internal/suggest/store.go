@@ -68,17 +68,64 @@ type Suggestion struct {
 	Via                   string    `json:"via,omitempty"`
 	Action                string    `json:"action,omitempty"`
 	Outcome               string    `json:"outcome,omitempty"`
+	HookAnnounced         bool      `json:"hook_announced,omitempty"`
 }
 
 type record struct {
-	Conversation      string                     `json:"conversation"`
-	UserTurns         uint64                     `json:"user_turns"`
-	LastUserSignature string                     `json:"last_user_signature,omitempty"`
-	NoticeDisabled    bool                       `json:"notice_disabled,omitempty"`
-	SetupHintSeen     bool                       `json:"setup_hint_seen,omitempty"`
-	Suggestions       []Suggestion               `json:"suggestions"`
-	Operations        map[string]operationRecord `json:"operations,omitempty"`
-	Changes           map[string]changeRecord    `json:"changes,omitempty"`
+	Conversation            string                     `json:"conversation"`
+	UserTurns               uint64                     `json:"user_turns"`
+	LastUserSignature       string                     `json:"last_user_signature,omitempty"`
+	NoticeDisabled          bool                       `json:"notice_disabled,omitempty"`
+	SetupHintSeen           bool                       `json:"setup_hint_seen,omitempty"`
+	Suggestions             []Suggestion               `json:"suggestions"`
+	Operations              map[string]operationRecord `json:"operations,omitempty"`
+	Changes                 map[string]changeRecord    `json:"changes,omitempty"`
+	LastHarnessModel        string                     `json:"last_harness_model,omitempty"`
+	LastHarnessSwitchSource string                     `json:"last_harness_switch_source,omitempty"`
+}
+
+// ClaimHookAnnouncement persists delivery suppression across restarts. Claim
+// before returning the hint: a failed response may miss a hint, never spam one.
+func (s *Store) ClaimHookAnnouncement(conversation string, turn uint64) (Suggestion, error) {
+	var selected Suggestion
+	err := s.update(conversation, func(current *record) (bool, error) {
+		selected = Suggestion{}
+		changed := expire(current, turn)
+		for i := range current.Suggestions {
+			item := &current.Suggestions[i]
+			if item.Status == "pending" && !item.HookAnnounced {
+				item.HookAnnounced = true
+				selected = *item
+				return true, nil
+			}
+		}
+		return changed, nil
+	})
+	return selected, err
+}
+
+// ObserveAdapterSwitch records every switch, but only explicit user/client
+// switches accept advice. Automatic fallback and resume are observations.
+func (s *Store) ObserveAdapterSwitch(conversation, model, source string, turn uint64) ([]Suggestion, error) {
+	switch source {
+	case "command", "picker", "sdk", "auto", "resume":
+	default:
+		return nil, errors.New("invalid adapter switch source")
+	}
+	var accepted []Suggestion
+	err := s.update(conversation, func(current *record) (bool, error) {
+		accepted = nil
+		changed := expire(current, turn)
+		if current.LastHarnessModel != model || current.LastHarnessSwitchSource != source {
+			current.LastHarnessModel, current.LastHarnessSwitchSource = model, source
+			changed = true
+		}
+		if source != "auto" && source != "resume" {
+			accepted = acceptHarnessSwitch(current, model, "adapter")
+		}
+		return changed || len(accepted) > 0, nil
+	})
+	return accepted, err
 }
 
 // DisableNotices is durable and one-way for a conversation. If signed-marker
@@ -429,15 +476,20 @@ func (s *Store) AcceptHarnessSwitchVia(conversation, model, via string, turn uin
 	err := s.update(conversation, func(current *record) (bool, error) {
 		changed := expire(current, turn)
 		accepted = nil
-		for i := range current.Suggestions {
-			item := &current.Suggestions[i]
-			if item.Status == "pending" && item.HarnessTargetModel == model && model != "" {
-				item.Status, item.Action, item.Via = "accepted", "accepted", via
-				accepted = append(accepted, *item)
-				changed = true
-			}
-		}
-		return changed, nil
+		accepted = acceptHarnessSwitch(current, model, via)
+		return changed || len(accepted) > 0, nil
 	})
 	return accepted, err
+}
+
+func acceptHarnessSwitch(current *record, model, via string) []Suggestion {
+	var accepted []Suggestion
+	for i := range current.Suggestions {
+		item := &current.Suggestions[i]
+		if item.Status == "pending" && item.HarnessTargetModel == model && model != "" {
+			item.Status, item.Action, item.Via = "accepted", "accepted", via
+			accepted = append(accepted, *item)
+		}
+	}
+	return accepted
 }

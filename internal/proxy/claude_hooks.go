@@ -15,6 +15,10 @@ import (
 
 const claudeHooksPath = "/_torana/hooks/claude-code/"
 
+func inferHarnessSwitch(source string, claudeAdapter bool) bool {
+	return source != "claude-code-session" || !claudeAdapter
+}
+
 // No callback can authorize a Torana mutation, block stopping, inject model
 // context or force a switch. The optional pre-switch warning only informs.
 func (s *Server) handleClaudeHook(w http.ResponseWriter, r *http.Request) {
@@ -116,7 +120,7 @@ func (s *Server) handleClaudeHook(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "invalid switch source", http.StatusBadRequest)
 			return
 		}
-		items, err := s.suggestions.AcceptHarnessSwitchVia(conversation, input.Model, "adapter", turn)
+		items, err := s.suggestions.ObserveAdapterSwitch(conversation, input.Model, input.Source, turn)
 		if err != nil {
 			http.Error(w, "hook state unavailable", http.StatusServiceUnavailable)
 			return
@@ -127,20 +131,18 @@ func (s *Server) handleClaudeHook(w http.ResponseWriter, r *http.Request) {
 		writeAgentJSON(w, http.StatusOK, map[string]any{})
 		return
 	}
-	items, err := s.suggestions.List(conversation, "", turn)
+	item, err := s.suggestions.ClaimHookAnnouncement(conversation, turn)
 	if err != nil {
 		http.Error(w, "hook state unavailable", http.StatusServiceUnavailable)
 		return
 	}
-	for _, item := range items {
-		if item.Status == "pending" {
-			message := "Torana has a suggestion for this conversation. Review it in Torana's UI or CLI."
-			if item.Kind == "model_switch" {
-				message += " You can also use /model to switch models in Claude Code."
-			}
-			writeAgentJSON(w, http.StatusOK, map[string]string{"systemMessage": message})
-			return
+	if item.ID != "" {
+		message := "Torana has a suggestion for this conversation. Review it in Torana's UI or CLI."
+		if item.Kind == "model_switch" {
+			message += " You can also use /model to switch models in Claude Code."
 		}
+		writeAgentJSON(w, http.StatusOK, map[string]string{"systemMessage": message})
+		return
 	}
 	writeAgentJSON(w, http.StatusOK, map[string]any{})
 }

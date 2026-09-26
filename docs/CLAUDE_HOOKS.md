@@ -14,6 +14,10 @@ Set the token in the shell launching Claude Code without copying it into a file:
 export TORANA_MCP_TOKEN="$(torana mcp token)"
 ```
 
+This environment variable is also visible to Claude's Bash tool. It is not
+private from an agent with local shell access; see the boundary in
+[SECURITY.md](../SECURITY.md).
+
 Add these entries alongside any existing hooks in a Claude settings file, using
 your Torana port. Do not replace unrelated settings or hooks.
 
@@ -38,11 +42,18 @@ your Torana port. Do not replace unrelated settings or hooks.
 }
 ```
 
-`Stop` returns only an informational `systemMessage` if this conversation has
-a pending suggestion. It exposes no codes, plugin-authored text, or change inputs.
+`Stop` returns only an informational `systemMessage` once per pending suggestion,
+with durable suppression across restarts. It exposes no codes, plugin-authored
+text, or change inputs.
 For model suggestions it points to `/model`; other proposals stay in Torana's
-Review view or CLI. `PostModelSwitch` records a matching suggestion as accepted
-through the adapter; it cannot accept a Torana operation or mutate configuration.
+Review view or CLI. `PostModelSwitch` records the latest reported model/source;
+only `command`, `picker` and `sdk` accept matching model advice through the
+adapter. Automatic fallback and resume are observations, not acceptance. It
+cannot accept a Torana operation or mutate configuration.
+
+Matching is exact: use the model name Claude reports as the first alias of each
+decision-router ladder step. A different alias or full model ID will not count
+as accepting the advice. Torana does not guess equivalence between custom models.
 
 The host never reads `transcript_path` or `cwd`. Identity is the same hashed
 Claude session identity used by routed requests. The endpoints require the

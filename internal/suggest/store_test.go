@@ -17,6 +17,39 @@ func sample(model string) *pb.SuggestArgs {
 	}
 }
 
+func TestHookAnnouncementPersistsAndAutomaticSwitchOnlyObserves(t *testing.T) {
+	state, err := pluginstate.New(pluginstate.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer state.Close()
+	store := New(state)
+	id, err := store.Create("c", "router", 0, sample("strong"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := store.ClaimHookAnnouncement("c", 0)
+	if err != nil || first.ID != id {
+		t.Fatalf("first=%+v %v", first, err)
+	}
+	store = New(state) // Fresh host store, same durable state.
+	if next, err := store.ClaimHookAnnouncement("c", 0); err != nil || next.ID != "" {
+		t.Fatalf("repeat=%+v %v", next, err)
+	}
+	for _, source := range []string{"auto", "resume"} {
+		if accepted, err := store.ObserveAdapterSwitch("c", "strong", source, 0); err != nil || len(accepted) != 0 {
+			t.Fatalf("automatic=%+v %v", accepted, err)
+		}
+		current, _, _, err := store.read("c")
+		if err != nil || current.LastHarnessModel != "strong" || current.LastHarnessSwitchSource != source || current.Suggestions[0].Status != "pending" {
+			t.Fatalf("observation=%+v %v", current, err)
+		}
+	}
+	if accepted, err := store.ObserveAdapterSwitch("c", "strong", "command", 0); err != nil || len(accepted) != 1 || accepted[0].Via != "adapter" {
+		t.Fatalf("explicit=%+v %v", accepted, err)
+	}
+}
+
 func TestSuggestionLifecycleAndConversationScope(t *testing.T) {
 	state, err := pluginstate.New(pluginstate.Options{})
 	if err != nil {
