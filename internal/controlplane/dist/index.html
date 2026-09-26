@@ -11,6 +11,7 @@
   <script src="theme.js"></script>
   <script src="providers.js"></script>
   <script src="approval.js"></script>
+  <script src="consent.js"></script>
 </head>
 <body>
   <header class="app-header">
@@ -34,6 +35,7 @@
       <button class="nav-btn" type="button" data-view="pipeline" onclick="go('pipeline')">Pipeline</button>
       <button class="nav-btn" type="button" data-view="traffic" onclick="go('traffic')">Traffic</button>
       <button class="nav-btn" type="button" data-view="feed" onclick="go('feed')">Live Feed</button>
+      <button class="nav-btn" type="button" data-view="review" onclick="go('review')">Review</button>
       <button class="nav-btn" type="button" data-view="settings" onclick="go('settings')">Settings</button>
     </nav>
 
@@ -156,6 +158,26 @@
           </tbody>
         </table>
       </div>
+    </section>
+
+    <!-- View: Review -->
+    <section id="view-review" class="view" aria-labelledby="reviewTitle">
+      <div class="section-header">
+        <div>
+          <h2 id="reviewTitle" class="section-title">You choose what changes.</h2>
+          <p class="section-desc">Review suggestions and plugin changes for a conversation. Nothing is applied until you accept.</p>
+        </div>
+        <button class="btn btn-ghost" type="button" onclick="ToranaConsent.load()">↻ Reload</button>
+      </div>
+      <div class="card form-section">
+        <label for="reviewConversation">Conversation</label>
+        <input id="reviewConversation" list="reviewConversations" placeholder="Choose a recent conversation or paste its ID" onchange="ToranaConsent.loadSelected()">
+        <datalist id="reviewConversations"></datalist>
+      </div>
+      <h3 class="subhead">Suggestions and confirmations</h3>
+      <div id="reviewSuggestions" aria-live="polite"></div>
+      <h3 class="subhead">Change history</h3>
+      <div id="reviewChanges" aria-live="polite"></div>
     </section>
 
     <!-- View: Settings -->
@@ -284,7 +306,7 @@
         focusViewTitle(document.getElementById('view-plugin'));
         return;
       }
-      const known = ['pipeline','traffic','feed','settings'];
+      const known = ['pipeline','traffic','feed','review','settings'];
       const target = known.includes(v) ? v : 'pipeline';
       document.getElementById(`view-${target}`).classList.add('active');
       const navBtn = document.querySelector(`.nav-btn[data-view="${target}"]`);
@@ -295,6 +317,7 @@
       if (target === 'traffic') fetchStats();
       if (target === 'settings') loadSettings();
       if (target === 'pipeline') renderPipeline();
+      if (target === 'review') ToranaConsent.load();
       focusViewTitle(document.getElementById(`view-${target}`));
     }
     function focusViewTitle(section) {
