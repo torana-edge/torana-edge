@@ -52,6 +52,32 @@ func TestStripSignedNoticesJSON(t *testing.T) {
 	}
 }
 
+func TestStripAdjacentNoticeElementsPreservesJSON(t *testing.T) {
+	signer, err := secret.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	notice, err := annotate.Render(signer, "conversation", suggest.Suggestion{ID: "sg_test", Code: "7f3k", Title: "Test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, ordinary := range []bool{false, true} {
+		parts := []any{}
+		if ordinary {
+			parts = append(parts, map[string]any{"type": "text", "text": "answer"})
+		}
+		parts = append(parts, map[string]any{"type": "text", "text": notice}, map[string]any{"type": "text", "text": notice})
+		body, _ := json.Marshal(map[string]any{"messages": []any{map[string]any{"role": "assistant", "content": parts}}})
+		got, changed, err := stripSignedNoticesJSON(body, "anthropic", signer, "conversation")
+		if err != nil || !changed || !json.Valid(got) || bytes.Contains(got, []byte("torana:begin")) {
+			t.Fatalf("strip=%s changed=%t err=%v", got, changed, err)
+		}
+		if ordinary && !bytes.Contains(got, []byte("answer")) {
+			t.Fatal("ordinary text removed")
+		}
+	}
+}
+
 func TestStripNoticeOnlyAppendedElements(t *testing.T) {
 	signer, err := secret.Open(t.TempDir())
 	if err != nil {

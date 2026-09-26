@@ -14,6 +14,11 @@ type noticeTextSlot struct {
 	removePath []any // a notice-only appended block/part/item
 }
 
+type noticeRemoval struct {
+	path  []any
+	start int
+}
+
 // stripSignedNoticesJSON removes only notices signed for this conversation
 // from assistant history. All other wire bytes remain unchanged, preserving
 // provider extensions and prompt-cache prefixes outside the notice strings.
@@ -28,6 +33,7 @@ func stripSignedNoticesJSON(body []byte, shape string, signer annotate.Signer, c
 		return nil, false, err
 	}
 	var splices []directiveSplice
+	var removals []noticeRemoval
 	for _, slot := range assistantTextPaths(document, shape) {
 		start, end, ok := rawJSONSpanAt(body, slot.path...)
 		if !ok {
@@ -43,23 +49,33 @@ func stripSignedNoticesJSON(body []byte, shape string, signer annotate.Signer, c
 		}
 		if changed {
 			if stripped == "" && len(slot.removePath) > 0 {
-				deleteStart, deleteEnd, derr := jsonArrayElementDeletion(body, slot.removePath)
+				deleteStart, _, derr := jsonArrayElementDeletion(body, slot.removePath)
 				if derr != nil {
 					return nil, false, derr
 				}
-				splices = append(splices, directiveSplice{deleteStart, deleteEnd, nil})
+				removals = append(removals, noticeRemoval{slot.removePath, deleteStart})
 				continue
 			}
 			replacement, _ := json.Marshal(stripped)
 			splices = append(splices, directiveSplice{start, end, replacement})
 		}
 	}
-	if len(splices) == 0 {
+	if len(splices) == 0 && len(removals) == 0 {
 		return body, false, nil
 	}
 	sort.Slice(splices, func(i, j int) bool { return splices[i].start > splices[j].start })
 	for _, splice := range splices {
 		body = spliceBytes(body, splice.start, splice.end, splice.value)
+	}
+	// Recompute deletion spans after each removal: adjacent elements share
+	// comma boundaries, so independently captured byte spans can overlap.
+	sort.Slice(removals, func(i, j int) bool { return removals[i].start > removals[j].start })
+	for _, removal := range removals {
+		start, end, err := jsonArrayElementDeletion(body, removal.path)
+		if err != nil {
+			return nil, false, err
+		}
+		body = spliceBytes(body, start, end, nil)
 	}
 	return body, true, nil
 }
