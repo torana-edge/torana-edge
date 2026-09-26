@@ -42,7 +42,8 @@ func TestFilePlanPreviewBackupIdempotencyAndNarrowTeardown(t *testing.T) {
 			if err != nil || again.Changed {
 				t.Fatalf("repeat=%+v err=%v", again, err)
 			}
-			remove, err := PlanFile(path, name, testServer(), true)
+			moved := Server{Command: "/a/new/binary", Args: []string{"mcp", "stdio", "--addr", "127.0.0.1:9999"}}
+			remove, err := PlanFile(path, name, moved, true)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -54,6 +55,36 @@ func TestFilePlanPreviewBackupIdempotencyAndNarrowTeardown(t *testing.T) {
 				t.Fatal("teardown lost unrelated state")
 			}
 		})
+	}
+}
+
+func TestCodexTeardownRefusesEditedEntryAndMissingOwnership(t *testing.T) {
+	for _, missing := range []bool{false, true} {
+		path := filepath.Join(t.TempDir(), "config.toml")
+		plan, err := PlanFile(path, "codex", testServer(), false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := plan.Apply(); err != nil {
+			t.Fatal(err)
+		}
+		if missing {
+			if err := os.Remove(path + ".torana-managed.json"); err != nil {
+				t.Fatal(err)
+			}
+		} else {
+			data, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			data = bytes.ReplaceAll(data, []byte("stdio"), []byte("user-edit"))
+			if err := os.WriteFile(path, data, 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if _, err := PlanFile(path, "codex", testServer(), true); err == nil {
+			t.Fatal("removed an edited or unowned entry")
+		}
 	}
 }
 
