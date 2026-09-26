@@ -11,7 +11,46 @@ import (
 	"strings"
 )
 
-var consentIdentifier = regexp.MustCompile(`^[A-Za-z0-9._:-]{1,64}$`)
+var consentIdentifier = regexp.MustCompile(`^[A-Za-z0-9._:-]{1,32}$`)
+var consentAlphanumericRun = regexp.MustCompile(`[A-Za-z0-9]{16,}`)
+
+func consentCredentialPrefix(text string) bool {
+	for _, prefix := range []string{"sk-", "ghp_", "github_pat_", "AKIA", "AIza", "xox", "sk_live_", "rk_live_", "glpat-", "hf_", "eyJ"} {
+		if strings.HasPrefix(text, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+func consentHumanIdentifier(text string) bool {
+	if !consentIdentifier.MatchString(text) {
+		return false
+	}
+	digits, hexCharacters := 0, 0
+	for _, ch := range text {
+		if ch >= '0' && ch <= '9' {
+			digits++
+		}
+		if ch >= '0' && ch <= '9' || ch >= 'a' && ch <= 'f' || ch >= 'A' && ch <= 'F' {
+			hexCharacters++
+		}
+	}
+	if digits > 8 || len(text) >= 16 && hexCharacters*4 >= len(text)*3 {
+		return false
+	}
+	for _, run := range consentAlphanumericRun.FindAllString(text, -1) {
+		upper, lower := false, false
+		for _, ch := range run {
+			upper = upper || ch >= 'A' && ch <= 'Z'
+			lower = lower || ch >= 'a' && ch <= 'z'
+		}
+		if upper && lower {
+			return false
+		}
+	}
+	return true
+}
 
 func consentSensitive(schema map[string]any, key string) bool {
 	lower := strings.ToLower(key)
@@ -30,12 +69,8 @@ func consentScalar(value any, schema map[string]any, key string) string {
 		return string(raw)
 	case string:
 		text := value.(string)
-		if strings.HasPrefix(text, "sk-") || strings.HasPrefix(text, "ghp_") || strings.HasPrefix(text, "github_pat_") || strings.HasPrefix(text, "AKIA") {
+		if consentCredentialPrefix(text) {
 			return "[redacted]"
-		}
-		if consentIdentifier.MatchString(text) {
-			raw, _ := json.Marshal(text)
-			return string(raw)
 		}
 		if choices, ok := schema["enum"].([]any); ok {
 			for _, choice := range choices {
@@ -46,6 +81,10 @@ func consentScalar(value any, schema map[string]any, key string) string {
 					}
 				}
 			}
+		}
+		if consentHumanIdentifier(text) {
+			raw, _ := json.Marshal(text)
+			return string(raw)
 		}
 	}
 	return "[redacted]"
