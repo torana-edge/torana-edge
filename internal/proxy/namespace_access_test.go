@@ -9,7 +9,10 @@ import (
 	"testing"
 
 	"github.com/torana-edge/torana-edge/internal/plugin"
+	"github.com/torana-edge/torana-edge/internal/pluginstate"
 	"github.com/torana-edge/torana-edge/internal/provider"
+	"github.com/torana-edge/torana-edge/internal/suggest"
+	pb "github.com/torana-edge/torana-plugin-sdk/pb/v1"
 )
 
 func TestNamespacePolicyExhaustiveStandardProtectionAndOverrides(t *testing.T) {
@@ -131,11 +134,26 @@ func TestModelReachableCoreContractsDoNotExposeCodesOrConversationSelection(t *t
 		t.Fatal(err)
 	}
 	config := provider.DefaultConfig()
+	config.Suggestions.Enabled = true
 	server, err := New(Config{Port: "8080", Providers: config})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer server.Shutdown(context.Background())
+	state, err := pluginstate.New(pluginstate.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer state.Close()
+	server.suggestions = suggest.New(state)
+	if _, err := server.suggestions.Create("bound", "router", 1, &pb.SuggestArgs{Kind: "model_switch", DedupeKey: "guard", Title: "Try another model", Body: "Guard fixture"}); err != nil {
+		t.Fatal(err)
+	}
+	items, err := server.suggestions.List("bound", "", 1)
+	if err != nil || len(items) != 1 || items[0].Code == "" {
+		t.Fatalf("seed=%+v err=%v", items, err)
+	}
+	code := items[0].Code
 	contracts := map[string]agentAPIOperation{}
 	for _, op := range builtInAgentOperations() {
 		contracts[op.ID] = op
@@ -152,8 +170,10 @@ func TestModelReachableCoreContractsDoNotExposeCodesOrConversationSelection(t *t
 			if !exists {
 				t.Fatalf("add scoped dispatch guard before exposing %s", op.ID)
 			}
-			if strings.Contains(contract.Path, "conversation_id") || strings.Contains(string(contract.InputSchema), "conversation_id") {
-				t.Fatalf("caller-selected conversation exposed: %s", op.ID)
+			// Current reachable core reads take no caller input. Future scoped
+			// handlers must use a host binding, not any model-supplied selector.
+			if strings.ContainsAny(contract.Path, "?{}") || len(contract.InputSchema) != 0 {
+				t.Fatalf("core input needs scoped dispatcher validation: %s", op.ID)
 			}
 			request := localControlPlaneRequest(http.MethodGet, contract.Path, nil)
 			request.RemoteAddr = "127.0.0.1:12345"
@@ -161,6 +181,9 @@ func TestModelReachableCoreContractsDoNotExposeCodesOrConversationSelection(t *t
 			server.Handler().ServeHTTP(recorder, request)
 			if recorder.Code != http.StatusOK {
 				t.Fatalf("%s: status=%d", op.ID, recorder.Code)
+			}
+			if strings.Contains(recorder.Body.String(), code) {
+				t.Fatalf("confirmation code value leaked by %s", op.ID)
 			}
 			var value any
 			if err := json.Unmarshal(recorder.Body.Bytes(), &value); err != nil {
