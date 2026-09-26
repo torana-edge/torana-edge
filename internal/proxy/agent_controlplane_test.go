@@ -91,6 +91,16 @@ func TestAgentControlPlaneDiscoveryAndJSONErrors(t *testing.T) {
 		request.RemoteAddr = "127.0.0.1:12345"
 		recorder = httptest.NewRecorder()
 		server.Handler().ServeHTTP(recorder, request)
+		if operation.ID == "torana.suggestions.list" {
+			if recorder.Code != http.StatusNotFound {
+				t.Fatalf("disabled suggestions status=%d", recorder.Code)
+			}
+			var disabled agentAPIErrorEnvelope
+			if err := json.Unmarshal(recorder.Body.Bytes(), &disabled); err != nil || disabled.Error.Code != "not_configured" {
+				t.Fatalf("disabled suggestions error=%s", recorder.Body.Bytes())
+			}
+			continue
+		}
 		if recorder.Code != http.StatusOK {
 			t.Fatalf("%s status = %d: %s", operation.ID, recorder.Code, recorder.Body.String())
 		}

@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"slices"
 	"strings"
@@ -27,7 +28,7 @@ func Handles(args []string) bool {
 		return false
 	}
 	switch args[0] {
-	case "config", "pipeline", "stats", "feed", "agent":
+	case "config", "pipeline", "stats", "feed", "agent", "suggestions", "conversations":
 		return true
 	case "plugin":
 		return len(args) > 1 && slices.Contains([]string{"status", "inspect", "approve", "revoke", "enable", "disable", "config"}, args[1])
@@ -54,8 +55,13 @@ func Usage(w io.Writer) {
   torana stats                              aggregate request statistics
   torana feed                               recent request snapshot
   torana feed --follow                      newline-delimited JSON, Ctrl-C to stop
+  torana conversations                      recent conversation IDs and activity
   torana agent discover                     operations and schemas, including plugins
   torana agent call <operation-id> [--file input.json] [--yes]
+  torana suggestions list --conversation <id>
+  torana suggestions show <id> --conversation <id>
+  torana suggestions accept <id> --conversation <id> --yes
+  torana suggestions dismiss <id> --conversation <id> --yes
 
 All commands accept --addr host:port (or a loopback HTTP(S) origin).
 --file - reads stdin. --json is accepted; JSON is already the default.
@@ -72,9 +78,9 @@ plugin list/install/remove work on disk; plugin status inspects the running host
 }
 
 type options struct {
-	addr, file         string
-	yes, follow, empty bool
-	args               []string
+	addr, file, conversation string
+	yes, follow, empty       bool
+	args                     []string
 }
 
 // Accept options before or after positional arguments, but reject unknown,
@@ -97,6 +103,9 @@ func parseOptions(args []string, allowed string, stderr io.Writer) (options, err
 	}
 	if strings.Contains(allowed, "empty") {
 		fs.BoolVar(&o.empty, "empty", false, "explicitly disable every plugin")
+	}
+	if strings.Contains(allowed, "conversation") {
+		fs.StringVar(&o.conversation, "conversation", "", "conversation ID from torana conversations")
 	}
 	var flags, positional []string
 	seen := map[string]bool{}
@@ -144,7 +153,7 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 		return fmt.Errorf("command required")
 	}
 	command, rest := args[0], args[1:]
-	if command == "config" || command == "pipeline" || command == "agent" || command == "plugin" {
+	if command == "config" || command == "pipeline" || command == "agent" || command == "plugin" || command == "suggestions" {
 		if len(rest) == 0 || rest[0] == "help" || rest[0] == "--help" || rest[0] == "-h" {
 			Usage(stdout)
 			return nil
@@ -162,7 +171,7 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 	}
 	allowed := ""
 	switch command {
-	case "config get", "pipeline get", "plugin status", "plugin inspect", "plugin config get", "stats", "agent discover":
+	case "config get", "pipeline get", "plugin status", "plugin inspect", "plugin config get", "stats", "agent discover", "conversations":
 	case "config apply", "pipeline apply", "plugin config apply", "plugin approve", "agent call":
 		allowed = "file yes"
 	case "plugin enable", "plugin disable", "plugin revoke":
@@ -171,6 +180,10 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 		allowed = "yes empty"
 	case "feed":
 		allowed = "follow"
+	case "suggestions list", "suggestions show":
+		allowed = "conversation"
+	case "suggestions accept", "suggestions dismiss":
+		allowed = "conversation yes"
 	default:
 		return fmt.Errorf("unknown live command %q; run torana help", command)
 	}
@@ -182,7 +195,7 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 		return err
 	}
 	wantArgs := 0
-	if strings.HasPrefix(command, "plugin ") && command != "plugin status" || command == "agent call" {
+	if strings.HasPrefix(command, "plugin ") && command != "plugin status" || command == "agent call" || command == "suggestions show" || command == "suggestions accept" || command == "suggestions dismiss" {
 		wantArgs = 1
 	}
 	if command != "pipeline order" && len(o.args) != wantArgs {
@@ -190,6 +203,9 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 	}
 	if strings.Contains(allowed, "yes") && command != "agent call" && !o.yes {
 		return fmt.Errorf("%s changes the running proxy; review the input and pass --yes", command)
+	}
+	if strings.HasPrefix(command, "suggestions ") && o.conversation == "" {
+		return fmt.Errorf("%s requires --conversation <id>; run torana conversations to find it", command)
 	}
 	if command == "pipeline order" && ((len(o.args) == 0 && !o.empty) || (len(o.args) > 0 && o.empty)) {
 		return fmt.Errorf("supply plugin names, or --empty to disable every plugin")
@@ -224,6 +240,8 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 		return c.changePlugin(command, o)
 	case "stats":
 		return c.read("/stats")
+	case "conversations":
+		return c.read("/conversations")
 	case "feed":
 		if o.follow {
 			return c.follow()
@@ -233,6 +251,8 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 		return c.read("/")
 	case "agent call":
 		return c.call(o)
+	case "suggestions list", "suggestions show", "suggestions accept", "suggestions dismiss":
+		return c.suggestions(command, o)
 	}
 	return fmt.Errorf("unhandled command %q", command)
 }
@@ -252,6 +272,45 @@ func output(w io.Writer, value any) error {
 
 func (c *runner) read(path string) error {
 	raw, _, err := c.client.JSON(c.ctx, http.MethodGet, controlclient.BasePath+path, nil, "")
+	if err != nil {
+		return err
+	}
+	return output(c.stdout, raw)
+}
+
+func (c *runner) suggestions(command string, o options) error {
+	listPath := "/agent/suggestions?conversation_id=" + url.QueryEscape(o.conversation)
+	if command == "suggestions list" || command == "suggestions show" {
+		raw, _, err := c.client.JSON(c.ctx, http.MethodGet, controlclient.BasePath+listPath, nil, "")
+		if err != nil {
+			return err
+		}
+		if command == "suggestions list" {
+			return output(c.stdout, raw)
+		}
+		var list struct {
+			Suggestions []json.RawMessage `json:"suggestions"`
+		}
+		if err := json.Unmarshal(raw, &list); err != nil {
+			return err
+		}
+		for _, item := range list.Suggestions {
+			var identity struct {
+				ID string `json:"id"`
+			}
+			if json.Unmarshal(item, &identity) == nil && identity.ID == o.args[0] {
+				return output(c.stdout, item)
+			}
+		}
+		return fmt.Errorf("suggestion %q was not found in conversation %q", o.args[0], o.conversation)
+	}
+	action := "accept"
+	if command == "suggestions dismiss" {
+		action = "dismiss"
+	}
+	body, _ := json.Marshal(map[string]string{"conversation_id": o.conversation})
+	path := controlclient.BasePath + "/agent/suggestions/" + url.PathEscape(o.args[0]) + "/" + action
+	raw, _, err := c.client.JSON(c.ctx, http.MethodPost, path, body, "")
 	if err != nil {
 		return err
 	}
@@ -643,12 +702,12 @@ func (c *runner) call(o options) error {
 			continue
 		}
 		if strings.ContainsAny(op.Path, "{}") {
-			return fmt.Errorf("operation requires a named resource; use the corresponding plugin command")
+			return fmt.Errorf("operation requires a named resource; use its dedicated CLI command")
 		}
 		// Built-in mutations use revisioned snapshots; a generic invocation
 		// must not become an escape hatch around their lost-update checks.
 		if op.Method != http.MethodGet && op.Plugin == "" {
-			return fmt.Errorf("use torana config/pipeline/plugin commands for revision-checked built-in mutations")
+			return fmt.Errorf("use the dedicated torana command for built-in mutations")
 		}
 		if !slices.Contains([]string{"GET", "POST", "PUT", "PATCH", "DELETE"}, op.Method) {
 			return fmt.Errorf("unsupported operation method")

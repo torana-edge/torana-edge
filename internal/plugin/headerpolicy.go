@@ -147,6 +147,23 @@ func injectRequestHeaders(current *pbv1.ChatRequest, headers map[string]any) {
 	current.ToranaMetaJson = b
 }
 
+// injectSuggestionOutcomes projects only this plugin's outcomes for the
+// duration of its hook. The caller restores the original metadata bytes.
+func injectSuggestionOutcomes(current *pbv1.ChatRequest, outcomes []byte) {
+	meta := map[string]json.RawMessage{}
+	if len(current.ToranaMetaJson) > 0 && json.Unmarshal(current.ToranaMetaJson, &meta) != nil {
+		return
+	}
+	if meta == nil {
+		meta = make(map[string]json.RawMessage)
+	}
+	meta["_suggestions"] = outcomes
+	encoded, err := json.Marshal(meta)
+	if err == nil {
+		current.ToranaMetaJson = encoded
+	}
+}
+
 // restoreRequestHeaders restores the EXACT pre-injection ToranaMetaJson bytes
 // on the request object(s) that can chain or return. Byte restoration — not
 // parse/delete/re-marshal — preserves nil vs "{}", byte identity of unrelated

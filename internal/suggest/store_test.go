@@ -82,6 +82,24 @@ func TestResolveIDRequiresConversationAndIsSingleUse(t *testing.T) {
 	}
 }
 
+func TestObserveUserTurnDeduplicatesContinuations(t *testing.T) {
+	state, err := pluginstate.New(pluginstate.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer state.Close()
+	store := New(state)
+	for _, tc := range []struct {
+		signature string
+		want      uint64
+	}{{"first", 1}, {"first", 1}, {"", 1}, {"second", 2}, {"second", 2}} {
+		got, err := store.ObserveUserTurn("conversation", tc.signature)
+		if err != nil || got != tc.want {
+			t.Fatalf("signature %q: turn %d, error %v; want %d", tc.signature, got, err, tc.want)
+		}
+	}
+}
+
 func TestSuggestionExpiryAndHarnessSwitch(t *testing.T) {
 	state, err := pluginstate.New(pluginstate.Options{})
 	if err != nil {

@@ -1696,6 +1696,14 @@ func (pp *PluginPipeline) runBeforeRequestPlugin(ctx context.Context, reqID uint
 	// plugin object (lp.plugin), never on a manifest declaration and never
 	// pipeline-wide.
 	savedMeta := current.ToranaMetaJson
+	if pp.runtime.SuggestionOutcomesFunc != nil {
+		outcomes, outcomeErr := pp.runtime.SuggestionOutcomesFunc(ctx, lp.manifest.Name)
+		if outcomeErr != nil {
+			log.Printf("[plugin] %s suggestions unavailable: %v", lp.manifest.Name, outcomeErr)
+		} else if outcomes != nil {
+			injectSuggestionOutcomes(current, outcomes)
+		}
+	}
 	if len(headers) > 0 && lp.plugin.HasGrant("env.request_headers") {
 		injectRequestHeaders(current, projectChatHeaders(headers))
 	}

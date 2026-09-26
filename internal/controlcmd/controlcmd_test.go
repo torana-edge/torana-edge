@@ -30,6 +30,7 @@ func TestUsageAndInvalidInputDoNotContactServer(t *testing.T) {
 		{"config", "get", "typo"}, {"plugin", "inspect", "../foo"},
 		{"stats", "--file", "foo"}, {"feed", "--follow", "--follow"},
 		{"stats", "--typo"},
+		{"suggestions", "list"}, {"suggestions", "accept", "sg_1", "--conversation", "c"},
 	} {
 		_, _, err := invoke("127.0.0.1:1", "", args...)
 		if err == nil || strings.Contains(err.Error(), "could not reach") {
@@ -42,6 +43,17 @@ func TestUsageAndInvalidInputDoNotContactServer(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "approve") {
 		t.Fatal("missing help")
+	}
+}
+
+func TestSuggestionsCLIOptions(t *testing.T) {
+	if !Handles([]string{"suggestions", "list"}) || !Handles([]string{"conversations"}) {
+		t.Fatal("suggestions or conversations not routed to live CLI")
+	}
+	var diag bytes.Buffer
+	got, err := parseOptions([]string{"sg_1", "--conversation", "c", "--yes"}, "conversation yes", &diag)
+	if err != nil || got.conversation != "c" || !got.yes || len(got.args) != 1 || got.args[0] != "sg_1" {
+		t.Fatalf("parsed suggestion action: %+v, %v", got, err)
 	}
 }
 
