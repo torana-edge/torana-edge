@@ -272,16 +272,16 @@ func parsePortOverride(v string) (int, error) {
 }
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "--debug" {
+		_ = os.Setenv("TORANA_LOG_LEVEL", "debug")
+		os.Args = append([]string{os.Args[0]}, os.Args[2:]...)
+	}
 	if len(os.Args) > 1 && os.Args[1] == "harness" {
 		if err := harnesscmd.Run(os.Args[1:], os.Stdin, os.Stdout, os.Stderr); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(2)
 		}
 		return
-	}
-	if len(os.Args) > 1 && os.Args[1] == "--debug" {
-		_ = os.Setenv("TORANA_LOG_LEVEL", "debug")
-		os.Args = append([]string{os.Args[0]}, os.Args[2:]...)
 	}
 	if lifecyclecmd.Handles(os.Args[1:]) {
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

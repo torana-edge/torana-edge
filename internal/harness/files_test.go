@@ -8,6 +8,7 @@ import (
 )
 
 func TestFilePlanPreviewBackupIdempotencyAndNarrowTeardown(t *testing.T) {
+	t.Setenv("TORANA_DATA_DIR", t.TempDir())
 	for _, name := range []string{"claude-code", "codex"} {
 		t.Run(name, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "config")
@@ -15,7 +16,7 @@ func TestFilePlanPreviewBackupIdempotencyAndNarrowTeardown(t *testing.T) {
 			if name == "claude-code" {
 				before = []byte(`{"other":"keep-me"}`)
 			}
-			if err := os.WriteFile(path, before, 0o600); err != nil {
+			if err := os.WriteFile(path, before, 0o644); err != nil {
 				t.Fatal(err)
 			}
 			plan, err := PlanFile(path, name, testServer(), false)
@@ -29,6 +30,13 @@ func TestFilePlanPreviewBackupIdempotencyAndNarrowTeardown(t *testing.T) {
 			backup, err := plan.Apply()
 			if err != nil {
 				t.Fatal(err)
+			}
+			if filepath.Dir(backup) == filepath.Dir(path) {
+				t.Fatal("backup leaked into project")
+			}
+			configInfo, _ := os.Stat(path)
+			if configInfo.Mode().Perm() != 0o644 {
+				t.Fatal("existing permissions changed")
 			}
 			recovery, _ := os.ReadFile(backup)
 			if !bytes.Equal(recovery, before) {
@@ -59,6 +67,7 @@ func TestFilePlanPreviewBackupIdempotencyAndNarrowTeardown(t *testing.T) {
 }
 
 func TestCodexTeardownRefusesEditedEntryAndMissingOwnership(t *testing.T) {
+	t.Setenv("TORANA_DATA_DIR", t.TempDir())
 	for _, missing := range []bool{false, true} {
 		path := filepath.Join(t.TempDir(), "config.toml")
 		plan, err := PlanFile(path, "codex", testServer(), false)
@@ -69,7 +78,7 @@ func TestCodexTeardownRefusesEditedEntryAndMissingOwnership(t *testing.T) {
 			t.Fatal(err)
 		}
 		if missing {
-			if err := os.Remove(path + ".torana-managed.json"); err != nil {
+			if err := os.Remove(plan.ownershipPath); err != nil {
 				t.Fatal(err)
 			}
 		} else {
@@ -89,6 +98,7 @@ func TestCodexTeardownRefusesEditedEntryAndMissingOwnership(t *testing.T) {
 }
 
 func TestFilePlanRefusesStalePreviewAndSymlink(t *testing.T) {
+	t.Setenv("TORANA_DATA_DIR", t.TempDir())
 	path := filepath.Join(t.TempDir(), "config")
 	plan, err := PlanFile(path, "claude-code", testServer(), false)
 	if err != nil {

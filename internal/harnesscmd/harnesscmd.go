@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -23,8 +24,9 @@ func Usage(w io.Writer) {
   torana harness setup <claude-code|codex> [--scope project|user] [--dry-run] [--yes]
   torana harness teardown <claude-code|codex> [--scope project|user] [--dry-run] [--yes]
   --addr <loopback origin> pins the MCP connection to a specific Torana instance.
-Project scope is the default. Preview shows only Torana's entry; writes make a
-private recovery backup. Harness approval and workspace trust remain unchanged.
+User scope is the default. Installed harness CLIs own user-config writes.
+Project-file fallback keeps private recovery backups outside your repository.
+Harness approval and workspace trust remain unchanged.
 Start Torana and run 'torana mcp enable --yes' before using the connection.
 `)
 }
@@ -82,7 +84,7 @@ func Run(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 	}
 	fs := flag.NewFlagSet("harness "+args[0], flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	scope := fs.String("scope", "project", "configuration scope")
+	scope := fs.String("scope", "user", "configuration scope")
 	addr := fs.String("addr", "", "loopback MCP origin")
 	dry := fs.Bool("dry-run", false, "preview without writing")
 	yes := fs.Bool("yes", false, "apply the displayed change without prompting")
@@ -117,6 +119,60 @@ func Run(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 	binary, err := os.Executable()
 	if err != nil {
 		return err
+	}
+	if found, lookupErr := exec.LookPath("torana"); lookupErr == nil {
+		currentInfo, currentErr := os.Stat(binary)
+		foundInfo, foundErr := os.Stat(found)
+		if currentErr == nil && foundErr == nil && os.SameFile(currentInfo, foundInfo) {
+			binary = "torana"
+		}
+	}
+	if binary != "torana" {
+		if *scope == "project" {
+			return fmt.Errorf("put this Torana binary on PATH before adding a shared project entry, or use --scope user")
+		}
+		if _, err := fmt.Fprintln(stderr, "Using a machine-specific Torana path; rerun setup if you move this binary."); err != nil {
+			return err
+		}
+	}
+	cliName := "claude"
+	if args[1] == "codex" {
+		cliName = "codex"
+	}
+	cli, lookupErr := exec.LookPath(cliName)
+	if lookupErr == nil && !(args[1] == "codex" && *scope == "project") {
+		plan, err := planNative(cli, args[1], *scope, path, harness.Server{Command: binary, Args: serverArgs}, args[0] == "teardown", runNative)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(stdout, "Harness command: %q %q\nScope: %s\n", cli, plan.args, *scope)
+		if !plan.changed {
+			_, err := fmt.Fprintln(stdout, "No change needed.")
+			return err
+		}
+		if *dry {
+			_, err := fmt.Fprintln(stdout, "Preview only; no files changed.")
+			return err
+		}
+		if !*yes {
+			fmt.Fprint(stdout, "Apply this change? [y/N] ")
+			line, err := bufio.NewReader(stdin).ReadString('\n')
+			if err != nil && !errors.Is(err, io.EOF) {
+				return err
+			}
+			if strings.ToLower(strings.TrimSpace(line)) != "y" && strings.ToLower(strings.TrimSpace(line)) != "yes" {
+				_, err := fmt.Fprintln(stdout, "No files changed.")
+				return err
+			}
+		}
+		if err := plan.apply(); err != nil {
+			return err
+		}
+		_, err = fmt.Fprintln(stdout, "Applied through your harness. Restart it to load MCP; harness approvals still apply.")
+		return err
+	}
+	if *scope == "user" {
+		return fmt.Errorf("install %s to manage its user MCP configuration; project scope is available with --scope project", cliName)
 	}
 	plan, err := harness.PlanFile(path, args[1], harness.Server{Command: binary, Args: serverArgs}, args[0] == "teardown")
 	if err != nil {
