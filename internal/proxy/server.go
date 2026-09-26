@@ -49,6 +49,7 @@ import (
 	"github.com/torana-edge/torana-edge/internal/format"
 	"github.com/torana-edge/torana-edge/internal/format/gemini"
 	"github.com/torana-edge/torana-edge/internal/format/openai"
+	"github.com/torana-edge/torana-edge/internal/mcpauth"
 	"github.com/torana-edge/torana-edge/internal/metrics"
 	"github.com/torana-edge/torana-edge/internal/mitm"
 	"github.com/torana-edge/torana-edge/internal/plugin"
@@ -231,6 +232,7 @@ type Server struct {
 	// managed config. Nil when there is no config path to anchor it to.
 	pluginState *pluginstate.Store
 	suggestions *suggest.Store
+	mcpTokens   *mcpauth.Manager
 	// egress meters plugin-originated provider requests against per-plugin
 	// budgets, so a plugin cannot spend without a ceiling an operator set.
 	egress *egressMeter
@@ -875,6 +877,7 @@ func New(cfg Config) (*Server, error) {
 		conversations:   conversation.New(conversation.Options{}),
 		pluginState:     stateStore,
 		suggestions:     suggest.New(stateStore),
+		mcpTokens:       mcpauth.New(stateStore, secStore),
 		egress:          newEgressMeter(),
 	}
 	cleanupConstruction := func() {
@@ -3072,6 +3075,8 @@ func New(cfg Config) (*Server, error) {
 	mux.HandleFunc(suggestionsAPIPath+"/", s.controlPlaneGuard(s.handleAgentSuggestions))
 	mux.HandleFunc("/_torana/api/v1/system", s.controlPlaneGuard(s.systemStatus))
 	mux.HandleFunc("/_torana/api/v1/system/stop", s.controlPlaneGuard(s.requestStop))
+	mux.HandleFunc(mcpTokenAPIPath, s.controlPlaneGuard(s.handleMCPToken))
+	mux.HandleFunc(mcpTokenAPIPath+"/rotate", s.controlPlaneGuard(s.handleMCPToken))
 	mux.HandleFunc("/_torana/api/v1/", s.controlPlaneGuard(func(w http.ResponseWriter, r *http.Request) {
 		legacyPath := strings.TrimPrefix(r.URL.Path, "/_torana/api/v1")
 		if legacyPath == "/" || legacyPath == "/agent" {
