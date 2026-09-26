@@ -39,7 +39,7 @@ func TestSuggestionLifecycleAndConversationScope(t *testing.T) {
 	if _, err := store.ResolveCode("conversation-b", firstCode, "accepted", "directive", 1); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("cross-conversation code resolved: %v", err)
 	}
-	secondID, err := store.Create("conversation-a", "router", 2, sample("strong"))
+	secondID, err := store.Create("conversation-a", "router", 2, sample("different-model"))
 	if err != nil || secondID == firstID {
 		t.Fatalf("replacement suggestion: %q, %v", secondID, err)
 	}

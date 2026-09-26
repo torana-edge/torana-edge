@@ -194,8 +194,9 @@ func expire(current *record, turn uint64) bool {
 	return changed
 }
 
-// Create supersedes an earlier live suggestion from the same plugin and
-// dedupe key. Only the ID returns to the plugin; the host retains the code.
+// Create refreshes matching live intent without changing its ID/code. A new
+// intent supersedes the plugin's previous live suggestion in this conversation.
+// Only the ID returns to the plugin; the host retains the code.
 func (s *Store) Create(conversation, plugin string, turn uint64, args *pb.SuggestArgs) (string, error) {
 	if plugin == "" || args == nil {
 		return "", errors.New("plugin and suggestion are required")
@@ -210,11 +211,35 @@ func (s *Store) Create(conversation, plugin string, turn uint64, args *pb.Sugges
 	var created string
 	err = s.update(conversation, func(current *record) (bool, error) {
 		expire(current, turn)
+		refresh := -1
+		for i := range current.Suggestions {
+			item := &current.Suggestions[i]
+			if item.Status == "pending" && item.Plugin == plugin && item.DedupeKey == args.DedupeKey && sameSuggestionIntent(*item, args) {
+				refresh = i
+				break
+			}
+		}
+		if refresh >= 0 {
+			for i := range current.Suggestions {
+				if i != refresh && current.Suggestions[i].Plugin == plugin && current.Suggestions[i].Status == "pending" {
+					current.Suggestions[i].Status = "superseded"
+				}
+			}
+			item := &current.Suggestions[refresh]
+			item.Title, item.Body, item.CostUSD = args.Title, args.Body, args.CostUsd
+			item.CreatedTurn = turn
+			item.ExpiresAfterUserTurns = args.ExpiresAfterUserTurns
+			if item.ExpiresAfterUserTurns == 0 {
+				item.ExpiresAfterUserTurns = defaultExpiry
+			}
+			created = item.ID
+			return true, nil
+		}
 		used := make(map[string]bool, len(current.Suggestions))
 		for i := range current.Suggestions {
 			item := &current.Suggestions[i]
 			used[item.Code] = true
-			if item.Status == "pending" && item.Plugin == plugin && item.DedupeKey == args.DedupeKey {
+			if item.Status == "pending" && item.Plugin == plugin {
 				item.Status = "superseded"
 			}
 		}
@@ -265,6 +290,18 @@ func (s *Store) Create(conversation, plugin string, turn uint64, args *pb.Sugges
 		return true, nil
 	})
 	return created, err
+}
+
+func sameSuggestionIntent(item Suggestion, args *pb.SuggestArgs) bool {
+	if item.Kind != args.Kind || item.HarnessTargetModel != args.GetHarnessTargetModel() || len(item.Actions) != len(args.Actions) {
+		return false
+	}
+	for i, action := range args.Actions {
+		if item.Actions[i].ID != action.Id || item.Actions[i].Label != action.Label {
+			return false
+		}
+	}
+	return true
 }
 
 // List advances expiry and returns only the requested conversation. A plugin
