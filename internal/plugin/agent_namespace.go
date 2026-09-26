@@ -149,7 +149,7 @@ func validateAgentV2(d AgentDescriptor, manifest PluginManifest) error {
 			return fmt.Errorf("agent descriptor: invalid or duplicate directive command %q", directive.Command)
 		}
 		commands[directive.Command] = true
-		if directive.UserDirect && (op.Risk != "write" || op.EffectiveModelAccess() == "never") {
+		if directive.UserDirect && op.Risk != "write" {
 			return fmt.Errorf("agent descriptor: user_direct requires an eligible write operation")
 		}
 		if err := validateDirectiveArgs(op); err != nil {
