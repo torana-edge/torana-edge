@@ -1308,6 +1308,10 @@ func New(cfg Config) (*Server, error) {
 					chat.ToranaMeta, _ = chat.ToranaMeta.SetMember("_torana_mcp", v)
 				}
 				metrics.RecordMCPConnection(req.Context(), convIdentity.Source, presence)
+				if presence != "present" && s.mcpCorrelation != nil && s.mcpCorrelation.RecentlyConnected(rs.ConversationID, time.Now()) {
+					presence = "present"
+					chat.ToranaMeta, _ = chat.ToranaMeta.SetMember("_torana_mcp", json.RawMessage(`"present"`))
+				}
 				if presence == "absent" && rs.ConversationID != "" && s.suggestions != nil {
 					if _, err := s.suggestions.SetupHint(rs.ConversationID, convIdentity.Source, rs.UserTurn, time.Now()); err != nil {
 						log.Printf("[mcp] could not record setup hint: %v", err)
@@ -3247,6 +3251,7 @@ func New(cfg Config) (*Server, error) {
 		// Record the conversation here rather than in the Rewrite hook: the
 		// provider's cache token counts only exist once the response has been
 		// read, and they are the ground truth for whether a prefix was warm.
+		canonicalInput, _ := rs.canonicalInputTokens()
 		s.conversations.Observe(conversation.Observation{
 			ID:             rs.ConversationID,
 			CachePrefixKey: rs.CachePrefixKey,
@@ -3256,7 +3261,7 @@ func New(cfg Config) (*Server, error) {
 			Path:           rs.Path,
 			CacheRead:      rs.UsageCacheRead,
 			CacheWrite:     rs.UsageCacheWrite,
-			TokensIn:       rs.UsageIn,
+			TokensIn:       canonicalInput,
 			TokensOut:      rs.UsageOut,
 		})
 		// Host request metrics: latency + outcome, labeled by model/provider.

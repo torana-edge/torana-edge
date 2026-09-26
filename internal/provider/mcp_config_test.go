@@ -26,6 +26,24 @@ func TestMCPConfigurationDefaultsAndExplicitProtection(t *testing.T) {
 	}
 }
 
+func TestMCPConsentPolicyAndUnknownHarnessSetting(t *testing.T) {
+	for _, mode := range []string{"", "elicitation", "operator_only"} {
+		cfg := DefaultConfig()
+		cfg.MCP.Consent = mode
+		if err := cfg.validateMCPConfiguration(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cfg := DefaultConfig()
+	cfg.MCP.Consent = "auto_approve"
+	if cfg.validateMCPConfiguration() == nil {
+		t.Fatal("invalid consent policy accepted")
+	}
+	if _, err := discardObsoleteChatSettings([]byte(`{"harness":{"future_setting":true}}`)); err == nil {
+		t.Fatal("unknown harness setting discarded")
+	}
+}
+
 func TestUnmanagedLoadPreservesFeatureConfiguration(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")
 	if err := os.WriteFile(path, []byte(`{"suggestions":{"enabled":true},"directives":{"enabled":true},"mcp":{"enabled":true,"access":{"logger._disable":"never"}},"harness":{"setup_from_directive":false}}`), 0600); err != nil {

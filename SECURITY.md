@@ -1,5 +1,11 @@
 # Security boundaries
 
+MCP confirmations inside a harness rely on that harness showing them to you.
+For unattended or auto-approve harnesses, set `mcp.consent` to `operator_only`
+in Torana Settings. Proposed changes then wait for your approval in Torana's UI
+or CLI. The default, `elicitation`, uses a harness dialog when available and
+otherwise falls back to the UI or CLI.
+
 ## Reporting a vulnerability
 
 Please [report vulnerabilities privately through GitHub](https://github.com/torana-edge/torana-edge/security/advisories/new).

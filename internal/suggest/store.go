@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	pb "github.com/torana-edge/torana-plugin-sdk/pb/v1"
@@ -34,7 +35,12 @@ type State interface {
 	CompareAndSet(plugin, key, value string, expected *string) (applied bool, version string, err error)
 }
 
-type Store struct{ state State }
+type Store struct {
+	state         State
+	setupMu       sync.Mutex
+	setupCooldown map[string]time.Time
+	setupSeen     map[string]bool
+}
 
 func New(state State) *Store { return &Store{state: state} }
 

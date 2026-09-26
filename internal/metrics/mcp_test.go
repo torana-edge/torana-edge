@@ -15,7 +15,7 @@ func TestMCPConnectionMetricsBoundLabelsAndIgnoreUnknownCatalogs(t *testing.T) {
 	got := map[string]int64{}
 	for _, scope := range read().ScopeMetrics {
 		for _, instrument := range scope.Metrics {
-			if instrument.Name != "torana_mcp_connected" {
+			if instrument.Name != "torana_mcp_catalog_observations_total" {
 				continue
 			}
 			for _, point := range instrument.Data.(metricdata.Sum[int64]).DataPoints {

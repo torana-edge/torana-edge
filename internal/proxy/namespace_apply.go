@@ -125,6 +125,17 @@ func (s *Server) applyConfirmedStandardOperation(ctx context.Context, conversati
 		return operationError("unbound_conversation", "This operation belongs to another conversation."), nil
 	}
 	current := s.GetConfig().Providers
+	if current.MCP.Consent == "operator_only" {
+		items, lookupErr := s.suggestions.List(conversation, "torana", 0)
+		if lookupErr != nil {
+			return mcpserver.Result{}, lookupErr
+		}
+		for _, proposal := range items {
+			if proposal.ID == id && proposal.Via == "mcp_elicitation" {
+				return operationError("access_denied", "Confirm this operation in Torana's UI or CLI."), nil
+			}
+		}
+	}
 	// Operator acceptance must enforce the current protected floor, even when
 	// a caller did not supply a policy snapshot. A stale override cannot grant
 	// access removed since the proposal was created.

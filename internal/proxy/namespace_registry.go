@@ -67,7 +67,7 @@ func buildNamespaceRegistry(installed []plugin.PluginBundle, loaded []plugin.Loa
 		core.Operations = append(core.Operations, namespaceOperation{ID: id, Description: op.Description, Risk: "read", ModelAccess: access, ConversationBinding: binding, Callable: callable, Source: "core", CoreID: op.ID})
 	}
 	for _, op := range []namespaceOperation{
-		{ID: "session.usage", Description: "Usage for this conversation", Risk: "read", ModelAccess: "read"},
+		{ID: "session.usage", Description: "Usage for this conversation; cache token counts are subsets of tokens_in", Risk: "read", ModelAccess: "read"},
 		{ID: "changes.list", Description: "Changes for this conversation", Risk: "read", ModelAccess: "read"},
 		{ID: "changes.undo", Description: "Undo a confirmed change", Risk: "write", ModelAccess: "confirm"},
 	} {

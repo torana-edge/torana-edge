@@ -21,8 +21,24 @@ func (s *Store) SetupHint(conversation, source string, turn uint64, now time.Tim
 	default:
 		return "", nil
 	}
+	s.setupMu.Lock()
+	defer s.setupMu.Unlock()
+	if s.setupCooldown == nil {
+		s.setupCooldown = make(map[string]time.Time)
+	}
+	if s.setupSeen == nil {
+		s.setupSeen = make(map[string]bool)
+	}
+	if s.setupSeen[conversation] || now.Before(s.setupCooldown[name]) {
+		return "", nil
+	}
+	// Bound retries on unavailable storage as well as the normal cooldown.
+	s.setupCooldown[name] = now.Add(time.Minute)
 	current, _, _, err := s.read(conversation)
 	if err != nil || current.SetupHintSeen {
+		if err == nil && len(s.setupSeen) < 4096 {
+			s.setupSeen[conversation] = true
+		}
 		return "", err
 	}
 	id, err := randomID()
@@ -40,6 +56,7 @@ func (s *Store) SetupHint(conversation, source string, turn uint64, now time.Tim
 			return "", fmt.Errorf("decode setup cooldown: %w", err)
 		}
 		if now.Before(previous.Add(7 * 24 * time.Hour)) {
+			s.setupCooldown[name] = previous.Add(7 * 24 * time.Hour)
 			return "", nil
 		}
 	}
@@ -55,6 +72,7 @@ func (s *Store) SetupHint(conversation, source string, turn uint64, now time.Tim
 	if err != nil || !claimed {
 		return "", err
 	}
+	s.setupCooldown[name] = now.Add(7 * 24 * time.Hour)
 	created := ""
 	err = s.update(conversation, func(current *record) (bool, error) {
 		if current.SetupHintSeen {
@@ -79,5 +97,8 @@ func (s *Store) SetupHint(conversation, source string, turn uint64, now time.Tim
 		created = id
 		return true, nil
 	})
+	if err == nil && len(s.setupSeen) < 4096 {
+		s.setupSeen[conversation] = true
+	}
 	return created, err
 }

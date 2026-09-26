@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"github.com/torana-edge/torana-edge/internal/mcpserver"
 	"github.com/torana-edge/torana-edge/internal/metrics"
 	"time"
@@ -29,6 +30,9 @@ func (s *Server) sealMCPConsent(ctx context.Context, name string, raw json.RawMe
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
+	if s.GetConfig().Providers.MCP.Consent == "operator_only" {
+		return "", fmt.Errorf("confirm this operation in Torana's UI or CLI")
+	}
 	state := mcpConsentState{Kind: "mcp-consent-v1", Tool: name, Hash: consentArgumentHash(raw), ID: consent.ID, Conversation: consent.Conversation, Expires: time.Now().Add(operationConsentTTL).Unix()}
 	encoded, err := json.Marshal(state)
 	if err != nil {
@@ -47,7 +51,7 @@ func (s *Server) resolveMCPConsent(ctx context.Context, name string, raw json.Ra
 	invalid := func() (mcpserver.Result, error) {
 		return operationError("invalid_confirmation", "Confirmation expired or changed; review the pending change in Torana."), nil
 	}
-	if s.secrets == nil || s.suggestions == nil || !s.GetConfig().Providers.MCP.Enabled {
+	if s.secrets == nil || s.suggestions == nil || !s.GetConfig().Providers.MCP.Enabled || s.GetConfig().Providers.MCP.Consent == "operator_only" {
 		return invalid()
 	}
 	s.mcpMu.Lock()

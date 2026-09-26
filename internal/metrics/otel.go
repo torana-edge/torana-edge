@@ -109,7 +109,7 @@ func initInstruments(m metric.Meter) {
 	compactionUnavailable, _ = m.Int64Counter("torana_compaction_savings_unavailable_total")
 	routedTotal, _ = m.Int64Counter("torana_routed_requests_total")
 	noticeTotal, _ = m.Int64Counter("torana_notice_total")
-	mcpConnected, _ = m.Int64Counter("torana_mcp_connected")
+	mcpConnected, _ = m.Int64Counter("torana_mcp_catalog_observations_total")
 	suggestionTotal, _ = m.Int64Counter("torana_suggestions_total")
 	pluginMetricRejected, _ = m.Int64Counter("torana_plugin_metric_rejections_total")
 }

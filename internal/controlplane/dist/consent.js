@@ -46,6 +46,9 @@ globalThis.ToranaConsent = (() => {
     }
     for (const item of items) {
       const card = node('article', '', 'card form-section');
+      if (kind === 'suggestions') {
+        card.append(node('p', item.plugin === 'torana' ? 'Torana · host-generated' : `${item.plugin || 'Plugin'} · plugin suggestion`, 'section-desc'));
+      }
       card.append(node('h4', item.title || `Change ${item.id}`), node('p', item.outcome || item.status, 'section-desc'));
       if (item.body) {
         const body = node('p', item.body);
@@ -54,7 +57,7 @@ globalThis.ToranaConsent = (() => {
       }
       const actions = node('div', '', 'inline-actions');
       const available = kind === 'suggestions' && item.status === 'pending'
-        ? [['accept', 'Accept'], ['dismiss', 'Dismiss']]
+        ? (item.kind === 'torana_setup' ? [['dismiss', 'Dismiss']] : [['accept', 'Accept'], ['dismiss', 'Dismiss']])
         : kind === 'changes' && item.status === 'applied' ? [['undo', 'Undo this change']] : [];
       for (const [action, label] of available) {
         const button = node('button', label, action === 'accept' ? 'btn btn-primary' : 'btn btn-ghost');

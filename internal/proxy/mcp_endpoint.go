@@ -148,6 +148,7 @@ func (s *Server) dispatchMCP(ctx context.Context, tool string, input json.RawMes
 		if evidence, ok := s.mcpCorrelation.Consume(tool, input, time.Now()); ok {
 			binding = plugin.MCPBinding{Bound: true, ConversationID: evidence.ConversationID, CallID: evidence.CallID}
 			conversation = evidence.ConversationID
+			s.mcpCorrelation.MarkConnected(conversation, time.Now())
 		}
 	}
 	releaseConversation, allowed := s.mcpLimits.acquireLease("conversation:" + conversation)

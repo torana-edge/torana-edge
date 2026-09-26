@@ -19,6 +19,17 @@ function setup(fetch = async () => ({ok: true, json: async () => ({})})) {
 }
 const text = element => element.textContent + element.children.map(text).join(' ');
 
+test('review labels sources and setup hints offer dismissal only', () => {
+  const {api} = setup();
+  const container = new Element('section');
+  api.render(container, [{id: 'hint', plugin: 'torana', kind: 'torana_setup', status: 'pending'}], 'conversation', 'suggestions');
+  assert.match(text(container), /Torana · host-generated/);
+  assert.match(text(container), /Dismiss/);
+  assert.doesNotMatch(text(container), /Accept/);
+  api.render(container, [{id: 'plugin', plugin: 'decision_router', status: 'pending'}], 'conversation', 'suggestions');
+  assert.match(text(container), /decision_router · plugin suggestion/);
+});
+
 test('review actions are scoped, encoded and carry the local mutation marker', async () => {
   const {api} = setup();
   const calls = [];
