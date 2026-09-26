@@ -67,7 +67,7 @@ func Usage(w io.Writer) {
   torana mcp status                         inspect whether MCP is enabled
   torana mcp enable --yes                    set up its token and enable MCP
   torana mcp disable --yes                   close MCP sessions; retain the token
-  torana mcp token                           print the instance token (sets up once)
+  torana mcp token                           print the existing instance token (read-only)
   torana mcp rotate --yes                    rotate and print the instance token
   torana mcp stdio                           serve MCP on stdin/stdout; token stays private
 
@@ -75,6 +75,8 @@ All commands accept --addr host:port (or a loopback HTTP(S) origin).
 --file - reads stdin. --json is accepted; JSON is already the default.
 MCP token/rotate print only the secret token; --json requests a JSON envelope.
 Keep tokens private. MCP policy does not sandbox unrestricted local shell access.
+Conversation-scoped reads/changes require a verified provider tool call; without
+that evidence Torana returns unbound_conversation rather than applying a change.
 Writes require --yes; an agent should obtain operator consent for approvals.
 config/pipeline/plugin-config apply require the revision from their get command.
 Edit the snapshot's config or pipeline, not its revision. Stale edits fail safely.

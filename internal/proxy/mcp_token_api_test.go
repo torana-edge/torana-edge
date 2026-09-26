@@ -69,7 +69,14 @@ func TestMCPTokensOperatorGuardAndRotation(t *testing.T) {
 		}
 		return result.Token
 	}
-	first := readToken(mcpTokenAPIPath)
+	w := request(http.MethodPost, mcpTokenAPIPath, "{}", "127.0.0.1:1234", "", true)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("unconfigured read status=%d", w.Code)
+	}
+	if token, err := s.mcpTokens.Current(); err != nil || token != "" {
+		t.Fatal("token read provisioned a credential")
+	}
+	first := readToken(mcpTokenAPIPath + "/setup")
 	if first != readToken(mcpTokenAPIPath) {
 		t.Fatal("setup replaced an existing token")
 	}

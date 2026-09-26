@@ -10,10 +10,15 @@ import (
 )
 
 func (c *runner) mcpToken(rotate bool) (string, error) {
-	path := controlclient.BasePath + "/mcp/token"
+	action := ""
 	if rotate {
-		path += "/rotate"
+		action = "/rotate"
 	}
+	return c.mcpTokenAction(action)
+}
+
+func (c *runner) mcpTokenAction(action string) (string, error) {
+	path := controlclient.BasePath + "/mcp/token" + action
 	raw, _, err := c.client.JSON(c.ctx, http.MethodPost, path, []byte(`{}`), "")
 	if err != nil {
 		return "", err
@@ -53,7 +58,7 @@ func (c *runner) mcp(command string, o options) error {
 		if command == "mcp enable" {
 			// Prepare authentication before opening the endpoint. The credential
 			// stays private: enable's success output is status, not the token.
-			if _, err := c.mcpToken(false); err != nil {
+			if _, err := c.mcpTokenAction("/setup"); err != nil {
 				return err
 			}
 		}

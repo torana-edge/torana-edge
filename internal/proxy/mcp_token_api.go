@@ -27,14 +27,24 @@ func (s *Server) handleMCPToken(w http.ResponseWriter, r *http.Request) {
 	}
 	var token string
 	var err error
-	if r.URL.Path == mcpTokenAPIPath+"/rotate" {
+	switch r.URL.Path {
+	case mcpTokenAPIPath + "/rotate":
 		token, err = s.mcpTokens.Rotate()
-	} else {
+	case mcpTokenAPIPath + "/setup":
 		token, err = s.mcpTokens.Ensure()
+	case mcpTokenAPIPath:
+		token, err = s.mcpTokens.Current()
+	default:
+		http.NotFound(w, r)
+		return
 	}
 	if err != nil {
 		// Storage/cryptography errors are not safe response text.
 		writeAgentError(w, http.StatusServiceUnavailable, "token_unavailable", "MCP token storage is unavailable; retry after checking the instance")
+		return
+	}
+	if token == "" {
+		writeAgentError(w, http.StatusConflict, "token_not_configured", "set up MCP with torana mcp enable --yes")
 		return
 	}
 	writeAgentJSON(w, http.StatusOK, struct {
