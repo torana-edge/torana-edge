@@ -1,0 +1,132 @@
+package mcpserver
+
+import (
+	"bytes"
+	"crypto/sha256"
+	"encoding/json"
+	"io"
+	"strings"
+	"sync"
+	"time"
+)
+
+const correlationTTL = 120 * time.Second
+const correlationLimit = 4096
+
+// Binding is host-owned evidence, not a conversation identifier supplied in
+// model tool arguments. Recording response calls is wired separately.
+type Binding struct {
+	ConversationID string
+	CallID         string
+}
+
+type correlationRecord struct {
+	binding  Binding
+	tool     string
+	hash     [32]byte
+	expires  time.Time
+	consumed bool
+}
+
+// Correlator binds an out-of-band MCP call only to one unconsumed response
+// call. It retains consumed records until expiry so response replay cannot
+// grant a second binding. It stores hashes, not tool arguments.
+type Correlator struct {
+	mu             sync.Mutex
+	records        map[Binding]correlationRecord
+	saturatedUntil time.Time
+}
+
+func NewCorrelator() *Correlator {
+	return &Correlator{records: make(map[Binding]correlationRecord)}
+}
+
+func canonicalTool(name string) string {
+	for _, tool := range []string{"torana_namespaces", "torana_describe", "torana_search", "torana_invoke"} {
+		if name == tool || strings.HasSuffix(name, "__"+tool) {
+			return tool
+		}
+	}
+	return ""
+}
+
+func argumentHash(input json.RawMessage) ([32]byte, bool) {
+	decoder := json.NewDecoder(bytes.NewReader(input))
+	decoder.UseNumber()
+	var value map[string]any
+	if decoder.Decode(&value) != nil || value == nil {
+		return [32]byte{}, false
+	}
+	var extra any
+	if decoder.Decode(&extra) != io.EOF {
+		return [32]byte{}, false
+	}
+	canonical, err := json.Marshal(value)
+	if err != nil {
+		return [32]byte{}, false
+	}
+	return sha256.Sum256(canonical), true
+}
+
+func (c *Correlator) prune(now time.Time) {
+	for key, record := range c.records {
+		if !now.Before(record.expires) {
+			delete(c.records, key)
+		}
+	}
+}
+
+// Record accepts only host-observed complete response calls. A Gemini adapter
+// supplies response ID plus part index as CallID where no native ID exists.
+func (c *Correlator) Record(name string, input json.RawMessage, binding Binding, now time.Time) bool {
+	tool := canonicalTool(name)
+	hash, ok := argumentHash(input)
+	if tool == "" || !ok || binding.ConversationID == "" || binding.CallID == "" {
+		return false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.prune(now)
+	if old, exists := c.records[binding]; exists {
+		if old.tool != tool || old.hash != hash {
+			old.consumed = true // Contradictory evidence must never bind.
+			c.records[binding] = old
+		}
+		return false
+	}
+	if len(c.records) >= correlationLimit {
+		// Do not evict an ambiguity and accidentally leave a unique match.
+		c.saturatedUntil = now.Add(correlationTTL)
+		return false
+	}
+	c.records[binding] = correlationRecord{binding: binding, tool: tool, hash: hash, expires: now.Add(correlationTTL)}
+	return true
+}
+
+func (c *Correlator) Consume(name string, input json.RawMessage, now time.Time) (Binding, bool) {
+	tool := canonicalTool(name)
+	hash, ok := argumentHash(input)
+	if tool == "" || !ok {
+		return Binding{}, false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.prune(now)
+	if now.Before(c.saturatedUntil) {
+		return Binding{}, false
+	}
+	var match correlationRecord
+	count := 0
+	for _, record := range c.records {
+		if !record.consumed && record.tool == tool && record.hash == hash {
+			match = record
+			count++
+		}
+	}
+	if count != 1 {
+		return Binding{}, false
+	}
+	match.consumed = true
+	c.records[match.binding] = match
+	return match.binding, true
+}
