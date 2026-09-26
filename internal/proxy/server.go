@@ -50,6 +50,7 @@ import (
 	"github.com/torana-edge/torana-edge/internal/format/gemini"
 	"github.com/torana-edge/torana-edge/internal/format/openai"
 	"github.com/torana-edge/torana-edge/internal/mcpauth"
+	"github.com/torana-edge/torana-edge/internal/mcpserver"
 	"github.com/torana-edge/torana-edge/internal/metrics"
 	"github.com/torana-edge/torana-edge/internal/mitm"
 	"github.com/torana-edge/torana-edge/internal/plugin"
@@ -230,9 +231,17 @@ type Server struct {
 	ticker *tickScheduler
 	// pluginState is durable per-plugin storage (env.state_*), kept beside the
 	// managed config. Nil when there is no config path to anchor it to.
-	pluginState *pluginstate.Store
-	suggestions *suggest.Store
-	mcpTokens   *mcpauth.Manager
+	pluginState    *pluginstate.Store
+	suggestions    *suggest.Store
+	mcpTokens      *mcpauth.Manager
+	mcpMu          sync.Mutex
+	mcpHandler     *mcpserver.Handler
+	mcpRetired     []*mcpserver.Handler
+	mcpStopping    bool
+	mcpLimits      *RateLimiter
+	mcpCorrelation *mcpserver.Correlator
+	// Protected by controlPlaneMutationMu, like its registry/config snapshot.
+	mcpCatalog *mcpPolicySnapshot
 	// egress meters plugin-originated provider requests against per-plugin
 	// budgets, so a plugin cannot spend without a ceiling an operator set.
 	egress *egressMeter
@@ -878,6 +887,8 @@ func New(cfg Config) (*Server, error) {
 		pluginState:     stateStore,
 		suggestions:     suggest.New(stateStore),
 		mcpTokens:       mcpauth.New(stateStore, secStore),
+		mcpLimits:       NewRateLimiter(120, 8),
+		mcpCorrelation:  mcpserver.NewCorrelator(),
 		egress:          newEgressMeter(),
 	}
 	cleanupConstruction := func() {
@@ -891,6 +902,7 @@ func New(cfg Config) (*Server, error) {
 		}
 		s.cacheMu.Unlock()
 		s.rateLimiter.Close()
+		s.mcpLimits.Close()
 		s.conversations.Close()
 		_ = s.pluginState.Close()
 		s.swapAuditWriter(nil)
@@ -3077,6 +3089,7 @@ func New(cfg Config) (*Server, error) {
 	mux.HandleFunc("/_torana/api/v1/system/stop", s.controlPlaneGuard(s.requestStop))
 	mux.HandleFunc(mcpTokenAPIPath, s.controlPlaneGuard(s.handleMCPToken))
 	mux.HandleFunc(mcpTokenAPIPath+"/rotate", s.controlPlaneGuard(s.handleMCPToken))
+	mux.HandleFunc("/_torana/mcp", s.handleMCP)
 	mux.HandleFunc("/_torana/api/v1/", s.controlPlaneGuard(func(w http.ResponseWriter, r *http.Request) {
 		legacyPath := strings.TrimPrefix(r.URL.Path, "/_torana/api/v1")
 		if legacyPath == "/" || legacyPath == "/agent" {
@@ -3816,6 +3829,9 @@ func (s *Server) applyProviders(cfg provider.Config, registry *credentialapi.Reg
 	s.configMu.Lock()
 	s.config.Providers = cfg
 	s.configMu.Unlock()
+	if !cfg.MCP.Enabled {
+		s.retireMCPHandler()
+	}
 	s.rateLimiter.Update(cfg.Limits.RPM, cfg.Limits.Concurrency)
 	log.Printf("config hot-reload: %d providers loaded", len(cfg.Providers))
 }
@@ -4538,6 +4554,7 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	// Close only stops these background janitors; in-flight users can still
 	// access their state. Stop them on every return, including deadline paths.
 	defer s.rateLimiter.Close()
+	defer s.mcpLimits.Close()
 	defer s.conversations.Close()
 	if s.pluginHTTP != nil {
 		defer s.pluginHTTP.CloseIdleConnections()
@@ -4563,6 +4580,9 @@ func (s *Server) Shutdown(ctx context.Context) error {
 		s.mitmSrv = nil
 	}
 	s.mitmMu.Unlock()
+	if err := s.shutdownMCP(ctx); err != nil {
+		return err
+	}
 	// Stop accepting new requests and let HTTP cancellation unblock streams
 	// before waiting for their pinned plugin pipeline.
 	if s.httpServer != nil {
