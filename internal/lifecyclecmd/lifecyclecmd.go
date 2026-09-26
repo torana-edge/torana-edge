@@ -295,7 +295,7 @@ func startExecutable(ctx context.Context, executable string, flags ServeFlags) (
 		return zero, err
 	}
 	if active {
-		return waitReady(ctx, store, 0, nil)
+		return waitReady(ctx, store, "", 0, nil)
 	}
 	// Resolve/validate the endpoint the CHILD will actually listen on, then
 	// preflight that one. Resolving without the flags probed the old port while
@@ -342,7 +342,7 @@ func startExecutable(ctx context.Context, executable string, flags ServeFlags) (
 	}
 	done := make(chan error, 1)
 	go func() { done <- cmd.Wait() }()
-	s, err := waitReady(ctx, store, cmd.Process.Pid, done)
+	s, err := waitReady(ctx, store, target, cmd.Process.Pid, done)
 	if err != nil {
 		// Only the child handle created here is eligible for startup cleanup.
 		if killErr := cmd.Process.Kill(); killErr == nil {
@@ -357,7 +357,7 @@ func startExecutable(ctx context.Context, executable string, flags ServeFlags) (
 	return s, nil
 }
 
-func waitReady(ctx context.Context, store string, pid int, done <-chan error) (Status, error) {
+func waitReady(ctx context.Context, store, target string, pid int, done <-chan error) (Status, error) {
 	var lastProbeError error
 	for {
 		select {
@@ -365,7 +365,10 @@ func waitReady(ctx context.Context, store string, pid int, done <-chan error) (S
 			return Status{}, fmt.Errorf("child exited before readiness: %v", err)
 		default:
 		}
-		c, err := controlclient.New("", time.Second)
+		// A launched child already has a resolved listener. Using defaultTarget
+		// here probes the instance lock and can race the child acquiring it.
+		// Existing-instance waits still discover the recorded runtime listener.
+		c, err := controlclient.New(target, time.Second)
 		if err == nil {
 			s, probeErr := Inspect(ctx, c)
 			c.Close()

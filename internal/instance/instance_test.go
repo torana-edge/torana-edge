@@ -63,3 +63,26 @@ func TestRecordReplacementAndValidation(t *testing.T) {
 		t.Fatal("accepted incomplete record")
 	}
 }
+
+func TestProbeReleasesLockBeforeImmediateAcquisition(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "instance.lock")
+	first, err := Acquire(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := first.Close(); err != nil {
+		t.Fatal(err)
+	}
+	for range 100 {
+		if active, err := Running(path); err != nil || active {
+			t.Fatalf("probe=%v %v", active, err)
+		}
+		owner, err := Acquire(path)
+		if err != nil {
+			t.Fatalf("probe kept the lock: %v", err)
+		}
+		if err := owner.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
