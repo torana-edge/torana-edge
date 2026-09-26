@@ -250,6 +250,14 @@ func extractOpenAI(body map[string]any, raw []byte) responseRefs {
 	}
 
 	if output, ok := body["output"].([]any); ok {
+		// Responses has status, not choices[].finish_reason. Do not make a
+		// partial/failed response look complete to host observers.
+		switch asString(body["status"]) {
+		case "completed":
+			refs.finishReason = "stop"
+		case "incomplete":
+			refs.finishReason = "length"
+		}
 		// Items are components of ONE response — keep aggregating all of them.
 		refs.hasMessage = len(output) > 0
 		extractResponsesOutput(&refs, output, raw)

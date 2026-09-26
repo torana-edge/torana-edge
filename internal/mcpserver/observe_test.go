@@ -17,7 +17,7 @@ func TestObserveCanonicalResponseAcrossShapes(t *testing.T) {
 				response.Message.Blocks[0].ToolCall.ID = ""
 			}
 			now := time.Now()
-			if count := c.ObserveResponse(response, shape, "conversation", []string{"torana"}, now); count != 1 {
+			if count := c.ObserveResponse(response, shape, "conversation", "host-request", []string{"torana"}, now); count != 1 {
 				t.Fatalf("count=%d", count)
 			}
 			binding, ok := c.Consume("torana_invoke", json.RawMessage(`{"namespace":"torana","operation":"status","input":{}}`), now)
@@ -40,11 +40,28 @@ func TestObservationRejectsForeignServerAndIncompleteCalls(t *testing.T) {
 	} {
 		c := NewCorrelator()
 		response := &engine.ChatResponse{UpstreamStatus: tc.status, FinishReason: tc.finish, Message: &engine.ResponseMessage{Blocks: []engine.ResponseBlock{{ToolCall: &engine.ResponseToolCall{ID: tc.id, Name: tc.name, ArgumentsJSON: []byte(`{}`)}}}}}
-		if c.ObserveResponse(response, "anthropic", "conversation", []string{"torana"}, time.Now()) != 0 {
+		if c.ObserveResponse(response, "anthropic", "conversation", "host-request", []string{"torana"}, time.Now()) != 0 {
 			t.Fatalf("unsafe evidence accepted: %+v", tc)
 		}
 	}
 	if responseTool("mcp__custom__torana_search", []string{"custom"}) != "torana_search" {
 		t.Fatal("configured server name rejected")
+	}
+}
+
+func TestGeminiObservationScopesSyntheticIDsToHostRequest(t *testing.T) {
+	c := NewCorrelator()
+	now := time.Now()
+	for _, query := range []string{"first", "second"} {
+		response := &engine.ChatResponse{UpstreamStatus: 200, FinishReason: "STOP", Message: &engine.ResponseMessage{Blocks: []engine.ResponseBlock{{ToolCall: &engine.ResponseToolCall{ID: "torana_search", Name: "torana_search", ArgumentsJSON: []byte(`{"query":"` + query + `"}`)}}}}}
+		if c.ObserveResponse(response, "gemini", "conversation", "request-"+query, nil, now) != 1 {
+			t.Fatal("native synthetic ID not recorded")
+		}
+	}
+	for _, query := range []string{"first", "second"} {
+		binding, ok := c.Consume("torana_search", json.RawMessage(`{"query":"`+query+`"}`), now)
+		if !ok || binding.CallID != "gemini:request-"+query+":0" {
+			t.Fatalf("binding=%+v ok=%t", binding, ok)
+		}
 	}
 }

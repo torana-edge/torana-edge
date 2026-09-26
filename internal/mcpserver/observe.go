@@ -29,8 +29,8 @@ func responseTool(name string, servers []string) string {
 // ObserveResponse records complete calls in the canonical response after the
 // client-facing adapter/bridge boundary. It does not mutate response bytes or
 // accept identity from tool arguments. The caller supplies trusted request
-// identity and operator-configured MCP server names.
-func (c *Correlator) ObserveResponse(response *engine.ChatResponse, shape, conversation string, servers []string, now time.Time) int {
+// identity, a unique host request ID and operator-configured MCP server names.
+func (c *Correlator) ObserveResponse(response *engine.ChatResponse, shape, conversation, requestID string, servers []string, now time.Time) int {
 	if response == nil || response.Message == nil || response.UpstreamStatus < 200 || response.UpstreamStatus >= 300 {
 		return 0
 	}
@@ -55,8 +55,13 @@ func (c *Correlator) ObserveResponse(response *engine.ChatResponse, shape, conve
 			continue
 		}
 		id := call.ID
-		if id == "" && strings.HasPrefix(shape, "gemini") && response.ID != "" {
-			id = fmt.Sprintf("gemini:%s:%d", response.ID, index)
+		if strings.HasPrefix(shape, "gemini") && (id == "" || id == call.Name) {
+			// Native Gemini parsers historically substitute the function name
+			// for missing IDs. That is not unique across calls or requests.
+			id = ""
+			if requestID != "" {
+				id = fmt.Sprintf("gemini:%s:%d", requestID, index)
+			}
 		}
 		if c.Record(tool, call.ArgumentsJSON, Binding{ConversationID: conversation, CallID: id}, now) {
 			count++
