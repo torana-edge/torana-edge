@@ -123,3 +123,50 @@ func TestMCPCatalogSearchAndInputErrors(t *testing.T) {
 		t.Fatal("bad cursor accepted")
 	}
 }
+
+func TestMCPCatalogNaturalSearchRanksIntentAndMetadata(t *testing.T) {
+	p := catalogTestPolicy(t, 12)
+	entry := p.registry.entries["logger"]
+	entry.Name, entry.Title, entry.Summary = "compactor", "Conversation Compression", "Keep tool output concise"
+	entry.Categories = []string{"economics"}
+	entry.Operations[7].Guest.Examples = []string{"inspect billing"}
+	p.registry.entries["compactor"] = entry
+	for _, tc := range []struct{ query, namespace, operation string }{
+		{"please turn off the compactor", "compactor", "_disable"},
+		{"turn on compactor", "compactor", "_enable"},
+		{"inspect billing", "compactor", entry.Operations[7].ID},
+	} {
+		raw, _ := json.Marshal(map[string]string{"query": tc.query})
+		result := p.catalogDispatch("torana_search", raw)
+		items, ok := result.Result.([]catalogOperation)
+		if !result.OK || !ok || len(items) == 0 || items[0].Namespace != tc.namespace || items[0].ID != tc.operation {
+			t.Fatalf("query=%q result=%+v", tc.query, result)
+		}
+	}
+	for _, query := range []string{"compression", "concise", "economics"} {
+		raw, _ := json.Marshal(map[string]string{"query": query, "namespace": "compactor"})
+		if result := p.catalogDispatch("torana_search", raw); !result.OK || len(result.Result.([]catalogOperation)) == 0 {
+			t.Fatalf("namespace metadata not searched: %s", query)
+		}
+	}
+}
+
+func TestMCPCatalogBoundsLegacySummariesAndDocumentsNoInput(t *testing.T) {
+	p := catalogTestPolicy(t, 1)
+	entry := p.registry.entries["logger"]
+	entry.Summary = strings.Repeat("界", 400) + "\nextra"
+	p.registry.entries["logger"] = entry
+	result := p.catalogDispatch("torana_namespaces", json.RawMessage(`{}`))
+	for _, item := range result.Result.([]catalogNamespace) {
+		if item.Name == "logger" && (len([]rune(item.Summary)) != 300 || strings.Contains(item.Summary, "\n")) {
+			t.Fatal("unbounded legacy summary")
+		}
+	}
+	for _, op := range p.catalog("logger", false) {
+		if op.ID == "_info" || op.ID == "_status" || op.ID == "_config.schema" || op.ID == "_enable" || op.ID == "_disable" {
+			if string(op.InputSchema) != `{"type":"object","additionalProperties":false}` {
+				t.Fatalf("missing no-input schema: %s", op.ID)
+			}
+		}
+	}
+}

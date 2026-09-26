@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"unicode"
 
 	"github.com/torana-edge/torana-edge/internal/mcpserver"
 )
@@ -42,6 +43,20 @@ func catalogFailure(code, message string) mcpserver.Result {
 	return mcpserver.Result{Error: &mcpserver.DomainError{Code: code, Message: message}}
 }
 
+func catalogText(text string, limit int) string {
+	text = strings.TrimSpace(strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) {
+			return ' '
+		}
+		return r
+	}, text))
+	runes := []rune(text)
+	if len(runes) > limit {
+		return string(runes[:limit])
+	}
+	return text
+}
+
 func (p *namespaceAccessPolicy) catalog(namespace string, detail bool) []catalogOperation {
 	result := []catalogOperation{}
 	if p == nil || p.registry == nil {
@@ -57,6 +72,9 @@ func (p *namespaceAccessPolicy) catalog(namespace string, detail bool) []catalog
 				continue
 			}
 			item := catalogOperation{Namespace: entry.Name, ID: op.ID, Description: op.Description, ModelAccess: access, ConversationBinding: op.ConversationBinding}
+			if op.Source != "plugin" && op.ID != "_config.set" {
+				item.InputSchema = json.RawMessage(`{"type":"object","additionalProperties":false}`)
+			}
 			if op.Guest != nil {
 				item.InputSchema = op.Guest.InputSchema
 				item.Deprecated, item.ReplacedBy = op.Guest.Deprecated, op.Guest.ReplacedBy
@@ -107,7 +125,7 @@ func (p *namespaceAccessPolicy) catalogDispatch(tool string, raw json.RawMessage
 			counts[operation.Namespace]++
 		}
 		for _, entry := range p.registry.list() {
-			items = append(items, catalogNamespace{Name: entry.Name, Title: entry.Title, Summary: entry.Summary, Status: entry.Status, Categories: entry.Categories, ReachableOperations: counts[entry.Name]})
+			items = append(items, catalogNamespace{Name: entry.Name, Title: catalogText(entry.Title, 60), Summary: catalogText(entry.Summary, 300), Status: entry.Status, Categories: entry.Categories, ReachableOperations: counts[entry.Name]})
 		}
 		return mcpserver.Result{OK: true, Result: items}
 	case "torana_describe":
@@ -150,32 +168,71 @@ func (p *namespaceAccessPolicy) catalogDispatch(tool string, raw json.RawMessage
 			NextCursor string             `json:"next_cursor,omitempty"`
 		}{items[start:end], next}}
 	case "torana_search":
-		terms := strings.Fields(strings.ToLower(input.Query))
+		terms := catalogSearchTerms(input.Query)
 		if len(terms) == 0 {
 			return catalogFailure("invalid_input", "Describe what you want to do in query.")
 		}
-		matches := []catalogOperation{}
+		type scoredOperation struct {
+			operation catalogOperation
+			score     int
+		}
+		scored := []scoredOperation{}
 		for _, item := range p.catalog(input.Namespace, false) {
 			if item.Deprecated {
 				continue
 			}
-			text := strings.ToLower(item.Namespace + " " + item.ID + " " + strings.ReplaceAll(item.ID, "_", " ") + " " + item.Description)
-			match := true
+			entry := p.registry.entries[item.Namespace]
+			text := item.Namespace + " " + item.ID + " " + item.Description + " " + entry.Title + " " + catalogText(entry.Summary, 300) + " " + strings.Join(entry.Categories, " ")
+			for _, op := range entry.Operations {
+				if op.ID == item.ID && op.Guest != nil {
+					text += " " + strings.Join(op.Guest.Examples, " ")
+					break
+				}
+			}
+			switch item.ID {
+			case "_disable":
+				text += " turn off stop disable"
+			case "_enable":
+				text += " turn on start enable"
+			}
+			text = strings.ToLower(text)
+			words := map[string]bool{}
+			for _, word := range strings.FieldsFunc(text, func(r rune) bool { return !unicode.IsLetter(r) && !unicode.IsDigit(r) }) {
+				words[word] = true
+			}
+			score := 0
 			for _, term := range terms {
-				if !strings.Contains(text, term) {
-					match = false
-					break
+				// Short intent words such as on/off must be whole words: "on"
+				// inside "configuration" must not tie enable with disable.
+				if words[term] || len(term) > 3 && strings.Contains(text, term) {
+					score++
 				}
 			}
-			if match {
-				matches = append(matches, item)
-				if len(matches) == 10 {
-					break
-				}
+			if score > 0 {
+				scored = append(scored, scoredOperation{item, score})
 			}
+		}
+		sort.SliceStable(scored, func(i, j int) bool { return scored[i].score > scored[j].score }) // Catalog order breaks ties by namespace/ID.
+		matches := make([]catalogOperation, 0, min(10, len(scored)))
+		for _, match := range scored[:min(10, len(scored))] {
+			matches = append(matches, match.operation)
 		}
 		return mcpserver.Result{OK: true, Result: matches}
 	default:
 		return catalogFailure("unknown_operation", "Not a discovery tool.")
 	}
+}
+
+func catalogSearchTerms(query string) []string {
+	stop := map[string]bool{"the": true, "a": true, "an": true, "please": true, "can": true, "you": true, "to": true, "my": true, "this": true, "for": true, "of": true, "with": true, "me": true, "is": true, "i": true, "want": true, "and": true, "in": true}
+	seen := map[string]bool{}
+	terms := []string{}
+	for _, term := range strings.Fields(strings.ToLower(query)) {
+		term = strings.Trim(term, ".,!?;:")
+		if term != "" && !stop[term] && !seen[term] {
+			terms = append(terms, term)
+			seen[term] = true
+		}
+	}
+	return terms
 }
