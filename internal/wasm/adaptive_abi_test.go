@@ -1,6 +1,7 @@
 package wasm
 
 import (
+	"context"
 	"testing"
 
 	pbv1 "github.com/torana-edge/torana-plugin-sdk/pb/v1"
@@ -12,6 +13,34 @@ func adaptiveError(t *testing.T, result *pbv1.HostCallResult, want pbv1.ErrorCod
 	arm, ok := result.Result.(*pbv1.HostCallResult_Error)
 	if !ok || arm.Error.Code != want {
 		t.Fatalf("host call result = %v, want %v", result.Result, want)
+	}
+}
+
+func TestModelCapabilitiesHostCallReturnsTypedDeclaration(t *testing.T) {
+	r, p := newGrantedPlugin(t, "env.model_capabilities")
+	r.ModelCapabilitiesFunc = func(_ context.Context, args *pbv1.ModelCapabilitiesArgs) (*pbv1.ModelCapabilities, *pbv1.HostError) {
+		if args.Provider != "p" || args.Model != "m" {
+			return nil, &pbv1.HostError{Code: pbv1.ErrorCode_ERROR_CODE_NOT_FOUND, Message: "model is not declared"}
+		}
+		return &pbv1.ModelCapabilities{Format: "anthropic", EffortLevels: []pbv1.Effort{pbv1.Effort_EFFORT_HIGH}}, nil
+	}
+	query := func(provider, model string) *pbv1.HostCallResult {
+		t.Helper()
+		args, err := proto.Marshal(&pbv1.ModelCapabilitiesArgs{Provider: provider, Model: model})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return hostCallDirect(t, r, p, "env.model_capabilities", args)
+	}
+	adaptiveError(t, query("p", "missing"), pbv1.ErrorCode_ERROR_CODE_NOT_FOUND)
+	result := query("p", "m")
+	value, ok := result.Result.(*pbv1.HostCallResult_Value)
+	if !ok {
+		t.Fatalf("capability result: %v", result.Result)
+	}
+	var capabilities pbv1.ModelCapabilities
+	if err := proto.Unmarshal(value.Value, &capabilities); err != nil || capabilities.Format != "anthropic" || len(capabilities.EffortLevels) != 1 {
+		t.Fatalf("capability body: %+v, %v", &capabilities, err)
 	}
 }
 

@@ -1104,6 +1104,7 @@ type Runtime struct {
 	StateCompareAndDeleteFunc     func(plugin, key, expected string) (bool, error)
 	StateScanFunc                 func(plugin, prefix, cursor string, limit, maxBytes int) ([]pluginstate.PageEntry, string, error)
 	ExecutionInfoFunc             func(context.Context) *pbv1.ExecutionInfo
+	ModelCapabilitiesFunc         func(context.Context, *pbv1.ModelCapabilitiesArgs) (*pbv1.ModelCapabilities, *pbv1.HostError)
 	ValidateSyntheticResponseFunc func(context.Context, *pbv1.SyntheticResponse) *pbv1.HostError
 
 	// SendRequestFunc backs torana_send_request: a plugin-originated provider
@@ -1966,7 +1967,20 @@ func (r *Runtime) dispatchHostCall(ctx context.Context, pluginName, cmd, args st
 				herr = hostErr(pbv1.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "%v", err)
 				break
 			}
-			herr = hostErr(pbv1.ErrorCode_ERROR_CODE_NOT_CONFIGURED, "model capabilities are not configured")
+			if r.ModelCapabilitiesFunc == nil {
+				herr = hostErr(pbv1.ErrorCode_ERROR_CODE_NOT_CONFIGURED, "model capabilities are not configured")
+				break
+			}
+			capabilities, callErr := r.ModelCapabilitiesFunc(ctx, &a)
+			if callErr != nil {
+				herr = callErr
+				break
+			}
+			if capabilities == nil || capabilities.Validate() != nil {
+				herr = hostErr(pbv1.ErrorCode_ERROR_CODE_UNAVAILABLE, "invalid host model capabilities")
+				break
+			}
+			value, _ = proto.Marshal(capabilities)
 		case "env.set_identity":
 			var a pbv1.SetIdentityArgs
 			if err := unmarshalClosed([]byte(args), &a); err != nil {

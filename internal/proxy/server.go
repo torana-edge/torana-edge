@@ -3659,7 +3659,7 @@ func sameJSONConfig(stored, incoming json.RawMessage) bool {
 // unmanagedProviderFields are per-provider settings that no control-plane form
 // currently renders. A client that rebuilds a provider object from a form would
 // drop them, so they are carried forward unless explicitly written.
-var unmanagedProviderFields = []string{"pricing", "responses_compaction", "cache", "bridge"}
+var unmanagedProviderFields = []string{"pricing", "models", "responses_compaction", "cache", "bridge"}
 
 // preserveUnmanagedProviderFields copies unmanaged fields from the stored config
 // into the incoming one wherever the caller left them out. It mutates incoming.
@@ -3676,6 +3676,8 @@ func preserveUnmanagedProviderFields(stored, incoming map[string]provider.Provid
 			switch field {
 			case "pricing":
 				incP.Pricing = curP.Pricing
+			case "models":
+				incP.Models = curP.Models
 			case "responses_compaction":
 				incP.ResponsesCompaction = curP.ResponsesCompaction
 			case "cache":
@@ -3766,6 +3768,13 @@ func (s *Server) newRuntime() *wasm.Runtime {
 		rt.StateCompareAndSetFunc = s.pluginState.CompareAndSet
 		rt.StateCompareAndDeleteFunc = s.pluginState.CompareAndDelete
 		rt.StateScanFunc = s.pluginState.Scan
+	}
+	rt.ModelCapabilitiesFunc = func(_ context.Context, args *pb.ModelCapabilitiesArgs) (*pb.ModelCapabilities, *pb.HostError) {
+		capabilities, found := s.GetConfig().Providers.ModelCapabilities(args.Provider, args.Model)
+		if !found {
+			return nil, &pb.HostError{Code: pb.ErrorCode_ERROR_CODE_NOT_FOUND, Message: "model is not declared"}
+		}
+		return capabilities, nil
 	}
 	rt.ValidateSyntheticResponseFunc = func(ctx context.Context, response *pb.SyntheticResponse) *pb.HostError {
 		scope, ok := ctx.Value(syntheticResponseScopeKey{}).(syntheticResponseScope)
