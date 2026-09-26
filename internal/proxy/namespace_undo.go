@@ -44,6 +44,9 @@ func (s *Server) undoConfirmedPluginChange(ctx context.Context, conversation, co
 	}
 	finish := func(status string, result mcpserver.Result, internal error) (mcpserver.Result, error) {
 		if err := s.suggestions.FinishUndo(conversation, id, status); err != nil {
+			if status == "undone" {
+				return mcpserver.Result{OK: true, Status: "undone_history_incomplete", Summary: "The change was undone, but its history update failed. Do not retry; check Torana's current configuration and change history."}, nil
+			}
 			return mcpserver.Result{}, err
 		}
 		return result, internal
@@ -75,7 +78,7 @@ func (s *Server) undoConfirmedPluginChange(ctx context.Context, conversation, co
 	candidate.Plugins = snapshot.Plugins
 	// This flag is a test-only construction option and is never serialized.
 	candidate.Plugins.AllowUnapproved = current.Plugins.AllowUnapproved
-	if err := s.applyPluginConfigurationLocked(ctx, candidate); err != nil {
+	if err := s.applyPluginConfigurationLocked(ctx, candidate, entry.Name); err != nil {
 		return finish("failed", operationError("plugin_failed", "The previous configuration could not be restored; configuration is unchanged."), nil)
 	}
 	return finish("undone", mcpserver.Result{OK: true, Status: "undone", Summary: "The confirmed change was undone."}, nil)

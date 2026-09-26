@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"testing"
 
+	"github.com/torana-edge/torana-edge/internal/mcpserver"
 	"github.com/torana-edge/torana-edge/internal/plugin"
 	"github.com/torana-edge/torana-edge/internal/provider"
 	"github.com/torana-edge/torana-edge/internal/secret"
@@ -99,6 +100,33 @@ func TestConfirmedPluginMutationRechecksSnapshotAndPolicy(t *testing.T) {
 	result, err = server.undoConfirmedPluginChange(context.Background(), binding.ConversationID, items[0].Code, nil)
 	if err != nil || result.Error == nil || result.Error.Code != "not_found" {
 		t.Fatalf("duplicate undo=%+v %v", result, err)
+	}
+}
+
+func TestModelDispatcherCannotSubmitUserUndoCode(t *testing.T) {
+	registry, err := buildNamespaceRegistry(nil, nil, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry := registry.entries["torana"]
+	for i := range entry.Operations {
+		if entry.Operations[i].ID == "changes.undo" {
+			entry.Operations[i].Callable = true
+		}
+	}
+	registry.entries[entry.Name] = entry
+	policy, err := newNamespaceAccessPolicy(registry, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	called := false
+	dispatch := operationDispatch{policy: policy, propose: func(context.Context, operationCall) (mcpserver.Result, error) {
+		called = true
+		return mcpserver.Result{}, nil
+	}}
+	result, err := dispatch.invoke(context.Background(), json.RawMessage(`{"namespace":"torana","operation":"changes.undo","input":{"code":"abcd"}}`), plugin.MCPBinding{Bound: true, ConversationID: "host", CallID: "call"})
+	if err != nil || called || result.Error == nil || result.Error.Code != "invalid_input" {
+		t.Fatalf("model undo code reached handler: %+v %v", result, err)
 	}
 }
 
