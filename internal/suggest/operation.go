@@ -12,6 +12,7 @@ import (
 // secret store before storage; human-facing suggestion fields never contain it.
 type OperationProposal struct {
 	IntentKey    string
+	IntentDigest string
 	Title        string
 	Body         string
 	SealedIntent string
@@ -22,13 +23,14 @@ type operationRecord struct {
 	SealedIntent string    `json:"sealed_intent"`
 	ExpiresAt    time.Time `json:"expires_at"`
 	Execution    string    `json:"execution,omitempty"`
+	IntentDigest string    `json:"intent_digest"`
 }
 
 func (s *Store) CreateOperation(conversation string, turn uint64, proposal OperationProposal) (string, error) {
-	if !strings.HasPrefix(proposal.SealedIntent, "enc:") || len(proposal.SealedIntent) > 128<<10 || !time.Now().Before(proposal.ExpiresAt) {
+	if proposal.IntentDigest == "" || len(proposal.IntentDigest) > 128 || !strings.HasPrefix(proposal.SealedIntent, "enc:") || len(proposal.SealedIntent) > 128<<10 || !time.Now().Before(proposal.ExpiresAt) {
 		return "", errors.New("sealed operation intent and a future expiry are required")
 	}
-	return s.create(conversation, "torana", turn, &pb.SuggestArgs{Kind: "torana_operation", DedupeKey: proposal.IntentKey, Title: proposal.Title, Body: proposal.Body, ExpiresAfterUserTurns: 100}, &operationRecord{SealedIntent: proposal.SealedIntent, ExpiresAt: proposal.ExpiresAt})
+	return s.create(conversation, "torana", turn, &pb.SuggestArgs{Kind: "torana_operation", DedupeKey: proposal.IntentKey, Title: proposal.Title, Body: proposal.Body, ExpiresAfterUserTurns: 100}, &operationRecord{SealedIntent: proposal.SealedIntent, ExpiresAt: proposal.ExpiresAt, IntentDigest: proposal.IntentDigest})
 }
 
 func pruneOperationPayloads(current *record) {
@@ -86,7 +88,7 @@ func (s *Store) FinishOperation(conversation, id, outcome string) error {
 		}
 		for i := range current.Suggestions {
 			if current.Suggestions[i].ID == id && current.Suggestions[i].Status == "accepted" {
-				current.Suggestions[i].Action = outcome
+				current.Suggestions[i].Outcome = outcome
 				delete(current.Operations, id)
 				return true, nil
 			}

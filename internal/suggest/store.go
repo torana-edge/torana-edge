@@ -61,6 +61,7 @@ type Suggestion struct {
 	Status                string    `json:"status"`
 	Via                   string    `json:"via,omitempty"`
 	Action                string    `json:"action,omitempty"`
+	Outcome               string    `json:"outcome,omitempty"`
 }
 
 type record struct {
@@ -190,7 +191,7 @@ func expire(current *record, turn uint64) bool {
 		operation, hostOperation := current.Operations[item.ID]
 		timedOut := hostOperation && !time.Now().Before(operation.ExpiresAt)
 		turnExpired := !hostOperation && turn >= item.CreatedTurn && turn-item.CreatedTurn >= uint64(item.ExpiresAfterUserTurns)
-		if item.Status == "pending" && (timedOut || turnExpired) {
+		if (item.Status == "pending" || hostOperation && item.Status == "accepted" && operation.Execution == "") && (timedOut || turnExpired) {
 			item.Status = "expired"
 			delete(current.Operations, item.ID)
 			changed = true
@@ -227,6 +228,9 @@ func (s *Store) create(conversation, plugin string, turn uint64, args *pb.Sugges
 		refresh := -1
 		for i := range current.Suggestions {
 			item := &current.Suggestions[i]
+			if operation != nil && current.Operations[item.ID].IntentDigest != operation.IntentDigest {
+				continue
+			}
 			if item.Status == "pending" && item.Plugin == plugin && item.DedupeKey == args.DedupeKey && sameSuggestionIntent(*item, args) {
 				refresh = i
 				break
@@ -234,7 +238,7 @@ func (s *Store) create(conversation, plugin string, turn uint64, args *pb.Sugges
 		}
 		if refresh >= 0 {
 			for i := range current.Suggestions {
-				if i != refresh && current.Suggestions[i].Plugin == plugin && current.Suggestions[i].Status == "pending" {
+				if i != refresh && current.Suggestions[i].Plugin == plugin && current.Suggestions[i].Status == "pending" && (operation == nil || current.Suggestions[i].DedupeKey == args.DedupeKey) {
 					current.Suggestions[i].Status = "superseded"
 				}
 			}
@@ -258,7 +262,7 @@ func (s *Store) create(conversation, plugin string, turn uint64, args *pb.Sugges
 		for i := range current.Suggestions {
 			item := &current.Suggestions[i]
 			used[item.Code] = true
-			if item.Status == "pending" && item.Plugin == plugin {
+			if item.Status == "pending" && item.Plugin == plugin && (operation == nil || item.DedupeKey == args.DedupeKey) {
 				item.Status = "superseded"
 			}
 		}

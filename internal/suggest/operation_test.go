@@ -20,7 +20,7 @@ func TestOperationConsentSurvivesRestartAndClaimsOnce(t *testing.T) {
 		t.Fatal(err)
 	}
 	store := New(state)
-	proposal := OperationProposal{IntentKey: "intent-1", Title: "Enable plugin?", Body: "Enable the selected plugin.", SealedIntent: "enc:private-intent", ExpiresAt: time.Now().Add(time.Hour)}
+	proposal := OperationProposal{IntentKey: "intent-1", IntentDigest: "digest-1", Title: "Enable plugin?", Body: "Enable the selected plugin.", SealedIntent: "enc:private-intent", ExpiresAt: time.Now().Add(time.Hour)}
 	id, err := store.CreateOperation("c", 1, proposal)
 	if err != nil {
 		t.Fatal(err)
@@ -74,7 +74,7 @@ func TestOperationConsentSurvivesRestartAndClaimsOnce(t *testing.T) {
 		t.Fatal(err)
 	}
 	current, _, _, err := store.read("c")
-	if err != nil || len(current.Operations) != 0 || current.Suggestions[0].Action != "applied" {
+	if err != nil || len(current.Operations) != 0 || current.Suggestions[0].Outcome != "applied" || current.Suggestions[0].Action != "accepted" {
 		t.Fatalf("finish=%+v, %v", current, err)
 	}
 	if _, err := store.ClaimOperation("c", id); !errors.Is(err, ErrNotFound) {
@@ -89,7 +89,7 @@ func TestOperationRefreshSupersessionAndExpiry(t *testing.T) {
 	}
 	defer state.Close()
 	store := New(state)
-	proposal := OperationProposal{IntentKey: "a", Title: "Apply?", Body: "Confirm the change.", SealedIntent: "enc:a", ExpiresAt: time.Now().Add(time.Hour)}
+	proposal := OperationProposal{IntentKey: "a", IntentDigest: "digest-a", Title: "Apply?", Body: "Confirm the change.", SealedIntent: "enc:a", ExpiresAt: time.Now().Add(time.Hour)}
 	id, err := store.CreateOperation("c", 1, proposal)
 	if err != nil {
 		t.Fatal(err)
@@ -104,7 +104,7 @@ func TestOperationRefreshSupersessionAndExpiry(t *testing.T) {
 	if items[0].Code != code {
 		t.Fatal("refresh changed confirmation code")
 	}
-	proposal.IntentKey, proposal.SealedIntent = "b", "enc:b"
+	proposal.IntentDigest, proposal.SealedIntent = "digest-b", "enc:b"
 	second, err := store.CreateOperation("c", 3, proposal)
 	if err != nil || second == id {
 		t.Fatalf("replacement=%q err=%v", second, err)
@@ -112,6 +112,16 @@ func TestOperationRefreshSupersessionAndExpiry(t *testing.T) {
 	current, _, _, _ := store.read("c")
 	if _, exists := current.Operations[id]; exists {
 		t.Fatal("superseded intent retained")
+	}
+	items, _ = store.List("c", "torana", 3)
+	if items[1].Code == code {
+		t.Fatal("changed digest reused confirmation code")
+	}
+	if _, err := store.ResolveCode("c", code, "accepted", "directive", 3); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("old code accepted changed intent: %v", err)
+	}
+	if _, err := store.ResolveID("c", second, "accepted", "directive", 3); err != nil {
+		t.Fatal(err)
 	}
 	if err := store.update("c", func(r *record) (bool, error) {
 		op := r.Operations[second]
@@ -124,6 +134,10 @@ func TestOperationRefreshSupersessionAndExpiry(t *testing.T) {
 	if _, err := store.ResolveID("c", second, "accepted", "directive", 3); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("expired consent accepted: %v", err)
 	}
+	current, _, _, _ = store.read("c")
+	if _, exists := current.Operations[second]; exists || current.Suggestions[1].Status != "expired" {
+		t.Fatal("accepted but unclaimed expired intent retained")
+	}
 	args := sample("strong")
 	args.Kind = "torana_operation"
 	if _, err := store.Create("c", "guest", 3, args); err == nil {
@@ -132,5 +146,23 @@ func TestOperationRefreshSupersessionAndExpiry(t *testing.T) {
 	args.Kind = "model_switch"
 	if _, err := store.Create("c", "torana", 3, args); err == nil {
 		t.Fatal("guest forged host source")
+	}
+}
+
+func TestIndependentHostProposalsRemainPending(t *testing.T) {
+	state, err := pluginstate.New(pluginstate.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer state.Close()
+	store := New(state)
+	for _, key := range []string{"enable-logger", "configure-compactor"} {
+		if _, err := store.CreateOperation("c", 1, OperationProposal{IntentKey: key, IntentDigest: key, Title: "Confirm", Body: "Review the change.", SealedIntent: "enc:" + key, ExpiresAt: time.Now().Add(time.Hour)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	items, err := store.List("c", "torana", 1)
+	if err != nil || len(items) != 2 || items[0].Status != "pending" || items[1].Status != "pending" {
+		t.Fatalf("items=%+v %v", items, err)
 	}
 }
