@@ -104,7 +104,7 @@ func (s *Server) proposeNamespaceOperation(ctx context.Context, call operationCa
 	// The model gets neither the code, internal ID, input, config diff nor the
 	// guest-authored title. Those stay in the trusted operator confirmation UI.
 	_, err = s.suggestions.CreateOperation(call.Binding.ConversationID, turn, suggest.OperationProposal{
-		IntentKey: hex.EncodeToString(mac), Title: "Confirm Torana operation", Body: "Review the requested operation in Torana before applying it.",
+		IntentKey: entry.Name + "." + operation.ID, IntentDigest: hex.EncodeToString(mac), Title: "Confirm Torana operation", Body: "Review the requested operation in Torana before applying it.",
 		SealedIntent: sealed, ExpiresAt: time.Now().Add(operationConsentTTL),
 	})
 	if err != nil {
