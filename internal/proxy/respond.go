@@ -19,6 +19,14 @@ import (
 // renderRespond creates a complete host-local response. Identity and accounting
 // are host-owned; guest arguments cannot forge an observed provider completion.
 func renderRespond(ctx context.Context, f *format.Format, chat *engine.ChatRequest, v *wasm.RespondVerdict) (*BlockResponse, error) {
+	var entropy [16]byte
+	if _, err := rand.Read(entropy[:]); err != nil {
+		return nil, err
+	}
+	return renderRespondWithID(ctx, f, chat, v, "torana_"+hex.EncodeToString(entropy[:]))
+}
+
+func renderRespondWithID(ctx context.Context, f *format.Format, chat *engine.ChatRequest, v *wasm.RespondVerdict, id string) (*BlockResponse, error) {
 	if f == nil || chat == nil || v == nil {
 		return nil, fmt.Errorf("synthetic response context is missing")
 	}
@@ -28,11 +36,6 @@ func renderRespond(ctx context.Context, f *format.Format, chat *engine.ChatReque
 	if err := validateSyntheticForFormat(f, chat, v.Response); err != nil {
 		return nil, err
 	}
-	var entropy [16]byte
-	if _, err := rand.Read(entropy[:]); err != nil {
-		return nil, err
-	}
-	id := "torana_" + hex.EncodeToString(entropy[:])
 	var body []byte
 	var err error
 	contentType := "application/json"

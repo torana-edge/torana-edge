@@ -64,6 +64,20 @@ func Render(signer Signer, conversation string, item suggest.Suggestion) (string
 	return body.String(), nil
 }
 
+// RenderLocalReply marks a host-only assistant reply for removal from later
+// client-supplied history. Its ID begins with local_, distinguishing it from
+// a suggestion appended to an actual provider reply.
+func RenderLocalReply(signer Signer, conversation, id, message string) (string, error) {
+	if !strings.HasPrefix(id, "local_") {
+		return "", errors.New("local reply ID must use local_ prefix")
+	}
+	sig, err := signature(signer, conversation, id)
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%s%s:%s]\n[torana] %s\n%s%s:%s]", beginPrefix, id, sig, message, endPrefix, id, sig), nil
+}
+
 // Strip removes every valid, conversation-bound notice span. It tolerates
 // reflow inside the span, but not changed delimiters. A valid start with no
 // matching end is a strip failure; the caller must suppress future notices

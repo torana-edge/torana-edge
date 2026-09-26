@@ -1122,6 +1122,15 @@ func New(cfg Config) (*Server, error) {
 				rejectMalformed()
 				return
 			}
+			if clientFormat == "openai" && strings.HasSuffix(strings.TrimSuffix(strippedPath, "/"), "/responses") && s.secrets != nil {
+				clean, _, localIDErr := rewriteLocalPreviousResponseID(body, s.secrets)
+				if localIDErr != nil {
+					rejectMalformed()
+					rs.AuditErrorCode = "invalid_local_response_id"
+					return
+				}
+				body = clean
+			}
 			var chat *engine.ChatRequest
 			if exchange != nil {
 				chat, err = bridge.ParseRequest(exchange.Client, body, strippedPath)
