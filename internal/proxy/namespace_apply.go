@@ -100,7 +100,7 @@ func (s *Server) applyPluginConfigurationLocked(ctx context.Context, candidate p
 // has already resolved explicit user acceptance. Policy is reconstructed from
 // the latest snapshot and operator settings, not a caller-held stale registry.
 // Guest mutations and undo mounting follow in separate wiring changes.
-func (s *Server) applyConfirmedStandardOperation(ctx context.Context, conversation, id string, protected []string, overrides map[string]string) (mcpserver.Result, error) {
+func (s *Server) applyConfirmedStandardOperation(ctx context.Context, conversation, id string, protected []string) (mcpserver.Result, error) {
 	if err := ctx.Err(); err != nil {
 		return mcpserver.Result{}, err
 	}
@@ -125,6 +125,11 @@ func (s *Server) applyConfirmedStandardOperation(ctx context.Context, conversati
 		return operationError("unbound_conversation", "This operation belongs to another conversation."), nil
 	}
 	current := s.GetConfig().Providers
+	// Operator acceptance must enforce the current protected floor, even when
+	// a caller did not supply a policy snapshot. A stale override cannot grant
+	// access removed since the proposal was created.
+	protected = append(append([]string(nil), protected...), current.Plugins.ProtectedNamespaces()...)
+	overrides := current.MCP.Access
 	if intent.Revision != s.configRevision(current) {
 		return operationError("conflict", "Configuration changed; request and review a fresh operation."), nil
 	}

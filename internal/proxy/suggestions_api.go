@@ -8,6 +8,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/torana-edge/torana-edge/internal/mcpserver"
 	"github.com/torana-edge/torana-edge/internal/metrics"
 	"github.com/torana-edge/torana-edge/internal/suggest"
 )
@@ -19,7 +20,8 @@ func validSuggestionConversation(value string) bool {
 }
 
 func (s *Server) handleAgentSuggestions(w http.ResponseWriter, r *http.Request) {
-	if !s.GetConfig().Providers.Suggestions.Enabled {
+	cfg := s.GetConfig().Providers
+	if !cfg.Suggestions.Enabled && !cfg.MCP.Enabled {
 		writeAgentError(w, http.StatusNotFound, "not_configured", "suggestions are disabled")
 		return
 	}
@@ -94,5 +96,19 @@ func (s *Server) handleAgentSuggestions(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	metrics.RecordSuggestion(r.Context(), item.Kind, item.Status, item.Via)
+	if status == "accepted" && item.Kind == "torana_operation" {
+		result, applyErr := s.applyConfirmedStandardOperation(r.Context(), input.ConversationID, item.ID, nil)
+		if applyErr != nil {
+			// Never echo encrypted intent, plugin input or underlying storage errors.
+			writeAgentError(w, http.StatusServiceUnavailable, "state_unavailable", "Confirmation was recorded, but execution could not be completed. Check current configuration and change history before retrying.")
+			return
+		}
+		item.Outcome = result.Status
+		writeAgentJSON(w, http.StatusOK, struct {
+			suggest.Suggestion
+			Execution mcpserver.Result `json:"execution"`
+		}{Suggestion: item, Execution: result})
+		return
+	}
 	writeAgentJSON(w, http.StatusOK, item)
 }
