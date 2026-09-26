@@ -30,6 +30,7 @@ func collect(t *testing.T) func() metricdata.ResourceMetrics {
 		compactionEstimatedUSD, compactionUnavailable = nil, nil
 		pluginMetricRejected = nil
 		noticeTotal = nil
+		mcpConnected = nil
 		suggestionTotal = nil
 		pluginMetrics = newPluginMetricRegistry()
 	})

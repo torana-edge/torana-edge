@@ -109,6 +109,7 @@ func initInstruments(m metric.Meter) {
 	compactionUnavailable, _ = m.Int64Counter("torana_compaction_savings_unavailable_total")
 	routedTotal, _ = m.Int64Counter("torana_routed_requests_total")
 	noticeTotal, _ = m.Int64Counter("torana_notice_total")
+	mcpConnected, _ = m.Int64Counter("torana_mcp_connected")
 	suggestionTotal, _ = m.Int64Counter("torana_suggestions_total")
 	pluginMetricRejected, _ = m.Int64Counter("torana_plugin_metric_rejections_total")
 }
@@ -125,10 +126,28 @@ var (
 	compactionUnavailable     metric.Int64Counter
 	routedTotal               metric.Int64Counter
 	noticeTotal               metric.Int64Counter
+	mcpConnected              metric.Int64Counter
 	suggestionTotal           metric.Int64Counter
 	pluginMetricRejected      metric.Int64Counter
 	pluginMetrics             = newPluginMetricRegistry()
 )
+
+// RecordMCPConnection counts request catalog observations, not live sockets.
+// Only fixed harness and state labels can enter telemetry.
+func RecordMCPConnection(ctx context.Context, harness, state string) {
+	if meter == nil || state == "not_observed" {
+		return
+	}
+	switch harness {
+	case "claude-code-session", "codex-thread", "codex-session", "codex-client-thread", "gemini-code-assist-session":
+	default:
+		harness = "other"
+	}
+	if state != "present" && state != "absent" {
+		return
+	}
+	mcpConnected.Add(ctx, 1, metric.WithAttributes(attribute.String("harness", harness), attribute.String("state", state)))
+}
 
 // RecordNotice reports a notice delivery attempt. Both dimensions use fixed
 // vocabularies so caller-controlled headers cannot create unbounded series.
