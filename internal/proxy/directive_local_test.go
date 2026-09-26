@@ -42,9 +42,9 @@ func TestRenderDirectiveReplyCarriesSignedReplayMarker(t *testing.T) {
 				if err := json.Unmarshal(rendered.Body, &body); err != nil {
 					t.Fatal(err)
 				}
-				real, recognized, err := annotate.DecodeLocalResponseID(signer, body["id"].(string))
-				if err != nil || !recognized || real != "resp_real" {
-					t.Fatalf("response ID did not carry provider parent: %q, %v, %v", real, recognized, err)
+				providerID, recognized, err := annotate.DecodeLocalResponseID(signer, body["id"].(string))
+				if err != nil || !recognized || providerID != "resp_real" {
+					t.Fatalf("response ID did not carry provider parent: %q, %v, %v", providerID, recognized, err)
 				}
 			}
 		})

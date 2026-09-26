@@ -19,18 +19,18 @@ func rewriteLocalPreviousResponseID(body []byte, signer annotate.Signer) ([]byte
 	if err := json.Unmarshal(body[start:end], &id); err != nil {
 		return body, false, nil // null and other invalid forms belong to the adapter
 	}
-	real, recognized, err := annotate.DecodeLocalResponseID(signer, id)
+	providerID, recognized, err := annotate.DecodeLocalResponseID(signer, id)
 	if err != nil || !recognized {
 		return body, recognized, err
 	}
-	if real == "" {
+	if providerID == "" {
 		memberStart, memberEnd, err := topLevelMemberDeletion(body, "previous_response_id")
 		if err != nil {
 			return nil, false, err
 		}
 		return spliceBytes(body, memberStart, memberEnd, nil), true, nil
 	}
-	replacement, _ := json.Marshal(real)
+	replacement, _ := json.Marshal(providerID)
 	return spliceBytes(body, start, end, replacement), true, nil
 }
 

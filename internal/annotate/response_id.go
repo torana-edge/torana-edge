@@ -14,8 +14,8 @@ const localResponsePurpose = "torana/local-response/v1"
 
 // EncodeLocalResponseID gives a Responses local reply an ID the harness can
 // cite, while carrying the last real provider response ID through that turn.
-func EncodeLocalResponseID(signer Signer, real string) (string, error) {
-	if len(real) > 2048 {
+func EncodeLocalResponseID(signer Signer, providerID string) (string, error) {
+	if len(providerID) > 2048 {
 		return "", errors.New("provider response ID is too long")
 	}
 	var nonce [8]byte
@@ -23,20 +23,20 @@ func EncodeLocalResponseID(signer Signer, real string) (string, error) {
 		return "", err
 	}
 	nonceHex := hex.EncodeToString(nonce[:])
-	mac, err := signer.MAC(localResponsePurpose, real+"\x00"+nonceHex)
+	mac, err := signer.MAC(localResponsePurpose, providerID+"\x00"+nonceHex)
 	if err != nil {
 		return "", err
 	}
 	if len(mac) < 12 {
 		return "", errors.New("response ID MAC is too short")
 	}
-	return localResponsePrefix + base64.RawURLEncoding.EncodeToString([]byte(real)) + "." + nonceHex + "." + hex.EncodeToString(mac[:12]), nil
+	return localResponsePrefix + base64.RawURLEncoding.EncodeToString([]byte(providerID)) + "." + nonceHex + "." + hex.EncodeToString(mac[:12]), nil
 }
 
 // DecodeLocalResponseID recognizes only Torana's signed local reply IDs.
 // Ordinary provider IDs pass through unchanged; an invalid Torana-shaped ID
 // is an error, never sent upstream as if it belonged to the provider.
-func DecodeLocalResponseID(signer Signer, id string) (real string, recognized bool, err error) {
+func DecodeLocalResponseID(signer Signer, id string) (providerID string, recognized bool, err error) {
 	if !strings.HasPrefix(id, localResponsePrefix) {
 		return id, false, nil
 	}
