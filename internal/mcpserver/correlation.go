@@ -35,6 +35,7 @@ type Correlator struct {
 	mu             sync.Mutex
 	records        map[Binding]correlationRecord
 	saturatedUntil time.Time
+	saturatedTools map[string]time.Time
 }
 
 func NewCorrelator() *Correlator {
@@ -71,6 +72,11 @@ func argumentHash(input json.RawMessage) ([32]byte, bool) {
 }
 
 func (c *Correlator) prune(now time.Time) {
+	for tool, expires := range c.saturatedTools {
+		if !now.Before(expires) {
+			delete(c.saturatedTools, tool)
+		}
+	}
 	for key, record := range c.records {
 		if !now.Before(record.expires) {
 			delete(c.records, key)
@@ -114,7 +120,7 @@ func (c *Correlator) Consume(name string, input json.RawMessage, now time.Time) 
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.prune(now)
-	if now.Before(c.saturatedUntil) {
+	if now.Before(c.saturatedUntil) || now.Before(c.saturatedTools[tool]) {
 		return Binding{}, false
 	}
 	var match correlationRecord
