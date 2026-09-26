@@ -5,7 +5,19 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+
+	"github.com/torana-edge/torana-edge/internal/engine"
 )
+
+func noticeShape(clientFormat string, chat *engine.ChatRequest) string {
+	if clientFormat == "openai" {
+		if isOpenAIResponsesRequest(chat) {
+			return "openai-responses"
+		}
+		return "openai-chat"
+	}
+	return clientFormat
+}
 
 // appendNoticeJSON changes a completed, tool-free response in the CLIENT'S
 // wire shape. An incomplete or tool-calling turn is returned byte-for-byte.
