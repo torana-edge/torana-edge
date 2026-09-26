@@ -130,6 +130,10 @@ func TestNamespaceExecutionCuratesModelVisibleHostReads(t *testing.T) {
 		t.Fatal(err)
 	}
 	d := operationDispatch{policy: p, execute: server.executeNamespaceOperation}
+	// Reads must use the already-built policy snapshot, not rediscover files.
+	server.configMu.Lock()
+	server.config.Providers.Plugins.Dir = "/nonexistent/torana-model-read-must-not-scan"
+	server.configMu.Unlock()
 	for _, op := range []string{"system.status", "plugins.list", "stats.get"} {
 		result, err := d.invoke(context.Background(), json.RawMessage(`{"namespace":"torana","operation":"`+op+`"}`), plugin.MCPBinding{})
 		if err != nil || !result.OK {

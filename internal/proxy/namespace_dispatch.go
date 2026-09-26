@@ -25,6 +25,7 @@ type operationCall struct {
 	Operation namespaceOperation
 	Input     json.RawMessage
 	Binding   plugin.MCPBinding
+	Catalog   []catalogNamespace
 }
 
 type operationDispatch struct {
@@ -107,7 +108,6 @@ func (d *operationDispatch) dispatch(ctx context.Context, input namespaceInvokeI
 		// Descriptor-authored schema text can contain arbitrary content. Do
 		// not echo its error to a model or reuse directive-local diagnostics.
 		result := operationError("invalid_input", "Input does not match the operation's declared schema; describe it and try again.")
-		result.Error.Details = &mcpserver.ErrorDetails{Path: ""}
 		return result, nil
 	}
 	ctx, err := plugin.WithMCPBinding(ctx, binding)
@@ -120,6 +120,14 @@ func (d *operationDispatch) dispatch(ctx context.Context, input namespaceInvokeI
 		return result, nil
 	}
 	call := operationCall{Entry: entry, Operation: op, Input: append(json.RawMessage(nil), input.Input...), Binding: binding}
+	if op.Source == "core" && op.ID == "plugins.list" {
+		call.Catalog = []catalogNamespace{}
+		for _, item := range d.policy.registry.list() {
+			if item.Name != "torana" {
+				call.Catalog = append(call.Catalog, catalogNamespace{Name: item.Name, Title: catalogText(item.Title, 60), Summary: catalogText(item.Summary, 300), Status: item.Status, Categories: append([]string(nil), item.Categories...)})
+			}
+		}
+	}
 	if confirm {
 		if d.propose == nil {
 			return operationError("not_configured", "User confirmation is not configured."), nil

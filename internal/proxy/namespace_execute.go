@@ -78,19 +78,10 @@ func (s *Server) executeNamespaceOperation(ctx context.Context, call operationCa
 		case "plugins.list":
 			// Get only public identity/status metadata; never the operator API's
 			// config, credential declarations, approvals or permission grants.
-			items := []catalogNamespace{}
-			{
-				registry, err := s.currentNamespaceRegistry()
-				if err != nil {
-					return nil, nil, err
-				}
-				for _, entry := range registry.list() {
-					if entry.Name != "torana" {
-						items = append(items, catalogNamespace{Name: entry.Name, Title: catalogText(entry.Title, 60), Summary: catalogText(entry.Summary, 300), Status: entry.Status, Categories: entry.Categories})
-					}
-				}
+			if call.Catalog == nil {
+				return []catalogNamespace{}, nil, nil
 			}
-			return items, nil, nil
+			return call.Catalog, nil, nil
 		}
 	}
 	return nil, &mcpserver.DomainError{Code: "unknown_operation", Message: "This operation has no model-facing handler."}, nil
