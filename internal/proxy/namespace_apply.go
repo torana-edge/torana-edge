@@ -55,7 +55,7 @@ func candidatePluginConfiguration(current provider.PluginsConfig, name, operatio
 
 // applyPluginConfigurationLocked validates the complete candidate pipeline
 // before persistence or publication. The caller holds controlPlaneMutationMu.
-func (s *Server) applyPluginConfigurationLocked(ctx context.Context, candidate provider.Config) error {
+func (s *Server) applyPluginConfigurationLocked(ctx context.Context, candidate provider.Config, target ...string) error {
 	s.rebuildMu.Lock()
 	defer s.rebuildMu.Unlock()
 	credentials, err := s.prepareCredentialRegistry(candidate.Credentials)
@@ -68,7 +68,15 @@ func (s *Server) applyPluginConfigurationLocked(ctx context.Context, candidate p
 		runtime.Close()
 		return err
 	}
-	if len(pipeline.Skipped()) > 0 {
+	var previous []plugin.SkippedPlugin
+	if raw := s.pluginPipeline.Load(); raw != nil {
+		previous = raw.(*plugin.PluginPipeline).Skipped()
+	}
+	name := ""
+	if len(target) > 0 {
+		name = target[0]
+	}
+	if introducesSkippedPlugins(previous, pipeline.Skipped(), name) {
 		pipeline.DrainAndClose()
 		return errors.New("candidate plugin pipeline contains unavailable plugins")
 	}
@@ -168,14 +176,31 @@ func (s *Server) applyConfirmedStandardOperation(ctx context.Context, conversati
 	if _, err := s.suggestions.PrepareOperationChange(conversation, id, sealedUndo, postRevision); err != nil {
 		return mcpserver.Result{}, err
 	}
-	if err := s.applyPluginConfigurationLocked(ctx, candidate); err != nil {
+	if err := s.applyPluginConfigurationLocked(ctx, candidate, entry.Name); err != nil {
 		if finishErr := s.suggestions.FinishOperation(conversation, id, "failed"); finishErr != nil {
 			return mcpserver.Result{}, finishErr
 		}
 		return operationError("plugin_failed", "The change could not be applied; configuration is unchanged."), nil
 	}
 	if err := s.suggestions.FinishOperation(conversation, id, "applied"); err != nil {
-		return mcpserver.Result{}, err
+		return appliedHistoryIncomplete(entry.Name, operation.ID), nil
 	}
 	return mcpserver.Result{OK: true, Status: "applied", Namespace: entry.Name, Operation: operation.ID, Summary: "The confirmed change was applied."}, nil
+}
+
+func introducesSkippedPlugins(previous, candidate []plugin.SkippedPlugin, target string) bool {
+	known := make(map[plugin.SkippedPlugin]bool, len(previous))
+	for _, item := range previous {
+		known[item] = true
+	}
+	for _, item := range candidate {
+		if item.Name == target || !known[item] {
+			return true
+		}
+	}
+	return false
+}
+
+func appliedHistoryIncomplete(namespace, operation string) mcpserver.Result {
+	return mcpserver.Result{OK: true, Status: "applied_history_incomplete", Namespace: namespace, Operation: operation, Summary: "The change was applied, but its history update failed. Do not retry the operation; check Torana's current configuration and change history."}
 }
