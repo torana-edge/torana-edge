@@ -164,7 +164,7 @@ func RecordSuggestion(ctx context.Context, kind, status, via string) {
 		status = "other"
 	}
 	switch via {
-	case "plugin", "agent_api", "harness_switch":
+	case "plugin", "agent_api", "harness_switch", "mcp_elicitation":
 	default:
 		via = "other"
 	}

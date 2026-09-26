@@ -38,7 +38,7 @@ func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
 				return ""
 			}
 			return token
-		}, Dispatch: s.dispatchMCP})
+		}, Dispatch: s.dispatchMCP, SealConsent: s.sealMCPConsent, ResolveConsent: s.resolveMCPConsent})
 		if err != nil {
 			s.mcpMu.Unlock()
 			http.Error(w, "MCP is unavailable", http.StatusServiceUnavailable)
