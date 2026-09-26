@@ -95,10 +95,14 @@ func (c *Correlator) Record(name string, input json.RawMessage, binding Binding,
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.prune(now)
-	if old, exists := c.records[binding]; exists {
-		if old.tool != tool || old.hash != hash {
+	return c.recordLocked(correlationRecord{binding: binding, tool: tool, hash: hash, expires: now.Add(correlationTTL)}, now)
+}
+
+func (c *Correlator) recordLocked(record correlationRecord, now time.Time) bool {
+	if old, exists := c.records[record.binding]; exists {
+		if old.tool != record.tool || old.hash != record.hash {
 			old.consumed = true // Contradictory evidence must never bind.
-			c.records[binding] = old
+			c.records[record.binding] = old
 		}
 		return false
 	}
@@ -107,8 +111,47 @@ func (c *Correlator) Record(name string, input json.RawMessage, binding Binding,
 		c.saturatedUntil = now.Add(correlationTTL)
 		return false
 	}
-	c.records[binding] = correlationRecord{binding: binding, tool: tool, hash: hash, expires: now.Add(correlationTTL)}
+	c.records[record.binding] = record
 	return true
+}
+
+// CommitFrom publishes staged stream evidence only after successful client
+// serialization. Preserve consumed/contradictory records and saturation: never
+// make an ambiguous call unique by dropping the other side of its evidence.
+func (c *Correlator) CommitFrom(staged *Correlator, now time.Time) {
+	if c == nil || staged == nil || c == staged {
+		return
+	}
+	staged.mu.Lock()
+	records := make([]correlationRecord, 0, len(staged.records))
+	for _, record := range staged.records {
+		records = append(records, record)
+	}
+	saturatedUntil := staged.saturatedUntil
+	saturatedTools := make(map[string]time.Time, len(staged.saturatedTools))
+	for tool, expires := range staged.saturatedTools {
+		saturatedTools[tool] = expires
+	}
+	staged.mu.Unlock()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.prune(now)
+	if saturatedUntil.After(c.saturatedUntil) {
+		c.saturatedUntil = saturatedUntil
+	}
+	if c.saturatedTools == nil {
+		c.saturatedTools = map[string]time.Time{}
+	}
+	for tool, expires := range saturatedTools {
+		if expires.After(c.saturatedTools[tool]) {
+			c.saturatedTools[tool] = expires
+		}
+	}
+	for _, record := range records {
+		if now.Before(record.expires) {
+			c.recordLocked(record, now)
+		}
+	}
 }
 
 func (c *Correlator) Consume(name string, input json.RawMessage, now time.Time) (Binding, bool) {

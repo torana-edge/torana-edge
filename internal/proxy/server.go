@@ -1980,6 +1980,24 @@ func New(cfg Config) (*Server, error) {
 						metrics.RecordNotice(context.Background(), rs.NoticeSource, outcome)
 					})
 				}
+				// Hold completion until the observer has validated the full stream
+				// and published binding evidence. A harness may invoke a tool as
+				// soon as its client-shaped finish marker arrives.
+				var mcpStaged *mcpserver.Correlator
+				mcpCfg := s.GetConfig().Providers.MCP
+				if mcpCfg.Enabled && s.mcpCorrelation != nil && rs.ConversationID != "" && resp.StatusCode >= 200 && resp.StatusCode < 300 && rs.UpstreamStatus >= 200 && rs.UpstreamStatus < 300 {
+					shape := noticeShape(streamFormat.Name, chat)
+					if e := exchangeFrom(resp.Request.Context()); e != nil {
+						shape = string(e.Client)
+					}
+					mcpStaged = mcpserver.NewCorrelator()
+					events = mcpStaged.ObserveStream(streamCtx, events, shape, rs.ConversationID, strconv.FormatUint(rs.ID, 10), mcpCfg.ResponseServerNames(), func() { _ = upstreamBody.Close() })
+					events = commitMCPStreamBeforeFinish(streamCtx, events, func() {
+						if term.Err() == nil && s.GetConfig().Providers.MCP.Enabled {
+							s.mcpCorrelation.CommitFrom(mcpStaged, time.Now())
+						}
+					})
+				}
 
 				// Pin the pipeline for the background goroutine's entire
 				// lifetime. The goroutine outlives this handler (it keeps
@@ -2214,6 +2232,13 @@ func New(cfg Config) (*Server, error) {
 					resp.Header.Set("Content-Type", "application/json")
 				}
 				// This is the final CLIENT wire shape, after any bridge translation.
+				if f != nil {
+					shape := noticeShape(f.Name, chat)
+					if e := exchangeFrom(ctx); e != nil {
+						shape = string(e.Client)
+					}
+					s.observeMCPResponse(bodyBytes, shape, rs, resp.StatusCode)
+				}
 				// Unknown harnesses never enter this path. Streaming notices are
 				// handled separately so a partial/tool-calling stream stays clean.
 				if rs.NoticeEnabled && f != nil {

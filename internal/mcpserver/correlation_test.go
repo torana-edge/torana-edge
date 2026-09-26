@@ -26,6 +26,47 @@ func TestCorrelationUniqueReorderedAndSingleUse(t *testing.T) {
 	}
 }
 
+func TestStagedEvidenceCommitPreservesReplayAmbiguityAndExpiry(t *testing.T) {
+	now := time.Now()
+	input := json.RawMessage(`{"query":"status"}`)
+	main, staged := NewCorrelator(), NewCorrelator()
+	staged.Record("torana_search", input, Binding{"conversation", "call"}, now)
+	if _, ok := main.Consume("torana_search", input, now); ok {
+		t.Fatal("uncommitted stream bound")
+	}
+	main.CommitFrom(staged, now)
+	if _, ok := main.Consume("torana_search", input, now); !ok {
+		t.Fatal("committed stream did not bind")
+	}
+	main.CommitFrom(staged, now)
+	if _, ok := main.Consume("torana_search", input, now); ok {
+		t.Fatal("repeated commit revived consumed evidence")
+	}
+	main = NewCorrelator()
+	main.Record("torana_search", input, Binding{"other", "other-call"}, now)
+	main.CommitFrom(staged, now)
+	if _, ok := main.Consume("torana_search", input, now); ok {
+		t.Fatal("commit erased ambiguity")
+	}
+	main = NewCorrelator()
+	main.CommitFrom(staged, now.Add(correlationTTL+time.Second))
+	if _, ok := main.Consume("torana_search", input, now.Add(correlationTTL+time.Second)); ok {
+		t.Fatal("expired staged evidence bound")
+	}
+	main = NewCorrelator()
+	main.Record("torana_search", json.RawMessage(`{"query":"different"}`), Binding{"conversation", "call"}, now)
+	main.CommitFrom(staged, now)
+	if _, ok := main.Consume("torana_search", json.RawMessage(`{"query":"different"}`), now); ok {
+		t.Fatal("commit erased contradictory evidence")
+	}
+	staged.saturatedTools = map[string]time.Time{"torana_search": now.Add(correlationTTL)}
+	main = NewCorrelator()
+	main.CommitFrom(staged, now)
+	if _, ok := main.Consume("torana_search", input, now); ok {
+		t.Fatal("commit discarded saturation")
+	}
+}
+
 func TestCorrelationAmbiguousMissingExpiredAndInvalid(t *testing.T) {
 	now := time.Now()
 	c := NewCorrelator()

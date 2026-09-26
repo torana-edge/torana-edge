@@ -11,8 +11,16 @@ import (
 // the host secret store, never in operator configuration (which is never
 // model-readable).
 type MCPConfig struct {
-	Enabled bool              `json:"enabled,omitempty"`
-	Access  map[string]string `json:"access,omitempty"`
+	Enabled     bool              `json:"enabled,omitempty"`
+	Access      map[string]string `json:"access,omitempty"`
+	ServerNames []string          `json:"server_names,omitempty"`
+}
+
+func (c MCPConfig) ResponseServerNames() []string {
+	if len(c.ServerNames) == 0 {
+		return []string{"torana"}
+	}
+	return append([]string{}, c.ServerNames...)
 }
 
 type AssistantConfig struct {
@@ -39,6 +47,13 @@ var mcpAccessKeyPattern = regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9_.-]{0,255}$`)
 var protectedNamespacePattern = regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9_-]{0,127}$`)
 
 func (c Config) validateMCPConfiguration() error {
+	serverNames := map[string]bool{}
+	for _, name := range c.MCP.ServerNames {
+		if !protectedNamespacePattern.MatchString(name) || len(name) > 64 || serverNames[name] {
+			return fmt.Errorf("mcp.server_names requires distinct server names of at most 64 characters")
+		}
+		serverNames[name] = true
+	}
 	for key, access := range c.MCP.Access {
 		if !mcpAccessKeyPattern.MatchString(key) || access != "read" && access != "confirm" && access != "never" {
 			return fmt.Errorf("mcp.access requires namespace or namespace.operation keys with read, confirm, or never values")
