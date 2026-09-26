@@ -1,0 +1,6 @@
+[
+  {"name":"torana_namespaces","description":"List Torana and installed plugin namespaces with their status and purpose.","inputSchema":{"type":"object","properties":{},"additionalProperties":false}},
+  {"name":"torana_describe","description":"Describe a namespace or operation, including input, access policy and conversation scope.","inputSchema":{"type":"object","properties":{"namespace":{"type":"string"},"operation":{"type":"string"}},"required":["namespace"],"additionalProperties":false}},
+  {"name":"torana_search","description":"Find reachable Torana operations by intent. Optionally restrict the search to one namespace.","inputSchema":{"type":"object","properties":{"query":{"type":"string"},"namespace":{"type":"string"}},"required":["query"],"additionalProperties":false}},
+  {"name":"torana_invoke","description":"Invoke a Torana operation. Reads run directly; changes require user confirmation. Never request or submit confirmation codes.","inputSchema":{"type":"object","properties":{"namespace":{"type":"string"},"operation":{"type":"string"},"input":{"type":"object","additionalProperties":true}},"required":["namespace","operation"],"additionalProperties":false}}
+]
