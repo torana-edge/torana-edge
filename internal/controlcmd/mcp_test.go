@@ -5,6 +5,8 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -21,6 +23,7 @@ func TestMCPInvalidCommandsNeverContactServer(t *testing.T) {
 		{"mcp", "enable"}, {"mcp", "disable"}, {"mcp", "rotate"},
 		{"mcp", "token", "extra"}, {"mcp", "token", "--file", "-"},
 		{"mcp", "token", "--json", "--json"}, {"mcp", "unknown"},
+		{"mcp", "stdio", "--json"}, {"mcp", "stdio", "--yes"},
 	} {
 		out, _, err := invoke("127.0.0.1:1", "", args...)
 		if err == nil || out != "" || strings.Contains(err.Error(), "could not reach") {
@@ -29,6 +32,52 @@ func TestMCPInvalidCommandsNeverContactServer(t *testing.T) {
 	}
 	if !Handles([]string{"mcp", "token"}) {
 		t.Fatal("MCP commands not routed")
+	}
+}
+
+func TestMCPStdioCLIRealHost(t *testing.T) {
+	cfg := provider.DefaultConfig()
+	cfg.Plugins.Dir = t.TempDir()
+	cfg.MCP.Enabled = true
+	s, err := proxy.New(proxy.Config{Providers: cfg, ConfigPath: filepath.Join(t.TempDir(), "config.json")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := s.Shutdown(ctx); err != nil {
+			t.Error(err)
+		}
+	}()
+	server := httptest.NewServer(s.Handler())
+	defer server.Close()
+	inR, inW := io.Pipe()
+	outR, outW := io.Pipe()
+	defer inW.Close()
+	defer outR.Close()
+	defer outW.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- Run(ctx, []string{"mcp", "stdio", "--addr", server.URL}, inR, outW, io.Discard) }()
+	deadline, stop := context.WithTimeout(context.Background(), 5*time.Second)
+	defer stop()
+	client := mcp.NewClient(&mcp.Implementation{Name: "cli-stdio-test", Version: "test"}, nil)
+	session, err := client.Connect(deadline, &mcp.IOTransport{Reader: outR, Writer: inW}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.Close()
+	result, err := session.CallTool(deadline, &mcp.CallToolParams{Name: "torana_invoke", Arguments: map[string]any{"namespace": "torana", "operation": "system.status"}})
+	if err != nil || result.IsError {
+		t.Fatal("CLI stdio did not reach the real host operation dispatcher")
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-deadline.Done():
+		t.Fatal("stdio CLI did not stop")
 	}
 }
 
