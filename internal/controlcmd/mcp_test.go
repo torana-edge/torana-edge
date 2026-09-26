@@ -52,6 +52,9 @@ func TestMCPStdioCLIRealHost(t *testing.T) {
 	}()
 	server := httptest.NewServer(s.Handler())
 	defer server.Close()
+	if _, _, err := invoke(server.URL, "", "mcp", "enable", "--yes"); err != nil {
+		t.Fatal(err)
+	}
 	inR, inW := io.Pipe()
 	outR, outW := io.Pipe()
 	defer inW.Close()
@@ -139,6 +142,9 @@ func TestMCPCLIRealOperatorRoundTrip(t *testing.T) {
 	out, _, err := invoke(server.URL, "", "mcp", "status")
 	if err != nil || !strings.Contains(out, `"enabled": false`) {
 		t.Fatal("initial status failed")
+	}
+	if out, _, err := invoke(server.URL, "", "mcp", "token"); err == nil || out != "" {
+		t.Fatal("unconfigured token retrieval provisioned or printed a credential")
 	}
 	out, diag, err := invoke(server.URL, "", "mcp", "enable", "--yes")
 	if err != nil {

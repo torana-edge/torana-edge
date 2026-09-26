@@ -80,8 +80,11 @@ torana mcp status
 
 For a Streamable HTTP client, use `http://127.0.0.1:8080/_torana/mcp`
 (substitute your port) and configure its Bearer authentication with the token
-from `torana mcp token`. That command prints the secret token; keep it in your
-client's credential settings, not in a shared chat, screenshot, or repository.
+from `torana mcp token`. Retrieval is read-only; `enable --yes` handles initial
+setup. Prefer stdio below, or pipe the token directly into your client's
+documented secret-input mechanism. Don't assume every client supports a
+`--header-stdin` flag. Keep tokens out of shared chats, screenshots, shell
+history, and repositories.
 Add `--json` if you need a structured token envelope.
 
 For a stdio client, configure **command** `torana` and **args** `["mcp", "stdio"]`.
@@ -90,6 +93,12 @@ belongs in your harness configuration or command arguments. The adapter keeps
 stdout exclusively for MCP messages and loads the host's tool descriptions and
 instructions directly. Use `["mcp", "stdio", "--addr", "127.0.0.1:8143"]` for
 an explicit local address. Torana must be running with MCP enabled.
+
+Reads such as proxy status work without a conversation. Conversation-scoped
+operations and confirmation requests need a provider tool call observed by
+Torana. With no verified match, `unbound_conversation` asks the client to retry;
+it does not apply a change. Route the harness's model requests through Torana as
+well as connecting its MCP tools.
 
 ```bash
 torana mcp rotate --yes     # prints the replacement token; update your client

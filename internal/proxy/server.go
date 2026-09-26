@@ -3088,6 +3088,7 @@ func New(cfg Config) (*Server, error) {
 	mux.HandleFunc("/_torana/api/v1/system", s.controlPlaneGuard(s.systemStatus))
 	mux.HandleFunc("/_torana/api/v1/system/stop", s.controlPlaneGuard(s.requestStop))
 	mux.HandleFunc(mcpTokenAPIPath, s.controlPlaneGuard(s.handleMCPToken))
+	mux.HandleFunc(mcpTokenAPIPath+"/setup", s.controlPlaneGuard(s.handleMCPToken))
 	mux.HandleFunc(mcpTokenAPIPath+"/rotate", s.controlPlaneGuard(s.handleMCPToken))
 	mux.HandleFunc("/_torana/mcp", s.handleMCP)
 	mux.HandleFunc("/_torana/api/v1/", s.controlPlaneGuard(func(w http.ResponseWriter, r *http.Request) {
