@@ -182,20 +182,27 @@ type ConfigSchema struct {
 // Torana's agent-facing control plane. The descriptor is language-neutral and
 // is loaded from agent.json beside the plugin bundle.
 type AgentOperation struct {
-	ID           string          `json:"id"`
-	Method       string          `json:"method"`
-	Path         string          `json:"path"`
-	Description  string          `json:"description"`
-	Risk         string          `json:"risk"` // read | write | destructive
-	Idempotent   bool            `json:"idempotent"`
-	InputSchema  json.RawMessage `json:"input_schema,omitempty"`
-	OutputSchema json.RawMessage `json:"output_schema"`
+	ID                  string          `json:"id"`
+	Method              string          `json:"method"`
+	Path                string          `json:"path"`
+	Description         string          `json:"description"`
+	Risk                string          `json:"risk"` // read | write | destructive
+	Idempotent          bool            `json:"idempotent"`
+	InputSchema         json.RawMessage `json:"input_schema,omitempty"`
+	OutputSchema        json.RawMessage `json:"output_schema"`
+	ModelAccess         string          `json:"model_access,omitempty"`
+	ConversationBinding string          `json:"conversation_binding,omitempty"`
+	Directive           *AgentDirective `json:"directive,omitempty"`
+	Examples            []string        `json:"examples,omitempty"`
+	Deprecated          bool            `json:"deprecated,omitempty"`
+	ReplacedBy          string          `json:"replaced_by,omitempty"`
 }
 
 type AgentDescriptor struct {
 	SchemaVersion int              `json:"schema_version"`
 	Description   string           `json:"description,omitempty"`
 	Operations    []AgentOperation `json:"operations"`
+	Namespace     *AgentNamespace  `json:"namespace,omitempty"`
 }
 
 // ============================================================================
@@ -236,8 +243,11 @@ func validateAgentDescriptor(descriptor AgentDescriptor, manifest PluginManifest
 	if !agentOperationIDPattern.MatchString(manifest.Name) {
 		return fmt.Errorf("agent descriptor: plugin name %q is not a safe path segment", manifest.Name)
 	}
-	if descriptor.SchemaVersion != 1 {
+	if descriptor.SchemaVersion != 1 && descriptor.SchemaVersion != 2 {
 		return fmt.Errorf("agent descriptor: unsupported schema_version %d", descriptor.SchemaVersion)
+	}
+	if err := validateAgentV2(descriptor, manifest); err != nil {
+		return err
 	}
 	if len(descriptor.Operations) == 0 || len(descriptor.Operations) > 64 {
 		return fmt.Errorf("agent descriptor: operations must contain 1 to 64 entries")
@@ -1492,6 +1502,11 @@ func cloneAgentDescriptor(descriptor *AgentDescriptor) *AgentDescriptor {
 		return nil
 	}
 	descriptorCopy := *descriptor
+	if descriptor.Namespace != nil {
+		namespace := *descriptor.Namespace
+		namespace.Categories = append([]string(nil), namespace.Categories...)
+		descriptorCopy.Namespace = &namespace
+	}
 	descriptorCopy.Operations = make([]AgentOperation, len(descriptor.Operations))
 	for index, operation := range descriptor.Operations {
 		descriptorCopy.Operations[index] = cloneAgentOperation(operation)
@@ -1500,6 +1515,12 @@ func cloneAgentDescriptor(descriptor *AgentDescriptor) *AgentDescriptor {
 }
 
 func cloneAgentOperation(operation AgentOperation) AgentOperation {
+	operation.Examples = append([]string(nil), operation.Examples...)
+	if operation.Directive != nil {
+		directive := *operation.Directive
+		directive.Args = append([]string(nil), directive.Args...)
+		operation.Directive = &directive
+	}
 	operation.InputSchema = append(json.RawMessage(nil), operation.InputSchema...)
 	operation.OutputSchema = append(json.RawMessage(nil), operation.OutputSchema...)
 	return operation
