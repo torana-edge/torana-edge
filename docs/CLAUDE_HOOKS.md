@@ -45,11 +45,26 @@ Review view or CLI. `PostModelSwitch` records a matching suggestion as accepted
 through the adapter; it cannot accept a Torana operation or mutate configuration.
 
 The host never reads `transcript_path` or `cwd`. Identity is the same hashed
-Claude session identity used by routed requests. Both endpoints require the
+Claude session identity used by routed requests. The endpoints require the
 loopback/origin guard, explicit local-request header and current bearer token.
 
-This implements the host callback layer. Automatic hook setup and the optional
-PreModelSwitch cost warning follow separately. PreModelSwitch is deliberately
-not enabled here: Claude blocks a switch if that hook times out. Hook behavior
-is covered by code tests; the real Claude session walkthrough is still pending.
+## Optional switch-cost warning
+
+Also set `suggestions.claude_code.pre_model_switch` to `true` and add a
+`PreModelSwitch` HTTP hook with the same headers and a **1-second timeout**,
+using `http://127.0.0.1:8080/_torana/hooks/claude-code/pre-model-switch`.
+This is a separate opt-in, not installed by default.
+
+The warning uses Claude's supplied context size and estimated cache-write cost,
+without loading suggestions, reading transcripts or calling another model.
+Authentication still checks the current durable MCP token. It returns only an
+informational `systemMessage`: no allow/deny/ask decision, so Claude's normal
+confirmation and noninteractive switch behavior remain unchanged.
+
+**Claude blocks a switch if a PreModelSwitch hook times out**, even though
+Torana's response never blocks it. Leave this hook out if you don't want Torana
+availability to affect switching. Remove the settings entry to disable the
+dependency; turning off the Torana flag alone leaves Claude calling the URL.
+
+Automatic hook setup and the real Claude session walkthrough remain pending.
 See [Claude's hook reference](https://code.claude.com/docs/en/hooks).

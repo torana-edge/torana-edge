@@ -75,6 +75,32 @@ func TestClaudeHooksGuardIdentityAndNonBlockingSwitchObservation(t *testing.T) {
 	if request("stop", body+body, token).Code != http.StatusBadRequest {
 		t.Fatal("trailing hook payload accepted")
 	}
+	pre := `{"session_id":"session","hook_event_name":"PreModelSwitch","to_model":"strong","source":"command","context_tokens":12345,"prompt_cache_warm":true,"estimated_cache_write_usd":0.1234}`
+	if request("pre-model-switch", pre, token).Code != http.StatusNotFound {
+		t.Fatal("pre-switch warning was enabled by default")
+	}
+	s.config.Providers.Suggestions.ClaudeCode.PreModelSwitch = true
+	// No conversation reads or writes are needed to report the supplied estimate.
+	s.suggestions = nil
+	response = request("pre-model-switch", pre, token)
+	result = nil
+	if response.Code != http.StatusOK || json.Unmarshal(response.Body.Bytes(), &result) != nil || len(result) != 1 || !strings.Contains(response.Body.String(), "12345") || !strings.Contains(response.Body.String(), "$0.1234") {
+		t.Fatalf("warning=%s", response.Body.String())
+	}
+	for _, source := range []string{"picker", "sdk"} {
+		if request("pre-model-switch", strings.ReplaceAll(pre, `"command"`, `"`+source+`"`), token).Code != http.StatusOK {
+			t.Fatalf("valid source rejected: %s", source)
+		}
+	}
+	if got := request("pre-model-switch", strings.ReplaceAll(pre, `"prompt_cache_warm":true`, `"prompt_cache_warm":false`), token); strings.TrimSpace(got.Body.String()) != "{}" {
+		t.Fatal("cold cache produced a warning")
+	}
+	if request("pre-model-switch", strings.ReplaceAll(pre, "0.1234", "-1"), token).Code != http.StatusBadRequest {
+		t.Fatal("negative cost accepted")
+	}
+	if request("pre-model-switch", strings.ReplaceAll(pre, `"command"`, `"auto"`), token).Code != http.StatusBadRequest {
+		t.Fatal("automatic switch accepted as a pre-switch request")
+	}
 	if _, err := s.mcpTokens.Rotate(); err != nil {
 		t.Fatal(err)
 	}

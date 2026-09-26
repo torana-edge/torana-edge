@@ -498,7 +498,8 @@ type SuggestionsConfig struct {
 // Hooks are a separate opt-in display/observation channel. They never grant
 // model access or authorize a Torana configuration change.
 type ClaudeCodeHooksConfig struct {
-	Enabled bool `json:"enabled,omitempty"`
+	Enabled        bool `json:"enabled,omitempty"`
+	PreModelSwitch bool `json:"pre_model_switch,omitempty"`
 }
 
 type NoticeConfig struct {
