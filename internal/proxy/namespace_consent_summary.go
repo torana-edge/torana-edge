@@ -9,10 +9,11 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 )
 
 var consentIdentifier = regexp.MustCompile(`^[A-Za-z0-9._:-]{1,32}$`)
-var consentAlphanumericRun = regexp.MustCompile(`[A-Za-z0-9]{16,}`)
+var consentAlphanumericRun = regexp.MustCompile(`[A-Za-z0-9]{12,}`)
 
 func consentCredentialPrefix(text string) bool {
 	for _, prefix := range []string{"sk-", "ghp_", "github_pat_", "AKIA", "AIza", "xox", "sk_live_", "rk_live_", "glpat-", "hf_", "eyJ"} {
@@ -36,16 +37,33 @@ func consentHumanIdentifier(text string) bool {
 			hexCharacters++
 		}
 	}
+	// Vendor model identifiers often end with a release date. Exempt only a
+	// valid calendar date from the digit budget, not arbitrary numeric tails.
+	if len(text) >= 10 && text[len(text)-9] == '-' {
+		date := text[len(text)-8:]
+		if strings.HasPrefix(date, "20") {
+			if _, err := time.Parse("20060102", date); err == nil {
+				digits -= 8
+			}
+		}
+	}
 	if digits > 8 || len(text) >= 16 && hexCharacters*4 >= len(text)*3 {
 		return false
 	}
 	for _, run := range consentAlphanumericRun.FindAllString(text, -1) {
 		upper, lower := false, false
+		runDigits, seenDigit, letterAfterDigit := 0, false, false
 		for _, ch := range run {
 			upper = upper || ch >= 'A' && ch <= 'Z'
 			lower = lower || ch >= 'a' && ch <= 'z'
+			if ch >= '0' && ch <= '9' {
+				runDigits++
+				seenDigit = true
+			} else if seenDigit {
+				letterAfterDigit = true
+			}
 		}
-		if upper && lower {
+		if len(run) >= 16 && upper && lower || runDigits >= 3 && letterAfterDigit {
 			return false
 		}
 	}

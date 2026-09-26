@@ -1,6 +1,8 @@
 package annotate
 
 import (
+	"encoding/base64"
+	"strings"
 	"testing"
 
 	"github.com/torana-edge/torana-edge/internal/secret"
@@ -36,5 +38,13 @@ func TestLocalResponseIDSurvivesRestartAndRejectsTampering(t *testing.T) {
 	bad := id[:len(id)-1] + replacement
 	if _, recognized, err := DecodeLocalResponseID(second, bad); !recognized || err == nil {
 		t.Fatalf("tampered local ID accepted: recognized %v, err %v", recognized, err)
+	}
+	// Substitute a different, valid encoded provider ID while retaining the
+	// nonce and original MAC. This must fail authentication, not just parsing.
+	parts := strings.Split(strings.TrimPrefix(id, localResponsePrefix), ".")
+	parts[0] = base64.RawURLEncoding.EncodeToString([]byte("resp_other"))
+	substituted := localResponsePrefix + strings.Join(parts, ".")
+	if _, recognized, err := DecodeLocalResponseID(second, substituted); !recognized || err == nil {
+		t.Fatalf("substituted provider ID accepted: recognized %v, err %v", recognized, err)
 	}
 }

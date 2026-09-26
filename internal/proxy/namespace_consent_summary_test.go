@@ -48,13 +48,13 @@ func TestConsentIdentifiersDoNotExposeCommonTokens(t *testing.T) {
 		"xoxb-123456789012-1234567890123-AbCdEfGhIjKlMnOpQrStUvWx",
 		"4f9a2c7e1b8d6a3f5c0e9b7d2a1f8c6e",
 		"sk_live_demo_not_real", "rk_live_demo_not_real", "glpat-demo-not-real", "hf_demo_not_real", "eyJdemo.not-real.signature",
-		"abc123456789012", "AbCdEfGh1234IjKlMnOp", "AbCdEfGhIjKlMnOp",
+		"abc123456789012", "AbCdEfGh1234IjKlMnOp", "AbCdEfGhIjKlMnOp", "a8f3k2m9x7q4w1z6", "abc1de2fg3hi", "claude-haiku-4-5-20251399",
 	} {
 		if got := consentScalar(value, nil, "value"); got != "[redacted]" {
 			t.Errorf("credential-like identifier was not redacted")
 		}
 	}
-	for _, value := range []string{"claude-opus-5", "gpt-5.4-mini", "step_1", "balanced"} {
+	for _, value := range []string{"claude-opus-5", "gpt-5.4-mini", "step_1", "balanced", "claude-haiku-4-5-20251001", "claude-haiku-4-5-20240229", "releasebuild1234"} {
 		if got := consentScalar(value, nil, "value"); got == "[redacted]" {
 			t.Errorf("human identifier %q was redacted", value)
 		}
