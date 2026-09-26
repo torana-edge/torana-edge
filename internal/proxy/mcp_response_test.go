@@ -8,14 +8,44 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/torana-edge/torana-edge/internal/bridge"
+	"github.com/torana-edge/torana-edge/internal/engine"
 	"github.com/torana-edge/torana-edge/internal/provider"
 )
+
+func TestMCPStreamCommitsBeforeExposingFinish(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	input := make(chan engine.StreamEvent)
+	committed := make(chan struct{})
+	out := commitMCPStreamBeforeFinish(ctx, input, func() { close(committed) })
+	go func() {
+		input <- engine.StreamEvent{FinishReason: "tool_calls"}
+		close(input)
+	}()
+	select {
+	case event := <-out:
+		if event.FinishReason != "tool_calls" {
+			t.Fatal("finish changed")
+		}
+		select {
+		case <-committed:
+		default:
+			t.Fatal("finish escaped before commit")
+		}
+	case <-ctx.Done():
+		t.Fatal("finish not delivered")
+	}
+	if _, open := <-out; open {
+		t.Fatal("extra event")
+	}
+}
 
 func TestMCPObservationThroughProxyAllShapes(t *testing.T) {
 	for _, shape := range bridgeProtocols {
@@ -27,7 +57,7 @@ func TestMCPObservationThroughProxyAllShapes(t *testing.T) {
 						wire = bridgeUpstreamSSE(upstreamShape, true) + "\n\n"
 					}
 					wire = strings.ReplaceAll(wire, "weather", "mcp__torana__torana_invoke")
-					requests := make(chan []byte, 2)
+					requests := make(chan []byte, 3)
 					upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 						raw, err := io.ReadAll(r.Body)
 						if err != nil {
@@ -63,6 +93,10 @@ func TestMCPObservationThroughProxyAllShapes(t *testing.T) {
 					if status != 200 {
 						t.Fatalf("baseline status=%d", status)
 					}
+					_, secondBaseline, _ := callBridge(t, proxy, shape, body, stream)
+					if !bytes.Equal(normalizeMCPGeneratedFields(baseline), normalizeMCPGeneratedFields(secondBaseline)) {
+						t.Fatal("two MCP-disabled responses differ beyond generated identities/timestamps")
+					}
 					if _, ok := s.mcpCorrelation.Consume("torana_invoke", json.RawMessage(`{"n":9007199254740993}`), time.Now()); ok {
 						t.Fatal("disabled MCP recorded evidence")
 					}
@@ -71,10 +105,11 @@ func TestMCPObservationThroughProxyAllShapes(t *testing.T) {
 						t.Fatal(err)
 					}
 					status, observed, _ := callBridge(t, proxy, shape, body, stream)
-					if status != 200 || !bytes.Equal(baseline, observed) {
+					if status != 200 || !bytes.Equal(normalizeMCPGeneratedFields(baseline), normalizeMCPGeneratedFields(observed)) {
 						t.Fatal("observation changed client response bytes")
 					}
-					if !bytes.Equal(<-requests, <-requests) {
+					firstRequest, secondRequest, observedRequest := <-requests, <-requests, <-requests
+					if !bytes.Equal(firstRequest, secondRequest) || !bytes.Equal(firstRequest, observedRequest) {
 						t.Fatal("observation changed provider request bytes/prompt cache prefix")
 					}
 					binding, ok := s.mcpCorrelation.Consume("torana_invoke", json.RawMessage(`{"n":9007199254740993}`), time.Now())
@@ -88,6 +123,21 @@ func TestMCPObservationThroughProxyAllShapes(t *testing.T) {
 			}
 		}
 	}
+}
+
+var mcpGeneratedID = regexp.MustCompile(`"((?:resp|chatcmpl|msg|call|fc|item|message)[_-]torana[_-][a-zA-Z0-9_-]+)"`)
+var mcpGeneratedCreated = regexp.MustCompile(`"created(?:_at)?":\s*[0-9]+`)
+
+func normalizeMCPGeneratedFields(body []byte) []byte {
+	identities := map[string]string{}
+	normalized := mcpGeneratedID.ReplaceAllFunc(body, func(value []byte) []byte {
+		key := string(value)
+		if _, exists := identities[key]; !exists {
+			identities[key] = fmt.Sprintf(`"generated-id-%d"`, len(identities))
+		}
+		return []byte(identities[key])
+	})
+	return mcpGeneratedCreated.ReplaceAll(normalized, []byte(`"created":0`))
 }
 
 func TestMCPObservationClientCancellationUnblocksRealParser(t *testing.T) {

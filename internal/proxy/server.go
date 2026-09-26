@@ -1980,9 +1980,9 @@ func New(cfg Config) (*Server, error) {
 						metrics.RecordNotice(context.Background(), rs.NoticeSource, outcome)
 					})
 				}
-				// Stage evidence after plugin verification; publish only when the
-				// final client serializer succeeds. An aborted/unsupported stream
-				// must not grant a conversation binding for an unseen tool call.
+				// Hold completion until the observer has validated the full stream
+				// and published binding evidence. A harness may invoke a tool as
+				// soon as its client-shaped finish marker arrives.
 				var mcpStaged *mcpserver.Correlator
 				mcpCfg := s.GetConfig().Providers.MCP
 				if mcpCfg.Enabled && s.mcpCorrelation != nil && rs.ConversationID != "" && resp.StatusCode >= 200 && resp.StatusCode < 300 && rs.UpstreamStatus >= 200 && rs.UpstreamStatus < 300 {
@@ -1992,6 +1992,11 @@ func New(cfg Config) (*Server, error) {
 					}
 					mcpStaged = mcpserver.NewCorrelator()
 					events = mcpStaged.ObserveStream(streamCtx, events, shape, rs.ConversationID, strconv.FormatUint(rs.ID, 10), mcpCfg.ResponseServerNames(), func() { _ = upstreamBody.Close() })
+					events = commitMCPStreamBeforeFinish(streamCtx, events, func() {
+						if term.Err() == nil && s.GetConfig().Providers.MCP.Enabled {
+							s.mcpCorrelation.CommitFrom(mcpStaged, time.Now())
+						}
+					})
 				}
 
 				// Pin the pipeline for the background goroutine's entire
@@ -2031,9 +2036,6 @@ func New(cfg Config) (*Server, error) {
 						// so the input pipeline exits and the pipe is never closed as
 						// a clean successful response.
 						term.trigger(serErr)
-					}
-					if serErr == nil && term.Err() == nil && streamCtx.Err() == nil && s.GetConfig().Providers.MCP.Enabled {
-						s.mcpCorrelation.CommitFrom(mcpStaged, time.Now())
 					}
 					if terr := term.Err(); terr != nil {
 						// The stream was terminated by enforcement: close the
