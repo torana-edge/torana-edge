@@ -36,8 +36,8 @@ func (s *Store) SetupHint(conversation, source string, turn uint64, now time.Tim
 	s.setupCooldown[name] = now.Add(time.Minute)
 	current, _, _, err := s.read(conversation)
 	if err != nil || current.SetupHintSeen {
-		if err == nil && len(s.setupSeen) < 4096 {
-			s.setupSeen[conversation] = true
+		if err == nil {
+			s.rememberSetupSeen(conversation)
 		}
 		return "", err
 	}
@@ -97,8 +97,16 @@ func (s *Store) SetupHint(conversation, source string, turn uint64, now time.Tim
 		created = id
 		return true, nil
 	})
-	if err == nil && len(s.setupSeen) < 4096 {
-		s.setupSeen[conversation] = true
+	if err == nil {
+		s.rememberSetupSeen(conversation)
 	}
 	return created, err
+}
+
+// Called under setupMu. Durable records remain authoritative after eviction.
+func (s *Store) rememberSetupSeen(conversation string) {
+	if len(s.setupSeen) >= 4096 {
+		clear(s.setupSeen)
+	}
+	s.setupSeen[conversation] = true
 }

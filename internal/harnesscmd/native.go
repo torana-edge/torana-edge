@@ -110,17 +110,96 @@ func (p *nativePlan) inspect() ([]byte, bool, error) {
 		return nil, false, err
 	}
 	defer func() { _ = file.Close() }()
-	data, err := io.ReadAll(io.LimitReader(file, (1<<20)+1))
-	if err != nil || len(data) > 1<<20 {
-		return nil, false, fmt.Errorf("Claude MCP config cannot be safely inspected")
-	}
-	var root struct {
-		Servers map[string]json.RawMessage `json:"mcpServers"`
-	}
-	if json.Unmarshal(data, &root) != nil || len(root.Servers["torana"]) == 0 {
+	entry, err := readClaudeServer(file)
+	if err != nil || len(entry) == 0 {
 		return nil, false, fmt.Errorf("Torana exists in a different or unknown Claude scope; review it manually")
 	}
-	return root.Servers["torana"], true, nil
+	return entry, true, nil
+}
+
+// User configuration can contain a large history. Stream unrelated values
+// rather than loading the whole file or imposing a history-size limit.
+func readClaudeServer(reader io.Reader) (json.RawMessage, error) {
+	d := json.NewDecoder(reader)
+	d.UseNumber()
+	token, err := d.Token()
+	if err != nil || token != json.Delim('{') {
+		return nil, fmt.Errorf("expected Claude configuration object")
+	}
+	var entry json.RawMessage
+	seen := false
+	for d.More() {
+		key, err := d.Token()
+		if err != nil {
+			return nil, err
+		}
+		if key != "mcpServers" {
+			if err := skipJSONValue(d, 0); err != nil {
+				return nil, err
+			}
+			continue
+		}
+		if seen {
+			return nil, fmt.Errorf("duplicate mcpServers")
+		}
+		seen = true
+		token, err := d.Token()
+		if err != nil || token != json.Delim('{') {
+			return nil, fmt.Errorf("expected MCP server object")
+		}
+		for d.More() {
+			key, err := d.Token()
+			if err != nil {
+				return nil, err
+			}
+			if key == "torana" {
+				if entry != nil {
+					return nil, fmt.Errorf("duplicate Torana entry")
+				}
+				if err := d.Decode(&entry); err != nil {
+					return nil, err
+				}
+			} else if err := skipJSONValue(d, 0); err != nil {
+				return nil, err
+			}
+		}
+		if _, err := d.Token(); err != nil {
+			return nil, err
+		}
+	}
+	if _, err := d.Token(); err != nil {
+		return nil, err
+	}
+	if _, err := d.Token(); err != io.EOF {
+		return nil, fmt.Errorf("unexpected trailing Claude configuration")
+	}
+	return entry, nil
+}
+
+func skipJSONValue(d *json.Decoder, depth int) error {
+	if depth > 64 {
+		return fmt.Errorf("configuration nesting exceeds safe limit")
+	}
+	token, err := d.Token()
+	if err != nil {
+		return err
+	}
+	delim, nested := token.(json.Delim)
+	if !nested {
+		return nil
+	}
+	for d.More() {
+		if delim == '{' {
+			if _, err := d.Token(); err != nil {
+				return err
+			}
+		}
+		if err := skipJSONValue(d, depth+1); err != nil {
+			return err
+		}
+	}
+	_, err = d.Token()
+	return err
 }
 
 func planNative(binary, name, scope, config string, server harness.Server, teardown bool, run commandRunner) (*nativePlan, error) {
@@ -198,7 +277,7 @@ func (p *nativePlan) apply() error {
 		}
 	}
 	if _, err := p.run(p.binary, p.args...); err != nil {
-		return fmt.Errorf("harness command failed; inspect the Torana entry before retrying (output kept private)")
+		return fmt.Errorf("harness command failed; rerun the exact command shown in the preview manually to see its diagnostic, then inspect the Torana entry before retrying (output kept private)")
 	}
 	if !p.teardown {
 		entry, exists, err := p.inspect()

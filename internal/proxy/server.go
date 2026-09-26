@@ -3287,7 +3287,7 @@ func New(cfg Config) (*Server, error) {
 				ReportedModel:    rs.ReportedModel,
 				Status:           tw.status,
 				LatencyMS:        latencyMS,
-				TokensIn:         int64(rs.UsageIn),
+				TokensIn:         int64(canonicalInput),
 				TokensOut:        int64(rs.UsageOut),
 				CacheReadTokens:  int64(rs.UsageCacheRead),
 				CacheWriteTokens: int64(rs.UsageCacheWrite),
