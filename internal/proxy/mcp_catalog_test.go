@@ -11,7 +11,7 @@ import (
 
 func catalogTestPolicy(t *testing.T, count int) *namespaceAccessPolicy {
 	t.Helper()
-	d := &plugin.AgentDescriptor{SchemaVersion: 2, Namespace: &plugin.AgentNamespace{Title: "Logger", Summary: "Inspect usage", Alias: "logs"}}
+	d := &plugin.AgentDescriptor{SchemaVersion: 2, Namespace: &plugin.AgentNamespace{Title: "Logger", Summary: "Inspect usage"}}
 	for i := 0; i < count; i++ {
 		d.Operations = append(d.Operations, plugin.AgentOperation{ID: fmt.Sprintf("read.%03d", i), Risk: "read", Description: "Read usage", InputSchema: json.RawMessage(`{"type":"object"}`), OutputSchema: json.RawMessage(`{"type":"string"}`), Examples: []string{"read usage"}})
 	}

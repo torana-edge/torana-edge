@@ -22,7 +22,7 @@ func TestNamespacePolicyExhaustiveStandardProtectionAndOverrides(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		entry, _ := r.resolve(name, false)
+		entry, _ := r.resolve(name)
 		for _, override := range []string{"read", "confirm", "never"} {
 			p, err := newNamespaceAccessPolicy(r, nil, map[string]string{name: override})
 			if err != nil {

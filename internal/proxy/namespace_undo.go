@@ -63,7 +63,7 @@ func (s *Server) undoConfirmedPluginChange(ctx context.Context, conversation, co
 	if err != nil {
 		return finish("failed", mcpserver.Result{}, err)
 	}
-	entry, exists := registry.resolve(snapshot.Namespace, false)
+	entry, exists := registry.resolve(snapshot.Namespace)
 	if !exists || entry.Digest != snapshot.Digest {
 		return finish("conflict", operationError("stale_digest", "The installed plugin changed; review its current configuration instead of undoing it."), nil)
 	}

@@ -192,7 +192,6 @@ type AgentOperation struct {
 	OutputSchema        json.RawMessage `json:"output_schema"`
 	ModelAccess         string          `json:"model_access,omitempty"`
 	ConversationBinding string          `json:"conversation_binding,omitempty"`
-	Directive           *AgentDirective `json:"directive,omitempty"`
 	Examples            []string        `json:"examples,omitempty"`
 	Deprecated          bool            `json:"deprecated,omitempty"`
 	ReplacedBy          string          `json:"replaced_by,omitempty"`
@@ -738,7 +737,7 @@ func loadBundle(dir string) (*PluginBundle, error) {
 	if aBytes, err := os.ReadFile(agentPath); err == nil {
 		agentBytes = aBytes
 		var descriptor AgentDescriptor
-		if err := json.Unmarshal(aBytes, &descriptor); err != nil {
+		if err := decodeAgentDescriptor(aBytes, &descriptor); err != nil {
 			return nil, fmt.Errorf("parse agent descriptor: %w", err)
 		}
 		if err := validateAgentDescriptor(descriptor, manifest); err != nil {
@@ -1516,11 +1515,6 @@ func cloneAgentDescriptor(descriptor *AgentDescriptor) *AgentDescriptor {
 
 func cloneAgentOperation(operation AgentOperation) AgentOperation {
 	operation.Examples = append([]string(nil), operation.Examples...)
-	if operation.Directive != nil {
-		directive := *operation.Directive
-		directive.Args = append([]string(nil), directive.Args...)
-		operation.Directive = &directive
-	}
 	operation.InputSchema = append(json.RawMessage(nil), operation.InputSchema...)
 	operation.OutputSchema = append(json.RawMessage(nil), operation.OutputSchema...)
 	return operation

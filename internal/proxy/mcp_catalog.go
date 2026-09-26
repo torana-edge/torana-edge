@@ -113,7 +113,7 @@ func (p *namespaceAccessPolicy) catalogDispatch(tool string, raw json.RawMessage
 		return catalogFailure("invalid_input", "Use a small JSON object for discovery input.")
 	}
 	if tool != "torana_namespaces" && input.Namespace != "" {
-		if _, exists := p.registry.resolve(input.Namespace, false); !exists {
+		if _, exists := p.registry.resolve(input.Namespace); !exists {
 			return catalogFailure("unknown_namespace", "Use a canonical namespace from torana_namespaces.")
 		}
 	}
