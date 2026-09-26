@@ -90,6 +90,12 @@ func (s *Server) executeNamespaceOperation(ctx context.Context, call operationCa
 func (s *Server) currentNamespaceRegistry() (*namespaceRegistry, error) {
 	s.controlPlaneMutationMu.Lock()
 	defer s.controlPlaneMutationMu.Unlock()
+	return s.currentNamespaceRegistryLocked()
+}
+
+// The caller holds controlPlaneMutationMu so registry and configuration
+// revision belong to the same operator snapshot.
+func (s *Server) currentNamespaceRegistryLocked() (*namespaceRegistry, error) {
 	cfg := s.GetConfig().Providers.Plugins
 	var bundles []plugin.PluginBundle
 	var err error
