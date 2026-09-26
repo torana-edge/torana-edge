@@ -10,6 +10,7 @@ import (
 	"github.com/torana-edge/torana-edge/internal/engine"
 	"github.com/torana-edge/torana-edge/internal/provider"
 	"github.com/torana-edge/torana-edge/internal/wasm"
+	pb "github.com/torana-edge/torana-plugin-sdk/pb/v1"
 )
 
 func TestRouteOutcomeReachesResponseHookMetadata(t *testing.T) {
@@ -234,6 +235,21 @@ func TestModelOnlyVerdictStillApplies(t *testing.T) {
 			t.Errorf("provider %q: model = %q, want the override to apply with no provider change",
 				target, chat.Model)
 		}
+	}
+}
+
+func TestEffortOnlyVerdictKeepsProviderAndModel(t *testing.T) {
+	rs := &reqState{Provider: "original", Model: "original-model"}
+	ctx := context.WithValue(context.Background(), reqStateKey{}, rs)
+	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://original.example/v1/chat/completions", nil)
+	chat := &engine.ChatRequest{Model: "original-model"}
+	if !(&Server{}).applyRoute(req, chat, "openai", "original", &wasm.RouteVerdict{
+		Plugin: "router", Effort: pb.Effort_EFFORT_HIGH,
+	}, provider.Config{}) {
+		t.Fatal("effort-only verdict was discarded")
+	}
+	if chat.Model != "original-model" || rs.RouteProvider != "original" || rs.RouteModel != "original-model" {
+		t.Fatalf("effort-only verdict changed route: model %q, state %+v", chat.Model, rs)
 	}
 }
 

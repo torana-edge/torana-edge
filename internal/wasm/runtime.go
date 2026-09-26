@@ -1107,6 +1107,7 @@ type Runtime struct {
 	ModelCapabilitiesFunc         func(context.Context, *pbv1.ModelCapabilitiesArgs) (*pbv1.ModelCapabilities, *pbv1.HostError)
 	SuggestFunc                   func(context.Context, string, *pbv1.SuggestArgs) (string, *pbv1.HostError)
 	SuggestionOutcomesFunc        func(context.Context, string) ([]byte, error)
+	RouteEffortEnabledFunc        func(context.Context) bool
 	ValidateSyntheticResponseFunc func(context.Context, *pbv1.SyntheticResponse) *pbv1.HostError
 
 	// SendRequestFunc backs torana_send_request: a plugin-originated provider
@@ -1942,12 +1943,14 @@ func (r *Runtime) dispatchHostCall(ctx context.Context, pluginName, cmd, args st
 			if a.Effort != pbv1.Effort_EFFORT_UNSPECIFIED {
 				if !p.hasGrant("env.route_request.effort") {
 					herr = hostErr(pbv1.ErrorCode_ERROR_CODE_PERMISSION_DENIED, "permission denied: env.route_request.effort")
-				} else {
+				} else if r.RouteEffortEnabledFunc == nil || !r.RouteEffortEnabledFunc(ctx) {
 					herr = hostErr(pbv1.ErrorCode_ERROR_CODE_UNSUPPORTED, "effort routing is not supported by this host version")
 				}
-				break
+				if herr != nil {
+					break
+				}
 			}
-			r.verdictsBucket(reqIDFrom(ctx)).setRoute(pluginName, a.Provider, a.Model)
+			r.verdictsBucket(reqIDFrom(ctx)).setRoute(pluginName, a.Provider, a.Model, a.Effort)
 		case "env.suggest":
 			var a pbv1.SuggestArgs
 			if err := unmarshalClosed([]byte(args), &a); err != nil {

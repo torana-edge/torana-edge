@@ -43,6 +43,7 @@ type RouteVerdict struct {
 	Plugin   string
 	Provider string
 	Model    string
+	Effort   pbv1.Effort
 }
 
 // IdentityVerdict overrides the rate-limit identity.
@@ -71,10 +72,14 @@ func (v *RequestVerdicts) setRespond(plugin string, response *pbv1.SyntheticResp
 	v.respond = &RespondVerdict{Plugin: plugin, Response: proto.Clone(response).(*pbv1.SyntheticResponse)}
 }
 
-func (v *RequestVerdicts) setRoute(plugin, provider, model string) {
+func (v *RequestVerdicts) setRoute(plugin, provider, model string, efforts ...pbv1.Effort) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
-	v.route = &RouteVerdict{Plugin: plugin, Provider: provider, Model: model}
+	effort := pbv1.Effort_EFFORT_UNSPECIFIED
+	if len(efforts) > 0 {
+		effort = efforts[0]
+	}
+	v.route = &RouteVerdict{Plugin: plugin, Provider: provider, Model: model, Effort: effort}
 }
 
 func (v *RequestVerdicts) setIdentity(plugin, identity string) {

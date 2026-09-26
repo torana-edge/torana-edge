@@ -81,3 +81,20 @@ func TestModelCapabilitiesRejectInvalidLevels(t *testing.T) {
 		}
 	}
 }
+
+func TestGeminiEffortRequiresNativeMapping(t *testing.T) {
+	cfg := DefaultConfig()
+	upstream := cfg.Providers["gemini"]
+	upstream.Models = map[string]ModelCapabilitiesConfig{"m": {Effort: &ModelEffortConfig{Levels: []string{"low"}}}}
+	cfg.Providers["gemini"] = upstream
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("unmapped Gemini effort accepted")
+	}
+	upstream.Models["m"] = ModelCapabilitiesConfig{Effort: &ModelEffortConfig{
+		Levels: []string{"low"}, Gemini: map[string]GeminiThinkingConfig{"low": {ThinkingLevel: "LOW"}},
+	}}
+	cfg.Providers["gemini"] = upstream
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("mapped Gemini effort refused: %v", err)
+	}
+}

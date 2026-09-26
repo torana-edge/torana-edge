@@ -43,6 +43,7 @@ import (
 	"github.com/torana-edge/torana-edge/internal/credentialstore"
 	"github.com/torana-edge/torana-edge/internal/directive"
 	"github.com/torana-edge/torana-edge/internal/economics"
+	"github.com/torana-edge/torana-edge/internal/effort"
 	"github.com/torana-edge/torana-edge/internal/engine"
 	"github.com/torana-edge/torana-edge/internal/engine/pbconv"
 	"github.com/torana-edge/torana-edge/internal/format"
@@ -398,8 +399,11 @@ type reqState struct {
 	RouteRefused   string
 	// RouteProvider/RouteModel describe the plugin verdict at application time.
 	// Provider/Model can subsequently change when an upstream fails over.
-	RouteProvider string
-	RouteModel    string
+	RouteProvider   string
+	RouteModel      string
+	RequestedEffort pb.Effort
+	EffortLevel     string
+	EffortStatus    string
 	// PluginFailure marks a plugin failure on an OBSERVATIONAL path, where
 	// failure_mode cannot be applied because the response has already gone to
 	// the caller. Recorded so the failure is visible to an operator rather than
@@ -528,6 +532,9 @@ func (rs *reqState) chatResponse(model, id string, msg *engine.ResponseMessage, 
 		DurationMS:        durationMS,
 	}
 	if rs.RouteAttempted {
+		if rs.EffortStatus == "" {
+			rs.EffortStatus = "unchanged"
+		}
 		var refused *string
 		if rs.RouteRefused != "" {
 			refused = &rs.RouteRefused
@@ -535,6 +542,7 @@ func (rs *reqState) chatResponse(model, id string, msg *engine.ResponseMessage, 
 		response.ToranaMetaJSON, _ = json.Marshal(map[string]any{
 			"_route_applied": map[string]any{
 				"provider": rs.RouteProvider, "model": rs.RouteModel,
+				"effort": rs.EffortLevel, "effort_status": rs.EffortStatus,
 				"verdict_plugin": rs.RoutePlugin, "refused": refused,
 				"served_by": rs.Provider, "served_model": rs.Model,
 				"failover": rs.Provider != rs.RouteProvider,
@@ -1525,6 +1533,9 @@ func New(cfg Config) (*Server, error) {
 					if routeApplied {
 						rstate.Verdict = "route"
 						rstate.VerdictPlugin = route.Plugin
+						if route.Effort != pb.Effort_EFFORT_UNSPECIFIED && currentCfg.Providers.Effort.Enabled {
+							rstate.RequestedEffort = route.Effort
+						}
 					}
 				}
 			}
@@ -1657,6 +1668,24 @@ func New(cfg Config) (*Server, error) {
 				req.Body = io.NopCloser(bytes.NewReader(nil))
 				req.ContentLength = 0
 				return
+			}
+			if rs.RequestedEffort != pb.Effort_EFFORT_UNSPECIFIED {
+				shape := fmt.Name
+				if shape == "openai" {
+					shape = "openai-chat"
+					if isOpenAIResponsesRequest(chat) {
+						shape = "openai-responses"
+					}
+				}
+				declaration := currentCfg.Providers.Providers[rs.Provider].Models[chat.Model]
+				var applied []byte
+				applied, rs.EffortLevel, rs.EffortStatus, err = effort.Apply(newBody, shape, rs.RequestedEffort, declaration)
+				if err != nil {
+					log.Printf("[effort] native request merge unavailable: %v", err)
+					rs.EffortLevel, rs.EffortStatus = "", "omitted"
+				} else {
+					newBody = applied
+				}
 			}
 			rs.AuditUpstreamRequestBytes = int64(len(newBody))
 			reqStateFrom(req.Context()).CompactionRequestPrepared = true
@@ -2288,6 +2317,9 @@ func New(cfg Config) (*Server, error) {
 			}
 			if _, supplied := topLevel["directives"]; !supplied {
 				incoming.Directives = cur.Directives
+			}
+			if _, supplied := topLevel["effort"]; !supplied {
+				incoming.Effort = cur.Effort
 			}
 			// Never let the settings surface mutate the pipeline.
 			incoming.Plugins = cur.Plugins
@@ -3991,6 +4023,9 @@ func (s *Server) newRuntime() *wasm.Runtime {
 			})
 		}
 		return json.Marshal(outcomes)
+	}
+	rt.RouteEffortEnabledFunc = func(context.Context) bool {
+		return s.GetConfig().Providers.Effort.Enabled
 	}
 	rt.ValidateSyntheticResponseFunc = func(ctx context.Context, response *pb.SyntheticResponse) *pb.HostError {
 		scope, ok := ctx.Value(syntheticResponseScopeKey{}).(syntheticResponseScope)
