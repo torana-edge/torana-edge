@@ -86,6 +86,16 @@ func TestConfirmedPluginMutationRechecksSnapshotAndPolicy(t *testing.T) {
 	server.configMu.Lock()
 	server.config.Providers.Port--
 	server.configMu.Unlock()
+	server.configMu.Lock()
+	server.config.Providers.Plugins.Protected = []string{"test-http-server"}
+	server.configMu.Unlock()
+	result, err = server.undoConfirmedPluginChange(context.Background(), binding.ConversationID, items[0].Code, nil)
+	if err != nil || result.Error == nil || result.Error.Code != "conflict" {
+		t.Fatalf("new protection did not invalidate undo: %+v %v", result, err)
+	}
+	server.configMu.Lock()
+	server.config.Providers.Plugins.Protected = nil
+	server.configMu.Unlock()
 	result, err = server.undoConfirmedPluginChange(context.Background(), "other-session", items[0].Code, nil)
 	if err != nil || result.Error == nil || result.Error.Code != "not_found" {
 		t.Fatalf("cross-session undo=%+v %v", result, err)

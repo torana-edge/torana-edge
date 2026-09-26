@@ -8,7 +8,8 @@ import (
 
 // MCP is opt-in. Access entries may tighten model access; they cannot relax
 // descriptor policy or the protected-operation floor. Tokens are stored through
-// the host secret store, never in this model-readable configuration section.
+// the host secret store, never in operator configuration (which is never
+// model-readable).
 type MCPConfig struct {
 	Enabled bool              `json:"enabled,omitempty"`
 	Access  map[string]string `json:"access,omitempty"`
