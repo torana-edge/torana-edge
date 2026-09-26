@@ -1936,7 +1936,37 @@ func (r *Runtime) dispatchHostCall(ctx context.Context, pluginName, cmd, args st
 				herr = hostErr(pbv1.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "%v", err)
 				break
 			}
+			if a.Effort != pbv1.Effort_EFFORT_UNSPECIFIED {
+				if !p.hasGrant("env.route_request.effort") {
+					herr = hostErr(pbv1.ErrorCode_ERROR_CODE_PERMISSION_DENIED, "permission denied: env.route_request.effort")
+				} else {
+					herr = hostErr(pbv1.ErrorCode_ERROR_CODE_UNSUPPORTED, "effort routing is not supported by this host version")
+				}
+				break
+			}
 			r.verdictsBucket(reqIDFrom(ctx)).setRoute(pluginName, a.Provider, a.Model)
+		case "env.suggest":
+			var a pbv1.SuggestArgs
+			if err := unmarshalClosed([]byte(args), &a); err != nil {
+				herr = hostErr(pbv1.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "invalid SuggestArgs: %v", err)
+				break
+			}
+			if err := a.Validate(); err != nil {
+				herr = hostErr(pbv1.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "%v", err)
+				break
+			}
+			herr = hostErr(pbv1.ErrorCode_ERROR_CODE_NOT_CONFIGURED, "suggestions are not configured")
+		case "env.model_capabilities":
+			var a pbv1.ModelCapabilitiesArgs
+			if err := unmarshalClosed([]byte(args), &a); err != nil {
+				herr = hostErr(pbv1.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "invalid ModelCapabilitiesArgs: %v", err)
+				break
+			}
+			if err := a.Validate(); err != nil {
+				herr = hostErr(pbv1.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "%v", err)
+				break
+			}
+			herr = hostErr(pbv1.ErrorCode_ERROR_CODE_NOT_CONFIGURED, "model capabilities are not configured")
 		case "env.set_identity":
 			var a pbv1.SetIdentityArgs
 			if err := unmarshalClosed([]byte(args), &a); err != nil {
