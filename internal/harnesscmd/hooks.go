@@ -2,11 +2,13 @@ package harnesscmd
 
 import (
 	"bufio"
+	"context"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -98,9 +100,31 @@ func runHooks(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 		return err
 	}
 	if args[0] == "setup" {
+		if *scope == "project" && projectHooksNeedIgnoreWarning(dir) {
+			// A diagnostic write failure must not misreport a completed install.
+			_, _ = fmt.Fprintln(stderr, "Warning: .claude/settings.local.json is not ignored by Git. Add it to .gitignore; it contains your per-user Torana hooks.")
+		}
 		_, err = fmt.Fprintln(stdout, "Hooks installed. Enable suggestions.claude_code.enabled in Torana and export TORANA_MCP_TOKEN before starting Claude. Optional PreModelSwitch also needs suggestions.claude_code.pre_model_switch.")
 	} else {
 		_, err = fmt.Fprintln(stdout, "Owned hooks removed. Restart Claude to reload settings.")
 	}
 	return err
+}
+
+// Git is optional. Only warn when it positively identifies a worktree and
+// reports that the local settings file is not ignored; never change ignore rules.
+func projectHooksNeedIgnoreWarning(dir string) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "git", "rev-parse", "--is-inside-work-tree")
+	cmd.Dir = dir
+	out, err := cmd.Output()
+	if err != nil || strings.TrimSpace(string(out)) != "true" {
+		return false
+	}
+	cmd = exec.CommandContext(ctx, "git", "check-ignore", "-q", "--", ".claude/settings.local.json")
+	cmd.Dir = dir
+	err = cmd.Run()
+	var exit *exec.ExitError
+	return ctx.Err() == nil && errors.As(err, &exit) && exit.ExitCode() == 1
 }
