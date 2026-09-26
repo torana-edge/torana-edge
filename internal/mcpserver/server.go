@@ -45,10 +45,18 @@ type ConversationBinding struct {
 // DomainError contains only deliberately model-visible host-generated details.
 // Raw provider errors, configuration and confirmation codes do not belong here.
 type DomainError struct {
-	Code      string         `json:"code"`
-	Message   string         `json:"message"`
-	Retryable bool           `json:"retryable"`
-	Details   map[string]any `json:"details,omitempty"`
+	Code      string        `json:"code"`
+	Message   string        `json:"message"`
+	Retryable bool          `json:"retryable"`
+	Details   *ErrorDetails `json:"details,omitempty"`
+}
+
+// ErrorDetails is intentionally an allowlist, not a passthrough for handler
+// output. Extend it only with explicitly model-safe diagnostic fields.
+type ErrorDetails struct {
+	Path              string `json:"path,omitempty"`
+	Status            string `json:"status,omitempty"`
+	RetryAfterSeconds int    `json:"retry_after_seconds,omitempty"`
 }
 
 type Dispatch func(context.Context, string, json.RawMessage) (Result, error)

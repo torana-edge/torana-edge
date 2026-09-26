@@ -152,7 +152,7 @@ func TestDomainOutcomesHaveStructuredAndTextEnvelope(t *testing.T) {
 		t.Run(map[bool]string{false: "pending", true: "invalid_input"}[failure], func(t *testing.T) {
 			output := Result{OK: true, Namespace: "logger", Operation: "_disable", Status: "pending_confirmation", Summary: "Disable logger"}
 			if failure {
-				output = Result{Error: &DomainError{Code: "invalid_input", Message: "must be an integer", Details: map[string]any{"path": "/threshold"}}}
+				output = Result{Error: &DomainError{Code: "invalid_input", Message: "must be an integer", Details: &ErrorDetails{Path: "/threshold"}}}
 			}
 			handler, err := NewHandler(Options{Token: func() string { return "test-token" }, Dispatch: func(context.Context, string, json.RawMessage) (Result, error) { return output, nil }})
 			if err != nil {
@@ -183,7 +183,7 @@ func TestDomainOutcomesHaveStructuredAndTextEnvelope(t *testing.T) {
 			if decoded.InterfaceVersion != 1 || decoded.OK == failure {
 				t.Fatalf("envelope=%s", structured)
 			}
-			if failure && (decoded.Error == nil || decoded.Error.Code != "invalid_input" || decoded.Error.Details["path"] != "/threshold") {
+			if failure && (decoded.Error == nil || decoded.Error.Code != "invalid_input" || decoded.Error.Details == nil || decoded.Error.Details.Path != "/threshold") {
 				t.Fatalf("domain error lost: %s", structured)
 			}
 			if len(got.Content) != 1 {
