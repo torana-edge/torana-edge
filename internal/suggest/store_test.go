@@ -151,3 +151,30 @@ func TestSuggestionStateSurvivesRestart(t *testing.T) {
 		t.Fatalf("restarted suggestion: %+v, %v", items, err)
 	}
 }
+
+func TestNoticeFailureDisablesConversationAcrossRestart(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "plugin-state.db")
+	state, err := pluginstate.New(pluginstate.Options{Path: path})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := New(state)
+	if err := store.DisableNotices("unsafe"); err != nil {
+		t.Fatal(err)
+	}
+	if err := state.Close(); err != nil {
+		t.Fatal(err)
+	}
+	state, err = pluginstate.New(pluginstate.Options{Path: path})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer state.Close()
+	store = New(state)
+	if disabled, err := store.NoticesDisabled("unsafe"); err != nil || !disabled {
+		t.Fatalf("unsafe conversation enabled after restart: %v, %v", disabled, err)
+	}
+	if disabled, err := store.NoticesDisabled("safe"); err != nil || disabled {
+		t.Fatalf("other conversation disabled: %v, %v", disabled, err)
+	}
+}

@@ -67,7 +67,25 @@ type record struct {
 	Conversation      string       `json:"conversation"`
 	UserTurns         uint64       `json:"user_turns"`
 	LastUserSignature string       `json:"last_user_signature,omitempty"`
+	NoticeDisabled    bool         `json:"notice_disabled,omitempty"`
 	Suggestions       []Suggestion `json:"suggestions"`
+}
+
+// DisableNotices is durable and one-way for a conversation. If signed-marker
+// removal fails, future replies must not add more notices to that history.
+func (s *Store) DisableNotices(conversation string) error {
+	return s.update(conversation, func(current *record) (bool, error) {
+		if current.NoticeDisabled {
+			return false, nil
+		}
+		current.NoticeDisabled = true
+		return true, nil
+	})
+}
+
+func (s *Store) NoticesDisabled(conversation string) (bool, error) {
+	current, _, _, err := s.read(conversation)
+	return current.NoticeDisabled, err
 }
 
 // ObserveUserTurn advances only when the latest genuine user message changes.

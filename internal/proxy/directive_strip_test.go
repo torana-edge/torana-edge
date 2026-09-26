@@ -88,6 +88,7 @@ func TestStripDirectiveOnlyHistoricalUserItem(t *testing.T) {
 		shape, body, want string
 	}{
 		{"openai-chat", `{"messages":[{"role":"user","content":"torana> status"},{"role":"assistant","content":"local"},{"role":"user","content":"next"}]}`, `{"messages":[{"role":"assistant","content":"local"},{"role":"user","content":"next"}]}`},
+		{"openai-chat", `{"messages":[{"role":"user","content":"torana> status\nplease do something else"},{"role":"assistant","content":"local"},{"role":"user","content":"next"}]}`, `{"messages":[{"role":"assistant","content":"local"},{"role":"user","content":"next"}]}`},
 		{"openai-chat", `{"messages":[{"role":"user","content":"torana> status"},{"role":"assistant","content":"local"},{"role":"user","content":"next"}],"opaque":1e999}`, `{"messages":[{"role":"assistant","content":"local"},{"role":"user","content":"next"}],"opaque":1e999}`},
 		{"anthropic", `{"messages":[{"role":"user","content":[{"type":"text","text":"torana> status"}]},{"role":"assistant","content":"local"},{"role":"user","content":"next"}]}`, `{"messages":[{"role":"assistant","content":"local"},{"role":"user","content":"next"}]}`},
 		{"openai-responses", `{"input":[{"role":"user","content":[{"type":"input_text","text":"torana> status"}]},{"role":"assistant","content":"local"},{"role":"user","content":"next"}]}`, `{"input":[{"role":"assistant","content":"local"},{"role":"user","content":"next"}]}`},
