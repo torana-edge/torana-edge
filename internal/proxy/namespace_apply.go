@@ -185,12 +185,13 @@ func (s *Server) applyConfirmedStandardOperation(ctx context.Context, conversati
 }
 
 func introducesSkippedPlugins(previous, candidate []plugin.SkippedPlugin, target string) bool {
-	known := make(map[plugin.SkippedPlugin]bool, len(previous))
+	type identity struct{ name, digest string }
+	known := make(map[identity]bool, len(previous))
 	for _, item := range previous {
-		known[item] = true
+		known[identity{item.Name, item.Digest}] = true
 	}
 	for _, item := range candidate {
-		if item.Name == target || !known[item] {
+		if item.Name == target || !known[identity{item.Name, item.Digest}] {
 			return true
 		}
 	}

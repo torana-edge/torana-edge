@@ -5,15 +5,62 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 )
 
-// Only the operator sees this summary. Free-form strings and containers are
-// never printed: they can contain credentials even without a schema annotation.
-func consentScalar(value any, schema map[string]any, key string) string {
+var consentIdentifier = regexp.MustCompile(`^[A-Za-z0-9._:-]{1,32}$`)
+var consentAlphanumericRun = regexp.MustCompile(`[A-Za-z0-9]{16,}`)
+
+func consentCredentialPrefix(text string) bool {
+	for _, prefix := range []string{"sk-", "ghp_", "github_pat_", "AKIA", "AIza", "xox", "sk_live_", "rk_live_", "glpat-", "hf_", "eyJ"} {
+		if strings.HasPrefix(text, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+func consentHumanIdentifier(text string) bool {
+	if !consentIdentifier.MatchString(text) {
+		return false
+	}
+	digits, hexCharacters := 0, 0
+	for _, ch := range text {
+		if ch >= '0' && ch <= '9' {
+			digits++
+		}
+		if ch >= '0' && ch <= '9' || ch >= 'a' && ch <= 'f' || ch >= 'A' && ch <= 'F' {
+			hexCharacters++
+		}
+	}
+	if digits > 8 || len(text) >= 16 && hexCharacters*4 >= len(text)*3 {
+		return false
+	}
+	for _, run := range consentAlphanumericRun.FindAllString(text, -1) {
+		upper, lower := false, false
+		for _, ch := range run {
+			upper = upper || ch >= 'A' && ch <= 'Z'
+			lower = lower || ch >= 'a' && ch <= 'z'
+		}
+		if upper && lower {
+			return false
+		}
+	}
+	return true
+}
+
+func consentSensitive(schema map[string]any, key string) bool {
 	lower := strings.ToLower(key)
-	if schema["writeOnly"] == true || schema["sensitive"] == true || schema["format"] == "password" || strings.Contains(lower, "key") || strings.Contains(lower, "secret") || strings.Contains(lower, "token") || strings.Contains(lower, "password") {
+	return schema["writeOnly"] == true || schema["sensitive"] == true || schema["format"] == "password" || schema["$ref"] != nil || schema["allOf"] != nil || schema["anyOf"] != nil || schema["oneOf"] != nil || strings.Contains(lower, "key") || strings.Contains(lower, "secret") || strings.Contains(lower, "token") || strings.Contains(lower, "password")
+}
+
+// Only the operator sees this summary. Print short identifiers, not arbitrary
+// free text. Schema/key sensitivity takes precedence even for scalar values.
+func consentScalar(value any, schema map[string]any, key string) string {
+	if consentSensitive(schema, key) {
 		return "[redacted]"
 	}
 	switch value.(type) {
@@ -21,6 +68,10 @@ func consentScalar(value any, schema map[string]any, key string) string {
 		raw, _ := json.Marshal(value)
 		return string(raw)
 	case string:
+		text := value.(string)
+		if consentCredentialPrefix(text) {
+			return "[redacted]"
+		}
 		if choices, ok := schema["enum"].([]any); ok {
 			for _, choice := range choices {
 				if reflect.DeepEqual(choice, value) {
@@ -30,6 +81,10 @@ func consentScalar(value any, schema map[string]any, key string) string {
 					}
 				}
 			}
+		}
+		if consentHumanIdentifier(text) {
+			raw, _ := json.Marshal(text)
+			return string(raw)
 		}
 	}
 	return "[redacted]"
@@ -55,40 +110,9 @@ func operationConsentSummary(entry namespaceEntry, operation namespaceOperation,
 			_ = json.Unmarshal(operation.Guest.InputSchema, &schema)
 		}
 	}
-	properties, _ := schema["properties"].(map[string]any)
-	keys := map[string]bool{}
-	for key := range before {
-		keys[key] = true
-	}
-	for key := range after {
-		keys[key] = true
-	}
-	ordered := []string{}
-	for key := range keys {
-		ordered = append(ordered, key)
-	}
-	sort.Strings(ordered)
 	parts := []string{}
-	for _, key := range ordered {
-		old, was := before[key]
-		value, present := after[key]
-		if operation.Source == "standard" && was == present && reflect.DeepEqual(old, value) {
-			continue
-		}
-		field, _ := properties[key].(map[string]any)
-		label, _ := json.Marshal("/" + strings.ReplaceAll(strings.ReplaceAll(key, "~", "~0"), "/", "~1"))
-		if operation.Source != "standard" {
-			parts = append(parts, string(label)+"="+consentScalar(value, field, key))
-			continue
-		}
-		from, to := "[absent]", "[removed]"
-		if was {
-			from = consentScalar(old, field, key)
-		}
-		if present {
-			to = consentScalar(value, field, key)
-		}
-		parts = append(parts, string(label)+": "+from+" -> "+to)
+	if err := appendConsentLeaves(&parts, "", "", before, operation.Source == "standard", after, true, schema, operation.Source == "standard", 0); err != nil {
+		return "", err
 	}
 	prefix := "Run " + entry.Name + "." + operation.ID
 	if operation.Source == "standard" {
@@ -102,4 +126,84 @@ func operationConsentSummary(entry namespaceEntry, operation namespaceOperation,
 		return "", errors.New("operation needs a full operator review")
 	}
 	return summary, nil
+}
+
+func appendConsentLeaves(parts *[]string, path, key string, old any, was bool, value any, present bool, schema map[string]any, diff bool, depth int) error {
+	if depth > 16 || len(*parts) > 64 {
+		return errors.New("operation needs a full operator review")
+	}
+	if diff && was == present && reflect.DeepEqual(old, value) {
+		return nil
+	}
+	oldObject, oldIsObject := old.(map[string]any)
+	newObject, newIsObject := value.(map[string]any)
+	if !consentSensitive(schema, key) && (oldIsObject || newIsObject) && (!was || oldIsObject) && (!present || newIsObject) {
+		keys := map[string]bool{}
+		for name := range oldObject {
+			keys[name] = true
+		}
+		for name := range newObject {
+			keys[name] = true
+		}
+		ordered := []string{}
+		for name := range keys {
+			ordered = append(ordered, name)
+		}
+		sort.Strings(ordered)
+		properties, _ := schema["properties"].(map[string]any)
+		for _, name := range ordered {
+			before, existsBefore := oldObject[name]
+			after, existsAfter := newObject[name]
+			field, ok := properties[name].(map[string]any)
+			if !ok {
+				field, _ = schema["additionalProperties"].(map[string]any)
+			}
+			pointer := path + "/" + strings.ReplaceAll(strings.ReplaceAll(name, "~", "~0"), "/", "~1")
+			if err := appendConsentLeaves(parts, pointer, name, before, existsBefore, after, existsAfter, field, diff, depth+1); err != nil {
+				return err
+			}
+		}
+		if len(ordered) > 0 {
+			return nil
+		}
+	}
+	oldArray, oldIsArray := old.([]any)
+	newArray, newIsArray := value.([]any)
+	if !consentSensitive(schema, key) && (oldIsArray || newIsArray) && (!was || oldIsArray) && (!present || newIsArray) {
+		count := max(len(oldArray), len(newArray))
+		for i := 0; i < count; i++ {
+			var before, after any
+			if i < len(oldArray) {
+				before = oldArray[i]
+			}
+			if i < len(newArray) {
+				after = newArray[i]
+			}
+			field, _ := schema["items"].(map[string]any)
+			if prefix, ok := schema["prefixItems"].([]any); ok && i < len(prefix) {
+				field, _ = prefix[i].(map[string]any)
+			}
+			if err := appendConsentLeaves(parts, path+"/"+strconv.Itoa(i), key, before, i < len(oldArray), after, i < len(newArray), field, diff, depth+1); err != nil {
+				return err
+			}
+		}
+		if count > 0 {
+			return nil
+		}
+	}
+	label, _ := json.Marshal(path)
+	to := "[removed]"
+	if present {
+		to = consentScalar(value, schema, key)
+	}
+	if diff {
+		from := "[absent]"
+		if was {
+			from = consentScalar(old, schema, key)
+		}
+		*parts = append(*parts, string(label)+": "+from+" -> "+to)
+	} else {
+		*parts = append(*parts, string(label)+"="+to)
+	}
+	return nil
 }
