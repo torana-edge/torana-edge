@@ -7,7 +7,7 @@ import (
 )
 
 func TestNamespaceRegistryRequiresExactLoadedDigest(t *testing.T) {
-	d := &plugin.AgentDescriptor{SchemaVersion: 2, Namespace: &plugin.AgentNamespace{Title: "Routing", Summary: "Choose models", Alias: "router"}, Operations: []plugin.AgentOperation{{ID: "conversation.get", Risk: "read", ConversationBinding: "required"}}}
+	d := &plugin.AgentDescriptor{SchemaVersion: 2, Namespace: &plugin.AgentNamespace{Title: "Routing", Summary: "Choose models"}, Operations: []plugin.AgentOperation{{ID: "conversation.get", Risk: "read", ConversationBinding: "required"}}}
 	b := plugin.PluginBundle{Manifest: plugin.PluginManifest{Name: "decision_router", Description: "Router"}, Digest: "new", Agent: d}
 	for _, tc := range []struct {
 		digest, status string
@@ -19,7 +19,7 @@ func TestNamespaceRegistryRequiresExactLoadedDigest(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		entry, ok := r.resolve("decision_router", false)
+		entry, ok := r.resolve("decision_router")
 		if !ok || entry.Status != tc.status {
 			t.Fatalf("entry = %+v", entry)
 		}
@@ -28,11 +28,8 @@ func TestNamespaceRegistryRequiresExactLoadedDigest(t *testing.T) {
 				t.Fatalf("guest callable = %t", op.Callable)
 			}
 		}
-		if _, ok := r.resolve("router", false); ok {
+		if _, ok := r.resolve("router"); ok {
 			t.Fatal("MCP canonical lookup accepted alias")
-		}
-		if _, ok := r.resolve("router", true); !ok {
-			t.Fatal("directive alias lookup failed")
 		}
 	}
 }
@@ -51,7 +48,7 @@ func TestNamespaceRegistryListsUnavailablePluginsWithoutExecutingThem(t *testing
 		if err != nil {
 			t.Fatal(err)
 		}
-		entry, _ := r.resolve("logger", false)
+		entry, _ := r.resolve("logger")
 		if entry.Status != status {
 			t.Fatalf("status = %s", entry.Status)
 		}
@@ -77,7 +74,7 @@ func TestCoreNamespaceOmitsOperatorOnlySurfaces(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	core, _ := r.resolve("torana", false)
+	core, _ := r.resolve("torana")
 	seen := map[string]bool{}
 	for _, op := range core.Operations {
 		seen[op.ID] = true
@@ -97,41 +94,5 @@ func TestCoreNamespaceOmitsOperatorOnlySurfaces(t *testing.T) {
 		if !seen[id] {
 			t.Fatalf("missing core operation %s", id)
 		}
-	}
-}
-
-func TestNamespaceAliasCollisionDoesNotBreakDiscovery(t *testing.T) {
-	bundles := []plugin.PluginBundle{
-		{Manifest: plugin.PluginManifest{Name: "decision_router"}, Agent: &plugin.AgentDescriptor{Namespace: &plugin.AgentNamespace{Alias: "logger"}}},
-		{Manifest: plugin.PluginManifest{Name: "logger"}},
-	}
-	for _, installed := range [][]plugin.PluginBundle{bundles, {bundles[1], bundles[0]}} {
-		r, err := buildNamespaceRegistry(installed, nil, nil, nil)
-		if err != nil {
-			t.Fatal(err)
-		}
-		entry, ok := r.resolve("decision_router", false)
-		if !ok || entry.AliasError == "" {
-			t.Fatal("collision not reported")
-		}
-		logger, ok := r.resolve("logger", true)
-		if !ok || logger.Name != "logger" {
-			t.Fatal("alias hides canonical namespace")
-		}
-	}
-}
-
-func TestNamespaceSelfAliasIsNotAConflict(t *testing.T) {
-	r, err := buildNamespaceRegistry([]plugin.PluginBundle{{Manifest: plugin.PluginManifest{Name: "logger"}, Agent: &plugin.AgentDescriptor{Namespace: &plugin.AgentNamespace{Alias: "LOGGER"}}}}, nil, nil, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	entries := r.list()
-	if len(entries) != 2 {
-		t.Fatalf("entries=%d", len(entries))
-	}
-	entry, ok := r.resolve("LOGGER", true)
-	if !ok || entry.Name != "logger" || entry.AliasError != "" {
-		t.Fatalf("entry=%+v", entry)
 	}
 }

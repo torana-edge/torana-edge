@@ -53,11 +53,11 @@ func (d *operationDispatch) dispatch(ctx context.Context, input namespaceInvokeI
 	if d == nil || d.policy == nil || d.policy.registry == nil {
 		return operationError("not_configured", "Torana operations are unavailable."), nil
 	}
-	entry, exists := d.policy.registry.resolve(input.Namespace, false)
+	entry, exists := d.policy.registry.resolve(input.Namespace)
 	if !exists {
 		return operationError("unknown_namespace", "Use a canonical namespace from torana_namespaces."), nil
 	}
-	_, op, exists := d.policy.lookup(entry.Name, input.Operation, false)
+	_, op, exists := d.policy.lookup(entry.Name, input.Operation)
 	if !exists {
 		return operationError("unknown_operation", "Describe this namespace to find an available operation."), nil
 	}

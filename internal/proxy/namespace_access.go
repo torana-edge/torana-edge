@@ -38,11 +38,11 @@ func accessRank(access string) int {
 	}
 }
 
-func (p *namespaceAccessPolicy) lookup(namespace, operation string, aliases bool) (namespaceEntry, namespaceOperation, bool) {
+func (p *namespaceAccessPolicy) lookup(namespace, operation string) (namespaceEntry, namespaceOperation, bool) {
 	if p == nil || p.registry == nil {
 		return namespaceEntry{}, namespaceOperation{}, false
 	}
-	entry, ok := p.registry.resolve(namespace, aliases)
+	entry, ok := p.registry.resolve(namespace)
 	if !ok {
 		return namespaceEntry{}, namespaceOperation{}, false
 	}
@@ -76,7 +76,7 @@ func (p *namespaceAccessPolicy) floor(entry namespaceEntry, op namespaceOperatio
 // description. Unknown operations, disabled guests and floor entries fail
 // closed. A separate dispatcher must still enforce binding and revision checks.
 func (p *namespaceAccessPolicy) ModelReachable(namespace, operation string) string {
-	entry, op, ok := p.lookup(namespace, operation, false)
+	entry, op, ok := p.lookup(namespace, operation)
 	if !ok || !op.Callable || p.floor(entry, op) {
 		return "never"
 	}

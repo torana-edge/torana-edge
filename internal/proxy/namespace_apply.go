@@ -141,7 +141,7 @@ func (s *Server) applyConfirmedStandardOperation(ctx context.Context, conversati
 	if err != nil {
 		return mcpserver.Result{}, err
 	}
-	entry, operation, exists := policy.lookup(intent.Namespace, intent.Operation, false)
+	entry, operation, exists := policy.lookup(intent.Namespace, intent.Operation)
 	if !exists || entry.Digest != intent.Digest {
 		return operationError("stale_digest", "The plugin changed; request and review a fresh operation."), nil
 	}

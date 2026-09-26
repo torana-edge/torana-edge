@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
-	"strings"
 
 	"github.com/torana-edge/torana-edge/internal/plugin"
 )
@@ -26,8 +25,6 @@ type namespaceOperation struct {
 
 type namespaceEntry struct {
 	Name         string               `json:"name"`
-	Alias        string               `json:"alias,omitempty"`
-	AliasError   string               `json:"alias_error,omitempty"`
 	Title        string               `json:"title"`
 	Summary      string               `json:"summary"`
 	Categories   []string             `json:"categories,omitempty"`
@@ -40,13 +37,12 @@ type namespaceEntry struct {
 
 type namespaceRegistry struct {
 	entries map[string]namespaceEntry
-	aliases map[string]string
 }
 
 // Installed bundles provide status metadata. Guest callability is granted only
 // from the exact digest in the pinned, approved pipeline snapshot.
 func buildNamespaceRegistry(installed []plugin.PluginBundle, loaded []plugin.LoadedPluginStatus, enabled []string, skipped []plugin.SkippedPlugin) (*namespaceRegistry, error) {
-	r := &namespaceRegistry{entries: map[string]namespaceEntry{}, aliases: map[string]string{}}
+	r := &namespaceRegistry{entries: map[string]namespaceEntry{}}
 	core := namespaceEntry{Name: "torana", Title: "Torana", Summary: "Inspect and manage the local proxy and this conversation", Status: "enabled"}
 	for _, op := range builtInAgentOperations() {
 		id := ""
@@ -103,7 +99,7 @@ func buildNamespaceRegistry(installed []plugin.PluginBundle, loaded []plugin.Loa
 		}
 		if plugin.ReservedNamespace(name) {
 			continue
-		} // Operator aliases for reserved names follow in setup.
+		}
 		entry := namespaceEntry{Name: name, Title: name, Summary: bundle.Manifest.Description, Status: "disabled", Digest: bundle.Digest, Version: bundle.Manifest.Version}
 		if bundle.Schema != nil {
 			entry.ConfigSchema = append(json.RawMessage(nil), bundle.Schema.Raw...)
@@ -121,7 +117,7 @@ func buildNamespaceRegistry(installed []plugin.PluginBundle, loaded []plugin.Loa
 		}
 		if descriptor != nil && descriptor.Namespace != nil {
 			ns := descriptor.Namespace
-			entry.Title, entry.Summary, entry.Alias = ns.Title, ns.Summary, ns.Alias
+			entry.Title, entry.Summary = ns.Title, ns.Summary
 			entry.Categories = append([]string(nil), ns.Categories...)
 		}
 		for _, standard := range []struct{ id, description, risk, access string }{
@@ -146,30 +142,6 @@ func buildNamespaceRegistry(installed []plugin.PluginBundle, loaded []plugin.Loa
 		}
 		r.entries[name] = entry
 	}
-	// Resolve aliases after collecting every canonical name. A collision disables
-	// only the alias, independent of discovery order or plugin enablement.
-	claims := map[string]int{}
-	for _, bundle := range installed {
-		claims[strings.ToLower(bundle.Manifest.Name)]++
-	}
-	claims["torana"]++
-	for _, entry := range r.entries {
-		if entry.Alias != "" && !strings.EqualFold(entry.Alias, entry.Name) {
-			claims[strings.ToLower(entry.Alias)]++
-		}
-	}
-	for name, entry := range r.entries {
-		if entry.Alias == "" {
-			continue
-		}
-		alias := strings.ToLower(entry.Alias)
-		if claims[alias] > 1 || plugin.ReservedNamespace(alias) {
-			entry.AliasError = "Alias conflicts with another namespace; use the canonical plugin name"
-			r.entries[name] = entry
-			continue
-		}
-		r.aliases[alias] = name
-	}
 	return r, nil
 }
 
@@ -182,12 +154,7 @@ func (r *namespaceRegistry) list() []namespaceEntry {
 	return entries
 }
 
-func (r *namespaceRegistry) resolve(name string, allowAlias bool) (namespaceEntry, bool) {
-	if allowAlias {
-		if canonical, ok := r.aliases[strings.ToLower(name)]; ok {
-			name = canonical
-		}
-	}
+func (r *namespaceRegistry) resolve(name string) (namespaceEntry, bool) {
 	entry, ok := r.entries[name]
 	return entry, ok
 }

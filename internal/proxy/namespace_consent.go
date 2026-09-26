@@ -44,7 +44,7 @@ func (s *Server) proposeNamespaceOperation(ctx context.Context, call operationCa
 	if err != nil {
 		return mcpserver.Result{}, err
 	}
-	entry, exists := registry.resolve(call.Entry.Name, false)
+	entry, exists := registry.resolve(call.Entry.Name)
 	if !exists || entry.Digest != call.Entry.Digest {
 		return operationError("stale_digest", "The plugin changed; describe it and try again."), nil
 	}
