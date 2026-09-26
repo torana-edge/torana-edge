@@ -38,6 +38,26 @@ func TestMITMIngressValidation(t *testing.T) {
 	}
 }
 
+func TestDirectivesDefaultOffAndConfigRoundTrip(t *testing.T) {
+	var cfg Config
+	if cfg.Directives.Enabled {
+		t.Fatal("directives must default off")
+	}
+	if err := json.Unmarshal([]byte(`{"directives":{"enabled":true}}`), &cfg); err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.Directives.Enabled {
+		t.Fatal("directives.enabled was not decoded")
+	}
+	encoded, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(encoded), `"directives":{"enabled":true}`) {
+		t.Fatalf("directives setting lost: %s", encoded)
+	}
+}
+
 func TestMITMHostCanonicalizationAndCollision(t *testing.T) {
 	got, err := CanonicalMITMHostname(" CloudCode-PA.GoogleAPIs.COM. ")
 	if err != nil {
