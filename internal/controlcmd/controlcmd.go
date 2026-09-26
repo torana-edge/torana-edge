@@ -28,7 +28,7 @@ func Handles(args []string) bool {
 		return false
 	}
 	switch args[0] {
-	case "config", "pipeline", "stats", "feed", "agent", "suggestions", "conversations":
+	case "config", "pipeline", "stats", "feed", "agent", "suggestions", "conversations", "mcp":
 		return true
 	case "plugin":
 		return len(args) > 1 && slices.Contains([]string{"status", "inspect", "approve", "revoke", "enable", "disable", "config"}, args[1])
@@ -62,9 +62,16 @@ func Usage(w io.Writer) {
   torana suggestions show <id> --conversation <id>
   torana suggestions accept <id> --conversation <id> --yes
   torana suggestions dismiss <id> --conversation <id> --yes
+  torana mcp status                         inspect whether MCP is enabled
+  torana mcp enable --yes                    set up its token and enable MCP
+  torana mcp disable --yes                   close MCP sessions; retain the token
+  torana mcp token                           print the instance token (sets up once)
+  torana mcp rotate --yes                    rotate and print the instance token
 
 All commands accept --addr host:port (or a loopback HTTP(S) origin).
 --file - reads stdin. --json is accepted; JSON is already the default.
+MCP token/rotate print only the secret token; --json requests a JSON envelope.
+Keep tokens private. MCP policy does not sandbox unrestricted local shell access.
 Writes require --yes; an agent should obtain operator consent for approvals.
 config/pipeline/plugin-config apply require the revision from their get command.
 Edit the snapshot's config or pipeline, not its revision. Stale edits fail safely.
@@ -79,7 +86,7 @@ plugin list/install/remove work on disk; plugin status inspects the running host
 
 type options struct {
 	addr, file, conversation string
-	yes, follow, empty       bool
+	yes, follow, empty, json bool
 	args                     []string
 }
 
@@ -91,7 +98,7 @@ func parseOptions(args []string, allowed string, stderr io.Writer) (options, err
 	fs.SetOutput(stderr)
 	fs.Usage = func() { Usage(stderr) }
 	fs.StringVar(&o.addr, "addr", "", "loopback control-plane origin")
-	fs.Bool("json", false, "JSON output (default)")
+	fs.BoolVar(&o.json, "json", false, "JSON output (default, except MCP token)")
 	if strings.Contains(allowed, "file") {
 		fs.StringVar(&o.file, "file", "", "JSON file, or - for stdin")
 	}
@@ -153,7 +160,7 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 		return fmt.Errorf("command required")
 	}
 	command, rest := args[0], args[1:]
-	if command == "config" || command == "pipeline" || command == "agent" || command == "plugin" || command == "suggestions" {
+	if command == "config" || command == "pipeline" || command == "agent" || command == "plugin" || command == "suggestions" || command == "mcp" {
 		if len(rest) == 0 || rest[0] == "help" || rest[0] == "--help" || rest[0] == "-h" {
 			Usage(stdout)
 			return nil
@@ -184,6 +191,9 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 		allowed = "conversation"
 	case "suggestions accept", "suggestions dismiss":
 		allowed = "conversation yes"
+	case "mcp status", "mcp token":
+	case "mcp enable", "mcp disable", "mcp rotate":
+		allowed = "yes"
 	default:
 		return fmt.Errorf("unknown live command %q; run torana help", command)
 	}
@@ -253,6 +263,8 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 		return c.call(o)
 	case "suggestions list", "suggestions show", "suggestions accept", "suggestions dismiss":
 		return c.suggestions(command, o)
+	case "mcp status", "mcp enable", "mcp disable", "mcp token", "mcp rotate":
+		return c.mcp(command, o)
 	}
 	return fmt.Errorf("unhandled command %q", command)
 }
