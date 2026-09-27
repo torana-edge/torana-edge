@@ -99,3 +99,28 @@ func TestCoreNamespaceOmitsOperatorOnlySurfaces(t *testing.T) {
 		}
 	}
 }
+
+func TestV1PluginWritesAreNotModelReachable(t *testing.T) {
+	descriptor := &plugin.AgentDescriptor{SchemaVersion: 1, Operations: []plugin.AgentOperation{
+		{ID: "status", Risk: "read"},
+		{ID: "configure", Risk: "write"},
+	}}
+	bundle := plugin.PluginBundle{Manifest: plugin.PluginManifest{Name: "legacy", Description: "Legacy descriptor"}, Agent: descriptor}
+	r, err := buildNamespaceRegistry([]plugin.PluginBundle{bundle}, []plugin.LoadedPluginStatus{{Name: "legacy", Agent: descriptor}}, []string{"legacy"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry, _ := r.resolve("legacy")
+	for _, op := range entry.Operations {
+		switch op.ID {
+		case "status":
+			if op.ModelAccess != "read" {
+				t.Fatalf("v1 read access = %q", op.ModelAccess)
+			}
+		case "configure":
+			if op.ModelAccess != "never" {
+				t.Fatalf("v1 write access = %q", op.ModelAccess)
+			}
+		}
+	}
+}
