@@ -194,6 +194,33 @@ func TestPluginAgentOperationDispatch(t *testing.T) {
 		!strings.Contains(recorder.Body.String(), `"plugin_digest":"sha256:`) {
 		t.Fatalf("discovery missing the fixture operation: %s", recorder.Body.String())
 	}
+	var discovery agentAPIDocument
+	if err := json.Unmarshal(recorder.Body.Bytes(), &discovery); err != nil {
+		t.Fatalf("decode discovery: %v", err)
+	}
+	var foundBoundWrite bool
+	for _, operation := range discovery.Operations {
+		if operation.ID == "plugin:test-http-server:value.set" {
+			foundBoundWrite = operation.ConversationBinding == "required"
+		}
+	}
+	if !foundBoundWrite {
+		t.Fatalf("discovery omitted conversation binding: %s", recorder.Body.String())
+	}
+
+	request = localControlPlaneRequest(http.MethodPost, "/_torana/api/v1/agent/plugins/test-http-server/value", strings.NewReader(`{"value":"must-not-run"}`))
+	request.RemoteAddr = "127.0.0.1:12345"
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-Torana-Local-Request", "1")
+	recorder = httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusConflict {
+		t.Fatalf("unbound operation status = %d, want 409: %s", recorder.Code, recorder.Body.String())
+	}
+	var envelope agentAPIErrorEnvelope
+	if err := json.Unmarshal(recorder.Body.Bytes(), &envelope); err != nil || envelope.Error.Code != "conversation_binding_required" {
+		t.Fatalf("unbound operation error = %+v, decode error = %v", envelope, err)
+	}
 
 	request = localControlPlaneRequest(http.MethodGet, "/_torana/api/v1/agent/plugins/test-http-server/status", nil)
 	request.RemoteAddr = "127.0.0.1:12345"

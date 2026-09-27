@@ -29,6 +29,7 @@ type agentAPIOperation struct {
 	OutputSchema         json.RawMessage               `json:"output_schema"`
 	Plugin               string                        `json:"plugin,omitempty"`
 	PluginDigest         string                        `json:"plugin_digest,omitempty"`
+	ConversationBinding  string                        `json:"conversation_binding,omitempty"`
 	RevisionPrecondition *agentAPIRevisionPrecondition `json:"revision_precondition,omitempty"`
 }
 
@@ -279,7 +280,7 @@ func builtInAgentOperations() []agentAPIOperation {
 		{
 			ID: "torana.suggestions.list", Method: http.MethodGet,
 			Path:        suggestionsAPIPath + "?conversation_id={conversation_id}",
-			Description: "List suggestions for one conversation, including pending confirmation codes and outcomes.",
+			Description: "List suggestions for one conversation, including pending confirmations and outcomes.",
 			Risk:        "read", Idempotent: true, ContentType: "application/json", OutputSchema: arbitraryObjectSchema,
 		},
 		{
@@ -309,18 +310,23 @@ func (s *Server) agentAPIDiscovery() agentAPIDocument {
 		if pipeline.TryAcquire() {
 			for _, loaded := range pipeline.AgentPlugins() {
 				for _, operation := range loaded.Descriptor.Operations {
+					binding := operation.ConversationBinding
+					if binding == "" {
+						binding = "none"
+					}
 					operations = append(operations, agentAPIOperation{
-						ID:           "plugin:" + loaded.Manifest.Name + ":" + operation.ID,
-						Method:       operation.Method,
-						Path:         "/_torana/api/v1/agent/plugins/" + url.PathEscape(loaded.Manifest.Name) + operation.Path,
-						Description:  operation.Description,
-						Risk:         operation.Risk,
-						Idempotent:   operation.Idempotent,
-						ContentType:  "application/json",
-						InputSchema:  operation.InputSchema,
-						OutputSchema: operation.OutputSchema,
-						Plugin:       loaded.Manifest.Name,
-						PluginDigest: loaded.Digest,
+						ID:                  "plugin:" + loaded.Manifest.Name + ":" + operation.ID,
+						Method:              operation.Method,
+						Path:                "/_torana/api/v1/agent/plugins/" + url.PathEscape(loaded.Manifest.Name) + operation.Path,
+						Description:         operation.Description,
+						Risk:                operation.Risk,
+						Idempotent:          operation.Idempotent,
+						ContentType:         "application/json",
+						InputSchema:         operation.InputSchema,
+						OutputSchema:        operation.OutputSchema,
+						Plugin:              loaded.Manifest.Name,
+						PluginDigest:        loaded.Digest,
+						ConversationBinding: binding,
 					})
 				}
 			}
@@ -394,6 +400,13 @@ func (s *Server) handlePluginAgentOperation(w http.ResponseWriter, r *http.Reque
 		}
 		writeAgentError(w, http.StatusNotFound, "operation_not_found", "plugin operation was not found")
 		return
+	}
+	if operation.ConversationBinding == "required" {
+		binding, exists := plugin.MCPBindingFromContext(r.Context())
+		if !exists || !binding.Bound {
+			writeAgentError(w, http.StatusConflict, "conversation_binding_required", "operation requires a verified harness conversation; invoke it through Torana MCP from that conversation")
+			return
+		}
 	}
 
 	var body []byte
