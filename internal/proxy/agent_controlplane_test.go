@@ -194,6 +194,19 @@ func TestPluginAgentOperationDispatch(t *testing.T) {
 		!strings.Contains(recorder.Body.String(), `"plugin_digest":"sha256:`) {
 		t.Fatalf("discovery missing the fixture operation: %s", recorder.Body.String())
 	}
+	var discovery agentAPIDocument
+	if err := json.Unmarshal(recorder.Body.Bytes(), &discovery); err != nil {
+		t.Fatalf("decode discovery: %v", err)
+	}
+	var foundBoundWrite bool
+	for _, operation := range discovery.Operations {
+		if operation.ID == "plugin:test-http-server:value.set" {
+			foundBoundWrite = operation.ModelAccess == "confirm" && operation.ConversationBinding == "required"
+		}
+	}
+	if !foundBoundWrite {
+		t.Fatalf("discovery omitted model access or conversation binding: %s", recorder.Body.String())
+	}
 
 	request = localControlPlaneRequest(http.MethodGet, "/_torana/api/v1/agent/plugins/test-http-server/status", nil)
 	request.RemoteAddr = "127.0.0.1:12345"

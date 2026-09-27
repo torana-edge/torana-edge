@@ -29,6 +29,8 @@ type agentAPIOperation struct {
 	OutputSchema         json.RawMessage               `json:"output_schema"`
 	Plugin               string                        `json:"plugin,omitempty"`
 	PluginDigest         string                        `json:"plugin_digest,omitempty"`
+	ModelAccess          string                        `json:"model_access,omitempty"`
+	ConversationBinding  string                        `json:"conversation_binding,omitempty"`
 	RevisionPrecondition *agentAPIRevisionPrecondition `json:"revision_precondition,omitempty"`
 }
 
@@ -309,18 +311,24 @@ func (s *Server) agentAPIDiscovery() agentAPIDocument {
 		if pipeline.TryAcquire() {
 			for _, loaded := range pipeline.AgentPlugins() {
 				for _, operation := range loaded.Descriptor.Operations {
+					binding := operation.ConversationBinding
+					if binding == "" {
+						binding = "none"
+					}
 					operations = append(operations, agentAPIOperation{
-						ID:           "plugin:" + loaded.Manifest.Name + ":" + operation.ID,
-						Method:       operation.Method,
-						Path:         "/_torana/api/v1/agent/plugins/" + url.PathEscape(loaded.Manifest.Name) + operation.Path,
-						Description:  operation.Description,
-						Risk:         operation.Risk,
-						Idempotent:   operation.Idempotent,
-						ContentType:  "application/json",
-						InputSchema:  operation.InputSchema,
-						OutputSchema: operation.OutputSchema,
-						Plugin:       loaded.Manifest.Name,
-						PluginDigest: loaded.Digest,
+						ID:                  "plugin:" + loaded.Manifest.Name + ":" + operation.ID,
+						Method:              operation.Method,
+						Path:                "/_torana/api/v1/agent/plugins/" + url.PathEscape(loaded.Manifest.Name) + operation.Path,
+						Description:         operation.Description,
+						Risk:                operation.Risk,
+						Idempotent:          operation.Idempotent,
+						ContentType:         "application/json",
+						InputSchema:         operation.InputSchema,
+						OutputSchema:        operation.OutputSchema,
+						Plugin:              loaded.Manifest.Name,
+						PluginDigest:        loaded.Digest,
+						ModelAccess:         operation.EffectiveModelAccess(),
+						ConversationBinding: binding,
 					})
 				}
 			}

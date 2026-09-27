@@ -191,7 +191,7 @@ func TestAgentCallRequiresDiscoveryAndWriteConsent(t *testing.T) {
 	var calls int
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == controlclient.BasePath+"/" {
-			io.WriteString(w, `{"operations":[{"id":"plugin:foo:clear","plugin":"foo","plugin_digest":"sha256:reviewed","method":"POST","path":"/_torana/api/v1/agent/plugins/foo/clear","risk":"destructive","input_schema":{"type":"object"}},{"id":"torana.config.update","method":"PUT","path":"/_torana/api/v1/config","risk":"write"}]}`)
+			io.WriteString(w, `{"operations":[{"id":"plugin:foo:clear","plugin":"foo","plugin_digest":"sha256:reviewed","method":"POST","path":"/_torana/api/v1/agent/plugins/foo/clear","risk":"destructive","input_schema":{"type":"object"}},{"id":"plugin:foo:session.write","plugin":"foo","plugin_digest":"sha256:reviewed","method":"POST","path":"/_torana/api/v1/agent/plugins/foo/session/write","risk":"write","conversation_binding":"required","input_schema":{"type":"object"}},{"id":"torana.config.update","method":"PUT","path":"/_torana/api/v1/config","risk":"write"}]}`)
 			return
 		}
 		calls++
@@ -208,6 +208,12 @@ func TestAgentCallRequiresDiscoveryAndWriteConsent(t *testing.T) {
 	}
 	if calls != 0 {
 		t.Fatal("unsafe call dispatched")
+	}
+	if _, _, err := invoke(srv.URL, `{}`, "agent", "call", "plugin:foo:session.write", "--file", "-", "--yes"); err == nil || !strings.Contains(err.Error(), "verified harness conversation") {
+		t.Fatalf("conversation-bound call error = %v", err)
+	}
+	if calls != 0 {
+		t.Fatal("conversation-bound call dispatched without a verified binding")
 	}
 	if _, _, err := invoke(srv.URL, `{}`, "agent", "call", "plugin:foo:clear", "--file", "-", "--yes"); err != nil {
 		t.Fatal(err)

@@ -757,6 +757,7 @@ func (c *runner) call(o options) error {
 			ID, Method, Path, Risk string
 			Plugin                 string          `json:"plugin"`
 			PluginDigest           string          `json:"plugin_digest"`
+			ConversationBinding    string          `json:"conversation_binding"`
 			Input                  json.RawMessage `json:"input_schema"`
 		} `json:"operations"`
 	}
@@ -769,6 +770,9 @@ func (c *runner) call(o options) error {
 		}
 		if strings.ContainsAny(op.Path, "{}") {
 			return fmt.Errorf("operation requires a named resource; use its dedicated CLI command")
+		}
+		if op.ConversationBinding == "required" {
+			return fmt.Errorf("operation requires a verified harness conversation; invoke it through Torana MCP from that conversation")
 		}
 		// Built-in mutations use revisioned snapshots; a generic invocation
 		// must not become an escape hatch around their lost-update checks.
