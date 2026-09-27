@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/base64"
@@ -21,6 +22,16 @@ func canonicalInvokeHash(input namespaceInvokeInput) (string, error) {
 		input.Input = json.RawMessage(`{}`)
 	}
 	raw, err := json.Marshal(input)
+	if err != nil {
+		return "", err
+	}
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	var canonical any
+	if err := decoder.Decode(&canonical); err != nil {
+		return "", err
+	}
+	raw, err = json.Marshal(canonical)
 	if err != nil {
 		return "", err
 	}

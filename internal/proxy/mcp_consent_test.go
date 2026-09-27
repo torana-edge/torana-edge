@@ -125,7 +125,7 @@ func TestOperatorOnlyConsentRetainsProposalWithoutHarnessApproval(t *testing.T) 
 	if _, err := s.suggestions.ResolveID("session", items[0].ID, "accepted", "agent_api", 0); err != nil {
 		t.Fatal(err)
 	}
-	applied, err := s.applyConfirmedStandardOperation(context.Background(), "session", items[0].ID, nil)
+	applied, err := s.applyConfirmedOperation(context.Background(), "session", items[0].ID, nil)
 	if err != nil || applied.Status != "applied" {
 		t.Fatalf("operator refused: %+v %v", applied, err)
 	}

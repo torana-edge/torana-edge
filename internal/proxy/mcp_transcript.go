@@ -44,12 +44,14 @@ func (s *Server) observeTranscriptOperations(ctx context.Context, request *engin
 		}
 		start := time.Now()
 		if err := s.consumeTranscriptTicket(ctx, call.Ticket, call.Input); err != nil {
+			s.appendMCPAudit("torana_invoke", false, operationError("invalid_ticket", "Torana could not verify this transcript operation."), nil, start)
 			releaseTool()
 			continue
 		}
 		result, handled, callErr := dispatch.invokeTranscript(ctx, call.Input, plugin.MCPBinding{Bound: true, ConversationID: conversation, CallID: call.CallID})
 		releaseTool()
 		if !handled {
+			s.appendMCPAudit("torana_invoke", true, operationError("operation_unavailable", "This operation is no longer available."), nil, start)
 			continue
 		}
 		s.appendMCPAudit("torana_invoke", true, result, callErr, start)

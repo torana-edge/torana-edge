@@ -101,5 +101,5 @@ func (s *Server) resolveMCPConsent(ctx context.Context, name string, raw json.Ra
 	if status == "dismissed" {
 		return mcpserver.Result{OK: true, Status: "dismissed", Summary: "The change was declined."}, nil
 	}
-	return s.applyConfirmedStandardOperation(ctx, state.Conversation, state.ID, nil)
+	return s.applyConfirmedOperation(ctx, state.Conversation, state.ID, nil)
 }

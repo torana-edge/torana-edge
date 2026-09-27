@@ -1,6 +1,10 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "description": "Test fixture agent operations.",
+  "namespace": {
+    "title": "Test HTTP server",
+    "summary": "Exercise read and reversible write agent operations."
+  },
   "operations": [
     {
       "id": "status",
@@ -43,6 +47,51 @@
             "type": "object"
           }
         },
+        "additionalProperties": false
+      }
+    },
+    {
+      "id": "value.set",
+      "method": "POST",
+      "path": "/value",
+      "description": "Set the fixture value.",
+      "risk": "write",
+      "idempotent": true,
+      "model_access": "confirm",
+      "conversation_binding": "required",
+      "undo_operation": "value.set.undo",
+      "input_schema": {
+        "type": "object",
+        "required": ["value"],
+        "properties": {"value": {"type": "string"}},
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "required": ["value"],
+        "properties": {"value": {"type": "string"}},
+        "additionalProperties": false
+      }
+    },
+    {
+      "id": "value.set.undo",
+      "method": "POST",
+      "path": "/value/undo",
+      "description": "Undo the matching fixture value change.",
+      "risk": "write",
+      "idempotent": true,
+      "model_access": "never",
+      "conversation_binding": "required",
+      "input_schema": {
+        "type": "object",
+        "required": ["value"],
+        "properties": {"value": {"type": "string"}},
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "required": ["value"],
+        "properties": {"value": {"type": "string"}},
         "additionalProperties": false
       }
     }

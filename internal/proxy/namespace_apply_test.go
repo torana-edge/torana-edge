@@ -40,7 +40,7 @@ func TestConfirmedPluginMutationRechecksSnapshotAndPolicy(t *testing.T) {
 		t.Fatalf("items=%+v %v", items, err)
 	}
 	id := items[0].ID
-	result, err = server.applyConfirmedStandardOperation(context.Background(), binding.ConversationID, id, nil)
+	result, err = server.applyConfirmedOperation(context.Background(), binding.ConversationID, id, nil)
 	if err != nil || result.Error == nil || result.Error.Code != "not_found" {
 		t.Fatalf("unaccepted executed: %+v %v", result, err)
 	}
@@ -50,18 +50,18 @@ func TestConfirmedPluginMutationRechecksSnapshotAndPolicy(t *testing.T) {
 	server.configMu.Lock()
 	server.config.Providers.Port++
 	server.configMu.Unlock()
-	result, err = server.applyConfirmedStandardOperation(context.Background(), binding.ConversationID, id, nil)
+	result, err = server.applyConfirmedOperation(context.Background(), binding.ConversationID, id, nil)
 	if err != nil || result.Error == nil || result.Error.Code != "conflict" {
 		t.Fatalf("stale accepted: %+v %v", result, err)
 	}
 	server.configMu.Lock()
 	server.config.Providers.Port--
 	server.configMu.Unlock()
-	result, err = server.applyConfirmedStandardOperation(context.Background(), binding.ConversationID, id, []string{"test-http-server"})
+	result, err = server.applyConfirmedOperation(context.Background(), binding.ConversationID, id, []string{"test-http-server"})
 	if err != nil || result.Error == nil || result.Error.Code != "access_denied" {
 		t.Fatalf("changed floor ignored: %+v %v", result, err)
 	}
-	result, err = server.applyConfirmedStandardOperation(context.Background(), binding.ConversationID, id, nil)
+	result, err = server.applyConfirmedOperation(context.Background(), binding.ConversationID, id, nil)
 	if err != nil || !result.OK || result.Status != "applied" {
 		t.Fatalf("apply=%+v %v", result, err)
 	}
@@ -72,7 +72,7 @@ func TestConfirmedPluginMutationRechecksSnapshotAndPolicy(t *testing.T) {
 	if err != nil || len(changes) != 1 || changes[0].Status != "applied" {
 		t.Fatalf("history=%+v %v", changes, err)
 	}
-	result, err = server.applyConfirmedStandardOperation(context.Background(), binding.ConversationID, id, nil)
+	result, err = server.applyConfirmedOperation(context.Background(), binding.ConversationID, id, nil)
 	if err != nil || result.Error == nil || result.Error.Code != "not_found" {
 		t.Fatalf("replayed execution=%+v %v", result, err)
 	}
@@ -110,6 +110,90 @@ func TestConfirmedPluginMutationRechecksSnapshotAndPolicy(t *testing.T) {
 	result, err = server.undoConfirmedPluginChange(context.Background(), binding.ConversationID, items[0].ID, nil)
 	if err != nil || result.Error == nil || result.Error.Code != "not_found" {
 		t.Fatalf("duplicate undo=%+v %v", result, err)
+	}
+}
+
+func TestConfirmedGuestMutationAppliesAndUsesDeclaredUndo(t *testing.T) {
+	requireWASM(t, fixturesDir+"/test-http-server/plugin.wasm")
+	t.Setenv("TORANA_DATA_DIR", t.TempDir())
+	cfg := provider.DefaultConfig()
+	cfg.Plugins = provider.PluginsConfig{Dir: fixturesDir, Order: []string{"test-http-server"}, AllowUnapproved: true}
+	server, err := New(Config{Port: "8080", Providers: cfg})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer server.Shutdown(context.Background())
+	registry, err := server.currentNamespaceRegistry()
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy, err := newNamespaceAccessPolicy(registry, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dispatch := operationDispatch{policy: policy, propose: server.proposeNamespaceOperation}
+	binding := plugin.MCPBinding{Bound: true, ConversationID: "guest-session", CallID: "guest-call"}
+	input := json.RawMessage(`{"namespace":"test-http-server","operation":"value.set","input":{"value":"next"}}`)
+	result, err := dispatch.invoke(context.Background(), input, binding)
+	if err != nil || !result.OK || result.Status != "pending_confirmation" {
+		t.Fatalf("proposal=%+v err=%v", result, err)
+	}
+	items, err := server.suggestions.List(binding.ConversationID, "torana", 0)
+	if err != nil || len(items) != 1 {
+		t.Fatalf("items=%+v err=%v", items, err)
+	}
+	if _, err := server.suggestions.ResolveCode(binding.ConversationID, items[0].Code, "accepted", "agent_api", 0); err != nil {
+		t.Fatal(err)
+	}
+	result, err = server.applyConfirmedOperation(context.Background(), binding.ConversationID, items[0].ID, nil)
+	if err != nil || !result.OK || result.Status != "applied" {
+		code := ""
+		if result.Error != nil {
+			code = result.Error.Code
+		}
+		t.Fatalf("apply=%+v code=%s err=%v", result, code, err)
+	}
+	value, found, err := server.pluginState.Get("test-http-server", "reversible/current")
+	if err != nil || !found || value != "next" {
+		t.Fatalf("state=%q found=%t err=%v", value, found, err)
+	}
+	result, err = server.undoConfirmedPluginChange(context.Background(), binding.ConversationID, items[0].ID, nil)
+	if err != nil || !result.OK || result.Status != "undone" {
+		t.Fatalf("undo=%+v err=%v", result, err)
+	}
+	if value, found, err := server.pluginState.Get("test-http-server", "reversible/current"); err != nil || found {
+		t.Fatalf("state remained after undo: %q found=%t err=%v", value, found, err)
+	}
+	direct, err := dispatch.invoke(context.Background(), json.RawMessage(`{"namespace":"test-http-server","operation":"value.set.undo","input":{"value":"next"}}`), binding)
+	if err != nil || direct.Error == nil || direct.Error.Code != "access_denied" {
+		t.Fatalf("model reached undo companion: %+v err=%v", direct, err)
+	}
+
+	binding.CallID = "guest-call-conflict"
+	result, err = dispatch.invoke(context.Background(), json.RawMessage(`{"namespace":"test-http-server","operation":"value.set","input":{"value":"second"}}`), binding)
+	if err != nil || result.Status != "pending_confirmation" {
+		t.Fatalf("second proposal=%+v err=%v", result, err)
+	}
+	items, err = server.suggestions.List(binding.ConversationID, "torana", 0)
+	if err != nil || len(items) != 2 {
+		t.Fatalf("second items=%+v err=%v", items, err)
+	}
+	second := items[1]
+	if _, err := server.suggestions.ResolveCode(binding.ConversationID, second.Code, "accepted", "agent_api", 0); err != nil {
+		t.Fatal(err)
+	}
+	if result, err = server.applyConfirmedOperation(context.Background(), binding.ConversationID, second.ID, nil); err != nil || !result.OK {
+		t.Fatalf("second apply=%+v err=%v", result, err)
+	}
+	if err := server.pluginState.Set("test-http-server", "reversible/current", "later"); err != nil {
+		t.Fatal(err)
+	}
+	result, err = server.undoConfirmedPluginChange(context.Background(), binding.ConversationID, second.ID, nil)
+	if err != nil || result.Error == nil || result.Error.Code != "plugin_failed" {
+		t.Fatalf("conflicting undo=%+v err=%v", result, err)
+	}
+	if value, found, err := server.pluginState.Get("test-http-server", "reversible/current"); err != nil || !found || value != "later" {
+		t.Fatalf("conflicting undo overwrote later state: %q found=%t err=%v", value, found, err)
 	}
 }
 

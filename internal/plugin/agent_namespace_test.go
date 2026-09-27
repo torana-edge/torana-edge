@@ -43,7 +43,11 @@ func TestV2DescriptorRejectsRemovedChatFields(t *testing.T) {
 }
 
 func validNamespaceDescriptor() (AgentDescriptor, PluginManifest) {
-	return AgentDescriptor{SchemaVersion: 2, Namespace: &AgentNamespace{Title: "Routing", Summary: "Choose a model for this conversation", Categories: []string{"routing"}}, Operations: []AgentOperation{{ID: "route.pin", Method: "POST", Path: "/pin", Description: "Pin a step", Risk: "write", Idempotent: true, ConversationBinding: "required", InputSchema: json.RawMessage(`{"type":"object","properties":{"step":{"type":"string"},"turns":{"type":"integer"}},"required":["step"],"additionalProperties":false}`), OutputSchema: json.RawMessage(`{"type":"object"}`)}}}, PluginManifest{Name: "decision_router", Hooks: []Hook{{Name: "run_on_http_request"}}, Permissions: []Permission{{Name: "env.serve_http"}}}
+	input := json.RawMessage(`{"type":"object","properties":{"step":{"type":"string"},"turns":{"type":"integer"}},"required":["step"],"additionalProperties":false}`)
+	return AgentDescriptor{SchemaVersion: 2, Namespace: &AgentNamespace{Title: "Routing", Summary: "Choose a model for this conversation", Categories: []string{"routing"}}, Operations: []AgentOperation{
+		{ID: "route.pin", Method: "POST", Path: "/pin", Description: "Pin a step", Risk: "write", Idempotent: true, ConversationBinding: "required", UndoOperation: "route.pin.undo", InputSchema: input, OutputSchema: json.RawMessage(`{"type":"object"}`)},
+		{ID: "route.pin.undo", Method: "POST", Path: "/pin/undo", Description: "Undo a pin", Risk: "write", Idempotent: true, ModelAccess: "never", ConversationBinding: "required", InputSchema: append(json.RawMessage(nil), input...), OutputSchema: json.RawMessage(`{"type":"object"}`)},
+	}}, PluginManifest{Name: "decision_router", Hooks: []Hook{{Name: "run_on_http_request"}}, Permissions: []Permission{{Name: "env.serve_http"}}}
 }
 
 func TestAgentNamespaceV2Validation(t *testing.T) {
@@ -64,6 +68,11 @@ func TestAgentNamespaceV2Validation(t *testing.T) {
 		{"loosened_access", func(d *AgentDescriptor, _ *PluginManifest) { d.Operations[0].ModelAccess = "read" }},
 		{"unknown_binding", func(d *AgentDescriptor, _ *PluginManifest) { d.Operations[0].ConversationBinding = "any" }},
 		{"bad_replacement", func(d *AgentDescriptor, _ *PluginManifest) { d.Operations[0].ReplacedBy = "route.pin" }},
+		{"missing_undo", func(d *AgentDescriptor, _ *PluginManifest) { d.Operations[0].UndoOperation = "" }},
+		{"reachable_undo", func(d *AgentDescriptor, _ *PluginManifest) { d.Operations[1].ModelAccess = "confirm" }},
+		{"different_undo_input", func(d *AgentDescriptor, _ *PluginManifest) {
+			d.Operations[1].InputSchema = json.RawMessage(`{"type":"object"}`)
+		}},
 		{"missing_replacement", func(d *AgentDescriptor, _ *PluginManifest) {
 			d.Operations[0].Deprecated = true
 			d.Operations[0].ReplacedBy = "missing"
