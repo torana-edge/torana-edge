@@ -22,10 +22,10 @@ rebinding; the header is **not an operator credential**.
 
 ## Model-facing tools and local commands
 
-MCP, `ask`, and conversation directives use a narrower operation policy.
-Protected operations cannot be reached through those channels, and eligible
-model-requested changes require user confirmation. The MCP token grants access
-to that interface, not to the broader operator API.
+MCP uses a narrower operation policy than the local operator API. Protected
+operations cannot be reached through MCP, and eligible model-requested changes
+require user confirmation. The MCP token grants access to that interface, not
+to the broader operator API.
 
 These rules are not a sandbox for other programs running as your user. A
 harness with unrestricted shell or local network access can call the operator

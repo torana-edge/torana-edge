@@ -962,10 +962,6 @@ func Load(path string) (Config, error) {
 	}
 
 	var user Config
-	raw, err = discardObsoleteChatSettings(raw)
-	if err != nil {
-		return cfg, fmt.Errorf("parsing config %q: %w", path, err)
-	}
 	decoder := json.NewDecoder(bytes.NewReader(raw))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&user); err != nil {

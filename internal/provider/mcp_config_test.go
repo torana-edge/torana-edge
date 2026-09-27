@@ -26,7 +26,7 @@ func TestMCPConfigurationDefaultsAndExplicitProtection(t *testing.T) {
 	}
 }
 
-func TestMCPConsentPolicyAndUnknownHarnessSetting(t *testing.T) {
+func TestMCPConsentPolicy(t *testing.T) {
 	for _, mode := range []string{"", "elicitation", "operator_only"} {
 		cfg := DefaultConfig()
 		cfg.MCP.Consent = mode
@@ -39,14 +39,11 @@ func TestMCPConsentPolicyAndUnknownHarnessSetting(t *testing.T) {
 	if cfg.validateMCPConfiguration() == nil {
 		t.Fatal("invalid consent policy accepted")
 	}
-	if _, err := discardObsoleteChatSettings([]byte(`{"harness":{"future_setting":true}}`)); err == nil {
-		t.Fatal("unknown harness setting discarded")
-	}
 }
 
 func TestUnmanagedLoadPreservesFeatureConfiguration(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")
-	if err := os.WriteFile(path, []byte(`{"suggestions":{"enabled":true},"directives":{"enabled":true},"mcp":{"enabled":true,"access":{"logger._disable":"never"}},"harness":{"setup_from_directive":false}}`), 0600); err != nil {
+	if err := os.WriteFile(path, []byte(`{"suggestions":{"enabled":true},"mcp":{"enabled":true,"access":{"logger._disable":"never"}}}`), 0600); err != nil {
 		t.Fatal(err)
 	}
 	cfg, err := Load(path)
@@ -55,6 +52,24 @@ func TestUnmanagedLoadPreservesFeatureConfiguration(t *testing.T) {
 	}
 	if !cfg.Suggestions.Enabled || !cfg.MCP.Enabled || cfg.MCP.Access["logger._disable"] != "never" {
 		t.Fatalf("configuration discarded: %+v", cfg)
+	}
+}
+
+func TestLoadRejectsRemovedChatControlSettings(t *testing.T) {
+	for name, raw := range map[string]string{
+		"directives": `{"directives":{"enabled":true}}`,
+		"assistant":  `{"assistant":{"provider":"local"}}`,
+		"harness":    `{"harness":{"setup_from_directive":true}}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.json")
+			if err := os.WriteFile(path, []byte(raw), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := Load(path); err == nil {
+				t.Fatal("removed chat-control setting accepted")
+			}
+		})
 	}
 }
 

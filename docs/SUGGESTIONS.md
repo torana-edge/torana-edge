@@ -49,7 +49,3 @@ torana changes undo <change-id> --conversation <conversation-id> --yes
 ```
 
 Undo checks that the configuration and installed plugin still match the recorded change. If either has changed, review the current setup instead of overwriting newer work. A change can only be undone once.
-
-## Upgrading older settings
-
-The former in-chat command channel has been removed; use MCP or the CLI. Legacy `directives`, `assistant`, and `harness.setup_from_directive` settings are ignored when loading an older configuration. Existing signed Responses reply IDs are decoded for one release so resumed conversations can continue.

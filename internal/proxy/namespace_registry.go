@@ -134,11 +134,18 @@ func buildNamespaceRegistry(installed []plugin.PluginBundle, loaded []plugin.Loa
 		if descriptor != nil {
 			for _, op := range descriptor.Operations {
 				guestOperation := op
+				access := op.EffectiveModelAccess()
+				// V1 has no undo companion or verified conversation binding.
+				// Keep its reads discoverable, but never offer a write that the
+				// confirmation executor cannot safely apply and reverse.
+				if descriptor.SchemaVersion == 1 && op.Risk != "read" {
+					access = "never"
+				}
 				binding := op.ConversationBinding
 				if binding == "" {
 					binding = "none"
 				}
-				entry.Operations = append(entry.Operations, namespaceOperation{ID: op.ID, Description: op.Description, Risk: op.Risk, ModelAccess: op.EffectiveModelAccess(), ConversationBinding: binding, Callable: entry.Status == "enabled", Source: "plugin", Guest: &guestOperation})
+				entry.Operations = append(entry.Operations, namespaceOperation{ID: op.ID, Description: op.Description, Risk: op.Risk, ModelAccess: access, ConversationBinding: binding, Callable: entry.Status == "enabled", Source: "plugin", Guest: &guestOperation})
 			}
 		}
 		r.entries[name] = entry

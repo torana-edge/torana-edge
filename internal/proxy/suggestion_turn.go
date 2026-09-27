@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"crypto/sha256"
+	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -43,13 +44,24 @@ func userTurnSignature(chat *engine.ChatRequest) string {
 }
 
 // Responses can send only the latest user input plus a provider-side parent.
-// A signed Torana-local reply uses a fresh parent ID for each local turn. Bind
-// that parent to the digest so identical commands in successive local turns
-// do not collapse, while an exact retry remains the same turn.
+// Bind that parent to the digest so identical text after different provider
+// responses remains a new turn, while an exact retry remains the same turn.
 func userTurnSignatureWithParent(chat *engine.ChatRequest, parent string) string {
 	signature := userTurnSignature(chat)
 	if signature == "" || parent == "" {
 		return signature
 	}
 	return fmt.Sprintf("%x", sha256.Sum256([]byte(signature+"\x00"+parent)))
+}
+
+func responsesTurnParent(body []byte) string {
+	start, end, ok := rawJSONSpanAt(body, "previous_response_id")
+	if !ok {
+		return ""
+	}
+	var parent string
+	if json.Unmarshal(body[start:end], &parent) != nil {
+		return ""
+	}
+	return parent
 }
