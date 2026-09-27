@@ -147,25 +147,24 @@ func TestE2E(t *testing.T) {
 	cacheRate := 1.0
 	freeRate := 0.0
 
-	approve := func(name string, permissions []string) provider.PluginApproval {
+	approve := func(name string) provider.PluginApproval {
+		manifest, err := plugin.ValidateManifestDir(bundles + "/" + name)
+		if err != nil {
+			t.Fatalf("validate manifest for %s: %v", name, err)
+		}
 		digest, err := plugin.BundleDigestForDir(bundles + "/" + name)
 		if err != nil {
 			t.Fatalf("bundle digest for %s: %v", name, err)
 		}
+		permissions := make([]string, 0, len(manifest.Permissions))
+		for _, permission := range manifest.Permissions {
+			permissions = append(permissions, permission.Name)
+		}
 		return provider.PluginApproval{Digest: digest, Permissions: permissions, FailureMode: "pass"}
 	}
-	schemaApproval := approve("schema_translator", []string{
-		"env.meta_get", "env.meta_set", "ir.messages.write.assistant", "ir.stream.write", "ir.tools.write",
-	})
-	intentApproval := approve("intent", []string{
-		"env.cache_get", "env.cache_set", "env.shared_cache_set", "env.emit_metric", "env.log", "env.meta_get", "env.meta_set", "env.plugin_config",
-		"ir.cache_control.write", "ir.messages.write.assistant", "ir.messages.write.developer", "ir.messages.write.other", "ir.messages.write.system",
-		"ir.messages.write.tool", "ir.messages.write.user", "ir.stream.write", "ir.tool_results.write", "ir.tools.write",
-	})
-	compactorApproval := approve("compactor", []string{
-		"env.cache_get", "env.cache_set", "env.shared_cache_get", "env.emit_metric", "env.host_call.torana_evaluate_compaction",
-		"env.model_complete", "env.model_pricing", "env.host_call.torana_record_savings", "env.plugin_config", "ir.tool_results.write",
-	})
+	schemaApproval := approve("schema_translator")
+	intentApproval := approve("intent")
+	compactorApproval := approve("compactor")
 	compactorApproval.ModelServices = map[string]provider.PluginModelServiceApproval{
 		"summarizer": {Provider: "cheap", Model: "cheap-1", Path: "/v1/chat/completions", TimeoutMS: 30_000, MaxTokens: 512, MaxInputBytes: 1 << 20, MaxCallsPerMinute: 60, MaxTokensPerHour: 200_000},
 	}
