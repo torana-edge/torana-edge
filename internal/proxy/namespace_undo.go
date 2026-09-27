@@ -6,14 +6,19 @@ import (
 	"errors"
 
 	"github.com/torana-edge/torana-edge/internal/mcpserver"
+	"github.com/torana-edge/torana-edge/internal/plugin"
 	"github.com/torana-edge/torana-edge/internal/provider"
 	"github.com/torana-edge/torana-edge/internal/suggest"
 )
 
-type pluginUndoSnapshot struct {
-	Namespace string                 `json:"namespace"`
-	Digest    string                 `json:"digest"`
-	Plugins   provider.PluginsConfig `json:"plugins"`
+type operationUndoSnapshot struct {
+	Kind      string                  `json:"kind"`
+	Namespace string                  `json:"namespace"`
+	Digest    string                  `json:"digest"`
+	Plugins   *provider.PluginsConfig `json:"plugins,omitempty"`
+	Operation string                  `json:"operation,omitempty"`
+	Input     json.RawMessage         `json:"input,omitempty"`
+	Binding   plugin.MCPBinding       `json:"binding,omitempty"`
 }
 
 // undoConfirmedPluginChange is for an explicitly user-supplied change ID, not
@@ -56,7 +61,7 @@ func (s *Server) undoConfirmedPluginChange(ctx context.Context, conversation, ch
 	if err != nil {
 		return finish("failed", mcpserver.Result{}, err)
 	}
-	var snapshot pluginUndoSnapshot
+	var snapshot operationUndoSnapshot
 	if err := json.Unmarshal([]byte(plaintext), &snapshot); err != nil {
 		return finish("failed", mcpserver.Result{}, err)
 	}
@@ -75,12 +80,36 @@ func (s *Server) undoConfirmedPluginChange(ctx context.Context, conversation, ch
 	if policy.protected[entry.Name] {
 		return finish("conflict", operationError("access_denied", "This plugin is now protected; manage it in Torana's UI or CLI."), nil)
 	}
-	candidate := current
-	candidate.Plugins = snapshot.Plugins
-	// This flag is a test-only construction option and is never serialized.
-	candidate.Plugins.AllowUnapproved = current.Plugins.AllowUnapproved
-	if err := s.applyPluginConfigurationLocked(ctx, candidate, entry.Name); err != nil {
-		return finish("failed", operationError("plugin_failed", "The previous configuration could not be restored; configuration is unchanged."), nil)
+	switch snapshot.Kind {
+	case "standard":
+		if snapshot.Plugins == nil {
+			return finish("failed", mcpserver.Result{}, errors.New("standard undo snapshot is incomplete"))
+		}
+		candidate := current
+		candidate.Plugins = *snapshot.Plugins
+		// This flag is a test-only construction option and is never serialized.
+		candidate.Plugins.AllowUnapproved = current.Plugins.AllowUnapproved
+		if err := s.applyPluginConfigurationLocked(ctx, candidate, entry.Name); err != nil {
+			return finish("failed", operationError("plugin_failed", "The previous configuration could not be restored; configuration is unchanged."), nil)
+		}
+	case "plugin":
+		if !snapshot.Binding.Bound || snapshot.Binding.ConversationID != conversation || snapshot.Operation == "" {
+			return finish("failed", mcpserver.Result{}, errors.New("plugin undo snapshot is incomplete"))
+		}
+		_, operation, exists := policy.lookup(entry.Name, snapshot.Operation)
+		if !exists || operation.Source != "plugin" || operation.Guest == nil || operation.ModelAccess != "never" || operation.Risk != "write" {
+			return finish("conflict", operationError("stale_digest", "The plugin's undo contract changed; review its current state instead of undoing it."), nil)
+		}
+		guestCtx, bindingErr := plugin.WithMCPBinding(ctx, snapshot.Binding)
+		if bindingErr != nil {
+			return finish("failed", mcpserver.Result{}, bindingErr)
+		}
+		_, domainError, executeErr := s.executeNamespaceOperation(guestCtx, operationCall{Entry: entry, Operation: operation, Input: snapshot.Input, Binding: snapshot.Binding})
+		if executeErr != nil || domainError != nil {
+			return finish("failed", operationError("plugin_failed", "The plugin could not safely restore its previous state."), nil)
+		}
+	default:
+		return finish("failed", mcpserver.Result{}, errors.New("unknown undo snapshot kind"))
 	}
 	return finish("undone", mcpserver.Result{OK: true, Status: "undone", Summary: "The confirmed change was undone."}, nil)
 }

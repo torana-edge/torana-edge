@@ -97,7 +97,7 @@ func (s *Server) handleAgentSuggestions(w http.ResponseWriter, r *http.Request) 
 	}
 	metrics.RecordSuggestion(r.Context(), item.Kind, item.Status, item.Via)
 	if status == "accepted" && item.Kind == "torana_operation" {
-		result, applyErr := s.applyConfirmedStandardOperation(r.Context(), input.ConversationID, item.ID, nil)
+		result, applyErr := s.applyConfirmedOperation(r.Context(), input.ConversationID, item.ID, nil)
 		if applyErr != nil {
 			// Never echo encrypted intent, plugin input or underlying storage errors.
 			writeAgentError(w, http.StatusServiceUnavailable, "state_unavailable", "Confirmation was recorded, but execution could not be completed. Check current configuration and change history; request a fresh change if needed.")

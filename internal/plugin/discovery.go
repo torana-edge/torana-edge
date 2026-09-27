@@ -27,6 +27,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"sort"
 	"strings"
@@ -192,6 +193,7 @@ type AgentOperation struct {
 	OutputSchema        json.RawMessage `json:"output_schema"`
 	ModelAccess         string          `json:"model_access,omitempty"`
 	ConversationBinding string          `json:"conversation_binding,omitempty"`
+	UndoOperation       string          `json:"undo_operation,omitempty"`
 	Examples            []string        `json:"examples,omitempty"`
 	Deprecated          bool            `json:"deprecated,omitempty"`
 	ReplacedBy          string          `json:"replaced_by,omitempty"`
@@ -320,7 +322,37 @@ func validateAgentDescriptor(descriptor AgentDescriptor, manifest PluginManifest
 			return fmt.Errorf("agent descriptor: operation %q output_schema: %w", operation.ID, err)
 		}
 	}
+	if descriptor.SchemaVersion != 2 {
+		return nil
+	}
+	operations := make(map[string]AgentOperation, len(descriptor.Operations))
+	for _, operation := range descriptor.Operations {
+		operations[operation.ID] = operation
+	}
+	for _, operation := range descriptor.Operations {
+		if operation.EffectiveModelAccess() != "confirm" {
+			if operation.UndoOperation != "" {
+				return fmt.Errorf("agent descriptor: operation %q has undo_operation but is not confirmable", operation.ID)
+			}
+			continue
+		}
+		undo, exists := operations[operation.UndoOperation]
+		if !exists || operation.UndoOperation == operation.ID {
+			return fmt.Errorf("agent descriptor: confirmable operation %q requires a distinct undo_operation", operation.ID)
+		}
+		if undo.Risk != "write" || !undo.Idempotent || undo.EffectiveModelAccess() != "never" || undo.ConversationBinding != "required" {
+			return fmt.Errorf("agent descriptor: undo operation %q must be an idempotent, conversation-bound, model-inaccessible write", undo.ID)
+		}
+		if !jsonObjectsEqual(operation.InputSchema, undo.InputSchema) {
+			return fmt.Errorf("agent descriptor: operation %q and undo operation %q must accept the same input schema", operation.ID, undo.ID)
+		}
+	}
 	return nil
+}
+
+func jsonObjectsEqual(left, right json.RawMessage) bool {
+	var a, b any
+	return json.Unmarshal(left, &a) == nil && json.Unmarshal(right, &b) == nil && reflect.DeepEqual(a, b)
 }
 
 func validateJSONSchemaObject(raw json.RawMessage, optional bool) error {

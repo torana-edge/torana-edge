@@ -96,11 +96,11 @@ func (s *Server) applyPluginConfigurationLocked(ctx context.Context, candidate p
 	return nil
 }
 
-// applyConfirmedStandardOperation is a host-only execution seam. The caller
+// applyConfirmedOperation is a host-only execution seam. The caller
 // has already resolved explicit user acceptance. Policy is reconstructed from
 // the latest snapshot and operator settings, not a caller-held stale registry.
 // Guest mutations and undo mounting follow in separate wiring changes.
-func (s *Server) applyConfirmedStandardOperation(ctx context.Context, conversation, id string, protected []string) (mcpserver.Result, error) {
+func (s *Server) applyConfirmedOperation(ctx context.Context, conversation, id string, protected []string) (mcpserver.Result, error) {
 	if err := ctx.Err(); err != nil {
 		return mcpserver.Result{}, err
 	}
@@ -160,38 +160,74 @@ func (s *Server) applyConfirmedStandardOperation(ctx context.Context, conversati
 	if !allowed {
 		return operationError("access_denied", "This operation is no longer available for confirmation."), nil
 	}
-	if operation.Source != "standard" {
-		return operationError("confirmation_unavailable", "Confirming plugin-defined operations is unavailable here; use the plugin's CLI guide for this operation."), nil
+	postRevision := ""
+	var undo operationUndoSnapshot
+	var candidate provider.Config
+	switch operation.Source {
+	case "standard":
+		if operation.ID == "_config.set" && (len(entry.ConfigSchema) == 0 || plugin.ValidateConfigAgainstSchema(&plugin.ConfigSchema{Raw: entry.ConfigSchema}, intent.Input) != nil) {
+			return operationError("invalid_input", "Configuration does not match the plugin schema."), nil
+		}
+		plugins, err := candidatePluginConfiguration(current.Plugins, entry.Name, operation.ID, intent.Input)
+		if err != nil {
+			return operationError("unknown_operation", "This mutation has no execution handler."), nil
+		}
+		candidate = current
+		candidate.Plugins = plugins
+		postRevision, err = s.operationRevision(candidate)
+		if err != nil {
+			return mcpserver.Result{}, err
+		}
+		pluginsSnapshot := current.Plugins
+		undo = operationUndoSnapshot{Kind: "standard", Namespace: entry.Name, Digest: entry.Digest, Plugins: &pluginsSnapshot}
+	case "plugin":
+		if operation.Guest == nil || operation.Guest.UndoOperation == "" {
+			return operationError("confirmation_unavailable", "This plugin operation does not provide a safe undo path."), nil
+		}
+		_, undoOperation, exists := policy.lookup(entry.Name, operation.Guest.UndoOperation)
+		if !exists || undoOperation.Source != "plugin" || undoOperation.Guest == nil || undoOperation.ModelAccess != "never" || undoOperation.Risk != "write" {
+			return operationError("stale_digest", "The plugin's undo contract changed; request and review a fresh operation."), nil
+		}
+		postRevision, err = s.operationRevision(current)
+		if err != nil {
+			return mcpserver.Result{}, err
+		}
+		undo = operationUndoSnapshot{Kind: "plugin", Namespace: entry.Name, Digest: entry.Digest, Operation: undoOperation.ID, Input: append(json.RawMessage(nil), intent.Input...), Binding: intent.Binding}
+	default:
+		return operationError("confirmation_unavailable", "This operation has no confirmation handler."), nil
 	}
-	if operation.ID == "_config.set" && (len(entry.ConfigSchema) == 0 || plugin.ValidateConfigAgainstSchema(&plugin.ConfigSchema{Raw: entry.ConfigSchema}, intent.Input) != nil) {
-		return operationError("invalid_input", "Configuration does not match the plugin schema."), nil
-	}
-	plugins, err := candidatePluginConfiguration(current.Plugins, entry.Name, operation.ID, intent.Input)
-	if err != nil {
-		return operationError("unknown_operation", "This mutation has no execution handler."), nil
-	}
-	candidate := current
-	candidate.Plugins = plugins
-	postRevision, err := s.operationRevision(candidate)
+	undoJSON, err := json.Marshal(undo)
 	if err != nil {
 		return mcpserver.Result{}, err
 	}
-	undo, err := json.Marshal(pluginUndoSnapshot{Namespace: entry.Name, Digest: entry.Digest, Plugins: current.Plugins})
-	if err != nil {
-		return mcpserver.Result{}, err
-	}
-	sealedUndo, err := s.secrets.Encrypt(string(undo))
+	sealedUndo, err := s.secrets.Encrypt(string(undoJSON))
 	if err != nil {
 		return mcpserver.Result{}, err
 	}
 	if _, err := s.suggestions.PrepareOperationChange(conversation, id, sealedUndo, postRevision); err != nil {
 		return mcpserver.Result{}, err
 	}
-	if err := s.applyPluginConfigurationLocked(ctx, candidate, entry.Name); err != nil {
+	var applyErr error
+	if operation.Source == "standard" {
+		applyErr = s.applyPluginConfigurationLocked(ctx, candidate, entry.Name)
+	} else {
+		guestCtx, bindingErr := plugin.WithMCPBinding(ctx, intent.Binding)
+		if bindingErr != nil {
+			applyErr = bindingErr
+		} else {
+			_, domainError, executeErr := s.executeNamespaceOperation(guestCtx, operationCall{Entry: entry, Operation: operation, Input: intent.Input, Binding: intent.Binding})
+			if executeErr != nil {
+				applyErr = executeErr
+			} else if domainError != nil {
+				applyErr = errors.New(domainError.Code)
+			}
+		}
+	}
+	if applyErr != nil {
 		if finishErr := s.suggestions.FinishOperation(conversation, id, "failed"); finishErr != nil {
 			return mcpserver.Result{}, finishErr
 		}
-		return operationError("plugin_failed", "The change could not be applied; configuration is unchanged."), nil
+		return operationError("plugin_failed", "The confirmed change could not be applied."), nil
 	}
 	if err := s.suggestions.FinishOperation(conversation, id, "applied"); err != nil {
 		return appliedHistoryIncomplete(entry.Name, operation.ID), nil

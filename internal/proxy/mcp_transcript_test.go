@@ -82,7 +82,7 @@ func TestTranscriptOperationCreatesOneConfirmationWithoutApplying(t *testing.T) 
 	if _, err := server.suggestions.ResolveID("conversation", beforeApply[1].ID, "accepted", "test", 0); err != nil {
 		t.Fatal(err)
 	}
-	if result, err := server.applyConfirmedStandardOperation(context.Background(), "conversation", beforeApply[1].ID, nil); err != nil || !result.OK || result.Status != "applied" {
+	if result, err := server.applyConfirmedOperation(context.Background(), "conversation", beforeApply[1].ID, nil); err != nil || !result.OK || result.Status != "applied" {
 		t.Fatalf("apply result=%+v err=%v", result, err)
 	}
 	server.observeTranscriptOperations(context.Background(), secondRequest, "conversation", []string{"torana"})
@@ -137,5 +137,14 @@ func TestTranscriptTicketRejectsMismatchedAndReplayedInvocation(t *testing.T) {
 	}
 	if err := server.consumeTranscriptTicket(context.Background(), expired, matching); err == nil {
 		t.Fatal("expired ticket accepted")
+	}
+	reorderedInput := namespaceInvokeInput{Namespace: "one", Operation: "write", Input: json.RawMessage(`{"a":9007199254740993,"b":2}`)}
+	reorderedTicket, err := server.sealTranscriptTicket(context.Background(), reorderedInput)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reordered := json.RawMessage(`{"input":{"b":2,"a":9007199254740993},"operation":"write","namespace":"one"}`)
+	if err := server.consumeTranscriptTicket(context.Background(), reorderedTicket, reordered); err != nil {
+		t.Fatalf("equivalent reordered arguments rejected: %v", err)
 	}
 }

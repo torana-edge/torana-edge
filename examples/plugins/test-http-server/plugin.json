@@ -28,6 +28,14 @@
     {
       "name": "env.cache_get",
       "description": "Deterministic snapshot barrier"
+    },
+    {
+      "name": "env.state_get",
+      "description": "Read reversible-operation fixture state"
+    },
+    {
+      "name": "env.state_set",
+      "description": "Persist reversible-operation fixture state"
     }
   ]
 }
