@@ -29,7 +29,6 @@ type agentAPIOperation struct {
 	OutputSchema         json.RawMessage               `json:"output_schema"`
 	Plugin               string                        `json:"plugin,omitempty"`
 	PluginDigest         string                        `json:"plugin_digest,omitempty"`
-	ModelAccess          string                        `json:"model_access,omitempty"`
 	ConversationBinding  string                        `json:"conversation_binding,omitempty"`
 	RevisionPrecondition *agentAPIRevisionPrecondition `json:"revision_precondition,omitempty"`
 }
@@ -327,7 +326,6 @@ func (s *Server) agentAPIDiscovery() agentAPIDocument {
 						OutputSchema:        operation.OutputSchema,
 						Plugin:              loaded.Manifest.Name,
 						PluginDigest:        loaded.Digest,
-						ModelAccess:         operation.EffectiveModelAccess(),
 						ConversationBinding: binding,
 					})
 				}
@@ -402,6 +400,13 @@ func (s *Server) handlePluginAgentOperation(w http.ResponseWriter, r *http.Reque
 		}
 		writeAgentError(w, http.StatusNotFound, "operation_not_found", "plugin operation was not found")
 		return
+	}
+	if operation.ConversationBinding == "required" {
+		binding, exists := plugin.MCPBindingFromContext(r.Context())
+		if !exists || !binding.Bound {
+			writeAgentError(w, http.StatusConflict, "conversation_binding_required", "operation requires a verified harness conversation; invoke it through Torana MCP from that conversation")
+			return
+		}
 	}
 
 	var body []byte

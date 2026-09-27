@@ -36,8 +36,15 @@ func WithMCPBinding(ctx context.Context, binding MCPBinding) (context.Context, e
 	return context.WithValue(ctx, mcpBindingKey{}, binding), nil
 }
 
+// MCPBindingFromContext returns only host-attached MCP evidence. Ordinary HTTP
+// headers cannot create this private context value.
+func MCPBindingFromContext(ctx context.Context) (MCPBinding, bool) {
+	binding, ok := ctx.Value(mcpBindingKey{}).(MCPBinding)
+	return binding, ok
+}
+
 func injectMCPBindingHeaders(ctx context.Context, filtered map[string][]string) {
-	binding, exists := ctx.Value(mcpBindingKey{}).(MCPBinding)
+	binding, exists := MCPBindingFromContext(ctx)
 	if !exists {
 		return
 	}

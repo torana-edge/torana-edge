@@ -41,3 +41,18 @@ func TestMCPBindingRejectsPartialOrUnsafeIdentity(t *testing.T) {
 		}
 	}
 }
+
+func TestMCPBindingFromContextReadsOnlyHostEvidence(t *testing.T) {
+	if _, ok := MCPBindingFromContext(context.Background()); ok {
+		t.Fatal("empty context reported MCP evidence")
+	}
+	want := MCPBinding{Bound: true, ConversationID: "conversation", CallID: "call"}
+	ctx, err := WithMCPBinding(context.Background(), want)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, ok := MCPBindingFromContext(ctx)
+	if !ok || got != want {
+		t.Fatalf("binding = %+v, %t; want %+v, true", got, ok, want)
+	}
+}
