@@ -153,8 +153,12 @@ and `schema.json`:
 
 ```json
 {
-  "schema_version": 1,
-  "description": "Machine-readable operations for this plugin.",
+  "schema_version": 2,
+  "namespace": {
+    "title": "My plugin",
+    "summary": "Inspect and control this plugin.",
+    "categories": ["workflow"]
+  },
   "operations": [
     {
       "id": "status",
@@ -163,6 +167,8 @@ and `schema.json`:
       "description": "Read plugin readiness.",
       "risk": "read",
       "idempotent": true,
+      "model_access": "read",
+      "conversation_binding": "none",
       "output_schema": {
         "type": "object",
         "required": ["status"],
@@ -188,6 +194,23 @@ the guest request path rewritten to `/agent/status`. This keeps page routes
 such as `/` separate from machine routes. Discovery operation IDs use the
 unambiguous reserved `plugin:<plugin-name>:<operation-id>` namespace; built-in IDs use
 `torana.*`, so community plugins cannot shadow host operations.
+
+The same descriptor supplies the plugin's canonical namespace to Torana's MCP
+server. `model_access` decides whether a model may read directly, must ask the
+user to confirm a change, or cannot reach the operation. Set
+`conversation_binding: "required"` when a result or change belongs to the
+current chat; Torana then supplies verified conversation and tool-call headers
+instead of trusting IDs in plugin input.
+
+Confirmed plugin changes must be safely reversible. The forward operation
+declares `undo_operation`, naming a separate idempotent write with
+`model_access: "never"`, required conversation binding, and the same input
+schema. The plugin records the prior state under the verified tool-call ID and
+refuses undo if a later change has superseded it. Torana keeps the original
+input and binding encrypted, and users undo from the UI or with
+`torana changes undo`—the model cannot invoke the companion directly. See the
+[SDK operation-authoring guide](https://github.com/torana-edge/torana-plugin-sdk/blob/main/docs/AGENT_OPERATIONS.md)
+for a complete descriptor and handler contract.
 
 The guest must return a `ServeHTTP` result containing a valid JSON body. Torana
 validates request and response values against the advertised schema and rejects
@@ -218,7 +241,9 @@ sdk.OnHTTPRequest(func(ctx context.Context, req *pb.HttpRequest) (sdk.HTTPResult
 
 ### Descriptor constraints
 
-- `schema_version` must be `1`.
+- `schema_version` must be `2` for new plugins.
+- `namespace` provides a short title, summary, and optional categories; the
+  manifest name remains the canonical namespace.
 - Operation IDs contain at most 64 ASCII letters, digits, `.`, `_`, or `-`.
 - Methods are `GET`, `POST`, `PUT`, `PATCH`, or `DELETE`.
 - Paths are absolute plugin-relative paths without traversal, query, or
@@ -228,8 +253,13 @@ sdk.OnHTTPRequest(func(ctx context.Context, req *pb.HttpRequest) (sdk.HTTPResult
   schema is required. Without `input_schema`, the operation accepts no body.
 - `GET` operations use `risk: "read"`.
 - Mutations use `risk: "write"` or `"destructive"` as appropriate.
+- `model_access` is `read`, `confirm`, or `never`; operators may only make it
+  stricter. `conversation_binding` is `none`, `preferred`, or `required`.
+- Every confirmable operation names a distinct `undo_operation` that is an
+  idempotent, conversation-bound, model-inaccessible write with the same input
+  schema.
 
-The v1 schema subset supports `type`, `properties`, `required`,
+The schema subset supports `type`, `properties`, `required`,
 `additionalProperties` (boolean), `items`, `const`, `enum`, `$schema`, `title`,
 and `description`. Types are `object`, `array`, `string`, `number`, `integer`,
 `boolean`, and `null`. Unknown keywords are rejected at discovery so a plugin
