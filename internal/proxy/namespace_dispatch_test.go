@@ -23,13 +23,39 @@ func TestOperationDispatchReadsAndConsentHaveSeparatePaths(t *testing.T) {
 		return mcpserver.Result{OK: true, Status: "pending_confirmation", Summary: "Disable logger"}, nil
 	}}
 	for _, tc := range []struct{ operation, status string }{{"read.000", ""}, {"_disable", "pending_confirmation"}} {
-		result, err := d.invoke(context.Background(), json.RawMessage(`{"namespace":"logger","operation":"`+tc.operation+`","input":{}}`), plugin.MCPBinding{})
+		binding := plugin.MCPBinding{}
+		if tc.operation == "_disable" {
+			binding = plugin.MCPBinding{Bound: true, ConversationID: "session", CallID: "call"}
+		}
+		result, err := d.invoke(context.Background(), json.RawMessage(`{"namespace":"logger","operation":"`+tc.operation+`","input":{}}`), binding)
 		if err != nil || !result.OK || result.Status != tc.status {
 			t.Fatalf("result=%+v err=%v", result, err)
 		}
 	}
 	if executed != 1 || proposed != 1 {
 		t.Fatalf("writes reached execution: execute=%d propose=%d", executed, proposed)
+	}
+}
+
+func TestRequiredConfirmedWriteDefersUntilTranscriptBinding(t *testing.T) {
+	p := catalogTestPolicy(t, 1)
+	proposed := 0
+	d := operationDispatch{policy: p, sealPending: func(context.Context, namespaceInvokeInput) (string, error) { return "ticket", nil }, propose: func(_ context.Context, call operationCall) (mcpserver.Result, error) {
+		proposed++
+		return mcpserver.Result{OK: true, Status: "pending_confirmation"}, nil
+	}}
+	raw := json.RawMessage(`{"namespace":"logger","operation":"_disable"}`)
+	result, err := d.invoke(context.Background(), raw, plugin.MCPBinding{})
+	if err != nil || !result.OK || result.Status != "pending" || result.Conversation == nil || result.Conversation.Binding != "unbound" || proposed != 0 {
+		t.Fatalf("unbound=%+v proposed=%d err=%v", result, proposed, err)
+	}
+	result, handled, err := d.invokeTranscript(context.Background(), raw, plugin.MCPBinding{Bound: true, ConversationID: "session", CallID: "call"})
+	if err != nil || !handled || !result.OK || result.Status != "pending_confirmation" || proposed != 1 {
+		t.Fatalf("transcript=%+v handled=%t proposed=%d err=%v", result, handled, proposed, err)
+	}
+	_, handled, err = d.invokeTranscript(context.Background(), json.RawMessage(`{"namespace":"logger","operation":"read.000"}`), plugin.MCPBinding{Bound: true, ConversationID: "session", CallID: "read"})
+	if err != nil || handled || proposed != 1 {
+		t.Fatalf("read replayed: handled=%t proposed=%d err=%v", handled, proposed, err)
 	}
 }
 

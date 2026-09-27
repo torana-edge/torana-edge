@@ -125,7 +125,11 @@ func buildNamespaceRegistry(installed []plugin.PluginBundle, loaded []plugin.Loa
 			if standard.id == "_enable" && entry.Status == "unapproved" {
 				callable = false
 			}
-			entry.Operations = append(entry.Operations, namespaceOperation{ID: standard.id, Description: standard.description, Risk: standard.risk, ModelAccess: standard.access, ConversationBinding: "none", Callable: callable, Source: "standard"})
+			binding := "none"
+			if standard.risk == "write" {
+				binding = "required"
+			}
+			entry.Operations = append(entry.Operations, namespaceOperation{ID: standard.id, Description: standard.description, Risk: standard.risk, ModelAccess: standard.access, ConversationBinding: binding, Callable: callable, Source: "standard"})
 		}
 		if descriptor != nil {
 			for _, op := range descriptor.Operations {

@@ -65,6 +65,9 @@ func TestNamespaceRegistryListsUnavailablePluginsWithoutExecutingThem(t *testing
 			if op.ID == "_config.get" && op.ModelAccess != "never" {
 				t.Fatal("configuration readable by model")
 			}
+			if op.Source == "standard" && op.Risk == "write" && op.ConversationBinding != "required" {
+				t.Fatalf("standard write %s is not transcript-bound", op.ID)
+			}
 		}
 	}
 }
