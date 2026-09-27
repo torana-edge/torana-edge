@@ -280,7 +280,7 @@ func builtInAgentOperations() []agentAPIOperation {
 		{
 			ID: "torana.suggestions.list", Method: http.MethodGet,
 			Path:        suggestionsAPIPath + "?conversation_id={conversation_id}",
-			Description: "List suggestions for one conversation, including pending confirmation codes and outcomes.",
+			Description: "List suggestions for one conversation, including pending confirmations and outcomes.",
 			Risk:        "read", Idempotent: true, ContentType: "application/json", OutputSchema: arbitraryObjectSchema,
 		},
 		{
