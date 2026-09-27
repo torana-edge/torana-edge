@@ -1290,6 +1290,12 @@ func New(cfg Config) (*Server, error) {
 					}
 				}
 			}
+			if currentCfg.Providers.MCP.Enabled {
+				// Consume authenticated transcript tickets before forwarding. This
+				// intentionally blocks briefly so a retry cannot race a duplicate
+				// confirmation into the durable suggestion store.
+				s.observeTranscriptOperations(req.Context(), chat, rs.ConversationID, currentCfg.Providers.MCP.ResponseServerNames())
+			}
 			// Publish the routing decision so plugins can ask the host about
 			// this provider — pricing and cache semantics are keyed by provider
 			// name, and a plugin that cannot name its own provider cannot look

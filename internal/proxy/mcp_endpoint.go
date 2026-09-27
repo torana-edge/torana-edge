@@ -163,7 +163,7 @@ func (s *Server) dispatchMCP(ctx context.Context, tool string, input json.RawMes
 	if tool != "torana_invoke" {
 		return policy.catalogDispatch(tool, input), nil
 	}
-	dispatch := operationDispatch{policy: policy, execute: s.executeNamespaceOperation, propose: s.proposeNamespaceOperation}
+	dispatch := operationDispatch{policy: policy, execute: s.executeNamespaceOperation, propose: s.proposeNamespaceOperation, sealPending: s.sealTranscriptTicket}
 	return dispatch.invoke(ctx, input, binding)
 }
 

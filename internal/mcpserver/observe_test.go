@@ -65,3 +65,62 @@ func TestGeminiObservationScopesSyntheticIDsToHostRequest(t *testing.T) {
 		}
 	}
 }
+
+func TestTranscriptInvocationsUseOnlyLatestCompletedExchange(t *testing.T) {
+	args, err := engine.ParseRequiredJSONObject([]byte(`{"namespace":"logger","operation":"_disable"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := &engine.ChatRequest{Messages: []engine.Message{
+		{Role: engine.RoleAssistant, Blocks: []engine.Block{{ToolUse: &engine.ToolUseBlock{ID: "old", Name: "mcp__torana__torana_invoke", Arguments: args}}}},
+		{Role: engine.RoleUser, Blocks: []engine.Block{{ToolResult: &engine.ToolResultBlock{ToolCallID: "old", Content: []engine.ToolResultContentBlock{{Text: `{"ok":true,"status":"pending","ticket":"old-ticket"}`}}}}}},
+		{Role: engine.RoleAssistant, Blocks: []engine.Block{{ToolUse: &engine.ToolUseBlock{ID: "new", Name: "mcp__torana__torana_invoke", Arguments: args}}}},
+		{Role: engine.RoleUser, Blocks: []engine.Block{{ToolResult: &engine.ToolResultBlock{ToolCallID: "new", Content: []engine.ToolResultContentBlock{{Text: `{"ok":true,"status":"pending","ticket":"new-ticket"}`}}}}}},
+	}}
+	calls := TranscriptInvocations(request, []string{"torana"})
+	if len(calls) != 1 || calls[0].CallID != "new" || calls[0].Ticket != "new-ticket" || string(calls[0].Input) != string(args.Bytes()) {
+		t.Fatalf("calls=%+v", calls)
+	}
+	request.Messages = append(request.Messages, engine.Message{Role: engine.RoleAssistant, Blocks: []engine.Block{{Text: &engine.TextBlock{Text: "done"}}}})
+	if calls := TranscriptInvocations(request, []string{"torana"}); len(calls) != 0 {
+		t.Fatalf("old exchange replayed: %+v", calls)
+	}
+}
+
+func TestTranscriptInvocationsRequireSuccessfulToranaTicket(t *testing.T) {
+	args, _ := engine.ParseRequiredJSONObject([]byte(`{"namespace":"logger","operation":"_disable"}`))
+	failed := true
+	for _, result := range []*engine.ToolResultBlock{
+		{ToolCallID: "call", IsError: &failed, Content: []engine.ToolResultContentBlock{{Text: `{"ok":true,"status":"pending","ticket":"ticket"}`}}},
+		{ToolCallID: "call", Content: []engine.ToolResultContentBlock{{Text: "user denied this tool call"}}},
+		{ToolCallID: "call", Content: []engine.ToolResultContentBlock{{Text: `{"ok":true,"status":"pending"}`}}},
+	} {
+		request := &engine.ChatRequest{Messages: []engine.Message{
+			{Role: engine.RoleAssistant, Blocks: []engine.Block{{ToolUse: &engine.ToolUseBlock{ID: "call", Name: "mcp__torana__torana_invoke", Arguments: args}}}},
+			{Role: engine.RoleUser, Blocks: []engine.Block{{ToolResult: result}}},
+		}}
+		if calls := TranscriptInvocations(request, []string{"torana"}); len(calls) != 0 {
+			t.Fatalf("unsafe result accepted: %+v", calls)
+		}
+	}
+}
+
+func TestTranscriptInvocationsRejectForeignIncompleteAndConflictingCalls(t *testing.T) {
+	first, _ := engine.ParseRequiredJSONObject([]byte(`{"namespace":"logger","operation":"_disable"}`))
+	second, _ := engine.ParseRequiredJSONObject([]byte(`{"namespace":"logger","operation":"_enable"}`))
+	request := &engine.ChatRequest{Messages: []engine.Message{
+		{Role: engine.RoleAssistant, Blocks: []engine.Block{
+			{ToolUse: &engine.ToolUseBlock{ID: "conflict", Name: "mcp__torana__torana_invoke", Arguments: first}},
+			{ToolUse: &engine.ToolUseBlock{ID: "conflict", Name: "mcp__torana__torana_invoke", Arguments: second}},
+			{ToolUse: &engine.ToolUseBlock{ID: "foreign", Name: "mcp__foreign__torana_invoke", Arguments: first}},
+			{ToolUse: &engine.ToolUseBlock{ID: "unfinished", Name: "mcp__torana__torana_invoke", Arguments: first}},
+		}},
+		{Role: engine.RoleUser, Blocks: []engine.Block{
+			{ToolResult: &engine.ToolResultBlock{ToolCallID: "conflict", Content: []engine.ToolResultContentBlock{{Text: "x"}}}},
+			{ToolResult: &engine.ToolResultBlock{ToolCallID: "foreign", Content: []engine.ToolResultContentBlock{{Text: "x"}}}},
+		}},
+	}}
+	if calls := TranscriptInvocations(request, []string{"torana"}); len(calls) != 0 {
+		t.Fatalf("unsafe calls accepted: %+v", calls)
+	}
+}

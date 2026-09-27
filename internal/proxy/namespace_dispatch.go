@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"strings"
 
@@ -29,24 +30,53 @@ type operationCall struct {
 }
 
 type operationDispatch struct {
-	policy  *namespaceAccessPolicy
-	execute func(context.Context, operationCall) (any, *mcpserver.DomainError, error)
-	propose func(context.Context, operationCall) (mcpserver.Result, error)
+	policy      *namespaceAccessPolicy
+	execute     func(context.Context, operationCall) (any, *mcpserver.DomainError, error)
+	propose     func(context.Context, operationCall) (mcpserver.Result, error)
+	sealPending func(context.Context, namespaceInvokeInput) (string, error)
 }
 
 func operationError(code, message string) mcpserver.Result {
 	return mcpserver.Result{Error: &mcpserver.DomainError{Code: code, Message: message}}
 }
 
-func (d *operationDispatch) invoke(ctx context.Context, raw json.RawMessage, binding plugin.MCPBinding) (mcpserver.Result, error) {
+func decodeNamespaceInvoke(raw json.RawMessage) (namespaceInvokeInput, bool) {
 	var input namespaceInvokeInput
 	decoder := json.NewDecoder(bytes.NewReader(raw))
 	decoder.DisallowUnknownFields()
 	var trailing any
 	if len(raw) > 64<<10 || !strings.HasPrefix(strings.TrimSpace(string(raw)), "{") || decoder.Decode(&input) != nil || decoder.Decode(&trailing) != io.EOF || input.Namespace == "" || input.Operation == "" {
+		return namespaceInvokeInput{}, false
+	}
+	return input, true
+}
+
+func (d *operationDispatch) invoke(ctx context.Context, raw json.RawMessage, binding plugin.MCPBinding) (mcpserver.Result, error) {
+	input, ok := decodeNamespaceInvoke(raw)
+	if !ok {
 		return operationError("invalid_input", "Choose a namespace and operation, with an optional input object."), nil
 	}
 	return d.dispatch(ctx, input, binding)
+}
+
+// invokeTranscript replays only required, confirmed writes. Read operations
+// already returned their result to the MCP caller and must never execute again
+// merely because their call is present in history.
+func (d *operationDispatch) invokeTranscript(ctx context.Context, raw json.RawMessage, binding plugin.MCPBinding) (mcpserver.Result, bool, error) {
+	input, ok := decodeNamespaceInvoke(raw)
+	if !ok || d == nil || d.policy == nil || d.policy.registry == nil || !binding.Bound {
+		return mcpserver.Result{}, false, nil
+	}
+	entry, exists := d.policy.registry.resolve(input.Namespace)
+	if !exists {
+		return mcpserver.Result{}, false, nil
+	}
+	_, op, exists := d.policy.lookup(entry.Name, input.Operation)
+	if !exists || op.ConversationBinding != "required" || d.policy.ModelReachable(entry.Name, op.ID) != "confirm" {
+		return mcpserver.Result{}, false, nil
+	}
+	result, err := d.dispatch(ctx, input, binding)
+	return result, true, err
 }
 
 func (d *operationDispatch) dispatch(ctx context.Context, input namespaceInvokeInput, binding plugin.MCPBinding) (mcpserver.Result, error) {
@@ -102,14 +132,24 @@ func (d *operationDispatch) dispatch(ctx context.Context, input namespaceInvokeI
 		result := operationError("invalid_input", "Input does not match the operation's declared schema; describe it and try again.")
 		return result, nil
 	}
-	ctx, err := plugin.WithMCPBinding(ctx, binding)
-	if err != nil {
-		return operationError("unbound_conversation", "Torana could not verify this call's conversation."), nil
-	}
 	if op.ConversationBinding == "required" && !binding.Bound {
+		if confirm {
+			if d.sealPending == nil {
+				return mcpserver.Result{}, errors.New("pending-operation ticket sealer is unavailable")
+			}
+			ticket, err := d.sealPending(ctx, input)
+			if err != nil {
+				return mcpserver.Result{}, err
+			}
+			return mcpserver.Result{OK: true, Namespace: entry.Name, Operation: op.ID, Status: "pending", Ticket: ticket, Summary: "Torana will attach this request when the tool result appears in the conversation.", Conversation: &mcpserver.ConversationBinding{Binding: "unbound"}}, nil
+		}
 		result := operationError("unbound_conversation", "This operation needs the current conversation; retry after Torana observes the tool call.")
 		result.Error.Retryable = true
 		return result, nil
+	}
+	ctx, err := plugin.WithMCPBinding(ctx, binding)
+	if err != nil {
+		return operationError("unbound_conversation", "Torana could not verify this call's conversation."), nil
 	}
 	call := operationCall{Entry: entry, Operation: op, Input: append(json.RawMessage(nil), input.Input...), Binding: binding}
 	if op.Source == "core" && op.ID == "plugins.list" {

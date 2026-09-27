@@ -33,6 +33,7 @@ type Result struct {
 	Operation        string               `json:"operation,omitempty"`
 	Result           any                  `json:"result,omitempty"`
 	Status           string               `json:"status,omitempty"`
+	Ticket           string               `json:"ticket,omitempty"`
 	Summary          string               `json:"summary,omitempty"`
 	ExpiresInSeconds int                  `json:"expires_in_seconds,omitempty"`
 	Conversation     *ConversationBinding `json:"conversation,omitempty"`

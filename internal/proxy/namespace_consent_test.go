@@ -30,13 +30,13 @@ func TestNamespaceConsentDoesNotExecuteOrExposeConfirmation(t *testing.T) {
 		t.Fatal(err)
 	}
 	executed := false
-	dispatch := operationDispatch{policy: policy, propose: server.proposeNamespaceOperation, execute: func(context.Context, operationCall) (any, *mcpserver.DomainError, error) {
+	dispatch := operationDispatch{policy: policy, propose: server.proposeNamespaceOperation, sealPending: func(context.Context, namespaceInvokeInput) (string, error) { return "ticket", nil }, execute: func(context.Context, operationCall) (any, *mcpserver.DomainError, error) {
 		executed = true
 		return nil, nil, nil
 	}}
 	input := json.RawMessage(`{"namespace":"test-http-server","operation":"_disable"}`)
 	unbound, err := dispatch.invoke(context.Background(), input, plugin.MCPBinding{})
-	if err != nil || unbound.Error == nil || unbound.Error.Code != "unbound_conversation" {
+	if err != nil || !unbound.OK || unbound.Status != "pending" || unbound.Conversation == nil || unbound.Conversation.Binding != "unbound" {
 		t.Fatalf("unbound=%+v %v", unbound, err)
 	}
 	binding := plugin.MCPBinding{Bound: true, ConversationID: "host-session", CallID: "host-call"}
