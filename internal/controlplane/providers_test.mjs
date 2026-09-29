@@ -6,7 +6,8 @@ const context = {structuredClone};
 runInNewContext(readFileSync(new URL('./dist/providers.js', import.meta.url), 'utf8'), context);
 function form(overrides = {}, original = {}) {
   const values = {name: 'route', url: 'http://127.0.0.1:8000', format: 'openai', 'auth-mode': 'none', credential: 'ignored',
-    fallback: '', translation: 'native', client: 'anthropic', upstream: 'openai-chat', model: '', 'max-tokens': '', project: '', ...overrides};
+    fallback: '', translation: 'native', client: 'anthropic', upstream: 'openai-chat', model: '', 'max-tokens': '', project: '',
+    'default-model': '', 'inference-path': '', ...overrides};
   return {originalProvider: original, open: false, focused: '', querySelector(selector) {
     const key = selector.slice(3);
     return {value: values[key], focus: () => { this.focused = key; }};
@@ -33,6 +34,14 @@ test('provider edits preserve unrelated config and remove a bridge explicitly', 
   const direct = context.ToranaProviders.read(form({}, original));
   direct.provider.cache.nested.value = 'edited';
   assert.equal(original.cache.nested.value, 'preserve');
+});
+test('plugin model defaults are explicit and removable', () => {
+  const configured = read(form({'default-model': 'local-scanner', 'inference-path': '/custom/scan'})).provider;
+  assert.equal(configured.default_model, 'local-scanner');
+  assert.equal(configured.inference_path, '/custom/scan');
+  const cleared = read(form({}, configured)).provider;
+  assert.equal('default_model' in cleared, false);
+  assert.equal('inference_path' in cleared, false);
 });
 test('bridge fields set the upstream family and retain ordered fallback targets', () => {
   const output = read(form({translation: 'bridge', client: 'openai-responses', upstream: 'anthropic', model: 'claude-haiku-4-5', 'max-tokens': '2048', 'auth-mode': 'credential', credential: 'anthropic-key', fallback: 'local, backup'})).provider;
