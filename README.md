@@ -42,8 +42,9 @@ export TORANA_DATA_DIR="$PWD/.torana-data"
 ./torana status
 ```
 
-Use any free port; keep the same port in your harness endpoint. This guide uses
-`8143` so the choice is explicit instead of assuming a common local port is free.
+Use any free port. The CLI discovers the running instance, so later commands
+and harness setup do not need to repeat it. This guide uses `8143` so the
+startup choice is explicit instead of assuming a common local port is free.
 
 ### Use the harness you already have
 
@@ -55,7 +56,7 @@ For an already signed-in Claude Code session, launch it through the example's
 Anthropic route:
 
 ```bash
-ANTHROPIC_BASE_URL=http://127.0.0.1:8143/provider/anthropic claude
+ANTHROPIC_BASE_URL="$(./torana endpoint anthropic)" claude
 ```
 
 Ask it to read a small, non-sensitive file, then find the request in Torana's
@@ -82,6 +83,8 @@ full prompt/response traffic log, and the recent feed resets when it restarts.
 
 `start`, `status`, and `stop` print readable summaries; add `--json` when
 driving them from scripts or an agent.
+`endpoint` prints the running origin, or a provider route such as
+`./torana endpoint anthropic`, for shell and harness configuration.
 
 ## Add one plugin
 

@@ -94,6 +94,7 @@ Usage:
   torana start                   run the proxy in the background
   torana status                  inspect the running instance
   torana open                    open the running instance's local Web UI
+  torana endpoint [provider]     print the live origin or provider endpoint
   torana stop --yes              stop it gracefully
   torana plugin <command>        author, build and install plugins
   torana credential <command>    configure named credentials

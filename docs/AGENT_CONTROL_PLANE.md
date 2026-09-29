@@ -39,7 +39,7 @@ the guest executes; rediscover and review instead of retrying blindly.
 The discovery document is the starting point:
 
 ```bash
-TORANA_URL=http://127.0.0.1:8080
+TORANA_URL="$(torana endpoint)"
 curl --fail-with-body --silent \
   "$TORANA_URL/_torana/api/v1/" | jq
 ```

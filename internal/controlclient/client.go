@@ -28,6 +28,7 @@ type Client struct {
 	base       *url.URL
 	http       *http.Client
 	instanceID string
+	storePath  string
 }
 
 // New accepts host:port or an HTTP(S) origin, never a remote host, URL path,
@@ -37,11 +38,17 @@ func New(addr string, timeout time.Duration) (*Client, error) {
 	var instanceID string
 	if addr == "" {
 		var err error
-		addr, instanceID, err = defaultTarget()
+		var storePath string
+		addr, instanceID, storePath, err = defaultTarget()
 		if err != nil {
 			return nil, err
 		}
+		return newClient(addr, instanceID, storePath, timeout)
 	}
+	return newClient(addr, instanceID, "", timeout)
+}
+
+func newClient(addr, instanceID, storePath string, timeout time.Duration) (*Client, error) {
 	if !strings.Contains(addr, "://") {
 		addr = "http://" + addr
 	}
@@ -84,7 +91,7 @@ func New(addr string, timeout time.Duration) (*Client, error) {
 		}
 		return dialer.DialContext(ctx, network, address)
 	}
-	return &Client{base: u, instanceID: instanceID, http: &http.Client{
+	return &Client{base: u, instanceID: instanceID, storePath: storePath, http: &http.Client{
 		Transport: transport, Timeout: timeout,
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 	}}, nil
@@ -94,39 +101,71 @@ func (c *Client) Close() { c.http.CloseIdleConnections() }
 
 func (c *Client) Address() string { return c.base.String() }
 
+// StorePath is non-empty only when this client discovered its target through a
+// managed store. Explicit --addr clients are intentionally not store-bound.
+func (c *Client) StorePath() string { return c.storePath }
+
 // DefaultAddress reads configuration without materializing a managed store.
 // A typo or unreadable configuration is an error, not permission to administer
 // an unrelated server at the default port. --addr bypasses this lookup.
 func DefaultAddress() (string, error) {
-	addr, _, err := defaultTarget()
+	addr, _, _, err := defaultTarget()
 	return addr, err
 }
 
-func defaultTarget() (string, string, error) {
+func defaultTarget() (string, string, string, error) {
 	// A daemon may have been started from a different shell with a port or
 	// IPv6 bind override. Follow its recorded listener while it owns the store;
 	// stale records after a crash are deliberately ignored. Explicit --addr
 	// still bypasses this lookup.
-	store, err := provider.ManagedStorePath()
+	store, err := liveStorePath()
 	if err != nil {
-		return "", "", err
+		return "", "", "", err
 	}
 	active, err := instance.Running(filepath.Join(filepath.Dir(store), "instance.lock"))
 	if err != nil {
-		return "", "", err
+		return "", "", "", err
 	}
 	if active {
 		r, err := instance.ReadRecord(filepath.Join(filepath.Dir(store), "instance.json"))
 		if err == nil {
-			return r.Address, r.InstanceID, nil
+			return r.Address, r.InstanceID, store, nil
 		}
 		if !os.IsNotExist(err) {
-			return "", "", fmt.Errorf("read running instance address: %w", err)
+			return "", "", "", fmt.Errorf("read running instance address: %w", err)
 		}
-		return "", "", fmt.Errorf("Torana owns the managed store but has not published its listener; wait for startup or inspect the logs")
+		return "", "", "", fmt.Errorf("Torana owns the managed store but has not published its listener; wait for startup or inspect the logs")
 	}
 	addr, err := configuredAddress()
-	return addr, "", err
+	return addr, "", store, err
+}
+
+// liveStorePath may discover a running checkout-local walkthrough instance.
+// It is deliberately private to control clients: persistent writes such as
+// credentials and harness ownership records keep using ManagedStorePath.
+func liveStorePath() (string, error) {
+	store, err := provider.ManagedStorePath()
+	if err != nil || os.Getenv("TORANA_DATA_DIR") != "" {
+		return store, err
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		return store, nil
+	}
+	for dir := cwd; ; dir = filepath.Dir(dir) {
+		candidate := filepath.Join(dir, ".torana-data", "config.json")
+		if info, statErr := os.Stat(candidate); statErr == nil && info.Mode().IsRegular() {
+			active, lockErr := instance.Running(filepath.Join(filepath.Dir(candidate), "instance.lock"))
+			if lockErr == nil && active {
+				return candidate, nil
+			}
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			break
+		}
+	}
+	return store, nil
 }
 
 // Listener names an explicitly requested listener, as `serve --port/--bind`

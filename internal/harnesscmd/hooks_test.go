@@ -7,6 +7,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/torana-edge/torana-edge/internal/instance"
+	"github.com/torana-edge/torana-edge/internal/provider"
 )
 
 func TestProjectHooksIgnoreWarning(t *testing.T) {
@@ -29,6 +32,34 @@ func TestProjectHooksIgnoreWarning(t *testing.T) {
 	}
 	if projectHooksNeedIgnoreWarning(dir) {
 		t.Fatal("warned for ignored local settings")
+	}
+}
+
+func TestUserHooksRefuseImplicitCheckoutOrigin(t *testing.T) {
+	root := t.TempDir()
+	project := filepath.Join(root, "project")
+	if err := os.MkdirAll(project, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	store := filepath.Join(project, ".torana-data", "config.json")
+	if err := provider.Save(store, provider.DefaultConfig()); err != nil {
+		t.Fatal(err)
+	}
+	if err := instance.WriteRecord(filepath.Join(filepath.Dir(store), "instance.json"), instance.Record{Address: "127.0.0.1:8143", InstanceID: "walkthrough"}); err != nil {
+		t.Fatal(err)
+	}
+	owner, err := instance.Acquire(filepath.Join(filepath.Dir(store), "instance.lock"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = owner.Close() }()
+	t.Setenv("TORANA_DATA_DIR", "")
+	t.Setenv("HOME", filepath.Join(root, "home"))
+	t.Chdir(project)
+	var out, diag bytes.Buffer
+	err = Run([]string{"harness", "hooks", "setup", "claude-code", "--scope", "user", "--dry-run"}, strings.NewReader(""), &out, &diag)
+	if err == nil || !strings.Contains(err.Error(), "--scope project") || !strings.Contains(err.Error(), "--addr") {
+		t.Fatalf("user-scope checkout discovery error = %v", err)
 	}
 }
 

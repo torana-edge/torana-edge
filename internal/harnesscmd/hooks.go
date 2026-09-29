@@ -15,6 +15,7 @@ import (
 
 	"github.com/torana-edge/torana-edge/internal/controlclient"
 	"github.com/torana-edge/torana-edge/internal/harness"
+	"github.com/torana-edge/torana-edge/internal/provider"
 )
 
 func runHooks(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
@@ -58,6 +59,30 @@ func runHooks(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 		return err
 	}
 	origin := client.Address()
+	if *scope == "user" && *addr == "" {
+		persistent, pathErr := provider.ManagedStorePath()
+		if pathErr != nil {
+			client.Close()
+			return pathErr
+		}
+		discovered := client.StorePath()
+		if discovered != "" {
+			persistent, pathErr = filepath.Abs(persistent)
+			if pathErr != nil {
+				client.Close()
+				return pathErr
+			}
+			discovered, pathErr = filepath.Abs(discovered)
+			if pathErr != nil {
+				client.Close()
+				return pathErr
+			}
+			if filepath.Clean(discovered) != filepath.Clean(persistent) {
+				client.Close()
+				return fmt.Errorf("user-scoped hooks will not persist a checkout-local Torana origin; use --scope project, or pass --addr explicitly after choosing a stable listener")
+			}
+		}
+	}
 	client.Close()
 	settings := "settings.json"
 	if *scope == "project" {

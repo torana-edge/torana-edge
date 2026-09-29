@@ -15,12 +15,16 @@ change your shell configuration.
 torana start
 torana status
 torana open
+torana endpoint [provider]
 torana stop --yes
 ```
 
 `start` runs this binary in the background and waits for its API to report
 ready. It is idempotent for the same managed store: it returns the existing
 instance instead of spawning a duplicate. `serve` still runs in the foreground.
+`endpoint` prints the live instance origin. Supplying a configured provider
+name prints its proxy route, so scripts can use `$(torana endpoint anthropic)`
+without knowing which local port was selected at startup.
 `open` discovers that managed instance and opens its actual control-plane URL
 in the default browser, including a non-default port.
 
@@ -81,8 +85,8 @@ torana mcp enable --yes
 torana mcp status
 ```
 
-For a Streamable HTTP client, use `http://127.0.0.1:8080/_torana/mcp`
-(substitute your port) and configure its Bearer authentication with the token
+For a Streamable HTTP client, append `/_torana/mcp` to the URL printed by
+`torana endpoint` and configure its Bearer authentication with the token
 from `torana mcp token`. Retrieval is read-only; `enable --yes` handles initial
 setup. Prefer stdio below, or pipe the token directly into your client's
 documented secret-input mechanism. Don't assume every client supports a
@@ -157,6 +161,9 @@ Use `--addr 127.0.0.1:8080` to select an instance explicitly. Otherwise the CLI
 follows the running store owner's recorded listener, including runtime port
 changes and overrides from another shell. Requests using this record are bound
 to its random instance ID; a stale record cannot authorize a different instance.
+An existing `.torana-data/config.json` in the current directory or a parent is
+also discovered when `TORANA_DATA_DIR` is unset, so the source walkthrough keeps
+working after opening a new shell.
 When no process owns the store, the CLI reads `TORANA_PORT`, then the managed
 configuration, then the seed/default configuration, without creating or changing
 a managed store. `TORANA_BIND`

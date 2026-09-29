@@ -4,8 +4,8 @@ Start Torana using the [quickstart](QUICKSTART.md), then choose your harness.
 You do not need a DeepSeek account. Keep the provider you already use; your
 provider’s billing and usage limits still apply.
 
-These examples use Torana’s default local port, 8080. Change it if your
-instance uses another port. Command-scoped settings affect only that launch.
+These examples ask the Torana CLI for the live endpoint, so they work with the
+port selected at startup. Command-scoped settings affect only that launch.
 
 ## Claude Code
 
@@ -22,7 +22,7 @@ For an existing Claude login, keep this native provider in Torana Settings:
 It is already in `config.example.json`. Launch:
 
 ```bash
-ANTHROPIC_BASE_URL=http://127.0.0.1:8080/provider/anthropic claude
+ANTHROPIC_BASE_URL="$(torana endpoint anthropic)" claude
 ```
 
 No new key is required when Claude Code already has an active subscription
@@ -44,10 +44,12 @@ ChatGPT login also use different upstream endpoints. Keep them separate.
 For an **OpenAI API key**, the example `openai` Torana provider points to
 `https://api.openai.com`. A dedicated provider in `~/.codex/config.toml` is:
 
+Run `torana endpoint openai`, append `/v1`, and use the result as `base_url`:
+
 ```toml
 [model_providers.torana]
 name = "Torana"
-base_url = "http://127.0.0.1:8080/provider/openai/v1"
+base_url = "<output-of-torana-endpoint-openai>/v1"
 wire_api = "responses"
 env_key = "OPENAI_API_KEY"
 supports_websockets = false
@@ -73,10 +75,11 @@ Add a separate Torana provider named `chatgpt` with URL
 Then run this command-scoped Codex provider without changing saved Codex config:
 
 ```bash
+TORANA_CHATGPT_URL="$(torana endpoint chatgpt)"
 codex exec --ignore-user-config --ephemeral --skip-git-repo-check -s read-only \
   -m gpt-5.6-luna \
   -c 'model_provider="torana"' \
-  -c 'model_providers.torana={name="Torana",base_url="http://127.0.0.1:8080/provider/chatgpt",wire_api="responses",requires_openai_auth=true,supports_websockets=false,request_max_retries=0,stream_max_retries=0}' \
+  -c "model_providers.torana={name=\"Torana\",base_url=\"${TORANA_CHATGPT_URL}\",wire_api=\"responses\",requires_openai_auth=true,supports_websockets=false,request_max_retries=0,stream_max_retries=0}" \
   -c check_for_update_on_startup=false \
   'Reply with exactly: 42'
 ```
