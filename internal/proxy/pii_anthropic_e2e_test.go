@@ -40,7 +40,12 @@ func anthropicPIIEnv(t *testing.T, piiCfg string) (
 	}))
 	t.Cleanup(upstream.Close)
 	scanner := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
 		w.Header().Set("Content-Type", "application/json")
+		if bytes.Contains(body, []byte("sk_test_torana_anthropic_not_a_real_key_123")) {
+			w.Write([]byte(`{"choices":[{"message":{"content":"{\"pii\":true,\"findings\":[{\"type\":\"api_key\",\"line\":2}]}"}}]}`))
+			return
+		}
 		w.Write([]byte(`{"choices":[{"message":{"content":"{\"pii\":false,\"findings\":[]}"}}]}`))
 	}))
 	t.Cleanup(scanner.Close)

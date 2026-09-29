@@ -48,6 +48,15 @@ globalThis.ToranaProviders = (() => {
     const credential = field(grid, 'Torana credential ID', 'credential', original.auth?.credential, null, 'Reference a credential stored in Torana. Do not paste an API key here.');
     const authHint = el('p', 'hint');
     content.appendChild(authHint);
+	const modelDefaults = el('details', 'advanced-settings');
+	modelDefaults.appendChild(el('summary', '', 'Plugin model defaults'));
+	const modelDefaultsGrid = el('div', 'form-grid');
+	modelDefaults.appendChild(modelDefaultsGrid);
+	field(modelDefaultsGrid, 'Default model', 'default-model', original.default_model, null,
+	  'Optional. Used when a plugin calls this provider without a model override. Single-model local servers can leave this blank.');
+	field(modelDefaultsGrid, 'Inference path override', 'inference-path', original.inference_path, null,
+	  'Optional. Torana derives the normal path from the provider format. Set this only for a server with a custom endpoint.');
+	content.appendChild(modelDefaults);
     const translation = el('fieldset', 'provider-translation');
     translation.appendChild(el('legend', '', 'API translation'));
     content.appendChild(translation);
@@ -108,6 +117,10 @@ globalThis.ToranaProviders = (() => {
     provider.url = value('url');
     provider.format = value('format');
     provider.auth = {mode: value('auth-mode')};
+	delete provider.default_model;
+	delete provider.inference_path;
+	if (value('default-model')) provider.default_model = value('default-model');
+	if (value('inference-path')) provider.inference_path = value('inference-path');
     if (provider.auth.mode === 'credential') {
       if (!value('credential')) invalid('credential', 'enter a stored credential ID.');
       provider.auth.credential = value('credential');

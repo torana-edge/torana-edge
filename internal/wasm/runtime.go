@@ -2444,7 +2444,7 @@ func (r *Runtime) dispatchHostCall(ctx context.Context, pluginName, cmd, args st
 					herr = hostErr(pbv1.ErrorCode_ERROR_CODE_PERMISSION_DENIED, "resource %q is not approved", a.Name)
 					break
 				}
-				info.Available = resource.Path != "" && r.ModelCompleteFunc != nil
+				info.Available = resource.Provider != "" && r.ModelCompleteFunc != nil
 				info.TimeoutMs = durationPtr(resource.Timeout)
 				info.MaxInputBytes = int64Ptr(resource.MaxInputBytes)
 				info.MaxTokens = uint64Ptr(uint64(resource.MaxTokens))

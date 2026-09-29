@@ -270,6 +270,7 @@
     document.addEventListener('DOMContentLoaded', () => {
       initSSE();
       loadPlugins();
+      loadConfigSnapshot();
       fetchStats();
       statsInterval = setInterval(() => { if (activeView() === 'traffic') fetchStats(); }, 5000);
       window.addEventListener('hashchange', route);
@@ -341,6 +342,17 @@
       box.setAttribute('aria-live', isError ? 'assertive' : 'polite');
       box.textContent = msg;
       setTimeout(() => { box.className = 'alert'; }, 6000);
+    }
+
+    function loadConfigSnapshot() {
+      return fetch('/_torana/api/v1/config')
+        .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); settingsRevision = r.headers.get('ETag') || settingsRevision; return r.json(); })
+        .then(cfg => {
+          settingsCfg = cfg;
+          if (activeView() === 'plugin') route();
+          return cfg;
+        })
+        .catch(() => null);
     }
 
     // ---- Plugins / pipeline ----
@@ -570,9 +582,9 @@
 		}
 	  }
 	  for (const [resource, binding] of Object.entries(modelServices)) {
-		if (!binding.provider || !binding.model || !binding.path.startsWith('/') ||
+		if (!binding.provider || (binding.path && !binding.path.startsWith('/')) ||
 			![binding.timeout_ms, binding.max_tokens, binding.max_input_bytes, binding.max_calls_per_minute, binding.max_tokens_per_hour].every(value => Number.isFinite(value) && value > 0)) {
-		  showAlert(`Model service ${resource} needs a provider, model, absolute inference path, and positive limits.`);
+		  showAlert(`Model service ${resource} needs a configured provider and positive limits. Model and path overrides are optional.`);
 		  return false;
 		}
 	  }
@@ -789,6 +801,15 @@
 	function addCachePolicyModelRow(button) {
 	  button.closest('[data-cache-policy]').querySelector('.cache-policy-models').insertAdjacentHTML('beforeend', cachePolicyModelFields({}));
 	}
+	function syncModelBindingSummary(select) {
+	  const option = select.selectedOptions[0];
+	  const summary = select.closest('[data-model-service]').querySelector('.model-binding-summary');
+	  if (!option || !option.value) {
+		summary.textContent = 'Choose a provider already configured in Settings.';
+		return;
+	  }
+	  summary.textContent = `Torana will use ${option.dataset.model ? `model ${option.dataset.model}` : "the provider's model"} and derive the inference path from ${option.dataset.format || 'its configured format'}.`;
+	}
     function renderPluginDetail(name) {
       const cont = document.getElementById('pluginDetail');
       const p = pluginByName[name];
@@ -798,20 +819,19 @@
       }
       const enabled = pipelineOrder.includes(name);
       const hookChips = (p.hooks || []).map(h => `<span class="chip hook">${escHtml(h)}</span>`).join('');
-      const permChips = (p.permissions || []).map(pm => `<span class="chip perm">${escHtml(pm)}</span>`).join('');
+      const permissionCount = (p.permissions || []).length;
       const cfgStr = JSON.stringify(configMap[name] || {}, null, 2);
       const approvalKey = p.id || p.name;
       const currentApproval = approvalMap[approvalKey];
       const permissionDetails = (p.permission_details || (p.permissions || []).map(name => ({ name, description: '' })));
-      const permissionOptions = permissionDetails.map(permission => `<div class="permission-option">
-        <span><code>${escHtml(permission.name)}</code>${permission.description ? `<span class="hint"> — ${escHtml(permission.description)}</span>` : ''}</span>
-      </div>`).join('');
+      const permissionOptions = permissionDetails.map(permission => `<tr>
+        <td><code>${escHtml(permission.name)}</code></td>
+        <td>${escHtml(permission.description || 'No additional access description supplied.')}</td>
+      </tr>`).join('');
       const permissionReview = `<fieldset class="permission-review">
         <legend>Capability approval</legend>
         <div class="section-desc">Review the complete capability set requested by this exact bundle. Torana approves this set as a whole; changing the bundle requires approval again.</div>
-        <div id="pluginPermissionList" data-plugin="${escAttr(name)}">
-          ${permissionOptions || '<div class="empty-state">This plugin requests no host capabilities.</div>'}
-        </div>
+        ${permissionOptions ? `<div id="pluginPermissionList" class="table-container" data-plugin="${escAttr(name)}"><table class="permission-table"><thead><tr><th>Capability</th><th>Why it is needed</th></tr></thead><tbody>${permissionOptions}</tbody></table></div>` : `<div id="pluginPermissionList" class="empty-state" data-plugin="${escAttr(name)}">This plugin requests no host capabilities.</div>`}
       </fieldset>`;
       const approvedCredentials = currentApproval && currentApproval.digest === p.digest ? (currentApproval.credentials || {}) : {};
       const credentialRows = (p.credentials || []).map(declaration => `<label class="field">
@@ -854,22 +874,30 @@
         </div>`;
       }).join('');
 	  const approvedModels = currentApproval && currentApproval.digest === p.digest ? (currentApproval.model_services || {}) : {};
+	  const configuredProviders = (settingsCfg && settingsCfg.providers) || {};
+	  const eligibleProviders = Object.entries(configuredProviders).filter(([, provider]) => provider.format && (provider.auth?.mode || 'caller') !== 'caller');
 	  const modelRows = (p.model_services || []).map(declaration => {
 		const existing = approvedModels[declaration.name] || {};
 		const enabled = Boolean(approvedModels[declaration.name]) || declaration.required;
+		const providerOptions = eligibleProviders.map(([providerName, provider]) => `<option value="${escAttr(providerName)}" data-format="${escAttr(provider.format)}" data-model="${escAttr(provider.default_model || '')}" ${providerName === existing.provider ? 'selected' : ''}>${escHtml(providerName)} — ${escHtml(provider.format)}</option>`).join('');
+		const selectedProvider = configuredProviders[existing.provider] || {};
+		const providerSummary = existing.provider ? `Torana will use ${selectedProvider.default_model ? `model ${selectedProvider.default_model}` : 'the provider\'s model'} and derive the inference path from ${selectedProvider.format || 'its configured format'}.` : 'Choose a provider already configured in Settings.';
 		return `<div class="info-note" data-model-service="${escAttr(declaration.name)}">
 		  <label class="checkbox-row"><input type="checkbox" class="model-binding-enabled" ${enabled ? 'checked' : ''} ${declaration.required ? 'disabled' : ''}> <code>${escHtml(declaration.name)}</code>${declaration.required ? ' (required)' : ''}</label>
 		  <div class="hint">${escHtml(declaration.description || '')}. The plugin sees only this logical name; Torana owns the provider, model, credential, path, and budgets.</div>
 		  <div class="form-grid">
-			<label class="field"><span>Provider</span><input class="input model-binding-provider" value="${escAttr(existing.provider || '')}" placeholder="configured provider name"></label>
-			<label class="field"><span>Model</span><input class="input model-binding-model" value="${escAttr(existing.model || '')}" placeholder="provider model ID"></label>
-			<label class="field"><span>Inference path</span><input class="input model-binding-path" value="${escAttr(existing.path || '')}" placeholder="/v1/chat/completions"></label>
-			<label class="field"><span>Timeout ms</span><input class="input model-binding-timeout" type="number" min="1" value="${escAttr(existing.timeout_ms || declaration.timeout_ms || 30000)}"></label>
-			<label class="field"><span>Max output tokens / call</span><input class="input model-binding-tokens" type="number" min="1" value="${escAttr(existing.max_tokens || declaration.max_tokens || '')}"></label>
-			<label class="field"><span>Max input bytes / call</span><input class="input model-binding-input-bytes" type="number" min="1" max="8388608" value="${escAttr(existing.max_input_bytes || declaration.max_input_bytes || '')}"></label>
-			<label class="field"><span>Calls / min</span><input class="input model-binding-rpm" type="number" min="1" value="${escAttr(existing.max_calls_per_minute || declaration.max_calls_per_minute || '')}"></label>
-			<label class="field"><span>Tokens / hour</span><input class="input model-binding-tph" type="number" min="1" value="${escAttr(existing.max_tokens_per_hour || declaration.max_tokens_per_hour || '')}"></label>
+			<label class="field"><span>Provider</span><select class="input model-binding-provider" onchange="syncModelBindingSummary(this)"><option value="">Choose a configured provider</option>${providerOptions}${existing.provider && !configuredProviders[existing.provider] ? `<option selected value="${escAttr(existing.provider)}">${escHtml(existing.provider)} — unavailable</option>` : ''}</select><span class="hint">Only providers with a known API format and host-owned or no authentication are shown.</span></label>
+			<div class="field"><span>How Torana will call it</span><span class="hint model-binding-summary">${escHtml(providerSummary)}</span>${eligibleProviders.length ? '' : '<span class="hint">No eligible provider yet. Add a local or host-authenticated provider in Settings first.</span>'}</div>
 		  </div>
+		  <details class="advanced-settings"><summary>Advanced model settings</summary><div class="form-grid">
+			<label class="field"><span>Model override</span><input class="input model-binding-model" value="${escAttr(existing.model || '')}" placeholder="optional"><span class="hint">Usually inherited from the provider. Single-model local servers can leave it blank.</span></label>
+			<label class="field"><span>Inference path override</span><input class="input model-binding-path" value="${escAttr(existing.path || '')}" placeholder="derived automatically"><span class="hint">Usually derived from the provider format. Use only for a custom endpoint.</span></label>
+			<label class="field"><span>Timeout ms</span><input class="input model-binding-timeout" type="number" min="1" value="${escAttr(existing.timeout_ms || declaration.timeout_ms || 30000)}"><span class="hint">Maximum time Torana waits for one model call.</span></label>
+			<label class="field"><span>Max output tokens / call</span><input class="input model-binding-tokens" type="number" min="1" value="${escAttr(existing.max_tokens || declaration.max_tokens || '')}"><span class="hint">Hard ceiling on the model's answer for each plugin call.</span></label>
+			<label class="field"><span>Max input bytes / call</span><input class="input model-binding-input-bytes" type="number" min="1" max="8388608" value="${escAttr(existing.max_input_bytes || declaration.max_input_bytes || '')}"><span class="hint">Largest request this plugin may send to the model service.</span></label>
+			<label class="field"><span>Calls / min</span><input class="input model-binding-rpm" type="number" min="1" value="${escAttr(existing.max_calls_per_minute || declaration.max_calls_per_minute || '')}"><span class="hint">Rolling rate limit for this plugin's model calls.</span></label>
+			<label class="field"><span>Tokens / hour</span><input class="input model-binding-tph" type="number" min="1" value="${escAttr(existing.max_tokens_per_hour || declaration.max_tokens_per_hour || '')}"><span class="hint">Rolling budget for provider-reported input and output tokens.</span></label>
+		  </div></details>
 		</div>`;
 	  }).join('');
 	  const approvedPricing = currentApproval && currentApproval.digest === p.digest ? (currentApproval.pricing_resources || {}) : {};
@@ -955,7 +983,7 @@
 
       if (hasSchemaFields) {
         const curCfg = configMap[name] || {};
-        const fieldHtml = p.schema.fields.map(field => {
+        const renderSchemaField = field => {
           const key = field.key;
           const label = field.label || key;
           const help = field.help || '';
@@ -1007,12 +1035,15 @@
               ${picker}
             </div>`;
           }
-        }).join('');
+        };
+        const basicFieldHtml = p.schema.fields.filter(field => !field.advanced).map(renderSchemaField).join('');
+        const advancedFieldHtml = p.schema.fields.filter(field => field.advanced).map(renderSchemaField).join('');
 
         schemaBlock = `
           <div class="subhead">Configuration</div>
           <div id="schemaFormContainer" class="form-grid space-block-end-sm">
-            ${fieldHtml}
+            ${basicFieldHtml || '<div class="hint">This plugin works with its recommended defaults.</div>'}
+            ${advancedFieldHtml ? `<details class="advanced-settings schema-wide"><summary>Advanced settings</summary><div class="form-grid">${advancedFieldHtml}</div></details>` : ''}
           </div>
           <div class="inline-actions space-block-end-md">
             <button class="btn btn-primary" type="button" onclick="saveSchemaConfig(${escJS(name)},this)">Save config</button>
@@ -1029,7 +1060,7 @@
           <span class="chip ${p.state === 'current' ? 'serve' : 'perm'}">${escHtml(p.state || (enabled ? 'enabled' : 'disabled'))}</span>
         </div>
         ${p.description ? `<div class="section-desc">${escHtml(p.description)}</div>` : ''}
-        <div class="detail-meta-grid">${hookChips}${permChips || '<span class="chip">no permissions</span>'}</div>
+          <div class="detail-meta-grid">${hookChips}<span class="chip perm">${permissionCount} ${permissionCount === 1 ? 'capability' : 'capabilities'}</span></div>
         ${p.digest ? `<div class="section-desc"><strong>Installed bundle digest:</strong> <code>${escHtml(p.digest)}</code>${p.loaded_digest ? `<br><strong>Loaded bundle digest:</strong> <code>${escHtml(p.loaded_digest)}</code>` : ''}<br><strong>Recommended failure policy:</strong> ${escHtml(p.failure_mode || 'pass')}</div>` : ''}
         ${compositionReview}
         ${permissionReview}

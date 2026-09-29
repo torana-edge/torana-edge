@@ -129,8 +129,8 @@ For the simplest path, open the local control plane at `/_torana/`:
 
 1. Select the installed plugin and review its requested permissions.
 2. Configure required resource bindings and budgets. For `pii`, bind its
-   scanner to the local provider and model you intend to use. `pii_guard` has
-   no model or network resource.
+   scanner to a configured local provider; add a model override only when that
+   provider requires it. `pii_guard` has no model or network resource.
 3. Choose **Approve and enable** and confirm the review dialog. Torana applies
    the approval and pipeline change together.
 
@@ -334,8 +334,10 @@ refusals per plugin. If a plugin is spending, you can see it.
 
 A plugin that needs a model declares a stable purpose such as `scanner` or
 `summarizer`; it does not name a vendor. During approval, bind that slot to one
-configured provider, model, and root-relative inference path, then choose
-limits no larger than the manifest requested. The same plugin may declare
+configured provider, then choose limits no larger than the manifest requested.
+Model and path normally come from the provider's defaults and API format; a
+binding may override either in Advanced settings. Single-model local endpoints
+can omit a model when their API allows it. The same plugin may declare
 multiple independent slots without learning any provider URL or credential.
 
 Pricing works the same way. A plugin declares a purpose such as `target`; the
@@ -343,6 +345,12 @@ operator supplies the provider/model coordinates and their explicit rates.
 When a pricing resource is attached to a model-service slot, its single model
 must match that service. Missing bindings fail closed, and changing the bundle
 requires approval again.
+
+The control plane derives plugin configuration forms from `schema.json` rather
+than plugin-specific UI code. Scalar JSON Schema properties render as ordinary
+controls. Add `"x-torana-advanced": true` to tuning fields that should stay
+out of the first-run path; they appear inside the generic Advanced settings
+disclosure. The raw JSON editor remains available for arrays and nested shapes.
 
 ### Plugin telemetry limits
 

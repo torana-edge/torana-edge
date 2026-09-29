@@ -93,6 +93,7 @@ Usage:
   torana --debug [serve]         run with safe per-request debug logs
   torana start                   run the proxy in the background
   torana status                  inspect the running instance
+  torana open                    open the running instance's local Web UI
   torana stop --yes              stop it gracefully
   torana plugin <command>        author, build and install plugins
   torana credential <command>    configure named credentials

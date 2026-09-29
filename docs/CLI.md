@@ -9,17 +9,20 @@ The examples use `torana` on PATH. With the source-build quickstart, run
 `./torana` from the checkout instead. This guide does not install a binary or
 change your shell configuration.
 
-## Start, inspect, stop
+## Start, inspect, open, stop
 
 ```bash
 torana start
 torana status
+torana open
 torana stop --yes
 ```
 
 `start` runs this binary in the background and waits for its API to report
 ready. It is idempotent for the same managed store: it returns the existing
 instance instead of spawning a duplicate. `serve` still runs in the foreground.
+`open` discovers that managed instance and opens its actual control-plane URL
+in the default browser, including a non-default port.
 
 Both accept `--port` and `--bind` when 8080 is taken or the listener belongs
 somewhere else:
@@ -126,6 +129,11 @@ torana feed
 torana conversations --json
 torana agent discover
 ```
+
+`feed` returns the latest 200 request-metadata events held in memory. It is
+bounded, contains no prompt or response bodies, and resets on restart. Use
+`torana feed --follow` for a live, tail-like stream. Torana does not store a
+complete traffic feed.
 
 Live configuration, plugin, statistics, and feed commands print JSON by default (`--json` is also
 accepted). Diagnostics go to stderr; failures exit nonzero. `conversations`

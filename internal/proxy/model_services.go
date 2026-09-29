@@ -16,9 +16,9 @@ import (
 )
 
 // completeModel invokes one operator-bound service. The guest supplies only
-// provider-neutral messages and sampling hints; destination, model,
-// credentials, path, timeout, and spend ceilings come from the immutable
-// resource snapshot installed on that exact plugin generation.
+// provider-neutral messages and sampling hints. The immutable plugin resource
+// owns the provider name and spend ceilings; provider-owned model/path defaults
+// are resolved from the current validated configuration for every call.
 func (s *Server) completeModel(ctx context.Context, pluginName string, resource wasm.ModelServiceResource, args *pbv1.ModelCompleteArgs) (*pbv1.ModelCompleteResult, *pbv1.HostError) {
 	if args == nil || args.Validate() != nil {
 		return nil, modelHostError(pbv1.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "model request is outside the supported domain")
@@ -28,6 +28,20 @@ func (s *Server) completeModel(ctx context.Context, pluginName string, resource 
 	if int64(proto.Size(args)) > resource.MaxInputBytes {
 		return nil, modelHostError(pbv1.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "model request exceeds the approved input limit")
 	}
+	configured, ok := s.GetConfig().Providers.Providers[resource.Provider]
+	if !ok {
+		return nil, modelHostError(pbv1.ErrorCode_ERROR_CODE_NOT_CONFIGURED, "model service provider is unavailable")
+	}
+	model, path, err := provider.ResolveModelServiceBinding(configured, provider.PluginModelServiceApproval{
+		Provider: resource.Provider,
+		Model:    resource.Model,
+		Path:     resource.Path,
+	})
+	if err != nil {
+		return nil, modelHostError(pbv1.ErrorCode_ERROR_CODE_NOT_CONFIGURED, "model service provider is not configured for inference")
+	}
+	resource.Model = model
+	resource.Path = path
 	maxTokens := resource.MaxTokens
 	if args.MaxTokens != nil && *args.MaxTokens < maxTokens {
 		maxTokens = *args.MaxTokens

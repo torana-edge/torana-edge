@@ -209,6 +209,24 @@ func TestResolvePluginResourcesUsesApprovalNotGuestInput(t *testing.T) {
 	}
 }
 
+func TestResolvePluginResourcesAllowsProviderOwnedModelCoordinates(t *testing.T) {
+	manifest := PluginManifest{ModelServices: []ModelServiceDeclaration{{
+		Name: "scanner", Description: "scanner", Required: true,
+		TimeoutMS: 2000, MaxTokens: 100, MaxInputBytes: 10000,
+		MaxCallsPerMinute: 5, MaxTokensPerHour: 1000,
+	}}}
+	resources, err := ResolvePluginResources(manifest, Approval{ModelServices: map[string]ModelServiceApproval{
+		"scanner": {Provider: "local", TimeoutMS: 1000, MaxTokens: 50, MaxInputBytes: 5000, MaxCallsPerMinute: 4, MaxTokensPerHour: 500},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := resources.ModelServices["scanner"]
+	if got.Provider != "local" || got.Model != "" || got.Path != "" {
+		t.Fatalf("model service = %+v", got)
+	}
+}
+
 func ptrForDiscoveryTest[T any](value T) *T { return &value }
 
 func TestResolvePromptCachePolicyIsExactValidatedAndNonAliasing(t *testing.T) {

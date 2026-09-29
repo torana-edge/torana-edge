@@ -54,6 +54,48 @@ func TestStatusReadableByDefaultAndJSONOnRequest(t *testing.T) {
 	}
 }
 
+func TestOpenControlPlaneUsesPlatformBrowserAndActualAddress(t *testing.T) {
+	s := Status{Address: "http://127.0.0.1:8143/"}
+	for _, tc := range []struct {
+		goos     string
+		wantName string
+		wantArgs []string
+	}{
+		{"darwin", "open", []string{"http://127.0.0.1:8143/_torana/"}},
+		{"linux", "xdg-open", []string{"http://127.0.0.1:8143/_torana/"}},
+		{"windows", "rundll32", []string{"url.dll,FileProtocolHandler", "http://127.0.0.1:8143/_torana/"}},
+	} {
+		t.Run(tc.goos, func(t *testing.T) {
+			var gotName string
+			var gotArgs []string
+			err := openControlPlane(s, tc.goos, func(name string, args ...string) error {
+				gotName, gotArgs = name, args
+				return nil
+			})
+			if err != nil || gotName != tc.wantName || strings.Join(gotArgs, "\x00") != strings.Join(tc.wantArgs, "\x00") {
+				t.Fatalf("got %q %q, %v; want %q %q", gotName, gotArgs, err, tc.wantName, tc.wantArgs)
+			}
+		})
+	}
+
+	want := "http://127.0.0.1:8143/_torana/"
+	err := openControlPlane(s, "linux", func(string, ...string) error { return errors.New("missing") })
+	if err == nil || !strings.Contains(err.Error(), want) {
+		t.Fatalf("browser failure should preserve the manual URL: %v", err)
+	}
+}
+
+func TestOpenRejectsStoppedInstanceAndJSON(t *testing.T) {
+	if err := validateOpenStatus(Status{Status: "stopped"}); err == nil || !strings.Contains(err.Error(), "not running") {
+		t.Fatalf("stopped instance error = %v", err)
+	}
+	var out, diag bytes.Buffer
+	err := Run(context.Background(), []string{"open", "--json"}, &out, &diag)
+	if err == nil || !strings.Contains(err.Error(), "does not support --json") {
+		t.Fatalf("open --json error = %v", err)
+	}
+}
+
 func TestLaunchedChildReadinessUsesExplicitTarget(t *testing.T) {
 	data := t.TempDir()
 	t.Setenv("TORANA_DATA_DIR", data)

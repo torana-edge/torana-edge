@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -55,6 +56,77 @@ func TestBoundModelServiceUsesOperatorDestinationAndReturnsNeutralResult(t *test
 	messages, ok := captured["messages"].([]any)
 	if !ok || len(messages) != 2 {
 		t.Fatalf("messages = %#v", captured["messages"])
+	}
+}
+
+func TestBoundModelServiceResolvesCurrentProviderDefaults(t *testing.T) {
+	var captured []map[string]any
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Error(err)
+		}
+		body["path"] = r.URL.Path
+		captured = append(captured, body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"safe"},"finish_reason":"stop"}]}`))
+	}))
+	t.Cleanup(upstream.Close)
+
+	providers := testProviderConfig(upstream.URL, "bound", "openai")
+	providers.Providers["bound"] = provider.Provider{URL: upstream.URL, Format: "openai", DefaultModel: "first", Auth: provider.ProviderAuth{Mode: "none"}}
+	server, err := New(Config{Port: "0", Providers: providers})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = server.Shutdown(context.Background()) })
+	resource := wasm.ModelServiceResource{Name: "classifier", Provider: "bound", Timeout: time.Second, MaxTokens: 40, MaxInputBytes: 1000, MaxCallsPerMinute: 2, MaxTokensPerHour: 100}
+	args := &pbv1.ModelCompleteArgs{Service: "classifier", Messages: []*pbv1.Message{{Role: "user", Blocks: modelTextBlocks("payload")}}}
+	if _, hostErr := server.completeModel(context.Background(), "pii", resource, args); hostErr != nil {
+		t.Fatalf("first call: %+v", hostErr)
+	}
+
+	current := server.GetConfig().Providers
+	next := current
+	next.Providers = maps.Clone(current.Providers)
+	updated := next.Providers["bound"]
+	updated.DefaultModel = "second"
+	updated.InferencePath = "/custom/infer"
+	next.Providers["bound"] = updated
+	server.applyProviders(next, server.liveCredentialRegistry())
+	if _, hostErr := server.completeModel(context.Background(), "pii", resource, args); hostErr != nil {
+		t.Fatalf("second call: %+v", hostErr)
+	}
+
+	if len(captured) != 2 || captured[0]["model"] != "first" || captured[0]["path"] != "/v1/chat/completions" || captured[1]["model"] != "second" || captured[1]["path"] != "/custom/infer" {
+		t.Fatalf("captured = %#v", captured)
+	}
+}
+
+func TestBoundModelServiceOmitsOptionalModel(t *testing.T) {
+	var captured map[string]any
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&captured); err != nil {
+			t.Error(err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"safe"},"finish_reason":"stop"}]}`))
+	}))
+	t.Cleanup(upstream.Close)
+	providers := testProviderConfig(upstream.URL, "bound", "openai")
+	providers.Providers["bound"] = provider.Provider{URL: upstream.URL, Format: "openai", Auth: provider.ProviderAuth{Mode: "none"}}
+	server, err := New(Config{Port: "0", Providers: providers})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = server.Shutdown(context.Background()) })
+	resource := wasm.ModelServiceResource{Name: "classifier", Provider: "bound", Timeout: time.Second, MaxTokens: 40, MaxInputBytes: 1000, MaxCallsPerMinute: 2, MaxTokensPerHour: 100}
+	args := &pbv1.ModelCompleteArgs{Service: "classifier", Messages: []*pbv1.Message{{Role: "user", Blocks: modelTextBlocks("payload")}}}
+	if _, hostErr := server.completeModel(context.Background(), "pii", resource, args); hostErr != nil {
+		t.Fatalf("host error: %+v", hostErr)
+	}
+	if _, present := captured["model"]; present {
+		t.Fatalf("single-model request should omit model: %#v", captured)
 	}
 }
 
