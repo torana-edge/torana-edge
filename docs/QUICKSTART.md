@@ -29,9 +29,12 @@ request. For a disposable evaluation, keep managed state in the checkout:
 
 ```bash
 export TORANA_DATA_DIR="$PWD/.torana-data"
-./torana --debug start
+./torana --debug start --port 8143
 ./torana status
 ```
+
+Use any free port and keep it consistent in the commands that follow. This
+guide uses `8143` so it does not silently assume a common local port is free.
 
 The repository ignores this disposable directory. It still contains the
 authoritative managed config, encrypted credentials, durable plugin state, and
@@ -44,11 +47,11 @@ credential at startup. The process runs in the background.
 For an already signed-in Claude Code installation:
 
 ```bash
-ANTHROPIC_BASE_URL=http://127.0.0.1:8080/provider/anthropic claude
+ANTHROPIC_BASE_URL=http://127.0.0.1:8143/provider/anthropic claude
 ```
 
-Ask it to read a small non-sensitive file, then open the local control plane’s
-**Live Feed** at `http://127.0.0.1:8080/_torana/`. Keep the `anthropic` provider’s
+Ask it to read a small non-sensitive file, then run `./torana open` and inspect
+the local control plane's **Live Feed**. Keep the `anthropic` provider's
 authentication set to **Use harness credentials**; no DeepSeek key is needed.
 For Codex, Antigravity, pi, or oh-my-pi, use the
 [harness-specific settings and verification results](HARNESS_SETUP.md).
@@ -56,8 +59,12 @@ For Codex, Antigravity, pi, or oh-my-pi, use the
 You can also inspect activity from the terminal:
 
 ```bash
-./torana feed
+./torana feed --follow
 ```
+
+`feed --follow` streams new request metadata like `tail -f`. Plain `feed`
+prints the latest in-memory snapshot (up to 200 events). Torana does not retain
+a full prompt/response traffic log, and the recent feed resets on restart.
 
 ## Optional: use an API key directly
 
@@ -69,9 +76,9 @@ to that provider’s API. Choose a model available to your account.
 ```bash
 export DEEPSEEK_API_KEY='replace-with-your-deepseek-key'
 
-curl --fail-with-body http://127.0.0.1:8080/health
+curl --fail-with-body http://127.0.0.1:8143/health
 
-curl --fail-with-body http://127.0.0.1:8080/provider/deepseek/v1/chat/completions \
+curl --fail-with-body http://127.0.0.1:8143/provider/deepseek/v1/chat/completions \
   -H "Authorization: Bearer ${DEEPSEEK_API_KEY}" \
   -H 'Content-Type: application/json' \
   -d '{"model":"deepseek-flash","messages":[{"role":"user","content":"Reply with exactly: Torana works"}]}'
@@ -103,9 +110,9 @@ On the first run, Torana imports this seed into its managed store at
 [user-config directory](CLI.md#environment-variables) when unset. After that,
 the managed store is authoritative so Control Plane edits survive restarts.
 Changing the original seed does not overwrite managed state; Torana logs a
-warning when both files exist and differ. Edit the managed configuration through
-`http://127.0.0.1:8080/_torana/`, or remove the managed store if you deliberately
-want the next start to re-import the seed. `TORANA_CONFIG` selects a different
+warning when both files exist and differ. Run `./torana open` to edit the
+managed configuration. Remove the managed store only if you deliberately want
+the next start to re-import the seed. `TORANA_CONFIG` selects a different
 seed path; it does not bypass an existing managed store.
 
 For repeated first-run testing, point `TORANA_DATA_DIR` at a new empty directory
@@ -196,7 +203,7 @@ capabilities as JSON:
 
 ```bash
 curl --fail-with-body --silent \
-  http://127.0.0.1:8080/_torana/api/v1/ | jq
+  http://127.0.0.1:8143/_torana/api/v1/ | jq
 ```
 
 See [AGENT_CONTROL_PLANE.md](AGENT_CONTROL_PLANE.md) for stable operation IDs,
@@ -261,7 +268,7 @@ JSON. In the same data-directory environment, stop before changing disk state:
 ./torana stop --yes
 ./torana credential set fallback-api-key --env FALLBACK_API_KEY
 # Export FALLBACK_API_KEY in this shell before starting the host.
-./torana start
+./torana start --port 8143
 ./torana status
 ```
 
@@ -327,7 +334,7 @@ whose upstream serves that API. Check the resulting request in Torana's **Live F
 ## Verify
 
 ```bash
-curl --fail-with-body http://127.0.0.1:8080/health
+curl --fail-with-body http://127.0.0.1:8143/health
 ./torana stats
 ./torana status
 ```

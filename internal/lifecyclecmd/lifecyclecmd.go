@@ -13,6 +13,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"text/tabwriter"
 	"time"
 
@@ -23,7 +25,7 @@ import (
 )
 
 func Handles(args []string) bool {
-	return len(args) > 0 && (args[0] == "start" || args[0] == "stop" || args[0] == "status")
+	return len(args) > 0 && (args[0] == "start" || args[0] == "stop" || args[0] == "status" || args[0] == "open")
 }
 
 func Usage(w io.Writer) {
@@ -31,6 +33,7 @@ func Usage(w io.Writer) {
   torana start [--port N] [--bind address] [--timeout 60s]
                                  start a background instance, or report the existing one
   torana status [--addr origin]  inspect this managed store's running instance
+  torana open [--addr origin]    open that instance's local control plane
   torana stop --yes [--addr origin] [--timeout 15s]
 
 start uses the same TORANA_CONFIG, TORANA_DATA_DIR, TORANA_PORT and TORANA_BIND
@@ -77,7 +80,7 @@ func Inspect(ctx context.Context, c *controlclient.Client) (Status, error) {
 
 func Run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	if !Handles(args) {
-		return fmt.Errorf("expected start, stop, or status")
+		return fmt.Errorf("expected start, stop, status, or open")
 	}
 	command := args[0]
 	fs := flag.NewFlagSet(command, flag.ContinueOnError)
@@ -160,13 +163,41 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 			}
 			if command == "stop" {
 				s, err = stop(ctx, c, s)
+			} else if command == "open" {
+				err = openControlPlane(s, runtime.GOOS, startBrowser)
 			}
 		}
 	}
 	if err != nil {
 		return err
 	}
+	if command == "open" {
+		fmt.Fprintf(stdout, "Opened %s/_torana/\n", strings.TrimRight(s.Address, "/"))
+		return nil
+	}
 	return printStatus(stdout, s, *jsonOutput)
+}
+
+var startBrowser = func(name string, args ...string) error {
+	return exec.Command(name, args...).Start()
+}
+
+func openControlPlane(s Status, goos string, start func(string, ...string) error) error {
+	url := strings.TrimRight(s.Address, "/") + "/_torana/"
+	var name string
+	var args []string
+	switch goos {
+	case "darwin":
+		name, args = "open", []string{url}
+	case "windows":
+		name, args = "rundll32", []string{"url.dll,FileProtocolHandler", url}
+	default:
+		name, args = "xdg-open", []string{url}
+	}
+	if err := start(name, args...); err != nil {
+		return fmt.Errorf("could not open a browser; open %s manually: %w", url, err)
+	}
+	return nil
 }
 
 func printStatus(w io.Writer, s Status, jsonOutput bool) error {

@@ -861,14 +861,14 @@
 		  <label class="checkbox-row"><input type="checkbox" class="model-binding-enabled" ${enabled ? 'checked' : ''} ${declaration.required ? 'disabled' : ''}> <code>${escHtml(declaration.name)}</code>${declaration.required ? ' (required)' : ''}</label>
 		  <div class="hint">${escHtml(declaration.description || '')}. The plugin sees only this logical name; Torana owns the provider, model, credential, path, and budgets.</div>
 		  <div class="form-grid">
-			<label class="field"><span>Provider</span><input class="input model-binding-provider" value="${escAttr(existing.provider || '')}" placeholder="configured provider name"></label>
-			<label class="field"><span>Model</span><input class="input model-binding-model" value="${escAttr(existing.model || '')}" placeholder="provider model ID"></label>
-			<label class="field"><span>Inference path</span><input class="input model-binding-path" value="${escAttr(existing.path || '')}" placeholder="/v1/chat/completions"></label>
-			<label class="field"><span>Timeout ms</span><input class="input model-binding-timeout" type="number" min="1" value="${escAttr(existing.timeout_ms || declaration.timeout_ms || 30000)}"></label>
-			<label class="field"><span>Max output tokens / call</span><input class="input model-binding-tokens" type="number" min="1" value="${escAttr(existing.max_tokens || declaration.max_tokens || '')}"></label>
-			<label class="field"><span>Max input bytes / call</span><input class="input model-binding-input-bytes" type="number" min="1" max="8388608" value="${escAttr(existing.max_input_bytes || declaration.max_input_bytes || '')}"></label>
-			<label class="field"><span>Calls / min</span><input class="input model-binding-rpm" type="number" min="1" value="${escAttr(existing.max_calls_per_minute || declaration.max_calls_per_minute || '')}"></label>
-			<label class="field"><span>Tokens / hour</span><input class="input model-binding-tph" type="number" min="1" value="${escAttr(existing.max_tokens_per_hour || declaration.max_tokens_per_hour || '')}"></label>
+			<label class="field"><span>Provider</span><input class="input model-binding-provider" value="${escAttr(existing.provider || '')}" placeholder="configured provider name"><span class="hint">Exact name from Settings. Use a provider with host-owned or no authentication, not harness credentials.</span></label>
+			<label class="field"><span>Model</span><input class="input model-binding-model" value="${escAttr(existing.model || '')}" placeholder="provider model ID"><span class="hint">Model ID served by that provider, for example the name loaded by your local model server.</span></label>
+			<label class="field"><span>Inference path</span><input class="input model-binding-path" value="${escAttr(existing.path || '')}" placeholder="/v1/chat/completions"><span class="hint">Request path appended to the provider URL. OpenAI-compatible chat servers normally use /v1/chat/completions.</span></label>
+			<label class="field"><span>Timeout ms</span><input class="input model-binding-timeout" type="number" min="1" value="${escAttr(existing.timeout_ms || declaration.timeout_ms || 30000)}"><span class="hint">Maximum time Torana waits for one model call.</span></label>
+			<label class="field"><span>Max output tokens / call</span><input class="input model-binding-tokens" type="number" min="1" value="${escAttr(existing.max_tokens || declaration.max_tokens || '')}"><span class="hint">Hard ceiling on the model's answer for each plugin call.</span></label>
+			<label class="field"><span>Max input bytes / call</span><input class="input model-binding-input-bytes" type="number" min="1" max="8388608" value="${escAttr(existing.max_input_bytes || declaration.max_input_bytes || '')}"><span class="hint">Largest request this plugin may send to the model service.</span></label>
+			<label class="field"><span>Calls / min</span><input class="input model-binding-rpm" type="number" min="1" value="${escAttr(existing.max_calls_per_minute || declaration.max_calls_per_minute || '')}"><span class="hint">Rolling rate limit for this plugin's model calls.</span></label>
+			<label class="field"><span>Tokens / hour</span><input class="input model-binding-tph" type="number" min="1" value="${escAttr(existing.max_tokens_per_hour || declaration.max_tokens_per_hour || '')}"><span class="hint">Rolling budget for provider-reported input and output tokens.</span></label>
 		  </div>
 		</div>`;
 	  }).join('');
