@@ -33,8 +33,9 @@ export TORANA_DATA_DIR="$PWD/.torana-data"
 ./torana status
 ```
 
-Use any free port and keep it consistent in the commands that follow. This
-guide uses `8143` so it does not silently assume a common local port is free.
+Use any free port. The CLI discovers the running instance for the commands that
+follow. This guide uses `8143` so it does not silently assume a common local
+port is free.
 
 The repository ignores this disposable directory. It still contains the
 authoritative managed config, encrypted credentials, durable plugin state, and
@@ -47,7 +48,7 @@ credential at startup. The process runs in the background.
 For an already signed-in Claude Code installation:
 
 ```bash
-ANTHROPIC_BASE_URL=http://127.0.0.1:8143/provider/anthropic claude
+ANTHROPIC_BASE_URL="$(./torana endpoint anthropic)" claude
 ```
 
 Ask it to read a small non-sensitive file, then run `./torana open` and inspect
@@ -75,10 +76,11 @@ to that provider’s API. Choose a model available to your account.
 
 ```bash
 export DEEPSEEK_API_KEY='replace-with-your-deepseek-key'
+TORANA_URL="$(./torana endpoint)"
 
-curl --fail-with-body http://127.0.0.1:8143/health
+curl --fail-with-body "$TORANA_URL/health"
 
-curl --fail-with-body http://127.0.0.1:8143/provider/deepseek/v1/chat/completions \
+curl --fail-with-body "$(./torana endpoint deepseek)/v1/chat/completions" \
   -H "Authorization: Bearer ${DEEPSEEK_API_KEY}" \
   -H 'Content-Type: application/json' \
   -d '{"model":"deepseek-flash","messages":[{"role":"user","content":"Reply with exactly: Torana works"}]}'
@@ -207,7 +209,7 @@ capabilities as JSON:
 
 ```bash
 curl --fail-with-body --silent \
-  http://127.0.0.1:8143/_torana/api/v1/ | jq
+  "$(./torana endpoint)/_torana/api/v1/" | jq
 ```
 
 See [AGENT_CONTROL_PLANE.md](AGENT_CONTROL_PLANE.md) for stable operation IDs,
@@ -338,7 +340,7 @@ whose upstream serves that API. Check the resulting request in Torana's **Live F
 ## Verify
 
 ```bash
-curl --fail-with-body http://127.0.0.1:8143/health
+curl --fail-with-body "$(./torana endpoint)/health"
 ./torana stats
 ./torana status
 ```

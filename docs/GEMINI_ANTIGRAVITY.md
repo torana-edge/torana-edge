@@ -28,7 +28,7 @@ opencode, …) is the easy case — identical to the openai/DeepSeek flow.
 }
 ```
 
-Point the tool at `http://localhost:8080/provider/gemini` and send
+Point the tool at the URL printed by `torana endpoint gemini` and send
 `GenerateContent` requests (e.g. `/v1beta/models/<model>:streamGenerateContent`).
 The caller's API key is forwarded upstream; no MITM is involved.
 

@@ -36,22 +36,23 @@ This environment variable is also visible to Claude's Bash tool. It is not
 private from an agent with local shell access; see the boundary in
 [SECURITY.md](../SECURITY.md).
 
-For manual setup, add these entries alongside existing hooks in a settings file, using
-your Torana port. Do not replace unrelated settings or hooks.
+For manual setup, run `torana endpoint` and replace `<torana-origin>` below
+with its output. Add these entries alongside existing hooks in a settings file.
+Do not replace unrelated settings or hooks.
 
 ```json
 {
   "hooks": {
     "Stop": [{"hooks": [{
       "type": "http",
-      "url": "http://127.0.0.1:8080/_torana/hooks/claude-code/stop",
+      "url": "<torana-origin>/_torana/hooks/claude-code/stop",
       "timeout": 3,
       "headers": {"Authorization": "Bearer $TORANA_MCP_TOKEN", "X-Torana-Local-Request": "1"},
       "allowedEnvVars": ["TORANA_MCP_TOKEN"]
     }]}],
     "PostModelSwitch": [{"hooks": [{
       "type": "http",
-      "url": "http://127.0.0.1:8080/_torana/hooks/claude-code/post-model-switch",
+      "url": "<torana-origin>/_torana/hooks/claude-code/post-model-switch",
       "timeout": 3,
       "headers": {"Authorization": "Bearer $TORANA_MCP_TOKEN", "X-Torana-Local-Request": "1"},
       "allowedEnvVars": ["TORANA_MCP_TOKEN"]
@@ -86,7 +87,7 @@ loopback/origin guard, explicit local-request header and current bearer token.
 
 Also set `suggestions.claude_code.pre_model_switch` to `true` and add a
 `PreModelSwitch` HTTP hook with the same headers and a **1-second timeout**,
-using `http://127.0.0.1:8080/_torana/hooks/claude-code/pre-model-switch`.
+using `<torana-origin>/_torana/hooks/claude-code/pre-model-switch`.
 This is a separate opt-in, not installed by default.
 
 To install it through the CLI instead, use

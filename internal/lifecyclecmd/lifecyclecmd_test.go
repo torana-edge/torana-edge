@@ -96,6 +96,36 @@ func TestOpenRejectsStoppedInstanceAndJSON(t *testing.T) {
 	}
 }
 
+func TestEndpointPrintsLiveProviderURL(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/config") {
+			_ = json.NewEncoder(w).Encode(map[string]any{"providers": map[string]any{"anthropic": map[string]any{}}})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(Status{Service: "torana-edge", InstanceID: "test", PID: 123, Status: "running", ConfigPath: "/config.json"})
+	}))
+	defer srv.Close()
+	for _, tc := range []struct {
+		args []string
+		want string
+	}{
+		{[]string{"endpoint", "--addr", srv.URL}, srv.URL + "\n"},
+		{[]string{"endpoint", "--addr", srv.URL, "anthropic"}, srv.URL + "/provider/anthropic\n"},
+	} {
+		var out, diag bytes.Buffer
+		if err := Run(context.Background(), tc.args, &out, &diag); err != nil || out.String() != tc.want {
+			t.Fatalf("Run(%q) = %q, %v; want %q", tc.args, &out, err, tc.want)
+		}
+	}
+	var out, diag bytes.Buffer
+	if err := Run(context.Background(), []string{"endpoint", "--addr", srv.URL, "../bad"}, &out, &diag); err == nil {
+		t.Fatal("unsafe provider name accepted")
+	}
+	if err := Run(context.Background(), []string{"endpoint", "--addr", srv.URL, "missing"}, &out, &diag); err == nil || !strings.Contains(err.Error(), "not configured") {
+		t.Fatalf("unknown provider error = %v", err)
+	}
+}
+
 func TestLaunchedChildReadinessUsesExplicitTarget(t *testing.T) {
 	data := t.TempDir()
 	t.Setenv("TORANA_DATA_DIR", data)

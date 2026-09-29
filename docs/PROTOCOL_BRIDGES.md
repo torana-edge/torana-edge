@@ -37,7 +37,7 @@ Replace `your-loaded-model` with the model name your server accepts. Send an
 Anthropic request to Torana:
 
 ```sh
-curl --fail-with-body http://127.0.0.1:8080/provider/local-messages/v1/messages \
+curl --fail-with-body "$(torana endpoint local-messages)/v1/messages" \
   -H 'Content-Type: application/json' \
   -d '{"model":"client-model","max_tokens":128,"messages":[{"role":"user","content":"Say hello"}]}'
 ```
@@ -45,7 +45,7 @@ curl --fail-with-body http://127.0.0.1:8080/provider/local-messages/v1/messages 
 The backend receives `/v1/chat/completions` with `model: your-loaded-model`.
 The client receives an Anthropic message. Set `stream: true` for Anthropic SSE.
 An Anthropic-compatible client's base URL is
-`http://127.0.0.1:8080/provider/local-messages`.
+the value printed by `torana endpoint local-messages`.
 
 Use `bridge.client: openai-responses` to expose the same backend at the
 Responses `/v1/responses` endpoint instead. Create separate provider names to

@@ -25,7 +25,7 @@ import (
 )
 
 func Handles(args []string) bool {
-	return len(args) > 0 && (args[0] == "start" || args[0] == "stop" || args[0] == "status" || args[0] == "open")
+	return len(args) > 0 && (args[0] == "start" || args[0] == "stop" || args[0] == "status" || args[0] == "open" || args[0] == "endpoint")
 }
 
 func Usage(w io.Writer) {
@@ -34,6 +34,7 @@ func Usage(w io.Writer) {
                                  start a background instance, or report the existing one
   torana status [--addr origin]  inspect this managed store's running instance
   torana open [--addr origin]    open that instance's local control plane
+  torana endpoint [provider]     print its live origin or provider endpoint
   torana stop --yes [--addr origin] [--timeout 15s]
 
 start uses the same TORANA_CONFIG, TORANA_DATA_DIR, TORANA_PORT and TORANA_BIND
@@ -80,7 +81,7 @@ func Inspect(ctx context.Context, c *controlclient.Client) (Status, error) {
 
 func Run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	if !Handles(args) {
-		return fmt.Errorf("expected start, stop, status, or open")
+		return fmt.Errorf("expected start, stop, status, open, or endpoint")
 	}
 	command := args[0]
 	fs := flag.NewFlagSet(command, flag.ContinueOnError)
@@ -108,11 +109,17 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 		}
 		return err
 	}
-	if fs.NArg() != 0 {
+	if command != "endpoint" && fs.NArg() != 0 {
 		return fmt.Errorf("%s takes no positional arguments", command)
+	}
+	if command == "endpoint" && fs.NArg() > 1 {
+		return fmt.Errorf("endpoint accepts at most one provider name")
 	}
 	if command == "open" && *jsonOutput {
 		return fmt.Errorf("open launches a browser and does not support --json")
+	}
+	if command == "endpoint" && *jsonOutput {
+		return fmt.Errorf("endpoint prints a shell-ready URL and does not support --json")
 	}
 	if timeout <= 0 || timeout > 10*time.Minute {
 		return fmt.Errorf("--timeout must be positive and at most 10m")
@@ -124,10 +131,10 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	defer cancel()
 	var s Status
 	var err error
+	var c *controlclient.Client
 	if command == "start" {
 		s, err = Start(ctx, serveFlags)
 	} else {
-		var c *controlclient.Client
 		c, err = controlclient.New(addr, 2*time.Second)
 		if err != nil {
 			return err
@@ -136,10 +143,7 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 		s, err = Inspect(ctx, c)
 		if err != nil && connectionRefused(err) {
 			if addr == "" {
-				path, e := provider.ManagedStorePath()
-				if e != nil {
-					return e
-				}
+				path := c.StorePath()
 				active, e := instance.Running(filepath.Join(filepath.Dir(path), "instance.lock"))
 				if e != nil {
 					return e
@@ -152,10 +156,8 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 			err = nil
 		} else if err == nil {
 			if addr == "" {
-				path, e := provider.ManagedStorePath()
-				if e != nil {
-					return e
-				}
+				path := c.StorePath()
+				var e error
 				path, e = filepath.Abs(path)
 				if e != nil {
 					return e
@@ -182,6 +184,34 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 		}
 		fmt.Fprintf(stdout, "Opened %s/_torana/\n", strings.TrimRight(s.Address, "/"))
 		return nil
+	}
+	if command == "endpoint" {
+		if s.Status != "running" {
+			return fmt.Errorf("Torana is not running; start it before requesting an endpoint")
+		}
+		endpoint := strings.TrimRight(s.Address, "/")
+		if fs.NArg() == 1 {
+			provider := fs.Arg(0)
+			if provider == "" || provider == "." || provider == ".." || strings.ContainsAny(provider, "/\\?#") {
+				return fmt.Errorf("provider name must be one URL path segment")
+			}
+			raw, _, readErr := c.JSON(ctx, http.MethodGet, controlclient.BasePath+"/config", nil, "")
+			if readErr != nil {
+				return readErr
+			}
+			var config struct {
+				Providers map[string]json.RawMessage `json:"providers"`
+			}
+			if json.Unmarshal(raw, &config) != nil {
+				return fmt.Errorf("running instance returned an invalid provider configuration")
+			}
+			if _, exists := config.Providers[provider]; !exists {
+				return fmt.Errorf("provider %q is not configured in the running instance", provider)
+			}
+			endpoint += "/provider/" + provider
+		}
+		_, err := fmt.Fprintln(stdout, endpoint)
+		return err
 	}
 	return printStatus(stdout, s, *jsonOutput)
 }
@@ -247,11 +277,15 @@ func stop(ctx context.Context, c *controlclient.Client, s Status) (Status, error
 	}
 	// Wait for the instance to disappear, not merely a 202 response. For our
 	// store, also wait for its OS lock: HTTP closes before plugin drain finishes.
-	store, err := provider.ManagedStorePath()
-	if err != nil {
-		return s, err
+	store := c.StorePath()
+	if store == "" {
+		var err error
+		store, err = provider.ManagedStorePath()
+		if err != nil {
+			return s, err
+		}
 	}
-	store, err = filepath.Abs(store)
+	store, err := filepath.Abs(store)
 	if err != nil {
 		return s, err
 	}

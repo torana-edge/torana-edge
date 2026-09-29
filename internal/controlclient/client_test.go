@@ -60,6 +60,43 @@ func TestActiveRecordBindsRequestsAndStaleRecordsAreIgnored(t *testing.T) {
 	}
 }
 
+func TestLiveClientDiscoversOnlyRunningCheckoutStore(t *testing.T) {
+	root := t.TempDir()
+	child := filepath.Join(root, "work", "child")
+	if err := os.MkdirAll(child, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	store := filepath.Join(root, ".torana-data", "config.json")
+	if err := provider.Save(store, provider.DefaultConfig()); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("TORANA_DATA_DIR", "")
+	t.Chdir(child)
+	before, err := liveStorePath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if before == store {
+		t.Fatal("inactive checkout store was discovered")
+	}
+	owner, err := instance.Acquire(filepath.Join(filepath.Dir(store), "instance.lock"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = owner.Close() }()
+	got, err := liveStorePath()
+	if err != nil || got != store {
+		t.Fatalf("liveStorePath = %q, %v; want %q", got, err, store)
+	}
+	persistent, err := provider.ManagedStorePath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if persistent == store {
+		t.Fatal("live discovery leaked into the persistent managed-store selector")
+	}
+}
+
 func TestAddressBoundary(t *testing.T) {
 	for _, addr := range []string{"https://example.com", "http://192.168.1.1:8080", "http://0.0.0.0:8080", "http://[::]:8080", "http://user:secret@localhost:8080", "http://localhost/config", "http://localhost?", "http://localhost?token=x", "http://localhost#x", "ftp://localhost", "http://localhost:0", "http://localhost:65536"} {
 		if c, err := New(addr, time.Second); err == nil {

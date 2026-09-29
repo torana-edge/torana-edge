@@ -22,8 +22,8 @@ OpenAI Responses can target a Chat Completions backend for supported features.
 ```
 
 For an OpenAI Chat Completions client that appends `/chat/completions`, set
-its base URL to `http://localhost:8080/provider/ollama/v1`. A raw request uses
-`http://localhost:8080/provider/ollama/v1/chat/completions`. A Responses client
+its base URL to `$(torana endpoint ollama)/v1`. A raw request uses
+`$(torana endpoint ollama)/v1/chat/completions`. A Responses client
 needs an upstream that implements Responses or an explicit protocol bridge.
 
 This route calls only your local Ollama server; no hosted-provider account is
