@@ -167,8 +167,8 @@ also covers configuration through the CLI.
 
 You may enable either plugin alone, or place `pii_guard` immediately before
 `pii`. The plugins do not share state. The deterministic guard turns a match
-into a normal recoverable tool error, and `pii` leaves existing tool errors
-alone instead of sending them to its scanner model.
+into a normal recoverable tool error before the contextual scan. `pii` still
+scans other failed tool results because failures can contain secrets.
 
 ### Test either choice
 
@@ -191,8 +191,9 @@ recoverable error beginning **Sensitive output withheld**. The safe request
 continues to the primary provider without the synthetic value, so the agent can
 acknowledge it and move on. You can inspect the request in Torana's **Live Feed**.
 
-With `pii_guard` first, this obvious value is handled without a model call. With
-only `pii`, the scanner model decides. After the check, remove the test file:
+With `pii_guard` first, this obvious value is replaced before the contextual
+scan. With only `pii`, the scanner model decides. After the check, remove the
+test file:
 
 ```bash
 rm demo-sensitive.txt

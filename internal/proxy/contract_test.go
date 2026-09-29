@@ -24,6 +24,8 @@ var formRenderedProviderFields = []string{
 	"format",
 	"fallback",
 	"auth",
+	"default_model",
+	"inference_path",
 }
 
 // TestFormRenderedFieldsAreNotPreserved is the inverse of the list above, and

@@ -2473,8 +2473,8 @@ func ResolvePluginResources(manifest PluginManifest, approval Approval) (wasm.Pl
 		if !ok {
 			return resources, fmt.Errorf("model service binding %q was not declared by manifest", name)
 		}
-		if strings.TrimSpace(binding.Provider) == "" || strings.TrimSpace(binding.Model) == "" || validateModelServicePath(binding.Path) != nil {
-			return resources, fmt.Errorf("model service %q approval requires provider, model, and absolute path", name)
+		if strings.TrimSpace(binding.Provider) == "" || (binding.Path != "" && validateModelServicePath(binding.Path) != nil) {
+			return resources, fmt.Errorf("model service %q approval requires a provider and an optional absolute path override", name)
 		}
 		if binding.TimeoutMS <= 0 || binding.TimeoutMS > 120000 || binding.MaxTokens == 0 || binding.MaxTokens > 1<<31-1 || binding.MaxInputBytes <= 0 || binding.MaxInputBytes > 8<<20 || binding.MaxCallsPerMinute <= 0 || binding.MaxTokensPerHour <= 0 {
 			return resources, fmt.Errorf("model service %q approval requires positive limits", name)

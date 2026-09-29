@@ -131,8 +131,9 @@ a new approval.
 
 You can enable either plugin on its own, or put `pii_guard` immediately before
 `pii` in the pipeline. In that order, the deterministic guard handles obvious
-matches and the model-backed scanner sees the remaining new tool results. They
-do not share state: `pii` simply leaves an existing tool error alone.
+matches first and the model-backed scanner sees subsequent tool output. They do
+not share state; `pii` also scans failed tool results because failures can
+contain secrets.
 
 Create a file with an obviously synthetic
 credential—never use a real key for this check:
@@ -158,8 +159,8 @@ remove the test file:
 rm demo-sensitive.txt
 ```
 
-With `pii_guard` enabled first, this obvious value is handled without a model
-call. With only `pii` enabled, the scanner model decides. The
+With `pii_guard` enabled first, this obvious value is replaced before the
+contextual scan. With only `pii` enabled, the scanner model decides. The
 [full quickstart](docs/QUICKSTART.md#add-one-plugin)
 includes the CLI alternatives and troubleshooting detail.
 
