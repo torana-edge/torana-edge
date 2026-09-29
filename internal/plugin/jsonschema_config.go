@@ -52,7 +52,8 @@ type jsonSchemaProperty struct {
 	// Source is a Torana extension naming a live host resource the control
 	// plane can offer as a picker. JSON Schema permits unknown keywords, so
 	// this travels without making the document invalid.
-	Source string `json:"x-torana-source"`
+	Source   string `json:"x-torana-source"`
+	Advanced bool   `json:"x-torana-advanced"`
 }
 
 // deriveConfigSchema converts a JSON Schema config document into the UI fields
@@ -84,11 +85,12 @@ func deriveConfigSchema(raw []byte) *ConfigSchema {
 	for _, key := range keys {
 		prop := doc.Properties[key]
 		field := ConfigField{
-			Key:     key,
-			Label:   prop.Title,
-			Help:    prop.Description,
-			Default: prop.Default,
-			Source:  prop.Source,
+			Key:      key,
+			Label:    prop.Title,
+			Help:     prop.Description,
+			Default:  prop.Default,
+			Source:   prop.Source,
+			Advanced: prop.Advanced,
 		}
 		if field.Label == "" {
 			field.Label = key

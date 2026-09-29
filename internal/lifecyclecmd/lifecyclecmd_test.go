@@ -85,6 +85,17 @@ func TestOpenControlPlaneUsesPlatformBrowserAndActualAddress(t *testing.T) {
 	}
 }
 
+func TestOpenRejectsStoppedInstanceAndJSON(t *testing.T) {
+	if err := validateOpenStatus(Status{Status: "stopped"}); err == nil || !strings.Contains(err.Error(), "not running") {
+		t.Fatalf("stopped instance error = %v", err)
+	}
+	var out, diag bytes.Buffer
+	err := Run(context.Background(), []string{"open", "--json"}, &out, &diag)
+	if err == nil || !strings.Contains(err.Error(), "does not support --json") {
+		t.Fatalf("open --json error = %v", err)
+	}
+}
+
 func TestLaunchedChildReadinessUsesExplicitTarget(t *testing.T) {
 	data := t.TempDir()
 	t.Setenv("TORANA_DATA_DIR", data)

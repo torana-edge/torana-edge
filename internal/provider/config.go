@@ -30,6 +30,8 @@ import (
 type Provider struct {
 	URL                 string                     `json:"url"`                            // upstream base URL
 	Format              string                     `json:"format"`                         // wire format: "openai", "anthropic", "gemini", "gemini-codeassist"
+	DefaultModel        string                     `json:"default_model,omitempty"`        // optional model used by plugin model-service bindings
+	InferencePath       string                     `json:"inference_path,omitempty"`       // optional advanced override for plugin model-service calls
 	Bridge              *BridgeConfig              `json:"bridge,omitempty"`               // explicit client/upstream inference protocol translation
 	Fallback            []string                   `json:"fallback,omitempty"`             // provider names to try on 429/5xx
 	ResponsesCompaction *ResponsesCompactionConfig `json:"responses_compaction,omitempty"` // native OpenAI Responses context compaction; nil disables it
@@ -219,6 +221,9 @@ func (c Config) Validate() error {
 					name, configured.Format, supportedFormatNames())
 			}
 		}
+		if configured.InferencePath != "" && !validBoundModelPath(configured.InferencePath) {
+			return fmt.Errorf("provider %q inference_path %q is not a valid absolute request path", name, configured.InferencePath)
+		}
 		if len(configured.Models) > 0 && configured.Format == "" {
 			return fmt.Errorf("provider %q must declare a format before model capabilities", name)
 		}
@@ -302,6 +307,9 @@ func (c Config) Validate() error {
 			// invalid binding or budget", which told an operator that one of
 			// ten numbers was wrong without saying which — and this is
 			// startup-fatal, so they are locked out until they guess right.
+			if _, _, err := ResolveModelServiceBinding(configured, binding); err != nil {
+				return fmt.Errorf("plugin %q model service %q: %w", pluginName, resourceName, err)
+			}
 			if err := validateModelServiceBinding(pluginName, resourceName, binding); err != nil {
 				return err
 			}
@@ -393,9 +401,7 @@ func (c Config) Validate() error {
 func validateModelServiceBinding(pluginName, resourceName string, b PluginModelServiceApproval) error {
 	where := fmt.Sprintf("plugin %q model service %q", pluginName, resourceName)
 	switch {
-	case strings.TrimSpace(b.Model) == "":
-		return fmt.Errorf("%s: model is required", where)
-	case !validBoundModelPath(b.Path):
+	case b.Path != "" && !validBoundModelPath(b.Path):
 		return fmt.Errorf("%s: path %q is not a valid bound model path", where, b.Path)
 	case b.TimeoutMS <= 0:
 		return fmt.Errorf("%s: timeout_ms is %d; it must be greater than 0", where, b.TimeoutMS)
@@ -415,6 +421,54 @@ func validateModelServiceBinding(pluginName, resourceName string, b PluginModelS
 		return fmt.Errorf("%s: max_tokens_per_hour is %d; it must be greater than 0", where, b.MaxTokensPerHour)
 	}
 	return nil
+}
+
+// ResolveModelServiceBinding applies provider-owned defaults to a plugin's
+// logical model slot. A plugin chooses neither provider coordinates nor wire
+// paths; operators configure those once on the provider and may override them
+// per binding only from the advanced UI.
+func ResolveModelServiceBinding(p Provider, b PluginModelServiceApproval) (model, path string, err error) {
+	model = strings.TrimSpace(b.Model)
+	if model == "" {
+		model = strings.TrimSpace(p.DefaultModel)
+	}
+	path = strings.TrimSpace(b.Path)
+	if path == "" {
+		path = strings.TrimSpace(p.InferencePath)
+	}
+	if path == "" {
+		switch p.Format {
+		case "openai":
+			path = "/v1/chat/completions"
+		case "anthropic":
+			path = "/v1/messages"
+		case "gemini":
+			if model == "" {
+				return "", "", fmt.Errorf("provider format gemini needs a default model or model override")
+			}
+			path = "/v1beta/models/" + url.PathEscape(model) + ":generateContent"
+		case "gemini-codeassist":
+			path = "/v1internal:generateContent"
+		default:
+			return "", "", fmt.Errorf("provider format %q has no model-service inference path", p.Format)
+		}
+	}
+	if !validBoundModelPath(path) {
+		return "", "", fmt.Errorf("path %q is not a valid bound model path", path)
+	}
+	// Provider URLs often already include /v1. Model-service paths are joined
+	// to that base, so remove an identical base prefix instead of producing
+	// /v1/v1/chat/completions.
+	if u, parseErr := url.Parse(p.URL); parseErr == nil {
+		base := strings.TrimSuffix(u.EscapedPath(), "/")
+		if base != "" && (path == base || strings.HasPrefix(path, base+"/")) {
+			path = strings.TrimPrefix(path, base)
+			if path == "" {
+				path = "/"
+			}
+		}
+	}
+	return model, path, nil
 }
 
 func validBoundModelPath(path string) bool {

@@ -111,6 +111,9 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	if fs.NArg() != 0 {
 		return fmt.Errorf("%s takes no positional arguments", command)
 	}
+	if command == "open" && *jsonOutput {
+		return fmt.Errorf("open launches a browser and does not support --json")
+	}
 	if timeout <= 0 || timeout > 10*time.Minute {
 		return fmt.Errorf("--timeout must be positive and at most 10m")
 	}
@@ -164,7 +167,9 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 			if command == "stop" {
 				s, err = stop(ctx, c, s)
 			} else if command == "open" {
-				err = openControlPlane(s, runtime.GOOS, startBrowser)
+				if err = validateOpenStatus(s); err == nil {
+					err = openControlPlane(s, runtime.GOOS, startBrowser)
+				}
 			}
 		}
 	}
@@ -172,10 +177,20 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 		return err
 	}
 	if command == "open" {
+		if err := validateOpenStatus(s); err != nil {
+			return err
+		}
 		fmt.Fprintf(stdout, "Opened %s/_torana/\n", strings.TrimRight(s.Address, "/"))
 		return nil
 	}
 	return printStatus(stdout, s, *jsonOutput)
+}
+
+func validateOpenStatus(s Status) error {
+	if s.Status != "running" {
+		return fmt.Errorf("Torana is not running; start it before opening the control plane")
+	}
+	return nil
 }
 
 var startBrowser = func(name string, args ...string) error {

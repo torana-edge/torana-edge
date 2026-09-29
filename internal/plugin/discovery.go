@@ -168,6 +168,9 @@ type ConfigField struct {
 	// Generic on purpose. The control plane resolves the name against its own
 	// table of sources, so no plugin is ever named in the rendering logic.
 	Source string `json:"source,omitempty"`
+	// Advanced keeps expert-only tuning out of the first-run path while using
+	// the same generic schema renderer for every plugin.
+	Advanced bool `json:"advanced,omitempty"`
 }
 
 type ConfigSchema struct {

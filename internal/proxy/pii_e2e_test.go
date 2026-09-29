@@ -122,35 +122,6 @@ func toolConvo(toolContent string) string {
 	return string(b)
 }
 
-// TestPIIRegexBlock: an API key in a tool result is caught by the deterministic
-// regex pre-filter (no model needed) → the tool result becomes a recoverable,
-// value-free error naming the type, line, and tool before upstream sees it.
-func TestPIIRegexBlock(t *testing.T) {
-	post, hits, captured := piiEnv(t, `{"tools":["*"],"on_error":"block"}`, nil)
-	status, body := post(toolConvo("some notes\nkey: sk_test_torana_e2e_not_a_real_key_123"))
-
-	if status != http.StatusOK {
-		t.Fatalf("status = %d, want 200; body=%s", status, body)
-	}
-	wires := captured()
-	if len(wires) != 1 {
-		t.Fatalf("captured requests = %d, want 1", len(wires))
-	}
-	s := wires[0]
-	if !strings.Contains(s, "api_key") || !strings.Contains(s, "line 2") {
-		t.Fatalf("error should name type+line: %s", s)
-	}
-	if !strings.Contains(s, "bash") {
-		t.Fatalf("error should name the tool: %s", s)
-	}
-	if strings.Contains(s, "sk_test_torana_e2e_not_a_real_key_123") {
-		t.Fatalf("error LEAKED the raw PII value: %s", s)
-	}
-	if n := atomic.LoadInt32(hits); n != 1 {
-		t.Fatalf("upstream called %d times, want the recoverable error forwarded", n)
-	}
-}
-
 // TestPIICleanForwards: a clean tool result is forwarded upstream.
 func TestPIICleanForwards(t *testing.T) {
 	post, hits, _ := piiEnv(t, `{"tools":["*"],"on_error":"block"}`, nil)
@@ -163,8 +134,8 @@ func TestPIICleanForwards(t *testing.T) {
 	}
 }
 
-// TestPIIModelBlock: content the regex misses is sent to the (mock) local model,
-// which flags PII → request blocked, upstream not called, no value leaked.
+// TestPIIModelBlock: new tool output is sent to the (mock) local model, which
+// flags PII, so only a recoverable value-free diagnostic reaches upstream.
 func TestPIIModelBlock(t *testing.T) {
 	var gotAuth string
 	model := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

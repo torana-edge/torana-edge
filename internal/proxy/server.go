@@ -2619,7 +2619,7 @@ func New(cfg Config) (*Server, error) {
 				byID[bundle.Manifest.ID] = bundle
 				byID[bundle.Manifest.Name] = bundle
 			}
-			converted := pluginApprovals(*req.Approvals)
+			converted := pluginApprovals(*req.Approvals, s.config.Providers.Providers)
 			for id, approval := range *req.Approvals {
 				if old, ok := oldPlugins.Approvals[id]; ok && reflect.DeepEqual(old, approval) {
 					continue
@@ -3543,7 +3543,7 @@ func clonePluginConfig(src map[string]json.RawMessage) map[string]json.RawMessag
 	return dst
 }
 
-func pluginApprovals(src map[string]provider.PluginApproval) map[string]plugin.Approval {
+func pluginApprovals(src map[string]provider.PluginApproval, providers map[string]provider.Provider) map[string]plugin.Approval {
 	if src == nil {
 		return nil
 	}
@@ -3563,7 +3563,14 @@ func pluginApprovals(src map[string]provider.PluginApproval) map[string]plugin.A
 		}
 		modelBindings := make(map[string]plugin.ModelServiceApproval, len(approval.ModelServices))
 		for name, binding := range approval.ModelServices {
-			modelBindings[name] = plugin.ModelServiceApproval{Provider: binding.Provider, Model: binding.Model, Path: binding.Path, TimeoutMS: binding.TimeoutMS, MaxTokens: binding.MaxTokens, MaxInputBytes: binding.MaxInputBytes, MaxCallsPerMinute: binding.MaxCallsPerMinute, MaxTokensPerHour: binding.MaxTokensPerHour}
+			model, path, resolveErr := provider.ResolveModelServiceBinding(providers[binding.Provider], binding)
+			if resolveErr != nil {
+				// Config.Validate reports the actionable error before this map is
+				// installed. Preserve the submitted values here so approval digest
+				// validation remains a pure conversion.
+				model, path = binding.Model, binding.Path
+			}
+			modelBindings[name] = plugin.ModelServiceApproval{Provider: binding.Provider, Model: model, Path: path, TimeoutMS: binding.TimeoutMS, MaxTokens: binding.MaxTokens, MaxInputBytes: binding.MaxInputBytes, MaxCallsPerMinute: binding.MaxCallsPerMinute, MaxTokensPerHour: binding.MaxTokensPerHour}
 		}
 		pricingBindings := make(map[string]plugin.PricingApproval, len(approval.PricingResources))
 		for name, binding := range approval.PricingResources {
@@ -4153,7 +4160,7 @@ func (s *Server) pipelinePluginConfig(pcfg provider.PluginsConfig) plugin.Plugin
 		Order:           pcfg.Order,
 		HookOrder:       pcfg.HookOrder,
 		Config:          pcfg.Config,
-		Approvals:       pluginApprovals(pcfg.Approvals),
+		Approvals:       pluginApprovals(pcfg.Approvals, s.config.Providers.Providers),
 		AllowUnapproved: pcfg.AllowUnapproved,
 		Strict:          true,
 		HostVersion:     s.config.HostVersion,

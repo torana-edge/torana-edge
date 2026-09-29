@@ -159,7 +159,7 @@ h3,
 .app-nav {
   grid-area: nav;
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(5, minmax(0, 1fr));
   align-items: center;
   gap: var(--space-3xs);
   min-width: 0;
@@ -761,32 +761,31 @@ tr:last-child td {
 }
 
 #pluginPermissionList {
-  display: grid;
-  gap: var(--space-2xs);
   margin-block-start: var(--space-xs);
 }
-
-.permission-option {
-  display: flex;
-  align-items: center;
-  gap: var(--space-xs);
-  min-width: 0;
-  min-block-size: var(--control-height);
-  color: var(--color-ink-2);
-  cursor: pointer;
-}
-
-.permission-option input {
-  inline-size: 1rem;
-  block-size: 1rem;
-  accent-color: var(--color-accent);
-}
-
-.permission-option code,
+.permission-table td:first-child { width: 30%; }
+.permission-table td { vertical-align: top; }
+.permission-table code,
 .section-desc code {
   overflow-wrap: anywhere;
   word-break: break-word;
 }
+
+.advanced-settings {
+  margin-block-start: var(--space-xs);
+  border: var(--rule-thin) solid var(--color-rule);
+  border-radius: var(--radius-input);
+  background: var(--color-paper);
+}
+.advanced-settings > summary {
+  min-height: var(--control-height);
+  padding: var(--space-xs);
+  color: var(--color-ink-2);
+  cursor: pointer;
+  font-weight: 650;
+}
+.advanced-settings > .form-grid,
+.advanced-settings > .advanced-content { padding: 0 var(--space-xs) var(--space-xs); }
 
 .detail-frame {
   width: 100%;

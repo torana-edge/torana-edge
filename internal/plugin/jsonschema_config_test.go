@@ -130,6 +130,14 @@ func TestSourceExtensionSurvives(t *testing.T) {
 	}
 }
 
+func TestAdvancedExtensionSurvives(t *testing.T) {
+	raw := []byte(`{"type":"object","properties":{"timeout":{"type":"integer","x-torana-advanced":true}}}`)
+	got := deriveConfigSchema(raw)
+	if got == nil || len(got.Fields) != 1 || !got.Fields[0].Advanced {
+		t.Fatalf("advanced field = %+v", got)
+	}
+}
+
 // countScalarProperties counts JSON Schema properties a form could render.
 func countScalarProperties(raw []byte) int {
 	var doc struct {

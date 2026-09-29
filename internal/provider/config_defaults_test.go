@@ -96,7 +96,6 @@ func TestModelServiceBindingErrorsNameTheField(t *testing.T) {
 		mutate func(*PluginModelServiceApproval)
 		want   string
 	}{
-		{"empty model", func(b *PluginModelServiceApproval) { b.Model = "  " }, "model"},
 		{"bad path", func(b *PluginModelServiceApproval) { b.Path = "not a path" }, "path"},
 		{"timeout zero", func(b *PluginModelServiceApproval) { b.TimeoutMS = 0 }, "timeout_ms"},
 		{"timeout too large", func(b *PluginModelServiceApproval) { b.TimeoutMS = 120001 }, "timeout_ms"},
@@ -117,5 +116,20 @@ func TestModelServiceBindingErrorsNameTheField(t *testing.T) {
 				t.Errorf("error %q does not name the offending field %q", err, tc.want)
 			}
 		})
+	}
+}
+
+func TestResolveModelServiceBindingUsesProviderDefaults(t *testing.T) {
+	p := Provider{URL: "http://127.0.0.1:8081/v1", Format: "openai", DefaultModel: "local"}
+	model, path, err := ResolveModelServiceBinding(p, PluginModelServiceApproval{})
+	if err != nil || model != "local" || path != "/chat/completions" {
+		t.Fatalf("resolved model=%q path=%q err=%v", model, path, err)
+	}
+	model, path, err = ResolveModelServiceBinding(Provider{URL: "https://example.test", Format: "openai"}, PluginModelServiceApproval{})
+	if err != nil || model != "" || path != "/v1/chat/completions" {
+		t.Fatalf("single-model endpoint model=%q path=%q err=%v", model, path, err)
+	}
+	if _, _, err := ResolveModelServiceBinding(Provider{URL: "https://example.test", Format: "gemini"}, PluginModelServiceApproval{}); err == nil {
+		t.Fatal("Gemini binding without a model was accepted")
 	}
 }

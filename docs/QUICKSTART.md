@@ -144,10 +144,10 @@ install the contextual guard:
 In the local control plane, add a provider such as `local-scanner` with the URL
 of your existing local server, format **OpenAI**, and authentication **None**.
 Select **pii**, keep its default fail-closed settings, and bind the required
-`scanner` service to `local-scanner`, the model you loaded, and
-`/v1/chat/completions`. Review the digest, permissions and model-call limits,
-then choose **Approve and enable**. Eligible tool output goes to that scanner;
-using a remote scanner would send it to that remote endpoint.
+`scanner` service to `local-scanner`. Torana derives the standard OpenAI path;
+select a model only if your server needs one. Review the digest, permissions
+and model-call limits, then choose **Approve and enable**. Eligible tool output
+goes to that scanner; using a remote scanner would send it to that endpoint.
 
 The [model-backed PII guide](https://github.com/torana-edge/torana-plugins/blob/main/plugins/pii/README.md)
 includes the exact CLI configuration and approval document.
@@ -163,8 +163,12 @@ Install the zero-model guard instead:
 Select **pii_guard** in the control plane, review its requested permissions, then
 choose **Approve and enable**. It makes no model or network calls. The
 [deterministic guard guide](https://github.com/torana-edge/torana-plugins/blob/main/plugins/pii_guard/README.md)
-also covers configuration through the CLI. Install only one guard; their
-manifests declare the pair as conflicting.
+also covers configuration through the CLI.
+
+You may enable either plugin alone, or place `pii_guard` immediately before
+`pii`. The plugins do not share state. The deterministic guard turns a match
+into a normal recoverable tool error, and `pii` leaves existing tool errors
+alone instead of sending them to its scanner model.
 
 ### Test either choice
 
@@ -182,14 +186,13 @@ Read the demo-sensitive.txt file in this directory and tell me what it contains.
 ```
 
 The harness will read the file locally and include the tool result in its next
-model request. Either guard should replace the sensitive result with a
+model request. The active guard should replace the sensitive result with a
 recoverable error beginning **Sensitive output withheld**. The safe request
 continues to the primary provider without the synthetic value, so the agent can
 acknowledge it and move on. You can inspect the request in Torana's **Live Feed**.
 
-This obvious value takes the deterministic fast path in both plugins. The
-model-backed `pii` plugin additionally sends eligible ambiguous content to the
-local scanner you bound earlier. After the check, remove the test file:
+With `pii_guard` first, this obvious value is handled without a model call. With
+only `pii`, the scanner model decides. After the check, remove the test file:
 
 ```bash
 rm demo-sensitive.txt
