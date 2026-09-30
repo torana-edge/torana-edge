@@ -100,12 +100,27 @@ moving the whole session to a local model.
 Try the contextual `pii` plugin first. It asks your OpenAI-compatible local
 model to inspect new tool output before it reaches the hosted model:
 
+First register that model server in Torana:
+
+1. Run `./torana open`, open **Settings**, and choose **Add provider**.
+2. Set **Provider name** to `local-scanner`, **Provider format** to `openai`,
+   and **Authentication** to **No authentication** for an unauthenticated local server.
+3. Set **Upstream URL** to your model server's address—for example,
+   `http://127.0.0.1:8081/v1` for a local OpenAI-compatible server, or
+   `http://127.0.0.1:11434` for Ollama. Use your server's actual port.
+4. If your server requires a model name, open **Plugin model defaults** and
+   set **Default model** to its loaded model's ID (for Ollama, its model name).
+   Single-model servers that accept requests without a model can leave it blank.
+   Leave **Inference path override** blank and choose **Save settings**.
+
+Now install the plugin:
+
 ```bash
 ./torana plugin install https://github.com/torana-edge/torana-plugins/tree/main/plugins/pii
 ```
 
 Run `./torana open`, configure its required
-`scanner` model service with the local provider you already configured,
+`scanner` model service by choosing `local-scanner` in **Provider**,
 then return to the installed plugin. The
 [PII guide](https://github.com/torana-edge/torana-plugins/blob/main/plugins/pii/README.md)
 has the complete binding and CLI examples.
