@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"log"
 	"math"
+	"time"
 
 	"github.com/torana-edge/torana-edge/internal/engine"
 	"github.com/torana-edge/torana-edge/internal/engine/pbconv"
@@ -63,13 +65,27 @@ func (s *Server) completeModel(ctx context.Context, pluginName string, resource 
 		return nil, modelHostError(pbv1.ErrorCode_ERROR_CODE_INTERNAL, "model request envelope could not be encoded")
 	}
 	budget := provider.EgressBudget{MaxCallsPerMinute: resource.MaxCallsPerMinute, MaxTokensPerHour: resource.MaxTokensPerHour}
+	// Inference must finish before the guest's deadline. Otherwise the runtime
+	// closes the module before it can handle the refusal and return a safe tool
+	// result. Each call shares the remaining hook budget, including batch scans.
+	modelCtx, cancel := modelServiceContext(ctx)
+	defer cancel()
+	if modelCtx.Err() != nil {
+		log.Printf("model service failed: plugin=%q service=%q provider=%q reason=hook_recovery_budget", pluginName, resource.Name, resource.Provider)
+		return nil, modelHostError(pbv1.ErrorCode_ERROR_CODE_UNAVAILABLE, "model service has insufficient remaining hook time")
+	}
 	var sourceResult pluginEgressSourceResult
-	result := s.sendPluginRequestWithBudget(ctx, pluginName, string(payload), pluginEgressOptions{
+	started := time.Now()
+	result := s.sendPluginRequestWithBudget(modelCtx, pluginName, string(payload), pluginEgressOptions{
 		boundBudget:   &budget,
 		budgetKey:     pluginName + "\x00model-service\x00" + resource.Name,
 		modelOverride: &resource.Model,
 		sourceResult:  &sourceResult,
 	})
+	// Log destinations and timing only, never scanner input, output, or credentials.
+	if result.Refusal() != nil {
+		log.Printf("model service failed: plugin=%q service=%q provider=%q elapsed_ms=%d code=%s", pluginName, resource.Name, resource.Provider, time.Since(started).Milliseconds(), result.Refusal().Code.String())
+	}
 	if result.Refusal() != nil {
 		return nil, proto.Clone(result.Refusal()).(*pbv1.HostError)
 	}
@@ -138,6 +154,19 @@ func (s *Server) completeModel(ctx context.Context, pluginName string, resource 
 		out.Usage = &pbv1.Usage{InputTokens: int32(input), OutputTokens: int32(sourceUsage.OutputTokens), CacheReadTokens: int32(sourceUsage.CacheReadTokens), CacheWriteTokens: int32(sourceUsage.CacheWriteTokens)}
 	}
 	return out, nil
+}
+
+func modelServiceContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		return context.WithCancel(ctx)
+	}
+	remaining := time.Until(deadline)
+	reserve := min(5*time.Second, remaining)
+	if remaining <= 0 {
+		return context.WithDeadline(ctx, deadline)
+	}
+	return context.WithDeadline(ctx, deadline.Add(-reserve))
 }
 
 func modelServiceSourceUsage(usage *struct {
