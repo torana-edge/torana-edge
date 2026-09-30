@@ -195,6 +195,8 @@
         <p class="section-desc">Choose where requests go, how they authenticate, and whether Torana translates between APIs.</p>
         <div id="providersBody" class="provider-list"></div>
         <button class="btn btn-sm space-block-start-xs" type="button" onclick="addProviderRow()">+ Add provider</button>
+        <button class="btn btn-primary space-block-start-xs" data-save-settings type="button" onclick="saveSettings()">Save settings</button>
+        <p class="hint">Saves and applies all settings on this page.</p>
       </div>
 
       <div class="card form-section">
@@ -245,7 +247,7 @@
         </div>
       </div>
 
-      <button class="btn btn-primary" type="button" onclick="saveSettings(this)">Save settings</button>
+      <button class="btn btn-primary" data-save-settings type="button" onclick="saveSettings()">Save settings</button>
     </section>
   </main>
 
@@ -1376,8 +1378,12 @@
     function addProviderRow(name, prov) {
       document.getElementById('providersBody').appendChild(ToranaProviders.create(name, prov || {}, PROVIDER_FORMATS));
     }
-    function saveSettings(button) {
-      setButtonBusy(button, true, 'Saving…');
+    function setSettingsBusy(busy) {
+      document.querySelectorAll('[data-save-settings]').forEach(button => setButtonBusy(button, busy, 'Saving…'));
+    }
+    function saveSettings() {
+      if (document.querySelector('[data-save-settings][disabled]')) return;
+      setSettingsBusy(true);
       const cfg = settingsCfg ? JSON.parse(JSON.stringify(settingsCfg)) : {};
       const providers = Object.create(null);
       try {
@@ -1389,7 +1395,7 @@
         ToranaProviders.validateFallbacks(providers);
       } catch (err) {
         showAlert(err.message);
-        setButtonBusy(button, false);
+        setSettingsBusy(false);
         return;
       }
       cfg.providers = providers;
@@ -1424,7 +1430,7 @@
       .then(async r => { const t = await r.text(); if (!r.ok) throw new Error(t || `HTTP ${r.status}`); settingsRevision = r.headers.get('ETag') || ''; return t ? JSON.parse(t) : {}; })
       .then(saved => { settingsCfg = saved; showAlert('Settings saved and applied.', false); })
       .catch(err => showAlert(`Failed to save settings: ${err.message}`))
-      .finally(() => setButtonBusy(button, false));
+      .finally(() => setSettingsBusy(false));
     }
 
     // ---- Utils ----

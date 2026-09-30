@@ -18,6 +18,60 @@ import (
 	pbv1 "github.com/torana-edge/torana-plugin-sdk/pb/v1"
 )
 
+func TestModelServiceContextReservesGuestRecoveryTime(t *testing.T) {
+	for _, budget := range []time.Duration{time.Second, 90 * time.Second} {
+		parent, stop := context.WithTimeout(context.Background(), budget)
+		child, cancel := modelServiceContext(parent)
+		parentDeadline, _ := parent.Deadline()
+		childDeadline, ok := child.Deadline()
+		margin := parentDeadline.Sub(childDeadline)
+		if !ok || margin <= 0 || margin > 5*time.Second {
+			t.Errorf("budget %s: recovery margin = %s", budget, margin)
+		}
+		cancel()
+		if parent.Err() != nil {
+			t.Error("canceling inference canceled the guest context")
+		}
+		stop()
+	}
+}
+
+func TestModelServiceContextDoesNotSpendRecoveryBudgetOnAnotherScan(t *testing.T) {
+	parent, stop := context.WithTimeout(context.Background(), time.Second)
+	defer stop()
+	child, cancel := modelServiceContext(parent)
+	defer cancel()
+	<-child.Done()
+	if parent.Err() != nil {
+		t.Fatal("the guest must still have time to handle an inference refusal")
+	}
+}
+
+func TestBoundModelServiceRefusesBeforeSpendingGuestRecoveryBudget(t *testing.T) {
+	var calls atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer upstream.Close()
+	providers := testProviderConfig(upstream.URL, "bound", "openai")
+	providers.Providers["bound"] = provider.Provider{URL: upstream.URL, Format: "openai", Auth: provider.ProviderAuth{Mode: "none"}}
+	server, err := New(Config{Port: "0", Providers: providers})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer server.Shutdown(context.Background())
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	_, hostErr := server.completeModel(ctx, "pii", wasm.ModelServiceResource{Name: "scanner", Provider: "bound", Timeout: time.Minute, MaxTokens: 512, MaxInputBytes: 1000, MaxCallsPerMinute: 2, MaxTokensPerHour: 1000}, &pbv1.ModelCompleteArgs{Service: "scanner", Messages: []*pbv1.Message{{Role: "user", Blocks: modelTextBlocks("synthetic")}}})
+	if hostErr == nil || hostErr.Code != pbv1.ErrorCode_ERROR_CODE_UNAVAILABLE {
+		t.Fatalf("expected recoverable refusal, got %v", hostErr)
+	}
+	if calls.Load() != 0 || ctx.Err() != nil {
+		t.Fatal("inference spent the guest's recovery budget")
+	}
+}
+
 func TestBoundModelServiceUsesOperatorDestinationAndReturnsNeutralResult(t *testing.T) {
 	var captured map[string]any
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
