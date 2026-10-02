@@ -120,9 +120,21 @@ base-URL overrides, but they use different files:
 - **oh-my-pi (`omp`):** `~/.omp/agent/models.yml`, under
   `providers.<provider>.baseUrl`.
 
-For example, an Anthropic API provider uses Torana’s native Anthropic route;
-an OpenAI-compatible Chat provider uses its own route with `/v1`. Preserve the
-other provider/model/auth settings instead of replacing the whole file.
+For example, an Anthropic API provider uses Torana’s native Anthropic route.
+For an OpenAI-compatible Chat provider, include `/v1` exactly once across
+Torana's configured **Upstream URL** and the harness's base URL:
+
+| Torana provider Upstream URL | Harness base URL |
+| --- | --- |
+| `http://127.0.0.1:8082` | `<torana endpoint local>/v1` |
+| `http://127.0.0.1:8082/v1` | `<torana endpoint local>` |
+
+Replace `local` and `8082` with your provider name and model-server port.
+For pi, set that URL in `providers.<provider>.baseUrl` and use
+`api: "openai-completions"` for Chat Completions. Do not append `/v1` again
+when the upstream already includes it: that sends `/v1/v1/chat/completions`
+and commonly returns 404. Preserve the other provider/model/auth settings
+instead of replacing the whole file.
 OAuth-backed provider extensions can have their own endpoint behavior: verify
 the selected provider rather than assuming every login uses the same URL.
 
@@ -134,8 +146,7 @@ rough edges are both useful.
 
 ## Live checks and what they prove
 
-These file-read and tool-follow-up checks passed on September 16, 2026,
-using native routes:
+These file-read and tool-follow-up checks use native routes:
 
 | Harness | Model | Observed result |
 | --- | --- | --- |
@@ -143,13 +154,24 @@ using native routes:
 | Codex 0.154.0 | GPT-5.6 Luna | ChatGPT login over HTTP/SSE: text and read-tool turns, Feed usage, and a local `usage_logger` record |
 | Antigravity CLI 1.2.4 | Gemini 3.8 Flash High | Signed-in headless file read and follow-up through the local TLS ingress, with six matching Feed and usage-logger records; tools were explicitly auto-approved for this isolated run |
 
+An October 3, 2026 launch-validation pass also checked Claude Code 2.1.288
+(Haiku 4.5), Codex 0.160.0 (GPT-5.6 Luna), Antigravity (Gemini 3.8 Flash Low),
+and pi 1.0.0 with a local Qwen2.5-3B Chat Completions server. Each completed a
+synthetic file-read/tool-result cycle through Torana with `usage_logger` and
+`pii_guard` enabled. Claude, Codex, and Antigravity resumed conversations
+after a Torana restart. Cache-read usage was observed for Claude, Codex,
+and the local pi server; no Gemini cache hit was observed in these short runs.
+pi's subscription-backed Luna path still needs a pi login; its local-server
+check does not verify that authentication path.
+
 <details>
 <summary>What these checks covered</summary>
 
 Each result covers the workflow, version, model, and authentication route
-listed above. Resume, login refresh, long conversations, every tool, and other
-provider accounts were outside these checks. Automated API fixtures separately
-exercise protocol behavior; they are not live harness runs.
+listed above. Resume was checked in the October pass as described above;
+login refresh, long conversations, every tool, and other provider accounts
+were not checked. Automated API fixtures separately exercise protocol
+behavior; they are not live harness runs.
 
 For headless Antigravity, check completed tool events and the actual answer.
 A run can finish with `SUCCESS` after a tool was denied; the
