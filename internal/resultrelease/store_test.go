@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/torana-edge/torana-edge/internal/pluginstate"
+	sdk "github.com/torana-edge/torana-plugin-sdk"
 )
 
 func testStore(t *testing.T, path string) *Store {
@@ -27,6 +28,32 @@ func testStore(t *testing.T, path string) *Store {
 		h.Write([]byte(value))
 		return h.Sum(nil), nil
 	}}
+}
+
+func TestReviewContextIsFrozenCopiedAndPersistent(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "review.db")
+	s := testStore(t, path)
+	review := ReviewContext{ToolName: "Read", FilePath: "src/config.txt", Reason: sdk.ToolResultReleaseReason{Kind: "findings", Findings: []sdk.ToolResultReleaseFinding{{Type: "api_key", Line: 2}}}}
+	item, _, err := s.Observe(testScope(), true, review)
+	if err != nil {
+		t.Fatal(err)
+	}
+	review.Reason.Findings[0].Type = "password"
+	if item.Review.Reason.Findings[0].Type != "api_key" {
+		t.Fatal("review metadata aliases caller")
+	}
+	_, _, err = s.Observe(testScope(), true, ReviewContext{ToolName: "different", Reason: sdk.ToolResultReleaseReason{Kind: "scan_failure"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.State.Close(); err != nil {
+		t.Fatal(err)
+	}
+	s = testStore(t, path)
+	stored, err := s.Get(item.Reference)
+	if err != nil || stored.Review == nil || stored.Review.ToolName != "Read" || stored.Review.FilePath != "src/config.txt" || stored.Review.Reason.Findings[0].Type != "api_key" {
+		t.Fatalf("review changed or lost: %+v %v", stored, err)
+	}
 }
 
 func TestRequestBudgetAndDecisionAuditPersist(t *testing.T) {

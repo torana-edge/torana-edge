@@ -1093,7 +1093,7 @@ type Runtime struct {
 	// Set by the server.
 	PluginCounterFunc func(plugin string, counter string, delta int64)
 	// ToolResultReleaseFunc receives host-verified input, never guest scope/content.
-	ToolResultReleaseFunc func(context.Context, string, string, *pbv1.RequestToolResultBlock, bool) ([]byte, *pbv1.HostError)
+	ToolResultReleaseFunc func(context.Context, string, string, *pbv1.RequestToolResultBlock, *pbv1.RequestToolUseBlock, *sdk.ToolResultReleaseReason) ([]byte, *pbv1.HostError)
 
 	// StateGetFunc and StateSetFunc back env.state_get / env.state_set:
 	// durable, plugin-namespaced storage that survives a restart. Unlike the
@@ -2799,14 +2799,25 @@ func (r *Runtime) dispatchHostCall(ctx context.Context, pluginName, cmd, args st
 				herr = hostErr(pbv1.ErrorCode_ERROR_CODE_NOT_CONFIGURED, "savings tracking not configured")
 			}
 		case "torana_tool_result_release":
-			object, err := strictjson.DecodeObjectStrict([]byte(args), "message", "block", "register")
+			object, err := strictjson.DecodeObjectStrict([]byte(args), "message", "block", "register", "reason")
 			var a struct {
 				Message  int  `json:"message"`
 				Block    int  `json:"block"`
 				Register bool `json:"register"`
 			}
-			if err != nil || len(object) != 3 || json.Unmarshal([]byte(args), &a) != nil || a.Message < 0 || a.Block < 0 {
+			if err != nil || object["message"] == nil || object["block"] == nil || object["register"] == nil || json.Unmarshal([]byte(args), &a) != nil || a.Message < 0 || a.Block < 0 {
 				herr = hostErr(pbv1.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "invalid tool-result position")
+				break
+			}
+			var reason *sdk.ToolResultReleaseReason
+			if a.Register {
+				reason, err = sdk.DecodeToolResultReleaseReason(object["reason"])
+				if err != nil {
+					herr = hostErr(pbv1.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "registration requires a value-free review reason")
+					break
+				}
+			} else if object["reason"] != nil {
+				herr = hostErr(pbv1.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "lookup cannot register a reason")
 				break
 			}
 			input, _ := ctx.Value(releaseInputKey{}).(*pbv1.ChatRequest)
@@ -2821,7 +2832,29 @@ func (r *Runtime) dispatchHostCall(ctx context.Context, pluginName, cmd, args st
 				herr = hostErr(pbv1.ErrorCode_ERROR_CODE_NOT_CONFIGURED, "tool-result approvals are not configured")
 				break
 			}
-			value, herr = r.ToolResultReleaseFunc(ctx, pluginName, digest, input.Messages[a.Message].Blocks[a.Block].GetToolResult(), a.Register)
+			result := input.Messages[a.Message].Blocks[a.Block].GetToolResult()
+			var call *pbv1.RequestToolUseBlock
+			ambiguous := false
+			for _, message := range input.Messages {
+				if message == nil {
+					continue
+				}
+				for _, block := range message.Blocks {
+					if block == nil {
+						continue
+					}
+					if candidate := block.GetToolUse(); candidate != nil && candidate.Id == result.ToolCallId {
+						if call != nil {
+							ambiguous = true
+						}
+						call = candidate
+					}
+				}
+			}
+			if ambiguous {
+				call = nil
+			}
+			value, herr = r.ToolResultReleaseFunc(ctx, pluginName, digest, result, call, reason)
 		case "torana_plugin_counter":
 			var counter struct {
 				Counter string `json:"counter"`

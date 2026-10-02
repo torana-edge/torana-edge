@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/torana-edge/torana-edge/internal/pluginstate"
+	sdk "github.com/torana-edge/torana-plugin-sdk"
 )
 
 const Namespace = "@torana/result-release"
@@ -40,10 +41,19 @@ type Scope struct {
 // Record contains metadata only; no tool text, scanner prose or credentials.
 type Record struct {
 	Scope
-	Reference string       `json:"reference"`
-	Status    string       `json:"status"`
-	CreatedAt time.Time    `json:"created_at"`
-	Audit     []AuditEvent `json:"audit,omitempty"`
+	Reference string         `json:"reference"`
+	Status    string         `json:"status"`
+	CreatedAt time.Time      `json:"created_at"`
+	Audit     []AuditEvent   `json:"audit,omitempty"`
+	Review    *ReviewContext `json:"review,omitempty"`
+}
+
+// ReviewContext is captured once from host-observed call metadata and the
+// plugin's closed reason. It never includes arbitrary arguments or output.
+type ReviewContext struct {
+	ToolName string                      `json:"tool_name"`
+	FilePath string                      `json:"file_path,omitempty"`
+	Reason   sdk.ToolResultReleaseReason `json:"initial_reason"`
 }
 
 type Store struct {
@@ -60,7 +70,7 @@ func ValidReference(ref string) bool {
 	return err == nil
 }
 
-func (s *Store) Observe(scope Scope, register bool) (Record, bool, error) {
+func (s *Store) Observe(scope Scope, register bool, review ...ReviewContext) (Record, bool, error) {
 	if s == nil || s.State == nil || s.MAC == nil {
 		return Record{}, false, errors.New("result approvals are unavailable")
 	}
@@ -87,6 +97,14 @@ func (s *Store) Observe(scope Scope, register bool) (Record, bool, error) {
 		return Record{}, false, errUnlessMissing(err)
 	}
 	item = Record{Scope: scope, Reference: ref, Status: "withheld", CreatedAt: time.Now().UTC()}
+	if len(review) > 0 {
+		if err := review[0].Reason.Validate(); err != nil {
+			return Record{}, false, err
+		}
+		context := review[0]
+		context.Reason.Findings = append([]sdk.ToolResultReleaseFinding(nil), context.Reason.Findings...)
+		item.Review = &context
+	}
 	text, _ := json.Marshal(item)
 	applied, _, err := s.State.CompareAndSet(Namespace, "result/"+ref, string(text), nil)
 	if err != nil {

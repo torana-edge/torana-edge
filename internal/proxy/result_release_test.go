@@ -59,7 +59,7 @@ func TestModelRequestsHumanReleaseWithoutGrantingConsent(t *testing.T) {
 	}
 	ctx := context.WithValue(context.Background(), reqStateKey{}, &reqState{ConversationID: "session-a"})
 	tr := &pb.RequestToolResultBlock{ToolCallId: "call-a", Content: []*pb.ToolResultContentBlock{{Kind: &pb.ToolResultContentBlock_Text{Text: &pb.ToolResultTextBlock{Text: "ordinary synthetic content"}}}}}
-	observed, refusal := s.observeToolResultRelease(ctx, "pii", "sha256:bundle", tr, true)
+	observed, refusal := s.observeToolResultRelease(ctx, "pii", "sha256:bundle", tr, nil, &sdk.ToolResultReleaseReason{Kind: "scan_failure"})
 	if refusal != nil {
 		t.Fatal(refusal)
 	}
@@ -72,7 +72,7 @@ func TestModelRequestsHumanReleaseWithoutGrantingConsent(t *testing.T) {
 	}
 	for _, callID := range []string{"", "torana_gemini_semantic_0"} {
 		tr.ToolCallId = callID
-		raw, refusal := s.observeToolResultRelease(ctx, "pii", "sha256:bundle", tr, true)
+		raw, refusal := s.observeToolResultRelease(ctx, "pii", "sha256:bundle", tr, nil, &sdk.ToolResultReleaseReason{Kind: "scan_failure"})
 		if refusal != nil || string(raw) != `{"reference":"","approved":false}` {
 			t.Fatalf("ambiguous call got review reference: %s %v", raw, refusal)
 		}
@@ -189,7 +189,7 @@ func TestHumanReleaseRequiresActiveExactBundleAndCanBeRevoked(t *testing.T) {
 	tr := &pb.RequestToolResultBlock{ToolCallId: "read-a", Content: []*pb.ToolResultContentBlock{{Kind: &pb.ToolResultContentBlock_Text{Text: &pb.ToolResultTextBlock{Text: "synthetic benign text"}}}}}
 	observe := func(digest string) sdk.ToolResultReleaseInfo {
 		t.Helper()
-		raw, refusal := s.observeToolResultRelease(ctx, entry.Name, digest, tr, true)
+		raw, refusal := s.observeToolResultRelease(ctx, entry.Name, digest, tr, &pb.RequestToolUseBlock{Id: tr.ToolCallId, Name: "Read", ArgumentsJson: []byte(`{"file_path":"src/synthetic.txt"}`)}, &sdk.ToolResultReleaseReason{Kind: "findings", Findings: []sdk.ToolResultReleaseFinding{{Type: "api_key", Line: 2}}})
 		if refusal != nil {
 			t.Fatal(refusal)
 		}
@@ -200,6 +200,10 @@ func TestHumanReleaseRequiresActiveExactBundleAndCanBeRevoked(t *testing.T) {
 		return info
 	}
 	current := observe(entry.Digest)
+	contextRecord, err := s.resultReleases.Get(current.Reference)
+	if err != nil || contextRecord.Review == nil || contextRecord.Review.ToolName != "Read" || contextRecord.Review.FilePath != "src/synthetic.txt" || contextRecord.Review.Reason.Findings[0].Line != 2 {
+		t.Fatalf("missing host context: %+v %v", contextRecord, err)
+	}
 	if _, err := s.resultReleases.Request(current.Reference, "human-session"); err != nil {
 		t.Fatal(err)
 	}
@@ -233,6 +237,27 @@ func TestHumanReleaseRequiresActiveExactBundleAndCanBeRevoked(t *testing.T) {
 	}
 	if observe(entry.Digest).Approved {
 		t.Fatal("revocation did not reach the plugin host API")
+	}
+}
+
+func TestReleaseReviewRetainsOnlyKnownReadPaths(t *testing.T) {
+	reason := &sdk.ToolResultReleaseReason{Kind: "scan_failure"}
+	result := &pb.RequestToolResultBlock{ToolName: "Read"}
+	for _, test := range []struct{ name, args, want string }{
+		{"Read", `{"file_path":"src/config.json","value":"must-not-store"}`, "src/config.json"},
+		{"read_file", `{"path":"src/config.json"}`, "src/config.json"},
+		{"Bash", `{"command":"cat src/config.json; echo secret","path":"src/config.json"}`, ""},
+		{"Read", `{"file_path":"https://user:secret@example.com/file"}`, ""},
+		{"Read", `{"file_path":"injected\npath"}`, ""},
+	} {
+		context := releaseReviewContext(result, &pb.RequestToolUseBlock{Name: test.name, ArgumentsJson: []byte(test.args)}, reason)
+		if context.FilePath != test.want || context.ToolName != test.name {
+			t.Fatalf("%s: %+v", test.name, context)
+		}
+		raw, _ := json.Marshal(context)
+		if strings.Contains(string(raw), "must-not-store") || strings.Contains(string(raw), "echo secret") {
+			t.Fatal("arbitrary tool arguments retained")
+		}
 	}
 }
 

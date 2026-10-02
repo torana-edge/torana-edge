@@ -8,6 +8,8 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/torana-edge/torana-edge/internal/mcpserver"
 	"github.com/torana-edge/torana-edge/internal/resultrelease"
@@ -28,7 +30,7 @@ func resultReleaseAgentOperations() []agentAPIOperation {
 	return operations
 }
 
-func (s *Server) observeToolResultRelease(ctx context.Context, pluginName, digest string, result *pb.RequestToolResultBlock, register bool) ([]byte, *pb.HostError) {
+func (s *Server) observeToolResultRelease(ctx context.Context, pluginName, digest string, result *pb.RequestToolResultBlock, call *pb.RequestToolUseBlock, reason *sdk.ToolResultReleaseReason) ([]byte, *pb.HostError) {
 	refusal := func(code pb.ErrorCode, message string) ([]byte, *pb.HostError) {
 		return nil, &pb.HostError{Code: code, Message: message}
 	}
@@ -53,7 +55,8 @@ func (s *Server) observeToolResultRelease(ctx context.Context, pluginName, diges
 	if err != nil {
 		return refusal(pb.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "unrepresentable tool content")
 	}
-	item, found, err := s.resultReleases.Observe(resultrelease.Scope{Conversation: state.ConversationID, Plugin: pluginName, Digest: digest, CallID: result.ToolCallId, ContentHash: hex.EncodeToString(fingerprint[:])}, register)
+	review := releaseReviewContext(result, call, reason)
+	item, found, err := s.resultReleases.Observe(resultrelease.Scope{Conversation: state.ConversationID, Plugin: pluginName, Digest: digest, CallID: result.ToolCallId, ContentHash: hex.EncodeToString(fingerprint[:])}, reason != nil, review)
 	if err != nil {
 		return refusal(pb.ErrorCode_ERROR_CODE_UNAVAILABLE, "result approval state is unavailable")
 	}
@@ -63,6 +66,39 @@ func (s *Server) observeToolResultRelease(ctx context.Context, pluginName, diges
 	}
 	raw, _ := json.Marshal(info)
 	return raw, nil
+}
+
+func releaseReviewContext(result *pb.RequestToolResultBlock, call *pb.RequestToolUseBlock, reason *sdk.ToolResultReleaseReason) resultrelease.ReviewContext {
+	review := resultrelease.ReviewContext{ToolName: result.GetToolName()}
+	if call != nil {
+		review.ToolName = call.Name
+		// Only known read-tool path members are retained. Never store a Bash
+		// command or arbitrary arguments; either can contain credentials.
+		switch strings.ToLower(call.Name) {
+		case "read", "read_file", "readfile", "get_file_contents":
+			var arguments map[string]json.RawMessage
+			if json.Unmarshal(call.ArgumentsJson, &arguments) == nil {
+				for _, key := range []string{"file_path", "path", "filePath"} {
+					var path string
+					if json.Unmarshal(arguments[key], &path) == nil && safeReviewPath(path) {
+						review.FilePath = path
+						break
+					}
+				}
+			}
+		}
+	}
+	if len(review.ToolName) > 128 || strings.IndexFunc(review.ToolName, unicode.IsControl) >= 0 {
+		review.ToolName = ""
+	}
+	if reason != nil {
+		review.Reason = *reason
+	}
+	return review
+}
+
+func safeReviewPath(path string) bool {
+	return path != "" && len(path) <= 512 && utf8.ValidString(path) && strings.IndexFunc(path, unicode.IsControl) < 0 && !strings.Contains(path, "://")
 }
 
 // Model-facing: requesting review is not approval, and no request payload can
@@ -161,6 +197,10 @@ func (s *Server) handleResultApprovals(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if parts[1] == "approve" {
+		if item.Review == nil || item.Review.Reason.Validate() != nil {
+			writeAgentError(w, 409, "review_context_missing", "This record has no scanner review context; use the current plugin bundle and request a fresh review.")
+			return
+		}
 		registry, err := s.currentNamespaceRegistryLocked()
 		if err != nil {
 			writeAgentError(w, 503, "state_unavailable", "Could not verify the active plugin.")

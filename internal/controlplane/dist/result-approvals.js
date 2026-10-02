@@ -11,6 +11,11 @@ globalThis.ToranaResultApprovals = (() => {
     return el;
   };
   const referenceOK = ref => typeof ref === 'string' && /^tr_[0-9a-f]{64}$/.test(ref);
+  const reasonText = reason => {
+    if (reason?.kind === 'scan_failure') return 'Scan failure — not a confirmed finding';
+    if (reason?.kind !== 'findings' || !Array.isArray(reason.findings)) return 'Not available';
+    return reason.findings.slice(0, 20).map(finding => `${String(finding.type).replaceAll('_', ' ')} (${finding.line > 0 ? 'tool-output line ' + finding.line : 'line not reported'})`).join('; ');
+  };
   function render() {
     const container = document.getElementById('resultApprovals');
     container.replaceChildren();
@@ -23,10 +28,17 @@ globalThis.ToranaResultApprovals = (() => {
       const row = node('article', '', 'result-approval');
       row.append(node('h4', `${item.plugin} · ${item.status}`));
       const details = node('dl', '', 'result-approval-details');
-      for (const [label, value] of [['Tool call', item.call_id], ['Conversation', item.conversation], ['Result reference', item.reference]]) {
+      const created = new Date(item.created_at);
+      for (const [label, value] of [
+        ['Tool', item.review?.tool_name || 'Not available'],
+        ['File path', item.review?.file_path || 'Not available for this tool'],
+        ['Initial scanner report', reasonText(item.review?.initial_reason)],
+        ['First withheld', Number.isNaN(created.getTime()) ? 'Not available' : created.toLocaleString()],
+        ['Tool call', item.call_id], ['Conversation', item.conversation], ['Result reference', item.reference]]) {
         details.append(node('dt', label), node('dd', value));
       }
       row.append(details);
+      if (item.review?.initial_reason?.kind === 'findings') row.append(node('p', 'This is the scanner’s initial report, not proof of sensitive data. Lines refer to returned tool output, not verified file positions. Check the original locally before allowing it.', 'section-desc'));
       const actions = node('div', '', 'inline-actions');
       let consent;
       if (item.status === 'pending') {

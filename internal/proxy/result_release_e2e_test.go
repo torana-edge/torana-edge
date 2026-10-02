@@ -87,6 +87,9 @@ func TestPIIHumanReleaseSurvivesRestartWithoutRescan(t *testing.T) {
 		t.Fatalf("registrations=%+v %v", items, err)
 	}
 	item := items[0]
+	if item.Review == nil || item.Review.Reason.Kind != "findings" || len(item.Review.Reason.Findings) != 1 || item.Review.Reason.Findings[0].Type != "unspecified" || item.Review.Reason.Findings[0].Line != 1 || item.CreatedAt.IsZero() {
+		t.Fatalf("real plugin did not register bounded review context: %+v", item)
+	}
 	policy, err := s.mcpPolicy()
 	if err != nil {
 		t.Fatal(err)

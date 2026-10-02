@@ -13,7 +13,7 @@ class Element {
   set innerHTML(_) { throw new Error('Approval metadata must never become HTML'); }
 }
 const reference = 'tr_' + 'a'.repeat(64);
-const record = {reference, plugin: 'pii', status: 'pending', call_id: 'call-a', conversation: 'session-a'};
+const record = {reference, plugin: 'pii', status: 'pending', call_id: 'call-a', conversation: 'session-a', created_at:'2026-10-02T12:00:00Z', review:{tool_name:'Read',file_path:'src/settings.json',initial_reason:{kind:'findings',findings:[{type:'api_key',line:2}]}}};
 const text = el => el.textContent + el.children.map(text).join(' ');
 const all = (el, tag) => [...(el.tag === tag ? [el] : []), ...el.children.flatMap(child => all(child, tag))];
 function setup(request) {
@@ -102,6 +102,16 @@ test('metadata is text and pagination retains the first page', async () => {
   assert.match(text(elements.resultApprovals), /revoked/);
   assert.equal(elements.moreResultApprovals.hidden, true);
   assert.equal(api.referenceOK('../other'), false);
+  assert.match(text(elements.resultApprovals), /src\/settings.json/);
+  assert.match(text(elements.resultApprovals), /api key \(tool-output line 2\)/);
+  assert.match(text(elements.resultApprovals), /not verified file positions/);
+});
+
+test('scan failure is clearly distinct from a finding and paths stay inert text', async () => {
+  const {api,elements} = setup(async () => ({approvals:[{...record,review:{tool_name:'Bash',file_path:'<img onerror=alert(1)>',initial_reason:{kind:'scan_failure'}}}]}));
+  await api.load();
+  assert.match(text(elements.resultApprovals), /Scan failure — not a confirmed finding/);
+  assert.match(text(elements.resultApprovals), /<img onerror=alert\(1\)>/);
 });
 
 test('a slow reload cannot overwrite the latest result list', async () => {
