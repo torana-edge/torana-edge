@@ -125,7 +125,7 @@ configuration while believing you are testing a changed seed.
 
 The empty plugin order is intentional: discovered plugins are not implicitly
 trusted or enabled. After the plugin-free request above succeeds, leave Torana
-running and choose one PII guard. The watcher discovers the new bundle without
+running and choose one plugin. The watcher discovers the new bundle without
 a restart.
 
 Plugins run in the request and response path. With permissions you approve,
@@ -133,48 +133,102 @@ they can inspect or change a request or response, block it, or call another
 endpoint. That lets your harness keep using its hosted model while a focused
 local model handles a narrow job.
 
-### Already have a local model running?
+### Have a local model—or happy to set up a small one?
 
-If you already run Ollama or another OpenAI-compatible local model endpoint,
-install the contextual guard:
+Try `pii` first: it's the best showcase of combining a focused local model with
+your hosted coding model. The local scanner checks new tool output before the
+hosted model sees it, without moving your whole workflow to local inference.
+Use Ollama or another OpenAI-compatible local server; see
+[Local models](LOCAL_MODELS.md) if you need setup guidance.
 
 ```bash
 ./torana plugin install https://github.com/torana-edge/torana-plugins/tree/main/plugins/pii
 ./torana plugin list
 ```
 
-In the local control plane, add a provider such as `local-scanner` with the URL
-of your existing local server, format **OpenAI**, and authentication **None**.
-Select **pii**, keep its default fail-closed settings, and bind the required
-`scanner` service to `local-scanner`. Torana derives the standard OpenAI path;
-select a model only if your server needs one. Review the digest, permissions
-and model-call limits, then choose **Approve and enable**. Eligible tool output
-goes to that scanner; using a remote scanner would send it to that endpoint.
+Register your local model before selecting it in the plugin:
+
+1. Run `./torana open`, open **Settings**, and choose **Add provider**.
+2. Set **Provider name** to `local-scanner`, **Provider format** to `openai`,
+   and **Authentication** to **No authentication** for an unauthenticated local server.
+3. Set **Upstream URL** to the local server's address, such as
+   `http://127.0.0.1:8081/v1`, or `http://127.0.0.1:11434` for Ollama.
+   Use your actual model-server port.
+4. If the server requires a model name, open **Plugin model defaults** and
+   set **Default model** to its loaded model ID. Single-model servers that
+   accept requests without a model can leave it blank. Leave **Inference path
+   override** blank and choose **Save settings**.
+
+Next, follow **Enable the plugin** below to choose `local-scanner` for `pii`.
+Eligible tool output goes to this scanner; selecting a remote scanner would
+send that output to the remote endpoint instead.
 
 The [model-backed PII guide](https://github.com/torana-edge/torana-plugins/blob/main/plugins/pii/README.md)
 includes the exact CLI configuration and approval document.
 
 ### Don't have a local model running?
 
-Install the zero-model guard instead:
+Choose either option—neither needs a scanner model:
+
+**See your traffic with usage_logger.** It records provider, latency and
+reported token usage locally, without saving prompts or response contents.
+
+```bash
+./torana plugin install https://github.com/torana-edge/torana-plugins/tree/main/plugins/usage_logger
+```
+
+**Or try pii_guard.** It checks high-confidence PII and common secret patterns
+deterministically, without a model or network call.
 
 ```bash
 ./torana plugin install https://github.com/torana-edge/torana-plugins/tree/main/plugins/pii_guard
 ```
 
-Select **pii_guard** in the control plane, review its requested permissions, then
-choose **Approve and enable**. It makes no model or network calls. The
+The
 [deterministic guard guide](https://github.com/torana-edge/torana-plugins/blob/main/plugins/pii_guard/README.md)
 also covers configuration through the CLI.
 
-You may enable either plugin alone, or place `pii_guard` immediately before
-`pii`. The plugins do not share state. The deterministic guard turns a match
-into a normal recoverable tool error before the contextual scan. `pii` still
-scans other failed tool results because failures can contain secrets.
+### Enable the plugin
 
-### Test either choice
+1. Run `./torana open`, choose **Pipeline**, and open the plugin you installed.
+2. For **pii**, find **Resource bindings and limits** → **scanner** and choose
+   `local-scanner` in **Provider**. This selects the provider you saved in
+   Settings. Torana uses its default model and derives the inference path;
+   leave **Advanced model settings** closed unless you need an override.
+3. Review the digest, requested permissions and resource limits. For
+   `usage_logger`, review its required `usage.jsonl` file and rotation limits;
+   for `pii`, review its scanner's model-call limits.
+4. Choose **Approve and enable**, then confirm the plugin is enabled in Pipeline.
 
-Both paths rejoin here. Create a file containing an obviously synthetic
+Installing a plugin does not enable it. A rebuilt bundle needs a new digest approval.
+
+### Test your setup
+
+#### If you chose usage_logger
+
+Create a small, non-sensitive file in the directory your harness is using:
+
+```bash
+echo 'Hello from Torana.' > demo-safe.txt
+```
+
+Ask your routed harness: `Read demo-safe.txt and tell me what it contains.`
+Open **Live Feed** to find its request, then read the content-free records
+with your shell:
+
+```bash
+tail -n 5 "$(./torana plugin file path usage_logger usage.jsonl)"
+rm demo-safe.txt
+```
+
+Expect provider/model, status, latency and reported token counts—not the file
+contents. This plugin observes traffic; it does not block secrets.
+The [usage logger guide](https://github.com/torana-edge/torana-plugins/blob/main/plugins/usage_logger/README.md)
+has CLI enablement and continuous log-following examples.
+
+#### If you chose pii or pii_guard
+
+Create a file containing an obviously synthetic
 credential. Do not use a real key:
 
 ```bash
@@ -188,14 +242,17 @@ Read the demo-sensitive.txt file in this directory and tell me what it contains.
 ```
 
 The harness will read the file locally and include the tool result in its next
-model request. The active guard should replace the sensitive result with a
-recoverable error beginning **Sensitive output withheld**. The safe request
-continues to the primary provider without the synthetic value, so the agent can
-acknowledge it and move on. You can inspect the request in Torana's **Live Feed**.
+model request. When the plugin flags the result, it replaces it with a
+recoverable tool error: **Tool output withheld** for `pii`, or **Sensitive output
+withheld** for `pii_guard`. That request continues to the primary provider
+without the flagged value, so the agent can acknowledge it and move on.
+`pii` is an extra model-backed check, not a guarantee that every secret is
+caught. You can inspect the request in Torana's **Live Feed**.
 
-With `pii_guard` first, this obvious value is replaced before the contextual
-scan. With only `pii`, the scanner model decides. After the check, remove the
-test file:
+With only `pii`, the scanner model decides. You can also put `pii_guard` directly
+before `pii` in Pipeline: the deterministic guard handles obvious matches first.
+They do not share state; `pii` also checks failed tool results, since failures
+can contain secrets. After the check, remove the test file:
 
 ```bash
 rm demo-sensitive.txt
