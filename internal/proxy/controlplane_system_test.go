@@ -67,6 +67,34 @@ func TestSystemCannotReportReadyBeforeStartupCompletes(t *testing.T) {
 	}
 }
 
+func TestSystemReportsAbsolutePluginDirectory(t *testing.T) {
+	t.Chdir(t.TempDir())
+	cfg := provider.DefaultConfig()
+	cfg.Plugins.Dir = filepath.Join("relative", "bundles")
+	s, err := New(Config{Providers: cfg, ConfigPath: filepath.Join(t.TempDir(), "config.json")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Shutdown(context.Background())
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest(http.MethodGet, "http://127.0.0.1/_torana/api/v1/system", nil)
+	r.RemoteAddr = "127.0.0.1:12345"
+	s.Handler().ServeHTTP(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status %d: %s", w.Code, w.Body.String())
+	}
+	var status struct {
+		Directory string `json:"plugin_directory"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &status); err != nil {
+		t.Fatal(err)
+	}
+	want, err := filepath.Abs(cfg.Plugins.Dir)
+	if err != nil || status.Directory != want {
+		t.Fatalf("directory %q, want %q: %v", status.Directory, want, err)
+	}
+}
+
 func TestSystemStopIdentityAndStrictInput(t *testing.T) {
 	cfg := provider.DefaultConfig()
 	cfg.Plugins.Dir = t.TempDir()
