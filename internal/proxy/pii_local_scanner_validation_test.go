@@ -1,3 +1,5 @@
+//go:build torana_local_models
+
 package proxy
 
 import (
