@@ -1362,6 +1362,7 @@ func reloadPipeline(runtime *wasm.Runtime, config PluginConfig) (*PluginPipeline
 			continue
 		}
 		pl.SetGrants(grants)
+		pl.SetBundleDigest(bundle.Digest)
 		pl.SetResources(resources)
 		if raw, ok := config.Config[name]; ok && len(raw) > 0 {
 			pl.SetConfig(string(raw))

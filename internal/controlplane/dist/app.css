@@ -1166,6 +1166,18 @@ main { padding-block-start: var(--space-xl); }
 .subhead { text-transform: none; letter-spacing: 0; font-size: var(--text-sm); }
 .nav-btn, .btn, .input, select, .code-editor { transition: none; }
 .nav-btn { font-size: var(--text-sm); }
+
+.result-approval { padding-block: var(--space-lg); border-bottom: 1px solid var(--color-rule); }
+.result-approval h4 { margin-block: 0 var(--space-md); }
+.result-approval-details { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--space-xs); margin-block: var(--space-md); }
+.result-approval-details dt { color: var(--color-muted); }
+.result-approval-details dd { margin: 0 0 var(--space-sm); overflow-wrap: anywhere; min-width: 0; font-family: var(--font-mono); }
+.result-approval-consent { display: flex; align-items: flex-start; gap: var(--space-sm); max-width: 65ch; margin-block: var(--space-lg); cursor: pointer; }
+.result-approval-consent input { flex: 0 0 auto; margin-block-start: var(--space-xs); }
+#moreResultApprovals[hidden] { display: none; }
+@media (min-width: 40rem) {
+  .result-approval-details { grid-template-columns: minmax(0, 10rem) minmax(0, 1fr); }
+}
 .btn { background: var(--color-paper); border-color: var(--color-rule-strong); font-size: var(--text-sm); }
 .btn-primary { background: var(--color-accent); color: var(--color-accent-ink); border-color: var(--color-accent); }
 .btn-danger { background: var(--color-danger-soft); color: var(--color-danger); border-color: var(--color-danger); }
@@ -1199,9 +1211,10 @@ th { text-transform: none; letter-spacing: 0; font-size: var(--text-xs); }
   .app-header { grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); grid-template-areas: "brand nav tools"; }
 }
 @media (max-width: 25rem) {
+  .app-nav { gap: 0; }
   .header-tools { flex-direction: column; align-items: flex-end; gap: var(--space-3xs); }
   .status-badge { min-height: var(--space-md); font-size: var(--text-2xs); border: 0; background: var(--color-transparent); }
   .plugin-card { gap: var(--space-2xs); padding: var(--space-xs); }
   .plugin-card-actions { justify-content: flex-start; }
-  .nav-btn { font-size: var(--text-xs); padding-inline: var(--space-3xs); }
+  .nav-btn { font-size: var(--text-xs); padding-inline: 0; }
 }

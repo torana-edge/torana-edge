@@ -82,6 +82,9 @@ func (p *namespaceAccessPolicy) catalog(namespace string, detail bool) []catalog
 					item.OutputSchema, item.Examples = op.Guest.OutputSchema, op.Guest.Examples
 				}
 			}
+			if op.Source == "core" && op.ID == "redactions.request_release" {
+				item.InputSchema = releaseRequestSchema
+			}
 			result = append(result, item)
 		}
 	}

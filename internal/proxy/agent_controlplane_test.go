@@ -12,6 +12,7 @@ import (
 
 	"github.com/torana-edge/torana-edge/internal/plugin"
 	"github.com/torana-edge/torana-edge/internal/provider"
+	"github.com/torana-edge/torana-edge/internal/resultrelease"
 	pb "github.com/torana-edge/torana-plugin-sdk/pb/v1"
 )
 
@@ -87,7 +88,15 @@ func TestAgentControlPlaneDiscoveryAndJSONErrors(t *testing.T) {
 		if operation.Risk != "read" || operation.Method != http.MethodGet || operation.Plugin != "" {
 			continue
 		}
-		request = localControlPlaneRequest(http.MethodGet, operation.Path, nil)
+		path := operation.Path
+		if operation.ID == "torana.approvals.show" {
+			item, _, err := server.resultReleases.Observe(resultrelease.Scope{Conversation: "discovery-test", Plugin: "pii", Digest: "sha256:test", CallID: "call-a", ContentHash: strings.Repeat("a", 64)}, true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			path = strings.ReplaceAll(path, "{reference}", item.Reference)
+		}
+		request = localControlPlaneRequest(http.MethodGet, path, nil)
 		request.RemoteAddr = "127.0.0.1:12345"
 		recorder = httptest.NewRecorder()
 		server.Handler().ServeHTTP(recorder, request)

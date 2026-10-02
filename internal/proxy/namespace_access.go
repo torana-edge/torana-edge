@@ -64,7 +64,7 @@ func (p *namespaceAccessPolicy) floor(entry namespaceEntry, op namespaceOperatio
 	}
 	if op.Source == "core" {
 		switch op.ID {
-		case "system.status", "plugins.list", "stats.get", "feed.recent", "session.usage", "suggestions.list", "changes.list", "changes.undo":
+		case "system.status", "plugins.list", "stats.get", "feed.recent", "session.usage", "suggestions.list", "changes.list", "changes.undo", "redactions.request_release":
 		default:
 			return true
 		}

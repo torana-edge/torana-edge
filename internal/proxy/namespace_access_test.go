@@ -11,6 +11,7 @@ import (
 	"github.com/torana-edge/torana-edge/internal/plugin"
 	"github.com/torana-edge/torana-edge/internal/pluginstate"
 	"github.com/torana-edge/torana-edge/internal/provider"
+	"github.com/torana-edge/torana-edge/internal/resultrelease"
 	"github.com/torana-edge/torana-edge/internal/suggest"
 	pb "github.com/torana-edge/torana-plugin-sdk/pb/v1"
 )
@@ -134,6 +135,26 @@ func TestModelReachableCoreContractsDoNotExposeCodesOrConversationSelection(t *t
 		}
 		for _, op := range entry.Operations {
 			if p.ModelReachable(entry.Name, op.ID) == "never" {
+				continue
+			}
+			if op.ID == "redactions.request_release" {
+				// This confirmed write requests human review; unlike scoped
+				// reads, it must use the proposal path, never the executor.
+				item, _, err := server.resultReleases.Observe(resultrelease.Scope{Conversation: "bound", Plugin: "pii", Digest: "sha256:test", CallID: "read-a", ContentHash: strings.Repeat("a", 64)}, true)
+				if err != nil {
+					t.Fatal(err)
+				}
+				input, _ := json.Marshal(map[string]string{"reference": item.Reference})
+				output, err := server.proposeNamespaceOperation(context.Background(), operationCall{Entry: entry, Operation: op, Input: input, Binding: plugin.MCPBinding{Bound: true, ConversationID: "bound"}})
+				if err != nil || !output.OK || output.Consent != nil {
+					t.Fatalf("review proposal=%+v %v", output, err)
+				}
+				encoded, _ := json.Marshal(output)
+				var value any
+				if json.Unmarshal(encoded, &value) != nil || strings.Contains(string(encoded), code) {
+					t.Fatal("review leaked a confirmation code")
+				}
+				assertNoConfirmationCode(t, op.ID, value)
 				continue
 			}
 			if op.ConversationBinding == "required" {

@@ -206,7 +206,7 @@ func validateAgentResponseHeaders(encoded []byte) error {
 }
 
 func builtInAgentOperations() []agentAPIOperation {
-	return []agentAPIOperation{
+	operations := []agentAPIOperation{
 		{
 			ID: "torana.system.status", Method: http.MethodGet, Path: "/_torana/api/v1/system",
 			Description: "Inspect process identity, health, version, and managed-store location.",
@@ -300,6 +300,7 @@ func builtInAgentOperations() []agentAPIOperation {
 			OutputSchema: arbitraryObjectSchema,
 		},
 	}
+	return append(operations, resultReleaseAgentOperations()...)
 }
 
 func (s *Server) agentAPIDiscovery() agentAPIDocument {

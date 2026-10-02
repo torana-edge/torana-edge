@@ -125,7 +125,7 @@ configuration while believing you are testing a changed seed.
 
 The empty plugin order is intentional: discovered plugins are not implicitly
 trusted or enabled. After the plugin-free request above succeeds, leave Torana
-running and choose one PII guard. The watcher discovers the new bundle without
+running and choose a plugin below. The watcher discovers the new bundle without
 a restart.
 
 Plugins run in the request and response path. With permissions you approve,
@@ -133,30 +133,52 @@ they can inspect or change a request or response, block it, or call another
 endpoint. That lets your harness keep using its hosted model while a focused
 local model handles a narrow job.
 
-### Already have a local model running?
+### Comfortable setting up a small local model? Try PII
 
-If you already run Ollama or another OpenAI-compatible local model endpoint,
-install the contextual guard:
+This is the best way to understand what Torana enables: your hosted coding
+model stays in charge while a small local model checks tool output before it
+leaves your machine. Use an existing OpenAI-compatible local endpoint, or start
+one and note its URL and loaded model ID. This is an extra check, not complete
+protection: the model can miss secrets or flag harmless code.
+
+1. Run `./torana open` to open the control plane.
+2. Go to **Settings → Add provider**. Name it `local-scanner`, enter your model
+   server URL (for example `http://127.0.0.1:8081/v1`), choose format **OpenAI**
+   and **No authentication** for an unauthenticated local server.
+3. Under **Plugin model defaults**, enter the loaded model ID if required.
+   Leave **Inference path override** blank. Choose **Save settings**.
+4. Install the plugin:
 
 ```bash
 ./torana plugin install https://github.com/torana-edge/torana-plugins/tree/main/plugins/pii
 ./torana plugin list
 ```
 
-In the local control plane, add a provider such as `local-scanner` with the URL
-of your existing local server, format **OpenAI**, and authentication **None**.
-Select **pii**, keep its default fail-closed settings, and bind the required
-`scanner` service to `local-scanner`. Torana derives the standard OpenAI path;
-select a model only if your server needs one. Review the digest, permissions
-and model-call limits, then choose **Approve and enable**. Eligible tool output
+5. Open **Pipeline → pii**. Under **Resource bindings → scanner → Provider**,
+   choose the `local-scanner` provider you added and saved in Settings. Torana
+   derives the inference path and uses that provider's default model. Review
+   the digest, permissions and limits, then **Approve and enable**. Eligible tool output
 goes to that scanner; using a remote scanner would send it to that endpoint.
 
 The [model-backed PII guide](https://github.com/torana-edge/torana-plugins/blob/main/plugins/pii/README.md)
 includes the exact CLI configuration and approval document.
 
-### Don't have a local model running?
+### Prefer to skip local-model setup? Try usage_logger or pii_guard
 
-Install the zero-model guard instead:
+Start with **usage_logger** for request timing and token-usage observations:
+
+```bash
+./torana plugin install https://github.com/torana-edge/torana-plugins/tree/main/plugins/usage_logger
+```
+
+Open **Pipeline → usage_logger**, review its permissions and local file binding,
+then **Approve and enable**. Ask your harness an ordinary question and check
+**Live Feed**. Read its local log with
+`tail -F "$(./torana plugin file path usage_logger usage.jsonl)"`.
+See the [usage_logger guide](https://github.com/torana-edge/torana-plugins/blob/main/plugins/usage_logger/README.md)
+for CLI configuration and PowerShell instructions.
+
+Or choose **pii_guard** for deterministic checks of recognizable secrets:
 
 ```bash
 ./torana plugin install https://github.com/torana-edge/torana-plugins/tree/main/plugins/pii_guard
@@ -172,9 +194,9 @@ You may enable either plugin alone, or place `pii_guard` immediately before
 into a normal recoverable tool error before the contextual scan. `pii` still
 scans other failed tool results because failures can contain secrets.
 
-### Test either choice
+### Test PII (either guard)
 
-Both paths rejoin here. Create a file containing an obviously synthetic
+If you chose a PII plugin, create a file containing an obviously synthetic
 credential. Do not use a real key:
 
 ```bash
@@ -188,8 +210,8 @@ Read the demo-sensitive.txt file in this directory and tell me what it contains.
 ```
 
 The harness will read the file locally and include the tool result in its next
-model request. The active guard should replace the sensitive result with a
-recoverable error beginning **Sensitive output withheld**. The safe request
+model request. When the scanner flags it, the active guard replaces the result
+with a value-free, recoverable tool error. The safe request
 continues to the primary provider without the synthetic value, so the agent can
 acknowledge it and move on. You can inspect the request in Torana's **Live Feed**.
 
@@ -200,6 +222,27 @@ test file:
 ```bash
 rm demo-sensitive.txt
 ```
+
+### Review a mistaken PII block
+
+With [Torana MCP connected](AGENT_CONTROL_PLANE.md), ask your agent to request
+review using the reference in the PII error. Run `./torana open` and open
+**Approvals**. Inspect the original content locally, then **Allow upstream**
+or **Keep withheld**. The model cannot approve the exception. CLI equivalents:
+
+```bash
+./torana approvals list
+./torana approvals show <reference>
+./torana approvals approve <reference> --yes
+./torana approvals decline <reference> --yes
+./torana approvals revoke <reference> --yes
+```
+
+Allowing permits only that exact result, conversation and plugin bundle to
+reach the configured upstream. The harness must resend the original result;
+Torana stores no copy. Another call or changed content needs fresh review.
+Approval can change the provider's cached prefix once; subsequent replay stays
+stable. Revocation cannot recall already sent content.
 
 Installation alone never approves, enables, or runs anything. The installer
 also accepts a reviewed local plugin directory or another repository URL.

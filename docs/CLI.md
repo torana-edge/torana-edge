@@ -75,6 +75,31 @@ live store owner; a failed or starting process is not silently called stopped.
 waits for completion (`--timeout 15s` by default). It never kills a cached PID.
 An API timeout leaves the outcome uncertain; inspect status before retrying.
 
+## Review a withheld PII result
+
+Your agent can request review through Torana MCP using the opaque reference
+in a PII tool error. You choose the outcome in **Approvals** in the control
+plane or through these operator commands:
+
+```bash
+torana approvals list
+torana approvals list --cursor '<next_cursor>'
+torana approvals show <reference>
+torana approvals approve <reference> --yes
+torana approvals decline <reference> --yes
+torana approvals revoke <reference> --yes
+```
+
+List returns at most 100 records and a `next_cursor`. Review the content locally
+before approving: the API returns identifiers and status, never original tool
+output. Approval permits that exact result to reach the configured upstream;
+it is not a clean verdict or blanket bypass. Scope includes conversation,
+tool-call ID, content fingerprint and plugin bundle digest. The CLI rereads the
+current status and submits it as a precondition; conflicting choices fail safely.
+Decisions persist, but Torana cannot reconstruct content the harness omits.
+Revocation affects future requests only. An agent with unrestricted shell access
+can use operator commands; keep your harness's shell approval controls enabled.
+
 ## Connect MCP tools
 
 Torana's MCP interface lets a client discover plugin operations and inspect the

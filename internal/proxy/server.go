@@ -57,6 +57,7 @@ import (
 	"github.com/torana-edge/torana-edge/internal/pluginhttp"
 	"github.com/torana-edge/torana-edge/internal/pluginstate"
 	"github.com/torana-edge/torana-edge/internal/provider"
+	"github.com/torana-edge/torana-edge/internal/resultrelease"
 	"github.com/torana-edge/torana-edge/internal/secret"
 	"github.com/torana-edge/torana-edge/internal/suggest"
 	"github.com/torana-edge/torana-edge/internal/wasm"
@@ -232,6 +233,7 @@ type Server struct {
 	// managed config. Nil when there is no config path to anchor it to.
 	pluginState    *pluginstate.Store
 	suggestions    *suggest.Store
+	resultReleases *resultrelease.Store
 	mcpTokens      *mcpauth.Manager
 	mcpMu          sync.Mutex
 	mcpHandler     *mcpserver.Handler
@@ -885,6 +887,7 @@ func New(cfg Config) (*Server, error) {
 		conversations:   conversation.New(conversation.Options{}),
 		pluginState:     stateStore,
 		suggestions:     suggest.New(stateStore),
+		resultReleases:  &resultrelease.Store{State: stateStore, MAC: secStore.MAC},
 		mcpTokens:       mcpauth.New(stateStore, secStore),
 		mcpLimits:       NewRateLimiter(120, 8),
 		mcpCorrelation:  mcpserver.NewCorrelator(),
@@ -3058,6 +3061,8 @@ func New(cfg Config) (*Server, error) {
 	mux.HandleFunc(changesAPIPath, s.controlPlaneGuard(s.handleOperatorChanges))
 	mux.HandleFunc(changesAPIPath+"/", s.controlPlaneGuard(s.handleOperatorChanges))
 	mux.HandleFunc(suggestionsAPIPath, s.controlPlaneGuard(s.handleAgentSuggestions))
+	mux.HandleFunc(resultReleaseAPIPath, s.controlPlaneGuard(s.handleResultApprovals))
+	mux.HandleFunc(resultReleaseAPIPath+"/", s.controlPlaneGuard(s.handleResultApprovals))
 	mux.HandleFunc(suggestionsAPIPath+"/", s.controlPlaneGuard(s.handleAgentSuggestions))
 	mux.HandleFunc("/_torana/api/v1/system", s.controlPlaneGuard(s.systemStatus))
 	mux.HandleFunc("/_torana/api/v1/system/stop", s.controlPlaneGuard(s.requestStop))
@@ -3964,6 +3969,7 @@ func (s *Server) newRuntime() *wasm.Runtime {
 		rs.CompactionReports = append(rs.CompactionReports, attributedCompactionReport{Plugin: pluginName, Report: report, Target: target, Summarizer: summarizer})
 	}
 	rt.EvaluateCompactionFunc = s.evaluateCompaction
+	rt.ToolResultReleaseFunc = s.observeToolResultRelease
 	// Compaction savings are priced against the FINAL provider/model, so the
 	// pending route has to be known before pricing runs. It used to be sniffed
 	// out of the mutated request's ToranaMeta["_route"]; the verdict is
