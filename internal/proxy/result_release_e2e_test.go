@@ -98,7 +98,7 @@ func TestPIIHumanReleaseSurvivesRestartWithoutRescan(t *testing.T) {
 		t.Fatalf("review=%+v %v", result, err)
 	}
 	httpServer := httptest.NewServer(s.Handler())
-	if _, err := runControlCLI(t, httpServer.URL, "", "approvals", "approve", item.Reference, "--yes"); err != nil {
+	if err := reviewResultDecision(t, httpServer.URL, item.Reference, "pending", "approve"); err != nil {
 		t.Fatal(err)
 	}
 	httpServer.Close()
@@ -113,7 +113,7 @@ func TestPIIHumanReleaseSurvivesRestartWithoutRescan(t *testing.T) {
 	}
 	httpServer = httptest.NewServer(s.Handler())
 	defer httpServer.Close()
-	if _, err := runControlCLI(t, httpServer.URL, "", "approvals", "revoke", item.Reference, "--yes"); err != nil {
+	if err := reviewResultDecision(t, httpServer.URL, item.Reference, "approved", "revoke"); err != nil {
 		t.Fatal(err)
 	}
 	if revoked := post(); revoked != withheld {

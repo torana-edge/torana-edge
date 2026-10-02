@@ -19,9 +19,13 @@ const all = (el, tag) => [...(el.tag === tag ? [el] : []), ...el.children.flatMa
 function setup(request) {
   const elements = {resultApprovals: new Element('section'), moreResultApprovals: new Element('button')};
   const alerts = [];
-  const context = {document: {createElement: tag => new Element(tag), getElementById: id => elements[id]}, ToranaConsent: {request}, showAlert: message => alerts.push(message)};
+  const fetchCalls = [];
+  const context = {document: {createElement: tag => new Element(tag), getElementById: id => elements[id]},
+    ToranaConsent: {request: (path, input, fetcher) => path === '/_torana/api/v1/approval-session'
+      ? Promise.resolve({token: 'synthetic-browser-session'}) : request(path, input, fetcher)},
+    fetch: async (path, options) => { fetchCalls.push({path, options}); return {}; }, showAlert: message => alerts.push(message)};
   runInNewContext(readFileSync(new URL('./dist/result-approvals.js', import.meta.url), 'utf8'), context);
-  return {api: context.ToranaResultApprovals, elements, alerts};
+  return {api: context.ToranaResultApprovals, elements, alerts, fetchCalls};
 }
 
 test('allowance requires explicit human acknowledgement and uses reviewed status', async () => {
@@ -42,6 +46,7 @@ test('allowance requires explicit human acknowledgement and uses reviewed status
   checkbox.listeners.change();
   assert.equal(allow.disabled, false);
   const saving = allow.listeners.click();
+  await new Promise(resolve => setImmediate(resolve));
   assert.equal(allow.disabled, true);
   assert.equal(decline.disabled, true);
   assert.equal(checkbox.disabled, true);
@@ -51,6 +56,21 @@ test('allowance requires explicit human acknowledgement and uses reviewed status
   await saving;
   assert.match(text(elements.resultApprovals), /approved.*Revoke allowance/);
   assert.doesNotMatch(text(elements.resultApprovals), /Allow upstream/);
+});
+
+test('decision fetch carries the browser session proof without exposing it as input', async () => {
+  const {api, elements, fetchCalls} = setup(async (path, input, fetcher) => {
+    if (!input) return {approvals: [record]};
+    // Exercise the supplied fetch wrapper rather than ignoring it in the mock.
+    await fetcher(path, {headers: {'X-Torana-Local-Request': '1'}});
+    return {...record, status: 'declined'};
+  });
+  await api.load();
+  await all(elements.resultApprovals, 'button')[1].listeners.click();
+  assert.equal(fetchCalls.length, 1);
+  assert.equal(fetchCalls[0].options.headers['X-Torana-Approval-Session'], 'synthetic-browser-session');
+  assert.equal(fetchCalls[0].options.headers['X-Torana-Local-Request'], '1');
+  assert.match(text(elements.resultApprovals), /declined/);
 });
 
 test('failed decisions keep pending state and restore controls without fake success', async () => {

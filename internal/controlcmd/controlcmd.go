@@ -69,9 +69,9 @@ func Usage(w io.Writer) {
   torana changes undo <change-id> --conversation <id> --yes
   torana approvals list [--cursor <cursor>]  withheld result metadata (no content)
   torana approvals show <reference>          inspect one requested exception
-  torana approvals approve <reference> --yes allow that exact result upstream
-  torana approvals decline <reference> --yes keep that result withheld
-  torana approvals revoke <reference> --yes  withhold it again on future requests
+  torana approvals approve <reference>       interactively allow that result upstream
+  torana approvals decline <reference>       interactively keep it withheld
+  torana approvals revoke <reference>        interactively revoke its allowance
   torana mcp status                         inspect whether MCP is enabled
   torana mcp enable --yes                    set up its token and enable MCP
   torana mcp disable --yes                   close MCP sessions; retain the token
@@ -85,7 +85,8 @@ MCP token/rotate print only the secret token; --json requests a JSON envelope.
 Keep tokens private. MCP policy does not sandbox unrestricted local shell access.
 Conversation-scoped reads/changes require a verified provider tool call; without
 that evidence Torana returns unbound_conversation rather than applying a change.
-Writes require --yes; an agent should obtain operator consent for approvals.
+Writes require --yes, except result decisions: those require an interactive
+terminal and typing the reference suffix. Agents must not make these decisions.
 config/pipeline/plugin-config apply require the revision from their get command.
 Edit the snapshot's config or pipeline, not its revision. Stale edits fail safely.
 Settings apply does not change plugins; use pipeline or plugin commands for those.
@@ -214,7 +215,6 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 		allowed = "cursor"
 	case "approvals show":
 	case "approvals approve", "approvals decline", "approvals revoke":
-		allowed = "yes"
 	default:
 		return fmt.Errorf("unknown live command %q; run torana help", command)
 	}

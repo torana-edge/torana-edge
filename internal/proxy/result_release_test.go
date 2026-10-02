@@ -3,11 +3,14 @@ package proxy
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/torana-edge/torana-edge/internal/controlclient"
 	"github.com/torana-edge/torana-edge/internal/engine"
 	"github.com/torana-edge/torana-edge/internal/plugin"
 	"github.com/torana-edge/torana-edge/internal/provider"
@@ -85,10 +88,25 @@ func TestModelRequestsHumanReleaseWithoutGrantingConsent(t *testing.T) {
 	}
 	httpServer := httptest.NewServer(s.Handler())
 	defer httpServer.Close()
-	if _, err := runControlCLI(t, httpServer.URL, "", "approvals", "decline", item.Reference); err == nil {
-		t.Fatal("CLI decision did not require --yes")
+	client, err := controlclient.New(httpServer.URL, 10*time.Second)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if _, err := runControlCLI(t, httpServer.URL, "", "approvals", "decline", item.Reference, "--yes"); err != nil {
+	defer client.Close()
+	if _, _, err := client.JSON(context.Background(), http.MethodPost, resultReleaseAPIPath+"/"+item.Reference+"/decline", []byte(`{"expected_status":"pending"}`), ""); err == nil {
+		t.Fatal("local mutation marker alone granted a decision")
+	}
+	item, err = s.resultReleases.Get(item.Reference)
+	if err != nil || item.Status != "pending" {
+		t.Fatal("missing proof changed approval state", err)
+	}
+	if _, err := runControlCLI(t, httpServer.URL, "", "approvals", "decline", item.Reference); err == nil {
+		t.Fatal("CLI decision did not require a terminal")
+	}
+	if _, err := runControlCLI(t, httpServer.URL, "", "approvals", "decline", item.Reference, "--yes"); err == nil {
+		t.Fatal("--yes bypassed interactive confirmation")
+	}
+	if err := reviewResultDecision(t, httpServer.URL, item.Reference, "pending", "decline"); err != nil {
 		t.Fatal(err)
 	}
 	item, err = s.resultReleases.Get(item.Reference)
@@ -187,7 +205,7 @@ func TestHumanReleaseRequiresActiveExactBundleAndCanBeRevoked(t *testing.T) {
 	}
 	httpServer := httptest.NewServer(s.Handler())
 	defer httpServer.Close()
-	if _, err := runControlCLI(t, httpServer.URL, "", "approvals", "approve", current.Reference, "--yes"); err != nil {
+	if err := reviewResultDecision(t, httpServer.URL, current.Reference, "pending", "approve"); err != nil {
 		t.Fatal(err)
 	}
 	if !observe(entry.Digest).Approved {
@@ -207,13 +225,81 @@ func TestHumanReleaseRequiresActiveExactBundleAndCanBeRevoked(t *testing.T) {
 	if _, err := s.resultReleases.Request(stale.Reference, "human-session"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := runControlCLI(t, httpServer.URL, "", "approvals", "approve", stale.Reference, "--yes"); err == nil {
+	if err := reviewResultDecision(t, httpServer.URL, stale.Reference, "pending", "approve"); err == nil {
 		t.Fatal("approved a stale bundle")
 	}
-	if _, err := runControlCLI(t, httpServer.URL, "", "approvals", "revoke", current.Reference, "--yes"); err != nil {
+	if err := reviewResultDecision(t, httpServer.URL, current.Reference, "approved", "revoke"); err != nil {
 		t.Fatal(err)
 	}
 	if observe(entry.Digest).Approved {
 		t.Fatal("revocation did not reach the plugin host API")
+	}
+}
+
+// Tests deliberately obtain a CSRF session as an operator HTTP client. This
+// is not proof of a human: unrestricted same-user clients remain issue #467.
+func reviewResultDecision(t *testing.T, addr, ref, status, action string) error {
+	t.Helper()
+	client, err := controlclient.New(addr, time.Second*10)
+	if err != nil {
+		return err
+	}
+	defer client.Close()
+	if err := client.BeginApprovalSession(context.Background()); err != nil {
+		return err
+	}
+	body, _ := json.Marshal(map[string]string{"expected_status": status})
+	_, _, err = client.JSON(context.Background(), http.MethodPost, resultReleaseAPIPath+"/"+ref+"/"+action, body, "")
+	return err
+}
+
+func TestApprovalSessionRejectsMissingForgedExpiredAndRestartedProof(t *testing.T) {
+	s := &Server{controlPlaneRevisionKey: "synthetic-test-instance"}
+	issue := httptest.NewRecorder()
+	s.handleApprovalSession(issue, httptest.NewRequest(http.MethodPost, approvalSessionPath, nil))
+	var session struct {
+		Token string `json:"token"`
+	}
+	if err := json.Unmarshal(issue.Body.Bytes(), &session); err != nil {
+		t.Fatal(err)
+	}
+	cookies := issue.Result().Cookies()
+	if len(cookies) != 1 || !cookies[0].HttpOnly || cookies[0].SameSite != http.SameSiteStrictMode || issue.Header().Get("Cache-Control") != "no-store" {
+		t.Fatal("session cookie is not private or bounded")
+	}
+	request := httptest.NewRequest(http.MethodPost, resultReleaseAPIPath+"/tr_"+strings.Repeat("a", 64)+"/approve", nil)
+	if s.validApprovalSession(request) {
+		t.Fatal("missing proof accepted")
+	}
+	request.AddCookie(cookies[0])
+	if s.validApprovalSession(request) {
+		t.Fatal("cookie without header accepted")
+	}
+	request.Header.Set(approvalSessionHeader, session.Token)
+	if !s.validApprovalSession(request) {
+		t.Fatal("fresh matching proof rejected")
+	}
+	request.Header.Set(approvalSessionHeader, session.Token+"forged")
+	if s.validApprovalSession(request) {
+		t.Fatal("mismatching proof accepted")
+	}
+	request.Header.Set(approvalSessionHeader, session.Token)
+	s.controlPlaneRevisionKey = "another-instance"
+	if s.validApprovalSession(request) {
+		t.Fatal("proof survived server restart")
+	}
+	for _, expiration := range []int64{time.Now().Add(-time.Hour).Unix(), time.Now().Add(time.Hour).Unix()} {
+		payload := fmt.Sprintf("%d.abcdefghijklmnop", expiration)
+		token := payload + "." + s.approvalSessionMAC(payload)
+		request.Header.Set("Cookie", approvalSessionCookie+"="+token)
+		request.Header.Set(approvalSessionHeader, token)
+		if s.validApprovalSession(request) {
+			t.Fatal("invalid expiration accepted")
+		}
+	}
+	for _, op := range resultReleaseAgentOperations() {
+		if op.Risk != "read" {
+			t.Fatalf("agent can discover decision: %s", op.ID)
+		}
 	}
 }

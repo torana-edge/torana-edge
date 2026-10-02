@@ -54,7 +54,11 @@ globalThis.ToranaResultApprovals = (() => {
           button.setAttribute('aria-busy', 'true');
           button.textContent = 'Saving…';
           try {
-            const updated = await ToranaConsent.request(`/_torana/api/v1/approvals/${item.reference}/${action}`, {expected_status: item.status});
+            // Keep this session proof out of agent discovery and plugin input.
+            // An unrestricted same-user process is not isolated by CSRF alone.
+            const session = await ToranaConsent.request('/_torana/api/v1/approval-session', {});
+            const updated = await ToranaConsent.request(`/_torana/api/v1/approvals/${item.reference}/${action}`, {expected_status: item.status},
+              (path, options) => fetch(path, {...options, headers: {...options.headers, 'X-Torana-Approval-Session': session.token}}));
             if (ticket !== generation) return;
             items = items.map(old => old.reference === updated.reference ? updated : old);
             render();

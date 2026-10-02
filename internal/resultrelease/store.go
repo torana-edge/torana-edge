@@ -3,9 +3,12 @@
 package resultrelease
 
 import (
+	"bytes"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"sync"
 	"time"
 
 	"github.com/torana-edge/torana-edge/internal/pluginstate"
@@ -15,6 +18,16 @@ const Namespace = "@torana/result-release"
 
 var ErrNotFound = errors.New("withheld result not found")
 var ErrConflict = errors.New("approval changed concurrently")
+var ErrRateLimited = errors.New("review request limit reached")
+
+// A conversation may create at most five new review requests per hour.
+// Replaying an existing request does not consume the allowance.
+const RequestsPerHour = 5
+
+type AuditEvent struct {
+	Action string    `json:"action"`
+	At     time.Time `json:"at"`
+}
 
 type Scope struct {
 	Conversation string `json:"conversation"`
@@ -27,14 +40,16 @@ type Scope struct {
 // Record contains metadata only; no tool text, scanner prose or credentials.
 type Record struct {
 	Scope
-	Reference string    `json:"reference"`
-	Status    string    `json:"status"`
-	CreatedAt time.Time `json:"created_at"`
+	Reference string       `json:"reference"`
+	Status    string       `json:"status"`
+	CreatedAt time.Time    `json:"created_at"`
+	Audit     []AuditEvent `json:"audit,omitempty"`
 }
 
 type Store struct {
-	State *pluginstate.Store
-	MAC   func(string, string) ([]byte, error)
+	State     *pluginstate.Store
+	MAC       func(string, string) ([]byte, error)
+	requestMu sync.Mutex
 }
 
 func ValidReference(ref string) bool {
@@ -117,18 +132,62 @@ func (s *Store) Get(ref string) (Record, error) {
 // Request cannot approve. Repeated model requests cannot reopen a declined
 // exception or overwrite an operator's decision.
 func (s *Store) Request(ref, conversation string) (Record, error) {
+	if s == nil || s.State == nil {
+		return Record{}, errors.New("result approvals are unavailable")
+	}
+	s.requestMu.Lock()
+	defer s.requestMu.Unlock()
+	current, err := s.Get(ref)
+	if err != nil || current.Conversation != conversation {
+		if err == nil {
+			err = ErrNotFound
+		}
+		return Record{}, err
+	}
+	if current.Status != "withheld" {
+		return current, nil
+	}
+	// Persist a bounded counter, not every attempted model request. Limits
+	// survive restart and do not contain tool content or scanner text.
+	hash := sha256.Sum256([]byte(conversation))
+	key := "budget/" + hex.EncodeToString(hash[:])
+	var budget struct {
+		Window time.Time `json:"window"`
+		Count  int       `json:"count"`
+	}
+	raw, found, err := s.State.Get(Namespace, key)
+	if err != nil {
+		return Record{}, err
+	}
+	if found && json.Unmarshal([]byte(raw), &budget) != nil {
+		return Record{}, errors.New("invalid review request budget")
+	}
+	now := time.Now().UTC()
+	if budget.Window.IsZero() || !now.Before(budget.Window.Add(time.Hour)) {
+		budget.Window, budget.Count = now, 0
+	}
+	if budget.Count >= RequestsPerHour {
+		return Record{}, ErrRateLimited
+	}
+	budget.Count++
+	encoded, _ := json.Marshal(budget)
+	if err := s.State.Set(Namespace, key, string(encoded)); err != nil {
+		return Record{}, err
+	}
 	return s.change(ref, func(item *Record) error {
 		if item.Conversation != conversation {
 			return ErrNotFound
 		}
 		if item.Status == "withheld" {
 			item.Status = "pending"
+			item.addAudit("requested")
 		}
 		return nil
 	})
 }
 
-// Decide is used only by authenticated operator routes, never MCP or guests.
+// Decide is used only by operator decision routes, never MCP or guests.
+// Those routes enforce interaction/CSRF safeguards; see #467 for authentication.
 func (s *Store) Decide(ref, expectedStatus, decision string) (Record, error) {
 	if decision != "approved" && decision != "declined" && decision != "revoked" {
 		return Record{}, errors.New("invalid approval decision")
@@ -144,8 +203,16 @@ func (s *Store) Decide(ref, expectedStatus, decision string) (Record, error) {
 			return ErrConflict
 		}
 		item.Status = decision
+		item.addAudit(decision)
 		return nil
 	})
+}
+
+func (item *Record) addAudit(action string) {
+	item.Audit = append(item.Audit, AuditEvent{Action: action, At: time.Now().UTC()})
+	if len(item.Audit) > 8 {
+		item.Audit = item.Audit[len(item.Audit)-8:]
+	}
 }
 
 func (s *Store) change(ref string, change func(*Record) error) (Record, error) {
@@ -167,14 +234,14 @@ func (s *Store) change(ref string, change func(*Record) error) (Record, error) {
 		if json.Unmarshal([]byte(raw), &item) != nil || item.Reference != ref {
 			return Record{}, errors.New("invalid result approval record")
 		}
-		before := item
+		before, _ := json.Marshal(item)
 		if err := change(&item); err != nil {
 			return Record{}, err
 		}
-		if before == item {
+		text, _ := json.Marshal(item)
+		if bytes.Equal(before, text) {
 			return item, nil
 		}
-		text, _ := json.Marshal(item)
 		applied, _, err := s.State.CompareAndSet(Namespace, "result/"+ref, string(text), &version)
 		if err != nil {
 			return Record{}, err

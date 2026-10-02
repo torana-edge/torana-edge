@@ -24,9 +24,7 @@ func resultReleaseAgentOperations() []agentAPIOperation {
 		{ID: "torana.approvals.list", Method: http.MethodGet, Path: resultReleaseAPIPath, Description: "List up to 100 withheld result records. Metadata only; pass next_cursor as the cursor query parameter for another page.", Risk: "read", Idempotent: true, ContentType: "application/json", OutputSchema: arbitraryObjectSchema},
 		{ID: "torana.approvals.show", Method: http.MethodGet, Path: resultReleaseAPIPath + "/{reference}", Description: "Read the current status and exact scope of one withheld result, without original content.", Risk: "read", Idempotent: true, ContentType: "application/json", OutputSchema: arbitraryObjectSchema},
 	}
-	for _, action := range []string{"approve", "decline", "revoke"} {
-		operations = append(operations, agentAPIOperation{ID: "torana.approvals." + action, Method: http.MethodPost, Path: resultReleaseAPIPath + "/{reference}/" + action, Description: "Operator-only decision for one exact result. Supply its reviewed expected_status; conflicts do not apply. Approval allows original content upstream, not a clean scan verdict.", Risk: "write", Idempotent: true, ContentType: "application/json", InputSchema: json.RawMessage(`{"type":"object","required":["expected_status"],"properties":{"expected_status":{"type":"string"}},"additionalProperties":false}`), OutputSchema: arbitraryObjectSchema})
-	}
+	// Decision routes intentionally have no agent-call operation ID.
 	return operations
 }
 
@@ -83,6 +81,9 @@ func (s *Server) requestToolResultRelease(call operationCall) (mcpserver.Result,
 	if errors.Is(err, resultrelease.ErrNotFound) {
 		return operationError("not_found", "That result is not available in this conversation."), nil
 	}
+	if errors.Is(err, resultrelease.ErrRateLimited) {
+		return operationError("rate_limited", "This conversation reached its review request limit. Wait before requesting another result; existing reviews are unchanged."), nil
+	}
 	if err != nil {
 		return operationError("state_unavailable", "Torana could not record this request. Try again."), nil
 	}
@@ -131,6 +132,10 @@ func (s *Server) handleResultApprovals(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		w.Header().Set("Allow", "POST")
 		writeAgentError(w, 405, "method_not_allowed", "Change approvals with POST.")
+		return
+	}
+	if !s.validApprovalSession(r) {
+		writeAgentError(w, 403, "approval_session_required", "Open Approvals in the control plane, or use the interactive approvals CLI.")
 		return
 	}
 	var input struct {

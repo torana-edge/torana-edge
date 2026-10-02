@@ -3062,6 +3062,7 @@ func New(cfg Config) (*Server, error) {
 	mux.HandleFunc(changesAPIPath+"/", s.controlPlaneGuard(s.handleOperatorChanges))
 	mux.HandleFunc(suggestionsAPIPath, s.controlPlaneGuard(s.handleAgentSuggestions))
 	mux.HandleFunc(resultReleaseAPIPath, s.controlPlaneGuard(s.handleResultApprovals))
+	mux.HandleFunc(approvalSessionPath, s.controlPlaneGuard(s.handleApprovalSession))
 	mux.HandleFunc(resultReleaseAPIPath+"/", s.controlPlaneGuard(s.handleResultApprovals))
 	mux.HandleFunc(suggestionsAPIPath+"/", s.controlPlaneGuard(s.handleAgentSuggestions))
 	mux.HandleFunc("/_torana/api/v1/system", s.controlPlaneGuard(s.systemStatus))

@@ -4,6 +4,7 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -26,6 +27,73 @@ func testStore(t *testing.T, path string) *Store {
 		h.Write([]byte(value))
 		return h.Sum(nil), nil
 	}}
+}
+
+func TestRequestBudgetAndDecisionAuditPersist(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "budget.db")
+	s := testStore(t, path)
+	var first Record
+	for i := 0; i < RequestsPerHour; i++ {
+		scope := testScope()
+		scope.CallID = fmt.Sprintf("read-%d", i)
+		item, _, err := s.Observe(scope, true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.Request(item.Reference, scope.Conversation); err != nil {
+			t.Fatal(err)
+		}
+		if i == 0 {
+			first = item
+		}
+	}
+	// Replays and failed cross-conversation requests cannot spend another budget.
+	if _, err := s.Request(first.Reference, first.Conversation); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Request(first.Reference, "other"); !errors.Is(err, ErrNotFound) {
+		t.Fatal(err)
+	}
+	if _, err := s.Decide(first.Reference, "pending", "approved"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Decide(first.Reference, "approved", "revoked"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.State.Close(); err != nil {
+		t.Fatal(err)
+	}
+	s = testStore(t, path)
+	scope := testScope()
+	scope.CallID = "read-over-budget"
+	item, _, err := s.Observe(scope, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Request(item.Reference, scope.Conversation); !errors.Is(err, ErrRateLimited) {
+		t.Fatalf("budget reset on restart: %v", err)
+	}
+	item, err = s.Get(item.Reference)
+	if err != nil || item.Status != "withheld" {
+		t.Fatalf("rate limit changed result: %+v %v", item, err)
+	}
+	first, err = s.Get(first.Reference)
+	if err != nil || len(first.Audit) != 3 {
+		t.Fatalf("audit lost: %+v %v", first, err)
+	}
+	for i, action := range []string{"requested", "approved", "revoked"} {
+		if first.Audit[i].Action != action || first.Audit[i].At.IsZero() {
+			t.Fatal("invalid audit")
+		}
+	}
+	scope.Conversation = "other"
+	item, _, err = s.Observe(scope, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Request(item.Reference, "other"); err != nil {
+		t.Fatal("conversation budgets are not isolated", err)
+	}
 }
 
 func testScope() Scope {
