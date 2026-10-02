@@ -32,7 +32,9 @@ func (c *runner) resultApproval(command string, o options) error {
 		return fmt.Errorf("Torana returned an invalid approval record")
 	}
 	if command == "approvals approve" {
-		fmt.Fprintln(c.stderr, "Allowing this exact tool result to reach the configured upstream model. This is an exception, not a clean scan verdict.")
+		if _, err := fmt.Fprintln(c.stderr, "Allowing this exact tool result to reach the configured upstream model. This is an exception, not a clean scan verdict."); err != nil {
+			return fmt.Errorf("print approval warning: %w", err)
+		}
 	}
 	body, _ := json.Marshal(map[string]string{"expected_status": item.Status})
 	raw, _, err = c.client.JSON(c.ctx, http.MethodPost, path+"/"+strings.TrimPrefix(command, "approvals "), body, "")
