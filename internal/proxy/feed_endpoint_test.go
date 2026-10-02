@@ -152,6 +152,36 @@ func TestFeedSnapshotEndpoint(t *testing.T) {
 // causes any pre-existing events to be replayed as SSE data frames before live
 // events start (snapshot-on-connect behaviour). This avoids the race between
 // Add() and Subscribe() that makes the live-events path hard to test reliably.
+func TestFeedSSEQuietConnectionSendsImmediateComment(t *testing.T) {
+	srv, err := New(Config{Port: "0", Providers: provider.DefaultConfig()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	go srv.Serve(ln)
+	defer srv.Shutdown(context.Background())
+	client := &http.Client{Timeout: 2 * time.Second, Transport: &http.Transport{Proxy: nil}}
+	defer client.CloseIdleConnections()
+	resp, err := client.Get("http://" + ln.Addr().String() + "/_torana/api/v1/stream")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status %d", resp.StatusCode)
+	}
+	scanner := bufio.NewScanner(resp.Body)
+	if !scanner.Scan() || scanner.Text() != ": connected" {
+		t.Fatalf("quiet stream did not send immediate comment: %q, %v", scanner.Text(), scanner.Err())
+	}
+	if len(srv.feed.Snapshot()) != 0 {
+		t.Fatal("connection handshake created a request event")
+	}
+}
+
 func TestFeedSSEStreamSnapshotReplay(t *testing.T) {
 	cfg := Config{
 		Port:      "0",
