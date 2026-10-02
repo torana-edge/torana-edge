@@ -67,13 +67,14 @@ func buildNamespaceRegistry(installed []plugin.PluginBundle, loaded []plugin.Loa
 		core.Operations = append(core.Operations, namespaceOperation{ID: id, Description: op.Description, Risk: "read", ModelAccess: access, ConversationBinding: binding, Callable: callable, Source: "core", CoreID: op.ID})
 	}
 	for _, op := range []namespaceOperation{
+		{ID: "redactions.request_release", Description: "Ask the user to allow one exact withheld PII result; cannot approve it", Risk: "write", ModelAccess: "confirm"},
 		{ID: "session.usage", Description: "Usage for this conversation; cache token counts are subsets of tokens_in", Risk: "read", ModelAccess: "read"},
 		{ID: "changes.list", Description: "Changes for this conversation", Risk: "read", ModelAccess: "read"},
 		{ID: "changes.undo", Description: "Undo a confirmed change", Risk: "write", ModelAccess: "confirm"},
 	} {
 		op.Source = "core"
 		op.ConversationBinding = "required"
-		op.Callable = op.Risk == "read" // Undo is available only to operators.
+		op.Callable = op.Risk == "read" || op.ID == "redactions.request_release" // Undo is operator-only.
 		core.Operations = append(core.Operations, op)
 	}
 	r.entries["torana"] = core

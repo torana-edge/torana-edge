@@ -30,6 +30,9 @@ func (s *Server) proposeNamespaceOperation(ctx context.Context, call operationCa
 	if err := ctx.Err(); err != nil {
 		return mcpserver.Result{}, err
 	}
+	if call.Operation.Source == "core" && call.Operation.ID == "redactions.request_release" {
+		return s.requestToolResultRelease(call)
+	}
 	if !call.Binding.Bound {
 		result := operationError("unbound_conversation", "Torana needs to observe this call before requesting confirmation.")
 		result.Error.Retryable = true

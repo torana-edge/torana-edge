@@ -25,10 +25,11 @@ const BasePath = "/_torana/api/v1"
 const MaxBodyBytes = 10 << 20
 
 type Client struct {
-	base       *url.URL
-	http       *http.Client
-	instanceID string
-	storePath  string
+	base            *url.URL
+	http            *http.Client
+	instanceID      string
+	storePath       string
+	approvalSession string
 }
 
 // New accepts host:port or an HTTP(S) origin, never a remote host, URL path,
@@ -295,6 +296,10 @@ func (c *Client) open(ctx context.Context, method, path string, body []byte, rev
 	if pluginDigest != "" {
 		req.Header.Set("X-Torana-Plugin-Digest", pluginDigest)
 	}
+	if c.approvalSession != "" && method == http.MethodPost && strings.HasPrefix(p.Path, BasePath+"/approvals/") {
+		req.Header.Set("X-Torana-Approval-Session", c.approvalSession)
+		req.AddCookie(&http.Cookie{Name: "torana-approval-session", Value: c.approvalSession})
+	}
 	resp, err := c.http.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("could not reach the proxy at %s — is it running? A timed-out write may have applied; inspect before retrying: %w", c.base.Host, err)
@@ -327,6 +332,24 @@ func (c *Client) open(ctx context.Context, method, path string, body []byte, rev
 
 func (c *Client) JSON(ctx context.Context, method, path string, body []byte, revision string) (json.RawMessage, string, error) {
 	return c.json(ctx, method, path, body, revision, "")
+}
+
+// BeginApprovalSession is called only after interactive CLI confirmation. It
+// deliberately has no agent-discovery operation. It is CSRF protection, not a
+// security boundary against an unrestricted process running as the same user.
+func (c *Client) BeginApprovalSession(ctx context.Context) error {
+	raw, _, err := c.JSON(ctx, http.MethodPost, BasePath+"/approval-session", []byte(`{}`), "")
+	if err != nil {
+		return err
+	}
+	var session struct {
+		Token string `json:"token"`
+	}
+	if json.Unmarshal(raw, &session) != nil || len(session.Token) < 32 || len(session.Token) > 256 {
+		return fmt.Errorf("invalid approval session")
+	}
+	c.approvalSession = session.Token
+	return nil
 }
 
 // CallPlugin binds invocation to the bundle whose operation/schema/risk was

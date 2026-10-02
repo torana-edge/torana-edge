@@ -31,7 +31,7 @@ func Handles(args []string) bool {
 		return false
 	}
 	switch args[0] {
-	case "config", "pipeline", "stats", "feed", "agent", "suggestions", "conversations", "mcp", "changes":
+	case "config", "pipeline", "stats", "feed", "agent", "suggestions", "conversations", "mcp", "changes", "approvals":
 		return true
 	case "plugin":
 		return len(args) > 1 && slices.Contains([]string{"status", "inspect", "approve", "revoke", "enable", "disable", "config"}, args[1])
@@ -67,6 +67,11 @@ func Usage(w io.Writer) {
   torana suggestions dismiss <id> --conversation <id> --yes
   torana changes list --conversation <id>
   torana changes undo <change-id> --conversation <id> --yes
+  torana approvals list [--cursor <cursor>]  withheld result metadata (no content)
+  torana approvals show <reference>          inspect one requested exception
+  torana approvals approve <reference>       interactively allow that result upstream
+  torana approvals decline <reference>       interactively keep it withheld
+  torana approvals revoke <reference>        interactively revoke its allowance
   torana mcp status                         inspect whether MCP is enabled
   torana mcp enable --yes                    set up its token and enable MCP
   torana mcp disable --yes                   close MCP sessions; retain the token
@@ -80,7 +85,8 @@ MCP token/rotate print only the secret token; --json requests a JSON envelope.
 Keep tokens private. MCP policy does not sandbox unrestricted local shell access.
 Conversation-scoped reads/changes require a verified provider tool call; without
 that evidence Torana returns unbound_conversation rather than applying a change.
-Writes require --yes; an agent should obtain operator consent for approvals.
+Writes require --yes, except result decisions: those require an interactive
+terminal and typing the reference suffix. Agents must not make these decisions.
 config/pipeline/plugin-config apply require the revision from their get command.
 Edit the snapshot's config or pipeline, not its revision. Stale edits fail safely.
 Settings apply does not change plugins; use pipeline or plugin commands for those.
@@ -93,9 +99,9 @@ plugin list/install/remove work on disk; plugin status inspects the running host
 }
 
 type options struct {
-	addr, file, conversation string
-	yes, follow, empty, json bool
-	args                     []string
+	addr, file, conversation, cursor string
+	yes, follow, empty, json         bool
+	args                             []string
 }
 
 // Accept options before or after positional arguments, but reject unknown,
@@ -121,6 +127,9 @@ func parseOptions(args []string, allowed string, stderr io.Writer) (options, err
 	}
 	if strings.Contains(allowed, "conversation") {
 		fs.StringVar(&o.conversation, "conversation", "", "conversation ID from torana conversations")
+	}
+	if strings.Contains(allowed, "cursor") {
+		fs.StringVar(&o.cursor, "cursor", "", "next_cursor from approvals list")
 	}
 	var flags, positional []string
 	seen := map[string]bool{}
@@ -168,7 +177,7 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 		return fmt.Errorf("command required")
 	}
 	command, rest := args[0], args[1:]
-	if command == "config" || command == "pipeline" || command == "agent" || command == "plugin" || command == "suggestions" || command == "mcp" || command == "changes" {
+	if command == "config" || command == "pipeline" || command == "agent" || command == "plugin" || command == "suggestions" || command == "mcp" || command == "changes" || command == "approvals" {
 		if len(rest) == 0 || rest[0] == "help" || rest[0] == "--help" || rest[0] == "-h" {
 			Usage(stdout)
 			return nil
@@ -202,6 +211,10 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 	case "mcp status", "mcp token", "mcp stdio":
 	case "mcp enable", "mcp disable", "mcp rotate":
 		allowed = "yes"
+	case "approvals list":
+		allowed = "cursor"
+	case "approvals show":
+	case "approvals approve", "approvals decline", "approvals revoke":
 	default:
 		return fmt.Errorf("unknown live command %q; run torana help", command)
 	}
@@ -216,6 +229,9 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 		return fmt.Errorf("mcp stdio already uses MCP protocol output; omit --json")
 	}
 	wantArgs := 0
+	if strings.HasPrefix(command, "approvals ") && command != "approvals list" {
+		wantArgs = 1
+	}
 	if strings.HasPrefix(command, "plugin ") && command != "plugin status" || command == "agent call" || command == "suggestions show" || command == "suggestions accept" || command == "suggestions dismiss" || command == "changes undo" {
 		wantArgs = 1
 	}
@@ -244,6 +260,9 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 	}
 	defer client.Close()
 	c := runner{ctx: ctx, client: client, stdin: stdin, stdout: stdout, stderr: stderr}
+	if strings.HasPrefix(command, "approvals ") {
+		return c.resultApproval(command, o)
+	}
 	switch command {
 	case "config get", "pipeline get", "plugin config get":
 		return c.getSnapshot(command, o)

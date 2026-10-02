@@ -12,6 +12,7 @@
   <script src="providers.js"></script>
   <script src="approval.js"></script>
   <script src="consent.js"></script>
+  <script src="result-approvals.js"></script>
 </head>
 <body>
   <header class="app-header">
@@ -35,7 +36,7 @@
       <button class="nav-btn" type="button" data-view="pipeline" onclick="go('pipeline')">Pipeline</button>
       <button class="nav-btn" type="button" data-view="traffic" onclick="go('traffic')">Traffic</button>
       <button class="nav-btn" type="button" data-view="feed" onclick="go('feed')">Live Feed</button>
-      <button class="nav-btn" type="button" data-view="review" onclick="go('review')">Review</button>
+      <button class="nav-btn" type="button" data-view="review" onclick="go('review')">Approvals</button>
       <button class="nav-btn" type="button" data-view="settings" onclick="go('settings')">Settings</button>
     </nav>
 
@@ -164,14 +165,19 @@
     <section id="view-review" class="view" aria-labelledby="reviewTitle">
       <div class="section-header">
         <div>
-          <h2 id="reviewTitle" class="section-title">You choose what changes.</h2>
-          <p class="section-desc">Review suggestions and plugin changes for a conversation. Nothing is applied until you accept.</p>
+          <h2 id="reviewTitle" class="section-title">You decide what gets through.</h2>
+          <p class="section-desc">Allow or decline exact results withheld by PII. Approving an exception permits that content to reach your configured upstream model; it is not a clean scan verdict.</p>
         </div>
-        <button class="btn btn-ghost" type="button" onclick="ToranaConsent.load()">↻ Reload</button>
+        <button class="btn btn-ghost" type="button" onclick="ToranaResultApprovals.load(); ToranaConsent.load()">↻ Reload</button>
       </div>
+      <h3 class="subhead">Withheld tool results</h3>
+      <p class="section-desc">Torana stores only result identifiers, not the original output. Check the content locally before allowing it. The harness must resend the original matching result; a new read is a separate result.</p>
+      <div id="resultApprovals" aria-live="polite"></div>
+      <button id="moreResultApprovals" class="btn btn-ghost" type="button" hidden onclick="ToranaResultApprovals.loadMore()">Load more results</button>
+      <h3 class="subhead">Other suggestions and changes</h3>
       <div class="card form-section">
         <label for="reviewConversation">Conversation</label>
-        <input id="reviewConversation" list="reviewConversations" placeholder="Choose a recent conversation or paste its ID" onchange="ToranaConsent.loadSelected()">
+        <input class="input" id="reviewConversation" list="reviewConversations" placeholder="Choose a recent conversation or paste its ID" onchange="ToranaConsent.loadSelected()">
         <datalist id="reviewConversations"></datalist>
       </div>
       <h3 class="subhead">Suggestions and confirmations</h3>
@@ -320,7 +326,7 @@
       if (target === 'traffic') fetchStats();
       if (target === 'settings') loadSettings();
       if (target === 'pipeline') renderPipeline();
-      if (target === 'review') ToranaConsent.load();
+      if (target === 'review') { ToranaResultApprovals.load(); ToranaConsent.load(); }
       focusViewTitle(document.getElementById(`view-${target}`));
     }
     function focusViewTitle(section) {

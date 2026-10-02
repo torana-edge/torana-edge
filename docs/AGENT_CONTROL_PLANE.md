@@ -62,6 +62,16 @@ advertise a callable capability.
 
 ## Built-in examples
 
+Human-reviewed PII exceptions use `GET /_torana/api/v1/approvals` (paginated by
+`next_cursor`) and `GET /_torana/api/v1/approvals/{reference}`. These return
+identifiers and status, never original output. An operator can POST to
+`/{reference}/approve`, `/decline`, or `/revoke` with
+`{"expected_status":"pending"}` (or `"approved"` for revocation) and the local
+request header. A conflicting status returns HTTP 409. Approval also requires
+the exact plugin bundle to remain enabled. These operator routes are not
+model-facing MCP tools: MCP can request review, never grant it.
+Prefer the [approval CLI commands](CLI.md#review-a-withheld-pii-result).
+
 Read the redacted effective configuration:
 
 ```bash

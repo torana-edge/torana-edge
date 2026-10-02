@@ -47,6 +47,7 @@ import (
 	"github.com/torana-edge/torana-edge/internal/pluginstate"
 	sdk "github.com/torana-edge/torana-plugin-sdk"
 	pbv1 "github.com/torana-edge/torana-plugin-sdk/pb/v1"
+	"github.com/torana-edge/torana-plugin-sdk/strictjson"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -144,8 +145,9 @@ func normalizeRuntimeOptions(options RuntimeOptions) RuntimeOptions {
 }
 
 type Plugin struct {
-	name   string
-	grants map[string]bool
+	name         string
+	bundleDigest string
+	grants       map[string]bool
 	// hooks is the guest's supported_hooks bitmap, read once at validation.
 	// Dispatch consults it instead of probing for a per-hook export, which no
 	// longer exists. Guarded by stateMu with the other mutable fields.
@@ -852,6 +854,9 @@ func (p *Plugin) CallRequest(ctx context.Context, hook pbv1.Hook, reqID uint64, 
 	if envelope.RequestId != reqID {
 		return fmt.Errorf("wasm: %s hook input request id mismatch", p.name)
 	}
+	if hook == pbv1.Hook_HOOK_BEFORE_REQUEST {
+		callCtx = context.WithValue(callCtx, releaseInputKey{}, envelope.GetChatRequest())
+	}
 	envelope.Execution = nil
 	if p.executionInfoFunc != nil {
 		if info := p.executionInfoFunc(ctx); info != nil {
@@ -1087,6 +1092,8 @@ type Runtime struct {
 	// increment named counters that appear in the /stats response.
 	// Set by the server.
 	PluginCounterFunc func(plugin string, counter string, delta int64)
+	// ToolResultReleaseFunc receives host-verified input, never guest scope/content.
+	ToolResultReleaseFunc func(context.Context, string, string, *pbv1.RequestToolResultBlock, *pbv1.RequestToolUseBlock, *sdk.ToolResultReleaseReason) ([]byte, *pbv1.HostError)
 
 	// StateGetFunc and StateSetFunc back env.state_get / env.state_set:
 	// durable, plugin-namespaced storage that survives a restart. Unlike the
@@ -2791,6 +2798,63 @@ func (r *Runtime) dispatchHostCall(ctx context.Context, pluginName, cmd, args st
 			} else {
 				herr = hostErr(pbv1.ErrorCode_ERROR_CODE_NOT_CONFIGURED, "savings tracking not configured")
 			}
+		case "torana_tool_result_release":
+			object, err := strictjson.DecodeObjectStrict([]byte(args), "message", "block", "register", "reason")
+			var a struct {
+				Message  int  `json:"message"`
+				Block    int  `json:"block"`
+				Register bool `json:"register"`
+			}
+			if err != nil || object["message"] == nil || object["block"] == nil || object["register"] == nil || json.Unmarshal([]byte(args), &a) != nil || a.Message < 0 || a.Block < 0 {
+				herr = hostErr(pbv1.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "invalid tool-result position")
+				break
+			}
+			var reason *sdk.ToolResultReleaseReason
+			if a.Register {
+				reason, err = sdk.DecodeToolResultReleaseReason(object["reason"])
+				if err != nil {
+					herr = hostErr(pbv1.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "registration requires a value-free review reason")
+					break
+				}
+			} else if object["reason"] != nil {
+				herr = hostErr(pbv1.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "lookup cannot register a reason")
+				break
+			}
+			input, _ := ctx.Value(releaseInputKey{}).(*pbv1.ChatRequest)
+			if input == nil || a.Message >= len(input.Messages) || input.Messages[a.Message] == nil || a.Block >= len(input.Messages[a.Message].Blocks) || input.Messages[a.Message].Blocks[a.Block] == nil || input.Messages[a.Message].Blocks[a.Block].GetToolResult() == nil {
+				herr = hostErr(pbv1.ErrorCode_ERROR_CODE_INVALID_ARGUMENT, "position does not identify an input tool result")
+				break
+			}
+			p.stateMu.RLock()
+			digest := p.bundleDigest
+			p.stateMu.RUnlock()
+			if r.ToolResultReleaseFunc == nil || digest == "" {
+				herr = hostErr(pbv1.ErrorCode_ERROR_CODE_NOT_CONFIGURED, "tool-result approvals are not configured")
+				break
+			}
+			result := input.Messages[a.Message].Blocks[a.Block].GetToolResult()
+			var call *pbv1.RequestToolUseBlock
+			ambiguous := false
+			for _, message := range input.Messages {
+				if message == nil {
+					continue
+				}
+				for _, block := range message.Blocks {
+					if block == nil {
+						continue
+					}
+					if candidate := block.GetToolUse(); candidate != nil && candidate.Id == result.ToolCallId {
+						if call != nil {
+							ambiguous = true
+						}
+						call = candidate
+					}
+				}
+			}
+			if ambiguous {
+				call = nil
+			}
+			value, herr = r.ToolResultReleaseFunc(ctx, pluginName, digest, result, call, reason)
 		case "torana_plugin_counter":
 			var counter struct {
 				Counter string `json:"counter"`

@@ -106,6 +106,7 @@ Usage:
   torana agent <command>         discover and call plugin agent operations
   torana mcp <command>           enable MCP, inspect it, or manage its token
   torana changes <command>       list or undo confirmed plugin changes
+  torana approvals <command>     review, allow or revoke a withheld result
   torana harness <command>       connect MCP to Claude Code or Codex
   torana version                 print the version
   torana help                    print this message

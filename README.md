@@ -95,10 +95,14 @@ model: your coding agent can keep using its hosted model while a focused local
 model handles a narrow job. Combining the two unlocks useful workflows without
 moving the whole session to a local model.
 
-### Already have a local model running?
+### Comfortable setting up a small local model? Try PII
 
-Try the contextual `pii` plugin first. It asks your OpenAI-compatible local
-model to inspect new tool output before it reaches the hosted model:
+This is the best way to understand what Torana enables: your hosted coding
+model stays in charge, while a small local model checks tool output before
+it leaves your machine. Already run an OpenAI-compatible local model server?
+Use it with `pii`. Otherwise, start one first and note its URL and model ID.
+This is an extra check, not complete protection: models can miss secrets or
+flag harmless content. Try both kinds of examples from your own workflow.
 
 First register that model server in Torana:
 
@@ -119,16 +123,30 @@ Now install the plugin:
 ./torana plugin install https://github.com/torana-edge/torana-plugins/tree/main/plugins/pii
 ```
 
-Run `./torana open`, configure its required
-`scanner` model service by choosing `local-scanner` in **Provider**,
-then return to the installed plugin. The
+Run `./torana open` to open the control plane. Go to **Pipeline**, open the
+installed **pii** plugin, and find **Resource bindings → scanner → Provider**.
+Choose the `local-scanner` provider you added and saved in **Settings** above.
+Torana derives the inference path and uses that provider's default model.
+The
 [PII guide](https://github.com/torana-edge/torana-plugins/blob/main/plugins/pii/README.md)
 has the complete binding and CLI examples.
 
-### Don't have a local model running?
+### Prefer to skip local-model setup? Try usage_logger or pii_guard
 
-Use the deterministic guard instead. It catches high-confidence PII and common
-secret shapes without a model:
+Start with **usage_logger** to see requests, token usage and timing without
+an extra model call:
+
+```bash
+./torana plugin install https://github.com/torana-edge/torana-plugins/tree/main/plugins/usage_logger
+```
+
+Open it in **Pipeline**, then approve and enable it. Make an ordinary request
+through your harness and inspect its activity in **Live Feed**. The
+[usage_logger guide](https://github.com/torana-edge/torana-plugins/blob/main/plugins/usage_logger/README.md)
+shows how to inspect the plugin's local usage log and configure it via CLI.
+
+Or use **pii_guard** for deterministic checks of recognizable secrets, without
+a model:
 
 ```bash
 ./torana plugin install https://github.com/torana-edge/torana-plugins/tree/main/plugins/pii_guard
@@ -145,7 +163,7 @@ the `scanner` binding and model-call limits. Then choose **Approve and enable**.
 The install command alone does not enable a plugin, and a rebuilt bundle needs
 a new approval.
 
-### Test your setup
+### Test PII (either guard)
 
 You can enable either plugin on its own, or put `pii_guard` immediately before
 `pii` in the pipeline. In that order, the deterministic guard handles obvious
@@ -167,8 +185,8 @@ Read the demo-sensitive.txt file in this directory and tell me what it contains.
 ```
 
 The harness reads the file locally and includes the tool result in its next
-model request. The active guard should replace the sensitive result with a
-recoverable error beginning **Sensitive output withheld**. The safe request
+model request. When the scanner flags it, the active guard replaces the result
+with a value-free, recoverable tool error. The safe request
 continues to the primary provider without the synthetic value, so the agent can
 acknowledge it and move on. Confirm the request in Torana's **Live Feed**, then
 remove the test file:
@@ -181,6 +199,15 @@ With `pii_guard` enabled first, this obvious value is replaced before the
 contextual scan. With only `pii` enabled, the scanner model decides. The
 [full quickstart](docs/QUICKSTART.md#add-one-plugin)
 includes the CLI alternatives and troubleshooting detail.
+
+If `pii` withholds harmless content, ask your agent to request review using
+Torana MCP and the result reference in the error. Open **Approvals** with
+`./torana open`, inspect the original content locally, then **Allow upstream**
+or **Keep withheld**. The CLI offers `./torana approvals list`,
+`./torana approvals show <reference>` and
+`./torana approvals approve <reference> --yes`. An allowance applies only to
+that exact result in that conversation and plugin bundle—not other reads.
+The harness must resend the original result; Torana does not store it.
 
 The [plugin listings](https://torana.sh/plugins/) include tool policy, telemetry,
 PII checks, schema adaptation and optional compaction. Compaction is a plugin

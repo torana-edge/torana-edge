@@ -121,6 +121,8 @@ func (d *operationDispatch) dispatch(ctx context.Context, input namespaceInvokeI
 		if len(schema) == 0 && len(object) == 0 {
 			input.Input = nil
 		}
+	} else if op.Source == "core" && op.ID == "redactions.request_release" {
+		schema = releaseRequestSchema
 	} else if op.ID == "_config.set" {
 		// The consent executor validates the candidate against the plugin's
 		// configuration schema and the operator revision before proposing it.
