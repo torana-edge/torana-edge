@@ -18,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/torana-edge/torana-edge/internal/bridge"
 	"github.com/torana-edge/torana-edge/internal/plugin"
 	"github.com/torana-edge/torana-edge/internal/provider"
 )
@@ -42,6 +43,13 @@ func TestPIILocalScannerProductionEgress(t *testing.T) {
 	if model == "" {
 		t.Fatal("TORANA_TEST_LOCAL_SCANNER_MODEL is required")
 	}
+	for _, shape := range []bridge.Protocol{bridge.Anthropic, bridge.OpenAIChat, bridge.OpenAIResponses, bridge.Gemini, bridge.GeminiCodeAssist} {
+		t.Run(string(shape), func(t *testing.T) { testPIILocalScannerShape(t, target, model, shape) })
+	}
+}
+
+func testPIILocalScannerShape(t *testing.T, target *url.URL, model string, shape bridge.Protocol) {
+	t.Helper()
 	t.Setenv("TORANA_DATA_DIR", t.TempDir())
 	bundles := officialBundlesDir(t)
 	requireBundle(t, bundles, "pii")
@@ -80,13 +88,13 @@ func TestPIILocalScannerProductionEgress(t *testing.T) {
 		upstreamBodies = append(upstreamBodies, string(body))
 		mu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(w, `{"id":"msg_test","type":"message","role":"assistant","model":"synthetic-primary","content":[{"type":"text","text":"done"}],"stop_reason":"end_turn"}`)
+		_, _ = io.WriteString(w, bridgeUpstreamJSON(shape, false))
 	}))
 	t.Cleanup(primary.Close)
 
 	srv, err := New(Config{Providers: provider.Config{
 		Providers: map[string]provider.Provider{
-			"primary": {URL: primary.URL, Format: "anthropic", Auth: provider.ProviderAuth{Mode: "caller"}},
+			"primary": {URL: primary.URL, Format: shape.Format(), Auth: provider.ProviderAuth{Mode: "caller"}},
 			"scanner": {URL: scanner.URL + "/v1", Format: "openai", DefaultModel: model, Auth: provider.ProviderAuth{Mode: "none"}},
 		},
 		Plugins: provider.PluginsConfig{
@@ -111,17 +119,17 @@ func TestPIILocalScannerProductionEgress(t *testing.T) {
 	}
 	go func() { _ = srv.Serve(ln) }()
 	client := &http.Client{Timeout: 100 * time.Second}
-	messages := []map[string]any{
-		{"role": "user", "content": "Review this synthetic configuration."},
-		{"role": "assistant", "content": []map[string]any{{"type": "tool_use", "id": "local_scan_call", "name": "Read", "input": map[string]any{"file_path": "synthetic-config.txt"}}}},
-		{"role": "user", "content": []map[string]any{{"type": "tool_result", "tool_use_id": "local_scan_call", "content": "DB_PASSWORD=" + secret, "cache_control": map[string]any{"type": "ephemeral"}}}},
+	fixture, path, carriers := localScannerShapeFixture(shape)
+	var document map[string]any
+	if err := json.Unmarshal([]byte(strings.ReplaceAll(fixture, "SYNTHETIC_SECRET", secret)), &document); err != nil {
+		t.Fatal(err)
 	}
 	for turn := 0; turn < 3; turn++ {
-		body, marshalErr := json.Marshal(map[string]any{"model": "synthetic-primary", "max_tokens": 64, "messages": messages})
+		body, marshalErr := json.Marshal(document)
 		if marshalErr != nil {
 			t.Fatal(marshalErr)
 		}
-		req, requestErr := http.NewRequest(http.MethodPost, "http://"+ln.Addr().String()+"/provider/primary/v1/messages", strings.NewReader(string(body)))
+		req, requestErr := http.NewRequest(http.MethodPost, "http://"+ln.Addr().String()+"/provider/primary"+path, strings.NewReader(string(body)))
 		if requestErr != nil {
 			t.Fatal(requestErr)
 		}
@@ -136,7 +144,7 @@ func TestPIILocalScannerProductionEgress(t *testing.T) {
 		if readErr != nil || resp.StatusCode != http.StatusOK {
 			t.Fatalf("turn %d: status=%d read=%v body=%s", turn, resp.StatusCode, readErr, responseBody)
 		}
-		messages = append(messages, map[string]any{"role": "assistant", "content": "done"}, map[string]any{"role": "user", "content": "Continue without rereading the file."})
+		appendLocalScannerTurn(document, shape)
 	}
 	mu.Lock()
 	defer mu.Unlock()
@@ -152,10 +160,82 @@ func TestPIILocalScannerProductionEgress(t *testing.T) {
 	if scannerAuth != "" || !strings.Contains(scannerInput, secret) || scannerRequest.Model != model || scannerPath != "/v1/chat/completions" {
 		t.Fatalf("production scanner egress must receive synthetic output and configured model, never caller auth; auth_present=%t", scannerAuth != "")
 	}
+	var firstReplacement string
 	for turn, wire := range upstreamBodies {
-		if strings.Contains(wire, secret) || !strings.Contains(wire, "Tool output withheld") || !strings.Contains(wire, "password") || strings.Contains(wire, "not a confirmed finding") || !strings.Contains(wire, `"is_error":true`) || !strings.Contains(wire, `"cache_control":{"type":"ephemeral"}`) {
-			t.Fatalf("turn %d: real scanner must yield a recoverable password finding with preserved cache marker, no secret/failure-only diagnostic: %s", turn, wire)
+		if strings.Contains(wire, secret) || !strings.Contains(wire, "Tool output withheld") || !strings.Contains(wire, "password") || strings.Contains(wire, "not a confirmed finding") {
+			t.Fatalf("turn %d: real scanner must yield a recoverable password finding, no secret/failure-only diagnostic: %s", turn, wire)
+		}
+		if !strings.Contains(wire, "line 1 of this tool output") || !strings.Contains(wire, "`Read` output") || !strings.Contains(wire, "Reported lines are not verified file positions") {
+			t.Fatalf("turn %d: finding must identify Read and output-relative line 1 without promising a file position: %s", turn, wire)
+		}
+		for _, carrier := range carriers {
+			if !strings.Contains(wire, carrier) {
+				t.Fatalf("turn %d: required error/cache/signature carrier %s lost: %s", turn, carrier, wire)
+			}
+		}
+		var forwarded map[string]any
+		if err := json.Unmarshal([]byte(wire), &forwarded); err != nil {
+			t.Fatal(err)
+		}
+		var protectedSlot any
+		switch shape {
+		case bridge.Anthropic, bridge.OpenAIChat:
+			protectedSlot = forwarded["messages"].([]any)[2]
+		case bridge.OpenAIResponses:
+			protectedSlot = forwarded["input"].([]any)[2]
+		case bridge.Gemini, bridge.GeminiCodeAssist:
+			if shape == bridge.GeminiCodeAssist {
+				forwarded = forwarded["request"].(map[string]any)
+			}
+			protectedSlot = forwarded["contents"].([]any)[2]
+		}
+		replacement, err := json.Marshal(protectedSlot)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if turn == 0 {
+			firstReplacement = string(replacement)
+		} else if string(replacement) != firstReplacement {
+			t.Fatalf("turn %d: historical replacement changed, risking prompt-cache prefix drift", turn)
 		}
 	}
-	t.Logf("real local model %s: production default-derived model/path on upstream /v1, native Anthropic transformation, three turns, one inference, no caller-auth leak, preserved cache marker", model)
+	t.Logf("real local model %s: production default-derived model/path on upstream /v1, native %s transformation, three turns, one inference, no caller-auth leak, preserved supported carriers; synthetic primary", model, shape)
+}
+
+func localScannerShapeFixture(shape bridge.Protocol) (string, string, []string) {
+	switch shape {
+	case bridge.Anthropic:
+		return `{"model":"synthetic-primary","max_tokens":64,"messages":[{"role":"user","content":"Review this synthetic configuration."},{"role":"assistant","content":[{"type":"tool_use","id":"local_scan_call","name":"Read","input":{"file_path":"synthetic-config.txt"}}]},{"role":"user","content":[{"type":"tool_result","tool_use_id":"local_scan_call","content":"DB_PASSWORD=SYNTHETIC_SECRET","cache_control":{"type":"ephemeral"}}]}]}`, "/v1/messages", []string{`"is_error":true`, `"cache_control":{"type":"ephemeral"}`}
+	case bridge.OpenAIChat:
+		return `{"model":"synthetic-primary","prompt_cache_key":"synthetic-cache-key","messages":[{"role":"user","content":"Review this synthetic configuration."},{"role":"assistant","tool_calls":[{"id":"local_scan_call","type":"function","function":{"name":"Read","arguments":"{}"}}]},{"role":"tool","tool_call_id":"local_scan_call","content":"DB_PASSWORD=SYNTHETIC_SECRET"}]}`, "/v1/chat/completions", []string{`"prompt_cache_key":"synthetic-cache-key"`, `"tool_call_id":"local_scan_call"`}
+	case bridge.OpenAIResponses:
+		return `{"model":"synthetic-primary","prompt_cache_key":"synthetic-cache-key","input":[{"type":"message","role":"user","content":"Review this synthetic configuration."},{"type":"custom_tool_call","call_id":"local_scan_call","name":"Read","input":"synthetic-config.txt"},{"type":"custom_tool_call_output","call_id":"local_scan_call","output":"DB_PASSWORD=SYNTHETIC_SECRET"}],"client_metadata":{"thread_id":"synthetic-thread"}}`, "/v1/responses", []string{`"prompt_cache_key":"synthetic-cache-key"`, `"type":"custom_tool_call_output"`, `"call_id":"local_scan_call"`}
+	default:
+		fixture := `{"cachedContent":"cachedContents/synthetic","contents":[{"role":"user","parts":[{"text":"Review this synthetic configuration."}]},{"role":"model","parts":[{"thoughtSignature":"c3ludGhldGljLXNpZw==","functionCall":{"id":"local_scan_call","name":"Read","args":{"file_path":"synthetic-config.txt"}}}]},{"role":"user","parts":[{"functionResponse":{"id":"local_scan_call","name":"Read","response":{"output":"DB_PASSWORD=SYNTHETIC_SECRET"}}}]}]}`
+		path := "/v1beta/models/synthetic-primary:generateContent"
+		if shape == bridge.GeminiCodeAssist {
+			fixture = `{"model":"synthetic-primary","project":"synthetic-project","request":` + fixture + `}`
+			path = "/v1internal:generateContent"
+		}
+		return fixture, path, []string{`"cachedContent":"cachedContents/synthetic"`, `"thoughtSignature":"c3ludGhldGljLXNpZw=="`, `"error":`}
+	}
+}
+
+func appendLocalScannerTurn(document map[string]any, shape bridge.Protocol) {
+	key := "messages"
+	assistant := map[string]any{"role": "assistant", "content": "done"}
+	user := map[string]any{"role": "user", "content": "Continue without rereading the file."}
+	switch shape {
+	case bridge.OpenAIResponses:
+		key = "input"
+		assistant["type"], user["type"] = "message", "message"
+	case bridge.Gemini, bridge.GeminiCodeAssist:
+		key = "contents"
+		if shape == bridge.GeminiCodeAssist {
+			document = document["request"].(map[string]any)
+		}
+		assistant = map[string]any{"role": "model", "parts": []any{map[string]any{"text": "done"}}}
+		user = map[string]any{"role": "user", "parts": []any{map[string]any{"text": "Continue without rereading the file."}}}
+	}
+	document[key] = append(document[key].([]any), assistant, user)
 }
