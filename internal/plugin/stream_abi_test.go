@@ -554,7 +554,7 @@ func TestIntentDoesNotGuessRemappedCallIdentity(t *testing.T) {
 	if _, err := pp.RunBeforeRequest(context.Background(), 2, chat, nil); err != nil {
 		t.Fatalf("RunBeforeRequest: %v", err)
 	}
-	got, ok, cacheErr := store.Get(context.Background(), wasm.SharedCacheKey("intent:call_req_42"))
+	got, ok, cacheErr := store.Get(context.Background(), wasm.SharedCacheKey(launchSharedIntentKey("conv-1", "call_req_42", "read", `{"path":"failover.go"}`)))
 	if cacheErr != nil {
 		t.Fatal(cacheErr)
 	}
@@ -609,7 +609,7 @@ func TestCapturedIntentOccurrenceFeedsKeywordCompactor(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RunBeforeRequest: %v", err)
 	}
-	if got, ok, err := store.Get(context.Background(), wasm.SharedCacheKey("intent:call_resp_9")); err != nil || !ok || got != "where is the retry budget configured" {
+	if got, ok, err := store.Get(context.Background(), wasm.SharedCacheKey(launchSharedIntentKey("conv-1", "call_resp_9", "read", `{"path":"failover.go"}`))); err != nil || !ok || got != "where is the retry budget configured" {
 		t.Fatalf("captured occurrence did not feed compactor: %q (present=%v)", got, ok)
 	}
 	var result string
@@ -987,6 +987,7 @@ func TestIntentNativeIEnrichesDescriptionOnly(t *testing.T) {
 
 	nativeParams := mustReq(`{"type":"object","properties":{"i":{"type":"string","description":"omp's own intent semantics"},"path":{"type":"string"}},"required":["path"]}`)
 	chat := &engine.ChatRequest{
+		ToranaMeta: mustOptReqForTest(`{"_conversation_id":"conv-1"}`),
 		Tools: []engine.ToolDef{
 			{Name: "read", Parameters: nativeParams},
 			{Name: "plain", Parameters: mustReq(`{"type":"object","properties":{"q":{"type":"string"}}}`)},
@@ -1044,7 +1045,7 @@ func TestIntentNativeIEnrichesDescriptionOnly(t *testing.T) {
 	if args["i"] != "find the retry budget" {
 		t.Fatalf(`native "i" must NOT be stripped, got %v`, args)
 	}
-	if v, ok, err := store.Get(context.Background(), wasm.SharedCacheKey("intent:call_native")); err != nil || !ok || v != "find the retry budget" {
+	if v, ok, err := store.Get(context.Background(), wasm.SharedCacheKey(launchSharedIntentKey("conv-1", "call_native", "read", `{"path":"failover.go"}`))); err != nil || !ok || v != "find the retry budget" {
 		t.Fatalf("native i not captured into cache: %q ok=%v", v, ok)
 	}
 }
