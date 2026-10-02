@@ -33,6 +33,73 @@ func launchSharedIntentKey(conversation, id, name, args string) string {
 	}
 	return "intent/shared/v3:sha256:" + hex.EncodeToString(h.Sum(nil))
 }
+func TestLaunchCatalogueAgentOperations(t *testing.T) {
+	bundles := officialBundlesDir(t)
+	for _, name := range []string{"cache_tier_selector", "cache_warmer", "compactor", "decision_router", "intent", "keyword_compactor", "otel", "pii", "pii_guard", "tool_governor", "usage_logger"} {
+		t.Run(name, func(t *testing.T) {
+			requireBundle(t, bundles, name)
+			raw, err := os.ReadFile(bundles + "/" + name + "/agent.json")
+			if err != nil {
+				t.Fatal(err)
+			}
+			var descriptor AgentDescriptor
+			if err := json.Unmarshal(raw, &descriptor); err != nil {
+				t.Fatal(err)
+			}
+			runtime := wasm.NewRuntime(context.Background())
+			t.Cleanup(func() { runtime.Close() })
+			state, err := pluginstate.New(pluginstate.Options{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { state.Close() })
+			runtime.StateGetFunc = state.Get
+			runtime.StateSetFunc = state.Set
+			runtime.StateGetVersionedFunc = state.GetVersioned
+			runtime.StateCompareAndSetFunc = state.CompareAndSet
+			runtime.StateCompareAndDeleteFunc = state.CompareAndDelete
+			runtime.StateKeysFunc = state.Keys
+			runtime.StateScanFunc = state.Scan
+			conversation := "catalogue-session"
+			runtime.ExecutionInfoFunc = func(context.Context) *pbv1.ExecutionInfo { return &pbv1.ExecutionInfo{ConversationId: &conversation} }
+			cfg := map[string]json.RawMessage{}
+			if name == "tool_governor" {
+				cfg[name] = json.RawMessage(`{"allow":["read"]}`)
+			}
+			pipeline, err := NewPipeline(runtime, officialPluginConfig(t, bundles, []string{name}, cfg))
+			if err != nil {
+				t.Fatal(err)
+			}
+			for index, operation := range descriptor.Operations {
+				if _, _, found := pipeline.FindAgentOperation(name, operation.Method, operation.Path); !found {
+					t.Fatalf("operation missing from discovery: %s", operation.ID)
+				}
+				ctx, err := WithMCPBinding(context.Background(), MCPBinding{Bound: true, ConversationID: conversation, CallID: "catalogue-confirmed-call"})
+				if err != nil {
+					t.Fatal(err)
+				}
+				request := &pbv1.HttpRequest{Method: operation.Method, Path: "/agent" + operation.Path}
+				if operation.Method == "POST" {
+					request.Body = []byte(`{"tool":"shell"}`)
+				}
+				if operation.ConversationBinding == "required" {
+					unbound, err := pipeline.RunOnHTTPRequest(context.Background(), uint64(index+100), name, request, nil)
+					if err != nil || unbound == nil || unbound.Status != 409 {
+						t.Fatalf("%s allowed unbound scope: response=%v err=%v", operation.ID, unbound, err)
+					}
+				}
+				response, err := pipeline.RunOnHTTPRequest(ctx, uint64(index+1), name, request, nil)
+				if err != nil || response == nil || response.Status != 200 {
+					t.Fatalf("%s failed: response=%v err=%v", operation.ID, response, err)
+				}
+				if err := ValidateConfigAgainstSchema(&ConfigSchema{Raw: operation.OutputSchema}, response.Body); err != nil {
+					t.Fatalf("%s violates its advertised output: %v; body=%s", operation.ID, err, response.Body)
+				}
+				t.Logf("compiled agent operation %s:%s PASS", name, operation.ID)
+			}
+		})
+	}
+}
 
 func TestLaunchIntentSharedOccurrenceIsolation(t *testing.T) {
 	bundles := officialBundlesDir(t)
