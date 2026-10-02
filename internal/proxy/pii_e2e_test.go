@@ -154,7 +154,7 @@ func TestPIIModelBlock(t *testing.T) {
 		t.Fatalf("status = %d, want 200; body=%s", status, body)
 	}
 	wires := captured()
-	if len(wires) != 1 || strings.Contains(wires[0], "Jonathan Q. Public") || !strings.Contains(wires[0], "output withheld") {
+	if len(wires) != 1 || strings.Contains(wires[0], "Jonathan Q. Public") || !strings.Contains(wires[0], "output withheld") || strings.Contains(wires[0], "not a confirmed finding") {
 		t.Fatalf("upstream request did not contain only the recoverable diagnostic: %v", wires)
 	}
 	// The approved normalization never echoes a model-controlled category
@@ -191,7 +191,7 @@ func TestPIIFailClosed(t *testing.T) {
 	if status != http.StatusOK {
 		t.Fatalf("fail-closed recovery: status = %d, want 200; body=%s", status, body)
 	}
-	if wires := captured(); len(wires) != 1 || !strings.Contains(wires[0], "could not complete") || strings.Contains(wires[0], "ambiguous content the regex cannot judge") {
+	if wires := captured(); len(wires) != 1 || !strings.Contains(wires[0], "not a confirmed finding") || strings.Contains(wires[0], "ambiguous content the regex cannot judge") {
 		t.Fatalf("fail-closed diagnostic missing from upstream request: %v", wires)
 	}
 	if n := atomic.LoadInt32(hits); n != 1 {

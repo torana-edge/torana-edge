@@ -434,7 +434,7 @@ func assertRecoverableToolError(t *testing.T, body, secret string) {
 		}
 		diagnostic = *blocks[0].Text
 	}
-	if !strings.Contains(diagnostic, "output withheld") || strings.Contains(diagnostic, secret) || strings.Contains(body, secret) {
+	if !strings.Contains(diagnostic, "output withheld") || strings.Contains(diagnostic, "not a confirmed finding") || strings.Contains(diagnostic, secret) || strings.Contains(body, secret) {
 		t.Fatalf("unsafe or missing diagnostic: %q", diagnostic)
 	}
 }
