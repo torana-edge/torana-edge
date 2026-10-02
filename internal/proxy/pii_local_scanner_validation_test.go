@@ -31,7 +31,7 @@ func TestPIILocalScannerProductionEgress(t *testing.T) {
 		t.Skip("opt-in local model check: set TORANA_TEST_LOCAL_SCANNER_URL and TORANA_TEST_LOCAL_SCANNER_MODEL")
 	}
 	target, err := url.Parse(scannerURL)
-	if err != nil || target.Scheme != "http" || target.User != nil || target.RawQuery != "" || target.Fragment != "" {
+	if err != nil || target.Scheme != "http" || target.User != nil || target.RawQuery != "" || target.Fragment != "" || (target.Path != "" && target.Path != "/") {
 		t.Fatal("local scanner must be an unauthenticated loopback HTTP origin")
 	}
 	ip := net.ParseIP(target.Hostname())
@@ -53,7 +53,7 @@ func TestPIILocalScannerProductionEgress(t *testing.T) {
 	const secret = "synthetic-launch-password-7Gx9!"
 	var scans atomic.Int32
 	var mu sync.Mutex
-	var scannerAuth, scannerInput string
+	var scannerAuth, scannerInput, scannerPath string
 	var upstreamBodies []string
 	forward := httputil.NewSingleHostReverseProxy(target)
 	scanner := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -64,7 +64,7 @@ func TestPIILocalScannerProductionEgress(t *testing.T) {
 			return
 		}
 		mu.Lock()
-		scannerAuth, scannerInput = r.Header.Get("Authorization"), string(body)
+		scannerAuth, scannerInput, scannerPath = r.Header.Get("Authorization"), string(body), r.URL.Path
 		mu.Unlock()
 		r.Body = io.NopCloser(strings.NewReader(string(body)))
 		forward.ServeHTTP(w, r)
@@ -87,7 +87,7 @@ func TestPIILocalScannerProductionEgress(t *testing.T) {
 	srv, err := New(Config{Providers: provider.Config{
 		Providers: map[string]provider.Provider{
 			"primary": {URL: primary.URL, Format: "anthropic", Auth: provider.ProviderAuth{Mode: "caller"}},
-			"scanner": {URL: scanner.URL, Format: "openai", Auth: provider.ProviderAuth{Mode: "none"}},
+			"scanner": {URL: scanner.URL + "/v1", Format: "openai", DefaultModel: model, Auth: provider.ProviderAuth{Mode: "none"}},
 		},
 		Plugins: provider.PluginsConfig{
 			Dir: bundles, Order: []string{"pii"},
@@ -95,7 +95,7 @@ func TestPIILocalScannerProductionEgress(t *testing.T) {
 			Approvals: map[string]provider.PluginApproval{"pii": {
 				Digest: digest, Permissions: manifestPermissions(bundles + "/pii"), FailureMode: "block",
 				ModelServices: map[string]provider.PluginModelServiceApproval{"scanner": {
-					Provider: "scanner", Model: model, Path: "/v1/chat/completions", TimeoutMS: 90_000,
+					Provider: "scanner", TimeoutMS: 90_000,
 					MaxTokens: 512, MaxInputBytes: 1 << 20, MaxCallsPerMinute: 60, MaxTokensPerHour: 100_000,
 				}},
 			}},
@@ -143,7 +143,13 @@ func TestPIILocalScannerProductionEgress(t *testing.T) {
 	if scans.Load() != 1 || len(upstreamBodies) != 3 {
 		t.Fatalf("scans=%d primary requests=%d; want one real inference and three forwarded turns", scans.Load(), len(upstreamBodies))
 	}
-	if scannerAuth != "" || !strings.Contains(scannerInput, secret) || !strings.Contains(scannerInput, model) {
+	var scannerRequest struct {
+		Model string `json:"model"`
+	}
+	if err := json.Unmarshal([]byte(scannerInput), &scannerRequest); err != nil {
+		t.Fatal(err)
+	}
+	if scannerAuth != "" || !strings.Contains(scannerInput, secret) || scannerRequest.Model != model || scannerPath != "/v1/chat/completions" {
 		t.Fatalf("production scanner egress must receive synthetic output and configured model, never caller auth; auth_present=%t", scannerAuth != "")
 	}
 	for turn, wire := range upstreamBodies {
@@ -151,5 +157,5 @@ func TestPIILocalScannerProductionEgress(t *testing.T) {
 			t.Fatalf("turn %d: real scanner must yield a recoverable password finding with preserved cache marker, no secret/failure-only diagnostic: %s", turn, wire)
 		}
 	}
-	t.Logf("real local model %s: production model-service egress, native Anthropic transformation, three turns, one inference, no caller-auth leak, preserved cache marker", model)
+	t.Logf("real local model %s: production default-derived model/path on upstream /v1, native Anthropic transformation, three turns, one inference, no caller-auth leak, preserved cache marker", model)
 }
