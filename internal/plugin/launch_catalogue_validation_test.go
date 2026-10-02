@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"github.com/torana-edge/torana-edge/internal/cache"
+	"github.com/torana-edge/torana-edge/internal/economics"
 	"github.com/torana-edge/torana-edge/internal/engine"
 	"github.com/torana-edge/torana-edge/internal/pluginstate"
 	"github.com/torana-edge/torana-edge/internal/wasm"
@@ -21,6 +22,9 @@ import (
 )
 
 func launchSharedIntentKey(conversation, id, name, args string) string {
+	if args == "" {
+		args = "{}"
+	}
 	var values map[string]json.RawMessage
 	if json.Unmarshal([]byte(args), &values) != nil || values == nil {
 		return ""
@@ -32,6 +36,67 @@ func launchSharedIntentKey(conversation, id, name, args string) string {
 		h.Write([]byte(strconv.Itoa(len(s)) + ":" + s))
 	}
 	return "intent/shared/v3:sha256:" + hex.EncodeToString(h.Sum(nil))
+}
+
+func TestLaunchConstrainedSchemaSubtreesStayExact(t *testing.T) {
+	bundles := officialBundlesDir(t)
+	requireBundle(t, bundles, "schema_translator")
+	pipeline := newTestPipeline(t, bundles, []string{"schema_translator"})
+	for index, raw := range []string{
+		`{"type":"object","additionalProperties":false,"properties":{"env":{"type":"object","enum":[{"prod":"on"}],"additionalProperties":true}}}`,
+		`{"type":"object","additionalProperties":false,"properties":{"rows":{"type":"array","enum":[[{"env":{"prod":"on"}}]],"items":{"type":"object","properties":{"env":{"type":"object","additionalProperties":true}}}}}}`,
+	} {
+		request := &engine.ChatRequest{Tools: []engine.ToolDef{{Name: "run", Parameters: mustReq(raw)}}}
+		out, err := pipeline.RunBeforeRequest(context.Background(), uint64(index+1), request, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if out == nil {
+			out = request
+		}
+		if string(out.Tools[0].Parameters.Bytes()) != raw {
+			t.Fatalf("constrained schema was weakened: %s", out.Tools[0].Parameters.Bytes())
+		}
+	}
+}
+
+func TestLaunchCompactorModelCacheReusesExactReplacement(t *testing.T) {
+	bundles := officialBundlesDir(t)
+	requireBundle(t, bundles, "compactor")
+	pipeline := newTestPipelineWith(t, bundles, []string{"compactor"}, cache.NewLocalCache(time.Minute), map[string]json.RawMessage{"compactor": json.RawMessage(`{"tool_policies":[{"match":"read","mode":"model"}],"expected_applications":6}`)})
+	calls, reports := 0, 0
+	pipeline.runtime.ModelCompleteFunc = func(_ context.Context, name string, resource wasm.ModelServiceResource, args *pbv1.ModelCompleteArgs) (*pbv1.ModelCompleteResult, *pbv1.HostError) {
+		calls++
+		if name != "compactor" || args.Service != "summarizer" {
+			t.Fatal("wrong model binding")
+		}
+		return &pbv1.ModelCompleteResult{Message: &pbv1.ResponseMessage{Blocks: []*pbv1.ResponseBlock{{Kind: &pbv1.ResponseBlock_Text{Text: &pbv1.ResponseTextBlock{Text: "Relevant evidence in server.go."}}}}}, Usage: &pbv1.Usage{InputTokens: 100, OutputTokens: 8}}, nil
+	}
+	pipeline.runtime.EvaluateCompactionFunc = func(_ context.Context, report economics.CompactionReport, target wasm.PricingResource, summarizer *wasm.PricingResource) economics.CompactionDecision {
+		return economics.CompactionDecision{Apply: true}
+	}
+	pipeline.runtime.CompactionReportFunc = func(_ context.Context, name string, report economics.CompactionReport, target wasm.PricingResource, summarizer *wasm.PricingResource) {
+		reports++
+	}
+	for turn := uint64(1); turn <= 3; turn++ {
+		request := cacheComplianceRequest()
+		request.Model = "target"
+		request.ToranaMeta = mustOptReqForTest(`{"_conversation_id":"model-compaction","_provider":"test"}`)
+		request.Messages = append(request.Messages, engine.Message{Role: engine.RoleAssistant, Blocks: []engine.Block{{Text: &engine.TextBlock{Text: "I read the complete result."}}}})
+		out, err := pipeline.RunBeforeRequest(context.Background(), turn, request, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if out == nil {
+			out = request
+		}
+		if got := toolResultText(out.Messages[3]); got != "Relevant evidence in server.go." {
+			t.Fatalf("summary missing: %q", got)
+		}
+	}
+	if calls != 1 || reports != 3 {
+		t.Fatalf("model replacement not replay-stable: model=%d reports=%d", calls, reports)
+	}
 }
 func TestLaunchCatalogueAgentOperations(t *testing.T) {
 	bundles := officialBundlesDir(t)
