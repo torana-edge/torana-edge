@@ -152,6 +152,8 @@ case ":${PATH:-}:" in
         if [ "$modify_path" = yes ] && [ "$install_dir" = "${HOME:-}/.local/bin" ]; then
             shell_name=${SHELL:-sh}
             shell_name=${shell_name##*/}
+            # Preserve variables literally for expansion by the user's next shell.
+            # shellcheck disable=SC2016
             case "$shell_name" in
                 zsh)
                     profile=${ZDOTDIR:-$HOME}/.zshrc
