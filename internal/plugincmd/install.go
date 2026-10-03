@@ -389,6 +389,20 @@ func installPlugin(args []string, stdout, stderr io.Writer) error {
 
 	var installed []string
 	for _, arg := range sources {
+		if isReleaseSource(arg) {
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+			client := releaseClient(nil)
+			release, err := resolveRelease(ctx, client, pluginRegistryURL, arg)
+			if err == nil {
+				err = installRelease(ctx, client, release, dest, stdout)
+			}
+			cancel()
+			if err != nil {
+				return err
+			}
+			installed = append(installed, release.name)
+			continue
+		}
 		src, err := parseSource(arg)
 		if err != nil {
 			return err

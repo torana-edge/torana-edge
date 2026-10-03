@@ -372,9 +372,11 @@ func TestInstallerDefaultsAndArguments(t *testing.T) {
 	t.Run("user-local default", func(t *testing.T) {
 		f := newInstaller(t, goos, arch)
 		f.env["TORANA_INSTALL_DIR"] = ""
+		f.args = []string{"--no-modify-path"}
 		f.installDir = filepath.Join(f.home, ".local", "bin")
 		if runtime.GOOS == "windows" {
 			f.installDir = filepath.Join(f.home, "Torana", "bin")
+			f.args = []string{"-NoModifyPath"}
 		}
 		profile := filepath.Join(f.home, ".profile")
 		must(t, os.WriteFile(profile, []byte("untouched profile"), 0o600))
