@@ -5,7 +5,7 @@ are validated by the running host, persisted in its managed store, and applied
 through the same transaction as a UI save. Do not edit the seed or managed JSON
 file to change a running instance.
 
-The examples use `torana` on PATH. With the source-build quickstart, run
+The examples use `torana` on PATH. With a contributor source build, run
 `./torana` from the checkout instead. This guide does not install a binary or
 change your shell configuration.
 

@@ -29,19 +29,47 @@ not mean every configured destination is local.
 
 ## Quick start
 
-The available install path is a source build. You need Git and Go 1.26.6+.
-The [full quickstart](docs/QUICKSTART.md) includes a first request and harness setup.
+Install **v0.1.0** on macOS or Linux:
 
 ```bash
-git clone https://github.com/torana-edge/torana-edge.git
-cd torana-edge
-go build -o ./torana ./cmd/torana
-cp config.example.json config.json
-export TORANA_DATA_DIR="$PWD/.torana-data"
-./torana start --port 8143
-./torana status
+curl -fsSL https://torana.sh/install.sh | sh -s -- --version 0.1.0
+export PATH="$HOME/.local/bin:$PATH"
+torana version
 ```
 
+<details>
+<summary>Windows (PowerShell)</summary>
+
+```powershell
+$installer = Join-Path $env:TEMP ("torana-install-" + [guid]::NewGuid() + ".ps1")
+Invoke-WebRequest https://torana.sh/install.ps1 -OutFile $installer
+& $installer -Version 0.1.0
+Remove-Item -LiteralPath $installer
+$env:PATH = "$env:LOCALAPPDATA\Torana\bin;$env:PATH"
+torana version
+```
+
+</details>
+
+The installer selects your OS and CPU architecture and verifies the release's
+SHA-256 checksum. It does not change your shell profile or start Torana.
+The PATH command above applies to this terminal; add the install directory to
+your user PATH to use `torana` in future terminals.
+[Inspect the installers](https://github.com/torana-edge/torana-edge/tree/v0.1.0/scripts)
+or [download a binary directly](https://github.com/torana-edge/torana-edge/releases/tag/v0.1.0).
+No Git or Go is needed to run the proxy. To build it yourself, see
+[Contributing](CONTRIBUTING.md#getting-a-build).
+The [full quickstart](docs/QUICKSTART.md) includes a first request and harness setup.
+
+Start on a free local port:
+
+```bash
+torana start --port 8143
+torana status
+```
+
+Torana creates its managed configuration automatically. You do not need a
+checkout, a seed file, or `TORANA_DATA_DIR` for this walkthrough.
 Use any free port. The CLI discovers the running instance, so later commands
 and harness setup do not need to repeat it. This guide uses `8143` so the
 startup choice is explicit instead of assuming a common local port is free.
@@ -52,11 +80,11 @@ Which coding harness do you use? Keep your existing provider and login. Pick
 the [setup recipe for your harness](docs/HARNESS_SETUP.md)—including Claude Code,
 Codex, Antigravity, pi, and oh-my-pi.
 
-For an already signed-in Claude Code session, launch it through the example's
+For an already signed-in Claude Code session, launch it through the default
 Anthropic route:
 
 ```bash
-ANTHROPIC_BASE_URL="$(./torana endpoint anthropic)" claude
+ANTHROPIC_BASE_URL="$(torana endpoint anthropic)" claude
 ```
 
 Ask it to read a small, non-sensitive file, then find the request in Torana's
@@ -71,10 +99,10 @@ model server, follow [Local models](docs/LOCAL_MODELS.md).
 Open the running instance's local UI, or keep using the CLI:
 
 ```bash
-./torana open
-./torana feed --follow
-./torana stats
-./torana plugin status
+torana open
+torana feed --follow
+torana stats
+torana plugin status
 ```
 
 `feed --follow` streams new request metadata like `tail -f`. Plain `feed`
@@ -84,9 +112,12 @@ full prompt/response traffic log, and the recent feed resets when it restarts.
 `start`, `status`, and `stop` print readable summaries; add `--json` when
 driving them from scripts or an agent.
 `endpoint` prints the running origin, or a provider route such as
-`./torana endpoint anthropic`, for shell and harness configuration.
+`torana endpoint anthropic`, for shell and harness configuration.
 
 ## Add one plugin
+
+Plugins are installed from source. Install Git and Go 1.26.6+ before trying
+these Go plugins; the Torana binary itself does not need either tool.
 
 Torana plugins run in the request and response path. With permissions you
 approve, they can inspect or change a request or response, block it, or call
@@ -105,7 +136,7 @@ point, see [Local models](docs/LOCAL_MODELS.md).
 
 First register that model server in Torana:
 
-1. Run `./torana open`, open **Settings**, and choose **Add provider**.
+1. Run `torana open`, open **Settings**, and choose **Add provider**.
 2. Set **Provider name** to `local-scanner`, **Provider format** to `openai`,
    and **Authentication** to **No authentication** for an unauthenticated local server.
 3. Set **Upstream URL** to your model server's address—for example,
@@ -119,7 +150,7 @@ First register that model server in Torana:
 Now install the plugin:
 
 ```bash
-./torana plugin install https://github.com/torana-edge/torana-plugins/tree/main/plugins/pii
+torana plugin install https://github.com/torana-edge/torana-plugins/tree/main/plugins/pii
 ```
 
 Next, follow **Enable the plugin** below to select that provider for `pii`.
@@ -135,14 +166,14 @@ Choose either of these—no scanner setup needed:
 reported token usage to a private local log, without saving prompts or responses.
 
 ```bash
-./torana plugin install https://github.com/torana-edge/torana-plugins/tree/main/plugins/usage_logger
+torana plugin install https://github.com/torana-edge/torana-plugins/tree/main/plugins/usage_logger
 ```
 
 **Or try `pii_guard`.** It catches high-confidence PII and common secret
 patterns without a model:
 
 ```bash
-./torana plugin install https://github.com/torana-edge/torana-plugins/tree/main/plugins/pii_guard
+torana plugin install https://github.com/torana-edge/torana-plugins/tree/main/plugins/pii_guard
 ```
 
 `pii_guard` makes no model or network calls. Review its requested tool-result
@@ -150,7 +181,7 @@ and state permissions in the local UI before enabling it.
 
 ### Enable the plugin
 
-1. Run `./torana open`, choose **Pipeline**, and open the plugin you installed.
+1. Run `torana open`, choose **Pipeline**, and open the plugin you installed.
 2. For **pii**, find **Resource bindings and limits** → **scanner**, then select
    `local-scanner` in **Provider**. This is the provider you added and saved in
    Settings—not a new model-server URL. Torana uses its default model and derives
@@ -179,7 +210,7 @@ Open **Live Feed** to see the request, then inspect the content-free usage log
 using your shell:
 
 ```bash
-tail -n 5 "$(./torana plugin file path usage_logger usage.jsonl)"
+tail -n 5 "$(torana plugin file path usage_logger usage.jsonl)"
 rm demo-safe.txt
 ```
 
@@ -240,9 +271,9 @@ that variable is unset). Change a running instance through the CLI or UI,
 not by editing the original seed:
 
 ```bash
-./torana config get > settings.json
+torana config get > settings.json
 # Edit the "config" object, preserving "revision".
-./torana config apply --file settings.json --yes
+torana config apply --file settings.json --yes
 ```
 
 The host validates changes and rejects stale snapshots. Plugin configuration
@@ -269,7 +300,7 @@ For clients without a usable base-URL override, an optional
 [TLS-intercepting ingress](docs/GEMINI_ANTIGRAVITY.md) is available. It is off
 unless configured and trusted by the client.
 
-When finished, run `./torana stop --yes`. Restore your harness's original
+When finished, run `torana stop --yes`. Restore your harness's original
 provider/base URL before using it without Torana.
 
 ## Build with us

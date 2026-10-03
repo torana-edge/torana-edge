@@ -6,52 +6,66 @@ work across supported APIs.
 
 ## Prerequisites
 
-You need Git and Go 1.26.6 or newer. Which coding harness do you already use?
-Start with its existing provider/login using the [harness setup guide](HARNESS_SETUP.md).
-A separate API key is only needed if you choose the direct API-key example.
+Which coding harness do you already use? Start with its existing provider/login
+using the [harness setup guide](HARNESS_SETUP.md). A separate API key is only
+needed if you choose the direct API-key example.
 
-## Install from source
+## Install v0.1.0
 
-```bash
-git clone https://github.com/torana-edge/torana-edge.git
-cd torana-edge
-go build -o ./torana ./cmd/torana
-cp config.example.json config.json
-```
-
-The available install path is a source build. For a reproducible deployment,
-check out a reviewed commit SHA before building. No WASM plugins are bundled;
-the supplied configuration enables none.
-
-First prove the proxy works without plugins. The example providers use caller
-authentication, so the harness or curl supplies the provider credential on each
-request. For a disposable evaluation, keep managed state in the checkout:
+Install **v0.1.0** on macOS or Linux:
 
 ```bash
-export TORANA_DATA_DIR="$PWD/.torana-data"
-./torana --debug start --port 8143
-./torana status
+curl -fsSL https://torana.sh/install.sh | sh -s -- --version 0.1.0
+export PATH="$HOME/.local/bin:$PATH"
+torana version
 ```
 
-Use any free port. The CLI discovers the running instance for the commands that
-follow. This guide uses `8143` so it does not silently assume a common local
-port is free.
+<details>
+<summary>Windows (PowerShell)</summary>
 
-The repository ignores this disposable directory. It still contains the
-authoritative managed config, encrypted credentials, durable plugin state, and
-private plugin files, so delete it when the evaluation is over and do not copy
-it into source control elsewhere. This Torana process receives no provider
-credential at startup. The process runs in the background.
+```powershell
+$installer = Join-Path $env:TEMP ("torana-install-" + [guid]::NewGuid() + ".ps1")
+Invoke-WebRequest https://torana.sh/install.ps1 -OutFile $installer
+& $installer -Version 0.1.0
+Remove-Item -LiteralPath $installer
+$env:PATH = "$env:LOCALAPPDATA\Torana\bin;$env:PATH"
+torana version
+```
+
+</details>
+
+The installer selects your OS and CPU architecture and verifies the release's
+SHA-256 checksum. It does not change your shell profile or start Torana.
+The PATH command above applies to this terminal; add the install directory to
+your user PATH to use `torana` in future terminals.
+[Inspect the installers](https://github.com/torana-edge/torana-edge/tree/v0.1.0/scripts)
+or [download a binary directly](https://github.com/torana-edge/torana-edge/releases/tag/v0.1.0).
+No Git or Go is needed to run the proxy. To build it yourself, see
+[Contributing](../CONTRIBUTING.md#getting-a-build).
+
+## Start without plugins
+
+```bash
+torana --debug start --port 8143
+torana status
+```
+
+Use any free port. The CLI discovers the running instance for later commands.
+Torana runs in the background on loopback and creates its managed configuration
+in your platform's [user-config directory](CLI.md#environment-variables).
+No checkout or `TORANA_DATA_DIR` export is required. This directory contains
+private configuration, credentials and plugin state; keep it out of source control.
+Default provider routes use harness credentials and no plugins are enabled.
 
 ## Connect your harness
 
 For an already signed-in Claude Code installation:
 
 ```bash
-ANTHROPIC_BASE_URL="$(./torana endpoint anthropic)" claude
+ANTHROPIC_BASE_URL="$(torana endpoint anthropic)" claude
 ```
 
-Ask it to read a small non-sensitive file, then run `./torana open` and inspect
+Ask it to read a small non-sensitive file, then run `torana open` and inspect
 the local control plane's **Live Feed**. Keep the `anthropic` provider's
 authentication set to **Use harness credentials**; no DeepSeek key is needed.
 For Codex, Antigravity, pi, or oh-my-pi, use the
@@ -60,7 +74,7 @@ For Codex, Antigravity, pi, or oh-my-pi, use the
 You can also inspect activity from the terminal:
 
 ```bash
-./torana feed --follow
+torana feed --follow
 ```
 
 `feed --follow` streams new request metadata like `tail -f`. Plain `feed`
@@ -76,29 +90,28 @@ to that provider’s API. Choose a model available to your account.
 
 ```bash
 export DEEPSEEK_API_KEY='replace-with-your-deepseek-key'
-TORANA_URL="$(./torana endpoint)"
+TORANA_URL="$(torana endpoint)"
 
 curl --fail-with-body "$TORANA_URL/health"
 
-curl --fail-with-body "$(./torana endpoint deepseek)/v1/chat/completions" \
+curl --fail-with-body "$(torana endpoint deepseek)/v1/chat/completions" \
   -H "Authorization: Bearer ${DEEPSEEK_API_KEY}" \
   -H 'Content-Type: application/json' \
   -d '{"model":"deepseek-flash","messages":[{"role":"user","content":"Reply with exactly: Torana works"}]}'
 ```
 
 The health endpoint returns `{"status":"ok"}` and the second command returns a
-normal provider response. Run `./torana feed` to find the matching request;
-`./torana status` reports the log path. Debug logging records safe
+normal provider response. Run `torana feed` to find the matching request;
+`torana status` reports the log path. Debug logging records safe
 request-received/completed lines, not headers or bodies. Bridge error-body
 diagnostics have a separate [explicit opt-in](PROTOCOL_BRIDGES.md#diagnose-an-upstream-rejection).
 
 ## Configure
 
-The copied [config.example.json](../config.example.json) is the complete seed:
-it includes native Anthropic, OpenAI, Gemini, and DeepSeek routes, with no
-plugins enabled. Choose the route for your harness; you do not need an account
-with every listed provider. For a ChatGPT login or Antigravity, follow the
-[harness guide](HARNESS_SETUP.md) for the appropriate endpoint and setup.
+The built-in defaults include native Anthropic, OpenAI, Gemini, and DeepSeek
+routes, with no plugins enabled. Choose the route for your harness; you do not
+need an account with every listed provider. For a ChatGPT login or Antigravity,
+follow the [harness guide](HARNESS_SETUP.md) for the appropriate endpoint and setup.
 
 `limits.concurrency` is the maximum number of simultaneous upstream requests
 per identity; `limits.rpm` is a per-identity token bucket refilled over one
@@ -107,12 +120,13 @@ support comments, so the shipped file stays directly parseable; these field
 descriptions and the hints in the local Control Plane are the annotated
 reference.
 
-On the first run, Torana imports this seed into its managed store at
+For custom deployments, [config.example.json](../config.example.json) is an optional
+first-run seed. Torana imports a seed into its managed store at
 `$TORANA_DATA_DIR/config.json`, or the platform's
 [user-config directory](CLI.md#environment-variables) when unset. After that,
 the managed store is authoritative so Control Plane edits survive restarts.
 Changing the original seed does not overwrite managed state; Torana logs a
-warning when both files exist and differ. Run `./torana open` to edit the
+warning when both files exist and differ. Run `torana open` to edit the
 managed configuration. Remove the managed store only if you deliberately want
 the next start to re-import the seed. `TORANA_CONFIG` selects a different
 seed path; it does not bypass an existing managed store.
@@ -122,6 +136,9 @@ for each run. That avoids accidentally exercising an older managed
 configuration while believing you are testing a changed seed.
 
 ## Add one plugin
+
+These Go plugins install from source, so you need Git and Go 1.26.6+ for this
+step. The released Torana binary does not require either tool.
 
 The empty plugin order is intentional: discovered plugins are not implicitly
 trusted or enabled. After the plugin-free request above succeeds, leave Torana
@@ -142,13 +159,13 @@ Use Ollama or another OpenAI-compatible local server; see
 [Local models](LOCAL_MODELS.md) if you need setup guidance.
 
 ```bash
-./torana plugin install https://github.com/torana-edge/torana-plugins/tree/main/plugins/pii
-./torana plugin list
+torana plugin install https://github.com/torana-edge/torana-plugins/tree/main/plugins/pii
+torana plugin list
 ```
 
 Register your local model before selecting it in the plugin:
 
-1. Run `./torana open`, open **Settings**, and choose **Add provider**.
+1. Run `torana open`, open **Settings**, and choose **Add provider**.
 2. Set **Provider name** to `local-scanner`, **Provider format** to `openai`,
    and **Authentication** to **No authentication** for an unauthenticated local server.
 3. Set **Upstream URL** to the local server's address, such as
@@ -174,14 +191,14 @@ Choose either option—neither needs a scanner model:
 reported token usage locally, without saving prompts or response contents.
 
 ```bash
-./torana plugin install https://github.com/torana-edge/torana-plugins/tree/main/plugins/usage_logger
+torana plugin install https://github.com/torana-edge/torana-plugins/tree/main/plugins/usage_logger
 ```
 
 **Or try pii_guard.** It checks high-confidence PII and common secret patterns
 deterministically, without a model or network call.
 
 ```bash
-./torana plugin install https://github.com/torana-edge/torana-plugins/tree/main/plugins/pii_guard
+torana plugin install https://github.com/torana-edge/torana-plugins/tree/main/plugins/pii_guard
 ```
 
 The
@@ -190,7 +207,7 @@ also covers configuration through the CLI.
 
 ### Enable the plugin
 
-1. Run `./torana open`, choose **Pipeline**, and open the plugin you installed.
+1. Run `torana open`, choose **Pipeline**, and open the plugin you installed.
 2. For **pii**, find **Resource bindings and limits** → **scanner** and choose
    `local-scanner` in **Provider**. This selects the provider you saved in
    Settings. Torana uses its default model and derives the inference path;
@@ -217,7 +234,7 @@ Open **Live Feed** to find its request, then read the content-free records
 with your shell:
 
 ```bash
-tail -n 5 "$(./torana plugin file path usage_logger usage.jsonl)"
+tail -n 5 "$(torana plugin file path usage_logger usage.jsonl)"
 rm demo-safe.txt
 ```
 
@@ -266,7 +283,7 @@ capabilities as JSON:
 
 ```bash
 curl --fail-with-body --silent \
-  "$(./torana endpoint)/_torana/api/v1/" | jq
+  "$(torana endpoint)/_torana/api/v1/" | jq
 ```
 
 See [AGENT_CONTROL_PLANE.md](AGENT_CONTROL_PLANE.md) for stable operation IDs,
@@ -328,11 +345,11 @@ Configure a reusable environment-backed credential without putting its value in
 JSON. In the same data-directory environment, stop before changing disk state:
 
 ```bash
-./torana stop --yes
-./torana credential set fallback-api-key --env FALLBACK_API_KEY
+torana stop --yes
+torana credential set fallback-api-key --env FALLBACK_API_KEY
 # Export FALLBACK_API_KEY in this shell before starting the host.
-./torana start --port 8143
-./torana status
+torana start --port 8143
+torana status
 ```
 
 Credential commands are disk-based; they do not refresh a running instance.
@@ -397,9 +414,9 @@ whose upstream serves that API. Check the resulting request in Torana's **Live F
 ## Verify
 
 ```bash
-curl --fail-with-body "$(./torana endpoint)/health"
-./torana stats
-./torana status
+curl --fail-with-body "$(torana endpoint)/health"
+torana stats
+torana status
 ```
 
 A failed plugin hot reload keeps the last known-good pipeline serving and makes
@@ -426,5 +443,4 @@ content.
 
 Exit the harness and launch it normally if you used command-scoped routing.
 If you edited a saved harness configuration, restore its previous provider
-settings. Then run `./torana stop --yes` in the shell with the same
-`TORANA_DATA_DIR`. Use `./torana serve` if you prefer foreground serving.
+settings. Then run `torana stop --yes` for the running instance. Use `torana serve` if you prefer foreground serving.

@@ -19,7 +19,7 @@ For an existing Claude login, keep this native provider in Torana Settings:
 }
 ```
 
-It is already in `config.example.json`. Launch:
+It is included in Torana's default configuration. Launch:
 
 ```bash
 ANTHROPIC_BASE_URL="$(torana endpoint anthropic)" claude

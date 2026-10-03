@@ -5,6 +5,21 @@ build below, then choose the guide for the part you want to change.
 
 ## Getting a build
 
+For the released binary, use the [quickstart](docs/QUICKSTART.md). To work on
+Torana itself, install Git and Go 1.26.6+, then build from source:
+
+```bash
+git clone https://github.com/torana-edge/torana-edge.git
+cd torana-edge
+go build -o ./torana ./cmd/torana
+# Optional isolated development state (keep this directory private):
+export TORANA_DATA_DIR="$PWD/.torana-data"
+./torana start --port 8143
+./torana open
+```
+
+Run the development checks from this checkout:
+
 ```bash
 go build ./...
 make testdata     # builds the WASM test fixtures the plugin tests need
