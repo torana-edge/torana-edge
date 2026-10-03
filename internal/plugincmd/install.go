@@ -40,17 +40,20 @@ func pluginsDir(explicit string) (string, error) {
 	if v := os.Getenv("TORANA_PLUGINS_DIR"); v != "" {
 		return v, nil
 	}
-	client, err := controlclient.New("", 3*time.Second)
+	store, err := controlclient.DiscoverStorePath()
 	if err != nil {
 		return "", err
 	}
-	defer client.Close()
-	store := client.StorePath()
 	active, err := instance.Running(filepath.Join(filepath.Dir(store), "instance.lock"))
 	if err != nil {
 		return "", err
 	}
 	if active {
+		client, err := controlclient.New("", 3*time.Second)
+		if err != nil {
+			return "", err
+		}
+		defer client.Close()
 		raw, _, err := client.JSON(context.Background(), "GET", controlclient.BasePath+"/system", nil, "")
 		if err != nil {
 			return "", err
@@ -67,7 +70,9 @@ func pluginsDir(explicit string) (string, error) {
 	if _, err := os.Stat(store); errors.Is(err, os.ErrNotExist) {
 		path = os.Getenv("TORANA_CONFIG")
 		if path == "" {
-			path = "config.json"
+			// An unrelated project's config.json is not a Torana seed. Only
+			// consume a seed when the operator explicitly selects one.
+			return provider.DefaultPluginsDir, nil
 		}
 	} else if err != nil {
 		return "", err

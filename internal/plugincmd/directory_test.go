@@ -80,3 +80,21 @@ func TestPluginDirectoryFollowsRunningInstanceFromAnotherDirectory(t *testing.T)
 		t.Fatalf("directory=%q err=%v want=%q", got, err, want)
 	}
 }
+
+func TestPluginDirectoryIgnoresUnrelatedWorkingDirectoryConfig(t *testing.T) {
+	t.Chdir(t.TempDir())
+	t.Setenv("TORANA_DATA_DIR", t.TempDir())
+	t.Setenv("TORANA_PLUGINS_DIR", "")
+	t.Setenv("TORANA_CONFIG", "")
+	if err := os.WriteFile("config.json", []byte(`{"project":"not-torana"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := pluginsDir("")
+	if err != nil || got != provider.DefaultPluginsDir {
+		t.Fatalf("directory=%q err=%v want=%q", got, err, provider.DefaultPluginsDir)
+	}
+	t.Setenv("TORANA_CONFIG", filepath.Join(".", "config.json"))
+	if _, err := pluginsDir(""); err == nil {
+		t.Fatal("explicitly selected invalid Torana seed was ignored")
+	}
+}
