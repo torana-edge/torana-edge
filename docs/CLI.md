@@ -299,6 +299,27 @@ for the 8 KiB limit and what these logs may contain.
 ## Plugins: install is not approval, and approval is not enablement
 
 `plugin install`, `plugin list`, and `plugin remove` manage local files.
+
+Install a maintained plugin by name, or pin a published version:
+
+```bash
+torana plugin install pii
+torana plugin install pii@0.4.2
+```
+
+Name-based installation downloads a prebuilt release; no Git or Go is needed.
+Torana verifies file checksums, bundle contents and identity, then compares the
+computed bundle digest against the independently published site catalogue.
+It never approves permissions or enables the plugin.
+
+You can also pass an HTTPS release archive URL. Direct URLs verify companion
+checksums and the declared bundle digest, but have no independent catalogue
+anchor: verify the publisher and provenance yourself.
+
+Repository URLs and local directories still build source, using the plugin’s
+required toolchain. An existing local path takes precedence over a catalogue
+name. For maintained Go source, install Git and Go 1.26.6+; Rust source must be
+cloned, reviewed and built locally.
 `plugin status` and the commands below inspect or change the running instance,
 which may use a different plugin directory. `plugin status` reports that
 directory and distinguishes installed, enabled, loaded, stale, and missing

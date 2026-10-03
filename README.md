@@ -114,8 +114,9 @@ driving them from scripts or an agent.
 
 ## Add one plugin
 
-Plugins are installed from source. Install Git and Go 1.26.6+ before trying
-these Go plugins; the Torana binary itself does not need either tool.
+Install maintained plugins by name—no Git or Go needed. Torana verifies the
+release bundle against its checksums and independently published catalogue
+digest. You review its permissions before enabling it.
 
 Torana plugins run in the request and response path. With permissions you
 approve, they can inspect or change a request or response, block it, or call
@@ -148,7 +149,7 @@ First register that model server in Torana:
 Now install the plugin:
 
 ```bash
-torana plugin install https://github.com/torana-edge/torana-plugins/tree/main/plugins/pii
+torana plugin install pii
 ```
 
 Next, follow **Enable the plugin** below to select that provider for `pii`.
@@ -164,14 +165,14 @@ Choose either of these—no scanner setup needed:
 reported token usage to a private local log, without saving prompts or responses.
 
 ```bash
-torana plugin install https://github.com/torana-edge/torana-plugins/tree/main/plugins/usage_logger
+torana plugin install usage_logger
 ```
 
 **Or try `pii_guard`.** It catches high-confidence PII and common secret
 patterns without a model:
 
 ```bash
-torana plugin install https://github.com/torana-edge/torana-plugins/tree/main/plugins/pii_guard
+torana plugin install pii_guard
 ```
 
 `pii_guard` makes no model or network calls. Review its requested tool-result
