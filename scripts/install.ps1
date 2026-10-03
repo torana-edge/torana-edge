@@ -130,12 +130,20 @@ try {
     Write-Host "Installed Torana $Version to $destination"
     if (-not $NoModifyPath -and $env:LOCALAPPDATA -and $InstallDir -ieq (Join-Path $env:LOCALAPPDATA 'Torana\bin')) {
         try {
-            $userPath = [Environment]::GetEnvironmentVariable('PATH', 'User')
-            if (($userPath -split ';') -inotcontains $InstallDir) {
+            $environmentKey = [Microsoft.Win32.Registry]::CurrentUser.CreateSubKey('Environment')
+            try {
+            $userPath = $environmentKey.GetValue('Path', '', [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+            $expandedEntries = @($userPath -split ';' | ForEach-Object { [Environment]::ExpandEnvironmentVariables($_) })
+            if ($expandedEntries -inotcontains $InstallDir) {
                 $updatedPath = if ($userPath) { "$userPath;$InstallDir" } else { $InstallDir }
-                [Environment]::SetEnvironmentVariable('PATH', $updatedPath, 'User')
+                $environmentKey.SetValue('Path', $updatedPath, [Microsoft.Win32.RegistryValueKind]::ExpandString)
+                # Broadcast the environment change without rewriting the PATH value.
+                $notificationName = 'ToranaInstaller_' + [Guid]::NewGuid().ToString('N')
+                try { [Environment]::SetEnvironmentVariable($notificationName, '1', 'User') }
+                finally { [Environment]::SetEnvironmentVariable($notificationName, $null, 'User') }
                 Write-Host 'Added Torana to user PATH for future terminals.'
             }
+            } finally { $environmentKey.Dispose() }
             if (($env:PATH -split ';') -inotcontains $InstallDir) { $env:PATH = "$InstallDir;$env:PATH" }
         } catch {
             Write-Warning "Installed successfully, but could not update user PATH; add $InstallDir manually."

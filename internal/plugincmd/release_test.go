@@ -105,12 +105,34 @@ func TestPrebuiltInstallWithoutToolchain(t *testing.T) {
 	if err != nil || got != digest {
 		t.Fatalf("installed digest %s, error %v; want %s", got, err, digest)
 	}
+	// Even internally consistent release assets must match the separate registry.
+	release := pluginRelease{name: "demo", version: "0.1.0", id: "torana/demo", url: server.URL + "/demo-0.1.0.tar.gz", digest: "sha256:" + strings.Repeat("0", 64)}
+	if err := installRelease(context.Background(), releaseClient(server.Client().Transport), release, dest, io.Discard); err == nil {
+		t.Fatal("registry digest mismatch accepted")
+	}
+	release.digest = digest
+	if err := installRelease(context.Background(), releaseClient(server.Client().Transport), release, dest, io.Discard); err != nil {
+		t.Fatal(err)
+	}
 	if !strings.Contains(output.String(), "NOT running yet") {
 		t.Fatal("install did not preserve approval guidance")
 	}
 	entries, err := os.ReadDir(filepath.Join(dest, "demo"))
 	if err != nil || len(entries) != 4 {
 		t.Fatalf("only runtime bundle files should be installed: %v %v", entries, err)
+	}
+}
+
+func TestLocalDirectoryPrecedesRegistryName(t *testing.T) {
+	t.Chdir(t.TempDir())
+	if err := os.Mkdir("myplugin", 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if isReleaseSource("myplugin") {
+		t.Fatal("local source directory shadowed by registry")
+	}
+	if !isReleaseSource("otherplugin") {
+		t.Fatal("missing directory must resolve as registry name")
 	}
 }
 
@@ -186,7 +208,7 @@ func TestReleaseNetworkAndRegistry(t *testing.T) {
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/index":
-			_, _ = io.WriteString(w, `{"schema_version":1,"plugins":[{"id":"torana/demo","name":"demo","latest":"0.1.0"}]}`)
+			_, _ = fmt.Fprintf(w, `{"schema_version":1,"plugins":[{"id":"torana/demo","name":"demo","latest":"0.1.0","bundle_digests":{"0.1.0":"sha256:%s","0.2.0":"sha256:%s"}}]}`, strings.Repeat("a", 64), strings.Repeat("b", 64))
 		case "/duplicate":
 			_, _ = io.WriteString(w, `{"schema_version":1,"plugins":[{"id":"torana/demo","name":"demo","latest":"0.1.0"},{"id":"torana/demo","name":"demo","latest":"0.1.0"}]}`)
 		case "/redirect":
@@ -209,7 +231,7 @@ func TestReleaseNetworkAndRegistry(t *testing.T) {
 			t.Fatal("version pin ignored")
 		}
 	}
-	for _, arg := range []string{"unknown", "demo@bad", "http://example.test/demo-0.1.0.tar.gz", "https://user:pass@example.test/demo-0.1.0.tar.gz", "https://example.test/demo-bad.tar.gz"} {
+	for _, arg := range []string{"unknown", "demo@0.3.0", "demo@bad", "http://example.test/demo-0.1.0.tar.gz", "https://user:pass@example.test/demo-0.1.0.tar.gz", "https://example.test/demo-bad.tar.gz"} {
 		if _, err := resolveRelease(ctx, client, server.URL+"/index", arg); err == nil {
 			t.Fatalf("accepted %s", arg)
 		}

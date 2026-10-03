@@ -32,9 +32,13 @@ var releaseArchive = regexp.MustCompile(`^([a-z][a-z0-9_]*)-([0-9].*)\.tar\.gz$`
 
 type pluginRelease struct {
 	name, version, url, id string
+	digest                 string
 }
 
 func isReleaseSource(arg string) bool {
+	if _, err := os.Stat(arg); err == nil {
+		return false // Preserve existing local-source installation precedence.
+	}
 	name, _, _ := strings.Cut(arg, "@")
 	return releaseName.MatchString(name) || strings.HasSuffix(arg, ".tar.gz")
 }
@@ -113,9 +117,10 @@ func resolveRelease(ctx context.Context, client *http.Client, registryURL, arg s
 	var index struct {
 		SchemaVersion int `json:"schema_version"`
 		Plugins       []struct {
-			ID     string `json:"id"`
-			Name   string `json:"name"`
-			Latest string `json:"latest"`
+			ID            string            `json:"id"`
+			Name          string            `json:"name"`
+			Latest        string            `json:"latest"`
+			BundleDigests map[string]string `json:"bundle_digests"`
 		} `json:"plugins"`
 	}
 	if err := json.Unmarshal(data, &index); err != nil || index.SchemaVersion != 1 {
@@ -132,8 +137,14 @@ func resolveRelease(ctx context.Context, client *http.Client, registryURL, arg s
 		if !pinned {
 			version = entry.Latest
 		}
+		digest := entry.BundleDigests[version]
+		decoded, err := hex.DecodeString(strings.TrimPrefix(digest, "sha256:"))
+		if err != nil || len(decoded) != sha256.Size || !strings.HasPrefix(digest, "sha256:") {
+			return pluginRelease{}, fmt.Errorf("plugin %s@%s has no published registry digest; use a source path or verified release URL", name, version)
+		}
 		result = pluginRelease{name: name, version: version, id: entry.ID,
-			url: fmt.Sprintf("https://github.com/torana-edge/torana-plugins/releases/download/%s/%s-%s.tar.gz", url.PathEscape(name+"/v"+version), name, version)}
+			digest: "sha256:" + hex.EncodeToString(decoded),
+			url:    fmt.Sprintf("https://github.com/torana-edge/torana-plugins/releases/download/%s/%s-%s.tar.gz", url.PathEscape(name+"/v"+version), name, version)}
 	}
 	if result.name == "" {
 		return pluginRelease{}, fmt.Errorf("plugin %q is not in the registry; use its source path or release archive URL", name)
@@ -273,6 +284,9 @@ func installRelease(ctx context.Context, client *http.Client, release pluginRele
 	digest, err := unpackRelease(archive, stage)
 	if err != nil {
 		return err
+	}
+	if release.digest != "" && digest != release.digest {
+		return errors.New("prebuilt bundle digest does not match the independently published registry value; nothing installed")
 	}
 	bundle, err := plugin.ValidateBundleDir(stage)
 	if err != nil {
