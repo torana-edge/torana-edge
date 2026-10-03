@@ -50,6 +50,7 @@ func TestHandler(t *testing.T) {
 		{path: "/app.css", marker: "designed-as-app"},
 		{path: "/providers.js", marker: "ToranaProviders"},
 		{path: "/approval.js", marker: "ToranaApproval"},
+		{path: "/errors.js", marker: "ToranaErrors"},
 	} {
 		resp, err := http.Get(srv.URL + asset.path)
 		if err != nil {

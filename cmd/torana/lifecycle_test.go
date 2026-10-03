@@ -43,10 +43,8 @@ func TestBinaryBackgroundLifecycle(t *testing.T) {
 	// Deliberately persist a DIFFERENT port. Status from another shell must
 	// find the daemon's runtime override through its instance record.
 	cfg.Port = 1
-	cfg.Plugins.Dir = filepath.Join(root, "plugins")
-	if err := os.Mkdir(cfg.Plugins.Dir, 0o700); err != nil {
-		t.Fatal(err)
-	}
+	// Leave plugins.dir empty, as older pristine managed configurations did.
+	// Startup must repair it before publishing the live installation directory.
 	if err := provider.Save(filepath.Join(data, "config.json"), cfg); err != nil {
 		t.Fatal(err)
 	}
@@ -77,6 +75,20 @@ func TestBinaryBackgroundLifecycle(t *testing.T) {
 	var initial map[string]any
 	if err := json.Unmarshal(started, &initial); err != nil {
 		t.Fatalf("start not JSON: %s", started)
+	}
+	wantPlugins := filepath.Join(data, "plugins")
+	pluginStatus, err := run(false, "plugin", "status")
+	if err != nil {
+		t.Fatalf("plugin status: %v %s", err, pluginStatus)
+	}
+	var plugins struct {
+		Dir string `json:"dir"`
+	}
+	if err := json.Unmarshal(pluginStatus, &plugins); err != nil || plugins.Dir != wantPlugins {
+		t.Fatalf("host directory = %q, want %q (error %v)", plugins.Dir, wantPlugins, err)
+	}
+	if info, err := os.Stat(wantPlugins); err != nil || !info.IsDir() {
+		t.Fatalf("plugin watcher directory not created: %v", err)
 	}
 	for _, command := range []string{"status", "start"} {
 		out, err := run(false, command, "--json")

@@ -156,6 +156,35 @@ func TestResolveConfigMaterializesFreshInstall(t *testing.T) {
 	if _, err := os.Stat(storePath); err != nil {
 		t.Errorf("managed store was not materialized: %v", err)
 	}
+	want := filepath.Join(dir, "managed", "plugins")
+	if cfg.Plugins.Dir != want {
+		t.Fatalf("plugin directory = %q, want %q", cfg.Plugins.Dir, want)
+	}
+	persisted, err := Load(storePath)
+	if err != nil || persisted.Plugins.Dir != want {
+		t.Fatalf("persisted plugin directory = %q, error %v", persisted.Plugins.Dir, err)
+	}
+}
+
+func TestResolveConfigRepairsEmptyManagedPluginDirectory(t *testing.T) {
+	root := t.TempDir()
+	store := filepath.Join(root, "data", "config.json")
+	cfg := DefaultConfig()
+	if err := Save(store, cfg); err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := ResolveConfig(filepath.Join(root, "missing.json"), store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(root, "data", "plugins")
+	if resolved.Plugins.Dir != want {
+		t.Fatalf("plugin directory = %q, want %q", resolved.Plugins.Dir, want)
+	}
+	persisted, err := Load(store)
+	if err != nil || persisted.Plugins.Dir != want {
+		t.Fatalf("repair was not persisted: %q, error %v", persisted.Plugins.Dir, err)
+	}
 }
 
 // TestResolveConfigRejectsBrokenConfig is what main.go now aborts on: the

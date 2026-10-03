@@ -1181,6 +1181,23 @@ func ManagedStorePath() (string, error) {
 	return filepath.Join(dataDir, "config.json"), nil
 }
 
+// ManagedPluginsDir is the stable default for an instance, independent of cwd.
+func ManagedPluginsDir(storePath string) (string, error) {
+	return filepath.Abs(filepath.Join(filepath.Dir(storePath), "plugins"))
+}
+
+func resolvePluginDirectory(cfg *Config, storePath string) error {
+	if cfg.Plugins.Dir != "" {
+		return nil
+	}
+	dir, err := ManagedPluginsDir(storePath)
+	if err != nil {
+		return err
+	}
+	cfg.Plugins.Dir = dir
+	return nil
+}
+
 // ManagedStoreShadowsSeed reports whether an existing managed store differs
 // semantically from an existing seed file. Managed is ignored because Save
 // sets it while materializing the seed. Missing inputs do not constitute a
@@ -1209,6 +1226,12 @@ func ManagedStoreShadowsSeed(seedPath, storePath string) (bool, error) {
 	}
 	seed.Managed = false
 	store.Managed = false
+	if err := resolvePluginDirectory(&seed, storePath); err != nil {
+		return false, err
+	}
+	if err := resolvePluginDirectory(&store, storePath); err != nil {
+		return false, err
+	}
 	return !reflect.DeepEqual(seed, store), nil
 }
 
@@ -1219,7 +1242,18 @@ func ManagedStoreShadowsSeed(seedPath, storePath string) (bool, error) {
 // and returns the config. The seed file is never modified.
 func ResolveConfig(seedPath, storePath string) (Config, error) {
 	if _, err := os.Stat(storePath); err == nil {
-		return Load(storePath)
+		cfg, err := Load(storePath)
+		if err != nil || cfg.Plugins.Dir != "" {
+			return cfg, err
+		}
+		if err := resolvePluginDirectory(&cfg, storePath); err != nil {
+			return cfg, err
+		}
+		if err := Save(storePath, cfg); err != nil {
+			return cfg, err
+		}
+		cfg.Managed = true
+		return cfg, nil
 	} else if !os.IsNotExist(err) {
 		return Config{}, fmt.Errorf("checking managed store %q: %w", storePath, err)
 	}
@@ -1229,6 +1263,9 @@ func ResolveConfig(seedPath, storePath string) (Config, error) {
 		return cfg, fmt.Errorf("loading seed config %q: %w", seedPath, err)
 	}
 
+	if err := resolvePluginDirectory(&cfg, storePath); err != nil {
+		return cfg, err
+	}
 	if err := Save(storePath, cfg); err != nil {
 		return cfg, fmt.Errorf("materializing managed store %q: %w", storePath, err)
 	}

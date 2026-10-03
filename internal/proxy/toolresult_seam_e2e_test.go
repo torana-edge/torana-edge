@@ -88,10 +88,14 @@ func TestToolResultSeamRealHookE2E(t *testing.T) {
 	}
 
 	t.Run("change accepted with only the tool grant", func(t *testing.T) {
-		_, base := newServer([]string{"test-toolresult-helper"})
+		srv, base := newServer([]string{"test-toolresult-helper"})
 		status, _ := post(base, "change")
 		if status != http.StatusOK {
 			t.Fatalf("status = %d, want 200", status)
+		}
+		events := srv.feed.Snapshot()
+		if len(events) != 1 || events[0].Verdict != "transform" || events[0].Status != 200 {
+			t.Fatalf("accepted rewrite should be visible as a successful transformation: %+v", events)
 		}
 		var wire struct {
 			Messages []struct {
@@ -121,13 +125,17 @@ func TestToolResultSeamRealHookE2E(t *testing.T) {
 	})
 
 	t.Run("noop passes with tokens preserved", func(t *testing.T) {
-		_, base := newServer([]string{"test-toolresult-helper"})
+		srv, base := newServer([]string{"test-toolresult-helper"})
 		status, _ := post(base, "noop")
 		if status != http.StatusOK {
 			t.Fatalf("status = %d, want 200", status)
 		}
 		if !strings.Contains(lastBody, `"content":"before"`) {
 			t.Fatalf("the no-op must leave the original text: %s", lastBody)
+		}
+		events := srv.feed.Snapshot()
+		if len(events) != 1 || events[0].Verdict != "" {
+			t.Fatalf("pass-through must not claim a transformation: %+v", events)
 		}
 	})
 

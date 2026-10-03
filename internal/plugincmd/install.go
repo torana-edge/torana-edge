@@ -72,7 +72,7 @@ func pluginsDir(explicit string) (string, error) {
 		if path == "" {
 			// An unrelated project's config.json is not a Torana seed. Only
 			// consume a seed when the operator explicitly selects one.
-			return provider.DefaultPluginsDir, nil
+			return provider.ManagedPluginsDir(store)
 		}
 	} else if err != nil {
 		return "", err
@@ -84,7 +84,7 @@ func pluginsDir(explicit string) (string, error) {
 	if cfg.Plugins.Dir != "" {
 		return cfg.Plugins.Dir, nil
 	}
-	return provider.DefaultPluginsDir, nil
+	return provider.ManagedPluginsDir(store)
 }
 
 // source describes where a plugin is being installed from.
@@ -524,8 +524,9 @@ func installPlugin(args []string, stdout, stderr io.Writer) error {
 	}
 
 	fmt.Fprintf(stdout, "\n%d plugin(s) installed. They are NOT running yet.\n", len(installed))
-	_, _ = fmt.Fprintln(stdout, "Run torana status to find your instance's control-plane address.")
-	_, _ = fmt.Fprintln(stdout, "Open it, review what each installed plugin requests, and approve")
+	_, _ = fmt.Fprintln(stdout, "Run torana open to open your instance's control plane.")
+	_, _ = fmt.Fprintln(stdout, "If it is already open, click Reload to see newly installed plugins.")
+	_, _ = fmt.Fprintln(stdout, "Review what each installed plugin requests, and approve")
 	_, _ = fmt.Fprintln(stdout, "its digest. Approval is bound to that digest — rebuild it and you approve again.")
 	return nil
 }

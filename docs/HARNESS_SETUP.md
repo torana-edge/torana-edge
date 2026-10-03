@@ -138,15 +138,102 @@ instead of replacing the whole file.
 OAuth-backed provider extensions can have their own endpoint behavior: verify
 the selected provider rather than assuming every login uses the same URL.
 
+**A tested Chat Completions example.** With your DeepSeek key available as
+`DEEPSEEK_API_KEY`, run `torana endpoint deepseek` and append `/v1` to the result.
+Use that URL below. This is one tested provider, not a requirement to use
+DeepSeek—keep the model and credentials appropriate for your own endpoint.
+
+For pi, add this provider to `models.json` (preserve existing entries):
+
+```json
+{
+  "providers": {
+    "torana": {
+      "baseUrl": "<output-of-torana-endpoint-deepseek>/v1",
+      "api": "openai-completions",
+      "apiKey": "${DEEPSEEK_API_KEY}",
+      "models": [{
+        "id": "deepseek-v4-flash", "reasoning": false, "input": ["text"],
+        "contextWindow": 131072, "maxTokens": 1024,
+        "compat": {"supportsStore": false, "supportsDeveloperRole": false, "supportsReasoningEffort": false, "maxTokensField": "max_tokens"}
+      }]
+    }
+  }
+}
+```
+
+For oh-my-pi, the equivalent entry in `models.yml` is:
+
+```yaml
+providers:
+  torana:
+    baseUrl: <output-of-torana-endpoint-deepseek>/v1
+    api: openai-completions
+    apiKey: DEEPSEEK_API_KEY
+    models:
+      - id: deepseek-v4-flash
+        reasoning: false
+        input: [text]
+        contextWindow: 131072
+        maxTokens: 1024
+        compat:
+          supportsStore: false
+          supportsDeveloperRole: false
+          supportsReasoningEffort: false
+          maxTokensField: max_tokens
+```
+
+Then launch `pi --provider torana --model deepseek-v4-flash` or
+`omp --provider torana --model deepseek-v4-flash`. The output limit above keeps
+the smoke test small; raise it for your normal workflow. The `compat` settings
+describe this endpoint, not every provider.
+
 See [pi’s model configuration](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/models.md)
-and [oh-my-pi’s provider guide](https://github.com/can1357/oh-my-pi/blob/main/docs/providers.md).
-Trying either with Torana? Share your provider and setup in an
-[issue](https://github.com/torana-edge/torana-edge/issues)—working recipes and
-rough edges are both useful.
+and [oh-my-pi’s model configuration](https://github.com/can1357/oh-my-pi/blob/main/docs/models.md).
+
+## OpenCode
+
+Add a custom provider to your existing `opencode.json`, preserving other settings:
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "provider": {
+    "torana": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "Torana",
+      "options": {
+        "baseURL": "<output-of-torana-endpoint-deepseek>/v1",
+        "apiKey": "{env:DEEPSEEK_API_KEY}"
+      },
+      "models": {"deepseek-v4-flash": {"name": "DeepSeek Flash"}}
+    }
+  }
+}
+```
+
+Get the URL with `torana endpoint deepseek`; use the selected provider's model
+and key. Run `opencode -m torana/deepseek-v4-flash`, or a bounded task with
+`opencode run -m torana/deepseek-v4-flash 'Read hello.txt and report its contents'`.
+Keep the harness's normal tool permissions. See
+[OpenCode configuration](https://opencode.ai/docs/config/) for configuration
+locations and environment-variable substitution.
 
 ## Live checks and what they prove
 
 These file-read and tool-follow-up checks use native routes:
+
+The minimum live walkthrough set is **Codex, Claude Code, pi, oh-my-pi, and
+OpenCode**. On October 3, 2026, all five completed a benign file read and a
+synthetic-key read with `usage_logger` and `pii_guard` enabled. The second read
+reached the model as a recoverable withholding explanation, not an HTTP error.
+Claude used Haiku with its existing login; Codex used Luna with its ChatGPT
+login over HTTP/SSE; pi, oh-my-pi, and OpenCode used DeepSeek V4 Flash over Chat
+Completions with a caller-supplied API key. Cache-read usage was observed for all
+five during these checks. That is evidence of cache hits, not a guarantee that
+every possible prompt prefix is unchanged. Harness logs can still contain the
+original local tool result: the proxy changes what is sent upstream, not the
+harness's local history.
 
 | Harness | Model | Observed result |
 | --- | --- | --- |
