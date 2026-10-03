@@ -2912,7 +2912,9 @@ func New(cfg Config) (*Server, error) {
 			}
 			flusher.Flush()
 		}
-		// A quiet proxy must still complete the SSE handshake immediately.
+		// Send a comment as well as headers: browsers can wait for the first
+		// body bytes before opening a quiet EventSource. This is not a feed event.
+		fmt.Fprint(w, ": connected\n\n")
 		flusher.Flush()
 
 		ctx := r.Context()
