@@ -1,6 +1,7 @@
 package plugincmd
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,7 +12,10 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
+	"github.com/torana-edge/torana-edge/internal/controlclient"
+	"github.com/torana-edge/torana-edge/internal/instance"
 	"github.com/torana-edge/torana-edge/internal/plugin"
 	"github.com/torana-edge/torana-edge/internal/provider"
 )
@@ -27,14 +31,60 @@ const (
 	maxSourceBytes = 100 << 20
 )
 
-// pluginsDir resolves where bundles are installed. Mirrors the server's
-// plugins.dir default so a plugin installed by the CLI is the one the proxy
-// discovers.
-func pluginsDir() string {
-	if v := os.Getenv("TORANA_PLUGINS_DIR"); v != "" {
-		return v
+// pluginsDir resolves bundles against the running instance, then its managed
+// configuration or seed. Explicit directory overrides still take precedence.
+func pluginsDir(explicit string) (string, error) {
+	if explicit != "" {
+		return explicit, nil
 	}
-	return provider.DefaultPluginsDir
+	if v := os.Getenv("TORANA_PLUGINS_DIR"); v != "" {
+		return v, nil
+	}
+	store, err := controlclient.DiscoverStorePath()
+	if err != nil {
+		return "", err
+	}
+	active, err := instance.Running(filepath.Join(filepath.Dir(store), "instance.lock"))
+	if err != nil {
+		return "", err
+	}
+	if active {
+		client, err := controlclient.New("", 3*time.Second)
+		if err != nil {
+			return "", err
+		}
+		defer client.Close()
+		raw, _, err := client.JSON(context.Background(), "GET", controlclient.BasePath+"/system", nil, "")
+		if err != nil {
+			return "", err
+		}
+		var status struct {
+			Directory string `json:"plugin_directory"`
+		}
+		if err := json.Unmarshal(raw, &status); err != nil || !filepath.IsAbs(status.Directory) {
+			return "", errors.New("running Torana returned an invalid plugin directory")
+		}
+		return status.Directory, nil
+	}
+	path := store
+	if _, err := os.Stat(store); errors.Is(err, os.ErrNotExist) {
+		path = os.Getenv("TORANA_CONFIG")
+		if path == "" {
+			// An unrelated project's config.json is not a Torana seed. Only
+			// consume a seed when the operator explicitly selects one.
+			return provider.DefaultPluginsDir, nil
+		}
+	} else if err != nil {
+		return "", err
+	}
+	cfg, err := provider.Load(path)
+	if err != nil {
+		return "", err
+	}
+	if cfg.Plugins.Dir != "" {
+		return cfg.Plugins.Dir, nil
+	}
+	return provider.DefaultPluginsDir, nil
 }
 
 // source describes where a plugin is being installed from.
@@ -299,7 +349,7 @@ func copyTree(src, dst string) error {
 
 func installPlugin(args []string, stdout, stderr io.Writer) error {
 	var sources []string
-	dest := pluginsDir()
+	dest := ""
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
 		case "--dir":
@@ -317,6 +367,10 @@ func installPlugin(args []string, stdout, stderr io.Writer) error {
 	}
 	if len(sources) == 0 {
 		return errors.New("nothing to install — pass at least one plugin source")
+	}
+	dest, err := pluginsDir(dest)
+	if err != nil {
+		return err
 	}
 	if err := os.MkdirAll(dest, 0o755); err != nil {
 		return fmt.Errorf("create plugins dir: %w", err)
@@ -528,9 +582,13 @@ func activateBundle(installStage, target string) error {
 }
 
 func listPlugins(args []string, stdout io.Writer) error {
-	dest := pluginsDir()
+	dest := ""
 	if len(args) >= 2 && args[0] == "--dir" {
 		dest = args[1]
+	}
+	dest, err := pluginsDir(dest)
+	if err != nil {
+		return err
 	}
 	entries, err := os.ReadDir(dest)
 	if errors.Is(err, os.ErrNotExist) {
@@ -584,7 +642,7 @@ func listPlugins(args []string, stdout io.Writer) error {
 }
 
 func removePlugin(args []string, stdout io.Writer) error {
-	dest := pluginsDir()
+	dest := ""
 	var names []string
 	for i := 0; i < len(args); i++ {
 		if args[i] == "--dir" {
@@ -599,6 +657,10 @@ func removePlugin(args []string, stdout io.Writer) error {
 	}
 	if len(names) == 0 {
 		return errors.New("a plugin name is required")
+	}
+	dest, err := pluginsDir(dest)
+	if err != nil {
+		return err
 	}
 	for _, name := range names {
 		if name == "" || strings.ContainsAny(name, `/\`) || name == "." || name == ".." {

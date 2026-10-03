@@ -28,6 +28,11 @@ func (s *Server) systemStatus(w http.ResponseWriter, r *http.Request) {
 		writeAgentError(w, http.StatusInternalServerError, "status_unavailable", "cannot resolve configuration path")
 		return
 	}
+	pluginDirectory, err := filepath.Abs(cfg.Providers.Plugins.Dir)
+	if err != nil {
+		writeAgentError(w, http.StatusInternalServerError, "status_unavailable", "cannot resolve plugin directory")
+		return
+	}
 	state := "running"
 	if s.pluginReloadDegraded.Load() || s.pluginState != nil && s.pluginState.ReadOnly() {
 		state = "degraded"
@@ -41,7 +46,7 @@ func (s *Server) systemStatus(w http.ResponseWriter, r *http.Request) {
 		"service": "torana-edge", "instance_id": s.instanceID, "pid": os.Getpid(),
 		"version": cfg.HostVersion, "status": state, "started_at": s.startedAt,
 		"uptime_seconds": int64(time.Since(s.startedAt).Seconds()),
-		"config_path":    configPath, "port": cfg.Providers.Port, "plugin_directory": cfg.Providers.Plugins.Dir,
+		"config_path":    configPath, "port": cfg.Providers.Port, "plugin_directory": pluginDirectory,
 	})
 }
 

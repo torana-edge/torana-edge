@@ -105,6 +105,11 @@ func (c *Client) Address() string { return c.base.String() }
 // managed store. Explicit --addr clients are intentionally not store-bound.
 func (c *Client) StorePath() string { return c.storePath }
 
+// DiscoverStorePath selects the same managed or active checkout-local store as
+// live clients, without resolving a port or reading a working-directory seed.
+// Disk-only commands can use this while Torana is stopped.
+func DiscoverStorePath() (string, error) { return liveStorePath() }
+
 // DefaultAddress reads configuration without materializing a managed store.
 // A typo or unreadable configuration is an error, not permission to administer
 // an unrelated server at the default port. --addr bypasses this lookup.
