@@ -27,9 +27,9 @@ import (
 // callback stub. Only synthetic tool output reaches an explicitly chosen local
 // scanner. The primary provider and all approval state are test-owned.
 func TestPIILocalScannerProductionEgress(t *testing.T) {
-	scannerURL := os.Getenv("TORANA_TEST_LOCAL_SCANNER_URL")
+	scannerURL := os.Getenv("TORANA_LOCAL_SCANNER_URL")
 	if scannerURL == "" {
-		t.Skip("opt-in local model check: set TORANA_TEST_LOCAL_SCANNER_URL and TORANA_TEST_LOCAL_SCANNER_MODEL")
+		t.Skip("opt-in local model check: set TORANA_LOCAL_SCANNER_URL and TORANA_LOCAL_SCANNER_MODEL")
 	}
 	target, err := url.Parse(scannerURL)
 	if err != nil || target.Scheme != "http" || target.User != nil || target.RawQuery != "" || target.Fragment != "" || (target.Path != "" && target.Path != "/") {
@@ -39,9 +39,9 @@ func TestPIILocalScannerProductionEgress(t *testing.T) {
 	if target.Hostname() != "localhost" && (ip == nil || !ip.IsLoopback()) {
 		t.Fatal("local scanner must be loopback; synthetic scan never targets a hosted model")
 	}
-	model := os.Getenv("TORANA_TEST_LOCAL_SCANNER_MODEL")
+	model := os.Getenv("TORANA_LOCAL_SCANNER_MODEL")
 	if model == "" {
-		t.Fatal("TORANA_TEST_LOCAL_SCANNER_MODEL is required")
+		t.Fatal("TORANA_LOCAL_SCANNER_MODEL is required")
 	}
 	for _, shape := range []bridge.Protocol{bridge.Anthropic, bridge.OpenAIChat, bridge.OpenAIResponses, bridge.Gemini, bridge.GeminiCodeAssist} {
 		t.Run(string(shape), func(t *testing.T) { testPIILocalScannerShape(t, target, model, shape) })

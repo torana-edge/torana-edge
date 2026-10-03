@@ -233,6 +233,10 @@ func TestLaunchPIIModelVerdictReplay(t *testing.T) {
 			t.Fatal("scanner did not receive tool output")
 		}
 		if endpoint := os.Getenv("TORANA_LOCAL_SCANNER_URL"); endpoint != "" {
+			model := os.Getenv("TORANA_LOCAL_SCANNER_MODEL")
+			if model == "" {
+				t.Fatal("TORANA_LOCAL_SCANNER_MODEL is required")
+			}
 			messages := []map[string]string{}
 			for _, message := range args.Messages {
 				var content strings.Builder
@@ -241,7 +245,7 @@ func TestLaunchPIIModelVerdictReplay(t *testing.T) {
 				}
 				messages = append(messages, map[string]string{"role": message.Role, "content": content.String()})
 			}
-			body, err := json.Marshal(map[string]any{"model": "qwen25-3b", "messages": messages, "max_tokens": args.GetMaxTokens(), "temperature": 0, "response_format": map[string]any{"type": "json_schema", "json_schema": map[string]any{"name": args.OutputFormat.Name, "strict": true, "schema": json.RawMessage(args.OutputFormat.SchemaJson)}}})
+			body, err := json.Marshal(map[string]any{"model": model, "messages": messages, "max_tokens": args.GetMaxTokens(), "temperature": 0, "response_format": map[string]any{"type": "json_schema", "json_schema": map[string]any{"name": args.OutputFormat.Name, "strict": true, "schema": json.RawMessage(args.OutputFormat.SchemaJson)}}})
 			if err != nil {
 				t.Fatal(err)
 			}
