@@ -5,14 +5,15 @@ Install an official Torana Edge release on Windows.
 .DESCRIPTION
 Defaults to the latest published release and $env:LOCALAPPDATA\Torana\bin.
 TORANA_VERSION and TORANA_INSTALL_DIR provide defaults. No administrator access,
-profile/PATH edits, service startup, or plugin installation. Requires curl.exe
-(included with supported current Windows versions). Website activation waits
-for the first published Edge tag; see docs/RELEASE_INSTALLERS.md.
+service startup, or plugin installation. The default install sets up user PATH;
+custom directories leave it unchanged. Use -NoModifyPath to opt out. Requires
+curl.exe (included with supported current Windows versions).
 #>
 [CmdletBinding()]
 param(
     [string]$Version = $env:TORANA_VERSION,
-    [string]$InstallDir = $env:TORANA_INSTALL_DIR
+    [string]$InstallDir = $env:TORANA_INSTALL_DIR,
+    [switch]$NoModifyPath
 )
 
 Set-StrictMode -Version Latest
@@ -28,7 +29,7 @@ function Invoke-ToranaDownload {
         --fail --silent --show-error --location --retry 2 `
         --connect-timeout 15 --max-time 300 @CurlArguments
     if ($LASTEXITCODE -ne 0) {
-        throw "Download failed (curl exit $LASTEXITCODE). The release or asset may not be published yet; check GitHub releases. Before the first Edge release, build from source."
+        throw "Download failed (curl exit $LASTEXITCODE). Check the selected version and assets on GitHub releases."
     }
     return $result
 }
@@ -127,6 +128,27 @@ try {
         [IO.File]::Move($staged, $destination)
     }
     Write-Host "Installed Torana $Version to $destination"
+    if (-not $NoModifyPath -and $env:LOCALAPPDATA -and $InstallDir -ieq (Join-Path $env:LOCALAPPDATA 'Torana\bin')) {
+        try {
+            $environmentKey = [Microsoft.Win32.Registry]::CurrentUser.CreateSubKey('Environment')
+            try {
+            $userPath = $environmentKey.GetValue('Path', '', [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+            $expandedEntries = @($userPath -split ';' | ForEach-Object { [Environment]::ExpandEnvironmentVariables($_) })
+            if ($expandedEntries -inotcontains $InstallDir) {
+                $updatedPath = if ($userPath) { "$userPath;$InstallDir" } else { $InstallDir }
+                $environmentKey.SetValue('Path', $updatedPath, [Microsoft.Win32.RegistryValueKind]::ExpandString)
+                # Broadcast the environment change without rewriting the PATH value.
+                $notificationName = 'ToranaInstaller_' + [Guid]::NewGuid().ToString('N')
+                try { [Environment]::SetEnvironmentVariable($notificationName, '1', 'User') }
+                finally { [Environment]::SetEnvironmentVariable($notificationName, $null, 'User') }
+                Write-Host 'Added Torana to user PATH for future terminals.'
+            }
+            } finally { $environmentKey.Dispose() }
+            if (($env:PATH -split ';') -inotcontains $InstallDir) { $env:PATH = "$InstallDir;$env:PATH" }
+        } catch {
+            Write-Warning "Installed successfully, but could not update user PATH; add $InstallDir manually."
+        }
+    }
     if (($env:PATH -split ';') -icontains $InstallDir) {
         Write-Host 'Run: torana version'
     } else {

@@ -29,34 +29,32 @@ not mean every configured destination is local.
 
 ## Quick start
 
-Install **v0.1.0** on macOS or Linux:
+Install Torana on macOS or Linux. The default installer adds `~/.local/bin`
+to your shell profile if needed; use `sh -s -- --no-modify-path` to skip:
 
 ```bash
-curl -fsSL https://torana.sh/install.sh | sh -s -- --version 0.1.0
-export PATH="$HOME/.local/bin:$PATH"
-torana version
+curl -fsSL https://torana.sh/install.sh | sh
 ```
 
 <details>
 <summary>Windows (PowerShell)</summary>
 
+Adds Torana to your user PATH. Pass `-NoModifyPath` to the installer to skip.
+
 ```powershell
 $installer = Join-Path $env:TEMP ("torana-install-" + [guid]::NewGuid() + ".ps1")
 Invoke-WebRequest https://torana.sh/install.ps1 -OutFile $installer
-& $installer -Version 0.1.0
+& $installer
 Remove-Item -LiteralPath $installer
-$env:PATH = "$env:LOCALAPPDATA\Torana\bin;$env:PATH"
-torana version
 ```
 
 </details>
 
 The installer selects your OS and CPU architecture and verifies the release's
-SHA-256 checksum. It does not change your shell profile or start Torana.
-The PATH command above applies to this terminal; add the install directory to
-your user PATH to use `torana` in future terminals.
-[Inspect the installers](https://github.com/torana-edge/torana-edge/tree/v0.1.0/scripts)
-or [download a binary directly](https://github.com/torana-edge/torana-edge/releases/tag/v0.1.0).
+SHA-256 checksum. It does not start Torana. Follow its PATH guidance for your
+current terminal; future terminals pick up the saved PATH automatically.
+[Inspect the installers](https://github.com/torana-edge/torana-edge/tree/main/scripts)
+or [download a binary directly](https://github.com/torana-edge/torana-edge/releases/latest).
 No Git or Go is needed to run the proxy. To build it yourself, see
 [Contributing](CONTRIBUTING.md#getting-a-build).
 The [full quickstart](docs/QUICKSTART.md) includes a first request and harness setup.

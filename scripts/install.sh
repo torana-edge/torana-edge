@@ -1,6 +1,5 @@
 #!/bin/sh
-# Installs an official Torana Edge release. Website activation waits for the
-# first published Edge tag; see docs/RELEASE_INSTALLERS.md.
+# Installs an official Torana Edge release and sets up the default user PATH.
 set -eu
 
 fail() { printf 'torana installer: %s\n' "$*" >&2; exit 1; }
@@ -11,12 +10,15 @@ Usage: sh install.sh [--version VERSION] [--install-dir DIRECTORY]
 Installs the latest published release by default. VERSION accepts v1.2.3 or
 1.2.3, including prereleases. DIRECTORY must be absolute; the default is
 $HOME/.local/bin. TORANA_VERSION and TORANA_INSTALL_DIR set the same defaults.
-No sudo, shell profile changes, service startup, or plugin installation.
+The default install adds ~/.local/bin to your shell profile when needed.
+No sudo, service startup, or plugin installation. Custom install directories
+leave your profile unchanged. Use --no-modify-path to opt out of profile setup.
 USAGE
 }
 
 version=${TORANA_VERSION:-}
 install_dir=${TORANA_INSTALL_DIR:-}
+modify_path=yes
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --version|--install-dir)
@@ -31,6 +33,7 @@ while [ "$#" -gt 0 ]; do
             shift 2
             ;;
         -h|--help) usage; exit 0 ;;
+        --no-modify-path) modify_path=no; shift ;;
         *) fail "unknown argument: $1 (see --help)" ;;
     esac
 done
@@ -74,7 +77,7 @@ curl_https() {
 }
 if [ -z "$version" ]; then
     if ! resolved=$(curl_https --output /dev/null --write-out '%{url_effective}' "$release_url/latest"); then
-        fail 'no published release could be resolved; check GitHub releases or build from source (before the first Edge release, no binaries exist)'
+        fail 'no published release could be resolved; check GitHub releases or download a binary directly'
     fi
     case "$resolved" in
         "$release_url/tag/"*) version=${resolved##*/} ;;
@@ -143,5 +146,53 @@ mv -f "$stage_dir/torana" "$destination" || fail "cannot replace $destination; c
 printf 'Installed Torana %s to %s\n' "$version" "$destination"
 case ":${PATH:-}:" in
     *:"$install_dir":*) printf 'Run: torana version\n' ;;
-    *) printf 'Add this directory to your shell PATH, then run torana version:\n  %s\n' "$install_dir" ;;
+    *)
+        # A child shell cannot update the caller's PATH. Persist the default
+        # location without executing anyone's startup file in this installer.
+        if [ "$modify_path" = yes ] && [ "$install_dir" = "${HOME:-}/.local/bin" ]; then
+            shell_name=${SHELL:-sh}
+            shell_name=${shell_name##*/}
+            # Preserve variables literally for expansion by the user's next shell.
+            # shellcheck disable=SC2016
+            case "$shell_name" in
+                zsh)
+                    profile=${ZDOTDIR:-$HOME}/.zshrc
+                    path_line='export PATH="$HOME/.local/bin:$PATH"'
+                    ;;
+                bash)
+                    if [ "$os" = darwin ]; then
+                        if [ -f "$HOME/.bash_profile" ]; then profile=$HOME/.bash_profile
+                        elif [ -f "$HOME/.bash_login" ]; then profile=$HOME/.bash_login
+                        elif [ -f "$HOME/.profile" ]; then profile=$HOME/.profile
+                        else profile=$HOME/.bash_profile; fi
+                    else profile=$HOME/.bashrc; fi
+                    path_line='export PATH="$HOME/.local/bin:$PATH"'
+                    ;;
+                fish)
+                    profile=${XDG_CONFIG_HOME:-$HOME/.config}/fish/config.fish
+                    path_line='fish_add_path "$HOME/.local/bin"'
+                    ;;
+                sh|dash|ksh|'')
+                    profile=$HOME/.profile
+                    path_line='export PATH="$HOME/.local/bin:$PATH"'
+                    ;;
+                *) profile=''; path_line='' ;;
+            esac
+            if [ -n "$profile" ]; then
+                if ! grep -Fqx "$path_line" "$profile" 2>/dev/null; then
+                    if mkdir -p "$(dirname "$profile")" && printf '\n# Torana PATH\n%s\n' "$path_line" >>"$profile"; then
+                        printf 'Added PATH setup to %s.\n' "$profile"
+                    else
+                        printf 'Could not update %s; add ~/.local/bin to PATH manually.\n' "$profile" >&2
+                    fi
+                fi
+                printf 'PATH setup is ready. Open a new terminal, then run: torana version\n'
+                printf 'For this terminal now, run: %s\n' "$path_line"
+            else
+                printf 'Add ~/.local/bin to your shell PATH, then run torana version.\n'
+            fi
+        else
+            printf 'Add this directory to your shell PATH, then run torana version:\n  %s\n' "$install_dir"
+        fi
+        ;;
 esac
