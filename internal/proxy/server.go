@@ -395,8 +395,8 @@ type reqState struct {
 	Synthetic bool
 	// Verdict is the control-plane outcome applied by the plugin pipeline:
 	// "block" (env.block_request), "respond" (env.respond_request),
-	// "route" (env.route_request). Empty when no pipeline is loaded or no
-	// veto/redirect was applied.
+	// "route" (env.route_request), or "transform" (accepted request rewrite).
+	// Empty when the pipeline passes the request without a verdict or rewrite.
 	Verdict string
 	// VerdictPlugin names the plugin that issued Verdict. v1 carried verdicts
 	// as anonymous ToranaMeta keys, so an operator seeing a blocked request
@@ -1389,6 +1389,12 @@ func New(cfg Config) (*Server, error) {
 				} else if modified != nil {
 					chat = modified
 					wireChanged = wireChanged || pluginChanged
+					if pluginChanged {
+						// An accepted rewrite is not an HTTP block. Make it
+						// visible without inspecting or logging sensitive text.
+						// Explicit block/respond/route verdicts below take precedence.
+						rs.Verdict = "transform"
+					}
 				}
 				// Defense in depth: never let credentials linger in meta
 				// past the request hook (format adapters don't serialize

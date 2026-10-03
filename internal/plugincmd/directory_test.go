@@ -25,7 +25,7 @@ func TestPluginDirectoryResolution(t *testing.T) {
 			t.Fatalf("directory=%q err=%v want=%q", got, err, want)
 		}
 	}
-	check("", provider.DefaultPluginsDir)
+	check("", filepath.Join(root, "plugins"))
 	if _, err := os.Stat(filepath.Join(root, "config.json")); !os.IsNotExist(err) {
 		t.Fatalf("read-only directory lookup materialized config: %v", err)
 	}
@@ -90,8 +90,9 @@ func TestPluginDirectoryIgnoresUnrelatedWorkingDirectoryConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 	got, err := pluginsDir("")
-	if err != nil || got != provider.DefaultPluginsDir {
-		t.Fatalf("directory=%q err=%v want=%q", got, err, provider.DefaultPluginsDir)
+	want := filepath.Join(os.Getenv("TORANA_DATA_DIR"), "plugins")
+	if err != nil || got != want {
+		t.Fatalf("directory=%q err=%v want=%q", got, err, want)
 	}
 	t.Setenv("TORANA_CONFIG", filepath.Join(".", "config.json"))
 	if _, err := pluginsDir(""); err == nil {

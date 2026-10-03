@@ -121,7 +121,7 @@ func TestAuditRecordsInferenceAndMalformedButNeverAuxiliary(t *testing.T) {
 		valid.InitialModel != "gpt-test" || valid.Model != "gpt-test" || valid.Status != http.StatusOK ||
 		valid.IngressBytes != int64(len(inferenceBody)) || valid.UpstreamRequestBytes != inferenceBytes.Load() ||
 		valid.UpstreamRequestBytes == valid.IngressBytes || !reflect.DeepEqual(valid.Plugins, []string{"test-mutator"}) ||
-		valid.Verdict != "" || valid.ErrorCode != "" {
+		valid.Verdict != "transform" || valid.ErrorCode != "" {
 		t.Fatalf("valid audit record = %#v", valid)
 	}
 	if len(valid.ToolCalls) != 1 || valid.ToolCalls[0] != (auditlog.ToolCall{
