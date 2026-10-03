@@ -135,8 +135,11 @@ configuration while believing you are testing a changed seed.
 
 ## Add one plugin
 
-These Go plugins install from source, so you need Git and Go 1.26.6+ for this
-step. The released Torana binary does not require either tool.
+Maintained plugins install by name from verified release bundles. No Git or
+Go is needed. Installation does not approve permissions or enable a plugin.
+
+Name-based installs require Torana 0.1.1 or newer. Already on 0.1.0?
+Re-run the installer at the start of this guide to upgrade.
 
 The empty plugin order is intentional: discovered plugins are not implicitly
 trusted or enabled. After the plugin-free request above succeeds, leave Torana
@@ -157,7 +160,7 @@ Use Ollama or another OpenAI-compatible local server; see
 [Local models](LOCAL_MODELS.md) if you need setup guidance.
 
 ```bash
-torana plugin install https://github.com/torana-edge/torana-plugins/tree/main/plugins/pii
+torana plugin install pii
 torana plugin list
 ```
 
@@ -189,14 +192,14 @@ Choose either option—neither needs a scanner model:
 reported token usage locally, without saving prompts or response contents.
 
 ```bash
-torana plugin install https://github.com/torana-edge/torana-plugins/tree/main/plugins/usage_logger
+torana plugin install usage_logger
 ```
 
 **Or try pii_guard.** It checks high-confidence PII and common secret patterns
 deterministically, without a model or network call.
 
 ```bash
-torana plugin install https://github.com/torana-edge/torana-plugins/tree/main/plugins/pii_guard
+torana plugin install pii_guard
 ```
 
 The
