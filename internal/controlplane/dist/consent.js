@@ -29,7 +29,7 @@ globalThis.ToranaConsent = (() => {
     try {
       const data = await request(actionPath(kind, id, action), {conversation_id: conversation});
       const result = data.execution || data;
-      showAlert(result.summary || (action === 'accept' ? 'Choice recorded. Switch models in your harness if the suggestion recommends one.' : 'Choice recorded.'), false);
+      showAlert(result.summary || 'Choice recorded.', false);
       await loadSelected();
     } catch (error) {
       showAlert(error.message);
