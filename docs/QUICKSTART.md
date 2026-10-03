@@ -138,6 +138,9 @@ configuration while believing you are testing a changed seed.
 Maintained plugins install by name from verified release bundles. No Git or
 Go is needed. Installation does not approve permissions or enable a plugin.
 
+Name-based installs require Torana 0.1.1 or newer. Already on 0.1.0?
+Re-run the installer at the start of this guide to upgrade.
+
 The empty plugin order is intentional: discovered plugins are not implicitly
 trusted or enabled. After the plugin-free request above succeeds, leave Torana
 running and choose one plugin. The watcher discovers the new bundle without

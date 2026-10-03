@@ -118,6 +118,9 @@ Install maintained plugins by name—no Git or Go needed. Torana verifies the
 release bundle against its checksums and independently published catalogue
 digest. You review its permissions before enabling it.
 
+Name-based installs require Torana 0.1.1 or newer. Already on 0.1.0?
+Re-run the installer above to upgrade.
+
 Torana plugins run in the request and response path. With permissions you
 approve, they can inspect or change a request or response, block it, or call
 another endpoint before the workflow continues. That endpoint can be a local
