@@ -1,31 +1,17 @@
 # <img src="./assets/logo/torana-color.svg" width="40" align="absmiddle" /> Torana Edge
 
-**Your coding tools. Your models. One place to make them work your way.**
+**Your coding agent. Now programmable.**
 
-Torana is a local-first, programmable reverse proxy for AI coding agents.
-Put it between your harness and model provider to observe requests, apply
-policy, or transform traffic with plugins—without tying that work to one harness.
+Hook into every step between your agent (Claude Code, Codex, Gemini or any
+other) and the model: rewrite requests, swap models, transform streams, and add
+your own rules with sandboxed plugins. It runs locally, with no account.
+
+[![Release](https://img.shields.io/github/v/release/torana-edge/torana-edge)](https://github.com/torana-edge/torana-edge/releases/latest)
+[![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
+[![Works with any coding agent](https://img.shields.io/badge/works%20with-any%20coding%20agent-2dd4bf)](docs/HARNESS_SETUP.md)
 
 [Get started](docs/QUICKSTART.md) · [Browse plugins](https://torana.sh/plugins/) ·
 [How it works](https://torana.sh/how-it-works/) · [Documentation](docs/README.md)
-
-## What you can do
-
-- **See your traffic.** Inspect requests, usage and plugin activity from the
-  terminal or the local Web UI.
-- **Make your own rules.** Install community source or write a Go/Rust WASM
-  plugin for tool policy, metrics, redaction or a workflow-specific transformation.
-- **Reuse your plugins.** Plugins work on one shared request/response format
-  across supported OpenAI, Anthropic and Gemini APIs.
-- **Connect different APIs.** Optional [protocol bridges](docs/PROTOCOL_BRIDGES.md)
-  translate supported features between a client and a backend. No plugin needed.
-- **Stay in control.** Choose each plugin, inspect its exact build, and approve
-  its permissions and resource budgets before enabling it.
-
-Torana runs on your machine, with no Torana account or hosted control service.
-Requests still go to the model endpoint you configure. Approved plugins can
-also use explicitly bound model services or HTTP endpoints; local-first does
-not mean every configured destination is local.
 
 ## Quick start
 
@@ -265,6 +251,38 @@ PII checks, schema adaptation and optional compaction. Compaction is a plugin
 use case, not a promise of savings:
 [read the measured results](https://github.com/torana-edge/torana-plugins/blob/main/plugins/compactor/DEEPSEEK_RESULTS.md).
 
+## Every step you can hook
+
+Plugins run between your agent and the model. They don't intercept local file
+access, shell commands or your harness's own permission prompts.
+
+| Step | What a plugin can do |
+|---|---|
+| Before the request leaves | Rewrite messages and system prompts, add, remove or replace tools, edit tool results, set cache markers, route to a different model or provider, or block the request |
+| While it streams back | Transform streamed tokens and tool-call deltas |
+| After the response | Record the response, usage and cost, or suggest a model switch |
+| Between requests | Run background work such as cache warming |
+| From the agent itself | Expose plugin tools your agent can call over MCP |
+| Across APIs | Bridge Anthropic, OpenAI and Gemini wire formats with [protocol bridges](docs/PROTOCOL_BRIDGES.md) |
+
+### What that gives you
+
+- **See your traffic.** Inspect requests, usage and plugin activity from the
+  terminal or the local Web UI.
+- **Make your own rules.** Install community source or write a Go/Rust WASM
+  plugin for tool policy, metrics, redaction or a workflow-specific transformation.
+- **Reuse your plugins.** Plugins work on one shared request/response format
+  across supported OpenAI, Anthropic and Gemini APIs.
+- **Connect different APIs.** Optional [protocol bridges](docs/PROTOCOL_BRIDGES.md)
+  translate supported features between a client and a backend. No plugin needed.
+- **Stay in control.** Choose each plugin, inspect its exact build, and approve
+  its permissions and resource budgets before enabling it.
+
+Torana runs on your machine, with no Torana account or hosted control service.
+Requests still go to the model endpoint you configure. Approved plugins can
+also use explicitly bound model services or HTTP endpoints; local-first does
+not mean every configured destination is local.
+
 ## Configuration
 
 On first start, Torana imports `config.json` into its managed store at
@@ -317,3 +335,5 @@ or move a harness-specific tool policy into one you can reuse.
 For evaluation, see the [public performance reports](benchmarks/README.md):
 both proxy-only overhead and plugin-chain CPU/memory costs are documented.
 For deeper operation and development topics, use the [docs index](docs/README.md).
+
+If Torana is useful to you, a ⭐ helps others find it.
