@@ -8,7 +8,7 @@ your own rules with sandboxed plugins. It runs locally, with no account.
 
 [![Release](https://img.shields.io/github/v/release/torana-edge/torana-edge)](https://github.com/torana-edge/torana-edge/releases/latest)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
-[![Works with any coding agent](https://img.shields.io/badge/works%20with-any%20coding%20agent-2dd4bf)](docs/HARNESS_SETUP.md)
+[![Works with Claude Code, Codex, Gemini](https://img.shields.io/badge/works%20with-Claude%20Code%20%C2%B7%20Codex%20%C2%B7%20Gemini-2dd4bf)](docs/HARNESS_SETUP.md)
 
 [Get started](docs/QUICKSTART.md) · [Browse plugins](https://torana.sh/plugins/) ·
 [How it works](https://torana.sh/how-it-works/) · [Documentation](docs/README.md)
@@ -263,7 +263,8 @@ access, shell commands or your harness's own permission prompts.
 | After the response | Record the response, usage and cost, or suggest a model switch |
 | Between requests | Run background work such as cache warming |
 | From the agent itself | Expose plugin tools your agent can call over MCP |
-| Across APIs | Bridge Anthropic, OpenAI and Gemini wire formats with [protocol bridges](docs/PROTOCOL_BRIDGES.md) |
+
+Built-in [protocol bridges](docs/PROTOCOL_BRIDGES.md) also connect Anthropic, OpenAI and Gemini APIs.
 
 ### What that gives you
 
