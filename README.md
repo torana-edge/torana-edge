@@ -13,6 +13,24 @@ your own rules with sandboxed plugins. It runs locally, with no account.
 [Get started](docs/QUICKSTART.md) · [Browse plugins](https://torana.sh/plugins/) ·
 [How it works](https://torana.sh/how-it-works/) · [Documentation](docs/README.md)
 
+<p align="center">
+  <img alt="Torana sits between your coding tools (Claude Code, Codex, OpenCode, Pi or your own agent) and model providers (Anthropic, OpenAI, DeepSeek or your own model), with WASM plugins, a Go/Rust SDK, an MCP server, a CLI and a web UI" src="https://torana.sh/readme/torana-overview.gif" width="480">
+</p>
+
+## What people use it for
+
+| You want to | For example | Use |
+|---|---|---|
+| See where your tokens go | Input, output, cache-read and cache-write tokens for every request your agent makes | Live Feed, `torana stats`, [`usage_logger`](https://github.com/torana-edge/torana-plugins/blob/main/plugins/usage_logger/README.md) |
+| Keep secrets out of what the agent sends | The agent reads a `.env`, or a failing test prints a connection string. The tool result is withheld before it leaves your machine | [`pii_guard`](https://github.com/torana-edge/torana-plugins/blob/main/plugins/pii_guard/README.md) (patterns, no model) or [`pii`](https://github.com/torana-edge/torana-plugins/blob/main/plugins/pii/README.md) (a small local model) |
+| Limit the tools the model sees | Expose search and read tools, omit deployment tools during a review | [`tool_governor`](https://github.com/torana-edge/torana-plugins/blob/main/plugins/tool_governor/README.md) |
+| Connect different APIs | Send Anthropic-format requests to a local OpenAI-compatible model server | [Protocol bridges](docs/PROTOCOL_BRIDGES.md), no plugin needed |
+| Trim old tool output | Shorten long, rerunnable search output, only when that beats the prompt-cache rewrite cost | [`keyword_compactor`](https://github.com/torana-edge/torana-plugins/blob/main/plugins/keyword_compactor/README.md), [`compactor`](https://github.com/torana-edge/torana-plugins/blob/main/plugins/compactor/README.md) |
+| Add your own rule | A sandboxed Go or Rust plugin that runs only after you approve its permissions | [Plugin SDK](https://github.com/torana-edge/torana-plugin-sdk) |
+
+No local model needed to start: install below, then try
+[`usage_logger` or `pii_guard`](#dont-have-a-local-model-running).
+
 ## Quick start
 
 Install Torana on macOS or Linux. The default installer adds `~/.local/bin`
